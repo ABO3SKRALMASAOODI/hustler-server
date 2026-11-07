@@ -121,11 +121,15 @@ def _typed(value, kind, key, notes):
         text = value.strip()
         if text[:1] in ("[", "{"):
             try:
-                parsed = json.loads(text)
+                # raw_decode: a model's string can run on past its value
+                # (p5520: a complete operations list, then a stray tail).
+                parsed, stop = json.JSONDecoder().raw_decode(text)
             except ValueError:
                 return value
             if isinstance(parsed, (list if kind == "array" else dict)):
-                notes.append(f"{key} sent as text: read as JSON")
+                notes.append(f"{key} sent as text: read as JSON"
+                             + ("" if stop == len(text)
+                                else ", the text after it left out"))
                 return parsed
         elif kind == "array" and text:
             return [text]

@@ -967,3 +967,23 @@ def test_an_effects_id_that_is_nowhere_says_which_are():
         batch(edl, [{"action": "upsert", "layer": "effects", "id": "zm9",
                      "value": {"strength": 0.03}}])
     assert "zm9" in str(e.value) and "zm2" in str(e.value)
+
+
+def test_operations_sent_as_text_with_a_tail_still_run():
+    _name, args, notes = norm(
+        "apply_edit_batch", base_version=3, operation_id="x",
+        operations='[{"action": "set", "layer": "motion", "value": []}]},'
+                   '{"base_version":3,"operation_id":"noop"}]')
+    assert args["operations"] == [{"action": "set", "layer": "motion", "value": []}]
+    assert any("left out" in n for n in notes)
+
+
+def test_an_ease_says_how_little_of_its_window_moves(zoom_ctx):
+    out = agent_tools.add_zoom(zoom_ctx, start=0.0, end=4.6, mode="ease",
+                               strength=0.05, ramp_s=1.0, cx=0.5, cy=0.5)
+    assert out.startswith("EDL"), out
+    assert "moves 5% in 1s" in out and "holds still for 2.6s" in out
+    assert "push_in" in out and "1.1% a second" in out
+    moving = agent_tools.add_zoom(zoom_ctx, start=5.0, end=9.0, mode="push_in",
+                                  strength=0.05, cx=0.5, cy=0.5)
+    assert "holds still" not in moving

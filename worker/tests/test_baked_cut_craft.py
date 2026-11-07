@@ -311,6 +311,21 @@ def test_fill_takes_only_pictures_with_bars_and_comes_off():
     assert "NO CHANGE" in F.set_photo_fill(ctx, mode="none")
 
 
+def test_a_fill_on_a_range_says_it_is_on_that_range_and_counts_the_rest():
+    # p5520's replay: the item said 0-347 s while 20 pictures of 0-60 s were
+    # filled, so the editor could not see why bars were left at 1:12.
+    ctx = Ctx()
+    out = F.set_photo_fill(ctx, start=0, end=15)
+    item = next(i for i in ctx.edl["fx"] if i["type"] == "photo_fill")
+    assert item["start"] == min(s["t0"] for s in item["spans"])
+    assert item["end"] == max(s["t1"] for s in item["spans"])
+    assert item["end"] < 16
+    left = sum(1 for s in MAP["shots"] if s["bars"]) - len(item["spans"])
+    assert left and f"{left} more picture(s) still have bars" in out
+    out = F.set_photo_fill(ctx)
+    assert "still have bars" not in out
+
+
 def test_a_wide_photo_in_a_tall_frame_is_filled_too():
     ctx = Ctx({"keep": [[0.0, 40.0]], "frame": {"ratio": "9:16",
                                                 "mode": "crop"}})

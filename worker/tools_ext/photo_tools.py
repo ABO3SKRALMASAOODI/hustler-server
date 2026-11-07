@@ -287,6 +287,7 @@ def set_photo_fill(ctx, start=None, end=None, at=None, mode="blur", blur=None,
 
     spans = [sp for sp in held if not covers(sp)]
     added = 0
+    everywhere = _shots_in(edl, pm["shots"], 0.0, program)
     if mode == "blur":
         for row, _p0, _p1, a, z in rows:
             if _needs_fill(row, aspect, pm):
@@ -308,8 +309,18 @@ def set_photo_fill(ctx, start=None, end=None, at=None, mode="blur", blur=None,
         summary = "set_photo_fill: blurred fill removed; the bars are back"
     else:
         spans.sort(key=lambda sp: float(sp["t0"]))
+        # The item's window is what it covers. It said the whole film: on
+        # p5520's replay the editor read fill on 0-347 s, saw bars on its own
+        # frames at 1:12 and 5:02, and told the customer it could not finish.
+        def filled(a, z):
+            return any(float(sp["t0"]) < z and a < float(sp["t1"]) for sp in spans)
+        reach = [(p0, p1) for _row, p0, p1, a, z in everywhere if filled(a, z)]
+        left = sum(1 for row, _p0, _p1, a, z in everywhere
+                   if _needs_fill(row, aspect, pm) and not filled(a, z))
         item = {"id": FILL_ITEM_ID, "type": "photo_fill", "stage": "world",
-                "start": 0.0, "end": round(program, 2), "spans": spans}
+                "start": round(min((r[0] for r in reach), default=0.0), 2),
+                "end": round(max((r[1] for r in reach), default=program), 2),
+                "spans": spans}
         for key, value, old in (("blur", blur, (current or {}).get("blur")),
                                 ("dim", dim, (current or {}).get("dim"))):
             if value is not None:
@@ -323,6 +334,9 @@ def set_photo_fill(ctx, start=None, end=None, at=None, mode="blur", blur=None,
                    if mode == "blur" else
                    f"set_photo_fill: removed in {span[0]:g}-{span[1]:g}s "
                    f"({len(spans)} still filled)")
+        if left:
+            summary += (f"; {left} more picture(s) still have bars: "
+                        "set_photo_fill() with no range fills them all")
     out = w.commit(ctx, ops, summary)
     if out.startswith("REJECTED"):
         return out

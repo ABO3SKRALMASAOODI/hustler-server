@@ -11180,6 +11180,17 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
         result += ("\nQUALITY ADVISORY: no target was supplied, so this zoom "
                    "uses the frame center. Inspect the preview and retarget "
                    "it if the intended subject is elsewhere.")
+    if zmode == "ease" and result.startswith("EDL v"):
+        # What the move does on screen, in numbers: p5520's "slower zooms" came
+        # back as 5% in one second, then a still picture for four.
+        ramp = camera.ramp_seconds(item, float(s), float(e))
+        hold = float(e) - float(s) - 2.0 * ramp
+        if hold >= 1.0:
+            result += (f"\nOn screen: it moves {int(round(st * 100))}% in "
+                       f"{ramp:g}s, then the picture holds still for {hold:g}s. "
+                       "A move that lasts the whole window is mode='push_in' "
+                       f"({st * 100.0 / max(float(e) - float(s), 0.1):.1f}% a "
+                       "second here).")
     if zmode == "landing" and result.startswith("EDL v"):
         cuts = [float(b["out_start"])
                 for b in timeline_mod.program_blocks(edl)[1:]]
@@ -32180,9 +32191,12 @@ TOOLS = {
                  "(end ~start+0.4) so the new shot arrives with momentum. "
                  "'push_in' = slow continuous push (strength 0.05-0.12) "
                  "across a long hold (3s+) that builds toward something; "
-                 "'pull_out' = the release/reveal. 'ease' (default) = "
-                 "smooth ramp in, hold, ramp out — a gentle push onto a "
-                 "subject mid-shot. An edge within 4 frames of a cut lands "
+                 "'pull_out' = the release/reveal; those two are the moves "
+                 "that last, a slow zoom across a photograph (Ken Burns) is "
+                 "one of them over the photo's whole window. 'ease' (default) "
+                 "= smooth ramp in, hold, ramp out — a gentle push onto a "
+                 "subject mid-shot, still between its ramps. An edge within "
+                 "4 frames of a cut lands "
                  "ON the cut and holds through it: no ramp straddles a cut, "
                  "and a punch/ease starting on a cut is in on its first "
                  "frame (it ramps from the wide instead when the frame "
@@ -32266,8 +32280,7 @@ TOOLS = {
         "interpolates between keyframes, so the frame can push in as it "
         "arrives and ease out as it leaves; to HOLD on a subject, repeat "
         "its keyframe at the hold's start and end times. The window runs "
-        "from the first t to the last (or give each keyframe f, a 0-1 "
-        "fraction of start..end). NO ramp is added at the edges: give "
+        "from the first t to the last. NO ramp is added at the edges: give "
                 "the first and last keyframe strength 0 for a seamless entry and "
                 "exit (a strength-0 rect keyframe still aims where the move is "
                 "going). ease: 'cubic_in_out' (default — settles at each keyframe, "
@@ -32276,7 +32289,6 @@ TOOLS = {
         "across later cuts exactly like add_zoom, so cutting elsewhere "
         "never strands it. Remove the whole move with remove_zoom_path.",
         {"keyframes": {"type": "array", "items": {"type": "object"}},
-         "start": {"type": "number"}, "end": {"type": "number"},
          "ease": {"type": "string", "enum": ["cubic_in_out", "linear"]},
          "purpose": {"type": "string"},
          "target_evidence_ids": {"type": "array",

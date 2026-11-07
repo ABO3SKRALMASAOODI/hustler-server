@@ -57,11 +57,15 @@ punches.
   for cuts between ideas or sections, B-roll returns and the hook — not for
   every jump cut, where a stream of landings makes the camera bounce.
 - `ease` — a smooth ramp in, hold and ramp out: a gentle reframe onto a
-  subject mid-shot. Its ramps never straddle a cut: see EDGES ON CUTS.
+  subject mid-shot. Its ramps never straddle a cut: see EDGES ON CUTS. Between
+  its ramps the picture is still, so it is not a slow zoom: a longer `ramp_s`
+  or a smaller strength does not make it one.
 - `push_in` — a slow continuous push, strength 0.05–0.12, across a hold of
   3 s or more that builds toward something (a confession, a reveal) — not
   on every long statement; a steady hold on a good frame is fine.
-  `pull_out` is the release or reveal.
+  `pull_out` is the release or reveal. A slow zoom, a Ken Burns move or a
+  slower zoom on a photograph is one of these two over the photo's whole
+  window: 5% over 5 s is 1% a second.
 - `pulse` — 1 → 1 + strength → 1 in ~0.3 s on a musical beat or a rhythmic
   list beat, strength 0.05–0.08.
 - `shake` — a decaying impact shake (the `shake` amount, 0.3–0.8, does the
