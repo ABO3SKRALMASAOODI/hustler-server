@@ -112,7 +112,10 @@ class SubjectFx(FxItemBase):
         return v
     width_px: Optional[float] = Field(default=None, ge=0.5, le=24.0,
                                       allow_inf_nan=False)
-    ev: Optional[float] = Field(default=None, ge=-4.0, le=4.0,
+    # In stops. A white wall reaches a black curtain's level at about -7
+    # (the skill's own example), so a darkened room needs room below -4:
+    # -4 left customer 5533's wall mid-grey (ticket #77, 7 Nov 2026).
+    ev: Optional[float] = Field(default=None, ge=-10.0, le=4.0,
                                 allow_inf_nan=False)
     saturation: Optional[float] = Field(default=None, ge=0.0, le=2.0,
                                         allow_inf_nan=False)

@@ -478,6 +478,11 @@ def add_subject_effect(ctx, kind, start=None, end=None, on=None, count=None,
         items.append(dict(base, id=_next_ids(edl, "sx", 1)[0], start=a,
                           end=b))
     for it in items:
+        if "_match" in it:
+            note = _solve_match_ev(ctx, edl, it)
+            if note.startswith("REJECTED"):
+                return note
+            notes.append(note)
         if it.get("kind") == "isolate":
             note = _solve_hue(ctx, it)
             if note and note not in notes:
@@ -544,9 +549,91 @@ def _subject_fields(kind, colour, scope, intensity, region, hue, echo,
               "field", "keep_footage", "colour"):
         if k in style:
             it[k] = style.pop(k)
+    if "match" in style:
+        if kind != "exposure":
+            raise ValueError("match belongs to kind exposure")
+        it["_match"] = _match_box(style.pop("match"))
     if style:
         raise ValueError("unknown style key(s): " + ", ".join(sorted(style)))
     return it
+
+
+MATCH_FRAMES = 5
+MATCH_PCT = 80          # the bright part of an area is what reads as its tone
+EV_RANGE = (-10.0, 4.0)
+
+
+def _match_box(v):
+    """``style.match``: the [x0, y0, x1, y1] box (0-1 of the frame) whose
+    brightness the effect's area should reach, e.g. the dark curtain."""
+    if isinstance(v, dict):
+        v = v.get("box")
+    try:
+        box = [float(x) for x in v]
+    except (TypeError, ValueError):
+        box = []
+    if len(box) != 4 or not (0 <= box[0] < box[2] <= 1
+                             and 0 <= box[1] < box[3] <= 1):
+        raise ValueError("style.match is a box [x0, y0, x1, y1] in 0-1 of "
+                         "the frame: the area whose brightness to reach")
+    return box
+
+
+def _luma_pct(frames, box, pct):
+    import numpy as np
+    vals = []
+    for f in frames:
+        h, w = f.shape[:2]
+        x0, y0 = int(box[0] * w), int(box[1] * h)
+        x1, y1 = max(x0 + 1, int(box[2] * w)), max(y0 + 1, int(box[3] * h))
+        px = f[y0:y1, x0:x1].reshape(-1, 3).astype(float)
+        vals.append(px @ np.array([0.2126, 0.7152, 0.0722]))
+    return float(np.percentile(np.concatenate(vals), pct)) if vals else 0.0
+
+
+def solve_match_ev(frames, area_box, ref_box, pct=MATCH_PCT):
+    """The ev (in the renderer's stops: luma gain 2 ** (ev / 2.2), see
+    subject_fx.k_exposure) that brings the area's bright part to the
+    reference's, measured on the frames. Returns (ev, area, ref)."""
+    area = _luma_pct(frames, area_box, pct)
+    ref = _luma_pct(frames, ref_box, pct)
+    if area < 1.0:
+        return 0.0, area, ref
+    gain = max(ref, 0.5) / area
+    ev = 2.2 * math.log2(gain)
+    return (round(max(EV_RANGE[0], min(EV_RANGE[1], ev)), 2), area, ref)
+
+
+def _solve_match_ev(ctx, edl, it):
+    """Measured, not guessed: an exposure asked to look like another part
+    of the picture gets its ev from that part's brightness on real frames
+    (ticket #77: the editor guessed -2.2, -3, -4 and the wall stayed grey).
+    The area is the effect's region box (the whole frame without one)."""
+    ref_box = it.pop("_match")
+    reg = it.get("region") or {}
+    area_box = [0.0, 0.0, 1.0, 1.0]
+    if isinstance(reg, dict) and reg.get("shape") in ("rect", "ellipse") \
+            and reg.get("box") and not reg.get("invert"):
+        area_box = [float(v) for v in reg["box"]]
+    s, e = float(it["start"]), float(it["end"])
+    times = [s + (e - s) * (k + 0.5) / MATCH_FRAMES
+             for k in range(MATCH_FRAMES)]
+    try:
+        from tools_ext.finish_tools import _frames
+        frames = _frames(ctx, edl, times)
+    except Exception as x:  # noqa: BLE001
+        frames, why = [], str(x)[:120]
+    else:
+        why = "no frame could be read"
+    if not frames:
+        return (f"REJECTED: style.match could not read frames to measure "
+                f"({why}); give style.ev instead.")
+    ev, area, ref = solve_match_ev(frames, area_box, ref_box)
+    it["ev"] = ev
+    return (f"{it['id']}: measured the area's bright part at luma "
+            f"{area:.0f} and the match box's at {ref:.0f} (of 255) on "
+            f"{len(frames)} frames, so ev = {ev:g}. Judge it on the preview; "
+            f"the subject matte keeps the person out of it.")
 
 
 def _solve_hue(ctx, it):
@@ -686,7 +773,9 @@ TOOL_SPECS = {
                   "|trail, offsets_f: [4, 8], opacity, decay, tint}"},
          "style": {"type": "object", "description": "radius, width_px, ev,"
                    " saturation, decay_f, silhouette, hue_op, stage "
-                   "(world|screen)"}}),
+                   "(world|screen); exposure: match=[x0,y0,x1,y1] measures "
+                   "that area (e.g. the dark curtain) and solves ev so the "
+                   "effect's area reaches its brightness"}}),
     "set_background": (
         set_background,
         "Replace the background behind the subject over [start, end): "
