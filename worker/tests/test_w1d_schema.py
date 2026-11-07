@@ -168,9 +168,9 @@ def test_bad_1d_shapes_are_refused_with_their_reason(item, match):
 def test_a_misspelled_field_reaches_the_real_field():
     item = dict(OK[0], kind="negative")
     item["colur"] = "white"
-    notes = []
-    out = edit_batch.apply_batch(_base(), [_up(item)], DUR, KEYS, notes=notes)
-    assert any("read colur as colour" in n for n in notes), (out, notes)
+    # read as colour, the real field, and then held to that field's own rule
+    with pytest.raises(ValueError, match="colour belongs to colour_hit"):
+        edit_batch.apply_batch(_base(), [_up(item)], DUR, KEYS)
 
 
 def test_flash_times_by_kind_region_and_stage():

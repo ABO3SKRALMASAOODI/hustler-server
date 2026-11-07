@@ -759,3 +759,33 @@ def test_batch_a_near_spelling_reaches_the_real_field():
         "id": "tx1", "text": "hi", "start": 0, "end": 2, "colr": "#FFFFFF"}]}])
     assert out["texts"][0]["color"] == "#FFFFFF"
     assert any("read colr as color" in n for n in notes)
+
+
+def test_batch_a_value_the_schema_refuses_on_a_styling_field_is_left_out():
+    out, notes = batch(fx_edl(), [{"action": "set", "layer": "texts", "value": [{
+        "id": "tx1", "text": "hi", "start": 0, "end": 2, "entrance": "swoosh"}]}])
+    assert out["texts"][0]["entrance"] in (None, "none")
+    assert any("swoosh" in n for n in notes)
+
+
+def test_batch_upsert_on_a_list_layer_sets_it():
+    out, _ = batch(default_edl(60.0), [{"action": "upsert", "layer": "keep",
+                                        "value": [[0.0, 5.0]]}])
+    assert out["keep"] == [[0.0, 5.0]]
+
+
+def test_batch_media_not_attached_names_the_key_and_the_choices():
+    with pytest.raises(ValueError) as err:
+        batch(default_edl(60.0), [{"action": "set", "layer": "inserts", "value": [{
+            "id": "i", "kind": "image", "asset_key": "gone.png", "at_output_s": 0,
+            "duration_s": 2}]}], keys=["cards/a.png"])
+    assert "gone.png" in str(err.value) and "cards/a.png" in str(err.value)
+
+
+def test_batch_a_fraction_of_an_overlay_at_the_end_is_removed():
+    edl = default_edl(60.0)
+    edl["overlays"] = [{"id": "ov1", "kind": "image", "asset_key": "a.png",
+                        "start": 59.84, "duration_s": 0.16}]
+    out, notes = batch(edl, [{"action": "upsert", "layer": "overlays",
+                              "id": "ov1", "value": {"x": 0.5}}])
+    assert not out["overlays"] and notes

@@ -7,6 +7,7 @@ import copy
 import difflib
 import json
 import os
+import re
 import sys
 
 try:
@@ -371,10 +372,11 @@ def end_with_programme(before, edl, operations):
                        else float(item.get("end")))
             except (KeyError, TypeError, ValueError):
                 continue
-            if end <= new_end + 0.01:
+            short_tail = path == "overlays" and end - start < 0.2
+            if end <= new_end + 0.01 and not short_tail:
                 continue
             label = f"{name} '{item.get('id') or '?'}'"
-            if new_end - start < 0.2:
+            if new_end - start < 0.2 or short_tail:
                 # Nothing of it is left to show.
                 node[leaf[-1]] = [i for i in node[leaf[-1]] if i is not item]
                 gone.append(label)
@@ -494,8 +496,12 @@ def _item_near_misses(edl, layers):
             item.pop("motion")
             notes.append(f"text {item.get('id') or '?'}: motion is an object "
                          "of keyframe lists, left out")
+        if item.get("motion") and item.get("behind") is not None:
+            item.pop("motion")
+            notes.append(f"text {item.get('id') or '?'}: its motion left out, "
+                         "a text behind the subject stays still")
         if isinstance(item.get("motion"), dict) and any(
-                isinstance(v, list) and v for v in item["motion"].values()):
+                v not in (None, [], {}) for v in item["motion"].values()):
             # An authored curve owns the animation, as add_text has it.
             for side in ("entrance", "exit"):
                 if item.get(side) not in (None, "none"):
@@ -745,6 +751,35 @@ def _style_field_hint(path, unknown):
             "\"style\": {\"font\": ..., \"size\": ...}}.")
 
 
+_REFUSED_VALUE = re.compile(
+    r"^([a-z_]+(?:\.\w+)*)\n\s+(?:Input should be|Value error)", re.M)
+_DROPPABLE = frozenset(("entrance", "exit", "motion_motif", "fit", "motion",
+                        "transition", "easing", "ease"))
+
+
+def _drop_refused_values(edl, message):
+    """An optional styling field our schema refused, named in our own
+    validation text: the item stands without it, and the result says so."""
+    dropped = []
+    for path in _REFUSED_VALUE.findall(message):
+        parts = path.split(".")
+        node = edl
+        for part in parts[:-1]:
+            if isinstance(node, list) and part.isdigit() \
+                    and int(part) < len(node):
+                node = node[int(part)]
+            elif isinstance(node, dict):
+                node = node.get(part)
+            else:
+                node = None
+        if parts[-1] in _DROPPABLE and isinstance(node, dict) \
+                and parts[-1] in node:
+            value = node.pop(parts[-1])
+            dropped.append(f"{path}: {str(value)[:30]!r} is not a value it "
+                           "takes, left out.")
+    return dropped
+
+
 def _keep_inside_source(edl, duration):
     """A keep end past the source means up to its end."""
     if not isinstance(edl.get("keep"), list) or not duration:
@@ -819,6 +854,9 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
             if layer == "keep":
                 edl.pop("split_keep_boundaries", None)
         elif action == "upsert" and layer not in ITEM_LAYERS \
+                and isinstance(op.get("value"), list):
+            edl[layer] = copy.deepcopy(op["value"])   # a list layer has no ids
+        elif action == "upsert" and layer not in ITEM_LAYERS \
                 and isinstance(edl.get(layer) or {}, dict) \
                 and isinstance(op.get("value"), dict):
             # upsert on a layer that is one object patches its fields, the
@@ -891,8 +929,12 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
     if program_matte_live():
         # the program matte is not a project file (track 1A)
         known.add(PROGRAM_MATTE_KEY)
-    if (set(media_keys(edl)) | _motion_refs(edl)) - known - set(allowed_keys):
-        raise ValueError("Use media attached to this project. A referenced asset is not available here.")
+    foreign = (set(media_keys(edl)) | _motion_refs(edl)) - known - set(allowed_keys)
+    if foreign:
+        raise ValueError(
+            "Use media attached to this project: "
+            + ", ".join(sorted(map(str, foreign))[:3]) + " is not. Attached: "
+            + (", ".join(sorted(map(str, allowed_keys))[:8]) or "none") + ".")
     near = _near_misses(edl, {op["layer"] for op in operations})
     near += _on_keep_boundaries(edl)
     if isinstance(duration, (int, float)) and "keep" in {
@@ -905,7 +947,16 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
     # A graphic behind the subject needs a subject mask: a measured clip
     # (add_motion_graphic builds one) or, from Wave 1, the program matte.
     _behind_through_program_matte(edl, before)
-    normalized = validate_edl(edl, duration).model_dump()
+    try:
+        normalized = validate_edl(edl, duration).model_dump()
+    except ValueError as exc:
+        dropped = _drop_refused_values(edl, str(exc))
+        if not dropped:
+            raise
+        near_ops.extend(dropped)
+        if notes is not None:
+            notes.extend(dropped)
+        normalized = validate_edl(edl, duration).model_dump()
     check_fx_devices(before, normalized)
     if isinstance(allowed_keys, dict):
         for item in normalized.get("inserts") or []:
