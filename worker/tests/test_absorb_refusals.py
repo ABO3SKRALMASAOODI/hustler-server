@@ -884,3 +884,14 @@ def test_a_breath_of_black_at_the_end_is_no_finding():
     import render_qc
     assert render_qc.black_tail_finding((347.3, 347.7, True), {}) is None
     assert "BLACK TAIL" in render_qc.black_tail_finding((340.0, 347.7, True), {})
+
+
+def test_batch_remove_on_an_object_layer_clears_a_field_or_the_layer():
+    edl = fx_edl()
+    edl["effects"]["grade"] = "warm"
+    edl["effects"]["fade_in_s"] = 0.5
+    out, _ = batch(edl, [{"action": "remove", "layer": "effects", "id": "grade"}])
+    assert not (out["effects"] or {}).get("grade")
+    assert out["effects"]["fade_in_s"] == 0.5
+    out, _ = batch(edl, [{"action": "remove", "layer": "effects"}])
+    assert not out["effects"]

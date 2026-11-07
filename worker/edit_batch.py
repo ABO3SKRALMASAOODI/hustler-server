@@ -862,6 +862,14 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
             # upsert on a layer that is one object patches its fields, the
             # same word doing the same thing on every layer.
             edl[layer] = {**(edl.get(layer) or {}), **op["value"]}
+        elif action == "remove" and layer not in ITEM_LAYERS:
+            # A field of an object layer by id; with no id, the whole layer.
+            current = edl.get(layer)
+            if op.get("id") and isinstance(current, dict):
+                edl[layer] = {k: v for k, v in current.items()
+                              if k != op["id"]}
+            elif not op.get("id"):
+                edl[layer] = None if layer != "keep" else edl.get(layer)
         elif action in ("upsert", "remove") and layer in ITEM_LAYERS:
             item_id = op.get("id")
             if not isinstance(item_id, str) or not item_id:
