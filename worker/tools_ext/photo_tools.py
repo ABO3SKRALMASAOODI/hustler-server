@@ -255,6 +255,21 @@ def _needs_fill(row, aspect, pm):
     return h > 0 and abs(w / h / aspect - 1.0) > 0.02
 
 
+def _in_a_card(edl, p0, p1):
+    """True when a picture card fed from the source covers program [p0, p1]
+    whole: the card composes those frames, so a fill there would not show."""
+    import picture_cards
+    for c in ((edl.get("effects") or {}).get("picture_cards") or []):
+        try:
+            if isinstance(c, dict) and picture_cards.source_fed(c) and \
+                    float(c["start"]) - 0.02 <= p0 and \
+                    p1 <= float(c["end"]) + 0.02:
+                return True
+        except (KeyError, TypeError, ValueError):
+            continue
+    return False
+
+
 def set_photo_fill(ctx, start=None, end=None, at=None, mode="blur", blur=None,
                    dim=None):
     edl = _edl(ctx)
@@ -286,15 +301,22 @@ def set_photo_fill(ctx, start=None, end=None, at=None, mode="blur", blur=None,
                    for r in rows)
 
     spans = [sp for sp in held if not covers(sp)]
-    added = 0
+    added = hidden = 0
     everywhere = _shots_in(edl, pm["shots"], 0.0, program)
     if mode == "blur":
-        for row, _p0, _p1, a, z in rows:
-            if _needs_fill(row, aspect, pm):
+        for row, p0, p1, a, z in rows:
+            if _needs_fill(row, aspect, pm) and _in_a_card(edl, p0, p1):
+                hidden += 1
+            elif _needs_fill(row, aspect, pm):
                 spans.append({"t0": round(a, 3), "t1": round(z, 3),
                               "rect": _rect(row),
                               "still": bool(row.get("still"))})
                 added += 1
+        if not added and not spans and hidden:
+            return ("NO CHANGE: the pictures with bars in that range are "
+                    "inside a picture card, which composes those frames, so "
+                    "a blurred fill would not show there. Do NOT tell the "
+                    "user you changed anything.")
         if not added and not spans:
             return ("NO CHANGE: every picture in that range already fills "
                     "the frame, so there are no bars to fill. Do NOT tell "
@@ -315,8 +337,9 @@ def set_photo_fill(ctx, start=None, end=None, at=None, mode="blur", blur=None,
         def filled(a, z):
             return any(float(sp["t0"]) < z and a < float(sp["t1"]) for sp in spans)
         reach = [(p0, p1) for _row, p0, p1, a, z in everywhere if filled(a, z)]
-        left = sum(1 for row, _p0, _p1, a, z in everywhere
-                   if _needs_fill(row, aspect, pm) and not filled(a, z))
+        left = sum(1 for row, p0, p1, a, z in everywhere
+                   if _needs_fill(row, aspect, pm) and not filled(a, z)
+                   and not _in_a_card(edl, p0, p1))
         item = {"id": FILL_ITEM_ID, "type": "photo_fill", "stage": "world",
                 "start": round(min((r[0] for r in reach), default=0.0), 2),
                 "end": round(max((r[1] for r in reach), default=program), 2),
@@ -334,6 +357,9 @@ def set_photo_fill(ctx, start=None, end=None, at=None, mode="blur", blur=None,
                    if mode == "blur" else
                    f"set_photo_fill: removed in {span[0]:g}-{span[1]:g}s "
                    f"({len(spans)} still filled)")
+        if hidden:
+            summary += (f"; {hidden} picture(s) inside a picture card keep "
+                        "the card's framing (the card composes those frames)")
         if left:
             summary += (f"; {left} more picture(s) still have bars: "
                         "set_photo_fill() with no range fills them all")

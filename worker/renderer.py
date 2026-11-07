@@ -3219,6 +3219,48 @@ def _internal_focus_edges(edl):
     return sorted(edges)[1:-1]
 
 
+def block_span_edges(edl, tl):
+    """SOURCE seconds, beyond follow.edges, where what a block draws changes
+    inside a kept span: each picture of a blurred fill (photo_fill spans) and
+    a source card's re-aim (source_track) or cut step inside its window.
+
+    A block is drawn with the span holding its midpoint, so the render splits
+    its blocks on these exactly as on a follow edge. Unsplit, a span no
+    block's midpoint fell in drew nothing: p5537, three tall photos in one
+    kept span, one block with its midpoint at 15 s, no fill on any of them
+    while the device said "full". The card window's own edges are split by
+    the card itself."""
+    out = set()
+    for it in photo_craft.fill_items(edl):
+        for sp in it.get("spans") or []:
+            for key in ("t0", "t1"):
+                try:
+                    out.add(float(sp[key]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+    for card in ((edl or {}).get("effects") or {}).get("picture_cards") or []:
+        if not isinstance(card, dict) or not picture_cards.source_fed(card):
+            continue
+        bounds = []
+        for key in ("start", "end"):
+            try:
+                src_t = tl.out_to_src(float(card[key])) if tl else None
+            except (KeyError, TypeError, ValueError):
+                src_t = None
+            if src_t is not None:
+                bounds.append(float(src_t))
+        for sp in (card.get("source_track") or []) + \
+                (card.get("cut_steps") or []):
+            for key in ("t0", "t1"):
+                try:
+                    t = float(sp[key])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if all(abs(t - b) > 0.05 for b in bounds):
+                    out.add(t)
+    return out
+
+
 def handoff_affected(edl, index):
     """True when composition_edge moves a crop switch of this EDL: an
     internal focus_track edge stands for a keep edge or for an indexed cut
@@ -3661,7 +3703,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # edge strictly inside a kept segment (a camera cut the span stops on)
     # splits the local render blocks exactly as a focus handoff does, so a
     # block follows at most one span and a cut may jump.
-    follow_edges = sorted(follow.edges(edl)) if keep else []
+    follow_edges = sorted(follow.edges(edl) | block_span_edges(edl, tl)) \
+        if keep else []
     if follow_edges:
         _sfps = float(src_fps or fps or 30.0)
         inner = {}
@@ -3758,6 +3801,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     vo_inputs = vo_inputs or []
     n = len(keep)
     parts = []
+    _fills, fill_drawn = [], set()     # (fill id, span t0) a block drew
     # The program matte (Wave 1, track 1A): built only when this render's
     # fx compilers or behind-subject items asked for it and something under
     # their windows is measured (worker/matte_track.py). None: not one mask
@@ -4556,7 +4600,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                                  frames=blk_frames.get(("seg", i)),
                                  grade=grade, src_size=main_src_size,
                                  fill=fill)
-                return
+                return fill if main_src_size else None
             fspan = (follow.span_at(_fspans, _block_mid(*keep[i]))
                      if _fspans and seg_mode == "crop" else None)
             if fspan and main_src_size and follow.moves(fspan):
@@ -4632,7 +4676,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                     panel_conceal=(card_layout[i][6] if len(card_layout[i]) > 6
                                    else None))
                 continue
-            _full_frame(i, f"segv{i}", f"v_seg{i}", f"s{i}")
+            drew = _full_frame(i, f"segv{i}", f"v_seg{i}", f"s{i}")
+            if drew:
+                fill_drawn.add((drew[0].get("id"), drew[1].get("t0")))
 
     # insert blocks: trim to their window (source_start_s picks where in
     # the clip the window starts), normalize like everything else
@@ -5130,12 +5176,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             if fspan:
                 edge = float(keep[i][1]) if side == "a" else float(keep[i][0])
                 seg_focus = follow.centre_at(fspan, edge)
+            hfill = _fill_of(i)
             _normalize_video(parts, f"{u}{side}r", f"{u}{side}h", W, H, fps,
                              seg_mode, f"{u}{side}n", focus=seg_focus,
                              seg_dur=h / f3, frames=h,
-                             picture=(edl.get("frame") or {}).get("picture"),
+                             picture=None if hfill else
+                             (edl.get("frame") or {}).get("picture"),
                              grade=block_grade, src_size=main_src_size,
-                             fill=_fill_of(i))
+                             fill=hfill)
             return f"{u}{side}h"
 
         a_own, b_own = _own(ka, "a"), _own(kb, "b")
@@ -5548,6 +5596,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
 
     # ---- fx: world stage (Wave 0 seams) — on the footage, before the
     # behind-subject composite and the camera, so it rides every zoom.
+    if fx_plan is not None and _fills:
+        fx_plan.fill_missed = photo_craft.fill_missed(
+            _fills, keep, fill_drawn, 1.5 / float(fps or 30.0))
     vlabel = _fx_picture_stage("world", parts, vlabel, fx_plan, card_runs,
                                fps)
 

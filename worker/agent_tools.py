@@ -16395,19 +16395,58 @@ def _kinetic_phrases(words, tl, out_start, out_end):
     return [(" ".join(t[0] for t in p), p[0][1], p[-1][2]) for p in phrases]
 
 
+def _authored_kinetic_phrases(phrases):
+    """phrases=[{text, start, end}] -> ([(text, start, end)], error)."""
+    if phrases is None:
+        return [], None
+    if isinstance(phrases, str):
+        try:
+            phrases = json.loads(phrases)
+        except ValueError:
+            return [], ("REJECTED: phrases must be a list of "
+                        "{text, start, end} objects.")
+    if not isinstance(phrases, list):
+        return [], "REJECTED: phrases must be a list of {text, start, end}."
+    out = []
+    for p in phrases:
+        if not isinstance(p, dict):
+            return [], ("REJECTED: each phrase is an object "
+                        "{text, start, end} (PROGRAM seconds).")
+        text = str(p.get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            a = float(p.get("start"))
+            b = float(p.get("end"))
+        except (TypeError, ValueError):
+            return [], (f"REJECTED: phrase \"{text[:30]}\" needs numeric "
+                        "start and end (PROGRAM seconds).")
+        out.append((text[:60], a, b))
+    return out, None
+
+
 def add_kinetic_text(ctx, start=None, end=None, accent_color="#DC2626",
                      emphasis_words=None, zone="upper", color="#FFFFFF",
                      font=None, size_scale=None, motion_style="composed",
-                     motion_motif=None):
-    """Choreograph the SPOKEN words onto the screen: one placed, animated
-    text event per phrase, timed to the transcript, in a single pass."""
+                     motion_motif=None, phrases=None):
+    """Choreograph words onto the screen: one placed, animated text event per
+    phrase, in a single pass. By default the phrases are the SPOKEN words,
+    timed to the transcript. `phrases` ([{text, start, end}] in PROGRAM
+    seconds) supplies the words instead — the path for footage with no speech
+    (gameplay, a product clip, music-only), where "kinetic captions" means big
+    kinetic on-screen text the editor writes for what the viewer SEES."""
     if not ctx.has_main_video:
-        return "REJECTED: there is no main video (and so no transcript)."
+        return "REJECTED: there is no main video to put kinetic text on."
+    authored, perr = _authored_kinetic_phrases(phrases)
+    if perr:
+        return perr
     words = ctx.index.get("words") or []
-    if not words:
-        return ("REJECTED: this video has no transcribed speech — kinetic "
-                "text is built FROM the spoken words. Use add_text for "
-                "designed titles instead.")
+    if not words and not authored:
+        return ("REJECTED: this video has no transcribed speech, so there "
+                "are no spoken words to time. Pass phrases=[{\"text\": ..., "
+                "\"start\": ..., \"end\": ...}, ...] (PROGRAM seconds) with "
+                "the words you want on screen — the hook, what the viewer "
+                "sees, the payoff — and I choreograph them the same way.")
     z = (zone or "upper").strip().lower()
     if z not in _KINETIC_ZONES:
         return ("REJECTED: zone must be one of "
@@ -16441,11 +16480,25 @@ def add_kinetic_text(ctx, start=None, end=None, accent_color="#DC2626",
                       edl.get("speed") or [])
     except Exception as ex:
         return f"REJECTED: could not map the timeline ({str(ex)[:120]})."
-    phrases = _kinetic_phrases(words, tl, s, e)
+    if authored:
+        phrases = []
+        for ptext, pa, pb in authored:
+            a = round(min(max(pa, 0.0), prog - 0.3), 2)
+            b = round(min(max(pb, a + 0.5), prog), 2)
+            if b - a >= 0.3:
+                phrases.append((ptext, a, b))
+        phrases.sort(key=lambda p: p[1])
+        if not phrases:
+            return (f"REJECTED: none of the phrases falls inside the "
+                    f"{prog:.2f}s program (start/end are PROGRAM seconds).")
+        s = min(s, phrases[0][1])
+        e = max(e, phrases[-1][2])
+    else:
+        phrases = _kinetic_phrases(words, tl, s, e)
     if not phrases:
         return (f"REJECTED: no kept speech inside {s}-{e}s of the program "
                 "— check get_kept_transcript for where the words actually "
-                "are.")
+                "are, or pass phrases with your own words.")
     emph = {str(w).strip().lower().strip(".,!?") for w in
             (emphasis_words or []) if str(w).strip()}
     texts = [dict(tx) for tx in (edl.get("texts") or [])]
@@ -16456,11 +16509,15 @@ def add_kinetic_text(ctx, start=None, end=None, accent_color="#DC2626",
                      "middle": "sides"}
     made, obstructed, unavailable, moved = [], 0, 0, 0
     for i, (ptext, pa, pb) in enumerate(phrases):
-        nxt = phrases[i + 1][1] if i + 1 < len(phrases) else None
-        hold_end = min(nxt if nxt is not None else pb + 1.4, pb + 2.2, e)
-        hold_end = max(hold_end, pa + 0.5)
-        item_start = round(max(s, pa - 0.05), 2)
-        item_end = round(hold_end, 2)
+        if authored:
+            # The editor wrote these beats and their timing: honour both.
+            item_start, item_end = pa, pb
+        else:
+            nxt = phrases[i + 1][1] if i + 1 < len(phrases) else None
+            hold_end = min(nxt if nxt is not None else pb + 1.4, pb + 2.2, e)
+            hold_end = max(hold_end, pa + 0.5)
+            item_start = round(max(s, pa - 0.05), 2)
+            item_end = round(hold_end, 2)
         if isinstance(ctx, ToolContext) or getattr(ctx, "enforce_spatial",
                                                    False):
             band, analyzed, unsafe, err = _fixed_text_band(
@@ -16515,13 +16572,15 @@ def add_kinetic_text(ctx, start=None, end=None, accent_color="#DC2626",
                       "follows any later move/removal.")
     res = ctx.write_edl(
         edl, f"kinetic typography: {len(made)} phrase(s) choreographed to "
-             f"the speech across {s}-{e}s (program time) "
+             f"{'your phrases' if authored else 'the speech'} across "
+             f"{s}-{e}s (program time) "
              f"[{made[0]['id']}-{made[-1]['id']}]")
     if not res.startswith("EDL v"):
         return res
     sample = "; ".join(f'"{m["text"]}"@{m["start"]}s' for m in made[:4])
     res += (f"\n{len(made)} phrases placed from measured clean bands, each "
-            f"appearing AT its spoken moment: {sample}..."
+            f"appearing AT its "
+            f"{'authored' if authored else 'spoken'} moment: {sample}..."
             f"{muted_note}")
     if moved:
         res += (f"\nMeasured composition moved {moved} phrase(s) out of "
@@ -33123,8 +33182,21 @@ TOOLS = {
                          "uses one restrained settle language across the "
                          "pass and a controlled overshoot only for semantic "
                          "emphasis; 'preset' restores the legacy named "
-                         "entrances; 'still' removes phrase animation.",
-                         {"start": {"type": "number"},
+                         "entrances; 'still' removes phrase animation. "
+                         "NO SPEECH (gameplay, a product clip, music-only): "
+                         "pass phrases=[{text, start, end}] in PROGRAM "
+                         "seconds with the words you write for what the "
+                         "viewer SEES (hook, beats, payoff); they get the "
+                         "same placement and motion. That is what 'kinetic "
+                         "captions' means on silent footage.",
+                         {"phrases": {"type": "array", "items": {
+                              "type": "object",
+                              "properties": {
+                                  "text": {"type": "string"},
+                                  "start": {"type": "number"},
+                                  "end": {"type": "number"}},
+                              "required": ["text", "start", "end"]}},
+                          "start": {"type": "number"},
                           "end": {"type": "number"},
                           "accent_color": {"type": "string"},
                           "emphasis_words": {"type": "array",

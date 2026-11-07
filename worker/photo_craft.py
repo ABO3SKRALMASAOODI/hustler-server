@@ -64,6 +64,22 @@ def fill_at(items, src_t):
     return None
 
 
+def fill_missed(items, keep, drawn, slack):
+    """{fill id: (pictures due, pictures not drawn)}: a span the render's
+    kept footage shows (by more than ``slack`` seconds) that no block drew.
+    ``drawn``: {(fill id, span t0)} of every block drawn on its fill."""
+    out = {}
+    for it in items or []:
+        due = [sp for sp in it.get("spans") or []
+               if any(min(float(e), float(sp["t1"]))
+                      - max(float(s), float(sp["t0"])) > slack
+                      for s, e in keep or [])]
+        gone = [sp for sp in due if (it.get("id"), sp.get("t0")) not in drawn]
+        if gone:
+            out[it.get("id")] = (len(due), len(gone))
+    return out
+
+
 def fill_chain(parts, in_label, out_label, W, H, uid, *, item, span, src_size,
                tail, late="", frames=None, fps=None):
     """Bring in_label (the source's frames) to W x H: the picture fitted,
@@ -107,6 +123,15 @@ class _Fill:
     KEEPS_FRAME_TAGS = True
 
     def stage(self, ctx, items):
+        # The rung is what the blocks drew, never what the item asked for.
+        missed = getattr(ctx.plan, "fill_missed", None) or {}
+        for it in items:
+            due, gone = missed.get(it.get("id")) or (0, 0)
+            if gone:
+                ctx.note(it, "omit" if gone >= due else "reduced",
+                         f"{gone} of {due} picture(s) shown without the "
+                         "blurred fill: a picture card composes those frames, "
+                         "or the source's size was not known")
         return ctx.label
 
 

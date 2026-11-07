@@ -744,3 +744,139 @@ def test_the_audio_pruner_reads_a_concat_that_leads_a_chain():
     graph = graph.replace("[0:v]split[x][y]", "[0:v]split=3[x][y][w2]")
     out = renderer._prune_graph_to_audio(graph, target="ac")
     assert "[vc]" not in out and "[ac]" in out
+
+
+# ── p5537: a fill draws on its spans when the keep is one segment ─────────
+
+_WIDE = (("red", "lime", "blue", "yellow"), ("lime", "blue", "yellow", "magenta"),
+         ("blue", "yellow", "magenta", "red"), ("yellow", "magenta", "red", "lime"))
+_TALL = ("cyan", "white", "orange")
+_P5537 = ((3.0, 6.0), (12.0, 15.0), (21.0, 24.0))
+
+
+def _make_p5537(path, W=320, H=180):
+    """30 s: wide four-stripe pictures, with tall photos on black pillars
+    baked in at 3-6, 12-15 and 21-24 s (project 5537's synthetic clip), over
+    stereo sound like an upload's."""
+    plan = [("w", 0, 3.0), ("t", 0, 3.0), ("w", 1, 6.0), ("t", 1, 3.0),
+            ("w", 2, 6.0), ("t", 2, 3.0), ("w", 3, 6.0)]
+    inputs, chain = [], []
+    for i, (kind, k, d) in enumerate(plan):
+        if kind == "w":
+            c = _WIDE[k]
+            inputs += ["-f", "lavfi", "-t", str(d), "-i",
+                       f"color=c={c[0]}:s={W}x{H}:r=30"]
+            boxes = "".join(f",drawbox=x={j * W // 4}:y=0:w={W // 4}:h={H}:"
+                            f"color={c[j]}:t=fill" for j in (1, 2, 3))
+            chain.append(f"[{i}:v]format=yuv420p{boxes},setsar=1[v{i}]")
+        else:
+            inputs += ["-f", "lavfi", "-t", str(d), "-i",
+                       f"color=c={_TALL[k]}:s={W // 2}x{H}:r=30"]
+            chain.append(f"[{i}:v]pad={W}:{H}:{W // 4}:0:black,"
+                         f"format=yuv420p,setsar=1[v{i}]")
+    n = len(plan)
+    chain.append("".join(f"[v{i}]" for i in range(n))
+                 + f"concat=n={n}:v=1:a=0[v]")
+    inputs += ["-f", "lavfi", "-t", "30", "-i",
+               "sine=frequency=440:sample_rate=48000"]
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", *inputs,
+                    "-filter_complex", ";".join(chain), "-map", "[v]",
+                    "-map", f"{n}:a", "-c:v", "libx264", "-preset",
+                    "ultrafast", "-crf", "12", "-g", "30", "-c:a", "aac",
+                    "-ac", "2", "-shortest", str(path)], check=True)
+
+
+def _rows(path, y=90):
+    """Row y of every frame: (frames, width, 3)."""
+    info = media.probe(str(path))
+    raw = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i",
+                          str(path), "-vf", f"crop={info['width']}:2:0:{y}",
+                          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                         stdout=subprocess.PIPE, check=True).stdout
+    return np.frombuffer(raw, np.uint8).reshape(
+        -1, 2, info["width"], 3)[:, 0].astype(np.int32)
+
+
+def _pcm(path):
+    raw = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i",
+                          str(path), "-vn", "-ac", "1", "-ar", "48000", "-f",
+                          "s16le", "-"], stdout=subprocess.PIPE,
+                         check=True).stdout
+    return np.frombuffer(raw, np.int16).astype(np.int32)
+
+
+@needs_ffmpeg
+def test_one_kept_segment_fills_each_span_on_its_own_frames(tmp_path):
+    src = tmp_path / "p5537.mp4"
+    _make_p5537(src)
+    film = {"src": str(src), "dur": 30.0, "map": picture_map.measure(str(src)),
+            "dir": tmp_path}
+    edl = _solve(film, [(F.set_photo_fill, {})])
+    assert edl["keep"] == [[0.0, 30.0]]     # nothing split the keep
+    item = next(i for i in edl["fx"] if i["type"] == "photo_fill")
+    assert [(s["t0"], s["t1"]) for s in item["spans"]] == \
+        [pytest.approx(s, abs=0.011) for s in _P5537]
+    out, d = _render(film, edl, "fill.mp4")
+    bare, _d = _render(film, dict(edl, fx=[]), "bare.mp4")
+    got, ref = _rows(out), _rows(bare)
+    assert len(got) == len(ref) == 900 and d == pytest.approx(30.0, abs=0.04)
+    span_frames = {k for a, b in _P5537
+                   for k in range(int(round(a * 30)), int(round(b * 30)))}
+    for k in range(900):
+        if k in span_frames:            # the pillar is the photo's blur
+            assert got[k][20].sum() > 150 and ref[k][20].sum() < 40, k
+            assert abs(got[k][160] - ref[k][160]).max() < 14, k
+        else:                           # every other frame is untouched
+            assert np.abs(got[k] - ref[k]).mean() < 4, k
+    a, b = _pcm(out), _pcm(bare)        # the sound did not move a sample
+    assert len(a) == len(b) and np.abs(a - b).max() <= 2
+
+
+def test_fill_and_card_track_edges_split_the_blocks():
+    tl = timeline.Timeline([[0.0, 30.0]], [], [])
+    edl = {"keep": [[0.0, 30.0]],
+           "fx": [{"id": "photo_fill", "type": "photo_fill",
+                   "spans": [{"t0": 3.0, "t1": 6.0}, {"t0": 12.0, "t1": 15.0}]}],
+           "effects": {"picture_cards": [
+               dict(id="c", start=20.0, end=28.0, source=[0, 0, 1, 1],
+                    source_track=[{"t0": 20.0, "t1": 24.0, "source": [0, 0, .5, 1]},
+                                  {"t0": 24.0, "t1": 28.0, "source": [.5, 0, 1, 1]}],
+                    cut_steps=[{"t0": 20.0, "t1": 22.5, "scale": 1.1}])]}}
+    assert renderer.block_span_edges(edl, tl) == {3.0, 6.0, 12.0, 15.0,
+                                                   24.0, 22.5}
+
+
+def test_a_fill_no_block_drew_is_not_reported_full():
+    item = {"id": "photo_fill", "spans": [{"t0": 3.0, "t1": 6.0},
+                                          {"t0": 12.0, "t1": 15.0},
+                                          {"t0": 40.0, "t1": 45.0}]}
+    keep = [(0.0, 30.0)]
+    assert photo_craft.fill_missed([item], keep, set(), 0.05) == {
+        "photo_fill": (2, 2)}
+    assert photo_craft.fill_missed([item], keep, {("photo_fill", 3.0)},
+                                   0.05) == {"photo_fill": (2, 1)}
+    assert photo_craft.fill_missed(
+        [item], keep, {("photo_fill", 3.0), ("photo_fill", 12.0)}, 0.05) == {}
+    notes = []
+
+    class _Ctx:
+        plan = type("P", (), {"fill_missed": {"photo_fill": (2, 1)}})()
+        label = "v"
+
+        def note(self, it, rung, reason):
+            notes.append((it["id"], rung))
+    assert photo_craft.FILL.stage(_Ctx(), [item]) == "v"
+    assert notes == [("photo_fill", "reduced")]
+
+
+def test_a_picture_inside_a_source_card_is_not_claimed_filled():
+    card = {"id": "c", "start": 4.0, "end": 10.0, "box": [.05, .3, .95, .55],
+            "fit": "pad", "background": "#406080", "entrance": "none",
+            "exit": "none", "shadow": 0, "border": 0, "source": [0, 0, 1, 1]}
+    ctx = Ctx({"keep": [[0.0, 40.0]], "effects": {"picture_cards": [card]}})
+    assert "NO CHANGE" in F.set_photo_fill(ctx, start=4.0, end=10.0)
+    out = F.set_photo_fill(ctx)
+    item = next(i for i in ctx.edl["fx"] if i["type"] == "photo_fill")
+    assert 4.63 not in [s["t0"] for s in item["spans"]]
+    assert "1 picture(s) inside a picture card" in out
+    assert "more picture(s) still have bars" not in out

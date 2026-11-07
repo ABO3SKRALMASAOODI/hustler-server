@@ -107,7 +107,8 @@ freeze may carry one `shutter_1` or `shutter_2` cue from the sound library
 (the strongest one may take `impact_1` instead, once per short).
 
 KINETIC TEXT (`add_kinetic_text`): transcript-timed phrase typography over a
-range, placed in measured clear bands; `motion_style='composed'` is one
+range, placed in measured clear bands (on footage with no speech, pass
+`phrases=[{text, start, end}]` with your own words and timing); `motion_style='composed'` is one
 inward settle with an overshoot reserved for `emphasis_words`; `still` when
 cutting carries the energy. It mutes duplicate bottom captions only under the
 phrases it creates. For premium word-on-onset motion across a whole reel,
