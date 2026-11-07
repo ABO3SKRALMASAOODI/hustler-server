@@ -895,3 +895,75 @@ def test_batch_remove_on_an_object_layer_clears_a_field_or_the_layer():
     assert out["effects"]["fade_in_s"] == 0.5
     out, _ = batch(edl, [{"action": "remove", "layer": "effects"}])
     assert not out["effects"]
+
+
+# ── what the first replay of the whole release still refused ──
+
+def test_an_fx_change_on_an_id_that_is_gone_names_the_ids_and_the_tool():
+    edl = {"keep": [[0.0, 60.0]], "fx": [
+        {"id": "jn1", "type": "junction", "stage": "junction", "at": 4.0,
+         "style": "dissolve", "duration_s": 1.0, "device": "junction_dissolve"}]}
+    with pytest.raises(ValueError) as e:
+        batch(edl, [{"action": "upsert", "layer": "fx", "id": "jn3",
+                     "value": {"style": "slide_left", "duration_s": 1.0}}])
+    text = str(e.value)
+    assert "jn3" in text and "jn1" in text and "set_junction(at=" in text
+    assert "validation error" not in text
+
+
+class _ZoomCtx:
+    def __init__(self):
+        self.edl = {"keep": [[0.0, 60.0]], "effects": {}}
+        self.notes = []
+
+    def latest_edl(self):
+        return {"version": 1, "json": self.edl}
+
+    def write_edl(self, edl, note):
+        self.edl = edl
+        return f"EDL v1 -> v2: {note}"
+
+
+@pytest.fixture
+def zoom_ctx(monkeypatch):
+    monkeypatch.setattr(agent_tools, "_zoom_target_problem", lambda *a, **k: None,
+                        raising=False)
+    return _ZoomCtx()
+
+
+def test_a_zoom_path_copied_from_get_edl_keeps_its_strength(zoom_ctx):
+    out = agent_tools.add_zoom_path(zoom_ctx, [
+        {"f": 0.0, "s": 0.0, "cx": 0.4, "cy": 0.5},
+        {"f": 0.5, "s": 0.05, "cx": 0.6, "cy": 0.5},
+        {"f": 1.0, "s": 0.0, "cx": 0.5, "cy": 0.5}], start=10.0, end=20.0)
+    assert out.startswith("EDL"), out
+    zoom = zoom_ctx.edl["effects"]["zooms"][-1]
+    assert (zoom["start"], zoom["end"]) == (10.0, 20.0)
+    assert max(p["s"] for p in zoom["path"]) == pytest.approx(0.05, abs=1e-6)
+
+
+def test_a_fraction_with_no_window_says_what_it_needs(zoom_ctx):
+    out = agent_tools.add_zoom_path(zoom_ctx, [
+        {"f": 0.0, "s": 0.0, "cx": 0.4, "cy": 0.5},
+        {"f": 1.0, "s": 0.0, "cx": 0.5, "cy": 0.5}])
+    assert out.startswith("REJECTED") and "start=" in out
+
+
+def test_a_zoom_named_by_its_id_on_the_effects_layer_changes():
+    edl = {"keep": [[0.0, 60.0]], "effects": {"zooms": [
+        {"id": "zm2", "start": 0.0, "end": 4.6, "strength": 0.1, "mode": "ease"},
+        {"id": "zm3", "start": 5.0, "end": 9.0, "strength": 0.1, "mode": "ease"}]}}
+    out, notes = batch(edl, [{"action": "upsert", "layer": "effects", "id": "zm2",
+                              "value": {"id": "zm2", "strength": 0.07}}])
+    zooms = out["effects"]["zooms"]
+    assert [z["strength"] for z in zooms] == [0.07, 0.1]
+    assert any("zm2" in n for n in notes)
+
+
+def test_an_effects_id_that_is_nowhere_says_which_are():
+    edl = {"keep": [[0.0, 60.0]], "effects": {"zooms": [
+        {"id": "zm2", "start": 0.0, "end": 4.6, "strength": 0.1, "mode": "ease"}]}}
+    with pytest.raises(ValueError) as e:
+        batch(edl, [{"action": "upsert", "layer": "effects", "id": "zm9",
+                     "value": {"strength": 0.03}}])
+    assert "zm9" in str(e.value) and "zm2" in str(e.value)

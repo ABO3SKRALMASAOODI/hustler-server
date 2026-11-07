@@ -726,6 +726,26 @@ def _remove_elsewhere(edl, layer, item_id):
     return f"{item_id} is not in this edit: nothing to remove."
 
 
+def _patch_effects_row(edl, item_id, value):
+    """One row of a list inside effects, found by its id. A field of effects
+    named as the id (the batch-upsert-effects class) keeps working."""
+    effects = edl.get("effects") or {}
+    for name, rows in effects.items():
+        if not isinstance(rows, list):
+            continue
+        for at, row in enumerate(rows):
+            if isinstance(row, dict) and row.get("id") == item_id:
+                rows[at] = {**row, **value, "id": item_id}
+                return f"{item_id} in effects.{name} changed."
+    if item_id in Effects.model_fields:
+        edl["effects"] = {**effects, item_id: value}
+        return f"effects.{item_id} set."
+    named = [row.get("id") for rows in effects.values() if isinstance(rows, list)
+             for row in rows if isinstance(row, dict) and row.get("id")]
+    raise ValueError(f"effects has no item {item_id}: its items are "
+                     f"{', '.join(map(str, named[:12])) or 'none'}.")
+
+
 def _canvas_size(ratio):
     try:
         wide, high = (float(side) for side in str(ratio).split(":"))
@@ -856,6 +876,12 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
         elif action == "upsert" and layer not in ITEM_LAYERS \
                 and isinstance(op.get("value"), list):
             edl[layer] = copy.deepcopy(op["value"])   # a list layer has no ids
+        elif action == "upsert" and layer == "effects" and op.get("id") \
+                and isinstance(op.get("value"), dict):
+            # The id of one zoom, region or picture card: that row changes.
+            # Read as fields of effects it wrote nothing and came back as NO
+            # CHANGE, and p5520's editor redid four zooms one call at a time.
+            near_ops.append(_patch_effects_row(edl, op["id"], op["value"]))
         elif action == "upsert" and layer not in ITEM_LAYERS \
                 and isinstance(edl.get(layer) or {}, dict) \
                 and isinstance(op.get("value"), dict):
@@ -903,6 +929,14 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
                     merged["params"] = {**prior["params"], **value["params"]}
                 merged.pop("replace_params", None)
                 value = merged
+                if layer == "fx" and at is None and not value.get("type"):
+                    # Validation can only say it found no tag. The id is stale
+                    # or new, and either way the call has what it needs.
+                    named = ", ".join(str(i.get("id")) for i in items[:12])
+                    raise ValueError(
+                        f"fx has no item {item_id}: to change one, use its id"
+                        f" ({named or 'there are none'}). A new transition on "
+                        "a cut is set_junction(at=<seconds>, style=...).")
                 if at is None:
                     items.append(value)
                 else:

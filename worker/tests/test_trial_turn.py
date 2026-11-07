@@ -307,9 +307,21 @@ def test_render_cap_unchanged_outside_the_trial_lane(kind):
     assert agent_loop._trial_render_refusal(ctx, "keep_segments") is None
 
 
-def test_trial_requests_render_at_most_twice():
+def test_a_count_of_previews_never_stops_a_trial_request():
+    # p5518: the second attempt at the customer's one request was refused.
+    # The trial's dollar cap bounds it, as credits bound a subscriber.
     ctx = _lane_ctx("trial")
-    assert config.CLAUDE_TRIAL_MAX_PREVIEWS == 2
+    assert config.CLAUDE_TRIAL_MAX_PREVIEWS == 0
+    assert agent_loop._trial_preview_cap(ctx, None) is None
+    ctx.trial_preview_cap = agent_loop._trial_preview_cap(ctx, None)
+    ctx.trial_previews = 99
+    assert agent_loop._trial_render_refusal(ctx, "render_preview") is None
+    assert agent_loop._trial_render_refusal(ctx, "keep_segments") is None
+
+
+def test_a_cap_set_by_hand_still_leaves_reads_open(monkeypatch):
+    monkeypatch.setattr(config, "CLAUDE_TRIAL_MAX_PREVIEWS", 2)
+    ctx = _lane_ctx("trial")
     assert agent_loop._trial_preview_cap(ctx, None) == 2
     assert agent_loop._trial_lane(ctx)
     ctx.trial_preview_cap = 2

@@ -11221,7 +11221,7 @@ def remove_zoom(ctx, id):
 # lives in worker/travel.py and BOTH tools call it.
 
 def add_zoom_path(ctx, keyframes, ease=None, motion_motif=None, purpose=None,
-                  target_evidence_ids=None):
+                  target_evidence_ids=None, start=None, end=None):
     """A zoom whose centre AND strength travel through a list of keyframes,
     interpolated, in output seconds."""
     if not isinstance(keyframes, list) or len(keyframes) < 2:
@@ -11240,11 +11240,18 @@ def add_zoom_path(ctx, keyframes, ease=None, motion_motif=None, purpose=None,
         if not isinstance(kf, dict):
             return (f"REJECTED: keyframes[{i}] must be an object "
                     "{t, cx, cy, strength} or {t, rect, strength}.")
+        # A stored path reads back in get_edl as {f, s}: f a fraction of its
+        # window, s its strength. An editor copying that shape means the same
+        # move, so it works here; s alone used to be dropped without a word.
         try:
-            t = float(kf["t"])
+            if kf.get("t") is None and kf.get("f") is not None:
+                t = float(start) + float(kf["f"]) * (float(end) - float(start))
+            else:
+                t = float(kf["t"])
         except (KeyError, TypeError, ValueError):
-            return f"REJECTED: keyframes[{i}] needs a numeric t (seconds)."
-        s = kf.get("strength")
+            return (f"REJECTED: keyframes[{i}] needs a numeric t (seconds), or "
+                    "f with this call's start= and end=.")
+        s = kf.get("strength", kf.get("s"))
         if s is not None:
             try:
                 s = float(s)
@@ -32259,7 +32266,8 @@ TOOLS = {
         "interpolates between keyframes, so the frame can push in as it "
         "arrives and ease out as it leaves; to HOLD on a subject, repeat "
         "its keyframe at the hold's start and end times. The window runs "
-        "from the first t to the last. NO ramp is added at the edges: give "
+        "from the first t to the last (or give each keyframe f, a 0-1 "
+        "fraction of start..end). NO ramp is added at the edges: give "
                 "the first and last keyframe strength 0 for a seamless entry and "
                 "exit (a strength-0 rect keyframe still aims where the move is "
                 "going). ease: 'cubic_in_out' (default — settles at each keyframe, "
@@ -32268,6 +32276,7 @@ TOOLS = {
         "across later cuts exactly like add_zoom, so cutting elsewhere "
         "never strands it. Remove the whole move with remove_zoom_path.",
         {"keyframes": {"type": "array", "items": {"type": "object"}},
+         "start": {"type": "number"}, "end": {"type": "number"},
          "ease": {"type": "string", "enum": ["cubic_in_out", "linear"]},
          "purpose": {"type": "string"},
          "target_evidence_ids": {"type": "array",

@@ -2073,11 +2073,13 @@ AGENT_MAX_PRODUCTIVE_SLICES = min(
 # requests short). It works until it is fulfilled; what stops it is evidence
 # of being stuck (the repeated-blocker and same-findings checks in
 # agent_loop), AGENT_MAX_PRODUCTIVE_SLICES above, and the user's credits.
-# The one exception is the FREE TRIAL's request (never a subscriber's): it
-# renders at most this many previews (Q3, 30 Oct 2026: one look and one
-# repair; agent_loop._trial_render_refusal). 0 = no cap on the trial either.
+# The trial is no exception: its dollar cap bounds it, and a count of previews
+# only stopped the work halfway. On p5518 the second attempt at the customer's
+# one request was refused with the request undone (owner, 6 Nov: zero issues,
+# free or paying). A number here brings a cap back (agent_loop.
+# _trial_render_refusal); 0 is no cap.
 CLAUDE_TRIAL_MAX_PREVIEWS = max(
-    0, int(os.getenv("CLAUDE_TRIAL_MAX_PREVIEWS", "2")))
+    0, int(os.getenv("CLAUDE_TRIAL_MAX_PREVIEWS", "0")))
 # The trial turn's punch/slam lift on talking heads (trial_turn.lift_static):
 # off, measured (see trial_turn.prepare); "1" turns it on.
 CLAUDE_TRIAL_LIFT_TALKING = os.getenv("CLAUDE_TRIAL_LIFT_TALKING", "0") == "1"
