@@ -776,7 +776,11 @@ def test_a_nastaliq_ladder_does_not_stack_its_lines_on_each_other():
     t = _film([{"k": "b", "id": "b01", "at": "@0..@3", "job": "x", "cut": "pulse 9", "pic": "main", "do": [{"g": "big", "t": "به جون چشات|دیگه جون ندارم", "at": "@0..@3", "size": 0.05, "font": "nastaliq"}], "rest": REST}])
     c = S.compile_score(t, index=wordless_index(10))
     a, b = [i for i in c.l1["items"] if i["k"] == "word"][:2]
-    assert b["y"] - a["y"] > 0.05 * 1.3
+    # By the shaped ink of the face that draws it (Naskh, from the images' fonts-noto-core), not a ratio
+    # that held only for the Mac's Nastaliq: line two's ink starts below line one's.
+    va, vb = c.l1["voices"][a["v"]], c.l1["voices"][b["v"]]
+    qa, qb = S.shaped(va["font"], a["t"]), S.shaped(vb["font"], b["t"])
+    assert b["y"] - qb[1] * vb["px"] / 1920 > a["y"] + qa[2] * va["px"] / 1920
 
 
 def test_the_meter_says_a_page_is_flat_and_what_opens_the_film():
