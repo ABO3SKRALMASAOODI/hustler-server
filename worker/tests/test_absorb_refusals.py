@@ -789,3 +789,52 @@ def test_batch_a_fraction_of_an_overlay_at_the_end_is_removed():
     out, notes = batch(edl, [{"action": "upsert", "layer": "overlays",
                               "id": "ov1", "value": {"x": 0.5}}])
     assert not out["overlays"] and notes
+
+
+def test_a_junction_run_is_one_line_in_every_receipt():
+    import schemas
+
+    def junction(at, style="dissolve"):
+        return SimpleNamespace(stage="junction", style=style, at=float(at),
+                               describe=lambda: f"junction {at} {style}")
+    items = [junction(at) for at in range(1, 60)]
+    one = schemas._fx_lines(items)
+    assert len(one) == 1 and "junction x59 (dissolve x59) on cuts 1-59s" in one[0]
+    items[3] = junction(4, "wipe_left")
+    assert schemas._fx_lines(items) != one
+    few = [junction(at) for at in range(1, 4)]
+    assert schemas._fx_lines(few) == ["junction 1 dissolve", "junction 2 dissolve",
+                                      "junction 3 dissolve"]
+
+
+def test_load_tools_by_department_lists_names_and_loads_none():
+    ctx = ctx_with()
+    ctx._tools_by_name = True
+    out = agent_tools.load_tools(ctx, domains=["looks"])
+    assert "load_tools(names=" in out and not getattr(
+        ctx, "_loaded_tool_domains", None)
+
+
+def test_a_department_never_surfaces_by_itself_on_a_stable_list():
+    ctx = SimpleNamespace(edit_plan={"tool_domains": ["looks"]},
+                          _loaded_tool_domains={"motion"},
+                          _loaded_tool_names={"add_zoom"}, _tools_by_name=True)
+    names = agent_tools.compact_tool_names(ctx)
+    assert "add_zoom" in names
+    assert names == agent_tools.planning_tool_names() | {"add_zoom"}
+
+
+def test_a_write_stops_in_front_of_look_frames_and_the_next_reads_it_back():
+    import claude_lane
+    frames = {"type": "text", "text": "Frames for your own eyes - see them"}
+    content = [{"type": "tool_result", "tool_use_id": "a", "content": "ok"},
+               frames, {"type": "image", "source": {}}]
+    assert claude_lane._last_kept_block(content) == 0
+    released = [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "a", "content": "ok"},
+        {"type": "text", "text": "Frames for your own eyes — inspected before "
+                                 "a committed EDL change."}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "y"}]},
+        {"role": "user", "content": [{"type": "text", "text": "z"}]}]
+    block, index = claude_lane._released_pixels_anchor(released)
+    assert block is released[0]["content"] and index == 0

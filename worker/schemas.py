@@ -4501,8 +4501,31 @@ def describe_edl(edl_dict, duration=None, src_shape=None):
     if edl.fx:
         # Per item, like music and sfx: a moved or retuned device must read
         # differently in the diff the agent quotes back.
-        parts.append("fx: " + "; ".join(f.describe() for f in edl.fx))
+        parts.append("fx: " + "; ".join(_fx_lines(edl.fx)))
     return ", ".join(parts)
+
+
+_JUNCTIONS_LISTED = 8
+
+
+def _fx_lines(items):
+    """Each device once, and a run of junctions as one line: this text is in
+    every write's receipt, twice, and 82 dissolves made a receipt 9k
+    characters (p5520). The tag still changes when any junction changes."""
+    junctions = [f for f in items if f.stage == "junction"]
+    if len(junctions) <= _JUNCTIONS_LISTED:
+        return [f.describe() for f in items]
+    lines = [f.describe() for f in items if f.stage != "junction"]
+    styles = {}
+    for f in junctions:
+        styles[f.style] = styles.get(f.style, 0) + 1
+    times = sorted(float(f.at or 0) for f in junctions)
+    tag = hashlib.sha256("|".join(sorted(
+        f.describe() for f in junctions)).encode()).hexdigest()[:6]
+    lines.append(f"junction x{len(junctions)} ("
+                 + ", ".join(f"{name} x{n}" for name, n in sorted(styles.items()))
+                 + f") on cuts {times[0]:g}-{times[-1]:g}s [{tag}]")
+    return lines
 
 
 # ------------------------------------------------------------------ #

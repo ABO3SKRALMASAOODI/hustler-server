@@ -501,7 +501,7 @@ def _mark_cache(system, msgs, tools, model="", cache_policy=None):
     # A large batch of images/observations can put the previous request's
     # write beyond Anthropic's 20-position lookback. Keep an explicit read
     # anchor there in that case, using the otherwise redundant tools slot.
-    anchor = _previous_cache_anchor(msgs)
+    anchor = _released_pixels_anchor(msgs) or _previous_cache_anchor(msgs)
     if tools and anchor is None:
         last = max((i for i, tool in enumerate(tools)
                     if not tool.get("defer_loading")), default=None)
@@ -529,15 +529,38 @@ def _mark_cache(system, msgs, tools, model="", cache_policy=None):
         content[index] = dict(content[index], cache_control={"type": "ephemeral"})
 
 
+_PIXELS_FROM = ("FILMSTRIPS & STILLS", "Frames for your own eyes")
+_PIXELS_RELEASED = "Frames for your own eyes — inspected before"
+
+
 def _last_kept_block(content):
-    """The newest block the next call will send unchanged. The first call's
-    contact sheets are dropped straight after it, so a write across them is
-    never read: stop in front of them."""
+    """The newest block a later call is sure to send unchanged. Pixels are
+    dropped once they have done their work, and everything after them is then
+    rewritten, so a write never crosses them: stop in front of the first.
+    (p5520, 7 Nov: 71k rewritten after every such drop.)"""
     for index, block in enumerate(content):
         if index and block.get("type") == "text" and str(
-                block.get("text") or "").startswith("FILMSTRIPS & STILLS"):
+                block.get("text") or "").startswith(_PIXELS_FROM):
             return index - 1
     return len(content) - 1
+
+
+def _released_pixels_anchor(msgs):
+    """The block in front of the pixels released last: the write that stopped
+    there is the one to read back, past the 20 blocks a read looks behind."""
+    for at in range(len(msgs) - 1, -1, -1):
+        msg = msgs[at]
+        if msg["role"] != "user":
+            continue
+        for index, block in enumerate(msg["content"]):
+            if str(block.get("text") or "").startswith(_PIXELS_RELEASED):
+                if index:
+                    return msg["content"], index - 1
+                before = next((m for m in reversed(msgs[:at])
+                               if m["role"] == "user" and m["content"]), None)
+                return ((before["content"], len(before["content"]) - 1)
+                        if before else None)
+    return None
 
 
 def _previous_cache_anchor(msgs):

@@ -26451,6 +26451,19 @@ def _asset_audio_analysis(ctx, asset_key):
     return _cap(out)
 
 
+def _department_listing(domains):
+    """A department's tools by name, one short line each."""
+    rows = []
+    for domain in domains:
+        rows.append(f"{domain}:")
+        for tool in sorted(TOOL_DOMAINS.get(domain) or ()):
+            if tool in TOOLS and not _tool_disabled(tool):
+                first = str(TOOLS[tool][1]).split(". ")[0].split("\n")[0]
+                rows.append(f"  {tool}: {first[:70]}")
+    return ("These tools exist; none is loaded yet. Call load_tools(names=[...]) "
+            "with the ones you will use.\n" + "\n".join(rows))
+
+
 def load_tools(ctx, names=None, domains=None):
     """Persist exact capabilities for the rest of this logical user turn.
 
@@ -26482,6 +26495,12 @@ def load_tools(ctx, names=None, domains=None):
                 + ".")
     if bad:
         call_note(ctx, "not loaded, no such domain: " + ", ".join(bad))
+    if requested and getattr(ctx, "_tools_by_name", False):
+        listing = _department_listing(requested)
+        requested = []
+        if not names:
+            return listing
+        call_note(ctx, listing)
     exact, bad_names = [], []
     for raw in names:
         tool = str(raw or "").strip()
@@ -33756,6 +33775,10 @@ def compact_tool_names(ctx):
             if isinstance(decision, dict) and decision.get("mode") == "author":
                 domains.update(BLUEPRINT_DEPARTMENT_DOMAINS.get(
                     department, set()))
+    if getattr(ctx, "_tools_by_name", False):
+        # On a stable tool list a tool is loaded by name: a department's 30
+        # schemas were 28k tokens resent on every later call of the turn.
+        domains = set()
     names.update(plan.get("required_tools") or [])
     names.update(loaded_names)
     domains.update(DEFAULT_EDIT_DOMAINS)
