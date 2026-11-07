@@ -177,7 +177,7 @@ def test_a_dead_player_with_nothing_after_it_pages(world):    # noqa: F811
 
 def test_a_slow_analysis_is_filed_at_once_and_does_not_page(world):    # noqa: F811
     index_job(world, "running", 5, 599)
-    world.ticks(40)
+    world.ticks(25)
     t = world.only_ticket()
     assert t["status"] == "open" and t["severity"] == "P1"
 

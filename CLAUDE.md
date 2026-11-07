@@ -235,7 +235,7 @@ never calls a model for it. The Reviewer (hourly) runs
 `backend/scripts/ops_review.py pending`, looks at each settled session of a
 real user frame by frame, uploads picture evidence (R2 `ops/evidence/<session>/`)
 and writes `session_reviews` and one `tickets` row per cause (migration 041).
-The Fixer (daily 03:10 Dubai, within 10 minutes on a P0) fixes causes, guards each with
+The Fixer (daily 03:10 Dubai, within 5 minutes on a P0) fixes causes, guards each with
 a test or journey and closes tickets with `fix_sha` and `regression_check`.
 `ops_review.py` is the agents' ONLY production write path and writes only the
 four outcome tables (`ops_loop/store.guard`). Views: admin Overview strip
@@ -248,13 +248,20 @@ four outcome tables (`ops_loop/store.guard`). Views: admin Overview strip
 own MCP error) is filed as a ticket within a minute by
 `ops_loop/intake.py` (a 1-minute advisory-locked tick in the web process;
 cause keys `auto-*`; P0 = a customer is blocked, P1 = device-side or a gated
-free account). The Mac's P0 watch (`check_fixer.sh p0`, every 10 minutes,
-also catches a backend or database outage) starts the Fixer. The owner gets
-ONE alert kind: a P0 nobody marked 'fixing' within 30 minutes (plus a model
-provider out of credit), and ONE daily email answering four questions:
+free account). Refused tool calls are read as they land, while the turn runs,
+on any plan (`ops_loop/refusals.py`): one tool refused twice in a row on a
+project is a P1 ticket, three times or twice in a request that ended short is
+P0. A subscriber whose request ended undone with no credits left is a P0 and an
+alert at once (`ops_loop/paid_out.py`). The Mac's P0 watch (`check_fixer.sh p0`,
+every 5 minutes, up to 3 Fixers, also catches a backend or database outage)
+starts a Fixer. The owner gets these alerts only: a P0 nobody marked 'fixing'
+within 10 minutes, a subscriber out of credits with a request undone, a model
+provider out of credit, and ONE daily email answering four questions:
 results judged, failures and what was fixed (links), signups and active
 customers, box / queue / spend; the same four answers top the admin
-(`GET /admin/video/ops/today`). No billing advice anywhere: no flag, alert or
+(`GET /admin/video/ops/today`). Each ticket's time to claim and to live is in
+its history (`ops_review.py clock`, `live`, and the admin Tickets tab). No
+billing advice anywhere: no flag, alert or
 digest line may suggest a refund, pause, cancellation, credit or plan change
 (`tests/test_cockpit.py::test_no_flag_gives_billing_advice`). MCP error
 events keep a bounded sentence (links, emails, quoted text removed) only for

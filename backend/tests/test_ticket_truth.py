@@ -27,7 +27,8 @@ SCHEMA = """
 SET TIME ZONE 'UTC';
 CREATE TEMP TABLE users(id int PRIMARY KEY, email text, is_admin boolean,
   created_at timestamp DEFAULT '2026-11-01', is_subscribed int DEFAULT 0,
-  billing_status text, trial_status text, plan text DEFAULT 'free');
+  billing_status text, trial_status text, plan text DEFAULT 'free',
+  credits_balance numeric DEFAULT 0, credits_monthly_limit numeric);
 CREATE TEMP TABLE projects(id int PRIMARY KEY, user_id int, chat_session_id int);
 CREATE TEMP TABLE client_events(id serial PRIMARY KEY, user_id int,
   project_id int, kind text, asset_id int, detail jsonb, created_at timestamptz);
@@ -768,10 +769,10 @@ def test_a_stuck_fixing_p0_reaches_the_owner(world):
     assert [t["id"] for t in got] == [tid] and got[0]["waiting_min"] == 361
 
 
-def test_the_alert_gives_the_30_minute_watch_its_turn(world):
+def test_the_alert_gives_the_5_minute_watch_its_turn_and_no_more(world):
     tid = p0(world)
-    assert intake.UNHANDLED_AFTER > timedelta(minutes=37)
-    assert intake.unhandled(world.c, world.clock.now + timedelta(minutes=37)) == []
+    assert intake.UNHANDLED_AFTER == timedelta(minutes=10)
+    assert intake.unhandled(world.c, world.clock.now + timedelta(minutes=9)) == []
     assert [t["id"] for t in intake.unhandled(
         world.c, world.clock.now + intake.UNHANDLED_AFTER)] == [tid]
 
@@ -801,6 +802,9 @@ def test_a_quiet_ends_by_itself(world):
                          t["updated_at"].isoformat(), "waiting on the replay")
     later = world.clock.now + intake.RELEASE_QUIET + MIN
     assert [r["id"] for r in intake.pending_p0(world.c, later)] == [tid]
+    # The watch gets its turn at it before the owner is told it was not taken.
+    assert intake.unhandled(world.c, later) == []
+    later += intake.UNHANDLED_AFTER
     assert [t["id"] for t in intake.unhandled(world.c, later)] == [tid]
 
 

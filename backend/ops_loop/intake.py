@@ -31,6 +31,10 @@ an advisory lock) reads what failed since the last tick and files it:
             customer's own assistant instead)
   gaps      what should have happened by a measured deadline and did not, or
             a measured fact no failure row carries (ops_loop.gaps)
+  refusal   one tool refused again and again on a project, read as the calls
+            land, while the turn is still running (ops_loop.refusals)
+  credits   a subscription's credits gone with the request undone: P0, and the
+            owner hears it at once (ops_loop.paid_out)
 
 One ticket per CAUSE: the cause key is derived from the failure's own
 signature (`auto-<source>-<kind>-<signature>`), so one customer's retry loop
@@ -41,8 +45,9 @@ an owner decision stays closed, and is reported in the digest (store.decide).
 Severity is what happened to the customer, never who pays and never what an
 error sentence says. A failure is filed at once at P1 and looked at again when
 its grace runs out (ops_loop.recovery): still stuck, it goes to P0, and the
-Mac's P0 watch (check_fixer.sh p0, every 30 minutes) starts the Fixer; got past
-it, the ticket stays open for the daily Fixer and nobody is paged. A P0 nobody
+Mac's P0 watch (check_fixer.sh p0, every 5 minutes, up to 3 Fixers at once)
+starts a Fixer; got past it, the ticket stays open for the daily Fixer and nobody
+is paged. A P0 nobody
 picked up within UNHANDLED_AFTER, or a claim gone stale, and a scheduled agent
 that stopped running are what the owner is emailed about (cockpit_alerts).
 
@@ -65,9 +70,10 @@ MAX_PER_TICK = 400
 # The webhook resumes a held request seconds after the payment; this long
 # after it, a request still waiting was dropped.
 HELD_GRACE = timedelta(minutes=3)
-# The watch runs every 30 minutes with up to 7 of jitter, and a run takes a
-# minute or two to mark the ticket: this long means it really did not.
-UNHANDLED_AFTER = timedelta(minutes=45)
+# The watch runs every 5 minutes (owner, 7 Nov 2026: "nor issues neither latency
+# in handling them is accepted") and a Fixer marks its ticket in its first
+# minute: this long means a watch came and went, or every Fixer slot is taken.
+UNHANDLED_AFTER = timedelta(minutes=10)
 FIXING_STALE = timedelta(hours=6)
 # A P0 handed back with a note is waiting on something (a replay, a rating, a
 # release): the next run could only repeat the last. Without this quiet every
@@ -77,7 +83,7 @@ RELEASE_QUIET = timedelta(hours=6)
 # A scheduled agent's own heartbeat (ops_review.py heartbeat). For 70 hours from
 # 2 Nov nothing ran and nothing said so; the alert can only live here, because
 # whatever stopped them stops anything else on the Mac too.
-HEARTBEAT_LATE = {"p0_watch": timedelta(minutes=75),
+HEARTBEAT_LATE = {"p0_watch": timedelta(minutes=20),    # 3 runs missed
                   "fixer": timedelta(hours=26),
                   "reviewer": timedelta(hours=3)}
 REVIEWS_LATE = timedelta(hours=24)
@@ -97,6 +103,12 @@ BUDGET_STATUSES = ("budget",)
 # error is still a ticket, but nobody is waiting on it: 8 of 58 pages in 14 days
 # were the repair batch of 3-4 Nov, "stuck" with no customer there to get past it.
 OPERATOR_REPAIR = "COALESCE(j.payload->>'operator_repair', '') <> ''"
+# A request that ended unfulfilled: not a slice handing over, and not a question
+# waiting on the customer.
+ENDED_SHORT = """(j.type = 'agent_turn' AND j.state = 'done'
+           AND j.result->>'outcome' IN ('partial', 'blocked')
+           AND COALESCE(j.result->>'status', '') <> 'awaiting_user'
+           AND COALESCE(j.result->>'continued_job_id', '') = '')"""
 MCP_OURS = ("internal_error", "unclassified", "timeout", "upload_error",
             "executor_version_mismatch")
 MCP_OURS_OUTCOMES = ("transient_failure", "unavailable", "unsafe")
@@ -256,18 +268,15 @@ def scan(cur, since, now):
                     600) AS why, {OPERATOR_REPAIR} AS operator_repair
           FROM video_jobs j JOIN users u ON u.id = j.user_id
          WHERE j.updated_at > %(since)s AND j.updated_at <= %(now)s
-           AND j.type = 'agent_turn' AND j.state = 'done'
-           AND j.result->>'outcome' IN ('partial', 'blocked')
-           AND COALESCE(j.result->>'status', '') <> 'awaiting_user'
-           AND COALESCE(j.result->>'continued_job_id', '') = ''
-           AND {_customers()}
+           AND {ENDED_SHORT} AND {_customers()}
          ORDER BY j.updated_at LIMIT %(limit)s""", p)
     for r in cur.fetchall():
         # The turn's status says WHY it ended unfulfilled (first_cut,
         # budget, blocked, replied, ...). Without it every unfulfilled
         # request folded into one key, so a trial budget stop "recurred" the
         # fixed box range-read P0 #60 (ticket #69). A budget stop is the
-        # trial's own limit answering with the plans: filed, never paged.
+        # trial's own limit answering with the plans: filed, never paged. On a
+        # subscription it is not that: ops_loop.paid_out pages it.
         status = r.get("status") or ""
         out.append({
             "ref": f"request:{r['id']}", "source": "request", "at": r["at"],
@@ -293,8 +302,27 @@ def scan(cur, since, now):
             out.append(item)
     out.extend(_held_not_resumed(cur, since, now, p))
     out.extend(_stopped_uploads(cur, since, now, p))
+    from ops_loop import paid_out, refusals
+    for reader in (refusals.scan, paid_out.scan):
+        out.extend(_guarded(reader, cur, since, now, p))
     out.sort(key=lambda f: _aware(f["at"]))
     return out
+
+
+def _guarded(reader, cur, since, now, p):
+    """One reader that breaks never costs the intake its tick, and files itself
+    (gaps.scan does the same)."""
+    try:
+        return reader(cur, since, now, p)
+    except Exception as e:
+        name = f"{reader.__module__.rsplit('.', 1)[-1]}-{reader.__name__}"
+        print(f"⚠️ [ops_intake] {name}: {type(e).__name__}: {e}", flush=True)
+        return [{"ref": f"broken:{name}:{_aware(now):%Y%m%d%H}", "source": "gap",
+                 "at": _aware(now), "user_id": None, "project_id": None,
+                 "severity": "P1", "cause_key": cause_key("gap", "check-broken",
+                                                          name),
+                 "title": _short(f"A failure check is broken: {name}"),
+                 "detail": _short(f"{type(e).__name__}: {e}", 600)}]
 
 
 def _stopped_uploads(cur, since, now, p):
@@ -595,6 +623,28 @@ CLAIMED_AT = """COALESCE((SELECT max((h->>'at')::timestamptz) FROM
 RELEASED_AT = """(SELECT max((h->>'at')::timestamptz) FROM
                   jsonb_array_elements(history) h
                  WHERE h->>'event' = 'released')"""
+BACK_AT = f"""(SELECT min((h->>'at')::timestamptz) FROM
+                  jsonb_array_elements(history) h
+                 WHERE h->>'event' = 'failure'
+                   AND (h->>'at')::timestamptz > {RELEASED_AT})"""
+
+
+def _waiting_since(r):
+    """When an open P0 became the watch's to take: the moment pending_p0 turns
+    true, so the two can never disagree. A ticket a Fixer handed back is nobody's
+    until its quiet ends or a failure lands on it; counted from the release, one
+    that came out of its 6 h quiet was already "not handled" before the next
+    watch could reach it."""
+    opened = _aware(r["opened_at"] or r["created_at"])
+    released = _aware(r.get("released_at"))
+    if not released or opened > released:
+        return opened
+    back = _aware(r.get("back_at"))
+    last = _aware(r["last_seen"])
+    if not back and last > released:
+        back = last             # past FAILURE_REFS_KEPT: no entry, only the time
+    quiet_ends = released + RELEASE_QUIET
+    return min(back, quiet_ends) if back else quiet_ends
 
 
 def unhandled(cur, now=None, after=UNHANDLED_AFTER, stale=FIXING_STALE):
@@ -609,7 +659,7 @@ def unhandled(cur, now=None, after=UNHANDLED_AFTER, stale=FIXING_STALE):
         SELECT id, cause_key, title, severity, status, occurrences,
                recurrence_count, first_seen, last_seen, created_at,
                updated_at, {OPENED_AT} AS opened_at, {CLAIMED_AT} AS claimed_at,
-               {RELEASED_AT} AS released_at,
+               {RELEASED_AT} AS released_at, {BACK_AT} AS back_at,
                (SELECT count(DISTINCT h->>'user') FROM
                   jsonb_array_elements(history) h
                  WHERE h->>'event' = 'failure') AS users
@@ -619,12 +669,7 @@ def unhandled(cur, now=None, after=UNHANDLED_AFTER, stale=FIXING_STALE):
     out = []
     for r in cur.fetchall():
         fixing = r["status"] == "fixing"
-        since = _aware(r["claimed_at"] if fixing else
-                       (r["opened_at"] or r["created_at"]))
-        released = _aware(r.get("released_at"))
-        if not fixing and released and now - released < RELEASE_QUIET and \
-                _aware(r["last_seen"]) <= released:
-            continue
+        since = _aware(r["claimed_at"]) if fixing else _waiting_since(r)
         if since and now - since >= (stale if fixing else after):
             d = dict(r)
             d["opened_at"] = since
@@ -650,6 +695,20 @@ def pending_p0(cur, now=None, stale=FIXING_STALE):
                            OR (status = 'fixing' AND {CLAIMED_AT} < %s))
                     ORDER BY id""", (now - RELEASE_QUIET, now - stale))
     return [dict(r) for r in cur.fetchall()]
+
+
+def watch_beat(cur, now=None):
+    """Minutes since the P0 watch last ran, or None if it never beat. Tells the
+    owner why a P0 sits open: the watch is off, or all its Fixers are busy."""
+    now = _aware(now) or datetime.now(timezone.utc)
+    cur.execute("SELECT value FROM app_kv WHERE key = %s",
+                ("ops_heartbeat_p0_watch",))
+    row = cur.fetchone()
+    try:
+        at = _aware(json.loads(row["value"])["at"])
+    except (TypeError, ValueError, KeyError):
+        return None
+    return int((now - at).total_seconds() // 60)
 
 
 def silent_agents(cur, now=None):

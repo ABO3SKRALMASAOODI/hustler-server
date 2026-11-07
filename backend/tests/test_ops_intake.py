@@ -283,7 +283,16 @@ class ScanCur:
         return self.answers.pop(0)
 
 
-def test_scan_files_jobs_requests_and_replies_once():
+@pytest.fixture
+def no_storm_readers(monkeypatch):
+    """test_refusal_storms has them on real PostgreSQL: this cursor answers only
+    the statements these tests script."""
+    from ops_loop import paid_out, refusals
+    monkeypatch.setattr(refusals, "scan", lambda cur, since, now, p: [])
+    monkeypatch.setattr(paid_out, "scan", lambda cur, since, now, p: [])
+
+
+def test_scan_files_jobs_requests_and_replies_once(no_storm_readers):
     jobs = [{"id": 115549, "type": "index", "user_id": 2589,
              "project_id": 4911, "at": NOW, "tool": None,
              "error": "ffmpeg killed: wall-clock 3000s exceeded"}]
@@ -328,7 +337,7 @@ def test_a_question_to_the_user_is_not_filed_as_a_blocked_request():
     assert "awaiting_user', 'partial" not in req[0]
 
 
-def test_a_budget_stop_never_folds_into_another_blocked_cause():
+def test_a_budget_stop_never_folds_into_another_blocked_cause(no_storm_readers):
     # Ticket #69: request 126999 (31 Oct) ended blocked because the free
     # trial's budget held it (status budget). It was filed under the one key
     # every unfulfilled request shared, auto-request-blocked, and "recurred"
@@ -456,7 +465,7 @@ def test_the_cli_mirrors_p0s_into_the_marker(tmp_path, monkeypatch):
     assert not marker.exists()
 
 
-def test_the_days_failures_by_ticket_with_fixes_and_waiting_p0s():
+def test_the_days_failures_by_ticket_with_fixes_and_waiting_p0s(monkeypatch):
     from ops_loop import views
     start, end = NOW - timedelta(hours=16), NOW
 
@@ -497,6 +506,8 @@ def test_the_days_failures_by_ticket_with_fixes_and_waiting_p0s():
         def fetchone(self):          # the intake's watermark
             return {"value": json.dumps({"at": (NOW - timedelta(
                 minutes=1)).isoformat()})}
+    monkeypatch.setattr(intake, "unhandled", lambda cur, now: [
+        {"id": 3, "title": "index failed", "status": "open", "waiting_min": 120}])
     got = views.failures_between(C(), start, end, NOW)
     assert got["intake_stale"] is False
     assert got["total"] == 4 and got["customers"] == 3

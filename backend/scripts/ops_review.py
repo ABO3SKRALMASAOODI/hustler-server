@@ -39,6 +39,8 @@ never touches billing, credits, plans or Paddle.
     ops_review.py fetch    --key ops/evidence/<slug>/x.jpg --out /tmp/x.jpg
     ops_review.py reviews  [--days 7]
     ops_review.py p0       [--count] [--sync-marker]     # the P0 watch
+    ops_review.py live     --ticket N --sha S            # the fix is in production
+    ops_review.py clock    [--ticket N] [--days 7]       # time to claim and to live
     ops_review.py failures --ticket 7                    # auto-filed failures
     ops_review.py whoami
 
@@ -75,6 +77,8 @@ GAUNTLET_RUNS = ("/Users/masaoodi/Documents/Valmera/.valmera/week-1106/gauntlet/
 READ_ONLY = "-c default_transaction_read_only=on"
 KEY_RE = re.compile(r"^p(\d+)-(\d+)$")
 CONNECT_TRIES = 3
+HEALTH_URL = "https://entrepreneur-bot-backend.onrender.com/healthz"
+MAIN_REMOTE = "git@github.com:ABO3SKRALMASAOODI/hustler-server.git"
 
 
 class CliError(Exception):
@@ -725,6 +729,56 @@ def cmd_close(a):
     return 0
 
 
+def live_commit():
+    """The commit production says it runs."""
+    url = os.getenv("OPS_HEALTH_URL", HEALTH_URL)
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            commit = json.load(r).get("commit")
+    except (OSError, ValueError) as e:
+        raise CliError(f"could not read {url}: {e}") from None
+    if not commit:
+        raise CliError(f"{url} names no commit")
+    return commit
+
+
+def check_live(sha):
+    """A backend or worker sha must be inside what production reports, so the
+    number is measured and not a Fixer's word. A frontend sha is on Vercel, which
+    /healthz cannot see: it is recorded as said. Render serving a commit is what
+    this proves; a worker fix also needs the box check in FIXER.md."""
+    commit = None
+    for part in sha.split(","):
+        repo, _, one = part.strip().rpartition(":")
+        if repo == "fe" or not one:
+            continue
+        commit = commit or live_commit()
+        if _git("cat-file", "-e", f"{commit}^{{commit}}").returncode != 0:
+            _git("fetch", "-q", MAIN_REMOTE, "main")
+        if _git("merge-base", "--is-ancestor", one, commit).returncode != 0:
+            raise CliError(f"{one} is not in production yet: it runs {commit}")
+    return commit
+
+
+def cmd_live(a):
+    from ops_loop import store
+    commit = check_live(a.sha)
+    with Writer(a.dry_run) as w:
+        seen = store.mark_live(w, a.ticket, a.sha)
+    out({"ticket_id": a.ticket, "live_s": seen.get("live_s"), "production": commit,
+         "dry_run": bool(a.dry_run)})
+    return 0
+
+
+def cmd_clock(a):
+    from ops_loop import views
+    conn = connect()
+    got = views.clocks(conn.cursor(), days=a.days, ticket=a.ticket)
+    conn.close()
+    out(got)
+    return 0
+
+
 def _clear_p0(ticket_id):
     try:
         with open(P0_MARKER, encoding="utf-8") as fh:
@@ -957,6 +1011,17 @@ def parser():
     p.add_argument("--note")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_fixing)
+    p = sub.add_parser("live", help="record that a ticket's fix is in production")
+    p.add_argument("--ticket", type=int, required=True)
+    p.add_argument("--sha", required=True,
+                   help="the fix's commit(s); fe: for a frontend commit")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_live)
+    p = sub.add_parser("clock", help="time to claim and time to live, per ticket "
+                       "and over recent P0s")
+    p.add_argument("--ticket", type=int)
+    p.add_argument("--days", type=int, default=7)
+    p.set_defaults(fn=cmd_clock)
     p = sub.add_parser("reopen", help="reopen a closed ticket whose closing was wrong")
     p.add_argument("--ticket", type=int, required=True)
     p.add_argument("--note", required=True)

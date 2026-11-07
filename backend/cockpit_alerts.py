@@ -6,18 +6,21 @@ this module and nothing reads a customer's address as a destination: these
 emails are the product reporting to its owner, never mail to a customer.
 
 How it runs:
-  * a BackgroundScheduler tick every 5 minutes in each gunicorn worker; a
+  * a BackgroundScheduler tick every minute in each gunicorn worker; a
     PostgreSQL advisory lock makes exactly one of them scan;
   * each alert has a dedupe key claimed in app_kv (`cockpit_alert:<key>`)
     BEFORE it is sent, so restarts, overlapping workers and retries never
     send the same alert twice; a failed send releases its claims for the
     next tick;
   * alerts are only what needs the owner NOW (29 Oct 2026): a P0 ticket the
-    Fixer did not pick up within 30 minutes, or a model provider out of
-    credit; never payments, renewals, refunds or spend;
+    Fixer did not pick up within 10 minutes, a paying customer out of credits
+    with their request undone, or a model provider out of credit; never
+    payments, renewals, refunds or spend;
   * one tick sends at most ONE email that lists every new alert, and at most
     MAX_ALERT_EMAILS_PER_DAY a day, so alerts never eat the Brevo reserve
-    that sign-in codes and receipts share;
+    that sign-in codes and receipts share. Only an alert no agent can act on
+    goes past that limit (ALWAYS_SENT); the rest wait unclaimed for the next
+    day, so nothing is marked sent that was not;
   * the digest is claimed per Dubai day (`cockpit_digest:<date>`) and sent by
     the first tick at or after 08:00 +04:00 (04:00 UTC): cron-safe, a worker
     asleep at 08:00 sends it on its next tick, and it is never sent twice.
@@ -41,9 +44,11 @@ except ImportError:                                      # pragma: no cover
 ADMIN_TO = defs.ADMIN_EMAIL          # thevalmera@gmail.com, never a customer
 ADMIN_URL = "https://valmera.io/admin"
 TICK_LOCK_ID = 7_710_251_025
-TICK_MINUTES = 5
+TICK_MINUTES = 1
 MAX_ALERT_EMAILS_PER_DAY = int(os.getenv("COCKPIT_MAX_ALERT_EMAILS_PER_DAY",
                                          "24"))
+# Rare (2 in 30 days) and only the owner can act on it.
+ALWAYS_SENT = ("paid-out:",)
 DIGEST_HOUR_LOCAL = 8
 FIRST_LOOKBACK = timedelta(minutes=30)   # a fresh install never replays history
 INTERNAL = list(INTERNAL_IDS)
@@ -100,8 +105,10 @@ def _put(wcur, key, value):
 # filed as a ticket within a minute (ops_loop.intake) and the Fixer starts on
 # P0s from the Mac; the owner is emailed only when that did not happen, or
 # when only the owner can unblock customers (a provider out of credit).
-# Payments, renewals, refunds, infrastructure spend and trial budgets are
-# never alerts (spend is in the digest; billing advice is nowhere).
+# A paying customer whose credits ran out with their request undone is the third:
+# no agent may touch credits, so it is said at once, as facts. Payments, renewals,
+# refunds, infrastructure spend and trial budgets are never alerts (spend is in
+# the digest; billing advice is nowhere).
 
 def _customer_sql(alias="u"):
     return (f"{defs.customer(alias)} AND NOT ({alias}.id = ANY(%(internal)s))")
@@ -112,9 +119,14 @@ def event_alerts(rcur, since, now):
     out = []
     try:
         from ops_loop import intake
+        late = intake.HEARTBEAT_LATE["p0_watch"].total_seconds() // 60
+        beat = intake.watch_beat(rcur, now)
         for t in intake.unhandled(rcur, now):
             state = (f"claimed {t['waiting_min']} min ago and no fix landed "
                      f"(the run may have died)" if t["status"] == "fixing" else
+                     f"open {t['waiting_min']} min and nobody took it: the P0 "
+                     f"watch ran {beat} min ago, so its Fixers are all busy or "
+                     f"failed to start" if beat is not None and beat < late else
                      f"open {t['waiting_min']} min and the Fixer has not "
                      f"started (the Mac may be asleep or the P0 watch off)")
             out.append((f"unhandled:{t['id']}:"
@@ -139,6 +151,17 @@ def event_alerts(rcur, since, now):
                            "scheduled task off.")))
     except Exception as e:
         print(f"⚠️ [cockpit] unhandled-P0 check failed: "
+              f"{type(e).__name__}: {e}", flush=True)
+    try:
+        from ops_loop import paid_out
+        for job_id, line in paid_out.alerts(rcur, now):
+            out.append((f"paid-out:{job_id}",
+                        "A subscriber ran out of credits with their request "
+                        "undone",
+                        f"{_e(line)} · <a href=\"{ADMIN_URL}?tab=tickets\" "
+                        f"style=\"color:#f87171\">tickets</a>"))
+    except Exception as e:
+        print(f"⚠️ [cockpit] paid-out check failed: "
               f"{type(e).__name__}: {e}", flush=True)
     # Only the owner can pay a provider: say so once a day while it lasts.
     p = {"since": since, "internal": INTERNAL}
@@ -461,12 +484,13 @@ def run_tick(now=None, send=_send, rconn=None, wconn=None):
                          if isinstance(mark, dict) and mark.get("at")
                          else now - FIRST_LOOKBACK)
                 items = event_alerts(r, since - timedelta(minutes=2), now)
-                claimed = [i for i in items
-                           if claim(w, "cockpit_alert:" + i[0][:180])]
-                out["alerts"] = len(claimed)
                 count = _kv(r, _count_key(now)) or {"n": 0}
-                if claimed and int(count.get("n", 0)) < \
-                        MAX_ALERT_EMAILS_PER_DAY:
+                room = int(count.get("n", 0)) < MAX_ALERT_EMAILS_PER_DAY
+                claimed = [i for i in items
+                           if (room or i[0].startswith(ALWAYS_SENT))
+                           and claim(w, "cockpit_alert:" + i[0][:180])]
+                out["alerts"] = len(claimed)
+                if claimed:
                     subject, body = alert_email(claimed)
                     if send(subject, body):
                         out["sent"] = True
@@ -529,7 +553,7 @@ _lock = threading.Lock()
 
 
 def start_scheduler(app):
-    """Every 5 minutes in each worker; the advisory lock picks one."""
+    """Every minute in each worker; the advisory lock picks one."""
     global _scheduler
     url = str(app.config.get("DATABASE_URL") or "")
     if not enabled() or not url or "stub" in url or \
