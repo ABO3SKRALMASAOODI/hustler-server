@@ -87,6 +87,13 @@ camera move with it, and none is added to "support" it. Flashing is held to
   source="<media key>", start=<cut>, end=<cut+0.6>, hold_subject=true,
   hold_t=<cut - 1 frame>)`; three plates in rhythm: `kind="strobe",
   sources=[…], style={"hold_f": 4}`.
+- **The room made dark, one part of it kept** (everything behind the person but the floor, say): one
+  `add_subject_effect(kind="exposure", scope="background", style={"ev": -7, "saturation": 0},
+  region={"shape": "rect", "box": [x0, y0, x1, y1]})`, the box over what changes and stopping at
+  the line of what stays. `ev` is in stops, so brightness falls slowly: -3.5 leaves a white wall
+  mid-grey at a third of its brightness, -7 takes it to about a tenth, the dark of a black curtain.
+  Judge how dark it is from the frames and move `ev` on the same effect. Rectangles stacked over
+  the bright parts leave hard edges, so keep it to the one effect.
 - **Clean defocus**: `set_background(kind="blur", start=…, end=…,
   style={"radius": 0.025})` — the subject never bleeds into the blur.
 
