@@ -2269,7 +2269,18 @@ def run_agent_job(worker_db, job):
         import request_contract as semantic_request
         prior_chat = worker_db.run(dbx.recent_chat, ctx.session_id, 24, user_message["id"])
         ctx.request_contract_history = semantic_request.history(prior_chat, user_message["id"])
-        ctx.request_edit_origin = semantic_request.edit_origin(prior_chat, user_message["id"])
+        later_cut = None
+        try:
+            later_cut = worker_db.run(dbx.first_cut_after, ctx.session_id,
+                                      user_message["id"])
+        except dbx.JobLeaseLost:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the turn runs as before
+            print(f"[agent] first-cut lookup skipped: {str(exc)[:160]}",
+                  flush=True)
+        ctx.request_edit_origin = semantic_request.edit_origin(
+            prior_chat, user_message["id"], later_first_cut=later_cut)
+        attachment_note += _before_first_cut_note(ctx)
         semantic_request.ensure(ctx)
         if (job.get("payload") or {}).get("death_resume"):
             # Round 97 (#1): this job is the reaper's resume of a turn the
@@ -2928,6 +2939,34 @@ def _cut_ask_not_answered(prep, user_message):
     except Exception:  # noqa: BLE001
         return False
     return bool(set(keys) & _CUT_ASKS)
+
+
+def _before_first_cut_note(ctx):
+    """#861: user 2869 asked for "the video quality to 2k ... sound should be
+    the same" while their 2 h 39 min upload was indexing. The product then made
+    its automatic first cut (3.8 s, vertical) and the request ran on THAT, so
+    the customer got a sharpened 4-second clip. The editor only saw an EDL. A
+    stored fact, stated once: which video the words were written about."""
+    origin = getattr(ctx, "request_edit_origin", None) or {}
+    if not origin.get("request_written_before_first_cut"):
+        return ""
+    try:
+        edl = ctx.latest_edl()["json"]
+        kept = round(sum(float(b) - float(a) for a, b in edl.get("keep") or []), 1)
+        ratio = (edl.get("frame") or {}).get("ratio") or "source"
+    except Exception:  # noqa: BLE001
+        kept, ratio = None, "?"
+    upload = getattr(ctx, "duration", None)
+    size = (f" ({kept}s kept of their {round(float(upload), 1)}s upload, "
+            f"frame {ratio})" if kept is not None and upload else "")
+    return ("\n[system: the customer sent this request BEFORE the product made "
+            "its automatic first cut. The current edit is that first cut"
+            + size + "; the customer never asked for it and wrote their "
+            "words about the video they uploaded. Apply the request to the "
+            "upload as they meant it: if the first cut's trim or reframe is "
+            "not part of what they asked, start from their full video "
+            "(reset_edit) and then make the change. Say in your reply which "
+            "video you edited.]")
 
 
 def _trial_head_start(ctx, worker_db, session_id, user_message):

@@ -866,6 +866,48 @@ def frame_dims(src_w, src_h, ratio, *, delivery=False):
     return _even(long_out), _even(short_out)
 
 
+# (short, long) box of each export class: 2K is QHD 2560x1440, 4K is UHD.
+DELIVERY_BOX = {"2k": (1440, 2560), "4k": (2160, 3840)}
+
+
+def delivery_resolution_dims(W, H, resolution):
+    """(W, H) of a final export at ``resolution`` ("2k" / "4k"): the HD master
+    scaled up, aspect kept, until it fills that class's box (a 9:16 master
+    becomes 1440x2560, a 2.35:1 one 2560x1088), both edges even. (W, H)
+    unchanged when the class is unknown or the master already fills it."""
+    box = DELIVERY_BOX.get(str(resolution or "").lower())
+    if not box or not W or not H:
+        return int(W), int(H)
+    k = min(box[0] / float(min(W, H)), box[1] / float(max(W, H)))
+    if k <= 1.0:
+        return int(W), int(H)
+    return _even(W * k), _even(H * k)
+
+
+def delivery_upscale(edl, out_path, workdir, cancelled_cb=None):
+    """A final whose frame asks for "2k" / "4k" is re-encoded at that size
+    (lanczos, the sound copied untouched). Returns (W, H) written, or None
+    when nothing was asked or the file is already that large (#861)."""
+    resolution = ((edl or {}).get("frame") or {}).get("resolution")
+    if not resolution:
+        return None
+    info = media.probe(out_path)
+    W, H = int(info["width"]), int(info["height"])
+    W2, H2 = delivery_resolution_dims(W, H, resolution)
+    if (W2, H2) == (W, H):
+        return None
+    fps = max(1.0, min(float(info.get("fps") or 30.0), 60.0))
+    tmp = os.path.join(workdir, f"upscale_{uuid.uuid4().hex[:8]}.mp4")
+    media.run(["ffmpeg", "-y", "-v", "error", "-i", out_path,
+               "-map", "0:v:0", "-map", "0:a?",
+               "-vf", f"scale={W2}:{H2}:flags=lanczos,setsar=1",
+               *final_video_encode(W2, H2, fps), "-pix_fmt", "yuv420p",
+               "-c:a", "copy", "-movflags", "+faststart", tmp],
+              cancelled_cb=cancelled_cb)
+    os.replace(tmp, out_path)
+    return W2, H2
+
+
 def delivery_canvas_current(asset, variant):
     """Keep HD/history caches, but never reuse a pre-fix tiny final picture."""
     if variant != "final":
@@ -10178,6 +10220,13 @@ def _run_render_job(worker_db, job):
                                  asset_locals=asset_locals)
             _verify_render(edl_row["json"], out_local, out_dur, job_id,
                            variant, src_path=src_local, src_dur=src_dur)
+        if variant == "final" and not proof_only:
+            # #861: "enhance the video quality to 2k" exports a 2K file
+            upscaled = delivery_upscale(edl_row["json"], out_local, workdir,
+                                        cancelled_cb=lambda: _abandoned[0])
+            if upscaled:
+                print(f"[render {job_id}] delivered at "
+                      f"{upscaled[0]}x{upscaled[1]}", flush=True)
         _mark("verify_s")
         # The delivered sound holds the true-peak ceiling (true_peak): the
         # master's limiter holds on the lossless mix, the AAC encode can
