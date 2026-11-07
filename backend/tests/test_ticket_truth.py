@@ -840,8 +840,40 @@ def test_every_p0_has_a_state_for_the_owner_read_from_the_table(world):
         "cause_key": "auto-x", "project_id": 5600, "severity": "P0",
         "title": "x", "detail": "d"})
     got = intake.p0_states(world.c, world.clock.now + intake.UNHANDLED_AFTER)
-    assert got[0]["state"] == "NOT HANDLED"
+    # A fix shipped, a customer failed after it, nobody holds it (7 Nov).
+    assert got[0]["state"] == "STILL STUCK"
     assert got[0]["failed_after_fix_at"] == world.clock.now
+
+
+def test_a_release_flagged_waiting_on_customer_is_its_own_state(world):
+    """#883 (7 Nov): a Fixer handed back an upload the customer left mid-way
+    and the owner read STILL STUCK. The release CLI's explicit field, never
+    the note's words, makes it WAITING ON CUSTOMER; without it, NOT HANDLED."""
+    tid = p0(world)
+    world.clock.now += 9 * MIN
+    store.set_fixing(world.conn.cursor(), tid, "on it")
+    world.clock.now += 4 * MIN
+    t = world.only_ticket()
+    with pytest.raises(store.StoreError):
+        store.release_fixing(world.conn.cursor(), tid,
+                             t["updated_at"].isoformat(), "left",
+                             waiting_on_customer="  ")
+    store.release_fixing(world.conn.cursor(), tid, t["updated_at"].isoformat(),
+                         "customer left mid-upload at part 43 of 200",
+                         waiting_on_customer="resumes from part 44 on re-pick")
+    t = world.only_ticket()
+    assert t["history"][-1]["waiting_on_customer"] == \
+        "resumes from part 44 on re-pick"
+    got = intake.p0_states(world.c, world.clock.now)
+    assert got[0]["state"] == "WAITING ON CUSTOMER"
+    assert got[0]["waiting_on_customer"] == "resumes from part 44 on re-pick"
+    world.clock.now += MIN
+    store.set_fixing(world.conn.cursor(), tid, "again")
+    t = world.only_ticket()
+    store.release_fixing(world.conn.cursor(), tid, t["updated_at"].isoformat(),
+                         "nothing more until they return")
+    got = intake.p0_states(world.c, world.clock.now)
+    assert got[0]["state"] == "NOT HANDLED" and got[0]["handed_back"]
 
 
 def test_the_alert_gives_the_5_minute_watch_its_turn_and_no_more(world):
@@ -1089,5 +1121,6 @@ def test_the_owner_hears_when_an_agent_stops_and_when_a_claim_goes_stale(monkeyp
     assert "the run has probably died" in text and "P0 #77" in text
     assert "3 customers" in text
     assert "p0_watch" in text and "2 h 5 min" in text
-    assert got[0][1].startswith("NOT HANDLED, act now: P0 #77 ")
+    assert got[0][1].startswith("NOT HANDLED, needs you (wake the Mac): "
+                                "P0 #77 ")
     assert [s for _k, s, _l in got][1:] == ["An automatic agent stopped"]

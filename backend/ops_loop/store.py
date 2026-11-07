@@ -980,13 +980,23 @@ def unmute(cur, ticket_id, note):
     return dict(cur.fetchone())
 
 
-def release_fixing(cur, ticket_id, expected_updated_at, note, severity=None):
+def release_fixing(cur, ticket_id, expected_updated_at, note, severity=None,
+                   waiting_on_customer=None):
     """Return an unfinished claim with evidence, without hiding new intake.
 
     The caller must have reviewed this exact ticket revision. A failure filed
     since that review must be inspected before its urgency can be changed.
+
+    `waiting_on_customer` is the Fixer's explicit statement that our side is
+    ready and only the customer's return can move it, saying how the product
+    resumes or tells them (FIXER.md). The owner's email reads this field, never
+    the note's words: with it the P0 is WAITING ON CUSTOMER; without it, a
+    hand-back with no fix live is NOT HANDLED (owner, 7 Nov 2026, #883).
     """
     note = _clean(note, 2000, "note", required=True)
+    if waiting_on_customer is not None:
+        waiting_on_customer = _clean(waiting_on_customer, 500,
+                                     "waiting_on_customer", required=True)
     if severity is not None and severity not in SEVERITIES:
         raise StoreError(f"severity must be one of {', '.join(SEVERITIES)}")
     try:
@@ -1014,7 +1024,8 @@ def release_fixing(cur, ticket_id, expected_updated_at, note, severity=None):
                    history = history || %s, updated_at = NOW()
                WHERE id = %s RETURNING *""",
        (severity, _history("released", note=note,
-                           previous_severity=ticket["severity"], severity=severity),
+                           previous_severity=ticket["severity"], severity=severity,
+                           waiting_on_customer=waiting_on_customer),
         int(ticket_id)))
     return dict(cur.fetchone())
 

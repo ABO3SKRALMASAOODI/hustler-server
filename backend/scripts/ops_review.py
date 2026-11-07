@@ -536,8 +536,12 @@ def cmd_heartbeat(a):
     thing still running when these stop."""
     from ops_loop import store
     with Writer(a.dry_run) as w:
-        store.put_state(w, f"ops_heartbeat_{a.agent}",
-                        {"at": _now().isoformat(timespec="seconds")})
+        beat = {"at": _now().isoformat(timespec="seconds")}
+        if a.fixers_running is not None:
+            beat["fixers_running"] = a.fixers_running
+        if a.fixers_max is not None:
+            beat["fixers_max"] = a.fixers_max
+        store.put_state(w, f"ops_heartbeat_{a.agent}", beat)
     out({"agent": a.agent, "dry_run": bool(a.dry_run)})
     return 0
 
@@ -624,8 +628,9 @@ def cmd_gaps(a):
 def cmd_release(a):
     from ops_loop import store
     with Writer(a.dry_run) as w:
-        ticket = store.release_fixing(w, a.ticket, a.expected_updated_at,
-                                     a.note, severity=a.severity)
+        ticket = store.release_fixing(
+            w, a.ticket, a.expected_updated_at, a.note, severity=a.severity,
+            waiting_on_customer=a.waiting_on_customer)
     if not a.dry_run:
         if ticket["severity"] == "P0":
             _mark_p0(ticket)
@@ -1054,6 +1059,11 @@ def parser():
                    help="updated_at from the reviewed ticket; rejects newer intake")
     p.add_argument("--note", required=True)
     p.add_argument("--severity", choices=("P0", "P1", "P2"))
+    p.add_argument("--waiting-on-customer", metavar="HOW",
+                   help="our side is ready and only the customer's return can "
+                        "move it; HOW is how the product resumes or tells them "
+                        "(FIXER.md). Without it a P0 handed back with no fix "
+                        "live is mailed to the owner as NOT HANDLED")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_release)
     p = sub.add_parser("close", help="close a ticket: fixed with a replay on a "
@@ -1078,6 +1088,11 @@ def parser():
     p = sub.add_parser("heartbeat", help="record that a scheduled agent ran")
     p.add_argument("--agent", required=True,
                    choices=("p0_watch", "fixer", "reviewer"))
+    p.add_argument("--fixers-running", type=int,
+                   help="p0_watch: Fixers it found running (the owner's P0 "
+                        "email says when all are busy)")
+    p.add_argument("--fixers-max", type=int,
+                   help="p0_watch: the most Fixers it runs at once")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_heartbeat)
     p = sub.add_parser("gaps", help="replay intake and gap checks over a window")

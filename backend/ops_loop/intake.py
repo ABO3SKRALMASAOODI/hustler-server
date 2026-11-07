@@ -49,8 +49,8 @@ Mac's P0 watch (check_fixer.sh p0, every 5 minutes, up to 3 Fixers at once)
 starts a Fixer; got past it, the ticket stays open for the daily Fixer and nobody
 is paged. Every P0 is
 emailed to the owner with where it stands (p0_state: NOT HANDLED, BEING FIXED,
-FIX LIVE, STILL STUCK), as is a scheduled agent that stopped running
-(cockpit_alerts).
+FIX LIVE, WAITING ON CUSTOMER, STILL STUCK; at most two emails an episode), as
+is a scheduled agent that stopped running (cockpit_alerts).
 
 Writes go through ops_loop.store (tickets only, guarded); reads are bounded
 by time and use the existing (updated_at|created_at, ...) indexes.
@@ -739,15 +739,31 @@ def pending_p0(cur, now=None, stale=FIXING_STALE):
 # ── Where each P0 stands, for the owner's email (owner, 7 Nov 2026) ───────
 # "i should still receive the mail so i dont miss something and i become blind
 # but its a good idea to indicate whether it was handled correctly or not so i
-# know whether i should freak out or no". Every P0 episode is mailed once its
-# state is known (claimed, or UNHANDLED_AFTER from its opening), then again only
-# when it turns to one of MAILED_CHANGES (cockpit_alerts).
-NOT_HANDLED = "NOT HANDLED"     # nobody on it: the one to act on
+# know whether i should freak out or no". Then, the same day, about #883: "try
+# not to make it annoying. I just received 9 minutes ago being fixed, and then
+# 4 minutes later I received still stuck. So how it is being fixed and still
+# stuck?" #883's Fixer handed it back because the customer had left mid-upload,
+# and the hand-back read as STILL STUCK although no fix had shipped. And: "it is
+# stupid that I need to act ... what I'm gonna do is I'm gonna come to you and
+# tell you". So each state says what the SYSTEM is doing; the email asks the
+# owner for nothing unless only the owner can fix the cause (cockpit_alerts).
+NOT_HANDLED = "NOT HANDLED"     # nobody on it, or handed back with no fix while
+#                                 our side could still help: the email says why
 BEING_FIXED = "BEING FIXED"     # a Fixer holds the claim
-FIX_LIVE = "FIX LIVE"           # a fix is live and nobody failed since
-STILL_STUCK = "STILL STUCK"     # failed after the fix, or handed back unfixed
-MAILED_CHANGES = (FIX_LIVE, STILL_STUCK, NOT_HANDLED)
+FIX_LIVE = "FIX LIVE"           # the fix is live and nobody failed since
+WAITING_ON_CUSTOMER = "WAITING ON CUSTOMER"  # our side is ready; only the
+#                                 customer's return moves it (release flag)
+STILL_STUCK = "STILL STUCK"     # a fix shipped, a customer failed after it and
+#                                 nobody holds it: the watch takes it again
+# At most P0_MAILS_PER_EPISODE emails per episode: its first state that held
+# P0_MAIL_HOLD (NOT HANDLED and STILL STUCK at once), then its outcome (never
+# BEING FIXED). A state that changes within the hold replaces the pending one.
+HELD = (BEING_FIXED, FIX_LIVE, WAITING_ON_CUSTOMER)
+P0_MAIL_HOLD = timedelta(minutes=10)
+P0_MAILS_PER_EPISODE = 2
 P0_MAIL_WINDOW = timedelta(days=3)  # a state change always touches the ticket
+RELEASE_QUIET = timedelta(hours=6)  # a P0 handed back waits this long for the
+#                                     watch, unless a customer fails on it
 
 
 def _hist_at(h):
@@ -761,7 +777,8 @@ def _hist_at(h):
 def _episode(history, now):
     """The latest episode of a ticket as of `now`, read from its history in the
     order it was written: when it opened and became P0, the Fixers' claims,
-    hand-backs and fixes put live, and the customers' failures."""
+    hand-backs (with the waiting_on_customer field the release CLI writes) and
+    fixes put live, and the customers' failures."""
     ep = None
     for h in history or []:
         if not isinstance(h, dict):
@@ -783,7 +800,7 @@ def _episode(history, now):
         elif ev == "fixing":
             ep["claims"].append(at)
         elif ev == "released":
-            ep["releases"].append(at)
+            ep["releases"].append((at, h.get("waiting_on_customer") or None))
         elif ev == "live":
             ep["lives"].append((at, str(h.get("sha") or "")))
         elif ev == "fixed":
@@ -797,22 +814,31 @@ def _episode(history, now):
     return ep
 
 
+def _stamp(at):
+    return f"{at:%Y%m%dT%H%M%S}"
+
+
 def p0_state(t, now, after=UNHANDLED_AFTER, stale=FIXING_STALE):
     """Where the latest episode of P0 ticket `t` (a tickets row with its
-    history) stands at `now`, in the owner's four words, or state None while
-    it is not known yet: opened under `after` ago and unclaimed, or a customer
-    failed after the fix under `after` ago and no Fixer answered yet.
+    history) stands at `now`, or state None while it is not known yet: opened
+    under `after` ago and unclaimed, or a customer failed again under `after`
+    ago and no Fixer answered yet (the watch's turn).
 
-      NOT HANDLED  a customer is stuck and no Fixer claimed, shipped or handed
-                   it back since, `after` on (the rule of unhandled()); or a
-                   claim older than `stale` that a customer failed after
-      FIX LIVE     the latest fix is live and no customer failed after it
-      STILL STUCK  a customer failed after the fix went live, or a Fixer
-                   handed it back with no fix live: customers still wait
-      BEING FIXED  a Fixer holds the claim and nothing is live yet
+      NOT HANDLED          nobody claimed it `after` on from a customer's
+                           failure; a Fixer handed it back with no fix live
+                           and without --waiting-on-customer; or a claim older
+                           than `stale` that a customer failed after
+      BEING FIXED          a Fixer holds the claim (also after a failure on
+                           a live fix: it was picked up again)
+      FIX LIVE             the latest fix is live and no customer failed after
+      WAITING ON CUSTOMER  handed back with --waiting-on-customer and no
+                           customer failed since: only their return moves it
+      STILL STUCK          a fix is live, a customer failed after it, and
+                           nobody holds it: the watch takes it again
 
     `variant` tells one occurrence of a state from the next (the sha, the
-    failure that started the wait), so the email is deduplicated per change."""
+    claim, the hand-back), so the email is deduplicated per change; `since`
+    is when the state began, for the hold."""
     now = _aware(now)
     ep = _episode(t.get("history"), now)
     if not ep or t.get("status") not in ("open", "fixing", "fixed"):
@@ -831,43 +857,64 @@ def p0_state(t, now, after=UNHANDLED_AFTER, stale=FIXING_STALE):
         return None
 
     claims, releases = ep["claims"], ep["releases"]
+    released_at, waiting = releases[-1] if releases else (None, None)
     live_at, sha = ep["lives"][-1] if ep["lives"] else (None, None)
-    handled = max(claims + releases + [x for x, _ in ep["lives"]],
-                  default=None)
+    handled = max(claims + [r for r, _ in releases]
+                  + [x for x, _ in ep["lives"]], default=None)
+    # The first failure nobody answered: since the opening, or since a Fixer
+    # last claimed, shipped or handed it back.
     stuck = (p0_at if handled is None else first_failure_after(handled)) \
         if status != "fixed" else None
     after_fix = first_failure_after(live_at) if live_at else None
+    reclaimed = max((c for c in claims if after_fix and c > after_fix),
+                    default=None)
     users = {f[1] for f in ep["failures"] if f[1] is not None}
     users_after = {f[1] for f in ep["failures"]
                    if f[1] is not None and live_at and f[0] > live_at}
     details = [f[2] for f in ep["failures"] if f[2]]
-    state = variant = None
-    if stuck and status == "open" and now - stuck >= after:
-        state, variant = NOT_HANDLED, f"{stuck:%Y%m%dT%H%M%S}"
-    elif stuck and status == "fixing" and claims and \
-            now - claims[-1] >= stale:
-        state, variant = NOT_HANDLED, f"stale{claims[-1]:%Y%m%dT%H%M%S}"
+    state = variant = since = None
+    if stuck and status == "fixing" and claims and now - claims[-1] >= stale:
+        state, variant, since = (NOT_HANDLED, "stale" + _stamp(claims[-1]),
+                                 claims[-1] + stale)
     elif live_at and not after_fix:
-        state, variant = FIX_LIVE, sha[:12]
-    elif live_at:
-        answered = any(x > after_fix for x in claims + releases)
-        if answered or now - after_fix >= after:
-            state, variant = STILL_STUCK, sha[:12]
+        state, variant, since = FIX_LIVE, sha[:12], live_at
+    elif live_at and status == "fixing":
+        at = reclaimed or claims[-1] if claims else live_at
+        state, variant, since = BEING_FIXED, _stamp(at), at
+    elif live_at and status == "open":
+        if stuck is None and waiting:
+            state, variant, since = (WAITING_ON_CUSTOMER, _stamp(released_at),
+                                     released_at)
+        elif stuck is None or now - stuck >= after:
+            state, variant, since = STILL_STUCK, sha[:12], (
+                released_at if stuck is None else stuck + after)
     elif status == "fixing":
-        state, variant = BEING_FIXED, (f"{claims[-1]:%Y%m%dT%H%M%S}"
-                                       if claims else "claimed")
-    elif claims:
-        state, variant = STILL_STUCK, "no-fix"
+        at = claims[-1] if claims else p0_at
+        state, variant, since = (BEING_FIXED,
+                                 _stamp(at) if claims else "claimed", at)
+    elif status == "open" and stuck is None and releases:
+        if waiting:
+            state, variant, since = (WAITING_ON_CUSTOMER, _stamp(released_at),
+                                     released_at)
+        else:
+            state, variant, since = (NOT_HANDLED, "released"
+                                     + _stamp(released_at), released_at)
+    elif status == "open" and stuck and now - stuck >= after:
+        state, variant, since = NOT_HANDLED, _stamp(stuck), stuck + after
     last_fail = max(fails + ([last_seen] if last_seen and last_seen > p0_at
                              and last_seen <= now else []), default=None)
     return {
         "id": t["id"], "title": t.get("title") or "", "status": status,
-        "state": state, "variant": variant, "p0_at": p0_at,
+        "state": state, "variant": variant, "since": since, "p0_at": p0_at,
         "claimed_at": claims[0] if claims else None,
         "last_claim_at": claims[-1] if claims else None,
-        "reclaimed_at": max((c for c in claims if after_fix and c > after_fix),
-                            default=None),
-        "released_at": releases[-1] if releases else None,
+        "reclaimed_at": reclaimed,
+        "released_at": released_at,
+        "waiting_on_customer": waiting if state == WAITING_ON_CUSTOMER else None,
+        "handed_back": state in (NOT_HANDLED, STILL_STUCK) and stuck is None
+        and status == "open" and bool(releases),
+        "quiet_until": (released_at + RELEASE_QUIET
+                        if released_at and stuck is None else None),
         "live_sha": sha, "live_at": live_at, "closed_at": ep["closed_at"],
         "replay_owed": bool(live_at) and status != "fixed",
         "failed_after_fix_at": after_fix,
@@ -876,6 +923,7 @@ def p0_state(t, now, after=UNHANDLED_AFTER, stale=FIXING_STALE):
         "stuck_now": bool(not live_at or after_fix),
         "stuck_since": stuck, "last_failure_at": last_fail,
         "what": details[-1] if details else None,
+        "details": details,
         "stale_claim": state == NOT_HANDLED and status == "fixing",
     }
 
@@ -902,18 +950,30 @@ def p0_states(cur, now=None):
     return out
 
 
-def watch_beat(cur, now=None):
-    """Minutes since the P0 watch last ran, or None if it never beat. Tells the
-    owner why a P0 sits open: the watch is off, or all its Fixers are busy."""
+def watch_report(cur, now=None):
+    """What the P0 watch last said, from its heartbeat: 'beat', minutes since
+    it ran (None if it never beat), and 'running' of 'top', the Fixers it found
+    running and the most it runs at once (None from a watch that did not say).
+    Tells the owner why a P0 sits open: the watch stopped (the Mac asleep or
+    offline, or the weekly usage limit), or all its Fixers are busy."""
     now = _aware(now) or datetime.now(timezone.utc)
     cur.execute("SELECT value FROM app_kv WHERE key = %s",
                 ("ops_heartbeat_p0_watch",))
     row = cur.fetchone()
+    out = {"beat": None, "running": None, "top": None}
     try:
-        at = _aware(json.loads(row["value"])["at"])
-    except (TypeError, ValueError, KeyError):
-        return None
-    return int((now - at).total_seconds() // 60)
+        v = json.loads(row["value"])
+        at = _aware(v["at"])
+        out["beat"] = int((now - at).total_seconds() // 60)
+        out["running"], out["top"] = v.get("fixers_running"), v.get("fixers_max")
+    except (TypeError, ValueError, KeyError, AttributeError):
+        pass
+    return out
+
+
+def watch_beat(cur, now=None):
+    """Minutes since the P0 watch last ran, or None if it never beat."""
+    return watch_report(cur, now)["beat"]
 
 
 def silent_agents(cur, now=None):

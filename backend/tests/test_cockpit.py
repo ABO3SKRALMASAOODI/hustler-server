@@ -489,8 +489,10 @@ def test_alerts_are_only_a_blocked_customer_nobody_handled():
     # Ticket 8 is 5 minutes old: the Fixer still has time; 7 waited 45.
     assert keys == [f"p0:7:{opened:%Y%m%dT%H%M%S}:not-handled:"
                     f"{opened:%Y%m%dT%H%M%S}"]
-    assert items[0][1].startswith("NOT HANDLED, act now: P0 #7 index failed")
-    assert "the Mac may be asleep" in items[0][2]
+    # No heartbeat from the P0 watch: only the owner can wake the Mac.
+    assert items[0][1].startswith("NOT HANDLED, needs you (wake the Mac): "
+                                  "P0 #7 index failed")
+    assert "the Mac is asleep or offline" in items[0][2]
     assert "ticket=7" in items[0][2]
     # Only the owner can pay a provider: one alert a day while it lasts.
     cur = AlertCur(quota={"n": 3, "users": 2, "error": "insufficient_quota"})
