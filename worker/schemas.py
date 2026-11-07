@@ -967,6 +967,13 @@ class Frame(BaseModel):
     # Crop/fit and source focus apply INSIDE it; the exterior stays black.
     # This preserves the source/transcript clock for portrait editorial layouts.
     picture: Optional[List[float]] = None
+    # resolution (#861, 7 Nov 2026): the final export's size class. None keeps
+    # the HD delivery canvas (renderer.frame_dims) and every stored signature;
+    # "2k" / "4k" export with the short edge at 1440 / 2160 px, upscaled from
+    # the HD master with lanczos (renderer.delivery_upscale). Previews ignore
+    # it. A customer asked "enhance the video quality to 2k" and the product
+    # had no way to write a 2K file, so the editor guessed at the canvas.
+    resolution: Optional[Literal["2k", "4k"]] = None
 
     @field_validator("picture")
     @classmethod

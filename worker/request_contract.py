@@ -113,6 +113,8 @@ its scene order, cut, format or length as they made it, are a promise about the
 upload, not a lock on the first cut: use relative_to=source_footage, set
 timing_policy=edit and list cuts and frame_ratio in changed_lanes so the edit can
 go back to the upload. Only words pointing at the first cut's own result protect it.
+request_written_before_first_cut means the customer sent this request before the
+first cut existed: every word is about their upload, none about the first cut.
 protecting original subtitles also prevents duplicating them with new captions.
 When an authorized change affects part of a lane, do not freeze that whole lane.
 List in changed_lanes what the changes must write. Those lanes are not frozen,
@@ -160,7 +162,7 @@ def history(rows, before_id):
             and row["role"] in {"user", "assistant"}][-12:]
 
 
-def edit_origin(rows, before_id):
+def edit_origin(rows, before_id, later_first_cut=None):
     """{'made_by', 'customer_requests_since'} when the edit began as the
     automatic first cut, else None. A stored fact, for the model to read: the
     brief only ever saw an EDL, so "leave the cut and format as they are" froze
@@ -170,6 +172,13 @@ def edit_origin(rows, before_id):
     cuts = [row["id"] for row in rows if row["role"] == "assistant"
             and (row.get("meta") or {}).get("kind") == "first_cut"]
     if not cuts:
+        if later_first_cut:
+            # #861: the request was sent while the upload was indexing; the
+            # product made its first cut after it, so the words are about the
+            # upload and the customer has not even seen that cut.
+            return {"made_by": "automatic_first_cut",
+                    "customer_requests_since": 0,
+                    "request_written_before_first_cut": True}
         return None
     return {"made_by": "automatic_first_cut",
             "customer_requests_since": sum(

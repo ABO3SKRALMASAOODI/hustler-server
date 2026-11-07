@@ -3782,6 +3782,24 @@ def recent_chat(conn, session_id, limit=24, before_id=None):
         return list(reversed(cur.fetchall()))
 
 
+def first_cut_after(conn, session_id, message_id):
+    """The id of the automatic first cut's reply posted AFTER message_id in
+    this session, or None. A request sent while the upload was still indexing
+    (or held by a gate) runs after the product made its first cut: the turn
+    starts on that cut although the customer wrote about their upload (#861)."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT id FROM chat_messages
+            WHERE session_id = %s AND role = 'assistant' AND id > %s
+              AND meta->>'kind' = 'first_cut'
+            ORDER BY id LIMIT 1
+        """, (session_id, int(message_id)))
+        row = cur.fetchone()
+    if not row:
+        return None
+    return int(row["id"] if isinstance(row, dict) else row[0])
+
+
 def customer_request_before_repair(conn, session_id, message_id, repair_prefix):
     """Find the customer's request behind consecutive generated repair notes.
 

@@ -20448,7 +20448,8 @@ def add_stylize(ctx, kind, start=None, end=None, intensity=None,
         edl, f"stylize {k}{window}, intensity {shown:g} [{item['id']}]")
 
 
-def enhance_video(ctx, sharpen=0.5, denoise=0.0, start=None, end=None):
+def enhance_video(ctx, sharpen=None, denoise=0.0, start=None, end=None,
+                  resolution=None):
     """"Make it clearer / sharper / better quality / HD" — the request five
     different users made in one day, to an agent that had no tool for it and
     answered with a colour grade, a contrast bump, or "the source is only
@@ -20463,11 +20464,53 @@ def enhance_video(ctx, sharpen=0.5, denoise=0.0, start=None, end=None):
     What it will NOT do is add resolution, and the tool says so in its result
     so the agent repeats the honest version rather than promising HD.
     """
+    if sharpen is None:
+        # a resolution-only call asks for no sharpening
+        sharpen = 0.0 if resolution else 0.5
     try:
-        sh = min(max(float(sharpen if sharpen is not None else 0.0), 0.0), 1.0)
+        sh = min(max(float(sharpen), 0.0), 1.0)
         dn = min(max(float(denoise if denoise is not None else 0.0), 0.0), 1.0)
     except (TypeError, ValueError):
         return "REJECTED: sharpen and denoise must be numbers 0-1."
+    res_class = str(resolution).strip().lower() if resolution else None
+    if res_class in ("hd", "1080p", "none", "off"):
+        res_class = "off"
+    if res_class not in (None, "off", "2k", "4k"):
+        return ("REJECTED: resolution is '2k' (2560x1440 class), '4k' "
+                "(3840x2160 class) or 'hd' to go back to the normal export.")
+    if res_class is not None:
+        if not ctx.has_main_video:
+            return ("REJECTED: export resolution applies to an edit of an "
+                    "uploaded video; this project is a canvas program.")
+        edl = dict(ctx.latest_edl()["json"])
+        frame = dict(edl.get("frame") or {"ratio": "source", "mode": "crop"})
+        frame["resolution"] = None if res_class == "off" else res_class
+        edl["frame"] = frame
+        rres = ctx.write_edl(
+            edl, ("export resolution back to HD" if res_class == "off"
+                  else f"export resolution {res_class.upper()}"))
+        if not (rres.startswith("EDL v") or rres.startswith("NO CHANGE")):
+            return rres
+        if sh <= 0.0 and dn <= 0.0:
+            if res_class == "off":
+                return rres + "\nThe export is back to the normal HD size."
+            import renderer as _r
+            sw, sh_ = (ctx.index or {}).get("video", {}).get("width"), \
+                (ctx.index or {}).get("video", {}).get("height")
+            dims = ""
+            try:
+                W0, H0 = _r.frame_dims(int(sw), int(sh_),
+                                       str(frame.get("ratio") or "source"),
+                                       delivery=True)
+                W1, H1 = _r.delivery_resolution_dims(W0, H0, res_class)
+                dims = f" The exported file will be {W1}x{H1}."
+            except Exception:  # noqa: BLE001 - the size note is optional
+                pass
+            return (rres + f"\nThe final export is now {res_class.upper()}."
+                    + dims + " Previews stay small so they load fast; the "
+                    "size applies to the exported file. Upscaling makes the "
+                    "file 2K/4K but cannot invent detail the source never "
+                    "had: say both plainly.")
     if sh <= 0.0 and dn <= 0.0:
         return ("REJECTED: pass sharpen and/or denoise above 0 — with both at "
                 "0 there is nothing to apply. To UNDO an enhancement, "
@@ -20488,10 +20531,13 @@ def enhance_video(ctx, sharpen=0.5, denoise=0.0, start=None, end=None):
         if not res.startswith("EDL v"):
             return res
         notes.append(f"sharpen {sh:g}")
+    if res_class in ("2k", "4k"):
+        notes.append(f"export {res_class.upper()}")
     return (res + "\nEnhanced (" + ", ".join(notes) + "). This recovers "
             "detail the camera's encoder smeared and makes the picture read "
-            "crisper — it does NOT add resolution, so tell the user plainly "
-            "that a low-resolution source stays low-resolution. If they also "
+            "crisper — sharpening does NOT add resolution (only the "
+            "resolution option sizes the export), so tell the user plainly "
+            "that a low-resolution source stays low in detail. If they also "
             "asked for 'no filters', check get_edl and remove any colour "
             "grade: enhancement is not a look.")
 
@@ -33462,13 +33508,20 @@ TOOLS = {
                       "0-1 (default 0) cleans grainy low-light footage and "
                       "should be raised BEFORE sharpening noisy video. "
                       "start/end are PROGRAM seconds; omit both for the whole "
-                      "video. It cannot add resolution — say that plainly "
-                      "instead of promising HD from a small source. Never "
-                      "answer a clarity request with a colour grade.",
+                      "video. resolution '2k' or '4k' makes the EXPORTED "
+                      "file that size (2560x1440 / 3840x2160 class, lanczos "
+                      "upscale of the whole edit; 'hd' goes back): use it "
+                      "when the user asks for 2K, 1440p, 4K or UHD. "
+                      "Sharpening alone never adds resolution, and an "
+                      "upscale adds pixels, not detail the source never had "
+                      "— say that plainly. Never answer a clarity request "
+                      "with a colour grade.",
                       {"sharpen": {"type": "number"},
                        "denoise": {"type": "number"},
                        "start": {"type": "number"},
-                       "end": {"type": "number"}}),
+                       "end": {"type": "number"},
+                       "resolution": {"type": "string",
+                                      "enum": ["2k", "4k", "hd"]}}),
     "remove_stylize": (remove_stylize, "Remove one stylize effect by its id "
                        "(see get_edl).", {"id": {"type": "string"}}),
     "add_custom_filter": (add_custom_filter, "WRITE YOUR OWN ffmpeg video "
