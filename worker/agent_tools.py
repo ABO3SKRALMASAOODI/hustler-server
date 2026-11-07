@@ -33189,13 +33189,8 @@ TOOLS = {
                          "viewer SEES (hook, beats, payoff); they get the "
                          "same placement and motion. That is what 'kinetic "
                          "captions' means on silent footage.",
-                         {"phrases": {"type": "array", "items": {
-                              "type": "object",
-                              "properties": {
-                                  "text": {"type": "string"},
-                                  "start": {"type": "number"},
-                                  "end": {"type": "number"}},
-                              "required": ["text", "start", "end"]}},
+                         {"phrases": {"type": "array",
+                                      "items": {"type": "object"}},
                           "start": {"type": "number"},
                           "end": {"type": "number"},
                           "accent_color": {"type": "string"},
@@ -34514,6 +34509,9 @@ _COMPACT_CONTRACTS = {
         "mode='report' lists every jump cut (evidence, cover, options), "
         "writes nothing. Optional, never a default: hard 10-15% steps on "
         "cuts that visibly pop; at=[s] picks; mode='off' undoes."),
+    "add_kinetic_text": (
+        "Speech as kinetic phrases; no speech: "
+        "phrases=[{text,start,end}] (program s)."),
     "set_transitions": (
         "One style at real scene changes (scope='scene' skips jump cuts); "
         "report its count. start/end: only that stretch. Styles dissolve, "
