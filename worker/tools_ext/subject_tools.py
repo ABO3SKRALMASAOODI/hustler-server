@@ -558,8 +558,9 @@ def _subject_fields(kind, colour, scope, intensity, region, hue, echo,
     return it
 
 
-MATCH_FRAMES = 5
-MATCH_PCT = 80          # the bright part of an area is what reads as its tone
+MATCH_FRAMES = 9
+AREA_PCT = 90           # the bright part of the area is what must come down
+REF_PCT = 50            # the reference's own typical tone
 EV_RANGE = (-10.0, 4.0)
 
 
@@ -579,6 +580,16 @@ def _match_box(v):
     return box
 
 
+def _plate(frames):
+    """The background without the people moving over it: the per-pixel
+    median of frames spread across the window (a locked shot's clean plate).
+    Frames of different sizes fall back to the frames themselves."""
+    import numpy as np
+    if len({f.shape for f in frames}) == 1 and len(frames) >= 3:
+        return [np.median(np.stack(frames).astype(float), axis=0)]
+    return [f.astype(float) for f in frames]
+
+
 def _luma_pct(frames, box, pct):
     import numpy as np
     vals = []
@@ -591,12 +602,15 @@ def _luma_pct(frames, box, pct):
     return float(np.percentile(np.concatenate(vals), pct)) if vals else 0.0
 
 
-def solve_match_ev(frames, area_box, ref_box, pct=MATCH_PCT):
+def solve_match_ev(frames, area_box, ref_box):
     """The ev (in the renderer's stops: luma gain 2 ** (ev / 2.2), see
-    subject_fx.k_exposure) that brings the area's bright part to the
-    reference's, measured on the frames. Returns (ev, area, ref)."""
-    area = _luma_pct(frames, area_box, pct)
-    ref = _luma_pct(frames, ref_box, pct)
+    subject_fx.k_exposure) that brings the area's bright part down to the
+    reference's tone, measured on the clean plate so a person standing in
+    front of the reference (ticket #77 replay: a white shirt read the
+    curtain as luma 156) is not measured as it. Returns (ev, area, ref)."""
+    plate = _plate(frames)
+    area = _luma_pct(plate, area_box, AREA_PCT)
+    ref = _luma_pct(plate, ref_box, REF_PCT)
     if area < 1.0:
         return 0.0, area, ref
     gain = max(ref, 0.5) / area
@@ -630,9 +644,9 @@ def _solve_match_ev(ctx, edl, it):
                 f"({why}); give style.ev instead.")
     ev, area, ref = solve_match_ev(frames, area_box, ref_box)
     it["ev"] = ev
-    return (f"{it['id']}: measured the area's bright part at luma "
-            f"{area:.0f} and the match box's at {ref:.0f} (of 255) on "
-            f"{len(frames)} frames, so ev = {ev:g}. Judge it on the preview; "
+    return (f"{it['id']}: on a clean plate of {len(frames)} frames (moving "
+            f"people removed) the area's bright part is luma {area:.0f} and "
+            f"the match box's tone {ref:.0f} (of 255), so ev = {ev:g}. Judge it on the preview; "
             f"the subject matte keeps the person out of it.")
 
 

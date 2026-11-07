@@ -54,7 +54,7 @@ def test_the_verb_writes_the_measured_ev(monkeypatch):
         region={"shape": "rect", "box": [0, 0, 1, 0.72]},
         style={"match": [0.4, 0.1, 0.6, 0.6], "saturation": 0})
     assert out.startswith("EDL"), out
-    assert "measured" in out and "ev = -" in out
+    assert "clean plate" in out and "ev = -" in out
     item = [f for f in _fx(ctx) if f.get("kind") == "exposure"][0]
     assert item["ev"] < -6.5
     assert "_match" not in item
@@ -77,3 +77,20 @@ def test_match_belongs_to_exposure():
                                 scope="background",
                                 style={"match": [0, 0, 1, 1]})
     assert out.startswith("REJECTED") and "match" in out
+
+
+def _dancer_at(k):
+    """The room with a white-shirted dancer crossing the curtain."""
+    f = _room()
+    x = 10 + 9 * k
+    f[60:140, x:x + 18] = 235
+    return f
+
+
+def test_a_person_in_front_of_the_reference_is_not_measured_as_it():
+    # the replay's box sat on the curtain with a dancer in it (luma 156)
+    frames = [_dancer_at(k) for k in range(9)]
+    ev, area, ref = st.solve_match_ev(frames, [0, 0, 1, 0.72],
+                                      [0.3, 0.3, 0.7, 0.7])
+    assert ref < 30, ref
+    assert 225 * 2 ** (ev / 2.2) < 35
