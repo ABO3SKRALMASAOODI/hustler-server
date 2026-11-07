@@ -1762,6 +1762,7 @@ def _adopt_steering_messages(ctx, worker_db, job, session_id, messages,
                 prior = worker_db.run(dbx.recent_chat, session_id, 24, newest)
                 if isinstance(prior, list):
                     ctx.request_contract_history = semantic_request.history(prior, newest)
+                    ctx.request_edit_origin = semantic_request.edit_origin(prior, newest)
                     previous = next((m for m in reversed(prior)
                                      if m.get('role') == 'assistant' and m['id'] < newest), {})
                     latest_input = max(rows, key=lambda row: int(row['id']))
@@ -2268,6 +2269,7 @@ def run_agent_job(worker_db, job):
         import request_contract as semantic_request
         prior_chat = worker_db.run(dbx.recent_chat, ctx.session_id, 24, user_message["id"])
         ctx.request_contract_history = semantic_request.history(prior_chat, user_message["id"])
+        ctx.request_edit_origin = semantic_request.edit_origin(prior_chat, user_message["id"])
         semantic_request.ensure(ctx)
         if (job.get("payload") or {}).get("death_resume"):
             # Round 97 (#1): this job is the reaper's resume of a turn the

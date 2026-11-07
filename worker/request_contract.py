@@ -105,6 +105,14 @@ Use preserve lanes only for existing EDL state the customer explicitly protects.
 A lane holds what THIS EDIT applied, not the upload: 'keep the natural colours',
 'match my original', 'remove the filters' while current_edl carries a grade is
 a change that removes it (relative_to=source_footage), never a lock on it.
+current_edit_origin says current_edl began as an automatic first cut: the product
+cut and reframed the upload by itself and the customer never asked for that cut.
+customer_requests_since counts what they typed after it. Read what their words
+protect. Words about the video they uploaded, their existing or whole video, or
+its scene order, cut, format or length as they made it, are a promise about the
+upload, not a lock on the first cut: use relative_to=source_footage, set
+timing_policy=edit and list cuts and frame_ratio in changed_lanes so the edit can
+go back to the upload. Only words pointing at the first cut's own result protect it.
 protecting original subtitles also prevents duplicating them with new captions.
 When an authorized change affects part of a lane, do not freeze that whole lane.
 List in changed_lanes what the changes must write. Those lanes are not frozen,
@@ -150,6 +158,22 @@ def history(rows, before_id):
     return [{"role": row["role"], "content": str(row.get("content") or "")}
             for row in rows if row["id"] < before_id
             and row["role"] in {"user", "assistant"}][-12:]
+
+
+def edit_origin(rows, before_id):
+    """{'made_by', 'customer_requests_since'} when the edit began as the
+    automatic first cut, else None. A stored fact, for the model to read: the
+    brief only ever saw an EDL, so "leave the cut and format as they are" froze
+    a 27 s vertical cut the product made of a customer's 4:26 upload, and the
+    editor was refused the way back to their video (#386, p5329)."""
+    rows = [row for row in rows if row["id"] < before_id]
+    cuts = [row["id"] for row in rows if row["role"] == "assistant"
+            and (row.get("meta") or {}).get("kind") == "first_cut"]
+    if not cuts:
+        return None
+    return {"made_by": "automatic_first_cut",
+            "customer_requests_since": sum(
+                1 for row in rows if row["role"] == "user" and row["id"] > cuts[-1])}
 
 
 def _customer_sources(request, conversation):
@@ -277,6 +301,8 @@ def ensure(ctx):
                 "customer_sources": sources,
                 "source": (getattr(ctx, "index", None) or {}).get("video"),
                 "current_edl": ctx.latest_edl()["json"]}
+    if getattr(ctx, "request_edit_origin", None):
+        evidence["current_edit_origin"] = ctx.request_edit_origin
     if getattr(ctx, "operator_instruction", None):
         evidence["internal_recovery"] = ctx.operator_instruction
     if getattr(ctx, "request_preservation_baseline", None):
@@ -409,10 +435,17 @@ _ASKED_SYSTEM = (
     "to preserve the same thing in general terms: a request can keep the look "
     "natural and also ask to lower one part of it, and a small change in the "
     "direction it describes is asked. The change lists the stored values after "
-    "the edit. It is false when the request wants this left alone and nothing "
+    "the edit. current_edit_origin, when present, means the product made the "
+    "current cut by itself after the upload and the customer did not ask for "
+    "it: a change that takes the edit back to the upload delivers a request "
+    "that protects the upload's cut, format or length. It is false when the request wants this left alone and nothing "
     "in it needs the change. When you cannot tell, answer false.")
 _ASKED_SCHEMA = {"type": "object", "required": ["asked"],
                  "properties": {"asked": {"type": "boolean"}}}
+
+
+def _kept_seconds(edl):
+    return round(sum(float(b) - float(a) for a, b in edl.get("keep") or []), 1)
 
 
 def reread_refused(ctx, lanes, labels, tool=None, after=None):
@@ -436,6 +469,11 @@ def reread_refused(ctx, lanes, labels, tool=None, after=None):
                   or ctx.user_message or "")[:6000]
     change = {"changes": list(labels), "tool": tool,
               "after": json.dumps(after or {}, ensure_ascii=False, default=str)[:800]}
+    origin = getattr(ctx, "request_edit_origin", None)
+    if origin:
+        change.update(current_edit_origin=origin,
+                      upload_seconds=getattr(ctx, "duration", None),
+                      current_seconds=_kept_seconds(ctx.latest_edl()["json"]))
     tool_def = {"type": "function", "function": {
         "name": _ASKED_TOOL, "description": "Report whether the request asks for it.",
         "parameters": _ASKED_SCHEMA}}

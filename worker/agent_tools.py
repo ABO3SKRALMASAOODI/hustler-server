@@ -758,7 +758,8 @@ class ToolContext:
                 and request_contract.reread_refused(
                     self, scope_guard.lanes_of(violations), violations,
                     getattr(self, "_executing_tool", None),
-                    _what_changed(prev["json"], normalized)):
+                    {"keep": normalized.get("keep"),
+                     **_what_changed(prev["json"], normalized)}):
             protected = request_contract.protected_lanes(self)
             violations = _guarded()
         if violations:
