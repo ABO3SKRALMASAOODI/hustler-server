@@ -122,8 +122,9 @@ def event_alerts(rcur, since, now):
         late = intake.HEARTBEAT_LATE["p0_watch"].total_seconds() // 60
         beat = intake.watch_beat(rcur, now)
         for t in intake.unhandled(rcur, now):
-            state = (f"claimed {t['waiting_min']} min ago and no fix landed "
-                     f"(the run may have died)" if t["status"] == "fixing" else
+            state = (f"claimed {t['waiting_min']} min ago, a customer failed "
+                     f"on it since and no fix landed (the run may have died)"
+                     if t["status"] == "fixing" else
                      f"open {t['waiting_min']} min and nobody took it: the P0 "
                      f"watch ran {beat} min ago, so its Fixers are all busy or "
                      f"failed to start" if beat is not None and beat < late else

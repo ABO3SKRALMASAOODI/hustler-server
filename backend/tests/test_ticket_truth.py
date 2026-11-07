@@ -764,9 +764,51 @@ def test_a_new_failure_does_not_make_a_stuck_claim_look_alive(world):
 def test_a_stuck_fixing_p0_reaches_the_owner(world):
     tid = p0(world, "fixing")
     assert intake.unhandled(world.c, world.clock.now) == []
-    world.clock.now += timedelta(hours=6, minutes=1)
+    world.clock.now += timedelta(hours=1)
+    store.record_failure(world.conn.cursor(), {
+        "ref": "job:3", "source": "job", "at": world.clock.now, "user_id": 2846,
+        "cause_key": "auto-x", "project_id": 5600, "severity": "P0",
+        "title": "x", "detail": "d"})
+    world.clock.now += timedelta(hours=5, minutes=1)
     got = intake.unhandled(world.c, world.clock.now)
     assert [t["id"] for t in got] == [tid] and got[0]["waiting_min"] == 361
+
+
+def test_a_stale_claim_nobody_failed_on_since_is_the_watchs_not_the_owners(world):
+    """The owner's test (7 Nov): email only when a customer is still stuck and
+    no Fixer claimed or released the ticket since that customer's failure."""
+    tid = p0(world, "fixing")
+    world.clock.now += timedelta(hours=6, minutes=1)
+    assert [r["id"] for r in intake.pending_p0(world.c, world.clock.now)] == [tid]
+    assert intake.unhandled(world.c, world.clock.now) == []
+
+
+def test_a_p0_released_with_its_fix_live_is_no_customer_blocked_email(world):
+    """#387 (and #386, #861), 7 Nov: claimed, fix live, released at 07:30 to
+    wait on the replay. Nobody failed on it after; at 13:40, 10 minutes after
+    the 6 h quiet ended, the owner was emailed "Customer blocked, not handled
+    yet". A new failure after the release is still an email at once."""
+    tid = p0(world, "fixing")
+    store.mark_live(world.conn.cursor(), tid, "a" * 40)
+    t = world.only_ticket()
+    store.release_fixing(world.conn.cursor(), tid,
+                         t["updated_at"].isoformat(), "live, waiting on replay")
+    for hours in (1, 6, 7, 30):
+        later = world.clock.now + timedelta(hours=hours)
+        assert intake.unhandled(world.c, later) == [], hours
+    world.clock.now += timedelta(hours=7)
+    assert [r["id"] for r in intake.pending_p0(world.c, world.clock.now)] == [tid]
+    store.record_failure(world.conn.cursor(), {
+        "ref": "job:9", "source": "job", "at": world.clock.now, "user_id": 2869,
+        "cause_key": "auto-x", "project_id": 5543, "severity": "P0",
+        "title": "x", "detail": "d"})
+    assert intake.unhandled(world.c, world.clock.now + timedelta(minutes=9)) == []
+    got = intake.unhandled(world.c, world.clock.now + intake.UNHANDLED_AFTER)
+    assert [t["id"] for t in got] == [tid]
+    assert got[0]["opened_at"] == world.clock.now
+    # A Fixer claiming it again answers that failure.
+    store.set_fixing(world.conn.cursor(), tid, "on it again")
+    assert intake.unhandled(world.c, world.clock.now + timedelta(hours=1)) == []
 
 
 def test_the_alert_gives_the_5_minute_watch_its_turn_and_no_more(world):
@@ -802,10 +844,10 @@ def test_a_quiet_ends_by_itself(world):
                          t["updated_at"].isoformat(), "waiting on the replay")
     later = world.clock.now + intake.RELEASE_QUIET + MIN
     assert [r["id"] for r in intake.pending_p0(world.c, later)] == [tid]
-    # The watch gets its turn at it before the owner is told it was not taken.
-    assert intake.unhandled(world.c, later) == []
+    # The watch takes it again; nobody failed on it since the release, so the
+    # owner is not told a customer is blocked and unhandled.
     later += intake.UNHANDLED_AFTER
-    assert [t["id"] for t in intake.unhandled(world.c, later)] == [tid]
+    assert intake.unhandled(world.c, later) == []
 
 
 def test_a_stopped_agent_is_reported_and_a_never_armed_one_is_not(world):

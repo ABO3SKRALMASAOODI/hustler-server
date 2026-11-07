@@ -636,43 +636,61 @@ CLAIMED_AT = """COALESCE((SELECT max((h->>'at')::timestamptz) FROM
 RELEASED_AT = """(SELECT max((h->>'at')::timestamptz) FROM
                   jsonb_array_elements(history) h
                  WHERE h->>'event' = 'released')"""
-BACK_AT = f"""(SELECT min((h->>'at')::timestamptz) FROM
+# The last time a Fixer acted on the ticket: claimed it, put its fix live, or
+# handed it back with a note. The owner's test for an email (7 Nov 2026): a
+# customer is stuck and no Fixer has claimed or released the ticket since that
+# customer's failure. #387 was released at 07:30 with its fix live and waiting
+# on a replay; when the 6 h quiet ended at 13:30 the owner was told "customer
+# blocked, not handled" although nobody had failed on it since the release.
+HANDLED_AT = """(SELECT max((h->>'at')::timestamptz) FROM
                   jsonb_array_elements(history) h
-                 WHERE h->>'event' = 'failure'
-                   AND (h->>'at')::timestamptz > {RELEASED_AT})"""
+                 WHERE h->>'event' IN ('fixing', 'live', 'released'))"""
+# The first time a customer needed it again after that: a new failure, or the
+# ticket coming back (recurred after a close, reopened, raised to P0).
+STUCK_AGAIN_AT = f"""(SELECT min((h->>'at')::timestamptz) FROM
+                  jsonb_array_elements(history) h
+                 WHERE h->>'event' IN ('failure', 'recurred', 'reopened',
+                                       'escalated')
+                   AND (h->>'at')::timestamptz > {HANDLED_AT})"""
+NEEDED_AT = """(SELECT max((h->>'at')::timestamptz) FROM
+                  jsonb_array_elements(history) h
+                 WHERE h->>'event' IN ('opened', 'recurred', 'reopened',
+                                       'escalated'))"""
 
 
-def _waiting_since(r):
-    """When an open P0 became the watch's to take: the moment pending_p0 turns
-    true, so the two can never disagree. A ticket a Fixer handed back is nobody's
-    until its quiet ends or a failure lands on it; counted from the release, one
-    that came out of its 6 h quiet was already "not handled" before the next
-    watch could reach it."""
-    opened = _aware(r["opened_at"] or r["created_at"])
-    released = _aware(r.get("released_at"))
-    if not released or opened > released:
-        return opened
-    back = _aware(r.get("back_at"))
-    last = _aware(r["last_seen"])
-    if not back and last > released:
+def _stuck_since(r):
+    """When a customer became stuck on this P0 with no Fixer on it since, or
+    None when a Fixer claimed, shipped or handed it back after its latest
+    failure. One nobody ever claimed counts from its (re)opening; one a Fixer
+    touched counts from the first failure after that touch, so more customers
+    do not make it look fresher."""
+    handled = _aware(r.get("handled_at"))
+    if not handled:
+        return _aware(r.get("needed_at") or r["created_at"])
+    back = _aware(r.get("stuck_again_at"))
+    last = _aware(r.get("last_seen"))
+    if not back and last and last > handled:
         back = last             # past FAILURE_REFS_KEPT: no entry, only the time
-    quiet_ends = released + RELEASE_QUIET
-    return min(back, quiet_ends) if back else quiet_ends
+    return back
 
 
 def unhandled(cur, now=None, after=UNHANDLED_AFTER, stale=FIXING_STALE):
-    """P0 tickets no agent is acting on: open ones nobody started within `after`
-    of their latest (re)opening (the Mac asleep, the P0 watch off, or the run
-    failed) and 'fixing' ones whose claim is older than `stale` (the run died).
-    What the owner is emailed about."""
+    """P0 tickets a customer is stuck on and no Fixer is acting on: what the
+    owner is emailed about. An open one counts from the customer's failure: one
+    nobody ever claimed, or one that failed again after a Fixer released it,
+    is named once the 5-minute watch had `after` to take it. A ticket a Fixer
+    released with its fix live and nobody failed on since is handled, however
+    long its replay takes: the watch takes it again after RELEASE_QUIET
+    (pending_p0), and that is not the owner's to hear about. A 'fixing' claim
+    older than `stale` is named only if a customer failed after the claim."""
     now = _aware(now) or datetime.now(timezone.utc)
     if not _tables_ready(cur):
         return []
     cur.execute(f"""
         SELECT id, cause_key, title, severity, status, occurrences,
                recurrence_count, first_seen, last_seen, created_at,
-               updated_at, {OPENED_AT} AS opened_at, {CLAIMED_AT} AS claimed_at,
-               {RELEASED_AT} AS released_at, {BACK_AT} AS back_at,
+               updated_at, {NEEDED_AT} AS needed_at, {CLAIMED_AT} AS claimed_at,
+               {HANDLED_AT} AS handled_at, {STUCK_AGAIN_AT} AS stuck_again_at,
                (SELECT count(DISTINCT h->>'user') FROM
                   jsonb_array_elements(history) h
                  WHERE h->>'event' = 'failure') AS users
@@ -681,9 +699,16 @@ def unhandled(cur, now=None, after=UNHANDLED_AFTER, stale=FIXING_STALE):
          ORDER BY id""")
     out = []
     for r in cur.fetchall():
-        fixing = r["status"] == "fixing"
-        since = _aware(r["claimed_at"]) if fixing else _waiting_since(r)
-        if since and now - since >= (stale if fixing else after):
+        stuck = _stuck_since(r)
+        if not stuck:
+            continue
+        if r["status"] == "fixing":
+            since = _aware(r["claimed_at"])
+            late = since and now - since >= stale
+        else:
+            since = stuck
+            late = now - since >= after
+        if late:
             d = dict(r)
             d["opened_at"] = since
             d["waiting_min"] = int((now - since).total_seconds() // 60)

@@ -497,18 +497,17 @@ def release(world, t):
                          "waiting on the release")
 
 
-def test_a_handed_back_ticket_counts_from_when_the_watch_could_take_it(world):
-    """Counted from the release, it was late the minute its quiet ended, before
-    the next watch could reach it."""
+def test_a_handed_back_ticket_is_the_watchs_again_and_never_the_owners(world):
+    """The quiet ending hands it back to the watch. Nobody failed on it after
+    the release, so no customer is blocked and unhandled (#387, 7 Nov)."""
     t = open_p0(world)
     release(world, t)
     world.clock.now += intake.RELEASE_QUIET - MIN
     assert pending_ids(world) == unhandled_ids(world) == []
     world.clock.now += 2 * MIN
     assert pending_ids(world) == [t["id"]]
-    assert unhandled_ids(world) == []
     world.clock.now += 9 * MIN
-    assert unhandled_ids(world) == [t["id"]]
+    assert unhandled_ids(world) == []
 
 
 def test_a_new_failure_on_a_handed_back_ticket_starts_at_that_failure(world):
@@ -529,14 +528,16 @@ def test_pending_and_unhandled_name_the_same_tickets_once_the_wait_is_over(world
     handed = open_p0(world, "auto-job-b-oom")
     release(world, handed)
     world.clock.now += intake.RELEASE_QUIET + 11 * MIN
-    assert sorted(pending_ids(world)) == sorted(unhandled_ids(world)) \
-        == sorted([plain["id"], handed["id"]])
+    assert sorted(pending_ids(world)) == sorted([plain["id"], handed["id"]])
+    assert unhandled_ids(world) == [plain["id"]]
 
 
 def test_a_claim_gone_stale_is_on_both_lists_at_the_same_moment(world):
     t = open_p0(world)
     store.set_fixing(world.c, t["id"])
-    world.clock.now += intake.FIXING_STALE - MIN
+    world.clock.now += 30 * MIN
+    open_p0(world)          # a customer failed on it after the claim
+    world.clock.now += intake.FIXING_STALE - 31 * MIN
     assert pending_ids(world) == unhandled_ids(world) == []
     world.clock.now += 2 * MIN
     assert pending_ids(world) == unhandled_ids(world) == [t["id"]]
