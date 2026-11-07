@@ -16,13 +16,17 @@ MAX_REPAIR_PASSES = 3
 # reset_edit is left out (it also drops the customer's earlier work), and
 # remove_filler_words is a cut.
 UNDO_TOOLS = frozenset((
-    "remove_aspect_shift", "remove_blur", "remove_cursor_enhance",
-    "remove_editorial_graphic", "remove_erase", "remove_insert",
-    "remove_motion_graphic", "remove_music", "remove_overlay",
-    "remove_picture_card", "remove_screen_frame", "remove_screen_takeover",
+    "remove_aspect_shift", "remove_blur", "remove_broll",
+    "remove_cursor_enhance", "remove_depth_time",
+    "remove_editorial_graphic", "remove_erase", "remove_finish",
+    "remove_insert", "remove_motion_graphic", "remove_music",
+    "remove_overlay", "remove_picture_card", "remove_punctuation",
+    "remove_region_effect", "remove_screen_frame", "remove_screen_takeover",
     "remove_sfx", "remove_speed", "remove_stem_mix", "remove_stylize",
-    "remove_text", "remove_typography_scene", "remove_vector_graphic",
-    "remove_voiceover", "remove_zoom", "remove_zoom_path", "restore_range",
+    "remove_subject_effect", "remove_text", "remove_typeset",
+    "remove_typography_scene", "remove_ui_scene", "remove_vector_graphic",
+    "remove_voiceover", "remove_world", "remove_zoom", "remove_zoom_path",
+    "restore_range",
 ))
 MAX_UNDO_RENDERS = 2
 
@@ -69,12 +73,20 @@ def _finish_undo(ctx, version):
     ctx.trial_preview_repairs = repairs
 
 
-def undo_allowed(ctx, name):
+def _only_removes(name, args):
+    """A batch of nothing but removals is the same way back as a remove_* tool
+    (edit_batch removes items by id, never a cut of the footage)."""
+    ops = (args or {}).get('operations') if name == 'apply_edit_batch' else None
+    return bool(ops) and all(isinstance(op, dict) and op.get('action') == 'remove'
+                             for op in ops)
+
+
+def undo_allowed(ctx, name, args=None):
     """Past every allowance, the turn may still take back what it added and
     show the result. Bounded: undo only removes, new work stays refused, and
     there are at most MAX_UNDO_RENDERS such passes."""
     state = dict(getattr(ctx, 'trial_preview_repairs', None) or {})
-    if name in UNDO_TOOLS:
+    if name in UNDO_TOOLS or _only_removes(name, args):
         if int(state.get('undo_renders') or 0) >= MAX_UNDO_RENDERS:
             return False
         if state.get('undo_from') is None:

@@ -277,9 +277,9 @@ def _gate(ctx, fx_type):
     return None
 
 
-def _ensure_matte(ctx, edl, tl, windows):
-    """Ask for the person-matte sidecar over the items' source windows
-    (never waits). Returns a short note for the reply, or ''."""
+def _ensure_matte(ctx, edl, tl, windows, wait_s=0):
+    """Ask for the person-matte sidecar over the items' source windows,
+    waiting up to ``wait_s``. Returns a short note for the reply, or ''."""
     try:
         import db as dbx
         import fxgraph
@@ -324,6 +324,8 @@ def _ensure_matte(ctx, edl, tl, windows):
             return ""
         h = sidecars.ensure("matte.person", src, ranges,
                             priority="interactive", params=params)
+        if wait_s:
+            sidecars.wait([h], wait_s)
         st = sidecars.status(h)
         if st == "ready":
             return ""

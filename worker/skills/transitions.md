@@ -163,3 +163,7 @@ Retime the sound to the cut → remove sounds the junction does not earn →
 shorten or subdue → change direction or style
 → move to the real section turn → replace with a hard cut plus a framing
 change → rescreen the sequence cadence.
+
+## The customer's own words
+
+When the customer names transitions, use those styles on the cuts of that stretch, mixed cut by cut with set_junction: "film strip" or "reel" is film_strip, "sliding" is slide_left/slide_right, "fade to black" is fade_black, "cross dissolve" is dissolve. Name each one they asked for at least where it fits; a near style is not that style.

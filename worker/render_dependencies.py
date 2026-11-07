@@ -2,6 +2,9 @@
 import hashlib
 import json
 
+# sidecars.wait caps this at 90 s, what a final gives its matte.
+MATTE_WAIT_FACTOR = 1.5
+
 
 def needed(ctx, row):
     if not getattr(ctx, "request_contract_required", False):
@@ -14,7 +17,33 @@ def needed(ctx, row):
     return bool(world_layer.requests(_world_ctx(ctx, edl)))
 
 
+def _wait_for_matte(ctx, row, wait_s):
+    """A matte effect drawn before its matte exists is left out, so the
+    preview shows the edit without it and the turn takes the effect for a
+    failure (p5533: the matte was 8 s old when the preview ran, and the
+    editor removed the one tool that could separate the dancers from the
+    wall). The wait is bounded and never refuses: a matte that does not arrive
+    renders as the device's substitute, reported like any degraded device."""
+    try:
+        edl = row["json"]
+        import matte_track
+        windows = [(float(i["start"]), float(i["end"]))
+                   for i in edl.get("fx") or []
+                   if isinstance(i, dict) and i.get("start") is not None
+                   and i.get("type") in matte_track.MATTE_FX_TYPES]
+        if not windows or not edl.get("keep"):
+            return
+        from timeline import Timeline
+        from tools_ext.subject_tools import _ensure_matte
+        tl = Timeline(edl["keep"], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+        _ensure_matte(ctx, edl, tl, windows, wait_s=wait_s)
+    except Exception as e:  # noqa: BLE001 — a wait never fails a preview
+        print(f"[render_dependencies] matte wait skipped: {e}", flush=True)
+
+
 def before_preview(ctx, row, wait_s=60):
+    _wait_for_matte(ctx, row, wait_s * MATTE_WAIT_FACTOR)
     ctx.render_dependency_key = None
     if not needed(ctx, row):
         ctx.render_dependency_state = None

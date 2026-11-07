@@ -114,6 +114,20 @@ def test_a_device_without_its_sidecar_draws_its_substitute(comp):
     assert {f["evidence"]["item_id"] for f in found} == {"a", "b"}
 
 
+def test_a_missing_input_still_leaves_a_device_out_past_the_budget(comp,
+                                                                   monkeypatch):
+    """Past the budget is drawn; a device that cannot run here stays out."""
+    monkeypatch.setattr(fxgraph, "_device_budget", lambda plan, edl: 0.0)
+    monkeypatch.setattr(fxgraph, "_device_detail",
+                        lambda item, status, *, frames=0, budget_ms=None: {
+                            "rung": "omit", "reason": "lane lacks a filter",
+                            "substitute": None, "params": {}, "est_ms": 0.0})
+    plan = _prepare({"keep": [[0.0, 5.0]], "fx": [
+        _dev("a", "poster_silhouette", 0.0, 2.0)]})
+    assert plan.report()[0]["rung"] == "omit"
+    assert plan.report()[0]["reason"] == "lane lacks a filter"
+
+
 def test_ready_sidecars_draw_full_within_one_render_budget(comp,
                                                            monkeypatch):
     calls = []
@@ -132,8 +146,9 @@ def test_ready_sidecars_draw_full_within_one_render_budget(comp,
     plan = _prepare(edl)
     rungs = [r["rung"] for r in plan.report()]
     # the budget is spent in program order: two full, a cheaper rung with
-    # what is left, then nothing left at all
-    assert rungs == ["full", "full", "reduced", "omit"]
+    # what is left, and with nothing left the device is still in the edit
+    assert rungs == ["full", "full", "reduced", "full"]
+    assert "drawn past the budget" in plan.report()[3]["reason"]
     assert "over the 0 ms budget" in plan.report()[3]["reason"]
     assert calls == ["p0", "p1", "p2", "p3"]
     assert plan.report()[0]["est_ms"] == pytest.approx(one, rel=0.01)

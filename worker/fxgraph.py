@@ -741,9 +741,18 @@ def _prepare_item(plan, item):
         # a few frames: past the budget it was left out silently, 51 of the 82
         # dissolves of p5520's slideshow. The budget paces extras, not that.
         asked = item.get("stage") == "junction"
-        d = _device_detail(item, _sidecar_status(item, plan.source, plan),
-                           frames=_item_frames(item, plan.fps),
+        status = _sidecar_status(item, plan.source, plan)
+        frames = _item_frames(item, plan.fps)
+        d = _device_detail(item, status, frames=frames,
                            budget_ms=None if asked else plan.budget_ms)
+        # Every device in the EDL is part of the edit, and the budget paces
+        # cost, it does not choose content. p5533: a customer's only request
+        # was left out of three previews to save 0.4 s of a 14 s render, each
+        # byte-identical to the last. Past the budget it is still drawn.
+        if d["rung"] == "omit" and plan.budget_ms is not None and not asked:
+            drawn = _device_detail(item, status, frames=frames)
+            if drawn["rung"] != "omit":
+                d = dict(drawn, reason=f"drawn past the budget: {d.get('reason')}")
         rung, reason = d["rung"], d.get("reason") or d["rung"]
         plan.devices[item.get("id")] = d
         if rung == "omit":
