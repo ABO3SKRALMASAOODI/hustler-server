@@ -5687,7 +5687,7 @@ def add_captions(ctx, mode=None, items=None, style=None,
             "items=[{text,start,end}].")
 
 
-def _parse_partial_style(style):
+def _parse_partial_style(style, ctx=None):
     """Validate a PARTIAL style patch, returning only the provided keys
     (normalized), or an 'ERR: ...' string. Unlike _parse_style this never
     fills defaults, so merging cannot reset fields the user didn't mention."""
@@ -5720,26 +5720,13 @@ def _parse_partial_style(style):
                                    "tracking", "text_align", "anchor_y",
                                    "single_line"})
     if unknown:
-        return (f"ERR: unknown style field(s) {unknown} — the style fields are "
-                "preset, color, size, size_scale, position, uppercase, "
-                "dynamic, highlight_color, animation, font, effect, layout, "
-                "leading, emphasis, emphasis_scale, outline_color, "
-                "outline_width, shadow, background_color, "
-                "background_opacity, tracking, text_align, anchor_y and "
-                "single_line. "
-                "anchor_y is the exact vertical output-frame fraction. "
-                "single_line=true makes every transcript-caption state one "
-                "rendered row even when the preset normally stacks. "
-                "preset picks "
-                "a look (clean/documentary/broadcast/retro/neon/podcast/"
-                "reels/beast/karaoke/elegant/stacked/iridescent/chrome/editorial/"
-                "fashion/luxe/impact/lyric/classic); "
-                "font names a bundled family (e.g. 'Playfair Display Black'); "
-                "effect layers chroma/chrome/glow onto emphasised words; "
-                "layout 'stack' gives each line its own position, which is "
-                "what lets leading go below 1.0 so lines overlap; emphasis "
-                "chooses what emphasis words get ('big' = size only, no "
-                "colour change); emphasis_scale is how much bigger they go.")
+        style = {k: v for k, v in style.items() if k not in unknown}
+        call_note(ctx, f"style field(s) {unknown} left out: not caption style "
+                       "fields")
+    scale = style.get("emphasis_scale")
+    if isinstance(scale, (int, float)) and not 1.0 <= scale <= 3.0:
+        style = dict(style, emphasis_scale=min(max(float(scale), 1.0), 3.0))
+        call_note(ctx, f"emphasis_scale {scale:g} held to the 1.0-3.0 range")
     try:
         validated = CaptionStyle.model_validate(style).model_dump()
     except Exception as e:
@@ -6051,7 +6038,7 @@ def set_caption_style(ctx, style=None, emphasis_words=None,
                     "(words from the transcript to emphasize).")
     partial = {}
     if style not in (None, {}):
-        partial = _parse_partial_style(style)
+        partial = _parse_partial_style(style, ctx)
         if isinstance(partial, str):
             return "REJECTED: " + partial[5:]
     elif emphasis_words is None and motion_motif is None:
@@ -34437,6 +34424,28 @@ def parse_tool_arguments(raw):
     return args
 
 
+_END_PAST_LIMIT = re.compile(r": end (\d+(?:\.\d+)?) exceeds the limit "
+                            r"(\d+(?:\.\d+)?)s")
+
+
+def _end_inside_limit(args, out):
+    """The limit our own validator named, when this call's end ran past it
+    and its start is inside. Times past the end have one meaning: up to it.
+    Reads our validator's sentence, nothing a customer wrote."""
+    if not isinstance(out, str) or not out.startswith("REJECTED"):
+        return None
+    hit = _END_PAST_LIMIT.search(out)
+    end, start = args.get("end"), args.get("start", 0)
+    if not hit or not isinstance(end, (int, float)) \
+            or abs(float(hit.group(1)) - float(end)) > 0.011:
+        return None
+    limit = float(hit.group(2))
+    try:
+        return limit if float(start or 0) < limit - 0.05 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _call_notes_begin(ctx, repairs):
     """Start this call's receipt: what was repaired or defaulted."""
     if isinstance(ctx, _RecipeContext):
@@ -34697,6 +34706,12 @@ def _execute(ctx, name, args):
         pass
     try:
         out = fn(ctx, **args)
+        fitted = _end_inside_limit(args, out)
+        if fitted is not None:
+            call_note(ctx, f"end {args['end']:g} held to the programme's end, "
+                           f"{fitted:g}s")
+            args = dict(args, end=fitted)
+            out = fn(ctx, **args)
     except dbx.JobLeaseLost:
         ctx._executing_tool = previous_executing_tool
         raise

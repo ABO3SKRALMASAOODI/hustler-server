@@ -63,11 +63,10 @@ class ToolOutcome:
 
 
 def _our_own_words(line):
-    """A result line without what it quotes back: a read of frames repeats
-    the model's own question, and a question holding the word 'failed' filed
-    a good read as a failure (7 rows on 1 Nov)."""
-    return re.sub(r'"[^"]*"|“[^”]*”', " ", line.split(" — ")[0]
-                  if line.startswith(("FRAMES", "PREVIEW", "LOOK")) else line)
+    """A result line without what it quotes back: a read of frames repeats the
+    model's own question, and a question holding the word 'failed' filed a
+    good read as a failure (7 rows, 1 Nov)."""
+    return line.split("(YOUR QUESTION:")[0]
 
 
 def from_legacy(result, *, state_changed=False, idempotent=False,
@@ -92,7 +91,9 @@ def from_legacy(result, *, state_changed=False, idempotent=False,
         fallback = "load_tools/list the current capability directory"
     elif upper.startswith("UNSAFE"):
         status = "unsafe"
-    elif re.match(r"^PREVIEW V\d+ (?:RENDERED:|(?:WAS |IS )?ALREADY RENDERED\b)", upper):
+    elif re.match(r"^(?:CHANGED-SECTION VERIFICATION FOR EDL V\d+ COVERED|"
+                  r"PREVIEW V\d+ (?:RENDERED:|(?:WAS |IS )?ALREADY RENDERED\b))",
+                  upper):
         # This receipt means the media operation succeeded. Its review prose
         # can say "never repeat the exact call that just failed", or report
         # editorial findings. Neither makes the completed render a transient

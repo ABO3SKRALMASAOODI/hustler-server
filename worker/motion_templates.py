@@ -360,8 +360,9 @@ def normalize_params(name, params, html=None, strict=False):
     out = {}
     unknown = [k for k in params if k not in s["params"]]
     if unknown and strict:
-        raise ValueError(f"{name} has no parameter(s) {unknown}; it accepts "
-                         f"{sorted(s['params'])}")
+        # A parameter this template does not have changes nothing it draws:
+        # the graphic goes on and the caller reads what was left out.
+        print(f"[motion] {name}: left out {unknown}", flush=True)
     for key, p in s["params"].items():
         if key in params and params[key] is not None \
                 and not _unset(p, params[key]):

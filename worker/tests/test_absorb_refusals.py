@@ -383,8 +383,15 @@ def test_justify_unknown_finding_named_by_its_sentence():
 
 
 def test_outcome_false_failure_a_quoted_word_is_not_a_failure():
-    text = 'Frames for "why did the render fail" and "it failed" attached.'
+    text = ("Captured 3 frame(s): @0.08s, @24.90s, @32.80s — 3 full-detail "
+            "images follow. LOOK AT THEM YOURSELF (your question: FAILED "
+            "complete6 saved read-only native evidence)")
     assert tool_outcome.from_legacy(text).status == "success"
+    assert tool_outcome.from_legacy(
+        "Changed-section verification for EDL v12 covered every planned risk "
+        "window, and one earlier proof failed.").status == "success"
+    assert tool_outcome.from_legacy(
+        "The repaint failed (no room).").status == "transient_failure"
 
 
 def test_no_change_is_counted_as_no_change():
@@ -687,3 +694,51 @@ def test_get_words_main_alias_on_the_fast_path():
     args = {"asset_key": "main", "start": 1}
     read_tools.main_asset_alias("get_words", args, [])
     assert args == {"start": 1}
+
+
+def test_end_past_program_a_single_tool_runs_again_at_the_limit():
+    out = "REJECTED (EDL v3 unchanged): effects.regions[0]: end 25.3 exceeds the limit 25.0s."
+    assert agent_tools._end_inside_limit({"start": 20, "end": 25.3}, out) == 25.0
+    assert agent_tools._end_inside_limit({"start": 25.5, "end": 25.3}, out) is None
+    assert agent_tools._end_inside_limit({"start": 20, "end": 30}, out) is None
+    assert agent_tools._end_inside_limit({"start": 20, "end": 25.3}, "EDL v4") is None
+
+
+def test_style_invalid_unknown_field_and_range_do_not_refuse():
+    ctx = ctx_with()
+    style = {"emphasis_scale": 0.75, "max_words_per_caption": 5, "size": "l"}
+    out = agent_tools._parse_partial_style(style, ctx)
+    assert "ERR" not in str(out)
+    assert any("max_words_per_caption" in n for n in ctx._call_notes)
+
+
+def test_motion_param_invalid_a_parameter_the_template_lacks_is_left_out():
+    import motion_templates
+    out = motion_templates.normalize_params(
+        "word_slam", {"text": "HI", "nope": 1}, strict=True)
+    assert "nope" not in out and out["text"] == "HI"
+
+
+def test_batch_media_upsert_with_another_id_uses_the_operations_id():
+    edl = fx_edl()
+    edl["texts"] = [{"id": "tx1", "text": "a", "start": 0.0, "end": 1.0}]
+    out, _ = batch(edl, [{"action": "upsert", "layer": "texts", "id": "tx1",
+                          "value": {"id": "other", "end": 2.0}}])
+    assert out["texts"][0]["id"] == "tx1" and out["texts"][0]["end"] == 2.0
+
+
+def test_batch_remove_in_the_wrong_layer_finds_the_item():
+    edl = fx_edl()
+    edl["effects"]["zooms"] = [{"id": "zm6", "start": 1.0, "end": 2.0,
+                                "strength": 1.2}]
+    out, notes = batch(edl, [{"action": "remove", "layer": "motion", "id": "zm6"}])
+    assert not (out["effects"] or {}).get("zooms")
+    assert any("zm6" in n for n in notes)
+
+
+def test_batch_caption_mutes_are_held_to_the_programme():
+    edl = fx_edl(30.21)
+    out, notes = batch(edl, [{"action": "set", "layer": "caption_mutes",
+                              "value": [[0.0, 40.0]]}], duration=30.21)
+    assert out["caption_mutes"][0][1] == 30.21 or \
+        out["caption_mutes"][0]["end"] == 30.21

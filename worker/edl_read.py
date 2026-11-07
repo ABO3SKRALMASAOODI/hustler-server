@@ -66,7 +66,7 @@ _EDL_SECTION_ALIASES = {
 _EDL_OVERVIEW_ALIASES = {"program", "program_map", "overview", "summary", "video"}
 _EDL_ALL_ALIASES = {"all", "everything", "full"}
 
-PAGE_CHARS = 21000
+PAGE_CHARS = 14000
 
 
 def _dig(edl, name):

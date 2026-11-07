@@ -479,14 +479,20 @@ def _item_near_misses(edl, layers):
         if "clip_start_s" in item:
             item.setdefault("source_start_s", item.pop("clip_start_s"))
             item.pop("clip_start_s", None)
-        if not item.get("kind") and item.get("asset_key"):
+        if item.get("kind") not in ("video", "image") and item.get("asset_key"):
             item["kind"] = _media_kind(item["asset_key"])
         fit = item.get("fit")
         if isinstance(fit, str) and fit.strip().lower() in _INSERT_FIT:
             item["fit"] = _INSERT_FIT[fit.strip().lower()]
+        elif fit is not None and fit not in ("crop", "pad", "pad_blur"):
+            item.pop("fit", None)
     for item in (edl.get("texts") if "texts" in layers else None) or []:
         if not isinstance(item, dict):
             continue
+        if item.get("motion") is not None and not isinstance(item["motion"], dict):
+            item.pop("motion")
+            notes.append(f"text {item.get('id') or '?'}: motion is an object "
+                         "of keyframe lists, left out")
         if isinstance(item.get("motion"), dict) and any(
                 isinstance(v, list) and v for v in item["motion"].values()):
             # An authored curve owns the animation, as add_text has it.
@@ -507,7 +513,27 @@ def _item_near_misses(edl, layers):
                          "list")
     if "keep" in layers and isinstance(edl.get("keep"), list):
         notes += _tidy_keep(edl)
+    if "caption_mutes" in layers:
+        notes += _mutes_inside_programme(edl)
     return notes
+
+
+def _mutes_inside_programme(edl):
+    mutes, end = edl.get("caption_mutes"), _programme_end(edl)
+    if not isinstance(mutes, list) or end is None:
+        return []
+    held = []
+    for index, span in enumerate(mutes):
+        if isinstance(span, list) and len(span) == 2 \
+                and isinstance(span[1], (int, float)) and span[1] > end:
+            mutes[index] = [span[0], end]
+            held.append(f"{span[1]:g}")
+        elif isinstance(span, dict) and isinstance(span.get("end"), (int, float)) \
+                and span["end"] > end:
+            held.append(f"{span['end']:g}")
+            span["end"] = end
+    return ([f"caption mutes held to the programme's end {end:g}s."]
+            if held else [])
 
 
 def _tidy_keep(edl):
@@ -654,6 +680,26 @@ def _fit_operation(op, before, notes):
     return op
 
 
+def _remove_elsewhere(edl, layer, item_id):
+    """A remove that named the wrong layer: the id is what it means. Named
+    nowhere, the state it asked for already holds."""
+    for name, rows in list((edl.get("effects") or {}).items()):
+        if isinstance(rows, list) and any(
+                isinstance(row, dict) and row.get("id") == item_id
+                for row in rows):
+            edl["effects"][name] = [row for row in rows
+                                    if row.get("id") != item_id]
+            return f"{item_id} is in effects.{name}, not {layer}: removed there."
+    for name in ITEM_LAYERS:
+        rows = edl.get(name)
+        if isinstance(rows, list) and any(
+                isinstance(row, dict) and row.get("id") == item_id
+                for row in rows):
+            edl[name] = [row for row in rows if row.get("id") != item_id]
+            return f"{item_id} is in {name}, not {layer}: removed there."
+    return f"{item_id} is not in this edit: nothing to remove."
+
+
 def _canvas_size(ratio):
     try:
         wide, high = (float(side) for side in str(ratio).split(":"))
@@ -764,12 +810,14 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
             at = next((i for i, item in enumerate(items) if item.get("id") == item_id), None)
             if action == "remove":
                 if at is None:
-                    raise ValueError(f"{layer} item {item_id} does not exist.")
-                items.pop(at)
+                    near_ops.append(_remove_elsewhere(edl, layer, item_id))
+                else:
+                    items.pop(at)
             else:
                 value = op.get("value")
-                if not isinstance(value, dict) or value.get("id", item_id) != item_id:
+                if not isinstance(value, dict):
                     raise ValueError("An upsert requires an object with the same id.")
+                value = {k: v for k, v in value.items() if k != "id"}
                 prior = items[at] if at is not None else {}
                 merged = {**prior, **value, "id": item_id}
                 # "upsert patches one object by id": a template's params

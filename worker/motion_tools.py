@@ -2918,12 +2918,26 @@ def _hoist_face_flag(spec, params, allow):
     return params, (None if allow is None else _flag(allow))
 
 
+def _note_left_out(at, ctx, template, params):
+    """Say which parameters a template does not have (validate leaves them
+    out), so the model does not assume they drew."""
+    try:
+        known = motion_templates.spec(template).get("params") or {}
+    except Exception:  # noqa: BLE001 - the tool words a bad template
+        return
+    extra = sorted(k for k in (params or {}) if k not in known) \
+        if isinstance(params, dict) else []
+    if extra and known:
+        at.call_note(ctx, f"{template} has no {', '.join(extra)}: left out")
+
+
 def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
                        layer=None, box=None, mute_captions=None, sfx=None,
                        id=None, purpose=None, allow_face_overlap=None):
     """Place a premium browser-rendered motion graphic on the program clock."""
     at = _at()
     template = str(template or "").strip()
+    _note_left_out(at, ctx, template, params)
     try:
         spec = motion_templates.spec(template)
     except ValueError as e:
