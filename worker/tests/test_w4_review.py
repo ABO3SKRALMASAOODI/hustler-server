@@ -298,7 +298,8 @@ def test_slot_footage_streams_frame_by_frame(tmp_path):
 def test_wave4_department_shares_stay_within_their_pins():
     import json
     import agent_tools
-    from tools_ext import broll_tools, critic_tools, depth_tools, ui_tools
+    from tools_ext import (broll_tools, critic_tools, depth_tools, photo_tools,
+                           ui_tools)
 
     def size(names):
         return len(json.dumps(agent_tools.openai_tools(
@@ -308,9 +309,13 @@ def test_wave4_department_shares_stay_within_their_pins():
     # their own department since the engines release ("picture"); the
     # share pin stands
     assert size(world) <= 5_000
-    assert set(world) == set(agent_tools.TOOL_DOMAINS["picture"])
+    # The photo verbs joined the same department with a share of their own, so
+    # Wave 4's pin above is unchanged.
+    photo = sorted(photo_tools.WRITE_TOOLS)
+    assert size(photo) <= 1_500
+    assert set(world) | set(photo) == set(agent_tools.TOOL_DOMAINS["picture"])
     assert size(critic_tools.VERBS) <= 1_200
-    for name in world + list(critic_tools.VERBS):
+    for name in world + photo + list(critic_tools.VERBS):
         assert len(agent_tools.TOOLS[name][1]) <= 900, name
 
 

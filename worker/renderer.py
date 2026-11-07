@@ -3423,12 +3423,15 @@ def _filter_thread_args(graph):
 
 
 def _require_whole_picture(path, expected_s):
-    """A picture track that stops short of the program is a failed render,
+    """A picture track that stops short of its own sound is a failed render,
     whatever ffmpeg's exit code said: the container's length is the sound's,
-    so nothing downstream would notice."""
+    so nothing downstream would notice. A program that runs out with BOTH
+    tracks (an old EDL's keep past the source's real end) is only shorter, and
+    fails nothing: that render succeeded before this check existed."""
     info = media.probe(path)
     have = info.get("video_duration")
-    if have is not None and float(have) < float(expected_s) - 1.0:
+    whole = min(float(expected_s), float(info.get("duration") or expected_s))
+    if have is not None and float(have) < whole - 1.0:
         raise media.MediaError(
             f"the render's picture stops at {float(have):.1f}s of "
             f"{float(expected_s):.1f}s")

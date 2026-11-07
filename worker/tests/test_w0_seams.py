@@ -630,7 +630,10 @@ def test_runtime_packages_are_inside_the_code_fingerprint():
                      "tools_ext/__init__.py", "jobs_ext/__init__.py",
                      "devices/__init__.py"):
         assert required in rel
-    assert not any(p.endswith(".md") or "__pycache__" in p for p in rel)
+    assert not any("__pycache__" in p for p in rel)
+    # A skill's words change what the editor does, so skills are in; nothing
+    # else that is only prose is (764d12f8).
+    assert all(p.startswith("skills/") for p in rel if p.endswith(".md"))
     assert "modal_app.py" not in rel
 
 

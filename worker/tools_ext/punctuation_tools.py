@@ -1107,7 +1107,7 @@ TOOL_SPECS = {
         "radial_blur, datamosh; 'none' removes. Whole film by default; "
         "start/end (program seconds) for a range; at= one cut; cuts='scene' "
         "(default: real picture changes; jump cuts stay bare)|'every'|"
-        "[seconds]. A second call on the same cuts replaces what is there; "
+        "[seconds]. Calling again on those cuts replaces them; "
         "style='none' with a range or only=<style> takes some off. origin: "
         "centre|face|point:x,y|<motion id>.",
         {"style": {"type": "string"},
