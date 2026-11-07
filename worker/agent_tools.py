@@ -34630,7 +34630,8 @@ def _fan_out_ids(ctx, name, args):
     """``ids=[a, b]`` on a tool that takes one ``id``: the same call once for
     each, in order. None when this call is not that shape. (repair leaves
     ``ids`` alone for exactly this.)"""
-    if "ids" not in args:
+    params = tool_dialect.parameters(TOOLS[name][0]) or {}
+    if "ids" not in args or "ids" in params or "id" not in params:
         return None
     ids = _json_text(args["ids"])
     ids = ids if isinstance(ids, list) else [ids]

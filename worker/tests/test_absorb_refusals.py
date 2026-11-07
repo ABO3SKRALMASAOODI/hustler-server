@@ -870,3 +870,17 @@ def test_a_stable_list_loads_by_name():
         "claude-haiku-5-5", compact=True, names={"load_tools"}))
     props = tools[0]["function"]["parameters"]["properties"]
     assert "names" in props and "domains" not in props
+
+
+def test_a_tool_that_takes_ids_is_never_fanned_out():
+    """It recursed for ever on a tool whose own argument is ids (the replay's
+    remove_punctuation, 'maximum recursion depth exceeded')."""
+    ctx = ctx_with()
+    assert agent_tools._fan_out_ids(ctx, "remove_punctuation",
+                                    {"ids": ["jn1", "jn2"]}) is None
+
+
+def test_a_breath_of_black_at_the_end_is_no_finding():
+    import render_qc
+    assert render_qc.black_tail_finding((347.3, 347.7, True), {}) is None
+    assert "BLACK TAIL" in render_qc.black_tail_finding((340.0, 347.7, True), {})

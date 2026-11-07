@@ -112,6 +112,9 @@ STALL_CARD_DARK = 40        # a card frame whose brightest pixel is under this
                             # on 16:9, reads >= 150 settled)
 STALL_SLOW = 0.5            # a speed under this repeats frames
 BLACK_TAIL_MAX_S = 120.0    # how far back a black ending is traced
+BLACK_TAIL_MIN_S = 1.0      # shorter is a breath at the end, not a defect: a
+                            # slideshow's own last 0.4 s blocked every turn of
+                            # p5520 with a repair the request forbade
 BLACK_TAIL_DENSE_S = 8.0    # the frame-exact refine window, at most
 MAX_FULL_PASS_S = 180.0     # programmes longer than this skip the frame pass
                             # and sample faces on keyframes
@@ -2979,6 +2982,8 @@ def black_tail_finding(tail, plan_):
         return None
     t0, t1, exact = tail
     n = t1 - t0
+    if n < BLACK_TAIL_MIN_S:
+        return None
     src = ""
     try:
         s0 = plan_.get("out_to_src")(t0) if plan_.get("out_to_src") else None
