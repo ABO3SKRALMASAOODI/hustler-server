@@ -484,6 +484,8 @@ class Ctx:
         self.gap = None
         self.shots = []
         self.blocks = []
+        self.traffic = []          # what type_traffic and display did to type that asked for a taken seat
+        self.cur_gid = None        # the gesture running now: every item it adds carries its id as _g
         self.boxes = {}
         self.own = {}
         self.matte = None
@@ -513,6 +515,8 @@ class Ctx:
         if not i or i in self.byid:
             self.find(f"item dropped: id {i!r} is missing or used twice")
             return None
+        if self.cur_gid and "_g" not in it:
+            it["_g"] = self.cur_gid
         self.items.append(it)
         self.byid[i] = it
         return it
@@ -1577,6 +1581,23 @@ def hold_whole(rect, marks, target):
     return c
 
 
+FILL_MIN_H = 0.55       # a landscape upload in a portrait frame covers at least this much of its height
+
+
+def fill_floor(ctx, c, target):
+    """p5565: a 16:9 video call in 9:16 held every printed word whole, so it sat at 46 % of the frame's
+    height on a dark blurred band. A frame-shaped crop that passes the source's top and bottom shows the
+    upload at 1/h of the frame's height; past the floor it narrows about its centre, so the picture is
+    larger and the blurred fill stays above and below. Side columns are what it gives up."""
+    if target >= 0.75 or c[3] - c[1] <= 1.0 / FILL_MIN_H + 1e-6:
+        return c
+    w = target / FILL_MIN_H
+    cx = clamp((c[0] + c[2]) / 2, w / 2, 1 - w / 2)
+    h = w / target
+    ctx.filled = getattr(ctx, "filled", 0) + 1
+    return [cx - w / 2, 0.5 - h / 2, cx + w / 2, 0.5 + h / 2]
+
+
 def keep_marks_whole(ctx, crop, src, asset, W, H):
     """p5363: the 9:16 crop of a 4:3 cartoon cut its printed title to 'a Parka' and the drawn characters
     off at the bottom. A crop of the upload holds every printed word and head it touches whole."""
@@ -1587,17 +1608,18 @@ def keep_marks_whole(ctx, crop, src, asset, W, H):
         return crop
     target = (W / H) * (sh / sw)
     marks = main_marks(ctx, src[0], src[1], words=abs(target - 1.0) > 0.02, aspect=sh / sw)
+    many = isinstance(crop[0], (list, tuple))
     if not marks:
-        return crop
-    if isinstance(crop[0], (list, tuple)):
+        return [fill_floor(ctx, list(c), target) for c in crop] if many else fill_floor(ctx, list(crop), target)
+    if many:
         held = [hold_whole(c, marks, target) for c in crop]
         if held != [list(c) for c in crop]:
             ctx.held_whole = getattr(ctx, "held_whole", 0) + 1
-        return held
+        return [fill_floor(ctx, c, target) for c in held]
     held = hold_whole(crop, marks, target)
     if held != list(crop):
         ctx.held_whole = getattr(ctx, "held_whole", 0) + 1
-    return held
+    return fill_floor(ctx, held, target)
 
 
 def video_src(ctx, ref, asset, n, rng):
@@ -2453,6 +2475,8 @@ def emit_word(ctx, iid, t, v, x, y, a, end, ink, role, chunk=None, region=None, 
     """One word. While gestures run the picture under it isn't final: a salvo replaces the base after
     this line, and a later gesture can too. So words wait for the sealed film, and an anchor on one
     still resolves."""
+    if ctx.cur_gid and "_g" not in extra:
+        extra["_g"] = ctx.cur_gid
     if ctx.waiting is None:
         place_word(ctx, iid, t, v, x, y, a, end, ink, role, chunk, region, **extra)
     elif t and end > a:
@@ -2661,8 +2685,14 @@ def display(ctx, iid, text, a, z, opt, b=None):
     # (p5302: LAR NOVO MÓVEIS across his hair at 19.0 and 22.25 s).
     on_head = not (opt.get("behind") and ctx.matte) and any(rects_touch(probe, r) for f in sorted({a, (a + z) // 2, max(a, z - 1)})
                                                              for r in head_rects(ctx, shot_at(ctx, f)))
-    if solve or on_marks or on_head:      # words already printed in the picture are the picture's. Type doesn't land on them
+    # Nor on other type: p5565 drew FORENSIC SCIENTIST over PILOT and "next generation" over WELCOME, two
+    # bigs of one beat on the same free seat. A seat another type item holds at the same time is taken.
+    on_type = [bl for bl in ctx.blocks if bl[0] < z and bl[1] > a and rects_touch(probe, bl[2])]
+    if solve or on_marks or on_head or on_type:      # words already printed in the picture are the picture's. Type doesn't land on them
+        y_was = y_mid
         x0, y_mid = solve_seat(ctx, [x0, y_mid], block_w, block_h, a, z)
+        if on_type:
+            ctx.traffic.append({"id": iid, "did": "moved", "dy": round(y_mid - y_was, 3), "at": "seat"})
         probe = [x0 - block_w / 2, y_mid - block_h / 2, x0 + block_w / 2, y_mid + block_h / 2]
         if on_marks and any(rects_touch(probe, r) for r in mark_rects(ctx, a, z)):
             ctx.find(f"{iid}: type sits on words printed in the picture, and no clear seat exists. Another picture, or a card")
@@ -3957,10 +3987,13 @@ def run_gestures(ctx):
                     continue
                 g = dict(g)
                 g["_gid"] = f"{b.id}.{n}" if k == 0 else f"{b.id}.{n}{k}"
+                ctx.cur_gid = g["_gid"]
                 try:
                     GESTURES[n]["fn"](ctx, b, g, k)
                 except (ValueError, TypeError, KeyError, IndexError) as e:
                     ctx.find(f"{b.id}: gesture {n} failed: {e}")
+                finally:
+                    ctx.cur_gid = None
 
 
 RAW_KINDS = {"shot", "card", "flash", "word"}
@@ -4125,6 +4158,164 @@ def mono_cap(ctx):
         ctx.base_grade["sat"] = 0.5
         ctx.film_out["grade"]["sat"] = 0.5
         ctx.find("mono: a film-wide black and white grade was refused")
+
+
+TRAFFIC_GAP = 0.01            # the least clear space between two type items, in frame fractions
+TRAFFIC_MIN_S = 0.8           # a delayed item still holds this long, or it goes
+
+
+def type_rect(ctx, it):
+    """Where a type item draws over its whole life, in frame fractions: every frame's position, at its
+    largest scale. A word's box runs from its cap height to under its descenders. None for what isn't type."""
+    if it["k"] == "word":
+        v = ctx.voices.get(it.get("v"))
+        if not v:
+            return None
+        w = text_px(it["t"], v) / ctx.W
+        asc, desc = 0.74 * v["px"] / ctx.H, 0.22 * v["px"] / ctx.H
+        xs = it["x"] if isinstance(it["x"], list) else [it["x"]]
+        ys = it["y"] if isinstance(it["y"], list) else [it["y"]]
+        r = [min(xs), min(ys) - asc, max(xs) + w, max(ys) + desc]
+    elif it["k"] == "card" and it.get("pic") == "plate":
+        xs = it["x"] if isinstance(it["x"], list) else [it["x"]]
+        ys = it["y"] if isinstance(it["y"], list) else [it["y"]]
+        r = [min(xs) - it["w"] / 2, min(ys) - it["h"] / 2, max(xs) + it["w"] / 2, max(ys) + it["h"] / 2]
+    else:
+        return None
+    sv = it.get("s", 1)
+    sc = max(sv) if isinstance(sv, list) and sv else (float(sv) if isinstance(sv, (int, float)) else 1.0)
+    if sc > 1.0:
+        cx, cy, hw, hh = (r[0] + r[2]) / 2, (r[1] + r[3]) / 2, (r[2] - r[0]) * sc / 2, (r[3] - r[1]) * sc / 2
+        r = [cx - hw, cy - hh, cx + hw, cy + hh]
+    return [max(r[0], 0.0), r[1], min(r[2], 1.0), r[3]]
+
+
+def _grow(r, m):
+    return [r[0] - m, r[1] - m, r[2] + m, r[3] + m]
+
+
+def _shift_item(it, dy):
+    """The same item, dy lower (negative: higher). Every position it carries moves together."""
+    for key in ("y",):
+        v = it.get(key)
+        if isinstance(v, list):
+            it[key] = [q + dy for q in v]
+        elif isinstance(v, (int, float)):
+            it[key] = v + dy
+    if isinstance(it.get("region"), list) and len(it["region"]) == 4:
+        r = it["region"]
+        it["region"] = [r[0], r[1] + dy, r[2], r[3] + dy]
+    rect = it.get("rect")
+    if isinstance(rect, list) and rect:
+        if isinstance(rect[0], list):
+            it["rect"] = [[q[0], q[1] + dy, q[2], q[3] + dy] for q in rect]
+        elif len(rect) == 4:
+            it["rect"] = [rect[0], rect[1] + dy, rect[2], rect[3] + dy]
+
+
+def _faces_over(ctx, a, z):
+    out = []
+    for f in sorted(set(range(a, z, 15)) | {max(a, z - 1)}):
+        out += face_rects(ctx, shot_at(ctx, f))
+    return out
+
+
+def type_traffic(ctx):
+    """No two type items share a place at the same time. Display words, chips and their labels, counters,
+    tickers and type-on lines are each one item: everything one gesture drew moves together, and what one
+    gesture lays over itself (a counter's steps, a chip's word on its label, a size ladder) is its own
+    design. Across gestures nothing layers type on type by design. Captions are the voice and hold their
+    seats. When the Score asks for a taken place, the later item moves to the nearest clear height, then
+    waits until the place is free, then goes; ctx.traffic and the meter say which. A running line (a ticker)
+    never crosses a face either. p5565: a ticker, two bigs and a chip drawn through each other."""
+    units, fixed = {}, []
+    for it in ctx.items:
+        if it["k"] == "word" and it.get("role") == "cap":
+            r = type_rect(ctx, it)
+            if r:
+                fixed.append((it["f"][0], it["f"][1], r, "caption"))
+            continue
+        key = it.get("_g") or it["id"]
+        units.setdefault(key, []).append(it)
+    rows = []
+    for key, members in units.items():
+        words = [m for m in members if m["k"] == "word"]
+        if not words:
+            continue
+        rects = [r for r in (type_rect(ctx, m) for m in members) if r]
+        if not rects:
+            continue
+        a, z = min(w["f"][0] for w in words), max(w["f"][1] for w in words)
+        rect = [min(r[0] for r in rects), min(r[1] for r in rects), max(r[2] for r in rects), max(r[3] for r in rects)]
+        running = any(isinstance(w.get("x"), list) and max(w["x"]) - min(w["x"]) > 0.3 for w in words)
+        rows.append({"key": key, "a": a, "z": z, "rect": rect, "items": members, "running": running})
+    rows.sort(key=lambda u: (u["a"], u["key"]))
+    kept = list(fixed)
+    gone, cut = set(), {}
+
+    def hits(rect, a, z, faces):
+        out = [k for k in kept if k[0] < z and a < k[1] and rects_touch(_grow(rect, TRAFFIC_GAP / 2), _grow(k[2], TRAFFIC_GAP / 2))]
+        return out + [(a, z, f, "face") for f in faces if rects_touch(rect, f)]
+
+    def seat(u, a, z, faces):
+        """The smallest move up or down that clears every type item, face and the watermark."""
+        r = u["rect"]
+        hard = [k[2] for k in kept if k[0] < z and a < k[1]] + _faces_over(ctx, a, z) + [list(KEEPOUT)]
+        # words printed in the picture are the picture's: a seat clear of them first, then any clear seat
+        for obst in (hard + mark_rects(ctx, a, z), hard):
+            tries = sorted({0.0} | {q[3] + TRAFFIC_GAP - r[1] for q in obst} | {q[1] - TRAFFIC_GAP - r[3] for q in obst}, key=abs)
+            for dy in tries:
+                m = [r[0], r[1] + dy, r[2], r[3] + dy]
+                if m[1] < 0.03 or m[3] > 0.96:
+                    continue
+                if not any(rects_touch(m, q) for q in obst):
+                    return dy
+        return None
+
+    for u in rows:
+        faces = _faces_over(ctx, u["a"], u["z"]) if u["running"] else []
+        hit = hits(u["rect"], u["a"], u["z"], faces)
+        if not hit:
+            kept.append((u["a"], u["z"], u["rect"], u["key"]))
+            continue
+        against = sorted({h[3] for h in hit})
+        dy = seat(u, u["a"], u["z"], faces)
+        if dy is not None:
+            for it in u["items"]:
+                _shift_item(it, dy)
+            u["rect"] = [u["rect"][0], u["rect"][1] + dy, u["rect"][2], u["rect"][3] + dy]
+            kept.append((u["a"], u["z"], u["rect"], u["key"]))
+            ctx.traffic.append({"id": u["key"], "did": "moved", "dy": round(dy, 3), "against": against})
+            continue
+        a2 = max(h[1] for h in hit)
+        if u["z"] - a2 >= TRAFFIC_MIN_S * ctx.fps and not hits(u["rect"], a2, u["z"], faces):
+            for it in u["items"]:
+                p, q = it["f"]
+                if q <= a2:
+                    gone.add(it["id"])
+                elif p < a2:
+                    cut[it["id"]] = a2
+            kept.append((a2, u["z"], u["rect"], u["key"]))
+            ctx.traffic.append({"id": u["key"], "did": "delayed", "frames": a2 - u["a"], "against": against})
+            continue
+        gone.update(it["id"] for it in u["items"])
+        ctx.traffic.append({"id": u["key"], "did": "dropped", "against": against})
+    if gone or cut:
+        out = []
+        for it in ctx.items:
+            if it["id"] in gone:
+                continue
+            if it["id"] in cut:
+                it = sub_item(it, cut[it["id"]], it["f"][1], it["id"])
+                if "on" in it:
+                    it["on"] = max(it["on"], it["f"][0])
+            out.append(it)
+        ctx.items = out
+        for i in gone:
+            ctx.byid.pop(i, None)
+    for t in ctx.traffic:
+        if t.get("at") != "seat":
+            ctx.find(f"type {t['id']} {t['did']}: its place was taken by {', '.join(t['against'])}")
 
 
 def keepout_sweep(ctx):
@@ -4606,7 +4797,8 @@ def meter(ctx, l1):
          "sounds": len(l1["sound"]), "sounds10": round(len(l1["sound"]) / max(dur, 1e-3) * 10, 1),
          "word_lock": None if lock is None else round(lock, 2), "word_lock_chance": None if chance is None else round(chance, 2),
          "dead_air_s": round(ctx.dead_air, 2), "ceiling": cap, "ceiling_why": list(low) if low else None,
-         "sources": source_mix(ctx, l1), "gestures": gesture_counts(ctx), "layers": layer_facts(ctx, l1), "blanks": blanks, "facts": facts, "busy_seconds": busy, "by_beat": beats, "rejects": [list(r) for r in ctx.rejects], "findings": list(ctx.findings), "soft": dict(ctx.soft), "band": ctx.band_name}
+         "sources": source_mix(ctx, l1), "gestures": gesture_counts(ctx), "layers": layer_facts(ctx, l1), "blanks": blanks, "facts": facts, "busy_seconds": busy, "by_beat": beats, "rejects": [list(r) for r in ctx.rejects], "findings": list(ctx.findings), "soft": dict(ctx.soft), "band": ctx.band_name,
+         "type_traffic": [dict(t) for t in ctx.traffic], "framed_larger": getattr(ctx, "filled", 0)}
     return m
 
 
@@ -4801,6 +4993,7 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
     build_sound(ctx)
     mono_cap(ctx)
     seal(ctx)
+    type_traffic(ctx)
     keepout_sweep(ctx)
     flash_gate(ctx)
     l1 = to_l1(ctx)

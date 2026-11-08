@@ -2194,7 +2194,8 @@ def create_upload(user_id, project_id):
         cur.execute("""SELECT 1 FROM assets
                        WHERE project_id = %s AND kind = 'original'
                        LIMIT 1""", (project_id,))
-        if cur.fetchone() and _subscribe_gate_applies(cur, user_id):
+        if cur.fetchone() and _more_uploads_walled(cur, user_id,
+                                                   project_id):
             body = dict(_subscribe_offer_body())
             body["error"] = _UPLOAD_SUBSCRIPTION_MESSAGE
             body["subscribe_gated"] = True
@@ -2299,7 +2300,41 @@ def _gate_refuses_more_uploads(cur, project_id, user_id, key):
     keys = [r["storage_key"] for r in cur.fetchall() or []]
     if not keys or key in keys:
         return False
-    return bool(_subscribe_gate_applies(cur, user_id))
+    return _more_uploads_walled(cur, user_id, project_id)
+
+
+def _trial_allows_more(cur, user_id, project_id):
+    """The trial project of an unsubscribed account still has allowance:
+    the owner's rule (8 Nov) is no paywall before Download or before the
+    trial runs out, so its extra clips are accepted like a payer's. The same
+    test a trial request passes (free_trial.request_allowance). A lookup
+    failure keeps the wall."""
+    try:
+        cur.execute("SAVEPOINT trial_more_uploads")
+        import free_trial
+        ok = bool((free_trial.request_allowance(cur, user_id, project_id)
+                   or {}).get("allowed"))
+        cur.execute("RELEASE SAVEPOINT trial_more_uploads")
+        return ok
+    except Exception as e:                                  # pragma: no cover
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT trial_more_uploads")
+            cur.execute("RELEASE SAVEPOINT trial_more_uploads")
+        except Exception:
+            pass
+        print(f"[free_trial] allowance lookup failed for project "
+              f"{project_id}: {e}", flush=True)
+        return False
+
+
+def _more_uploads_walled(cur, user_id, project_id):
+    """A project that holds its original takes no further transfer from a
+    subscribe-gated account, unless it is that account's trial project with
+    allowance left (p5565, 8 Nov: a trial with $0.40 left was refused two
+    clips with "Upgrade to start editing it")."""
+    if not _subscribe_gate_applies(cur, user_id):
+        return False
+    return not _trial_allows_more(cur, user_id, project_id)
 
 
 @video_bp.route("/projects/<int:project_id>/uploads/resume", methods=["POST"])

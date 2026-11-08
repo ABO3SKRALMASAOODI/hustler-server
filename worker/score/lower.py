@@ -22,6 +22,7 @@ import score.compiler as score
 import score.shape as shape
 
 OV_MIN_S, TX_MIN_S = 0.2, 0.3      # today's minimums: schemas.validate_edl
+RUN_FIT = 0.86                     # a running line keeps the whole words that fit this share of the frame
 KF_MAX = 20                        # keyframes on one curve, under schemas.ANIM_MAX_KEYFRAMES
 FAMILY = {"Anton-Regular": ("Anton", False), "BebasNeue-Regular": ("Bebas Neue", False),
           "ArchivoBlack-Regular": ("Archivo Black", False), "Poppins-Black": ("Poppins Black", False),
@@ -676,6 +677,22 @@ def text_item(l1, it, a, b, rep):
     def cy(y):
         return float(y) - 0.36 * px / H
     x0, y0 = it.get("x", 0.5), it.get("y", 0.5)
+    # A running line (a ticker) wider than the frame: today's renderer wraps a line at the frame's width,
+    # from its anchor, so p5565's ticker drew a column of INTERNATIONAL STEM DAY eight high across the
+    # film. It runs as the whole words that fit one line, crossing the frame once over its life.
+    running = animated(it.get("x")) and w_px > RUN_FIT * W
+    if running:
+        words, fit = it["t"].split(" "), ""
+        for k in range(1, len(words) + 1):
+            cand = " ".join(words[:k]).strip()
+            if fit and (text_w(cand, v) if v.get("font") else len(cand) * px * 0.5) > RUN_FIT * W:
+                break
+            fit = cand
+        xs = it["x"]
+        left = xs[-1] < xs[0]
+        it = dict(it, t=fit, x=0.5)
+        w_px = text_w(fit, v) if v.get("font") else len(fit) * px * 0.5
+        rep["running_lines_fitted"] = rep.get("running_lines_fitted", 0) + 1
     tx = {"id": f"tx.{it['id']}"[:60], "text": it["t"], "start": r2(a / fps), "end": r2(b / fps), "template": "title", "font": face[0],
           "font_size": round(min(max(libass_px(v, px) / min(W, H), 0.012), 0.3), 4), "text_align": "center", "max_width": 0.96, "color": it.get("ink") or "#FFFFFF",
           "uppercase": False, "shadow": 1.0 if (v.get("shadow") or {}).get("a") else 0.0, "outline_width": 0.0, "entrance": "none", "exit": "none"}
@@ -698,6 +715,11 @@ def text_item(l1, it, a, b, rep):
         if animated(val):
             n = b - a
             motion[key] = curve([fn(q) for q in (list(val) + [val[-1]] * n)[:n]], fps)
+    if running:
+        n = max(b - a, 2)
+        path = [(1.0 - k / (n - 1)) if left else k / (n - 1) for k in range(n)]
+        motion["x"] = curve(path, fps)
+        tx["x"] = 0.5
     if motion:
         tx["motion"] = motion
     if it.get("behind"):
