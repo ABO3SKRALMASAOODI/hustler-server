@@ -80,7 +80,11 @@ FIXING_STALE = timedelta(hours=6)
 # release): the next run could only repeat the last. Without this quiet every
 # watch would start a Fixer on it, and the weekly limit is what stopped them all
 # for 70 hours. A new failure on it ends the quiet at once.
-RELEASE_QUIET = timedelta(hours=6)
+# 8 Nov: 6 h re-picked #386, #387, #401 and #883 every 6 hours: a Fixer
+# claimed, found nobody stuck and nothing to change, and handed back within two
+# minutes, each run costing Claude usage. A new failure, a failed proof or a
+# customer stuck still re-picks at once; only a quiet hand-back waits a day.
+RELEASE_QUIET = timedelta(hours=24)
 # A scheduled agent's own heartbeat (ops_review.py heartbeat). For 70 hours from
 # 2 Nov nothing ran and nothing said so; the alert can only live here, because
 # whatever stopped them stops anything else on the Mac too.
