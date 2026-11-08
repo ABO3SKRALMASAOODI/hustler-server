@@ -385,16 +385,15 @@ def test_a_close_through_the_gate_is_fixed_with_what_was_wrong(db):
             "14:00 Dubai (session p5302, run r1)") in text
 
 
-def test_blocked_with_the_step_when_the_mac_sleeps_never_an_issue_too(db):
+def test_a_sleeping_mac_sends_no_per_ticket_email_then_the_issue_at_claim(db):
+    """8 Nov: the Mac slept 06:14-06:35 UTC and #93, five days old, got its own
+    Blocked email. A silent watch is one "automatic agent stopped" email."""
     db.open(4, T0)
     db.beat(T0 - 30 * MIN)                   # the watch stopped
-    got = run(db, T0, T0 + 30 * MIN, beat=False)
-    assert subjects(got) == [f"Blocked: {TITLE} (P0 #4)"]
-    from routes.newsletter_content import plain_text
-    text = plain_text(got[0][2])
-    assert "Only you can clear it: wake the Mac" in text
+    assert run(db, T0, T0 + 30 * MIN, beat=False) == []
     db.claim(4, T0 + 60 * MIN)
-    assert run(db, T0 + 60 * MIN, T0 + 3 * 60 * MIN) == []
+    assert subjects(run(db, T0 + 60 * MIN, T0 + 3 * 60 * MIN)) == [
+        f"Issue: {TITLE} (P0 #4), being fixed"]
 
 
 def test_blocked_with_the_step_when_a_provider_is_out_of_credit(db):
@@ -526,7 +525,7 @@ def test_only_what_the_owner_can_clear_passes_the_daily_cap(db):
     db.open(6, T0)
     db.claim(6, T0 + 2 * MIN)
     got = tick(db, T0 + 20 * MIN)         # the watch last beat at T0
-    assert got == [f"Blocked: {TITLE} (P0 #5)"]
+    assert got == []                      # silent watch: no per-ticket mail
     assert not any(":6:" in k for k in db.kv)   # its ISSUE waits unclaimed
 
 
@@ -585,5 +584,4 @@ def test_rendered_samples_of_the_three_kinds(db, capsys):
         for _, subject, body in got:
             print(f"\n──── {subject.split(':')[0]} ────\nSubject: {subject}\n"
                   f"{plain_text(body)}")
-    assert [s.split(":")[0] for s in subjects(got)] == ["Issue", "Blocked",
-                                                        "Fixed"]
+    assert [s.split(":")[0] for s in subjects(got)] == ["Issue", "Fixed"]

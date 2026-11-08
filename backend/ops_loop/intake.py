@@ -86,7 +86,9 @@ RELEASE_QUIET = timedelta(hours=6)
 # whatever stopped them stops anything else on the Mac too.
 HEARTBEAT_LATE = {"p0_watch": timedelta(minutes=20),    # 3 runs missed
                   "fixer": timedelta(hours=26),
-                  "reviewer": timedelta(hours=3)}
+                  # Runs every 6 h until the weekly reset of 12 Nov (usage):
+                  # 3 h called a healthy Reviewer silent at 00:00 on 8 Nov.
+                  "reviewer": timedelta(hours=7)}
 REVIEWS_LATE = timedelta(hours=24)
 # The intake's own last pass. It ticks every minute; a pass that keeps raising
 # leaves no ticket and no row, and until now only the next morning's digest said

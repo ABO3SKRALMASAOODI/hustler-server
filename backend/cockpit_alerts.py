@@ -142,7 +142,9 @@ def _customer_sql(alias="u"):
 P0_PREFIX = "p0:"
 STATE_MAIL_FROM = datetime(2026, 11, 7, 15, 0, tzinfo=timezone.utc)
 FIXED_MAIL_FROM = datetime(2026, 11, 7, 16, 50, tzinfo=timezone.utc)
-OWNER_STEPS = ("watch", "provider")     # BLOCKED only the owner can clear
+# 8 Nov: a silent watch is one "automatic agent stopped" email for the day,
+# not a Blocked email per ticket (#93, five days old, was emailed at 06:35).
+OWNER_STEPS = ("provider",)     # BLOCKED only the owner can clear
 # The provider error codes the out-of-credit alert below reads (event_alerts),
 # with who to top up. Machine text from the provider, never a customer's.
 PROVIDER_OUT = (("credit balance is too low", "Anthropic"),
@@ -366,7 +368,11 @@ def p0_alerts(rcur, now):
             cause, reason, step = causes[0]
             out.append((ep + "blocked:" + cause,
                         *p0_blocked_mail(s, now, cause, reason, step)))
-        elif not sent and now >= issue_at:
+        elif not sent and now >= issue_at and (s.get("claimed_at") or not (
+                beat is None or beat >= late)):
+            # While the watch is silent nothing is "being fixed": the one
+            # "automatic agent stopped" email says so, and the Issue follows
+            # when a Fixer claims it.
             out.append((ep + "issue", *p0_issue_mail(s, now, beat)))
     return out
 
