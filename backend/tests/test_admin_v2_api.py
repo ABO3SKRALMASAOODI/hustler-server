@@ -151,7 +151,12 @@ def summary_fixtures(monkeypatch, cash_error=None):
     monkeypatch.setattr(health, "engine", lambda *a, **k: {
         "status": "good", "text": "Working", "queued": 0, "running": 1,
         "last_activity_at": None, "oldest_queued_s": None, "stuck": 0})
-    now = datetime.now(timezone.utc)
+    # Midday, frozen: "today" starts at local midnight, so events placed a
+    # few minutes before a real clock fell into yesterday right after midnight
+    # (verify-production-release failed at 00:02 Dubai on 9 Nov).
+    now = datetime.now(timezone.utc).replace(hour=8, minute=0, second=0,
+                                              microsecond=0)
+    monkeypatch.setattr(ranges, "utc_now", lambda: now)
     monkeypatch.setattr(insights, "activation_firsts", lambda cur, since: [
         ("upload", 1, now - timedelta(minutes=5)),
         ("upload", 2, now - timedelta(days=1, minutes=5)),
