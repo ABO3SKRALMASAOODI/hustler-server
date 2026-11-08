@@ -16,7 +16,8 @@ import re
 import sys
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
+from pydantic import (AfterValidator, BaseModel, Field, field_validator,
+                      model_serializer, model_validator)
 
 # SINGLE source of truth for the index pipeline version — bump it HERE, by
 # commit, whenever index OUTPUT changes (transcriber switch, segmentation
@@ -974,6 +975,16 @@ class Frame(BaseModel):
     # it. A customer asked "enhance the video quality to 2k" and the product
     # had no way to write a 2K file, so the editor guessed at the canvas.
     resolution: Optional[Literal["2k", "4k"]] = None
+
+    @model_serializer(mode="wrap")
+    def _dump_without_unset_resolution(self, handler):
+        # A stored EDL is its dump: every frame written before #861 must dump
+        # (and so store and compare) byte-identically, so an unset resolution
+        # is absent, not None. A set "2k"/"4k" dumps and round-trips as usual.
+        data = handler(self)
+        if isinstance(data, dict) and data.get("resolution") is None:
+            data.pop("resolution", None)
+        return data
 
     @field_validator("picture")
     @classmethod

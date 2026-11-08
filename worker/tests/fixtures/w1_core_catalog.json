@@ -1,5 +1,5 @@
 {
- "bytes": 82087,
- "sha256": "fe936be810516b95692760fa7d7d175ea6d6e05345070c6554421ff136ab701d",
- "_doc": "Core compact catalog with automatic wave growth set aside. add_kinetic_text takes authored phrases on footage with no speech and its compact line says so (+30 B, ticket 859). Existing 82,700 B ceiling unchanged. Previous pin: 82,057 B."
+ "bytes": 82066,
+ "sha256": "4cb81336d37b72b980be11500994ae9403f250727f74071f67071ad1d64ffa30",
+ "_doc": "Core compact catalog with automatic wave growth set aside. enhance_video's resolution enum (+55 B, #861 2K export) and extract_audio's part enum (+85 B, #386 clip music) are paid for by trims that lose no fact: enhance_video gets a compact line naming the export size, extract_audio's line is tightened, and set_picture_card, apply_look and add_zoom drop prose that restated their own property names and enum values. Existing 82,700 B ceiling and the 81,688 + 400 B share unchanged. Previous pin: 82,087 B."
 }

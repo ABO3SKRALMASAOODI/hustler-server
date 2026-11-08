@@ -221,6 +221,12 @@ def test_meter_writes_the_one_running_total_and_alerts_once(monkeypatch):
     # customer or a provider out of credit); the credit switch alerts once.
     assert meter.alerts == []
     monkeypatch.setattr(claude_trial, "POOL_ALERTS_ENABLED", True)
+    # The key names the cycle's end, so the clock sits inside the first
+    # cycle (it rolled to 8 Dec on 8 Nov 2026 and the pin went stale).
+    import datetime as _dt
+    import claude_credit
+    monkeypatch.setattr(claude_credit, "now_utc", lambda: _dt.datetime(
+        2026, 11, 1, 12, tzinfo=_dt.timezone.utc))
     claude_trial.activate(scope)
     try:
         claude_trial.meter("claude-haiku-5-5", 0.25)

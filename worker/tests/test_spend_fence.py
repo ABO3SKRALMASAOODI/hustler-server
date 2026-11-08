@@ -5,6 +5,7 @@ the customers' credit line and the automatic switch turned the free trial off.
 Every model dollar now lands on one ledger by lane; company spend stops at its
 own share before the call and can never reach what a customer gets.
 """
+import inspect
 import re
 import threading
 from pathlib import Path
@@ -320,7 +321,11 @@ def test_the_trial_meter_keeps_a_company_call_off_the_line(monkeypatch):
 
     class Db:
         def run(self, fn, *args):
-            seen.append(args)
+            # By name, not position: _meter_tx grows keyword flags (analysis,
+            # #861), and the line's decision is the `customer` one.
+            bound = inspect.signature(fn).bind(None, *args)
+            bound.apply_defaults()
+            seen.append(bound.arguments)
             return 0.0, 0.0
     monkeypatch.setattr(claude_trial, "_metering_db", lambda: Db())
     monkeypatch.setattr(claude_trial, "_pool_alerts", lambda *a: None)
@@ -336,7 +341,8 @@ def test_the_trial_meter_keeps_a_company_call_off_the_line(monkeypatch):
     finally:
         claude_trial.deactivate()
         llm.set_recorder(None)
-    assert [args[-1] for args in seen] == [False, True]
+    assert [args["customer"] for args in seen] == [False, True]
+    assert [args["analysis"] for args in seen] == [False, False]
 
 
 def test_our_own_upload_is_company_spend_on_the_sound_lanes_thread(ledger, monkeypatch):

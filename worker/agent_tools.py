@@ -34519,8 +34519,7 @@ _COMPACT_CONTRACTS = {
         "word, hard cut out at end (end on a cut or sentence turn); landing="
         "start ON a cut, settles from 0.12-0.18; push_in=slow 0.05-0.12 push "
         "over a 3s+ hold that builds; pulse=0.3s beat thump; shake=impact; ease=gentle "
-        "push. rect frames a region; cx/cy pins a point. ramp_s, overshoot, "
-        "rotate, shake shape the move."),
+        "push. rect frames a region; cx/cy pins a point."),
     "apply_edit_batch": (
         "Atomic edits, no render wait. Read get_edl; use current base_version. "
         "set replaces one complete layer; upsert patches one object by id; "
@@ -34555,11 +34554,14 @@ _COMPACT_CONTRACTS = {
         "Inspect an uploaded IMAGE or VIDEO by its exact asset_key from list_assets. "
         "Times are relative to that source. For audio use get_audio_analysis; "
         "for edited output use render_preview then look_at."),
+    "enhance_video": (
+        "PICTURE QUALITY, not a look: 'make it clearer / sharper / 2k'. "
+        "resolution sizes the export."),
     "extract_audio": (
-        "Extract sound from an uploaded video_clip by exact asset_key. Returns "
-        "a music storage_key to place with add_music/add_sfx. Silent sources "
-        "cannot yield sound. part=music drops its speech. Main-video audio is "
-        "already in the edit; use set_volume."),
+        "Extract an uploaded video_clip's sound by exact asset_key, as a music "
+        "storage_key for add_music/add_sfx; a silent clip has none. "
+        "part=music: no speech. Main-video audio is already in the edit; use "
+        "set_volume."),
     "get_edl": (
         "Read current version and exact EDL shapes. sections accepts layer names "
         "or an array; compact=true gives an index; offset/limit page long lists. "
@@ -34638,7 +34640,7 @@ _COMPACT_CONTRACTS = {
         "ONE committed look in one version: caption look + grade + grain + "
         "transitions, reporting every component. Premium: "
         "editorial (podcast/interview default), creator_punch, cinematic_doc, "
-        "mono_noir, clean_minimal; legacy hype, clean, cinematic, luxury, meme. "
+        "mono_noir, clean_minimal; others legacy. "
         "Places no sound unless transition_sounds=true (sounds are optional, "
         "never rules); read the receipt before adding junction cues. Its music "
         "option, only when the user asked for background music, takes the "
@@ -34667,8 +34669,8 @@ _COMPACT_CONTRACTS = {
         "add_sfx sound:swish_1 at the cut unless a look placed one. "
         "One cut: a motion template."),
     "set_picture_card": (
-        "Footage-only rounded card for start/end program seconds (box, radius, "
-        "border, shadow, entrance/exit). Its footage comes from the full SOURCE "
+        "Footage-only rounded card for start/end program seconds. Its footage "
+        "comes from the full SOURCE "
         "frame (source='auto' frames the speaker with headroom, following one "
         "who moves inside a shot — still while they sway, a glide when a "
         "still card would cut the head, never across a cut; a "
