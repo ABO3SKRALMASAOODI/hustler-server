@@ -212,7 +212,8 @@ def _turn(cur, w, now):
     """A turn that went silent: it spoke again, or the request ended. A slice
     handing over to the next is not an end: 127 turns in 14 days ended that way.
     The customer's own "hello?" is the opposite of the turn speaking (account
-    2752 sent "؟" two minutes in and waited another 1,060 s)."""
+    2752 sent "؟" two minutes in and waited another 1,060 s). A step row or the
+    turn's preview render moving is the product speaking (ticket #842)."""
     cur.execute("""SELECT 1 FROM video_jobs
                     WHERE project_id = %s AND type = 'agent_turn'
                       AND state = ANY(%s) LIMIT 1""",
@@ -221,9 +222,15 @@ def _turn(cur, w, now):
         return RECOVERED
     cur.execute("""SELECT 1 FROM chat_messages m
                      JOIN projects p ON p.chat_session_id = m.session_id
-                    WHERE p.id = %s AND m.role = 'assistant'
-                      AND m.created_at > %s AND m.created_at <= %s LIMIT 1""",
-                (w["project_id"], _naive(w["at"]), _naive(now)))
+                    WHERE p.id = %s AND m.role IN ('assistant', 'activity')
+                      AND m.created_at > %s AND m.created_at <= %s
+                    UNION ALL
+                   SELECT 1 FROM video_jobs
+                    WHERE project_id = %s AND type = 'preview'
+                      AND heartbeat_at > %s AND heartbeat_at <= %s
+                    LIMIT 1""",
+                (w["project_id"], _naive(w["at"]), _naive(now),
+                 w["project_id"], _aware(w["at"]), now))
     return RECOVERED if _one(cur) else STUCK
 
 

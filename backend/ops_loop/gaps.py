@@ -435,7 +435,10 @@ def _turn_went_silent(cur, since, now, p):
     """27 of 88 typed turns had a silence over 120 s, while the customer watched
     nothing happen. Only the product speaking resets the clock: a customer
     asking "hello?" is still waiting, and so is one whose request moved on to
-    its next slice. Judged only while the turn is open, so a past window is not
+    its next slice. The product speaks in its replies, in the step rows the
+    Studio shows as they land ('activity'), and in the progress of the turn's
+    own preview render, which the working bubble shows live (ticket #842: 17
+    of 20 "silences" were steps the check did not read, or a 1-3 min render). Judged only while the turn is open, so a past window is not
     replayed by this one."""
     q = dict(p, silence=TURN_SILENCE, lookback=now - timedelta(days=1))
     cur.execute(f"""
@@ -444,8 +447,14 @@ def _turn_went_silent(cur, since, now, p):
                    GREATEST(COALESCE(root.created_at, j.created_at), (
                        SELECT max(m.created_at) FROM chat_messages m
                         WHERE m.session_id = pr.chat_session_id
-                          AND m.role = 'assistant'
-                       ) AT TIME ZONE 'UTC') AS heard
+                          AND m.role IN ('assistant', 'activity')
+                       ) AT TIME ZONE 'UTC', (
+                       SELECT max(pj.heartbeat_at) FROM video_jobs pj
+                        WHERE pj.project_id = j.project_id
+                          AND pj.type = 'preview'
+                          AND pj.created_at >= COALESCE(root.created_at,
+                                                        j.created_at)
+                       )) AS heard
               FROM video_jobs j JOIN users u ON u.id = j.user_id
               JOIN projects pr ON pr.id = j.project_id
               LEFT JOIN video_jobs root ON root.id = CASE

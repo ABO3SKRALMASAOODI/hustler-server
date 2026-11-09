@@ -659,3 +659,48 @@ def test_a_render_tool_defect_files_on_its_tool_cause(world):    # noqa: F811
     t, action = store.record_failure(world.conn.cursor(), f)
     assert action == "opened" and t["cause_key"] == "tool:captions:plate-offset"
     assert gaps._tool_defects in gaps.CHECKS
+
+
+def test_842_a_step_row_is_the_turn_speaking(world):    # noqa: F811
+    """Ticket #842: the Studio shows each step row as it lands, so a turn that
+    posted one 100 s in has not been silent for 120 s."""
+    world.job("agent_turn", state="running", project=5600, user=2846)
+    world.clock.now += timedelta(seconds=100)
+    world.c.execute("INSERT INTO chat_messages (session_id, role, content, "
+                    "created_at) VALUES (3, 'activity', 'Directing your film', %s)",
+                    (world.clock.now.replace(tzinfo=None),))
+    world.clock.now += timedelta(seconds=25)
+    assert not fired(world, gaps._turn_went_silent, minutes=2)
+
+
+def test_842_the_turns_render_moving_is_the_turn_speaking(world):    # noqa: F811
+    """Ticket #842: a 160 s preview render inside the turn, its progress live in
+    the working bubble, is not a silence; the same turn with no render is."""
+    world.job("agent_turn", state="running", project=5600, user=2846)
+    pj = world.job("preview", state="running", project=5600, user=2846)
+    world.clock.now += timedelta(seconds=110)
+    world.c.execute("UPDATE video_jobs SET heartbeat_at = %s WHERE id = %s",
+                    (world.clock.now, pj))
+    world.clock.now += timedelta(seconds=15)
+    assert not fired(world, gaps._turn_went_silent, minutes=2)
+
+
+def test_842_a_render_of_another_project_does_not_hide_a_silence(world):    # noqa: F811
+    world.job("agent_turn", state="running", project=5600, user=2846)
+    pj = world.job("preview", state="running", project=5601, user=2846)
+    world.clock.now += timedelta(seconds=110)
+    world.c.execute("UPDATE video_jobs SET heartbeat_at = %s WHERE id = %s",
+                    (world.clock.now, pj))
+    world.clock.now += timedelta(seconds=15)
+    assert fired(world, gaps._turn_went_silent, minutes=2)
+
+
+def test_842_a_render_moving_after_the_silence_is_not_paged(world):    # noqa: F811
+    world.job("agent_turn", state="running", project=5600, user=2846)
+    pj = world.job("preview", state="running", project=5600, user=2846, age=200)
+    world.ticks(3)
+    world.c.execute("UPDATE video_jobs SET heartbeat_at = %s WHERE id = %s",
+                    (world.clock.now, pj))
+    world.ticks(48)
+    t = world.ticket("auto-gap-turn-silent-running")
+    assert t and t["severity"] == "P1"
