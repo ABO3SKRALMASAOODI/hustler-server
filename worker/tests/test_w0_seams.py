@@ -633,7 +633,10 @@ def test_runtime_packages_are_inside_the_code_fingerprint():
     assert not any("__pycache__" in p for p in rel)
     # A skill's words change what the editor does, so skills are in; nothing
     # else that is only prose is (764d12f8).
-    assert all(p.startswith("skills/") for p in rel if p.endswith(".md"))
+    # The Director's prompts are what it reads, the same reason
+    # (version._RUNTIME_DIRS).
+    assert all(p.startswith(("skills/", "score/prompts/"))
+               for p in rel if p.endswith(".md"))
     assert "modal_app.py" not in rel
 
 

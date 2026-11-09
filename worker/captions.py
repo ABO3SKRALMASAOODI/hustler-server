@@ -2129,6 +2129,19 @@ def _font_measure(family):
         return None
 
 
+@functools.lru_cache(maxsize=64)
+def _font_cmap(family):
+    """The code points a bundled family draws itself, or None."""
+    path = _font_files().get("".join(str(family or "").lower().split()))
+    if not path:
+        return None
+    try:
+        from fontTools.ttLib import TTFont
+        return frozenset(TTFont(path, lazy=True).getBestCmap() or ())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _type_width(text, family, px, fallback_char_w, tracking=0.0):
     """Rendered advance of `text` at libass font size `px`: measured on the
     bundled face; a family we do not ship falls back to the preset estimate.
@@ -2136,6 +2149,19 @@ def _type_width(text, family, px, fallback_char_w, tracking=0.0):
     import unicodedata
     text = str(text or "")
     m = _font_measure(family)
+    missing = 0
+    if m is not None:
+        cmap = _font_cmap(family)
+        if cmap:
+            # A character the bundled face lacks is drawn by a fallback face
+            # (Arabic, Devanagari, ... in a Latin display face): its width
+            # is unknown, so it is bounded at 0.7 font-size px.
+            kept = "".join(ch for ch in text
+                           if ord(ch) in cmap or ch.isspace())
+            missing = len(text) - len(kept)
+            text_measured = kept
+        else:
+            text_measured = text
     if m is None:
         width = max(1, len(text)) * fallback_char_w * px
         em = px
@@ -2143,7 +2169,8 @@ def _type_width(text, family, px, fallback_char_w, tracking=0.0):
         font, em_ratio = m
         em = px * em_ratio
         try:
-            width = font.getlength(text) / 1000.0 * em
+            width = font.getlength(text_measured) / 1000.0 * em \
+                + missing * 0.7 * px
         except Exception:  # noqa: BLE001
             width = max(1, len(text)) * fallback_char_w * px
     wide = sum(1 for ch in text if unicodedata.east_asian_width(ch) in "WF")
