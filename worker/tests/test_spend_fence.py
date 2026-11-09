@@ -467,7 +467,8 @@ def test_every_job_that_makes_a_recorder_says_whose_money_it_spends():
 # Every place a model provider is called. A new one is added here on purpose,
 # with its charge (llm.record, or the concierge's) and its fence.
 PROVIDER_CALLS = {
-    "worker/claude_lane.py": 1,       # guard_call, metered, recorded
+    "worker/claude_lane.py": 2,       # guard_call, metered, recorded; the
+                                      # on-demand credit probe (fenced, P0 #60)
     "worker/llm.py": 5,               # create_with_dialect, responses_create,
                                       # ask_audio, both image calls
     "worker/agent_loop.py": 1,        # the agent step

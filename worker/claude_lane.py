@@ -113,6 +113,8 @@ def probe():
     if not configured():
         return False, "Anthropic key not configured"
     try:
+        import llm
+        llm.fence(PROBE_MODEL)    # company lanes stop at their share
         msg = _sdk().with_options(timeout=20.0).messages.create(
             model=PROBE_MODEL, max_tokens=16,
             messages=[{"role": "user", "content": "Reply with OK."}])
