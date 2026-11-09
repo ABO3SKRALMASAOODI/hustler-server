@@ -40,6 +40,7 @@ _TIME = re.compile(r"(\d+):(\d+):(\d+(?:\.\d+)?)")
 # Machine syntax of the ASS we wrote (override tags), never customer text.
 _BORD = re.compile(r"\\(bord|xbord|ybord|shad|xshad|yshad|be|blur)-?[\d.]+")
 _FADE = re.compile(r"\\fade?\([^)]*\)")
+_SHAD = re.compile(r"\\(shad|xshad|yshad)-?[\d.]+")
 _FILL_ALPHA = re.compile(r"\\(1a|alpha)&H[0-9A-Fa-f]{2}&")
 
 
@@ -80,20 +81,22 @@ def parse(path):
     return header, styles, events
 
 
-def _style_line(st, glyph_only):
+def _style_line(st, glyph_only, no_shadow=False):
     st = dict(st)
     if glyph_only:
         st["Outline"], st["Shadow"], st["BorderStyle"] = "0", "0", "1"
+    elif no_shadow:
+        st["Shadow"] = "0"
     return "Style: " + ",".join(st.values())
 
 
 def _write(path, header, styles, events, glyph_only=False,
-           opaque_plates=False):
+           opaque_plates=False, no_shadow=False):
     out = []
     for line in header:
         if line.startswith("Style:"):
             name = line[6:].split(",", 1)[0].strip()
-            out.append(_style_line(styles[name], glyph_only)
+            out.append(_style_line(styles[name], glyph_only, no_shadow)
                        if name in styles else line)
         else:
             out.append(line)
@@ -101,6 +104,8 @@ def _write(path, header, styles, events, glyph_only=False,
         text = _FADE.sub("", ev["text"])
         if glyph_only:
             text = _BORD.sub(lambda m: "\\" + m.group(1) + "0", text)
+        elif no_shadow:
+            text = _SHAD.sub(lambda m: "\\" + m.group(1) + "0", text)
         if opaque_plates and ev["drawing"]:
             text = _FILL_ALPHA.sub(lambda m: "\\" + m.group(1) + "&H00&",
                                    text)
@@ -232,6 +237,15 @@ def check(ass_path, W, H, workdir, *, fontsdir, ffmpeg="ffmpeg",
         plates = render(p_path, W, H, times, fontsdir, ffmpeg)
     shadow_styles = {name for name, st in styles.items()
                      if _num(st.get("Shadow")) > 0.05}
+    # The shadow is measured against the OUTLINED glyphs (outline kept,
+    # shadow removed): typed minus bare glyphs is outline + shadow, and a
+    # style with a 3.9 px outline read as a stray shadow (tickets #976,
+    # projects 5590 / 5591, 9 Nov 2026) though libass drew it correctly.
+    outlined = None
+    if any(e["style"] in shadow_styles for e in glyph_ev):
+        o_path = _write(os.path.join(workdir, "qc_outlined.ass"), header,
+                        styles, glyph_ev, no_shadow=True)
+        outlined = render(o_path, W, H, times, fontsdir, ffmpeg)
     defects, seen = [], set()
 
     def add(kind, t, detail, box):
@@ -283,14 +297,22 @@ def check(ass_path, W, H, workdir, *, fontsdir, ffmpeg="ffmpeg",
                     add("plate-empty", t, "a caption plate with no glyphs on "
                         "it", list(pbox))
         # shadow: the drop shadow must sit on its own glyphs
-        if any(e["style"] in shadow_styles for e in active
-               if not e["drawing"]):
+        if outlined is not None and any(
+                e["style"] in shadow_styles for e in active
+                if not e["drawing"]):
             ty = drawn(typed[k])
-            shadow = ty & ~g
+            body = drawn(outlined[k]) | g
+            shadow = ty & ~body
             n = int(shadow.sum())
             if n >= 24:
-                reach = max(3, int(0.15 * line_h) + 2)
-                stray = float((shadow & ~_dilate(g, reach)).sum()) / n
+                # A drop shadow of s px is offset (s, s): 2s steps of the
+                # 4-neighbour dilation, plus antialiasing.
+                shad = max((_num(styles.get(e["style"], {}).get("Shadow"))
+                            for e in active if not e["drawing"]),
+                           default=0.0)
+                reach = max(3, int(0.15 * line_h) + 2,
+                            int(2 * shad + 0.999) + 2)
+                stray = float((shadow & ~_dilate(body, reach)).sum()) / n
                 if stray > SHADOW_MAX_STRAY:
                     add("shadow-offset", t, f"{stray:.0%} of the shadow "
                         f"lies off its glyphs", _bbox(shadow))

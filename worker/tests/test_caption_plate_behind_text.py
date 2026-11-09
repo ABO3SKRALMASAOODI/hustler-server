@@ -184,3 +184,54 @@ def test_raster_check_catches_cut_text_and_overlapping_items(tmp_path):
         str(both), W, H, str(tmp_path / "q2"), fontsdir=captions.FONTS_DIR,
         ffmpeg=FFMPEG)}
     assert "type-overlap" in kinds
+
+
+def _one_line_ass(path, style_tail, text):
+    path.write_text(
+        "[Script Info]\nScriptType: v4.00+\nPlayResX: 720\nPlayResY: 1280\n"
+        "WrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: VS4,Inter Display Bold,47,&H00111111,&H00FFFFFF,&H00F2F2F2,"
+        f"&H96000000,0,0,0,0,100,100,0,0,1,{style_tail},5,72,72,0,-1\n\n"
+        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, "
+        "MarginV, Effect, Text\n"
+        f"Dialogue: 5,0:00:02.57,0:00:03.67,VS4,,0,0,0,,{text}\n",
+        encoding="utf-8")
+    return str(path)
+
+
+@pytest.mark.skipif(not FFMPEG, reason="needs ffmpeg with libass")
+@pytest.mark.parametrize("play_res", [(720, 1280), (1080, 1920)])
+def test_976_outlined_caption_shadow_is_not_a_defect(tmp_path, play_res):
+    """Ticket #976 (projects 5590 / 5591, 9 Nov 2026): dark text with a
+    3.9 px light outline and a 1.8 px shadow, drawn correctly, was filed as
+    shadow-offset because the outline was counted as shadow."""
+    W, H = play_res
+    k = W / 720.0
+    ass = _one_line_ass(tmp_path / "c.ass", f"{3.9 * k:.1f},{1.8 * k:.1f}",
+                        "{\\an5\\pos(%d,%d)}not trust," % (W // 2,
+                                                         int(1011 * k)))
+    if (W, H) != (720, 1280):
+        text = open(ass, encoding="utf-8").read()
+        text = text.replace("PlayResX: 720", f"PlayResX: {W}") \
+            .replace("PlayResY: 1280", f"PlayResY: {H}") \
+            .replace("Bold,47,", f"Bold,{int(47 * k)},")
+        open(ass, "w", encoding="utf-8").write(text)
+    defects = caption_qc.check(ass, W, H, str(tmp_path / "qc"),
+                               fontsdir=captions.FONTS_DIR, ffmpeg=FFMPEG,
+                               times=[3.12])
+    assert defects == [], defects
+
+
+@pytest.mark.skipif(not FFMPEG, reason="needs ffmpeg with libass")
+def test_shadow_off_its_glyphs_is_still_caught(tmp_path):
+    """A shadow thrown far from its own (outlined) glyphs stays a defect."""
+    ass = _one_line_ass(tmp_path / "c.ass", "3.9,1.8",
+                        "{\\an5\\pos(360,1011)\\xshad60\\yshad0}not trust,")
+    defects = caption_qc.check(ass, 720, 1280, str(tmp_path / "qc"),
+                               fontsdir=captions.FONTS_DIR, ffmpeg=FFMPEG,
+                               times=[3.12])
+    assert "tool:captions:shadow-offset" in {d["cause_key"] for d in defects}
