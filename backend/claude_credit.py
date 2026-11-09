@@ -429,6 +429,46 @@ def probe_plan(conn, now=None):
             "reason": state.get("reason"), "spent_usd": spent, "line_usd": line}
 
 
+# A subscriber's request may probe at most this often across the fleet.
+ON_DEMAND_EVERY_S = 300
+
+
+def claim_on_demand_probe(conn, every_s=ON_DEMAND_EVERY_S, now=None):
+    """A subscriber's request met paid editing off on a provider refusal.
+
+    9 Nov 2026 (P0 #60): the wallet ran dry at 18:18 UTC and the only way back
+    was the 3-hourly probe, so after a top-up a paying customer could stay
+    blocked for up to 3 more hours. The request itself may now probe: this
+    claims the one probe allowed every ``every_s`` seconds across every worker
+    (it stamps ``last_probe_at`` under the switch lock) and returns the plan
+    for ``after_probe``, or None when paid editing is not off on a refusal,
+    is already open, or another request probed recently."""
+    now = now or now_utc()
+    cfg = read_config(conn)
+    start, end = cycle_window(cfg, now)
+    spent = cycle_spend(conn, start, end)
+    line = line_usd(cfg)
+    with conn.cursor() as cur:
+        _lock(cur)
+        state = parse_state(_kv(cur, STATE_KEY))
+        if (state["state"] != OFF
+                or state.get("reason") not in (REASON_BILLING, REASON_AUTH)
+                or state.get("last_probe_ok") is True):
+            return None
+        last = _parse_time(state.get("last_probe_at"))
+        if last and (now - last) < timedelta(seconds=every_s):
+            return None
+        state["last_probe_at"] = now.isoformat()
+        _write_state(cur, state)
+    off_end = _parse_time(state.get("cycle_end"))
+    new_cycle = off_end is None or now >= off_end
+    may = (new_cycle and spent < line) if state.get("reason") == REASON_BILLING \
+        else spent < line
+    return {"action": "probe", "may_switch_on": may, "new_cycle": new_cycle,
+            "reason": state.get("reason"), "spent_usd": spent,
+            "line_usd": line, "on_demand": True}
+
+
 def after_probe(conn, plan, ok, error="", now=None):
     """Apply one probe result. Returns "switched_on" | "recorded"."""
     if ok and plan.get("may_switch_on"):

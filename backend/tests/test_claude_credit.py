@@ -316,3 +316,42 @@ def test_the_workflow_runs_the_probe_every_three_hours_with_the_credited_key():
     assert "secrets.ANTHROPIC_API_KEY" in wf
     assert "secrets.PRODUCTION_DATABASE_URL" in wf
     assert "backend/scripts/claude_credit_probe.py" in wf
+
+
+def test_a_subscriber_request_probes_at_once_after_a_top_up_at_most_every_5_min():
+    """P0 #60 (9 Nov 2026): the wallet ran dry; after a top-up only the
+    3-hourly probe reopened paid editing. A request may now claim one probe
+    every 5 minutes across the fleet; a success opens paid editing at once
+    (the free trial still waits for the next cycle)."""
+    conn = FakeConn()
+    now = _at(2026, 11, 9, 18)
+    cc.switch_off(conn, cc.REASON_BILLING, "credit balance is too low", now=now)
+    assert not cc.paid_available(cc.status(conn, now=now))
+    plan = cc.claim_on_demand_probe(conn, now=now + timedelta(minutes=1))
+    assert plan and plan["action"] == "probe" and not plan["may_switch_on"]
+    # a second request within 5 minutes does not probe again
+    assert cc.claim_on_demand_probe(conn, now=now + timedelta(minutes=4)) is None
+    # that probe was refused (still empty): recorded, still closed
+    cc.after_probe(conn, plan, False, "402 billing_error", now=now + timedelta(minutes=1))
+    assert not cc.paid_available(cc.status(conn, now=now + timedelta(minutes=2)))
+    # the owner tops up; the next request past 5 minutes probes and succeeds
+    later = now + timedelta(minutes=7)
+    plan = cc.claim_on_demand_probe(conn, now=later)
+    assert plan
+    cc.after_probe(conn, plan, True, now=later)
+    credit = cc.status(conn, now=later)
+    assert credit["on"] is False and cc.paid_available(credit)
+    # paid editing open: nothing more to probe
+    assert cc.claim_on_demand_probe(conn, now=later + timedelta(minutes=10)) is None
+
+
+def test_on_demand_probe_never_runs_while_on_or_after_a_budget_stop():
+    conn = FakeConn()
+    now = _at(2026, 11, 9)
+    assert cc.claim_on_demand_probe(conn, now=now) is None          # on
+    conn.spend(now.date(), paid=201.0)
+    cc.switch_off(conn, cc.REASON_BUDGET, now=now)
+    assert cc.claim_on_demand_probe(conn, now=now) is None          # budget
+    cc.switch_off(conn, cc.REASON_AUTH, "401", now=now)
+    plan = cc.claim_on_demand_probe(conn, now=now + timedelta(minutes=6))
+    assert plan and plan["reason"] == cc.REASON_AUTH

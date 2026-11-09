@@ -39,6 +39,7 @@ never returned and never placed in a recorded payload.
 """
 
 import json
+import os
 import hashlib
 import threading
 import time
@@ -100,6 +101,24 @@ def reopen():
     """Tests/operators: clear the outage latch."""
     global _closed_until, _closed_reason
     _closed_until, _closed_reason = 0.0, ""
+
+
+PROBE_MODEL = os.getenv("CLAUDE_CREDIT_PROBE_MODEL", "claude-haiku-5-5")
+
+
+def probe():
+    """(ok, error_text): one minimal call proving the key and the balance
+    (claude_credit.claim_on_demand_probe decides when). Never raises; the
+    error text is scrubbed of the key by the caller's claude_credit."""
+    if not configured():
+        return False, "Anthropic key not configured"
+    try:
+        msg = _sdk().with_options(timeout=20.0).messages.create(
+            model=PROBE_MODEL, max_tokens=16,
+            messages=[{"role": "user", "content": "Reply with OK."}])
+        return True, f"stop_reason={getattr(msg, 'stop_reason', None)}"
+    except Exception as exc:  # noqa: BLE001 - every failure is a result
+        return False, f"{type(exc).__name__} {_status(exc)}: {str(exc)[:200]}"
 
 
 def _sdk():

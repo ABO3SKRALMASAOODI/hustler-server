@@ -2410,6 +2410,36 @@ def run_agent_job(worker_db, job):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _probe_paid_lane(worker_db, job):
+    """Paid editing is off on an Anthropic refusal: probe now, not in 3 h.
+
+    P0 #60 (9 Nov 2026): the wallet ran dry and only the 3-hourly probe
+    could reopen paid editing, so a subscriber stayed blocked for hours
+    after a top-up. At most one request every 5 minutes across the fleet
+    makes one minimal call (claude_credit.claim_on_demand_probe); a success
+    records the probe, clears this process's refusal latch and lets this
+    request run. True when paid editing is open now. Never raises."""
+    try:
+        import claude_credit
+        plan = worker_db.run(claude_credit.claim_on_demand_probe)
+        if not plan:
+            return False
+        ok, error = claude_lane.probe()
+        worker_db.run(claude_credit.after_probe, plan, ok, "" if ok else error)
+        print(f"[agent] job {job.get('id')}: on-demand Claude credit probe "
+              f"{'succeeded' if ok else 'refused'}", flush=True)
+        if not ok:
+            return False
+        claude_lane.reopen()
+        claude_trial.reset_flag_cache()
+        return claude_credit.paid_available(
+            claude_trial.credit_status(worker_db))
+    except Exception as exc:  # noqa: BLE001 - lanes as today on any doubt
+        print(f"[agent] job {job.get('id')}: on-demand credit probe failed "
+              f"({str(exc)[:160]})", flush=True)
+        return False
+
+
 def _claude_paid_lane(worker_db, job, subscribed, plan, payload):
     """A funded paid Claude primary, independent of the trial cutoff.
 
@@ -2424,10 +2454,11 @@ def _claude_paid_lane(worker_db, job, subscribed, plan, payload):
         if not (flag["on"] or int(job.get("user_id") or 0)
                 in flag["test_user_ids"]) or not flag["claude_lane"]:
             return None
-        if not claude_lane.available():
-            return None
         import claude_credit
         if not claude_credit.paid_available(claude_trial.credit_status(worker_db)):
+            if not _probe_paid_lane(worker_db, job):
+                return None
+        if not claude_lane.available():
             return None
         # 4 Nov: subscribers keep the funded Anthropic route, including
         # older accounts. Cohort checks still own feature entitlements;
