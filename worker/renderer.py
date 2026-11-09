@@ -2642,6 +2642,59 @@ def legibility_current(meta, edl):
     return ((meta or {}).get("legib_v") or 0) == config.LEGIBILITY_VERSION
 
 
+def plate_current(meta, edl):
+    """Were this render's caption plates drawn behind their text?
+
+    Before config.CAPTION_PLATE_VERSION a premium caption plate was centred
+    on the preset's anchor, not the style's own anchor_y, and a dictated
+    caption line wider than the frame was cut by it (project 5574 v35, 9 Nov
+    2026). Only EDLs whose captions those rules touch are stale."""
+    if not caplib.plate_rule_applies(edl or {}):
+        return True
+    return ((meta or {}).get("plate_v") or 0) == config.CAPTION_PLATE_VERSION
+
+
+def caption_tool_defects(edl, index, workdir, out_info, out_dur=None,
+                         job_id=None):
+    """caption_qc on the captions ASS this render burned, drawn again by the
+    same libass at the output's size at every caption state: plates and
+    shadows off their glyphs, glyphs cut by the frame, overlapping items.
+    Runs with the other checks, after the asset row exists; [] when there is
+    nothing to check or the check cannot run (never a render failure)."""
+    edl = edl or {}
+    if not edl.get("captions") or motion_captions.look_of(edl):
+        return []
+    try:
+        import caption_qc
+        W, H = int(out_info["width"]), int(out_info["height"])
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+        if edl.get("motion"):
+            video = (index or {}).get("video") or {}
+            edl = json.loads(json.dumps(edl))
+            motion_layer.fill_footprints(edl, *frame_dims(
+                float(video.get("width") or 1920),
+                float(video.get("height") or 1080),
+                (edl.get("frame") or {}).get("ratio")), index=index, tl=tl)
+        qdir = os.path.join(workdir, "caption_qc")
+        os.makedirs(qdir, exist_ok=True)
+        path = caplib.build_ass(edl, index, tl,
+                                os.path.join(qdir, "captions.ass"),
+                                play_res=(W, H))
+        defects = caption_qc.check(path, W, H, qdir,
+                                   fontsdir=caplib.FONTS_DIR,
+                                   duration=out_dur)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[render {job_id}] caption QC skipped: {str(exc)[:200]}",
+              flush=True)
+        return []
+    if defects:
+        print(f"[render {job_id}] CAPTION TOOL DEFECTS: "
+              + "; ".join(f"{d['cause_key']} @{d['t']}s" for d in defects),
+              flush=True)
+    return defects
+
+
 def carry_current(meta, edl):
     """Were this render's captions planned with today's caption plan (one
     reading path, worker/caption_carry.py)?
@@ -9556,6 +9609,7 @@ def cache_rules_current(cached, edl, variant, *, src_shape=(None, None),
         and follow_current(meta, edl)
         and cards_current(meta, edl)
         and patch_clock_current(meta, edl)
+        and plate_current(meta, edl)
         and (not handoff_may_matter(edl)
              or handoff_current(meta, edl, _index() or {}))
         and watermark_current(meta, variant, is_paid, wm_settings)
@@ -10474,6 +10528,16 @@ def _run_render_job(worker_db, job):
                 picture_qc_res = picture_qc(
                     edl_row["json"], index, out_local, out_info, variant,
                     want_wm, wm_settings, src_shape, job_id, src_path=src_local)
+                # Tool defects (owner, 9 Nov 2026): a caption plate or shadow
+                # off its text, text cut by the frame, overlapping items.
+                # Evidence for ops_loop intake (cause tool:<layer>:<defect>),
+                # never a gate on this render.
+                tool_defects = caption_tool_defects(
+                    edl_row["json"], index, workdir, out_info, out_dur,
+                    job_id)
+                if tool_defects:
+                    picture_qc_res = dict(picture_qc_res or {},
+                                          tool_defects=tool_defects)
             # Deterministic measurements are always-on.  When the edit authors
             # music/SFX/voiceover, also cut a few tiny excerpts while the finished
             # render is already local.  The dispatcher can hand those to the
@@ -10637,6 +10701,11 @@ def _run_render_job(worker_db, job):
                                if reused_visual_meta
                                else config.FINISH_VERSION),
                   "audio_peak_v": config.AUDIO_PEAK_VERSION,
+                  # A reused picture keeps the caption plates it was drawn
+                  # with.
+                  "plate_v": (reused_visual_meta.get("plate_v") or 0
+                              if reused_visual_meta
+                              else config.CAPTION_PLATE_VERSION),
                   "master_v": config.MASTER_VERSION,
                   # The cache rules this render was made under: what the
                   # backend's final gate compares (config.RENDER_RULE_

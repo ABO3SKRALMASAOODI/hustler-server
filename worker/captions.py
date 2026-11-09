@@ -24,6 +24,7 @@ at any aspect ratio): font sizes scale with the LARGER frame dimension factor
 relative to the 1280x720 the base numbers were tuned on.
 """
 
+import functools
 import os
 import math
 import re
@@ -2026,6 +2027,22 @@ def _premium_layout(disp, wpl, line_chars):
     return lines
 
 
+def _geom_block_h(p, lines, treats, px):
+    """The glyph block height _geom_prefix places (and a panel must cover)."""
+    scale_of = {"num": p["num_scale"], "num_plain": p["num_scale"],
+                "accent": p["emph_scale"], "serif": p["emph_scale"],
+                "box": 1.0}
+    return sum(1.34 * px * max((scale_of.get(treats[i], 1.0) for i in ln
+                                if i < len(treats)), default=1.0)
+               for ln in lines)
+
+
+def _stack_block_h(p, s, lines, mults, px):
+    """The glyph block height _stack_positions places."""
+    lead = _leading(s, p)
+    return sum(lead * px * m for m in _line_mults(lines, mults))
+
+
 def _geom_prefix(p, s, play_res, lines, treats, px):
     """Explicit \\an+\\pos so nothing ever jumps: left-aligned blocks are
     anchored top-left (words land in their final spot as they appear),
@@ -2034,12 +2051,7 @@ def _geom_prefix(p, s, play_res, lines, treats, px):
     W, H = play_res
     pos_name = s["position"] if s.get("_pos_set") else p["position"]
     anchor = _premium_anchor(p, pos_name, s) * H
-    scale_of = {"num": p["num_scale"], "num_plain": p["num_scale"],
-                "accent": p["emph_scale"], "serif": p["emph_scale"],
-                "box": 1.0}
-    line_hs = [1.34 * px * max((scale_of.get(treats[i], 1.0) for i in ln),
-                               default=1.0) for ln in lines]
-    block_h = sum(line_hs)
+    block_h = _geom_block_h(p, lines, treats, px)
     edge = 0.03 * H
     align = _align_of(p, s)
     if align == "left":
@@ -2077,8 +2089,116 @@ def _rounded_rect_path(x0, y0, x1, y1, radius):
         f"{q(x0 + r)} {q(y0)}")
 
 
+@functools.lru_cache(maxsize=None)
+def _font_files():
+    """{normalised family: bundled file}, read from each file's own name
+    table, so the panel is measured on the face libass will draw."""
+    out = {}
+    try:
+        from PIL import ImageFont
+        names = sorted(os.listdir(FONTS_DIR))
+    except Exception:  # noqa: BLE001
+        return out
+    for fn in names:
+        if not fn.lower().endswith((".ttf", ".otf")):
+            continue
+        path = os.path.join(FONTS_DIR, fn)
+        try:
+            fam = ImageFont.truetype(path, 32).getname()[0]
+        except Exception:  # noqa: BLE001
+            continue
+        for key in (fam, os.path.splitext(fn)[0].split("-")[0]):
+            out.setdefault("".join(str(key).lower().split()), path)
+    return out
+
+
+@functools.lru_cache(maxsize=64)
+def _font_measure(family):
+    """(PIL font at 1000 px/em, libass px per em per font-size px) for a
+    bundled family, or None. libass sizes a face so that its ascent+descent
+    equals the font size, so one em is px * 1000 / (ascent + descent)."""
+    path = _font_files().get("".join(str(family or "").lower().split()))
+    if not path:
+        return None
+    try:
+        from PIL import ImageFont
+        font = ImageFont.truetype(path, 1000)
+        asc, desc = font.getmetrics()
+        return font, 1000.0 / max(1, asc + desc)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _type_width(text, family, px, fallback_char_w, tracking=0.0):
+    """Rendered advance of `text` at libass font size `px`: measured on the
+    bundled face; a family we do not ship falls back to the preset estimate.
+    East Asian wide characters (drawn by a fallback face) count a full em."""
+    import unicodedata
+    text = str(text or "")
+    m = _font_measure(family)
+    if m is None:
+        width = max(1, len(text)) * fallback_char_w * px
+        em = px
+    else:
+        font, em_ratio = m
+        em = px * em_ratio
+        try:
+            width = font.getlength(text) / 1000.0 * em
+        except Exception:  # noqa: BLE001
+            width = max(1, len(text)) * fallback_char_w * px
+    wide = sum(1 for ch in text if unicodedata.east_asian_width(ch) in "WF")
+    if wide:
+        # A fallback CJK face is sized by its own ascent+descent (about one
+        # em), so a full font-size px per character bounds it.
+        width = max(width, wide * px + (len(text) - wide) * 0.5 * em)
+    return width + max(0.0, float(tracking or 0.0)) * len(text)
+
+
+def _fit_scale(p, s, play_res, lines, px):
+    """<= 1.0: the scale at which every line fits the text width libass
+    wraps at (the frame minus the preset's side margins), with 4% to spare."""
+    W = play_res[0]
+    usable = W - 2 * round(PREMIUM_MARGIN_X[_align_of(p, s)] * W)
+    f = max(W / BASE_PLAY_RES[0], play_res[1] / BASE_PLAY_RES[1])
+    widest = max((_type_width(line, _font_of(p, s), px, p["char_w"],
+                              _tracking_of(p, s) * f) for line in lines),
+                 default=0.0)
+    if widest <= 0:
+        return 1.0
+    return max(0.3, min(1.0, 0.96 * usable / widest))
+
+
+def plate_rule_applies(edl):
+    """Does config.CAPTION_PLATE_VERSION change how this EDL's captions draw?
+    Transcript captions: only a premium look with a backing plate. Dictated
+    items: any premium look (their plate and their fit to the frame)."""
+    caps = (edl or {}).get("captions")
+    if isinstance(caps, dict):
+        ns = _norm_style(caps.get("style"))
+        p = _preset_of(ns)
+        return bool(p) and _background_of(p, ns)[1] > 0.001
+    if isinstance(caps, list):
+        for it in caps:
+            style = it.get("style") if isinstance(it, dict) else None
+            if _preset_of(_norm_style(style)):
+                return True
+    return False
+
+
+def _text_center_y(p, s, play_res, block_h):
+    """Where the glyph block's centre lands: the same anchor (the style's own
+    anchor_y first) and the same on-frame clamp as _geom_prefix and
+    _stack_positions, so a panel built from it sits on the text."""
+    W, H = play_res
+    pos_name = s["position"] if s.get("_pos_set") else p["position"]
+    anchor = _premium_anchor(p, pos_name, s) * H
+    edge = 0.03 * H
+    return max(block_h / 2 + edge, min(anchor, H - block_h / 2 - edge))
+
+
 def _premium_panel(p, s, play_res, disp, treats, lines, px,
-                   design_version=None, animation=None):
+                   design_version=None, animation=None, text_block_h=None,
+                   mults=None, line_texts=None):
     """One translucent vector rectangle behind the complete caption block.
 
     ASS BorderStyle 3 looks acceptable only when an event has no inline word
@@ -2093,23 +2213,42 @@ def _premium_panel(p, s, play_res, disp, treats, lines, px,
     f = max(W / BASE_PLAY_RES[0], H / BASE_PLAY_RES[1])
     pad_x = max(8.0, base_pad * f * 1.25)
     pad_y = max(6.0, base_pad * f * 0.72)
-    char_w = p["char_w"] * px
-    mults = [_treat_props(treats[i], p, s).get("mult", 1.0)
-             for i in range(len(disp))]
+    # 9 Nov 2026, project 5574 v35: the panel was centred on the preset's
+    # anchor while the glyphs sat on the style's own anchor_y (0.84 vs 0.80),
+    # so a dark band floated ABOVE "dan polanya sama". The panel is now
+    # measured on the face libass draws and centred where the glyph block
+    # lands (_text_center_y, the caller's real block height and lines).
+    family = _font_of(p, s)
+    if mults is None:
+        mults = [_treat_props(treats[i], p, s).get("mult", 1.0)
+                 for i in range(len(disp))]
+    tracking = _tracking_of(p, s) * f
     line_widths, line_heights = [], []
-    for line in lines:
-        width = sum(max(1, len(disp[i])) * char_w * mults[i] for i in line)
-        width += max(0, len(line) - 1) * char_w * 0.4
+    for k, line in enumerate(lines):
+        if line_texts is not None and k < len(line_texts):
+            width = _type_width(line_texts[k], family, px, p["char_w"],
+                                tracking)
+        else:
+            width = sum(_type_width(disp[i], family, px * mults[i],
+                                    p["char_w"], tracking) for i in line)
+            width += max(0, len(line) - 1) * _type_width(
+                " ", family, px, p["char_w"] * 0.4)
         line_widths.append(width)
-        line_heights.append(px * 1.28 * max((mults[i] for i in line),
+        line_heights.append(px * 1.28 * max((mults[i] for i in line
+                                             if i < len(mults)),
                                             default=1.0))
-    panel_w = min(W * 0.90, max(W * 0.42, max(line_widths) + 2 * pad_x))
-    panel_h = min(H * 0.34, sum(line_heights) + 2 * pad_y)
-    pos_name = s["position"] if s.get("_pos_set") else p["position"]
-    anchor_y = _premium_anchor(p, pos_name) * H
-    edge = 0.03 * H
-    y0 = max(edge, min(anchor_y - panel_h / 2, H - panel_h - edge))
-    y1 = y0 + panel_h
+    stag = (_pget(p, "stagger") or 0.0) * W
+    panel_w = min(W * 0.96, max(W * 0.42, max(line_widths) + 2 * pad_x
+                                + 2 * stag))
+    panel_h = min(H * 0.6, max(sum(line_heights),
+                               float(text_block_h or 0.0)) + 2 * pad_y)
+    if text_block_h is None:
+        text_block_h = sum(1.34 * px * max((mults[i] for i in line
+                                            if i < len(mults)), default=1.0)
+                           for line in lines)
+    center_y = _text_center_y(p, s, play_res, text_block_h)
+    y0 = max(0.0, center_y - panel_h / 2)
+    y1 = min(float(H), center_y + panel_h / 2)
     align = _align_of(p, s)
     margin = PREMIUM_MARGIN_X[align] * W
     if align == "left":
@@ -2563,7 +2702,10 @@ def events_premium(out_words, style=None, max_words=None,
         panel = _premium_panel(
             p, s, play_res, disp, treats, lines, px,
             design_version=design_version,
-            animation=s.get("animation") or p.get("animation"))
+            animation=s.get("animation") or p.get("animation"),
+            text_block_h=(_stack_block_h(p, s, lines, mults, px) if stack
+                          else _geom_block_h(p, lines, treats, px)),
+            mults=mults)
         ctx.append({"disp": disp, "treats": treats, "lines": lines,
                     "geom": geom, "mults": mults, "panel": panel})
         nxt_t0 = chunks[ci + 1][0]["t0"] if ci + 1 < len(chunks) else None
@@ -2727,15 +2869,27 @@ def events_from_items(items, tl, play_res=BASE_PLAY_RES):
                 lines = _wrap(text, item_chars)[:PREMIUM_MAX_LINES]
                 geom = _geom_prefix(p, ns, play_res,
                                     [[0]] * len(lines), [None], px)
+                # A line wider than the frame's text width (a wide face, a
+                # long word, a script the char estimate undercounts) was cut
+                # by the frame edge or re-wrapped by libass under a panel
+                # sized for fewer lines. Measured on the face libass draws,
+                # it is scaled to fit instead.
+                fit = _fit_scale(p, ns, play_res, lines, px)
+                if fit < 0.999:
+                    pct = int(fit * 100)
+                    geom = geom[:-1] + rf"\fscx{pct}\fscy{pct}}}"
                 # Manual/translated captions use the same single vector
                 # panel as transcript captions. Without this, a documentary
                 # style applied successfully to translated items but its
                 # contrast panel was silently absent.
-                disp = [_display_word(x, upper) for x in text.split()]
-                panel_lines = _premium_layout(disp, p["wpl"], item_chars)
+                # The panel covers the lines THIS event draws (its wrap),
+                # not a word-count re-layout of them.
                 panel = _premium_panel(
-                    p, ns, play_res, disp, [None] * len(disp), panel_lines,
-                    px, animation=ns.get("animation") or p.get("animation"))
+                    p, ns, play_res, [text], [None], [[0]] * len(lines),
+                    px * fit, animation=ns.get("animation") or p.get("animation"),
+                    text_block_h=_geom_block_h(p, [[0]] * len(lines),
+                                               [None], px),
+                    mults=[1.0], line_texts=lines)
                 if panel:
                     events.append({"start": p_start,
                                    "end": p_end,

@@ -2913,6 +2913,10 @@ AUDIO_PEAK_VERSION = 1
 # hears about a change through this number: tests/test_render_rules.py pins
 # the fingerprint's literals, so changing them fails until this is bumped.
 CAPTION_FP_VERSION = 1
+# A premium caption plate centred on the glyphs it backs (the style's own
+# anchor_y, measured widths) and dictated caption lines fitted to the frame
+# (renderer.plate_current; stamped as `plate_v`). Project 5574 v35, 9 Nov 2026.
+CAPTION_PLATE_VERSION = 1
 
 # ── The render cache's rules, as the backend sees them ───────────────────
 # Every version a cached render must match to be served again for its own
@@ -2937,7 +2941,7 @@ RENDER_RULE_CONSTANTS = (
     "LEGIBILITY_VERSION", "CAPTION_CARRY_VERSION", "FOLLOW_VERSION",
     "CARD_LAYOUT_VERSION", "PATCH_CLOCK_VERSION", "HANDOFF_VERSION",
     "WATERMARK_VERSION", "FINISH_VERSION", "DELIVERY_VERSION",
-    "AUDIO_PEAK_VERSION", "CAPTION_FP_VERSION",
+    "AUDIO_PEAK_VERSION", "CAPTION_FP_VERSION", "CAPTION_PLATE_VERSION",
 )
 # The mark's three lines (brandmark.py sets them; v6). Literals, not
 # .upper()'d at render time, so an operator override renders exactly as

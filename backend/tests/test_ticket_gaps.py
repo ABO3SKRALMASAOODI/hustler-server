@@ -635,3 +635,27 @@ def test_a_dropped_connection_redoes_the_window_not_the_scan(monkeypatch):
     dead = Conn(closed=2)
     conn, rows = ops._scan_window(dead, T0, T0 + MIN)
     assert conn is fresh and len(calls) == 3, "both tries of the window ran"
+
+
+def test_a_render_tool_defect_files_on_its_tool_cause(world):    # noqa: F811
+    """Owner, 9 Nov 2026 (project 5574, render v35): the caption plate sat
+    above "dan polanya sama". The render measured it (worker/caption_qc.py)
+    and carries it in picture_qc.tool_defects; it files on
+    tool:<layer>:<defect> with the frame time and the asset id."""
+    defect = {"layer": "captions", "defect": "plate-offset",
+              "cause_key": "tool:captions:plate-offset", "t": 13.8,
+              "detail": "1% of a caption line's glyphs on its plate"}
+    jid = world.job("preview", result={
+        "render_asset_id": 40651, "edl_version": 35,
+        "picture_qc": {"findings": [], "tool_defects": [defect]}})
+    world.job("preview", result={"render_asset_id": 40652,
+                                 "picture_qc": {"findings": []}})
+    got = fired(world, gaps._tool_defects)
+    assert [f["ref"] for f in got] == [f"tool:{jid}:captions:plate-offset"]
+    f = got[0]
+    assert f["cause_key"] == "tool:captions:plate-offset"
+    assert f["severity"] == "P1" and f["frame_t"] == 13.8
+    assert "asset 40651 at 13.80s" in f["title"]
+    t, action = store.record_failure(world.conn.cursor(), f)
+    assert action == "opened" and t["cause_key"] == "tool:captions:plate-offset"
+    assert gaps._tool_defects in gaps.CHECKS

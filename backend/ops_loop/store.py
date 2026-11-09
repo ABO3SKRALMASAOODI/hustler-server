@@ -19,7 +19,9 @@ WRITABLE = ("session_reviews", "tickets", "ticket_reviews", "ops_review_keys",
             "spend_ledger")
 _WRITE_RE = re.compile(
     r"^\s*(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+([a-z_\.\"]+)", re.I)
-CAUSE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,79}$")
+# `tool:<layer>:<defect>` names a tool defect measured in a render
+# (ops_loop.gaps._tool_defects; REVIEWER.md "Tool defects are tickets").
+CAUSE_RE = re.compile(r"^[a-z0-9][a-z0-9:-]{2,79}$")
 SEVERITY_RANK = {"P0": 0, "P1": 1, "P2": 2}
 CLOSED = ("fixed", "wont_fix")
 # The only wont_fix there is (AGENTS.md: a ticket closes with a root fix plus a

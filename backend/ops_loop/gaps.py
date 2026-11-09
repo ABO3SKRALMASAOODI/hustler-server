@@ -14,6 +14,7 @@ of any past window answers what it would have filed (ops_review.py gaps).
 Deadlines are the audit's, back-tested on 14 days of production.
 """
 import json
+import re
 from datetime import timedelta
 
 from admin_metrics import defs
@@ -522,11 +523,66 @@ def _unread_endings(cur, since, now, p):
     return out
 
 
+_TOOL_KEY_PART = re.compile(r"[^a-z0-9-]+")
+
+
+def _tool_defects(cur, since, now, p):
+    """Owner, 9 Nov 2026: "when the edit produce a corrupt thing that may be
+    because of the tools ... the reviewer must raise a ticket". A render
+    measures its own pixels after its asset row exists (worker/caption_qc.py:
+    a caption plate or shadow off its text, text cut by the frame, two items
+    overlapping) and carries each defect in result.picture_qc.tool_defects.
+    Each files on `tool:<layer>:<defect>` with the frame time and the asset
+    id, whatever the model asked for. P0 when it shows in the first seconds
+    of the film, else P1."""
+    cur.execute(f"""
+        SELECT j.id, j.type, j.user_id, j.project_id, j.updated_at AS at,
+               j.result->'picture_qc'->'tool_defects' AS defects,
+               j.result->>'render_asset_id' AS asset_id,
+               j.result->>'edl_version' AS edl_version
+          FROM video_jobs j JOIN users u ON u.id = j.user_id
+         WHERE j.updated_at > %(since)s AND j.updated_at <= %(now)s
+           AND j.state = 'done' AND j.type IN ('preview', 'final')
+           AND jsonb_typeof(j.result->'picture_qc'->'tool_defects') = 'array'
+           AND {_customers()}
+         ORDER BY j.updated_at LIMIT %(limit)s""", p)
+    out = []
+    for r in cur.fetchall():
+        for d in (r["defects"] if isinstance(r["defects"], list) else [])[:8]:
+            if not isinstance(d, dict):
+                continue
+            layer = _TOOL_KEY_PART.sub("-", str(d.get("layer") or "render")
+                                       .lower()).strip("-")[:30] or "render"
+            kind = _TOOL_KEY_PART.sub("-", str(d.get("defect") or "defect")
+                                      .lower()).strip("-")[:40] or "defect"
+            try:
+                t = float(d.get("t"))
+            except (TypeError, ValueError):
+                t = None
+            where = (f"asset {r['asset_id']} at {t:.2f}s" if t is not None
+                     else f"asset {r['asset_id']}")
+            out.append({
+                "ref": f"tool:{r['id']}:{layer}:{kind}", "source": "tool",
+                "at": r["at"], "user_id": r["user_id"],
+                "project_id": r["project_id"],
+                "severity": "P0" if t is not None and t < 3.0 else "P1",
+                "cause_key": f"tool:{layer}:{kind}",
+                "title": f"Render drew a broken {layer}: {kind} "
+                         f"(project {r['project_id']}, {where})",
+                "detail": (f"{r['type']} job {r['id']}, EDL v"
+                           f"{r['edl_version']}, {where}: "
+                           f"{str(d.get('detail') or '')[:300]}"),
+                "job_id": r["id"], "job_type": r["type"],
+                "asset_id": r["asset_id"], "frame_t": t})
+    return out
+
+
 CHECKS = (_analysis_overdue, _render_overdue, _export_never_arrived, _checkout,
           _request_changed_nothing, _first_cut_is_the_upload,
           _reply_hid_a_failure, _brief_unread, _model_failing,
           _cancelled_within_a_day,
-          _below_the_bar, _turn_went_silent, _unread_endings)
+          _below_the_bar, _turn_went_silent, _unread_endings,
+          _tool_defects)
 
 
 def scan(cur, since, now, checks=CHECKS):
