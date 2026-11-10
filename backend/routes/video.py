@@ -7318,6 +7318,73 @@ def list_edls(user_id, project_id):
     ]})
 
 
+READY_EXPORT_DAYS = 7
+
+
+def _ready_exports(cur, user_id, limit=5):
+    """Finished exports of this user that no download has followed yet.
+
+    P0 #780: a paying customer pressed Download on a 45-minute source, the
+    final took 43 minutes, and meanwhile they opened another project. The
+    finished MP4 was announced only on the page of the project it belongs to,
+    so it never reached them. The Studio asks this on every page and offers
+    the file wherever the customer is.
+
+    A row is the newest export_render_done of a project with no later
+    download_triggered / mcp_export_delivered, whose final for that version
+    still passes _final_gate (the same rule as the project's own Download).
+    """
+    cur.execute("""
+        SELECT DISTINCT ON (ce.project_id)
+               ce.project_id, p.title, ce.created_at,
+               ce.detail->>'version' AS version
+          FROM client_events ce
+          JOIN projects p ON p.id = ce.project_id AND p.user_id = ce.user_id
+         WHERE ce.user_id = %s AND ce.kind = 'export_render_done'
+           AND ce.created_at > now() - make_interval(days => %s)
+           AND NOT EXISTS (
+                 SELECT 1 FROM client_events d
+                  WHERE d.project_id = ce.project_id
+                    AND d.kind IN ('download_triggered', 'mcp_export_delivered')
+                    AND d.created_at >= ce.created_at)
+         ORDER BY ce.project_id, ce.created_at DESC""",
+                (int(user_id), READY_EXPORT_DAYS))
+    rows = sorted(cur.fetchall(), key=lambda r: r["created_at"], reverse=True)
+    out = []
+    for r in rows:
+        if len(out) >= limit:
+            break
+        try:
+            v = int(r["version"])
+        except (TypeError, ValueError):
+            continue
+        cur.execute("""SELECT id, meta FROM assets
+                       WHERE project_id = %s AND kind = 'render'
+                         AND meta->>'variant' = 'final'
+                         AND meta->>'edl_version' = %s
+                       ORDER BY id DESC""", (r["project_id"], str(v)))
+        finals = cur.fetchall()
+        if not finals:
+            continue
+        gate = _final_gate(cur, r["project_id"], user_id)
+        asset = next((a for a in finals
+                      if gate(a["id"], a.get("meta") or {}, v)), None)
+        if asset is None:
+            continue
+        out.append({"project_id": r["project_id"], "title": r["title"],
+                    "version": v, "final_asset_id": asset["id"],
+                    "finished_at": r["created_at"].isoformat()})
+    return out
+
+
+@video_bp.route("/exports/ready", methods=["GET"])
+@token_required
+def ready_exports(user_id):
+    with vdb() as conn:
+        cur = conn.cursor()
+        return jsonify({"exports": _ready_exports(cur, user_id)})
+
+
 @video_bp.route("/projects/<int:project_id>/edls/<int:version>", methods=["GET"])
 @token_required
 def get_edl_version(user_id, project_id, version):
