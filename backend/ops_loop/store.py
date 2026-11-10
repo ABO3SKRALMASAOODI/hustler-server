@@ -1056,6 +1056,12 @@ def is_quality(ticket):
     """Filed by a rating or a measured empty result, not by something that
     failed: its bar is the score."""
     key = ticket.get("cause_key") or ""
+    if key.startswith("tool:"):
+        # A tool defect (10 Nov) is measured on pixels: its bar is the defect
+        # gone on a replay, not the whole film's score. #954 and #976 were
+        # proven fixed and re-picked every day for a 10/10 the defect can't
+        # give; the film's quality is its own ticket.
+        return False
     return not key.startswith(AUTO_PREFIX) or key.startswith(QUALITY_KEYS)
 
 

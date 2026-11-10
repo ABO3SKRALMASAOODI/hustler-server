@@ -1154,3 +1154,9 @@ def test_the_owner_hears_when_an_agent_stops_and_when_a_claim_goes_stale(monkeyp
     assert got[0][1] == "Blocked: A request ended partial (P0 #77)"
     assert "wake the Mac" in got[0][2]
     assert [s for _k, s, _l in got][1:] == ["An automatic agent stopped"]
+
+
+def test_a_tool_defect_is_closed_on_the_defect_not_the_films_score():
+    from ops_loop import store as _store
+    assert _store.is_quality({"cause_key": "tool:captions:plate-offset"}) is False
+    assert _store.is_quality({"cause_key": "first-cut-title-covers-speaker-face"}) is True
