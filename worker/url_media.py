@@ -50,7 +50,8 @@ import subprocess
 import sys
 import time
 import uuid
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, urljoin as requests_urljoin
+import html.parser as _html_parser
 
 import config
 import io_telemetry
@@ -703,6 +704,115 @@ def _shrink_image(path, limit, long_side=3840):
     return None
 
 
+# ── Photos of a web page (ticket 1015, 11 Nov 2026) ─────────────────────────
+# A customer asked for the photos of a news article they linked; fetch_url
+# only knew media extractors, yt-dlp's generic extractor met a 403, and the
+# request ended with nothing. A page's own photos are named in its markup
+# (og:image, twitter:image, image_src, the article's <img>), so they are read
+# with an HTML parser, never by guessing at text.
+PAGE_MAX_BYTES = 3 << 20
+PAGE_IMAGE_LIMIT = 8
+
+
+class _PageImages(_html_parser.HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.lead, self.body = [], []
+
+    def handle_starttag(self, tag, attrs):
+        a = {k.lower(): (v or "") for k, v in attrs}
+        if tag == "meta":
+            name = (a.get("property") or a.get("name") or "").lower()
+            if name in ("og:image", "og:image:url", "og:image:secure_url",
+                        "twitter:image", "twitter:image:src"):
+                self.lead.append(a.get("content", ""))
+        elif tag == "link" and "image_src" in a.get("rel", "").lower():
+            self.lead.append(a.get("href", ""))
+        elif tag in ("img", "source"):
+            src = (a.get("data-src") or a.get("src") or "").strip()
+            if not src:
+                srcset = (a.get("srcset") or a.get("data-srcset") or "").strip()
+                src = srcset.split(",")[-1].strip().split(" ")[0] if srcset else ""
+            try:
+                w = int(a.get("width") or 0)
+            except ValueError:
+                w = 0
+            # A sized-small <img> is an icon or a tracking pixel.
+            if src and not src.startswith("data:") and (w == 0 or w >= 300):
+                self.body.append(src)
+
+
+def page_images(url, *, html_path=None, timeout_s=20):
+    """The photos a web page names, lead image first: absolute http(s) URLs.
+
+    Returns [] for anything that is not an HTML page."""
+    tmp = html_path
+    if tmp is None:
+        import tempfile
+        fd, tmp = tempfile.mkstemp(suffix=".html")
+        os.close(fd)
+    try:
+        if html_path is None:
+            try:
+                _, base = net_fetch.download(url, tmp, max_bytes=PAGE_MAX_BYTES,
+                                             timeout_s=timeout_s)
+            except net_fetch.FetchError:
+                return []
+        else:
+            base = url
+        with open(tmp, "rb") as fh:
+            raw = fh.read(PAGE_MAX_BYTES)
+        text = raw.decode("utf-8", errors="replace")
+        parser = _PageImages()
+        try:
+            parser.feed(text)
+        except Exception:  # noqa: BLE001 — malformed markup: keep what parsed
+            pass
+        out, seen = [], set()
+        for src in parser.lead + parser.body:
+            full = requests_urljoin(base or url, src.strip())
+            if urlparse(full).scheme not in ("http", "https") or full in seen:
+                continue
+            if os.path.splitext(urlparse(full).path)[1].lower() in (
+                    ".svg", ".gif", ".ico"):
+                continue
+            seen.add(full)
+            out.append(full)
+            if len(out) >= PAGE_IMAGE_LIMIT:
+                break
+        return out
+    finally:
+        if html_path is None:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def _fetch_page_image(url, workdir):
+    """Download the first usable photo of the web page at ``url``.
+
+    Returns (path, info) like _extract, info carrying the page's other photos
+    under ``page_images``; raises FetchMediaError when the page names none."""
+    images = page_images(url)
+    last = None
+    for i, img in enumerate(images[:4]):
+        try:
+            net_fetch.check_url(img)
+            path, _ = _download_direct(img, workdir)
+            kind, _ = classify(path)
+        except (net_fetch.FetchError, FetchMediaError) as exc:
+            last = exc
+            continue
+        if kind != KIND_IMAGE:
+            last = FetchMediaError("the page's image link is not a photo")
+            continue
+        return path, {"extractor_key": "page_image", "page_url": url,
+                      "page_images": [x for x in images if x != img]}
+    raise FetchMediaError(
+        str(last) if last else "that page names no photo to download")
+
+
 def fetch(url, workdir, prefer=None):
     """Download `url` into `workdir` and say what it is.
 
@@ -721,6 +831,7 @@ def fetch(url, workdir, prefer=None):
     info, extractor, final_url = {}, None, url
     path = None
 
+    ctype = None
     direct = looks_direct(url)
     if not direct:
         # One cheap ranged request. A media content-type means we can skip the
@@ -736,6 +847,20 @@ def fetch(url, workdir, prefer=None):
                                                         "image"))
 
     direct_error = None
+    # head_kind's answer is advisory: None means "could not tell", and many
+    # news sites refuse the ranged probe while serving the page itself.
+    page_html = (not direct and
+                 ctype in (None, "text/html", "application/xhtml+xml"))
+    page_tried = False
+    if page_html and prefer == KIND_IMAGE and not ytaccess.is_youtube_url(url):
+        # A photo asked of a web page: the page's own photos, before any
+        # video extractor (ticket 1015).
+        page_tried = True
+        try:
+            path, info = _fetch_page_image(url, workdir)
+            extractor = "page_image"
+        except FetchMediaError:
+            path, info = None, {}
     if direct:
         try:
             path, final_url = _download_direct(url, workdir)
@@ -751,6 +876,13 @@ def fetch(url, workdir, prefer=None):
             direct_error = e
 
     if path is None or not os.path.exists(path):
+        if not _ytdlp_available() and prefer is None and not direct:
+            try:
+                path, info = _fetch_page_image(url, workdir)
+                extractor = "page_image"
+            except FetchMediaError:
+                path = None
+    if path is None or not os.path.exists(path):
         if not _ytdlp_available():
             raise FetchMediaError(
                 str(direct_error) if direct_error else
@@ -758,10 +890,20 @@ def fetch(url, workdir, prefer=None):
                 "deployment cannot extract media from pages")
         try:
             path, info = _extract_with_fallback(url, workdir, prefer=prefer)
-        except FetchMediaError:
+        except FetchMediaError as extract_error:
             if direct_error is not None:
                 raise FetchMediaError(str(direct_error))
-            raise
+            # A web page with no extractable video or song still has its
+            # photos; a clip or a song asked for is not answered by a photo.
+            if (prefer in (None, KIND_IMAGE) and not page_tried
+                    and not ytaccess.is_youtube_url(url)):
+                _clear_partials(workdir)
+                try:
+                    path, info = _fetch_page_image(url, workdir)
+                except FetchMediaError:
+                    raise extract_error
+            else:
+                raise
         extractor = (info or {}).get("extractor_key") or "yt-dlp"
 
     try:
@@ -811,6 +953,9 @@ def fetch(url, workdir, prefer=None):
            "source_url": final_url or url, "extractor": extractor,
            "title": (info or {}).get("title"),
            "uploader": (info or {}).get("uploader")}
+    if (info or {}).get("page_images") is not None:
+        out["page_url"] = info.get("page_url")
+        out["page_images"] = list(info.get("page_images") or [])
     out.update(probed)
     return out
 

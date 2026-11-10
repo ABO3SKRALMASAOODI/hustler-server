@@ -21832,9 +21832,19 @@ def fetch_url(ctx, url, as_kind=None):
     measured = motion_judge.describe(motion_profile)
     if measured:
         review += " " + measured
+    page_note = ""
+    if got.get("page_images") is not None:
+        # The link was a web page (an article): this is its lead photo, and
+        # its other photos are direct links fetch_url takes one by one.
+        others = [u for u in (got.get("page_images") or [])
+                  if isinstance(u, str)][:6]
+        page_note = (" This is the lead photo of the web page you linked."
+                     + (" The same page has these other photos, each one "
+                        "fetch_url(url=<it>, as_kind='image') away: "
+                        + ", ".join(others) + "." if others else ""))
     return (f"Downloaded \"{got['filename']}\"{detail} as a "
             f"{url_media.KIND_LABEL[kind]}: storage_key={key}. It is saved to "
-            f"the project but NOT in the video yet — {nxt}.{index_note}{review} RIGHTS CHECK: "
+            f"the project but NOT in the video yet — {nxt}.{page_note}{index_note}{review} RIGHTS CHECK: "
             "source title/uploader identify the file, but fetching does not "
             "determine usage rights; downloading it does not by itself grant "
             "republication rights. Use it only when the user has the needed "
