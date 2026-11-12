@@ -101,6 +101,16 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 
+# The scene engine (worker/scene, lane D 12 Nov): GL with no GPU. Mesa's
+# llvmpipe behind EGL, headless; moderngl opens it in the render child only.
+# Late and separate so it rebuilds none of the heavy layers above. Measured on
+# the box image (Mesa 22.3.6, LLVM 15): "llvmpipe ... 4.5 (Core Profile)".
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       libegl1 libgl1 libgles2 libegl-mesa0 libgl1-mesa-dri \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir moderngl==5.13.0 glcontext==3.1.0
+
 # Pinned models (Wave 0 track 0A, ROADMAP A8): models/bake.py reads
 # models/*.json, refuses any model whose licence is not commercial-use or
 # whose sha256/size differs from models.lock, and installs
