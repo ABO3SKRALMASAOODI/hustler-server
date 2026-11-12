@@ -2300,6 +2300,8 @@ def run_agent_job(worker_db, job):
         attachment_note += _followup_start(
             ctx, user_message, continuation_state,
             (job.get("payload") or {}).get("death_resume"))
+        attachment_note += _typed_asks_start(ctx, worker_db, job, session_id,
+                                             user_message, continuation_state)
         result = _run_loop(ctx, worker_db, job, session_id, user_message,
                            attachment_note,
                            _cont=(continuation_state or None))
@@ -2359,6 +2361,7 @@ def run_agent_job(worker_db, job):
                         getattr(ctx, "_loaded_tool_names", None) or []),
                     "usage": {"model_usage": ctx.model_usage,
                               "generation_cost_usd": ctx.gen_extra_cost_usd},
+                    **_asks_checkpoint(ctx),
                 })
                 next_payload.update({
                     "message_id": int(user_message["id"]),
@@ -2723,6 +2726,128 @@ def _trial_render_refusal(ctx, name, args=None):
             "remove_erase, remove_text, restore_range and the like) is still "
             "open: if it made the video worse, remove all of it in one go, "
             "then call render_preview once.")
+
+
+# ------------------------------------------------------------------ the ask ledger (lane E, 12 Nov)
+# score/asks.py: one model call lists each ask and how to check it, routes the request (the
+# Director on the full upload, a Patch on named items, or this loop), and before the reply checks
+# every ask on the rendered film. Off unless app_kv.typed_asks admits the account (internal first).
+
+def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
+    """The ledger, and the route it picks, before the loop. Returns the editor's note. A slice
+    resumed after a boundary carries its ledger; nothing here runs twice. Never raises."""
+    ctx.ask_ledger = None
+    ctx.ask_verdict = None
+    cont = cont or {}
+    if isinstance(cont.get("ask_ledger"), dict):
+        ctx.ask_ledger = cont["ask_ledger"]
+        ctx.ask_verdict = cont.get("ask_verdict")
+        ctx.ask_model = (ctx.ask_ledger.get("cfg") or {}).get("model")
+        return ""
+    if cont or _trial_lane(ctx) or getattr(ctx, "claude_trial", None) is not None:
+        return ""
+    try:
+        from score import asks
+        cfg = asks.read(worker_db)
+        if not asks.admitted(cfg, job.get("user_id")):
+            return ""
+        ctx.ask_model = cfg.get("model")
+        request = quality_verifier.request_text_for(ctx)
+        ledger = asks.build(ctx, request, getattr(ctx, "request_contract_history", None))
+    except dbx.JobLeaseLost:
+        raise
+    except Exception as exc:  # noqa: BLE001 - no ledger: today's loop, as before
+        print(f"[asks] job {job.get('id')}: no ledger: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
+        return ""
+    ledger["cfg"] = {k: cfg[k] for k in ("repairs", "check", "model")}
+    ctx.ask_ledger = ledger
+    if not ledger["asks"]:
+        return ""
+    done_by = None
+    if ledger["route"] == "film" and cfg["director"]:
+        got = asks.direct_film(ctx, worker_db, job, session_id, cfg)
+        ledger["routed"] = {"to": "director", **{k: got.get(k) for k in ("version", "fell", "applied", "s")}}
+        if got.get("version"):
+            done_by = (f"The Director already made the whole film from the full upload as EDL "
+                       f"v{got['version']} ({', '.join(got.get('applied') or [])}). Build on it: do any ask it "
+                       "left, render, look, and reply. Don't rebuild it.")
+        else:
+            done_by = ("Asks of kind film are about the customer's whole upload: work from the full "
+                       "upload, not from an automatic first cut.")
+    elif ledger["route"] == "patch" and cfg["patch"]:
+        from score import patch
+        got = patch.run(ctx, ledger, quality_verifier.request_text_for(ctx))
+        ledger["routed"] = {"to": "patch", **{k: got.get(k) for k in ("version", "fell", "applied", "usage")}}
+        if got.get("version"):
+            done_by = (f"A Patch already made the change as EDL v{got['version']}: "
+                       f"{'; '.join(got.get('applied') or [])}. Render it, look, and reply; change more "
+                       "only where an ask is still not met.")
+    else:
+        ledger["routed"] = {"to": "loop"}
+    print(f"[asks] job {job.get('id')}: {len(ledger['asks'])} ask(s), route {ledger['route']} -> "
+          f"{json.dumps(ledger.get('routed'), default=str)[:240]}", flush=True)
+    return asks.editor_note(ledger, done_by)
+
+
+def _asks_checkpoint(ctx):
+    return {"ask_ledger": getattr(ctx, "ask_ledger", None),
+            "ask_verdict": getattr(ctx, "ask_verdict", None)}
+
+
+def _asks_check(ctx, draft, allow_repair=True):
+    """Check every ask on the rendered film. Returns the repair note when one repair is owed and
+    allowed, else None; the verdict stays on ctx. Never raises: a check that can't run leaves the
+    asks unchecked, and an unchecked edit is never called fulfilled (asks.outcome)."""
+    ledger = getattr(ctx, "ask_ledger", None)
+    if not ledger or not ledger.get("asks") or not (ledger.get("cfg") or {}).get("check", True):
+        return None
+    from score import asks
+    try:
+        row = ctx.latest_edl()
+    except Exception:  # noqa: BLE001
+        return None
+    preview = getattr(ctx, "last_preview", None) or {}
+    if str(preview.get("edl_version")) != str(row.get("version")):
+        preview = None
+    previous = getattr(ctx, "ask_verdict", None) or {}
+    if previous.get("edl_version") == row.get("version") and previous.get("draft") == (draft or "")[:200]:
+        verdict = previous
+    else:
+        try:
+            verdict = asks.check(ctx, ledger, draft, row.get("json"), preview, _turn_change_list(ctx))
+        except dbx.JobLeaseLost:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            print(f"[asks] check skipped: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
+            return None
+        verdict["edl_version"] = row.get("version")
+        verdict["draft"] = (draft or "")[:200]
+        ledger.setdefault("checks", []).append({"edl_version": row.get("version"), "usage": verdict.get("usage"),
+                                                "open": [r["id"] for r in asks.open_asks(verdict)]})
+        ctx.ask_verdict = verdict
+    if not allow_repair or not asks.open_asks(verdict):
+        return None
+    if int(ledger.get("repairs") or 0) >= int((ledger.get("cfg") or {}).get("repairs", 1)):
+        return None
+    ledger["repairs"] = int(ledger.get("repairs") or 0) + 1
+    return asks.repair_note(ledger, verdict)
+
+
+def _asks_settle(ctx, final, outcome):
+    """The reply says what is done and what is not; the outcome is never fulfilled with an ask open."""
+    ledger = getattr(ctx, "ask_ledger", None)
+    if not ledger or not ledger.get("asks"):
+        return final, outcome
+    from score import asks
+    verdict = getattr(ctx, "ask_verdict", None)
+    try:
+        if verdict and str(verdict.get("edl_version")) != str(ctx.latest_edl().get("version")):
+            verdict = None
+    except Exception:  # noqa: BLE001
+        verdict = None
+    if verdict:
+        final = (final or "") + asks.reply_block(ledger, verdict)
+    return final, asks.outcome(ledger, verdict, outcome)
 
 
 def _outcome_after_reply(outcome, report, honesty):
@@ -5733,7 +5858,12 @@ def _outcome_meta(ctx, outcome):
                     "screening_pages") or []),
         },
     })
+    ask_ledger = None
+    if getattr(ctx, "ask_ledger", None):
+        from score import asks as _asks
+        ask_ledger = _asks.summary(ctx.ask_ledger, getattr(ctx, "ask_verdict", None))
     return {"outcome": outcome,
+            **({"ask_ledger": ask_ledger} if ask_ledger else {}),
             "delivery_requirement": getattr(ctx, 'delivery_requirement', None),
             "tool_outcomes": counts,
             "write_attempts": ctx.write_attempts,
@@ -5766,6 +5896,13 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
     final_text += _unused_fetched_audio_note(ctx)
     quality = _quality_handoff(ctx)
     outcome, billable = _turn_completion(ctx, status, fail_note=fail_note)
+    if getattr(ctx, "ask_ledger", None):
+        _asks_check(ctx, final_text, allow_repair=False)
+        final_text, outcome = _asks_settle(ctx, final_text, outcome)
+        if isinstance(honesty, dict):
+            from score import asks as _asks
+            honesty["ask_ledger"] = _asks.summary(
+                ctx.ask_ledger, getattr(ctx, "ask_verdict", None))
     import fulfillment
     final_text = fulfillment.disclose(ctx, final_text)
     meta = {"edl_version": latest["version"], "preview": ctx.last_preview,
@@ -6131,6 +6268,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             **_tighten_checkpoint(ctx),
             "plan_write_pushed": plan_write_pushed,
             "plan_close_pushed": plan_close_pushed,
+            **_asks_checkpoint(ctx),
             "first_write_pushed": first_write_pushed,
             "versions_written": list(ctx.versions_written),
             "rendered_versions": sorted(ctx.rendered_versions),
@@ -7015,6 +7153,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 else:
                     draft = ("I only reviewed the video — the edit was not "
                              f"changed{_assets_made_note(ctx)}.")
+            ask_repair = _asks_check(
+                ctx, draft, allow_repair=turn_deadline - time.monotonic() > 150)
+            if ask_repair:
+                print(f"[job {job['id']}] ask check: open asks on "
+                      f"v{latest['version']}, one repair pass", flush=True)
+                if body:
+                    messages.append({"role": "assistant", "content": body})
+                messages.append({"role": "system", "content": ask_repair})
+                continue
             final = _enforce_honesty(ctx, client, messages, tools, draft,
                                      start_version, honesty,
                                      user_text=quality_verifier.request_text_for(ctx))
@@ -7033,6 +7180,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             outcome, billable = _turn_completion(
                 ctx, "replied", fail_note=fail_note,
                 truncated=truncated_out)
+            final, outcome = _asks_settle(ctx, final, outcome)
+            if getattr(ctx, "ask_ledger", None):
+                from score import asks as _asks
+                honesty["ask_ledger"] = _asks.summary(
+                    ctx.ask_ledger, getattr(ctx, "ask_verdict", None))
             import fulfillment
             final = fulfillment.disclose(ctx, final)
             # RS_ENGINE (31 Oct): music the user asked for ends on a choice

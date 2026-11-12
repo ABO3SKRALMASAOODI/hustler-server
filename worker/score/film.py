@@ -409,6 +409,9 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
         raise Fall("prep", "no original asset")
     name = ((original.get("meta") or {}).get("filename")) or ""
     sess = {"prompts": _asks(worker_db, getattr(ctx, "first_cut_session", None)), "uploads": [{"filename": name}] if name else []}
+    ledger = getattr(ctx, "ask_ledger", None)
+    if ledger and ledger.get("asks"):
+        sess["ledger"] = [{"said": a["said"], "want": a["want"]} for a in ledger["asks"]]
     _say(ctx, worker_db, "director_read", "Reading your video")
     per = perceive.run(index, os.path.join(work, "source.mp4"), work)
     grid, _times = brief.boards_for(work, index, per)
