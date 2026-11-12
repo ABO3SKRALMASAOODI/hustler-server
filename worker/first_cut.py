@@ -3580,6 +3580,21 @@ def run(worker_db, job, project, index_row):
             steps.append({"tool": "chain", "ok": False,
                           "note": f"{type(exc).__name__}: {str(exc)[:160]}"})
         render = _render_cut(ctx, steps, picked)
+        if picked and picked.get("how") == "director" and _on_screen(ctx):
+            # The last look (score/taste.py): six frames of the film under
+            # the same six of the upload. What it names is removed and the
+            # film renders once more; a look that fails changes nothing.
+            again = _director_look(ctx, worker_db, job, started, spend,
+                                   trial_scope)
+            if again is not None:
+                applied = again
+                picked = dict(picked, edl_version=getattr(
+                    ctx, "director_version", None), look=True)
+                render = _render_cut(ctx, steps, picked)
+                if not _on_screen(ctx) and _director_first_back(ctx):
+                    render = _render_cut(ctx, steps, picked)
+        elif picked and picked.get("how") == "director":
+            _director_close(ctx)
         if picked and picked.get("how") == "director" and not _on_screen(ctx):
             steps, applied, picked, render = _film_fell_at_render(
                 ctx, worker_db, job, started, spend, steps, start_edl, render)
@@ -3723,6 +3738,36 @@ def _director_film(ctx, worker_db, job, started, spend, trial_scope, subscribed)
         print(f"[first_cut] director skipped: {type(exc).__name__}: "
               f"{str(exc)[:200]}", flush=True)
         return None
+
+
+def _director_look(ctx, worker_db, job, started, spend, trial_scope):
+    """The reply's `applied` list when the last look wrote the film again,
+    else None. Never raises."""
+    try:
+        from score import film
+        return film.last_look(ctx, worker_db, job, started, spend,
+                              trial_scope)
+    except Exception as exc:  # noqa: BLE001 — the film on screen stands
+        print(f"[first_cut] last look skipped: {type(exc).__name__}: "
+              f"{str(exc)[:200]}", flush=True)
+        _director_close(ctx)
+        return None
+
+
+def _director_first_back(ctx):
+    try:
+        from score import film
+        return film.restore_first(ctx)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _director_close(ctx):
+    try:
+        from score import film
+        film.close(ctx)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _film_fell_at_render(ctx, worker_db, job, started, spend, steps,

@@ -208,10 +208,12 @@ def fix_facts(lines, scout, words):
 
 
 def band_distance(m):
+    """How far the film sits from the card it named, on how often its picture really changes. A crop of the take
+    is not a cut: held against cuts/10s, a take with 22 crops read as in band (p5591, distance 0.0, rated 2.5)."""
     b = score.BANDS.get(m.get("band") or "", {}) if isinstance(m.get("band"), str) else {}
     d = 0.0
-    if b.get("cuts10") and m["cuts10"]:
-        d += abs(math.log(m["cuts10"] / b["cuts10"]))
+    if b.get("cuts10") is not None:
+        d += abs(math.log((float(m.get("new_pictures10") or 0.0) + 1.0) / (b["cuts10"] + 1.0)))
     if b.get("type10") and m["type_events10"]:
         d += abs(math.log(m["type_events10"] / b["type10"]))
     return round(d, 3)
@@ -229,8 +231,11 @@ def repair_ask(comp, facts, fixes, proof):
         out += ["ASKS"] + facts + [""]
     if fixes:
         out += ["HEARING not decided yet, read each and keep it with a fix line if it is what was said: " + "; ".join(fixes), ""]
-    out.append('Read it the way a stranger scrolling past reads it, then the way the judge does. Which frames look automatic: one element alone, a stock picture standing still, type on type, a page where the person should be? Is the first second the strongest thing in the film? Does the sound stop being thin? '
-               'Rewrite what the frames show you is weak. Answer with only the lines that change, JSONL, each line complete. '
+    out.append('Read it the way the person who uploaded this reads it, then the way a stranger scrolling past does. Would they post this over their upload? Is the first second the strongest thing in the film? '
+               'Which frames look automatic: a stock picture standing still, type on type, a page where the person should be, a device the upload is better without? '
+               'The TASTE and LINES rows are device lines the compiler removed: nothing in the voice or on screen earned them, or this footage can\'t carry that many. '
+               'Don\'t write those back as they were. A removed line returns only with the `for` it answers, inside the counts on the SUPPLY line; a film that wants more of them needs more pictures from the Bin first. '
+               'Rewrite what is weak. Answer with only the lines that change, JSONL, each line complete. '
                'A line with the same id replaces the old one. A new beat takes "after":"b05". {"k":"del","id":"b05"} removes one. '
                'If it stands as it is, answer {"k":"ok"}.')
     return "\n".join(out)
@@ -290,4 +295,15 @@ def direct(work, idx, scout, deadline, model=MODEL, effort="medium", budget_usd=
     usage["asks"] = facts
     usage["asks_open"] = open_asks
     usage["validate_l1"] = score.validate_l1(kept.l1)[:20]
+    usage["taste"] = taste_record(kept)
     return kept, dump(lines), usage
+
+
+def taste_record(comp):
+    """What the governor did to this film, for the job record: the class, what stood, what went and why."""
+    t = comp.meter.get("taste") or {}
+    if not t:
+        return None
+    return {"cls": (t.get("supply") or {}).get("cls"), "np10": (t.get("supply") or {}).get("np10"), "allow": t.get("allow"), "kept": t.get("kept"),
+            "sounds": t.get("sounds"), "count": t.get("count"), "seats": t.get("seats"), "speaks": t.get("speaks"), "floor": t.get("floor"),
+            "why": [f"{r['id']} {r['did']}: {r['why']}"[:140] for r in (t.get("rows") or []) if r["why"] != score.NO_FOR][:24]}

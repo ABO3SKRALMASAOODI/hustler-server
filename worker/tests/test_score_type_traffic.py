@@ -8,10 +8,20 @@ import os
 import sys
 import types
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import score.compiler as S  # noqa: E402
 from score import lower as L  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _mechanics_only(monkeypatch):
+    """These tests pin how each line of a Score compiles. What a film may carry is the taste governor's
+    (score/taste.py), which has its own tests in test_score_taste.py, so it is off here."""
+    import score.compiler as _compiler
+    monkeypatch.setattr(_compiler, "GOVERN", False)
 
 FPS = 30
 

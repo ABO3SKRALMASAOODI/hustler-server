@@ -587,7 +587,10 @@ def lower_captions(l1, rep, src_dur=0.0):
         lines = chunk_lines(first)
         v = l1["voices"].get(first[0]["v"]) or l1["voices"].get("a") or {}
         px = float(v.get("px", 58))
-        y = float(np.mean([(w["y"][-1] if isinstance(w["y"], list) else w["y"]) for w in first])) - 0.36 * px / H
+        # The renderer centres a caption on its anchor (\an5), so the anchor is the middle of the whole block, not of
+        # its first line: a two-line chunk sat half a line above a one-line chunk at the same seat (TASTE P1).
+        ys = [float(np.mean([(w["y"][-1] if isinstance(w["y"], list) else w["y"]) for w in ln])) for ln in lines]
+        y = (ys[0] + ys[-1]) / 2 - 0.36 * px / H
         font = (face_of(l1["voices"].get("a", v)) or ("Inter Display Bold", False))[0]
         font = font if font != "Plus Jakarta Sans ExtraBold" else "Plus Jakarta Sans"
         style = {"preset": "clean", "font": font, "color": first[0].get("ink") or "#FFFFFF", "uppercase": False, "animation": "none",

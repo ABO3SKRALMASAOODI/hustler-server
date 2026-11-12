@@ -9,6 +9,14 @@ import pytest
 
 import score.compiler as S  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def _mechanics_only(monkeypatch):
+    """These tests pin how each line of a Score compiles. What a film may carry is the taste governor's
+    (score/taste.py), which has its own tests in test_score_taste.py, so it is off here."""
+    import score.compiler as _compiler
+    monkeypatch.setattr(_compiler, "GOVERN", False)
+
 # Arabic-script type needs the images' fonts-noto-core (or VALMERA_SCRIPT_FONTS pointing at a copy)
 ARABIC = pytest.mark.skipif(S.font_path("NotoSansArabic-Bold.ttf") is None, reason="no Arabic-script font on this machine")
 

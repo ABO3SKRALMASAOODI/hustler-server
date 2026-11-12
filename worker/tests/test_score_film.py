@@ -16,6 +16,14 @@ from score import compiler, film, flags, lower, perceive
 from tests.test_score_compiler import talk_index
 
 
+@pytest.fixture(autouse=True)
+def _mechanics_only(monkeypatch):
+    """These tests pin how each line of a Score compiles. What a film may carry is the taste governor's
+    (score/taste.py), which has its own tests in test_score_taste.py, so it is off here."""
+    import score.compiler as _compiler
+    monkeypatch.setattr(_compiler, "GOVERN", False)
+
+
 # ------------------------------------------------------------------ the switch
 
 def test_a_bad_row_is_off():
@@ -294,7 +302,7 @@ def test_the_prefix_is_one_fixed_file_with_the_live_menu_under_its_cap():
     text = brief.prefix_text()
     assert text == brief.prefix_text()
     assert compiler.gesture_menu() in text                     # rebake director/first-result/bake_assets.py when gestures change
-    assert len(text) <= 27209       # the slice's prefix: 27,209 characters measured 11,470 tokens, under the 11,500 cap
+    assert len(text) <= 28400       # 27,603 characters measured 11,160 tokens (count_tokens, 12 Nov), under the 11,500 cap
     for engine_only in ('"behind":true', "cut:paper", '"g":"whip"', "`glow`"):
         assert engine_only not in text
 

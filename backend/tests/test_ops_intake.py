@@ -306,6 +306,23 @@ def test_a_director_fall_is_a_ticket_per_cause_never_a_page():
     assert "fell to the chain at direct" in a["title"]
 
 
+def test_a_film_that_lost_frames_to_its_upload_is_a_quality_ticket_never_a_page():
+    """worker/score/film.last_look: the last look removed devices, or delivered the plain floor film."""
+    def row(decision, cls="T", rid=7, removed=("b01.big", "b02.chip")):
+        return {"id": rid, "kind": "director_taste", "user_id": 3, "project_id": 1,
+                "at": datetime(2026, 11, 12, 10, tzinfo=timezone.utc),
+                "detail": json.dumps({"decision": decision, "pairs": 6, "for_upload": 4 if decision == "floor" else 2,
+                                      "removed": list(removed), "why": ["type over his face"], "cls": cls})}
+    a = intake._event_failure(row("cut"))
+    b = intake._event_failure(row("cut", rid=8, removed=("b05.flash",)))
+    c = intake._event_failure(row("floor"))
+    d = intake._event_failure(row("cut", cls="P"))
+    assert a["severity"] == "P1" and a["source"] == "director"
+    assert a["cause_key"] == b["cause_key"] and len({a["cause_key"], c["cause_key"], d["cause_key"]}) == 3
+    assert "lost 2 of 6 frames to its upload: 2 devices removed" in a["title"]
+    assert "the plain floor film was delivered" in c["title"]
+
+
 def test_scan_files_jobs_requests_and_replies_once(no_storm_readers):
     jobs = [{"id": 115549, "type": "index", "user_id": 2589,
              "project_id": 4911, "at": NOW, "tool": None,

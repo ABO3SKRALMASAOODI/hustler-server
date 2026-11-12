@@ -12,6 +12,13 @@ that compiles to nothing, an EDL the write path refuses. Every failure files thr
 Scope: a trial account (a live claude_trial scope, the account rule first_cut_visual.engine_on, never
 a subscriber), a video upload of at most 180 s. The film is ordinary EDL items drawn by today's
 renderer (score.lower); the write runs the usual checks through ToolContext.apply_score.
+
+    last_look(...) -> None, or the new `applied` list when the film was written again
+
+After the film's preview lands, one model call sets six of its frames under the same six of the upload
+(score.taste.look). What it names is removed and the film is rendered once more; when most frames lose
+to the upload, the customer gets the plain floor film. Either files a quality ticket (client event
+director_taste). A late, failed or unreadable look changes nothing: the film stands as rendered.
 """
 import json
 import os
@@ -22,6 +29,9 @@ import uuid
 from . import flags
 
 PREP_LEFT_S = 75.0     # what Scout, Supply and Direct need after perception and boards, or there is no film
+LOOK_USD = 0.10        # one board and a short answer, reserved on top of the account's allowance like the film
+LOOK_S = 30.0          # the look's own deadline
+LOOK_BY_S = 300.0      # seconds from the First cut job's start: past this the film stands as rendered
 
 
 class Fall(Exception):
@@ -58,6 +68,113 @@ def fell(ctx, worker_db, job, stage, reason, usd=0.0, start_edl=None):
         except Exception as exc:  # noqa: BLE001
             print(f"[director] start state not restored: {exc}", flush=True)
         ctx.director_version = None
+    close(ctx)
+
+
+def close(ctx):
+    """The film's folder goes when nothing more will read it."""
+    st = getattr(ctx, "director_state", None)
+    ctx.director_state = None
+    if st and st.get("work"):
+        shutil.rmtree(st["work"], ignore_errors=True)
+
+
+def look_on():
+    return os.environ.get("DIRECTOR_LOOK", "1") != "0"
+
+
+def last_look(ctx, worker_db, job, started, spend, trial_scope):
+    """The film beside its upload, once, after its preview landed. Returns None when the film stands as rendered,
+    or the reply's `applied` list when a new version was written and needs its preview. Never raises, never
+    blocks: a look that is late, fails or can't be read leaves the customer the film they already have."""
+    st = getattr(ctx, "director_state", None)
+    if not st:
+        return None
+    from . import call, compiler, lower, taste
+    import db as dbx
+    import storage
+    rec, out, reserve = {}, None, 0.0
+    spent0 = trial_scope.spent_usd if trial_scope is not None else 0.0
+    t0 = time.monotonic()
+    try:
+        if not look_on():
+            rec["skipped"] = "off"
+            return None
+        if t0 - started > LOOK_BY_S:
+            rec["skipped"] = f"late: {t0 - started:.0f} s into the job"
+            return None
+        preview = getattr(ctx, "last_preview", None) or {}
+        asset = worker_db.run(dbx.get_asset, preview["render_asset_id"]) if preview.get("render_asset_id") else None
+        key = (asset or {}).get("storage_key")
+        if not key:
+            rec["skipped"] = "no preview file"
+            return None
+        work, comp, cfg = st["work"], st["comp"], st["cfg"]
+        if trial_scope is not None:
+            reserve = LOOK_USD
+            _allowance(worker_db, trial_scope, reserve)
+        try:
+            v, usd = taste.look(work, comp, storage.presign_get(key, expires=900), time.monotonic() + LOOK_S, cfg["models"]["direct"])
+        except (call.Late, call.Refused) as exc:
+            rec["skipped"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+            return None
+        what = taste.verdict_of(v)
+        rec.update(verdict=v, decision=what, usd=round(usd, 5), look_s=round(time.monotonic() - t0, 1))
+        if what == "film":
+            return None
+        text = taste.floor_text(st["text"]) if what == "floor" else taste.cut_text(st["text"], v["remove"])
+        comp2 = compiler.compile_score(text, work_dir=work)
+        if comp2.json() == comp.json():            # it named only what the customer asked for, or the caption
+            rec["decision"] = "film"
+            return None
+        edl, locals_, rep = lower.lower(comp2.l1, work)
+        edl = _publish(ctx, worker_db, edl, locals_, st["bin_doc"], st["original_key"])
+        result = ctx.apply_score(edl, "the Director's First cut, after the last look")
+        if not str(result).startswith("EDL v"):
+            rec["error"] = f"write: {str(result)[:200]}"
+            return None
+        ctx.director_first = {"edl": st["edl"], "version": getattr(ctx, "director_version", None)}
+        ctx.director_version = (ctx.versions_written or [None])[-1]
+        t = comp2.meter.get("taste") or {}
+        rec.update(edl_version=ctx.director_version, counts=rep.get("counts"), removed=v["remove"][:24])
+        _event(worker_db, job, "director_taste", {
+            "job_id": job.get("id"), "decision": what, "pairs": v["pairs"], "for_upload": v["upload"], "removed": v["remove"][:24],
+            "why": v["why"][:6], "cls": (t.get("supply") or {}).get("cls"), "edl_version": ctx.director_version})
+        out = _applied(rep, comp2.l1, st["bin_doc"])
+        return out
+    except Exception as exc:  # noqa: BLE001 - the film on screen stands
+        rec["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+        print(f"[director] job {job.get('id')}: the last look did not finish: {rec['error']}", flush=True)
+        return out
+    finally:
+        try:
+            if trial_scope is not None:
+                used = trial_scope.spent_usd - spent0
+                spend["usd"] = spend.get("usd", 0.0) + used
+                _allowance(worker_db, trial_scope, -max(0.0, reserve - used))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[director] look allowance not settled: {exc}", flush=True)
+        phases = dict(getattr(ctx, "first_cut_phases", None) or {})
+        phases["director"] = dict(phases.get("director") or {}, look=rec)
+        ctx.first_cut_phases = phases
+        close(ctx)
+
+
+def restore_first(ctx):
+    """The version the look wrote did not render: the film that already had its preview goes back. True when written."""
+    first = getattr(ctx, "director_first", None)
+    ctx.director_first = None
+    if not first:
+        return False
+    try:
+        result = ctx.apply_score(first["edl"], "the Director's First cut")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[director] first film not restored: {exc}", flush=True)
+        return False
+    if not str(result).startswith("EDL v"):
+        return False
+    ctx.director_version = (ctx.versions_written or [None])[-1]
+    return True
 
 
 # ------------------------------------------------------------------ spend
@@ -269,7 +386,8 @@ def attempt(ctx, worker_db, job, started, spend, trial_scope, subscribed):
         except Exception as exc:  # noqa: BLE001
             print(f"[director] allowance not settled: {exc}", flush=True)
         ctx.first_cut_phases = dict(getattr(ctx, "first_cut_phases", None) or {}, director=rec)
-        shutil.rmtree(work, ignore_errors=True)
+        if getattr(ctx, "director_state", None) is None:        # a film that landed keeps its folder for the last look
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def _stage(rec, name, t0):
@@ -357,6 +475,9 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
         raise Fall("write", str(result)[:300])
     ctx.director_version = (ctx.versions_written or [None])[-1]
     rec["at"] = "written"
+    rec["taste"] = usage.get("taste")
+    # what the last look needs once the preview is on screen (last_look closes it)
+    ctx.director_state = {"work": work, "text": text, "comp": comp, "edl": edl, "bin_doc": bin_doc, "original_key": original["storage_key"], "cfg": cfg}
     applied = _applied(rep, comp.l1, bin_doc)
     steps = [{"tool": "director", "ok": True, "s": round(sum(rec["stages"].values()), 1), "note": str(result)[:160]}]
     return steps, applied, {"how": "director", "edl_version": ctx.director_version}

@@ -300,7 +300,7 @@ def scan(cur, since, now):
           FROM client_events ce JOIN users u ON u.id = ce.user_id
          WHERE ce.kind IN ('upload_failed', 'upload_rejected', 'player_error',
                            'upload_proxy_failed', 'mcp_error_response',
-                           'director_fell_back')
+                           'director_fell_back', 'director_taste')
            AND ce.created_at > %(since)s AND ce.created_at <= %(now)s
            AND {_customers()}
          ORDER BY ce.created_at LIMIT %(limit)s""", p)
@@ -550,6 +550,20 @@ def _event_failure(r):
         return dict(base, source="director", severity="P1",
                     cause_key=cause_key("director", stage, head),
                     title=_short(f"The Director's First cut fell to the chain at {stage}: {reason}"),
+                    detail=_short(json.dumps(d, default=str), 600))
+    if kind == "director_taste":
+        # The last look set the Director's film beside its upload and the
+        # upload won frames (worker/score/taste.py): the named devices were
+        # removed ("cut"), or the customer got the plain floor film
+        # ("floor"). The customer has a clean result, so never P0; the film
+        # the Director first wrote is a quality gap with a cause, one ticket
+        # per decision and supply class.
+        decision = str(d.get("decision") or "cut")
+        return dict(base, source="director", severity="P1",
+                    cause_key=cause_key("director-taste", decision, str(d.get("cls") or "")),
+                    title=_short(f"The Director's film lost {d.get('for_upload')} of {d.get('pairs')} frames to its upload: "
+                                 + ("the plain floor film was delivered" if decision == "floor"
+                                    else f"{len(d.get('removed') or [])} devices removed")),
                     detail=_short(json.dumps(d, default=str), 600))
     return None
 

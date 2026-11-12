@@ -18,7 +18,7 @@ import time
 import numpy as np
 from PIL import Image, ImageDraw
 
-from . import boards
+from . import boards, taste
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FF = os.environ.get("FFMPEG_BIN", "ffmpeg")
@@ -57,15 +57,37 @@ def word_rms(x, t0, t1):
     return 20 * math.log10(float(env.max()) + 1e-6)
 
 
+def stress_row(ws, x):
+    """Stress of each word of one sentence, from the signal only: louder and longer than its neighbours.
+    Returns (z, level in dB, seconds)."""
+    db = np.array([word_rms(x, w["t0"], w["t1"]) for w in ws]) if len(x) else np.zeros(len(ws))
+    secs = np.array([w["t1"] - w["t0"] for w in ws])
+    z = (db - db.mean()) / (db.std() + 1e-6) + 0.8 * (secs - secs.mean()) / (secs.std() + 1e-6)
+    z[secs < 0.16] = -9                  # too short to carry stress: a signal gate, not a word list
+    return z, db, secs
+
+
+def stress_map(idx, x):
+    """Word id -> measured stress, for the compiler: past what a film can carry, the devices on the words the
+    voice stresses most are the ones that stay (taste.decide). The same number that prints the * marks."""
+    words = idx.get("words") or []
+    out = {}
+    for s in idx.get("sentences") or []:
+        ids = list(range(int(s["wi0"]), min(int(s["wi1"]), len(words) - 1) + 1))
+        if not ids:
+            continue
+        z, _, _ = stress_row([words[i] for i in ids], x)
+        for i, v in zip(ids, z):
+            out[i] = round(float(max(v, -9.0)), 3)
+    return out
+
+
 def sentence_line(n, s, words, x, shown):
     """One sentence with its signal facts written into the text. Signal only: loudness and length."""
     ids = list(range(s["wi0"], s["wi1"] + 1))
     ws = [words[i] for i in ids]
-    db = np.array([word_rms(x, w["t0"], w["t1"]) for w in ws]) if len(x) else np.zeros(len(ws))
-    secs = np.array([w["t1"] - w["t0"] for w in ws])
+    z, db, secs = stress_row(ws, x)
     letters = np.array([max(2, len(w["w"])) for w in ws])
-    z = (db - db.mean()) / (db.std() + 1e-6) + 0.8 * (secs - secs.mean()) / (secs.std() + 1e-6)
-    z[secs < 0.16] = -9                  # too short to carry stress: a signal gate, not a word list
     marks = set(int(i) for i in np.argsort(-z)[:max(1, round(len(ws) / 5))])
     ld = np.log(np.maximum(secs, 0.04) / letters)
     held = set(i for i in range(len(ws)) if ld[i] - ld.mean() > 1.1 * (ld.std() + 1e-6))
@@ -377,10 +399,42 @@ def detail_board(src, per, idx):
     return im
 
 
-def pick_styles(idx, per):
+TALK_CARDS, WORDLESS_CARDS = ("P1", "P6", "M8", "P2"), ("S9", "S11", "M5")
+
+
+def pick_styles(idx, per, bin_items=None):
+    """Style cards this footage can supply (taste.fit_styles): films of the folder whose picture changes about as
+    often as this upload's own cuts and its Bin can reach. One take with an empty Bin is offered the take's card,
+    not three films that cut fifteen times in 10 s."""
+    from . import compiler
     words = idx.get("words") or []
     talk = len(words) / max(per["dur"], 1) >= 1.0
-    return ["P2", "M8", "P6"] if talk else ["M5", "S11", "S9"]
+    have = [s for s in (TALK_CARDS if talk else WORDLESS_CARDS) if os.path.exists(os.path.join(STYLE_DIR, f"{s}.jpg"))]
+    return taste.fit_styles(compiler.BANDS, taste.reach(per, bin_items, per["dur"]), have)
+
+
+def supply_part(idx, per, bin_items):
+    """What this footage can carry, in numbers, before a film exists."""
+    dur = float(per["dur"])
+    own = max(0, len(per.get("shots") or []) - 1)
+    n = len(bin_items or [])
+    words = idx.get("words") or []
+    a = per.get("audio") or {}
+    bins = a.get("rms_db") or []
+    bed = False
+    if bins and len(words) / max(dur, 1e-3) < 1.0:
+        top = sorted(bins)[int(len(bins) * 0.9)]
+        bed = sum(1 for b in bins if b >= top - 20.0) >= 0.5 * len(bins) and top > -45.0
+    out = ["## Supply"]
+    rows = []
+    for label, np10 in (("held as one take, no found picture", own / max(dur, 1e-3) * 10), (f"with all {n} Bin pictures cut in", taste.reach(per, bin_items, dur))):
+        cls = taste.klass(np10, dur)
+        al = taste.allow({"cls": cls, "np10": np10, "dur_s": dur, "bed": bed})
+        rows.append(f"{label}: {np10:.1f} new pictures per 10 s, class {cls}: camera moves {al['camera']}, sounds {al['sounds']}, display lines {al['display']} at {al['seats']} seats, cards {al['cards']}, flashes {al['flashes']}")
+        if not n:
+            break
+    out.append(f"The upload has {own} cut(s) of its own, {dur:.1f} s, {'a sound bed' if bed else 'no bed'}. What it carries, " + "; ".join(rows) + ". The compiler counts the pictures you really cut to and holds the film to that.")
+    return out
 
 
 # ----------------------------------------------------------------- prefix
@@ -442,7 +496,7 @@ def bin_part(work):
     return out, os.path.join(work, "bin_board.jpg")
 
 
-def film_text(work, idx, sess, per, x, scout, styles, cards):
+def film_text(work, idx, sess, per, x, scout, styles, cards, bin_items=None):
     prompts = sess.get("prompts") or []
     out = ["# This film", "## The ask"]
     names = [u.get("filename") for u in sess.get("uploads") or [] if u.get("filename")]
@@ -459,8 +513,9 @@ def film_text(work, idx, sess, per, x, scout, styles, cards):
     out += ["## Frames",
             "Boards 1-3: frames in time order. Each stamp reads @source-second, then the word being spoken. Green box face, yellow box free space on the first cell. White ticks mark every .1 of the frame. Board 4: details, softness, palette."]
     out += scout_part(scout)
+    out += supply_part(idx, per, bin_items)
     out.append("## Style cards")
-    out.append("Real films from the folder. The frames follow, one board per card, after the frame boards. Numbers are that film's, measured. A band is a guardrail you choose or replace with `own`.")
+    out.append("Real films from the folder that this footage can supply. The frames follow, one board per card, after the frame boards. Numbers are that film's, measured. `system.card` is one of these: " + " ".join(styles) + ".")
     for s in styles:
         out.append(cards[s])
     out += bin_part(work)[0]
@@ -488,11 +543,14 @@ def build(work, idx, sess, per, scout, grid=None):
     x = decode(src) if idx.get("words") else np.zeros(0)
     with open(STYLES, encoding="utf-8") as f:
         cards = json.load(f)
-    styles = pick_styles(idx, per)
+    bin_items = (jload(os.path.join(work, "bin.json")) or {}).get("items") or []
+    styles = pick_styles(idx, per, bin_items)
+    with open(os.path.join(work, "stress.json"), "w") as f:      # the compiler ranks devices by the voice's own stress
+        json.dump(stress_map(idx, x) if len(x) else {}, f)
     # text, under the cap: a third card goes first, then a second, each recorded
     dropped = []
     while True:
-        txt = film_text(work, idx, sess, per, x, scout, styles, cards)
+        txt = film_text(work, idx, sess, per, x, scout, styles, cards, bin_items)
         est = estimate(work, txt, styles)
         if est <= FILM_CAP or len(styles) <= 1:
             break

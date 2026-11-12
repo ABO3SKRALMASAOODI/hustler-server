@@ -10,6 +10,14 @@ import schemas
 from score import compiler, lower, supply
 from tests.test_score_compiler import REST, _film, talk_index, wordless_index
 
+
+@pytest.fixture(autouse=True)
+def _mechanics_only(monkeypatch):
+    """These tests pin how each line of a Score compiles. What a film may carry is the taste governor's
+    (score/taste.py), which has its own tests in test_score_taste.py, so it is off here."""
+    import score.compiler as _compiler
+    monkeypatch.setattr(_compiler, "GOVERN", False)
+
 FILM = {"k": "film", "v": 1, "fps": 30, "frame": "9:16", "spine": "main", "band": "P2", "seed": 7}
 
 

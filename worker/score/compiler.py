@@ -110,6 +110,11 @@ CELLS_X = (0.31, 0.375, 0.315)                        # unequal 3x3, ATLAS 8.3
 CELLS_Y = (0.31, 0.373, 0.317)
 RELAY_WALK = [(0, 0), (1, 0), (2, 0), (2, 1), (2, 2), (1, 2), (0, 2), (0, 1), (1, 1)]    # anticlockwise, ends centre
 
+# The taste governor (score/taste.py, week-1112 TASTE.md): a device exists only where an event earns it, and its
+# count follows the supply of new pictures. On for every film; a test of how one gesture compiles turns it off.
+GOVERN = True
+GOVERN_ROUNDS = 3
+
 _font_cache = {}
 _sound_cache = {}
 
@@ -323,7 +328,7 @@ def parse_font_spec(spec):
 
 # ---------------------------------------------------------------- parse
 
-KNOWN = {"treat", "film", "dna", "bind", "pics", "b", "item", "tool", "def", "fix", "drop"}
+KNOWN = {"treat", "film", "dna", "bind", "pics", "b", "item", "tool", "def", "fix", "drop", "cut"}
 
 
 def parse_score(text):
@@ -497,6 +502,24 @@ class Ctx:
         self.soft = {}
         self.soft_at = 3.4
         self.dead_air = 0.0
+        # taste (score/taste.py)
+        self.governed = False
+        self.plan = {}             # decisions of the reading before this compile: what to drop, move, hold
+        self.devices = {}          # every device line of the Score: its department and the event it answers
+        self.taste_rows = []       # what this compile itself removed or repaired, with the reason
+        self.asks = {}             # the Scout's ask ledger, id -> ask
+        self.stress = {}           # word id -> measured stress of the voice
+        self.system = {}           # the film's one design system, from the treat line
+        self.cuts = {}             # ids the last look named, id -> why
+        self.calm = False
+        self.cap_y = None          # the film's one caption seat
+        self.seats = None          # the film's display seats
+        self.cam_land, self.cam_len = {}, {}
+        self.cam_marks = []        # (frame, rect): the framing an earned camera line left the take in
+        self.wrote = {}            # device lines the Score wrote, by department
+        self.flip_frames = None    # programme frames where a speech edit changes the take's framing by a tenth
+        self.step_once = False
+        self.offered = None        # style cards the Brief offered for this footage
 
     def _faces_from_index(self):
         out = []
@@ -594,6 +617,9 @@ def frame_of(ctx, a, b=None, end=False):
             f = bb.pf0 if io == "in" else bb.pf1
         elif name in ctx.byid:
             f = ctx.byid[name]["f"][0 if io == "in" else 1]
+        elif any(i.get("_g") == name for i in ctx.items):      # a gesture by its id: where what it drew lands, and leaves
+            grp = [i["f"] for i in ctx.items if i.get("_g") == name]
+            f = min(g[0] for g in grp) if io == "in" else max(g[1] for g in grp)
         else:
             s = next((x for x in ctx.shots if x["id"] == name), None)
             if s is None:
@@ -688,6 +714,8 @@ def read_film(ctx, lines):
                 ctx.sets[str(l["id"])] = l
         elif l["k"] == "def" and not ctx.owner:
             ctx.find(f"line {l['_line']}: def is refused on a customer's Score")
+        elif l["k"] == "cut" and l.get("id"):
+            ctx.cuts[str(l["id"])] = str(l.get("why") or "the last look")
     ctx.film = film
     try:
         ctx.fps = int(round(float(film.get("fps", 30)))) or 30
@@ -716,8 +744,40 @@ def read_film(ctx, lines):
         ctx.gap = float(gap)
     if not ctx.dna:
         ctx.find("no dna line: safety fonts, seat and ink")
+    if ctx.governed:
+        read_system(ctx)
     voices(ctx)
     film_look(ctx)
+
+
+def read_system(ctx):
+    """The film's one design system, named in the treat line:
+    {"card":"P1","devices":["big","card"],"sounds":["impact"],"seats":[[.5,.26],[.5,.72]]}. Score syntax only.
+    A Score with none is not refused: its own most used devices stand in (taste.decide), and the meter says so."""
+    from . import taste
+    sy = ctx.treat.get("system")
+    named = isinstance(sy, dict)
+    sy = sy if named else {}
+    card = str(sy.get("card") or ctx.film.get("band") or "")
+    if ctx.offered and card not in ctx.offered and ctx.band_name != "own":
+        fit = next((c for c in ctx.offered if c in BANDS), None)
+        if fit:
+            ctx.find(f"system card {card or 'none'} is not one this footage can supply ({' '.join(ctx.offered)}): {fit} stands in")
+            card = fit
+    if card in BANDS and ctx.band_name != "own":
+        ctx.band, ctx.band_name = BANDS[card], card
+    devices = [str(d.get("g") if isinstance(d, dict) else d) for d in (sy.get("devices") or []) if d]
+    _, roles = sound_table()
+    table, _ = sound_table()
+    sounds = []
+    for x in sy.get("sounds") or []:
+        x = str(x.get("s") if isinstance(x, dict) else x)
+        role = x if x in roles or x in VOICE_LAYERS else (table.get(x) or {}).get("role")
+        if role and role not in sounds:
+            sounds.append(role)
+    ctx.system = {"named": named, "card": card if card in BANDS else None, "devices": [d for d in dict.fromkeys(devices) if d in taste.DEPT],
+                  "sounds": sounds, "seats": [x for x in (sy.get("seats") or ctx.dna.get("seats") or []) if isinstance(x, (list, tuple)) and len(x) == 2]}
+    ctx.calm = str(ctx.film.get("intensity") or sy.get("intensity") or "") == "calm"
 
 
 def voices(ctx):
@@ -733,6 +793,8 @@ def voices(ctx):
                 ctx.find(f"font {pair.get(key)!r} is not in the set, safety font used")
             font = safe[key][0]
         size = size if size else safe[key][1]
+        if ctx.governed:
+            size = clamp(size, 0.022, 0.05)        # P5: a caption is read on a phone: 28 px at 720x1280 or more
         ctx.voices[key] = {"font": font, "px": max(14, int(round(size * ctx.H))), "track": safe[key][2] if track is None else track}
         sh = dna.get("shadow", {"a": 0.35, "blur": 0.012})
         if sh:
@@ -999,6 +1061,11 @@ def build_spine(ctx):
         s0 = clamp(r["s0"], 0.0, ctx.src_dur)
         if r.get("joined") and prev_end is not None:
             s0 = prev_end
+        elif prev_end is not None and 0 < prev_end - s0 <= 0.2:
+            # The air before a first word reaches back into the span before it (a beat written in seconds, then a
+            # beat of words: p5571, 4.41 after 4.46). That is one continuous take. Lowered as a jump it became an
+            # insert of the upload, framed differently from the upload itself.
+            s0 = prev_end
         s1 = clamp(r["s1"], s0 + 1.0 / ctx.fps, max(ctx.src_dur, s0 + 1.0 / ctx.fps))
         n = max(1, int(round((s1 - s0) * ctx.fps)))
         s1 = s0 + n / ctx.fps
@@ -1141,7 +1208,7 @@ def parse_pic(ctx, p, where):
         p = {"src": p}
     if not isinstance(p, dict):
         return None
-    ref = {k: p.get(k) for k in ("crop", "cam", "d", "treat", "look", "step", "zoom", "rate")}
+    ref = {k: p.get(k) for k in ("crop", "cam", "d", "treat", "look", "step", "zoom", "rate", "for")}
     if "plate" in p:
         ref.update(kind="plate", plate=plate_of(ctx, p["plate"]))
         return ref
@@ -1424,7 +1491,7 @@ def base_rect(ctx, ref, asset, t, W, H, rng, repeat):
         pass
     elif repeat and asset.get("kind") == "image":
         z = rng.uniform(1.12, 1.38)
-    elif repeat and ref.get("kind") == "main" and not ref.get("crop"):
+    elif repeat and ref.get("kind") == "main" and not ref.get("crop") and not ctx.governed:
         z = (1.0, 1.28, 1.14, 1.42)[repeat % 4]
     else:
         z = None
@@ -1519,8 +1586,21 @@ def picture_fields(ctx, b, ref, a, z, W=None, H=None, src=None):
                 src = video_src(ctx, ref, asset, n, rng)
             out["src"] = [src[0], src[1]]
         t = out["src"][0] if "src" in out else 0.0
-        base = tracked_crop(ctx, ref, asset, out.get("src"), W, H, n) or base_rect(ctx, ref, asset, t, W, H, rng, repeat)
-        out["crop"] = camera(ctx, base, n, ref.get("cam") or ctx.dna.get("cam"))
+        if ctx.governed and ref["asset"] == "main" and (W, H) == (ctx.W, ctx.H):
+            # the upload on the frame: one framing for the film, a step only where a device line earned one
+            base = take_crop(ctx, ref, asset, out.get("src"), n, rng, at=a)
+            out["crop"] = camera(ctx, base, n, calm_cam(ref.get("cam"))) if ref.get("_cam") else base
+            if ref.get("_cam"):            # where it ends is where the take stays
+                c = out["crop"]
+                c = c[-1] if isinstance(c[0], list) else c
+                flip = ref.get("_flip") or 1.0
+                cx, cy, hw, hh = (c[0] + c[2]) / 2, (c[1] + c[3]) / 2, (c[2] - c[0]) * flip / 2, (c[3] - c[1]) * flip / 2
+                ctx.cam_marks.append((a, [cx - hw, cy - hh, cx + hw, cy + hh]))
+                ctx.cam_marks.sort(key=lambda m: m[0])
+        else:
+            base = tracked_crop(ctx, ref, asset, out.get("src"), W, H, n) or base_rect(ctx, ref, asset, t, W, H, rng, repeat)
+            cam = ref.get("cam") or ctx.dna.get("cam")
+            out["crop"] = camera(ctx, base, n, calm_cam(cam) if ctx.governed and asset["kind"] == "image" else cam)
         if ref["asset"] == "main" and (W, H) == (ctx.W, ctx.H):        # the frame's own picture, not a card's inset
             out["crop"] = keep_marks_whole(ctx, out["crop"], out.get("src"), asset, W, H)
     tr = parse_treat(ref.get("treat"))
@@ -1531,6 +1611,91 @@ def picture_fields(ctx, b, ref, a, z, W=None, H=None, src=None):
         out["grade"] = g
     if isinstance(ref.get("step"), int) and ref["step"] > 1:
         out["step"] = ref["step"]
+    return out
+
+
+def calm_cam(cam):
+    """A slow move on a take or a still stays slow: 6% in all (TASTE 4.2)."""
+    from . import taste
+    c = parse_cam(cam)
+    if not c:
+        return None
+    v = c.get("v")
+    if c["m"] in ("push", "pull", "ui_zoom"):
+        c["v"] = min(1.04 if v is None else float(v), taste.PUSH_MAX)
+    elif c["m"] == "settle":
+        c["v"] = max(SETTLE["s_inf"] if v is None else float(v), 1 / taste.PUSH_MAX)
+    elif c["m"] in ("pan", "tilt"):
+        c["v"] = min(0.05 if v is None else abs(float(v)), 0.05)
+    return c
+
+
+def film_framing(ctx, asset, src, n):
+    """The film's one framing of the upload: dna.take (a rect, a zoom number, or a subject that is followed), else
+    the upload as it was shot."""
+    t = ctx.dna.get("take")
+    ref = {"kind": "main", "asset": "main"}
+    if isinstance(t, (int, float)) and not isinstance(t, bool):
+        ref["zoom"] = float(t)
+    elif t not in (None, "", "full"):
+        ref["crop"] = t
+    r = tracked_crop(ctx, ref, asset, src, ctx.W, ctx.H, n) if ref.get("crop") else None
+    return r or base_rect(ctx, ref, asset, (src or [0.0])[0], ctx.W, ctx.H, None, 0)
+
+
+def take_crop(ctx, ref, asset, src, n, rng, at=0):
+    """The upload on the frame, governed (TASTE 4.2, camera). Its scale is the film's one framing; a shot leaves it
+    only when its device line earned a step (`_cam`), by 15% at most and 20% once, and by a tenth where the voice
+    was cut (`_flip`), aimed on the face. An earned framing then holds: the take does not step back out of it, so
+    one device is one step, never an A-B-A. Where the Score wrote a crop without earning it, the window still
+    centres where the Score put it: where the frame sits is a reframe, how close it is is a camera move. Nothing
+    here zooms past what the source can hold, or until the face fills the frame."""
+    from . import taste
+    W, H = ctx.W, ctx.H
+    fit = fit_crop([0, 0, 1, 1], asset["w"], asset["h"], W, H)
+    fw, fh = fit[2] - fit[0], fit[3] - fit[1]
+    t = (src or [0.0])[0]
+    face = face_at(ctx, t)
+    base_up = W / max(1.0, fw * asset["w"])
+    cap = max(1.0, min(taste.ZOOM_OVER_UPSCALE, taste.UPSCALE_MAX / base_up))
+    if face:
+        cap = max(1.0, min(cap, taste.FACE_H_MAX / max((face[3] - face[1]) / max(fh, 1e-6), 1e-6)))
+    film = film_framing(ctx, asset, src, n)
+    f0 = film[0] if isinstance(film[0], list) else film
+    zf = clamp(fw / max(f0[2] - f0[0], 1e-6), 1.0, cap)
+    written = None
+    if ref.get("crop") or (isinstance(ref.get("zoom"), (int, float)) and not isinstance(ref.get("zoom"), bool) and ref["zoom"] > 1):
+        written = tracked_crop(ctx, ref, asset, src, W, H, n) or base_rect(ctx, ref, asset, t, W, H, rng, 0)
+    rects = written if written is not None else film
+    path = rects if isinstance(rects[0], list) else [rects]
+    held = None
+    for f, r in ctx.cam_marks:              # the last framing a device earned before this shot
+        if f <= at:
+            held = r
+    z, centre = zf, None
+    if ref.get("_cam") and written is not None:
+        zw = fw / max(path[0][2] - path[0][0], 1e-6)
+        lim = taste.STEP_MAX
+        if not ctx.step_once and (zw / zf > lim or zf / max(zw, 1e-6) > lim):
+            lim, ctx.step_once = taste.STEP_ONCE, True
+        z = clamp(zf * clamp(zw / zf, 1 / lim, lim), 1.0, cap)
+    elif held is not None:
+        z = clamp(fw / max(held[2] - held[0], 1e-6), 1.0, cap)
+        if written is None:
+            centre = ((held[0] + held[2]) / 2, (held[1] + held[3]) / 2)
+    flip = ref.get("_flip") if cap >= taste.EDIT_STEP[0] else None
+    if flip:
+        z = min(z * flip, cap * flip)
+    w, h = fw / z, fh / z
+    out = []
+    for r in path:
+        cx, cy = centre or ((r[0] + r[2]) / 2, (r[1] + r[3]) / 2)
+        if flip and face:
+            cx, cy = (face[0] + face[2]) / 2, (face[1] + face[3]) / 2 + 0.1 * h
+        cx, cy = clamp(cx, w / 2, 1 - w / 2), clamp(cy, h / 2, 1 - h / 2)
+        out.append([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2])
+    if len(out) == 1 or max(abs(a[0] - out[0][0]) + abs(a[1] - out[0][1]) for a in out) < 0.002:
+        return out[0]
     return out
 
 
@@ -1660,6 +1825,8 @@ def emit_ref(ctx, b, ref, a, z, sid):
         out = []
         for i, (p, q, s0, s1) in enumerate(parts):
             it = {"id": sid if i == 0 else f"{sid}.j{i}", "k": "shot", "f": [p, q]}
+            if ctx.governed and ref.get("asset") == "main":
+                ref = {**ref, "_flip": speech_edit_flip(ctx, p)}
             it.update(picture_fields(ctx, b, ref, p, q, src=[s0, s1]))
             if i:
                 ctx.seen[ref["asset"]] -= 1      # same framing either side of the jump
@@ -1674,6 +1841,27 @@ def emit_ref(ctx, b, ref, a, z, sid):
     it = {"id": sid, "k": "shot", "f": [a, z]}
     it.update(picture_fields(ctx, b, ref, a, z))
     return [it]
+
+
+def speech_edit_flip(ctx, p):
+    """Where the voice was cut inside the take, the framing changes by a tenth, so the jump reads as a cut
+    (TASTE 4.2: one step per speech edit, 8-12%). Never twice inside ten seconds: a row of closed pauses is a
+    row of plain jump cuts, not a zoom on every breath. Read from the spine alone, so a shot's framing
+    depends on where it starts and never on the order gestures ran in. Returns the zoom at frame p, or None."""
+    from . import taste
+    if ctx.flip_frames is None:
+        out, last = [], -10 ** 6
+        sp = sorted(ctx.spine, key=lambda x: x["f"][0])
+        for a, z in zip(sp, sp[1:]):
+            f = z["f"][0]
+            if a["f"][1] == f and abs(z["src"][0] - a["src"][1]) > 0.2 and f - last >= int(taste.STEP_GAP_S * ctx.fps):
+                out.append(f)
+                last = f
+        ctx.flip_frames = out
+    if bisect.bisect_right(ctx.flip_frames, p) % 2 == 0:
+        return None
+    lo, hi = taste.EDIT_STEP
+    return round(rng_for(ctx.seed, "edit_step").uniform(lo, hi), 3)
 
 
 def sub_item(it, a, z, new_id):
@@ -1815,12 +2003,20 @@ def plan_shots(ctx):
     for b in beats:
         where = b.id
         b.pics = parse_pics(ctx, b.raw.get("pic"), where) or [{"kind": "main", "asset": "main", "sync": True}]
+        if ctx.governed:
+            camera_gate(ctx, b)
         total = b.pf1 - b.pf0
         if total <= 0:
             continue
         rng = rng_for(ctx.seed, "pulse", b.id)
         fr = [p.get("d") for p in b.pics]
-        if b.cut["frames"]:
+        take_only = ctx.governed and all(p.get("asset") == "main" and p.get("sync") and p.get("k") is None for p in b.pics)
+        if take_only and not any(p.get("_cam") for p in b.pics):
+            lens = [total]         # a pulse cuts between pictures. One take has none: it holds
+        elif take_only:            # each earned framing once, never a pulse back and forth
+            want = b.cut["frames"] or [int(x) if isinstance(x, (int, float)) else max(1, total // len(b.pics)) for x in fr]
+            lens = explicit_lengths(total, want[:len(b.pics)])
+        elif b.cut["frames"]:
             lens = explicit_lengths(total, b.cut["frames"])
         elif any(isinstance(x, (int, float)) for x in fr):
             spent = sum(int(x) for x in fr if isinstance(x, (int, float)))
@@ -1834,9 +2030,104 @@ def plan_shots(ctx):
         t = b.pf0
         for j, d in enumerate(lens):
             ref = b.pics[j % len(b.pics)]
-            b.shots += emit_ref(ctx, b, ref, t, t + d, f"{b.id}.s{j}")
+            sid = f"{b.id}.s{j}"
+            if ctx.governed and ref.get("asset") != "main" and ref.get("kind") != "plate":
+                gone = _gone(ctx, sid, "picture", None)        # the last look, or the floor: the take stands in
+                if gone:
+                    ctx.taste_rows.append({"id": sid, "did": gone[0], "why": gone[1], "dept": "picture"})
+                    ref = {"kind": "main", "asset": "main", "sync": True}
+            b.shots += emit_ref(ctx, b, ref, t, t + d, sid)
+            if ref.get("_cam"):
+                ctx.cam_land.setdefault(ref["_cam"], t)
+                ctx.cam_len[ref["_cam"]] = ctx.cam_len.get(ref["_cam"], 0) + d
             t += d
         ctx.shots += b.shots
+
+
+def _gone(ctx, key, dept, bound):
+    """Was this device line already decided against? (did, why) from the last look, the floor or the reading before."""
+    if not bound and (key in ctx.cuts or "*" in ctx.cuts):
+        return ("cut", ctx.cuts.get(key) or ctx.cuts["*"])
+    for lane in ("drop_g", "drop_cam", "drop_snd", "drop_item"):
+        if key in ctx.plan.get(lane, {}):
+            return tuple(ctx.plan[lane][key])
+    return None
+
+
+def camera_gate(ctx, b):
+    """A camera move on the upload is a device line: it stands when it names the event it answers. One that
+    doesn't keeps its window where the Score put it, at the film's own scale (take_crop)."""
+    from . import taste
+    for j, ref in enumerate(b.pics):
+        if ref.get("asset") != "main":
+            continue
+        z = ref.get("zoom")
+        if not (ref.get("crop") or ref.get("cam") or (isinstance(z, (int, float)) and not isinstance(z, bool) and z > 1)):
+            continue
+        key = f"{b.id}.p{j}"
+        ctx.wrote["camera"] = ctx.wrote.get("camera", 0) + 1
+        ev, why = taste.read_for(ctx, b, ref.get("for"), "camera")
+        bound = taste.bound_by(ctx, key, "camera") or (ev["ask"] if ev and ev["kind"] == "ask" else None)
+        gone = _gone(ctx, key, "camera", bound) or (("unearned", why) if ev is None and not bound else None)
+        if gone:
+            ctx.taste_rows.append({"id": key, "did": gone[0], "why": gone[1], "dept": "camera"})
+            continue
+        ref["_cam"] = key
+        ctx.devices[key] = {"id": key, "dept": "camera", "g": "cam", "b": b.id, "ev": ev, "bound": bound or None, "cam_key": True}
+
+
+def film_seats(ctx):
+    """The film's one caption seat and its display seats, solved once from the planned picture (taste)."""
+    if ctx.seats is None:
+        from . import taste
+        ctx.cap_y = taste.caption_seat(ctx, asked=bool(taste.bound_by(ctx, "cap:", "caption")))
+        n = {"T": 2, "M": 3, "P": 3, "L": 2}.get(ctx.plan.get("cls") or "T", 2)
+        ctx.seats = taste.display_seats(ctx, ctx.cap_y, n, ctx.system.get("seats"))
+    return ctx.seats
+
+
+SEATED = ("big", "chip", "counter", "type_on", "line")
+
+
+def device_gate(ctx, b, g):
+    """A gesture that is a device stands when its line names the word, the turn or the picture event it answers
+    (`for`). One that names none is dropped, with a row the Director reads in the meter. Returns False when dropped."""
+    from . import taste
+    n, gid = g["g"], g["_gid"]
+    dept = taste.DEPT.get(n)
+    if dept is None:
+        return True
+    ctx.wrote[dept] = ctx.wrote.get(dept, 0) + 1
+    ev, why = taste.read_for(ctx, b, g.get("for"), dept)
+    bound = taste.bound_by(ctx, gid, dept) or (ev["ask"] if ev and ev["kind"] == "ask" else None)
+    gone = _gone(ctx, gid, dept, bound)
+    if gone:
+        ctx.taste_rows.append({"id": gid, "did": gone[0], "why": gone[1], "dept": dept})
+        return False
+    if ev is None and not bound:
+        ctx.rejects.append((b.raw.get("_line", 0), f"{gid} dropped: it {why}", ""))
+        ctx.taste_rows.append({"id": gid, "did": "unearned", "why": why, "dept": dept})
+        return False
+    if n in SEATED and not bound:
+        seats = film_seats(ctx)
+        k = taste.snap(seats, g.get("seat"))
+        if k is None:             # P3: a close face fills this frame. The film sets no display type; it never sets it on the face
+            ctx.taste_rows.append({"id": gid, "did": "thinned", "dept": dept, "why": "no place in this frame clears the face, the caption and the safe area"})
+            return False
+        g["seat"] = list(seats[k])
+        room = (getattr(ctx, "seat_rooms", None) or [[0.9, 0.2]] * len(seats))[k]
+        g["_room"] = room[1]                       # the type is fitted to the seat's room
+        g["fit"] = min(float(g["fit"]) if isinstance(g.get("fit"), (int, float)) else 1 - 2 * SAFE_X - 0.02, room[0])
+    ctx.devices[gid] = {"id": gid, "dept": dept, "g": n, "b": b.id, "ev": ev, "bound": bound or None}
+    if gid in ctx.plan.get("hold", {}):
+        g["d"] = int(ctx.plan["hold"][gid][0])
+        ctx.taste_rows.append({"id": gid, "did": "repaired", "why": ctx.plan["hold"][gid][1], "dept": dept})
+    if gid in ctx.plan.get("trim", {}):
+        g["_max"] = int(ctx.plan["trim"][gid][0])
+        ctx.taste_rows.append({"id": gid, "did": "repaired", "why": ctx.plan["trim"][gid][1], "dept": dept})
+    if n == "punch" and not bound:
+        g["z"] = min(float(g.get("z", 1.28)) if isinstance(g.get("z"), (int, float)) else 1.28, taste.STEP_MAX)
+    return True
 
 
 # ---------------------------------------------------------------- type
@@ -2127,9 +2418,8 @@ def under_plate(ctx, f):
     return s.get("plate") if s and s.get("pic") == "plate" else None
 
 
-def solve_seat(ctx, seat, block_w, block_h, a, z):
-    """Seat a block of type: rests on a card's edge, leaves faces and display type, never
-    enters the keep-out."""
+def card_edge_seat(ctx, seat, block_h, a, z):
+    """A caption rests on the edge of a card that is on screen, or None when there is none near its seat."""
     x, y = seat
     mid = (a + z) // 2
     cards = [c for c in cards_at(ctx, mid) if c.get("_cap_edge") and c["f"][1] - c["f"][0] > 6]
@@ -2144,6 +2434,17 @@ def solve_seat(ctx, seat, block_w, block_h, a, z):
             if y2 - block_h / 2 > 0.03:
                 return [cx, y2]
             return [cx, cy + hh + tilt + 0.014 + block_h / 2]
+    return None
+
+
+def solve_seat(ctx, seat, block_w, block_h, a, z):
+    """Seat a block of type: rests on a card's edge, leaves faces and display type, never
+    enters the keep-out."""
+    x, y = seat
+    mid = (a + z) // 2
+    on_card = card_edge_seat(ctx, seat, block_h, a, z)
+    if on_card:
+        return on_card
     margin = 0.012
     obstacles = [b[2] for b in ctx.blocks if b[0] < z and b[1] > a] + mark_rects(ctx, a, z)
     heads = []
@@ -2236,6 +2537,19 @@ def build_captions(ctx):
     seat0 = ctx.dna.get("seat")
     if seat0 != "free" and not (isinstance(seat0, (list, tuple)) and len(seat0) == 2):
         seat0 = [0.5, 0.62]
+    asked = False
+    if ctx.governed:
+        from . import taste
+        film_seats(ctx)
+        seat0 = [0.5, ctx.cap_y]           # P1: one caption seat for the film; the caption does not go hunting
+        asked = any(str(a.get("probe")) in ("caption_coverage", "caption_language") for a in ctx.asks.values())
+        own = taste.upload_captions(ctx)
+        ctx.upload_caps = round(own, 2)
+        if own >= 0.5 and not asked:       # P7: say it once
+            ctx.taste_rows.append({"id": "cap", "did": "thinned", "dept": "caption",
+                                   "why": f"the upload prints its own captions on {int(own * 100)}% of its speech, so none are added"})
+            ctx.n_chunks = 0
+            return
     for b in ctx.beats:
         specs = b.raw.get("type")
         if specs in (None, "", []):
@@ -2272,7 +2586,7 @@ def build_captions(ctx):
                 lag = cfg.get("lag")
                 lag = int(lag) if isinstance(lag, (int, float)) else r.choice([1, 2, 2, 3])
                 cid = f"{b.id}.c{n}" if sidx == 0 else f"{b.id}.c{sidx}_{n}"
-                chunks.append({"id": cid, "b": b, "ws": ws2, "lag": lag, "seat": opts.get("seat") or seat0,
+                chunks.append({"id": cid, "b": b, "ws": ws2, "lag": lag, "seat": seat0 if ctx.governed else opts.get("seat") or seat0,
                                "ink": opts.get("ink"), "on": b.wf[ws2[0][0]] + lag,
                                "end": b.wfe[ws2[-1][0]]})
     chunks.sort(key=lambda c: c["on"])
@@ -2299,6 +2613,9 @@ def place_chunk(ctx, c, layout, auto_pool):
     W, H = ctx.W, ctx.H
     px = max(ctx.voices[v]["px"] for _, v in parts)
     max_w = 1 - 2 * SAFE_X
+    if ctx.governed and ctx.H > ctx.W:
+        from . import taste
+        max_w = taste.CAP_MAX_W            # P2: a centred line ends left of the platform's buttons
     if layout == "stack":
         lines = [[(i, 0.0, text_px(t, ctx.voices[v]))] for i, (t, v) in enumerate(parts)]
         lines = [[(i, (W * c["seat"][0] - w / 2), w)] for row in lines for i, _, w in row]
@@ -2311,7 +2628,11 @@ def place_chunk(ctx, c, layout, auto_pool):
     if seat0 == "free":
         fr = free_seat(ctx, c["on"])
         seat0 = [(fr[0] + fr[2]) / 2, (fr[1] + fr[3]) / 2] if fr else [0.5, 0.62]
-    seat = solve_seat(ctx, [float(seat0[0]), float(seat0[1])], block_w, block_h, c["on"], c["off"])
+    if ctx.governed and seat0 == [0.5, ctx.cap_y]:
+        # the film's seat. It changes only onto the edge of a card that is on screen
+        seat = card_edge_seat(ctx, [0.5, ctx.cap_y], block_h, c["on"], c["off"]) or [0.5, ctx.cap_y]
+    else:
+        seat = solve_seat(ctx, [float(seat0[0]), float(seat0[1])], block_w, block_h, c["on"], c["off"])
     seat[0] = clamp(seat[0], SAFE_X + block_w / 2, 1 - SAFE_X - block_w / 2)
     top = seat[1] - block_h / 2
     dy = dodge_keepout(seat[0] - block_w / 2, top, seat[0] + block_w / 2, top + block_h)
@@ -2506,6 +2827,12 @@ def place_word(ctx, iid, t, v, x, y, a, end, ink, role, chunk=None, region=None,
         ink2 = ink if is_hex(ink) else (ink_over(ctx, s, (f + q) // 2, rect) or ink_on(ctx, plate_under(ctx, s)))
         ink2 = norm_hex(ink2)
         pl = plate_under(ctx, s)
+        if ctx.governed and is_hex(ink) and not pl:        # P4: a named ink the picture swallows flips to the one that reads
+            m0 = ink_margin(ctx, s, (f + q) // 2, rect, ink2)
+            other = DARK_INK if luma(ink2) > 0.5 else "#FFFFFF"
+            m1 = ink_margin(ctx, s, (f + q) // 2, rect, other)
+            if m0 is not None and m1 is not None and m0 < EDGE_BELOW and m1 > m0 + 0.1:
+                ink2 = other
         if pl and is_hex(ink) and abs(luma(ink2) - luma(pl["c0"])) < 0.16:      # p5302: pink ESPETACULARES on the pink page. Named ink, same plate
             ink2 = "#FFFFFF" if luma(pl["c0"]) < 0.62 else "#111111"
         if pl:
@@ -2637,6 +2964,18 @@ def display(ctx, iid, text, a, z, opt, b=None):
     lines = display_lines(ctx, text, opt)
     if not lines or z <= a:
         return None
+    if ctx.governed:
+        from . import taste
+        if any(taste.machine_text(l["t"]) for l in lines):       # P10: a stamp off a board is not a word of this film
+            ctx.rejects.append((0, f"{iid} dropped: {' '.join(str(l['t']) for l in lines)[:40]!r} is a reference, not a word of this film", ""))
+            return None
+        for l in lines:
+            l["px"] = int(min(l["px"], 0.25 * H))                 # P5: display type at most a quarter of the frame
+        room = opt.get("_room")
+        tall = sum(l["px"] for l in lines) * 1.02 / H
+        if isinstance(room, (int, float)) and tall > room > 0:    # P3: it shrinks to the room its seat has
+            for l in lines:
+                l["px"] = max(int(l["px"] * room / tall), int(0.02 * H))
     seat = opt.get("seat")
     kind = opt.get("in", "cut")
     if kind not in ENTRANCES:
@@ -2963,6 +3302,8 @@ def g_page(ctx, b, g, i):
     z = b.pf1 if z is None else z
     if a is None or z <= a:
         return ctx.find(f"{b.id}: page has no span")
+    if g.get("_max"):
+        z = min(z, a + int(g["_max"]))
     ref = {"kind": "plate", "plate": plate_of(ctx, g.get("plate", "plate"))}
     carve(ctx, a, z, emit_ref(ctx, b, ref, a, z, g["_gid"]))
     text = g.get("t") or big_words(ctx, g)
@@ -3289,6 +3630,20 @@ def g_punch(ctx, b, g, i):
     w, h = (c0[2] - c0[0]) / k, (c0[3] - c0[1]) / k
     it["crop"] = [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
     carve(ctx, a, z, [it])
+    ctx.cam_land[g["_gid"]], ctx.cam_len[g["_gid"]] = a, z - a
+    if ctx.governed and s.get("pic") == "main" and not isinstance(g.get("d"), (int, float)):
+        end = z                      # the take stays in the framing it punched to, until another picture cuts in
+        for q in sorted(ctx.shots, key=lambda x: x["f"][0]):
+            if q["f"][0] < z:
+                continue
+            if q["f"][0] != end or q.get("pic") != "main" or isinstance(q["crop"][0], list):
+                break
+            qc = q["crop"]
+            qx, qy = (qc[0] + qc[2]) / 2, (qc[1] + qc[3]) / 2
+            qw, qh = (qc[2] - qc[0]) / k, (qc[3] - qc[1]) / k
+            q["crop"] = [qx - qw / 2, qy - qh / 2, qx + qw / 2, qy + qh / 2]
+            end = q["f"][1]
+        ctx.cam_len[g["_gid"]] = end - a
     g_snd(ctx, b, g, a)
 
 
@@ -3351,7 +3706,7 @@ def g_counter(ctx, b, g, i):
         q = z if j == n - 1 else f + step
         if g.get("hold") and j == n - 1:
             q = min(ctx.dur_f, z + int(g["hold"]))
-        opt = {k: v2 for k, v2 in g.items() if k in ("size", "seat", "font", "ink", "fit", "blend", "case")}
+        opt = {k: v2 for k, v2 in g.items() if k in ("size", "seat", "font", "ink", "fit", "blend", "case", "_room")}
         if held:
             opt["seat"] = held
         r = display(ctx, f"{g['_gid']}.{j}", s, f, q, opt, b)
@@ -3577,6 +3932,12 @@ def g_chip(ctx, b, g, i):
     if not t or z <= a:
         return
     size = float(g.get("size", 0.03))
+    if ctx.governed:
+        from . import taste
+        if taste.machine_text(t):
+            ctx.rejects.append((b.raw.get("_line", 0), f"{g['_gid']} dropped: {t[:40]!r} is a reference, not a word of this film", ""))
+            return
+        size = max(size, 0.02)             # P5: anything meant to be read is 26 px at 720x1280 or more
     font, _, track = parse_font_spec(g.get("font") or "grotesk-bold")
     font = script_font(font or "InterDisplay-Bold.ttf", t)
     track = 0 if joined_script(t) else track
@@ -3987,6 +4348,8 @@ def run_gestures(ctx):
                     continue
                 g = dict(g)
                 g["_gid"] = f"{b.id}.{n}" if k == 0 else f"{b.id}.{n}{k}"
+                if ctx.governed and not device_gate(ctx, b, g):
+                    continue
                 ctx.cur_gid = g["_gid"]
                 try:
                     GESTURES[n]["fn"](ctx, b, g, k)
@@ -4020,8 +4383,23 @@ def run_raw(ctx, lines):
             ctx.find(f"item {raw['id']}: no time")
             continue
         z = a + int(raw.get("d", 2)) if z is None else z
-        it = {k: v for k, v in raw.items() if k not in ("kind", "at", "d")}
+        it = {k: v for k, v in raw.items() if k not in ("kind", "at", "d", "for")}
         it.update(k=kind, f=[int(a), int(z)])
+        if ctx.governed and kind != "shot":
+            from . import taste
+            dept = {"card": "card", "flash": "flash", "word": "display"}[kind]
+            ctx.wrote[dept] = ctx.wrote.get(dept, 0) + 1
+            rid = str(raw["id"])
+            ev, why = taste.read_for(ctx, None, raw.get("for"), dept)
+            bound = taste.bound_by(ctx, rid, dept) or (ev["ask"] if ev and ev["kind"] == "ask" else None)
+            gone = _gone(ctx, rid, dept, bound)
+            if gone or (ev is None and not bound):
+                if not gone:
+                    ctx.rejects.append((l["_line"], f"item {rid} dropped: it {why}", ""))
+                ctx.taste_rows.append({"id": rid, "did": gone[0] if gone else "unearned", "why": gone[1] if gone else why, "dept": dept})
+                continue
+            ctx.devices[rid] = {"id": rid, "dept": dept, "g": "item", "b": None, "ev": ev, "bound": bound or None}
+            it["_g"] = rid
         if kind == "word":
             for need, dv in (("t", ""), ("x", 0.5), ("y", 0.5), ("v", "a"), ("ink", "#FFFFFF")):
                 it.setdefault(need, dv)
@@ -4105,6 +4483,30 @@ def solve_levels(ctx):
         s["db"] = round(clamp(max(float(s["db"]), need), -36, -2), 1)
 
 
+def sound_gate(ctx, b, sid, spec, host=None):
+    """A sound is a device line: it names what it answers, or it is the sound of a gesture that does. Returns
+    (stands, frame to move its peak to or None)."""
+    from . import taste
+    ctx.wrote["sound"] = ctx.wrote.get("sound", 0) + 1
+    ev, why = (None, None) if host else taste.read_for(ctx, b, spec.get("for") if isinstance(spec, dict) else None, "sound")
+    bound = taste.bound_by(ctx, sid, "sound") or (ev["ask"] if ev and ev["kind"] == "ask" else None)
+    if host and ctx.devices.get(host, {}).get("bound"):
+        bound = bound or ctx.devices[host]["bound"]
+    gone = _gone(ctx, sid, "sound", bound)
+    if gone:
+        ctx.taste_rows.append({"id": sid, "did": gone[0], "why": gone[1], "dept": "sound"})
+        return False, None
+    if not host and ev is None and not bound:
+        ctx.rejects.append(((b.raw.get("_line", 0) if b is not None else 0), f"{sid} dropped: it {why}", ""))
+        ctx.taste_rows.append({"id": sid, "did": "unearned", "why": why, "dept": "sound"})
+        return False, None
+    ctx.devices[sid] = {"id": sid, "dept": "sound", "g": "snd", "b": b.id if b is not None else None, "ev": ev, "bound": bound or None, "host": host}
+    mv = ctx.plan.get("move_snd", {}).get(sid)
+    if mv:
+        ctx.taste_rows.append({"id": sid, "did": "repaired", "why": mv[1], "dept": "sound"})
+    return True, (int(mv[0]) if mv else None)
+
+
 def build_sound(ctx):
     for b in ctx.beats:
         specs = b.raw.get("snd")
@@ -4119,7 +4521,21 @@ def build_sound(ctx):
             if not isinstance(spec, dict) or not spec.get("s"):
                 ctx.find(f"{b.id}: can't read a sound line")
                 continue
-            for f in each_frames(ctx, b, spec.get("at") or f"{b.id}.in"):
+            at = spec.get("at")
+            if at is None and isinstance(spec.get("for"), str) and spec["for"] not in ("turn",) and spec["for"] not in ctx.asks:
+                at = spec["for"] if ANCHOR_RE.match(spec["for"]) else spec["for"] + ".in"      # it lands on what it answers
+            if ctx.governed and spec.get("at") is None and at is not None and frame_of(ctx, at, b) is None:
+                ctx.wrote["sound"] = ctx.wrote.get("sound", 0) + 1
+                ctx.taste_rows.append({"id": f"{b.id}.snd{n}", "did": "thinned", "dept": "sound", "why": f"the sound of {spec['for']}, which is not on screen"})
+                n += 1
+                continue
+            for f in each_frames(ctx, b, at or f"{b.id}.in"):
+                if ctx.governed:
+                    ok, to = sound_gate(ctx, b, f"{b.id}.snd{n}", spec)
+                    if not ok:
+                        n += 1
+                        continue
+                    f = f if to is None else to
                 place_sound(ctx, b.id, spec["s"], f, spec.get("db"), n, spec)
                 n += 1
     for b, spec, f, gid in ctx.g_snd:
@@ -4128,9 +4544,37 @@ def build_sound(ctx):
         else:
             s, _, d = str(spec).partition(":")
             db = float(d) if d else None
+        if ctx.governed:
+            ok, to = sound_gate(ctx, b, f"{gid}.snd0", spec, host=gid)
+            if not ok:
+                continue
+            f = f if to is None else to
         place_sound(ctx, gid, s, f, db, 0)
-    solve_levels(ctx)
+    if ctx.governed:
+        placed = {s["id"] for s in ctx.sound}
+        for k in [k for k, d in ctx.devices.items() if d["dept"] == "sound" and k not in placed]:
+            del ctx.devices[k]             # not an approved sound: place_sound said so
+    else:
+        solve_levels(ctx)
     ctx.sound.sort(key=lambda s: (s["event_f"], s["id"]))
+
+
+def voice_levels(ctx, under_db):
+    """A placed sound sits under the voice (TASTE 4.2: 9 dB on a take, 6 mixed, 4.5 over pictures). The Director's
+    number is what it asks for; this is the most it gets. It replaces the lift that set every sound at the level
+    of the voice (p5591: a median of +7.2 dB over the half second before)."""
+    from . import taste
+    table, _ = sound_table()
+    voice = taste.voice_db(ctx)
+    for s in ctx.sound:
+        x = table.get(s["s"])
+        if ctx.devices.get(s["id"], {}).get("bound"):
+            continue
+        if x is None or voice is None:
+            s["db"] = round(clamp(min(float(s["db"]), -6.0 - under_db), -36, -2), 1)
+            continue
+        most = float(voice) - under_db - float(x.get("hit_lufs", -15))
+        s["db"] = round(clamp(min(float(s["db"]), most), -36, -2), 1)
 
 
 # ---------------------------------------------------------------- finish
@@ -4264,9 +4708,10 @@ def type_traffic(ctx):
         # words printed in the picture are the picture's: a seat clear of them first, then any clear seat
         for obst in (hard + mark_rects(ctx, a, z), hard):
             tries = sorted({0.0} | {q[3] + TRAFFIC_GAP - r[1] for q in obst} | {q[1] - TRAFFIC_GAP - r[3] for q in obst}, key=abs)
+            top, bottom = (0.10, 0.80) if ctx.governed and ctx.H > ctx.W else (0.03, 0.96)     # P2: the safe area
             for dy in tries:
                 m = [r[0], r[1] + dy, r[2], r[3] + dy]
-                if m[1] < 0.03 or m[3] > 0.96:
+                if m[1] < top or m[3] > bottom:
                     continue
                 if not any(rects_touch(m, q) for q in obst):
                     return dy
@@ -4316,6 +4761,63 @@ def type_traffic(ctx):
     for t in ctx.traffic:
         if t.get("at") != "seat":
             ctx.find(f"type {t['id']} {t['did']}: its place was taken by {', '.join(t['against'])}")
+
+
+def _shift_x(it, dx):
+    v = it.get("x")
+    if isinstance(v, list):
+        it["x"] = [q + dx for q in v]
+    elif isinstance(v, (int, float)):
+        it["x"] = v + dx
+    if isinstance(it.get("region"), list) and len(it["region"]) == 4:
+        r = it["region"]
+        it["region"] = [r[0] + dx, r[1], r[2] + dx, r[3]]
+    rect = it.get("rect")
+    if isinstance(rect, list) and rect:
+        if isinstance(rect[0], list):
+            it["rect"] = [[q[0] + dx, q[1], q[2] + dx, q[3]] for q in rect]
+        elif len(rect) == 4:
+            it["rect"] = [rect[0] + dx, rect[1], rect[2] + dx, rect[3]]
+
+
+def safe_sweep(ctx):
+    """P2: added display type and labels sit inside the safe area of a vertical frame, left of the platform's own
+    buttons. Everything one gesture drew moves together. Moved, never dropped. Captions hold the film's seat."""
+    from . import taste
+    if ctx.H <= ctx.W:
+        return
+    x0, y0, x1, y1 = taste.SAFE
+    bx, by0, _, by1 = taste.BUTTONS
+    units = {}
+    for it in ctx.items:
+        if it["k"] == "word" and it.get("role") == "cap":
+            continue
+        if it["k"] in ("word", "flash") or (it["k"] == "card" and it.get("pic") == "plate"):
+            units.setdefault(it.get("_g") or it["id"].split(".pool")[0], []).append(it)
+    for key, members in units.items():
+        if ctx.devices.get(key, {}).get("bound"):
+            continue
+        rects = [r for r in (type_rect(ctx, m) for m in members) if r]
+        if not rects:
+            continue
+        r = [min(q[0] for q in rects), min(q[1] for q in rects), max(q[2] for q in rects), max(q[3] for q in rects)]
+        running = any(isinstance(m.get("x"), list) and max(m["x"]) - min(m["x"]) > 0.3 for m in members)
+        dy = 0.0
+        if r[3] - r[1] <= y1 - y0:
+            dy = y0 - r[1] if r[1] < y0 else y1 - r[3] if r[3] > y1 else 0.0
+        dx = 0.0
+        if not running and r[2] - r[0] <= x1 - x0:
+            dx = x0 - r[0] if r[0] < x0 else x1 - r[2] if r[2] > x1 else 0.0
+            if r[2] + dx > bx and r[3] + dy > by0 and r[1] + dy < by1 and r[2] - r[0] <= bx - x0:
+                dx = bx - r[2]
+        if abs(dx) < 1e-4 and abs(dy) < 1e-4:
+            continue
+        for m in members:
+            if dy:
+                _shift_item(m, dy)
+            if dx:
+                _shift_x(m, dx)
+        ctx.taste_rows.append({"id": key, "did": "repaired", "dept": "display", "why": f"moved inside the safe area ({dx:+.2f}, {dy:+.2f})"})
 
 
 def keepout_sweep(ctx):
@@ -4514,6 +5016,8 @@ def rest_check(ctx):
             v = b.raw.get(f)
             if v not in (None, "", []):
                 continue
+            if ctx.governed and f in ("do", "snd"):
+                continue            # empty unless something earns them: restraint needs no reason
             if f in rest or name in rest:
                 continue
             if f == "look" and (ctx.dna.get("look") or ctx.film.get("look")):
@@ -4597,7 +5101,7 @@ def ceiling(ctx, l1, cuts):
     designed = bool(kinds.get("card")) or any(i.get("pic") == "plate" for i in kinds.get("shot", []))
     dims = []
     if not added:
-        reframed = designed or len({str(_crop_start(s)) for s in kinds.get("shot", []) if s.get("pic") == "main"}) > 2
+        reframed = designed or (not ctx.governed and len({str(_crop_start(s)) for s in kinds.get("shot", []) if s.get("pic") == "main"}) > 2)
         reframed = reframed or cutouts
         dims.append(("footage_broll", 5 if reframed else 3, "upload's own frames" + (", re-framed by design" if reframed else "")))
     if not l1["sound"]:
@@ -4812,7 +5316,7 @@ def meter_text(ctx, m):
     want = f" (band {b.get('type10')})" if b.get("type10") else ""
     wos = f" (band {b.get('wos')})" if b.get("wos") is not None else ""
     out.append(f"TYPE events/10s {m['type_events10']}{want}, words on screen {m['words_on_screen']}{wos}, frames with text {m['text_frames']}, chunks {m['captions']}")
-    want = f" (band {b.get('sfx10')} transients)" if b.get("sfx10") else ""
+    want = f" (band {b.get('sfx10')} transients)" if b.get("sfx10") and not m.get("taste") else ""
     ly = m["layers"]
     out.append(f"SOUND placed {m['sounds']}, {m['sounds10']}/10s{want}, covering {int(ly['sound_cover'] * 100)}% of the film")
     out.append(f"DESIGN cards {m['cards']}, flashes {m['flashes']}")
@@ -4837,6 +5341,7 @@ def meter_text(ctx, m):
                f"overlay {fx['overlay_pct']}%, re-framed {fx['reframed_pct']}%, grade {'yes' if fx['grade_applied'] else 'no'}, sounds {fx['sfx_added']}, design items/10s {fx['design_items10']}")
     if m["busy_seconds"]:
         out.append(f"QUIET {m['busy_seconds']}s with picture, type and camera all busy. One thing stays quiet")
+    out += taste_text(m.get("taste"))
     out.append("BEATS id sec pics/10s type design snd")
     for r in m["by_beat"]:
         out.append(f"  {r['id']:<9} {r['sec']:>5} {r['pics10']:>5} {r['type']:>3} {r['design']:>3} {r['snd']:>3}")
@@ -4848,11 +5353,57 @@ def meter_text(ctx, m):
         out.append("BLANKS none")
     if m["soft"]:
         out.append("SOFT " + ", ".join(f"{k} upscaled {v}x" for k, v in m["soft"].items()))
+    bare = [str(r[1]).split(" dropped: ")[0] for r in m["rejects"] if NO_FOR in str(r[1])]
+    if bare:
+        out.append(f"LINES dropped, {len(bare)} with no `for`: {' '.join(bare[:40])}{' ...' if len(bare) > 40 else ''}. "
+                   "A device line names the word, the turn or the picture event it answers, or it stays out")
     for r in m["rejects"]:
-        out.append(f"LINE {r[0]} dropped: {r[1]} {r[2]}".rstrip())
+        if NO_FOR not in str(r[1]):
+            out.append(f"LINE {r[0]} dropped: {r[1]} {r[2]}".rstrip())
     for f in m["findings"]:
         out.append(f"FIND {f}")
     return "\n".join(out) + "\n"
+
+
+NO_FOR = "names no word, turn or picture event it answers"
+
+
+def taste_text(t):
+    """The governor's lines of the meter: what this footage carries, what stood, and each line that went with its reason."""
+    if not t:
+        return []
+    sup, al, kept = t["supply"], t["allow"], t["kept"]
+    names = {"T": "T, one take", "M": "M, a take with some pictures", "P": "P, pictures", "L": "L, a long film"}
+    out = [f"SUPPLY class {names[sup['cls']]}: {sup['np10']} new pictures/10s ({sup['np']} in {sup['dur_s']}s), {'a bed' if sup['bed'] else 'no bed'}"
+           + (", calm: every allowance halved" if t.get("calm") else "")
+           + f". It carries: camera moves {al['camera']} (and a tenth at {t['flips']} of {t['speech_edits']} speech edits), sounds {al['sounds']} at {al['under_voice_db']:g} dB under the voice, "
+           f"display lines {al['display']} at {al['seats']} seats, cards {al['cards']}, flashes {al['flashes']}"]
+    sy = t.get("system") or {}
+    out.append(f"SYSTEM {sy.get('card') or 'no card'}{'' if sy.get('named') else ' (the treat line names no system: the most used devices stand in)'}; "
+               f"speaks in {', '.join(t.get('speaks') or []) or 'no device'}; sounds {', '.join(sy.get('sounds') or []) or 'any three roles'}")
+    seats = t.get("seats") or {}
+    if seats.get("caption") is not None:
+        out.append(f"SEATS caption y {seats['caption']:.2f}, never moving; display " + " ".join(f"[{x:.2f},{y:.2f}]" for x, y in seats.get("display") or []))
+    k = lambda name: "{} of {}".format(*kept.get(name, (0, 0)))        # noqa: E731
+    land = ", ".join(f"{n} on a {what}" for what, n in sorted((t.get("partners") or {}).items())) or "none on a picture event"
+    out.append(f"EARNED display {k('display')}, cards {k('card')}, pages {k('page')}, flashes {k('flash')}, camera {k('camera')}, "
+               f"sounds {t['sounds'][0]} of {t['sounds'][1]} ({land})")
+    rows = t.get("rows") or []
+    if rows:
+        c = t.get("count") or {}
+        out.append("TASTE " + ", ".join(f"{v} {n}" for n, v in sorted(c.items())) + ". A line that went is not put back as it was: "
+                   "it comes back only with the word, turn or picture event it answers, inside what this footage carries")
+        cams = [r for r in rows if r["dept"] == "camera" and r["did"] == "unearned"]
+        shown = [r for r in rows if r not in cams and r["why"] != NO_FOR]
+        for r in shown[:28]:
+            out.append(f"  {r['id']} {r['did']}: {r['why']}")
+        if cams:
+            out.append(f"  {len(cams)} crops of the take hold the film's framing: no line earned a step ({' '.join(r['id'] for r in cams[:8])})")
+        if len(shown) > 28:
+            out.append(f"  and {len(shown) - 28} more")
+    if t.get("floor"):
+        out.append("FLOOR the plain film: its trims, one framing, captions on the film seat, the grade, and what the customer asked for")
+    return out
 
 
 # ---------------------------------------------------------------- entry points
@@ -4952,20 +5503,36 @@ def faces_from(perc):
     return out or None
 
 
-def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, faces=None, sid=None, owner=False, seed=None, perception=None):
-    """Score text to L1. Never raises on a Score: a bad line drops only itself."""
-    t0_ = time.perf_counter()
-    if index is None:
-        index = json.load(open(os.path.join(work_dir, "index.json")))
-    if bin_items is None:
-        bin_items = load_bin(work_dir)
-    perc = perception if perception is not None else load_perception(work_dir)
-    if faces is None:
-        faces = faces_from(perc)
-    sid = sid or (os.path.basename(os.path.normpath(work_dir)) if work_dir else None)
+def load_taste(work_dir):
+    """What the governor reads beside the Score: the Scout's ask ledger, the measured stress of each word, and the
+    style cards the Brief offered. All optional: a film with none of them is governed on its plan alone."""
+    asks, stress, offered = {}, {}, None
+    if not work_dir:
+        return asks, stress, offered
+    try:
+        for a in (json.load(open(os.path.join(work_dir, "scout.json"))).get("asks") or []):
+            if isinstance(a, dict) and a.get("id"):
+                asks[str(a["id"])] = a
+    except (OSError, ValueError, AttributeError):
+        pass
+    try:
+        stress = {int(k): float(v) for k, v in json.load(open(os.path.join(work_dir, "stress.json"))).items()}
+    except (OSError, ValueError, AttributeError, TypeError):
+        stress = {}
+    try:
+        offered = [str(x) for x in json.load(open(os.path.join(work_dir, "brief", "manifest.json"))).get("styles") or []] or None
+    except (OSError, ValueError, AttributeError):
+        offered = None
+    return asks, stress, offered
+
+
+def compile_once(text, index, work_dir, bin_items, tray, faces, sid, owner, seed, perc, governed, plan, extra):
+    """One pass of the compiler. `plan` holds what the reading of the pass before decided (taste.decide)."""
     ctx = Ctx(index, bin_items=bin_items, tray=tray, faces=faces, sid=sid, owner=owner, seed=seed)
     ctx.perc = perc
     ctx.work = work_dir
+    ctx.governed, ctx.plan = governed, plan
+    ctx.asks, ctx.stress, ctx.offered = extra
     ctx.own = load_own(work_dir)
     for v in ctx.own.values():
         if v["kind"] == "video":
@@ -4985,6 +5552,14 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
     ctx.waiting = []
     run_gestures(ctx)
     run_raw(ctx, good)
+    gone = plan.get("drop_item") or {}
+    if governed and gone:                  # one flash of a row the reading thinned
+        for it in ctx.items:
+            if it["id"] in gone:
+                ctx.taste_rows.append({"id": it["id"], "did": gone[it["id"]][0], "why": gone[it["id"]][1], "dept": "flash"})
+        ctx.items = [i for i in ctx.items if i["id"] not in gone]
+        for i in gone:
+            ctx.byid.pop(i, None)
     seal(ctx)
     flash_gate(ctx)            # it can take a negative off a shot, and a word's ink reads that shot
     place_waiting_words(ctx)
@@ -4993,13 +5568,72 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
     build_sound(ctx)
     mono_cap(ctx)
     seal(ctx)
+    if governed:
+        safe_sweep(ctx)
     type_traffic(ctx)
     keepout_sweep(ctx)
     flash_gate(ctx)
+    return ctx
+
+
+def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, faces=None, sid=None, owner=False, seed=None, perception=None, govern=None):
+    """Score text to L1. Never raises on a Score: a bad line drops only itself. Governed (taste.py): the film is
+    compiled, read against what its footage can carry, and compiled again without what nothing earned, until the
+    reading has nothing left to say. Same inputs give the same film."""
+    t0_ = time.perf_counter()
+    if index is None:
+        index = json.load(open(os.path.join(work_dir, "index.json")))
+    if bin_items is None:
+        bin_items = load_bin(work_dir)
+    perc = perception if perception is not None else load_perception(work_dir)
+    if faces is None:
+        faces = faces_from(perc)
+    sid = sid or (os.path.basename(os.path.normpath(work_dir)) if work_dir else None)
+    governed = GOVERN if govern is None else bool(govern)
+    extra = load_taste(work_dir) if governed else ({}, {}, None)
+    plan, facts, rounds = {}, None, 0
+    while True:
+        ctx = compile_once(text, index, work_dir, bin_items, tray, faces, sid, owner, seed, perc, governed, plan, extra)
+        rounds += 1
+        if not governed:
+            break
+        from . import taste
+        dec, ledger, facts = taste.decide(ctx)
+        cls = facts["supply"]["cls"]
+        if (taste.empty(dec) and plan.get("cls", "T") == cls) or rounds > GOVERN_ROUNDS:
+            ctx.unsettled = ledger if not taste.empty(dec) else []
+            voice_levels(ctx, facts["allow"]["under_voice_db"])
+            break
+        plan = taste.merge(dict(plan), dec)
+        plan["cls"] = cls
     l1 = to_l1(ctx)
     m = meter(ctx, l1)
+    if governed:
+        m["taste"] = taste_meter(ctx, facts, rounds)
+        m["findings"] = list(ctx.findings)
     txt = meter_text(ctx, m)
     return Compiled(l1, m, txt, (time.perf_counter() - t0_) * 1000)
+
+
+def taste_meter(ctx, facts, rounds):
+    """What the governor did, for the meter and the job record."""
+    rows, seen = [], set()
+    for r in ctx.taste_rows:
+        key = (r["id"], r["did"])
+        if key not in seen:
+            seen.add(key)
+            rows.append(dict(r))
+    for r in getattr(ctx, "unsettled", None) or []:
+        ctx.find(f"taste: {r['id']} still over what this footage carries after {rounds} readings: {r['why']}")
+    count = {}
+    for r in rows:
+        count[r["did"]] = count.get(r["did"], 0) + 1
+    kept = {k: [v[0], max(v[1], ctx.wrote.get(k, 0))] for k, v in facts["kept"].items()}
+    return {"supply": facts["supply"], "allow": facts["allow"], "kept": kept, "sounds": [facts["sounds"][0], max(facts["sounds"][1], ctx.wrote.get("sound", 0))], "partners": facts["partners"],
+            "speaks": facts["speaks"], "speech_edits": facts["speech_edits"], "flips": len(ctx.flip_frames or []),
+            "seats": {"caption": ctx.cap_y, "display": ctx.seats or []}, "system": dict(ctx.system), "calm": ctx.calm,
+            "rows": rows, "count": count, "rounds": rounds, "devices": sorted(ctx.devices), "bound": facts["bound"],
+            "floor": "*" in ctx.cuts, "cuts": len(ctx.cuts), "upload_captions": getattr(ctx, "upload_caps", None)}
 
 
 def prebuild_thumbs(work_dir):
