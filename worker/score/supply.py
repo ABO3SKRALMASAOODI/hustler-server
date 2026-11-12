@@ -459,8 +459,8 @@ def run(work, scout, per, acquire, deadline):
     report, cands = [], []
     usd = 0.0
     side = cf.ThreadPoolExecutor(max_workers=6)
-    name_f = side.submit(name_wishes, work, wishes)
-    own_f = side.submit(own_moments, work, wishes, per or {}, min(deadline, time.monotonic() + 14.0))
+    name_f = side.submit(broll_source.carried(name_wishes), work, wishes)
+    own_f = side.submit(broll_source.carried(own_moments), work, wishes, per or {}, min(deadline, time.monotonic() + 14.0))
     t_search = time.monotonic()
     with cf.ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(lambda w: search_wish(stock, broll_source, w) if not w.get("mine") else ([], [], 0.0), wishes))
@@ -476,7 +476,7 @@ def run(work, scout, per, acquire, deadline):
         report.append(dict(wish=i, w=wish.get("w") or wish.get("at"), want=wish.get("want"), own=wish.get("own"), mine=bool(wish.get("mine")),
                            seconds=secs, hits=len(hits), errors=errs, named=sub["name"] if sub else None))
         if sub:     # its pictures come from the named route, checked; the library's join that check
-            named_f[i] = side.submit(named_for, work, wish, sub, hits, min(deadline - 4.0, time.monotonic() + 16.0))
+            named_f[i] = side.submit(broll_source.carried(named_for), work, wish, sub, hits, min(deadline - 4.0, time.monotonic() + 16.0))
             continue
         for h in hits:
             h["_wish"] = i
@@ -598,6 +598,11 @@ def run(work, scout, per, acquire, deadline):
                    usage=dict(model=LOOK_MODEL, usd=round(usd, 6), candidates=len(cands), search_seconds=t_search, seconds=round(time.monotonic() - t_all, 1)))
         with open(os.path.join(work, "bin.json"), "w") as f:
             json.dump(out, f, ensure_ascii=False, indent=1)
+        print("[supply] " + json.dumps(dict(
+            wishes=len(wishes), items=len(items), named={r["named"]: r.get("named_found") for r in report if r.get("named")},
+            own=len(own), said=len(said), seconds=out["usage"]["seconds"], usd=out["usage"]["usd"],
+            errors=[{k: v for k, v in r.items() if k.endswith("error")} for r in report if any(k.endswith("error") for k in r)]),
+            ensure_ascii=False)[:900], flush=True)
         return out
     finally:
         side.shutdown(wait=False, cancel_futures=True)

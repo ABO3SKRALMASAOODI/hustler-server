@@ -676,7 +676,7 @@ NAMED_MODEL = os.environ.get("NAMED_PICTURE_MODEL", "claude-haiku-5-5")
 NAMED_CHECK_MAX = 14       # pictures one check call looks at
 NAMED_NAME_S = 12.0        # the naming call's own deadline
 NAMED_CHECK_S = 25.0
-NAMED_SEARCH_S = 9.0       # every library for one subject, together
+NAMED_SEARCH_S = 6.0       # every library for one subject, together
 COMMONS_DOWNLOAD_W = 1920  # a Commons rendition step, never an upscale
 _NAMED = {}                # text, folded -> subjects (list), bounded
 
@@ -710,6 +710,23 @@ def _json_obj(text):
             pass
         i = s.find("{", i + 1)
     return None
+
+
+def carried(fn):
+    """fn for a pool thread, carrying the caller's llm recorder: the turn's
+    ledger, its trial scope and llm_calls travel with it, so a call made on
+    a pool thread is metered like one made on the turn's own thread."""
+    import llm
+    rec = llm.get_recorder()
+
+    def run(*a, **k):
+        prev = llm.get_recorder()
+        llm.set_recorder(rec)
+        try:
+            return fn(*a, **k)
+        finally:
+            llm.set_recorder(prev)
+    return run
 
 
 def _objects(text):

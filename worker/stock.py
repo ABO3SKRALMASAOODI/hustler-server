@@ -365,7 +365,10 @@ def search(query, kind=KIND_VIDEO, orientation=None, count=MAX_RESULTS):
         lanes.append(("openverse", _openverse_search))
     errors, got = [], {}
     with ThreadPoolExecutor(max_workers=max(1, len(lanes)) + 1) as pool:
-        named_f = pool.submit(_named_subjects, query) if NAMED_ROUTE else None
+        named_f = None
+        if NAMED_ROUTE:
+            import broll_source
+            named_f = pool.submit(broll_source.carried(_named_subjects), query)
         futures = {pool.submit(fn, query, kind, orientation, count): name
                    for name, fn in lanes}
         for future in as_completed(futures):
