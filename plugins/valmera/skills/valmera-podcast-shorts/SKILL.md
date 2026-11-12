@@ -428,6 +428,34 @@ time; renders per short; re-index count; manifest paths. Optionally score
 2-3 shorts on the calibration rubric. Never claim viral performance or
 self-award a quality score.
 
+## One film at a time on the workflow shell (`../_shell`, `alien/`)
+
+For a single finished short in one of the ALIEN styles, with no Valmera project and no editor subagents, run
+the workflow shell. It finds the moment itself, writes the direction, fetches licensed pictures, has the
+Director write the Score, renders on the Mac engine, adds the product's watermark and end card, measures the
+film, delivers one folder once and deletes its work folder.
+
+```
+PY=/Users/masaoodi/Documents/Valmera/.valmera/venv-worker/bin/python
+zsh /Users/masaoodi/Documents/Valmera/.valmera/claude_trial_env.sh $PY ../_shell/shell.py run --workflow wf1 \
+    --source <podcast.mp4, captions .json3 beside it> --out <deliver root> [--args '{"style": "<id>"}']
+```
+
+A style whose recipe names alien passes (`RECIPES` in `../_shell/wf1.py`) is rendered in two passes
+(`alien/alien_render.py`): the engine draws the Director's pictures, the passes work on that film in programme
+space, then the engine lays the type over the result, so type is never relit. What exists:
+
+| Style | Pass (`alien/passes.py`, `alien/footnotes.py`) | What the film's `film.json` proves |
+|---|---|---|
+| `lit-by-voice` | `voice_light` (L2): the room goes dark; a warm lamp at the mouth follows the sound's level; pictures and cards breathe with it | light against the lamp inside every shot (0.8 or more), dark in pauses, flashes per second |
+| `receipts` | `footnotes` (C6): a superscript on the claim's word, the note and its source typed at the foot | each note's fragment was found in the fetched page and its numbers in that fragment (`alien/evidence.py`); rejected notes are listed |
+| `second-camera` | `second_camera` (K1): the take seen from a few degrees off axis through its own depth, cut in on stressed words, ending on the true frame | parallax in pixels, share of the film, what the move uncovered |
+
+Rules the passes keep for every style (`alien/l1pass.py`): type and held cards are moved inside x 0.05-0.95,
+y 0.10-0.80 and measured again; ink is checked against the picture it will stand on (WCAG 4.5, 3.0 for display)
+and flipped or given a pool; a footnote with no fragment in its source is dropped, never invented. A style
+without a recipe renders through the shared chain. The builder never rates the film.
+
 ## Legacy and resuming older runs
 
 A `run.json` with version `valmera-podcast-shorts-v7` is an older run: resume
