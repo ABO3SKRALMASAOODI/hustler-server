@@ -3019,9 +3019,13 @@ def display(ctx, iid, text, a, z, opt, b=None):
             l["px"] = int(min(l["px"], 0.25 * H))                 # P5: display type at most a quarter of the frame
         room = opt.get("_room")
         tall = sum(l["px"] for l in lines) * 1.02 / H
-        if isinstance(room, (int, float)) and tall > room > 0:    # P3: it shrinks to the room its seat has
+        if isinstance(room, (int, float)) and tall > room > 0:    # P3: it shrinks to the room its seat has, while it still reads
+            if any(l["px"] * room / tall < 0.03 * H for l in lines):       # p5574: three headlines shrunk to 0.02 read as "tiny"
+                ctx.taste_rows.append({"id": iid, "did": "thinned", "dept": "display",
+                                       "why": f"its seat has room for {room:.2f} of the frame and it stands {tall:.2f} tall: shrunk that far it would not read"})
+                return None
             for l in lines:
-                l["px"] = max(int(l["px"] * room / tall), int(0.02 * H))
+                l["px"] = int(l["px"] * room / tall)
     seat = opt.get("seat")
     kind = opt.get("in", "cut")
     if kind not in ENTRANCES:
