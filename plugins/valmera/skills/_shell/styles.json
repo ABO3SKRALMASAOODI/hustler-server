@@ -1,0 +1,70 @@
+{
+  "_about": "Style registry for the four workflows, from atlas/ALIEN.md section 8. A run never repeats any of its workflow's last three styles (ledger.json). Concept ids (L1, C1, ...) are ALIEN.md section 4. pace is cuts per 10 s. needs: what the source must have for the style to work; the ideas stage only offers a style to a moment that has it.",
+  "wf1": {
+    "name": "podcast shorts",
+    "styles": [
+      {"id": "room-listens", "name": "The Room Listens", "spine": ["L1", "C1", "L4"], "pace": [5, 9],
+       "look": "The real talking head stays full frame, and the room responds to the voice.",
+       "hook": "One word lands and lights his face.", "close": "The payoff line, then the end card.",
+       "needs": "one speaker carrying the moment on camera"},
+      {"id": "past-self", "name": "Past Self", "spine": ["K4", "G5"], "pace": [5, 8],
+       "look": "The speaker meets an earlier version of himself from the same conversation.",
+       "hook": "He said the opposite earlier in this conversation.", "close": "Both selves in frame, one line each.",
+       "needs": "a callback or a change of position inside the same source"},
+      {"id": "second-camera", "name": "Second Camera", "spine": ["K1", "K7", "C4"], "pace": [4, 7],
+       "look": "A one-camera podcast edited as a three-camera show, cuts on stress and blinks.",
+       "hook": "An angle that should not exist.", "close": "Pull back to the true single frame.",
+       "needs": "a locked-off single camera on one speaker"},
+      {"id": "two-mouths", "name": "Two Mouths", "spine": ["C7", "T5", "T6"], "pace": [6, 10],
+       "look": "Each speaker owns a lane; interruptions are physical.",
+       "hook": "The interruption itself.", "close": "Both faces woven into one frame.",
+       "needs": "two people disagreeing or cutting in on each other"},
+      {"id": "lit-by-voice", "name": "Lit by the Voice", "spine": ["L2", "C2", "S4", "D1"], "pace": [0.5, 2],
+       "look": "A single quotable line, 20-40 s, near black; the face appears with the sound.",
+       "hook": "Black, one word, his face appears with the sound.", "close": "The voice stops, the frame goes dark, end card.",
+       "needs": "one quotable line or thought of 20-40 s"},
+      {"id": "receipts", "name": "Receipts", "spine": ["C6", "G3", "G2"], "pace": [6, 10],
+       "look": "Bold claims with footnotes, the pitch trace and arrows to the evidence.",
+       "hook": "The boldest claim, with superscript 1.", "close": "The footnotes stack up as the conclusion.",
+       "needs": "concrete claims, numbers or names that can be footnoted"}
+    ]
+  },
+  "wf2": {
+    "name": "marketing to editors",
+    "styles": [
+      {"id": "exploded", "name": "Exploded", "spine": ["N9", "N8"], "pace": [10, 16], "cta": "keyword on a floating layer"},
+      {"id": "did-you-notice", "name": "Did You Notice", "spine": ["K6"], "pace": [2, 16], "cta": "Comment ROOM"},
+      {"id": "reading-wipe", "name": "Reading Wipe Before/After", "spine": ["T5", "M1"], "pace": [6, 9], "cta": "the last word of the line is the keyword"},
+      {"id": "one-clip-three-films", "name": "One Clip, Three Films", "spine": ["N7"], "pace": [6, 12], "cta": "Send me your clip, or a keyword"},
+      {"id": "edits-itself", "name": "It Edits Itself", "spine": ["N8", "C8", "A3"], "pace": [8, 12], "cta": "A3 receipt"},
+      {"id": "silent-hidden-word", "name": "Silent Film, Hidden Word", "spine": ["T1", "T2", "T6", "A1"], "pace": [17, 28], "cta": "Pause-Proof Keyword in the last 3 s"}
+    ]
+  },
+  "wf3": {
+    "name": "topic and founder stories",
+    "styles": [
+      {"id": "living-print", "name": "Living Print", "spine": ["X1", "T2", "N1", "L3"], "pace": [13, 19]},
+      {"id": "the-thread", "name": "The Thread", "spine": ["N2", "T5"], "pace": [13, 19]},
+      {"id": "whole-page", "name": "Whole Page", "spine": ["N6", "C1"], "pace": [4, 8]},
+      {"id": "character-sheet", "name": "Character Sheet", "spine": ["G4", "T4"], "pace": [13, 19]},
+      {"id": "census", "name": "Census", "spine": ["G1", "T10", "X5"], "pace": [13, 19]},
+      {"id": "one-photograph", "name": "One Photograph", "spine": ["T3", "X2", "K5"], "pace": [10, 14]}
+    ]
+  },
+  "wf4": {
+    "name": "long-form voiceover stories",
+    "styles": [
+      {"id": "memory-palace", "name": "Memory Palace", "spine": ["N4", "X1"], "pace": [2, 4]},
+      {"id": "dark-room", "name": "The Dark Room", "spine": ["L2", "S3", "S5", "D1"], "pace": [2, 4]},
+      {"id": "worn-print", "name": "Worn Print", "spine": ["X1", "N5", "T4"], "pace": [2, 4]},
+      {"id": "one-day", "name": "One Day", "spine": ["L3", "L5", "C6"], "pace": [2, 4]},
+      {"id": "the-ledger", "name": "The Ledger", "spine": ["G4", "G5"], "pace": [2, 4]}
+    ]
+  },
+  "selftest": {
+    "name": "the shell's own test workflow",
+    "styles": [
+      {"id": "t1", "name": "T1"}, {"id": "t2", "name": "T2"}, {"id": "t3", "name": "T3"}, {"id": "t4", "name": "T4"}, {"id": "t5", "name": "T5"}
+    ]
+  }
+}
