@@ -355,12 +355,15 @@ def test_the_customers_alternative_rides_with_its_ask_to_the_editor_and_the_chec
 
     def fake(ctx, name, schema, system, content, max_tokens=4000):
         seen["system"], seen["content"] = system, content
-        return {"asks": [{"id": "a1", "state": "done", "seen": "unchanged; the reply says why", "line": "x"},
-                         {"id": "a2", "state": "done", "seen": "", "line": "y"}]}, {"usd": 0.001, "s": 1, "model": "m"}
+        return {"asks": [{"id": "a1", "state": "not_done", "alternative": "taken", "seen": "still photos; the reply says why", "line": "x"},
+                         {"id": "a2", "state": "not_done", "alternative": "taken", "seen": "", "line": "y"}]}, {"usd": 0.001, "s": 1, "model": "m"}
     monkeypatch.setattr(asks, "_call", fake)
-    asks.check(NS(workdir=str(tmp_path)), ledger, "It can't be done here.", EDL, None, "")
+    v = asks.check(NS(workdir=str(tmp_path)), ledger, "It can't be done here.", EDL, None, "")
     assert "otherwise (their alternative when it can't be done): explain the limitation and stop" in seen["content"][0]["text"]
-    assert "An ask with an otherwise is done when" in seen["system"]
+    assert "alternative" in asks.CHECK_SCHEMA["properties"]["asks"]["items"]["required"]
+    # the alternative counts only for an ask the customer gave one for
+    assert [r["state"] for r in v["asks"]] == ["done", "not_done"]
+    assert v["asks"][0]["seen"].startswith("their alternative was taken")
 
 
 def test_a_question_to_the_customer_keeps_the_ledger_on_its_message():
@@ -369,3 +372,42 @@ def test_a_question_to_the_customer_keeps_the_ledger_on_its_message():
     assert [a["state"] for a in got["asks"]] == ["unchecked", "unchecked"] and got["open"] is None
     assert agent_loop._asks_summary(NS(ask_ledger=None)) is None
     assert agent_loop._asks_summary(NS(ask_ledger={"asks": "broken"})) is None
+
+
+def test_the_whole_film_numbers_see_single_cut_transitions_photos_and_the_frame_size():
+    edl = {"keep": [], "canvas": {"width": 1080, "height": 1920, "fps": 30},
+           "inserts": [{"id": f"ins{i}", "kind": "image", "motion": "zoom_in" if i < 3 else None, "at_output_s": 4.0 * i,
+                        "duration_s": 4.0} for i in range(5)],
+           "fx": [{"type": "junction", "style": "dissolve", "at": 4.0 * i, "duration_s": 0.4} for i in range(1, 5)]}
+    m = asks.measured(edl, [], None, None, {})
+    assert m["transitions_at_single_cuts"]["count"] == 4 and m["transitions_at_single_cuts"]["styles"] == {"dissolve": 4}
+    assert m["photos"] == {"count": 5, "with_motion": 3} and m["render_size"] == [1080, 1920]
+    video = {"keep": [[0, 10]], "frame": {"ratio": "9:16"}}
+    assert asks.output_size(video, {"video": {"width": 1920, "height": 1080}}) == [1080, 1920]
+    assert asks.output_size({"keep": [[0, 10]]}, {}) is None
+
+
+def test_a_request_that_rendered_nothing_is_checked_on_its_versions_stored_preview():
+    class Db:
+        def run(self, fn, *a):
+            class Cur:
+                def __enter__(s):
+                    return s
+
+                def __exit__(s, *e):
+                    return False
+
+                def execute(s, sql, args):
+                    s.args = args
+
+                def fetchone(s):
+                    return {"result": {"edl_version": 7, "duration_s": 20.0, "screening_pages": []}} if s.args[1] == "7" else None
+
+            class Conn:
+                def cursor(s):
+                    return Cur()
+            return fn(Conn(), *a)
+    ctx = NS(db=Db(), project_id=1)
+    assert asks.stored_preview(ctx, 7)["duration_s"] == 20.0
+    assert asks.stored_preview(ctx, 8) is None
+    assert asks.stored_preview(NS(db=None, project_id=1), 7) is None

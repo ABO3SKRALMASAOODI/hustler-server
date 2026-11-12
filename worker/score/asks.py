@@ -316,10 +316,12 @@ def editor_note(ledger, done_by=None):
 CHECK_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["asks"],
     "properties": {"asks": {"type": "array", "items": {
-        "type": "object", "additionalProperties": False, "required": ["id", "state", "seen", "line"],
+        "type": "object", "additionalProperties": False, "required": ["id", "state", "alternative", "seen", "line"],
         "properties": {
             "id": {"type": "string"},
             "state": {"type": "string", "enum": ["done", "partly", "not_done", "cannot_tell"]},
+            "alternative": {"type": "string", "enum": ["taken", "not_taken", "none"],
+                            "description": "Only for an ask with an otherwise: taken when this request did the customer's alternative instead of the ask (the reply says plainly that and why the ask itself can't be done, and this request made nothing they said not to make; the film from before may stay as it was). none for an ask without an otherwise."},
             "seen": {"type": "string", "description": "What the frames, the numbers or the reply show for this ask, with times."},
             "line": {"type": "string", "description": "One short honest line for the customer, in their language: what was done, or what was not and why."},
         }}}},
@@ -329,7 +331,9 @@ CHECK_SYSTEM = """You check a finished video edit against the customer's asks, o
 
 For each ask: done only when the frames or the numbers show its pass condition met; partly when some of it is there; not_done when it is missing or wrong; cannot_tell when nothing you were given can show it either way. The reply's own claims are not evidence for an edit; they are evidence only for an answer ask. Be exact and fair: don't fail an ask on taste, and don't pass one on hope.
 
-An ask with an otherwise is done when its pass is met, or when its otherwise was done instead: the reply says plainly that and why the ask itself can't be done, and the frames and numbers show the alternative and nothing they said not to make (what changed in this request shows what was made).
+state is about the ask itself. For an ask with an otherwise, say in alternative whether this request took the customer's alternative instead: the reply says plainly that and why the ask can't be done, and this request made nothing they said not to make. What changed in this request shows what was made; the film from before staying as it was is not something this request made.
+
+A keep is about what this request must leave alone or must not make: it is done when this request left it alone or did not make it, even when the film from before already had it.
 
 An ask about the whole film is counted on the numbers under whole_film, measured from the edit: shots with a camera move out of the shots measured, the share of the film moving or under pictures, the transitions, the look, the sound and how much of the upload is kept, in order. A keep ask is done when those numbers show nothing it protects was changed (no music, sound or speed added to a song asked to stay, all of the upload kept in order when the length must stay). The frames show what the numbers can't.
 
@@ -375,7 +379,46 @@ def program_seconds(edl):
         return None
 
 
-def measured(edl, shots=None, source_s=None, preview=None):
+def _junctions(edl):
+    """Transitions placed one cut at a time (set_junction writes them to edl["fx"] as type junction)."""
+    rows = [f for f in edl.get("fx") or [] if isinstance(f, dict) and f.get("type") == "junction"]
+    if not rows:
+        return None
+    styles = {}
+    for f in rows:
+        styles[str(f.get("style") or "?")] = styles.get(str(f.get("style") or "?"), 0) + 1
+    secs = sorted({float(f["duration_s"]) for f in rows if isinstance(f.get("duration_s"), (int, float))})
+    return {"count": len(rows), "styles": styles, "seconds": secs[:6],
+            "at": [f.get("at") for f in rows[:40]]}
+
+
+def _photos(edl):
+    """Still pictures placed on the film (image inserts) and how many carry their own motion."""
+    rows = [i for i in edl.get("inserts") or [] if isinstance(i, dict) and i.get("kind") == "image"]
+    if not rows:
+        return None
+    return {"count": len(rows), "with_motion": sum(1 for i in rows if i.get("motion") not in (None, "", "none", "static"))}
+
+
+def output_size(edl, index=None):
+    """The rendered frame's size, from the edit: its canvas, else the upload's size at the edit's frame
+    ratio (the renderer's own frame_dims for delivery). None when neither is known."""
+    canvas = edl.get("canvas") if isinstance(edl.get("canvas"), dict) else {}
+    if canvas.get("width") and canvas.get("height"):
+        return [int(canvas["width"]), int(canvas["height"])]
+    video = (index or {}).get("video") or {}
+    if not (video.get("width") and video.get("height")):
+        return None
+    frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
+    try:
+        import renderer
+        return list(renderer.frame_dims(int(video["width"]), int(video["height"]), frame.get("ratio") or "source",
+                                        delivery=True))
+    except Exception:  # noqa: BLE001 - no size is said as unknown, never guessed
+        return None
+
+
+def measured(edl, shots=None, source_s=None, preview=None, index=None):
     """What the edit does across the whole film, measured from the EDL on the film's own clock: how
     much of it moves, how much is covered by pictures, the transitions, the look, the sound, and how
     much of the upload is kept in its order. These are the numbers a whole-film ask is checked on."""
@@ -407,7 +450,9 @@ def measured(edl, shots=None, source_s=None, preview=None):
         "upload_seconds": round(float(source_s), 1) if source_s else None,
         "upload_kept_share": round(kept / float(source_s), 3) if source_s else None,
         "upload_kept_in_order": all(float(keep[i][0]) >= float(keep[i - 1][0]) for i in range(1, len(keep))),
-        "render_size": [preview.get("width"), preview.get("height")] if preview.get("width") else None,
+        "render_size": ([preview.get("width"), preview.get("height")] if preview.get("width")
+                        else output_size(edl, index)),
+        "rendered_seconds": preview.get("duration_s"),
         "shots_measured": len(shots),
         "shots_with_a_camera_move": moved,
         "camera_moves": len(moving),
@@ -417,6 +462,8 @@ def measured(edl, shots=None, source_s=None, preview=None):
         "transitions": ({"style": tr.get("style"), "scope": tr.get("scope"), "seconds": tr.get("duration_s"),
                          "junctions": len(tr.get("junctions") or []) if isinstance(tr.get("junctions"), list) else tr.get("junctions")}
                         if tr else None),
+        "transitions_at_single_cuts": _junctions(edl),
+        "photos": _photos(edl),
         "grade": {k: fx.get(k) for k in ("grade", "grade_custom", "stylize", "custom") if fx.get(k)} or None,
         "fades": {k: fx.get(k) for k in ("fade_in_s", "fade_out_s") if fx.get(k)} or None,
         "sound": {"music_items": len(edl.get("music") or []), "sound_effects": len(edl.get("sfx") or []),
@@ -426,7 +473,7 @@ def measured(edl, shots=None, source_s=None, preview=None):
     return out
 
 
-def facts(edl, preview=None, changes="", shots=None, source_s=None):
+def facts(edl, preview=None, changes="", shots=None, source_s=None, index=None):
     """The edit's numbers: measured from the EDL and the render, never read from the request."""
     edl = edl if isinstance(edl, dict) else {}
     preview = preview or {}
@@ -452,7 +499,7 @@ def facts(edl, preview=None, changes="", shots=None, source_s=None):
         "effects": json.dumps({k: v for k, v in (edl.get("effects") or {}).items() if k != "zooms"},
                               ensure_ascii=False, default=str)[:1200],
         "loudness": (preview.get("audio_qc") or {}).get("integrated_lufs") if isinstance(preview.get("audio_qc"), dict) else None,
-        "whole_film": measured(edl, shots, source_s, preview),
+        "whole_film": measured(edl, shots, source_s, preview, index),
         "changed_in_this_request": str(changes or "nothing")[:1500],
     }
     return out
@@ -486,6 +533,28 @@ def frame_pages(ctx, preview, limit=3):
     return out
 
 
+def stored_preview(ctx, version):
+    """The newest finished preview of this EDL version, made earlier (a request that changed nothing
+    renders nothing, and its check still sees the film). None when there is none."""
+    def q(conn, project_id, v):
+        with conn.cursor() as cur:
+            cur.execute("""SELECT result FROM video_jobs
+                            WHERE project_id = %s AND type = 'preview' AND state = 'done'
+                              AND result->>'edl_version' = %s
+                            ORDER BY id DESC LIMIT 1""", (project_id, str(v)))
+            row = cur.fetchone()
+        if not row:
+            return None
+        res = row["result"] if isinstance(row, dict) else row[0]
+        return json.loads(res) if isinstance(res, str) else res
+    try:
+        got = ctx.db.run(q, ctx.project_id, int(version))
+        return got if isinstance(got, dict) and got.get("screening_pages") is not None else None
+    except Exception as exc:  # noqa: BLE001 - no stored render: judged from the numbers
+        print(f"[asks] stored preview of v{version} not read: {type(exc).__name__}", flush=True)
+        return None
+
+
 def check(ctx, ledger, reply_text, edl, preview=None, changes=""):
     """Every ask, checked on what was rendered. Returns {asks: [{id, state, seen, line}], usage}."""
     import llm
@@ -496,7 +565,8 @@ def check(ctx, ledger, reply_text, edl, preview=None, changes=""):
                               + (f"; otherwise (their alternative when it can't be done): {a['otherwise']}" if a.get("otherwise") else "")
                               for a in ledger["asks"]),
         "The edit's numbers:\n" + json.dumps(facts(edl, preview, changes, program_shots(edl, getattr(ctx, "index", None)),
-                                                    getattr(ctx, "duration", None)), ensure_ascii=False, default=str),
+                                                    getattr(ctx, "duration", None), getattr(ctx, "index", None)),
+                                              ensure_ascii=False, default=str),
         "The editor's reply:\n" + json.dumps(str(reply_text or "")[:3000], ensure_ascii=False),
         "No rendered frames: judge from the numbers and the reply." if not preview else "",
     ])}]
@@ -509,7 +579,11 @@ def check(ctx, ledger, reply_text, edl, preview=None, changes=""):
     for a in ledger["asks"]:
         r = by_id.get(a["id"]) or {}
         state = r.get("state") if r.get("state") in ("done", "partly", "not_done", "cannot_tell") else "cannot_tell"
-        rows.append({"id": a["id"], "state": state, "seen": str(r.get("seen") or "")[:400],
+        seen = str(r.get("seen") or "")
+        if state != "done" and a.get("otherwise") and r.get("alternative") == "taken":
+            # The customer said what to do when it can't be done, and the check saw that done instead.
+            state, seen = "done", "their alternative was taken: " + seen
+        rows.append({"id": a["id"], "state": state, "seen": seen[:400],
                      "line": str(r.get("line") or "")[:300]})
     return {"asks": rows, "usage": usage, "edl_version": None}
 

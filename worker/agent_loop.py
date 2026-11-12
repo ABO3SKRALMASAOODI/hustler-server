@@ -2840,7 +2840,9 @@ def _asks_check(ctx, draft, allow_repair=True):
         return None
     preview = getattr(ctx, "last_preview", None) or {}
     if str(preview.get("edl_version")) != str(row.get("version")):
-        preview = None
+        # This request rendered nothing of this version (it changed nothing): the version's own
+        # earlier preview, when there is one. Never a preview of another version.
+        preview = asks.stored_preview(ctx, row.get("version"))
     previous = getattr(ctx, "ask_verdict", None) or {}
     if previous.get("edl_version") == row.get("version") and previous.get("draft") == (draft or "")[:200]:
         verdict = previous
