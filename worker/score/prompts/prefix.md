@@ -36,7 +36,7 @@ A beat:
 | `job` | story | What this beat is for, under 12 words, in the customer's language, plain. It reaches the customer as a live status line |
 | `cut` | picture | `"pulse 0.5"` seconds, `"lead 10f"` start before the voice, or frame lengths `[11,11,10]` |
 | `pic` | sources | Picture references in order, one per cut, repeating |
-| `type` | type | Caption chunks in the cap grammar, or a list of `{"cap":"7-8|9","seat":[.5,.3],"ink":"#FFE600"}` |
+| `type` | type | Caption chunks in the cap grammar, or a list of `{"cap":"7-8|9","ink":"#FFE600"}`. Captions sit at the film's one seat |
 | `do` | design | Gestures, in order. Each carries `for`: what it answers |
 | `look` | look | A change from the film look |
 | `snd` | sound | `[{"s":"impact_1","at":"b02.big.in","db":-14,"for":"b02.big"}]`. The sample's peak lands on the anchor. `for` names what lands on screen under it |

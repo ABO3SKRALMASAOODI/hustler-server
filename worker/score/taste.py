@@ -323,8 +323,8 @@ def caption_seat(ctx, asked=False):
     for marks in (True, False):          # clear of the upload's printed words where a seat is, of faces always
         rows = _take_heads(ctx, speech_only=True, marks=marks)
 
-        def share(y, rows=rows):
-            return _clear(rows, [0.5 - half, y - h / 2, 0.5 + half, y + h / 2])
+        def share(y, rows=rows, air=0.015 if marks else 0.0):      # off printed words by a little air, not squeezed between two lines
+            return _clear(rows, [0.5 - half, y - h / 2 - air, 0.5 + half, y + h / 2 + air])
         if wy is not None and (lo <= wy <= hi or (asked and 0.06 <= wy <= 0.94)) and share(wy) >= 0.9:
             return round(wy, 3)
         for y in pref + rest:
@@ -1051,7 +1051,7 @@ def read_look(text, n, known):
     return {"pairs": len(pairs[:n]), "upload": upload, "remove": remove, "why": why}
 
 
-def verdict_of(v, n=LOOK_PAIRS):
+def verdict_of(v):
     """film: it goes out. cut: it goes out without what was named. floor: four of six for the upload, the plain film."""
     if v is None:
         return "film"
