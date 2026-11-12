@@ -2764,6 +2764,7 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     if not ledger["asks"]:
         return ""
     done_by = None
+    reset_note = _typed_start_from_upload(ctx, ledger, job)
     if ledger["route"] == "film" and cfg["director"]:
         got = asks.direct_film(ctx, worker_db, job, session_id, cfg)
         ledger["routed"] = {"to": "director", **{k: got.get(k) for k in ("version", "fell", "applied", "s")}}
@@ -2793,7 +2794,37 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
         ledger["routed"] = {"to": "loop"}
     print(f"[asks] job {job.get('id')}: {len(ledger['asks'])} ask(s), route {ledger['route']} -> "
           f"{json.dumps(ledger.get('routed'), default=str)[:240]}", flush=True)
+    if reset_note:
+        done_by = reset_note + ("\n" + done_by if done_by else "")
     return asks.editor_note(ledger, done_by)
+
+
+def _typed_start_from_upload(ctx, ledger, job):
+    """The ledger model read the request as being about the upload while the current film is the
+    automatic first cut nobody has built on (p5624, 12 Nov replay: "work only on the first news story
+    ... keep my narration and the 16:9 format" ran on the product's 52 s vertical cut of a 15 min show,
+    and nothing could be done). The edit starts again from the full upload, as one version, before
+    any route runs. Set logic on the model's field and the stored origin; never raises."""
+    origin = getattr(ctx, "request_edit_origin", None) or {}
+    if ledger.get("start") != "upload" or origin.get("made_by") != "automatic_first_cut":
+        return ""
+    if int(origin.get("customer_requests_since") or 0) > 0 or not getattr(ctx, "has_main_video", False):
+        return ""
+    try:
+        before = ctx.latest_edl()["version"]
+        result = str(agent_tools.reset_edit(ctx))
+    except dbx.JobLeaseLost:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the routes run on the current film, as before
+        print(f"[asks] job {job.get('id')}: start from the upload skipped: {str(exc)[:160]}", flush=True)
+        return ""
+    if not result.startswith("EDL v"):
+        return ""
+    ledger["reset"] = {"from": before, "to": (getattr(ctx, "versions_written", None) or [None])[-1]}
+    print(f"[asks] job {job.get('id')}: started from the full upload (v{before} was the automatic first cut)", flush=True)
+    return (f"The current film was the automatic first cut (v{before}), and this request is about the upload: "
+            f"the edit now starts from the full upload as EDL v{ledger['reset']['to']}. Work on that; say in "
+            "the reply that you edited their full video.")
 
 
 def _typed_pass(ctx, ledger, cfg, job):

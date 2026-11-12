@@ -259,9 +259,11 @@ def _call(ctx, name, schema, system, content, max_tokens=4000):
 # ------------------------------------------------------------------ the ledger
 
 LEDGER_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["lang", "asks"],
+    "type": "object", "additionalProperties": False, "required": ["lang", "start", "asks"],
     "properties": {
         "lang": {"type": "string", "description": "ISO code of the language the customer typed in."},
+        "start": {"type": "string", "enum": ["current", "upload"],
+                  "description": "upload when the current film is an automatic first cut the product made by itself and the customer's words are about their uploaded video, not that cut (they ask to keep the upload's length, format or narration, or to work on a part of it the first cut left out); current otherwise, and always when the customer has built on the current film."},
         "asks": {"type": "array", "maxItems": 24, "items": {
             "type": "object", "additionalProperties": False,
             "required": ["id", "said", "want", "kind", "span", "cut", "items", "how", "where", "pass", "otherwise"],
@@ -361,6 +363,7 @@ def settle(value, edl, usage=None):
             a[k] = str(a.get(k) or "")[:400]
         asks.append(a)
     return {"lang": str(value.get("lang") or "en")[:8], "asks": asks, "route": route(asks),
+            "start": value.get("start") if value.get("start") in ("current", "upload") else "current",
             "usage": usage or {}, "checks": [], "repairs": 0}
 
 
@@ -728,6 +731,7 @@ def summary(ledger, verdict=None):
     states = {r["id"]: r["state"] for r in (verdict or {}).get("asks") or []}
     seen = {r["id"]: str(r.get("seen") or "")[:200] for r in (verdict or {}).get("asks") or []}
     return {"route": ledger.get("route"), "lang": ledger.get("lang"), "repairs": ledger.get("repairs", 0),
+            "start": ledger.get("start"), "reset": ledger.get("reset"),
             "routed": ledger.get("routed"), "usd": round(sum(float((c or {}).get("usd") or 0) for c in
                                                              [ledger.get("usage"), (ledger.get("routed") or {}).get("usage")]
                                                              + [x.get("usage") for x in ledger.get("checks") or []]), 6),

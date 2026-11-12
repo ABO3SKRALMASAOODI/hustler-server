@@ -7,6 +7,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 import agent_loop
+import agent_tools
 import spend_ledger
 from score import asks, patch
 
@@ -475,3 +476,29 @@ def test_the_typed_route_holds_the_owners_off_switch_on_the_director(monkeypatch
     monkeypatch.setattr(director_flags, "read", lambda db: dict(director_flags.DEFAULTS, mode="off"))
     ctx = NS(duration=60.0, has_main_video=True, workdir="/tmp")
     assert asks.direct_film(ctx, None, {"id": 1}, 9, asks.parse('{"mode": "on"}')) == {"fell": "the Director is off (app_kv.director)"}
+
+
+def test_a_request_about_the_upload_starts_from_it_over_an_untouched_first_cut(monkeypatch):
+    # p5624 on the 12 Nov replay: "work only on the first news story ... keep my narration and 16:9" ran on
+    # the product's own 52 s vertical cut of a 15 min show. The ledger model says where the request starts.
+    assert "start" in asks.LEDGER_SCHEMA["required"]
+    assert asks.settle({"lang": "es", "start": "upload", "asks": [_ask("edit")]}, EDL)["start"] == "upload"
+    assert asks.settle({"lang": "es", "start": "elsewhere", "asks": [_ask("edit")]}, EDL)["start"] == "current"
+    calls = []
+
+    def reset(ctx):
+        calls.append(1)
+        ctx.versions_written.append(28)
+        return "EDL v27 -> v28: reset the edit"
+    monkeypatch.setattr(agent_tools, "reset_edit", reset)
+
+    def ctx_for(since=0, start="upload", made_by="automatic_first_cut", main=True):
+        c = NS(request_edit_origin={"made_by": made_by, "customer_requests_since": since}, has_main_video=main,
+               versions_written=[], latest_edl=lambda: {"version": 27, "json": EDL})
+        return c, {"lang": "es", "start": start, "asks": [_ask("edit")]}
+    c, led = ctx_for()
+    note = agent_loop._typed_start_from_upload(c, led, {"id": 1})
+    assert calls == [1] and led["reset"] == {"from": 27, "to": 28} and "starts from the full upload as EDL v28" in note
+    for kw in ({"since": 1}, {"start": "current"}, {"made_by": None}, {"main": False}):
+        c, led = ctx_for(**kw)
+        assert agent_loop._typed_start_from_upload(c, led, {"id": 1}) == "" and calls == [1], kw
