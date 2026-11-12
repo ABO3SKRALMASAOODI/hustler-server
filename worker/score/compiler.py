@@ -515,7 +515,7 @@ class Ctx:
         self.cap_y = None          # the film's one caption seat
         self.seats = None          # the film's display seats
         self.cam_land, self.cam_len = {}, {}
-        self.cam_marks = []        # (frame, rect): the framing an earned camera line left the take in
+        self.cam_marks = []        # (frame, rect, source second): the framing an earned camera line left the take in
         self.wrote = {}            # device lines the Score wrote, by department
         self.flip_frames = None    # programme frames where a speech edit changes the take's framing by a tenth
         self.spine_talk = []       # per spine stretch: does it carry the voice?
@@ -1597,12 +1597,12 @@ def picture_fields(ctx, b, ref, a, z, W=None, H=None, src=None):
             # the upload on the frame: one framing for the film, a step only where a device line earned one
             base = take_crop(ctx, ref, asset, out.get("src"), n, rng, at=a)
             if ref.get("_cam"):            # where it ends is where the take stays
-                c = camera(ctx, base, n, calm_cam(ref.get("cam")))
-                out["crop"] = keep_marks_whole(ctx, c, out.get("src"), asset, W, H)
+                out["crop"] = keep_marks_whole(ctx, camera(ctx, base, n, calm_cam(ref.get("cam"))), out.get("src"), asset, W, H)
+                c = out["crop"]            # what the frame really shows: the framing the take stays in is this one
                 c = c[-1] if isinstance(c[0], list) else c
                 flip = ref.get("_flip") or 1.0
                 cx, cy, hw, hh = (c[0] + c[2]) / 2, (c[1] + c[3]) / 2, (c[2] - c[0]) * flip / 2, (c[3] - c[1]) * flip / 2
-                ctx.cam_marks.append((a, [cx - hw, cy - hh, cx + hw, cy + hh]))
+                ctx.cam_marks.append((a, [cx - hw, cy - hh, cx + hw, cy + hh], t))
                 ctx.cam_marks.sort(key=lambda m: m[0])
             else:
                 out["crop"] = settled_take(ctx, ref, asset, out.get("src"), n, rng, a, base)
@@ -1674,10 +1674,7 @@ def take_crop(ctx, ref, asset, src, n, rng, at=0):
         written = tracked_crop(ctx, ref, asset, src, W, H, n) or base_rect(ctx, ref, asset, t, W, H, rng, 0)
     rects = written if written is not None else film
     path = rects if isinstance(rects[0], list) else [rects]
-    held = None
-    for f, r in ctx.cam_marks:              # the last framing a device earned before this shot
-        if f <= at:
-            held = r
+    held = held_framing(ctx, at, t)       # the last framing a device earned before this shot, while the take ran on
     z, centre = zf, None
     blind = face is None and not (ctx.devices.get(ref.get("_cam")) or {}).get("bound")
     if ref.get("_cam") and written is not None and blind:
@@ -1714,6 +1711,37 @@ def take_crop(ctx, ref, asset, src, n, rng, at=0):
     return out
 
 
+def take_carries(ctx, f0, s0, f1, s1):
+    """Does the take run on from programme frame f0 (source second s0) to frame f1 (source second s1)? One shot of
+    the upload, and on every stretch of the spine between the two the source only moves forward. Read from the
+    spine alone, like a speech edit: never from the order shots were planned in."""
+    from . import taste
+    if taste._kshot(ctx, s0) != taste._kshot(ctx, s1) or s1 < s0 - 0.1:
+        return False
+    sp = ctx.spine
+    i0 = next((i for i, s in enumerate(sp) if s["f"][0] <= f0 < s["f"][1]), None)
+    i1 = next((i for i, s in enumerate(sp) if s["f"][0] <= f1 < s["f"][1]), None)
+    if i0 is None or i1 is None:
+        return True
+    for i in range(i0 + 1, i1 + 1):
+        p, q = sp[i - 1], sp[i]
+        if q["src"][0] < p["src"][1] - 0.1 or taste._kshot(ctx, p["src"][1] - 0.02) != taste._kshot(ctx, q["src"][0]):
+            return False
+    return True
+
+
+def held_framing(ctx, at, t):
+    """The framing an earned step left the take in, for a shot that starts at programme frame `at` and source second
+    `t`: the last such step before it, while the take carries on from there. A cut back to an earlier moment, or to
+    another shot of the upload, is a new picture and starts from the film's own framing (p5584: a 12% step on the
+    cold open stayed on the whole walk that followed and cut the man at the edge of the frame)."""
+    held = None
+    for f, r, s0 in ctx.cam_marks:
+        if f <= at and take_carries(ctx, f, s0, at, t):
+            held = r
+    return held
+
+
 def settled_take(ctx, ref, asset, src, n, rng, a, crop):
     """A closer framing of the take (the tenth at a speech edit, or the framing an earned step left it in) is one
     framing for its whole run: solved on the run's first shot and kept. The heads a crop must hold whole are
@@ -1723,7 +1751,7 @@ def settled_take(ctx, ref, asset, src, n, rng, a, crop):
     W, H = ctx.W, ctx.H
     plain = keep_marks_whole(ctx, crop, src, asset, W, H)
     fit = fit_crop([0, 0, 1, 1], asset["w"], asset["h"], W, H)
-    key = (sum(1 for f, _ in ctx.cam_marks if f <= a), bisect.bisect_right(ctx.flip_frames or [], a))
+    key = (str(held_framing(ctx, a, (src or [0.0])[0])), bisect.bisect_right(ctx.flip_frames or [], a))
     if isinstance(crop[0], list) or crop[2] - crop[0] >= fit[2] - fit[0] - 1e-4:
         return plain
     if ref.get("crop"):            # a window the Score placed on the upload sits where it was put, shot by shot
@@ -1873,6 +1901,11 @@ def emit_ref(ctx, b, ref, a, z, sid):
             it = {"id": sid if i == 0 else f"{sid}.j{i}", "k": "shot", "f": [p, q]}
             if ctx.governed and ref.get("asset") == "main":
                 ref = {**ref, "_flip": speech_edit_flip(ctx, p)}
+                if i and ref.get("_cam"):
+                    # a step is made once, where its shot starts. Past a jump of the spine the shot is either the
+                    # take running on, which stays in the framing the step left (held_framing), or another moment
+                    # of the upload, which is a new picture and starts from the film's own framing
+                    ref = {**ref, "_cam": None}
             it.update(picture_fields(ctx, b, ref, p, q, src=[s0, s1]))
             if i:
                 ctx.seen[ref["asset"]] -= 1      # same framing either side of the jump
@@ -3003,6 +3036,50 @@ def free_seat(ctx, f):
     return best
 
 
+READ_FLOOR = 0.03          # of the frame's height: the reference films' caption median. Display type under it is not display
+ON_PRINT = 0.2             # share of a type block lying on words printed in the picture, past which neither reads
+
+
+def on_print(rect, marks):
+    """How much of a type block lies on what the picture already prints, 0-1. A corner on a logo is a touch; a word
+    across a caption is on it."""
+    area = max((rect[2] - rect[0]) * (rect[3] - rect[1]), 1e-9)
+    hit = sum(max(0.0, min(rect[2], r[2]) - max(rect[0], r[0])) * max(0.0, min(rect[3], r[3]) - max(rect[1], r[1])) for r in {tuple(m) for m in marks})
+    return min(1.0, hit / area)
+
+
+def lines_that_read(ctx, iid, lines, fit_w, room):
+    """Display lines at a size a phone can read, or none (P5, P3). A line too long for the frame at its size breaks
+    in two at the word nearest its middle before it shrinks; the block then shrinks to the room its seat has. What
+    would land under the floor is left out and the meter says so (p5574: three one-line headlines written at 0.034
+    of the frame were fitted to its width and came out at 0.022, which the last look read as tiny three times)."""
+    W, H = ctx.W, ctx.H
+    floor = READ_FLOOR * H
+
+    def fitted(l):
+        w = text_px(l["t"], {"font": l["font"], "px": l["px"], "track": l["track"]})
+        return l["px"] if w / W <= fit_w else l["px"] * fit_w * W / w
+
+    out = []
+    for l in lines:
+        words = str(l["t"]).split()
+        if fitted(l) < floor and len(words) >= 2 and len(lines) == 1:
+            k = min(range(1, len(words)), key=lambda j: abs(len(" ".join(words[:j])) - len(" ".join(words[j:]))))
+            out += [{**l, "t": " ".join(words[:k])}, {**l, "t": " ".join(words[k:])}]
+        else:
+            out.append(l)
+    px = [fitted(l) for l in out]
+    tall = sum(px) * 1.02 / H
+    scale = room / tall if isinstance(room, (int, float)) and tall > room > 0 else 1.0
+    if any(p * scale < floor for p in px):
+        why = (f"its seat has room for {room:.2f} of the frame and it stands {tall:.2f} tall" if scale < 1.0 else "the line is longer than the frame at its size")
+        ctx.taste_rows.append({"id": iid, "did": "thinned", "dept": "display", "why": why + ": shrunk that far it would not read"})
+        return None
+    for l, p in zip(out, px):
+        l["px"] = int(p * scale)
+    return out
+
+
 def display(ctx, iid, text, a, z, opt, b=None):
     """Display type: fits the frame, sits on a seat, lands on its own clock. Returns its rect."""
     W, H = ctx.W, ctx.H
@@ -3017,15 +3094,6 @@ def display(ctx, iid, text, a, z, opt, b=None):
             return None
         for l in lines:
             l["px"] = int(min(l["px"], 0.25 * H))                 # P5: display type at most a quarter of the frame
-        room = opt.get("_room")
-        tall = sum(l["px"] for l in lines) * 1.02 / H
-        if isinstance(room, (int, float)) and tall > room > 0:    # P3: it shrinks to the room its seat has, while it still reads
-            if any(l["px"] * room / tall < 0.03 * H for l in lines):       # p5574: three headlines shrunk to 0.02 read as "tiny"
-                ctx.taste_rows.append({"id": iid, "did": "thinned", "dept": "display",
-                                       "why": f"its seat has room for {room:.2f} of the frame and it stands {tall:.2f} tall: shrunk that far it would not read"})
-                return None
-            for l in lines:
-                l["px"] = int(l["px"] * room / tall)
     seat = opt.get("seat")
     kind = opt.get("in", "cut")
     if kind not in ENTRANCES:
@@ -3044,6 +3112,10 @@ def display(ctx, iid, text, a, z, opt, b=None):
             fit_w = min(fit_w, (fr[2] - fr[0]) * 0.92)
     if not (isinstance(seat, (list, tuple)) and len(seat) == 2):
         seat, solve = [0.5, 0.42], True
+    if ctx.governed:
+        lines = lines_that_read(ctx, iid, lines, fit_w, opt.get("_room"))
+        if not lines:
+            return None
     for l in lines:
         v = {"font": l["font"], "px": l["px"], "track": l["track"]}
         w = text_px(l["t"], v)
@@ -3091,6 +3163,13 @@ def display(ctx, iid, text, a, z, opt, b=None):
     y_top = clamp(y_top, 0.02, max(0.02, 0.98 - block_h))
     n = z - a
     out_rect = [x0 - block_w / 2, y_top, x0 + block_w / 2, y_top + block_h]
+    asked = (ctx.devices.get(iid) or ctx.devices.get(iid.rsplit(".", 1)[0]) or {}).get("bound")
+    if ctx.governed and not asked and on_print(out_rect, mark_rects(ctx, a, z)) >= ON_PRINT:
+        # P6: the upload's own words are the picture's. Type that ends on them makes both unreadable, and where it
+        # ends is read after every move: p5572's RELIEF was solved to a clear seat above the creator's caption,
+        # then pushed down out of the platform's top bar and onto it. With no clear seat it is left out
+        ctx.taste_rows.append({"id": iid, "did": "thinned", "dept": "display", "why": "it lands on words the upload prints, and this frame has no clear seat for it"})
+        return None
     # a block is as tall as its ink. A tall condensed face stands well above 0.74 em
     q0 = shaped(lines[0]["font"], lines[0]["t"]) if joined_script(lines[0]["t"]) else None
     ink_top = y_top + ys[0] - (q0[1] if q0 else cap_height(lines[0]["font"])) * lines[0]["px"] / H
@@ -5641,21 +5720,33 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
     sid = sid or (os.path.basename(os.path.normpath(work_dir)) if work_dir else None)
     governed = GOVERN if govern is None else bool(govern)
     extra = load_taste(work_dir) if governed else ({}, {}, None)
-    plan, facts, rounds = {}, None, 0
-    while True:
-        ctx = compile_once(text, index, work_dir, bin_items, tray, faces, sid, owner, seed, perc, governed, plan, extra)
-        rounds += 1
-        if not governed:
-            break
-        from . import taste
-        dec, ledger, facts = taste.decide(ctx)
-        cls = facts["supply"]["cls"]
-        if (taste.empty(dec) and plan.get("cls", "T") == cls) or rounds > GOVERN_ROUNDS:
-            ctx.unsettled = ledger if not taste.empty(dec) else []
-            voice_levels(ctx, facts["allow"]["under_voice_db"])
-            break
-        plan = taste.merge(dict(plan), dec)
-        plan["cls"] = cls
+
+    def settle(text, plan):
+        facts, rounds = None, 0
+        while True:
+            ctx = compile_once(text, index, work_dir, bin_items, tray, faces, sid, owner, seed, perc, governed, plan, extra)
+            rounds += 1
+            if not governed:
+                break
+            from . import taste
+            dec, ledger, facts = taste.decide(ctx)
+            cls = facts["supply"]["cls"]
+            if (taste.empty(dec) and plan.get("cls", "T") == cls) or rounds > GOVERN_ROUNDS:
+                ctx.unsettled = ledger if not taste.empty(dec) else []
+                voice_levels(ctx, facts["allow"]["under_voice_db"])
+                break
+            plan = taste.merge(dict(plan), dec)
+            plan["cls"] = cls
+        return ctx, plan, facts, rounds
+
+    plan = {}
+    seen = score_the_look_saw(text) if governed else None
+    if seen is not None:
+        # The last look judged one film. Taking a device out of it must not let in another that film had no room
+        # for and the look never saw (p5575: with 'ready' removed, a counter the reading had thinned came back and
+        # sat on her arm for four seconds). What was decided against in the film it saw stays decided.
+        plan = settle(seen, {})[1]
+    ctx, plan, facts, rounds = settle(text, plan)
     l1 = to_l1(ctx)
     m = meter(ctx, l1)
     if governed:
@@ -5663,6 +5754,27 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
         m["findings"] = list(ctx.findings)
     txt = meter_text(ctx, m)
     return Compiled(l1, m, txt, (time.perf_counter() - t0_) * 1000)
+
+
+def score_the_look_saw(text):
+    """The Score without the last look's cut lines, or None when it has none or asks for the floor (the floor keeps
+    only what was asked for, so nothing can come in). Reads the Score's own syntax, line by line."""
+    kept, cuts = [], 0
+    for line in text.splitlines():
+        s = line.strip()
+        row = None
+        if s.startswith("{") and '"cut"' in s:
+            try:
+                row = json.loads(s)
+            except ValueError:
+                row = None
+        if isinstance(row, dict) and row.get("k") == "cut":
+            if str(row.get("id")) == "*":
+                return None
+            cuts += 1
+            continue
+        kept.append(line)
+    return "\n".join(kept) + "\n" if cuts else None
 
 
 def taste_meter(ctx, facts, rounds):

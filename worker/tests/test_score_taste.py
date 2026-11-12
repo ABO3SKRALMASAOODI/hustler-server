@@ -847,3 +847,96 @@ def test_a_step_is_not_made_blind():
     beats[1]["pic"]["for"] = "a1"                      # the customer asked for it: it is made
     c = _with_asks(film(beats), idx, [{"id": "a1", "said": "zoom in when I start the second point", "probe": "cut_rate", "min": None}])
     assert camera_steps(c) == 1
+
+
+def _take_widths(c):
+    """Per beat, how wide the take's window is on its first shot, against the film's own framing."""
+    out = {}
+    for s in sorted((i for i in c.l1["items"] if i["k"] == "shot" and i.get("pic") == "main"), key=lambda i: i["f"][0]):
+        r = s["crop"][0] if isinstance(s["crop"][0], list) else s["crop"]
+        out.setdefault(s["id"].split(".")[0], round(r[2] - r[0], 4))
+    return out
+
+
+def test_an_earned_framing_ends_where_the_film_cuts_back_in_the_take():
+    """p5584: a 12% step on the cold open stayed on the whole walk that followed, which was earlier in the upload,
+    and cut the man at the edge of the frame. The framing a step leaves holds only while the take runs on."""
+    idx = selfie(30.0)
+    s = idx["sentences"]
+    a, z = s[4]["wi0"], s[4]["wi1"]
+    beats = [{"k": "b", "id": "b01", "w": f"{a}-{z}", "job": "x", "pic": {"src": "main", "zoom": 1.15, "for": "a1"}},     # the cold open
+             {"k": "b", "id": "b02", "w": f"0-{a - 1}", "job": "x", "pic": "main"},                                         # back to the start
+             {"k": "b", "id": "b03", "w": f"{z + 1}-{len(idx['words']) - 1}", "job": "x", "pic": "main"}]
+    c = _with_asks(film(beats), idx, [{"id": "a1", "said": "start close on me", "probe": "cut_rate", "min": None}])
+    full = max(s["crop"][2] - s["crop"][0] for s in c.l1["items"] if s["k"] == "shot" and not isinstance(s["crop"][0], list))
+    close = {s["id"]: round(full / (s["crop"][2] - s["crop"][0]), 3) for s in c.l1["items"] if s["k"] == "shot" and not isinstance(s["crop"][0], list)}
+    assert close["b01.s0"] == 1.15 and close["b02.s0"] == 1.0                          # the step is made, and ends at the cut back
+    assert all(v == 1.0 for k, v in close.items() if k != "b01.s0" and c.l1["items"] and next(s for s in c.l1["items"] if s["id"] == k)["src"][0] < 13.0)
+    after = [v for k, v in close.items() if next(s for s in c.l1["items"] if s["id"] == k)["src"][0] > 15.0]
+    assert after and all(v == 1.0 or 1.08 <= v <= 1.12 for v in after)                 # where the cold open's words were cut out: a tenth at most
+    # the same step where the take runs on from it holds: one device is one step, never out again
+    beats = [{"k": "b", "id": "b01", "w": f"0-{a - 1}", "job": "x", "pic": "main"},
+             {"k": "b", "id": "b02", "w": f"{a}-{z}", "job": "x", "pic": {"src": "main", "zoom": 1.12, "for": "a1"}},
+             {"k": "b", "id": "b03", "w": f"{z + 1}-{len(idx['words']) - 1}", "job": "x", "pic": "main"}]
+    c = _with_asks(film(beats), idx, [{"id": "a1", "said": "come closer on the second point", "probe": "cut_rate", "min": None}])
+    w = _take_widths(c)
+    assert w["b02"] < w["b01"] and abs(w["b03"] - w["b02"]) < 0.004 and camera_steps(c) == 1
+
+
+def test_what_the_look_removes_lets_nothing_new_in():
+    """p5575: with one display word removed, a counter the reading had thinned came back and sat on her arm."""
+    idx = selfie(30.0)
+    beats = beats_over(idx, 12, lambda k, a, z: {"pic": "main", "do": [{"g": "big", "t": f"LINE {k}", "for": f"w{a}", "at": f"w{a}", "d": 40}]})
+    text = film(beats)
+    c = comp(text, idx)
+    bigs = lambda x: sorted({i["id"].rsplit(".", 1)[0] for i in x.l1["items"] if i["k"] == "word" and i.get("role") == "big"})
+    kept = bigs(c)
+    assert 2 <= len(kept) < len(beats)                                 # more display lines were written than a take carries
+    cut = comp(taste.cut_text(text, [kept[0]]), idx)
+    assert bigs(cut) == kept[1:]                                       # the others stay, and none the reading had thinned comes in
+    assert bigs(comp(taste.cut_text(text, kept), idx)) == []
+    assert S.score_the_look_saw(text) is None and S.score_the_look_saw(taste.floor_text(text)) is None
+    assert S.score_the_look_saw(taste.cut_text(text, kept[:1])) == text
+
+
+def test_a_headline_longer_than_the_frame_breaks_in_two_before_it_shrinks_or_goes():
+    """p5574: three one-line headlines written at 0.034 of the frame came out at 0.022 once fitted to its width."""
+    idx = selfie(12.0)
+    n = len(idx["words"])
+
+    def big(t):
+        text = film([{"k": "b", "id": "b01", "w": f"0-{n - 1}", "job": "x", "pic": "main",
+                      "do": [{"g": "big", "t": t, "size": 0.05, "for": "w0", "at": "w0", "d": 60}]}])
+        c = comp(text, idx)
+        return c, [i for i in c.l1["items"] if i["k"] == "word" and i.get("role") == "big" and i["f"][0] <= 30]
+
+    c, words = big("THIS HEADLINE IS MUCH TOO LONG FOR ONE LINE OF A PHONE")
+    px = {c.l1["voices"][w["v"]]["px"] for w in words}
+    assert len({w["id"] for w in words}) == 2 and min(px) >= S.READ_FLOOR * 1920            # two lines, both readable
+    assert {w["t"] for w in words} == {"THIS HEADLINE IS MUCH TOO", "LONG FOR ONE LINE OF A PHONE"}
+    from score import lower
+    rep = {}
+    drawn = [t["text"] for t in lower.lower_texts(c.l1, rep) if ".big." in t["id"]]
+    assert sorted(set(drawn)) == ["LONG FOR ONE LINE OF A PHONE", "THIS HEADLINE IS MUCH TOO"] and not rep.get("type_steps_dropped")   # today's renderer draws both
+    c, words = big("ANTIDISESTABLISHMENTARIANISMANTIDISESTABLISHMENTARIANISMANTIDISESTABLISHMENTARIANISM")
+    assert not words and any(r["id"] == "b01.big" and "would not read" in r["why"] for r in c.meter["taste"]["rows"])
+    c, words = big("SHORT")
+    assert len(words) == 1 and c.l1["voices"][words[0]["v"]]["px"] == int(0.05 * 1920)
+
+
+def test_display_type_does_not_land_on_the_words_the_upload_prints():
+    """p5572: RELIEF was set across the creator's own caption. Where no clear seat exists, the line is left out."""
+    idx = selfie(12.0, face=(0.4, 0.42, 0.6, 0.56))
+    for s in idx["spatial"]["samples"]:
+        s["text"] = [[0.04, y, 0.96, y + 0.1] for y in (0.06, 0.17, 0.28, 0.6, 0.71, 0.82)] + [[0.04, 0.39, 0.33, 0.59], [0.67, 0.39, 0.96, 0.59]]   # printed words all round the face
+    n = len(idx["words"])
+    beat = {"k": "b", "id": "b01", "w": f"0-{n - 1}", "job": "x", "pic": "main", "do": [{"g": "big", "t": "RELIEF", "for": "w0", "at": "w0", "d": 60}]}
+    c = comp(film([beat]), idx)
+    assert not [i for i in c.l1["items"] if i["k"] == "word" and i.get("role") == "big"]
+    assert any(r["id"].startswith("b01.big") and "words the upload prints" in r["why"] for r in c.meter["taste"]["rows"])
+    for s in idx["spatial"]["samples"]:
+        s["text"] = []
+    c = comp(film([beat]), idx)                                          # the same line on a clear frame stands
+    assert [i for i in c.l1["items"] if i["k"] == "word" and i.get("role") == "big"]
+    assert S.on_print([0.2, 0.2, 0.6, 0.3], [[0.0, 0.19, 0.9, 0.35]]) == 1.0                 # across a caption
+    assert S.on_print([0.1, 0.72, 0.4, 0.79], [[0.1, 0.77, 0.22, 0.84]]) < S.ON_PRINT       # a corner on a logo is a touch

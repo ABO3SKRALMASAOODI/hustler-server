@@ -826,7 +826,9 @@ def no_double_type(texts, rep):
     """One gesture never draws two of its words on top of each other. A counter's steps move as they
     step, so each is its own chain, and stretched to today's 0.3 s each ran into the next: DIA 23 and
     DIA 24 drawn over one another (a p5302 replay). An earlier step ends where the next one starts on
-    the same spot, and a step left under the minimum goes; the count always lands on its last."""
+    the same spot, and a step left under the minimum goes; the count always lands on its last. Lines that start
+    together are a block's lines: a headline of two lines lost its first here (p5574: "BISNIS YANG / BERBEDA?"
+    came out as "BERBEDA?"), because a line's height in the frame was read against its size in the frame's width."""
     groups = collections.defaultdict(list)
     for tx in texts:
         groups[".".join(tx["id"].split(".")[1:3])].append(tx)
@@ -837,6 +839,8 @@ def no_double_type(texts, rep):
             for nxt in items[i + 1:]:
                 if nxt["start"] >= tx["end"]:
                     break
+                if nxt["start"] == tx["start"]:
+                    continue        # two lines set together are one block, not two steps: the second never replaces the first
                 fs = max(float(tx["font_size"]), float(nxt["font_size"]))
                 if abs(float(tx["y"]) - float(nxt["y"])) < 0.8 * fs and _x_overlap(tx, nxt) > 0.2:
                     tx["end"] = nxt["start"]
