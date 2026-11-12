@@ -748,6 +748,10 @@ def direct_film(ctx, worker_db, job, session_id, cfg):
     from . import film, flags as director_flags
     t0 = time.monotonic()
     dcfg = director_flags.read(worker_db)
+    if dcfg.get("mode") != "on":
+        # The owner's switch on the Director (app_kv.director, off since 12 Nov for device spam) holds
+        # here too: a typed whole-film ask goes to the pass or the loop while it is off.
+        return {"fell": "the Director is off (app_kv.director)"}
     source_s = float(getattr(ctx, "duration", 0) or 0)
     if not getattr(ctx, "has_main_video", False) or source_s <= 0:
         return {"fell": "no upload to direct"}
