@@ -19,8 +19,6 @@ uniform float uRadius;
 uniform float uBorder;
 uniform vec3 uBorderC;
 uniform float uOp;
-uniform sampler2D uMatte;   // the person, on the take's geometry: this pass redraws only him
-uniform int uUseMatte;
 
 float sdRound(vec2 p, vec2 b, float r) {
   vec2 q = abs(p) - b + r;
@@ -70,6 +68,5 @@ void main() {
     c = mix(c, uBorderC, clamp(0.5 + inner * uScale, 0.0, 1.0));
   }
   float a = cov * uOp * ta;
-  if (uUseMatte == 1) a *= texture(uMatte, mix(uCrop.xy, uCrop.zw, tv)).r;
   o = vec4(c * a, a);
 }

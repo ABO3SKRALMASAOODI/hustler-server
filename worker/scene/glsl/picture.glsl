@@ -14,10 +14,16 @@ uniform vec3 uG1;           // sat, contrast, temp
 uniform float uTint;
 uniform int uEdge;          // edge-directed upscale
 uniform int uAlpha;         // the picture carries alpha, premultiplied: a logo on a card
+// How the picture is read, decided once per draw from the same numbers the shader has (so a software
+// rasteriser, which runs every branch, compiles only the one in use):
+//   0 magnified: edge-directed or Catmull-Rom, then sharpened    1 minified: through the mips
+//   2 blurred                                                    3 one texel a pixel, on the grid: the texel itself
+uniform int uSamp;
 
 vec3 sample_pic(vec2 uv, float texel_per_px) {
-  if (uBlur > 0.01) return gauss(uTex, uv, uTexSize, uBlur * texel_per_px).rgb;
-  if (texel_per_px > 1.05) return textureLod(uTex, uv, log2(texel_per_px)).rgb;
+  if (uSamp == 2) return gauss(uTex, uv, uTexSize, uBlur * texel_per_px).rgb;
+  if (uSamp == 1) return textureLod(uTex, uv, log2(texel_per_px)).rgb;
+  if (uSamp == 3) return texelFetch(uTex, clamp(ivec2(uv * uTexSize), ivec2(0), ivec2(uTexSize) - 1), 0).rgb;
   vec3 c = uEdge == 1 ? easu(uTex, uv, uTexSize) : catrom(uTex, uv, uTexSize);
   if (uSharp > 0.0) {
     // Contrast-adaptive sharpening on the source grid: lifts soft phone footage without halos.

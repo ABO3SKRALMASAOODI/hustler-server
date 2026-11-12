@@ -1511,3 +1511,143 @@ def test_a_segment_moves_into_a_cache_on_another_filesystem(tmp_path, pics, monk
     assert os.listdir(os.path.join(cache, "tmp")) == [], "and nothing is left half way"
     again = RUN.render_plan(SC.compile(l1, "/"), str(tmp_path / "g.mp4"), tier="final", audio=False, cache=cache)
     assert again["segments_drawn"] == 0
+
+
+# ---- the box tier, round 2: what the profile on the box image asked for. The picture must not know.
+
+def test_a_picture_on_the_grid_is_its_own_texels(pics):
+    """One texel a pixel, on the grid: the shot is read texel by texel (no nine taps to give the
+    texel back), and the frame is the source."""
+    import scene.runtime as RT
+    pic = {"w": 360, "h": 640}
+    assert RT.Runtime.on_grid(pic, (0, 0, 1, 1), (180, 320, 180, 320, 1.0, 0.0))
+    assert not RT.Runtime.on_grid(pic, (0, 0, 1, 1), (180, 320, 180, 320, 1.0, 0.1)), "a turned picture is off the grid"
+    assert not RT.Runtime.on_grid(pic, (0.1, 0.1, 0.9, 0.9), (180, 320, 180, 320, 1.0, 0.0)), "so is a magnified one"
+    assert not RT.Runtime.on_grid(pic, (0.001, 0, 1.001, 1), (180, 320, 180, 320, 1.0, 0.0)), "and one a third of a texel off"
+    got = one(small([pic_shot()], 4, pics))
+    want = np.asarray(Image.open(pics["a"]).convert("RGB")).astype(np.int16)
+    assert np.abs(got - want).max() <= 1
+
+
+def test_a_held_blur_is_blurred_once_and_reads_the_same(monkeypatch):
+    """A word held out of focus, and every reflection, is the same blurred sprite frame after frame.
+    It is blurred on the second frame that asks and read back after that, at whatever scale the word
+    is settling through. Drawn the old way, 32 taps a pixel on every frame, the frames are the same."""
+    import scene.runtime as RT
+    voices = {"big": {"font": "InterDisplay-Black.ttf", "px": 200, "track": 0}}
+    w = {"id": "w", "k": "word", "f": [0, 6], "t": "HH", "v": "big", "x": 0.3, "y": 0.5, "ink": "#FFFFFF", "role": "big", "on": 0,
+         "reflect": 0.6, "s": [1.19, 1.12, 1.06, 1.02, 1.0, 1.0]}
+    soft = {"id": "v", "k": "word", "f": [0, 6], "t": "II", "v": "big", "x": 0.1, "y": 0.25, "ink": "#FFD040", "role": "big", "on": 0, "blur": 9}
+    moving = {"id": "m", "k": "word", "f": [0, 6], "t": "L", "v": "big", "x": 0.7, "y": 0.25, "ink": "#40D0FF", "role": "big", "on": 0,
+              "blur": [14, 10, 7, 4, 2, 0]}
+    l1 = film([plate(6, "#000000"), w, soft, moving], dur=6, voices=voices)
+    frames = [0, 1, 2, 3, 4, 5]
+    e = Engine(l1, "/")
+    kept = e.stills(frames)
+    n = dict(e.rt.n)
+    held = sum(1 for v in e.rt.soft.values() if v["tex"] is not None)
+    e.close()
+    assert n["soft_kept"] >= 10, "the reflection and the held blur are read back"
+    assert n["soft_drawn"] >= 5 and held == 2, "a blur that is moving is drawn as it always was, and keeps nothing"
+    monkeypatch.setattr(RT.Runtime, "soft_sprite", lambda self, spr, sig, f: None)
+    e = Engine(l1, "/")
+    plain = e.stills(frames)
+    e.close()
+    for f in frames:
+        assert psnr(kept[f][..., :3], plain[f][..., :3]) > 55, f"frame {f}: {psnr(kept[f][..., :3], plain[f][..., :3]):.1f} dB"
+
+
+def test_waiting_for_the_rasteriser_with_the_lock_released_changes_no_pixel(pics, monkeypatch):
+    """On a software rasteriser the engine waits for each pass through ctypes, so the interpreter
+    lock is free for the reader and the encoder's writer while the frame is drawn. Same calls, same
+    frame; off by itself on a GPU."""
+    import scene.runtime as RT
+    l1 = GOLDEN_OPS["finish"](pics)
+    monkeypatch.setenv("VALMERA_SCENE_YIELD", "0")
+    e = Engine(l1, "/")
+    a = e.stills([1])[1][..., :3]
+    assert e.rt._finish is None
+    e.close()
+    monkeypatch.setenv("VALMERA_SCENE_YIELD", "1")
+    e = Engine(l1, "/")
+    b = e.stills([1])[1][..., :3]
+    assert e.rt._finish is not None
+    e.close()
+    assert psnr(a, b) > 90
+    monkeypatch.delenv("VALMERA_SCENE_YIELD")
+    e = Engine(l1, "/")
+    assert (e.rt._finish is not None) == any(k in str(e.rt.gl).lower() for k in RT.SOFTWARE)
+    e.close()
+
+
+def test_the_sound_is_mixed_beside_the_picture_and_its_fault_is_the_films(tmp_path, pics, monkeypatch):
+    """The mix runs while the frames are drawn. If it fails, the render fails with SceneFault('audio'),
+    as it did when the mix came after."""
+    l1, _ = _talky(pics, n_shots=2)
+    plan = SC.compile(l1, "/")
+    started = []
+    real = AU.write_audio
+
+    def spy(plan_, out, tmp):
+        started.append(len(os.listdir(os.path.join(str(tmp_path / "c"), "seg"))) if os.path.isdir(str(tmp_path / "c" / "seg")) else 0)
+        return real(plan_, out, tmp)
+    monkeypatch.setattr(RUN.AU, "write_audio", spy)
+    log = RUN.render_plan(plan, str(tmp_path / "f.mp4"), tier="final", audio=True, cache=str(tmp_path / "c"))
+    assert started == [0], "the mix began before any segment was drawn"
+    assert log["frames"] == l1["dur_f"] and log["audio"] is not None
+
+    def boom(plan_, out, tmp):
+        raise SceneFault("audio", "no mix")
+    monkeypatch.setattr(RUN.AU, "write_audio", boom)
+    with pytest.raises(SceneFault) as ex:
+        RUN.render_plan(SC.compile(l1, "/"), str(tmp_path / "g.mp4"), tier="final", audio=True, cache=str(tmp_path / "c2"))
+    assert ex.value.code == "audio"
+
+
+def test_the_intermediate_tier_is_a_whole_film_nearer_the_drawn_frames(tmp_path, pics):
+    """inter is for a film another encode follows: every frame, the same length, closer to what was drawn."""
+    l1, _ = _talky(pics, n_shots=2)
+    logs = {}
+    for tier in ("final", "inter"):
+        logs[tier] = RUN.render_plan(SC.compile(l1, "/"), str(tmp_path / f"{tier}.mp4"), tier=tier, audio=False, cache=str(tmp_path / tier))
+        assert logs[tier]["frames"] == l1["dur_f"]
+    drawn = RUN.stills(SC.compile(l1, "/", segment=False), [7])[7][..., :3]
+
+    def frame7(path):
+        r = subprocess.run([FF, "-v", "error", "-i", path, "-vf", "select=eq(n\\,7),scale=in_range=tv:out_range=pc:in_color_matrix=bt709",
+                            "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True)
+        return np.frombuffer(r.stdout, np.uint8).reshape(drawn.shape)
+    assert psnr(frame7(str(tmp_path / "inter.mp4")), drawn) >= psnr(frame7(str(tmp_path / "final.mp4")), drawn) - 0.5
+    assert psnr(frame7(str(tmp_path / "inter.mp4")), drawn) > 30
+
+
+def test_one_source_at_two_moments_keeps_a_decoder_for_each(src):
+    """The take plays while a card shows an earlier moment of the same upload. With one decoder a
+    source the two reads reopened it in turn on every frame; each moment keeps its own now, and
+    every frame still shows the source frames the plan says."""
+    n = 24
+    items = [{"id": "s", "k": "shot", "f": [0, n], "pic": "main", "src": [2.0, 2.0 + n / FPS], "crop": [0, 0, 1, 1]},
+             {"id": "c", "k": "card", "f": [0, n], "pic": "main", "src": [0.0, n / FPS], "crop": [0, 0, 1, 0.4], "x": 0.5, "y": 0.7, "w": 1.0,
+              "h": 0.40 * (640 / 360) * (1080 / 1920)}]
+    e = Engine(film(items, dur=n, assets={"main": {"kind": "video", "path": src}}), "/")
+    fr = e.stills(list(range(n)))
+    rd = e.rt.reader
+    e.close()
+    H = int(0.7 * 1920 - 0.5 * items[1]["h"] * 1920)
+    assert {f: (read_code(a), read_code(a[H:])) for f, a in fr.items()} == {f: (60 + f, f) for f in range(n)}
+    assert rd.seeks == 2, f"{rd.seeks} decoders opened for two moments of one source"
+    assert rd.decoded <= 2 * n + 8
+
+
+def test_asked_past_its_end_a_source_answers_at_once(src):
+    """Regression: a decoder that had given its last frame took half a second to say so each time it was asked again."""
+    import time as _t
+    a = dict(SR_.probe(src), abs=src, rate=30.0)
+    d = SR_.Decoder(a, 148, ahead=2)
+    while d.next() is not None:
+        pass
+    t = _t.monotonic()
+    for _ in range(5):
+        assert d.next() is None
+    d.close()
+    assert _t.monotonic() - t < 0.2

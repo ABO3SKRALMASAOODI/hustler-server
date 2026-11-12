@@ -13,6 +13,8 @@ uniform float uOp;
 uniform float uShadow;
 uniform float uGlow;
 uniform float uBlur;       // sigma, sprite texels
+uniform int uPre;          // 1: this sprite at this blur was drawn once into uPreTex (wblur.frag); read it there
+uniform sampler2D uPreTex;
 uniform int uBlend;        // 0 normal, 1 difference, 2 multiply
 uniform int uFade;         // 1: a reflection, strongest at the baseline, gone at the top of the sprite
 uniform int uFill;         // 1: the letters hold a picture, fitted to their block. 2: static. 3: a window onto a picture
@@ -45,7 +47,9 @@ uniform vec3 uStrokeC;
 void main() {
   vec2 st = (uSpr.xy + v * uSpr.zw) / uAtlas;
   vec4 t;
-  if (uBlur > 0.0) {
+  if (uPre == 1) {
+    t = textureLod(uPreTex, v, 0.0);
+  } else if (uBlur > 0.0) {
     t = gauss(uW, st, uAtlas, uBlur);
   } else {
     float l0 = floor(uLod);

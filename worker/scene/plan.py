@@ -221,8 +221,12 @@ class Plan:
 
     def take_shot(self, shot):
         """Does this shot run on the take's clock and geometry, so the person's matte registers to it?"""
+        return self.take_shot_of(self.assets, shot)
+
+    @staticmethod
+    def take_shot_of(assets, shot):
         pic = str((shot or {}).get("pic"))
-        return "matte" in self.assets and bool((shot or {}).get("src")) and (pic == "main" or pic.startswith("own:cut"))
+        return "matte" in assets and bool((shot or {}).get("src")) and (pic == "main" or pic.startswith("own:cut"))
 
     def matte_frame(self, shot, f):
         m = self.assets["matte"]

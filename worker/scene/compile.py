@@ -18,7 +18,7 @@ from .faults import SceneFault
 from .plan import ANIM, ANIM_RECT, KINDS, PLAN_VERSION, Plan, canon, eligible, fingerprint, scene_of, sized
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ENGINE_VERSION = "scene-1"
+ENGINE_VERSION = "scene-2"      # in every plan and so in every segment's hash: a segment kept by another engine is never taken for this one's
 # what strict mode refuses to draw around: these change the picture a customer was promised
 STRICT = ("missing", "not installed", "lacks a glyph", "no font here", "without exactly one")
 
@@ -86,6 +86,8 @@ def _need(doc):
         refs = []
         if it["k"] in ("shot", "join"):
             refs.append((it.get("pic"), W, H, it.get("crop")))
+            if it["k"] == "shot" and Plan.take_shot_of(doc["assets"], it):
+                refs.append(("matte", W, H, it.get("crop")))     # the matte lies on the take, through the same crop
         elif it["k"] == "card":
             sc = it.get("s", 1)
             smax = max(sc) if isinstance(sc, list) else float(sc)
@@ -251,7 +253,7 @@ def compile(doc, work, budget_s=None, tier="mac", segment=True, strict=False, ti
         except ValueError as e:
             raise SceneFault("ineligible", str(e))
     warn = []
-    d = {"plan": PLAN_VERSION, "engine": ENGINE_VERSION, "shaders": shaders_sha(), "sws": reader.SWS, "sid": l1.get("sid"), "seed": int(l1.get("seed") or 0),
+    d = {"plan": PLAN_VERSION, "engine": ENGINE_VERSION, "shaders": shaders_sha(), "sws": reader.way_in(), "sid": l1.get("sid"), "seed": int(l1.get("seed") or 0),
          "fps": float(l1.get("fps") or 30), "frame": [int(x) for x in (l1.get("frame") or [1080, 1920])], "dur_f": int(l1["dur_f"]),
          "film": copy.deepcopy(l1.get("film") or {}), "voices": copy.deepcopy(l1.get("voices") or {}),
          "spine": copy.deepcopy(l1.get("spine") or []), "sound": copy.deepcopy(l1.get("sound") or [])}
@@ -275,6 +277,8 @@ def compile(doc, work, budget_s=None, tier="mac", segment=True, strict=False, ti
                 warn.append(f"asset {aid} missing: no picture in {p}")
                 continue
             o["w"], o["h"] = reader.fit(o["w"], o["h"])
+            if aid == "matte":
+                o["gray"] = True                                # a matte is its luma: read one byte a pixel
         d["assets"][aid] = o
     _rates(d)
     for it in d["items"]:

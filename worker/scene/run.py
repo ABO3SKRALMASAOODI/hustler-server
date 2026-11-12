@@ -16,10 +16,12 @@ import collections
 import json
 import math
 import os
+import queue
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 
@@ -35,10 +37,13 @@ from .runtime import Runtime
 
 FF = os.environ.get("FFMPEG_BIN", "ffmpeg")
 FP = os.environ.get("FFPROBE_BIN", "ffprobe")
-# DESIGN 4.5. master is the slice's own setting, for a workflow final rendered on the Mac.
+# DESIGN 4.5. master is the slice's own setting, for a workflow final rendered on the Mac. inter is
+# for a film that another encode follows (the product's brand finish re-encodes every engine film):
+# nearer the drawn frames than final, at a third of the encoder's CPU, in a file nobody keeps.
 TIERS = {"preview": dict(preset="superfast", crf=23, maxrate="3M", bufsize="6M"),
          "final": dict(preset="veryfast", crf=18, maxrate="12M", bufsize="24M"),
-         "master": dict(preset="medium", crf=18, maxrate="12M", bufsize="24M")}
+         "master": dict(preset="medium", crf=18, maxrate="12M", bufsize="24M"),
+         "inter": dict(preset="ultrafast", crf=14, maxrate=None, bufsize=None)}
 
 
 class Engine:
@@ -89,7 +94,7 @@ class Engine:
 
 def enc_tag(tier):
     t = TIERS[tier]
-    return f"x264-{t['preset']}-crf{t['crf']}-{t['maxrate']}-{R.SWS}"
+    return f"x264-{t['preset']}-crf{t['crf']}-{t['maxrate']}-{R.SWS}-{R.way_in()}"
 
 
 def encoder(out, W, H, fps, tier="final"):
@@ -97,15 +102,18 @@ def encoder(out, W, H, fps, tier="final"):
     t = TIERS[tier]
     vf = ("scale=in_range=pc:out_range=tv:out_color_matrix=bt709:out_h_chr_pos=0:out_v_chr_pos=128:"
           f"flags={R.SWS},format=yuv420p")
+    rate = ["-maxrate", t["maxrate"], "-bufsize", t["bufsize"]] if t.get("maxrate") else []
     cmd = [FF, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba",
            "-s", f"{W}x{H}", "-r", f"{fps}", "-i", "-", "-vf", vf,
-           "-c:v", "libx264", "-preset", t["preset"], "-crf", str(t["crf"]), "-maxrate", t["maxrate"], "-bufsize", t["bufsize"],
+           "-c:v", "libx264", "-preset", t["preset"], "-crf", str(t["crf"]), *rate,
            "-profile:v", "high", "-pix_fmt", "yuv420p", "-color_range", "tv", "-colorspace", "bt709",
            "-color_primaries", "bt709", "-color_trc", "bt709", "-movflags", "+faststart", "-an", out]
     try:
-        return subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as e:
         raise SceneFault("encode", f"cannot start ffmpeg: {e}")
+    R.wide_pipe(p.stdin)
+    return p
 
 
 class Progress:
@@ -129,11 +137,65 @@ class Progress:
         os.replace(tmp, self.path)
 
 
+class Sound(threading.Thread):
+    """The film's sound, mixed while the picture is drawn. It is a few seconds of one core; after the
+    picture it was a few seconds of the whole film's time with three cores idle."""
+
+    def __init__(self, plan, out, tmp):
+        super().__init__(daemon=True)
+        self.plan, self.out, self.tmp, self.rep, self.err = plan, out, tmp, None, None
+        self.start()
+
+    def run(self):
+        try:
+            self.rep = AU.write_audio(self.plan, self.out, self.tmp)
+        except BaseException as e:      # noqa: BLE001 - raised again where the film is put together
+            self.err = e
+
+    def result(self):
+        self.join()
+        if self.err is not None:
+            raise self.err if isinstance(self.err, SceneFault) else SceneFault("audio", repr(self.err)[:400])
+        return self.rep
+
+
+class Writer(threading.Thread):
+    """Hands drawn frames to the encoder from a thread of its own, a few frames behind the draw. A
+    frame is far larger than a pipe, so written from the draw loop each one waited for the encoder to
+    take the one before, and the rasteriser's cores stood idle while it did."""
+
+    def __init__(self, enc, depth=3):
+        super().__init__(daemon=True)
+        self.enc, self.q, self.err = enc, queue.Queue(maxsize=depth), None
+        self.start()
+
+    def run(self):
+        while True:
+            b = self.q.get()
+            if b is None:
+                return
+            if self.err is None:
+                try:
+                    self.enc.stdin.write(b)
+                except (BrokenPipeError, OSError, ValueError) as e:
+                    self.err = e
+
+    def put(self, b):
+        if self.err is not None:
+            raise SceneFault("encode", (self.enc.stderr.read() or b"").decode("utf-8", "replace")[-400:] or repr(self.err))
+        self.q.put(b)
+
+    def finish(self):
+        self.q.put(None)
+        self.join()
+
+
 def _draw(e, frames, video, tier, prog, flog=None, done0=0):
     """Draw these frames, in this order, into one encoded file. Returns the mean level of what was
     drawn, 0-255, so a black segment can be told from a dark plan."""
     plan, rt = e.plan, e.rt
     enc = encoder(video, plan.W, plan.H, plan.fps, tier)
+    out = Writer(enc)
     lum, n = 0.0, 0
     try:
         for f in frames:
@@ -142,10 +204,7 @@ def _draw(e, frames, video, tier, prog, flog=None, done0=0):
             ts = time.perf_counter()
             buf = rt.read()                                   # the GPU finishes the frame here, then hands it over
             ts = rt.tick("read", ts)
-            try:
-                enc.stdin.write(buf)
-            except (BrokenPipeError, OSError):
-                raise SceneFault("encode", (enc.stderr.read() or b"").decode("utf-8", "replace")[-400:])
+            out.put(buf)                                      # waits only when the encoder is three frames behind
             rt.tick("encode_wait", ts)
             rt.reader.release(f)
             lum += float(np.frombuffer(buf, np.uint8)[::1009].mean())
@@ -158,14 +217,39 @@ def _draw(e, frames, video, tier, prog, flog=None, done0=0):
                                        "join": [i["id"] for i in act if i["k"] == "join"],
                                        "word": sum(1 for i in act if i["k"] == "word")}, separators=(",", ":")) + "\n")
     finally:
+        out.finish()
         try:
             enc.stdin.close()
         except OSError:
             pass
     err = (enc.stderr.read() or b"").decode("utf-8", "replace")
-    if enc.wait():
-        raise SceneFault("encode", err[-400:])
+    c0 = _children_cpu()
+    if enc.wait() or out.err is not None:
+        raise SceneFault("encode", err[-400:] or repr(out.err))
+    rt.t["cpu:encode"] += _children_cpu() - c0
     return lum / max(n, 1)
+
+
+def _children_cpu():
+    """CPU seconds of the ffmpeg processes this one has reaped so far (0 where the OS does not say)."""
+    try:
+        import resource
+        r = resource.getrusage(resource.RUSAGE_CHILDREN)
+        return r.ru_utime + r.ru_stime
+    except Exception:      # noqa: BLE001
+        return 0.0
+
+
+def _cpu(rt):
+    """Where the CPU went: this process (Python and, on a software rasteriser, every pixel), the
+    encoders, and the rest of the ffmpeg children (decoders, probes, the sound)."""
+    try:
+        import resource
+        r = resource.getrusage(resource.RUSAGE_SELF)
+        enc = rt.t.get("cpu:encode", 0.0) if rt else 0.0
+        return {"draw": round(r.ru_utime + r.ru_stime, 2), "encode": round(enc, 2), "decode": round(max(_children_cpu() - enc, 0.0), 2)}
+    except Exception:      # noqa: BLE001
+        return {}
 
 
 def _dark_plan(plan, a, b):
@@ -196,8 +280,11 @@ def render_plan(plan, out, tier="final", frames=None, audio=True, cache=None, pr
     tmp = tempfile.mkdtemp(prefix="scene_", dir=os.path.dirname(os.path.abspath(out)))
     segs_log, rep = [], {}
     flog = open(out + ".frames.jsonl", "w") if frames_log else None
+    sound = None
     try:
         video = os.path.join(tmp, "v.mp4")
+        if audio is True and not partial:
+            sound = Sound(plan, os.path.join(tmp, "a.m4a"), tmp)      # mixed beside the picture, not after it
         if partial or not plan.segments:
             frames = list(range(plan.dur)) if frames is None else list(frames)
             e.start(frames)
@@ -225,6 +312,7 @@ def render_plan(plan, out, tier="final", frames=None, audio=True, cache=None, pr
             finally:
                 if e:
                     rt.reader.stop()
+                    rt.reader.join(timeout=5)                 # its decoders are closed, so their CPU is counted
                 for s in order:                               # a segment that did not make it leaves nothing behind
                     try:
                         os.remove(S.temp_path(cache, s["i"]))
@@ -243,21 +331,23 @@ def render_plan(plan, out, tier="final", frames=None, audio=True, cache=None, pr
                 AU.mux(video, audio, out)
                 rep = {"from": os.path.basename(audio)}
             else:
-                a = os.path.join(tmp, "a.m4a")
-                rep = AU.write_audio(plan, a, tmp)
-                AU.mux(video, a, out)
+                rep = sound.result()
+                AU.mux(video, sound.out, out)
         else:
             shutil.move(video, out)
     finally:
         if flog:
             flog.close()
+        if sound is not None:
+            sound.join()                                      # its files are in tmp: let it finish before tmp goes
         shutil.rmtree(tmp, ignore_errors=True)
     rd = rt.reader if rt else None
     log = dict(frames=n_frames, fps=plan.fps, size=[plan.W, plan.H], gl=rt.gl if rt else None, gl_version=rt.gl_version if rt else None,
                engine=C.ENGINE_VERSION,
                shaders=plan.doc.get("shaders"), plan=plan.sha, tier=tier, seconds=round(time.time() - t0, 2), picture_seconds=round(t_pic, 2),
-               stage_ms={k: round(1000 * v / max(rt.n[k], 1), 3) for k, v in rt.t.items()} if rt else {}, stage_frames=dict(rt.n) if rt else {},
-               decoded=rd.decoded if rd else 0, seeks=rd.seeks if rd else 0, sprites=len(plan.sprites),
+               stage_ms={k: round(1000 * v / max(rt.n[k], 1), 3) for k, v in rt.t.items() if not k.startswith("cpu:")} if rt else {},
+               stage_frames=dict(rt.n) if rt else {}, cpu_s=_cpu(rt),
+               decoded=rd.decoded if rd else 0, seeks=rd.seeks if rd else 0, seek_s=round(rd.seek_s, 2) if rd else 0, sprites=len(plan.sprites),
                segments=len(plan.segments), segments_drawn=len(segs_log), segment_log=segs_log, audio=rep,
                degraded=plan.doc.get("degraded") or [], cost_s=plan.doc.get("cost_s"), warnings=plan.warn)
     with open(out + ".log.json", "w") as f:
@@ -401,11 +491,16 @@ def main(argv=None):
     ap.add_argument("--frames-log", action="store_true")
     a = ap.parse_args(argv)
     if sys.platform.startswith("linux") and not os.environ.get("MESA_SHADER_CACHE_DIR"):
-        try:                                   # llvmpipe compiles each shader once per cache, not once per render
-            os.environ["MESA_SHADER_CACHE_DIR"] = os.path.join(a.cache or S.cache_dir(), "mesa")
-            os.makedirs(os.environ["MESA_SHADER_CACHE_DIR"], exist_ok=True)
-        except OSError:
-            pass
+        # llvmpipe compiles each shader variant once per cache, not once per render (0.1 to 0.2 s each
+        # on the box, a dozen or two a film). The cache is the machine's standing one even when the
+        # segments go to a folder of the job's own: a job's folder is new every time.
+        for d in (lambda: S.cache_dir(), lambda: a.cache):
+            try:
+                os.environ["MESA_SHADER_CACHE_DIR"] = os.path.join(d(), "mesa")
+                os.makedirs(os.environ["MESA_SHADER_CACHE_DIR"], exist_ok=True)
+                break
+            except (OSError, SceneFault, TypeError):
+                os.environ.pop("MESA_SHADER_CACHE_DIR", None)
     fault_path = (a.progress + ".fault") if a.progress else None
     prog0 = Progress(a.progress)
     try:

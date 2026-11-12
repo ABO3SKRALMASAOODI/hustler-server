@@ -13,6 +13,14 @@ no frame and no reader progress for ``stall_s`` kills it. Every failure is one e
 ticket. Nothing in this package switches itself on.
 
 The GL context comes from ``VALMERA_SCENE_GL`` (auto: EGL on Linux, the default context elsewhere).
+
+Tiers (``scene/run.py`` TIERS): ``preview``, ``final``, ``master``, and ``inter`` for a film that another
+encode follows (the product's brand finish re-encodes every engine film): nearer the drawn frames
+than ``final`` for a third of the encoder's CPU, in a file nobody keeps.
+
+On a software rasteriser (the box: llvmpipe on 4 vCPU) the same frames are drawn by fewer and smaller
+passes, and nothing waits on anything else: see ``runtime.Runtime.frame``, ``settle`` and
+``soft_sprite``, ``reader.Reader.decoder_for``, and ``run.Writer`` and ``run.Sound``.
 """
 import json
 import os
@@ -25,7 +33,7 @@ import time
 from .faults import SceneFault
 from .plan import eligible, scene_of
 
-VERSION = "scene-1"
+VERSION = "scene-2"
 WORKER = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 __all__ = ["VERSION", "SceneFault", "eligible", "scene_of", "compile_scene", "render", "stills"]
