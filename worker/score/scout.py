@@ -46,6 +46,11 @@ def user_text(idx, sess, per):
         lines.append("Customer typed: " + json.dumps(p["text"], ensure_ascii=False))
     if not sess.get("prompts"):
         lines.append("Customer typed nothing.")
+    if sess.get("ledger"):
+        # The ask ledger (score.asks) already read this request, and the film is checked against it:
+        # the Scout keeps the same asks, one per row, and adds their probes.
+        lines.append("The request was read into these asks; keep exactly these, one ask each: "
+                     + json.dumps(sess["ledger"], ensure_ascii=False))
     said = f", speech language {idx.get('language')}" if words else ", no speech"
     lines.append(f"Upload: {per['dur']:.1f} s, {per['W']}x{per['H']}, {len(per['shots'])} shot(s){said}.")
     if words:
