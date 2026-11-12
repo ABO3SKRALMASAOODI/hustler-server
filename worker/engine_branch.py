@@ -208,8 +208,11 @@ def draw(prep, worker_db, *, src_local, out_local, variant, finish, verify, sdir
         film_s = float(l1.get("dur_f") or 0) / float(l1.get("fps") or 30)
         engine_out = os.path.join(sdir, "engine.mp4")
         t1 = time.monotonic()
+        # The segment cache sits in the job's own folder: scene moves finished segments into it with a
+        # rename, which fails across devices (the box's shared cache is another mount; measured 12 Nov).
         log = scene.render(l1, sdir, engine_out, tier=ENGINE_TIER, audio=True, strict=True, stall_s=STALL_S,
-                           timeout_s=timeout_s if timeout_s is not None else 90.0 + 3.0 * film_s)
+                           timeout_s=timeout_s if timeout_s is not None else 90.0 + 3.0 * film_s,
+                           cache=os.path.join(sdir, "cache"))
         t2 = time.monotonic()
         prep.info.update(fetch_s=round(t1 - t0, 2), draw_s=round(t2 - t1, 2), film_s=round(film_s, 2), size=[w, h],
                          frames=log.get("frames"), stage_ms=log.get("stage_ms"), gl=log.get("gl"))

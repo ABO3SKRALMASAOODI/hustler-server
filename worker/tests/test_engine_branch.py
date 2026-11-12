@@ -182,6 +182,7 @@ def test_the_engine_draws_the_plan_at_the_variants_size_and_the_brand_step_finis
     l1, work, kw = scene.calls[0]
     assert l1["frame"] == [720, 1280] and l1["voices"]["a"]["px"] == pytest.approx(58 * 720 / 1080, abs=1e-3)
     assert kw["strict"] is True and kw["audio"] is True and kw["timeout_s"] > 0
+    assert kw["cache"].startswith(work)                                         # same device as the segments
     assert os.path.islink(os.path.join(work, "a", "main.mp4"))                # main is the render's own source
     assert open(os.path.join(work, "a", "bin_3.mp4"), "rb").read() == b"bin3"
     assert prep.info["draw_s"] >= 0 and "fault" not in prep.info
