@@ -73,6 +73,20 @@ def scene_of(doc):
     raise ValueError("no scene layer: expected an L1, or an EDL with one under 'scene'")
 
 
+def sized(l1, size):
+    """The same scene at another frame size of the same shape. Places are frame fractions and most
+    lengths are written at 1080 wide, so only two things are in output pixels: the frame and each
+    voice's ``px``. Raises ValueError when the shape differs: that is a different film."""
+    W, H = [int(v) for v in (l1.get("frame") or [1080, 1920])]
+    w, h = int(size[0]), int(size[1])
+    if (w, h) == (W, H):
+        return l1
+    if w % 2 or h % 2 or abs(w / h - W / H) > 0.01 * W / H:
+        raise ValueError(f"size {w}x{h} is not the shape of {W}x{H}")
+    k = w / W
+    return dict(l1, frame=[w, h], voices={n: dict(v, px=float(v.get("px", 58)) * k) for n, v in (l1.get("voices") or {}).items()})
+
+
 def _curve_names(x, out):
     if isinstance(x, dict):
         if "curve" in x:

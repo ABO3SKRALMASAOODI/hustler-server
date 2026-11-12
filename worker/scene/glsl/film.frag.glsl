@@ -3,7 +3,7 @@ in vec2 v;
 out vec4 o;
 uniform sampler2D uBg;
 uniform sampler2D uNoise;
-uniform sampler2D uHi;      // highlights, quarter size
+uniform sampler2D uHi;      // highlights, quarter size, already blurred
 uniform vec2 uFrame;
 uniform ivec2 uAt;
 uniform float uGrain;
@@ -18,8 +18,7 @@ void main() {
   vec2 uv = px / uFrame;
   vec3 c = texelFetch(uBg, ivec2(px), 0).rgb;
   if (uHal > 0.0 || uBloom > 0.0) {
-    vec2 hs = vec2(textureSize(uHi, 0));
-    vec3 hi = 0.6 * gauss(uHi, uv, hs, 3.0).rgb + 0.4 * gauss(uHi, uv, hs, 12.0).rgb;
+    vec3 hi = textureLod(uHi, uv, 0.0).rgb;      // blurred once at quarter size (hiblur), read with one tap
     if (uBloom > 0.0) c = 1.0 - (1.0 - c) * (1.0 - clamp(hi, 0.0, 1.0) * uBloom);
     if (uHal > 0.0) c += vec3(1.0, 0.32, 0.12) * luma(hi) * uHal * (1.0 - luma(c));
   }

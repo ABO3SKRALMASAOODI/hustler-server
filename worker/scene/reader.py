@@ -16,6 +16,10 @@ from .faults import SceneFault
 FF = os.environ.get("FFMPEG_BIN", "ffmpeg")
 FP = os.environ.get("FFPROBE_BIN", "ffprobe")
 MAX_PIC = 2160                               # no picture needs more than this on a 1920 frame
+# The scaler's flags, in and out. The accurate ones are the default because they are what the golden
+# colour tests pin; they also switch swscale's SIMD off, so a tier that must be fast can name others
+# (lane D measured "bicubic" on the box). One variable, so decode and encode always agree.
+SWS = os.environ.get("VALMERA_SCENE_SWS") or "lanczos+accurate_rnd+full_chroma_int+full_chroma_inp"
 _MATRIX = {"bt709": "bt709", "smpte170m": "smpte170m", "bt470bg": "bt470bg", "fcc": "fcc", "smpte240m": "smpte240m",
            "bt2020nc": "bt2020", "bt2020c": "bt2020"}
 
@@ -58,7 +62,7 @@ def read_filter(info, rate, w, h):
     """Decode to full-range RGBA with the source's matrix named, never guessed by swscale."""
     m = _MATRIX.get(info.get("matrix"), "bt709" if info["h"] >= 720 or info["w"] >= 1280 else "smpte170m")
     r = "pc" if info.get("range") == "pc" else "tv"
-    sws = "lanczos+accurate_rnd+full_chroma_int+full_chroma_inp"
+    sws = SWS
     if info.get("trc") in ("arib-std-b67", "smpte2084"):
         tin = info["trc"]
         return (f"fps={rate}:round=near,zscale=tin={tin}:min=bt2020nc:pin=bt2020:rin=limited:t=linear:npl=203,"

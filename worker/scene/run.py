@@ -89,14 +89,14 @@ class Engine:
 
 def enc_tag(tier):
     t = TIERS[tier]
-    return f"x264-{t['preset']}-crf{t['crf']}-{t['maxrate']}"
+    return f"x264-{t['preset']}-crf{t['crf']}-{t['maxrate']}-{R.SWS}"
 
 
 def encoder(out, W, H, fps, tier="final"):
     """Colour is explicit at the way out: full-range RGB to BT.709 limited, tagged."""
     t = TIERS[tier]
     vf = ("scale=in_range=pc:out_range=tv:out_color_matrix=bt709:out_h_chr_pos=0:out_v_chr_pos=128:"
-          "flags=lanczos+accurate_rnd+full_chroma_int+full_chroma_inp,format=yuv420p")
+          f"flags={R.SWS},format=yuv420p")
     cmd = [FF, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba",
            "-s", f"{W}x{H}", "-r", f"{fps}", "-i", "-", "-vf", vf,
            "-c:v", "libx264", "-preset", t["preset"], "-crf", str(t["crf"]), "-maxrate", t["maxrate"], "-bufsize", t["bufsize"],
@@ -214,7 +214,7 @@ def render_plan(plan, out, tier="final", frames=None, audio=True, cache=None, pr
             try:
                 for s in order:
                     a, b = s["f"]
-                    part = os.path.join(tmp, f"seg{s['i']:04d}.mp4")
+                    part = S.temp_path(cache, s["i"])
                     rt.src_sum, rt.src_n = 0.0, 0
                     ts = time.time()
                     mean = _draw(e, range(a, b), part, tier, prog, flog, done)
@@ -225,6 +225,11 @@ def render_plan(plan, out, tier="final", frames=None, audio=True, cache=None, pr
             finally:
                 if e:
                     rt.reader.stop()
+                for s in order:                               # a segment that did not make it leaves nothing behind
+                    try:
+                        os.remove(S.temp_path(cache, s["i"]))
+                    except OSError:
+                        pass
             prog.say("join", done, force=True)
             S.concat([paths[s["i"]] for s in plan.segments], video)
             n_frames, _ = S.count(video)
@@ -389,6 +394,7 @@ def main(argv=None):
     ap.add_argument("--no-segments", action="store_true")
     ap.add_argument("--strict", action="store_true")
     ap.add_argument("--budget", type=float)
+    ap.add_argument("--size", help="WxH: draw the same scene at this size (same shape)")
     ap.add_argument("--cost-tier", default="llvmpipe" if sys.platform.startswith("linux") else "mac")
     ap.add_argument("--cache")
     ap.add_argument("--progress")
@@ -410,8 +416,9 @@ def main(argv=None):
                 return Plan.load(a.plan, a.work)
             d = doc if drop_id is None else dict(doc, items=[i for i in doc["items"] if i.get("id") != drop_id])
             prog0.say("compile", force=True)
+            size = tuple(int(x) for x in a.size.lower().split("x")) if a.size else None
             return C.compile(d, a.work, segment=segment and not a.no_segments, strict=a.strict, budget_s=a.budget, tier=a.cost_tier,
-                             tick=lambda: prog0.say("compile", prog0.frames - 1))
+                             size=size, tick=lambda: prog0.say("compile", prog0.frames - 1))
         if a.cmd == "compile":
             p = plan_of()
             p.save(a.plan)

@@ -44,12 +44,14 @@ def stills(doc, work, frames, **kw):
 
 
 def render(doc, work, out, tier="final", audio=True, strict=False, budget_s=None, cost_tier=None, stall_s=20.0,
-           timeout_s=None, cache=None, use_cache=True, python=None, env=None, frames_log=False):
+           timeout_s=None, cache=None, use_cache=True, python=None, env=None, frames_log=False, size=None):
     """Compile, then draw in a child process. Returns the render log. Raises SceneFault.
 
     audio: True mixes the plan's own spine and sounds, a path muxes that file, False leaves it silent.
     strict: refuse to draw around a missing picture, font or glyph (what a customer film wants).
     budget_s: degrade the plan until its estimated draw time fits; never a failure.
+    size: (W, H) to draw the same scene at another size of the same shape; everything in the plan
+          that is in pixels follows, so a caller never rescales a plan by hand.
     """
     ok, why = eligible(doc)
     if not ok:
@@ -68,6 +70,8 @@ def render(doc, work, out, tier="final", audio=True, strict=False, budget_s=None
             cmd += ["--budget", str(float(budget_s))]
         if cost_tier:
             cmd += ["--cost-tier", cost_tier]
+        if size:
+            cmd += ["--size", f"{int(size[0])}x{int(size[1])}"]
         if isinstance(audio, str):
             cmd += ["--audio", audio]
         elif not audio:

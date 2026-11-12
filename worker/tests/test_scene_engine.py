@@ -1384,11 +1384,17 @@ def test_a_4k_source_is_read_no_larger_than_a_frame_needs(tmp_path):
     p = str(tmp_path / "4k.mp4")
     big = cv2.resize(barcode(5), (2160, 3840), interpolation=cv2.INTER_NEAREST)
     encode(p, (big for _ in range(4)), 2160, 3840, crf=20)
-    e = Engine(film([{"id": "s", "k": "shot", "f": [0, 3], "pic": "main", "src": [0.0, 0.1], "crop": [0, 0, 1, 1]}], dur=3,
-                    assets={"main": {"kind": "video", "path": p}}, frame=(360, 640)), "/")
-    assert max(e.plan.assets["main"]["w"], e.plan.assets["main"]["h"]) == 2160
+    shot = {"id": "s", "k": "shot", "f": [0, 3], "pic": "main", "src": [0.0, 0.1], "crop": [0, 0, 1, 1]}
+    assets = {"main": {"kind": "video", "path": p}}
+    e = Engine(film([shot], dur=3, assets=assets, frame=(360, 640)), "/")
+    a = e.plan.assets["main"]
+    assert 640 <= a["h"] <= 644 and 360 <= a["w"] <= 364, "a small frame reads a small picture: one texel a pixel at the tightest crop"
     assert read_code(e.stills([1])[1]) == 5
     e.close()
+    tight = SC.compile(film([dict(shot, crop=[[0, 0, 1, 1], [0.25, 0.25, 0.5, 0.5], [0, 0, 1, 1]])], dur=3, assets=assets, frame=(360, 640)), "/")
+    assert tight.assets["main"]["h"] == 2160, "a push to a quarter of the picture asks for four times the texels, and 2160 is the most ever read"
+    full = SC.compile(film([shot], dur=3, assets=assets), "/")
+    assert 1920 <= full.assets["main"]["h"] <= 1924, "a full frame at 1080 wide reads it at the frame's own size"
 
 
 def test_a_cut_off_upload_holds_its_last_picture_and_a_broken_one_faults_by_name(tmp_path, src):
@@ -1432,3 +1438,76 @@ def test_a_shader_that_does_not_compile_faults_before_the_first_frame(monkeypatc
     with pytest.raises(SceneFault) as ex:
         Engine(film([plate(2)], dur=2), "/")
     assert ex.value.code == "gl" and "shader out" in ex.value.detail
+
+
+# ---- the box tier: what lane D measured on llvmpipe, kept true on every runtime
+
+@pytest.mark.parametrize("op", ["blit_card", "blit_word", "finish", "flash", "join_weave", "treat_line", "plate", "src_fit"])
+def test_folded_gates_draw_the_same_pixels(pics, op, monkeypatch):
+    """On a software rasteriser the uniforms that gate heavy branches are compiled in as constants.
+    The picture must not know: the folded programs draw what the plain ones draw."""
+    l1 = GOLDEN_OPS[op](pics)
+    monkeypatch.setenv("VALMERA_SCENE_FOLD", "0")
+    plain = Engine(l1, "/")
+    a = plain.stills([1])[1][..., :3]
+    assert not plain.rt.folded
+    plain.close()
+    monkeypatch.setenv("VALMERA_SCENE_FOLD", "1")
+    folded = Engine(l1, "/")
+    b = folded.stills([1])[1][..., :3]
+    variants = sum(len(p.cache) for p, _ in folded.rt.P.values() if hasattr(p, "cache"))
+    assert folded.rt.folded and variants >= 1
+    folded.close()
+    assert psnr(a, b) > 60, f"{op}: {psnr(a, b):.1f} dB"
+
+
+def test_the_fold_is_automatic_on_a_software_rasteriser(monkeypatch):
+    import scene.runtime as RT
+    monkeypatch.delenv("VALMERA_SCENE_FOLD", raising=False)
+    assert RT.fold_wanted("llvmpipe (LLVM 15.0.6, 256 bits)") and not RT.fold_wanted("Apple M5 Pro")
+    monkeypatch.setenv("VALMERA_SCENE_FOLD", "0")
+    assert not RT.fold_wanted("llvmpipe (LLVM 15.0.6, 256 bits)")
+
+
+def test_the_same_scene_at_another_size(pics):
+    v = {"a": {"font": "InterDisplay-Bold.ttf", "px": 116, "track": -3}}
+    wd = {"id": "w", "k": "word", "f": [0, 2], "t": "Valmera", "v": "a", "x": 0.2, "y": 0.5, "ink": "#FFFFFF", "stroke": {"w": 6, "c": "#000000"}}
+    bg = {"id": "s", "k": "shot", "f": [0, 2], "pic": "plate", "plate": {"c0": "#404040", "c1": "#404040"}}
+    l1 = film([bg, wd], dur=2, voices=v, film_={"dither": 0.0})
+    big = stills(l1, [0])[0][..., 0]
+    plan = SC.compile(l1, "/", size=(540, 960), segment=False)
+    assert (plan.W, plan.H) == (540, 960) and plan.voices["a"]["px"] == 58.0
+    small = RUN.stills(plan, [0])[0][..., 0]
+    by, bx = np.where(big > 200)
+    sy, sx = np.where(small > 200)
+    assert abs(bx.min() / 2 - sx.min()) <= 1.5 and abs(bx.max() / 2 - sx.max()) <= 1.5 and abs(by.min() / 2 - sy.min()) <= 1.5
+    assert abs(len(by) / 4 - len(sy)) < 0.06 * len(sy), "the same word, half the size, in the same place"
+    half = cv2.resize(big.astype(np.float32), (540, 960), interpolation=cv2.INTER_AREA)
+    assert psnr(half, small) > 24, "and the same picture"
+    with pytest.raises(SceneFault) as ex:
+        SC.compile(l1, "/", size=(960, 540))
+    assert ex.value.code == "ineligible" and "shape" in ex.value.detail
+
+
+def test_a_segment_moves_into_a_cache_on_another_filesystem(tmp_path, pics, monkeypatch):
+    """The box keeps its cache on another mount than the job folder. Segments are written inside the
+    cache, and if a rename still cannot cross, the file is copied beside its place and renamed there."""
+    l1, _ = _talky(pics, n_shots=3)
+    cache = str(tmp_path / "cache")
+    seen = []
+    real = os.replace
+
+    def exdev(a, b):
+        seen.append((a, b))
+        if len(seen) == 1:
+            raise OSError(18, "Invalid cross-device link")
+        return real(a, b)
+    plan = SC.compile(l1, "/")
+    monkeypatch.setattr(RUN.S.os, "replace", exdev)
+    log = RUN.render_plan(plan, str(tmp_path / "f.mp4"), tier="final", audio=False, cache=cache)
+    monkeypatch.setattr(RUN.S.os, "replace", real)
+    assert log["frames"] == l1["dur_f"] and log["segments_drawn"] == len(plan.segments)
+    assert seen[0][0].startswith(os.path.join(cache, "tmp")), "a segment is written inside the cache it will live in"
+    assert os.listdir(os.path.join(cache, "tmp")) == [], "and nothing is left half way"
+    again = RUN.render_plan(SC.compile(l1, "/"), str(tmp_path / "g.mp4"), tier="final", audio=False, cache=cache)
+    assert again["segments_drawn"] == 0

@@ -25,7 +25,20 @@ HEADER = {"core": "#version 330 core\n",
           "es": "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n"}
 PROGRAMS = {"pic": ("common", "easu", "picture", "pic.frag"), "join": ("common", "easu", "picture", "join.frag"),
             "shadow": ("shadow.frag",), "flash": ("common", "flash.frag"), "film": ("common", "film.frag"),
-            "word": ("common", "word.frag"), "out": ("out.frag",), "bright": ("bright.frag",)}
+            "word": ("common", "word.frag"), "out": ("out.frag",), "bright": ("bright.frag",), "hiblur": ("common", "hiblur.frag")}
+# Uniforms that gate heavy branches. A software rasteriser runs both sides of every branch on a
+# uniform, so on llvmpipe they are folded to constants: one compiled variant per distinct set of
+# gates, cached (lane D measured the film pass at 75 ms a frame before and 9 ms after).
+#   int      always folded          float0  folded when 0.0
+#   vec2y0   folded when .y is 0    zero    folded when every component is 0
+FOLD = {"pic": {"uPlate": "int", "uEdge": "int", "uAlpha": "int", "uUseMatte": "int", "uTreat": "int", "uTreatHasC": "int",
+                "uBlur": "float0", "uSharp": "float0", "uBorder": "float0", "uPlateGrain": "float0"},
+        "join": {"uJoin": "int", "uEdge": "int", "uAlpha": "int", "uTreat": "int", "uTreatHasC": "int", "uBlur": "float0", "uSharp": "float0"},
+        "flash": {"uMode": "int", "uHasC": "int"},
+        "film": {"uGrain": "float0", "uVig": "float0", "uHal": "float0", "uBloom": "float0", "uMesh": "vec2y0", "uRaster": "vec2y0"},
+        "word": {"uBlur": "float0", "uBlend": "int", "uFade": "int", "uFill": "int", "uHard": "int", "uShadow": "float0", "uGlow": "float0",
+                 "uFx": "zero"}}
+SOFTWARE = ("llvmpipe", "softpipe", "swiftshader", "swrast")
 STRETCH = {"left": 0, "right": 1, "up": 2, "down": 3}
 
 
@@ -50,6 +63,77 @@ def _src(name):
     return open(os.path.join(GLSL, name + ".glsl"), encoding="utf-8").read()
 
 
+def fold_wanted(renderer):
+    """VALMERA_SCENE_FOLD: 1, 0, or unset for auto (on when the GL renderer is a software rasteriser)."""
+    v = os.environ.get("VALMERA_SCENE_FOLD", "auto")
+    if v in ("0", "1"):
+        return v == "1"
+    return any(k in str(renderer).lower() for k in SOFTWARE)
+
+
+class Folded:
+    """A program whose gating uniforms become constants at draw time. Uniform writes are recorded;
+    the draw picks (or compiles once) the variant for the recorded gates and replays the rest on it.
+    It stands where a (program, vertex array) pair stands, so the draw code does not know."""
+
+    class _Slot:
+        def __init__(self, owner, k):
+            self.owner, self.k = owner, k
+
+        @property
+        def value(self):
+            return self.owner.vals.get(self.k)
+
+        @value.setter
+        def value(self, v):
+            self.owner.vals[self.k] = v
+
+    class _Vao:
+        def __init__(self, owner):
+            self.owner = owner
+
+        def render(self, mode):
+            self.owner.resolve().render(mode)
+
+    def __init__(self, name, base, build):
+        self.name, self.build = name, build
+        self.names = set(base[0])
+        self.vals, self.cache = {}, {}
+
+    def pair(self):
+        return self, Folded._Vao(self)
+
+    def __contains__(self, k):
+        return k in self.names
+
+    def __getitem__(self, k):
+        return Folded._Slot(self, k)
+
+    def resolve(self):
+        consts = {}
+        for u, rule in FOLD[self.name].items():
+            if u not in self.vals:
+                continue
+            v = self.vals[u]
+            if rule == "int":
+                consts[u] = ("int", str(int(v)))
+            elif rule == "float0" and float(v) == 0.0:
+                consts[u] = ("float", "0.0")
+            elif rule == "vec2y0" and float(v[1]) == 0.0:
+                consts[u] = ("vec2", f"vec2({float(v[0])!r}, 0.0)")
+            elif rule == "zero" and not any(float(c) for c in v):
+                consts[u] = (f"vec{len(v)}", f"vec{len(v)}(0.0)")
+        key = tuple(sorted((k, c[1]) for k, c in consts.items()))
+        pv = self.cache.get(key)
+        if pv is None:
+            pv = self.cache[key] = self.build(self.name, consts)
+        p, vao = pv
+        for k, v in self.vals.items():
+            if k in p:
+                p[k].value = v
+        return vao
+
+
 class Runtime:
     def __init__(self, plan, ctx=None):
         import moderngl
@@ -70,6 +154,23 @@ class Runtime:
             except Exception as e:      # noqa: BLE001
                 raise SceneFault("gl", f"shader {name} does not compile on {self.gl}: {str(e)[:600]}")
             self.P[name] = (p, ctx.simple_vertex_array(p, self.vbo, "p"))
+        self.folded = fold_wanted(self.gl)
+        if self.folded:
+            import re
+
+            def build(name, consts):
+                src = "".join(_src(x) for x in PROGRAMS[name])
+                for u, (ty, val) in consts.items():
+                    src, n = re.subn(r"uniform\s+" + ty + r"\s+" + u + r"\s*;", f"const {ty} {u} = {val};", src)
+                    if n != 1:
+                        raise SceneFault("gl", f"shader {name}: cannot fold {u}")
+                try:
+                    p = ctx.program(vertex_shader=vs, fragment_shader=head + src)
+                except Exception as e:      # noqa: BLE001
+                    raise SceneFault("gl", f"shader {name} with {sorted(consts)} folded does not compile on {self.gl}: {str(e)[:600]}")
+                return p, ctx.simple_vertex_array(p, self.vbo, "p")
+            for name in FOLD:
+                self.P[name] = Folded(name, self.P[name], build).pair()
         size = (self.W, self.H)
 
         def target(dtype, mips=False):
@@ -87,6 +188,10 @@ class Runtime:
             self.hi.repeat_x = self.hi.repeat_y = False
             self.hi.build_mipmaps()
             self.hi_fb = ctx.framebuffer([self.hi])
+            self.hi2 = ctx.texture(self.hi.size, 4, dtype="f2")           # the same field, blurred
+            self.hi2.repeat_x = self.hi2.repeat_y = False
+            self.hi2.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            self.hi2_fb = ctx.framebuffer([self.hi2])
         except Exception as e:      # noqa: BLE001
             raise SceneFault("gl", f"no float render target on {self.gl}: {e}")
         rng = np.random.RandomState(plan.seed ^ 0x5EED)
@@ -478,10 +583,11 @@ class Runtime:
         pg = self.plan.pages[spr["page"]]
         stroke = it.get("stroke") or {}
         from .type_atlas import SPREAD
+        fx_w, fx_g = float(stroke.get("w", 0)) * W / 1080.0, float(A(it.get("grow", 0) or 0, f, lo)) * W / 1080.0
         self.U(p, uW=0, uBg=1, uAtlas=(pg.shape[1], pg.shape[0]), uSpr=(spr["ax"], spr["ay"], spr["aw"], spr["ah"]), uLod=lod,
                uInk=hex3(it.get("ink")), uOp=op, uShadow=float((v.get("shadow") or {}).get("a", 0)),
                uGlow=float((v.get("glow") or {}).get("a", 0)), uBlur=bsig, uBlend=blend,
-               uFx=(float(stroke.get("w", 0)) * W / 1080.0, float(A(it.get("grow", 0) or 0, f, lo)) * W / 1080.0, SPREAD * ss, ss / max(s_now, 1e-3)),
+               uFx=(fx_w, fx_g, SPREAD * ss, ss / max(s_now, 1e-3)) if (fx_w or fx_g) else (0.0, 0.0, 0.0, 0.0),
                uStrokeC=hex3(stroke.get("c"), (0.0, 0.0, 0.0)))
         self.rect_uniforms(p, rx, ry, rw, rh)
         self.U(p, uFade=0)
@@ -515,8 +621,13 @@ class Runtime:
             self.U(pb, uBg=0, uRect=(0, 0, self.W // 4, self.H // 4), uFrame=(self.W // 4, self.H // 4))
             vb.render(self.mgl.TRIANGLE_STRIP)
             self.hi.build_mipmaps()
+            ph, vh = self.P["hiblur"]                      # blur the field once, at quarter size
+            self.hi2_fb.use()
+            self.hi.use(0)
+            self.U(ph, uHi=0, uRect=(0, 0, self.W // 4, self.H // 4), uFrame=(self.W // 4, self.H // 4))
+            vh.render(self.mgl.TRIANGLE_STRIP)
             self.comp_fb.use()
-        self.hi.use(2)
+        self.hi2.use(2)
         p, vao = self.P["film"]
         self.bg.use(0)
         self.noise_tex.use(1)

@@ -104,7 +104,7 @@ def stamp(d):
         if under:
             pics.add("matte")
         assets = {k: {x: v.get(x) for x in ("sha", "rate", "w", "h", "kind")} for k, v in d["assets"].items() if k in pics}
-        blob = canon({"engine": d["engine"], "shaders": d["shaders"], "fps": d["fps"], "frame": d["frame"], "seed": d["seed"],
+        blob = canon({"engine": d["engine"], "shaders": d["shaders"], "sws": d.get("sws"), "fps": d["fps"], "frame": d["frame"], "seed": d["seed"],
                       "film": d["film"], "n": b - a, "key": s["key"], "items": its, "assets": assets,
                       "voices": {k: d["voices"].get(k) for k in sorted(v for v in voices if v)}, "masks": sorted(masks)})
         s["sha"] = hashlib.sha256(blob.encode()).hexdigest()[:32]
@@ -151,10 +151,25 @@ def have(path):
     return False
 
 
+def temp_path(cache, i):
+    """Where a segment is written before it is checked: inside the cache, so moving it into place
+    is a rename on one filesystem. (A job folder on another mount made that move fail on the box.)"""
+    d = os.path.join(cache, "tmp")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"{os.getpid()}_{i:04d}.mp4")
+
+
 def keep(tmp, path):
     """Move a verified segment into the cache. Atomic, so a killed render leaves whole files only."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    os.replace(tmp, path)
+    try:
+        os.replace(tmp, path)
+    except OSError:                         # another filesystem after all: copy beside the target, then rename
+        import shutil
+        part = path + f".{os.getpid()}.part"
+        shutil.copyfile(tmp, part)
+        os.replace(part, path)
+        os.remove(tmp)
 
 
 def sweep(cache=None, cap=CAP_BYTES, max_age_s=MAX_AGE_S, now=None):
@@ -171,6 +186,14 @@ def sweep(cache=None, cap=CAP_BYTES, max_age_s=MAX_AGE_S, now=None):
                 continue
             files.append((st.st_mtime, st.st_size, p))
     files.sort()
+    tmp = os.path.join(cache or cache_dir(), "tmp")
+    for f in (os.listdir(tmp) if os.path.isdir(tmp) else []):          # what a killed render left half written
+        p = os.path.join(tmp, f)
+        try:
+            if now - os.stat(p).st_mtime > 3600:
+                os.remove(p)
+        except OSError:
+            pass
     total, gone = sum(s for _, s, _ in files), 0
     for m, size, p in files:
         if now - m > max_age_s or total > cap:

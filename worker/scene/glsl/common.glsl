@@ -54,15 +54,22 @@ vec4 bspline(sampler2D tex, vec2 uv, vec2 size, float lod) {
 // A true gaussian of sigma sig texels: 32 taps on a golden-angle spiral, with radii drawn from the
 // gaussian's own distribution, so all taps weigh the same and no grid can form. Each tap reads a mip
 // about a third of sigma wide, so the taps overlap. A held blurred plate stays smooth at any radius.
+// The taps are constants: (cos, sin)(i * 2.39996323) * sqrt(-2 ln(1 - (i + .5) / 32 * .985)), so a software
+// rasteriser pays no log, root or sine per tap.
+const vec2 GTAP[32] = vec2[32](
+  vec2(0.1761266, 0.0000000), vec2(-0.2267257, 0.2076993), vec2(0.0349867, -0.3986558), vec2(0.2905146, 0.3789249),
+  vec2(-0.5377263, -0.0951162), vec2(0.5139056, -0.3269047), vec2(-0.1734659, 0.6452844), vec2(-0.3339471, -0.6429948),
+  vec2(0.7316157, 0.2671849), vec2(-0.7688280, 0.3173610), vec2(0.3745149, -0.8003167), vec2(0.2797725, 0.8919588),
+  vec2(-0.8527946, -0.4942119), vec2(1.0122421, -0.2225386), vec2(-0.6253765, 0.8895338), vec2(-0.1463424, -1.1293139),
+  vec2(0.9105774, 0.7674356), vec2(-1.2428395, 0.0513953), vec2(0.9202228, -0.9157446), vec2(-0.0625507, 1.3527162),
+  vec2(-0.9047398, -1.0841807), vec2(1.4593366, 0.1963517), vec2(-1.2607776, 0.8772162), vec2(0.3518603, -1.5640544),
+  vec2(0.8328323, 1.4534034), vec2(-1.6702060, -0.5328413), vec2(1.6695498, -0.7713743), vec2(-0.7473953, 1.7858628),
+  vec2(-0.6932462, -1.9274012), vec2(1.9338812, 1.0163938), vec2(-2.2858434, 0.6025410), vec2(1.4296176, -2.2233838));
 vec4 gauss(sampler2D tex, vec2 uv, vec2 size, float sig) {
   float lod = max(log2(max(sig, 1.0)) - 1.6, 0.0);
+  vec2 st = sig / size;
   vec4 r = vec4(0.0);
-  for (int i = 0; i < 32; i++) {
-    float k = (float(i) + 0.5) / 32.0;
-    float rad = sqrt(-2.0 * log(1.0 - k * 0.985)) * sig;
-    float th = float(i) * 2.39996323;
-    r += textureLod(tex, uv + vec2(cos(th), sin(th)) * rad / size, lod);
-  }
+  for (int i = 0; i < 32; i++) r += textureLod(tex, uv + GTAP[i] * st, lod);
   return r / 32.0;
 }
 

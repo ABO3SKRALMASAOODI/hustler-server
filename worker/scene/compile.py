@@ -15,7 +15,7 @@ import numpy as np
 from . import bake, reader, segments
 from . import type_atlas as TA
 from .faults import SceneFault
-from .plan import ANIM, ANIM_RECT, KINDS, PLAN_VERSION, Plan, canon, eligible, fingerprint, scene_of
+from .plan import ANIM, ANIM_RECT, KINDS, PLAN_VERSION, Plan, canon, eligible, fingerprint, scene_of, sized
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE_VERSION = "scene-1"
@@ -71,6 +71,43 @@ def _rates(doc):
             real = (q["f"][1] - q["f"][0]) / fps
             if t1 != t0 and abs(t1 - t0) / max(real, 1e-6) < 0.75:
                 a["rate"] = max(a["rate"], min(round(a.get("fps", fps)), 120))
+
+
+def _need(doc):
+    """Read each video no larger than the film needs. For every use of a source, how many of its
+    texels fall on one output pixel at the tightest crop; where that is more than one, the reader
+    scales it down so the tightest use is one to one, and wider uses still minify on the GPU. A 4K
+    upload in a 720 preview is then decoded, scaled and uploaded at a ninth of the bytes, with
+    nothing lost that the frame could show."""
+    import math
+    W, H = doc["frame"]
+    need = {}
+    for it in doc["items"]:
+        refs = []
+        if it["k"] in ("shot", "join"):
+            refs.append((it.get("pic"), W, H, it.get("crop")))
+        elif it["k"] == "card":
+            sc = it.get("s", 1)
+            smax = max(sc) if isinstance(sc, list) else float(sc)
+            refs.append((it.get("pic"), float(it.get("w", 0.5)) * W * smax, float(it.get("h", 0.5)) * H * smax, it.get("crop")))
+        elif it["k"] == "word" and isinstance(it.get("fill"), dict) and it["fill"].get("pic"):
+            refs.append((it["fill"]["pic"], W, H, it["fill"].get("crop")))
+        for aid, ow, oh, crop in refs:
+            a = doc["assets"].get(aid)
+            if not a or a.get("kind") != "video":
+                continue
+            nw, nh = a["w"], a["h"]
+            for c in ([None] if crop is None else (crop if isinstance(crop[0], list) else [crop])):
+                if c is None:                                   # the default crop: centred cover
+                    ta, ra = nw / nh, ow / max(oh, 1e-6)
+                    cw, ch = (ra / ta, 1.0) if ta > ra else (1.0, ta / ra)
+                else:
+                    cw, ch = max(c[2] - c[0], 1e-3), max(c[3] - c[1], 1e-3)
+                need[aid] = max(need.get(aid, 0.0), ow / (cw * nw), oh / (ch * nh))
+    for aid, k in need.items():
+        a = doc["assets"][aid]
+        if k < 1.0:
+            a["w"], a["h"] = max(int(math.ceil(a["w"] * k / 2)) * 2, 2), max(int(math.ceil(a["h"] * k / 2)) * 2, 2)
 
 
 def _type(doc, warn, tick=None):
@@ -200,15 +237,21 @@ def degrade(doc, step):
 
 # ------------------------------------------------------------------ compile
 
-def compile(doc, work, budget_s=None, tier="mac", segment=True, strict=False, tick=None):   # noqa: A001
+def compile(doc, work, budget_s=None, tier="mac", segment=True, strict=False, tick=None, size=None):   # noqa: A001
     """EDL plus scene to a Plan. ``strict`` raises SceneFault where a lenient compile would draw
-    around a hole and say so in ``plan.warn``. ``budget_s`` degrades, never fails."""
+    around a hole and say so in ``plan.warn``. ``budget_s`` degrades, never fails. ``size`` draws
+    the same scene at another frame size of the same shape."""
     ok, why = eligible(doc)
     if not ok:
         raise SceneFault("ineligible", "; ".join(why[:6]), reasons=why)
     l1 = scene_of(doc)
+    if size:
+        try:
+            l1 = sized(l1, size)
+        except ValueError as e:
+            raise SceneFault("ineligible", str(e))
     warn = []
-    d = {"plan": PLAN_VERSION, "engine": ENGINE_VERSION, "shaders": shaders_sha(), "sid": l1.get("sid"), "seed": int(l1.get("seed") or 0),
+    d = {"plan": PLAN_VERSION, "engine": ENGINE_VERSION, "shaders": shaders_sha(), "sws": reader.SWS, "sid": l1.get("sid"), "seed": int(l1.get("seed") or 0),
          "fps": float(l1.get("fps") or 30), "frame": [int(x) for x in (l1.get("frame") or [1080, 1920])], "dur_f": int(l1["dur_f"]),
          "film": copy.deepcopy(l1.get("film") or {}), "voices": copy.deepcopy(l1.get("voices") or {}),
          "spine": copy.deepcopy(l1.get("spine") or []), "sound": copy.deepcopy(l1.get("sound") or [])}
@@ -238,6 +281,7 @@ def compile(doc, work, budget_s=None, tier="mac", segment=True, strict=False, ti
         _bake_item(it, warn)
         if it["k"] in ("shot", "card", "join") and it.get("pic") not in (None, "plate") and it["pic"] not in d["assets"]:
             warn.append(f"asset missing for {it['id']}: {it['pic']}")
+    _need(d)
     pages, masks = _type(d, warn, tick)
     steps = []
     plan = None
@@ -263,7 +307,7 @@ def compile(doc, work, budget_s=None, tier="mac", segment=True, strict=False, ti
                 r.append([n, n])
     d["pull"] = {k: v for k, v in sorted(pull.items())}
     d["warnings"] = warn
-    head = {k: d[k] for k in ("plan", "engine", "shaders", "seed", "fps", "frame", "dur_f", "film", "voices", "items", "spine", "sound")}
+    head = {k: d[k] for k in ("plan", "engine", "shaders", "sws", "seed", "fps", "frame", "dur_f", "film", "voices", "items", "spine", "sound")}
     head["assets"] = {k: {x: y for x, y in a.items() if x != "abs"} for k, a in d["assets"].items()}
     d["sha"] = hashlib.sha256(canon(head).encode()).hexdigest()[:24]
     if segment:
