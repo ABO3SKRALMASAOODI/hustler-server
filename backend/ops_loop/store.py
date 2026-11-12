@@ -1043,8 +1043,14 @@ def release_fixing(cur, ticket_id, expected_updated_at, note, severity=None,
 
 def ticket_projects(cur, ticket):
     """The projects a ticket is about: its failures and its linked reviews."""
-    found = {h.get("project") for h in (ticket.get("history") or [])
-             if isinstance(h, dict) and h.get("event") == "failure"}
+    found = set()
+    for h in ticket.get("history") or []:
+        if not isinstance(h, dict):
+            continue
+        if h.get("event") == "failure":
+            found.add(h.get("project"))
+        elif h.get("from_ticket") is not None:  # a gap holds its cause's
+            found.update(h.get("projects") or [])
     cur.execute("""SELECT r.project_id FROM ticket_reviews tr
                      JOIN session_reviews r ON r.id = tr.review_id
                     WHERE tr.ticket_id = %s""", (ticket["id"],))
@@ -1065,7 +1071,86 @@ def is_quality(ticket):
     return not key.startswith(AUTO_PREFIX) or key.startswith(QUALITY_KEYS)
 
 
-def check_replay(cur, ticket, replay):
+def is_rating(ticket):
+    """Filed by the score itself (a rating below the bar, or a result that
+    changed nothing): there is no cause apart from the film to prove gone."""
+    return (ticket.get("cause_key") or "").startswith(QUALITY_KEYS)
+
+
+# ── A proven cause closes; the film's gap is its own ticket (12 Nov) ─────
+# #386 and #387 had their cause fixed, live and proven by a replay a session
+# that made no fix rated, with no failure since and nobody stuck, yet stayed
+# open P0s for 5 days because the replay's WHOLE film rated under 10. A Fixer
+# re-picked each one every 24 h and handed it back a minute later. The cause
+# closes; the gap moves to a P1 quality ticket linked to it, whose bar is still
+# 10 on rubric v3, so nothing is lost and the bar still holds where it belongs.
+GAP_PREFIX = QUALITY_PREFIX + "after-"   # auto-quality-after-<ticket id>
+GAP_SEVERITY = "P1"
+
+
+def _episode_start(history):
+    """When the current episode began: the latest opening or recurrence."""
+    starts = [_event_at(h) for h in history or [] if isinstance(h, dict)
+              and h.get("event") in ("opened", "recurred", "reopened")]
+    return max((a for a in starts if a), default=None)
+
+
+def live_at(ticket):
+    """When this episode's latest fix went live (ops_review.py live), or None."""
+    history = ticket.get("history") or []
+    start = _episode_start(history)
+    lives = [_event_at(h) for h in history if isinstance(h, dict)
+             and h.get("event") == "live"]
+    return max((a for a in lives if a and (start is None or a >= start)),
+               default=None)
+
+
+def check_cause_quiet(ticket):
+    """The cause is proven gone in production too: its fix is recorded live
+    and no customer met it after that (no failure filed, no session attached:
+    last_seen is both), so nobody is stuck on it."""
+    live = live_at(ticket)
+    if live is None:
+        raise StoreError(
+            f"ticket {ticket['id']} has no fix recorded live in this episode: "
+            "a proven cause needs `ops_review.py live --ticket N --sha S` "
+            "first, so 'no failure since' can be measured")
+    after = sorted(a for a in (_event_at(h) for h in ticket.get("history") or []
+                               if isinstance(h, dict)
+                               and h.get("event") == "failure")
+                   if a and a > live)
+    seen = ticket.get("last_seen")
+    if seen is not None and not getattr(seen, "tzinfo", None):
+        seen = seen.replace(tzinfo=timezone.utc)
+    if after or (seen is not None and seen > live):
+        when = after[0] if after else seen
+        raise StoreError(
+            f"a customer met this cause at {when:%Y-%m-%d %H:%M} UTC, after "
+            f"its fix went live at {live:%Y-%m-%d %H:%M} UTC: the cause is "
+            "not proven gone, the ticket stays open")
+    return live
+
+
+def _check_rater(replay):
+    rated_by = str(replay.get("rated_by") or "")
+    if not rated_by.startswith(RATER_PREFIXES):
+        raise StoreError("--rated-by must name the Reviewer session, Claude "
+                         "Opus or above (RUBRIC_V3.md)")
+    if rated_by == str(replay.get("fixer") or ""):
+        raise StoreError("a fixer never rates its own fix (AGENTS.md)")
+
+
+def _rated_below(replay):
+    """The replay's rubric-v3 score when it is under the bar, else None."""
+    try:
+        exact = float(replay.get("score_exact"))
+    except (TypeError, ValueError):
+        return None
+    return exact if replay.get("rubric") == RUBRIC and exact < QUALITY_BAR \
+        else None
+
+
+def check_replay(cur, ticket, replay, quality_gap=False):
     """The proof a `fixed` needs (AGENTS.md): that exact request, on a copy,
     through the product, reaching the bar. `replay` is what ops_review.py read
     from the run on disk: session, run, state, failures, and for a quality
@@ -1092,7 +1177,8 @@ def check_replay(cur, ticket, replay):
                          f"({', '.join(map(str, replay['failures']))[:200]}): "
                          "the ticket stays open")
     out = {k: replay.get(k) for k in ("run", "session", "be_sha", "fe_sha",
-                                      "score_exact", "tier", "rated_by")
+                                      "score_exact", "rubric", "tier",
+                                      "rated_by")
            if replay.get(k) is not None}
     if not is_quality(ticket):
         return out
@@ -1103,23 +1189,37 @@ def check_replay(cur, ticket, replay):
                          f"closes at {QUALITY_BAR} on rubric {RUBRIC}, rated by "
                          "a session that did not make the fix") from None
     if replay.get("rubric") != RUBRIC or exact < QUALITY_BAR:
-        raise StoreError(f"replay {session} scored {exact} on rubric "
-                         f"{replay.get('rubric')}: below the bar of "
-                         f"{QUALITY_BAR} the ticket stays open, with the score "
-                         "in its note")
-    rated_by = str(replay.get("rated_by") or "")
-    if not rated_by.startswith(RATER_PREFIXES):
-        raise StoreError("--rated-by must name the Reviewer session, Claude "
-                         "Opus or above (RUBRIC_V3.md)")
-    if rated_by == str(replay.get("fixer") or ""):
-        raise StoreError("a fixer never rates its own fix (AGENTS.md)")
+        if not quality_gap or replay.get("rubric") != RUBRIC:
+            hint = "" if is_rating(ticket) else (
+                ". If the replay proves this ticket's own cause gone and only "
+                "the film falls short, close with --quality-gap: the gap "
+                "becomes its own P1 quality ticket at the same bar")
+            raise StoreError(f"replay {session} scored {exact} on rubric "
+                             f"{replay.get('rubric')}: below the bar of "
+                             f"{QUALITY_BAR} the ticket stays open, with the "
+                             f"score in its note{hint}")
+        if is_rating(ticket):
+            raise StoreError(f"ticket {ticket['id']} is the film's score "
+                             "itself: it has no cause apart from the film, so "
+                             f"it closes only at {QUALITY_BAR}")
+        _check_rater(replay)        # proven by a session that made no fix
+        check_cause_quiet(ticket)
+        out["quality_gap"] = True
+        return out
+    _check_rater(replay)
     return out
 
 
 def close(cur, ticket_id, status, root_cause=None, fix_sha=None,
-          regression_check=None, reason=None, replay=None):
+          regression_check=None, reason=None, replay=None, quality_gap=False,
+          quality_ticket=None):
     """fixed: root_cause + fix_sha + regression_check and a replay on a copy
-    that reached the bar (check_replay). wont_fix: only an owner decision,
+    that reached the bar (check_replay). `quality_gap`: the replay proves this
+    ticket's cause gone (finished, no failure, rated by a session that made no
+    fix, no customer met the cause since its fix went live) and only the whole
+    film is short of 10: it closes fixed and the gap is carried to its own P1
+    quality ticket (carry_gap), new or `quality_ticket`. Any fixed close whose
+    replay rated under the bar carries its gap the same way. wont_fix: only an owner decision,
     with the reason saying which; nothing else is closed without a fix
     (AGENTS.md; owner, 6 Nov 2026: nothing is closed as device-side, noise,
     expected or "the customer recovered alone")."""
@@ -1133,6 +1233,7 @@ def close(cur, ticket_id, status, root_cause=None, fix_sha=None,
     if t["status"] in CLOSED:
         raise StoreError(f"ticket {ticket_id} is already {t['status']}; "
                          "reopen it first")
+    proof, gap_into = {}, None
     if status == "fixed":
         root_cause = _clean(root_cause, 3000, "root_cause", required=True)
         fix_sha = _clean(fix_sha, 80, "fix_sha", required=True)
@@ -1143,7 +1244,8 @@ def close(cur, ticket_id, status, root_cause=None, fix_sha=None,
                              "with fe: (e.g. abc1234,fe:def5678)")
         regression_check = _clean(regression_check, 500, "regression_check",
                                   required=True)
-        proof = check_replay(cur, dict(t), replay)
+        proof = check_replay(cur, dict(t), replay, quality_gap=quality_gap)
+        gap_into = _gap_target(cur, dict(t), quality_ticket)
         _w(cur, """UPDATE tickets SET status = 'fixed', root_cause = %s,
                        fix_sha = %s, regression_check = %s,
                        wont_fix_reason = NULL, closed_at = NOW(),
@@ -1173,5 +1275,103 @@ def close(cur, ticket_id, status, root_cause=None, fix_sha=None,
                    WHERE id = %s""",
            (reason, _clean(root_cause, 3000, "root_cause"),
             _history("wont_fix", reason=reason), int(ticket_id)))
+    gap = None
+    if status == "fixed" and (proof.get("quality_gap") or gap_into
+                              or _rated_below(proof) is not None):
+        gap = carry_gap(cur, dict(t), proof, gap_into)
     cur.execute("SELECT * FROM tickets WHERE id = %s", (int(ticket_id),))
+    row = dict(cur.fetchone())
+    row["quality_gap_ticket"] = gap["id"] if gap else None
+    return row
+
+
+def _gap_target(cur, ticket, quality_ticket):
+    """The open quality ticket a gap is attached to, checked before closing."""
+    if quality_ticket is None:
+        return None
+    cur.execute("SELECT * FROM tickets WHERE id = %s FOR UPDATE",
+                (int(quality_ticket),))
+    q = cur.fetchone()
+    if not q:
+        raise StoreError(f"no ticket {quality_ticket} to carry the gap")
+    q = dict(q)
+    if q["id"] == ticket["id"]:
+        raise StoreError("the gap goes to another ticket, not the one closing")
+    if q["status"] in CLOSED:
+        raise StoreError(f"ticket {q['id']} is {q['status']}: carry the gap "
+                         "to an open quality ticket, or let one be filed")
+    if not is_quality(q):
+        raise StoreError(f"ticket {q['id']} ({q['cause_key']}) closes on "
+                         "something other than the score: the gap needs a "
+                         "quality ticket")
+    return q
+
+
+def carry_gap(cur, ticket, proof, into=None):
+    """File or attach the film's quality gap after `ticket`'s cause closed: a
+    P1 quality ticket (bar 10 on rubric v3) linked both ways, holding the
+    cause's sessions, so its own close replays the same request."""
+    proof = proof or {}
+    score = proof.get("score_exact")
+    where = "/".join(str(proof[k]) for k in ("run", "session") if proof.get(k))
+    rated = f", rated {score} on rubric {RUBRIC}" if score is not None else ""
+    note = (f"#{ticket['id']} closed fixed: its cause is proven gone on the "
+            f"replay {where}{rated}. What keeps that film under "
+            f"{QUALITY_BAR} is this ticket's.")
+    projects = sorted(ticket_projects(cur, ticket))
+    link = dict(from_ticket=ticket["id"], cause=ticket["cause_key"],
+                replay=proof or None, score=score, projects=projects,
+                note=note)
+    if into is None:
+        key = f"{GAP_PREFIX}{ticket['id']}"
+        title = (f"Film under {QUALITY_BAR:g} after #{ticket['id']}'s cause was "
+                 f"fixed{rated}: {ticket.get('title') or ''}")[:200]
+        _w(cur, """INSERT INTO tickets (cause_key, title, severity, status,
+                       summary, first_seen, last_seen, occurrences, history)
+                   VALUES (%s, %s, %s, 'open', %s, %s, %s, 0, %s)
+                   ON CONFLICT (cause_key) DO NOTHING RETURNING *""",
+           (key, title, GAP_SEVERITY, note, ticket.get("first_seen"),
+            ticket.get("last_seen"),
+            _history("opened", severity=GAP_SEVERITY, **link)))
+        row = cur.fetchone()
+        if row:
+            into = dict(row)
+        else:
+            cur.execute("SELECT * FROM tickets WHERE cause_key = %s FOR UPDATE",
+                        (key,))
+            into = dict(cur.fetchone())
+            if into["status"] in CLOSED:
+                # Its film once reached 10; the cause came back and closed
+                # again short of it: the gap is open again.
+                _w(cur, """UPDATE tickets SET status = 'open',
+                               recurrence_count = recurrence_count + 1,
+                               fix_sha = NULL, regression_check = NULL,
+                               wont_fix_reason = NULL, closed_at = NULL,
+                               severity = %s, history = history || %s,
+                               updated_at = NOW() WHERE id = %s""",
+                   (GAP_SEVERITY, _history(
+                       "reopened", previous_status=into["status"],
+                       previous_fix_sha=into["fix_sha"], **link), into["id"]))
+            else:
+                _w(cur, """UPDATE tickets SET history = history || %s,
+                               updated_at = NOW() WHERE id = %s""",
+                   (_history("linked_gap", **link), into["id"]))
+    else:
+        _w(cur, """UPDATE tickets SET history = history || %s,
+                       updated_at = NOW() WHERE id = %s""",
+           (_history("linked_gap", **link), into["id"]))
+    _w(cur, """INSERT INTO ticket_reviews (ticket_id, review_id)
+               SELECT %s, review_id FROM ticket_reviews WHERE ticket_id = %s
+               ON CONFLICT DO NOTHING RETURNING review_id""",
+       (into["id"], ticket["id"]))
+    added = len(cur.fetchall())
+    _w(cur, """UPDATE tickets SET occurrences = occurrences + %s,
+                   first_seen = LEAST(first_seen, %s),
+                   last_seen = GREATEST(last_seen, %s), updated_at = NOW()
+               WHERE id = %s""",
+       (added, ticket.get("first_seen"), ticket.get("last_seen"), into["id"]))
+    _w(cur, """UPDATE tickets SET history = history || %s, updated_at = NOW()
+               WHERE id = %s""",
+       (_history("quality_gap", ticket=into["id"], score=score), ticket["id"]))
+    cur.execute("SELECT * FROM tickets WHERE id = %s", (into["id"],))
     return dict(cur.fetchone())
