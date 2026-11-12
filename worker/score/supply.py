@@ -33,6 +33,12 @@ def licence_class(item):
         return "A", "Pexels License", "https://www.pexels.com/license/"
     lic = str(item.get("license") or "")
     url = item.get("license_url")
+    if not lic.startswith(("CC0", "Public domain", "CC BY")):   # Openverse writes "by-sa-4.0"
+        import broll_source
+        canon = broll_source.canon_licence(lic, url)
+        if canon is None or canon[0].startswith(("Pexels", "Pixabay")):
+            return None, lic, url
+        lic, url = canon[0], canon[1] or url
     if lic.startswith(("CC0", "Public domain")):
         return "A", lic, url
     if lic.startswith("CC BY"):
@@ -222,12 +228,18 @@ def renumber(work, items):
     return out
 
 
-def bin_board(items, work, path):
+def bin_board(items, work, path, own=()):
     cols, rows = 6, 2
     gap = 4
     cw, ch = (BOARD_W - (cols - 1) * gap) // cols, (BOARD_H - (rows - 1) * gap) // rows
     im = Image.new("RGB", (BOARD_W, BOARD_H), boards.BG)
     f, fs = boards.font(19), boards.font(13)
+    n = min(len(items), cols * rows)
+    for j, (label, cell) in enumerate(own_cells(work, list(own)[:cols * rows - n], cw, ch)):  # the upload's own, after the found
+        d = ImageDraw.Draw(cell)
+        d.rectangle((0, 0, d.textlength(label, font=fs) + 10, 21), fill=(0, 0, 0))
+        d.text((5, 3), label, fill=(120, 230, 255), font=fs)
+        im.paste(cell, (((n + j) % cols) * (cw + gap), ((n + j) // cols) * (ch + gap)))
     for i, it in enumerate(items[:cols * rows]):
         p = os.path.join(work, it["path"])
         fr = Image.open(p).convert("RGB")
@@ -292,24 +304,185 @@ def fetch_stills(cands, tmp):
     return [c for c in cands if c.get("_img") is not None]
 
 
+# ------------------------------------------------------------------ named subjects
+
+def name_wishes(work, wishes):
+    """(subjects per wish, usd): what each moment's words and want name that a real picture could
+    show (a driver, a city, a brand), by one model call. The customer's own (`mine`) are not asked:
+    only the upload shows those. No answer names nothing, and the libraries answer as before."""
+    import broll_source
+    texts, idx = [], []
+    for i, w in enumerate(wishes):
+        if w.get("mine"):
+            continue
+        said = clause_of(work, w.get("w") or w.get("at"))
+        texts.append(f"wants: {w.get('want') or ''}" + (f' | words said there: "{said}"' if said else ""))
+        idx.append(i)
+    out = [[] for _ in wishes]
+    if not texts:
+        return out, 0.0
+    got, usd = broll_source.name_many(texts)
+    for j, subs in zip(idx, got):
+        out[j] = subs[:1]
+    return out, usd
+
+
+def named_for(work, wish, subject, hits, deadline):
+    """Checked pictures of a named subject for one wish: Commons and Openverse by its name, the
+    library's hits for the wish beside them, one check that each shows it. (kept, report)."""
+    import broll_source
+    kind = broll_source.KIND_VIDEO if wish.get("kind") == "video" else broll_source.KIND_PHOTO
+    return broll_source.find_named(subject, kind, 3, also=hits, workdir=work, deadline=deadline)
+
+
+# ------------------------------------------------------------------ the upload's own moments
+
+OWN_FRAMES = 16
+OWN_ZOOM_MAX = 2.5
+OWN_SYSTEM = """You help a film editor re-use the customer's own footage. You see numbered frames from the upload with their times, and moments of the film that want a picture. For each moment, find a frame whose detail shows what the moment wants better than a wide shot: the product, hands at work, a sign, a tool, a place, a gesture, the thing the words are about. Give the box around that detail as fractions of the frame, x0 y0 x1 y1 from the top left, tight on it but never cutting it. Only a detail that is plainly there and still reads when enlarged up to 2.5 times. Leave a moment out when no frame holds it.
+Answer with one JSON object and nothing else: {"own":[{"m":moment number,"f":frame number,"box":[x0,y0,x1,y1],"what":"at most eight plain words"}]}."""
+
+
+def own_sheet(src, times, W, H):
+    """The upload's frames, numbered with their times, on one sheet."""
+    cols = 4 if H >= W else 3
+    cw = (BOARD_W - (cols - 1) * 3) // cols
+    ch = int(cw * H / max(1, W))
+    rows = (len(times) + cols - 1) // cols
+    im = Image.new("RGB", (BOARD_W, rows * (ch + 3)), boards.BG)
+    f = boards.font(20)
+    got = 0
+    for i, t in enumerate(times):
+        fr = boards.grab(src, t, width=cw)
+        if fr is None:
+            continue
+        got += 1
+        cell = boards.fit(fr, cw, ch)
+        d = ImageDraw.Draw(cell)
+        label = f"{i}  {t:.1f}s"
+        d.rectangle((0, 0, d.textlength(label, font=f) + 10, 26), fill=(0, 0, 0))
+        d.text((5, 2), label, fill=(255, 225, 60), font=f)
+        im.paste(cell, ((i % cols) * (cw + 3), (i // cols) * (ch + 3)))
+    return im if got else None
+
+
+def reframe(box, W, H, out_ratio=9 / 16):
+    """A detail box (source fractions) to a crop of the output's shape around it, no tighter than
+    OWN_ZOOM_MAX of the full-height frame, inside the source. None for a box that can't be read."""
+    try:
+        x0, y0, x1, y1 = (float(v) for v in box)
+    except (TypeError, ValueError):
+        return None
+    x0, x1 = sorted((min(max(x0, 0.0), 1.0), min(max(x1, 0.0), 1.0)))
+    y0, y1 = sorted((min(max(y0, 0.0), 1.0), min(max(y1, 0.0), 1.0)))
+    if x1 - x0 < 0.02 or y1 - y0 < 0.02:
+        return None
+    bw, bh = (x1 - x0) * W * 1.3, (y1 - y0) * H * 1.3            # air round the detail
+    h = max(bh, bw / out_ratio, H / OWN_ZOOM_MAX)
+    w = h * out_ratio
+    if w > W:
+        w, h = W, W / out_ratio
+    h = min(h, H)
+    w = min(w, h * out_ratio)
+    cx, cy = (x0 + x1) / 2 * W, (y0 + y1) / 2 * H
+    left = min(max(cx - w / 2, 0.0), W - w)
+    top = min(max(cy - h / 2, 0.0), H - h)
+    return [round(left / W, 3), round(top / H, 3), round((left + w) / W, 3), round((top + h) / H, 3)]
+
+
+def own_moments(work, wishes, per, deadline):
+    """(rows, usd): moments of the upload, re-framed, for the wishes the upload itself can show (the
+    customer's own product, place or person, and what the Scout marked `own`). Each row names its
+    source span and crop as the Score writes them: {"src": "main@12.0-14.0", "crop": [...]}."""
+    want = [(i, w) for i, w in enumerate(wishes) if w.get("own") or w.get("mine")][:6]
+    dur, W, H = float(per.get("dur") or 0), int(per.get("W") or 0), int(per.get("H") or 0)
+    src = os.path.join(work, "source.mp4")
+    if not want or dur < 2.0 or not W or not H or not os.path.exists(src):
+        return [], 0.0
+    n = OWN_FRAMES
+    times = [round(dur * (k + 0.5) / n, 2) for k in range(n)]
+    tmp = tempfile.mkdtemp(prefix="own-", dir=work)
+    try:
+        sheet = own_sheet(src, times, W, H)
+        if sheet is None:
+            return [], 0.0
+        path = os.path.join(tmp, "own.jpg")
+        boards.save(sheet, path, quality=82)
+        lines = [f"moment {j}: {w.get('want')}" for j, (_i, w) in enumerate(want)]
+        r = call.stream(LOOK_MODEL, OWN_SYSTEM, [brief.image_block(path), {"type": "text", "text": "\n".join(lines)}],
+                        max_tokens=900, effort="low", purpose="director_own", deadline=deadline, thinking=False)
+        rows, seen = [], set()
+        for o in parse_keep(r.text.replace('"m"', '"c"')):
+            j, f = o.get("c"), o.get("f")
+            if not (isinstance(j, int) and isinstance(f, int) and 0 <= j < len(want) and 0 <= f < n) or (j, f) in seen:
+                continue
+            crop = reframe(o.get("box"), W, H)
+            if crop is None:
+                continue
+            seen.add((j, f))
+            i, w = want[j]
+            t0 = max(0.0, times[f] - 0.8)
+            t1 = min(dur, t0 + 2.4)
+            rows.append(dict(id=f"own{len(rows)}", src=f"main@{t0:.2f}-{t1:.2f}", crop=crop, at=times[f], wish=i,
+                             what=str(o.get("what") or w.get("want") or "")[:80],
+                             **{"for": f"w{w.get('w')}" if w.get("w") else str(w.get("at"))}))
+        return rows[:6], float(r.usd or 0.0)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def own_cells(work, rows, cw, ch):
+    """Board cells for the upload's own moments: the crop as the film would show it."""
+    src = os.path.join(work, "source.mp4")
+    out = []
+    for r in rows:
+        fr = boards.grab(src, r["at"], width=720)
+        if fr is None:
+            continue
+        x0, y0, x1, y1 = r["crop"]
+        w, h = fr.size
+        out.append((f"{r['src']} crop", boards.fit(fr.crop((int(x0 * w), int(y0 * h), int(x1 * w), int(y1 * h))), cw, ch)))
+    return out
+
+
 def run(work, scout, per, acquire, deadline):
-    """acquire(candidate) -> {"storage_key","w","h","dur","fps"} or None. Writes bin.json and the board."""
+    """acquire(candidate) -> {"storage_key","w","h","dur","fps"} or None. Writes bin.json and the board.
+
+    Three supplies at once: the libraries for each wish; for a wish whose words name a real person,
+    place, brand or event, Commons and Openverse by that name with one check that each picture shows
+    it (a library lookalike faces the same check and never stands in); and the upload's own moments,
+    re-framed, for what only the upload can show."""
     t_all = time.monotonic()
     wishes = (scout or {}).get("wishes") or []
     import broll_source
     import stock
     report, cands = [], []
+    usd = 0.0
+    side = cf.ThreadPoolExecutor(max_workers=6)
+    name_f = side.submit(broll_source.carried(name_wishes), work, wishes)
+    own_f = side.submit(broll_source.carried(own_moments), work, wishes, per or {}, min(deadline, time.monotonic() + 14.0))
     t_search = time.monotonic()
     with cf.ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(lambda w: search_wish(stock, broll_source, w) if not w.get("mine") else ([], [], 0.0), wishes))
+    try:
+        subjects, name_usd = name_f.result(timeout=max(0.05, min(deadline, t_search + 10.0) - time.monotonic()))
+        usd += name_usd
+    except Exception as e:  # noqa: BLE001 no naming: the libraries answer as before
+        subjects = [[] for _ in wishes]
+        report.append(dict(naming_error=str(e)[:120]))
+    named_f = {}
     for i, (wish, (hits, errs, secs)) in enumerate(zip(wishes, results)):
-        report.append(dict(wish=i, w=wish.get("w") or wish.get("at"), want=wish.get("want"), own=wish.get("own"), mine=bool(wish.get("mine")), seconds=secs, hits=len(hits), errors=errs))
+        sub = subjects[i][0] if i < len(subjects) and subjects[i] else None
+        report.append(dict(wish=i, w=wish.get("w") or wish.get("at"), want=wish.get("want"), own=wish.get("own"), mine=bool(wish.get("mine")),
+                           seconds=secs, hits=len(hits), errors=errs, named=sub["name"] if sub else None))
+        if sub:     # its pictures come from the named route, checked; the library's join that check
+            named_f[i] = side.submit(broll_source.carried(named_for), work, wish, sub, hits, min(deadline - 4.0, time.monotonic() + 16.0))
+            continue
         for h in hits:
             h["_wish"] = i
             cands.append(h)
     t_search = round(time.monotonic() - t_search, 2)
     tmp = tempfile.mkdtemp(prefix="supply-", dir=work)
-    usd = 0.0
     items = []
     try:
         cands = fetch_stills(cands, tmp)
@@ -319,7 +492,8 @@ def run(work, scout, per, acquire, deadline):
             sheet_path = os.path.join(tmp, "sheet.jpg")
             boards.save(sheet, sheet_path, quality=82)
             try:
-                keep, usd = look(sheet_path, cands, wishes, min(deadline, time.monotonic() + 12.0))
+                keep, look_usd = look(sheet_path, cands, wishes, min(deadline, time.monotonic() + 12.0))
+                usd += look_usd
             except Exception as e:  # noqa: BLE001 no Look came back: one picture per wish, library order
                 report.append(dict(look_error=str(e)[:120]))
             if not keep:
@@ -327,6 +501,24 @@ def run(work, scout, per, acquire, deadline):
                 for i, c in enumerate(cands):
                     first.setdefault(c["_wish"], i)
                 keep = [dict(c=i, wish=w) for w, i in first.items()]
+        named = []
+        for i, fut in named_f.items():
+            try:
+                kept, rep = fut.result(timeout=max(0.05, deadline - 2.0 - time.monotonic()))
+            except Exception as e:  # noqa: BLE001 unchecked is never shown: the wish falls back
+                kept, rep = [], dict(say=f"the named search did not finish ({str(e)[:80] or 'late'})")
+            usd += float(rep.get("usd") or 0.0)
+            report[next(n for n, r in enumerate(report) if r.get("wish") == i)].update(
+                named_found=len(kept), named_say=rep.get("say"), named_checked=len(rep.get("checked") or []))
+            for c in kept:
+                if licence_class(c)[0] is None:
+                    continue
+                c["_wish"] = i
+                named.append(c)
+        named = fetch_stills(named, tmp)
+        first_named = len(cands)
+        cands = cands + named
+        keep = [dict(c=first_named + j, wish=c["_wish"], what=f"{c['named']}: {c.get('shows') or ''}".strip(": ")) for j, c in enumerate(named)] + keep
         binroot = os.path.join(work, "bin")
         shutil.rmtree(binroot, ignore_errors=True)
         os.makedirs(binroot, exist_ok=True)
@@ -342,13 +534,15 @@ def run(work, scout, per, acquire, deadline):
             for w in sorted(by_wish):
                 if by_wish[w] and len(picks) < MAX_ITEMS:
                     picks.append(by_wish[w].pop(0))
-            pool = cf.ThreadPoolExecutor(max_workers=4)
+        pool = cf.ThreadPoolExecutor(max_workers=4)
         jobs = [(k, c, pool.submit(acquire, c)) for k, c in picks]
         for k, c, fut in jobs:
             try:
                 got = fut.result(timeout=max(0.05, deadline - time.monotonic()))
             except Exception as e:  # noqa: BLE001 the Bin simply has one picture less
-                report[c["_wish"]].setdefault("errors", []).append(f"acquire {c.get('id')}: {str(e)[:100]}")
+                wr = next((r for r in report if r.get("wish") == c["_wish"]), None)
+                if wr is not None:
+                    wr.setdefault("errors", []).append(f"acquire {c.get('id')}: {str(e)[:100]}")
                 continue
             if not got:
                 continue
@@ -356,6 +550,8 @@ def run(work, scout, per, acquire, deadline):
             final = f"bin/{iid}.jpg"
             if got.get("local"):                       # a still came back whole
                 shutil.copyfile(got["local"], os.path.join(work, final))
+                if os.path.dirname(os.path.abspath(got["local"])) == os.path.abspath(work):
+                    os.remove(got["local"])            # the fetched copy goes: the Bin keeps its own
             else:
                 c["_img"].convert("RGB").save(os.path.join(work, final), quality=90)
             cls, lic, lurl = licence_class(c)
@@ -368,6 +564,8 @@ def run(work, scout, per, acquire, deadline):
             row.update({"what": k.get("what") or c.get("description") or c.get("title") or "", "for": f"w{w0.get('w')}" if w0.get("w") else str(w0.get("at")),
                         "wish": c["_wish"], "class": cls, "licence": lic, "licence_url": lurl, "provider": c.get("provider"), "author": c.get("credit"),
                         "page": c.get("page_url"), "query": c.get("_q")})
+            if c.get("named"):
+                row.update(named=c["named"], shows=c.get("shows"))
             items.append(row)
         pool.shutdown(wait=False, cancel_futures=True)
         n_before = len(items)
@@ -379,18 +577,33 @@ def run(work, scout, per, acquire, deadline):
         usd += check_usd
         report.append(dict(check=check_rep, dropped=dropped, usd=round(check_usd, 6)))
         read_pictures(work, items)
+        try:
+            own, own_usd = own_f.result(timeout=max(0.05, deadline - time.monotonic()))
+            usd += own_usd
+        except Exception as e:  # noqa: BLE001 the upload still stands as itself
+            own = []
+            report.append(dict(own_error=str(e)[:120]))
         plates = plates_for(per, 3, work)
         for r in report:
             if "wish" in r:
                 r["bin"] = [it["id"] for it in items if it["wish"] == r["wish"]]
+                r["own_moments"] = [o["src"] for o in own if o["wish"] == r["wish"]]
                 r["fallback"] = "upload" if r.get("own") else "plate p0"
         credits = [f"{it['what']}: {it['author'] or it['provider']}, {it['licence']}, {it['page']}" for it in items if it["class"] == "B"]
-        if items:
-            bin_board(items, work, os.path.join(work, "bin_board.jpg"))
-        out = dict(own=[], items=items, plates=plates, wishes=report, credits=credits,
+        if items or own:
+            bin_board(items, work, os.path.join(work, "bin_board.jpg"), own)
+        said = [r["named_say"] for r in report if r.get("named_say") and not r.get("bin")]
+        out = dict(own=own, items=items, plates=plates, wishes=report, credits=credits, said=said,
+                   own_lines=[f"{o['src']} crop {o['crop']}: {o['what']} (for {o['for']})" for o in own],
                    usage=dict(model=LOOK_MODEL, usd=round(usd, 6), candidates=len(cands), search_seconds=t_search, seconds=round(time.monotonic() - t_all, 1)))
         with open(os.path.join(work, "bin.json"), "w") as f:
             json.dump(out, f, ensure_ascii=False, indent=1)
+        print("[supply] " + json.dumps(dict(
+            wishes=len(wishes), items=len(items), named={r["named"]: r.get("named_found") for r in report if r.get("named")},
+            own=len(own), said=len(said), seconds=out["usage"]["seconds"], usd=out["usage"]["usd"],
+            errors=[{k: v for k, v in r.items() if k.endswith("error")} for r in report if any(k.endswith("error") for k in r)]),
+            ensure_ascii=False)[:900], flush=True)
         return out
     finally:
+        side.shutdown(wait=False, cancel_futures=True)
         shutil.rmtree(tmp, ignore_errors=True)

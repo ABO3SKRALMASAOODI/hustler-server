@@ -661,6 +661,358 @@ def prerank(cands, queries, W, H, need_s=2.0, archival=False):
     return keep
 
 
+# ── named subjects: real people, places, brands and events ───────────────
+#
+# A stock library has no Oscar Piastri: p5591 asked for him at McLaren and got
+# six Pexels lookalikes, rightly refused. Commons and Openverse do hold him,
+# with a licence and a credit on every file. A model reads the words, in any
+# language and spelling, and names what a picture must show (never a word
+# list); the libraries are searched by those names; a vision check looks at
+# every candidate beside its own caption and keeps only the ones that plainly
+# show it. A picture the check did not pass is never offered, and when none
+# passes the caller gets the honest sentence to say.
+
+NAMED_MODEL = os.environ.get("NAMED_PICTURE_MODEL", "claude-haiku-5-5")
+NAMED_CHECK_MAX = 14       # pictures one check call looks at
+NAMED_NAME_S = 12.0        # the naming call's own deadline
+NAMED_CHECK_S = 25.0
+NAMED_SEARCH_S = 6.0       # every library for one subject, together
+COMMONS_DOWNLOAD_W = 1920  # a Commons rendition step, never an upscale
+_NAMED = {}                # text, folded -> subjects (list), bounded
+
+NAME_SYSTEM = """You help a film editor find real pictures. You get words from a customer's request or from a film's narration, in any language, perhaps misspelled or run together.
+
+List the specific real-world subjects they name that a public photo archive (Wikimedia Commons) could hold a genuine photo of: a named person, a named place or building, a brand, company or product by name, a named event, team, vehicle, artwork or organisation. Fix the spelling to the subject's usual English name ("oscar piastrin" is Oscar Piastri). Only what the words name or plainly point to; a generic thing, an idea, a feeling, a kind of place or an unnamed person is not a subject. When the words relate two named things ("X in his McLaren"), give one subject for the person with the context in its searches and in must_show.
+
+For each subject: "name" (the usual English name), "is" (person, place, brand, event or thing), "searches" (one to three Commons searches, most specific first, the bare name last), "must_show" (one plain sentence: what a picture must visibly show to count, the way a picture editor would brief it, naming every form the subject can take on camera: a racing driver "himself, or his own car on track"; a company "its logo on its building or product"; a city "a recognisable view of it").
+
+Answer with one JSON object and nothing else: {"subjects":[...]}; {"subjects":[]} when nothing is named."""
+
+CHECK_NAMED_SYSTEM = """You check pictures for a film editor before he may use them. Each numbered picture was found for a named real subject; you get what the picture must show, and the picture's own caption from its archive.
+
+Keep a picture when a viewer would accept at once that it shows that subject: the caption names the subject, nothing in the frame contradicts it, and the frame holds one of the forms the brief allows (the person, his own car or stage in the act the caption names, the building, the event) large enough to read on a phone. A driver is shown by his car on track: the face inside a helmet need not be readable. You do not recognise faces: you judge the caption against what the frame plainly shows (a livery, a number, a sign, the setting, a person where a person should be).
+
+Drop a picture when the frame shows something else than the brief (a crowd, a logo alone, a document, a map, a different car), when the subject is a speck, when it is a drawing, caricature, collage or screenshot, when its caption or look says an image generator made it, when it is a lookalike with no caption naming the subject, or when it is too dark, blurred or watermarked to use.
+
+Answer with one JSON object and nothing else: {"fit":[{"n":number,"ok":true or false,"shows":"at most eight plain words","grade":1 to 5}]}, one entry per picture, grade 5 for a picture you would lead a film with."""
+
+
+def _json_obj(text):
+    """The first JSON object in a model's answer, or None."""
+    s = str(text or "")
+    i = s.find("{")
+    while i >= 0:
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(s, i)
+            if isinstance(obj, dict):
+                return obj
+        except ValueError:
+            pass
+        i = s.find("{", i + 1)
+    return None
+
+
+def carried(fn):
+    """fn for a pool thread, carrying the caller's llm recorder: the turn's
+    ledger, its trial scope and llm_calls travel with it, so a call made on
+    a pool thread is metered like one made on the turn's own thread."""
+    import llm
+    rec = llm.get_recorder()
+
+    def run(*a, **k):
+        prev = llm.get_recorder()
+        llm.set_recorder(rec)
+        try:
+            return fn(*a, **k)
+        finally:
+            llm.set_recorder(prev)
+    return run
+
+
+def _objects(text):
+    """Every flat JSON object in an answer, in order, so a line cut off by
+    the token cap costs that line only."""
+    dec, s, out, i = json.JSONDecoder(), str(text or ""), [], 0
+    s = s[s.find("[") + 1:] if "[" in s else s
+    while True:
+        j = s.find("{", i)
+        if j < 0:
+            return out
+        try:
+            obj, i = dec.raw_decode(s, j)
+            if isinstance(obj, dict):
+                out.append(obj)
+        except ValueError:
+            i = j + 1
+
+
+def _ask(system, content, purpose, budget_s, max_tokens):
+    """One Claude call on the product's lane. (text, usd). Raises when no
+    lane or no answer: every caller keeps its honest fallback."""
+    import time
+    from score import call
+    r = call.stream(NAMED_MODEL, system, content, max_tokens=max_tokens,
+                    effort="low", purpose=purpose, thinking=False,
+                    deadline=time.monotonic() + budget_s)
+    return r.text, float(r.usd or 0.0)
+
+
+def _subjects_of(obj):
+    out = []
+    for s in (obj or {}).get("subjects") or []:
+        if not isinstance(s, dict):
+            continue
+        name = " ".join(str(s.get("name") or "").split())[:80]
+        if not name:
+            continue
+        qs = [" ".join(str(q).split())[:100] for q in s.get("searches") or []
+              if str(q).strip()][:3] or [name]
+        out.append({"name": name, "is": str(s.get("is") or "thing")[:20],
+                    "searches": qs,
+                    "must_show": " ".join(str(s.get("must_show") or
+                                              name).split())[:240]})
+    return out[:3]
+
+
+def name_subjects(text, context=""):
+    """(subjects, usd) for one text: what it names that a real picture could
+    show. [] when it names nothing. Raises when the model did not answer."""
+    key = " ".join(f"{text} | {context}".split()).casefold()[:600]
+    if key in _NAMED:
+        return _NAMED[key], 0.0
+    user = f"Words: {str(text)[:800]}"
+    if context:
+        user += f"\nWhat the film is about: {str(context)[:600]}"
+    txt, usd = _ask(NAME_SYSTEM, [{"type": "text", "text": user}],
+                    "named_subjects", NAMED_NAME_S, 600)
+    obj = _json_obj(txt)
+    if obj is None:
+        raise BrollError("the naming call answered without JSON")
+    subs = _subjects_of(obj)
+    if len(_NAMED) >= 2048:
+        _NAMED.clear()
+    _NAMED[key] = subs
+    return subs, usd
+
+
+def name_many(texts, context=""):
+    """(list of subject lists, one per text, usd): one call for a film's
+    moments. Raises when the model did not answer."""
+    if not texts:
+        return [], 0.0
+    lines = [f"moment {i}: {str(t)[:300]}" for i, t in enumerate(texts)]
+    user = ("Each moment separately. Answer {\"moments\":[{\"m\":number,"
+            "\"subjects\":[...]}]}, one entry per moment, subjects [] where "
+            "nothing is named.\n" + "\n".join(lines))
+    if context:
+        user += f"\nWhat the film is about: {str(context)[:600]}"
+    txt, usd = _ask(NAME_SYSTEM, [{"type": "text", "text": user}],
+                    "named_subjects", NAMED_NAME_S, 1800)
+    obj = _json_obj(txt)
+    if obj is None:
+        raise BrollError("the naming call answered without JSON")
+    out = [[] for _ in texts]
+    for m in obj.get("moments") or []:
+        if isinstance(m, dict) and isinstance(m.get("m"), int) and \
+                0 <= m["m"] < len(texts):
+            out[m["m"]] = _subjects_of(m)
+    return out, usd
+
+
+def _sized_url(c):
+    """A Commons original can be 8000 px and 40 MB: take the 1920 px step of
+    the same file when the original is wider, never an upscale."""
+    url = c.get("_url")
+    thumb = str(c.get("_thumb") or "")
+    w = int(c.get("width") or 0)
+    if c.get("provider") == "wikimedia" and w > COMMONS_DOWNLOAD_W and \
+            "/thumb/" in thumb and "px-" in thumb:
+        head, _, tail = thumb.rpartition("/")
+        step = tail.split("px-", 1)
+        if len(step) == 2 and step[0].isdigit():
+            return f"{head}/{COMMONS_DOWNLOAD_W}px-{step[1]}"
+    return url
+
+
+def search_named(subject, kind=KIND_PHOTO, count=6, budget_s=None):
+    """(candidates, errors): Commons (by Wikidata 'depicts' first, then text)
+    and Openverse for one subject, every search at once. Photos always, since
+    a named person is rarely on free video; Commons video too when asked."""
+    import stock
+    import time
+    jobs = []
+    pool = ThreadPoolExecutor(max_workers=6)
+    for q in subject["searches"][:3]:
+        jobs.append((f"commons {q}", pool.submit(_wikimedia, q, KIND_PHOTO,
+                                                 None, count)))
+    if kind == KIND_VIDEO:
+        jobs.append(("commons video", pool.submit(
+            _wikimedia, subject["searches"][0], KIND_VIDEO, None, 3)))
+    jobs.append(("openverse", pool.submit(
+        stock._openverse_search, subject["searches"][0], KIND_PHOTO, None,
+        count)))
+    t0 = time.monotonic()
+    out, seen, errors = [], set(), []
+    for name, fut in jobs:
+        try:
+            got = fut.result(timeout=max(0.05, (budget_s or NAMED_SEARCH_S) -
+                                         (time.monotonic() - t0)))
+        except Exception as e:  # noqa: BLE001 — one library late or down
+            errors.append(f"{name}: {str(e)[:100] or 'over its time'}")
+            continue
+        for c in got or []:
+            if c.get("id") in seen or not c.get("_thumb"):
+                continue
+            seen.add(c["id"])
+            c = dict(c)
+            if c.get("kind") == KIND_PHOTO:
+                c["_url"] = _sized_url(c)
+            out.append(c)
+    pool.shutdown(wait=False, cancel_futures=True)
+    return out, errors
+
+
+def _caption(c):
+    bits = [c.get("title"), c.get("description")]
+    if c.get("keywords"):
+        bits.append("depicts: " + ", ".join(map(str, c["keywords"])))
+    if c.get("_categories"):
+        bits.append("categories: " + str(c["_categories"]))
+    text = " | ".join(str(b) for b in bits if b)
+    return _clip(text, 360) or "(no caption)"
+
+
+def check_named(subject, cands, workdir=None, budget_s=None):
+    """(kept, report, usd): the candidates a vision model passes as showing
+    the subject, best first, each with what it shows. No answer passes
+    nothing: an unchecked picture of a real person is never offered."""
+    import base64
+    import shutil
+    import tempfile
+    from PIL import Image
+    cands = cands[:NAMED_CHECK_MAX]
+    if not cands:
+        return [], [], 0.0
+    tmp = tempfile.mkdtemp(prefix="named-", dir=workdir)
+    try:
+        def thumb(i):
+            p = os.path.join(tmp, f"{i}.jpg")
+            try:
+                net_fetch.download(cands[i]["_thumb"], p,
+                                   max_bytes=4 * 1024 * 1024, timeout_s=10)
+                with Image.open(p) as im:
+                    im = im.convert("RGB")
+                    im.thumbnail((448, 448))
+                    im.save(p, quality=85)
+                return i, p
+            except Exception:  # noqa: BLE001 — that candidate is not seen
+                return i, None
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            seen = dict(pool.map(thumb, range(len(cands))))
+        content, rows = [], []
+        for i, c in enumerate(cands):
+            p = seen.get(i)
+            if not p:
+                continue
+            with open(p, "rb") as f:
+                data = base64.standard_b64encode(f.read()).decode()
+            content += [{"type": "text", "text": f"picture {i}: caption: "
+                         f"{_caption(c)}"},
+                        {"type": "image", "source": {
+                            "type": "base64", "media_type": "image/jpeg",
+                            "data": data}}]
+            rows.append(i)
+        if not rows:
+            return [], [dict(error="no thumbnail could be read")], 0.0
+        content.append({"type": "text", "text":
+                        f"Subject: {subject['name']}. Each picture must "
+                        f"show: {subject['must_show']}"})
+        txt, usd = _ask(CHECK_NAMED_SYSTEM, content, "named_check",
+                        budget_s or NAMED_CHECK_S, 2400)
+        verdict = {}
+        for o in _objects(txt):          # a cut-off answer keeps its lines
+            if isinstance(o.get("n"), int):
+                verdict[o["n"]] = o
+        kept, report = [], []
+        for i in rows:
+            v = verdict.get(i) or {}
+            ok = v.get("ok") is True
+            grade = v.get("grade") if isinstance(v.get("grade"), int) else 0
+            report.append(dict(id=cands[i]["id"], ok=ok, grade=grade,
+                               shows=_clip(v.get("shows"), 120)))
+            if ok:
+                kept.append(dict(cands[i], named=subject["name"],
+                                 shows=_clip(v.get("shows"), 120) or
+                                 subject["name"], _grade=grade))
+        kept.sort(key=lambda c: -c["_grade"])
+        return kept, report, usd
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def license_note(c):
+    """The credit line an agent reads and a film's credits carry."""
+    who = c.get("credit") or ("Wikimedia Commons contributor"
+                              if c.get("provider") == "wikimedia" else None)
+    src = {"wikimedia": "Wikimedia Commons", "openverse": "Openverse"}.get(
+        c.get("provider"), c.get("provider"))
+    lic = c.get("license") or ""
+    if who:
+        return f"{lic}, credit: {who} via {src}"[:240]
+    return f"{lic} via {src}"[:240]
+
+
+def find_named(subject, kind=KIND_PHOTO, count=6, also=(), workdir=None,
+               deadline=None):
+    """Checked pictures of one named subject. ``also`` are other libraries'
+    hits for the same words (stock lookalikes): they face the same check.
+    Returns (kept, report) with report["say"] the honest sentence when
+    nothing passed and report["usd"] the model spend."""
+    import time
+    left = (lambda cap: cap if deadline is None else
+            max(1.0, min(cap, deadline - time.monotonic())))
+    cands, errors = search_named(subject, kind, count,
+                                 left(NAMED_SEARCH_S) * 0.6
+                                 if deadline is not None else None)
+    lic_ok = []
+    # the archives' own files first; a library's lookalikes fill what's left
+    others = [dict(x) for x in (also or [])]
+    n_other = min(len(others), 4)
+    for c in cands[:NAMED_CHECK_MAX - n_other] + others[:n_other]:
+        if c.get("provider") in ("wikimedia", "openverse") and \
+                c.get("license") and not c.get("license_note"):
+            c["license_note"] = license_note(c)
+        lic_ok.append(c)
+    report = dict(subject=subject["name"], must_show=subject["must_show"],
+                  searched=subject["searches"], candidates=len(lic_ok),
+                  errors=errors, usd=0.0)
+    if not lic_ok:
+        report["say"] = (f"No free-licence picture of {subject['name']} was "
+                         "found in Wikimedia Commons, Openverse or the stock "
+                         "libraries" + (f" ({'; '.join(errors)[:160]})"
+                                        if errors else "") + ".")
+        return [], report
+    try:
+        kept, checked, usd = check_named(subject, lic_ok, workdir,
+                                         left(NAMED_CHECK_S))
+    except Exception as e:  # noqa: BLE001 — unchecked is never shown
+        report["say"] = (f"{len(lic_ok)} pictures were found for "
+                         f"{subject['name']}, but the check that each one "
+                         "really shows him, her or it did not answer, so "
+                         "none is offered.")
+        report["check_error"] = str(e)[:160]
+        return [], report
+    report.update(checked=checked, usd=round(usd, 6), kept=len(kept))
+    if not kept:
+        report["say"] = (f"None of the {len(checked)} free-licence pictures "
+                         f"found for {subject['name']} passed the check that "
+                         "it really shows that, so none is offered.")
+    for c in kept:
+        c["description"] = f"SHOWS {c['named']}: {c['shows']}"
+        c.pop("_grade", None)
+    return kept[:max(1, count)], report
+
+
 # ── fetching and checking ────────────────────────────────────────────────
 
 _MAGIC = ((b"\xff\xd8\xff", "jpeg"), (b"\x89PNG\r\n\x1a\n", "png"),
