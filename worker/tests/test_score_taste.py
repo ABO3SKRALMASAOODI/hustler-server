@@ -833,3 +833,17 @@ def test_the_look_can_take_back_a_silent_beat_the_film_added():
     assert comp(taste.floor_text(text), idx).l1["dur_f"] == c.l1["dur_f"] - 45
     # a beat of the voice is never taken: naming it changes nothing
     assert comp(taste.cut_text(text, ["b01"]), idx).l1["dur_f"] == c.l1["dur_f"]
+
+
+def test_a_step_is_not_made_blind():
+    """p5584: 12% on a man whose face the index had missed cut the top of his head."""
+    idx = talk_index(20.0, faces=False)
+    a = idx["sentences"][1]["wi0"]
+    beats = [{"k": "b", "id": "b01", "w": f"0-{a - 1}", "job": "x", "pic": "main"},
+             {"k": "b", "id": "b02", "w": f"{a}-{len(idx['words']) - 1}", "job": "x", "pic": {"src": "main", "zoom": 1.12, "for": "turn"}}]
+    c = comp(film(beats, film_={"drop": [f"{a + 5}-{a + 7}"]}), idx)
+    assert camera_steps(c) == 0 and c.meter["taste"]["flips"] == 0
+    assert any(r["id"] == "b02.p0" and "no face found" in r["why"] for r in c.meter["taste"]["rows"])
+    beats[1]["pic"]["for"] = "a1"                      # the customer asked for it: it is made
+    c = _with_asks(film(beats), idx, [{"id": "a1", "said": "zoom in when I start the second point", "probe": "cut_rate", "min": None}])
+    assert camera_steps(c) == 1

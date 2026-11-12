@@ -1679,7 +1679,12 @@ def take_crop(ctx, ref, asset, src, n, rng, at=0):
         if f <= at:
             held = r
     z, centre = zf, None
-    if ref.get("_cam") and written is not None:
+    blind = face is None and not (ctx.devices.get(ref.get("_cam")) or {}).get("bound")
+    if ref.get("_cam") and written is not None and blind:
+        # P9: a closer frame must hold the head whole, and no head was found in this shot to hold. The step is not
+        # made blind (p5584: 12% on a man whose face the index missed cut the top of his head).
+        ctx.taste_rows.append({"id": ref["_cam"], "did": "repaired", "dept": "camera", "why": "no face found in this shot to hold whole: the frame stays as shot"})
+    elif ref.get("_cam") and written is not None:
         zw = fw / max(path[0][2] - path[0][0], 1e-6)
         lim = taste.STEP_MAX
         if not ctx.step_once and (zw / zf > lim or zf / max(zw, 1e-6) > lim):
@@ -1689,7 +1694,7 @@ def take_crop(ctx, ref, asset, src, n, rng, at=0):
         z = clamp(fw / max(held[2] - held[0], 1e-6), 1.0, cap)
         if written is None:
             centre = ((held[0] + held[2]) / 2, (held[1] + held[3]) / 2)
-    flip = ref.get("_flip") if cap >= taste.EDIT_STEP[0] else None
+    flip = ref.get("_flip") if cap >= taste.EDIT_STEP[0] and face is not None else None
     if flip:
         z = min(z * flip, cap * flip)
     w, h = fw / z, fh / z
