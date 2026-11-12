@@ -1,3 +1,31 @@
-{"_": "ms per frame at 1080x1920, by op (compile.program). mac: measured on the M5 Pro from the three slice films' stage timers, 12 Nov. llvmpipe: to be measured by the box lane on a 4 vCPU cpuset slot; until then the mac row scaled by the one measured ratio (56.9 s against 3.3 s on a 15 s composition, COMPUTE).",
- "mac": {"start": 0.6, "src": 1.1, "plate": 0.3, "treat": 0.1, "blit_card": 0.25, "blit_word": 0.05, "flash": 0.25, "join": 0.6, "under": 0.9, "finish": 0.45, "lens": 0.55, "out": 2.2},
- "llvmpipe": {"start": 2.5, "src": 19.0, "plate": 5.2, "treat": 1.7, "blit_card": 4.3, "blit_word": 0.9, "flash": 4.3, "join": 10.3, "under": 15.5, "finish": 7.8, "lens": 9.5, "out": 38.0}}
+{
+ "_": "ms per op-frame at 1080x1920, as compile.program counts ops. mac: fitted by lanes/C/cost_fit.py to the three slice films' stage timers on the M5 Pro, 12 Nov (final tier, cold cache; 'out' carries readback and the encoder's back-pressure). plate, treat and join are set by hand: the slice films hold too few of them to fit. llvmpipe: NOT MEASURED. It is the mac row times 17.2, the one ratio COMPUTE measured (56.9 s against 3.3 s on a 15 s composition). The box lane replaces it with 4 vCPU numbers.",
+ "mac": {
+  "blit_card": 1.153,
+  "blit_word": 0.057,
+  "finish": 0.236,
+  "flash": 0.167,
+  "join": 4.211,
+  "lens": 0.288,
+  "out": 13.145,
+  "plate": 0.3,
+  "src": 3.509,
+  "start": 0.4,
+  "treat": 0.1,
+  "under": 4.634
+ },
+ "llvmpipe": {
+  "blit_card": 19.83,
+  "blit_word": 0.98,
+  "finish": 4.06,
+  "flash": 2.87,
+  "join": 72.43,
+  "lens": 4.95,
+  "out": 226.09,
+  "plate": 5.16,
+  "src": 60.35,
+  "start": 6.88,
+  "treat": 1.72,
+  "under": 79.7
+ }
+}

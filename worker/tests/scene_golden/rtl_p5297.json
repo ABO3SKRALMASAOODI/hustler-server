@@ -1,0 +1,18 @@
+{
+ "font": "NotoSansArabic-Bold.ttf",
+ "font_sha": "d7e2ff8681c5e692",
+ "words": {
+  "غيّر": {
+   "glyphs": 4,
+   "adv_em": 1.416
+  },
+  "لون": {
+   "glyphs": 3,
+   "adv_em": 1.562
+  },
+  "السيارة": {
+   "glyphs": 7,
+   "adv_em": 3.156
+  }
+ }
+}

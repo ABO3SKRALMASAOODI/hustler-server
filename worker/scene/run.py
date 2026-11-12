@@ -139,8 +139,9 @@ def _draw(e, frames, video, tier, prog, flog=None, done0=0):
         for f in frames:
             act = e.advance(f)
             rt.frame(f, act)
-            buf = rt.read()
             ts = time.perf_counter()
+            buf = rt.read()                                   # the GPU finishes the frame here, then hands it over
+            ts = rt.tick("read", ts)
             try:
                 enc.stdin.write(buf)
             except (BrokenPipeError, OSError):
@@ -180,11 +181,17 @@ def render_plan(plan, out, tier="final", frames=None, audio=True, cache=None, pr
     """
     t0 = time.time()
     prog = Progress(progress)
-    prog.say("gl", 0, force=True)
-    e = Engine(plan)                                     # every shader compiles here, in the first second
-    rt = e.rt
-    prog.say("ready", 0, force=True)
     partial = frames is not None
+    tag = enc_tag(tier)
+    cache = cache or S.cache_dir()
+    paths = {s["i"]: S.seg_path(cache, s["sha"], tag) for s in plan.segments}
+    todo = [s for s in plan.segments if not (use_cache and S.have(paths[s["i"]]))]
+    e = rt = None
+    if partial or not plan.segments or todo:
+        prog.say("gl", 0, force=True)
+        e = Engine(plan)                                 # every shader compiles here, in the first second
+        rt = e.rt
+        prog.say("ready", 0, force=True)
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     tmp = tempfile.mkdtemp(prefix="scene_", dir=os.path.dirname(os.path.abspath(out)))
     segs_log, rep = [], {}
@@ -200,16 +207,9 @@ def render_plan(plan, out, tier="final", frames=None, audio=True, cache=None, pr
                 rt.reader.stop()
             n_frames = len(frames)
         else:
-            cache = cache or S.cache_dir()
-            tag = enc_tag(tier)
-            todo, paths = [], {}
-            for s in plan.segments:
-                p = S.seg_path(cache, s["sha"], tag)
-                paths[s["i"]] = p
-                if not (use_cache and S.have(p)):
-                    todo.append(s)
             order = S.order(todo)
-            e.start([f for s in order for f in range(*s["f"])])
+            if e:
+                e.start([f for s in order for f in range(*s["f"])])
             done = 0
             try:
                 for s in order:
@@ -223,8 +223,9 @@ def render_plan(plan, out, tier="final", frames=None, audio=True, cache=None, pr
                     S.keep(part, paths[s["i"]])
                     segs_log.append({"i": s["i"], "f": [a, b], "s": round(time.time() - ts, 3), "sha": s["sha"]})
             finally:
-                rt.reader.stop()
-            prog.say("join", done, rt.reader, force=True)
+                if e:
+                    rt.reader.stop()
+            prog.say("join", done, force=True)
             S.concat([paths[s["i"]] for s in plan.segments], video)
             n_frames, _ = S.count(video)
             if n_frames != plan.dur:
@@ -246,17 +247,19 @@ def render_plan(plan, out, tier="final", frames=None, audio=True, cache=None, pr
         if flog:
             flog.close()
         shutil.rmtree(tmp, ignore_errors=True)
-    rd = rt.reader
-    log = dict(frames=n_frames, fps=plan.fps, size=[plan.W, plan.H], gl=rt.gl, gl_version=rt.gl_version, engine=C.ENGINE_VERSION,
+    rd = rt.reader if rt else None
+    log = dict(frames=n_frames, fps=plan.fps, size=[plan.W, plan.H], gl=rt.gl if rt else None, gl_version=rt.gl_version if rt else None,
+               engine=C.ENGINE_VERSION,
                shaders=plan.doc.get("shaders"), plan=plan.sha, tier=tier, seconds=round(time.time() - t0, 2), picture_seconds=round(t_pic, 2),
-               stage_ms={k: round(1000 * v / max(rt.n[k], 1), 3) for k, v in rt.t.items()}, stage_frames=dict(rt.n),
+               stage_ms={k: round(1000 * v / max(rt.n[k], 1), 3) for k, v in rt.t.items()} if rt else {}, stage_frames=dict(rt.n) if rt else {},
                decoded=rd.decoded if rd else 0, seeks=rd.seeks if rd else 0, sprites=len(plan.sprites),
                segments=len(plan.segments), segments_drawn=len(segs_log), segment_log=segs_log, audio=rep,
                degraded=plan.doc.get("degraded") or [], cost_s=plan.doc.get("cost_s"), warnings=plan.warn)
     with open(out + ".log.json", "w") as f:
         json.dump(log, f, indent=1)
     prog.say("done", n_frames, force=True)
-    e.close()
+    if e:
+        e.close()
     return log
 
 
@@ -347,12 +350,14 @@ def check_film(plan_of, film, short=3):
                 good = False
                 shot_misses.append(dict(id=it["id"], f=x, own=round(own, 2), cross=[round(c, 2) for c in cross]))
         shots_ok += good
+    newer = sorted(aid for aid, a_ in plan.assets.items() if os.path.getmtime(a_["abs"]) > os.path.getmtime(film))
+    # "plays": a full decode of both streams with nothing to report, and their lengths
     r = subprocess.run([FF, "-hide_banner", "-nostdin", "-v", "error", "-i", film, "-f", "null", "-"], capture_output=True, text=True, timeout=900)
     q = subprocess.run([FP, "-v", "error", "-show_entries", "stream=codec_type,duration", "-of", "json", film], capture_output=True, text=True, timeout=60)
     dur = {x["codec_type"]: float(x.get("duration") or 0) for x in json.loads(q.stdout or "{}").get("streams", [])}
     return dict(frames_in_file=n, frames_planned=plan.dur, short_flashes=len(want), stacked=stacked, on_exact_frames=sum(rows), misses=misses[:20],
                 short_shots=len(salvo), short_shots_on_exact_frames=shots_ok, short_frames_too_alike_to_tell=too_alike, shot_misses=shot_misses[:20],
-                decode_errors=r.stderr.strip()[:300], video_s=dur.get("video"), audio_s=dur.get("audio"))
+                sources_newer_than_film=newer, decode_errors=r.stderr.strip()[:300], video_s=dur.get("video"), audio_s=dur.get("audio"))
 
 
 def _frames(spec):

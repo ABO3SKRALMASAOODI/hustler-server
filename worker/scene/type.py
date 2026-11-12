@@ -49,12 +49,12 @@ def voice_font(v):
         return find_font(v["font"]), v.get("var")
     if v.get("family"):
         from typeset import shaping
-        spec = shaping.match(v["family"], int(v.get("weight", 400)), v.get("style", "normal"), float(v.get("stretch", 100.0)))
-        if spec is None:
+        try:
+            spec = shaping.FontSpec(v["family"], int(v.get("weight", 400)), v.get("style", "normal"), float(v.get("stretch", 100.0)),
+                                    extra=v.get("var"))
+        except KeyError:
             raise FileNotFoundError(v["family"])
-        var = dict(getattr(spec, "variations", None) or {})
-        var.update(v.get("var") or {})
-        return spec.path, (var or None)
+        return spec.face["path"], (dict(spec.variations) or None)
     raise FileNotFoundError("voice names no font")
 
 

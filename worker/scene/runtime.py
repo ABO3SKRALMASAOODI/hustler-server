@@ -422,7 +422,9 @@ class Runtime:
         br = it.get("blur", 0) or 0
         b_now = float(A(br, f, lo)) * W / 1080.0
         X, Y = float(A(it.get("x", 0), f, lo)) * W + spr["dx"], float(A(it.get("y", 0), f, lo)) * H
-        if abs(s_now - 1.0) < 0.0025:            # a word at rest sits on the pixel grid, so it stays crisp
+        # A word at rest sits on the pixel grid, so it stays crisp. The margin keeps a value that sits
+        # exactly on the line (1.0025, as a Score rounds it) at rest after its trip through Float32.
+        if abs(s_now - 1.0) < 0.0025 + 1e-6:
             s_now = 1.0
             if held(it.get("x"), f, lo):
                 X = float(round(X))
@@ -456,6 +458,14 @@ class Runtime:
             hx, hy = (hx, hy / k) if k > 1 else (hx * k, hy)
             pf["tex"].use(2)
             self.U(p, uFill=1, uFillCrop=(mx - hx, my - hy, mx + hx, my + hy))
+            if fill.get("frame"):
+                # a window onto the picture as a shot would show it: same crop, same sampling, same grade
+                g = {**IDENTITY, **(fill.get("grade") or self.plan.film.get("grade") or {})}
+                if (c[2] - c[0]) * pf["w"] > W * 1.05 and not pf.get("mips"):
+                    pf["tex"].build_mipmaps()
+                    pf["mips"] = True
+                self.U(p, uFill=3, uFillCrop=tuple(c), uFillSize=(pf["w"], pf["h"]), uFG0=(g["lift"], g["gamma"], g["gain"]),
+                       uFG1=(g["sat"], g["contrast"], g["temp"]), uFTint=g["tint"])
         elif st and PLATES.get(st.get("kind")) == 2:
             kk = W / 1080.0
             self.noise_tex.use(2)

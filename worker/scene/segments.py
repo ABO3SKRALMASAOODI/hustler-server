@@ -17,6 +17,9 @@ from .faults import SceneFault
 from .plan import ANIM, ANIM_RECT, canon
 
 MIN_S, MAX_S = 1.5, 4.0
+# what an item carries for logs and lowering, not for pixels: left out of a segment's hash (``on`` is
+# an absolute frame, and would move every hash after a ripple)
+NOT_DRAWN = ("f", "on", "chunk", "role")
 CAP_BYTES = 20 * 1024 ** 3
 MAX_AGE_S = 7 * 86400
 FF = os.environ.get("FFMPEG_BIN", "ffmpeg")
@@ -79,7 +82,7 @@ def stamp(d):
             lo, hi = max(it["f"][0], a), min(it["f"][1], b)
             if hi <= lo:
                 continue
-            o = {k: v for k, v in it.items() if k != "f"}
+            o = {k: v for k, v in it.items() if k not in NOT_DRAWN}
             o["f"] = [it["f"][0] - a, it["f"][1] - a]
             for k in ANIM.get(it["k"], ()):
                 if isinstance(o.get(k), list):
@@ -118,14 +121,19 @@ def order(segs):
 # ------------------------------------------------------------------ the cache
 
 def cache_dir():
-    d = os.environ.get("VALMERA_SCENE_CACHE")
-    if not d:
-        d = "/var/lib/valmera/cache/scene"
-        if not os.access(os.path.dirname(os.path.dirname(d)), os.W_OK) and not os.path.isdir(d):
-            base = os.path.expanduser("~/Library/Caches") if sys.platform == "darwin" else tempfile.gettempdir()
-            d = os.path.join(base, "valmera", "scene")
-    os.makedirs(d, exist_ok=True)
-    return d
+    """VALMERA_SCENE_CACHE, else the box's cache folder, else this user's, else a temp folder."""
+    home = os.path.expanduser("~/Library/Caches") if sys.platform == "darwin" else os.path.expanduser("~/.cache")
+    for d in (os.environ.get("VALMERA_SCENE_CACHE"), "/var/lib/valmera/cache/scene", os.path.join(home, "valmera", "scene"),
+              os.path.join(tempfile.gettempdir(), "valmera-scene")):
+        if not d:
+            continue
+        try:
+            os.makedirs(d, exist_ok=True)
+            if os.access(d, os.W_OK):
+                return d
+        except OSError:
+            continue
+    raise SceneFault("segment", "no writable folder for the segment cache")
 
 
 def seg_path(cache, sha, enc):

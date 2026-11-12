@@ -15,9 +15,26 @@ uniform float uGlow;
 uniform float uBlur;       // sigma, sprite texels
 uniform int uBlend;        // 0 normal, 1 difference, 2 multiply
 uniform int uFade;         // 1: a reflection, strongest at the baseline, gone at the top of the sprite
-uniform int uFill;         // 1: the letters are a window onto a picture laid over the whole frame. 2: onto static
+uniform int uFill;         // 1: the letters hold a picture, fitted to their block. 2: static. 3: a window onto a picture
+                           //    laid over the whole frame, sampled and graded as a shot is, so it registers to that shot
 uniform sampler2D uFillTex;
 uniform vec4 uFillCrop;
+uniform vec2 uFrame;
+uniform vec2 uFillSize;    // 3: the picture's size, texels
+uniform vec3 uFG0;         // 3: lift, gamma, gain
+uniform vec3 uFG1;         // 3: sat, contrast, temp
+uniform float uFTint;
+
+vec3 window(vec2 px) {
+  vec2 uv = mix(uFillCrop.xy, uFillCrop.zw, px / uFrame);
+  float tpp = (uFillCrop.z - uFillCrop.x) * uFillSize.x / uFrame.x;
+  vec3 c = tpp > 1.05 ? textureLod(uFillTex, uv, log2(tpp)).rgb : catrom(uFillTex, uv, uFillSize);
+  c = pow(max(c + uFG0.x, vec3(0.0)), vec3(1.0 / uFG0.y)) * uFG0.z;
+  c = mix(vec3(luma(c)), c, uFG1.x);
+  c = (c - 0.5) * uFG1.y + 0.5;
+  c.r += uFG1.z; c.b -= uFG1.z; c.g += uFTint;
+  return c;
+}
 uniform vec3 uStatic;      // cell px, scroll px, seed
 uniform vec3 uFillC0;
 uniform vec3 uFillC1;
@@ -50,6 +67,7 @@ void main() {
     vec3 ink = uInk;
     if (uFill == 1) ink = texture(uFillTex, mix(uFillCrop.xy, uFillCrop.zw, v)).rgb;
     if (uFill == 2) ink = mix(uFillC0, uFillC1, static_bit(gl_FragCoord.xy, uStatic.x, uStatic.y, uStatic.z));
+    if (uFill == 3) ink = window(gl_FragCoord.xy);
     vec3 rgb = ink * clamp(cov * uOp + gl * (1.0 - cov * uOp), 0.0, 1.0);
     float a = 1.0 - (1.0 - cov * uOp) * (1.0 - gl) * (1.0 - sh);
     if (stroke > 0.0) {      // the stroke sits under the letter and over its shadow
