@@ -186,7 +186,7 @@ LEDGER_SCHEMA = {
 
 LEDGER_SYSTEM = """You read what a customer typed to a video editor and list each thing they asked for: the ask ledger. You don't edit anything.
 
-One ask per thing they really asked for, none invented, none merged away. A list of five wishes is five asks. Small talk, thanks and descriptions of the upload are not asks. What they asked to keep or avoid is an ask of kind keep. A question is an ask of kind answer.
+One ask per thing they really asked for, none invented, none merged away. A list of five wishes is five asks. Small talk, thanks and descriptions of the upload are not asks. What they asked to keep or avoid is an ask of kind keep. A question is an ask of kind answer. An ask with a condition and its alternative ("make X; if you can't, explain why and stop") is one ask: its pass is met by either branch done honestly, and the alternative is never a separate ask.
 
 kind:
 - film: make or remake the whole film from their upload: an edit throughout, a new style for the entire video, a short or reel from it, a full post-production pass. Their words are about the upload, so this is done on the full upload, never on an automatic first cut the product made by itself.
