@@ -364,7 +364,8 @@ def search(query, kind=KIND_VIDEO, orientation=None, count=MAX_RESULTS):
     if kind == KIND_PHOTO:
         lanes.append(("openverse", _openverse_search))
     errors, got = [], {}
-    with ThreadPoolExecutor(max_workers=max(1, len(lanes))) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, len(lanes)) + 1) as pool:
+        named_f = pool.submit(_named_subjects, query) if NAMED_ROUTE else None
         futures = {pool.submit(fn, query, kind, orientation, count): name
                    for name, fn in lanes}
         for future in as_completed(futures):
@@ -374,6 +375,14 @@ def search(query, kind=KIND_VIDEO, orientation=None, count=MAX_RESULTS):
             except Exception as e:
                 # One provider being down must not take the capability with it.
                 errors.append(f"{name}: {str(e)[:120]}")
+        subjects = named_f.result() if named_f is not None else []
+    if subjects:
+        # The words name a real person, place, brand or event: no library
+        # lookalike stands in for it. Every candidate, the stock hits
+        # included, faces one check that it shows the subject.
+        return _named_hits(subjects, kind, count,
+                           [h for name, _fn in lanes
+                            for h in got.get(name) or []])
     if got.get("openverse"):
         import broll_source
         got["openverse"], note = broll_source.drop_ai_made(got["openverse"])
@@ -385,6 +394,47 @@ def search(query, kind=KIND_VIDEO, orientation=None, count=MAX_RESULTS):
     if errors and len(errors) == len(lanes):
         raise StockError("; ".join(errors))
     return []
+
+
+NAMED_ROUTE = os.getenv("STOCK_NAMED_ROUTE", "1").strip() != "0"
+LAST_NAMED = {}     # query, folded -> the named route's last report
+
+
+class NamedNotFound(StockError):
+    """The words name a real subject and no picture passed the check that
+    it shows it. The message is the sentence to tell the customer."""
+
+
+def _named_subjects(query):
+    """The real subjects the query names, by a model. [] on no answer: the
+    search then runs as a plain library search, as before the route."""
+    import broll_source
+    try:
+        return broll_source.name_subjects(query)[0]
+    except Exception as e:  # noqa: BLE001 — no naming, no named route
+        print(f"[stock] naming: {str(e)[:120]}", flush=True)
+        return []
+
+
+def _named_hits(subjects, kind, count, also):
+    """Checked pictures of every named subject, best first; NamedNotFound
+    with the honest sentence when none passed."""
+    import broll_source
+    out, says = [], []
+    for sub in subjects[:2]:
+        kept, rep = broll_source.find_named(sub, kind, count, also=also)
+        LAST_NAMED[sub["name"].casefold()] = rep
+        out.extend(kept)
+        if rep.get("say"):
+            says.append(rep["say"])
+    if not out:
+        raise NamedNotFound(" ".join(says) or "no checked picture was found")
+    seen, uniq = set(), []
+    for h in out:
+        if h["id"] not in seen:
+            seen.add(h["id"])
+            uniq.append(h)
+    return uniq[:count]
 
 
 def resolve(item, want_w, want_h):
