@@ -220,29 +220,33 @@ def _bin(tmp_path, n=3):
     return str(tmp_path), items, wishes
 
 
-def test_a_found_picture_the_check_rejects_never_enters_the_bin(tmp_path, monkeypatch):
+def test_a_found_picture_the_last_look_would_remove_never_enters_the_bin(tmp_path, monkeypatch):
+    """12 Nov: the last look removed a found picture on 5 of 7 films. The Bin now asks the last look's own
+    question, with its prompt and its model, on the same pairs, before a picture may enter."""
     work, items, wishes = _bin(tmp_path)
     seen = {}
 
     def fake(model, system, content, **kw):
-        seen.update(model=model, purpose=kw["purpose"], images=sum(1 for c in content if c.get("type") == "image"), text=content[-1]["text"])
-        return NS(text='{"fit":[{"n":0,"ok":true,"why":"a wardrobe"},{"n":1,"ok":false,"why":"chipboard and a screw"},{"n":2,"ok":true,"why":"a shop"}]}', usd=0.0021)
+        seen.update(model=model, system=system, purpose=kw["purpose"], images=sum(1 for c in content if c.get("type") == "image"), text=content[-1]["text"])
+        return NS(text='{"pairs":[{"n":1,"post":"film","why":"a wardrobe","remove":[]},{"n":2,"post":"upload","why":"chipboard","remove":["b1.s1"]},'
+                       '{"n":3,"post":"same","why":"a shop","remove":[]}]}', usd=0.0121)
     monkeypatch.setattr(supply.call, "stream", fake)
     kept, usd, rep = supply.check_fit(work, items, wishes, 1e12)
-    assert [k["id"] for k in kept] == [0, 2] and usd == 0.0021
-    assert seen["model"] == supply.LOOK_MODEL and seen["purpose"] == "director_bin_check" and seen["images"] == 3
-    assert "palavra" in seen["text"] and "a wardrobe" in seen["text"]
+    from score import taste
+    assert [k["id"] for k in kept] == [0, 2] and usd == 0.0121
+    assert seen["model"] == supply.CHECK_MODEL and seen["system"] == taste.LOOK_SYSTEM and seen["purpose"] == "director_bin_check"
+    assert seen["images"] == 1 and "b1.s1: a found picture, full frame" in seen["text"] and "palavra" in seen["text"]
     ren = supply.renumber(work, kept)
     assert [r["id"] for r in ren] == [0, 1] and ren[1]["path"] == "bin/1.jpg" and ren[1]["storage_key"] == "k2"
     assert os.path.exists(os.path.join(work, "bin", "1.jpg"))
 
 
-def test_no_verdict_keeps_only_what_the_look_chose(tmp_path, monkeypatch):
+def test_no_verdict_keeps_only_the_pictures_already_checked_to_show_their_subject(tmp_path, monkeypatch):
     work, items, wishes = _bin(tmp_path)
-    items[1]["_looked"] = False                       # the library-order fallback: no model ever saw it
+    items[1]["named"] = "Oscar Piastri"
 
     def boom(*a, **k):
         raise TimeoutError("late")
     monkeypatch.setattr(supply.call, "stream", boom)
     kept, usd, rep = supply.check_fit(work, items, wishes, 1e12)
-    assert [k["id"] for k in kept] == [0, 2] and usd == 0.0 and rep[0]["dropped"] == [1]
+    assert [k["id"] for k in kept] == [1] and usd == 0.0 and rep[-1]["check_error"]

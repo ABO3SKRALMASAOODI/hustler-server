@@ -472,7 +472,14 @@ def _smaller_renditions(files, picked_w, picked_h):
 
 
 def download(item, out_path, want_w, want_h):
-    """Fetch the chosen rendition to out_path. Returns the item, annotated."""
+    """Fetch the chosen rendition to out_path. Returns the item, annotated.
+    A designed picture is drawn from its spec here, on whichever worker
+    acquires it: it has no URL and needs none."""
+    import broll_source
+    if item.get("provider") == broll_source.DESIGNED:
+        broll_source.draw_designed(item, out_path, want_w, want_h)
+        item["source_url"] = "designed"
+        return item
     url, cap = resolve(item, want_w, want_h)
     try:
         net_fetch.download(url, out_path, max_bytes=cap,

@@ -271,6 +271,8 @@ def pick_times(per, n):
             evs += [float(e["t"][0]), float(sum(e["t"]) / 2)]
     out = []
     for (a, b), k in zip(shots, alloc):
+        if k <= 0:              # a shot the allowance passed over (p5554, 45 s with no words: the Director fell here)
+            continue
         base = np.linspace(a + min(0.15, (b - a) / 4), b - min(0.15, (b - a) / 4), k)
         tol = (b - a) / k * 0.45
         used = set()
@@ -486,11 +488,16 @@ def bin_part(work):
         line += f" {it.get('w')}x{it.get('h')} {it.get('what', '')}".rstrip()
         if it.get("for"):
             line += f" (for {it['for']})"
-        if any(r.get("text") for r in it.get("seen") or []):
+        if it.get("design"):
+            line += ". Designed from the words said there: it is type, so no type goes on it"
+        elif any(r.get("text") for r in it.get("seen") or []):
             line += ". Holds printed words"
         if any(r.get("faces") for r in it.get("seen") or []):
-            line += ". Holds a stranger's face"
+            line += f". Shows {it['named']}, as the words name" if it.get("named") else ". Holds a stranger's face"
         out.append(line)
+    if b.get("own_lines"):
+        out.append("The upload's own moments, re-framed for what only it shows; on the board after the found pictures, used as written:")
+        out += b["own_lines"]
     if b.get("plates"):
         out.append("Plates ready for any beat: " + " ".join(f"{p['id']} {p['c0']}>{p['c1']} ({p.get('why', '')})" for p in b["plates"]))
     return out, os.path.join(work, "bin_board.jpg")

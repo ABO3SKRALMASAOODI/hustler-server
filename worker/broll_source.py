@@ -1013,6 +1013,116 @@ def find_named(subject, kind=KIND_PHOTO, count=6, also=(), workdir=None,
     return kept[:max(1, count)], report
 
 
+# ── designed pictures ────────────────────────────────────────────────────
+# Where no real picture shows what is said, a picture made of what is said:
+# the number, the two sides, the steps, the dates (score/boards.designed).
+# A model reads the words and decides; nothing here reads them by rule.
+
+DESIGN_MODEL = os.environ.get("DESIGN_PICTURE_MODEL", NAMED_MODEL)
+DESIGN_S = 12.0
+DESIGNED = "designed"
+DESIGN_LICENCE = "Designed by Valmera from the film's own words"
+
+DESIGN_SYSTEM = """You read moments of a short film for its picture editor. You get the words said at each moment, in any language. For each moment answer two things.
+
+"thing": the one concrete, photographable thing the words name or plainly point to, in two to five plain English words a stock library would know ("airline cockpit", "fishing nets on a boat deck", "turmeric root"), or "" when the words name nothing a camera could film: an idea, a feeling, an opinion, a greeting. Never a mood or a metaphor for the words.
+
+"design": a picture made of the words themselves, only when they carry something a designed picture shows better than the person saying it: a figure ("number"), two named sides with their values ("versus"), steps or items in a row ("list"), amounts to compare ("bars", each part with its number in "n"), dates in order ("timeline"), or a technical term with its plain meaning ("term"). Otherwise null: a sentence, a claim, a feeling or anything a caption already says is never a design. Every word and number on it comes from the words given, never a fact, figure, date or name they do not say. Write it in the language of the words. Short: a value at most twelve characters, a label at most five words, a title at most four words or empty.
+
+Answer with one JSON object and nothing else: {"moments":[{"m":0,"thing":"fishing nets on a boat deck","design":null},{"m":1,"thing":"","design":{"kind":"number","title":"","parts":[{"value":"150 years","label":"before she can breed"}],"what":"at most eight plain words on what it shows"}}]}, one entry per moment."""
+
+_GLYPHS = {}
+
+
+def _covers(text):
+    """True when the designed picture's faces hold a glyph for every
+    character: a word the font cannot draw would come out as boxes."""
+    if "cmap" not in _GLYPHS:
+        try:
+            from fontTools.ttLib import TTFont
+            from score import boards
+            _GLYPHS["cmap"] = set(TTFont(os.path.join(
+                os.path.dirname(boards.FONT), "InterDisplay-Black.ttf"))
+                .getBestCmap())
+        except Exception:  # noqa: BLE001 — no table read: Latin only
+            _GLYPHS["cmap"] = set(range(0x20, 0x250))
+    cmap = _GLYPHS["cmap"]
+    return all(ord(ch) in cmap or ch.isspace() for ch in str(text))
+
+
+def read_moments(texts, accent=None, budget_s=None):
+    """(list of {"thing", "design"} per text, usd) by one model call: the
+    photographable thing each moment's words name, and the designed picture
+    its words carry (a spec for score/boards.designed, or None). Raises when
+    the model did not answer; every caller keeps the moment without them."""
+    import time
+    from score import boards, call
+    if not texts:
+        return [], 0.0
+    lines = [f"moment {i}: {str(t)[:360]}" for i, t in enumerate(texts)]
+    r = call.stream(DESIGN_MODEL, DESIGN_SYSTEM,
+                    [{"type": "text", "text": "\n".join(lines)}],
+                    max_tokens=2400, effort="low", purpose="designed_picture",
+                    thinking=False,
+                    deadline=time.monotonic() + (budget_s or DESIGN_S))
+    out = [{"thing": "", "design": None} for _ in texts]
+    for o in _objects(r.text):
+        m = o.get("m")
+        if not isinstance(m, int) or not 0 <= m < len(texts):
+            continue
+        if "thing" in o:
+            out[m]["thing"] = _clip(o.get("thing") or "", 60)
+        d = o.get("design") if isinstance(o.get("design"), dict) else \
+            (o if o.get("kind") else None)
+        spec = boards.design_spec(dict(d, accent=accent or "#E8B23A")) \
+            if d else None
+        if spec is None:
+            continue
+        words = [spec["title"]] + [p["label"] + " " + p["value"]
+                                   for p in spec["parts"]]
+        if not _covers(" ".join(words)):
+            continue
+        spec["what"] = _clip(d.get("what") or spec["kind"], 80)
+        out[m]["design"] = spec
+    return out, float(r.usd or 0.0)
+
+
+def design_specs(texts, accent=None, budget_s=None):
+    """(spec or None per text, usd): the designed pictures alone."""
+    got, usd = read_moments(texts, accent, budget_s)
+    return [g["design"] for g in got], usd
+
+
+def designed_hit(spec, orientation="portrait"):
+    """A designed picture as a library hit: stock.download draws it from
+    the spec on whichever worker acquires it, so it travels like any hit."""
+    import hashlib
+    W, H = (1920, 1080) if orientation == "landscape" else \
+        (1080, 1080) if orientation == "square" else (1080, 1920)
+    key = json.dumps({k: spec.get(k) for k in ("kind", "title", "parts",
+                                                "accent", "page")},
+                     sort_keys=True, ensure_ascii=False)
+    hid = "designed:" + hashlib.sha1(
+        f"{key}|{W}x{H}".encode()).hexdigest()[:14]
+    what = spec.get("what") or spec["kind"]
+    return {"id": hid, "provider": DESIGNED, "kind": KIND_PHOTO,
+            "width": W, "height": H, "license": DESIGN_LICENCE,
+            "license_url": None, "credit": "Valmera", "title": what,
+            "description": f"DESIGNED {spec['kind']}: {what}",
+            "design": {k: spec.get(k) for k in ("kind", "title", "parts",
+                                                "accent", "page")}}
+
+
+def draw_designed(item, out_path, want_w=None, want_h=None):
+    """The designed hit's picture, drawn at its own size, as a JPEG."""
+    from score import boards
+    W = int(item.get("width") or want_w or 1080)
+    H = int(item.get("height") or want_h or 1920)
+    im = boards.designed(boards.design_spec(item.get("design")), W, H)
+    im.save(out_path, "JPEG", quality=92)
+    return out_path
+
+
 # ── fetching and checking ────────────────────────────────────────────────
 
 _MAGIC = ((b"\xff\xd8\xff", "jpeg"), (b"\x89PNG\r\n\x1a\n", "png"),

@@ -29,6 +29,8 @@ LOOK_MODEL = "claude-haiku-5-5"
 def licence_class(item):
     """SOURCING 6: A free to use, B with credit. Anything else never reaches the Bin."""
     prov = item.get("provider")
+    if prov == "designed":
+        return "A", "Designed by Valmera from the film's own words", None
     if prov == "pexels":
         return "A", "Pexels License", "https://www.pexels.com/license/"
     lic = str(item.get("license") or "")
@@ -51,7 +53,7 @@ def search_wish(stock, broll, wish):
     Pexels and Commons run as separate lanes, so neither waits on the other."""
     t0 = time.time()
     kind = "photo" if wish.get("kind") == "photo" else "video"
-    qs = [q for q in (wish.get("q") or []) if q][:2]
+    qs = [q for q in (wish.get("q") or []) if q][:1]     # the second search is the words' own thing (search_thing)
     pool = cf.ThreadPoolExecutor(max_workers=3)
     jobs = [(q, pool.submit(stock._pexels_search, q, kind, "portrait", 4)) for q in qs]
     if qs:
@@ -118,8 +120,8 @@ def contact_sheet(cands):
     return im
 
 
-LOOK_SYSTEM = """You help a film researcher. You see numbered stock candidates and a list of wishes from a film. Keep the pictures an art director would be proud of: they plainly show what the wish wants, they feel like an advert or a film, not a stock catalogue: real light, a clear subject, restraint. Prefer dark, rich or graphic frames over flat catalogue shots. Drop anything off-subject, cheesy, watermarked, staged with grinning models, generic sale or discount signs, or showing a product the film doesn't sell, or a lookalike of what the customer sells. Drop any person who could be taken for the speaker, or who stands in for the speaker: this film already has its person. Objects, hands, textures and places travel; a stranger's face doesn't.
-Answer with one JSON object and nothing else: {"keep":[{"c":number,"wish":number,"what":"six to ten plain words on what the picture shows"}]}. Up to 3 for each wish, the best of each first. A wish may keep none when nothing fits: an honest gap is better than a wrong picture."""
+LOOK_SYSTEM = """You help a film researcher. You see numbered stock candidates and a list of wishes from a film. Each picture would take the whole frame in place of the person talking. Keep only pictures that show the very thing the wish names, so a viewer sees what is being said: never something loosely like it, a mood, a metaphor or a picture that is merely near the words. Of those, keep the ones an art director would be proud of: they plainly show what the wish wants, they feel like an advert or a film, not a stock catalogue: real light, a clear subject, restraint. Prefer dark, rich or graphic frames over flat catalogue shots. Drop anything off-subject, cheesy, watermarked, staged with grinning models, generic sale or discount signs, or showing a product the film doesn't sell, or a lookalike of what the customer sells. Drop any person who could be taken for the speaker, or who stands in for the speaker: this film already has its person. Objects, hands, textures and places travel; a stranger's face doesn't.
+Answer with one JSON object and nothing else: {"keep":[{"c":number,"wish":number,"what":"six to ten plain words on what the picture shows"}]}. Up to 3 for each wish, the best of each first. A wish may keep none: an honest gap is better than a picture that is only near the words."""
 
 
 def parse_keep(txt):
@@ -140,15 +142,71 @@ def parse_keep(txt):
 
 def look(sheet_path, cands, wishes, deadline):
     """One vision pick. Returns (keep list, usd)."""
-    lines = [f"wish {i}: {w.get('want')}" for i, w in enumerate(wishes)]
+    lines = [f"wish {i}: {w.get('want')}" + (f" | words said: \"{w['_said']}\"" if w.get("_said") else "")
+             + (f" | the words name: {w['_thing']}" if w.get("_thing") else "") for i, w in enumerate(wishes)]
     lines.append("Candidates by number: " + ", ".join(f"{i} for wish {x['_wish']}" for i, x in enumerate(cands)))
     r = call.stream(LOOK_MODEL, LOOK_SYSTEM, [brief.image_block(sheet_path), {"type": "text", "text": "\n".join(lines)}], max_tokens=2500, effort="low",
                     purpose="director_look", deadline=deadline, thinking=False)
     return parse_keep(r.text), r.usd
 
 
-CHECK_SYSTEM = """You check stock pictures for a short film before an editor may use them. Each numbered picture was found for one moment of the film; you get what the moment wants and the words said there. Keep a picture only when a viewer would see at once that it belongs with those words: it shows the thing, the place, the action or the feeling the words are about. Drop it when it shows something the words neither name nor suggest (a material, a tool, a room or an object that just happens to be near the search words), when it would read as a mistake next to the words, or when you cannot tell what it shows.
-Answer with one JSON object and nothing else: {"fit":[{"n":number,"ok":true or false,"why":"five to ten plain words"}]}, one entry per picture."""
+CHECK_MODEL = os.environ.get("BIN_CHECK_MODEL", "claude-opus-5-5")   # the last look's eyes: what it removes never enters
+CHECK_S = 18.0
+CHECK_RESERVE_S = 8.0      # the end of the budget belongs to the look: a picture nobody checked never enters
+
+
+def wish_second(work, w):
+    """The upload's second where a wish lands: its first word's start, or its `at`."""
+    try:
+        with open(os.path.join(work, "index.json"), encoding="utf-8") as f:
+            words = json.load(f).get("words") or []
+    except (OSError, ValueError):
+        words = []
+    s = str(w or "").strip().strip("w")
+    a = s.split("-")[0].strip() if "-" in s else s
+    if a.isdigit() and words and not isinstance(w, (int, float)):
+        try:
+            return float(words[min(int(a), len(words) - 1)].get("t0") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+    try:
+        return float(w)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def pair_board(work, rows, path, cell_h=400):
+    """rows: [(upload second, picture path)]. The upload above, the picture as the film would show it below
+    (covering the frame), numbered from 0. Returns how many pairs have both frames."""
+    src = os.path.join(work, "source.mp4")
+    first = boards.grab(src, 0.5, height=cell_h)
+    W, H = first.size if first is not None else (9, 16)
+    cw = max(80, int(cell_h * W / max(1, H)))
+    while len(rows) * (cw + 6) > 2400 and cell_h > 200:
+        cell_h -= 40
+        cw = max(80, int(cell_h * W / max(1, H)))
+    gap, head = 6, 24
+    im = Image.new("RGB", (max(1, len(rows) * (cw + gap) - gap), head + 2 * cell_h + gap), boards.BG)
+    d = ImageDraw.Draw(im)
+    with cf.ThreadPoolExecutor(max_workers=4) as pool:
+        ups = list(pool.map(lambda r: boards.grab(src, r[0], height=cell_h * 2), rows))
+    drawn = 0
+    for i, ((t, pic), up) in enumerate(zip(rows, ups)):
+        x = i * (cw + gap)
+        if up is not None:
+            im.paste(boards.fit(up, cw, cell_h), (x, head))
+        try:
+            p = Image.open(pic).convert("RGB")
+        except OSError:
+            continue
+        k = max(cw / p.width, cell_h / p.height)
+        p = p.resize((max(cw, int(p.width * k)), max(cell_h, int(p.height * k))))
+        lx, ty = (p.width - cw) // 2, (p.height - cell_h) // 2
+        im.paste(p.crop((lx, ty, lx + cw, ty + cell_h)), (x, head + cell_h + gap))
+        d.text((x + 4, 3), f"pair {i + 1}  @{t:.1f}s  upload above, film below", fill=boards.FG, font=boards.font(13))
+        drawn += 1
+    boards.save(im, path, quality=86)
+    return drawn
 
 
 def clause_of(work, w):
@@ -175,42 +233,68 @@ def clause_of(work, w):
 
 
 def check_fit(work, items, wishes, deadline):
-    """Before a found picture enters the Bin, a model looks at it against the moment it is for and
-    drops it when it doesn't belong there (p5302: chipboard and a screw in a furniture promo; p5374: a
-    bathroom tap in a night song). The cheapest vision model already wired, one call for the Bin.
-    Returns (kept items, usd, report). No answer keeps only what the Look itself chose."""
+    """Before a picture enters the Bin it faces the last look itself (taste.LOOK_SYSTEM, its model, its
+    pairs): the upload at the picture's moment above, the picture full frame below, the words said there as
+    the caption. It stays only when the look would leave it in the film (12 Nov: the last look removed a
+    found picture on 5 of 7 films as "a library picture of something loosely like it, in place of the
+    person talking"; each removal cost a second render). Returns (kept items, usd, report). No answer
+    keeps only the named pictures, which a check that each shows its subject already passed."""
+    from . import taste
     if not items:
         return items, 0.0, []
     tmp = tempfile.mkdtemp(prefix="check-", dir=work)
     try:
-        content, lines = [], []
-        for n, it in enumerate(items):
-            im = Image.open(os.path.join(work, it["path"])).convert("RGB")
-            im.thumbnail((448, 448))
-            p = os.path.join(tmp, f"{n}.jpg")
-            im.save(p, quality=85)
+        rows, saids = [], []
+        for it in items:
             w0 = wishes[it["wish"]] if 0 <= int(it.get("wish", -1)) < len(wishes) else {}
-            content += [{"type": "text", "text": f"picture {n}"}, brief.image_block(p)]
-            said = clause_of(work, w0.get("w") or w0.get("at"))
-            lines.append(f"picture {n}: the moment wants: {w0.get('want') or it.get('what') or ''}" + (f" | words said there: \"{said}\"" if said else ""))
-        content.append({"type": "text", "text": "\n".join(lines)})
-        try:
-            r = call.stream(LOOK_MODEL, CHECK_SYSTEM, content, max_tokens=1200, effort="low", purpose="director_bin_check",
-                            deadline=min(deadline, time.monotonic() + 15.0), thinking=False)
-        except Exception as e:  # noqa: BLE001 no verdict: a picture no model chose does not go in
-            kept = [it for it in items if it.get("_looked")]
-            return kept, 0.0, [dict(check_error=str(e)[:120], dropped=[it["id"] for it in items if not it.get("_looked")])]
-        verdict = {}
-        for o in parse_keep(r.text.replace('"n"', '"c"')):
-            if isinstance(o.get("c"), int):
-                verdict[o["c"]] = (o.get("ok") is True, str(o.get("why") or "")[:80])
+            ref = w0.get("w") or w0.get("at")
+            rows.append((wish_second(work, ref), os.path.join(work, it["path"])))
+            saids.append(clause_of(work, ref))
+        verdict, usd, errors = {}, 0.0, []
+        n_pairs = taste.LOOK_PAIRS
+
+        def one(k):
+            chunk = list(range(k, min(len(items), k + n_pairs)))
+            board = os.path.join(tmp, f"pairs_{k}.jpg")
+            pair_board(work, [rows[n] for n in chunk], board)
+            ask = ["The pairs, with what the editor added at each moment:"]
+            for j, n in enumerate(chunk, 1):
+                ask.append(f"pair {j} @{rows[n][0]:.1f}s: b{n}.s1: a found picture, full frame"
+                           + (f"; cap: the caption, reading {saids[n]}" if saids[n] else ""))
+            ask.append("Now the JSON.")
+            r = call.stream(CHECK_MODEL, taste.LOOK_SYSTEM, [brief.image_block(board), {"type": "text", "text": "\n".join(ask)}],
+                            max_tokens=1200, effort="low", purpose="director_bin_check",
+                            deadline=min(deadline, time.monotonic() + CHECK_S), thinking=False)
+            return chunk, r
+        with cf.ThreadPoolExecutor(max_workers=2) as pool:
+            for fut in [pool.submit(one, k) for k in range(0, len(items), n_pairs)]:
+                try:
+                    chunk, r = fut.result()
+                except Exception as e:  # noqa: BLE001 that board has no verdict
+                    errors.append(str(e)[:120])
+                    continue
+                usd += float(r.usd or 0.0)
+                v = taste.read_look(r.text, len(chunk), {f"b{n}.s1" for n in chunk})
+                pairs = []
+                try:
+                    pairs = json.loads(r.text[r.text.find("{"):r.text.rfind("}") + 1]).get("pairs") or []
+                except (ValueError, AttributeError):
+                    pass
+                if v is None:
+                    continue
+                for j, n in enumerate(chunk):
+                    p = pairs[j] if j < len(pairs) and isinstance(pairs[j], dict) else {}
+                    post = str(p.get("post", "")).strip().lower()
+                    verdict[n] = (f"b{n}.s1" not in v["remove"] and post in ("film", "same"), str(p.get("why") or "")[:100])
         kept, rep = [], []
         for n, it in enumerate(items):
-            ok, why = verdict.get(n, (bool(it.get("_looked")), "no verdict"))
-            rep.append(dict(id=it["id"], what=it.get("what"), ok=ok, why=why))
+            ok, why = verdict.get(n, (bool(it.get("named")) if errors else False, "no verdict"))
+            rep.append(dict(id=it["id"], what=it.get("what"), designed=it.get("provider") == "designed", ok=ok, why=why))
             if ok:
                 kept.append(it)
-        return kept, r.usd, rep
+        if errors:
+            rep.append(dict(check_error="; ".join(errors)[:200]))
+        return kept, usd, rep
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -335,11 +419,71 @@ def named_for(work, wish, subject, hits, deadline):
     return broll_source.find_named(subject, kind, 3, also=hits, workdir=work, deadline=deadline)
 
 
+# ------------------------------------------------------------------ designed pictures
+
+MAX_DESIGNED = 4
+
+
+def accent_of(per):
+    """The film's own strongest colour for a designed picture's accent, when it reads on a dark page."""
+    hot = plates_for(per or {}, 1, None)[0]["c0"]
+    try:
+        r, g, b = (int(hot[i:i + 2], 16) for i in (1, 3, 5))
+    except ValueError:
+        return "#E8B23A"
+    return hot if (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 >= 0.38 else "#E8B23A"
+
+
+def reads_for(work, wishes, per):
+    """(per wish {"thing", "design"} or None, usd): the photographable thing each moment's words name, for
+    a library search by that very thing, and a designed picture where the words carry a number, two sides,
+    steps, dates or a term, made only of what is said. One model call reads the words; nothing here does.
+    Wordless moments and the customer's own get none."""
+    import broll_source
+    texts, idx = [], []
+    for i, w in enumerate(wishes):
+        if w.get("mine"):
+            continue
+        said = clause_of(work, w.get("w") or w.get("at"))
+        if len(said.split()) < 3:
+            continue
+        texts.append(said)
+        idx.append(i)
+    out = [None] * len(wishes)
+    if not texts:
+        return out, 0.0
+    got, usd = broll_source.read_moments(texts, accent=accent_of(per))
+    for j, g in zip(idx, got):
+        out[j] = g
+    return out, usd
+
+
+def search_thing(stock, wish, thing, budget_s):
+    """Library hits for the very thing a moment's words name, in place of the Scout's second search (the
+    same one library call per wish as before: the Pexels key's hourly allowance is shared by every film)."""
+    kind = "photo" if wish.get("kind") == "photo" else "video"
+    pool = cf.ThreadPoolExecutor(max_workers=1)
+    futs = [pool.submit(stock._pexels_search, thing, kind, "portrait", 4)]
+    out = []
+    t0 = time.monotonic()
+    for fut in futs:
+        try:
+            r = fut.result(timeout=max(0.05, budget_s - (time.monotonic() - t0)))
+        except Exception:  # noqa: BLE001 late or down: the wish keeps what it has
+            continue
+        for it in (r[0] if isinstance(r, tuple) else r) or []:
+            if licence_class(it)[0] and it.get("_thumb") and not (it.get("kind") == "video" and (it.get("duration_s") or 0) < 2):
+                it["_q"] = thing
+                out.append(it)
+    pool.shutdown(wait=False, cancel_futures=True)
+    return out
+
+
 # ------------------------------------------------------------------ the upload's own moments
 
 OWN_FRAMES = 16
-OWN_ZOOM_MAX = 2.5
-OWN_SYSTEM = """You help a film editor re-use the customer's own footage. You see numbered frames from the upload with their times, and moments of the film that want a picture. For each moment, find a frame whose detail shows what the moment wants better than a wide shot: the product, hands at work, a sign, a tool, a place, a gesture, the thing the words are about. Give the box around that detail as fractions of the frame, x0 y0 x1 y1 from the top left, tight on it but never cutting it. Only a detail that is plainly there and still reads when enlarged up to 2.5 times. Leave a moment out when no frame holds it.
+OWN_ZOOM_MAX = 2.0
+OWN_SYSTEM = """You help a film editor re-use the customer's own footage. You see numbered frames from the upload with their times, and moments of the film that want a picture, each with the second it lands and what is said there. For each moment, find a frame from ANOTHER time whose detail shows the very thing the words name, better than the frame at that moment does: the product, hands at work, a sign, a tool, a place, a gesture. Give the box around that detail as fractions of the frame, x0 y0 x1 y1 from the top left, tight on it but never cutting it, never cutting a head or printed words. Only a detail that is plainly there, sharp, and still reads when enlarged up to 2 times. Leave a moment out when no other frame shows its thing better than the moment itself, or when the words name nothing a frame could show: most moments are left out.
 Answer with one JSON object and nothing else: {"own":[{"m":moment number,"f":frame number,"box":[x0,y0,x1,y1],"what":"at most eight plain words"}]}."""
 
 
@@ -408,7 +552,11 @@ def own_moments(work, wishes, per, deadline):
             return [], 0.0
         path = os.path.join(tmp, "own.jpg")
         boards.save(sheet, path, quality=82)
-        lines = [f"moment {j}: {w.get('want')}" for j, (_i, w) in enumerate(want)]
+        lines = []
+        for j, (_i, w) in enumerate(want):
+            ref = w.get("w") or w.get("at")
+            said = clause_of(work, ref)
+            lines.append(f"moment {j} at {wish_second(work, ref):.1f}s: {w.get('want')}" + (f' | words said: "{said}"' if said else ""))
         r = call.stream(LOOK_MODEL, OWN_SYSTEM, [brief.image_block(path), {"type": "text", "text": "\n".join(lines)}],
                         max_tokens=900, effort="low", purpose="director_own", deadline=deadline, thinking=False)
         rows, seen = [], set()
@@ -417,10 +565,12 @@ def own_moments(work, wishes, per, deadline):
             if not (isinstance(j, int) and isinstance(f, int) and 0 <= j < len(want) and 0 <= f < n) or (j, f) in seen:
                 continue
             crop = reframe(o.get("box"), W, H)
-            if crop is None:
+            if crop is None or crop[3] - crop[1] > 0.87:     # no closer than the take itself: nothing re-framed
                 continue
-            seen.add((j, f))
             i, w = want[j]
+            if abs(times[f] - wish_second(work, w.get("w") or w.get("at"))) < 1.5:
+                continue                                # the same instant, enlarged: a zoom, not another moment
+            seen.add((j, f))
             t0 = max(0.0, times[f] - 0.8)
             t1 = min(dur, t0 + 2.4)
             rows.append(dict(id=f"own{len(rows)}", src=f"main@{t0:.2f}-{t1:.2f}", crop=crop, at=times[f], wish=i,
@@ -461,6 +611,22 @@ def run(work, scout, per, acquire, deadline):
     side = cf.ThreadPoolExecutor(max_workers=6)
     name_f = side.submit(broll_source.carried(name_wishes), work, wishes)
     own_f = side.submit(broll_source.carried(own_moments), work, wishes, per or {}, min(deadline, time.monotonic() + 14.0))
+    read_f = side.submit(broll_source.carried(reads_for), work, wishes, per or {})
+
+    def things_found():
+        """As soon as the words are read: each moment's very thing, searched by its name."""
+        try:
+            reads, read_usd = read_f.result(timeout=max(0.05, min(deadline - 14.0, time.monotonic() + 10.0) - time.monotonic()))
+        except Exception as e:  # noqa: BLE001 unread: the Scout's own second search stands
+            reads, read_usd = [None] * len(wishes), 0.0
+            report.append(dict(read_error=str(e)[:120] or "late"))
+        things = {i: r["thing"] for i, r in enumerate(reads) if r and r.get("thing") and not wishes[i].get("mine")}
+        second = {i: things.get(i) or ((w.get("q") or [None, None]) + [None])[1] for i, w in enumerate(wishes) if not w.get("mine")}
+        second = {i: q for i, q in second.items() if q}
+        with cf.ThreadPoolExecutor(max_workers=4) as pool:
+            more = dict(zip(second, pool.map(lambda i: search_thing(stock, wishes[i], second[i], 4.0), second)))
+        return reads, read_usd, things, more
+    thing_f = side.submit(broll_source.carried(things_found))
     t_search = time.monotonic()
     with cf.ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(lambda w: search_wish(stock, broll_source, w) if not w.get("mine") else ([], [], 0.0), wishes))
@@ -470,13 +636,23 @@ def run(work, scout, per, acquire, deadline):
     except Exception as e:  # noqa: BLE001 no naming: the libraries answer as before
         subjects = [[] for _ in wishes]
         report.append(dict(naming_error=str(e)[:120]))
+    try:
+        reads, read_usd, things, more = thing_f.result(timeout=max(0.05, min(deadline - 12.0, time.monotonic() + 5.0) - time.monotonic()))
+        usd += read_usd
+        for i, extra in more.items():
+            hits, errs, secs = results[i]
+            have = {h.get("id") for h in hits}
+            results[i] = (hits + [h for h in extra if h.get("id") not in have][:4], errs, secs)
+    except Exception as e:  # noqa: BLE001 no reading: the Scout's searches stand alone
+        reads, things = [None] * len(wishes), {}
+        report.append(dict(read_error=str(e)[:120] or "late"))
     named_f = {}
     for i, (wish, (hits, errs, secs)) in enumerate(zip(wishes, results)):
         sub = subjects[i][0] if i < len(subjects) and subjects[i] else None
         report.append(dict(wish=i, w=wish.get("w") or wish.get("at"), want=wish.get("want"), own=wish.get("own"), mine=bool(wish.get("mine")),
-                           seconds=secs, hits=len(hits), errors=errs, named=sub["name"] if sub else None))
+                           seconds=secs, hits=len(hits), errors=errs, named=sub["name"] if sub else None, thing=things.get(i)))
         if sub:     # its pictures come from the named route, checked; the library's join that check
-            named_f[i] = side.submit(broll_source.carried(named_for), work, wish, sub, hits, min(deadline - 4.0, time.monotonic() + 16.0))
+            named_f[i] = side.submit(broll_source.carried(named_for), work, wish, sub, hits, min(deadline - CHECK_RESERVE_S - 1.5, time.monotonic() + 16.0))
             continue
         for h in hits:
             h["_wish"] = i
@@ -492,7 +668,8 @@ def run(work, scout, per, acquire, deadline):
             sheet_path = os.path.join(tmp, "sheet.jpg")
             boards.save(sheet, sheet_path, quality=82)
             try:
-                keep, look_usd = look(sheet_path, cands, wishes, min(deadline, time.monotonic() + 12.0))
+                seen_as = [dict(w, _said=clause_of(work, w.get("w") or w.get("at")), _thing=things.get(i)) for i, w in enumerate(wishes)]
+                keep, look_usd = look(sheet_path, cands, seen_as, min(deadline - CHECK_RESERVE_S - 2.0, time.monotonic() + 12.0))
                 usd += look_usd
             except Exception as e:  # noqa: BLE001 no Look came back: one picture per wish, library order
                 report.append(dict(look_error=str(e)[:120]))
@@ -504,7 +681,7 @@ def run(work, scout, per, acquire, deadline):
         named = []
         for i, fut in named_f.items():
             try:
-                kept, rep = fut.result(timeout=max(0.05, deadline - 2.0 - time.monotonic()))
+                kept, rep = fut.result(timeout=max(0.05, deadline - CHECK_RESERVE_S - 1.0 - time.monotonic()))
             except Exception as e:  # noqa: BLE001 unchecked is never shown: the wish falls back
                 kept, rep = [], dict(say=f"the named search did not finish ({str(e)[:80] or 'late'})")
             usd += float(rep.get("usd") or 0.0)
@@ -534,11 +711,18 @@ def run(work, scout, per, acquire, deadline):
             for w in sorted(by_wish):
                 if by_wish[w] and len(picks) < MAX_ITEMS:
                     picks.append(by_wish[w].pop(0))
+        specs = [r.get("design") if r else None for r in reads]     # designed pictures join the same look;
+        designed = 0                                                  # one stays only where no real picture did
+        for i, sp in enumerate(specs):
+            if sp and designed < MAX_DESIGNED:
+                c = dict(broll_source.designed_hit(sp), _wish=i)
+                picks.append((dict(c=-1, wish=i, what=f"designed {sp['kind']}: {sp.get('what') or ''}".strip(": ")), c))
+                designed += 1
         pool = cf.ThreadPoolExecutor(max_workers=4)
         jobs = [(k, c, pool.submit(acquire, c)) for k, c in picks]
         for k, c, fut in jobs:
             try:
-                got = fut.result(timeout=max(0.05, deadline - time.monotonic()))
+                got = fut.result(timeout=max(0.05, deadline - CHECK_RESERVE_S - time.monotonic()))
             except Exception as e:  # noqa: BLE001 the Bin simply has one picture less
                 wr = next((r for r in report if r.get("wish") == c["_wish"]), None)
                 if wr is not None:
@@ -552,6 +736,8 @@ def run(work, scout, per, acquire, deadline):
                 shutil.copyfile(got["local"], os.path.join(work, final))
                 if os.path.dirname(os.path.abspath(got["local"])) == os.path.abspath(work):
                     os.remove(got["local"])            # the fetched copy goes: the Bin keeps its own
+            elif c.get("design"):
+                broll_source.draw_designed(c, os.path.join(work, final))
             else:
                 c["_img"].convert("RGB").save(os.path.join(work, final), quality=90)
             cls, lic, lurl = licence_class(c)
@@ -566,10 +752,16 @@ def run(work, scout, per, acquire, deadline):
                         "page": c.get("page_url"), "query": c.get("_q")})
             if c.get("named"):
                 row.update(named=c["named"], shows=c.get("shows"))
+            if c.get("design"):
+                row.update(design=c["design"])
             items.append(row)
         pool.shutdown(wait=False, cancel_futures=True)
         n_before = len(items)
         items, check_usd, check_rep = check_fit(work, items, wishes, deadline)
+        real = {it["wish"] for it in items if it.get("provider") != "designed"}
+        for it in [x for x in items if x.get("provider") == "designed" and x["wish"] in real]:
+            os.remove(os.path.join(work, it["path"]))
+            items.remove(it)
         for it in items:
             it.pop("_looked", None)
         dropped = n_before - len(items)
@@ -594,12 +786,14 @@ def run(work, scout, per, acquire, deadline):
             bin_board(items, work, os.path.join(work, "bin_board.jpg"), own)
         said = [r["named_say"] for r in report if r.get("named_say") and not r.get("bin")]
         out = dict(own=own, items=items, plates=plates, wishes=report, credits=credits, said=said,
-                   own_lines=[f"{o['src']} crop {o['crop']}: {o['what']} (for {o['for']})" for o in own],
-                   usage=dict(model=LOOK_MODEL, usd=round(usd, 6), candidates=len(cands), search_seconds=t_search, seconds=round(time.monotonic() - t_all, 1)))
+                   own_lines=[json.dumps({"src": o["src"], "crop": o["crop"]}, separators=(",", ":")) + f": {o['what']} (for {o['for']})" for o in own],
+                   usage=dict(model=LOOK_MODEL, usd=round(usd, 6), candidates=len(cands), search_seconds=t_search, seconds=round(time.monotonic() - t_all, 1),
+                              counts=dict(offered=n_before, kept=len(items), designed=sum(1 for it in items if it.get("provider") == "designed"),
+                                          named=sum(1 for it in items if it.get("named")), own=len(own))))
         with open(os.path.join(work, "bin.json"), "w") as f:
             json.dump(out, f, ensure_ascii=False, indent=1)
         print("[supply] " + json.dumps(dict(
-            wishes=len(wishes), items=len(items), named={r["named"]: r.get("named_found") for r in report if r.get("named")},
+            wishes=len(wishes), items=len(items), checked=n_before, designed=out["usage"]["counts"]["designed"], named={r["named"]: r.get("named_found") for r in report if r.get("named")},
             own=len(own), said=len(said), seconds=out["usage"]["seconds"], usd=out["usage"]["usd"],
             errors=[{k: v for k, v in r.items() if k.endswith("error")} for r in report if any(k.endswith("error") for k in r)]),
             ensure_ascii=False)[:900], flush=True)
