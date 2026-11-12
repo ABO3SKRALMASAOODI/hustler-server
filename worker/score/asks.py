@@ -174,7 +174,7 @@ LEDGER_SCHEMA = {
         "lang": {"type": "string", "description": "ISO code of the language the customer typed in."},
         "asks": {"type": "array", "maxItems": 24, "items": {
             "type": "object", "additionalProperties": False,
-            "required": ["id", "said", "want", "kind", "span", "cut", "items", "how", "where", "pass"],
+            "required": ["id", "said", "want", "kind", "span", "cut", "items", "how", "where", "pass", "otherwise"],
             "properties": {
                 "id": {"type": "string", "description": "a1, a2, ..."},
                 "said": {"type": "string", "description": "The customer's own words for this ask, verbatim and short."},
@@ -189,13 +189,15 @@ LEDGER_SCHEMA = {
                 "how": {"type": "string", "enum": ["look", "measure", "reply"]},
                 "where": {"type": "string", "description": "Where to check: the whole film, a stretch such as 0-5 s, or digest ids."},
                 "pass": {"type": "string", "description": "What a checker must see on the rendered film, or read in the reply, to call it done."},
+                "otherwise": {"type": "string",
+                              "description": "What the customer said to do instead when this ask can't be done (explain why and stop, keep the presenter on screen), in their words. Empty when they gave no alternative."},
             }}},
     },
 }
 
 LEDGER_SYSTEM = """You read what a customer typed to a video editor and list each thing they asked for: the ask ledger. You don't edit anything.
 
-One ask per thing they really asked for, none invented, none merged away. A list of five wishes is five asks. Small talk, thanks and descriptions of the upload are not asks. What they asked to keep or avoid is an ask of kind keep. A question is an ask of kind answer. An ask with a condition and its alternative ("make X; if you can't, explain why and stop") is one ask: its pass is met by either branch done honestly, and the alternative is never a separate ask.
+One ask per thing they really asked for, none invented, none merged away. A list of five wishes is five asks. Small talk, thanks and descriptions of the upload are not asks. What they asked to keep or avoid is an ask of kind keep. A question is an ask of kind answer. An ask with a condition and its alternative ("make X; if you can't, explain why and stop") is one ask: the alternative goes in its otherwise, never in an ask of its own, and when the alternative covers several asks each of them carries it. A qualifier of an ask (what is not enough, what it must look like, how long) is part of that ask's pass, not a keep of its own.
 
 kind:
 - film: make or remake the whole film from their upload: an edit throughout, a new style for the entire video, a short or reel from it, a full post-production pass. Their words are about the upload, so this is done on the full upload, never on an automatic first cut the product made by itself.
@@ -255,7 +257,7 @@ def settle(value, edl, usage=None):
     for n, a in enumerate(value.get("asks") or [], 1):
         if not isinstance(a, dict):
             continue
-        a = {k: a.get(k) for k in ("said", "want", "kind", "span", "cut", "items", "how", "where", "pass")}
+        a = {k: a.get(k) for k in ("said", "want", "kind", "span", "cut", "items", "how", "where", "pass", "otherwise")}
         a["id"] = f"a{n}"
         a["kind"] = a["kind"] if a["kind"] in ("film", "change", "edit", "keep", "answer") else "edit"
         a["span"] = a["span"] if a["span"] in ("whole", "part") else "part"
@@ -264,7 +266,7 @@ def settle(value, edl, usage=None):
         a["items"] = [str(i) for i in a.get("items") or [] if str(i) in items]
         if a["kind"] == "change" and not a["items"]:
             a["kind"] = "edit"
-        for k in ("said", "want", "where", "pass"):
+        for k in ("said", "want", "where", "pass", "otherwise"):
             a[k] = str(a.get(k) or "")[:400]
         asks.append(a)
     return {"lang": str(value.get("lang") or "en")[:8], "asks": asks, "route": route(asks),
@@ -299,6 +301,7 @@ def route(asks):
 def editor_note(ledger, done_by=None):
     """The ledger for the editor: its checklist, read once at the top of the turn."""
     rows = [f"{a['id']} [{a['kind']}{', whole film' if a.get('span') == 'whole' else ''}] {a['want']} (check: {a['pass']})"
+            + (f" If it can't be done: {a['otherwise']}" if a.get("otherwise") else "")
             for a in ledger["asks"]]
     head = ("\n\nASK LEDGER: each thing the customer asked for and how it will be checked on the "
             "rendered film before your reply goes out. Do every one; an ask you can't do, say so plainly.\n")
@@ -325,6 +328,8 @@ CHECK_SCHEMA = {
 CHECK_SYSTEM = """You check a finished video edit against the customer's asks, one by one. You see frames of the rendered film with their times, the edit's measured numbers, what changed in this request, and the reply the editor wrote.
 
 For each ask: done only when the frames or the numbers show its pass condition met; partly when some of it is there; not_done when it is missing or wrong; cannot_tell when nothing you were given can show it either way. The reply's own claims are not evidence for an edit; they are evidence only for an answer ask. Be exact and fair: don't fail an ask on taste, and don't pass one on hope.
+
+An ask with an otherwise is done when its pass is met, or when its otherwise was done instead: the reply says plainly that and why the ask itself can't be done, and the frames and numbers show the alternative and nothing they said not to make (what changed in this request shows what was made).
 
 An ask about the whole film is counted on the numbers under whole_film, measured from the edit: shots with a camera move out of the shots measured, the share of the film moving or under pictures, the transitions, the look, the sound and how much of the upload is kept, in order. A keep ask is done when those numbers show nothing it protects was changed (no music, sound or speed added to a song asked to stay, all of the upload kept in order when the length must stay). The frames show what the numbers can't.
 
@@ -487,7 +492,9 @@ def check(ctx, ledger, reply_text, edl, preview=None, changes=""):
     content = [{"type": "text", "text": "\n".join([
         f"Customer's language: {ledger.get('lang') or 'en'}",
         "Asks:\n" + "\n".join(f"{a['id']} [{a['kind']}, check by {a['how']}] said: {json.dumps(a['said'], ensure_ascii=False)}; "
-                              f"done means: {a['want']}; pass: {a['pass']}; where: {a['where']}" for a in ledger["asks"]),
+                              f"done means: {a['want']}; pass: {a['pass']}; where: {a['where']}"
+                              + (f"; otherwise (their alternative when it can't be done): {a['otherwise']}" if a.get("otherwise") else "")
+                              for a in ledger["asks"]),
         "The edit's numbers:\n" + json.dumps(facts(edl, preview, changes, program_shots(edl, getattr(ctx, "index", None)),
                                                     getattr(ctx, "duration", None)), ensure_ascii=False, default=str),
         "The editor's reply:\n" + json.dumps(str(reply_text or "")[:3000], ensure_ascii=False),

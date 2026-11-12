@@ -97,18 +97,55 @@ def test_a_move_row_puts_one_move_on_every_measured_shot():
 def test_a_refused_op_is_dropped_and_the_rest_is_written(monkeypatch):
     calls = []
 
-    def execute(ctx, name, args):
-        calls.append([op["tool"] for op in args["operations"]])
-        if any(op["tool"] == "add_text" for op in args["operations"]):
+    def recipe(ctx, operations, brief=None):
+        calls.append([op["tool"] for op in operations])
+        if any(op["tool"] == "add_text" for op in operations):
             return "RECIPE ABORTED at operation 2 (add_text); no EDL version was created.\nREJECTED: text past the end"
         ctx.versions_written.append(7)
         return "EDL v7: ok"
-    monkeypatch.setattr(agent_tools, "execute", execute)
+    monkeypatch.setattr(agent_tools, "apply_edit_recipe", recipe)
     ctx = NS(versions_written=[])
     version, dropped = patch._commit(ctx, [{"tool": "add_zoom", "args": {}}, {"tool": "add_text", "args": {}},
                                           {"tool": "set_fades", "args": {}}], "x")
     assert version == 7 and calls[-1] == ["add_zoom", "set_fades"]
     assert dropped[0][0]["tool"] == "add_text" and "past the end" in dropped[0][1]
+
+
+def test_the_pass_writes_through_the_real_recipe_although_it_left_the_editors_catalog():
+    # 12 Nov replay of p5345: agent_tools.execute answered "Unknown tool 'apply_edit_recipe'" (retired from
+    # the live catalog in 0cecaeec), every op was dropped and the pass wrote nothing. The real recipe, on a
+    # real tool context, writes one version with each op staged by its own ordinary tool.
+    import tempfile
+    import db as dbx
+    from schemas import default_edl
+
+    assert "apply_edit_recipe" not in agent_tools.TOOLS
+
+    class Db:
+        def __init__(self):
+            self.rows = [{"version": 1, "json": default_edl(20.0)}]
+
+        def run(self, fn, *args):
+            if fn is dbx.latest_edl:
+                return self.rows[-1]
+            if fn is dbx.insert_edl:
+                self.rows.append({"version": self.rows[-1]["version"] + 1, "json": args[1]})
+                return self.rows[-1]["version"]
+            if fn is dbx.get_edl_version:
+                return next(x for x in self.rows if x["version"] == args[1])
+            raise AssertionError(f"unexpected DB call: {fn}")
+
+    fake = Db()
+    ctx = agent_tools.ToolContext(fake, {"id": 9, "user_id": 3}, {"id": 7, "chat_session_id": 11},
+                                  {"video": {"duration": 20.0, "width": 1920, "height": 1080, "fps": 30.0}, "words": []},
+                                  tempfile.mkdtemp())
+    ctx.user_message = "make the whole film move"
+    version, dropped = patch._commit(ctx, [
+        {"tool": "add_zoom", "args": {"start": 2.0, "end": 6.0, "mode": "push_in", "strength": 0.06}},
+        {"tool": "set_transitions", "args": {"style": "dissolve", "duration_s": 0.5}}], "whole-film pass, program 0-20 s")
+    assert version == 2 and len(fake.rows) == 2
+    assert [d[0]["tool"] for d in dropped] == ["set_transitions"] and "no cut" in dropped[0][1]   # one cut-less film
+    assert len(fake.rows[-1]["json"]["effects"]["zooms"]) == 1
 
 
 class _Ctx(NS):
@@ -150,12 +187,14 @@ def test_the_pass_finds_checks_and_writes_the_whole_film_in_one_recipe(monkeypat
         if name == "add_stock_media":
             ctx._pending_visual_review_assets.add("fetched/1/obama.jpg")
             return "Added stock image \"x\" to the project: storage_key=fetched/1/obama.jpg. It is SILENT"
-        if name == "apply_edit_recipe":
-            seen["ops"] = args["operations"]
-            ctx.versions_written.append(4)
-            return "EDL v4: applied"
         raise AssertionError(name)
     monkeypatch.setattr(agent_tools, "execute", execute)
+
+    def recipe(ctx, operations, brief=None):
+        seen["ops"] = operations
+        ctx.versions_written.append(4)
+        return "EDL v4: applied"
+    monkeypatch.setattr(agent_tools, "apply_edit_recipe", recipe)
     ctx = _pass_ctx(tmp_path)
     led = asks.settle({"lang": "es", "asks": [_ask("film", "whole", cut="keep"), _ask("edit", "whole"), _ask("edit", "whole"),
                                               _ask("edit", "part")]}, EDL)

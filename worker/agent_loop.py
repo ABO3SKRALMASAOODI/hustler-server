@@ -2815,6 +2815,17 @@ def _asks_checkpoint(ctx):
             "ask_verdict": getattr(ctx, "ask_verdict", None)}
 
 
+def _asks_summary(ctx):
+    """The ledger as the message meta keeps it, or None. Never raises."""
+    if not getattr(ctx, "ask_ledger", None):
+        return None
+    try:
+        from score import asks
+        return asks.summary(ctx.ask_ledger, getattr(ctx, "ask_verdict", None))
+    except Exception:  # noqa: BLE001 - a record that can't be written never stops the reply
+        return None
+
+
 def _asks_check(ctx, draft, allow_repair=True):
     """Check every ask on the rendered film. Returns the repair note when one repair is owed and
     allowed, else None; the verdict stays on ctx. Never raises: a check that can't run leaves the
@@ -7346,15 +7357,24 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         # WAITING on them, not blocked: "blocked" filed a P0
                         # ticket for every question the editor asked
                         # (ops_loop.intake files partial / blocked only).
+                        # The ask ledger stays on a question too (12 Nov replay
+                        # of p5345: the turn asked which track and the ledger
+                        # of 14 asks was lost); its asks are open until the
+                        # customer answers.
+                        _asked_ledger = _asks_summary(ctx)
                         worker_db.run(dbx.add_message, session_id,
                                       "assistant", q.question,
                                       {"ask_user": True,
                                        "edl_version": _cur_v,
-                                       "outcome": AWAITING_USER})
+                                       "outcome": AWAITING_USER,
+                                       **({"ask_ledger": _asked_ledger}
+                                          if _asked_ledger else {})})
                         _complete_adopted_steers(ctx, worker_db, job)
                         return {"status": "awaiting_user",
                                 "steps": total_steps, "timings": timings,
-                                "outcome": AWAITING_USER, "billable": False}
+                                "outcome": AWAITING_USER, "billable": False,
+                                **({"ask_ledger": _asked_ledger}
+                                   if _asked_ledger else {})}
                 except agent_tools.FeatureUpgrade as gate:
                     # Shorts and Website demos come with Pro and Max (owner,
                     # 30 Oct 2026; feature_gate.py). The tool did not run;

@@ -339,3 +339,33 @@ def test_an_empty_ledger_for_a_typed_request_is_asked_again_then_dropped(monkeyp
     answers[:] = [{"lang": "en"}, {"lang": "en", "asks": []}]
     with pytest.raises(ValueError):
         asks.build(ctx, "remove the grade and add dissolves")
+
+
+def test_the_customers_alternative_rides_with_its_ask_to_the_editor_and_the_check(monkeypatch, tmp_path):
+    # 12 Nov replay of p5345: "image-to-video with real motion ... If not, explain the limitation and stop"
+    # was read as five asks, and the honest stop left four of them not done. The alternative is a field
+    # of the ask the model fills; the check counts it as a branch that meets the ask.
+    assert "otherwise" in asks.LEDGER_SCHEMA["properties"]["asks"]["items"]["required"]
+    ledger = asks.settle({"lang": "en", "asks": [
+        _ask("film", said="real motion from the photos", otherwise="explain the limitation and stop"),
+        _ask("keep", said="no new credits")]}, EDL)
+    assert ledger["asks"][0]["otherwise"] == "explain the limitation and stop" and ledger["asks"][1]["otherwise"] == ""
+    assert "If it can't be done: explain the limitation and stop" in asks.editor_note(ledger)
+    seen = {}
+
+    def fake(ctx, name, schema, system, content, max_tokens=4000):
+        seen["system"], seen["content"] = system, content
+        return {"asks": [{"id": "a1", "state": "done", "seen": "unchanged; the reply says why", "line": "x"},
+                         {"id": "a2", "state": "done", "seen": "", "line": "y"}]}, {"usd": 0.001, "s": 1, "model": "m"}
+    monkeypatch.setattr(asks, "_call", fake)
+    asks.check(NS(workdir=str(tmp_path)), ledger, "It can't be done here.", EDL, None, "")
+    assert "otherwise (their alternative when it can't be done): explain the limitation and stop" in seen["content"][0]["text"]
+    assert "An ask with an otherwise is done when" in seen["system"]
+
+
+def test_a_question_to_the_customer_keeps_the_ledger_on_its_message():
+    ctx = NS(ask_ledger=asks.settle({"lang": "en", "asks": [_ask("edit"), _ask("keep")]}, EDL), ask_verdict=None)
+    got = agent_loop._asks_summary(ctx)
+    assert [a["state"] for a in got["asks"]] == ["unchecked", "unchecked"] and got["open"] is None
+    assert agent_loop._asks_summary(NS(ask_ledger=None)) is None
+    assert agent_loop._asks_summary(NS(ask_ledger={"asks": "broken"})) is None
