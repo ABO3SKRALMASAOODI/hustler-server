@@ -302,6 +302,8 @@ span: whole when the ask runs through the entire film or a long stretch of it (o
 
 cut, for a film ask: new when they want a new cut made from the upload (a short, a reel, highlights, a shorter or reordered film); keep when the upload's length and order stay and the work goes over it (keep my full narration and add pictures, keep the song and the photo order and add movement). none for the other kinds.
 
+start: the current film may be an automatic first cut the product made by itself (its origin says made_by automatic_first_cut): a short piece of the upload, often reframed. When the customer has not built on it (customer_requests_since 0) and their words are about their video rather than that cut (a part of the upload the cut left out, the transcript or story as a whole, their full narration or length, the upload's own format), start is upload. start is current when they talk about the cut they saw, or have edited it since.
+
 how: look when the frames of the rendered film show it (text, pictures, framing, colour, motion). measure when the edit's numbers show it (length, captions on, music present, number of sound effects, loudness, aspect ratio). reply when only the reply can show it. There is no listening: a sound ask is measured.
 
 pass: concrete and checkable by someone who sees 16-32 frames of the rendered film with their times and the edit's numbers. Name the thing, where, and how much when they said how much.
@@ -326,6 +328,8 @@ def build(ctx, request, history=None, edl=None):
         f"The upload: {float(video.get('duration') or getattr(ctx, 'duration', 0) or 0):.1f} s, "
         f"{video.get('width')}x{video.get('height')}, speech language {index.get('language') or 'unknown'}.",
         "Where the current film came from: " + json.dumps(origin or "the customer's own edits", ensure_ascii=False, default=str)[:400],
+        f"The current film is {program_seconds(edl) or 0:.1f} s of the {float(video.get('duration') or getattr(ctx, 'duration', 0) or 0):.1f} s "
+        f"upload, frame {((edl.get('frame') if isinstance(edl.get('frame'), dict) else {}) or {}).get('ratio') or 'source'}.",
         "The current film, digest (id then what it is):\n" + text,
     ])
     value, usage = _call(ctx, "record_ask_ledger", LEDGER_SCHEMA, LEDGER_SYSTEM, content, max_tokens=8000)

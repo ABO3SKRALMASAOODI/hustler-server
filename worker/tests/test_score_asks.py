@@ -502,3 +502,19 @@ def test_a_request_about_the_upload_starts_from_it_over_an_untouched_first_cut(m
     for kw in ({"since": 1}, {"start": "current"}, {"made_by": None}, {"main": False}):
         c, led = ctx_for(**kw)
         assert agent_loop._typed_start_from_upload(c, led, {"id": 1}) == "" and calls == [1], kw
+
+
+def test_the_ledger_is_told_how_much_of_the_upload_the_current_film_is(monkeypatch):
+    seen = {}
+
+    def fake(ctx, name, schema, system, content, max_tokens=4000):
+        seen["content"], seen["system"] = content, system
+        return {"lang": "es", "start": "upload", "asks": [_ask("edit")]}, {"usd": 0.0, "s": 0, "model": "m"}
+    monkeypatch.setattr(asks, "_call", fake)
+    monkeypatch.setattr(asks, "asset_names", lambda ctx, edl: {})
+    ctx = NS(index={"video": {"duration": 895.0, "width": 1920, "height": 1080}}, duration=895.0,
+             request_edit_origin={"made_by": "automatic_first_cut", "customer_requests_since": 0})
+    led = asks.build(ctx, "trabaja solo la primera noticia", [], {"keep": [[100.0, 138.0]], "frame": {"ratio": "9:16"}})
+    assert led["start"] == "upload"
+    assert "The current film is 38.0 s of the 895.0 s upload, frame 9:16." in seen["content"]
+    assert "start is upload" in seen["system"]
