@@ -2774,6 +2774,13 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
         else:
             done_by = ("Asks of kind film are about the customer's whole upload: work from the full "
                        "upload, not from an automatic first cut.")
+            if cfg.get("pass", True) and asks.pass_asks(ledger["asks"]):
+                # The Director could not take it (a long source, photos only): the whole-film part
+                # of the request still gets a route that does all of it, not the loop's first minute.
+                done_by = _typed_pass(ctx, ledger, cfg, job) + "\n" + done_by
+    elif ledger["route"] == "pass" and cfg.get("pass", True):
+        ledger["routed"] = {"to": "pass"}
+        done_by = _typed_pass(ctx, ledger, cfg, job)
     elif ledger["route"] == "patch" and cfg["patch"]:
         from score import patch
         got = patch.run(ctx, ledger, quality_verifier.request_text_for(ctx))
@@ -2787,6 +2794,20 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     print(f"[asks] job {job.get('id')}: {len(ledger['asks'])} ask(s), route {ledger['route']} -> "
           f"{json.dumps(ledger.get('routed'), default=str)[:240]}", flush=True)
     return asks.editor_note(ledger, done_by)
+
+
+def _typed_pass(ctx, ledger, cfg, job):
+    """score.patch.throughout over the whole film; the editor's note says what it did and left."""
+    from score import patch
+    request = quality_verifier.request_text_for(ctx)
+    got = patch.throughout(ctx, ledger, request, cfg.get("pass_s", 600.0))
+    routed = ledger.setdefault("routed", {"to": "pass"})
+    routed["pass"] = {k: got.get(k) for k in ("version", "fell", "applied", "units", "of_units", "shots", "s")}
+    routed["pass"]["pictures"] = {k: (got.get("pictures") or {}).get(k) for k in ("asked", "placed")}
+    routed["pass"]["dropped"] = len(got.get("dropped") or [])
+    routed["usage"] = got.get("usage")
+    print(f"[asks] job {job.get('id')}: whole-film pass -> {json.dumps(routed['pass'], default=str)[:400]}", flush=True)
+    return patch.pass_note(got)
 
 
 def _asks_checkpoint(ctx):
