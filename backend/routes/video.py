@@ -7499,6 +7499,40 @@ def _flash_flag(edl_json):
     return {}
 
 
+def _adopt_landed_original(user_id, project_id, original):
+    """A 'pending' original whose bytes are already in storage is adopted now.
+
+    Ticket #60 (12 Nov 2026): a 45-minute, 8.3 GB original's multipart
+    finish was answered with errors while storage was still assembling it;
+    the object landed seconds later, but the only thing that flips
+    `upload_state` is a successful /uploads/original-ready, so every export
+    was refused as "still uploading (100% done)" for good. The export now
+    asks storage itself. A multipart object does not exist until it is
+    assembled, so an upload truly in flight still reads as uploading. The
+    adoption is the same verified path original-ready runs (size limit,
+    magic bytes, duration drift, deferred shorts).
+    """
+    if not original or not original.get("storage_key"):
+        return False
+    try:
+        if storage.head_bytes(original["storage_key"]) is None:
+            return False
+        resp = _original_ready(user_id, project_id,
+                               {"asset_id": original["id"]})
+    except Exception as e:                       # never worse than before
+        print(f"[uploads] project {project_id}: reconciling the pending "
+              f"original failed: {type(e).__name__}: {e}", flush=True)
+        return False
+    status = resp[1] if isinstance(resp, tuple) else 200
+    if status == 200:
+        record_client_event(user_id, project_id, "upload_original_reconciled",
+                            detail={"asset_id": original["id"],
+                                    "stage": "export"}, origin="server")
+        print(f"[uploads] project {project_id}: original was already in "
+              f"storage — adopted at export", flush=True)
+    return status == 200
+
+
 def _request_final(cur, user_id, project_id, version, render_group=None,
                    reuse_existing=False):
     """One export gate shared by individual and explicit batch requests."""
@@ -7641,6 +7675,9 @@ def _request_final(cur, user_id, project_id, version, render_group=None,
             "detail": preflight_error,
         }), 409
     meta = (original or {}).get("meta") or {}
+    if (meta.get("upload_state") == "pending"
+            and _adopt_landed_original(user_id, project_id, original)):
+        meta = {**meta, "upload_state": "ready"}
     if meta.get("upload_state") == "pending":
         pct = int(round(float(meta.get("upload_progress") or 0) * 100))
         record_client_event(
