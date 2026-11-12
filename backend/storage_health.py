@@ -40,6 +40,7 @@ infrastructure, like is_missing() in storage_routing.py.
 import json
 import os
 import socket
+import sys
 import threading
 import time
 import urllib.error
@@ -103,18 +104,25 @@ def _short(exc):
     return f"{type(exc).__name__}: {str(exc)[:200]}"
 
 
+_CLIENT_LOCK = threading.Lock()
+
+
 def _default_client(cfg, timeout_s=10.0):
+    """A client on a session of its own, made under a lock: boto3's shared
+    default session is not safe to build clients from concurrently, and the
+    request threads build theirs from it."""
     import boto3
     from botocore.config import Config
-    return boto3.client(
-        "s3", endpoint_url=cfg["endpoint"],
-        aws_access_key_id=cfg["access_key_id"],
-        aws_secret_access_key=cfg["secret_access_key"],
-        region_name=cfg["region"],
-        config=Config(**routing.botocore_config_kwargs(
-            cfg, connect_timeout=5.0, read_timeout=timeout_s,
-            retries={"max_attempts": 1, "mode": "standard"},
-            max_pool_connections=4)))
+    with _CLIENT_LOCK:
+        return boto3.session.Session().client(
+            "s3", endpoint_url=cfg["endpoint"],
+            aws_access_key_id=cfg["access_key_id"],
+            aws_secret_access_key=cfg["secret_access_key"],
+            region_name=cfg["region"],
+            config=Config(**routing.botocore_config_kwargs(
+                cfg, connect_timeout=5.0, read_timeout=timeout_s,
+                retries={"max_attempts": 1, "mode": "standard"},
+                max_pool_connections=4)))
 
 
 class Prober:
@@ -143,6 +151,12 @@ class Prober:
         self._thread = None
         self._pid = None
         self._listeners = []
+        self._passes = 0
+        self._pass_started = None
+        # The first pass waits this long after start(): a web worker starts
+        # the probe while it is still booting, and nothing is gained by
+        # building clients in the same seconds as every request thread.
+        self.first_delay_s = _env_num("STORAGE_PROBE_FIRST_DELAY_S", 10, 0)
 
     # -- what is configured ---------------------------------------------
     def configured(self):
@@ -182,13 +196,22 @@ class Prober:
     def probe_once(self):
         """Probe every configured store once. Returns status()."""
         self._n += 1
-        write = self.write_store()
-        for name in self.configured():
-            prev = self._results.get(name) or {}
-            do_write = name == write and (
-                (self._n - 1) % self.write_every == 0
-                or prev.get("ok") is False)
-            self._probe(name, do_write)
+        self._pass_started = self._clock()
+        try:
+            write = self.write_store()
+            for name in self.configured():
+                prev = self._results.get(name) or {}
+                # Every write_every-th pass, while it fails, and until it
+                # has had one round trip (a process's first pass may run
+                # before it has read the mode or the next store's keys).
+                do_write = name == write and (
+                    (self._n - 1) % self.write_every == 0
+                    or prev.get("ok") is False
+                    or not prev.get("last_write_ok_at"))
+                self._probe(name, do_write)
+        finally:
+            self._pass_started = None
+            self._passes += 1
         for fn in list(self._listeners):
             try:
                 fn(self)
@@ -256,13 +279,34 @@ class Prober:
             with self._lock:
                 stores = {k: dict(v) for k, v in self._results.items()}
             w = stores.get(write)
-            return {"stores": stores, "write_store": write,
-                    "write_ok": (w or {}).get("ok"),
-                    "probe_every_s": self.every_s,
-                    "probing": self.running()}
+            out = {"stores": stores, "write_store": write,
+                   "write_ok": (w or {}).get("ok"),
+                   "probe_every_s": self.every_s,
+                   "probing": self.running(), "passes": self._passes,
+                   "pid": os.getpid()}
+            started = self._pass_started
+            if started is not None and \
+                    self._clock() - started > max(45.0, self.every_s):
+                # A pass that never ends: say where it is stuck.
+                out["stalled_s"] = int(self._clock() - started)
+                out["stack"] = self._stack()
+            return out
         except Exception as e:  # noqa: BLE001
             return {"stores": {}, "write_ok": None,
                     "probe_error": _short(e)}
+
+    def _stack(self):
+        try:
+            frame = sys._current_frames().get(self._thread.ident)
+            out = []
+            while frame is not None and len(out) < 12:
+                code = frame.f_code
+                out.append(f"{os.path.basename(code.co_filename)}:"
+                           f"{frame.f_lineno} {code.co_name}")
+                frame = frame.f_back
+            return out
+        except Exception:  # noqa: BLE001
+            return None
 
     # -- the background thread -------------------------------------------
     def add_listener(self, fn):
@@ -284,6 +328,7 @@ class Prober:
             return True
 
     def _loop(self):
+        time.sleep(self.first_delay_s)
         while True:
             try:
                 self.probe_once()

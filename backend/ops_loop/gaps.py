@@ -651,7 +651,7 @@ LANE_OFF_AFTER = timedelta(minutes=15)
 
 def _claude_lane_off(cur, since, now, p):
     """12 Nov 2026: app_kv.claude_credit_state went off on a billing refusal
-    on 9 Nov and stayed off for 3 days after Anthropic accepted calls again:
+    on 9 Nov and stayed off for 3 days after the provider took calls again:
     0 trial grants, about 105 paywalls, and nothing in the ticket system
     said so. Off for anything but the owner's quota (``budget``) for over
     LANE_OFF_AFTER: every new trial meets the paywall. A ref per hour."""

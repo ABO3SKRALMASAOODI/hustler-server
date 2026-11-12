@@ -333,3 +333,15 @@ def test_the_cloudflare_deploy_is_manual_and_the_worker_suite_runs_on_push():
     on = ce.split("\non:", 1)[1].split("\npermissions:", 1)[0]
     assert "push:" in on and "worker/**" in on
     assert "python -m pytest -q '${{ matrix.service }}/tests'" in ce
+
+
+def test_a_pass_that_never_ends_says_where_it_is_stuck():
+    prober, *_ = _world(mode="next")
+    clock = [5000.0]
+    prober._clock = lambda: clock[0]
+    st = prober.status()
+    assert st["passes"] == 0 and st["pid"] == os.getpid()
+    assert "stalled_s" not in st
+    prober._pass_started = 4000.0
+    st = prober.status()
+    assert st["stalled_s"] == 1000 and "stack" in st
