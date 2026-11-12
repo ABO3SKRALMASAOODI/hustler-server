@@ -58,6 +58,7 @@ from video_services.upload import (
 )
 from video_services.chat_jobs import parse_client_event as _event_request_args
 from video_services import held_request as _held_request
+from video_services import upload_handoff
 from video_services import chat_display
 from video_services.render_export import (
     deterministic_final_failure as _deterministic_final_failure,
@@ -2217,6 +2218,7 @@ def create_upload(user_id, project_id):
     # can say "too big to route through us, try a different network" up front
     # instead of after a 4 GB upload earns a 413.
     out["relay_max_bytes"] = storage.RELAY_MAX_BYTES
+    upload_handoff.attach(out, user_id, project_id, kind, nbytes)
     if out.get("resumed") or out.get("assembled"):
         # The same bytes, already part way up: this is not a new upload.
         record_client_event(user_id, project_id, "upload_resumed", detail={
@@ -2436,6 +2438,7 @@ def resume_upload(user_id, project_id):
         return jsonify({"error": f"Could not resume the upload: {e}"}), 502
     out["kind"] = kind
     out["relay_max_bytes"] = storage.RELAY_MAX_BYTES
+    upload_handoff.attach(out, user_id, project_id, kind, nbytes)
     record_client_event(user_id, project_id, "upload_resumed", detail={
         "filename": filename, "bytes": nbytes, "kind": kind,
         "assembled": bool(out.get("assembled")),
@@ -2447,7 +2450,38 @@ def resume_upload(user_id, project_id):
 
 @video_bp.route("/projects/<int:project_id>/uploads/relay-part",
                 methods=["POST"])
+def relay_upload_part_route(project_id):
+    """A signed-in page sends its bearer token. A page that is gone sends
+    nothing but the transfer's handoff token (Background Fetch cannot send an
+    Authorization header): it may write a part of that one upload only."""
+    ht = request.args.get("ht")
+    if ht and "Authorization" not in request.headers:
+        claims = upload_handoff.read(
+            ht, project_id, key=request.args.get("key") or "",
+            upload_id=(request.args.get("upload_id") or "").strip())
+        if not claims:
+            return jsonify({"error": "This upload's handoff has expired"}), 401
+        out = relay_upload_part(user_id=claims["u"], project_id=project_id)
+        status = out[1] if isinstance(out, tuple) else out.status_code
+        part = request.args.get("part_number") or "0"
+        if status == 200 and part.isdigit() and int(part) % \
+                upload_handoff.BEAT_EVERY_PARTS == 0:
+            # Its sign of life for the intake, as a page's beat is.
+            record_client_event(claims["u"], project_id, "upload_progress",
+                                detail={"bytes": claims["n"], "kind": claims["t"],
+                                        "via": "handoff",
+                                        "sent_bytes": min(claims["n"], int(part)
+                                                          * claims["s"])},
+                                origin="server")
+        return out
+    return _relay_upload_part_signed_in(project_id=project_id)
+
+
 @token_required
+def _relay_upload_part_signed_in(user_id, project_id):
+    return relay_upload_part(user_id, project_id)
+
+
 def relay_upload_part(user_id, project_id):
     """One part of a multipart upload, through our servers.
 
@@ -2493,6 +2527,52 @@ def relay_upload_part(user_id, project_id):
         record_client_event(user_id, project_id, "upload_relayed", detail={
             "kind": kind, "per_part": True}, origin="server")
     return jsonify({"ok": True, "part_number": part_number, "etag": etag})
+
+
+@video_bp.route("/projects/<int:project_id>/uploads/handoff-complete",
+                methods=["POST"])
+def handoff_complete(project_id):
+    """Finish a transfer that a page handed to its browser before it went
+    away (video_services/upload_handoff.py). The service worker posts here
+    when Background Fetch has written the last part: a plain POST, the
+    handoff token in the query, the completion the page would have sent as
+    a text body. Storage is the authority on the parts; the token names the
+    user, project, key and upload id; the rest is the page's own payload,
+    finished by exactly the code the page uses. Idempotent like both."""
+    claims = upload_handoff.read(request.args.get("ht"), project_id)
+    if not claims:
+        return jsonify({"error": "This upload's handoff has expired"}), 401
+    try:
+        body = json.loads(request.get_data(as_text=True) or "{}")
+    except ValueError:
+        return jsonify({"error": "bad body"}), 400
+    to = body.get("to") or "complete"
+    payload = dict(body.get("payload") or {})
+    user_id = claims["u"]
+    with vdb() as conn:
+        if not _project_for_user(conn.cursor(), project_id, user_id):
+            return jsonify({"error": "Project not found"}), 404
+    try:
+        parts, have = upload_handoff.stored_parts(storage, claims)
+    except Exception as e:  # noqa: BLE001
+        if storage.error_code(e) != "NoSuchUpload":
+            current_app.logger.exception("handoff list parts failed")
+            return jsonify({"error": "storage unavailable"}), 502
+        parts, have = [], 0     # consumed: the page or an earlier call finished it
+    if parts is None:
+        return jsonify({"error": "parts missing", "parts_in_storage": have}), 409
+    payload["upload_id"] = claims["x"] if parts else None
+    payload["parts"] = parts
+    record_client_event(user_id, project_id, "upload_handoff_landed", detail={
+        "kind": claims.get("t"), "bytes": claims.get("n"), "to": to,
+        "parts": len(parts)}, origin="server")
+    if to == "original-ready":
+        return _original_ready(user_id, project_id, payload)
+    payload["storage_key"] = claims["k"]
+    payload.setdefault("kind", claims.get("t") or "original")
+    out, status = complete_upload_core(user_id, project_id, payload,
+                                       studio=True)
+    return jsonify(out), status
 
 
 # Recognizing a re-upload (round 67d). The two halves must compute the SAME
@@ -3581,6 +3661,10 @@ def original_upload_progress(user_id, project_id):
                 methods=["POST"])
 @token_required
 def original_upload_ready(user_id, project_id):
+    return _original_ready(user_id, project_id, request.get_json() or {})
+
+
+def _original_ready(user_id, project_id, data):
     """The background upload of the real original finished — verify and adopt it.
 
     This is the moment the deferred half of a proxy-first upload becomes real,
@@ -3590,7 +3674,6 @@ def original_upload_ready(user_id, project_id):
     adopted, because a project whose export would die is better described as
     still missing its video than as ready.
     """
-    data = request.get_json() or {}
     asset_id = data.get("asset_id")
     upload_id = data.get("upload_id")
     parts = data.get("parts") or []
@@ -7857,7 +7940,7 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe", "player_composition_
                       # A transfer carried on from the parts storage already
                       # held (reload, sleep, dropped network) instead of
                       # starting from zero (/uploads/resume).
-                      "upload_resumed",
+                      "upload_resumed", "upload_handed_off", "upload_handoff_landed",
                       # A running transfer's heartbeat and the page going away
                       # under one. Without them an upload that stops looks the
                       # same as one still going: 18 of the 23 accounts that
