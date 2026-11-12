@@ -432,7 +432,9 @@ def _adopt_successor(conn, user_id, retiring_sub_id):
                       AND amount_cents > 0
                     ORDER BY occurred_at DESC NULLS LAST, id DESC
                     LIMIT 3""", (user_id, retiring_sub_id))
-    candidates = [r[0] for r in cur.fetchall()]
+    # The hourly tick's connection uses RealDictCursor; tests pass tuples.
+    candidates = [r["subscription_id"] if isinstance(r, dict) else r[0]
+                  for r in cur.fetchall()]
     cur.close()
     for candidate in dict.fromkeys(candidates):
         data, err = fetch_subscription(candidate)

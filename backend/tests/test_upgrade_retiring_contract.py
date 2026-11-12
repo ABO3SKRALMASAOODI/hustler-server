@@ -121,7 +121,10 @@ class _Cur:
     def execute(self, sql, params=None):
         self.conn.sql.append((" ".join(sql.split()), params))
         if "FROM payments" in sql:
-            self._rows = [(s,) for s in self.conn.payment_subs]
+            # Production's tick uses RealDictCursor: rows are dicts.
+            self._rows = ([{"subscription_id": s} for s in self.conn.payment_subs]
+                          if self.conn.dict_rows else
+                          [(s,) for s in self.conn.payment_subs])
         else:
             self._rows = []
 
@@ -136,8 +139,9 @@ class _Cur:
 
 
 class _Conn:
-    def __init__(self, payment_subs):
+    def __init__(self, payment_subs, dict_rows=True):
         self.payment_subs = payment_subs
+        self.dict_rows = dict_rows
         self.sql = []
         self.committed = 0
 
@@ -238,3 +242,13 @@ def test_reconciler_never_adopts_a_dead_or_retiring_contract(monkeypatch):
 
     assert not [s for s, _ in conn.sql if s.startswith("UPDATE users")]
     assert report["plan"] == "plus_2026"
+
+
+def test_reconciler_adopts_with_tuple_rows_too(monkeypatch):
+    _subscriptions(monkeypatch, {
+        "sub_old_plus": _sub("sub_old_plus", "plus_2026", scheduled_cancel=True),
+        "sub_new_pro": _sub("sub_new_pro", "pro_2026"),
+    })
+    report = billing_sync.reconcile_user(
+        _Conn(["sub_new_pro"], dict_rows=False), dict(ROW))
+    assert report["plan"] == "pro_2026"
