@@ -313,6 +313,21 @@ def reconcile_user(conn, row, fetch_all_transactions=False):
                 f"trial credits clamped {clamped[0]:.0f} → {clamped[1]:.0f}")
         return report
 
+    # ── Active, but retiring: an upgrade replaced this contract (#1039) ─────
+    # The account still points at a contract Paddle will end at its period
+    # end, while a newer paid contract of the same account is live. Adopt the
+    # live one, so the plan the customer paid for is the plan they get, and
+    # the old contract's cancel cannot later downgrade them to free.
+    if status == "active" and ((data.get("scheduled_change") or {})
+                               .get("action") == "cancel"):
+        adopted = _adopt_successor(conn, user_id, sub_id)
+        if adopted:
+            report["changes"].append(
+                f"adopted the live upgrade contract ({adopted['plan']}); "
+                f"the old one is scheduled to end")
+            report["plan"] = adopted["plan"]
+            return report
+
     # ── Active ──────────────────────────────────────────────────────────────
     if status == "active":
         paid = billing.subscription_has_paid(conn, sub_id, user_id)
@@ -400,6 +415,54 @@ def _activate(conn, user_id, plan, subscription_id, expiry, price_id=None):
                  daily_credits_for_plan(plan), daily_credits_for_plan(plan), monthly, user_id))
     conn.commit()
     cur.close()
+
+
+def _adopt_successor(conn, user_id, retiring_sub_id):
+    """Point the account at its newest paid, live contract other than the
+    retiring one. The credit pool is kept as it is: the upgrade's own paid
+    webhook already granted it, so this only corrects which contract (and so
+    which plan) the account is on. Returns {"plan", "subscription_id"} or
+    None when there is no such contract."""
+    cur = conn.cursor()
+    cur.execute("""SELECT subscription_id
+                     FROM payments
+                    WHERE user_id = %s
+                      AND subscription_id IS NOT NULL
+                      AND subscription_id <> %s
+                      AND amount_cents > 0
+                    ORDER BY occurred_at DESC NULLS LAST, id DESC
+                    LIMIT 3""", (user_id, retiring_sub_id))
+    candidates = [r[0] for r in cur.fetchall()]
+    cur.close()
+    for candidate in dict.fromkeys(candidates):
+        data, err = fetch_subscription(candidate)
+        if err or not data:
+            continue
+        if (data.get("status") or "").lower() != "active":
+            continue
+        if (data.get("scheduled_change") or {}).get("action") == "cancel":
+            continue
+        plan = _plan_from_items(data)
+        if not plan:
+            continue
+        from routes.paddle_webhook import credits_for_price
+        limit = credits_for_price(_price_id_from_items(data), plan)
+        cur = conn.cursor()
+        cur.execute("""UPDATE users
+                          SET is_subscribed         = 1,
+                              subscription_expiry   = %s,
+                              subscription_id       = %s,
+                              plan                  = %s,
+                              credits_monthly_limit = %s
+                        WHERE id = %s""",
+                    (_parse(data.get("next_billed_at")), candidate, plan,
+                     limit, user_id))
+        cur.close()
+        billing.set_status(conn, user_id, "active", plan,
+                           _billing_period(data))
+        conn.commit()
+        return {"plan": plan, "subscription_id": candidate}
+    return None
 
 
 def _latest_decline_reason(conn, subscription_id):

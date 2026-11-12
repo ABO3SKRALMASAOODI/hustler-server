@@ -254,6 +254,20 @@ def _stored_subscription_id(user_id):
     return row[0] if row else None
 
 
+def _scheduled_to_cancel(data):
+    return ((data or {}).get('scheduled_change') or {}).get('action') == 'cancel'
+
+
+def _is_retiring_other_subscription(user_id, subscription_id, data):
+    """True when this subscription event is about a contract that is NOT the
+    account's current one and is already scheduled to end (the old side of an
+    upgrade). Such an event must never change the account's plan."""
+    if not subscription_id or not _scheduled_to_cancel(data):
+        return False
+    stored = _stored_subscription_id(user_id)
+    return bool(stored) and stored != subscription_id
+
+
 def _verified_payer_user_id(data, subscription_id):
     """Resolve a billing event without trusting browser custom data."""
     stored = _user_id_by_subscription(subscription_id)
@@ -547,6 +561,26 @@ def handle_webhook():
     # transaction.completed's data.status is the TRANSACTION's ('completed').
     sub_status = ((data.get('status') or '').lower()
                   if event_type.startswith('subscription.') else '')
+
+    # ── A RETIRING CONTRACT NEVER SPEAKS FOR THE ACCOUNT (ticket #1039) ─────
+    # An upgrade checkout opens a NEW subscription and asks Paddle to end the
+    # old one at its period end (_retire_upgrade_source). Paddle answers with
+    # subscription.updated for the OLD contract, still 'active', carrying the
+    # old price and a scheduled cancel. That is a grant event, so it used to
+    # re-grant the old plan and store the old subscription id over the new
+    # one: a customer who had just paid for Pro was put back on Plus, shown
+    # the Pro upgrade card, and would have been downgraded to free when the
+    # old contract's cancel landed. Lifecycle news about a contract that is
+    # not the account's current one and is already scheduled to end only
+    # goes in the reporting snapshot (recorded above).
+    if (event_type.startswith('subscription.')
+            and event_type != 'subscription.canceled'
+            and _is_retiring_other_subscription(
+                user_id, subscription_id, data)):
+        print(f"↩︎ {event_type} for retiring subscription {subscription_id} "
+              f"(user {user_id} is on another contract) — no entitlement "
+              f"change")
+        return 'OK', 200
 
     # ── THE GUARD THAT WAS MISSING ─────────────────────────────────────────
     # Paddle keeps sending subscription.updated while a subscription sits in
