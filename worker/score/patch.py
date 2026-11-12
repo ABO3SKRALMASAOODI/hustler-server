@@ -100,7 +100,7 @@ def run(ctx, ledger, request):
     try:
         row = ctx.latest_edl()
         edl = row["json"]
-        text, items = asks.digest(edl)
+        text, items = asks.digest(edl, asks.asset_names(ctx, edl))
         named = sorted({i for a in ledger["asks"] if a["kind"] == "change" for i in a["items"]})
         full = {}
         for iid in named:
@@ -159,7 +159,7 @@ RETRIES = 12                # an op the recipe refuses is dropped and the rest i
 PASS_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["moves", "pictures", "ops", "left", "say"],
     "properties": {
-        "moves": {"type": "array", "maxItems": 40, "items": {
+        "moves": {"type": "array", "maxItems": 40, "description": "Camera moves on the upload's own shots only.", "items": {
             "type": "object", "additionalProperties": False, "required": ["t0", "t1", "mode", "strength", "aim", "for"],
             "properties": {
                 "t0": {"type": "number"}, "t1": {"type": "number"},
@@ -196,7 +196,7 @@ PASS_SYSTEM = """You plan one unit of a whole-film pass for a video editor. The 
 
 Cover the whole unit for every ask that runs through the film: an ask about every photo or every shot is a move on every shot, an ask for pictures every few seconds is pictures through the whole unit, not the first minute. Do exactly what was asked and keep what they asked to keep. Add no device nobody asked for: a move, a sound or a card without a reason in the asks reads as cheap.
 
-moves: each row gives every measured shot inside t0-t1 the same kind of camera move across the shot's own window. Split the unit into rows when the moves should differ (toward a face on portraits, sideways drifts on wide pictures), and vary direction from row to row. aim face uses the measured face when there is one. Moves need measured shots; with one long shot use ops (add_zoom at the moments) instead. Moves are only for an ask that wants the picture itself to move (movement on the photos, slow zooms, a travelling camera). An ask to make the film engaging, cinematic or professional is not an ask for moves: a person talking to camera carries about one gentle move per 30 s at most, where the words turn, and none when no ask wants movement. Repeated zooms on a talking take read as cheap.
+moves: camera moves on the upload's own picture (the speaker, the slideshow's photos), never on found pictures or cutaways placed over it; an ask about the cutaways is not an ask for moves. Each row gives every measured shot inside t0-t1 the same kind of camera move across the shot's own window. Split the unit into rows when the moves should differ (toward a face on portraits, sideways drifts on wide pictures), and vary direction from row to row. aim face uses the measured face when there is one. Moves need measured shots; with one long shot use ops (add_zoom at the moments) instead. Moves are only for an ask that wants the picture itself to move (movement on the photos, slow zooms, a travelling camera). An ask to make the film engaging, cinematic or professional is not an ask for moves: a person talking to camera carries about one gentle move per 30 s at most, where the words turn, and none when no ask wants movement. Repeated zooms on a talking take read as cheap.
 
 pictures: a found picture covers the film while the sound goes on. Place each on the words it shows, 3-6 s unless they said otherwise. query names the real thing: a named person, event, place or document by name for archive, news or history, a concrete filmable subject otherwise. kind photo for real people and events, which are rarely on free video. A picture must not stand in for a real event it isn't from. When nothing honest can be found, the customer's own footage stays.
 
@@ -329,7 +329,7 @@ def _plan_unit(ctx, ledger, request, edl, k, unit, n_units, prog, shots, words, 
     if group:
         lines.append(f"[{group[0][0]:.1f}-{group[-1][1]:.1f}] " + " ".join(x[2] for x in group))
     shot_lines = [f"#{i + 1} {s0:.1f}-{s1:.1f}{' face' if _faces(ctx, edl, s0, s1) else ''}" for i, (s0, s1) in enumerate(in_shots)]
-    text, _items = asks.digest(edl)
+    text, _items = asks.digest(edl, asks.asset_names(ctx, edl))
     frame = edl.get("frame") or {"ratio": "source"}
     video = (ctx.index or {}).get("video") or {}
     content = [{"type": "text", "text": "\n".join([

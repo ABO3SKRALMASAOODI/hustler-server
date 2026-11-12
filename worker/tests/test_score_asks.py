@@ -411,3 +411,57 @@ def test_a_request_that_rendered_nothing_is_checked_on_its_versions_stored_previ
     assert asks.stored_preview(ctx, 7)["duration_s"] == 20.0
     assert asks.stored_preview(ctx, 8) is None
     assert asks.stored_preview(NS(db=None, project_id=1), 7) is None
+
+
+def test_pictures_are_named_the_way_the_customer_calls_them():
+    # p5460's third request: "Remove the honey and tea b roll clip ... Yes #5 when I introduce the honey".
+    # The check had overlay ids and times only, and could not tell which clip was which (cannot_tell x3).
+    rows = [{"id": 6, "kind": "original", "storage_key": "originals/3/a.mp4", "meta": {"filename": "talk.mov"}},
+            {"id": 19, "kind": "video_clip", "storage_key": "fetched/3/broll/tea.mp4",
+             "meta": {"stock": True, "provider": "pexels", "filename": "b-roll.mp4",
+                      "page_url": "https://www.pexels.com/video/two-people-drinking-tea-5977443/"}},
+            {"id": 30, "kind": "video_clip", "storage_key": "uploads/3/4870.mov", "meta": {"filename": "IMG_4870.mov"}},
+            {"id": 31, "kind": "video_clip", "storage_key": "uploads/3/4872.mov", "meta": {"filename": "IMG_4872.mov"}}]
+
+    class Db:
+        def run(self, fn, *a):
+            class Cur:
+                def __enter__(s):
+                    return s
+
+                def __exit__(s, *e):
+                    return False
+
+                def execute(s, sql, args):
+                    assert args == (3,)
+
+                def fetchall(s):
+                    return rows
+
+            class Conn:
+                def cursor(s):
+                    return Cur()
+            return fn(Conn(), *a)
+    edl = {"keep": [[0, 60]], "overlays": [{"id": "ov1", "asset_key": "fetched/3/broll/tea.mp4", "start": 39.5, "duration_s": 2.1},
+                                           {"id": "ov2", "asset_key": "uploads/3/4872.mov", "start": 5.0, "duration_s": 3.0}]}
+    names = asks.asset_names(NS(db=Db(), project_id=3), edl)
+    assert names == {"fetched/3/broll/tea.mp4": "found pexels video_clip: two people drinking tea",
+                     "uploads/3/4872.mov": "upload #3 IMG_4872.mov"}
+    text, items = asks.digest(edl, names)
+    assert "overlays:ov1 overlay  39.5-41.6 s [found pexels video_clip: two people drinking tea]" in text
+    assert "[upload #3 IMG_4872.mov]" in text and "overlays:ov2" in items
+    assert asks.asset_names(NS(db=None, project_id=3), edl) == {}
+
+
+def test_the_check_reads_the_items_and_the_words_on_the_films_clock(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake(ctx, name, schema, system, content, max_tokens=4000):
+        seen["content"] = content
+        return {"asks": []}, {"usd": 0.0, "s": 0, "model": "m"}
+    monkeypatch.setattr(asks, "_call", fake)
+    index = {"words": [{"w": "Our", "t0": 1.0, "t1": 1.2}, {"w": "honey", "t0": 1.3, "t1": 1.7}], "video": {"duration": 20.0}}
+    monkeypatch.setattr(asks, "asset_names", lambda ctx, edl: {})
+    asks.check(NS(workdir=str(tmp_path), index=index), asks.settle({"lang": "en", "asks": [_ask("edit")]}, EDL), "ok", EDL, None, "")
+    text = seen["content"][0]["text"]
+    assert "texts:t1 text \"Big sale\"" in text and "[1.0-1.7] Our honey" in text
