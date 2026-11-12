@@ -328,3 +328,14 @@ def test_a_named_model_is_used_only_on_a_claude_lane(monkeypatch):
     asks._call(NS(llm_client=None, agent_model="gpt-6-luna", ask_model="claude-sonnet-5-5"), "record_x", {}, "s", "c")
     asks._call(NS(llm_client=None, agent_model="claude-haiku-5-5"), "record_x", {}, "s", "c")
     assert used == ["claude-sonnet-5-5", "gpt-6-luna", "claude-haiku-5-5"]
+
+
+def test_an_empty_ledger_for_a_typed_request_is_asked_again_then_dropped(monkeypatch):
+    answers = [{"lang": "en"}, {"lang": "en", "asks": [_ask("edit")]}]
+    monkeypatch.setattr(asks, "_call", lambda *a, **k: (answers.pop(0), {"usd": 0.001, "s": 1.0, "model": "m"}))
+    ctx = NS(latest_edl=lambda: {"version": 3, "json": EDL}, index={}, duration=20.0)
+    ledger = asks.build(ctx, "remove the grade and add dissolves")
+    assert len(ledger["asks"]) == 1 and ledger["usage"]["usd"] == 0.002
+    answers[:] = [{"lang": "en"}, {"lang": "en", "asks": []}]
+    with pytest.raises(ValueError):
+        asks.build(ctx, "remove the grade and add dissolves")

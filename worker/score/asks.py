@@ -224,7 +224,17 @@ def build(ctx, request, history=None, edl=None):
         "Where the current film came from: " + json.dumps(origin or "the customer's own edits", ensure_ascii=False, default=str)[:400],
         "The current film, digest (id then what it is):\n" + text,
     ])
-    value, usage = _call(ctx, "record_ask_ledger", LEDGER_SCHEMA, LEDGER_SYSTEM, content)
+    value, usage = _call(ctx, "record_ask_ledger", LEDGER_SCHEMA, LEDGER_SYSTEM, content, max_tokens=8000)
+    if not value.get("asks") and str(request or "").strip():
+        # The model answered with no ledger for a typed request (p5520's second request on a replay:
+        # {"lang": "en"} and nothing else). Asked once more; an empty ledger is no ledger, never a
+        # request that asked for nothing.
+        value, again = _call(ctx, "record_ask_ledger", LEDGER_SCHEMA, LEDGER_SYSTEM,
+                             content + "\n\nYour last answer listed no asks. List every ask in the request now.",
+                             max_tokens=8000)
+        usage = {"usd": round(usage["usd"] + again["usd"], 6), "s": round(usage["s"] + again["s"], 2), "model": again["model"]}
+        if not value.get("asks"):
+            raise ValueError("the ledger came back empty twice")
     return settle(value, edl if edl is not None else ctx.latest_edl()["json"], usage)
 
 
