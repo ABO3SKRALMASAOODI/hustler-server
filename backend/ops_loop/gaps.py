@@ -586,12 +586,100 @@ def _tool_defects(cur, since, now, p):
     return out
 
 
+def _store_health():
+    """This web process's measured store health (storage_health.py), or {}
+    where no probe runs (a replay on the Mac, ops_review.py gaps: it must
+    not probe production stores from there). create_app starts the probe in
+    every web worker. Kept separate so a test can stand in."""
+    import storage
+    if not storage.store_prober().running():
+        return {}
+    return storage.store_health()
+
+
+def _kv(cur, key):
+    cur.execute("SELECT value FROM app_kv WHERE key = %s", (key,))
+    row = cur.fetchone()
+    raw = row["value"] if row else None
+    try:
+        data = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def _storage_write_failing(cur, since, now, p):
+    """12 Nov 2026: R2 answered every call with NotEntitled from 16:36 UTC;
+    every upload failed, and /healthz said storage was fine because nothing
+    asked a store. The store the live mode writes to has now failed
+    FAILS_FOR_ALARM background probes in a row: every upload fails until a
+    store takes them. One ticket per store, a ref per hour. An automatic
+    failover (the dispatcher's, storage_health.Failover) is filed on the same
+    ticket: it says what moved and that returning is a person's decision."""
+    import storage_health
+    out = []
+    st = _store_health() or {}
+    store = st.get("write_store")
+    res = (st.get("stores") or {}).get(store) or {}
+    if res.get("ok") is False and \
+            int(res.get("fails") or 0) >= storage_health.FAILS_FOR_ALARM:
+        out.append(_item(
+            f"gap:storage:{store}:{now.strftime('%Y%m%d%H')}", "storage", now,
+            {}, "P0", ("gap", "storage-write-failing", store),
+            f"Uploads fail: the {store} store fails its probe "
+            f"({res.get('code') or 'no answer'})",
+            f"{store} ({res.get('host')}) failed {res.get('fails')} probes in "
+            f"a row since {res.get('since')}: {res.get('err')}"))
+    row = _kv(cur, "storage_routing")
+    at = row.get("set_at")
+    if row.get("by") == storage_health.routing.AUTO_BY and at:
+        moment = _i()._aware(at)
+        if since < moment <= now:
+            failed = row.get("failed_store") or "legacy"
+            out.append(_item(
+                f"gap:storage-failover:{at}", "storage", moment, {}, "P0",
+                ("gap", "storage-write-failing", failed),
+                f"Storage failed over automatically: {row.get('previous')} -> "
+                f"{row.get('mode')}",
+                f"{row.get('note') or ''} Returning is a human or Fixer "
+                "decision (storage_migrate.py mode)."))
+    return out
+
+
+LANE_OFF_AFTER = timedelta(minutes=15)
+
+
+def _claude_lane_off(cur, since, now, p):
+    """12 Nov 2026: app_kv.claude_credit_state went off on a billing refusal
+    on 9 Nov and stayed off for 3 days after Anthropic accepted calls again:
+    0 trial grants, about 105 paywalls, and nothing in the ticket system
+    said so. Off for anything but the owner's quota (``budget``) for over
+    LANE_OFF_AFTER: every new trial meets the paywall. A ref per hour."""
+    state = _kv(cur, "claude_credit_state")
+    if str(state.get("state") or "").lower() != "off":
+        return []
+    reason = str(state.get("reason") or "")
+    if reason == "budget":
+        return []
+    started = state.get("since")
+    started = _i()._aware(started) if started else None
+    if started is None or now - started < LANE_OFF_AFTER:
+        return []
+    return [_item(
+        f"gap:claude-lane-off:{now.strftime('%Y%m%d%H')}", "lane", now, {},
+        "P0", ("gap", "claude-lane-off", reason or "unknown"),
+        "Claude lane off: every new trial meets the paywall",
+        f"claude_credit_state off since {state.get('since')} ({reason}); "
+        f"last probe {state.get('last_probe_at')} ok="
+        f"{state.get('last_probe_ok')}: {state.get('last_probe_error') or ''}")]
+
+
 CHECKS = (_analysis_overdue, _render_overdue, _export_never_arrived, _checkout,
           _request_changed_nothing, _first_cut_is_the_upload,
           _reply_hid_a_failure, _brief_unread, _model_failing,
           _cancelled_within_a_day,
           _below_the_bar, _turn_went_silent, _unread_endings,
-          _tool_defects)
+          _tool_defects, _storage_write_failing, _claude_lane_off)
 
 
 def scan(cur, since, now, checks=CHECKS):

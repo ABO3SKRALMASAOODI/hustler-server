@@ -211,8 +211,12 @@ def create_app():
             pass
         # Which object store(s) this process reads and writes (the move off
         # R2, storage_routing.py): hosts and the mode, never a key.
+        # Each store is probed in the background (storage_health.py): the
+        # first health call in a process starts it, and stores.<name>.ok and
+        # write_ok are measured answers, never configuration.
         try:
             import storage as _storage
+            _storage.start_store_probe()
             payload["storage"] = _storage.routing_status()
         except Exception:
             pass
@@ -338,6 +342,15 @@ def create_app():
         start_cockpit_alerts(app)
     except Exception as e:
         app.logger.error("could not start cockpit alert scheduler: %s", e)
+
+    # Each object store's measured health (storage_health.py, 12 Nov 2026):
+    # a background probe per process, which /healthz and the intake's
+    # storage check read. Never on a request path.
+    try:
+        import storage as _storage_probe
+        _storage_probe.start_store_probe()
+    except Exception as e:
+        app.logger.error("could not start the store probe: %s", e)
 
     # Claude-funded trial (D2): pool 50/80/95 % and Anthropic billing/auth
     # refusals reach the admin address only. A no-op until migration 040.

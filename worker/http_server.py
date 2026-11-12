@@ -287,6 +287,7 @@ class Handler(BaseHTTPRequestHandler):
             # and the mode here, never a key.
             try:
                 import storage as _storage
+                _storage.start_store_probe()
                 body["storage"] = _storage.routing_status()
             except Exception as e:
                 body["storage_error"] = str(e)[:200]
@@ -342,6 +343,14 @@ def serve():
     # cannot let the reaper kill a still-running turn whose result this request
     # is responsible for committing.
     executor_runtime.ensure_heartbeat()
+    # Each object store's measured health (storage_health.py): /health
+    # reports stores.<name>.ok and write_ok from a background probe.
+    try:
+        import storage as _storage
+        _storage.start_store_probe()
+    except Exception as e:  # noqa: BLE001 — a probe never stops a boot
+        print(f"[executor] store probe not started: {str(e)[:200]}",
+              flush=True)
     signal.signal(signal.SIGTERM, _on_sigterm)
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"valmera-{config.WORKER_ROLE.replace('_', '-')} listening on :{port} "

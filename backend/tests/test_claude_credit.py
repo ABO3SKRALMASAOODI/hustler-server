@@ -1,6 +1,7 @@
 """The automatic credit switch (backend/claude_credit.py, owner 25 Oct 2026):
 per-cycle Claude spend against the budget, OFF at the line or on a billing
-refusal, a probe that turns it back ON in a new cycle, one admin alert per
+refusal, a probe that turns it back ON as soon as one succeeds under the
+line (12 Nov 2026; it used to wait for a new cycle), one admin alert per
 switch, and the same code in the backend and the worker."""
 import json
 import os
@@ -103,8 +104,8 @@ class FakeConn:
         return self._row
 
 
-def _at(y, m, d, h=12):
-    return datetime(y, m, d, h, tzinfo=UTC)
+def _at(y, m, d, h=12, mi=0):
+    return datetime(y, m, d, h, mi, tzinfo=UTC)
 
 
 def _state(conn):
@@ -217,28 +218,56 @@ def test_a_budget_stop_comes_back_when_the_line_moves_and_not_before():
     assert out["result"] == "switched_on" and _state(conn)["state"] == "on"
 
 
-def test_the_probe_switches_on_only_in_a_new_cycle_after_a_billing_stop():
+def test_a_billing_stop_comes_back_in_the_same_cycle_when_a_probe_succeeds():
+    """12 Nov 2026: a billing OFF of 9 Nov waited for the next cycle (8 Dec)
+    although Anthropic accepted calls again within a day; every new trial met
+    the paywall for 3 days. A probe that succeeds under the line turns the
+    lane on at once."""
     conn = FakeConn()
     cc.switch_off(conn, cc.REASON_BILLING, now=_at(2026, 11, 1))
     calls = []
+    answers = [(False, "402 billing_error"), (True, "stop_reason=end_turn")]
 
     def call(key):
         calls.append(key)
-        return True, "stop_reason=end_turn"
+        return answers.pop(0)
 
-    # same cycle: it probes (recorded) but stays off
-    out = probe.run(conn, "k", call=call, now=_at(2026, 11, 2))
+    # still refused: recorded, stays off
+    out = probe.run(conn, "k", call=call, now=_at(2026, 11, 1, 1))
     assert out["result"] == "recorded" and calls == ["k"]
-    assert _state(conn)["state"] == "off" and _state(conn)["last_probe_ok"]
-    # three hours have not passed: no call at all
-    out = probe.run(conn, "k", call=call, now=_at(2026, 11, 2, 13))
+    assert _state(conn)["state"] == "off"
+    # under 15 minutes later: no call at all
+    out = probe.run(conn, "k", call=call, now=_at(2026, 11, 1, 1, 10))
     assert out["result"] == "nothing to do" and len(calls) == 1
-    # new cycle: one call, back on, one alert
-    out = probe.run(conn, "k", call=call, now=_at(2026, 11, 8, 3))
+    # 15 minutes on, same cycle: one call, back on, one alert each way
+    out = probe.run(conn, "k", call=call, now=_at(2026, 11, 1, 1, 15))
     assert out["result"] == "switched_on" and len(calls) == 2
     assert _state(conn)["state"] == "on"
+    assert _state(conn)["previous_reason"] == cc.REASON_BILLING
     kinds = sorted(a["kind"] for a in conn.alerts.values())
     assert kinds == ["credit_switch_off", "credit_switch_on"]
+
+
+def test_a_refusal_off_is_probed_every_15_minutes_a_budget_off_on_its_cadence():
+    cfg = cc.parse_config(None)
+    assert cc.probe_every_s(cfg, {"reason": cc.REASON_BILLING}) == 900
+    assert cc.probe_every_s(cfg, {"reason": cc.REASON_AUTH}) == 900
+    assert cc.probe_every_s(cfg, {"reason": cc.REASON_BUDGET}) == 3 * 3600
+
+
+def test_a_billing_stop_whose_probe_succeeds_over_the_line_becomes_budget():
+    """Only the owner's quota keeps the lane off once the provider answers."""
+    conn = FakeConn()
+    conn.kv[cc.CONFIG_KEY] = json.dumps({"cycle_budget_usd": 100})
+    now = _at(2026, 11, 2)
+    conn.spend(now.date(), paid=95.0)
+    cc.switch_off(conn, cc.REASON_BILLING, "credit balance", now=now)
+    out = probe.run(conn, "k", call=lambda k: (True, "ok"),
+                    now=now + timedelta(minutes=16))
+    assert out["result"] == "recorded"
+    st = _state(conn)
+    assert st["state"] == "off" and st["reason"] == cc.REASON_BUDGET
+    assert st["previous_reason"] == cc.REASON_BILLING
 
 
 def test_a_failed_probe_in_a_new_cycle_stays_off():
@@ -321,14 +350,14 @@ def test_the_workflow_runs_the_probe_every_three_hours_with_the_credited_key():
 def test_a_subscriber_request_probes_at_once_after_a_top_up_at_most_every_5_min():
     """P0 #60 (9 Nov 2026): the wallet ran dry; after a top-up only the
     3-hourly probe reopened paid editing. A request may now claim one probe
-    every 5 minutes across the fleet; a success opens paid editing at once
-    (the free trial still waits for the next cycle)."""
+    every 5 minutes across the fleet; a success turns the lane on at once
+    (12 Nov 2026: the free trial no longer waits for the next cycle)."""
     conn = FakeConn()
     now = _at(2026, 11, 9, 18)
     cc.switch_off(conn, cc.REASON_BILLING, "credit balance is too low", now=now)
     assert not cc.paid_available(cc.status(conn, now=now))
     plan = cc.claim_on_demand_probe(conn, now=now + timedelta(minutes=1))
-    assert plan and plan["action"] == "probe" and not plan["may_switch_on"]
+    assert plan and plan["action"] == "probe" and plan["may_switch_on"]
     # a second request within 5 minutes does not probe again
     assert cc.claim_on_demand_probe(conn, now=now + timedelta(minutes=4)) is None
     # that probe was refused (still empty): recorded, still closed
@@ -338,9 +367,9 @@ def test_a_subscriber_request_probes_at_once_after_a_top_up_at_most_every_5_min(
     later = now + timedelta(minutes=7)
     plan = cc.claim_on_demand_probe(conn, now=later)
     assert plan
-    cc.after_probe(conn, plan, True, now=later)
+    assert cc.after_probe(conn, plan, True, now=later) == "switched_on"
     credit = cc.status(conn, now=later)
-    assert credit["on"] is False and cc.paid_available(credit)
+    assert credit["on"] is True and cc.paid_available(credit)
     # paid editing open: nothing more to probe
     assert cc.claim_on_demand_probe(conn, now=later + timedelta(minutes=10)) is None
 

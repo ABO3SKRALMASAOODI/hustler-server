@@ -27,12 +27,16 @@ automatically, without changing anything."
   access. Since the owner's 4 Nov instruction, this trial ledger must not
   switch paid editing off. Actual billing/auth refusals require a configured
   funded paid fallback.
-* ON AGAIN. While OFF, a probe (GitHub Actions every 3 h,
-  backend/scripts/claude_credit_probe.py) makes one minimal call. A billing
-  refusal comes back when the probe succeeds in a NEW cycle. A switch that
-  went off on the budget or on an auth refusal comes back on as soon as a
-  probe succeeds and the cycle is under the line (a raised budget, a fixed
-  key): only a real provider refusal has to wait for new credit.
+* ON AGAIN. While OFF on a billing or key refusal, the dispatcher probes
+  every OFF_PROBE_EVERY_S (15 min; worker/main.py, one claim across the
+  fleet), and GitHub Actions every 3 h as the backstop
+  (backend/scripts/claude_credit_probe.py): one minimal call. Whatever turned
+  it off, it comes back on as soon as a probe succeeds while the cycle's
+  spend is under the line. 12 Nov 2026: a billing OFF of 9 Nov waited for
+  the next cycle (8 Dec) although Anthropic accepted calls again within a
+  day, and every new trial met the paywall for 3 days with the owner's
+  trial switch on. A probe that succeeds over the line turns the reason into
+  ``budget``: only the owner's quota keeps the lane off.
 * Each switch queues ONE admin alert (``trial_alerts``; the backend's alert
   scheduler sends it to the admin address, never a customer).
 
@@ -72,6 +76,10 @@ ON, OFF = "on", "off"
 REASON_BUDGET = "budget"
 REASON_BILLING = "billing_error"
 REASON_AUTH = "auth_error"
+REFUSALS = (REASON_BILLING, REASON_AUTH)
+# While OFF on a refusal, probe this often (the configured probe_every_s, 3 h
+# by default, when that is shorter).
+OFF_PROBE_EVERY_S = 15 * 60
 
 
 def _v(row, key, index=0):
@@ -327,8 +335,8 @@ def switch_off(conn, reason, detail="", now=None):
             "included Studio access. The trial cutoff reserves remaining "
             "Anthropic credit for paid work. The trial ledger does not disable "
             "paid editing; an actual provider refusal requires a funded fallback.</p>"
-            "<p>It comes back on by itself when a probe succeeds in the next "
-            "cycle (a key problem: as soon as a probe succeeds). Override: "
+            "<p>It comes back on by itself as soon as a probe (every 15 "
+            "minutes) succeeds while the cycle is under the line. Override: "
             "app_kv claude_credit_state = {\"state\": \"on\", \"reason\": "
             "\"manual\"}.</p>"
             + (f"<p>Provider said: <code>{_scrub(detail)}</code></p>"
@@ -360,8 +368,10 @@ def switch_on(conn, reason, now=None):
     return True
 
 
-def note_probe(conn, ok, error="", now=None):
-    """Record a probe that did not switch anything (OFF stays OFF)."""
+def note_probe(conn, ok, error="", now=None, over_line=False):
+    """Record a probe that did not switch anything (OFF stays OFF). A
+    refusal OFF whose probe succeeded with the cycle over the line is a
+    budget OFF from now on: the provider is fine, the quota is not."""
     now = now or now_utc()
     with conn.cursor() as cur:
         _lock(cur)
@@ -370,6 +380,9 @@ def note_probe(conn, ok, error="", now=None):
             return
         state.update(last_probe_at=now.isoformat(), last_probe_ok=bool(ok),
                      last_probe_error=_scrub(error) if error else None)
+        if ok and over_line and state.get("reason") in REFUSALS:
+            state["previous_reason"] = state.get("reason")
+            state["reason"] = REASON_BUDGET
         _write_state(cur, state)
 
 
@@ -416,17 +429,25 @@ def probe_plan(conn, now=None):
         return {"action": "enforce_line" if spent >= line else "none",
                 "spent_usd": spent, "line_usd": line}
     last = _parse_time(state.get("last_probe_at"))
-    if last and (now - last) < timedelta(seconds=cfg["probe_every_s"] - 60):
+    if last and (now - last) < timedelta(
+            seconds=probe_every_s(cfg, state) - 60):
         return {"action": "none", "why": "probed recently",
                 "spent_usd": spent, "line_usd": line}
     off_end = _parse_time(state.get("cycle_end"))
     new_cycle = off_end is None or now >= off_end
-    if state.get("reason") == REASON_BILLING:
-        may = new_cycle and spent < line
-    else:
-        may = spent < line
-    return {"action": "probe", "may_switch_on": may, "new_cycle": new_cycle,
-            "reason": state.get("reason"), "spent_usd": spent, "line_usd": line}
+    return {"action": "probe", "may_switch_on": spent < line,
+            "new_cycle": new_cycle, "reason": state.get("reason"),
+            "spent_usd": spent, "line_usd": line}
+
+
+def probe_every_s(cfg, state):
+    """How often an OFF switch is probed: every 15 minutes after a refusal
+    (credit or a key can come back any minute), the configured cadence after
+    a budget stop (only a raised budget or a new cycle reopens it)."""
+    every = cfg["probe_every_s"]
+    if state.get("reason") in REFUSALS:
+        every = min(every, OFF_PROBE_EVERY_S)
+    return every
 
 
 # A subscriber's request may probe at most this often across the fleet.
@@ -441,8 +462,10 @@ def claim_on_demand_probe(conn, every_s=ON_DEMAND_EVERY_S, now=None):
     blocked for up to 3 more hours. The request itself may now probe: this
     claims the one probe allowed every ``every_s`` seconds across every worker
     (it stamps ``last_probe_at`` under the switch lock) and returns the plan
-    for ``after_probe``, or None when paid editing is not off on a refusal,
-    is already open, or another request probed recently."""
+    for ``after_probe``, or None when the lane is not off on a refusal or
+    another request (or the dispatcher's 15-minute probe) probed recently.
+    A success turns the lane on (after_probe), so nothing waits for a new
+    cycle."""
     now = now or now_utc()
     cfg = read_config(conn)
     start, end = cycle_window(cfg, now)
@@ -451,9 +474,7 @@ def claim_on_demand_probe(conn, every_s=ON_DEMAND_EVERY_S, now=None):
     with conn.cursor() as cur:
         _lock(cur)
         state = parse_state(_kv(cur, STATE_KEY))
-        if (state["state"] != OFF
-                or state.get("reason") not in (REASON_BILLING, REASON_AUTH)
-                or state.get("last_probe_ok") is True):
+        if state["state"] != OFF or state.get("reason") not in REFUSALS:
             return None
         last = _parse_time(state.get("last_probe_at"))
         if last and (now - last) < timedelta(seconds=every_s):
@@ -462,9 +483,8 @@ def claim_on_demand_probe(conn, every_s=ON_DEMAND_EVERY_S, now=None):
         _write_state(cur, state)
     off_end = _parse_time(state.get("cycle_end"))
     new_cycle = off_end is None or now >= off_end
-    may = (new_cycle and spent < line) if state.get("reason") == REASON_BILLING \
-        else spent < line
-    return {"action": "probe", "may_switch_on": may, "new_cycle": new_cycle,
+    return {"action": "probe", "may_switch_on": spent < line,
+            "new_cycle": new_cycle,
             "reason": state.get("reason"), "spent_usd": spent,
             "line_usd": line, "on_demand": True}
 
@@ -475,5 +495,6 @@ def after_probe(conn, plan, ok, error="", now=None):
         if switch_on(conn, "probe succeeded" + (
                 " in a new cycle" if plan.get("new_cycle") else ""), now=now):
             return "switched_on"
-    note_probe(conn, ok, error, now=now)
+    note_probe(conn, ok, error, now=now,
+               over_line=bool(ok and not plan.get("may_switch_on")))
     return "recorded"

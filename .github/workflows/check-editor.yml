@@ -5,6 +5,14 @@ on:
       - 'backend/**'
       - 'worker/**'
       - '.github/workflows/check-editor.yml'
+  # The worker suite on every push to main (12 Nov 2026): it ran inside
+  # deploy-cloudflare-executor.yml, which is manual now. The backend suite runs
+  # on push in verify-production-release.yml, so a push runs the worker only.
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '.github/workflows/check-editor.yml'
 permissions:
   contents: read
 jobs:
@@ -16,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [backend, worker]
+        service: ${{ github.event_name == 'push' && fromJSON('["worker"]') || fromJSON('["backend", "worker"]') }}
     services:
       postgres:
         image: postgres:16

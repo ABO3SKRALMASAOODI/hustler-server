@@ -1,11 +1,13 @@
 name: claude-credit-probe
 
 # The automatic credit switch for the Claude lane (owner, 25 Oct 2026;
-# backend/claude_credit.py). Every 3 hours: while the switch is ON this makes
-# NO Anthropic call (it only switches OFF if the cycle's recorded spend is
-# past the line); while it is OFF it makes one minimal call and switches the
-# lane back ON when that succeeds in a new billing cycle. It writes only the
-# app_kv row claude_credit_state and, on a switch, one admin alert row.
+# backend/claude_credit.py). Every 3 hours, the BACKSTOP: the dispatcher
+# probes every 15 minutes while the lane is off on a refusal (worker/main.py,
+# 12 Nov 2026). While the switch is ON this makes NO Anthropic call (it only
+# switches OFF if the cycle's recorded spend is past the line); while it is
+# OFF it makes one minimal call and switches the lane back ON when that
+# succeeds with the cycle under the line. It writes only the app_kv row
+# claude_credit_state and, on a switch, one admin alert row.
 on:
   push:
     branches: [main]

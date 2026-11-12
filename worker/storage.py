@@ -179,8 +179,42 @@ def next_config():
     return routing.store_config(routing.NEXT, creds.ENV)
 
 
+# Each store's measured health (storage_health.py, 12 Nov 2026): a
+# background probe, started by the health route, the web app and the
+# dispatcher, never on a request path. The routing status carries it, so
+# /healthz and the executors' /health say whether a store answers, not only
+# whether it is configured.
+import storage_health as _health  # noqa: E402
+
+_prober = _health.Prober(env=creds.ENV, mode=lambda: _router.mode())
+
+
+def store_prober():
+    return _prober
+
+
+def start_store_probe():
+    """Idempotent per process. False when STORAGE_PROBE_EVERY_S=0."""
+    if str(os.environ.get("STORAGE_PROBE_EVERY_S", "")).strip() == "0":
+        return False
+    try:
+        _prober.start()
+        return True
+    except Exception as e:  # noqa: BLE001 — a probe never stops a process
+        _log(f"store probe not started: {str(e)[:200]}")
+        return False
+
+
+def store_health():
+    return _prober.status()
+
+
 def routing_status():
     st = _router.status()
+    try:
+        st.update(_prober.status())
+    except Exception:  # noqa: BLE001 — a health route never fails on this
+        pass
     try:
         if _mode_feed.started():
             st["mode_read"] = _mode_feed.status()

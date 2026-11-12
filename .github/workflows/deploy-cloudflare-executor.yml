@@ -5,14 +5,12 @@ name: deploy-cloudflare-executor
 # staged-rollout verifier waits for every Cloudflare lane to serve this source.
 # A cancelled run leaves Cloudflare behind the dispatcher; touching this file
 # re-runs the same pipeline without changing worker source.
+#
+# Manual only since 12 Nov 2026: app_kv.box_routing has sent every lane to the
+# render box since 30 Oct, and the Cloudflare account's publish has failed since
+# run #266 (12 Nov), so a push only produced a red run. check-editor.yml runs
+# the worker suite on every push to main instead.
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "worker/**"
-      - "backend/migrations/025_remote_executions.sql"
-      - ".github/workflows/deploy-cloudflare-executor.yml"
   workflow_dispatch: {}
 
 concurrency:

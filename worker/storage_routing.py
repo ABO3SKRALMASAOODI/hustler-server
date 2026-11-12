@@ -82,6 +82,29 @@ LEGACY_SAFE = frozenset(("legacy", "copy", "dual_write"))
 
 _PREFIX = {LEGACY: "S3_", NEXT: "S3_NEXT_"}
 
+# The automatic failover (storage_health.py, 12 Nov 2026: R2 answered every
+# call with NotEntitled for an hour while B2 sat configured and idle). When
+# the store a mode WRITES to fails at the account level and the other store
+# passes a full probe, the dispatcher moves to the mode whose writes go to the
+# other store, keeping every object readable from both: off R2 to ``next``,
+# off the next store to ``rollback``. ``next_only`` has no second store and
+# is never entered or left automatically. A flip is never undone
+# automatically either: returning is a human's or a Fixer's decision.
+FAILOVER = {"legacy": "next", "copy": "next", "dual_write": "next",
+            "rollback": "next", "next": "rollback"}
+AUTO_BY = "auto-failover"
+
+
+def failover_mode(mode):
+    """The mode that moves ``mode``'s writes to the other store, or None."""
+    return FAILOVER.get(mode)
+
+
+def write_store(mode):
+    """The store that must accept a write for ``mode`` to serve uploads: the
+    one browser uploads and every server write go to first."""
+    return plan_for(mode).write[0]
+
 
 def plan_for(mode):
     return _PLANS.get(mode) or _PLANS[DEFAULT_MODE]

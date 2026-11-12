@@ -1,6 +1,8 @@
 """The automatic credit switch's probe (backend/claude_credit.py).
 
-Run every 3 hours by .github/workflows/claude-credit-probe.yml with the
+The backstop (the dispatcher probes every 15 minutes while the lane is off
+on a refusal, worker/main.py). Run every 3 hours by
+.github/workflows/claude-credit-probe.yml with the
 credited Anthropic organisation's key (GitHub secret ANTHROPIC_API_KEY) and
 the production database (PRODUCTION_DATABASE_URL). It writes ONLY the
 code-owned app_kv row ``claude_credit_state`` and, on a switch, one admin
@@ -10,9 +12,9 @@ alert row in ``trial_alerts``.
   past the line (budget - safety margin), it switches OFF (belt and braces
   behind the worker's own check).
 * Switch OFF: one minimal Messages call (Claude Haiku 5.5, a few tokens,
-  well under $0.0001). It switches back ON when the call succeeds in a NEW
-  billing cycle, or, when it went off on a key (auth) refusal, as soon as a
-  call succeeds and the cycle is under the line. Otherwise it records the
+  well under $0.0001). It switches back ON as soon as the call succeeds
+  while the cycle is under the line, whatever turned it off (12 Nov 2026: a
+  billing OFF no longer waits for a new cycle). Otherwise it records the
   probe and stays off.
 
 Never prints the key or the database URL.
@@ -80,7 +82,7 @@ def run(conn, api_key, dry_run=False, call=probe_call, now=None):
     if dry_run:
         out["result"] = ("would probe; would switch on if it succeeds"
                          if plan.get("may_switch_on")
-                         else "would probe; stays off (same cycle)")
+                         else "would probe; stays off (over the line)")
         return out
     ok, error = call(api_key)
     out["probe_ok"] = ok

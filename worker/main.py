@@ -1165,6 +1165,70 @@ def _on_shutdown(signum, _frame):
     os._exit(0)
 
 
+def _start_store_failover():
+    """Start this process's store probe and, on the dispatcher, the single
+    automatic failover writer. Best effort: never stops a boot."""
+    try:
+        import storage as _storage
+        import storage_health as _health
+        prober = _storage.store_prober()
+        if config.WORKER_ROLE in ("worker", "dispatcher"):
+            fdb = dbx.Db()
+
+            def _alert(subject, html):
+                stamp = time.strftime("%Y%m%d%H%M%S", time.gmtime())
+                fdb.run(_health.queue_admin_alert,
+                        f"storage_failover_{stamp}", subject, html)
+
+            prober.add_listener(_health.Failover(
+                prober,
+                read_row=lambda: fdb.run(_health.read_routing_row),
+                write_row=lambda old, new: fdb.run(
+                    _health.write_routing_row, old, new),
+                alert=_alert))
+        _storage.start_store_probe()
+    except Exception as e:  # noqa: BLE001
+        print(f"[storage] failover watch not started: {str(e)[:200]}",
+              flush=True)
+
+
+CLAUDE_CREDIT_PROBE_TICK_S = 300
+
+
+def _claude_credit_probe_loop():
+    """While the Claude lane is OFF on a billing or key refusal, one minimal
+    call every claude_credit.OFF_PROBE_EVERY_S (15 min) across the fleet
+    (claude_credit.claim_on_demand_probe stamps the claim under the switch
+    lock); a success turns the lane back on in the same cycle while the
+    cycle's spend is under the line. The GitHub probe (every 3 h) stays as
+    the backstop. Never raises."""
+    import claude_credit
+    import claude_lane
+    pdb = None
+    while True:
+        try:
+            if claude_lane.configured():
+                pdb = pdb or dbx.Db()
+                plan = pdb.run(claude_credit.claim_on_demand_probe,
+                               claude_credit.OFF_PROBE_EVERY_S)
+                if plan:
+                    ok, error = claude_lane.probe()
+                    out = pdb.run(claude_credit.after_probe, plan, ok,
+                                  "" if ok else error)
+                    print(f"[credit] lane probe "
+                          f"{'ok' if ok else 'refused'}: {out}", flush=True)
+                    if out == "switched_on":
+                        claude_lane.reopen()
+                        try:
+                            import claude_trial
+                            claude_trial.reset_flag_cache()
+                        except Exception:  # noqa: BLE001
+                            pass
+        except Exception as e:  # noqa: BLE001
+            print(f"[credit] lane probe error: {str(e)[:200]}", flush=True)
+        time.sleep(CLAUDE_CREDIT_PROBE_TICK_S)
+
+
 def _routing_self_check():
     try:
         remote.routing_self_check()
@@ -1225,7 +1289,9 @@ def main():
                 st = dict(_storage.routing_status())
                 seen = {k: st.get(k) for k in (
                     "mode", "requested", "degraded", "legacy", "next",
-                    "next_host", "next_source")}
+                    "next_host", "next_source", "write_ok")}
+                seen["stores_ok"] = {k: (v or {}).get("ok") for k, v in
+                                     (st.get("stores") or {}).items()}
                 # Where this process's model keys come from (the same row
                 # reasoning): source words only, never a key.
                 import provider_creds as _providers
@@ -1247,6 +1313,19 @@ def main():
 
     threading.Thread(target=_storage_probe, daemon=True,
                      name="storage-probe").start()
+
+    # Measured store health and the automatic failover (storage_health.py,
+    # 12 Nov 2026: R2 refused every call for over an hour while B2 sat
+    # configured). The dispatcher is the ONE process that may flip
+    # app_kv.storage_routing; it does so only when the write store fails at
+    # the account level and the other store passes a full probe, never back.
+    _start_store_failover()
+
+    # The Claude lane's credit switch, probed every 15 minutes while it is
+    # off on a provider refusal (claude_credit.py, 12 Nov 2026: a billing OFF
+    # kept the trial behind the paywall for 3 days after credit came back).
+    threading.Thread(target=_claude_credit_probe_loop, daemon=True,
+                     name="claude-credit-probe").start()
 
     # Publish the MCP tool catalog for the backend to serve on tools/list.
     # Best effort by design — a missing table (migration not applied yet) must
