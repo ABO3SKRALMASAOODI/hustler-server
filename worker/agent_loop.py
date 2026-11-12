@@ -2742,6 +2742,7 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     if isinstance(cont.get("ask_ledger"), dict):
         ctx.ask_ledger = cont["ask_ledger"]
         ctx.ask_verdict = cont.get("ask_verdict")
+        ctx.ask_model = (ctx.ask_ledger.get("cfg") or {}).get("model")
         return ""
     if cont or _trial_lane(ctx) or getattr(ctx, "claude_trial", None) is not None:
         return ""
@@ -2750,6 +2751,7 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
         cfg = asks.read(worker_db)
         if not asks.admitted(cfg, job.get("user_id")):
             return ""
+        ctx.ask_model = cfg.get("model")
         request = quality_verifier.request_text_for(ctx)
         ledger = asks.build(ctx, request, getattr(ctx, "request_contract_history", None))
     except dbx.JobLeaseLost:
@@ -2757,7 +2759,7 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     except Exception as exc:  # noqa: BLE001 - no ledger: today's loop, as before
         print(f"[asks] job {job.get('id')}: no ledger: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
         return ""
-    ledger["cfg"] = {k: cfg[k] for k in ("repairs", "check")}
+    ledger["cfg"] = {k: cfg[k] for k in ("repairs", "check", "model")}
     ctx.ask_ledger = ledger
     if not ledger["asks"]:
         return ""

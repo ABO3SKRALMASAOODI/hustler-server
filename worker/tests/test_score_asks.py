@@ -307,3 +307,24 @@ def test_a_trial_turn_never_enters():
     ctx = _seam_ctx()
     ctx.claude_trial = object()
     assert agent_loop._typed_asks_start(ctx, _Db('{"mode": "on"}'), {"id": 1, "user_id": 5}, 9, {}, None) == ""
+
+
+def test_the_switch_may_name_a_claude_model_for_the_ledger_and_check_only():
+    assert asks.parse('{"mode": "on", "model": "claude-sonnet-5-5"}')["model"] == "claude-sonnet-5-5"
+    assert asks.parse('{"mode": "on", "model": "gpt-6-luna"}')["model"] is None
+    assert asks.parse(None)["model"] is None
+
+
+def test_a_named_model_is_used_only_on_a_claude_lane(monkeypatch):
+    import llm
+    used = []
+
+    class Resp:
+        usage = None
+        choices = [NS(message=NS(tool_calls=[NS(function=NS(name="record_x", arguments='{"a": 1}'))]), finish_reason="stop")]
+    monkeypatch.setattr(llm, "create_with_dialect", lambda client, model, *a, **k: used.append(model) or Resp())
+    monkeypatch.setattr(llm, "record", lambda *a, **k: None)
+    asks._call(NS(llm_client=None, agent_model="claude-haiku-5-5", ask_model="claude-sonnet-5-5"), "record_x", {}, "s", "c")
+    asks._call(NS(llm_client=None, agent_model="gpt-6-luna", ask_model="claude-sonnet-5-5"), "record_x", {}, "s", "c")
+    asks._call(NS(llm_client=None, agent_model="claude-haiku-5-5"), "record_x", {}, "s", "c")
+    assert used == ["claude-sonnet-5-5", "gpt-6-luna", "claude-haiku-5-5"]

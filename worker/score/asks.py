@@ -19,7 +19,7 @@ import time
 KEY = "typed_asks"
 MODES = ("off", "internal", "on")
 DEFAULTS = {"mode": "internal", "user_ids": [], "director": True, "patch": True,
-            "check": True, "repairs": 1, "film_s": 220.0}
+            "check": True, "repairs": 1, "film_s": 220.0, "model": None}
 EDIT_KINDS = ("film", "change", "edit")
 OPEN_STATES = ("not_done", "partly", "cannot_tell")
 
@@ -47,6 +47,8 @@ def parse(raw):
     for k in ("director", "patch", "check"):
         if k in data:
             out[k] = data[k] is True
+    if str(data.get("model") or "").startswith("claude-"):
+        out["model"] = str(data["model"])     # the ledger and the check only; the editor keeps its own
     return out
 
 
@@ -139,17 +141,19 @@ def _call(ctx, name, schema, system, content, max_tokens=4000):
         "name": name, "description": "Record the structured result.", "parameters": schema, "strict": True}}
     messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
     t0 = time.monotonic()
+    model = getattr(ctx, "ask_model", None) if str(getattr(ctx, "agent_model", "") or "").startswith("claude-") else None
+    model = model or ctx.agent_model
     response = llm.create_with_dialect(
-        ctx.llm_client, ctx.agent_model, messages, max_tokens=max_tokens,
+        ctx.llm_client, model, messages, max_tokens=max_tokens,
         tools=[tool], tool_choice={"type": "function", "function": {"name": name}})
     message = response.choices[0].message
     calls = list(message.tool_calls or [])
     usd = 0.0
     try:
-        usd = float(llm.provider_cost_usd(response.usage, ctx.agent_model) or 0.0)
+        usd = float(llm.provider_cost_usd(response.usage, model) or 0.0)
     except Exception:  # noqa: BLE001 - a price we can't read is still recorded below
         pass
-    llm.record(name, {"model": ctx.agent_model},
+    llm.record(name, {"model": model},
                {"finish_reason": getattr(response.choices[0], "finish_reason", None),
                 "tool_calls": [{"name": c.function.name, "arguments": c.function.arguments} for c in calls]},
                response.usage)
@@ -158,7 +162,7 @@ def _call(ctx, name, schema, system, content, max_tokens=4000):
     value = json.loads(calls[0].function.arguments)
     if not isinstance(value, dict):
         raise ValueError(f"{name}: not an object")
-    return value, {"usd": round(usd, 6), "s": round(time.monotonic() - t0, 2), "model": ctx.agent_model}
+    return value, {"usd": round(usd, 6), "s": round(time.monotonic() - t0, 2), "model": model}
 
 
 # ------------------------------------------------------------------ the ledger
