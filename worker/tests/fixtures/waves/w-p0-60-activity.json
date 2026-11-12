@@ -1,0 +1,4 @@
+{
+ "_doc": "P0 #60 (12 Nov 2026): find_activity, the measured activity track over every frame (department direction), so 'cut the space between serves' on a long wordless match cuts instead of asking for timestamps.",
+ "verbs": ["find_activity"]
+}
