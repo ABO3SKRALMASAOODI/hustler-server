@@ -2395,6 +2395,140 @@ def find_visual_moments(ctx, query, start=0.0, end=None, max_results=12):
     return result
 
 
+# P0 #60 (9-10 Nov 2026): "cut the space between serves" on a 45-minute
+# volleyball match ended in five questions and no cut, because the only
+# picture search sampled one frame every ~19 s. find_activity MEASURES where
+# the picture and the sound are busy (activity.py: changed pixels between
+# samples at 4 per second, sharp sound transients over the room's floor) and
+# returns the active and idle stretches, so the agent cuts the dead time
+# itself and checks a few stretches with its own eyes.
+ACTIVITY_TOOL_BUDGET_S = 420.0
+ACTIVITY_LIST_MAX = 160
+_ACTIVITY_TRACKS = {}
+_ACTIVITY_LOCK = threading.Lock()
+
+
+def _activity_track(ctx):
+    """(track, None) or (None, why). Cached per proxy in this process and as
+    a JSON sidecar in storage, so it is measured once per footage."""
+    import activity
+    key = _proxy_key(ctx)
+    skey = None
+    if key:
+        skey = ("analysis/activity/v%d/%s.json"
+                % (activity.ACTIVITY_VERSION,
+                   hashlib.sha1(key.encode("utf-8")).hexdigest()))
+    with _ACTIVITY_LOCK:
+        if skey and skey in _ACTIVITY_TRACKS:
+            return _ACTIVITY_TRACKS[skey], None
+    if skey:
+        local = os.path.join(ctx.workdir, f"activity_{uuid.uuid4().hex[:6]}.json")
+        try:
+            if storage.exists(skey):
+                storage.download_to(skey, local, check_capacity=False)
+                with open(local) as fh:
+                    track = json.load(fh)
+                if int(track.get("version") or 0) == activity.ACTIVITY_VERSION:
+                    with _ACTIVITY_LOCK:
+                        _ACTIVITY_TRACKS[skey] = track
+                    return track, None
+        except Exception as exc:  # noqa: BLE001
+            print(f"[activity] cached track unreadable: {str(exc)[:120]}",
+                  flush=True)
+    try:
+        proxy = ctx.proxy_path()
+    except Exception as exc:  # noqa: BLE001
+        return None, f"the video's proxy is not available ({str(exc)[:120]})"
+    _touch_job_heartbeat(ctx, progress=18)
+    try:
+        track = activity.measure(
+            proxy, budget_s=ACTIVITY_TOOL_BUDGET_S,
+            progress=lambda _t: _touch_job_heartbeat(ctx))
+    except Exception as exc:  # noqa: BLE001
+        return None, f"measuring failed ({type(exc).__name__}: {str(exc)[:140]})"
+    if len(track.get("motion") or []) < 8:
+        return None, "the video has too few frames to measure"
+    if skey:
+        try:
+            path = os.path.join(ctx.workdir, "activity_track.json")
+            with open(path, "w") as fh:
+                json.dump(track, fh)
+            storage.upload_file(path, skey, "application/json")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[activity] track not stored: {str(exc)[:120]}", flush=True)
+        with _ACTIVITY_LOCK:
+            _ACTIVITY_TRACKS[skey] = track
+    _metric(ctx, "activity_measured_s", track.get("elapsed_s"))
+    return track, None
+
+
+def find_activity(ctx, start=0.0, end=None, min_active_s=2.0, min_idle_s=1.5,
+                  sensitivity=0.5, pad_before_s=1.5, pad_after_s=1.0):
+    """Measured active / idle stretches of the main video (source seconds)."""
+    import activity
+    try:
+        lo = max(0.0, float(start or 0.0))
+        hi = None if end is None else float(end)
+        min_act = max(0.5, float(min_active_s))
+        min_idle = max(0.5, float(min_idle_s))
+        sens = min(1.0, max(0.0, float(sensitivity)))
+        pb = min(5.0, max(0.0, float(pad_before_s)))
+        pa = min(5.0, max(0.0, float(pad_after_s)))
+    except (TypeError, ValueError):
+        return ("REJECTED: start, end, min_active_s, min_idle_s, sensitivity "
+                "and the pads must be numbers.")
+    if hi is not None and hi <= lo:
+        return "REJECTED: end must be after start."
+    track, why = _activity_track(ctx)
+    if track is None:
+        return (f"Activity could not be measured: {why}. Use "
+                "find_visual_moments or look_at on chosen times instead.")
+    dur = float(track.get("duration") or 0.0)
+    seg = activity.segment(track, start=lo, end=hi, min_active_s=min_act,
+                           min_idle_s=min_idle, sensitivity=sens)
+    act, idle = seg["active"], seg["idle"]
+    span_hi = min(dur, hi) if hi is not None else dur
+    basis = " + ".join("picture motion" if b == "motion" else "sound hits"
+                       for b in seg["basis"])
+    if not act:
+        return (f"ACTIVITY {lo:.1f}-{span_hi:.1f}s (measured from {basis}, "
+                f"{seg['fps']:g} samples/s): no stretch rises clearly above "
+                "the take's quiet level, so the activity is even throughout. "
+                "Try sensitivity=0.75, or check the picture with look_at.")
+    keep = []
+    for a, b, _pk, _mn in act:
+        ka, kb = max(lo, a - pb), min(span_hi, b + pa)
+        if keep and ka <= keep[-1][1]:
+            keep[-1][1] = round(kb, 2)
+        else:
+            keep.append([round(ka, 2), round(kb, 2)])
+    act_s = sum(b - a for a, b, _p, _m in act)
+    keep_s = sum(b - a for a, b in keep)
+    rows = [f"{_fmt_t(a)}-{_fmt_t(b)} ({b - a:.1f}s, peak {pk:.2f}, "
+            f"mean {mn:.2f})" for a, b, pk, mn in act[:ACTIVITY_LIST_MAX]]
+    more = (f"\n({len(act) - ACTIVITY_LIST_MAX} more active stretches not "
+            "listed: narrow start/end)" if len(act) > ACTIVITY_LIST_MAX else "")
+    longest_idle = sorted(idle, key=lambda r: r[0] - r[1])[:5]
+    idle_line = ", ".join(f"{_fmt_t(a)}-{_fmt_t(b)} ({b - a:.0f}s)"
+                          for a, b, _m in sorted(longest_idle))
+    _metric(ctx, "activity_searches")
+    return _cap(
+        f"ACTIVITY {lo:.1f}-{span_hi:.1f}s, measured from {basis} at "
+        f"{seg['fps']:g} samples/s over every frame (not sampled stills): "
+        f"{len(act)} active stretch(es), {act_s:.0f}s in all, and "
+        f"{len(idle)} idle stretch(es). Strength is relative to this take "
+        "(1 = its busy level).\nACTIVE:\n" + "\n".join(rows) + more
+        + (f"\nLONGEST IDLE: {idle_line}" if idle_line else "")
+        + f"\nKEEP LIST (active stretches with {pb:g}s before and {pa:g}s "
+          f"after, joined where they touch; {keep_s:.0f}s of "
+          f"{span_hi - lo:.0f}s): {json.dumps(keep)}"
+        + "\nThese are measurements, not meanings: verify what the active "
+          "stretches are with ONE batched look_at at a few stretch starts "
+          "(e.g. is each one a rally/play?), adjust sensitivity or "
+          "min_idle_s if they merge or split, then cut with keep_segments. "
+          "Long idle stretches are where sides switch or breaks happen.")
+
+
 def _asset_local_path(ctx, asset):
     local = ctx._asset_locals.get(asset["id"])
     if not local:

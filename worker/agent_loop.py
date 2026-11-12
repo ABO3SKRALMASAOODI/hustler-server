@@ -7331,7 +7331,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     "or ask_user only when a specific missing choice/asset "
                     "truly blocks every useful edit. For a long visual-event "
                     "hunt, use find_visual_moments once, verify its candidates "
-                    "in one batched look_at, then write. If the request is "
+                    "in one batched look_at, then write. To cut dead time "
+                    "between plays or actions, load and use find_activity. If the request is "
                     "genuinely analysis-only, answer it now.]")})
             print(f"[job {job['id']}] execution checkpoint after "
                   f"{read_calls} read-only tools and zero writes", flush=True)

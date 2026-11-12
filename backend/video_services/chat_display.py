@@ -117,7 +117,8 @@ PLANNING_TOOLS = frozenset({
     "suggest_motion_beats", "suggest_match_cuts", "plan_footage",
     "plan_to_music", "plan_loop", "list_motion_templates", "list_music_library",
     "list_sound_library", "find_song", "analyze_music", "analyze_reference",
-    "find_visual_moments", "find_silences", "check_speech", "audit_captions",
+    "find_visual_moments", "find_activity", "find_silences",
+    "check_speech", "audit_captions",
     "audit_motion", "audit_audio_mix", "justify_verification_findings",
 })
 
