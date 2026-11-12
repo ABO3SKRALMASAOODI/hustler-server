@@ -261,7 +261,7 @@ def test_resume_keeps_the_subscribe_wall_exactly(monkeypatch, s3):
 def test_relay_part_route_streams_one_part(monkeypatch, s3):
     fake = s3(_S3(1, 1, stored=[]))
     status, body, _ = _route(
-        monkeypatch, video.relay_upload_part, _Cur(),
+        monkeypatch, video._relay_upload_part_signed_in, _Cur(),
         query="?key=originals/7/a.mp4&upload_id=u1&part_number=3",
         data=b"y" * 1000)
     assert status == 200, body
@@ -272,12 +272,12 @@ def test_relay_part_route_streams_one_part(monkeypatch, s3):
 def test_relay_part_route_checks_ownership_and_numbers(monkeypatch, s3):
     s3(_S3(1, 1, stored=[]))
     status, _b, _ = _route(
-        monkeypatch, video.relay_upload_part, _Cur(),
+        monkeypatch, video._relay_upload_part_signed_in, _Cur(),
         query="?key=originals/9/a.mp4&upload_id=u1&part_number=3",
         data=b"y")
     assert status == 400
     status, _b, _ = _route(
-        monkeypatch, video.relay_upload_part, _Cur(),
+        monkeypatch, video._relay_upload_part_signed_in, _Cur(),
         query="?key=originals/7/a.mp4&upload_id=u1&part_number=0",
         data=b"y")
     assert status == 400

@@ -102,7 +102,7 @@ INTAKE_LATE = timedelta(minutes=15)
 # long with nothing heard is a transfer that stopped.
 UPLOAD_SILENT_AFTER = timedelta(minutes=15)
 UPLOAD_ALIVE_KINDS = ("upload_started", "upload_resumed", "upload_progress",
-                      "upload_interrupted")
+                      "upload_interrupted", "upload_handed_off")
 P1_JOB_TYPES = ("preview_check", "filmstrip")
 # agent_turn result.status of a request the trial or plan budget held.
 BUDGET_STATUSES = ("budget",)
@@ -380,6 +380,9 @@ def _stopped_uploads(cur, since, now, p):
     for r in cur.fetchall():
         d = _detail(r)
         left = r["kind"] == "upload_interrupted"
+        # The page went away but handed the rest to the browser
+        # (video_services/upload_handoff.py), and that stopped too.
+        handed = r["kind"] == "upload_handed_off" or d.get("via") == "handoff"
         sent = d.get("sent_bytes", d.get("bytes_done"))
         out.append({
             "ref": f"stopped:{r['id']}", "source": "upload", "at": _aware(r["at"]),
@@ -387,8 +390,11 @@ def _stopped_uploads(cur, since, now, p):
             "severity": "P1", "bytes": d.get("bytes"),
             "file_kind": d.get("kind"),
             "cause_key": cause_key("upload-stopped",
+                                   "handoff" if handed else
                                    "page-left" if left else "no-signal"),
-            "title": ("An upload stopped without landing: the page went away"
+            "title": ("An upload the browser carried on after the page went "
+                      "away stopped without landing" if handed else
+                      "An upload stopped without landing: the page went away"
                       if left else
                       "An upload stopped without landing: nothing heard"),
             "detail": _short(f"{d.get('filename') or 'file'} · {d.get('bytes')} "
