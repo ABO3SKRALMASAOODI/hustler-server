@@ -28,7 +28,9 @@ never touches billing, credits, plans or Paddle.
     ops_review.py close    --ticket 7 --status fixed --root-cause "..." \
         --fix-sha abc1234 --regression-check "tests/test_x.py::test_y" \
         --replay <gauntlet run>/<session> --fixer <this session> \
-        [--rated-by <the Reviewer session, for a quality ticket>]
+        [--rated-by <the Reviewer session, for a quality ticket>] \
+        [--quality-gap [--quality-ticket N]]   # the cause is proven gone and
+                     # only the film is under 10: the gap goes to a P1 ticket
     ops_review.py close    --ticket 7 --status wont_fix \
         --reason "owner decision: <which>"     # nothing else closes unfixed
     ops_review.py reopen   --ticket 7 --note "why the closing was wrong"
@@ -720,20 +722,44 @@ def check_fix_sha(fix_sha):
                            "ticket tooling, not the product")
 
 
+def check_replay_has_fix(fix_sha, replay):
+    """A replay that ran before the fix proves nothing about it: each backend
+    --fix-sha must be inside the build the replay ran (its be_sha)."""
+    built = str((replay or {}).get("be_sha") or "")
+    if not built:
+        return
+    if _git("cat-file", "-e", f"{built}^{{commit}}").returncode != 0:
+        _git("fetch", "-q", MAIN_REMOTE, "main")
+    for part in (fix_sha or "").split(","):
+        repo, _, sha = part.strip().rpartition(":")
+        if repo == "fe" or not sha:
+            continue
+        if _git("merge-base", "--is-ancestor", sha, built).returncode != 0:
+            raise CliError(f"the replay ran {built[:12]}, which does not "
+                           f"contain the fix {sha}: it proves nothing about it")
+
+
 def cmd_close(a):
     from ops_loop import store
+    if a.quality_ticket is not None and a.status != "fixed":
+        raise CliError("--quality-ticket goes with --status fixed")
+    replay = load_replay(a)
     if a.status == "fixed":
         check_fix_sha(a.fix_sha)
-    replay = load_replay(a)
+        check_replay_has_fix(a.fix_sha, replay)
     with Writer(a.dry_run) as w:
         t = store.close(w, a.ticket, a.status, root_cause=a.root_cause,
                         fix_sha=a.fix_sha,
                         regression_check=a.regression_check,
-                        reason=a.reason, replay=replay)
+                        reason=a.reason, replay=replay,
+                        quality_gap=a.quality_gap,
+                        quality_ticket=a.quality_ticket)
     _clear_p0(t["id"])
     out({"ticket_id": t["id"], "status": t["status"],
          "fix_sha": t["fix_sha"], "regression_check": t["regression_check"],
-         "closed_at": t["closed_at"], "dry_run": bool(a.dry_run)})
+         "closed_at": t["closed_at"],
+         "quality_gap_ticket": t.get("quality_gap_ticket"),
+         "dry_run": bool(a.dry_run)})
     return 0
 
 
@@ -1083,6 +1109,15 @@ def parser():
     p.add_argument("--rated-by", dest="rated_by",
                    help="the Reviewer session that rated the replay")
     p.add_argument("--fixer", help="this session; never the rater")
+    p.add_argument("--quality-gap", dest="quality_gap", action="store_true",
+                   help="the replay proves this ticket's own cause gone (no "
+                        "failure, rated by a session that made no fix, no "
+                        "customer met it since its fix went live) and only "
+                        "the whole film is under 10: close it fixed and carry "
+                        "the gap to its own P1 quality ticket")
+    p.add_argument("--quality-ticket", dest="quality_ticket", type=int,
+                   help="an open quality ticket that already owns the film's "
+                        "gap; without it one is filed (auto-quality-after-N)")
     p.add_argument("--reason", help="wont_fix: 'owner decision: <which>'")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_close)
