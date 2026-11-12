@@ -519,6 +519,7 @@ class Ctx:
         self.wrote = {}            # device lines the Score wrote, by department
         self.flip_frames = None    # programme frames where a speech edit changes the take's framing by a tenth
         self.spine_talk = []       # per spine stretch: does it carry the voice?
+        self.run_crops, self.flip_runs = {}, {}       # one framing per run of a closer take; which runs took their tenth
         self.step_once = False
         self.offered = None        # style cards the Brief offered for this footage
 
@@ -1591,19 +1592,21 @@ def picture_fields(ctx, b, ref, a, z, W=None, H=None, src=None):
         if ctx.governed and ref["asset"] == "main" and (W, H) == (ctx.W, ctx.H):
             # the upload on the frame: one framing for the film, a step only where a device line earned one
             base = take_crop(ctx, ref, asset, out.get("src"), n, rng, at=a)
-            out["crop"] = camera(ctx, base, n, calm_cam(ref.get("cam"))) if ref.get("_cam") else base
             if ref.get("_cam"):            # where it ends is where the take stays
-                c = out["crop"]
+                c = camera(ctx, base, n, calm_cam(ref.get("cam")))
+                out["crop"] = keep_marks_whole(ctx, c, out.get("src"), asset, W, H)
                 c = c[-1] if isinstance(c[0], list) else c
                 flip = ref.get("_flip") or 1.0
                 cx, cy, hw, hh = (c[0] + c[2]) / 2, (c[1] + c[3]) / 2, (c[2] - c[0]) * flip / 2, (c[3] - c[1]) * flip / 2
                 ctx.cam_marks.append((a, [cx - hw, cy - hh, cx + hw, cy + hh]))
                 ctx.cam_marks.sort(key=lambda m: m[0])
+            else:
+                out["crop"] = settled_take(ctx, ref, asset, out.get("src"), n, rng, a, base)
         else:
             base = tracked_crop(ctx, ref, asset, out.get("src"), W, H, n) or base_rect(ctx, ref, asset, t, W, H, rng, repeat)
             cam = ref.get("cam") or ctx.dna.get("cam")
             out["crop"] = camera(ctx, base, n, calm_cam(cam) if ctx.governed and asset["kind"] == "image" else cam)
-        if ref["asset"] == "main" and (W, H) == (ctx.W, ctx.H):        # the frame's own picture, not a card's inset
+        if ref["asset"] == "main" and (W, H) == (ctx.W, ctx.H) and not ctx.governed:        # the frame's own picture, not a card's inset
             out["crop"] = keep_marks_whole(ctx, out["crop"], out.get("src"), asset, W, H)
     tr = parse_treat(ref.get("treat"))
     if tr:
@@ -1700,6 +1703,37 @@ def take_crop(ctx, ref, asset, src, n, rng, at=0):
     if len(out) == 1 or max(abs(a[0] - out[0][0]) + abs(a[1] - out[0][1]) for a in out) < 0.002:
         return out[0]
     return out
+
+
+def settled_take(ctx, ref, asset, src, n, rng, a, crop):
+    """A closer framing of the take (the tenth at a speech edit, or the framing an earned step left it in) is one
+    framing for its whole run: solved on the run's first shot and kept. The heads a crop must hold whole are
+    measured shot by shot, and nudged the frame at every beat (p5591: 9%, 8%, 6%, 5%, 11% on five shots of one
+    run). When holding them whole would widen the closer frame, the run stays as shot: a step that can't be made
+    cleanly is not made."""
+    W, H = ctx.W, ctx.H
+    plain = keep_marks_whole(ctx, crop, src, asset, W, H)
+    fit = fit_crop([0, 0, 1, 1], asset["w"], asset["h"], W, H)
+    key = (sum(1 for f, _ in ctx.cam_marks if f <= a), bisect.bisect_right(ctx.flip_frames or [], a))
+    if isinstance(crop[0], list) or crop[2] - crop[0] >= fit[2] - fit[0] - 1e-4:
+        return plain
+    if ref.get("crop"):            # a window the Score placed on the upload sits where it was put, shot by shot
+        if ref.get("_flip"):
+            ctx.flip_runs.setdefault(key[1], True)
+        return plain
+    if key not in ctx.run_crops:
+        held = [round(v, 5) for v in plain] == [round(v, 5) for v in crop]
+        if not held and ref.get("_flip"):
+            crop = take_crop(ctx, {**ref, "_flip": None}, asset, src, n, rng, at=a)
+            closer = crop[2] - crop[0] < fit[2] - fit[0] - 1e-4
+            ctx.run_crops[key] = keep_marks_whole(ctx, crop, src, asset, W, H) if closer else None
+        else:
+            ctx.run_crops[key] = plain
+        ctx.flip_runs[key[1]] = bool(ref.get("_flip")) and held
+    kept = ctx.run_crops[key]
+    if kept is None:           # this run is the upload as shot
+        return keep_marks_whole(ctx, take_crop(ctx, {**ref, "_flip": None}, asset, src, n, rng, at=a), src, asset, W, H)
+    return list(kept)
 
 
 def head_of(f):
@@ -1854,8 +1888,10 @@ def speech_edit_flip(ctx, p):
     from . import taste
     if ctx.flip_frames is None:
         out, last = [], -10 ** 6
+        gap = int(taste.STEP_GAP_S * ctx.fps)
+        earned = [int(v[0]) for v in (ctx.plan.get("cam_at") or {}).values()]      # a step a line earned outranks a tenth
         for f in taste.speech_edits(ctx):
-            if f - last >= int(taste.STEP_GAP_S * ctx.fps):
+            if f - last >= gap and all(abs(f - e) >= gap for e in earned):
                 out.append(f)
                 last = f
         ctx.flip_frames = out
@@ -5631,7 +5667,8 @@ def taste_meter(ctx, facts, rounds):
         count[r["did"]] = count.get(r["did"], 0) + 1
     kept = {k: [v[0], max(v[1], ctx.wrote.get(k, 0))] for k, v in facts["kept"].items()}
     return {"supply": facts["supply"], "allow": facts["allow"], "kept": kept, "sounds": [facts["sounds"][0], max(facts["sounds"][1], ctx.wrote.get("sound", 0))], "partners": facts["partners"],
-            "speaks": facts["speaks"], "speech_edits": facts["speech_edits"], "flips": len(ctx.flip_frames or []),
+            "speaks": facts["speaks"], "speech_edits": facts["speech_edits"],
+            "flips": sum(1 for i in range(1, len(ctx.flip_frames or []) + 1) if bool(ctx.flip_runs.get(i - 1)) != bool(ctx.flip_runs.get(i))),
             "seats": {"caption": ctx.cap_y, "display": ctx.seats or []}, "system": dict(ctx.system), "calm": ctx.calm,
             "rows": rows, "count": count, "rounds": rounds, "devices": sorted(ctx.devices), "bound": facts["bound"],
             "floor": "*" in ctx.cuts, "cuts": len(ctx.cuts), "upload_captions": getattr(ctx, "upload_caps", None)}

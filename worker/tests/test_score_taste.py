@@ -799,3 +799,20 @@ def test_a_tenth_at_a_speech_edit_keeps_its_centre_and_the_head_whole():
         hd = S.head_of([0.55, 0.5, 0.85, 0.72])
         assert r[0] <= max(hd[0], 0) + 1e-6 and r[2] >= min(hd[2], 1) - 1e-6          # the head stays inside the closer frame
         assert abs((r[0] + r[2]) / 2 - 0.5) <= 0.06                                     # and the frame barely leaves its centre
+
+
+def test_an_earned_step_outranks_the_tenth_at_a_speech_edit_near_it():
+    idx = selfie(30.0)
+    sents = idx["sentences"]
+    a = sents[3]["wi0"]
+    cut = f"{a + 4}-{a + 6}"                                          # words cut out two seconds after the earned step
+    beats = [{"k": "b", "id": "b01", "w": f"0-{a - 1}", "job": "x", "pic": "main"},
+             {"k": "b", "id": "b02", "w": f"{a}-{len(idx['words']) - 1}", "job": "x", "pic": {"src": "main", "zoom": 1.12, "for": "turn"}}]
+    c = comp(film(beats, film_={"drop": [cut]}), idx)
+    t = c.meter["taste"]
+    assert t["kept"]["camera"] == [1, 1] and t["speech_edits"] == 1 and t["flips"] == 0
+    assert camera_steps(c) == 1
+    # with no earned step, the same cut takes its tenth
+    beats[1]["pic"] = "main"
+    c = comp(film(beats, film_={"drop": [cut]}), idx)
+    assert c.meter["taste"]["flips"] == 1 and camera_steps(c) == 1

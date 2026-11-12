@@ -592,7 +592,7 @@ def decide(ctx):
     sup = supply(ctx)
     al = allow(sup, calm=ctx.calm)
     cls = sup["cls"]
-    dec = {"drop_g": {}, "drop_item": {}, "drop_snd": {}, "move_snd": {}, "drop_cam": {}, "hold": {}, "trim": {}}
+    dec = {"drop_g": {}, "drop_item": {}, "drop_snd": {}, "move_snd": {}, "drop_cam": {}, "hold": {}, "trim": {}, "cam_at": {}}
     units = _units(ctx)
     devs = ctx.devices
     lands = {}
@@ -662,20 +662,22 @@ def decide(ctx):
     if cams:
         for g in _keep_n(ctx, cams, lands, al["camera"]):
             drop(g, f"camera moves {len(cams)}, this footage carries {al['camera']} (class {cls})", "merged", count=True)
-        min_hold, flips, last = int(al["hold_s"] * fps), list(ctx.flip_frames or []), None
+        min_hold, gap, last = int(al["hold_s"] * fps), int(STEP_GAP_S * fps), None
         for d in sorted(live("camera"), key=lambda d: lands[d["id"]]):
             f = lands[d["id"]]
+            flips = [x for x in (ctx.flip_frames or []) if abs(x - f) >= gap]      # a tenth this near gives way to the earned step
             if d.get("cam_key"):            # an earned framing holds until the next one, or the next speech edit
                 held = min([x for x in flips if x > f] + [lands[e["id"]] for e in live("camera") if lands[e["id"]] > f] + [ctx.dur_f]) - f
             else:
                 held = ctx.cam_len.get(d["id"], min_hold)
             if held < min_hold and drop(d["id"], f"a framing held {held / fps:.1f} s, under the {al['hold_s']:g} s a step needs on this footage", "merged"):
                 continue
-            near = min([abs(f - x) for x in flips] + ([f - last] if last is not None else []), default=None)
-            if near is not None and cls != "P" and near < STEP_GAP_S * fps:
-                if drop(d["id"], f"a second framing {near / fps:.1f} s from the last step: one in 10 s on this footage", "merged"):
+            if last is not None and cls != "P" and f - last < gap:
+                if drop(d["id"], f"a second framing {(f - last) / fps:.1f} s after the last: one in 10 s on this footage", "merged"):
                     continue
             last = f
+            if cls != "P" and (ctx.plan.get("cam_at") or {}).get(d["id"], (None,))[0] != f:
+                dec["cam_at"][d["id"]] = (f, "the earned step")
     kept_n["camera"] = (len(live("camera")), len(cams))
 
     # 3. pages while a person talks
