@@ -771,3 +771,31 @@ def test_a_title_can_answer_the_films_first_picture():
                  {"k": "b", "id": "b02", "at": "@6.0..@11.0", "job": "x", "pic": "main", "type": ""}])
     c = comp(text, idx)
     assert [w for w in c.l1["items"] if w["k"] == "word" and w.get("role") == "big"] and len(c.l1["sound"]) == 1
+
+
+def test_a_beat_played_out_of_order_is_a_cut_and_changes_no_framing():
+    """p5575: a wordless montage with a cold open. Every jump of the spine was read as a speech edit and the film
+    sat a tenth closer, off-centre, from the second shot on."""
+    idx = wordless_index(12.0)
+    idx["spatial"] = {"samples": [{"t": float(k), "faces": [[0.6, 0.55, 0.8, 0.7]], "mean_luma": 120.0} for k in range(13)]}
+    text = film([{"k": "b", "id": "b01", "at": "@6.9..@7.7", "job": "x", "pic": "main", "type": ""},
+                 {"k": "b", "id": "b02", "at": "@0.0..@3.9", "job": "x", "pic": "main", "type": ""},
+                 {"k": "b", "id": "b03", "at": "@4.0..@6.0", "job": "x", "pic": "main", "type": ""},
+                 {"k": "b", "id": "b04", "at": "@8.0..@10.0", "job": "x", "pic": "main", "type": ""}], dna={"take": 1.2})
+    c = comp(text, idx)
+    assert c.meter["taste"]["speech_edits"] == 0 and c.meter["taste"]["flips"] == 0
+    for s in (i for i in c.l1["items"] if i["k"] == "shot"):
+        r = s["crop"] if not isinstance(s["crop"][0], list) else s["crop"][0]
+        assert [round(v, 3) for v in r] == [0, 0, 1, 1]              # the upload as shot: dna.take never zooms
+
+
+def test_a_tenth_at_a_speech_edit_keeps_its_centre_and_the_head_whole():
+    idx = selfie(30.0, face=(0.55, 0.5, 0.85, 0.72))                  # a face low and to the right
+    c = comp(film(beats_over(idx, 6, lambda k, a, z: {"pic": "main"}), film_={"drop": ["30-33"]}), idx)
+    assert c.meter["taste"]["flips"] == 1
+    close = [s["crop"] for s in c.l1["items"] if s["k"] == "shot" and not isinstance(s["crop"][0], list) and s["crop"][2] - s["crop"][0] < 0.99]
+    assert close
+    for r in close:
+        hd = S.head_of([0.55, 0.5, 0.85, 0.72])
+        assert r[0] <= max(hd[0], 0) + 1e-6 and r[2] >= min(hd[2], 1) - 1e-6          # the head stays inside the closer frame
+        assert abs((r[0] + r[2]) / 2 - 0.5) <= 0.06                                     # and the frame barely leaves its centre

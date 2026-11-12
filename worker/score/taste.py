@@ -489,11 +489,16 @@ def visual_events(ctx, gone_g=(), gone_i=()):
 
 
 def speech_edits(ctx):
-    """Programme frames where the take jumps in source time while it stays on screen: a keep join."""
+    """Programme frames where words were cut out of the voice: both sides are the voice, in one shot of the upload,
+    and the source jumps forward. A beat played out of order, or a cut the upload already has, is a cut to another
+    moment and hides nothing: the framing does not change for it (p5575: a montage read as zoomed throughout)."""
     out = []
-    sp = sorted(ctx.spine, key=lambda s: s["f"][0])
-    for p, q in zip(sp, sp[1:]):
-        if p["f"][1] == q["f"][0] and abs(q["src"][0] - p["src"][1]) > 0.05:
+    sp, talk = ctx.spine, ctx.spine_talk
+    for i in range(1, len(sp)):
+        p, q = sp[i - 1], sp[i]
+        jump = q["src"][0] - p["src"][1]
+        if p["f"][1] == q["f"][0] and i < len(talk) and talk[i - 1] and talk[i] and 0.2 < jump <= 30.0 \
+                and _kshot(ctx, p["src"][1] - 0.02) == _kshot(ctx, q["src"][0]):
             out.append(q["f"][0])
     return out
 

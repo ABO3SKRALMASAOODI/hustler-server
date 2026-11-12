@@ -518,6 +518,7 @@ class Ctx:
         self.cam_marks = []        # (frame, rect): the framing an earned camera line left the take in
         self.wrote = {}            # device lines the Score wrote, by department
         self.flip_frames = None    # programme frames where a speech edit changes the take's framing by a tenth
+        self.spine_talk = []       # per spine stretch: does it carry the voice?
         self.step_once = False
         self.offered = None        # style cards the Brief offered for this footage
 
@@ -1076,6 +1077,7 @@ def build_spine(ctx):
             last["src"][1] = s1
         else:
             ctx.spine.append({"f": [prog, prog + n], "src": [s0, s1]})
+            ctx.spine_talk.append(bool(r["ws"]))        # a stretch of the voice, or of picture written in seconds
         prog += n
         prev_end = s1
         b = r["b"]
@@ -1631,13 +1633,11 @@ def calm_cam(cam):
 
 
 def film_framing(ctx, asset, src, n):
-    """The film's one framing of the upload: dna.take (a rect, a zoom number, or a subject that is followed), else
-    the upload as it was shot."""
+    """Where the film's window sits on the upload: dna.take (a rect, or a subject that is followed), else the middle
+    of the upload as it was shot. Only its centre is used: how close the frame is belongs to the camera."""
     t = ctx.dna.get("take")
     ref = {"kind": "main", "asset": "main"}
-    if isinstance(t, (int, float)) and not isinstance(t, bool):
-        ref["zoom"] = float(t)
-    elif t not in (None, "", "full"):
+    if t not in (None, "", "full") and not isinstance(t, (int, float)):
         ref["crop"] = t
     r = tracked_crop(ctx, ref, asset, src, ctx.W, ctx.H, n) if ref.get("crop") else None
     return r or base_rect(ctx, ref, asset, (src or [0.0])[0], ctx.W, ctx.H, None, 0)
@@ -1661,8 +1661,7 @@ def take_crop(ctx, ref, asset, src, n, rng, at=0):
     if face:
         cap = max(1.0, min(cap, taste.FACE_H_MAX / max((face[3] - face[1]) / max(fh, 1e-6), 1e-6)))
     film = film_framing(ctx, asset, src, n)
-    f0 = film[0] if isinstance(film[0], list) else film
-    zf = clamp(fw / max(f0[2] - f0[0], 1e-6), 1.0, cap)
+    zf = 1.0          # the film's framing is where the window sits on the upload, never how close: it does not zoom
     written = None
     if ref.get("crop") or (isinstance(ref.get("zoom"), (int, float)) and not isinstance(ref.get("zoom"), bool) and ref["zoom"] > 1):
         written = tracked_crop(ctx, ref, asset, src, W, H, n) or base_rect(ctx, ref, asset, t, W, H, rng, 0)
@@ -1690,8 +1689,12 @@ def take_crop(ctx, ref, asset, src, n, rng, at=0):
     out = []
     for r in path:
         cx, cy = centre or ((r[0] + r[2]) / 2, (r[1] + r[3]) / 2)
-        if flip and face:
-            cx, cy = (face[0] + face[2]) / 2, (face[1] + face[3]) / 2 + 0.1 * h
+        if z > zf and face:         # a closer frame keeps its centre, and moves only as far as holds the head whole (P9)
+            hd = head_of(face)
+            if hd[2] - hd[0] <= w:
+                cx = clamp(cx, hd[2] - w / 2, hd[0] + w / 2)
+            if hd[3] - hd[1] <= h:
+                cy = clamp(cy, hd[3] - h / 2, hd[1] + h / 2)
         cx, cy = clamp(cx, w / 2, 1 - w / 2), clamp(cy, h / 2, 1 - h / 2)
         out.append([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2])
     if len(out) == 1 or max(abs(a[0] - out[0][0]) + abs(a[1] - out[0][1]) for a in out) < 0.002:
@@ -1851,10 +1854,8 @@ def speech_edit_flip(ctx, p):
     from . import taste
     if ctx.flip_frames is None:
         out, last = [], -10 ** 6
-        sp = sorted(ctx.spine, key=lambda x: x["f"][0])
-        for a, z in zip(sp, sp[1:]):
-            f = z["f"][0]
-            if a["f"][1] == f and abs(z["src"][0] - a["src"][1]) > 0.2 and f - last >= int(taste.STEP_GAP_S * ctx.fps):
+        for f in taste.speech_edits(ctx):
+            if f - last >= int(taste.STEP_GAP_S * ctx.fps):
                 out.append(f)
                 last = f
         ctx.flip_frames = out
