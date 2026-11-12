@@ -210,6 +210,10 @@ def test_the_pass_finds_checks_and_writes_the_whole_film_in_one_recipe(monkeypat
     assert not ctx._pending_visual_review_assets            # judged by the rendition review here
     note = patch.pass_note(got)
     assert "EDL v4" in note and "6 add_zoom" in note and "music the customer did not supply" in note
+    # the editor is told which ask each piece of work serves, so it doesn't thin what was asked for
+    assert {x["ask"]: x["ops"] for x in got["serves"]}["a1"] == {"add_zoom": 6}
+    assert "- for a1 (y): 6 add_zoom. The customer asked for these" in note
+    assert len(got["sources"]) == 1 and "Sources of the placed pictures" in note
     text = seen["content"][0]["text"]
     assert "unit 1 of 1" in text and "Measured shots in this unit (6)" in text and "add_zoom:" in text
 

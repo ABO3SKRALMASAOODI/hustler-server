@@ -482,6 +482,24 @@ def _commit(ctx, ops, label):
     return None, dropped + [(op, "too many refusals") for op in ops]
 
 
+def _sources(ctx, keys):
+    """Where each placed picture came from (provider, credit, page): what a customer who asked to keep
+    the sources gets, and what the editor can say."""
+    import read_tools
+    out = []
+    for key in keys:
+        try:
+            row = ctx.db.run(read_tools.asset_by_key, ctx.project_id, key) or {}
+            meta = row.get("meta") or {}
+            if isinstance(meta, str):
+                meta = json.loads(meta)
+        except Exception:  # noqa: BLE001 - an unknown source is said as unknown
+            meta = {}
+        out.append({"key": key, "provider": meta.get("provider"), "credit": meta.get("credit"),
+                    "page": meta.get("page_url") or meta.get("source_url"), "license": meta.get("license")})
+    return out
+
+
 def throughout(ctx, ledger, request, budget_s=600.0):
     """The whole-film pass. Returns {"version", "applied", "pictures", "left", "dropped", "usage", "s"}
     when a version landed, or {"fell": why, ...} for the loop. Never raises."""
@@ -519,19 +537,20 @@ def throughout(ctx, ledger, request, budget_s=600.0):
                                        kind=w.get("kind") if w.get("kind") in ("video", "photo") else "video"))
                     owner.append(n)
         placed, off = _pictures(ctx, wishes, deadline - 60) if wishes else ({}, [])
-        versions, dropped, applied = [], [], {}
+        versions, dropped, applied, serves = [], [], {}, {}
         for n, (unit, value) in enumerate(plans):
             ops = []
             for i, w in enumerate(wishes):
                 if owner[i] == n and i in placed:
                     ops.append({"tool": "add_overlay", "args": {"asset_key": placed[i], "start": w["at"], "duration_s": w["duration_s"],
-                                                                "fit": "cover", "entrance": "fade", "exit": "fade"}})
+                                                                "fit": "cover", "entrance": "fade", "exit": "fade"},
+                                "_for": list(w.get("for") or [])})
                     if str(w.get("sound") or "").strip():
                         sid = str(w["sound"]).strip()
                         ops.append({"tool": "add_sfx", "args": {"storage_key": sid if sid.startswith("sound:") else "sound:" + sid,
                                                                 "at": w["at"], "purpose": "entrance of a found picture"}})
             for mv in value.get("moves") or []:
-                ops += _move_ops(ctx, edl, mv, shots)
+                ops += [dict(op, _for=list(mv.get("for") or [])) for op in _move_ops(ctx, edl, mv, shots)]
             for op in value.get("ops") or []:
                 if op.get("tool") not in PASS_TOOLS:
                     continue
@@ -541,18 +560,28 @@ def throughout(ctx, ledger, request, budget_s=600.0):
                     dropped.append(({"tool": op.get("tool")}, "args_json is not JSON"))
                     continue
                 if isinstance(args, dict):
-                    ops.append({"tool": op["tool"], "args": args})
+                    ops.append({"tool": op["tool"], "args": args, "_for": list(op.get("for") or [])})
             if not ops:
                 continue
+            tags = [op.pop("_for", []) for op in ops]
             version, lost = _commit(ctx, ops, f"whole-film pass, program {unit[0]:.0f}-{unit[1]:.0f} s")
             dropped += lost
             if version:
                 versions.append(version)
-                kept = [op for op in ops if op not in [d[0] for d in lost]]
-                for op in kept:
+                gone = [d[0] for d in lost]
+                for op, tag in zip(ops, tags):
+                    if op in gone:
+                        continue
                     applied[op["tool"]] = applied.get(op["tool"], 0) + 1
+                    for aid in tag:
+                        serves.setdefault(str(aid), {}).setdefault(op["tool"], 0)
+                        serves[str(aid)][op["tool"]] += 1
         left = [x for _u, v in plans for x in v.get("left") or [] if isinstance(x, dict)]
+        want = {a["id"]: a for a in ledger["asks"]}
         out = {"applied": applied, "units": len(plans), "of_units": len(parts),
+               "serves": [{"ask": aid, "want": str((want.get(aid) or {}).get("want") or "")[:120], "ops": ops_n}
+                          for aid, ops_n in sorted(serves.items()) if aid in want],
+               "sources": _sources(ctx, [placed[i] for i in sorted(placed)])[:40],
                "pictures": {"asked": len(wishes), "placed": len(placed),
                             "kept_off": [{"at": wishes[i]["at"], "query": wishes[i]["query"][:80], "why": why} for i, why in off][:20]},
                "left": [{"ask": str(x.get("ask"))[:12], "why": str(x.get("why"))[:200]} for x in left][:20],
@@ -578,6 +607,14 @@ def pass_note(got):
         lines.append(f"Pictures: {pics.get('placed')} of {pics.get('asked')} placed as full-frame cutaways.")
     for k in pics.get("kept_off") or []:
         lines.append(f"- kept off at {k['at']} s ({k['query']}): {k['why']}")
+    for x in got.get("serves") or []:
+        ops = ", ".join(f"{n} {tool}" for tool, n in sorted(x["ops"].items()))
+        lines.append(f"- for {x['ask']} ({x['want']}): {ops}. The customer asked for these; keep them unless a frame "
+                     "shows one broken.")
+    if got.get("sources"):
+        lines.append("Sources of the placed pictures (say them when the customer asked for sources): " + "; ".join(
+            f"{s.get('provider') or '?'}, {s.get('credit') or 'no credit'}, {s.get('page') or 'no page'}"
+            for s in got["sources"][:20]))
     for x in got.get("left") or []:
         lines.append(f"- left for you: {x['ask']}: {x['why']}")
     if got.get("dropped"):
