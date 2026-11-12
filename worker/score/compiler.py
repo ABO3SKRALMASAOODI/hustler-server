@@ -924,6 +924,10 @@ def read_beats(ctx, lines):
                 if b.src[1] <= b.src[0]:
                     raise ValueError("empty span")
             elif isinstance(l.get("f"), (int, float)) and l["f"] > 0:
+                if ctx.governed and (bid in ctx.cuts or "*" in ctx.cuts):
+                    # a silent beat is time the film added to the upload: the last look, or the floor, takes it back
+                    ctx.taste_rows.append({"id": bid, "did": "cut", "why": ctx.cuts.get(bid) or ctx.cuts["*"], "dept": "beat"})
+                    continue
                 b.silent = int(l["f"])
             else:
                 raise ValueError("no span")
@@ -5671,6 +5675,7 @@ def taste_meter(ctx, facts, rounds):
             "flips": sum(1 for i in range(1, len(ctx.flip_frames or []) + 1) if bool(ctx.flip_runs.get(i - 1)) != bool(ctx.flip_runs.get(i))),
             "seats": {"caption": ctx.cap_y, "display": ctx.seats or []}, "system": dict(ctx.system), "calm": ctx.calm,
             "rows": rows, "count": count, "rounds": rounds, "devices": sorted(ctx.devices), "bound": facts["bound"],
+            "silent": [b.id for b in ctx.beats if b.silent],
             "floor": "*" in ctx.cuts, "cuts": len(ctx.cuts), "upload_captions": getattr(ctx, "upload_caps", None)}
 
 

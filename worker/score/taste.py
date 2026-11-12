@@ -961,10 +961,16 @@ def on_screen(l1, t, devices):
     f = int(round(t * float(l1["fps"])))
     rows, seen = [], set()
     caps = []
+    spoken = any(s["f"][0] <= f < s["f"][1] for s in l1.get("spine") or [])
     for it in l1["items"]:
         if not it["f"][0] <= f < it["f"][1]:
             continue
         gid = next((g for g in devices if it["id"] == g or it["id"].startswith(g + ".")), None)
+        if it["k"] == "shot" and not spoken and gid and "." not in gid and gid not in seen:
+            seen.add(gid)          # a silent beat: seconds the film added, holding a picture of its own choosing
+            rows.append(f"{gid}: a beat the editor added with no sound of the upload, holding "
+                        + ("a flat page" if it.get("pic") == "plate" else "a frame of the upload from another moment" if it.get("pic") == "main" else "a found picture"))
+            continue
         if it["k"] == "word" and it.get("role") == "cap":
             caps.append(str(it.get("t")))
             continue
@@ -1069,7 +1075,8 @@ def verdict_of(v):
 
 def look_ids(comp):
     """What the look may name: every device line that stands, and every found picture that takes the frame."""
-    ids = set((comp.meter.get("taste") or {}).get("devices") or [])
+    t = comp.meter.get("taste") or {}
+    ids = set(t.get("devices") or []) | set(t.get("silent") or [])
     for it in comp.l1["items"]:
         if it["k"] == "shot" and str(it.get("pic")).startswith(("bin:", "tray:")) and re.fullmatch(r"[A-Za-z][\w\-]*\.s\d+", it["id"]):
             ids.add(it["id"])

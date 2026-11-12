@@ -816,3 +816,20 @@ def test_an_earned_step_outranks_the_tenth_at_a_speech_edit_near_it():
     beats[1]["pic"] = "main"
     c = comp(film(beats, film_={"drop": [cut]}), idx)
     assert c.meter["taste"]["flips"] == 1 and camera_steps(c) == 1
+
+
+def test_the_look_can_take_back_a_silent_beat_the_film_added():
+    """p5584: the film's last beat held a frame of the upload that was the platform's end card."""
+    idx = selfie(12.0)
+    n = len(idx["words"])
+    text = film([{"k": "b", "id": "b01", "w": f"0-{n - 1}", "job": "x", "pic": "main"},
+                 {"k": "b", "id": "b02", "f": 45, "job": "x", "pic": "main@10.0", "type": ""}])
+    c = comp(text, idx)
+    assert "b02" in taste.look_ids(c) and c.meter["taste"]["silent"] == ["b02"]
+    t = (c.l1["dur_f"] - 20) / 30
+    assert any(r.startswith("b02: a beat the editor added") for r in taste.on_screen(c.l1, t, sorted(taste.look_ids(c), key=len, reverse=True)))
+    cut = comp(taste.cut_text(text, ["b02"]), idx)
+    assert cut.l1["dur_f"] == c.l1["dur_f"] - 45 and any(r["id"] == "b02" and r["did"] == "cut" for r in cut.meter["taste"]["rows"])
+    assert comp(taste.floor_text(text), idx).l1["dur_f"] == c.l1["dur_f"] - 45
+    # a beat of the voice is never taken: naming it changes nothing
+    assert comp(taste.cut_text(text, ["b01"]), idx).l1["dur_f"] == c.l1["dur_f"]
