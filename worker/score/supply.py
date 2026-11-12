@@ -232,7 +232,7 @@ def clause_of(work, w):
     return " ".join(str(x.get("w", "")) for x in words if t - 2.5 <= float(x.get("t0", -9)) <= t + 2.5)
 
 
-def check_fit(work, items, wishes, deadline):
+def check_fit(work, items, wishes, deadline, asks=()):
     """Before a picture enters the Bin it faces the last look itself (taste.LOOK_SYSTEM, its model, its
     pairs): the upload at the picture's moment above, the picture full frame below, the words said there as
     the caption. It stays only when the look would leave it in the film (12 Nov: the last look removed a
@@ -261,6 +261,9 @@ def check_fit(work, items, wishes, deadline):
             for j, n in enumerate(chunk, 1):
                 ask.append(f"pair {j} @{rows[n][0]:.1f}s: b{n}.s1: a found picture, full frame"
                            + (f"; cap: the caption, reading {saids[n]}" if saids[n] else ""))
+            if asks:        # what the customer asked for is theirs: the film's own look leaves an ask-bound picture in
+                ask.append("The customer typed these asks: " + json.dumps([a.get("said") for a in asks if a.get("said")], ensure_ascii=False)[:900]
+                           + ". A picture that shows what an ask asked for is the customer's own choice: post film for it unless it does not show that.")
             ask.append("Now the JSON.")
             r = call.stream(CHECK_MODEL, taste.LOOK_SYSTEM, [brief.image_block(board), {"type": "text", "text": "\n".join(ask)}],
                             max_tokens=1200, effort="low", purpose="director_bin_check",
@@ -757,7 +760,7 @@ def run(work, scout, per, acquire, deadline):
             items.append(row)
         pool.shutdown(wait=False, cancel_futures=True)
         n_before = len(items)
-        items, check_usd, check_rep = check_fit(work, items, wishes, deadline)
+        items, check_usd, check_rep = check_fit(work, items, wishes, deadline, (scout or {}).get("asks") or [])
         real = {it["wish"] for it in items if it.get("provider") != "designed"}
         for it in [x for x in items if x.get("provider") == "designed" and x["wish"] in real]:
             os.remove(os.path.join(work, it["path"]))

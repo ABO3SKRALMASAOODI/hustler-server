@@ -83,7 +83,7 @@ def test_a_designed_picture_stays_only_where_no_real_picture_did(tmp_path, monke
     monkeypatch.setattr(supply, "look", lambda *a, **k: ([{"c": 0, "wish": 0, "what": "nets on a deck"}, {"c": 1, "wish": 1, "what": "a shark"}], 0.0))
     monkeypatch.setattr(supply, "read_pictures", lambda work, rows: None)
 
-    def check(work, items, wishes, deadline):
+    def check(work, items, wishes, deadline, asks=()):
         keep = [it for it in items if not (it.get("provider") != "designed" and it["wish"] == 1)]   # the stock shark loses
         return keep, 0.01, []
     monkeypatch.setattr(supply, "check_fit", check)
@@ -136,3 +136,43 @@ def test_pick_times_passes_over_a_shot_with_no_allowance():
     except ZeroDivisionError:  # pragma: no cover - the defect
         raise AssertionError("pick_times divided by zero")
     assert len(times) >= 1
+
+
+def test_a_picture_the_customer_asked_for_is_checked_as_theirs(tmp_path, monkeypatch):
+    """The film's last look never removes an ask-bound picture; the Bin's check is told the asks, so a
+    picture of what the customer typed is not dropped for standing in for the speaker."""
+    from PIL import Image
+    os.makedirs(tmp_path / "bin", exist_ok=True)
+    Image.new("RGB", (64, 96)).save(tmp_path / "bin" / "0.jpg")
+    (tmp_path / "index.json").write_text(json.dumps({"words": [{"w": "piastri", "t0": 1.0, "t1": 1.4}]}))
+    seen = {}
+
+    def fake(model, system, content, **kw):
+        seen["text"] = content[-1]["text"]
+        return NS(text='{"pairs":[{"n":1,"post":"film","remove":[]}]}', usd=0.01)
+    monkeypatch.setattr(supply.call, "stream", fake)
+    items = [dict(id=0, kind="image", path="bin/0.jpg", wish=0, what="Oscar Piastri: McLaren on track", named="Oscar Piastri")]
+    kept, usd, rep = supply.check_fit(str(tmp_path), items, [{"w": "0", "want": "Piastri"}], 1e12,
+                                      [{"id": "a1", "said": "Add image or video of oscar piastrin in mclaren"}])
+    assert len(kept) == 1 and "oscar piastrin in mclaren" in seen["text"] and "customer's own choice" in seen["text"]
+
+
+def test_a_typed_ask_no_real_picture_passes_returns_a_designed_one_with_the_honest_sentence(monkeypatch):
+    monkeypatch.setattr(stock, "available", lambda: True)
+    monkeypatch.setattr(stock, "PEXELS_KEY", "")
+    monkeypatch.setattr(stock, "PIXABAY_KEY", "")
+    monkeypatch.setattr(stock, "_openverse_search", lambda *a, **k: [])
+    monkeypatch.setattr(stock, "_named_subjects", lambda q: [{"name": "Operation Fast and Furious", "is": "event", "searches": ["x"], "must_show": "y"}])
+
+    def none(*a, **k):
+        raise stock.NamedNotFound("None of the 9 free-licence pictures found for Operation Fast and Furious passed the check.")
+    monkeypatch.setattr(stock, "_named_hits", none)
+    spec = dict(boards.design_spec({"kind": "number", "parts": [{"value": "2,000", "label": "guns walked"}]}), what="guns walked")
+    monkeypatch.setattr(broll_source, "read_moments", lambda texts, accent=None, budget_s=None: ([{"thing": "", "design": spec}], 0.0))
+    hits = stock.search("Fast and Furious: 2,000 guns walked", kind="photo", orientation="landscape")
+    assert len(hits) == 1 and hits[0]["provider"] == "designed" and hits[0]["width"] == 1920
+    assert "passed the check" in hits[0]["description"]
+    monkeypatch.setattr(broll_source, "read_moments", lambda texts, accent=None, budget_s=None: ([{"thing": "", "design": None}], 0.0))
+    import pytest
+    with pytest.raises(stock.NamedNotFound):
+        stock.search("Operation Fast and Furious", kind="photo")

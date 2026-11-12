@@ -383,9 +383,19 @@ def search(query, kind=KIND_VIDEO, orientation=None, count=MAX_RESULTS):
         # The words name a real person, place, brand or event: no library
         # lookalike stands in for it. Every candidate, the stock hits
         # included, faces one check that it shows the subject.
-        return _named_hits(subjects, kind, count,
-                           [h for name, _fn in lanes
-                            for h in got.get(name) or []])
+        try:
+            return _named_hits(subjects, kind, count,
+                               [h for name, _fn in lanes
+                                for h in got.get(name) or []])
+        except NamedNotFound as e:
+            made = _designed_for(query, orientation)
+            if not made:
+                raise
+            # no real picture of it passed: what the words themselves hold,
+            # drawn, and the honest sentence beside it
+            for h in made:
+                h["description"] += f" (made in place of a photo: {e})"
+            return made
     if got.get("openverse"):
         import broll_source
         got["openverse"], note = broll_source.drop_ai_made(got["openverse"])
@@ -438,6 +448,20 @@ def _named_hits(subjects, kind, count, also):
             seen.add(h["id"])
             uniq.append(h)
     return uniq[:count]
+
+
+def _designed_for(query, orientation):
+    """A designed picture of what the typed words hold (a figure, two
+    sides, steps, dates), when they hold one. [] otherwise or on no answer."""
+    import broll_source
+    try:
+        got, _usd = broll_source.read_moments([query])
+    except Exception as e:  # noqa: BLE001 — no reading, no design
+        print(f"[stock] design: {str(e)[:120]}", flush=True)
+        return []
+    spec = got[0].get("design") if got else None
+    return [broll_source.designed_hit(spec, orientation or "portrait")] \
+        if spec else []
 
 
 def resolve(item, want_w, want_h):
