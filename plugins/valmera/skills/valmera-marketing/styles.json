@@ -1,21 +1,59 @@
 {
- "_about": "The six styles of workflow 2 (atlas/ALIEN.md 8.2), as the ideas and script stages read them. ids match _shell/styles.json. buildable: the engine draws its whole spine today and film.py has its builder; a style that is not buildable is never offered, so nothing is faked.",
+ "_about": "The six styles of workflow 2 (atlas/ALIEN.md 8.2), as the ideas and script stages read them. ids match _shell/styles.json. buildable: the engine draws its whole spine today and film.py has its builder; a style that is not buildable is never offered, so nothing is faked. Every buildable style is made of studio recordings (studio.py): what the product itself returned for a typed sentence.",
  "styles": [
-  {"id": "reading-wipe", "name": "Reading Wipe Before/After", "buildable": true,
-   "look": "Raw footage and one sentence: the request, as an editor would type it. A leaning caret reads the sentence, and the caret is the seam of the before/after: everything it has passed is already the delivered edit, in the same framing. The sentence is spent as it is read. Then the delivered short, untouched; others like it in quick cuts; the whole delivery counted on one sheet.",
-   "hook": "Frame 0 is the raw footage, the sentence and the caret. By 0.5 s the frame is changing behind the caret.",
-   "close": "The count locks. Then the keyword, drawn in static that only reads while it moves.",
-   "needs": "a ledger run with many delivered shorts, its raw source on disk, and one short that opens on a continuous take of 7 s or more",
-   "cta": "a keyword of 4 to 7 letters that only exists in motion (A1), on its own for about 3 s before the end card"},
-  {"id": "edits-itself", "name": "It Edits Itself", "buildable": false,
-   "look": "The reel pulls back onto its own real timeline; a request is typed; a clip moves; the film changes.", "needs": "the film's own EDL as layers, and a real re-render of the change", "cta": "the edit receipt (A3)"},
-  {"id": "one-clip-three-films", "name": "One Clip, Three Films", "buildable": false,
-   "look": "The same 6 s three times, three real edits from three requests.", "needs": "three real results on one clip, recorded through the product", "cta": "a keyword"},
-  {"id": "silent-hidden-word", "name": "Silent Film, Hidden Word", "buildable": false,
-   "look": "No voice. An effects film at 17-28 cuts per 10 s with one long breath, ending on the pause-proof keyword.", "needs": "weave and glyph junctions between real exports; a sound plan without a bed", "cta": "the pause-proof keyword"},
-  {"id": "exploded", "name": "Exploded", "buildable": false,
-   "look": "Time stops and the frame comes apart into its real layers with real values.", "needs": "layers along z (class C)", "cta": "keyword on a floating layer"},
-  {"id": "did-you-notice", "name": "Did You Notice", "buildable": false,
-   "look": "A plain talk to lens; the room changes six times in blinks; rewind, replay.", "needs": "matte, clean plate and blink times (class B)", "cta": "Comment ROOM"}
+  {
+   "id": "reading-wipe",
+   "name": "Reading Wipe Before/After",
+   "buildable": true,
+   "look": "A page: the upload, whole and wide, and the one sentence that was typed. A leaning caret reads the sentence, and the caret is the seam of the before/after: everything it has passed is already the film the product made. The sentence is spent as it is read. Then that film, untouched; then the upload and the film side by side at the same instant, with one line and the edit's facts.",
+   "hook": "Frame 0 is the raw upload, the sentence and the caret. By 0.5 s the frame is changing behind the caret.",
+   "close": "A keyword drawn in static that only reads while it moves, with the product's mark kept clear.",
+   "needs": "one recording where one sentence was typed before the first result and a vertical film came back; the sentence short enough for one line",
+   "cta": "a keyword of 4 to 7 letters that only exists in motion (A1), on its own for about 3 s before the end card"
+  },
+  {
+   "id": "edits-itself",
+   "name": "It Edits Itself",
+   "buildable": true,
+   "look": "The first cut plays, then the frame pulls back onto its own timeline: every block a kept range of the project's EDL at its true second, the playhead at the true time. A sentence is typed. The blocks it removed are marked and leave, the rest close up, the pictures it added land, and the frame goes back into the new cut.",
+   "hook": "Frame 0 is the first cut; within two seconds it is a viewer above its own timeline.",
+   "close": "The edit's receipt prints: what was typed, what was cut, what was added, the EDL versions.",
+   "needs": "one recording with an export before a typed sentence and an export after it, and the EDL of both",
+   "cta": "a keyword on the last line of the receipt (A3)"
+  },
+  {
+   "id": "one-clip-three-films",
+   "name": "One Clip, Three Films",
+   "buildable": true,
+   "look": "Three films of the same instant side by side, lips moving together: three edits the product made of one upload from three typed sentences. Then each sentence typed and its film whole, the same seconds each time. Then the three again.",
+   "hook": "Frame 0 is the three films at once, the same word on three mouths.",
+   "close": "The three again, with a question: which one would you post.",
+   "needs": "three recordings of one upload with three different typed sentences, each a vertical film that keeps the same few seconds whole",
+   "cta": "a question and a number to comment (1, 2 or 3); nothing to send"
+  },
+  {
+   "id": "silent-hidden-word",
+   "name": "Silent Film, Hidden Word",
+   "buildable": false,
+   "look": "No voice. An effects film at 17-28 cuts per 10 s with one long breath, ending on the pause-proof keyword.",
+   "needs": "weave and glyph junctions between real exports; a sound plan without a bed",
+   "cta": "the pause-proof keyword"
+  },
+  {
+   "id": "exploded",
+   "name": "Exploded",
+   "buildable": false,
+   "look": "Time stops and the frame comes apart into its real layers with real values.",
+   "needs": "layers along z (class C)",
+   "cta": "keyword on a floating layer"
+  },
+  {
+   "id": "did-you-notice",
+   "name": "Did You Notice",
+   "buildable": false,
+   "look": "A plain talk to lens; the room changes six times in blinks; rewind, replay.",
+   "needs": "matte, clean plate and blink times (class B)",
+   "cta": "Comment ROOM"
+  }
  ]
 }

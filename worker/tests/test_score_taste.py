@@ -689,7 +689,7 @@ def test_the_look_can_send_a_found_picture_back_to_the_take():
     n = c.meter["sources"]["found_items"]
     assert "b02.s1" in taste.look_ids(c) and n >= 4
     cut = comp(taste.cut_text(text, ["b02.s1"]), idx)
-    pics = {i["id"]: i["pic"] for i in cut.l1["items"] if i["k"] == "shot"}
+    pics = {i["id"]: i.get("framed") or i["pic"] for i in cut.l1["items"] if i["k"] == "shot"}      # a wide still is framed on the plate, and is still that still
     assert pics["b02.s1"] == "main" and pics["b01.s1"] == "bin:0" and cut.meter["sources"]["found_items"] == n - 1
     assert any(r["id"] == "b02.s1" and r["did"] == "cut" for r in cut.meter["taste"]["rows"])
     floor = comp(taste.floor_text(text), idx)

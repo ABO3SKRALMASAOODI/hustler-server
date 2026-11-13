@@ -70,7 +70,7 @@ def test_a_designed_picture_stays_only_where_no_real_picture_did(tmp_path, monke
         return ([{"id": f"pexels:photo:{wish['q'][0]}", "provider": "pexels", "kind": "photo", "_thumb": "u", "width": 1080, "height": 1920}], [], 0.1)
     monkeypatch.setattr(supply, "search_wish", fake_search)
     monkeypatch.setattr(supply, "search_thing", lambda *a, **k: [])
-    monkeypatch.setattr(supply, "name_wishes", lambda work, wishes: ([[] for _ in wishes], 0.0))
+    monkeypatch.setattr(supply, "name_wishes", lambda work, wishes, about="": ([[] for _ in wishes], 0.0))
     monkeypatch.setattr(supply, "own_moments", lambda *a, **k: ([], 0.0))
     monkeypatch.setattr(supply, "reads_for", lambda work, wishes, per: ([{"thing": "fishing nets", "design": dict(boards.design_spec(NUMBER), what="a")},
                                                                          {"thing": "", "design": dict(boards.design_spec(NUMBER), what="b")}], 0.0))

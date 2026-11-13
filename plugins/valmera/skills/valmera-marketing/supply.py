@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
-"""Supply for a marketing film: real Valmera output, recorded with its receipts.
+"""Supply for a marketing film: real Valmera output, packed with its receipts.
 
-Marketing shows only what the product did. This reads a finished podcast-shorts run (the product's
-own delivery: every final is an export of a Valmera project) and packs what a film needs:
+Marketing shows only what the product did. The evidence is a studio recording (studio.py): one clip uploaded to
+the product, the sentences typed, every export the browser downloaded and every version of the project's EDL.
 
-    python supply.py build --run <podcast-shorts run folder> --out <run>/supply --hero s042 \
-        [--salvo s032,s028,s061,s068] [--tile-t 1.2]
+    python supply.py studio --style reading-wipe --records whynot-pictures --out <run>/supply
 
-  hero      one delivered short, read in place (never re-encoded), with the raw source it was cut
-            from registered to it: the rectangle of the frame that is the source picture, the crop
-            of the source that fills it, and the source frame on screen (register.py)
-  raw.mp4   the same seconds of the raw source, cut frame-exact, no sound
-  salvo     other delivered shorts, read in place
-  tiles/    one frame of every delivered short, in short-id order: the whole delivery as a wall
-  receipts  for every number the film may show: the file it was read from and its sha256
+The pack names, per record, the upload, the export(s) and the EDL files, each with its sha256, and the facts a
+film may show (shapes, lengths, counts), read from those files. For the film that draws the timeline it also cuts
+small frames of both exports (one every half second) and one of each picture the edit added.
 
 Nothing here uploads, publishes or touches a project. Everything written goes under --out.
 """
@@ -27,7 +22,6 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import film as F  # noqa: E402
-import register as RG  # noqa: E402
 
 V = "/Users/masaoodi/Documents/Valmera"
 BIN = f"{V}/audit/subscriber-reliability-20260908/bin-arm"
@@ -49,144 +43,122 @@ def sha256(path, limit=None):
     return h.hexdigest()
 
 
-def run_record(run_dir):
-    """A finished podcast-shorts run as facts: the source, and every delivered short with its file."""
-    d = json.load(open(os.path.join(run_dir, "run.json")))
-    folder = d.get("delivered_to")
-    files = sorted(f for f in os.listdir(folder) if f.endswith(".mp4")) if folder and os.path.isdir(folder) else []
-    by = {}
-    for f in files:
-        parts = f.split("__")
-        if len(parts) >= 3:
-            by[parts[1]] = f
-    acq = {}
-    for name in ("acquisition.json", "plan.json", "provenance.json"):
-        p = os.path.join(run_dir, "source", name)
-        if os.path.exists(p):
-            try:
-                acq.update(json.load(open(p)))
-            except ValueError:
-                pass
-    shorts = []
-    for sid in sorted(by):
-        s = (d.get("shorts") or {}).get(sid) or {}
-        c = (s.get("candidates") or [{}])[-1]
-        hb = c.get("handback") or {}
-        shorts.append(dict(sid=sid, file=os.path.join(folder, by[sid]), structure=by[sid].split("__")[0], look=s.get("look") or hb.get("look"),
-                           title=s.get("title") or (s.get("brief") or {}).get("headline"), keeps=hb.get("kept_source_ranges_s") or [],
-                           project_id=hb.get("project_id") or s.get("child_project_id"), edl_version=c.get("edl_version") or hb.get("edl_version"),
-                           final_s=c.get("final_s"), rank=s.get("rank"), sfx=hb.get("sfx") or [], broll=hb.get("broll") or []))
-    src = None
-    for n in sorted(os.listdir(os.path.join(run_dir, "source"))):
-        if n.endswith((".mp4", ".mkv", ".webm", ".mov")):
-            src = os.path.join(run_dir, "source", n)
-            break
-    return dict(run_id=d.get("run_id"), run_json=os.path.join(run_dir, "run.json"), stage=d.get("stage"), version=d.get("version"),
-                delivered_to=folder, delivered=len(by), declared=len(d.get("delivered_files") or {}), source=src,
-                source_url=d.get("source") or acq.get("source_url"), source_s=acq.get("duration_s"), music=d.get("music"),
-                started=d.get("created_at"), finished=d.get("updated_at"), shorts=shorts)
-
-
-def clock(sec):
-    sec = int(round(float(sec)))
-    return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
-
-
-def grid_for(n):
-    """Columns and rows of 9:16 tiles that hold exactly n and sit nearest a square block; None if n has no such shape."""
-    best = None
-    for rows in range(1, n + 1):
-        if n % rows:
-            continue
-        cols = n // rows
-        aspect = (cols * 9) / (rows * 16)
-        if 0.6 <= aspect <= 1.25 and (best is None or abs(aspect - 0.95) < abs(best[2] - 0.95)):
-            best = (cols, rows, aspect)
-    return best[:2] if best else None
-
-
-def build(a):
-    out = os.path.abspath(a.out)
-    os.makedirs(os.path.join(out, "tiles"), exist_ok=True)
-    rec = run_record(a.run)
-    if rec["stage"] != "complete" or not rec["delivered"] or rec["delivered"] != rec["declared"]:
-        raise SystemExit(f"run not usable as evidence: stage {rec['stage']}, {rec['delivered']} files of {rec['declared']} declared")
-    by = {s["sid"]: s for s in rec["shorts"]}
-    hero = by[a.hero]
-    if not hero["keeps"]:
-        raise SystemExit(f"{a.hero} has no kept source ranges on record: it cannot be registered to its source")
-    k0, k1 = hero["keeps"][0]
-    if k1 - k0 < 4.0:
-        raise SystemExit(f"{a.hero} opens on a {k1 - k0:.1f} s keep: too short to wipe across")
-    src_fps = F.probe(FP, rec["source"])["fps"]
-    reg = RG.register(FF, hero["file"], rec["source"], a.reg_t, k0 + a.reg_t, raw_fps=src_fps)
-    raw_t0 = k0 + reg["frame_offset"] / src_fps
-    raw = os.path.join(out, "raw.mp4")
-    subprocess.run([FF, "-v", "error", "-y", "-ss", f"{raw_t0:.4f}", "-i", rec["source"], "-t", f"{a.raw_s:.3f}", "-an", "-map", "0:v:0",
-                    "-c:v", "libx264", "-preset", "medium", "-crf", "12", "-pix_fmt", "yuv420p", "-r", "30", raw], check=True)
-    tiles = []
-    for i, s in enumerate(rec["shorts"]):
-        p = os.path.join(out, "tiles", f"{i:03d}.jpg")
-        subprocess.run([FF, "-v", "error", "-y", "-ss", f"{a.tile_t:.2f}", "-i", s["file"], "-frames:v", "1",
-                        "-vf", f"scale={a.tile_w}:{a.tile_w * 16 // 9}:flags=lanczos", "-q:v", "2", p], check=True)
-        tiles.append(dict(sid=s["sid"], path=p, w=a.tile_w, h=a.tile_w * 16 // 9, look=s["look"]))
-    salvo = []
-    for spec in [x for x in (a.salvo or "").split(",") if x]:
-        sid, _, t = spec.partition("@")
-        s = by[sid]
-        salvo.append(dict(sid=sid, path=s["file"], t=float(t or a.salvo_t), look=s["look"], probe=F.probe(FP, s["file"]),
-                          project_id=s["project_id"], edl_version=s["edl_version"]))
+def sound_facts(ids=("tick_1", "whoosh_soft_1", "riser_2", "click_1", "typing_2")):
+    """The library sounds a film may place: file, where its peak is, how loud its peak is."""
     lib_dir = os.path.join(F.scene_worker(), "sound_library")
     sounds = {}
     for m in json.load(open(os.path.join(lib_dir, "manifest.json"))):
-        if m["id"] in ("tick_1", "whoosh_soft_1", "riser_2", "click_1"):
+        if m["id"] in ids:
             r = subprocess.run([FF, "-hide_banner", "-i", os.path.join(lib_dir, m["file"]), "-af", "volumedetect", "-f", "null", "-"],
                                capture_output=True, text=True)
             mx = next(float(ln.split("max_volume:")[1].split()[0]) for ln in r.stderr.splitlines() if "max_volume" in ln)
             sounds[m["id"]] = dict(file=m["file"], peak_s=float(m["peak_s"]), max_db=mx)
-    grid = grid_for(len(tiles))
-    sup = dict(
-        sid=f"wf2-{rec['run_id']}", ffmpeg=FF, grid=list(grid) if grid else None, tiles=tiles, salvo=salvo, sounds=sounds,
-        hero=dict(sid=hero["sid"], path=hero["file"], probe=F.probe(FP, hero["file"]), keep0=k0, keeps=hero["keeps"], reg=reg, look=hero["look"],
-                  project_id=hero["project_id"], edl_version=hero["edl_version"], title=hero["title"],
-                  raw=dict(path=raw, probe=F.probe(FP, raw), source_t0=round(raw_t0, 4))),
-        facts=dict(delivered=rec["delivered"], source_s=rec["source_s"], source_clock=clock(rec["source_s"]) if rec["source_s"] else None,
-                   source_url=rec["source_url"], music=rec["music"], run_started=rec["started"], run_finished=rec["finished"]),
-        receipts=[
-            dict(claim=f"{rec['delivered']} shorts delivered from one source", file=rec["run_json"], how="delivered_files count equals the .mp4 files in delivered_to",
-                 sha256=sha256(rec["run_json"]), folder=rec["delivered_to"]),
-            dict(claim="the source and its length", file=os.path.join(a.run, "source", "acquisition.json"), value=rec["source_s"], url=rec["source_url"]),
-            dict(claim="the hero is a Valmera export, shown unaltered", file=hero["file"], sha256=sha256(hero["file"]), project_id=hero["project_id"],
-                 edl_version=hero["edl_version"]),
-            dict(claim="the raw side is the same seconds of the source, in the export's own framing", file=rec["source"], source_t0=round(raw_t0, 4),
-                 registration=reg, sha256_first_64mb=sha256(rec["source"], 64 << 20)),
-        ])
+    return sounds
+
+
+def studio_record(sid):
+    """One studio recording as a film reads it: the upload, the export after the last sentence, the export before it
+    when there is one, and the EDL of each."""
+    import studio as ST
+    d = os.path.join(ST.RECORDS, sid)
+    r = json.load(open(os.path.join(d, "record.json")))
+    if r.get("state") != "done" or not r.get("asks"):
+        raise SystemExit(f"{sid}: not a finished recording with a sentence")
+    final = next((e for e in r["exports"] if e["tag"] == "final"), None)
+    if not final or not final.get("edl_version"):
+        raise SystemExit(f"{sid}: no final export with its EDL version on record")
+    before = next((e for e in r["exports"] if e["tag"].startswith("before_ask")), None)
+
+    def edl(v):
+        p = os.path.join(d, "edl", f"v{int(v):03d}.json")
+        if not os.path.exists(p):
+            raise SystemExit(f"{sid}: EDL v{v} is not on record")
+        return p
+
+    def media(e):
+        return dict(path=e["file"], w=e["w"], h=e["h"], fps=e["fps"], dur=e["dur"], sha256=e["sha256"], edl_version=e.get("edl_version"),
+                    edl=edl(e["edl_version"]) if e.get("edl_version") else None)
+
+    ask = r["asks"][-1]
+    j = json.load(open(edl(final["edl_version"])))
+    tl, body = F.program(j)
+    pics = F.pictures_of(j)
+    cap = j.get("captions")
+    facts = dict(upload_ratio=F.ratio(r["upload"]["w"], r["upload"]["h"]), upload_length=F.clock(r["upload"]["dur"]), upload_s=round(r["upload"]["dur"], 1),
+                 export_ratio=F.ratio(final["w"], final["h"]), export_length=F.clock(body), export_s=round(body, 1), cuts=max(len(tl.segs) - 1, 0),
+                 pictures=len(pics), captions=bool(cap), edl_version=final["edl_version"], sentences=len(r["asks"]))
+    return dict(sid=sid, sentence=ask["text"], phase=ask.get("phase"), reply=ask.get("reply"), ask_seconds=ask.get("seconds"),
+                upload=dict(path=r["upload"]["file"], w=r["upload"]["w"], h=r["upload"]["h"], fps=r["upload"]["fps"], dur=r["upload"]["dur"],
+                            sha256=r["upload"]["sha256"]),
+                export=media(final), before=media(before) if before else None, edl=edl(final["edl_version"]), body_s=round(body, 3), facts=facts,
+                source=r.get("source"), be_sha=r.get("be_sha"), fe_sha=r.get("fe_sha"), models=r.get("models"), journey=r.get("journey"),
+                journey_sha256=r.get("journey_sha256"), record=os.path.join(d, "record.json"))
+
+
+def frames_of(path, out_dir, tag, step, upto, w=90, h=160):
+    """One small frame of a film every `step` seconds, up to `upto`: [{t, path, w, h}]."""
+    os.makedirs(out_dir, exist_ok=True)
+    subprocess.run([FF, "-v", "error", "-y", "-t", f"{upto:.3f}", "-i", path, "-vf", f"fps={1.0 / step:.6f}:start_time=0:round=down,scale={w}:{h}:flags=lanczos",
+                    "-q:v", "3", os.path.join(out_dir, f"{tag}_%04d.jpg")], check=True)
+    rows = []
+    for n in sorted(x for x in os.listdir(out_dir) if x.startswith(tag + "_")):
+        i = int(n[len(tag) + 1:-4]) - 1
+        rows.append(dict(t=round(i * step, 3), path=os.path.join(out_dir, n), w=w, h=h))
+    return rows
+
+
+def studio(a):
+    out = os.path.abspath(a.out)
+    os.makedirs(out, exist_ok=True)
+    recs = [studio_record(sid) for sid in a.records.split(",") if sid]
+    thumbs = {}
+    if a.style == "edits-itself":
+        r = recs[0]
+        if not r["before"]:
+            raise SystemExit(f"{r['sid']}: no export from before the sentence: nothing to show changing")
+        ea, eb = json.load(open(r["before"]["edl"])), json.load(open(r["edl"]))
+        da, db = F.program(ea)[1], F.program(eb)[1]
+        thumbs["a"] = frames_of(r["before"]["path"], os.path.join(out, "thumbs"), "a", 0.5, da)
+        thumbs["b"] = frames_of(r["export"]["path"], os.path.join(out, "thumbs"), "b", 0.5, db)
+        thumbs["pictures"] = {}
+        for o in F.pictures_of(eb):
+            p = os.path.join(out, "thumbs", f"pic_{o['id']}.jpg")
+            t = float(o["start"]) + float(o["duration_s"]) / 2
+            subprocess.run([FF, "-v", "error", "-y", "-ss", f"{t:.3f}", "-i", r["export"]["path"], "-frames:v", "1", "-vf", "scale=270:480:flags=lanczos",
+                            "-q:v", "3", p], check=True)
+            thumbs["pictures"][o["id"]] = dict(path=p, w=270, h=480, t=round(t, 3))
+    if a.style == "one-clip-three-films":
+        if len(recs) != 3:
+            raise SystemExit("three recordings of one clip are needed")
+        if len({r["upload"]["sha256"] for r in recs}) != 1:
+            raise SystemExit("the three recordings are not of the same upload")
+        if len({r["sentence"] for r in recs}) != 3:
+            raise SystemExit("the three sentences are not three different sentences")
+    receipts = []
+    for r in recs:
+        receipts.append(dict(claim="this sentence was typed into the product, and this export came back", sentence=r["sentence"], record=r["record"],
+                             journey=r["journey"], journey_sha256=r["journey_sha256"], product_commit=r["be_sha"], frontend_commit=r["fe_sha"]))
+        receipts.append(dict(claim="the export is shown as the browser downloaded it", file=r["export"]["path"], sha256=r["export"]["sha256"],
+                             edl_version=r["export"]["edl_version"], edl=r["edl"], edl_sha256=sha256(r["edl"])))
+        receipts.append(dict(claim="the upload, and the seconds of the source it was cut from", file=r["upload"]["path"], sha256=r["upload"]["sha256"], source=r["source"]))
+        if r["before"]:
+            receipts.append(dict(claim="the same project before the sentence, as the browser downloaded it", file=r["before"]["path"], sha256=r["before"]["sha256"],
+                                 edl_version=r["before"]["edl_version"], edl=r["before"]["edl"], edl_sha256=sha256(r["before"]["edl"])))
+    sup = dict(sid=f"wf2-{a.style}-{recs[0]['sid']}", style=a.style, ffmpeg=FF, sounds=sound_facts(), records=recs, thumbs=thumbs, receipts=receipts)
     with open(os.path.join(out, "pack.json"), "w") as f:
         json.dump(sup, f, ensure_ascii=False, indent=1)
-    print(json.dumps(dict(pack=os.path.join(out, "pack.json"), delivered=rec["delivered"], grid=grid, reg=reg, salvo=[s["sid"] for s in salvo])))
+    print(json.dumps(dict(pack=os.path.join(out, "pack.json"), records=[r["sid"] for r in recs], thumbs={k: len(v) for k, v in thumbs.items()})))
 
 
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    b = sub.add_parser("build")
-    b.add_argument("--run", required=True)
-    b.add_argument("--out", required=True)
-    b.add_argument("--hero", required=True)
-    b.add_argument("--salvo", default="")
-    b.add_argument("--salvo-t", type=float, default=3.0)
-    b.add_argument("--tile-t", type=float, default=1.2)
-    b.add_argument("--tile-w", type=int, default=108)
-    b.add_argument("--reg-t", type=float, default=1.6)
-    b.add_argument("--raw-s", type=float, default=4.0)
-    r = sub.add_parser("runs")
-    r.add_argument("--root", default=f"{V}/.tmp/valmera-podcast-shorts")
+    st = sub.add_parser("studio")
+    st.add_argument("--style", required=True)
+    st.add_argument("--records", required=True)
+    st.add_argument("--out", required=True)
     a = ap.parse_args()
-    if a.cmd == "build":
-        build(a)
-    else:
-        import evidence
-        print(json.dumps(evidence.ledger(a.root), indent=1))
+    studio(a)
 
 
 if __name__ == "__main__":

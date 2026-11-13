@@ -231,7 +231,9 @@ def repair_ask(comp, facts, fixes, proof):
         out += ["ASKS"] + facts + [""]
     if fixes:
         out += ["HEARING not decided yet, read each and keep it with a fix line if it is what was said: " + "; ".join(fixes), ""]
-    out.append('Read it the way the person who uploaded this reads it, then the way a stranger scrolling past does. Would they post this over their upload? Is the first second the strongest thing in the film? '
+    out.append('Read it the way the person who uploaded this reads it, then the way a stranger scrolling past does. Would they post this over their upload? '
+               'Does the first second carry the hook title, where the Seats section said it can stand? Is every Bin picture cut in once, on its word? '
+               'Do the words the voice stresses stand as chunks of their own in the second voice? Is it still the upload with captions (SOURCES, EARNED)? '
                'Which frames look automatic: a stock picture standing still, type on type, a page where the person should be, a device the upload is better without? '
                'The TASTE and LINES rows are device lines the compiler removed: nothing in the voice or on screen earned them, or this footage can\'t carry that many. '
                'Don\'t write those back as they were. A removed line returns only with the `for` it answers, inside the counts on the SUPPLY line; a film that wants more of them needs more pictures from the Bin first. '

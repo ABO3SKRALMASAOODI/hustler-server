@@ -28,7 +28,7 @@ STYLE_DIR = os.path.join(HERE, "assets", "styles")
 SR = 16000
 FINAL_W, FINAL_H = 1080, 1920
 BOARD_W, BOARD_H = 1568, 880
-PREFIX_CAP, FILM_CAP = 11500, 18000
+PREFIX_CAP, FILM_CAP = 13600, 18000
 
 GREEN, CYAN, YEL = (70, 240, 120), (90, 210, 255), (255, 225, 60)
 
@@ -133,8 +133,9 @@ def words_part(work, idx, per, x, scout):
         dur = per["dur"]
         out.append(f"Speech runs {w0:.2f} to {w1:.2f} of {dur:.2f} s. Language {idx.get('language')}, {idx.get('speakers', 1)} speaker(s).")
         conf = float(np.mean([float(w.get("confidence", 1.0)) for w in words]))
-        if conf < 0.6:
-            out.append(f"Mean transcript confidence is only {conf:.2f}: this may be a song or noise rather than speech. Trust the sound more than these words.")
+        if conf < 0.75 or len(words) < 4:
+            out.append(f"{len(words)} words at a mean transcript confidence of {conf:.2f}: this is likely a song, a crowd or noise rather than speech, and the language is a guess. "
+                       "These words are not captioned (the compiler leaves them out) and no title is taken from them. Build the film on the picture and the sound.")
     else:
         out.append("## Words")
         out.append("No word ids in this upload. Anchor on `k` and `@`. Beats take `\"at\":\"@12.0..@15.5\"`.")
@@ -415,6 +416,30 @@ def pick_styles(idx, per, bin_items=None):
     return taste.fit_styles(compiler.BANDS, taste.reach(per, bin_items, per["dur"]), have)
 
 
+def seats_part(work, idx, per):
+    """Where type can stand on the take, solved by the compiler's own rules before a film exists. The Director
+    wrote hook titles the compiler then left out for want of a place (p5591: three of three). Told where the
+    place is, or that the take has none, it sets the title there, or over a picture."""
+    if per["W"] >= per["H"]:
+        return []
+    try:
+        from . import compiler
+        got = compiler.take_seats(work, idx)
+    except Exception:  # noqa: BLE001 - a Brief without this line is still a Brief
+        got = None
+    if not got:
+        return []
+    cap_y, seats, rooms = got
+    out = ["## Seats", f"Solved on the take as shot. Caption seat y {cap_y:.2f}."]
+    if seats:
+        rows = [f"[{q[0]:.2f},{q[1]:.2f}] with room for type {r[1]:.2f} of the frame tall and {r[0]:.2f} wide" for q, r in zip(seats, rooms)]
+        out.append("Display seats on the take: " + "; ".join(rows) + ". Display type over the take stands there, fitted to that room: a two-line title needs about 0.12 tall."
+                   + (" The room is small: set the hook title over a found picture or a page instead, and keep the seat for one short word." if max(r[1] for r in rooms) < 0.1 else ""))
+    else:
+        out.append("Display seats on the take: none, the head fills the frame. Display type stands over a found picture or a page, never over the take; the hook title opens the film on one.")
+    return out
+
+
 def supply_part(idx, per, bin_items):
     """What this footage can carry, in numbers, before a film exists."""
     dur = float(per["dur"])
@@ -516,6 +541,7 @@ def film_text(work, idx, sess, per, x, scout, styles, cards, bin_items=None):
         out.append("The customer uploaded and typed nothing.")
     out += words_part(work, idx, per, x, scout)
     out += footage_part(per, idx)
+    out += seats_part(work, idx, per)
     out += audio_part(idx, per)
     out += ["## Frames",
             "Boards 1-3: frames in time order. Each stamp reads @source-second, then the word being spoken. Green box face, yellow box free space on the first cell. White ticks mark every .1 of the frame. Board 4: details, softness, palette."]

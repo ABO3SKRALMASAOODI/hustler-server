@@ -231,12 +231,29 @@ def lower_spine(l1, bake, rep):
         inserts.append({"id": f"gap{a}", "asset_key": black, "kind": "image", "at_output_s": r2(pre), "duration_s": r2((b - a) / fps)})
         rep["silences"] = rep.get("silences", 0) + 1
 
-    for s in spine:
+    # Which spans are the base and which go in as inserts. The base has to run in source order, and captions are
+    # authored in source time against it: only the base's words can carry a caption. So the base is the longest run of
+    # spans in source order, not the first span played. With the first span as the base, a film that opens on a late
+    # sentence had 4 s of base and 31 s of inserts, and no caption after the hook (p5574, 13 Nov).
+    n = len(spine)
+    best = [float(s["src"][1] - s["src"][0]) for s in spine]
+    prev = [-1] * n
+    for i in range(n):
+        for j in range(i):
+            if spine[j]["src"][1] <= spine[i]["src"][0] + 0.04 and best[j] + (spine[i]["src"][1] - spine[i]["src"][0]) > best[i]:
+                best[i] = best[j] + (spine[i]["src"][1] - spine[i]["src"][0])
+                prev[i] = j
+    base = set()
+    k = max(range(n), key=lambda i: (best[i], -i)) if n else -1
+    while k >= 0:
+        base.add(k)
+        k = prev[k]
+    for k, s in enumerate(spine):
         a, b = s["f"]
         if a > prog:
             silence(prog, a)
         t0, t1 = s["src"]
-        if t0 >= last_src - 0.04:       # a beat written in seconds can start a frame before the last one ended: that is continuity, not a jump
+        if k in base and t0 >= last_src - 0.04:       # a beat written in seconds can start a frame before the last one ended: that is continuity, not a jump
             d = max(0.0, last_src - t0)         # the same length, or the programme ends short of the film
             t0, t1 = t0 + d, t1 + d
             keep.append([r2(t0), r2(t1)])
@@ -246,6 +263,7 @@ def lower_spine(l1, bake, rep):
             bake.locals["main"] = os.path.join(bake.work, "source.mp4")
             inserts.append({"id": f"spine{a}", "asset_key": "main", "kind": "video", "at_output_s": r2(pre), "duration_s": r2(t1 - t0), "source_start_s": r2(t0)})
             rep["out_of_order_spans"] = rep.get("out_of_order_spans", 0) + 1
+            rep.setdefault("_off_base", []).append((a, b))        # programme frames whose words can't carry a source-time caption
         prog = b
     if prog < l1["dur_f"]:
         silence(prog, l1["dur_f"])
@@ -564,8 +582,14 @@ def src_at(l1, f, fps):
     return best
 
 
+CAP_IN = {"settle": "pop", "bounce": "bounce", "rise": "rise", "blur": "blur_in", "flicker": "flash"}     # the film's caption entrance, as today's renderer names it
+
+
 def lower_captions(l1, rep, src_dur=0.0):
-    """Chunks as dictated items, each at its own height. The second voice falls away: one style to an item."""
+    """Chunks as dictated items, each at its own height. Today's renderer gives one style to an item, so the second
+    voice is kept by the chunk: a chunk whose words are all in the second voice (the Score starred each of them) is
+    set in that voice's face and size and takes the film's caption entrance; every other chunk is the first voice,
+    swapped hard. Before 13 Nov the second voice fell away and every film's captions were one plain face."""
     import captions as caplib
     fps, H = float(l1["fps"]), l1["frame"][1]
     groups = collections.OrderedDict()
@@ -585,18 +609,40 @@ def lower_captions(l1, rep, src_dur=0.0):
             rep["captions_off_spine"] = rep.get("captions_off_spine", 0) + 1
             continue
         lines = chunk_lines(first)
-        v = l1["voices"].get(first[0]["v"]) or l1["voices"].get("a") or {}
+        off_base = any(p < b and a < q for p, q in rep.get("_off_base") or [])
+        second = len({w.get("v") for w in first}) == 1 and first[0].get("v") == "b" and face_of(l1["voices"].get("b") or {}) is not None
+        v = l1["voices"].get("b" if second else "a") or l1["voices"].get(first[0]["v"]) or {}
         px = float(v.get("px", 58))
         # The renderer centres a caption on its anchor (\an5), so the anchor is the middle of the whole block, not of
         # its first line: a two-line chunk sat half a line above a one-line chunk at the same seat (TASTE P1).
         ys = [float(np.mean([(w["y"][-1] if isinstance(w["y"], list) else w["y"]) for w in ln])) for ln in lines]
         y = (ys[0] + ys[-1]) / 2 - 0.36 * px / H
-        font = (face_of(l1["voices"].get("a", v)) or ("Inter Display Bold", False))[0]
+        font = (face_of(v if second else l1["voices"].get("a", v)) or ("Inter Display Bold", False))[0]
         font = font if font != "Plus Jakarta Sans ExtraBold" else "Plus Jakarta Sans"
-        style = {"preset": "clean", "font": font, "color": first[0].get("ink") or "#FFFFFF", "uppercase": False, "animation": "none",
+        # a hairline serif at caption size does not hold over moving pictures, and today's caption has no italic to
+        # give it: the second voice is drawn in the display serif of the same family feeling (13 Nov, "2025" unread on grey)
+        font = "DM Serif Display" if font == "Instrument Serif" else font
+        tfont = (face_of(v if second else l1["voices"].get("a", v)) or ("Inter Display Bold", False))[0]      # a text item names its face as titles do
+        tfont = "DM Serif Display" if tfont == "Instrument Serif" else tfont
+        anim = CAP_IN.get(str((l1.get("film") or {}).get("cap_in")), "none") if second else "none"
+        if second:
+            rep["captions_second_voice"] = rep.get("captions_second_voice", 0) + 1
+        style = {"preset": "clean", "font": font, "color": first[0].get("ink") or "#FFFFFF", "uppercase": False, "animation": anim,
                  "anchor_y": round(min(max(y, 0.02), 0.98), 4), "size_scale": round(min(max(libass_px(v, px) / (base_size * f), 0.5), 3.0), 3), "single_line": len(lines) == 1,
                  "emphasis": "none", "outline_width": 0.0, "shadow": 1.0}
         text = "\n".join(" ".join(w["t"] for w in ln) for ln in lines) if len(lines) > 1 else " ".join(w["t"] for w in lines[0])
+        if off_base:
+            # A span that plays out of source order is an insert, and a caption is authored in source time against the
+            # base: here it would be lost, or land on another second. It goes in as a text item at its programme time,
+            # in the caption's own face, size and seat (p5574, 13 Nov: no caption on a cold open, and two on one frame).
+            if (b - a) / fps >= TX_MIN_S:
+                rep.setdefault("_cap_texts", []).append({
+                    "id": f"tx.cap.{cid}"[:60], "text": text.replace("\n", " "), "start": r2(a / fps), "end": r2(b / fps), "template": "title", "font": tfont,
+                    "font_size": round(min(max(libass_px(v, px) / min(l1["frame"][0], H), 0.012), 0.3), 4), "text_align": "center", "max_width": 0.72,
+                    "color": first[0].get("ink") or "#FFFFFF", "uppercase": False, "shadow": 1.0, "outline_width": 0.0, "entrance": "none", "exit": "none",
+                    "x": 0.5, "y": round(min(max(y, 0.02), 0.98), 4)})
+                rep["captions_as_text"] = rep.get("captions_as_text", 0) + 1
+            continue
         # A chunk can outlive a cut, and its ink was solved shot by shot. One item per run of one ink, so
         # dark type never carries on onto a page it was not chosen for (p5302: dark COM PROMOCOES on pink).
         longest = max(parts.values(), key=lambda ps: ps[-1]["f"][1] - ps[0]["f"][0])
@@ -939,6 +985,8 @@ def lower(l1, work):
     edl = {"keep": keep, "frame": dict(rep["frame"]),
            "inserts": inserts, "captions": lower_captions(l1, rep, src_dur), "sfx": sfx, "overlays": overlays + pool_ov + cards + script_type,
            "texts": lower_texts(l1, rep, runs), "vectors": vectors, "fx": tr_fx + flash_fx, "effects": effects, "master": {"loudness": "social"}}
+    edl["texts"] += rep.pop("_cap_texts", [])
+    rep.pop("_off_base", None)
     for lane, least in (("texts", TX_MIN_S), ("vectors", TX_MIN_S), ("fx", 1 / fps)):
         kept = []
         for it in edl[lane]:
