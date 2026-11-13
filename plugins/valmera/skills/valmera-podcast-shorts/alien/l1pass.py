@@ -290,28 +290,46 @@ def picture_cuts(l1):
 
 
 def split_captions_at(l1, cuts, least=3):
-    """A caption that lives across a cut to another picture becomes two: the ground under it changes there, so its ink
-    may too (white on the dark take, dark on a white paper), instead of one ink and a pool that smudges the paper.
-    Each half keeps its place, its words and its own frames of every per-frame list. Returns how many were split."""
-    out, n = [], 0
-    for it in l1["items"]:
-        if it.get("k") != "word" or it.get("role") != "cap" or it.get("behind"):
-            out.append(it)
+    """A caption chunk that lives across one of these frames becomes two chunks there: the ground under it changes
+    (a cut to another picture, a card landing), so its ink or its seat may too, instead of one ink and a pool that
+    smudges a paper. A word that lives on both sides is cut in two, each half keeping its place and its own frames
+    of every per-frame list; a word within ``least`` frames of the frame goes whole to the side it lives on.
+    Returns how many chunks were divided."""
+    n = 0
+    for c in sorted(set(int(x) for x in cuts)):
+        life = {}
+        for it in l1["items"]:
+            if it.get("k") == "word" and it.get("role") == "cap" and not it.get("behind"):
+                key = it.get("chunk") or it["id"]
+                a, b = life.get(key, (it["f"][0], it["f"][1]))
+                life[key] = (min(a, it["f"][0]), max(b, it["f"][1]))
+        across = {k for k, (a, b) in life.items() if a + least <= c <= b - least}
+        if not across:
             continue
-        a, b = it["f"]
-        c = next((c for c in cuts if a + least <= c <= b - least), None)
-        if c is None:
-            out.append(it)
-            continue
-        first, second = dict(it, f=[a, c]), dict(it, f=[c, b], id=f"{it['id']}~{c}", on=c)
-        if it.get("chunk"):
-            second["chunk"] = f"{it['chunk']}~{c}"
-        for key, v in it.items():
-            if isinstance(v, list) and key != "f" and len(v) == b - a:
-                first[key], second[key] = v[:c - a], v[c - a:]
-        out += [first, second]
-        n += 1
-    l1["items"] = sorted(out, key=lambda it: it["f"][0])
+        out = []
+        for it in l1["items"]:
+            key = (it.get("chunk") or it.get("id")) if it.get("k") == "word" and it.get("role") == "cap" and not it.get("behind") else None
+            if key not in across:
+                out.append(it)
+                continue
+            a, b = it["f"]
+            later = f"{it['chunk']}~{c}" if it.get("chunk") else None
+            if b <= c + least and a < c - least:                 # it lives before the frame
+                out.append(it)
+            elif a >= c - least:                                 # it lives after it
+                out.append(dict(it, chunk=later) if later else it)
+            elif b - c < least or c - a < least:
+                out.append(it if c - a >= b - c else (dict(it, chunk=later) if later else it))
+            else:
+                first, second = dict(it, f=[a, c]), dict(it, f=[c, b], id=f"{it['id']}~{c}", on=c)
+                if later:
+                    second["chunk"] = later
+                for k2, v in it.items():
+                    if isinstance(v, list) and k2 != "f" and len(v) == b - a:
+                        first[k2], second[k2] = v[:c - a], v[c - a:]
+                out += [first, second]
+        l1["items"] = sorted(out, key=lambda it: it["f"][0])
+        n += len(across)
     return n
 
 

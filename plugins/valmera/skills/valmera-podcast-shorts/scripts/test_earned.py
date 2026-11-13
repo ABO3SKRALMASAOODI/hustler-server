@@ -70,9 +70,9 @@ SCRIPT = dict(window=[100.0, 122.0], accent="#FFC857", hook=dict(picture=0, line
                         dict(on="w38", at=113.5, hold=2.0, kind="design", design=dict(kind="document", title="the email", lines=[
                             "Mark, would you look at this", "I still have the emails", "Never came back to me"], mark="I still have the emails")),
                         dict(on="w44", at=115.6, kind="named", name="nothing found")])
-EARNED = dict(rows=[dict(i=0, ok=True, name="A", path="earned/0.jpg", w=900, h=1400, layout="full", crop=[0.0625, 0.0, 0.9375, 1.0], faces=[[0.4, 0.2, 0.2, 0.15]]),
-                    dict(i=1, ok=True, name="B", path="earned/1.jpg", w=1800, h=1000, layout="card", crop=[0, 0, 1, 1], faces=[]),
-                    dict(i=3, ok=True, name="C", path="earned/3.jpg", w=1000, h=1200, layout="full", crop=[0.21875, 0.0, 0.78125, 1.0], faces=[]),
+EARNED = dict(rows=[dict(i=0, ok=True, name="A", path="earned/0.jpg", w=900, h=1400, faces=[[0.4, 0.2, 0.2, 0.15]], box=[0.3, 0.1, 0.7, 0.6]),
+                    dict(i=1, ok=True, name="B", path="earned/1.jpg", w=1800, h=1000, faces=[], box=[0.05, 0.1, 0.95, 0.9]),
+                    dict(i=3, ok=True, name="C", path="earned/3.jpg", w=1000, h=1200, faces=[], box=[0.3, 0.1, 0.7, 0.9]),
                     dict(i=5, ok=False, name="nothing found", said="none")], credits=[], said=["none"])
 
 
@@ -148,7 +148,16 @@ def test_pictures_land_on_their_words_and_what_was_not_found_is_not_shown(clip):
     assert rec["ok"] and rec["new_pictures"] >= 4
     card = next(it for it in l1["items"] if it["id"] == "e1.card")
     box = L.card_box(card)
-    assert box[1] >= E.MARK[3] and box[3] <= E.CAP_TOP                   # under the mark, above the captions
+    assert box[1] >= 0.30 and box[3] <= 0.80 and box[0] >= 0.05 and box[2] <= 0.95      # under his chin, inside the safe area
+    a, b = by[1]["frames"]
+    under = [it for it in l1["items"] if it["k"] == "shot" and it["f"][0] < b and it["f"][1] > a]
+    assert under and all(it["pic"] == "main" for it in under)           # the take goes on under a card
+    assert isinstance(card["s"], list) and card["s"][0] < 1.0 and card["s"][-1] == 1.0
+    for key, ws in L.units(l1).items():                                 # no caption stands on the card while it is there
+        if all(w.get("role") == "cap" for w in ws) and min(w["f"][1] for w in ws) > a and max(w["f"][0] for w in ws) < b:
+            cb = L.unit_box(ws, l1)
+            assert cb[1] >= box[3] or cb[3] <= box[1], key
+            assert cb[3] <= 0.80
 
 
 def test_nothing_after_the_payoff_but_his_own_footage_closer(clip):
@@ -210,6 +219,9 @@ def test_a_found_picture_fills_the_frame_only_when_its_subject_fits():
     assert lay == "full" and abs((c[2] - c[0]) * 1600 / ((c[3] - c[1]) * 2400) - 9 / 16) < 0.01
     eyes = (0.25 + 0.15 * 0.45 - c[1]) / (c[3] - c[1])
     assert 0.2 <= eyes <= 0.4
+    # a paper keeps its words: a print wider than the window is a card, where an object of the same box fills the frame
+    assert E.solve_frame(944, 1300, [], [0.07, 0.05, 0.93, 0.95], paper=True)[0] == "card"
+    assert E.solve_frame(944, 1300, [], [0.07, 0.05, 0.93, 0.95])[0] == "full"
     # a wide picture whose subject spans it: whole, as a card
     lay, c = E.solve_frame(1920, 1275, [], [0.05, 0.1, 0.95, 0.9])
     assert lay == "card" and c == [0.0, 0.0, 1.0, 1.0]
@@ -219,6 +231,51 @@ def test_a_found_picture_fills_the_frame_only_when_its_subject_fits():
     # too small to fill a phone: a card
     lay, _ = E.solve_frame(900, 520, [], [0.4, 0.1, 0.6, 0.9])
     assert lay == "card"
+
+
+def test_the_hook_is_never_a_card(clip):
+    l1 = plan()
+    idx = dict(words=words(), video=dict(duration=22.0))
+    script = dict(SCRIPT, hook=dict(picture=1, line="One day", accent="day"))      # the script chose the wide picture
+    rec = E.apply(l1, script, EARNED, idx, os.path.join(clip, "source.mp4"), manifest())
+    assert rec["hook"]["picture"] == 0 and rec["hook"]["layout"] == "full"         # the first picture that fills the phone opens the film
+    assert next(it for it in l1["items"] if it["k"] == "shot" and it["f"][0] == 0)["pic"] == "earned:0"
+
+
+def test_a_pull_quote_is_never_drawn(clip):
+    l1 = plan()
+    assert E.panel_items("q", dict(kind="quote", parts=[dict(value="Why not you", label="Mark")], mark="you"), 100, 160, l1, "#FFC857", 0.3, 0.23) == []
+
+
+def test_a_caption_across_a_cut_to_another_picture_becomes_two():
+    l1 = dict(items=[dict(id="s0", k="shot", f=[0, 50], pic="main"), dict(id="s1", k="shot", f=[50, 90], pic="earned:1"),
+                     dict(id="s2", k="shot", f=[90, 120], pic="earned:1"),
+                     dict(id="c0.w0", k="word", role="cap", chunk="c0", f=[40, 70], t="the", v="a", x=[0.3] * 30, y=0.62, ink="#FFFFFF", on=40),
+                     dict(id="c0.w1", k="word", role="cap", chunk="c0", f=[48, 70], t="idea", v="a", x=0.4, y=0.62, ink="#FFFFFF", on=48),
+                     dict(id="c0.w2", k="word", role="cap", chunk="c0", f=[56, 70], t="now", v="a", x=0.5, y=0.62, ink="#FFFFFF", on=56),
+                     dict(id="c1.w0", k="word", role="cap", chunk="c1", f=[49, 80], t="x", v="a", x=0.3, y=0.62, ink="#FFFFFF", on=49),
+                     dict(id="big.0", k="word", role="big", f=[40, 70], t="B", v="a", x=0.3, y=0.3, ink="#FFFFFF", on=40)])
+    assert L.picture_cuts(l1) == [50]
+    assert L.split_captions_at(l1, [50]) == 1
+    parts = [it for it in l1["items"] if it["id"].startswith("c0.w0")]
+    assert [p["f"] for p in parts] == [[40, 50], [50, 70]] and [len(p["x"]) for p in parts] == [10, 20]
+    assert parts[1]["chunk"] == "c0~50" and parts[1]["on"] == 50
+    w1 = [it for it in l1["items"] if it["id"].startswith("c0.w1")]
+    assert len(w1) == 1 and w1[0]["chunk"] == "c0~50" and w1[0]["f"] == [48, 70]        # two frames early: whole, on the later side
+    assert next(it for it in l1["items"] if it["id"] == "c0.w2")["chunk"] == "c0~50"    # after the cut: the later chunk
+    groups = L.groups(l1)
+    assert sorted(len(v) for k, v in groups.items() if k.startswith("c0")) == [1, 3]    # the halves are two units
+    assert len([it for it in l1["items"] if it["id"].startswith("c1.w0")]) == 1          # one frame before the cut: left whole
+    assert len([it for it in l1["items"] if it["id"].startswith("big.0")]) == 1          # display type is not a caption
+
+
+def test_the_hook_is_never_a_card(clip):
+    l1 = plan()
+    idx = dict(words=words(), video=dict(duration=22.0))
+    script = dict(SCRIPT, hook=dict(picture=1, line="One day", accent="day"))      # the script chose the wide picture
+    rec = E.apply(l1, script, EARNED, idx, os.path.join(clip, "source.mp4"), manifest())
+    assert rec["hook"]["picture"] == 0 and rec["hook"]["layout"] == "full"         # the first picture that fills the phone opens the film
+    assert next(it for it in l1["items"] if it["k"] == "shot" and it["f"][0] == 0)["pic"] == "earned:0"
 
 
 def test_a_pull_quote_is_never_drawn(clip):

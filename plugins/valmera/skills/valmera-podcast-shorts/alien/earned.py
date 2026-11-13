@@ -128,13 +128,18 @@ def _faces_of(img):
     return sorted(rows, key=lambda r: -r[2] * r[3])
 
 
-FRAME_SYSTEM = """You frame found photographs for a vertical film. Each numbered picture comes with what it must show. For each, give the smallest box that must stay in frame for a viewer to still see that: the person's head and shoulders, the whole object, the sign with its building. Fractions of the picture's width and height, origin top left.
+FRAME_SYSTEM = """You frame found pictures for a vertical film. Each numbered picture comes with what it must show. For each, answer two things.
 
-Answer with one JSON object and nothing else: {"boxes":[{"n":0,"box":[x0,y0,x1,y1]}]}, one entry per picture."""
+"box": the smallest box that must stay in frame for a viewer to still see that: the person's head and shoulders, the whole object, the sign with its building; for a sheet of print, the printed area without its blank margin. Fractions of the picture's width and height, origin top left.
+
+"print": true when the picture is itself a sheet of print or drawing (a document, a patent, a letter, a page, a poster, an advertisement, a chart), whose words a crop would cut; false for a photograph of people, places or things, even when a sign or a label is somewhere in it.
+
+Answer with one JSON object and nothing else: {"boxes":[{"n":0,"box":[x0,y0,x1,y1],"print":false}]}, one entry per picture."""
 
 
 def _keep_boxes(B, ask, rows, tmp):
-    """{row index: [x0, y0, x1, y1]} by one vision call: what must stay in frame. A picture with no answer keeps its centre."""
+    """{row index: {"box": [x0, y0, x1, y1], "print": bool}} by one vision call: what must stay in frame, and whether
+    the picture is a sheet of print. A picture with no answer keeps its centre."""
     import base64
     from PIL import Image
     content, order = [], []
@@ -164,7 +169,7 @@ def _keep_boxes(B, ask, rows, tmp):
             except (TypeError, ValueError):
                 continue
             if x1 - x0 > 0.03 and y1 - y0 > 0.03:
-                out[order[n]] = [x0, y0, x1, y1]
+                out[order[n]] = dict(box=[x0, y0, x1, y1], print=o.get("print") is True)
     return out
 
 
@@ -181,7 +186,7 @@ def solve_frame(w, h, faces, box, frame=(1080, 1920), paper=False):
                                   if face else [0.5 - cw / 2, 0.0, 0.5 + cw / 2, 1.0])
     keep = [min(max(v, 0.0), 1.0) for v in keep]
     kw = keep[2] - keep[0]
-    fits = kw <= cw * 1.02 if paper else (kw * 0.86 <= cw or cw >= 0.62)
+    fits = kw * 0.92 <= cw if paper else (kw * 0.86 <= cw or cw >= 0.70)    # an object may lose a sliver; a paper only its margin
     if fits and cw * w >= 460:                                   # what matters fits the window: full frame
         cx = (keep[0] + keep[2]) / 2
         x0 = min(max(cx - cw / 2, 0.0), 1.0 - cw)
@@ -231,6 +236,8 @@ def find(ctx, script, llm, worker):
     rows, used, got = [], set(), {}
     for i, sub, kept, rep in found:
         rec = dict(i=i, name=sub["name"], must_show=sub["must_show"], report=rep, ok=False)
+        kept = sorted(kept, key=lambda c: (-int(c.get("_grade") or 0), int(c.get("width") or 0) > int(c.get("height") or 0),
+                                           -min(int(c.get("width") or 0), int(c.get("height") or 0))))     # among equals, the upright one fills a phone
         for c in kept:
             if c["id"] in used:
                 continue
@@ -264,8 +271,8 @@ def find(ctx, script, llm, worker):
         img = cv2.imread(r["abs"])
         faces = _faces_of(img)
         r["faces"] = [[round(v, 4) for v in f] for f in faces[:3]]
-        r["box"] = boxes.get(r["i"])
-        r["paper"] = str(by_i.get(r["i"], {}).get("is") or "").lower() == "document"
+        r["box"] = (boxes.get(r["i"]) or {}).get("box")
+        r["paper"] = bool((boxes.get(r["i"]) or {}).get("print")) or str(by_i.get(r["i"], {}).get("is") or "").lower() == "document"
         r["layout"], r["crop"] = solve_frame(r["w"], r["h"], faces, r["box"], paper=r["paper"])
         r.pop("abs", None)
     out = dict(rows=rows, plan=len(plan), wanted=len(wanted), found=sum(1 for r in rows if r["ok"]),
@@ -454,10 +461,10 @@ def bright_under_mark(path, crop):
         return None
 
 
-def picture_items(pid, row, a, b, l1, top=0.205, room=None, work=None):
+def picture_items(pid, row, a, b, l1, top=0.36, room=None, work=None):
     """A found picture on frames [a, b). Full frame when its subject fits the window: it settles and drifts on one
-    curve; where it is bright under the watermark, a soft shade keeps the mark read. Otherwise whole, as a card on
-    its own blurred self. Returns (shot, other items)."""
+    curve; where it is bright under the watermark, the top edge falls off so the mark is read. Otherwise whole, as
+    a card that lands over the live take. Returns (shot or None, other items)."""
     W, H = l1["frame"]
     n = b - a
     key = f"earned:{row['i']}"
@@ -471,28 +478,25 @@ def picture_items(pid, row, a, b, l1, top=0.205, room=None, work=None):
         extra = []
         lum = bright_under_mark(os.path.join(work, row["path"]), c) if work else None
         if lum is not None and lum > 0.35:                         # the whole top edge falls off, as a lens would: no smudge behind the mark
-            extra.append(dict(id=f"{pid}.shade", k="flash", f=[a, b], mode="pool", a=round(min(0.2 + 0.3 * lum, 0.45), 3), z=0,
+            extra.append(dict(id=f"{pid}.shade", k="flash", f=[a, b], mode="pool", a=round(min(0.15 + 0.25 * lum, 0.38), 3), z=0,
                               rect=[-0.35, -0.2, 1.35, round(MARK[3] + 0.16, 4)]))
         return dict(id=f"{pid}.s", k="shot", f=[a, b], pic=key, crop=crops), extra
-    ar = row["w"] / row["h"]
-    cw = min(1.0, row["h"] * (W / H) / row["w"])
-    back = [round(0.5 - cw / 2, 5), 0.0, round(0.5 + cw / 2, 5), 1.0]
-    shot = dict(id=f"{pid}.s", k="shot", f=[a, b], pic=key, crop=[_zoomed(back, z) for z in settle_zoom(n, 0.05, 0.05)], blur=64,
-                grade=dict(lift=-0.02, gamma=0.92, gain=0.46, sat=0.8, contrast=1.0, temp=0.0, tint=0.0))
-    tall = ar < 1.0                                              # an upright picture or paper: whole, down to the foot of the safe area
-    room = room or ((0.795 - top) if tall else (CAP_TOP - 0.02 - top))
+    ar = row["w"] / row["h"]                                     # whole, as a card over the live take, under his chin: he stays,
+    room = room or (0.725 - top)                                 # the room pass makes it a lamp on him, and the captions sit at its foot
     w = 0.88
     h = w * (W / H) / ar
     crop = [0.0, 0.0, 1.0, 1.0]
-    if h > room and tall:                                        # as large as its place holds, never trimmed
+    if h > room and ar < 1.0:                                    # an upright picture or paper: as large as its place holds, never trimmed
         w, h = round(room * ar * H / W, 5), room
     elif h > room:                                               # a wide picture taller than its place: trimmed top and bottom, never squeezed
         k = room / h
         crop, h = [0.0, round(0.5 - k / 2, 5), 1.0, round(0.5 + k / 2, 5)], room
-    card = dict(id=f"{pid}.card", k="card", f=[a, b], z=2, pic=key, crop=crop, x=0.5, y=round(top + h / 2, 5), w=w, h=round(h, 5),
-                s=r4(expo(min(n, 14), 1.07, 1.0) + [1.0] * max(n - 14, 0)), rot=0, op=1, radius=0.014,
-                border=dict(w=0.0035, c="#FFFFFF"), shadow=dict(dx=0.0, dy=0.012, blur=0.035, a=0.6))
-    return shot, [card]
+    land = min(n, 12)
+    y = top + h / 2
+    card = dict(id=f"{pid}.card", k="card", f=[a, b], z=2, pic=key, crop=crop, x=0.5, w=round(w, 5), h=round(h, 5),
+                y=r4(expo(land, y + 0.02, y) + [y] * (n - land)), s=r4(expo(land, 0.93, 1.0) + [1.0] * (n - land)), rot=0, op=_fade(n, 3, 4),
+                radius=0.012, border=dict(w=0.0035, c="#FFFFFF"), shadow=dict(dx=0.0, dy=0.014, blur=0.045, a=0.7))
+    return None, [card]
 
 
 def _wrap(tokens, voices, W, x0, x1, gap):
@@ -762,9 +766,27 @@ def ride_captions(l1, card, moved):
         a, b = min(w["f"][0] for w in ws), max(w["f"][1] for w in ws)
         both = min(b, card["f"][1]) - max(a, card["f"][0])
         box = L.unit_box(ws, l1)
-        if both <= 0 or box[3] <= cb[1] - 0.004 or box[1] >= cb[3]:
+        if both * 2 < b - a or box[3] <= cb[1] - 0.004 or box[1] >= cb[3]:
             continue
         dy = cb[1] - L.EDGE - box[3]
+        for w in ws:
+            w["y"] = L._shift(w["y"], dy)
+        moved.append(key)
+
+
+def ride_under(l1, card, moved):
+    """Captions that would stand on a found picture's card take its foot as their seat while it is there: no type on
+    its print, and his mouth above it stays clear (TASTE P1, P6)."""
+    cb = L.card_box(card)
+    for key, ws in L.units(l1).items():
+        if any(it.get("k") != "word" or it.get("role") != "cap" for it in ws):
+            continue
+        a, b = min(w["f"][0] for w in ws), max(w["f"][1] for w in ws)
+        both = min(b, card["f"][1]) - max(a, card["f"][0])
+        box = L.unit_box(ws, l1)
+        if both * 2 < b - a or box[3] <= cb[1] - 0.004 or box[1] >= cb[3] + 0.004:      # it lives with the card, not past its edge
+            continue
+        dy = cb[3] + 0.016 - box[1]
         for w in ws:
             w["y"] = L._shift(w["y"], dy)
         moved.append(key)
@@ -894,7 +916,9 @@ def apply(l1, script, earned, idx, source, sounds_manifest, own=True, panel_low=
     if crop:
         crop, framed = reframe_take(l1, source, crop, PUNCH if own else 1.0)
     lev = S.level(source, int(idx["video"]["duration"] * fps) + 1)
-    got = {r["i"]: r for r in earned.get("rows") or [] if r.get("ok")}
+    got = {r["i"]: dict(r) for r in earned.get("rows") or [] if r.get("ok")}
+    for r in got.values():                                       # the frame is solved here, from what supply measured
+        r["layout"], r["crop"] = solve_frame(r["w"], r["h"], r.get("faces") or [], r.get("box"), tuple(l1["frame"]), bool(r.get("paper")))
     plan = [dict(r, i=i) for i, r in enumerate(script.get("pictures") or []) if isinstance(r, dict)]
 
     def land(row):
@@ -907,7 +931,8 @@ def apply(l1, script, earned, idx, source, sounds_manifest, own=True, panel_low=
     # the hook: frame 0 to a stressed word
     hook = script.get("hook") or {}
     hi = hook.get("picture") if isinstance(hook.get("picture"), int) else None
-    hrow = got.get(hi) or next((got[i] for i in sorted(got) if got[i].get("layout") == "full"), None) or next((got[i] for i in sorted(got)), None)
+    full = [got[i] for i in sorted(got) if got[i].get("layout") == "full"]      # frame 0 is a picture that fills the phone
+    hrow = got[hi] if hi in got and got[hi]["layout"] == "full" else (full[0] if full else None)
     spine0 = (l1.get("spine") or [dict(f=[0, n], src=[0.0, n / fps])])[0]
     t_end = stressed_onset(words, lev, spine0["src"][0] + HOOK_S[0], spine0["src"][0] + HOOK_S[1], fps)
     hook_end = frame_of(l1, t_end) if t_end is not None else None
@@ -915,7 +940,7 @@ def apply(l1, script, earned, idx, source, sounds_manifest, own=True, panel_low=
     rec = dict(stripped=gone, framed=framed, hook=None, pictures=[], designs=[], own=None, skipped=[])
     items = []
     if hrow:
-        shot, cards = picture_items("hook", hrow, 0, hook_end, l1, top=0.205, room=0.22, work=work)
+        shot, cards = picture_items("hook", hrow, 0, hook_end, l1, work=work)
         paint(l1, 0, hook_end, lambda a, b: shot)
         items += cards
         rec["hook"] = dict(picture=hrow["i"], name=hrow["name"], layout=hrow["layout"], frames=[0, hook_end], line=hook.get("line"))
@@ -958,6 +983,7 @@ def apply(l1, script, earned, idx, source, sounds_manifest, own=True, panel_low=
     if face and crop:
         f = face[2]
         chin = (f[1] + f[3] - crop[1]) / (crop[3] - crop[1])
+    card_top = min(max(0.30, (chin or 0.0) + 0.035), 0.46)
     events = [(3, "hook")] if hrow else []
     by_i = {r["i"]: r for r in plan}
     moved, n_design = [], 0
@@ -978,15 +1004,19 @@ def apply(l1, script, earned, idx, source, sounds_manifest, own=True, panel_low=
             items += its
             n_design += 1
             if top > 0.5:
-                l1["items"] += [its[0]]
+                L.split_captions_at(l1, [a, b])
                 ride_captions(l1, its[0], moved)
-                l1["items"].remove(its[0])
             events.append((a + 2, "design"))
             rec["designs"].append(dict(i=i, kind=(r.get("design") or {}).get("kind"), frames=[a, b], on=r.get("on")))
         else:
             row = got[i]
-            shot, cards = picture_items(f"e{i}", row, a, b, l1, work=work)
-            paint(l1, a, b, lambda a_, b_, shot=shot: shot)
+            shot, cards = picture_items(f"e{i}", row, a, b, l1, top=card_top, work=work)
+            if shot is not None:
+                paint(l1, a, b, lambda a_, b_, shot=shot: shot)
+            for c in cards:
+                if c.get("k") == "card":                           # only the captions that live with the card move, and only while it stands
+                    L.split_captions_at(l1, [c["f"][0], c["f"][1]])
+                    ride_under(l1, c, moved)
             items += cards
             events.append((a, "picture"))
             rec["pictures"].append(dict(i=i, name=row["name"], shows=row.get("shows"), layout=row["layout"], frames=[a, b], on=r.get("on"),
@@ -1012,6 +1042,9 @@ def apply(l1, script, earned, idx, source, sounds_manifest, own=True, panel_low=
     busy = np.zeros(n + 1, bool)
     for a, b in L.picture_shots(l1):
         busy[a:b] = True
+    for it in items:
+        if it.get("k") == "card":
+            busy[it["f"][0]:it["f"][1]] = True
     for key in chips:
         its = L.units(l1).get(key) or []
         if not its:
