@@ -62,6 +62,17 @@ def _runtime(v):
     return s or None
 
 
+def channel_of(url, timeout_s=10):
+    """A YouTube video's channel by oEmbed (the flat search leaves it empty for some uploads): the credit
+    needs it. None when YouTube does not say."""
+    import net_fetch
+    try:
+        return net_fetch.get_json("https://www.youtube.com/oembed", params={"url": url, "format": "json"},
+                                  timeout_s=timeout_s).get("author_name") or None
+    except Exception:  # noqa: BLE001 the credit keeps the URL
+        return None
+
+
 def run(searches, workers=6):
     """All searches at once: {search index: [hits]}."""
     import concurrent.futures as cf

@@ -939,8 +939,8 @@ def lens_restraint(edl, index, request_text, intensity, maps=None):
     for m in (edl or {}).get("music") or []:
         prov = (m or {}).get("provenance")
         if isinstance(m, dict) and prov not in (
-                "user_upload", "user_named", "user_picked_library", "legacy",
-                None):
+                "user_upload", "user_named", "user_picked_library",
+                "valmera_chosen", "legacy", None):
             out.append(_f("blocking", "restraint", "owner_rule",
                           f"music {m.get('id')} has provenance {prov!r}: "
                           "agents never choose music.", id=m.get("id")))

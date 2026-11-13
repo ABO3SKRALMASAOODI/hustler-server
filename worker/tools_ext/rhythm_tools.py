@@ -23,7 +23,7 @@ import os
 
 DEPARTMENT = "rhythm"
 VERBS = ("analyze_music", "get_syllables", "check_speech", "align_lyrics")
-USER_PROVENANCE = ("user_upload", "user_named", "user_picked_library")
+USER_PROVENANCE = ("user_upload", "user_named", "user_picked_library", "valmera_chosen")
 
 
 def _latest(ctx):

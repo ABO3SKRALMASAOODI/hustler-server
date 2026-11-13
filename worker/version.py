@@ -83,7 +83,10 @@ _RUNTIME_DIRS = (("models", (".json",)), (os.path.join("motion", "lib"),
                  (os.path.join("score", "prompts"), (".md",)),
                  (os.path.join("score", "assets", "styles"), (".jpg",)),
                  # The engine's shaders are its program as much as its Python.
-                 (os.path.join("scene", "glsl"), (".glsl",)))
+                 (os.path.join("scene", "glsl"), (".glsl",)),
+                 # The music library and the references' music profiles the
+                 # chooser reads (music_choose.py, 13 Nov 2026).
+                 ("music_library", (".json",)))
 
 _cached = None
 
