@@ -57,7 +57,10 @@ _RUNTIME_PACKAGES = ("fx_schemas", "tools_ext", "jobs_ext", "devices",
                      "depth_anything", "formats",
                      # The Director (9 Nov): worker/score/ only, so its fixes
                      # moved nothing and 595643e6 reached 0 of 31 slots.
-                     "score")
+                     "score",
+                     # The engine (12 Nov): worker/scene/ draws the frames a
+                     # Score asks for. A fix there alone must roll the box.
+                     "scene")
 _RUNTIME_DATA = (".py", ".yaml", ".yml", ".json")
 # Wave 0 runtime data the shared program obeys, outside any package: the
 # device cost model the resolver spends against, the model pins whose
@@ -75,7 +78,9 @@ _RUNTIME_DIRS = (("models", (".json",)), (os.path.join("motion", "lib"),
                  ("skills", (".md",)),
                  # The Director's prompt and style boards are what it reads.
                  (os.path.join("score", "prompts"), (".md",)),
-                 (os.path.join("score", "assets", "styles"), (".jpg",)))
+                 (os.path.join("score", "assets", "styles"), (".jpg",)),
+                 # The engine's shaders are its program as much as its Python.
+                 (os.path.join("scene", "glsl"), (".glsl",)))
 
 _cached = None
 

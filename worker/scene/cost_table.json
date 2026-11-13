@@ -1,0 +1,31 @@
+{
+ "_": "ms per op-frame at 1080x1920, as compile.program counts ops. mac: fitted by lanes/C/cost_fit.py to the three slice films' stage timers on the M5 Pro, 12 Nov (round 1, final tier, cold cache; 'out' carries readback and the encoder's back-pressure). llvmpipe: fitted by lanes/C/r2/cost_fit_box.py to the same films drawn in the box image at 720x1280 on 4 vCPU (Mesa 22.3.6, LLVM 15), 12 Nov, final tier, cold segments, each film's quietest run; 'out' is what is left of the picture time after the stages (readback, the staged frames' way out, waits), 'start' the context and the first shader variants. plate, treat and join are set from src by hand in both rows: the slice films hold too few of them to fit.",
+ "mac": {
+  "blit_card": 1.153,
+  "blit_word": 0.057,
+  "finish": 0.236,
+  "flash": 0.167,
+  "join": 4.211,
+  "lens": 0.288,
+  "out": 13.145,
+  "plate": 0.3,
+  "src": 3.509,
+  "start": 0.4,
+  "treat": 0.1,
+  "under": 4.634
+ },
+ "llvmpipe": {
+  "blit_card": 10.61,
+  "blit_word": 3.94,
+  "finish": 25.2,
+  "flash": 4.68,
+  "join": 68.84,
+  "lens": 10.8,
+  "out": 7.06,
+  "plate": 17.21,
+  "src": 57.37,
+  "start": 1.5,
+  "treat": 5.74,
+  "under": 30.75
+ }
+}
