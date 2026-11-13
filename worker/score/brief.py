@@ -430,14 +430,23 @@ def seats_part(work, idx, per):
         got = None
     if not got:
         return []
-    cap_y, seats, rooms = got
+    cap_y, seats, rooms, grounds = got
+    open_shots = [g for g in grounds if g[2]]
     out = ["## Seats", f"Solved on the take as shot. Caption seat y {cap_y:.2f}."]
     if seats:
         rows = [f"[{q[0]:.2f},{q[1]:.2f}] with room for type {r[1]:.2f} of the frame tall and {r[0]:.2f} wide" for q, r in zip(seats, rooms)]
         out.append("Display seats on the take: " + "; ".join(rows) + ". Display type over the take stands there, fitted to that room: a two-line title needs about 0.12 tall."
-                   + (" The room is small: set the hook title over a found picture or a page instead, and keep the seat for one short word." if max(r[1] for r in rooms) < 0.1 else ""))
-    else:
+                   + (" The room is small: set the hook title over a found picture or a page instead, and keep the seat for one short word." if max(r[1] for r in rooms) < 0.1 and not open_shots else ""))
+    elif not open_shots:
         out.append("Display seats on the take: none, the head fills the frame. Display type stands over a found picture or a page, never over the take; the hook title opens the film on one.")
+    if open_shots:
+        # a clip of several shots: a line is seated for the seconds it stands, so the room is the shot's, not the film's
+        rows = []
+        for sid, t, places in grounds:
+            rows.append(f"k{sid} {t[0]:g}-{t[1]:g} s: " + (", ".join(f"[{p[0]:.2f},{p[1]:.2f}] {h:.2f} tall" for p, h in places) if places else "none, a head or printed words fill it"))
+        out.append("Shot by shot, the open ground a display line has while that shot is on screen (a line is seated for the seconds it stands, at the size you write, so write the `seat` of the shot it lands on; "
+                   "two or three seats for the whole film): " + "; ".join(rows) + ". These are measured clear of heads and of words the upload prints, not of the thing the shot is about: "
+                   "look at the frame and take the ground beside or under the subject, never across it.")
     return out
 
 
@@ -488,10 +497,14 @@ def scout_part(scout, idx=None):
     if not scout:
         return ["## Asks", "The Scout has not run."]
     lang = scout.get("lang")
-    if idx is not None and doubtful_words(idx) and not scout.get("asks"):
-        # the language was guessed from noise: a firework clip got its title in Finnish (p5571, 13 Nov)
-        lang = "en"
-    out = ["## Asks", f"The Scout read the request. Scope `{scout.get('scope')}`. Customer's language `{lang}`: write every `job` and every word of type in it. {scout.get('about', '')}".strip()]
+    said = f"Customer's language `{lang}`: write every `job` and every word of type in it."
+    if idx is not None and (doubtful_words(idx) or not idx.get("words")) and not scout.get("asks"):
+        # the language was guessed from noise: a firework clip got its title in Finnish (p5571, 13 Nov). Nor is it
+        # English by default: a tin labelled in Spanish, with no word spoken, was titled "Turmeric", then "Gold you
+        # take daily" (p5582)
+        said = ("The customer's language is not known: nothing is spoken that can be trusted as speech, and nothing was typed. Write every `job` and every word of type in the "
+                "language the frames themselves print (a label, a caption, a sign): read it off the boards first. With nothing printed, in `en`.")
+    out = ["## Asks", f"The Scout read the request. Scope `{scout.get('scope')}`. {said} {scout.get('about', '')}".strip()]
     if scout.get("scope") == "surgical":
         out.append("The product makes the literal change on its own. This Score is the director's cut built alongside it, offered once: write the whole film.")
     if scout.get("asks"):

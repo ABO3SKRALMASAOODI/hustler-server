@@ -25,6 +25,7 @@ CAP_BAND_WIDE, CAP_PREF_WIDE = (0.60, 0.88), (0.72, 0.84)
 CAP_MAX_W = 0.72                        # a centred caption line ends left of the buttons
 CAP_BLOCK_H = 0.075
 SEAT_BLOCK = (0.56, 0.09)               # the nominal display block a film seat has to hold
+READ_ROOM = 0.045                       # the least height a place has to have for one line of display type at the reading floor
 STEP_MAX, STEP_ONCE = 1.15, 1.20        # a camera step on a take: at most 15%, 20% once per film
 EDIT_STEP = (1.08, 1.12)                # a tenth at a speech edit hides the jump
 PUSH_MAX = 1.06                         # a slow move on a take or a still: 6% in all
@@ -363,6 +364,17 @@ def captions_off(ctx):
     return upload_captions(ctx) >= 0.5
 
 
+def voiceless(ctx):
+    """No one speaks in this film: no words kept, or a transcript that is noise, a shout or a few stray tokens (the
+    same bar captions are held to). A song or a voice the transcript trusts is a voice."""
+    S = _S()
+    words = ctx.index.get("words") or []
+    if not ctx.wf_any or not words:
+        return True
+    conf = [float(w.get("confidence", 1.0)) for w in words]
+    return sum(conf) / len(conf) < S.CAPTION_CONFIDENCE or len(words) < S.CAPTION_WORDS
+
+
 def _display_seats(ctx, cap_y, n, named, marks):
     """The film's display seats: at most n places for display type, inside the safe area, clear of the caption
     seat, the watermark, the platform's buttons and the head for nine tenths of the film. A frame a close face
@@ -426,6 +438,111 @@ def _display_seats(ctx, cap_y, n, named, marks):
             one_rooms.append(r)
     ctx.seat_rooms = one_rooms
     return one
+
+
+def _heads_near(ctx, s, f, reach=0.6):
+    """Heads and faces in the frame at programme frame f of a shot of the take, through its crop: what the signal saw
+    within `reach` seconds of that source second. A shot's middle stands for a locked-off take; a clip that swings
+    from a firework to a man does not have its heads where its middle has them."""
+    S = _S()
+    samples = ctx.perc.get("samples") or []
+    if not s or "src" not in s or not S.is_take(s.get("pic")):
+        return []
+    if not samples:
+        return S.head_rects(ctx, s) + S.face_rects(ctx, s)
+    lo, hi = s["f"]
+    t = s["src"][0] + (s["src"][1] - s["src"][0]) * (f - lo) / max(hi - lo, 1)
+    boxes = []
+    for r in samples:
+        if abs(float(r["t"]) - t) > reach:
+            continue
+        if r.get("face"):
+            boxes += [S.head_of(r["face"]), list(r["face"])]
+        elif r.get("person"):
+            b = r["person"]
+            w, h = b[2] - b[0], b[3] - b[1]
+            boxes.append([b[0] + 0.28 * w, b[1] + 0.02 * h, b[2] - 0.28 * w, b[1] + 0.2 * h])
+    c = s["crop"]
+    c = c[min(max(f - lo, 0), len(c) - 1)] if isinstance(c[0], (list, tuple)) else c
+    out = []
+    for b in boxes:
+        r = S.through_crop(b, c)
+        if r[2] > 0 and r[0] < 1 and r[3] > 0 and r[1] < 1:
+            out.append([S.clamp(v, 0, 1) for v in r])
+    return out
+
+
+def span_seat(ctx, a, z, want, need, keep=(), only=False):
+    """A display line's place for the frames it is on screen: (seat, [room width, room height], share of its written
+    size the room holds), or None. A film seat is solved against the whole film, which is right for one take and wrong
+    for a clip of several shots: p5571's fountain title was kept off the middle of the frame by a head that enters
+    three seconds after the title has gone, was left a strip at y 0.72 on the fountain's base, and came out at the
+    reading floor, where the last look took it for tiny. Here the line clears what is under it while it stands: heads
+    and faces always, the upload's printed words where the frame has such a place, the caption while words are being
+    captioned, the watermark, the platform's buttons, the safe area. `keep` are seats the film already uses: with the
+    same room, one of them is taken again, then the place nearest the one the Score wrote; with `only`, no other place
+    is offered (a film has two or three display seats, TASTE 4.2)."""
+    S = _S()
+    wide = ctx.W >= ctx.H
+    need_w, need_h = max(float(need[0]), 0.2), max(float(need[1]), 0.03)
+    step = max(1, ctx.fps // 4)
+    frames = sorted(set(list(range(int(a), int(z), step)) + [max(int(a), int(z) - 1)]))
+    shots = [(f, S.shot_at(ctx, f)) for f in frames]
+    if not shots or any(s is None or not S.is_take(s.get("pic")) for _, s in shots):
+        return None
+    said = any(a - 6 <= f < z + 6 for f in ctx.wf_any.values())
+    cap_y = ctx.cap_y if (said and not captions_off(ctx) and ctx.cap_y is not None) else None
+    wx = float(want[0]) if isinstance(want, (list, tuple)) and len(want) == 2 and isinstance(want[0], (int, float)) else 0.5
+    wy = float(want[1]) if isinstance(want, (list, tuple)) and len(want) == 2 and isinstance(want[1], (int, float)) else 0.4
+    bottom_edge = 0.92 if wide else SAFE[3]
+    best = None
+    for marks in (True, False):
+        rows = [_heads_near(ctx, s, f) + (S.marks_of(ctx, s, f) if marks else []) for f, s in shots]
+
+        def free(x, y, bw, bh, rows=rows):
+            r = [x - bw / 2, y - bh / 2, x + bw / 2, y + bh / 2]
+            if r[0] < SAFE[0] - 1e-6 or r[2] > SAFE[2] + 1e-6 or r[1] < SAFE[1] - 1e-6 or r[3] > bottom_edge + 1e-6:
+                return False
+            if cap_y is not None and abs(y - cap_y) < CAP_BLOCK_H / 2 + bh / 2 + 0.005:
+                return False
+            if S.rects_touch(r, S.KEEPOUT) or (not wide and S.rects_touch(r, BUTTONS)):
+                return False
+            return not any(S.rects_touch(r, q) for row in rows for q in row)
+        xs = sorted({0.5, 0.32, 0.68, round(min(max(wx, 0.3), 0.7), 2)} | {round(float(k[0]), 2) for k in keep})
+        for x in xs:
+            width = min(0.9, 2 * min(x - SAFE[0], SAFE[2] - x))
+            strip = min(max(need_w, 0.42), width)
+            y, runs, run = SAFE[1] + 0.006, [], None
+            while y <= bottom_edge - 0.006 + 1e-9:
+                if free(x, y, strip, 0.012):
+                    run = [y, y] if run is None else [run[0], y]
+                elif run is not None:
+                    runs.append(run)
+                    run = None
+                y = round(y + 0.01, 3)
+            if run is not None:
+                runs.append(run)
+            for top, bottom in runs:
+                top, bottom = top - 0.006, bottom + 0.006
+                room_h = bottom - top
+                if room_h < READ_ROOM:
+                    continue
+                room_w = width
+                if not wide and bottom > BUTTONS[1] and top < BUTTONS[3] and x >= 0.5:
+                    room_w = min(room_w, 2 * (BUTTONS[0] - x))
+                k = min(1.0, room_h / need_h, room_w / need_w)
+                half = min(need_h, room_h) / 2
+                for cy in sorted({wy} | {float(q[1]) for q in keep if abs(float(q[0]) - x) < 0.25}, key=lambda v: abs(v - wy)):
+                    y_seat = min(max(cy, top + half), bottom - half)
+                    kept = any(abs(float(q[0]) - x) < 0.25 and abs(float(q[1]) - y_seat) < 0.1 for q in keep)
+                    if only and not kept:
+                        continue
+                    key = (-round(k, 1), 0 if kept else 1, round((x - wx) ** 2 + (y_seat - wy) ** 2, 4), abs(x - 0.5))
+                    if best is None or key < best[0]:
+                        best = (key, [round(x, 3), round(y_seat, 3)], [round(room_w, 3), round(room_h, 3)], round(k, 3))
+        if best is not None and best[3] >= 0.75:
+            break                   # clear of what the upload prints, and it reads: the heads-only pass is for a frame with no such place
+    return None if best is None else (best[1], best[2], best[3])
 
 
 def snap(seats, want):
@@ -688,7 +805,13 @@ def decide(ctx):
             end = e.get("fe") if e.get("fe") is not None else f
             off = _off(units.get(gid, [])) or lands[gid]
             near = int(NEAR_S * fps)
-            if lands[gid] > end + near or off < f - near:
+            # The close of a film with no voice is an event too: its last line lands late in the last shot and holds
+            # to the last frame, and what it answers is the film ending, not the cut that shot began on (p5571 and
+            # p5584, 13 Nov: "and him." and "still on the call" went as landing 1.6 s and 1.4 s from the last cut,
+            # and both films ended as they were shot).
+            closes = (d["dept"] == "display" and ctx.beats and d.get("b") == ctx.beats[-1].id and voiceless(ctx)
+                      and off >= ctx.dur_f - near and lands[gid] >= ctx.dur_f - int(3.0 * fps))
+            if (lands[gid] > end + near or off < f - near) and not closes:
                 drop(gid, f"lands {abs(lands[gid] - f) / fps:.1f} s from what it answers", "unearned")
 
     # 2. camera on the take
@@ -822,8 +945,8 @@ def decide(ctx):
             if d.get("bound"):
                 continue
             hits = 0
-            for f in range(a, z, max(1, fps // 2)):      # P3: type over a face
-                heads = S.head_rects(ctx, S.shot_at(ctx, f))
+            for f in range(a, z, max(1, fps // 2)):      # P3: type over a face, where the face is at that frame (a man who
+                heads = _heads_near(ctx, S.shot_at(ctx, f), f, 0.3)     # walks up to the lens is not where the shot's middle has him: p5584)
                 if any(w["f"][0] <= f < w["f"][1] and any(_overlap(r, h) >= 0.15 for h in heads)
                        for w in words for r in [S.type_rect(ctx, w)] if r):
                     hits += 1

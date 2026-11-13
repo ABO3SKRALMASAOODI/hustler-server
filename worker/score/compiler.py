@@ -514,6 +514,8 @@ class Ctx:
         self.calm = False
         self.cap_y = None          # the film's one caption seat
         self.seats = None          # the film's display seats
+        self.used_seats = []       # the display seats lines have taken so far, film seats and span seats alike
+        self.span_seats = {}       # gesture id -> the seat it was given for its own span, or None when the film's seat stood
         self.cam_land, self.cam_len = {}, {}
         self.cam_marks = []        # (frame, rect, source second): the framing an earned camera line left the take in
         self.wrote = {}            # device lines the Score wrote, by department
@@ -2414,6 +2416,11 @@ def head_rects(ctx, shot):
     return out
 
 
+def _iou(a, b):
+    i = max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    return i / max((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - i, 1e-9)
+
+
 def seen_rows(ctx, pic, t):
     """What Vision read in this picture, nearest its second: (printed text boxes, face boxes), source fractions."""
     if pic == "main":
@@ -2421,9 +2428,15 @@ def seen_rows(ctx, pic, t):
         # The index's own reading at this second too: a sign or a printed number seen in one part of the
         # take never makes a cluster that stays, and type landed on it (p5302: DIA 22 over a printed 22).
         # A region over a quarter of the frame is a pattern, not words.
-        for r in (ctx.index.get("spatial") or {}).get("samples") or []:
+        # Nor is a box the next sample does not find again: the detector reads sparks, leaves and gravel as text for
+        # one sample and somewhere else in the next, while a sign or a caption stays where it is. p5571: 39 boxes on
+        # a firework, 2 of them seen twice; with all 39 counted the frame had no place for its title but a strip on
+        # the fountain's base. Print holds its place across two samples (overlap 0.3 of their union).
+        samples = (ctx.index.get("spatial") or {}).get("samples") or []
+        for i, r in enumerate(samples):
             if abs(float(r.get("t", -9)) - t) <= 0.75:
-                boxes += [list(b) for b in r.get("text") or [] if len(b) == 4 and (b[2] - b[0]) * (b[3] - b[1]) < 0.25]
+                beside = [q for j in (i - 1, i + 1) if 0 <= j < len(samples) for q in samples[j].get("text") or [] if len(q) == 4]
+                boxes += [list(b) for b in r.get("text") or [] if len(b) == 4 and (b[2] - b[0]) * (b[3] - b[1]) < 0.25 and any(_iou(b, q) >= 0.3 for q in beside)]
         # A text box that lies on a head is the detector reading a moustache or a cap, not words (p5591: three of the
         # four "printed" boxes sat on his face, and with them no seat in the frame was clear). The head itself is
         # kept clear by its own rule, so nothing is lost by not counting it twice as print.
@@ -3034,12 +3047,37 @@ def place_word(ctx, iid, t, v, x, y, a, end, ink, role, chunk=None, region=None,
     pieces = []
     f = a
     rect = region or word_rect(ctx, t, v, x, y)
+    blk = extra.get("_blk")
+    whole = None
+    if blk and not is_hex(ink):
+        rect = blk                        # the lines of one display block take one ink, read off the whole block
+        if ctx.governed and role == "big":
+            # and one ink for as long as it stands: over a cut from a dark shirt to pale shorts a title went from white
+            # to black in the middle of being read (p5572, 13 Nov). It is dark only where the ground under it is bright
+            # in every shot it crosses; anywhere else it is the film's light ink, with the edge where that needs it.
+            base = norm_hex(ctx.dna.get("ink")) if is_hex(ctx.dna.get("ink")) else "#FFFFFF"
+            light = base if luma(base) > 0.5 else "#FFFFFF"
+            dark, lit, seen_any = [], [], False
+            for g in sorted(set(list(range(a, end, 6)) + [max(a, end - 1)])):
+                s_ = shot_at(ctx, g)
+                if s_ is None or plate_under(ctx, s_):
+                    continue
+                q_ = under_rect(ctx, s_, g, rect)
+                if q_ is None:
+                    continue
+                seen_any = True
+                lit.append(1.0 - q_[1])
+                dark.append(q_[0] - 0.07)
+            if seen_any:
+                whole = DARK_INK if (min(dark) >= EDGE_BELOW and min(lit) < EDGE_BELOW) else light
     while f < end:
         s = shot_at(ctx, f)
         q = min(end, s["f"][1]) if s else end
         if q <= f:                        # the nearest shot ended before this frame: the walk must still advance, or the compile
             q = end                       # never returns (p5554, 13 Nov: a counter step on the film's last frame spun for minutes)
         ink2 = ink if is_hex(ink) else (ink_over(ctx, s, (f + q) // 2, rect) or ink_on(ctx, plate_under(ctx, s)))
+        if whole is not None and s is not None and not plate_under(ctx, s):
+            ink2 = whole
         ink2 = norm_hex(ink2)
         if ctx.governed and role == "cap" and not is_hex(ink) and s is not None and not plate_under(ctx, s):
             # A caption keeps the film's ink over a picture unless the picture swallows it: on a mid-grey hoodie the
@@ -3071,6 +3109,13 @@ def place_word(ctx, iid, t, v, x, y, a, end, ink, role, chunk=None, region=None,
             ms = [x for x in ms if x is not None]
             m = min(ms) if ms else (None if s is None else -1.0)
         edge = (m is not None and m < EDGE_BELOW) or clip_by_still(ctx, s)
+        if ctx.governed and role == "big" and blk and not pl and not is_hex(ink) and edge and luma(ink2) < 0.5:
+            # Dark ink reads on a bright ground and nowhere else, and the renderer draws a dark edge only, so dark type
+            # that crosses a dark stretch has nothing to hold it (p5584, 13 Nov: ON A CALL in black across a pale step
+            # and his black trousers, its second line in white: the last look could read neither). Over a picture
+            # that is not bright all the way, display type is light and takes the edge.
+            base = norm_hex(ctx.dna.get("ink")) if is_hex(ctx.dna.get("ink")) else "#FFFFFF"
+            ink2 = base if luma(base) > 0.5 else "#FFFFFF"
         if pieces and pieces[-1][2] == ink2 and pieces[-1][3] == edge:
             pieces[-1][1] = q
         else:
@@ -3378,11 +3423,71 @@ def title_page(ctx, iid, a, z, b):
     return end
 
 
+def span_seated(ctx, iid, text, a, z, opt):
+    """A display line over the take, seated for the frames it stands. The film's seat is kept where it holds the line
+    at four fifths of its written size or more: on one take that is the same place for the whole film. Where it does
+    not (a clip of several shots, a head that is in frame for part of the film only, a film with no seat at all), the
+    line takes the open ground under it while it is on screen, nearest the place the Score wrote, with that room
+    (taste.span_seat). A film still uses no more display seats than its footage carries: past the count, the line
+    takes the best of the seats already used."""
+    from . import taste
+    lines = display_lines(ctx, text, opt)
+    if not lines or z <= a:
+        return opt
+    gid = ".".join(iid.split(".")[:2])
+    if gid in ctx.span_seats:               # a counter is one gesture: every step of it stands where its first step was seated
+        got = ctx.span_seats[gid]
+        return opt if got is None else {**{key: v for key, v in opt.items() if key != "_noseat"}, **got}
+    ctx.span_seats[gid] = None
+    if z - a < ctx.fps // 2:
+        z = min(a + 2 * ctx.fps, ctx.dur_f)       # a step of a counter: the place has to hold while the counter runs
+    full = 1 - 2 * SAFE_X - 0.02
+    peak = 1 / SETTLE["s_inf"] if opt.get("in") == "settle" else 1.0
+    need_w = min(full, max(text_px(l["t"], {"font": l["font"], "px": l["px"], "track": l["track"]}) for l in lines) / ctx.W * peak)
+    need_h = sum(l["px"] for l in lines) * 1.02 / ctx.H
+    noseat = bool(opt.get("_noseat"))
+    seat0 = opt.get("seat") if isinstance(opt.get("seat"), (list, tuple)) and len(opt.get("seat")) == 2 else None
+    have = 0.0 if noseat else min(1.0, float(opt.get("fit", full)) / max(need_w, 1e-6), float(opt.get("_room") or 0.2) / max(need_h, 1e-6))
+    used = ctx.used_seats
+
+    def near(p, q):
+        return abs(float(p[0]) - float(q[0])) < 0.25 and abs(float(p[1]) - float(q[1])) < 0.1
+
+    def note(seat):
+        if seat is not None and all(isinstance(v, (int, float)) for v in seat) and not any(near(q, seat) for q in used):
+            used.append([float(seat[0]), float(seat[1])])
+    want = opt.get("_want") if isinstance(opt.get("_want"), (list, tuple)) and len(opt.get("_want")) == 2 and all(isinstance(v, (int, float)) for v in opt.get("_want")) else None
+    n = {"T": 2, "M": 3, "P": 3, "L": 2}.get(ctx.plan.get("cls") or "T", 2)
+    got = taste.span_seat(ctx, a, z, want or seat0, (need_w, need_h), keep=used, only=len(used) >= n)
+    # the place the Score wrote, when it is open while the line stands: the Director looked at the frame and set the
+    # title beside what the shot is about; the film's seat knows heads and print, not the subject
+    written = got is not None and want is not None and got[2] >= 0.8 and near(got[0], want) and not (seat0 is not None and not noseat and near(seat0, want))
+    # a place that holds under three quarters of the written size is not a place for it: a title shrunk that far is
+    # what the last look calls tiny (p5584: a two-line title in a strip 0.09 tall beside his head)
+    if not written and (have >= 0.8 or got is None or got[2] < 0.75 or got[2] <= have + 0.1):
+        if not noseat:
+            note(seat0)
+        return opt
+    seat, room, k = got
+    opt = {key: v for key, v in opt.items() if key != "_noseat"}
+    fit0 = opt.get("_fit0")
+    opt["seat"], opt["_room"] = list(seat), room[1]
+    opt["fit"] = min(float(fit0) if isinstance(fit0, (int, float)) and not isinstance(fit0, bool) else full, room[0])
+    ctx.span_seats[gid] = {"seat": opt["seat"], "_room": opt["_room"], "fit": opt["fit"]}
+    note(seat)
+    ctx.taste_rows.append({"id": iid, "did": "repaired", "dept": "display",
+                           "why": f"seated for the {(z - a) / ctx.fps:.1f} s it stands, at [{seat[0]:.2f},{seat[1]:.2f}] with room {room[1]:.2f} of the frame tall: "
+                                  + ("the film has no seat that holds for the whole of it" if noseat else "the place the Score wrote is open while it stands" if written and have >= 0.8
+                                     else f"the film's seat held {have:.0%} of its size")})
+    return opt
+
+
 def display(ctx, iid, text, a, z, opt, b=None):
     """Display type: fits the frame, sits on a seat, lands on its own clock. Returns its rect."""
     W, H = ctx.W, ctx.H
     opt = opt or {}
     if ctx.governed and "_want" in opt and off_take(ctx, a, z) is None:
+        opt = span_seated(ctx, iid, text, a, z, opt)
         # over the take: does it have a place there at a size that reads? If not, and it is the film's opening
         # title, the film opens on a page (title_page); anywhere else the meter says where it could stand
         fits = not opt.get("_noseat")
@@ -3451,6 +3556,8 @@ def display(ctx, iid, text, a, z, opt, b=None):
             y += top * l["px"] / H
         else:
             y += max(lead_k * l["px"] / H, below + top * l["px"] / H + 0.006 if q else 0.0)
+            if ctx.governed and opt.get("lead") is None and min(l["px"], lines[i - 1]["px"]) < 0.8 * max(l["px"], lines[i - 1]["px"]):
+                y += 0.22 * min(l["px"], lines[i - 1]["px"]) / H        # a ladder's small line stands clear of the large one: with the edge drawn they touched
         below = q[2] * l["px"] / H if q else 0.0
         ys.append(y)
     block_h = ys[-1] + below
@@ -3524,7 +3631,7 @@ def display(ctx, iid, text, a, z, opt, b=None):
                 if ch.strip():
                     d = rng.randint(0, 4)
                     if a + d < z:
-                        emit_word(ctx, f"{iid}.{i}.{j}", ch, l["v"], xc / W, y, a + d, z, ink, "big", z=1, region=[x, y - 0.8 * px / H, x + w, y])
+                        emit_word(ctx, f"{iid}.{i}.{j}", ch, l["v"], xc / W, y, a + d, z, ink, "big", z=1, region=[x, y - 0.8 * px / H, x + w, y], **({"_blk": list(out_rect)} if ctx.governed else {}))
                 xc += cw + voice["track"] * voice["px"] / 100
             continue
         extra = entrance(kind, n, y)
@@ -3541,6 +3648,8 @@ def display(ctx, iid, text, a, z, opt, b=None):
                 pf = picture_fields(ctx, b, dict(refs[0]), a, z)
                 extra["fill"] = {k: pf[k] for k in ("pic", "src", "crop", "plate", "grade", "treat") if k in pf}
                 ink = ink if is_hex(ink) else (ink1 if is_hex(ink1) else "#FFFFFF")
+        if ctx.governed and block_h >= 1e-6:
+            extra["_blk"] = list(out_rect)          # one ink for the block: its lines are read together
         emit_word(ctx, f"{iid}.{i}", l["t"], l["v"], x, yy, a, z, ink, "big", z=1, region=[x, y - 0.8 * px / H, x + w, y], **extra)
     return out_rect
 
@@ -4938,6 +5047,7 @@ def sound_table():
     return _sound_cache["t"], _sound_cache["roles"]
 
 
+QUIET_HIT = -24.0                     # dB: the least level a placed sound lands at on a film with no voice
 VOICE_LAYERS = ("echo", "swell")      # made from the film's own recorded audio. Nothing synthesised, nothing from a library
 
 
@@ -5082,6 +5192,20 @@ def voice_levels(ctx, under_db):
             continue
         if x is None or voice is None:
             s["db"] = round(clamp(min(float(s["db"]), -6.0 - under_db), -36, -2), 1)
+            continue
+        if taste.voiceless(ctx):
+            # A film with no words in it has no voice to sit under. "Under the voice" was read off the mean level of
+            # its track, so a hit under a title landed 4.5 dB below a street or a song and nobody heard it: 0 or 1
+            # added sound could be measured on 11 of 11 first films (13 Nov). With nothing spoken to protect, a placed
+            # sound sits 3 dB over what the track plays at that moment: heard once, on the thing that lands.
+            # "that moment" is the second the sound rings for, not the half second it starts in: an impact under an
+            # opening title started in the track's fade-in and was set against that, 8 dB under the song a beat later
+            lvls = [track_level(ctx, g) for g in range(s["event_f"], min(s["event_f"] + ctx.fps + 1, ctx.dur_f), max(1, ctx.fps // 4))]
+            lvls = [v for v in lvls if v is not None]
+            lvl = max(lvls) if lvls else None
+            here = float(voice) if lvl is None else max(float(lvl), float(voice) - 12.0)
+            # and never under QUIET_HIT: over a near-silent room "3 dB over the track" is still silence (p5582: -31 dB)
+            s["db"] = round(clamp(max(here + 3.0, QUIET_HIT) - float(x.get("hit_lufs", -15)), -36, -2), 1)
             continue
         most = float(voice) - under_db - float(x.get("hit_lufs", -15))
         s["db"] = round(clamp(min(float(s["db"]), most), -36, -2), 1)
@@ -6195,7 +6319,7 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
 
 def take_seats(work_dir, index=None):
     """Where type can stand on the upload held as one take, by the same rules a film is compiled with: (caption y,
-    display seats, the room each has as [width, height]). For the Brief, before a film exists, so the Director
+    display seats, the room each has as [width, height], the open ground shot by shot). For the Brief, before a film exists, so the Director
     knows whether its hook title has a place on the take or must stand over a picture. None when nothing can be told."""
     if index is None:
         index = json.load(open(os.path.join(work_dir, "index.json")))
@@ -6207,7 +6331,31 @@ def take_seats(work_dir, index=None):
     perc = load_perception(work_dir)
     ctx = compile_once(stub, index, work_dir, {}, None, faces_from(perc), None, False, None, perc, True, {}, ({}, {}, None))
     seats = film_seats(ctx)
-    return ctx.cap_y, [list(q) for q in seats], [list(r) for r in (getattr(ctx, "seat_rooms", None) or [])]
+    return ctx.cap_y, [list(q) for q in seats], [list(r) for r in (getattr(ctx, "seat_rooms", None) or [])], shot_grounds(ctx)
+
+
+def shot_grounds(ctx, most=10):
+    """Shot by shot, the open ground a display line has while that shot is on screen: [(shot id, [t0, t1], [(seat,
+    room height), ..])], the upper place and the lower one where the shot has both. A line over the take is seated
+    for the seconds it stands (span_seated), so on a clip of several shots this, not the film-wide seat, is where a
+    title goes. Empty for one take: there the film's seat is the answer."""
+    from . import taste
+    rows = [r for r in ctx.perc.get("shots") or [] if r.get("t") and float(r["t"][1]) - float(r["t"][0]) >= 0.8]
+    if len(rows) < 2:
+        return []
+    out = []
+    for r in rows[:most]:
+        a = int(float(r["t"][0]) * ctx.fps) + 2
+        z = min(int(float(r["t"][1]) * ctx.fps) - 2, a + 2 * ctx.fps, ctx.dur_f)        # a line lands as the shot does and stands about 2 s
+        if z - a < 12:
+            continue
+        places = []
+        for want in ([0.5, 0.26], [0.5, 0.7]):
+            got = taste.span_seat(ctx, a, z, want, (0.78, 0.12))
+            if got and got[2] >= 0.6 and all(abs(got[0][1] - q[0][1]) >= 0.15 for q in places):
+                places.append((got[0], got[1][1]))
+        out.append((r.get("id"), [round(float(r["t"][0]), 1), round(float(r["t"][1]), 1)], places))
+    return out
 
 
 def score_the_look_saw(text):

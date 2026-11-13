@@ -367,3 +367,137 @@ def test_type_for_a_doubtful_transcript_is_briefed_in_english():
     assert "`en`" in out[1] and "`fi`" not in out[1]
     idx = selfie(8.0)
     assert not brief.doubtful_words(idx) and "`fi`" in brief.scout_part({"scope": "film", "lang": "fi", "asks": []}, idx)[1]
+
+
+# ------------------------------------------------------------------ round three: type that stands on a clip
+
+def clip_perc(seconds=8.0, head_from=4.5, db=-25.0):
+    """A clip of two shots: a firework with nobody in it, then a man whose head is large in the frame."""
+    samples = []
+    for k in range(int(seconds * 2)):
+        t = 0.25 + 0.5 * k
+        samples.append({"t": t, "face": [0.25, 0.2, 0.75, 0.6] if t >= head_from else None, "persons": int(t >= head_from)})
+    return {"samples": samples, "shots": [{"id": 1, "t": [0.0, head_from]}, {"id": 2, "t": [head_from, seconds]}],
+            "audio": {"step": 0.5, "rms_db": [db] * int(seconds * 2 + 2), "mean_db": db, "onsets": []}}
+
+
+def clip_film(title_seat=(0.5, 0.3), snd=True):
+    b1 = {"k": "b", "id": "b01", "at": "@0.2..@3.0", "job": "x", "pic": "main@0.2-3.0",
+          "do": [{"g": "big", "t": [{"t": "TONIGHT", "size": 0.09}, {"t": "the fire goes up", "size": 0.036, "font": "serif-italic"}],
+                  "for": "b01.s0", "at": "b01.in", "d": 54, "seat": list(title_seat)}]}
+    if snd:
+        b1["snd"] = [{"s": "impact_1", "for": "b01.big", "db": -12}]
+    return film([b1, {"k": "b", "id": "b02", "at": "@4.6..@7.8", "job": "x", "pic": "main@4.6-7.8"}],
+                system={"devices": ["big"], "sounds": ["impact"], "seats": [list(title_seat)]})
+
+
+def test_a_title_on_a_clip_of_several_shots_is_seated_for_the_seconds_it_stands():
+    idx = wordless_index(8.0)
+    c = comp(clip_film(), idx, clip_perc())
+    title = next(w for w in bigs(c) if w["t"] == "TONIGHT")
+    px = c.l1["voices"][title["v"]]["px"]
+    assert px >= 0.085 * 1280                                           # at the size it was written, not at the reading floor
+    assert 0.2 <= title["y"] <= 0.45 and title["f"][1] <= 60            # in the open ground of its own shot, near the seat written
+    assert any(r["id"] == "b01.big" and r["did"] == "repaired" and "seated for the" in r["why"] for r in c.meter["taste"]["rows"])
+    # the same title while the head is on screen has no such ground: it is not set across the face
+    late = film([{"k": "b", "id": "b01", "at": "@4.6..@7.8", "job": "x", "pic": "main@4.6-7.8",
+                  "do": [{"g": "big", "t": [{"t": "TONIGHT", "size": 0.09}], "for": "b01.s0", "at": "b01.in", "d": 54, "seat": [0.5, 0.4]}]}],
+                system={"devices": ["big"], "sounds": [], "seats": [[0.5, 0.4]]})
+    c2 = comp(late, idx, clip_perc())
+    for w in bigs(c2):
+        v = c2.l1["voices"][w["v"]]
+        top, bottom = w["y"] - 0.8 * v["px"] / 1280, w["y"]
+        assert bottom < 0.2 - 0.6 * 0.4 + 0.02 or top > 0.6 + 0.15 * 0.4 - 0.02 or w.get("on") is None      # above the hair or under the chin
+
+
+def test_a_text_box_the_next_sample_does_not_find_again_is_not_print():
+    idx = wordless_index(6.0)
+    idx["spatial"] = {"samples": [{"t": 0.5 * k, "text": [[0.1 + 0.07 * k, 0.2 + 0.05 * (k % 3), 0.3 + 0.07 * k, 0.26 + 0.05 * (k % 3)]], "faces": []} for k in range(12)]}
+    ctx = S.compile_once(film([{"k": "b", "id": "b01", "at": "@0.0..@5.9", "job": "x", "pic": "main"}]), idx, None, BIN, None, None, "t", False, None, {}, True, {}, ({}, {}, None))
+    assert S.seen_rows(ctx, "main", 2.0)[0] == []                       # sparks: a box per sample, never twice in one place
+    for r in idx["spatial"]["samples"]:
+        r["text"].append([0.1, 0.7, 0.9, 0.78])                          # a caption the upload prints: there in every sample
+    ctx = S.compile_once(film([{"k": "b", "id": "b01", "at": "@0.0..@5.9", "job": "x", "pic": "main"}]), idx, None, BIN, None, None, "t", False, None, {}, True, {}, ({}, {}, None))
+    assert [0.1, 0.7, 0.9, 0.78] in S.seen_rows(ctx, "main", 2.0)[0]
+
+
+def test_display_type_over_a_picture_is_light_with_the_edge_unless_the_ground_is_bright_throughout(monkeypatch):
+    import numpy as np
+    idx = wordless_index(8.0)
+
+    def ground(left, right):
+        arr = np.zeros((24, S.THUMB_H, S.THUMB_W), dtype="float32")
+        arr[:, :, : S.THUMB_W // 2], arr[:, :, S.THUMB_W // 2:] = left, right
+        monkeypatch.setattr(S, "thumbs", lambda ctx, pic: arr)
+        return [w for w in bigs(comp(clip_film(snd=False), idx, clip_perc())) if w["f"][0] < 60]
+    mixed = ground(0.92, 0.08)                                           # a pale step and black trousers under one title
+    assert mixed and all(S.luma(w["ink"]) > 0.5 and w.get("edge") for w in mixed)
+    assert len({w["ink"] for w in mixed}) == 1                           # both lines of the ladder in one ink
+    bright = ground(0.95, 0.93)
+    assert bright and all(S.luma(w["ink"]) < 0.3 and not w.get("edge") for w in bright)
+    dark = ground(0.06, 0.1)
+    assert dark and all(S.luma(w["ink"]) > 0.5 and not w.get("edge") for w in dark)
+
+
+def test_a_placed_sound_on_a_film_with_no_voice_is_heard_over_its_track():
+    idx = wordless_index(8.0)
+    c = comp(clip_film(), idx, clip_perc(db=-25.0))
+    table, _ = S.sound_table()
+    hit = float(table["impact_1"].get("hit_lufs", -15))
+    snd = c.l1["sound"]
+    assert len(snd) == 1 and abs(snd[0]["db"] - max(-36, min(-2, -25.0 + 3.0 - hit))) < 0.11       # 3 dB over what the track plays there
+    # a talking take keeps its sound under the voice, as before
+    talk = selfie(20.0)
+    make = lambda k, a, z: {"pic": "main", "do": [{"g": "big", "t": "ONE WORD", "for": f"w{a}", "at": f"w{a}", "d": 30}], "snd": [{"s": "impact_1", "for": "b01.big", "db": -6}]} if k == 0 else {"pic": "main"}
+    c2 = comp(film(beats_over(talk, 3, make), system={"devices": ["big"], "sounds": ["impact"], "seats": [[0.5, 0.75]]}), talk, voice(20.0, db=-18.0))
+    for s in c2.l1["sound"]:
+        assert s["db"] <= -18.0 - 9.0 - hit + 0.11
+
+
+def test_the_brief_has_the_open_ground_shot_by_shot_for_a_clip():
+    idx = wordless_index(8.0)
+    ctx = S.compile_once(film([{"k": "b", "id": "b01", "at": "@0.0..@7.9", "job": "x", "pic": "main"}]), idx, None, BIN, None, S.faces_from(clip_perc()), "t", False, None, clip_perc(), True, {}, ({}, {}, None))
+    rows = S.shot_grounds(ctx)
+    assert [r[0] for r in rows] == [1, 2]
+    assert rows[0][2] and max(h for _, h in rows[0][2]) >= 0.3           # the firework: the frame is open
+    assert all(not (0.2 - 0.25 < seat[1] < 0.66) for seat, _ in rows[1][2])      # the man: only above his hair or under his chin
+    one = S.compile_once(film([{"k": "b", "id": "b01", "w": "0-5", "job": "x", "pic": "main"}]), selfie(12.0), None, BIN, None, None, "t", False, None, {}, True, {}, ({}, {}, None))
+    assert S.shot_grounds(one) == []                                     # one take: the film's seat is the answer
+
+
+def test_a_counter_keeps_the_seat_its_first_step_was_given():
+    idx = wordless_index(8.0)
+    text = film([{"k": "b", "id": "b01", "at": "@0.2..@4.0", "job": "x", "pic": "main@0.2-4.0",
+                  "do": [{"g": "counter", "from": 0, "to": 4, "for": "b01.s0", "at": "b01.in..b01.out", "fmt": "{n}/4 DOWN", "size": 0.06, "seat": [0.5, 0.3]}]},
+                 {"k": "b", "id": "b02", "at": "@4.6..@7.8", "job": "x", "pic": "main@4.6-7.8"}],
+                system={"devices": ["counter"], "sounds": [], "seats": [[0.5, 0.3]]})
+    c = comp(text, idx, clip_perc())
+    steps = [w for w in bigs(c) if "DOWN" in w["t"]]
+    assert len(steps) > 4
+    assert len({round(w["y"], 3) for w in steps}) == 1                   # one place for the whole count, not a new one each step
+    assert sum(1 for r in c.meter["taste"]["rows"] if "seated for the" in r["why"]) <= 1
+
+
+def test_type_for_a_noise_transcript_follows_what_the_frames_print_not_english_by_default():
+    idx = selfie(8.0)
+    idx["words"] = idx["words"][:3]
+    line = brief.scout_part({"scope": "film", "lang": "fi", "asks": [], "about": "x"}, idx)[1]
+    assert "language the frames themselves print" in line and "not known" in line
+    silent = brief.scout_part({"scope": "film", "lang": "en", "asks": []}, wordless_index(5.0))[1]
+    assert "language the frames themselves print" in silent              # no word spoken and nothing typed: not English by default
+    asked = brief.scout_part({"scope": "film", "lang": "es", "asks": [{"id": "a1", "said": "x", "probe": "caption"}]}, wordless_index(5.0))[1]
+    assert "`es`" in asked                                               # a typed request has a language
+
+
+def test_the_last_line_of_a_film_with_no_voice_is_earned_by_the_film_ending():
+    idx = wordless_index(8.0)
+
+    def text(d):
+        return film([{"k": "b", "id": "b01", "at": "@0.2..@3.0", "job": "x", "pic": "main@0.2-3.0"},
+                     {"k": "b", "id": "b02", "at": "@4.0..@7.0", "job": "x", "pic": "main@4.0-7.0",
+                      "do": [{"g": "big", "t": "AND HIM", "for": "b02.s0", "at": "@3.7", "d": d, "seat": [0.5, 0.3]}]}],
+                    system={"devices": ["big"], "sounds": [], "seats": [[0.5, 0.3]]})
+    c = comp(text(80), idx, clip_perc(head_from=99.0))
+    assert "AND HIM" in " ".join(w["t"] for w in bigs(c))                # lands 0.8 s into the last shot and holds to the end: the close
+    c = comp(text(20), idx, clip_perc(head_from=99.0))
+    assert "AND HIM" not in " ".join(w["t"] for w in bigs(c))            # gone before the end: a line in the middle of a shot, answering nothing
