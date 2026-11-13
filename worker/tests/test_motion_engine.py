@@ -275,20 +275,34 @@ def test_tool_rejects_bad_params_and_invisible_compositions(monkeypatch):
 
 def test_sound_library_is_real_approved_recordings_with_licences():
     rows = sound_library.catalog()
-    assert len(rows) >= 20
+    assert len(rows) >= 80
     for r in rows:
-        assert r["license"] == "CC0 1.0" and r["source_url"].startswith("https://freesound.org/")
         assert os.path.exists(sound_library.path(r["id"]))
-        assert -20 <= r["gain_db"] <= -6
+        if r.get("reference"):
+            # joined by reference match (owner decision 13 Nov 2026): a professional recording under the bundle licence,
+            # set at its class's reference level against the voice (inside the mix's gain range)
+            assert r["license"] == "Sonniss GameAudioGDC" and r["source_url"].startswith("https://archive.org/download/sonniss-gdc-")
+            assert r["approval"].startswith("approved by reference match") and -36 <= r["gain_db"] <= -2
+        else:
+            assert r["license"] == "CC0 1.0" and r["source_url"].startswith("https://freesound.org/")
+            assert -20 <= r["gain_db"] <= -6
     lic = open(os.path.join(sound_library.LIB_DIR, "LICENSES.md")).read()
-    assert all(r["id"] in lic for r in rows)
+    assert all(f"| {r['id']} |" in lic for r in rows)
     assert sound_library.get("whoosh_soft_1") and sound_library.get("../manifest.json") is None
     assert sound_library.pick("whoosh_soft", "a")["role"] == "whoosh"      # template role alias
-    assert sound_library.pick("paper") is None                              # nothing approved -> skipped
+    # a template's cue keeps to the recordings it was authored on; a role only the new recordings fill picks those
+    assert all(not sound_library.pick(k, str(i)).get("reference") for k in ("whoosh", "impact", "click", "riser") for i in range(12))
+    assert sound_library.pick("paper")["reference"]["class"] in ("click", "hit", "whoosh")
+    assert sound_library.pick("crowd_cheer") is None                        # nothing approved -> skipped
     hits = motion_tools.sound_search("camera photo")
     assert hits and hits[0]["role"] == "shutter" and hits[0]["id"].startswith("sound:")
     listing = motion_tools.list_sound_library(None)
     assert "sound:impact_1" in listing and "never on" in listing.lower()
+    # the whole library is long: the unfiltered listing names the roles of the rest, and a role lists its recordings
+    assert "sound:impact_5" not in listing and "impact +" in listing and len(listing) < 9000
+    assert "sound:impact_5" in motion_tools.list_sound_library(None, role="impact")
+    assert "royalty-free, no attribution" in sound_library.describe(sound_library.get("impact_5"))
+    assert "CC0" in sound_library.describe(sound_library.get("impact_1"))
 
 
 # ── engine (real Chromium) ──────────────────────────────────────────────

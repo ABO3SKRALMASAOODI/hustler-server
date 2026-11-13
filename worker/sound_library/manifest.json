@@ -340,5 +340,5227 @@
   "peak_s": 0.03,
   "hit_lufs": -12.9,
   "hit_lufs_hp150": -30.7
+ },
+ {
+  "id": "click_3",
+  "role": "click",
+  "use": "a short dry click or tick: one cut of a quick run of cuts, a counter step, a small landing",
+  "file": "click_3.flac",
+  "sha": "48f21eb9c479cafa",
+  "title": "Essentials 02 Clocks: CLOCKTick_InsJ_Clock-12_Ticking_Multi_LOOP",
+  "author": "InspectorJ",
+  "source_url": "https://archive.org/download/sonniss-gdc-2023-game-audio-bundle-normalized/InspectorJ%20-%20Essentials%2002%20Clocks/CLOCKTick_InsJ_Clock-12_Ticking_Multi_LOOP.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -19.1,
+  "hit_lufs_hp150": -19.2,
+  "source_file": "InspectorJ - Essentials 02 Clocks/CLOCKTick_InsJ_Clock-12_Ticking_Multi_LOOP.flac",
+  "source_sha256": "f86f46949a9e2ff234cf0f45868740654907066399a4198b437bd470db5967bf",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   2.225,
+   2.43
+  ],
+  "bundle": "sonniss-gdc-2023-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "click",
+   "distance": 0.312,
+   "limit": 0.453,
+   "moments": [
+    [
+     "Dee-mp9BJqG",
+     23.16,
+     0.221
+    ],
+    [
+     "pick_21_DdxWoavOuyl",
+     15.37,
+     0.269
+    ],
+    [
+     "DaDhP4JNAq9",
+     5.93,
+     0.338
+    ],
+    [
+     "DdO49cmh2gw",
+     71.86,
+     0.341
+    ],
+    [
+     "Zf87y5bWzUA",
+     5.96,
+     0.392
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.035,
+   "attack_s": 0.01,
+   "decay_s": 0.02,
+   "bands": [
+    -14.4,
+    -9.9,
+    -10.0,
+    -5.9,
+    -7.4,
+    -5.7,
+    -12.9
+   ],
+   "flat": 0.224,
+   "low": 0.069,
+   "sweep": -0.57,
+   "centroid_hz": 2907
+  },
+  "peak_s": 0.024,
+  "duration_s": 0.205,
+  "gain_db": -7.8
+ },
+ {
+  "id": "click_4",
+  "role": "click",
+  "use": "a short dry click or tick: one cut of a quick run of cuts, a counter step, a small landing",
+  "file": "click_4.flac",
+  "sha": "11d13b01724ed6dd",
+  "title": "Tick Tock: Waterphone, Clock, Ticking, Tick, Tock, Click, Rhythm, Time, Watch, Countdown",
+  "author": "344 Audio",
+  "source_url": "https://archive.org/download/sonniss-gdc-2020-game-audio-bundle-normalized/344%20Audio%20-%20Tick%20Tock/Waterphone%2C%20Clock%2C%20Ticking%2C%20Tick%2C%20Tock%2C%20Click%2C%20Rhythm%2C%20Time%2C%20Watch%2C%20Countdown.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -19.1,
+  "hit_lufs_hp150": -20.5,
+  "source_file": "344 Audio - Tick Tock/Waterphone, Clock, Ticking, Tick, Tock, Click, Rhythm, Time, Watch, Countdown.flac",
+  "source_sha256": "726aa84f0b9639e4d16f06776b77deb3e53fd2e867e5e4e519f7054f54b4bd1a",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   32.985,
+   33.17
+  ],
+  "bundle": "sonniss-gdc-2020-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "click",
+   "distance": 0.338,
+   "limit": 0.453,
+   "moments": [
+    [
+     "DeHkRtts3bI",
+     1.83,
+     0.209
+    ],
+    [
+     "DcRHfOnhlWx",
+     99.89,
+     0.294
+    ],
+    [
+     "DcbYpgZBApV",
+     52.43,
+     0.347
+    ],
+    [
+     "DfFErGgsMxT",
+     18.35,
+     0.364
+    ],
+    [
+     "DaDhP4JNAq9",
+     5.93,
+     0.476
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.04,
+   "attack_s": 0.015,
+   "decay_s": 0.02,
+   "bands": [
+    -14.6,
+    -1.4,
+    -8.5,
+    -13.3,
+    -15.9,
+    -17.7,
+    -19.0
+   ],
+   "flat": 0.104,
+   "low": 0.111,
+   "sweep": -0.19,
+   "centroid_hz": 595
+  },
+  "peak_s": 0.02,
+  "duration_s": 0.185,
+  "gain_db": -7.8
+ },
+ {
+  "id": "click_5",
+  "role": "click",
+  "use": "a short dry click or tick: one cut of a quick run of cuts, a counter step, a small landing",
+  "file": "click_5.flac",
+  "sha": "28105a3582f02da0",
+  "title": "Tick Tock: Waterphone, Clock, Ticking, Tick, Tock, Click, Rhythm, Time, Watch, Countdown",
+  "author": "344 Audio",
+  "source_url": "https://archive.org/download/sonniss-gdc-2020-game-audio-bundle-normalized/344%20Audio%20-%20Tick%20Tock/Waterphone%2C%20Clock%2C%20Ticking%2C%20Tick%2C%20Tock%2C%20Click%2C%20Rhythm%2C%20Time%2C%20Watch%2C%20Countdown.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -18.4,
+  "hit_lufs_hp150": -18.6,
+  "source_file": "344 Audio - Tick Tock/Waterphone, Clock, Ticking, Tick, Tock, Click, Rhythm, Time, Watch, Countdown.flac",
+  "source_sha256": "726aa84f0b9639e4d16f06776b77deb3e53fd2e867e5e4e519f7054f54b4bd1a",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.0,
+   0.155
+  ],
+  "bundle": "sonniss-gdc-2020-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "click",
+   "distance": 0.348,
+   "limit": 0.453,
+   "moments": [
+    [
+     "DahTnUZAhkG",
+     16.27,
+     0.271
+    ],
+    [
+     "DehXGq_Bgss",
+     23.9,
+     0.287
+    ],
+    [
+     "DePRLwPoANZ",
+     6.2,
+     0.329
+    ],
+    [
+     "DdB8LATJ_1z",
+     31.5,
+     0.418
+    ],
+    [
+     "pick_03_DeRswaFSqgu",
+     4.04,
+     0.435
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.085,
+   "attack_s": 0.04,
+   "decay_s": 0.04,
+   "bands": [
+    -10.7,
+    -9.4,
+    -9.5,
+    -4.0,
+    -9.2,
+    -12.4,
+    -9.4
+   ],
+   "flat": 0.3,
+   "low": 0.137,
+   "sweep": -0.08,
+   "centroid_hz": 2426
+  },
+  "peak_s": 0.016,
+  "duration_s": 0.155,
+  "gain_db": -8.5
+ },
+ {
+  "id": "click_6",
+  "role": "click",
+  "use": "a short dry click or tick: one cut of a quick run of cuts, a counter step, a small landing",
+  "file": "click_6.flac",
+  "sha": "210740866a81eb7a",
+  "title": "Essentials 02 Clocks: CLOCKTick_InsJ_Clock-12_Ticking_Multi_LOOP",
+  "author": "InspectorJ",
+  "source_url": "https://archive.org/download/sonniss-gdc-2023-game-audio-bundle-normalized/InspectorJ%20-%20Essentials%2002%20Clocks/CLOCKTick_InsJ_Clock-12_Ticking_Multi_LOOP.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -18.7,
+  "hit_lufs_hp150": -18.7,
+  "source_file": "InspectorJ - Essentials 02 Clocks/CLOCKTick_InsJ_Clock-12_Ticking_Multi_LOOP.flac",
+  "source_sha256": "f86f46949a9e2ff234cf0f45868740654907066399a4198b437bd470db5967bf",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   2.96,
+   3.165
+  ],
+  "bundle": "sonniss-gdc-2023-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "click",
+   "distance": 0.318,
+   "limit": 0.453,
+   "moments": [
+    [
+     "Dee-mp9BJqG",
+     23.16,
+     0.224
+    ],
+    [
+     "pick_21_DdxWoavOuyl",
+     15.37,
+     0.264
+    ],
+    [
+     "DdO49cmh2gw",
+     71.86,
+     0.314
+    ],
+    [
+     "Dc3y7l5BLGB",
+     48.8,
+     0.382
+    ],
+    [
+     "DaDhP4JNAq9",
+     5.93,
+     0.404
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.035,
+   "attack_s": 0.015,
+   "decay_s": 0.015,
+   "bands": [
+    -14.7,
+    -9.8,
+    -11.1,
+    -5.1,
+    -6.5,
+    -6.6,
+    -14.6
+   ],
+   "flat": 0.187,
+   "low": 0.063,
+   "sweep": -0.21,
+   "centroid_hz": 2622
+  },
+  "peak_s": 0.027,
+  "duration_s": 0.205,
+  "gain_db": -8.2
+ },
+ {
+  "id": "click_7",
+  "role": "click",
+  "use": "a short dry click or tick: one cut of a quick run of cuts, a counter step, a small landing",
+  "file": "click_7.flac",
+  "sha": "7a76e7562b8a9a23",
+  "title": "Switch And Button Sound Effects: Bluezone_BC0268_switch_button_click_ignition_002_03",
+  "author": "Bluezone",
+  "source_url": "https://archive.org/download/sonniss-gdc-2020-game-audio-bundle-normalized/Bluezone%20-%20Switch%20And%20Button%20Sound%20Effects/Bluezone_BC0268_switch_button_click_ignition_002_03.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -16.5,
+  "hit_lufs_hp150": -16.5,
+  "source_file": "Bluezone - Switch And Button Sound Effects/Bluezone_BC0268_switch_button_click_ignition_002_03.flac",
+  "source_sha256": "0755b5e91b4510f177d3364b1c7f5022f51a7559c5d26e4af7f3eb76e8d53752",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.0,
+   0.175
+  ],
+  "bundle": "sonniss-gdc-2020-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "click",
+   "distance": 0.323,
+   "limit": 0.453,
+   "moments": [
+    [
+     "DahTnUZAhkG",
+     16.27,
+     0.248
+    ],
+    [
+     "DehXGq_Bgss",
+     23.9,
+     0.275
+    ],
+    [
+     "DePRLwPoANZ",
+     6.2,
+     0.284
+    ],
+    [
+     "pick_03_DeRswaFSqgu",
+     4.04,
+     0.398
+    ],
+    [
+     "De9ykdsOC_X",
+     5.68,
+     0.409
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.07,
+   "attack_s": 0.04,
+   "decay_s": 0.025,
+   "bands": [
+    -10.9,
+    -10.7,
+    -6.4,
+    -4.4,
+    -9.7,
+    -10.6,
+    -13.7
+   ],
+   "flat": 0.257,
+   "low": 0.123,
+   "sweep": 0.06,
+   "centroid_hz": 1919
+  },
+  "peak_s": 0.015,
+  "duration_s": 0.175,
+  "gain_db": -10.4
+ },
+ {
+  "id": "click_8",
+  "role": "click",
+  "use": "a single key strike: a display word or a counter step landing",
+  "file": "click_8.flac",
+  "sha": "edfbaed9507f962a",
+  "title": "Turning The Page: SBttp_Typewriter 001",
+  "author": "Sonic Bat",
+  "source_url": "https://archive.org/download/sonniss-gdc-2023-game-audio-bundle-normalized/Sonic%20Bat%20-%20Turning%20The%20Page/SBttp_Typewriter%20001.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -22.5,
+  "hit_lufs_hp150": -22.5,
+  "source_file": "Sonic Bat - Turning The Page/SBttp_Typewriter 001.flac",
+  "source_sha256": "c364098eeef01f75fbc23264d06e15efca8396f98f2cae2ece1a49c79015502d",
+  "source_codec": "flac",
+  "source_rate": 192000,
+  "source_bits": 24,
+  "cut_s": [
+   10.61,
+   10.86
+  ],
+  "bundle": "sonniss-gdc-2023-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "type",
+  "reference": {
+   "class": "click",
+   "distance": 0.314,
+   "limit": 0.453,
+   "moments": [
+    [
+     "Dee-mp9BJqG",
+     23.16,
+     0.229
+    ],
+    [
+     "DdO49cmh2gw",
+     71.86,
+     0.242
+    ],
+    [
+     "pick_21_DdxWoavOuyl",
+     15.37,
+     0.277
+    ],
+    [
+     "Dc3y7l5BLGB",
+     48.8,
+     0.406
+    ],
+    [
+     "DSpQaXkkzG5",
+     4.71,
+     0.414
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.025,
+   "attack_s": 0.01,
+   "decay_s": 0.01,
+   "bands": [
+    -13.4,
+    -14.2,
+    -10.0,
+    -4.0,
+    -6.9,
+    -7.8,
+    -13.0
+   ],
+   "flat": 0.165,
+   "low": 0.076,
+   "sweep": 0.0,
+   "centroid_hz": 2587
+  },
+  "peak_s": 0.042,
+  "duration_s": 0.25,
+  "gain_db": -4.4
+ },
+ {
+  "id": "click_9",
+  "role": "click",
+  "use": "a single key strike: a display word or a counter step landing",
+  "file": "click_9.flac",
+  "sha": "2c278078702b70f7",
+  "title": "Turning The Page: SBttp_Typewriter 001",
+  "author": "Sonic Bat",
+  "source_url": "https://archive.org/download/sonniss-gdc-2023-game-audio-bundle-normalized/Sonic%20Bat%20-%20Turning%20The%20Page/SBttp_Typewriter%20001.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -23.9,
+  "hit_lufs_hp150": -23.9,
+  "source_file": "Sonic Bat - Turning The Page/SBttp_Typewriter 001.flac",
+  "source_sha256": "c364098eeef01f75fbc23264d06e15efca8396f98f2cae2ece1a49c79015502d",
+  "source_codec": "flac",
+  "source_rate": 192000,
+  "source_bits": 24,
+  "cut_s": [
+   15.32,
+   15.56
+  ],
+  "bundle": "sonniss-gdc-2023-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "type",
+  "reference": {
+   "class": "click",
+   "distance": 0.361,
+   "limit": 0.453,
+   "moments": [
+    [
+     "Dee-mp9BJqG",
+     23.16,
+     0.263
+    ],
+    [
+     "pick_21_DdxWoavOuyl",
+     15.37,
+     0.303
+    ],
+    [
+     "DeubjvURpH8",
+     67.14,
+     0.409
+    ],
+    [
+     "DaDhP4JNAq9",
+     5.93,
+     0.411
+    ],
+    [
+     "DdO49cmh2gw",
+     71.86,
+     0.417
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.03,
+   "attack_s": 0.01,
+   "decay_s": 0.015,
+   "bands": [
+    -14.0,
+    -12.3,
+    -7.7,
+    -7.4,
+    -5.5,
+    -7.0,
+    -11.6
+   ],
+   "flat": 0.299,
+   "low": 0.075,
+   "sweep": -1.03,
+   "centroid_hz": 2977
+  },
+  "peak_s": 0.038,
+  "duration_s": 0.24,
+  "gain_db": -3.0
+ },
+ {
+  "id": "shutter_3",
+  "role": "shutter",
+  "use": "a camera shutter on a still photograph landing or a freeze frame",
+  "file": "shutter_3.flac",
+  "sha": "11ac80f2f2ccca6c",
+  "title": "Cameras: camera halina h160 film advance lever mono",
+  "author": "SoundHolder",
+  "source_url": "https://archive.org/download/sonniss-gdc-2017-game-audio-bundle-normalized/SoundHolder%20-%20%20Cameras/camera%20halina%20h160%20film%20advance%20lever%20mono.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -21.9,
+  "hit_lufs_hp150": -21.9,
+  "source_file": "SoundHolder -  Cameras/camera halina h160 film advance lever mono.flac",
+  "source_sha256": "05a14e25578e4d299a0888a94ce58d35595718d14b820b23297a6e601eaf4df2",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   20.55,
+   20.84
+  ],
+  "bundle": "sonniss-gdc-2017-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "shutter",
+  "reference": {
+   "class": "click",
+   "distance": 0.341,
+   "limit": 0.453,
+   "moments": [
+    [
+     "Zf87y5bWzUA",
+     5.96,
+     0.261
+    ],
+    [
+     "Dee-mp9BJqG",
+     23.16,
+     0.343
+    ],
+    [
+     "DaDhP4JNAq9",
+     5.93,
+     0.349
+    ],
+    [
+     "Ddy9H_LIZgr",
+     37.89,
+     0.374
+    ],
+    [
+     "pick_21_DdxWoavOuyl",
+     15.37,
+     0.379
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.035,
+   "attack_s": 0.01,
+   "decay_s": 0.02,
+   "bands": [
+    -12.1,
+    -9.3,
+    -10.3,
+    -11.1,
+    -12.0,
+    -4.0,
+    -7.3
+   ],
+   "flat": 0.276,
+   "low": 0.113,
+   "sweep": -1.26,
+   "centroid_hz": 4467
+  },
+  "peak_s": 0.155,
+  "hit_s": 0.018,
+  "duration_s": 0.29,
+  "gain_db": -5.0
+ },
+ {
+  "id": "shutter_4",
+  "role": "shutter",
+  "use": "a camera shutter on a still photograph landing or a freeze frame",
+  "file": "shutter_4.flac",
+  "sha": "68b97af92e9c8f04",
+  "title": "Cameras: camera halina h160 film advance lever mono",
+  "author": "SoundHolder",
+  "source_url": "https://archive.org/download/sonniss-gdc-2017-game-audio-bundle-normalized/SoundHolder%20-%20%20Cameras/camera%20halina%20h160%20film%20advance%20lever%20mono.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -20.4,
+  "hit_lufs_hp150": -20.4,
+  "source_file": "SoundHolder -  Cameras/camera halina h160 film advance lever mono.flac",
+  "source_sha256": "05a14e25578e4d299a0888a94ce58d35595718d14b820b23297a6e601eaf4df2",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   12.41,
+   13.1
+  ],
+  "bundle": "sonniss-gdc-2017-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "shutter",
+  "reference": {
+   "class": "click",
+   "distance": 0.356,
+   "limit": 0.453,
+   "moments": [
+    [
+     "DfIL2Fbqbvx",
+     1.38,
+     0.241
+    ],
+    [
+     "pick_33_Dc_2Y1qI0ZH",
+     3.35,
+     0.336
+    ],
+    [
+     "Zf87y5bWzUA",
+     5.96,
+     0.378
+    ],
+    [
+     "Ddy9H_LIZgr",
+     37.89,
+     0.381
+    ],
+    [
+     "DeubjvURpH8",
+     24.73,
+     0.443
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.065,
+   "attack_s": 0.01,
+   "decay_s": 0.05,
+   "bands": [
+    -15.0,
+    -13.8,
+    -13.7,
+    -15.3,
+    -12.4,
+    -3.9,
+    -4.1
+   ],
+   "flat": 0.419,
+   "low": 0.057,
+   "sweep": 0.01,
+   "centroid_hz": 6927
+  },
+  "peak_s": 0.575,
+  "hit_s": 0.145,
+  "duration_s": 0.69,
+  "gain_db": -6.5
+ },
+ {
+  "id": "paper_1",
+  "role": "paper",
+  "use": "paper moving: a page, a document or a card landing",
+  "file": "paper_1.flac",
+  "sha": "14c5a7d9ac7e6e7e",
+  "title": "Turning The Page: SBttp_Regular Book Flip Through 001",
+  "author": "Sonic Bat",
+  "source_url": "https://archive.org/download/sonniss-gdc-2023-game-audio-bundle-normalized/Sonic%20Bat%20-%20Turning%20The%20Page/SBttp_Regular%20Book%20Flip%20Through%20001.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -22.9,
+  "hit_lufs_hp150": -22.9,
+  "source_file": "Sonic Bat - Turning The Page/SBttp_Regular Book Flip Through 001.flac",
+  "source_sha256": "88ef80c48814711dcaff232122d46aacf279c65eb1d1af8aae53e51f7008e807",
+  "source_codec": "flac",
+  "source_rate": 192000,
+  "source_bits": 24,
+  "cut_s": [
+   107.135,
+   107.835
+  ],
+  "bundle": "sonniss-gdc-2023-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "paper",
+  "reference": {
+   "class": "click",
+   "distance": 0.362,
+   "limit": 0.453,
+   "moments": [
+    [
+     "DdO49cmh2gw",
+     71.86,
+     0.247
+    ],
+    [
+     "Dee-mp9BJqG",
+     23.16,
+     0.354
+    ],
+    [
+     "DXFV0j8iCsF",
+     6.01,
+     0.398
+    ],
+    [
+     "pick_21_DdxWoavOuyl",
+     15.37,
+     0.401
+    ],
+    [
+     "DSpQaXkkzG5",
+     4.71,
+     0.408
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.025,
+   "attack_s": 0.01,
+   "decay_s": 0.01,
+   "bands": [
+    -19.8,
+    -6.3,
+    -9.8,
+    -6.7,
+    -9.0,
+    -5.9,
+    -12.5
+   ],
+   "flat": 0.097,
+   "low": 0.018,
+   "sweep": 0.0,
+   "centroid_hz": 2968
+  },
+  "peak_s": 0.499,
+  "duration_s": 0.7,
+  "gain_db": -4.0
+ },
+ {
+  "id": "paper_2",
+  "role": "paper",
+  "use": "paper moving: a page, a document or a card landing",
+  "file": "paper_2.flac",
+  "sha": "77cff05ad1da468a",
+  "title": "Turning The Page: SBttp_Regular Book Flip Through 001",
+  "author": "Sonic Bat",
+  "source_url": "https://archive.org/download/sonniss-gdc-2023-game-audio-bundle-normalized/Sonic%20Bat%20-%20Turning%20The%20Page/SBttp_Regular%20Book%20Flip%20Through%20001.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -22.8,
+  "hit_lufs_hp150": -23.0,
+  "source_file": "Sonic Bat - Turning The Page/SBttp_Regular Book Flip Through 001.flac",
+  "source_sha256": "88ef80c48814711dcaff232122d46aacf279c65eb1d1af8aae53e51f7008e807",
+  "source_codec": "flac",
+  "source_rate": 192000,
+  "source_bits": 24,
+  "cut_s": [
+   51.565,
+   52.515
+  ],
+  "bundle": "sonniss-gdc-2023-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "paper",
+  "reference": {
+   "class": "click",
+   "distance": 0.343,
+   "limit": 0.453,
+   "moments": [
+    [
+     "Dc3y7l5BLGB",
+     48.8,
+     0.291
+    ],
+    [
+     "pick_21_DdxWoavOuyl",
+     15.37,
+     0.328
+    ],
+    [
+     "Dee-mp9BJqG",
+     23.16,
+     0.344
+    ],
+    [
+     "DdO49cmh2gw",
+     71.86,
+     0.37
+    ],
+    [
+     "De8qirotK5Q",
+     0.52,
+     0.38
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.04,
+   "attack_s": 0.02,
+   "decay_s": 0.015,
+   "bands": [
+    -15.8,
+    -19.3,
+    -12.1,
+    -5.3,
+    -3.7,
+    -8.7,
+    -13.7
+   ],
+   "flat": 0.117,
+   "low": 0.027,
+   "sweep": 0.07,
+   "centroid_hz": 2898
+  },
+  "peak_s": 0.511,
+  "duration_s": 0.95,
+  "gain_db": -4.1
+ },
+ {
+  "id": "paper_3",
+  "role": "paper",
+  "use": "paper moving: a page, a document or a card landing",
+  "file": "paper_3.flac",
+  "sha": "a0058bf0c4f38cdc",
+  "title": "Books & Magazines: put_magazine_on_table_002",
+  "author": "3maze",
+  "source_url": "https://archive.org/download/sonniss-gdc-2018-game-audio-bundle-normalized/3maze%20-%20Books%20%26%20Magazines/put_magazine_on_table_002.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -20.9,
+  "hit_lufs_hp150": -20.9,
+  "source_file": "3maze - Books & Magazines/put_magazine_on_table_002.flac",
+  "source_sha256": "c95cd23a0fba7fa0b71efbd9a6b8d179333cffd0b800e455be837086d9b5f443",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.0,
+   0.195
+  ],
+  "bundle": "sonniss-gdc-2018-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "paper",
+  "reference": {
+   "class": "click",
+   "distance": 0.342,
+   "limit": 0.453,
+   "moments": [
+    [
+     "DehXGq_Bgss",
+     23.9,
+     0.266
+    ],
+    [
+     "DahTnUZAhkG",
+     16.27,
+     0.281
+    ],
+    [
+     "DePRLwPoANZ",
+     6.2,
+     0.347
+    ],
+    [
+     "De9ykdsOC_X",
+     5.68,
+     0.395
+    ],
+    [
+     "pick_33_Dc_2Y1qI0ZH",
+     3.35,
+     0.424
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.07,
+   "attack_s": 0.035,
+   "decay_s": 0.03,
+   "bands": [
+    -11.7,
+    -10.8,
+    -8.7,
+    -3.7,
+    -8.7,
+    -9.5,
+    -13.5
+   ],
+   "flat": 0.293,
+   "low": 0.099,
+   "sweep": 0.68,
+   "centroid_hz": 2125
+  },
+  "peak_s": 0.012,
+  "duration_s": 0.195,
+  "gain_db": -6.0
+ },
+ {
+  "id": "glitch_3",
+  "role": "glitch",
+  "use": "a digital glitch on a glitched flash cut",
+  "file": "glitch_3.flac",
+  "sha": "3efcabe9393d6f24",
+  "title": "INACCURACY (GLITCHES): Glitch_Error_Malfunction_018",
+  "author": "MatiasMacSD",
+  "source_url": "https://archive.org/download/sonniss-gdc-2017-game-audio-bundle-normalized/MatiasMacSD%20-%20INACCURACY%20%28GLITCHES%29/Glitch_Error_Malfunction_018.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -17.9,
+  "hit_lufs_hp150": -17.9,
+  "source_file": "MatiasMacSD - INACCURACY (GLITCHES)/Glitch_Error_Malfunction_018.flac",
+  "source_sha256": "ea9c55340a243f49ef33832a7a3ce55f459dcf6376af322a1f488397a2626797",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.34,
+   0.75
+  ],
+  "bundle": "sonniss-gdc-2017-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "glitch",
+  "reference": {
+   "class": "click",
+   "distance": 0.434,
+   "limit": 0.453,
+   "moments": [
+    [
+     "DaDhP4JNAq9",
+     32.82,
+     0.373
+    ],
+    [
+     "DehXGq_Bgss",
+     23.9,
+     0.412
+    ],
+    [
+     "pick_15_DdEk9kqh_zd",
+     1.76,
+     0.428
+    ],
+    [
+     "DfM8Y32IQUY",
+     0.2,
+     0.472
+    ],
+    [
+     "DdB8LATJ_1z",
+     31.5,
+     0.486
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.075,
+   "attack_s": 0.045,
+   "decay_s": 0.025,
+   "bands": [
+    -8.3,
+    -9.4,
+    -12.0,
+    -5.9,
+    -8.9,
+    -8.8,
+    -8.1
+   ],
+   "flat": 0.527,
+   "low": 0.168,
+   "sweep": 0.3,
+   "centroid_hz": 3344
+  },
+  "peak_s": 0.258,
+  "duration_s": 0.41,
+  "gain_db": -9.0
+ },
+ {
+  "id": "click_10",
+  "role": "click",
+  "use": "a short dry click or tick: one cut of a quick run of cuts, a counter step, a small landing",
+  "file": "click_10.flac",
+  "sha": "cd23eecf867d611d",
+  "title": "Hits Whoosh: Action Swish_HW 02",
+  "author": "Mechanical Wave",
+  "source_url": "https://archive.org/download/sonniss-gdc-2015-game-audio-bundle-normalized/Mechanical%20Wave%20-%20Hits%20Whoosh/Action%20Swish_HW%2002.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -15.0,
+  "hit_lufs_hp150": -15.0,
+  "source_file": "Mechanical Wave - Hits Whoosh/Action Swish_HW 02.flac",
+  "source_sha256": "f58193bf0417a0ad76a4311f8d88f9ab8ce1642d22733cedf033c387e5426879",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   1.06,
+   1.315
+  ],
+  "bundle": "sonniss-gdc-2015-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "click",
+   "distance": 0.371,
+   "limit": 0.453,
+   "moments": [
+    [
+     "DeHkRtts3bI",
+     1.83,
+     0.34
+    ],
+    [
+     "Dee-mp9BJqG",
+     23.16,
+     0.349
+    ],
+    [
+     "iL_0HblXMho",
+     114.35,
+     0.358
+    ],
+    [
+     "Dc3GhdpM-3J",
+     32.95,
+     0.396
+    ],
+    [
+     "DfFErGgsMxT",
+     28.36,
+     0.41
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.035,
+   "attack_s": 0.01,
+   "decay_s": 0.02,
+   "bands": [
+    -15.5,
+    -12.6,
+    -5.3,
+    -5.2,
+    -5.9,
+    -13.7,
+    -17.5
+   ],
+   "flat": 0.059,
+   "low": 0.05,
+   "sweep": 0.15,
+   "centroid_hz": 1738
+  },
+  "peak_s": 0.042,
+  "duration_s": 0.255,
+  "gain_db": -11.9
+ },
+ {
+  "id": "hit_1",
+  "role": "hit",
+  "use": "a dry hit on a display line or a card landing",
+  "file": "hit_1.flac",
+  "sha": "115a2611cdf442af",
+  "title": "Essentials 02 Clocks: CLOCKTick_InsJ_Clock-03_Ticking_Multi_LOOP",
+  "author": "InspectorJ",
+  "source_url": "https://archive.org/download/sonniss-gdc-2023-game-audio-bundle-normalized/InspectorJ%20-%20Essentials%2002%20Clocks/CLOCKTick_InsJ_Clock-03_Ticking_Multi_LOOP.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -18.1,
+  "hit_lufs_hp150": -18.2,
+  "source_file": "InspectorJ - Essentials 02 Clocks/CLOCKTick_InsJ_Clock-03_Ticking_Multi_LOOP.flac",
+  "source_sha256": "d93b348b5b7f46a220537ccd105a355cd6a9bde3e4efc2b869ff3669dab1ec68",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.99,
+   1.215
+  ],
+  "bundle": "sonniss-gdc-2023-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "hit",
+   "distance": 0.377,
+   "limit": 0.578,
+   "moments": [
+    [
+     "DfIL2Fbqbvx",
+     49.41,
+     0.3
+    ],
+    [
+     "DelTv4SteNh",
+     20.71,
+     0.314
+    ],
+    [
+     "Zf87y5bWzUA",
+     11.86,
+     0.377
+    ],
+    [
+     "DUQzZ_kE3O7",
+     15.87,
+     0.427
+    ],
+    [
+     "DePRLwPoANZ",
+     74.41,
+     0.467
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.095,
+   "attack_s": 0.045,
+   "decay_s": 0.045,
+   "bands": [
+    -15.4,
+    -7.5,
+    -10.2,
+    -5.1,
+    -5.9,
+    -10.4,
+    -13.3
+   ],
+   "flat": 0.33,
+   "low": 0.048,
+   "sweep": -0.87,
+   "centroid_hz": 2310
+  },
+  "peak_s": 0.066,
+  "duration_s": 0.225,
+  "gain_db": -10.1
+ },
+ {
+  "id": "hit_2",
+  "role": "hit",
+  "use": "a dry hit on a display line or a card landing",
+  "file": "hit_2.flac",
+  "sha": "a5de9107a2ed9eca",
+  "title": "Just Whoosh 3 _ Whoosh Essentials: Swoosh_Rope_Whip_075",
+  "author": "SoundBits",
+  "source_url": "https://archive.org/download/sonniss-gdc-2016-game-audio-bundle-normalized/SoundBits%20-%20%20Just%20Whoosh%203%20_%20Whoosh%20Essentials/Swoosh_Rope_Whip_075.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -17.0,
+  "hit_lufs_hp150": -17.3,
+  "source_file": "SoundBits -  Just Whoosh 3 _ Whoosh Essentials/Swoosh_Rope_Whip_075.flac",
+  "source_sha256": "54c876e1d8b702139d67277f1e263c6f8e1e2b105723cf94aa2bf0f0df38d9e9",
+  "source_codec": "flac",
+  "source_rate": 192000,
+  "source_bits": 24,
+  "cut_s": [
+   0.055,
+   0.505
+  ],
+  "bundle": "sonniss-gdc-2016-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "hit",
+   "distance": 0.434,
+   "limit": 0.578,
+   "moments": [
+    [
+     "pick_23_DeKRACloUED",
+     2.09,
+     0.4
+    ],
+    [
+     "DfIL2Fbqbvx",
+     49.41,
+     0.407
+    ],
+    [
+     "Zf87y5bWzUA",
+     11.86,
+     0.417
+    ],
+    [
+     "DelTv4SteNh",
+     20.71,
+     0.437
+    ],
+    [
+     "DePRLwPoANZ",
+     74.41,
+     0.51
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.105,
+   "attack_s": 0.05,
+   "decay_s": 0.05,
+   "bands": [
+    -6.3,
+    -11.0,
+    -10.9,
+    -8.5,
+    -5.6,
+    -8.7,
+    -12.7
+   ],
+   "flat": 0.433,
+   "low": 0.283,
+   "sweep": -0.75,
+   "centroid_hz": 2356
+  },
+  "peak_s": 0.075,
+  "duration_s": 0.45,
+  "gain_db": -11.2
+ },
+ {
+  "id": "hit_3",
+  "role": "hit",
+  "use": "a dry hit on a display line or a card landing",
+  "file": "hit_3.flac",
+  "sha": "7e78a97d0dd24a95",
+  "title": "Just Whoosh 3 _ Whoosh Essentials: Whoosh_Rod_Pole_022",
+  "author": "SoundBits",
+  "source_url": "https://archive.org/download/sonniss-gdc-2016-game-audio-bundle-normalized/SoundBits%20-%20%20Just%20Whoosh%203%20_%20Whoosh%20Essentials/Whoosh_Rod_Pole_022.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -10.1,
+  "hit_lufs_hp150": -12.5,
+  "source_file": "SoundBits -  Just Whoosh 3 _ Whoosh Essentials/Whoosh_Rod_Pole_022.flac",
+  "source_sha256": "467456522c5ea1f7daf15f3d6bb0fa4c9e783a73feace058b7d37bfa5b88c230",
+  "source_codec": "flac",
+  "source_rate": 192000,
+  "source_bits": 24,
+  "cut_s": [
+   0.01,
+   0.75
+  ],
+  "bundle": "sonniss-gdc-2016-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "hit",
+   "distance": 0.38,
+   "limit": 0.578,
+   "moments": [
+    [
+     "DfIL2Fbqbvx",
+     49.41,
+     0.298
+    ],
+    [
+     "DelTv4SteNh",
+     20.71,
+     0.336
+    ],
+    [
+     "Dc803cWhYln",
+     37.85,
+     0.364
+    ],
+    [
+     "Zf87y5bWzUA",
+     11.86,
+     0.418
+    ],
+    [
+     "DePRLwPoANZ",
+     74.41,
+     0.482
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.12,
+   "attack_s": 0.055,
+   "decay_s": 0.06,
+   "bands": [
+    -6.9,
+    -2.6,
+    -9.5,
+    -12.4,
+    -15.4,
+    -16.3,
+    -17.1
+   ],
+   "flat": 0.333,
+   "low": 0.345,
+   "sweep": -0.13,
+   "centroid_hz": 685
+  },
+  "peak_s": 0.222,
+  "duration_s": 0.74,
+  "gain_db": -18.1
+ },
+ {
+  "id": "paper_4",
+  "role": "paper",
+  "use": "paper moving: a page, a document or a card landing",
+  "file": "paper_4.flac",
+  "sha": "dd5065c20aeb32fe",
+  "title": "Books Alive: PM_BA_BOOK_2_6 Book, Paper, Page Turn",
+  "author": "PMSFX",
+  "source_url": "https://archive.org/download/sonniss-gdc-2019-game-audio-bundle-normalized/PMSFX%20-%20Books%20Alive/PM_BA_BOOK_2_6%20Book%2C%20Paper%2C%20Page%20Turn.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -16.8,
+  "hit_lufs_hp150": -16.8,
+  "source_file": "PMSFX - Books Alive/PM_BA_BOOK_2_6 Book, Paper, Page Turn.flac",
+  "source_sha256": "5c0f0bbc1183ddfbb3bf22436cdb63df5c89498400d7c9581b26a31c7b8b59bb",
+  "source_codec": "flac",
+  "source_rate": 192000,
+  "source_bits": 24,
+  "cut_s": [
+   0.0,
+   1.43
+  ],
+  "bundle": "sonniss-gdc-2019-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "paper",
+  "reference": {
+   "class": "hit",
+   "distance": 0.508,
+   "limit": 0.578,
+   "moments": [
+    [
+     "pick_23_DeKRACloUED",
+     2.09,
+     0.267
+    ],
+    [
+     "Zf87y5bWzUA",
+     11.86,
+     0.541
+    ],
+    [
+     "DfIL2Fbqbvx",
+     49.41,
+     0.554
+    ],
+    [
+     "DelTv4SteNh",
+     20.71,
+     0.569
+    ],
+    [
+     "DUQzZ_kE3O7",
+     15.87,
+     0.607
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.105,
+   "attack_s": 0.05,
+   "decay_s": 0.05,
+   "bands": [
+    -9.4,
+    -10.3,
+    -12.8,
+    -6.4,
+    -7.9,
+    -5.8,
+    -10.7
+   ],
+   "flat": 0.542,
+   "low": 0.137,
+   "sweep": -0.35,
+   "centroid_hz": 3183
+  },
+  "peak_s": 0.216,
+  "max_s": 0.76,
+  "duration_s": 1.43,
+  "gain_db": -11.4
+ },
+ {
+  "id": "paper_5",
+  "role": "paper",
+  "use": "paper moving: a page, a document or a card landing",
+  "file": "paper_5.flac",
+  "sha": "b0dea4a93d3dc1c0",
+  "title": "Antique Books: PAPRMisc_Antique Books Slow Page Turns 6_344 Audio_Antiques - Books",
+  "author": "344 Audio",
+  "source_url": "https://archive.org/download/sonniss-gdc-2026-game-audio-bundle-normalized/344%20Audio%20-%20Antique%20Books/PAPRMisc_Antique%20Books%20Slow%20Page%20Turns%206_344%20Audio_Antiques%20-%20Books.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -18.9,
+  "hit_lufs_hp150": -19.6,
+  "source_file": "344 Audio - Antique Books/PAPRMisc_Antique Books Slow Page Turns 6_344 Audio_Antiques - Books.flac",
+  "source_sha256": "063b26d2ffdc95517d855997469f55d7c0411a658fed8a88ac783fcf7cb1e2bb",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.055,
+   0.975
+  ],
+  "bundle": "sonniss-gdc-2026-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "paper",
+  "reference": {
+   "class": "hit",
+   "distance": 0.532,
+   "limit": 0.578,
+   "moments": [
+    [
+     "DfIL2Fbqbvx",
+     49.41,
+     0.435
+    ],
+    [
+     "DelTv4SteNh",
+     20.71,
+     0.475
+    ],
+    [
+     "pick_23_DeKRACloUED",
+     2.09,
+     0.553
+    ],
+    [
+     "Zf87y5bWzUA",
+     11.86,
+     0.596
+    ],
+    [
+     "DUQzZ_kE3O7",
+     15.87,
+     0.604
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.135,
+   "attack_s": 0.015,
+   "decay_s": 0.115,
+   "bands": [
+    -7.5,
+    -9.2,
+    -9.8,
+    -6.7,
+    -6.4,
+    -9.7,
+    -13.3
+   ],
+   "flat": 0.444,
+   "low": 0.216,
+   "sweep": -0.93,
+   "centroid_hz": 2154
+  },
+  "peak_s": 0.753,
+  "hit_s": 0.649,
+  "duration_s": 0.92,
+  "gain_db": -9.3
+ },
+ {
+  "id": "glitch_4",
+  "role": "glitch",
+  "use": "a digital glitch on a glitched flash cut",
+  "file": "glitch_4.flac",
+  "sha": "ff3b8b4881dc1f63",
+  "title": "INACCURACY (GLITCHES): Glitch_Error_Malfunction_045",
+  "author": "MatiasMacSD",
+  "source_url": "https://archive.org/download/sonniss-gdc-2017-game-audio-bundle-normalized/MatiasMacSD%20-%20INACCURACY%20%28GLITCHES%29/Glitch_Error_Malfunction_045.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -11.9,
+  "hit_lufs_hp150": -11.9,
+  "source_file": "MatiasMacSD - INACCURACY (GLITCHES)/Glitch_Error_Malfunction_045.flac",
+  "source_sha256": "2e87feb1a1d12784513849bf31bd47fca6ab0ad29cd9fd2744ab8c31414ebba9",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.825,
+   1.12
+  ],
+  "bundle": "sonniss-gdc-2017-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "glitch",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.3,
+   "limit": 0.415,
+   "moments": [
+    [
+     "De9yb6rMm2s",
+     36.12,
+     0.27
+    ],
+    [
+     "pick_38_DdocrlHOCNB",
+     0.82,
+     0.277
+    ],
+    [
+     "De9ykdsOC_X",
+     86.0,
+     0.278
+    ],
+    [
+     "DfOh6WivITF",
+     19.52,
+     0.313
+    ],
+    [
+     "pick_12_DeGKdTaCtXD",
+     8.79,
+     0.36
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.335,
+   "attack_s": 0.08,
+   "decay_s": 0.25,
+   "bands": [
+    -10.0,
+    -9.4,
+    -5.9,
+    -7.4,
+    -9.2,
+    -9.7,
+    -9.3
+   ],
+   "flat": 0.53,
+   "low": 0.141,
+   "sweep": 0.01,
+   "centroid_hz": 2660
+  },
+  "peak_s": 0.144,
+  "duration_s": 0.295,
+  "gain_db": -15.8
+ },
+ {
+  "id": "impact_2",
+  "role": "impact",
+  "use": "a deep impact on the hook, the turn or the payoff",
+  "file": "impact_2.flac",
+  "sha": "c3c1ac177db6a0ae",
+  "title": "Effective Trailer Hits & Impacts: Dramatic E",
+  "author": "Federico Soler Fern\u00e1ndez",
+  "source_url": "https://archive.org/download/sonniss-gdc-2019-game-audio-bundle-normalized/Federico%20Soler%20Fern%C3%A1ndez%20-%20Effective%20Trailer%20Hits%20%26%20Impacts/Dramatic%20E.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -9.5,
+  "hit_lufs_hp150": -14.1,
+  "source_file": "Federico Soler Fern\u00e1ndez - Effective Trailer Hits & Impacts/Dramatic E.flac",
+  "source_sha256": "da6cda5751b61c8edbcdaac6cf75d3fd26f4f13e9e8c3190999e10ecb48a0ffd",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.0,
+   4.67
+  ],
+  "bundle": "sonniss-gdc-2019-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "impact",
+   "distance": 0.277,
+   "limit": 0.314,
+   "moments": [
+    [
+     "pick_18_DdPdXhhItNH",
+     7.67,
+     0.144
+    ],
+    [
+     "DeubjvURpH8",
+     41.56,
+     0.29
+    ],
+    [
+     "pick_19_DdFE-HlRKiB",
+     16.41,
+     0.304
+    ],
+    [
+     "DfIL2Fbqbvx",
+     31.03,
+     0.315
+    ],
+    [
+     "pick_07_Dc_0o-nIKYF",
+     33.66,
+     0.331
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.43,
+   "attack_s": 0.025,
+   "decay_s": 0.4,
+   "bands": [
+    -1.8,
+    -8.1,
+    -13.2,
+    -14.0,
+    -14.5,
+    -13.9,
+    -17.3
+   ],
+   "flat": 0.59,
+   "low": 0.758,
+   "sweep": 0.36,
+   "centroid_hz": 677
+  },
+  "peak_s": 0.055,
+  "max_s": 1.915,
+  "duration_s": 4.67,
+  "gain_db": -13.5
+ },
+ {
+  "id": "impact_3",
+  "role": "impact",
+  "use": "a deep impact on the hook, the turn or the payoff",
+  "file": "impact_3.flac",
+  "sha": "91b09616cca87dbc",
+  "title": "Effective Trailer Booms: Boom 005",
+  "author": "Federico Soler Fern\u00e1ndez",
+  "source_url": "https://archive.org/download/sonniss-gdc-2019-game-audio-bundle-normalized/Federico%20Soler%20Fern%C3%A1ndez%20-%20Effective%20Trailer%20Booms/Boom%20005.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -11.7,
+  "hit_lufs_hp150": -18.3,
+  "source_file": "Federico Soler Fern\u00e1ndez - Effective Trailer Booms/Boom 005.flac",
+  "source_sha256": "de64d1c9d3ddce566dd252cacdb9e59ffc05042867bf83d3748ffee89bcc8596",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.0,
+   3.565
+  ],
+  "bundle": "sonniss-gdc-2019-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "impact",
+   "distance": 0.291,
+   "limit": 0.314,
+   "moments": [
+    [
+     "pick_19_DdFE-HlRKiB",
+     16.41,
+     0.268
+    ],
+    [
+     "k9zTr2MAFRg",
+     1.43,
+     0.272
+    ],
+    [
+     "DezYj_ijIsf",
+     39.56,
+     0.281
+    ],
+    [
+     "DeMu_6OohNw",
+     63.09,
+     0.314
+    ],
+    [
+     "DclpjyxhKF6",
+     7.41,
+     0.323
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.445,
+   "attack_s": 0.06,
+   "decay_s": 0.38,
+   "bands": [
+    -0.6,
+    -15.9,
+    -13.2,
+    -17.6,
+    -19.0,
+    -19.3,
+    -19.7
+   ],
+   "flat": 0.434,
+   "low": 0.888,
+   "sweep": 1.53,
+   "centroid_hz": 319
+  },
+  "peak_s": 0.085,
+  "max_s": 1.525,
+  "duration_s": 3.565,
+  "gain_db": -11.3
+ },
+ {
+  "id": "impact_4",
+  "role": "impact",
+  "use": "a deep impact on the hook, the turn or the payoff",
+  "file": "impact_4.flac",
+  "sha": "9ba81df065b6727e",
+  "title": "Sinematic: Sinematic - Stingers_11",
+  "author": "SoundMorph",
+  "source_url": "https://archive.org/download/sonniss-gdc-2015-game-audio-bundle-normalized/SoundMorph%20-%20Sinematic/Sinematic%20-%20Stingers_11.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -10.2,
+  "hit_lufs_hp150": -11.9,
+  "source_file": "SoundMorph - Sinematic/Sinematic - Stingers_11.flac",
+  "source_sha256": "37e4e2fce66bd440655c1652e3d48715dcbc8aa06adde59625dac8d79d168f8c",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.125,
+   4.85
+  ],
+  "bundle": "sonniss-gdc-2015-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "impact",
+   "distance": 0.281,
+   "limit": 0.314,
+   "moments": [
+    [
+     "Ddy44PAtEs_",
+     69.45,
+     0.198
+    ],
+    [
+     "pick_21_DdxWoavOuyl",
+     19.96,
+     0.233
+    ],
+    [
+     "Dee-mp9BJqG",
+     24.2,
+     0.275
+    ],
+    [
+     "DeMu_6OohNw",
+     15.29,
+     0.334
+    ],
+    [
+     "Dewt0XXoHtk",
+     12.12,
+     0.365
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 1.335,
+   "attack_s": 0.455,
+   "decay_s": 0.875,
+   "bands": [
+    -4.1,
+    -5.1,
+    -8.6,
+    -11.6,
+    -14.1,
+    -15.2,
+    -16.1
+   ],
+   "flat": 0.379,
+   "low": 0.559,
+   "sweep": 0.1,
+   "centroid_hz": 808
+  },
+  "peak_s": 1.458,
+  "max_s": 4.145,
+  "duration_s": 4.725,
+  "gain_db": -12.8
+ },
+ {
+  "id": "impact_5",
+  "role": "impact",
+  "use": "a deep impact on the hook, the turn or the payoff",
+  "file": "impact_5.flac",
+  "sha": "493d3ffb83b02f97",
+  "title": "Effective Trailer Hits & Impacts: Angry E",
+  "author": "Federico Soler Fern\u00e1ndez",
+  "source_url": "https://archive.org/download/sonniss-gdc-2019-game-audio-bundle-normalized/Federico%20Soler%20Fern%C3%A1ndez%20-%20Effective%20Trailer%20Hits%20%26%20Impacts/Angry%20E.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -10.5,
+  "hit_lufs_hp150": -15.2,
+  "source_file": "Federico Soler Fern\u00e1ndez - Effective Trailer Hits & Impacts/Angry E.flac",
+  "source_sha256": "d4a6ed382f184d63538fd66a698f5b068271d73ec3653aff94dbd16821c895c3",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.0,
+   4.66
+  ],
+  "bundle": "sonniss-gdc-2019-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "impact",
+   "distance": 0.293,
+   "limit": 0.314,
+   "moments": [
+    [
+     "pick_18_DdPdXhhItNH",
+     7.67,
+     0.257
+    ],
+    [
+     "DcRHfOnhlWx",
+     40.42,
+     0.262
+    ],
+    [
+     "pick_19_DdFE-HlRKiB",
+     16.41,
+     0.311
+    ],
+    [
+     "DezYj_ijIsf",
+     39.56,
+     0.313
+    ],
+    [
+     "DeubjvURpH8",
+     41.56,
+     0.323
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.5,
+   "attack_s": 0.025,
+   "decay_s": 0.47,
+   "bands": [
+    -1.4,
+    -8.1,
+    -13.9,
+    -16.0,
+    -16.7,
+    -18.0,
+    -19.3
+   ],
+   "flat": 0.505,
+   "low": 0.828,
+   "sweep": 0.64,
+   "centroid_hz": 409
+  },
+  "peak_s": 0.054,
+  "max_s": 2.58,
+  "duration_s": 4.66,
+  "gain_db": -12.5
+ },
+ {
+  "id": "impact_6",
+  "role": "impact",
+  "use": "a deep impact on the hook, the turn or the payoff",
+  "file": "impact_6.flac",
+  "sha": "cdd8058191601ca4",
+  "title": "Effective Trailer Hits & Impacts: Smash B",
+  "author": "Federico Soler Fern\u00e1ndez",
+  "source_url": "https://archive.org/download/sonniss-gdc-2019-game-audio-bundle-normalized/Federico%20Soler%20Fern%C3%A1ndez%20-%20Effective%20Trailer%20Hits%20%26%20Impacts/Smash%20B.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -10.1,
+  "hit_lufs_hp150": -13.2,
+  "source_file": "Federico Soler Fern\u00e1ndez - Effective Trailer Hits & Impacts/Smash B.flac",
+  "source_sha256": "9a3e2b45fb8dcb5532b10c01685ce434511573cbe2906aa7714d1abed70c13db",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.0,
+   4.855
+  ],
+  "bundle": "sonniss-gdc-2019-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "impact",
+   "distance": 0.28,
+   "limit": 0.314,
+   "moments": [
+    [
+     "pick_19_DdFE-HlRKiB",
+     16.41,
+     0.249
+    ],
+    [
+     "DezYj_ijIsf",
+     39.56,
+     0.269
+    ],
+    [
+     "DeHkRtts3bI",
+     5.88,
+     0.272
+    ],
+    [
+     "DcRHfOnhlWx",
+     23.45,
+     0.301
+    ],
+    [
+     "pick_38_DdocrlHOCNB",
+     20.59,
+     0.311
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.5,
+   "attack_s": 0.05,
+   "decay_s": 0.445,
+   "bands": [
+    -1.1,
+    -11.2,
+    -12.6,
+    -14.3,
+    -15.5,
+    -16.5,
+    -19.4
+   ],
+   "flat": 0.453,
+   "low": 0.808,
+   "sweep": 0.27,
+   "centroid_hz": 471
+  },
+  "peak_s": 0.055,
+  "max_s": 2.345,
+  "duration_s": 4.855,
+  "gain_db": -12.9
+ },
+ {
+  "id": "impact_7",
+  "role": "impact",
+  "use": "a deep impact on the hook, the turn or the payoff",
+  "file": "impact_7.flac",
+  "sha": "50ef7ca5a977d0d5",
+  "title": "Effective Trailer Whooshes: Action B",
+  "author": "Federico Soler Fern\u00e1ndez",
+  "source_url": "https://archive.org/download/sonniss-gdc-2019-game-audio-bundle-normalized/Federico%20Soler%20Fern%C3%A1ndez%20-%20Effective%20Trailer%20Whooshes/Action%20B.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -7.9,
+  "hit_lufs_hp150": -13.4,
+  "source_file": "Federico Soler Fern\u00e1ndez - Effective Trailer Whooshes/Action B.flac",
+  "source_sha256": "2c348f75e561bf6ab32eb23b435b653eeac054da902e0324dd86337ee75b566f",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.29,
+   3.29
+  ],
+  "bundle": "sonniss-gdc-2019-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "impact",
+   "distance": 0.27,
+   "limit": 0.314,
+   "moments": [
+    [
+     "pick_31_DcdlcvcO421",
+     9.51,
+     0.214
+    ],
+    [
+     "sYSIyYjC3dg",
+     43.0,
+     0.254
+    ],
+    [
+     "pick_38_DdocrlHOCNB",
+     20.59,
+     0.288
+    ],
+    [
+     "DaVhlyooymt",
+     51.44,
+     0.295
+    ],
+    [
+     "k9zTr2MAFRg",
+     1.43,
+     0.298
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.405,
+   "attack_s": 0.12,
+   "decay_s": 0.28,
+   "bands": [
+    -4.6,
+    -3.3,
+    -10.7,
+    -15.6,
+    -16.4,
+    -16.0,
+    -17.5
+   ],
+   "flat": 0.448,
+   "low": 0.623,
+   "sweep": 0.3,
+   "centroid_hz": 577
+  },
+  "peak_s": 0.729,
+  "max_s": 1.505,
+  "duration_s": 3.0,
+  "gain_db": -15.1
+ },
+ {
+  "id": "impact_8",
+  "role": "impact",
+  "use": "a deep impact on the hook, the turn or the payoff",
+  "file": "impact_8.flac",
+  "sha": "e4962efb77314194",
+  "title": "Eclectic Whooshes: Whoosh,Sound Design,Blast,Watery,Crash",
+  "author": "Airborne Sound",
+  "source_url": "https://archive.org/download/sonniss-gdc-2018-game-audio-bundle-normalized/Airborne%20Sound%20-%20Eclectic%20Whooshes/Whoosh%2CSound%20Design%2CBlast%2CWatery%2CCrash.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -11.9,
+  "hit_lufs_hp150": -14.4,
+  "source_file": "Airborne Sound - Eclectic Whooshes/Whoosh,Sound Design,Blast,Watery,Crash.flac",
+  "source_sha256": "946a5d1452b0b32b90ef8a6da9a14f80cc8fd64e250e14e54a9dd7e06c1a67a0",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.005,
+   1.475
+  ],
+  "bundle": "sonniss-gdc-2018-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "impact",
+   "distance": 0.309,
+   "limit": 0.314,
+   "moments": [
+    [
+     "pick_19_DdFE-HlRKiB",
+     16.41,
+     0.271
+    ],
+    [
+     "pick_38_DdocrlHOCNB",
+     20.59,
+     0.303
+    ],
+    [
+     "DdHguJfhYSU",
+     14.61,
+     0.311
+    ],
+    [
+     "DezYj_ijIsf",
+     39.56,
+     0.324
+    ],
+    [
+     "DeUawxcIr_g",
+     51.3,
+     0.335
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.47,
+   "attack_s": 0.06,
+   "decay_s": 0.405,
+   "bands": [
+    -1.9,
+    -10.4,
+    -12.1,
+    -11.5,
+    -11.7,
+    -13.5,
+    -17.2
+   ],
+   "flat": 0.493,
+   "low": 0.689,
+   "sweep": -0.41,
+   "centroid_hz": 822
+  },
+  "peak_s": 0.253,
+  "max_s": 1.205,
+  "duration_s": 1.47,
+  "gain_db": -11.1
+ },
+ {
+  "id": "whoosh_3",
+  "role": "whoosh",
+  "use": "a sweep whose peak lands on a moving cut or a card sliding in",
+  "file": "whoosh_3.flac",
+  "sha": "c04db9d4b20e6dea",
+  "title": "Transitions HD: transition shutter 009",
+  "author": "Alexander Kopeikin",
+  "source_url": "https://archive.org/download/sonniss-gdc-2015-game-audio-bundle-normalized/Alexander%20Kopeikin%20-%20Transitions%20HD/transition%20shutter%20009.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -12.6,
+  "hit_lufs_hp150": -14.9,
+  "source_file": "Alexander Kopeikin - Transitions HD/transition shutter 009.flac",
+  "source_sha256": "d0e3b552cd71b2f42766ca8936c957e749da898c9dc12f5c39ac62f61d0c8833",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.005,
+   1.02
+  ],
+  "bundle": "sonniss-gdc-2015-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.282,
+   "limit": 0.415,
+   "moments": [
+    [
+     "DfOh6WivITF",
+     19.52,
+     0.243
+    ],
+    [
+     "De9ykdsOC_X",
+     86.0,
+     0.258
+    ],
+    [
+     "pick_24_Ddar0sgSdQq",
+     9.41,
+     0.28
+    ],
+    [
+     "De9yb6rMm2s",
+     36.12,
+     0.305
+    ],
+    [
+     "Dc803cWhYln",
+     32.62,
+     0.322
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.285,
+   "attack_s": 0.115,
+   "decay_s": 0.165,
+   "bands": [
+    -5.6,
+    -6.0,
+    -9.8,
+    -10.3,
+    -10.2,
+    -8.6,
+    -13.4
+   ],
+   "flat": 0.581,
+   "low": 0.407,
+   "sweep": -0.23,
+   "centroid_hz": 1761
+  },
+  "peak_s": 0.193,
+  "duration_s": 1.015,
+  "gain_db": -15.1
+ },
+ {
+  "id": "whoosh_4",
+  "role": "whoosh",
+  "use": "a sweep whose peak lands on a moving cut or a card sliding in",
+  "file": "whoosh_4.flac",
+  "sha": "a229747acd346527",
+  "title": "Transitions HD: transition t05 hard 002",
+  "author": "Alexander Kopeikin",
+  "source_url": "https://archive.org/download/sonniss-gdc-2015-game-audio-bundle-normalized/Alexander%20Kopeikin%20-%20Transitions%20HD/transition%20t05%20hard%20002.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -11.2,
+  "hit_lufs_hp150": -13.5,
+  "source_file": "Alexander Kopeikin - Transitions HD/transition t05 hard 002.flac",
+  "source_sha256": "db9354beaa3c3528be465696d027d8d9ba4f8bdd0cc4f1bd33f52508025bbbfd",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.0,
+   0.48
+  ],
+  "bundle": "sonniss-gdc-2015-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.279,
+   "limit": 0.415,
+   "moments": [
+    [
+     "DcgnHXLK2Sc",
+     0.37,
+     0.234
+    ],
+    [
+     "pick_17_DcgnHXLK2Sc",
+     0.37,
+     0.234
+    ],
+    [
+     "pick_36_DdEXKX7ICIG",
+     0.28,
+     0.253
+    ],
+    [
+     "De9ykdsOC_X",
+     2.65,
+     0.333
+    ],
+    [
+     "DcbYpgZBApV",
+     18.09,
+     0.344
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.395,
+   "attack_s": 0.36,
+   "decay_s": 0.03,
+   "bands": [
+    -4.1,
+    -6.9,
+    -8.7,
+    -9.2,
+    -11.8,
+    -13.5,
+    -14.3
+   ],
+   "flat": 0.449,
+   "low": 0.48,
+   "sweep": 0.03,
+   "centroid_hz": 1132
+  },
+  "peak_s": 0.378,
+  "duration_s": 0.48,
+  "gain_db": -16.5
+ },
+ {
+  "id": "whoosh_5",
+  "role": "whoosh",
+  "use": "a sweep whose peak lands on a moving cut or a card sliding in",
+  "file": "whoosh_5.flac",
+  "sha": "cf4a56956b4fba77",
+  "title": "Whooshes & Impacts 2: Whooshes_135",
+  "author": "SoundBits",
+  "source_url": "https://archive.org/download/sonniss-gdc-2017-game-audio-bundle-normalized/SoundBits%20-%20Whooshes%20%26%20Impacts%202/Whooshes_135.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -11.9,
+  "hit_lufs_hp150": -13.2,
+  "source_file": "SoundBits - Whooshes & Impacts 2/Whooshes_135.flac",
+  "source_sha256": "da5f553911cb98fb755ceb05f0fe4dd419657ffee4460a66566c7c8a13951405",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.19,
+   2.495
+  ],
+  "bundle": "sonniss-gdc-2017-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.232,
+   "limit": 0.415,
+   "moments": [
+    [
+     "DW6PsEUCHDs",
+     1.23,
+     0.194
+    ],
+    [
+     "DahTnUZAhkG",
+     6.25,
+     0.215
+    ],
+    [
+     "pick_36_DdEXKX7ICIG",
+     2.69,
+     0.244
+    ],
+    [
+     "pick_15_DdEk9kqh_zd",
+     12.49,
+     0.253
+    ],
+    [
+     "DeKHcthhKyd",
+     20.24,
+     0.256
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.71,
+   "attack_s": 0.41,
+   "decay_s": 0.295,
+   "bands": [
+    -2.8,
+    -8.2,
+    -8.9,
+    -11.3,
+    -13.7,
+    -13.7,
+    -15.0
+   ],
+   "flat": 0.476,
+   "low": 0.594,
+   "sweep": 0.41,
+   "centroid_hz": 932
+  },
+  "peak_s": 1.299,
+  "max_s": 1.755,
+  "duration_s": 2.305,
+  "gain_db": -15.8
+ },
+ {
+  "id": "whoosh_6",
+  "role": "whoosh",
+  "use": "a sweep whose peak lands on a moving cut or a card sliding in",
+  "file": "whoosh_6.flac",
+  "sha": "5b0c8ef2f7bde6ae",
+  "title": "Impacts, Hits & Whooshes: WHOOSH AIR Steady Smooth_02",
+  "author": "SmartSoundFX",
+  "source_url": "https://archive.org/download/sonniss-gdc-2020-game-audio-bundle-normalized/SmartSoundFX%20-%20Impacts%2C%20Hits%20%26%20Whooshes/WHOOSH%20AIR%20Steady%20Smooth_02.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -13.5,
+  "hit_lufs_hp150": -13.6,
+  "source_file": "SmartSoundFX - Impacts, Hits & Whooshes/WHOOSH AIR Steady Smooth_02.flac",
+  "source_sha256": "dd7be20935f9901688468a109184d21e827da502c8ae72f25aeea78d9fa123c4",
+  "source_codec": "flac",
+  "source_rate": 48000,
+  "source_bits": 24,
+  "cut_s": [
+   0.175,
+   1.095
+  ],
+  "bundle": "sonniss-gdc-2020-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.285,
+   "limit": 0.415,
+   "moments": [
+    [
+     "DcRHfOnhlWx",
+     83.31,
+     0.21
+    ],
+    [
+     "pick_16_Dc3mgNJO73W",
+     22.3,
+     0.262
+    ],
+    [
+     "DaDhP4JNAq9",
+     23.02,
+     0.305
+    ],
+    [
+     "DcgnHXLK2Sc",
+     12.09,
+     0.324
+    ],
+    [
+     "pick_17_DcgnHXLK2Sc",
+     12.09,
+     0.324
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.225,
+   "attack_s": 0.09,
+   "decay_s": 0.13,
+   "bands": [
+    -12.5,
+    -12.3,
+    -2.8,
+    -6.8,
+    -11.9,
+    -12.8,
+    -14.0
+   ],
+   "flat": 0.226,
+   "low": 0.072,
+   "sweep": 0.52,
+   "centroid_hz": 1450
+  },
+  "peak_s": 0.443,
+  "duration_s": 0.92,
+  "gain_db": -14.2
+ },
+ {
+  "id": "whoosh_7",
+  "role": "whoosh",
+  "use": "a sweep whose peak lands on a moving cut or a card sliding in",
+  "file": "whoosh_7.flac",
+  "sha": "327057eeee3432d3",
+  "title": "Tiny Transitions 2: Scrape_Cloth_10",
+  "author": "SoundBits",
+  "source_url": "https://archive.org/download/sonniss-gdc-2019-game-audio-bundle-normalized/SoundBits%20-%20Tiny%20Transitions%202/Scrape_Cloth_10.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -12.4,
+  "hit_lufs_hp150": -12.5,
+  "source_file": "SoundBits - Tiny Transitions 2/Scrape_Cloth_10.flac",
+  "source_sha256": "622c54aa75097ffe0a4bfcfd350beb534cb9be1d2328d759245f15031417fbaa",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.015,
+   0.55
+  ],
+  "bundle": "sonniss-gdc-2019-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.256,
+   "limit": 0.415,
+   "moments": [
+    [
+     "DcgnHXLK2Sc",
+     0.37,
+     0.239
+    ],
+    [
+     "pick_17_DcgnHXLK2Sc",
+     0.37,
+     0.239
+    ],
+    [
+     "pick_36_DdEXKX7ICIG",
+     0.28,
+     0.243
+    ],
+    [
+     "De9yb6rMm2s",
+     58.88,
+     0.274
+    ],
+    [
+     "pick_15_DdEk9kqh_zd",
+     12.49,
+     0.283
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.395,
+   "attack_s": 0.275,
+   "decay_s": 0.115,
+   "bands": [
+    -10.8,
+    -9.0,
+    -6.0,
+    -6.4,
+    -8.0,
+    -10.4,
+    -12.0
+   ],
+   "flat": 0.427,
+   "low": 0.117,
+   "sweep": 0.13,
+   "centroid_hz": 2092
+  },
+  "peak_s": 0.357,
+  "duration_s": 0.535,
+  "gain_db": -15.3
+ },
+ {
+  "id": "whoosh_8",
+  "role": "whoosh",
+  "use": "a sweep whose peak lands on a moving cut or a card sliding in",
+  "file": "whoosh_8.flac",
+  "sha": "c71cc44ea3e51e71",
+  "title": "Tiny Transitions 2: Tiny-Transitions-2_281",
+  "author": "SoundBits",
+  "source_url": "https://archive.org/download/sonniss-gdc-2019-game-audio-bundle-normalized/SoundBits%20-%20Tiny%20Transitions%202/Tiny-Transitions-2_281.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -11.4,
+  "hit_lufs_hp150": -11.4,
+  "source_file": "SoundBits - Tiny Transitions 2/Tiny-Transitions-2_281.flac",
+  "source_sha256": "5aea050b2901ed713b30a0bbba7e74201f0b9294d0ef0f577e6faf3c9f3c1eb0",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.0,
+   1.57
+  ],
+  "bundle": "sonniss-gdc-2019-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.236,
+   "limit": 0.415,
+   "moments": [
+    [
+     "DeKHcthhKyd",
+     20.24,
+     0.204
+    ],
+    [
+     "DcbYpgZBApV",
+     56.38,
+     0.229
+    ],
+    [
+     "pick_07_Dc_0o-nIKYF",
+     28.57,
+     0.232
+    ],
+    [
+     "DdO49cmh2gw",
+     24.37,
+     0.248
+    ],
+    [
+     "Ddy44PAtEs_",
+     74.1,
+     0.268
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.84,
+   "attack_s": 0.365,
+   "decay_s": 0.47,
+   "bands": [
+    -8.7,
+    -10.7,
+    -8.9,
+    -7.5,
+    -7.3,
+    -7.6,
+    -9.3
+   ],
+   "flat": 0.702,
+   "low": 0.165,
+   "sweep": -0.06,
+   "centroid_hz": 3092
+  },
+  "peak_s": 0.686,
+  "max_s": 1.265,
+  "duration_s": 1.57,
+  "gain_db": -16.3
+ },
+ {
+  "id": "swish_2",
+  "role": "swish",
+  "use": "a short swish on a quick cut or a small card landing",
+  "file": "swish_2.flac",
+  "sha": "6b0862fb1173c76b",
+  "title": "Just Whoosh 3 _ Whoosh Essentials: Whoosh_Cloth_Leather_Fight_174",
+  "author": "SoundBits",
+  "source_url": "https://archive.org/download/sonniss-gdc-2016-game-audio-bundle-normalized/SoundBits%20-%20%20Just%20Whoosh%203%20_%20Whoosh%20Essentials/Whoosh_Cloth_Leather_Fight_174.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -17.3,
+  "hit_lufs_hp150": -18.8,
+  "source_file": "SoundBits -  Just Whoosh 3 _ Whoosh Essentials/Whoosh_Cloth_Leather_Fight_174.flac",
+  "source_sha256": "5f5db160cf1e65f84f425a0acf4721fad9eb88c1583933aa5350a0341f4d1991",
+  "source_codec": "flac",
+  "source_rate": 192000,
+  "source_bits": 24,
+  "cut_s": [
+   0.075,
+   0.53
+  ],
+  "bundle": "sonniss-gdc-2016-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.298,
+   "limit": 0.415,
+   "moments": [
+    [
+     "De9ykdsOC_X",
+     65.0,
+     0.202
+    ],
+    [
+     "DcRHfOnhlWx",
+     86.59,
+     0.286
+    ],
+    [
+     "DcEN0yGh4DD",
+     75.12,
+     0.321
+    ],
+    [
+     "Dax0R-atz8d",
+     28.95,
+     0.337
+    ],
+    [
+     "Dewt0XXoHtk",
+     55.21,
+     0.344
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.13,
+   "attack_s": 0.08,
+   "decay_s": 0.045,
+   "bands": [
+    -4.5,
+    -8.5,
+    -6.4,
+    -7.5,
+    -13.5,
+    -15.7,
+    -16.6
+   ],
+   "flat": 0.223,
+   "low": 0.426,
+   "sweep": -1.04,
+   "centroid_hz": 915
+  },
+  "peak_s": 0.225,
+  "duration_s": 0.455,
+  "gain_db": -10.4
+ },
+ {
+  "id": "whoosh_9",
+  "role": "whoosh",
+  "use": "a sweep whose peak lands on a moving cut or a card sliding in",
+  "file": "whoosh_9.flac",
+  "sha": "d7ac406415e8d7cf",
+  "title": "Eclectic Whooshes 3: Whoosh,Sound Design,Watery,Strong,Fast,Abrupt",
+  "author": "Airborne Sound",
+  "source_url": "https://archive.org/download/sonniss-gdc-2019-game-audio-bundle-normalized/Airborne%20Sound%20-%20Eclectic%20Whooshes%203/Whoosh%2CSound%20Design%2CWatery%2CStrong%2CFast%2CAbrupt.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -11.9,
+  "hit_lufs_hp150": -13.7,
+  "source_file": "Airborne Sound - Eclectic Whooshes 3/Whoosh,Sound Design,Watery,Strong,Fast,Abrupt.flac",
+  "source_sha256": "8b4c86648095408b823774f17769378101a8d8365ff0190624bd4f906bde6f9b",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.005,
+   1.255
+  ],
+  "bundle": "sonniss-gdc-2019-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.268,
+   "limit": 0.415,
+   "moments": [
+    [
+     "De9yb6rMm2s",
+     1.01,
+     0.255
+    ],
+    [
+     "pick_36_DdEXKX7ICIG",
+     0.28,
+     0.257
+    ],
+    [
+     "pick_24_Ddar0sgSdQq",
+     9.41,
+     0.274
+    ],
+    [
+     "pick_41_Da0l5hSp5MQ",
+     3.82,
+     0.276
+    ],
+    [
+     "Dc803cWhYln",
+     32.62,
+     0.278
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.29,
+   "attack_s": 0.19,
+   "decay_s": 0.095,
+   "bands": [
+    -5.7,
+    -5.1,
+    -8.7,
+    -9.3,
+    -11.7,
+    -12.2,
+    -13.7
+   ],
+   "flat": 0.495,
+   "low": 0.386,
+   "sweep": 0.51,
+   "centroid_hz": 1287
+  },
+  "peak_s": 0.292,
+  "max_s": 0.855,
+  "duration_s": 1.25,
+  "gain_db": -15.8
+ },
+ {
+  "id": "whoosh_10",
+  "role": "whoosh",
+  "use": "a sweep whose peak lands on a moving cut or a card sliding in",
+  "file": "whoosh_10.flac",
+  "sha": "b98a97d0c115ad06",
+  "title": "Whooshes And Transitions: morph_whoosh_13",
+  "author": "Soundrangers",
+  "source_url": "https://archive.org/download/sonniss-gdc-2018-game-audio-bundle-normalized/Soundrangers%20-%20Whooshes%20And%20Transitions/morph_whoosh_13.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -11.0,
+  "hit_lufs_hp150": -11.1,
+  "source_file": "Soundrangers - Whooshes And Transitions/morph_whoosh_13.flac",
+  "source_sha256": "b66af96b8cdf42e6ed162d8d40bd74c3c8bee749184adb05ae228d4d124090f6",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.055,
+   2.085
+  ],
+  "bundle": "sonniss-gdc-2018-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.257,
+   "limit": 0.415,
+   "moments": [
+    [
+     "DeKHcthhKyd",
+     20.24,
+     0.151
+    ],
+    [
+     "DdO49cmh2gw",
+     24.37,
+     0.263
+    ],
+    [
+     "DW6PsEUCHDs",
+     1.23,
+     0.271
+    ],
+    [
+     "pick_19_DdFE-HlRKiB",
+     16.67,
+     0.296
+    ],
+    [
+     "DcbYpgZBApV",
+     56.38,
+     0.305
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.84,
+   "attack_s": 0.51,
+   "decay_s": 0.325,
+   "bands": [
+    -9.7,
+    -10.4,
+    -7.7,
+    -5.4,
+    -8.6,
+    -8.6,
+    -11.4
+   ],
+   "flat": 0.532,
+   "low": 0.136,
+   "sweep": 0.38,
+   "centroid_hz": 2420
+  },
+  "peak_s": 1.008,
+  "max_s": 1.68,
+  "duration_s": 2.03,
+  "gain_db": -16.7
+ },
+ {
+  "id": "whoosh_11",
+  "role": "whoosh",
+  "use": "a sweep whose peak lands on a moving cut or a card sliding in",
+  "file": "whoosh_11.flac",
+  "sha": "8a776ad71b1b60eb",
+  "title": "Transitions HD: transition t04 soft 016",
+  "author": "Alexander Kopeikin",
+  "source_url": "https://archive.org/download/sonniss-gdc-2015-game-audio-bundle-normalized/Alexander%20Kopeikin%20-%20Transitions%20HD/transition%20t04%20soft%20016.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -11.5,
+  "hit_lufs_hp150": -21.8,
+  "source_file": "Alexander Kopeikin - Transitions HD/transition t04 soft 016.flac",
+  "source_sha256": "a5007b6594c6c793f72d0371b0c1f99626662d1d7ae3e764e59e2dd699b4b5ce",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.005,
+   0.91
+  ],
+  "bundle": "sonniss-gdc-2015-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.311,
+   "limit": 0.415,
+   "moments": [
+    [
+     "k9zTr2MAFRg",
+     2.52,
+     0.297
+    ],
+    [
+     "DeKHcthhKyd",
+     84.22,
+     0.306
+    ],
+    [
+     "DahTnUZAhkG",
+     5.46,
+     0.315
+    ],
+    [
+     "DeHkRtts3bI",
+     57.76,
+     0.317
+    ],
+    [
+     "pick_24_Ddar0sgSdQq",
+     9.41,
+     0.319
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.205,
+   "attack_s": 0.13,
+   "decay_s": 0.07,
+   "bands": [
+    -0.7,
+    -16.8,
+    -15.6,
+    -14.5,
+    -15.8,
+    -15.9,
+    -17.2
+   ],
+   "flat": 0.602,
+   "low": 0.854,
+   "sweep": -0.01,
+   "centroid_hz": 540
+  },
+  "peak_s": 0.53,
+  "duration_s": 0.905,
+  "gain_db": -16.2
+ },
+ {
+  "id": "whoosh_12",
+  "role": "whoosh",
+  "use": "a sweep whose peak lands on a moving cut or a card sliding in",
+  "file": "whoosh_12.flac",
+  "sha": "d1e8d9a7ad9b7a14",
+  "title": "Whooshes And Transitions: texture_whoosh_02_fast_02",
+  "author": "Soundrangers",
+  "source_url": "https://archive.org/download/sonniss-gdc-2018-game-audio-bundle-normalized/Soundrangers%20-%20Whooshes%20And%20Transitions/texture_whoosh_02_fast_02.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -14.3,
+  "hit_lufs_hp150": -14.4,
+  "source_file": "Soundrangers - Whooshes And Transitions/texture_whoosh_02_fast_02.flac",
+  "source_sha256": "edb41477018905c1bb03fa67bdddb5e61dbe42a23b78e793a719830df53c8544",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.03,
+   0.795
+  ],
+  "bundle": "sonniss-gdc-2018-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.272,
+   "limit": 0.415,
+   "moments": [
+    [
+     "De9yb6rMm2s",
+     1.01,
+     0.17
+    ],
+    [
+     "pick_23_DeKRACloUED",
+     8.26,
+     0.253
+    ],
+    [
+     "De9ykdsOC_X",
+     86.0,
+     0.276
+    ],
+    [
+     "pick_38_DdocrlHOCNB",
+     0.82,
+     0.305
+    ],
+    [
+     "Dc803cWhYln",
+     32.62,
+     0.355
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.31,
+   "attack_s": 0.135,
+   "decay_s": 0.17,
+   "bands": [
+    -11.2,
+    -8.6,
+    -5.6,
+    -8.0,
+    -7.6,
+    -9.3,
+    -12.0
+   ],
+   "flat": 0.463,
+   "low": 0.112,
+   "sweep": -0.01,
+   "centroid_hz": 2199
+  },
+  "peak_s": 0.275,
+  "duration_s": 0.765,
+  "gain_db": -13.4
+ },
+ {
+  "id": "paper_6",
+  "role": "paper",
+  "use": "paper moving: a page, a document or a card landing",
+  "file": "paper_6.flac",
+  "sha": "4bb4aca26e7dc243",
+  "title": "Paper Sound Effects: Grabbing Paper 03",
+  "author": "Sounds Hunter",
+  "source_url": "https://archive.org/download/sonniss-gdc-2016-game-audio-bundle-normalized/Sounds%20Hunter%20-%20Paper%20Sound%20Effects/Grabbing%20Paper%2003.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -19.2,
+  "hit_lufs_hp150": -19.3,
+  "source_file": "Sounds Hunter - Paper Sound Effects/Grabbing Paper 03.flac",
+  "source_sha256": "22548c2c0689514c8c1babe8578d96bdf93ed1e8d0b28009c594b9a053c87e39",
+  "source_codec": "flac",
+  "source_rate": 48000,
+  "source_bits": 24,
+  "cut_s": [
+   0.0,
+   0.61
+  ],
+  "bundle": "sonniss-gdc-2016-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "paper",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.275,
+   "limit": 0.415,
+   "moments": [
+    [
+     "k9zTr2MAFRg",
+     2.52,
+     0.226
+    ],
+    [
+     "DeubjvURpH8",
+     53.3,
+     0.28
+    ],
+    [
+     "Dee-mp9BJqG",
+     9.54,
+     0.283
+    ],
+    [
+     "Dc803cWhYln",
+     32.62,
+     0.29
+    ],
+    [
+     "De9ykdsOC_X",
+     86.0,
+     0.297
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.245,
+   "attack_s": 0.165,
+   "decay_s": 0.075,
+   "bands": [
+    -10.2,
+    -9.9,
+    -9.3,
+    -10.0,
+    -9.8,
+    -5.8,
+    -6.5
+   ],
+   "flat": 0.841,
+   "low": 0.118,
+   "sweep": 0.45,
+   "centroid_hz": 4333
+  },
+  "peak_s": 0.373,
+  "duration_s": 0.61,
+  "gain_db": -8.5
+ },
+ {
+  "id": "paper_7",
+  "role": "paper",
+  "use": "paper moving: a page, a document or a card landing",
+  "file": "paper_7.flac",
+  "sha": "e778cae4f625dbb5",
+  "title": "Cardboard and Paper: PAPRHndl_Large Book Squeak Page Turn_ 01_MWSFX_CDAP",
+  "author": "Mechanical Wave",
+  "source_url": "https://archive.org/download/sonniss-gdc-2024-game-audio-bundle-normalized/Mechanical%20Wave%20-%20Cardboard%20and%20Paper/PAPRHndl_Large%20Book%20Squeak%20Page%20Turn_%2001_MWSFX_CDAP.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -15.0,
+  "hit_lufs_hp150": -15.1,
+  "source_file": "Mechanical Wave - Cardboard and Paper/PAPRHndl_Large Book Squeak Page Turn_ 01_MWSFX_CDAP.flac",
+  "source_sha256": "6fba1a0f35036287bfecf5ae47190f3d020ea02a6164dcaa8d7333c76a132114",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.065,
+   1.985
+  ],
+  "bundle": "sonniss-gdc-2024-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "paper",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.302,
+   "limit": 0.415,
+   "moments": [
+    [
+     "pick_15_DdEk9kqh_zd",
+     12.49,
+     0.295
+    ],
+    [
+     "DcgnHXLK2Sc",
+     0.37,
+     0.302
+    ],
+    [
+     "pick_17_DcgnHXLK2Sc",
+     0.37,
+     0.302
+    ],
+    [
+     "DeKHcthhKyd",
+     78.53,
+     0.302
+    ],
+    [
+     "Dc803cWhYln",
+     32.62,
+     0.31
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.41,
+   "attack_s": 0.305,
+   "decay_s": 0.1,
+   "bands": [
+    -8.5,
+    -9.9,
+    -8.3,
+    -6.9,
+    -6.8,
+    -9.0,
+    -11.6
+   ],
+   "flat": 0.546,
+   "low": 0.176,
+   "sweep": 0.0,
+   "centroid_hz": 2420
+  },
+  "peak_s": 1.674,
+  "duration_s": 1.92,
+  "gain_db": -12.7
+ },
+ {
+  "id": "paper_8",
+  "role": "paper",
+  "use": "paper moving: a page, a document or a card landing",
+  "file": "paper_8.flac",
+  "sha": "86f5181d6bf5fd6c",
+  "title": "Paper Sound Effects: Paper Handling and Turning Sequence",
+  "author": "Sounds Hunter",
+  "source_url": "https://archive.org/download/sonniss-gdc-2016-game-audio-bundle-normalized/Sounds%20Hunter%20-%20Paper%20Sound%20Effects/Paper%20Handling%20and%20Turning%20Sequence.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -18.8,
+  "hit_lufs_hp150": -18.8,
+  "source_file": "Sounds Hunter - Paper Sound Effects/Paper Handling and Turning Sequence.flac",
+  "source_sha256": "9401e31c23901987155d474c1ea9f17e6bf1c009df8b58129cbb0ed7049cebdc",
+  "source_codec": "flac",
+  "source_rate": 48000,
+  "source_bits": 24,
+  "cut_s": [
+   3.905,
+   4.675
+  ],
+  "bundle": "sonniss-gdc-2016-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "paper",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.248,
+   "limit": 0.415,
+   "moments": [
+    [
+     "DeKHcthhKyd",
+     20.24,
+     0.198
+    ],
+    [
+     "DcbYpgZBApV",
+     56.38,
+     0.215
+    ],
+    [
+     "DdO49cmh2gw",
+     24.37,
+     0.265
+    ],
+    [
+     "DehXGq_Bgss",
+     58.25,
+     0.276
+    ],
+    [
+     "pick_07_Dc_0o-nIKYF",
+     28.57,
+     0.288
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.825,
+   "attack_s": 0.37,
+   "decay_s": 0.45,
+   "bands": [
+    -9.2,
+    -9.2,
+    -8.3,
+    -8.4,
+    -8.4,
+    -7.3,
+    -8.7
+   ],
+   "flat": 0.764,
+   "low": 0.157,
+   "sweep": -0.56,
+   "centroid_hz": 3271
+  },
+  "peak_s": 0.241,
+  "duration_s": 0.77,
+  "gain_db": -8.9
+ },
+ {
+  "id": "paper_9",
+  "role": "paper",
+  "use": "paper moving: a page, a document or a card landing",
+  "file": "paper_9.flac",
+  "sha": "0e39f0b720ddbc9e",
+  "title": "Paper: newspaper_opening_009",
+  "author": "SpillAudio",
+  "source_url": "https://archive.org/download/sonniss-gdc-2020-game-audio-bundle-normalized/SpillAudio%20-%20Paper/newspaper_opening_009.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -17.1,
+  "hit_lufs_hp150": -17.1,
+  "source_file": "SpillAudio - Paper/newspaper_opening_009.flac",
+  "source_sha256": "97de898f5ea5f4ca7656a0458aeda0c7b0b925e60394ff2b775cb10371f98d3c",
+  "source_codec": "flac",
+  "source_rate": 192000,
+  "source_bits": 24,
+  "cut_s": [
+   0.115,
+   0.775
+  ],
+  "bundle": "sonniss-gdc-2020-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "paper",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.356,
+   "limit": 0.415,
+   "moments": [
+    [
+     "k9zTr2MAFRg",
+     2.52,
+     0.262
+    ],
+    [
+     "De9yb6rMm2s",
+     52.26,
+     0.341
+    ],
+    [
+     "DahTnUZAhkG",
+     12.1,
+     0.367
+    ],
+    [
+     "DeubjvURpH8",
+     53.3,
+     0.391
+    ],
+    [
+     "Dee-mp9BJqG",
+     9.1,
+     0.419
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.13,
+   "attack_s": 0.085,
+   "decay_s": 0.04,
+   "bands": [
+    -9.8,
+    -10.6,
+    -11.6,
+    -8.8,
+    -5.5,
+    -6.5,
+    -10.0
+   ],
+   "flat": 0.624,
+   "low": 0.122,
+   "sweep": 0.38,
+   "centroid_hz": 3296
+  },
+  "peak_s": 0.251,
+  "duration_s": 0.66,
+  "gain_db": -10.6
+ },
+ {
+  "id": "shutter_5",
+  "role": "shutter",
+  "use": "a camera shutter on a still photograph landing or a freeze frame",
+  "file": "shutter_5.flac",
+  "sha": "cd12111c7ef58ce1",
+  "title": "Hollywood Cameras: Camera Shutter Click Design Double Trouble 5.1 (LCRLsRsLf)",
+  "author": "2496SoundEffects",
+  "source_url": "https://archive.org/download/sonniss-gdc-2019-game-audio-bundle-normalized/2496SoundEffects%20-%20Hollywood%20Cameras/Camera%20Shutter%20Click%20Design%20Double%20Trouble%205.1%20%28LCRLsRsLf%29.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -17.4,
+  "hit_lufs_hp150": -21.4,
+  "source_file": "2496SoundEffects - Hollywood Cameras/Camera Shutter Click Design Double Trouble 5.1 (LCRLsRsLf).flac",
+  "source_sha256": "8b07c8b4dbec528f473fb18fe685f6db35b0961c6cfdcfdc32fe20865ca2f2bf",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.045,
+   0.685
+  ],
+  "bundle": "sonniss-gdc-2019-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "shutter",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.279,
+   "limit": 0.415,
+   "moments": [
+    [
+     "pick_24_Ddar0sgSdQq",
+     9.41,
+     0.224
+    ],
+    [
+     "k9zTr2MAFRg",
+     2.52,
+     0.247
+    ],
+    [
+     "Dc803cWhYln",
+     32.62,
+     0.296
+    ],
+    [
+     "DeubjvURpH8",
+     53.3,
+     0.313
+    ],
+    [
+     "Dee-mp9BJqG",
+     9.54,
+     0.315
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.26,
+   "attack_s": 0.16,
+   "decay_s": 0.095,
+   "bands": [
+    -2.2,
+    -9.4,
+    -12.4,
+    -12.4,
+    -11.8,
+    -13.1,
+    -12.7
+   ],
+   "flat": 0.662,
+   "low": 0.659,
+   "sweep": 0.34,
+   "centroid_hz": 1209
+  },
+  "peak_s": 0.091,
+  "duration_s": 0.64,
+  "gain_db": -10.3
+ },
+ {
+  "id": "shutter_6",
+  "role": "shutter",
+  "use": "a camera shutter on a still photograph landing or a freeze frame",
+  "file": "shutter_6.flac",
+  "sha": "a68207bcd2951a4d",
+  "title": "Cameras: camera nikon d5500 shutter 1 to 2000s mono",
+  "author": "SoundHolder",
+  "source_url": "https://archive.org/download/sonniss-gdc-2017-game-audio-bundle-normalized/SoundHolder%20-%20%20Cameras/camera%20nikon%20d5500%20shutter%201%20to%202000s%20mono.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -13.9,
+  "hit_lufs_hp150": -13.9,
+  "source_file": "SoundHolder -  Cameras/camera nikon d5500 shutter 1 to 2000s mono.flac",
+  "source_sha256": "6569efcbf83a6b3d4e1f80e83503e3628d9331451198098d0a992dd19d275083",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   2.08,
+   2.365
+  ],
+  "bundle": "sonniss-gdc-2017-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "shutter",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.297,
+   "limit": 0.415,
+   "moments": [
+    [
+     "DfOh6WivITF",
+     19.52,
+     0.251
+    ],
+    [
+     "De9yb6rMm2s",
+     36.12,
+     0.272
+    ],
+    [
+     "De9ykdsOC_X",
+     86.0,
+     0.296
+    ],
+    [
+     "Dc803cWhYln",
+     32.62,
+     0.332
+    ],
+    [
+     "pick_38_DdocrlHOCNB",
+     0.82,
+     0.335
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.33,
+   "attack_s": 0.13,
+   "decay_s": 0.195,
+   "bands": [
+    -9.7,
+    -8.9,
+    -9.2,
+    -8.9,
+    -7.8,
+    -7.0,
+    -8.3
+   ],
+   "flat": 0.763,
+   "low": 0.15,
+   "sweep": -0.53,
+   "centroid_hz": 3499
+  },
+  "peak_s": 0.061,
+  "duration_s": 0.285,
+  "gain_db": -13.8
+ },
+ {
+  "id": "shutter_7",
+  "role": "shutter",
+  "use": "a camera shutter on a still photograph landing or a freeze frame",
+  "file": "shutter_7.flac",
+  "sha": "8149b4e10f3788f1",
+  "title": "Cameras: camera kodak coloursnap 35 film advance lever fast mono",
+  "author": "SoundHolder",
+  "source_url": "https://archive.org/download/sonniss-gdc-2017-game-audio-bundle-normalized/SoundHolder%20-%20%20Cameras/camera%20kodak%20coloursnap%2035%20film%20advance%20lever%20fast%20mono.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -15.4,
+  "hit_lufs_hp150": -15.4,
+  "source_file": "SoundHolder -  Cameras/camera kodak coloursnap 35 film advance lever fast mono.flac",
+  "source_sha256": "c3c7ba483c027353e25ce982c5220d3c472177d065b7ebb104a606091daa96d9",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   11.375,
+   12.39
+  ],
+  "bundle": "sonniss-gdc-2017-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "shutter",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.305,
+   "limit": 0.415,
+   "moments": [
+    [
+     "DcbYpgZBApV",
+     56.38,
+     0.278
+    ],
+    [
+     "pick_38_DdocrlHOCNB",
+     0.82,
+     0.29
+    ],
+    [
+     "DehXGq_Bgss",
+     58.25,
+     0.315
+    ],
+    [
+     "DdO49cmh2gw",
+     24.37,
+     0.32
+    ],
+    [
+     "DfOh6WivITF",
+     30.27,
+     0.323
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.505,
+   "attack_s": 0.155,
+   "decay_s": 0.345,
+   "bands": [
+    -9.5,
+    -9.4,
+    -8.6,
+    -8.4,
+    -9.3,
+    -7.2,
+    -7.4
+   ],
+   "flat": 0.785,
+   "low": 0.149,
+   "sweep": 0.02,
+   "centroid_hz": 3631
+  },
+  "peak_s": 0.121,
+  "max_s": 0.385,
+  "duration_s": 1.015,
+  "gain_db": -12.3
+ },
+ {
+  "id": "glitch_5",
+  "role": "glitch",
+  "use": "a digital glitch on a glitched flash cut",
+  "file": "glitch_5.flac",
+  "sha": "6d499bff35edc87e",
+  "title": "Scene Switch- Transitions & Textures: Transition Synth Delay 03",
+  "author": "Glitchedtones",
+  "source_url": "https://archive.org/download/sonniss-gdc-2019-game-audio-bundle-normalized/Glitchedtones%20-%20Scene%20Switch-%20Transitions%20%26%20Textures/Transition%20Synth%20Delay%2003.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -11.5,
+  "hit_lufs_hp150": -11.7,
+  "source_file": "Glitchedtones - Scene Switch- Transitions & Textures/Transition Synth Delay 03.flac",
+  "source_sha256": "ec5d7e1a618ed9b1ed72d728526e8df929eb370ab62e0324e813b9e458c9e869",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.115,
+   1.295
+  ],
+  "bundle": "sonniss-gdc-2019-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "glitch",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.275,
+   "limit": 0.415,
+   "moments": [
+    [
+     "DcRHfOnhlWx",
+     86.59,
+     0.208
+    ],
+    [
+     "DcEN0yGh4DD",
+     75.12,
+     0.269
+    ],
+    [
+     "DaDhP4JNAq9",
+     23.02,
+     0.291
+    ],
+    [
+     "DXFV0j8iCsF",
+     0.66,
+     0.3
+    ],
+    [
+     "De9ykdsOC_X",
+     65.0,
+     0.308
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.16,
+   "attack_s": 0.115,
+   "decay_s": 0.04,
+   "bands": [
+    -7.7,
+    -9.9,
+    -2.9,
+    -11.9,
+    -12.7,
+    -12.7,
+    -13.7
+   ],
+   "flat": 0.241,
+   "low": 0.197,
+   "sweep": -0.03,
+   "centroid_hz": 1265
+  },
+  "peak_s": 0.936,
+  "duration_s": 1.18,
+  "gain_db": -16.2
+ },
+ {
+  "id": "glitch_6",
+  "role": "glitch",
+  "use": "a digital glitch on a glitched flash cut",
+  "file": "glitch_6.flac",
+  "sha": "70607d4087681495",
+  "title": "Dark Atmo And Digital Glitch Vol.2: BR_Glitch 076",
+  "author": "Total Kh\u00e9ops",
+  "source_url": "https://archive.org/download/sonniss-gdc-2019-game-audio-bundle-normalized/Total%20Kh%C3%A9ops%20-%20Dark%20Atmo%20And%20Digital%20Glitch%20Vol.2/BR_Glitch%20076.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -8.3,
+  "hit_lufs_hp150": -9.4,
+  "source_file": "Total Kh\u00e9ops - Dark Atmo And Digital Glitch Vol.2/BR_Glitch 076.flac",
+  "source_sha256": "44620a6f18816e97941559c0c6d523204e15b03df80b73ff892535e0afddea2d",
+  "source_codec": "flac",
+  "source_rate": 48000,
+  "source_bits": 24,
+  "cut_s": [
+   0.0,
+   0.555
+  ],
+  "bundle": "sonniss-gdc-2019-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "glitch",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.294,
+   "limit": 0.415,
+   "moments": [
+    [
+     "DfOh6WivITF",
+     19.52,
+     0.257
+    ],
+    [
+     "k9zTr2MAFRg",
+     2.52,
+     0.264
+    ],
+    [
+     "pick_24_Ddar0sgSdQq",
+     9.41,
+     0.297
+    ],
+    [
+     "Dee-mp9BJqG",
+     9.1,
+     0.298
+    ],
+    [
+     "De9ykdsOC_X",
+     86.0,
+     0.354
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.215,
+   "attack_s": 0.095,
+   "decay_s": 0.115,
+   "bands": [
+    -3.6,
+    -9.2,
+    -11.7,
+    -12.2,
+    -10.3,
+    -8.9,
+    -10.3
+   ],
+   "flat": 0.764,
+   "low": 0.492,
+   "sweep": -0.76,
+   "centroid_hz": 2184
+  },
+  "peak_s": 0.31,
+  "duration_s": 0.555,
+  "gain_db": -19.4
+ },
+ {
+  "id": "glitch_7",
+  "role": "glitch",
+  "use": "a digital glitch on a glitched flash cut",
+  "file": "glitch_7.flac",
+  "sha": "25022caee71234cb",
+  "title": "Digital Glitch: BR_Glitched Loop_43",
+  "author": "Total Kh\u00e9ops",
+  "source_url": "https://archive.org/download/sonniss-gdc-2018-game-audio-bundle-normalized/Total%20Kh%C3%A9ops%20-%20Digital%20Glitch/BR_Glitched%20Loop_43.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -22.5,
+  "hit_lufs_hp150": -22.9,
+  "source_file": "Total Kh\u00e9ops - Digital Glitch/BR_Glitched Loop_43.flac",
+  "source_sha256": "daccc9762c2d8041e2bdc50f142f846853b73b953745b55abc1c96cd0c43f956",
+  "source_codec": "flac",
+  "source_rate": 48000,
+  "source_bits": 16,
+  "cut_s": [
+   1.48,
+   2.36
+  ],
+  "bundle": "sonniss-gdc-2018-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "glitch",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.25,
+   "limit": 0.415,
+   "moments": [
+    [
+     "pick_36_DdEXKX7ICIG",
+     2.4,
+     0.188
+    ],
+    [
+     "pick_19_DdFE-HlRKiB",
+     16.67,
+     0.23
+    ],
+    [
+     "DfOh6WivITF",
+     13.14,
+     0.271
+    ],
+    [
+     "DW6PsEUCHDs",
+     1.23,
+     0.277
+    ],
+    [
+     "DeKHcthhKyd",
+     20.24,
+     0.286
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.865,
+   "attack_s": 0.435,
+   "decay_s": 0.425,
+   "bands": [
+    -2.3,
+    -10.2,
+    -9.8,
+    -10.5,
+    -12.4,
+    -13.9,
+    -15.1
+   ],
+   "flat": 0.471,
+   "low": 0.628,
+   "sweep": 0.1,
+   "centroid_hz": 952
+  },
+  "peak_s": 0.053,
+  "duration_s": 0.88,
+  "gain_db": -5.2
+ },
+ {
+  "id": "glitch_8",
+  "role": "glitch",
+  "use": "a digital glitch on a glitched flash cut",
+  "file": "glitch_8.flac",
+  "sha": "c8f7492ae0afb812",
+  "title": "Digital Glitch: BR_Glitch _37",
+  "author": "Total Kh\u00e9ops",
+  "source_url": "https://archive.org/download/sonniss-gdc-2018-game-audio-bundle-normalized/Total%20Kh%C3%A9ops%20-%20Digital%20Glitch/BR_Glitch%20_37.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -7.1,
+  "hit_lufs_hp150": -12.0,
+  "source_file": "Total Kh\u00e9ops - Digital Glitch/BR_Glitch _37.flac",
+  "source_sha256": "8c882623754de8fda8be45e569500a7ed69dd11a54f5bdd47a264caa240a5a23",
+  "source_codec": "flac",
+  "source_rate": 48000,
+  "source_bits": 24,
+  "cut_s": [
+   0.0,
+   0.765
+  ],
+  "bundle": "sonniss-gdc-2018-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "glitch",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.306,
+   "limit": 0.415,
+   "moments": [
+    [
+     "pick_24_Ddar0sgSdQq",
+     9.41,
+     0.261
+    ],
+    [
+     "DahTnUZAhkG",
+     5.46,
+     0.301
+    ],
+    [
+     "pick_41_Da0l5hSp5MQ",
+     3.82,
+     0.307
+    ],
+    [
+     "DeubjvURpH8",
+     68.61,
+     0.317
+    ],
+    [
+     "DfDdOy2Iwwj",
+     5.22,
+     0.343
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.275,
+   "attack_s": 0.165,
+   "decay_s": 0.105,
+   "bands": [
+    -1.0,
+    -12.7,
+    -13.8,
+    -14.9,
+    -15.4,
+    -15.8,
+    -16.3
+   ],
+   "flat": 0.607,
+   "low": 0.814,
+   "sweep": 0.99,
+   "centroid_hz": 613
+  },
+  "peak_s": 0.284,
+  "duration_s": 0.765,
+  "gain_db": -20.6
+ },
+ {
+  "id": "whoosh_13",
+  "role": "whoosh",
+  "use": "a sweep whose peak lands on a moving cut or a card sliding in",
+  "file": "whoosh_13.flac",
+  "sha": "eea38ceba150074a",
+  "title": "Just Impacts - Extension II: Metal_Hit_Crash_199",
+  "author": "SoundBits",
+  "source_url": "https://archive.org/download/sonniss-gdc-2017-game-audio-bundle-normalized/SoundBits%20-%20Just%20Impacts%20-%20Extension%20II/Metal_Hit_Crash_199.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -6.6,
+  "hit_lufs_hp150": -10.9,
+  "source_file": "SoundBits - Just Impacts - Extension II/Metal_Hit_Crash_199.flac",
+  "source_sha256": "bb49337dd5156e8609d206e756ae1c32d9dc60bccfecddfa0ff52c9a7522af81",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.01,
+   1.465
+  ],
+  "bundle": "sonniss-gdc-2017-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.324,
+   "limit": 0.415,
+   "moments": [
+    [
+     "k9zTr2MAFRg",
+     2.52,
+     0.279
+    ],
+    [
+     "pick_24_Ddar0sgSdQq",
+     9.41,
+     0.292
+    ],
+    [
+     "De9ykdsOC_X",
+     2.65,
+     0.343
+    ],
+    [
+     "DeHkRtts3bI",
+     57.76,
+     0.35
+    ],
+    [
+     "DfOh6WivITF",
+     19.52,
+     0.358
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.215,
+   "attack_s": 0.125,
+   "decay_s": 0.085,
+   "bands": [
+    -1.6,
+    -11.8,
+    -12.5,
+    -12.3,
+    -13.4,
+    -12.9,
+    -15.1
+   ],
+   "flat": 0.611,
+   "low": 0.722,
+   "sweep": -1.45,
+   "centroid_hz": 932
+  },
+  "peak_s": 0.145,
+  "max_s": 0.53,
+  "duration_s": 1.455,
+  "gain_db": -21.1
+ },
+ {
+  "id": "riser_5",
+  "role": "riser",
+  "use": "the climb into a hit: its peak meets the landing",
+  "file": "riser_5.flac",
+  "sha": "242aeb6b09e69210",
+  "title": "Trailer Reverses: Async Choppy Pierce 2",
+  "author": "Async Audio",
+  "source_url": "https://archive.org/download/sonniss-gdc-2020-game-audio-bundle-normalized/Async%20Audio%20-%20Trailer%20Reverses/Async%20Choppy%20Pierce%202.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -14.9,
+  "hit_lufs_hp150": -18.3,
+  "source_file": "Async Audio - Trailer Reverses/Async Choppy Pierce 2.flac",
+  "source_sha256": "942e8d81675fb88cd08743caf9e7cf388f392d713715caf47d817829082a7a8b",
+  "source_codec": "flac",
+  "source_rate": 48000,
+  "source_bits": 24,
+  "cut_s": [
+   1.51,
+   3.01
+  ],
+  "fade_s": [
+   0.3,
+   0.06
+  ],
+  "bundle": "sonniss-gdc-2020-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "riser",
+   "distance": 0.414,
+   "limit": 0.496,
+   "moments": [
+    [
+     "pick_10_DdeBT3rMCGY",
+     20.47,
+     0.378
+    ],
+    [
+     "DfDdOy2Iwwj",
+     17.55,
+     0.38
+    ],
+    [
+     "pick_34_DbHi9-MJhdw",
+     6.46,
+     0.398
+    ],
+    [
+     "DQGohw3D8uf",
+     88.81,
+     0.455
+    ],
+    [
+     "Dd76VgfOOS7",
+     7.57,
+     0.457
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 1.17,
+   "attack_s": 1.05,
+   "decay_s": 0.115,
+   "bands": [
+    -0.8,
+    -10.1,
+    -14.8,
+    -16.3,
+    -22.8,
+    -21.6,
+    -22.9
+   ],
+   "flat": 0.284,
+   "low": 0.876,
+   "sweep": 2.12,
+   "centroid_hz": 219
+  },
+  "peak_s": 1.281,
+  "duration_s": 1.5,
+  "gain_db": -5.1
+ },
+ {
+  "id": "riser_6",
+  "role": "riser",
+  "use": "the climb into a hit: its peak meets the landing",
+  "file": "riser_6.flac",
+  "sha": "6eb034db2a6e08b1",
+  "title": "Uplifter pack: Effect - uplifter (8)",
+  "author": "Daumantas Ercmonas",
+  "source_url": "https://archive.org/download/sonniss-gdc-2018-game-audio-bundle-normalized/Daumantas%20Ercmonas%20-%20Uplifter%20pack/Effect%20-%20uplifter%20%288%29.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -15.3,
+  "hit_lufs_hp150": -19.2,
+  "source_file": "Daumantas Ercmonas - Uplifter pack/Effect - uplifter (8).flac",
+  "source_sha256": "4adf2ea7db76d423a4f2393faf956bbe43cf578db12898c7c9c92bdeccbab3cb",
+  "source_codec": "flac",
+  "source_rate": 44100,
+  "source_bits": 24,
+  "cut_s": [
+   13.065,
+   14.774
+  ],
+  "fade_s": [
+   0.425,
+   0.06
+  ],
+  "bundle": "sonniss-gdc-2018-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "riser",
+   "distance": 0.394,
+   "limit": 0.496,
+   "moments": [
+    [
+     "pick_34_DbHi9-MJhdw",
+     6.46,
+     0.269
+    ],
+    [
+     "pick_31_DcdlcvcO421",
+     9.56,
+     0.288
+    ],
+    [
+     "pick_10_DdeBT3rMCGY",
+     20.47,
+     0.46
+    ],
+    [
+     "Dax0R-atz8d",
+     27.93,
+     0.472
+    ],
+    [
+     "Dd76VgfOOS7",
+     7.57,
+     0.48
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 1.455,
+   "attack_s": 1.155,
+   "decay_s": 0.295,
+   "bands": [
+    -4.6,
+    -2.8,
+    -13.1,
+    -14.8,
+    -16.9,
+    -17.3,
+    -19.8
+   ],
+   "flat": 0.367,
+   "low": 0.66,
+   "sweep": -0.42,
+   "centroid_hz": 461
+  },
+  "peak_s": 1.454,
+  "duration_s": 1.709,
+  "gain_db": -4.7
+ },
+ {
+  "id": "riser_7",
+  "role": "riser",
+  "use": "the climb into a hit: its peak meets the landing",
+  "file": "riser_7.flac",
+  "sha": "df4601d82f3c68c0",
+  "title": "Uplifter pack: Effect - uplifter (90)",
+  "author": "Daumantas Ercmonas",
+  "source_url": "https://archive.org/download/sonniss-gdc-2018-game-audio-bundle-normalized/Daumantas%20Ercmonas%20-%20Uplifter%20pack/Effect%20-%20uplifter%20%2890%29.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -10.4,
+  "hit_lufs_hp150": -15.0,
+  "source_file": "Daumantas Ercmonas - Uplifter pack/Effect - uplifter (90).flac",
+  "source_sha256": "af63abd8e093111be2f6bdd1e065b6a8cac08aac6e131266b2aacd6d00e97d55",
+  "source_codec": "flac",
+  "source_rate": 44100,
+  "source_bits": 24,
+  "cut_s": [
+   11.465,
+   14.774
+  ],
+  "fade_s": [
+   0.6,
+   0.06
+  ],
+  "bundle": "sonniss-gdc-2018-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "riser",
+   "distance": 0.45,
+   "limit": 0.496,
+   "moments": [
+    [
+     "DeMu_6OohNw",
+     25.32,
+     0.31
+    ],
+    [
+     "DdB8LATJ_1z",
+     34.46,
+     0.472
+    ],
+    [
+     "DPsUMzpEaVC",
+     15.37,
+     0.481
+    ],
+    [
+     "DfNWN82R0wR",
+     56.16,
+     0.484
+    ],
+    [
+     "8YHBJdPK6eY",
+     19.05,
+     0.506
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 2.835,
+   "attack_s": 2.77,
+   "decay_s": 0.06,
+   "bands": [
+    -1.4,
+    -6.6,
+    -12.9,
+    -26.2,
+    -32.4,
+    -34.3,
+    -35.1
+   ],
+   "flat": 0.033,
+   "low": 0.841,
+   "sweep": 0.15,
+   "centroid_hz": 120
+  },
+  "peak_s": 3.24,
+  "duration_s": 3.309,
+  "gain_db": -9.6
+ },
+ {
+  "id": "riser_8",
+  "role": "riser",
+  "use": "the climb into a hit: its peak meets the landing",
+  "file": "riser_8.flac",
+  "sha": "58678a07157362d3",
+  "title": "Rise & Swell: swell_mixed_002",
+  "author": "3maze",
+  "source_url": "https://archive.org/download/sonniss-gdc-2018-game-audio-bundle-normalized/3maze%20-%20Rise%20%26%20Swell/swell_mixed_002.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -10.2,
+  "hit_lufs_hp150": -11.2,
+  "source_file": "3maze - Rise & Swell/swell_mixed_002.flac",
+  "source_sha256": "ea9da1fb1047b708d3d155f860a3929f8d83e630661936979d33d9d51b3f0773",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.905,
+   2.405
+  ],
+  "fade_s": [
+   0.3,
+   0.06
+  ],
+  "bundle": "sonniss-gdc-2018-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "riser",
+   "distance": 0.483,
+   "limit": 0.496,
+   "moments": [
+    [
+     "H549E4twQ_8",
+     11.97,
+     0.372
+    ],
+    [
+     "8YHBJdPK6eY",
+     19.05,
+     0.38
+    ],
+    [
+     "DU-wrXZCEWm",
+     13.61,
+     0.463
+    ],
+    [
+     "DdwYc95o7ce",
+     33.55,
+     0.592
+    ],
+    [
+     "DQGohw3D8uf",
+     88.81,
+     0.61
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 1.28,
+   "attack_s": 0.955,
+   "decay_s": 0.32,
+   "bands": [
+    -12.0,
+    -4.0,
+    -3.9,
+    -9.0,
+    -21.7,
+    -39.0,
+    -44.4
+   ],
+   "flat": 0.001,
+   "low": 0.119,
+   "sweep": -1.09,
+   "centroid_hz": 436
+  },
+  "peak_s": 0.959,
+  "duration_s": 1.5,
+  "gain_db": -9.8
+ },
+ {
+  "id": "riser_9",
+  "role": "riser",
+  "use": "the climb into a hit: its peak meets the landing",
+  "file": "riser_9.flac",
+  "sha": "0fa358266d0c3fbf",
+  "title": "REVERSE_PRODUCTION ELEMENTS: Reverse_Production Element_Guitar-Piano-Thunder Drum-Bullet Shell-001",
+  "author": "MatiasMacSD",
+  "source_url": "https://archive.org/download/sonniss-gdc-2017-game-audio-bundle-normalized/MatiasMacSD%20-%20REVERSE_PRODUCTION%20ELEMENTS/Reverse_Production%20Element_Guitar-Piano-Thunder%20Drum-Bullet%20Shell-001.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -13.9,
+  "hit_lufs_hp150": -14.6,
+  "source_file": "MatiasMacSD - REVERSE_PRODUCTION ELEMENTS/Reverse_Production Element_Guitar-Piano-Thunder Drum-Bullet Shell-001.flac",
+  "source_sha256": "05afd1a52ba82ed1bc9682f562d58daea5a9163e2e95d3481bd5237d5e1add04",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   1.32,
+   2.82
+  ],
+  "fade_s": [
+   0.3,
+   0.06
+  ],
+  "bundle": "sonniss-gdc-2017-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "riser",
+   "distance": 0.429,
+   "limit": 0.496,
+   "moments": [
+    [
+     "DdO49cmh2gw",
+     8.12,
+     0.271
+    ],
+    [
+     "pick_31_DcdlcvcO421",
+     9.56,
+     0.404
+    ],
+    [
+     "DU-wrXZCEWm",
+     13.61,
+     0.452
+    ],
+    [
+     "pick_10_DdeBT3rMCGY",
+     20.47,
+     0.492
+    ],
+    [
+     "DQGohw3D8uf",
+     88.81,
+     0.525
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 1.305,
+   "attack_s": 1.07,
+   "decay_s": 0.23,
+   "bands": [
+    -6.6,
+    -8.9,
+    -2.8,
+    -11.9,
+    -13.6,
+    -17.9,
+    -22.9
+   ],
+   "flat": 0.06,
+   "low": 0.238,
+   "sweep": 0.26,
+   "centroid_hz": 601
+  },
+  "peak_s": 1.273,
+  "duration_s": 1.5,
+  "gain_db": -6.1
+ },
+ {
+  "id": "riser_10",
+  "role": "riser",
+  "use": "the climb into a hit: its peak meets the landing",
+  "file": "riser_10.flac",
+  "sha": "026e263f7634e8e0",
+  "title": "Eclectic Whooshes: Whoosh,Sound Design,Logo,Airy to Shiver,Uncertain,Low",
+  "author": "Airborne Sound",
+  "source_url": "https://archive.org/download/sonniss-gdc-2018-game-audio-bundle-normalized/Airborne%20Sound%20-%20Eclectic%20Whooshes/Whoosh%2CSound%20Design%2CLogo%2CAiry%20to%20Shiver%2CUncertain%2CLow.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -12.6,
+  "hit_lufs_hp150": -17.9,
+  "source_file": "Airborne Sound - Eclectic Whooshes/Whoosh,Sound Design,Logo,Airy to Shiver,Uncertain,Low.flac",
+  "source_sha256": "2e934d62bda5e65697e5835fd3064184debf5552bbc6f0fcd4fd65ef100dc1e6",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.735,
+   2.235
+  ],
+  "fade_s": [
+   0.3,
+   0.06
+  ],
+  "bundle": "sonniss-gdc-2018-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "riser",
+   "distance": 0.324,
+   "limit": 0.496,
+   "moments": [
+    [
+     "H549E4twQ_8",
+     11.97,
+     0.214
+    ],
+    [
+     "8YHBJdPK6eY",
+     19.05,
+     0.262
+    ],
+    [
+     "DQGohw3D8uf",
+     88.81,
+     0.343
+    ],
+    [
+     "DdwYc95o7ce",
+     33.55,
+     0.385
+    ],
+    [
+     "DU-wrXZCEWm",
+     13.61,
+     0.418
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 1.22,
+   "attack_s": 0.985,
+   "decay_s": 0.23,
+   "bands": [
+    -1.9,
+    -6.4,
+    -10.1,
+    -17.1,
+    -24.3,
+    -30.6,
+    -41.2
+   ],
+   "flat": 0.021,
+   "low": 0.765,
+   "sweep": 0.5,
+   "centroid_hz": 167
+  },
+  "peak_s": 1.155,
+  "duration_s": 1.5,
+  "gain_db": -7.4
+ },
+ {
+  "id": "riser_11",
+  "role": "riser",
+  "use": "the climb into a hit: its peak meets the landing",
+  "file": "riser_11.flac",
+  "sha": "fc2d417aede4bc19",
+  "title": "Cinematic Hits & Transitions 2: CHT2_Cinematic_Transition_019",
+  "author": "SoundBits",
+  "source_url": "https://archive.org/download/sonniss-gdc-2016-game-audio-bundle-normalized/SoundBits%20-%20%20Cinematic%20Hits%20%26%20Transitions%202/CHT2_Cinematic_Transition_019.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -10.9,
+  "hit_lufs_hp150": -16.2,
+  "source_file": "SoundBits -  Cinematic Hits & Transitions 2/CHT2_Cinematic_Transition_019.flac",
+  "source_sha256": "1c6325e5a2bf35da08432f8952e9c8a4976be53dc9d422978bbbf3fd6ee3b223",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   2.5,
+   4.0
+  ],
+  "fade_s": [
+   0.3,
+   0.06
+  ],
+  "bundle": "sonniss-gdc-2016-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "riser",
+   "distance": 0.34,
+   "limit": 0.496,
+   "moments": [
+    [
+     "Dd76VgfOOS7",
+     7.57,
+     0.253
+    ],
+    [
+     "pick_10_DdeBT3rMCGY",
+     20.47,
+     0.258
+    ],
+    [
+     "DQGohw3D8uf",
+     88.81,
+     0.372
+    ],
+    [
+     "DdwYc95o7ce",
+     33.55,
+     0.396
+    ],
+    [
+     "DfNWN82R0wR",
+     11.79,
+     0.42
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 1.33,
+   "attack_s": 0.995,
+   "decay_s": 0.33,
+   "bands": [
+    -0.7,
+    -10.4,
+    -14.7,
+    -20.1,
+    -21.7,
+    -20.3,
+    -33.8
+   ],
+   "flat": 0.157,
+   "low": 0.919,
+   "sweep": 0.18,
+   "centroid_hz": 179
+  },
+  "peak_s": 0.816,
+  "duration_s": 1.5,
+  "gain_db": -9.1
+ },
+ {
+  "id": "riser_12",
+  "role": "riser",
+  "use": "the climb into a hit: its peak meets the landing",
+  "file": "riser_12.flac",
+  "sha": "7304fd5ea0f67d2b",
+  "title": "Cinematic Hits & Transitions 2: CHT2_Cinematic_Hit_096",
+  "author": "SoundBits",
+  "source_url": "https://archive.org/download/sonniss-gdc-2016-game-audio-bundle-normalized/SoundBits%20-%20%20Cinematic%20Hits%20%26%20Transitions%202/CHT2_Cinematic_Hit_096.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -9.7,
+  "hit_lufs_hp150": -12.0,
+  "source_file": "SoundBits -  Cinematic Hits & Transitions 2/CHT2_Cinematic_Hit_096.flac",
+  "source_sha256": "0e476f0955d4f69256648e0162879aa33407f606147b099b93f5a98f24eae141",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.115,
+   3.215
+  ],
+  "fade_s": [
+   0.6,
+   0.06
+  ],
+  "bundle": "sonniss-gdc-2016-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "riser",
+   "distance": 0.371,
+   "limit": 0.496,
+   "moments": [
+    [
+     "pick_34_DbHi9-MJhdw",
+     6.46,
+     0.252
+    ],
+    [
+     "DQGohw3D8uf",
+     72.16,
+     0.372
+    ],
+    [
+     "DePRLwPoANZ",
+     76.11,
+     0.388
+    ],
+    [
+     "Dd76VgfOOS7",
+     7.57,
+     0.418
+    ],
+    [
+     "Dax0R-atz8d",
+     22.8,
+     0.423
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 1.845,
+   "attack_s": 1.505,
+   "decay_s": 0.335,
+   "bands": [
+    -0.4,
+    -14.2,
+    -18.8,
+    -23.9,
+    -19.6,
+    -18.7,
+    -19.1
+   ],
+   "flat": 0.433,
+   "low": 0.929,
+   "sweep": -0.04,
+   "centroid_hz": 325
+  },
+  "peak_s": 2.761,
+  "duration_s": 3.1,
+  "gain_db": -10.3
+ },
+ {
+  "id": "click_11",
+  "role": "click",
+  "use": "a short dry click or tick: one cut of a quick run of cuts, a counter step, a small landing",
+  "file": "click_11.flac",
+  "sha": "3d08c3033c9d8172",
+  "title": "Cassette Tone: TM_CASSETTE TONE_Tape in out case, with paper, close perspective",
+  "author": "Tone Manufacture",
+  "source_url": "https://archive.org/download/sonniss-gdc-2017-game-audio-bundle-normalized/Tone%20Manufacture%20-%20Cassette%20Tone/TM_CASSETTE%20TONE_Tape%20in%20out%20case%2C%20with%20paper%2C%20close%20perspective.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -20.5,
+  "hit_lufs_hp150": -20.6,
+  "source_file": "Tone Manufacture - Cassette Tone/TM_CASSETTE TONE_Tape in out case, with paper, close perspective.flac",
+  "source_sha256": "1f2372ce41246da164996467e2156290c56e12b7294795b7b880c2fd9d32e40f",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   14.97,
+   15.11
+  ],
+  "bundle": "sonniss-gdc-2017-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "click",
+   "distance": 0.289,
+   "limit": 0.453,
+   "moments": [
+    [
+     "Dee-mp9BJqG",
+     23.16,
+     0.209
+    ],
+    [
+     "pick_21_DdxWoavOuyl",
+     15.37,
+     0.259
+    ],
+    [
+     "DdO49cmh2gw",
+     71.86,
+     0.261
+    ],
+    [
+     "Dc3y7l5BLGB",
+     48.8,
+     0.326
+    ],
+    [
+     "DSpQaXkkzG5",
+     4.71,
+     0.391
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.03,
+   "attack_s": 0.01,
+   "decay_s": 0.015,
+   "bands": [
+    -14.7,
+    -14.7,
+    -12.5,
+    -3.6,
+    -5.0,
+    -11.7,
+    -12.2
+   ],
+   "flat": 0.141,
+   "low": 0.054,
+   "sweep": -0.2,
+   "centroid_hz": 2421
+  },
+  "peak_s": 0.04,
+  "duration_s": 0.14,
+  "gain_db": -6.4
+ },
+ {
+  "id": "click_12",
+  "role": "click",
+  "use": "a short dry click or tick: one cut of a quick run of cuts, a counter step, a small landing",
+  "file": "click_12.flac",
+  "sha": "f2215f0ec7eb103d",
+  "title": "Cassette Tone: TM_CASSETTE TONE_Tape in out case, with paper, close perspective",
+  "author": "Tone Manufacture",
+  "source_url": "https://archive.org/download/sonniss-gdc-2017-game-audio-bundle-normalized/Tone%20Manufacture%20-%20Cassette%20Tone/TM_CASSETTE%20TONE_Tape%20in%20out%20case%2C%20with%20paper%2C%20close%20perspective.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -21.9,
+  "hit_lufs_hp150": -21.9,
+  "source_file": "Tone Manufacture - Cassette Tone/TM_CASSETTE TONE_Tape in out case, with paper, close perspective.flac",
+  "source_sha256": "1f2372ce41246da164996467e2156290c56e12b7294795b7b880c2fd9d32e40f",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   24.715,
+   25.045
+  ],
+  "bundle": "sonniss-gdc-2017-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "click",
+   "distance": 0.325,
+   "limit": 0.453,
+   "moments": [
+    [
+     "Dee-mp9BJqG",
+     23.16,
+     0.246
+    ],
+    [
+     "pick_21_DdxWoavOuyl",
+     15.37,
+     0.289
+    ],
+    [
+     "Zf87y5bWzUA",
+     5.96,
+     0.338
+    ],
+    [
+     "DaDhP4JNAq9",
+     5.93,
+     0.372
+    ],
+    [
+     "DdO49cmh2gw",
+     71.86,
+     0.383
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.035,
+   "attack_s": 0.01,
+   "decay_s": 0.02,
+   "bands": [
+    -9.9,
+    -9.3,
+    -12.2,
+    -6.3,
+    -6.8,
+    -7.4,
+    -10.2
+   ],
+   "flat": 0.275,
+   "low": 0.131,
+   "sweep": -0.85,
+   "centroid_hz": 2948
+  },
+  "peak_s": 0.247,
+  "duration_s": 0.33,
+  "gain_db": -5.0
+ },
+ {
+  "id": "impact_9",
+  "role": "impact",
+  "use": "a deep impact on the hook, the turn or the payoff",
+  "file": "impact_9.flac",
+  "sha": "f2cd801f9c99fac2",
+  "title": "Trailer Pack: 3 Fast Hit Trailer - Dry",
+  "author": "Wakerone",
+  "source_url": "https://archive.org/download/sonniss-gdc-2018-game-audio-bundle-normalized/Wakerone%20-%20Trailer%20Pack/3%20Fast%20Hit%20Trailer%20-%20Dry.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -10.0,
+  "hit_lufs_hp150": -16.4,
+  "source_file": "Wakerone - Trailer Pack/3 Fast Hit Trailer - Dry.flac",
+  "source_sha256": "a6c2151a2a057c473780f31d523826f43c2e614958c2ad4d1f05aeed81916549",
+  "source_codec": "flac",
+  "source_rate": 48000,
+  "source_bits": 24,
+  "cut_s": [
+   0.035,
+   2.005
+  ],
+  "bundle": "sonniss-gdc-2018-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "impact",
+   "distance": 0.274,
+   "limit": 0.314,
+   "moments": [
+    [
+     "DcRHfOnhlWx",
+     41.77,
+     0.177
+    ],
+    [
+     "DdHguJfhYSU",
+     14.61,
+     0.266
+    ],
+    [
+     "DXFV0j8iCsF",
+     52.91,
+     0.285
+    ],
+    [
+     "DeMu_6OohNw",
+     62.1,
+     0.319
+    ],
+    [
+     "DfFErGgsMxT",
+     49.4,
+     0.32
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.26,
+   "attack_s": 0.09,
+   "decay_s": 0.165,
+   "bands": [
+    -1.3,
+    -8.6,
+    -16.0,
+    -15.1,
+    -15.4,
+    -17.4,
+    -19.5
+   ],
+   "flat": 0.506,
+   "low": 0.842,
+   "sweep": -0.81,
+   "centroid_hz": 437
+  },
+  "peak_s": 0.139,
+  "max_s": 0.635,
+  "duration_s": 1.97,
+  "gain_db": -13.0
+ },
+ {
+  "id": "impact_10",
+  "role": "impact",
+  "use": "a deep impact on the hook, the turn or the payoff",
+  "file": "impact_10.flac",
+  "sha": "77e4763b8a145957",
+  "title": "Ultimate Trailer Sound Effects: Bluezone_BC0253_impact_11",
+  "author": "BlueZone",
+  "source_url": "https://archive.org/download/sonniss-gdc-2019-game-audio-bundle-normalized/BlueZone%20-Ultimate%20Trailer%20Sound%20Effects/Bluezone_BC0253_impact_11.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -10.8,
+  "hit_lufs_hp150": -14.6,
+  "source_file": "BlueZone -Ultimate Trailer Sound Effects/Bluezone_BC0253_impact_11.flac",
+  "source_sha256": "5f0fcb2da7e89990477299fb6f1b6839d53497c9138556f46f8c03082e0af6ed",
+  "source_codec": "flac",
+  "source_rate": 96000,
+  "source_bits": 24,
+  "cut_s": [
+   0.0,
+   4.815
+  ],
+  "bundle": "sonniss-gdc-2019-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "impact",
+   "distance": 0.219,
+   "limit": 0.314,
+   "moments": [
+    [
+     "De9ykdsOC_X",
+     4.0,
+     0.191
+    ],
+    [
+     "pick_19_DdFE-HlRKiB",
+     9.95,
+     0.202
+    ],
+    [
+     "pick_20_DbuFz6KPmM5",
+     9.95,
+     0.204
+    ],
+    [
+     "DeubjvURpH8",
+     14.41,
+     0.217
+    ],
+    [
+     "DdO49cmh2gw",
+     91.31,
+     0.28
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.89,
+   "attack_s": 0.09,
+   "decay_s": 0.795,
+   "bands": [
+    -2.0,
+    -7.7,
+    -10.8,
+    -12.6,
+    -16.2,
+    -17.5,
+    -18.5
+   ],
+   "flat": 0.374,
+   "low": 0.715,
+   "sweep": 0.42,
+   "centroid_hz": 505
+  },
+  "peak_s": 0.007,
+  "max_s": 4.44,
+  "duration_s": 4.815,
+  "gain_db": -12.2
+ },
+ {
+  "id": "riser_13",
+  "role": "riser",
+  "use": "the climb into a hit: its peak meets the landing",
+  "file": "riser_13.flac",
+  "sha": "acfe8ff0e81f0777",
+  "title": "Cobalt - Trailer: Bluezone_BC0232_transition_011",
+  "author": "Bluezone Corporation",
+  "source_url": "https://archive.org/download/sonniss-gdc-2018-game-audio-bundle-normalized/Bluezone%20Corporation%20-%20Cobalt%20-%20Trailer/Bluezone_BC0232_transition_011.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -8.9,
+  "hit_lufs_hp150": -9.6,
+  "source_file": "Bluezone Corporation - Cobalt - Trailer/Bluezone_BC0232_transition_011.flac",
+  "source_sha256": "065278bb4c3f8ef6ca0ec2fca1ba3a2cd32aa7f8d5ad2004559e5fbaf5cf89bb",
+  "source_codec": "flac",
+  "source_rate": 44100,
+  "source_bits": 24,
+  "cut_s": [
+   0.775,
+   2.275
+  ],
+  "fade_s": [
+   0.3,
+   0.06
+  ],
+  "bundle": "sonniss-gdc-2018-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "c381327b077e56d52fe1bf928852ee1e0a8b930246d71ec5c6d26d7faaf0d08f",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "reference": {
+   "class": "riser",
+   "distance": 0.454,
+   "limit": 0.496,
+   "moments": [
+    [
+     "pick_31_DcdlcvcO421",
+     9.56,
+     0.39
+    ],
+    [
+     "pick_34_DbHi9-MJhdw",
+     6.46,
+     0.425
+    ],
+    [
+     "DdO49cmh2gw",
+     8.12,
+     0.444
+    ],
+    [
+     "pick_10_DdeBT3rMCGY",
+     20.47,
+     0.499
+    ],
+    [
+     "pick_03_DeRswaFSqgu",
+     4.67,
+     0.512
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 1.125,
+   "attack_s": 0.765,
+   "decay_s": 0.355,
+   "bands": [
+    -5.2,
+    -4.4,
+    -7.1,
+    -15.4,
+    -16.5,
+    -14.7,
+    -12.7
+   ],
+   "flat": 0.27,
+   "low": 0.418,
+   "sweep": 3.37,
+   "centroid_hz": 983
+  },
+  "peak_s": 1.136,
+  "duration_s": 1.5,
+  "gain_db": -11.1
+ },
+ {
+  "id": "braam_1",
+  "role": "braam",
+  "use": "a braam under a structural landing: the hook, the turn or the payoff",
+  "file": "braam_1.flac",
+  "sha": "df2c66c30145012f",
+  "title": "Effective Trailer Braams: Braam 029 (G)",
+  "author": "Federico Soler Fernandez",
+  "source_url": "https://archive.org/download/sonniss-gdc-2020-game-audio-bundle-normalized/Federico%20Soler%20Fernandez%20-%20Effective%20Trailer%20Braams/Braam%20029%20%28G%29.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -12.2,
+  "hit_lufs_hp150": -15.8,
+  "source_file": "Federico Soler Fernandez - Effective Trailer Braams/Braam 029 (G).flac",
+  "source_sha256": "c832c1b54fbf1d99cad5e7bd118a28f7b0289721c6889d841e548459a19c51eb",
+  "source_codec": "flac",
+  "source_rate": 48000,
+  "source_bits": 24,
+  "cut_s": [
+   0.005,
+   1.505
+  ],
+  "fade_s": [
+   0.002,
+   0.5
+  ],
+  "bundle": "sonniss-gdc-2020-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "braam",
+  "reference": {
+   "class": "impact",
+   "distance": 0.264,
+   "limit": 0.314,
+   "moments": [
+    [
+     "pick_04_Db4J3AWK8oy",
+     8.89,
+     0.214
+    ],
+    [
+     "DXFV0j8iCsF",
+     5.26,
+     0.238
+    ],
+    [
+     "pick_38_DdocrlHOCNB",
+     11.42,
+     0.263
+    ],
+    [
+     "pick_37_Dc3yFtihnFH",
+     11.84,
+     0.293
+    ],
+    [
+     "DcbYpgZBApV",
+     24.86,
+     0.311
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 1.27,
+   "attack_s": 0.16,
+   "decay_s": 1.105,
+   "bands": [
+    -1.7,
+    -7.5,
+    -11.8,
+    -15.1,
+    -17.4,
+    -18.1,
+    -19.2
+   ],
+   "flat": 0.416,
+   "low": 0.758,
+   "sweep": 0.1,
+   "centroid_hz": 415
+  },
+  "peak_s": 0.214,
+  "duration_s": 1.5,
+  "gain_db": -10.8
+ },
+ {
+  "id": "braam_2",
+  "role": "braam",
+  "use": "a braam under a structural landing: the hook, the turn or the payoff",
+  "file": "braam_2.flac",
+  "sha": "e9564d4dd2acaf15",
+  "title": "Effective Trailer Braams: Braam 013 (B)",
+  "author": "Federico Soler Fernandez",
+  "source_url": "https://archive.org/download/sonniss-gdc-2020-game-audio-bundle-normalized/Federico%20Soler%20Fernandez%20-%20Effective%20Trailer%20Braams/Braam%20013%20%28B%29.flac",
+  "license": "Sonniss GameAudioGDC",
+  "approved_request": "snd2_reference_1113",
+  "hit_lufs": -12.5,
+  "hit_lufs_hp150": -13.8,
+  "source_file": "Federico Soler Fernandez - Effective Trailer Braams/Braam 013 (B).flac",
+  "source_sha256": "fa48e59b209b91a6fb814280c37f62e656ba08deebdb21c7926a1013b9043090",
+  "source_codec": "flac",
+  "source_rate": 48000,
+  "source_bits": 24,
+  "cut_s": [
+   0.025,
+   2.525
+  ],
+  "fade_s": [
+   0.002,
+   0.5
+  ],
+  "bundle": "sonniss-gdc-2020-game-audio-bundle-normalized",
+  "bundle_licence_sha256": "8a26e0113e8b00a4dc953a2d568d326bc780ebd792165f9bb604cb26010dee27",
+  "approval": "approved by reference match, owner decision 13 Nov 2026",
+  "family": "braam",
+  "reference": {
+   "class": "whoosh",
+   "distance": 0.275,
+   "limit": 0.415,
+   "moments": [
+    [
+     "DW6PsEUCHDs",
+     1.23,
+     0.259
+    ],
+    [
+     "DcbYpgZBApV",
+     50.67,
+     0.263
+    ],
+    [
+     "DahTnUZAhkG",
+     6.25,
+     0.277
+    ],
+    [
+     "DehXGq_Bgss",
+     1.43,
+     0.282
+    ],
+    [
+     "DdO49cmh2gw",
+     84.41,
+     0.295
+    ]
+   ]
+  },
+  "shape": {
+   "dur_s": 0.535,
+   "attack_s": 0.285,
+   "decay_s": 0.245,
+   "bands": [
+    -4.8,
+    -7.3,
+    -5.4,
+    -10.9,
+    -13.9,
+    -14.3,
+    -14.9
+   ],
+   "flat": 0.303,
+   "low": 0.385,
+   "sweep": 0.32,
+   "centroid_hz": 974
+  },
+  "peak_s": 0.366,
+  "duration_s": 2.5,
+  "gain_db": -15.2
  }
 ]

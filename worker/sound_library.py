@@ -1,10 +1,12 @@
-"""Valmera's sound library: real recordings the owner approved by ear.
+"""Valmera's sound library: real recordings, approved by the owner's ear or by reference match.
 
-Every sound in worker/sound_library/ is a real CC0 recording (Freesound) that
-passed the owner's listening audition; synthesized sounds were rejected and
-must never be shipped. manifest.json carries each file's role, when to use
-it, a recommended mix level under speech and the licence trail
-(LICENSES.md).
+Every sound in worker/sound_library/ is a real recording; synthesized sounds were rejected and must never be
+shipped. The first 21 are CC0 recordings (Freesound) that passed the owner's listening audition (9 Oct 2026). The
+rest joined by reference match (owner decision 13 Nov 2026, sound_approval.approve_by_reference): professional
+recordings whose signal matches a class of sound the reference films place, under a licence that allows use
+inside rendered films (LICENSES.md, licences/). manifest.json carries each file's role, when to use it, a
+recommended mix level under speech, how it was approved (with the reference moments it matched) and the
+licence trail.
 
 Roles are what templates and editors ask for ("whoosh", "click", "impact");
 a role can hold several approved recordings and ``pick`` chooses one
@@ -67,6 +69,8 @@ ROLE_ALIASES = {
     "riser_short": "riser", "riser_long": "riser", "riser": "riser",
     "glitch": "glitch", "shutter": "shutter", "typing": "typing",
     "heartbeat": "heartbeat",
+    "hit": "hit", "thud": "hit", "paper": "paper", "page": "paper", "page_turn": "paper",
+    "braam": "braam", "drone": "drone",
 }
 
 _CACHE = {}
@@ -229,10 +233,14 @@ def roles():
 
 
 def pick(role, seed=""):
-    """A deterministic approved recording for a role, or None."""
+    """A deterministic approved recording for a role, or None. A template's cue and a look's junction sound were
+    authored on the first library (the owner's audition), so a role that has one of those keeps to them; a role
+    that only reference-matched recordings fill (paper, hit, braam) picks among those. The Director chooses from the
+    whole library by signal (score/sound_choice.py)."""
     rows = catalog(role)
     if not rows:
         return None
+    rows = [r for r in rows if not r.get("reference")] or rows
     h = int(hashlib.sha256(f"{role}:{seed}".encode()).hexdigest()[:8], 16)
     return rows[h % len(rows)]
 
@@ -271,5 +279,6 @@ def describe(r):
         level = f"hit {float(r['hit_lufs']):g} LUFS, levelled against the voice"
     else:
         level = f"suggested gain {r['gain_db']} dB"
+    lic = "CC0" if str(r.get("license") or "").startswith("CC0") else "royalty-free, no attribution"
     return (f"{REF_PREFIX}{r['id']} [{r['role']}, {r['duration_s']:g}s, {timing}, {level}] "
-            f"— {r['use']} (real recording, CC0)")
+            f"— {r['use']} (real recording, {lic})")

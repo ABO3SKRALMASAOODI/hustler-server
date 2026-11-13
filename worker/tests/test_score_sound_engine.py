@@ -92,7 +92,9 @@ def test_the_profiles_are_the_study():
 def test_a_moment_gets_the_class_the_references_use_there():
     desc = CH.describe_library(SD.library(), SD.SOUNDS, SD.pcm)
     lib = SD.library()
-    assert desc and all(lib[s]["role"] in CH.GENERAL for s in desc)       # a cash register or a ding is never a guess
+    # a cash register or a ding is never a guess: only general roles of the first library and recordings the references vouch for
+    assert desc and all(lib[s]["role"] in CH.GENERAL or lib[s].get("reference") for s in desc)
+    assert not {lib[s]["role"] for s in desc} & {"cash", "ding", "heartbeat", "typing", "drone"}
     free = lambda sid: True
     # a jump cut: a click, the references' own answer there
     cls, lead = CH.class_for("jump", 0.4, 0.5, {})
@@ -117,7 +119,102 @@ def test_a_moment_gets_the_class_the_references_use_there():
     assert desc[CH.nearest("riser", desc, False, free)]["kind"] == "riser"
     layers, cls = CH.layers({"f": 300, "kind": "display", "room_s": 2.5}, "payoff", {"desc": desc, "tally": {}, "free": free, "spoken": False})
     assert cls == "impact" and [w for _s, w in layers] == ["lead", "hit"]
-    assert desc[layers[0][0]]["kind"] == "riser" and lib[layers[1][0]]["role"] == "impact"
+    assert desc[layers[0][0]]["kind"] == "riser" and desc[layers[1][0]]["kind"] == "impact"
+
+
+@needs_ffmpeg
+def test_a_recording_that_means_something_answers_only_the_picture_that_shows_it():
+    """SND2: paper for a page or a document, a shutter for a still photograph, a glitch for a glitched flash, a braam for
+    the film's structural landings, and none of them for anything else. The moment's weight picks the length."""
+    desc = CH.describe_library(SD.library(), SD.SOUNDS, SD.pcm)
+    fam = lambda sid: desc[sid].get("family")
+    free = lambda sid: True
+    st = lambda: {"desc": desc, "tally": {}, "free": free, "spoken": False, "used": {}}
+    assert {fam(s) for s in desc} >= {"paper", "shutter", "glitch", "braam", None}
+    # a plain moving cut never hears paper, a camera, a glitch or a braam
+    for k in range(6):
+        got, _ = CH.layers({"f": 300 + 40 * k, "kind": "picture", "size": 0.3 + 0.1 * k, "room_s": 2.0, "moving": bool(k % 2)}, "plain", st())
+        assert got and all(fam(s) is None for s, _w in got), got
+    assert CH.fits_of({"kind": "page"}, "plain") == {"paper"}
+    assert CH.fits_of({"kind": "picture", "still": True}, "plain") == {"shutter", "paper"}
+    assert CH.fits_of({"kind": "flash", "glitch": True}, "plain") == {"glitch"}
+    assert CH.fits_of({"kind": "flash"}, "plain") == set() and "braam" in CH.fits_of({"kind": "display"}, "payoff")
+    for cls in ("click", "hit", "whoosh"):
+        assert fam(CH.nearest(cls, desc, False, free, fits={"paper"})) in ("paper", None)
+        assert fam(CH.nearest(cls, desc, False, free, fits=set())) is None
+    assert fam(CH.nearest("click", desc, False, free, fits={"shutter"}, weight=0.5)) == "shutter"
+    assert fam(CH.nearest("whoosh", desc, False, free, fits={"glitch"}, weight=0.55)) == "glitch"
+    # a heavy moment hears a longer recording of the class than a light one
+    light, heavy = CH.nearest("whoosh", desc, False, free, weight=0.3), CH.nearest("whoosh", desc, False, free, weight=0.9)
+    assert desc[light]["dur_s"] < desc[heavy]["dur_s"]
+    # a recording the references vouch for is set at its class's reference level against the voice
+    sid = CH.nearest("impact", desc, False, free, weight=1.0)
+    assert desc[sid]["matched"] and SD.class_of(sid) == "impact"
+    hit = SD.library()[sid]["hit_lufs"]
+    # its class's reading on the references' stems plus what a stem loses of a sound under a voice
+    want = SD.VOICE_LUFS + SP.CLASSES["impact"]["over_voice_spoken_db"] + SD.STEM_LOSS_DB
+    assert SD.STEM_LOSS_DB == 3.0 and abs(hit + SD.gain_for(sid, SD.VOICE_LUFS) - want) <= 0.06
+    assert SD.gain_for(sid, SD.VOICE_LUFS, under=4.0) <= SD.VOICE_LUFS - 4.0 - hit + 0.06
+
+
+def test_a_film_of_new_pictures_carries_the_judges_amount_and_no_more():
+    """SND2: 3.6 clearly audible sounds per 10 s on a film of new pictures over a bed (the judge's median), what the
+    governor allows on some pictures and on a take, 0.8 on a long film; never more in any 10 s than the rate and a
+    half; two gestures never inside 0.6 s."""
+    total, win, _al = SD.allowance("P", 12.0, 60.0, True)
+    assert total == 21 and win == 6
+    assert SD.allowance("P", 3.0, 60.0, True)[0] <= 16                    # the picture supply still earns it
+    assert SD.allowance("M", 3.0, 60.0, True)[0] == 18 and SD.allowance("T", 0.5, 60.0, True)[0] == 12
+    assert SD.allowance("T", 0.5, 30.0, False)[0] <= 3 and SD.allowance("L", 6.0, 600.0, True)[0] == 48
+    fps, dur = 30, 60.0
+    D = int(dur * fps)
+    ev = [{"f": 45, "kind": "display"}] + [{"f": f, "kind": "picture", "size": 0.4 + 0.5 * ((f // 21) % 2)} for f in range(90, D - 60, 21)]
+    ctx = {"fps": fps, "dur_f": D, "existing": [], "speech": None, "voice": None, "words": [], "bed": True, "np10": 14.0, "turn_f": 1200}
+    sounds, rep = SD.plan_sounds(ev, ctx)
+    t = sorted(p["t"] for p in rep["placed"])
+    assert 18 <= len(t) <= 21, len(t)                                     # 3.0 to 3.6 per 10 s
+    assert min(b - a for a, b in zip(t, t[1:])) >= SD.SPACE_S - 1e-6
+    for w in np.arange(0, dur, 0.5):
+        assert sum(1 for x in t if w <= x < w + 10) <= rep["allow_10s"]
+    for a in sorted({s["s"] for s in sounds}):                             # one recording: twice in 30 s, never inside 3 s
+        at = sorted(s["event_f"] / fps for s in sounds if s["s"] == a and s.get("layer") != "lead")
+        assert all(b - c >= SD.SAME_GAP_S for c, b in zip(at, at[1:])), a
+    assert all(s["event_f"] in {e["f"] for e in ev} for s in sounds)      # every sound has a picture event under it
+    # the allowance reaches the end of the film: every 10 s of it carries sound, and no silence runs past 8 s
+    assert all(any(w <= x < w + 10 for x in t) for w in np.arange(0, dur - 10, 2.0))
+    assert max(b - a for a, b in zip([0.0] + t, t + [dur])) <= 8.0, t
+    halves = [sum(1 for x in t if x < dur / 2), sum(1 for x in t if x >= dur / 2)]
+    assert abs(halves[0] - halves[1]) <= 4, halves
+
+
+@needs_ffmpeg
+def test_a_burst_of_quick_cuts_is_one_train_of_clicks():
+    """The judge's list bursts (TEARDOWN B31): one click on each cut of a run of quick cuts, one gesture to the count,
+    never the same sample twice in a row, nothing else inside it, and two trains never back to back."""
+    fps, dur = 30, 30.0
+    D = int(dur * fps)
+    run = [240 + 6 * k for k in range(8)]                                 # eight stills 0.2 s apart from 8.0 s
+    again = [330 + 6 * k for k in range(6)]                               # another run 3 s later: too soon for a second train
+    ev = [{"f": 45, "kind": "display"}, {"f": 150, "kind": "picture", "size": 0.8}] + \
+         [{"f": f, "kind": "picture", "still": True} for f in run + again] + [{"f": 246, "kind": "display"}, {"f": 700, "kind": "picture", "size": 0.9}]
+    ctx = {"fps": fps, "dur_f": D, "existing": [], "speech": None, "voice": None, "words": [], "bed": True, "np10": 9.0}
+    assert [[e["f"] for e in r] for r in SD.bursts(ev, fps)] == [run, again]
+    sounds, rep = SD.plan_sounds([dict(e) for e in ev], ctx)
+    lib = SD.library()
+    trains = [p for p in rep["placed"] if p["kind"] == "burst"]
+    assert len(trains) == 1 and trains[0]["t"] == 8.0 and trains[0]["class"] == "click" and trains[0]["train"] == 8
+    clicks = sorted((s["event_f"], s["s"]) for s in sounds if s["for"] == "burst")
+    assert [f for f, _ in clicks] == run                                   # one on each cut, its peak on the cut
+    ids = [sid for _, sid in clicks]
+    assert len(set(ids)) >= 2 and all(a != b for a, b in zip(ids, ids[1:]))
+    # each a single short click of one kind: nothing with a second clack in it, nothing that rings into the next cut
+    assert all(not lib[sid].get("hit_s") and (lib[sid].get("max_s") or lib[sid]["duration_s"]) <= SD.TRAIN_CLICK_S for sid in ids)
+    assert len({lib[sid].get("family") for sid in ids}) == 1
+    others = [p["t"] for p in rep["placed"] if p["kind"] != "burst"]
+    assert not [t for t in others if 8.0 - SD.SPACE_S < t < run[-1] / fps + SD.SPACE_S]                 # the display word inside it stays silent
+    assert len(rep["placed"]) <= rep["allow"]                               # a train is one gesture to the allowance
+    # three quick cuts are not a burst
+    assert SD.bursts([{"f": f, "kind": "picture"} for f in (30, 36, 42)], fps) == []
 
 
 @needs_ffmpeg
@@ -318,7 +415,7 @@ def test_the_named_turn_takes_the_heaviest_landing_whatever_the_film_has_used():
     layers, cls = CH.layers({"f": 990, "kind": "display", "room_s": 6.0, "turn": True}, "payoff",
                             {"desc": desc, "tally": dict(spent), "free": free, "spoken": True})
     assert cls == "impact" and [w for _s, w in layers] == ["lead", "hit"]
-    assert desc[layers[0][0]]["kind"] == "riser" and lib[layers[1][0]]["role"] == "impact"
+    assert desc[layers[0][0]]["kind"] == "riser" and desc[layers[1][0]]["kind"] == "impact"
     tight, _ = CH.layers({"f": 990, "kind": "display", "room_s": 0.3, "turn": True}, "payoff", {"desc": desc, "tally": {}, "free": free, "spoken": True})
     assert [w for _s, w in tight] == ["hit"]                              # no room for the climb: the hit alone
 

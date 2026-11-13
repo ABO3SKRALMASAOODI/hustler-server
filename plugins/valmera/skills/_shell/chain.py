@@ -251,9 +251,11 @@ def score(ctx, script):
 
 
 def sound(ctx, l1_path):
-    """The film's sound design (worker/score/sound.py, lane J): each chosen picture event gets a library sound with
-    its peak on the event, inside the footage's allowance, checked against the voice. Writes l1_sound.json beside
-    the Director's L1 and returns its path; the Director's own L1 when the pass cannot run (logged, never a stop)."""
+    """The film's sound design (worker/score/sound.py): each chosen picture event gets the library recording the
+    references would use there (owner, 13 Nov 2026: the references judge the kinds and the amount), its peak on the
+    event, at the references' level under the voice, spread over the whole film, checked against the voice. Writes
+    l1_sound.json beside the Director's L1 and returns its path; the Director's own L1 when the pass cannot run
+    (logged, never a stop)."""
     out = l1_path[:-len(".json")] + "_sound.json"
     if not os.path.exists(out):
         wk = brand.worker_dir()
@@ -354,9 +356,17 @@ def song_version(ctx, rd, sc):
 SONG_KIND = {"wf1": "podcast", "wf2": "marketing", "wf3": "stories", "wf4": "longform"}
 
 
+def sound_manifest():
+    """The sound library of the worker this run designs and draws with (its sounds are chosen from that library, so a
+    checkout that lags it would call a new recording foreign); the ops checkout only when that worker has none."""
+    p = os.path.join(brand.worker_dir(), "sound_library", "manifest.json")
+    return p if os.path.exists(p) else SOUNDS
+
+
 def no_music(l1_path):
-    """Valmera never picks music: every sound in the plan is a library effect or a synthesized one."""
-    lib = {s["file"] for s in json.load(open(SOUNDS))}
+    """Every sound in the plan is a recording of the library (approved by the owner's ear or by reference match):
+    nothing foreign, nothing synthesized, and no audio asset outside the library."""
+    lib = {s["file"] for s in json.load(open(sound_manifest()))}
     l1 = json.load(open(l1_path))
     bad = [s.get("file") for s in l1.get("sound") or [] if s.get("file") and s["file"] not in lib]
     audio_assets = [k for k, a in (l1.get("assets") or {}).items() if a.get("kind") == "audio"]

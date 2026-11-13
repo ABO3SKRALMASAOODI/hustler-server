@@ -97,6 +97,9 @@ ROLE_MIX = {
     "typing": {"target": -14.0, "lo": -18.0, "hi": -9.0},
     "impact": _LOW,
     "heartbeat": _LOW,
+    # roles that joined by reference match (owner decision 13 Nov 2026)
+    "hit": _TONAL, "paper": _SWEEP, "braam": _LOW,
+    "drone": {"target": -16.0, "lo": -22.0, "hi": -11.0},
 }
 
 

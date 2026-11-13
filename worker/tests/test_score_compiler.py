@@ -336,7 +336,15 @@ def test_only_approved_sounds_and_no_music():
     idx = talk_index(33.0)
     txt = '{"k":"film","fps":30}\n{"k":"b","id":"b1","w":"0-30","snd":[{"s":"my_synth","at":"w2"},{"s":"impact","at":"w3"}]}\n'
     r = compile_(txt, idx)
-    assert [s["s"] for s in r.l1["sound"]] == ["impact_1"]     # a role picks an approved file
+    table, roles = S.sound_table()
+    got = [s["s"] for s in r.l1["sound"]]
+    assert len(got) == 1 and got[0] in roles["impact"] and table[got[0]]["role"] == "impact"     # a role picks an approved file
+    # a role names a kind of sound: a recording that means something else (a typewriter key among the clicks) is never its pick
+    keys = {i for i in roles["click"] if table[i].get("family") == "type"}
+    assert keys
+    for k in range(40):
+        ctx_r = compile_(txt.replace('"impact"', '"click"').replace('"b1"', f'"b{k}"'), idx)
+        assert ctx_r.l1["sound"] and ctx_r.l1["sound"][0]["s"] in set(roles["click"]) - keys
     assert any("my_synth" in f for f in r.meter["findings"])
 
 

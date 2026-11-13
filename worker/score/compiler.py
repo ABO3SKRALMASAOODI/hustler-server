@@ -5162,7 +5162,10 @@ def place_sound(ctx, sid, spec, f, db, n, opt=None):
         return
     if name not in table and name in roles:
         r = rng_for(ctx.seed, "snd", sid, n)
-        name = r.choice(sorted(roles[name]))
+        # a role names a kind of sound, never a thing: a recording that means something else (a typewriter key among
+        # the clicks: its manifest `family`) answers only the picture that shows it (score/sound_choice.py)
+        pool = [i for i in roles[name] if not table[i].get("family") or table[i]["family"] == name] or roles[name]
+        name = r.choice(sorted(pool))
     if name not in table:
         ctx.find(f"{sid}: sound {spec!r} is not an approved sound")
         return

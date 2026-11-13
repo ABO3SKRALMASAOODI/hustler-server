@@ -8,20 +8,34 @@ the owner's library, peak on the event, and the master that sets the voice clean
 The master (voice levelled, sounds on it, -14 LUFS, under -1 dBTP, AAC) is scene.audio.master: the engine reads no
 score code (test_the_engine_imports_no_model_code), so the mix lives on its side of the seam.
 
-Owner rules (binding): only the approved recordings of `sound_library` (manifest, sound:<id>); nothing synthesised;
-never music; never a sound on a caption. A sound answers a picture event (a new picture, a card or page landing, a
-display line, a counter step, a flash on a cut, the hook and the payoff) with its PEAK on the event's frame, 13 ms
-early (atlas 8.5: locked sounds peak a median -13 ms from the cut, in every class). The count follows the picture
-supply and the no-bed allowance of TASTE 4.2 (taste.allow): a talking take carries one or two sounds, a film of new
-pictures up to 0.9 per new picture per 10 s, never more in any 10 s than the class allows, three or four kinds of
-sound in 30 s, one recording at most twice in 30 s and never twice inside 3 s. The hook and the payoff are layered
-(a lead whose peak meets the hit): one gesture to the ear and to every counter. Gains are set against the voice the
-mix will have (the renderer levels speech to dialogue_level's -20 LUFS first), by role (ROLE below: the judged targets
-of sfx_mix, Oct 10, moved on 13 Nov toward the references' measured levels): sweeps 8 dB under the voice, short hits
-8.5, risers 7, impacts low (their content above 150 Hz 10.5 under, the whole hit at most 5.5 under). Under speech a
-sound sits at least the class's margin under the voice. Then a signal check: each layer is laid over the programme's
-own voice in 20 ms frames, and one whose speech band (300-3400 Hz) comes within 3 dB of the voice on spoken frames
-is lowered to its role's floor, else dropped.
+Owner rules (binding; 13 Nov 2026: the references are the judge of the sound effects, their kinds and their amount):
+only the approved recordings of `sound_library` (manifest, sound:<id>; approved by the owner's ear or by reference
+match, sound_approval); nothing synthesised; never music; never a sound on a caption; never a cheap or cartoon
+sound. A sound answers a picture event (a new picture, a card or page landing, a display line, a counter step, a
+flash on a cut, the hook and the payoff) with its PEAK on the event's frame, 13 ms early (atlas 8.5: locked sounds
+peak a median -13 ms from the cut, in every class).
+
+How many (SND2, 14 Nov): the references' amount for the film's supply. A film of new pictures carries the judge's
+3.6 clearly audible sounds per 10 s (judge/metromedia/TEARDOWN.md section 9, median of the 8), a film of some
+pictures and a talking take what the governor allows them (taste.allow), a long-form film 0.8 (the study's 20
+long films), never more than the picture supply earns (taste.allow) and never more in any 10 s than the rate and
+a half, and spread over the whole film: it is cut into as many equal stretches as it may carry sounds and every
+stretch's best event is tried before any stretch's second (the payoff is not left in silence because the opening
+spent the allowance). Two gestures are never closer than 0.6 s (the references' median gap is 0.94 s), one recording at most
+twice in 30 s and never twice inside 3 s. The hook and the payoff are layered (a lead whose peak meets the hit):
+one gesture to the ear and to every counter. A burst of quick cuts (four or more new pictures inside 0.4 s of each
+other) is one gesture too: a train of clicks, one on each cut, as the judge's list bursts are sounded.
+
+How loud: at the references' level for the class. A recording that joined by reference match sits where the
+references put that class against the voice (sound_profiles.CLASSES over_voice_spoken_db: a click 6.9 dB under
+the voice, a hit 8.2, a whoosh 7.7, an impact 3.0, measured on stems as the K-weighted loudest 200 ms against the
+voice's speech level), plus the 3 dB a stem loses of a sound under a voice (STEM_LOSS_DB: measured by reading this
+engine's own mixes back on the same ruler), so that it reads where theirs do; the first library keeps its judged
+role targets (ROLE below). Gains are set against the voice the
+mix will have (the renderer levels speech to dialogue_level's -20 LUFS first). Under speech a sound sits at least
+the class's margin under the voice. Then a signal check: each layer is laid over the programme's own voice in
+20 ms frames, and one whose speech band (300-3400 Hz) comes within 3 dB of the voice on spoken frames is lowered
+to its floor, else dropped.
 
 Which recording answers which event is sound_choice's (13 Nov, the sound engine lane): the references' classes for
 the moment (a click, a hit, an impact, a whoosh; a riser only as the climb into a hit), the class the film has
@@ -51,8 +65,8 @@ AR = 16000                  # the analysis rate
 LEAD_S = 0.013              # a placed sound's peak lands this far before its frame (atlas 8.5)
 VOICE_LUFS = -20.0          # dialogue_level.TARGET_LUFS: the voice every gain is set against
 GAIN_MIN, GAIN_MAX = -36.0, -2.0
-MERGE_S = 1.0               # sounds closer than this are one gesture (edit_delta.MERGE_S)
-SPACE_S = 1.5               # two gestures never closer than this
+MERGE_S = 0.6               # sounds closer than this are one gesture
+SPACE_S = 0.6               # two gestures never closer than this (the references' median gap is 0.94 s, their tenth percentile 0.19)
 SAME_GAP_S, SAME_WIN_S, SAME_MAX = 3.0, 30.0, 2
 HOOK_S = 3.0
 PAYOFF_FROM = 0.6           # the payoff is a designed landing in the film's last 40%
@@ -66,8 +80,21 @@ PRESENT_DB = 9.0            # a placed sound stands this far over the voice in t
 PRESENT_MIN = 5.0           # detector counts a reference's sound from 9 dB over its surroundings); under PRESENT_MIN it is not there
 PRESENT_LIFT = 4.0          # the most a sound comes up to be heard (still inside the references' own levels, and never into the voice)
 PRESENT_BANDS = ((60.0, 300.0), (300.0, 1000.0), (1000.0, 3400.0), (3400.0, 8000.0))
-PLACED_10S = 3              # atlas 8.5: the measurable placed layer is 1-3 sounds per 10 s, whatever the transients
+# The references' placed layer per 10 s by the film's supply: clearly audible sounds (50 ms peak 6 dB or more over the
+# bed). P: the judge's median of 8 (TEARDOWN section 9: 3.6, range 1.1-10.4). L: the study's 20 long films (0.8 placed).
+# M and T are the governor's own rates (taste.allow: 3 and 2 over a bed), under the judge's.
+RATE_10S = {"P": 3.6, "M": 3.0, "T": 2.0, "L": 0.8}
+BURST = 1.5                 # in any 10 s, at most the rate and a half (the references' densest 10 s runs to twice their median)
+KINDS_30S = 5               # the references' five classes may all sound inside 30 s; a sixth kind of sound may not
 OWN_CUT_10S = 1             # the upload's own cuts: at most one sounded in any 10 s
+# A burst: a run of quick cuts, one new picture after another (the judge's list bursts: 8 to 14 cuts 0.12-0.25 s apart,
+# TEARDOWN B31). The references sound it as a train, one click a cut; so do we, as ONE gesture.
+TRAIN_GAP_S = 0.4           # cuts this close are one run
+TRAIN_MIN, TRAIN_MAX = 4, 14
+TRAIN_EVERY_S = 8.0         # two trains never start closer than this
+TRAIN_VOICES = 3            # a train alternates up to three recordings of one kind: the same sample in a row is a machine
+TRAIN_CLICK_S = 0.3         # a train's click is over before the cut after the next
+TRIES = 3                   # recordings tried on one event before the voice is given the moment
 
 # Role targets, dB of the hit (K-weighted loudest 200 ms, manifest hit_lufs) against the voice. They began as sfx_mix.ROLE_MIX,
 # judged on the showcase shorts (Oct 10), and moved on 13 Nov toward what the references carry (lanes/S study, 132 films,
@@ -84,13 +111,40 @@ ROLE = {"whoosh": _SWEEP, "swish": _SWEEP, "riser": {"target": -7.0, "lo": -11.0
 LEAD_DB = -2.0              # a lead sits under its hit
 COUNTER_DB = -4.0           # ticks on a counter are texture, under one hit
 NO_VOICE_LIFT = 8.0         # with nothing spoken, the "voice" a sound is set against is the track 8 dB up
+RISER_TOP = -3.0            # a climb never comes nearer the voice than this (the references' risers sit at it; ours play dry)
+# The references' levels were read off Demucs stems, and a stem gives back less of a sound that plays under a voice
+# than was mixed in. Read back on the same ruler (lanes/S study.py), the sounds this engine placed in two re-mixed
+# films measured a median 3.0 dB (17 sounds) and 2.9 dB (11) under the level they were mixed at. So the level a
+# recording is mixed at is the references' reading plus that loss: then it reads where theirs do.
+STEM_LOSS_DB = 3.0
+
+
+def _class_mix():
+    """Level by reference class, for recordings that joined by reference match: the class's own median against the
+    voice under a word (sound_profiles, the study's 132 films) plus what the stem ruler loses (STEM_LOSS_DB), and a
+    floor 3 dB under its lower quartile."""
+    out = {}
+    try:
+        from . import sound_profiles as SP
+        for k, c in SP.CLASSES.items():
+            t, q = c.get("over_voice_spoken_db"), c.get("over_voice_db")
+            if t is None:
+                continue
+            t = min(float(t), RISER_TOP) if k == "riser" else float(t) + STEM_LOSS_DB
+            out[k] = {"target": t, "lo": min(t - 4.0, float(q[0]) - 3.0) if q else t - 6.0}
+    except Exception:  # noqa: BLE001 - without the profiles the role table answers
+        pass
+    return out
+
+
+CLASS_MIX = _class_mix()
 
 # What answers what. A gesture is its layers, each (recording, part); every peak lands on the event.
 # Alternates keep the one-recording rules without changing the gesture's kind.
 ALT = {"whoosh_soft_2": "whoosh_soft_1", "whoosh_soft_1": "whoosh_soft_2", "shutter_1": "shutter_2",
        "shutter_2": "shutter_1", "riser_3": "riser_1", "riser_1": "riser_2", "riser_2": "riser_4",
        "swish_1": "whoosh_soft_2", "pop_1": "click_2", "click_2": "click_1", "glitch_1": "glitch_2"}
-KIND_RANK = {"picture": 0, "card": 1, "page": 1.5, "display": 2, "counter": 2.5, "flash": 3, "cut": 4}
+KIND_RANK = {"picture": 0, "burst": 0.5, "card": 1, "page": 1.5, "display": 2, "counter": 2.5, "flash": 3, "cut": 4}
 DESIGNED = ("picture", "card", "page", "display", "counter", "flash")
 _PIECE = re.compile(r"\.p\d+$")
 
@@ -141,11 +195,27 @@ def role_of(sid):
     return (library().get(sid) or {}).get("role") or "ding"
 
 
+def class_of(sid):
+    """The reference class a recording joined by (None for the first library)."""
+    ref = (library().get(sid) or {}).get("reference")
+    return ref.get("class") if isinstance(ref, dict) else None
+
+
+def kind_of(sid):
+    """What kind of sound this is to the ear's count of kinds: its reference class, else its role."""
+    return class_of(sid) or role_of(sid)
+
+
+def spec_of(sid):
+    c = class_of(sid)
+    return CLASS_MIX[c] if c in CLASS_MIX else ROLE.get(role_of(sid), _TONAL)
+
+
 def gain_for(sid, ref, under=None, offset=0.0):
-    """The gain that puts this recording's hit at its role target against a voice at `ref` LUFS, then at least
-    `under` dB under it when the voice speaks there."""
+    """The gain that puts this recording's hit at its target against a voice at `ref` LUFS (its reference class's
+    level, or its role's), then at least `under` dB under it when the voice speaks there."""
     x = library().get(sid) or {}
-    sp = ROLE.get(role_of(sid), _TONAL)
+    sp = spec_of(sid)
     k = float(x.get("hit_lufs", -15.0))
     hp = x.get("hit_lufs_hp150")
     if sp.get("hp") and hp is not None:
@@ -161,8 +231,16 @@ def gain_for(sid, ref, under=None, offset=0.0):
 
 def floor_for(sid, ref):
     x = library().get(sid) or {}
-    sp = ROLE.get(role_of(sid), _TONAL)
-    return ref + sp["lo"] - float(x.get("hit_lufs", -15.0))
+    return ref + spec_of(sid)["lo"] - float(x.get("hit_lufs", -15.0))
+
+
+def allowance(cls, np10, dur_s, bed):
+    """How many sounds a film of this supply carries, and how many in any 10 s: (total, in 10 s, the governor's row).
+    The governor's allowance (taste.allow: what the picture supply earns) under the references' rate for the class."""
+    al = dict(_allow(cls, np10, dur_s, bed))
+    rate = min(float(RATE_10S.get(cls, 3.0)), float(al["sounds_10s"]) + 0.999) if al.get("sounds_10s") else float(RATE_10S.get(cls, 3.0))
+    total = max(1, min(int(al["sounds"]), int(rate * dur_s / 10.0 + 1e-9)))
+    return total, max(1, min(int(math.ceil(rate * BURST)), total)), al
 
 
 # ----------------------------------------------------------------- audio helpers
@@ -454,6 +532,22 @@ def _gestures(times):
     return [g[0] for g in out]
 
 
+def bursts(events, fps):
+    """Runs of quick cuts: [[event, ...]] of TRAIN_MIN or more new pictures, each inside TRAIN_GAP_S of the one before."""
+    pics = sorted((e for e in events if e["kind"] in ("picture", "cut")), key=lambda e: e["f"])
+    runs, run = [], []
+    for e in pics:
+        if run and (e["f"] - run[-1]["f"]) / fps <= TRAIN_GAP_S:
+            run.append(e)
+        else:
+            if len(run) >= TRAIN_MIN:
+                runs.append(run)
+            run = [e]
+    if len(run) >= TRAIN_MIN:
+        runs.append(run)
+    return runs
+
+
 def plan_sounds(events, ctx):
     """The core. events: [{f, kind, ...}] in programme frames. ctx: fps, dur_f, existing (sound items already in the
     film), speech (bool per 20 ms frame) and voice (mono AR programme voice) or None, words (programme seconds),
@@ -469,16 +563,15 @@ def plan_sounds(events, ctx):
         np10 = len(pics) / max(dur_s, 1e-3) * 10
     cls = klass(np10, dur_s)
     bed = bool(ctx.get("bed"))
-    al = dict(_allow(cls, np10, dur_s, bed))
-    al["sounds_10s"] = min(int(al["sounds_10s"]), PLACED_10S)
-    al["sounds"] = min(int(al["sounds"]), max(1, int(PLACED_10S * dur_s / 10.0 + 1e-9)))
+    total, win, al = allowance(cls, np10, dur_s, bed)
+    al["sounds"], al["sounds_10s"] = total, win
     report = {"class": cls, "np10": round(np10, 2), "bed": bed, "allow": al["sounds"], "allow_10s": al["sounds_10s"],
               "events": len(events), "placed": [], "dropped": [], "kept_director": len(ctx.get("existing") or [])}
     existing = list(ctx.get("existing") or [])
     ex_t = [float(s.get("event_f", 0)) / fps for s in existing]
     taken = _gestures(ex_t)
     uses = [(float(s.get("event_f", 0)) / fps, s.get("s")) for s in existing]
-    roles = [(float(s.get("event_f", 0)) / fps, role_of(s.get("s"))) for s in existing if s.get("s") in lib]
+    roles = [(float(s.get("event_f", 0)) / fps, kind_of(s.get("s"))) for s in existing if s.get("s") in lib]
     speech = ctx.get("speech")
     words = ctx.get("words") or []
 
@@ -492,6 +585,19 @@ def plan_sounds(events, ctx):
     cands = [e for e in events if e["f"] < end_f - int(END_GUARD_S * fps)
              and (e["f"] > 1 or e["kind"] in ("display", "card", "page", "counter"))
              and not any(abs(e["f"] / fps - t) <= 3.0 / fps for t in ex_t)]
+    trains, last_train = [], -1e9
+    for run in bursts(cands, fps):
+        if run[0]["f"] / fps - last_train < TRAIN_EVERY_S:
+            continue
+        last_train = run[0]["f"] / fps
+        run = run[:TRAIN_MAX]
+        still = sum(1 for e in run if e.get("still")) * 2 > len(run)
+        trains.append({"f": run[0]["f"], "kind": "burst", "id": run[0].get("id"), "steps": [e["f"] for e in run], "still": still,
+                       "end_f": run[-1]["f"]})
+        inside = {id(e) for e in run}
+        cands = [e for e in cands if id(e) not in inside]
+    cands = sorted(cands + trains, key=lambda e: e["f"])
+    busy = []                                    # (start, end) seconds of placed trains: nothing else lands inside one
     hook = next((e for e in cands if e["f"] < HOOK_S * fps and e["kind"] in DESIGNED), None)
     late = [e for e in cands if e["f"] >= PAYOFF_FROM * end_f and e["kind"] in ("display", "card", "page", "picture", "counter")]
     payoff = min(late, key=lambda e: (KIND_RANK[e["kind"]] > 2, -e["f"])) if late else None
@@ -504,9 +610,24 @@ def plan_sounds(events, ctx):
         if turn is payoff:
             payoff = None
 
-    def rank(e):
-        part = 0 if (e is hook or e is turn) else 1 if e is payoff else 2
-        return (part, 1 if spoken(e["f"] / fps) else 0, KIND_RANK.get(e["kind"], 9), e["f"])
+    # The order the events are tried in. The hook, the turn and the payoff first. Then the film is cut into as many
+    # equal stretches as it may carry sounds, and every stretch is given one sound before any is given a second: its
+    # events are tried best first (in a breath before under a word, a new picture before type, the bigger change
+    # first) until one can be heard. So the allowance reaches the end of the film. (Tried in time order it was spent
+    # early: the FedEx story of 13 Nov placed 14 of its 21 sounds in its first 18 s and none in its last 11.) A
+    # stretch one of the three structural landings is in waits a round; later rounds go to the longest silences first.
+    slot_s = max(dur_s / max(1, int(al["sounds"])), SPACE_S)
+    structural = [e for e in (hook, turn, payoff) if e is not None]
+    stretch = {}
+    for e in cands:
+        if not any(e is x for x in structural):
+            stretch.setdefault(int(e["f"] / fps / slot_s), []).append(e)
+    for rows in stretch.values():
+        rows.sort(key=lambda e: (1 if spoken(e["f"] / fps) else 0, KIND_RANK.get(e["kind"], 9), -choice.weight_of(e, "plain"), e["f"]))
+    filled = {}
+    for e in structural:
+        k = int(e["f"] / fps / slot_s)
+        filled[k] = filled.get(k, 0) + 1
     placed = []
     for s in existing:                       # the Director's own library sounds: same levels, same signal check
         if s.get("s") not in lib:
@@ -528,54 +649,82 @@ def plan_sounds(events, ctx):
         k = (desc.get(s.get("s")) or {}).get("kind")
         if k:
             tally[k] = tally.get(k, 0) + 1
-    for e in sorted(cands, key=rank):
+    film_cls = cls
+
+    def attempt(e):
+        """Place one event's sound if the rules, the library and the voice allow it. True when it was placed."""
+        nonlocal own_cut
         t = e["f"] / fps
         why = None
         if len(taken) >= al["sounds"]:
-            why = f"the footage carries {al['sounds']} (class {cls}{', a bed' if bed else ''})"
+            why = f"the footage carries {al['sounds']} (class {film_cls}{', a bed' if bed else ''})"
         elif e["kind"] == "cut" and (own_cut >= own_cap or any(abs(u - t) < 10.0 for u in own_t) and OWN_CUT_10S <= 1):
             why = "the upload's own cuts already hold their share"
-        elif any(abs(t - g) < SPACE_S for g in taken):
-            why = "another sound is inside 1.5 s"
+        elif any(abs(t - g) < SPACE_S for g in taken) or any(a - SPACE_S < t < b + SPACE_S for a, b in busy) or \
+                (e["kind"] == "burst" and any(t - SPACE_S < g < e["end_f"] / fps + SPACE_S for g in taken)):
+            why = f"another sound is inside {SPACE_S:g} s"
         elif sum(1 for g in taken if abs(g - t) < 10.0) >= al["sounds_10s"] and \
-                any(sum(1 for g in taken + [t] if w <= g < w + 10.0) > al["sounds_10s"] for w in np.arange(t - 10.0, t + 0.01, 0.5)):
-            why = f"more than {al['sounds_10s']} inside 10 s"
+                any(sum(1 for g in taken + [t] if w <= g < w + 10.0) > al["sounds_10s"] for w in [g for g in taken + [t] if t - 10.0 < g <= t]):
+            why = f"more than {al['sounds_10s']} inside 10 s"         # any 10 s that would hold it, counted from each sound in it
         if why:
             report["dropped"].append({"f": e["f"], "kind": e["kind"], "why": why})
-            continue
+            return False
         part = "hook" if e is hook else "payoff" if (e is payoff or e is turn) else "plain"
         prev = max([g for g in taken if g < t], default=0.0)
         e = dict(e, room_s=t - prev, turn=e is turn)
-        layers, cls = _choose(e, part, t, uses, spoken(t), tally, desc)
-        win_roles = {r for (u, r) in roles if abs(u - t) < SAME_WIN_S / 2}
-        new_roles = {role_of(s) for s, _ in layers} - win_roles
-        if layers and len(win_roles) + len(new_roles) > al["roles"]:
-            layers = [(s, w) for s, w in layers if w == "hit"]
-            if role_of(layers[0][0]) not in win_roles and len(win_roles) + 1 > al["roles"]:
-                layers = []
-        if not layers:
-            report["dropped"].append({"f": e["f"], "kind": e["kind"], "why": "no recording left for it inside 30 s"})
-            continue
+        if e["kind"] == "burst":
+            group, voices = _train(e, t, uses, desc, ctx, al, spoken, fps, len(placed))
+            if not group:
+                report["dropped"].append({"f": e["f"], "kind": "burst", "why": "no click left for a train inside 30 s"})
+                return False
+            placed.append({"t": t, "ev": e, "part": "plain", "items": group, "ref": VOICE_LUFS, "class": "click", "train": len(group)})
+            taken.append(t)
+            busy.append((t, e["end_f"] / fps))
+            tally["click"] = tally.get("click", 0) + 1
+            for sid in voices:
+                uses.append((t, sid))
+                roles.append((t, kind_of(sid)))
+            return True
         under = al["under_voice_db"] if spoken(t) else None
         ref = ctx["ref_at"](t) if callable(ctx.get("ref_at")) else VOICE_LUFS
-        lift = 0.0 if (under is not None or cls is None) else choice.breath_lift(cls)      # heard in a breath, as the references do
         steps = e.get("steps") if e["kind"] == "counter" else None
-        group = []
-        if steps and part != "plain":           # a counter that is the hook or the payoff: ticks, then its last value lands
-            layers = [("tick_1", "hit")] + [(sid, w) for sid, w in layers if role_of(sid) == "impact"]
-        for sid, what in layers:
-            off = LEAD_DB if what == "lead" else lift
-            if steps and role_of(sid) == "tick":
-                for sf in steps:
-                    group.append(_item(f"snd.j{len(placed)}.{len(group)}", sid, sf, fps, gain_for(sid, ref, under, COUNTER_DB), e, part, what))
-            else:
-                f_at = steps[-1] if steps else e["f"]
-                group.append(_item(f"snd.j{len(placed)}.{len(group)}", sid, f_at, fps, gain_for(sid, ref, under, off), e, part,
-                                   "accent" if steps else what))
-        hidden = _heard(group, ctx, ref, under, part != "plain")
+        kinds = max(int(al["roles"]), KINDS_30S)
+        win_roles = {r for (u, r) in roles if abs(u - t) < SAME_WIN_S / 2}
+        avoid, hidden, layers, group, cls = set(), None, [], [], None
+        for _ in range(TRIES):
+            # the recording nearest the class; when the voice would hide that one here, the next nearest (the library
+            # holds several of each class, and one that lives in another band may stand clear of this word)
+            layers, cls = _choose(e, part, t, uses, spoken(t), tally, desc, avoid)
+            new_roles = {kind_of(s) for s, _ in layers} - win_roles
+            if layers and len(win_roles) + len(new_roles) > kinds:
+                layers = [(s, w) for s, w in layers if w == "hit"]
+                if kind_of(layers[0][0]) not in win_roles and len(win_roles) + 1 > kinds:
+                    layers = []
+            if not layers:
+                break
+            lift = 0.0 if (under is not None or cls is None) else choice.breath_lift(cls)      # heard in a breath, as the references do
+            group = []
+            if steps and part != "plain":           # a counter that is the hook or the payoff: ticks, then its last value lands
+                layers = [("tick_1", "hit")] + [(sid, w) for sid, w in layers if kind_of(sid) == "impact"]
+            for sid, what in layers:
+                off = LEAD_DB if what == "lead" else lift
+                if steps and role_of(sid) == "tick":
+                    for sf in steps:
+                        group.append(_item(f"snd.j{len(placed)}.{len(group)}", sid, sf, fps, gain_for(sid, ref, under, COUNTER_DB), e, part, what))
+                else:
+                    f_at = steps[-1] if steps else e["f"]
+                    group.append(_item(f"snd.j{len(placed)}.{len(group)}", sid, f_at, fps, gain_for(sid, ref, under, off), e, part,
+                                       "accent" if steps else what))
+            hidden = _heard(group, ctx, ref, under, part != "plain")
+            if not hidden or steps:
+                break
+            avoid |= {sid for sid, what in layers if what == "hit"}
+        if not layers:
+            report["dropped"].append({"f": e["f"], "kind": e["kind"], "why": hidden or "no recording left for it inside 30 s"})
+            return False
         if hidden:                               # a sound nobody would hear is not placed: the next event gets its chance
             report["dropped"].append({"f": e["f"], "kind": e["kind"], "why": hidden})
-            continue
+            return False
         placed.append({"t": t, "ev": e, "part": part, "items": group, "ref": ref, "class": cls})
         taken.append(t)
         if cls:
@@ -585,12 +734,60 @@ def plan_sounds(events, ctx):
             own_t.append(t)
         for sid, _w in layers:
             uses.append((t, sid))
-            roles.append((t, role_of(sid)))
+            roles.append((t, kind_of(sid)))
+        return True
+
+    for e in sorted(structural, key=lambda e: (1 if e is payoff else 0, e["f"])):
+        attempt(e)
+    level = 0
+    while any(stretch.values()):
+        def silence(k):                          # how far this stretch's middle is from any sound so far
+            mid = (k + 0.5) * slot_s
+            return min((abs(mid - g) for g in taken), default=dur_s)
+        for k in sorted((k for k in stretch if stretch[k]), key=(lambda k: k) if level == 0 else (lambda k: (-round(silence(k), 2), k))):
+            if filled.get(k, 0) > level:
+                continue
+            while stretch[k]:
+                if attempt(stretch[k].pop(0)):
+                    filled[k] = filled.get(k, 0) + 1
+                    break
+        level += 1
     sounds, report = _signal_check(placed, ctx, report)
     sounds += [s for s in existing if s.get("s") not in lib]          # the Director's voice layers (echo, swell) as written
     sounds.sort(key=lambda s: (s["event_f"], s["id"]))
     report["sounds"] = len(sounds)
     return sounds, report
+
+
+def _train(e, t, uses, desc, ctx, al, spoken, fps, n):
+    """A burst's train: one click on each of its cuts, alternating up to TRAIN_VOICES recordings of one kind (camera
+    clicks when the pictures are stills, else plain clicks), each at the counter's level: texture under one hit.
+    Returns (items, the recordings used)."""
+    if not desc:
+        return [], []
+    fits = {"shutter"} if e.get("still") else set()
+    lib = library()
+    # a train's click is one short event: a recording of two clacks, or one that rings past the next cut, is not one
+    pool = {k: d for k, d in desc.items() if d["kind"] == "click" and not (lib.get(k) or {}).get("hit_s")
+            and float((lib.get(k) or {}).get("max_s") or (lib.get(k) or {}).get("duration_s") or 9.0) <= TRAIN_CLICK_S}
+    voices = []
+    for _ in range(TRAIN_VOICES):
+        sid = choice.nearest("click", pool, False, lambda s: _free_ok(s, t, uses), exclude=tuple(voices), weight=0.2, fits=fits)
+        if sid is None:
+            break
+        if not voices:
+            pool = {k: d for k, d in pool.items() if d.get("family") == pool[sid].get("family")}      # one kind of click a train
+        voices.append(sid)
+    if not voices:
+        return [], []
+    group = []
+    for k, f in enumerate(e["steps"]):
+        sid = voices[k % len(voices)]
+        tk = f / fps
+        ref = ctx["ref_at"](tk) if callable(ctx.get("ref_at")) else VOICE_LUFS
+        under = al["under_voice_db"] if spoken(tk) else None
+        group.append(_item(f"snd.j{n}.{k}", sid, f, fps, gain_for(sid, ref, under, COUNTER_DB), e, "plain", "hit"))
+    return group, voices
 
 
 def _free_ok(sid, t, uses):
@@ -599,9 +796,10 @@ def _free_ok(sid, t, uses):
     return not any(abs(u - t) < SAME_GAP_S for u in near) and sum(1 for u in near if abs(u - t) < SAME_WIN_S / 2) < SAME_MAX
 
 
-def _choose(e, part, t, uses, is_spoken, tally, desc):
+def _choose(e, part, t, uses, is_spoken, tally, desc, avoid=()):
     """The layers for one event and the class they were given: by the references' shares for the moment and the
-    signal ruler (sound_choice) when the library is described; else by the fixed table. A counter keeps its tick."""
+    signal ruler (sound_choice) when the library is described; else by the fixed table. A counter keeps its tick.
+    avoid: recordings already tried on this event (the voice would hide them here)."""
     lib = library()
     if desc and e["kind"] != "counter":
         try:
@@ -609,15 +807,17 @@ def _choose(e, part, t, uses, is_spoken, tally, desc):
             for _u, sid_ in uses:
                 heard[sid_] = heard.get(sid_, 0) + 1
             got, cls = choice.layers(e, part, {"desc": desc, "tally": tally, "spoken": is_spoken, "used": heard,
-                                               "free": lambda sid: _free_ok(sid, t, uses)})
+                                               "free": lambda sid: sid not in avoid and _free_ok(sid, t, uses)})
         except Exception:  # noqa: BLE001
             got, cls = None, None
         if got:
             return [(sid, w) for sid, w in got if sid in lib], cls
+        if avoid:
+            return [], cls
     layers = []
     for sid, what in gesture(e, part):
         sid = _free(sid, t, uses)
-        if sid is None or sid not in lib:
+        if sid is None or sid not in lib or sid in avoid:
             if what == "hit":
                 return [], None
             continue
@@ -816,6 +1016,7 @@ def _signal_check(placed, ctx, report):
                 lay.append([i["s"], i["db"], sum(1 for k in keep if k["s"] == i["s"])])
         over = [i["present_db"] for i in keep if i.get("present_db") is not None]
         report["placed"].append({"t": round(g["t"], 2), "kind": g["ev"]["kind"], "part": g["part"], "class": g.get("class"), "layers": lay,
+                                 **({"train": len(keep)} if g.get("train") else {}),
                                  **({"over_voice_db": min(over)} if over else {})})
     out.sort(key=lambda s: (s["event_f"], s["id"]))
     report["gestures"] = len(report["placed"])

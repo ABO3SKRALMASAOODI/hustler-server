@@ -94,6 +94,7 @@ def _box_in_fractions(ctx, edl, box):
 # ── Sound library (real recordings approved by the owner) ─────────────────
 
 SOUND_PREFIX = sound_library.REF_PREFIX
+LIBRARY_LISTING_MAX = 40          # an unfiltered listing longer than this names the roles instead of every row
 
 
 def sound_search(query, limit=6):
@@ -124,7 +125,9 @@ def ensure_library_asset(ctx, sound_id):
                meta={"filename": row["file"], "source": "valmera-sound-library",
                      "source_url": row["source_url"], "author": row["author"],
                      "license": row["license"],
-                     "license_note": "CC0 1.0 real recording from Freesound — no attribution required",
+                     "license_note": ("CC0 1.0 real recording from Freesound — no attribution required"
+                                      if str(row.get("license") or "").startswith("CC0") else
+                                      f"{row.get('license')} real recording — royalty-free, no attribution required"),
                      "caption": row["use"], "library_sound": sound_id, "role": row["role"]})
     return key
 
@@ -181,12 +184,23 @@ def list_sound_library(ctx, role=None):
                     "one clause: " + sound_requests.decline_clause(role, rid))
     if not rows:
         return "The sound library is empty on this deployment."
-    return ("Valmera sound library — real recordings approved by ear (CC0, no attribution). "
+    more = ""
+    if not role and len(rows) > LIBRARY_LISTING_MAX:
+        # the whole library is long: the first library in full, then each role's count (list a role for its rows)
+        counts = {}
+        for r in rows:
+            if r.get("reference"):
+                counts[r["role"]] = counts.get(r["role"], 0) + 1
+        rows = [r for r in rows if not r.get("reference")]
+        more = ("\nMore recordings by role (list_sound_library(role='<role>') lists them): "
+                + ", ".join(f"{k} +{n}" for k, n in sorted(counts.items())) + ".")
+    return ("Valmera sound library — real recordings, approved by ear or by match to the reference films "
+            "(royalty-free, no attribution). "
             "Place with add_sfx(storage_key='sound:<id>', at=<program second it should HIT>) "
             "and gain_db unset: the tool starts each recording early by its measured peak "
             "(typing starts at `at`), stops long tails at their measured end and levels it "
             "against the measured voice at its hit.\n"
-            + SOUND_POLICY + "\n" + "\n".join("- " + sound_library.describe(r) for r in rows))
+            + SOUND_POLICY + "\n" + "\n".join("- " + sound_library.describe(r) for r in rows) + more)
 
 
 # ── motion graphics ───────────────────────────────────────────────────────
