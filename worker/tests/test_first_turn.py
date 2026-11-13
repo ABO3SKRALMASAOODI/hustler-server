@@ -276,3 +276,40 @@ def test_the_no_offers_rule_does_not_apply_to_an_empty_turn():
     rule = p[i:i + 900]
     assert "ASSUMES YOU DELIVERED SOMETHING" in rule
     assert "changed nothing" in rule
+
+
+def test_the_first_message_is_written_by_the_greet_model_on_the_claude_lane(monkeypatch):
+    """14 Nov: index_greet moved from gpt-6-luna to config.GREET_MODEL
+    (claude-haiku-5-5) on the Claude lane; the shared route answers when the
+    lane is closed or the Claude call fails."""
+    import claude_lane
+    calls = []
+
+    def fake_ask_text(system, user, **kw):
+        lane = kw.get("lane")
+        calls.append(lane[1] if lane else None)
+        if lane and fail_claude[0]:
+            return None
+        return {"text": "Your video is ready to edit.", "model": lane[1] if lane else "gpt-6-luna",
+                "prompt_tokens": 1, "completion_tokens": 1}
+
+    fail_claude = [False]
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(config, "GREET_MODEL", "claude-haiku-5-5")
+    monkeypatch.setattr(claude_lane, "configured", lambda: True)
+    monkeypatch.setattr(claude_lane, "available", lambda: True)
+    monkeypatch.setattr(llm, "ask_text", fake_ask_text)
+    assert indexer._greet_via_llm(None, 1, "2.0 min, 3 shots", None, False,
+                                  {"words": [{"w": "hi"}]})
+    assert calls == ["claude-haiku-5-5"]
+
+    calls.clear(); fail_claude[0] = True
+    assert indexer._greet_via_llm(None, 1, "2.0 min, 3 shots", None, False,
+                                  {"words": [{"w": "hi"}]})
+    assert calls == ["claude-haiku-5-5", None]
+
+    calls.clear(); fail_claude[0] = False
+    monkeypatch.setattr(config, "GREET_MODEL", "gpt-6-luna")
+    indexer._greet_via_llm(None, 1, "2.0 min, 3 shots", None, False,
+                           {"words": [{"w": "hi"}]})
+    assert calls == [None]

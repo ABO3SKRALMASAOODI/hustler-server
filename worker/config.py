@@ -306,6 +306,13 @@ ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "").strip()
 # Chosen from the 25 Oct trial-lane fixtures (cost and quality per request);
 # app_kv.free_result.model overrides it without a deploy.
 CLAUDE_TRIAL_MODEL = os.getenv("CLAUDE_TRIAL_MODEL", "claude-haiku-5-5").strip()
+# The "your video is ready" message a customer reads first after an upload
+# (indexer._greet_via_llm). 14 Nov: on 10 real greetings Haiku was at least as
+# good as gpt-6-luna (it names the footage's language, shortens long
+# transcript quotes instead of pasting them whole) and as fast (median 1.3 s
+# against 1.6 s) at the same price. A non-Claude value, or a closed Claude
+# lane, keeps the shared AGENT_MODEL path.
+GREET_MODEL = os.getenv("GREET_MODEL", "claude-haiku-5-5").strip()
 # output_config.effort for the planning step (iteration 0) and the dispatch
 # steps after it. Effort is the main cost/quality lever on Claude 5.5 models;
 # thinking is adaptive and is billed as output. Applies to every Claude lane

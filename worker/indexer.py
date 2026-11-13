@@ -1362,12 +1362,31 @@ _GREET_CLAIM = re.compile(
     r"rendered|captioned)|i (?:cut|trimmed|edited|rendered)\b)")
 
 
+def _greet_lane():
+    """(client, model) for the first message, from config.GREET_MODEL: the
+    Claude lane when that setting names a Claude model and the lane is open,
+    otherwise None (the shared ask_text route answers)."""
+    model = str(config.GREET_MODEL or "")
+    if not model.startswith("claude-"):
+        return None
+    try:
+        import claude_lane
+        if not (claude_lane.configured() and claude_lane.available()):
+            return None
+        return claude_lane.ClaudeLaneClient(), model
+    except Exception as exc:  # noqa: BLE001 - the shared route still answers
+        print(f"[index] greet Claude lane unavailable: {str(exc)[:120]}",
+              flush=True)
+        return None
+
+
 def _greet_via_llm(worker_db, project_id, stats, pending, out_of_credits,
                    index):
     """LLM-authored ready-notice in Valmera's voice — the template in
     _finish_setup is the fallback. Recorded to llm_calls with job_id NULL
     (visible in admin, never charged)."""
-    if not config.OPENAI_API_KEY:
+    lane = _greet_lane()
+    if lane is None and not config.OPENAI_API_KEY:
         return None
     words = index.get("words") or []
     snippet = " ".join((w.get("w") or "").strip()
@@ -1419,12 +1438,18 @@ def _greet_via_llm(worker_db, project_id, stats, pending, out_of_credits,
     # 147 of 204 greetings in the two weeks to 15 Oct came back empty and
     # the template went out instead. Room to answer, low effort, and one
     # retry when the cap was the reason.
-    res = llm.ask_text(system, user, max_tokens=1200, temperature=0.5,
-                       purpose="index_greet", reasoning_effort="low",
-                       retry_empty=True)
+    res = None
+    if lane is not None:
+        res = llm.ask_text(system, user, max_tokens=1200, temperature=0.5,
+                           purpose="index_greet", reasoning_effort="low",
+                           retry_empty=True, lane=lane)
+    if res is None and config.OPENAI_API_KEY:
+        res = llm.ask_text(system, user, max_tokens=1200, temperature=0.5,
+                           purpose="index_greet", reasoning_effort="low",
+                           retry_empty=True)
     try:
         worker_db.run(dbx.insert_llm_call, project_id, None, "index_greet",
-                      config.AGENT_MODEL,
+                      (res or {}).get("model") or config.AGENT_MODEL,
                       {"system": system, "user": user},
                       {"text": res["text"]} if res
                       # The REAL provider error, not "call failed" — this row
