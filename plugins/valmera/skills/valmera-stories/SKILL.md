@@ -64,7 +64,11 @@ Open `.valmera/workflow/work/<run_id>/look/sheet.jpg`. Frame 0 must already be t
 every name must be on its own picture; nothing on a face or under the platform's buttons. Then write
 `<run folder>/direction.json` with only what you change, `touch <run folder>/look.ok`, and resume.
 `{"script": {...}}` replaces parts of the script's data (facts are verified again); any other key is
-a knob of the style's builder (the `d` dict at the top of each builder in `film.py`).
+a knob of the style's builder (the `d` dict at the top of each builder in `film.py`). Two knobs come up
+often: `"drop": [picture titles]` keeps a photograph the check passed out of the film (a 2025 meeting
+photo would read as 1973), and `"low_stat": id` names the stat that goes red at the low point.
+Read each photograph's own title and date in `supply/pack.json` before approving: the vision check
+knows who is in a picture, not when it was taken.
 
 ### A film that must be redone
 
@@ -76,7 +80,7 @@ from `.valmera/workflow/ledger.json`, run again with `notes`. After handover: re
 | Style | Spine | As built |
 |---|---|---|
 | **Character Sheet** | G4, T4 | Photographs of the named people and places full frame (or whole on a blurred bed of themselves when a crop would cut them or pass 3x), designed pages for the figures. A stat block in the top-left corner changes on the word that causes each change: the number ticks over 7 frames in accent, its bar sets to the value. At the low point the bar goes red and blinks. At most one in three sentence endings is a cut through its own full stop: the stop swells 1.9x a frame and is a window onto the next picture. The last stat overflows: the number leaves the block and fills the frame |
-| **Whole Page** | N6, C1 | The whole script set as a page (one or two columns, sized to fill it), photographs as windows in the text. Words not yet spoken wait at 22% ink and are inked as they are said; a window opens when its line is said. The camera follows the spoken line and holds a window while it is talked about. Each word's size step and lift come from the narrator's own loudness and pitch (signal only). The close pulls back to the whole page: a poster |
+| **Whole Page** | N6, C1 | The whole script set as a page (one or two columns, sized to fill it), photographs as windows in the text. Words not yet spoken wait at 22% ink and are inked as they are said; a window opens when its line is said. The page is seen below a dark desk edge at y 0.215, so no word ever passes under the product's mark. The camera follows the spoken line and holds a window while it is talked about. Each word's size step and lift come from the narrator's own loudness and pitch (signal only). The close pulls back to the whole page: a poster |
 | **One Photograph** | T3, X2 | One free archive photograph. Hook: it lies blurred and dark, and its faces land sharp, a few on each spoken word. The camera travels inside it to each person as the script looks at them, with their name once. A person whose part is told keeps a small gold mark to the end. Once, a face turns out to be the sentence being spoken, set in tiny type in its tones; the camera pushes in and reads along it. The close pulls back to the whole photograph with every mark and one line |
 | Living Print, The Thread, Census | | not built: they need a stateful damage layer, a path planner over matte and depth, or particles from a photo's pixels |
 

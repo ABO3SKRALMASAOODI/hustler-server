@@ -187,7 +187,8 @@ STYLE_DATA = {
         '(the bar\'s full length)}], and in each segment "ticks": [{"stat": id, "to": the value as printed, "number": plain number, '
         '"word": the exact word of `say` on which it changes}] (only changes the story states, every value in a fact\'s quote), '
         '"overflow": {"stat": id, "to": the final value as printed, "number": plain number, "word": a word of the last segments} for the '
-        'stat that overflows the block at the close. Mark one segment "beat": "low" where a stat is at its worst.'),
+        'stat that overflows the block at the close. Mark one segment "beat": "low" where the story is at its worst, and give "low_stat": the '
+        'id of the stat that is at its worst there (its bar goes red).'),
     "whole-page": (
         '"headline": the page\'s headline, two to five words, that does not repeat the first sentence, and each segment may carry '
         '"window": {"subject": the name of one named thing, "line": four to eight words it sits after} for the four to six photographs '

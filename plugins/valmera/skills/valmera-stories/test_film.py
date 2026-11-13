@@ -102,7 +102,7 @@ def test_style_compiles_and_passes_taste(style, supply, tmp_path):
         assert len([s for s in l1["sound"] if s["s"] == "tick_1"]) <= 2
         assert any(i["k"] == "word" and i["t"] == "." and i.get("fill") for i in l1["items"])
     if style == "whole-page":
-        words = [i for i in l1["items"] if i["k"] == "word" and isinstance(i["op"], list)]
+        words = [i for i in l1["items"] if i["k"] == "word" and i.get("z") == 3]
         assert len(words) == len(sup["words"]["words"])
         assert min(words[0]["s"]) < 0.6               # the pull-back to the whole page
     if style == "one-photograph":

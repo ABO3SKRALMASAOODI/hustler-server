@@ -336,7 +336,10 @@ def designed_page(P, f, text, sub, palette, v_big, v_sub):
     """A page of type: a figure or a date on its own, where no photograph shows it (a designed picture)."""
     a, b = f
     P.page(f, palette["page0"], palette["page1"], grain=0.05)
-    P.voices[v_big]["px"] = P.R.fit_px(v_big, text, 0.80 * W, 300)
+    v_own = f"{v_big}{a}"                   # each page's figure is sized for itself: a voice of its own
+    P.voices[v_own] = dict(P.voices[v_big])
+    P.voices[v_own]["px"] = P.R.fit_px(v_own, text, 0.80 * W, 300)
+    v_big = v_own
     n = b - a
     ys = [0.47 + 0.012 * (1 - q) for q in expo_out(min(7, n))] + [0.47] * max(n - 7, 0)
     ops = [min(1.0, (i + 1) / 3) for i in range(n)]
@@ -429,7 +432,9 @@ def character_sheet(script, sup, direction=None):
     }
     P = Plan(voices, sup["sounds"])
     pal = dict(page0="#14110F", page1="#0B0A09", ink="#F4EFE6", ink_soft="#BDB4A6", accent="#F2C14E", red="#E5322D", plate="#0A0A0A")
-    pics = sup["pictures"]
+    drop = set(d.get("drop") or [])            # the director's hand: photographs (by title) the film must not use
+    pics = {k: [r for r in v if r.get("title") not in drop] for k, v in sup["pictures"].items()}
+    pics = {k: v for k, v in pics.items() if v}
     keys = {}
     for name, lst in pics.items():
         for j, rec in enumerate(lst):
@@ -555,8 +560,8 @@ def character_sheet(script, sup, direction=None):
             ticks.append(dict(t, f=Clock.f(clock.word_t(i, t.get("word"))), seg=i, beat=s.get("beat")))
     ticks.sort(key=lambda t: t["f"])
     low_seg = next((i for i, s in enumerate(script["segments"]) if s.get("beat") == "low"), None)
-    low_stat = None
-    if low_seg is not None and stats:
+    low_stat = script.get("low_stat") or d.get("low_stat")
+    if low_seg is not None and stats and not low_stat:
         lf = Clock.f(clock.segs[low_seg][0])
 
         def at(st):
@@ -646,14 +651,18 @@ def character_sheet(script, sup, direction=None):
     l1 = P.done(sup.get("sid", "wf3"), f_end, int(d.get("seed", 1113)), film)
     beats = dict(dur_f=f_end, voice_f=[LEAD_F, f_voice_end], overflow_f=f_ovf, cuts=sorted(set(cut_pts)), t4=[x[1] for x in t4],
                  events=sorted(set(P.events) | set(cut_pts)), pictures=P.pictures, stats=stat_rows, on_screen=P.shown, caption_y=cap_y,
-                 look=sorted({0, 12, *[c + 4 for c in cut_pts[::3]], *[x[1] + 4 for x in t4], f_ovf + 25, f_end - 2}))
+                 look=sorted({0, 12, *[c + 4 for c in cut_pts[::3]], *[x[1] + 4 for x in t4], f_ovf + 25, f_end - 2,
+                              *([Clock.f(clock.segs[low_seg][0]) + 6] if low_seg is not None else [])}))
     return l1, beats
 
 
 # ----------------------------------------------------------------- style: Whole Page
 
 def whole_page(script, sup, direction=None):
-    d = dict(read_y=0.42, paper0="#F3EEE4", paper1="#E9E2D4", ink="#191714", wait=0.22, ground="#171513", poster_fill=0.93)
+    # the page is seen below `top`: above it is the desk, where the product's mark sits on dark ground and no word
+    # passes under it (TASTE P2, the mark's keep-out). The poster at the close sits in the same window.
+    d = dict(read_y=0.55, top=0.215, bottom=0.975, paper0="#F3EEE4", paper1="#E9E2D4", ink="#191714", wait=0.22, ground="#171513",
+             poster_fill=0.98)
     d.update(direction or {})
     clock = Clock(sup["words"], script)
     words = clock.words
@@ -779,7 +788,9 @@ def whole_page(script, sup, direction=None):
         PH = max(min(g["used"] + margin_bot, 1.9 * H), 1.15 * H)
     PW = W * ncols
     layout, windows, cols, lead = g["layout"], g["windows"], g["cols"], g["lead"]
-    z_end = d["poster_fill"] * min(W / PW, H / PH)
+    top, bot = d["top"], d["bottom"]
+    z_end = d["poster_fill"] * min(0.90 * W / PW, (bot - top) * H / PH)
+    poster_y = (top + bot) / 2
 
     # ---- the camera: a stop per word (its line), a window holds the frame while it is talked about
     n_end_voice = Clock.f(clock.dur)
@@ -794,27 +805,32 @@ def whole_page(script, sup, direction=None):
             wn = next(x for x in windows if x["k"] == l["k"])
             stops.append((Clock.f(w["t1"]) + 2, cols[wn["col"]] + col_w / 2, wn["py0"] + wn["h"] * 0.5 - 0.02 * H))
     stops.sort(key=lambda s: s[0])
-    cx, cy = stops[0][1], stops[0][2]
+    read_y = d["read_y"]
+    cy_min = (read_y - top) * H + 0.012 * H              # the page's head never scrolls under the desk's edge
+    cx, cy = stops[0][1], max(stops[0][2], cy_min)
     cam = []
     ti = 0
     k = 0.17
     for f in range(f_pull0):
         while ti + 1 < len(stops) and stops[ti + 1][0] <= f:
             ti += 1
-        tx, ty = stops[ti][1], stops[ti][2]
+        tx, ty = stops[ti][1], max(stops[ti][2], cy_min)
         cx, cy = cx + (tx - cx) * k, cy + (ty - cy) * k        # an exponential follow: most of a line in 8 frames
-        cam.append((cx, cy, 1.0))
-    x0, y0, _ = cam[-1]
+        cam.append((cx, cy, 1.0, read_y))
+    x0, y0, _, _ = cam[-1]
     for j in range(f_end - f_pull0):
         q = ease_io(n_pull)[min(j, n_pull - 1)]
         z = 1.0 / ((1 - q) + q / z_end)
-        cam.append((x0 + (PW / 2 - x0) * q, y0 + (PH / 2 - y0) * q, z))
-    read_y = d["read_y"]
+        cam.append((x0 + (PW / 2 - x0) * q, y0 + (PH / 2 - y0) * q, z, read_y + (poster_y - read_y) * q))
 
     def to_screen(px_, py_, f):
-        cx_, cy_, z = cam[f]
-        yc = read_y + (0.5 - read_y) * (1 - 1 / max(z, 1e-6)) / (1 - 1 / max(z_end, 1e-6)) if z < 1 else read_y
+        cx_, cy_, z, yc = cam[f]
         return ((px_ - cx_) * z + W * 0.5) / W, ((py_ - cy_) * z + H * yc) / H, z
+
+    def seen(v, ys, ss):
+        """1 where a word stands below the desk's edge, fading to 0 as it passes under it."""
+        cap = R.cap(v) / H
+        return [min(1.0, max(0.0, (y - cap * s - top) / 0.018)) for y, s in zip(ys, ss)]
 
     def track_card(px_, py_, a, b):
         xs, ys, ss = [], [], []
@@ -844,10 +860,10 @@ def whole_page(script, sup, direction=None):
     for li, t in enumerate(g["tlines"]):
         py_ = margin_top + g["th"] * (li + 1) - 0.2 * g["th"]
         xs, ys, ss = track_word("title", t, cols[0], py_, 0, f_end)
-        P.word([0, f_end], t, "title", xs, ys, d["ink"], 1.0, s=ss, z=2)
+        P.word([0, f_end], t, "title", xs, ys, d["ink"], [r4(o) for o in seen("title", ys, ss)], s=ss, z=2)
     if kick:
         xs, ys, ss = track_word("kick", kick.upper(), cols[0], margin_top - 0.25 * g["th"], 0, f_end)
-        P.word([0, f_end], kick.upper(), "kick", xs, ys, "#6E655A", 1.0, s=ss, z=2)
+        P.word([0, f_end], kick.upper(), "kick", xs, ys, "#6E655A", [r4(o) for o in seen("kick", ys, ss)], s=ss, z=2)
     rule_y = margin_top + g["th"] * len(g["tlines"]) + px * 0.35
     xs, ys, ss = track_card(cols[0] + col_w / 2, rule_y, 0, f_end)
     P.card([0, f_end], "plate", [0.5 - col_w / W / 2, 0.5 - 0.0008, 0.5 + col_w / W / 2, 0.5 + 0.0008], z=2, x=xs, y=ys, s=ss,
@@ -856,7 +872,8 @@ def whole_page(script, sup, direction=None):
         w = words[l["k"]]
         on = Clock.f(w["t0"])
         xs, ys, ss = track_word(l["v"], w["w"], l["px"], l["py"], 0, f_end)
-        ops = [r4(d["wait"] + (1 - d["wait"]) * min(1.0, max(0.0, (f - on + 1) / 3.0))) for f in range(f_end)]
+        vis = seen(l["v"], ys, ss)
+        ops = [r4(vis[f] * (d["wait"] + (1 - d["wait"]) * min(1.0, max(0.0, (f - on + 1) / 3.0)))) for f in range(f_end)]
         P.word([0, f_end], w["w"], l["v"], xs, ys, d["ink"], ops, s=ss, z=3, note=False)
     for wn in windows:
         rec = wn["rec"]
@@ -869,6 +886,9 @@ def whole_page(script, sup, direction=None):
                grade=dict(lift=0.02, gamma=1.0, gain=0.97, sat=0.9, contrast=1.04, temp=0.03, tint=0))
         P.pictures.append(dict(f=[k_on, f_end], kind="window", name=wn["name"], path=rec["path"]))
         P.events.append(k_on)
+    # the desk above the page: windows and the page itself pass under it (words fade out on their own)
+    P.block([0, f_end], [0.0, 0.0, 1.0, top], d["ground"], z=9)
+    P.block([0, f_end], [0.0, top - 0.0012, 1.0, top], "#2C2925", z=9)
     film = dict(grain=0.03, vignette=0.22, over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0))
     l1 = P.done(sup.get("sid", "wf3"), f_end, int(d.get("seed", 1113)), film)
     beats = dict(dur_f=f_end, voice_f=[LEAD_F, n_end_voice], pull=[f_pull0, f_pull0 + n_pull], windows=[dict(name=w["name"], k=w["k"]) for w in windows],
