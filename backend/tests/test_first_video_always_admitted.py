@@ -139,3 +139,20 @@ def test_a_link_is_the_accounts_first_video_exactly_as_an_upload(monkeypatch):
                                     link, link)
     assert out["subscribe_gated"] is True and out["index_job_id"] is None
     assert out["trial_refusal"] == "device_limit" and locks == [41206]
+
+
+def test_a_ticket_a_failure_opened_has_the_failures_bar():
+    """`ops_review.py ticket --project` files a walled first video as a
+    failure: its replay closes it when the request completes with no failure;
+    a cause the Reviewer named from a rating keeps the score as its bar."""
+    from ops_loop import store
+    failed = {"cause_key": "trial-first-video-link-not-admitted", "history": [
+        {"event": "opened", "auto": True, "ref": "fixer:x:p5741"},
+        {"event": "failure", "ref": "fixer:x:p5741", "project": 5741}]}
+    rated = {"cause_key": "first-cut-title-covers-speaker-face", "history": [
+        {"event": "opened", "review": 338, "severity": "P1"}]}
+    assert store.is_quality(failed) is False
+    assert store.is_quality(rated) is True
+    assert store.is_quality({"cause_key": "auto-quality-same-upload",
+                             "history": failed["history"]}) is True
+    assert store.is_quality({"cause_key": "auto-job-index-oom"}) is False

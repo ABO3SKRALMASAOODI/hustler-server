@@ -1068,7 +1068,22 @@ def is_quality(ticket):
         # proven fixed and re-picked every day for a 10/10 the defect can't
         # give; the film's quality is its own ticket.
         return False
-    return not key.startswith(AUTO_PREFIX) or key.startswith(QUALITY_KEYS)
+    if key.startswith(QUALITY_KEYS):
+        return True
+    if key.startswith(AUTO_PREFIX):
+        return False
+    # A cause named by hand is the Reviewer's rating, unless what opened it
+    # was a failure (record_failure; `ops_review.py ticket --project`, 13 Nov:
+    # a first video walled before anything ran has no session to rate). Its
+    # bar is the failure's: that request completes with no failure.
+    return not _opened_by_failure(ticket)
+
+
+def _opened_by_failure(ticket):
+    for h in ticket.get("history") or []:
+        if isinstance(h, dict) and h.get("event") == "opened":
+            return bool(h.get("ref")) and h.get("review") is None
+    return False
 
 
 def is_rating(ticket):
