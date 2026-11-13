@@ -922,11 +922,14 @@ def edits_itself(script, sup, direction=None):
         q0 = next((q for q, y in enumerate(ys) if y <= slot - 0.003), None)
         if q0 is not None:
             P.word(iid, [f_r0 + q0, f_end], t, v, x, ys[q0:], pin, op, align=align)
+        return q0
 
     printed("bill.head", bill["head"], "h", (px0 + px1) / 2, offs["head"], align="c")
     for j, (lab, val) in enumerate(bill["rows"]):
         printed(f"bill.l{j}", lab, "r", px0 + 0.04, offs[f"r{j}"], op=0.6)
-        printed(f"bill.v{j}", val, "r", px1 - 0.04, offs[f"r{j}"], align="r")
+        q0 = printed(f"bill.v{j}", val, "r", px1 - 0.04, offs[f"r{j}"], align="r")
+        if q0 is not None:                                # the printer's tick as each row clears the slot
+            P.hit(f"bill.t{j}", "tick_1", f_r0 + q0, d["tick_db"] - 2.0)
     printed("bill.total", bill["total"], "q", px0 + 0.04, offs["total"])
     for j, t in enumerate(cta["rows"][:2]):
         printed(f"bill.cta{j}", t, "r", (px0 + px1) / 2, offs[f"c{j}"], align="c", op=1.0 if j == 0 else 0.6)
@@ -934,7 +937,7 @@ def edits_itself(script, sup, direction=None):
     P.events.append(f_r0 + feed_n)
 
     # ---- sound: the first cut's voice to the send, the new cut's voice from the cut --------
-    f_v0 = int(round(lead_in(sup["ffmpeg"], A["path"]) * FPS)) if ta0 == 0 else 0
+    f_v0 = int(round(float(d.get("before_voice_from_s", lead_in(sup["ffmpeg"], A["path"]) if ta0 == 0 else 0.0)) * FPS))
     t_stop = (quiet_point(sup["ffmpeg"], A["path"], ta0 + (f_send - 14) / FPS, ta0 + (f_send + 4) / FPS) if d.get("before_voice_end_s") is None
               else float(d["before_voice_end_s"]))
     f_va1 = int(round((t_stop - ta0) * FPS))

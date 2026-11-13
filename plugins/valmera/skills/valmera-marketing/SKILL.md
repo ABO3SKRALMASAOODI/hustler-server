@@ -96,7 +96,9 @@ resume. Changing `records` needs the supply again: delete `supply/pack.json` fir
                 "voice_from_s": 1.0    film second the voice comes in (moved to the nearest quiet point); "voice_end_s": export second it stops
                 "hero_f": 150, "pair_f": 140, "word_f": 5      frames of the film whole, of the side by side, per word of the caret
  Three Films:   "window_s": [6.1, 10.3]   the seconds of the upload all three show (default: the first stretch all three keep whole)
- Edits Itself:  "before_in_s": 0.0, "after_in_s": 0.0, "after_f": 150, "watch_f": 44}
+ Edits Itself:  "before_in_s": 0.0, "after_in_s": 0.0   where each cut is entered
+                "watch_f": 24, "after_f": 231          frames the new cut plays in the viewer, then whole
+                "before_voice_from_s": 0.0, "after_voice_end_s": 8.9}   the first cut heard from this film second; the new cut's voice stops at this export second
 ```
 
 Choose seconds where the edit is seen doing what the sentence asked: a picture landing on its
@@ -162,8 +164,8 @@ row looks like in `evidence.rows()`.
 3. **The sentence is typed.** On send, the blocks it removed are marked and leave, the rest close
    up to where the new EDL puts them, the pictures it added land, the EDL's version and length flip.
 4. **The frame goes back into the new cut,** whole, on its own voice.
-5. **The receipt** prints: what was typed, what was cut, what was added, the versions. Its last
-   lines are the call to action.
+5. **The receipt** prints, a tick a row: what was typed, what was cut, what was added or moved
+   with the cut, the versions. Its last lines are the call to action.
 
 ## The call to action
 
