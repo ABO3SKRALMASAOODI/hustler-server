@@ -357,3 +357,22 @@ def test_a_view_under_a_line_printed_across_the_frame_is_that_moment_shown_whole
     v2 = next(s for s in shots(c2) if s.get("view") is not None)
     r2 = v2["crop"][0] if isinstance(v2["crop"][0], list) else v2["crop"]
     assert r2[2] - r2[0] < 0.8                                           # with nothing printed there, the view is the closer insert it was
+
+
+def test_a_caption_the_index_sees_and_perception_missed_still_binds_views_and_the_eased_track(tmp_path):
+    idx = selfie(12.0)
+    idx["words"], idx["sentences"] = [], []
+    for r in idx["spatial"]["samples"]:
+        r["text"] = [[0.1, 0.18, 0.88, 0.3]] + ([[0.4, 0.6, 0.5, 0.64]] if r["t"] == 3 else [])     # a caption band on every sample
+    perc = {"audio": {"step": 0.5, "rms_db": [-30.0] * 26, "onsets": []}, "text": []}                    # no region "stayed put" for perception
+    work = _work(tmp_path, idx, perc)
+    json.dump({"items": [], "own": [{"id": 0, "src": "main@6.00-8.40", "box": [0.3, 0.2, 0.7, 0.6], "at": 6.8, "what": "the belt"}]}, open(tmp_path / "bin.json", "w"))
+    text = film([{"k": "b", "id": "b01", "at": "@0.0..@5.0", "job": "x", "cut": [40, 999], "pic": ["view:0", "main"]}])
+    c = S.compile_score(text, index=idx, work_dir=work, sid="five", perception=perc)
+    for s in shots(c):
+        rows = s["crop"] if isinstance(s["crop"][0], list) else [s["crop"]]
+        assert all(r[0] <= 0.1 + 1e-6 and r[2] >= 0.88 - 1e-6 and r[1] <= 0.18 + 1e-6 for r in rows), s["id"]
+    lone = [dict(r, text=[[0.1, 0.18, 0.88, 0.3]] if r["t"] == 3 else []) for r in idx["spatial"]["samples"]]
+    idx2 = dict(idx, spatial={"samples": lone})
+    ctx = S.compile_once(text, idx2, work, {}, None, S.faces_from(perc), "t", False, None, perc, True, {}, ({}, {}, None))
+    assert S.wide_print(ctx, 2.0, 4.0, 1.0) == []                         # one stray box on one frame is not print

@@ -23,7 +23,7 @@ Weights: `openbmb/VoxCPM2`, `mobiuslabsgmbh/faster-whisper-large-v3-turbo`, whis
 ## Script
 
 ```json
-{"title": "...", "voice": "atlas", "band": "03", "pace": "brisk", "energy": "mid",
+{"title": "...", "voice": "atlas", "band": "03", "pace": "brisk", "energy": "mid", "names": ["Fred Smith"],
  "segments": [
   {"text": "In 2007, two roommates in San Francisco had a problem.", "melody": "falling",
    "emphasis": ["problem"], "pause_after": 0.45},
@@ -132,7 +132,19 @@ About $0.015 a minute of speech. If the service fails, the VoxCPM2 voice reads t
 ## The VOICE gate (`check`)
 
 - Word error under 1%, by whisper large-v3 (it never chose a take); the take listener's figure is
-  reported beside it.
+  reported beside it. **The spoken form (13 Nov):** the script is the writer model's spoken form
+  ("nineteen seventy-three"), and the script's `names` (every proper noun as the writer spelled it)
+  are the gate listener's vocabulary (`initial_prompt`; not the take listener's, where the prompt made
+  turbo invent words at window edges). A take whose listener wrote digits or symbols is judged on the
+  same model-written spoken form, so a rule's guess at "-60°F" never sends a good take back up the ladder. Whisper writes what it hears in written form, so
+  `spoken.py` has a model (OpenAI, `NARRATE_SPOKEN_MODEL`, default gpt-6.1-sol) write the listener's
+  text in spoken form, choosing the script's reading where a number, symbol or initialism allows it;
+  the model's words are taken only where the listener wrote digits, symbols or an abbreviation, and
+  every word heard in letters is kept as heard (`spoken.merge`), so it can never correct a mistake.
+  The old figure (inflect and patterns over the written form) stays in `check.json` as
+  `wer_rule_normalised`, for comparison only. Replayed on lane O's three WF3 films
+  (`.valmera/week-1112/lanes/R/wer_replay.json`): 3.80, 3.65, 2.60% by the rule became 1.09, 0.52,
+  0.00%; what remains is spoken ("reach" heard "reached", "way" inserted).
 - Pace (wpm and wpm while speaking) and pitch range (p5..p95 of f0, semitones) inside p10..p90 of
   the reference narrators in `reference-library/2026-11-05` folders 03 and 04 (`ref_band.json`,
   measured by `.valmera/week-1112/lanes/M/tools/ref_band.py`: demucs vocal stem, whisper-large-v3 word

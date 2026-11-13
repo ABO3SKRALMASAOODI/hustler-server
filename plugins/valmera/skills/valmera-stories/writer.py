@@ -59,8 +59,113 @@ def _cost(u):
     return usd, searches, fetches
 
 
+# The provider. Claude by default when this process holds an Anthropic key; OpenAI (the Responses API with its own web
+# search) when WRITER_PROVIDER=openai or when only an OpenAI key is present. Both answer the same prompts.
+OA_MODEL = os.environ.get("WRITER_OPENAI_MODEL", "gpt-6.1-sol")
+# USD per token: input, cached input, output (worker/model_prices.py, the providers' own pages); per web search call
+OA_PRICE = {"gpt-6.1-sol": (2.0e-6, 0.1e-6, 10.0e-6), "gpt-6-sol": (2.0e-6, 0.2e-6, 10.0e-6), "gpt-5.5": (5.0e-6, 0.5e-6, 30.0e-6),
+            "gpt-6-luna": (0.10e-6, 0.01e-6, 0.50e-6), "gpt-5.6-luna": (0.20e-6, 0.02e-6, 1.20e-6)}
+OA_SEARCH_USD = 0.01
+OA_EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "xhigh"}
+
+
+def provider():
+    p = os.environ.get("WRITER_PROVIDER")
+    if p:
+        return p
+    return "anthropic" if os.environ.get("ANTHROPIC_API_KEY") else "openai"
+
+
+def _oa_parts(content):
+    """Claude content blocks (text, base64 image) to Responses input parts."""
+    if isinstance(content, str):
+        return [{"type": "input_text", "text": content}]
+    out = []
+    for b in content:
+        if isinstance(b, dict) and b.get("type") == "image":
+            src = b.get("source") or {}
+            url = src.get("url") if src.get("type") == "url" else f"data:{src.get('media_type') or 'image/jpeg'};base64,{src.get('data', '')}"
+            out.append({"type": "input_image", "image_url": url, "detail": "high"})
+        else:
+            out.append({"type": "input_text", "text": b.get("text", "") if isinstance(b, dict) else str(b)})
+    return out
+
+
+def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, what="writer", model=None, timeout=2400):
+    """(text, usage): one streamed Responses call; with `searches`, the model may use OpenAI's web search. The key comes
+    from this process's environment (OPENAI_API_KEY) and is never printed or stored."""
+    import httpx
+    model = model or OA_MODEL
+    body = {"model": model, "instructions": system, "input": [{"role": "user", "content": _oa_parts(content)}],
+            "max_output_tokens": int(max_tokens), "reasoning": {"effort": OA_EFFORT.get(effort, "high")}, "stream": True, "store": False}
+    if searches:
+        body["tools"] = [{"type": "web_search"}]
+        body["include"] = ["web_search_call.action.sources"]
+    headers = {"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"], "Content-Type": "application/json"}
+    t0 = time.time()
+    final = None
+    for attempt in range(4):
+        try:
+            with httpx.Client(timeout=httpx.Timeout(timeout, connect=30)) as cl, \
+                    cl.stream("POST", "https://api.openai.com/v1/responses", headers=headers, json=body) as r:
+                if r.status_code >= 400:
+                    msg = r.read().decode("utf-8", "replace")[:400]
+                    if r.status_code in (429, 500, 502, 503, 504) and attempt < 3:
+                        time.sleep(10 * (attempt + 1))
+                        continue
+                    raise RuntimeError(f"openai {r.status_code}: {msg}")
+                for line in r.iter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    raw = line[5:].strip()
+                    if not raw or raw == "[DONE]":
+                        continue
+                    try:
+                        ev = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if ev.get("type") in ("response.completed", "response.incomplete", "response.failed"):
+                        final = ev.get("response") or {}
+            if final is not None:
+                break
+        except (httpx.TransportError, httpx.TimeoutException):
+            if attempt == 3:
+                raise
+            time.sleep(10 * (attempt + 1))
+    if final is None:
+        raise RuntimeError("openai: the stream ended without a response")
+    if final.get("status") == "failed":
+        raise RuntimeError(f"openai failed: {json.dumps(final.get('error'))[:300]}")
+    text, n_search, cited = "", 0, []
+    for item in final.get("output") or []:
+        if item.get("type") == "web_search_call":
+            n_search += 1
+            for s in ((item.get("action") or {}).get("sources") or []):
+                if s.get("url"):
+                    cited.append(s["url"])
+        if item.get("type") == "message":
+            for c in item.get("content") or []:
+                if c.get("type") == "output_text":
+                    text += c.get("text", "")
+                    cited += [a.get("url") for a in c.get("annotations") or [] if a.get("url")]
+    u = final.get("usage") or {}
+    tin, tout = int(u.get("input_tokens") or 0), int(u.get("output_tokens") or 0)
+    cached = int((u.get("input_tokens_details") or {}).get("cached_tokens") or 0)
+    pin, pc, pout = OA_PRICE.get(model, OA_PRICE["gpt-5.5"])
+    usd = (tin - cached) * pin + cached * pc + tout * pout + n_search * OA_SEARCH_USD
+    SEEN_URLS.update(u_ for u_ in cited if u_)
+    return text, dict(provider="openai", model=model, effort=effort, what=what, input=tin, output=tout, web_searches=n_search,
+                      web_fetches=0, usd=round(usd, 4), seconds=round(time.time() - t0, 1), stop=final.get("status"),
+                      incomplete=(final.get("incomplete_details") or {}).get("reason"))
+
+
+SEEN_URLS = set()
+
+
 def ask_web(system, content, *, effort="high", max_tokens=32000, searches=12, fetches=12, what="writer"):
     """(text, usage). The model may search and fetch; a paused turn is continued until it ends."""
+    if provider() == "openai":
+        return ask_openai(system, content, effort=effort, max_tokens=max(max_tokens, 48000), searches=searches or fetches, what=what)
     import anthropic
     c = anthropic.Anthropic()
     tools = []
@@ -106,6 +211,8 @@ def ask_web(system, content, *, effort="high", max_tokens=32000, searches=12, fe
 
 def ask(system, content, *, effort="medium", max_tokens=8000, what="look"):
     """(text, usage): one call without tools (a picture may be in the content)."""
+    if provider() == "openai":
+        return ask_openai(system, content, effort=effort, max_tokens=max(max_tokens, 16000), what=what)
     import anthropic
     c = anthropic.Anthropic()
     t0 = time.time()
@@ -219,10 +326,12 @@ def write(idea, card, form, voices=None, notes=None, effort="high"):
                "first second (a known name and something that should not be true, or a stake), never a greeting or a question to the "
                "viewer. The last segment reframes the hook in one sentence. No call to action, no 'follow for more'.\n\n"
                "Return JSON only: {\"title\": a plain title, \"voice\": one voice id, \"pace\": slow|steady|brisk|fast, \"energy\": "
-               "low|mid|high, \"hook_line\": the first segment's words, \"close_line\": the last segment's words, \"segments\": [{\"say\": "
+               "low|mid|high, \"hook_line\": the first segment's words, \"close_line\": the last segment's words, \"names\": [every "
+               "proper noun the narration says, exactly as spelled; the narrator's listeners hear with them], \"segments\": [{\"say\": "
                "the words spoken, numbers and years written as words the way they are said (\"nineteen seventy-three\", \"five thousand "
                "dollars\"), no digits, no abbreviations, no symbols, \"show\": at most two short display strings for this segment as they "
-               "would be printed, digits allowed (a year, a figure, a name), or [], \"beat\": hook|setup|turn|low|payoff|close, "
+               "would be printed, digits allowed (a year, a figure, a name), or [], \"beat\": hook|setup|turn|low|payoff|close, \"pace\": slow|steady|brisk|fast (how fast this "
+               "segment's pictures change and its voice moves: brisk on a list or on money, slow on the turn), "
                "\"pictures\": names from the named list this segment talks about, in order, \"melody\": falling|rising|level|wide, "
                "\"emphasis\": [one or two words of say], \"pause_after\": seconds of silence after it (0.15 to 0.9), \"direction\": a few "
                "words for the actor, \"facts\": ids of the facts it states}], \"facts\": [{\"id\": \"f1\", \"claim\": the fact in plain "
@@ -355,4 +464,4 @@ def narration_script(script, band):
         segs.append(seg)
     segs[-1]["pause_after"] = 0.0
     return dict(title=script.get("title"), voice=script.get("voice") or "atlas", band=band, pace=script.get("pace") or "steady",
-                energy=script.get("energy") or "mid", segments=segs)
+                energy=script.get("energy") or "mid", names=list(script.get("names") or []), segments=segs)

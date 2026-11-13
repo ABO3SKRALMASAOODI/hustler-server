@@ -69,7 +69,8 @@ def narrate(nscript, out, band="03", label="narrate", env=None, timeout=5400):
         import fcntl
         with open(NARRATE_LOCK, "a") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
-            r = subprocess.run(["zsh", HEAVY, label, NARRATE_PY, NARRATE, "render", sp, "--out", out, "--band", band],
+            extra = os.environ.get("NARRATE_RENDER_ARGS", "").split()      # e.g. "--takes 1" on a loaded Mac
+            r = subprocess.run(["zsh", HEAVY, label, NARRATE_PY, NARRATE, "render", sp, "--out", out, "--band", band] + extra,
                                cwd=os.path.dirname(NARRATE), capture_output=True, text=True, timeout=timeout, env=env)
         if r.returncode != 0 or not os.path.exists(os.path.join(out, "words.json")):
             raise RuntimeError(f"narrate failed ({r.returncode}): {(r.stderr or r.stdout)[-800:]}")

@@ -1,0 +1,20 @@
+{
+ "_about": "The five styles of workflow 4 (atlas/ALIEN.md 8.4), as the ideas and script stages read them. ids match _shell/styles.json. buildable: film_long.py has the builder and the engine draws it today; a style that is not buildable is never offered.",
+ "styles": [
+  {
+   "id": "the-ledger",
+   "name": "The Ledger",
+   "buildable": true,
+   "spine": ["G4", "G5"],
+   "look": "A 16:9 film on one paper desk, in the line of The Sudden Theory. Archive photographs land as taped prints, documents are typed cards carrying the source's own words, places are pins on a real map, dates and figures are designed cards. A ledger of the story's stakes (money, lives, days, miles) is a physical card in the corner that ticks on the word that changes it; each chapter opens on the ledger page itself with its question, then the page folds back to the corner. The camera breathes over the desk; picture changes follow each chapter's pace.",
+   "hook": "Frame 0 is the story's first picture with the ledger already showing its first, impossible-looking figure; the promise is printed by 30 s.",
+   "close": "The ledger fills the frame and balances: every row's last value, a double rule, the sum of the story in one line.",
+   "needs": "a true story of 10-20 minutes with stakes that change (two to four quantities, every value in a source), a mechanism to teach, a turn at two thirds, and public-domain pictures of its people, places, machines and documents",
+   "voice": ["sage", "iris"]
+  },
+  {"id": "memory-palace", "name": "Memory Palace", "buildable": false, "spine": ["N4", "X1"]},
+  {"id": "dark-room", "name": "The Dark Room", "buildable": false, "spine": ["L2", "S3", "S5", "D1"]},
+  {"id": "worn-print", "name": "Worn Print", "buildable": false, "spine": ["X1", "N5", "T4"]},
+  {"id": "one-day", "name": "One Day", "buildable": false, "spine": ["L3", "L5", "C6"]}
+ ]
+}

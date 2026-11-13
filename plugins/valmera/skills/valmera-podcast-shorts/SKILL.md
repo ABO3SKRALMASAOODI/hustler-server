@@ -5,6 +5,17 @@ description: Turn podcasts and interviews into premium, story-led social shorts 
 
 # Valmera Podcast Shorts (v9)
 
+FOOTAGE CUT (13 Nov 2026, the owner: real footage of what is said, a new picture every 1-3 s):
+`scripts/run_cut.py run --source <podcast> --out <root> --args '{"again": "<delivered wf1 folder>"}'`
+makes a delivered moment again on the engines with no model writing or directing it (`scripts/wf1_cut.py`):
+the take is the spine and the sound; over the sentences that name real people, companies and places the
+picture cuts to real footage (worker/footage) and photographs of them on the clause that says the name,
+then back to him; captions ink word by word at one seat; the title holds the seat over his first breath;
+each named thing is labelled once; the pacing driver eases the take (never punches it), one look is
+solved on the film's pictures, the sound design places the references' sounds, and a song is laid on a
+copy only when the owner hands one over (`"song"`). The payoff is always his face. The footage is not
+licensed: never publish it.
+
 Make shorts that look and sound like the best Instagram editors made them,
 and better: a story worth finishing, committed art direction, motion
 typography and designed graphics, and — only where a moment clearly earns
@@ -474,6 +485,13 @@ Rules the passes keep for every style (`alien/l1pass.py`): type and held cards a
 y 0.10-0.80 and measured again; ink is checked against the picture it will stand on (WCAG 4.5, 3.0 for display)
 and flipped or given a pool; a footnote with no fragment in its source is dropped, never invented. A style
 without a recipe renders through the shared chain. The builder never rates the film.
+
+## The alien bank (`worker/scene/alien`, since 13 Nov 2026)
+
+Beside the passes above the engine has five devices of its own (`rhyme`, `diecut`, `lamp`, `arc`, `answer`): a scene
+asks for one under `alien`, by the Director's `alien` gesture or a style, and the one-pass render lays it in
+(`../_shell/chain.py alien_bank`). The two-pass styles do not take them yet. Asks, reasons and proofs on a trial
+upload: `.valmera/week-1112/notes/S.md`, `.valmera/week-1112/side-by-side/S/`.
 
 ## Legacy and resuming older runs
 

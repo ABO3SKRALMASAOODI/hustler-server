@@ -151,3 +151,92 @@ def test_one_photograph_without_faces(supply, tmp_path):
     l1, beats = F.STYLES["one-photograph"](sc, sup, {})
     assert beats["pieces"] == 12 + 3 and beats["marks"] == ["A", "B", "C"]
     assert F.taste_check(l1, beats)["ok"]
+
+
+# ----------------------------------------------------------------- the cut: footage, pace, captions, display words
+
+def test_a_printed_figure_is_found_on_the_words_that_say_it():
+    assert ["five", "thousand"] in F.spoken_forms("$5,000")
+    assert ["nineteen", "seventythree"] in F.spoken_forms("1973")
+    assert F.spoken_forms("ONE MORE WEEK") == [["one", "more", "week"]]
+    script = dict(segments=[dict(say="They carried one hundred and eighty-six packages in nineteen seventy-three."),
+                            dict(say="He won twenty-seven thousand dollars.")])
+    clock = F.Clock(words_for(script), script)
+    t186, n = F.said_at(clock, 0, "186")
+    assert n == 3 and abs(t186 - clock.word_t(0, "one")) < 1e-6                 # the filler "and" is stepped over
+    assert abs(F.said_at(clock, 0, "1973")[0] - clock.word_t(0, "nineteen")) < 1e-6
+    assert abs(F.said_at(clock, 1, "$27,000")[0] - clock.word_t(1, "twenty-seven")) < 1e-6
+    assert F.said_at(clock, 1, "Memphis") is None
+
+
+def test_words_the_aligner_gave_one_span_get_their_own_moments():
+    script = dict(segments=[dict(say="carried one hundred and eighty-six packages")])
+    w = [dict(w="carried", start=0.8, end=1.06, seg=0), dict(w="one", start=1.06, end=2.04, seg=0), dict(w="hundred", start=1.06, end=2.04, seg=0),
+         dict(w="and", start=2.04, end=1.06, seg=0), dict(w="eighty-six", start=1.06, end=2.04, seg=0), dict(w="packages", start=2.04, end=2.34, seg=0)]
+    clock = F.Clock(dict(duration=2.5, words=w), script)
+    ts = [(x["t0"], x["t1"]) for x in clock.words]
+    assert all(b > a for a, b in ts)                                            # every word lasts
+    assert all(ts[i + 1][0] >= ts[i][1] - 1e-6 for i in range(len(ts) - 1))     # in order, none on top of another
+    assert abs(ts[1][0] - (1.06 + F.LEAD_F / F.FPS)) < 1e-6 and abs(ts[4][1] - (2.04 + F.LEAD_F / F.FPS)) < 1e-6
+
+
+def test_supply_shots_real_footage_first_and_a_new_picture_about_every_second(tmp_path):
+    script = dict(segments=[dict(say="Fred flew his company's last five thousand dollars out to the desert. Then Las Vegas took him in for the night.",
+                                 pictures=["Fred", "Las Vegas"]),
+                            dict(say="He took it all to the blackjack table and he sat there until the morning came.", pictures=["Table"])])
+    clock = F.Clock(words_for(script), script)
+    pics = {"Fred": [picture(str(tmp_path), "f1", 1600, 1200, (90, 80, 70)), picture(str(tmp_path), "f2", 1600, 1200, (60, 80, 70))],
+            "Las Vegas": [picture(str(tmp_path), "v1", 1600, 1200, (20, 30, 90))], "Table": [picture(str(tmp_path), "t1", 1600, 1200, (10, 90, 30))]}
+
+    def clip(n, subject, s, face_w=0.0):
+        return dict(path=str(tmp_path / f"{n}.mp4"), file=f"clips/{n}.mp4", seconds=s, subject=subject, w=1080, h=1920,
+                    faces=[dict(box=[0.3, 0.3, 0.3 + face_w, 0.6], eyes=[[0.4, 0.4], [0.5, 0.4]])] if face_w else [])
+    footage = {0: [clip("a", "Fred", 1.4, 0.5), clip("b", "Fred", 1.2, 0.2)] + [clip(n, "Las Vegas", 1.6) for n in "cdeghijk"]}
+    f_end = F.Clock.f(clock.dur)
+    tl = F.supply_shots(script, clock, pics, footage, f_end, stress=[], aim_s=1.0)
+    assert tl[0][0] == 0 and tl[-1][1] == f_end
+    assert all(a[1] == b[0] for a, b in zip(tl, tl[1:]))                        # one picture at a time, no gap
+    assert tl[0][2] == "clip" and tl[0][4]["path"].endswith("b.mp4")            # the wider clip opens; the close-up waits
+    for f0, f1, kind, name, rec in tl:
+        if kind == "clip":
+            assert (f1 - f0) / F.FPS <= rec["seconds"] / 0.75 + 0.04            # a clip never held past its length (a quarter slow at most)
+            assert 0 <= rec["src"][0] < rec["src"][1] <= rec["seconds"] + 1e-6
+    vegas = F.Clock.f(clock.word_t(0, "Then")) - 1
+    first_vegas = next(r for r in tl if r[3] == "Las Vegas")
+    assert abs(first_vegas[0] - vegas) <= 2                                      # the place arrives with the clause that names it
+    assert all(a[4]["path"] != b[4]["path"] for a, b in zip(tl, tl[1:]) if a[2] == b[2] == "photo" and len(pics[a[3]]) > 1)
+    # the line after Las Vegas has one photograph of its own: a Vegas clip nobody played leads it in
+    line2 = [r for r in tl if r[0] >= F.Clock.f(clock.segs[1][0]) - 1]
+    assert line2[0][2] == "clip" and line2[0][3] == "Las Vegas" and line2[-1][3] == "Table"
+    holds = sorted((r[1] - r[0]) / F.FPS for r in tl)
+    assert holds[len(holds) // 2] <= 1.6
+
+
+def test_captions_ink_word_by_word_and_yield_the_seat_to_a_display_word():
+    script = dict(segments=[dict(say="In nineteen seventy-three he moved the company to Memphis for good.", show=["1973", "Memphis"])])
+    clock = F.Clock(words_for(script), script)
+    voices = {"cap": {"font": "InterDisplay-Bold.ttf", "px": 56, "track": 0}, "dsp": {"font": "InterDisplay-Black.ttf", "px": 170, "track": -2}}
+    P = F.Plan(voices, {})
+    shown = F.display_words(P, clock, script, "dsp", 0.627, F.Clock.f(clock.dur), gap_s=1.0)
+    assert [t for _, _, t in shown] == ["1973", "Memphis"]
+    assert abs(shown[0][0] - (F.Clock.f(clock.word_t(0, "nineteen")) - 1)) <= 1
+    F.caption_build(P, clock, "cap", 0.615, hold=[(a - 1, b) for a, b, _ in shown])
+    caps = [i for i in P.items if i["k"] == "word" and i.get("role") == "cap"]
+    big = [i for i in P.items if i["k"] == "word" and i.get("role") == "big"]
+    assert caps and len(big) == 2
+    for c in caps:                                                              # never a caption while a display word has the seat
+        assert not any(b["f"][0] <= f < b["f"][1] for b in big for f in range(c["f"][0], c["f"][1]))
+    line = [c for c in caps if c["f"][1] == caps[0]["f"][1]]
+    assert all(x["x"] < y["x"] for x, y in zip(line, line[1:])) and all(x["f"][0] <= y["f"][0] for x, y in zip(line, line[1:]))
+
+
+def test_a_head_is_slid_clear_of_the_sheet_when_the_picture_has_room():
+    face = [0.40, 0.30, 0.20, 0.20, 0.38]
+    it = dict(id="sh0001", k="shot", f=[0, 3], pic="p0", crop=[[0.2, 0.2, 0.8, 0.9]] * 3)
+    moved = F.clear_of([it], {"p0": dict(faces=[face])}, [0.05, 0.105, 0.46, 0.24], {"sh0001"})
+    assert moved == 1
+    c = it["crop"][0]
+    top = (face[1] - 0.28 * face[3] - c[1]) / (c[3] - c[1])
+    left = (face[0] - c[0]) / (c[2] - c[0])
+    assert top >= 0.24 - 1e-3 or left >= 0.46 - 1e-3
+    assert abs((c[2] - c[0]) - 0.6) < 1e-4 and abs((c[3] - c[1]) - 0.7) < 1e-4  # the framing keeps its size: it slides

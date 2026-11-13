@@ -304,3 +304,44 @@ def test_with_the_bed_known_a_buried_hit_is_raised_and_a_clear_one_is_left():
     assert 0 < up["lifted_for_bed_db"] <= SD.PRESENT_LIFT and up["db"] <= SD.GAIN_MAX
     lead = dict(it, layer="lead")
     assert SD.present_over([lead], voice, loud_bed, fps)[0]["db"] == it["db"]
+
+
+def test_the_named_turn_takes_the_heaviest_landing_whatever_the_film_has_used():
+    """A workflow that names its story's turn gets the hit with its climb there, even when the hook already took the
+    impact (a film whose hook spent it left the turn a sweep nobody heard, 13 Nov)."""
+    desc = CH.describe_library(SD.library(), SD.SOUNDS, SD.pcm)
+    lib = SD.library()
+    free = lambda sid: True
+    spent = {"impact": 3}
+    plain, cls0 = CH.layers({"f": 990, "kind": "display", "room_s": 6.0}, "payoff", {"desc": desc, "tally": dict(spent), "free": free, "spoken": True})
+    assert cls0 != "impact"                                               # the shares alone give it something lighter
+    layers, cls = CH.layers({"f": 990, "kind": "display", "room_s": 6.0, "turn": True}, "payoff",
+                            {"desc": desc, "tally": dict(spent), "free": free, "spoken": True})
+    assert cls == "impact" and [w for _s, w in layers] == ["lead", "hit"]
+    assert desc[layers[0][0]]["kind"] == "riser" and lib[layers[1][0]]["role"] == "impact"
+    tight, _ = CH.layers({"f": 990, "kind": "display", "room_s": 0.3, "turn": True}, "payoff", {"desc": desc, "tally": {}, "free": free, "spoken": True})
+    assert [w for _s, w in tight] == ["hit"]                              # no room for the climb: the hit alone
+
+
+@needs_ffmpeg
+def test_a_pause_inside_a_words_span_has_nothing_to_mask():
+    """A transcript can hold a word's span over a breath (a figure heard as digits shares one span between its words).
+    A sound through that silence masks nothing: the check reads only frames that carry a voice."""
+    sr, fps = SD.AR, 30.0
+    rng = np.random.default_rng(7)
+    n = rng.standard_normal(int(9.0 * sr)).astype(np.float32)
+    sp = np.fft.rfft(n)
+    hz = np.fft.rfftfreq(len(n), 1 / sr)
+    sp[(hz < 200) | (hz > 4000)] = 0
+    full = (np.fft.irfft(sp, len(n)) * 0.2).astype(np.float32)
+    voice = full.copy()
+    voice[int(1.2 * sr):int(4.8 * sr)] = 0.0                              # a long breath the transcript calls spoken
+    speech, _ = SD.speech_frames(voice, [(0.0, 9.0)])
+    sid = next(s for s, x in SD.library().items() if x.get("role") == "riser")
+    it = SD._item("t.0", sid, int(3.6 * fps), fps, 0.0, {"kind": "display"}, "payoff", "lead")
+    a, b = it["start_s"], it["start_s"] + float(it.get("dur_s") or 1.0)
+    assert 1.2 <= a and b <= 4.8, (a, b)                                  # the whole sound lies in the breath
+    assert SD._masking(it, SD.frames_db(voice)[0], speech, fps) == 0.0
+    quiet = full.copy()
+    quiet[int(1.2 * sr):int(4.8 * sr)] *= 0.1                             # the same seconds spoken softly: a voice is there, and is kept clear
+    assert SD._masking(it, SD.frames_db(quiet)[0], speech, fps) > 0.0

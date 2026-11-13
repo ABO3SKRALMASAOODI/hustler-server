@@ -86,7 +86,21 @@ def probe(idea):
     return dict(subjects=rows, covered=covered, pictures=total, photo=photo, ok=bool(ok))
 
 
+def remake_of(ctx):
+    """A delivered film's record when this run re-makes it (--args '{"remake": "<its folder or film.json>"}'): the
+    same story and script on today's engines. No model writes anything: the facts are fetched and checked again."""
+    p = ctx.args.get("remake")
+    if not p:
+        return None
+    p = os.path.join(p, "film.json") if os.path.isdir(p) else p
+    return json.load(open(p))
+
+
 def ideas(ctx):
+    old = remake_of(ctx)
+    if old:
+        idea = dict((old.get("script") or {}).get("idea_full") or {}, supply=dict(ok=True, note="re-made from a delivered film"))
+        return dict(source=dict(old.get("source") or {}, remake_of=old.get("run_id")), ideas=[idea], chosen=idea.get("title"), spend=[])
     able = able_cards(ctx)
     if not able:
         raise RuntimeError(f"no buildable style outside the last three ({ctx.styles_last()})")
@@ -102,6 +116,22 @@ def ideas(ctx):
 
 
 def script(ctx, ideas_out):
+    old = remake_of(ctx)
+    if old:
+        prev = old["script"]
+        sc = prev["script"]
+        rep = writer.verify(sc)
+        if not rep["ok"] and (prev.get("verify") or {}).get("ok") and all(r.get("error") for r in rep["facts"] if not r["found"]):
+            # every miss is a page that would not open today: the delivered film's own check stands, and says so
+            rep = dict(prev["verify"], reused="pages unreachable at the re-make: " + ", ".join(str(r["id"]) for r in rep["facts"] if not r["found"]))
+        if not rep["ok"]:
+            raise RuntimeError(f"the re-made script's facts do not verify: {json.dumps(rep)[:600]}")
+        sid = (old.get("style") or {}).get("id")
+        reg = next(s for s in ctx.styles_allowed() if s["id"] == sid)
+        card = cards().get(sid, {})
+        return dict(title=sc.get("title") or prev.get("title"), style=reg, window=None, hook_line=sc.get("hook_line"),
+                    close_line=sc.get("close_line"), direction=f"{card.get('name', sid)}: {card.get('look', '')}", idea=prev.get("title"),
+                    idea_full=prev.get("idea_full"), script=sc, verify=rep, words=writer.words_of(sc), remake_of=old.get("run_id"), spend=[])
     able = {s["id"]: s for s in able_cards(ctx)}
     pick = next((i for i in ideas_out["ideas"] if i.get("style") in able and (i.get("supply") or {}).get("ok")), None)
     if not pick:
@@ -252,6 +282,80 @@ def portrait_of(ctx, photo, sc, sup_dir):
     return dict(path=path, size=3000, region=reg, row_y=row_y)
 
 
+def given_narration(ctx, sc, out):
+    """A narration the narrate tool already rendered for this very script (--args '{"narration": "<its folder>"}'): the
+    read is reused when its words are the script's words, one for one; otherwise the run narrates afresh."""
+    src = ctx.args.get("narration")
+    if not src or os.path.exists(os.path.join(out, "words.json")):
+        return
+    import shutil
+    try:
+        got = [F.norm_word(w["w"]) for w in json.load(open(os.path.join(src, "words.json")))["words"]]
+        want = [F.norm_word(x) for s in sc["segments"] for x in str(s["say"]).split()]
+        if [g for g in got if g] != [x for x in want if x]:
+            ctx.log(f"the given narration is another script's ({len(got)} words against {len(want)}): narrating afresh")
+            return
+        os.makedirs(out, exist_ok=True)
+        for n in ("narration.wav", "words.json", "check.json"):
+            if os.path.exists(os.path.join(src, n)):
+                shutil.copyfile(os.path.join(src, n), os.path.join(out, n))
+        ctx.log(f"narration reused from {src}")
+    except (OSError, ValueError, KeyError) as e:
+        ctx.log(f"the given narration could not be read ({str(e)[:120]}): narrating afresh")
+
+
+def given_footage(ctx, out):
+    """Footage the engine already found for this script (--args '{"footage_from": ["<footage folder>", ...]}', each a
+    worker/footage record with its clips): merged per line, the first folder's clips first, so a re-make does not
+    fetch the same sources again. Every clip keeps its source, channel and time range for the credits."""
+    srcs = [p for p in ctx.args.get("footage_from") or [] if os.path.exists(os.path.join(p, "footage.json"))]
+    if not srcs or os.path.exists(os.path.join(out, "footage.json")):
+        return
+    import shutil
+    os.makedirs(os.path.join(out, "clips"), exist_ok=True)
+    recs = [json.load(open(os.path.join(p, "footage.json"))) for p in srcs]
+    lines = {}
+    for p, r in zip(srcs, recs):
+        for ln in r.get("lines") or []:
+            row = lines.setdefault(int(ln["i"]), dict(i=int(ln["i"]), say=ln.get("say"), show=ln.get("show"), dur=ln.get("dur"), want=ln.get("want"), clips=[]))
+            for c in ln.get("clips") or []:
+                dst = os.path.join(out, c["file"])
+                if os.path.exists(os.path.join(p, c["file"])) and not os.path.exists(dst):
+                    shutil.copyfile(os.path.join(p, c["file"]), dst)
+                    row["clips"].append(c)
+    rows = [lines[k] for k in sorted(lines)]
+    merged = dict(recs[0], lines=rows, merged_from=srcs,
+                  counts=dict(lines=len(rows), lines_with_footage=sum(1 for r in rows if r["clips"]), clips=sum(len(r["clips"]) for r in rows)),
+                  credits=[dict(line=r["i"], url=c["source"]["url"], channel=c["source"].get("channel"), title=c["source"].get("title"),
+                                time_range=c.get("time_range")) for r in rows for c in r["clips"]],
+                  spend=dict(usd=round(sum(float((r.get("spend") or {}).get("usd") or 0) for r in recs), 4)))
+    json.dump(merged, open(os.path.join(out, "footage.json"), "w"), ensure_ascii=False, indent=1)
+    ctx.log(f"footage reused: {merged['counts']['clips']} clips on {merged['counts']['lines_with_footage']} lines from {len(srcs)} records")
+
+
+def clip_facts(c):
+    """What the pacing driver and the look need of a clip: its size, a still from its middle, the faces on it."""
+    import subprocess
+    try:
+        r = subprocess.run([PX.FP, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,nb_frames,r_frame_rate", "-of", "json",
+                            c["path"]], capture_output=True, text=True, timeout=60)
+        st = json.loads(r.stdout)["streams"][0]
+        c["w"], c["h"] = int(st["width"]), int(st["height"])
+        num, den = (st.get("r_frame_rate") or "30/1").split("/")
+        c["fps"] = float(num) / max(float(den), 1.0)
+        if st.get("nb_frames"):
+            c["seconds"] = round(min(float(c.get("seconds") or 1e9), int(st["nb_frames"]) / c["fps"]), 3)
+        still = c["path"][:-4] + ".jpg"
+        if not os.path.exists(still):
+            subprocess.run([PX.FF, "-v", "error", "-y", "-ss", f"{float(c['seconds']) / 2:.3f}", "-i", c["path"], "-frames:v", "1", "-q:v", "3", still],
+                           check=True, timeout=60)
+        c["still"] = still
+        c["faces"] = PX.faces(still)
+    except Exception:  # noqa: BLE001 - a clip without facts still plays: the driver frames it whole
+        c.setdefault("faces", [])
+    return c
+
+
 def supply(ctx, script):
     sc = script["script"]
     sid = script["style"]["id"]
@@ -265,6 +369,7 @@ def supply(ctx, script):
     spend = []
     band = writer.FORMS[FORM]["band"]
     env = dict(os.environ, TMPDIR=ctx.tmp)
+    given_narration(ctx, sc, os.path.join(sup_dir, "narration"))
     nar = PX.narrate(writer.narration_script(sc, band), os.path.join(sup_dir, "narration"), band=band, label=f"wf3-narrate-{ctx.run_id}", env=env)
     ctx.log(f"narration {nar['duration']} s, gate {nar['gate']}")
     pack = dict(sid=ctx.sid, words=nar["words"], narration=nar["wav"], ffmpeg=PX.FF, sounds=PX.sound_facts(), pictures={}, credits=[])
@@ -276,7 +381,9 @@ def supply(ctx, script):
     named = [n for n in sc.get("named") or [] if n.get("name") in used]
     if sid != "one-photograph" and named:
         got, reports, usd = PX.pictures(named, os.path.join(sup_dir, "pics"), per=4 if sid == "character-sheet" else 2)
-        spend.append(dict(stage="supply", provider="anthropic", model="claude-haiku-5-5", what="picture check", usd=usd))
+        B = PX._worker()          # the check's own model (gpt-6-sol on the OpenAI rung since 13 Nov; its fallback is named when it ran)
+        spend.append(dict(stage="supply", provider="openai" if str(B.NAMED_CHECK_MODEL).startswith("gpt") else "anthropic",
+                          model=B.NAMED_CHECK_MODEL, what="picture check", usd=usd))
         for name, recs in got.items():
             for r in recs:
                 try:
@@ -304,10 +411,11 @@ def supply(ctx, script):
         pack["microtext"] = portrait_of(ctx, ph, sc, sup_dir)
     words_all = json.load(open(nar["words"]))["words"]
     anchors = {k: [r["path"] for r in v if r.get("path")] for k, v in (pack.get("pictures") or {}).items()}
+    given_footage(ctx, os.path.join(sup_dir, "footage"))
     foot = chain.footage(ctx, script, chain.seg_durs(words_all, len(sc["segments"])), anchors=anchors)     # real video per line
     if foot:
         fdir = os.path.join(sup_dir, "footage")
-        pack["footage"] = [dict(i=ln["i"], clips=[dict(c, path=os.path.join(fdir, c["file"])) for c in ln["clips"]]) for ln in foot["lines"]]
+        pack["footage"] = [dict(i=ln["i"], clips=[clip_facts(dict(c, path=os.path.join(fdir, c["file"]))) for c in ln["clips"]]) for ln in foot["lines"]]
         pack["credits"] = pack["credits"] + [dict(name=c["title"], title=c["title"], licence="footage, not licensed (owner's decision)",
                                                   credit=c["channel"], page=c["url"], time_range=c["time_range"], line=c["line"])
                                              for c in foot["credits"]]
@@ -370,7 +478,8 @@ def score(ctx, script):
         if changed:
             whole["pack"] = pack
             json.dump(whole, open(pk, "w"), ensure_ascii=False, indent=1)
-    knobs = {k: v for k, v in d.items() if k not in ("script", "why", "targets", "retarget")}
+    knobs = {k: v for k, v in d.items() if k not in ("script", "why", "targets", "retarget", "alien")}
+    knobs.setdefault("bed", bool(ctx.args.get("song")))       # a song was handed to this run: the sounds are designed for a film with a bed
     sys.path[:0] = [p for p in env_path().split(os.pathsep) if p not in sys.path]
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     l1, beats = F.STYLES[script["style"]["id"]](sc, pack, knobs)
@@ -378,12 +487,19 @@ def score(ctx, script):
         rep = writer.verify(sc)
         if not rep["ok"]:
             raise RuntimeError(f"the director's change breaks the facts: {rep['numbers_unbacked']} {rep['facts_unverified']}")
+    if d.get("alien"):                     # the direction's asks for the engine's alien bank (chain.alien_bank lays them in at the render)
+        l1["alien"] = d["alien"]
     out = os.path.join(ctx.supply, "l1.json")
     json.dump(l1, open(out, "w"), ensure_ascii=False)
+    l1_audio = os.path.join(ctx.supply, "l1_audio.json")       # the same scene with the narration as its spine: what the song is cut to
+    json.dump(F.audio_scene(l1, pack), open(l1_audio, "w"), ensure_ascii=False)
     json.dump(beats, open(os.path.join(ctx.supply, "beats.json"), "w"), indent=1)
     taste = F.taste_check(l1, beats)
     look = os.path.join(ctx.run_dir, "look")
     frames = sorted({int(f) for f in beats["look"] if 0 <= int(f) < l1["dur_f"]})
+    for n in os.listdir(look) if os.path.isdir(look) else []:      # a look before this one: its stills are of another plan
+        if n.endswith(".png"):
+            os.remove(os.path.join(look, n))
     chain.sh(ctx, ["env", f"PYTHONPATH={env_path()}", chain.PY, "-m", "scene.run", "still", "--l1", out, "--work", ctx.supply,
                    "--frames", ",".join(str(f) for f in frames), "--dir", look], label=f"wf3-look-{ctx.run_id}", heavy=True, timeout=1800)
     import subprocess
@@ -395,8 +511,9 @@ def score(ctx, script):
     if ctx.args.get("look", True) and not os.path.exists(os.path.join(ctx.run_dir, "look.ok")):
         raise RuntimeError(f"the director's look: open {look}/sheet.jpg, put changes in {ctx.run_dir}/direction.json, "
                            f"then touch {ctx.run_dir}/look.ok and resume")
-    return dict(l1=out, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste, frames=l1["dur_f"], items=len(l1["items"]),
-                direction=d, spend=[])
+    turn_s = round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None
+    return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
+                frames=l1["dur_f"], items=len(l1["items"]), direction=d, spend=[])
 
 
 def render(ctx, script, sc):
@@ -406,19 +523,35 @@ def render(ctx, script, sc):
     pack = load_pack(ctx)
     sound = os.path.join(ctx.supply, "sound.m4a")
     mix = F.audio_master(pack["ffmpeg"], l1, pack["narration"], sound, ctx.tmp) if not os.path.exists(sound) else {}
+    settle = os.environ.get("SHELL_RENDER_CMD")       # a renderer in place of the Mac engine: the box image's, where a film is settled
     if not os.path.exists(out):
-        log = chain.sh(ctx, ["env", f"PYTHONPATH={env_path()}", f"VALMERA_SCENE_CACHE={cache}", chain.PY, "-m", "scene.run", "render", "--l1", sc["l1"],
-                             "--work", ctx.supply, "--out", out + ".part.mp4", "--tier", "master", "--strict", "--cache", cache, "--audio", sound],
-                       label=f"wf3-render-{ctx.run_id}", heavy=True, timeout=7200)
-        os.replace(out + ".part.mp4", out)
-        try:
-            j = json.loads(log[log.index("{"):log.rindex("}") + 1])
-        except ValueError:
+        scene = chain.alien_bank(ctx, sc["l1"])          # the scene to draw: the alien bank's asks laid out first, when it carries any
+        if settle:
+            log = chain.sh(ctx, ["zsh", settle, scene, ctx.supply, sound, out + ".part.mp4"], label=f"wf3-render-{ctx.run_id}", heavy=True, timeout=7200)
             j = {}
+            bl = os.path.join(ctx.supply, "box", "film.mp4.log.json")
+            if os.path.exists(bl):
+                try:
+                    j = json.load(open(bl))
+                except ValueError:
+                    j = {}
+            try:
+                j["settled_on"] = json.loads(log[log.rindex("{"):log.rindex("}") + 1])
+            except ValueError:
+                j["settled_on"] = dict(cmd=os.path.basename(settle))
+        else:
+            log = chain.sh(ctx, ["env", f"PYTHONPATH={env_path()}", f"VALMERA_SCENE_CACHE={cache}", chain.PY, "-m", "scene.run", "render", "--l1", scene,
+                                 "--work", ctx.supply, "--out", out + ".part.mp4", "--tier", "master", "--strict", "--cache", cache, "--audio", sound],
+                           label=f"wf3-render-{ctx.run_id}", heavy=True, timeout=7200)
+            try:
+                j = json.loads(log[log.index("{"):log.rindex("}") + 1])
+            except ValueError:
+                j = {}
+        os.replace(out + ".part.mp4", out)
         json.dump(dict(j, mix=mix), open(out + ".log.json", "w"))
     j = json.load(open(out + ".log.json")) if os.path.exists(out + ".log.json") else {}
     return dict(engine="scene", film=out, engine_check=dict(frames=j.get("frames"), seconds=j.get("seconds"), audio=j.get("mix"),
-                                                              degraded=j.get("degraded"), warnings=j.get("warnings")))
+                                                              degraded=j.get("degraded"), warnings=j.get("warnings"), settled_on=j.get("settled_on")))
 
 
 def mark_samples(prog, final, n=6):

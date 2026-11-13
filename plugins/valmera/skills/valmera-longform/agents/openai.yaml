@@ -1,0 +1,7 @@
+interface:
+  display_name: "Valmera Long-form"
+  short_description: "Narrated 10-20 minute story films on archive pictures and designed pages"
+  default_prompt: "Use $valmera-longform to make one long-form voiceover story film (10-20 minutes): let the workflow find its own idea on the web, research and verify it, write it in chapters, narrate it with the local narrator, supply real free-licence pictures and designed maps, documents and diagrams, render on Valmera's engine, check, deliver once and delete the work folder. Never publish and never pick music."
+
+policy:
+  allow_implicit_invocation: false
