@@ -998,6 +998,30 @@ def run_index_job(worker_db, job):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+# Clip perception reads a proxy, as the main video's always has, once the
+# source is heavier than 1080p at 30 fps or longer than this (#555). Measured
+# on production clips (14 days to 12 Nov): read from the source, perception
+# took 395-857 s on 4K clips of 48-174 s and on a 634 s 720p clip, against a
+# deadline of 600 s or 1.5x the source; the main video's perception, read
+# from its 540p proxy, took 59-89 s on 230-895 s sources.
+HEAVY_PIXEL_RATE = 1920 * 1080 * 31
+HEAVY_DURATION_S = 90.0
+
+
+def perception_is_heavy(info):
+    """A clip that costs too much to decode five times over (#555).
+
+    Measured from the probe (width, height, frame rate, duration), never
+    from a name."""
+    try:
+        rate = float(info.get("width") or 0) * float(info.get("height") or 0) \
+            * float(info.get("fps") or 0)
+        duration = float(info.get("duration") or 0)
+    except (TypeError, ValueError):
+        return False
+    return rate > HEAVY_PIXEL_RATE or duration > HEAVY_DURATION_S
+
+
 def _run_clip_index(worker_db, job, asset):
     """Perception for a NON-MAIN upload — a spliced clip or a music file.
 
@@ -1054,9 +1078,16 @@ def _run_clip_index(worker_db, job, asset):
                     "timings": timings}
 
         warnings = []
-        if streamed_source:
+        heavy = not is_music and not streamed_source and \
+            perception_is_heavy(info)
+        if streamed_source or heavy:
             # Clip perception seeks repeatedly. Give it one local proxy while
             # retaining the original's hash, geometry and clock in the index.
+            # A heavy or long clip gets one too (#555): shots, tiles, faces,
+            # motion and the storyboard each decoded every 4K frame of a 48 s
+            # clip, 555 s against a 600 s deadline. Decoding it once into the
+            # proxy and reading that is the sample.
+            t_proxy = time.monotonic()
             proxy = os.path.join(workdir, "proxy.mp4")
             media.make_proxy(
                 src, proxy, info["fps"], info["vfr"], info["has_audio"],
@@ -1065,6 +1096,8 @@ def _run_clip_index(worker_db, job, asset):
                 cancelled_cb=lambda: _cancelled(worker_db),
                 maxrate_kbps=proxy_kbps)
             src = proxy
+            timings["perception_proxy_s"] = round(time.monotonic() - t_proxy, 2)
+            timings["perception_proxy"] = "heavy" if heavy else "streamed"
         wav_local = None
         if info["has_audio"]:
             wav_local = os.path.join(workdir, "audio.wav")
