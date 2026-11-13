@@ -22075,6 +22075,19 @@ def search_stock(ctx, query, kind="video", orientation=None, count=6):
     try:
         hits = stock.search(q, kind=kind, orientation=orientation,
                             count=count)
+    except stock.NamedNotFound as e:
+        if not getattr(e, "retryable", False):
+            # The search and the check both answered: no free-licence
+            # picture really shows what the words name. That is a result to
+            # tell, not a failure to retry (ticket #1108). The first line is
+            # our own words only: the outcome classifier reads it.
+            return (f"No checked {kind} to offer for this search.\n"
+                    f"\"{q}\": {e} Tell the user plainly; offer a more "
+                    "general visual phrase, their own footage or image, or a generated still. "
+                    "Do NOT invent results and do NOT claim you added "
+                    "anything.")
+        return (f"Stock search failed — {e}. Tell the user plainly and offer "
+                "to use their own footage instead. Do NOT invent results.")
     except stock.StockError as e:
         return (f"Stock search failed — {e}. Tell the user plainly and offer "
                 "to use their own footage instead. Do NOT invent results.")

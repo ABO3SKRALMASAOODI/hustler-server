@@ -415,7 +415,15 @@ LAST_NAMED = {}     # query, folded -> the named route's last report
 
 class NamedNotFound(StockError):
     """The words name a real subject and no picture passed the check that
-    it shows it. The message is the sentence to tell the customer."""
+    it shows it. The message is the sentence to tell the customer.
+
+    ``retryable`` is True only when a library or the check itself did not
+    answer; an answered check that kept nothing is a result, not a failure
+    (ticket #1108: "Windows XP" was told "Stock search failed")."""
+
+    def __init__(self, message, retryable=False):
+        super().__init__(message)
+        self.retryable = bool(retryable)
 
 
 def _named_subjects(query):
@@ -433,15 +441,21 @@ def _named_hits(subjects, kind, count, also):
     """Checked pictures of every named subject, best first; NamedNotFound
     with the honest sentence when none passed."""
     import broll_source
-    out, says = [], []
+    out, says, unanswered = [], [], False
     for sub in subjects[:2]:
         kept, rep = broll_source.find_named(sub, kind, count, also=also)
         LAST_NAMED[sub["name"].casefold()] = rep
         out.extend(kept)
         if rep.get("say"):
             says.append(rep["say"])
+        # a check that did not answer, or no candidate while a library
+        # erred, may go differently next time; a check that answered "no"
+        # will not
+        unanswered = unanswered or bool(rep.get("check_error")) or bool(
+            not rep.get("candidates") and rep.get("errors"))
     if not out:
-        raise NamedNotFound(" ".join(says) or "no checked picture was found")
+        raise NamedNotFound(" ".join(says) or "no checked picture was found",
+                            retryable=unanswered)
     seen, uniq = set(), []
     for h in out:
         if h["id"] not in seen:

@@ -176,3 +176,51 @@ def test_a_typed_ask_no_real_picture_passes_returns_a_designed_one_with_the_hone
     import pytest
     with pytest.raises(stock.NamedNotFound):
         stock.search("Operation Fast and Furious", kind="photo")
+
+
+def test_an_answered_check_that_kept_nothing_is_a_result_not_a_failure(monkeypatch):
+    """Ticket #1108: search_stock("Windows XP") — the check answered and kept
+    none of 14 pictures — went out as "Stock search failed" and was filed as
+    a transient failure (a P0). An answered "no" is a result; only a check or
+    library that did not answer stays a retryable failure."""
+    import agent_tools
+    import tool_outcome
+
+    class Ctx:
+        project_id = 5735
+        stock_results = {}
+        workdir = "/tmp"
+
+        def latest_edl(self):
+            return {"version": 1, "json": {"frame": {"ratio": "16:9"}}}
+
+    monkeypatch.setattr(stock, "available", lambda: True)
+    say = ("None of the 14 free-licence pictures found for Windows XP passed "
+           "the check that it really shows that, so none is offered.")
+    monkeypatch.setattr(stock, "search", lambda *a, **k: (_ for _ in ()).throw(
+        stock.NamedNotFound(say)))
+    out = agent_tools.search_stock(Ctx(), "Windows XP", kind="photo")
+    assert tool_outcome.from_legacy(out).status == "success"
+    assert say in out and "Do NOT invent" in out
+
+    monkeypatch.setattr(stock, "search", lambda *a, **k: (_ for _ in ()).throw(
+        stock.NamedNotFound("the check did not answer", retryable=True)))
+    out = agent_tools.search_stock(Ctx(), "Windows XP", kind="photo")
+    assert tool_outcome.from_legacy(out).status == "transient_failure"
+
+
+def test_named_hits_marks_only_an_unanswered_check_retryable(monkeypatch):
+    import pytest
+    sub = {"name": "Windows XP", "is": "brand", "searches": ["Windows XP"],
+           "must_show": "Windows XP"}
+    reps = {"no": dict(candidates=14, errors=[], say="None passed."),
+            "down": dict(candidates=3, errors=[], check_error="timeout",
+                         say="did not answer"),
+            "empty": dict(candidates=0, errors=["wikimedia: 503"],
+                          say="none found")}
+    for key, retry in (("no", False), ("down", True), ("empty", True)):
+        monkeypatch.setattr(broll_source, "find_named",
+                            lambda *a, _r=reps[key], **k: ([], dict(_r)))
+        with pytest.raises(stock.NamedNotFound) as got:
+            stock._named_hits([sub], "photo", 6, [])
+        assert got.value.retryable is retry, key
