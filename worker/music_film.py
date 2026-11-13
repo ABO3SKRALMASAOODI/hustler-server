@@ -15,6 +15,7 @@ Three modules do the work and this one joins them for a film:
     marks = story_marks(lines, dur, call)            where the story turns and pays off, read by a model from the film's lines
     ch, path, tried = choose(film, marks, cache)     a library track for this film, its audio on disk
     report = score(l1, work, film=, out=, ...)       the workflow shell's music stage: one film with music beside the clean one
+                                                     (a film over four minutes is scored chapter by chapter, a track each)
     doc = bake_bed(work, doc, l1, index, ...)        the Director's bed: the chosen track arranged and levelled for this film
 
 Nothing here reads what a customer typed, and no word list decides anything: the film's kind, words on the clock,
@@ -229,6 +230,7 @@ def choose(film, marks, cache, used=(), call=None, n=AUDITION, fetch=None, profi
     import music_choose
     from score import music as MU
     opts, prof = music_choose.shortlist(film, used=used, n=8)
+    opts = [o for o in opts if o["cid"] not in set(used or ())] or opts      # a track this film already plays is not offered again while others are
     if not opts:
         return None, None, []
     order, why, by = list(range(len(opts))), "the closest match to the references by signal", "signal"
@@ -275,6 +277,78 @@ def choose(film, marks, cache, used=(), call=None, n=AUDITION, fetch=None, profi
     return ch, path, tried
 
 
+# ----------------------------------------------------------------- a long film: a track a chapter
+
+LONG_S = 240.0               # from here a film is scored chapter by chapter: the long-form references change track at a section's turn
+CHAPTER_S = (50.0, 80.0, 115.0)     # a chapter's least, wished and most seconds
+
+
+def chapters(marks):
+    """A long film's chapters for its music: [(t0, t1)], cut in the voice's longest pause near every CHAPTER_S[1]
+    seconds (a section's turn is where the narrator stops), never shorter than CHAPTER_S[0]."""
+    dur = float(marks["dur_s"])
+    ws = sorted(marks.get("words") or [])
+    gaps = [(b0, a1) for (_a0, b0), (a1, _b1) in zip(ws, ws[1:]) if a1 - b0 >= 0.35]
+    out, t0 = [], 0.0
+    while dur - t0 > CHAPTER_S[2]:
+        near = [g for g in gaps if t0 + CHAPTER_S[0] <= 0.5 * (g[0] + g[1]) <= t0 + CHAPTER_S[2] and dur - 0.5 * (g[0] + g[1]) >= CHAPTER_S[0]]
+        if near:                                               # the longest pause, a nearer one winning a tie
+            g = max(near, key=lambda g: (g[1] - g[0]) - 0.01 * abs(0.5 * (g[0] + g[1]) - (t0 + CHAPTER_S[1])))
+            cut = 0.5 * (g[0] + g[1])
+        else:
+            cut = t0 + CHAPTER_S[1]
+        out.append((round(t0, 3), round(cut, 3)))
+        t0 = cut
+    out.append((round(t0, 3), round(dur, 3)))
+    return out
+
+
+def score_chapters(film, marks, kind, cache, call=None, used=(), fetch=None, voice=None):
+    """A long film's music, a track a chapter: each chapter is a film of its own to the chooser and the engine (its
+    own words, cuts and sounded moments, an entrance to open it, a last hit before the next begins), no track twice.
+    Returns (music on the whole film's clock, report with `chapters`), or (None, why) when no chapter could be scored."""
+    import music_choose
+    import numpy as np
+    from score import music as MU
+    prof = MU.profile_for(music_choose.ENGINE_KIND.get(film["kind"], kind))
+    dur = float(marks["dur_s"])
+    whole = np.zeros((int(round(dur * MU.SR)), 2), np.float32)
+    rows, taken = [], list(used or ())
+    for t0, t1 in chapters(marks):
+        sub = {"dur_s": t1 - t0, "words": [(a - t0, min(b, t1) - t0) for a, b in marks.get("words") or [] if t0 <= a < t1],
+               "cuts": [c - t0 for c in marks.get("cuts") or [] if t0 < c < t1], "landings": [c - t0 for c in marks.get("landings") or [] if t0 < c < t1],
+               "accents": [c - t0 for c in marks.get("accents") or [] if t0 < c < t1], "turn_s": None, "payoff_s": None, "end_hit_s": None, "quiet": []}
+        for k in ("turn_s", "payoff_s"):
+            if marks.get(k) is not None and t0 + 4.0 < float(marks[k]) < t1 - 4.0:
+                sub[k] = float(marks[k]) - t0
+        f = dict(film, duration_s=round(t1 - t0, 2), turns=[dict(x, t=round(float(x["t"]) - t0, 2)) for x in film.get("turns") or [] if t0 <= float(x["t"]) < t1])
+        row = {"film": [t0, t1]}
+        try:
+            ch, path, tried = choose(f, sub, cache, used=taken, call=call, fetch=fetch, profile=prof)
+            if not ch:
+                raise ValueError("no track could be had")
+            song = MU.analyse(path, sung=ch.get("sung"))
+            plan = MU.arrange(song, sub, profile=prof)
+            if not plan.get("ok"):
+                raise ValueError(plan.get("why") or "no arrangement")
+            a, b = int(round(t0 * MU.SR)), int(round(t1 * MU.SR))
+            music, rep = MU.track(path, song, plan, sub, voice=None if voice is None else voice[a:b], profile=prof)
+            whole[a:a + len(music)] += music[:max(0, len(whole) - a)]
+            taken.append(ch["cid"])
+            row.update(choice={k: ch.get(k) for k in ("cid", "title", "author", "license", "credit", "page_url", "why", "chosen_by")}, tried=tried,
+                       drop_at=None if plan.get("drop_at") is None else round(plan["drop_at"] + t0, 2), end_hit_s=round(plan["end_hit_s"] + t0, 2),
+                       under_voice_db=rep.get("under_voice_db"), jumps=plan.get("jumps"), intro_bars=plan.get("intro_bars"), low_bars=plan.get("low_bars"))
+        except Exception as ex:  # noqa: BLE001 - a chapter without music is a rest, not a stop
+            row["why"] = f"{type(ex).__name__}: {str(ex)[:160]}"
+        rows.append(row)
+    done = [r for r in rows if r.get("choice")]
+    if not done:
+        return None, {"chapters": rows}
+    under = [r["under_voice_db"] for r in done if r.get("under_voice_db") is not None]
+    return whole, {"chapters": rows, "under_voice_db": round(sum(under) / len(under), 1) if under else None, "lifts": [], "accents": [],
+                   "music_share": round(sum(r["film"][1] - r["film"][0] for r in done) / max(dur, 1e-3), 3)}
+
+
 # ----------------------------------------------------------------- the workflow shell's music stage
 
 def score(l1, work, film=None, out=None, kind="stories", song=None, vocals=None, turn_s=None, payoff_s=None, cache=None, brief="",
@@ -316,6 +390,24 @@ def score(l1, work, film=None, out=None, kind="stories", song=None, vocals=None,
         if not marks["words"] and film and os.path.exists(str(film)):
             whole = True
             marks["words"] = [(a, b) for a, b in MU.voice_spans(MU._decode(film, MU.SR, 2)[:int(marks["dur_s"] * MU.SR)]) if a < marks["dur_s"]]
+    if song is None and marks["dur_s"] > LONG_S and film and os.path.exists(str(film)):
+        # a long film: a track a chapter, against the film's own sound (its narration is not a spine the scene gives apart)
+        text = " ".join(s for _t, s in lines)
+        f = facts(kind, marks, brief=(str(brief or "") + " " + text[:400]).strip(), mood=mood)
+        voice = MU._decode(film, MU.SR, 2)[:int(marks["dur_s"] * MU.SR)]
+        if not marks["words"]:
+            marks["words"] = [(a, b) for a, b in MU.voice_spans(voice) if a < marks["dur_s"]]
+        music, mrep = score_chapters(f, marks, kind, cache or os.path.join(work, "music_cache"), call=call, used=used, voice=voice)
+        rep["film"], rep["chapters"] = f, mrep.get("chapters")
+        if music is None:
+            rep["why"] = "no chapter of this film could be scored"
+            return rep
+        picks = [r["choice"] for r in mrep["chapters"] if r.get("choice")]
+        rep["choice"] = dict(picks[0], tracks=picks, credit="; ".join(dict.fromkeys(str(p.get("credit") or "") for p in picks if p.get("credit"))))
+        rep["mix"] = MU.mix_film(film, "a track a chapter", marks, out=out, kind=kind, supplied=False, music=(music, mrep))
+        rep["ok"] = bool(not out or rep["mix"].get("out"))
+        rep["spend_usd"] = spend(call)
+        return rep
     if song is None:
         import music_choose
         text = " ".join(s for _t, s in lines)

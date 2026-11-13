@@ -84,7 +84,9 @@ opens on a full part of the song, a build of two to four bars where the story tu
 under every word and up in the pauses, a hit before the end card. The shell delivers that film as `film.mp4`,
 the same film without music as `film_clean.mp4`, and the track's title, licence and credit line in
 `film.json` under `music` (CC-BY: the credit goes wherever the film is published). `--args '{"music": false}'`
-keeps a run dry. **A song the owner hands over** (`--args '{"song": "<file>"}'`) gets the same section choice
+keeps a run dry. A film over four minutes is scored chapter by chapter (the narrator's longest pauses), a track
+each, never one twice, every chapter closing on its own hit; `film.json` lists the tracks and their credit
+lines. **A song the owner hands over** (`--args '{"song": "<file>"}'`) gets the same section choice
 and level flow and is delivered as `film_song.mp4` beside the clean `film.mp4` (a test song is never the
 film). A narrated film hands the scene with its narration as the spine (`score.l1_audio`); a film whose
 sound is one file is scored against that sound. A music fault never stops a run: the clean film is delivered. **A renderer other than the Mac engine**: `SHELL_RENDER_CMD=<script>` (workflows that

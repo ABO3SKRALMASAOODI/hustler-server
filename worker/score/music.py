@@ -423,7 +423,7 @@ def arrange(song, marks, profile=None):
         join = None
         if n_build and cuts:
             for nbd in sorted(range(BUILD_BARS[0], BUILD_BARS[1] + 1), key=lambda x: (abs(x - want), -x)):
-                if nbd > n1 // 4 - 2:
+                if nbd > n1 // 4 - 2 or abs(nbd - want) > 1:        # a cut is worth a bar either way, never a build twice the story's
                     continue
                 near = [c for c in cuts if abs((drop_t - c) / (nbd * B) - 1.0) <= STRETCH_MAX and c >= 2.0 * B]
                 if near:
@@ -1111,29 +1111,37 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
     return rep
 
 
-def mix_film(film, song_path, marks, out=None, kind="stories", vocals=None, sung=None, supplied=True):
+def mix_film(film, song_path, marks, out=None, kind="stories", vocals=None, sung=None, supplied=True, music=None):
     """A finished film's own sound with a song under it, for a film whose scene cannot give its voice apart (its
     sound was written as one file: a narrated long form, a screen film). The film's sound is its voice here: where
     it speaks is read from its level when the marks carry no words, the song is arranged and ridden against it,
-    and the two are mastered to -14 LUFS on a copy of the picture. The film itself is never touched."""
+    and the two are mastered to -14 LUFS on a copy of the picture. The film itself is never touched. `music`: the
+    music already on the film's clock (a long film scored chapter by chapter, each with its own track): (stereo
+    48 kHz, report); song_path is then only its name."""
     import tempfile
     from scene import audio as AU
     prog = _decode(film, SR, 2)
     total = len(prog) / float(SR)
+    mrep = None
     marks = dict(marks)
     marks.setdefault("dur_s", total)
     n_prog = int(float(marks["dur_s"]) * SR)
     if not marks.get("words"):
         marks["words"] = [(a, b) for a, b in voice_spans(prog[:n_prog]) if a < marks["dur_s"]]
-    song = analyse(song_path, vocals=vocals, sung=sung)
     prof = profile_for(kind)
-    plan = arrange(song, marks, profile=prof)
-    rep = {"song": os.path.basename(song_path), "supplied": bool(supplied), "words": len(marks["words"]), "from": "the film's own sound",
+    if music is not None:
+        music, mrep = music
+        plan = {"ok": True, "chapters": mrep.get("chapters")}
+    else:
+        song = analyse(song_path, vocals=vocals, sung=sung)
+        plan = arrange(song, marks, profile=prof)
+    rep = {"song": os.path.basename(str(song_path)), "supplied": bool(supplied), "words": len(marks["words"]), "from": "the film's own sound",
            "marks": {k: marks.get(k) for k in ("dur_s", "turn_s", "payoff_s", "end_hit_s")}, "plan": {k: v for k, v in plan.items() if k != "grid"}}
     if not plan.get("ok"):
         return rep
     with tempfile.TemporaryDirectory(dir=os.path.dirname(os.path.abspath(out)) if out else None) as tmp:
-        music, mrep = track(song_path, song, plan, marks, voice=prog[:n_prog], profile=prof)
+        if mrep is None or "chapters" not in mrep:
+            music, mrep = track(song_path, song, plan, marks, voice=prog[:n_prog], profile=prof)
         if not marks["words"]:                              # nobody speaks: the music is set against the film's own level, not a voice's
             i, _tp, _ = AU.loudness_of(prog, tmp) if float(np.abs(prog).max()) > 1e-5 else (None, None, None)
             if i is not None and i > -70:

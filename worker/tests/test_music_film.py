@@ -123,6 +123,34 @@ def test_the_engine_tries_the_models_picks_and_keeps_the_first_that_carries_the_
     assert ch3 is None and p3 is None and all("error" in r for r in tried3)
 
 
+@needs_ffmpeg
+def test_a_long_film_is_scored_chapter_by_chapter_a_track_each(songs, tmp_path, monkeypatch):
+    import music_choose
+    # 300 s of narration with a long pause every 70 s or so: the chapters turn there
+    words, t = [], 0.4
+    while t < 298.0:
+        words.append((t, t + 0.4))
+        t += 0.5 if int(t) not in (69, 141, 215) else 2.5
+    marks = {"dur_s": 300.0, "words": words, "cuts": [], "turn_s": None, "payoff_s": None, "end_hit_s": None, "quiet": []}
+    chs = MF.chapters(marks)
+    assert chs[0][0] == 0.0 and chs[-1][1] == 300.0 and len(chs) == 4 and all(b - a >= MF.CHAPTER_S[0] for a, b in chs)
+    assert all(any(abs(b - x) < 2.0 for x in (70.5, 142.5, 216.5)) for _a, b in chs[:-1])       # in the narrator's pauses
+    lib = {"one": songs["full"], "two": _wav(tmp_path, "two", bars=40, intro_bars=4), "three": _wav(tmp_path, "three", bars=44, intro_bars=6),
+           "four": _wav(tmp_path, "four", bars=48, intro_bars=2)}
+    monkeypatch.setattr(music_choose, "shortlist", lambda film, used=(), n=8: ([_opt(c) for c in lib], {"n": 4, "bpm": {"p25": 100, "p75": 130}, "minor_share": 0.7, "top_tags": {}}))
+    film = {"kind": "longform", "duration_s": 300.0, "turns": [], "pace": {"cuts10": 2.0}, "speech_share": 0.8, "brief": "a long story"}
+    music, rep = MF.score_chapters(film, marks, "longform", "/nonexistent", fetch=lambda t: lib[t["cid"]])
+    rows = rep["chapters"]
+    picked = [r["choice"]["cid"] for r in rows]
+    assert len(picked) == 4 and len(set(picked)) == 4                    # no track twice in one film
+    assert music.shape == (int(300.0 * MU.SR), 2) and all(r["intro_bars"] == 0 for r in rows)
+    for (a, b), r in zip(chs, rows):                                      # each chapter closes on its own hit, silent before the next opens
+        assert a < r["end_hit_s"] < b
+        gap = music[int((b - 0.05) * MU.SR):int(b * MU.SR)]
+        assert float(np.abs(gap).max()) == 0.0
+    assert abs(rep["under_voice_db"] - MU.UNDER_VOICE["longform"]) <= 0.7
+
+
 def test_a_library_file_is_kept_only_when_it_is_the_one_that_was_measured(tmp_path, monkeypatch):
     body = b"an mp3, as far as this test goes"
     fake = types.SimpleNamespace(download=lambda url, out, allowed_hosts=None, max_bytes=0, timeout_s=0: open(out, "wb").write(body))

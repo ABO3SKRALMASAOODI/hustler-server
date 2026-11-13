@@ -384,6 +384,8 @@ def music_version(ctx, rd, sc):
     does = dict(marks=rep.get("marks"), drop_at=plan.get("drop_at"), build_at=plan.get("build_at"), end_hit_s=plan.get("end_hit_s"), jumps=plan.get("jumps"),
                 tempo=plan.get("tempo"), cuts=plan.get("cuts"), under_voice_db=levels.get("under_voice_db"), lifts=len(levels.get("lifts") or []),
                 accents=len(levels.get("accents") or []), lufs=(mix.get("master") or {}).get("lufs"))
+    if rep.get("chapters"):                      # a long film: a track a chapter, each opening on an entrance and closing on a hit
+        does["chapters"] = [dict(film=c.get("film"), title=(c.get("choice") or {}).get("title"), end_hit_s=c.get("end_hit_s"), why=c.get("why")) for c in rep["chapters"]]
     spend = [dict(stage="check", provider="openai", model="gpt-6.1-sol", what="music: story marks and the pick", usd=float(rep.get("spend_usd") or 0))]
     if song:
         return dict(final_song=final, song=dict(file=os.path.basename(str(song)), supplied_by="owner", picked_by_valmera=False, does=does), spend=spend)
@@ -398,6 +400,7 @@ def music_version(ctx, rd, sc):
         return None
     music = dict(picked_by_valmera=True, title=ch.get("title"), author=ch.get("author"), license=ch.get("license"), credit=ch.get("credit"),
                  page_url=ch.get("page_url"), cid=ch.get("cid"), why=ch.get("why"), chosen_by=ch.get("chosen_by"), tried=rep.get("tried"), does=does,
+                 tracks=ch.get("tracks"),
                  checks={k: chk.get(k) for k in ("length_ok", "endcard_ok", "mark_ok", "lufs", "loud_ok")}, removable=True,
                  note="CC-BY: the credit line goes wherever the film is published; film_clean.mp4 is the same film without music")
     return dict(final_music=final, music=music, spend=spend)
