@@ -198,6 +198,7 @@ def ease_takes(ctx):
     cap_y = getattr(ctx, "cap_y", None)
     last_end_z, k_run = 1.0, 0
     other_shape = abs((ctx.W / ctx.H) / max(aw / ah, 1e-6) - 1.0) > 0.03
+    talking = len(ctx.words) / max(float(ctx.src_dur or 0), 1e-3) >= 1.0
     try:
         own_caps = taste.upload_captions(ctx) >= 0.3
     except Exception:  # noqa: BLE001 - unread: the words are held, the careful side
@@ -240,6 +241,11 @@ def ease_takes(ctx):
             # a line printed across the frame is the upload's own caption or title, whoever speaks or does not (p5572, 13
             # Nov: an eased step cut "POV: You have back pain" at both edges, and the last look took the film back)
             marks = [m for m in marks if m[2] - m[0] >= WIDE_LINE * w]
+        if not talking:
+            # A clip nobody talks over is where a caption or a title is burned in ("POV: ...", a game's HUD), and the
+            # index sees such a line on samples where perception kept no region. Behind a person talking, the same
+            # boxes are a poster on the wall, and a closer frame leaving part of it out is a choice.
+            marks += [m for m in S.wide_print(ctx, s0, s1, w) if m not in marks]
         # The anchor: the point of the frame that stays put while the frame closes. It sits inside the span of
         # everything that must stay whole (heads, and the lines the upload prints), where the room either side of that
         # span is shared out: a head held against one edge (a selfie) grows away from that edge, a caption that

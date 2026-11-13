@@ -6211,17 +6211,30 @@ VIEW_ZOOM = (1.4, 2.0)         # an insert is this much closer than the film's f
 WIDE_PRINT = 0.4               # printed text this wide in the film's framing is the upload's own caption or title
 
 
+def wide_print(ctx, s0, s1, fw):
+    """The lines the upload prints across its frame while source seconds s0..s1 play: text at least WIDE_PRINT of the
+    film's framing wide (fw, in source fractions). Two readings, joined: perception's regions that stay put, and the
+    index's own text boxes sample by sample, kept when another sample of the upload prints a line in the same band
+    (a caption changes its words and keeps its place; one stray box on one frame is a pattern, not print).
+    Perception alone missed a caption for the first four seconds of p5572, and the film's first shot cut it."""
+    out = [list(x["box"]) for x in (ctx.perc or {}).get("text") or []
+           if x.get("box") and x["t"][0] - 0.5 <= s1 and x["t"][1] + 0.5 >= s0 and x["box"][2] - x["box"][0] >= WIDE_PRINT * fw]
+    rows = ((getattr(ctx, "index", None) or {}).get("spatial") or {}).get("samples") or []
+    wide = [(float(r.get("t", -9)), [float(v) for v in b]) for r in rows for b in r.get("text") or [] if len(b) == 4 and b[2] - b[0] >= WIDE_PRINT * fw]
+    for t, b in wide:
+        if not s0 - 0.6 <= t <= s1 + 0.6:
+            continue
+        again = sum(1 for t2, b2 in wide if t2 != t and min(b[3], b2[3]) - max(b[1], b2[1]) >= 0.5 * min(b[3] - b[1], b2[3] - b2[1]))
+        if again >= 1:
+            out.append(b)
+    return out
+
+
 def cuts_wide_print(ctx, rect, src, asset, W, H):
-    """Does this window cut through a line the upload prints across its frame (perception's text regions that stay
-    put, at least WIDE_PRINT of the film's framing wide) while it is on screen?"""
+    """Does this window cut through a line the upload prints across its frame while it is on screen?"""
     fit = fit_crop([0, 0, 1, 1], asset["w"], asset["h"], W, H)
-    fw = fit[2] - fit[0]
     s0, s1 = (src or [0.0, ctx.src_dur])[:2]
-    for x in (ctx.perc or {}).get("text") or []:
-        m = x.get("box")
-        if m and x["t"][0] - 0.5 <= s1 and x["t"][1] + 0.5 >= s0 and m[2] - m[0] >= WIDE_PRINT * fw and _cuts(rect, m):
-            return True
-    return False
+    return any(_cuts(rect, m) for m in wide_print(ctx, s0, s1, fit[2] - fit[0]))
 
 
 def view_rect(ctx, v, asset, W, H):
