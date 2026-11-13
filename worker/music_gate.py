@@ -268,6 +268,22 @@ def latest_offer(ctx):
     return offer
 
 
+def _read_pick(ctx, text, offered=(), offer_text=""):
+    """A model's reading of the user's reply: {'slug', ...} only when it
+    picks one track (music_pick.read), else None. Never raises."""
+    try:
+        import music_pick
+        verdict = music_pick.read(ctx, text, music_pick.candidates(offered),
+                                  offer_text or "")
+    except Exception as exc:  # noqa: BLE001 - no reading is no pick
+        print(f"[music_gate] pick reading unavailable: {str(exc)[:160]}",
+              flush=True)
+        return None
+    if verdict and verdict.get("kind") == "picked" and verdict.get("slug"):
+        return verdict
+    return None
+
+
 def bind_turn_choice(ctx, text, previous_reply=None, previous_reply_id=None):
     """Resolve the incoming answer against the offer the customer actually saw.
 
@@ -298,15 +314,24 @@ def bind_turn_choice(ctx, text, previous_reply=None, previous_reply_id=None):
     if not positional:
         slugs = ()
     slug = identify(text, slugs)
-    if not slug:
-        return None
-    if not positional:
+    if slug and not positional:
         remainder = str(text)
         for start, end, _slug in reversed(_mentions(text)):
             remainder = remainder[:start] + ' ' + remainder[end:]
         if any(w not in selection_words for w in _norm(remainder).split()):
-            return None  # naming a track while rejecting/discussing it is no pick
-    record = {'slug': slug, 'at': time.time(), 'via': 'chat',
+            slug = None  # naming a track while rejecting/discussing it: read it
+    via = 'chat'
+    if not slug:
+        # Ticket #1088: "Calm current" answered an offer of "Calm Currents"
+        # and no exact rule saw it. A model reads the reply against the
+        # offer the customer saw; delegation and moods are never a pick.
+        offered = offered_slugs(previous_reply) if previous_reply else []
+        verdict = _read_pick(ctx, text, offered, previous_reply)
+        if not verdict:
+            return None
+        slug, via = verdict['slug'], 'chat_read'
+        slugs = offered
+    record = {'slug': slug, 'at': time.time(), 'via': via,
               'offer': ((offer or {}).get('token')
                         if list(slugs) == (offer or {}).get('slugs') else None),
               'offer_message_id': previous_reply_id,
@@ -440,13 +465,23 @@ def resolve_pick(ctx, slug, user_pick=None):
                  offer.get("job_id") == (getattr(ctx, "job", None)
                                          or {}).get("id"))
     who = identify(evidence, () if same_turn else slugs)
+    via = "mcp" if mcp else "chat"
+    if who is None and not mcp:
+        # Ticket #1088: the exact rules did not see a pick ("Calm current"
+        # for "Calm Currents"); a model reads the user's own message against
+        # the offer they answered (or the catalog, before any offer).
+        verdict = _read_pick(ctx, evidence,
+                             [] if same_turn else list(slugs),
+                             "" if same_turn else (offer or {}).get("question"))
+        if verdict:
+            who, via = verdict["slug"], "chat_read"
     if who != slug:
         if who:
             return None, (f"REJECTED: the user picked '{who}', not '{slug}'. "
                           "Place the track they chose.")
         return None, REFUSE_PICK
     record = {"slug": slug, "at": time.time(),
-              "via": "mcp" if mcp else "chat",
+              "via": via,
               "offer": (offer or {}).get("token"),
               "evidence": " ".join(str(evidence).split())[:200]}
     _remember_pick(ctx, record)
