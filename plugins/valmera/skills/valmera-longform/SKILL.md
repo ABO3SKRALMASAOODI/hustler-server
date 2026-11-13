@@ -33,7 +33,9 @@ two thirds, and a ledger of the stakes that balances at the end. `REFERENCES.md`
    shutter in any 30 s, a recording's third use takes its alternate; captions at one seat with ink measured from the
    picture under them and a soft pool on photographs; type inside the safe area and off the mark; pushes on stills at
    most 6%.
-6. **Never** publish, pick music (the narrator and a few library sounds only), touch a customer's project, alter the end
+6. **Never** publish, put music in the plan (the narrator and a few library sounds only; the shell lays the film's music
+   after the render from the licensed library: `film.mp4` with it, `film_clean.mp4` without, the credit in `film.json`),
+   touch a customer's project, alter the end
    card or the mark (the shell adds both), or rate the film (a separate Opus session rates it on rubric v3).
 
 ## Run it

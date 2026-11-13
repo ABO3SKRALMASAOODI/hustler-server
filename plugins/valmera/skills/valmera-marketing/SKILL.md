@@ -21,7 +21,9 @@ check: a pain they know, one true thing Valmera did about it, shown with the rea
    right rail, nothing under 38 px. A sound only where something lands on screen. Pages are a
    colour the product's white mark reads on. The `score` stage checks these as numbers and stops
    the run on any miss.
-3. **Never:** publish, pick music, touch a customer's project or footage, alter the end card
+3. **Never:** publish, put music in the plan (the shell lays the film's music after the render from the licensed
+   library: `film.mp4` with it, `film_clean.mp4` without, the credit in `film.json`), touch a customer's project or
+   footage, alter the end card
    or the mark (the shell adds both after the film), rate the film (a separate session does).
 
 ## Record first: `studio.py`

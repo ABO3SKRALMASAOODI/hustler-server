@@ -11,7 +11,8 @@ Stages, each writing one file into the run folder (README.md has the contract):
 A workflow is a module with ideas(ctx) and script(ctx, ideas) (and, when it differs from the shared
 chain, supply/score/render). The shell owns everything else: the style registry and ledger, the
 Mac engine through heavy.sh, the brand finish, delivering once, and deleting the work folder.
-Never publishes. Never picks music. The end card and the watermark stay.
+Never publishes. The end card and the watermark stay. Every film gets music Valmera chooses from its licensed library
+(chain.music_version); the same film without it is delivered beside it.
 """
 import argparse
 import datetime as dt
@@ -207,7 +208,12 @@ def deliver(ctx, state, out_root, results):
     part = os.path.join(out_root, f".{name}.partial")
     shutil.rmtree(part, ignore_errors=True)
     os.makedirs(part)
-    shutil.copyfile(chk["final"], os.path.join(part, "film.mp4"))
+    scored = bool(chk.get("final_music") and os.path.exists(chk["final_music"]))
+    if scored:                                   # the film with the music Valmera chose for it; the same film without music beside it
+        shutil.copyfile(chk["final_music"], os.path.join(part, "film.mp4"))
+        shutil.copyfile(chk["final"], os.path.join(part, "film_clean.mp4"))
+    else:
+        shutil.copyfile(chk["final"], os.path.join(part, "film.mp4"))
     if chk.get("final_song") and os.path.exists(chk["final_song"]):      # the owner's song under the same film; film.mp4 is the clean export
         shutil.copyfile(chk["final_song"], os.path.join(part, "film_song.mp4"))
     spend = [s for r in results.values() if isinstance(r, dict) for s in r.get("spend") or []]
@@ -217,7 +223,9 @@ def deliver(ctx, state, out_root, results):
                window=script.get("window"), script=dict((k, v) for k, v in script.items() if k not in ("style", "idea")),
                engine=results["render"].get("engine"), checks=chk["checks"], stage_seconds=state.get("seconds"),
                spend=spend, spend_usd=round(sum(float(s.get("usd") or 0) for s in spend), 4),
-               rules=dict(published=False, music_picked=False, end_card=chk["checks"].get("endcard_ok"), watermark=chk["checks"].get("mark_ok")))
+               rules=dict(published=False, music_picked=scored, end_card=chk["checks"].get("endcard_ok"), watermark=chk["checks"].get("mark_ok")))
+    if scored:
+        rec["music"] = dict(chk.get("music") or {}, film="film.mp4", clean_export="film_clean.mp4")
     if chk.get("song"):
         rec["song"] = dict(chk["song"], film="film_song.mp4", clean_export="film.mp4")
     jsave(os.path.join(part, "film.json"), rec)

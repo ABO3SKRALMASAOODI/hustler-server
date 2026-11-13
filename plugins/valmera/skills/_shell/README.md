@@ -75,15 +75,24 @@ script whose style is one of them.
 engine's `worker/scene/alien`) is laid out before the engine draws it, through heavy.sh, and the scene to draw is
 written beside it as `*.alien.json` with `supply/alien_bank.json` saying what stood. Every render path calls it.
 
-**A song the owner hands over** (`--args '{"song": "<file>"}'`): `chain.song_version` lays it on a copy
-of the engine's film with `score.music` (bars re-cut so the drop lands on the turn, under the voice, a
-hit before the end card) and the shell delivers `film_song.mp4` beside the clean `film.mp4`. A narrated
-film hands the scene with its narration as the spine (`score.l1_audio`) and the turn it named
-(`score.turn_s`). **A renderer other than the Mac engine**: `SHELL_RENDER_CMD=<script>` (workflows that
+**Every film gets music** (owner, 13 Nov 2026; `chain.music_version`, after the render, on a copy of the
+engine's film). `worker/music_film.py` reads the story's turn and payoff from the film's own lines (a model;
+a workflow may name the landing as `score.turn_s`), chooses a track from the licensed library the way the
+references do (`worker/music_choose.py`: signal shortlist, a model's ranking, then the engine tries the first
+three against the film and keeps the one whose bars carry it), and `worker/score/music.py` cuts it: the film
+opens on a full part of the song, a build of two to four bars where the story turns, the drop on the payoff,
+under every word and up in the pauses, a hit before the end card. The shell delivers that film as `film.mp4`,
+the same film without music as `film_clean.mp4`, and the track's title, licence and credit line in
+`film.json` under `music` (CC-BY: the credit goes wherever the film is published). `--args '{"music": false}'`
+keeps a run dry. **A song the owner hands over** (`--args '{"song": "<file>"}'`) gets the same section choice
+and level flow and is delivered as `film_song.mp4` beside the clean `film.mp4` (a test song is never the
+film). A narrated film hands the scene with its narration as the spine (`score.l1_audio`); a film whose
+sound is one file is scored against that sound. A music fault never stops a run: the clean film is delivered. **A renderer other than the Mac engine**: `SHELL_RENDER_CMD=<script>` (workflows that
 render through `wf3.render`): the script gets the scene, the work folder, the sound and the output path.
 
 ## Never
 
-Never publishes. Never picks music: the plan may only carry the sound library's effects, and the
-check fails a plan with any other audio. The end card and the watermark are the product's own,
+Never publishes. The plan itself never carries music: it may only carry the sound library's effects, and the
+check fails a plan with any other audio (the film's music is laid after the render, from the licensed library
+or the owner's own song, never anything else). The end card and the watermark are the product's own,
 on every film. A builder never rates its own film: `film.json` carries measurements, not scores.

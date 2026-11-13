@@ -153,3 +153,34 @@ def test_deliver_once_and_styles(tmp):
     assert r.returncode == 0, r.stderr[-1500:]
     rows = json.loads(led.read_text())["selftest"]
     assert rows[-1]["style"] == "t1" and rows[-1]["style"] not in [x["style"] for x in rows[-4:-1]]
+
+
+def test_a_scored_film_is_the_film_and_the_clean_one_sits_beside_it(tmp_path):
+    """Every film gets music (owner, 13 Nov): the film Valmera scored is film.mp4, with its track's credit in film.json,
+    and the same film without music is film_clean.mp4. A song the owner handed over stays a separate file."""
+    import chain
+    import shell as sh_mod
+    for n, b in (("clean.mp4", b"clean"), ("music.mp4", b"music"), ("song.mp4", b"song")):
+        (tmp_path / n).write_bytes(b)
+    (tmp_path / "state").mkdir()
+    ctx = sh_mod.Ctx(str(tmp_path / "run"), dict(run_id="r1-abcdef", workflow="wf3"), str(tmp_path / "state"))
+    style = dict(id="s1")
+    res = dict(script=dict(style=style, title="A film"), ideas={}, render={},
+               check=dict(final=str(tmp_path / "clean.mp4"), checks={}, final_music=str(tmp_path / "music.mp4"),
+                          music=dict(title="T", author="A", license="CC-BY-4.0", credit="\"T\" by A (CC BY 4.0)"), spend=[dict(stage="check", usd=0.01)]))
+    d = sh_mod.deliver(ctx, {}, str(tmp_path / "out"), res)
+    folder = d["folder"]
+    assert open(os.path.join(folder, "film.mp4"), "rb").read() == b"music" and open(os.path.join(folder, "film_clean.mp4"), "rb").read() == b"clean"
+    rec = json.load(open(os.path.join(folder, "film.json")))
+    assert rec["rules"]["music_picked"] is True and rec["music"]["credit"].startswith("\"T\"") and rec["music"]["clean_export"] == "film_clean.mp4"
+    assert rec["spend_usd"] == 0.01
+    ctx2 = sh_mod.Ctx(str(tmp_path / "run2"), dict(run_id="r2-abcdef", workflow="wf3"), str(tmp_path / "state"))
+    res2 = dict(script=dict(style=style, title="Another film"), ideas={}, render={},
+                check=dict(final=str(tmp_path / "clean.mp4"), checks={}, final_song=str(tmp_path / "song.mp4"), song=dict(file="x.wav", supplied_by="owner")))
+    f2 = sh_mod.deliver(ctx2, {}, str(tmp_path / "out"), res2)["folder"]
+    assert open(os.path.join(f2, "film.mp4"), "rb").read() == b"clean" and open(os.path.join(f2, "film_song.mp4"), "rb").read() == b"song"
+    assert json.load(open(os.path.join(f2, "film.json")))["rules"]["music_picked"] is False and not os.path.exists(os.path.join(f2, "film_clean.mp4"))
+    # music is every film's unless the run says no; the shell's own self-test never asks for it
+    assert chain.wants_music(ctx) and not chain.wants_music(sh_mod.Ctx(str(tmp_path / "run3"), dict(run_id="r3", workflow="wf3", args=dict(music=False)), str(tmp_path / "state")))
+    assert not chain.wants_music(sh_mod.Ctx(str(tmp_path / "run4"), dict(run_id="r4", workflow="selftest"), str(tmp_path / "state")))
+

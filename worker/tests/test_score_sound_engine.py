@@ -276,32 +276,50 @@ def test_the_song_is_read_on_one_bar_grid(song):
     assert np.mean(after) > np.mean(before) + 0.3                         # the drop is a step up in the song's own level
 
 
-def test_the_drop_lands_on_the_turn_and_the_last_hit_before_the_card(song):
+def _played(plan):
+    return [(x["bar"], x["role"], x["e"]) for x in plan["bars_played"]]
+
+
+def test_the_film_opens_full_builds_into_the_drop_and_never_plays_the_intro(song):
+    """MUSIC2 (owner, 13 Nov: "a very boring and weird part"): the song's intro is not what the film waits in. The film
+    opens on a full part, the song pulls back for a build of two to four bars, and its drop lands on the turn."""
     _p, s, _truth = song
     words = [(0.4 + k * 0.5, 0.8 + k * 0.5) for k in range(60) if not 13.0 < 0.4 + k * 0.5 < 14.0]      # speech to 30.3 s, a breath at 13-14
     marks = {"dur_s": 32.0, "words": words, "turn_s": 14.1, "end_hit_s": None, "quiet": []}
     plan = MU.arrange(s, marks)
-    assert plan["ok"] and abs(plan["drop_at"] - 14.1) < 0.02 and plan["turn_miss_s"] == 0.0
-    assert abs(plan["tempo"] - 1.0) <= MU.STRETCH_MAX + 1e-6
-    tail = MU.PROFILE["end_tail_beats"] * plan["beat_s"]
-    assert max(w1 for _w0, w1 in words) <= plan["end_hit_s"] and plan["end_hit_s"] + tail <= 32.0 - MU.PROFILE["end_gap_s"] + 1e-6
+    assert plan["ok"] and abs(plan["drop_at"] - 14.1) < 0.02 and plan["turn_miss_s"] == 0.0 and plan["drop_is"] == "entrance"
+    assert all(abs(x["tempo"] - 1.0) <= MU.STRETCH_MAX + 1e-3 for x in plan["spans"])
+    assert max(w1 for _w0, w1 in words) <= plan["end_hit_s"] and plan["end_hit_s"] + plan["end_tail_s"] <= 32.0 - MU.PROFILE["end_gap_s"] + 1e-6
     seg = plan["segments"]
-    assert seg[0]["film"][0] <= 0.0 and abs(seg[-1]["film"][1] - plan["end_hit_s"]) < 1e-3
+    assert abs(seg[-1]["film"][1] - plan["end_hit_s"]) < 1e-3 and seg[0]["film"][0] < MU.PROFILE["hole_max_s"]
     for a, b in zip(seg, seg[1:]):
         assert abs(a["film"][1] - b["film"][0]) < 1e-3                    # the film is covered, bar after bar
+    rows = _played(plan)
     bars = s["bars"]
-    at_drop = next(x for x in seg if x["film"][0] - 1e-3 <= plan["drop_at"] < x["film"][1] - 1e-3)
-    bar_at = at_drop["bars"][0] + int(round((plan["drop_at"] - at_drop["film"][0]) / plan["bar_s"]))
-    assert bars[bar_at]["drop"]                                           # what lands on the turn is the song's drop
-    pre = [bars[i]["e"] for x in seg for i in range(x["bars"][0], x["bars"][1] + 1)
-           if x["film"][0] + (i - x["bars"][0]) * plan["bar_s"] < plan["drop_at"] - 1e-3]
-    assert max(pre) < 0.6                                                 # and nothing before it spends it
-    assert [g for g in plan["grid"] if g["down"]]
+    opening = [e for _b, role, e in rows if role in ("open", "groove")]
+    assert opening and min(opening) >= 0.6 and plan["intro_bars"] == 0 and plan["low_bars"] == 0      # a full part from the first bar
+    build = [(b, e) for b, role, e in rows if role == "build"]
+    assert MU.BUILD_BARS[0] <= len(build) <= MU.BUILD_BARS[1] and max(e for _b, e in build) < 0.5       # the pull-back before the drop
+    drop = next(b for b, role, _e in rows if role == "drop")
+    assert bars[drop]["entry"] and bars[drop]["drop"] and build[-1][0] == drop - 1                    # the song's own bars lead into its own drop
+    assert min(e for _b, role, e in rows if role in ("drop", "post")) >= 0.6
+    assert [g for g in plan["grid"] if g["down"]] and plan["build_at"] < plan["drop_at"]
 
 
-def test_the_song_sits_under_the_voice_rises_in_a_breath_and_ends_on_its_hit(song):
+def test_the_build_starts_where_the_story_turns_and_on_a_picture_cut_when_one_is_near(song):
+    _p, s, _truth = song
+    words = [(0.4 + k * 0.5, 0.8 + k * 0.5) for k in range(70)]
+    marks = {"dur_s": 40.0, "words": words, "turn_s": 15.0, "payoff_s": 22.0, "end_hit_s": None, "quiet": [], "cuts": [3.0, 9.1, 15.9, 22.03, 30.0]}
+    plan = MU.arrange(s, marks)
+    assert plan["ok"] and abs(plan["drop_at"] - 22.03) < 1e-6           # the drop takes the cut the payoff sits on: the visual turn
+    assert abs(plan["build_at"] - 15.9) < 1e-6 and plan["build_bars"] == 3      # three bars from the cut nearest the turn, inside the tempo's limit
+    assert all(abs(x["tempo"] - 1.0) <= MU.STRETCH_MAX + 1e-3 for x in plan["spans"])
+    assert MU.arrange(s, dict(marks, snap=False))["drop_at"] == 22.0     # a landing the film itself made is kept to the frame
+
+
+def test_the_song_sits_under_the_voice_rises_in_a_pause_and_ends_on_its_hit(song):
     p, s, _truth = song
-    words = [(0.4 + k * 0.5, 0.85 + k * 0.5) for k in range(60) if not 13.0 < 0.4 + k * 0.5 < 14.5]
+    words = [(0.4 + k * 0.5, 0.85 + k * 0.5) for k in range(60) if not 5.0 < 0.4 + k * 0.5 < 6.6]      # a pause of 1.55 s at 5.35-6.9
     marks = {"dur_s": 32.0, "words": words, "turn_s": 14.1, "end_hit_s": None, "quiet": []}
     plan = MU.arrange(s, marks)
     music, rep = MU.track(p, s, plan, marks, voice=None)
@@ -314,9 +332,37 @@ def test_the_song_sits_under_the_voice_rises_in_a_breath_and_ends_on_its_hit(son
     def lv(a, b):
         seg = music[int(a * MU.SR):int(b * MU.SR)]
         return 10 * np.log10(float((seg ** 2).mean()) + 1e-12)
-    assert rep["under_voice_db"] >= MU.PROFILE["under_voice_db"] - 1.0    # under the voice by the references' margin
-    assert lv(20.0, 26.0) > lv(4.0, 10.0)                                 # the bed after the drop is the bigger one
-    assert rep["in_breaths_db"] is None or rep["in_breaths_db"] < rep["under_voice_db"]
+    assert abs(rep["under_voice_db"] - MU.PROFILE["under_voice_db"]) <= 0.6     # on the judge's ruler, whatever the song's crest
+    assert len(rep["lifts"]) == 1 and abs(rep["lifts"][0]["t"] - 5.35) < 0.01 and rep["lifts"][0]["db"] == MU.PROFILE["lift_max_db"]
+    assert lv(5.9, 6.5) > lv(2.0, 4.5) + 2.5                              # up in the pause, down again before the next word
+    d = plan["drop_at"]
+    assert rep["holes"][0]["before"] == "drop" and lv(d - 0.3, d - 0.05) < lv(d - 2.0, d - 1.0) - 10.0     # out for a beat before the drop
+    assert lv(d, d + 0.4) > lv(d - 2.0, d - 1.0)                          # and the drop over the bed
+    assert rep["ride_wobble_db"] < 1.0                                    # the ride does not move at syllable rate: no pumping
+
+
+def test_a_breath_gets_no_lift_and_the_ride_swells_into_the_films_own_sounds():
+    P = MU.PROFILE
+    nf, hop = 3000, 0.01
+    words = [(0.2, 4.0), (4.4, 9.0), (10.2, 20.0), (20.3, 27.0)]            # breaths of 0.4 and 0.3 s, a pause of 1.2 s
+    plan = {"drop_at": None, "end_hit_s": 27.2, "beat_s": 0.5, "spans": [{"t0": 0.0, "t1": 27.2, "beats": 54, "beat_s": 0.5}]}
+    slow, fast, notes = MU.flow(nf, hop, {"words": words, "accents": [15.0]}, plan, P, -10.0, -6.0)
+    assert [x["t"] for x in notes["lifts"]] == [9.0]                     # only the pause
+    assert slow[int(4.2 / hop)] == -10.0 and slow[int(20.15 / hop)] == -10.0
+    assert -10.0 + P["lift_db"] < slow[int(9.7 / hop)] < -10.0 + P["lift_max_db"] + 1e-6 and slow[int(10.2 / hop)] <= -10.0 + 1e-6      # down before the next word
+    assert abs(slow[int(15.0 / hop)] - (-10.0 + P["accent_db"])) < 0.1 and slow[int(13.0 / hop)] == -10.0 and slow[int(16.5 / hop)] == -10.0
+    assert fast[int(27.0 / hop)] == -P["end_hole_db"] and notes["holes"][-1]["before"] == "last hit"
+
+
+def test_a_voice_with_no_word_times_says_where_it_speaks():
+    sr = MU.SR
+    x = np.zeros(int(6.0 * sr), np.float32)
+    rng = np.random.default_rng(4)
+    for a, b in ((0.5, 1.9), (2.6, 4.0), (4.05, 5.2)):                    # 4.0-4.05 is inside a sentence
+        x[int(a * sr):int(b * sr)] = rng.standard_normal(int(b * sr) - int(a * sr)).astype(np.float32) * 0.1
+    spans = MU.voice_spans(x)
+    assert len(spans) == 2 and abs(spans[0][0] - 0.5) < 0.05 and abs(spans[0][1] - 1.9) < 0.05 and abs(spans[1][0] - 2.6) < 0.05 and abs(spans[1][1] - 5.2) < 0.05
+    assert MU.voice_spans(np.zeros(sr, np.float32)) == []
 
 
 def test_a_cut_moves_to_the_beat_only_where_nobody_speaks():
@@ -331,7 +377,10 @@ def test_marks_come_from_the_compiled_film():
     l1 = {"fps": 30, "dur_f": 900, "spine": [{"f": [0, 900], "src": [0.0, 30.0]}], "items": [], "sound": [],
           "sound_design": {"placed": [{"t": 12.0, "part": "payoff"}]}}
     m = MU.marks_from_l1(l1, {"words": [{"t0": 1.0, "t1": 1.4}, {"t0": 27.0, "t1": 27.5}]}, prog_end_f=840)
-    assert m["dur_s"] == 28.0 and m["turn_s"] == 12.0 and m["words"][-1] == (27.0, 27.5)
+    assert m["dur_s"] == 28.0 and m["turn_s"] == 12.0 and m["words"][-1] == (27.0, 27.5) and m["accents"] == [12.0]
+    own = MU.marks_from_l1(dict(l1, music_marks={"turn_s": 9.0, "payoff_s": 14.0}), {"words": []}, prog_end_f=840)
+    assert own["turn_s"] == 9.0 and own["payoff_s"] == 14.0             # the scene's own marks come before the sound design's payoff
+    assert MU.marks_from_l1(l1, {"words": []}, prog_end_f=840, payoff_s=20.0)["turn_s"] is None
 
 
 # ----------------------------------------------------------------- the owner's desk

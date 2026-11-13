@@ -332,10 +332,53 @@ def settle(work, comp, index, score_lines, about=""):
                     "offset_s": round(a, 2), "loop": bool(sec.get("loop")), "turn_s": None if turn_s is None else round(turn_s, 2),
                     "dur_s": f["duration_s"], "align": sec.get("align"), "section_why": sec.get("why"), "film": f})
         _write(work, doc)
+        arranged(work, doc, comp.l1, index, f, turn_s)          # MUSIC2: the track cut to this film; the plain bed above stands when it cannot be
         return doc
     except Exception as e:  # noqa: BLE001 - the film goes out without a bed, and says why
         _write(work, {"on": False, "why": f"{type(e).__name__}: {str(e)[:200]}", "cid": doc.get("cid")})
         return None
+
+
+ARRANGE_S = 14.0            # what the film's write waits for the track to be cut to it; past it the plain bed plays
+TRACK_FILE = "bed_track.mp3"
+
+
+def arranged(work, doc, l1, index, f, turn_s):
+    """MUSIC2's seam (14 Nov): the chosen track cut and ridden for this film by the music engine (music_film.bake_bed:
+    the film opens on a full part, a build into the turn, the drop on it, under every word, up in the pauses, the
+    last hit before the end card), written beside the film as one file and recorded under doc["arranged"]. The
+    track's audio is the copy the fetch left in the work folder, else the library's object. Late, missing or
+    refused: the plain bed settled above plays, and the reason is on file. Never raises."""
+    import threading
+    box = {}
+    doc.pop("arranged", None)
+    doc.pop("arranged_error", None)
+
+    def run():
+        try:
+            import music_choose
+            import music_film
+            path = os.path.join(work, TRACK_FILE)
+            if not os.path.exists(path):
+                import storage
+                storage.download_to(music_choose.find(doc["cid"])["storage_key"], path)
+            turns = {t["role"]: float(t["t"]) for t in f.get("turns") or []}
+            drop = turn_s if turn_s is not None else turns.get("payoff")
+            box["got"] = music_film.bake_bed(work, doc, l1, index, path, turn_s=drop, under_db=UNDER_VOICE.get(f["kind"], 9.0), lead=f["speech_share"] < 0.15)
+        except Exception as e:  # noqa: BLE001 - the plain bed stands
+            box["err"] = f"{type(e).__name__}: {str(e)[:200]}"
+    try:
+        th = threading.Thread(target=run, name="film-bed-arrange", daemon=True)
+        th.start()
+        th.join(ARRANGE_S)
+        if box.get("got"):
+            doc["arranged"] = box["got"]
+        else:
+            doc["arranged_error"] = box.get("err") or f"not cut inside {ARRANGE_S:.0f} s"
+        _write(work, doc)
+    except Exception:  # noqa: BLE001
+        pass
+    return doc.get("arranged")
 
 
 def chosen(work):
@@ -368,7 +411,12 @@ def project_asset(ctx, worker_db, doc):
     class _C:
         project_id = ctx.project_id
         db = worker_db
-    key, err = music_choose.ensure_project_asset(_C, {"cid": doc["cid"]})
+    arr = doc.get("arranged")
+    if arr and doc.get("placed") == "arranged" and arr.get("path") and os.path.exists(arr["path"]):
+        import music_film
+        key, err = music_film.ensure_arranged_asset(_C, doc, arr["path"])
+    else:
+        key, err = music_choose.ensure_project_asset(_C, {"cid": doc["cid"]})
     if err or not key:
         return None, err or "no key"
     music_gate.grant(ctx, key, PROVENANCE)
@@ -379,6 +427,16 @@ def local_key(doc):
     return f"bed:{doc['cid']}"
 
 
+def _placed(work, doc, form):
+    """Which bed this lowering placed, for the write that follows it: the asset has to be the audio the item plays."""
+    if doc.get("placed") != form:
+        doc["placed"] = form
+        try:
+            _write(work, doc)
+        except OSError:
+            pass
+
+
 def items(work, prog_s):
     """(music items, fx items) for the EDL, on the programme clock; ([], []) when the film has no chosen bed.
     The storage key is local (`bed:<cid>`): score.film swaps it for the project's asset before the write."""
@@ -386,6 +444,16 @@ def items(work, prog_s):
     if not doc or prog_s < MIN_S:
         return [], []
     purpose = (f"Valmera's choice for this film: \"{doc.get('title')}\" by {doc.get('author')} ({doc.get('license')}). {doc.get('why') or ''}")[:400]
+    arr = doc.get("arranged")
+    if arr and os.path.exists(os.path.join(work, str(arr.get("file")))) and abs(float(arr.get("dur_s") or 0.0) - prog_s) <= 0.15:
+        # cut and levelled for this film already (music_film.bake_bed): it plays as written, and ends before the last
+        # frame so nothing of it rides into the end card. A film lowered again at another length (the last look cut
+        # it) is not the film it was cut for: that one takes the plain bed below
+        end = math.floor(min(prog_s - 0.05, float(arr["end_s"])) * 100) / 100
+        _placed(work, doc, "arranged")
+        return [{"id": "bed", "storage_key": local_key(doc), "start": 0.0, "end": end, "gain_db": 0.0, "duck": False, "purpose": purpose,
+                 "provenance": PROVENANCE}], []
+    _placed(work, doc, "plain")
     m = {"id": "bed", "storage_key": local_key(doc), "start": 0.0, "end": round(prog_s, 2), "gain_db": float(doc["gain_db"]), "duck": False,
          "fade_in_s": FADE_IN_S, "fade_out_s": FADE_OUT_S, "purpose": purpose, "provenance": PROVENANCE}
     if doc.get("offset_s"):

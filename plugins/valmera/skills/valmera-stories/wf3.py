@@ -479,7 +479,7 @@ def score(ctx, script):
             whole["pack"] = pack
             json.dump(whole, open(pk, "w"), ensure_ascii=False, indent=1)
     knobs = {k: v for k, v in d.items() if k not in ("script", "why", "targets", "retarget", "alien")}
-    knobs.setdefault("bed", bool(ctx.args.get("song")))       # a song was handed to this run: the sounds are designed for a film with a bed
+    knobs.setdefault("bed", bool(ctx.args.get("song")) or chain.wants_music(ctx))       # the film gets music: the sounds are designed for a film with a bed
     sys.path[:0] = [p for p in env_path().split(os.pathsep) if p not in sys.path]
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     l1, beats = F.STYLES[script["style"]["id"]](sc, pack, knobs)

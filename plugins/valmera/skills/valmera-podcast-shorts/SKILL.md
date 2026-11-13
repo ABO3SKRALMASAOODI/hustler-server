@@ -13,8 +13,10 @@ picture cuts to real footage (worker/footage, cut wide and shown in a window ove
 a small archive copy is never blown up) and photographs of them on the clause that says the name, then
 back to him; what was filmed comes before what was photographed; captions ink word by word at one seat; the title holds the seat over his first breath;
 each named thing is labelled once; the pacing driver eases the take (never punches it), one look is
-solved on the film's pictures, the sound design places the references' sounds, and a song is laid on a
-copy only when the owner hands one over (`"song"`). The payoff is always his face. The footage is not
+solved on the film's pictures, the sound design places the references' sounds, and the shell lays the
+film's music after the render (a track from the licensed library, cut to the short's turn and payoff:
+`film.mp4` with it, `film_clean.mp4` without, the credit in `film.json`; the owner's own `"song"` is
+`film_song.mp4`). The payoff is always his face. The footage is not
 licensed: never publish it.
 
 Make shorts that look and sound like the best Instagram editors made them,

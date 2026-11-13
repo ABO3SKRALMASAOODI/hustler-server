@@ -27,8 +27,9 @@ narrator over real pictures of what it names, with one device that no editor wou
    second, every picture moving and eased, faces whole, one caption seat, type inside the safe area and
    off the mark, nothing under 38 px, sounds on the film's events in the references' classes and count,
    no upscale past 3x. `score` checks the placement rules as numbers; the pace is in `film.json`.
-4. **Never** publish, pick music (a song is laid only when the owner hands one to the run: `film_song.mp4`
-   beside the clean `film.mp4`), touch a customer's project, alter the end card or the mark (the shell
+4. **Never** publish, put music in the plan (the shell lays the film's music after the render: a track chosen
+   from the licensed library, `film.mp4` with it and `film_clean.mp4` without, its credit line in `film.json`;
+   a song the owner hands to the run is `film_song.mp4` beside the clean `film.mp4`), touch a customer's project, alter the end card or the mark (the shell
    adds both), or rate the film (a separate Opus session rates it on rubric v3).
 
 ## Run it
@@ -45,8 +46,10 @@ $PY -m pytest -q test_film.py
 
 `--args`: `style` keeps it to one style, `line` passes a line from the owner to the story finder,
 `notes` to the writer, `look: false` skips the stop for the director's look, `direction` sets knobs.
-`song` (a file the owner handed over) adds `film_song.mp4`: the song cut to the film by `score.music`
-(its drop on the turn, under the voice, a hit before the end card). `remake` (a delivered folder) makes
+Music is every film's: the build starts where the story turns and the drop lands on the payoff's landing
+(`worker/music_film.py`, `score.music`); `music: false` keeps a run dry. `song` (a file the owner handed over)
+adds `film_song.mp4` instead: that song cut the same way (a full part from the first frame, never its intro,
+under every word, a hit before the end card). `remake` (a delivered folder) makes
 that film's story and script again on today's engines with no model call: the facts are fetched and
 checked again. `narration` (a folder the narrate tool rendered for this very script) and `footage_from`
 (folders of `worker/footage` records for it) are reused instead of rendered and fetched again.

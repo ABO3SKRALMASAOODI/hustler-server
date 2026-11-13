@@ -261,7 +261,7 @@ def sound(ctx, l1_path):
         wk = brand.worker_dir()
         try:
             extra = ""
-            if (ctx.args or {}).get("song"):                 # the owner handed this run a song: the sounds are designed for a film with a bed
+            if (ctx.args or {}).get("song") or wants_music(ctx):     # the film gets music: the sounds are designed for a film with a bed
                 extra += " --bed"
             if (ctx.args or {}).get("turn_s") is not None:   # and the story's turn, when the run names it
                 extra += f" --turn {float(ctx.args['turn_s']):.3f}"
@@ -317,40 +317,90 @@ def render(ctx, script, sc):
     return dict(engine=kind, film=out, engine_check=chk)
 
 
-def song_version(ctx, rd, sc):
-    """The same film with the owner's song under it, when the owner handed one to this run (--args '{"song": path}').
-    Valmera never picks a song: without that argument this does nothing. The song is cut to the film by
-    worker/score/music.py (its drop on the turn, its last hit before the end card, under the voice), mixed with the
-    film's own voice and sounds, and laid on a copy of the engine's picture. film.mp4 stays the clean export."""
+def wants_music(ctx):
+    """Every film gets music (owner, 13 Nov 2026: Valmera chooses it the way the references do) unless the run says
+    otherwise: --args '{"music": false}'."""
+    return (ctx.args or {}).get("music", True) is not False and ctx.workflow != "selftest"
+
+
+def music_version(ctx, rd, sc):
+    """The same film with music under it, on a copy of the engine's picture (worker/music_film.py: the story's turn
+    and payoff read from the film's own lines, the part of the song chosen by the engine, its level ridden under
+    every word, a hit before the end card). With a song the owner handed to the run (--args '{"song": path}') that
+    song plays and the film is delivered as film_song.mp4 beside the clean film.mp4 (a test song is never the film).
+    Otherwise Valmera chooses a track from its licensed library: that film is film.mp4, with its credit line in
+    film.json, and the export without music is film_clean.mp4. A fault here never stops a run: the clean film is
+    delivered and the reason is logged."""
     song = (ctx.args or {}).get("song")
-    if not song or not os.path.exists(str(song)) or not sc.get("l1"):
+    if song and not os.path.exists(str(song)):
+        song = None
+    if not sc.get("l1") or not (song or wants_music(ctx)):
         return None
-    out = os.path.join(ctx.supply, "film_engine_song.mp4")
-    if not os.path.exists(out):
+    tag = "song" if song else "music"
+    out = os.path.join(ctx.supply, f"film_engine_{tag}.mp4")
+    report = os.path.join(ctx.supply, f"{tag}.json")
+    if not (os.path.exists(out) and os.path.exists(report)):
         wk = brand.worker_dir()
-        # a narrated film's voice is not an upload: its workflow hands the scene with the narration as its spine (l1_audio)
-        cmd = (f"cd '{wk}' && PYTHONPATH=. FFMPEG_BIN='{brand.FF}' SCENE_CEIL_DBTP=-2.0 '{PY}' -m score.music mix --l1 '{sc.get('l1_audio') or sc['l1']}' --work '{ctx.supply}' "
-               f"--song '{song}' --film '{rd['film']}' --out '{out}.part.mp4' --kind {SONG_KIND.get(ctx.workflow, 'stories')}")
-        if (ctx.args or {}).get("song_vocals"):
-            cmd += f" --vocals '{ctx.args['song_vocals']}'"
-        turn = (ctx.args or {}).get("turn_s", sc.get("turn_s"))       # the run's own word first, else the turn the score named
-        if turn is not None:
-            cmd += f" --turn {float(turn):.3f}"
+        brief = ""
         try:
-            sh(ctx, ["zsh", "-c", cmd], label=f"wf-song-{ctx.run_id}", heavy=True, timeout=1800)
+            sj = json.load(open(os.path.join(ctx.run_dir, "script.json")))
+            brief = " ".join(str(sj.get(k) or "") for k in ("title", "hook_line", "direction"))[:500]
+        except (OSError, ValueError):
+            pass
+        bf = os.path.join(ctx.supply, f"{tag}_brief.txt")
+        open(bf, "w", encoding="utf-8").write(brief)
+        # a narrated film's voice is not an upload: its workflow hands the scene with the narration as its spine (l1_audio)
+        cmd = (f"cd '{wk}' && export OPENAI_API_KEY=\"${{OPENAI_API_KEY:-$(grep -E '^OPENAI_API_KEY=' '{ENV_FILE}' | tail -1 | cut -d= -f2- | tr -d '\"')}}\" && "
+               f"PYTHONPATH=. FFMPEG_BIN='{brand.FF}' SCENE_CEIL_DBTP=-2.0 SKIP_DB_INIT=1 '{PY}' -m music_film score --l1 '{sc.get('l1_audio') or sc['l1']}' "
+               f"--work '{ctx.supply}' --film '{rd['film']}' --out '{out}.part.mp4' --kind {SONG_KIND.get(ctx.workflow, 'stories')} "
+               f"--cache '{os.path.join(ctx.state_root, 'music_cache')}' --report '{report}' --brief \"$(cat '{bf}')\"")    # the publishers' own files, sha256-checked, kept between runs
+        if song:
+            cmd += f" --song '{song}'"
+            if (ctx.args or {}).get("song_vocals"):
+                cmd += f" --vocals '{ctx.args['song_vocals']}'"
+        turn = (ctx.args or {}).get("turn_s", sc.get("turn_s"))       # the run's own word first, else the landing the score named: the drop goes on it
+        if turn is not None:
+            cmd += f" --payoff {float(turn):.3f}"
+        try:
+            sh(ctx, ["zsh", "-c", cmd], label=f"wf-{tag}-{ctx.run_id}", heavy=True, timeout=1800)
             os.replace(out + ".part.mp4", out)
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:
-            ctx.log(f"song version skipped: {str(e)[:300]}")
+            ctx.log(f"{tag} version skipped: {str(e)[:300]}")
             return None
-    final = os.path.join(ctx.run_dir, "final_song.mp4")
+    try:
+        rep = json.load(open(report))
+    except (OSError, ValueError):
+        rep = {}
+    final = os.path.join(ctx.run_dir, f"final_{tag}.mp4")
     if not os.path.exists(final):
         try:
             brand.finish(out, final + ".part.mp4", ctx.tmp)
             os.replace(final + ".part.mp4", final)
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:     # the clean film is delivered either way
-            ctx.log(f"song version not finished: {str(e)[:300]}")
+            ctx.log(f"{tag} version not finished: {str(e)[:300]}")
             return None
-    return dict(final_song=final, song=dict(file=os.path.basename(str(song)), supplied_by="owner", picked_by_valmera=False))
+    mix = rep.get("mix") or {}
+    plan, levels = mix.get("plan") or {}, mix.get("music") or {}
+    does = dict(marks=rep.get("marks"), drop_at=plan.get("drop_at"), build_at=plan.get("build_at"), end_hit_s=plan.get("end_hit_s"), jumps=plan.get("jumps"),
+                tempo=plan.get("tempo"), cuts=plan.get("cuts"), under_voice_db=levels.get("under_voice_db"), lifts=len(levels.get("lifts") or []),
+                accents=len(levels.get("accents") or []), lufs=(mix.get("master") or {}).get("lufs"))
+    spend = [dict(stage="check", provider="openai", model="gpt-6.1-sol", what="music: story marks and the pick", usd=float(rep.get("spend_usd") or 0))]
+    if song:
+        return dict(final_song=final, song=dict(file=os.path.basename(str(song)), supplied_by="owner", picked_by_valmera=False, does=does), spend=spend)
+    ch = rep.get("choice") or {}
+    try:
+        chk = brand.check(out, final, ctx.tmp)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        ctx.log(f"music version not checked: {str(e)[:300]}")
+        return None
+    if not (chk.get("length_ok") and chk.get("endcard_ok")):
+        ctx.log(f"music version not delivered: its finish does not hold ({ {k: chk.get(k) for k in ('length_ok', 'endcard_ok', 'mark_ok', 'lufs')} })")
+        return None
+    music = dict(picked_by_valmera=True, title=ch.get("title"), author=ch.get("author"), license=ch.get("license"), credit=ch.get("credit"),
+                 page_url=ch.get("page_url"), cid=ch.get("cid"), why=ch.get("why"), chosen_by=ch.get("chosen_by"), tried=rep.get("tried"), does=does,
+                 checks={k: chk.get(k) for k in ("length_ok", "endcard_ok", "mark_ok", "lufs", "loud_ok")}, removable=True,
+                 note="CC-BY: the credit line goes wherever the film is published; film_clean.mp4 is the same film without music")
+    return dict(final_music=final, music=music, spend=spend)
 
 
 SONG_KIND = {"wf1": "podcast", "wf2": "marketing", "wf3": "stories", "wf4": "longform"}
@@ -365,7 +415,8 @@ def sound_manifest():
 
 def no_music(l1_path):
     """Every sound in the plan is a recording of the library (approved by the owner's ear or by reference match):
-    nothing foreign, nothing synthesized, and no audio asset outside the library."""
+    nothing foreign, nothing synthesized, and no audio asset outside the library. The plan itself carries no music: the
+    film's music is laid on a copy after the render (music_version), so the clean export is exactly this plan."""
     lib = {s["file"] for s in json.load(open(sound_manifest()))}
     l1 = json.load(open(l1_path))
     bad = [s.get("file") for s in l1.get("sound") or [] if s.get("file") and s["file"] not in lib]
@@ -386,9 +437,9 @@ def finish_and_check(ctx, rd, sc):
     c.update(music=m, finish=info)
     c["ok"] = bool(c["ok"] and m["ok"])
     out = dict(final=final, checks=c)
-    sv = song_version(ctx, rd, sc)               # only when the owner handed this run a song; film.mp4 stays clean
-    if sv:
-        out.update(sv)
+    mv = music_version(ctx, rd, sc)              # the film's music: Valmera's choice, or the song the owner handed this run
+    if mv:
+        out.update(mv)
     return out
 
 
