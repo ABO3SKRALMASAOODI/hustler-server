@@ -2759,7 +2759,7 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     except Exception as exc:  # noqa: BLE001 - no ledger: today's loop, as before
         print(f"[asks] job {job.get('id')}: no ledger: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
         return ""
-    ledger["cfg"] = {k: cfg[k] for k in ("repairs", "check", "model")}
+    ledger["cfg"] = {k: cfg.get(k) for k in ("repairs", "check", "model", "check_model")}
     ctx.ask_ledger = ledger
     if not ledger["asks"]:
         return ""
@@ -2835,6 +2835,13 @@ def _typed_pass(ctx, ledger, cfg, job):
     routed = ledger.setdefault("routed", {"to": "pass"})
     routed["pass"] = {k: got.get(k) for k in ("version", "fell", "applied", "units", "of_units", "shots", "s")}
     routed["pass"]["pictures"] = {k: (got.get("pictures") or {}).get(k) for k in ("asked", "placed")}
+    routed["pass"]["own"] = {k: (got.get("own") or {}).get(k) for k in ("asked", "placed")}
+    routed["pass"]["aims"] = {k: (got.get("aims") or {}).get(k) for k in ("shots", "aimed")}
+    why = {}
+    for k in (got.get("pictures") or {}).get("kept_off") or []:
+        reason = " ".join(str(k.get("why") or "").split())[:70]
+        why[reason] = why.get(reason, 0) + 1
+    routed["pass"]["kept_off"] = dict(sorted(why.items(), key=lambda kv: -kv[1])[:6])
     routed["pass"]["dropped"] = len(got.get("dropped") or [])
     routed["usage"] = got.get("usage")
     print(f"[asks] job {job.get('id')}: whole-film pass -> {json.dumps(routed['pass'], default=str)[:400]}", flush=True)
@@ -2878,8 +2885,15 @@ def _asks_check(ctx, draft, allow_repair=True):
     if previous.get("edl_version") == row.get("version") and previous.get("draft") == (draft or "")[:200]:
         verdict = previous
     else:
+        # Same film as the last check: the asks judged on the film keep their verdict; only the asks
+        # that read the reply are asked again (a new draft can answer them).
+        fixed = {}
+        if previous.get("edl_version") is not None and previous.get("edl_version") == row.get("version"):
+            bound = {a["id"] for a in ledger["asks"] if asks.reply_bound(a)}
+            fixed = {r["id"]: r for r in previous.get("asks") or [] if r.get("id") not in bound}
         try:
-            verdict = asks.check(ctx, ledger, draft, row.get("json"), preview, _turn_change_list(ctx))
+            verdict = asks.check(ctx, ledger, draft, row.get("json"), preview, _turn_change_list(ctx),
+                                 **({"fixed": fixed} if fixed else {}))
         except dbx.JobLeaseLost:
             raise
         except Exception as exc:  # noqa: BLE001

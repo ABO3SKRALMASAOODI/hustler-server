@@ -77,7 +77,7 @@ def test_route_is_set_logic_on_the_models_kinds(kinds, route):
 def test_the_ledger_is_one_model_call(monkeypatch):
     seen = {}
 
-    def fake(ctx, name, schema, system, content, max_tokens=4000):
+    def fake(ctx, name, schema, system, content, max_tokens=4000, **kw):
         seen["name"], seen["content"] = name, content
         return {"lang": "es", "asks": [_ask("change", ["sfx:s2"], said="quita el pop")]}, {"usd": 0.001, "s": 1.0, "model": "m"}
     monkeypatch.setattr(asks, "_call", fake)
@@ -131,7 +131,7 @@ def test_a_patch_writes_through_the_ordinary_write_path(monkeypatch):
 def test_a_refused_patch_is_corrected_once_then_goes_to_the_loop(monkeypatch):
     calls = []
 
-    def fake(ctx, name, schema, system, content, max_tokens=4000):
+    def fake(ctx, name, schema, system, content, max_tokens=4000, **kw):
         calls.append(content)
         return {"ops": [{"item": "texts:t1", "set_json": '{"size_scale": 9}', "remove": False}], "say": ""}, {"usd": 0.001, "s": 1, "model": "m"}
     monkeypatch.setattr(asks, "_call", fake)
@@ -156,7 +156,7 @@ def _verdict(*states):
 def test_the_check_reads_the_rendered_film_and_an_unanswered_ask_cannot_be_told(monkeypatch, tmp_path):
     seen = {}
 
-    def fake(ctx, name, schema, system, content, max_tokens=4000):
+    def fake(ctx, name, schema, system, content, max_tokens=4000, **kw):
         seen["content"] = content
         return {"asks": [{"id": "a1", "state": "done", "seen": "title at 0-3 s", "line": "Title is bigger."}]}, {"usd": 0.003, "s": 2, "model": "m"}
     monkeypatch.setattr(asks, "_call", fake)
@@ -354,14 +354,14 @@ def test_the_customers_alternative_rides_with_its_ask_to_the_editor_and_the_chec
     assert "If it can't be done: explain the limitation and stop" in asks.editor_note(ledger)
     seen = {}
 
-    def fake(ctx, name, schema, system, content, max_tokens=4000):
+    def fake(ctx, name, schema, system, content, max_tokens=4000, **kw):
         seen["system"], seen["content"] = system, content
-        return {"asks": [{"id": "a1", "state": "not_done", "alternative": "taken", "seen": "still photos; the reply says why", "line": "x"},
-                         {"id": "a2", "state": "not_done", "alternative": "taken", "seen": "", "line": "y"}]}, {"usd": 0.001, "s": 1, "model": "m"}
+        return {"asks": [{"id": "a1", "state": "not_done", "said_why_not": True, "made_against": False, "seen": "still photos; the reply says why", "line": "x"},
+                         {"id": "a2", "state": "not_done", "said_why_not": True, "made_against": False, "seen": "", "line": "y"}]}, {"usd": 0.001, "s": 1, "model": "m"}
     monkeypatch.setattr(asks, "_call", fake)
     v = asks.check(NS(workdir=str(tmp_path)), ledger, "It can't be done here.", EDL, None, "")
     assert "otherwise (their alternative when it can't be done): explain the limitation and stop" in seen["content"][0]["text"]
-    assert "alternative" in asks.CHECK_SCHEMA["properties"]["asks"]["items"]["required"]
+    assert {"said_why_not", "made_against"} <= set(asks.CHECK_SCHEMA["properties"]["asks"]["items"]["required"])
     # the alternative counts only for an ask the customer gave one for
     assert [r["state"] for r in v["asks"]] == ["done", "not_done"]
     assert v["asks"][0]["seen"].startswith("their alternative was taken")
@@ -457,7 +457,7 @@ def test_pictures_are_named_the_way_the_customer_calls_them():
 def test_the_check_reads_the_items_and_the_words_on_the_films_clock(monkeypatch, tmp_path):
     seen = {}
 
-    def fake(ctx, name, schema, system, content, max_tokens=4000):
+    def fake(ctx, name, schema, system, content, max_tokens=4000, **kw):
         seen["content"] = content
         return {"asks": []}, {"usd": 0.0, "s": 0, "model": "m"}
     monkeypatch.setattr(asks, "_call", fake)
@@ -507,7 +507,7 @@ def test_a_request_about_the_upload_starts_from_it_over_an_untouched_first_cut(m
 def test_the_ledger_is_told_how_much_of_the_upload_the_current_film_is(monkeypatch):
     seen = {}
 
-    def fake(ctx, name, schema, system, content, max_tokens=4000):
+    def fake(ctx, name, schema, system, content, max_tokens=4000, **kw):
         seen["content"], seen["system"] = content, system
         return {"lang": "es", "start": "upload", "asks": [_ask("edit")]}, {"usd": 0.0, "s": 0, "model": "m"}
     monkeypatch.setattr(asks, "_call", fake)
@@ -518,3 +518,73 @@ def test_the_ledger_is_told_how_much_of_the_upload_the_current_film_is(monkeypat
     assert led["start"] == "upload"
     assert "The current film is 38.0 s of the 895.0 s upload, frame 9:16." in seen["content"]
     assert "start is upload" in seen["system"]
+
+
+# ------------------------------------------------------------------ round 3: a stable check
+
+def test_the_alternative_is_two_facts_combined_in_code(monkeypatch, tmp_path):
+    # Round 2, p5345: Haiku said "their alternative was taken" while its own line said the reply gave no
+    # reason. Now the model states two facts and code combines them: said why AND made nothing against.
+    ledger = asks.settle({"lang": "en", "asks": [_ask("edit", said="music", otherwise="explain why and stop")] * 3}, EDL)
+    monkeypatch.setattr(asks, "_call", lambda *a, **k: ({"asks": [
+        {"id": "a1", "state": "not_done", "said_why_not": True, "made_against": False, "seen": "", "line": ""},
+        {"id": "a2", "state": "not_done", "said_why_not": False, "made_against": False, "seen": "", "line": ""},
+        {"id": "a3", "state": "not_done", "said_why_not": True, "made_against": True, "seen": "", "line": ""}]},
+        {"usd": 0, "s": 0, "model": "m"}))
+    v = asks.check(NS(workdir=str(tmp_path)), ledger, "x", EDL, None, "")
+    assert [r["state"] for r in v["asks"]] == ["done", "not_done", "not_done"]
+
+
+def test_an_edit_is_never_done_on_the_replys_word(monkeypatch, tmp_path):
+    ledger = asks.settle({"lang": "en", "asks": [_ask("edit"), _ask("answer"), _ask("edit")]}, EDL)
+    monkeypatch.setattr(asks, "_call", lambda *a, **k: ({"asks": [
+        {"id": "a1", "state": "done", "rests_on": "reply", "said_why_not": False, "made_against": False, "seen": "", "line": ""},
+        {"id": "a2", "state": "done", "rests_on": "reply", "said_why_not": False, "made_against": False, "seen": "", "line": ""},
+        {"id": "a3", "state": "done", "rests_on": "numbers", "said_why_not": False, "made_against": False, "seen": "", "line": ""}]},
+        {"usd": 0, "s": 0, "model": "m"}))
+    v = asks.check(NS(workdir=str(tmp_path)), ledger, "x", EDL, None, "")
+    assert [r["state"] for r in v["asks"]] == ["cannot_tell", "done", "done"]
+
+
+def test_the_check_runs_on_the_check_model_unless_the_switch_says_inherit(monkeypatch, tmp_path):
+    used = []
+    monkeypatch.setattr(asks, "_call", lambda *a, **k: used.append(k.get("model")) or ({"asks": []}, {"usd": 0, "s": 0, "model": "m"}))
+    ledger = asks.settle({"lang": "en", "asks": [_ask("edit")]}, EDL)
+    asks.check(NS(workdir=str(tmp_path)), ledger, "x", EDL, None, "")
+    ledger["cfg"] = asks.parse('{"mode": "on", "check_model": "claude-sonnet-5-5"}')
+    asks.check(NS(workdir=str(tmp_path)), ledger, "x", EDL, None, "")
+    ledger["cfg"] = asks.parse('{"mode": "on", "check_model": "inherit"}')
+    asks.check(NS(workdir=str(tmp_path)), ledger, "x", EDL, None, "")
+    assert used == [asks.CHECK_MODEL, "claude-sonnet-5-5", None]
+    assert asks.parse('{"mode": "on", "check_model": "gpt-6-luna"}')["check_model"] is None
+
+
+def test_the_same_film_keeps_its_verdict_and_only_reply_asks_are_asked_again(monkeypatch):
+    ledger = asks.settle({"lang": "en", "asks": [_ask("edit"), _ask("answer"), _ask("edit", otherwise="say why")]}, EDL)
+    ledger["cfg"] = {"repairs": 0, "check": True}
+    asked = []
+
+    def fake_check(ctx, ledger, draft, edl, preview, changes, fixed=None):
+        asked.append(sorted(fixed or {}))
+        rows = [dict((fixed or {}).get(a["id"]) or {"id": a["id"], "state": "not_done", "seen": "", "line": ""}) for a in ledger["asks"]]
+        return {"asks": rows, "usage": {}}
+    monkeypatch.setattr(asks, "check", fake_check)
+    monkeypatch.setattr(agent_loop, "_turn_change_list", lambda ctx: "")
+    ctx = _loop_ctx(ledger)
+    agent_loop._asks_check(ctx, "first draft")
+    ctx.ask_verdict["asks"][0]["state"] = "done"
+    agent_loop._asks_check(ctx, "second draft")
+    assert asked == [[], ["a1"]]
+    assert ctx.ask_verdict["asks"][0]["state"] == "done"
+
+
+def test_every_move_is_listed_with_its_aim():
+    edl = dict(EDL, effects={"zooms": [
+        {"id": "zm1", "start": 1.0, "end": 4.0, "strength": 0.05, "mode": "push_in", "cx": 0.4, "cy": 0.3,
+         "rect": [0.3, 0.2, 0.5, 0.4], "target_measured": True, "purpose": "whole-film pass a6: toward the dog's eyes"},
+        {"id": "zp1", "start": 5.0, "end": 9.0, "strength": 0.05, "mode": "path", "ease": "cubic_in_out",
+         "path": [{"t": 5.0, "cx": 0.3, "cy": 0.5, "s": 0.05}, {"t": 9.0, "cx": 0.5, "cy": 0.5, "s": 0.05}]}]})
+    rows = asks.move_rows(edl)
+    assert rows[0].startswith("1.0-4.0 push_in 5% framing 0.30,0.20,0.50,0.40") and "toward the dog's eyes" in rows[0]
+    assert rows[1].startswith("5.0-9.0 path travels (0.30,0.50) to (0.50,0.50)")
+    assert asks.measured(edl)["moves"] == rows

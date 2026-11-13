@@ -168,7 +168,7 @@ def test_the_pass_finds_checks_and_writes_the_whole_film_in_one_recipe(monkeypat
                     {"tool": "render_preview", "args_json": "{}", "for": []}],
             "left": [{"ask": "a4", "why": "music the customer did not supply"}], "say": "ok"}
     seen = {}
-    monkeypatch.setattr(asks, "_call", lambda ctx, name, schema, system, content, max_tokens=4000: (
+    monkeypatch.setattr(asks, "_call", lambda ctx, name, schema, system, content, max_tokens=4000, **kw: (
         seen.setdefault("content", content) and plan, {"usd": 0.01, "s": 2.0, "model": "m"}))
 
     def execute(ctx, name, args):
@@ -291,3 +291,68 @@ def test_the_switch_can_turn_the_pass_off(monkeypatch):
     agent_loop._typed_asks_start(ctx, _Db('{"mode": "on", "pass": false}'), {"id": 1, "user_id": 5}, 9, {}, None)
     assert ctx.ask_ledger["routed"] == {"to": "loop"}
     assert asks.parse('{"mode": "on", "pass_s": 5000}')["pass_s"] == 1200.0
+
+
+# ------------------------------------------------------------------ round 3: aimed moves, own uploads
+
+def test_a_move_aimed_at_a_subject_frames_the_box_located_on_its_picture():
+    ctx = NS(index={})
+    shots = [(0.0, 4.0), (4.0, 8.0), (8.0, 12.0)]
+    aims = {(0.0, 4.0): {"toward": "the dog's eyes", "box": [0.4, 0.2, 0.6, 0.3], "shows": "dog close-up", "mode": "push_in", "for": ["a6"]},
+            (4.0, 8.0): {"toward": "", "box": None, "shows": "a wide yard", "mode": "drift_left", "for": ["a5"]}}
+    ops = patch._move_ops(ctx, {"keep": [[0, 12]]}, {"t0": 0, "t1": 12, "mode": "push_in", "strength": 0.05, "aim": "subject", "for": ["a5"]}, shots, aims)
+    assert ops[0]["tool"] == "add_zoom" and ops[0]["args"]["rect"] == [0.4, 0.2, 0.6, 0.3]
+    assert "toward the dog's eyes" in ops[0]["args"]["purpose"] and "a6" in ops[0]["args"]["purpose"]
+    assert ops[1]["tool"] == "add_zoom_path" and "a wide yard" in ops[1]["args"]["purpose"]
+    assert ops[2]["tool"] == "add_zoom" and ops[2]["args"]["cx"] == 0.5        # not looked at: centred, as before
+    # a reframed film: the frame's fractions are not the picture's, so no box is used
+    ops = patch._move_ops(ctx, {"keep": [[0, 12]], "frame": {"ratio": "9:16"}},
+                          {"t0": 0, "t1": 4, "mode": "push_in", "strength": 0.05, "aim": "subject", "for": []}, shots, aims)
+    assert "rect" not in ops[0]["args"]
+
+
+def test_pictures_never_cover_the_same_second():
+    kept, off = patch._no_overlap([(10.0, 5.0, "a"), (12.0, 5.0, "b"), (30.0, 4.0, "c"), (40.0, 1.0, "d")], [(28.0, 31.0)])
+    spans = [(a, a + d) for a, d, _p in kept]
+    assert all(not (x0 < y1 and x1 > y0) for i, (x0, x1) in enumerate(spans) for (y0, y1) in spans[i + 1:])
+    assert [p for _a, _d, p in kept] == ["a", "b", "c"] and [p for p, _w in off] == ["d"]
+    assert kept[1][0] >= 15.0 and kept[2][0] >= 31.0
+
+
+def test_the_customers_own_uploads_are_placed_by_the_pass_without_overlap(monkeypatch, tmp_path):
+    # Round 2, p5460: "add in these b roll clips that I took ... #5 when I introduce the honey, then spread
+    # the others out" had no tool in the pass, and the loop laid #2 over #3.
+    own = [{"n": 2, "key": "uploads/3/a.mov", "kind": "video_clip", "name": "IMG_1.mov", "duration_s": 9.0, "in_film": [], "frame": None},
+           {"n": 3, "key": "uploads/3/b.mov", "kind": "video_clip", "name": "IMG_2.mov", "duration_s": 9.0, "in_film": [], "frame": None}]
+    monkeypatch.setattr(patch, "_own_media", lambda ctx, edl: own)
+    plan = {"moves": [], "own": [{"upload": 2, "at": 2.0, "duration_s": 6.0, "from_s": 1.0, "for": ["a1"]},
+                                 {"upload": 3, "at": 5.0, "duration_s": 6.0, "from_s": 0.0, "for": ["a1"]},
+                                 {"upload": 9, "at": 1.0, "duration_s": 3.0, "from_s": 0.0, "for": ["a1"]}],
+            "pictures": [], "ops": [], "left": [], "say": "x"}
+    monkeypatch.setattr(asks, "_call", lambda *a, **k: (plan, {"usd": 0.001, "s": 1.0, "model": "m"}))
+    written = []
+    monkeypatch.setattr(patch, "_commit", lambda ctx, ops, label: written.append(ops) or (7, []))
+    got = patch.throughout(_pass_ctx(tmp_path), asks.settle({"lang": "en", "asks": [_ask("edit", "whole")]}, EDL), "x")
+    overlays = [op["args"] for op in written[0] if op["tool"] == "add_overlay"]
+    assert [o["asset_key"] for o in overlays] == ["uploads/3/a.mov", "uploads/3/b.mov"]
+    assert overlays[0]["source_start_s"] == 1.0 and overlays[1]["start"] >= overlays[0]["start"] + overlays[0]["duration_s"]
+    assert got["own"]["placed"] == 2 and got["own"]["kept_off"][0]["upload"] == 9
+    assert "Their own uploads: 2 placed" in patch.pass_note(dict(got, version=7))
+
+
+def test_subject_aims_are_looked_at_once_for_the_shots_the_moves_cover(monkeypatch, tmp_path):
+    plan = {"moves": [{"t0": 0, "t1": 60, "mode": "push_in", "strength": 0.05, "aim": "subject", "for": ["a1"]}],
+            "own": [], "pictures": [], "ops": [], "left": [], "say": "x"}
+    monkeypatch.setattr(asks, "_call", lambda *a, **k: (plan, {"usd": 0.001, "s": 1.0, "model": "m"}))
+    looked = []
+
+    def aims(ctx, ledger, edl, spans, deadline):
+        looked.append(sorted(set(spans)))
+        return {spans[0]: {"toward": "the truck", "box": [0.1, 0.5, 0.3, 0.7], "shows": "truck", "mode": "push_in", "for": ["a1"]}}
+    monkeypatch.setattr(patch, "_aims", aims)
+    written = []
+    monkeypatch.setattr(patch, "_commit", lambda ctx, ops, label: written.append(ops) or (7, []))
+    got = patch.throughout(_pass_ctx(tmp_path), asks.settle({"lang": "en", "asks": [_ask("edit", "whole")]}, EDL), "x")
+    assert len(looked) == 1 and looked[0]
+    assert written[0][0]["args"].get("rect") == [0.1, 0.5, 0.3, 0.7]
+    assert got["aims"]["aimed"] == 1 and got["aims"]["toward"] == ["the truck"]
