@@ -27,6 +27,7 @@ import time
 import uuid
 
 import audio_qc
+import engine_branch
 import audit
 import camera
 import captions as caplib
@@ -9762,6 +9763,34 @@ def _stored_render(worker_db, project_id, variant, version, job_id):
                          version) or asset
 
 
+def _start_scene_shadow(prep, worker_db, job_id, edl_row, src_local, variant,
+                        want_wm, wm_settings):
+    """Lane D's shadow: the engine draws the same plan after today's film is
+    visible, on a niced side thread with its own folder. Never raises."""
+    def finish_factory(sdir):
+        def finish(engine_out, out_path):
+            fdir = os.path.join(sdir, "finish")
+            os.makedirs(fdir, exist_ok=True)
+            return render_edl(engine_branch.pass_through(engine_out), {},
+                              engine_out, out_path, fdir,
+                              preview=(variant == "preview"),
+                              want_wm=want_wm, wm_settings=wm_settings)
+        return finish
+
+    def verify_factory(src):
+        def verify(path, dur):
+            _verify_render(edl_row["json"], path, dur, job_id, variant,
+                           src_path=src, src_dur=media.duration_of(src))
+        return verify
+    try:
+        engine_branch.shadow(prep, worker_db, src_local=src_local,
+                             variant=variant, finish_factory=finish_factory,
+                             verify_factory=verify_factory)
+    except Exception as exc:  # noqa: BLE001 — a shadow never touches the job
+        print(f"[render {job_id}] scene shadow not started: "
+              f"{str(exc)[:160]}", flush=True)
+
+
 def _run_render_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     # Which run of this job we are. The dispatcher ships it (remote._job_payload)
@@ -10151,7 +10180,14 @@ def _run_render_job(worker_db, job):
                     progress_cb=_prog,
                     raw_pages=job["payload"].get("check_pages") or [],
                     proof_segments=proof_segments)
-        if not proof_only and not force:
+        # Lane D (12 Nov): a Director film whose scene plan was kept may be
+        # drawn by the engine (engine_branch). Read once, here: an engine
+        # film is never stitched, and today's renderer stays its fallback.
+        scene_prep = engine_branch.prepare(worker_db, job, edl_row["json"],
+                                           proof_only=proof_only)
+        scene_on = scene_prep is not None and scene_prep.mode == "on"
+        engine_drawn = False
+        if not proof_only and not force and not scene_on:
             try:
                 prev_asset = worker_db.run(dbx.latest_render_asset,
                                            project_id, variant)
@@ -10160,6 +10196,7 @@ def _run_render_job(worker_db, job):
                 if prev_asset and prev_v is not None \
                         and int(prev_v) != version \
                         and pm.get("src_sha256") == src_sha \
+                        and not pm.get("engine") \
                         and (variant != "preview" or
                              pm.get("quality", "draft") == _PREVIEW_QUALITY.get()) \
                         and storage.exists(prev_asset["storage_key"]):
@@ -10226,6 +10263,33 @@ def _run_render_job(worker_db, job):
                 print(f"[render {job_id}] stitch eligibility failed "
                       f"({str(se)[:160]}) — full render", flush=True)
                 out_dur = None
+        if out_dur is None and scene_on:
+            def _scene_finish(engine_out, out_path):
+                # Today's brand step, untouched: watermark, end card,
+                # loudness and the variant's encode, on a pass-through EDL.
+                fdir = os.path.join(workdir, "scene_finish")
+                os.makedirs(fdir, exist_ok=True)
+                return render_edl(engine_branch.pass_through(engine_out), {},
+                                  engine_out, out_path, fdir,
+                                  preview=(variant == "preview"),
+                                  progress_cb=_prog, want_wm=want_wm,
+                                  wm_settings=wm_settings,
+                                  cancelled_cb=lambda: _abandoned[0])
+
+            def _scene_verify(path, dur):
+                try:
+                    sdur = media.duration_of(src_local) if src_local else None
+                except Exception:  # noqa: BLE001
+                    sdur = None
+                _verify_render(edl_row["json"], path, dur, job_id, variant,
+                               src_path=src_local, src_dur=sdur)
+            out_dur = engine_branch.draw(
+                scene_prep, worker_db, src_local=src_local,
+                out_local=out_local, variant=variant, finish=_scene_finish,
+                verify=_scene_verify, sdir=os.path.join(workdir, "scene"))
+            engine_drawn = out_dur is not None
+            timings["engine"] = dict(scene_prep.info, drawn=engine_drawn)
+            # None: the fault is filed, and the same EDL renders below.
         if out_dur is None:
             out_dur = render_edl(edl_row["json"], index, src_local,
                                  out_local, workdir,
@@ -10643,6 +10707,7 @@ def _run_render_job(worker_db, job):
                   "audio_model_review": audio_model_review,
                   **({} if picture_first else check_fields()),
                   "src_sha256": src_sha,
+                  **({"engine": "scene"} if engine_drawn else {}),
                   **({"stitched_from": stitched_from}
                      if stitched_from is not None else {}),
                   "caption_fp": _caption_index_fp(edl_row["json"], index),
@@ -10725,6 +10790,10 @@ def _run_render_job(worker_db, job):
                      if drawn_matte in ("ready", "partial", "absent")
                      else {})})
         timings["visible_s"] = round(time.monotonic() - job_t0, 2)
+        if scene_prep is not None and scene_prep.mode == "shadow" \
+                and not engine_drawn:
+            _start_scene_shadow(scene_prep, worker_db, job_id, edl_row,
+                                src_local, variant, want_wm, wm_settings)
         _mark("register_s")
         if picture_first:
             run_checks()

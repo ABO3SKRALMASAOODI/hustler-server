@@ -316,6 +316,7 @@ def _publish(ctx, worker_db, edl, locals_, bin_doc, original_key):
             missing.add(s["storage_key"])
     if missing:
         raise Fall("publish", f"no storage key for {sorted(map(str, missing))[:4]}")
+    ctx.scene_keys = dict(keys)        # lane D: the plan's pictures by the same keys (engine_branch.keep_plan)
     return edl
 
 
@@ -388,6 +389,18 @@ def attempt(ctx, worker_db, job, started, spend, trial_scope, subscribed):
         ctx.first_cut_phases = dict(getattr(ctx, "first_cut_phases", None) or {}, director=rec)
         if getattr(ctx, "director_state", None) is None:        # a film that landed keeps its folder for the last look
             shutil.rmtree(work, ignore_errors=True)
+
+
+def _keep_scene_plan(ctx, l1, work, rec):
+    """Lane D: the plan beside the EDL just written, so the engine may draw exactly this version. Kept only
+    while app_kv.director.engine is shadow or on; the render reads the switch again. Never sinks the film."""
+    try:
+        import engine_branch
+        row = ctx.latest_edl()
+        if row and row.get("version") == ctx.director_version:
+            rec["scene_plan"] = engine_branch.keep_plan(ctx.project_id, row["json"], l1, getattr(ctx, "scene_keys", {}) or {}, work)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[director] scene plan not kept: {str(exc)[:160]}", flush=True)
 
 
 def _stage(rec, name, t0):
@@ -481,6 +494,8 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
     rec["taste"] = usage.get("taste")
     # what the last look needs once the preview is on screen (last_look closes it)
     ctx.director_state = {"work": work, "text": text, "comp": comp, "edl": edl, "bin_doc": bin_doc, "original_key": original["storage_key"], "cfg": cfg}
+    if flags.engine_mode(cfg, job.get("user_id")) != "off":
+        _keep_scene_plan(ctx, comp.l1, work, rec)
     applied = _applied(rep, comp.l1, bin_doc)
     steps = [{"tool": "director", "ok": True, "s": round(sum(rec["stages"].values()), 1), "note": str(result)[:160]}]
     return steps, applied, {"how": "director", "edl_version": ctx.director_version}

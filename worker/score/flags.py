@@ -3,6 +3,12 @@
 Off by default. A bad row means off. mode "on" opens the film to new trial accounts, or to a percent
 of them; test_user_ids opens it to named trial accounts while everyone else stays on the chain.
 Nothing here can admit a subscriber: the seam only asks about a job that holds a live trial scope.
+
+engine (lane D, 12 Nov): which renderer draws a Director film whose scene plan was kept.
+"off" (default, and what any bad value reads as): today's renderer only. "shadow": today's renderer
+delivers; the engine draws the same plan afterwards on the side, never shown, for timings and faults.
+"on": the engine draws, today's renderer is the fallback in the same job. engine_user_ids opens "on"
+to named accounts while the rest stay on the row's engine mode.
 """
 import hashlib
 import json
@@ -15,7 +21,9 @@ DEADLINE_S = 150.0
 SCOUT_S, SUPPLY_S = 16.0, 32.0     # supply: 6 s of it is the look every Bin picture passes (lane B, 12 Nov)
 FILM_USD = 0.70            # what one film may spend: the dearest slice run was $0.56, and a Look and a Scout are under a cent
 DEFAULTS = {"mode": "off", "percent": 100, "test_user_ids": [], "deadline_s": DEADLINE_S, "max_source_s": MAX_SOURCE_S, "film_usd": FILM_USD,
-            "models": {"scout": "claude-haiku-5-5", "direct": "claude-opus-5-5"}, "effort": {"direct": "low"}}
+            "models": {"scout": "claude-haiku-5-5", "direct": "claude-opus-5-5"}, "effort": {"direct": "low"},
+            "engine": "off", "engine_user_ids": []}
+ENGINE_MODES = ("off", "shadow", "on")
 # Effort, measured on copies through this path (director/first-result): at medium the slice's Scores ended
 # 68-148 s after the call and a p5302 replay was still writing at 131 s, past the deadline, so about half
 # the films would fall to the chain after the wait. At low, Direct took 19-31 s and its repair 12-22 s on
@@ -50,7 +58,26 @@ def parse(raw):
     effort = data.get("effort") if isinstance(data.get("effort"), dict) else {}
     e = str(effort.get("direct") or DEFAULTS["effort"]["direct"])
     out["effort"] = {"direct": e if e in ("low", "medium", "high", "xhigh", "max") else DEFAULTS["effort"]["direct"]}
+    out.update(_engine(data))
     return out
+
+
+def _engine(data):
+    """The engine switch reads on its own: a bad Director field never turns it on, a bad engine field is off."""
+    mode = data.get("engine")
+    try:
+        ids = [int(v) for v in data.get("engine_user_ids") or []]
+    except (TypeError, ValueError):
+        ids = []
+    return {"engine": mode if mode in ENGINE_MODES else "off", "engine_user_ids": ids}
+
+
+def engine_mode(cfg, user_id=None):
+    """off | shadow | on for this job's account."""
+    if user_id is not None and int(user_id) in (cfg.get("engine_user_ids") or []):
+        return "on"
+    mode = cfg.get("engine")
+    return mode if mode in ENGINE_MODES else "off"
 
 
 def read_row(conn):
