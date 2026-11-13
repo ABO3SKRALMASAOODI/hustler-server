@@ -329,8 +329,10 @@ def test_the_hook_line_never_stands_on_a_face(clip):
 
 
 def test_a_wide_hook_picture_opens_on_its_face():
-    c = E.face_frame(1920, 828, [0.35, 0.19, 0.128, 0.43])              # a banknote: the window goes to the portrait
+    c = E.face_frame(1920, 828, [0.35, 0.10, 0.128, 0.40])              # a wide picture: the window goes to the face
     assert c and abs((c[2] - c[0]) * 1920 / ((c[3] - c[1]) * 828) - 9 / 16) < 0.01 and c[0] <= 0.35 and c[2] >= 0.478
+    assert E.face_frame(1920, 817, [0.375, 0.18, 0.176, 0.53]) is None  # a banknote's portrait would reach the caption seat
+    assert E.solve_frame(1200, 1600, [[0.2, 0.15, 0.6, 0.6]], [0.1, 0.05, 0.9, 0.95])[0] == "card"      # so would a close portrait
     assert E.face_frame(1920, 828, None) is None
     assert E.face_frame(1920, 828, [0.3, 0.1, 0.4, 0.8]) is None       # a face wider than the window stays a card
     assert E.face_frame(1000, 500, [0.4, 0.2, 0.1, 0.3]) is None       # too small to fill a phone

@@ -42,6 +42,7 @@ EYES_Y = 0.30                      # and where his eyes ride
 UPSCALE = 3.0                      # TASTE 4.2: the frame never asks for more than 3x of the source's pixels
 MARK = (0.5594, 0.115, 0.9146, 0.1923)      # the watermark keep-out: no held card enters it
 CAP_TOP = 0.585                    # above the caption seat
+FACE_FOOT = 0.575                  # a face in a full-frame picture ends above the caption seat
 PAPER, INK, GLASS = ("#F4F1EA", "#E7E1D4"), "#15171A", ("#191C22", "#0C0D10")
 # sample per role and how far under the voice its hit sits, by supply class (TASTE 4.2: T -9, M -6, P -4.5 dB).
 # The owner's rule for a talking short (SKILL.md, Oct 2026): one or two sounds, each on a structural moment with a
@@ -193,6 +194,8 @@ def solve_frame(w, h, faces, box, frame=(1080, 1920), paper=False):
         if face:                                                # the eyes ride high, clear of the hook line and the captions
             cy = face[1] + face[3] * 0.45
             y0 = min(max(cy - 0.30 * ch, 0.0), 1.0 - ch)
+            if (face[1] + 1.06 * face[3] - y0) / ch > FACE_FOOT:  # a face that reaches the caption seat cannot fill the frame:
+                return "card", [0.0, 0.0, 1.0, 1.0]              # no caption is ever written on it (TASTE P3)
         else:
             y0 = min(max((keep[1] + keep[3]) / 2 - 0.42 * ch, 0.0), 1.0 - ch)
         return "full", [round(x0, 5), round(y0, 5), round(x0 + cw, 5), round(y0 + ch, 5)]
@@ -204,10 +207,12 @@ def face_frame(w, h, face, frame=(1080, 1920)):
     too small to fill a phone. For the hook: a wide picture with a face in it (a banknote, a group) opens on the face."""
     W, H = frame
     cw, ch = min(1.0, h * (W / H) / w), min(1.0, w / (W / H) / h)
-    if not face or face[2] > 0.8 * cw or cw * w < 460:
+    if not face or face[2] > 0.8 * cw or W / (cw * w) > 2.6:     # the window may be enlarged 2.6 times, inside the 3x of TASTE 4.2
         return None
     x0 = min(max(face[0] + face[2] / 2 - cw / 2, 0.0), 1.0 - cw)
     y0 = min(max(face[1] + face[3] * 0.45 - 0.30 * ch, 0.0), 1.0 - ch)
+    if (face[1] + 1.06 * face[3] - y0) / ch > FACE_FOOT:          # the face would reach the caption seat
+        return None
     return [round(x0, 5), round(y0, 5), round(x0 + cw, 5), round(y0 + ch, 5)]
 
 
