@@ -555,7 +555,8 @@ def test_the_check_runs_on_the_check_model_unless_the_switch_says_inherit(monkey
     asks.check(NS(workdir=str(tmp_path)), ledger, "x", EDL, None, "")
     ledger["cfg"] = asks.parse('{"mode": "on", "check_model": "inherit"}')
     asks.check(NS(workdir=str(tmp_path)), ledger, "x", EDL, None, "")
-    assert used == [asks.CHECK_MODEL, "claude-sonnet-5-5", None]
+    # an answer that reached no ask is asked once more, so each check is two calls here
+    assert used == [asks.CHECK_MODEL] * 2 + ["claude-sonnet-5-5"] * 2 + [None] * 2
     assert asks.parse('{"mode": "on", "check_model": "gpt-6-luna"}')["check_model"] is None
 
 
@@ -588,3 +589,19 @@ def test_every_move_is_listed_with_its_aim():
     assert rows[0].startswith("1.0-4.0 push_in 5% framing 0.30,0.20,0.50,0.40") and "toward the dog's eyes" in rows[0]
     assert rows[1].startswith("5.0-9.0 path travels (0.30,0.50) to (0.50,0.50)")
     assert asks.measured(edl)["moves"] == rows
+
+
+def test_a_check_cut_short_is_asked_again_for_the_asks_it_missed(monkeypatch, tmp_path):
+    # r10, p5520: 20 asks hit the token cap, the answer came back "{}" and every ask read cannot_tell.
+    ledger = asks.settle({"lang": "en", "asks": [_ask("edit"), _ask("edit"), _ask("keep")]}, EDL)
+    answers = [{}, {"asks": [{"id": "a1", "state": "done", "rests_on": "numbers", "said_why_not": False, "made_against": False, "seen": "s", "line": "l"},
+                            {"id": "a2", "state": "partly", "rests_on": "frames", "said_why_not": False, "made_against": False, "seen": "s", "line": "l"}]}]
+    asked = []
+
+    def fake(ctx, name, schema, system, content, max_tokens=4000, **kw):
+        asked.append([line.split()[0] for line in content[0]["text"].split("Asks:\n", 1)[1].split("\n") if line[:1] == "a"])
+        return answers.pop(0), {"usd": 0.01, "s": 1.0, "model": "m"}
+    monkeypatch.setattr(asks, "_call", fake)
+    v = asks.check(NS(workdir=str(tmp_path)), ledger, "x", EDL, None, "")
+    assert asked == [["a1", "a2", "a3"], ["a1", "a2", "a3"]]
+    assert [r["state"] for r in v["asks"]] == ["done", "partly", "cannot_tell"] and v["usage"]["usd"] == 0.02

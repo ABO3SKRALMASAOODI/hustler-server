@@ -465,7 +465,7 @@ CHECK_SCHEMA = {
         "required": ["id", "seen", "rests_on", "state", "said_why_not", "made_against", "line"],
         "properties": {
             "id": {"type": "string"},
-            "seen": {"type": "string", "description": "First: what the numbers, the frames or the reply show for this ask, with times and figures."},
+            "seen": {"type": "string", "description": "First: what the numbers, the frames or the reply show for this ask, with times and figures. At most two short sentences."},
             "rests_on": {"type": "string", "enum": ["numbers", "frames", "reply", "nothing"],
                          "description": "What the state below rests on: the edit's numbers, the rendered frames, the reply (only for an answer ask, or for said_why_not), or nothing given shows it."},
             "state": {"type": "string", "enum": ["done", "partly", "not_done", "cannot_tell"]},
@@ -767,28 +767,47 @@ def check(ctx, ledger, reply_text, edl, preview=None, changes="", fixed=None):
     todo = [a for a in ledger["asks"] if a["id"] not in fixed]
     usage = {"usd": 0.0, "s": 0.0, "model": None}
     by_id = {}
-    if todo:
+    numbers = None
+    pages = None
+    for _round in range(2):
+        if not todo:
+            break
+        if numbers is None:
+            numbers = "\n".join([
+                "The edit's numbers:\n" + json.dumps(facts(edl, preview, changes, program_shots(edl, getattr(ctx, "index", None)),
+                                                            getattr(ctx, "duration", None), getattr(ctx, "index", None)),
+                                                      ensure_ascii=False, default=str),
+                "The film's items now (id, what it is, where):\n" + digest(edl, asset_names(ctx, edl))[0][:7000],
+                "What the viewer hears, on the film's clock:\n" + (spoken(ctx, edl) or "no speech"),
+                "The editor's reply:\n" + json.dumps(str(reply_text or "")[:3000], ensure_ascii=False),
+                "No rendered frames: judge from the numbers and the reply." if not preview else ""])
+            pages = frame_pages(ctx, preview) if preview else []
         content = [{"type": "text", "text": "\n".join([
             f"Customer's language: {ledger.get('lang') or 'en'}",
             "Asks:\n" + "\n".join(f"{a['id']} [{a['kind']}, check by {a['how']}] said: {json.dumps(a['said'], ensure_ascii=False)}; "
                                   f"done means: {a['want']}; pass: {a['pass']}; where: {a['where']}"
                                   + (f"; otherwise (their alternative when it can't be done): {a['otherwise']}" if a.get("otherwise") else "")
                                   for a in todo),
-            "The edit's numbers:\n" + json.dumps(facts(edl, preview, changes, program_shots(edl, getattr(ctx, "index", None)),
-                                                        getattr(ctx, "duration", None), getattr(ctx, "index", None)),
-                                                  ensure_ascii=False, default=str),
-            "The film's items now (id, what it is, where):\n" + digest(edl, asset_names(ctx, edl))[0][:7000],
-            "What the viewer hears, on the film's clock:\n" + (spoken(ctx, edl) or "no speech"),
-            "The editor's reply:\n" + json.dumps(str(reply_text or "")[:3000], ensure_ascii=False),
-            "No rendered frames: judge from the numbers and the reply." if not preview else "",
-        ])}]
-        for local, label in (frame_pages(ctx, preview) if preview else []):
+            numbers])}]
+        for local, label in pages:
             content.append({"type": "text", "text": label})
             content.append(llm.image_part(local))
         model = check_model((ledger.get("cfg") or {}))
-        value, usage = _call(ctx, "record_ask_check", CHECK_SCHEMA, CHECK_SYSTEM, content, max_tokens=6000,
+        try:
+            value, u = _call(ctx, "record_ask_check", CHECK_SCHEMA, CHECK_SYSTEM, content, max_tokens=16000,
                              **({"model": model} if model else {}))
-        by_id = {str(r.get("id")): r for r in value.get("asks") or [] if isinstance(r, dict)}
+        except Exception:  # noqa: BLE001 - the second asking only adds; the first one's fault is the caller's
+            if _round == 0:
+                raise
+            break
+        usage = {"usd": round(float(usage["usd"] or 0) + float(u.get("usd") or 0), 6),
+                 "s": round(float(usage["s"] or 0) + float(u.get("s") or 0), 2), "model": u.get("model")}
+        for r in value.get("asks") or []:
+            if isinstance(r, dict) and r.get("state") in ("done", "partly", "not_done", "cannot_tell"):
+                by_id.setdefault(str(r.get("id")), r)
+        # An answer cut short (r10, p5520: 20 asks hit the token cap and came back as "{}", so every ask
+        # read cannot_tell) is asked once more for the asks it did not reach.
+        todo = [a for a in todo if a["id"] not in by_id]
     rows = []
     for a in ledger["asks"]:
         if a["id"] in fixed:
