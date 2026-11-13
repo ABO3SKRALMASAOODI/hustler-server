@@ -6309,6 +6309,8 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
         plan = settle(seen, {})[1]
     ctx, plan, facts, rounds = settle(text, plan)
     l1 = to_l1(ctx)
+    from . import sound                    # lane J: the film's sound design, peak on each chosen picture event
+    l1 = sound.apply(l1, work_dir, index, perc, ctx.asks or None, (facts or {}).get("supply"))
     m = meter(ctx, l1)
     if governed:
         m["taste"] = taste_meter(ctx, facts, rounds)

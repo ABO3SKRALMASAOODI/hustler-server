@@ -177,8 +177,24 @@ def score(ctx, script):
         sh(ctx, [PY, "direct.py", ctx.sid, "--run", "1", "--effort", script.get("effort", "medium"), "--proof",
                  "--note", f"workflow {ctx.workflow}, style {script['style']['id']}"], model=True, timeout=3600)
     u = json.load(open(os.path.join(run, "usage.json")))
-    return dict(l1=os.path.join(run, "l1.json"), usd=u.get("usd"), gate=u.get("gate"), asks_open=u.get("asks_open"),
+    return dict(l1=sound(ctx, os.path.join(run, "l1.json")), usd=u.get("usd"), gate=u.get("gate"), asks_open=u.get("asks_open"),
                 spend=[dict(stage="score", provider="anthropic", model=u.get("model"), what="director", usd=u.get("usd") or 0)])
+
+
+def sound(ctx, l1_path):
+    """The film's sound design (worker/score/sound.py, lane J): each chosen picture event gets a library sound with
+    its peak on the event, inside the footage's allowance, checked against the voice. Writes l1_sound.json beside
+    the Director's L1 and returns its path; the Director's own L1 when the pass cannot run (logged, never a stop)."""
+    out = l1_path[:-len(".json")] + "_sound.json"
+    if not os.path.exists(out):
+        wk = brand.worker_dir()
+        try:
+            sh(ctx, ["zsh", "-c", f"cd '{wk}' && PYTHONPATH=. '{PY}' -m score.sound design --l1 '{l1_path}' --work '{ctx.supply}' --out '{out}'"],
+               timeout=900)
+        except (RuntimeError, subprocess.SubprocessError) as e:
+            ctx.log(f"sound design skipped: {str(e)[:300]}")
+            return l1_path
+    return out
 
 
 def render(ctx, script, sc):

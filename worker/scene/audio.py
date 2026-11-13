@@ -1,12 +1,14 @@
 """The film's sound for a local render: the spine in programme order plus each placed sound, with
-its peak on its event, mastered to -14 LUFS. ffmpeg and numpy only.
+its peak on its event, mastered by master() here (the voice levelled as the renderer levels it,
+the sounds on it at their own gains, -14 LUFS, true peak under -1 dBTP, no pumping). ffmpeg and
+numpy only; the sound design that places the sounds is score/sound.py, on the plan's side.
 
 The product's audio master is ``renderer.render_edl(audio_only=True)`` (DESIGN 4.8): a caller that
 has one hands its file to ``run.render_plan(audio=path)`` and nothing here runs. This mixer serves
 the owner's workflows on the Mac and the proofs, where there is no EDL render beside the engine.
 """
-import json
 import os
+import re
 import subprocess
 
 import numpy as np
@@ -16,6 +18,8 @@ from .faults import SceneFault
 FF = os.environ.get("FFMPEG_BIN", "ffmpeg")
 SOUNDS = os.environ.get("VALMERA_SOUNDS") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sound_library")
 SR = 48000
+TARGET_LUFS = -14.0                  # the delivered master
+CEIL_DBTP, LIMIT_DBFS = -1.0, -1.6   # never over -1 dBTP after the encode; the limiter starts at -1.6 dBFS
 
 
 def pcm(path, seconds=None):
@@ -62,6 +66,13 @@ def voice_layer(dry, s, fps):
 
 def mix_audio(plan):
     """The spine in programme order, plus each sound with its peak on its event. Sample exact."""
+    voice, fx, report = split_audio(plan)
+    return voice + fx, report
+
+
+def split_audio(plan):
+    """(voice, sounds, report): the spine, and every placed sound on its own track, so the master levels the
+    voice before the sounds are laid on it."""
     n = int(round(plan.dur / plan.fps * SR))
     mix = np.zeros((n, 2), np.float32)
     spine = plan.doc.get("spine") or []
@@ -88,6 +99,7 @@ def mix_audio(plan):
             mix[at:at + len(seg)] += seg
     cache = {}
     dry = mix.copy()
+    voice, mix = mix, np.zeros((n, 2), np.float32)
     for s in plan.doc.get("sound") or []:
         if s.get("s") in ("echo", "swell"):
             at, smp = voice_layer(dry, s, plan.fps)
@@ -112,38 +124,118 @@ def mix_audio(plan):
         smp = smp[:n - at] * (10 ** (float(s.get("db", 0)) / 20))
         mix[at:at + len(smp)] += smp
         report["sounds"] += 1
-    return mix, report
+    return voice, mix, report
 
 
 def write_audio(plan, out, tmp):
-    mix, report = mix_audio(plan)
+    voice, fx, report = split_audio(plan)
+    try:
+        report.update(master(voice, fx, out, tmp, plan.dur / plan.fps))
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as e:
+        raise SceneFault("audio", str(e)[-400:])
+    return report
+
+
+def _parse_summary(t):
+    """(integrated LUFS, true peak dBTP, LRA) from ebur128's summary."""
+    def num(pat):
+        m = re.findall(pat, t)
+        try:
+            return float(m[-1]) if m else None
+        except ValueError:
+            return None
+    return num(r"I:\s+(-?[0-9.]+|-inf) LUFS"), num(r"Peak:\s+(-?[0-9.]+|-inf) dBFS"), num(r"LRA:\s+(-?[0-9.]+) LU")
+
+
+def loudness_of(x, tmp):
+    raw = os.path.join(tmp, "lv.f32")
+    np.asarray(x, np.float32).tofile(raw)
+    r = subprocess.run([FF, "-hide_banner", "-nostdin", "-nostats", "-f", "f32le", "-ar", str(SR), "-ac", "2", "-i", raw,
+                        "-af", "ebur128=peak=true", "-f", "null", "-"], capture_output=True, text=True, timeout=600)
+    os.remove(raw)
+    return _parse_summary(r.stderr)
+
+
+def level_voice(voice, tmp):
+    """The voice levelled as the renderer levels it (dialogue_level: speech to -20 LUFS, a slow curve that holds
+    across pauses, slew-limited), after a 70 Hz high-pass. Returns (voice, report)."""
+    x = np.asarray(voice, np.float32)
+    raw = os.path.join(tmp, "voice.f32")
+    x.tofile(raw)
+    hp = os.path.join(tmp, "voice_hp.f32")
+    r = subprocess.run([FF, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-f", "f32le", "-ar", str(SR), "-ac", "2",
+                        "-i", raw, "-af", "highpass=f=70:poles=2", "-f", "f32le", hp], capture_output=True, timeout=600)
+    if r.returncode == 0 and os.path.getsize(hp) == x.nbytes:
+        x = np.fromfile(hp, np.float32).reshape(-1, 2)
+    meta = os.path.join(tmp, "voice_m.txt")
+    x.tofile(raw)
+    subprocess.run([FF, "-hide_banner", "-nostdin", "-nostats", "-f", "f32le", "-ar", str(SR), "-ac", "2", "-i", raw, "-af",
+                    f"ebur128=metadata=1,ametadata=mode=print:key=lavfi.r128.M:file='{meta}'", "-f", "null", "-"],
+                   capture_output=True, timeout=600)
+    rep = {"curve": False}
+    try:
+        import dialogue_level as DL
+        blocks = DL.parse_probe(open(meta).read())
+        knots = DL.gain_knots(blocks)
+    except (ImportError, OSError):
+        knots = None
+    for p in (raw, hp, meta):
+        if os.path.exists(p):
+            os.remove(p)
+    if knots:
+        kt = np.array([k[0] for k in knots], np.float64)
+        kg = np.array([k[1] for k in knots], np.float64)
+        t = np.arange(len(x)) / SR
+        g = np.interp(t, kt, kg)
+        x = x * (10 ** (g / 20)).astype(np.float32)[:, None]
+        rep = {"curve": True, "knots": len(knots), "gain_db": [round(float(kg.min()), 1), round(float(kg.max()), 1)]}
+    return x, rep
+
+
+def master(voice, fx, out, tmp, dur, bitrate="256k"):
+    """Voice levelled, sounds laid on it at their own gains, the whole to -14 LUFS by one gain, true peaks held
+    under -1 dBTP by a 4x oversampled limiter (5 ms look-ahead, 50 ms release: it touches transients, never the
+    voice's level), AAC. Measured after the encode: the limit comes down while the true peak is over -1 dBTP, the
+    gain comes back while the limiter's work leaves the film under -14.2 LUFS, five passes at most. Returns the report."""
+    v, rep = level_voice(voice, tmp) if voice is not None and np.abs(voice).max() > 1e-5 else (voice, {"curve": False})
+    mix = (v if v is not None else 0) + fx
+    mix = np.asarray(mix, np.float32)
+    if float(np.abs(mix).max()) < 1e-5:
+        raw = os.path.join(tmp, "mix.f32")
+        mix.tofile(raw)
+        subprocess.run([FF, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-f", "f32le", "-ar", str(SR), "-ac", "2",
+                        "-i", raw, "-c:a", "aac", "-b:a", "128k", out], check=True)
+        return dict(rep, lufs=None)
+    i, _tp, _ = loudness_of(mix, tmp)
+    g = TARGET_LUFS - i if i is not None and i > -70 else 0.0
     raw = os.path.join(tmp, "mix.f32")
     mix.tofile(raw)
-    dur = plan.dur / plan.fps
-    src = ["-f", "f32le", "-ar", str(SR), "-ac", "2", "-i", raw]
-    if float(np.abs(mix).max()) < 1e-5:          # nothing to normalise: a silent track of the exact length
-        subprocess.run([FF, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", *src, "-c:a", "aac", "-b:a", "128k", out], check=True)
-        report.update(lufs=None)
-        return report
-    target = "I=-14:TP=-1.5:LRA=11"
-    m = subprocess.run([FF, "-hide_banner", "-nostdin", "-y", *src, "-af", f"loudnorm={target}:print_format=json", "-f", "null", "-"],
-                       capture_output=True, text=True, timeout=600)
-    t = m.stderr
-    try:
-        j = json.loads(t[t.rindex("{"):t.rindex("}") + 1])
-    except ValueError:
-        raise SceneFault("audio", t[-300:])
-    af = (f"loudnorm={target}:measured_I={j['input_i']}:measured_TP={j['input_tp']}:measured_LRA={j['input_lra']}:"
-          f"measured_thresh={j['input_thresh']}:offset={j['target_offset']}:linear=true:print_format=json,"
-          f"aresample={SR},apad=whole_dur={dur:.6f},atrim=0:{dur:.6f}")
-    r = subprocess.run([FF, "-hide_banner", "-nostdin", "-y", *src, "-af", af, "-c:a", "aac", "-b:a", "256k", out],
-                       capture_output=True, text=True, timeout=600)
-    if r.returncode:
-        raise SceneFault("audio", r.stderr[-400:])
-    t = r.stderr
-    j2 = json.loads(t[t.rindex("{"):t.rindex("}") + 1])
-    report.update(lufs_in=float(j["input_i"]), lufs=float(j2["output_i"]), tp=float(j2["output_tp"]), norm=j2.get("normalization_type"))
-    return report
+    limit = LIMIT_DBFS
+    got = (None, None, None)
+    used = g
+    for _ in range(5):
+        lin = max(0.0625, min(1.0, 10 ** (limit / 20)))
+        used = g
+        af = (f"volume={g:.3f}dB,aresample=192000,alimiter=limit={lin:.5f}:attack=5:release=50:level=0:latency=1,aresample={SR},"
+              f"aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_dur={dur:.6f},atrim=0:{dur:.6f}")
+        r = subprocess.run([FF, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-f", "f32le", "-ar", str(SR), "-ac", "2",
+                            "-i", raw, "-af", af, "-c:a", "aac", "-b:a", bitrate, out], capture_output=True, text=True, timeout=600)
+        if r.returncode:
+            raise RuntimeError(f"master encode failed: {r.stderr[-300:]}")
+        m = subprocess.run([FF, "-hide_banner", "-nostdin", "-nostats", "-i", out, "-af", "ebur128=peak=true", "-f", "null", "-"],
+                           capture_output=True, text=True, timeout=600)
+        got = _parse_summary(m.stderr)
+        if got[0] is None or got[1] is None:
+            break
+        if got[1] > CEIL_DBTP:                       # the codec's overshoot rides on the limited level: lower it
+            limit -= max(0.25, got[1] - (CEIL_DBTP - 0.5))
+        elif abs(got[0] - TARGET_LUFS) > 0.2:        # the limiter took loudness with the peaks: give it back by one gain
+            g += TARGET_LUFS - got[0]
+        else:
+            break
+    os.remove(raw)
+    return dict(rep, lufs_in=round(i, 2) if i is not None else None, lufs=got[0], tp=got[1], lra=got[2], limit_dbfs=round(limit, 2),
+                gain_db=round(used, 2))
 
 
 def mux(video, audio, out):
