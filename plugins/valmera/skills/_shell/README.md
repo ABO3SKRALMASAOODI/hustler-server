@@ -43,7 +43,8 @@ line, from YouTube and archive.org (worker/footage through `footage.seam`): sear
 gpt-6-sol, transcribed on gpt-4o-transcribe, every frame checked by gpt-6-sol (low) and, for a person,
 the same face across sources (SFace); 1-3 s clips inside one shot, graded to one measured look, each
 with its source URL, channel and time range in `footage.json` and the film's credits. WF3 calls it
-in its supply; `VALMERA_FOOTAGE=0` turns it off. OpenAI only (credit until 30 Nov 2026, money after).
+in its supply; `VALMERA_FOOTAGE=0` turns it off. A source YouTube will not open (it takes the Mac for
+a bot) is looked for on archive.org: the same film by its title, then the subject's own searches. OpenAI only (credit until 30 Nov 2026, money after).
 Rights: not licensed, so the shell never publishes and customers stay behind `app_kv.footage` (off).
 
 WF3 and WF4 speak through `narrate/` (VoxCPM2, local open weights): a script with a performance
@@ -73,6 +74,13 @@ script whose style is one of them.
 `chain.alien_bank(ctx, l1_path)`: a scene that carries asks under `alien` (rhyme, diecut, lamp, arc, answer; the
 engine's `worker/scene/alien`) is laid out before the engine draws it, through heavy.sh, and the scene to draw is
 written beside it as `*.alien.json` with `supply/alien_bank.json` saying what stood. Every render path calls it.
+
+**A song the owner hands over** (`--args '{"song": "<file>"}'`): `chain.song_version` lays it on a copy
+of the engine's film with `score.music` (bars re-cut so the drop lands on the turn, under the voice, a
+hit before the end card) and the shell delivers `film_song.mp4` beside the clean `film.mp4`. A narrated
+film hands the scene with its narration as the spine (`score.l1_audio`) and the turn it named
+(`score.turn_s`). **A renderer other than the Mac engine**: `SHELL_RENDER_CMD=<script>` (workflows that
+render through `wf3.render`): the script gets the scene, the work folder, the sound and the output path.
 
 ## Never
 

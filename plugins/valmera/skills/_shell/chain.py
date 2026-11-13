@@ -326,12 +326,14 @@ def song_version(ctx, rd, sc):
     out = os.path.join(ctx.supply, "film_engine_song.mp4")
     if not os.path.exists(out):
         wk = brand.worker_dir()
-        cmd = (f"cd '{wk}' && PYTHONPATH=. '{PY}' -m score.music mix --l1 '{sc['l1']}' --work '{ctx.supply}' --song '{song}' "
-               f"--film '{rd['film']}' --out '{out}.part.mp4' --kind {SONG_KIND.get(ctx.workflow, 'stories')}")
+        # a narrated film's voice is not an upload: its workflow hands the scene with the narration as its spine (l1_audio)
+        cmd = (f"cd '{wk}' && PYTHONPATH=. FFMPEG_BIN='{brand.FF}' '{PY}' -m score.music mix --l1 '{sc.get('l1_audio') or sc['l1']}' --work '{ctx.supply}' "
+               f"--song '{song}' --film '{rd['film']}' --out '{out}.part.mp4' --kind {SONG_KIND.get(ctx.workflow, 'stories')}")
         if (ctx.args or {}).get("song_vocals"):
             cmd += f" --vocals '{ctx.args['song_vocals']}'"
-        if (ctx.args or {}).get("turn_s") is not None:
-            cmd += f" --turn {float(ctx.args['turn_s']):.3f}"
+        turn = (ctx.args or {}).get("turn_s", sc.get("turn_s"))       # the run's own word first, else the turn the score named
+        if turn is not None:
+            cmd += f" --turn {float(turn):.3f}"
         try:
             sh(ctx, ["zsh", "-c", cmd], label=f"wf-song-{ctx.run_id}", heavy=True, timeout=1800)
             os.replace(out + ".part.mp4", out)

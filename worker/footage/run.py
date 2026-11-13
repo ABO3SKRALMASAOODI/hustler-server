@@ -86,8 +86,23 @@ def _same(a, b):
     return key(a) == key(b) and len(key(a)) > 12
 
 
-def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MAX_SOURCES, keep_work=False, anchors=None):
-    """anchors: {person's name: [photo paths already checked as that person]} for the identity step."""
+def _title_q(title, words=6):
+    """A title as an archive.org search: its first words, letters and digits only."""
+    ws = ["".join(ch for ch in w if ch.isalnum()) for w in str(title).split()]
+    return " ".join(w for w in ws if w)[:120] if len([w for w in ws if w]) <= words else " ".join([w for w in ws if w][:words])
+
+
+def _twin(a, b, n=28):
+    """Two listings of one film: their titles open with the same letters (libraries cut a long title differently)."""
+    def key(s):
+        return "".join(ch for ch in str(s).casefold() if ch.isalnum())
+    ka, kb = key(a), key(b)
+    return len(ka) >= 16 and len(kb) >= 16 and ka[:n] == kb[:n]
+
+
+def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MAX_SOURCES, keep_work=False, anchors=None, avoid=None):
+    """anchors: {person's name: [photo paths already checked as that person]} for the identity step.
+    avoid: [{"url", "time_range"}] already cut for this film by an earlier run: those seconds of a source are not cut again."""
     t_all = time.monotonic()
     os.makedirs(os.path.join(out_dir, "clips"), exist_ok=True)
     os.makedirs(os.path.join(out_dir, "sheets"), exist_ok=True)
@@ -140,6 +155,42 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         # 4. open them: proxy, shots, transcript
         with cf.ThreadPoolExecutor(max_workers=4) as pool:
             sources = list(pool.map(lambda s: _open(s, work, log), sources))
+        # 4b. what YouTube would not open (it takes a machine for a bot, a video is gone) is looked for on archive.org:
+        #     the same film under its own title first (the film libraries upload to both), then, for a subject none
+        #     of whose sources opened, that subject's own searches among archive.org's moving images
+        more = []
+        failed = [s for s in sources if s.get("error") and s.get("where") == "youtube"]
+        if failed:
+            tw = search.run([dict(where="archive", q=_title_q(s["title"])) for s in failed])
+            for k, s in enumerate(failed):
+                h = next((h for h in tw.get(k) or [] if _twin(h["title"], s["title"]) and h["id"] not in by_id), None)
+                if h:
+                    src = dict(h, key=f"s{len(sources) + len(more)}", subjects=list(s["subjects"]), why="the same film on archive.org")
+                    by_id[h["id"]] = src
+                    more.append(src)
+        dead = [si for si in range(len(subjects)) if not any(si in s["subjects"] and not s.get("error") and s.get("shots") for s in sources)
+                and not any(si in s["subjects"] for s in more)]
+        if dead:
+            flat2 = [(si, dict(where="archive", q=q["q"])) for si in dead for q in subjects[si]["searches"]]
+            found2 = search.run([q for _, q in flat2])
+            hits2 = {}
+            for k, (si, _) in enumerate(flat2):
+                have = {h["id"] for h in hits2.get(si, [])} | set(by_id)
+                hits2.setdefault(si, []).extend(h for h in found2.get(k) or [] if h["id"] not in have)
+            kept2, ru = plan.rank(subjects, hits2, per=PER_SUBJECT) if any(hits2.values()) else ([], 0.0)
+            spend["rank"] += ru
+            for si, h, why in kept2:
+                if h["id"] in by_id:
+                    by_id[h["id"]]["subjects"].append(si)
+                    continue
+                src = dict(h, key=f"s{len(sources) + len(more)}", subjects=[si], why=why)
+                by_id[h["id"]] = src
+                more.append(src)
+        if failed or dead:
+            log(f"archive round: {len(failed)} sources would not open, {len(dead)} subjects had none; {len(more)} archive sources to open")
+        if more:
+            with cf.ThreadPoolExecutor(max_workers=4) as pool:
+                sources += list(pool.map(lambda s: _open(s, work, log), more))
         spend["hear"] = round(sum(s.get("hear_usd") or 0.0 for s in sources), 5)
         live = [s for s in sources if not s.get("error") and s.get("shots")]
         # 5. moments and the picture check, per subject
@@ -196,6 +247,10 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         #    overlapping a window already cut (a long interview take can carry several lines)
         src_of = {s["key"]: s for s in live}
         taken, last_src, plan_rows, shot_uses = {}, None, [], {}
+        for av in avoid or []:
+            k = next((s["key"] for s in live if s["url"] == av.get("url")), None)
+            if k and av.get("time_range"):
+                taken.setdefault(k, []).append((float(av["time_range"][0]), float(av["time_range"][1])))
         for ln in lines:
             dur = _line_dur(ln)
             n = max(1, min(4, round(dur / SHOT_S)))
@@ -289,7 +344,8 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                                   source=dict(url=s["url"], title=s["title"], channel=s.get("channel"), where=s["where"]),
                                   time_range=[p["t0"], p["t1"]], frame_at=p["t"], x=p.get("x"), eq=p.get("eq"), trim=p.get("trim"),
                                   how=p.get("how"), sheet=p.get("sheet")))
-            out_lines.append(dict(i=r["i"], say=r["say"], show=r["show"], dur=r["dur"], want=r["want"], clips=clips))
+            out_lines.append(dict(i=r["i"], say=r["say"], show=r["show"], dur=r["dur"], want=r["want"], clips=clips,
+                                  subjects=(shows.get(r["i"]) or {}).get("subjects") or []))      # what the planner read the line as naming
         spend = {k: round(v, 5) for k, v in spend.items()}
         res = dict(engine="worker/footage", model=dict(look="gpt-6-sol low", hear=hear.MODEL), about=about, frame=[W, H], grade_target=tgt,
                    subjects=subjects, lines=out_lines,
@@ -315,7 +371,7 @@ def lines_of(script):
     sc = script
     while "segments" not in sc and isinstance(sc.get("script"), dict):     # a film.json, a script.json or the writer's own
         sc = sc["script"]
-    return [dict(i=k, say=s.get("say"), pictures=s.get("pictures") or [], dur=s.get("dur"), pause_after=s.get("pause_after"))
+    return [dict(i=int(s.get("i", k)), say=s.get("say"), pictures=s.get("pictures") or [], dur=s.get("dur"), pause_after=s.get("pause_after"))
             for k, s in enumerate(sc.get("segments") or [])], sc.get("named") or [], sc.get("title") or ""
 
 
@@ -327,6 +383,7 @@ def main():
     ap.add_argument("--h", type=int, default=1920)
     ap.add_argument("--timing", help="json: [seconds per line] from the narration")
     ap.add_argument("--anchors", help="json: {person's name: [photo paths checked as that person]}")
+    ap.add_argument("--avoid", nargs="*", default=[], help="footage.json records of earlier runs for this film: their clips are not cut again")
     a = ap.parse_args()
     lines, named, title = lines_of(json.load(open(a.script)))
     if a.timing:
@@ -335,8 +392,10 @@ def main():
             ln["dur"] = d
     from . import seam
     anchors = json.load(open(a.anchors)) if a.anchors else None
+    avoid = [dict(url=c["source"]["url"], time_range=c["time_range"]) for p in a.avoid for ln in json.load(open(p)).get("lines") or []
+             for c in ln.get("clips") or []]
     res = seam.for_lines(lines, named, title, a.out, a.w, a.h, scope="workflow", log=lambda m: print("[footage] " + m, flush=True),
-                         anchors=anchors)
+                         anchors=anchors, avoid=avoid)
     if res is None:
         print(json.dumps(dict(off="VALMERA_FOOTAGE=0")))
         return

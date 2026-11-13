@@ -170,6 +170,10 @@ def layers(ev, part, state):
         sid = nearest("click", desc, state["spoken"], state["free"], used=state.get("used"))
         return ([(sid, "hit")] if sid else None), "click"
     cls, lead = class_for(m, w, room, state["tally"], state.get("spoken"))
+    if ev.get("turn") and "impact" in SP.CLASSES and _room_ok("impact", room):
+        # the story's turn, named by the caller, is the film's heaviest landing: the hit with its climb, whatever
+        # the film has used before it (a hook that took the impact left the turn a sweep nobody heard)
+        cls, lead = "impact", ("riser" if "riser" in SP.CLASSES and room >= SP.CLASSES["riser"]["lead_s"] else None)
     sid = nearest(cls, desc, state["spoken"], state["free"], used=state.get("used"))
     if sid is None:
         return None, cls

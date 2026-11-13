@@ -26,7 +26,11 @@
       {"id": "receipts", "name": "Receipts", "spine": ["C6", "G3", "G2"], "pace": [6, 10],
        "look": "Bold claims with footnotes, the pitch trace and arrows to the evidence.",
        "hook": "The boldest claim, with superscript 1.", "close": "The footnotes stack up as the conclusion.",
-       "needs": "concrete claims, numbers or names that can be footnoted"}
+       "needs": "concrete claims, numbers or names that can be footnoted"},
+      {"id": "footage-cut", "name": "Footage Cut", "spine": ["G1", "T1"], "pace": [8, 14], "engine": "cut",
+       "look": "The take is the spine; over the sentences that name real people, companies and places the picture cuts to real footage and photographs of them, a new one about every second, then back to him.",
+       "hook": "His face, and the title on the caption seat.", "close": "The payoff line on his face, then the end card.",
+       "needs": "a moment that names real people, companies or places a camera has filmed; made by valmera-podcast-shorts/scripts/run_cut.py from a delivered moment"}
     ]
   },
   "wf2": {

@@ -545,7 +545,7 @@ def plan_sounds(events, ctx):
             continue
         part = "hook" if e is hook else "payoff" if (e is payoff or e is turn) else "plain"
         prev = max([g for g in taken if g < t], default=0.0)
-        e = dict(e, room_s=t - prev)
+        e = dict(e, room_s=t - prev, turn=e is turn)
         layers, cls = _choose(e, part, t, uses, spoken(t), tally, desc)
         win_roles = {r for (u, r) in roles if abs(u - t) < SAME_WIN_S / 2}
         new_roles = {role_of(s) for s, _ in layers} - win_roles
@@ -837,7 +837,12 @@ def _masking(it, vb, speech, fps):
         return 0.0
     sb, v, sp = sb[:n], vb[f0:f0 + n], speech[f0:f0 + n]
     over = sb - (v - MASK_DB)
-    bad = over[sp & (sb > -80)]
+    # a frame the transcript calls spoken but that carries no voice (a pause inside a word's span, a breath before a
+    # figure: 30 dB or more under the film's own spoken level) has nothing to mask
+    k = min(len(vb), len(speech))
+    spoken_lv = float(np.median(vb[:k][speech[:k]])) if k and speech[:k].any() else None
+    live = (v > spoken_lv - 30.0) if spoken_lv is not None and np.isfinite(spoken_lv) else np.ones(n, bool)
+    bad = over[sp & live & (sb > -80)]
     if (bad > 0).sum() < MASK_FRAMES:
         return 0.0
     return float(np.percentile(bad[bad > 0], 80)) + 0.5

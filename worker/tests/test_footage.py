@@ -266,3 +266,25 @@ def test_a_clip_without_a_channel_in_the_search_gets_it_for_its_credit(monkeypat
     assert seen["url"].endswith("/oembed") and seen["params"]["url"].endswith("xrLN7xcx67g")
     monkeypatch.setattr(net_fetch, "get_json", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
     assert search.channel_of("https://www.youtube.com/watch?v=x") is None
+
+
+def test_a_film_youtube_will_not_open_is_looked_for_on_the_archive_by_its_title():
+    from footage import run
+    a = '1970s FEDERAL EXPRESS PROMO FILM   FEDEX  DASSAULT CARGO FALCON JET  MEMPHIS  87744'
+    b = '1970s FEDERAL EXPRESS PROMO FILM FEDEX DASSAULT CARGO FALCON JET MEMPHIS TENNESSEE 87744'
+    assert run._title_q(a) == "1970s FEDERAL EXPRESS PROMO FILM FEDEX"            # the title's first words, letters and digits only
+    assert run._twin(a, b) and not run._twin(a, "1970s FedEx hub at night, a home movie") and not run._twin("FedEx", "FedEx")
+
+
+def test_a_line_keeps_its_own_number_and_seconds_already_cut_are_not_cut_again(monkeypatch, tmp_path):
+    from footage import run
+    lines, named, title = run.lines_of({"title": "T", "segments": [{"i": 4, "say": "a"}, {"i": 9, "say": "b"}, {"say": "c"}]})
+    assert [ln["i"] for ln in lines] == [4, 9, 2]                                  # a top-up run names the film's own lines
+    seen = {}
+
+    def fake_find(lines, named, about, out_dir, W=1080, H=1920, log=print, anchors=None, avoid=None, **kw):
+        seen["avoid"] = avoid
+        return {"counts": {}, "spend": {}, "seconds": 0}
+    monkeypatch.setattr(run, "find", fake_find)
+    res = seam.for_lines([], [], "t", str(tmp_path), avoid=[{"url": "u", "time_range": [1.0, 2.5]}])
+    assert res is not None and seen["avoid"] == [{"url": "u", "time_range": [1.0, 2.5]}]

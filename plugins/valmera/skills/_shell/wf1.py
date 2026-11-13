@@ -158,7 +158,7 @@ def style_menu(styles):
 def _styles(ctx):
     """The styles this run may take: the registry minus the last three, and only the one the owner's line names
     (--args '{"style": id}') when it names one that is allowed. The moment is still found by the workflow."""
-    allowed = ctx.styles_allowed()
+    allowed = [s for s in ctx.styles_allowed() if not s.get("engine")]      # a style with its own engine has its own launcher (footage-cut: run_cut.py)
     want = (ctx.args or {}).get("style")
     one = [s for s in allowed if s["id"] == want]
     return one or allowed
