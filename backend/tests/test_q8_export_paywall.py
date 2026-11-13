@@ -42,6 +42,17 @@ def test_the_value_line_names_only_what_the_edit_holds():
     assert "captions" not in video._export_value_line(off)
 
 
+def test_back_to_back_spans_are_not_called_pauses_cut():
+    # p5725 (13 Nov): a 98 s film split at its 12 shot changes for dissolves
+    # kept 0-98 s whole; the card said "the pauses cut".
+    whole = {"keep": [[0.0, 8.0], [8.0, 18.0], [18.0, 26.0], [26.0, 34.04],
+                      [34.04, 42.04], [42.04, 98.0]]}
+    line = video._export_value_line(whole)
+    assert line.startswith("Your 98-second edit") and "pauses" not in line
+    cut = {"keep": [[0.0, 8.0], [9.2, 18.0]]}
+    assert "the pauses cut" in video._export_value_line(cut)
+
+
 def test_the_export_reply_carries_the_line_and_a_repeat_updates_it():
     chat = Chat()
     first = video._record_plans_message(chat, 3, "export",

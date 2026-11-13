@@ -1345,6 +1345,25 @@ def _unused_broll(asset, edl):
     return True
 
 
+def _removed_between_keeps(keep):
+    """Seconds of source left out between the kept spans, in source order."""
+    spans = []
+    for k in keep:
+        try:
+            a, b = (k[0], k[1]) if isinstance(k, (list, tuple)) else \
+                (k.get("start"), k.get("end"))
+            spans.append((float(a), float(b)))
+        except (TypeError, ValueError, KeyError, IndexError, AttributeError):
+            continue
+    spans.sort()
+    removed, reach = 0.0, None
+    for a, b in spans:
+        if reach is not None and a > reach:
+            removed += a - reach
+        reach = b if reach is None else max(reach, b)
+    return removed
+
+
 def _export_value_line(edl_json):
     """Q8 (30 Oct): what the trial user's finished edit is, in one line, for
     the export paywall ("Your 36-second vertical edit is ready to download:
@@ -1379,7 +1398,10 @@ def _export_value_line(edl_json):
                 if isinstance(f, dict) and f.get("type") == "broll")
     if broll:
         have.append(f"{broll} B-roll cutaway" + ("s" if broll != 1 else ""))
-    if len(edl_json.get("keep") or []) > 1:
+    # "The pauses cut" only when source time was actually removed between kept
+    # spans. Back-to-back spans (a film split at its shot changes for dissolves,
+    # p5725 on 13 Nov: 12 spans covering 0-98 s whole) cut nothing.
+    if _removed_between_keeps(edl_json.get("keep") or []) >= 0.1:
         have.append("the pauses cut")
     if not total:
         return None
