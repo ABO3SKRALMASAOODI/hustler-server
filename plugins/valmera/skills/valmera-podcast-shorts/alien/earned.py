@@ -199,6 +199,18 @@ def solve_frame(w, h, faces, box, frame=(1080, 1920), paper=False):
     return "card", [0.0, 0.0, 1.0, 1.0]
 
 
+def face_frame(w, h, face, frame=(1080, 1920)):
+    """The 9:16 window of a picture about its largest face, or None when the face would not fit it or the window is
+    too small to fill a phone. For the hook: a wide picture with a face in it (a banknote, a group) opens on the face."""
+    W, H = frame
+    cw, ch = min(1.0, h * (W / H) / w), min(1.0, w / (W / H) / h)
+    if not face or face[2] > 0.8 * cw or cw * w < 460:
+        return None
+    x0 = min(max(face[0] + face[2] / 2 - cw / 2, 0.0), 1.0 - cw)
+    y0 = min(max(face[1] + face[3] * 0.45 - 0.30 * ch, 0.0), 1.0 - ch)
+    return [round(x0, 5), round(y0, 5), round(x0 + cw, 5), round(y0 + ch, 5)]
+
+
 def find(ctx, script, llm, worker):
     """The story's pictures, found and checked. Rows the script stage planned keep their order and index."""
     out_dir = os.path.join(ctx.supply, "earned")
@@ -968,6 +980,10 @@ def apply(l1, script, earned, idx, source, sounds_manifest, own=True, panel_low=
     # the hook: frame 0 to a stressed word
     hook = script.get("hook") or {}
     hi = hook.get("picture") if isinstance(hook.get("picture"), int) else None
+    if hi in got and got[hi]["layout"] != "full":                # the script's hook is a wide picture: it opens on its face, when it has one
+        c = face_frame(got[hi]["w"], got[hi]["h"], (got[hi].get("faces") or [None])[0], tuple(l1["frame"]))
+        if c:
+            got[hi] = dict(got[hi], layout="full", crop=c)
     full = [got[i] for i in sorted(got) if got[i].get("layout") == "full"]      # frame 0 is a picture that fills the phone
     hrow = got[hi] if hi in got and got[hi]["layout"] == "full" else (full[0] if full else None)
     spine0 = (l1.get("spine") or [dict(f=[0, n], src=[0.0, n / fps])])[0]

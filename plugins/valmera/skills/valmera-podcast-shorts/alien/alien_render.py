@@ -82,7 +82,9 @@ def render(ctx, script, sc, chain):
         import footnotes
         fp = os.path.join(adir, "footnotes.json")
         notes = json.load(open(fp))["footnotes"] if os.path.exists(fp) else []
-        plan["footnotes"] = footnotes.apply(l1, notes, hold=[tuple(d["frames"]) for d in (plan.get("earned") or {}).get("designs") or []])
+        e = plan.get("earned") or {}                    # a note waits while a panel or a picture's card holds the lower frame
+        hold = [tuple(d["frames"]) for d in e.get("designs") or []] + [tuple(p["frames"]) for p in e.get("pictures") or [] if p.get("layout") == "card"]
+        plan["footnotes"] = footnotes.apply(l1, notes, hold=hold)
         plan["footnotes"]["ok"] = True
     passes = [p for p in passes if p not in PLAN_PASSES]
     look = script.get("look")

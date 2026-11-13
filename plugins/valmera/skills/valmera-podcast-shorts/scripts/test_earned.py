@@ -326,3 +326,29 @@ def test_the_hook_line_never_stands_on_a_face(clip):
     rec = E.apply(l1, SCRIPT, EARNED, idx, os.path.join(clip, "source.mp4"), manifest())
     hook = [it for it in l1["items"] if it["id"].startswith("hook.") and it["k"] == "word"]
     assert hook and max(L.word_box(it, l1)[3] for it in hook) <= E.CAP_TOP
+
+
+def test_a_wide_hook_picture_opens_on_its_face():
+    c = E.face_frame(1920, 828, [0.35, 0.19, 0.128, 0.43])              # a banknote: the window goes to the portrait
+    assert c and abs((c[2] - c[0]) * 1920 / ((c[3] - c[1]) * 828) - 9 / 16) < 0.01 and c[0] <= 0.35 and c[2] >= 0.478
+    assert E.face_frame(1920, 828, None) is None
+    assert E.face_frame(1920, 828, [0.3, 0.1, 0.4, 0.8]) is None       # a face wider than the window stays a card
+    assert E.face_frame(1000, 500, [0.4, 0.2, 0.1, 0.3]) is None       # too small to fill a phone
+
+
+def test_a_footnote_waits_for_a_panel_and_is_waived_when_no_time_is_left():
+    import footnotes
+    notes = [dict(n=1, t_s=3.0, note="Founded in January 2022", source="Wikipedia, Cost Plus Drugs"),
+             dict(n=2, t_s=9.0, note="Three PBMs hold 80% of the market", source="Wikipedia, Pharmacy benefit management")]
+    l1 = plan()
+    free = footnotes.apply(l1, notes)
+    assert [p["n"] for p in free["placed"]] == [1, 2] and free["waived"] == []
+    first = min(it["f"][0] for it in l1["items"] if it["id"].startswith("fn1.t."))
+    l1 = plan()
+    held = footnotes.apply(l1, notes, hold=[(first - 4, first + 60)])            # a panel stands where note 1 would be typed
+    t1 = [it for it in l1["items"] if it["id"].startswith("fn1.t.")]
+    assert t1 and min(it["f"][0] for it in t1) >= first + 60                      # it waits for the panel to leave
+    l1 = plan()
+    gone = footnotes.apply(l1, notes, hold=[(first - 4, 262)])                    # the panel stays until the next note's word
+    assert [p["n"] for p in gone["placed"]] == [2] and gone["waived"][0]["n"] == 1
+    assert not any(it["id"].startswith("fn1.") for it in l1["items"])            # no superscript without its note
