@@ -536,14 +536,14 @@ def test_the_alternative_is_two_facts_combined_in_code(monkeypatch, tmp_path):
 
 
 def test_an_edit_is_never_done_on_the_replys_word(monkeypatch, tmp_path):
-    ledger = asks.settle({"lang": "en", "asks": [_ask("edit"), _ask("answer"), _ask("edit")]}, EDL)
+    ledger = asks.settle({"lang": "en", "asks": [_ask("edit"), _ask("answer"), _ask("edit"), _ask("keep"), _ask("edit", how="reply")]}, EDL)
     monkeypatch.setattr(asks, "_call", lambda *a, **k: ({"asks": [
-        {"id": "a1", "state": "done", "rests_on": "reply", "said_why_not": False, "made_against": False, "seen": "", "line": ""},
-        {"id": "a2", "state": "done", "rests_on": "reply", "said_why_not": False, "made_against": False, "seen": "", "line": ""},
-        {"id": "a3", "state": "done", "rests_on": "numbers", "said_why_not": False, "made_against": False, "seen": "", "line": ""}]},
+        {"id": f"a{i}", "state": "done", "rests_on": on, "said_why_not": False, "made_against": False, "seen": "", "line": ""}
+        for i, on in ((1, "reply"), (2, "reply"), (3, "numbers"), (4, "reply"), (5, "reply"))]},
         {"usd": 0, "s": 0, "model": "m"}))
     v = asks.check(NS(workdir=str(tmp_path)), ledger, "x", EDL, None, "")
-    assert [r["state"] for r in v["asks"]] == ["cannot_tell", "done", "done"]
+    # Opus on p5345's second request rested "no credits bought" on the reply: a keep may, an edit may not
+    assert [r["state"] for r in v["asks"]] == ["cannot_tell", "done", "done", "done", "done"]
 
 
 def test_the_check_runs_on_the_check_model_unless_the_switch_says_inherit(monkeypatch, tmp_path):

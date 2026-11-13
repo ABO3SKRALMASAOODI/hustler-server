@@ -816,8 +816,10 @@ def check(ctx, ledger, reply_text, edl, preview=None, changes="", fixed=None):
         r = by_id.get(a["id"]) or {}
         state = r.get("state") if r.get("state") in ("done", "partly", "not_done", "cannot_tell") else "cannot_tell"
         seen = str(r.get("seen") or "")
-        if state == "done" and a["kind"] != "answer" and r.get("rests_on") in ("reply", "nothing"):
+        if state == "done" and a["kind"] in EDIT_KINDS and a.get("how") != "reply" \
+                and r.get("rests_on") in ("reply", "nothing"):
             # An edit is never done on the reply's word: what was made shows in the numbers or frames.
+            # A keep (nothing bought, nothing carried over) or an ask checked by the reply may rest on it.
             state = "cannot_tell"
         if state != "done" and a.get("otherwise") and r.get("said_why_not") is True and r.get("made_against") is False:
             # The customer said what to do when it can't be done (say why, make nothing in its place),
