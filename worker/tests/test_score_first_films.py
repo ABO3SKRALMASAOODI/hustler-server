@@ -8,7 +8,7 @@ told what each picture shows. Fixtures are synthetic Scores and index stubs. No 
 import json
 
 import score.compiler as S
-from score import lower, taste
+from score import brief, lower, taste
 from tests.test_score_compiler import BIN, wordless_index
 from tests.test_score_taste import beats_over, comp, film, selfie, voice
 
@@ -325,3 +325,45 @@ def test_the_opening_title_of_wordless_footage_is_earned_by_the_film_starting():
     c = comp(film(beats + [{"k": "b", "id": "b03", "at": "@8.0..@9.9", "job": "x", "pic": "main"}], system={"devices": ["big"], "sounds": [], "seats": []}), idx)
     said = " ".join(w["t"] for w in bigs(c))
     assert "TITLE" in said and "MIDDLE" not in said                    # the opening stands; a line in the middle still needs its event
+
+
+def test_a_silent_beat_the_look_emptied_goes_with_what_stood_on_it():
+    idx = selfie(12.0)
+    n = len(idx["words"])
+    beats = [{"k": "b", "id": "b01", "w": f"0-{n - 1}", "job": "x", "pic": "main"},
+             {"k": "b", "id": "b02", "f": 36, "job": "x", "pic": {"plate": "#101014"},
+              "do": [{"g": "big", "t": "THE END", "for": "turn", "at": "b02.in", "d": 36}]}]
+    text = film(beats, system={"devices": ["big"], "sounds": [], "seats": []})
+    c = comp(text, idx)
+    assert shots(c)[-1]["pic"] == "plate" and bigs(c)
+    assert taste.silent_beats_emptied(text, ["b02.big"]) == ["b02"] and taste.silent_beats_emptied(text, ["b01.big"]) == []
+    cut = comp(taste.cut_text(text, ["b02.big"]), idx)
+    assert cut.l1["dur_f"] == c.l1["dur_f"] - 36 and all(s["pic"] == "main" for s in shots(cut))     # no second of black at the end
+
+
+def test_a_film_that_sets_no_captions_may_seat_its_title_in_the_caption_band():
+    from tests.test_score_compiler import talk_index
+
+    def rooms(idx):
+        n = len(idx["words"])
+        ctx = S.compile_once(film([{"k": "b", "id": "b01", "w": f"0-{n - 1}", "job": "x", "pic": "main"}]), idx, None, BIN, None, None, "t", False, None, {}, True, {}, ({}, {}, None))
+        S.film_seats(ctx)
+        return taste.captions_off(ctx), max(r[1] for r in ctx.seat_rooms)
+    spoken = talk_index(12.0, faces=False)
+    off, tall = rooms(spoken)
+    assert not off
+    noise = talk_index(12.0, faces=False)
+    for w in noise["words"]:
+        w["confidence"] = 0.5
+    off2, tall2 = rooms(noise)
+    assert off2 and tall2 > tall + 0.05                                   # the band the caption would hold is ground for a title
+
+
+def test_type_for_a_doubtful_transcript_is_briefed_in_english():
+    idx = selfie(8.0)
+    idx["words"] = idx["words"][:3]
+    assert brief.doubtful_words(idx)
+    out = brief.scout_part({"scope": "film", "lang": "fi", "asks": [], "about": "x"}, idx)
+    assert "`en`" in out[1] and "`fi`" not in out[1]
+    idx = selfie(8.0)
+    assert not brief.doubtful_words(idx) and "`fi`" in brief.scout_part({"scope": "film", "lang": "fi", "asks": []}, idx)[1]

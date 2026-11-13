@@ -26,6 +26,8 @@ The upload handed back with captions on it is not a film. It rates 1 or 2 out of
 
 Wordless footage (a clip, a routine, a product in a hand, a game) is built the same way from other parts. The hook is the upload's best moment moved to the front with a title the frames earn. The pace comes from the upload's own cuts and the beats of its track (`d` anchors), with the dull stretches dropped. The type is that title, then a short label or a count on each new shot, in one place, and a last line. The sound is `echo` and `swell` made from its own track, on its own cuts. Over a song the beats keep the upload's own order, so the song is never broken, and another moment is shown by naming it in `pic`: `"pic":"main@9.2-10.6"`. An upload that already carries captions and graphics is not captioned again: it gets what it lacks, a first second, a look, sounds on its own cuts, a closing line where the frame is clear.
 
+The frame follows the footage. A landscape upload that prints words across its width (a slide, a screen recording, a video call) stays landscape, `"frame":"16:9"`: a 9:16 window cuts what it prints and leaves the rest of the phone empty. A landscape upload of a person or a scene is cut to 9:16 on its subject.
+
 # The Score
 
 One complete JSON object per line, plain text, nothing around it. Order: treat, film, dna, fix lines, bind lines, pics lines, then beats. The beats you write are the programme: the order you write them is the order the film plays, so writing a late sentence first is a cold open, and the voice jumps with it.

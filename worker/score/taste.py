@@ -349,6 +349,20 @@ def display_seats(ctx, cap_y, n, named=None):
     return []
 
 
+def captions_off(ctx):
+    """Does this film set no captions of its own: no words, words the transcript doubts, or an upload that prints
+    its own? Then the caption's band is free ground for a title (p5572: the only seat left was on the upload's own
+    captions, and both titles went)."""
+    S = _S()
+    words = ctx.index.get("words") or []
+    if not words:
+        return True
+    conf = [float(w.get("confidence", 1.0)) for w in words]
+    if sum(conf) / len(conf) < S.CAPTION_CONFIDENCE or len(words) < S.CAPTION_WORDS:
+        return True
+    return upload_captions(ctx) >= 0.5
+
+
 def _display_seats(ctx, cap_y, n, named, marks):
     """The film's display seats: at most n places for display type, inside the safe area, clear of the caption
     seat, the watermark, the platform's buttons and the head for nine tenths of the film. A frame a close face
@@ -356,12 +370,13 @@ def _display_seats(ctx, cap_y, n, named, marks):
     S = _S()
     rows = _take_heads(ctx, marks=marks)
     wide = ctx.W >= ctx.H
+    no_caps = captions_off(ctx)
 
     def ok(x, y, bw, bh):
         r = [x - bw / 2, y - bh / 2, x + bw / 2, y + bh / 2]
         if r[0] < SAFE[0] or r[2] > SAFE[2] or r[1] < SAFE[1] or r[3] > (0.92 if wide else SAFE[3]):
             return False
-        if abs(y - cap_y) < CAP_BLOCK_H / 2 + bh / 2 + 0.005:
+        if not no_caps and abs(y - cap_y) < CAP_BLOCK_H / 2 + bh / 2 + 0.005:
             return False
         if S.rects_touch(r, S.KEEPOUT) or (not wide and S.rects_touch(r, BUTTONS)):
             return False
@@ -1163,8 +1178,36 @@ def look(work, comp, film_path, deadline, model, effort="low"):
     return v, r.usd
 
 
+def silent_beats_emptied(text, ids):
+    """Silent beats (written with `f`: seconds the film added, no sound of the upload) whose every gesture the look
+    named. With its card and its line gone such a beat is a second of flat page and silence, and it goes too (p5572,
+    13 Nov: the look took the card and the title off a closing beat and the film ended on black)."""
+    gone = {str(i) for i in ids}
+    out = []
+    for raw in text.splitlines():
+        raw = raw.strip()
+        if not raw.startswith("{"):
+            continue
+        try:
+            o = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(o, dict) or o.get("k") != "b" or o.get("f") is None or str(o.get("id")) in gone:
+            continue
+        seen, names = {}, []
+        for g in (o.get("do") if isinstance(o.get("do"), list) else [o.get("do")] if o.get("do") else []):
+            n = g.get("g") if isinstance(g, dict) else g
+            k = seen.get(n, 0)
+            seen[n] = k + 1
+            names.append(f"{o.get('id')}.{n}" if k == 0 else f"{o.get('id')}.{n}{k}")
+        if names and all(n in gone for n in names):
+            out.append(str(o.get("id")))
+    return out
+
+
 def cut_text(text, ids, why="the last look"):
     """The Score with a cut line for each id: the compiler drops those devices and says why."""
+    ids = list(ids) + silent_beats_emptied(text, ids)
     lines = [json.dumps({"k": "cut", "id": i, "why": why}, ensure_ascii=False, separators=(",", ":")) for i in ids if i]
     return text.rstrip("\n") + "\n" + "\n".join(lines) + ("\n" if lines else "")
 

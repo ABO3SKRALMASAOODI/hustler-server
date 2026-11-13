@@ -199,7 +199,8 @@ def footage_part(per, idx):
     up = FINAL_W / W
     out = ["## Footage",
            f"Source {W}x{H}, {per.get('fps') or 0:.0f} fps, {per['dur']:.2f} s, {len(per['shots'])} shot(s). Final frame {FINAL_W}x{FINAL_H}: "
-           f"the full width upscales {up:.1f}x, a crop to half width {up * 2:.1f}x. Past 3.4x it reads soft."]
+           f"the full width upscales {up:.1f}x, a crop to half width {up * 2:.1f}x. Past 3.4x it reads soft."
+           + (f" Kept landscape (`\"frame\":\"16:9\"`, {FINAL_H}x{FINAL_W}) the whole upload shows at {FINAL_H / W:.1f}x." if W > H else "")]
     samples = per["samples"]
     step = per["step"]
     for sh in per["shots"]:
@@ -475,10 +476,22 @@ def prefix_text():
 # ----------------------------------------------------------------- film part
 
 
-def scout_part(scout):
+def doubtful_words(idx):
+    """Is the transcript noise rather than speech: under four words, or a mean confidence under 0.75?"""
+    words = idx.get("words") or []
+    if not words:
+        return False
+    return len(words) < 4 or float(np.mean([float(w.get("confidence", 1.0)) for w in words])) < 0.75
+
+
+def scout_part(scout, idx=None):
     if not scout:
         return ["## Asks", "The Scout has not run."]
-    out = ["## Asks", f"The Scout read the request. Scope `{scout.get('scope')}`. Customer's language `{scout.get('lang')}`: write every `job` in it. {scout.get('about', '')}".strip()]
+    lang = scout.get("lang")
+    if idx is not None and doubtful_words(idx) and not scout.get("asks"):
+        # the language was guessed from noise: a firework clip got its title in Finnish (p5571, 13 Nov)
+        lang = "en"
+    out = ["## Asks", f"The Scout read the request. Scope `{scout.get('scope')}`. Customer's language `{lang}`: write every `job` and every word of type in it. {scout.get('about', '')}".strip()]
     if scout.get("scope") == "surgical":
         out.append("The product makes the literal change on its own. This Score is the director's cut built alongside it, offered once: write the whole film.")
     if scout.get("asks"):
@@ -545,7 +558,7 @@ def film_text(work, idx, sess, per, x, scout, styles, cards, bin_items=None):
     out += audio_part(idx, per)
     out += ["## Frames",
             "Boards 1-3: frames in time order. Each stamp reads @source-second, then the word being spoken. Green box face, yellow box free space on the first cell. White ticks mark every .1 of the frame. Board 4: details, softness, palette."]
-    out += scout_part(scout)
+    out += scout_part(scout, idx)
     out += supply_part(idx, per, bin_items)
     out.append("## Style cards")
     out.append("Real films from the folder that this footage can supply. The frames follow, one board per card, after the frame boards. Numbers are that film's, measured. `system.card` is one of these: " + " ".join(styles) + ".")
