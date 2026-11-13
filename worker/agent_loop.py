@@ -2972,6 +2972,15 @@ def _asks_check(ctx, draft, allow_repair=True):
                                                 "open": [r["id"] for r in asks.open_asks(verdict)],
                                                 "harm": len(asks.harm(verdict))})
         ctx.ask_verdict = verdict
+    # The check read an ask as keeping the upload's whole length that the ledger did not mark: the
+    # ask is marked (so the write path holds it) and the film gets its length back before any repair.
+    held = ""
+    longer = asks.length_asks(ledger, verdict) - {a["id"] for a in ledger["asks"] if a.get("length") == "upload"}
+    if longer and allow_repair:
+        for a in ledger["asks"]:
+            if a["id"] in longer:
+                a["length"] = "upload"
+        held = _typed_hold_length(ctx, ledger, {"id": getattr(ctx, "job_id", None)})
     if not allow_repair or not (asks.open_asks(verdict) or asks.harm(verdict)):
         return None
     if int(ledger.get("repairs") or 0) >= int((ledger.get("cfg") or {}).get("repairs", 1)):
@@ -2984,7 +2993,7 @@ def _asks_check(ctx, draft, allow_repair=True):
     except Exception as exc:  # noqa: BLE001 - the editor is told the harm instead
         print(f"[asks] harm not taken out: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
         undone = ""
-    return asks.repair_note(ledger, verdict, undone)
+    return asks.repair_note(ledger, verdict, "\n".join(x for x in (held, undone) if x))
 
 
 def _asks_settle(ctx, final, outcome):

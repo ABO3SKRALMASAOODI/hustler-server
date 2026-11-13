@@ -478,9 +478,11 @@ CHECK_SCHEMA = {
         }}},
         "asks": {"type": "array", "items": {
         "type": "object", "additionalProperties": False,
-        "required": ["id", "seen", "rests_on", "state", "said_why_not", "made_against", "line"],
+        "required": ["id", "seen", "rests_on", "state", "said_why_not", "made_against", "full_length", "line"],
         "properties": {
             "id": {"type": "string"},
+            "full_length": {"type": "boolean",
+                            "description": "This ask wants the film as long as the whole upload, nothing of it cut (keep my full narration, my duration, do not shorten)."},
             "seen": {"type": "string", "description": "First: what the numbers, the frames or the reply show for this ask, with times and figures. At most two short sentences."},
             "rests_on": {"type": "string", "enum": ["numbers", "frames", "reply", "nothing"],
                          "description": "What the state below rests on: the edit's numbers, the rendered frames, the reply (only for an answer ask, or for said_why_not), or nothing given shows it."},
@@ -1034,8 +1036,10 @@ def check(ctx, ledger, reply_text, edl, preview=None, changes="", fixed=None):
             # The customer said what to do when it can't be done (say why, make nothing in its place),
             # and the check saw exactly that: two facts, combined here, never one free answer.
             state, seen = "done", "their alternative was taken: " + seen
-        rows.append({"id": a["id"], "state": state, "seen": seen[:400],
-                     "line": str(r.get("line") or "")[:300]})
+        row = {"id": a["id"], "state": state, "seen": seen[:400], "line": str(r.get("line") or "")[:300]}
+        if r.get("full_length") is True:
+            row["full_length"] = True
+        rows.append(row)
     out = {"asks": rows, "usage": usage, "edl_version": None}
     if unasked is not None:
         out["unasked"] = unasked
@@ -1064,6 +1068,14 @@ def open_asks(verdict):
 
 def harm(verdict):
     return list((verdict or {}).get("unasked") or [])
+
+
+def length_asks(ledger, verdict):
+    """Ask ids that want the film as long as the upload: the ledger model's field, or the check's (a
+    second reading on the stronger model; round 4, p5472: the ledger missed "keep my full narration,
+    duration" on one replay and caught it on the next)."""
+    ids = {a["id"] for a in (ledger or {}).get("asks") or [] if a.get("length") == "upload"}
+    return ids | {r["id"] for r in (verdict or {}).get("asks") or [] if r.get("full_length") is True}
 
 
 def undo_harm(ctx, verdict, ledger=None):
