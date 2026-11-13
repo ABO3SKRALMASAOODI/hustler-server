@@ -9,8 +9,9 @@ FOOTAGE CUT (13 Nov 2026, the owner: real footage of what is said, a new picture
 `scripts/run_cut.py run --source <podcast> --out <root> --args '{"again": "<delivered wf1 folder>"}'`
 makes a delivered moment again on the engines with no model writing or directing it (`scripts/wf1_cut.py`):
 the take is the spine and the sound; over the sentences that name real people, companies and places the
-picture cuts to real footage (worker/footage) and photographs of them on the clause that says the name,
-then back to him; captions ink word by word at one seat; the title holds the seat over his first breath;
+picture cuts to real footage (worker/footage, cut wide and shown in a window over itself out of focus, so
+a small archive copy is never blown up) and photographs of them on the clause that says the name, then
+back to him; what was filmed comes before what was photographed; captions ink word by word at one seat; the title holds the seat over his first breath;
 each named thing is labelled once; the pacing driver eases the take (never punches it), one look is
 solved on the film's pictures, the sound design places the references' sounds, and a song is laid on a
 copy only when the owner hands one over (`"song"`). The payoff is always his face. The footage is not

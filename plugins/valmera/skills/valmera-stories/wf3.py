@@ -609,7 +609,10 @@ def check(ctx, rd, sc):
         c["ok"] = bool(c["length_ok"] and c["endcard_ok"] and c["loud_ok"] and c["music"]["ok"])
     pack = load_pack(ctx)
     c["stories"] = dict(taste=sc["taste"], credits=pack.get("credits"), narration=dict(voice=None, gate=None),
-                        pictures=sc["beats"].get("pictures"), missing_pictures=pack.get("missing"))
+                        pictures=sc["beats"].get("pictures"), missing_pictures=pack.get("missing"),
+                        # how the film moves and sounds, as the engines measured it, and where it was drawn
+                        pace=sc["beats"].get("pace"), sound_design=sc["beats"].get("sound_design"), turn_s=sc.get("turn_s"),
+                        render=rd.get("engine_check"))
     rec = json.load(open(os.path.join(ctx.supply, "pack.json")))["record"]
     c["stories"]["narration"] = dict(seconds=rec.get("narration_s"), voice=rec.get("voice"), gate=rec.get("gate"))
     c["stories"]["caption_contrast"] = caption_contrast(rd["film"], json.load(open(sc["l1"])), pack["ffmpeg"])
