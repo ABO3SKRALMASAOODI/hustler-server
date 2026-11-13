@@ -78,8 +78,10 @@ def narrate(nscript, out, band="03", label="narrate", env=None, timeout=5400):
                        capture_output=True, text=True, timeout=1800, env=env)
     chk = json.load(open(os.path.join(out, "check.json"))) if os.path.exists(os.path.join(out, "check.json")) else {}
     w = json.load(open(os.path.join(out, "words.json")))
+    g, ib = chk.get("gate") or {}, chk.get("in_band") or {}
     return dict(wav=os.path.join(out, "narration.wav"), words=os.path.join(out, "words.json"), duration=w["duration"],
-                voice=w.get("voice"), gate=dict(ok=chk.get("ok"), **{k: chk.get(k) for k in ("wer", "wpm", "range_st", "lufs") if k in chk}))
+                voice=w.get("voice"), gate=dict(ok=g.get("pass"), wer=(chk.get("wer") or {}).get("wer"), checks=g,
+                                                **{k: (ib.get(k) or {}).get("value") for k in ("wpm", "wpm_artic", "f0_range_st", "voice_lufs")}))
 
 
 # ----------------------------------------------------------------- pictures of what is named

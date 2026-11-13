@@ -1,8 +1,15 @@
 """narrate: the narrator voice for workflows 3 (stories) and 4 (long-form voiceover).
 
-Open weights only, on the Mac: VoxCPM2 (Apache-2.0) speaks; whisper
-large-v3-turbo (faster-whisper, CPU) hears every take; whisper large-v3 (mlx)
-times the finished words and is the gate's listener. Nothing goes to a paid API.
+VoxCPM2 (Apache-2.0, on the Mac) speaks by default; OpenAI gpt-4o-mini-tts,
+directed per line, is the second engine (--engine openai, openai_voice.py).
+whisper large-v3-turbo (faster-whisper, CPU) hears every take; whisper large-v3
+(mlx) times the finished words and is the gate's listener.
+
+Every read gets the same finish (13 Nov voice study, 48 reference narrators):
+pauses set from the script and the reference band (pauses.py), the writer's
+stressed words ridden up, and a mastering chain solved against the references
+by signal (master.py: high-pass, tonal EQ, compressor, leveler, presence,
+de-ess, -14 LUFS / -1 dBTP). --no-master restores the old finish.
 
   PY=/Users/masaoodi/Documents/Valmera/.valmera/venv-narrate/bin/python
   $PY narrate.py voices
@@ -39,7 +46,7 @@ Takes are measured: a chunk is kept only when the listener hears every word
 and its pace sits inside the reference band; among those the one nearest the
 asked pace wins.
 
-Outputs in DIR: narration.wav (48 kHz mono, loudness-set), words.json (every
+Outputs in DIR: narration.wav (48 kHz mono, mastered), words.json (every
 script word with start/end, its segment and chunk, plus phrases and cut
 points), render.json (chunks, takes, boundaries, timings); `check` adds
 check.json (the VOICE gate).
@@ -83,6 +90,12 @@ PACE_WPM = {"slow": 178, "steady": 190, "brisk": 201, "fast": 211}
 # 5-10x faster. NARRATE_DTYPE=float32 restores the default.
 os.environ.setdefault("VOXCPM_MPS_DTYPE", os.environ.get("NARRATE_DTYPE", "bfloat16"))
 CHUNK_WORDS = 42
+# The voice engine. The 13 Nov voice study (.valmera/week-1112/lanes/VOICE: 48 reference narrators,
+# 23 signal features, every candidate through the same finish) measured VoxCPM2 with the new finish
+# nearest the references (79 of 100; 64.5 before it), OpenAI gpt-4o-mini-tts directed per line next (76),
+# tts-1-hd 68.
+# NARRATE_ENGINE / --engine / the script's "engine" choose; openai needs OPENAI_API_KEY.
+DEFAULT_ENGINE = "voxcpm"
 
 
 def log(*a):
@@ -511,12 +524,30 @@ def loudness_set(x, sr, target, tp_db=-1.5):
 
 # ================================================================ render
 
+def pick_engine(args, script):
+    """VoxCPM2 on the Mac by default; openai when asked and a key is there."""
+    name = getattr(args, "engine", None) or script.get("engine") or os.environ.get("NARRATE_ENGINE") or DEFAULT_ENGINE
+    if name == "openai":
+        import openai_voice
+        if not openai_voice.available():
+            log("no OPENAI_API_KEY: the VoxCPM2 voice reads this script")
+            return "voxcpm"
+    return name
+
+
 def render(args):
     import soundfile as sf
     script = load_script(args.script)
     vid = args.voice or script.get("voice") or "atlas"
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    fallback = None
+    if pick_engine(args, script) == "openai":
+        try:
+            return render_openai(args, script, vid, out)
+        except Exception as e:  # noqa: BLE001 - the service down or refusing: the local voice reads it
+            fallback = f"{type(e).__name__}: {str(e)[:200]}"
+            log(f"OpenAI voice failed ({fallback}); the VoxCPM2 voice reads this script")
     chunks = make_chunks(script)
     t_all = time.time()
     eng = Engine()
@@ -761,24 +792,58 @@ def render(args):
                        "pause_set": want, "t": None, "_shift_before": shift})
         shift += d
         bounds[-1]["t"] = round((b + shift - (d / 2 if d else 0)) / sr, 3)
-    target = args.lufs if args.lufs is not None else band_target()
-    x = loudness_set(x, sr, target)
-    sf.write(out / "narration.wav", x, sr, subtype="PCM_24")
+    rep = {"engine": "voxcpm", "engine_fallback": fallback, "script": str(args.script), "voice": vid, "band": bandname,
+           "voice_pace": vpace, "ref_tempo": round(ref_tempo, 4), "chunks": chunks, "takes_total": takes_total,
+           "settings": {"takes": args.takes, "steps": args.steps, "cfg": args.cfg, "seed": args.seed,
+                        "pace_tol": args.pace_tol, "chunk_words": CHUNK_WORDS, "model": MODEL_ID,
+                        "listener": ASR_MODEL}}
+    deliver(x, sr, script, chunks, bounds, rep, args, out, t_all, gen_s=t_gen + t_dec, load_s=t_load,
+            timing={"generate_s": round(t_gen, 1), "decode_s": round(t_dec, 1)})
     import shutil
     shutil.rmtree(state, ignore_errors=True)
 
-    # words, phrases and cut points from the finished signal
-    t_lis = time.time()
-    _, heard = listen_long(x, sr)
+
+def deliver(x, sr, script, chunks, bounds, rep, args, out, t_all, gen_s, load_s=0.0, timing=None):
+    """The same finish for every engine: pauses set from the script and the reference band (pauses.py),
+    the mastering chain (master.py: EQ, compression, presence, de-ess, -14 LUFS), then every word timed
+    on the finished signal. `bounds`: chunk joins, "t" in seconds of x. --no-master keeps the old finish
+    (pauses as generated, loudness only)."""
+    import soundfile as sf
+    bandname = rep.get("band") or "03"
     full = " ".join(c["text"] for c in chunks)
+    t_lis = time.time()
+    edits, mrep = [], None
+    if not getattr(args, "no_master", False):
+        import master as MS
+        import pauses as PZ
+        _, heard = listen_long(x, sr)
+        words0 = map_words(full, heard)
+        me = sys.modules[__name__]
+        x, edits = PZ.shape(x, sr, script["segments"], words0, me, bandname if bandname in PZ.CAP else "03")
+        for b in bounds:   # a join moves with every pause edit before it
+            b["t"] = round(PZ.remap(b["t"], edits), 3)
+        target = args.lufs if args.lufs is not None else MS.LUFS
+        x, mrep = MS.master(x, sr, band=bandname, lufs_target=target,
+                            ride=PZ.stress_spans(words0, script["segments"], edits, me), words=PZ.remap_words(words0, edits))
+        sr = MS.SR
+    else:
+        target = args.lufs if args.lufs is not None else band_target()
+        x = loudness_set(x, sr, target)
+    sf.write(out / "narration.wav", x, sr, subtype="PCM_24")
+
+    # words, phrases and cut points from the finished signal
+    _, heard = listen_long(x, sr)
     words = map_words(full, heard)
+    seg_of = [si for si, s in enumerate(script["segments"]) for _ in s["text"].split()]
     k = 0
     for ci, c in enumerate(chunks):
         n = len(c["text"].split())
         for w in words[k:k + n]:
-            w["chunk"], w["seg"] = ci, c["seg"]
+            w["chunk"] = ci
         c["start"], c["end"] = words[k]["start"], words[k + n - 1]["end"]
         k += n
+    for w, si in zip(words, seg_of):
+        w["seg"] = si
     for b in bounds:   # the boundary is the middle of the silence where the chunks meet
         g = measure.gap_at(x, sr, b["t"])
         if g:
@@ -795,24 +860,105 @@ def render(args):
             if z["start"] - a["end"] >= measure.PAUSE_S]
     t_lis = time.time() - t_lis
     dur = len(x) / sr
-    json.dump({"voice": vid, "duration": round(dur, 2), "words": words,
+    json.dump({"voice": rep["voice"], "duration": round(dur, 2), "words": words,
                "phrases": [{"text": " ".join(w["w"] for w in p), "start": p[0]["start"], "end": p[-1]["end"],
                             "seg": p[0]["seg"]} for p in phrases],
                "cut_points": cuts}, open(out / "words.json", "w"), indent=1)
-    gen_min = t_gen + t_dec
-    rep = {"script": str(args.script), "voice": vid, "voice_pace": vpace, "ref_tempo": round(ref_tempo, 4), "duration_s": round(dur, 2), "lufs_target": target,
-           "chunks": chunks, "boundaries": bounds, "takes_total": takes_total,
-           "timing": {"load_s": round(t_load, 1), "generate_s": round(t_gen, 1), "decode_s": round(t_dec, 1),
-                      "listen_s": round(t_lis, 1), "total_s": round(time.time() - t_all, 1),
-                      "render_s_per_min_speech": round(60 * gen_min / dur, 1),
-                      "end_to_end_s_per_min_speech": round(60 * (time.time() - t_all - t_load) / dur, 1)},
-           "settings": {"takes": args.takes, "steps": args.steps, "cfg": args.cfg, "seed": args.seed,
-                        "pace_tol": args.pace_tol, "chunk_words": CHUNK_WORDS, "model": MODEL_ID,
-                        "listener": ASR_MODEL}}
+    rep.update(duration_s=round(dur, 2), lufs_target=target, boundaries=bounds, pauses=edits, master=mrep)
+    rep["timing"] = {"load_s": round(load_s, 1), **(timing or {"generate_s": round(gen_s, 1)}),
+                     "listen_s": round(t_lis, 1), "total_s": round(time.time() - t_all, 1),
+                     "render_s_per_min_speech": round(60 * gen_s / dur, 1),
+                     "end_to_end_s_per_min_speech": round(60 * (time.time() - t_all - load_s) / dur, 1)}
     json.dump(rep, open(out / "render.json", "w"), indent=1, default=_jsonable)
     log(f"done: {dur:.1f}s of speech, {rep['timing']}")
     print(json.dumps({"narration": str(out / "narration.wav"), "words": str(out / "words.json"),
-                      "duration_s": round(dur, 2), "timing": rep["timing"]}))
+                      "duration_s": round(dur, 2), "engine": rep["engine"], "timing": rep["timing"]}))
+
+
+def render_openai(args, script, vid, out):
+    """The OpenAI voice (openai_voice.py): chunks of consecutive segments, each read with the voice's
+    persona and every line's direction; takes heard by the take listener until one is heard whole with
+    its pace inside the reference band; then the shared finish (deliver)."""
+    import openai_voice as OV
+    from concurrent.futures import ThreadPoolExecutor
+    t_all = time.time()
+    bandname = args.band or script.get("band") or "all"
+    vmeta = next((v for v in voice_list() if v["id"] == vid), {})
+    oc = vmeta.get("openai") or {}
+    voice = oc.get("voice") or OV.DEFAULT_VOICE
+    persona = oc.get("persona") or OV.DEFAULT_PERSONA
+    segs = script["segments"]
+    groups = OV.chunks(script, args.chunk_words or OV.CHUNK_WORDS)
+    chunks = [{"seg": g[0], "segs": g, "text": " ".join(segs[i]["text"] for i in g),
+               "pause_after": float(segs[g[-1]].get("pause_after") or 0.0)} for g in groups]
+    instr = [OV.instructions(persona, [segs[i] for i in g], script) for g in groups]
+    try:
+        bb = json.load(open(BAND))["band"][bandname]["wpm_artic"]
+        lo, hi = bb["p10"], bb["p90"]
+    except Exception:
+        lo, hi = 0, 1e9
+    want = target_wpm(segs[0], script) or (lo + hi) / 2
+    try:
+        import spoken     # the listener's written numbers in spoken form, when the tool has it
+    except ImportError:
+        spoken = None
+    names = list(globals().get("VOCAB") or [])
+
+    said = [" ".join(OV.styled(segs[i]) for i in g) for g in groups]
+
+    def gen(ci):
+        x, s = OV.speech(said[ci], voice, instr[ci])
+        return ci, OV.trim(x, s), s
+
+    cands = [[] for _ in chunks]
+    todo, sr, takes_total, t_gen = list(range(len(chunks))), None, 0, time.time()
+    for rnd in range(max(1, args.takes)):
+        if not todo:
+            break
+        with ThreadPoolExecutor(min(6, len(todo))) as ex:
+            res = list(ex.map(gen, todo))
+        for ci, x, s in res:
+            sr = s
+            takes_total += 1
+            text, heard = listen_fast(x, s)
+            w = measure.wer(chunks[ci]["text"], text)
+            errs = w["S"] + w["D"] + w["I"]
+            if errs and spoken is not None:
+                try:
+                    sp = spoken.spoken_form(text, chunks[ci]["text"], names)
+                    if sp.get("ok"):
+                        w2 = measure.wer(chunks[ci]["text"], sp["text"])
+                        errs = min(errs, w2["S"] + w2["D"] + w2["I"])
+                except Exception:  # noqa: BLE001 - the rule figure stands
+                    pass
+            pa = measure.pace(heard)["wpm_artic"]
+            oob = 0.0 if (pa is None or lo <= pa <= hi) else min(abs(pa - lo), abs(pa - hi)) / hi
+            cands[ci].append({"take": rnd, "wer": w["wer"], "errs": errs, "wpm_artic": pa, "oob": round(oob, 3),
+                              "dur": round(len(x) / s, 2), "heard": text, "_x": x})
+            log(f"chunk {ci + 1}/{len(chunks)} take {rnd + 1}: errors {errs} (rule wer {w['wer']:.3f}) pace {pa} "
+                f"{'in' if not oob else 'OUT of'} band, {len(x) / s:.1f}s")
+        # a chunk is done once a take is heard whole and reads inside the band
+        todo = [ci for ci in range(len(chunks)) if not any(c["errs"] == 0 and c["oob"] == 0 for c in cands[ci])]
+    t_gen = time.time() - t_gen
+    parts, bounds, t = [], [], 0.0
+    for ci, ch in enumerate(chunks):
+        best = min(cands[ci], key=lambda c: (c["errs"], c["oob"], abs((c["wpm_artic"] or want) / want - 1)))
+        ch.update(kept=best["take"], heard=best["heard"], takes=[{k: v for k, v in c.items() if not k.startswith("_")} for c in cands[ci]])
+        parts.append(best["_x"])
+        t += len(best["_x"]) / sr
+        if ci < len(chunks) - 1:
+            gap = max(ch["pause_after"], 0.25)
+            parts.append(np.zeros(int(gap * sr), np.float32))
+            bounds.append({"after_chunk": ci, "t": round(t + gap / 2, 3), "pause_set": gap})
+            t += gap
+    x = np.concatenate(parts).astype(np.float32)
+    minutes = sum(c["dur"] for cc in cands for c in cc) / 60
+    rep = {"engine": "openai", "model": OV.MODEL, "openai_voice": voice, "persona": persona, "script": str(args.script),
+           "voice": vid, "band": bandname, "chunks": chunks, "takes_total": takes_total,
+           "usd_estimate": round(minutes * OV.USD_PER_MIN, 4),
+           "settings": {"takes": args.takes, "chunk_words": args.chunk_words or OV.CHUNK_WORDS, "pace_band": [lo, hi],
+                        "take_listener": "faster-whisper " + CHECK_ASR, "listener": ASR_MODEL}}
+    deliver(x, sr, script, chunks, bounds, rep, args, out, t_all, gen_s=t_gen)
 
 
 def _jsonable(o):
@@ -849,6 +995,11 @@ def check(args):
             "f0_range_st": prof["pitch"]["range_st"], "voice_lufs": prof["loudness"]["lufs"]}
     inband = {k: {"value": v, "band": [band[k]["p10"], band[k]["p90"]],
                   "ok": v is not None and band[k]["p10"] <= v <= band[k]["p90"]} for k, v in vals.items()}
+    if rep.get("master") and rep.get("lufs_target") is not None:
+        # the mastering chain sets the voice to its own target (-14 LUFS, the film's level); the
+        # reference stems sit 1.4 dB under their mixes because a music bed shares the level
+        lt = rep["lufs_target"]
+        inband["voice_lufs"].update(target=lt, ok=vals["voice_lufs"] is not None and abs(vals["voice_lufs"] - lt) <= 0.7)
     # 3. joins: every chunk boundary, against the natural sentence gaps inside chunks
     words = wj["words"]
     natural = []
@@ -973,7 +1124,10 @@ def main():
     r.add_argument("--pace-tol", type=float, default=0.10)
     r.add_argument("--no-tempo-anchor", dest="tempo_anchor", action="store_false",
                    help="continue every chunk from the kept chunk as generated")
-    r.add_argument("--lufs", type=float)
+    r.add_argument("--lufs", type=float, help="the narration's loudness (default: the mastering chain's -14 LUFS)")
+    r.add_argument("--engine", choices=["openai", "voxcpm"], help="default: " + DEFAULT_ENGINE + " (NARRATE_ENGINE)")
+    r.add_argument("--chunk-words", type=int, help="openai: words per request (default 60)")
+    r.add_argument("--no-master", action="store_true", help="pauses as generated and loudness only (the pre-13 Nov finish)")
     r.add_argument("--band", choices=["03", "04", "all"], help="reference band the takes must sit in")
     c = sp.add_parser("check")
     c.add_argument("dir")

@@ -1,13 +1,17 @@
 # narrate: the narrator voice for workflows 3 and 4
 
-Local, open weights, on the Mac. VoxCPM2 (Apache-2.0) speaks; whisper hears. No paid API, no
-person's recording: every voice is designed from a description.
+VoxCPM2 (Apache-2.0, open weights, on the Mac) speaks by default; OpenAI gpt-4o-mini-tts, directed
+line by line, is the second engine (`--engine openai`). whisper hears. No person's recording: every
+voice is designed from a description (VoxCPM2) or is a stock voice (OpenAI). Every read, from either
+engine, gets the same finish: pauses set from the script and the reference narrators, the writer's
+stressed words ridden, and a mastering chain solved against the references by signal.
 
 ```
 PY=/Users/masaoodi/Documents/Valmera/.valmera/venv-narrate/bin/python
 cd plugins/valmera/skills/_shell/narrate
 $PY narrate.py voices
 zsh .valmera/week-1106/heavy.sh narrate $PY narrate.py render script.json --out DIR --band 03   # 04 for long-form
+$PY narrate.py render script.json --out DIR --band 03 --engine openai      # the OpenAI voice (NARRATE_ENGINE=openai)
 $PY narrate.py check DIR --band 03
 ```
 
@@ -74,20 +78,73 @@ perfectly whose melody range, tempo and register sit nearest the reference narra
   error, ASR confidence, high-band energy and clicks as float32 at a third of the memory; float32
   pushed the weights to swap on a loaded Mac and ran 5 to 10 times slower.
 
+## Engines and the finish (voice study, 13 Nov)
+
+The owner asked for a better voiceover. `.valmera/week-1112/lanes/VOICE` measured 48 reference
+narrators (all 28 narrated metromedia stories in `reference-library/2026-11-05/03`, all 20 long-form
+films in `04`; htdemucs voice stems at 44.1 kHz, whisper-large-v3 word times) on 23 signals: pitch
+range, spread, velocity, phrase swing, declination and cadence; articulation rate and its change
+between phrases; pauses per minute and their length; emphasis (loudest and highest word over its
+phrase, word-level spread, prominences); spectral tilt, alpha ratio, presence, low-mid weight and
+sibilance; room (the fall at phrase ends); crest factor, 400 ms loudness spread and 20 ms dynamics.
+No listening model. `voice_ref.json` holds the bands (p10/p25/median/p75/p90) and the median
+long-term spectrum. A candidate scores 0-100 per signal (exp(-z^2/2) from the reference median),
+averaged per group, groups averaged.
+
+What the metromedia narrators do (medians): 191 words a minute while speaking, 4 pauses a minute,
+sentence gaps of 0.22 s and none inside a phrase; 13.8 semitones of range, pitch moving 16.6 st/s;
+the stressed word 4.9 dB louder and 8.2 st higher than its phrase; a -6.0 dB/octave spectrum, a dry
+room (72 ms fall), 15 dB crest.
+
+| candidate (FedEx story, 177 words, band 03) | score | in band |
+|---|---|---|
+| VoxCPM2 atlas, today, as delivered | 64.5 | |
+| VoxCPM2 atlas + the new finish (default) | 79.0 | 19/23 |
+| VoxCPM2 atlas, 16 steps, guidance 2.5, + finish (a fresh read) | 77.1 | 19/23 |
+| gpt-4o-mini-tts cedar, directed, stress in capitals, + finish | 75.7 | 18/23 |
+| gpt-4o-mini-tts echo / verse / ash / onyx / ballad, + finish | 50-68 | |
+| tts-1-hd echo (speed 1.12) / fable / onyx, + finish | 61-68 | |
+
+Through the same htdemucs pass as the references (a fairness check) the order holds. Every OpenAI
+voice reads flatter on emphasis (stressed word +2.6-3.3 dB against +4.9) and pauses 20-37 times a
+minute before the finish; one request per segment read 120-150 words a minute, so the OpenAI engine
+reads chunks of up to 60 words with the persona and every line's direction.
+
+**The finish** (`deliver`, both engines):
+- `pauses.py`: every silence in the read goes to its script boundary (punctuation first) and is set:
+  a segment end gets the writer's `pause_after` as a ranking (the biggest beats, about 3 a minute in
+  03 and 6 in 04, stay pauses of 0.32-0.55 s / 0.40-0.90 s; the rest read as sentence gaps); a
+  sentence end at most 0.24 s (04: 0.50), a comma 0.16 s, a gap inside a phrase 0.10 s.
+- `master.py`: 80 Hz high-pass; linear-phase tonal EQ toward the references' long-term spectrum
+  shape (+-6 dB, 250 Hz-8 kHz); a compressor whose threshold is solved for the references' crest and
+  20 ms dynamics; a leveler solved for their 400 ms loudness spread; the writer's emphasis words
+  ridden 0-3 dB, solved for their emphasis; a 3.2 kHz presence bell solved for their 2-5 kHz
+  balance; a split-band de-esser solved for their sibilance; -14 LUFS, true peak under -1 dBTP.
+- `--no-master` keeps the old finish (pauses as generated, loudness only).
+
+**OpenAI engine** (`openai_voice.py`): `gpt-4o-mini-tts-2025-12-15`; per narrate voice an OpenAI
+voice and persona (`voices/<id>.json` "openai": atlas cedar, nova coral, blaze verse, sage onyx, iris
+marin); the writer's emphasis words go in capitals (4 letters or more), the persona says capitals
+carry the stress; takes are heard by the take listener until one is heard whole inside the pace
+band (3 rounds at most). The key: `OPENAI_API_KEY`, else the backend `.env` line (never printed).
+About $0.015 a minute of speech. If the service fails, the VoxCPM2 voice reads the script.
+
 ## The VOICE gate (`check`)
 
 - Word error under 1%, by whisper large-v3 (it never chose a take); the take listener's figure is
   reported beside it.
-- Pace (wpm and wpm while speaking), pitch range (p5..p95 of f0, semitones) and voice loudness inside
-  p10..p90 of the reference narrators in `reference-library/2026-11-05` folders 03 and 04
-  (`ref_band.json`, measured by `.valmera/week-1112/lanes/M/tools/ref_band.py`: demucs vocal stem, whisper-large-v3 word timings).
+- Pace (wpm and wpm while speaking) and pitch range (p5..p95 of f0, semitones) inside p10..p90 of
+  the reference narrators in `reference-library/2026-11-05` folders 03 and 04 (`ref_band.json`,
+  measured by `.valmera/week-1112/lanes/M/tools/ref_band.py`: demucs vocal stem, whisper-large-v3 word
+  timings); the voice's loudness within 0.7 dB of the chain's target (-14 LUFS; with `--no-master`,
+  inside that band).
 - No join artefact at any chunk boundary: energy step and spectral flux under the file's own p99,
   no click (sample step over the file's p99.9), noise floor inside the pause steady within 3 dB,
   level and pitch drift no larger than at the natural sentence gaps (+1 dB / +1 st).
 
 `measure.py` measures both sides (the reference narrators and our renders) the same way.
 
-## Gate results (13 Nov, this code)
+## Gate results (13 Nov, before the finish: loudness -15.6 LUFS, pauses as generated)
 
 | script | voice | length | word error (large-v3) | wpm / while speaking | range | loudness | joins with artefact | render s per min of speech |
 |---|---|---|---|---|---|---|---|---|

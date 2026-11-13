@@ -18,5 +18,10 @@
  "for": "founder stories, explainers",
  "gender": "female",
  "character": "clear, warm, expressive",
- "band": "03"
+ "band": "03",
+ "openai": {
+  "voice": "coral",
+  "persona": "Voice: a clear, confident female narrator of a top short-form documentary channel, warm and expressive, telling a true story. Close to the microphone, natural and human, never an announcer, never salesy, never theatrical.\nPacing: fast and tight, about 200 words a minute while speaking; slow lines are shown with tone, not with speed; short pauses only where a sentence ends.\nMelody: big, natural pitch movement, like someone telling a friend a story they can't believe: each sentence climbs to its key word and falls firmly at its end.\nStress: words written in capitals carry the line. Hit each one clearly: noticeably louder and higher than the words around it, then come straight back down.\nNumbers and names land crisp and exact.",
+  "chosen": "13 Nov voice study (.valmera/week-1112/lanes/VOICE): pitch range, pace and match to the reference narrators"
+ }
 }
