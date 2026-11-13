@@ -251,3 +251,18 @@ def test_a_sources_own_black_bars_and_a_timecode_band_never_reach_the_film(tmp_p
     from footage import shots
     p = shots.probe(str(out))
     assert (p["w"], p["h"]) == (540, 960) and not p["audio"]
+
+
+def test_a_clip_without_a_channel_in_the_search_gets_it_for_its_credit(monkeypatch):
+    import net_fetch
+    from footage import search
+    seen = {}
+
+    def get_json(url, params=None, timeout_s=None, **k):
+        seen.update(url=url, params=params)
+        return {"author_name": "CBS Sunday Morning"}
+    monkeypatch.setattr(net_fetch, "get_json", get_json)
+    assert search.channel_of("https://www.youtube.com/watch?v=xrLN7xcx67g") == "CBS Sunday Morning"
+    assert seen["url"].endswith("/oembed") and seen["params"]["url"].endswith("xrLN7xcx67g")
+    monkeypatch.setattr(net_fetch, "get_json", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    assert search.channel_of("https://www.youtube.com/watch?v=x") is None

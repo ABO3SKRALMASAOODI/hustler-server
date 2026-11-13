@@ -124,6 +124,9 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             src = dict(h, key=f"s{len(sources)}", subjects=[si], why=why)
             by_id[h["id"]] = src
             sources.append(src)
+        for s in sources:
+            if not s.get("channel") and s.get("where") == "youtube":
+                s["channel"] = search.channel_of(s["url"])
         log(f"rank: {len(sources)} sources to open of {sum(len(v) for v in hits.values())} found")
         # 3b. a person's face to hold the clips to: photographs the product's picture check already
         #     passed as that person (broll_source: Commons, gpt-6-sol), unless the caller gave its own
