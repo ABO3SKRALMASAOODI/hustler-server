@@ -425,6 +425,24 @@ def get_balance(conn, user_id: int) -> dict:
             # the Studio shows the MCP path with this plain line.
             out["studio_ai_paused"] = True
             out["studio_ai_notice"] = PLUS_STUDIO_PAUSED_TEXT
+    if is_subscribed:
+        # Lane P (13 Nov): the Studio's empty start tells a paying account
+        # that its first upload becomes a finished film by itself (an
+        # MCP-only plan's start used to say only "edit with your assistant").
+        # Present only when true.
+        try:
+            import free_trial
+            with conn.cursor() as fcur:
+                fcur.execute("SAVEPOINT first_cut_on_upload")
+                try:
+                    if free_trial.first_cut_on_upload(fcur, user_id):
+                        out["first_cut_on_upload"] = True
+                    fcur.execute("RELEASE SAVEPOINT first_cut_on_upload")
+                except Exception:
+                    fcur.execute("ROLLBACK TO SAVEPOINT first_cut_on_upload")
+                    fcur.execute("RELEASE SAVEPOINT first_cut_on_upload")
+        except Exception:
+            pass
     if subscribe_gated:
         out["subscribe_offer"] = subscribe_offer_body(conn)
     return out

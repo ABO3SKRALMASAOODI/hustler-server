@@ -72,6 +72,14 @@ DEFAULTS = {
     "max_upload_bytes": 2 * 1024 ** 3,
     "max_accounts_per_device_30d": 2,
     "payer_first_cut": True,
+    # Lane P (13 Nov 2026): 12 of the 21 paying Plus accounts had never seen
+    # a film. Every one subscribed before the D1 cutoff, so their uploads were
+    # the only ones that got NOTHING automatic: a free trial account got a
+    # First cut, a grandfathered payer got "edit with your assistant". The
+    # First cut is the free result, not a plan lane: their typed requests
+    # stay on exactly their contracted lane (MCP-only stays MCP-only). False
+    # restores the 30 Oct rule (new subscribers only).
+    "grandfathered_first_cut": True,
     # Trial REQUESTS run on the Claude lane in the executors (the
     # ANTHROPIC_API_KEY GitHub secret, deploy-cloudflare-executor.yml). A
     # kill switch for requests only: false keeps the First cut and sends
@@ -413,12 +421,13 @@ def admit_upload(cur, user_id, project_id, subscribed, nbytes=None):
         return None
     if subscribed and not cfg.get("payer_first_cut", True):
         return None
-    if subscribed and not _new_subscriber(cur, user_id):
-        # D1 grandfathering (DECISIONS.md, 25 Oct): EXISTING subscribers keep
-        # exactly today's behaviour, so no automatic First cut on their next
-        # upload. Only subscribers who joined after the release cutoff
-        # (claude_plans: studio_for_all_plans on, no payment or Paddle start
-        # before cutoff_at) get it. Found by the T1 gating proof (30 Oct).
+    if subscribed and not cfg.get("grandfathered_first_cut", True) \
+            and not _new_subscriber(cur, user_id):
+        # The 30 Oct rule (T1 gating proof), kept behind a switch: with
+        # grandfathered_first_cut false only subscribers who joined after the
+        # D1 cutoff get the automatic First cut. On (the default since lane P,
+        # 13 Nov) every paying account's first Studio project gets it, whatever
+        # its plan; its own requests keep their contracted lane.
         return None
     if nbytes and int(nbytes) > int(cfg.get("max_upload_bytes") or 0) > 0:
         return None
@@ -444,6 +453,81 @@ def admit_upload(cur, user_id, project_id, subscribed, nbytes=None):
                               || jsonb_build_object('free_result', %s::jsonb)
                    WHERE id = %s""", (json.dumps(admission), int(project_id)))
     return admission
+
+
+def first_cut_on_upload(cur, user_id):
+    """Whether this paying account's next Studio upload gets the automatic
+    First cut (the Studio says so on its empty start, lane P). The same
+    rules as admit_upload, read only; any doubt reads False."""
+    try:
+        cfg = settings(cur)
+        if not cfg.get("payer_first_cut", True) or not live(cur, user_id, cfg):
+            return False
+        if int(user_id) in {int(x) for x in cfg.get("excluded_user_ids") or []}:
+            return False
+        if not cfg.get("grandfathered_first_cut", True) \
+                and not _new_subscriber(cur, user_id):
+            return False
+        cur.execute("""SELECT 1 FROM projects
+                       WHERE user_id = %s AND meta ? 'free_result' LIMIT 1""",
+                    (int(user_id),))
+        return cur.fetchone() is None
+    except Exception:
+        return False
+
+
+# A paying account's assistant may ask for the First cut on any project it
+# owns over MCP (make_first_cut), at most this many a day per account.
+MCP_FIRST_CUTS_PER_DAY = 10
+
+
+def admit_mcp_first_cut(cur, user_id, project_id, nbytes=None):
+    """Admit a paying account's project to the First cut because its own
+    assistant asked for it over MCP (routes/mcp make_first_cut).
+
+    Lane P (13 Nov 2026): MCP-only Plus accounts (2544, 2555, 2624, 2647)
+    paid, connected an assistant, and never got a film: their assistants
+    searched stock and read transcripts for hours, and no tool turned a video
+    into a finished cut. This is the Studio's automatic First cut, asked for
+    by the caller instead of started by an upload: the same switch, caps and
+    chain, on any project of a subscribed account, never the owner's agent
+    account. Returns (admission, None) or (None, reason)."""
+    cfg = settings(cur)
+    if not live(cur, user_id, cfg):
+        return None, "paused"
+    try:
+        if int(user_id) in {int(x) for x in cfg.get("excluded_user_ids") or []}:
+            return None, "excluded"
+    except (TypeError, ValueError):
+        return None, "excluded"
+    if not cfg.get("payer_first_cut", True):
+        return None, "paused"
+    existing = project_admission(cur, project_id)
+    if existing:
+        return existing, None
+    if nbytes and int(nbytes) > int(cfg.get("max_upload_bytes") or 0) > 0:
+        return None, "too_large"
+    cur.execute("""SELECT COUNT(*) AS n FROM projects
+                   WHERE user_id = %s AND meta ? 'free_result'
+                     AND (meta->'free_result'->>'admitted_at')::timestamptz
+                         > NOW() - INTERVAL '1 day'""", (int(user_id),))
+    row = cur.fetchone() or {}
+    today = int((row.get("n") if isinstance(row, dict) else row[0]) or 0)
+    if today >= MCP_FIRST_CUTS_PER_DAY:
+        return None, "daily_limit"
+    spend = spend_status(cur, fresh=True)
+    if not spend.get("ready", True):
+        return None, "paused"
+    if spend["month_usd"] >= float(cfg.get("monthly_usd_cap") or 0) \
+            or spend["all_usd"] >= float(cfg.get("pool_usd_cap") or 0):
+        return None, "paused"
+    admission = {"admitted_at": _now().isoformat(), "kind": "payer",
+                 "first_cut": True, "via": "mcp"}
+    cur.execute("""UPDATE projects
+                   SET meta = COALESCE(meta, '{}'::jsonb)
+                              || jsonb_build_object('free_result', %s::jsonb)
+                   WHERE id = %s""", (json.dumps(admission), int(project_id)))
+    return admission, None
 
 
 def trial_project(cur, user_id, project_id, live_only=False):

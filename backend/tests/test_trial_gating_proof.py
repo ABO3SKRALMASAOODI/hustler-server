@@ -30,9 +30,21 @@ def _existing():
               credit_state=json.dumps({"state": "on"}))
 
 
-def test_an_existing_subscribers_upload_gets_no_first_cut():
+def test_an_existing_subscribers_upload_gets_the_first_cut_lane_p():
+    """Lane P (13 Nov 2026): 12 of 21 paying Plus accounts had never seen a
+    film; the grandfathered payer was the one class whose upload got nothing
+    automatic. The First cut is the free result, not a plan lane."""
     _fresh()
     db = _existing()
+    got = free_trial.admit_upload(db, 900, 501, subscribed=True)
+    assert got and got["kind"] == "payer" and got["first_cut"] is True
+
+
+def test_with_the_old_rule_an_existing_subscribers_upload_gets_no_first_cut():
+    _fresh()
+    db = DB(stored=_on(**EVERY_FLAG, grandfathered_first_cut=False),
+            studio=STUDIO_ON, paid_before=True,
+            credit_state=json.dumps({"state": "on"}))
     assert free_trial.live(db, 501) is True                # the trial is ON
     assert free_trial.admit_upload(db, 900, 501, subscribed=True) is None
     assert db.updates == []                                # project untouched

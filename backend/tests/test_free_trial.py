@@ -155,20 +155,29 @@ def test_admission_marks_the_project_once_and_payers_get_the_first_cut():
     assert free_trial.admit_upload(db, 777, 9, subscribed=False) == first
     assert len(db.updates) == 1
     _fresh()
-    # D1 grandfathering: an EXISTING subscriber's next upload is today's
-    # (no automatic First cut) with every trial flag on ...
+    # Lane P (13 Nov): every paying account's first project gets the First
+    # cut, a subscriber from before the D1 cutoff too ...
     cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
     studio = json.dumps({"on": True, "cutoff_at": cutoff})
     assert free_trial.admit_upload(DB(stored=_on()), 778, 10,
-                                   subscribed=True) is None
+                                   subscribed=True)["kind"] == "payer"
     _fresh()
     assert free_trial.admit_upload(DB(stored=_on(), studio=studio,
                                       paid_before=True), 778, 10,
-                                   subscribed=True) is None
-    # ... and only a subscriber who joined after the cutoff gets it.
+                                   subscribed=True)["kind"] == "payer"
+    # ... and grandfathered_first_cut=false restores the 30 Oct rule: only a
+    # subscriber who joined after the cutoff gets it.
     _fresh()
-    payer = free_trial.admit_upload(DB(stored=_on(), studio=studio), 778, 10,
-                                    subscribed=True)
+    old_rule = _on(grandfathered_first_cut=False)
+    assert free_trial.admit_upload(DB(stored=old_rule), 778, 10,
+                                   subscribed=True) is None
+    _fresh()
+    assert free_trial.admit_upload(DB(stored=old_rule, studio=studio,
+                                      paid_before=True), 778, 10,
+                                   subscribed=True) is None
+    _fresh()
+    payer = free_trial.admit_upload(DB(stored=old_rule, studio=studio), 778,
+                                    10, subscribed=True)
     assert payer["kind"] == "payer"
 
 

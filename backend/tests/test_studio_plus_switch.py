@@ -624,11 +624,29 @@ def test_the_assistant_is_shown_a_plus_request_in_every_state(held_world,
 
 # --------------------------------------------------- the automatic First cut
 
+def test_every_paying_plan_gets_the_first_cut_by_default_lane_p():
+    """Lane P (13 Nov 2026): an MCP-only plan's first Studio upload becomes a
+    film too; its typed requests keep their lane (MCP-only stays MCP-only)."""
+    import free_trial
+    from test_free_trial import DB, _fresh, _on
+    studio_off = json.dumps({"on": False, "cutoff_at": CUTOFF.isoformat()})
+    for plan, uid in (("plus_2026", NEW_PLUS), ("mcp_connect", NEW_MCP)):
+        _fresh()
+        d = DB(stored=_on(trial_requests=True, payer_first_cut=True),
+               studio=studio_off, paid_before=True,
+               credit_state=json.dumps({"state": "on"}))
+        d.user = dict(d.user, plan=plan)
+        got = free_trial.admit_upload(d, 905, uid, subscribed=True)
+        assert got and got["kind"] == "payer"
+
+
 def test_an_mcp_only_plan_never_gets_an_automatic_first_cut():
+    """The 30 Oct rule, behind grandfathered_first_cut=false."""
     import free_trial
     from test_free_trial import DB, _fresh, _on
     every = dict(trial_requests=True, payer_first_cut=True,
-                 model="claude-haiku-5-5", per_account_usd_cap=0.12)
+                 model="claude-haiku-5-5", per_account_usd_cap=0.12,
+                 grandfathered_first_cut=False)
     studio_on = json.dumps({"on": True, "cutoff_at": CUTOFF.isoformat()})
     studio_off = json.dumps({"on": False, "cutoff_at": CUTOFF.isoformat()})
     credit = json.dumps({"state": "on"})

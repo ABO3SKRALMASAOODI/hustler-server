@@ -1195,6 +1195,39 @@ def _trial_url_direct(cur, user_id, project_id, message_id, text, concierge):
     return job_id
 
 
+def _admit_unlocked_upload(cur, user_id, project_id, original):
+    """An upload that met the wall and was unlocked by a payment is admitted
+    to the First cut as if it had landed after the payment.
+
+    Lane P (13 Nov 2026), account 2941: the video landed while the account
+    had no plan (the trial was paused), they paid Plus seven minutes later,
+    checkout's replay started the analysis, and the analysis said "tell me
+    what you'd like changed": admission is only tried when an upload lands,
+    so a paying customer's first video got no automatic film. Tried once
+    here, under the same rules as a landing upload (free_trial.admit_upload:
+    first project only, the switch, the caps); any failure keeps today's
+    behaviour."""
+    if _subscribe_gate_applies(cur, user_id):
+        return None
+    try:
+        cur.execute("SAVEPOINT free_trial_unlock_admit")
+        import free_trial
+        admission = free_trial.admit_upload(
+            cur, user_id, project_id, subscribed=True,
+            nbytes=(original or {}).get("bytes"))
+        cur.execute("RELEASE SAVEPOINT free_trial_unlock_admit")
+        return admission
+    except Exception as e:                                  # pragma: no cover
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT free_trial_unlock_admit")
+            cur.execute("RELEASE SAVEPOINT free_trial_unlock_admit")
+        except Exception:
+            pass
+        print(f"[free_trial] unlock admission failed for project "
+              f"{project_id}: {e}", flush=True)
+        return None
+
+
 def _upload_wall(cur, user_id, project_id, nbytes=None):
     """Whether a Studio main-video upload meets the subscribe wall.
 
@@ -4255,6 +4288,10 @@ def project_state(user_id, project_id):
             if still_idle and main_index["recent_count"] < 3:
                 current_app.logger.info("project %s: re-indexing (%s)",
                                         project_id, heal_reason)
+                if not idx_row and not ij:
+                    # The upload met the wall and checkout unlocked it: the
+                    # paying customer's first video gets the First cut too.
+                    _admit_unlocked_upload(cur, user_id, project_id, original)
                 _enqueue(cur, project_id, user_id, "index",
                          {"asset_id": original["id"],
                           "reindex": is_reindex})
@@ -4636,6 +4673,7 @@ def replay_blocked(user_id, project_id):
                 return jsonify({"replay": None, "reason": "indexing"})
             if _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
                 return jsonify({"replay": None, "reason": "busy_capacity"})
+            _admit_unlocked_upload(cur, user_id, project_id, original)
             job_id = _enqueue(cur, project_id, user_id, "index",
                               {"asset_id": original["id"],
                                "subscription_unlocked": True})
@@ -9094,6 +9132,8 @@ CLIENT_EVENT_KINDS.update({
     # An AI app was handed the download link of a finished export
     # (MCP download_url kind=final): the MCP twin of download_triggered.
     "mcp_export_delivered",
+    # An AI app asked for the automatic First cut (MCP make_first_cut).
+    "mcp_first_cut_started",
     # The optional "what didn't work?" answer on /cancel.
     "cancel_feedback",
     # The upgrade card for Shorts / Website demos (feature_gate.py): the

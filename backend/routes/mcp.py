@@ -771,6 +771,11 @@ SESSION_TOOLS = [
          "project_id": {"type": "integer", "minimum": 1},
          "edl_version": {"type": "integer", "minimum": 1}},
          "required": ["project_id", "edl_version"]}},
+    {"name": "make_first_cut",
+     "description": "Make Valmera's automatic first cut of an explicit project's analyzed main video: a finished vertical film (the strongest stretch, tightened, with a hook title, captions and the picture reframed for phones), made by the same chain the Studio runs after a first upload. Use it when the user wants a finished video and has not asked for anything more specific, or as the first draft you then refine with the editing tools. Needs index_status 'done'. Returns a job: call wait_for_job, then download_url(kind='preview') to watch it and export_final(edl_version) for the MP4. One first cut per project; calling it again returns the existing one.",
+     "inputSchema": {"type": "object", "properties": {
+         "project_id": {"type": "integer", "minimum": 1}},
+         "required": ["project_id"]}},
     {"name": "apply_short_edit_batches",
      "description": "Save caller-authored edits for up to 30 shorts in one request, without running another model or rendering. project_id is the parent; every child must belong to it. Each batch uses apply_edit_batch's operations and current base_version, and has its own unique retry operation_id. Each child is atomic; results explicitly report partial failures. All times describe that child's resulting timeline. Read and inspect each short first. Saved edits still require changed-moment and final quality review. This tool never exports finals.",
      "inputSchema": {"type": "object", "properties": {
@@ -987,6 +992,7 @@ SESSION_TOOLS = [
 # and calling it twice with the same id lands the same state.
 _SESSION_META = {
     "export_final": ("Export the finished video", False, True),
+    "make_first_cut": ("Make the automatic first cut", False, True),
     "apply_short_edit_batches": ("Apply edits to selected shorts", False, True),
     #  name: (title, readOnlyHint, idempotentHint)
     "list_projects":  ("List this account's projects", True, False),
@@ -1056,6 +1062,12 @@ with the same names, arguments and effects.
    index_status reports progress, and a long video takes minutes. A source
    under one minute is already one short: edit that project directly
    instead of using the multi-clip workflow.
+   A FINISHED FILM IN ONE CALL: once the video is analyzed,
+   make_first_cut(project_id) makes Valmera's automatic first cut, the
+   same finished vertical film the Studio makes after a first upload. Use it
+   when the user wants a finished video and has not asked for anything more
+   specific, or as the draft you refine. wait_for_job, watch it with
+   download_url(kind='preview'), then export_final for the MP4.
 
 5. LONG VIDEO TO SHORTS. create_project(title, kind='shorts'), upload the
    long main video and poll index_status. Clip selection does not start
@@ -3082,6 +3094,106 @@ def _latest_edl_version(cur, project_id):
         return None
 
 
+_FIRST_CUT_REFUSALS = {
+    "paused": ("The automatic first cut is paused on this deployment right "
+               "now. Edit the video with the editing tools instead "
+               "(get_transcript, keep_segments, add_captions, render_preview)."),
+    "excluded": "This account does not use the automatic first cut.",
+    "too_large": ("This video is too large for the automatic first cut. Edit "
+                  "it with the editing tools instead."),
+    "daily_limit": ("This account has made today's first cuts already. Edit "
+                    "with the editing tools, or try again tomorrow."),
+}
+
+
+def _t_make_first_cut(tok, args):
+    """The Studio's automatic First cut, asked for by the caller (lane P,
+    13 Nov 2026): one call turns an analyzed video into a finished film, so
+    an MCP-only plan has a film without hand-building a timeline."""
+    project_id, error = _required_project_id(args)
+    if error:
+        return _session_error(error)
+    user_id = int(tok["user_id"])
+    with vdb() as conn:
+        cur = conn.cursor()
+        project = _project_for_user(cur, project_id, user_id)
+        if not project:
+            return _session_error(
+                f"Project {project_id} does not exist on this account.")
+        original = _active_original(cur, project_id)
+        if not original:
+            return _session_error(
+                f"PROJECT {project_id} has no main video. Upload one "
+                "(upload_start with kind='original', then upload_finish), "
+                "wait for index_status 'done', then call make_first_cut.")
+        if not (original.get("sha256") and _index_row(cur, original["sha256"])):
+            return _text(
+                f"PREREQUISITE: project {project_id}'s video is still being "
+                "analyzed. Poll index_status until it is done, then call "
+                "make_first_cut again.", True)
+        cur.execute("""SELECT id, state FROM video_jobs
+                       WHERE project_id = %s AND type = 'agent_turn'
+                         AND payload->>'first_cut' = 'true'
+                       ORDER BY id DESC LIMIT 1""", (project_id,))
+        done = cur.fetchone()
+        if done:
+            latest = _latest_edl_version(cur, project_id)
+            return (f"PROJECT {project_id}: its first cut is job {done['id']} "
+                    f"({done['state']}). Call wait_for_job(job_id="
+                    f"{done['id']}) if it is still running, then "
+                    f"download_url(project_id={project_id}, kind='preview') "
+                    "to watch it and export_final(project_id="
+                    f"{project_id}, edl_version={latest}) for the MP4. "
+                    "Refine it with the editing tools; no second first cut "
+                    "is made.")
+        cur.execute("""SELECT 1 FROM video_jobs
+                       WHERE project_id = %s AND type = 'agent_turn'
+                         AND state IN ('queued', 'running') LIMIT 1""",
+                    (project_id,))
+        if cur.fetchone():
+            return _text(
+                f"PREREQUISITE: project {project_id} has an edit running. "
+                "Wait for it, then call make_first_cut again.", True)
+        import free_trial
+        cur.execute("SELECT is_subscribed FROM users WHERE id = %s",
+                    (user_id,))
+        if not (cur.fetchone() or {}).get("is_subscribed"):
+            return _session_error("The first cut over MCP needs a plan.")
+        cur.execute("SAVEPOINT mcp_first_cut")
+        try:
+            admission, reason = free_trial.admit_mcp_first_cut(
+                cur, user_id, project_id, original.get("bytes"))
+            cur.execute("RELEASE SAVEPOINT mcp_first_cut")
+        except Exception as e:                              # pragma: no cover
+            cur.execute("ROLLBACK TO SAVEPOINT mcp_first_cut")
+            cur.execute("RELEASE SAVEPOINT mcp_first_cut")
+            print(f"[mcp] make_first_cut admission failed: {e}", flush=True)
+            admission, reason = None, "paused"
+        if not admission:
+            return _text(_FIRST_CUT_REFUSALS.get(reason, _FIRST_CUT_REFUSALS[
+                "paused"]), True)
+        job_id = _enqueue(cur, project_id, user_id, "agent_turn",
+                          {"first_cut": True, "trial_lane": True,
+                           "via": "mcp"})
+    try:
+        record_client_event(user_id, project_id, "mcp_first_cut_started",
+                            detail={"job_id": job_id}, origin="mcp")
+    except Exception:
+        pass
+    return {"content": [{"type": "text", "text": (
+                f"PROJECT {project_id}: the first cut is job {job_id}; it "
+                "usually takes two to four minutes. Call wait_for_job(job_id="
+                f"{job_id}) until done, then download_url(project_id="
+                f"{project_id}, kind='preview') to watch it, and "
+                f"export_final(project_id={project_id}, edl_version=<the "
+                "version project_state reports>) for the MP4 the user keeps. "
+                "It is a draft until you have watched it; when export_final "
+                "names unresolved findings, repair them with the editing "
+                "tools (or justify a false positive) and export again.")}],
+            "structuredContent": {"project_id": project_id,
+                                  "job_id": job_id, "kind": "first_cut"}}
+
+
 def _t_export_final(tok, args):
     project_id, version = args.get("project_id"), args.get("edl_version")
     if type(project_id) is not int or project_id < 1 or type(version) is not int or version < 1:
@@ -3725,6 +3837,7 @@ def _t_apply_short_edit_batches(tok, args):
 
 SESSION_IMPL = {
     "export_final": _t_export_final,
+    "make_first_cut": _t_make_first_cut,
     "apply_short_edit_batches": _t_apply_short_edit_batches,
     "list_projects": _t_list_projects,
     "open_project": _t_open_project,
