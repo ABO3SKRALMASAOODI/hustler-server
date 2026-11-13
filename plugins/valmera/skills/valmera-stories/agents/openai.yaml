@@ -1,0 +1,7 @@
+interface:
+  display_name: "Valmera Story Films"
+  short_description: "Narrated founder and topic stories on real pictures"
+  default_prompt: "Use $valmera-stories to make one narrated founder or topic story film: let the workflow find its own idea on the web, write and verify the script, narrate it, supply real free-licence pictures of what it names, stop at the director's look, then render on Valmera's engine, check, deliver once and delete the work folder. Never publish and never pick music."
+
+policy:
+  allow_implicit_invocation: false

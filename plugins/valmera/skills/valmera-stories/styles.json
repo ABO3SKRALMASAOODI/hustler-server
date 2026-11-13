@@ -1,0 +1,59 @@
+{
+ "_about": "The six styles of workflow 3 (atlas/ALIEN.md 8.3), as the ideas and script stages read them. ids match _shell/styles.json. buildable: film.py has the builder and the engine draws the whole spine today; a style that is not buildable is never offered, so nothing is faked.",
+ "styles": [
+  {
+   "id": "character-sheet",
+   "name": "Character Sheet",
+   "buildable": true,
+   "spine": ["G4", "T4"],
+   "look": "The founder's life as a run in a game. Real photographs of the named people, places and things fill the frame; a small stat block lives in the top-left corner and every event in the narration changes a stat on the word that causes it (cash, runway, age, planes, customers). At the low point a bar goes red and blinks. Some sentence endings are cuts: the full stop of the caption swells and swallows the frame with the next picture inside it.",
+   "hook": "Frame 0 is the founder's real photo with the stat block already showing one absurd number.",
+   "close": "The last stat overflows its box: the number grows past the block and fills the frame, then the end card.",
+   "needs": "a money or survival story with three or four quantities that change over time, every value stated in a source; named people and places with free-licence photos",
+   "voice": ["atlas", "blaze"]
+  },
+  {
+   "id": "whole-page",
+   "name": "Whole Page",
+   "buildable": true,
+   "spine": ["N6", "C1"],
+   "look": "The story is set as one printed page, two columns, with real photographs as windows inside the text. The camera rides the line being spoken, a word at a time; words not yet spoken wait in grey, spoken words are inked, and the loud ones are set larger, measured from the narrator's voice. At the end the camera pulls back and the whole film is one page: a poster the viewer can screenshot.",
+   "hook": "Frame 0 is the first line of the page, the hook sentence already set, its first word inked as it is said.",
+   "close": "A pull-back to the whole page, every window still showing its picture; it holds as a poster before the end card.",
+   "needs": "a story told in about 150 to 190 words with four to six named things that have free-licence photos; a strong first sentence",
+   "voice": ["nova", "atlas"]
+  },
+  {
+   "id": "one-photograph",
+   "name": "One Photograph",
+   "buildable": true,
+   "spine": ["T3", "X2"],
+   "look": "One real archive photograph, public domain or free licence, is the whole world. It is assembled by the voice: its people arrive one per spoken beat out of a blurred copy. The camera travels inside it to each person as they are named, and each one keeps a small mark once their part of the story is told, so the photo fills up with the story. Once, the camera pushes into a face until its tones turn out to be the sentence being spoken, set in tiny type.",
+   "hook": "Frame 0 is the blurred photograph with its first face landing sharp on the first word.",
+   "close": "Pull back to the whole photograph, every mark lit, one line.",
+   "needs": "one free-licence archive photograph on Wikimedia Commons, large (2000 px or more), whose people or things are the whole story",
+   "voice": ["nova", "atlas"]
+  },
+  {
+   "id": "living-print",
+   "name": "Living Print",
+   "buildable": false,
+   "spine": ["X1", "T2", "N1", "L3"],
+   "needs": "a stateful damage layer in the engine (X1) and the residue word's falling tiles (T2)"
+  },
+  {
+   "id": "the-thread",
+   "name": "The Thread",
+   "buildable": false,
+   "spine": ["N2", "T5"],
+   "needs": "a path planner over matte and depth per shot; stills have neither"
+  },
+  {
+   "id": "census",
+   "name": "Census",
+   "buildable": false,
+   "spine": ["G1", "T10", "X5"],
+   "needs": "particles from a photo's own pixels (engine class C)"
+  }
+ ]
+}
