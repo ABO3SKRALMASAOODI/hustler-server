@@ -533,27 +533,62 @@ def _contrast(ink_lum, grounds):
     return min((max(ink_lum, g) + 0.05) / (min(ink_lum, g) + 0.05) for g in grounds)
 
 
-def hook_type(l1, line, accent_words, accent, a, b, bottom=0.556, ground=None):
+def _hits_face(box, faces):
+    """TASTE P3 on the plan: a box of type stands on a face when they share more than 15% of either."""
+    for f in faces or []:
+        ix, iy = min(box[2], f[2]) - max(box[0], f[0]), min(box[3], f[3]) - max(box[1], f[1])
+        if ix > 0 and iy > 0 and ix * iy > 0.15 * min((box[2] - box[0]) * (box[3] - box[1]), (f[2] - f[0]) * (f[3] - f[1])):
+            return True
+    return False
+
+
+def hook_type(l1, line, accent_words, accent, a, b, bottom=0.556, ground=None, faces=None):
     """The hook line, large, left, two rows at most, standing sharp on frame 0. The words that carry it take the
     serif voice in the film's accent and breathe once; a hairline draws under them. ``ground(box)`` gives the
     picture's dark and light under the line: where the accent would not read there (WCAG 3.0 for display type, after
     the shade), those words are white and only the hairline keeps the colour; where white would not read, the shade
-    deepens. Returns items."""
+    deepens. ``faces`` are the picture's faces in the frame: the line stands above the caption seat when that is
+    clear of them, else under the chin (smaller if it must be, the captions at its foot), else it is not set: a face
+    is never written on. Returns (items, the line's foot when the captions must sit under it, else None)."""
     W, H = l1["frame"]
     acc = {_norm(x) for x in str(accent_words or "").split()}
     words = [w for w in str(line or "").split() if w]
     if not words:
-        return []
-    px = 112
-    for _ in range(6):
+        return [], None
+
+    def lay(px):
         l1["voices"]["hk"] = dict(font="InterDisplay-Black.ttf", px=px, track=-2.5, shadow=dict(a=0.55, blur=0.014))
         l1["voices"]["hka"] = dict(font="InstrumentSerif-Italic.ttf", px=int(px * 1.16), track=-1, shadow=dict(a=0.55, blur=0.014))
         toks = [(w, "hka" if _norm(w) in acc else "hk") for w in words]
-        rows = _wrap(toks, l1["voices"], W, 0.07, 0.93, 0.26 * px / W)
+        return _wrap(toks, l1["voices"], W, 0.07, 0.93, 0.26 * px / W)
+
+    def box_at(rows, px, foot):
+        lead = 1.06 * px / H
+        right = max(x + L.text_w(l1["voices"][v], t, W) for row in rows for t, v, x in row)
+        return [0.07, foot - (len(rows) - 1) * lead - 0.78 * 1.16 * px / H, right, foot + 0.24 * 1.16 * px / H]
+
+    px, rows = 112, None
+    for _ in range(6):
+        rows = lay(px)
         if len(rows) <= 2:
             break
         px = int(px * 0.9)
     rows = rows[:2]
+    floor = None
+    if _hits_face(box_at(rows, px, bottom), faces):              # the seat above the captions is on a face: under the chin
+        chin = max(f[3] for f in faces)
+        placed = False
+        for p2 in (px, int(px * 0.88), int(px * 0.78), 84):
+            r2 = lay(p2)[:2]
+            foot = chin + 0.022 + 0.78 * 1.16 * p2 / H + (len(r2) - 1) * 1.06 * p2 / H
+            bx = box_at(r2, p2, foot)
+            if bx[3] <= 0.735 and not _hits_face(bx, faces):
+                px, rows, bottom, floor, placed = p2, r2, foot, bx[3] + 0.016, True
+                break
+        if not placed:
+            return [], None
+    else:
+        lay(px)
     lead = 1.06 * px / H
     n = b - a
     out = []
@@ -578,11 +613,11 @@ def hook_type(l1, line, accent_words, accent, a, b, bottom=0.556, ground=None):
             x0, x1 = marks[0][0], marks[-1][0] + marks[-1][1]
             y0 = y + 0.2 * px / H
             grow = expo(12, 0.0, 1.0)
-            rect = [[round(x0, 5), round(y0, 5), round(x0 + max((x1 - x0) * g, 0.002), 5), round(y0 + 0.0042, 5)] for g in [0.0] * 2 + grow + [1.0] * (n - 14)]
+            rect = [[round(x0, 5), round(y0, 5), round(x0 + max((x1 - x0) * g_, 0.002), 5), round(y0 + 0.0042, 5)] for g_ in [0.0] * 2 + grow + [1.0] * (n - 14)]
             out.append(dict(id=f"hook.{r}.rule", k="flash", f=[a, b], mode="fill", c=accent, a=1, rect=rect, z=3))
     out.append(dict(id="hook.pool", k="flash", f=[a, b], mode="pool", a=pool, z=0,           # a wide, soft ground: a shade, not a smudge
                     rect=[0.0, round(bottom - len(rows) * lead - 0.11, 4), 1.0, round(bottom + 0.12, 4)]))
-    return out
+    return out, floor
 
 
 def _fade(n, inn=5, out=5):
@@ -673,6 +708,8 @@ def _panel(pid, design, a, b, l1, accent, top, height):
         y += 0.027
         row_of(title.upper(), "dl", inner_x0, y, accent if not paper else "#8A5A00", 5, 1, inner_x1)
     if kind in ("number", "versus", "bars") and parts:
+        if not all(any(ch.isdigit() for ch in str(p["value"])) for p in parts):
+            return [], top                                       # a chart is made of figures he said: words alone are the captions' work
         vals = [_num(p) for p in parts]
         top_v = max([v for v in vals if v] or [1.0])
         cols = len(parts) if kind == "versus" or len(parts) <= 2 else 1
@@ -938,7 +975,7 @@ def apply(l1, script, earned, idx, source, sounds_manifest, own=True, panel_low=
     hook_end = frame_of(l1, t_end) if t_end is not None else None
     hook_end = int(min(max(hook_end if hook_end is not None else 54, 36), min(84, n // 3)))
     rec = dict(stripped=gone, framed=framed, hook=None, pictures=[], designs=[], own=None, skipped=[])
-    items = []
+    items, hook_moved = [], []
     if hrow:
         shot, cards = picture_items("hook", hrow, 0, hook_end, l1, work=work)
         paint(l1, 0, hook_end, lambda a, b: shot)
@@ -947,7 +984,17 @@ def apply(l1, script, earned, idx, source, sounds_manifest, own=True, panel_low=
     ground = None
     if hrow and hrow.get("layout") == "full" and work:
         ground = lambda box: ground_under(os.path.join(work, hrow["path"]), hrow["crop"], box)      # noqa: E731
-    items += hook_type(l1, hook.get("line") or script.get("hook_line"), hook.get("accent"), accent, 0, hook_end, ground=ground)
+    hfaces = None
+    if hrow and hrow.get("layout") == "full":                     # the picture's faces in the frame, a little larger: it lands close and settles
+        x0, y0, x1, y1 = hrow["crop"]
+        hfaces = [[(f[0] - 0.09 * f[2] - x0) / (x1 - x0), (f[1] - 0.09 * f[3] - y0) / (y1 - y0),
+                   (f[0] + 1.09 * f[2] - x0) / (x1 - x0), (f[1] + 1.09 * f[3] - y0) / (y1 - y0)] for f in hrow.get("faces") or []]
+    htype, floor = hook_type(l1, hook.get("line") or script.get("hook_line"), hook.get("accent"), accent, 0, hook_end, ground=ground, faces=hfaces)
+    items += htype
+    rec_hook_line = bool(htype)
+    if floor is not None:                                        # the line stands under the chin: the hook's captions sit at its foot
+        L.split_captions_at(l1, [hook_end])
+        ride_under(l1, dict(f=[0, hook_end], x=0.5, y=floor / 2 - 0.008, w=1.0, h=floor - 0.016, s=1), hook_moved)
     # the payoff: no picture after it, and his own footage closer
     pay = script.get("payoff") or {}
     pay_f = None
@@ -962,6 +1009,9 @@ def apply(l1, script, earned, idx, source, sounds_manifest, own=True, panel_low=
     rows = []
     for r in plan:
         if hrow and r["i"] == hrow["i"]:
+            continue
+        if r.get("kind") == "design" and not panel_items("probe", r.get("design") or {}, 0, 90, dict(l1, voices=dict(l1["voices"])), accent, 0.55, 0.235):
+            rec["skipped"].append(dict(i=r["i"], why="not a design of figures or a paper"))
             continue
         if r.get("kind") == "design" or r["i"] in got:
             f = land(r)
@@ -1066,7 +1116,9 @@ def apply(l1, script, earned, idx, source, sounds_manifest, own=True, panel_low=
     pics = len(L.picture_shots(l1)) + len([c for c in L.cards(l1)])
     np10 = pics / max(n / fps / 10.0, 1e-6)
     rec["sound"] = place_sounds(l1, events, sounds_manifest, voice_lufs(source), np10, script.get("sounds"))
-    rec.update(new_pictures=pics, np10=round(np10, 2), hook_frames=hook_end, captions_moved=moved,
+    if rec["hook"]:
+        rec["hook"]["line_set"] = rec_hook_line
+    rec.update(new_pictures=pics, np10=round(np10, 2), hook_frames=hook_end, captions_moved=moved + hook_moved,
                found=len(got), planned=len(plan), credits=earned.get("credits"), said=earned.get("said"))
     rec["ok"] = bool(rec["hook"] and len(rec["pictures"]) + len(rec["designs"]) >= 3)
     return rec

@@ -296,3 +296,33 @@ def test_a_caption_across_a_cut_to_another_picture_becomes_two():
     assert parts[1]["chunk"] == "c0~50" and parts[1]["on"] == 50
     assert len([it for it in l1["items"] if it["id"].startswith("c1.w0")]) == 1        # one frame before the cut: left whole
     assert len([it for it in l1["items"] if it["id"].startswith("big.0")]) == 1        # display type is not a caption
+
+
+def test_a_chart_without_figures_is_not_drawn(clip):
+    l1 = plan()
+    d = dict(kind="versus", parts=[dict(value="Happy", label="when broke", n=1), dict(value="Really happy", label="when rich", n=3)])
+    assert E.panel_items("v", d, 100, 180, l1, "#FFC857", 0.55, 0.23) == []
+
+
+def test_the_hook_line_never_stands_on_a_face(clip):
+    idx = dict(words=words(), video=dict(duration=22.0))
+    # a close portrait: the face reaches under the seat above the captions, so the line goes under the chin and the captions under it
+    big = dict(EARNED, rows=[dict(i=0, ok=True, name="A", path="earned/0.jpg", w=900, h=1400, faces=[[0.25, 0.12, 0.5, 0.34]], box=[0.2, 0.05, 0.8, 0.7])] + EARNED["rows"][1:])
+    l1 = plan()
+    rec = E.apply(l1, SCRIPT, big, idx, os.path.join(clip, "source.mp4"), manifest())
+    hook = [it for it in l1["items"] if it["id"].startswith("hook.") and it["k"] == "word"]
+    row = next(r for r in big["rows"] if r["i"] == 0)
+    lay, c = E.solve_frame(900, 1400, row["faces"], row["box"])
+    f = row["faces"][0]
+    chin = (f[1] + f[3] - c[1]) / (c[3] - c[1])
+    if hook:
+        assert rec["hook"]["line_set"] and min(L.word_box(it, l1)[1] for it in hook) >= chin
+        caps = [it for it in l1["items"] if it["k"] == "word" and it.get("role") == "cap" and it["f"][1] <= rec["hook_frames"] and it["f"][0] >= 3]
+        assert caps and all(L.word_box(it, l1)[1] >= max(L.word_box(h, l1)[3] for h in hook) for it in caps)
+    else:
+        assert rec["hook"]["line_set"] is False
+    # the same picture with a small face high in the frame keeps the seat above the captions
+    l1 = plan()
+    rec = E.apply(l1, SCRIPT, EARNED, idx, os.path.join(clip, "source.mp4"), manifest())
+    hook = [it for it in l1["items"] if it["id"].startswith("hook.") and it["k"] == "word"]
+    assert hook and max(L.word_box(it, l1)[3] for it in hook) <= E.CAP_TOP
