@@ -482,7 +482,7 @@ def test_type_for_a_noise_transcript_follows_what_the_frames_print_not_english_b
     idx = selfie(8.0)
     idx["words"] = idx["words"][:3]
     line = brief.scout_part({"scope": "film", "lang": "fi", "asks": [], "about": "x"}, idx)[1]
-    assert "language the frames themselves print" in line and "not known" in line
+    assert "language the frames themselves print" in line and "not known" in line and "not their words" in line
     silent = brief.scout_part({"scope": "film", "lang": "en", "asks": []}, wordless_index(5.0))[1]
     assert "language the frames themselves print" in silent              # no word spoken and nothing typed: not English by default
     asked = brief.scout_part({"scope": "film", "lang": "es", "asks": [{"id": "a1", "said": "x", "probe": "caption"}]}, wordless_index(5.0))[1]
@@ -501,3 +501,14 @@ def test_the_last_line_of_a_film_with_no_voice_is_earned_by_the_film_ending():
     assert "AND HIM" in " ".join(w["t"] for w in bigs(c))                # lands 0.8 s into the last shot and holds to the end: the close
     c = comp(text(20), idx, clip_perc(head_from=99.0))
     assert "AND HIM" not in " ".join(w["t"] for w in bigs(c))            # gone before the end: a line in the middle of a shot, answering nothing
+
+
+def test_the_brief_says_where_the_upload_prints_words_of_its_own(tmp_path, monkeypatch):
+    idx = wordless_index(11.0)
+    per = dict(clip_perc(11.0, head_from=99.0), W=720, H=1280, dur=11.0,
+               text=[{"read": "", "box": [0.0, 0.19, 0.91, 0.33], "t": [4.5, 9.5], "seen": 9}, {"read": "", "box": [0.4, 0.5, 0.5, 0.52], "t": [1.0, 2.0], "seen": 1}])
+    monkeypatch.setattr(S, "take_seats", lambda work, index=None: (0.56, [[0.5, 0.6]], [[0.72, 0.2]], []))
+    out = " ".join(brief.seats_part(str(tmp_path), idx, per))
+    assert "The upload prints words of its own (y 0.19-0.33 from 4.5 to 9.5 s)" in out and "never says them again" in out
+    per["text"] = []
+    assert "prints words of its own" not in " ".join(brief.seats_part(str(tmp_path), idx, per))

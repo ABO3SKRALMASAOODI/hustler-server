@@ -439,6 +439,14 @@ def seats_part(work, idx, per):
                    + (" The room is small: set the hook title over a found picture or a page instead, and keep the seat for one short word." if max(r[1] for r in rooms) < 0.1 and not open_shots else ""))
     elif not open_shots:
         out.append("Display seats on the take: none, the head fills the frame. Display type stands over a found picture or a page, never over the take; the hook title opens the film on one.")
+    printed = [x for x in per.get("text") or [] if x.get("box") and int(x.get("seen") or 0) >= 3 and x["box"][2] - x["box"][0] >= 0.3
+               and (x["box"][2] - x["box"][0]) * (x["box"][3] - x["box"][1]) < 0.25]
+    if printed:
+        # measured, not read: where the upload holds words of its own. p5572: a title was written out of its captions' own
+        # words twice, and its closing line was set on its spine graphic three times
+        rows = [f"y {x['box'][1]:.2f}-{x['box'][3]:.2f} from {float(x['t'][0]):g} to {float(x['t'][1]):g} s" for x in sorted(printed, key=lambda x: float(x["t"][0]))[:4]]
+        out.append("The upload prints words of its own (" + "; ".join(rows) + "): captions, a label or a sign. Read them on the boards. They are the upload's voice: your type never says them again, "
+                   "and is never set on them or on a graphic the upload shows beside them.")
     if open_shots:
         # a clip of several shots: a line is seated for the seconds it stands, so the room is the shot's, not the film's
         rows = []
@@ -503,7 +511,8 @@ def scout_part(scout, idx=None):
         # English by default: a tin labelled in Spanish, with no word spoken, was titled "Turmeric", then "Gold you
         # take daily" (p5582)
         said = ("The customer's language is not known: nothing is spoken that can be trusted as speech, and nothing was typed. Write every `job` and every word of type in the "
-                "language the frames themselves print (a label, a caption, a sign): read it off the boards first. With nothing printed, in `en`.")
+                "language the frames themselves print (a label, a caption, a sign). Their language, not their words: a title says what the frame does not already print. "
+                "With nothing printed, in `en`.")
     out = ["## Asks", f"The Scout read the request. Scope `{scout.get('scope')}`. {said} {scout.get('about', '')}".strip()]
     if scout.get("scope") == "surgical":
         out.append("The product makes the literal change on its own. This Score is the director's cut built alongside it, offered once: write the whole film.")
