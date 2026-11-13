@@ -18,5 +18,10 @@
  "for": "long-form motivation",
  "gender": "male",
  "character": "gravelly, slow, powerful",
- "band": "04"
+ "band": "04",
+ "openai": {
+  "voice": "onyx",
+  "persona": "Voice: a mature, deep and powerful male narrator, slightly gravelly, close to the microphone, natural and human, never an announcer, never theatrical.\nPacing: measured but moving, about 190 words a minute while speaking, with a real pause only where a thought lands.\nMelody: natural pitch movement with conviction; sentences end with a firm fall.\nStress: words written in capitals carry the line. Hit each one clearly: louder and higher than the words around it.\nNumbers and names land crisp and exact.",
+  "chosen": "13 Nov voice study (.valmera/week-1112/lanes/VOICE): pitch range, pace and match to the reference narrators"
+ }
 }
