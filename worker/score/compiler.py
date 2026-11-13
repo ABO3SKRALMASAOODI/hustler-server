@@ -838,6 +838,9 @@ def film_look(ctx):
             ctx.film_out[k] = {a: b for a, b in v.items() if isinstance(b, (int, float))}
     if fl.get("mesh_over"):
         ctx.film_out["mesh_over"] = True
+    cin = (ctx.dna.get("cap") or {}).get("in") if isinstance(ctx.dna.get("cap"), dict) else None
+    if isinstance(cin, str) and cin in ENTRANCES and cin != "cut":
+        ctx.film_out["cap_in"] = cin            # the caption's entrance, for the lowering: the second voice arrives with it
 
 
 def plate_of(ctx, name):
@@ -1917,9 +1920,58 @@ def emit_ref(ctx, b, ref, a, z, sid):
         if k and parts and all(k[0] - 1e-3 <= p[2] and p[3] <= k[1] + 1e-3 for p in parts):
             ref = {**ref, "k": None}
             return emit_ref(ctx, b, ref, a, z, sid)
+    if framed_still(ctx, ref) and z - a >= 9:
+        return emit_framed(ctx, b, ref, a, z, sid)
     it = {"id": sid, "k": "shot", "f": [a, z]}
     it.update(picture_fields(ctx, b, ref, a, z))
     return [it]
+
+
+FRAMED_LOSS = 2.0          # a still this many times wider than the frame's shape shows under half of itself in a cover crop
+FRAMED_W, FRAMED_Y = 0.9, 0.42
+
+
+def framed_rect(ctx, f):
+    """Where a framed still rests at this frame, settled, in frame fractions, or None."""
+    for c in ctx.items:
+        if c.get("k") == "card" and c.get("framed") and c["f"][0] <= f < c["f"][1]:
+            k = _last(c.get("s", 1)) or 1
+            cw, ch = float(c["w"]) * k, float(c["h"]) * k
+            return [_last(c["x"]) - cw / 2, _last(c["y"]) - ch / 2, _last(c["x"]) + cw / 2, _last(c["y"]) + ch / 2]
+    return None
+
+
+def framed_still(ctx, ref):
+    """A wide photograph cut into a vertical film. A cover crop shows a third of it: Piastri's McLaren came out as a
+    wheel under the letters 'einek' of a trackside sign (p5591, 13 Nov). Unless the Score wrote a crop, such a still
+    is shown whole: framed on the film's plate, the way the folder sets its archive pictures."""
+    if not ctx.governed or ctx.H <= ctx.W or ref.get("kind") != "asset" or ref.get("crop") is not None:
+        return False
+    z = ref.get("zoom")
+    if isinstance(z, (int, float)) and not isinstance(z, bool) and z > 1:
+        return False
+    asset = asset_for(ctx, ref["asset"])
+    if not asset or asset.get("kind") != "image" or not asset.get("w") or not asset.get("h"):
+        return False
+    return (asset["w"] / asset["h"]) / (ctx.W / ctx.H) >= FRAMED_LOSS
+
+
+def emit_framed(ctx, b, ref, a, z, sid):
+    """The plate takes the frame and the still stands on it whole, settling. The shot keeps its id, so a line that
+    answers it still finds it; the picture is `<id>.pic`."""
+    asset = asset_for(ctx, ref["asset"])
+    dark = ctx.dna.get("plate")
+    dark = norm_hex(dark) if is_hex(dark) and luma(norm_hex(dark)) < 0.2 else "#0B0B0D"
+    plate = _plate(dark, None, 0)
+    bg = {"id": sid, "k": "shot", "f": [a, z], "pic": "plate", "plate": plate, "framed": ref["asset"]}
+    w = FRAMED_W
+    h = w * (ctx.W / ctx.H) * (asset["h"] / asset["w"])
+    make_card(ctx, b, dict(ref, cam=None), a, z, {"w": w, "h": h, "x": 0.5, "y": FRAMED_Y, "in": "settle", "s_inf": 0.93, "border": 0, "shadow": 0, "radius": 0.012, "cap": "free"},
+              f"{sid}.pic", z_order=1)
+    card = ctx.byid.get(f"{sid}.pic")
+    if card is not None:
+        card["framed"] = True
+    return [bg]
 
 
 def speech_edit_flip(ctx, p):
@@ -2043,8 +2095,25 @@ def jitter_split(total, n, rng):
     return [max(1, y - x) for x, y in zip(edges, edges[1:])]
 
 
+FILL_F = 900        # a written length this long means "what is left": no beat is 30 s of one picture by a number
+
+
 def explicit_lengths(total, frames):
-    """Written lengths, the last picture takes what's left."""
+    """Written lengths, the last picture takes what's left. A length of 900 frames or more is a fill: it takes what
+    the written lengths leave, shared when there are several. Read as a plain length, the first 999 swallowed the beat
+    and every picture written after it never reached the screen ("cut":[60,999,45,999] showed two of its four
+    pictures; "cut":[999,30] never showed its closing page)."""
+    frames = [int(f) for f in frames]
+    fills = [i for i, f in enumerate(frames) if f >= FILL_F]
+    if fills and len(frames) > 1:
+        fixed = sum(f for f in frames if f < FILL_F)
+        room = total - fixed
+        if room >= 6 * len(fills):
+            each = room // len(fills)
+            out = [each if f >= FILL_F else f for f in frames]
+            out[fills[-1]] += total - sum(out)
+            return out
+        frames = [f for f in frames if f < FILL_F]       # no room for a fill: the written lengths stand
     out, left = [], total
     for f in frames:
         if left <= 0:
@@ -2106,6 +2175,8 @@ def plan_shots(ctx):
             lens = pulse_lengths(ctx, total, b.cut["pulse"], rng)
         else:
             lens = jitter_split(total, len(b.pics), rng)
+        if ctx.governed:
+            lens = on_the_breath(ctx, b, lens)
         t = b.pf0
         for j, d in enumerate(lens):
             ref = b.pics[j % len(b.pics)]
@@ -2121,6 +2192,43 @@ def plan_shots(ctx):
                 ctx.cam_len[ref["_cam"]] = ctx.cam_len.get(ref["_cam"], 0) + d
             t += d
         ctx.shots += b.shots
+
+
+BREATH_MIN_F, BREATH_REACH_F = 3, 12
+CAPTION_CONFIDENCE, CAPTION_WORDS = 0.75, 4        # under this mean confidence, or this many words, the transcript is noise, a song or a shout
+
+
+def breaths(ctx):
+    """Programme frames where the voice is between two words for three frames or more: [(from, to)]."""
+    if getattr(ctx, "_breaths", None) is None:
+        ws = sorted((f, ctx.wfe_any.get(w, f + 1)) for w, f in ctx.wf_any.items())
+        ctx._breaths = [(p[1], q[0]) for p, q in zip(ws, ws[1:]) if q[0] - p[1] >= BREATH_MIN_F]
+    return ctx._breaths
+
+
+def on_the_breath(ctx, b, lens):
+    """A cut from the person to a found picture lands in the breath nearest to where the Score put it, when one is
+    within 0.4 s: an editor cuts on the breath, and the sound that lands with the picture is then heard in the gap
+    instead of under a word (13 Nov: two sounds placed, none measurable against the voice). Other cuts keep their own
+    clock."""
+    if len(lens) < 2 or not ctx.wf_any:
+        return lens
+    out = list(lens)
+    t = b.pf0
+    for j in range(1, len(out)):
+        t += out[j - 1]
+        prev, ref = b.pics[(j - 1) % len(b.pics)], b.pics[j % len(b.pics)]
+        if prev.get("asset") != "main" or ref.get("asset") == "main" or ref.get("kind") == "plate":
+            continue
+        near = [(abs((a + z) // 2 - t), (a + z) // 2) for a, z in breaths(ctx) if abs((a + z) // 2 - t) <= BREATH_REACH_F]
+        if not near:
+            continue
+        d = min(near)[1] - t
+        if out[j - 1] + d >= 9 and out[j] - d >= 9:
+            out[j - 1] += d
+            out[j] -= d
+            t += d
+    return out
 
 
 def _gone(ctx, key, dept, bound):
@@ -2190,9 +2298,11 @@ def device_gate(ctx, b, g):
     if n in SEATED and not bound:
         seats = film_seats(ctx)
         k = taste.snap(seats, g.get("seat"))
-        if k is None:             # P3: a close face fills this frame. The film sets no display type; it never sets it on the face
-            ctx.taste_rows.append({"id": gid, "did": "thinned", "dept": dept, "why": "no place in this frame clears the face, the caption and the safe area"})
-            return False
+        if k is None:             # P3: a close face fills this frame. Over the take the film sets no display type; it never sets it on the face
+            g["_want"], g["_fit0"], g["_noseat"] = g.get("seat"), g.get("fit"), True
+            ctx.devices[gid] = {"id": gid, "dept": dept, "g": n, "b": b.id, "ev": ev, "bound": bound or None}
+            return True
+        g["_want"], g["_fit0"] = g.get("seat"), g.get("fit")      # what the Score wrote: it stands over a found picture or a page (off_take)
         g["seat"] = list(seats[k])
         room = (getattr(ctx, "seat_rooms", None) or [[0.9, 0.2]] * len(seats))[k]
         g["_room"] = room[1]                       # the type is fitted to the seat's room
@@ -2314,7 +2424,19 @@ def seen_rows(ctx, pic, t):
         for r in (ctx.index.get("spatial") or {}).get("samples") or []:
             if abs(float(r.get("t", -9)) - t) <= 0.75:
                 boxes += [list(b) for b in r.get("text") or [] if len(b) == 4 and (b[2] - b[0]) * (b[3] - b[1]) < 0.25]
-        return boxes, []
+        # A text box that lies on a head is the detector reading a moustache or a cap, not words (p5591: three of the
+        # four "printed" boxes sat on his face, and with them no seat in the frame was clear). The head itself is
+        # kept clear by its own rule, so nothing is lost by not counting it twice as print.
+        heads = []
+        if ctx.faces:
+            near = min(ctx.faces, key=lambda r: abs(r["t"] - t))
+            if abs(near["t"] - t) <= 2.0:
+                heads = [head_of(f) for f in near["boxes"] if (f[2] - f[0]) * (f[3] - f[1]) > 0.01]
+
+        def on_head(b):
+            area = max((b[2] - b[0]) * (b[3] - b[1]), 1e-9)
+            return any(max(0.0, min(b[2], h[2]) - max(b[0], h[0])) * max(0.0, min(b[3], h[3]) - max(b[1], h[1])) >= 0.5 * area for h in heads)
+        return [b for b in boxes if not on_head(b)], []
     if str(pic).startswith("bin:"):
         rows = (ctx.bin.get(str(pic)[4:]) or {}).get("seen") or []
         if rows:
@@ -2363,6 +2485,9 @@ def mark_rects(ctx, a, z):
         for c in cards_at(ctx, f):
             if c["f"][1] - c["f"][0] > 6:
                 out += marks_of(ctx, c, f)
+            if c.get("framed"):                 # a framed still is the picture: type stands on the plate beside it
+                cw, ch = float(c["w"]) * (_last(c.get("s", 1)) or 1), float(c["h"]) * (_last(c.get("s", 1)) or 1)
+                out.append([_last(c["x"]) - cw / 2, _last(c["y"]) - ch / 2, _last(c["x"]) + cw / 2, _last(c["y"]) + ch / 2])
     return out
 
 
@@ -2622,6 +2747,14 @@ def build_captions(ctx):
         film_seats(ctx)
         seat0 = [0.5, ctx.cap_y]           # P1: one caption seat for the film; the caption does not go hunting
         asked = any(str(a.get("probe")) in ("caption_coverage", "caption_language") for a in ctx.asks.values())
+        # Words the transcript itself doubts are not set on screen: a firework clip came back captioned "tämä on hän"
+        # in Finnish, eight words at 0.64 confidence (p5571). Measured on the index, never on what the words say.
+        conf = [float(w.get("confidence", 1.0)) for w in ctx.index.get("words") or []]
+        if not asked and ctx.words and (sum(conf) / len(conf) < CAPTION_CONFIDENCE or len(ctx.words) < CAPTION_WORDS):
+            ctx.taste_rows.append({"id": "cap", "did": "thinned", "dept": "caption",
+                                   "why": f"{len(ctx.words)} words at a transcript confidence of {sum(conf) / len(conf):.2f}: not speech a caption can be trusted with"})
+            ctx.n_chunks = 0
+            return
         own = taste.upload_captions(ctx)
         ctx.upload_caps = round(own, 2)
         if own >= 0.5 and not asked:       # P7: say it once
@@ -2895,6 +3028,7 @@ def place_waiting_words(ctx):
 def place_word(ctx, iid, t, v, x, y, a, end, ink, role, chunk=None, region=None, **extra):
     """Split where the picture under it changes polarity, so ink stays readable. A block of words
     passes one region, so a line never changes ink in the middle."""
+    end = min(end, ctx.dur_f)             # a word never outlives the film
     if not t or end <= a:
         return
     pieces = []
@@ -2903,9 +3037,22 @@ def place_word(ctx, iid, t, v, x, y, a, end, ink, role, chunk=None, region=None,
     while f < end:
         s = shot_at(ctx, f)
         q = min(end, s["f"][1]) if s else end
+        if q <= f:                        # the nearest shot ended before this frame: the walk must still advance, or the compile
+            q = end                       # never returns (p5554, 13 Nov: a counter step on the film's last frame spun for minutes)
         ink2 = ink if is_hex(ink) else (ink_over(ctx, s, (f + q) // 2, rect) or ink_on(ctx, plate_under(ctx, s)))
         ink2 = norm_hex(ink2)
-        pl = plate_under(ctx, s)
+        if ctx.governed and role == "cap" and not is_hex(ink) and s is not None and not plate_under(ctx, s):
+            # A caption keeps the film's ink over a picture unless the picture swallows it: on a mid-grey hoodie the
+            # light ink read a little worse than dark on one chunk and a little better on the next, and the caption
+            # changed colour chunk by chunk (p5591, 13 Nov). Under the bar it keeps its ink and takes the edge.
+            base = norm_hex(ctx.dna.get("ink")) if is_hex(ctx.dna.get("ink")) else "#FFFFFF"
+            if ink2 != base:
+                m_base = ink_margin(ctx, s, (f + q) // 2, rect, base)
+                if m_base is None or m_base >= 0.15:
+                    ink2 = base
+        # a chip's word sits on its own label, whatever the frame under the label is: on a dark page the dark word
+        # of a white chip was flipped to white and the label stood empty (13 Nov, a name over a framed still)
+        pl = {"c0": extra["_label"]} if is_hex(extra.get("_label")) else plate_under(ctx, s)
         if ctx.governed and is_hex(ink) and not pl:        # P4: a named ink the picture swallows flips to the one that reads
             m0 = ink_margin(ctx, s, (f + q) // 2, rect, ink2)
             other = DARK_INK if luma(ink2) > 0.5 else "#FFFFFF"
@@ -3048,45 +3195,215 @@ def on_print(rect, marks):
     return min(1.0, hit / area)
 
 
-def lines_that_read(ctx, iid, lines, fit_w, room):
+def lines_that_read(ctx, iid, lines, fit_w, room, quiet=False):
     """Display lines at a size a phone can read, or none (P5, P3). A line too long for the frame at its size breaks
-    in two at the word nearest its middle before it shrinks; the block then shrinks to the room its seat has. What
-    would land under the floor is left out and the meter says so (p5574: three one-line headlines written at 0.034
-    of the frame were fitted to its width and came out at 0.022, which the last look read as tiny three times)."""
+    in two at the word nearest its middle before it shrinks; the block then shrinks to the room its seat has. A line
+    never goes under the floor: it stands at the floor and the others give up the room, then the smaller lines of a
+    ladder go and the line that matters stays, and only a block whose main line cannot be read in its seat is left
+    out, with a row in the meter (p5574: three one-line headlines written at 0.034 of the frame came out at 0.022,
+    which the last look read as tiny three times; 13 Nov: four hook titles in four films were left out whole because
+    their second line had been written a hair under the floor, or the seat was 0.01 short)."""
     W, H = ctx.W, ctx.H
     floor = READ_FLOOR * H
 
+    def width_px(l, px):
+        return text_px(l["t"], {"font": l["font"], "px": px, "track": l["track"]})
+
     def fitted(l):
-        w = text_px(l["t"], {"font": l["font"], "px": l["px"], "track": l["track"]})
+        w = width_px(l, l["px"])
         return l["px"] if w / W <= fit_w else l["px"] * fit_w * W / w
 
     out = []
     for l in lines:
         words = str(l["t"]).split()
-        if fitted(l) < floor and len(words) >= 2 and len(lines) == 1:
+        if fitted(l) < (max(floor, 0.75 * l["px"]) if l.get("sized") else floor) and len(words) >= 2 and len(lines) == 1:
             k = min(range(1, len(words)), key=lambda j: abs(len(" ".join(words[:j])) - len(" ".join(words[j:]))))
             out += [{**l, "t": " ".join(words[:k])}, {**l, "t": " ".join(words[k:])}]
         else:
             out.append(l)
-    px = [fitted(l) for l in out]
-    tall = sum(px) * 1.02 / H
-    scale = room / tall if isinstance(room, (int, float)) and tall > room > 0 else 1.0
-    if any(p * scale < floor for p in px):
-        why = (f"its seat has room for {room:.2f} of the frame and it stands {tall:.2f} tall" if scale < 1.0 else "the line is longer than the frame at its size")
-        ctx.taste_rows.append({"id": iid, "did": "thinned", "dept": "display", "why": why + ": shrunk that far it would not read"})
+
+    def solve(rows):
+        """Sizes for these lines inside the width and the room, none under the floor, or None."""
+        px = [max(fitted(l), floor) for l in rows]
+        if any(width_px(l, p) / W > fit_w * 1.03 for l, p in zip(rows, px)):
+            return None                         # at the floor it is still wider than its seat
+        if not (isinstance(room, (int, float)) and room > 0):
+            return px
+        for _ in range(8):
+            tall = sum(px) * 1.02 / H
+            if tall <= room + 1e-6:
+                return px
+            free = [i for i, p in enumerate(px) if p > floor + 0.5]
+            if not free:
+                return None
+            over = (tall - room) * H / 1.02
+            give = sum(px[i] - floor for i in free)
+            k = min(1.0, over / max(give, 1e-6))
+            px = [p - (p - floor) * k if i in free else p for i, p in enumerate(px)]
+        return px if sum(px) * 1.02 / H <= room + 1e-6 else None
+
+    rows, px = out, solve(out)
+    if px is None and len(out) > 1:             # a ladder with a line too long for its seat breaks that line in two first
+        wide = max(out, key=lambda l: width_px(l, max(fitted(l), floor)))
+        words = str(wide["t"]).split()
+        if len(words) >= 2 and width_px(wide, floor) / W > fit_w:
+            k = min(range(1, len(words)), key=lambda j: abs(len(" ".join(words[:j])) - len(" ".join(words[j:]))))
+            at = out.index(wide)
+            broken = out[:at] + [{**wide, "t": " ".join(words[:k])}, {**wide, "t": " ".join(words[k:])}] + out[at + 1:]
+            got = solve(broken)
+            if got is not None:
+                rows, px = broken, got
+    if px is None and len(out) > 1:             # a ladder too tall for its seat keeps the line that matters
+        main = max(out, key=lambda l: l["px"])
+        rows, px = [main], solve([main])
+        if px is not None and not quiet:
+            ctx.taste_rows.append({"id": iid, "did": "repaired", "dept": "display", "why": "its seat holds one line: the large line stands, the small one went"})
+    if px is None and quiet:
         return None
-    for l, p in zip(out, px):
-        l["px"] = int(p * scale)
-    return out
+    if px is None:
+        tall = sum(max(fitted(l), floor) for l in out) * 1.02 / H
+        why = (f"its seat has room for {room:.2f} of the frame and it stands {tall:.2f} tall" if isinstance(room, (int, float)) and room > 0 and tall > room
+               else "the line is longer than its seat at its size")
+        ctx.taste_rows.append({"id": iid, "did": "thinned", "dept": "display", "why": why + ": shrunk that far it would not read. Over a found picture or a page it has the whole frame"})
+        return None
+    for l, p in zip(rows, px):
+        l["px"] = int(p)
+    return rows
+
+
+def off_take(ctx, a, z):
+    """Where a display line that lands at frame a stops being over a found picture or a page, or None when it lands
+    on the take. Seats are solved for the take (heads, the caption, what the upload prints); a line over a picture
+    that takes the whole frame has that picture's own room, and it labels that picture: it leaves with it."""
+    s = shot_at(ctx, a)
+    if s is None or is_take(s.get("pic")):
+        return None
+    end = s["f"][1]
+    while end < ctx.dur_f:
+        q = shot_at(ctx, end)
+        if q is None or is_take(q.get("pic")):
+            break
+        end = q["f"][1]
+    if end >= z:
+        return z
+    return end if end - a >= 12 else None
+
+
+def seat_for(ctx, iid, opt, a, z):
+    """(opt, z) for a seated display line. Over the take: the film's seat, as the gate set it. Over a found picture
+    or a page: the seat the Score wrote, to the end of that picture. With no seat on the take and no picture under
+    it, the line is left out and the meter says where it could stand."""
+    if not ctx.governed or "_want" not in opt:
+        return opt, z
+    end = off_take(ctx, a, z)
+    if end is not None:
+        opt = {k: v for k, v in opt.items() if k not in ("_room", "fit", "seat")}
+        if opt.get("_fit0") is not None:
+            opt["fit"] = opt["_fit0"]
+        want = opt.get("_want")
+        if getattr(ctx, "hook_page", None) and getattr(ctx, "hook_page", None) == ".".join(iid.split(".")[:2]):
+            opt["seat"] = [0.5, 0.44]           # the opening title page: the title is the frame, centred
+            opt["_page_title"] = True
+        elif isinstance(want, (list, tuple)) and len(want) == 2 and all(isinstance(v, (int, float)) for v in want):
+            opt["seat"] = [clamp(float(want[0]), 0.2, 0.8), clamp(float(want[1]), 0.16, 0.74)]
+        return opt, end
+    if opt.get("_noseat"):
+        ctx.taste_rows.append({"id": ".".join(iid.split(".")[:2]), "did": "thinned", "dept": "display",
+                               "why": "no place on the take clears the face, the caption and the safe area: this line stands over a found picture or a page, not over the take"})
+        return None, z
+    return opt, z
+
+
+def end_unit(ctx, gid, f):
+    """A display line or label leaves at frame f: everything its gesture drew, the words still waiting for their
+    ink, and the place it held. Used when the next label of a film takes its seat."""
+    def cut(it):
+        p, q = it["f"]
+        if q <= f:
+            return it
+        n = f - p
+        for k in ("x", "y", "op", "s", "blur", "rect"):
+            if isinstance(it.get(k), list) and it[k] and isinstance(it[k][0], (int, float, list)) and len(it[k]) > n and k != "rect":
+                it[k] = it[k][:max(n, 1)]
+        it["f"] = [p, f]
+        return it
+    mine = lambda i: i == gid or str(i).startswith(gid + ".")
+    ctx.items = [cut(it) for it in ctx.items if not (mine(it["id"]) and it["f"][0] >= f)]
+    if ctx.waiting is not None:
+        rows = []
+        for r in ctx.waiting:
+            iid, t, v, x, y, a, end, ink, role, chunk, region, extra = r
+            if mine(iid) and end > f:
+                if a >= f:
+                    ctx.byid.pop(iid, None)
+                    continue
+                extra = dict(extra)
+                for k in ("op", "s", "blur"):
+                    if isinstance(extra.get(k), list):
+                        extra[k] = extra[k][:max(f - a, 1)]
+                x = x[:max(f - a, 1)] if isinstance(x, list) else x
+                y = y[:max(f - a, 1)] if isinstance(y, list) else y
+                r = (iid, t, v, x, y, a, f, ink, role, chunk, region, extra)
+                ctx.byid[iid] = {"f": [a, f]}
+            rows.append(r)
+        ctx.waiting = rows
+    ctx.blocks = [(bl[0], min(bl[1], f), *bl[2:]) if len(bl) > 3 and bl[3] == gid else bl for bl in ctx.blocks]
+    ctx.blocks = [bl for bl in ctx.blocks if bl[1] > bl[0]]
+    for it in ctx.items:
+        if mine(it["id"]) and it["id"] in ctx.byid:
+            ctx.byid[it["id"]] = it
+
+
+HOOK_PAGE_F = 30
+
+
+def title_page(ctx, iid, a, z, b):
+    """The hook title has no place on the take: the film opens on a page for a second, the title on it, the voice
+    already running, and cuts to the person. One page, at the film's first frame only (TASTE 4.2: a page holds the
+    frame 1 s while a person talks). Returns the frame the page ends on, or None when this is not the film's opening
+    title. 13 Nov: with no seat the title was left out, and the film's first second was the upload as it was."""
+    if not ctx.governed or a > 3 or iid.count(".") != 1 or getattr(ctx, "hook_page", None):
+        return None
+    s0 = shot_at(ctx, a)
+    if s0 is None or not is_take(s0.get("pic")):
+        return None
+    end = min(z, a + HOOK_PAGE_F, ctx.dur_f)
+    if end - a < 12:
+        return None
+    dark = ctx.dna.get("plate")
+    plate = plate_of(ctx, "plate") if (is_hex(dark) or isinstance(dark, dict)) else _plate("#0B0B0D", None, 0)
+    carve(ctx, a, end, emit_ref(ctx, b, {"kind": "plate", "plate": plate}, a, end, f"{iid}.page"))
+    ctx.hook_page = iid
+    ctx.taste_rows.append({"id": iid, "did": "repaired", "dept": "display", "why": "no place on the take holds this title: it opens the film on a page for 1 s and the take follows"})
+    return end
 
 
 def display(ctx, iid, text, a, z, opt, b=None):
     """Display type: fits the frame, sits on a seat, lands on its own clock. Returns its rect."""
     W, H = ctx.W, ctx.H
     opt = opt or {}
+    if ctx.governed and "_want" in opt and off_take(ctx, a, z) is None:
+        # over the take: does it have a place there at a size that reads? If not, and it is the film's opening
+        # title, the film opens on a page (title_page); anywhere else the meter says where it could stand
+        fits = not opt.get("_noseat")
+        if fits:
+            peak0 = 1 / SETTLE["s_inf"] if opt.get("in") == "settle" else 1.0
+            fits = lines_that_read(ctx, iid, [dict(l) for l in display_lines(ctx, text, opt)], float(opt.get("fit", 1 - 2 * SAFE_X - 0.02)) / peak0, opt.get("_room"), quiet=True) is not None
+        if not fits:
+            end = title_page(ctx, iid, a, z, b)
+            if end is not None:
+                z = end
+    opt, z = seat_for(ctx, iid, opt, a, z)
+    if opt is None:
+        return None
     lines = display_lines(ctx, text, opt)
     if not lines or z <= a:
         return None
+    if opt.get("_page_title"):                  # written for a small seat on the take: on its own page it stands at title size
+        top = max(l["px"] for l in lines)
+        k = max(1.0, 0.075 * H / max(top, 1))
+        for l in lines:
+            l["px"] = int(l["px"] * k)
     if ctx.governed:
         from . import taste
         if any(taste.machine_text(l["t"]) for l in lines):       # P10: a stamp off a board is not a word of this film
@@ -3173,7 +3490,7 @@ def display(ctx, iid, text, a, z, opt, b=None):
     # a block is as tall as its ink. A tall condensed face stands well above 0.74 em
     q0 = shaped(lines[0]["font"], lines[0]["t"]) if joined_script(lines[0]["t"]) else None
     ink_top = y_top + ys[0] - (q0[1] if q0 else cap_height(lines[0]["font"])) * lines[0]["px"] / H
-    ctx.blocks.append((a, z, [out_rect[0], min(ink_top, y_top), out_rect[2], out_rect[3] + 0.006]))
+    ctx.blocks.append((a, z, [out_rect[0], min(ink_top, y_top), out_rect[2], out_rect[3] + 0.006], ".".join(iid.split(".")[:2])))
     pool = opt.get("pool")
     if pool is None and not opt.get("blend") and not opt.get("behind") and not is_hex(opt.get("hl")) and under_bright(ctx, a, z):
         pool = 0.5
@@ -3835,7 +4152,7 @@ def g_counter(ctx, b, g, i):
         q = z if j == n - 1 else f + step
         if g.get("hold") and j == n - 1:
             q = min(ctx.dur_f, z + int(g["hold"]))
-        opt = {k: v2 for k, v2 in g.items() if k in ("size", "seat", "font", "ink", "fit", "blend", "case", "_room")}
+        opt = {k: v2 for k, v2 in g.items() if k in ("size", "seat", "font", "ink", "fit", "blend", "case", "_room", "_want", "_fit0", "_noseat")}
         if held:
             opt["seat"] = held
         r = display(ctx, f"{g['_gid']}.{j}", s, f, q, opt, b)
@@ -4060,6 +4377,9 @@ def g_chip(ctx, b, g, i):
     t = str(g.get("t") or big_words(ctx, g))
     if not t or z <= a:
         return
+    g, z = seat_for(ctx, g["_gid"], g, a, z)
+    if g is None:
+        return
     size = float(g.get("size", 0.03))
     if ctx.governed:
         from . import taste
@@ -4078,7 +4398,68 @@ def g_chip(ctx, b, g, i):
     w, h = tw + 2 * float(g.get("pad", 0.022)), float(g.get("h", size * 1.55))
     x = clamp(float(seat[0]), w / 2 + 0.02, 1 - w / 2 - 0.02)
     y = float(seat[1])
+    fr = framed_rect(ctx, a)
+    if fr and rects_touch([x - w / 2, y - h / 2 - 0.01, x + w / 2, y + h / 2 + 0.01], fr):
+        # a label names the framed still from the plate, above it, or under it when the top is the platform's
+        y = fr[1] - h / 2 - 0.028 if fr[1] - h - 0.028 >= 0.11 else fr[3] + h / 2 + 0.028
+        x = clamp(fr[0] + w / 2, w / 2 + 0.02, 1 - w / 2 - 0.02)        # flush with the picture's left edge
     y += dodge_keepout(x - w / 2, y - h / 2, x + w / 2, y + h / 2)
+    if ctx.governed:
+        # Labels that share a seat while they are on screen are a list: each lands under the one before, flush left
+        # with it, and the list grows upward instead when going down would reach a head or leave the safe area
+        # (p5574, 13 Nov: four therapies named on four chips at one seat were pushed onto his face and three left out).
+        def taken(yy):
+            r = [x - w / 2, yy - h / 2, x + w / 2, yy + h / 2]
+            return [bl for bl in ctx.blocks if bl[0] < z and bl[1] > a and rects_touch(r, bl[2])]
+
+        def on_head(yy):
+            r = [x - w / 2, yy - h / 2, x + w / 2, yy + h / 2]
+            return any(rects_touch(r, hd) for f in sorted({a, (a + z) // 2, max(a, z - 1)}) for hd in head_rects(ctx, shot_at(ctx, f)))
+        # One seat, one label at a time: a label or a title of an earlier beat that still holds this place leaves as
+        # this one lands, once it has been read (0.5 s). Labels of the same beat are a list and stand together.
+        # p5575, 13 Nov: 01 to 05 at one seat pushed each other up the frame, the last onto her neck.
+        for bl in taken(y):
+            owner = bl[3] if len(bl) > 3 else None
+            if owner and not str(owner).startswith(b.id + ".") and a - bl[0] >= int(0.5 * ctx.fps):
+                end_unit(ctx, owner, a)
+        fit = g.get("fit") if isinstance(g.get("fit"), (int, float)) and "_want" in g and not fr else None
+        left, right = (float(seat[0]) - fit / 2, float(seat[0]) + fit / 2) if fit else (0.05, 0.95)
+        listed = sum(1 for q in (b.raw.get("do") or []) if isinstance(q, dict) and q.get("g") == "chip") >= 2
+        hit = taken(y)
+        if not hit and listed and fit:
+            x = clamp(left + w / 2, w / 2 + 0.02, 1 - w / 2 - 0.02)       # a list starts at its seat's left edge, so it has the row
+            hit = taken(y)
+        flowed = False
+        if hit:
+            last = max(hit, key=lambda bl: (round(bl[2][3], 3), bl[2][2]))[2]
+            grow = (1 / SETTLE["s_inf"] - 1) / 2 if g.get("in", "settle") == "settle" else 0.0      # labels land a fifth larger and settle
+            nx = last[2] + 0.012 + grow * ((last[2] - last[0]) + w) + w / 2
+            ny = (last[1] + last[3]) / 2
+            r = [nx - w / 2, ny - h / 2, nx + w / 2, ny + h / 2]
+            if nx + w / 2 <= right + 1e-6 and not any(bl[0] < z and bl[1] > a and rects_touch(r, bl[2]) for bl in ctx.blocks):
+                x, y, flowed = nx, ny, True           # the next label of the row
+        if hit and flowed:
+            pass
+        elif hit:
+            x = clamp(min(bl[2][0] for bl in hit) + w / 2, w / 2 + 0.02, 1 - w / 2 - 0.02)
+            down = up = y
+            row = 0.014 + (1 / SETTLE["s_inf"] - 1) * h          # each label lands a fifth larger: the rows keep clear of each other then too
+            for _ in range(8):
+                q = taken(down)
+                if not q:
+                    break
+                down = max(bl[2][3] for bl in q) + h / 2 + row
+            for _ in range(8):
+                q = taken(up)
+                if not q:
+                    break
+                up = min(bl[2][1] for bl in q) - h / 2 - row
+
+            def on_cap(yy):
+                return ctx.cap_y is not None and bool(ctx.wf_any) and abs(yy - ctx.cap_y) < 0.0375 + 0.6 * h + 0.016
+            down_ok = down + h / 2 <= 0.80 and not taken(down) and not on_head(down) and not on_cap(down)
+            up_ok = up - h / 2 >= 0.10 and not taken(up) and not on_head(up) and not on_cap(up)
+            y = down if down_ok or not up_ok else up
     n = z - a
     settle = g.get("in", "settle") == "settle"
     scale = [(SETTLE["s_inf"] + (1 - SETTLE["s_inf"]) * math.exp(-j / SETTLE["tau"])) / SETTLE["s_inf"] for j in range(n)] if settle else 1
@@ -4086,10 +4467,10 @@ def g_chip(ctx, b, g, i):
     plate["grain"] = 0
     ctx.add({"id": g["_gid"], "k": "card", "f": [a, z], "z": 2, "pic": "plate", "plate": plate, "x": x, "y": y, "w": w, "h": h, "s": scale, "rot": float(g.get("rot", 0)), "op": 1,
              "radius": float(g.get("radius", 0.006)), "_cap_edge": False})
-    ctx.blocks.append((a, z, [x - w / 2, y - h / 2, x + w / 2, y + h / 2]))
+    ctx.blocks.append((a, z, [x - w / 2, y - h / 2, x + w / 2, y + h / 2], g["_gid"]))
     ink = g.get("ink") or ("#111111" if luma(plate["c0"]) > 0.5 else "#FFFFFF")
     ex = {} if not settle else {"s": list(scale)}
-    emit_word(ctx, f"{g['_gid']}.t", t, key, x - tw / 2, y + 0.36 * v["px"] / ctx.H, a, z, ink, "big", z=2, **ex)
+    emit_word(ctx, f"{g['_gid']}.t", t, key, x - tw / 2, y + 0.36 * v["px"] / ctx.H, a, z, ink, "big", z=2, _label=plate["c0"], **ex)
     g_snd(ctx, b, g, a)
 
 
@@ -4825,6 +5206,7 @@ def type_traffic(ctx):
     rows.sort(key=lambda u: (u["a"], u["key"]))
     kept = list(fixed)
     gone, cut = set(), {}
+    ends = {}           # unit key -> the frame it leaves at, when the next label took its seat
 
     def hits(rect, a, z, faces):
         out = [k for k in kept if k[0] < z and a < k[1] and rects_touch(_grow(rect, TRAFFIC_GAP / 2), _grow(k[2], TRAFFIC_GAP / 2))]
@@ -4853,6 +5235,19 @@ def type_traffic(ctx):
             kept.append((u["a"], u["z"], u["rect"], u["key"]))
             continue
         against = sorted({h[3] for h in hit})
+        # One seat, one label at a time. A label that lands where a title or a label of an earlier beat still stands,
+        # once that one has been read for half a second, takes the seat and the earlier one leaves: it is not pushed
+        # up the frame (p5575, 13 Nov: 01 wake landed above the film's title and 05 on her neck).
+        if ".chip" in str(u["key"]) and all(h[3] not in ("caption", "face") for h in hit):
+            beat = str(u["key"]).split(".")[0]
+            olds = [h for h in hit if str(h[3]).split(".")[0] != beat and u["a"] - h[0] >= int(0.5 * ctx.fps)]
+            if olds and len(olds) == len(hit):
+                gone_keys = {h[3] for h in olds}
+                for kq in gone_keys:
+                    ends[kq] = min(ends.get(kq, 10 ** 9), u["a"])
+                kept[:] = [(k[0], min(k[1], u["a"]), k[2], k[3]) if k[3] in gone_keys else k for k in kept]
+                kept.append((u["a"], u["z"], u["rect"], u["key"]))
+                continue
         dy = seat(u, u["a"], u["z"], faces)
         if dy is not None:
             for it in u["items"]:
@@ -4874,7 +5269,7 @@ def type_traffic(ctx):
             continue
         gone.update(it["id"] for it in u["items"])
         ctx.traffic.append({"id": u["key"], "did": "dropped", "against": against})
-    if gone or cut:
+    if gone or cut or ends:
         out = []
         for it in ctx.items:
             if it["id"] in gone:
@@ -4883,6 +5278,12 @@ def type_traffic(ctx):
                 it = sub_item(it, cut[it["id"]], it["f"][1], it["id"])
                 if "on" in it:
                     it["on"] = max(it["on"], it["f"][0])
+            e = ends.get(it.get("_g") or it["id"]) if not (it["k"] == "word" and it.get("role") == "cap") else None
+            if e is not None and it["f"][1] > e:
+                if it["f"][0] >= e:
+                    ctx.byid.pop(it["id"], None)
+                    continue
+                it = sub_item(it, it["f"][0], e, it["id"])
             out.append(it)
         ctx.items = out
         for i in gone:
@@ -5192,7 +5593,7 @@ def new_pictures(ctx, shots):
     shot neither a stranger nor the judge's cut counter sees it as a cut (p5374: 29 planned cuts read as 10)."""
     n, last = 0, None
     for s in sorted(shots, key=lambda i: i["f"][0]):
-        p = str(s.get("pic"))
+        p = str(s.get("framed") or s.get("pic"))          # a still framed on the plate is that still
         q = "take" if p == "main" or p.startswith("own:") else p
         if last is not None and q != last:
             n += 1
@@ -5223,8 +5624,9 @@ def ceiling(ctx, l1, cuts):
         kinds.setdefault(i["k"], []).append(i)
     pics = {i.get("pic") for i in items if i["k"] in ("shot", "card")}
     # found pictures count by the time they hold the frame: 2 s of cards in a 51 s film is still the upload's own frames
-    found_f = sum(i["f"][1] - i["f"][0] for i in kinds.get("shot", []) if str(i.get("pic")).startswith(("bin:", "tray:")))
-    found_f += sum((i["f"][1] - i["f"][0]) * 0.5 for i in kinds.get("card", []) if str(i.get("pic")).startswith(("bin:", "tray:")) and i["f"][1] - i["f"][0] > 6)
+    found_f = sum(i["f"][1] - i["f"][0] for i in kinds.get("shot", []) if str(i.get("framed") or i.get("pic")).startswith(("bin:", "tray:")))
+    found_f += sum((i["f"][1] - i["f"][0]) * 0.5 for i in kinds.get("card", []) if str(i.get("pic")).startswith(("bin:", "tray:")) and i["f"][1] - i["f"][0] > 6
+                   and not i.get("framed"))
     added = found_f >= 0.1 * ctx.dur_f
     cutouts = any(str(p).startswith("own:") for p in pics)
     designed = bool(kinds.get("card")) or any(i.get("pic") == "plate" for i in kinds.get("shot", []))
@@ -5326,6 +5728,9 @@ def source_mix(ctx, l1):
                 crops += n
         elif p.startswith("own:"):
             lifted += n
+        elif p == "plate" and s.get("framed"):
+            found += n                      # a still shown whole on the plate holds the frame as itself
+            seen.add(s["framed"])
         elif p == "plate":
             pages += n
         else:
@@ -5419,6 +5824,14 @@ def meter(ctx, l1):
         beats.append({"id": b.id, "sec": round(tot, 2), "pics10": round(n / tot * 10, 1), "type": wn, "design": des, "snd": snd})
     blanks = rest_check(ctx)
     cap, low = ceiling(ctx, l1, cuts)
+    # the first second: what an editor adds has to be there by then (rubric: the upload's opening kept as it is scores 1).
+    # 13 Nov: with a seat on the take the hook title was still written on the third word and landed at 2.2 s
+    lands = [w.get("on", w["f"][0]) for w in words if w.get("role") == "big"] + [c["f"][0] for c in cards if c.get("pic") != "plate" or c["f"][0] > 0] \
+        + [s_["f"][0] for s_ in shots if s_.get("pic") != "main" and not str(s_.get("pic")).startswith("own:")]
+    hook_f = min(lands) if lands else None
+    if ctx.governed and dur >= 5.0 and (hook_f is None or hook_f > fps):
+        ctx.find("HOOK the first second is the upload as it was: " + ("nothing designed lands in this film" if hook_f is None else f"the first title, card or picture lands at {hook_f / fps:.1f} s")
+                 + ". The hook title lands at the first beat's `in`: on the take's display seat, beside a found picture that opens the film, or on a page of 1 s")
     first3 = sum(1 for c in cuts if c <= 3 * fps)
     facts = compile_facts(ctx, l1, cuts, per_frame)
     busy = quiet_meter(ctx, l1, cuts)
@@ -5655,6 +6068,28 @@ def load_taste(work_dir):
     return asks, stress, offered
 
 
+def empty_pages(ctx):
+    """A flat page with nothing on it says nothing. When the type or the card written for it is gone (the last look
+    named it, the count thinned it, it had no place), the page goes with it and the take plays through: the last look
+    took 'every morning' off a closing page and the film ended on a second of black (p5575, 13 Nov)."""
+    spans = [(it["f"][0], it["f"][1]) for it in ctx.items if it.get("k") in ("word", "card")]
+    spans += [(r[5], r[6]) for r in (ctx.waiting or [])]
+    out = []
+    for s in ctx.shots:
+        a, z = s["f"]
+        if s.get("pic") != "plate" or s.get("framed") or any(p < z and a < q for p, q in spans):
+            out.append(s)
+            continue
+        parts = [p for p in follow_spine(ctx, a, z) if p[3] > p[2]]
+        if not parts or parts[0][0] != a or parts[-1][1] != z:
+            out.append(s)                   # a silent beat has no take to show: the page stays
+            continue
+        b = next((bt for bt in ctx.beats if bt.pf0 <= a < bt.pf1), ctx.beats[0] if ctx.beats else None)
+        out += emit_ref(ctx, b, {"kind": "main", "asset": "main", "sync": True}, a, z, s["id"])
+        ctx.taste_rows.append({"id": s["id"], "did": "repaired", "dept": "page", "why": "a page with nothing on it: the take plays through"})
+    ctx.shots = sorted(out, key=lambda i: i["f"][0])
+
+
 def compile_once(text, index, work_dir, bin_items, tray, faces, sid, owner, seed, perc, governed, plan, extra):
     """One pass of the compiler. `plan` holds what the reading of the pass before decided (taste.decide)."""
     ctx = Ctx(index, bin_items=bin_items, tray=tray, faces=faces, sid=sid, owner=owner, seed=seed)
@@ -5681,6 +6116,8 @@ def compile_once(text, index, work_dir, bin_items, tray, faces, sid, owner, seed
     ctx.waiting = []
     run_gestures(ctx)
     run_raw(ctx, good)
+    if governed:
+        empty_pages(ctx)
     gone = plan.get("drop_item") or {}
     if governed and gone:                  # one flash of a row the reading thinned
         for it in ctx.items:
@@ -5754,6 +6191,23 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
         m["findings"] = list(ctx.findings)
     txt = meter_text(ctx, m)
     return Compiled(l1, m, txt, (time.perf_counter() - t0_) * 1000)
+
+
+def take_seats(work_dir, index=None):
+    """Where type can stand on the upload held as one take, by the same rules a film is compiled with: (caption y,
+    display seats, the room each has as [width, height]). For the Brief, before a film exists, so the Director
+    knows whether its hook title has a place on the take or must stand over a picture. None when nothing can be told."""
+    if index is None:
+        index = json.load(open(os.path.join(work_dir, "index.json")))
+    dur = float((index.get("video") or {}).get("duration") or 0.0)
+    if dur <= 0:
+        return None
+    stub = ('{"k":"film","v":1,"fps":30,"frame":"9:16","spine":"main"}\n'
+            '{"k":"b","id":"b01","at":"@0.0..@%.2f","pic":"main"}\n' % max(0.5, dur - 0.05))
+    perc = load_perception(work_dir)
+    ctx = compile_once(stub, index, work_dir, {}, None, faces_from(perc), None, False, None, perc, True, {}, ({}, {}, None))
+    seats = film_seats(ctx)
+    return ctx.cap_y, [list(q) for q in seats], [list(r) for r in (getattr(ctx, "seat_rooms", None) or [])]
 
 
 def score_the_look_saw(text):

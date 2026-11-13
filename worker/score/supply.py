@@ -153,6 +153,8 @@ def look(sheet_path, cands, wishes, deadline):
 CHECK_MODEL = os.environ.get("BIN_CHECK_MODEL", "claude-opus-5-5")   # the last look's eyes: what it removes never enters
 CHECK_S = 18.0
 CHECK_RESERVE_S = 8.0      # the end of the budget belongs to the look: a picture nobody checked never enters
+ACQUIRE_S = 5.0            # and the seconds before it to the fetch: three named pictures were found and none arrived (p5591, 13 Nov), since
+                           # the named check ran to 1.5 s before the look's reserve and every fetch then timed out
 
 
 def wish_second(work, w):
@@ -259,7 +261,9 @@ def check_fit(work, items, wishes, deadline, asks=()):
             pair_board(work, [rows[n] for n in chunk], board)
             ask = ["The pairs, with what the editor added at each moment:"]
             for j, n in enumerate(chunk, 1):
-                ask.append(f"pair {j} @{rows[n][0]:.1f}s: b{n}.s1: a found picture, full frame"
+                shows = str(items[n].get("what") or "")[:90]      # the look can't tell Webber's car from any car unless told what it is
+                ask.append(f"pair {j} @{rows[n][0]:.1f}s: b{n}.s1: " + ("a designed picture made of the words said" if items[n].get("provider") == "designed" else "a found picture")
+                           + ", full frame for a second or two" + (f", showing {shows}" if shows else "")
                            + (f"; cap: the caption, reading {saids[n]}" if saids[n] else ""))
             if asks:        # what the customer asked for is theirs: the film's own look leaves an ask-bound picture in
                 ask.append("The customer typed these asks: " + json.dumps([a.get("said") for a in asks if a.get("said")], ensure_ascii=False)[:900]
@@ -393,7 +397,7 @@ def fetch_stills(cands, tmp):
 
 # ------------------------------------------------------------------ named subjects
 
-def name_wishes(work, wishes):
+def name_wishes(work, wishes, about=""):
     """(subjects per wish, usd): what each moment's words and want name that a real picture could
     show (a driver, a city, a brand), by one model call. The customer's own (`mine`) are not asked:
     only the upload shows those. No answer names nothing, and the libraries answer as before."""
@@ -403,12 +407,14 @@ def name_wishes(work, wishes):
         if w.get("mine"):
             continue
         said = clause_of(work, w.get("w") or w.get("at"))
-        texts.append(f"wants: {w.get('want') or ''}" + (f' | words said there: "{said}"' if said else ""))
+        # the words first: the Scout's want is often a mood ("a young driver's uncertain future") and the name is in
+        # what was said ("où Oscar partira"). 13 Nov: a film that names four people got no named picture on one run in two
+        texts.append((f'words said there: "{said}" | ' if said else "") + f"the editor wants: {w.get('want') or ''}")
         idx.append(i)
     out = [[] for _ in wishes]
     if not texts:
         return out, 0.0
-    got, usd = broll_source.name_many(texts)
+    got, usd = broll_source.name_many(texts, context=about)        # what the film is about turns "Oscar" into Oscar Piastri
     for j, subs in zip(idx, got):
         out[j] = subs[:1]
     return out, usd
@@ -612,7 +618,7 @@ def run(work, scout, per, acquire, deadline):
     report, cands = [], []
     usd = 0.0
     side = cf.ThreadPoolExecutor(max_workers=6)
-    name_f = side.submit(broll_source.carried(name_wishes), work, wishes)
+    name_f = side.submit(broll_source.carried(name_wishes), work, wishes, str((scout or {}).get("about") or ""))
     own_f = side.submit(broll_source.carried(own_moments), work, wishes, per or {}, min(deadline, time.monotonic() + 14.0))
     read_f = side.submit(broll_source.carried(reads_for), work, wishes, per or {})
 
@@ -655,7 +661,7 @@ def run(work, scout, per, acquire, deadline):
         report.append(dict(wish=i, w=wish.get("w") or wish.get("at"), want=wish.get("want"), own=wish.get("own"), mine=bool(wish.get("mine")),
                            seconds=secs, hits=len(hits), errors=errs, named=sub["name"] if sub else None, thing=things.get(i)))
         if sub:     # its pictures come from the named route, checked; the library's join that check
-            named_f[i] = side.submit(broll_source.carried(named_for), work, wish, sub, hits, min(deadline - CHECK_RESERVE_S - 1.5, time.monotonic() + 16.0))
+            named_f[i] = side.submit(broll_source.carried(named_for), work, wish, sub, hits, min(deadline - CHECK_RESERVE_S - ACQUIRE_S, time.monotonic() + 16.0))
             continue
         for h in hits:
             h["_wish"] = i
@@ -672,7 +678,7 @@ def run(work, scout, per, acquire, deadline):
             boards.save(sheet, sheet_path, quality=82)
             try:
                 seen_as = [dict(w, _said=clause_of(work, w.get("w") or w.get("at")), _thing=things.get(i)) for i, w in enumerate(wishes)]
-                keep, look_usd = look(sheet_path, cands, seen_as, min(deadline - CHECK_RESERVE_S - 2.0, time.monotonic() + 12.0))
+                keep, look_usd = look(sheet_path, cands, seen_as, min(deadline - CHECK_RESERVE_S - ACQUIRE_S, time.monotonic() + 12.0))
                 usd += look_usd
             except Exception as e:  # noqa: BLE001 no Look came back: one picture per wish, library order
                 report.append(dict(look_error=str(e)[:120]))
@@ -684,7 +690,7 @@ def run(work, scout, per, acquire, deadline):
         named = []
         for i, fut in named_f.items():
             try:
-                kept, rep = fut.result(timeout=max(0.05, deadline - CHECK_RESERVE_S - 1.0 - time.monotonic()))
+                kept, rep = fut.result(timeout=max(0.05, deadline - CHECK_RESERVE_S - ACQUIRE_S + 0.5 - time.monotonic()))
             except Exception as e:  # noqa: BLE001 unchecked is never shown: the wish falls back
                 kept, rep = [], dict(say=f"the named search did not finish ({str(e)[:80] or 'late'})")
             usd += float(rep.get("usd") or 0.0)
