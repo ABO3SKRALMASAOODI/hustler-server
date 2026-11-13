@@ -562,20 +562,31 @@ def _num(part):
 def panel_items(pid, design, a, b, l1, accent, top, height):
     """A designed panel beside the head, drawn in the plan so it moves: the panel lands and settles, then its
     contents arrive on eased curves (bars grow, values rise, a paper's lines type on, the marked line takes a
-    highlighter). Every word on it is the script stage's, from his words. Returns items, or [] when it cannot fit."""
+    highlighter). Every word on it is the script stage's, from his words. The panel is as tall as what it holds
+    and stands on the foot of its place. Returns items, or [] when it cannot fit."""
+    items, used = _panel(pid, design, a, b, l1, accent, top, height)
+    spare = top + height - 0.024 - used
+    if items and spare > 0.012:
+        items, _ = _panel(pid, design, a, b, l1, accent, top + spare, height - spare)
+    return items
+
+
+def _panel(pid, design, a, b, l1, accent, top, height):
+    """(items, the lowest point its contents reach)."""
     W, H = l1["frame"]
     n = b - a
     if n < 30:
-        return []
+        return [], top
     kind = str(design.get("kind") or "")
     paper = kind == "document"
+    low = [top]
     x0, x1 = 0.07, 0.93
     y0, y1 = top, top + height
     pad = 0.045
     V = l1["voices"]
     V["dv"] = dict(font="InterDisplay-Black.ttf", px=92, track=-2.5)
     V["dl"] = dict(font="InterDisplay-Bold.ttf", px=31, track=5)
-    V["dd"] = dict(font="InstrumentSerif-Regular.ttf", px=43, track=0)
+    V["dd"] = dict(font="InstrumentSerif-Regular.ttf", px=58, track=0)
     ink, dim = (INK, "#6B6F76") if paper else ("#FFFFFF", "#9AA1AC")
     land = min(n, 12)
     card = dict(id=f"{pid}.panel", k="card", f=[a, b], z=2, pic="plate",
@@ -595,6 +606,7 @@ def panel_items(pid, design, a, b, l1, accent, top, height):
         for j in range(min(5, life)):
             op[life - 1 - j] = min(op[life - 1 - j], (j + 1) / 5)
         seq[0] += 1
+        low[0] = max(low[0], y + 0.24 * V[v]["px"] / H)
         items.append(dict(id=f"{pid}.{seq[0]}", k="word", f=[a + at, b], t=t, v=v, x=round(x, 5), ink=col, role="big", on=a + at, z=5,
                           y=r4(expo(k, y + 0.014, y) + [y] * (life - k)), blur=r4(expo(k, 7.0, 0.0) + [0.0] * (life - k)), op=r4(op)))
 
@@ -637,10 +649,10 @@ def panel_items(pid, design, a, b, l1, accent, top, height):
                 frac = (vals[i] / top_v) if vals[i] else 1.0
                 life = n - at
                 g = expo(min(life, 16), 0.0, 1.0) + [1.0] * max(life - 16, 0)
-                rect = [[round(cx, 5), round(by, 5), round(cx + max(cw * frac * k, 0.003), 5), round(by + 0.011, 5)] for k in g]
+                rect = [[round(cx, 5), round(by, 5), round(cx + max(cw * frac * k, 0.003), 5), round(by + 0.013, 5)] for k in g]
                 items.append(dict(id=f"{pid}.bar{i}", k="flash", f=[a + at, b], mode="fill", z=3, rect=rect, a=_fade(life, 2, 5),
                                   c=accent if (vals[i] is not None and vals[i] == big and len(parts) > 1) else "#5C6370"))
-                row_of(str(p.get("label") or "").upper(), "dl", cx, by + 0.011 + 0.03, dim, at + 4, 1, cx + cw)
+                row_of(str(p.get("label") or "").upper(), "dl", cx, by + 0.013 + 0.03, dim, at + 4, 1, cx + cw)
         else:                                                    # amounts stacked: value, label, bar to its share
             rows_h = (y1 - y - 0.02) / len(parts)
             V["dv"]["px"] = int(min(V["dv"]["px"], rows_h * H * 0.52))
@@ -661,22 +673,26 @@ def panel_items(pid, design, a, b, l1, accent, top, height):
         lines = [" ".join(str(x).split()) for x in (design.get("lines") or []) if str(x).strip()][:5]
         v = "dd"
         mark = _norm(design.get("mark"))
-        gap = L.text_w(V[v], "n n", W) - 2 * L.text_w(V[v], "n", W)
-        laid = []                                                # (text, x, row, marked)
-        row, x = 0, inner_x0
-        for ln in lines:
-            marked = bool(mark) and (mark in _norm(ln) or _norm(ln) in mark)
-            for t in ln.split():
-                tw = L.text_w(V[v], t, W)
-                if x + tw > inner_x1 and x > inner_x0:
-                    row, x = row + 1, inner_x0
-                laid.append((t, x, row, marked))
-                x += tw + gap
-            row, x = row + 1, inner_x0
-        lead = 1.22 * V[v]["px"] / H
-        room = int((y1 - y - 0.03) / lead)
+        while True:                                              # the lines as large as the paper holds
+            gap = L.text_w(V[v], "n n", W) - 2 * L.text_w(V[v], "n", W)
+            laid = []                                            # (text, x, row, marked)
+            row, x = 0, inner_x0
+            for ln in lines:
+                marked = bool(mark) and (mark in _norm(ln) or _norm(ln) in mark)
+                for t in ln.split():
+                    tw = L.text_w(V[v], t, W)
+                    if x + tw > inner_x1 and x > inner_x0:
+                        row, x = row + 1, inner_x0
+                    laid.append((t, x, row, marked))
+                    x += tw + gap
+                row, x = row + 1, inner_x0
+            lead = 1.22 * V[v]["px"] / H
+            room = int((y1 - y - 0.03) / lead)
+            if row <= room or V[v]["px"] <= 40:
+                break
+            V[v]["px"] -= 4
         if room < 1:
-            return []
+            return [], top
         laid = [w for w in laid if w[2] < room]
         base = y + 0.012 + 0.82 * V[v]["px"] / H
         for i, (t, x, r, marked) in enumerate(laid):
@@ -693,8 +709,11 @@ def panel_items(pid, design, a, b, l1, accent, top, height):
             items.append(dict(id=f"{pid}.mark{r}", k="flash", f=[a + at, b], mode="fill", z=3, rect=rect, c=accent,
                               a=r4([0.42 * v_ for v_ in _fade(life, 2, 5)])))
     else:
-        return []
-    return items if len(items) > 1 else []
+        return [], top
+    for it in items:
+        if it.get("k") == "flash" and isinstance(it.get("rect"), list) and it["rect"] and isinstance(it["rect"][0], list):
+            low[0] = max(low[0], it["rect"][-1][3])
+    return (items, low[0]) if len(items) > 1 else ([], top)
 
 
 def ride_captions(l1, card, moved):
