@@ -24,6 +24,8 @@ DEFAULTS = {"mode": "off", "percent": 100, "test_user_ids": [], "deadline_s": DE
             "models": {"scout": "claude-haiku-5-5", "direct": "claude-opus-5-5"}, "effort": {"direct": "low"},
             "engine": "off", "engine_user_ids": []}
 ENGINE_MODES = ("off", "shadow", "on")
+# OpenAI models a Director row may name for its test_user_ids only (lane Q, 13 Nov; prices in model_prices).
+OPENAI_MODELS = ("gpt-5.5", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna")
 # Effort, measured on copies through this path (director/first-result): at medium the slice's Scores ended
 # 68-148 s after the call and a p5302 replay was still writing at 131 s, past the deadline, so about half
 # the films would fall to the chain after the wait. At low, Direct took 19-31 s and its repair 12-22 s on
@@ -53,8 +55,12 @@ def parse(raw):
         return dict(DEFAULTS)
     models = data.get("models") if isinstance(data.get("models"), dict) else {}
     out["models"] = {k: str(models.get(k) or v) for k, v in DEFAULTS["models"].items()}
+    if not all(m.startswith("claude-") or m in OPENAI_MODELS for m in out["models"].values()):
+        return dict(DEFAULTS)
     if not all(m.startswith("claude-") for m in out["models"].values()):
-        return dict(DEFAULTS)       # OpenAI is no customer rung until the Gauntlet clears it
+        # OpenAI is no customer rung until the Gauntlet clears it: a row naming an OpenAI model admits its
+        # test_user_ids only (mode off, no percent), whatever its mode says.
+        out["mode"], out["percent"] = "off", 0
     effort = data.get("effort") if isinstance(data.get("effort"), dict) else {}
     e = str(effort.get("direct") or DEFAULTS["effort"]["direct"])
     out["effort"] = {"direct": e if e in ("low", "medium", "high", "xhigh", "max") else DEFAULTS["effort"]["direct"]}

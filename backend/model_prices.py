@@ -66,6 +66,9 @@ separate and the flag must be True.
 # Keep every number sourced from the provider's own price page or a real
 # invoice. A guessed price is a silent, permanent billing error.
 MODEL_PRICES = {
+    # https://developers.openai.com/api/docs/models/gpt-5.5 (read 2026-11-13): $5 in, $0.50 cached in,
+    # $30 out per 1M. Lane Q's OpenAI rung for the Director and the checks (replays, test accounts).
+    "gpt-5.5": {"in": 5.0, "cached_in": 0.5, "out": 30.0, "reasoning_separate": False},
     # https://developers.openai.com/api/docs/models/gpt-6.1-sol (2026-09-30).
     # Preserve GPT-6 Sol below for historical usage; its cache rate differs.
     "gpt-6.1-sol": {"in": 2.0, "cached_in": 0.1, "cache_write_in": 2.5, "out": 10.0, "reasoning_separate": False},
