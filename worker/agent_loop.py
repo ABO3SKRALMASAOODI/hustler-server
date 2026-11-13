@@ -2765,6 +2765,9 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
         return ""
     done_by = None
     reset_note = _typed_start_from_upload(ctx, ledger, job)
+    held = _typed_hold_length(ctx, ledger, job)
+    if held:
+        reset_note = (reset_note + "\n" + held) if reset_note else held
     if ledger["route"] == "film" and cfg["director"]:
         got = asks.direct_film(ctx, worker_db, job, session_id, cfg)
         ledger["routed"] = {"to": "director", **{k: got.get(k) for k in ("version", "fell", "applied", "s")}}
@@ -2796,7 +2799,69 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
           f"{json.dumps(ledger.get('routed'), default=str)[:240]}", flush=True)
     if reset_note:
         done_by = reset_note + ("\n" + done_by if done_by else "")
+    kept = _typed_keep_whole(ctx, ledger, job, request)
+    if kept:
+        done_by = (done_by + "\n" + kept) if done_by else kept
     return asks.editor_note(ledger, done_by)
+
+
+def _typed_hold_length(ctx, ledger, job):
+    """An ask that keeps the upload's length (the ledger model's field) holds the film at the upload's
+    length: what an earlier cut took out comes back, with every item re-anchored (p5472, round 3:
+    "keep my full narration and duration, 7:53" stayed a 427 s film from the first cut's trims, and
+    the check called the keep done because this request had not cut it). Never raises."""
+    if not any(a.get("length") == "upload" for a in ledger.get("asks") or []):
+        return ""
+    try:
+        from score import asks
+        source_s = float(getattr(ctx, "duration", 0) or 0)
+        row = ctx.latest_edl()
+        prog = asks.program_seconds(row["json"]) or 0.0
+        keep = [k for k in row["json"].get("keep") or [] if k and len(k) >= 2]
+        kept = sum(max(0.0, float(b) - float(a)) for a, b in keep)
+        if not getattr(ctx, "has_main_video", False) or source_s <= 0 or kept >= source_s - 0.5:
+            return ""
+        result = str(agent_tools.restore_range(ctx, 0.0, source_s))
+    except dbx.JobLeaseLost:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the film as it was; the check still sees its length
+        print(f"[asks] job {job.get('id')}: length not held: {str(exc)[:160]}", flush=True)
+        return ""
+    if not result.startswith("EDL v"):
+        print(f"[asks] job {job.get('id')}: length not held: {result[:160]}", flush=True)
+        return ""
+    ledger["held"] = {"from_s": round(prog, 1), "to_s": round(source_s, 1)}
+    print(f"[asks] job {job.get('id')}: length held: {prog:.1f} s -> the whole {source_s:.1f} s upload", flush=True)
+    return (f"The customer asked to keep the upload's length: the film was {prog:.1f} s of their {source_s:.1f} s, "
+            "so every part an earlier cut took out is back, with the items re-anchored. Keep all of it; "
+            "say in the reply that the full length is kept.")
+
+
+def _typed_keep_whole(ctx, ledger, job, request):
+    """After the route: faces stay whole (every camera move that cuts a measured head is refitted or
+    taken out, measured on the index's faces with the renderer's own camera math) and names in the
+    captions are spelled as the customer and the frames spell them. Never raises."""
+    from score import asks
+    notes = []
+    try:
+        row = ctx.latest_edl()
+        new, said = asks.fit_faces(row["json"], getattr(ctx, "index", None) or {})
+        if new is not None and said:
+            result = str(ctx.write_edl(new, "faces kept whole: " + "; ".join(said)[:240]))
+            if result.startswith("EDL v"):
+                ledger["faces"] = said[:20]
+                notes.append(f"Camera moves that cut a face were fixed ({len(said)}): " + "; ".join(said[:8])
+                             + ". Keep faces whole: no move that crops a head.")
+            else:
+                print(f"[asks] job {job.get('id')}: faces not refitted: {result[:160]}", flush=True)
+    except dbx.JobLeaseLost:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        print(f"[asks] job {job.get('id')}: faces not measured: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
+    names = asks.fix_names(ctx, ledger, request, getattr(ctx, "request_contract_history", None))
+    if names:
+        notes.append(names)
+    return "\n".join(notes)
 
 
 def _typed_start_from_upload(ctx, ledger, job):
@@ -2901,15 +2966,25 @@ def _asks_check(ctx, draft, allow_repair=True):
             return None
         verdict["edl_version"] = row.get("version")
         verdict["draft"] = (draft or "")[:200]
+        if fixed and "unasked" not in verdict:
+            verdict["unasked"] = previous.get("unasked") or []
         ledger.setdefault("checks", []).append({"edl_version": row.get("version"), "usage": verdict.get("usage"),
-                                                "open": [r["id"] for r in asks.open_asks(verdict)]})
+                                                "open": [r["id"] for r in asks.open_asks(verdict)],
+                                                "harm": len(asks.harm(verdict))})
         ctx.ask_verdict = verdict
-    if not allow_repair or not asks.open_asks(verdict):
+    if not allow_repair or not (asks.open_asks(verdict) or asks.harm(verdict)):
         return None
     if int(ledger.get("repairs") or 0) >= int((ledger.get("cfg") or {}).get("repairs", 1)):
         return None
     ledger["repairs"] = int(ledger.get("repairs") or 0) + 1
-    return asks.repair_note(ledger, verdict)
+    try:
+        undone = asks.undo_harm(ctx, verdict, ledger)
+    except dbx.JobLeaseLost:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the editor is told the harm instead
+        print(f"[asks] harm not taken out: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
+        undone = ""
+    return asks.repair_note(ledger, verdict, undone)
 
 
 def _asks_settle(ctx, final, outcome):
@@ -2925,6 +3000,7 @@ def _asks_settle(ctx, final, outcome):
     except Exception:  # noqa: BLE001
         verdict = None
     if verdict:
+        final = asks.true_reply(ctx, ledger, verdict, final or "")
         final = (final or "") + asks.reply_block(ledger, verdict)
     return final, asks.outcome(ledger, verdict, outcome)
 

@@ -586,8 +586,8 @@ def test_every_move_is_listed_with_its_aim():
         {"id": "zp1", "start": 5.0, "end": 9.0, "strength": 0.05, "mode": "path", "ease": "cubic_in_out",
          "path": [{"t": 5.0, "cx": 0.3, "cy": 0.5, "s": 0.05}, {"t": 9.0, "cx": 0.5, "cy": 0.5, "s": 0.05}]}]})
     rows = asks.move_rows(edl)
-    assert rows[0].startswith("1.0-4.0 push_in 5% framing 0.30,0.20,0.50,0.40") and "toward the dog's eyes" in rows[0]
-    assert rows[1].startswith("5.0-9.0 path travels (0.30,0.50) to (0.50,0.50)")
+    assert rows[0].startswith("move:zm1 1.0-4.0 push_in 5% framing 0.30,0.20,0.50,0.40") and "toward the dog's eyes" in rows[0]
+    assert rows[1].startswith("move:zp1 5.0-9.0 path travels (0.30,0.50) to (0.50,0.50)")
     assert asks.measured(edl)["moves"] == rows
 
 
