@@ -110,10 +110,17 @@ def _ask_with(llm, spend, what):
     return ask
 
 
-def _subject(row):
+def _subject(row, story=""):
+    """The subject as the named route reads it. The check also gets what the film is about, so a picture that plainly
+    belongs to another country, era or trade than the story (a formulary of another country, a namesake) is dropped
+    by the model that looks at it, not by a rule."""
     name = " ".join(str(row.get("name") or row.get("shows") or "").split())[:80]
     qs = [" ".join(str(q).split())[:100] for q in row.get("searches") or [] if str(q).strip()][:3] or [name]
-    return dict(name=name, searches=qs, must_show=" ".join(str(row.get("must_show") or row.get("shows") or name).split())[:240])
+    must = " ".join(str(row.get("must_show") or row.get("shows") or name).split())[:240]
+    if story:
+        must += (f" It stands in a film about: {story[:260]} Drop a picture that plainly belongs to another country, era or "
+                 "trade than that story, unless the subject itself is from there.")
+    return dict(name=name, searches=qs, must_show=must)
 
 
 def _faces_of(img):
@@ -233,8 +240,11 @@ def find(ctx, script, llm, worker):
     plan = [dict(r, i=i) for i, r in enumerate(script.get("pictures") or []) if isinstance(r, dict)]
     wanted = [r for r in plan if r.get("kind") in ("named", "thing")]
 
+    idea = script.get("idea") or {}
+    story = " ".join(f"{script.get('title') or ''}. {idea.get('why') or ''}".split())
+
     def one(r):
-        sub = _subject(r)
+        sub = _subject(r, story)
         try:
             cands, errors = B.search_named(sub, B.KIND_PHOTO, 8, SEARCH_S)
             cands = [c for c in cands if min(int(c.get("width") or 0), int(c.get("height") or 0)) >= PHOTO_MIN]
@@ -251,8 +261,9 @@ def find(ctx, script, llm, worker):
     with ThreadPoolExecutor(max_workers=4) as pool:
         found = list(pool.map(one, wanted))
     rows, used, got = [], set(), {}
+    by_i = {r["i"]: r for r in plan}
     for i, sub, kept, rep in found:
-        rec = dict(i=i, name=sub["name"], must_show=sub["must_show"], report=rep, ok=False)
+        rec = dict(i=i, name=sub["name"], must_show=by_i.get(i, {}).get("must_show") or sub["name"], report=rep, ok=False)
         kept = sorted(kept, key=lambda c: (-int(c.get("_grade") or 0), int(c.get("width") or 0) > int(c.get("height") or 0),
                                            -min(int(c.get("width") or 0), int(c.get("height") or 0))))     # among equals, the upright one fills a phone
         for c in kept:
@@ -281,7 +292,6 @@ def find(ctx, script, llm, worker):
         rows.append(rec)
         got[i] = rec
     boxes = _keep_boxes(B, ask, [r for r in rows if r["ok"]], ctx.tmp)
-    by_i = {r["i"]: r for r in plan}
     for r in rows:
         if not r["ok"]:
             continue
