@@ -1044,7 +1044,9 @@ def apply(l1, script, earned, idx, source, sounds_manifest, own=True, panel_low=
             pay_f = None
     if pay_f is not None and not (hook_end + 60 <= pay_f <= n - 24):
         pay_f = None
-    last_ok = min(n - TAIL_F, (pay_f - 6) if pay_f is not None else n)
+    # the payoff belongs to his face when the film cuts closer on it; a style with no closer cut (the second camera
+    # has its own angles) keeps showing what he names until the tail
+    last_ok = min(n - TAIL_F, (pay_f - 6) if (pay_f is not None and own) else n)
     rows = []
     for r in plan:
         if hrow and r["i"] == hrow["i"]:
