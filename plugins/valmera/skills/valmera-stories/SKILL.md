@@ -108,12 +108,21 @@ cannot stand on the film leaves it as it was and says why; it never fails a rend
 One device a beat, each with a reason in the words. Which word, picture and year is your reading, never a rule.
 Proofs beside the judge: `.valmera/week-1112/side-by-side/S/`. Full asks: `.valmera/week-1112/notes/S.md`.
 
+## Providers, the spoken form, pace
+
+- **Provider.** `writer.ask_web` and `writer.ask` run on Claude when the process holds an Anthropic key, else on OpenAI's
+  Responses API with its web search (`WRITER_PROVIDER=openai|anthropic` forces one; `WRITER_OPENAI_MODEL`, default
+  gpt-6.1-sol). Quotes are verified here either way.
+- **The spoken form.** `say` is the writer model's spoken form and `names` lists every proper noun as spelled; the
+  narrator's gate listener hears with the names and the VOICE gate compares spoken forms (`_shell/narrate/spoken.py`).
+- **Pace.** Each segment carries `pace` (slow, steady, brisk, fast); `film.assign_pictures` holds each framing between
+  that pace's shortest and longest (`film.PACE_S`), so picture density follows the story's pace.
+
 ## Workflow 4 reuses this
 
-`writer.py` takes a form: `FORMS["long"]` is the 10-20 minute voiceover (band 04, chapters, a promise
-by 30 s). `find_ideas`, `write`, `verify` and `narration_script` work the same for it, and
-`pictures.narrate` / `pictures.pictures` / `pictures.commons_file` are its supply. Long-form voices
-are `sage` and `iris`.
+`valmera-longform` (the 10-20 minute voiceover) builds on `writer.py` (the web, the providers, `verify`) and on
+`pictures.narrate` / `pictures.pictures` / `pictures.commons_file` / `pictures.faces` for its supply, and on `film.py`'s
+clock, curves and ticks. Long-form voices are `sage` and `iris`.
 
 ## Where things are
 

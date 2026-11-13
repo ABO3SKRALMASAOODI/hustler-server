@@ -359,9 +359,16 @@ def designed_page(P, f, text, sub, palette, v_big, v_sub):
         P.word([a + 3, b], sub, v_sub, 0.5, 0.47 + 0.05, palette["ink_soft"], 0.85, align="c")
 
 
+# Picture density follows the pace the writer gave each segment (or the script): the shortest and longest framing in
+# seconds. A slow, reflective stretch holds a picture longer; a list or a money passage changes faster (atlas 1.2: the
+# fastest 10 s of a story sits on a list or on money). Shared with workflow 4 (valmera-longform), whose chapters set it.
+PACE_S = {"slow": (1.6, 3.4), "steady": (1.15, 2.6), "brisk": (0.85, 1.9), "fast": (0.65, 1.5)}
+
+
 def assign_pictures(script, clock, pics, f_end, min_s=1.15, max_s=2.6):
     """Shots in programme frames from the segments' named pictures: [(f0, f1, name, rec)]. A subject's photographs
-    rotate; a segment that names nothing keeps the last subject with its next photograph."""
+    rotate; a segment that names nothing keeps the last subject with its next photograph. Each segment's framings
+    last between its pace's shortest and longest (PACE_S); without a pace, min_s and max_s."""
     used = {}
     out = []
     last = None
@@ -373,8 +380,9 @@ def assign_pictures(script, clock, pics, f_end, min_s=1.15, max_s=2.6):
         if not names:
             continue
         span = (b - a) / FPS
-        k = max(1, min(len(names) * 2, int(span / min_s)))
-        k = max(k, int(math.ceil(span / max_s)))
+        lo_s, hi_s = PACE_S.get(str(s.get("pace") or script.get("pace") or ""), (min_s, max_s))
+        k = max(1, min(len(names) * 2, int(span / lo_s)))
+        k = max(k, int(math.ceil(span / hi_s)))
         k = max(k, len(names))
         cuts = [a + int(round((b - a) * j / k)) for j in range(k + 1)]
         for j in range(k):

@@ -67,6 +67,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import measure  # noqa: E402
+import spoken  # noqa: E402
 
 VOICES = HERE / "voices"
 MODEL_ID = os.environ.get("NARRATE_MODEL", "openbmb/VoxCPM2")
@@ -265,6 +266,17 @@ class Engine:
 # ================================================================ listening
 
 _asr_cache = {}
+# The story's proper nouns as its writer spelled them (the script's `names`, written by the writer model). The gate's
+# listener (large-v3) hears with them as vocabulary, as a human checker would know the names: a rare name spelled the
+# common way ("Goldstein" for Goldstine) is the listener's spelling, not the narrator's error, and cost lane O 1-2% word
+# error. The take listener (large-v3-turbo on 10-20 s chunks) does not: with the prompt it invented "thank you" and
+# "forty six" at window edges on lane O's ENIAC film (13 Nov), more than the names it fixed.
+VOCAB = []
+
+
+def vocab_prompt():
+    names = [str(n).strip() for n in VOCAB if str(n).strip()]
+    return ("Names: " + ", ".join(names[:60]) + ".") if names else None
 
 
 def listen(x, sr, model=None):
@@ -273,7 +285,7 @@ def listen(x, sr, model=None):
     y = measure.resample(x, sr, 16000) if sr != 16000 else x
     r = mlx_whisper.transcribe(y.astype(np.float32), path_or_hf_repo=model or ASR_MODEL, language="en",
                                word_timestamps=True, condition_on_previous_text=False, verbose=None,
-                               temperature=0.0)
+                               temperature=0.0, initial_prompt=vocab_prompt())
     words = [{"w": w["word"].strip(), "start": float(w["start"]), "end": float(w["end"]),
               "p": float(w.get("probability", 1))} for s in r["segments"] for w in s.get("words", [])]
     return r["text"], words
@@ -538,6 +550,7 @@ def pick_engine(args, script):
 def render(args):
     import soundfile as sf
     script = load_script(args.script)
+    VOCAB[:] = list(script.get("names") or [])
     vid = args.voice or script.get("voice") or "atlas"
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -659,6 +672,14 @@ def render(args):
             dur = len(wav) / eng.sr
             text, heard = listen_fast(wav, eng.sr)
             w = measure.wer(ch["text"], text)
+            if w["wer"] > 0 and any(spoken._letters(t) is None for t in text.split()):
+                # the listener wrote a number or a symbol: a model puts its text in spoken form before the take is
+                # judged, as the gate does; a rule's guess at "-60°F" must not send a good take back to the ladder
+                spf = spoken.spoken_form(text, ch["text"], VOCAB)
+                if spf.get("ok"):
+                    w2 = measure.wer(ch["text"], spf["text"])
+                    if w2["wer"] < w["wer"]:
+                        w = w2
             p = measure.pace(heard)
             pa = p["wpm_artic"]
             dev = abs(pa / wpm - 1) if (wpm and pa) else 0.0
@@ -864,7 +885,7 @@ def deliver(x, sr, script, chunks, bounds, rep, args, out, t_all, gen_s, load_s=
                "phrases": [{"text": " ".join(w["w"] for w in p), "start": p[0]["start"], "end": p[-1]["end"],
                             "seg": p[0]["seg"]} for p in phrases],
                "cut_points": cuts}, open(out / "words.json", "w"), indent=1)
-    rep.update(duration_s=round(dur, 2), lufs_target=target, boundaries=bounds, pauses=edits, master=mrep)
+    rep.update(duration_s=round(dur, 2), lufs_target=target, boundaries=bounds, pauses=edits, master=mrep, names=list(VOCAB))
     rep["timing"] = {"load_s": round(load_s, 1), **(timing or {"generate_s": round(gen_s, 1)}),
                      "listen_s": round(t_lis, 1), "total_s": round(time.time() - t_all, 1),
                      "render_s_per_min_speech": round(60 * gen_s / dur, 1),
@@ -982,10 +1003,19 @@ def check(args):
     wj = json.load(open(d / "words.json"))
     x, sr = measure.load_mono(d / "narration.wav")
     script = " ".join(c["text"] for c in rep["chunks"])
+    VOCAB[:] = list(rep.get("names") or [])
+    if getattr(args, "names", None):
+        VOCAB[:] = json.load(open(args.names)) if args.names.endswith(".json") else [n.strip() for n in args.names.split(",")]
     # 1. words. The gate listener is whisper large-v3 (mlx), which never chose a
-    # take; the take listener (large-v3-turbo) is reported beside it.
+    # take; the take listener (large-v3-turbo) is reported beside it. Both hear
+    # with the story's names. The script is the writer model's spoken form; the
+    # listener's written form is put in its spoken form by a model (spoken.py),
+    # never by rule, and the gate compares the two. The rule-based figure is kept
+    # beside it for comparison only.
     text1, words1 = listen_long(x, sr)
-    w1 = measure.wer(script, text1)
+    w_rule = measure.wer(script, text1)
+    sp = spoken.spoken_form(text1, script, VOCAB)
+    w1 = measure.wer(script, sp["text"]) if sp.get("ok") else dict(w_rule)
     text2, words2 = listen_long(x, sr, listen_fast)
     w2 = measure.wer(script, text2)
     # 2. voice against the reference band (timings from the same listener the band used)
@@ -1030,7 +1060,12 @@ def check(args):
     for b in j["boundaries"]:
         b["artefacts"] = clean(b)
     res = {"dir": str(d), "voice": rep["voice"], "duration_s": rep["duration_s"],
-           "wer": {"gate_listener": "whisper-large-v3 (mlx)", **w1, "errors": measure.wer_detail(script, text1)},
+           "wer": {"gate_listener": "whisper-large-v3 (mlx)", **w1,
+                   "spoken_form": {k: sp.get(k) for k in ("ok", "model", "guard", "usd", "why")},
+                   "errors": measure.wer_detail(script, sp["text"] if sp.get("ok") else text1)},
+           "wer_rule_normalised": {**w_rule, "errors": measure.wer_detail(script, text1),
+                                   "note": "the listener's written form expanded by inflect and patterns; comparison only"},
+           "names": list(VOCAB), "heard": text1, "heard_spoken": sp.get("text"),
            "wer_take_listener": {"listener": "faster-whisper " + CHECK_ASR, **w2,
                                  "errors": measure.wer_detail(script, text2)},
            "voice": prof, "band": args.band, "in_band": inband,
@@ -1132,6 +1167,7 @@ def main():
     c = sp.add_parser("check")
     c.add_argument("dir")
     c.add_argument("--band", default="all", choices=["03", "04", "all"])
+    c.add_argument("--names", help="the story's names (comma list or a .json list); default: render.json's names")
     v = sp.add_parser("make-voice")
     v.add_argument("--id", required=True)
     v.add_argument("--describe", required=True)
