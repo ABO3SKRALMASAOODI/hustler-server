@@ -121,6 +121,11 @@ def split_audio(plan):
         if at >= n or len(smp) == 0:
             report["skipped"].append(s.get("id"))
             continue
+        if s.get("dur_s"):                     # the measured audible tail: stopped there with a 0.12 s fade, as the renderer does
+            span = int(round(float(s["dur_s"]) * SR))
+            smp = smp[:span].copy()
+            fade = min(int(0.12 * SR), max(1, len(smp) // 3))
+            smp[-fade:] *= np.linspace(1, 0, fade, dtype=np.float32)[:, None]
         smp = smp[:n - at] * (10 ** (float(s.get("db", 0)) / 20))
         mix[at:at + len(smp)] += smp
         report["sounds"] += 1
