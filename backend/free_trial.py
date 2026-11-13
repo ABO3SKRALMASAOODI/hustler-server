@@ -74,6 +74,9 @@ DEFAULTS = {
     # upload's own (storage.MAX_UPLOAD_GB, MAX_DURATION_S, shown in the Studio).
     "max_accounts_per_device_30d": 2,
     "payer_first_cut": True,
+    # While "on" is false (the owner's paywall) a paying account's first
+    # project still gets the First cut; false makes OFF admit nobody.
+    "payers_while_off": True,
     # Lane P (13 Nov 2026): 12 of the 21 paying Plus accounts had never seen
     # a film. Every one subscribed before the D1 cutoff, so their uploads were
     # the only ones that got NOTHING automatic: a free trial account got a
@@ -411,7 +414,16 @@ def _refusal(cur, cfg, user_id, subscribed, fresh=True):
     the read-only answer the Studio asks before an upload. Not about any one
     project: the caller checks the account's other admissions."""
     if not live(cur, user_id, cfg):
-        return "off"
+        # The owner's OFF is the paywall for accounts that have not paid
+        # (13 Nov 2026: "turn the paywall on while we keep pushing this to
+        # ten"). A paying account's first project still gets its First cut
+        # (lane P) while the Claude lane is on: the wall never applied to
+        # payers, and switching the trial off must not take their film away.
+        # payers_while_off=false restores "off admits nobody".
+        if not (subscribed and not cfg.get("on")
+                and cfg.get("payers_while_off", True)
+                and credit_on(cur)):
+            return "off"
     try:
         if int(user_id) in {int(x) for x in cfg.get("excluded_user_ids") or []}:
             return "excluded"

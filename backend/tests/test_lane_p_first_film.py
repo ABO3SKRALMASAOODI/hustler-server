@@ -236,7 +236,14 @@ def test_first_cut_on_upload_reads_the_same_rules():
     assert free_trial.first_cut_on_upload(
         LaneDB(stored=_on(), any_admission=True), 2380) is False
     _fresh()
-    assert free_trial.first_cut_on_upload(LaneDB(stored=None), 2380) is False
+    # The owner's OFF (13 Nov 2026) is the paywall for unpaid accounts; a
+    # paying account's first project keeps its First cut ...
+    assert free_trial.first_cut_on_upload(
+        LaneDB(stored=json.dumps({"on": False})), 2380) is True
+    _fresh()
+    # ... unless payers_while_off is false: then OFF admits nobody.
+    assert free_trial.first_cut_on_upload(LaneDB(stored=json.dumps(
+        {"on": False, "payers_while_off": False})), 2380) is False
     _fresh()
     assert free_trial.first_cut_on_upload(LaneDB(stored=_on()), 60) is False
     _fresh()

@@ -136,6 +136,23 @@ def test_switched_off_admits_nobody_not_even_internal_accounts():
                                        subscribed=False) is None
 
 
+def test_owner_off_walls_unpaid_accounts_but_payers_keep_their_first_cut():
+    # 13 Nov 2026: the owner turned the trial off ("turn the paywall on while
+    # we keep pushing this to ten"). Unpaid accounts meet the wall; a paying
+    # account's first project still gets its First cut.
+    off = json.dumps({"on": False})
+    _fresh()
+    assert free_trial.admit_upload(DB(stored=off), 777, 9,
+                                   subscribed=False) is None
+    _fresh()
+    payer = free_trial.admit_upload(DB(stored=off), 778, 10, subscribed=True)
+    assert payer is not None and payer["kind"] == "payer"
+    _fresh()
+    strict = json.dumps({"on": False, "payers_while_off": False})
+    assert free_trial.admit_upload(DB(stored=strict), 778, 10,
+                                   subscribed=True) is None
+
+
 def test_before_start_only_internal_accounts_are_admitted():
     _fresh()
     future = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
