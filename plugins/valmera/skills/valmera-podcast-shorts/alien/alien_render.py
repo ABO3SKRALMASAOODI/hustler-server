@@ -35,6 +35,36 @@ def _engine(ctx, chain, l1_path, out, label, audio=True):
     os.replace(out + ".part.mp4", out)
 
 
+def _sound(ctx, chain, l1, adir, fallback):
+    """The sound design of the finished plan (worker/score/sound.py, week-1112/notes/J.md): every picture event the
+    plan now holds is offered to it, with no sound of ours in the way. When the pass is not in the checkout or
+    cannot run, the plan keeps the two sounds earned.py placed by the owner's rule, and the record says which."""
+    import brand
+    wk = brand.worker_dir()
+    src, out = os.path.join(adir, "l1_plan.json"), os.path.join(adir, "l1_sound.json")
+    if not os.path.exists(os.path.join(wk, "score", "sound.py")):
+        return dict(fallback or {}, by="earned (the sound pass is not in this checkout)")
+    if not os.path.exists(out):
+        json.dump(dict(l1, sound=[]), open(src, "w"), ensure_ascii=False)
+        # asks={}: the Scout read the shell's own direction to the Director ("no sounds from you: the engine adds them")
+        # as an ask about sound. It is this workflow's division of work, not a customer's wish, so it binds nothing here.
+        code = ("import json,sys;from score import sound;l1=json.load(open(sys.argv[1]));l1=sound.apply(l1,work=sys.argv[2],asks={});"
+                "json.dump(l1,open(sys.argv[3]+'.part','w'));import os;os.replace(sys.argv[3]+'.part',sys.argv[3]);"
+                "print(json.dumps(l1.get('sound_design') or {},default=float)[:2000])")
+        try:
+            chain.sh(ctx, ["zsh", "-c", f"cd '{wk}' && PYTHONPATH=. '{chain.PY}' -c \"{code}\" '{src}' '{ctx.supply}' '{out}'"], timeout=900)
+        except (RuntimeError, subprocess.SubprocessError) as e:
+            ctx.log(f"sound design skipped: {str(e)[:300]}")
+            return dict(fallback or {}, by="earned (the sound pass could not run)")
+    got = json.load(open(out))
+    rep = got.get("sound_design") or {}
+    if rep.get("fault") or rep.get("no_signal") or rep.get("asked") or not rep:
+        return dict(fallback or {}, by="earned (the sound pass placed nothing)", sound_design=rep)
+    l1["sound"] = got.get("sound") or []
+    return dict(by="score.sound", placed=len(l1["sound"]), cls=rep.get("class"), np10=rep.get("np10"), allow=rep.get("allow"),
+                events=[dict(f=s_.get("event_f"), s=s_.get("s"), db=s_.get("db")) for s_ in l1["sound"]], dropped=rep.get("dropped"))
+
+
 def render(ctx, script, sc, chain):
     adir = os.path.join(ctx.supply, "alien")
     os.makedirs(adir, exist_ok=True)
@@ -42,22 +72,36 @@ def render(ctx, script, sc, chain):
     l1 = json.load(open(sc["l1"]))
     passes = list(script.get("passes") or [])
     plan = {}
+    ep = os.path.join(ctx.supply, "earned", "earned.json")
+    if os.path.exists(ep):                              # the story's pictures, the hook, his own footage closer, motion, sound
+        import earned
+        plan["earned"] = earned.apply(l1, script, json.load(open(ep)), json.load(open(os.path.join(ctx.supply, "index.json"))),
+                                      os.path.join(ctx.supply, "source.mp4"), json.load(open(chain.SOUNDS)),
+                                      own="second_camera" not in passes, panel_low=False, work=ctx.supply)
     if "footnotes" in passes:                           # a plan pass: type added to the plan, drawn with the type
         import footnotes
         fp = os.path.join(adir, "footnotes.json")
         notes = json.load(open(fp))["footnotes"] if os.path.exists(fp) else []
-        plan["footnotes"] = footnotes.apply(l1, notes)
+        e = plan.get("earned") or {}                    # a note waits while a panel or a picture's card holds the lower frame
+        hold = [tuple(d["frames"]) for d in e.get("designs") or []] + [tuple(p["frames"]) for p in e.get("pictures") or [] if p.get("layout") == "card"]
+        plan["footnotes"] = footnotes.apply(l1, notes, hold=hold)
         plan["footnotes"]["ok"] = True
     passes = [p for p in passes if p not in PLAN_PASSES]
     look = script.get("look")
     film = l1.setdefault("film", {})
     graded = any(abs(float((film.get("grade") or {}).get(k, v)) - v) > 1e-6 for k, v in L.IDENTITY.items())
-    if look and not graded:                             # the style's look, only when the Director left the colours as shot
+    if look and (not graded or "earned" in plan):       # the style's look: one grade for the take and every found picture
         film["grade"] = dict(look["grade"])
-        film["grain"] = max(float(film.get("grain") or 0), look.get("grain", 0))
-        film["vignette"] = max(float(film.get("vignette") or 0), look.get("vignette", 0))
+        for k in ("grain", "vignette", "halation", "bloom"):
+            if look.get(k) is not None:
+                film[k] = look[k]
+        for it in l1["items"]:                          # a shot the Director graded apart joins the film's look
+            if it.get("k") == "shot" and it.get("pic") == "main":
+                it.pop("grade", None)
         plan["look"] = dict(applied=look, ok=True)
     moved = L.repair_placement(l1)
+    if "earned" in plan:                                # the film's sound: lane J's pass on the finished plan, where the events are
+        plan["earned"]["sound"] = _sound(ctx, chain, l1, adir, plan["earned"].get("sound"))
     p1, _ = L.split(l1, "alien/lit.mp4")
     paths = {k: os.path.join(adir, k + ".json") for k in ("l1", "p1", "p2")}
     for k, obj in (("l1", l1), ("p1", p1)):
@@ -87,6 +131,7 @@ def render(ctx, script, sc, chain):
         np.save(tp, S.track(S.faces(pass1, n), L.cuts(l1), n))
     import numpy as np
     off_faces = L.repair_faces(l1, np.load(tp))
+    split_caps = L.split_captions_at(l1, L.picture_cuts(l1)) if "earned" in plan else 0
     mids = {f for ws in L.groups(l1).values() for f in L.sample_frames(min(w["f"][0] for w in ws), max(w["f"][1] for w in ws))}
     pooled = L.repair_contrast(l1, S.gray_frames(lit, mids))            # measured on the picture the type will stand on
     _, p2 = L.split(l1, "alien/lit.mp4")
@@ -99,8 +144,9 @@ def render(ctx, script, sc, chain):
         os.replace(out + ".part.mp4", out)
     bad = L.outside_safe(l1)
     pictures = len(L.picture_shots(l1)) + len(L.cards(l1))
-    alien = dict(passes=list(script.get("passes") or []), measures=measures, placement=dict(moved=moved, outside_safe=bad, safe_area=list(L.SAFE), pooled=pooled, off_faces=off_faces),
+    measures.pop("earned", None)
+    alien = dict(passes=list(script.get("passes") or []), measures=measures, earned=plan.get("earned"), placement=dict(moved=moved, outside_safe=bad, safe_area=list(L.SAFE), pooled=pooled, off_faces=off_faces, captions_split_at_cuts=split_caps),
                  new_pictures=pictures, sounds=len(l1.get("sound") or []),
-                 ok=bool(all(m.get("ok", True) for m in measures.values()) and not bad))
+                 ok=bool(all(m.get("ok", True) for m in measures.values()) and not bad and (plan.get("earned") or {}).get("ok", True)))
     return dict(engine=chain.engine_kind() + "+alien", film=out, engine_check=dict(skipped="the alien passes change the picture by design"),
-                alien=alien)
+                alien=alien, plan=paths["l1"])

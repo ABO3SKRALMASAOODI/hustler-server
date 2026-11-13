@@ -241,8 +241,8 @@ def repair_contrast(l1, gray_frames):
     pooled = []
     for key, items in units(l1).items():
         ws = [it for it in items if it.get("k") == "word" and not it.get("behind")]
-        if not ws or any(it.get("k") == "card" for it in items):
-            continue
+        if not ws or any(it.get("k") == "card" for it in items) or any(w.get("grounded") for w in ws):
+            continue                                   # type on a card, or type that brings its own ground, keeps its ink
         a, b = min(w["f"][0] for w in ws), max(w["f"][1] for w in ws)
         gs = [g for g in (gray_frames.get(f) for f in sample_frames(a, b)) if g is not None]
         if not gs:
@@ -264,6 +264,12 @@ def repair_contrast(l1, gray_frames):
         if now >= need:
             continue
         fix = dict(id=key, ratio=round(now, 2), need=need)
+        if min(los) > 0.30 and ratio(_lum(DARK_INK)) >= need:            # a bright ground all its life (a paper, a white wall):
+            for w in ws:                                                 # dark ink reads, and no pool smudges the picture
+                w["ink"] = DARK_INK
+            fix["ink"] = DARK_INK
+            pooled.append(fix)
+            continue
         ink = "#FFFFFF"                                                  # white holds on a picture whose light moves
         for w in ws:
             w["ink"] = ink
@@ -277,7 +283,58 @@ def repair_contrast(l1, gray_frames):
     return pooled
 
 
+def picture_cuts(l1):
+    """Frames where the film cuts between two different pictures (the take and a found picture, two found pictures)."""
+    shots = sorted((it for it in l1["items"] if it.get("k") == "shot"), key=lambda it: it["f"][0])
+    return [b["f"][0] for a, b in zip(shots, shots[1:]) if a.get("pic") != b.get("pic")]
+
+
+def split_captions_at(l1, cuts, least=3):
+    """A caption chunk that lives across one of these frames becomes two chunks there: the ground under it changes
+    (a cut to another picture, a card landing), so its ink or its seat may too, instead of one ink and a pool that
+    smudges a paper. A word that lives on both sides is cut in two, each half keeping its place and its own frames
+    of every per-frame list; a word within ``least`` frames of the frame goes whole to the side it lives on.
+    Returns how many chunks were divided."""
+    n = 0
+    for c in sorted(set(int(x) for x in cuts)):
+        life = {}
+        for it in l1["items"]:
+            if it.get("k") == "word" and it.get("role") == "cap" and not it.get("behind"):
+                key = it.get("chunk") or it["id"]
+                a, b = life.get(key, (it["f"][0], it["f"][1]))
+                life[key] = (min(a, it["f"][0]), max(b, it["f"][1]))
+        across = {k for k, (a, b) in life.items() if a + least <= c <= b - least}
+        if not across:
+            continue
+        out = []
+        for it in l1["items"]:
+            key = (it.get("chunk") or it.get("id")) if it.get("k") == "word" and it.get("role") == "cap" and not it.get("behind") else None
+            if key not in across:
+                out.append(it)
+                continue
+            a, b = it["f"]
+            later = f"{it['chunk']}~{c}" if it.get("chunk") else None
+            if b <= c + least and a < c - least:                 # it lives before the frame
+                out.append(it)
+            elif a >= c - least:                                 # it lives after it
+                out.append(dict(it, chunk=later) if later else it)
+            elif b - c < least or c - a < least:
+                out.append(it if c - a >= b - c else (dict(it, chunk=later) if later else it))
+            else:
+                first, second = dict(it, f=[a, c]), dict(it, f=[c, b], id=f"{it['id']}~{c}", on=c)
+                if later:
+                    second["chunk"] = later
+                for k2, v in it.items():
+                    if isinstance(v, list) and k2 != "f" and len(v) == b - a:
+                        first[k2], second[k2] = v[:c - a], v[c - a:]
+                out += [first, second]
+        l1["items"] = sorted(out, key=lambda it: it["f"][0])
+        n += len(across)
+    return n
+
+
 IDENTITY = dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0)
+DARK_INK = "#0E0F11"
 
 
 def split(l1, lit_path):

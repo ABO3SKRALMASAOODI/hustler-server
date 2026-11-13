@@ -28,14 +28,16 @@ def _cap_word(l1, f):
     return best if best is not None and abs(best.get("on", best["f"][0]) - f) <= 15 else None
 
 
-def apply(l1, notes):
+def apply(l1, notes, hold=()):
+    """``hold``: frame spans in which a designed panel is being read. A note waits for the panel to leave, and leaves
+    before the next one lands: one thing is read at a time (TASTE P8). A note with no time left is not placed."""
     W, H = l1["frame"]
     n_f = int(l1["dur_f"])
     cap_px = float((l1["voices"].get("a") or next(iter(l1["voices"].values()))).get("px") or 56)
     l1["voices"].update(fn=dict(font="InstrumentSerif-Regular.ttf", px=NOTE_PX, track=0, shadow=dict(a=0.5, blur=0.008)),
                         fn_n=dict(font="InterDisplay-Bold.ttf", px=NUM_PX, track=0, shadow=dict(a=0.5, blur=0.008)),
                         fn_sup=dict(font="InterDisplay-Bold.ttf", px=int(round(cap_px * 0.5)), track=0, shadow=dict(a=0.5, blur=0.008)))
-    placed, items = [], []
+    placed, items, waived = [], [], []
     for n in notes:
         f = frame_of(l1, float(n["t_s"]))
         w = _cap_word(l1, f) if f is not None else None
@@ -49,16 +51,26 @@ def apply(l1, notes):
         chunk = [it for it in l1["items"] if it.get("k") == "word" and it.get("chunk") == w.get("chunk")] if w.get("chunk") else [w]
         end = max(it["f"][1] for it in chunk)
         on = min(w.get("on", w["f"][0]) + 6, end - 2)
+        start = on + 4
+        held = False
+        for a, b in sorted(hold):
+            if start < b and start + 20 > a:
+                start, held = b + 2, True
+        nxt = placed[i + 1][1].get("on", placed[i + 1][1]["f"][0]) if i + 1 < len(placed) else n_f
+        stop = max(min(start + HOLD_F, nxt, n_f), start + 20)
+        stop = min(stop, n_f)
+        for a, b in sorted(hold):
+            if start < a < stop:
+                stop, held = a - 2, True
+        if held and stop - start < 45:
+            waived.append(dict(n=n["n"], why="a designed panel is being read there"))
+            continue
         sup_w = L.text_w(l1["voices"]["fn_sup"], str(n["n"]), W) + 0.004
         for it in chunk:                                           # the words after it on its row make room
             if it is not w and abs(float(L._rest(it["y"])) - wy) < 0.004 and float(L._rest(it["x"])) > wx:
                 it["x"] = L._shift(it["x"], sup_w)
         items.append(dict(id=f"fn{n['n']}.sup.0", k="word", f=[on, end], t=str(n["n"]), v="fn_sup", x=round(wx + ww + 0.003, 5),
                           y=round(wy - 0.40 * float(v.get("px") or cap_px) / H, 5), ink=ACCENT, role="big", on=on, z=5))
-        start = on + 4
-        nxt = placed[i + 1][1].get("on", placed[i + 1][1]["f"][0]) if i + 1 < len(placed) else n_f
-        stop = max(min(start + HOLD_F, nxt, n_f), start + 20)
-        stop = min(stop, n_f)
         sp = L.text_w(l1["voices"]["fn"], "n n", W) - 2 * L.text_w(l1["voices"]["fn"], "n", W)
 
         def lay(source):
@@ -96,4 +108,5 @@ def apply(l1, notes):
                 u["y"] = L._shift(u["y"], dy)
             lifted.append(key)
     l1["items"] = sorted(l1["items"] + items, key=lambda it: it["f"][0])
-    return dict(asked=len(notes), lifted=lifted, placed=[dict(n=n["n"], note=n["note"], source=n["source"], word=w["t"], on=w.get("on")) for n, w in placed])
+    return dict(asked=len(notes), lifted=lifted, waived=waived, placed=[dict(n=n["n"], note=n["note"], source=n["source"], word=w["t"], on=w.get("on")) for n, w in placed
+                        if not any(x["n"] == n["n"] for x in waived)])
