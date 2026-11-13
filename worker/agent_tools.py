@@ -4143,13 +4143,16 @@ def cut_silences(ctx, min_silence_s=0.5, padding_s=0.12,
                     "find_shots / look_at.")
         return (f"No gaps in the speech of {min_s}s or longer — the talking "
                 "is already tight, so nothing was cut.")
-    cuts, noisy = [], 0
+    cuts, noisy, quiet_cuts, sounded = [], 0, [], []
     for g in gaps:
         cs, ce = round(g["start"] + pad, 2), round(g["end"] - pad, 2)
         if ce - cs >= 0.1:
             cuts.append([cs, ce])
             if g["quiet_frac"] < 0.8:
                 noisy += 1
+                sounded.append([cs, ce])
+            else:
+                quiet_cuts.append([cs, ce])
     if not cuts:
         return (f"Found {len(gaps)} speech gap(s), but each is too short to "
                 f"trim once {pad}s of padding is kept around speech. Nothing "
@@ -4168,14 +4171,40 @@ def cut_silences(ctx, min_silence_s=0.5, padding_s=0.12,
         allow_nonquiet is True or
         str(allow_nonquiet).strip().casefold() in {"true", "1", "yes", "on"})
     if destructive_nonquiet and not allow_nonquiet_n:
-        return (
-            "REJECTED: DESTRUCTIVE NON-QUIET CUT — this would remove "
-            f"{removed:.1f}s ({removed / before_duration:.0%}) of the current "
-            f"program, and {noisy} of {len(cuts)} proposed gaps contain "
-            "audible music, game, room, or performance sound. No EDL change "
-            "was made. Only retry with allow_nonquiet=true when the user's "
-            "request explicitly permits discarding those non-speaking "
-            "moments; otherwise inspect and cut narrower visual/story spans.")
+        # Ticket #1078 (13 Nov 2026): this used to refuse the WHOLE call, so a
+        # request met "REJECTED" three times in a row while the model tried
+        # other thresholds, and the customer got nothing, not even the gaps
+        # that really were silent. A check repairs or delivers with an honest
+        # note; it never blocks. Cut the truly quiet gaps now, keep every gap
+        # that carries sound, and say exactly which ones and how to cut them.
+        held = sum(e - s for s, e in sounded)
+        where = ", ".join(f"{s:.2f}-{e:.2f}s" for s, e in sounded[:12])
+        if len(sounded) > 12:
+            where += f" (+{len(sounded) - 12} more)"
+        keep_note = (
+            f"KEPT {len(sounded)} of {len(cuts)} speech gaps (~{held:.1f}s, "
+            f"source {where}): nobody talks there, but they carry audible "
+            "music, game, room or performance sound, and cutting them all "
+            f"would remove {removed:.1f}s ({removed / before_duration:.0%}) of "
+            "the program. If the user's request does mean dropping those "
+            "moments with their sound, call cut_silences again with "
+            "allow_nonquiet=true; otherwise cut chosen spans by story or "
+            "picture. Retrying other thresholds without it keeps them too.")
+        if quiet_cuts:
+            safe = [list(x) for x in audit.subtract_spans(cur, quiet_cuts)]
+            if safe and safe != [list(x) for x in cur]:
+                q_removed = output_duration(cur) - output_duration(safe)
+                res = _write_keep(
+                    ctx, safe,
+                    f"cut {len(quiet_cuts)} quiet gap(s) in the speech >= "
+                    f"{min_s}s ({q_removed:.1f}s removed, {pad}s kept around "
+                    "speech)",
+                    snap_to_words=True, never_grow=True)
+                if res.startswith("EDL v"):
+                    return res + "\n" + keep_note
+                return res
+        return ("NO CHANGE — every speech gap long enough to cut carries "
+                "sound, so nothing was cut. " + keep_note)
     what = "gap(s) in the speech" if basis == "speech" else "quiet span(s)"
     res = _write_keep(
         ctx, new,
@@ -31670,10 +31699,11 @@ TOOLS = {
                      "in one call instead of many cut_range calls; then "
                      "get_kept_transcript to verify. If at least half of the "
                      "gaps contain audible material and the pass would remove "
-                     "25%+ of the program, it refuses without changing the "
-                     "EDL. Set allow_nonquiet=true ONLY when the user "
-                     "explicitly permits discarding those non-speaking "
-                     "music/game/room-performance moments.",
+                     "25%+ of the program, it cuts only the truly quiet gaps "
+                     "and KEEPS the ones that carry sound, listing them. Set "
+                     "allow_nonquiet=true ONLY when the user explicitly "
+                     "permits discarding those non-speaking "
+                     "music/game/room-performance moments too.",
                      {"min_silence_s": {"type": "number"},
                       "padding_s": {"type": "number"},
                       "allow_nonquiet": {"type": "boolean"}}),
