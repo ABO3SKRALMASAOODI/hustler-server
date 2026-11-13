@@ -356,3 +356,26 @@ def test_subject_aims_are_looked_at_once_for_the_shots_the_moves_cover(monkeypat
     assert len(looked) == 1 and looked[0]
     assert written[0][0]["args"].get("rect") == [0.1, 0.5, 0.3, 0.7]
     assert got["aims"]["aimed"] == 1 and got["aims"]["toward"] == ["the truck"]
+
+
+def test_aims_look_at_one_frame_per_shot_and_read_the_located_box(monkeypatch, tmp_path):
+    import llm
+    import media
+    monkeypatch.setattr(media, "frame_at", lambda src, t, dst, width=None: open(dst, "wb").write(b"x"))
+    monkeypatch.setattr(llm, "image_part", lambda path: {"type": "image_url", "image_url": {"url": path}})
+    calls = []
+
+    def fake(ctx, name, schema, system, content, max_tokens=4000, **kw):
+        calls.append((name, kw.get("model"), sum(1 for c in content if c["type"] == "image_url")))
+        return {"shots": [{"shot": 1, "shows": "dog close-up", "toward": "the dog's eyes", "box": [0.4, 0.2, 0.6, 0.3],
+                           "mode": "push_in", "for": ["a6"]},
+                          {"shot": 2, "shows": "yard", "toward": "", "box": [0, 0, 1, 1], "mode": "drift_left", "for": []}]}, \
+            {"usd": 0.0, "s": 0.0, "model": "m"}
+    monkeypatch.setattr(asks, "_call", fake)
+    ctx = _pass_ctx(tmp_path)
+    ctx.proxy_path = lambda: "/proxy.mp4"
+    ledger = asks.settle({"lang": "en", "asks": [_ask("edit", "whole")]}, EDL)
+    got = patch._aims(ctx, ledger, EDL, [(0.0, 4.0), (4.0, 8.0), (0.0, 4.0)], deadline=1e18)
+    assert calls == [("record_shot_aims", asks.CHECK_MODEL, 2)]
+    assert got[(0.0, 4.0)]["box"] == [0.4, 0.2, 0.6, 0.3] and got[(0.0, 4.0)]["toward"] == "the dog's eyes"
+    assert got[(4.0, 8.0)]["box"] is None and got[(4.0, 8.0)]["mode"] == "drift_left"

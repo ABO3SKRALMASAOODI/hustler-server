@@ -168,7 +168,7 @@ PASS_SCHEMA = {
                 "mode": {"type": "string", "enum": list(MOVE_MODES)},
                 "strength": {"type": "number", "description": "How far the camera travels across each shot: 0.03-0.15."},
                 "aim": {"type": "string", "enum": ["subject", "face", "center"],
-                        "description": "subject: each picture's move goes toward what an ask names on it (eyes, a vehicle, two subjects together), located on that picture by a look at its frame; face: the measured face; center: no aim."},
+                        "description": "subject: each picture's move goes toward what an ask names on it (eyes, a vehicle, two subjects together), located on that picture by a look at its frame; face: the measured face; center: no aim. Every move's pictures are looked at; a picture with a subject an ask names is aimed at it whatever this says."},
                 "for": {"type": "array", "items": {"type": "string"}, "description": "The ask ids it does."}}}},
         "own": {"type": "array", "maxItems": 30,
                 "description": "The customer's own uploaded clips and photos (listed as upload #n), placed over the film as cutaways while the sound goes on.",
@@ -189,7 +189,7 @@ PASS_SCHEMA = {
                 "query": {"type": "string", "description": "What to search: the real named person, event, place or thing, or a concrete filmable subject."},
                 "variants": {"type": "array", "items": {"type": "string"}, "description": "0-2 other searches for the same moment."},
                 "kind": {"type": "string", "enum": ["video", "photo"]},
-                "purpose": {"type": "string", "description": "What the picture must show for the moment to work."},
+                "purpose": {"type": "string", "description": "What the picture must show for the moment to work: what is really on a picture that can exist (the named person, the place, the document), never a scene no camera took."},
                 "sound": {"type": "string", "description": "A library sound id for its entrance, only when an ask asks for sound on the pictures. Else empty."},
                 "for": {"type": "array", "items": {"type": "string"}}}}},
         "ops": {"type": "array", "maxItems": 40, "items": {
@@ -214,6 +214,8 @@ moves: camera moves on the upload's own picture (the speaker, the slideshow's ph
 own: when an ask wants the customer's own clips or photos in the film (listed under Their uploads, upload #n with frames), place each on the words it shows, where they said to, spread through the film when they asked for that, 3-8 s unless they said otherwise. Two pictures never cover the same second: leave the stretches the film's existing cutaways hold, and give each its own words. Place an upload they asked for before any found picture.
 
 pictures: a found picture covers the film while the sound goes on. Place each on the words it shows, 3-6 s unless they said otherwise. query names the real thing: a named person, event, place or document by name for archive, news or history, a concrete filmable subject otherwise. kind photo for real people and events, which are rarely on free video. A picture must not stand in for a real event it isn't from. When nothing honest can be found, the customer's own footage stays.
+
+purpose is checked against the downloaded picture, so ask for what a real archive picture shows. When the words are about a real person and what they did (a policy, a figure, an award, a scandal), the honest picture is that real person (a press, official or archive photo of them, at a podium, in office, at a named place), or the real place, building, agency or document named, and its purpose says so: "Barack Obama in office, as the narration names him", not "Obama announcing the deportation figures", which no single photo shows. A figure or a statistic is shown by a card the editor makes, not by a found picture. Ask for the event itself only when it was photographed (a named hearing, summit, ceremony or protest), and name it with its year.
 
 ops: other tool calls, args exactly as the tool's parameters say, times in program seconds. One call per change; a tool that applies to every cut or the whole film is one call.
 
@@ -408,32 +410,44 @@ def _aims(ctx, ledger, edl, spans, deadline):
     os.makedirs(folder, exist_ok=True)
     want = [a for a in ledger["asks"] if a["kind"] in ("film", "edit", "change")]
     asks_text = "\n".join(f"{a['id']} {a['want']} (check: {a['pass']})" for a in want)
-    out = {}
     spans = sorted(set(spans))
+    batches = []
     for b0 in range(0, len(spans), AIM_BATCH):
-        if time.monotonic() > deadline:
-            break
         batch = spans[b0:b0 + AIM_BATCH]
         content, shown = [{"type": "text", "text": "The customer's asks:\n" + asks_text}], {}
         for n, (a, b) in enumerate(batch, 1):
+            if time.monotonic() > deadline:
+                break
             try:
                 src = tl.out_to_src((a + b) / 2.0)
                 local = os.path.join(folder, f"shot_{b0 + n}.jpg")
                 media.frame_at(proxy, float(src), local, width=448)
-            except Exception:  # noqa: BLE001 - a shot with no frame keeps a centred move
+            except Exception:  # noqa: BLE001 - a shot with no frame keeps its plain move
                 continue
             shown[n] = (a, b)
             content.append({"type": "text", "text": f"shot {n}: program {a:.1f}-{b:.1f} s"})
             content.append(llm.image_part(local))
-        if not shown:
-            continue
-        model = asks.check_model(ledger.get("cfg") or {})
+        if shown:
+            batches.append((content, shown))
+    model = asks.check_model(ledger.get("cfg") or {})
+
+    def look(job):
+        content, shown = job
         try:
             value, _u = asks._call(ctx, "record_shot_aims", AIM_SCHEMA, AIM_SYSTEM, content, max_tokens=6000,
                                    **({"model": model} if model else {}))
-        except Exception as exc:  # noqa: BLE001 - a look that fails leaves those moves centred
-            print(f"[pass] aims batch {b0 // AIM_BATCH + 1}: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
-            continue
+            return shown, value
+        except Exception as exc:  # noqa: BLE001 - a look that fails leaves those moves plain
+            print(f"[pass] aims batch: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
+            return shown, {}
+    if not batches:
+        return {}
+    import broll_source
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(4, len(batches))) as pool:
+        answers = list(pool.map(broll_source.carried(look), batches))
+    out = {}
+    for shown, value in answers:
         for row in value.get("shots") or []:
             try:
                 span = shown[int(row["shot"])]
@@ -562,8 +576,11 @@ def _move_ops(ctx, edl, move, shots, aims=None):
         if b - a < 1.0:
             continue
         mode = move.get("mode") if move.get("mode") in MOVE_MODES else "push_in"
-        look = (aims or {}).get((s0, s1)) if move.get("aim") == "subject" else None
-        box = look.get("box") if look and _source_frame(edl) else None
+        # Every move's picture was looked at (round 3: Haiku's plans for p5520 aimed all 83 moves at
+        # the centre while 4 asks named the eyes, the truck and the bond): what the look located on
+        # this picture wins over the row's aim.
+        look = (aims or {}).get((s0, s1))
+        box = look.get("box") if look and look.get("toward") and _source_frame(edl) else None
         if look and look.get("mode"):
             mode = look["mode"]
         tags = sorted(set(move.get("for") or []) | set((look or {}).get("for") or []))
@@ -752,8 +769,6 @@ def throughout(ctx, ledger, request, budget_s=600.0):
         aim_spans = []
         for _unit, value in plans:
             for mv in value.get("moves") or []:
-                if mv.get("aim") != "subject":
-                    continue
                 try:
                     t0, t1 = float(mv["t0"]), float(mv["t1"])
                 except (KeyError, TypeError, ValueError):
