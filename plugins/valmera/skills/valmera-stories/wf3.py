@@ -171,6 +171,31 @@ def photo_targets(ctx, photo, sc):
         x0, y0, x1, y1 = [v * s for v, s in zip(f["box"], (im.size[0], im.size[1], im.size[0], im.size[1]))]
         dr.rectangle([x0, y0, x1, y1], outline=(255, 40, 40), width=2)
         dr.text((x0, y1 + 2), str(i), fill=(255, 255, 0), font=fnt, stroke_width=2, stroke_fill=(0, 0, 0))
+    # details of this photograph that the writer cited on Commons, found inside it by correlation (signal only)
+    details = []
+    main_title = (photo.get("title") or "").replace(" ", "_").replace("File:", "")
+    import urllib.parse
+    for f_ in sc.get("facts") or []:
+        u = str(f_.get("url") or "")
+        if "commons.wikimedia.org/wiki/File:" not in u:
+            continue
+        title = urllib.parse.unquote(u.split("/wiki/", 1)[1]).replace("_", " ")
+        if title.replace(" ", "_").replace("File:", "") == main_title or title in [x["title"] for x in details]:
+            continue
+        try:
+            rec = PX.commons_file(title, os.path.join(ctx.supply, "photo", f"detail{len(details)}"), want_w=1600)
+            box, score = PX.locate_detail(photo["path"], rec["path"])
+        except Exception as e:  # noqa: BLE001 - a detail that cannot be read or found is left out
+            ctx.log(f"detail {title}: {str(e)[:120]}")
+            continue
+        ctx.log(f"detail {title}: box {box} score {score}")
+        if box and score >= 0.45 and box[2] - box[0] <= 0.6:          # a detail, not another print of the whole
+            details.append(dict(title=title, description=rec.get("description", "")[:400], box=box, score=score))
+            x0, y0, x1, y1 = [v * s_ for v, s_ in zip(box, (im.size[0], im.size[1], im.size[0], im.size[1]))]
+            dr.rectangle([x0, y0, x1, y1], outline=(40, 160, 255), width=3)
+            dr.text((x0, y0 - max(14, int(im.size[0] / 90)) - 2), f"D{len(details) - 1}", fill=(40, 160, 255), font=fnt,
+                    stroke_width=2, stroke_fill=(0, 0, 0))
+    photo["details"] = details
     p = os.path.join(ctx.tmp, "who.jpg")
     im.save(p, quality=88)
     data = base64.standard_b64encode(open(p, "rb").read()).decode()
@@ -178,10 +203,13 @@ def photo_targets(ctx, photo, sc):
                {"type": "text", "text": f"Description from Commons: {photo.get('description', '')[:1600]}\n\nThe photograph, as the writer "
                                         f"describes it: {(sc.get('photo') or {}).get('about', '')}\n\nPeople it names: "
                                         f"{json.dumps((sc.get('photo') or {}).get('people') or [], ensure_ascii=False)}\n\nPlaces the camera goes: "
-                                        f"{json.dumps(names, ensure_ascii=False)}\n\nThere are {len(photo['faces'])} face boxes, numbered from 0. "
+                                        f"{json.dumps(names, ensure_ascii=False)}\n\nDetails of this photograph published on Commons, found "
+                                        f"inside it by image correlation and drawn in blue as D0, D1...: "
+                                        f"{json.dumps([dict(d=i, title=x['title'], description=x['description'], box=x['box']) for i, x in enumerate(details)], ensure_ascii=False)}"
+                                        f"\n\nThere are {len(photo['faces'])} face boxes, numbered from 0. "
                                         "Regions are fractions of the photograph's width and height, [x0, y0, x1, y1], tight around what must be "
                                         "seen. Answer JSON only: {\"targets\": {each place exactly as written: {\"face\": box number} or "
-                                        "{\"box\": [x0, y0, x1, y1]} or null}, \"why\": {place: a few words}}"}]
+                                        "{\"box\": [x0, y0, x1, y1]} or {\"detail\": D number} or null}, \"why\": {place: a few words}}"}]
     text, use = writer.ask(WHO_SYSTEM, content, effort="high", max_tokens=8000, what="camera targets")
     got = writer.json_block(text)
     out = {}
@@ -189,6 +217,8 @@ def photo_targets(ctx, photo, sc):
         v = (got.get("targets") or {}).get(n)
         if isinstance(v, dict) and isinstance(v.get("face"), (int, float)) and 0 <= int(v["face"]) < len(photo["faces"]):
             out[n] = {"face": int(v["face"])}
+        elif isinstance(v, dict) and isinstance(v.get("detail"), (int, float)) and 0 <= int(v["detail"]) < len(details):
+            out[n] = {"box": details[int(v["detail"])]["box"], "detail": details[int(v["detail"])]["title"]}
         elif isinstance(v, dict) and isinstance(v.get("box"), list) and len(v["box"]) == 4:
             x0, y0, x1, y1 = [min(max(float(q), 0.0), 1.0) for q in v["box"]]
             out[n] = {"box": [x0, y0, x1, y1]} if x1 - x0 > 0.005 and y1 - y0 > 0.005 else None
@@ -298,20 +328,32 @@ def env_path():
 
 def score(ctx, script):
     pack = load_pack(ctx)
-    if script["style"]["id"] == "one-photograph" and "targets" not in pack["photo"]:
-        pk = os.path.join(ctx.supply, "pack.json")
-        whole = json.load(open(pk))
-        targets, why, use = photo_targets(ctx, pack["photo"], script["script"])
-        pack["photo"]["targets"], pack["photo"]["targets_why"] = targets, why
-        pack["microtext"] = portrait_of(ctx, pack["photo"], script["script"], ctx.supply)
-        whole["pack"] = pack
-        whole["record"].setdefault("spend", []).append(dict(stage="score", **use))
-        json.dump(whole, open(pk, "w"), ensure_ascii=False, indent=1)
     d = direction_of(ctx)
     sc = json.loads(json.dumps(script["script"]))
     for k, v in (d.get("script") or {}).items():          # the director's hand on the script's data; facts are checked again
         sc[k] = v
-    knobs = {k: v for k, v in d.items() if k not in ("script", "why")}
+    if script["style"]["id"] == "one-photograph":
+        pk = os.path.join(ctx.supply, "pack.json")
+        whole = json.load(open(pk))
+        changed = False
+        if "targets" not in pack["photo"] or ctx.args.get("retarget") or d.get("retarget"):
+            targets, why, use = photo_targets(ctx, pack["photo"], sc)
+            pack["photo"]["targets"], pack["photo"]["targets_why"] = targets, why
+            whole["record"].setdefault("spend", []).append(dict(stage="score", **use))
+            changed = True
+        for n, t in (d.get("targets") or {}).items():       # the director places what the model could not
+            pack["photo"]["targets"][n] = t
+            changed = True
+        por = sc.get("portrait") or {}
+        want = [por.get("name"), por.get("segment")]
+        if changed or (pack.get("microtext") or {}).get("for") != want:
+            mt = portrait_of(ctx, pack["photo"], sc, ctx.supply)
+            pack["microtext"] = dict(mt, **{"for": want}) if mt else None
+            changed = True
+        if changed:
+            whole["pack"] = pack
+            json.dump(whole, open(pk, "w"), ensure_ascii=False, indent=1)
+    knobs = {k: v for k, v in d.items() if k not in ("script", "why", "targets", "retarget")}
     sys.path[:0] = [p for p in env_path().split(os.pathsep) if p not in sys.path]
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     l1, beats = F.STYLES[script["style"]["id"]](sc, pack, knobs)
@@ -382,6 +424,29 @@ def mark_samples(prog, final, n=6):
     return rows
 
 
+def caption_contrast(film, l1, ffmpeg):
+    """Measured on the engine's film: for each caption, the tone of the frame around it at its middle frame. White ink
+    on a median over 0.6, or dark ink on one under 0.4, is a caption that does not read (TASTE P4, h3)."""
+    import subprocess
+    import numpy as np
+    caps = [i for i in l1["items"] if i["k"] == "word" and i["v"] in ("cap", "capd") and i["t"].strip() not in (".",)]
+    bad, rows = 0, 0
+    for it in caps[::2]:
+        f = (it["f"][0] + it["f"][1]) // 2
+        r = subprocess.run([ffmpeg, "-v", "error", "-ss", f"{(f + 0.5) / F.FPS:.3f}", "-i", film, "-frames:v", "1", "-vf", "scale=270:480",
+                            "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True)
+        g = np.frombuffer(r.stdout, np.uint8)[:270 * 480].reshape(480, 270) / 255.0
+        y = float(it["y"][-1] if isinstance(it["y"], list) else it["y"])
+        band = g[max(int((y - 0.045) * 480), 0):int((y + 0.012) * 480), 54:216]
+        if band.size == 0:
+            continue
+        med = float(np.median(band))
+        rows += 1
+        if (it["v"] == "cap" and med > 0.6) or (it["v"] == "capd" and med < 0.4):
+            bad += 1
+    return dict(captions_sampled=rows, unreadable=bad, ok=rows == 0 or bad / rows <= 0.05)
+
+
 def check(ctx, rd, sc):
     r = chain.finish_and_check(ctx, rd, sc)
     c = r["checks"]
@@ -397,5 +462,6 @@ def check(ctx, rd, sc):
                         pictures=sc["beats"].get("pictures"), missing_pictures=pack.get("missing"))
     rec = json.load(open(os.path.join(ctx.supply, "pack.json")))["record"]
     c["stories"]["narration"] = dict(seconds=rec.get("narration_s"), voice=rec.get("voice"), gate=rec.get("gate"))
-    c["ok"] = bool(c["ok"] and sc["taste"]["ok"])
+    c["stories"]["caption_contrast"] = caption_contrast(rd["film"], json.load(open(sc["l1"])), pack["ffmpeg"])
+    c["ok"] = bool(c["ok"] and sc["taste"]["ok"] and c["stories"]["caption_contrast"]["ok"])
     return r

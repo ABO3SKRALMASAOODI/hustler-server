@@ -321,15 +321,23 @@ def still(P, f, key, rec, grade=None, amount=0.045, z=0):
     return dict(mode="bed", upscale=round(cw * W / pw, 2), box=box)
 
 
-def caption_track(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), z=0):
-    """Captions at one seat for the whole film (TASTE P1), centred, a few words at a time."""
-    for t0, t1, text, ws in clock.phrases():
+def caption_track(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), z=0, ink_for=None):
+    """Captions at one seat for the whole film (TASTE P1), centred, a few words at a time. ink_for(a, b, box) may
+    return (voice, ink) for a chunk from what is measured under it (TASTE P4: flip the ink before anything else)."""
+    ph = clock.phrases()
+    for i, (t0, t1, text, ws) in enumerate(ph):
         a, b = Clock.f(t0) - 1, Clock.f(t1)
+        if i + 1 < len(ph):
+            b = min(b, Clock.f(ph[i + 1][0]) - 1)       # one chunk at a time, never two on the seat
         if f_end is not None:
             b = min(b, f_end)
         if b - a < 3 or any(s0 <= a < s1 for s0, s1 in skip):
             continue
-        P.word([max(a, 0), b], text, v, 0.5, y, ink, 1.0, align="c", note=False, z=z)
+        v_, ink_ = v, ink
+        if ink_for:
+            wd = P.R.width(v, text) / W
+            v_, ink_ = ink_for(max(a, 0), b, [0.5 - wd / 2 - 0.02, y - P.R.cap(v) / H - 0.012, 0.5 + wd / 2 + 0.02, y + 0.012])
+        P.word([max(a, 0), b], text, v_, 0.5, y, ink_, 1.0, align="c", note=False, z=z)
 
 
 def designed_page(P, f, text, sub, palette, v_big, v_sub):
@@ -543,7 +551,38 @@ def character_sheet(script, sup, direction=None):
         skip_caps.append((a, b))
         P.hit("pop_1", end_f, d["cut_db"])
         P.events.append(end_f)
-    caption_track(P, clock, "cap", cap_y, f_end=f_ovf, skip=skip_caps)
+    # the ink of each caption from the photograph's tone under it (TASTE P4): a full-bleed photograph is read through
+    # its crop; a page and a blurred bed are dark, and keep white
+    import numpy as np
+    from PIL import Image
+    grays = {}
+
+    def gray(path):
+        if path not in grays:
+            with Image.open(path) as im_:
+                grays[path] = np.asarray(im_.convert("L").resize((480, max(2, int(480 * im_.size[1] / im_.size[0])))), np.float32) / 255.0
+        return grays[path]
+
+    bleeds = [(p_["f"][0], p_["f"][1], p_["path"]) for p_ in P.pictures if p_.get("kind") == "photo" and p_.get("mode") == "bleed"]
+    recs = {r["path"]: r for v in pics.values() for r in v}
+
+    def under(a, b, box):
+        m = (a + b) // 2
+        hit = next((x for x in bleeds if x[0] <= m < x[1]), None)
+        if not hit:
+            return "cap", "#FFFFFF"
+        rec = recs[hit[2]]
+        cr = cover_crop(rec["w"], rec["h"], W / H, focus_of(rec)[0], (0.5, 0.40))
+        g_ = gray(hit[2])
+        x0_ = int((cr[0] + box[0] * (cr[2] - cr[0])) * g_.shape[1])
+        x1_ = int((cr[0] + box[2] * (cr[2] - cr[0])) * g_.shape[1])
+        y0_ = int((cr[1] + box[1] * (cr[3] - cr[1])) * g_.shape[0])
+        y1_ = int((cr[1] + box[3] * (cr[3] - cr[1])) * g_.shape[0])
+        lum = float(g_[y0_:max(y1_, y0_ + 1), x0_:max(x1_, x0_ + 1)].mean()) * grade["gain"]
+        return ("capd", "#17120D") if lum > 0.55 else ("cap", "#FFFFFF")
+
+    voices["capd"] = {"font": "InterDisplay-Bold.ttf", "px": 56, "track": 0, "glow": {"a": 0.35}}
+    caption_track(P, clock, "cap", cap_y, f_end=f_ovf, skip=skip_caps, ink_for=under)
 
     # ---- G4: the stat block
     stats = script.get("stats") or []
@@ -948,6 +987,7 @@ def one_photograph(script, sup, direction=None):
     aspect = pw / ph
     voices = {
         "cap": {"font": "InterDisplay-Bold.ttf", "px": 56, "track": 0, "shadow": {"a": 0.7}},
+        "capd": {"font": "InterDisplay-Bold.ttf", "px": 56, "track": 0, "glow": {"a": 0.35}},
         "name": {"font": "InterDisplay-Bold.ttf", "px": 40, "track": 8},
         "line": {"font": "DMSerifDisplay-Regular.ttf", "px": 96, "track": -1},
     }
@@ -1069,6 +1109,27 @@ def one_photograph(script, sup, direction=None):
             ss.append(r4(z))
         return xs, ys, ss
 
+    # the ink of each caption from the photograph's tone under it, measured through the camera (TASTE P4)
+    import numpy as np
+    from PIL import Image
+    with Image.open(photo["path"]) as im_:
+        g_ = np.asarray(im_.convert("L").resize((800, max(2, int(800 * ph / pw)))), np.float32) / 255.0
+
+    def under(a, b, box):
+        vals = []
+        for f in range(a, b, max(1, (b - a) // 4)):
+            cu, cv, z = cams[min(f, len(cams) - 1)]
+            u0, u1 = cu + (box[0] - 0.5) / z, cu + (box[2] - 0.5) / z
+            v0, v1 = cv + (box[1] - y_mid) * H / (Hc * z), cv + (box[3] - y_mid) * H / (Hc * z)
+            x0_, x1_ = int(max(min(u0, 1), 0) * g_.shape[1]), int(max(min(u1, 1), 0) * g_.shape[1])
+            y0_, y1_ = int(max(min(v0, 1), 0) * g_.shape[0]), int(max(min(v1, 1), 0) * g_.shape[0])
+            if x1_ > x0_ and y1_ > y0_:
+                vals.append(float(g_[y0_:y1_, x0_:x1_].mean()))
+            else:
+                vals.append(0.05)                       # off the photograph: the dark ground
+        lum = sum(vals) / max(len(vals), 1)
+        return ("capd", "#17120D") if lum > 0.52 else ("cap", "#FFFFFF")
+
     photo_box = [0.0, 0.5 - Hc / H / 2, 1.0, 0.5 + Hc / H / 2]
     P.page([0, f_end], d["ground"], "#060606", grain=0.02)
     # ---- T3: the photograph assembled by the voice, a few faces per spoken word, out of a blurred copy
@@ -1141,7 +1202,10 @@ def one_photograph(script, sup, direction=None):
             a = Clock.f(clock.segs[i][0]) + 12
             b = min(a + 54, Clock.f(clock.segs[i][1]) + 8)
             if b - a > 12:
-                P.word([a, b], str(look).upper(), "name", 0.5, 0.715, "#F2E8D6", [r4(min(1, (k + 1) / 5)) for k in range(b - a)], align="c", z=6)
+                nw = P.R.width("name", str(look).upper()) / W
+                _, nink = under(a, b, [0.5 - nw / 2 - 0.02, 0.715 - P.R.cap("name") / H - 0.01, 0.5 + nw / 2 + 0.02, 0.715 + 0.01])
+                P.word([a, b], str(look).upper(), "name", 0.5, 0.715, "#F2E8D6" if nink == "#FFFFFF" else nink,
+                       [r4(min(1, (k + 1) / 5)) for k in range(b - a)], align="c", z=6)
     # ---- X2: one face, whose tones are the sentence being spoken
     por = script.get("portrait") or {}
     x2 = None
@@ -1179,7 +1243,7 @@ def one_photograph(script, sup, direction=None):
             P.events.append(a)
     # ---- captions, one seat, low; off during the portrait
     skip = [tuple(x2["f"])] if x2 else []
-    caption_track(P, clock, "cap", 0.775, f_end=f_close0 + 20, skip=skip, z=8)
+    caption_track(P, clock, "cap", 0.775, f_end=f_close0 + 20, skip=skip, z=8, ink_for=under)
     # ---- the close: the whole photograph with every mark, and one line
     last = script["segments"][-1]
     line = next((t for t, _ in shown_items(last)), None)

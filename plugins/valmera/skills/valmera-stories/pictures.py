@@ -210,3 +210,29 @@ def sound_facts(ids=("tick_1", "click_2", "pop_1", "whoosh_soft_1", "shutter_2",
             mx = next(float(ln.split("max_volume:")[1].split()[0]) for ln in r.stderr.splitlines() if "max_volume" in ln)
             sounds[m["id"]] = dict(file=m["file"], peak_s=float(m["peak_s"]), max_db=mx, path=os.path.join(lib_dir, m["file"]))
     return sounds
+
+
+def locate_detail(main_path, detail_path, work_w=1600):
+    """Where a detail crop of a photograph sits inside it: normalised cross-correlation over scales (signal only).
+    Returns ([x0, y0, x1, y1] in fractions of the main photograph, score), score 1.0 for a perfect match."""
+    import cv2
+    import numpy as np
+    m = cv2.imread(main_path, cv2.IMREAD_GRAYSCALE)
+    t = cv2.imread(detail_path, cv2.IMREAD_GRAYSCALE)
+    if m is None or t is None:
+        return None, 0.0
+    k = work_w / m.shape[1]
+    m = cv2.resize(m, (work_w, int(round(m.shape[0] * k))), interpolation=cv2.INTER_AREA)
+    m = cv2.equalizeHist(m)
+    best = (None, -1.0)
+    for frac in np.geomspace(0.03, 0.7, 36):                   # the detail's width as a share of the photograph's
+        tw = int(round(work_w * frac))
+        th = int(round(t.shape[0] * tw / t.shape[1]))
+        if tw < 24 or th < 24 or th >= m.shape[0] or tw >= m.shape[1]:
+            continue
+        tt = cv2.equalizeHist(cv2.resize(t, (tw, th), interpolation=cv2.INTER_AREA))
+        r = cv2.matchTemplate(m, tt, cv2.TM_CCOEFF_NORMED)
+        _, mx, _, loc = cv2.minMaxLoc(r)
+        if mx > best[1]:
+            best = ([loc[0] / m.shape[1], loc[1] / m.shape[0], (loc[0] + tw) / m.shape[1], (loc[1] + th) / m.shape[0]], float(mx))
+    return ([round(v, 5) for v in best[0]] if best[0] else None), round(best[1], 3)
