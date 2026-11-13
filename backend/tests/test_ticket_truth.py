@@ -29,7 +29,8 @@ CREATE TEMP TABLE users(id int PRIMARY KEY, email text, is_admin boolean,
   created_at timestamp DEFAULT '2026-11-01', is_subscribed int DEFAULT 0,
   billing_status text, trial_status text, plan text DEFAULT 'free',
   credits_balance numeric DEFAULT 0, credits_monthly_limit numeric);
-CREATE TEMP TABLE projects(id int PRIMARY KEY, user_id int, chat_session_id int);
+CREATE TEMP TABLE projects(id int PRIMARY KEY, user_id int, chat_session_id int,
+  meta jsonb DEFAULT '{}');
 CREATE TEMP TABLE client_events(id serial PRIMARY KEY, user_id int,
   project_id int, kind text, asset_id int, detail jsonb, created_at timestamptz);
 CREATE TEMP TABLE video_jobs(id serial PRIMARY KEY, project_id int, user_id int,

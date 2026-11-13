@@ -674,12 +674,50 @@ def _claude_lane_off(cur, since, now, p):
         f"{state.get('last_probe_ok')}: {state.get('last_probe_error') or ''}")]
 
 
+def _first_video_walled(cur, since, now, p):
+    """A never-paid account's FIRST video met the subscribe wall while the free
+    trial was on for it: no analysis, no First cut, "Upgrade to start editing
+    it". Nothing filed these: 13 Nov 2026, user 3023's 3.6 GB upload (a size
+    rule) and user 3025's Drive link (a link never asked for admission) were
+    walled and only a client event said so. The wall's event carries the
+    trial's measured refusal (free_trial.admit_upload_why); the owner's switches
+    (the trial off for the account) and D2's one admitted upload per account
+    (another project already admitted) are the product's rule and are not
+    filed. One ticket per refusal reason."""
+    import free_trial
+    q = dict(p, switches=list(free_trial.SWITCH_REFUSALS) + ["other_project"])
+    cur.execute(f"""
+        SELECT ce.id, ce.user_id, ce.project_id, ce.created_at AS at, ce.detail
+          FROM client_events ce JOIN users u ON u.id = ce.user_id
+         WHERE ce.kind = 'subscription_upload_locked'
+           AND ce.created_at > %(since)s AND ce.created_at <= %(now)s
+           AND COALESCE(ce.detail->>'trial_refusal', '') <> ''
+           AND NOT (ce.detail->>'trial_refusal' = ANY(%(switches)s))
+           AND {_customers()}
+           AND NOT EXISTS (SELECT 1 FROM projects o
+                            WHERE o.user_id = ce.user_id
+                              AND o.meta ? 'free_result')
+         ORDER BY ce.created_at LIMIT %(limit)s""", q)
+    out = []
+    for r in cur.fetchall():
+        d = _i()._detail(r)
+        why = str(d.get("trial_refusal") or "unknown")[:40]
+        out.append(_item(
+            f"gap:firstwall:{r['id']}", "upload", r["at"], r, "P1",
+            ("gap", "first-video-walled", why),
+            f"A trial account's first video met the wall: {why}",
+            f"asset {d.get('asset_id')} · surface {d.get('surface')} · "
+            f"refusal {why}"))
+    return out
+
+
 CHECKS = (_analysis_overdue, _render_overdue, _export_never_arrived, _checkout,
           _request_changed_nothing, _first_cut_is_the_upload,
           _reply_hid_a_failure, _brief_unread, _model_failing,
           _cancelled_within_a_day,
           _below_the_bar, _turn_went_silent, _unread_endings,
-          _tool_defects, _storage_write_failing, _claude_lane_off)
+          _tool_defects, _storage_write_failing, _claude_lane_off,
+          _first_video_walled)
 
 
 def scan(cur, since, now, checks=CHECKS):

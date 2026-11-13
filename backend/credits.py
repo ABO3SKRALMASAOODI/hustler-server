@@ -425,17 +425,22 @@ def get_balance(conn, user_id: int) -> dict:
             # the Studio shows the MCP path with this plain line.
             out["studio_ai_paused"] = True
             out["studio_ai_notice"] = PLUS_STUDIO_PAUSED_TEXT
-    if is_subscribed:
+    if is_subscribed or subscribe_gated:
         # Lane P (13 Nov): the Studio's empty start tells a paying account
         # that its first upload becomes a finished film by itself (an
         # MCP-only plan's start used to say only "edit with your assistant").
+        # A never-paid account the free trial would admit gets it too: the
+        # Studio then prepares the browser's proxy for that upload, so the
+        # First cut starts while a multi-GB original is still going up (user
+        # 3023, 13 Nov: 31 minutes of a 3.6 GB upload before anything began).
         # Present only when true.
         try:
             import free_trial
             with conn.cursor() as fcur:
                 fcur.execute("SAVEPOINT first_cut_on_upload")
                 try:
-                    if free_trial.first_cut_on_upload(fcur, user_id):
+                    if free_trial.first_cut_on_upload(
+                            fcur, user_id, subscribed=bool(is_subscribed)):
                         out["first_cut_on_upload"] = True
                     fcur.execute("RELEASE SAVEPOINT first_cut_on_upload")
                 except Exception:

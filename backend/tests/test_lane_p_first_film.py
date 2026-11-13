@@ -66,10 +66,11 @@ def test_mcp_first_cut_keeps_the_switch_caps_and_the_owners_account_out():
     _fresh()
     assert free_trial.admit_mcp_first_cut(
         LaneDB(stored=_on(), month_usd=10_000.0), 2555, 1) == (None, "paused")
+    # No size rule (user 3023, 13 Nov 2026): a 10 GB source is admitted.
     _fresh()
-    assert free_trial.admit_mcp_first_cut(
-        LaneDB(stored=_on()), 2555, 1, nbytes=10 * 1024 ** 3) == \
-        (None, "too_large")
+    got, reason = free_trial.admit_mcp_first_cut(
+        LaneDB(stored=_on()), 2555, 1, nbytes=10 * 1024 ** 3)
+    assert reason is None and got["first_cut"] is True
 
 
 def test_make_first_cut_is_a_published_session_tool():

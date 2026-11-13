@@ -3099,8 +3099,6 @@ _FIRST_CUT_REFUSALS = {
                "now. Edit the video with the editing tools instead "
                "(get_transcript, keep_segments, add_captions, render_preview)."),
     "excluded": "This account does not use the automatic first cut.",
-    "too_large": ("This video is too large for the automatic first cut. Edit "
-                  "it with the editing tools instead."),
     "daily_limit": ("This account has made today's first cuts already. Edit "
                     "with the editing tools, or try again tomorrow."),
 }

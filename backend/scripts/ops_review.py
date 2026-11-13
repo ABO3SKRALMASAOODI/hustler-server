@@ -471,10 +471,30 @@ def _mark_p0(ticket):
 
 def cmd_ticket(a):
     from ops_loop import store
+    if bool(a.session) == bool(a.project):
+        raise CliError("give --session (a reviewed session) or --project")
     with Writer(a.dry_run) as w:
-        t, action = store.open_or_attach(
-            w, a.cause, a.title, a.severity, session_key=a.session,
-            summary=a.summary)
+        if a.project:
+            # A project with no reviewable session: a first video walled
+            # before anything ran (users 3023 and 3025, 13 Nov 2026) leaves a
+            # paywalled-only window the Reviewer never sees. Filed as a
+            # failure on that project, like the intake's, so the close gate
+            # knows the ticket's project and its replay.
+            w.execute("SELECT user_id FROM projects WHERE id = %s",
+                      (int(a.project),))
+            row = w.fetchone()
+            if not row:
+                raise CliError(f"no project {a.project}")
+            t, action = store.record_failure(w, {
+                "ref": f"fixer:{a.cause}:p{int(a.project)}"[:80],
+                "source": "fixer", "at": _now(), "user_id": row["user_id"],
+                "project_id": int(a.project), "severity": a.severity,
+                "cause_key": a.cause, "title": a.title,
+                "detail": a.summary})
+        else:
+            t, action = store.open_or_attach(
+                w, a.cause, a.title, a.severity, session_key=a.session,
+                summary=a.summary)
     if t["severity"] == "P0" and t["status"] in ("open", "fixing") \
             and not a.dry_run:
         _mark_p0(t)
@@ -1043,7 +1063,10 @@ def parser():
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_annotate)
     p = sub.add_parser("ticket", help="open or attach the ticket for a cause")
-    p.add_argument("--session", required=True)
+    p.add_argument("--session", help="a reviewed session's key")
+    p.add_argument("--project", type=int,
+                   help="instead of --session: a project with no reviewable "
+                        "session (a first video walled before anything ran)")
     p.add_argument("--cause", required=True)
     p.add_argument("--title", required=True)
     p.add_argument("--severity", required=True, choices=("P0", "P1", "P2"))

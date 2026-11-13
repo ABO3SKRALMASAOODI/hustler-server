@@ -325,7 +325,7 @@ def landing(monkeypatch):
     monkeypatch.setattr(video, "_project_for_user",
                         lambda c, p, u: {"id": p, "chat_session_id": 9})
     monkeypatch.setattr(video, "_subscribe_gate_applies", lambda c, u: False)
-    monkeypatch.setattr(video, "_upload_wall", lambda *a: False)
+    monkeypatch.setattr(video, "_upload_wall", lambda *a, **k: False)
     monkeypatch.setattr(video, "_trial_admission", lambda *a: False)
     monkeypatch.setattr(video.storage, "is_configured", lambda: True)
     state = type("S", (), {"size": 0, "boxes": {}})

@@ -704,3 +704,27 @@ def test_842_a_render_moving_after_the_silence_is_not_paged(world):    # noqa: F
     world.ticks(48)
     t = world.ticket("auto-gap-turn-silent-running")
     assert t and t["severity"] == "P1"
+
+
+def test_a_trial_accounts_walled_first_video_fires_by_its_refusal(world):    # noqa: F811
+    """Users 3023 (a 3.6 GB upload) and 3025 (a Drive link), 13 Nov 2026: the
+    first video met the wall and only a client event said so."""
+    eid = world.event("subscription_upload_locked", asset_id=41226,
+                      surface="link", trial_refusal="error:KeyError")
+    got = fired(world, gaps._first_video_walled)
+    assert [f["ref"] for f in got] == [f"gap:firstwall:{eid}"]
+    assert got[0]["cause_key"] == "auto-gap-first-video-walled-error-keyerror"
+    assert got[0]["severity"] == "P1"
+
+
+def test_the_owners_switches_and_d2s_second_upload_are_not_filed(world):    # noqa: F811
+    world.event("subscription_upload_locked", trial_refusal="off")
+    world.event("subscription_upload_locked", trial_refusal="other_project")
+    world.event("subscription_upload_locked")          # before 13 Nov: no reason
+    assert fired(world, gaps._first_video_walled) == []
+    # user 3030: an account with an admitted project is past its first video
+    world.c.execute("UPDATE projects SET meta = '{\"free_result\": {}}' "
+                    "WHERE id = 5499")
+    world.event("subscription_upload_locked", trial_refusal="daily_count_cap")
+    assert fired(world, gaps._first_video_walled) == []
+    assert gaps._first_video_walled in gaps.CHECKS

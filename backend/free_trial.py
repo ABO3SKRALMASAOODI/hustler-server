@@ -67,9 +67,11 @@ DEFAULTS = {
     "pool_usd_cap": 200.0,
     "monthly_usd_cap": 200.0,
     "daily_count_cap": 40,
-    # The First cut analyses at most the first 30 minutes of a long source;
-    # larger uploads than this are walled as today.
-    "max_upload_bytes": 2 * 1024 ** 3,
+    # No size rule (13 Nov 2026, user 3023: a 3.6 GB phone recording met the
+    # wall). The First cut reads at most the first 30 minutes of any source
+    # (worker FIRST_CUT_MAX_SOURCE_S), the index streams a large original from
+    # storage or adopts the browser's proxy, and the only real limits are the
+    # upload's own (storage.MAX_UPLOAD_GB, MAX_DURATION_S, shown in the Studio).
     "max_accounts_per_device_30d": 2,
     "payer_first_cut": True,
     # Lane P (13 Nov 2026): 12 of the 21 paying Plus accounts had never seen
@@ -402,25 +404,21 @@ def _other_admission(cur, user_id, project_id):
     return bool(cur.fetchone())
 
 
-def admit_upload(cur, user_id, project_id, subscribed, nbytes=None):
-    """Called under the project lock when a Studio main-video upload lands.
-
-    Returns the admission dict when this project gets the First cut (and,
-    for an unsubscribed account, the trial), else None. Idempotent: an
-    already-admitted project returns its admission."""
-    existing = project_admission(cur, project_id)
-    if existing:
-        return existing
-    cfg = settings(cur)
+def _refusal(cur, cfg, user_id, subscribed, fresh=True):
+    """Why this account's first Studio video would NOT be admitted (a short
+    reason code), or None when it would. The same rules for every way the
+    first video arrives (a file, a proxy-first file, a pasted link) and for
+    the read-only answer the Studio asks before an upload. Not about any one
+    project: the caller checks the account's other admissions."""
     if not live(cur, user_id, cfg):
-        return None
+        return "off"
     try:
         if int(user_id) in {int(x) for x in cfg.get("excluded_user_ids") or []}:
-            return None
+            return "excluded"
     except (TypeError, ValueError):
-        return None
+        return "excluded"
     if subscribed and not cfg.get("payer_first_cut", True):
-        return None
+        return "payer_first_cut_off"
     if subscribed and not cfg.get("grandfathered_first_cut", True) \
             and not _new_subscriber(cur, user_id):
         # The 30 Oct rule (T1 gating proof), kept behind a switch: with
@@ -428,23 +426,40 @@ def admit_upload(cur, user_id, project_id, subscribed, nbytes=None):
         # D1 cutoff get the automatic First cut. On (the default since lane P,
         # 13 Nov) every paying account's first Studio project gets it, whatever
         # its plan; its own requests keep their contracted lane.
-        return None
-    if nbytes and int(nbytes) > int(cfg.get("max_upload_bytes") or 0) > 0:
-        return None
-    if _other_admission(cur, user_id, project_id):
-        return None
-    spend = spend_status(cur, fresh=True)
+        return "grandfathered"
+    spend = spend_status(cur, fresh=fresh)
     if not spend.get("ready", True):
-        return None
+        return "ledger_not_ready"
     if spend["month_usd"] >= float(cfg.get("monthly_usd_cap") or 0):
-        return None
+        return "monthly_cap"
     if spend["first_cuts_today"] >= int(cfg.get("daily_count_cap") or 0):
-        return None
+        return "daily_count_cap"
     if spend["all_usd"] >= float(cfg.get("pool_usd_cap") or 0):
-        return None
-    if not subscribed and not is_test(cfg, user_id) \
-            and _account_reason(cur, cfg, user_id):
-        return None
+        return "pool_cap"
+    if not subscribed and not is_test(cfg, user_id):
+        return _account_reason(cur, cfg, user_id)
+    return None
+
+
+# Refusals that are the owner's switches rather than a trial left without a
+# film: the trial off for this account, or the owner's own agent account.
+SWITCH_REFUSALS = ("off", "excluded", "payer_first_cut_off", "grandfathered")
+
+
+def admit_upload_why(cur, user_id, project_id, subscribed, nbytes=None):
+    """admit_upload, with the reason when it refuses: (admission, None) or
+    (None, reason). ``other_project`` is D2 itself (one admitted upload per
+    account). ``nbytes`` is accepted and ignored: no upload is refused the
+    First cut for its size (user 3023, 13 Nov 2026)."""
+    existing = project_admission(cur, project_id)
+    if existing:
+        return existing, None
+    cfg = settings(cur)
+    reason = _refusal(cur, cfg, user_id, subscribed)
+    if reason:
+        return None, reason
+    if _other_admission(cur, user_id, project_id):
+        return None, "other_project"
     admission = {"admitted_at": _now().isoformat(),
                  "kind": "payer" if subscribed else "trial",
                  "first_cut": True}
@@ -452,21 +467,28 @@ def admit_upload(cur, user_id, project_id, subscribed, nbytes=None):
                    SET meta = COALESCE(meta, '{}'::jsonb)
                               || jsonb_build_object('free_result', %s::jsonb)
                    WHERE id = %s""", (json.dumps(admission), int(project_id)))
-    return admission
+    return admission, None
 
 
-def first_cut_on_upload(cur, user_id):
-    """Whether this paying account's next Studio upload gets the automatic
-    First cut (the Studio says so on its empty start, lane P). The same
-    rules as admit_upload, read only; any doubt reads False."""
+def admit_upload(cur, user_id, project_id, subscribed, nbytes=None):
+    """Called under the project lock when a Studio main video lands (a file,
+    a proxy-first file or a pasted link).
+
+    Returns the admission dict when this project gets the First cut (and,
+    for an unsubscribed account, the trial), else None. Idempotent: an
+    already-admitted project returns its admission."""
+    return admit_upload_why(cur, user_id, project_id, subscribed, nbytes)[0]
+
+
+def first_cut_on_upload(cur, user_id, subscribed=True):
+    """Whether this account's next Studio upload gets the automatic First cut
+    (and, unsubscribed, the free trial). Read only, the same rules as
+    admit_upload; any doubt reads False. The Studio says so on its empty
+    start (lane P) and, for a trial account, prepares the browser's proxy so
+    the first film starts while a multi-GB original is still going up."""
     try:
         cfg = settings(cur)
-        if not cfg.get("payer_first_cut", True) or not live(cur, user_id, cfg):
-            return False
-        if int(user_id) in {int(x) for x in cfg.get("excluded_user_ids") or []}:
-            return False
-        if not cfg.get("grandfathered_first_cut", True) \
-                and not _new_subscriber(cur, user_id):
+        if _refusal(cur, cfg, user_id, subscribed, fresh=False):
             return False
         cur.execute("""SELECT 1 FROM projects
                        WHERE user_id = %s AND meta ? 'free_result' LIMIT 1""",
@@ -505,8 +527,6 @@ def admit_mcp_first_cut(cur, user_id, project_id, nbytes=None):
     existing = project_admission(cur, project_id)
     if existing:
         return existing, None
-    if nbytes and int(nbytes) > int(cfg.get("max_upload_bytes") or 0) > 0:
-        return None, "too_large"
     cur.execute("""SELECT COUNT(*) AS n FROM projects
                    WHERE user_id = %s AND meta ? 'free_result'
                      AND (meta->'free_result'->>'admitted_at')::timestamptz

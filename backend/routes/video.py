@@ -382,10 +382,16 @@ def _register_link_original(cur, project, project_id, user_id, url, text):
                        "upload_state": "pending", "link_src": url,
                        "source": "link"})))
     asset_id = cur.fetchone()["id"]
-    gated = _subscribe_gate_applies(cur, user_id)
+    # A pasted link is the account's first video exactly as a file is (user
+    # 3025, 13 Nov 2026: a Drive link met the wall the free trial would have
+    # admitted as an upload): the same admission, the same First cut.
+    why = {}
+    gated = _upload_wall(cur, user_id, project_id, why=why)
     out = {"asset_id": asset_id, "subscribe_gated": bool(gated),
            "index_job_id": None}
     if gated:
+        if why:
+            out["trial_refusal"] = why["trial_refusal"]
         out["message_id"] = _record_upload_subscription_lock(
             cur, project["chat_session_id"], asset_id)
         return out
@@ -1228,23 +1234,28 @@ def _admit_unlocked_upload(cur, user_id, project_id, original):
         return None
 
 
-def _upload_wall(cur, user_id, project_id, nbytes=None):
-    """Whether a Studio main-video upload meets the subscribe wall.
+def _upload_wall(cur, user_id, project_id, nbytes=None, why=None):
+    """Whether a Studio main video (a file, a proxy-first file or a pasted
+    link) meets the subscribe wall.
 
-    Owner decision D2: an account's first Studio upload, while the free trial
+    Owner decision D2: an account's first Studio video, while the free trial
     is switched on and within budget, is admitted instead (free_trial.py):
     it is analysed and gets the automatic First cut, and an unsubscribed
     account may edit it on the trial budget (export stays behind a plan).
-    Payers' first project gets the First cut too. Called under the project
-    lock; a failure keeps today's behaviour."""
+    Payers' first project gets the First cut too. Any size: the First cut
+    reads at most the first 30 minutes and the index streams or uses the
+    browser's proxy (user 3023, 13 Nov 2026). ``why``, a dict, receives
+    ``trial_refusal`` when the wall stays (the wall's client event carries it,
+    and ops_loop/gaps.py files a first video walled for any reason that is
+    not the owner's switch or D2's one admitted upload). Called under the
+    project lock; a failure keeps today's behaviour."""
     gated = _subscribe_gate_applies(cur, user_id)
-    admission = None
+    admission, reason = None, None
     try:
         cur.execute("SAVEPOINT free_trial_admit")
         import free_trial
-        admission = free_trial.admit_upload(cur, user_id, project_id,
-                                            subscribed=not gated,
-                                            nbytes=nbytes)
+        admission, reason = free_trial.admit_upload_why(
+            cur, user_id, project_id, subscribed=not gated, nbytes=nbytes)
         cur.execute("RELEASE SAVEPOINT free_trial_admit")
     except Exception as e:                                  # pragma: no cover
         try:
@@ -1254,9 +1265,11 @@ def _upload_wall(cur, user_id, project_id, nbytes=None):
             pass
         print(f"[free_trial] admission failed for project {project_id}: {e}",
               flush=True)
-        admission = None
+        admission, reason = None, f"error:{type(e).__name__}"[:40]
     if gated and admission and admission.get("kind") == "trial":
         return False
+    if gated and why is not None:
+        why["trial_refusal"] = reason or "not_trial"
     return gated
 
 
@@ -2903,7 +2916,9 @@ def _register_deferred_original(user_id, project_id, key, filename, declared,
                            "client_proxy_bytes": proxy_bytes,
                            "declared_bytes": declared})))
         asset_id = cur.fetchone()["id"]
-        subscribe_gated = _upload_wall(cur, user_id, project_id, declared)
+        wall_why = {}
+        subscribe_gated = _upload_wall(cur, user_id, project_id, declared,
+                                       why=wall_why)
         message_id = None
         if subscribe_gated:
             message_id = _record_upload_subscription_lock(
@@ -2931,7 +2946,7 @@ def _register_deferred_original(user_id, project_id, key, filename, declared,
         record_client_event(
             user_id, project_id, "subscription_upload_locked",
             detail={"asset_id": asset_id, "surface": "upload",
-                    "original_pending": True}, origin="server")
+                    "original_pending": True, **wall_why}, origin="server")
     return result, 200
 
 
@@ -3219,7 +3234,9 @@ def complete_upload_core(user_id, project_id, data, studio=False):
         job_id = None
         # Only the Studio's own upload can be admitted to the free trial; an
         # MCP upload (routes/mcp.py) keeps the ordinary gate.
-        account_gated = (_upload_wall(cur, user_id, project_id, nbytes)
+        wall_why = {}
+        account_gated = (_upload_wall(cur, user_id, project_id, nbytes,
+                                      why=wall_why)
                          if studio and kind == "original" and not staged
                          else (_subscribe_gate_applies(cur, user_id)
                                and not (studio and _trial_admission(
@@ -3255,7 +3272,7 @@ def complete_upload_core(user_id, project_id, data, studio=False):
         result.update(_upload_subscription_payload(asset_id, message_id))
         record_client_event(
             user_id, project_id, "subscription_upload_locked",
-            detail={"asset_id": asset_id, "surface": "upload"},
+            detail={"asset_id": asset_id, "surface": "upload", **wall_why},
             origin="server")
     return result, 200
 
@@ -5098,11 +5115,16 @@ def post_message(user_id, project_id, data=None):
                                             "source": "link",
                                             "host": _link.split("/")[2][:80]},
                                     origin="server")
+                # Kept off the response: the reason is for the ops loop.
+                _refused = _imported.pop("trial_refusal", None)
                 if _imported.get("subscribe_gated"):
                     record_client_event(
                         user_id, project_id, "subscription_upload_locked",
                         detail={"asset_id": _imported["asset_id"],
-                                "surface": "link"}, origin="server")
+                                "surface": "link",
+                                **({"trial_refusal": _refused}
+                                   if _refused else {})},
+                        origin="server")
                 return jsonify({"queued": bool(_imported.get("index_job_id")),
                                 "message_id": message_id,
                                 "link_import": _imported})
