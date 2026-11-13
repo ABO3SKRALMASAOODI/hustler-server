@@ -97,15 +97,18 @@ def _worker(worker):
 
 def _ask_with(llm, spend, what):
     """The named route's model call on the shell's credited key: (text, usd). Every call is written to the spend."""
-    def ask(system, content, purpose, budget_s, max_tokens):
+    def ask(system, content, purpose, budget_s, max_tokens, model=None, **_):
+        # the route may name another model for a call (worker/broll_source._ask); the shell's key is the credited
+        # Claude key, so a model the shell has no price for is answered by the route's own Claude model
         import anthropic
         import broll_source as B
+        use = model if model in llm.PRICES else B.NAMED_MODEL
         c = anthropic.Anthropic(timeout=float(budget_s) + 20.0, max_retries=1)
-        r = c.messages.create(model=B.NAMED_MODEL, max_tokens=int(max_tokens), system=system,
+        r = c.messages.create(model=use, max_tokens=int(max_tokens), system=system,
                               messages=[{"role": "user", "content": content}])
         text = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
-        usd = round(llm.cost(B.NAMED_MODEL, r.usage), 6)
-        spend.append(dict(stage="supply", provider="anthropic", model=B.NAMED_MODEL, what=f"{what}: {purpose}", usd=usd))
+        usd = round(llm.cost(use, r.usage), 6)
+        spend.append(dict(stage="supply", provider="anthropic", model=use, what=f"{what}: {purpose}", usd=usd))
         return text, usd
     return ask
 

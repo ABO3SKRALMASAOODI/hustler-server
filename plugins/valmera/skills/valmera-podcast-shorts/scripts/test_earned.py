@@ -354,3 +354,33 @@ def test_a_footnote_waits_for_a_panel_and_is_waived_when_no_time_is_left():
     gone = footnotes.apply(l1, notes, hold=[(first - 4, 262)])                    # the panel stays until the next note's word
     assert [p["n"] for p in gone["placed"]] == [2] and gone["waived"][0]["n"] == 1
     assert not any(it["id"].startswith("fn1.") for it in l1["items"])            # no superscript without its note
+
+
+def test_the_shells_model_call_takes_the_routes_arguments(monkeypatch):
+    """worker/broll_source._ask grew a ``model`` argument on 13 Nov (the product's check moved to another provider);
+    the shell answers on its own Claude key whatever model the route names, and writes the spend."""
+    import types
+
+    class Usage:
+        input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens = 1000, 100, 0, 0
+
+    seen = {}
+
+    class Client:
+        def __init__(self, **kw):
+            self.messages = self
+
+        def create(self, **kw):
+            seen.update(kw)
+            return types.SimpleNamespace(content=[types.SimpleNamespace(type="text", text='{"fit":[]}')], usage=Usage())
+
+    monkeypatch.setitem(sys.modules, "anthropic", types.SimpleNamespace(Anthropic=Client))
+    monkeypatch.setitem(sys.modules, "broll_source", types.SimpleNamespace(NAMED_MODEL="claude-haiku-5-5"))
+    llm = types.SimpleNamespace(PRICES={"claude-haiku-5-5": 1, "claude-opus-5-5": 1}, cost=lambda model, u: 0.001)
+    spend = []
+    ask = E._ask_with(llm, spend, "named picture")
+    text, usd = ask("system", [{"type": "text", "text": "x"}], "named_check", 10.0, 100, model="gpt-6-sol")
+    assert text == '{"fit":[]}' and usd == 0.001 and seen["model"] == "claude-haiku-5-5"
+    assert spend and spend[0]["model"] == "claude-haiku-5-5" and spend[0]["what"] == "named picture: named_check"
+    ask("system", [], "frame_boxes", 10.0, 100)                                   # and the old call still works
+    assert len(spend) == 2
