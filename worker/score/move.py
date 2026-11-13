@@ -37,6 +37,7 @@ TOTAL_MAX = 1.18              # the tightest a run ever gets against the framing
 RETURN_IN = 1.07              # a take that comes back from a cutaway comes back this much closer, or wide again
 STRESS_MIN = 0.6              # measured stress (z) a word needs to lead a move
 EDGE = 0.012                  # a head keeps this much of the frame between itself and the edge
+WIDE_LINE = 0.4               # printed text this wide in the frame is a caption or a title of the upload's own, never a sign behind someone
 
 
 def on():
@@ -232,9 +233,13 @@ def ease_takes(ctx):
             last_end_z = 1.0
             continue
         # Printed words bind as the compiler binds them: where the upload's shape is not the frame's every word it
-        # prints stays whole, and an upload that carries its own captions keeps them whole in any shape. A sign in
-        # the background of a same-shape take is not held: a punch-in that leaves it out is a choice (main_marks).
-        marks = [list(x["box"]) for x in (ctx.perc.get("text") or []) if x.get("box") and x["t"][0] - 0.5 <= s1 and x["t"][1] + 0.5 >= s0] if (other_shape or own_caps) else []
+        # prints stays whole, and an upload that carries its own captions keeps them whole in any shape. A small sign
+        # in the background of a same-shape take is not held: a punch-in that leaves it out is a choice (main_marks).
+        marks = [list(x["box"]) for x in (ctx.perc.get("text") or []) if x.get("box") and x["t"][0] - 0.5 <= s1 and x["t"][1] + 0.5 >= s0]
+        if not (other_shape or own_caps):
+            # a line printed across the frame is the upload's own caption or title, whoever speaks or does not (p5572, 13
+            # Nov: an eased step cut "POV: You have back pain" at both edges, and the last look took the film back)
+            marks = [m for m in marks if m[2] - m[0] >= WIDE_LINE * w]
         # The anchor: the point of the frame that stays put while the frame closes. Across, it sits in the heads'
         # span where the room either side of them is shared out, so a head held against one edge (a selfie) grows
         # away from that edge and is never cut by it. Down, it is the chin when the captions sit under the face and

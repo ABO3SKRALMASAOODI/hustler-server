@@ -327,3 +327,33 @@ def test_one_picture_held_past_five_seconds_is_a_finding_the_repair_round_reads(
     cut = film(beats_over(idx, 8, lambda k, a, z: {"cut": [40, 999], "pic": ["main", f"bin:{k % 4}"]}), film_={"gap": 0.25})
     c2 = comp(cut, idx, voice(24.0))
     assert c2.meter["hold_s"] < c.meter["hold_s"] and (c2.meter["hold_s"] <= S.HOLD_FIND_S or any(f.startswith("hold:") for f in c2.meter["findings"]))
+
+
+def test_a_line_the_upload_prints_across_the_frame_is_never_cut_by_the_eased_track():
+    idx, text = talking()
+    wide = dict(voice(24.0), text=[{"box": [0.06, 0.08, 0.94, 0.14], "t": [0.0, 24.0]}])          # a title burned in across the top
+    c = S.compile_score(text, index=idx, sid="five", perception=wide, bin_items=BIN)
+    for s in shots(c):
+        rows = s["crop"] if isinstance(s["crop"][0], list) else [s["crop"]]
+        assert all(r[0] <= 0.06 + 1e-6 and r[2] >= 0.94 - 1e-6 and r[1] <= 0.08 + 1e-6 for r in rows)
+    sign = dict(voice(24.0), text=[{"box": [0.0, 0.2, 0.2, 0.25], "t": [0.0, 24.0]}])               # a small sign at the edge, behind him
+    c2 = S.compile_score(text, index=idx, sid="five", perception=sign, bin_items=BIN)
+    assert c2.meter["move"]["moved"] >= 1
+
+
+def test_a_view_under_a_line_printed_across_the_frame_is_that_moment_shown_whole(tmp_path):
+    idx = selfie(12.0)
+    idx["words"], idx["sentences"] = [], []
+    perc = {"audio": {"step": 0.5, "rms_db": [-30.0] * 26, "onsets": []}, "text": [{"box": [0.05, 0.3, 0.95, 0.38], "t": [0.0, 12.0]}]}
+    work = _work(tmp_path, idx, perc)
+    json.dump({"items": [], "own": [{"id": 0, "src": "main@6.00-8.40", "box": [0.3, 0.28, 0.7, 0.6], "at": 6.8, "what": "the belt"}]}, open(tmp_path / "bin.json", "w"))
+    text = film([{"k": "b", "id": "b01", "at": "@0.0..@4.0", "job": "x", "cut": [40, 999], "pic": ["main", "view:0"]}])
+    c = S.compile_score(text, index=idx, work_dir=work, sid="five", perception=perc)
+    v = next(s for s in shots(c) if s.get("view") is not None)
+    rows = v["crop"] if isinstance(v["crop"][0], list) else [v["crop"]]
+    assert all(r[0] <= 0.05 and r[2] >= 0.95 for r in rows)             # the printed line is whole
+    perc2 = dict(perc, text=[])
+    c2 = S.compile_score(text, index=idx, work_dir=_work(tmp_path, idx, perc2), sid="five", perception=perc2)
+    v2 = next(s for s in shots(c2) if s.get("view") is not None)
+    r2 = v2["crop"][0] if isinstance(v2["crop"][0], list) else v2["crop"]
+    assert r2[2] - r2[0] < 0.8                                           # with nothing printed there, the view is the closer insert it was

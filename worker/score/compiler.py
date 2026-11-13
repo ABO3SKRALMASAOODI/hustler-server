@@ -1649,7 +1649,12 @@ def picture_fields(ctx, b, ref, a, z, W=None, H=None, src=None):
             out["src"] = [src[0], src[1]]
         t = out["src"][0] if "src" in out else 0.0
         if ref.get("_view") is not None and ref["asset"] == "main":
-            out["crop"] = camera(ctx, view_rect(ctx, ctx.views[ref["_view"]], asset, W, H), n, calm_cam(ref.get("cam") or "push 1.04"))
+            vr, cam = view_rect(ctx, ctx.views[ref["_view"]], asset, W, H), calm_cam(ref.get("cam") or "push 1.04")
+            if cuts_wide_print(ctx, vr, out.get("src"), asset, W, H):
+                # the detail sits under a line the upload prints across its frame: closer would cut that line at both
+                # ends (p5572, 13 Nov, the last look took the film back for it). That moment is shown whole instead
+                vr, cam = fit_crop([0, 0, 1, 1], asset["w"], asset["h"], W, H), None
+            out["crop"] = camera(ctx, vr, n, cam)
             out["view"] = ref["_view"]
         elif ctx.governed and ref["asset"] == "main" and (W, H) == (ctx.W, ctx.H):
             # the upload on the frame: one framing for the film, a step only where a device line earned one
@@ -6203,6 +6208,20 @@ def load_views(work_dir):
 
 
 VIEW_ZOOM = (1.4, 2.0)         # an insert is this much closer than the film's framing: under it is the take again, over it is mush
+WIDE_PRINT = 0.4               # printed text this wide in the film's framing is the upload's own caption or title
+
+
+def cuts_wide_print(ctx, rect, src, asset, W, H):
+    """Does this window cut through a line the upload prints across its frame (perception's text regions that stay
+    put, at least WIDE_PRINT of the film's framing wide) while it is on screen?"""
+    fit = fit_crop([0, 0, 1, 1], asset["w"], asset["h"], W, H)
+    fw = fit[2] - fit[0]
+    s0, s1 = (src or [0.0, ctx.src_dur])[:2]
+    for x in (ctx.perc or {}).get("text") or []:
+        m = x.get("box")
+        if m and x["t"][0] - 0.5 <= s1 and x["t"][1] + 0.5 >= s0 and m[2] - m[0] >= WIDE_PRINT * fw and _cuts(rect, m):
+            return True
+    return False
 
 
 def view_rect(ctx, v, asset, W, H):

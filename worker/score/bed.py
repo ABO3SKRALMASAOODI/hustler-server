@@ -41,6 +41,7 @@ LEAD_LUFS = -19.0           # with nobody speaking the music is the lead; the ma
 DROP_S = 0.85               # the bed stops this long before the turn and is back on it (the judge: 0.5 to 2.3 s)
 DROP_FADE_MS = 90.0
 FADE_IN_S, FADE_OUT_S = 0.12, 0.6
+MIN_S = 2.5                 # a film this short still carries a bed: a product held up for 3 s is a sting, and went out dry at 4 (p5582)
 PICK_S = 6.0                # the model's pick; past it the signal's first option stands
 FILE = "bed.json"
 
@@ -314,8 +315,8 @@ def settle(work, comp, index, score_lines, about=""):
             raise ValueError("the upload carries its own track")
         import music_choose
         f, turn_s = facts(comp.l1, index, film, treat, comp.meter, about)
-        if f["duration_s"] < 4.0:
-            raise ValueError("under 4 s: no room for a bed")
+        if f["duration_s"] < MIN_S:
+            raise ValueError(f"under {MIN_S:g} s: no room for a bed")
         track = music_choose.find(doc["cid"])
         if not track:
             raise ValueError("the chosen track left the library")
@@ -382,7 +383,7 @@ def items(work, prog_s):
     """(music items, fx items) for the EDL, on the programme clock; ([], []) when the film has no chosen bed.
     The storage key is local (`bed:<cid>`): score.film swaps it for the project's asset before the write."""
     doc = chosen(work)
-    if not doc or prog_s < 4.0:
+    if not doc or prog_s < MIN_S:
         return [], []
     purpose = (f"Valmera's choice for this film: \"{doc.get('title')}\" by {doc.get('author')} ({doc.get('license')}). {doc.get('why') or ''}")[:400]
     m = {"id": "bed", "storage_key": local_key(doc), "start": 0.0, "end": round(prog_s, 2), "gain_db": float(doc["gain_db"]), "duck": False,
