@@ -6068,6 +6068,13 @@ def meter_text(ctx, m):
         from . import grade
         out.append(grade.line(m["look"]))
     out += taste_text(m.get("taste"))
+    mv = m.get("move") or {}
+    if mv.get("runs"):
+        why = "; ".join(f"{v} held: {k}" for k, v in (mv.get("why_held") or {}).items())
+        out.append(f"CAMERA the take runs {mv['runs']} time(s); {mv.get('moved', 0)} of those runs are eased for you: {mv.get('moves', 0)} moves on the stressed words "
+                   f"({mv.get('moves10', 0)} per 10 s) and a slow push between them" + (f". {why}" if why else ""))
+    if m.get("hold_s") is not None:
+        out.append(f"HOLD the longest the picture goes without changing: {m['hold_s']} s (the judge's films: 0.5 s at the median, 2 s for one shot in forty)")
     out.append("BEATS id sec pics/10s type design snd")
     for r in m["by_beat"]:
         out.append(f"  {r['id']:<9} {r['sec']:>5} {r['pics10']:>5} {r['type']:>3} {r['design']:>3} {r['snd']:>3}")
@@ -6403,15 +6410,44 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
         # sat on her arm for four seconds). What was decided against in the film it saw stays decided.
         plan = settle(seen, {})[1]
     ctx, plan, facts, rounds = settle(text, plan)
+    hold_s = None
     if governed:
         hook_finding(ctx)
+        hold_s = hold_finding(ctx)
     l1 = to_l1(ctx)
     from . import sound                    # lane J: the film's sound design, peak on each chosen picture event
-    l1 = sound.apply(l1, work_dir, index, perc, ctx.asks or None, (facts or {}).get("supply"))
+    turn_s = None
+    if governed:
+        try:                               # the turn the Score named for its bed is landed like the payoff (sound engine, 13 Nov)
+            from . import bed as bedlib
+            tf = bedlib.turn_frame(l1, index, ctx.film)
+            turn_s = tf / ctx.fps if tf is not None else None
+        except Exception:  # noqa: BLE001 - a film is never lost to its music line
+            turn_s = None
+    l1 = sound.apply(l1, work_dir, index, perc, ctx.asks or None, (facts or {}).get("supply"), turn_s=turn_s)
     m = meter(ctx, l1)
     if governed:
         m["taste"] = taste_meter(ctx, facts, rounds)
         m["findings"] = list(ctx.findings)
+        m["hold_s"] = hold_s
+        # The take is never still (score.move, 13 Nov): each run of the upload becomes one eased camera track. Done
+        # after the meter, which counts cuts and framings as the Score wrote them, and kept only when the L1 holds.
+        try:
+            from . import move
+            rep = move.ease_takes(ctx)
+            if rep.get("moved") or rep.get("stills"):
+                l1e = to_l1(ctx)
+                l1e["sound"] = l1["sound"]
+                for k in ("sound_design",):
+                    if k in l1:
+                        l1e[k] = l1[k]
+                if not validate_l1(l1e):
+                    l1 = l1e
+                else:
+                    rep["fault"] = "the eased film did not validate: the framings stay as written"
+            m["move"] = rep
+        except Exception as e:  # noqa: BLE001 - the film stands as the Score framed it
+            m["move"] = {"fault": f"{type(e).__name__}: {str(e)[:160]}"}
     txt = meter_text(ctx, m)
     return Compiled(l1, m, txt, (time.perf_counter() - t0_) * 1000)
 
@@ -6428,6 +6464,24 @@ def hook_finding(ctx):
     if first is None or first > taste.HOOK_S:
         ctx.find("hook: " + ("the film never leaves the take" if first is None else f"the first picture that is not the take lands at {first:.1f} s")
                  + ". A talking film shows one inside its first 3 s: open on the Bin's hook picture with the title, or cut the first picture in earlier")
+
+
+HOLD_FIND_S = 5.0          # one picture on screen this long is told to the repair round (the judge: one shot in forty passes 2 s)
+
+
+def hold_finding(ctx):
+    """The longest stretch in which the picture never changes: no cut to another source, no cut of the upload's own
+    (taste.picture_changes; a crop of the take is not a change). Past HOLD_FIND_S on a film of 8 s or more it is a
+    finding, with where it is, so the repair round cuts into it. Returns the seconds, for the meter."""
+    from . import taste
+    fps = ctx.fps
+    marks = [0] + list(taste.picture_changes(ctx)) + [ctx.dur_f]
+    gap, at = max(((b - a, a) for a, b in zip(marks, marks[1:])), default=(0, 0))
+    hold = gap / fps
+    if hold > HOLD_FIND_S and ctx.dur_f / fps >= 8.0:
+        ctx.find(f"hold: one picture stays on screen {hold:.1f} s, from {at / fps:.1f} s. A framing held that long reads as nothing happening: cut inside it to a Bin "
+                 "picture, a view, another moment of the upload (`main@12.4-13.6`), a page or a counter, every 1 to 3 s")
+    return round(hold, 2)
 
 
 def take_seats(work_dir, index=None):

@@ -21,7 +21,7 @@ from PIL import Image, ImageDraw
 from . import boards, brief, call
 
 BOARD_W, BOARD_H = 1568, 880
-MAX_ITEMS = 8
+MAX_ITEMS = 14             # round five: a film cuts to a new picture every 2 to 3 s of speech (was 8)
 WISH_BUDGET_S = 6.0
 LOOK_MODEL = "claude-haiku-5-5"
 
@@ -122,8 +122,10 @@ def contact_sheet(cands):
     return im
 
 
-LOOK_SYSTEM = """You help a film researcher. You see numbered stock candidates and a list of wishes from a film. Each picture would take the whole frame in place of the person talking. Keep only pictures that show the very thing the wish names, so a viewer sees what is being said: never something loosely like it, a mood, a metaphor or a picture that is merely near the words. Of those, keep the ones an art director would be proud of: they plainly show what the wish wants, they feel like an advert or a film, not a stock catalogue: real light, a clear subject, restraint. Prefer dark, rich or graphic frames over flat catalogue shots. Drop anything off-subject, cheesy, watermarked, staged with grinning models, generic sale or discount signs, or showing a product the film doesn't sell, or a lookalike of what the customer sells. Drop any person who could be taken for the speaker, or who stands in for the speaker: this film already has its person. Objects, hands, textures and places travel; a stranger's face doesn't.
-Answer with one JSON object and nothing else: {"keep":[{"c":number,"wish":number,"what":"six to ten plain words on what the picture shows"}]}. Up to 3 for each wish, the best of each first. A wish may keep none: an honest gap is better than a picture that is only near the words."""
+LOOK_SYSTEM = """You help a film editor choose cutaways. You see numbered stock candidates and a list of moments from a film, each with what the editor wants to show there and the words said. Each picture would take the whole frame for a second or two while the voice runs on. Keep a picture when an editor at the top of the craft would cut to it on those words. For a moment marked thing, it shows the very thing the words name. For a moment marked like, it shows what the words mean so plainly that a stranger gets it at once with nothing explained: one clear subject, concrete, alive, the way a film cuts to a cheetah for "no plan B" or to dominoes for "it collapsed". Either way it must look like a film and not a stock catalogue: real light, a clear subject, depth, something happening. Prefer dark, rich, graphic or cinematic frames over flat bright ones. Drop anything off-subject; a general scene of the topic's field that says nothing by itself (an office, a handshake, a laptop, a skyline); a picture that matches one word but not what the sentence means; anything cheesy, watermarked, staged with grinning models; generic sale or discount signs; a product the film doesn't sell, or a lookalike of what the customer sells. Drop any person who could be taken for the speaker, or who stands in for the speaker: this film already has its person. Objects, hands, animals, machines, textures and places travel; a stranger's face looking at the lens doesn't.
+Answer with one JSON object and nothing else: {"keep":[{"c":number,"wish":number,"what":"six to ten plain words on what the picture shows"}]}. Up to 2 for each moment, the best first. A moment may keep none: an honest gap is better than a picture that does not land."""
+SECOND_SEARCHES = 6        # wishes that get a second library search (the words' own thing, or the Scout's second query)
+LOOK_CELLS = 60            # candidates on one sheet: past this a cell is too small to judge, and a second sheet is read beside it
 
 
 def parse_keep(txt):
@@ -142,14 +144,40 @@ def parse_keep(txt):
             i = j + 1
 
 
-def look(sheet_path, cands, wishes, deadline):
-    """One vision pick. Returns (keep list, usd)."""
-    lines = [f"wish {i}: {w.get('want')}" + (f" | words said: \"{w['_said']}\"" if w.get("_said") else "")
+def look(sheet_path, cands, wishes, deadline, offset=0):
+    """One vision pick over one sheet. `offset` is the number the sheet's first candidate carries in `cands`.
+    Returns (keep list in `cands` numbers, usd)."""
+    lines = [f"moment {i} ({'like' if w.get('how') == 'like' else 'thing'}): {w.get('want')}" + (f" | words said: \"{w['_said']}\"" if w.get("_said") else "")
              + (f" | the words name: {w['_thing']}" if w.get("_thing") else "") for i, w in enumerate(wishes)]
-    lines.append("Candidates by number: " + ", ".join(f"{i} for wish {x['_wish']}" for i, x in enumerate(cands)))
-    r = call.stream(LOOK_MODEL, LOOK_SYSTEM, [brief.image_block(sheet_path), {"type": "text", "text": "\n".join(lines)}], max_tokens=2500, effort="low",
+    lines.append("Candidates by number: " + ", ".join(f"{i} for moment {x['_wish']}" for i, x in enumerate(cands)))
+    r = call.stream(LOOK_MODEL, LOOK_SYSTEM, [brief.image_block(sheet_path), {"type": "text", "text": "\n".join(lines)}], max_tokens=3000, effort="low",
                     purpose="director_look", deadline=deadline, thinking=False)
-    return parse_keep(r.text), r.usd
+    keep = parse_keep(r.text)
+    for k in keep:
+        if isinstance(k.get("c"), int):
+            k["c"] += offset
+    return keep, r.usd
+
+
+def look_all(tmp, cands, wishes, deadline):
+    """The Look over every candidate: sheets of LOOK_CELLS, read side by side. (keep, usd, errors)."""
+    parts = [(k, cands[k:k + LOOK_CELLS]) for k in range(0, len(cands), LOOK_CELLS)]
+
+    def one(job):
+        k, part = job
+        path = os.path.join(tmp, f"sheet_{k}.jpg")
+        boards.save(contact_sheet(part), path, quality=82)
+        return look(path, part, wishes, deadline, offset=k)
+    keep, usd, errs = [], 0.0, []
+    with cf.ThreadPoolExecutor(max_workers=max(1, min(4, len(parts)))) as pool:
+        for fut in [pool.submit(one, j) for j in parts]:
+            try:
+                got, u = fut.result()
+                keep += got
+                usd += float(u or 0.0)
+            except Exception as e:  # noqa: BLE001 that sheet has no pick: its moments fall back to library order
+                errs.append(str(e)[:120] or "late")
+    return keep, usd, errs
 
 
 CHECK_MODEL = os.environ.get("BIN_CHECK_MODEL", "claude-opus-5-5")   # the last look's eyes: what it removes never enters
@@ -264,7 +292,9 @@ def check_fit(work, items, wishes, deadline, asks=()):
             ask = ["The pairs, with what the editor added at each moment:"]
             for j, n in enumerate(chunk, 1):
                 shows = str(items[n].get("what") or "")[:90]      # the look can't tell Webber's car from any car unless told what it is
-                ask.append(f"pair {j} @{rows[n][0]:.1f}s: b{n}.s1: " + ("a designed picture made of the words said" if items[n].get("provider") == "designed" else "a found picture")
+                like = (wishes[items[n]["wish"]] if 0 <= int(items[n].get("wish", -1)) < len(wishes) else {}).get("how") == "like"
+                ask.append(f"pair {j} @{rows[n][0]:.1f}s: b{n}.s1: " + ("a designed picture made of the words said" if items[n].get("provider") == "designed"
+                                                                      else "a found picture cut to as a picture of what the words mean (an association, not the thing named)" if like else "a found picture")
                            + ", full frame for a second or two" + (f", showing {shows}" if shows else "")
                            + (f"; cap: the caption, reading {saids[n]}" if saids[n] else ""))
             if asks:        # what the customer asked for is theirs: the film's own look leaves an ask-bound picture in
@@ -275,7 +305,7 @@ def check_fit(work, items, wishes, deadline, asks=()):
                             max_tokens=1200, effort="low", purpose="director_bin_check",
                             deadline=min(deadline, time.monotonic() + CHECK_S), thinking=False)
             return chunk, r
-        with cf.ThreadPoolExecutor(max_workers=2) as pool:
+        with cf.ThreadPoolExecutor(max_workers=4) as pool:
             for fut in [pool.submit(one, k) for k in range(0, len(items), n_pairs)]:
                 try:
                     chunk, r = fut.result()
@@ -322,7 +352,10 @@ def renumber(work, items):
 
 
 def bin_board(items, work, path, own=()):
-    cols, rows = 6, 2
+    """Every Bin picture and every view on one board with its id. Twelve cells held a Bin of eight; a Bin of fourteen
+    and six views takes a third row and a seventh column, so the Director never cuts to a picture it was not shown."""
+    total = len(items) + len(list(own))
+    cols, rows = (6, 2) if total <= 12 else (6, 3) if total <= 18 else (7, 3)
     gap = 4
     cw, ch = (BOARD_W - (cols - 1) * gap) // cols, (BOARD_H - (rows - 1) * gap) // rows
     im = Image.new("RGB", (BOARD_W, BOARD_H), boards.BG)
@@ -739,8 +772,14 @@ def run(work, scout, per, acquire, deadline):
             reads, read_usd = [None] * len(wishes), 0.0
             report.append(dict(read_error=str(e)[:120] or "late"))
         things = {i: r["thing"] for i, r in enumerate(reads) if r and r.get("thing") and not wishes[i].get("mine")}
-        second = {i: things.get(i) or ((w.get("q") or [None, None]) + [None])[1] for i, w in enumerate(wishes) if not w.get("mine")}
+        # a metaphor's second search is the Scout's own: the thing its words name is not the picture it wants
+        second = {i: (None if w.get("how") == "like" else things.get(i)) or ((w.get("q") or [None, None]) + [None])[1]
+                  for i, w in enumerate(wishes) if not w.get("mine")}
         second = {i: q for i, q in second.items() if q}
+        # the library key's hourly allowance is shared by every film: with up to 14 moments a film, the second search
+        # goes to the first SECOND_SEARCHES of them, the things named before the associations
+        order = sorted(second, key=lambda i: (wishes[i].get("how") == "like", i))[:SECOND_SEARCHES]
+        second = {i: second[i] for i in sorted(order)}
         with cf.ThreadPoolExecutor(max_workers=4) as pool:
             more = dict(zip(second, pool.map(lambda i: search_thing(stock, wishes[i], second[i], 4.0), second)))
         return reads, read_usd, things, more
@@ -782,13 +821,12 @@ def run(work, scout, per, acquire, deadline):
         cands = fetch_stills(cands, tmp)
         keep = []
         if cands:
-            sheet = contact_sheet(cands)
-            sheet_path = os.path.join(tmp, "sheet.jpg")
-            boards.save(sheet, sheet_path, quality=82)
             try:
                 seen_as = [dict(w, _said=clause_of(work, w.get("w") or w.get("at")), _thing=things.get(i)) for i, w in enumerate(wishes)]
-                keep, look_usd = look(sheet_path, cands, seen_as, min(deadline - CHECK_RESERVE_S - ACQUIRE_S, time.monotonic() + 12.0))
+                keep, look_usd, look_errs = look_all(tmp, cands, seen_as, min(deadline - CHECK_RESERVE_S - ACQUIRE_S, time.monotonic() + 12.0))
                 usd += look_usd
+                if look_errs:
+                    report.append(dict(look_error="; ".join(look_errs)[:200]))
             except Exception as e:  # noqa: BLE001 no Look came back: one picture per wish, library order
                 report.append(dict(look_error=str(e)[:120]))
             if not keep:
@@ -839,7 +877,7 @@ def run(work, scout, per, acquire, deadline):
                 c = dict(broll_source.designed_hit(sp), _wish=i)
                 picks.append((dict(c=-1, wish=i, what=f"designed {sp['kind']}: {sp.get('what') or ''}".strip(": ")), c))
                 designed += 1
-        pool = cf.ThreadPoolExecutor(max_workers=4)
+        pool = cf.ThreadPoolExecutor(max_workers=8)
         jobs = [(k, c, pool.submit(acquire, c)) for k, c in picks]
         for k, c, fut in jobs:
             try:
@@ -870,6 +908,8 @@ def run(work, scout, per, acquire, deadline):
             row["_looked"] = bool(k.get("what"))
             if w0.get("hook"):
                 row["hook"] = True
+            if w0.get("how") == "like":
+                row["how"] = "like"
             row.update({"what": k.get("what") or c.get("description") or c.get("title") or "", "for": f"w{w0.get('w')}" if w0.get("w") else str(w0.get("at")),
                         "wish": c["_wish"], "class": cls, "licence": lic, "licence_url": lurl, "provider": c.get("provider"), "author": c.get("credit"),
                         "page": c.get("page_url"), "query": c.get("_q")})

@@ -3,6 +3,10 @@
 A model reads the request; nothing here pattern-matches it. The Director can't change the asks,
 so it can't mark its own exam. Returns scope, language, asks with probes, windows, picture wishes,
 and the words the transcript misheard.
+
+Round five (13 Nov, the owner's judge): the wishes are the film's cutaways, about one every 2 to 3 s of
+speech, and a wish may be a metaphor or an association (`how` "like") as the @metromedia.house reels
+cut them. The rule that forbade those is gone; Supply's look and the last look decide each picture.
 """
 import json
 import os
@@ -21,7 +25,7 @@ Answer with one JSON object and nothing else:
  "about":"one plain sentence: who this is and what the upload is for, only what the words and frames show",
  "asks":[{{"id":"a1","said":"the clause as typed","probe":"one probe","min":number or null,"note":"a fact a checker needs, or null"}}],
  "windows":[{{"t0":0,"t1":30,"why":"the story window"}}],
- "wishes":[{{"w":"16-20","at":null,"want":"what this moment wants to show","own":true,"mine":true,"q":["search 1","search 2"],"kind":"video|photo"}}],
+ "wishes":[{{"w":"16-20","at":null,"how":"thing|like","want":"what this moment shows","own":false,"mine":false,"q":["search 1","search 2"],"kind":"video|photo"}}],
  "fixes":[{{"w":7,"t":"corrected text"}}]}}
 
 scope: film is one film up to about 120 s, and it is the default even when the ask is small talk about captions or effects. surgical is one precise change that stands alone, such as a recolour of one object. set is several films from one source. long is one film over about 120 s.
@@ -30,7 +34,10 @@ asks: one per clause the customer really asked for, none invented. Nothing typed
 
 windows: where the story sits. A short upload is one window, the whole thing.
 
-wishes: up to 8 moments, in order, where the words name something a camera can show: a person, a place, a brand, a team, an object, an action, a material. Take the noun as it is said and set `w` to the very words that say it, two to five words, so the picture can land on that word. `want` is that very thing in plain words, with the name when the words give one: "Mark Webber, the racing driver", "cupping therapy on a back", "a kiln door opening". Real pictures of named people, places and brands are found by a separate search, so name them in `want`. `q` is two stock-library searches in English for that same thing: the object itself, hands doing the action, the place; specific and photographable. A library has no brands and no real people, so `q` never names one. Never a mood, a metaphor, an idea or a feeling: a picture only loosely like the words is thrown away before the film, and a sentence that names nothing a camera can show gets no wish. Fewer wishes that are exact beat more that are vague. `own` true when the upload itself can show it by a crop or a frame. `mine` true when the thing is the customer's own: the product they sell, their shop, their vehicle, their person. A library picture of something similar would be a lie about what they have, so nothing is searched for a `mine` wish and the upload shows it. For wordless footage give `at` seconds, and only for what the upload does not already show.
+wishes: the cutaways an editor at the top of the craft would make, in order, up to 14. A talking film wants a new picture about every 2 to 3 s of speech, spread over its whole length and not only its start; a film under 15 s wants 3 to 5. Each wish is one moment. `w` is the ids of the words it lands on, first-last as in the transcript, two to five words, such as "16-20", so the picture can cut in on that very word: ids, never the words themselves. `how` says which kind of picture it is:
+- "thing": the words name something a camera can show, and the picture is that very thing: a person, a place, a brand, a team, an object, an action, a material. `want` is that thing in plain words, with the name when the words give one: "Mark Webber, the racing driver", "cupping therapy on a back", "a kiln door opening". Real pictures and real footage of named people, places, brands and events are found by a separate search, so name them in `want`.
+- "like": the words say an idea, a feeling, a size, a risk, a turn, and the picture is what an editor would cut to so a stranger sees it at once: a cheetah at full run for "no plan B", dominoes falling for "it all collapsed", a speedometer climbing for "it scaled so fast", a door closing for "that was the end of it", a crowd for "everyone". One clear subject, in motion, concrete, that needs no explaining. Only where the sentence already holds the image: a comparison, a verb of motion, a size, a fall, a wait. A general scene of the topic's field (people in an office, a handshake, a laptop, a whiteboard, a skyline for "business"), a picture of someone doing the abstract thing (a person "trusting", "planning", "learning"), and a picture that only matches a word and not what the sentence means are not it: those are thrown away before the film, and one that slips through is what makes a film read as automatic. Taste decides: `thing` wishes come first and carry the film, a `like` wish is the exception that lands (one wish in three at most), and when no picture would land the moment stays with the speaker.
+`q` is two stock-library searches in English for the picture: the subject itself, what it is doing, where; specific and photographable, three to five words. A library has no brands and no real people, so `q` never names one. `kind` is "video" unless only a photograph can show it (a named person, a document, a historic thing). `own` true when the upload itself can show it by a crop or a frame. `mine` true when the thing is the customer's own: the product they sell, their shop, their vehicle, their person. A library picture of something similar would be a lie about what they have, so nothing is searched for a `mine` wish and the upload shows it. For wordless footage give `at` seconds in place of `w`, and wish only for what the upload does not already show and that belongs to what it is about (the raw material of the product in a hand, the place a routine happens, the thing a clip is a joke about); a wordless upload that is complete as it is gets no wishes.
 
 fixes: the transcript is machine-made and ? marks doubt. Go through every ? word and every word that makes no sense in its sentence. Say each sentence aloud in the speaker's language and ask what a person really said. A name garbled in one place is usually spelled clearly in another. An event name is said the same way twice. Words can run together, so one id can hold two words. `t` is what was really said, in normal case. Keep numbers that are numbers; a digit standing for an ordinary word becomes the word.
 
@@ -82,7 +89,7 @@ def parse(text):
 
 
 def run(work, idx, sess, per, deadline, model=MODEL):
-    r = call.stream(model, SYSTEM, content(work, idx, sess, per), max_tokens=4000, effort="low", purpose="director_scout", deadline=deadline)
+    r = call.stream(model, SYSTEM, content(work, idx, sess, per), max_tokens=6000, effort="low", purpose="director_scout", deadline=deadline)
     d = parse(r.text)
     d["_usage"] = dict(model=model, usd=round(r.usd, 6), seconds=r.seconds, first_text_s=r.first_s, stop=r.stop)
     with open(os.path.join(work, "scout.json"), "w") as f:

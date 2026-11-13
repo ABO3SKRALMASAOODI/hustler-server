@@ -248,7 +248,8 @@ def test_the_look_is_told_what_a_found_picture_shows_and_what_a_title_page_is(tm
     assert "b02.s1" in taste.look_ids(c)
     rows = taste.on_screen(c.l1, 0.3, sorted(taste.look_ids(c), key=len, reverse=True), whats)
     assert any("opening title page" in r for r in rows) and any("THE CLAIM" in r for r in rows)
-    assert "cutaway" in taste.LOOK_SYSTEM and "loosely like the words" in taste.LOOK_SYSTEM
+    # round five: a metaphor that lands stands (the ban is gone); what never stands is the generic library scene
+    assert "cutaway" in taste.LOOK_SYSTEM and "generic library scene" in taste.LOOK_SYSTEM and "association" in taste.LOOK_SYSTEM
 
 
 def test_a_printed_text_box_that_lies_on_a_head_is_not_print():
@@ -451,7 +452,7 @@ def test_a_placed_sound_on_a_film_with_no_voice_is_heard_over_its_track():
     make = lambda k, a, z: {"pic": "main", "do": [{"g": "big", "t": "ONE WORD", "for": f"w{a}", "at": f"w{a}", "d": 30}], "snd": [{"s": "impact_1", "for": "b01.big", "db": -6}]} if k == 0 else {"pic": "main"}
     c2 = comp(film(beats_over(talk, 3, make), system={"devices": ["big"], "sounds": ["impact"], "seats": [[0.5, 0.75]]}), talk, voice(20.0, db=-18.0))
     for s in c2.l1["sound"]:
-        assert s["db"] <= -18.0 - 9.0 - hit + 0.11
+        assert s["db"] <= -18.0 - 7.0 - hit + 0.11          # class T: 7 dB under the voice since round five
 
 
 def test_the_brief_has_the_open_ground_shot_by_shot_for_a_clip():

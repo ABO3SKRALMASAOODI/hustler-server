@@ -491,28 +491,51 @@ def colour_part(work, styles):
     return out
 
 
-def supply_part(idx, per, bin_items):
+def own_bed(idx, per, music=False):
+    """Does the upload carry a track of its own under most of it, before a film exists? The governor's reading
+    (taste.has_bed: any steady sound that is not a voice), or with `music` the stricter one a bed is decided on
+    (bed.own_track: loud enough to be the programme, not the hum of a room)."""
+    dur = float(per["dur"])
+    words = idx.get("words") or []
+    bins = (per.get("audio") or {}).get("rms_db") or []
+    if music:
+        from . import bed as bedlib
+        return bedlib.own_track(bins, len(words), dur)
+    if bins and len(words) / max(dur, 1e-3) < 1.0:
+        top = sorted(bins)[int(len(bins) * 0.9)]
+        return sum(1 for b in bins if b >= top - 20.0) >= 0.5 * len(bins) and top > -45.0
+    return False
+
+
+def supply_part(idx, per, bin_items, work=None):
     """What this footage can carry, in numbers, before a film exists."""
+    from . import bed as bedlib
     dur = float(per["dur"])
     own = max(0, len(per.get("shots") or []) - 1)
     n = len(bin_items or [])
-    words = idx.get("words") or []
-    a = per.get("audio") or {}
-    bins = a.get("rms_db") or []
-    bed = False
-    if bins and len(words) / max(dur, 1e-3) < 1.0:
-        top = sorted(bins)[int(len(bins) * 0.9)]
-        bed = sum(1 for b in bins if b >= top - 20.0) >= 0.5 * len(bins) and top > -45.0
+    bed = own_bed(idx, per)
+    given = bool(work) and not own_bed(idx, per, music=True) and bedlib.brief_line(work) is not None       # the film gets a bed of its own (score.bed)
     out = ["## Supply"]
     rows = []
     for label, np10 in (("held as one take, no found picture", own / max(dur, 1e-3) * 10), (f"with all {n} Bin pictures cut in", taste.reach(per, bin_items, dur))):
         cls = taste.klass(np10, dur)
-        al = taste.allow({"cls": cls, "np10": np10, "dur_s": dur, "bed": bed})
+        al = taste.allow({"cls": cls, "np10": np10, "dur_s": dur, "bed": bed or given})
         rows.append(f"{label}: {np10:.1f} new pictures per 10 s, class {cls}: camera moves {al['camera']}, sounds {al['sounds']}, display lines {al['display']} at {al['seats']} seats, cards {al['cards']}, flashes {al['flashes']}")
         if not n:
             break
-    out.append(f"The upload has {own} cut(s) of its own, {dur:.1f} s, {'a sound bed' if bed else 'no bed'}. What it carries, " + "; ".join(rows) + ". The compiler counts the pictures you really cut to and holds the film to that.")
+    out.append(f"The upload has {own} cut(s) of its own, {dur:.1f} s, {'a sound bed' if bed else 'no bed of its own'}. What it carries, " + "; ".join(rows) + ". The compiler counts the pictures you really cut to and holds the film to that.")
     return out
+
+
+def bed_part(work, own_bed=False):
+    """What the Director is told about the film's music (score.bed)."""
+    from . import bed
+    line = None if own_bed else bed.brief_line(work)
+    if line:
+        return ["## Bed", line]
+    if own_bed:
+        return ["## Bed", "The upload carries its own track: it is the film's music, and no bed is added. `film.music` is \"none\"."]
+    return ["## Bed", "No bed is available for this film: `film.music` is \"none\", and its sound is the upload's own and what you place."]
 
 
 # ----------------------------------------------------------------- prefix
@@ -619,7 +642,8 @@ def film_text(work, idx, sess, per, x, scout, styles, cards, bin_items=None):
     out += ["## Frames",
             "Boards 1-3: frames in time order. Each stamp reads @source-second, then the word being spoken. Green box face, yellow box free space on the first cell. White ticks mark every .1 of the frame. Board 4: details, softness, palette."]
     out += scout_part(scout, idx)
-    out += supply_part(idx, per, bin_items)
+    out += supply_part(idx, per, bin_items, work)
+    out += bed_part(work, own_bed(idx, per, music=True))
     out.append("## Style cards")
     out.append("Real films from the folder that this footage can supply. The frames follow, one board per card, after the frame boards. Numbers are that film's, measured. `system.card` is one of these: " + " ".join(styles) + ".")
     for s in styles:

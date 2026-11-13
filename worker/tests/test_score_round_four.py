@@ -291,7 +291,8 @@ def test_a_film_most_of_whose_frames_lose_to_the_upload_is_taken_back_for_the_ch
 def test_a_film_the_look_only_trims_is_written_again_as_before(monkeypatch, tmp_path):
     idx = selfie(20.0)
     text = film(beats_over(idx, 4, lambda k, a, z: {"cut": [40, 45, 999], "pic": ["main", f"bin:{k}", "main"]} if k in (1, 2) else {"pic": "main"}))
-    ctx, db, wrote, out = _looked(monkeypatch, tmp_path, {"pairs": 6, "upload": 1, "remove": ["b02.s1"], "why": ["only loosely like the words"]}, text)
+    # round five, one render: a film is cut and rendered again when a third of its frames lose to the upload
+    ctx, db, wrote, out = _looked(monkeypatch, tmp_path, {"pairs": 6, "upload": 2, "remove": ["b02.s1"], "why": ["a library scene", "a library scene"]}, text)
     assert out is not None, ctx.first_cut_phases
     assert len(wrote) == 1 and wrote[0][1] == "the Director's First cut, after the last look"
     assert ctx.first_cut_phases["director"]["look"]["decision"] == "cut" and ctx.director_version == 2

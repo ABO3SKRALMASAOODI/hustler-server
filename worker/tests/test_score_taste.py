@@ -81,12 +81,25 @@ def p5591_shape(idx):
     return beats_over(idx, 12, make)
 
 
+
+@pytest.fixture(autouse=True)
+def _framings_as_the_governor_leaves_them(monkeypatch):
+    """These tests read the take's framings as taste.decide settles them. The eased camera track laid over them
+    (score.move, round five) is tested in test_score_round_five.py."""
+    monkeypatch.setenv("VALMERA_EASE", "0")
+
+
 # ------------------------------------------------------------------ supply and allowance
 
 def test_the_allowance_is_the_table_of_taste_4_2():
     t = taste.allow({"cls": "T", "np10": 0.6, "dur_s": 32.8, "bed": False})
-    assert (t["camera"], t["sounds"], t["display"], t["seats"], t["flashes"], t["under_voice_db"]) == (1, 1, 6, 2, 1, 9.0)
-    assert taste.allow({"cls": "T", "np10": 0, "dur_s": 47.9, "bed": False})["sounds"] == 2            # p5565
+    # round five (13 Nov, the owner's judge): the dry rows moved to the references' own one-take rate (1.4 sounds in 10 s),
+    # the bed rows are the ones a film now runs on (score.bed)
+    assert (t["camera"], t["sounds"], t["display"], t["seats"], t["flashes"], t["under_voice_db"]) == (1, 3, 9, 2, 1, 7.0)
+    assert taste.allow({"cls": "T", "np10": 0, "dur_s": 47.9, "bed": False})["sounds"] == 4            # p5565
+    bed = taste.allow({"cls": "T", "np10": 0.6, "dur_s": 32.8, "bed": True})
+    assert bed["sounds"] == 6 and bed["sounds_10s"] == 2
+    assert taste.allow({"cls": "M", "np10": 3, "dur_s": 30, "bed": True})["sounds"] == 9
     assert taste.allow({"cls": "M", "np10": 4.2, "dur_s": 4.8, "bed": False})["sounds"] == 1           # p5582: never under one
     p = taste.allow({"cls": "P", "np10": 14, "dur_s": 20, "bed": False})
     assert (p["sounds"], p["camera"], p["display"]) == (12, 7, 20)
@@ -119,14 +132,17 @@ def test_p5591_one_take_holds_one_sound_one_step_one_caption_seat_and_two_displa
     c = comp(film(p5591_shape(idx), system={"card": "P1", "devices": ["big", "chip", "flash"], "sounds": ["impact", "whoosh", "pop", "riser"]},
                   film_={"drop": ["20-21", "40-41", "60-61"]}), idx, voice(32.8))
     t = c.meter["taste"]
-    assert t["supply"]["cls"] == "T" and t["allow"]["sounds"] == 1
+    assert t["supply"]["cls"] == "T" and t["allow"]["sounds"] == 3
     assert t["kept"]["camera"][0] <= 1 and t["kept"]["camera"][1] >= 12
     assert camera_steps(c) <= 1 + t["flips"] <= 1 + t["speech_edits"]
     snd = c.l1["sound"]
-    assert len(snd) == 1
+    assert 1 <= len(snd) <= 3                      # the upload carried 19; one take dry holds one in any 10 s
     lands = [i["on"] for i in c.l1["items"] if i["k"] == "word" and i.get("role") == "big"] + [i["f"][0] for i in c.l1["items"] if i["k"] == "card"]
-    assert min(abs(snd[0]["event_f"] - f) for f in lands) <= taste.PARTNER_F
-    assert t["kept"]["display"][0] <= 6 and t["kept"]["flash"][0] <= 1
+    for q in snd:
+        assert min(abs(q["event_f"] - f) for f in lands) <= taste.PARTNER_F
+    at = sorted(q["event_f"] for q in snd)
+    assert all(b - a >= 10 * 30 for a, b in zip(at, at[1:]))
+    assert t["kept"]["display"][0] <= 9 and t["kept"]["flash"][0] <= 1
     caps = [w for w in c.l1["items"] if w["k"] == "word" and w.get("role") == "cap"]
     assert caps and max(w["y"] if not isinstance(w["y"], list) else w["y"][-1] for w in caps) - min(w["y"] if not isinstance(w["y"], list) else w["y"][-1] for w in caps) <= 0.045
     assert len(t["seats"]["display"]) <= 2
@@ -144,7 +160,7 @@ def test_p5565_eighty_seven_sounds_on_a_video_call_become_two():
                 "snd": [{"s": ("tick_1", "pop_1", "click_1", "swish_1", "ding_1", "impact_1", "whoosh_soft_1")[(k + j) % 7], "at": f"w{min(z, a + j)}", "for": f"w{min(z, a + j)}"} for j in range(7)]
                 + [{"s": "impact_1", "for": f"b{k + 1:02d}.big"}]}
     c = comp(film(beats_over(idx, 12, make)), idx, voice(47.9))
-    assert c.meter["taste"]["sounds"][1] >= 80 and len(c.l1["sound"]) == 2
+    assert c.meter["taste"]["sounds"][1] >= 80 and len(c.l1["sound"]) == 4
     assert "EARNED" in c.meter_text and "SUPPLY class T" in c.meter_text
 
 
@@ -238,7 +254,7 @@ def test_a_sound_sits_under_the_voice():
     c = comp(text, idx, voice(14.0, db=-18.0))
     table, _ = S.sound_table()
     s = c.l1["sound"][0]
-    assert s["db"] + table["impact_1"]["hit_lufs"] <= -18.0 - 9.0 + 0.06          # class T: 9 dB under the voice
+    assert s["db"] + table["impact_1"]["hit_lufs"] <= -18.0 - 7.0 + 0.06          # class T: 7 dB under the voice (was 9 before round five)
     old = S.compile_score(text, index=idx, perception=voice(14.0, db=-18.0), govern=False).l1["sound"]
     assert not old or old[0]["db"] > s["db"]
 
@@ -324,10 +340,10 @@ def test_an_ask_with_a_number_raises_the_count_to_that_number_and_a_bind_to_a_be
     beats = [{"k": "b", "id": "b01", "w": f"0-{n - 1}", "job": "x", "pic": "main",
               "do": [{"g": "big", "t": f"EFFECT {j}", "for": "a2", "at": f"w{3 * j}", "d": 20} for j in range(6)]}]
     c = _with_asks(film(beats), idx, [{"id": "a2", "said": "make some effects", "probe": "design_items", "min": 3}])
-    assert c.meter["taste"]["allow"]["display"] == 2 and c.meter["taste"]["kept"]["display"] == [3, 6]
+    assert c.meter["taste"]["allow"]["display"] == 3 and c.meter["taste"]["kept"]["display"] == [3, 6]
     beats[0]["do"] = [{"g": "big", "t": f"EFFECT {j}", "for": f"w{3 * j}", "at": f"w{3 * j}", "d": 20} for j in range(6)]
     c = _with_asks(film(beats, extra=[{"k": "bind", "ask": "a2", "to": ["b01"]}]), idx, [{"id": "a2", "said": "make some effects", "probe": "design_items", "min": None}])
-    assert c.meter["taste"]["kept"]["display"] == [2, 6] and not c.meter["taste"]["bound"]
+    assert c.meter["taste"]["kept"]["display"] == [3, 6] and not c.meter["taste"]["bound"]
 
 
 def _with_asks(text, idx, asks, perc=None):
@@ -404,7 +420,7 @@ def test_style_cards_are_the_ones_this_footage_can_supply():
     assert many and "P1" not in many and set(many) <= {"P6", "M8", "P2"}
     assert taste.reach(per, [], 32.8) == 0 and taste.reach(per, [{}] * 16, 32.8) > 5
     txt = "\n".join(brief.supply_part(idx, per, []))
-    assert "class T" in txt and "sounds 1" in txt
+    assert "class T" in txt and "sounds 3" in txt
 
 
 def test_band_distance_reads_new_pictures_not_crops():
@@ -679,7 +695,7 @@ def test_no_ten_second_window_holds_two_sounds_on_a_take():
         return {"pic": "main", "do": [{"g": "big", "t": f"WORD {k}", "for": f"w{a}", "at": f"w{a}", "d": 30}], "snd": [{"s": ("impact_1", "whoosh_soft_1", "pop_1")[k % 3], "for": f"b{k + 1:02d}.big"}]}
     c = comp(film(beats_over(idx, 14, make)), idx, voice(47.9))
     at = sorted(s["event_f"] for s in c.l1["sound"])
-    assert len(at) == 2 and at[1] - at[0] >= 10 * 30
+    assert len(at) == 4 and all(b - a >= 10 * 30 for a, b in zip(at, at[1:]))
 
 
 def test_the_look_can_send_a_found_picture_back_to_the_take():

@@ -18,7 +18,7 @@ MAX_SOURCE_S = 180.0
 # Seconds from the First cut job's start. landed-to-first-result stays within 1.3 x 253 = 329 s:
 # analysis of a clip under 3 minutes is 54-70 s, the render about 65-110 s. See director/first-result.
 DEADLINE_S = 150.0
-SCOUT_S, SUPPLY_S = 20.0, 36.0     # supply: 8 s of it is the look every Bin picture passes (lane B, 12 Nov), 5 s the fetch (13 Nov)
+SCOUT_S, SUPPLY_S = 22.0, 44.0     # supply: the look every Bin picture passes (lane B, 12 Nov), the fetch (13 Nov), and since round five up to 14 pictures a film
 FILM_USD = 0.70            # what one film may spend: the dearest slice run was $0.56, and a Look and a Scout are under a cent
 DEFAULTS = {"mode": "off", "percent": 100, "test_user_ids": [], "deadline_s": DEADLINE_S, "max_source_s": MAX_SOURCE_S, "film_usd": FILM_USD,
             "models": {"scout": "claude-haiku-5-5", "direct": "claude-opus-5-5"}, "effort": {"direct": "low"},

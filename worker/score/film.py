@@ -135,7 +135,25 @@ def last_look(ctx, worker_db, job, started, spend, trial_scope):
             return None
         what = taste.verdict_of(v)
         rec.update(verdict=v, decision=what, usd=round(usd, 5), look_s=round(time.monotonic() - t0, 1))
-        if what == "film":
+        v = v or {"pairs": 0, "upload": 0, "remove": [], "why": []}        # no verdict: the film stands, and footage may still join it
+        # The full film: real footage that arrived while the quick film was written and rendered takes the place of
+        # the stills of the same subjects, in the same render the look may ask for. Never waited for.
+        full = None
+        if what != "floor":
+            try:
+                full = footage_into(work, st["text"], st.get("footage"), st.get("acquire"))
+            except Exception as exc:  # noqa: BLE001 - the quick film stands
+                rec["footage_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+        if full is not None:
+            st["text"], rows = full
+            st["bin_doc"] = dict(st.get("bin_doc") or {}, items=list((st.get("bin_doc") or {}).get("items") or []) + rows)
+            rec["footage"] = {"clips": len(rows), "seconds": (st.get("footage") or {}).get("seconds"),
+                              "sources": sorted({str(r.get("page")) for r in rows})[:8]}
+        elif st.get("footage") is not None:
+            fb = st["footage"]
+            rec["footage"] = {"clips": 0, "why": fb.get("error") or ("not there yet" if "offers" not in fb else "none found, or no still of its subject in the film"),
+                              "report": [r for r in fb.get("report") or [] if isinstance(r, dict) and any(k.startswith("footage") for k in r)][:3]}
+        if what == "film" and full is None:
             return None
         # What the look named goes, at the floor too: every frame it judged is then the upload's own or better, and
         # what stood on the others stays. Only when nothing it can name explains a floor, or what is left is the
@@ -143,14 +161,20 @@ def last_look(ctx, worker_db, job, started, spend, trial_scope):
         # screen and runs today's chain in the same job. The plain floor film is no longer anyone's first film
         # (rated under the cut it replaced, 13 Nov).
         comp2 = None
-        if v["remove"]:
+        if v["remove"] and what != "film":
             text = taste.cut_text(st["text"], v["remove"])
             comp2 = compiler.compile_score(text, work_dir=work)
             if comp2.json() == comp.json():            # it named only what the customer asked for, or the caption
                 comp2 = None
+        elif full is not None:
+            comp2 = compiler.compile_score(st["text"], work_dir=work)
+            if comp2.json() == comp.json():
+                comp2 = None
         if comp2 is None and what != "floor":
             rec["decision"] = "film"
             return None
+        if full is not None and comp2 is not None:
+            rec["decision"] = what = "full" if what == "film" else what
         if comp2 is None or bare(comp2):
             start = st.get("start_edl")
             back = ctx.apply_score(start, "the First cut starts again from the upload") if start is not None else ""
@@ -338,6 +362,7 @@ def _publish(ctx, worker_db, edl, locals_, bin_doc, original_key):
         if k.startswith("sound:") and k not in keys:
             keys[k] = motion_tools.ensure_library_asset(ctx, k[6:])
             music_gate.grant_sfx(ctx, keys[k])
+    _publish_bed(ctx, worker_db, edl)
     missing = set()
     for lane in ("overlays", "inserts"):
         for it in edl.get(lane) or []:
@@ -356,6 +381,46 @@ def _publish(ctx, worker_db, edl, locals_, bin_doc, original_key):
     return edl
 
 
+BED_WAIT_S = 10.0          # how long the write waits for a chosen track to reach the project; past it the film goes out dry
+
+
+def _publish_bed(ctx, worker_db, edl):
+    """The bed's local key becomes the project's own music asset (the library copy, with its licence and credit). A
+    track that is not in storage in time, or any fault, takes the bed and its drop out of this film: it is written
+    dry, exactly as before round five, and never waits on music."""
+    music = edl.get("music") or []
+    if not music:
+        return
+    from . import bed
+    st = getattr(ctx, "director_state", None) or getattr(ctx, "director_bed", None) or {}
+    work = st.get("work")
+    doc = bed.chosen(work) if work else None
+    key, err = None, "no chosen bed on file"
+    if doc:
+        box = {}
+
+        def run():
+            try:
+                box["got"] = bed.project_asset(ctx, worker_db, doc)
+            except Exception as exc:  # noqa: BLE001
+                box["got"] = (None, f"{type(exc).__name__}: {str(exc)[:160]}")
+        import threading
+        th = threading.Thread(target=run, name="film-bed-asset", daemon=True)
+        th.start()
+        th.join(BED_WAIT_S)
+        key, err = box.get("got") or (None, f"the track was not in the project after {BED_WAIT_S:.0f} s")
+    if key:
+        for m in music:
+            m["storage_key"] = key
+        return
+    print(f"[director] the film goes out without its bed: {str(err)[:200]}", flush=True)
+    edl["music"] = []
+    edl["fx"] = [f for f in edl.get("fx") or [] if f.get("stage") != "music_bus"]
+    if work:
+        bed.unset(work, err)
+    ctx.director_bed_fell = str(err)[:200]
+
+
 def _applied(rep, l1, bin_doc):
     """What the reply names, from the film's own counts."""
     c = rep.get("counts") or {}
@@ -372,7 +437,152 @@ def _applied(rep, l1, bin_doc):
         out.append("titles")
     if c.get("sfx"):
         out.append("sound on its key moments")
+    if rep.get("bed"):
+        out.append("a music bed you can keep or remove")
     return out or ["a directed cut"]
+
+
+# ------------------------------------------------------------------ real footage: the quick film, then the full one
+
+def footage_start(job, work, sc, per):
+    """Real footage of the people, places and events the film names (lane FOOT's engine, worker/footage), found on
+    a thread beside Supply, Direct and the first render. The engine takes minutes and the first film has a deadline,
+    so the film is written without waiting for it (the quick film). When its clips are there by the time the last
+    look has read the film, they take the place of the stills of the same subjects and the film is rendered once
+    more (the full film): `footage_into`. Only for an account the footage switch opens (app_kv footage, the owner's
+    decision; off by default, and then nothing here runs). Returns the box the thread fills, or None."""
+    try:
+        import footage.seam as seam
+        import footage.switch as switch
+        uid = job.get("user_id")
+        if not switch.allowed("customer", uid, seam.customer_cfg()):
+            return None
+        wishes = [dict(w) for w in (sc or {}).get("wishes") or [] if isinstance(w, dict) and not w.get("mine")]
+        if not wishes:
+            return None
+        import threading
+        import broll_source
+        from . import supply
+        box = {"t0": time.monotonic(), "wishes": wishes, "report": []}
+        about = str((sc or {}).get("about") or "")
+        W, H = (1080, 1920) if int((per or {}).get("H") or 16) >= int((per or {}).get("W") or 9) else (1920, 1080)
+
+        def run():
+            try:
+                subjects, usd = supply.name_wishes(work, wishes, about)
+                box["usd"] = float(usd or 0.0)
+                if any(subjects):
+                    box["offers"] = seam.bin_offers(work, wishes, subjects, time.monotonic() + 3600.0, box["report"], about, uid, W, H)
+                else:
+                    box["offers"] = []
+            except Exception as exc:  # noqa: BLE001 - the film stands on what Supply found
+                box["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+                box.setdefault("offers", [])
+            box["seconds"] = round(time.monotonic() - box["t0"], 1)
+        th = threading.Thread(target=broll_source.carried(run), name="film-footage", daemon=True)
+        th.start()
+        box["thread"] = th
+        return box
+    except Exception as exc:  # noqa: BLE001
+        print(f"[director] footage not started: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
+        return None
+
+
+def footage_into(work, text, box, acquire, most=8):
+    """The Score with real footage in it, or None when there is none to add. Each clip the engine cut (checked there:
+    it shows its subject, and a person's clips are held to that person's face) joins the Bin with its source and
+    credit, and takes the place of one still of the same moment in the film: the same cut, the same length, now a
+    moving picture of the real thing. Nothing else in the Score changes, no model is called, and a moment the film
+    showed no picture for gets none. Returns (score text, [new Bin rows])."""
+    from . import compiler, direct
+    offers = [c for c in (box or {}).get("offers") or [] if isinstance(c, dict) and c.get("kind") == "video"]
+    if not offers:
+        return None
+    try:
+        with open(os.path.join(work, "bin.json"), encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return None
+    items = doc.get("items") or []
+    wishes = box.get("wishes") or []
+    # A clip takes the place of a still of the same subject (the Bin names it in `named`), or of the same moment (the
+    # Bin names the words it lands on in `for`): the film opens on a photograph of the driver, the clip is that driver.
+    def name_of(x):
+        return "n:" + str(x).strip().casefold() if x else None
+    by_for = {}
+    for c in offers:
+        w = wishes[c["_wish"]] if isinstance(c.get("_wish"), int) and 0 <= c["_wish"] < len(wishes) else {}
+        moment = "f:" + (f"w{w.get('w')}" if w.get("w") else str(w.get("at")))
+        for key in (name_of(c.get("named")), moment):
+            if key and c not in by_for.setdefault(key, []):
+                by_for[key].append(c)
+    stills = {}
+    for it in items:
+        if it.get("provider") == "footage" or it.get("kind") == "video":
+            continue                                   # a clip that already moves keeps its place
+        key = next((k for k in (name_of(it.get("named")), "f:" + str(it.get("for"))) if k in by_for), None)
+        if key:
+            stills.setdefault(key, []).append(f"bin:{it['id']}")
+    lines, _bad = compiler.parse_score(text)
+    lines = [direct.clean(o) for o in lines]
+    used, rows, swapped = {}, [], 0
+
+    def clip_for(key):
+        """The next clip of this moment as a Bin row, acquired once."""
+        pool = by_for.get(key) or []
+        n = used.get(key, 0)
+        if not pool:
+            return None
+        c = pool[n % len(pool)]
+        used[key] = n + 1
+        if c.get("_row") is None:
+            if len(rows) >= most:
+                return None
+            got = acquire(c)
+            if not got or not got.get("storage_key"):
+                c["_row"] = False
+                return None
+            iid = len(items) + len(rows)
+            rel = f"bin/{iid}.jpg"
+            try:
+                c["_img"].convert("RGB").save(os.path.join(work, rel), quality=90)
+            except Exception:  # noqa: BLE001 - a clip with no frame to stand for it is not cut in
+                c["_row"] = False
+                return None
+            c["_row"] = dict(id=iid, kind="video", path=rel, w=got.get("w") or c.get("width"), h=got.get("h") or c.get("height"), storage_key=got["storage_key"],
+                             dur=round(float(got.get("dur") or c.get("duration_s") or 0), 2), fps=got.get("fps"),
+                             what=f"{c.get('named')}: {c.get('shows') or ''}".strip(": "), wish=None, **{"for": key[2:], "class": "F"},
+                             licence=c.get("license"), licence_url=c.get("page_url"), provider="footage", author=c.get("credit"), page=c.get("page_url"),
+                             named=c.get("named"), shows=c.get("shows"), footage=c.get("footage"))
+            rows.append(c["_row"])
+        return f"bin:{c['_row']['id']}" if c["_row"] else None
+
+    def swap(ref):
+        nonlocal swapped
+        name = ref if isinstance(ref, str) else ref.get("src") if isinstance(ref, dict) else None
+        if not isinstance(name, str):
+            return ref
+        head = name.split("@")[0]
+        key = next((k for k, v in stills.items() if head in v), None)
+        if key is None:
+            return ref
+        new = clip_for(key)
+        if new is None:
+            return ref
+        swapped += 1
+        return new if isinstance(ref, str) else dict({k: v for k, v in ref.items() if k not in ("crop", "zoom", "cam")}, src=new)
+    for o in lines:
+        if o.get("k") == "b" and o.get("pic") is not None:
+            o["pic"] = [swap(r) for r in o["pic"]] if isinstance(o["pic"], list) else swap(o["pic"])
+        elif o.get("k") == "pics" and isinstance(o.get("of"), list):
+            o["of"] = [swap(r) for r in o["of"]]
+    if not swapped or not rows:
+        return None
+    doc["items"] = items + rows
+    doc["credits"] = list(doc.get("credits") or []) + [f"{r['what']}: {r['author'] or 'footage'}, {r['licence']}, {r['page']}" for r in rows]
+    with open(os.path.join(work, "bin.json"), "w") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=1)
+    return direct.dump(lines), rows
 
 
 # ------------------------------------------------------------------ the film
@@ -481,9 +691,18 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
         sc = None
     _stage(rec, "scout", t)
 
+    foot = footage_start(job, work, sc, per) if sc is not None else None      # None unless the footage switch opens this account
     rec["at"] = "supply"
     t = time.monotonic()
     _say(ctx, worker_db, "director_supply", "Finding pictures for it")
+    bed_th = None
+    try:                     # the film's bed is chosen beside Supply, and its audio starts on its way into storage (score.bed)
+        from . import bed
+        ctx.director_bed = {"work": work}
+        if bed.available():
+            bed_th = bed.start(work, sc, per, index, min(deadline - 80.0, time.monotonic() + 12.0), cfg["models"]["scout"], fetch=bed.fetch_library)
+    except Exception as exc:  # noqa: BLE001 - no bed, the film is written dry
+        rec["bed_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
     bin_doc = None
     if sc is not None:       # with no wish too: the hook picture of a talking film and a wordless upload's own details are found here
         try:
@@ -494,6 +713,11 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
             rec["supply_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
     _stage(rec, "supply", t)
 
+    if bed_th is not None:
+        bed_th.join(max(0.0, min(3.0, deadline - 75.0 - time.monotonic())))      # long done by now; a late pick only means this film is dry
+        if bed_th.is_alive():
+            from . import bed
+            bed.unset(work, "the pick was late")
     rec["at"] = "direct"
     t = time.monotonic()
     _say(ctx, worker_db, "director_direct", "Directing your film")
@@ -520,9 +744,18 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
         raise Fall("direct", "nothing stood: the film is the upload again but for its colour")
     rec["at"] = "lower"
     t = time.monotonic()
+    try:                     # the stretch of the chosen track, its level and its drop, on the film as compiled
+        from . import bed, compiler
+        got = bed.settle(work, comp, index, compiler.parse_score(text)[0], str((sc or {}).get("about") or ""))
+        rec["bed"] = {k: got.get(k) for k in ("cid", "title", "kind", "gain_db", "offset_s", "turn_s", "chosen_by")} if got else None
+    except Exception as exc:  # noqa: BLE001
+        rec["bed_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
     edl, locals_, rep = lower.lower(comp.l1, work)
-    rec["lower"] = {k: rep.get(k) for k in ("counts", "burns_as_light", "burns_as_glow", "missing_pictures", "fonts_replaced")}
+    rec["lower"] = {k: rep.get(k) for k in ("counts", "burns_as_light", "burns_as_glow", "missing_pictures", "fonts_replaced", "bed", "bed_error")}
     edl = _publish(ctx, worker_db, edl, locals_, bin_doc, original["storage_key"])
+    if getattr(ctx, "director_bed_fell", None):
+        rec["bed_fell"], ctx.director_bed_fell = ctx.director_bed_fell, None
+        rep.pop("bed", None)
     _stage(rec, "lower", t)
 
     rec["at"] = "write"
@@ -533,7 +766,8 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
     rec["at"] = "written"
     rec["taste"] = usage.get("taste")
     # what the last look needs once the preview is on screen (last_look closes it)
-    ctx.director_state = {"work": work, "text": text, "comp": comp, "edl": edl, "bin_doc": bin_doc, "original_key": original["storage_key"], "cfg": cfg}
+    ctx.director_state = {"work": work, "text": text, "comp": comp, "edl": edl, "bin_doc": bin_doc, "original_key": original["storage_key"], "cfg": cfg,
+                          "footage": foot, "acquire": _acquirer(ctx, worker_db, job, work) if foot else None}
     if flags.engine_mode(cfg, job.get("user_id")) != "off":
         _keep_scene_plan(ctx, comp.l1, work, rec)
     applied = _applied(rep, comp.l1, bin_doc)

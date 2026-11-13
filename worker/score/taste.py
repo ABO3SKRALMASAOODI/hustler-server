@@ -83,23 +83,31 @@ def _count(rate, dur_s, least=0):
 
 
 def allow(sup, calm=False):
-    """What a film of this supply class carries when the customer asked for nothing of the kind."""
+    """What a film of this supply class carries when the customer asked for nothing of the kind.
+
+    Round five (13 Nov, the owner's judge): the rates follow the @metromedia.house reels on the same supply
+    (judge/metromedia/TEARDOWN.md: 3.6 audible sounds per 10 s about 3 dB under the voice over a bed, display type
+    on 17% of shots, 0.8 white frames and 0.74 polarity flips per 10 s), and a film now carries a bed (score.bed),
+    so the bed rows are the ones in use. What stays from the governor is the law, not the old numbers: a device
+    is earned by an event, and how many a film carries follows how often its picture changes. The hard camera
+    step on a take stays rare (the references' takes carry none at the median); what moves a take is eased
+    (score.move), outside this count."""
     c, n, d, bed = sup["cls"], sup["np10"], sup["dur_s"], sup["bed"]
     k = 0.5 if calm else 1.0
     cam = {"T": 0.3, "M": 1.0, "L": 0.25}.get(c, min(0.25 * n, 7.5))
-    snd = {"T": 1.5 if bed else 0.6, "M": 2.5 if bed else 1.5, "L": 1.2}.get(c, min(0.9 * n, 8.0 if bed else 6.0))
-    disp = {"T": 2.0, "M": 4.0, "P": 10.0, "L": 1.0}[c]
+    snd = {"T": 2.0 if bed else 1.0, "M": 3.0 if bed else 2.0, "L": 1.2}.get(c, min(0.9 * n, 8.0 if bed else 6.0))
+    disp = {"T": 3.0, "M": 5.0, "P": 10.0, "L": 1.0}[c]
     cards = {"T": 1.5, "M": 3.0, "P": 6.0, "L": 1.0}[c]
     if c == "T":
-        flashes = 1 if d < 20 else _count(0.3 * k, d, 1)
+        flashes = 1 if d < 20 else _count(0.5 * k, d, 1)
     else:
-        flashes = _count({"M": 1.0, "P": 3.0, "L": 0.2}[c] * k, d, 0)
+        flashes = _count({"M": 1.5, "P": 3.0, "L": 0.2}[c] * k, d, 0)
     return {"camera": _count(cam * k, d, 1), "sounds": _count(snd * k, d, 1), "display": _count(disp * k, d, 1),
             "cards": _count(cards * k, d, 0), "flashes": flashes,
             # in any 10 s: never more than the whole of the rate, and always room for one
-            "sounds_10s": max(1, int(snd * k)), "flashes_10s": max(1, int({"T": 0.3, "M": 1.0, "P": 3.0, "L": 0.2}[c] * k)),
-            "seats": {"T": 2, "M": 3, "P": 3, "L": 2}[c], "roles": {"T": 3, "M": 3, "P": 4, "L": 2}[c],
-            "under_voice_db": {"T": 9.0, "M": 6.0, "P": 4.5, "L": 12.0}[c],
+            "sounds_10s": max(1, int(snd * k)), "flashes_10s": max(1, int({"T": 0.5, "M": 1.5, "P": 3.0, "L": 0.2}[c] * k)),
+            "seats": {"T": 2, "M": 3, "P": 3, "L": 2}[c], "roles": {"T": 3, "M": 4, "P": 4, "L": 2}[c],
+            "under_voice_db": {"T": 7.0, "M": 5.0, "P": 4.0, "L": 12.0}[c],
             "hold_s": {"T": 1.5, "M": 1.2, "P": 0.4, "L": 3.0}[c],
             "display_hold_s": {"T": 0.8, "M": 0.8, "P": 0.4, "L": 1.5}[c],
             "pages": c in ("T", "M"), "kinds": DEVICE_KINDS[c]}
@@ -161,10 +169,14 @@ def has_bed(ctx):
 
 
 def supply(ctx):
+    """How often the picture changes, and whether a bed plays under the film: the upload's own track, or the one
+    the film is given after the Score is written (score.bed, 13 Nov)."""
+    from . import bed as bedlib
     dur = ctx.dur_f / ctx.fps
     np_ = len(picture_changes(ctx))
     np10 = np_ / max(dur, 1e-3) * 10
-    return {"dur_s": round(dur, 2), "np": np_, "np10": round(np10, 2), "cls": klass(np10, dur), "bed": has_bed(ctx)}
+    own = bedlib.own_track((ctx.perc.get("audio") or {}).get("rms_db"), len(ctx.words), ctx.src_dur)
+    return {"dur_s": round(dur, 2), "np": np_, "np10": round(np10, 2), "cls": klass(np10, dur), "bed": bool(has_bed(ctx) or bedlib.planned(ctx)), "own_bed": bool(own)}
 
 
 def reach(per, bin_items, dur):
@@ -1096,9 +1108,9 @@ LOOK_SYSTEM = """You are the last look before a film goes back to the person who
 
 Look at each pair the way the person who made the upload would, and then the way a stranger scrolling past would. An edit is meant to add things: a title that says what this is, a picture of the very thing being named, a caption, a card, a number. Judge each added thing by what it does on the frame.
 
-It earns its place when a stranger reads it at once and it says or shows what is being said at that moment. A found picture that takes the frame is a cutaway: an editor cuts from the person talking to the very person, thing or place they name, for a second or two, and comes back. The list says what each found picture shows; check it with your own eyes. When the picture is the very thing the words on that pair name, and it is a real, sharp picture, the cutaway stands and the pair is "film", although the person is off screen for that second. A designed picture made of the words (a number, two sides, a list) stands when it is clean and says only what was said. A title page that opens the film for a second, or a page that holds one term for a second, stands when its type is clean and says what the person is saying: it is how an edited film announces itself, and the person is back at once.
+It earns its place when a stranger reads it at once and it says or shows what is being said at that moment. A found picture that takes the frame is a cutaway: an editor cuts from the person talking to a picture for a second or two, and comes back. Two kinds stand. The very person, thing or place the words name. And a picture of what the words mean, which the list marks as an association: a cheetah at full run for "no plan B", dominoes falling for "it collapsed"; it stands when a stranger gets the link at once, with one clear subject and nothing to explain. The list says what each found picture shows; check it with your own eyes. When the picture is one of those two and it is a real, sharp, well-shot picture, the cutaway stands and the pair is "film", although the person is off screen for that second. A fast film cuts to many such pictures: how many there are is never the fault, only whether each one lands. A designed picture made of the words (a number, two sides, a list) stands when it is clean and says only what was said. A title page that opens the film for a second, or a page that holds one term for a second, stands when its type is clean and says what the person is saying: it is how an edited film announces itself, and the person is back at once.
 
-It does not earn it when it covers a face or the thing the video is about, sits where the platform's own buttons or captions go, repeats words already printed on the same frame, cannot be read against what is behind it, is too small to read on a phone, crops a head or a printed word, or is simply there: a flash, a sticker, a zoom, a coloured page with no reason in the picture. A found picture does not earn it when it is only loosely like the words: a mood, a metaphor, a generic library scene, a lookalike of the customer's own product or person, a picture whose subject the words never name, or one that is blurred, watermarked or cropped past reading.
+It does not earn it when it covers a face or the thing the video is about, sits where the platform's own buttons or captions go, repeats words already printed on the same frame, cannot be read against what is behind it, is too small to read on a phone, crops a head or a printed word, or is simply there: a flash, a sticker, a zoom, a coloured page with no reason in the picture. A found picture does not earn it when it is a generic library scene that says nothing by itself (an office, a handshake, a laptop, a skyline), when it matches one word but not what the sentence means, when the link to the words has to be explained, when it is a lookalike of the customer's own product or person, or when it is blurred, watermarked or cropped past reading.
 
 For each pair answer "film" when what was added makes this moment better than the upload left alone, "upload" when the upload's own frame is better without it, and "same" when nothing was added and the two frames show the same thing.
 
@@ -1233,7 +1245,8 @@ def bin_whats(work):
     """Bin id -> what the supply says the picture shows, for the look's list."""
     try:
         with open(os.path.join(work, "bin.json"), encoding="utf-8") as f:
-            return {f"bin:{it['id']}": str(it.get("what") or "")[:90] for it in (json.load(f).get("items") or []) if it.get("what")}
+            return {f"bin:{it['id']}": str(it.get("what") or "")[:90] + (" (an association: a picture of what the words mean, not the thing named)" if it.get("how") == "like" else "")
+                    for it in (json.load(f).get("items") or []) if it.get("what")}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return {}
 
@@ -1271,13 +1284,21 @@ def read_look(text, n, known):
     return {"pairs": len(pairs[:n]), "upload": upload, "remove": remove, "why": why}
 
 
+CUT_PAIRS = 2          # frames of six that must lose to the upload before the film is rendered a second time
+
+
 def verdict_of(v):
-    """film: it goes out. cut: it goes out without what was named. floor: four of six for the upload, the plain film."""
+    """film: it goes out. cut: it goes out without what was named. floor: four of six for the upload.
+
+    One render, not two (13 Nov: the first live film reached its customer about six minutes after the upload, 64 s
+    of that a second render for one label the look named). A film is cut and rendered again only when a third of
+    its frames lose to the upload; one named device on one frame stands, as the Bin's own check and the compiler's
+    seats already passed it. What the look named is still on the job record."""
     if v is None:
         return "film"
     if v["upload"] * 6 >= 4 * max(1, v["pairs"]):
         return "floor"
-    return "cut" if v["remove"] or v["upload"] else "film"
+    return "cut" if v["upload"] >= CUT_PAIRS and (v["remove"] or v["upload"]) else "film"
 
 
 def look_ids(comp):

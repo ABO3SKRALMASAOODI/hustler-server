@@ -126,6 +126,33 @@ class Bake:
             Image.fromarray(np.clip(a0 * (1 - rad) + a1 * rad + noise + 0.5, 0, 255).astype(np.uint8)).save(p, optimize=False)
         return self.done(key, p)
 
+    def fill(self, still, pl, W, H):
+        """The plate under a photograph that is set whole on it: the photograph itself, covering the frame, far out of
+        focus and brought down to the plate's own darkness. A wide still on flat black left three quarters of a
+        vertical frame empty (rated "cards on a dark page", 13 Nov); this is how an editor fills that frame. Type on
+        it was solved for the dark plate, so the fill never comes up past it by more than a shade. Returns a key, or
+        None when the still cannot be read (the flat plate stands)."""
+        c0 = pl.get("c0") or "#0B0B0D"
+        try:
+            st = os.stat(still)
+            key, p = self.path("fill", os.path.basename(still), st.st_size, c0, W, H)
+            if not os.path.exists(p):
+                sw, sh = 216, max(2, int(round(216 * H / W)))
+                im = Image.open(still).convert("RGB")
+                k = max(sw / im.width, sh / im.height)
+                im = im.resize((max(sw, int(im.width * k + 0.5)), max(sh, int(im.height * k + 0.5))), Image.BILINEAR)
+                x0, y0 = (im.width - sw) // 2, (im.height - sh) // 2
+                im = im.crop((x0, y0, x0 + sw, y0 + sh)).filter(ImageFilter.GaussianBlur(11))
+                a = np.asarray(im, np.float32)
+                base = np.array([int(c0.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)], np.float32)
+                yy, xx = np.mgrid[0:sh, 0:sw].astype(np.float32)
+                rad = np.clip(np.hypot((xx - sw / 2) / (sw * 0.8), (yy - sh * 0.42) / (sh * 0.75)), 0, 1)[..., None]
+                out = (a * 0.34 + base * 0.5) * (1.0 - 0.45 * rad ** 2)
+                Image.fromarray(np.clip(out + 0.5, 0, 255).astype(np.uint8)).resize((W // 2, H // 2), Image.BICUBIC).save(p, optimize=False)
+            return self.done(key, p)
+        except Exception:  # noqa: BLE001 - the flat plate stands
+            return None
+
     def glow(self):
         """A soft white light, alpha only where it shines. Placed and scaled as an overlay."""
         key, p = self.path("glow", 1)
@@ -344,15 +371,37 @@ def base_window(l1):
     return [0.5 - wb / 2, 0.5 - hb / 2, 0.5 + wb / 2, 0.5 + hb / 2], frame
 
 
+def key_frames(rows, most=KF_MAX, tol=0.0012):
+    """Which frames of a camera track to keep as waypoints so straight lines between them stay on it: the ends, then
+    the frame farthest off its line, until none is off by more than `tol` (of the frame) or `most` are kept. An eased
+    move is fast in and slow to rest: eight even samples drew it as one straight ramp."""
+    n = len(rows)
+    if n <= 2:
+        return list(range(n))
+    keep = [0, n - 1]
+    while len(keep) < most:
+        worst, at = tol, None
+        for p, q in zip(keep, keep[1:]):
+            for i in range(p + 1, q):
+                u = (i - p) / (q - p)
+                d = max(abs(rows[i][k] - (rows[p][k] + (rows[q][k] - rows[p][k]) * u)) for k in range(len(rows[i])))
+                if d > worst:
+                    worst, at = d, i
+        if at is None:
+            break
+        keep = sorted(keep + [at])
+    return keep
+
+
 def zoom_of(it, a, b, fps, zid, win=(0.0, 0.0, 1.0, 1.0)):
     """A crop of the live take is the camera, on the picture as the renderer frames it (`win`)."""
     crops = it.get("crop")
     if isinstance(crops[0], (list, tuple)):
         n = len(crops)
-        ix = sorted({0, n - 1, *[int(round(i * (n - 1) / 7)) for i in range(8)]})
+        crops = [in_window(c, win) for c in crops]
+        ix = key_frames([[(c[0] + c[2]) / 2, (c[1] + c[3]) / 2, 1 / max(c[2] - c[0], 1e-3)] for c in crops])
     else:
-        crops, n, ix = [crops, crops], 2, [0, 1]
-    crops = [in_window(c, win) for c in crops]
+        crops, n, ix = [in_window(crops, win)] * 2, 2, [0, 1]
     pts = []
     for i in ix:
         c = crops[i]
@@ -398,7 +447,13 @@ def lower_pictures(l1, work, bake, rep):
         if pic == "plate" or asset is None:
             if pic != "plate":
                 rep.setdefault("missing_pictures", []).append(pic)
-            ov.update(asset_key=bake.plate(it.get("plate") or {}, W, H), kind="image")
+            key = None
+            framed = assets.get(it.get("framed")) if pic == "plate" and it.get("framed") else None
+            if framed and framed.get("kind") == "image" and framed.get("path"):
+                key = bake.fill(os.path.join(work, framed["path"]), it.get("plate") or {}, W, H)
+                if key:
+                    rep["filled_plates"] = rep.get("filled_plates", 0) + 1
+            ov.update(asset_key=key or bake.plate(it.get("plate") or {}, W, H), kind="image")
         else:
             key = "main" if pic == "main" else pic
             bake.locals[key] = os.path.join(work, asset["path"])
@@ -804,7 +859,11 @@ def lower_script_type(l1, bake, rep):
         if isinstance(it.get("op"), list) and min(it["op"]) < 0.5:        # a ghost word lands when its ink does
             a = it["f"][0] + next((i for i, v in enumerate(it["op"]) if v >= 0.9), 0)
         v = l1["voices"].get(it["v"]) or {}
-        key, wf, cx, cy = bake.type_line(it["t"], v, it.get("ink"), W)
+        try:
+            key, wf, cx, cy = bake.type_line(it["t"], v, it.get("ink"), W)
+        except Exception:  # noqa: BLE001 - no file for this script's face on this host: the line is left out and named, the film is written
+            rep.setdefault("script_type_dropped", []).append(gid)
+            continue
         x = float(it["x"][-1] if isinstance(it["x"], list) else it["x"])
         y = float(it["y"][-1] if isinstance(it["y"], list) else it["y"])
         out.append({"id": f"st.{gid}"[:60], "asset_key": key, "kind": "image", "start": r2(a / fps), "duration_s": r2(max((b - a) / fps, OV_MIN_S)),
@@ -992,6 +1051,15 @@ def lower(l1, work):
            "inserts": inserts, "captions": lower_captions(l1, rep, src_dur), "sfx": sfx, "overlays": overlays + pool_ov + cards + script_type,
            "texts": lower_texts(l1, rep, runs), "vectors": vectors, "fx": tr_fx + flash_fx, "effects": effects, "master": {"loudness": "social"}}
     edl["texts"] += rep.pop("_cap_texts", [])
+    try:                              # the film's bed (score.bed): the chosen track under the whole programme, its drop on the turn
+        from . import bed
+        music, bed_fx = bed.items(work, lim)
+        if music:
+            edl["music"] = music
+            edl["fx"] = edl["fx"] + bed_fx
+            rep["bed"] = {"cid": music[0]["storage_key"].split(":", 1)[-1], "gain_db": music[0]["gain_db"], "drop": bool(bed_fx)}
+    except Exception as e:  # noqa: BLE001 - a film is never lost to its music
+        rep["bed_error"] = f"{type(e).__name__}: {str(e)[:160]}"
     if look:
         # the keyed tone grades the take's own stream; a cutaway takes plain windows only (renderer.cutaway_look_chain).
         # A film that cuts its take in as a picture would come out in two colours, so that film goes without it
