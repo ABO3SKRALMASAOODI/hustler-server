@@ -240,3 +240,43 @@ def test_a_head_is_slid_clear_of_the_sheet_when_the_picture_has_room():
     left = (face[0] - c[0]) / (c[2] - c[0])
     assert top >= 0.24 - 1e-3 or left >= 0.46 - 1e-3
     assert abs((c[2] - c[0]) - 0.6) < 1e-4 and abs((c[3] - c[1]) - 0.7) < 1e-4  # the framing keeps its size: it slides
+
+
+def test_a_podcast_cut_keeps_the_take_as_spine_and_cuts_away_on_what_is_named(tmp_path):
+    """The footage cut on synthetic supply: the engine accepts the scene, every frame has one base picture, the
+    hook and the payoff are the speaker, wide footage plays in a window over itself, and taste passes."""
+    from PIL import Image
+    script = dict(title="The Deal He Passed On", segments=[
+        dict(say="So it was natural for him to come to me.", pictures=[]),
+        dict(say="He showed me UberCab, and I thought it was a great idea for the city.", pictures=["UberCab"]),
+        dict(say="Your biggest challenge is going to be the taxi commissions in every town.", pictures=["UberCab"]),
+        dict(say="Never came back to me.", pictures=["UberCab"])])
+    wj = words_for(script)
+    take = str(tmp_path / "take.jpg")
+    Image.new("RGB", (1920, 1080), (30, 30, 34)).save(take)
+    clips = []
+    for n in "abc":
+        p = str(tmp_path / f"{n}.jpg")                        # a still stands in for a clip file: the plan only needs its path to exist
+        Image.new("RGB", (1080, 608), (90, 120, 60)).save(p)
+        clips.append(dict(path=p, file=f"clips/{n}.mp4", seconds=1.5, subject="UberCab", w=1080, h=608, faces=[], shows="the app"))
+    sup = dict(sid="t", words=wj, narration=str(tmp_path / "none.wav"), ffmpeg="ffmpeg", pictures={"UberCab": [picture(str(tmp_path), "u1", 1600, 1200, (80, 80, 120))]},
+               footage=[dict(i=1, clips=clips[:2]), dict(i=2, clips=clips[2:])],
+               take=dict(path=take, w=1920, h=1080, fps=30.0, dur=wj["duration"], faces=[dict(box=[0.60, 0.2, 0.74, 0.5], eyes=[[0.64, 0.3], [0.70, 0.3]]),
+                                                                                   dict(box=[0.30, 0.5, 0.33, 0.56], eyes=[[0.31, 0.52], [0.32, 0.52]])]))
+    l1, beats = F.podcast_cut(script, sup, {})
+    cov = [0] * l1["dur_f"]
+    for it in l1["items"]:
+        if it["k"] == "shot":
+            for f in range(it["f"][0], it["f"][1]):
+                cov[f] += 1
+    assert set(cov) == {1}                                                   # one base picture on every frame
+    shots = sorted((i for i in l1["items"] if i["k"] == "shot"), key=lambda i: i["f"][0])
+    assert shots[0]["pic"] == "main" and shots[-1]["pic"] == "main"          # the hook and the payoff are his
+    assert all(i["pic"] == "main" for i in shots if i["f"][1] > beats["turn_f"] - 4)   # from the turn on, only him
+    wins = [p for p in beats["pictures"] if p.get("mode") == "window"]
+    assert wins and all(p["f"][0] >= int(1.2 * F.FPS) for p in beats["pictures"])
+    cards = [i for i in l1["items"] if i["k"] == "card" and i.get("pic") != "plate" and i.get("src")]
+    assert len(cards) == len(wins) and all(0.19 < c["y"] - c["h"] / 2 and c["y"] + c["h"] / 2 < beats["caption_y"] - 0.03 for c in cards)
+    assert 0.15 <= beats["cutaway_share"] <= 0.7
+    assert [x["text"] for x in beats["labels"]] == ["UberCab"]              # a named thing is labelled once
+    assert F.taste_check(l1, beats)["ok"], F.taste_check(l1, beats)["problems"]

@@ -327,7 +327,7 @@ def song_version(ctx, rd, sc):
     if not os.path.exists(out):
         wk = brand.worker_dir()
         # a narrated film's voice is not an upload: its workflow hands the scene with the narration as its spine (l1_audio)
-        cmd = (f"cd '{wk}' && PYTHONPATH=. FFMPEG_BIN='{brand.FF}' '{PY}' -m score.music mix --l1 '{sc.get('l1_audio') or sc['l1']}' --work '{ctx.supply}' "
+        cmd = (f"cd '{wk}' && PYTHONPATH=. FFMPEG_BIN='{brand.FF}' SCENE_CEIL_DBTP=-2.0 '{PY}' -m score.music mix --l1 '{sc.get('l1_audio') or sc['l1']}' --work '{ctx.supply}' "
                f"--song '{song}' --film '{rd['film']}' --out '{out}.part.mp4' --kind {SONG_KIND.get(ctx.workflow, 'stories')}")
         if (ctx.args or {}).get("song_vocals"):
             cmd += f" --vocals '{ctx.args['song_vocals']}'"

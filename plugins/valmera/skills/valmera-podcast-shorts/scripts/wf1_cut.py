@@ -35,6 +35,10 @@ import pictures as PX  # noqa: E402
 import wf1  # noqa: E402
 import wf3  # noqa: E402
 
+# wf1 reads the shell's own llm.py; the worker has an llm module of its own, and its OpenAI rung (score.call_openai)
+# imports it by that name. Left in sys.modules, the shell's would answer for it and every picture check would fail.
+sys.modules.pop("llm", None)
+
 STYLE = "footage-cut"
 
 
@@ -96,7 +100,9 @@ def supply(ctx, script):
                          f"never him as he looks today. Who is in it: {who}",
                    segments=[dict(say=s["text"], pictures=[]) for s in sents], named=[])
     wf3.given_footage(ctx, os.path.join(sup_dir, "footage"))
-    foot = chain.footage(ctx, dict(script=fscript), [round(float(s["t1"]) - float(s["t0"]) + 0.2, 2) for s in sents])
+    # cut wide, as shot (1080 x 608): a podcast's cutaways play in a window over the take, so an archive's small
+    # copy (the Wayback Machine's 360p) is never blown up to fill the phone
+    foot = chain.footage(ctx, dict(script=fscript), [round(float(s["t1"]) - float(s["t0"]) + 0.2, 2) for s in sents], W=1080, H=608)
     pack = dict(sid=ctx.sid, words=wj, narration=src, ffmpeg=PX.FF, sounds={}, pictures={}, credits=[], footage=[], title=script.get("title"))
     subjects, by_line = [], {}
     if foot:

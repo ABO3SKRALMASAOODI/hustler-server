@@ -558,6 +558,8 @@ def clause_starts(clock, seg, gap=0.22):
 def too_close(c):
     """A clip cut to the phone whose largest face is wider than 0.45 of the frame: a broadcast close-up, closer than
     any reference holds a head in a vertical film."""
+    if int(c.get("w") or W) > int(c.get("h") or H):
+        return False                                   # a clip kept wide plays in a window: its head is a share of the window
     return any((f["box"][2] - f["box"][0]) > 0.45 for f in c.get("faces") or [])
 
 
@@ -1809,6 +1811,7 @@ def cut_ins(script, clock, pics, footage, f_first, f_last, stress, aim_s=1.0, lo
         names = [n for n in s.get("pictures") or [] if pics.get(n) or any(c.get("subject") == n for c in clips)]
         names += [c["subject"] for c in clips if c.get("subject") and c["subject"] not in names]
         names = list(dict.fromkeys(names))
+        names.sort(key=lambda n: not any(c.get("subject") == n for c in clips))      # what was filmed comes before what was photographed
         if not names:
             continue
         bounds = [c for c in clause_starts(clock, i) if a + 6 <= c <= b - lo]
@@ -1821,8 +1824,11 @@ def cut_ins(script, clock, pics, footage, f_first, f_last, stress, aim_s=1.0, lo
                 cl = [c for c in bounds if at <= c <= said]
                 start = max(cl) if cl and said - max(cl) <= FPS else max(said - 3, at)
             else:
-                cl = [c for c in bounds if c >= at + (int(gap_s * FPS) if out and out[-1][1] > at - 2 else 0)]
-                start = cl[0] if cl else None
+                after = at + (int(gap_s * FPS) if out and out[-1][1] > at - 2 else 0)
+                cl = [c for c in bounds if c >= after]
+                # no clause to land on: after the sentence's first words, on the voice's strongest stress there
+                near = [(st, -f) for f, st in stress if max(after, a + int(0.35 * FPS)) <= f <= a + int(1.1 * FPS)]
+                start = cl[0] if cl else (-max(near)[1] if near else max(after, a + int(0.5 * FPS)))
             if start is None or budget < lo or b - start < lo:
                 continue
             if out and 0 < start - out[-1][1] < gap_s * FPS:           # the take would flash by: the picture before holds on
@@ -1892,7 +1898,7 @@ def podcast_cut(script, sup, direction=None):
             if c["path"] not in keys:
                 keys[c["path"]] = P.video(f"v{len(keys):02d}", c)
     f_voice_end = Clock.f(clock.dur)
-    f_end = min(f_voice_end + 15, int((float(take["dur"]) + LEAD_F / FPS) * FPS))
+    f_end = min(f_voice_end + 8, int((float(take["dur"]) + LEAD_F / FPS) * FPS))      # out on his last word: the end card follows
     stress = voice_stress(sup)
     nseg = len(script["segments"])
     cap_y = 0.615
@@ -1902,6 +1908,9 @@ def podcast_cut(script, sup, direction=None):
     ins = cut_ins(script, clock, pics, footage, int(1.2 * FPS), f_last, stress, aim_s=float(d["aim_s"]), share=float(d["share"]))
     cut_pts, drive_ids, look_pics = [], set(), []
     faces_take = face_meta(dict(faces=take.get("faces") or []))
+    if faces_take:                                       # a speaker's head, not a face-shaped thing on the shelf behind him
+        tall = max(f[3] for f in faces_take)
+        faces_take = [f for f in faces_take if f[3] >= 0.5 * tall]
     meta[tk] = dict(pw=int(take["w"]), ph=int(take["h"]), faces=faces_take, max_up=float(d.get("take_up", 2.4)))
     if take.get("still"):
         look_pics.append(take["still"])
@@ -1919,7 +1928,31 @@ def podcast_cut(script, sup, direction=None):
     for f0, f1, kind, name, rec in ins:
         take_shot(pos, f0)
         key = keys[rec["path"]]
-        if kind == "clip":
+        if kind == "clip" and int(rec.get("w") or W) > int(rec.get("h") or H):
+            # footage cut as it was shot, wide: it plays in a window the width of the phone, between the mark and the
+            # caption seat, three by two round its subject, over itself out of focus and dim (an archive's small copy
+            # is never blown up to fill the phone)
+            n = f1 - f0
+            pw_, ph_ = float(rec["w"]), float(rec["h"])
+            cw, y0, y1 = 0.92, 0.205, 0.565
+            asp = cw * W / ((y1 - y0) * H)                        # the window's shape
+            rw = min(asp * ph_ / pw_, 1.0)                        # the share of the clip's width it shows
+            fs_ = rec.get("faces") or []
+            cx = 0.5
+            if fs_:
+                big = max(fs_, key=lambda q: (q["box"][2] - q["box"][0]) * (q["box"][3] - q["box"][1]))
+                cx = (big["box"][0] + big["box"][2]) / 2
+            x0 = min(max(cx - rw / 2, 0.0), 1.0 - rw)
+            P.shot([f0, f1], key, cover_crop(pw_, ph_, W / H, (cx, 0.45), (0.5, 0.40)), src=list(rec["src"]), blur=26,
+                   grade=dict(lift=0, gamma=1.0, gain=0.46, sat=0.8, contrast=1, temp=0, tint=0))
+            sc_ = [r4(1.035 - 0.035 * smooth(q / 7.0)) if q < 8 else r4(1.0 + 0.04 * (q - 8) / max(n - 9, 1)) for q in range(n)]
+            P.card([f0, f1], key, [0.5 - cw / 2, y0, 0.5 + cw / 2, y1], z=1, s=sc_, src=list(rec["src"]), crop=[r4(x0), 0.0, r4(x0 + rw), 1.0],
+                   radius=0.010, op=[min(1.0, 0.5 + 0.25 * q) for q in range(n)], shadow=dict(a=0.55, blur=0.03, dx=0, dy=0.012))
+            if rec.get("still"):
+                look_pics.append(rec["still"])
+            P.pictures.append(dict(f=[f0, f1], kind="clip", name=name, path=rec["path"], shows=rec.get("shows"), mode="window",
+                                   source=(rec.get("source") or {}).get("url"), time_range=rec.get("time_range")))
+        elif kind == "clip":
             it = P.shot([f0, f1], key, None, src=list(rec["src"]))
             it.pop("crop")
             drive_ids.add(it["id"])
@@ -2031,7 +2064,14 @@ def audio_master(ffmpeg, l1, narration_wav, out, tmp, lead_f=LEAD_F):
         fps, assets = float(FPS), {"main": {"abs": narration_wav}}
     _P.dur = int(l1["dur_f"])
     voice, fx, rep = AU.split_audio(_P)
-    m = AU.master(voice, fx, out, tmp, dur)
+    # the shell's brand finish encodes this sound once more when it joins the end card, and a second AAC pass overshoots
+    # by up to a decibel (a film of hits measured 0.0 dBTP delivered): the master here stops at -2 dBTP so the film ends under -1
+    ceil, limit = AU.CEIL_DBTP, AU.LIMIT_DBFS
+    AU.CEIL_DBTP, AU.LIMIT_DBFS = min(ceil, -2.0), min(limit, -2.6)
+    try:
+        m = AU.master(voice, fx, out, tmp, dur)
+    finally:
+        AU.CEIL_DBTP, AU.LIMIT_DBFS = ceil, limit
     return dict(sounds=rep.get("sounds"), skipped=rep.get("skipped"), lufs_in=m.get("lufs_in"), lufs=m.get("lufs"), tp=m.get("tp"))
 
 
@@ -2121,6 +2161,9 @@ def taste_check(l1, beats):
     np10 = len([p for p in beats.get("pictures") or [] if p.get("kind") in ("photo", "designed", "window", "clip")]) / secs * 10
     # the references' placed layer: 3.6 audible sounds per 10 s on 16 pictures per 10 s (judge teardown); the engine holds 3
     allow = max(1, int(min(0.9 * np10, 3.6) * secs / 10 + 1)) if np10 >= 5 else max(1, int((1.5 if np10 >= 1 else 0.6) * secs / 10))
+    eng = (l1.get("sound_design") or {}).get("allow")       # the sound engine's own governor counted the film's picture changes
+    if eng:                                                 # (a take cut to a picture and back is two): its allowance stands
+        allow = max(allow, int(eng))
     if n_s > allow:
         bad.append(f"{n_s} sounds where the supply ({np10:.1f} new pictures a 10 s) allows {allow}")
     return dict(ok=not bad, problems=bad[:20], words=len(words), sounds=n_s, sounds_allowed=allow, new_pictures_10s=round(np10, 2),

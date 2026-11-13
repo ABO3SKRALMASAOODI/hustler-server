@@ -20,6 +20,9 @@ SOUNDS = os.environ.get("VALMERA_SOUNDS") or os.path.join(os.path.dirname(os.pat
 SR = 48000
 TARGET_LUFS = -14.0                  # the delivered master
 CEIL_DBTP, LIMIT_DBFS = -1.0, -1.6   # never over -1 dBTP after the encode; the limiter starts at -1.6 dBFS
+if os.environ.get("SCENE_CEIL_DBTP"):  # a caller whose film is encoded once more after this master (the workflow shell's brand
+    CEIL_DBTP = float(os.environ["SCENE_CEIL_DBTP"])       # finish joins the end card) leaves the second encode its overshoot
+    LIMIT_DBFS = CEIL_DBTP - 0.6
 
 
 def pcm(path, seconds=None):

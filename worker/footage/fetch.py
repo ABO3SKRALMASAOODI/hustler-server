@@ -95,9 +95,14 @@ def _walled(text):
         return "403" in t or "not a bot" in t or "sign in" in t or "format is not available" in t
 
 
+WAYBACK = "https://web.archive.org/web/2/"      # the Wayback Machine's newest capture of a page; yt-dlp reads its archived YouTube videos
+
+
 def run_ladder(url, args, timeout_s=CALL_S, done=None):
     """Run yt-dlp with args on url down the ladder. Returns (stdout, rung label). done(stdout) says a
-    rung delivered (default: it exited 0). Raises FetchError with yt-dlp's own last words."""
+    rung delivered (default: it exited 0). Raises FetchError with yt-dlp's own last words.
+    A YouTube video no rung could open (walled as a bot, removed, private) is asked of the Wayback Machine last: its
+    archived copy is small (360p as a rule) and free of the wall, and for old footage it is often all there is."""
     last = "no rung ran"
     for extra, label in _rungs(url):
         try:
@@ -111,6 +116,14 @@ def run_ladder(url, args, timeout_s=CALL_S, done=None):
         last = f"{label}: " + " | ".join(ln for ln in (r.stderr or "").strip().splitlines()[-2:])[:300]
         if not _walled(r.stderr or "") and is_youtube(url):
             break
+    if is_youtube(url) and os.environ.get("FOOTAGE_WAYBACK", "1") != "0":
+        try:
+            r = subprocess.run(ytdlp_cmd() + args + ["--", WAYBACK + url], capture_output=True, text=True, timeout=timeout_s, env=env())
+            if r.returncode == 0 and (done(r.stdout) if done else True):
+                return r.stdout, "wayback"
+            last += " || wayback: " + " | ".join(ln for ln in (r.stderr or "").strip().splitlines()[-1:])[:160]
+        except subprocess.TimeoutExpired:
+            last += " || wayback: timed out"
     raise FetchError(last)
 
 

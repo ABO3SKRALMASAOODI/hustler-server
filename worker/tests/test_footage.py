@@ -288,3 +288,38 @@ def test_a_line_keeps_its_own_number_and_seconds_already_cut_are_not_cut_again(m
     monkeypatch.setattr(run, "find", fake_find)
     res = seam.for_lines([], [], "t", str(tmp_path), avoid=[{"url": "u", "time_range": [1.0, 2.5]}])
     assert res is not None and seen["avoid"] == [{"url": "u", "time_range": [1.0, 2.5]}]
+
+
+def test_a_youtube_video_no_rung_opens_is_asked_of_the_wayback_machine(monkeypatch):
+    """Walled as a bot on every rung (or removed), a YouTube source is tried once more from the Wayback Machine's
+    archived copy; another site's failure is not, and FOOTAGE_WAYBACK=0 turns the rung off."""
+    from footage import fetch
+    calls = []
+
+    class R:
+        def __init__(self, code, out="", err=""):
+            self.returncode, self.stdout, self.stderr = code, out, err
+
+    def fake_run(cmd, **kw):
+        url = cmd[-1]
+        calls.append(url)
+        if url.startswith(fetch.WAYBACK):
+            return R(0, '{"id": "x"}')
+        return R(1, "", "ERROR: [youtube] x: Sign in to confirm you're not a bot")
+    monkeypatch.setattr(fetch.subprocess, "run", fake_run)
+    monkeypatch.setattr(fetch, "_rungs", lambda url: [([], "default")])
+    monkeypatch.delenv("FOOTAGE_WAYBACK", raising=False)
+    out, rung = fetch.run_ladder("https://www.youtube.com/watch?v=x", ["-J"], done=lambda s: s.strip().startswith("{"))
+    assert rung == "wayback" and calls[-1] == fetch.WAYBACK + "https://www.youtube.com/watch?v=x"
+    calls.clear()
+    try:
+        fetch.run_ladder("https://archive.org/details/some-film", ["-J"])
+        assert False, "a failed archive.org source has no second copy"
+    except fetch.FetchError:
+        assert all(not u.startswith(fetch.WAYBACK) for u in calls)
+    monkeypatch.setenv("FOOTAGE_WAYBACK", "0")
+    try:
+        fetch.run_ladder("https://www.youtube.com/watch?v=x", ["-J"])
+        assert False
+    except fetch.FetchError:
+        pass
