@@ -259,12 +259,19 @@ def pick_times(per, n):
     """n seconds over the film, each pulled onto a nearby moment, every shot represented."""
     dur = per["dur"]
     shots = [sh["t"] for sh in per["shots"]]
-    tot = sum(b - a for a, b in shots) or dur
-    alloc = [max(2, int(round(n * (b - a) / tot))) for a, b in shots]
+    if not shots:
+        shots = [(0.0, float(dur))]
+    tot = sum(b - a for a, b in shots) or dur or 1.0
+    # Every shot gets its two frames only while the boards have room for that;
+    # a fast-cut source (34 shots for 27 cells, ticket #922) shares the cells by
+    # length instead, so no shot is ever given zero or fewer frames to divide by.
+    floor = 2 if 2 * len(shots) <= n else 1 if len(shots) <= n else 0
+    alloc = [max(floor, int(round(n * (b - a) / tot))) for a, b in shots]
     while sum(alloc) > n:
         alloc[alloc.index(max(alloc))] -= 1
     while sum(alloc) < n:
-        alloc[alloc.index(max(alloc))] += 1
+        share = [(b - a) / tot - k / n for (a, b), k in zip(shots, alloc)]
+        alloc[share.index(max(share))] += 1
     evs = []
     for e in per.get("events", []):
         if isinstance(e["t"], (int, float)):
