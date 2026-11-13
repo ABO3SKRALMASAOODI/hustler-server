@@ -28,7 +28,7 @@ LIVE = True
 
 KINDS = ("hole", "hold", "filter", "stutter", "montage_intent", "fit_intent")
 RECORDS = ("montage_intent", "fit_intent")
-USER_PROVENANCE = ("user_upload", "user_named", "user_picked_library")
+USER_PROVENANCE = ("user_upload", "user_named", "user_picked_library", "valmera_chosen")
 
 
 class ArrangeFx(FxItemBase):

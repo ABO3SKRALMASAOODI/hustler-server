@@ -40,7 +40,10 @@ import re
 import secrets
 import time
 
-PROVENANCES = ("user_upload", "user_named", "user_picked_library")
+# valmera_chosen (owner, 13 Nov 2026): "Valmera may pick the track itself ... the customer decides whether to
+# keep it." Only music_choose places it: a track from the licensed library (worker/music_library/) that the
+# chooser copied into the project and registered with chosen_by "valmera". The customer can remove it.
+PROVENANCES = ("user_upload", "user_named", "user_picked_library", "valmera_chosen")
 LEGACY = "legacy"
 OFFER_TTL_S = 7 * 24 * 3600
 _OFFER_KEY = "music_pick_offer:{pid}"
@@ -593,6 +596,8 @@ def decide(key, asset, *, is_picked, seen_before, pick=None, source=None):
         return kind, None
     if kind == "library":
         slug = library_slug(key, (asset or {}).get("meta"))
+        if ((asset or {}).get("meta") or {}).get("chosen_by") == "valmera":
+            return "valmera_chosen", None
         if slug and is_picked(slug):
             return "user_picked_library", None
         if seen_before(key):

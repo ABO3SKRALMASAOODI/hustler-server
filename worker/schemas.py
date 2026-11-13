@@ -785,8 +785,11 @@ class MusicItem(BaseModel):
     # None reads as "legacy" (every item written before the field existed):
     # it still renders; no migration rewrites stored EDLs. Enforcement on
     # NEW writes lives in the music gate, not here (INTERFACES.md §4.3).
+    # valmera_chosen: music_choose's pick from the licensed library (owner,
+    # 13 Nov 2026); the customer may keep or remove it.
     provenance: Optional[Literal["user_upload", "user_named",
-                                 "user_picked_library", "legacy"]] = None
+                                 "user_picked_library", "valmera_chosen",
+                                 "legacy"]] = None
     # Music-bus automation (drops, gaps, ducks bound to the RhythmMap).
     # Typed slot, owned through fx_schemas (Wave 2); None-only until then.
     automation: _slot("MusicItem.automation") = None

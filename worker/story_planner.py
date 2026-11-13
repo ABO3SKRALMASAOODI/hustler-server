@@ -236,7 +236,8 @@ def suggest(edl, index, *, intensity="designed", seed=None, asked=(),
     users = [m for m in edl.get("music") or []
              if str(m.get("provenance") or "") in ("user_upload",
                                                     "user_named",
-                                                    "user_picked_library")]
+                                                    "user_picked_library",
+                                                    "valmera_chosen")]
     if users and pay.get("t") is not None:
         out.append({"device": "arrange_drop_hold", "family": "rhythm",
                     "beat": "payoff", "at": round(float(pay["t"]), 2),
