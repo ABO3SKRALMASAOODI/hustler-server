@@ -1,54 +1,72 @@
 """What the marketing workflow knows before it has an idea.
 
-Two kinds of knowledge, both read from disk, none invented:
+Read from disk, none of it invented:
 
-  ledger()       what Valmera really delivered: every finished podcast-shorts run with its source,
-                 the count of exported shorts and where they are. A claim in a film is one of these
-                 rows or it is not made.
-  references()   what editors respond to: the captions, lengths and reactions of the owner's
-                 reference films in "editing tutorials and app marketing".
-  capabilities() what the product does in one request, each with the place its receipt comes from.
+  rows()         what the product really did, as rows a film may be about. A row is one or more studio recordings
+                 (studio.py): a clip uploaded to the product, a sentence typed, the export that came back, and the
+                 project's EDL at every version. A claim in a film is one of these rows or it is not made.
+  references()   what editors respond to: the captions, lengths and reactions of the owner's reference films in
+                 "editing tutorials and app marketing".
+  capabilities() what the product does with one sentence, each with the place its receipt comes from.
 """
 import json
 import os
 
 V = "/Users/masaoodi/Documents/Valmera"
-RUNS = f"{V}/.tmp/valmera-podcast-shorts"
 REFS = f"{V}/reference-library/2026-11-05/02-editing-tutorials-and-app-marketing"
 
 
-def _read(path, n=1200):
+def _read(path, n=700):
     try:
         return open(path, encoding="utf-8", errors="replace").read()[:n]
     except OSError:
         return ""
 
 
-def ledger(root=RUNS):
-    """Finished runs whose finals and source are still on disk, largest delivery first."""
+def clip_of(r):
+    """Where a recording's clip came from, in the source's own words when its identity file is beside it."""
+    src = (r.get("source") or {})
+    ident = _read(os.path.join(os.path.dirname(src.get("file") or ""), "identity.md"))
+    return dict(source=ident or os.path.basename(src.get("file") or ""), from_s=src.get("t0"), to_s=src.get("t1"), length_s=r["upload"]["dur"],
+                shape=r["facts"]["upload_ratio"])
+
+
+def rows():
+    """Every finished recording as a row, and every upload that three or more sentences were typed on as one more."""
+    import film as F
+    import studio as ST
     import supply as S
-    rows = []
-    for n in sorted(os.listdir(root)) if os.path.isdir(root) else []:
-        d = os.path.join(root, n)
-        if not os.path.exists(os.path.join(d, "run.json")) or not os.path.isdir(os.path.join(d, "source")):
-            continue
+    recs = []
+    for x in ST.ledger():
         try:
-            r = S.run_record(d)
-        except (OSError, ValueError, KeyError):
+            recs.append(S.studio_record(x["sid"]))
+        except (SystemExit, OSError, ValueError, KeyError):
             continue
-        if r["stage"] != "complete" or not r["delivered"] or r["delivered"] != r["declared"] or not r["source"]:
-            continue
-        looks = {}
-        for s in r["shorts"]:
-            looks[s["look"] or "?"] = looks.get(s["look"] or "?", 0) + 1
-        single = sum(1 for s in r["shorts"] if len(s["keeps"]) == 1)
-        rows.append(dict(run=d, run_id=r["run_id"], delivered=r["delivered"], source_s=r["source_s"],
-                         source_clock=S.clock(r["source_s"]) if r["source_s"] else None, source_url=r["source_url"],
-                         identity=_read(os.path.join(d, "source", "identity.md")) or _read(os.path.join(d, "SOURCE.md")),
-                         folder=r["delivered_to"], looks=looks, shorts_on_one_take=single, music=r["music"],
-                         started=r["started"], finished=r["finished"]))
-    rows.sort(key=lambda x: -x["delivered"])
-    return rows
+    out, by_clip = [], {}
+    for r in recs:
+        tall = r["export"]["h"] > r["export"]["w"]
+        base = dict(records=[r["sid"]], clip=clip_of(r), sentence=r["sentence"], product_replied=(r.get("reply") or "")[:500], result=r["facts"])
+        if r["before"]:
+            ea, eb = json.load(open(r["before"]["edl"])), json.load(open(r["edl"]))
+            tla, da = F.program(ea)
+            tlb, db = F.program(eb)
+            removed = sum(e - s for s, e, ia, ib in F.edl_pieces(tla.segs, tlb.segs) if ia and not ib)
+            had = {o["id"]: o for o in F.pictures_of(ea)}
+            now = F.pictures_of(eb)
+            change = dict(before_version=r["before"]["edl_version"], after_version=r["export"]["edl_version"], before_length=F.clock(da), after_length=F.clock(db),
+                          seconds_removed=round(removed, 1), pictures_added=sum(1 for o in now if o["id"] not in had),
+                          pictures_moved_with_the_cut=sum(1 for o in now if o["id"] in had and abs(o["start"] - had[o["id"]]["start"]) > 0.05))
+            out.append(dict(row_id=f"edit:{r['sid']}", kind="one project, before and after a typed sentence", fits=["edits-itself"], change=change, **base))
+        elif tall and r.get("phase") == "before_first_result":
+            out.append(dict(row_id=f"sentence:{r['sid']}", kind="one clip, one typed sentence, one finished vertical film", fits=["reading-wipe"], **base))
+        if tall and not r["before"]:
+            by_clip.setdefault(r["upload"]["sha256"], []).append(r)
+    for sha, group in by_clip.items():
+        if len({r["sentence"] for r in group}) >= 3:
+            out.append(dict(row_id=f"clip:{sha[:8]}", kind="one clip, three or more typed sentences, a different film from each", fits=["one-clip-three-films"],
+                            records=[r["sid"] for r in group], clip=clip_of(group[0]),
+                            sentences=[dict(record=r["sid"], sentence=r["sentence"], product_replied=(r.get("reply") or "")[:300], result=r["facts"]) for r in group]))
+    return out
 
 
 def references(root=REFS, n=40):
@@ -74,11 +92,11 @@ def references(root=REFS, n=40):
 def capabilities():
     """True product behaviour a film may show, and where the proof is read from. Add a row only with its receipt."""
     return [
-        dict(id="podcast-to-shorts", what="One request to an AI app with the Valmera plugin turns a whole podcast into finished vertical shorts: "
-             "stories chosen, cut on word edges, framed, captioned, titled, designed in several Looks, exported.",
-             receipt="a finished run in the ledger: run.json delivered_files and the exported .mp4 files"),
-        dict(id="looks", what="The shorts of one run are not one template: each takes one of several designed Looks.",
-             receipt="the looks count of a ledger row"),
-        dict(id="unaltered-export", what="Every short is an export of a Valmera project with the product's own end card and mark.",
-             receipt="the exported file itself, shown unaltered, with its sha256"),
+        dict(id="sentence-to-film", what="A clip is uploaded to the Valmera Studio and one sentence is typed. The product reframes it, trims it, captions it, "
+             "and lays pictures on the words when asked, and the result is exported as an MP4.",
+             receipt="a studio recording: the journey (what was typed, what was replied), the export file and its sha256"),
+        dict(id="same-clip-other-sentence", what="Another sentence on the same clip gives another film.",
+             receipt="recordings that share one upload (same sha256) and differ in the sentence"),
+        dict(id="edit-is-an-edl", what="Every edit is a new numbered version of the project's EDL: which seconds are kept, which pictures stand where.",
+             receipt="the EDL versions kept with a recording, and the worker's own timeline arithmetic"),
     ]
