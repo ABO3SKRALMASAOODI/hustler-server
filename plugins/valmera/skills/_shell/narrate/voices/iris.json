@@ -1,0 +1,22 @@
+{
+ "describe": "A soft, intimate adult female narrator, calm and thoughtful, gentle storytelling voice, unhurried and measured, close to the microphone, studio quality",
+ "line": "Most people never notice the moment their life changes. For her, it was a Tuesday, a cold coffee, and a message she almost did not open.",
+ "take": 3,
+ "seed": 14,
+ "wer": 0.0,
+ "f0_med_hz": 215.1,
+ "range_st": 11.6,
+ "pace": {
+  "wpm": 172.2,
+  "wpm_artic": 192.1,
+  "pauses_pm": 6.6,
+  "pause_med_s": 0.94,
+  "words": 26,
+  "span_s": 9.1
+ },
+ "made_with": "openbmb/VoxCPM2 voice design (description only; no person's recording)",
+ "for": "reflective stories, long-form",
+ "gender": "female",
+ "character": "soft, intimate, thoughtful",
+ "band": "04"
+}

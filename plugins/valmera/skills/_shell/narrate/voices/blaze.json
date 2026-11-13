@@ -1,0 +1,22 @@
+{
+ "describe": "A deep-voiced adult man in his thirties, a confident motivational speaker, energetic and punchy yet clear and controlled, close to the microphone, studio quality",
+ "line": "Stop scrolling. Right now, someone with half your talent is building the life you keep saying you want. So what are you waiting for?",
+ "take": 1,
+ "seed": 12,
+ "wer": 0.0,
+ "f0_med_hz": 244.2,
+ "range_st": 12.08,
+ "pace": {
+  "wpm": 225.0,
+  "wpm_artic": 225.0,
+  "pauses_pm": 0.0,
+  "pause_med_s": 0.0,
+  "words": 24,
+  "span_s": 6.4
+ },
+ "made_with": "openbmb/VoxCPM2 voice design (description only; no person's recording)",
+ "for": "hooks, energetic shorts",
+ "gender": "male",
+ "character": "fast, punchy, intense",
+ "band": "03"
+}

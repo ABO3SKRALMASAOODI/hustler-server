@@ -1,0 +1,22 @@
+{
+ "describe": "A clear, confident adult female narrator with a warm, expressive storytelling voice, unhurried and measured, close to the microphone, studio quality",
+ "line": "She was twenty three, broke, and living on her friend's couch. Ten years later, her company was worth more than the bank that turned her down.",
+ "take": 1,
+ "seed": 12,
+ "wer": 0.0,
+ "f0_med_hz": 230.5,
+ "range_st": 11.15,
+ "pace": {
+  "wpm": 186.6,
+  "wpm_artic": 206.6,
+  "pauses_pm": 14.9,
+  "pause_med_s": 0.39,
+  "words": 25,
+  "span_s": 8.0
+ },
+ "made_with": "openbmb/VoxCPM2 voice design (description only; no person's recording)",
+ "for": "founder stories, explainers",
+ "gender": "female",
+ "character": "clear, warm, expressive",
+ "band": "03"
+}

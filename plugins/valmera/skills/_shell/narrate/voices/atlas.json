@@ -1,0 +1,22 @@
+{
+ "describe": "A deep, warm adult male documentary narrator with a calm, confident storytelling voice, unhurried and measured, close to the microphone, studio quality",
+ "line": "In nineteen ninety four, a man quit the best job he ever had to sell books out of his garage. Everyone told him it was a mistake. He did it anyway.",
+ "take": 2,
+ "seed": 13,
+ "wer": 0.0,
+ "f0_med_hz": 102.1,
+ "range_st": 12.0,
+ "pace": {
+  "wpm": 175.1,
+  "wpm_artic": 201.4,
+  "pauses_pm": 12.1,
+  "pause_med_s": 0.65,
+  "words": 29,
+  "span_s": 9.9
+ },
+ "made_with": "openbmb/VoxCPM2 voice design (description only; no person's recording)",
+ "for": "founder stories, long-form",
+ "gender": "male",
+ "character": "deep, warm, documentary",
+ "band": "03"
+}

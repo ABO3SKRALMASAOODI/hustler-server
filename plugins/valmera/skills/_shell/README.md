@@ -38,6 +38,10 @@ screen capture for WF2); everything else stays the shell's. `ctx` gives `run_dir
 `supply`, `source`, `args` (`--args` JSON, e.g. a line from the owner), `styles_allowed()`,
 `styles_last()`, `windows_used()` and `log()`.
 
+WF3 and WF4 speak through `narrate/` (VoxCPM2, local open weights): a script with a performance
+layer per segment becomes `narration.wav`, `words.json` (every word timed) and `check.json` (the
+VOICE gate). See `narrate/README.md`.
+
 ## Workspace rules
 
 - **Every byte a run writes is inside its run folder.** Tools get `TMPDIR` and `SLICE_TMP` in it;

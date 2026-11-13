@@ -1,0 +1,22 @@
+{
+ "describe": "A mature male narrator with a slightly gravelly, slow, deep and powerful motivational speech voice, dramatic pauses, unhurried and measured, close to the microphone, studio quality",
+ "line": "Nobody is coming to save you. Not your boss, not your parents, not luck. The day you understand that is the day your life begins.",
+ "take": 1,
+ "seed": 12,
+ "wer": 0.0,
+ "f0_med_hz": 158.3,
+ "range_st": 11.65,
+ "pace": {
+  "wpm": 180.3,
+  "wpm_artic": 180.3,
+  "pauses_pm": 0.0,
+  "pause_med_s": 0.0,
+  "words": 25,
+  "span_s": 8.3
+ },
+ "made_with": "openbmb/VoxCPM2 voice design (description only; no person's recording)",
+ "for": "long-form motivation",
+ "gender": "male",
+ "character": "gravelly, slow, powerful",
+ "band": "04"
+}
