@@ -241,8 +241,8 @@ def repair_contrast(l1, gray_frames):
     pooled = []
     for key, items in units(l1).items():
         ws = [it for it in items if it.get("k") == "word" and not it.get("behind")]
-        if not ws or any(it.get("k") == "card" for it in items):
-            continue
+        if not ws or any(it.get("k") == "card" for it in items) or any(w.get("grounded") for w in ws):
+            continue                                   # type on a card, or type that brings its own ground, keeps its ink
         a, b = min(w["f"][0] for w in ws), max(w["f"][1] for w in ws)
         gs = [g for g in (gray_frames.get(f) for f in sample_frames(a, b)) if g is not None]
         if not gs:
@@ -264,6 +264,12 @@ def repair_contrast(l1, gray_frames):
         if now >= need:
             continue
         fix = dict(id=key, ratio=round(now, 2), need=need)
+        if min(los) > 0.30 and ratio(_lum(DARK_INK)) >= need:            # a bright ground all its life (a paper, a white wall):
+            for w in ws:                                                 # dark ink reads, and no pool smudges the picture
+                w["ink"] = DARK_INK
+            fix["ink"] = DARK_INK
+            pooled.append(fix)
+            continue
         ink = "#FFFFFF"                                                  # white holds on a picture whose light moves
         for w in ws:
             w["ink"] = ink
@@ -277,7 +283,40 @@ def repair_contrast(l1, gray_frames):
     return pooled
 
 
+def picture_cuts(l1):
+    """Frames where the film cuts between two different pictures (the take and a found picture, two found pictures)."""
+    shots = sorted((it for it in l1["items"] if it.get("k") == "shot"), key=lambda it: it["f"][0])
+    return [b["f"][0] for a, b in zip(shots, shots[1:]) if a.get("pic") != b.get("pic")]
+
+
+def split_captions_at(l1, cuts, least=3):
+    """A caption that lives across a cut to another picture becomes two: the ground under it changes there, so its ink
+    may too (white on the dark take, dark on a white paper), instead of one ink and a pool that smudges the paper.
+    Each half keeps its place, its words and its own frames of every per-frame list. Returns how many were split."""
+    out, n = [], 0
+    for it in l1["items"]:
+        if it.get("k") != "word" or it.get("role") != "cap" or it.get("behind"):
+            out.append(it)
+            continue
+        a, b = it["f"]
+        c = next((c for c in cuts if a + least <= c <= b - least), None)
+        if c is None:
+            out.append(it)
+            continue
+        first, second = dict(it, f=[a, c]), dict(it, f=[c, b], id=f"{it['id']}~{c}", on=c)
+        if it.get("chunk"):
+            second["chunk"] = f"{it['chunk']}~{c}"
+        for key, v in it.items():
+            if isinstance(v, list) and key != "f" and len(v) == b - a:
+                first[key], second[key] = v[:c - a], v[c - a:]
+        out += [first, second]
+        n += 1
+    l1["items"] = sorted(out, key=lambda it: it["f"][0])
+    return n
+
+
 IDENTITY = dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0)
+DARK_INK = "#0E0F11"
 
 
 def split(l1, lit_path):

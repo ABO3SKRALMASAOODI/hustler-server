@@ -431,15 +431,33 @@ self-award a quality score.
 ## One film at a time on the workflow shell (`../_shell`, `alien/`)
 
 For a single finished short in one of the ALIEN styles, with no Valmera project and no editor subagents, run
-the workflow shell. It finds the moment itself, writes the direction, fetches licensed pictures, has the
-Director write the Score, renders on the Mac engine, adds the product's watermark and end card, measures the
-film, delivers one folder once and deletes its work folder.
+the workflow shell. It finds the moment itself, plans the pictures and the direction, finds and checks the
+story's real pictures, has the Director write the Score, renders on the Mac engine, adds the product's
+watermark and end card, measures the film, delivers one folder once and deletes its work folder.
 
 ```
 PY=/Users/masaoodi/Documents/Valmera/.valmera/venv-worker/bin/python
 zsh /Users/masaoodi/Documents/Valmera/.valmera/claude_trial_env.sh $PY ../_shell/shell.py run --workflow wf1 \
     --source <podcast.mp4, captions .json3 beside it> --out <deliver root> [--args '{"style": "<id>"}']
+    # --args '{"again": "<delivered folder>", "style": "<id>"}' makes a delivered moment again in another style
 ```
+
+**What every shell film gets (`alien/earned.py`, since 13 Nov 2026).** The Director's film is the take in one
+framing, its captions and the name chip. Everything else is planned by the script stage and made by the engine,
+the same way for every film, never by hand:
+
+| | How |
+|---|---|
+| Earned pictures | The script stage names 6-9 pictures on his words: `named` (a real person, company, place, product, document), `thing` (what he points at) or `design`. Named and thing rows go down the named route (`worker/broll_source`: Wikimedia Commons by Wikidata depicts, then Openverse) and one vision check keeps only pictures that show the subject. A second look says what must stay in frame; the 9:16 crop is solved from that box and the faces. A subject with no passing picture is not shown, and `film.json` says so. Never a library lookalike |
+| Designs | At most two a film: `number`, `versus`, `bars`, `quote`, `document`. A panel beside the head, drawn in the plan so it moves: it lands and settles, bars grow to their share, lines type on, the marked line takes a highlighter. Every word on it is his |
+| Hook picture | Frame 0 is the story's subject, full frame, the hook line large and sharp on that frame, the words that carry it in the serif accent. It holds to the first stressed word after 1.25 s, then cuts to him |
+| His own footage | One closer framing (13%, about his face), cut in on the payoff's first word. No picture after the payoff; the last 1.4 s stay on live footage |
+| Motion | A picture lands two frames ahead of its word, settles on the atlas curve (tau 6.9 frames) and drifts in while it holds. Panels and their contents arrive on expo-out curves |
+| Sound | The owner's rule holds: one or two approved library sounds a film, on the payoff's cut and one landing, soft air or a low hit, never on frame 0, never a bright sound on a word, each set a fixed distance under the measured voice |
+| Colour | One grade per style (`RECIPES[style]["look"]`) on the take and every found picture, with its grain, vignette and halation |
+
+`film.json` carries what was planned, found, placed and skipped, with each picture's licence and credit
+(`checks.alien.earned`). `scripts/test_earned.py` holds the plan pass to its rules.
 
 A style whose recipe names alien passes (`RECIPES` in `../_shell/wf1.py`) is rendered in two passes
 (`alien/alien_render.py`): the engine draws the Director's pictures, the passes work on that film in programme
@@ -447,6 +465,7 @@ space, then the engine lays the type over the result, so type is never relit. Wh
 
 | Style | Pass (`alien/passes.py`, `alien/footnotes.py`) | What the film's `film.json` proves |
 |---|---|---|
+| `room-listens` | `room_light` (L1, L4): he stays as shot; the room behind him is exposed by the level of his voice; a picture about to cut in lights him and the wall in its own colour before it arrives and after it leaves; a card is a lamp | room light against the voice (0.8 or more) on frames no picture lights, his own exposure unchanged, frames lit by pictures |
 | `lit-by-voice` | `voice_light` (L2): the room goes dark; a warm lamp at the mouth follows the sound's level; pictures and cards breathe with it | light against the lamp inside every shot (0.8 or more), dark in pauses, flashes per second |
 | `receipts` | `footnotes` (C6): a superscript on the claim's word, the note and its source typed at the foot | each note's fragment was found in the fetched page and its numbers in that fragment (`alien/evidence.py`); rejected notes are listed |
 | `second-camera` | `second_camera` (K1): the take seen from a few degrees off axis through its own depth, cut in on stressed words, ending on the true frame | parallax in pixels, share of the film, what the move uncovered |

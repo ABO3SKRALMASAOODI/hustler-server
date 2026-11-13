@@ -16,56 +16,69 @@ import chain
 import llm
 
 TASTE = ("A device exists only where an event earns it, and less, placed right, beats more. But a plain take with "
-         "captions is not a film: the first second is designed, the things he names are shown, and one idea nobody "
-         "else has runs through the whole piece. A sound belongs to something landing on screen (a new picture, a "
-         "display line): about 1.5 per 10 s when the film has new pictures, none without a partner, quiet under the "
-         "voice. One framing per speaker; no zoom per cut, no reflexive whoosh, no sound puns. Every graphic adds what "
-         "captions cannot (a number, a contrast, a name, evidence). Placement is law: all type and cards inside x "
-         "0.05-0.95 and y 0.10-0.80, clear of the top-right mark, never on a face, never light type on a light shirt; "
-         "one caption seat for the film, between y 0.58 and 0.68. A name is a small chip inside y 0.70-0.78, once per "
-         "person. No music: Valmera never picks music. The end card and watermark are added after you; leave the last "
-         "frames on live footage.")
+         "captions is not a film: frame 0 is a designed picture, the people, places, companies and documents he names "
+         "are shown as themselves (a real archive photograph, never a lookalike from a stock library), a number or a "
+         "quote that carries the story becomes a designed chart or document, and one idea nobody else has runs through "
+         "the whole piece. A sound belongs to something landing on screen. One framing per speaker; no zoom per cut, no "
+         "reflexive whoosh, no sound puns. Placement is law: all type and cards inside x 0.05-0.95 and y 0.10-0.80, "
+         "clear of the top-right mark, never on a face; one caption seat for the film, between y 0.58 and 0.68. A name "
+         "is a small chip inside y 0.70-0.78, once per person. No music: Valmera never picks music. The end card and "
+         "watermark are added after you; leave the last frames on live footage.")
+
+# What the engine adds after the Director on every podcast short (alien/earned.py). The script stage plans it; the
+# Director is told to leave room for it. Nothing here is decided by hand per film.
+ENGINE = ("After you, the engine adds everything that is not the take and its captions: the hook picture at frame 0 (the "
+          "story's real subject, full frame, with the hook line set large), the story's pictures on their words (archive "
+          "photographs of the people, places, companies and documents he names, a designed chart or document where a "
+          "number or a quote carries the story), one closer framing of his own footage on the payoff, the sounds on "
+          "those landings, the motion of all of it, and the grade. So from you: the take in one framing for the whole "
+          "film, captions in one seat, the stressed word of a line in the second voice, and the name chip once. No found "
+          "pictures, no Bin items, no cards, no plates, no display lines, no sounds, no flashes, no camera moves, no "
+          "grade. Start the captions on his first word: the hook picture carries them.")
 
 # How each style is made. `pass` is the alien pass the render stage runs after the Director's pictures and before
 # the type (valmera-podcast-shorts/alien); `made` is told to the script stage so the Director leaves room for it.
 RECIPES = {
-    "lit-by-voice": dict(passes=["voice_light"], house=" No grade, flash, vignette or camera move on the take: the engine's light is the look.", made=(
-        "After the Director, the engine relights the finished picture: the room falls to near black and the only light "
-        "is a warm lamp at the speaker's mouth whose brightness is the loudness of his voice, frame by frame. In a pause "
-        "the frame is dark. Pictures and cards glow with the same light, so the whole film breathes with him. Type is "
-        "drawn after the light and stays at full brightness. Direct for darkness: (1) open on a silent beat of 18-24 "
-        "frames, black, carrying the hook as one small display line of at most six of his own words, with a swell of his "
-        "own voice rising into the first word; (2) one framing per speaker, no camera move, no flash, no grade, no "
-        "vignette, because the light is the grade; (3) captions small (about 0.026 of the height), white, one seat, the "
-        "stressed word in serif italic; (4) three to five pictures of the things he names, each landing on its word and "
-        "held 1.2-2.5 s, at least two of them full-frame cuts: say exactly what each one shows; (5) no library sound "
-        "except one quiet partner per picture landing, and an echo of his last words after the close, which the light "
-        "will follow down into the dark; (6) the close is the payoff line, then about one second in which the echo dies.")),
+    "room-listens": dict(passes=["room_light"], house=" No grade, flash or vignette on the take: the engine lights the room.",
+                         look=dict(grade=dict(lift=-0.006, gamma=0.97, gain=1.05, sat=1.10, contrast=1.10, temp=0.014, tint=-0.004),
+                                   grain=0.05, vignette=0.30, halation=0.16, bloom=0.10),
+                         accent="#FFC857", sounds=dict(payoff="heartbeat_1"), made=(
+        "After the pictures, the engine makes the room listen (ALIEN L1 and L4): he stays as he was shot, and the room "
+        "behind him brightens and falls with the level of his own voice, frame by frame; every picture that is about to "
+        "cut in throws its own colour on his face and the wall for a few frames before it arrives, the way a screen "
+        "lights a room, and the hook line lights his cheek in its colour when the film returns to him. Direct for a room "
+        "that answers: one framing, no camera move, no grade and no vignette from you; captions small and white in one "
+        "seat; the pictures and the hook are the engine's.")),
+    "lit-by-voice": dict(passes=["voice_light"], house=" No grade, flash, vignette or camera move on the take: the engine's light is the look.",
+                         accent="#FFD9A0", sounds=dict(payoff="heartbeat_1"), made=(
+        "After the pictures, the engine relights the finished film: the room falls to near black and the only light is a "
+        "warm lamp at the speaker's mouth whose brightness is the loudness of his voice, frame by frame. In a pause the "
+        "frame is dark. Pictures glow with the same light, so the whole film breathes with him. Type is drawn after the "
+        "light and stays at full brightness. Direct for darkness: one framing per speaker, no camera move, no flash, no "
+        "grade, no vignette, because the light is the grade; captions small (about 0.026 of the height), white, one "
+        "seat, the stressed word in serif italic; the close is the payoff line, then about one second in which the light "
+        "falls.")),
     "receipts": dict(passes=["footnotes"], house=(" Type nothing in y 0.70-0.80 after the first three seconds and add no superscripts or numbered "
-                                                  "labels: the engine alone writes the footnotes, from sources."), look=dict(grade=dict(lift=-0.012, gamma=0.96, gain=1.0, sat=0.82, contrast=1.10, temp=-0.012, tint=0.0),
-                                                     grain=0.07, vignette=0.35), made=(
-        "After the Director, the engine annotates the speech like a court record: each claim that a fetched source "
+                                                  "labels: the engine alone writes the footnotes, from sources."),
+                     look=dict(grade=dict(lift=-0.012, gamma=0.96, gain=1.0, sat=0.80, contrast=1.12, temp=-0.014, tint=0.0),
+                               grain=0.08, vignette=0.36, halation=0.0, bloom=0.0),
+                     accent="#FF5A36", made=(
+        "After the pictures, the engine annotates the speech like a court record: each claim that a fetched source "
         "confirms gets a small superscript number on its word and a two-row footnote with its source, typed at the foot "
         "of the safe area (y 0.70-0.80). Only the engine writes footnotes, because only it has the sources. So from "
         "you: no superscripts, no numbered labels, no captions restating a claim, nothing typed in y 0.70-0.80 after the "
-        "first three seconds. Direct for evidence: (1) the first second is the boldest claim as one display line of his "
-        "own words, in the upper part of the frame, off his head; (2) four to six pictures that are evidence for what he "
-        "names (the company, the place, the document, the thing), each landing on its word and held 1.2-2.5 s: at least "
-        "two of them full-frame cuts, the others cards beside his head; (3) captions in one seat between y 0.58 and 0.66; (4) a quiet tick or click "
-        "partners each picture landing; (5) one framing per speaker; (6) the name chip, if any, inside the first three "
-        "seconds; (7) the close holds the payoff line plain.")),
+        "first three seconds. Captions in one seat between y 0.58 and 0.66; the name chip, if any, inside the first "
+        "three seconds; the close holds the payoff line plain.")),
     "second-camera": dict(passes=["second_camera"], house=(" One crop of the take for the whole film: never alternate crops, framings or looks of "
-                                                           "the take. The engine alone makes the second angle and its cuts; you cut only to pictures."), look=dict(grade=dict(lift=-0.008, gamma=0.98, gain=1.03, sat=1.06, contrast=1.08, temp=0.008, tint=0.0),
-                                                              grain=0.04, vignette=0.22), made=(
-        "After the Director, the engine cuts to a second camera that was never there: the film opens on the take seen "
-        "from a few degrees off axis and a little closer, rebuilt from the depth of the picture so the room slides "
-        "behind him as it would for a real second camera; it cuts to the true frame on a stressed word, visits the "
-        "second angle once more, and ends on the true frame. Direct for a two-camera show: (1) one framing of the take "
-        "from you, held, no zoom, no punch-in, no camera move: the engine makes the other angle and its cuts; (2) the "
-        "first second carries the hook as one display line over the second angle; (3) three to five pictures of the "
-        "things he names, each a full-frame cut landing on its word and held 1.2-2.5 s, no inset cards; (4) captions "
-        "in one seat; (5) a quiet partner sound on each picture landing and none on a camera cut; (6) the close stays "
-        "on the take, plain.")),
+                                                           "the take. The engine alone makes the second angle and its cuts."),
+                          look=dict(grade=dict(lift=-0.008, gamma=0.98, gain=1.03, sat=1.06, contrast=1.08, temp=0.008, tint=0.0),
+                                    grain=0.04, vignette=0.22, halation=0.10, bloom=0.06),
+                          accent="#7FE3FF", made=(
+        "After the pictures, the engine cuts to a second camera that was never there: the take seen from a few degrees "
+        "off axis and a little closer, rebuilt from the depth of the picture so the room slides behind him as it would "
+        "for a real second camera; it cuts to the true frame on a stressed word, visits the second angle once more, and "
+        "ends on the true frame. Direct for a two-camera show: one framing of the take from you, held, no zoom, no "
+        "punch-in, no camera move; captions in one seat; the close stays on the take, plain.")),
 }
 
 
@@ -155,6 +168,26 @@ def _words_file(ctx):
     return os.path.join(ctx.tmp, "words.json")
 
 
+def _again(ctx, allowed):
+    """--args '{"again": "<delivered folder>", "style": id}': the moment of a film already delivered from this source,
+    made again in a style the ledger allows. The idea is read from that film's record; nothing is asked of a model."""
+    folder = (ctx.args or {}).get("again")
+    if not folder:
+        return None
+    rec = json.load(open(os.path.join(folder, "film.json")))
+    if os.path.abspath((rec.get("source") or {}).get("path") or "") != os.path.abspath(ctx.source):
+        raise RuntimeError("--args again: that film was made from another source")
+    was = (rec.get("style") or {}).get("id")
+    ids = [s["id"] for s in allowed if s["id"] != was]
+    if not ids:
+        raise RuntimeError("--args again: no style outside the last three is left for this moment")
+    idea = dict(rec["idea"], styles=[dict(id=ids[0], why=f"made again from {os.path.basename(folder.rstrip('/'))}, which was {was}")],
+                again=dict(folder=folder, run_id=rec.get("run_id"), was=was))
+    w = rec.get("window") or [idea.get("t0"), idea.get("t1")]
+    idea["t0"], idea["t1"] = float(w[0]), float(w[1])
+    return idea
+
+
 def ideas(ctx):
     src = ctx.source
     caps = [os.path.join(os.path.dirname(src), n) for n in sorted(os.listdir(os.path.dirname(src))) if n.endswith(".json3")]
@@ -164,10 +197,14 @@ def ideas(ctx):
         words, how = whisper_words(ctx, src), "whisper-large-v3 local"
     json.dump(words, open(_words_file(ctx), "w"))
     allowed = _styles(ctx)
+    again = _again(ctx, allowed)
+    if again:                                            # a delivered moment made again in another style: no call
+        return dict(source=dict(source_log(src), transcript=how, words=len(words)), ideas=[again], chosen=None, again=again["again"], spend=[])
     system = ("You are the ideas stage of Valmera's podcast shorts workflow. You read a whole conversation and find the "
               "moments that become great vertical shorts: a story with a turn, a claim that stops the scroll, a payoff "
-              "that lands inside the clip. Each moment must stand alone without the rest of the episode. You find the "
-              "ideas yourself; nobody gives you a topic.")
+              "that lands inside the clip. Each moment must stand alone without the rest of the episode. Prefer a moment "
+              "that names things a picture can show as themselves: real people, companies, places, products, documents, "
+              "numbers. You find the ideas yourself; nobody gives you a topic.")
     used = ctx.windows_used()
     content = (f"# Who is in it (the acquisition record)\n{identity_text(src)}\n\n"
                f"# Styles a film can take (one each). These are the ones not used in the last three films:\n{style_menu(allowed)}\n\n"
@@ -189,17 +226,45 @@ def ideas(ctx):
                 spend=[dict(stage="ideas", what="find moments", **use)])
 
 
-HOUSE = (" House rules, binding: every card and every piece of type sits inside x 0.05-0.95 and y 0.10-0.80 (a card 0.24 "
-         "high is centred at y 0.66 or higher), clear of faces and of the mark at the top right. A found picture is used "
-         "whole or nearly whole, its subject filling the frame and readable in half a second on a phone: never crop deep "
-         "into a wide photo, and never grade a found picture darker. A sound sits at least 9 dB under the voice.")
+HOUSE = (" House rules, binding: every piece of type sits inside x 0.05-0.95 and y 0.10-0.80, clear of faces and of the "
+         "mark at the top right; the name chip is small, inside y 0.70-0.78, once.")
 
 
 def _pictures_line(rows):
-    rows = [r for r in rows or [] if isinstance(r, dict) and r.get("shows")]
+    rows = [r for r in rows or [] if isinstance(r, dict) and (r.get("shows") or r.get("name"))]
     if not rows:
         return ""
-    return " Pictures to find: " + "; ".join(f"on \"{r.get('on', '')}\": {r['shows']}" for r in rows) + "."
+    return (" The engine's pictures, for your information only (place none of them): "
+            + "; ".join(f"on \"{r.get('on', '')}\": {r.get('name') or r.get('shows')}" for r in rows) + ".")
+
+
+PICTURES = (
+    "\"pictures\": [7-10 items, in the order he says them, each {\"on\": the quoted words it lands on (its most stressed "
+    "word first), \"at\": the seconds printed before the first of those words, \"hold\": seconds on screen (1.2-2.6), "
+    "\"kind\": \"named\" | \"thing\" | \"design\", and: "
+    "for \"named\" (a real person, company, place, building, product, event or document he names or plainly points to; "
+    "a real archive photograph will be searched in Wikimedia Commons and checked by eye): \"name\" its usual English "
+    "name, \"is\" person|company|place|product|event|document, \"searches\" one to three Commons searches, the most "
+    "specific first (the person at the age or in the act the story is about, the company's building or first product, "
+    "the document itself) and the bare name last, \"must_show\" one plain sentence on what the picture must visibly "
+    "show, \"shows\" what it is, in eight words; "
+    "for \"thing\" (an unnamed physical thing he points at): the same fields, \"name\" being what an archive would "
+    "title it; "
+    "for \"design\" (a number or a comparison carries the story, or he describes a paper nobody can photograph): "
+    "\"design\": {\"kind\": \"number\" (one figure) | \"versus\" (two named sides with their values) | \"bars\" (two to "
+    "four amounts to compare) | \"document\" (the paper he describes: an email, an invoice, a term sheet, drawn as "
+    "that paper with the line that matters marked), \"title\": at most four words or \"\", \"parts\": [{\"value\": at "
+    "most twelve characters, \"label\": at most five words, \"n\": the value as a plain number}], \"lines\": for a "
+    "document, three to five short lines of the paper in his words, \"mark\": the one line to mark}, and \"shows\"}. "
+    "Every word and number of a design comes from what he says; never a fact he does not say, and never his sentence "
+    "set again as type: the captions already say it. Prefer \"named\": a film about real people and companies shows "
+    "them, each as an archive would hold them (the founder at the age of the story, the first product, the building, "
+    "the document itself). For a \"thing\", ask for the famous or historical instance an archive keeps, not the "
+    "everyday one. At most two designs. Never ask for a generic stock scene.], "
+    "\"hook\": {\"picture\": the index in pictures of the one that opens the film at frame 0 (the picture a stranger "
+    "would stop for: the most famous face or object of the story), \"line\": the hook as at most five words, his own "
+    "words where they work, \"accent\": the one or two words of that line that carry it}, "
+    "\"payoff\": {\"on\": the quoted words of the payoff line, \"at\": the seconds of its first word}, ")
 
 
 def script(ctx, ideas_out):
@@ -213,44 +278,48 @@ def script(ctx, ideas_out):
     words = json.load(open(_words_file(ctx)))
     near = [(t, w) for t, w in words if float(idea["t0"]) - 25 <= t <= float(idea["t1"]) + 25]
     system = ("You are the script stage of Valmera's podcast shorts workflow. You turn one chosen moment into the exact "
-              "clip and the direction a film Director will follow. You cut on word edges, start on the first word of "
-              "the thought (no throat-clearing), and end on the payoff with a breath of tail.")
+              "clip, the pictures that will be shown on his words, and the direction a film Director will follow. You cut "
+              "on word edges, start on the first word of the thought (no throat-clearing), and end on the payoff with a "
+              "breath of tail.")
     recipe = RECIPES.get(style["id"]) or {}
     made = (f"# How this style is made (binding: the engine does this part, you direct the rest around it)\n{recipe['made']}\n\n"
             if recipe else "")
     content = (f"# The moment\n{json.dumps(idea, ensure_ascii=False)}\n\n# The style\n{style_menu([style])}\n"
                f"Concepts in its spine are from Valmera's ALIEN list: {', '.join(style['spine'])}. Use what the footage can carry; "
                "a device the engine cannot draw well is left out rather than faked.\n\n" + made +
+               f"# What the engine adds to every film (binding)\n{ENGINE}\n\n"
                f"# Taste rules\n{TASTE}\n\n# Who is in it\n{identity_text(ctx.source)[:1500]}\n\n"
                "# Words near the moment: seconds word\n" + " ".join(f"{t:.2f} {w}" for t, w in near) + "\n\n"
                "Return JSON only: {\"in\": seconds (a little before the first word), \"out\": seconds (0.3-0.8 s after the last word), "
                "\"title\": the film's title, \"hook_line\": exact words heard first, \"close_line\": exact last words, "
-               "\"speakers\": number of people heard, \"pictures\": [3-6 items {\"on\": the quoted words it lands on, \"shows\": "
-               "the physical thing a camera can film or an archive holds, specific, never a person's likeness}], "
-               "\"direction\": 170-260 words to the Director: the story in one line; the first second, frame by frame (what is on "
-               "screen at frame 0 and what lands in the first 30 frames); how the style above looks on THIS footage; each picture "
-               "and the words it lands on; the sounds and their partners; the close; names to identify with a chip and when; and "
-               "what stays plain. Anchor every moment on the quoted words, never on seconds: the Director sees the clip from 0, not "
-               "the episode's clock. Write it as an editor's brief, not a list of effects.}")
+               "\"speakers\": number of people heard, " + PICTURES +
+               "\"direction\": 120-200 words to the Director: the story in one line; how the style above looks on THIS footage; "
+               "the one framing of the take; the caption seat and which words take the second voice; the name chip and the words "
+               "it lands on; the close; and what stays plain. Anchor every moment on the quoted words, never on seconds: the "
+               "Director sees the clip from 0, not the episode's clock. Write it as an editor's brief, not a list of effects.}")
     spend, s = [], {}
     for _ in range(2):                                   # an answer cut short or missing a field is asked for once more
-        text, use = llm.ask(system, content, effort="medium", max_tokens=14000)
-        spend.append(dict(stage="script", what="clip and direction", **use))
+        text, use = llm.ask(system, content, effort="medium", max_tokens=16000)
+        spend.append(dict(stage="script", what="clip, pictures and direction", **use))
         try:
             s = llm.json_block(text)
         except ValueError:
             s = {}
-        if isinstance(s, dict) and all(s.get(k) not in (None, "") for k in ("in", "out", "direction")):
+        if isinstance(s, dict) and all(s.get(k) not in (None, "") for k in ("in", "out", "direction")) and s.get("pictures"):
             break
     else:
-        raise RuntimeError("the script stage gave no clip and direction")
+        raise RuntimeError("the script stage gave no clip, pictures and direction")
     t0, t1 = float(s["in"]), float(s["out"])
     if not (5.0 <= t1 - t0 <= 90.0):
         raise RuntimeError(f"script window {t0}-{t1} is not a short")
+    pictures = [r for r in s.get("pictures") or [] if isinstance(r, dict)]
     return dict(title=s.get("title") or idea.get("title"), style=style, window=[round(t0, 2), round(t1, 2)], source=ctx.source,
                 hook_line=s.get("hook_line"), close_line=s.get("close_line"), speakers=int(s.get("speakers") or 1),
-                direction=f"Style: {style['name']}. " + s["direction"].strip() + _pictures_line(s.get("pictures")) + HOUSE + (recipe.get("house") or ""),
-                pictures=s.get("pictures") or [], passes=recipe.get("passes") or [], look=recipe.get("look"), idea=idea,
+                direction=(f"Style: {style['name']}. " + s["direction"].strip() + " " + ENGINE + _pictures_line(pictures) + HOUSE
+                           + (recipe.get("house") or "")),
+                pictures=pictures, hook=s.get("hook") if isinstance(s.get("hook"), dict) else None,
+                payoff=s.get("payoff") if isinstance(s.get("payoff"), dict) else None,
+                passes=recipe.get("passes") or [], look=recipe.get("look"), accent=recipe.get("accent"), sounds=recipe.get("sounds"), idea=idea,
                 spend=spend)
 
 
@@ -262,6 +331,19 @@ def _alien():
         sys.path.insert(0, d)
     import alien_render
     return alien_render
+
+
+def supply(ctx, script):
+    """The shared supply, then the story's own pictures: every person, company, place and document the script named
+    goes down the named route and is checked by eye (alien/earned.py). Nothing found is nothing shown."""
+    r = chain.supply(ctx, script)
+    _alien()
+    import brand
+    import earned
+    e = earned.find(ctx, script, llm, brand.worker_dir())
+    r["earned"] = dict(planned=e.get("plan"), wanted=e.get("wanted"), found=e.get("found"), said=e.get("said"), credits=e.get("credits"))
+    r["spend"] = (r.get("spend") or []) + (e.get("spend") or [])
+    return r
 
 
 def score(ctx, script):
@@ -286,6 +368,10 @@ def render(ctx, script, sc):
 def check(ctx, rd, sc):
     """The shared finish and checks, plus what the alien pass measured on its own film: a claim is a number."""
     r = chain.finish_and_check(ctx, rd, sc)
+    if rd.get("plan") and os.path.exists(rd["plan"]):   # the sounds of the plan that was drawn, not of the Director's draft
+        m = chain.no_music(rd["plan"])
+        r["checks"]["ok"] = bool(r["checks"]["length_ok"] and r["checks"]["mark_ok"] and r["checks"]["endcard_ok"] and r["checks"]["loud_ok"] and m["ok"])
+        r["checks"]["music"] = m
     if rd.get("alien"):
         r["checks"]["alien"] = rd["alien"]
         r["checks"]["ok"] = bool(r["checks"]["ok"] and rd["alien"].get("ok", True))

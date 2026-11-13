@@ -83,6 +83,8 @@ def voice_light(film, l1, adir, out):
             light = PEAK * e * fall * (BACK + (1.0 - BACK) * person)
         else:                                                      # a picture: it glows with the same lamp,
             a0 = next((a for a, b in bounds if a <= i < b), 0)     # brought to the take's exposure first
+            if a0 == 0:                                            # the hook picture is fully lit: frame 0 is read in daylight,
+                ep = 1.0                                           # and the dark begins on the cut to him
             if a0 not in expo:
                 g0 = lut[fr[::8, ::8]].mean(axis=2)
                 expo[a0] = float(np.clip(0.55 / max(np.percentile(g0, 97), 1e-3), 1.0, 3.0))
@@ -130,6 +132,132 @@ def voice_light(film, l1, adir, out):
              pause_frames=int(quiet.sum()), lit_area_speaking=round(float(lit_px[speak].mean()) if speak.any() else 0.0, 3),
              flashes_per_s=S.flashes_per_second(np.clip(lum * scale, 0, 1)))
     m["ok"] = bool(m["corr_light_lamp_in_shot"] >= 0.8 and m["flashes_per_s"] <= 3.0 and (not quiet.any() or m["lum_pause"] < 0.35 * max(m["lum_speaking"], 1e-6)))
+    return m
+
+
+ROOM_LOW, ROOM_HIGH = 0.50, 1.60                   # the room's exposure in a pause and on his loudest phrase
+PRE_F, POST_F = 12, 10                             # a picture lights the room this many frames before it cuts in, and after it leaves
+SCREEN, LAMP = 0.85, 0.75                          # how strongly a coming picture and a standing card light him
+
+
+def colour_of(fr_lin):
+    """A picture's light: its mean colour, lifted so a dark photograph still throws a hue."""
+    c = fr_lin.reshape(-1, 3).mean(axis=0)
+    return (c / max(float(c.max()), 1e-4)) * min(max(float(c.mean()) * 3.2, 0.35), 1.0)
+
+
+def room_light(film, l1, adir, out):
+    """ALIEN L1 and L4, The Room Listens. He stays as he was shot. The room behind him is exposed by the level of his
+    own voice, frame by frame; a picture that is about to cut in lights him and the wall in its own colour for a few
+    frames before it arrives and after it leaves, as a screen lights a room; a card standing in the frame is a lamp
+    whose light falls off with distance. Matte, level and the plan's own cuts: signal only."""
+    n = int(l1["dur_f"])
+    W, H = l1["frame"]
+    cuts = L.cuts(l1)
+    tp, mp = os.path.join(adir, "track.npy"), os.path.join(adir, "matte.npy")
+    if not os.path.exists(tp):
+        np.save(tp, S.track(S.faces(film, n), cuts, n))
+    if not os.path.exists(mp):
+        S.matte(film, cuts, n, mp)
+    M = np.load(mp, mmap_mode="r")
+    lev = S.level(film, n)
+    env = S.envelope(lev, attack_f=3.0, release_f=20.0)            # phrases, not syllables: a room does not blink
+    pics = sorted(L.picture_shots(l1))
+    cards = L.cards(l1)
+    on_pic = np.zeros(n, bool)
+    for a, b in pics:
+        on_pic[a:b] = True
+    lut = (np.arange(256, dtype=np.float32) / 255.0) ** 2.2
+    lut75 = lut ** 0.75                                            # light needs something to fall on: his skin takes it, black cloth barely
+    back = (np.clip(np.arange(4097, dtype=np.float32) / 4096.0, 0, 1) ** (1 / 2.2) * 255.0 + 0.5).astype(np.uint8)
+    wanted = {a + 1 for a, b in pics} | {b - 2 for a, b in pics}
+    tint = {}
+    last = max(wanted) if wanted else -1
+    for i, fr in enumerate(S.frames_of(film, S.GW, S.GH)):         # the colour each picture arrives and leaves with
+        if i in wanted:
+            tint[i] = colour_of(lut[fr])
+        if i >= last:
+            break
+    glow = np.zeros((n, 3), np.float32)                            # per frame of the take: the light of the picture next door
+    for a, b in pics:
+        ca, cb = tint.get(a + 1), tint.get(b - 2)
+        for i in range(max(a - PRE_F, 0), a):
+            if not on_pic[i] and ca is not None:
+                glow[i] = np.maximum(glow[i], ca * SCREEN * ((i - (a - PRE_F) + 1) / PRE_F) ** 2)
+        for i in range(b, min(b + POST_F, n)):
+            if not on_pic[i] and cb is not None:
+                glow[i] = np.maximum(glow[i], cb * SCREEN * 0.7 * (1.0 - (i - b) / POST_F) ** 2)
+    gy, gx = np.mgrid[0:S.GH, 0:S.GW].astype(np.float32)
+    wr = writer(out + ".part.mp4", W, H)
+    room, him, spill = np.zeros(n, np.float32), np.ones(n, np.float32), np.zeros(n, np.float32)
+    i = -1
+    for i, fr in enumerate(S.frames_of(film, W, H)):
+        if i >= n:
+            break
+        if on_pic[i]:
+            wr.stdin.write(fr.tobytes())
+            continue
+        pm = M[i].astype(np.float32) / 255.0
+        person = cv2.GaussianBlur(pm, (0, 0), 1.6)
+        g = ROOM_LOW + (ROOM_HIGH - ROOM_LOW) * float(min(env[i], 1.0))
+        gain = person + (1.0 - person) * g                         # he stays; the room answers
+        add = None
+        if glow[i].max() > 1e-3:                                   # the screen's light: on him first, a little on the wall
+            add = (0.30 + 0.70 * person)[:, :, None] * glow[i][None, None, :]
+        small = None
+        for a, b, box in cards:                                    # a card is a lamp: its own colour, falling off with distance
+            if not (a <= i < b):
+                continue
+            x0, y0, x1, y1 = [int(round(v)) for v in (box[0] * S.GW, box[1] * S.GH, box[2] * S.GW, box[3] * S.GH)]
+            x0, y0, x1, y1 = max(x0, 0), max(y0, 0), min(x1, S.GW), min(y1, S.GH)
+            if x1 - x0 < 2 or y1 - y0 < 2:
+                continue
+            if small is None:
+                small = cv2.resize(fr, (S.GW, S.GH), interpolation=cv2.INTER_AREA)
+            c = colour_of(lut[small[y0:y1, x0:x1]])
+            dx = np.maximum(np.maximum(x0 - gx, gx - x1), 0.0)
+            dy = np.maximum(np.maximum(y0 - gy, gy - y1), 0.0)
+            fall = 1.0 / (1.0 + (dx * dx + dy * dy) / (0.39 * S.GW) ** 2)
+            fall[y0:y1, x0:x1] = 0.0                               # the lamp does not light itself
+            k = min((i - a + 1) / 4.0, (b - i) / 3.0, 1.0)
+            lamp = (LAMP * k * fall * (0.25 + 0.75 * person))[:, :, None] * c[None, None, :]
+            add = lamp if add is None else add + lamp
+        y = lut[fr] * cv2.resize(gain, (W, H), interpolation=cv2.INTER_LINEAR)[:, :, None]
+        if add is not None:
+            addf = cv2.resize(add, (W, H), interpolation=cv2.INTER_LINEAR)
+            y += lut75[fr] * addf * 0.9 + addf * 0.012
+            spill[i] = float(add.max())
+        hi = y > 0.8                                               # a soft shoulder instead of a clip
+        if hi.any():
+            y[hi] = 0.8 + 0.2 * np.tanh((y[hi] - 0.8) / 0.2)
+        o = back[np.clip(y * 4096.0, 0, 4096).astype(np.uint16)]
+        wr.stdin.write(o.tobytes())
+        sin = lut[cv2.resize(fr, (S.GW, S.GH), interpolation=cv2.INTER_AREA)].mean(axis=2)
+        sout = lut[cv2.resize(o, (S.GW, S.GH), interpolation=cv2.INTER_AREA)].mean(axis=2)
+        wall = (1.0 - pm) * (sin > 0.004)                          # the room where it holds any light at all
+        if wall.sum() > 50:
+            room[i] = float((sout * wall).sum() / max(float((sin * wall).sum()), 1e-6))     # the room's exposure as drawn: out over in
+        if pm.sum() > 50:
+            him[i] = float((sout * pm).sum() / max(float((sin * pm).sum()), 1e-6))
+    wr.stdin.close()
+    if wr.wait() != 0:
+        raise RuntimeError("the encoder failed on the room's light")
+    if i + 1 < n:
+        raise RuntimeError(f"the film gave {i + 1} frames, the plan has {n}")
+    os.replace(out + ".part.mp4", out)
+    take = ~on_pic
+    plain = take & (spill < 1e-3) & (room > 0)
+    c = float(np.corrcoef(room[plain], env[plain])[0, 1]) if plain.sum() > 20 and room[plain].std() > 0 and env[plain].std() > 0 else 0.0
+    speak, quiet = plain & (env > 0.5), plain & (env < 0.08)
+    m = dict(device="room_light", alien="L1+L4", frames=n, take_frames=int(take.sum()),
+             corr_room_voice=round(c, 3),
+             room_gain_speaking=round(float(room[speak].mean()) if speak.any() else 0.0, 3),
+             room_gain_pause=round(float(room[quiet].mean()) if quiet.any() else 0.0, 3),
+             him_gain_plain=round(float(him[plain].mean()) if plain.any() else 1.0, 3),
+             lit_by_pictures_frames=int((take & (spill >= 0.02)).sum()), pictures=len(pics), cards=len(cards),
+             flashes_per_s=S.flashes_per_second(np.clip(room / max(ROOM_HIGH, 1e-6) * 0.5, 0, 1)))
+    m["ok"] = bool(m["corr_room_voice"] >= 0.8 and m["flashes_per_s"] <= 3.0 and abs(m["him_gain_plain"] - 1.0) <= 0.12
+                   and (not pics or m["lit_by_pictures_frames"] > 0))
     return m
 
 
@@ -280,14 +408,14 @@ def second_camera(film, l1, adir, out):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["voice_light", "second_camera"])
+    ap.add_argument("cmd", choices=["voice_light", "second_camera", "room_light"])
     ap.add_argument("--film", required=True)
     ap.add_argument("--l1", required=True)
     ap.add_argument("--dir", required=True)
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     l1 = json.load(open(a.l1))
-    m = {"voice_light": voice_light, "second_camera": second_camera}[a.cmd](a.film, l1, a.dir, a.out)
+    m = {"voice_light": voice_light, "second_camera": second_camera, "room_light": room_light}[a.cmd](a.film, l1, a.dir, a.out)
     mp = os.path.join(a.dir, f"measure_{a.cmd}.json")
     json.dump(m, open(mp + ".part", "w"), indent=1)
     os.replace(mp + ".part", mp)
