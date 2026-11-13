@@ -2764,6 +2764,7 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     if not ledger["asks"]:
         return ""
     done_by = None
+    reset_note = _typed_start_from_upload(ctx, ledger, job)
     if ledger["route"] == "film" and cfg["director"]:
         got = asks.direct_film(ctx, worker_db, job, session_id, cfg)
         ledger["routed"] = {"to": "director", **{k: got.get(k) for k in ("version", "fell", "applied", "s")}}
@@ -2774,6 +2775,13 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
         else:
             done_by = ("Asks of kind film are about the customer's whole upload: work from the full "
                        "upload, not from an automatic first cut.")
+            if cfg.get("pass", True) and asks.pass_asks(ledger["asks"]):
+                # The Director could not take it (a long source, photos only): the whole-film part
+                # of the request still gets a route that does all of it, not the loop's first minute.
+                done_by = _typed_pass(ctx, ledger, cfg, job) + "\n" + done_by
+    elif ledger["route"] == "pass" and cfg.get("pass", True):
+        ledger["routed"] = {"to": "pass"}
+        done_by = _typed_pass(ctx, ledger, cfg, job)
     elif ledger["route"] == "patch" and cfg["patch"]:
         from score import patch
         got = patch.run(ctx, ledger, quality_verifier.request_text_for(ctx))
@@ -2786,12 +2794,67 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
         ledger["routed"] = {"to": "loop"}
     print(f"[asks] job {job.get('id')}: {len(ledger['asks'])} ask(s), route {ledger['route']} -> "
           f"{json.dumps(ledger.get('routed'), default=str)[:240]}", flush=True)
+    if reset_note:
+        done_by = reset_note + ("\n" + done_by if done_by else "")
     return asks.editor_note(ledger, done_by)
+
+
+def _typed_start_from_upload(ctx, ledger, job):
+    """The ledger model read the request as being about the upload while the current film is the
+    automatic first cut nobody has built on (p5624, 12 Nov replay: "work only on the first news story
+    ... keep my narration and the 16:9 format" ran on the product's 52 s vertical cut of a 15 min show,
+    and nothing could be done). The edit starts again from the full upload, as one version, before
+    any route runs. Set logic on the model's field and the stored origin; never raises."""
+    origin = getattr(ctx, "request_edit_origin", None) or {}
+    if ledger.get("start") != "upload" or origin.get("made_by") != "automatic_first_cut":
+        return ""
+    if int(origin.get("customer_requests_since") or 0) > 0 or not getattr(ctx, "has_main_video", False):
+        return ""
+    try:
+        before = ctx.latest_edl()["version"]
+        result = str(agent_tools.reset_edit(ctx))
+    except dbx.JobLeaseLost:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the routes run on the current film, as before
+        print(f"[asks] job {job.get('id')}: start from the upload skipped: {str(exc)[:160]}", flush=True)
+        return ""
+    if not result.startswith("EDL v"):
+        return ""
+    ledger["reset"] = {"from": before, "to": (getattr(ctx, "versions_written", None) or [None])[-1]}
+    print(f"[asks] job {job.get('id')}: started from the full upload (v{before} was the automatic first cut)", flush=True)
+    return (f"The current film was the automatic first cut (v{before}), and this request is about the upload: "
+            f"the edit now starts from the full upload as EDL v{ledger['reset']['to']}. Work on that; say in "
+            "the reply that you edited their full video.")
+
+
+def _typed_pass(ctx, ledger, cfg, job):
+    """score.patch.throughout over the whole film; the editor's note says what it did and left."""
+    from score import patch
+    request = quality_verifier.request_text_for(ctx)
+    got = patch.throughout(ctx, ledger, request, cfg.get("pass_s", 600.0))
+    routed = ledger.setdefault("routed", {"to": "pass"})
+    routed["pass"] = {k: got.get(k) for k in ("version", "fell", "applied", "units", "of_units", "shots", "s")}
+    routed["pass"]["pictures"] = {k: (got.get("pictures") or {}).get(k) for k in ("asked", "placed")}
+    routed["pass"]["dropped"] = len(got.get("dropped") or [])
+    routed["usage"] = got.get("usage")
+    print(f"[asks] job {job.get('id')}: whole-film pass -> {json.dumps(routed['pass'], default=str)[:400]}", flush=True)
+    return patch.pass_note(got)
 
 
 def _asks_checkpoint(ctx):
     return {"ask_ledger": getattr(ctx, "ask_ledger", None),
             "ask_verdict": getattr(ctx, "ask_verdict", None)}
+
+
+def _asks_summary(ctx):
+    """The ledger as the message meta keeps it, or None. Never raises."""
+    if not getattr(ctx, "ask_ledger", None):
+        return None
+    try:
+        from score import asks
+        return asks.summary(ctx.ask_ledger, getattr(ctx, "ask_verdict", None))
+    except Exception:  # noqa: BLE001 - a record that can't be written never stops the reply
+        return None
 
 
 def _asks_check(ctx, draft, allow_repair=True):
@@ -2808,7 +2871,9 @@ def _asks_check(ctx, draft, allow_repair=True):
         return None
     preview = getattr(ctx, "last_preview", None) or {}
     if str(preview.get("edl_version")) != str(row.get("version")):
-        preview = None
+        # This request rendered nothing of this version (it changed nothing): the version's own
+        # earlier preview, when there is one. Never a preview of another version.
+        preview = asks.stored_preview(ctx, row.get("version"))
     previous = getattr(ctx, "ask_verdict", None) or {}
     if previous.get("edl_version") == row.get("version") and previous.get("draft") == (draft or "")[:200]:
         verdict = previous
@@ -7325,15 +7390,24 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         # WAITING on them, not blocked: "blocked" filed a P0
                         # ticket for every question the editor asked
                         # (ops_loop.intake files partial / blocked only).
+                        # The ask ledger stays on a question too (12 Nov replay
+                        # of p5345: the turn asked which track and the ledger
+                        # of 14 asks was lost); its asks are open until the
+                        # customer answers.
+                        _asked_ledger = _asks_summary(ctx)
                         worker_db.run(dbx.add_message, session_id,
                                       "assistant", q.question,
                                       {"ask_user": True,
                                        "edl_version": _cur_v,
-                                       "outcome": AWAITING_USER})
+                                       "outcome": AWAITING_USER,
+                                       **({"ask_ledger": _asked_ledger}
+                                          if _asked_ledger else {})})
                         _complete_adopted_steers(ctx, worker_db, job)
                         return {"status": "awaiting_user",
                                 "steps": total_steps, "timings": timings,
-                                "outcome": AWAITING_USER, "billable": False}
+                                "outcome": AWAITING_USER, "billable": False,
+                                **({"ask_ledger": _asked_ledger}
+                                   if _asked_ledger else {})}
                 except agent_tools.FeatureUpgrade as gate:
                     # Shorts and Website demos come with Pro and Max (owner,
                     # 30 Oct 2026; feature_gate.py). The tool did not run;
