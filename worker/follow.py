@@ -751,8 +751,11 @@ def _stream_gray(path, a, b, fps, width, height, deadline, cancel=None,
     """Yield the grayscale frames of SOURCE [a, b] at ``fps`` as they decode
     (frame i: the one on screen at a + i/fps, SAMPLE_VF);
     stops (and kills ffmpeg) at ``deadline`` (time.monotonic) or when
-    ``cancel`` is set. ``state`` receives the frame count, the exit code and
-    the tail of ffmpeg's stderr."""
+    ``cancel`` is set. ``state`` receives the frame count, the exit code, the
+    tail of ffmpeg's stderr and ``killed``: True only when ffmpeg was stopped
+    before its output ended (the deadline, ``cancel``, or the consumer closing
+    this generator early) — never for an ffmpeg that ended its output itself,
+    which is waited for, so its exit code and error are what callers see."""
     import tempfile
     import numpy as np
     cmd = ["ffmpeg", "-v", "error", "-nostdin", "-threads", str(max(1, int(threads))),
@@ -783,18 +786,26 @@ def _stream_gray(path, a, b, fps, width, height, deadline, cancel=None,
     timer.daemon = True
     timer.start()
     size = width * height
+    ended = False
     try:
         while True:
             if (cancel is not None and cancel.is_set()) or time.monotonic() > deadline:
                 break
             buf = proc.stdout.read(size)
             if len(buf) < size:
+                ended = True
                 break
             state["frames"] += 1
             yield np.frombuffer(buf, np.uint8).reshape(height, width)
     finally:
         timer.cancel()
-        if proc.poll() is None:
+        # An ffmpeg whose output ended is exiting by itself, but the kernel
+        # can make it reapable a moment after the pipe closes (poll() still
+        # None — most often on a loaded host). Killing it there called a
+        # failed open "killed", measure then took it for the deadline's stop
+        # and not a decode error, and a stream that read nothing was never
+        # staged (check-editor #146).
+        if not ended and proc.poll() is None:
             stop()
         try:
             proc.stdout.close()
@@ -803,7 +814,11 @@ def _stream_gray(path, a, b, fps, width, height, deadline, cancel=None,
         try:
             proc.wait(timeout=10)
         except Exception:
-            pass
+            try:                     # ended its output but never exited
+                proc.kill()
+                proc.wait(timeout=5)
+            except Exception:
+                pass
         state["rc"] = proc.returncode
         try:
             err.seek(0)

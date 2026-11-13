@@ -698,13 +698,48 @@ def test_a_resumed_call_waits_on_the_media_lane_job_already_running(
     assert local.full < 30
 
 
+class _LateReap(subprocess.Popen):
+    """ffmpeg in the moment after it closes its output and before the kernel
+    makes it reapable: the first poll() still answers None. Real runs land
+    there now and then (1-2 in 300 on an idle Mac; check-editor run #146 on a
+    runner 40 minutes into the suite), so the tests put every run there."""
+
+    def poll(self):
+        if not getattr(self, "_reaped_late", False):
+            self._reaped_late = True
+            return None
+        return super().poll()
+
+
+@FFMPEG
+def test_a_stream_that_ends_by_itself_is_never_reported_killed(
+        monkeypatch, tmp_path, walk_proxy):
+    """ffmpeg that ends its output on its own (here: the source is missing)
+    is waited for, never killed — even when it is not yet reapable the
+    instant its output ends. A kill there was reported as the deadline's,
+    which hid the decode error that sends a stream back to staging."""
+    monkeypatch.setattr(subprocess, "Popen", _LateReap)
+    st = {}
+    frames = list(follow._stream_gray(f"file://{tmp_path}/missing.mp4", 4.0, 9.0,
+                                      4.0, 64, 36, time.monotonic() + 60, state=st))
+    assert frames == [] and st["frames"] == 0 and not st["killed"], st
+    assert st["rc"] not in (None, 0) and "missing.mp4" in st["stderr"], st
+    # a consumer that stops early still stops (and kills) ffmpeg
+    st = {}
+    gen = follow._stream_gray(str(walk_proxy), 0.0, 9.0, 4.0, 64, 36,
+                              time.monotonic() + 60, state=st)
+    next(gen)
+    gen.close()
+    assert st["frames"] == 1 and st["killed"] and st["rc"] is not None, st
+
+
 @FFMPEG
 def test_the_media_lane_range_reads_the_proxy_instead_of_staging_it(
         monkeypatch, tmp_path, walk_proxy):
     """A cold batch shard used to download the whole proxy (production's run
     to ~400 MB: 25-60 s) before measuring 40 s of it. It now range-reads a
     presigned URL (the proxy is +faststart); a stream that reads nothing
-    falls back to staging it."""
+    falls back to staging it — however late ffmpeg becomes reapable."""
     follow.FACE_STORE.clear()
     monkeypatch.setattr(follow, "detect", _Detector())
     monkeypatch.setattr(config, "TMP_DIR", str(tmp_path))
@@ -724,12 +759,16 @@ def test_the_media_lane_range_reads_the_proxy_instead_of_staging_it(
     out = follow.run_faces_job(None, {"payload": payload})
     assert out["ok"] and out["report"]["source"] == "stream" and staged == []
     assert len(follow.unpack_frames(out["frames"])) >= 18
-    # a URL that reads nothing: the proxy is staged and measured
+    # a URL that reads nothing: the proxy is staged and measured, also when
+    # the failed ffmpeg is not yet reapable as its output ends
     follow.FACE_STORE.clear()
     monkeypatch.setattr(storage, "presign_get",
                         lambda key, expires=3600: f"file://{tmp_path}/missing.mp4")
+    monkeypatch.setattr(subprocess, "Popen", _LateReap)
     out = follow.run_faces_job(None, {"payload": payload})
-    assert out["ok"] and out["report"]["source"] == "staged" and staged == [KEY]
+    assert out["report"].get("stream_error"), out["report"]
+    assert out["ok"] and out["report"]["source"] == "staged" and staged == [KEY], \
+        out["report"]
     follow.FACE_STORE.clear()
 
 
