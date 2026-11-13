@@ -107,16 +107,18 @@ def script(ctx, ideas_out):
                            json.dumps([(i.get("title"), i.get("style"), (i.get("supply") or {}).get("covered")) for i in ideas_out["ideas"]])[:600])
     card = able[pick["style"]]
     spend, notes, rep, sc = [], ctx.args.get("notes"), None, None
-    for attempt in range(2):
+    for attempt in range(3):
         sc, use = writer.write(pick, card, FORM, voices=card.get("voice"), notes=notes)
         spend.append(dict(stage="script", attempt=attempt, **use))
         rep = writer.verify(sc)
+        json.dump(dict(script=sc, verify=rep), open(os.path.join(ctx.run_dir, f"script_attempt{attempt}.json"), "w"), ensure_ascii=False, indent=1)
         n_words = writer.words_of(sc)
         lo, hi = writer.FORMS[FORM]["words"]
         problems = []
         if rep["facts_unverified"]:
-            problems.append(f"these facts' quotes were not found on their pages when fetched: {rep['facts_unverified']}; "
-                            "quote the page word for word, or use another source, or drop the fact")
+            why = {r["id"]: (r.get("error") or "the quote is not on the page") + f" ({r['url']})" for r in rep["facts"] if r["id"] in rep["facts_unverified"]}
+            problems.append(f"these facts did not verify: {json.dumps(why)}; quote a readable page word for word (read it with web_fetch "
+                            "first), or use another source, or drop the fact")
         if rep["numbers_unbacked"]:
             problems.append(f"these numbers are on screen but in no verified quote: {rep['numbers_unbacked']}")
         if not lo * 0.85 <= n_words <= hi * 1.15:
@@ -135,16 +137,28 @@ def script(ctx, ideas_out):
 
 # ----------------------------------------------------------------- supply
 
-WHO_SYSTEM = ("You identify people in an archive photograph for a film editor. You get the photograph with numbered boxes on "
-              "the faces a detector found, the photograph's own description from Wikimedia Commons (which often lists who stands "
-              "where, row by row), and the names a film needs. Match each name to a box only when the description's row and "
-              "position, or something plainly visible, places them there. Never guess from a face: when it is not clear, answer null.")
+WHO_SYSTEM = ("You place a film's camera inside one archive photograph for its editor. You get the photograph with numbered boxes on "
+              "the faces a detector found, the photograph's own description from Wikimedia Commons (which often says who stands where), "
+              "the people the film names with where the writer believes they are, and the places the camera must go. For a person, give "
+              "their face box only when the description's position, or something plainly visible, places them there; never guess from a "
+              "face. For anything else (an object, a group, a part of the scene), give the region of the photograph that shows it. When "
+              "it cannot be placed, answer null.")
 
 
-def who_is_who(ctx, photo, people):
-    """{name: face index or None}, from the description's own positions, read by a model on the numbered photograph."""
+def photo_targets(ctx, photo, sc):
+    """{target: {"face": n} | {"box": [x0, y0, x1, y1]} | None} for every place the script's camera goes, its marks and its
+    portrait, read by a model on the photograph with its faces numbered and its own Commons description."""
     import base64
     from PIL import Image, ImageDraw, ImageFont
+    names = []
+    for s_ in sc["segments"]:
+        for k in ("look", "mark"):
+            v = s_.get(k)
+            if v and v != "whole" and v not in names:
+                names.append(v)
+    por = (sc.get("portrait") or {}).get("name")
+    if por and por not in names:
+        names.append(por)
     im = Image.open(photo["path"]).convert("RGB")
     k = min(1.0, 2400 / max(im.size))
     im = im.resize((int(im.size[0] * k), int(im.size[1] * k)))
@@ -161,16 +175,47 @@ def who_is_who(ctx, photo, people):
     im.save(p, quality=88)
     data = base64.standard_b64encode(open(p, "rb").read()).decode()
     content = [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}},
-               {"type": "text", "text": f"Description from Commons: {photo.get('description', '')[:1400]}\n\nPeople the film names, with where the "
-                                        f"writer believes they are: {json.dumps(people, ensure_ascii=False)}\n\nThere are {len(photo['faces'])} boxes, numbered "
-                                        "0 upwards, rows top to bottom and left to right. Answer JSON only: {\"who\": {name: box number or null}, "
-                                        "\"why\": {name: a few words}}"}]
-    text, use = writer.ask(WHO_SYSTEM, content, effort="high", max_tokens=6000, what="who is who")
+               {"type": "text", "text": f"Description from Commons: {photo.get('description', '')[:1600]}\n\nThe photograph, as the writer "
+                                        f"describes it: {(sc.get('photo') or {}).get('about', '')}\n\nPeople it names: "
+                                        f"{json.dumps((sc.get('photo') or {}).get('people') or [], ensure_ascii=False)}\n\nPlaces the camera goes: "
+                                        f"{json.dumps(names, ensure_ascii=False)}\n\nThere are {len(photo['faces'])} face boxes, numbered from 0. "
+                                        "Regions are fractions of the photograph's width and height, [x0, y0, x1, y1], tight around what must be "
+                                        "seen. Answer JSON only: {\"targets\": {each place exactly as written: {\"face\": box number} or "
+                                        "{\"box\": [x0, y0, x1, y1]} or null}, \"why\": {place: a few words}}"}]
+    text, use = writer.ask(WHO_SYSTEM, content, effort="high", max_tokens=8000, what="camera targets")
     got = writer.json_block(text)
-    who = {}
-    for n, v in (got.get("who") or {}).items():
-        who[n] = int(v) if isinstance(v, (int, float)) and 0 <= int(v) < len(photo["faces"]) else None
-    return who, got.get("why") or {}, use
+    out = {}
+    for n in names:
+        v = (got.get("targets") or {}).get(n)
+        if isinstance(v, dict) and isinstance(v.get("face"), (int, float)) and 0 <= int(v["face"]) < len(photo["faces"]):
+            out[n] = {"face": int(v["face"])}
+        elif isinstance(v, dict) and isinstance(v.get("box"), list) and len(v["box"]) == 4:
+            x0, y0, x1, y1 = [min(max(float(q), 0.0), 1.0) for q in v["box"]]
+            out[n] = {"box": [x0, y0, x1, y1]} if x1 - x0 > 0.005 and y1 - y0 > 0.005 else None
+        else:
+            out[n] = None
+    return out, got.get("why") or {}, use
+
+
+def portrait_of(ctx, photo, sc, sup_dir):
+    """X2's picture: the portrait's face region redrawn as its spoken sentence in tiny type."""
+    por = sc.get("portrait") or {}
+    t = (photo.get("targets") or {}).get(por.get("name")) or {}
+    if "face" in t:
+        b = photo["faces"][t["face"]]["box"]
+    elif "box" in t:
+        b = t["box"]
+    else:
+        return None
+    cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+    half = max(b[2] - b[0], (b[3] - b[1]) * photo["h"] / photo["w"]) * 0.95
+    hh = half * photo["w"] / photo["h"]
+    reg = [max(cx - half, 0), max(cy - hh * 0.85, 0), min(cx + half, 1), min(cy + hh * 1.15, 1)]
+    si = int(por.get("segment", 0))
+    sentence = sc["segments"][si]["say"] if si < len(sc["segments"]) else sc["segments"][0]["say"]
+    path, rows = F.microtext_image(photo["path"], reg, sentence, os.path.join(sup_dir, "photo", "micro.jpg"))
+    row_y = min(max((cy - reg[1]) / max(reg[3] - reg[1], 1e-6), 0.2), 0.8)
+    return dict(path=path, size=3000, region=reg, row_y=row_y)
 
 
 def supply(ctx, script):
@@ -217,25 +262,12 @@ def supply(ctx, script):
         ph["faces"] = PX.faces(ph["path"], score=0.55)
         if len(ph["faces"]) < 2:
             raise RuntimeError(f"the photograph has {len(ph['faces'])} faces a detector can find")
-        who, why, use = who_is_who(ctx, ph, sc["photo"].get("people") or [])
+        targets, why, use = photo_targets(ctx, ph, sc)
         spend.append(dict(stage="supply", **use))
-        ph["who"], ph["who_why"] = who, why
+        ph["targets"], ph["targets_why"] = targets, why
         pack["photo"] = ph
         pack["credits"] = [dict(name=ph["title"], title=ph["title"], licence=ph["licence"], credit=ph.get("credit"), page=ph.get("page"))]
-        por = sc.get("portrait") or {}
-        fi = who.get(por.get("name"))
-        if fi is not None:
-            b = ph["faces"][fi]["box"]
-            cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
-            half = (b[2] - b[0]) * 0.95
-            hh = half * ph["w"] / ph["h"]
-            reg = [max(cx - half, 0), max(cy - hh * 0.85, 0), min(cx + half, 1), min(cy + hh * 1.15, 1)]
-            si = int(por.get("segment", 0))
-            sentence = sc["segments"][si]["say"] if si < len(sc["segments"]) else sc["segments"][0]["say"]
-            path, rows = F.microtext_image(ph["path"], reg, sentence, os.path.join(sup_dir, "photo", "micro.jpg"))
-            ey = (ph["faces"][fi]["eyes"][0][1] + ph["faces"][fi]["eyes"][1][1]) / 2
-            row_y = min(max((ey - reg[1]) / max(reg[3] - reg[1], 1e-6), 0.2), 0.8)
-            pack["microtext"] = dict(path=path, size=3000, region=reg, row_y=row_y)
+        pack["microtext"] = portrait_of(ctx, ph, sc, sup_dir)
     if sid == "whole-page":
         w = json.load(open(nar["words"]))["words"]
         loud, pitch = F.voice_measures(nar["wav"], w, PX.FF)
@@ -266,6 +298,15 @@ def env_path():
 
 def score(ctx, script):
     pack = load_pack(ctx)
+    if script["style"]["id"] == "one-photograph" and "targets" not in pack["photo"]:
+        pk = os.path.join(ctx.supply, "pack.json")
+        whole = json.load(open(pk))
+        targets, why, use = photo_targets(ctx, pack["photo"], script["script"])
+        pack["photo"]["targets"], pack["photo"]["targets_why"] = targets, why
+        pack["microtext"] = portrait_of(ctx, pack["photo"], script["script"], ctx.supply)
+        whole["pack"] = pack
+        whole["record"].setdefault("spend", []).append(dict(stage="score", **use))
+        json.dump(whole, open(pk, "w"), ensure_ascii=False, indent=1)
     d = direction_of(ctx)
     sc = json.loads(json.dumps(script["script"]))
     for k, v in (d.get("script") or {}).items():          # the director's hand on the script's data; facts are checked again

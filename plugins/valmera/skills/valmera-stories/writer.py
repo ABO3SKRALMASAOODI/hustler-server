@@ -90,6 +90,11 @@ def ask_web(system, content, *, effort="high", max_tokens=32000, searches=12, fe
         d, s, f = _cost(u)
         usd, n_s, n_f, tin, tout = usd + d, n_s + s, n_f + f, tin + u.input_tokens, tout + u.output_tokens
         text = "".join(b.text for b in final.content if getattr(b, "type", "") == "text")
+        for b in final.content:
+            if getattr(b, "type", "") == "web_fetch_tool_result" and getattr(b.content, "type", "") == "web_fetch_result":
+                src = getattr(b.content.content, "source", None)
+                if getattr(src, "type", "") == "text" and getattr(src, "data", None):
+                    FETCHED[b.content.url] = src.data
         if final.stop_reason == "refusal":
             raise RuntimeError("the model refused this stage")
         if final.stop_reason != "pause_turn":
@@ -222,7 +227,10 @@ def write(idea, card, form, voices=None, notes=None, effort="high"):
                "words, \"quote\": a sentence copied exactly, word for word, from the page at url that states it, \"url\": the page}], "
                "\"named\": [{\"name\", \"is\", \"searches\", \"must_show\"} for every person, place or thing the film shows], "
                + STYLE_DATA.get(card["id"], "") + "}\n"
-               "Every digit that appears in `show` or in the style's data must appear in some fact's quote.")
+               "Every digit that appears in `show` or in the style's data must appear in some fact's quote. Every quote is checked "
+               "by fetching its URL with a plain script, so cite pages a script can read (Wikipedia, Wikimedia, archive.org, "
+               "government and university pages, a company's own newsroom) and read each one with web_fetch before quoting it; "
+               "pages behind a paywall or a bot wall (Britannica, most newspapers) cannot be checked and will be dropped.")
     text, use = ask_web(system, content, effort=effort, max_tokens=32000, searches=8, fetches=10, what="write")
     return json_block(text), use
 
@@ -255,6 +263,9 @@ def norm(s):
 
 
 _PAGES = {}
+# pages the web_fetch tool read during this process: fetched by Anthropic's servers, not written by the model, so a
+# quote is also checked against them when a site refuses this machine (a 403 to a script)
+FETCHED = {}
 
 
 def page_text(url, timeout=20):
@@ -308,8 +319,12 @@ def verify(script):
         try:
             pg = page_text(f["url"])
             r["found"] = quote_found(f.get("quote", ""), pg)
-        except Exception as e:  # noqa: BLE001 - an unreadable page verifies nothing
+            r["read"] = "here"
+        except Exception as e:  # noqa: BLE001 - an unreadable page verifies nothing here
             r["found"], r["error"] = False, str(e)[:160]
+        if not r["found"] and f.get("url") in FETCHED:
+            r["found"] = quote_found(f.get("quote", ""), norm(FETCHED[f["url"]]))
+            r["read"] = "web_fetch"
         if r["found"]:
             ok_quotes.append(norm(f.get("quote", "")))
         rows.append(r)

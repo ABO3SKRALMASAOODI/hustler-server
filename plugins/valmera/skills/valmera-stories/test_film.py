@@ -83,7 +83,7 @@ def test_style_compiles_and_passes_taste(style, supply, tmp_path):
         ph = picture(str(tmp_path), "photo", 3000, 2100, (120, 110, 100))
         ph["faces"] = [dict(box=[0.2 + 0.2 * k, 0.4, 0.26 + 0.2 * k, 0.48], eyes=[[0.22 + 0.2 * k, 0.43], [0.24 + 0.2 * k, 0.43]], score=0.9)
                        for k in range(4)]
-        ph["who"] = {"A": 0, "B": 1, "C": 2}
+        ph["targets"] = {"A": {"face": 0}, "B": {"face": 1}, "C": {"box": [0.6, 0.38, 0.7, 0.5]}}
         sup["photo"] = ph
         path, rows = F.microtext_image(ph["path"], [0.15, 0.3, 0.35, 0.6], SAYS[4], str(tmp_path / "micro.jpg"), size=600, pitch=20)
         sup["microtext"] = dict(path=path, size=600, region=[0.15, 0.3, 0.35, 0.6], row_y=0.45)

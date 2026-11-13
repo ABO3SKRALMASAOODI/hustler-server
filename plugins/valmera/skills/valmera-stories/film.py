@@ -443,12 +443,23 @@ def character_sheet(script, sup, direction=None):
 
     # ---- pictures, with designed pages on the figures the writer printed
     shots = assign_pictures(script, clock, pics, f_ovf)
-    pages = []
+    # a designed page only for a figure or a date the block does not already print (TASTE P7: say it once), and at
+    # most one every other segment, so the photographs carry the film
+    printed = [str(st.get("start")) for st in script.get("stats") or []] + [str(ovf.get("to"))] + \
+              [str(t.get("to")) for s_ in script["segments"] for t in s_.get("ticks") or []]
+    printed = [x for x in printed if x and x != "None"]
+    pages, last_i = [], -2
     for i, s in enumerate(script["segments"]):
-        for text, word in shown_items(s)[:1]:
+        if i == 0 or i - last_i < 2:
+            continue
+        for text, word in shown_items(s):
+            if not any(ch.isdigit() for ch in text) or any(x in text or text in x for x in printed):
+                continue
             t = clock.word_t(i, word) if word else clock.segs[i][0] + 0.15
             a = max(Clock.f(t) - 2, 1)
             pages.append([a, min(a + 34, Clock.f(clock.segs[i][1]) + 6), text])
+            last_i = i
+            break
     cut_pts = []
     timeline = []
     for f0, f1, name, rec in shots:
@@ -544,6 +555,17 @@ def character_sheet(script, sup, direction=None):
             ticks.append(dict(t, f=Clock.f(clock.word_t(i, t.get("word"))), seg=i, beat=s.get("beat")))
     ticks.sort(key=lambda t: t["f"])
     low_seg = next((i for i, s in enumerate(script["segments"]) if s.get("beat") == "low"), None)
+    low_stat = None
+    if low_seg is not None and stats:
+        lf = Clock.f(clock.segs[low_seg][0])
+
+        def at(st):
+            v = float(st.get("number") or 0)
+            for t in ticks:
+                if t.get("stat") == st["id"] and t["f"] <= lf:
+                    v = float(t.get("number") or 0)
+            return abs(v) / max(abs(float(st.get("max") or 0)), abs(v), 1e-9)
+        low_stat = min(stats, key=at)["id"]
     stat_rows = []
     for r, st in enumerate(stats):
         y_base = by0 + pad + row_h * r + row_h * 0.62
@@ -575,14 +597,22 @@ def character_sheet(script, sup, direction=None):
             # the bar: its length is the value against the stat's most
             frac = max(min(abs(num) / mx, 1.0), 0.012)
             bar = [bar_x0, bar_y0, bar_x0 + (bar_x1 - bar_x0) * frac, bar_y0 + 0.0042]
-            red = low_seg is not None and any(t.get("seg") == low_seg and t.get("stat") == st["id"] and t["f"] == f0 for t in mine)
-            c = pal["red"] if red else pal["accent"]
-            if red:
+            # the low point: from the low segment's first word, the stat at its worst against its most goes red and
+            # blinks, until its next change
+            red_from = None
+            if low_seg is not None and st["id"] == low_stat:
+                lf = Clock.f(clock.segs[low_seg][0])
+                if f0 <= lf < f1:
+                    red_from = lf
+            if red_from is not None:
+                if red_from > f0:
+                    P.block([f0, red_from], bar, pal["accent"], z=6)
                 blink = int(d["low_blink"])
-                ops = [(1.0 if (k // 2) % 2 == 0 else 0.0) if k < blink else 1.0 for k in range(f1 - f0)]
-                P.block([f0, f1], bar, c, z=6, op=ops)
+                ops = [(1.0 if (k // 2) % 2 == 0 else 0.0) if k < blink else 1.0 for k in range(f1 - red_from)]
+                P.block([red_from, f1], bar, pal["red"], z=6, op=ops)
+                P.events.append(red_from)
             else:
-                P.block([f0, f1], bar, c, z=6)
+                P.block([f0, f1], bar, pal["accent"], z=6)
             if prev:
                 P.hit("tick_1", f0, d["stat_db"])
         stat_rows.append(dict(id=st["id"], y=r4(y_base), right=r4(right), values=[v[1] for v in vals]))
@@ -894,7 +924,10 @@ def one_photograph(script, sup, direction=None):
     P = Plan(voices, sup["sounds"])
     key = P.image("photo", photo)
     faces = photo.get("faces") or []
-    who = photo.get("who") or {}             # name -> face index
+    targets = dict(photo.get("targets") or {})          # place -> {"face": n} | {"box": [x0, y0, x1, y1]}
+    for n, fi in (photo.get("who") or {}).items():       # an older pack: names to face indexes
+        targets.setdefault(n, {"face": fi} if fi is not None else None)
+    people = {p_.get("name") for p_ in (script.get("photo") or {}).get("people") or []}
     f_voice_end = Clock.f(clock.dur)
     n_close = 70
     f_close0 = f_voice_end - 30
@@ -923,28 +956,48 @@ def one_photograph(script, sup, direction=None):
         group = (0.5, 0.5)
     s_hook = max(s_fill * 1.02, 1.0)
 
-    # ---- the camera: a target per segment, eased moves of 16 frames, a slow drift while it holds
-    targets = []
+    def view(name):
+        """(centre, zoom) for a place in the photograph, or None."""
+        t = targets.get(name)
+        if not t:
+            return None
+        if "face" in t and t["face"] < len(faces):
+            return face_center(t["face"]), face_zoom(t["face"])
+        if "box" in t:
+            x0, y0, x1, y1 = t["box"]
+            z = min(0.86 / max(x1 - x0, 1e-3), 0.55 * H / max((y1 - y0) * Hc, 1e-3))
+            return ((x0 + x1) / 2, (y0 + y1) / 2), min(max(z, s_fill * 1.02), MAX_UP * pw / W)
+        return None
+
+    def anchor(name):
+        """Where a person's mark sits: under the face, or at the foot of the region."""
+        t = targets.get(name) or {}
+        if "face" in t and t["face"] < len(faces):
+            b = faces[t["face"]]["box"]
+            return (b[0] + b[2]) / 2, b[3] + (b[3] - b[1]) * 0.28
+        if "box" in t:
+            b = t["box"]
+            return (b[0] + b[2]) / 2, b[3] - (b[3] - b[1]) * 0.08
+        return None
+
+    # ---- the camera: a target per segment, eased moves of 18 frames, a slow drift while it holds
+    cam_t = []
     for i, s in enumerate(script["segments"]):
-        look = s.get("look")
         a = Clock.f(clock.segs[i][0]) if i else 0
         if i == 0:
-            targets.append((0, group, s_hook))
+            cam_t.append((0, group, s_hook))
             continue
-        if look in who and who[look] is not None and who[look] < len(faces):
-            fi = who[look]
-            targets.append((a - 4, face_center(fi), face_zoom(fi)))
-        else:
-            targets.append((a - 4, group, s_hook * 1.12))
+        vw = view(s.get("look"))
+        cam_t.append((a - 4, vw[0], vw[1]) if vw else (a - 4, group, s_hook * 1.08))
     cam = []
     j = 0
     prev = (group, s_hook)
     move_n = 18
     for f in range(f_close0):
-        while j + 1 < len(targets) and targets[j + 1][0] <= f:
+        while j + 1 < len(cam_t) and cam_t[j + 1][0] <= f:
             j += 1
             prev = (cam[-1][0], cam[-1][1]) if cam else prev
-        f0, (u, v), s = targets[j]
+        f0, (u, v), s = cam_t[j]
         q = ease_io(move_n)[min(max(f - f0, 0), move_n - 1)] if j else 1.0
         (pu, pv), ps = prev if j else ((u, v), s)
         # zoom moves in log space, so a dive feels even
@@ -1034,11 +1087,9 @@ def one_photograph(script, sup, direction=None):
     marks = []
     for i, s in enumerate(script["segments"]):
         m = s.get("mark")
-        if m in who and who[m] is not None and who[m] < len(faces) and m not in [x[0] for x in marks]:
-            marks.append((m, who[m], Clock.f(clock.segs[i][0]) + 10))
-    for name, fi, on in marks:
-        b = faces[fi]["box"]
-        u, v = (b[0] + b[2]) / 2, b[3] + (b[3] - b[1]) * 0.28
+        if m and anchor(m) and m not in [x[0] for x in marks]:
+            marks.append((m, anchor(m), Clock.f(clock.segs[i][0]) + 10))
+    for name, (u, v), on in marks:
         xs_, ys_, ss_ = [], [], []
         for f in range(on, f_end):
             sx, sy = to_screen(u, v, f)
@@ -1055,7 +1106,7 @@ def one_photograph(script, sup, direction=None):
     named_once = set()
     for i, s in enumerate(script["segments"]):
         look = s.get("look")
-        if look in who and who[look] is not None and look not in named_once:
+        if look and look in people and view(look) and look not in named_once:
             named_once.add(look)
             a = Clock.f(clock.segs[i][0]) + 12
             b = min(a + 54, Clock.f(clock.segs[i][1]) + 8)
@@ -1064,7 +1115,7 @@ def one_photograph(script, sup, direction=None):
     # ---- X2: one face, whose tones are the sentence being spoken
     por = script.get("portrait") or {}
     x2 = None
-    if por.get("name") in who and sup.get("microtext"):
+    if por.get("name") in targets and sup.get("microtext"):
         mt = sup["microtext"]
         si = int(por.get("segment", 0))
         a, b = Clock.f(clock.segs[si][0]), Clock.f(clock.segs[si][1]) + 6
@@ -1111,7 +1162,7 @@ def one_photograph(script, sup, direction=None):
     l1 = P.done(sup.get("sid", "wf3"), f_end, int(d.get("seed", 1113)), film)
     beats = dict(dur_f=f_end, voice_f=[LEAD_F, f_voice_end], close=[f_close0, f_end], pieces=pieces, marks=[m[0] for m in marks], x2=x2,
                  events=sorted(set(P.events)), pictures=[dict(kind="photo", name=photo.get("title"), path=photo["path"])], on_screen=P.shown,
-                 look=sorted({0, 8, 30, f_hook_end - 4, f_hook_end + 20, *[t[0] + 30 for t in targets[1:]][:8],
+                 look=sorted({0, 8, 30, f_hook_end - 4, f_hook_end + 20, *[t[0] + 30 for t in cam_t[1:]][:12],
                               *([x2["f"][0] + 30, x2["f"][1] - 12] if x2 else []), f_end - 2}))
     return l1, beats
 
