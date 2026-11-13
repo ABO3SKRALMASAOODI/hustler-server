@@ -168,9 +168,10 @@ def _keep_boxes(B, ask, rows, tmp):
     return out
 
 
-def solve_frame(w, h, faces, box, frame=(1080, 1920)):
+def solve_frame(w, h, faces, box, frame=(1080, 1920), paper=False):
     """How a found picture sits in the vertical frame: ("full", crop) when what must stay fits the 9:16 window of
-    the picture at a usable size, else ("card", crop) with the picture whole on its own blurred self.
+    the picture at a usable size, else ("card", crop) with the picture whole on its own blurred self. An object may
+    lose a sliver of its edge; a paper (print, a patent, an advertisement) never loses a word.
     crop is [x0, y0, x1, y1] in picture fractions, at the frame's aspect for "full"."""
     W, H = frame
     ar = W / H
@@ -180,7 +181,8 @@ def solve_frame(w, h, faces, box, frame=(1080, 1920)):
                                   if face else [0.5 - cw / 2, 0.0, 0.5 + cw / 2, 1.0])
     keep = [min(max(v, 0.0), 1.0) for v in keep]
     kw = keep[2] - keep[0]
-    if (kw * 0.86 <= cw or cw >= 0.62) and cw * w >= 460:        # what matters fits the window (a sliver of its edge may go): full frame
+    fits = kw <= cw * 1.02 if paper else (kw * 0.86 <= cw or cw >= 0.62)
+    if fits and cw * w >= 460:                                   # what matters fits the window: full frame
         cx = (keep[0] + keep[2]) / 2
         x0 = min(max(cx - cw / 2, 0.0), 1.0 - cw)
         if face:                                                # the eyes ride high, clear of the hook line and the captions
@@ -255,6 +257,7 @@ def find(ctx, script, llm, worker):
         rows.append(rec)
         got[i] = rec
     boxes = _keep_boxes(B, ask, [r for r in rows if r["ok"]], ctx.tmp)
+    by_i = {r["i"]: r for r in plan}
     for r in rows:
         if not r["ok"]:
             continue
@@ -262,7 +265,8 @@ def find(ctx, script, llm, worker):
         faces = _faces_of(img)
         r["faces"] = [[round(v, 4) for v in f] for f in faces[:3]]
         r["box"] = boxes.get(r["i"])
-        r["layout"], r["crop"] = solve_frame(r["w"], r["h"], faces, r["box"])
+        r["paper"] = str(by_i.get(r["i"], {}).get("is") or "").lower() == "document"
+        r["layout"], r["crop"] = solve_frame(r["w"], r["h"], faces, r["box"], paper=r["paper"])
         r.pop("abs", None)
     out = dict(rows=rows, plan=len(plan), wanted=len(wanted), found=sum(1 for r in rows if r["ok"]),
                credits=[dict(i=r["i"], name=r["name"], credit=r.get("credit"), license=r.get("license"), license_url=r.get("license_url"),
@@ -466,20 +470,23 @@ def picture_items(pid, row, a, b, l1, top=0.205, room=None, work=None):
         crops = [_zoomed(c, z, fx, fy) for z in settle_zoom(n)]
         extra = []
         lum = bright_under_mark(os.path.join(work, row["path"]), c) if work else None
-        if lum is not None and lum > 0.35:
-            extra.append(dict(id=f"{pid}.shade", k="flash", f=[a, b], mode="pool", a=round(min(0.25 + 0.5 * lum, 0.6), 3), z=0,
-                              rect=[round(MARK[0] - 0.16, 4), round(MARK[1] - 0.09, 4), 1.0, round(MARK[3] + 0.09, 4)]))
+        if lum is not None and lum > 0.35:                         # the whole top edge falls off, as a lens would: no smudge behind the mark
+            extra.append(dict(id=f"{pid}.shade", k="flash", f=[a, b], mode="pool", a=round(min(0.2 + 0.3 * lum, 0.45), 3), z=0,
+                              rect=[-0.35, -0.2, 1.35, round(MARK[3] + 0.16, 4)]))
         return dict(id=f"{pid}.s", k="shot", f=[a, b], pic=key, crop=crops), extra
     ar = row["w"] / row["h"]
     cw = min(1.0, row["h"] * (W / H) / row["w"])
     back = [round(0.5 - cw / 2, 5), 0.0, round(0.5 + cw / 2, 5), 1.0]
     shot = dict(id=f"{pid}.s", k="shot", f=[a, b], pic=key, crop=[_zoomed(back, z) for z in settle_zoom(n, 0.05, 0.05)], blur=64,
                 grade=dict(lift=-0.02, gamma=0.92, gain=0.46, sat=0.8, contrast=1.0, temp=0.0, tint=0.0))
-    room = room or (CAP_TOP - 0.02 - top)
+    tall = ar < 1.0                                              # an upright picture or paper: whole, down to the foot of the safe area
+    room = room or ((0.795 - top) if tall else (CAP_TOP - 0.02 - top))
     w = 0.88
     h = w * (W / H) / ar
     crop = [0.0, 0.0, 1.0, 1.0]
-    if h > room:                                                 # taller than its place: trimmed top and bottom, never squeezed
+    if h > room and tall:                                        # as large as its place holds, never trimmed
+        w, h = round(room * ar * H / W, 5), room
+    elif h > room:                                               # a wide picture taller than its place: trimmed top and bottom, never squeezed
         k = room / h
         crop, h = [0.0, round(0.5 - k / 2, 5), 1.0, round(0.5 + k / 2, 5)], room
     card = dict(id=f"{pid}.card", k="card", f=[a, b], z=2, pic=key, crop=crop, x=0.5, y=round(top + h / 2, 5), w=w, h=round(h, 5),
@@ -503,9 +510,31 @@ def _wrap(tokens, voices, W, x0, x1, gap):
     return rows
 
 
-def hook_type(l1, line, accent_words, accent, a, b, bottom=0.556):
+def ground_under(path, crop, box):
+    """(dark, light): the 15th and 85th percentile of a picture's relative luminance under a box of the frame."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            im = im.convert("L")
+            w, h = im.size
+            x0, y0, x1, y1 = crop
+            px = sorted(im.crop((int((x0 + box[0] * (x1 - x0)) * w), int((y0 + box[1] * (y1 - y0)) * h),
+                                 int((x0 + box[2] * (x1 - x0)) * w), int((y0 + box[3] * (y1 - y0)) * h))).resize((48, 16)).getdata())
+        return (px[int(len(px) * 0.15)] / 255.0) ** 2.2, (px[int(len(px) * 0.85)] / 255.0) ** 2.2
+    except Exception:  # noqa: BLE001 unread: the accent stays
+        return None
+
+
+def _contrast(ink_lum, grounds):
+    return min((max(ink_lum, g) + 0.05) / (min(ink_lum, g) + 0.05) for g in grounds)
+
+
+def hook_type(l1, line, accent_words, accent, a, b, bottom=0.556, ground=None):
     """The hook line, large, left, two rows at most, standing sharp on frame 0. The words that carry it take the
-    serif voice in the film's accent and breathe once; a hairline draws under them. Returns items."""
+    serif voice in the film's accent and breathe once; a hairline draws under them. ``ground(box)`` gives the
+    picture's dark and light under the line: where the accent would not read there (WCAG 3.0 for display type, after
+    the shade), those words are white and only the hairline keeps the colour; where white would not read, the shade
+    deepens. Returns items."""
     W, H = l1["frame"]
     acc = {_norm(x) for x in str(accent_words or "").split()}
     words = [w for w in str(line or "").split() if w]
@@ -524,10 +553,18 @@ def hook_type(l1, line, accent_words, accent, a, b, bottom=0.556):
     lead = 1.06 * px / H
     n = b - a
     out = []
+    pool, acc_ink = 0.58, accent
+    g = ground([0.07, bottom - len(rows) * lead, 0.93, bottom + 0.02]) if ground else None
+    if g:
+        shaded = [v * (1.0 - 0.8 * pool) for v in g]
+        if _contrast(L._lum(accent), shaded) < 3.0:
+            acc_ink = "#FFFFFF"
+        if _contrast(1.0, shaded) < 4.5:
+            pool = 0.74
     for r, row in enumerate(rows):
         y = bottom - (len(rows) - 1 - r) * lead
         for k, (t, v, x) in enumerate(row):
-            it = dict(id=f"hook.{r}.{k}", k="word", f=[a, b], t=t, v=v, x=round(x, 5), y=round(y, 5), ink=accent if v == "hka" else "#FFFFFF",
+            it = dict(id=f"hook.{r}.{k}", k="word", f=[a, b], t=t, v=v, x=round(x, 5), y=round(y, 5), ink=acc_ink if v == "hka" else "#FFFFFF",
                       role="big", on=a, z=6, grounded=True)
             if v == "hka" and n > 16:                             # sharp and at rest on frame 0, then one breath
                 it["s"] = r4([1.0] * 3 + ease(6, 1.0, 1.07) + ease(7, 1.07, 1.0) + [1.0] * (n - 16))
@@ -539,7 +576,7 @@ def hook_type(l1, line, accent_words, accent, a, b, bottom=0.556):
             grow = expo(12, 0.0, 1.0)
             rect = [[round(x0, 5), round(y0, 5), round(x0 + max((x1 - x0) * g, 0.002), 5), round(y0 + 0.0042, 5)] for g in [0.0] * 2 + grow + [1.0] * (n - 14)]
             out.append(dict(id=f"hook.{r}.rule", k="flash", f=[a, b], mode="fill", c=accent, a=1, rect=rect, z=3))
-    out.append(dict(id="hook.pool", k="flash", f=[a, b], mode="pool", a=0.58, z=0,           # a wide, soft ground: a shade, not a smudge
+    out.append(dict(id="hook.pool", k="flash", f=[a, b], mode="pool", a=pool, z=0,           # a wide, soft ground: a shade, not a smudge
                     rect=[0.0, round(bottom - len(rows) * lead - 0.11, 4), 1.0, round(bottom + 0.12, 4)]))
     return out
 
@@ -882,7 +919,10 @@ def apply(l1, script, earned, idx, source, sounds_manifest, own=True, panel_low=
         paint(l1, 0, hook_end, lambda a, b: shot)
         items += cards
         rec["hook"] = dict(picture=hrow["i"], name=hrow["name"], layout=hrow["layout"], frames=[0, hook_end], line=hook.get("line"))
-    items += hook_type(l1, hook.get("line") or script.get("hook_line"), hook.get("accent"), accent, 0, hook_end)
+    ground = None
+    if hrow and hrow.get("layout") == "full" and work:
+        ground = lambda box: ground_under(os.path.join(work, hrow["path"]), hrow["crop"], box)      # noqa: E731
+    items += hook_type(l1, hook.get("line") or script.get("hook_line"), hook.get("accent"), accent, 0, hook_end, ground=ground)
     # the payoff: no picture after it, and his own footage closer
     pay = script.get("payoff") or {}
     pay_f = None

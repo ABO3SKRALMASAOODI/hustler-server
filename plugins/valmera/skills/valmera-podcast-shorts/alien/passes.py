@@ -62,6 +62,9 @@ def voice_light(film, l1, adir, out):
     slow = S.envelope(lev, attack_f=3.0, release_f=24.0)       # a picture breathes with the phrase, it does not blink with the syllable
     np.save(os.path.join(adir, "level.npy"), lev)
     cards = L.cards(l1)
+    on_pic = np.zeros(n + 1, bool)
+    for a, b in L.picture_shots(l1):
+        on_pic[a:b] = True
     bounds, expo = S.shot_bounds(cuts, n), {}
     gy, gx = np.mgrid[0:S.GH, 0:S.GW].astype(np.float32)
     lut = (np.arange(256, dtype=np.float32) / 255.0) ** 2.2
@@ -75,7 +78,7 @@ def voice_light(film, l1, adir, out):
             break
         e = float(min(env[i], 1.15)) ** 1.4
         ep = 0.3 + 0.7 * float(min(slow[i], 1.0)) ** 1.2
-        if not np.isnan(T[i, 0]):                                  # a person: the lamp sits at his mouth
+        if not np.isnan(T[i, 0]) and not on_pic[i]:                # a person: the lamp sits at his mouth (a face in a found picture is a picture)
             mx, my = T[i, 4] * S.GW, T[i, 5] * S.GH
             R = max(0.9 * T[i, 3] * S.GH, 36.0)
             fall = 1.0 / (1.0 + ((gx - mx) ** 2 + (gy - my) ** 2) / (R * R))
@@ -104,7 +107,7 @@ def voice_light(film, l1, adir, out):
         g = o[::8, ::8].astype(np.float32).mean(axis=2) / 255.0
         lum[i] = float((g ** 2.2).mean())
         lum_in[i] = float(lut[fr[::8, ::8]].mean())
-        lamp[i] = e if not np.isnan(T[i, 0]) else ep
+        lamp[i] = e if not np.isnan(T[i, 0]) and not on_pic[i] else ep
         lit_px[i] = float((g > 0.2).mean())
     wr.stdin.close()
     if wr.wait() != 0:
@@ -114,7 +117,11 @@ def voice_light(film, l1, adir, out):
     os.replace(out + ".part.mp4", out)
     speak = env > 0.5
     quiet = env < 0.05
-    face = ~np.isnan(T[:, 0])                                    # the take's own frames: brightness against the sound's raw level
+    if on_pic[0]:                                                # the hook picture is lit whatever he says: it is not the lamp's claim
+        b0 = next((b for a, b in bounds if a == 0), 0)
+        speak[:b0] = False
+        quiet[:b0] = False
+    face = ~np.isnan(T[:, 0]) & ~on_pic[:n]                      # the take's own frames: brightness against the sound's raw level
     c = float(np.corrcoef(lum[face], lev[face])[0, 1]) if face.sum() > 10 and lum[face].std() > 0 and lev[face].std() > 0 else 0.0
     # the claim, shot by shot: how much of its own picture each frame keeps, against the lamp
     gain = lum / np.maximum(lum_in, 1e-4)

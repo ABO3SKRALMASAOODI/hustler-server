@@ -46,15 +46,19 @@ def _sound(ctx, chain, l1, adir, fallback):
         return dict(fallback or {}, by="earned (the sound pass is not in this checkout)")
     if not os.path.exists(out):
         json.dump(dict(l1, sound=[]), open(src, "w"), ensure_ascii=False)
+        # asks={}: the Scout read the shell's own direction to the Director ("no sounds from you: the engine adds them")
+        # as an ask about sound. It is this workflow's division of work, not a customer's wish, so it binds nothing here.
+        code = ("import json,sys;from score import sound;l1=json.load(open(sys.argv[1]));l1=sound.apply(l1,work=sys.argv[2],asks={});"
+                "json.dump(l1,open(sys.argv[3]+'.part','w'));import os;os.replace(sys.argv[3]+'.part',sys.argv[3]);"
+                "print(json.dumps(l1.get('sound_design') or {},default=float)[:2000])")
         try:
-            chain.sh(ctx, ["zsh", "-c", f"cd '{wk}' && PYTHONPATH=. '{chain.PY}' -m score.sound design --l1 '{src}' --work '{ctx.supply}' --out '{out}'"],
-                     timeout=900)
+            chain.sh(ctx, ["zsh", "-c", f"cd '{wk}' && PYTHONPATH=. '{chain.PY}' -c \"{code}\" '{src}' '{ctx.supply}' '{out}'"], timeout=900)
         except (RuntimeError, subprocess.SubprocessError) as e:
             ctx.log(f"sound design skipped: {str(e)[:300]}")
             return dict(fallback or {}, by="earned (the sound pass could not run)")
     got = json.load(open(out))
     rep = got.get("sound_design") or {}
-    if rep.get("fault") or rep.get("no_signal"):
+    if rep.get("fault") or rep.get("no_signal") or rep.get("asked") or not rep:
         return dict(fallback or {}, by="earned (the sound pass placed nothing)", sound_design=rep)
     l1["sound"] = got.get("sound") or []
     return dict(by="score.sound", placed=len(l1["sound"]), cls=rep.get("class"), np10=rep.get("np10"), allow=rep.get("allow"),
