@@ -475,6 +475,13 @@ y 0.10-0.80 and measured again; ink is checked against the picture it will stand
 and flipped or given a pool; a footnote with no fragment in its source is dropped, never invented. A style
 without a recipe renders through the shared chain. The builder never rates the film.
 
+## The alien bank (`worker/scene/alien`, since 13 Nov 2026)
+
+Beside the passes above the engine has five devices of its own (`rhyme`, `diecut`, `lamp`, `arc`, `answer`): a scene
+asks for one under `alien`, by the Director's `alien` gesture or a style, and the one-pass render lays it in
+(`../_shell/chain.py alien_bank`). The two-pass styles do not take them yet. Asks, reasons and proofs on a trial
+upload: `.valmera/week-1112/notes/S.md`, `.valmera/week-1112/side-by-side/S/`.
+
 ## Legacy and resuming older runs
 
 A `run.json` with version `valmera-podcast-shorts-v7` is an older run: resume

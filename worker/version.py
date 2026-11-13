@@ -60,6 +60,8 @@ _RUNTIME_PACKAGES = ("fx_schemas", "tools_ext", "jobs_ext", "devices",
                      "score",
                      # The engine (12 Nov): worker/scene/ draws the frames a
                      # Score asks for. A fix there alone must roll the box.
+                     # Its alien bank (13 Nov, worker/scene/alien/) is walked
+                     # with it: tests/test_scene_alien.py holds that.
                      "scene",
                      # Footage (13 Nov): worker/footage/, reached from
                      # score/supply and stock.download through footage.seam.

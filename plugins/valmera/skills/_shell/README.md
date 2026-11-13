@@ -68,6 +68,12 @@ close, what the source must have). `<state root>/ledger.json` keeps the last 30 
 workflow. The ideas stage only sees styles outside the last three, and the shell refuses a
 script whose style is one of them.
 
+## The alien bank
+
+`chain.alien_bank(ctx, l1_path)`: a scene that carries asks under `alien` (rhyme, diecut, lamp, arc, answer; the
+engine's `worker/scene/alien`) is laid out before the engine draws it, through heavy.sh, and the scene to draw is
+written beside it as `*.alien.json` with `supply/alien_bank.json` saying what stood. Every render path calls it.
+
 ## Never
 
 Never publishes. Never picks music: the plan may only carry the sound library's effects, and the

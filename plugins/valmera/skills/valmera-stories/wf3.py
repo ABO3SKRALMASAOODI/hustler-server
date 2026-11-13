@@ -370,7 +370,7 @@ def score(ctx, script):
         if changed:
             whole["pack"] = pack
             json.dump(whole, open(pk, "w"), ensure_ascii=False, indent=1)
-    knobs = {k: v for k, v in d.items() if k not in ("script", "why", "targets", "retarget")}
+    knobs = {k: v for k, v in d.items() if k not in ("script", "why", "targets", "retarget", "alien")}
     sys.path[:0] = [p for p in env_path().split(os.pathsep) if p not in sys.path]
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     l1, beats = F.STYLES[script["style"]["id"]](sc, pack, knobs)
@@ -378,6 +378,8 @@ def score(ctx, script):
         rep = writer.verify(sc)
         if not rep["ok"]:
             raise RuntimeError(f"the director's change breaks the facts: {rep['numbers_unbacked']} {rep['facts_unverified']}")
+    if d.get("alien"):                     # the direction's asks for the engine's alien bank (chain.alien_bank lays them in at the render)
+        l1["alien"] = d["alien"]
     out = os.path.join(ctx.supply, "l1.json")
     json.dump(l1, open(out, "w"), ensure_ascii=False)
     json.dump(beats, open(os.path.join(ctx.supply, "beats.json"), "w"), indent=1)
@@ -407,7 +409,7 @@ def render(ctx, script, sc):
     sound = os.path.join(ctx.supply, "sound.m4a")
     mix = F.audio_master(pack["ffmpeg"], l1, pack["narration"], sound, ctx.tmp) if not os.path.exists(sound) else {}
     if not os.path.exists(out):
-        log = chain.sh(ctx, ["env", f"PYTHONPATH={env_path()}", f"VALMERA_SCENE_CACHE={cache}", chain.PY, "-m", "scene.run", "render", "--l1", sc["l1"],
+        log = chain.sh(ctx, ["env", f"PYTHONPATH={env_path()}", f"VALMERA_SCENE_CACHE={cache}", chain.PY, "-m", "scene.run", "render", "--l1", chain.alien_bank(ctx, sc["l1"]),
                              "--work", ctx.supply, "--out", out + ".part.mp4", "--tier", "master", "--strict", "--cache", cache, "--audio", sound],
                        label=f"wf3-render-{ctx.run_id}", heavy=True, timeout=7200)
         os.replace(out + ".part.mp4", out)

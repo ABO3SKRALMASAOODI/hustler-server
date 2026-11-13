@@ -87,6 +87,27 @@ from `.valmera/workflow/ledger.json`, run again with `notes`. After handover: re
 A new style is one builder in `film.py` (`(script, supply, direction) -> (l1, beats)`), a row in
 `STYLES`, a card in `styles.json` with `buildable: true`, and its data in `writer.STYLE_DATA`.
 
+## The alien bank (`worker/scene/alien`, since 13 Nov 2026)
+
+Five devices the engine lays into a scene before it draws it, each bound to this film's own frames, words and voice.
+A film asks for one by carrying it under `alien` in its scene: put `"alien": [asks]` in `direction.json`.
+The shell lays them in at the render (`_shell/chain.py alien_bank`, log in `supply/alien_bank.json`). A device that
+cannot stand on the film leaves it as it was and says why; it never fails a render. Frames are programme frames.
+
+- `rhyme` `{"dev":"rhyme","at":[a,z],"cuts":[f,f],"pool":[assets],"hints":{asset:{"t":s,"at":[x,y]}}}`: a chain of
+  pictures cut on one round shape, registered and growing through every cut. For a line that names like things.
+- `diecut` `{"dev":"diecut","at":[a,z],"t":"WORD"}`: the word is stamped out of the live picture, its letters lift
+  carrying the footage, and drop back. For a word about the thing itself.
+- `lamp` `{"dev":"lamp","at":[a,z],"t":"WORD","ink":"#FF3D1F","faces":[[x,y,w,h]]}`: the word is a light that relights
+  the take at the voice's level; needs the take's matte for the shadow. For the one quotable word of a take.
+- `arc` `{"dev":"arc","marks":[{"f":f,"year":1927,"stakes":-0.4}]}`: the finish follows the year each sentence speaks
+  from, the light and the frame follow the stakes. Once a film, for a story with dates or a fall and a turn.
+- `answer` `{"dev":"answer","at":[a,z],"picks":[{"f":f,"pic":asset,"word":"VEGAS"}]}`: each named picture is first
+  seen inside its own word, then takes the frame on the stressed vowel. For a hook or a list that names things.
+
+One device a beat, each with a reason in the words. Which word, picture and year is your reading, never a rule.
+Proofs beside the judge: `.valmera/week-1112/side-by-side/S/`. Full asks: `.valmera/week-1112/notes/S.md`.
+
 ## Workflow 4 reuses this
 
 `writer.py` takes a form: `FORMS["long"]` is the 10-20 minute voiceover (band 04, chapters, a promise

@@ -264,11 +264,13 @@ def plan(ctx, script):
             copy[k].update(v)
         else:
             copy[k] = v
-    knobs = {k: v for k, v in d.items() if k not in ("records", "copy", "why")}
+    knobs = {k: v for k, v in d.items() if k not in ("records", "copy", "why", "alien")}
     sid = script["style"]["id"]
     if sid == "one-clip-three-films" and not knobs.get("window_s"):
         knobs["window_s"] = default_window(pack, float(knobs.get("take_s", 4.4)))
     l1, beats = F.STYLES[sid](copy, pack, knobs)
+    if d.get("alien"):                     # the direction's asks for the engine's alien bank (chain.alien_bank lays them in at the render)
+        l1["alien"] = d["alien"]
     return l1, beats, d, pack, env_path
 
 
@@ -315,7 +317,7 @@ def render(ctx, script, sc):
     sound = os.path.join(ctx.supply, "sound.m4a")
     mix = F.audio_master(pack["ffmpeg"], l1, sound, ctx.tmp) if not os.path.exists(sound) else {}
     if not os.path.exists(out):
-        log = chain.sh(ctx, ["env", f"PYTHONPATH={env_path}", f"VALMERA_SCENE_CACHE={cache}", chain.PY, "-m", "scene.run", "render", "--l1", sc["l1"],
+        log = chain.sh(ctx, ["env", f"PYTHONPATH={env_path}", f"VALMERA_SCENE_CACHE={cache}", chain.PY, "-m", "scene.run", "render", "--l1", chain.alien_bank(ctx, sc["l1"]),
                              "--work", ctx.supply, "--out", out + ".part.mp4", "--tier", "master", "--strict", "--cache", cache, "--audio", sound],
                        label=f"wf2-render-{ctx.run_id}", heavy=True, timeout=7200)
         os.replace(out + ".part.mp4", out)

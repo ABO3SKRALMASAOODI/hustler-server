@@ -5003,6 +5003,47 @@ def g_ticker(ctx, b, g, i):
     g_snd(ctx, b, g, a)
 
 
+ALIEN_PASS = ("t", "ink", "font", "width", "seat", "lift", "dim", "room", "behind", "tail", "bars", "develop", "weave", "flicker",
+              "n", "r", "grow", "mono", "step", "faces", "hints", "hole", "up", "down", "now")
+
+
+@gesture("alien", 'dev at ... A device of the engine\'s alien bank (scene.alien.menu()). It rides the scene for the engine; today\'s renderer '
+                  'draws the film without it', lower="none")
+def g_alien(ctx, b, g, i):
+    """The one seam to worker/scene/alien (lane S, 13 Nov 2026). A Score line names a device and what it answers;
+    every anchor is resolved to programme frames here and the ask rides the scene under ``alien``. Nothing is drawn
+    by the compiler: the engine's side lays the device in (``scene.alien.apply(l1, work)``) before it draws, and a
+    renderer that never calls it shows the film as it was. Pictures are named as anywhere in a Score (bin:2, own:x)."""
+    def frame(ref):
+        return frame_of(ctx, ref, b) if not isinstance(ref, bool) and ref is not None else None
+
+    def pic(name):
+        return name if isinstance(name, str) and asset_for(ctx, name) is not None else None
+    ask = {"dev": str(g.get("dev") or ""), "id": g["_gid"].replace(".", "_")}
+    a, z = span_of(ctx, b, g.get("at"))
+    if a is not None:
+        ask["at"] = [a, b.pf1 if z is None else z]
+    if isinstance(g.get("cuts"), list):
+        ask["cuts"] = [f for f in (frame(c) for c in g["cuts"]) if f is not None]
+    for key in ("pool", "order"):
+        if isinstance(g.get(key), list):
+            ask[key] = [p for p in (pic(n) for n in g[key]) if p]
+    if isinstance(g.get("picks"), list):
+        ask["picks"] = [dict({k: v for k, v in p.items() if k in ("word", "t", "focus")}, f=frame(p.get("at", p.get("w"))), pic=pic(p.get("pic")))
+                        for p in g["picks"] if isinstance(p, dict)]
+        ask["picks"] = [p for p in ask["picks"] if p["f"] is not None and p["pic"]]
+    if isinstance(g.get("marks"), list):
+        ask["marks"] = [dict({k: v for k, v in m.items() if k in ("year", "stakes")}, f=frame(m.get("at", m.get("w"))))
+                        for m in g["marks"] if isinstance(m, dict)]
+        ask["marks"] = [m for m in ask["marks"] if m["f"] is not None]
+    for key in ALIEN_PASS:
+        if key in g:
+            ask[key] = g[key]
+    if not ask["dev"]:
+        return ctx.find(f"{b.id}: alien names no device")
+    ctx.__dict__.setdefault("alien", []).append(ask)
+
+
 def run_gestures(ctx):
     """Base-replacing gestures first, in the written order, then what sits on top of them."""
     base = ("hold", "cuts", "salvo", "page", "band", "split", "wall", "freeze", "punch", "stutter", "shake", "whip")
@@ -5652,9 +5693,12 @@ def to_l1(ctx):
     items.sort(key=lambda i: (i["f"][0], STAGE.get(i["k"], 9), i.get("z", 0), i["id"]))
     if ctx.matte and any(i.get("behind") for i in items):
         ctx.assets["matte"] = {"kind": "video", "path": ctx.matte, "w": 1080, "h": 1920, "dur": ctx.src_dur, "fps": 30.0}
-    return {"l1": 1, "sid": ctx.sid, "seed": ctx.seed, "fps": ctx.fps, "frame": [ctx.W, ctx.H], "dur_f": ctx.dur_f,
-            "assets": rf(ctx.assets), "spine": rf(ctx.spine), "voices": rf(ctx.voices), "film": rf(ctx.film_out),
-            "items": items, "sound": rf(ctx.sound)}
+    out = {"l1": 1, "sid": ctx.sid, "seed": ctx.seed, "fps": ctx.fps, "frame": [ctx.W, ctx.H], "dur_f": ctx.dur_f,
+           "assets": rf(ctx.assets), "spine": rf(ctx.spine), "voices": rf(ctx.voices), "film": rf(ctx.film_out),
+           "items": items, "sound": rf(ctx.sound)}
+    if getattr(ctx, "alien", None):
+        out["alien"] = rf(ctx.alien)          # asks for scene.alien.apply, by the alien gesture; no item of the scene depends on them
+    return out
 
 
 def validate_l1(l1):
