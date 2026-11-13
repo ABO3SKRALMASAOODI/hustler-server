@@ -1234,6 +1234,43 @@ def _admit_unlocked_upload(cur, user_id, project_id, original):
         return None
 
 
+def _readmit_walled_first_video(cur, user_id, project_id, original):
+    """A main video walled when it landed, never analysed, asks the trial for
+    admission again when the Studio opens its project (the state poll's first
+    tick). Returns whether it stays walled.
+
+    User 3023 (13 Nov 2026): a 3.6 GB first upload met a size rule that was
+    removed six hours later, and admission is only tried when a video lands,
+    so the fix could never reach the video already sitting there. Same rules
+    as a landing video (_upload_wall: the switch, the caps, one admitted
+    project per account); once admitted the state poll's heal below starts
+    the analysis and the index starts the First cut. Any failure keeps the
+    wall."""
+    try:
+        cur.execute("""SELECT 1 FROM video_jobs
+                       WHERE project_id = %s AND type = 'index'
+                     AND COALESCE(payload->>'proxy_only', '') <> 'true'
+                         AND payload->>'asset_id' = %s LIMIT 1""",
+                    (project_id, str(original["id"])))
+        if cur.fetchone():
+            return True
+        cur.execute("SELECT id FROM projects WHERE id = %s FOR UPDATE",
+                    (project_id,))
+        if _upload_wall(cur, user_id, project_id, original.get("bytes")):
+            return True
+        current_app.logger.info("project %s: walled first video admitted on "
+                                "reopen (asset %s)", project_id,
+                                original["id"])
+        record_client_event(
+            user_id, project_id, "walled_upload_readmitted",
+            detail={"asset_id": original["id"]}, origin="server")
+        return False
+    except Exception as e:                                  # pragma: no cover
+        print(f"[free_trial] reopen admission failed for project "
+              f"{project_id}: {e}", flush=True)
+        return True
+
+
 def _upload_wall(cur, user_id, project_id, nbytes=None, why=None):
     """Whether a Studio main video (a file, a proxy-first file or a pasted
     link) meets the subscribe wall.
@@ -4111,6 +4148,10 @@ def project_state(user_id, project_id):
         account_walled = bool(original and _subscribe_gate_applies(cur, user_id))
         subscription_locked = bool(
             account_walled and not _trial_admission(cur, user_id, project_id))
+        if (subscription_locked and not after_id and not idx_row
+                and not _media_purged(original)):
+            subscription_locked = _readmit_walled_first_video(
+                cur, user_id, project_id, original)
         trial_status = _trial_status(cur, user_id, project_id,
                                      subscribed=not account_walled)
         # The retention sweep removed the active original's file: nothing can

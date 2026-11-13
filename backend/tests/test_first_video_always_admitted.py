@@ -156,3 +156,46 @@ def test_a_ticket_a_failure_opened_has_the_failures_bar():
     assert store.is_quality({"cause_key": "auto-quality-same-upload",
                              "history": failed["history"]}) is True
     assert store.is_quality({"cause_key": "auto-job-index-oom"}) is False
+
+
+class _ReopenCur(_Cur):
+    def __init__(self, has_index_job=False):
+        super().__init__()
+        self.has_index_job = has_index_job
+
+    def execute(self, sql, params=()):
+        super().execute(sql, params)
+        if "FROM video_jobs" in self.sql[-1] and self.has_index_job:
+            self._one = {"?column?": 1}
+
+
+def test_a_walled_first_video_is_admitted_when_its_project_reopens(
+        monkeypatch):
+    """User 3023: the upload was walled by the size rule before it went. The
+    next Studio open asks the trial again and the heal starts its analysis;
+    an upload with an index job, or one the trial still refuses, keeps the
+    wall."""
+    import flask
+    seen, events = [], []
+    monkeypatch.setattr(v, "_subscribe_gate_applies", lambda c, u: True)
+    monkeypatch.setattr(v, "record_client_event",
+                        lambda *a, **k: events.append(a[2]))
+    monkeypatch.setattr(free_trial, "admit_upload_why", _admission(
+        ({"kind": "trial", "first_cut": True}, None), seen))
+    original = {"id": 41226, "bytes": PHONE_4K}
+    with flask.Flask("t").app_context():
+        cur = _ReopenCur()
+        assert v._readmit_walled_first_video(cur, 3023, 5739, original) is False
+        assert seen == [(3023, 5739, False, PHONE_4K)]
+        assert any("FOR UPDATE" in s for s in cur.sql)
+        assert events == ["walled_upload_readmitted"]
+        # already has an index job: nothing asked, stays walled
+        seen.clear()
+        assert v._readmit_walled_first_video(
+            _ReopenCur(has_index_job=True), 3023, 5739, original) is True
+        assert seen == []
+        # D2's one admitted project per account still holds
+        monkeypatch.setattr(free_trial, "admit_upload_why", _admission(
+            (None, "other_project"), seen))
+        assert v._readmit_walled_first_video(
+            _ReopenCur(), 3030, 5747, original) is True
