@@ -52,6 +52,12 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
     """deadline is time.monotonic(). A call that has written nothing by first_text_by is late already:
     in the slice, a Score took 12-40 s to write after its first line. Returns a Result. Raises Late,
     Refused, or the provider's error."""
+    if not str(model or "").startswith("claude-"):
+        # The OpenAI rung (lane Q): only a replay's own models or a Director row limited to its
+        # test_user_ids (flags.parse) name one. Same Result, deadline and metering.
+        from . import call_openai
+        return call_openai.stream(model, system, content, max_tokens=max_tokens, effort=effort, purpose=purpose,
+                                  deadline=deadline, on_text=on_text, thinking=thinking, first_text_by=first_text_by)
     if not claude_lane.configured():
         raise Refused("the Claude lane has no key")
     if not claude_lane.available():

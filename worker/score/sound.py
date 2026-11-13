@@ -478,7 +478,7 @@ def plan_sounds(events, ctx):
 
     def rank(e):
         part = 0 if e is hook else 1 if e is payoff else 2
-        return (part, KIND_RANK.get(e["kind"], 9), e["f"])
+        return (part, 1 if spoken(e["f"] / fps) else 0, KIND_RANK.get(e["kind"], 9), e["f"])
     placed = []
     for s in existing:                       # the Director's own library sounds: same levels, same signal check
         if s.get("s") not in lib:
@@ -570,14 +570,20 @@ def _free(sid, t, uses):
 
 
 def _item(iid, sid, f, fps, db, ev, part, what):
+    """One placed recording. Its hit (the library's hit_s where the ear hears it earlier than the loudest 10 ms, else
+    peak_s) lands LEAD_S before frame f; `peak_s` carries that offset so validate_l1's start = event - peak holds.
+    dur_s is the measured audible tail (max_s) from the trim point: the renderer and the scene mix stop there."""
     x = library()[sid]
-    peak = float(x.get("peak_s", 0.0)) + LEAD_S
+    peak = float(x.get("hit_s") or x.get("peak_s") or 0.0) + LEAD_S
     start = f / fps - peak
     trim = 0.0
     if start < 0:
         trim, start = -start, 0.0
-    return {"id": iid, "s": sid, "file": x["file"], "event_f": int(f), "start_s": round(start, 4), "trim_s": round(trim, 4),
-            "db": db, "peak_s": round(peak, 4), "for": ev["kind"], "part": part, "layer": what, "by": "sound.py"}
+    it = {"id": iid, "s": sid, "file": x["file"], "event_f": int(f), "start_s": round(start, 4), "trim_s": round(trim, 4),
+          "db": db, "peak_s": round(peak, 4), "for": ev["kind"], "part": part, "layer": what, "by": "sound.py"}
+    if x.get("max_s") and float(x["max_s"]) - trim >= 0.05:
+        it["dur_s"] = round(float(x["max_s"]) - trim, 3)
+    return it
 
 
 def _signal_check(placed, ctx, report):

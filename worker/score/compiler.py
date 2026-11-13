@@ -493,6 +493,7 @@ class Ctx:
         self.cur_gid = None        # the gesture running now: every item it adds carries its id as _g
         self.boxes = {}
         self.own = {}
+        self.views = {}
         self.matte = None
         self.max_up = 6.0
         self.work = None
@@ -808,14 +809,49 @@ def voices(ctx):
 def parse_look(ctx, v, where):
     if v is None or v == "":
         return None
+    from . import grade
     if isinstance(v, str):
         if v in LOOKS:
             return dict(LOOKS[v])
-        ctx.find(f"{where}: look is prose, nothing to grade from. Write numbers: lift gamma gain sat contrast temp tint, or a name: {', '.join(sorted(LOOKS))}")
+        if v in grade.LOOKS:           # a design the film's look is solved from (film_look): no fixed numbers of its own
+            return {}
+        ctx.find(f"{where}: look is prose, nothing to grade from. Write a name: {', '.join(grade.LOOKS)}")
         return None
     if isinstance(v, dict):
         return {k: float(x) for k, x in v.items() if k in IDENTITY and isinstance(x, (int, float)) and not isinstance(x, bool)}
     return None
+
+
+def solved_look(ctx, raw):
+    """The film's look solved on its own frames (score.grade): the design the Score named, the tone its style card
+    measures, the strength this footage needs to stand off its upload with skin left alone. Kept beside the session,
+    since one film is compiled many times. None when there are no frames to read: the older numbers stand."""
+    if not ctx.governed or not ctx.work:
+        return None
+    from . import grade
+    card = (ctx.system or {}).get("card")
+    try:
+        arr = grade.frames(ctx.work)
+        if arr is None:
+            return None
+        key = hashlib.sha1(json.dumps([raw, card, grade.VERSION, list(arr.shape), int(arr[:, ::7, ::7].sum())], sort_keys=True, default=str).encode()).hexdigest()[:16]
+        path = os.path.join(ctx.work, f"look_{key}.json")
+        if os.path.exists(path):
+            with open(path) as f:
+                return json.load(f)
+        look = grade.solve(arr, raw, card)
+        if look:
+            with open(path, "w") as f:
+                json.dump(look, f)
+        return look
+    except Exception as exc:  # noqa: BLE001 - a look that can't be solved is never a film that can't be made
+        ctx.find(f"dna: the look could not be solved on these frames ({type(exc).__name__}), the plain grade stands")
+        return None
+
+
+def grade_names():
+    from . import grade
+    return list(grade.LOOKS)
 
 
 def film_look(ctx):
@@ -829,6 +865,11 @@ def film_look(ctx):
         "over_type": ctx.dna.get("over_type") is True,          # a yes or no: a sentence here turned grain on over the type
         "grade": dict(ctx.base_grade),
     }
+    look = solved_look(ctx, raw)
+    if look:
+        if isinstance(raw, str) and raw not in grade_names():
+            ctx.find(f"dna: look {raw!r} is not a design, {look['name']} stands in. The designs: {', '.join(grade_names())}")
+        ctx.film_out["look"] = look
     fl = ctx.dna.get("film") if isinstance(ctx.dna.get("film"), dict) else {}
     for k in ("halation", "bloom", "sharpen"):
         v = fl.get(k, src.get(k, ctx.dna.get(k)))
@@ -1238,6 +1279,15 @@ def parse_pic(ctx, p, where):
             else:
                 ctx.find(f"{where}: can't read {s!r}, main follows the voice")
         return ref
+    if s.startswith("view:"):
+        v = ctx.views.get(s[5:].strip())
+        if v is None:
+            ctx.find(f"{where}: {s} is not on the board, main stands in")
+            ref.update(kind="main", asset="main", sync=True)
+            return ref
+        # a detail of the upload at another moment: a picture Supply found, not a camera move on the take
+        ref.update(kind="main", asset="main", sync=False, t0=v["t0"], t1=v["t1"], crop=None, zoom=None, _view=v["id"])
+        return ref
     if s.startswith("cut:") or s == "clean":
         name = "clean" if s == "clean" else "cut_" + s[4:]
         key = "own:" + name
@@ -1598,7 +1648,10 @@ def picture_fields(ctx, b, ref, a, z, W=None, H=None, src=None):
                 src = video_src(ctx, ref, asset, n, rng)
             out["src"] = [src[0], src[1]]
         t = out["src"][0] if "src" in out else 0.0
-        if ctx.governed and ref["asset"] == "main" and (W, H) == (ctx.W, ctx.H):
+        if ref.get("_view") is not None and ref["asset"] == "main":
+            out["crop"] = camera(ctx, view_rect(ctx, ctx.views[ref["_view"]], asset, W, H), n, calm_cam(ref.get("cam") or "push 1.04"))
+            out["view"] = ref["_view"]
+        elif ctx.governed and ref["asset"] == "main" and (W, H) == (ctx.W, ctx.H):
             # the upload on the frame: one framing for the film, a step only where a device line earned one
             base = take_crop(ctx, ref, asset, out.get("src"), n, rng, at=a)
             if ref.get("_cam"):            # where it ends is where the take stays
@@ -1615,7 +1668,7 @@ def picture_fields(ctx, b, ref, a, z, W=None, H=None, src=None):
             base = tracked_crop(ctx, ref, asset, out.get("src"), W, H, n) or base_rect(ctx, ref, asset, t, W, H, rng, repeat)
             cam = ref.get("cam") or ctx.dna.get("cam")
             out["crop"] = camera(ctx, base, n, calm_cam(cam) if ctx.governed and asset["kind"] == "image" else cam)
-        if ref["asset"] == "main" and (W, H) == (ctx.W, ctx.H) and not ctx.governed:        # the frame's own picture, not a card's inset
+        if ref["asset"] == "main" and (W, H) == (ctx.W, ctx.H) and not ctx.governed and ref.get("_view") is None:        # the frame's own picture, not a card's inset
             out["crop"] = keep_marks_whole(ctx, out["crop"], out.get("src"), asset, W, H)
     tr = parse_treat(ref.get("treat"))
     if tr:
@@ -2248,7 +2301,7 @@ def camera_gate(ctx, b):
     doesn't keeps its window where the Score put it, at the film's own scale (take_crop)."""
     from . import taste
     for j, ref in enumerate(b.pics):
-        if ref.get("asset") != "main":
+        if ref.get("asset") != "main" or ref.get("_view") is not None:
             continue
         z = ref.get("zoom")
         if not (ref.get("crop") or ref.get("cam") or (isinstance(z, (int, float)) and not isinstance(z, bool) and z > 1)):
@@ -5719,6 +5772,8 @@ def new_pictures(ctx, shots):
     for s in sorted(shots, key=lambda i: i["f"][0]):
         p = str(s.get("framed") or s.get("pic"))          # a still framed on the plate is that still
         q = "take" if p == "main" or p.startswith("own:") else p
+        if s.get("view") is not None:
+            q = f"view:{s['view']}"                       # a detail of the upload cut in as an insert is its own picture
         if last is not None and q != last:
             n += 1
         last = q
@@ -5761,7 +5816,7 @@ def ceiling(ctx, l1, cuts):
         dims.append(("footage_broll", 5 if reframed else 3, "upload's own frames" + (", re-framed by design" if reframed else "")))
     if not l1["sound"]:
         dims.append(("sound", 2, "nothing added to the source audio"))
-    grade_used = ctx.base_grade != IDENTITY or any(i.get("grade") for i in items)
+    grade_used = ctx.base_grade != IDENTITY or any(i.get("grade") for i in items) or bool(ctx.film_out.get("look"))
     if not grade_used:
         dims.append(("colour_light", 2, "the source's colours untouched"))
     if not (kinds.get("card") or kinds.get("flash") or any(isinstance(i.get("crop", [0])[0], list) for i in kinds.get("shot", []))):
@@ -5795,14 +5850,16 @@ def compile_facts(ctx, l1, cuts, per_frame):
     designed = sum(1 for i in items if i["k"] == "card" or (i["k"] == "word" and i.get("role") == "big" and not i["id"].split(".")[-1].startswith("p"))
                    or (i["k"] == "flash" and i.get("mode") != "pool"))
     refills = len(sources) + plates
-    grade = ctx.base_grade != IDENTITY or any(i.get("grade") for i in items)
+    grade = ctx.base_grade != IDENTITY or any(i.get("grade") for i in items) or bool(ctx.film_out.get("look"))
     if refills == 0 and not cuts and overlay < 0.12 and not grade:
         kind = "same_upload"
     elif refills == 0 and overlay < 0.12 and moved / D < 0.25:
         kind = "light_touch"
     else:
         kind = "edited"
-    return {"class": kind, "opening_changed": opening, "new_sources": len(sources), "plates": plates, "pictures_added": refills,
+    # the upload again but for its colour: no picture added, no cut moved, type on under an eighth of it (film.bare)
+    bare = refills == 0 and not cuts and overlay < 0.12
+    return {"class": kind, "bare": bare, "opening_changed": opening, "new_sources": len(sources), "plates": plates, "pictures_added": refills,
             "overlay_pct": round(overlay * 100), "reframed_pct": round(moved / D * 100), "grade_applied": grade, "sfx_added": len(l1["sound"]),
             "design_items10": round(designed / max(ctx.dur_f / ctx.fps, 1e-3) * 10, 1)}
 
@@ -5967,7 +6024,7 @@ def meter(ctx, l1):
          "sounds": len(l1["sound"]), "sounds10": round(len(l1["sound"]) / max(dur, 1e-3) * 10, 1),
          "word_lock": None if lock is None else round(lock, 2), "word_lock_chance": None if chance is None else round(chance, 2),
          "dead_air_s": round(ctx.dead_air, 2), "ceiling": cap, "ceiling_why": list(low) if low else None,
-         "sources": source_mix(ctx, l1), "gestures": gesture_counts(ctx), "layers": layer_facts(ctx, l1), "blanks": blanks, "facts": facts, "busy_seconds": busy, "by_beat": beats, "rejects": [list(r) for r in ctx.rejects], "findings": list(ctx.findings), "soft": dict(ctx.soft), "band": ctx.band_name,
+         "sources": source_mix(ctx, l1), "gestures": gesture_counts(ctx), "layers": layer_facts(ctx, l1), "blanks": blanks, "facts": facts, "busy_seconds": busy, "look": ctx.film_out.get("look"), "by_beat": beats, "rejects": [list(r) for r in ctx.rejects], "findings": list(ctx.findings), "soft": dict(ctx.soft), "band": ctx.band_name,
          "type_traffic": [dict(t) for t in ctx.traffic], "framed_larger": getattr(ctx, "filled", 0)}
     return m
 
@@ -6007,6 +6064,9 @@ def meter_text(ctx, m):
                f"overlay {fx['overlay_pct']}%, re-framed {fx['reframed_pct']}%, grade {'yes' if fx['grade_applied'] else 'no'}, sounds {fx['sfx_added']}, design items/10s {fx['design_items10']}")
     if m["busy_seconds"]:
         out.append(f"QUIET {m['busy_seconds']}s with picture, type and camera all busy. One thing stays quiet")
+    if m.get("look"):
+        from . import grade
+        out.append(grade.line(m["look"]))
     out += taste_text(m.get("taste"))
     out.append("BEATS id sec pics/10s type design snd")
     for r in m["by_beat"]:
@@ -6119,6 +6179,40 @@ def load_bin(work_dir):
     return out
 
 
+def load_views(work_dir):
+    """The upload's own details Supply found (bin.json `own`): another moment of the take, re-framed. id -> row."""
+    out = {}
+    try:
+        with open(os.path.join(work_dir or "", "bin.json")) as f:
+            rows = (json.load(f) or {}).get("own") or []
+    except (OSError, ValueError, AttributeError):
+        return out
+    for r in rows:
+        m = re.fullmatch(r"main@(\d*\.?\d+)-(\d*\.?\d+)", str(r.get("src") or ""))
+        box = r.get("box") or r.get("crop")
+        if m and isinstance(box, list) and len(box) == 4 and all(isinstance(v, (int, float)) for v in box):
+            out[str(r.get("id"))] = {"id": str(r.get("id")), "t0": float(m.group(1)), "t1": float(m.group(2)), "box": [float(v) for v in box]}
+    return out
+
+
+VIEW_ZOOM = (1.4, 2.0)         # an insert is this much closer than the film's framing: under it is the take again, over it is mush
+
+
+def view_rect(ctx, v, asset, W, H):
+    """The window a view shows: the frame's shape round the detail's box, with air, no wider than the film's own
+    framing over VIEW_ZOOM's least and no tighter than its most, inside the source."""
+    fit = fit_crop([0, 0, 1, 1], asset["w"], asset["h"], W, H)
+    fw, fh = fit[2] - fit[0], fit[3] - fit[1]
+    x0, y0, x1, y1 = v["box"]
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    k = max((x1 - x0) * 1.3 / fw, (y1 - y0) * 1.3 / fh)         # the share of the film's framing the detail needs
+    k = clamp(k, 1 / VIEW_ZOOM[1], 1 / VIEW_ZOOM[0])
+    k = max(k, W / (ctx.max_up * fw * asset["w"]))                  # never past what the source can hold
+    w, h = fw * k, fh * k
+    cx, cy = clamp(cx, w / 2, 1 - w / 2), clamp(cy, h / 2, 1 - h / 2)
+    return [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
+
+
 def load_own(work_dir):
     """Pictures S2 made from the upload: cut-outs on the take's timeline, the empty room, a matte."""
     out = {}
@@ -6222,6 +6316,7 @@ def compile_once(text, index, work_dir, bin_items, tray, faces, sid, owner, seed
     ctx.governed, ctx.plan = governed, plan
     ctx.asks, ctx.stress, ctx.offered = extra
     ctx.own = load_own(work_dir)
+    ctx.views = load_views(work_dir)
     for v in ctx.own.values():
         if v["kind"] == "video":
             v["dur"] = ctx.src_dur
@@ -6308,6 +6403,8 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
         # sat on her arm for four seconds). What was decided against in the film it saw stays decided.
         plan = settle(seen, {})[1]
     ctx, plan, facts, rounds = settle(text, plan)
+    if governed:
+        hook_finding(ctx)
     l1 = to_l1(ctx)
     from . import sound                    # lane J: the film's sound design, peak on each chosen picture event
     l1 = sound.apply(l1, work_dir, index, perc, ctx.asks or None, (facts or {}).get("supply"))
@@ -6317,6 +6414,20 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
         m["findings"] = list(ctx.findings)
     txt = meter_text(ctx, m)
     return Compiled(l1, m, txt, (time.perf_counter() - t0_) * 1000)
+
+
+def hook_finding(ctx):
+    """A talking film shows its first picture that is not the take inside its first 3 s, when it has one to show
+    (a Bin picture or a detail of the upload). Measured on the plan; the repair round reads it."""
+    from . import taste
+    if len(ctx.words) / max(ctx.src_dur, 1e-3) < 1.0 or not (ctx.bin or ctx.views):
+        return
+    firsts = [s["f"][0] for s in ctx.shots if (taste._pic_key(ctx, s) or ("take",))[0] != "take"]
+    firsts += [c["f"][0] for c in ctx.items if c.get("k") == "card" and c.get("pic") not in (None, "plate", "main")]
+    first = min(firsts) / ctx.fps if firsts else None
+    if first is None or first > taste.HOOK_S:
+        ctx.find("hook: " + ("the film never leaves the take" if first is None else f"the first picture that is not the take lands at {first:.1f} s")
+                 + ". A talking film shows one inside its first 3 s: open on the Bin's hook picture with the title, or cut the first picture in earlier")
 
 
 def take_seats(work_dir, index=None):

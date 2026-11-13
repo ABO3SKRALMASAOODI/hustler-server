@@ -582,9 +582,98 @@ def own_moments(work, wishes, per, deadline):
             seen.add((j, f))
             t0 = max(0.0, times[f] - 0.8)
             t1 = min(dur, t0 + 2.4)
-            rows.append(dict(id=f"own{len(rows)}", src=f"main@{t0:.2f}-{t1:.2f}", crop=crop, at=times[f], wish=i,
+            rows.append(dict(id=len(rows), src=f"main@{t0:.2f}-{t1:.2f}", crop=crop, at=times[f], wish=i,
                              what=str(o.get("what") or w.get("want") or "")[:80],
                              **{"for": f"w{w.get('w')}" if w.get("w") else str(w.get("at"))}))
+        return rows[:6], float(r.usd or 0.0)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+HOOK_S = 3.0               # a talking film shows its first picture inside this
+HOOK_CALL_S = 4.0
+VIEW_CALL_S = 22.0         # sixteen frames read and up to six boxes written: 11 s measured
+HOOK_TOKENS, VIEW_TOKENS = 1200, 3000     # room to answer: at 900 the views call spent every token before its first word and returned nothing (13 Nov, five uploads of five)
+HOOK_SYSTEM = """You help a film editor open a short film of a person talking. You get what the film is about and its first words, each with its number. Name the one picture a viewer should see in the film's first three seconds, before or beside the speaker: the very thing the film is about, as its first words or its subject name it. A named person, team, company, place, product, animal, object or event that a photograph or a clip can show. Never a mood, a metaphor or a feeling, never the speaker, never a generic picture of the topic's field. When the thing is the speaker's own (their product, shop, vehicle, workplace), set "mine" true: only the upload can show it. When the first words and the subject name nothing a picture can show, answer {"hook":null}.
+Answer with one JSON object and nothing else: {"hook":{"w":"first-last word number the picture lands on, inside the first three seconds","want":"what the picture shows, with the full name of who or what it is","q":["a short stock search","a second, broader one"],"kind":"photo or video","mine":false}}."""
+VIEW_SYSTEM = """You help a film editor cut a short film from one upload that has no words to follow. You see numbered frames from the upload with their times. Find up to six details that deserve a shot of their own, the way an editor cuts in an insert: the thing the clip is about seen closer (a label, hands at work, a face reacting, the flame, the tool, the plate, the screen), or a second subject the wide frame holds. Give the box around each detail as fractions of the frame, x0 y0 x1 y1 from the top left, tight on it but never cutting it, never through a head or through printed words. Only a detail that is plainly there, sharp, and still reads when enlarged up to 2 times. Take details from different moments and different parts of the frame, and leave out a frame that only repeats another. When the frames are already close on one thing and hold nothing else to cut to, answer {"own":[]}.
+Answer with one JSON object and nothing else: {"own":[{"c":frame number,"box":[x0,y0,x1,y1],"what":"at most eight plain words"}]}."""
+
+
+def _first_words(work, until_s=7.0, most=24):
+    try:
+        with open(os.path.join(work, "index.json"), encoding="utf-8") as f:
+            words = json.load(f).get("words") or []
+    except (OSError, ValueError):
+        return []
+    return [(i, w) for i, w in enumerate(words[:most]) if float(w.get("t0") or 0.0) < until_s]
+
+
+def hook_wish(work, scout, wishes, per, deadline):
+    """(wish or None, usd): the picture a talking film opens on, when no wish of the Scout's lands inside its first
+    3 s. One model call reads what the film is about and its first words; nothing here reads them. The wish joins
+    the others and takes the same route: the libraries, a named search, the check."""
+    first = _first_words(work)
+    dur = float((per or {}).get("dur") or 0.0)
+    if len(first) < 4 or dur < 6.0:
+        return None, 0.0
+    for w in wishes:                         # the Scout already asked for a picture there
+        if not w.get("mine") and wish_second(work, w.get("w") or w.get("at")) < HOOK_S and (str(w.get("w") or "").strip("w")[:1].isdigit() or w.get("at") is not None):
+            return None, 0.0
+    lines = ["The film is about: " + str((scout or {}).get("about") or "not known"),
+             "First words: " + " ".join(f"{i}:{w.get('w')}" for i, w in first)]
+    r = call.stream(LOOK_MODEL, HOOK_SYSTEM, [{"type": "text", "text": "\n".join(lines)}], max_tokens=HOOK_TOKENS, effort="low",
+                    purpose="director_hook", deadline=deadline, thinking=False)
+    txt = r.text or ""
+    try:
+        o = json.JSONDecoder().raw_decode(txt, max(txt.find("{"), 0))[0].get("hook")
+    except (ValueError, AttributeError):
+        return None, float(r.usd or 0.0)
+    if not isinstance(o, dict) or not str(o.get("want") or "").strip():
+        return None, float(r.usd or 0.0)
+    ref = str(o.get("w") or "0").strip().strip("w")
+    a = ref.split("-")[0].strip()
+    if not a.isdigit() or int(a) > first[-1][0] or wish_second(work, ref) > HOOK_S + 1.0:
+        ref = "0-1"
+    q = [str(x)[:80] for x in (o.get("q") or []) if isinstance(x, str) and x.strip()][:2]
+    return dict(w=ref if "-" in ref else f"{ref}-{ref}", at=None, want=str(o["want"])[:160], own=bool(o.get("mine")), mine=bool(o.get("mine")),
+                q=q, kind="video" if o.get("kind") == "video" else "photo", hook=True), float(r.usd or 0.0)
+
+
+def own_views(work, per, deadline, n_have=0):
+    """(rows, usd): for footage with no words to follow, details of the upload itself worth a shot of their own,
+    each another moment re-framed. One model call looks at sixteen frames; the boxes are checked here."""
+    dur, W, H = float(per.get("dur") or 0), int(per.get("W") or 0), int(per.get("H") or 0)
+    src = os.path.join(work, "source.mp4")
+    if dur < 2.5 or not W or not H or not os.path.exists(src):
+        return [], 0.0
+    n = OWN_FRAMES
+    times = [round(dur * (k + 0.5) / n, 2) for k in range(n)]
+    tmp = tempfile.mkdtemp(prefix="view-", dir=work)
+    try:
+        sheet = own_sheet(src, times, W, H)
+        if sheet is None:
+            return [], 0.0
+        path = os.path.join(tmp, "views.jpg")
+        boards.save(sheet, path, quality=82)
+        r = call.stream(LOOK_MODEL, VIEW_SYSTEM, [brief.image_block(path), {"type": "text", "text": f"The upload runs {dur:.1f} s. Frames 0 to {n - 1}."}],
+                        max_tokens=VIEW_TOKENS, effort="low", purpose="director_views", deadline=deadline, thinking=False)
+        rows, seen = [], []
+        for o in parse_keep(r.text):
+            f = o.get("c")
+            if not (isinstance(f, int) and 0 <= f < n):
+                continue
+            crop = reframe(o.get("box"), W, H)
+            if crop is None or crop[3] - crop[1] > 0.72:      # under 1.4 times closer is the take again, not a detail
+                continue
+            cx, cy = (crop[0] + crop[2]) / 2, (crop[1] + crop[3]) / 2
+            if any(abs(times[f] - t) < 1.0 and abs(cx - x) + abs(cy - y) < 0.2 for t, x, y in seen):
+                continue                                # the same detail at the same moment
+            seen.append((times[f], cx, cy))
+            span = min(2.4, dur)
+            t0 = min(max(0.0, times[f] - 0.8), max(0.0, dur - span))
+            rows.append(dict(id=n_have + len(rows), src=f"main@{t0:.2f}-{t0 + span:.2f}", crop=crop, box=[round(float(v), 3) for v in o["box"]], at=times[f],
+                             wish=None, what=str(o.get("what") or "")[:80], **{"for": f"@{times[f]:.1f}"}))
         return rows[:6], float(r.usd or 0.0)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -600,7 +689,7 @@ def own_cells(work, rows, cw, ch):
             continue
         x0, y0, x1, y1 = r["crop"]
         w, h = fr.size
-        out.append((f"{r['src']} crop", boards.fit(fr.crop((int(x0 * w), int(y0 * h), int(x1 * w), int(y1 * h))), cw, ch)))
+        out.append((f"view:{r['id']} @{r['at']:.1f}s", boards.fit(fr.crop((int(x0 * w), int(y0 * h), int(x1 * w), int(y1 * h))), cw, ch)))
     return out
 
 
@@ -617,7 +706,25 @@ def run(work, scout, per, acquire, deadline):
     import stock
     report, cands = [], []
     usd = 0.0
+    words_n = 0
+    try:
+        with open(os.path.join(work, "index.json"), encoding="utf-8") as f:
+            words_n = len(json.load(f).get("words") or [])
+    except (OSError, ValueError):
+        pass
+    talk = words_n / max(float((per or {}).get("dur") or 0.0), 1.0) >= 1.0
+    if talk:
+        try:
+            hook, hook_usd = hook_wish(work, scout, wishes, per or {}, min(deadline, time.monotonic() + HOOK_CALL_S))
+            usd += hook_usd
+            if hook:
+                wishes = [hook] + list(wishes)
+                if isinstance(scout, dict):
+                    scout["wishes"] = wishes           # the Brief lists it with the Scout's own
+        except Exception as e:  # noqa: BLE001 no hook wish: the Scout's wishes stand
+            report.append(dict(hook_error=str(e)[:120] or "late"))
     side = cf.ThreadPoolExecutor(max_workers=6)
+    view_f = None if talk else side.submit(broll_source.carried(own_views), work, per or {}, min(deadline, time.monotonic() + VIEW_CALL_S))
     name_f = side.submit(broll_source.carried(name_wishes), work, wishes, str((scout or {}).get("about") or ""))
     own_f = side.submit(broll_source.carried(own_moments), work, wishes, per or {}, min(deadline, time.monotonic() + 14.0))
     read_f = side.submit(broll_source.carried(reads_for), work, wishes, per or {})
@@ -756,6 +863,8 @@ def run(work, scout, per, acquire, deadline):
             if kind == "video":
                 row.update(dur=round(float(got.get("dur") or c.get("duration_s") or 0), 2), fps=got.get("fps"))
             row["_looked"] = bool(k.get("what"))
+            if w0.get("hook"):
+                row["hook"] = True
             row.update({"what": k.get("what") or c.get("description") or c.get("title") or "", "for": f"w{w0.get('w')}" if w0.get("w") else str(w0.get("at")),
                         "wish": c["_wish"], "class": cls, "licence": lic, "licence_url": lurl, "provider": c.get("provider"), "author": c.get("credit"),
                         "page": c.get("page_url"), "query": c.get("_q")})
@@ -784,6 +893,15 @@ def run(work, scout, per, acquire, deadline):
         except Exception as e:  # noqa: BLE001 the upload still stands as itself
             own = []
             report.append(dict(own_error=str(e)[:120]))
+        if view_f is not None:
+            try:
+                views, view_usd = view_f.result(timeout=max(0.05, deadline - time.monotonic()))
+                usd += view_usd
+                for v in views:
+                    v["id"] = len(own)
+                    own.append(v)
+            except Exception as e:  # noqa: BLE001 the upload still stands as itself
+                report.append(dict(view_error=str(e)[:120] or "late"))
         plates = plates_for(per, 3, work)
         for r in report:
             if "wish" in r:
@@ -795,7 +913,7 @@ def run(work, scout, per, acquire, deadline):
             bin_board(items, work, os.path.join(work, "bin_board.jpg"), own)
         said = [r["named_say"] for r in report if r.get("named_say") and not r.get("bin")]
         out = dict(own=own, items=items, plates=plates, wishes=report, credits=credits, said=said,
-                   own_lines=[json.dumps({"src": o["src"], "crop": o["crop"]}, separators=(",", ":")) + f": {o['what']} (for {o['for']})" for o in own],
+                   own_lines=[f"view:{o['id']} the upload at {o['at']:.1f}s, re-framed on: {o['what']}" + (f" (for {o['for']})" if o.get("wish") is not None else "") for o in own],
                    usage=dict(model=LOOK_MODEL, usd=round(usd, 6), candidates=len(cands), search_seconds=t_search, seconds=round(time.monotonic() - t_all, 1),
                               counts=dict(offered=n_before, kept=len(items), designed=sum(1 for it in items if it.get("provider") == "designed"),
                                           named=sum(1 for it in items if it.get("named")), own=len(own))))

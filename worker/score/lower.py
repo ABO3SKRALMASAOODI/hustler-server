@@ -922,6 +922,10 @@ def lower(l1, work):
     if abs(float(grade.get("gain", 1)) - 1) > 1e-3 or abs(float(grade.get("lift", 0))) > 1e-3:
         gc["exposure"] = round(min(max((float(grade.get("gain", 1)) - 1 + float(grade.get("lift", 0))) / 0.35, -1), 1), 3)
     film = l1.get("film") or {}
+    look = film.get("look") if isinstance(film.get("look"), dict) else None
+    if look:           # the solved look (score.grade) is the film's grade: its shadow hue here, its tone as a window below
+        from . import grade
+        gc = grade.custom(look)
     stylize = []
     if film.get("grain"):             # noise alls = 5 + 25 i, so the engine's sigma in 8 bits
         stylize.append({"id": "film.grain", "kind": "grain", "intensity": round(min(max((float(film["grain"]) * 255 - 5) / 25, 0.0), 1.0), 3)})
@@ -957,6 +961,8 @@ def lower(l1, work):
         item = {"id": s["id"], "storage_key": key, "at": r2(s["start_s"]), "gain_db": float(s.get("db", -6)), "purpose": s.get("s")}
         if s.get("trim_s"):
             item["offset_s"] = r2(s["trim_s"])
+        if s.get("dur_s"):                    # lane J: a recording with a measured audible tail stops there, 0.12 s fade (the renderer's own)
+            item["dur_s"] = r2(s["dur_s"])
         sfx.append(item)
     # Source time never passes the source: the air after a last word can reach past its end, and
     # validate_edl refuses the whole film for a caption 0.02 s over it.
@@ -986,6 +992,13 @@ def lower(l1, work):
            "inserts": inserts, "captions": lower_captions(l1, rep, src_dur), "sfx": sfx, "overlays": overlays + pool_ov + cards + script_type,
            "texts": lower_texts(l1, rep, runs), "vectors": vectors, "fx": tr_fx + flash_fx, "effects": effects, "master": {"loudness": "social"}}
     edl["texts"] += rep.pop("_cap_texts", [])
+    if look:
+        # the keyed tone grades the take's own stream; a cutaway takes plain windows only (renderer.cutaway_look_chain).
+        # A film that cuts its take in as a picture would come out in two colours, so that film goes without it
+        keyed = not any(o.get("asset_key") == "main" for o in edl["overlays"])
+        edl["fx"] = grade.windows(look, 0.0, lim, keyed) + edl["fx"]
+        rep["look"] = dict({k: look.get(k) for k in ("name", "card", "amount", "de", "skin_de")}, keyed=bool(keyed and look.get("key")),
+                           **({"de": look.get("key_de"), "skin_de": look.get("key_skin_de")} if keyed and look.get("key") else {}))
     rep.pop("_off_base", None)
     for lane, least in (("texts", TX_MIN_S), ("vectors", TX_MIN_S), ("fx", 1 / fps)):
         kept = []

@@ -757,6 +757,9 @@ class ToolContext:
                 clock.src_to_out, self.user_message)
             if counter_refusal:
                 return f"REJECTED (EDL v{prev['version']} unchanged): {counter_refusal}"
+        held = _length_held_refusal(self, prev, normalized)
+        if held:
+            return f"REJECTED (EDL v{prev['version']} unchanged): {held}"
         import request_contract
         protected = None
         # The Director's film (apply_score) is one whole version made from the upload: the request
@@ -13082,6 +13085,34 @@ def erase_region(ctx, x=None, y=None, w=None, h=None, start=None, end=None,
     except Exception as e:
         return (f"The repaint failed ({str(e)[:180]}). Nothing changed — do "
                 "NOT claim anything was removed.")
+
+
+def _kept_seconds(edl):
+    total = 0.0
+    for k in (edl or {}).get("keep") or []:
+        try:
+            total += max(0.0, float(k[1]) - float(k[0]))
+        except (IndexError, TypeError, ValueError):
+            continue
+    return total
+
+
+def _length_held_refusal(ctx, prev, proposed):
+    """A typed request whose ask ledger keeps the upload's length (score.asks, the ledger model's
+    `length` field) refuses any write that cuts the upload shorter (p5472, round 3 and the round-4
+    replay: the length was restored to 473 s, then the editor cut its pauses back to 427 s against
+    "do not shorten"). The reason, not a pattern: the model read the ask; this only measures."""
+    ledger = getattr(ctx, "ask_ledger", None)
+    if not isinstance(ledger, dict) or not getattr(ctx, "has_main_video", False):
+        return None
+    if not any(isinstance(a, dict) and a.get("length") == "upload" for a in ledger.get("asks") or []):
+        return None
+    before, after = _kept_seconds(prev.get("json")), _kept_seconds(proposed)
+    if after >= before - 0.25:
+        return None
+    return (f"the customer asked to keep their full length; this write cuts the upload from "
+            f"{before:.1f} s to {after:.1f} s of it. Cut nothing: place pictures over the film "
+            "(overlays) instead of removing any of it, and keep every second of the narration.")
 
 
 def reset_edit(ctx):

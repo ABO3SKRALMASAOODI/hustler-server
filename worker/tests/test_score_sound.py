@@ -79,7 +79,9 @@ def test_every_peak_lands_13ms_before_its_event_and_validates(tmp_path):
     assert l1["sound"], rep
     for s in l1["sound"]:
         assert s["s"] in lib and s["file"] == lib[s["s"]]["file"]               # only the owner's library
-        assert abs(s["peak_s"] - lib[s["s"]]["peak_s"] - SD.LEAD_S) < 1e-6
+        assert abs(s["peak_s"] - float(lib[s["s"]].get("hit_s") or lib[s["s"]]["peak_s"]) - SD.LEAD_S) < 1e-6
+        if lib[s["s"]].get("max_s"):
+            assert abs(s["dur_s"] - (lib[s["s"]]["max_s"] - s["trim_s"])) < 1e-3
         assert abs(s["start_s"] - max(0.0, s["event_f"] / FPS - s["peak_s"])) < 1e-3
         assert s["event_f"] in (150, 210, 400, 460, 520)                         # every sound answers a picture event
         assert SD.GAIN_MIN <= s["db"] <= SD.GAIN_MAX

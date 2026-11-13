@@ -465,6 +465,32 @@ def seats_part(work, idx, per):
     return out
 
 
+def colour_part(work, styles):
+    """What the upload's colour measures, beside the cards it was offered: the look is chosen against these."""
+    try:
+        from . import grade
+        arr = grade.frames(work)
+        if arr is None:
+            return []
+        px = grade.pixels(arr)
+        px = px[:: max(1, len(px) // grade.SOLVE_PX)]
+        n = grade.numbers(px)
+        skin = float(grade.apply(px, {})[1].mean())
+    except Exception:  # noqa: BLE001 - a Brief without this line is still a Brief
+        return []
+    lean = ""
+    if n.get("sh"):
+        a, b = n["sh"]
+        lean = ", its shadows lean " + ("neutral" if abs(a) < 2 and abs(b) < 2 else ("warm" if b > 0 else "cool") + (" and green" if a < -2 else " and magenta" if a > 3 else ""))
+    out = ["## Colour",
+           f"The upload measures L* {n['L5']:.0f} / {n['L50']:.0f} / {n['L95']:.0f} at its 5th, 50th and 95th percentile, chroma {n['C']:.0f}{lean}; skin is {int(skin * 100)}% of the frame. "
+           + ("It is dark: a design that darkens loses it. " if n["L50"] < 22 else "It is bright and flat: it can take contrast. " if n["L5"] > 12 and n["L50"] > 55 else "")]
+    cards = [f"{s} {grade.CARDS[s]['L5']:.0f} / {grade.CARDS[s]['L50']:.0f} / {grade.CARDS[s]['L95']:.0f}, chroma {grade.CARDS[s]['C']:.0f}" for s in styles if s in grade.CARDS]
+    if cards:
+        out.append("The cards measure, the same way: " + "; ".join(cards) + ". The look you name is solved toward its card.")
+    return out
+
+
 def supply_part(idx, per, bin_items):
     """What this footage can carry, in numbers, before a film exists."""
     dur = float(per["dur"])
@@ -541,7 +567,7 @@ def scout_part(scout, idx=None):
 
 def bin_part(work):
     b = jload(os.path.join(work, "bin.json"))
-    if not b:
+    if not b or not (b.get("items") or b.get("own_lines")):
         return ["## The Bin", "Empty so far. Plates and the upload only."], None
     out = ["## The Bin", "On the last board. Everything here exists: it is real files."]
     mine = [w.get("want") for w in b.get("wishes", []) if w.get("mine")]
@@ -561,9 +587,13 @@ def bin_part(work):
             line += ". Holds printed words"
         if any(r.get("faces") for r in it.get("seen") or []):
             line += f". Shows {it['named']}, as the words name" if it.get("named") else ". Holds a stranger's face"
+        if it.get("hook"):
+            line += ". THE HOOK PICTURE: what the film is about. It opens the film under the title, or is cut in inside the first 3 s"
         out.append(line)
     if b.get("own_lines"):
-        out.append("The upload's own moments, re-framed for what only it shows; on the board after the found pictures, used as written:")
+        out.append("The upload's own details, each another moment of it re-framed; on the board after the found pictures. Cut to one by its id, "
+                   '`"pic":"view:0"`, for 1 to 2 s: it is a new picture like a Bin picture, an insert an editor would have shot, and it needs no `for`. '
+                   "They carry a film whose Bin is otherwise empty: open on the strongest, and come back to one where the take runs long:")
         out += b["own_lines"]
     if b.get("plates"):
         out.append("Plates ready for any beat: " + " ".join(f"{p['id']} {p['c0']}>{p['c1']} ({p.get('why', '')})" for p in b["plates"]))
@@ -584,6 +614,7 @@ def film_text(work, idx, sess, per, x, scout, styles, cards, bin_items=None):
     out += words_part(work, idx, per, x, scout)
     out += footage_part(per, idx)
     out += seats_part(work, idx, per)
+    out += colour_part(work, styles)
     out += audio_part(idx, per)
     out += ["## Frames",
             "Boards 1-3: frames in time order. Each stamp reads @source-second, then the word being spoken. Green box face, yellow box free space on the first cell. White ticks mark every .1 of the frame. Board 4: details, softness, palette."]

@@ -217,3 +217,30 @@ def test_a_patch_value_the_schema_refuses_is_corrected_then_put_back(monkeypatch
     assert "values the schema refuses" in contents[1] and "captions" in contents[1]
     assert got["version"] and ctx.edl["captions"]["style"]["color"] == "#F3EBDC"
     assert "effect" not in ctx.edl["captions"]["style"] and any("kept as it was" in r for r in got["refused"])
+
+
+def test_a_held_length_refuses_any_write_that_cuts_the_upload_shorter():
+    ledger = {"asks": [{"id": "a1", "length": "upload"}]}
+    ctx = NS(ask_ledger=ledger, has_main_video=True)
+    prev = {"version": 9, "json": {"keep": [[0.0, 473.3]]}}
+    why = agent_tools._length_held_refusal(ctx, prev, {"keep": [[0.0, 100.0], [102.0, 473.3]]})
+    assert why and "473.3 s to 471.3 s" in why
+    assert agent_tools._length_held_refusal(ctx, prev, {"keep": [[0.0, 473.3]]}) is None
+    ctx.ask_ledger = {"asks": [{"id": "a1", "length": "none"}]}
+    assert agent_tools._length_held_refusal(ctx, prev, {"keep": [[0.0, 100.0]]}) is None
+    assert agent_tools._length_held_refusal(NS(has_main_video=True), prev, {"keep": [[0.0, 100.0]]}) is None
+
+
+def test_a_length_ask_the_ledger_missed_is_held_on_the_checks_reading(monkeypatch):
+    ledger = asks.settle({"lang": "en", "asks": [{"said": "keep my full narration and duration", "want": "all of it", "kind": "keep",
+                                                  "length": "none", "items": [], "how": "measure", "where": "", "pass": ""}]},
+                         {"keep": [[0.0, 20.0]]})
+    ledger["cfg"] = {"repairs": 1, "check": True}
+    ctx = _ctx({"keep": [[0.0, 8.0], [9.0, 17.0]]}, ask_ledger=ledger, ask_verdict=None, last_preview={"edl_version": 1})
+    monkeypatch.setattr(asks, "check", lambda *a, **k: {"asks": [{"id": "a1", "state": "not_done", "seen": "16 of 20 s", "line": "l",
+                                                                  "full_length": True}], "unasked": [], "usage": {}})
+    monkeypatch.setattr(agent_loop, "_turn_change_list", lambda c: "")
+    calls = []
+    monkeypatch.setattr(agent_tools, "restore_range", lambda c, a, b: calls.append((a, b)) or "EDL v5: restored")
+    note = agent_loop._asks_check(ctx, "draft")
+    assert calls == [(0.0, 20.0)] and ledger["asks"][0]["length"] == "upload" and "full length" in note

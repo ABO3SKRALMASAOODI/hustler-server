@@ -109,6 +109,8 @@ def _kshot(ctx, t):
 
 def _pic_key(ctx, s):
     p = str(s.get("pic"))
+    if s.get("view") is not None:
+        return ("view", str(s["view"]))        # a detail of the upload Supply found: an insert, a picture of its own
     if p == "plate":
         return (str(s["framed"]),) if s.get("framed") else None      # a still framed on the plate is that picture
     if p == "main" or p.startswith("own:"):
@@ -1299,6 +1301,59 @@ def look(work, comp, film_path, deadline, model, effort="low"):
     if v is not None:
         v.update(times=times, seconds=r.seconds)
     return v, r.usd
+
+
+AGAINST_SYSTEM = """Two editors each made a short film from the same upload. You get one board: the top row is six frames of film A across its length, the bottom row is six frames of film B across its length. The films may differ in length, order and shape. Decide which one the person who uploaded the footage would rather post, the way a stranger scrolling past would judge them: which looks like an editor's work. Type that reads at once and says something, a real picture of what the film is about, a clear first frame, a frame that is whole and well composed count for a film. Type that can't be read, covers a face or repeats what the frame already prints, a cropped head, empty pages, a picture with nothing to do with the rest, and a film that is only the raw footage count against it.
+Answer with one JSON object and nothing else: {"better":"A" or "B" or "same","why":"what on the frames decides it, under 30 words"}."""
+
+
+def against(current, film, out_path, deadline, model, effort="low", cell_h=360):
+    """The critic, for a project that already holds a first film: is the new film worse than the one the customer
+    has now? Returns ({"better": "current" | "new" | "same", "why"}, usd), or (None, usd) when it can't be told.
+    A is the current film and B the new one. It rates nothing: the new film goes out unless the current one is better."""
+    import concurrent.futures as cf
+    import subprocess
+
+    from PIL import Image, ImageDraw
+
+    from . import boards, brief, call
+
+    def dur(p):
+        try:
+            r = subprocess.run([boards.FFMPEG.replace("ffmpeg", "ffprobe") if os.path.sep in boards.FFMPEG else "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                "-of", "csv=p=0", p], capture_output=True, text=True, timeout=30)
+            return float(r.stdout.strip() or 0.0)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return 0.0
+    da, db = dur(current), dur(film)
+    if da <= 0 or db <= 0:
+        return None, 0.0
+    n = LOOK_PAIRS
+    with cf.ThreadPoolExecutor(max_workers=4) as pool:
+        fa = list(pool.map(lambda k: boards.grab(current, da * (k + 0.5) / n, height=cell_h), range(n)))
+        fb = list(pool.map(lambda k: boards.grab(film, db * (k + 0.5) / n, height=cell_h), range(n)))
+    if sum(f is not None for f in fa) < 3 or sum(f is not None for f in fb) < 3:
+        return None, 0.0
+    cw = max(max(f.size[0] for f in fa + fb if f is not None), 8)
+    gap, head = 6, 22
+    im = Image.new("RGB", (n * (cw + gap) - gap, 2 * (head + cell_h) + gap), boards.BG)
+    d = ImageDraw.Draw(im)
+    for row, (name, frames) in enumerate((("film A", fa), ("film B", fb))):
+        y = row * (head + cell_h + gap)
+        d.text((3, y + 2), name, fill=boards.FG, font=boards.font(14))
+        for i, f in enumerate(frames):
+            if f is not None:
+                im.paste(f, (i * (cw + gap) + (cw - f.size[0]) // 2, y + head))
+    boards.save(im, out_path, quality=86)
+    r = call.stream(model, AGAINST_SYSTEM, [brief.image_block(out_path), {"type": "text", "text": "Film A above, film B below. Now the JSON."}],
+                    max_tokens=1200, effort=effort, purpose="director_against", deadline=deadline, thinking=False)       # room to answer: at 300 one of eleven came back empty
+    a, b = (r.text or "").find("{"), (r.text or "").rfind("}")
+    try:
+        o = json.loads(r.text[a:b + 1])
+    except (ValueError, TypeError):
+        return None, r.usd
+    pick = str(o.get("better", "")).strip().upper()
+    return {"better": {"A": "current", "B": "new"}.get(pick, "same"), "why": str(o.get("why", ""))[:200]}, r.usd
 
 
 def silent_beats_emptied(text, ids):

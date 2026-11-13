@@ -298,6 +298,8 @@ def run(index, src, work):
                           noise=round(float(np.median([s["noise"] for s in ss])), 2), change=round(float(np.median([s["diff"] for s in ss if s["diff"] is not None] or [0])), 2),
                           free=free_regions(fr[:: max(1, len(fr) // 6)], faces[:: max(1, len(faces) // 4)])))
     pal, accents = palette([f for _, f in spaced])
+    from . import grade
+    grade.keep(work, [f for _, f in keep])         # the look is solved on these (score.grade)
     res = dict(step=step, W=W, H=H, dur=dur, fps=vid.get("fps"), shots=shots, events=[], text=text_clusters(index.get("spatial")), palette=pal, accents=accents,
                audio=audio_facts(src, vid.get("has_audio", True)), samples=samples)
     with open(os.path.join(work, "perception.json"), "w") as f:
