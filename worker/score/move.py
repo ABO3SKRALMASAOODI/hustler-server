@@ -240,14 +240,17 @@ def ease_takes(ctx):
             # a line printed across the frame is the upload's own caption or title, whoever speaks or does not (p5572, 13
             # Nov: an eased step cut "POV: You have back pain" at both edges, and the last look took the film back)
             marks = [m for m in marks if m[2] - m[0] >= WIDE_LINE * w]
-        # The anchor: the point of the frame that stays put while the frame closes. Across, it sits in the heads'
-        # span where the room either side of them is shared out, so a head held against one edge (a selfie) grows
-        # away from that edge and is never cut by it. Down, it is the chin when the captions sit under the face and
-        # the brow when they sit over it, so the head never grows onto the caption seat.
+        # The anchor: the point of the frame that stays put while the frame closes. It sits inside the span of
+        # everything that must stay whole (heads, and the lines the upload prints), where the room either side of that
+        # span is shared out: a head held against one edge (a selfie) grows away from that edge, a caption that
+        # starts at the left edge keeps its first letter, a line along the bottom stays on the bottom. Then the
+        # captions: the head never grows onto the caption seat, so the anchor is no higher than the chin when the
+        # captions sit under the face, and no lower than the brow when they sit over it.
         ax, ay, z_face = 0.5, 0.5, 9.0
-        if heads:
-            l, r = min(m[0] for m in heads), max(m[2] for m in heads)
-            t, b_ = min(m[1] for m in heads), max(m[3] for m in heads)
+        whole = [m for m in list(heads) + list(marks) if c[0] - 1e-3 <= m[0] and c[1] - 1e-3 <= m[1] and m[2] <= c[2] + 1e-3 and m[3] <= c[3] + 1e-3]
+        if whole:
+            l, r = min(m[0] for m in whole), max(m[2] for m in whole)
+            t, b_ = min(m[1] for m in whole), max(m[3] for m in whole)
             fl, fr_ = (l - c[0]) / w, (r - c[0]) / w
             ft, fb = (t - c[1]) / h, (b_ - c[1]) / h
             rl, rr = max(fl - EDGE, 0.0), max(1 - EDGE - fr_, 0.0)
@@ -256,8 +259,8 @@ def ease_takes(ctx):
             ay = ft + (fb - ft) * (rt / (rt + rb) if rt + rb > 1e-6 else 0.5)
         if face and c[0] <= (face[0] + face[2]) / 2 <= c[2] and c[1] <= (face[1] + face[3]) / 2 <= c[3]:
             if cap_y is not None:
-                below = cap_y >= ((face[1] + face[3]) / 2 - c[1]) / h
-                ay = min(max(((face[3] if below else face[1]) - c[1]) / h, 0.1), 0.9)
+                chin, brow = (face[3] - c[1]) / h, (face[1] - c[1]) / h
+                ay = max(ay, min(chin, 0.9)) if cap_y >= (chin + brow) / 2 else min(ay, max(brow, 0.1))
             z_face = taste.FACE_H_MAX / max((face[3] - face[1]) / h, 1e-6)
         up = ctx.W / max(1.0, w * aw)
         z_up = max(1.0, min(TOTAL_MAX, taste.UPSCALE_MAX / max(up, 1e-6)))
