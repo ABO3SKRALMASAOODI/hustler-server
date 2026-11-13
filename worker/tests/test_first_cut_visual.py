@@ -572,3 +572,22 @@ def test_a_beat_card_lasts_exactly_as_long_as_its_slam(monkeypatch):
     edl["motion"][0]["end"] = 15.33
     first_cut._card_to_slam(ctx, [], 0.0, "vec1", 13.9, 15.33)
     assert calls == []
+
+
+def test_a_colourful_set_does_not_outweigh_the_character_in_it():
+    """#1137 (p5740): a warm-lit cartoon room, its left half one saturated
+    orange wall and fire, the speaking girl a small bright figure on the
+    right. The window goes to the girl, not to the wall."""
+    import numpy as np
+    frames = np.empty((4, 45, 80, 3), np.uint8)
+    frames[:] = (205, 150, 150)                            # pink room
+    frames[:, :, :32] = (210, 110, 40)                     # warm wall + fire
+    frames[1::2, 25:33, 8:20] = (230, 140, 50)             # the fire flickers
+    for k in range(4):                                     # the girl moves
+        x = 58 + k
+        frames[k, 14:24, x:x + 8] = (250, 30, 30)
+        frames[k, 24:34, x:x + 8] = (30, 200, 40)
+        frames[k, 34:40, x:x + 8] = (40, 60, 230)
+    # (the frame-wide median put the window on the wall: centre 0.19-0.22)
+    for k, (x0, x1) in enumerate(fcv.action_boxes(frames)):
+        assert 0.65 < (x0 + x1) / 2.0 < 0.85, (k, x0, x1)

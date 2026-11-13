@@ -170,32 +170,15 @@ def tool_feature(name):
 # ------------------------------------------------------------------ #
 #  Typed requests                                                     #
 # ------------------------------------------------------------------ #
-# Deliberately narrow: a typed request is answered with the card before any
-# model runs only when it plainly asks for several shorts or for a website
-# recording. Anything else runs as usual, and the Studio agent's gated tools
-# answer with the same card if it reaches for them (agent_tools).
+# A typed request is answered with the card before any model runs only
+# when it asks for a website recording (a link or "my site" next to a
+# recording word). Shorts are never read from the words (owner, 6 Nov 2026:
+# no regex on intent; ticket #1136: "Create a 9:16 YouTube Shorts video" of
+# a free trial's own 51 s fireworks clip met the Shorts card and nothing
+# ran). A shorts ask goes to the Studio agent, which interprets it; if it
+# reaches for make_shorts on a long source, agent_tools answers with the
+# same card, measured from the source, never from the words.
 
-_COUNT = (r"(?:\d{1,2}|a\s+few|few|several|some|multiple|many|a\s+couple"
-          r"(?:\s+of)?|two|three|four|five|six|seven|eight|nine|ten|"
-          r"twelve|fifteen|twenty)")
-_SHORT_WORDS = r"(?:shorts|reels|tiktoks|youtube\s+shorts|short\s+clips)"
-_SOURCE_WORDS = (r"(?:podcast|interview|episode|livestream|live\s+stream|"
-                 r"stream|webinar|talk|long\s+video|long-form|longform|"
-                 r"full\s+video|whole\s+video)")
-_SHORTS_PATTERNS = (
-    re.compile(r"\b" + _COUNT + r"\s+(?:[\w'-]+\s+){0,3}?" + _SHORT_WORDS
-               + r"\b", re.I),
-    re.compile(r"\b(?:into|to|as)\s+(?:[\w'-]+\s+){0,2}?" + _SHORT_WORDS
-               + r"\b", re.I),
-    re.compile(r"\b(?:make|create|cut|generate|extract|pull|clip|chop|"
-               r"split|get|give\s+me|find)\s+(?:[\w'-]+\s+){0,2}?"
-               + _SHORT_WORDS + r"\b", re.I),
-    re.compile(r"\b(?:shorts|reels|clips|tiktoks|highlights)\s+(?:from|out\s+of)"
-               r"\s+(?:[\w'-]+\s+){0,2}?" + _SOURCE_WORDS + r"\b", re.I),
-    re.compile(r"\b" + _SOURCE_WORDS + r"\b.{0,40}\b(?:into|to)\s+"
-               r"(?:[\w'-]+\s+){0,2}?(?:shorts|reels|clips|tiktoks)\b",
-               re.I),
-)
 _URL = re.compile(r"(?:https?://|\bwww\.)[^\s<>\"')]+", re.I)
 _SITE_WORDS = re.compile(
     r"\b(?:my|our|the|this|a)\s+(?:web\s*site|site|landing\s+page|"
@@ -221,16 +204,14 @@ def website_link(text):
 
 
 def request_feature(text):
-    """The gated feature a typed request plainly asks for, else None."""
+    """"website_demo" when a typed request plainly asks for a website
+    recording, else None. Never "shorts": see the note above."""
     text = str(text or "")[:4000]
     if not text.strip():
         return None
     if _RECORD_WORDS.search(text) and (website_link(text)
                                        or _SITE_WORDS.search(text)):
         return "website_demo"
-    for pattern in _SHORTS_PATTERNS:
-        if pattern.search(text):
-            return "shorts"
     return None
 
 

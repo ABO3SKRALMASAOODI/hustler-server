@@ -1110,16 +1110,40 @@ def _rgb_frames(path, a, b, fps=ACTION_FPS, width=160):
     return np.frombuffer(raw[:n * width * h * 3], np.uint8).reshape(n, h, width, 3)
 
 
+ACTION_SAT_RADIUS = 0.12      # of the frame's width
+
+
+def _local_contrast(m, r):
+    """``m`` minus its mean over a (2r+1)-square neighbourhood (edge-padded,
+    summed-area table): what stands out from its surroundings."""
+    import numpy as np
+    p = np.pad(m, r + 1, mode="edge")
+    s = p.cumsum(axis=0).cumsum(axis=1)
+    h, w = m.shape
+    k = 2 * r + 1
+    tot = (s[k:k + h, k:k + w] - s[:h, k:k + w] - s[k:k + h, :w]
+           + s[:h, :w])
+    return m - tot / float(k * k)
+
+
 def action_boxes(frames, ww=0.316):
     """Per frame [x0, x1] (fractions) of where the action is: the window of
     width ``ww`` holding the most colour saturation, motion and detail
     against the frame's own background (u4899: an orange pipe and a red
     cleaner on white snow), narrowed to its middle 70% so a follow keeps it
-    inside with room; None for a flat frame."""
+    inside with room; None for a flat frame.
+
+    Saturation counts where it stands out from its own surroundings, not
+    against the whole frame: in a colourful set the background is as
+    saturated as the subject (#1137, p5740: a warm-lit cartoon living room
+    held the 9:16 window on an empty fireplace and cut the speaking girl
+    out for the whole clip, while motion and detail both pointed at her)."""
     import numpy as np
     f = frames.astype(np.float32) / 255.0
     mx, mn = f.max(axis=3), f.min(axis=3)
     sat = (mx - mn) / np.maximum(mx, 1e-3)
+    r = max(1, int(round(ACTION_SAT_RADIUS * f.shape[2])))
+    sat = np.stack([_local_contrast(s, r) for s in sat])
     luma = f.mean(axis=3)
     gx = np.abs(np.diff(luma, axis=2, prepend=luma[:, :, :1]))
     gy = np.abs(np.diff(luma, axis=1, prepend=luma[:, :1, :]))

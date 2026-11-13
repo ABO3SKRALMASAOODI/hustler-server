@@ -162,17 +162,27 @@ def test_the_module_is_byte_identical_and_agrees_with_its_sources():
 
 # ------------------------------------------------------------- requests
 
+# Ticket #1136 (p5737, 13 Nov 2026): a free trial's own 51 s fireworks clip.
+P5737 = ("Edit my uploaded fireworks footage like a professional human video "
+         "editor. Create a 9:16 YouTube Shorts video using LUZ ROJA (Slowed). "
+         "Synchronize cuts with the music rhythm. Preserve original fireworks "
+         "audio and mix it naturally with the soundtrack.")
+
+
 @pytest.mark.parametrize("text,feature", [
     ("Record my website https://valmera.io/ as a 20-second vertical (9:16) "
      "demo: scroll the page from top to bottom at a steady pace, then make "
      "it a polished showcase video.", "website_demo"),
     ("record my website", "website_demo"),
     ("a demo of my app at www.example.com", "website_demo"),
-    ("make 5 shorts from this podcast", "shorts"),
-    ("turn this podcast into shorts", "shorts"),
-    ("cut this interview into reels", "shorts"),
-    ("give me some shorts", "shorts"),
-    ("Create 3 TikToks out of this", "shorts"),
+    # Shorts are never read from the words (#1136, no regex on intent):
+    # the agent interprets them and make_shorts carries the card.
+    ("make 5 shorts from this podcast", None),
+    ("turn this podcast into shorts", None),
+    ("cut this interview into reels", None),
+    ("give me some shorts", None),
+    ("Create 3 TikToks out of this", None),
+    (P5737, None),
     ("make the captions bigger", None),
     ("add 3 b-roll clips", None),
     ("remove the clips where I stutter", None),
@@ -327,7 +337,6 @@ def _assert_card(body, status, feature):
 
 @pytest.mark.parametrize("why_", ["trial", "plus"])
 @pytest.mark.parametrize("text,feature", [
-    ("make 5 shorts from this podcast", "shorts"),
     ("Record my website https://acme.io as a 20-second vertical (9:16) "
      "demo: scroll the page from top to bottom at a steady pace, then make "
      "it a polished showcase video.", "website_demo"),
@@ -358,6 +367,29 @@ def test_a_typed_gated_request_gets_the_card_and_nothing_runs(
                                       "and Max.")
     assert routes["events"][-1][0] == "feature_upgrade_shown"
     assert body["message_id"] == user["id"]
+
+
+@pytest.mark.parametrize("why_", ["trial", "plus"])
+@pytest.mark.parametrize("text", [P5737, "make 5 shorts from this podcast"])
+def test_a_typed_shorts_ask_of_a_gated_account_reaches_the_agent(
+        routes, monkeypatch, why_, text):
+    """#1136: words never decide the Shorts gate. The request runs as an
+    agent turn; make_shorts on a long source answers with the card."""
+    v = routes["video"]
+    routes["why"] = why_
+    routes["gated"] = False
+    monkeypatch.setattr(v, "_active_original", lambda *_: {"id": 41,
+                                                           "sha256": "s"})
+    monkeypatch.setattr(v, "_index_row", lambda *_: {"id": 1})
+    monkeypatch.setattr(v, "_edl_at", lambda *_: None, raising=False)
+    monkeypatch.setattr(v.plan_gate, "needs_plan", lambda *a: False)
+    monkeypatch.setattr(v, "_running_jobs_count", lambda *_: 0)
+    monkeypatch.setattr(v, "_queue_depth_notice", lambda *a: None)
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    body, status = _call(v.post_message, {"text": text}, user_id=8,
+                         project_id=9)
+    assert status == 200 and body.get("code") != "feature_upgrade"
+    assert [t for t, _ in routes["enqueued"]] == ["agent_turn"]
 
 
 def test_the_same_request_from_an_ungated_account_runs_as_before(routes,
