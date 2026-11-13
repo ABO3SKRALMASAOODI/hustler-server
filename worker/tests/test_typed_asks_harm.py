@@ -217,3 +217,15 @@ def test_a_patch_value_the_schema_refuses_is_corrected_then_put_back(monkeypatch
     assert "values the schema refuses" in contents[1] and "captions" in contents[1]
     assert got["version"] and ctx.edl["captions"]["style"]["color"] == "#F3EBDC"
     assert "effect" not in ctx.edl["captions"]["style"] and any("kept as it was" in r for r in got["refused"])
+
+
+def test_a_held_length_refuses_any_write_that_cuts_the_upload_shorter():
+    ledger = {"asks": [{"id": "a1", "length": "upload"}]}
+    ctx = NS(ask_ledger=ledger, has_main_video=True)
+    prev = {"version": 9, "json": {"keep": [[0.0, 473.3]]}}
+    why = agent_tools._length_held_refusal(ctx, prev, {"keep": [[0.0, 100.0], [102.0, 473.3]]})
+    assert why and "473.3 s to 471.3 s" in why
+    assert agent_tools._length_held_refusal(ctx, prev, {"keep": [[0.0, 473.3]]}) is None
+    ctx.ask_ledger = {"asks": [{"id": "a1", "length": "none"}]}
+    assert agent_tools._length_held_refusal(ctx, prev, {"keep": [[0.0, 100.0]]}) is None
+    assert agent_tools._length_held_refusal(NS(has_main_video=True), prev, {"keep": [[0.0, 100.0]]}) is None
