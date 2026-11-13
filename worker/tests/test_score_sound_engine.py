@@ -260,3 +260,47 @@ def test_one_typed_line_approves_a_list_and_nothing_else_does(tmp_path, monkeypa
     rows = json.load(open(os.path.join(lib, "manifest.json")))
     assert [g[1] for g in got[:2]] == ["click_1", "click_2"] and got[2][1].startswith("not approved")
     assert [r["id"] for r in rows] == ["click_1", "click_2"] and all(r["license"] == "CC0 1.0" for r in rows)
+
+
+# ----------------------------------------------------------------- a placed sound is there
+
+@needs_ffmpeg
+def test_a_sound_the_voice_would_hide_comes_up_or_gives_its_place(tmp_path):
+    """Under an unbroken voice every plain gesture that stays can be picked out of it (PRESENT_MIN over the voice in its
+    own band at its hit), a quiet one is raised by PRESENT_LIFT at most, and a hidden one is dropped with the reason."""
+    sr, dur, fps = SD.AR, 20.0, 30
+    rng = np.random.default_rng(5)
+    n = rng.standard_normal(int(dur * sr)).astype(np.float32)
+    sp = np.fft.rfft(n)
+    hz = np.fft.rfftfreq(len(n), 1 / sr)
+    sp[(hz < 120) | (hz > 6000)] = 0                                      # a wide, loud voice with no breath in it
+    voice = (np.fft.irfft(sp, len(n)) * 0.2).astype(np.float32)
+    speech, _ = SD.speech_frames(voice, [(0.0, dur)])
+    D = int(dur * fps)
+    ev = [{"f": f, "kind": "picture", "size": 0.5} for f in range(90, D - 60, 60)]
+    ctx = {"fps": fps, "dur_f": D, "existing": [], "speech": speech, "voice": voice, "voice_shift_db": SD.voice_shift(voice, speech),
+           "words": [(0.0, dur)], "bed": True, "np10": 8.0}
+    sounds, rep = SD.plan_sounds(ev, ctx)
+    for p in rep["placed"]:
+        assert p["part"] != "plain" or p["over_voice_db"] >= SD.PRESENT_MIN, p
+    for s in sounds:
+        assert s.get("lifted_db", 0.0) <= SD.PRESENT_LIFT + 1e-6
+    hidden = [d for d in rep["dropped"] if "hide" in d["why"]]
+    assert rep["placed"] or hidden                                        # every event was either heard or named as hidden
+
+
+@needs_ffmpeg
+def test_with_the_bed_known_a_buried_hit_is_raised_and_a_clear_one_is_left():
+    fps, dur = 30, 6.0
+    n = int(dur * SD.AR)
+    voice = np.zeros(n, np.float32)
+    voice[:SD.AR] = np.random.default_rng(1).standard_normal(SD.AR).astype(np.float32) * 0.05       # a word, then silence
+    quiet_bed = np.random.default_rng(2).standard_normal(n).astype(np.float32) * 1e-4
+    loud_bed = np.random.default_rng(3).standard_normal(n).astype(np.float32) * 0.2
+    it = SD._item("x", "click_2", 120, fps, -14.0, {"kind": "picture"}, "plain", "hit")
+    same = SD.present_over([it], voice, quiet_bed, fps)[0]
+    assert same["db"] == it["db"] and "lifted_for_bed_db" not in same
+    up = SD.present_over([it], voice, loud_bed, fps)[0]
+    assert 0 < up["lifted_for_bed_db"] <= SD.PRESENT_LIFT and up["db"] <= SD.GAIN_MAX
+    lead = dict(it, layer="lead")
+    assert SD.present_over([lead], voice, loud_bed, fps)[0]["db"] == it["db"]

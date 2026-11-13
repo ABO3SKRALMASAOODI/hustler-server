@@ -682,6 +682,16 @@ def marks_from_l1(l1, index=None, turn_s=None, prog_end_f=None):
     return {"dur_s": end_f / fps, "words": words, "turn_s": turn_s, "end_hit_s": min(after) if after else None, "quiet": []}
 
 
+def to_ar(x):
+    """Stereo or mono 48 kHz -> mono at sound.AR (the rate the sound checks read), by ffmpeg."""
+    from . import sound as SD
+    x = np.asarray(x, np.float32)
+    ch = 2 if x.ndim > 1 else 1
+    r = subprocess.run([FF, "-hide_banner", "-nostdin", "-loglevel", "error", "-f", "f32le", "-ar", str(SR), "-ac", str(ch), "-i", "pipe:0",
+                        "-ac", "1", "-ar", str(SD.AR), "-f", "f32le", "pipe:1"], input=x.tobytes(), capture_output=True, timeout=600)
+    return np.frombuffer(r.stdout, np.float32).copy()
+
+
 # ----------------------------------------------------------------- one film, with the song and without
 
 class _Plan:
@@ -716,12 +726,17 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
            "plan": {k: v for k, v in plan.items() if k != "grid"}}
     if not plan.get("ok"):
         return rep
+    from . import sound as SD
     l1 = dict(l1, sound=sounds_on_the_drop(l1.get("sound") or [], plan, float(l1["fps"])))
-    voice, fx, _ = AU.split_audio(_Plan(l1, src))
+    voice, _fx0, _ = AU.split_audio(_Plan(dict(l1, sound=[]), src))
     total = len(voice) / float(AU.SR)
     with tempfile.TemporaryDirectory(dir=os.path.dirname(os.path.abspath(out)) if out else None) as tmp:
         lv, _ = AU.level_voice(voice, tmp) if float(np.abs(voice).max()) > 1e-5 else (voice, {})
         music, mrep = track(song_path, song, plan, marks, voice=lv[:int(marks["dur_s"] * SR)], profile=profile_for(kind))
+        # with the bed known, each placed sound is made to be there over the voice and the song together
+        l1["sound"] = SD.present_over(l1["sound"], to_ar(lv), to_ar(music), float(l1["fps"]))
+        rep["lifted_for_bed"] = sum(1 for x in l1["sound"] if x.get("lifted_for_bed_db"))
+        _v, fx, _ = AU.split_audio(_Plan(l1, src))
         fx[:len(music)] += music[:len(fx)]
         m4a = os.path.join(tmp, "song.m4a")
         rep["master"] = AU.master(voice, fx, m4a, tmp, total)

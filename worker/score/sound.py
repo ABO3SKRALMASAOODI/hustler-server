@@ -62,6 +62,10 @@ MASK_FRAMES = 3             # for 60 ms or more
 FRAME = 320                 # 20 ms at AR
 SPEECH_BAND = (300.0, 3400.0)
 COUNTER_TICKS = 8
+PRESENT_DB = 9.0            # a placed sound stands this far over the voice in the band it lives in, at its hit (the atlas's
+PRESENT_MIN = 5.0           # detector counts a reference's sound from 9 dB over its surroundings); under PRESENT_MIN it is not there
+PRESENT_LIFT = 4.0          # the most a sound comes up to be heard (still inside the references' own levels, and never into the voice)
+PRESENT_BANDS = ((60.0, 300.0), (300.0, 1000.0), (1000.0, 3400.0), (3400.0, 8000.0))
 PLACED_10S = 3              # atlas 8.5: the measurable placed layer is 1-3 sounds per 10 s, whatever the transients
 OWN_CUT_10S = 1             # the upload's own cuts: at most one sounded in any 10 s
 
@@ -568,6 +572,10 @@ def plan_sounds(events, ctx):
                 f_at = steps[-1] if steps else e["f"]
                 group.append(_item(f"snd.j{len(placed)}.{len(group)}", sid, f_at, fps, gain_for(sid, ref, under, off), e, part,
                                    "accent" if steps else what))
+        hidden = _heard(group, ctx, ref, under, part != "plain")
+        if hidden:                               # a sound nobody would hear is not placed: the next event gets its chance
+            report["dropped"].append({"f": e["f"], "kind": e["kind"], "why": hidden})
+            continue
         placed.append({"t": t, "ev": e, "part": part, "items": group, "ref": ref, "class": cls})
         taken.append(t)
         if cls:
@@ -646,17 +654,133 @@ def _item(iid, sid, f, fps, db, ev, part, what):
     return it
 
 
+def _bands_pw(x):
+    """Per 20 ms frame of a mono AR signal: power in each of PRESENT_BANDS (frames x 4)."""
+    n = len(x) // FRAME
+    if n == 0:
+        return np.zeros((0, len(PRESENT_BANDS)))
+    seg = x[:n * FRAME].reshape(n, FRAME) * np.hanning(FRAME).astype(np.float32)
+    sp = np.abs(np.fft.rfft(seg, axis=1)) ** 2
+    hz = np.fft.rfftfreq(FRAME, 1.0 / AR)
+    return np.stack([sp[:, (hz >= a) & (hz < b)].sum(axis=1) for a, b in PRESENT_BANDS], axis=1) + 1e-12
+
+
+def _voice_levels(ctx):
+    """The programme's voice as the checks read it, once per plan: (syllable level of the speech band per frame, band powers)."""
+    if "_levels" not in ctx:
+        voice, speech = ctx.get("voice"), ctx.get("speech")
+        if voice is None or speech is None or not len(voice) or not speech.any():
+            ctx["_levels"] = (None, None)
+        else:
+            v = voice * (10 ** (float(ctx.get("voice_shift_db") or 0.0) / 20))
+            vb = frames_db(v)[0]
+            k = 7                                   # the voice's level over a syllable: the loudest frame within 0.15 s
+            pad = np.pad(vb, k, mode="edge")
+            vb = np.max(np.stack([pad[j:j + len(vb)] for j in range(2 * k + 1)]), axis=0)
+            ctx["_levels"] = (vb, _bands_pw(v))
+    return ctx["_levels"]
+
+
+def _presence(it, vbands):
+    """dB this layer lifts the mix over the voice at its hit, in the band where it shows most: 10 log (1 + S / V) with S
+    the sound's loudest frame within 60 ms of its hit and V the voice's loudest frame there. A sound nobody could
+    pick out of the voice reads near 0; a reference's placed sound reads 9 or more."""
+    smp = sample_pcm(it["s"])
+    if not len(smp) or vbands is None or not len(vbands):
+        return 99.0
+    smp = smp[int(round(float(it.get("trim_s", 0)) * AR)):] * (10 ** (float(it["db"]) / 20))
+    at = int(round(float(it["start_s"]) * AR))
+    f0 = at // FRAME
+    sb = _bands_pw(np.concatenate([np.zeros(at - f0 * FRAME, np.float32), smp]))
+    h = int(round(float(it["event_f"]) / max(float(it.get("_fps", 30.0)), 1e-6) * AR / FRAME)) - f0
+    a, b = max(0, h - 3), min(len(sb), h + 4)
+    va, vz = max(0, f0 + a), min(len(vbands), f0 + b)
+    if b <= a or vz <= va:
+        return 99.0
+    s_pk = sb[a:b].max(axis=0)
+    v_pk = vbands[va:vz].max(axis=0)
+    return float(np.max(10 * np.log10(1.0 + s_pk / v_pk)))
+
+
+def _heard(group, ctx, ref, under, structural):
+    """Each hit of a gesture, made to be there: lowered while it masks the voice (as the signal check will), then
+    raised toward PRESENT_DB when the voice would hide it, never past PRESENT_LIFT, the voice's margin or the mask.
+    Returns None when the gesture can be heard, else why not (the planner then tries the next event; the film's
+    hook, turn and payoff keep their sound either way)."""
+    vb, vbands = _voice_levels(ctx)
+    if vb is None:
+        return None
+    speech, fps = ctx["speech"], float(ctx["fps"])
+    worst = None
+    for it in group:
+        if it.get("layer") not in ("hit", "accent") or it.get("for") == "counter":
+            continue
+        it["_fps"] = fps
+        need = _masking(it, vb, speech, fps)
+        if need > 0:
+            it["db"] = round(max(it["db"] - need, floor_for(it["s"], ref)), 1)
+        p = _presence(it, vbands)
+        if p < PRESENT_DB:
+            cap = GAIN_MAX
+            if under is not None:
+                cap = min(cap, ref - under - float((library().get(it["s"]) or {}).get("hit_lufs", -15.0)) + PRESENT_LIFT / 2)
+            was = it["db"]
+            it["db"] = round(min(it["db"] + min(PRESENT_DB - p, PRESENT_LIFT), cap), 1)
+            if it["db"] > was:
+                back = _masking(it, vb, speech, fps)
+                if back > 0:
+                    it["db"] = round(max(was, it["db"] - back), 1)
+                if it["db"] > was:
+                    it["lifted_db"] = round(it["db"] - was, 1)
+                p = _presence(it, vbands)
+        it.pop("_fps", None)
+        it["present_db"] = round(min(p, 60.0), 1)
+        if p < PRESENT_MIN and not structural:
+            worst = f"the voice would hide it here ({p:.1f} dB over it)"
+    return worst
+
+
+def present_over(sounds, voice, bed, fps, voice_shift_db=0.0):
+    """The same sounds once the film's bed is known (a supplied song, arranged and levelled): each hit raised toward
+    PRESENT_DB over the voice and the bed together, in the band it lives in, by PRESENT_LIFT at most and never into
+    the voice. voice, bed: mono at AR on the film's clock. Returns adjusted copies; a sound that is already there,
+    a lead, a counter's ticks and anything not from the library come back as they were."""
+    if voice is None or bed is None or not len(voice) or not len(bed):
+        return [dict(s) for s in sounds]
+    n = min(len(voice), len(bed))
+    v = voice[:n] * (10 ** (float(voice_shift_db) / 20))
+    both = _bands_pw(v) + _bands_pw(np.asarray(bed[:n], np.float32))
+    speech, _ = speech_frames(voice[:n], None)
+    vb = frames_db(v)[0]
+    k = 7
+    pad = np.pad(vb, k, mode="edge")
+    vb = np.max(np.stack([pad[j:j + len(vb)] for j in range(2 * k + 1)]), axis=0)
+    lib, out = library(), []
+    for s in sounds:
+        it = dict(s)
+        out.append(it)
+        if it.get("s") not in lib or it.get("layer") == "lead" or it.get("for") == "counter" or it.get("start_s") is None:
+            continue
+        it["_fps"] = float(fps)
+        p = _presence(it, both)
+        if p < PRESENT_DB:
+            was = it["db"]
+            it["db"] = round(min(it["db"] + min(PRESENT_DB - p, PRESENT_LIFT), GAIN_MAX), 1)
+            back = _masking(it, vb, speech, fps) if speech.any() else 0.0
+            if back > 0:
+                it["db"] = round(max(was, it["db"] - back), 1)
+            if it["db"] > was:
+                it["lifted_for_bed_db"] = round(it["db"] - was, 1)
+        it.pop("_fps", None)
+    return out
+
+
 def _signal_check(placed, ctx, report):
     """Each layer laid over the programme's own voice: a sound that masks the speech band on spoken frames is
     lowered to its role's floor, else dropped with its gesture's leads."""
-    voice, speech = ctx.get("voice"), ctx.get("speech")
+    speech = ctx.get("speech")
     out = []
-    vb = None
-    if voice is not None and speech is not None and len(voice) and speech.any():
-        vb = frames_db(voice * (10 ** (float(ctx.get("voice_shift_db") or 0.0) / 20)))[0]
-        k = 7                                   # the voice's level over a syllable: the loudest frame within 0.15 s
-        pad = np.pad(vb, k, mode="edge")
-        vb = np.max(np.stack([pad[j:j + len(vb)] for j in range(2 * k + 1)]), axis=0)
+    vb, _vbands = _voice_levels(ctx)
     for g in placed:
         hits = [i for i in g["items"] if i["layer"] == "hit"]
         keep = []
@@ -690,7 +814,9 @@ def _signal_check(placed, ctx, report):
         for i in keep:
             if not any(x[0] == i["s"] for x in lay):
                 lay.append([i["s"], i["db"], sum(1 for k in keep if k["s"] == i["s"])])
-        report["placed"].append({"t": round(g["t"], 2), "kind": g["ev"]["kind"], "part": g["part"], "class": g.get("class"), "layers": lay})
+        over = [i["present_db"] for i in keep if i.get("present_db") is not None]
+        report["placed"].append({"t": round(g["t"], 2), "kind": g["ev"]["kind"], "part": g["part"], "class": g.get("class"), "layers": lay,
+                                 **({"over_voice_db": min(over)} if over else {})})
     out.sort(key=lambda s: (s["event_f"], s["id"]))
     report["gestures"] = len(report["placed"])
     report["sounds"] = len(out)

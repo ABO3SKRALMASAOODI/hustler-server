@@ -318,8 +318,12 @@ def song_version(ctx, rd, sc):
             return None
     final = os.path.join(ctx.run_dir, "final_song.mp4")
     if not os.path.exists(final):
-        brand.finish(out, final + ".part.mp4", ctx.tmp)
-        os.replace(final + ".part.mp4", final)
+        try:
+            brand.finish(out, final + ".part.mp4", ctx.tmp)
+            os.replace(final + ".part.mp4", final)
+        except (RuntimeError, OSError, subprocess.SubprocessError) as e:     # the clean film is delivered either way
+            ctx.log(f"song version not finished: {str(e)[:300]}")
+            return None
     return dict(final_song=final, song=dict(file=os.path.basename(str(song)), supplied_by="owner", picked_by_valmera=False))
 
 
