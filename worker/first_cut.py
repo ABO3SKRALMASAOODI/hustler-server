@@ -987,6 +987,19 @@ def _faces(index):
             "share": len(boxes) / float(len(samples))}
 
 
+def dense_ui(index):
+    """The geometry half of _screen_like: most filmstrip samples carry dense
+    edge rectangles and almost none a face. Only then is the visual
+    storyboard asked whether the upload is a screen (so the index keeps it
+    before the project is ready: indexer.storyboard_after_ready)."""
+    samples = ((index or {}).get("spatial") or {}).get("samples") or []
+    if not samples:
+        return False
+    ui = sum(1 for s in samples if s.get("dense_ui") or len(s.get("text") or []) >= 3)
+    faces = sum(1 for s in samples if s.get("faces"))
+    return not (ui < 0.6 * len(samples) or faces > 0.15 * len(samples))
+
+
 def _screen_like(index):
     """Dense geometry needs semantic UI evidence before choosing a screen edit.
 
@@ -994,12 +1007,7 @@ def _screen_like(index):
     furniture and a bar table can produce many of its 'text' rectangles.
     Those rectangles alone must not choose screen framing or a UI-follow camera.
     """
-    samples = ((index or {}).get("spatial") or {}).get("samples") or []
-    if not samples:
-        return False
-    ui = sum(1 for s in samples if s.get("dense_ui") or len(s.get("text") or []) >= 3)
-    faces = sum(1 for s in samples if s.get("faces"))
-    if ui < 0.6 * len(samples) or faces > 0.15 * len(samples):
+    if not dense_ui(index):
         return False
     evidence = ((index or {}).get("visual_storyboard") or {}).get("evidence") or []
     cues = re.compile(r"\b(?:screen recording|screencast|computer screen|phone screen|"
@@ -3579,8 +3587,27 @@ def run(worker_db, job, project, index_row):
                   f"{type(exc).__name__}: {str(exc)[:200]}", flush=True)
             steps.append({"tool": "chain", "ok": False,
                           "note": f"{type(exc).__name__}: {str(exc)[:160]}"})
-        render = _render_cut(ctx, steps, picked)
-        if picked and picked.get("how") == "director" and _on_screen(ctx):
+        early = None
+        if picked and picked.get("how") == "director":
+            early = _director_early_look(ctx, worker_db, job, started, spend,
+                                         trial_scope)
+        if early is not None and early[1] is not None:
+            applied = early[1]
+            picked = dict(picked, edl_version=getattr(
+                ctx, "director_version", None), look=True)
+        if early is not None and getattr(ctx, "director_fell_why", None):
+            # The look took the film back before any render: the chain's
+            # cut, in the same job, with no render of the upload first.
+            steps, applied, picked, render = _film_fell_at_render(
+                ctx, worker_db, job, started, spend, steps, start_edl, None)
+        else:
+            render = _render_cut(ctx, steps, picked)
+            if early is not None and early[1] is not None \
+                    and not _on_screen(ctx) and _director_first_back(ctx):
+                render = _render_cut(ctx, steps, picked)
+        if early is not None:
+            pass                    # the look already read this film
+        elif picked and picked.get("how") == "director" and _on_screen(ctx):
             # The last look (score/taste.py): six frames of the film under
             # the same six of the upload. What it names is removed and the
             # film renders once more; a look that fails changes nothing.
@@ -3752,6 +3779,125 @@ def _director_look(ctx, worker_db, job, started, spend, trial_scope):
               f"{str(exc)[:200]}", flush=True)
         _director_close(ctx)
         return None
+
+
+PROOF_HALF_S = 0.4     # each look moment is rendered with this much either side
+
+
+def _proof_times(times, segments):
+    """{programme second: second in the proof reel} for the look moments the
+    reel holds (renderer._render_changed_sections' proof_segments)."""
+    out = {}
+    for t in times:
+        for seg in segments or []:
+            try:
+                a, b, r = (float(seg["start"]), float(seg["end"]),
+                           float(seg["reel_start"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if a - 0.001 <= t <= b + 0.001:
+                out[t] = round(r + min(max(t - a, 0.02), max(0.02, b - a - 0.02)), 3)
+                break
+    return out
+
+
+def _wait_job(worker_db, job_id, deadline):
+    """The job's result once it is done, or None (failed, superseded, late)."""
+    while time.monotonic() < deadline:
+        j = worker_db.run(dbx.get_job, job_id) or {}
+        if j.get("state") == "done":
+            res = j.get("result") or {}
+            return None if res.get("superseded_by") else res
+        if j.get("state") == "failed":
+            return None
+        time.sleep(0.5)
+    return None
+
+
+def _director_early_look(ctx, worker_db, job, started, spend, trial_scope):
+    """One full render (SPEED, 14 Nov 2026). The first live Director film
+    (p5755) rendered twice: 77 s, the last look on that preview, then 64 s
+    more for the three labels the look took out, about 6 minutes from upload.
+
+    Now the film's full render starts the moment it is written, and beside it
+    a low-resolution proof of only the look's six moments (preview_check, the
+    proxy at 480p, a few seconds of frames). The look reads the proof, which
+    shows the same frames on the same board the look reads at 404 px. When
+    the film stands, the full render already running is the film (nothing is
+    rendered twice). When the look takes something out, the new version's
+    render starts at once and the first one is retired by the queue (a newer
+    version supersedes it), so the customer waits for one render of the film
+    they get.
+
+    Returns None when the look did not run here (switch off, the proof late
+    or failed): the film renders and the look reads that preview as before.
+    Otherwise ("looked", applied-or-None). Never raises."""
+    if not config.DIRECTOR_PROOF_LOOK:
+        return None
+    st = getattr(ctx, "director_state", None)
+    if not st or not st.get("comp"):
+        return None
+    t0 = time.monotonic()
+    rec = {}
+    try:
+        from score import film, taste
+        import storage
+        l1 = st["comp"].l1
+        dur = float(l1["dur_f"]) / float(l1["fps"])
+        times = taste.look_times(l1)
+        row = ctx.latest_edl()
+        version = row["version"]
+        try:                # the film's one full render, beside the proof
+            with _timed(ctx, "render_queue"):
+                agent_tools.render_preview(ctx, quality="approval",
+                                           _wait_timeout_s=0)
+        except Exception as exc:  # noqa: BLE001 — _render_cut queues it
+            rec["queue_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        windows = [[round(max(0.0, t - PROOF_HALF_S), 3),
+                    round(min(dur, t + PROOF_HALF_S), 3)] for t in times]
+        payload = agent_tools._child_payload(ctx, {
+            "edl_version": version, "check_ranges": windows,
+            "check_pages": [windows], "proof_pages": 1,
+            "source": "agent_preview_check", "agent_job_id": job["id"],
+            "director_look": True, "audio_model_review": False,
+            "verify_times": list(times),
+            "proof_budget_s": config.DIRECTOR_PROOF_BUDGET_S,
+            "render_signature": agent_tools._render_signature(
+                row, "preview_check", windows, audio_model_review=False)})
+        proof_job, _ = worker_db.run(dbx.get_or_enqueue_preview_check_job,
+                                     ctx.project_id, job["user_id"], payload)
+        rec["proof_job"] = proof_job
+        with _timed(ctx, "look_proof"):
+            res = _wait_job(worker_db, proof_job,
+                            t0 + config.DIRECTOR_PROOF_WAIT_S)
+        rec["proof_s"] = round(time.monotonic() - t0, 1)
+        if not res or not res.get("render_asset_id"):
+            rec["skipped"] = "the proof was late or failed"
+            return None
+        asset = worker_db.run(dbx.get_asset, res["render_asset_id"]) or {}
+        segments = res.get("proof_segments") or \
+            (asset.get("meta") or {}).get("proof_segments") or []
+        at = _proof_times(times, segments)
+        if len(at) < 3 or not asset.get("storage_key"):
+            rec["skipped"] = f"the proof holds {len(at)} of {len(times)} moments"
+            return None
+        url = storage.presign_get(asset["storage_key"], expires=900)
+        with _timed(ctx, "look"):
+            again = film.last_look(ctx, worker_db, job, started, spend,
+                                   trial_scope, proof=(url, at))
+        rec["look_s"] = round(time.monotonic() - t0, 1)
+        return ("looked", again)
+    except Exception as exc:  # noqa: BLE001 — the look after the render runs
+        rec["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+        print(f"[first_cut] early look skipped: {rec['error']}", flush=True)
+        return None
+    finally:
+        try:
+            phases = dict(getattr(ctx, "first_cut_phases", None) or {})
+            phases["early_look"] = rec
+            ctx.first_cut_phases = phases
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _director_first_back(ctx):

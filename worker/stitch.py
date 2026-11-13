@@ -697,8 +697,22 @@ def _window_fx(items, w0, w1, fps, music_ids):
             continue
         stage = it.get("stage")
         if stage == "music_bus":
-            if it.get("music_id") in music_ids:
-                out.append(dict(it))
+            if it.get("music_id") not in music_ids:
+                continue
+            if it.get("start") is None or it.get("end") is None:
+                out.append(dict(it))        # a record: no program window
+                continue
+            # A windowed bus item (a bed's drop, a filter sweep) is program
+            # time like the music it shapes: rebased onto the piece's clock,
+            # clipped to it, and left out when it lies outside. Carried as
+            # is, a drop after the piece failed the whole proof ("arrange
+            # 'bed.drop' starts after the program"; SPEED replay, 14 Nov).
+            a, b = float(it["start"]), float(it["end"])
+            if b <= w0 + 1e-6 or a >= w1 - 1e-6:
+                continue
+            la, lb = max(0.0, local(max(a, w0))), min(span, local(min(b, w1)))
+            if lb - la >= 0.02:
+                out.append({**it, "start": la, "end": round(lb, 2)})
             continue
         if stage == "junction":
             at = float(it.get("at") or 0.0)

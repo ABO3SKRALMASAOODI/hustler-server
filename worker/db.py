@@ -2974,6 +2974,25 @@ def upsert_index(conn, project_id, sha256, index_json):
               config.PIPELINE_VERSION))
 
 
+def set_index_storyboard(conn, sha256, storyboard, warning=None):
+    """Merge ONLY the visual storyboard (and its warning, when it failed) into
+    an index row that is already live (indexer.storyboard_after_ready): the
+    First cut is reading the row by then, so nothing else in it is replaced."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE indexes
+               SET json = jsonb_set(
+                       CASE WHEN %s::text IS NULL THEN json::jsonb
+                            ELSE jsonb_set(json::jsonb, '{warnings}',
+                                 COALESCE(json::jsonb->'warnings', '[]'::jsonb)
+                                 || to_jsonb(%s::text))
+                       END,
+                       '{visual_storyboard}', %s::jsonb)
+             WHERE video_sha256 = %s
+        """, (warning, warning, Json(storyboard), sha256))
+        return cur.rowcount
+
+
 def set_index_perception(conn, sha256, perception_json, pipeline_version):
     """Merge ONLY the perception sidecar into an index row, atomically.
 

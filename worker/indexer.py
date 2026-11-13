@@ -459,6 +459,36 @@ def _refuse_unfinished_source(asset):
             f"unfinished file: {key} ({total} bytes) has no complete moov box")
 
 
+def storyboard_after_ready(worker_db, job, project_id, session_id,
+                           spatial=None):
+    """True when this index starts a First cut and nothing reads its storyboard
+    before the film is made: a first analysis (not a re-index) of a project the
+    trial or a plan admitted to the First cut, with no request waiting (a
+    waiting request is the brief, and the Studio agent that runs it reads the
+    storyboard). Then the project is ready before the storyboard is built, and
+    the film starts 31-42 s sooner. An upload whose filmstrip geometry reads as
+    a screen keeps today's order: the First cut asks the storyboard whether it
+    is one before it frames it (first_cut._screen_like). Any doubt keeps
+    today's order."""
+    if not config.STORYBOARD_AFTER_READY or not session_id:
+        return False
+    if (job.get("payload") or {}).get("reindex"):
+        return False
+    try:
+        import first_cut
+        if first_cut.dense_ui({"spatial": spatial}):
+            return False
+        admission = worker_db.run(first_cut.project_admission, project_id)
+        if not (admission and admission.get("first_cut")):
+            return False
+        return worker_db.run(dbx.pending_user_message, project_id,
+                             session_id) is None
+    except Exception as exc:  # noqa: BLE001
+        print(f"[index] storyboard order check failed: {str(exc)[:160]}",
+              flush=True)
+        return False
+
+
 def run_index_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     asset = worker_db.run(dbx.get_asset, job["payload"].get("asset_id"))
@@ -892,19 +922,32 @@ def run_index_job(worker_db, job):
         spatial_sidecar = state.get("spatial")
         layout_sidecar = state.get("source_layout")
         motion_sidecar = state.get("motion")
-        try:
-            visual_storyboard = clock.timed(
-                "storyboard_s", visual_index.build,
-                proxy_local, info["duration"], shots, motion_sidecar,
-                spatial_sidecar, sentences, sha, workdir,
-                seek_ceiling=max(0.0, info["duration"] - 0.05))
-        except Exception as e:
-            visual_storyboard = None
-            warnings.append(
-                f"hierarchical visual evidence failed ({str(e)[:120]}) — "
-                "the diverse raw filmstrip remains available")
-            print(f"[index {job_id}] visual storyboard degraded: {e}",
-                  flush=True)
+
+        def _storyboard():
+            try:
+                return clock.timed(
+                    "storyboard_s", visual_index.build,
+                    proxy_local, info["duration"], shots, motion_sidecar,
+                    spatial_sidecar, sentences, sha, workdir,
+                    seek_ceiling=max(0.0, info["duration"] - 0.05)), None
+            except Exception as e:
+                print(f"[index {job_id}] visual storyboard degraded: {e}",
+                      flush=True)
+                return None, (f"hierarchical visual evidence failed "
+                              f"({str(e)[:120]}) — the diverse raw filmstrip "
+                              "remains available")
+        # SPEED (14 Nov): the storyboard (31-39 s on the box, a vision call
+        # included) is read by the Studio agent, never by a First cut. A
+        # first upload that starts one, with no request waiting, is ready
+        # without it: the film starts now and the storyboard joins the index
+        # row a moment later (storyboard_after_ready).
+        late_board = storyboard_after_ready(
+            worker_db, job, project_id, session_id, spatial=spatial_sidecar)
+        visual_storyboard = None
+        if not late_board:
+            visual_storyboard, board_warning = _storyboard()
+            if board_warning:
+                warnings.append(board_warning)
         # Lane timings for the admin views: the two lanes overlap, so the
         # old per-stage ladder is now picture/sound walls plus their split.
         t_lanes = time.monotonic() - _t
@@ -976,6 +1019,21 @@ def run_index_job(worker_db, job):
         sidecars.prefetch_after_index(project_id, sha, proxy_key, proxy_info,
                                       shots, duration=info["duration"])
         _mark("upload_persist_s")
+        if late_board:
+            # The First cut is already running from the row above. Only the
+            # storyboard (and its warning) is merged into that row, so
+            # nothing another process wrote to it meanwhile is replaced.
+            timings["storyboard_after_ready"] = True
+            visual_storyboard, board_warning = _storyboard()
+            try:
+                worker_db.run(dbx.set_index_storyboard, sha,
+                              visual_storyboard, board_warning)
+            except Exception as exc:  # noqa: BLE001 — the filmstrip stands
+                print(f"[index {job_id}] storyboard not stored: "
+                      f"{str(exc)[:160]}", flush=True)
+            if board_warning:
+                warnings.append(board_warning)
+            _mark("storyboard_late_s")
         timings.update(clock.seconds)
         return {"sha256": sha, "cached": False, "shots": len(shots),
                 "from_client_proxy": from_client_proxy,

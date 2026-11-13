@@ -9390,8 +9390,13 @@ def _concat_check_pieces(pieces, out_path, workdir, durations=None):
 
 def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
                              patch_locals, out_path, raw_ranges,
-                             verify_times, progress_cb=None, raw_pages=None, proof_segments=None):
-    """Render only affected output windows into one short proof reel."""
+                             verify_times, progress_cb=None, raw_pages=None, proof_segments=None,
+                             budget_s=None):
+    """Render only affected output windows into one short proof reel.
+
+    budget_s: a smaller output budget than 25 s a page, for a proof that only
+    needs its requested moments (the Director's last look: six short windows,
+    first_cut._director_early_look). The requested pixels are never cut."""
     duration0 = float((index.get("video") or {}).get("duration") or 0.0)
     keep_end = max((float(e) for _s, e in
                     (edl_row["json"].get("keep") or [])), default=0.0)
@@ -9412,6 +9417,12 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
     # finite windows render in the same container. This removes N cold starts
     # and N dispatcher wait loops without truncating large-edit evidence.
     page_count = max(1, len(pages))
+    budget = page_count * 25.0
+    try:
+        if budget_s is not None and float(budget_s) > 0:
+            budget = min(budget, float(budget_s))
+    except (TypeError, ValueError):
+        pass
     requested_ranges = _validated_check_ranges(
         requested, duration, max_windows=page_count * 6,
         budget=page_count * 25.0)
@@ -9422,7 +9433,8 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
     # oversized authored item cannot smuggle a full render into the cheap lane.
     ranges = _budget_contained_check_ranges(
         requested_ranges, contained_ranges, duration,
-        max_windows=page_count * 6, budget=page_count * 25.0)
+        max_windows=page_count * 6,
+        budget=max(budget, sum(b - a for a, b in requested_ranges)))
 
     if src_local:
         info = media.probe(src_local)
@@ -10179,7 +10191,8 @@ def _run_render_job(worker_db, job):
                     job["payload"].get("verify_times") or [],
                     progress_cb=_prog,
                     raw_pages=job["payload"].get("check_pages") or [],
-                    proof_segments=proof_segments)
+                    proof_segments=proof_segments,
+                    budget_s=job["payload"].get("proof_budget_s"))
         # Lane D (12 Nov): a Director film whose scene plan was kept may be
         # drawn by the engine (engine_branch). Read once, here: an engine
         # film is never stitched, and today's renderer stays its fallback.

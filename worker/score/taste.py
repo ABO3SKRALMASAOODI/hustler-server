@@ -1212,8 +1212,9 @@ def on_screen(l1, t, devices, whats=None):
     return rows
 
 
-def paired_board(src, film, l1, times, out_path, cell_h=404):
-    """One board: the upload above, the film below, at the same programme second. Returns the pairs drawn."""
+def paired_board(src, film, l1, times, out_path, cell_h=404, film_times=None):
+    """One board: the upload above, the film below, at the same programme second. Returns the pairs drawn.
+    film_times: where each programme second sits in `film` when that is a proof reel of the film's moments."""
     from PIL import Image, ImageDraw
 
     from . import boards
@@ -1227,7 +1228,7 @@ def paired_board(src, film, l1, times, out_path, cell_h=404):
     import concurrent.futures as cf
     with cf.ThreadPoolExecutor(max_workers=4) as pool:          # twelve single-frame seeks: the film may be a signed URL
         ups = list(pool.map(lambda t: boards.grab(src, source_second(l1, t), height=cell_h * 2), times))
-        fls = list(pool.map(lambda t: boards.grab(film, t, height=cell_h * 2), times))
+        fls = list(pool.map(lambda t: boards.grab(film, t, height=cell_h * 2), film_times or times))
     for i, t in enumerate(times):
         up, fl = ups[i], fls[i]
         if up is None or fl is None:
@@ -1311,14 +1312,20 @@ def look_ids(comp):
     return ids
 
 
-def look(work, comp, film_path, deadline, model, effort="low"):
-    """The last look. Returns (verdict dict or None, usd). Never raises for a customer: any failure is no verdict."""
+def look(work, comp, film_path, deadline, model, effort="low", proof=None):
+    """The last look. Returns (verdict dict or None, usd). Never raises for a customer: any failure is no verdict.
+    proof: {programme second: second in film_path} when film_path is a proof reel of the film's moments rendered
+    before its full render (first_cut._director_early_look); the pairs are the moments the reel holds."""
     from . import brief, call
     l1 = comp.l1
     devices = sorted(look_ids(comp), key=len, reverse=True)
     times = look_times(l1)
+    film_times = None
+    if proof is not None:
+        times = [t for t in times if t in proof]
+        film_times = [proof[t] for t in times]
     board = os.path.join(work, "look.jpg")
-    drawn = paired_board(os.path.join(work, "source.mp4"), film_path, l1, times, board)
+    drawn = paired_board(os.path.join(work, "source.mp4"), film_path, l1, times, board, film_times=film_times)
     if drawn < 3:
         return None, 0.0
     content = [brief.image_block(board), {"type": "text", "text": look_ask(l1, times, devices, bin_whats(work))}]

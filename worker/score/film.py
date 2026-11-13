@@ -98,10 +98,14 @@ def look_on():
     return os.environ.get("DIRECTOR_LOOK", "1") != "0"
 
 
-def last_look(ctx, worker_db, job, started, spend, trial_scope):
+def last_look(ctx, worker_db, job, started, spend, trial_scope, proof=None):
     """The film beside its upload, once, after its preview landed. Returns None when the film stands as rendered,
     or the reply's `applied` list when a new version was written and needs its preview. Never raises, never
-    blocks: a look that is late, fails or can't be read leaves the customer the film they already have."""
+    blocks: a look that is late, fails or can't be read leaves the customer the film they already have.
+
+    proof: (signed url, {programme second: reel second}) of a low-resolution proof of the look's moments, rendered
+    beside the film's one full render (SPEED, 14 Nov: first_cut._director_early_look). The look then reads the proof
+    and what it names is removed before the film's full render, never after it."""
     st = getattr(ctx, "director_state", None)
     if not st:
         return None
@@ -118,18 +122,24 @@ def last_look(ctx, worker_db, job, started, spend, trial_scope):
         if t0 - started > LOOK_BY_S:
             rec["skipped"] = f"late: {t0 - started:.0f} s into the job"
             return None
-        preview = getattr(ctx, "last_preview", None) or {}
-        asset = worker_db.run(dbx.get_asset, preview["render_asset_id"]) if preview.get("render_asset_id") else None
-        key = (asset or {}).get("storage_key")
-        if not key:
-            rec["skipped"] = "no preview file"
-            return None
+        if proof is not None:
+            film_url, film_at = proof
+            rec["proof"] = {"pairs": len(film_at)}
+        else:
+            preview = getattr(ctx, "last_preview", None) or {}
+            asset = worker_db.run(dbx.get_asset, preview["render_asset_id"]) if preview.get("render_asset_id") else None
+            key = (asset or {}).get("storage_key")
+            if not key:
+                rec["skipped"] = "no preview file"
+                return None
+            film_url, film_at = storage.presign_get(key, expires=900), None
         work, comp, cfg = st["work"], st["comp"], st["cfg"]
         if trial_scope is not None:
             reserve = LOOK_USD
             _allowance(worker_db, trial_scope, reserve)
         try:
-            v, usd = taste.look(work, comp, storage.presign_get(key, expires=900), time.monotonic() + LOOK_S, cfg["models"]["direct"])
+            v, usd = taste.look(work, comp, film_url, time.monotonic() + LOOK_S, cfg["models"]["direct"],
+                               **({"proof": film_at} if film_at is not None else {}))
         except (call.Late, call.Refused) as exc:
             rec["skipped"] = f"{type(exc).__name__}: {str(exc)[:120]}"
             return None

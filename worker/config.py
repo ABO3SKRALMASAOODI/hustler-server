@@ -269,6 +269,16 @@ FIRST_CUT_BROLL_PREFETCH = os.getenv("FIRST_CUT_BROLL_PREFETCH", "1") != "0"
 # costs, 10-100 s either way, because encoding is not where a render's time
 # goes; off until a draft is much cheaper)
 FIRST_CUT_DRAFT_FIRST = os.getenv("FIRST_CUT_DRAFT_FIRST", "0") == "1"
+# SPEED (14 Nov 2026): a first upload that starts a First cut is ready before
+# its visual storyboard is built (31-39 s on the box); the storyboard joins the
+# index row afterwards (indexer.storyboard_after_ready). 0 restores the order.
+STORYBOARD_AFTER_READY = os.getenv("STORYBOARD_AFTER_READY", "1") == "1"
+# The Director's last look reads a low-resolution proof of its six moments,
+# rendered beside the film's one full render, instead of the finished preview
+# (first_cut._director_early_look). 0 restores the look after the render.
+DIRECTOR_PROOF_LOOK = os.getenv("DIRECTOR_PROOF_LOOK", "1") == "1"
+DIRECTOR_PROOF_WAIT_S = float(os.getenv("DIRECTOR_PROOF_WAIT_S", "45"))
+DIRECTOR_PROOF_BUDGET_S = float(os.getenv("DIRECTOR_PROOF_BUDGET_S", "8"))
 FIRST_CUT_UPGRADE_PARALLEL = os.getenv("FIRST_CUT_UPGRADE_PARALLEL", "0") == "1"
 
 # All subscribing editors use Luna on the standard OpenAI client. Keep the
