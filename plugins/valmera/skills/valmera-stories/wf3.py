@@ -234,7 +234,9 @@ def portrait_of(ctx, photo, sc, sup_dir):
     if "face" in t:
         b = photo["faces"][t["face"]]["box"]
     elif "box" in t:
-        b = t["box"]
+        b = list(t["box"])
+        if (b[3] - b[1]) * photo["h"] > 1.6 * (b[2] - b[0]) * photo["w"]:      # a standing figure: its head and shoulders
+            b[3] = b[1] + (b[2] - b[0]) * photo["w"] / photo["h"] * 1.1
     else:
         return None
     cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
@@ -289,12 +291,12 @@ def supply(ctx, script):
         pack["missing"] = missing
     if sid == "one-photograph":
         ph = PX.commons_file(sc["photo"]["file"], os.path.join(sup_dir, "photo"))
-        ph["faces"] = PX.faces(ph["path"], score=0.55)
-        if len(ph["faces"]) < 2:
-            raise RuntimeError(f"the photograph has {len(ph['faces'])} faces a detector can find")
+        ph["faces"] = PX.faces(ph["path"], score=0.55)       # people in profile find none: the places the camera goes still do
         targets, why, use = photo_targets(ctx, ph, sc)
         spend.append(dict(stage="supply", **use))
         ph["targets"], ph["targets_why"] = targets, why
+        if len(ph["faces"]) < 2 and sum(1 for t in targets.values() if t) < 2:
+            raise RuntimeError(f"the photograph has {len(ph['faces'])} faces and {sum(1 for t in targets.values() if t)} placed targets")
         pack["photo"] = ph
         pack["credits"] = [dict(name=ph["title"], title=ph["title"], licence=ph["licence"], credit=ph.get("credit"), page=ph.get("page"))]
         pack["microtext"] = portrait_of(ctx, ph, sc, sup_dir)

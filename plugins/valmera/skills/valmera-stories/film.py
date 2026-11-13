@@ -321,7 +321,7 @@ def still(P, f, key, rec, grade=None, amount=0.045, z=0):
     return dict(mode="bed", upscale=round(cw * W / pw, 2), box=box)
 
 
-def caption_track(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), z=0, ink_for=None):
+def caption_track(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), z=0, ink_for=None, yield_to=()):
     """Captions at one seat for the whole film (TASTE P1), centred, a few words at a time. ink_for(a, b, box) may
     return (voice, ink) for a chunk from what is measured under it (TASTE P4: flip the ink before anything else)."""
     ph = clock.phrases()
@@ -333,6 +333,9 @@ def caption_track(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), z=0, ink_f
             b = min(b, f_end)
         if b - a < 3 or any(s0 <= a < s1 for s0, s1 in skip):
             continue
+        words_here = {norm_word(x) for x in text.split() if len(norm_word(x)) >= 3}
+        if any(s0 < b and a < s1 and words_here & {norm_word(x) for x in t_.split()} for s0, s1, t_ in yield_to):
+            continue                                    # TASTE P7: the display says it; the caption yields
         v_, ink_ = v, ink
         if ink_for:
             wd = P.R.width(v, text) / W
@@ -1017,14 +1020,18 @@ def one_photograph(script, sup, direction=None):
         s_max = MAX_UP * pw / W                 # zoom at which one photo pixel is 3 frame pixels
         return min(max(s, s_fill * 1.2), s_max)
 
-    group = None
-    if faces:
-        xs_ = [f["box"][0] for f in faces] + [f["box"][2] for f in faces]
-        ys_ = [f["box"][1] for f in faces] + [f["box"][3] for f in faces]
-        group = ((min(xs_) + max(xs_)) / 2, (min(ys_) + max(ys_)) / 2)
+    # "whole": the people of the photograph, all of them in frame. Their span decides the zoom: the photograph fills
+    # the frame when they fit inside it, else it pulls back (letterboxed) until they do
+    spans = [t["box"] for n_, t in targets.items() if t and "box" in t and n_ in people]
+    spans += [f["box"] for f in faces]
+    if spans:
+        ux0, ux1 = min(b[0] for b in spans), max(b[2] for b in spans)
+        uy0, uy1 = min(b[1] for b in spans), max(b[3] for b in spans)
+        group = ((ux0 + ux1) / 2, (uy0 + uy1) / 2)
+        s_hook = min(max(0.95 / max(ux1 - ux0, 1e-3), 1.0), s_fill * 1.02)
     else:
         group = (0.5, 0.5)
-    s_hook = max(s_fill * 1.02, 1.0)
+        s_hook = max(s_fill * 1.02, 1.0)
 
     def view(name):
         """(centre, zoom) for a place in the photograph, or None."""
@@ -1141,15 +1148,27 @@ def one_photograph(script, sup, direction=None):
            grade=dict(lift=0, gamma=1.0, gain=0.62, sat=0.6, contrast=1, temp=0, tint=0))
     sharp_op = [r4(min(1.0, max(0.0, (f - f_hook_end) / 8.0))) for f in range(f_end)]
     P.card([0, f_end], key, photo_box, z=2, x=xs, y=ys, s=ss, op=sharp_op)
-    order = sorted(range(len(faces)), key=lambda i: (faces[i]["box"][0] - group[0]) ** 2 + (faces[i]["box"][1] - group[1]) ** 2)
+    # the pieces: its faces (with head and shoulders), nearest the middle first; a photograph whose people are in
+    # profile has none, and then its own named regions land last, out of a grid of the rest
+    if len(faces) >= 4:
+        boxes = []
+        for i in sorted(range(len(faces)), key=lambda i: (faces[i]["box"][0] - group[0]) ** 2 + (faces[i]["box"][1] - group[1]) ** 2):
+            b = faces[i]["box"]
+            boxes.append([b[0] - (b[2] - b[0]) * 0.35, b[1] - (b[3] - b[1]) * 0.45, b[2] + (b[2] - b[0]) * 0.35, b[3] + (b[3] - b[1]) * 0.55])
+    else:
+        named = []
+        for t in targets.values():
+            if t and "box" in t and (t["box"][2] - t["box"][0]) * (t["box"][3] - t["box"][1]) < 0.4 and t["box"] not in named:
+                named.append(t["box"])
+        grid = [[c / 4, r / 3, (c + 1) / 4, (r + 1) / 3] for r in range(3) for c in range(4)]
+        boxes = grid + named
+    order = list(range(len(boxes)))
     onsets = [Clock.f(w["t0"]) for w in hook_ws] or [LEAD_F]
     per = max(1, math.ceil(len(order) / max(len(onsets), 1)))
     pieces = 0
     for oi, fi in enumerate(order):
         on = onsets[min(oi // per, len(onsets) - 1)] + (oi % per)
-        b = faces[fi]["box"]
-        gx0, gy0 = b[0] - (b[2] - b[0]) * 0.35, b[1] - (b[3] - b[1]) * 0.45
-        gx1, gy1 = b[2] + (b[2] - b[0]) * 0.35, b[3] + (b[3] - b[1]) * 0.55
+        gx0, gy0, gx1, gy1 = boxes[fi]
         gx0, gy0, gx1, gy1 = max(gx0, 0), max(gy0, 0), min(gx1, 1), min(gy1, 1)
         end = f_hook_end + 8
         if on >= end:
@@ -1195,6 +1214,7 @@ def one_photograph(script, sup, direction=None):
             P.hit("click_2", on, d["tick_db"] - 2)
     # ---- names: the first time the camera arrives on a person, their name at the lower seat
     named_once = set()
+    shown_names = []
     for i, s in enumerate(script["segments"]):
         look = s.get("look")
         if look and look in people and view(look) and look not in named_once:
@@ -1206,6 +1226,7 @@ def one_photograph(script, sup, direction=None):
                 _, nink = under(a, b, [0.5 - nw / 2 - 0.02, 0.715 - P.R.cap("name") / H - 0.01, 0.5 + nw / 2 + 0.02, 0.715 + 0.01])
                 P.word([a, b], str(look).upper(), "name", 0.5, 0.715, "#F2E8D6" if nink == "#FFFFFF" else nink,
                        [r4(min(1, (k + 1) / 5)) for k in range(b - a)], align="c", z=6)
+                shown_names.append((a, b, str(look)))
     # ---- X2: one face, whose tones are the sentence being spoken
     por = script.get("portrait") or {}
     x2 = None
@@ -1243,7 +1264,7 @@ def one_photograph(script, sup, direction=None):
             P.events.append(a)
     # ---- captions, one seat, low; off during the portrait
     skip = [tuple(x2["f"])] if x2 else []
-    caption_track(P, clock, "cap", 0.775, f_end=f_close0 + 20, skip=skip, z=8, ink_for=under)
+    caption_track(P, clock, "cap", 0.775, f_end=f_close0 + 20, skip=skip, z=8, ink_for=under, yield_to=shown_names)
     # ---- the close: the whole photograph with every mark, and one line
     last = script["segments"][-1]
     line = next((t for t, _ in shown_items(last)), None)

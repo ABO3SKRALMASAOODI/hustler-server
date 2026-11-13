@@ -138,3 +138,16 @@ def test_narration_script_carries_direction_not_digits():
     assert n["band"] == "03" and n["segments"][-1]["pause_after"] == 0.0
     assert all(not any(ch.isdigit() for ch in s["text"]) for s in n["segments"])
     json.dumps(n)
+
+
+def test_one_photograph_without_faces(supply, tmp_path):
+    """People in profile: no face is found, and the photograph is assembled from a grid and its own named regions."""
+    sc = base_script("one-photograph")
+    sup = dict(supply, words=words_for(sc))
+    ph = picture(str(tmp_path), "photo", 3000, 2100, (120, 110, 100))
+    ph["faces"] = []
+    ph["targets"] = {"A": {"box": [0.05, 0.1, 0.2, 0.8]}, "B": {"box": [0.7, 0.2, 0.85, 0.75]}, "C": {"box": [0.3, 0.2, 0.6, 0.5]}}
+    sup["photo"] = ph
+    l1, beats = F.STYLES["one-photograph"](sc, sup, {})
+    assert beats["pieces"] == 12 + 3 and beats["marks"] == ["A", "B", "C"]
+    assert F.taste_check(l1, beats)["ok"]
