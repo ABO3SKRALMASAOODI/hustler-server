@@ -189,7 +189,12 @@ def sound(ctx, l1_path):
     if not os.path.exists(out):
         wk = brand.worker_dir()
         try:
-            sh(ctx, ["zsh", "-c", f"cd '{wk}' && PYTHONPATH=. '{PY}' -m score.sound design --l1 '{l1_path}' --work '{ctx.supply}' --out '{out}'"],
+            extra = ""
+            if (ctx.args or {}).get("song"):                 # the owner handed this run a song: the sounds are designed for a film with a bed
+                extra += " --bed"
+            if (ctx.args or {}).get("turn_s") is not None:   # and the story's turn, when the run names it
+                extra += f" --turn {float(ctx.args['turn_s']):.3f}"
+            sh(ctx, ["zsh", "-c", f"cd '{wk}' && PYTHONPATH=. '{PY}' -m score.sound design --l1 '{l1_path}' --work '{ctx.supply}' --out '{out}'{extra}"],
                timeout=900)
         except (RuntimeError, subprocess.SubprocessError) as e:
             ctx.log(f"sound design skipped: {str(e)[:300]}")
@@ -219,6 +224,39 @@ def render(ctx, script, sc):
     return dict(engine=kind, film=out, engine_check=chk)
 
 
+def song_version(ctx, rd, sc):
+    """The same film with the owner's song under it, when the owner handed one to this run (--args '{"song": path}').
+    Valmera never picks a song: without that argument this does nothing. The song is cut to the film by
+    worker/score/music.py (its drop on the turn, its last hit before the end card, under the voice), mixed with the
+    film's own voice and sounds, and laid on a copy of the engine's picture. film.mp4 stays the clean export."""
+    song = (ctx.args or {}).get("song")
+    if not song or not os.path.exists(str(song)) or not sc.get("l1"):
+        return None
+    out = os.path.join(ctx.supply, "film_engine_song.mp4")
+    if not os.path.exists(out):
+        wk = brand.worker_dir()
+        cmd = (f"cd '{wk}' && PYTHONPATH=. '{PY}' -m score.music mix --l1 '{sc['l1']}' --work '{ctx.supply}' --song '{song}' "
+               f"--film '{rd['film']}' --out '{out}.part.mp4' --kind {SONG_KIND.get(ctx.workflow, 'stories')}")
+        if (ctx.args or {}).get("song_vocals"):
+            cmd += f" --vocals '{ctx.args['song_vocals']}'"
+        if (ctx.args or {}).get("turn_s") is not None:
+            cmd += f" --turn {float(ctx.args['turn_s']):.3f}"
+        try:
+            sh(ctx, ["zsh", "-c", cmd], label=f"wf-song-{ctx.run_id}", heavy=True, timeout=1800)
+            os.replace(out + ".part.mp4", out)
+        except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+            ctx.log(f"song version skipped: {str(e)[:300]}")
+            return None
+    final = os.path.join(ctx.run_dir, "final_song.mp4")
+    if not os.path.exists(final):
+        brand.finish(out, final + ".part.mp4", ctx.tmp)
+        os.replace(final + ".part.mp4", final)
+    return dict(final_song=final, song=dict(file=os.path.basename(str(song)), supplied_by="owner", picked_by_valmera=False))
+
+
+SONG_KIND = {"wf1": "podcast", "wf2": "marketing", "wf3": "stories", "wf4": "longform"}
+
+
 def no_music(l1_path):
     """Valmera never picks music: every sound in the plan is a library effect or a synthesized one."""
     lib = {s["file"] for s in json.load(open(SOUNDS))}
@@ -240,7 +278,11 @@ def finish_and_check(ctx, rd, sc):
     m = no_music(sc["l1"]) if sc.get("l1") and os.path.exists(sc["l1"]) else dict(ok=True, note="no plan")
     c.update(music=m, finish=info)
     c["ok"] = bool(c["ok"] and m["ok"])
-    return dict(final=final, checks=c)
+    out = dict(final=final, checks=c)
+    sv = song_version(ctx, rd, sc)               # only when the owner handed this run a song; film.mp4 stays clean
+    if sv:
+        out.update(sv)
+    return out
 
 
 def cleanup_dir(path):

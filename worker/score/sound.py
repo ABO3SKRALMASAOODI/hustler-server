@@ -16,11 +16,18 @@ supply and the no-bed allowance of TASTE 4.2 (taste.allow): a talking take carri
 pictures up to 0.9 per new picture per 10 s, never more in any 10 s than the class allows, three or four kinds of
 sound in 30 s, one recording at most twice in 30 s and never twice inside 3 s. The hook and the payoff are layered
 (a lead whose peak meets the hit): one gesture to the ear and to every counter. Gains are set against the voice the
-mix will have (the renderer levels speech to dialogue_level's -20 LUFS first), by role, from the judged targets of
-sfx_mix (Oct 10): sweeps 8 dB under the voice, tonal hits 10, risers 9, impacts low (their content above 150 Hz 13
-under, the whole hit at most 8 under). Under speech a sound sits at least the class's margin under the voice. Then a
-signal check: each layer is laid over the programme's own voice in 20 ms frames, and one whose speech band
-(300-3400 Hz) comes within 3 dB of the voice on spoken frames is lowered to its role's floor, else dropped.
+mix will have (the renderer levels speech to dialogue_level's -20 LUFS first), by role (ROLE below: the judged targets
+of sfx_mix, Oct 10, moved on 13 Nov toward the references' measured levels): sweeps 8 dB under the voice, short hits
+8.5, risers 7, impacts low (their content above 150 Hz 10.5 under, the whole hit at most 5.5 under). Under speech a
+sound sits at least the class's margin under the voice. Then a signal check: each layer is laid over the programme's
+own voice in 20 ms frames, and one whose speech band (300-3400 Hz) comes within 3 dB of the voice on spoken frames
+is lowered to its role's floor, else dropped.
+
+Which recording answers which event is sound_choice's (13 Nov, the sound engine lane): the references' classes for
+the moment (a click, a hit, an impact, a whoosh; a riser only as the climb into a hit), the class the film has
+used least against their shares, then the approved recording nearest that class's reference shape on the signal
+ruler (sound_signal), leaning away from the speech band under a word. gesture() below is the fixed table it
+replaced, kept for a library the ruler cannot read. A sound that lands in a breath comes up as the references' do.
 
 Nothing here reads what anyone asked for. When the Scout bound an ask to the sound department (a model read it),
 the Director's own lines carry that ask and this pass adds nothing.
@@ -32,6 +39,8 @@ import re
 import subprocess
 
 import numpy as np
+
+from . import sound_choice as choice
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SOUNDS = os.environ.get("VALMERA_SOUNDS") or os.path.join(os.path.dirname(HERE), "sound_library")
@@ -56,14 +65,18 @@ COUNTER_TICKS = 8
 PLACED_10S = 3              # atlas 8.5: the measurable placed layer is 1-3 sounds per 10 s, whatever the transients
 OWN_CUT_10S = 1             # the upload's own cuts: at most one sounded in any 10 s
 
-# Role targets, dB of the hit (K-weighted loudest 200 ms, manifest hit_lufs) against the voice: sfx_mix.ROLE_MIX,
-# judged on the showcase shorts (Oct 10). "lo" is the floor the signal check may lower a sound to.
+# Role targets, dB of the hit (K-weighted loudest 200 ms, manifest hit_lufs) against the voice. They began as sfx_mix.ROLE_MIX,
+# judged on the showcase shorts (Oct 10), and moved on 13 Nov toward what the references carry (lanes/S study, 132 films,
+# the same measure on their stems, medians under a word: click -6.9, hit -8.2, whoosh -7.7, impact -3.0): the owner's
+# "they need to also be there". Each stays a step under its reference median: our recordings are dry and sit on no bed.
+# "lo" is the floor the signal check may lower a sound to.
 _SWEEP = {"target": -8.0, "lo": -12.5}
-_TONAL = {"target": -10.0, "lo": -14.0}
-_LOW = {"target": -13.0, "cap": -8.0, "lo": -16.0, "hp": True}
-ROLE = {"whoosh": _SWEEP, "swish": _SWEEP, "riser": {"target": -9.0, "lo": -12.0},
-        "ding": _TONAL, "pop": _TONAL, "tick": _TONAL, "click": _TONAL, "shutter": _TONAL, "cash": _TONAL,
-        "glitch": _TONAL, "typing": {"target": -14.0, "lo": -18.0}, "impact": _LOW, "heartbeat": _LOW}
+_TONAL = {"target": -8.5, "lo": -13.0}
+_LOW = {"target": -10.5, "cap": -5.5, "lo": -14.0, "hp": True}
+ROLE = {"whoosh": _SWEEP, "swish": _SWEEP, "riser": {"target": -7.0, "lo": -11.0},
+        "ding": {"target": -10.0, "lo": -14.0}, "pop": _TONAL, "tick": _TONAL, "click": _TONAL, "shutter": _TONAL, "hit": _TONAL,
+        "cash": {"target": -10.0, "lo": -14.0}, "glitch": {"target": -10.0, "lo": -14.0},
+        "typing": {"target": -14.0, "lo": -18.0}, "impact": _LOW, "heartbeat": _LOW}
 LEAD_DB = -2.0              # a lead sits under its hit
 COUNTER_DB = -4.0           # ticks on a counter are texture, under one hit
 NO_VOICE_LIFT = 8.0         # with nothing spoken, the "voice" a sound is set against is the track 8 dB up
@@ -370,6 +383,10 @@ def l1_events(l1, kshots=()):
                 steps.append(f)
             prev = t
         ev.append({"f": rows[0][0], "kind": "counter", "id": g, "steps": steps[:COUNTER_TICKS]})
+    moving = {it["f"][0] for it in items if it.get("k") in ("shot", "card") and isinstance(it.get("blur"), list) and len(it["blur"]) > 1}
+    for e in ev:
+        if e["kind"] in ("picture", "cut") and e["f"] in moving:
+            e["moving"] = True                    # the cut travels (a whip, a slide): the picture itself asks for a sweep
     out = []
     for e in sorted(ev, key=lambda e: (e["f"], KIND_RANK.get(e["kind"], 9))):
         if 0 <= e["f"] < D and not any(abs(e["f"] - o["f"]) <= 2 for o in out):
@@ -436,7 +453,8 @@ def _gestures(times):
 def plan_sounds(events, ctx):
     """The core. events: [{f, kind, ...}] in programme frames. ctx: fps, dur_f, existing (sound items already in the
     film), speech (bool per 20 ms frame) and voice (mono AR programme voice) or None, words (programme seconds),
-    bed, prog_end_f, np10 (or None: counted from the events). Returns (sound items, report)."""
+    bed, prog_end_f, np10 (or None: counted from the events), turn_f (the story's turn, when the caller knows its
+    frame: it is landed like the payoff). Returns (sound items, report)."""
     fps, D = float(ctx["fps"]), int(ctx["dur_f"])
     end_f = int(ctx.get("prog_end_f") or D)
     dur_s = end_f / fps
@@ -475,9 +493,15 @@ def plan_sounds(events, ctx):
     payoff = min(late, key=lambda e: (KIND_RANK[e["kind"]] > 2, -e["f"])) if late else None
     if payoff is not None and hook is not None and payoff is hook:
         payoff = None
+    turn = None                                  # the story's turn, when the caller knows it (a workflow's script does)
+    if ctx.get("turn_f") is not None:
+        near = [e for e in cands if abs(e["f"] - int(ctx["turn_f"])) <= 3 and e is not hook]
+        turn = min(near, key=lambda e: abs(e["f"] - int(ctx["turn_f"]))) if near else None
+        if turn is payoff:
+            payoff = None
 
     def rank(e):
-        part = 0 if e is hook else 1 if e is payoff else 2
+        part = 0 if (e is hook or e is turn) else 1 if e is payoff else 2
         return (part, 1 if spoken(e["f"] / fps) else 0, KIND_RANK.get(e["kind"], 9), e["f"])
     placed = []
     for s in existing:                       # the Director's own library sounds: same levels, same signal check
@@ -491,6 +515,15 @@ def plan_sounds(events, ctx):
         placed.append({"t": t, "ev": {"kind": s.get("for") or "director", "f": s.get("event_f", 0)}, "part": "director",
                        "items": [dict(s, layer="hit", **({"for": "director"} if "for" not in s else {}))], "ref": ref, "director": True})
     own_cut, own_cap, own_t = 0, max(1, int(round(0.5 * al["sounds"]))), []
+    try:
+        desc = choice.describe_library(lib, SOUNDS, pcm)
+    except Exception:  # noqa: BLE001 - without the ruler the fixed table still answers
+        desc = {}
+    tally = {}
+    for s in existing:                           # what the Director already used counts against the shares
+        k = (desc.get(s.get("s")) or {}).get("kind")
+        if k:
+            tally[k] = tally.get(k, 0) + 1
     for e in sorted(cands, key=rank):
         t = e["f"] / fps
         why = None
@@ -506,18 +539,10 @@ def plan_sounds(events, ctx):
         if why:
             report["dropped"].append({"f": e["f"], "kind": e["kind"], "why": why})
             continue
-        part = "hook" if e is hook else "payoff" if e is payoff else "plain"
+        part = "hook" if e is hook else "payoff" if (e is payoff or e is turn) else "plain"
         prev = max([g for g in taken if g < t], default=0.0)
         e = dict(e, room_s=t - prev)
-        layers = []
-        for sid, what in gesture(e, part):
-            sid = _free(sid, t, uses)
-            if sid is None or sid not in lib:
-                if what == "hit":
-                    layers = []
-                    break
-                continue
-            layers.append((sid, what))
+        layers, cls = _choose(e, part, t, uses, spoken(t), tally, desc)
         win_roles = {r for (u, r) in roles if abs(u - t) < SAME_WIN_S / 2}
         new_roles = {role_of(s) for s, _ in layers} - win_roles
         if layers and len(win_roles) + len(new_roles) > al["roles"]:
@@ -529,12 +554,13 @@ def plan_sounds(events, ctx):
             continue
         under = al["under_voice_db"] if spoken(t) else None
         ref = ctx["ref_at"](t) if callable(ctx.get("ref_at")) else VOICE_LUFS
+        lift = 0.0 if (under is not None or cls is None) else choice.breath_lift(cls)      # heard in a breath, as the references do
         steps = e.get("steps") if e["kind"] == "counter" else None
         group = []
         if steps and part != "plain":           # a counter that is the hook or the payoff: ticks, then its last value lands
             layers = [("tick_1", "hit")] + [(sid, w) for sid, w in layers if role_of(sid) == "impact"]
         for sid, what in layers:
-            off = LEAD_DB if what == "lead" else 0.0
+            off = LEAD_DB if what == "lead" else lift
             if steps and role_of(sid) == "tick":
                 for sf in steps:
                     group.append(_item(f"snd.j{len(placed)}.{len(group)}", sid, sf, fps, gain_for(sid, ref, under, COUNTER_DB), e, part, what))
@@ -542,8 +568,10 @@ def plan_sounds(events, ctx):
                 f_at = steps[-1] if steps else e["f"]
                 group.append(_item(f"snd.j{len(placed)}.{len(group)}", sid, f_at, fps, gain_for(sid, ref, under, off), e, part,
                                    "accent" if steps else what))
-        placed.append({"t": t, "ev": e, "part": part, "items": group, "ref": ref})
+        placed.append({"t": t, "ev": e, "part": part, "items": group, "ref": ref, "class": cls})
         taken.append(t)
+        if cls:
+            tally[cls] = tally.get(cls, 0) + 1
         if e["kind"] == "cut":
             own_cut += 1
             own_t.append(t)
@@ -555,6 +583,38 @@ def plan_sounds(events, ctx):
     sounds.sort(key=lambda s: (s["event_f"], s["id"]))
     report["sounds"] = len(sounds)
     return sounds, report
+
+
+def _free_ok(sid, t, uses):
+    """The one-recording rules for this recording at t: twice in 30 s at most, never twice inside 3 s."""
+    near = [u for u, s in uses if s == sid]
+    return not any(abs(u - t) < SAME_GAP_S for u in near) and sum(1 for u in near if abs(u - t) < SAME_WIN_S / 2) < SAME_MAX
+
+
+def _choose(e, part, t, uses, is_spoken, tally, desc):
+    """The layers for one event and the class they were given: by the references' shares for the moment and the
+    signal ruler (sound_choice) when the library is described; else by the fixed table. A counter keeps its tick."""
+    lib = library()
+    if desc and e["kind"] != "counter":
+        try:
+            heard = {}
+            for _u, sid_ in uses:
+                heard[sid_] = heard.get(sid_, 0) + 1
+            got, cls = choice.layers(e, part, {"desc": desc, "tally": tally, "spoken": is_spoken, "used": heard,
+                                               "free": lambda sid: _free_ok(sid, t, uses)})
+        except Exception:  # noqa: BLE001
+            got, cls = None, None
+        if got:
+            return [(sid, w) for sid, w in got if sid in lib], cls
+    layers = []
+    for sid, what in gesture(e, part):
+        sid = _free(sid, t, uses)
+        if sid is None or sid not in lib:
+            if what == "hit":
+                return [], None
+            continue
+        layers.append((sid, what))
+    return layers, None
 
 
 def _free(sid, t, uses):
@@ -630,7 +690,7 @@ def _signal_check(placed, ctx, report):
         for i in keep:
             if not any(x[0] == i["s"] for x in lay):
                 lay.append([i["s"], i["db"], sum(1 for k in keep if k["s"] == i["s"])])
-        report["placed"].append({"t": round(g["t"], 2), "kind": g["ev"]["kind"], "part": g["part"], "layers": lay})
+        report["placed"].append({"t": round(g["t"], 2), "kind": g["ev"]["kind"], "part": g["part"], "class": g.get("class"), "layers": lay})
     out.sort(key=lambda s: (s["event_f"], s["id"]))
     report["gestures"] = len(report["placed"])
     report["sounds"] = len(out)
@@ -666,9 +726,11 @@ def _asked(asks):
     return False
 
 
-def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=None):
+def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=None, turn_s=None, bed=None):
     """The designed sound for a compiled film: (sounds, report). The Director's own sounds stay and count first.
-    supply: the governor's {np10, bed} (taste.supply) when the compiler has it; else read from the L1 and the upload."""
+    supply: the governor's {np10, bed} (taste.supply) when the compiler has it; else read from the L1 and the upload.
+    turn_s: the story's turn on the film's clock, when the caller knows it (a workflow's script names its payoff).
+    bed: True when a song will play under the film (the owner or the customer supplied one)."""
     fps, D = float(l1["fps"]), int(l1["dur_f"])
     if work and index is None and os.path.exists(os.path.join(work, "index.json")):
         index = json.load(open(os.path.join(work, "index.json")))
@@ -701,7 +763,8 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
     else:
         voice = None
     src_dur = float(((index or {}).get("video") or {}).get("duration") or D / fps)
-    bed = has_bed(perc, len((index or {}).get("words") or []), src_dur) if not supply else bool(supply.get("bed"))
+    if bed is None:
+        bed = has_bed(perc, len((index or {}).get("words") or []), src_dur) if not supply else bool(supply.get("bed"))
     speaks = sum(b - a for a, b in words) >= 1.0 if words is not None else (speech is not None and speech.sum() * FRAME / AR >= 1.0)
 
     def ref_at(t):
@@ -715,19 +778,20 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
         return max(min(lv + NO_VOICE_LIFT, VOICE_LUFS + 6), VOICE_LUFS - 10)
     events = l1_events(l1, _kshots(perc, index))
     ctx = {"fps": fps, "dur_f": D, "existing": existing, "speech": speech, "voice": voice, "voice_shift_db": shift,
-           "words": words or [], "bed": bed, "ref_at": ref_at, "np10": (supply or {}).get("np10")}
+           "words": words or [], "bed": bed, "ref_at": ref_at, "np10": (supply or {}).get("np10"),
+           "turn_f": int(round(float(turn_s) * fps)) if turn_s is not None else None}
     sounds, report = plan_sounds(events, ctx)
     report["speaks"] = bool(speaks)
     return sounds, report
 
 
-def apply(l1, work=None, index=None, perc=None, asks=None, supply=None):
+def apply(l1, work=None, index=None, perc=None, asks=None, supply=None, turn_s=None, bed=None):
     """The seam for the compile path and the workflow shell: the L1 with its designed sound. Never raises; on any
     fault the L1 comes back as it was, with the fault in l1["sound_design"]. VALMERA_SOUND_DESIGN=0 turns it off."""
     if os.environ.get("VALMERA_SOUND_DESIGN", "1") == "0":
         return l1
     try:
-        sounds, report = design(l1, work=work, index=index, perc=perc, asks=asks, supply=supply)
+        sounds, report = design(l1, work=work, index=index, perc=perc, asks=asks, supply=supply, turn_s=turn_s, bed=bed)
         l1["sound"] = sounds
         l1["sound_design"] = report
     except Exception as e:  # noqa: BLE001 — a film is never lost to its sound design
@@ -738,16 +802,18 @@ def apply(l1, work=None, index=None, perc=None, asks=None, supply=None):
 # ----------------------------------------------------------------- command line
 
 def main(argv=None):
-    """python -m score.sound design --l1 l1.json --work DIR --out l1_sound.json"""
+    """python -m score.sound design --l1 l1.json --work DIR --out l1_sound.json [--turn S] [--bed]"""
     import argparse
     ap = argparse.ArgumentParser(prog="score.sound")
     ap.add_argument("cmd", choices=["design"])
     ap.add_argument("--l1", required=True)
     ap.add_argument("--work")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--turn", type=float, help="the story's turn on the film's clock, seconds")
+    ap.add_argument("--bed", action="store_true", help="a supplied song will play under the film")
     a = ap.parse_args(argv)
     l1 = json.load(open(a.l1))
-    l1 = apply(l1, work=a.work or os.path.dirname(os.path.abspath(a.l1)))
+    l1 = apply(l1, work=a.work or os.path.dirname(os.path.abspath(a.l1)), turn_s=a.turn, bed=True if a.bed else None)
     tmp = a.out + ".part"
     with open(tmp, "w") as fh:
         json.dump(l1, fh)
