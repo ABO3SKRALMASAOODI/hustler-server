@@ -21,8 +21,8 @@ to the upload, the customer gets the plain floor film. Either files a quality ti
 director_taste). A late, failed or unreadable look changes nothing: the film stands as rendered.
 
 Never below today's first cut (13 Nov, lane K): a film that compiles to the upload again but for its colour is not
-written (`bare`), and a film most of whose frames lose to the upload at the last look is taken back; in both cases
-the chain runs in the same job. `taste.against` is the same critic for a project that already holds a first film:
+written (`bare`), and a film the last look leaves bare, or most of whose frames lose for no device it can name, is
+taken back; in both cases the chain runs in the same job. `taste.against` is the same critic for a project that already holds a first film:
 the new film replaces it only when the critic does not find it worse.
 """
 import json
@@ -137,22 +137,26 @@ def last_look(ctx, worker_db, job, started, spend, trial_scope):
         rec.update(verdict=v, decision=what, usd=round(usd, 5), look_s=round(time.monotonic() - t0, 1))
         if what == "film":
             return None
+        # What the look named goes, at the floor too: every frame it judged is then the upload's own or better, and
+        # what stood on the others stays. Only when nothing it can name explains a floor, or what is left is the
+        # upload again, is the film taken back: the start state is written, first_cut finds the film is not on
+        # screen and runs today's chain in the same job. The plain floor film is no longer anyone's first film
+        # (rated under the cut it replaced, 13 Nov).
         comp2 = None
-        if what != "floor":
+        if v["remove"]:
             text = taste.cut_text(st["text"], v["remove"])
             comp2 = compiler.compile_score(text, work_dir=work)
             if comp2.json() == comp.json():            # it named only what the customer asked for, or the caption
-                rec["decision"] = "film"
-                return None
-        if what == "floor" or bare(comp2):
-            # Most frames lose to the upload, or what the look leaves is the upload again. Neither is delivered and
-            # neither is the plain film in its place (rated under the cut it replaced, 13 Nov): the start state goes
-            # back, first_cut finds the film is not on screen and runs today's chain in the same job.
+                comp2 = None
+        if comp2 is None and what != "floor":
+            rec["decision"] = "film"
+            return None
+        if comp2 is None or bare(comp2):
             start = st.get("start_edl")
             back = ctx.apply_score(start, "the First cut starts again from the upload") if start is not None else ""
             if str(back).startswith("EDL v"):
                 ctx.director_version = None
-                ctx.director_fell_why = f"the last look: {what}, {v['upload']} of {v['pairs']} frames for the upload" + ("" if what == "floor" else ", nothing left but the upload")
+                ctx.director_fell_why = f"the last look: {v['upload']} of {v['pairs']} frames for the upload, " + ("nothing it could name" if comp2 is None else "nothing left but the upload")
                 rec["decision"] = "chain"
                 _event(worker_db, job, "director_taste", {"job_id": job.get("id"), "decision": "chain", "pairs": v["pairs"], "for_upload": v["upload"],
                                                          "removed": v["remove"][:24], "why": v["why"][:6]})

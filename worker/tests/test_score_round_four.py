@@ -254,6 +254,7 @@ def _looked(monkeypatch, tmp_path, verdict, text):
     """film.last_look on a film whose preview is on screen, with the look's answer given."""
     import storage
     from PIL import Image
+    os.makedirs(tmp_path, exist_ok=True)
     idx = selfie(20.0)
     work = _work(tmp_path, idx, items=[{"id": i, "kind": "image", "path": f"bin/{i}.jpg", "w": 1600, "h": 1067, "what": "a bridge"} for i in range(4)])
     os.makedirs(tmp_path / "bin")
@@ -279,7 +280,7 @@ TITLED = lambda idx: film(beats_over(idx, 3, lambda k, a, z: {"pic": "main", "do
 def test_a_film_most_of_whose_frames_lose_to_the_upload_is_taken_back_for_the_chain(monkeypatch, tmp_path):
     ctx, db, wrote, out = _looked(monkeypatch, tmp_path, {"pairs": 6, "upload": 5, "remove": ["b01.big"], "why": ["type on the face"]}, TITLED(selfie(20.0)))
     assert out is None and wrote == [({"keep": [[0.0, 20.0]]}, "the First cut starts again from the upload")]
-    assert ctx.director_version is None and ctx.director_fell_why.startswith("the last look: floor, 5 of 6")
+    assert ctx.director_version is None and ctx.director_fell_why == "the last look: 5 of 6 frames for the upload, nothing left but the upload"
     assert ctx.first_cut_phases["director"]["look"]["decision"] == "chain"
     assert [k for k, _ in db.events] == ["director_taste"] and db.events[0][1]["decision"] == "chain"
     # first_cut then finds the film is not on screen and calls fell, which files it as the look's doing
@@ -319,3 +320,12 @@ def test_a_sound_with_a_measured_tail_lowers_with_its_length(tmp_path):
     edl, _, _ = lower.lower(l1, str(tmp_path))
     by = {s["id"]: s for s in edl["sfx"]}
     assert by["x.impact"]["dur_s"] == 1.4 and "dur_s" not in by["x.pop"]
+
+
+def test_at_the_floor_what_the_look_named_goes_and_a_film_that_still_stands_is_delivered(monkeypatch, tmp_path):
+    idx = selfie(20.0)
+    text = film(beats_over(idx, 4, lambda k, a, z: {"cut": [40, 45, 999], "pic": ["main", f"bin:{k}", "main"]} if k in (1, 2) else {"pic": "main"}))
+    ctx, db, wrote, out = _looked(monkeypatch, tmp_path, {"pairs": 6, "upload": 4, "remove": ["b02.s1"], "why": ["loosely like the words"] * 4}, text)
+    assert out is not None and wrote[0][1] == "the Director's First cut, after the last look"          # the other picture still stands
+    ctx, db, wrote, out = _looked(monkeypatch, tmp_path / "b", {"pairs": 6, "upload": 4, "remove": [], "why": ["the frame is cropped"] * 4}, text)
+    assert out is None and ctx.director_fell_why.endswith("nothing it could name") and wrote[0][1] == "the First cut starts again from the upload"

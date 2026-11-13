@@ -4,8 +4,8 @@ A look here is a decision anyone can see beside the upload, and it is numbers en
 one (`dna.look`), which fixes the design: the hue that owns the shadows, how much colour stays, how hard the
 tone is. The style card it named gives the tone the reference films measure (CIELAB percentiles and chroma,
 `assets/colour.json`, read off the films themselves). This module reads the upload's own frames and solves the
-strengths: exposure a third of the way to the card's median as far as skin allows, contrast and saturation half
-way to its spread and chroma, then the shadow hue as far as it takes for the film to stand a measured distance
+strengths: exposure a third of the way to the card's median as far as skin allows, contrast half way to its
+spread, saturation a quarter of the way to its chroma, then the shadow hue as far as it takes for the film to stand a measured distance
 off its upload (CIE delta E 2000, mean over what is neither skin nor black), and never past what skin can take.
 
     look = grade.solve(grade.frames(work), "cream_teal", "S9")
@@ -27,14 +27,15 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FF = os.environ.get("FFMPEG_BIN", "ffmpeg")
-VERSION = 4                # moves when a design or the solver changes: a kept look is solved again
+VERSION = 5                # moves when a design or the solver changes: a kept look is solved again
 N_FRAMES, FRAME_W = 12, 96
 SOLVE_PX = 6000            # pixels the solver reads: percentiles and means settle long before this
 
 DE_MIN, DE_MAX = 3.0, 20.0
 SKIN_DE_MAX = 6.0          # skin moves with the exposure and the contrast only, and never past this
 CLIP_MAX = 0.03            # share of the picture a grade may push onto pure black or white beyond what the upload holds
-PULL = 0.5                 # how far the spread and the chroma go toward the card's numbers
+PULL = 0.5                 # how far the spread goes toward the card's numbers
+PULL_C = 0.25              # and the chroma: the cards are drained films, and half way took the gold out of a firework (p5571)
 PULL_L = 0.35              # and the median: a card's is its pages and plates too, so the take goes a third of the way
 EV_MAX = 0.25              # stops of exposure, at most
 SKIN_DE_EV = 4.5           # what exposure alone may do to skin
@@ -298,7 +299,7 @@ def solve(arr, raw, card=None):
         if best is None or d < best[0] - 1e-9:
             best = (d, c)
     con = best[1] if best else 1.0
-    chroma = (was["C"] + PULL * (want["C"] - was["C"]) if want else was["C"]) * rec["sat"]
+    chroma = (was["C"] + PULL_C * (want["C"] - was["C"]) if want else was["C"]) * rec["sat"]
     sat = min((round(v, 3) for v in np.arange(SAT[0], SAT[1] + 1e-6, 0.025)),
               key=lambda v: (abs(numbers(*measure({"ev": ev, "contrast": con, "saturation": v})[:2])["C"] - chroma), abs(v - 1)))
     base = {"ev": ev, "contrast": con, "saturation": sat}

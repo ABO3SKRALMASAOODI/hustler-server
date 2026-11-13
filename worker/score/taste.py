@@ -1346,7 +1346,7 @@ def against(current, film, out_path, deadline, model, effort="low", cell_h=360):
                 im.paste(f, (i * (cw + gap) + (cw - f.size[0]) // 2, y + head))
     boards.save(im, out_path, quality=86)
     r = call.stream(model, AGAINST_SYSTEM, [brief.image_block(out_path), {"type": "text", "text": "Film A above, film B below. Now the JSON."}],
-                    max_tokens=300, effort=effort, purpose="director_against", deadline=deadline, thinking=False)
+                    max_tokens=1200, effort=effort, purpose="director_against", deadline=deadline, thinking=False)       # room to answer: at 300 one of eleven came back empty
     a, b = (r.text or "").find("{"), (r.text or "").rfind("}")
     try:
         o = json.loads(r.text[a:b + 1])

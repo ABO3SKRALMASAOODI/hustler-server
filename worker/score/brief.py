@@ -487,7 +487,7 @@ def colour_part(work, styles):
            + ("It is dark: a design that darkens loses it. " if n["L50"] < 22 else "It is bright and flat: it can take contrast. " if n["L5"] > 12 and n["L50"] > 55 else "")]
     cards = [f"{s} {grade.CARDS[s]['L5']:.0f} / {grade.CARDS[s]['L50']:.0f} / {grade.CARDS[s]['L95']:.0f}, chroma {grade.CARDS[s]['C']:.0f}" for s in styles if s in grade.CARDS]
     if cards:
-        out.append("The cards measure, the same way: " + "; ".join(cards) + ". The look you name is solved half way to its card.")
+        out.append("The cards measure, the same way: " + "; ".join(cards) + ". The look you name is solved toward its card.")
     return out
 
 

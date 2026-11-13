@@ -592,6 +592,8 @@ def own_moments(work, wishes, per, deadline):
 
 HOOK_S = 3.0               # a talking film shows its first picture inside this
 HOOK_CALL_S = 4.0
+VIEW_CALL_S = 22.0         # sixteen frames read and up to six boxes written: 11 s measured
+HOOK_TOKENS, VIEW_TOKENS = 1200, 3000     # room to answer: at 900 the views call spent every token before its first word and returned nothing (13 Nov, five uploads of five)
 HOOK_SYSTEM = """You help a film editor open a short film of a person talking. You get what the film is about and its first words, each with its number. Name the one picture a viewer should see in the film's first three seconds, before or beside the speaker: the very thing the film is about, as its first words or its subject name it. A named person, team, company, place, product, animal, object or event that a photograph or a clip can show. Never a mood, a metaphor or a feeling, never the speaker, never a generic picture of the topic's field. When the thing is the speaker's own (their product, shop, vehicle, workplace), set "mine" true: only the upload can show it. When the first words and the subject name nothing a picture can show, answer {"hook":null}.
 Answer with one JSON object and nothing else: {"hook":{"w":"first-last word number the picture lands on, inside the first three seconds","want":"what the picture shows, with the full name of who or what it is","q":["a short stock search","a second, broader one"],"kind":"photo or video","mine":false}}."""
 VIEW_SYSTEM = """You help a film editor cut a short film from one upload that has no words to follow. You see numbered frames from the upload with their times. Find up to six details that deserve a shot of their own, the way an editor cuts in an insert: the thing the clip is about seen closer (a label, hands at work, a face reacting, the flame, the tool, the plate, the screen), or a second subject the wide frame holds. Give the box around each detail as fractions of the frame, x0 y0 x1 y1 from the top left, tight on it but never cutting it, never through a head or through printed words. Only a detail that is plainly there, sharp, and still reads when enlarged up to 2 times. Take details from different moments and different parts of the frame, and leave out a frame that only repeats another. When the frames are already close on one thing and hold nothing else to cut to, answer {"own":[]}.
@@ -620,7 +622,7 @@ def hook_wish(work, scout, wishes, per, deadline):
             return None, 0.0
     lines = ["The film is about: " + str((scout or {}).get("about") or "not known"),
              "First words: " + " ".join(f"{i}:{w.get('w')}" for i, w in first)]
-    r = call.stream(LOOK_MODEL, HOOK_SYSTEM, [{"type": "text", "text": "\n".join(lines)}], max_tokens=400, effort="low",
+    r = call.stream(LOOK_MODEL, HOOK_SYSTEM, [{"type": "text", "text": "\n".join(lines)}], max_tokens=HOOK_TOKENS, effort="low",
                     purpose="director_hook", deadline=deadline, thinking=False)
     txt = r.text or ""
     try:
@@ -655,7 +657,7 @@ def own_views(work, per, deadline, n_have=0):
         path = os.path.join(tmp, "views.jpg")
         boards.save(sheet, path, quality=82)
         r = call.stream(LOOK_MODEL, VIEW_SYSTEM, [brief.image_block(path), {"type": "text", "text": f"The upload runs {dur:.1f} s. Frames 0 to {n - 1}."}],
-                        max_tokens=900, effort="low", purpose="director_views", deadline=deadline, thinking=False)
+                        max_tokens=VIEW_TOKENS, effort="low", purpose="director_views", deadline=deadline, thinking=False)
         rows, seen = [], []
         for o in parse_keep(r.text):
             f = o.get("c")
@@ -722,7 +724,7 @@ def run(work, scout, per, acquire, deadline):
         except Exception as e:  # noqa: BLE001 no hook wish: the Scout's wishes stand
             report.append(dict(hook_error=str(e)[:120] or "late"))
     side = cf.ThreadPoolExecutor(max_workers=6)
-    view_f = None if talk else side.submit(broll_source.carried(own_views), work, per or {}, min(deadline, time.monotonic() + 14.0))
+    view_f = None if talk else side.submit(broll_source.carried(own_views), work, per or {}, min(deadline, time.monotonic() + VIEW_CALL_S))
     name_f = side.submit(broll_source.carried(name_wishes), work, wishes, str((scout or {}).get("about") or ""))
     own_f = side.submit(broll_source.carried(own_moments), work, wishes, per or {}, min(deadline, time.monotonic() + 14.0))
     read_f = side.submit(broll_source.carried(reads_for), work, wishes, per or {})
