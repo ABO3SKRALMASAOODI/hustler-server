@@ -12,6 +12,8 @@ listened.
         --license CC0 --author <name> [--title ...]
     python -m sound_approval approve <request id> <candidate> --role <role>
         --use "<when to use it>"          (asks the owner to type the line)
+    python -m sound_approval approve-many <approved.json>
+        (an audition page's list; one typed attestation for all of it)
     python -m sound_approval decline <request id> [--note ...]
 
 ``stage`` copies a CC0 candidate into the audition folder (outside the
@@ -119,7 +121,7 @@ def approve(rid, cid, *, role, use, attest, db=None, audition_dir=None,
            "title": meta.get("title"), "author": meta.get("author"),
            "source_url": meta.get("source_url"),
            "license": meta.get("license"), "approved_request": rid}
-    for k in ("peak_s", "hit_lufs", "hit_lufs_hp150", "duration_s",
+    for k in ("peak_s", "hit_s", "hit_lufs", "hit_lufs_hp150", "duration_s",
               "max_s"):
         if meta.get(k) is not None:
             row[k] = meta[k]
@@ -132,6 +134,26 @@ def approve(rid, cid, *, role, use, attest, db=None, audition_dir=None,
         sound_requests.set_status(db, rid, "approved",
                                   note=f"joined the library as {rec_id}")
     return rec_id
+
+
+def approve_many(rid, picks, *, attest, db=None, audition_dir=None,
+                 lib_dir=None):
+    """Approve several auditioned candidates of one request with ONE typed
+    attestation (an audition page hands the owner a list). ``picks`` is
+    [{"cid", "role", "use"}]. Each still goes through ``approve``; one that
+    fails is reported and the others still join. Returns [(cid, id | error)]."""
+    if attest != attestation(rid):
+        raise ApprovalError("approval needs the owner's typed attestation")
+    out = []
+    for p in picks:
+        try:
+            out.append((p.get("cid"), approve(
+                rid, p.get("cid"), role=p.get("role"), use=p.get("use"),
+                attest=attest, db=None, audition_dir=audition_dir,
+                lib_dir=lib_dir)))
+        except (ApprovalError, OSError, ValueError) as e:
+            out.append((p.get("cid"), f"not approved: {e}"))
+    return out
 
 
 def decline(rid, *, db, note=None):
@@ -155,7 +177,23 @@ def main(argv):
     a.add_argument("cid")
     a.add_argument("--role", required=True)
     a.add_argument("--use", required=True)
+    m = sub.add_parser("approve-many")
+    m.add_argument("list", help="the audition page's approved.json")
     args = ap.parse_args(argv)
+    if args.cmd == "approve-many":
+        if not sys.stdin.isatty():
+            print("approval is typed by the owner at a terminal",
+                  file=sys.stderr)
+            return 2
+        doc = json.load(open(args.list))
+        rid, picks = doc["rid"], doc.get("approved") or []
+        print(f"{len(picks)} recordings of {rid}:")
+        for p in picks:
+            print(f"  {p.get('cid')}  {p.get('role')}  {p.get('use')}")
+        line = input(f"Type exactly: {attestation(rid)}\n> ")
+        for cid, got in approve_many(rid, picks, attest=line):
+            print(cid, "->", got)
+        return 0
     if args.cmd == "stage":
         print(stage(args.rid, args.path, source_url=args.source,
                     licence=args.license, author=args.author,

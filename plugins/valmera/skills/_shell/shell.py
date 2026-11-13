@@ -208,6 +208,8 @@ def deliver(ctx, state, out_root, results):
     shutil.rmtree(part, ignore_errors=True)
     os.makedirs(part)
     shutil.copyfile(chk["final"], os.path.join(part, "film.mp4"))
+    if chk.get("final_song") and os.path.exists(chk["final_song"]):      # the owner's song under the same film; film.mp4 is the clean export
+        shutil.copyfile(chk["final_song"], os.path.join(part, "film_song.mp4"))
     spend = [s for r in results.values() if isinstance(r, dict) for s in r.get("spend") or []]
     rec = dict(contract=CONTRACT, run_id=ctx.run_id, workflow=ctx.workflow, delivered=now(),
                idea=script.get("idea") or results["ideas"].get("chosen"),
@@ -216,6 +218,8 @@ def deliver(ctx, state, out_root, results):
                engine=results["render"].get("engine"), checks=chk["checks"], stage_seconds=state.get("seconds"),
                spend=spend, spend_usd=round(sum(float(s.get("usd") or 0) for s in spend), 4),
                rules=dict(published=False, music_picked=False, end_card=chk["checks"].get("endcard_ok"), watermark=chk["checks"].get("mark_ok")))
+    if chk.get("song"):
+        rec["song"] = dict(chk["song"], film="film_song.mp4", clean_export="film.mp4")
     jsave(os.path.join(part, "film.json"), rec)
     os.rename(part, final_dir)
     ledger_add(ctx.state_root, ctx.workflow, dict(run_id=ctx.run_id, style=script["style"]["id"], idea=script.get("title"),
