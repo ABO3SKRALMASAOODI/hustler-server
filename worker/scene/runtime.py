@@ -18,6 +18,7 @@ import time
 import numpy as np
 
 from .faults import SceneFault
+from . import looks
 from .plan import A, AR, BLENDS, IDENTITY, JOINS, MODES, PLATES, TREATS, held, hex3
 
 GLSL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "glsl")
@@ -33,9 +34,9 @@ PROGRAMS = {"pic": ("common", "easu", "picture", "pic.frag"), "join": ("common",
 #   int      always folded          float0  folded when 0.0
 #   vec2y0   folded when .y is 0    zero    folded when every component is 0
 FOLD = {"pic": {"uPlate": "int", "uEdge": "int", "uAlpha": "int", "uSamp": "int", "uTreat": "int", "uTreatHasC": "int",
-                "uBlur": "float0", "uSharp": "float0", "uBorder": "float0", "uPlateGrain": "float0"},
+                "uBlur": "float0", "uSharp": "float0", "uBorder": "float0", "uPlateGrain": "float0", "uLook": "int", "uTaps": "int"},
         "join": {"uJoin": "int", "uEdge": "int", "uAlpha": "int", "uSamp": "int", "uTreat": "int", "uTreatHasC": "int", "uBlur": "float0",
-                 "uSharp": "float0"},
+                 "uSharp": "float0", "uLook": "int"},
         "hiblur": {"uStep": "int"}, "bright": {"uStep": "int"},
         "flash": {"uMode": "int", "uHasC": "int"},
         "film": {"uGrain": "float0", "uVig": "float0", "uHal": "float0", "uBloom": "float0", "uMesh": "vec2y0", "uRaster": "vec2y0",
@@ -403,8 +404,20 @@ class Runtime:
                 return False
         return True
 
-    def picture_uniforms(self, p, it, f, pic, crop, out_w, blur, geom=None):
+    def look_uniforms(self, p, it, pic):
+        """The look for one picture: the item's own, else the film's. A plate is a designed colour and takes none."""
+        lk = it.get("look") if "look" in it else self.plan.film.get("look")
+        if pic is None or not isinstance(lk, dict):
+            self.U(p, uLook=0)
+            return
+        u = looks.uniforms(lk)
+        win = it.get("window")
+        win = tuple(float(v) for v in win[:4]) if (isinstance(win, (list, tuple)) and len(win) >= 4) else (0.5, 0.5, 0.0, 0.0)
+        self.U(p, uLook=1, uLk0=u["lk0"], uLk1=u["lk1"], uLkSh=u["sh"], uLkHi=u["hi"], uSk=u["sk"], uLkDrop=u["drop"], uLkWin=win)
+
+    def picture_uniforms(self, p, it, f, pic, crop, out_w, blur, geom=None, taps=0):
         """Crop, sampling, treat and grade for one picture drawn ``out_w`` frame pixels wide."""
+        self.look_uniforms(p, it, pic)
         treat = it.get("treat") or {}
         grade = {**IDENTITY, **(it.get("grade") or self.plan.film.get("grade") or {})}
         mode = TREATS.get(treat.get("mode"), 0)
@@ -420,7 +433,7 @@ class Runtime:
         pix_in = (crop[2] - crop[0]) * pic["w"]
         up = out_w / max(pix_in, 1.0)
         tpp = pix_in / max(out_w, 1e-6)                       # texels per pixel, as the shader works it out
-        samp = 2 if blur > 0.01 else 1 if tpp > 1.05 else 0
+        samp = 2 if (blur > 0.01 and not taps) else 1 if tpp > 1.05 else 0
         # Mips are built per decoded frame, so only as deep as this draw reads: a push-in that
         # minifies by a sixth needs one level, not eleven (a level is a pass of its own on llvmpipe).
         deep = 1000 if (samp == 2 or mode >= 20) else max(int(math.ceil(math.log2(tpp))), 1) if samp == 1 else 0
@@ -436,14 +449,38 @@ class Runtime:
             pic["filter"] = want
         edge = up >= 1.25 and not self.plan.film.get("no_easu")
         sharp = float(self.plan.film.get("sharpen", min(max((up - 1.15) / 1.4, 0.0), 1.0) * (0.35 if edge else 1.0)))
-        if samp == 0 and sharp == 0.0 and mode < 20 and not pic.get("alpha") and geom and self.on_grid(pic, crop, geom):
+        if samp == 0 and sharp == 0.0 and mode < 20 and not taps and not pic.get("alpha") and geom and self.on_grid(pic, crop, geom):
             samp = 3
         self.U(p, uTexSize=(pic["w"], pic["h"]), uCrop=tuple(crop), uSharp=sharp if samp == 0 else 0.0, uAlpha=1 if pic.get("alpha") else 0,
                uEdge=1 if (edge and samp == 0) else 0, uSamp=samp)
 
     # blit: shot and card -----------------------------------------
 
-    def draw_pic(self, it, f, geom):
+    def shutter_of(self, it):
+        """How long the shutter is open on this item, as a share of a frame: its own, else the film's. 0 is none."""
+        v = it.get("shutter") if "shutter" in it else self.plan.film.get("shutter")
+        return min(max(float(v or 0.0), 0.0), 2.0)
+
+    @staticmethod
+    def _mid(a, b, t):
+        if a is None or b is None:
+            return a
+        if isinstance(a, (list, tuple)):
+            return [x + (y - x) * t for x, y in zip(a, b)]
+        return a + (b - a) * t
+
+    def shutter_poses(self, it, f, sh, pose):
+        """Pose A and pose B of an exposure centred on frame f: (centre x, centre y, scale, crop) at f - sh/2 and
+        f + sh/2, read off the item's own baked curves. ``pose(g)`` gives the pose on frame g; frames outside the
+        item hold its ends, so a move that starts on a cut blurs forward only. None when nothing moves."""
+        lo, hi = it["f"]
+        now, before, after = pose(f), pose(max(f - 1, lo)), pose(min(f + 1, hi - 1))
+        if now == before and now == after:
+            return None
+        h = sh / 2
+        return tuple(self._mid(n, b, h) for n, b in zip(now, before)), tuple(self._mid(n, a, h) for n, a in zip(now, after))
+
+    def draw_pic(self, it, f, geom, pose_b=None):
         p, vao = self.P["pic"]
         lo = it["f"][0]
         cx, cy, hw, hh, s, rot, op, radius = geom
@@ -457,6 +494,7 @@ class Runtime:
                 self.note(f"no picture for {it['id']}: drew a plain plate")
             pl = it.get("plate") or {"c0": "#101010", "c1": "#0A0A0A"}
             self.picture_uniforms(p, it, f, None, None, 0, blur)
+            self.U(p, uTaps=0)
             self.plate_uniforms(p, it["id"], pl, f, lo)
             self.noise_tex.use(0)                  # a plate samples no picture, but unit 0 must hold a texture
             self.noise_tex.use(1)
@@ -464,11 +502,28 @@ class Runtime:
             return
         pic = self.picture(it, f)
         crop = AR(it.get("crop"), f, lo) or self.cover(pic["w"], pic["h"], hw, hh)
-        self.picture_uniforms(p, it, f, pic, crop, 2 * hw * s, blur, (cx, cy, hw, hh, s, rot))
-        self.U(p, uPlate=0)
+        taps, grow = 0, 0.0
+        if pose_b is not None:
+            # the exposure runs from pose A to pose B (``shutter_poses``): how far the picture travels decides the samples
+            (cxa, cya, sa, cropa), (cxb, cyb, sb, cropb) = pose_b
+            ca = cropa or crop
+            cb = cropb or crop
+            kx, ky = 2 * hw * s / max(ca[2] - ca[0], 1e-6), 2 * hh * s / max(ca[3] - ca[1], 1e-6)
+            ext = max(abs(cxb - cxa) + abs(sb - sa) * hw, abs(cyb - cya) + abs(sb - sa) * hh,
+                      max(abs(cb[0] - ca[0]), abs(cb[2] - ca[2])) * kx, max(abs(cb[1] - ca[1]), abs(cb[3] - ca[3])) * ky)
+            # under three pixels of travel (at 1080 wide) nobody sees a smear, and the single sample is the sharper picture
+            if ext >= 3.0 * self.W / 1080.0:
+                taps = 8 if ext < 16 else 16 if ext < 64 else 24
+                grow = abs(cxb - cxa) + abs(cyb - cya) + abs(sb - sa) * max(hw, hh)
+                cx, cy, s, crop = cxa, cya, sa, ca
+                self.U(p, uCentre=(cxa, cya), uScale=sa, uCentreB=(cxb, cyb), uScaleB=sb, uCropB=tuple(cb))
+                cx, cy = (cxa + cxb) / 2, (cya + cyb) / 2                 # the scissor's centre: between the two poses
+                self.n["shutter"] += 1
+        self.picture_uniforms(p, it, f, pic, crop, 2 * hw * s, blur, (cx, cy, hw, hh, s, rot), taps=taps)
+        self.U(p, uPlate=0, uTaps=taps)
         pic["tex"].use(0)
         self.noise_tex.use(1)
-        self.quad_scissored("pic", cx, cy, hw, hh, s, rot)
+        self.quad_scissored("pic", cx, cy, hw, hh, max(s, pose_b[1][2]) if taps else s, rot, grow=grow)
 
     def plate_uniforms(self, p, item_id, pl, f, lo):
         kind = PLATES.get(pl.get("kind", "paper"), 1)
@@ -508,7 +563,12 @@ class Runtime:
         self.ctx.scissor = None
 
     def draw_shot(self, it, f):
-        self.draw_pic(it, f, (self.W / 2, self.H / 2, self.W / 2, self.H / 2, 1.0, 0.0, 1.0, 0.0))
+        pose_b = None
+        sh = self.shutter_of(it)
+        if sh > 0 and isinstance(it.get("crop"), list) and it["crop"] and isinstance(it["crop"][0], (list, tuple)):
+            lo = it["f"][0]
+            pose_b = self.shutter_poses(it, f, sh, lambda g: (self.W / 2, self.H / 2, 1.0, list(AR(it["crop"], g, lo))))
+        self.draw_pic(it, f, (self.W / 2, self.H / 2, self.W / 2, self.H / 2, 1.0, 0.0, 1.0, 0.0), pose_b)
 
     def keep_base(self):
         """Keep the base picture as drawn, for ``draw_kept``."""
@@ -552,7 +612,15 @@ class Runtime:
             self.U(p, uCentre=(sx, sy), uHalf=(hw * s, hh * s), uRadius=max(radius * s, 0.01), uSigma=sigma,
                    uA=float(sh["a"]) * op, uRot=(math.cos(rot), math.sin(rot)))
             self.quad_scissored("shadow", sx, sy, hw, hh, s, rot, grow=sigma * 3.2)
-        self.draw_pic(it, f, (cx, cy, hw, hh, s, rot, op, radius))
+        pose_b = None
+        shut = self.shutter_of(it)
+        if shut > 0 and any(isinstance(it.get(k), list) for k in ("x", "y", "s", "crop")):
+            def pose(g):
+                c = AR(it.get("crop"), g, lo)
+                return (float(A(it.get("x", 0.5), g, lo)) * W, float(A(it.get("y", 0.5), g, lo)) * H, float(A(it.get("s", 1), g, lo)),
+                        list(c) if c is not None else None)
+            pose_b = self.shutter_poses(it, f, shut, pose)
+        self.draw_pic(it, f, (cx, cy, hw, hh, s, rot, op, radius), pose_b)
 
     # flash and join: they read the frame ---------------------------
 

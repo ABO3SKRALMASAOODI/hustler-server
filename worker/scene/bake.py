@@ -170,7 +170,69 @@ def keys(n, at, v, how="linear"):
     return out
 
 
-CURVES = {"settle": settle, "flicker": flicker, "burn": burn, "burn_th": burn_th, "relay": relay, "ui_zoom": ui_zoom,
+# ---------------------------------------------------------------- camera curves, measured (week-1112 VIS lane)
+# 13 Nov 2026: frame-to-frame camera motion on 91 reference films (the owner's 41 picks, 43 shorts and 7 long
+# films across the four folders; week-1112/notes/VIS.md, lanes/VIS/data/numbers.json). The 84 shorts hold 745
+# eased camera moves. An eased move is one of three shapes, by where its speed peaks; each is the median travel
+# of its family at 17 evenly spaced times.
+MOVE = {
+    # speed peaks in the first third and coasts in: the move that lands (48% of eased moves; 14 frames, 8.3%)
+    "out": (0.0, 0.070, 0.169, 0.278, 0.373, 0.461, 0.550, 0.629, 0.693, 0.760, 0.804, 0.856, 0.903, 0.941, 0.969, 0.992, 1.0),
+    # eases both ways (19%; 11 frames, 4.2%)
+    "io": (0.0, 0.011, 0.043, 0.090, 0.169, 0.248, 0.322, 0.429, 0.508, 0.599, 0.692, 0.773, 0.860, 0.924, 0.965, 0.995, 1.0),
+    # gathers speed to its end: the move that runs into a cut (33%; 11 frames, 6.2%; a third of them end on one)
+    "in": (0.0, 0.011, 0.032, 0.069, 0.110, 0.155, 0.216, 0.259, 0.313, 0.381, 0.460, 0.552, 0.639, 0.736, 0.830, 0.922, 1.0),
+}
+MOVE_FRAMES = 13          # an eased move's length at 30 fps: median 13, quartiles 8 to 19
+MOVE_SIZE = (0.038, 0.063, 0.117)             # its size (scale change): quartiles; one in ten passes 18.6%
+MOVE_OVER = 0.13          # where a move overshoots, it passes its end by this share of its travel (lower quartile of those)
+MOVE_OVER_SHARE = 0.21    # and one move in five does
+MOVE_BACK = 6             # frames to come back
+CAM_SETTLE = {"size": 0.063, "tau": 5.7}      # a picture that lands off its size and settles: median size (quartiles 0.041 to 0.124), tau in frames at 30 fps
+DRIFT_RATE = (0.051, 0.085, 0.149)            # a slow push: scale per second, quartiles; 57% go in; its middle is at 56% of the travel
+PAN_RATE = (0.008, 0.019, 0.049)              # a slow pan: frame widths per second, quartiles
+PUNCH_SIZE = (0.037, 0.046, 0.071)            # a hard punch (one frame, same picture): quartiles; one in ten passes 11%; 53% go in
+WHIP = {"frames": 4, "peak_w": 0.082, "travel_w": 0.27}    # the fast pan either side of a whip cut: frames (3 to 5), peak in frame widths a frame, travel (0.18 to 0.42)
+
+
+def _on(curve, t):
+    """A 17-point curve read at t in 0..1."""
+    x = min(max(t, 0.0), 1.0) * (len(curve) - 1)
+    i = min(int(x), len(curve) - 2)
+    return curve[i] + (curve[i + 1] - curve[i]) * (x - i)
+
+
+def move(n, a=0.0, b=1.0, kind="out", frames=None, over=0.0, back=None, delay=0):
+    """From a to b on a measured camera curve (MOVE), in ``frames`` frames (default: all n), then held. ``over``:
+    the move passes b by that share of its travel and comes back over ``back`` frames, as a quarter of the
+    references' moves do. ``delay`` holds a first."""
+    n, delay = int(n), int(delay or 0)
+    m = max(int(frames or (n - delay)), 1)
+    bk = int(MOVE_BACK if back is None else back) if over else 0
+    c = MOVE[kind]
+    out = []
+    for i in range(n):
+        j = i - delay
+        if j <= 0:
+            out.append(float(a))
+        elif j < m:
+            out.append(a + (b - a) * (1.0 + over) * _on(c, j / m))
+        elif bk and j < m + bk:
+            u = (j - m) / bk
+            out.append(b + (b - a) * over * (1.0 - _on(MOVE["out"], u)))
+        else:
+            out.append(float(b))
+    return out
+
+
+def cam_settle(n, size=None, tau=None, sign=1.0):
+    """Log-scale offset per frame of a picture that lands ``size`` off and settles: size * e^(-t/tau), no overshoot."""
+    size = CAM_SETTLE["size"] if size is None else float(size)
+    tau = CAM_SETTLE["tau"] if tau is None else float(tau)
+    return [sign * math.log1p(size) * math.exp(-i / tau) for i in range(int(n))]
+
+
+CURVES = {"move": move, "cam_settle": cam_settle, "settle": settle, "flicker": flicker, "burn": burn, "burn_th": burn_th, "relay": relay, "ui_zoom": ui_zoom,
           "bounce": bounce, "bounce_blur": bounce_blur, "expo_out": expo_out, "ease": ease, "linear": linear,
           "grow": grow, "gravity": gravity, "keys": keys}
 

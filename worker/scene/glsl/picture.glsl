@@ -41,11 +41,59 @@ vec3 sample_pic(vec2 uv, float texel_per_px) {
   return c;
 }
 
+// The look: what a colourist does after the balance (scene/looks.py holds the numbers, measured on the
+// reference films). A tone curve that is an S about a pivot with a floor and a ceiling, colour kept or
+// drained, one hue for the shadows and one for the highlights, and skin left as it came: a key on the
+// direction of skin's chroma takes skin out of the hues, holds its colour and gives it part of the contrast.
+uniform int uLook;          // 0: none, and none of this is compiled in on a software rasteriser
+uniform vec4 uLk0;          // contrast (slope at the pivot), pivot, floor, ceiling
+uniform vec4 uLk1;          // saturation, skin keep 0..1, shadow hue amount, highlight hue amount
+uniform vec3 uLkSh;         // the shadow hue, as an rgb offset of no luma
+uniform vec3 uLkHi;         // the highlight hue, the same
+uniform vec4 uSk;           // the skin key: axis cos, axis sin, cos of the half width, cos of half width plus feather
+uniform float uLkDrop;      // the level of the room against the face's (1: the same): outside the window the picture goes down
+uniform vec4 uLkWin;        // the window on the face, in the picture's own 0..1: centre x, y, radius x, y (radius 0: no window)
+float gWin = 0.0;           // how far inside the window this pixel is, 0..1: set by the caller, which knows where in the picture it is
+
+// A colourist's window: 1 inside an ellipse round the face, falling to 0 over as much again. Wide and soft, so
+// there is no edge to see: it is the room that goes down, not a spot that goes up.
+float window_at(vec2 uv) {
+  if (uLkWin.z <= 0.0) return 0.0;
+  return 1.0 - smoothstep(0.8, 1.9, length((uv - uLkWin.xy) / uLkWin.zw));
+}
+
+float skin_key(vec3 c, float y) {
+  float yy = max(y, 0.05);
+  vec2 k = vec2(c.r - y, y - c.b) / yy;
+  float m = length(k);
+  float along = dot(k, uSk.xy) / max(m, 1e-4);
+  return smoothstep(uSk.w, uSk.z, along) * smoothstep(0.07, 0.15, m) * (1.0 - smoothstep(0.95, 1.25, m)) * smoothstep(0.06, 0.16, y);
+}
+
+vec3 look(vec3 c) {
+  c = clamp(c, 0.0, 1.0);
+  float y = luma(c);
+  float keep = skin_key(c, y) * uLk1.y;
+  c *= mix(uLkDrop, 1.0, gWin);
+  y = luma(c);
+  float p = uLk0.y;
+  float k = mix(uLk0.x, 1.0 + (uLk0.x - 1.0) * 0.5, keep);
+  float t = y < p ? p * pow(y / p, k) : 1.0 - (1.0 - p) * pow((1.0 - y) / (1.0 - p), k);
+  c *= min(t / max(y, 1e-3), 4.0);
+  float s = mix(uLk1.x, clamp(uLk1.x, 0.92, 1.08), keep);
+  c = mix(vec3(t), c, s);
+  c = uLk0.z + (uLk0.w - uLk0.z) * c;
+  float free_ = 1.0 - keep;
+  c += uLkSh * (uLk1.z * (1.0 - smoothstep(0.0, 0.5, t)) * free_) + uLkHi * (uLk1.w * smoothstep(0.5, 1.0, t) * (1.0 - 0.5 * keep));
+  return c;
+}
+
 vec3 grade(vec3 c) {
   c = pow(max(c + uG0.x, vec3(0.0)), vec3(1.0 / uG0.y)) * uG0.z;
   c = mix(vec3(luma(c)), c, uG1.x);
   c = (c - 0.5) * uG1.y + 0.5;
   c.r += uG1.z; c.b -= uG1.z; c.g += uTint;
+  if (uLook == 1) c = look(c);
   return c;
 }
 

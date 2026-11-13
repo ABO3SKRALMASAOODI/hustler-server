@@ -12,13 +12,13 @@ import os
 
 import numpy as np
 
-from . import bake, reader, segments
+from . import bake, looks, reader, segments
 from . import type_atlas as TA
 from .faults import SceneFault
 from .plan import ANIM, ANIM_RECT, KINDS, PLAN_VERSION, Plan, canon, eligible, fingerprint, scene_of, sized
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ENGINE_VERSION = "scene-2"      # in every plan and so in every segment's hash: a segment kept by another engine is never taken for this one's
+ENGINE_VERSION = "scene-3"      # in every plan and so in every segment's hash: a segment kept by another engine is never taken for this one's
 # what strict mode refuses to draw around: these change the picture a customer was promised
 STRICT = ("missing", "not installed", "lacks a glyph", "no font here", "without exactly one")
 
@@ -163,6 +163,30 @@ def _type(doc, warn, tick=None):
 
 # ------------------------------------------------------------------ passes and cost
 
+def _moving(it, lo, hi, W):
+    """Frames of [lo, hi) on which this item's picture travels a pixel or more: the frames the shutter blurs."""
+    a = it["f"][0]
+    cr = it.get("crop")
+    n = 0
+    lists = [it.get(k) for k in ("x", "y", "s") if isinstance(it.get(k), list)]
+    crops = cr if (isinstance(cr, list) and cr and isinstance(cr[0], (list, tuple))) else None
+    if not lists and crops is None:
+        return 0
+    for f in range(lo, hi - 1):
+        i = f - a
+        d = 0.0
+        if crops is not None and i + 1 < len(crops):
+            p, q = crops[i], crops[i + 1]
+            w = max(p[2] - p[0], 1e-6)
+            d = max(abs(q[0] - p[0]), abs(q[2] - p[2]), abs(q[1] - p[1]), abs(q[3] - p[3])) / w * W
+        for v in lists:
+            if i + 1 < len(v):
+                d = max(d, abs(v[i + 1] - v[i]) * W)
+        if d >= 1.5:
+            n += 1
+    return n
+
+
 def program(plan):
     """Per segment (or the whole film), how many frames each op draws: the frame program in counts.
     This is what the cost estimate multiplies, and what a reader of plan.json sees the film is made of."""
@@ -183,6 +207,10 @@ def program(plan):
                 c["plate" if it.get("pic") == "plate" else "src"] += n
                 if it.get("treat"):
                     c["treat"] += n
+            if k in ("shot", "card") and float(it.get("shutter", fl.get("shutter", 0)) or 0) > 0:
+                mv = _moving(it, lo, hi, plan.W)
+                if mv:
+                    c["shutter"] += mv
             elif k == "card":
                 c["blit_card"] += n
             elif k == "word":
@@ -258,6 +286,19 @@ def compile(doc, work, budget_s=None, tier="mac", segment=True, strict=False, ti
          "film": copy.deepcopy(l1.get("film") or {}), "voices": copy.deepcopy(l1.get("voices") or {}),
          "spine": copy.deepcopy(l1.get("spine") or []), "sound": copy.deepcopy(l1.get("sound") or [])}
     d["items"] = [copy.deepcopy(it) for it in (l1.get("items") or []) if it.get("k") in KINDS]
+    # a look named is a look in numbers from here on: the plan, its hash and the runtime read only numbers
+    for holder in [d["film"]] + d["items"]:
+        lk = holder.get("look")
+        if isinstance(lk, str):
+            if lk in looks.LOOKS:
+                holder["look"] = {k: v for k, v in looks.clean(looks.LOOKS[lk]).items()}
+            else:
+                warn.append(f"unknown look {lk!r}: drawn without one")
+                holder.pop("look")
+        elif isinstance(lk, dict):
+            holder["look"] = looks.clean(lk)
+        elif "look" in holder and lk is not None:
+            holder.pop("look")
     for it in d["items"]:
         it["f"] = [int(it["f"][0]), int(it["f"][1])]
     order = {"shot": 0, "join": 1, "card": 2, "flash": 3, "word": 4}

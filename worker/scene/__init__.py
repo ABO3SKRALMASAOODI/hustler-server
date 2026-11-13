@@ -12,6 +12,14 @@ no frame and no reader progress for ``stall_s`` kills it. Every failure is one e
 ``scene.SceneFault`` with a ``code``; the caller renders the same EDL on today's renderer and files a
 ticket. Nothing in this package switches itself on.
 
+Picture and motion (13 Nov, week-1112/notes/VIS.md; every number measured on the reference films):
+
+    scene.motion   camera ops: framings of a picture (a face, a detail, the whole) and the moves on them
+    scene.pace     the pacing driver: a new framing every 1 to 3 s on the voice's stress, each one moving
+    scene.looks    the grade and finish: looks per family, solved on the film's own pictures, skin kept
+    film.shutter   the shutter: whatever moves is blurred by exactly how far it moved (0: as before)
+    film.look      a look by name or in numbers; shot.window keeps a face at its level while the room goes down
+
 The GL context comes from ``VALMERA_SCENE_GL`` (auto: EGL on Linux, the default context elsewhere).
 
 Tiers (``scene/run.py`` TIERS): ``preview``, ``final``, ``master``, and ``inter`` for a film that another
@@ -33,10 +41,22 @@ import time
 from .faults import SceneFault
 from .plan import eligible, scene_of
 
-VERSION = "scene-2"
+VERSION = "scene-3"
 WORKER = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-__all__ = ["VERSION", "SceneFault", "eligible", "scene_of", "compile_scene", "render", "stills"]
+__all__ = ["VERSION", "SceneFault", "eligible", "scene_of", "compile_scene", "render", "stills", "drive", "look"]
+
+
+def drive(l1, work, stress, **kw):
+    """Framings and camera moves for every picture shot of a scene, led by the voice's stress (scene/pace.py)."""
+    from . import pace as _p
+    return _p.drive_l1(l1, work, stress, **kw)
+
+
+def look(name, pictures=None, **kw):
+    """A film dict carrying a look, its finish and the shutter, solved on the film's pictures (scene/looks.py)."""
+    from . import looks as _l
+    return _l.film(name, pictures=pictures, **kw)
 
 
 def compile_scene(doc, work, **kw):

@@ -28,7 +28,12 @@ SEAT_BLOCK = (0.56, 0.09)               # the nominal display block a film seat 
 READ_ROOM = 0.045                       # the least height a place has to have for one line of display type at the reading floor
 STEP_MAX, STEP_ONCE = 1.15, 1.20        # a camera step on a take: at most 15%, 20% once per film
 EDIT_STEP = (1.08, 1.12)                # a tenth at a speech edit hides the jump
-PUSH_MAX = 1.06                         # a slow move on a take or a still: 6% in all
+# A slow move on a take or a still. It was 6% in all, set for restraint (12 Nov). The references' slow pushes measure
+# 8.5% at the median and 13.8% at the upper quartile, at 8.5% a second (week-1112/notes/VIS.md, 286 pushes in 84
+# shorts), and the owner's word of 13 Nov is that a picture held still is the defect. The camera STEP rates in
+# `allow` stay: they count hard steps, and the references' takes carry none at the median (0.86 per 10 s at the
+# upper quartile); what a take carries is eased, 1.3 moves per 10 s of 4% each.
+PUSH_MAX = 1.13
 FACE_H_MAX = 0.45                       # the face after a step
 UPSCALE_MAX, ZOOM_OVER_UPSCALE = 3.0, 1.25
 PARTNER_F = 3                           # a sound's peak within this many frames of something landing

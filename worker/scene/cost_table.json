@@ -1,5 +1,5 @@
 {
- "_": "ms per op-frame at 1080x1920, as compile.program counts ops. mac: fitted by lanes/C/cost_fit.py to the three slice films' stage timers on the M5 Pro, 12 Nov (round 1, final tier, cold cache; 'out' carries readback and the encoder's back-pressure). llvmpipe: fitted by lanes/C/r2/cost_fit_box.py to the same films drawn in the box image at 720x1280 on 4 vCPU (Mesa 22.3.6, LLVM 15), 12 Nov, final tier, cold segments, each film's quietest run; 'out' is what is left of the picture time after the stages (readback, the staged frames' way out, waits), 'start' the context and the first shader variants. plate, treat and join are set from src by hand in both rows: the slice films hold too few of them to fit.",
+ "_": "ms per op-frame at 1080x1920, as compile.program counts ops. mac: fitted by lanes/C/cost_fit.py to the three slice films' stage timers on the M5 Pro, 12 Nov (round 1, final tier, cold cache; 'out' carries readback and the encoder's back-pressure). llvmpipe: fitted by lanes/C/r2/cost_fit_box.py to the same films drawn in the box image at 720x1280 on 4 vCPU (Mesa 22.3.6, LLVM 15), 12 Nov, final tier, cold segments, each film's quietest run; 'out' is what is left of the picture time after the stages (readback, the staged frames' way out, waits), 'start' the context and the first shader variants. plate, treat and join are set from src by hand in both rows: the slice films hold too few of them to fit. shutter (13 Nov, VIS lane): the extra cost of a frame whose picture is drawn through the shutter's samples (8 to 24 bilinear taps in place of one), set by hand from src in both rows: the FedEx proof drew 68 such frames of 600 in the box image (2 vCPU, 1080x1920, 122 s in all).",
  "mac": {
   "blit_card": 1.153,
   "blit_word": 0.057,
@@ -12,7 +12,8 @@
   "src": 3.509,
   "start": 0.4,
   "treat": 0.1,
-  "under": 4.634
+  "under": 4.634,
+  "shutter": 1.2
  },
  "llvmpipe": {
   "blit_card": 10.61,
@@ -26,6 +27,7 @@
   "src": 57.37,
   "start": 1.5,
   "treat": 5.74,
-  "under": 30.75
+  "under": 30.75,
+  "shutter": 45.0
  }
 }

@@ -27,6 +27,7 @@ void main() {
   vec3 b = sample_pic(uv, tpp);
   if (uTreat >= 20) b = rerender(uv, max(tpp, 0.25), b, px, uFrame);
   else if (uTreat != 0) b = treat(b, uTreat, uTreatC, uTreatHasC == 1, uTreatTh, px);
+  if (uLook == 1) gWin = window_at(uv);
   b = grade(b);
   vec3 c = a;
   if (uJoin == 1) {
