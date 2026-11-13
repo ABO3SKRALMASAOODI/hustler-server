@@ -2899,6 +2899,9 @@ def _t_wait_for_job(tok, args):
             # Run report C13: the final's picture check measures the end card
             # and the corner mark but never said so. State both, every time.
             receipt["brand_check"] = _brand_check(result.get("picture_qc"))
+            if receipt["state"] == "done" and row.get("project_id") is not None:
+                return _finished_final_delivery(tok, row, identity, job_status,
+                                                receipt)
         return {"content": [{"type": "text", "text": identity + json.dumps(receipt)}],
                 "structuredContent": {"job": job_status, "render": receipt}, "isError": False}
     if row["type"] == "index":
@@ -2907,6 +2910,51 @@ def _t_wait_for_job(tok, args):
                 f"ready. project_state(project_id={row['project_id']}) shows them.")
     return (identity +
             f"Job {job_id} ({row['type']}) finished: {json.dumps(result)[:800]}")
+
+
+def _finished_final_delivery(tok, row, identity, job_status, receipt):
+    """A finished export is handed over where the assistant learns it is done.
+
+    #780 (13 Nov 2026): wait_for_job answered a finished final with a bare
+    receipt, and the MP4 only reached the customer through a further
+    download_url call. User 2484's assistant exported v14 and v17 of p5718,
+    and no link was ever issued: the customer got nothing. The link (and its
+    delivery record) now comes with the "done", as export_final already does
+    for an export that exists. Without a link, the answer says the one next
+    step."""
+    project_id = row["project_id"]
+    version = receipt.get("edl_version") or (row.get("payload") or {}).get(
+        "edl_version")
+    args = {"project_id": project_id, "kind": "final",
+            "asset_id": receipt["asset_id"]}
+    if version is not None:
+        args["edl_version"] = version
+    try:
+        delivered = _t_download_url(tok, args)
+    except Exception as exc:  # noqa: BLE001 - the receipt below still answers
+        print(f"[mcp] wait_for_job could not hand over final {receipt['asset_id']}: "
+              f"{str(exc)[:200]}", flush=True)
+        delivered = None
+    if isinstance(delivered, dict) and not delivered.get("isError") and \
+            (delivered.get("structuredContent") or {}).get("download_receipt"):
+        structured = dict(delivered["structuredContent"], job=job_status,
+                          render=receipt)
+        content = list(delivered.get("content") or [])
+        lead = (identity + "The export is finished. Give the customer this "
+                "link to the full-resolution MP4:\n" + json.dumps(receipt))
+        if content and content[0].get("type") == "text":
+            content[0] = dict(content[0], text=lead + "\n\n" + content[0]["text"])
+        else:
+            content.insert(0, {"type": "text", "text": lead})
+        return {"content": content, "structuredContent": structured,
+                "isError": False}
+    nxt = (f"\nThe MP4 is ready: call download_url(project_id={project_id}, "
+           f"kind='final'" + (f", edl_version={version}" if version is not None
+                              else "") + ") and give the customer the link.")
+    return {"content": [{"type": "text",
+                         "text": identity + json.dumps(receipt) + nxt}],
+            "structuredContent": {"job": job_status, "render": receipt},
+            "isError": False}
 
 
 def _record_download_receipt(tok, project_id, receipt):

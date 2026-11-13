@@ -2951,3 +2951,49 @@ def test_index_status_names_a_cut_short_file(monkeypatch):
     assert "incomplete" in said
     assert "same copy again cannot help" in said
     assert "moov" not in said
+
+
+def _wait_on_final(client, monkeypatch, asset_id=51, version=17, events=None):
+    monkeypatch.setattr(mcpmod, "_wait", lambda *_: {
+        "id": 138222, "type": "final", "state": "done", "project_id": 3,
+        "payload": {"edl_version": version}, "progress": 100,
+        "result": {"edl_version": version, "render_asset_id": asset_id}})
+    monkeypatch.setattr(mcpmod.storage, "presign_get",
+                        lambda key: f"https://cdn.example/{key}?sig=1")
+    monkeypatch.setattr(mcpmod, "_record_download_receipt",
+                        lambda tok, pid, receipt: {"download_job_id": 1})
+    monkeypatch.setattr(mcpmod, "_final_gate",
+                        lambda cur, pid, uid: (lambda aid, meta, v: True))
+    if events is not None:
+        monkeypatch.setattr(mcpmod, "record_client_event",
+                            lambda *a, **k: events.append(a[2]))
+    return rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "wait_for_job", "arguments": {"job_id": 138222},
+    }).get_json()["result"]
+
+
+def test_a_finished_export_is_handed_over_where_the_wait_ends(client, monkeypatch):
+    """#780 (p5718, 12 Nov): the assistant exported v14 and v17 and waited;
+    wait_for_job answered "done" with no link, download_url was never called,
+    and the customer never got the MP4. The link and its delivery record now
+    come with the "done"."""
+    DB["render_assets"] = [_render(51, 17, "final", width=1920, height=1080)]
+    events = []
+    got = _wait_on_final(client, monkeypatch, events=events)
+    assert got["isError"] is False
+    structured = got["structuredContent"]
+    assert structured["download_receipt"]["asset_id"] == 51
+    assert structured["download_receipt"]["url"].startswith("https://cdn.example/")
+    assert structured["render"]["render_type"] == "final_export"
+    assert structured["job"]["state"] == "done"
+    assert "mcp_export_delivered" in events
+    assert "https://cdn.example/media/3/51.mp4" in got["content"][0]["text"]
+
+
+def test_a_finished_export_without_a_link_names_the_next_step(client, monkeypatch):
+    DB["render_assets"] = []
+    got = _wait_on_final(client, monkeypatch, asset_id=51)
+    assert got["isError"] is False
+    assert got["structuredContent"]["render"]["render_type"] == "final_export"
+    assert "download_url(project_id=3, kind='final', edl_version=17)" in \
+        got["content"][0]["text"]

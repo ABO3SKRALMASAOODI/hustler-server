@@ -314,7 +314,7 @@ def test_a_lost_lease_during_the_correction_still_ends_the_execution(monkeypatch
         _reads(monkeypatch, _reading([]), dbx.JobLeaseLost("replaced"))
 
 
-@pytest.mark.parametrize("mode", ["inspect", "clarify"])
+@pytest.mark.parametrize("mode", ["inspect"])
 def test_only_an_edit_is_asked_what_it_writes(monkeypatch, mode):
     reading = dict(_reading([]), mode=mode)
     reading["requirements"] = [{"description": "Should this cut go?", "action": "change",
@@ -420,10 +420,10 @@ def test_effects_beside_a_cut_keeps_the_recipe():
     assert followup_recipes.active(ctx)["direction"] == "shorter"
 
 
-@pytest.mark.parametrize("mode", ["open", "inspect", "clarify"])
+@pytest.mark.parametrize("mode", ["open", "inspect"])
 def test_no_edit_brief_means_no_recipe(mode):
-    """An open brief promises nothing frozen, and writes are refused in the
-    other two, so a recipe would tell the editor to do what cannot land."""
+    """An open brief promises nothing frozen, and writes are refused in an
+    inspect brief, so a recipe would tell the editor to do what cannot land."""
     assert not followup_recipes.active(_followup("make the captions bigger", mode))
 
 

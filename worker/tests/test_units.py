@@ -2569,9 +2569,29 @@ _gp.index = {"video": {"duration": 60.0}, "silences": [],
                         for i in range(12)])}            # talks 50.0-55.9s
 _blocked = agent_tools.cut_silences(
     _gp, min_silence_s=0.7, padding_s=0.12)
-check("cut_silences blocks a destructive mostly-nonquiet inferred trim",
-      _blocked.startswith("REJECTED: DESTRUCTIVE NON-QUIET CUT") and
+check("cut_silences never refuses a mostly-nonquiet trim: nothing quiet, "
+      "NO CHANGE with the kept gaps and the opt-in (#1078)",
+      _blocked.startswith("NO CHANGE") and "REJECTED" not in _blocked and
+      "KEPT 2 of 2" in _blocked and "allow_nonquiet=true" in _blocked and
       _gp.written is None)
+# Ticket #1078: the same trim with one truly silent gap among sounded ones
+# cuts the silent one and keeps the sounded ones, instead of refusing all.
+_mq = DropCtx({"keep": [[0.0, 60.0]]})
+_mq.index = {"video": {"duration": 60.0}, "silences": [[7.9, 14.0]],
+             "words": ([{"w": "a", "t0": i * 0.5, "t1": i * 0.5 + 0.4}
+                        for i in range(16)] +            # talks 0.0-7.9s
+                       [{"w": "c", "t0": 14 + i * 0.5, "t1": 14 + i * 0.5 + 0.4}
+                        for i in range(4)] +             # talks 14.0-15.9s
+                       [{"w": "b", "t0": 50 + i * 0.5, "t1": 50 + i * 0.5 + 0.4}
+                        for i in range(12)])}            # talks 50.0-55.9s
+_mr = agent_tools.cut_silences(_mq, min_silence_s=0.7, padding_s=0.12)
+_mkept = output_duration([list(x) for x in (_mq.written or {}).get("keep", [[0, 60]])])
+check("cut_silences cuts the quiet gap and keeps the sounded ones (#1078)",
+      _mr.startswith("EDL v") and "cut 1 quiet gap" in _mr and
+      "KEPT" in _mr and "allow_nonquiet=true" in _mr and 54.0 < _mkept < 57.5)
+from tool_outcome import from_legacy as _fl                   # noqa: E402
+check("...and neither answer counts as a refusal (#1078)",
+      _fl(_blocked).status == "success" and _fl(_mr).status == "success")
 _gr = agent_tools.cut_silences(
     _gp, min_silence_s=0.7, padding_s=0.12, allow_nonquiet=True)
 check("cut_silences finds the pauses a game/music bed hides from silencedetect",
