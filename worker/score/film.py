@@ -19,6 +19,11 @@ After the film's preview lands, one model call sets six of its frames under the 
 (score.taste.look). What it names is removed and the film is rendered once more; when most frames lose
 to the upload, the customer gets the plain floor film. Either files a quality ticket (client event
 director_taste). A late, failed or unreadable look changes nothing: the film stands as rendered.
+
+Never below today's first cut (13 Nov, lane K): a film that compiles to the upload again but for its colour is not
+written (`bare`), and a film most of whose frames lose to the upload at the last look is taken back; in both cases
+the chain runs in the same job. `taste.against` is the same critic for a project that already holds a first film:
+the new film replaces it only when the critic does not find it worse.
 """
 import json
 import os
@@ -56,9 +61,19 @@ def _event(worker_db, job, kind, detail):
         print(f"[director] {kind} not recorded: {str(exc)[:160]}", flush=True)
 
 
+def bare(comp):
+    """Is this film the upload again but for its colour? Nothing stood that a viewer would call an edit: no picture
+    added, no cut moved, type on under an eighth of it. Such a film is never delivered: today's first cut is
+    (p5582, 13 Nov: a 3 s product hold came back with a grade and nothing else, below the film it replaced)."""
+    return bool(((comp.meter or {}).get("facts") or {}).get("bare"))
+
+
 def fell(ctx, worker_db, job, stage, reason, usd=0.0, start_edl=None):
     """The film did not land. Files it (ops_loop intake), and puts the start state back if the film
     was written, so the chain starts from the upload."""
+    why = getattr(ctx, "director_fell_why", None)
+    if why:                 # the last look sent the film back: first_cut reports it as a render that is not on screen
+        stage, reason, ctx.director_fell_why = "look", why, None
     print(f"[director] job {job.get('id')}: fell to the chain at {stage}: {str(reason)[:200]}", flush=True)
     _event(worker_db, job, "director_fell_back", {"job_id": job.get("id"), "stage": stage, "reason": str(reason)[:300],
                                                    "usd": round(float(usd or 0), 5)})
@@ -122,11 +137,28 @@ def last_look(ctx, worker_db, job, started, spend, trial_scope):
         rec.update(verdict=v, decision=what, usd=round(usd, 5), look_s=round(time.monotonic() - t0, 1))
         if what == "film":
             return None
-        text = taste.floor_text(st["text"]) if what == "floor" else taste.cut_text(st["text"], v["remove"])
-        comp2 = compiler.compile_score(text, work_dir=work)
-        if comp2.json() == comp.json():            # it named only what the customer asked for, or the caption
-            rec["decision"] = "film"
-            return None
+        comp2 = None
+        if what != "floor":
+            text = taste.cut_text(st["text"], v["remove"])
+            comp2 = compiler.compile_score(text, work_dir=work)
+            if comp2.json() == comp.json():            # it named only what the customer asked for, or the caption
+                rec["decision"] = "film"
+                return None
+        if what == "floor" or bare(comp2):
+            # Most frames lose to the upload, or what the look leaves is the upload again. Neither is delivered and
+            # neither is the plain film in its place (rated under the cut it replaced, 13 Nov): the start state goes
+            # back, first_cut finds the film is not on screen and runs today's chain in the same job.
+            start = st.get("start_edl")
+            back = ctx.apply_score(start, "the First cut starts again from the upload") if start is not None else ""
+            if str(back).startswith("EDL v"):
+                ctx.director_version = None
+                ctx.director_fell_why = f"the last look: {what}, {v['upload']} of {v['pairs']} frames for the upload" + ("" if what == "floor" else ", nothing left but the upload")
+                rec["decision"] = "chain"
+                _event(worker_db, job, "director_taste", {"job_id": job.get("id"), "decision": "chain", "pairs": v["pairs"], "for_upload": v["upload"],
+                                                         "removed": v["remove"][:24], "why": v["why"][:6]})
+                return None
+            text = taste.floor_text(st["text"])       # the start state could not be written: the plain film, as before
+            comp2 = compiler.compile_score(text, work_dir=work)
         edl, locals_, rep = lower.lower(comp2.l1, work)
         edl = _publish(ctx, worker_db, edl, locals_, st["bin_doc"], st["original_key"])
         result = ctx.apply_score(edl, "the Director's First cut, after the last look")
@@ -369,6 +401,8 @@ def attempt(ctx, worker_db, job, started, spend, trial_scope, subscribed):
         reserve = cfg["film_usd"]
         _allowance(worker_db, trial_scope, reserve)
         steps, applied, picked = _make(ctx, worker_db, job, cfg, deadline, work, rec)
+        if getattr(ctx, "director_state", None):
+            ctx.director_state["start_edl"] = start_edl        # what the last look puts back when the film loses to its upload
         rec["usd"] = round(trial_scope.spent_usd - spent0, 5)
         spend["usd"] = spend.get("usd", 0.0) + rec["usd"]
         _event(worker_db, job, "director_film", {"job_id": job.get("id"), "usd": rec["usd"], "stages": rec["stages"],
@@ -447,7 +481,7 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
     t = time.monotonic()
     _say(ctx, worker_db, "director_supply", "Finding pictures for it")
     bin_doc = None
-    if sc and sc.get("wishes"):
+    if sc is not None:       # with no wish too: the hook picture of a talking film and a wordless upload's own details are found here
         try:
             bin_doc = supply.run(work, sc, per, _acquirer(ctx, worker_db, job, work), min(deadline - 70.0, time.monotonic() + flags.SUPPLY_S))
         except call.Refused:
@@ -478,6 +512,8 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
                         rejects=len(m.get("rejects") or []), findings=len(m.get("findings") or []))
     _stage(rec, "direct", t)
 
+    if bare(comp):
+        raise Fall("direct", "nothing stood: the film is the upload again but for its colour")
     rec["at"] = "lower"
     t = time.monotonic()
     edl, locals_, rep = lower.lower(comp.l1, work)
