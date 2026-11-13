@@ -724,6 +724,19 @@ class ToolContext:
             # it can ever save, and telling the agent to "fix the span" sends
             # it round a loop it cannot exit — which is what happened to a real
             # customer on 2026-07-25. Name the escape hatch instead.
+            # A blank canvas (no main video) starts with no inserts, which the
+            # validator rejects by design: that is the project's first state,
+            # not a broken one, and "the video was replaced ... reset_edit" is
+            # false there (ticket #948: an MCP app adding music to an empty
+            # project stopped on it). Name the real next step instead.
+            if not getattr(self, "has_main_video", True):
+                if not (prev["json"].get("inserts") or []):
+                    msg += ("\nThis project has no video yet: it is a blank "
+                            "canvas with nothing placed. Upload a clip or "
+                            "image and place it with insert_media first; "
+                            "music, sound and text can go on once the "
+                            "canvas has a picture.")
+                return msg
             try:
                 validate_edl(prev["json"], self.duration)
             except EDLValidationError:
