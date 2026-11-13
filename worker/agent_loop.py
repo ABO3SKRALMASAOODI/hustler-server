@@ -5448,11 +5448,7 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
         unfinished_edit = True
     import request_contract
     request_mode = (getattr(ctx, "semantic_contract", None) or {}).get("mode")
-    # The brief found the request conflicting and writes are refused, so this
-    # reply is a question: the same fact as ask_user, not an answer delivered.
-    clarifying = bool(request_contract.enabled(ctx) and request_mode == "clarify"
-                      and status == "replied" and not has_edit_deliverable)
-    if request_contract.enabled(ctx) and request_mode in {"inspect", "clarify"}:
+    if request_contract.enabled(ctx) and request_mode == "inspect":
         # The answer is the requested deliverable even on a photos-only or
         # empty timeline. It must not become a false editing failure merely
         # because this answer correctly made no new video.
@@ -5472,7 +5468,7 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
         # cleared: what the customer protected is measurably broken.
         unfinished_edit = True
 
-    if (status == "awaiting_user" and not failed) or clarifying:
+    if status == "awaiting_user" and not failed:
         # a question to the user: the request waits on their answer
         outcome = AWAITING_USER
     elif (getattr(ctx, "shorts_jobs_completed", None) and not has_edit_deliverable
@@ -5519,9 +5515,9 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     # only churned versions that ended where they began or never rendered.
     # Nobody read an open brief's request, so an answer stays an answer, but
     # it may have been an edit that never happened: the doubt is the customer's.
-    if billable and (clarifying or ((request_mode == "open"
-                                     or outcome in {"partial", "blocked"})
-                                    and not _deliverable_changed(ctx))):
+    if billable and ((request_mode == "open"
+                      or outcome in {"partial", "blocked"})
+                     and not _deliverable_changed(ctx)):
         billable = False
     return outcome, billable
 

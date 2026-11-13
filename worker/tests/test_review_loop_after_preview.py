@@ -473,24 +473,12 @@ def test_a_failed_automatic_render_stays_on_the_record(monkeypatch):
     assert agent_loop._turn_completion(ctx, fail_note=fail_note)[0] == "partial"
 
 
-def test_a_clarifying_reply_waits_on_the_customer_and_is_not_charged():
+def test_a_question_the_editor_asks_waits_on_the_customer():
+    """Asking is the editor's own choice (ask_user), not a mode of the brief
+    (#1075): its question still ends waiting and uncharged."""
     outcome, billable = agent_loop._turn_completion(
-        _nothing_changed(semantic_contract={"mode": "clarify"}))
+        _nothing_changed(), status="awaiting_user")
     assert outcome == "awaiting_user" and billable is False
-
-
-def test_a_clarifying_turn_ends_waiting_through_the_loop(monkeypatch):
-    ctx, db, posted, _checkpoint, calls = _delivered(
-        monkeypatch, "Do you want the serif or the script caption?")
-    ctx.semantic_contract["mode"] = "clarify"
-    ctx.versions_written = []
-    ctx.rendered_versions = set()
-    ctx.last_preview = None
-    result = _run(ctx, db)
-    assert len(calls) == 1
-    assert result["status"] == "awaiting_user"
-    assert result["billable"] is False
-    assert posted[-1][1]["outcome"] == "awaiting_user"
 
 
 def test_a_music_offer_on_a_turn_that_wrote_nothing_waits_on_the_customer(monkeypatch):

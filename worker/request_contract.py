@@ -20,7 +20,14 @@ LANES = ("music", "sfx", "voiceover", "audio_mix", "captions", "texts",
 CONTRACT_SCHEMA = {
     "type": "object", "required": ["mode", "requirements", "output_count", "timing_policy", "music_requested", "changed_lanes"],
     "properties": {
-        "mode": {"type": "string", "enum": ["edit", "inspect", "clarify"]},
+        # There is no "clarify" mode (#1075, p5722, 13 Nov 2026): a brief
+        # that read the request as conflicting refused every write, the editor
+        # was never told why, and a free customer's three requests ended with
+        # nothing. A reading is the model's best one; asking is the editor's
+        # own choice (ask_user), never a lock on its tools.
+        "mode": {"type": "string", "enum": ["edit", "inspect"], "description": (
+            "inspect only when the customer asks for analysis or an answer and "
+            "no change to the video; otherwise edit.")},
         "changed_lanes": {"type": "array", "description": (
             "Lanes the requested changes must write. Restyling, retiming or "
             "rewording titles writes texts; a caption look writes captions; "
@@ -135,6 +142,10 @@ Logo visibility and semantic visual coverage remain requirements even when no
 single EDL lane can express them (lanes=[]). A request to change one element
 does not freeze every other lane. Do not turn 'no generic effects' into a ban
 on all effects. Use output_count only for explicitly separate deliverables.
+A request that seems unclear or conflicting is still read, never parked: the
+latest words win over older ones, and between readings of the same message
+record the most plausible one with mode=edit, naming in the requirement's
+description which reading it takes, so the editor can make it and say so.
 Use the record_request_contract tool once. No prose answer."""
 
 _UNNAMED_CHANGE = ("A change requirement needs changed_lanes: list every lane "
@@ -299,6 +310,10 @@ def ensure(ctx):
     current = getattr(ctx, "semantic_contract", None)
     key = digest(ctx)
     if current and current.get("request_digest") == key and current.get("schema_version") == 1:
+        if current.get("mode") == "clarify":
+            # A brief kept by a continuation from before #1075: it is read
+            # as the edit it is, never a lock on the editor's tools.
+            current["mode"] = "edit"
         return current
     request = getattr(ctx, "verification_request", None) or ctx.user_message
     history = list(getattr(ctx, "request_contract_history", None) or [])
@@ -554,8 +569,6 @@ def protected_lanes(ctx):
     contract = getattr(ctx, "semantic_contract", None)
     if not contract or contract.get("request_digest") != digest(ctx):
         raise ValueError("The current request must be interpreted before editing")
-    if contract["mode"] == "clarify":
-        raise ValueError("Clarify the conflicting request before changing the edit")
     if contract["mode"] == "inspect":
         raise ValueError("This request asks for analysis; inspect and answer without changing the edit")
     # What the customer asks to change this turn cannot also be frozen by a
