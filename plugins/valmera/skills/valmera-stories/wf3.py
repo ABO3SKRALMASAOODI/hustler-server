@@ -5,7 +5,9 @@ ideas   the writer finds stories on the web itself (writer.find_ideas), then eac
 script  the writer writes the best idea in its style, every fact with a quote and its URL; each quote is fetched
         here from its own page and every number on screen must stand in a verified quote, or the stage fails
 supply  the narrator (narrate tool, local, through heavy.sh) and the pictures (worker/broll_source: Commons and
-        Openverse, checked by a vision model against what each must show, licence kept); faces found in each
+        Openverse, checked by a vision model against what each must show, licence kept), and real video per line
+        (worker/footage through _shell/chain.footage: YouTube and archive.org, transcribed and checked on OpenAI,
+        1-3 s clips with their source, channel and time range in the credits); faces found in each
 score   film.py bakes the scene (L1), draws stills of the beats for the director's look, checks the plan against
         the taste rules as numbers
 render  the film's sound as one file (narration and the library's few sounds; never music), then Valmera's engine
@@ -300,12 +302,25 @@ def supply(ctx, script):
         pack["photo"] = ph
         pack["credits"] = [dict(name=ph["title"], title=ph["title"], licence=ph["licence"], credit=ph.get("credit"), page=ph.get("page"))]
         pack["microtext"] = portrait_of(ctx, ph, sc, sup_dir)
+    words_all = json.load(open(nar["words"]))["words"]
+    anchors = {k: [r["path"] for r in v if r.get("path")] for k, v in (pack.get("pictures") or {}).items()}
+    foot = chain.footage(ctx, script, chain.seg_durs(words_all, len(sc["segments"])), anchors=anchors)     # real video per line
+    if foot:
+        fdir = os.path.join(sup_dir, "footage")
+        pack["footage"] = [dict(i=ln["i"], clips=[dict(c, path=os.path.join(fdir, c["file"])) for c in ln["clips"]]) for ln in foot["lines"]]
+        pack["credits"] = pack["credits"] + [dict(name=c["title"], title=c["title"], licence="footage, not licensed (owner's decision)",
+                                                  credit=c["channel"], page=c["url"], time_range=c["time_range"], line=c["line"])
+                                             for c in foot["credits"]]
+        spend.append(dict(stage="supply", provider="openai", model="gpt-6-sol low + gpt-4o-transcribe", what="footage",
+                          usd=foot["spend"]["usd"]))
+        ctx.log(f"footage: {foot['counts']['clips']} clips on {foot['counts']['lines_with_footage']} of {foot['counts']['lines']} lines")
     if sid == "whole-page":
-        w = json.load(open(nar["words"]))["words"]
+        w = words_all
         loud, pitch = F.voice_measures(nar["wav"], w, PX.FF)
         pack["loudness"], pack["pitch"] = loud, pitch
     rec = dict(narration_s=nar["duration"], voice=nar.get("voice"), gate=nar["gate"], pictures=sum(len(v) for v in pack["pictures"].values()),
-               subjects=len(pack["pictures"]), missing=pack.get("missing"), spend=spend)
+               subjects=len(pack["pictures"]), missing=pack.get("missing"), spend=spend,
+               footage=(dict(clips=foot["counts"]["clips"], lines=foot["counts"]["lines_with_footage"], credits=foot["credits"]) if foot else None))
     json.dump(dict(pack=pack, record=rec), open(pk, "w"), ensure_ascii=False, indent=1)
     return rec
 

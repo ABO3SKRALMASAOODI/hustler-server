@@ -170,6 +170,75 @@ def supply(ctx, script):
     return rec
 
 
+FOOTAGE_YTDLP = f"{VV}/tools/ytdlp-venv/bin/python"      # yt-dlp newer than the image's pin (YouTube's player moves)
+FOOTAGE_DENO = f"{VV}/tools/deno"                          # the JS runtime yt-dlp's challenge solver needs
+ENV_FILE = f"{V}/hustler-server/backend/.env"
+
+
+def seg_durs(words, n):
+    """Each segment's spoken length, its trailing pause included, from narrate's words.json rows (seg, start, end)."""
+    starts, ends = {}, {}
+    for w in words:
+        s = w.get("seg")
+        if isinstance(s, int):
+            starts[s] = min(starts.get(s, w["start"]), w["start"])
+            ends[s] = max(ends.get(s, w["end"]), w["end"])
+    out = []
+    for i in range(n):
+        if i not in starts:
+            out.append(None)
+            continue
+        nxt = min((starts[j] for j in starts if j > i), default=ends[i])
+        out.append(round(max(nxt, ends[i]) - starts[i], 2))
+    return out
+
+
+def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None):
+    """Real footage per line (worker/footage, through footage.seam's workflow scope): supply/footage/ with
+    footage.json (clips per line, each with its source URL, channel and time range for the credits) and
+    clips/*.mp4. None when VALMERA_FOOTAGE=0 or when the engine could not run (logged, never a stop).
+    OpenAI only: the key is read from the backend .env into this one process's environment, never printed."""
+    if os.environ.get("VALMERA_FOOTAGE", "1") == "0":
+        return None
+    out = os.path.join(ctx.supply, "footage")
+    rec = os.path.join(out, "footage.json")
+    if os.path.exists(rec):
+        return json.load(open(rec))
+    os.makedirs(out, exist_ok=True)
+    sp = os.path.join(ctx.run_dir, "footage_script.json")
+    json.dump(script, open(sp, "w"), ensure_ascii=False)
+    cmd = [PY, "-m", "footage.run", "--script", sp, "--out", out, "--w", str(W), "--h", str(H)]
+    if durs:
+        tp = os.path.join(ctx.run_dir, "footage_timing.json")
+        json.dump(dict(durs=durs), open(tp, "w"))
+        cmd += ["--timing", tp]
+    if anchors:                                   # photographs the picture check passed: a person's clips keep that face
+        ap = os.path.join(ctx.run_dir, "footage_anchors.json")
+        json.dump(anchors, open(ap, "w"))
+        cmd += ["--anchors", ap]
+    env = dict(os.environ, TMPDIR=ctx.tmp, FOOTAGE_WORK=ctx.tmp, PYTHONPATH=brand.worker_dir(), PYTHONDONTWRITEBYTECODE="1",
+               FOOTAGE_FFMPEG=brand.FF, PATH=os.path.dirname(brand.FF) + ":" + os.environ.get("PATH", "/usr/bin:/bin"))
+    if os.path.exists(FOOTAGE_YTDLP):
+        env["FOOTAGE_YTDLP"] = FOOTAGE_YTDLP
+    if os.path.isdir(FOOTAGE_DENO):
+        env["FOOTAGE_PATH"] = FOOTAGE_DENO
+    if not env.get("OPENAI_API_KEY") and os.path.exists(ENV_FILE):
+        for line in open(ENV_FILE):
+            if line.startswith("OPENAI_API_KEY="):
+                env["OPENAI_API_KEY"] = line.split("=", 1)[1].strip().strip('"').strip("'")
+    ctx.log("run footage.run " + " ".join(cmd[3:])[:300])
+    try:
+        r = subprocess.run(cmd, cwd=brand.worker_dir(), env=env, capture_output=True, text=True, timeout=3600)
+        ctx.log_raw(r.stdout[-4000:] + r.stderr[-2000:])
+    except subprocess.SubprocessError as e:
+        ctx.log(f"footage skipped: {str(e)[:300]}")
+        return None
+    if r.returncode != 0 or not os.path.exists(rec):
+        ctx.log(f"footage skipped: exit {r.returncode}")
+        return None
+    return json.load(open(rec))
+
+
 def score(ctx, script):
     """The Director writes the Score; the compiler turns it into L1. One run, with its repair round."""
     run = os.path.join(ctx.supply, "run1")

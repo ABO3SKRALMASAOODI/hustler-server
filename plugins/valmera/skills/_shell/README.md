@@ -38,6 +38,14 @@ screen capture for WF2); everything else stays the shell's. `ctx` gives `run_dir
 `supply`, `source`, `args` (`--args` JSON, e.g. a line from the owner), `styles_allowed()`,
 `styles_last()`, `windows_used()` and `log()`.
 
+**Footage** (`chain.footage`, 13 Nov): real video of the people, places and events a script names, per
+line, from YouTube and archive.org (worker/footage through `footage.seam`): searched and ranked by
+gpt-6-sol, transcribed on gpt-4o-transcribe, every frame checked by gpt-6-sol (low) and, for a person,
+the same face across sources (SFace); 1-3 s clips inside one shot, graded to one measured look, each
+with its source URL, channel and time range in `footage.json` and the film's credits. WF3 calls it
+in its supply; `VALMERA_FOOTAGE=0` turns it off. OpenAI only (credit until 30 Nov 2026, money after).
+Rights: not licensed, so the shell never publishes and customers stay behind `app_kv.footage` (off).
+
 WF3 and WF4 speak through `narrate/` (VoxCPM2, local open weights): a script with a performance
 layer per segment becomes `narration.wav`, `words.json` (every word timed) and `check.json` (the
 VOICE gate). See `narrate/README.md`.

@@ -673,6 +673,13 @@ def prerank(cands, queries, W, H, need_s=2.0, archival=False):
 # passes the caller gets the honest sentence to say.
 
 NAMED_MODEL = os.environ.get("NAMED_PICTURE_MODEL", "claude-haiku-5-5")
+# The picture check (check_named) is a vision call of its own: gpt-6-sol at low effort through
+# score.call's OpenAI rung (lane footage, 13 Nov 2026). Lane Q's skeptic judged every disputed
+# picture against the frames and found gpt-6-sol right where Opus let library lookalikes in
+# (week-1112/lanes/Q/skeptic.json, picture_check: SAFE). It is paid from the OpenAI credit until
+# 30 Nov 2026 and in OpenAI money after that. When the OpenAI rung cannot answer (no key, an
+# error) the check falls back to NAMED_MODEL inside the same deadline.
+NAMED_CHECK_MODEL = os.environ.get("NAMED_CHECK_MODEL", "gpt-6-sol")
 NAMED_CHECK_MAX = 14       # pictures one check call looks at
 NAMED_NAME_S = 12.0        # the naming call's own deadline
 NAMED_CHECK_S = 25.0
@@ -746,14 +753,27 @@ def _objects(text):
             i = j + 1
 
 
-def _ask(system, content, purpose, budget_s, max_tokens):
-    """One Claude call on the product's lane. (text, usd). Raises when no
-    lane or no answer: every caller keeps its honest fallback."""
+def _ask(system, content, purpose, budget_s, max_tokens, model=None):
+    """One model call on the product's lane. (text, usd). Raises when no
+    lane or no answer: every caller keeps its honest fallback. A model
+    other than NAMED_MODEL that fails before the deadline (no OpenAI key,
+    a provider error) hands the call to NAMED_MODEL with the time left."""
     import time
     from score import call
-    r = call.stream(NAMED_MODEL, system, content, max_tokens=max_tokens,
-                    effort="low", purpose=purpose, thinking=False,
-                    deadline=time.monotonic() + budget_s)
+    model = model or NAMED_MODEL
+    deadline = time.monotonic() + budget_s
+    try:
+        r = call.stream(model, system, content, max_tokens=max_tokens,
+                        effort="low", purpose=purpose, thinking=False,
+                        deadline=deadline)
+    except call.Late:
+        raise
+    except Exception:  # noqa: BLE001 the Claude lane answers instead
+        if model == NAMED_MODEL or deadline - time.monotonic() < 3.0:
+            raise
+        r = call.stream(NAMED_MODEL, system, content, max_tokens=max_tokens,
+                        effort="low", purpose=purpose, thinking=False,
+                        deadline=deadline)
     return r.text, float(r.usd or 0.0)
 
 
@@ -928,7 +948,8 @@ def check_named(subject, cands, workdir=None, budget_s=None):
                         f"Subject: {subject['name']}. Each picture must "
                         f"show: {subject['must_show']}"})
         txt, usd = _ask(CHECK_NAMED_SYSTEM, content, "named_check",
-                        budget_s or NAMED_CHECK_S, 2400)
+                        budget_s or NAMED_CHECK_S, 2400,
+                        model=NAMED_CHECK_MODEL)
         verdict = {}
         for o in _objects(txt):          # a cut-off answer keeps its lines
             if isinstance(o.get("n"), int):

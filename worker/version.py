@@ -60,7 +60,10 @@ _RUNTIME_PACKAGES = ("fx_schemas", "tools_ext", "jobs_ext", "devices",
                      "score",
                      # The engine (12 Nov): worker/scene/ draws the frames a
                      # Score asks for. A fix there alone must roll the box.
-                     "scene")
+                     "scene",
+                     # Footage (13 Nov): worker/footage/, reached from
+                     # score/supply and stock.download through footage.seam.
+                     "footage")
 _RUNTIME_DATA = (".py", ".yaml", ".yml", ".json")
 # Wave 0 runtime data the shared program obeys, outside any package: the
 # device cost model the resolver spends against, the model pins whose

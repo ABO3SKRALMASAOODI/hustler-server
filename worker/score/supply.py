@@ -29,6 +29,8 @@ LOOK_MODEL = "claude-haiku-5-5"
 def licence_class(item):
     """SOURCING 6: A free to use, B with credit. Anything else never reaches the Bin."""
     prov = item.get("provider")
+    if prov == "footage":                       # real video, not licensed: only behind footage's switch (owner's decision)
+        return "F", item.get("license"), item.get("page_url")
     if prov == "designed":
         return "A", "Designed by Valmera from the film's own words", None
     if prov == "pexels":
@@ -808,6 +810,9 @@ def run(work, scout, per, acquire, deadline):
                     continue
                 c["_wish"] = i
                 named.append(c)
+        import footage.seam                      # real footage of the named subjects: the switch is off for customers
+        named += footage.seam.bin_offers(work, wishes, subjects, deadline - CHECK_RESERVE_S - ACQUIRE_S, report,
+                                         str((scout or {}).get("about") or ""))
         named = fetch_stills(named, tmp)
         first_named = len(cands)
         cands = cands + named
@@ -908,7 +913,7 @@ def run(work, scout, per, acquire, deadline):
                 r["bin"] = [it["id"] for it in items if it["wish"] == r["wish"]]
                 r["own_moments"] = [o["src"] for o in own if o["wish"] == r["wish"]]
                 r["fallback"] = "upload" if r.get("own") else "plate p0"
-        credits = [f"{it['what']}: {it['author'] or it['provider']}, {it['licence']}, {it['page']}" for it in items if it["class"] == "B"]
+        credits = [f"{it['what']}: {it['author'] or it['provider']}, {it['licence']}, {it['page']}" for it in items if it["class"] in ("B", "F")]
         if items or own:
             bin_board(items, work, os.path.join(work, "bin_board.jpg"), own)
         said = [r["named_say"] for r in report if r.get("named_say") and not r.get("bin")]

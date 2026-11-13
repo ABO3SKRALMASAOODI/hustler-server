@@ -518,6 +518,9 @@ def download(item, out_path, want_w, want_h):
         broll_source.draw_designed(item, out_path, want_w, want_h)
         item["source_url"] = "designed"
         return item
+    if item.get("provider") == "footage":      # worker/footage: the cut clip, or its section cut again
+        import footage.seam
+        return footage.seam.acquire(item, out_path, want_w, want_h)
     url, cap = resolve(item, want_w, want_h)
     try:
         net_fetch.download(url, out_path, max_bytes=cap,
