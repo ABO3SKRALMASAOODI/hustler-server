@@ -384,3 +384,33 @@ def test_the_shells_model_call_takes_the_routes_arguments(monkeypatch):
     assert spend and spend[0]["model"] == "claude-haiku-5-5" and spend[0]["what"] == "named picture: named_check"
     ask("system", [], "frame_boxes", 10.0, 100)                                   # and the old call still works
     assert len(spend) == 2
+
+
+def test_a_panel_cut_to_its_contents_keeps_its_type_size(clip):
+    l1 = plan()
+    its = E.panel_items("n", dict(kind="number", title="Humira, pre-rebate", parts=[dict(value="$8,000", label="per month", n=8000)]), 100, 190, l1, "#FF5A36", 0.552, 0.235)
+    panel = next(it for it in its if it["id"] == "n.panel")
+    assert panel["h"] < 0.2                                               # the panel is cut to what it holds
+    assert l1["voices"]["dv"]["px"] >= 88                                 # and the figure stays as large as the full place allowed
+    fig = next(it for it in its if it.get("t") == "$8,000")
+    box = L.card_box(panel)
+    assert box[1] <= L.word_box(fig, l1)[1] and L.word_box(fig, l1)[3] <= box[3]
+
+
+def test_a_card_stands_under_the_face_of_its_own_shot(clip, monkeypatch):
+    idx = dict(words=words(), video=dict(duration=22.0))
+    src = os.path.join(clip, "source.mp4")
+    # his chin ends a third of the way down: the card starts just under it
+    monkeypatch.setattr(E, "take_face", lambda source, t, crop: (0.5, 0.2, [0.42, 0.08, 0.16, 0.25]))
+    l1 = plan()
+    rec = E.apply(l1, SCRIPT, EARNED, idx, src, manifest())
+    card = next(it for it in l1["items"] if it["id"] == "e1.card")
+    assert L.card_box(card)[1] >= 0.33 + 0.03
+    # the take cuts to a close shot whose face reaches low in the frame while the card would stand: the picture is not shown there
+    def face(source, t, crop):
+        return (0.5, 0.4, [0.3, 0.15, 0.4, 0.55]) if 4.5 <= t <= 8.0 else (0.5, 0.2, [0.42, 0.08, 0.16, 0.25])
+    monkeypatch.setattr(E, "take_face", face)
+    l1 = plan()
+    rec = E.apply(l1, SCRIPT, EARNED, idx, src, manifest())
+    assert not any(it["id"] == "e1.card" for it in l1["items"])
+    assert dict(i=1, why="no room under the face on screen") in rec["skipped"]

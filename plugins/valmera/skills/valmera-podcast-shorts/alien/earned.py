@@ -672,13 +672,14 @@ def panel_items(pid, design, a, b, l1, accent, top, height):
     and stands on the foot of its place. Returns items, or [] when it cannot fit."""
     items, used = _panel(pid, design, a, b, l1, accent, top, height)
     spare = top + height - 0.024 - used
-    if items and spare > 0.012:
-        items, _ = _panel(pid, design, a, b, l1, accent, top + spare, height - spare)
+    if items and spare > 0.012:                                  # the same type at the same size, on a panel cut to it
+        lock = dict(dv=l1["voices"]["dv"]["px"], dd=l1["voices"]["dd"]["px"])
+        items, _ = _panel(pid, design, a, b, l1, accent, top + spare, height - spare, lock)
     return items
 
 
-def _panel(pid, design, a, b, l1, accent, top, height):
-    """(items, the lowest point its contents reach)."""
+def _panel(pid, design, a, b, l1, accent, top, height, lock=None):
+    """(items, the lowest point its contents reach). ``lock``: type sizes already solved for the panel's full place."""
     W, H = l1["frame"]
     n = b - a
     if n < 30:
@@ -693,6 +694,8 @@ def _panel(pid, design, a, b, l1, accent, top, height):
     V["dv"] = dict(font="InterDisplay-Black.ttf", px=92, track=-2.5)
     V["dl"] = dict(font="InterDisplay-Bold.ttf", px=31, track=5)
     V["dd"] = dict(font="InstrumentSerif-Regular.ttf", px=58, track=0)
+    if lock:
+        V["dv"]["px"], V["dd"]["px"] = lock["dv"], lock["dd"]
     ink, dim = (INK, "#6B6F76") if paper else ("#FFFFFF", "#9AA1AC")
     land = min(n, 12)
     card = dict(id=f"{pid}.panel", k="card", f=[a, b], z=2, pic="plate",
@@ -745,7 +748,7 @@ def _panel(pid, design, a, b, l1, accent, top, height):
         cols = len(parts) if kind == "versus" or len(parts) <= 2 else 1
         if cols > 1:                                             # sides stand next to each other, each bar under its value
             cw = (inner_x1 - inner_x0 - 0.04 * (cols - 1)) / cols
-            while V["dv"]["px"] > 54 and not all(fits(p["value"], "dv", cw) for p in parts):
+            while not lock and V["dv"]["px"] > 54 and not all(fits(p["value"], "dv", cw) for p in parts):
                 V["dv"]["px"] = int(V["dv"]["px"] * 0.92)
             vy = y + 0.018 + 0.78 * V["dv"]["px"] / H
             for i, p in enumerate(parts):
@@ -763,7 +766,9 @@ def _panel(pid, design, a, b, l1, accent, top, height):
                 row_of(str(p.get("label") or "").upper(), "dl", cx, by + 0.013 + 0.03, dim, at + 4, 1, cx + cw)
         else:                                                    # amounts stacked: value, label, bar to its share
             rows_h = (y1 - y - 0.02) / len(parts)
-            V["dv"]["px"] = int(min(V["dv"]["px"], rows_h * H * 0.52))
+            if not lock:
+                V["dv"]["px"] = int(min(V["dv"]["px"], rows_h * H * 0.52))
+            rows_h = min(rows_h, (0.78 * V["dv"]["px"] / H) + 0.046)        # rows as tall as their figure and bar, not as the place
             for i, p in enumerate(parts):
                 at = 7 + i * 6
                 vy = y + i * rows_h + 0.012 + 0.78 * V["dv"]["px"] / H
@@ -796,7 +801,7 @@ def _panel(pid, design, a, b, l1, accent, top, height):
                 row, x = row + 1, inner_x0
             lead = 1.22 * V[v]["px"] / H
             room = int((y1 - y - 0.03) / lead)
-            if row <= room or V[v]["px"] <= 40:
+            if lock or row <= room or V[v]["px"] <= 40:
                 break
             V[v]["px"] -= 4
         if room < 1:
@@ -1067,7 +1072,23 @@ def apply(l1, script, earned, idx, source, sounds_manifest, own=True, panel_low=
     if face and crop:
         f = face[2]
         chin = (f[1] + f[3] - crop[1]) / (crop[3] - crop[1])
-    card_top = min(max(0.30, (chin or 0.0) + 0.035), 0.46)
+    def chin_at(f):
+        """Where the chin of whoever is on screen at programme frame f ends, in the frame; None when nobody is found.
+        The take may cut to another camera or to the listener: a card is placed under the face of its own shot."""
+        it = next((x for x in l1["items"] if x.get("k") == "shot" and x.get("pic") == "main" and x["f"][0] <= f < x["f"][1]
+                   and isinstance(x.get("src"), list)), None)
+        if it is None:
+            return None
+        c = it["crop"][f - it["f"][0]] if isinstance(it["crop"][0], list) else it["crop"]
+        t = it["src"][0] + (it["src"][1] - it["src"][0]) * (f - it["f"][0]) / max(it["f"][1] - it["f"][0], 1)
+        fc = take_face(source, t, c)
+        return None if not fc else (fc[2][1] + fc[2][3] - c[1]) / (c[3] - c[1])
+
+    def under_face(a_, b_):
+        """The top a card or panel may take on frames [a_, b_): under the lowest chin seen there."""
+        chins = [v for v in (chin_at(f) for f in (a_ + 2, (a_ + b_) // 2, b_ - 3)) if v is not None]
+        return max(0.30, max(chins) + 0.035) if chins else max(0.30, (chin or 0.0) + 0.035)
+
     events = [(3, "hook")] if hrow else []
     by_i = {r["i"]: r for r in plan}
     moved, n_design = [], 0
@@ -1077,9 +1098,12 @@ def apply(l1, script, earned, idx, source, sounds_manifest, own=True, panel_low=
             if n_design >= 2:
                 rec["skipped"].append(dict(i=i, why="two designs a film"))
                 continue
-            top = max(0.30, (chin or 0.0) + 0.035)
+            top = under_face(a, b)
             height = min(0.235, CAP_TOP - 0.012 - top)
             if panel_low or height < 0.17:
+                if top > 0.552:                                  # the face on screen reaches the panel's low seat
+                    rec["skipped"].append(dict(i=i, why="no room under the face on screen"))
+                    continue
                 top, height = 0.552, 0.235
             its = panel_items(f"e{i}", r.get("design") or {}, a, b, l1, accent, top, height)
             if not its:
@@ -1094,6 +1118,10 @@ def apply(l1, script, earned, idx, source, sounds_manifest, own=True, panel_low=
             rec["designs"].append(dict(i=i, kind=(r.get("design") or {}).get("kind"), frames=[a, b], on=r.get("on")))
         else:
             row = got[i]
+            card_top = under_face(a, b) if row.get("layout") != "full" else 0.36
+            if card_top > 0.525:                                 # a card would be a strip, or would stand on his face
+                rec["skipped"].append(dict(i=i, why="no room under the face on screen"))
+                continue
             shot, cards = picture_items(f"e{i}", row, a, b, l1, top=card_top, work=work)
             if shot is not None:
                 paint(l1, a, b, lambda a_, b_, shot=shot: shot)
