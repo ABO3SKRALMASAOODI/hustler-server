@@ -657,13 +657,22 @@ def whole_page(script, sup, direction=None):
     d.update(direction or {})
     clock = Clock(sup["words"], script)
     words = clock.words
-    # C1, measured from the voice: louder words a step larger, pitch lifts the baseline a little
+    # C1, from the voice: a word the narrator leaned on is set a step larger. Leaned on = loud against its own
+    # segment (more than 1.4 standard deviations of the segment's words, measured on the narration), or a word the
+    # writer directed the actor to stress. The baseline stays level: a lifted word read as broken type.
     loud = sup.get("loudness") or {}
     lv = [float(loud.get(str(i), -99.0)) for i in range(len(words))]
-    pitch = [float((sup.get("pitch") or {}).get(str(i), 0.0)) for i in range(len(words))]
-    real = sorted(v for v in lv if v > -98)
-    p50, p90 = (real[len(real) // 2], real[int(len(real) * 0.9)]) if real else (0.0, 0.0)
-    steps = (1.0, 1.12, 1.26)
+    pitch = [0.0] * len(words)
+    lean = set()
+    for si, seg in enumerate(script["segments"]):
+        ks = [k for k, w in enumerate(words) if w["seg"] == si and lv[k] > -98]
+        if len(ks) >= 3:
+            m = sum(lv[k] for k in ks) / len(ks)
+            sd = (sum((lv[k] - m) ** 2 for k in ks) / len(ks)) ** 0.5 or 1.0
+            lean.update(k for k in ks if (lv[k] - m) / sd > 1.4)
+        emph = {norm_word(e) for e in seg.get("emphasis") or [] for e in str(e).split()}
+        lean.update(k for k, w in enumerate(words) if w["seg"] == si and norm_word(w["w"]) in emph)
+    steps = (1.0, 1.13)
     voices = {"title": {"font": "DMSerifDisplay-Italic.ttf", "px": 118, "track": -1},
               "kick": {"font": "InterDisplay-Bold.ttf", "px": 34, "track": 10}}
     P = Plan(voices, sup["sounds"])
@@ -675,10 +684,7 @@ def whole_page(script, sup, direction=None):
             keys[name] = P.image(f"p{len(keys):02d}", lst[0])
 
     def step_of(i):
-        if not real or p90 <= p50 or lv[i] < -98:
-            return 0
-        x = (lv[i] - p50) / (p90 - p50)
-        return 2 if x > 1.0 else 1 if x > 0.55 else 0
+        return 1 if i in lean else 0
 
     win_after = {}
     for i, s in enumerate(script["segments"]):
@@ -692,7 +698,11 @@ def whole_page(script, sup, direction=None):
                 k_at = next((k for k in seg_ws if norm_word(words[k]["w"]) == last), k_at)
             if k_at is not None and k_at not in win_after:
                 win_after[k_at] = wdw["subject"]
-    title = str(script.get("title") or "")
+    title = str(script.get("headline") or script.get("title") or "")
+    first = {norm_word(w) for w in str(script["segments"][0].get("say", "")).split()}
+    tw = [norm_word(w) for w in title.split()]
+    if tw and sum(w in first for w in tw) / len(tw) >= 0.6:      # TASTE P7: a headline that repeats the first line is said twice
+        title = ""
     kick = next((t for t, _ in shown_items(script["segments"][0])), "")
     col_w = W * 0.80
     margin_top, margin_bot = 0.16 * H, 0.08 * H

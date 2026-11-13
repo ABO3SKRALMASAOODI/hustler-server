@@ -189,8 +189,9 @@ STYLE_DATA = {
         '"overflow": {"stat": id, "to": the final value as printed, "number": plain number, "word": a word of the last segments} for the '
         'stat that overflows the block at the close. Mark one segment "beat": "low" where a stat is at its worst.'),
     "whole-page": (
-        'each segment may carry "window": {"subject": the name of one named thing, "line": four to eight words it sits after} for the '
-        'four to six photographs set as windows into the page; the first window comes within the first three segments.'),
+        '"headline": the page\'s headline, two to five words, that does not repeat the first sentence, and each segment may carry '
+        '"window": {"subject": the name of one named thing, "line": four to eight words it sits after} for the four to six photographs '
+        'set as windows into the page; the first window comes within the first three segments.'),
     "one-photograph": (
         '"photo": {"file": the Commons file title of the one photograph, "about": what it shows, "people": [{"name": a person the story '
         'names who is in the photo, "where": where in the photo (row and position, from its Commons description)}]}, and in each '

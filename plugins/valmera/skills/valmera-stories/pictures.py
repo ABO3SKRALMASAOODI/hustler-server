@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +27,7 @@ SHELL = os.path.join(os.path.dirname(HERE), "_shell")
 V = "/Users/masaoodi/Documents/Valmera"
 VV = f"{V}/.valmera"
 HEAVY = f"{VV}/week-1106/heavy.sh"
+NARRATE_LOCK = f"{VV}/week-1106/.narrate.lock"
 NARRATE_PY = os.environ.get("NARRATE_PY", f"{VV}/venv-narrate/bin/python")
 NARRATE = os.path.join(SHELL, "narrate", "narrate.py")
 BIN = f"{V}/audit/subscriber-reliability-20260908/bin-arm"
@@ -62,8 +64,13 @@ def narrate(nscript, out, band="03", label="narrate", env=None, timeout=5400):
     sp = os.path.join(out, "narration_script.json")
     json.dump(nscript, open(sp, "w"), ensure_ascii=False, indent=1)
     if not os.path.exists(os.path.join(out, "words.json")):
-        r = subprocess.run(["zsh", HEAVY, label, NARRATE_PY, NARRATE, "render", sp, "--out", out, "--band", band],
-                           cwd=os.path.dirname(NARRATE), capture_output=True, text=True, timeout=timeout, env=env)
+        # One narration at a time on this Mac: VoxCPM2 shares the Apple GPU, and three at once measured a chunk in
+        # 5-10 min against 20-50 s alone (13 Nov). The lock is the kernel's: a dead holder releases it.
+        import fcntl
+        with open(NARRATE_LOCK, "a") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            r = subprocess.run(["zsh", HEAVY, label, NARRATE_PY, NARRATE, "render", sp, "--out", out, "--band", band],
+                               cwd=os.path.dirname(NARRATE), capture_output=True, text=True, timeout=timeout, env=env)
         if r.returncode != 0 or not os.path.exists(os.path.join(out, "words.json")):
             raise RuntimeError(f"narrate failed ({r.returncode}): {(r.stderr or r.stdout)[-800:]}")
     if not os.path.exists(os.path.join(out, "check.json")):
@@ -96,23 +103,36 @@ def pictures(named, out, per=4, min_px=700):
             kept, rep = B.find_named(s, kind=B.KIND_PHOTO, count=per + 2, workdir=out)
         except Exception as e:  # noqa: BLE001 - one subject without pictures is a gap, not a stop
             return subj["name"], [], dict(subject=subj["name"], error=str(e)[:200])
-        recs = []
+        recs, fails = [], []
         for c in kept:
             if len(recs) >= per:
                 break
-            try:
-                got = B.fetch_local(c, os.path.join(out, "pics"), 1080, 1920)
-            except Exception:  # noqa: BLE001
+            if max(int(c.get("width") or 0), int(c.get("height") or 0)) and \
+                    max(int(c.get("width") or 0), int(c.get("height") or 0)) < min_px:
+                fails.append(f"{c.get('id')}: {c.get('width')}x{c.get('height')} is too small")
+                continue
+            got = None
+            for attempt in range(3):            # Commons answers a burst with 429: wait and ask again
+                try:
+                    got = B.fetch_local(c, os.path.join(out, "pics"), 1080, 1920)
+                    break
+                except Exception as e:  # noqa: BLE001
+                    fails.append(f"{c.get('id')}: {str(e)[:120]}")
+                    time.sleep(3 * (attempt + 1))
+            if not got:
                 continue
             if min(int(got.get("width") or 0), int(got.get("height") or 0)) < min_px * 0.6 or max(int(got.get("width") or 0), int(got.get("height") or 0)) < min_px:
+                fails.append(f"{c.get('id')}: {got.get('width')}x{got.get('height')} is too small")
                 continue
             recs.append(_record(c, got, subj["name"]))
         rep = {k: v for k, v in rep.items() if k in ("subject", "candidates", "kept", "say", "errors", "usd")}
         rep["downloaded"] = len(recs)
+        if fails:
+            rep["download_errors"] = fails[:6]
         return subj["name"], recs, rep
 
     res, reports, usd = {}, [], 0.0
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         for name, recs, rep in pool.map(one, named):
             res[name] = recs
             reports.append(rep)

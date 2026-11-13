@@ -45,7 +45,9 @@ $PY -m pytest -q test_film.py
 `notes` to the writer, `look: false` skips the stop for the director's look, `direction` sets knobs.
 Run every stage in the background and let it wake you; never poll. **Do not start a new run while
 another run is stopped at its look**: every new start sweeps stopped runs (the shell's contract).
-Resume or finish it first.
+Resume or finish it first. Runs may start together; their narrations queue on one lock
+(`.valmera/week-1106/.narrate.lock`), because VoxCPM2 shares the Apple GPU: three at once measured
+5-10 minutes a chunk against 20-50 seconds alone.
 
 | Stage | What happens | Time, cost |
 |---|---|---|
