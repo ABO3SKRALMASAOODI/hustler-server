@@ -2813,8 +2813,13 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     if ledger["route"] == "film" and cfg["director"]:
         got = asks.direct_film(ctx, worker_db, job, session_id, cfg)
         ledger["routed"] = {"to": "director", **{k: got.get(k) for k in (
-            "version", "fell", "applied", "s", "path", "source_window", "selection_usage", "remaining_clips")}}
-        if got.get("path") == "segmented_whole_film":
+            "version", "fell", "applied", "s", "path", "source_window", "selection_usage", "remaining_clips", "job_id")}}
+        if got.get("path") == "podcast_shorts_engine":
+            done_by = (f"The typed clip request is running through the podcast-shorts engine as job {got['job_id']}. "
+                       "Its selected stories get their own child editors automatically under this request. "
+                       "Keep the parent source intact. Wait for this job, then wait for every returned editor_job "
+                       "and inspect each child's rendered result before the final reply. Raw story cards are not finished films.")
+        elif got.get("path") == "segmented_whole_film":
             from score import patch
             done_by = patch.pass_note(got)
         elif got.get("version"):
@@ -6622,6 +6627,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # matches; the user reads the original words (5 customers read
         # "dead air: #-#s is silent for #s" between 21 Sep and 22 Oct 2026).
         return fingerprint, _blocker_display_rows(plan, verification)
+
+    # A typed clip route can enqueue the serial planner before the first tool
+    # batch. Release this parent's writer so that planner can materialize it.
+    if _serial_background_handoff(ctx):
+        return _durable_continuation("awaiting serial background job")
 
     # TPM admission: the provider's tokens-per-minute ceiling is org-wide,
     # and a fresh turn's first call is the biggest single request we make

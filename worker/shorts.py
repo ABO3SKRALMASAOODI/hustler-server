@@ -1193,6 +1193,67 @@ def _source_layout_for(worker_db, job, project, idx_row, index, workdir):
 
 
 # ------------------------------------------------------------------ the job
+def start_typed_craft(ctx, clips, request):
+    """A typed request authorizes finished clips, not a second Edit click.
+
+    Use the same story validation, materialization and plan gates as the
+    shorts engine. This entry is internal to Studio; MCP tools stay unchanged.
+    """
+    planned, problems, _moves = agent_tools._direct_short_clips(ctx, clips, snap="none")
+    if problems:
+        return {"fell": "story bounds: " + "; ".join(problems)}
+    payload = agent_tools._child_payload(ctx, {"source": "agent_direct",
+        "clips": planned, "count": len(planned), "style_note": request,
+        "typed_craft_request": request, "parent_agent_job_id": ctx.job["id"]})
+    def queue(conn):
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (int(ctx.job["id"]),))
+            cur.execute("""SELECT id FROM video_jobs WHERE project_id=%s AND user_id=%s
+                AND type='shorts_plan' AND payload->>'parent_agent_job_id'=%s
+                ORDER BY id LIMIT 1""", (ctx.project_id, ctx.job["user_id"], str(ctx.job["id"])))
+            old = cur.fetchone()
+        return old["id"] if old else dbx.enqueue_job(conn, ctx.project_id, ctx.job["user_id"], "shorts_plan", payload)
+    ctx.serial_job_id = ctx.db.run(queue)
+    return {"path": "podcast_shorts_engine", "job_id": ctx.serial_job_id}
+
+
+def _boot_typed_child(conn, job, clip, request):
+    """One fresh child editor per authorized arc, atomically across retries."""
+    child_id = clip["child_project_id"]
+    key = clip["materialization_key"] + ":typed-craft"
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (key,))
+        cur.execute("""SELECT id FROM video_jobs WHERE project_id=%s AND user_id=%s
+            AND type='agent_turn' AND payload->>'typed_craft_key'=%s ORDER BY id LIMIT 1""",
+            (child_id, job["user_id"], key))
+        old = cur.fetchone()
+        if old:
+            return old["id"]
+        cur.execute("SELECT chat_session_id FROM projects WHERE id=%s AND user_id=%s",
+                    (child_id, job["user_id"]))
+        child = cur.fetchone()
+        if not child:
+            raise RuntimeError("typed story child ownership changed")
+        prompt = (f"Finish this selected story ({clip['start']:g}-{clip['end']:g} source seconds) "
+                  f"as its own short. Hook candidate: {clip.get('hook') or clip['title']}. "
+                  "Read short-form-direction, cutting, hooks-retention and the relevant craft skills. "
+                  "Use the selected complete story, with a 9:16 frame, speech captions and an opening hook, "
+                  "unless the user's preserved direction excludes them. Make real editorial decisions from "
+                  "the footage, render a complete attempt, inspect it and repair defects. "
+                  "The parent's typed request already authorizes this child edit.\nUser's direction:\n" + request)
+        message_id = dbx.add_message(conn, child["chat_session_id"], "user", prompt,
+            {"shorts_boot": True, "from_parent": job["project_id"],
+             "customer_request": "Finish this selected story as one of the requested shorts.\n" + request,
+             "edl_version": clip["seed_edl_version"]})
+        editor_job = dbx.enqueue_job(conn, child_id, job["user_id"], "agent_turn",
+            {"message_id": message_id, "shorts_boot": True, "parent_project_id": job["project_id"],
+             "typed_craft_key": key, "execution_policy": (job.get("payload") or {}).get("execution_policy", config.EXECUTION_POLICY_MODE)})
+        cur.execute("""UPDATE projects SET meta=jsonb_set(COALESCE(meta,'{}'::jsonb),
+            '{shorts_editor}', COALESCE(meta->'shorts_editor','{}'::jsonb) || %s::jsonb)
+            WHERE id=%s""", (Json({"status": "editing", "job_id": editor_job}), child_id))
+    return editor_job
+
+
 def run_shorts_plan(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     payload = job.get("payload") or {}
@@ -1206,6 +1267,7 @@ def run_shorts_plan(worker_db, job):
             shorts_meta.get("plan_job_id") == job_id:
         # A reclaimed job whose first run finished — nothing to redo.
         return {"clips": len(shorts_meta.get("clips") or []),
+                "editor_jobs": [c["editor_job_id"] for c in shorts_meta.get("clips") or [] if c.get("editor_job_id")],
                 "resumed": True, "billable": False}
 
     original = worker_db.run(dbx.latest_asset, project_id, "original")
@@ -1490,6 +1552,9 @@ def run_shorts_plan(worker_db, job):
             if line:
                 clip["source_layout"] = line
             clip["edit_status"] = "locked"
+            if payload.get("typed_craft_request") and payload.get("parent_agent_job_id"):
+                clip["editor_job_id"] = worker_db.run(_boot_typed_child, job, clip, payload["typed_craft_request"])
+                clip["edit_status"] = "editing"
             worker_db.run(_save_shorts_meta, project_id, shorts_meta)
             worker_db.run(dbx.set_progress, job_id,
                           35 + int(58 * position / n))
@@ -1506,13 +1571,15 @@ def run_shorts_plan(worker_db, job):
                 f"I reviewed all {mins:.0f} minutes and found {n} stor"
                 f"{'ies' if n != 1 else 'y'} genuinely worth developing "
                 f"({min(lens):.0f}-{max(lens):.0f}s). These are raw story "
-                "cuts, not template edits. Choose Edit on any card to boot "
-                "a fresh short-form editor for that reel.",
+                "cuts. " + ("Each selected story is now with its own editor to finish and render your request."
+                            if payload.get("typed_craft_request") else
+                            "Choose Edit on any card to boot a fresh short-form editor for that reel."),
                 {"kind": "shorts_candidates", "clips": n,
                  "parent_project_id": project_id})
 
         worker_db.run(dbx.set_progress, job_id, 97)
         return {"clips": n, "rendered_clips": 0, "billable": True,
+                "editor_jobs": [c["editor_job_id"] for c in clips if c.get("editor_job_id")],
                 "reference": bool(ref),
                 "children": [c.get("child_project_id") for c in clips]}
     except Exception:
