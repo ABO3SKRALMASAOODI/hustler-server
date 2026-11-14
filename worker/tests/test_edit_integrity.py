@@ -140,3 +140,12 @@ def test_new_tray_image_has_pixels_without_message_attachment_id(monkeypatch):
     by_id={r['id']:r for r in images}
     selected, omitted=agent_loop._image_visual_plan([by_id[i] for i in ids],4,ids)
     assert selected[0]['id']==201 and omitted==197
+
+
+def test_missing_ledger_cannot_lose_required_check_on_resume():
+    original=NS(ask_ledger=None,ask_verdict=None,ask_check_required=True)
+    saved=agent_loop._asks_checkpoint(original)
+    resumed=NS()
+    agent_loop._typed_asks_start(resumed,None,{},None,{},saved)
+    reply,outcome=agent_loop._asks_settle(resumed,'Done','fulfilled')
+    assert outcome=='partial' and "can't confirm" in reply

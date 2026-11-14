@@ -2753,7 +2753,7 @@ def _trial_render_refusal(ctx, name, args=None):
 # ------------------------------------------------------------------ the ask ledger (lane E, 12 Nov)
 # score/asks.py: one model call lists each ask and how to check it, routes the request (the
 # Director on the full upload, a Patch on named items, or this loop), and before the reply checks
-# every ask on the rendered film. Off unless app_kv.typed_asks admits the account (internal first).
+# every ask on the rendered film. Checks cover typed requests by default; routing is opt-in.
 
 def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     """The ledger, and the route it picks, before the loop. Returns the editor's note. A slice
@@ -2761,10 +2761,12 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     ctx.ask_ledger = None
     ctx.ask_verdict = None
     cont = cont or {}
+    ctx.ask_check_required = cont.get("ask_check_required", False)
     if isinstance(cont.get("ask_ledger"), dict):
         ctx.ask_ledger = cont["ask_ledger"]
         ctx.ask_verdict = cont.get("ask_verdict")
         ctx.ask_model = (ctx.ask_ledger.get("cfg") or {}).get("model")
+        ctx.ask_check_required = (ctx.ask_ledger.get("cfg") or {}).get("check", True)
         return ""
     if cont:
         return ""
@@ -2940,7 +2942,8 @@ def _typed_pass(ctx, ledger, cfg, job):
 
 def _asks_checkpoint(ctx):
     return {"ask_ledger": getattr(ctx, "ask_ledger", None),
-            "ask_verdict": getattr(ctx, "ask_verdict", None)}
+            "ask_verdict": getattr(ctx, "ask_verdict", None),
+            "ask_check_required": getattr(ctx, "ask_check_required", False)}
 
 
 def _asks_summary(ctx):
