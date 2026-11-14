@@ -178,3 +178,12 @@ def test_a_bad_story_window_is_not_silently_shortened_into_a_clip(monkeypatch):
         {"start": 7300, "end": 7400, "title": "bad", "hook": "bad"}]}, {}))
     with pytest.raises(ValueError, match="outside the source"):
         typed._selection(ctx)
+
+
+def test_pending_footage_is_joined_and_applied_before_cleanup(monkeypatch):
+    events = []
+    view = NS(director_state={"footage": {"thread": NS(join=lambda: events.append("joined"))}})
+    monkeypatch.setattr(film, "close", lambda ctx: events.append("handoff"))
+    monkeypatch.setattr(film, "upgrade", lambda *args: events.append("upgrade") or {"applied": ["real footage"]})
+    assert typed._finish_footage(view, None, {}) == {"applied": ["real footage"]}
+    assert events == ["joined", "handoff", "upgrade"]
