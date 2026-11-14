@@ -3516,7 +3516,7 @@ def run(worker_db, job, project, index_row):
     ctx.user_message = "First cut"
     ctx.credit_budget = None
     ctx.first_cut_db, ctx.first_cut_session = worker_db, session_id
-    if ctx.index and not payload.get("url"):
+    if getattr(ctx, "index", None) and not payload.get("url"):
         import source_screen
         if not ctx.index.get("source_screen"):
             v = ctx.index["video"]
