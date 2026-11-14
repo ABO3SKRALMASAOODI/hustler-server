@@ -126,6 +126,14 @@ def test_background_sample_cannot_read_outside_source(crop):
     assert result.startswith('REJECTED') and not ctx.writes
 
 
+def test_background_texture_cannot_repeat_a_face(monkeypatch):
+    import face_guard
+    monkeypatch.setattr(face_guard,'source_hit',lambda *a,**k:(1.0,[.1,.1,.3,.4]))
+    ctx = Ctx()
+    result = st.set_background(ctx,'source',0,8,source=1,source_crop=[.1,.1,.3,.5])
+    assert result.startswith('REJECTED') and 'face' in result and not ctx.writes
+
+
 # ── the department ──────────────────────────────────────────────────────
 
 def test_the_verbs_are_installed_in_the_compositing_department():
