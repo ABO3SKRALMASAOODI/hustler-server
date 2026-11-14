@@ -6145,9 +6145,11 @@ def meter(ctx, l1):
     if ctx.governed and dur >= 5.0 and (hook_f is None or hook_f > fps):
         ctx.find("HOOK the first second is the upload as it was: " + ("nothing designed lands in this film" if hook_f is None else f"the first title, card or picture lands at {hook_f / fps:.1f} s")
                  + ". The hook title lands at the first beat's `in`: on the take's display seat, beside a found picture that opens the film, or on a page of 1 s")
+    from . import taste
+    picture_cuts = taste.picture_changes(ctx)
     first3 = sum(1 for c in cuts if c <= 3 * fps)
-    if len(ctx.words) / max(ctx.src_dur, 1e-3) >= 1.0 and dur >= 8 and len(cuts) * 10 / dur < 10:
-        ctx.find(f"pace: only {len(cuts) * 10 / dur:.1f} planned cuts/10s. Talking films need at least 10 perceptibly distinct cuts/10s: use the Bin on its words, different source shots and readable designed evidence. Tiny crops do not qualify; do not insert an unrelated picture.")
+    if len(ctx.words) / max(ctx.src_dur, 1e-3) >= 1.0 and dur >= 8 and len(picture_cuts) * 10 / dur < 10:
+        ctx.find(f"pace: only {len(picture_cuts) * 10 / dur:.1f} planned picture changes/10s. Talking films need at least 10 perceptibly distinct cuts/10s: use the Bin on its words, genuinely different source shots and checked pictures. Crops, counters and flat pages do not qualify; do not insert an unrelated picture.")
     facts = compile_facts(ctx, l1, cuts, per_frame)
     busy = quiet_meter(ctx, l1, cuts)
     m = {"measurement_source": "score_plan", "dur_s": round(dur, 2), "beats": len(ctx.beats), "shots": len(shots), "cuts": len(cuts), "cuts10": round(len(cuts) / max(dur, 1e-3) * 10, 1),
@@ -6696,7 +6698,7 @@ def hold_finding(ctx):
     hold = gap / fps
     if hold > HOLD_FIND_S and ctx.dur_f / fps >= 8.0:
         ctx.find(f"hold: one picture stays on screen {hold:.1f} s, from {at / fps:.1f} s. A framing held that long reads as nothing happening: cut inside it to a Bin "
-                 "picture, a view, another moment of the upload (`main@12.4-13.6`), a page or a counter, every 1 to 3 s")
+                 "picture, a visibly different view or another shot of the upload (`main@12.4-13.6`), every 1 to 3 s. A flat page, counter or crop of this same shot does not resolve the hold")
     return round(hold, 2)
 
 
