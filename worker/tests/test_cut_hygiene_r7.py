@@ -213,7 +213,8 @@ def test_every_keep_tool_writes_audio_safe_edges_and_says_so(tmp_path):
     res = agent_tools.keep_segments(ctx, [[0.0, 1.25], [2.45, 5.0]])
     keep = ctx._edl["keep"]
     assert 1.45 <= keep[0][1] <= 1.52 and 2.3 <= keep[1][0] <= 2.4
-    assert "AUDIO-SAFE CUTS: moved 2 keep edges" in res
+    assert "Kept the whole word 'was'" in res and "Kept the whole word 'ever'" in res
+    assert "AUDIO-SAFE CUTS: moved 1 keep edge" in res
     assert "lands inside the word" not in res
     # cut_range places only the edges it makes: the old ones stay put
     before = [list(k) for k in keep]
