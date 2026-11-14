@@ -7572,6 +7572,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         _cur_v = (ctx.versions_written[-1]
                                   if ctx.versions_written
                                   else start_version)
+                        if (getattr(ctx, "ask_ledger", None) or
+                                getattr(ctx, "ask_check_required", False)) and ctx.versions_written:
+                            _auto_render_if_needed(ctx, worker_db, session_id,
+                                                   timings, turn_deadline)
                         # A question is also a customer-facing reply. It cannot
                         # bypass rendered evidence by claiming completion in its preamble.
                         import reply_truth
@@ -7581,6 +7585,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                             honesty, strict=True)
                         _question_outcome = ("partial" if q.question == reply_truth.UNVERIFIED
                                              else AWAITING_USER)
+                        # Ending on a question cannot leave an unverified attempt
+                        # behind or bypass disclosure of what actually changed.
+                        _asks_check(ctx, q.question, allow_repair=False)
+                        q.question, _question_outcome = _asks_settle(
+                            ctx, q.question, _question_outcome)
+                        _cur_v = ctx.latest_edl().get("version", _cur_v)
                         _activity(worker_db, session_id, name, args,
                                   f"asked: {q.question}",
                                   edl_version=_cur_v)
