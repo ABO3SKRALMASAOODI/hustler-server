@@ -201,3 +201,45 @@ def test_typed_footage_unreadable_switch_fails_closed():
     def fail(fn):
         raise RuntimeError("unavailable")
     assert typed.footage_config(NS(run=fail))["mode"] == "off"
+
+
+def test_long_clip_request_enters_shorts_engine_without_editing_parent(monkeypatch):
+    import shorts
+    import quality_verifier
+    ctx = NS(duration=7320, has_main_video=True, project={})
+    clips = [{"start": 7000, "end": 7090, "title": "Payoff", "hook": "A complete story"}]
+    monkeypatch.setattr(flags, "read", lambda db: dict(copy.deepcopy(flags.DEFAULTS), mode="on"))
+    monkeypatch.setattr(typed, "_selection", lambda ctx: (clips, {}))
+    monkeypatch.setattr(quality_verifier, "request_text_for", lambda ctx: "A 90-second clip")
+    monkeypatch.setattr(film, "_make", lambda *a: pytest.fail("parent must stay intact"))
+    def enqueue(ctx, selected, request):
+        assert selected == clips and request == "A 90-second clip"
+        return {"path": "podcast_shorts_engine", "job_id": 23}
+    monkeypatch.setattr(shorts, "start_typed_craft", enqueue)
+    assert typed.run(ctx, None, {}, 9, {"director": True})["job_id"] == 23
+
+
+def test_short_child_director_is_bounded_to_its_story(monkeypatch, tmp_path):
+    source = tmp_path / "source.mp4"
+    source.touch()
+    clip = {"start": 7000, "end": 7090, "title": "Late story", "hook": "The payoff"}
+    ctx = NS(duration=7320, has_main_video=True, project_id=7, workdir=str(tmp_path),
+        project={"parent_project_id": 6, "meta": {"clip": clip}},
+        index={"video": {"duration": 7320}, "words": []}, proxy_path=lambda: str(source),
+        agent_model="gpt-6.1-sol", versions_written=[])
+    writes = []
+    ctx.write_edl = lambda edl, note: writes.append(edl) or "EDL v2"
+    db = NS(run=lambda *a: {"storage_key": "original"})
+    monkeypatch.setattr(flags, "read", lambda db: dict(copy.deepcopy(flags.DEFAULTS), mode="on"))
+    monkeypatch.setattr(typed, "_selection", lambda *a: pytest.fail("do not reselect from the long parent"))
+    monkeypatch.setattr(typed.subprocess, "run", lambda *a, **k: None)
+    def make(view, db, job, cfg, deadline, work, rec):
+        assert view.duration == 90
+        view.apply_score({"keep": [[0, 90]]}, "selected story")
+        view.director_version = 2
+        return [], ["story"], {}
+    monkeypatch.setattr(film, "_make", make)
+    got = typed.run(ctx, db, {"id": 1}, 9, {"director": True})
+    assert got["source_window"] == [7000, 7090]
+    assert writes[0]["keep"] == [[7000, 7090]]
+    assert not list(tmp_path.glob("typed-film-*"))
