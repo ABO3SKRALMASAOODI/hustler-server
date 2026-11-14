@@ -186,3 +186,25 @@ def test_transcript_cannot_add_subjects_to_an_explicit_request(monkeypatch):
         {'w': 'Zorba?', 't0': 2, 't1': 3}]}), ledger, 'Show Zorba pictures as named')
     assert [p['subject'] for p in pictures] == ['Zorba']
     assert pictures[0]['word_ids'] == [0, 2]
+
+
+@pytest.mark.parametrize('cut_away', [False, True])
+def test_unspoken_picture_can_be_seen_but_cutting_its_words_cannot_evade_check(monkeypatch, tmp_path, cut_away):
+    import agent_tools, media, llm
+    picture = {'id': 'picture1', 'subject': 'Zorba', 'must_show': 'Recognizable Zorba',
+               'source_words': [{'w': 'Zorba', 't0': 0, 't1': 1}] if cut_away else []}
+    ctx = NS(workdir=str(tmp_path), db=NS(run=lambda *a: {'kind': 'render'}), project_id=1)
+    monkeypatch.setattr(agent_tools, '_asset_local_path', lambda *a: 'render.mp4')
+    samples = []
+    monkeypatch.setattr(media, 'frame_at', lambda path, t, out, **kw: samples.append(t))
+    monkeypatch.setattr(llm, 'image_part', lambda p: {'type': 'image', 'path': p})
+    def check(ctx, name, schema, system, content, **kw):
+        assert json.loads(content[0]['text'])['spoken_anchor_check'] is False
+        return {'shown': True, 'seen': 'Zorba is visible.', 'line': 'Zorba is shown.'}, {}
+    monkeypatch.setattr(asks, '_call', check)
+    result = required_broll.check(ctx, {'required_pictures': [picture]},
+        {'keep': [[2, 5]], 'overlays': [{'start': .1, 'duration_s': .4}]}, {'edl_version': 3})
+    assert result['picture1']['state'] == ('cannot_tell' if cut_away else 'done')
+    assert (len(samples) == 0) is cut_away
+    if not cut_away:
+        assert .1 + .4 / 2 in samples
