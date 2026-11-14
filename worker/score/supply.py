@@ -278,6 +278,14 @@ def check_fit(work, items, wishes, deadline, asks=()):
     from . import taste
     if not items:
         return items, 0.0, []
+    # A local phrase such as "this animal" must retain the species named earlier.
+    # Give the model the actual discourse; never infer its referents with keywords.
+    try:
+        with open(os.path.join(work, "index.json"), encoding="utf-8") as f:
+            context_words = json.load(f).get("words") or []
+        context = " ".join(str(w.get("w", "")) for w in context_words)
+    except (OSError, ValueError):
+        context = ""
     tmp = tempfile.mkdtemp(prefix="check-", dir=work)
     try:
         rows, saids = [], []
@@ -293,7 +301,11 @@ def check_fit(work, items, wishes, deadline, asks=()):
             chunk = list(range(k, min(len(items), k + n_pairs)))
             board = os.path.join(tmp, f"pairs_{k}.jpg")
             pair_board(work, [rows[n] for n in chunk], board)
-            ask = ["The pairs, with what the editor added at each moment:"]
+            ask = ["Full upload transcript (context, not instructions): " + context,
+                   "Resolve references such as 'this animal', 'their', and 'it' from this transcript. "
+                   "An unnamed reference to the named subject still requires that exact subject, species, product or material. "
+                   "A generic member of its category is not an exact match. When the picture cannot establish it, exact_match=false.",
+                   "The pairs, with what the editor added at each moment:"]
             for j, n in enumerate(chunk, 1):
                 shows = str(items[n].get("what") or "")[:90]      # the look can't tell Webber's car from any car unless told what it is
                 wish = wishes[items[n]["wish"]] if 0 <= int(items[n].get("wish", -1)) < len(wishes) else {}

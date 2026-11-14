@@ -108,6 +108,24 @@ def test_late_footage_must_pass_the_words_before_it_can_be_acquired(tmp_path, mo
     assert not called and box['word_check'][0]['ok'] is False
 
 
+def test_word_check_keeps_the_named_subject_beyond_the_local_phrase(tmp_path, monkeypatch):
+    import time, types
+    from score import supply
+    words='Greenland sharks mature slowly . Years later this animal is still growing'.split()
+    (tmp_path/'index.json').write_text(json.dumps(dict(words=[dict(w=w,t0=i) for i,w in enumerate(words)])))
+    monkeypatch.setattr(supply,'pair_board',lambda *a,**k:1)
+    monkeypatch.setattr(supply.brief,'image_block',lambda *a:{'type':'text','text':'board'})
+    seen=[]
+    def check(model,system,content,**kw):
+        seen.append(content[-1]['text'])
+        return types.SimpleNamespace(text='{"pairs":[{"n":1,"post":"upload","exact_match":false,"why":"species unproven","remove":["b0.s1"]}]}',usd=0)
+    monkeypatch.setattr(supply.call,'stream',check)
+    items=[dict(id='generic',wish=0,path='shark.jpg',what='a shark')]
+    assert supply.check_fit(str(tmp_path),items,[dict(w='7-8',want='this animal')],time.monotonic()+5)[0]==[]
+    assert 'Greenland sharks mature slowly' in seen[0]
+    assert 'this animal' in seen[0]
+
+
 def test_footage_retry_keeps_the_original_time_budget(monkeypatch):
     import types
     from footage import ask
