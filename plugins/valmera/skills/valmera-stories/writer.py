@@ -25,6 +25,7 @@ import os
 import re
 import gzip
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -771,6 +772,29 @@ def norm(s):
     return " ".join(re.sub(r"[^a-z0-9]+", " ", s).split())
 
 
+APOSTROPHES = "\u2019\u2018\u02bc\u02b9\u0060\u00b4\u2032\uff07"
+_SPEECH_WORD = re.compile(r"[^\W_]+(?:'[^\W_]+)*")
+
+
+def speech_words(s):
+    """The words of a span, for identity only: Unicode NFKC, case folded, every apostrophe one character, thousands
+    separators dropped; a word is a run of letters or digits, with apostrophes inside it ("I'm" is one word, never
+    "I" and "m"). Never a reading of meaning: it decides only whether the same words stand in the same order."""
+    s = unicodedata.normalize("NFKC", html.unescape(str(s or ""))).casefold()
+    for a in APOSTROPHES:
+        s = s.replace(a, "'")
+    s = re.sub("(?<=\\d)[,\u202f\u00a0](?=\\d{3})", "", s)
+    return _SPEECH_WORD.findall(s)
+
+
+def has_words(text, span):
+    """True when the span's words stand in text as one contiguous run of whole words (never a substring: "I'm in" is
+    not in "I'm interested in the part")."""
+    a, b = speech_words(text), speech_words(span)
+    n = len(b)
+    return bool(b) and any(a[k:k + n] == b for k in range(len(a) - n + 1))
+
+
 def readable(raw):
     """HTML to the normalised text a reader sees (quote presence is measured on this, never on the markup)."""
     p = _Text()
@@ -1075,15 +1099,16 @@ def speech_of(seg):
 
 def speech_backed(words, seg, quotes_by_id):
     """Why a span presented as someone's words cannot stand, or None when it can: it must be in the line and stand
-    word for word in the verified quote of a fact the line cites (identity of strings, never a reading of meaning)."""
-    w = norm(words)
-    if not w:
+    word for word in the verified quote of a fact the line cites (identity of whole words in order: speech_words,
+    has_words; never a substring, never a reading of meaning). `quotes_by_id` holds each verified fact's quote as
+    written."""
+    if not speech_words(words):
         return None
     cited = [quotes_by_id[f] for f in (seg.get("facts") or []) if f in quotes_by_id]
-    if any(w in q for q in cited):
+    if any(has_words(q, words) for q in cited):
         return None
-    if w not in norm(seg.get("say") or ""):
-        return "the quoted words are not in the line"
+    if not has_words(seg.get("say") or "", words):
+        return "the quoted words are not in the line as given (a loose copy is not someone's words)"
     return "the quoted words stand in no verified quote the line cites"
 
 
@@ -1093,7 +1118,7 @@ def speech_problems(script, quotes_by_id):
     out = []
     for k, s in enumerate(script.get("segments") or []):
         for q in speech_of(s):
-            why = None if norm(q["words"]) in norm(s.get("say") or "") else "the quoted words are no longer in the line"
+            why = None if has_words(s.get("say") or "", q["words"]) else "the quoted words are no longer in the line"
             why = why or speech_backed(q["words"], s, quotes_by_id)
             if why:
                 out.append(dict(segment=k, words=q["words"], who=q.get("who"), why=why))
@@ -1108,7 +1133,7 @@ def verify(script):
         r = check_fact(f)
         if r["found"]:
             ok_quotes.append(norm(f.get("quote", "")))
-            by_id[f.get("id")] = ok_quotes[-1]
+            by_id[f.get("id")] = str(f.get("quote") or "")
         rows.append(r)
     have = set()
     for q in ok_quotes:
@@ -1213,7 +1238,7 @@ def _script_lines(segs):
                      for k, s in enumerate(segs))
 
 
-def rewrite_without(script, bad, ask=None, targets=None, why=None):
+def rewrite_without(script, bad, ask=None, targets=None, why=None, style=None):
     """(script, info, usage): segments rewritten on the checked facts alone, or dropped, by one call (RESEARCH_MODEL on
     OpenAI, no web). The segments are those citing an unverifiable fact in `bad` (which leave the script), plus
     `targets` (indices) with `why` ({index: the reason it must change}: a claim no quote states, a repeat). Structure
@@ -1246,7 +1271,8 @@ def rewrite_without(script, bad, ask=None, targets=None, why=None):
                    (f"\n\n# Core segments (the hook, the turn, the payoff): never drop these; restate each on the checked facts "
                     f"only when they still carry its point, else answer say null for it\n{[k for k in targets if k in core]}"
                     if any(k in core for k in targets) else "") +
-                   (f"\n\n# Display roles\n{list(roles)}" if roles else ""))
+                   (f"\n\n# Display roles\n{list(roles)}" if roles else "") +
+                   (f"\n\n# The spoken style to keep in every rewritten segment\n{style}" if style else ""))
         try:
             text, use = ask(REWRITE_SYSTEM, content)
             ans = json_block(text)
@@ -1261,7 +1287,10 @@ def rewrite_without(script, bad, ask=None, targets=None, why=None):
         if k in core and not (isinstance(say, str) and say.strip() and facts and set(facts) <= good_ids):
             core_failed.append(k)               # the hook, turn or payoff restated on nothing checked does not stand
         elif isinstance(say, str) and say.strip() and facts is not None and set(facts) <= good_ids and k in got:
+            segs[k].setdefault("say_first", segs[k].get("say"))     # the writer's own words, for the point check
             segs[k]["say"] = " ".join(say.split())
+            if isinstance(segs[k].get("emphasis"), list):             # the actor stresses words the new line still says
+                segs[k]["emphasis"] = [e for e in segs[k]["emphasis"] if has_words(segs[k]["say"], e)]
             segs[k]["facts"] = list(dict.fromkeys(facts))
             segs[k]["show"] = _norm_show(g.get("show"), roles)
             segs[k]["quotes"] = _norm_quotes(g.get("quotes"), set(facts))
@@ -1283,14 +1312,15 @@ def rewrite_without(script, bad, ask=None, targets=None, why=None):
 def _verified_quotes(script, rep=None):
     rep = rep or verify(script)
     ok = {r["id"] for r in rep["facts"] if r["found"]}
-    return {f.get("id"): norm(f.get("quote") or "") for f in script.get("facts") or [] if f.get("id") in ok}
+    return {f.get("id"): str(f.get("quote") or "") for f in script.get("facts") or [] if f.get("id") in ok}
 
 
 def judge_support(script, idx, ask=None, quotes_by_id=None):
     """({index: {"ok", "why", "speech"}}, usage): one model call (SUPPORT_MODEL) judges whether every claim of each line
     in `idx` is stated by the verified quotes of the facts it cites, and names the spans each line presents as someone's
     own words. Each such span (the model's and the writer's own `quotes`) must then stand word for word in a verified
-    quote the line cites: identity of strings. A line the answer leaves out is unsupported (fail closed)."""
+    quote the line cites (has_words: whole words in order); a span that does not, even one the judge copied loosely
+    and called supported, makes the line unsupported. A line the answer leaves out is unsupported (fail closed)."""
     ask = ask or (lambda system, content: ask_openai(system, content, effort="medium", max_tokens=12000, what="line support",
                                                      model=SUPPORT_MODEL))
     segs = script.get("segments") or []
@@ -1320,12 +1350,15 @@ def judge_support(script, idx, ask=None, quotes_by_id=None):
             out[k] = dict(ok=False, why="no judgement for this line", speech=[])
             continue
         speech = [dict(words=str(x.get("words")), who=x.get("who")) for x in g.get("speech") or []
-                  if isinstance(x, dict) and norm(x.get("words") or "")]
+                  if isinstance(x, dict) and speech_words(x.get("words") or "")]
         declared = [dict(words=q["words"], who=q.get("who")) for q in speech_of(segs[k])]
         bad_speech = []
-        for q in declared + [q for q in speech if norm(q["words"]) in norm(segs[k].get("say") or "")]:
-            w = speech_backed(q["words"], segs[k], quotes_by_id)     # a span the judge copied loosely is left to its verdict
-            if w and not any(norm(q["words"]) == norm(b["words"]) for b in bad_speech):
+        for q in declared + speech:
+            # fail closed: every span given as someone's words, the writer's and the judge's alike, must stand word for
+            # word in a verified quote the line cites; a span the judge copied loosely ("Im in") stands in none, so the
+            # line is unsupported whatever the verdict says
+            w = speech_backed(q["words"], segs[k], quotes_by_id)
+            if w and not any(speech_words(q["words"]) == speech_words(b["words"]) for b in bad_speech):
                 bad_speech.append(dict(q, why=w))
         if not bad_speech and g.get("supported") is True:
             out[k] = dict(ok=True, why="", speech=speech)
@@ -1373,7 +1406,7 @@ def _at(sc, sid):
     return None
 
 
-def check_lines(sc, info, spend, log, ask_judge=None, ask_rewrite=None, rounds=SUPPORT_ROUNDS):
+def check_lines(sc, info, spend, log, ask_judge=None, ask_rewrite=None, rounds=SUPPORT_ROUNDS, style=None, stage="settle"):
     """(script, core_failed {sid: why}): every segment marked `_check` (it cites a fact whose quote was replaced, it was
     rewritten, or it declares quoted speech no verified quote holds) is judged for support; an unsupported line is
     rewritten on the verified quotes and judged again, at most `rounds` times, then dropped. A core line that
@@ -1388,11 +1421,12 @@ def check_lines(sc, info, spend, log, ask_judge=None, ask_rewrite=None, rounds=S
         if use:
             spend.append(use)
         segs = sc["segments"]
-        info["lines_checked"] += [dict(round=rnd, line=k, say=segs[k].get("say"), why_checked=segs[k].get("_check"),
+        info["lines_checked"] += [dict(stage=stage, round=rnd, line=k, sid=segs[k].get("_sid"), say=segs[k].get("say"),
+                                       why_checked=segs[k].get("_check"),
                                        ok=verdicts[k]["ok"], why=verdicts[k]["why"],
                                        speech=[dict(words=q["words"], who=q.get("who"),
                                                     source=next((f for f in segs[k].get("facts") or []
-                                                                 if norm(q["words"]) in qb.get(f, "")), None))
+                                                                 if has_words(qb.get(f, ""), q["words"])), None))
                                                for q in verdicts[k]["speech"]])
                                   for k in idx]
         bad = {k: verdicts[k]["why"] for k in idx if not verdicts[k]["ok"]}
@@ -1413,7 +1447,7 @@ def check_lines(sc, info, spend, log, ask_judge=None, ask_rewrite=None, rounds=S
             break
         sids = {k: segs[k].get("_sid") for k in bad}
         why = {k: f"{w} (checked because {str(segs[k].get('_check')).strip()})" for k, w in bad.items()}
-        sc2, ri, use = rewrite_without(sc, (), ask=ask_rewrite, targets=sorted(bad), why=why)
+        sc2, ri, use = rewrite_without(sc, (), ask=ask_rewrite, targets=sorted(bad), why=why, style=style)
         if use:
             spend.append(use)
         if ri["core_failed"]:
@@ -1428,7 +1462,7 @@ def check_lines(sc, info, spend, log, ask_judge=None, ask_rewrite=None, rounds=S
     return sc, core_failed
 
 
-def check_repeats(sc, changed, info, spend, log, ask_judge=None, ask_rewrite=None, ask_repeats=None):
+def check_repeats(sc, changed, info, spend, log, ask_judge=None, ask_rewrite=None, ask_repeats=None, style=None, stage="settle"):
     """The script after a rewrite: one judgement over the whole script flags a line that repeats another's claim or
     phrasing; it is rewritten once (and judged for support and for repeats again), else dropped when it is not core
     (a core line keeps its last supported words)."""
@@ -1447,7 +1481,7 @@ def check_repeats(sc, changed, info, spend, log, ask_judge=None, ask_rewrite=Non
     flagged = {segs[r["i"]].get("_sid"): r for r in reps}
     why = {r["i"]: f"it says again what line {r['of']} says ({r['why']}): say something else this point of the story needs, "
                    "on the checked facts, or drop it" for r in reps}
-    sc2, ri, use = rewrite_without(sc, (), ask=ask_rewrite, targets=sorted(why), why=why)
+    sc2, ri, use = rewrite_without(sc, (), ask=ask_rewrite, targets=sorted(why), why=why, style=style)
     if use:
         spend.append(use)
     core = {segs[k].get("_sid") for k in core_segments(sc)}
@@ -1455,7 +1489,7 @@ def check_repeats(sc, changed, info, spend, log, ask_judge=None, ask_rewrite=Non
         sc2 = before                           # a core line that cannot be said otherwise keeps its words
     info["repeat_rewritten"] += [segs[k].get("_sid") for k in ri["rewritten"]]
     info["repeat_dropped"] += [dict(say=segs[k].get("say"), why=why[k]) for k in ri["dropped"]]
-    sc2, failed = check_lines(sc2, info, spend, log, ask_judge=ask_judge, rounds=0)     # rewritten once: judged, never again
+    sc2, failed = check_lines(sc2, info, spend, log, ask_judge=ask_judge, rounds=0, stage=stage)     # rewritten once: judged, never again
     if failed:
         sc2 = before                           # the core line's new words do not stand: its last supported words do
         for s in sc2["segments"]:
@@ -1595,6 +1629,148 @@ def settle(script, log=print, ask_research=None, ask_rewrite=None, ask_judge=Non
                 s["show"] = [x for x in s.get("show") or [] if not any(x is o for o in off)]
         log(f"fact check: display items with unbacked numbers taken off screen: {info['display_dropped']}")
     return done(sc, rep)
+
+
+# ----------------------------------------------------------------- the final support pass: the last text gate
+
+POINT_SYSTEM = """You are the story editor of a narrated documentary film of about a minute. Its core lines (the hook that must stop a viewer in the first second, the turn, the payoff) were rewritten after fact checking and for the narrator's ear. For each one you get the line as the writer first wrote it and as it stands now. Decide whether the line now still makes the same point: the claim at its centre (who did what, what was at stake) and its tension (the surprise, the collision or the stake that makes a viewer need the next line). The new line may name the person the sources name instead of a company, drop a detail no source states, and change its wording and rhythm; it has lost the point when its central claim is gone, buried or softened into background, or when its collision or stake is gone (a flat statement where there was a turn of the knife).
+
+Answer with one JSON object only: {"lines": [{"i": the line index, "kept": true or false, "lost": what the line lost and what it must win back, in a few words (empty when kept)}]}"""
+
+FINAL_WHY = "the final pass: every line of the script is judged on its verified quotes after the ear's rewrite"
+
+
+def judge_point(script, idx, ask=None):
+    """({index: {"kept", "lost"}}, usage): one model call (SUPPORT_MODEL) compares each core line in `idx` as first
+    written (`_origin`) with its words now, and says whether it still makes its point (its claim and its tension).
+    No answer leaves the line as it is (a point is never rewritten on a guess)."""
+    ask = ask or (lambda system, content: ask_openai(system, content, effort="medium", max_tokens=6000, what="hook point",
+                                                     model=SUPPORT_MODEL))
+    segs = script.get("segments") or []
+    rows = [dict(i=k, beat=segs[k].get("beat") or ("hook" if k == 0 else None), first=segs[k].get("_origin"), now=segs[k].get("say"))
+            for k in idx if _valid_i(k, len(segs))]
+    if not rows:
+        return {}, None
+    content = ("# The whole script now (context)\n" + "\n".join(f"{k}. {s.get('say')}" for k, s in enumerate(segs)) +
+               f"\n\n# Core lines: as first written, and now\n{json.dumps(rows, ensure_ascii=False, indent=1)}")
+    try:
+        text, use = ask(POINT_SYSTEM, content)
+        ans = json_block(text)
+    except Exception:  # noqa: BLE001
+        return {}, None
+    out = {}
+    for g in ans.get("lines") or [] if isinstance(ans, dict) else []:
+        if isinstance(g, dict) and _valid_i(g.get("i"), len(segs)) and g["i"] in idx:
+            out[g["i"]] = dict(kept=g.get("kept") is not False, lost=str(g.get("lost") or ""))
+    return out, use
+
+
+def final_support(script, log=print, ask_judge=None, ask_rewrite=None, ask_repeats=None, ask_point=None, style=None,
+                  rounds=SUPPORT_ROUNDS):
+    """(script, report, spend): the last text gate before the script is frozen, run after the ear's rewrite (and after
+    any other change to what the narrator says).
+
+      1. EVERY line is judged against the verified quotes it cites, in one batched call (judge_support: every claim
+         stated by a quote; every span given as someone's own words verbatim, word for word, in one of them). An
+         unsupported line is rewritten on its quotes in the spoken style it has now (`style`) and judged again, at most
+         `rounds` times, else dropped; a core line (hook, turn, payoff) is restated or the pass fails
+         (report.ok False, report.core_unsupported).
+      2. a rewrite that says again what another line says is caught (check_repeats), rewritten once and judged.
+      3. every core line whose words changed since the writer first wrote them is compared with those first words by a
+         model (judge_point): when it lost its claim or its tension it is rewritten once more to win the point back on
+         its quotes, and judged for support; new words that do not stand are not kept (the supported line stays).
+    report.final_lines gives every final line with the verdict of its last judgement."""
+    original = json.loads(json.dumps(script))
+    sc = json.loads(json.dumps(script))
+    for k, s in enumerate(sc.get("segments") or []):
+        s["_sid"] = k
+        s["_origin"] = s.get("say_first") or s.get("say_written") or s.get("say")
+        s["_check"] = FINAL_WHY
+    spend = []
+    info = dict(lines_checked=[], support_rewritten=[], support_dropped=[], repeats=[], repeat_rewritten=[], repeat_dropped=[],
+                point=[], point_rewritten=[], point_kept_old=[], core_unsupported={})
+
+    def done(sc_, ok, why=None):
+        for s in sc_.get("segments") or []:
+            for k in ("_sid", "_check", "_origin"):
+                s.pop(k, None)
+        rep_ = verify(sc_)
+        ok = bool(ok and rep_["ok"])
+        return sc_, dict(info, ok=ok, why=why or ("" if ok else "the final script does not verify"), verify=rep_,
+                         usd=round(sum(float((u or {}).get("usd") or 0) for u in spend), 4)), spend
+
+    sc, failed = check_lines(sc, info, spend, log, ask_judge=ask_judge, ask_rewrite=ask_rewrite, rounds=rounds, style=style,
+                             stage="final")
+    if failed:
+        segs0 = original.get("segments") or []
+        info["core_unsupported"] = {str(sid): dict(say=segs0[sid].get("say") if sid < len(segs0) else None, why=w,
+                                                   beat=segs0[sid].get("beat") if sid < len(segs0) else None)
+                                    for sid, w in failed.items()}
+        log(f"final support: a core line cannot stand on its quotes: {info['core_unsupported']}"[:600])
+        return done(json.loads(json.dumps(original)), False, "core_unsupported")
+    if info["support_rewritten"]:
+        sc = check_repeats(sc, set(info["support_rewritten"]), info, spend, log, ask_judge=ask_judge, ask_rewrite=ask_rewrite,
+                           ask_repeats=ask_repeats, style=style, stage="final")
+    segs = sc.get("segments") or []
+    moved = [k for k in sorted(core_segments(sc)) if speech_words(segs[k].get("_origin")) != speech_words(segs[k].get("say"))]
+    if moved:
+        pv, use = judge_point(sc, moved, ask=ask_point)
+        if use:
+            spend.append(use)
+        info["point"] += [dict(line=k, sid=segs[k]["_sid"], first=segs[k]["_origin"], now=segs[k].get("say"),
+                               kept=(pv.get(k) or {}).get("kept", True), lost=(pv.get(k) or {}).get("lost", ""))
+                          for k in moved]
+        lost = {k: pv[k]["lost"] for k in moved if k in pv and not pv[k]["kept"]}
+        if lost:
+            log(f"final support: core lines lost their point: {lost}"[:400])
+            before = json.loads(json.dumps(sc))
+            why = {k: (f"it lost the point it had as first written ({segs[k]['_origin']!r}): {lost[k] or 'its claim and its tension'}. "
+                       "Restate it so it makes that point again, as sharply (its central claim and its tension, the collision "
+                       "or the stake), saying only what the quotes it cites state: name whom those quotes name, add nothing "
+                       "they do not hold") for k in lost}
+            sc2, ri, use = rewrite_without(sc, (), ask=ask_rewrite, targets=sorted(lost), why=why, style=style)
+            if use:
+                spend.append(use)
+            if ri["core_failed"] or not ri["rewritten"]:
+                info["point_kept_old"] += [segs[k]["_sid"] for k in lost]
+                sc = before
+            else:
+                sc2, failed = check_lines(sc2, info, spend, log, ask_judge=ask_judge, rounds=0, stage="final-point")
+                if failed or len(sc2["segments"]) != len(before["segments"]):
+                    info["point_kept_old"] += [segs[k]["_sid"] for k in lost]
+                    sc = before                                # its new words do not stand: the supported line stays
+                    for s in sc["segments"]:
+                        s.pop("_check", None)
+                else:
+                    info["point_rewritten"] += [segs[k]["_sid"] for k in ri["rewritten"]]
+                    again = [k for k, s in enumerate(sc2["segments"]) if s["_sid"] in info["point_rewritten"]]
+                    pv2, use = judge_point(sc2, again, ask=ask_point)
+                    if use:
+                        spend.append(use)
+                    info["point"] += [dict(line=k, sid=sc2["segments"][k]["_sid"], first=sc2["segments"][k]["_origin"],
+                                           now=sc2["segments"][k].get("say"), kept=(pv2.get(k) or {}).get("kept", True),
+                                           lost=(pv2.get(k) or {}).get("lost", ""), after_rewrite=True) for k in again]
+                    sc = sc2
+    last = {}
+    for row in info["lines_checked"]:                  # the latest judgement of each line's exact final words
+        last[(row.get("sid"), row.get("say"))] = row
+    info["final_lines"] = []
+    for k, s in enumerate(sc.get("segments") or []):
+        row = last.get((s.get("_sid"), s.get("say"))) or {}
+        info["final_lines"].append(dict(i=k, beat=s.get("beat"), say=s.get("say"), facts=s.get("facts") or [],
+                                        supported=bool(row.get("ok")), why=row.get("why") or "",
+                                        judged=f"{row.get('stage')} round {row.get('round')}" if row else None,
+                                        restated=s.get("_sid") in set(info["support_rewritten"]) | set(info["repeat_rewritten"])
+                                        | set(info["point_rewritten"])))
+    unjudged = [x["i"] for x in info["final_lines"] if not x["supported"]]
+    if sc.get("segments"):
+        sc["hook_line"], sc["close_line"] = sc["segments"][0].get("say"), sc["segments"][-1].get("say")
+    if unjudged:
+        log(f"final support: lines without a supported judgement on their final words: {unjudged}")
+        return done(sc, False, f"lines without a supported judgement: {unjudged}")
+    log(f"final support: {len(sc['segments'])} lines stand on their quotes; restated {len(info['support_rewritten'])}, "
+        f"dropped {len(info['support_dropped']) + len(info['repeat_dropped'])}, point rewritten {len(info['point_rewritten'])}")
+    return done(sc, True)
 
 
 def words_of(script):

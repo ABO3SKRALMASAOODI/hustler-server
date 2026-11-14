@@ -183,9 +183,13 @@ def script(ctx, ideas_out):
     card = able[pick["style"]]
     sc, rep, spend = write_checked(ctx, pick, card)
     sc, rep = for_the_ear(ctx, sc, rep, spend)
+    sc, rep = final_gate(ctx, sc, rep, spend)          # the last text gate: the narration's words are frozen after it
+    frozen = [s_.get("say") for s_ in sc["segments"]]
     ann = None
     if card["id"] in R.STYLES:
         sc, ann = annotate_script(ctx, sc, pick, spend, reel=True)
+    if [s_.get("say") for s_ in sc["segments"]] != frozen:
+        raise RuntimeError("the narration changed after the final support pass: the words are frozen there")
     reg = registry_row(card)
     return dict(title=sc.get("title") or pick.get("title"), style=reg, window=None, hook_line=sc.get("hook_line"),
                 close_line=sc.get("close_line"), direction=f"{card['name']}: {card['look']}", idea=pick.get("title"),
@@ -376,6 +380,23 @@ def for_the_ear(ctx, sc, rep, spend):
         ctx.log("ear: the rewrite does not verify; the script stands as written")
         return sc, rep
     return sc2, (dict(rep2, settle=rep["settle"]) if rep.get("settle") else rep2)
+
+
+def final_gate(ctx, sc, rep, spend, final=None):
+    """(script, verify report): the last text gate before the script is frozen (writer.final_support). Every line,
+    after the ear's rewrite, is judged against the verified quotes it cites in one batched call; an unsupported line is
+    rewritten on its quotes in the ear's style (ear.KEEP_STYLE) and judged again, at most twice, else dropped; a core
+    line is restated or the stage fails; a core line whose rewrite lost its claim or tension is rewritten once more.
+    The report is script_final.json."""
+    final = final or (lambda sc_: writer.final_support(sc_, log=ctx.log, style=ear.KEEP_STYLE))
+    sc2, fr, more = final(sc)
+    spend += [dict(stage="final-support", **u) for u in more if u]
+    json.dump(dict(script=sc2, report=fr), open(os.path.join(ctx.run_dir, "script_final.json"), "w"), ensure_ascii=False, indent=1)
+    if not fr.get("ok"):
+        raise RuntimeError("the final support pass does not stand: " + json.dumps(
+            {k: fr.get(k) for k in ("why", "core_unsupported", "support_dropped")}, ensure_ascii=False)[:700])
+    st = dict(rep.get("settle") or {}, final=dict({k: v for k, v in fr.items() if k != "verify"}))
+    return sc2, dict(fr["verify"], settle=st)
 
 
 # ----------------------------------------------------------------- supply

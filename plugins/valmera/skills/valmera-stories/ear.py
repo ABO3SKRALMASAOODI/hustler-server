@@ -14,6 +14,11 @@ and names any segment whose facts, figures, names or claims changed. A flagged s
 Then measured checks, on strings only: the spoken form has no digits, every name and ledger word the original
 segment said is still said, the stressed words are words of the line, and the film's length stays within 10%.
 Nothing here interprets the words by rule; the model rewrites, the model audits, strings are compared.
+
+15 Nov (the independent check of the fact gate): the rewrite gave lines claims no quote held ("Pixar had never made a
+movie this long"). Each segment now carries the verified quotes it stands on, the rewrite is told to add no fact beyond
+them and the auditor checks against them; both calls are pinned to OpenAI (EAR_MODEL). The ear is never the last word:
+writer.final_support judges every line on its quotes after it (wf3.final_gate).
 """
 import json
 import os
@@ -25,6 +30,7 @@ if HERE not in sys.path:
 import writer  # noqa: E402
 
 KEEP_LEN = 0.10           # the film's spoken words may move this much (its pictures are planned on the old length)
+EAR_MODEL = "gpt-6.1-sol"   # pinned to OpenAI: writer.ask would turn to Anthropic when its key is present (Anthropic spend: $0)
 FIELDS = ("say", "emphasis", "pause_after", "melody", "pace", "direction")
 
 SHAPE = (
@@ -50,6 +56,12 @@ HARD = ("- Hard words: a long or rare compound a speech engine runs together is 
         "(\"retro rockets\"); a word with two readings gets the spelling of the one meant; names stay exactly as spelled.\n")
 SHAPE += HARD
 
+# the voice a later rewrite keeps (writer.final_support restates an unsupported line in the ear's style)
+KEEP_STYLE = ("The line is spoken by a narrator over pictures and was already rewritten for the ear: keep that voice. Sentences "
+              "of nine to fourteen words, one idea a sentence; hinge words (But, So, Then) where the story turns; short verdicts "
+              "of one to four words made only of what the line states; the news late in its sentence; numbers and years in "
+              "words; commas and full stops only (no dashes, colons, semicolons or brackets); about the same length as now.")
+
 QUESTION = {
     "story": "Exactly one segment in the setup asks the question the film will answer (the viewer's own question, said by "
              "the narrator: \"So how do you save a company with five thousand dollars?\"); never a question to the viewer "
@@ -62,13 +74,22 @@ SYSTEM = ("You are the voice editor of a documentary studio. A checked script re
           "narrator can perform it, without changing a single fact. You keep every fact, figure, date, name and claim "
           "exactly; you add no fact, drop no fact, round nothing, and never dramatise beyond the original. You may reorder "
           "words inside a segment, split or join its sentences, add hinge words (But, So, Then, And) and short verdicts made "
-          "only of what the segment already says.")
+          "only of what the segment already says. Each segment comes with `its_quotes`, the verified source sentences it "
+          "stands on: say nothing that the segment and those quotes do not already state. No new superlative, record, first, "
+          "never, only or comparison; no new count, length, setting, scene, time, title, role, motive or feeling; no new "
+          "person or company as the one who acted (keep who did what exactly as the segment names them); a restated verb "
+          "keeps its exact strength (\"made changes\" never becomes \"rewrote\").")
+
+
+def _quotes_of(script):
+    return {f.get("id"): f.get("quote") for f in script.get("facts") or [] if f.get("id") and f.get("quote")}
 
 
 def _segments_view(script):
     out = []
+    qb = _quotes_of(script)
     for i, s in enumerate(script.get("segments") or []):
-        v = {"i": i, "say": s.get("say", "")}
+        v = {"i": i, "say": s.get("say", ""), "its_quotes": [qb[f] for f in s.get("facts") or [] if f in qb]}
         for k in ("beat", "chapter", "pace", "melody", "emphasis", "pause_after", "direction"):
             if s.get(k) not in (None, "", []):
                 v[k] = s[k]
@@ -98,21 +119,24 @@ def rewrite(script, form="story", effort="medium"):
                "slow|steady|brisk|fast, `direction` a few concrete words for the actor (energy, pace, where to lean).\n\n"
                "Return JSON only: {\"segments\": [{\"i\": the index, \"say\", \"emphasis\", \"pause_after\", \"melody\", "
                "\"pace\", \"direction\"}]}")
-    text, use = writer.ask(SYSTEM, content, effort=effort, max_tokens=32000, what="ear")
+    text, use = writer.ask_openai(SYSTEM, content, effort=effort, max_tokens=32000, what="ear", model=EAR_MODEL)
     return writer.json_block(text).get("segments") or [], use
 
 
 AUDIT = ("You audit a rewrite of a documentary script for facts only. For each pair of segments (the original, the rewrite) "
          "decide whether the rewrite changed what is asserted: a fact, figure, date, name, quantity, order of events, cause or "
-         "claim added, dropped or altered, or a certainty made stronger or weaker. Style, word order, split sentences, hinge "
-         "words and short verdicts that restate the original are not changes.")
+         "claim added, dropped or altered, or a certainty made stronger or weaker. Each pair comes with `its_quotes`, the "
+         "verified sentences the original stands on: a detail that neither the original nor its quotes state is an added "
+         "claim (a superlative or a 'never' or 'first', a setting such as 'in that early reel', a role such as 'his own "
+         "director', a stronger verb such as 'rewrote' for 'made changes', a different actor). Style, word order, split "
+         "sentences, hinge words and short verdicts that restate the original are not changes.")
 
 
 def audit(pairs, effort="low"):
     """([indices whose facts changed], {i: why}, usage)"""
     content = (f"# Pairs\n{json.dumps(pairs, ensure_ascii=False, indent=0)}\n\n"
                "Return JSON only: {\"changed\": [{\"i\": index, \"why\": a few words}]} (an empty list when no segment changed).")
-    text, use = writer.ask(AUDIT, content, effort=effort, max_tokens=12000, what="ear-audit")
+    text, use = writer.ask_openai(AUDIT, content, effort=effort, max_tokens=12000, what="ear-audit", model=EAR_MODEL)
     ch = writer.json_block(text).get("changed") or []
     why = {int(c["i"]): str(c.get("why") or "") for c in ch if isinstance(c, dict) and str(c.get("i", "")).lstrip("-").isdigit()}
     return sorted(why), why, use
@@ -145,7 +169,7 @@ def measured_problems(old, new, names):
         if t.get("word") and not _has(say, t["word"]):
             p.append(f"lost the ledger word {t['word']}")
     for q in old.get("quotes") or []:
-        if isinstance(q, dict) and q.get("words") and writer.norm(q["words"]) not in writer.norm(say):
+        if isinstance(q, dict) and q.get("words") and not writer.has_words(say, q["words"]):
             p.append(f"lost the quoted words {q['words']}")       # someone's own words stay exactly as the checked quote has them
     em = new.get("emphasis") or []
     if not isinstance(em, list) or not em or not all(_has(say, e) for e in em):
@@ -190,7 +214,9 @@ def for_ear(script, form="story", effort="medium", log=print):
         log(f"ear: rewrite failed, the script stands: {e!r}"[:300])
         return script, dict(ok=False, error=repr(e)[:300], spend=[])
     by_i = {int(g["i"]): g for g in got if isinstance(g, dict) and str(g.get("i", "")).isdigit()}
-    pairs = [{"i": i, "original": s.get("say", ""), "rewrite": (by_i.get(i) or {}).get("say", "")} for i, s in enumerate(segs)]
+    qb = _quotes_of(script)
+    pairs = [{"i": i, "original": s.get("say", ""), "rewrite": (by_i.get(i) or {}).get("say", ""),
+              "its_quotes": [qb[f] for f in s.get("facts") or [] if f in qb]} for i, s in enumerate(segs)]
     try:
         changed, why, use2 = audit(pairs)
     except Exception as e:  # noqa: BLE001
