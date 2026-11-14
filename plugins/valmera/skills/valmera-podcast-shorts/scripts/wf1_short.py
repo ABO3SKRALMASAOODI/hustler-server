@@ -48,7 +48,7 @@ import shell  # noqa: E402
 import wf1_film  # noqa: E402
 import wf3  # noqa: E402
 
-RESEARCH_CONTRACT = 3  # separate illustrative context from explicit archival-event requirements
+RESEARCH_CONTRACT = 4  # primary documents can fill a truthful still-picture gap before more video research
 
 
 def _llm():
@@ -151,6 +151,7 @@ def supply(ctx, script):
     who = str((ctx.args or {}).get("identity") or "")[:400].replace("\n", " ")
     import wf1_coverage
     coverage = wf1_coverage.plan(words, script.get('title'), sup_dir, _llm())
+    coverage['context']=who
     windows = coverage['windows']
     # Inventory records what was said; windows specify what can truthfully be photographed.
     # Passing the inventory back as search subjects resurrects unnamed people and isolated dates.
@@ -176,11 +177,13 @@ def supply(ctx, script):
         n_yt, n_bad = refused(foot)
         ctx.log(f"footage sources: {n_yt} on YouTube, {n_bad} refused or archive-only; {foot['counts'].get('clips')} clips on "
                 f"{foot['counts'].get('lines_with_footage')} of {foot['counts'].get('lines')} sentences")
-    if walled(foot):                                           # nothing is cut from photographs and a clip or two: the same run continues when the wall lifts
+    if walled(foot) and not int(foot['counts'].get('clips') or 0):
         import shutil
         shutil.rmtree(os.path.join(sup_dir, footage_name), ignore_errors=True)
         raise RuntimeError(f"{wf1_film.WALL}: {n_bad} of {n_yt} footage sources would not open ({foot['counts'].get('clips')} clips on "
                            f"{foot['counts'].get('lines_with_footage')} of {foot['counts'].get('lines')} sentences). It lifts by itself; run the same link again later")
+    if walled(foot):
+        ctx.log('Some sources refused access; retaining acquired clips for the contextual coverage gate and targeted recovery')
     pack = dict(sid=ctx.sid, words=wj, narration=src, ffmpeg=PX.FF, sounds={}, pictures={}, credits=[], footage=[], title=script.get("title"), coverage=coverage)
     subjects, by_line = [], {}
     if foot:
@@ -372,6 +375,28 @@ def refill(ctx, script, pack, shortage):
     coverage = pack['coverage']
     windows = coverage['windows']
     wanted = shortage['weak_windows'] or list(range(len(windows)))
+    if not pack.get('research_revision'):
+        import wf1_coverage
+        checks=os.path.join(ctx.supply,'placement_checks.json')
+        evidence=dict(available=[dict(i=r['i'],clips=[dict(subject=c.get('subject'),shows=c.get('shows')) for c in r['clips']]) for r in pack['footage']],
+                      rejected=[r['reason'] for r in json.load(open(checks)).values() if not r['ok']][-60:] if os.path.exists(checks) else [])
+        usage=wf1_coverage.repair_requirements(coverage,wanted,evidence,_llm())
+        pack.setdefault('research_spend',[]).append(usage);pack['research_revision']=1
+        stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
+        with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
+    import wf1_documents
+    documents=wf1_documents.acquire([dict(windows[i],i=i,context=coverage.get('context')) for i in wanted],os.path.join(ctx.supply,'primary-documents'),_llm())
+    added=0
+    for subject,records in documents['pictures'].items():
+        dest=pack['pictures'].setdefault(subject,[]);have={r['path'] for r in dest}
+        fresh=[r for r in records if r['path'] not in have];dest.extend(fresh);added+=len(fresh)
+    if added:
+        pack['credits']+=documents['credits']
+        pack.setdefault('document_research',[]).append(documents)
+        stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
+        with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
+        ctx.log(f'acquired {added} primary-document crops; checking their actual words before further research')
+        return
     previous = pack.get('coverage_repairs',0) if pack.get('research_contract')==RESEARCH_CONTRACT else 0
     count = int(previous)+1
     if count > 3:
@@ -382,7 +407,7 @@ def refill(ctx, script, pack, shortage):
     subjects = {windows[i]['name']:windows[i]['must_show'] for i in wanted}
     fscript = dict(title=script['title']+' — supplementary documentary coverage. Prefer original institutional or company films with visible action; avoid influencer promotions and unrelated banners.',
                    segments=[dict(i=i,say=w['say'],pictures=[w['name']],visual=w['must_show']) for i,w in enumerate(windows)],
-                   named=[dict(name=n,must_show=show,**{'is':'thing'}) for n,show in subjects.items()])
+                   named=[dict(name=n,must_show=show,video_searches=list(dict.fromkeys(q for w in windows if w['name']==n for q in w.get('video_searches',[]))),**{'is':'thing'}) for n,show in subjects.items()])
     fw,fh = wf1_film.STYLES[script['style']['id']]['footage']
     ctx.log(f"research missing documentary windows {wanted}; pass {count}")
     foot = chain.footage(ctx,dict(script=fscript),[w['t1']-w['t0'] for w in windows],W=fw,H=fh,
@@ -413,6 +438,8 @@ def score(ctx, script):
         supply(ctx,script)
         pack = wf3.load_pack(ctx)
     pack["work"] = ctx.supply
+    if (ctx.args or {}).get('identity'):
+        pack['coverage']['context']=ctx.args['identity']
     d = direction_of(ctx, script, pack)
     knobs = {k: d.get(k) for k in ("display", "past_segs", "turn_seg", "arc")}
     knobs.update({k: v for k, v in ((ctx.args or {}).get("direction") or {}).items()})
@@ -447,6 +474,8 @@ def score(ctx, script):
     turn_s = round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None
     return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
                 frames=l1["dur_f"], items=len(l1["items"]), direction={k: v for k, v in d.items() if k != "spend"}, spend=([d["spend"]] if d.get("spend") else []) +
+                [dict(u,stage='supply',what='primary documents') for research in pack.get('document_research',[]) for u in research.get('spend',[])] +
+                [dict(u,stage='supply',what='documentary research revision') for u in pack.get('research_spend',[])] +
                 [dict(stage="score", what="picture-to-words check", **u) for u in (beats.get("placement_check") or {}).get("spend", [])])
 
 
@@ -517,7 +546,7 @@ def _rebuild_rejected(ctx, script, sc, report):
     ctx.log(f"composed picture check: rebuilding without {len(dropped)} rejected placements")
     old_spend = sc.get("spend", [])
     rebuilt = score(ctx, script)
-    rebuilt["spend"] = old_spend + [u for u in rebuilt.get("spend", []) if u.get("what") == "picture-to-words check"]
+    rebuilt["spend"] = old_spend + [u for u in rebuilt.get("spend", []) if u not in old_spend]
     sc.clear()
     sc.update(rebuilt)
     json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)

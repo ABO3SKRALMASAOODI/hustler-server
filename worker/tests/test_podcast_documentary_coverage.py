@@ -115,3 +115,42 @@ def test_podcast_payoff_hole_survives_half_second_measurement():
     assert 1 <= p['hole_min_s'] <= p['hole_max_s'] <= 2.3
     assert 10 <= p['hole_db'] <= 24
     assert p['broadband_bed_db']==5.5
+
+
+def test_primary_document_reader_rejects_private_urls(monkeypatch):
+    import socket
+    spec=importlib.util.spec_from_file_location('wf1_documents_test',path.with_name('wf1_documents.py'))
+    docs=importlib.util.module_from_spec(spec);spec.loader.exec_module(docs)
+    monkeypatch.setattr(socket,'getaddrinfo',lambda *a,**k:[(2,1,6,'',('127.0.0.1',443))])
+    with pytest.raises(ValueError,match='non-public'):
+        docs.public_url('https://example.org/paper.pdf')
+    for url in ('http://example.org/a','https://user:password@example.org/a','https://example.org:8443/a'):
+        with pytest.raises(ValueError,match='public HTTPS'):docs.public_url(url)
+
+
+def test_primary_document_pixels_remain_stills_and_canonical_subject_is_available(tmp_path):
+    from PIL import Image
+    import io
+    spec=importlib.util.spec_from_file_location('wf1_documents_test',path.with_name('wf1_documents.py'))
+    docs=importlib.util.module_from_spec(spec);spec.loader.exec_module(docs)
+    buf=io.BytesIO();Image.new('RGB',(800,600),'white').save(buf,format='PNG')
+    assert docs.pages(buf.getvalue())[0].size==(800,600)
+    coverage={'windows':[dict(t0=0.,t1=2.,name='Solar System',subjects=['NASA visualization'],must_show='Actual planetary system')]}
+    rows=C.proposals(coverage,{}, {'Solar System':[dict(path='actual-document.jpg')]})
+    assert len(rows)==1 and rows[0][2]=='photo'
+    with pytest.raises(C.CoverageError,match='moving=0.000'):
+        C.require_coverage(rows,coverage,2.)
+
+
+def test_research_revision_preserves_named_subject_and_word_boundaries():
+    import json
+    class LLM:
+        @staticmethod
+        def ask(*a,**k):
+            return json.dumps(dict(windows=[dict(i=0,name='Different company',must_show='wrong'),dict(i=1,name='Actual company',must_show='Its visibly identified premises OR product interface',first=999,last=999,video_searches=['actual company official tour'])])),{}
+        json_block=staticmethod(json.loads)
+    coverage=dict(windows=[dict(name='First',first=0,last=4,t0=0.,t1=2.),dict(name='Actual company',first=5,last=9,t0=2.,t1=4.)])
+    C.repair_requirements(coverage,[0,1],{},LLM())
+    assert coverage['windows'][0]['name']=='First' and 'must_show' not in coverage['windows'][0]
+    assert coverage['windows'][1]['first']==5 and coverage['windows'][1]['last']==9
+    assert coverage['windows'][1]['t0']==2. and coverage['windows'][1]['t1']==4.

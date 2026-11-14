@@ -1,4 +1,6 @@
 psycopg2-binary==2.9.10
+# Rasterize authentic source documents for documentary workflows (never generated evidence).
+pypdfium2==5.15.2
 boto3==1.35.99
 pydantic==2.9.2
 openai==1.59.9

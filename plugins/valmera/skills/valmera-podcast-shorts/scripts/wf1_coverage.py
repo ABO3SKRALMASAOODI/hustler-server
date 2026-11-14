@@ -61,7 +61,10 @@ a generic boardroom for a company, a galaxy for the solar system, or a later eve
 For abstract or hypothetical claims show a truthful concrete illustration/document and explicitly
 say what it DOES NOT establish. A campus can illustrate studying there without claiming it records
 the particular conversation. Do not invent evidence of an unfilmed event or hypothetical number.
-Keep the opening words intact. Preserve short speaker passages at emotional turns.
+Keep the opening audio and captions intact. External pictures may begin on the very first word;
+they never remove or delay speech or captions. Do not impose a two-second speaker-only opening.
+An entity named in the opening still needs a picture window on its words.
+Preserve short speaker passages at emotional turns.
 Never leave an unchanged speaker passage longer than three seconds: use a relevant external picture
 or a meaningful rhetorical move, never arbitrary alternating reframes. A move cannot count as a picture.
 Moves are sparse rhetorical changes that justify an eased camera move on the speaker, each with
@@ -110,7 +113,8 @@ def proposals(coverage, footage, pictures, fps=30, lead=3):
     for i, window in enumerate(coverage['windows']):
         a, b = round(window['t0']*fps)+lead, round(window['t1']*fps)+lead
         candidates = [('clip', c.get('subject', window['name']), c) for c in sorted(footage.get(i, []),key=lambda c:-c.get('motion_p90',0))]
-        candidates += [('photo', name, p) for name in window.get('subjects', [window['name']]) for p in pictures.get(name, [])]
+        names=list(dict.fromkeys([window['name'],*window.get('subjects',[])]))
+        candidates += [('photo', name, p) for name in names for p in pictures.get(name, [])]
         candidates = [r for r in candidates if r[2]['path'] not in used]
         wanted = max(1, math.ceil((b-a)/fps*.8))
         candidates = candidates[:wanted]
@@ -130,6 +134,33 @@ def proposals(coverage, footage, pictures, fps=30, lead=3):
             out.append([pos,end,kind,name,dict(rec, window=i, illustration=window['must_show'])])
             used.add(rec['path']); pos=end
     return out
+
+
+def repair_requirements(coverage, wanted, evidence, llm):
+    """A director corrects over-specific research constraints without changing spoken facts or timing."""
+    system='''Revise documentary acquisition requirements after real research failed.
+Return JSON {"windows":[{"i":integer,"name":unchanged subject name,"must_show":str,"video_searches":[str]}]}.
+Keep every actual identity, object, place and spoken fact. Do not replace a specific named thing with
+a merely related one. Requirements describe ANY ONE faithful shot, using alternatives (OR), not a
+whole montage that every one-second clip must contain. Do not require a specific paper, demo or
+camera angle invented by the previous director when the speaker did not name it.
+For a company, its authentic identifiable premises, products, interfaces or original records can
+illustrate the company; they do not prove the economic claim. Generic unbranded offices/warehouses
+or random people do not identify a named company. A historical setting can illustrate a recollection
+without pretending to record the particular conversation. Never invent an unnamed participant.
+A named scientific system still needs that exact system; a galaxy is never a solar system, and a
+generic neural network is not AlexNet. A hypothetical theory needs an attributed theoretical diagram
+or document, never purported observational footage. Do not invent searches for unfilmed events.
+Suggest existing, fetchable primary footage and actual documents. Separate context from claims of
+exact archival evidence. The independent picture-to-word checks will still reject every mismatch.
+Do not change the subject name or any spoken words, window boundaries, or numerical quality targets.'''
+    content=json.dumps(dict(context=coverage.get('context'),windows=[dict(coverage['windows'][i],i=i) for i in wanted],research=evidence))
+    text,use=llm.ask(system,content,effort='medium')
+    for row in llm.json_block(text).get('windows',[]):
+        i=row.get('i')
+        if i not in wanted or row.get('name')!=coverage['windows'][i]['name'] or not row.get('must_show'):continue
+        coverage['windows'][i].update(must_show=row['must_show'],video_searches=row.get('video_searches') or [])
+    return use
 
 
 def require_coverage(ins, coverage, duration, fps=30):
