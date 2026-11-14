@@ -7533,6 +7533,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         _cur_v = (ctx.versions_written[-1]
                                   if ctx.versions_written
                                   else start_version)
+                        # A question is also a customer-facing reply. It cannot
+                        # bypass rendered evidence by claiming completion in its preamble.
+                        import reply_truth
+                        q.question = reply_truth.enforce(
+                            ctx, client, ctx.agent_model or model,
+                            quality_verifier.request_text_for(ctx), q.question,
+                            honesty, strict=True)
+                        _question_outcome = ("partial" if q.question == reply_truth.UNVERIFIED
+                                             else AWAITING_USER)
                         _activity(worker_db, session_id, name, args,
                                   f"asked: {q.question}",
                                   edl_version=_cur_v)
@@ -7548,15 +7557,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         _asked_ledger = _asks_summary(ctx)
                         worker_db.run(dbx.add_message, session_id,
                                       "assistant", q.question,
-                                      {"ask_user": True,
+                                      {"ask_user": _question_outcome == AWAITING_USER,
                                        "edl_version": _cur_v,
-                                       "outcome": AWAITING_USER,
+                                       "outcome": _question_outcome,
                                        **({"ask_ledger": _asked_ledger}
                                           if _asked_ledger else {})})
                         _complete_adopted_steers(ctx, worker_db, job)
-                        return {"status": "awaiting_user",
+                        return {"status": ("awaiting_user" if _question_outcome == AWAITING_USER else "replied"),
                                 "steps": total_steps, "timings": timings,
-                                "outcome": AWAITING_USER, "billable": False,
+                                "outcome": _question_outcome, "billable": False,
                                 **({"ask_ledger": _asked_ledger}
                                    if _asked_ledger else {})}
                 except agent_tools.FeatureUpgrade as gate:

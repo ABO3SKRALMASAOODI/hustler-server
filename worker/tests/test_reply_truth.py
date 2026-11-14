@@ -114,3 +114,30 @@ def test_a_failing_check_posts_the_draft(monkeypatch, tmp_path):
         raise RuntimeError("provider down")
     monkeypatch.setattr(llm, "create_with_dialect", boom)
     assert reply_truth.enforce(_Ctx(), _Client([]), "m", "req", P5533_DRAFT) == P5533_DRAFT
+
+
+def test_strict_question_preserves_question_but_rewrites_unproved_preamble(monkeypatch,tmp_path):
+    _wire(monkeypatch,tmp_path)
+    client = _Client([{'quote':'The background is done.', 'status':'contradicted',
+                       'honest':'The wall is still visible.', 'seen':'wall remains'}])
+    out = reply_truth.enforce(_Ctx(),client,'m','req',
+                              'The background is done. Which music would you like?',strict=True)
+    assert out=='The wall is still visible. Which music would you like?'
+
+
+def test_strict_question_fails_closed_on_provider_error_and_quote_drift(monkeypatch,tmp_path):
+    _wire(monkeypatch,tmp_path)
+    monkeypatch.setattr(reply_truth,'check',lambda *a,**k:None)
+    assert reply_truth.enforce(_Ctx(),_Client([]),'m','req',P5533_DRAFT,strict=True)==reply_truth.UNVERIFIED
+    out,_ = reply_truth.corrected(P5533_DRAFT,[{'quote':'wrong quoted words',
+        'status':'contradicted','honest':'The dancers were dimmed.'}],strict=True)
+    assert out==reply_truth.UNVERIFIED
+
+
+def test_strict_question_without_frames_does_not_accept_a_claim_as_shown(monkeypatch,tmp_path):
+    _wire(monkeypatch,tmp_path)
+    client = _Client([{'quote':'Done.', 'status':'shown','honest':'','seen':''}])
+    out = reply_truth.enforce(_Ctx(False),client,'m','req','Done. Which music?',strict=True)
+    assert 'Done.' not in out and 'Which music?' in out
+    question='Can you upload the original without the mark?'
+    assert reply_truth.enforce(_Ctx(False),_Client([]),'m','req',question,strict=True)==question

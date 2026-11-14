@@ -121,16 +121,16 @@ def items(ctx, edl):
     return "\n".join(out[:60]) or "no added pictures, clips, titles or effects"
 
 
-def check(ctx, client, model, request_text, draft, limit=3):
+def check(ctx, client, model, request_text, draft, limit=3, strict=False):
     """[{quote, status, seen, honest}] for the draft against the film, or None when it cannot be
     checked here. Records the call (llm.record) so it is metered with the request."""
     import llm
     from score import asks
     preview = _preview(ctx)
-    if not preview:
+    if not preview and not strict:
         return None
-    pages = asks.frame_pages(ctx, preview, limit=limit)
-    if not pages:
+    pages = asks.frame_pages(ctx, preview, limit=limit) if preview else []
+    if not pages and not strict:
         return None
     try:
         edl = ctx.latest_edl().get("json")
@@ -146,7 +146,14 @@ def check(ctx, client, model, request_text, draft, limit=3):
     tool = {"type": "function", "function": {
         "name": "record_reply_truth", "description": "Record the checked claims.",
         "parameters": SCHEMA, "strict": True}}
-    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": content}]
+    system = SYSTEM
+    if strict:
+        system += ("\nThis text may be a question to the customer, but its claims of completed edits "
+                   "still require evidence. For cannot_tell claims, supply an honest uncertainty line "
+                   "in the customer's language too. No supplied frames means a visual completion "
+                   "claim cannot be verified. Preserve genuine questions and statements that an "
+                   "edit was not made; those are not completion claims.")
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
     t0 = time.monotonic()
     response = llm.create_with_dialect(
         client, model, messages, max_tokens=3000, tools=[tool],
@@ -163,21 +170,30 @@ def check(ctx, client, model, request_text, draft, limit=3):
     rows = value.get("claims") if isinstance(value, dict) else None
     if not isinstance(rows, list):
         return None
-    return [r for r in rows if isinstance(r, dict) and r.get("status") in
+    rows = [r for r in rows if isinstance(r, dict) and r.get("status") in
             ("shown", "contradicted", "cannot_tell")]
+    if strict and not pages:
+        rows = [dict(r, status="cannot_tell", honest=r.get("honest") or UNVERIFIED)
+                if r.get("status") == "shown" else r for r in rows]
+    return rows
 
 
-def corrected(draft, rows):
+UNVERIFIED = "I couldn't verify the requested changes in the preview, so I can't confirm they're complete."
+
+
+def corrected(draft, rows, strict=False):
     """(reply, swapped): every contradicted claim's quoted words replaced by its honest line; an
     honest line whose quote is not verbatim in the draft is added after the first paragraph."""
     import reply_grounding
     text = str(draft or "")
     swapped, added = [], []
     for r in rows or []:
-        if r.get("status") != "contradicted":
+        if r.get("status") not in (("contradicted", "cannot_tell") if strict else ("contradicted",)):
             continue
         quote = str(r.get("quote") or "").strip()
         honest = str(r.get("honest") or "").strip()
+        if strict and (not honest or not quote or quote not in text):
+            return UNVERIFIED, [quote or "unverified claim"]
         if not honest:
             continue
         # the whole sentence that holds the quoted words, so a clause never leaves half a sentence
@@ -195,18 +211,20 @@ def corrected(draft, rows):
     return text, swapped
 
 
-def enforce(ctx, client, model, request_text, draft, honesty=None):
+def enforce(ctx, client, model, request_text, draft, honesty=None, strict=False):
     """The draft with its contradicted claims told truthfully. Never raises."""
     if not draft or not str(draft).strip() or client is None or not model:
-        return draft
+        return UNVERIFIED if strict else draft
     try:
-        rows = check(ctx, client, model, request_text, draft)
+        rows = check(ctx, client, model, request_text, draft, **({"strict": True} if strict else {}))
     except Exception as exc:  # noqa: BLE001 - an unchecked reply goes out as drafted
         print(f"[reply-truth] check skipped: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
-        return draft
+        return UNVERIFIED if strict else draft
+    if rows is None and strict:
+        return UNVERIFIED
     if not rows:
         return draft
-    text, swapped = corrected(draft, rows)
+    text, swapped = corrected(draft, rows, strict=strict)
     if isinstance(honesty, dict):
         honesty["reply_truth"] = {
             "claims": len(rows),
