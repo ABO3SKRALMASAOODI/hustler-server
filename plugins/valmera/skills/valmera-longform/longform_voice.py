@@ -207,17 +207,55 @@ def finish(out, script):
     raise ValueError('measured Easton delivery remains outside VO2: '+json.dumps(after))
 
 
+def raw_checkpoint(out,script,groups,picks=None):
+    """Commit the read before the shared mastering FFT allocates its buffers."""
+    import narrate as N
+    N.free_gate_listener();N.free_take_listener()
+    out=Path(out)
+    for name in ('narration.wav','words.json','render.json'):
+        shutil.copy2(out/name,out/(Path(name).stem+'_raw'+Path(name).suffix))
+    for name in ('narration_performance.wav','words_performance.json','render_performance.json','longform_voice.json','check.json'):
+        (out/name).unlink(missing_ok=True)
+    (out/'read-stage.json').write_text(json.dumps(dict(script=script,groups=groups,picks=picks or [])))
+
+
+def isolated_render(a):
+    """Each phase exits before the next loads models or whole-film FFT buffers.
+    The outer guard observes every child; there is one shared lock for the job.
+    """
+    out=Path(a.out);script=json.loads(Path(a.script).read_text())
+    stage=out/'read-stage.json'
+    ready=stage.exists() and json.loads(stage.read_text())['script']==script
+    if not ready or a.rerender:
+        subprocess.run([sys.executable,str(Path(__file__).resolve()),'_render',a.script,'--out',a.out,'--band',a.band],check=True)
+    rj=out/'render.json'
+    mastered=rj.exists() and json.loads(rj.read_text()).get('stories_read')
+    if a.rerender or not mastered:
+        subprocess.run([sys.executable,str(Path(__file__).resolve()),'_shared-finish',a.script,'--out',a.out,'--band',a.band],check=True)
+    subprocess.run([sys.executable,str(Path(__file__).resolve()),'finish',a.script,'--out',a.out,'--band',a.band],check=True)
+
+
 def main():
     ap=argparse.ArgumentParser();sub=ap.add_subparsers(dest='cmd',required=True)
-    for cmd in ('render','finish'):
+    for cmd in ('render','finish','_render','_shared-finish'):
         p=sub.add_parser(cmd);p.add_argument('script');p.add_argument('--out',required=True);p.add_argument('--band',default='04')
+        if cmd=='render':p.add_argument('--rerender',action='store_true')
     p=sub.add_parser('level-voices');p.add_argument('dir')
     a=ap.parse_args()
     if not os.environ.get('OPENAI_API_KEY'):
         for line in Path('/Users/masaoodi/Documents/Valmera/hustler-server/backend/.env').read_text().splitlines():
             if line.startswith('OPENAI_API_KEY='): os.environ['OPENAI_API_KEY']=line.split('=',1)[1].strip().strip('"').strip("'")
     if a.cmd=='level-voices': return shared.level_voices(a)
-    if a.cmd=='render' and not (Path(a.out)/'narration_performance.wav').exists():
+    if a.cmd=='render':return isolated_render(a)
+    if a.cmd=='_shared-finish':
+        out=Path(a.out);stage=json.loads((out/'read-stage.json').read_text())
+        if stage['script']!=json.loads(Path(a.script).read_text()):raise ValueError('raw read belongs to a different script')
+        for name in ('narration.wav','words.json','render.json'):
+            shutil.copy2(out/(Path(name).stem+'_raw'+Path(name).suffix),out/name)
+        import narrate as N
+        N.malloc_returns_memory()
+        return shared.finish(out,stage['script'],stage['groups'],stage['picks'])
+    if a.cmd=='_render':
         import narrate as N
         import datetime
         original_log=N.log
@@ -243,14 +281,11 @@ def main():
                 if requested>30:log(row['id']+': thirty-take retry budget spent; retaining strict gate')
             return original_generate(self,bounded,dest,log,seed0)
         shared.Read.generate_phonon=bounded_generate
-        original_finish=shared.finish
-        def finished_read(*args,**kwargs):
-            N.free_gate_listener();N.free_take_listener()
-            return original_finish(*args,**kwargs)
-        shared.finish=finished_read
+        shared.finish=raw_checkpoint
         shared.render(a)
         rendered=json.loads((Path(a.out)/'render.json').read_text())
         if rendered.get('engine')!='lines:phonon':raise RuntimeError('WF4 requires Easton; a different-engine fallback cannot be delivered')
+        return
     print(json.dumps(finish(a.out,json.loads(Path(a.script).read_text()))))
 
 
