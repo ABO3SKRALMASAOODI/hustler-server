@@ -149,3 +149,16 @@ def test_missing_ledger_cannot_lose_required_check_on_resume():
     agent_loop._typed_asks_start(resumed,None,{},None,{},saved)
     reply,outcome=agent_loop._asks_settle(resumed,'Done','fulfilled')
     assert outcome=='partial' and "can't confirm" in reply
+
+
+def test_authorized_shorter_cut_is_allowed_and_evidence_is_cached(monkeypatch,tmp_path):
+    import media,llm
+    monkeypatch.setattr(media,'frame_at',lambda *a,**k:None)
+    monkeypatch.setattr(llm,'image_part',lambda p:{'type':'image_url','image_url':{'url':p}})
+    calls=[]
+    monkeypatch.setattr(asks,'_call',lambda *a,**k: (calls.append(a[1]) or {'allow':True,'reason':'The customer explicitly requested the last five seconds.'},{}))
+    ctx=NS(user_message='Keep only the last five seconds',llm_client=object(),agent_model='any',
+           proxy_path=lambda:'source.mp4',workdir=str(tmp_path),index={})
+    for _ in range(2):
+        assert ei.cut_refusal(ctx,{'keep':[[0,11]]},{'keep':[[6,11]]}) is None
+    assert calls==['check_cut_evidence']
