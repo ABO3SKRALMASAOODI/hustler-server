@@ -266,7 +266,7 @@ def linear_to_srgb(c):
 
 def rgb_to_lab(rgb):
     """sRGB 0..1 -> CIELAB (D65)."""
-    xyz = srgb_to_linear(rgb) @ _M_RGB2XYZ.T / _D65
+    xyz = _colour_matrix(srgb_to_linear(rgb), _M_RGB2XYZ) / _D65
     eps, k = 216 / 24389, 24389 / 27
     f = np.where(xyz > eps, np.cbrt(xyz), (k * xyz + 16) / 116)
     L = 116 * f[..., 1] - 16
@@ -288,7 +288,17 @@ def lab_to_rgb(lab):
     xyz = np.stack([finv(fx), np.where(lab[..., 0] > k * eps, fy ** 3,
                                        lab[..., 0] / k), finv(fz)],
                    axis=-1) * _D65
-    return np.clip(linear_to_srgb(xyz @ _M_XYZ2RGB.T), 0, 1)
+    return np.clip(linear_to_srgb(_colour_matrix(xyz, _M_XYZ2RGB)), 0, 1)
+
+
+def _colour_matrix(values, matrix):
+    """Three-channel pixel transform without entering a threaded BLAS pool.
+
+    Independent worker jobs may colour-match concurrently. A replay stalled
+    in OpenBLAS dgemm_thread_tn for this N-by-3 operation. The direct NumPy
+    contraction preserves the transform and does not dispatch to BLAS.
+    """
+    return np.einsum('...j,ij->...i', values, matrix, optimize=False)
 
 
 def delta_e2000(lab1, lab2):
@@ -603,7 +613,13 @@ def dominant_hue(rgb, mask=None, min_radius=18.0, exclude_skin=True,
 
 def _stats(lab):
     x = np.asarray(lab, np.float64).reshape(-1, 3)
-    return x.mean(axis=0), np.cov(x, rowvar=False) + np.eye(3) * 1e-6
+    mean = x.mean(axis=0)
+    if len(x) > 1:
+        centred = x - mean
+        cov = np.einsum('ni,nj->ij', centred, centred, optimize=False) / (len(x) - 1)
+    else:
+        cov = np.cov(x, rowvar=False)
+    return mean, cov + np.eye(3) * 1e-6
 
 
 def _sqrtm(m):
@@ -666,7 +682,7 @@ def _fit(ls, lr, method):
         k = np.sqrt(np.diag(cr) / np.diag(cs))
         return lambda lab: (np.asarray(lab) - ms) * k + mr
     T = mkl_matrix(cs, cr)
-    return lambda lab: (np.asarray(lab) - ms) @ T.T + mr
+    return lambda lab: _colour_matrix(np.asarray(lab) - ms, T) + mr
 
 
 def _match_lab(src_rgb, ref_rgb, shared=True):
