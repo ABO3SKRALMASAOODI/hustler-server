@@ -264,6 +264,19 @@ def evidence_for_gaps(ctx,script,ft,gaps):
     ft['lines']=list(by.values())
 
 
+def photo_research_ready(root,gaps,duration):
+    """Two completed video searches may establish a genuinely scarce view.
+    Count the saved engine results, including uncovered lines, not an attempt
+    counter: a failed download or interrupted search is not research evidence.
+    """
+    if sum(g['seconds'] for g in gaps)>duration*.45:return False
+    counts={}
+    for path in Path(root).glob('*/footage.json'):
+        for i in {r['i'] for r in read(path).get('lines',[])}:
+            counts[i]=counts.get(i,0)+1
+    return all(counts.get(g['seg'],0)>=2 for g in gaps)
+
+
 def supply(ctx, script):
     if (Path(ctx.run_dir)/'read-repair.pending.json').exists():
         from read_repair import finish_pending
@@ -299,6 +312,9 @@ def supply(ctx, script):
             break
         except CoverageError as failure:
             gaps=failure.gaps
+            if photo_research_ready(Path(ctx.supply)/'footage',gaps,wj['duration']):
+                ctx.log('two completed video searches cover each remaining gap; researching unique archive photographs within the 45% limit')
+                break
             avoid=[dict(url=c['source']['url'],time_range=c['time_range']) for ln in ft['lines'] for c in ln['clips']]
             avoid += [dict(url=v['source']['url'],time_range=v['time_range']) for v in ft['voices']]
             ctx.log(f"footage repair {attempt+1}: {len(gaps)} gaps, {sum(g['seconds'] for g in gaps):.1f}s")
@@ -608,7 +624,8 @@ def check(ctx,rd,sc):
     if not checks['ok']: raise RuntimeError('delivered-file gates failed: '+json.dumps(targets))
     evidence=Path(ctx.state_root).parent/'evidence'/ctx.run_id
     evidence.mkdir(parents=True,exist_ok=True)
-    for src in [pr,mp,sound_metrics,Path(ctx.run_dir)/'measured.json',Path(ctx.supply)/'shots.json',Path(rd['film']+'.json')]:
+    for src in [pr,mp,sound_metrics,Path(ctx.run_dir)/'measured.json',Path(ctx.run_dir)/'structure.json',
+                Path(sc['l1']),Path(ctx.supply)/'shots.json',Path(rd['film']+'.json')]:
         shutil.copy2(src,evidence/src.name)
     shutil.copytree(Path(ctx.supply)/'picture-evidence',evidence/'pictures',dirs_exist_ok=True)
     shutil.copytree(metrics,evidence/'voice-metrics',dirs_exist_ok=True)

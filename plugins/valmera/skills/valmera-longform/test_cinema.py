@@ -25,6 +25,16 @@ def test_coverage_failure_is_explicit():
     assert e.value.gaps[0]['seconds']>5
 
 
+def test_photo_fallback_requires_completed_research_and_moving_majority(tmp_path):
+    gap=[dict(seg=3,seconds=40)]
+    C.save(tmp_path/'initial/footage.json',dict(lines=[dict(i=3,clips=[])]))
+    assert not C.photo_research_ready(tmp_path,gap,100)
+    C.save(tmp_path/'second/footage.json',dict(lines=[dict(i=3,clips=[])]))
+    assert C.photo_research_ready(tmp_path,gap,100)
+    assert not C.photo_research_ready(tmp_path,[dict(seg=3,seconds=46)],100)
+    assert not C.photo_research_ready(tmp_path,[dict(seg=4,seconds=10)],100)
+
+
 def test_unique_footage_covers_narration_without_freeze():
     sc={'segments':[{'say':'Words.','chapter':'c'}]}
     words={'duration':8,'words':[{'w':'Words.','start':0.1,'end':1,'seg':0}]}
