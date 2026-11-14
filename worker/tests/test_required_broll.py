@@ -14,6 +14,7 @@ def test_rejected_generic_pictures_trigger_archive_retry_without_relaxing_subjec
         return [{'id': 'wrong' if len(queries) == 1 else 'mining-rig'}], []
     def check(subject, hits, **kw):
         assert subject['must_show'] == 'Real mining hardware'
+        assert kw['frame_size'][0] < kw['frame_size'][1]
         if hits[0]['id'] == 'wrong':
             return [], [{'shows': 'coins and padlocks', 'ok': False}], 0
         return hits, [{'shows': 'operating mining rig', 'ok': True}], 0
@@ -28,11 +29,34 @@ def test_rejected_generic_pictures_trigger_archive_retry_without_relaxing_subjec
     monkeypatch.setattr(agent_tools, '_remember_search_hits', lambda *a, **kw: None)
     p = {'id': 'picture1', 'subject': 'crypto mining', 'query': 'long vague query',
          'must_show': 'Real mining hardware', 'source_words': []}
-    ctx = NS(workdir=str(tmp_path), stock_results={})
-    required_broll.supply(ctx, {'required_pictures': [p]})
+    ctx = NS(workdir=str(tmp_path), stock_results={}, index={'video': {'width': 1920, 'height': 1080}},
+             latest_edl=lambda: {'json': {'frame': {'ratio': '16:9'}}})
+    required_broll.supply(ctx, {'required_pictures': [p], 'picture_frame_ratio': '9:16'})
     assert len(queries) == 2
     assert p['subject'] == 'crypto mining'
     assert p['candidates'] == ['required:picture1:mining-rig']
+
+
+def test_picture_candidate_is_checked_in_its_actual_cover_shape(monkeypatch, tmp_path):
+    import broll_source, net_fetch, base64, io, shutil
+    from PIL import Image
+    source = tmp_path / 'source.jpg'
+    im = Image.new('RGB', (400, 200), 'red')
+    im.paste('blue', (0, 0, 100, 200))  # named mark lies outside the centre cover crop
+    im.save(source)
+    monkeypatch.setattr(net_fetch, 'download', lambda url, path, **kw: shutil.copyfile(source, path))
+    def check(system, content, *args, **kw):
+        pic = next(p for p in content if p['type'] == 'image')
+        shown = Image.open(io.BytesIO(base64.b64decode(pic['source']['data'])))
+        assert shown.width < shown.height
+        assert shown.getpixel((shown.width // 2, shown.height // 2))[0] > 200
+        assert shown.getpixel((0, shown.height // 2))[2] < 50
+        return '[{"n":0,"ok":false,"grade":1,"shows":"the requested blue mark was cropped away"}]', 0
+    monkeypatch.setattr(broll_source, '_ask', check)
+    hits, report, _ = broll_source.check_named({'name': 'blue mark', 'must_show': 'blue mark'},
+        [{'id': 'x', '_thumb': 'https://example.test/picture.jpg'}],
+        workdir=str(tmp_path), frame_size=(720, 1280))
+    assert hits == [] and report[0]['ok'] is False
 
 
 def test_every_named_subject_becomes_durable_ask_with_word_anchor(monkeypatch):
