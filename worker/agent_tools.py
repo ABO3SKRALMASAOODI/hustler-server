@@ -1076,12 +1076,17 @@ def get_video_info(ctx):
         edl = ctx.latest_edl()
         ins = edl["json"].get("inserts") or []
         prog = _program_map(ctx, edl["json"])
-        return ("This project has no main video. Uploaded audio, clips and images "
+        guidance = ("This project has no main video. Uploaded audio, clips and images "
                 "can form a finished film here in Valmera. Keep narration on "
                 "the timeline with add_voiceover, place checked footage with "
                 "place_search_result, and add captions and designed motion. "
                 "Review render_preview(complete=true), then export_final and "
-                "download_url(kind=final); downloaded source assets are not a finished film. "
+                "download_url(kind=final); downloaded source assets are not a finished film. ")
+        if not getattr(ctx, "sight_out", False):
+            guidance = ("No main video in this project — this is a blank canvas. Build "
+                        "the program from uploaded images/clips, then place them "
+                        "with insert_media. ")
+        return (guidance +
                 f"Current EDL v{edl['version']}: {len(ins)} placed "
                 f"clip{'s' if len(ins) != 1 else ''}, "
                 f"{program_duration(edl['json'])}s total."

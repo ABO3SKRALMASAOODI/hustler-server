@@ -84,7 +84,16 @@ def measure(path, edl, audio=None, duration_s=None):
     if failures or not diffs:
         report['motion_error'] = failures or ['no decoded frame pairs']
     a = report['authored']
-    report['no_authored_text'] = not (a['text_items'] or a['captions_enabled'] or a['caption_items'] or a['motion_graphics'])
+    # A graphic may be a shape with no words. An enabled caption lane can
+    # likewise have no transcribed words. Neither declaration proves text
+    # was rendered; leave those cases unknown until frame review.
+    if a['text_items'] or a['caption_items']:
+        report['no_authored_text'] = False
+    elif a['captions_enabled'] or a['motion_graphics']:
+        report['no_authored_text'] = None
+        report['warnings'].append('TEXT UNKNOWN: captions are enabled or graphics exist, but no explicit text items are declared; inspect frames.')
+    else:
+        report['no_authored_text'] = True
     if report['silent']:
         report['warnings'].append('SILENT: encoded mix is below -70 LUFS.')
     if report['no_authored_text']:

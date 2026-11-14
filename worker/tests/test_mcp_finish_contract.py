@@ -60,6 +60,18 @@ def test_failed_vision_never_invents_description(tmp_path, monkeypatch):
     assert not list(tmp_path.iterdir())
 
 
+def test_description_provider_outage_keeps_known_evidence(tmp_path, monkeypatch):
+    monkeypatch.setattr(net_fetch, 'download', lambda *a, **kw: None)
+    def unavailable(*a, **kw):
+        raise RuntimeError('provider unavailable')
+    monkeypatch.setattr(llm, 'ask_vision', unavailable)
+    known = {'id': 'known', 'description': 'A train at a platform.'}
+    rows, missing = mcp_search.describe_missing(SimpleNamespace(workdir=str(tmp_path)),
+        [known, {'id': 'unknown', '_thumb': 'https://provider/thumb'}])
+    assert rows == [known] and missing == 1
+    assert not list(tmp_path.iterdir())
+
+
 def test_place_uses_acquired_key_and_source_window(monkeypatch):
     ctx = SimpleNamespace(stock_added=[])
     def acquire(ctx, id):
@@ -108,3 +120,11 @@ def test_sound_only_on_automatic_tail_cannot_hide_silent_program(tmp_path):
                               audio={'i': -20}, duration_s=4)
     assert report['program_s'] == 3
     assert report['silent'] is True
+
+
+@pytest.mark.parametrize('extra', [{'motion': [{'kind': 'shape'}]}, {'captions': {'enabled': True}}])
+def test_graphics_or_caption_switch_do_not_prove_visible_text(monkeypatch, extra):
+    monkeypatch.setattr(subprocess, 'run', lambda *a, **kw: SimpleNamespace(stdout=bytes(96*54*3)))
+    report = mcp_craft.measure('unused', {'keep': [[0, 3]], **extra}, audio={'i': -20}, duration_s=3)
+    assert report['no_authored_text'] is None
+    assert any('TEXT UNKNOWN' in w for w in report['warnings'])

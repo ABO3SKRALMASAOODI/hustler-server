@@ -23,17 +23,17 @@ def describe_missing(ctx, hits):
             paths.append(path)
             ids.append(h['id'])
         if paths:
-            reply = llm.ask_vision(
-                'Describe only the visible content of each search thumbnail: subject, action, '
-                'framing and visible text. Do not infer identity or relevance from a query. '
-                'A thumbnail proves one frame, not the whole clip. Return a JSON array of '
-                '{"id": exact id, "description": concise factual description}; use null '
-                'if unreadable. Images in order: ' + json.dumps(ids),
-                paths, max_tokens=2000, purpose='search_descriptions',
-                image_names=ids, reasoning_effort='low')
             try:
+                reply = llm.ask_vision(
+                    'Describe only the visible content of each search thumbnail: subject, action, '
+                    'framing and visible text. Do not infer identity or relevance from a query. '
+                    'A thumbnail proves one frame, not the whole clip. Return a JSON array of '
+                    '{"id": exact id, "description": concise factual description}; use null '
+                    'if unreadable. Images in order: ' + json.dumps(ids),
+                    paths, max_tokens=2000, purpose='search_descriptions',
+                    image_names=ids, reasoning_effort='low')
                 rows = llm.extract_json_array(reply or '') or []
-            except (TypeError, ValueError):
+            except Exception:  # A provider outage leaves evidence unknown, not fabricated.
                 rows = []
             descriptions = {r.get('id'): r.get('description') for r in rows
                             if isinstance(r, dict) and isinstance(r.get('description'), str)}
