@@ -159,6 +159,20 @@ def test_legacy_metadata_patch_failure_cannot_drop_preview_checks(job):
     assert len(job.assets) == 1
 
 
+@pytest.mark.parametrize('missing', ['picture', 'audio'])
+def test_first_film_retries_without_publishing_when_a_check_did_not_finish(
+        job, monkeypatch, missing):
+    if missing == 'picture':
+        monkeypatch.setattr(renderer, 'picture_qc', lambda *a, **k: None)
+    else:
+        monkeypatch.setattr(renderer.audio_qc, 'measure', lambda *a, **k: None)
+    # Canvas fixtures need no source boundary; the payload still identifies
+    # the first-film publication contract.
+    with pytest.raises(RuntimeError, match='Preview QC did not finish'):
+        job.run(first_film_source_screen={'status': 'verified'})
+    assert job.assets == [] and job.deleted
+
+
 class _Waiting:
     """A row found while the job that made it is still measuring it."""
 
