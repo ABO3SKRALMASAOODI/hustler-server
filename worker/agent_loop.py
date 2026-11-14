@@ -6100,10 +6100,10 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
     final_text += _unused_fetched_audio_note(ctx)
     quality = _quality_handoff(ctx)
     outcome, billable = _turn_completion(ctx, status, fail_note=fail_note)
-    if getattr(ctx, "ask_ledger", None):
+    if getattr(ctx, "ask_ledger", None) or getattr(ctx, "ask_check_required", False):
         _asks_check(ctx, final_text, allow_repair=False)
         final_text, outcome = _asks_settle(ctx, final_text, outcome)
-        if isinstance(honesty, dict):
+        if isinstance(honesty, dict) and getattr(ctx, "ask_ledger", None):
             from score import asks as _asks
             honesty["ask_ledger"] = _asks.summary(
                 ctx.ask_ledger, getattr(ctx, "ask_verdict", None))

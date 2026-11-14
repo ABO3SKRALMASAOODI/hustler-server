@@ -168,3 +168,22 @@ def test_default_check_does_not_change_existing_route_opt_in():
     assert asks.parse(None)['mode']=='on'
     assert not asks.parse(None)['director'] and not asks.parse(None)['patch']
     assert asks.parse({'mode':'on'})['director'] and asks.parse({'mode':'on'})['patch']
+
+
+def test_budget_stop_cannot_claim_completion_after_ledger_failure(monkeypatch):
+    import fulfillment
+    posted = []
+    ctx = NS(ask_ledger=None, ask_check_required=True, last_preview=None,
+             autorendered=False)
+    monkeypatch.setattr(agent_loop, '_auto_render_if_needed', lambda *a, **k: ({'version':2}, ''))
+    monkeypatch.setattr(agent_loop, '_disclose_outstanding_quality', lambda c,t:t)
+    monkeypatch.setattr(agent_loop, '_unused_fetched_audio_note', lambda c:'')
+    monkeypatch.setattr(agent_loop, '_quality_handoff', lambda c:{})
+    monkeypatch.setattr(agent_loop, '_turn_completion', lambda *a, **k:('fulfilled',True))
+    monkeypatch.setattr(agent_loop, '_outcome_meta', lambda *a:{})
+    monkeypatch.setattr(agent_loop, '_turn_edl_changed', lambda c:True)
+    monkeypatch.setattr(fulfillment, 'disclose', lambda c,t:t)
+    db = NS(run=lambda fn,*a:posted.append(a))
+    result = agent_loop._finalize(ctx,db,1,'Completed and saved.','budget',3,{})
+    assert result['outcome']=='partial'
+    assert "can't confirm" in posted[-1][2]
