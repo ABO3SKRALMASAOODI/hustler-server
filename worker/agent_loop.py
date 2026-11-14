@@ -3044,14 +3044,13 @@ def _asks_settle(ctx, final, outcome):
     if not ledger or not ledger.get("asks"):
         if getattr(ctx, "ask_check_required", False):
             from score import asks
-            return asks.checked_reply(None, None), "partial"
+            import edit_scope
+            edit_scope.restore_unmet(ctx, ledger, None)
+            return edit_scope.disclose(ctx, asks.checked_reply(None, None)), "partial"
         return final, outcome
     from score import asks
     verdict = getattr(ctx, "ask_verdict", None)
     import edit_scope
-    if edit_scope.restore_unmet(ctx, ledger, verdict):
-        verdict = ctx.ask_verdict
-        final = asks.checked_reply(ledger, verdict)
     try:
         if verdict and str(verdict.get("edl_version")) != str(ctx.latest_edl().get("version")):
             verdict = None
@@ -3062,6 +3061,9 @@ def _asks_settle(ctx, final, outcome):
             verdict = None
     except Exception:  # noqa: BLE001
         verdict = None
+    if edit_scope.restore_unmet(ctx, ledger, verdict):
+        verdict = ctx.ask_verdict
+        final = asks.checked_reply(ledger, verdict)
     if verdict:
         final = asks.true_reply(ctx, ledger, verdict, final or "")
         block = asks.reply_block(ledger, verdict)
