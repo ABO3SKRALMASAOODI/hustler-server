@@ -375,13 +375,13 @@ def refill(ctx, script, pack, shortage):
     coverage = pack['coverage']
     windows = coverage['windows']
     wanted = shortage['weak_windows'] or list(range(len(windows)))
-    if not pack.get('research_revision'):
+    if pack.get('research_revision',0)<2:
         import wf1_coverage
         checks=os.path.join(ctx.supply,'placement_checks.json')
-        evidence=dict(available=[dict(i=r['i'],clips=[dict(subject=c.get('subject'),shows=c.get('shows')) for c in r['clips']]) for r in pack['footage']],
+        evidence=dict(available=[dict(i=r['i'],clips=[dict(subject=c.get('subject'),shows=c.get('shows'),source=c.get('source')) for c in r['clips']]) for r in pack['footage']],
                       rejected=[r['reason'] for r in json.load(open(checks)).values() if not r['ok']][-60:] if os.path.exists(checks) else [])
         usage=wf1_coverage.repair_requirements(coverage,wanted,evidence,_llm())
-        pack.setdefault('research_spend',[]).append(usage);pack['research_revision']=1
+        pack.setdefault('research_spend',[]).append(usage);pack['research_revision']=2
         stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
         with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
     import wf1_documents
@@ -451,12 +451,12 @@ def score(ctx, script):
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     sc = dict(title=script.get("title"), hook_line=script.get("hook_line"), close_line=script.get("close_line"),
               segments=[dict(say=ln["text"], pictures=[n for n in ln.get("subjects") or []]) for ln in pack["lines"]])
-    for attempt in range(3):
+    for attempt in range(8):
         try:
             l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
             break
         except wf1_coverage.CoverageError as error:
-            if attempt == 2:
+            if attempt == 7:
                 raise
             refill(ctx,script,pack,error.report)
     taste = F.taste_check(l1, beats)
@@ -497,7 +497,7 @@ def _render_review(ctx, rd, sc):
         rows.append([a, b, "clip", p["name"], dict(path=rd["film"], src=[a/F.FPS,b/F.FPS],
                     check_times=[f/F.FPS for f in sorted(frames)], display_words=words,
                     illustration=p.get('illustration'),
-                    source=dict(url=p.get("source")))])
+                    source=p.get('source_evidence') or dict(url=p.get("source")))])
     _, report = placement_check(rows, script, clock, os.path.join(ctx.supply, "render-review"), pack["ffmpeg"])
     if not report["rejected"] and rows:
         _, audit = placement_check(rows, script, clock, os.path.join(ctx.supply, "render-review"),

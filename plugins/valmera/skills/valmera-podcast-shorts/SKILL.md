@@ -150,3 +150,9 @@ README.md             the list, what was not made and why
 Never report plan counts as viewer measurements. Use the independent rater’s final-film scripts and judge3; zero rejected pictures with insufficient real-picture coverage is a failure. A fixer does not independently rate its own work.
 
 Research the director's visual subjects, keeping the full spoken-entity inventory for audit. Pass the depiction context all the way to the footage reviewer. A contextual campus illustration is distinct from a claim to record a particular historical conversation; never invent the missing participant. The podcast uses the engine's contextual-check route: every selected source cut, composed placement and branded transition is checked against the actual words. Named people require visible attribution, never face comparison. Preliminary motion scouting is bounded to the source frames being examined; the selected clips still receive exact motion measurements. A failed coverage gate triggers targeted research with retained sources, never silent deletion of the pictures.
+
+For subjects that need primary evidence, the product also researches original institutional PDFs and images,
+renders their actual pixels with PDFium, and checks readable crops against the spoken passage. These remain
+stills and never count as moving footage. Source provenance follows each placement into the final-frame
+review; it cannot excuse a contradictory image. A failed source download does not discard other usable
+sources. The bounded research budget includes both documentary artifacts and moving-footage recovery.

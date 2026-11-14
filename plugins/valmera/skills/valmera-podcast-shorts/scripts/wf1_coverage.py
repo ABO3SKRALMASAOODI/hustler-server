@@ -144,15 +144,24 @@ Keep every actual identity, object, place and spoken fact. Do not replace a spec
 a merely related one. Requirements describe ANY ONE faithful shot, using alternatives (OR), not a
 whole montage that every one-second clip must contain. Do not require a specific paper, demo or
 camera angle invented by the previous director when the speaker did not name it.
-For a company, its authentic identifiable premises, products, interfaces or original records can
-illustrate the company; they do not prove the economic claim. Generic unbranded offices/warehouses
-or random people do not identify a named company. A historical setting can illustrate a recollection
+For a company, its authentic premises, products, interfaces or original records can illustrate the
+company; they do not prove the economic claim. The company's original film can establish the
+provenance of its facilities; a logo need not occupy every frame. Generic stock found by a search
+for the company is not evidence. Evaluate the actual source publisher and the pictured subject.
+Do not invent a specific company or interface screen when the speaker says only enterprise software:
+any genuine business-software workflow can illustrate that category. Do not narrow it to a contact,
+opportunity or case panel that the speaker never mentions. Do not turn earlier checker objections
+into extra requirements beyond the spoken facts. A historical setting can illustrate a recollection
 without pretending to record the particular conversation. Never invent an unnamed participant.
 A named scientific system still needs that exact system; a galaxy is never a solar system, and a
 generic neural network is not AlexNet. A hypothetical theory needs an attributed theoretical diagram
 or document, never purported observational footage. Do not invent searches for unfilmed events.
 Suggest existing, fetchable primary footage and actual documents. Separate context from claims of
 exact archival evidence. The independent picture-to-word checks will still reject every mismatch.
+Every supplied window is EXTERNAL documentary coverage. Never replace its requirement with the
+original interview or speaker. For an unnamed activity, seek truthful illustrative footage or an
+original document about that activity without inventing its participants, employer or exact location.
+If no faithful external depiction exists, state that research failure; never count the speaker as it.
 Do not change the subject name or any spoken words, window boundaries, or numerical quality targets.'''
     content=json.dumps(dict(context=coverage.get('context'),windows=[dict(coverage['windows'][i],i=i) for i in wanted],research=evidence))
     text,use=llm.ask(system,content,effort='medium')

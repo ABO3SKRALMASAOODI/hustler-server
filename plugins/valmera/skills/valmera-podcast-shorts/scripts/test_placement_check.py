@@ -23,3 +23,23 @@ def test_words_use_overlap_with_displayed_interval():
     class Clock:
         words=[dict(w='Earth',t0=1,t1=1.3),dict(w='Sun',t0=1.4,t1=1.8)]
     assert words_under(Clock(),30,40)=='Earth'
+
+
+def test_source_provenance_reaches_checker_and_invalidates_cached_decision(tmp_path,monkeypatch):
+    import json
+    import placement_check as pc
+    path=tmp_path/'clip.mp4';path.write_bytes(b'fixture')
+    monkeypatch.setattr(pc,'evidence',lambda *a:b'pixels')
+    class Clock:
+        words=[dict(w='Google',t0=0,t1=1)]
+        segs=[(0,1)]
+    calls=[]
+    def call(system,content,**kwargs):
+        row=json.loads(content[0]['text']);calls.append(row['source_evidence'])
+        return json.dumps({'placements':[{'id':0,'ok':False,'reason':'test'}]}),{}
+    rec=dict(path=str(path),src=[0,1],source=dict(url='https://example.org/film',channel='Original publisher'))
+    args=([[0,30,'clip','Google',rec]],{'segments':[{'say':'Google'}]},Clock(),str(tmp_path),'unused')
+    pc.check(*args,call=call);pc.check(*args,call=call)
+    rec['source']['channel']='Different publisher'
+    pc.check(*args,call=call)
+    assert [x['channel'] for x in calls]==['Original publisher','Different publisher']

@@ -13,7 +13,7 @@ import os
 import subprocess
 
 MODEL = "gpt-6-sol"
-CONTRACT = 5
+CONTRACT = 6
 
 
 def words_under(clock, a, b, fps=30):
@@ -79,11 +79,12 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement"):
         context = " ".join(s["say"] for n, s in enumerate(script["segments"])
                            if clock.segs[n][0] < b / 30 + 1 and clock.segs[n][1] > a / 30 - 1)
         key = hashlib.sha256(json.dumps([CONTRACT, MODEL, review, hashes[p], rec.get("src"), rec.get("check_times"),
-                                        rec.get("display_words"), rec.get("illustration"), spoken, context, name],
+                                        rec.get("display_words"), rec.get("illustration"), rec.get('source'), spoken, context, name],
                                        ensure_ascii=False).encode()).hexdigest()
         entry = dict(id=i, key=key, f=[a, b], name=name, words=spoken, context=context,
                      source=(rec.get("source") or {}).get("url") if kind == "clip" else rec.get("page"))
         entry['illustration_intent'] = rec.get('illustration')
+        entry['source_evidence'] = rec.get('source') or dict(url=rec.get('page'),title=rec.get('title'),publisher=rec.get('credit'))
         if rec.get("display_words"):
             entry["display_words"] = rec["display_words"]
         if key in cache:
@@ -102,6 +103,10 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement"):
               "Visible faces must remain whole: reject a frame cutting through a forehead, eyes, mouth or chin, "
               "or leaving the subject outside the picture. "
               "If identity or relevance cannot be established from these frames and the context, reject. "
+              "For facilities, software and technical artifacts, consider original publisher provenance alongside "
+              "the actual pictured content. A company's own facility film can establish its premises without a "
+              "logo in every shot; generic stock or an unrelated search title cannot. Never use provenance to "
+              "excuse a visibly contradictory object, unrelated person, event, place, date or label. "
               "Read every visible display word as part of the claim: a correct spoken sentence cannot excuse "
               "a contradictory label on screen, even for a single transition frame. Distinguish a clear contextual "
               "illustration from claimed archival evidence: a real campus may illustrate studying there, and a "
