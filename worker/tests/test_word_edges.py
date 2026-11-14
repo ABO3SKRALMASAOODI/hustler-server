@@ -17,6 +17,25 @@ def test_batch_and_exact_time_writes_cannot_bypass_word_check():
         assert 'Nike' in word_edges.refusal(ctx, {'keep': [[0, 10]]}, {'keep': keep})
 
 
+def test_shared_write_rejects_measured_clipped_onset_even_at_asr_word_boundary(monkeypatch):
+    import pytest
+    import agent_tools, cut_audio
+    from schemas import default_edl
+    words = [{'w': 'story', 't0': 1.63, 't1': 1.87},
+             {'w': 'but', 't0': 1.87, 't1': 1.95},
+             {'w': 'Galaxy', 't0': 1.95, 't1': 2.27},
+             {'w': 'Quest', 't0': 2.27, 't1': 2.59}]
+    monkeypatch.setattr(cut_audio, 'source_levels', lambda *a, **k:
+        lambda t: -37. if 1.79 <= round(t, 2) <= 1.86 else (-14. if t > 1.86 else -48.))
+    before = default_edl(4.)
+    ctx = NS(_states_seen={}, duration=4., index={'words': words}, user_message='',
+             project_id=1, job={}, db=NS(run=lambda *a, **k: pytest.fail('Clipped onset reached EDL persistence')),
+             latest_edl=lambda: {'version': 1, 'json': before},
+             cut_sound_source=lambda: 'actual-source.wav')
+    result = agent_tools.ToolContext.write_edl(ctx, dict(before, keep=[[1.95, 4.]]), 'Trim')
+    assert result.startswith('REJECTED') and 'Galaxy' in result
+
+
 def test_unrelated_edit_does_not_move_existing_cut_or_split_camera_seam():
     words = [{'w': 'Coke', 't0': 1, 't1': 2}]
     assert not word_edges.introduced([[1.2, 4]], [[1.2, 3]], words, 5)
