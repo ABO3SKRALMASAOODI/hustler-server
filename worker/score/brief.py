@@ -626,6 +626,8 @@ def bin_part(work):
 def film_text(work, idx, sess, per, x, scout, styles, cards, bin_items=None):
     prompts = sess.get("prompts") or []
     out = ["# This film", "## The ask"]
+    if sess.get("execution"):
+        out.append("Library execution context: " + sess["execution"])
     names = [u.get("filename") for u in sess.get("uploads") or [] if u.get("filename")]
     if names:
         out.append("File name: " + ", ".join(names))
