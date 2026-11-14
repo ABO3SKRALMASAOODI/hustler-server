@@ -53,3 +53,31 @@ def test_sparse_face_track_is_not_treated_as_an_empty_frame():
     ctx = context()
     ctx.faces = [{"t": 1, "boxes": [[.4, .52, .6, .66]]}]
     assert [.4, .52, .6, .66] in taste._heads_near(ctx, ctx.shots[0], 0)
+
+
+@pytest.mark.parametrize("moving", [False, True])
+def test_fill_enlargement_cannot_reclip_protected_source_text(moving):
+    ctx = context()
+    ctx.faces = []
+    text = [.05, .42, .95, .47]
+    ctx.perc = {"text": [{"t": [0, 10], "box": text}]}
+    crop = [0, -1.08, 1, 2.08]
+    if moving:
+        crop = [crop, crop]
+    result = compiler.keep_marks_whole(
+        ctx, crop, [0, 10], {"w": 1920, "h": 1080}, 1080, 1920)
+    for rect in result if moving else [result]:
+        assert not compiler._cuts(rect, text)
+        assert rect[0] <= text[0] and rect[2] >= text[2]
+
+
+def test_same_aspect_punch_in_keeps_burned_caption_whole():
+    ctx = context()
+    ctx.faces = []
+    text = [.12, .82, .88, .86]
+    ctx.perc = {"text": [{"t": [0, 10], "box": text}]}
+    result = compiler.keep_marks_whole(
+        ctx, [.15, .15, .85, .85], [0, 10],
+        {"w": 1080, "h": 1920}, 1080, 1920)
+    assert not compiler._cuts(result, text)
+    assert result[3] >= text[3]
