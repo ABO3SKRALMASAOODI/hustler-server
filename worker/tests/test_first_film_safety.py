@@ -158,3 +158,16 @@ def test_safe_source_cutaway_is_contained_not_recropped_by_overlay_cover(tmp_pat
     edl["overlays"] = overlays
     normalized = validate_edl(edl, 14.2).model_dump()
     assert [o["asset_key"] for o in normalized["overlays"]] == ["backing.png", "main"]
+
+
+def test_fractional_eof_spine_rounding_matches_the_publication_gate():
+    film, index = _scene()
+    index["video"]["duration"] = 10.026
+    index["source_screen"] = {"status": "verified", "source_duration_s": 10.026}
+    # The 30 fps spine rounds the fully cleared source's end to 10.0333.
+    film["items"][0]["src"] = [8., 10.033333]
+    assert source_guard.apply(film, index, {})
+    # The identical end is forbidden if this is a boundary BEFORE an outro.
+    index["source_screen"]["source_duration_s"] = 14.
+    with pytest.raises(ValueError, match="outside cleared"):
+        source_guard.apply(film, index, {})
