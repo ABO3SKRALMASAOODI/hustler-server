@@ -1,7 +1,7 @@
 interface:
   display_name: "Valmera Marketing Films"
-  short_description: "Before-and-after films for editors, from real output"
-  default_prompt: "Use $valmera-marketing to make one film that markets Valmera to video editors: record what the product does with a clip and a typed sentence (studio.py) if no recording fits, let the workflow find its own idea in those recordings, write the script, stop at the director's look, then render on Valmera's engine, check, deliver once and delete the work folder. Never publish and never pick music."
+  short_description: "One command: a marketing film for editors from real Valmera output"
+  default_prompt: "Use $valmera-marketing: run market.py (with the user's few words, if any) in the background, wait for it to exit, and report the delivered folder and title from its last JSON line. If it stopped, run the same command again. Never publish and never rate the film."
 
 policy:
   allow_implicit_invocation: false

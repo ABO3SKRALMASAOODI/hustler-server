@@ -303,6 +303,35 @@ def img(b64):
     return dict(type="image", source=dict(type="base64", media_type="image/jpeg", data=b64))
 
 
+CHECK_V = 2           # the export check reads the spoken words too (EDL keep ranges on the source's captions)
+
+
+def spoken(rec, ex):
+    """What the upload and the export say: the source's caption words on the upload's seconds, and on the seconds the
+    export's EDL keeps, in the export's order (each kept range with its export start)."""
+    src = next((s for s in sources() if s["file"] == rec["source"]["file"]), None)
+    if not src:
+        return None, None
+    t0, t1 = float(rec["source"]["t0"]), float(rec["source"]["t1"])
+    ws = [(t - t0, w) for t, w in json3_words(src["captions"]) if t0 <= t <= t1]
+    up = " ".join(w for _, w in ws)
+    edl = None
+    d = os.path.join(os.path.dirname(os.path.dirname(ex["file"])), "edl")
+    if ex.get("edl_version") is not None and os.path.exists(os.path.join(d, f"v{int(ex['edl_version']):03d}.json")):
+        edl = jload(os.path.join(d, f"v{int(ex['edl_version']):03d}.json"), {})
+    elif os.path.isdir(d) and os.listdir(d):
+        edl = jload(os.path.join(d, sorted(os.listdir(d))[-1]), {})
+    rows, at = [], 0.0
+    for k in (edl or {}).get("keep") or []:
+        try:
+            a, b = float(k[0]), float(k[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        rows.append(f"export {at:.1f}-{at + b - a:.1f} s (upload {a:.1f}-{b:.1f} s): " + " ".join(w for t, w in ws if a <= t < b))
+        at += b - a
+    return up, rows
+
+
 def export_check(ctx, rec, ask_text, must_see):
     """The export against the sentence, element by element, on its own frames (one a second) and the upload's."""
     ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1] if rec.get("exports") else None)
@@ -319,12 +348,19 @@ def export_check(ctx, rec, ask_text, must_see):
     for t, b in zip(ut, frames(up["file"], ut)):
         if b:
             content += [dict(type="text", text=f"upload at {t} s"), img(b)]
+    up_words, ex_words = spoken(rec, ex)
+    if up_words:
+        content.append(dict(type="text", text=f"What the upload says (its captions): {up_words}"))
+    if ex_words:
+        content.append(dict(type="text", text="What the export says, kept range by kept range (its EDL on the same captions; the export's "
+                                              "speed changes, if any, are not counted):\n" + "\n".join(ex_words)))
     content.append(dict(type="text", text=f"Then the export the product returned ({ex['w']}x{ex['h']}, {ex['dur']} s), a frame a second:"))
     for t, b in zip(et, frames(ex["file"], et)):
         if b:
             content += [dict(type="text", text=f"export at {t} s"), img(b)]
     system = ("You check a product's real output before a marketing film shows it. Be strict and literal: a thing asked for counts as "
-              "delivered only if it is plainly visible in the export's frames. You also choose the seconds the film will show.")
+              "delivered only if it is plainly visible in the export's frames, or, for what is said and where the cut starts or ends, "
+              "plainly in the export's spoken words as given. You also choose the seconds the film will show.")
     content.append(dict(type="text", text=(
         "Return JSON only: {\"elements\": [{\"asked\": a part of the sentence, \"visible\": true|false, \"seconds\": [export seconds where "
         "it shows], \"how\": what is seen}], \"all_visible\": true|false, \"after\": [start, end] export seconds, 5 to 9 s, where the "
@@ -336,7 +372,7 @@ def export_check(ctx, rec, ask_text, must_see):
     got = got if isinstance(got, dict) else {}
     vis = [e for e in got.get("elements") or [] if isinstance(e, dict)]
     ok = bool(vis) and all(e.get("visible") for e in vis) and bool(got.get("all_visible")) and not got.get("defects")
-    return dict(ok=ok, why=None if ok else ("not visible: " + "; ".join(str(e.get("asked")) for e in vis if not e.get("visible"))
+    return dict(ok=ok, v=CHECK_V, why=None if ok else ("not visible: " + "; ".join(str(e.get("asked")) for e in vis if not e.get("visible"))
                                              + ("; defects: " + "; ".join(map(str, got.get("defects") or [])) if got.get("defects") else "")),
                 export=ex, upload=up, **got, spend=[use])
 
@@ -447,10 +483,11 @@ def script(ctx, ideas_out):
     chosen = None
     for k, (idea, ask_text, must) in enumerate(tries):
         tag = f"r{k}"
-        if stt.get(tag, {}).get("ok") is False:
-            continue
+        old = stt.get(tag, {}).get("check") or {}
+        if old.get("v") == CHECK_V and stt[tag].get("ok") is False:
+            continue                     # checked by this check and not shown: never shown
         rec = record(ctx, idea, k, ask_text)
-        chk = stt.get(tag, {}).get("check") or export_check(ctx, rec, ask_text, must)
+        chk = old if old.get("v") == CHECK_V else export_check(ctx, rec, ask_text, must)
         spend += chk.pop("spend", []) if "spend" in chk else []
         stt[tag] = dict(ok=chk["ok"], check=chk, record=os.path.join(ctx.tmp, "studio", "records", rec["sid"], "record.json"))
         jsave(keep, stt)

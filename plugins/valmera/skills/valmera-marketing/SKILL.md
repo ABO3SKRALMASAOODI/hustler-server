@@ -1,9 +1,38 @@
 ---
 name: valmera-marketing
-description: Make short vertical films that market Valmera to video editors (before-and-after and technique films with the call to action inside the film), on the workflow shell and Valmera's own engine. The workflow records what the product really did with a clip and a typed sentence, finds its own idea from those recordings, writes the script, directs and renders the film, delivers it once and deletes its work folder. Use when the user asks for a Valmera marketing film, an editing tutorial or a before-and-after for editors. Never publishes, never picks music.
+description: Make a finished vertical marketing film that sells Valmera to video editors and creators (a technique or a before-and-after with the call to action inside the film) with one command and at most a few words (/valmera-marketing, or /valmera-marketing <a pain, a technique or a theme>). The run finds the editor's pain itself, records what Valmera really does with a clip and a typed sentence on a local copy of the product (never a customer's project), checks the export against the sentence, narrates with Phonon Easton over real footage cut at the references' pace, checks every picture against the words it sits under, lays sound design and chosen music, delivers one complete folder once and deletes its work. Use when the user asks for a Valmera marketing film, an editing tutorial or a before-and-after for editors. Does not publish.
 ---
 
 # Valmera marketing films (workflow 2)
+
+## Start it: one command, nothing or a few words
+
+```
+python3 /Users/masaoodi/Documents/Valmera/hustler-server/plugins/valmera/skills/valmera-marketing/market.py [a few words]
+```
+
+Run it in the background; it takes 40 to 90 minutes (the recording 5-15, the footage 10-30, the render 10-30). Do not
+poll: wait for it to exit. Its last line is one JSON object: `delivered` (the folder), `title`, `style`, `typed` (the
+sentence Valmera was given), `pictures_fit`, `spend_usd`, `work_empty`. Exit 2 with `stopped`: run the same command with
+the same words; it continues where it stopped. `--out <folder>` delivers elsewhere (default
+`/Users/masaoodi/Documents/Valmera/Marketing Films/`). Never rate the film yourself.
+
+What the run does (`proof.py` on the workflow shell, `market.py` the launcher):
+
+| Stage | What happens |
+|---|---|
+| ideas | One call (gpt-6.1-sol) reads what editors answered to (the marketing references' captions and counts), the references' pace (atlas medians), the clips the owner already works from (podcast sources with transcripts) and the few words if given. It returns ranked ideas: the pain or technique, the true claim, the clip and its seconds, two sentences to type and what each must visibly do, the style |
+| script | **Real output first.** `studio.py` uploads the clip to a local stack of the product (the Gauntlet's runner on this week's main, edits on OpenAI, a synthetic paid account; nothing of production is written), types the sentence before the first result and downloads the export. A vision call (gpt-6-sol, low) checks the export frame by frame against the sentence: every element must be visible, the export vertical, nothing broken; otherwise the second sentence is recorded, and if that fails too the run stops (a film never claims what the export does not show). It also picks the after's seconds, the before's and the export's strongest frame. Then the narration is written around the receipts (the typed sentence spoken word for word, the call to action as the last line, VALMERA.IO on screen) and every claim is audited against the receipts by a second call |
+| supply | Narration by Phonon Easton (the stories read, `valmera-stories/voice.py`), real footage per line (`worker/footage`), free photographs of what is named, and the recording cut in between two narrator lines with its own sound (`_shell/narrate/realvoice.py`): the clip as uploaded, then the export; a frame of the export can open the film |
+| score | The story reel builder (`valmera-stories/reel.py`) at a shot length set from this film's own narration speed against the marketing references' medians; the recording shown as delivered (no section finish, flash or caption pool over it); then every picture against the exact words it sits under (gpt-6-sol, low): a misfit is dropped and the cut rebuilt, up to three rounds |
+| render, check, deliver | Valmera's engine, the shell's brand finish (watermark, end card), the music it chooses (MUSIC2), the sound design (score.sound); `film.mp4`, `film_clean.mp4`, `film.json` (receipts, picture check, pace, credits) and `SOURCES.md`, once. The run folder, the recording, the stack's database and its folder are deleted |
+
+The styles of the one-command path are in `reels.json` (Proof Reel, Window, Pinboard, Archive); a style rests for three
+films. The state root is `.valmera/workflow/marketing` (its own ledger and work folder).
+
+The rest of this page is the older, hand-directed path (three built styles on recordings made beforehand, with a stop
+for the director's look). It still works through `run.py` without `WF2_ENGINE=proof`.
+
 
 One film per run, in one of the built styles, for editors. The film is an argument an editor can
 check: a pain they know, one true thing Valmera did about it, shown with the real output.
