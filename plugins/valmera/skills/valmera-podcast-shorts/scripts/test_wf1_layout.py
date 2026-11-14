@@ -46,3 +46,15 @@ def test_ink_change_preserves_the_words_already_visible():
     assert caption_restarts({'items':items})==[]
     items.append(dict(k='word',role='cap',t='four',f=[14,20]))
     assert caption_restarts({'items':items})==[dict(frame=14,words=['three','four'])]
+
+
+def test_lower_type_seat_moves_a_face_up_and_never_partly_down_into_it():
+    shot=dict(id='sh1',k='shot',pic='main',f=[0,3],crop=[.2,.2,.8,.9])
+    meta={'main':{'faces':[[.4,.4,.2,.2,.45]]}}
+    assert film.F.clear_of([shot],meta,[.05,.5,.95,.62],{'sh1'})==1
+    assert shot['crop'][1]>.2
+    assert face_boxes(shot,meta['main'],0)[0][3]<=.50001
+    shot['crop']=[.2,.1,.8,.9]
+    meta['main']['faces']=[[.4,.48,.2,.4,.5]]
+    assert film.F.clear_of([shot],meta,[.05,.5,.95,.62],{'sh1'})==0
+    assert shot['crop']==[.2,.1,.8,.9]

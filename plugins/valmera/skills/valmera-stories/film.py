@@ -922,12 +922,13 @@ def clear_of(items, assets_meta, rect, ids):
             continue
         fx, fy, fw, fh = max(fs, key=lambda f: f[2] * f[3])[:4]
         crops = it["crop"] if isinstance(it["crop"][0], list) else [it["crop"]]
-        need_dy = need_dx = 0.0
+        need_dy = need_dx = need_up = 0.0
         for c in crops:
             cw, ch = c[2] - c[0], c[3] - c[1]
             sx0, sx1 = (fx - c[0]) / cw, (fx + fw - c[0]) / cw
             sy0, sy1 = (fy - 0.28 * fh - c[1]) / ch, (fy + fh - c[1]) / ch
             if sx0 < rect[2] and sx1 > rect[0] and sy0 < rect[3] and sy1 > rect[1] and 0 < (sx0 + sx1) / 2 < 1:
+                need_up = max(need_up, (sy1 - rect[1]) * ch)
                 need_dy = max(need_dy, (rect[3] - sy0) * ch)           # slide the picture down: the crop moves up
                 need_dx = max(need_dx, (rect[2] - sx0) * cw)           # or the head right: the crop moves left
         if need_dy <= 0:
@@ -937,8 +938,14 @@ def clear_of(items, assets_meta, rect, ids):
         cw0 = crops[0][2] - crops[0][0]
         right_edge = max((fx + fw - c[0]) / (c[2] - c[0]) for c in crops)
         dx_ok = need_dx <= room_x and right_edge + need_dx / cw0 <= 0.96
-        dy = min(need_dy, room_y)
-        if dx_ok and need_dx / cw0 < need_dy / (crops[0][3] - crops[0][1]) and dy < need_dy:
+        # Lower caption seats should move a head up when there is room.
+        # A partial downward slide used to push mouths into long headlines.
+        up_ok = need_up <= min(1-c[3] for c in crops) and all(
+            (fy-.28*fh-c[1]-need_up)/(c[3]-c[1]) >= .02 for c in crops)
+        dy = need_dy if need_dy <= room_y else 0.0
+        if up_ok and (not dy or need_up < dy):
+            sh = (0.0, need_up)
+        elif dx_ok and need_dx / cw0 < need_dy / (crops[0][3] - crops[0][1]) and dy < need_dy:
             sh = (-need_dx, 0.0)
         else:
             sh = (0.0, -dy)
