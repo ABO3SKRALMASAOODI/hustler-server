@@ -417,6 +417,13 @@ def test_ask_user_records_awaiting_user_not_blocked(monkeypatch, verified):
     monkeypatch.setattr(agent_loop.reply_language, "judge", lambda *a, **k: {})
     monkeypatch.setattr(agent_loop, "_language_flip", lambda *a, **k: None)
     monkeypatch.setattr(reply_truth, "check", lambda *a, **k: [] if verified else None)
+    settled = []
+    monkeypatch.setattr(agent_loop, "_asks_check", lambda ctx, text, allow_repair:
+                        settled.append(('check', text, allow_repair)))
+    def settle(ctx, text, outcome):
+        settled.append(('settle', text, outcome))
+        return text, outcome
+    monkeypatch.setattr(agent_loop, "_asks_settle", settle)
     result = _run(ctx, db)
     expected = "awaiting_user" if verified else "partial"
     assert result["outcome"] == expected
@@ -426,6 +433,7 @@ def test_ask_user_records_awaiting_user_not_blocked(monkeypatch, verified):
     assert meta["ask_user"] is verified
     assert meta["outcome"] == expected
     assert text == (question if verified else reply_truth.UNVERIFIED)
+    assert settled == [('check', text, False), ('settle', text, expected)]
     assert checkpoint == {}
 
 
