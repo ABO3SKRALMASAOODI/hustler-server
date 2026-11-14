@@ -1515,7 +1515,7 @@ def build(script, sup, style_id, direction=None):
     cards = {}
     for i, s_ in enumerate(script["segments"]):
         cards[i] = [dict(text=str(x["text"]), role=x.get("role"), big=x.get("big"), small=x.get("small")) for x in s_.get("show") or []
-                    if isinstance(x, dict) and x.get("text") and x.get("role") in ("figure", "key", "chapter")]
+                    if isinstance(x, dict) and x.get("text") and x.get("role") in ("figure", "key", "chapter", "ordinal")]
     fin = [section_finish(st, s, i, script) for i, s in enumerate(script["segments"])]
     fin, device_share = finish_budget(fin, seg_len, script, top=0.25 * float(d.get("device_budget", 1.0)))
     talk_fit = set()

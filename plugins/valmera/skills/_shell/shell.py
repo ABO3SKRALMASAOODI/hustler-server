@@ -3,6 +3,7 @@
 
     zsh .valmera/claude_trial_env.sh $PY shell.py run --workflow wf1 --source <file> --out <deliver root>
     $PY shell.py run --resume <run_id> [--out <deliver root>]     continue a stopped run where it stopped
+    $PY shell.py run ... --until script                          stop after that stage: its file is kept, nothing delivered
     $PY shell.py status                                          runs in the work root, ledger tail
 
 Stages, each writing one file into the run folder (README.md has the contract):
@@ -364,6 +365,14 @@ def run(a):
             state["done"].append(stage)
             state["seconds"][stage] = round(time.time() - t0, 1)
             jsave(os.path.join(run_dir, "run.json"), state)
+            if getattr(a, "until", None) == stage:
+                # a stage test (the script stage alone): the run stops here, kept for --resume, never delivered
+                state["pid"] = None
+                jsave(os.path.join(run_dir, "run.json"), state)
+                ctx.log(f"until {stage}: stopped after it")
+                print(json.dumps(dict(run_id=state["run_id"], until=stage, done=state["done"], run_dir=run_dir,
+                                      result=os.path.join(run_dir, f"{stage}.json"), stage_seconds=state["seconds"])))
+                return 0
             if hang == stage:
                 ctx.log(f"hanging after {stage} (test)")
                 while True:
@@ -412,6 +421,8 @@ def main():
     ap.add_argument("--resume")
     ap.add_argument("--args", help="JSON handed to the workflow, e.g. a line from the owner")
     ap.add_argument("--state-root", default=STATE_ROOT)
+    ap.add_argument("--until", choices=[s for s in STAGES if s != "deliver"],
+                    help="stop after this stage (a stage test): nothing after it runs, nothing is delivered")
     a = ap.parse_args()
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     if a.cmd == "status":
