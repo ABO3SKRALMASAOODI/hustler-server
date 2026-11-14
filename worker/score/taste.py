@@ -318,7 +318,7 @@ def _take_heads(ctx, speech_only=False, marks=True):
         s = S.shot_at(ctx, f)
         if not s or not S.is_take(s.get("pic")):
             continue
-        rows.append(S.head_rects(ctx, s) + S.face_rects(ctx, s) + (S.marks_of(ctx, s, f) if marks else []))
+        rows.append(_heads_near(ctx, s, f) + (S.marks_of(ctx, s, f) if marks else []))
     return rows
 
 
@@ -350,10 +350,10 @@ def caption_seat(ctx, asked=False):
 
         def share(y, rows=rows, air=0.015 if marks else 0.0):      # off printed words by a little air, not squeezed between two lines
             return _clear(rows, [0.5 - half, y - h / 2 - air, 0.5 + half, y + h / 2 + air])
-        if wy is not None and (lo <= wy <= hi or (asked and 0.06 <= wy <= 0.94)) and share(wy) >= 0.9:
+        if wy is not None and (lo <= wy <= hi or (asked and 0.06 <= wy <= 0.94)) and share(wy) == 1.0:
             return round(wy, 3)
         for y in pref + rest:
-            if share(y) >= 0.9:
+            if share(y) == 1.0:
                 return y
     return max(grid, key=lambda y: (share(y), y))
 
@@ -467,11 +467,22 @@ def _heads_near(ctx, s, f, reach=0.6):
     samples = ctx.perc.get("samples") or []
     if not s or "src" not in s or not S.is_take(s.get("pic")):
         return []
-    if not samples:
-        return S.head_rects(ctx, s) + S.face_rects(ctx, s)
     lo, hi = s["f"]
     t = s["src"][0] + (s["src"][1] - s["src"][0]) * (f - lo) / max(hi - lo, 1)
     boxes = []
+    # The spatial index measures all faces; perception can contain only a
+    # primary subject or no face at all. Neither is evidence that the other
+    # faces disappeared. Project their boxes through THIS frame's crop,
+    # including when perception has no samples, instead of reusing the
+    # shot midpoint through a moving camera.
+    face_rows = [r for r in ctx.faces or [] if abs(float(r["t"]) - t) <= reach]
+    if not face_rows and ctx.faces:
+        nearest = min(ctx.faces, key=lambda r: abs(float(r["t"]) - t))
+        if abs(float(nearest["t"]) - t) <= 2.0:
+            face_rows = [nearest]
+    for r in face_rows:
+        for face in r.get("boxes") or []:
+            boxes += [S.head_of(face), list(face)]
     for r in samples:
         if abs(float(r["t"]) - t) > reach:
             continue
