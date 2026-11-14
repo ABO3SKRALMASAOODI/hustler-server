@@ -182,7 +182,7 @@ def face_cover_refusal(ctx, before, after):
         meta = (assets.get(it.get('asset_key')) or {}).get('meta') or {}
         if (it.get('fit') == 'cover' and meta.get('made_from') == 'design' and meta.get('pixel_opaque') is True
                 and it.get('opacity') in (None, 1, 1.0) and not it.get('entrance') and not it.get('exit')
-                and not it.get('motion_motif') and not it.get('rotation')):
+                and not it.get('motion_motif') and not it.get('rotation') and not it.get('screen')):
             a = float(it.get('start') or 0)
             backdrops.append((a, a + float(it.get('duration_s') or 0)))
     for ident, a, b, rect in candidates:

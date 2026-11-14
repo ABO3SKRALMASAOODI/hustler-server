@@ -97,6 +97,9 @@ def test_split_backdrop_hides_source_only_with_pixel_evidence(monkeypatch, opaqu
         {'id':'window','asset_key':'card.mp4','fit':'contain','x':.5,'y':.3,'scale':.4,'start':0.,'duration_s':10.},
     ])
     assert (ei.face_cover_refusal(ctx,before,after) is None) is allowed
+    if allowed:
+        after['overlays'][0]['screen'] = {'rect':[0,0,.2,.2]}
+        assert ei.face_cover_refusal(ctx,before,after) is not None
 
 
 def test_generated_backdrop_opacity_is_measured_from_pixels(tmp_path):
