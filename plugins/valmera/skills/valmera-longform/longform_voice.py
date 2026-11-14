@@ -167,6 +167,7 @@ def finish(out, script):
             call(tier,'Formula',f'{median} * (self / {median}) ^ {gain}')
             call([tier,manipulation],'Replace pitch tier')
             x=call(manipulation,'Get resynthesis (overlap-add)').values[0].astype(np.float32)
+            del snd,manipulation,tier,f
         temp=out/'contour.wav'; sf.write(temp,x,sr,subtype='FLOAT')
         if factor!=1:
             ff=os.environ.get('NARRATE_FFMPEG') or str(Path('/Users/masaoodi/Documents/Valmera/audit/subscriber-reliability-20260908/bin-arm/ffmpeg'))
@@ -178,6 +179,9 @@ def finish(out, script):
         sf.write(audio,x,sr,subtype='PCM_24')
         wj=retime(json.loads(origin_words.read_text()),factor);wj['duration']=len(x)/sr
         words.write_text(json.dumps(wj,indent=1))
+        del x
+        import gc
+        gc.collect()
         after=measure(audio,expected,out/'longform-metrics')
         joins=[]
         if after['pauses_per_min']>17.4:
@@ -242,6 +246,8 @@ def main():
         if cmd=='render':p.add_argument('--rerender',action='store_true')
     p=sub.add_parser('level-voices');p.add_argument('dir')
     a=ap.parse_args()
+    import narrate as N
+    N.malloc_returns_memory()
     if not os.environ.get('OPENAI_API_KEY'):
         for line in Path('/Users/masaoodi/Documents/Valmera/hustler-server/backend/.env').read_text().splitlines():
             if line.startswith('OPENAI_API_KEY='): os.environ['OPENAI_API_KEY']=line.split('=',1)[1].strip().strip('"').strip("'")

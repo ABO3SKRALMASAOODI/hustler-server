@@ -6,6 +6,30 @@ sys.path.insert(0,str(Path(__file__).resolve().parent))
 import cinema as C
 
 
+def test_rater_stem_fit_recovers_delay_and_final_gains():
+    import numpy as np
+    import stem_evidence as E
+    rng=np.random.default_rng(4);n=E.SR*3
+    stems=[rng.normal(0,.1,n) for _ in range(3)]
+    gains=np.array([.7,.4,.2]);m=np.zeros(n)
+    m[48:]=sum(g*s[:-48] for g,s in zip(gains,stems))
+    q,lag,got=E.fitted(m,stems,n)
+    assert lag==48 and q<-60
+    assert np.allclose(got,gains,atol=1e-6)
+
+
+def test_rater_sfx_count_excludes_effects_masked_by_voice_or_bed():
+    import numpy as np
+    import stem_evidence as E
+    rng=np.random.default_rng(7);n=E.SR*6
+    voice=rng.normal(0,.3,n);bed=rng.normal(0,.01,n);sfx=np.zeros(n)
+    for t,g in ((1,.5),(3,.04),(5,.001)):
+        start=t*E.SR;sfx[start:start+1920]=rng.normal(0,g,1920)
+    events,_=E.audible(voice,sfx,bed)
+    assert sum(e['T1'] for e in events)==2
+    assert sum(e['T2'] for e in events)==1
+
+
 def clip(name,a,b):
     return dict(path=name,source={'url':'https://archive.test/one'},time_range=[a,b],seconds=b-a,w=1920,h=1080)
 
@@ -15,6 +39,16 @@ def test_renamed_download_cannot_replay_source_seconds():
     assert C.reserve(used,clip('a',0,8),4)==0
     assert C.reserve(used,clip('b',0,8),4)==4
     assert C.reserve(used,clip('c',0,8),1) is None
+
+
+def test_partly_used_clip_can_supply_only_its_unseen_remainder():
+    sc={'segments':[{'say':'First.','chapter':'c'},{'say':'Second.','chapter':'c'}]}
+    words={'duration':10,'words':[dict(w='First.',start=.1,end=2.5,seg=0),dict(w='Second.',start=3,end=9.8,seg=1)]}
+    ft={'lines':[dict(i=0,clips=[clip('a',0,8)]),dict(i=1,clips=[clip('b',0,8),clip('c',10,16)])]}
+    shots,_,_=C.schedule(sc,words,ft)
+    assert not C.duplicate_ranges(shots)
+    assert abs(sum((r['f'][1]-r['f'][0])/30 for r in shots)-10.1)<.04
+    assert shots[1]['src'][0]>3
 
 
 def test_coverage_failure_is_explicit():
@@ -139,6 +173,18 @@ def test_completed_voice_does_not_start_another_model(tmp_path,monkeypatch):
     assert C.narrated(Context(),{'segments':[]},tmp_path,'reader.py')=={'cached':True}
 
 
+def test_narration_phases_exit_before_next_memory_heavy_phase(tmp_path,monkeypatch):
+    import argparse
+    import longform_voice as V
+    script=tmp_path/'script.json';C.save(script,dict(segments=[]))
+    calls=[]
+    def child(command,**kwargs):
+        calls.append(command[2]);C.save(tmp_path/'render.json',{})
+    monkeypatch.setattr(V.subprocess,'run',child)
+    V.isolated_render(argparse.Namespace(out=str(tmp_path),script=str(script),band='04',rerender=False))
+    assert calls==['_render','_shared-finish','finish']
+
+
 def test_rater_sound_measure_separates_bed_and_audible_hit(tmp_path,monkeypatch):
     import numpy as np
     import measure_sound as M
@@ -151,7 +197,15 @@ def test_rater_sound_measure_separates_bed_and_audible_hit(tmp_path,monkeypatch)
     monkeypatch.setattr(M,'pcm',lambda p,ff:voice+bed if Path(p)==final else voice)
     plan=tmp_path/'plan.json';C.save(plan,dict(dur_f=240,fps=30,chapters=[dict(id='c1',start=0,end=8)],sound_design=dict(placed=[dict(t=3)])))
     words=tmp_path/'words.json';C.save(words,dict(words=[dict(start=0,end=8)]))
-    r=M.measure(final,clean,plan,words,tmp_path/'measured.json','unused')
+    import stem_evidence as E
+    t48=np.arange(E.SR*8)/E.SR;v48=.1*np.sin(2*np.pi*200*t48)
+    s48=np.zeros_like(t48);s48[3*E.SR:round(3.1*E.SR)]=.5*np.sin(2*np.pi*70*t48[:round(.1*E.SR)])
+    b48=(.002+.02*t48/8)*np.sin(2*np.pi*517*t48)
+    arrays={final:v48+s48+b48,tmp_path/'voice.flac':v48,tmp_path/'sfx.flac':s48,tmp_path/'music.flac':b48}
+    for p in list(arrays)[1:]:p.write_text(p.name)
+    monkeypatch.setattr(E,'pcm',lambda p,ff:arrays[Path(p)])
+    r=M.measure(final,clean,plan,words,tmp_path/'measured.json','unused',stem_dir=tmp_path,music_stem=tmp_path/'music.flac')
+    assert r['verified'] and r['stems']['T2']>=1
     assert r['music_share']>.8
     assert r['chapter_rises'][0]['rise_db']>3
     assert r['audible_placed']==1

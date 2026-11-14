@@ -33,9 +33,11 @@ def windows(x,seconds=.1):
     n=int(seconds*SR);k=len(x)//n
     return 10*np.log10((x[:k*n].reshape(k,n)**2).mean(1)+1e-12)
 
-def measure(final,clean,plan,words,out,ffmpeg):
+def measure(final,clean,plan,words,out,ffmpeg,stem_dir=None,music_stem=None):
+    if not stem_dir or not music_stem:raise ValueError('actual mixer stems are required for the rater audibility test')
+    stem_files=[Path(stem_dir)/'voice.flac',Path(stem_dir)/'sfx.flac',Path(music_stem)]
     fingerprint=hashlib.sha256(Path(__file__).read_bytes())
-    for source in (final,clean,plan,words):
+    for source in (final,clean,plan,words,Path(__file__).with_name('stem_evidence.py'),*stem_files):
         with open(source,'rb') as f:fingerprint.update(hashlib.file_digest(f,'sha256').digest())
     signature=fingerprint.hexdigest()
     if Path(out).exists():
@@ -96,9 +98,15 @@ def measure(final,clean,plan,words,out,ffmpeg):
            blind=[dict(t=t,bands=sorted(ns)) for t,ns in merged],
            method='Independent WF1-r4 audio rater: final minus gain-fitted clean; bed 100ms RMS > -50 dBFS, verified programme bed divided by full film duration (tail excluded conservatively); audible final-mix 50ms/10ms transient >=6 dB over preceding .5s; blind events present in clean, speech starts excluded',
            rater_source='week-1112/lanes/RATINGS/work1114WF1-r4/audio.py')
+    from stem_evidence import measure as measured_stems
+    strict=measured_stems(final,*stem_files,plan,ffmpeg)
+    r['residual_music_share']=r['music_share'];r['residual_chapter_rises']=r['chapter_rises']
+    r.update(stems=strict,music_share=strict['music_share'],chapter_rises=strict['chapter_rises'],
+             music_under_voice_db=strict['bed_under_voice_db'],verified=strict['verified'])
     Path(out).write_text(json.dumps(r,indent=1));return r
 
 if __name__=='__main__':
     a=argparse.ArgumentParser()
     for key in ('final','clean','plan','words','out','ffmpeg'):a.add_argument(key)
+    a.add_argument('--stems',dest='stem_dir',required=True);a.add_argument('--bed',dest='music_stem',required=True)
     print(json.dumps(measure(**vars(a.parse_args()))))

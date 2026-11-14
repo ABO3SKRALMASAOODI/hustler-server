@@ -10,7 +10,7 @@ def score(l1, pack, film, out, cache):
     import music_film as MF
     from score import music as MU
     import music_choose
-    import soundfile as sf
+    from stem_evidence import write_audio
     prof=MU.profile_for('longform')
     wd=json.loads(Path(pack['words']).read_text())
     lead=0.0
@@ -50,7 +50,7 @@ def score(l1, pack, film, out, cache):
     report=dict(chapters=rows,music_share=share,method='100ms music-stem RMS above -50 dBFS; chapter rises measured over 2-8s',
                 credit='; '.join(dict.fromkeys(r['choice'].get('credit','') for r in rows)))
     if share<0.8: raise RuntimeError(f'music coverage {share:.3f} below 80%')
-    sf.write(str(Path(out).with_suffix('.bed.wav')),whole,MU.SR,subtype='PCM_24')
+    write_audio(Path(out).with_suffix('.bed.wav'),whole,MU.SR,os.environ['FFMPEG_BIN'])
     marks=dict(dur_s=dur,words=[(w['start']+lead,w['end']+lead) for w in wd['words']])
     from scene import audio as AU
     ceiling,limit=AU.CEIL_DBTP,AU.LIMIT_DBFS

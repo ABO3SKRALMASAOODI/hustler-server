@@ -394,6 +394,20 @@ class CoverageError(ValueError):
         super().__init__('footage gaps require a new search, never a repeated picture: '+json.dumps(gaps)[:1500])
 
 
+def unused_seconds(used,c):
+    """A partly reserved archive cut can still contain genuinely unseen frames."""
+    url=c['source']['url'];a,b=map(float,c['time_range'])
+    if c.get('kind')=='image':
+        return 0 if used.get(url) or used.get('image:'+c['content_hash']) else float(c['seconds'])
+    b=min(b,a+float(c['seconds']));cur=a;longest=0.
+    for lo,hi in sorted(used.get(url,[])):
+        if hi<=cur:continue
+        longest=max(longest,min(lo,b)-cur)
+        cur=max(cur,hi)
+        if cur>=b:break
+    return max(longest,b-cur,0.)
+
+
 def schedule(sc, words, ft):
     clock=F.Clock(words,sc)
     wj=read(words) if isinstance(words,(str,Path)) else words
@@ -427,7 +441,7 @@ def schedule(sc, words, ft):
         for a,b in intervals:
             pos=a
             for ci,c in enumerate(clips):
-                seconds=min(7.8,(b-pos)/FPS,float(c['seconds']))
+                seconds=min(7.8,(b-pos)/FPS,unused_seconds(used,c))
                 tail=(b-pos)/FPS-seconds
                 if 0<tail<1.5 and seconds>3 and ci+1<len(clips):
                     seconds-=1.5-tail
@@ -531,7 +545,8 @@ def render(ctx,script,sc):
     import film_long as L
     pack=read(Path(ctx.supply)/'pack.json')['pack']
     from version import code_version
-    inputs=dict(engine=code_version(),narration=digest(pack['narration']),l1=digest(sc['l1']),mixer=digest(HERE/'film_long.py'),music=digest(HERE/'music_chapters.py'))
+    inputs=dict(engine=code_version(),narration=digest(pack['narration']),l1=digest(sc['l1']),mixer=digest(HERE/'film_long.py'),
+                stem_capture=digest(HERE/'stem_evidence.py'),music=digest(HERE/'music_chapters.py'))
     stamp=Path(ctx.supply)/'render-inputs.json'
     if not stamp.exists() or read(stamp)!=inputs:
         for name in ('sound.m4a','sound.report.json','film_engine.mp4','film_engine.mp4.log.json','film_scored.mp4','film_scored.mp4.json','film_scored.bed.wav'):
@@ -610,7 +625,9 @@ def check(ctx,rd,sc):
     voice=read(metrics/'metrics.json')
     mix=read(metrics/'mix-wer.json')
     sound_metrics=Path(ctx.supply)/'sound-measured.json'
-    chain.sh(ctx,[chain.PY,str(HERE/'measure_sound.py'),str(final),rd['clean'],sc['l1'],pack['words'],str(sound_metrics),PX.FF],label='wf4-sound-measure-'+ctx.run_id,heavy=True,timeout=1800)
+    stems=Path(ctx.supply)/'audio-stems';bed=Path(rd['film']).with_suffix('.bed.wav')
+    chain.sh(ctx,[chain.PY,str(HERE/'measure_sound.py'),str(final),rd['clean'],sc['l1'],pack['words'],str(sound_metrics),PX.FF,
+                  '--stems',str(stems),'--bed',str(bed)],label='wf4-sound-measure-'+ctx.run_id,heavy=True,timeout=1800)
     heard_sound=read(sound_metrics)
     duration=brand.probe(str(final))['dur']
     repeats=duplicate_ranges(read(Path(ctx.supply)/'shots.json'))
@@ -627,7 +644,8 @@ def check(ctx,rd,sc):
                 narration=voice,delivered_mix_wer=mix['wer'],real_voices=pack['record']['real_voices'],chapters=sc['chapters'],credits=pack['footage']['credits']))
     structure=read(Path(ctx.run_dir)/'structure.json')
     targets=dict(hook=hook.get('hook') is True,turns=len(structure['chapters'])==len(sc['chapters']),length=600<=duration<=1200,footage=pics['moving_share']>=0.5,unique=not repeats and duplicates['ok'],holds=sc['max_hold_s']<=8,
-                 pictures=pics['ok'],music=heard_sound['music_share']>=0.8,rises=all(r['rise_db']>=3 for r in heard_sound['chapter_rises']),voice=voice['ok'],mix_wer=mix['ok'])
+                 pictures=pics['ok'],sound_fit=heard_sound['verified'],audible_sound=heard_sound['stems']['T2']>0,
+                 music=heard_sound['music_share']>=0.8,rises=all(r['rise_db']>=3 for r in heard_sound['chapter_rises']),voice=voice['ok'],mix_wer=mix['ok'])
     checks['targets']=targets; checks['ok']=bool(base['ok'] and all(targets.values()))
     save(Path(ctx.run_dir)/'measured.json',checks)
     if not checks['ok']: raise RuntimeError('delivered-file gates failed: '+json.dumps(targets))
@@ -638,6 +656,8 @@ def check(ctx,rd,sc):
         shutil.copy2(src,evidence/src.name)
     shutil.copytree(Path(ctx.supply)/'picture-evidence',evidence/'pictures',dirs_exist_ok=True)
     shutil.copytree(metrics,evidence/'voice-metrics',dirs_exist_ok=True)
+    shutil.copytree(stems,evidence/'audio-stems',dirs_exist_ok=True)
+    subprocess.run([PX.FF,'-v','error','-y','-i',str(bed),'-c:a','flac',str(evidence/'audio-stems/music.flac')],check=True)
     subprocess.run([PX.FF,'-v','error','-y','-i',rd['clean'],'-vn','-c:a','flac',str(evidence/'clean-audio.flac')],check=True)
     shutil.copy2(nar,evidence/'narration.wav')
     shutil.copy2(pack['words'],evidence/'words.json')

@@ -1168,7 +1168,8 @@ def audio_master(ctx, l1, narration_wav):
         plan = os.path.join(ctx.supply, "sound.plan.json")
         json.dump(l1, open(plan, "w"))
         job = os.path.join(ctx.supply, "mix_current.py")
-        code = ('import sys,json; sys.path[:0]=' + repr([STORIES]) + '; import film; '
+        code = ('import sys,json; sys.path[:0]=' + repr([os.path.dirname(__file__),STORIES]) + '; import film; '
+                'from scene import audio as AU; import stem_evidence; stem_evidence.capture(AU,'+repr(os.path.join(ctx.supply,'audio-stems'))+'); '
                 'r=film.audio_master(' + ','.join([repr(PX.FF), 'json.load(open('+repr(plan)+'))', repr(narration_wav), repr(out), repr(ctx.tmp)]) + '); '
                 'json.dump(r,open('+repr(report)+',"w"))')
         open(job, "w").write(code)
