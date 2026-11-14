@@ -26,15 +26,15 @@ def shots(c):
 
 # ------------------------------------------------------------------ found pictures at the judge's pace
 
-def test_a_found_still_held_a_second_is_cut_inside_itself_and_every_part_moves():
+def test_a_found_still_keeps_one_eased_move_without_timed_hard_reframes():
     idx = selfie(20.0)
     text = film_text(beats_over(idx, 4, lambda k, a, z: {"cut": [30, 48, 999], "pic": ["main", f"bin:{k}", "main"]} if k == 1 else {"pic": "main"}))
     c = comp(text, idx)
     parts = [s for s in shots(c) if s["id"].startswith("b02.s1")]
-    assert len(parts) >= 2 and parts[0]["id"] == "b02.s1" and all(s["pic"] == parts[0]["pic"] for s in parts)      # the first keeps the shot's id
+    assert len(parts) == 1 and parts[0]["id"] == "b02.s1" and all(s["pic"] == parts[0]["pic"] for s in parts)      # the first keeps the shot's id
     assert sum(s["f"][1] - s["f"][0] for s in parts) == 48 and all(pace.parent(s["id"]) == "b02.s1" for s in parts)
     moving = [s for s in parts if isinstance(s["crop"][0], list) and len({tuple(r) for r in s["crop"]}) > 1]
-    assert moving and c.meter["pace"]["parts_added"] >= 1 and c.meter["pace"]["stills_moving"] >= 1
+    assert moving and c.meter["pace"]["parts_added"] == 0 and c.meter["pace"]["stills_moving"] >= 1
     first = [tuple(s["crop"][0]) if isinstance(s["crop"][0], list) else tuple(s["crop"]) for s in parts]
     assert len(set(first)) == len(first)                                   # each part is another framing of the picture
     for s in parts:                                                        # and every framing stays inside the picture
