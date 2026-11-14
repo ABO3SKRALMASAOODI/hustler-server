@@ -3247,7 +3247,9 @@ def findings(res, plan_):
         rows = [r for r in rows or [] if not (
             r[0] == "black" and float(r[1]) < prog
             and float(r[2]) >= prog - .25 / float(fps))]
-        out.append(black_tail_finding(tail, plan_))
+        finding = black_tail_finding(tail, plan_)
+        if finding is not None:
+            out.append(finding)
     out += stall_findings(rows, plan_)
     for kind, fr, cut in res.get("jumps") or []:
         t = _t(fr, fps)

@@ -243,3 +243,26 @@ def test_repeated_primary_evidence_covers_a_callback_but_is_not_a_new_picture():
     assert error.value.report['repeated_pictures']==1
     assert error.value.report['new_per_10s']==5
     assert not error.value.report['missing_windows']
+
+
+def test_recorded_attack_after_half_second_is_levelled_at_its_actual_peak():
+    sr=48000;t=np.arange(sr*4)/sr
+    voice=.1*np.sin(2*np.pi*220*t);bed=.045*np.sin(2*np.pi*110*t)
+    sample=np.zeros_like(t);a=int(1.9*sr);sample[a:a+4800]=.03*np.sin(2*np.pi*1200*t[:4800])*np.hanning(4800)
+    def render(items):return sample*sum(10**(x['db']/20) for x in items)
+    out=audibility.present_hits([dict(layer='hit',start_s=1.,peak_s=.9,db=-5.)],voice,bed,render)
+    assert out[0]['broadband_lift_db']<20
+    assert audibility.measure(voice,render(out),bed)['T2']==1
+
+
+def test_attack_in_speech_pause_can_clear_bed_without_adding_events():
+    sr=48000;t=np.arange(sr*5)/sr
+    voice=.1*np.sin(2*np.pi*220*t);voice[int(1.5*sr):int(4.5*sr)]=0
+    bed=.04*np.sin(2*np.pi*110*t);sample=np.zeros_like(t);a=sr*3
+    sample[a:a+4800]=.05*np.sin(2*np.pi*1200*t[:4800])*np.hanning(4800)
+    def render(items):return sample*sum(10**(x['db']/20) for x in items)
+    original=[dict(id='earned-picture',layer='hit',start_s=3.,peak_s=.05,db=-9.)]
+    out=audibility.present_hits(original,voice,bed,render)
+    assert len(out)==1 and out[0]['id']==original[0]['id']
+    assert audibility.measure(voice,render(out),bed)['T2']==1
+    assert np.max(np.abs(render(out)))<=.701

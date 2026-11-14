@@ -61,21 +61,32 @@ def present_hits(sounds, voice, bed, render):
     n = min(len(voice),len(bed))
     v,b = mono(voice[:n]),mono(bed[:n])
     lb,lvb,lv = levels(b),levels(v+b),levels(v)
+    speech_ceiling = float(np.percentile(lv,90))+3.5 if len(lv) else -20.
+    surroundings = mono(render(out))[:n]+b
     for it in out:
         if it.get('layer')!='hit' or it.get('start_s') is None: continue
         own = mono(render([it]))[:n]
         lo = max(0,int(float(it['start_s'])*100)-3)
-        hi = min(len(lb),lo+50)
+        # The recording can start well before its actual attack (a whoosh or
+        # impact with a long lead). Inspect through that measured attack.
+        peak_s = float(it.get('peak_s') or 0)-float(it.get('trim_s') or 0)
+        hi = min(len(lb),max(lo+50,int((float(it['start_s'])+max(0.,peak_s)+.15)*100)))
         if hi<=lo: continue
         ls = levels(own)
         i = lo+int(np.argmax(ls[lo:hi]))
-        med = np.median(lb[max(0,i-100):min(len(lb),i+100)])
+        # The teardown compares against the entire non-vocal track, including
+        # neighbouring effects' tails, not the music stem in isolation.
+        ln = levels(surroundings)
+        med = np.median(ln[max(0,i-100):min(len(ln),i+100)])
         target = max(med+7.,lvb[i]-5.)
         # A short attack may rise above speech, but never become a sustained competing voice.
-        ceiling = np.percentile(lv[max(0,i-100):min(len(lv),i+100)],90)+3.5
+        # A pause has no local speech peak: it must not force the effect below
+        # a still-playing bed. Bound attacks against the film's spoken level.
+        ceiling = speech_ceiling
         peak = np.max(np.abs(own))
         headroom = 20*np.log10(.7/max(peak,1e-9))
-        lift = max(0.,min(target-ls[i],ceiling-ls[i],headroom,12.))
+        lift = max(0.,min(target-ls[i],ceiling-ls[i],headroom,24.))
         it['db'] = round(float(it['db'])+lift,2)
         it['broadband_lift_db'] = round(lift,2)
+        surroundings += own*(10**(lift/20)-1)
     return out
