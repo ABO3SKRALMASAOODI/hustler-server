@@ -40,7 +40,8 @@ def test_requested_change_allowed(monkeypatch):
     assert edit_scope.write_refusal(ctx, {'texts': [1]}, {'texts': []}) is None
 
 
-def test_unmet_edit_restores_exact_edl_and_existing_preview_atomically(monkeypatch):
+@pytest.mark.parametrize('failure', ['unmet', 'check_unavailable', 'ledger_unavailable'])
+def test_unmet_edit_restores_exact_edl_and_existing_preview_atomically(monkeypatch, failure):
     import db
     before = {'keep': [[0, 4.566]], 'frame': {'fit': 'cover'}, 'texts': [{'text': 'A PAPER SNOWFLAKE'}]}
     after = dict(before, frame={'fit': 'pad_blur'}, texts=[])
@@ -54,9 +55,14 @@ def test_unmet_edit_restores_exact_edl_and_existing_preview_atomically(monkeypat
     monkeypatch.setattr(db, 'insert_asset', lambda *a, **k: saved.append(('preview', a[3], k['meta'])))
     monkeypatch.setattr(asks, 'stored_preview', lambda *a: {'edl_version': 8, 'screening_pages': ['before.jpg']})
     ctx = NS(turn_start_edl={'json': before, 'version': 8}, latest_edl=lambda: {'json': after, 'version': 9},
-             project_id=1, versions_written=[9], db=NS(run=lambda fn: fn(object())))
+             project_id=1, versions_written=[9], db=NS(run=lambda fn: fn(object())),
+             ask_check_required=True)
     ledger = {'asks': [{'id': 'a1', 'kind': 'edit'}]}
     verdict = {'asks': [{'id': 'a1', 'state': 'not_done'}], 'edl_version': 9}
+    if failure != 'unmet':
+        verdict = None
+    if failure == 'ledger_unavailable':
+        ledger = None
     assert edit_scope.restore_unmet(ctx, ledger, verdict)
     assert saved[0] == ('edl', before)
     assert saved[1][1] == 'original-preview.mp4'
