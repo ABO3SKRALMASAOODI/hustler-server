@@ -1143,7 +1143,7 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
         f.write(text)
     rec["direct"] = {k: usage.get(k) for k in ("rounds", "q_first", "q_repair", "repair_kept", "asks_open", "truncated")}
     m = comp.meter
-    rec["meter"] = {k: m.get(k) for k in ("dur_s", "beats", "cuts10", "new_pictures10", "type_events10", "captions", "cards", "flashes", "sounds10", "ceiling")}
+    rec["meter"] = {k: m.get(k) for k in ("dur_s", "beats", "cuts10", "new_pictures10", "type_events10", "captions", "cards", "flashes", "sounds10", "ceiling", "source_guard")}
     rec["meter"].update(design_items10=(m.get("facts") or {}).get("design_items10"), gestures=len(m.get("gestures") or {}),
                         rejects=len(m.get("rejects") or []), findings=len(m.get("findings") or []))
     _stage(rec, "direct", t)
