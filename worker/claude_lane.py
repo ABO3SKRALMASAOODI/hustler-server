@@ -830,7 +830,7 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
             "Claude lane is closed after a provider refusal (credit balance "
             "or key): " + closed_reason())
     import claude_trial            # metering + hard per-account ceiling
-    claude_trial.guard_call(model)
+    claude_trial.guard_call()
     plan = tool_plan if plan_usable(tool_plan, model) else None
 
     def build(active):
