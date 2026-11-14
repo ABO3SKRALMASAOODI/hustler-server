@@ -352,7 +352,7 @@ def test_blueprint_tools_are_retired_from_the_agent_catalog():
     schemas = {row["function"]["name"]: row["function"]
                for row in agent_tools.openai_tools()}
     for name in ("set_edit_plan", "complete_edit_plan_steps",
-                 "apply_edit_recipe", "generate_video", "generate_image",
+                 "apply_edit_recipe", "generate_image",
                  "research_music", "search_music",
                  "audition_music_candidates", "fetch_music"):
         assert name not in schemas

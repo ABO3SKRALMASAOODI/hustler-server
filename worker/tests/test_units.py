@@ -2052,13 +2052,13 @@ check("search_sfx appears when the owner turns web sounds on",
 cfg.SFX_SEARCH_ENABLED = _saved_sfx_search
 cfg.WEB_SFX_ENABLED = _saved_web_sfx
 
-check("generate_video is retired from the agent catalog",
+check("generate_video is hidden without a configured provider",
       all(t["function"]["name"] != "generate_video"
           for t in at.openai_tools()))
 cfg.FAL_KEY = "test-key"
 cfg.VIDEO_PROVIDER = "fal"
-check("generate_video stays hidden even when a video provider is configured",
-      all(t["function"]["name"] != "generate_video"
+check("generate_video appears when a video provider is configured",
+      any(t["function"]["name"] == "generate_video"
           for t in at.openai_tools()))
 cfg.FAL_KEY = ""
 
