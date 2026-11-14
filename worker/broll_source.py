@@ -855,6 +855,20 @@ def _sized_url(c):
     return url
 
 
+def _named_searches(subject):
+    """Keep the model's context queries and its subject name in the search budget.
+
+    Detailed narration queries can all miss an archive even when it has many
+    pictures of the named subject. The existing vision check still decides
+    whether the broader results meet the unchanged must_show brief.
+    """
+    name = subject["name"]
+    queries = list(dict.fromkeys(subject.get("searches") or []))
+    if name in queries[:3]:
+        return queries[:3]
+    return queries[:2] + [name]
+
+
 def search_named(subject, kind=KIND_PHOTO, count=6, budget_s=None):
     """(candidates, errors): Commons (by Wikidata 'depicts' first, then text)
     and Openverse for one subject, every search at once. Photos always, since
@@ -863,14 +877,15 @@ def search_named(subject, kind=KIND_PHOTO, count=6, budget_s=None):
     import time
     jobs = []
     pool = ThreadPoolExecutor(max_workers=6)
-    for q in subject["searches"][:3]:
+    queries = _named_searches(subject)
+    for q in queries:
         jobs.append((f"commons {q}", pool.submit(_wikimedia, q, KIND_PHOTO,
                                                  None, count)))
     if kind == KIND_VIDEO:
         jobs.append(("commons video", pool.submit(
-            _wikimedia, subject["searches"][0], KIND_VIDEO, None, 3)))
+            _wikimedia, queries[0], KIND_VIDEO, None, 3)))
     jobs.append(("openverse", pool.submit(
-        stock._openverse_search, subject["searches"][0], KIND_PHOTO, None,
+        stock._openverse_search, queries[0], KIND_PHOTO, None,
         count)))
     t0 = time.monotonic()
     out, seen, errors = [], set(), []
@@ -1006,7 +1021,7 @@ def find_named(subject, kind=KIND_PHOTO, count=6, also=(), workdir=None,
             c["license_note"] = license_note(c)
         lic_ok.append(c)
     report = dict(subject=subject["name"], must_show=subject["must_show"],
-                  searched=subject["searches"], candidates=len(lic_ok),
+                  searched=_named_searches(subject), candidates=len(lic_ok),
                   errors=errors, usd=0.0)
     if not lic_ok:
         report["say"] = (f"No free-licence picture of {subject['name']} was "

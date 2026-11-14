@@ -77,6 +77,38 @@ def test_no_check_answer_offers_nothing_and_says_why(monkeypatch):
     assert kept == [] and "none is offered" in rep["say"]
 
 
+def test_specific_archive_queries_recover_by_subject_name_and_still_face_vision(monkeypatch):
+    subject = dict(PIASTRI, searches=["Category:Oscar Piastri", "Oscar Piastri production interview",
+                                      "Oscar Piastri storyboard meeting"])
+    queries, briefs = [], []
+
+    def archive(query, *args):
+        queries.append(query)
+        return [commons(1)] if query == subject["name"] else []
+
+    def unavailable(*args):
+        raise RuntimeError("HTTP 429")
+
+    def check(subj, candidates, *args):
+        briefs.append(subj["must_show"])
+        return [dict(candidates[0], named=subj["name"], shows="McLaren 81 on track", _grade=4)], [], 0.001
+
+    monkeypatch.setattr(broll_source, "_wikimedia", archive)
+    monkeypatch.setattr(stock, "_openverse_search", unavailable)
+    monkeypatch.setattr(broll_source, "check_named", check)
+    kept, report = broll_source.find_named(subject)
+    assert len(kept) == 1
+    assert len(queries) == 3 and subject["name"] in queries
+    assert report["searched"][-1] == subject["name"]
+    assert briefs == [subject["must_show"]]
+    assert any("HTTP 429" in error for error in report["errors"])
+
+
+def test_subject_name_search_is_present_once_even_without_context_queries():
+    assert broll_source._named_searches(dict(PIASTRI, searches=[])) == [PIASTRI["name"]]
+    assert broll_source._named_searches(PIASTRI) == PIASTRI["searches"]
+
+
 def test_nothing_passing_is_said_honestly(monkeypatch):
     monkeypatch.setattr(broll_source, "search_named", lambda *a, **k: ([commons(1)], []))
     monkeypatch.setattr(broll_source, "check_named", lambda *a, **k: ([], [dict(id="x", ok=False)], 0.001))
