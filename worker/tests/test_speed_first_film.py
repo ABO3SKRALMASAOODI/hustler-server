@@ -255,14 +255,58 @@ def test_the_storyboard_merges_only_its_own_keys():
     assert args[-1] == "abc"
 
 
-def test_a_screen_shaped_upload_keeps_its_storyboard_before_ready():
+def test_a_screen_shaped_upload_starts_director_before_its_storyboard():
     screen = {"samples": [{"dense_ui": True, "faces": []} for _ in range(10)]}
     talking = {"samples": [{"text": [], "faces": [[0, 0, 1, 1]]} for _ in range(10)]}
     db = _IdxDb({"first_cut": True})
-    assert indexer.storyboard_after_ready(db, {"payload": {}}, 1, 9, spatial=screen) is False
+    assert indexer.storyboard_after_ready(db, {"payload": {}}, 1, 9, spatial=screen) is True
     assert indexer.storyboard_after_ready(db, {"payload": {}}, 1, 9, spatial=talking) is True
     assert first_cut.dense_ui({"spatial": screen}) and not first_cut.dense_ui({"spatial": talking})
     assert not first_cut._screen_like({"spatial": screen})       # no storyboard: never a screen, as before
+
+
+def test_screen_fallback_joins_the_same_storyboard_before_framing(monkeypatch):
+    ctx = NS(project_id=1, index={'visual_storyboard_pending': True,
+             'spatial': {'samples': [{'dense_ui': True, 'faces': []}]},
+             'words': [{'w': 'preserve'}]})
+    board = {'evidence': [{'setting': 'screen recording'}]}
+    reads = []
+    class DB:
+        def run(self, fn, *args):
+            if fn is dbx.latest_asset:
+                return {'sha256': 'same-source'}
+            assert fn is dbx.get_index_by_sha and args == ('same-source',)
+            reads.append(1)
+            return {'json': {'visual_storyboard_pending': len(reads) == 1,
+                             'visual_storyboard': board}}
+    monkeypatch.setattr(first_cut.time, 'sleep', lambda _: None)
+    first_cut._await_first_cut_storyboard(ctx, DB())
+    assert len(reads) == 2 and ctx.index['visual_storyboard'] == board
+    assert ctx.index['words'] == [{'w': 'preserve'}]
+    assert first_cut._screen_like(ctx.index)
+
+
+def test_non_screen_chain_does_not_wait_for_unused_storyboard():
+    class DB:
+        def run(self, *args):
+            raise AssertionError('unused storyboard read')
+    first_cut._await_first_cut_storyboard(NS(index={
+        'visual_storyboard_pending': True, 'spatial': {'samples': [
+            {'faces': [[0, 0, 1, 1]]}]}}), DB())
+
+
+def test_pending_screen_evidence_cannot_silently_change_framing(monkeypatch):
+    import pytest
+    ctx = NS(project_id=1, index={'visual_storyboard_pending': True,
+             'spatial': {'samples': [{'dense_ui': True, 'faces': []}]}})
+    class DB:
+        def run(self, fn, *args):
+            return ({'sha256': 'same-source'} if fn is dbx.latest_asset
+                    else {'json': {'visual_storyboard_pending': True}})
+    times = iter([0, 121])
+    monkeypatch.setattr(first_cut.time, 'monotonic', lambda: next(times))
+    with pytest.raises(RuntimeError, match='still pending'):
+        first_cut._await_first_cut_storyboard(ctx, DB())
 
 
 def test_a_proof_window_rebases_the_beds_drop_or_leaves_it_out():

@@ -2026,10 +2026,40 @@ def continuous_take(ctx, steps, applied, started, spend, q1=False):
             "s": round(sum(b - a for a, b in (_keep(ctx) or selected)), 3)}
 
 
+def _await_first_cut_storyboard(ctx, worker_db):
+    """Only the chain's screen decision needs the late storyboard.
+
+    The Director reads its own frames, so a geometric false positive must
+    not serialize its start behind a 50-second vision call. On fallback,
+    join the same evidence the chain used to receive before project-ready.
+    Never turn a slow pending result into a different framing decision.
+    """
+    if not (ctx.index.get("visual_storyboard_pending") and dense_ui(ctx.index)):
+        return
+    asset = worker_db.run(dbx.latest_asset, ctx.project_id, "original") or {}
+    sha = asset.get("sha256")
+    if not sha:
+        raise RuntimeError("The source storyboard has no index identity")
+    started = time.monotonic()
+    while True:
+        row = worker_db.run(dbx.get_index_by_sha, sha) or {}
+        fresh = row.get("json") or {}
+        if fresh and not fresh.get("visual_storyboard_pending"):
+            ctx.index["visual_storyboard"] = fresh.get("visual_storyboard")
+            ctx.index["visual_storyboard_pending"] = False
+            ctx.first_cut_phases = dict(getattr(ctx, "first_cut_phases", None) or {},
+                                        storyboard_wait_s=round(time.monotonic() - started, 3))
+            return
+        if time.monotonic() - started >= 120:
+            raise RuntimeError("The source storyboard is still pending; retry this edit")
+        time.sleep(0.5)
+
+
 def video_chain(ctx, worker_db, started, spend, whole=False):
     """The First cut's chain. whole=True (the trial turn's clean-up of the
     whole take, trial_turn.whole_cleanup): no best-moment pick, the source's
     own ends trimmed (a mic check, a trailing fragment) and the rest kept."""
+    _await_first_cut_storyboard(ctx, worker_db)
     steps, applied = [], []
     duration = float(ctx.duration or 0)
     picked = None

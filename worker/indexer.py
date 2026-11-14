@@ -471,18 +471,16 @@ def storyboard_after_ready(worker_db, job, project_id, session_id,
     trial or a plan admitted to the First cut, with no request waiting (a
     waiting request is the brief, and the Studio agent that runs it reads the
     storyboard). Then the project is ready before the storyboard is built, and
-    the film starts 31-42 s sooner. An upload whose filmstrip geometry reads as
-    a screen keeps today's order: the First cut asks the storyboard whether it
-    is one before it frames it (first_cut._screen_like). Any doubt keeps
-    today's order."""
+    the film starts 31-42 s sooner. The Director reads its own frame boards.
+    If it falls back to the chain, that consumer joins a pending storyboard
+    before making a screen-framing decision. Any admission doubt keeps the
+    original order."""
     if not config.STORYBOARD_AFTER_READY or not session_id:
         return False
     if (job.get("payload") or {}).get("reindex"):
         return False
     try:
         import first_cut
-        if first_cut.dense_ui({"spatial": spatial}):
-            return False
         admission = worker_db.run(first_cut.project_admission, project_id)
         if not (admission and admission.get("first_cut")):
             return False
@@ -678,7 +676,8 @@ def run_index_job(worker_db, job):
         # Cache hit: this exact file was indexed before (any project) BY THE
         # CURRENT PIPELINE, and its filmstrip is still readable in storage.
         cached = worker_db.run(dbx.get_index_by_sha, sha)
-        if cached and cached.get("pipeline_version", 1) == \
+        if cached and not (cached.get("json") or {}).get("visual_storyboard_pending") \
+                and cached.get("pipeline_version", 1) == \
                 config.PIPELINE_VERSION and _index_has_tiles(cached["json"]):
             ready_proxy = src if from_client_proxy else None
             if "proxy" in stream_prepared:
@@ -1029,6 +1028,7 @@ def run_index_job(worker_db, job):
             spatial=spatial_sidecar,
             source_layout=layout_sidecar,
             visual_storyboard=visual_storyboard,
+            visual_storyboard_pending=late_board,
         ).model_dump()
         worker_db.run(dbx.upsert_index, project_id, sha, index)
         clock.timed("trial_indexed_s", _claude_trial_indexed, worker_db, job,

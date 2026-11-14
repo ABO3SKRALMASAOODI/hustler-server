@@ -2988,6 +2988,7 @@ def set_index_storyboard(conn, sha256, storyboard, warning=None):
                                  || to_jsonb(%s::text))
                        END,
                        '{visual_storyboard}', %s::jsonb)
+                       || '{"visual_storyboard_pending": false}'::jsonb
              WHERE video_sha256 = %s
         """, (warning, warning, Json(storyboard), sha256))
         return cur.rowcount

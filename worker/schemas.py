@@ -4762,3 +4762,6 @@ class VideoIndex(BaseModel):
     # collapsed into explicit clusters.  The opaque versioned envelope lets
     # the evidence format evolve without making old indexes unreadable.
     visual_storyboard: Optional[dict] = None
+    # The first-film Director can work from its own frames while this is
+    # built. Consumers needing the storyboard join it before choosing edits.
+    visual_storyboard_pending: bool = False
