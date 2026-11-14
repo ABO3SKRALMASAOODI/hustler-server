@@ -7372,15 +7372,14 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             final = _enforce_honesty(ctx, client, messages, tools, draft,
                                      start_version, honesty,
                                      user_text=quality_verifier.request_text_for(ctx))
-            if getattr(ctx, "ask_verdict", None) is None \
-                    and turn_deadline - time.monotonic() > 45:
+            if getattr(ctx, "ask_verdict", None) is None:
                 # A reply never says "done" for what the film does not show
                 # (reply_truth, 14 Nov 2026): the screening sheets beside the
                 # draft, on the turn's own model.
                 import reply_truth
                 final = reply_truth.enforce(
                     ctx, client, ctx.agent_model or model,
-                    quality_verifier.request_text_for(ctx), final, honesty)
+                    quality_verifier.request_text_for(ctx), final, honesty, strict=True)
             # Language MUST run on the model draft before the English
             # quality advisory is appended — otherwise a Cyrillic reply
             # plus a long Latin advisory fails the 60% script threshold
