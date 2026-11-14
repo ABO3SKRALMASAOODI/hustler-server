@@ -136,7 +136,7 @@ TIER_PRESENT = {"hero": 12.0, "accent": 9.0, "body": 7.0, "tick": 4.0}  # how fa
 TIER_HEARD = {"hero": 6.0, "accent": 5.0, "body": 4.0, "tick": 2.5}     # under this the sound is not there and gives its place
 TIER_LIFT = {"hero": 5.0, "accent": 4.0, "body": 3.0, "tick": 2.0}      # the most the check raises it (the hierarchy stays)
 TIER_CEIL = {"hero": TIER_DB["hero"] + 4.0 + 1.0, "accent": TIER_DB["hero"] - 2.0,
-             "body": TIER_DB["accent"] - 1.0, "tick": TIER_DB["body"] - 2.0}   # a lift never reaches the tier above
+             "body": TIER_DB["body"] + 1.0, "tick": TIER_DB["body"] - 2.0}   # body lifts retain space below accents
 TIER_FLOOR_DB = 6.0         # the signal check may lower a sound this far under its tier, no further
 ACCENT_W, BODY_W = 0.6, 0.35                                          # never an accent under this weight (sound_choice.weight_of), never a body under that
 DISPLAY_W = 0.7             # the most a line of type weighs on its own
@@ -839,7 +839,7 @@ def gain_tier(sid, ref, tier, w, under=None, lead=False):
     g = ref + t - k
     if under is not None:
         g = min(g, ref - under - k)
-    return round(min(GAIN_MAX, max(GAIN_MIN, g)), 1)
+    return round(min(GAIN_MAX, tier_ceiling(sid, ref, tier), max(GAIN_MIN, g)), 1)
 
 
 def tier_ceiling(sid, ref, tier):

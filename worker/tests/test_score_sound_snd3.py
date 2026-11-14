@@ -231,3 +231,14 @@ def test_equal_weight_source_windows_do_not_all_become_accents():
     assert tiers=={e['id']:SD.tier_of(e,'plain',backwards) for e in events}
     assert SD.tier_of(events[0],'payoff',ladder)=='hero'
     assert len(ladder)==2
+
+
+def test_heavy_body_hits_leave_room_for_accents_before_presence_lifts():
+    """A heavy body event used to start above its lift ceiling, compressing the final hierarchy."""
+    lib = SD.library()
+    for sid in ("click_2", "impact_10"):
+        for weight in (.6, .85, 1.0):
+            gain = SD.gain_tier(sid, SD.VOICE_LUFS, "body", weight)
+            level = gain + float(lib[sid]["hit_lufs"]) - SD.VOICE_LUFS
+            assert level <= -7.45
+            assert SD.TIER_DB["accent"] - level >= 3.45
