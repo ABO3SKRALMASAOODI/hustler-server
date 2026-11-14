@@ -752,6 +752,10 @@ class ToolContext:
         integrity_refusal = edit_integrity.write_refusal(self, prev["json"], normalized)
         if integrity_refusal:
             return f"REJECTED (EDL v{prev['version']} unchanged): {integrity_refusal}"
+        import edit_scope
+        scope_refusal = edit_scope.write_refusal(self, prev["json"], normalized)
+        if scope_refusal:
+            return f"REJECTED (EDL v{prev['version']} unchanged): {scope_refusal}"
         import counter_facts
         if counter_facts.candidates(prev["json"], normalized):
             clock = timeline_mod.Timeline(normalized.get("keep") or [],
