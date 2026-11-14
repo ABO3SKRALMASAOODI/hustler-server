@@ -212,7 +212,10 @@ def run(ctx, worker_db, job, session_id, cfg):
         return {"fell": "no upload to direct"}
     started = time.monotonic()
     selections, selection_usage = (None, None)
-    if source_s > WINDOW_S:
+    child_clip = ((getattr(ctx, "project", None) or {}).get("meta") or {}).get("clip")
+    if (getattr(ctx, "project", None) or {}).get("parent_project_id") and child_clip:
+        selections = [child_clip]
+    elif source_s > WINDOW_S:
         selections, selection_usage = _selection(ctx)
         if selections is None:
             result = patch.throughout(ctx, ctx.ask_ledger,
@@ -220,6 +223,11 @@ def run(ctx, worker_db, job, session_id, cfg):
             result["path"] = "segmented_whole_film"
             result["selection_usage"] = selection_usage
             return result
+        import shorts
+        result = shorts.start_typed_craft(ctx, selections,
+            quality_verifier.request_text_for(ctx))
+        result["selection_usage"] = selection_usage
+        return result
     # Both switches admitted this request. The first-film account admission
     # and 180-second cap stay confined to first films.
     model = getattr(ctx, "agent_model", None) or "gpt-6.1-sol"
