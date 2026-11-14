@@ -28,9 +28,21 @@
        "hook": "The boldest claim, with superscript 1.", "close": "The footnotes stack up as the conclusion.",
        "needs": "concrete claims, numbers or names that can be footnoted"},
       {"id": "footage-cut", "name": "Footage Cut", "spine": ["G1", "T1"], "pace": [8, 14], "engine": "cut",
-       "look": "The take is the spine; over the sentences that name real people, companies and places the picture cuts to real footage and photographs of them, a new one about every second, then back to him.",
+       "look": "The take is the spine; over the sentences that name real people, companies and places the picture fills the phone with real footage and photographs of them, in colour, a new one about every second, then back to him. Heavy grotesk display words, yellow accent.",
        "hook": "His face, and the title on the caption seat.", "close": "The payoff line on his face, then the end card.",
-       "needs": "a moment that names real people, companies or places a camera has filmed; made by valmera-podcast-shorts/scripts/run_cut.py from a delivered moment"}
+       "needs": "a moment that names real people, companies or places a camera has filmed"},
+      {"id": "window", "name": "Window", "spine": ["G1", "N6"], "pace": [7, 12], "engine": "cut",
+       "look": "What he names plays in a framed window the width of the phone over itself out of focus, three layers deep, and the film cuts back to him between windows. Condensed capitals, cyan accent.",
+       "hook": "His face, and the title on the caption seat.", "close": "The payoff line on his face, then the end card.",
+       "needs": "a moment whose footage is wide or small in the archive (news, launches, screens): it is never blown up"},
+      {"id": "archive-reel", "name": "Archive Reel", "spine": ["G1", "X1"], "pace": [7, 12], "engine": "cut",
+       "look": "Every found picture fills the phone in black and white with heavy grain, a projector flash into each run of archive; he stays in colour. Cream serif italic display words.",
+       "hook": "His face, and the title on the caption seat.", "close": "The payoff line on his face in colour, then the end card.",
+       "needs": "a story about the past: how something began, what someone once did"},
+      {"id": "prints", "name": "Prints", "spine": ["G1", "N1"], "pace": [7, 12], "engine": "cut",
+       "look": "The pictures land as tilted prints that stack beside and over each other on the picture's own dark, out-of-focus ground, four layers and more by the third, each a clip or photograph of what he names; back to him between stacks. High-contrast serif, orange accent.",
+       "hook": "His face, and the title on the caption seat.", "close": "The payoff line on his face, then the end card.",
+       "needs": "a moment that lists or compares several named things"}
     ]
   },
   "wf2": {

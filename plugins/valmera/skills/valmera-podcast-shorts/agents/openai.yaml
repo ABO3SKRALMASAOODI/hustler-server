@@ -1,7 +1,7 @@
 interface:
   display_name: "Valmera Podcast Shorts"
-  short_description: "Make premium story shorts in parallel"
-  default_prompt: "Use $valmera-podcast-shorts with @valmera to turn this podcast into premium story-led shorts: scan the whole podcast and select every moment that clears the bar (the count follows the podcast; challenge every exclusion before materializing), give each a Look and a short brief, pilot the source's frame and export path once, let three reusable editors execute with one preview each, review each candidate as it arrives (work around a Valmera defect and report it at the end, never pausing the run), then export and verify the local finals."
+  short_description: "A podcast link in, finished shorts out"
+  default_prompt: "Use $valmera-podcast-shorts on this link. Run scripts/podcast.py with the link as its only argument, in the background, wait for it to exit without polling, then tell me the delivered folder, the number of shorts and anything that was not made. Ask me nothing else."
 
 policy:
   allow_implicit_invocation: false

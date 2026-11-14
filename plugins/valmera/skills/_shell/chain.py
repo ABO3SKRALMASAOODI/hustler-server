@@ -69,12 +69,23 @@ def unlink(sid):
         os.unlink(lk)
 
 
+def _run_alive(target):
+    """True when a link's target is the supply folder of a run whose owner still lives (any state root)."""
+    try:
+        st = json.load(open(os.path.join(os.path.dirname(target.rstrip("/")), "run.json")))
+        os.kill(int(st.get("pid")), 0)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def sweep_links(live_dirs):
-    """Links left by runs that died: any wf-* link in slice/work whose target is not a live run."""
+    """Links left by runs that died: a wf-* link in slice/work whose target is not a live run. A run under another
+    state root (a podcast run keeps one per short, and other workflows run beside it) is live while its owner is."""
     d = os.path.join(SLICE, "work")
     for n in os.listdir(d) if os.path.isdir(d) else []:
         p = os.path.join(d, n)
-        if n.startswith("wf-") and os.path.islink(p) and not any(os.readlink(p).startswith(x) for x in live_dirs):
+        if n.startswith("wf-") and os.path.islink(p) and not any(os.readlink(p).startswith(x) for x in live_dirs) and not _run_alive(os.readlink(p)):
             os.unlink(p)
 
 
@@ -172,6 +183,7 @@ def supply(ctx, script):
 
 FOOTAGE_YTDLP = f"{VV}/tools/ytdlp-venv/bin/python"      # yt-dlp newer than the image's pin (YouTube's player moves)
 FOOTAGE_DENO = f"{VV}/tools/deno"                          # the JS runtime yt-dlp's challenge solver needs
+FOOTAGE_POT = f"{VV}/tools/bgutil-pot/server"              # the PO-token script yt-dlp's bgutil plugin runs
 ENV_FILE = f"{V}/hustler-server/backend/.env"
 
 
@@ -222,6 +234,8 @@ def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None):
         env["FOOTAGE_YTDLP"] = FOOTAGE_YTDLP
     if os.path.isdir(FOOTAGE_DENO):
         env["FOOTAGE_PATH"] = FOOTAGE_DENO
+    if os.path.isdir(FOOTAGE_POT):                # PO tokens, the product's first rung against YouTube's bot wall (worker/ytaccess.pot_args)
+        env.setdefault("YTDLP_POT_SERVER_HOME", FOOTAGE_POT)
     if not env.get("OPENAI_API_KEY") and os.path.exists(ENV_FILE):
         for line in open(ENV_FILE):
             if line.startswith("OPENAI_API_KEY="):
@@ -361,12 +375,40 @@ def music_version(ctx, rd, sc):
         turn = (ctx.args or {}).get("turn_s", sc.get("turn_s"))       # the run's own word first, else the landing the score named: the drop goes on it
         if turn is not None:
             cmd += f" --payoff {float(turn):.3f}"
+        # films made together (a podcast's shorts) share a list of the tracks already taken, so no two play the same one:
+        # --args '{"music_ledger": "<file>"}'. The choice is made under the file's lock, one film at a time.
+        ledger, lock, used = (ctx.args or {}).get("music_ledger") if not song else None, None, []
         try:
+            if ledger:
+                import fcntl
+                lock = open(ledger + ".lock", "a")
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                try:
+                    used = [str(x) for x in json.load(open(ledger))]
+                except (OSError, ValueError):
+                    used = []
+            if used:                                     # the same call as the command line, with the tracks to leave out
+                aj, hp = os.path.join(ctx.supply, f"{tag}_args.json"), os.path.join(ctx.supply, f"{tag}_used.py")
+                json.dump(dict(l1=sc.get("l1_audio") or sc["l1"], work=ctx.supply, film=rd["film"], out=out + ".part.mp4", kind=SONG_KIND.get(ctx.workflow, "stories"),
+                               cache=os.path.join(ctx.state_root, "music_cache"), report=report, brief=brief,
+                               payoff=float(turn) if turn is not None else None, used=used), open(aj, "w"), ensure_ascii=False)
+                open(hp, "w").write(MUSIC_USED)
+                cmd = cmd[:cmd.index(" -m music_film score ")] + f" '{hp}' '{aj}'"
             sh(ctx, ["zsh", "-c", cmd], label=f"wf-{tag}-{ctx.run_id}", heavy=True, timeout=1800)
             os.replace(out + ".part.mp4", out)
+            if ledger:
+                try:
+                    cid = (json.load(open(report)).get("choice") or {}).get("cid")
+                    if cid and str(cid) not in used:
+                        json.dump(used + [str(cid)], open(ledger, "w"))
+                except (OSError, ValueError):
+                    pass
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:
             ctx.log(f"{tag} version skipped: {str(e)[:300]}")
             return None
+        finally:
+            if lock:
+                lock.close()
     try:
         rep = json.load(open(report))
     except (OSError, ValueError):
@@ -407,6 +449,20 @@ def music_version(ctx, rd, sc):
 
 
 SONG_KIND = {"wf1": "podcast", "wf2": "marketing", "wf3": "stories", "wf4": "longform"}
+# music_film's own command line, plus the tracks a run of films has already taken (its `used`)
+MUSIC_USED = '''import json
+import sys
+
+import music_film as M
+
+a = json.load(open(sys.argv[1]))
+try:
+    rep = M.score(json.load(open(a["l1"])), a["work"], film=a["film"], out=a["out"], kind=a["kind"], payoff_s=a.get("payoff"), cache=a["cache"],
+                  brief=a["brief"], call=M.openai_call(), used=a["used"])
+except Exception as ex:  # noqa: BLE001 - the clean film is delivered either way; the reason is on file
+    rep = {"ok": False, "why": f"{type(ex).__name__}: {str(ex)[:300]}"}
+json.dump(rep, open(a["report"], "w", encoding="utf-8"), default=float, ensure_ascii=False, indent=1)
+'''
 
 
 def sound_manifest():

@@ -19,11 +19,12 @@ TASTE = ("A device exists only where an event earns it, and less, placed right, 
          "captions is not a film: frame 0 is a designed picture, the people, places, companies and documents he names "
          "are shown as themselves (a real archive photograph, never a lookalike from a stock library), a number or a "
          "quote that carries the story becomes a designed chart or document, and one idea nobody else has runs through "
-         "the whole piece. A sound belongs to something landing on screen. One framing per speaker; no zoom per cut, no "
-         "reflexive whoosh, no sound puns. Placement is law: all type and cards inside x 0.05-0.95 and y 0.10-0.80, "
-         "clear of the top-right mark, never on a face; one caption seat for the film, between y 0.58 and 0.68. A name "
-         "is a small chip inside y 0.70-0.78, once per person. No music: Valmera never picks music. The end card and "
-         "watermark are added after you; leave the last frames on live footage.")
+         "the whole piece. A sound belongs to something landing on screen, and a film has them where the references do. "
+         "One framing per speaker; no zoom per cut, no sound puns. Placement is law: all type and cards inside x "
+         "0.05-0.95 and y 0.10-0.80, clear of the top-right mark, never on a face; one caption seat for the film, "
+         "between y 0.58 and 0.68. A name is a small chip inside y 0.70-0.78, once per person. The film's music is "
+         "chosen and laid after you (owner, 13 Nov 2026): place none. The end card and watermark are added after you; "
+         "leave the last frames on live footage.")
 
 # What the engine adds after the Director on every podcast short (alien/earned.py). The script stage plans it; the
 # Director is told to leave room for it. Nothing here is decided by hand per film.
@@ -158,7 +159,7 @@ def style_menu(styles):
 def _styles(ctx):
     """The styles this run may take: the registry minus the last three, and only the one the owner's line names
     (--args '{"style": id}') when it names one that is allowed. The moment is still found by the workflow."""
-    allowed = [s for s in ctx.styles_allowed() if not s.get("engine")]      # a style with its own engine has its own launcher (footage-cut: run_cut.py)
+    allowed = [s for s in ctx.styles_allowed() if not s.get("engine")]      # a style with its own engine has its own launcher (the engine styles: valmera-podcast-shorts/scripts/podcast.py)
     want = (ctx.args or {}).get("style")
     one = [s for s in allowed if s["id"] == want]
     return one or allowed

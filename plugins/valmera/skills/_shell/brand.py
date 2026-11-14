@@ -18,14 +18,18 @@ FF, FP = os.environ.get("SHELL_FFMPEG", BIN + "/ffmpeg"), os.environ.get("SHELL_
 
 
 def worker_dir():
-    """The worker beside this plugin (repo checkout), else the synced main checkout."""
+    """The worker these films are made with: one that holds this week's engines (the scene engine, the footage
+    engine, the film's music). The checkout beside this plugin when it has them; else the synced main checkout
+    (.valmera/sync_skill.sh keeps worktrees/skill-main at main). The installed copy under hustler-server sits beside
+    an older worker without the engines, and the Codex cache has no worker beside it: both reach the synced one."""
     if os.environ.get("VALMERA_WORKER"):
         return os.environ["VALMERA_WORKER"]
     d = HERE
     for _ in range(6):
         d = os.path.dirname(d)
-        if os.path.exists(os.path.join(d, "worker", "renderer.py")):
-            return os.path.join(d, "worker")
+        w = os.path.join(d, "worker")
+        if all(os.path.exists(os.path.join(w, n)) for n in ("renderer.py", "scene/run.py", "footage/run.py", "music_film.py")):
+            return w
     return f"{V}/worktrees/skill-main/worker"
 
 

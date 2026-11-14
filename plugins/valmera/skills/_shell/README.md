@@ -32,6 +32,19 @@ killed anywhere resumes where it stopped.
 | deliver | shell | everything | `<out>/<date>-<wf>-<style>-<title>-<id>/{film.mp4, film.json}` | Written to a hidden `.partial` folder, then renamed: delivered once, complete. A folder that exists is never added to. The ledger gets the style and window |
 | cleanup | shell | | nothing | The run folder and its slice link are deleted. The run exits 3 if anything of it is left in the work root |
 
+**Podcast shorts** (`../valmera-podcast-shorts/scripts/podcast.py <link>`, 14 Nov 2026) is a run of runs: it fetches and
+hears a whole podcast, finds and ranks its moments, and starts one shell run per moment (`wf1_short.py`, workflow
+`wf1`), two at a time, each under a state root of its own inside the podcast's work folder, so their ledgers and
+sweeps never meet. It gathers the delivered films into one folder and deletes the work folder. `wf1.py` here is the
+earlier one-film podcast workflow and is not part of it.
+
+**Model calls** (`llm.py`): the OpenAI rung by default since 14 Nov 2026 (`gpt-6.1-sol`, the key read from the
+backend's `.env` into the process, never printed); `SHELL_LLM=anthropic` under `claude_trial_env.sh` for Claude.
+
+**The worker** (`brand.worker_dir()`): the checkout beside the plugin when it holds this week's engines
+(`scene/run.py`, `footage/run.py`, `music_film.py`), else `worktrees/skill-main/worker`, which
+`.valmera/sync_skill.sh` keeps at main. The installed copy under `hustler-server/` and Codex's cache both reach it.
+
 A workflow module (`wf1.py` is the first) has `ideas(ctx)` and `script(ctx, ideas)`. It may
 replace `supply`, `score`, `render` or `check` when its films need it (narration for WF3/WF4,
 screen capture for WF2); everything else stays the shell's. `ctx` gives `run_dir`, `tmp`,

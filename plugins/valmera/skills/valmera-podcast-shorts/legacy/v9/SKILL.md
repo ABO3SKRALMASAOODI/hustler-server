@@ -1,0 +1,506 @@
+---
+name: valmera-podcast-shorts
+description: Turn podcasts and interviews into premium, story-led social shorts with Valmera, using one coordinator and reusable editor subagents, ranked hero stories, reference-derived Looks (motion typography and designed graphics, with sound and camera moves only where a moment earns them), fast batch review and verified local exports. Use when the user asks to make shorts from a podcast or interview with this workflow. Does not publish or operate the downstream CRM.
+---
+
+# Valmera Podcast Shorts (v9)
+
+FOOTAGE CUT (13 Nov 2026, the owner: real footage of what is said, a new picture every 1-3 s):
+`scripts/run_cut.py run --source <podcast> --out <root> --args '{"again": "<delivered wf1 folder>"}'`
+makes a delivered moment again on the engines with no model writing or directing it (`scripts/wf1_cut.py`):
+the take is the spine and the sound; over the sentences that name real people, companies and places the
+picture cuts to real footage (worker/footage, cut wide and shown in a window over itself out of focus, so
+a small archive copy is never blown up) and photographs of them on the clause that says the name, then
+back to him; what was filmed comes before what was photographed; captions ink word by word at one seat; the title holds the seat over his first breath;
+each named thing is labelled once; the pacing driver eases the take (never punches it), one look is
+solved on the film's pictures, the sound design places the references' sounds, and the shell lays the
+film's music after the render (a track from the licensed library, cut to the short's turn and payoff:
+`film.mp4` with it, `film_clean.mp4` without, the credit in `film.json`; the owner's own `"song"` is
+`film_song.mp4`). The payoff is always his face. The footage is not
+licensed: never publish it.
+
+Make shorts that look and sound like the best Instagram editors made them,
+and better: a story worth finishing, committed art direction, motion
+typography and designed graphics, and — only where a moment clearly earns
+them — sound edited to picture and eased camera moves.
+
+ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES (owner, Oct 2026):
+restraint is the default. Reach for a zoom or a sound only when a specific
+moment needs it — a key word, a reveal, a genuinely jarring jump cut, a
+real-world action shown — and zero is a fine answer. Never a zoom per cut,
+a camera move per hero moment or a sound per landing or transition: used
+where nothing calls for them they make an edit look childish.
+
+SOUND EFFECTS IN A PODCAST OR TALKING SHORT DEFAULT TO ZERO (owner, Oct
+2026): at most 1-2 per short, each on a structural moment (the payoff, a
+real section change) with a visual partner within ~50 ms of its hit (a
+graphic landing, a B-roll entry, a real-world action shown). Never a
+reflexive opening whoosh, never a bright sound (ding, pop, click, shutter)
+on the onset of a payoff or emphasis word, and never a literal sound pun:
+a shutter on the word 'pictures', a cash register on the word 'money' when
+nothing on screen is a payment. Leave gain_db unset: add_sfx levels each
+library sound against the measured voice at its hit and reports where it
+sits.
+
+EVERY GRAPHIC EARNS ITS PLACE (owner and judges, Oct 2026): it adds what
+the captions cannot — a number, a contrast, an identification, evidence, an
+image. About one hero graphic per 6-8 s at most, graphics on screen for
+under ~50% of the runtime, at most 3 type roles and one accent colour;
+never a re-typeset of the words being heard, never a spoken list as rows
+of text (show the items: real photos or clips on their onsets, else one
+accumulating list_build of the noun phrases said). The other half of the
+budget: every thesis line, spoken list or triad, named product or place and
+number gets a beat that adds information, with no body stretch past ~6-8 s
+without one. The hook is written from the clip's strongest line or
+statistic (never a generic question), is a headline that owns its zone
+(`word_slam` `tier='hook'`, or on some shorts the cover headline: the
+captions wait until it exits) and never shows a word a later graphic slams; a counter really counts and shows a
+spoken range as said ('30–40'); the payoff locks its number and noun
+together and holds about 0.6-1.2 s after the last word on LIVE footage: the
+natural tail chosen at selection (a reaction, a nod, a breath). Never a
+freeze frame or a slowed tail before the end card: viewers read it as the
+video stalling (owner, 22 Oct 2026). With no natural tail, end cleanly on the
+last word; the end card follows directly. A payoff number stays ~2 s on screen. Valmera's render result carries an EARN ITS PLACE advisory naming
+what breaks these rules, each with a fix ([looks.md](references/looks.md),
+**Shared grammar**, has the details).
+
+A steady, well-framed picture and a clean voice are the defaults, and every
+zoom or sound needs a reason you can name. The owner's references score
+about 7.5/10; October's bare clip pages (small picture, plain captions,
+nothing designed) scored 2.6. v9 answers with **Looks**
+([references/looks.md](references/looks.md)): designed type and graphics on
+the story's words, the picture filling the frame, sparse optional sound from
+the owner-approved library, one render as the norm and review as a quick
+binary verdict. Superseded v6-v8 material lives in `legacy/`.
+
+## Roles and what to read
+
+- **Coordinator (you):** this file, [selection.md](references/selection.md),
+  [looks.md](references/looks.md) and [review.md](references/review.md).
+  You select, run the framing pilot, brief, review, export and write the
+  manifest. Beyond the pilot's frame you do not edit shorts yourself.
+- **Editors:** [editing.md](references/editing.md), the Shared grammar,
+  structure and Look sections of looks.md, one brief, its `music_effective`
+  and, when that is on, the owner's song. Default **three editors**, reused:
+  a finished editor takes the next brief once the run's first candidate has
+  a verdict (the first-candidate gate). Raise the pool (and `--max-jobs`) to 4-6
+  when renders return in about a minute with no "shard is busy" errors.
+- Everyone runs on the session's current model (in Codex, `gpt-6.1-sol`).
+
+## Saved briefs written for v7/v8
+
+Runs often start from a saved brief such as
+`.valmera/podcast-shorts/briefs/reusable-four-styles.md`. Where it and v9
+disagree, v9 wins on method and the brief wins on preferences.
+
+- **Still binding:** the source and people, lane (structure) names,
+  speaker-first verified headlines, spoken-word highlighting when asked,
+  asset provenance notes, no publishing or scheduling, B-roll and montage
+  rules, and the music preference. Music is off unless the owner supplies
+  or approves a specific song for the run (the brief's Music line names it;
+  record it with `--song`).
+- **Superseded:** any fixed story count, minimum, maximum or rate (8-12,
+  "up to N", "one per N minutes"): the count follows the podcast; v7 run state (use `scripts/run.py`);
+  `premium-design.md`, `additional-reels.md` and `set_typography_scene` as
+  primary direction (use looks.md); the bare clip-page defaults, the blanket
+  SFX ban (sound is now optional, sparse and library-only), any `auto` music
+  or library bed
+  (music is off without the owner's song), the black canvas, the
+  per-candidate evidence path (use review.md) and the score-90 gate.
+
+## The production loop
+
+1. **Start.** Make `.tmp/valmera-podcast-shorts/<run-id>` under
+   `/Users/masaoodi/Documents/Valmera` and run `scripts/run.py init`
+   (source, editors; `--song '<file, link or Artist - Title>'` only when the
+   owner supplied or approved one, otherwise music stays off). A new podcast
+   is a new run.
+2. **Acquire and index once.** `create_project(kind='shorts')`, upload the
+   source as `original` (`upload_start`/`upload_finish`). **Uploading:**
+   never copy presigned URLs into curl by hand. Save the `upload_start`
+   result (its structuredContent, or the JSON closing its text) as
+   `<run>/source/plan.json`, run `python3 scripts/upload_parts.py <local
+   file> <run>/source/plan.json` (it checks the size, PUTs every part 4 at a
+   time with retries, and resumes on a re-run), then call `upload_finish`
+   with exactly the arguments it writes to `<run>/source/upload_finish.json`.
+   A plan's URLs last 12 hours; a size mismatch means `upload_start` again
+   with the file's real `size_bytes`. Download a URL
+   locally once if Valmera cannot fetch it; with yt-dlp fetch the video and
+   the `en-orig` captions in separate calls, so a caption 429 cannot block the
+   download). **Downloading** (`fetch_url` refuses media over 60 minutes, so
+   a long podcast is always downloaded here): run yt-dlp with a Python 3.10+
+   (`.valmera/venv-worker/bin/python -m yt_dlp`; the system `python3` is 3.9
+   and cannot import it), `-f 'bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080]'
+   --merge-output-format mp4 -N 8 --ffmpeg-location
+   /Users/masaoodi/Documents/Valmera/audit/subscriber-reliability-20260908/bin-arm`.
+   On HTTP 403 the downloader is outdated (the owner: update it, never stop
+   for it): make `<run-dir>/tools` with `.valmera/venv-worker/bin/python -m
+   venv`, `pip install -U 'yt-dlp[default]'` into it, and add `--js-runtimes
+   node:/Users/masaoodi/Documents/Valmera/.valmera/venv-worker/lib/python3.12/site-packages/playwright/driver/node`
+   (Jensen run, 15 Oct: this recovered the 90-minute 1080p source after two
+   403s). Indexing takes about 20-25 min for an hour of talking heads and
+   longer for long or busy footage (a 90-minute vlog sat at 90%, "building
+   the visual storyboard", for 90 min): 90% is progress, not a stall. It
+   shows "0%" while queued. Meanwhile read selection.md and looks.md, fetch
+   the audience signal (selection.md, **Audience signal**) and draft
+   candidates from the platform's captions if it has them; then check
+   `index_status` about every 5 minutes, or `wait_for_job(job_id)` (each call
+   waits up to ~110 s). **Never end your turn while an index, render or
+   export of the run is still running**: the run has no one to resume it
+   (Jensen run: the coordinator stopped at 90% and the finished index sat
+   unused for 4.5 h). Waiting: the harness blocks a foreground `sleep`; run
+   `sleep 300` with `run_in_background` and continue when it reports done.
+3. **Select every moment that clears the bar**
+   ([selection.md](references/selection.md)). A FULL SCAN, not a skim: walk
+   the whole transcript in order, chapter by chapter, and list every
+   self-contained moment worth a short (a story, a striking claim, a
+   surprising number, a funny or emotional exchange, a strong opinion, a
+   vivid explanation). Map YouTube's most-replayed windows and timestamped
+   top comments onto them. Grade each moment INDEPENDENTLY on hook, payoff
+   and inspiration (would a viewer stop scrolling, finish it, and feel or
+   learn something?) and keep EVERY one that clears the bar. There is no
+   number: the count follows the podcast (7 if only 7 are good, 70 if 70
+   are), never a target, minimum, maximum or rate. Leave a moment out only
+   for one of selection.md's six valid reasons, with a one-line reason
+   for every moment left out; never for quota, theme overlap, "host-led"
+   or "chatter" that is actually funny. Then the **challenge
+   pass**: re-read the not-selected list as the owner who watched the whole
+   podcast ("would I miss this?") and overturn every weak reason before
+   `make_shorts`. Look at 3-4 source frames first: what the picture allows
+   (a call window, a picture-in-picture, UI, logos, a 4:3 archive) decides
+   the layouts and so the Looks.
+4. **Materialize once.** One `make_shorts` call with verified sentence
+   boundaries and a 0-100 score. Its reply (or `shorts_status(parent)` once
+   the children exist) carries the **SOURCE LAYOUT**: a call window, its
+   status bar and buttons, the host's self-view, and the largest card at
+   <= 2x with and without a headline band. Every child starts 9:16 from it.
+5. **Pilot the frame and the export path once per source** (selection.md,
+   **Framing pilot**; about 15 min, 1 render, 1 export) on the rank-1 child
+   whenever a short will use a card or letterbox or the source has
+   obstacles: set the layout the briefs will use (start from the SOURCE
+   LAYOUT's card), render, read the measured picture area and headline vs
+   caption cap height from the render result, and export it once. Save
+   `selection/framing.json`; every brief copies it. If no layout meets the
+   Look floors, change the Looks and structures to one that does (looks.md,
+   **Card geometry**); if Valmera cannot render or export the proven layout,
+   fall back to the safest layout that does work (full-bleed, no band), note
+   the defect for the end-of-run report, and carry on (**Defects: keep going,
+   report at the end**). Oct 2026: 8 of 9 shorts died on a frame the pilot
+   would have caught in the first 20 minutes.
+6. **Brief.** Draft while the children build (4-7 min), finish with the
+   pilot's measurements (Looks and layouts it allows), not by eye: for each short a Look, a
+   structure (`cover-to-conversation`, the cover-headline opening, for SOME
+   shorts whose title is a strong curiosity title, with its `cover_text`;
+   looks.md **Structures**) and a 150-word brief with a beat sheet (hook, turn, payoff,
+   2-4 hero moments with exact word cues, no source gap over 12 s),
+   saved as `assignments/<id>.json` with `child_project_id`, `rank`,
+   `score` and the pilot's `framing`. Then one `shorts_status(parent)` and
+   one `run.py register --assignments <run>/assignments` (it rejects a brief
+   whose beats leave a long gap).
+7. **Edit.** Run exactly `max_editors` PERSISTENT editors (lane0, lane1,
+   lane2): each owns a fixed share of the shorts (sorted short ids, index
+   modulo the editor count) and edits them one after another, fix passes
+   first, so what it learns on one short carries to the next. Each editor
+   reads the guides once, then keeps notes: the run's shared
+   `lanes/LESSONS.md` (framing, Valmera quirks, what landed, what reviewers
+   flagged; 1-3 lines after every short) and its own `lanes/<editor>-notes.md`.
+   Read both before each short. After about 4 shorts, or when its context is
+   long, an editor hands over to a fresh one that starts from those notes.
+   Per short: `run.py assign --editor <name>` with its brief,
+   `music_effective` and `music_song`; plan with `suggest_devices` and the
+   brief, then go further; build in batched calls; `proof_device` and
+   `audit_motion` before rendering; render once, self-check with rendered
+   `look_at` (editing.md step 5), fix the weakest moment, and hand back a note
+   of at most 10 lines with `run.py candidate --editor <name> --programme-s
+   <preview s>` (the final adds the 5 s end card; over the run's cap it warns
+   and review refuses to ship).
+8. **Review** ([review.md](references/review.md)) candidates in small
+   batches as editors hand them back (one reviewer reads review.md once and
+   judges the batch; no reviewer waits idle for work). Use the evidence
+   recipe plus `critique_short` (the motion critic) and `audit_motion`:
+   five yes/no questions, then
+   **ship**, **a targeted fix** (one per concrete defect, no limit) or
+   **kill** (only a story that fails on its own: a craft defect is a fix),
+   recorded with `run.py review`. Fix passes go before new
+   briefs: a fix is the nearest thing a run has to an export.
+   **First-candidate gate:** `run.py` hands out no more than `max_editors`
+   shorts until the run's first review. If a verdict names a cause the shorts
+   in flight share (layout, source, template, a Valmera tool), fix the
+   framing recipe and the open briefs before the next hand-out (switch to a
+   layout, template or device that works), then keep handing out. Never stop
+   the run to wait for a fix.
+9. **Export** only a short whose latest review is **ship** on that exact
+   EDL version: `export_final(project_id, edl_version)`, `wait_for_job`,
+   `download_url(kind='final', edl_version=...)`, save as
+   `exports/<structure>__<short_id>__<slug>.mp4`, then `run.py export`
+   (it computes the sha256). Watch the first final in full (`--verified-full`).
+   If `export_final` answers `verification_open`, nothing was started: repair
+   the listed findings on a new version, or justify a genuine false positive
+   with `justify_verification_findings(finding_ids=[...], justification=...)`
+   citing the frames you checked, then export again. A full-bleed still or a
+   brief transition flash is no longer flagged for the corner mark or the
+   captions, and an opening blink whose only clean start drops words is an
+   advisory: a finding of that kind on a new render is worth reporting.
+   If it answers `held_tail`, nothing was started: the EDL ends on a held
+   picture (a freeze-frame or payoff hold, a still, a slowed or time-effect
+   tail) or the render measured one. Remove the hold it names, extend the
+   last keep onto live footage 0.6-1.2 s after the last word or end on the
+   last word, render a preview and export that version. No justification
+   clears an EDL hold.
+   **Tail check every final** right after downloading it:
+   `python3 scripts/tail_check.py <file>` (ffmpeg from PATH,
+   `$VALMERA_FFMPEG_BIN` or the bin-arm build). `HELD` means the final
+   stalls before the end card and must not be delivered: re-cut it as above
+   and export again. `deliver` runs the same check on every final.
+10. **Manifest.** `run.py finalize --not-selected <file>` writes
+   `exports/manifest.json`, `publishing-manifest.json` and `PUBLISHING.md`
+   in the format the publisher already reads.
+11. **Deliver once, complete.** The owner hands the delivered folder to
+   publishing agents, which post it as one set; a short added to it later
+   is never posted (owner, 24 Oct 2026). So **every revival, re-cut, fix
+   pass, export, tail check and finalize comes before deliver**, and nothing
+   is ever added to a delivered folder. When the last short is accounted
+   for, run `run.py deliver --run-dir <run>` exactly once. It runs
+   `scripts/tail_check.py` on every final first: if any is `HELD` (a still
+   picture before the end card) or cannot be measured, it delivers nothing
+   and lists them. Re-cut those shorts, export them again, `run.py export`
+   and finalize, then deliver (if one cannot be repaired, close it with
+   `run.py exception` before finalize; never pass `--allow-held` unless the
+   owner asks). It builds the complete folder aside (every final
+   sha256-checked, `README.md`, `CREDITS.md` and the manifests) and moves it
+   into place in one step: `~/Documents/Valmera/Podcast Shorts/<Speaker> -
+   <Title> (<year>) - <N> Finals/` (`--name` overrides the folder name).
+   A run that was already delivered, or a folder that already exists, is
+   refused. Only when the owner asks for a delivered folder to be replaced,
+   pass `--redeliver-replace`: the whole folder is rebuilt and swapped in,
+   and the old one is kept in `<run>/delivery-replaced/`. Never copy a final
+   into a delivered folder by hand. End the run by telling the user that
+   folder's path, once: their publishing agents are pointed at it.
+
+## Non-negotiables
+
+- **Faithful claims.** No spliced claims, qualifiers kept, cautious
+  statements stay cautious. No invented numbers, quotes, messages, posts or
+  identities: UI and data templates dramatize only what the source says.
+- **Rights.** Licensed or CC media, the Valmera sound library, and only the
+  owner's own song for music; record source and licence for every asset and
+  put required credits in the handback. Never use another creator's logo,
+  footage, music or identity, or present archival footage as the exact event
+  discussed.
+- **Speaker-first, verified headlines** (`Name: claim`, the claim taken
+  from the clip's strongest line, never a generic question). The name lives
+  in the headline or the hook's kicker, so a famous speaker needs no
+  broadcast lower third. If identity is uncertain, omit the name; never
+  borrow one from a reference or earlier run.
+- **Branding.** Every final keeps the native corner watermark ("EDITED
+  USING" / the robot and "Valmera AI" / "valmera.io", right-aligned; since
+  25 Oct 2026 in the fixed brand slot on 9:16, y 0.125-0.182, right edge x
+  0.905, just under the platforms' top controls) and the complete 5-second native Valmera end card
+  exactly as Valmera renders them: never cropped, covered, trimmed,
+  shortened, moved or replaced. They are the owner's marketing. The final is
+  15-45 s including that ending.
+- **Accounted for.** Every selected short ends exported, killed,
+  needs_user_review or failed_technical, with a reason and next action.
+- Archival footage is used as is; never upscale or re-upload children.
+- Nothing is published or scheduled; the CRM is out of scope.
+- The user's current message overrides Look defaults.
+
+## Sound and music
+
+**Sound** comes only from the owner-approved library of real recordings
+(`list_sound_library`; `add_sfx(storage_key='sound:<id>', at=...)` with
+gain_db unset), never from online search. A podcast short carries zero by
+default and at most 1-2, each on a structural moment where something on
+screen changes within ~50 ms of the hit: a designed graphic landing, a real
+section change or B-roll entry, the payoff, or a real-world action shown (a
+shutter on a photo being taken, typing under typed text, a click on a
+button press, a cash register on a payment shown). Never on captions or
+ordinary cuts inside the conversation, never the reflexive opening whoosh,
+never a bright sound (ding, pop, click, shutter) on the payoff word's
+onset, never a literal pun on the spoken word. Never the same sound twice
+within ~3 s; one family per short, matched to the material; peaks on the
+visual frame. `add_sfx` levels each recording against the measured voice
+at its hit (whoosh and swish about 8 dB under, ding, pop, click and
+shutter about 10 under, an impact louder only below 150 Hz) and reports
+where it sits; `audit_audio_mix` lists every sound's level and placement
+checks. Motion graphics are silent unless the editor passes `sfx=true`, and
+`apply_look` places no sound unless called with `transition_sounds=true`
+(looks.md, **Sound**).
+
+**Music is off.** Agents never choose music: no CC0 library bed, no stock
+track, no song picked by taste. It is on only when the owner supplies or
+approves a specific song for the run (`run.py init --song ...`); then that
+exact song goes under every short whose brief does not say `off`, about
+-20 dB and ducked. A brief's `music` is `inherit` or `off`; `on` is accepted
+only when the run has the owner's song. Montages and action openers never
+ship digital silence: they keep the source's natural sound, are designed
+around speech, or, when neither works, are flagged in the handback for the
+owner to add a song when posting (looks.md, **Sound without music**). Never
+invent a music choice.
+
+## Defects: keep going, report at the end
+
+A run never pauses to wait for a Valmera fix, and never asks the user
+whether to continue: it finishes on its own and reports. Run one podcast at a
+time.
+
+- When a Valmera defect blocks a path (a tool that errors, a template that
+  renders type smaller than captions, a layout the engine refuses, an export
+  that fails), switch to a path that works: another layout or template,
+  another device, the `apply_edit_batch` route, or a simpler version of the
+  beat. Fix the framing recipe and the open briefs so the other shorts avoid
+  it.
+- If one short truly cannot be made, record it with `run.py exception
+  --status failed_technical` and the next action "revive after Valmera fix:
+  <defect>", and move on to the next short. Stop handing out only if EVERY
+  remaining short is blocked by the same defect, and even then finish
+  exporting what passed and write the report.
+- Do not grind: the same operation failing twice means change the approach
+  (another layout, template, device or tool, or the `apply_edit_batch`
+  route), never stop the short or the run for it (Oct 2026: editing nine
+  shorts by repeating one failing call cost 2 h 55 min, 729 editor calls and
+  25 renders for 0 exports).
+- Write every REAL defect once, with its evidence (call, arguments, error
+  text, job id, frame), into REPORT.md's **Valmera defects** section at the
+  end of the run, ranked by impact. That list is how Valmera gets fixed.
+
+## Efficiency rules
+
+- Per short: about 25-40 Valmera calls, 1-2 renders, at most 3
+  `wait_for_job` calls per render. Savings come from polling, verification
+  and bookkeeping; never drop a planned beat to save calls.
+- **Budgets, never stops** (owner, Oct 2026: runs kept ending shorts on the
+  two-render ceiling, the one-fix rule and the call cap, and the owner had
+  to say "ignore and solve it" twice). A render count, a call count or a
+  second failure of one operation never ends a short or the run. A short
+  with a concrete, named defect gets the render that fixes it; what changes
+  after the same operation fails twice is the approach. A short is
+  `failed_technical` only when no working path remains, and every quality,
+  factual and exact-version export gate still applies.
+- `render_preview` now waits longer. Never poll in a loop, never re-render
+  an unchanged version, never use a heartbeat or scheduled task. Long waits
+  (indexing, `make_shorts`, exports) are checked every few minutes, not
+  every few seconds (a backgrounded `sleep`, never a foreground one).
+- Reviews go before new edits in any shared queue: a verdict can change every
+  open brief, and a candidate waiting for review is the run's most valuable
+  information (Oct 2026: the first candidate waited 49 min while five more
+  shorts were started with its defect).
+- At most `max_jobs` Valmera jobs in flight (default 3). Writes to one child
+  are serial; independent children proceed in parallel.
+- Reuse the parent source and index. No local re-encodes, local ASR, frame
+  dumps, preview downloads or reading Valmera's backend code; use the tool
+  schemas. Editors list templates and the sound library once.
+- On a rejected call, correct the arguments and retry once. On a lost
+  response (a transport error, "error sending request"), never repeat a
+  render or export blindly: `render_preview(report=true)` returns the stored
+  report of a render that finished, `download_url(kind='final')` names an
+  export still running (wait for that job), and `shorts_status` and the job
+  id answer the rest. A transient failure gets one retry, then
+  `run.py exception` and move on.
+- To resume, read `run.py status --json` and `shorts_status(parent)`.
+
+## Known Valmera limits
+
+Tools change; the live server schema wins over any doc. A client caches
+`tools/list` when it connects, so a long-lived session can miss tools and
+parameters the server added since (e.g. `suggest_devices`,
+`apply_format_pack`, `set_picture_card` `panels`). Never restart or work
+around it: **if a tool you need is not in your list,
+`expand_toolset(describe=['<tool>'])` returns its current schema, then
+`expand_toolset(call={'name': '<tool>', 'arguments': {..., 'project_id':
+<id>}})` runs it** exactly like a direct call (same project check, gates,
+charges, errors and result). A parameter your cached schema lacks: pass it
+anyway, or make the call through `call`. `expand_toolset(domains=[])` lists
+every current tool. Real limits as of Oct 2026 (a face filling its card, write-time
+size estimates for lockups) are in editing.md **Known Valmera limits** with
+the working path. Read it before the pilot and before editing; never spend
+more than two calls rediscovering one. The render result measures what
+reviewers used to estimate (its MEASURES line: picture area and upscale,
+hook, caption and payoff cap heights), and the `headline` write measures its
+claim against the captions and names the fix when it is smaller.
+
+## Run state (`scripts/run.py`, `--help` on each command)
+
+`init` · `register` (add-short + brief for a whole assignments folder) ·
+`add-short` · `assign` · `candidate` · `review` (ship | fix | kill) ·
+`export` · `exception` · `status [--json]` · `finalize`, run with
+`python3`. It locks `run.json` (editors record their own candidates, from
+`queued` or `fix` too, without holding a slot), counts each short's fix
+passes (no limit), brief and note limits, beat coverage in the brief, the
+first-candidate gate, the export name and length, and that every short is
+accounted for. It never scores taste. Editors save their note and handback
+as `candidates/<id>-note.txt` and `candidates/<id>-handback.json`, never in
+a session scratchpad.
+
+## Completion report
+
+Moments found, selected and left out (and what happened to each
+high-replay window); shorts exported by tier, Look and structure; the two
+or three best moments
+(short, timestamp, what lands); kills and exceptions with reasons; elapsed
+time; renders per short; re-index count; manifest paths. Optionally score
+2-3 shorts on the calibration rubric. Never claim viral performance or
+self-award a quality score.
+
+## One film at a time on the workflow shell (`../_shell`, `alien/`)
+
+For a single finished short in one of the ALIEN styles, with no Valmera project and no editor subagents, run
+the workflow shell. It finds the moment itself, plans the pictures and the direction, finds and checks the
+story's real pictures, has the Director write the Score, renders on the Mac engine, adds the product's
+watermark and end card, measures the film, delivers one folder once and deletes its work folder.
+
+```
+PY=/Users/masaoodi/Documents/Valmera/.valmera/venv-worker/bin/python
+zsh /Users/masaoodi/Documents/Valmera/.valmera/claude_trial_env.sh $PY ../_shell/shell.py run --workflow wf1 \
+    --source <podcast.mp4, captions .json3 beside it> --out <deliver root> [--args '{"style": "<id>"}']
+    # --args '{"again": "<delivered folder>", "style": "<id>"}' makes a delivered moment again in another style
+```
+
+**What every shell film gets (`alien/earned.py`, since 13 Nov 2026).** The Director's film is the take in one
+framing, its captions and the name chip. Everything else is planned by the script stage and made by the engine,
+the same way for every film, never by hand:
+
+| | How |
+|---|---|
+| Earned pictures | The script stage names 7-10 pictures on his words: `named` (a real person, company, place, product, document), `thing` (the famous or historical instance of what he points at) or `design`; never the speaker as he looks today. Named and thing rows go down the named route (`worker/broll_source`: Wikimedia Commons by Wikidata depicts, then Openverse) and one vision check keeps only pictures that show the subject (a second sheet of candidates when the first keeps none; among equals the upright one). A second look says what must stay in frame and whether the picture is a sheet of print. A picture whose subject fits the 9:16 window fills the frame (a paper never loses a word); one that does not is a card that lands over the live take under his chin, with the captions at its foot. A subject with no passing picture is not shown, and `film.json` says so. Never a library lookalike |
+| Designs | At most two a film: `number`, `versus`, `bars` (figures he says; a chart without figures is not drawn) or `document` (a paper he describes). A panel beside the head, drawn in the plan so it moves: it lands and settles, bars grow to their share, a paper's lines type on and the marked line takes a highlighter. Every word on it is his, and his sentence is never set again as a pull quote. Captions take the panel's top edge while it stands; a footnote waits for it to leave |
+| Hook picture | Frame 0 is the story's subject, full frame, never a card (a wide picture with a face opens on the face), the hook line large and sharp on that frame, the words that carry it in the serif accent, their ink solved on the picture. The line never stands on a face: above the caption seat when that is clear, else under the chin with the captions at its foot, else not set. It holds to the first stressed word after 1.25 s, then cuts to him |
+| His own footage | The take moves closer when his face is under a fifth of the frame's height (never past 3x of the source's pixels), and one closer framing (13%, about his face) is cut in on the payoff's first word. No picture after the payoff; the last 1.4 s stay on live footage |
+| Motion | A picture lands two frames ahead of its word, settles on the atlas curve (tau 6.9 frames) and drifts in while it holds. Panels and their contents arrive on expo-out curves |
+| Sound | The finished plan (pictures, panels and hook in place) goes to the film's sound design (`worker/score/sound.py`): each chosen picture event gets an approved library sound with its peak on the event, inside the footage's allowance, checked against the voice. When that pass is not in the checkout or cannot run, the owner's rule is applied directly: at most two sounds, on the payoff's cut and one landing, soft air or a low hit, never on a word, a fixed distance under the measured voice. Never music |
+| Colour and ink | One grade per style (`RECIPES[style]["look"]`) on the take and every found picture, with its grain, vignette and halation. A caption that lives across a cut to another picture takes each ground's ink (dark on a white paper, no pool); a bright picture is shaded under the watermark |
+
+`film.json` carries what was planned, found, placed and skipped, with each picture's licence and credit
+(`checks.alien.earned`). `scripts/test_earned.py` holds the plan pass to its rules.
+
+A style whose recipe names alien passes (`RECIPES` in `../_shell/wf1.py`) is rendered in two passes
+(`alien/alien_render.py`): the engine draws the Director's pictures, the passes work on that film in programme
+space, then the engine lays the type over the result, so type is never relit. What exists:
+
+| Style | Pass (`alien/passes.py`, `alien/footnotes.py`) | What the film's `film.json` proves |
+|---|---|---|
+| `room-listens` | `room_light` (L1, L4): he stays as shot; the room behind him is exposed by the level of his voice; a picture about to cut in lights him and the wall in its own colour before it arrives and after it leaves; a card is a lamp | room light against the voice (0.8 or more) on frames no picture lights, his own exposure unchanged, frames lit by pictures |
+| `lit-by-voice` | `voice_light` (L2): the room goes dark; a warm lamp at the mouth follows the sound's level; pictures and cards breathe with it | light against the lamp inside every shot (0.8 or more), dark in pauses, flashes per second |
+| `receipts` | `footnotes` (C6): a superscript on the claim's word, the note and its source typed at the foot | each note's fragment was found in the fetched page and its numbers in that fragment (`alien/evidence.py`); rejected notes are listed |
+| `second-camera` | `second_camera` (K1): the take seen from a few degrees off axis through its own depth, cut in on stressed words, ending on the true frame | parallax in pixels, share of the film, what the move uncovered |
+
+Rules the passes keep for every style (`alien/l1pass.py`): type and held cards are moved inside x 0.05-0.95,
+y 0.10-0.80 and measured again; ink is checked against the picture it will stand on (WCAG 4.5, 3.0 for display)
+and flipped or given a pool; a footnote with no fragment in its source is dropped, never invented. A style
+without a recipe renders through the shared chain. The builder never rates the film.
+
+## The alien bank (`worker/scene/alien`, since 13 Nov 2026)
+
+Beside the passes above the engine has five devices of its own (`rhyme`, `diecut`, `lamp`, `arc`, `answer`): a scene
+asks for one under `alien`, by the Director's `alien` gesture or a style, and the one-pass render lays it in
+(`../_shell/chain.py alien_bank`). The two-pass styles do not take them yet. Asks, reasons and proofs on a trial
+upload: `.valmera/week-1112/notes/S.md`, `.valmera/week-1112/side-by-side/S/`.
+
+## Legacy and resuming older runs
+
+A `run.json` with version `valmera-podcast-shorts-v7` is an older run: resume
+it with `scripts/run_state.py` and [legacy/README.md](legacy/README.md),
+keeping its frozen brief. `legacy/` holds the v6-v8 references, contracts,
+JSON schemas and the registry, contract-validation, source-ledger and
+transcription scripts. `scripts/compose_short.py`, `design_graphics.py` and
+`inspect_cut.py` are v8 helpers that v9 does not use.
