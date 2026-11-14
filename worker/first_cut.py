@@ -453,6 +453,7 @@ def _fit_span(rows, first, last, low=20.0, high=60.0, complete=False):
 
 def scout_range(ctx, worker_db, spend):
     """(start_s, end_s, title, how) for a long source."""
+    import first_cut_spelling
     limit = min(float(ctx.duration or 0), config.FIRST_CUT_MAX_SOURCE_S)
     rows = _sentences(ctx.index, limit)
     if not rows:
@@ -483,7 +484,7 @@ def scout_range(ctx, worker_db, spend):
                          else SCOUT_SYSTEM},
                         {"role": "user", "content":
                          "Transcript (sentence id, source seconds):\n"
-                         + "\n".join(lines)}]
+                         + "\n".join(lines) + first_cut_spelling.context(ctx.index)}]
             # thinking is on by default on the lane's models: a small
             # max_tokens can be spent before any answer (C1: an empty pick)
             with _timed(ctx, "scout"):
@@ -498,6 +499,7 @@ def scout_range(ctx, worker_db, spend):
                        {"content": text}, usage)
             match = re.search(r"\{.*\}", text or "", re.S)
             pick = json.loads(match.group(0)) if match else {}
+            first_cut_spelling.apply(ctx, pick)
             first = by_id.get(str(pick.get("start_id")))
             last = by_id.get(str(pick.get("end_id")))
             if first and q1:
@@ -732,6 +734,7 @@ def trim_range(ctx, worker_db, spend):
     """(start_s, end_s, how) for a short speech source; also sets
     ctx.first_cut_hook. One small scout call on the trial lane, the
     deterministic trim without it."""
+    import first_cut_spelling
     rows = _sentences(ctx.index, float(ctx.duration or 0) + 1)
     duration = float(ctx.duration or 0)
     if not rows:
@@ -756,7 +759,7 @@ def trim_range(ctx, worker_db, spend):
                              else TRIM_SYSTEM},
                             {"role": "user", "content":
                              "Transcript (sentence id, source seconds):\n"
-                             + "\n".join(lines)}],
+                             + "\n".join(lines) + first_cut_spelling.context(ctx.index)}],
                     max_tokens=4000, effort="low")
             text = resp.choices[0].message.content or ""
             spend["usd"] += float(getattr(resp.usage, "provider_cost_usd", 0)
@@ -767,6 +770,7 @@ def trim_range(ctx, worker_db, spend):
             print(f"[first_cut] trim pick: {text.strip()[:240]}", flush=True)
             match = re.search(r"\{.*\}", text, re.S)
             pick = json.loads(match.group(0)) if match else {}
+            first_cut_spelling.apply(ctx, pick)
             a = by_id.get(str(pick.get("start_id")))
             b = by_id.get(str(pick.get("end_id")))
             if a and b and float(b["t1"]) - float(a["t0"]) >= min(
