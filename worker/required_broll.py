@@ -7,7 +7,9 @@ import json
 import os
 
 SCHEMA = {"type": "object", "additionalProperties": False,
-          "required": ["pictures"], "properties": {"pictures": {
+          "required": ["pictures", "preserve_speech_clock"], "properties": {
+    "preserve_speech_clock": {"type": "boolean", "description": "True for illustrative B-roll over ongoing speech; false when the customer actually asks for additional silent picture time or a separate montage."},
+    "pictures": {
     "type": "array", "items": {"type": "object", "additionalProperties": False,
     "required": ["subject", "must_show", "query", "word_ids"], "properties": {
         "subject": {"type": "string"}, "must_show": {"type": "string"},
@@ -45,7 +47,22 @@ def record(ctx, ledger, request):
             cut='none', length='none', items=[], how='look', where='at the named words',
             **{'pass': p['must_show'], 'otherwise': ''}))
     ledger['required_pictures'] = pictures
+    ledger['pictures_preserve_speech_clock'] = value.get('preserve_speech_clock') is True
     return pictures
+
+
+def write_refusal(ctx, before, after):
+    ledger = getattr(ctx, 'ask_ledger', None) or {}
+    if not ledger.get('required_pictures') or not ledger.get('pictures_preserve_speech_clock'):
+        return None
+    old = {str(it.get('id')): it for it in before.get('inserts') or []}
+    for it in after.get('inserts') or []:
+        prev = old.get(str(it.get('id'))) or {}
+        if float(it.get('duration_s') or 0) > float(prev.get('duration_s') or 0) + .001:
+            return ('These pictures illustrate ongoing speech. Splicing them adds unwanted time '
+                    'and displaces the named words. Use add_overlay(fit=cover) at the current '
+                    'program word times so the narration keeps running underneath.')
+    return None
 
 
 def supply(ctx, ledger):
