@@ -499,6 +499,17 @@ def lower_pictures(l1, work, bake, rep):
                 ov.pop("source_crop", None)
             elif moves:
                 rep["moves_held_on_pictures"] = rep.get("moves_held_on_pictures", 0) + 1
+        if pic == "main" and it.get("source_full_frame") and asset:
+            # An off-spine source shot is a video overlay. `cover` would
+            # silently crop it again after the compiler held it whole.
+            # Fit it inside the canvas with an opaque backing so the old
+            # underlying source shot cannot show through the letterbox.
+            overlays.append({"id": f"safe.{pid}", "asset_key": bake.plate({"c0": "#000000"}, W, H),
+                             "kind": "image", "start": start, "duration_s": dur,
+                             "fit": "cover"})
+            ov.pop("fit", None)
+            ov.pop("source_crop", None)
+            ov.update(x=0.5, y=0.5, scale=min(1., (H / W) * (asset["w"] / asset["h"])))
         overlays.append(ov)
         gain = float((it.get("grade") or {}).get("gain", 1.0))
         if gain < 0.85 and pic != "plate":        # an overlay has no grade today. dna.match lands as black laid over it at the right strength
