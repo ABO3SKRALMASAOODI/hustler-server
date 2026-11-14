@@ -716,6 +716,19 @@ def supply(ctx, script):
                 c = W3.clip_facts(dict(path=os.path.join(fdir, fn), file=fn, subject=name, seconds=1.4,
                                        source=dict(url="valmera studio recording"), time_range=[round(t, 2), round(t + 1.4, 2)]))
                 lines.setdefault(i, dict(i=i, clips=[]))["clips"].append(c)
+    # a reserve on every line: one silent slice of the export (outside the after and the tease), so a line whose footage
+    # was thin or left the film for not fitting its words cuts to the real result instead of holding a picture
+    free = [t for t in [0.3 + 1.5 * j for j in range(int(max(ex_["dur"] - 4.5, 0) / 1.5))]
+            if not any(a - 1.5 <= t <= b for a, b in (pc["after"]["t"], pc["tease"]["t"]))]
+    for i in range(len(sc["segments"])):
+        if not free:
+            break
+        t = free[i % len(free)]
+        fn = f"product/reserve_{i}.mp4"
+        cut(ex_["file"], t, t + 1.4, os.path.join(fdir, fn), audio=False)
+        c = W3.clip_facts(dict(path=os.path.join(fdir, fn), file=fn, subject="THE EXPORT", seconds=1.4,
+                               source=dict(url="valmera studio recording: the export"), time_range=[round(t, 2), round(t + 1.4, 2)]))
+        lines.setdefault(i, dict(i=i, clips=[]))["clips"].append(c)
     pack["footage"] = [lines[k] for k in sorted(lines)]
     talk = {}
     for ln in pack["footage"]:
@@ -852,7 +865,7 @@ def score(ctx, script):
     cache_p = os.path.join(ctx.run_dir, "picture_check.json")
     cache = jload(cache_p, {}) or {}
     drop, spend, rounds = list(knobs.get("drop") or []), [], []
-    for rnd in range(3):
+    for rnd in range(4):
         l1, beats = build(sc, pack, dict(knobs, drop=drop))
         taste = F.taste_check(l1, beats)
         if not taste["ok"]:
@@ -868,7 +881,7 @@ def score(ctx, script):
         jsave(cache_p, cache)
         rounds.append(dict(round=rnd, pictures=len(beats.get("pictures") or []), misfits=[dict(file=b, words=w, why=y) for b, w, y in bad]))
         ctx.log(f"picture check round {rnd}: {len(bad)} of {len(beats.get('pictures') or [])} do not fit their words")
-        if not bad or rnd == 2:
+        if not bad or rnd == 3:
             break
         drop += [b for b, _, _ in bad if b not in drop]
     if not taste["ok"]:
