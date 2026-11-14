@@ -355,7 +355,7 @@ def clamp_seconds(duration, t):
     # themselves, so keep a generous upper here rather than collapsing
     # every time to 0.
     upper = duration if duration > 0 else 1e7
-    return round(min(max(t, 0.0), upper), 2)
+    return round(min(max(t, 0.0), upper), 6)
 
 
 
