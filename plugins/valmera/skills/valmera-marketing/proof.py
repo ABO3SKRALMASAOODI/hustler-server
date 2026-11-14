@@ -477,8 +477,11 @@ def write(ctx, idea, card, rc, notes=None):
                "two words of say], \"pause_after\": 0.18 to 0.3 (0.4 where it turns, at most twice), \"direction\": a few words for the "
                "actor, \"era\": 2026, \"collage\": true on the one or two segments that list several things}], \"named\": [{\"name\": what a "
                "camera filmed and anyone can find on YouTube or Wikimedia Commons (the speaker on stage, an editor at a timeline, a "
-               "podcast studio, a phone scrolling shorts, a named app's interface), \"is\": thing|place|company|person|event, \"searches\": "
-               "one to three searches, \"must_show\": what a picture must visibly show to count}]; never name the recording itself here: "
+               "podcast studio, a phone scrolling shorts, a named app's interface), \"is\": thing|place|company|person|event (a generic scene "
+               "such as an editor's timeline is a thing, not a person), \"searches\": one to three YouTube searches, \"must_show\": one "
+               "plain sentence of what is visible in a frame (a face and its setting, a screen, an object), never how the film shows it "
+               "and never which words are said}]; prefer subjects a camera filmed often (a named editing app's timeline, a phone "
+               "scrolling short videos, a podcast studio, the speaker of the clip); never name the recording itself here: "
                "in `pictures`, the names \"THE UPLOAD\" and \"THE EXPORT\" put silent seconds of the real clip and of the real export "
                "on that segment, "
                "\"proof\": {\"before_after\": index of the segment the before plays after, \"after_after\": index of the segment the after "
@@ -645,6 +648,22 @@ def supply(ctx, script):
     for seg in fscript["script"]["segments"]:
         seg["pictures"] = [n for n in seg.get("pictures") or [] if n not in own]
     foot = chain.footage(ctx, fscript, durs, anchors=anchors)
+    if foot and foot["counts"]["lines_with_footage"] < len(sc["segments"]) / 2:
+        # too little passed: once more with each subject as a plain thing to see (the writer's must_show can be too narrow)
+        ctx.log(f"footage: {foot['counts']['lines_with_footage']} of {len(sc['segments'])} lines; searching again with plain subjects")
+        keep_dir = os.path.join(sup_dir, "footage_first")
+        shutil.rmtree(keep_dir, ignore_errors=True)
+        os.rename(os.path.join(sup_dir, "footage"), keep_dir)
+        for n in fscript["script"].get("named") or []:
+            n["must_show"] = f"{n['name']}, plainly visible."
+            n["is"] = "person" if n.get("is") == "person" and len(str(n["name"]).split()) <= 3 else "thing"
+        foot2 = chain.footage(ctx, fscript, durs, anchors=anchors)
+        if foot2 and foot2["counts"]["clips"] > foot["counts"]["clips"]:
+            foot = foot2
+            shutil.rmtree(keep_dir, ignore_errors=True)
+        else:
+            shutil.rmtree(os.path.join(sup_dir, "footage"), ignore_errors=True)
+            os.rename(keep_dir, os.path.join(sup_dir, "footage"))
     fdir = os.path.join(sup_dir, "footage")
     os.makedirs(fdir, exist_ok=True)
     pack["footage"] = [dict(i=ln["i"], clips=[W3.clip_facts(dict(c, path=os.path.join(fdir, c["file"]))) for c in ln["clips"]])
@@ -773,16 +792,18 @@ def picture_check(ctx, beats, clock, product_paths, cache):
         if p["path"] in product_paths and p.get("name") in ("before", "after"):
             continue
         ws = words_under(clock, p["f"][0], p["f"][1])
-        key = f"{p['path']}|{ws}"
+        key = f"v2|{p['path']}|{ws}"
         if key not in cache:
             t = sum(p["src"]) / 2 if p.get("src") else 0.0
             todo.append((key, p, ws, t))
     spend = []
     system = ("You check a marketing film for video editors before it is published. Each numbered picture is on screen while the "
-              "narrator says the words given with it. fits is true when the picture shows what the words say or plainly illustrates "
-              "it (an editor at a timeline under words about cutting, a feed of shorts under words about posting). fits is false when it "
-              "shows a different specific thing than the words name (another app, person or product), contradicts the words, carries "
-              "text or a logo that misleads, is a blank or broken frame, or has nothing to do with the words.")
+              "narrator says the words given with it. Judge each: fit \"yes\" when it shows what the words say; \"loose\" when it does "
+              "not show the words' exact thing but is fair footage for the film's subject and the moment (an editor at work, the speaker "
+              "the film is about, a timeline, a phone of shorts, a picture that carries the idea as a metaphor); \"wrong\" when it "
+              "shows a different specific thing than the words name (another person where a named person is meant, another app or "
+              "website where Valmera or valmera.io is named), contradicts the words, carries text that says something else on screen "
+              "at that moment, or is blank or broken. Only \"wrong\" pictures leave the film.")
     for k in range(0, len(todo), 10):
         batch = todo[k:k + 10]
         content = []
@@ -792,7 +813,7 @@ def picture_check(ctx, beats, clock, product_paths, cache):
                 content += [dict(type="text", text=f"Picture {n}, under the words: \"{ws}\""), img(b)]
             else:
                 cache[key] = dict(fits=True, why="no frame to read")
-        content.append(dict(type="text", text="Return JSON only: {\"pictures\": [{\"n\": number, \"fits\": true|false, \"why\": a few words}]}"))
+        content.append(dict(type="text", text="Return JSON only: {\"pictures\": [{\"n\": number, \"fit\": \"yes\"|\"loose\"|\"wrong\", \"why\": a few words}]}"))
         got, use = ask(system, content, what="picture check", effort="low", model=CHECK_MODEL, max_tokens=3000)
         spend.append(use)
         for v in (got.get("pictures") if isinstance(got, dict) else []) or []:
@@ -800,11 +821,12 @@ def picture_check(ctx, beats, clock, product_paths, cache):
                 key = batch[int(v["n"]) - 1][0]
             except (KeyError, ValueError, IndexError, TypeError):
                 continue
-            cache[key] = dict(fits=bool(v.get("fits")), why=v.get("why"))
+            fit = str(v.get("fit") or "").lower()
+            cache[key] = dict(fits=fit != "wrong", fit=fit or None, why=v.get("why"))
     bad = []
     for p in beats.get("pictures") or []:
         ws = words_under(clock, p["f"][0], p["f"][1])
-        v = cache.get(f"{p['path']}|{ws}")
+        v = cache.get(f"v2|{p['path']}|{ws}")
         if v and not v["fits"] and p["path"] not in product_paths:
             bad.append((os.path.basename(p["path"]), ws, v.get("why")))
     return bad, spend
