@@ -742,16 +742,23 @@ def part_size_for_parts(nbytes, max_parts):
     return max(part_size_for(nbytes), min(MAX_S3_PART_SIZE, size))
 
 
-def presign_upload(key, nbytes, content_type, max_parts=None):
+def presign_upload(key, nbytes, content_type, max_parts=None,
+                   always_multipart=False):
     """Single presigned PUT for small files, presigned multipart for large.
 
     Returns a dict the browser can act on directly. ``max_parts`` caps the
     number of parts (larger parts) for a plan that travels in a tool reply.
     The store is the one browser uploads go to in the current routing mode.
+    ``always_multipart``: a Studio browser's transfer, whatever its size, is
+    multipart, because only a multipart upload id can be handed to the
+    browser when the page goes away (upload_handoff; #883, 14 Nov 2026: a
+    9 MB single PUT on Android Chrome died with its page, nothing to hand
+    off). A single part may be smaller than S3's 5 MiB minimum: the last
+    part has no minimum.
     """
     name = _plan().presign
     c, b = store_client(name, public=True), store_bucket(name)
-    if nbytes <= SINGLE_PUT_LIMIT:
+    if nbytes <= SINGLE_PUT_LIMIT and not always_multipart:
         url = c.generate_presigned_url(
             "put_object",
             Params={"Bucket": b, "Key": key, "ContentType": content_type},

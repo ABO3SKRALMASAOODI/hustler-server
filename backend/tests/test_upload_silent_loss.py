@@ -289,7 +289,19 @@ def test_no_usable_identity_is_the_old_path(api, content_id):
 def test_a_small_file_has_nothing_to_resume(api):
     s3 = api.use(_S3(1000))
     out, _ = api.post(1000, content_id=CONTENT)
-    assert out["mode"] == "single" and s3.created == []
+    assert not out.get("resumed") and len(s3.created) == 1
+
+
+@pytest.mark.parametrize("nbytes", [1000, 9_292_102, 16 * 1024 * 1024])
+def test_a_small_studio_upload_can_be_handed_off(api, nbytes):
+    """#883, 14 Nov 2026: a 9.3 MB upload on Android Chrome was a single
+    presigned PUT, which has no upload id, so when its page went away there
+    was nothing to hand to the browser and it stopped at 1 MB. Every Studio
+    transfer is multipart while the hand-off is on, whatever its size."""
+    api.use(_S3(nbytes))
+    out, _ = api.post(nbytes, content_id=CONTENT)
+    assert out["mode"] == "multipart" and out["upload_id"]
+    assert out["part_urls"] and out["part_urls"][0]["part_number"] == 1
 
 
 # ── a file that cannot open never becomes an asset ──────────────────────────

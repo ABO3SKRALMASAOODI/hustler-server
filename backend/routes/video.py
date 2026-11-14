@@ -2312,7 +2312,12 @@ def create_upload(user_id, project_id):
                                    data.get("content_id"))
         if out is None:
             key = storage.new_original_key(project_id, ext, kind)
-            out = storage.presign_upload(key, nbytes, content_type)
+            # Multipart at every size while the hand-off is on: a single PUT
+            # has no upload id, so a page that goes away mid-transfer could
+            # not hand it to the browser (#883).
+            out = storage.presign_upload(
+                key, nbytes, content_type,
+                always_multipart=upload_handoff.enabled())
     except Exception as e:
         current_app.logger.exception("presign failed")
         return jsonify({"error": f"Could not prepare upload: {e}"}), 502
