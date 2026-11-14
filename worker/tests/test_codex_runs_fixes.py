@@ -298,12 +298,14 @@ def test_a_pixel_box_is_stored_as_frame_fractions():
     assert same == [0.1, 0.5, 0.9, 0.7] and none == ""
 
 
-def test_a_pixel_font_size_on_add_text_is_read_as_pixels():
+@pytest.mark.parametrize("ratio", ["9:16", "16:9", "1:1"])
+@pytest.mark.parametrize("pixels", [24, 30, 72])
+def test_a_pixel_font_size_on_add_text_is_read_as_pixels(ratio, pixels):
     """PG s16 (3600: font_size 30), Zuckerberg s28 (3639: 24): refused
     'font_size must be between 0.012 and 0.3'."""
     edl = default_edl(30.0)
     edl["keep"] = [[0.0, 20.0]]
-    edl["frame"] = {"ratio": "9:16"}
+    edl["frame"] = {"ratio": ratio}
     row = {"version": 1, "json": validate_edl(edl, 30.0).model_dump()}
     ctx = SimpleNamespace(latest_edl=lambda: row, project_id=1,
                           index={"video": {"width": 1920, "height": 1080}})
@@ -313,11 +315,19 @@ def test_a_pixel_font_size_on_add_text_is_read_as_pixels():
         return f"EDL v{row['version']}: {description}"
     ctx.write_edl = write
     out = agent_tools.add_text(ctx, "Rhode Island School of Design", 2.0, 4.0,
-                               template="subtitle", font_size=30)
+                               template="subtitle", font_size=pixels)
     assert out.startswith("EDL v"), out
-    assert "FONT SIZE: 30 read as pixels" in out
+    assert f"FONT SIZE: {pixels} read as pixels" in out
     size = row["json"]["texts"][0]["font_size"]
     assert 0.012 <= size <= 0.3
+    # Check the emitted renderer size, not just that the normalized value
+    # passes schema validation. Dividing by portrait HEIGHT then rendering
+    # against its short side silently turned 30 requested pixels into 17.
+    import graphics
+    import motion_tools
+    canvas = motion_tools._canvas_size(ctx, row["json"])
+    event = graphics._compile_item(row["json"]["texts"][0], 20, canvas)
+    assert (rf"\fs{pixels}" + "\\") in event["text"]
 
 
 # ── overlapping picture cards are named ─────────────────────────────────────
