@@ -97,6 +97,7 @@ def test_same_entry_command_accepts_nothing_or_a_topic(monkeypatch,arguments,top
     monkeypatch.setattr(entry.shell,'load_workflow',entry.shell.load_workflow)
     got=entry.main();args=json.loads(got[got.index('--args')+1])
     assert got[1]=='run' and args['look'] is False
+    assert args['delivered_ledger']=='off'
     assert args.get('line')==topic
     assert got[got.index('--out')+1].endswith('/lanes/WF4-LONGFORM')
 
@@ -117,3 +118,12 @@ def test_nested_research_shares_only_its_own_film_cache(tmp_path):
     root=tmp_path/'run-one'/'footage'
     assert B.cache_path(root)==B.cache_path(root/'witnesses')
     assert B.cache_path(root)!=B.cache_path(tmp_path/'run-two'/'footage')
+
+
+def test_completed_voice_does_not_start_another_model(tmp_path,monkeypatch):
+    C.save(tmp_path/'longform_voice.json',{'after':{'ok':True}})
+    C.save(tmp_path/'check.json',{'gate':{'pass':True}})
+    monkeypatch.setattr(C,'guarded_voice',lambda *a:pytest.fail('completed checkpoint restarted'))
+    monkeypatch.setattr(C.PX,'narrate',lambda *a,**k:{'cached':True})
+    class Context:run_id='test'
+    assert C.narrated(Context(),{'segments':[]},tmp_path,'reader.py')=={'cached':True}

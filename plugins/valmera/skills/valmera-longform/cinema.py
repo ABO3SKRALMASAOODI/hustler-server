@@ -159,21 +159,30 @@ def verify_structure(ctx, script, attempt=0):
     return sc
 
 
+def guarded_voice(ctx, command, label):
+    evidence=Path(ctx.supply)/'memory'/label
+    return chain.sh(ctx,[chain.PY,str(HERE/'guarded.py'),'--out',str(evidence),
+                         '--label',label,'--',*command])
+
+
 def narrated(ctx, ns, nd, reader):
-    """Resume a stopped correction even when the shared reader left word times."""
-    import fcntl
-    try:nar=PX.narrate(ns,str(nd),'04',f'wf4-{ctx.run_id}',dict(os.environ),18000,reader)
+    """Every model/listener process uses the shared locks and 6 GB stop."""
+    nd=Path(nd);nd.mkdir(parents=True,exist_ok=True)
+    save(nd/'narration_script.json',ns)
+    report=nd/'longform_voice.json'
+    try:
+        if not report.exists() or not read(report)['after']['ok']:
+            guarded_voice(ctx,[PX.NARRATE_PY,reader,'render',str(nd/'narration_script.json'),
+                              '--out',str(nd),'--band','04'],'wf4-narration-'+ctx.run_id)
+        if not (nd/'check.json').exists():
+            guarded_voice(ctx,[PX.NARRATE_PY,PX.NARRATE,'check',str(nd),'--band','04'],
+                          'wf4-voice-check-'+ctx.run_id)
+        # With both checkpoints present, the shared adapter only reads metadata.
+        return PX.narrate(ns,str(nd),'04',f'wf4-{ctx.run_id}',dict(os.environ),18000,reader)
     except Exception as error:
         ctx.log('narrator stopped: '+str(error))
         save(nd/'failure.json',dict(error=str(error)))
         raise
-    report=nd/'longform_voice.json'
-    if not report.exists() or not read(report)['after']['ok']:
-        with open(PX.NARRATE_LOCK,'a') as lk:
-            fcntl.flock(lk,fcntl.LOCK_EX)
-            chain.sh(ctx,[PX.NARRATE_PY,reader,'finish',str(nd/'narration_script.json'),'--out',str(nd)],label='wf4-voice-correct-'+ctx.run_id,heavy=True,timeout=7200)
-        nar=PX.narrate(ns,str(nd),'04',f'wf4-{ctx.run_id}',dict(os.environ),18000,reader)
-    return nar
 
 
 def add_footage(ft,extra,dest):
@@ -531,7 +540,7 @@ def check(ctx,rd,sc):
     if not final.exists():
         # Brand's own watermark and end card, never recreated or altered here.
         job=Path(ctx.supply)/'finish.py'
-        job.write_text('import sys; sys.path[:0]='+repr([str(HERE.parent/'_shell')])+"; import brand; brand.finish("+repr(rd['film'])+','+repr(str(final))+','+repr(ctx.tmp)+')')
+        job.write_text('import sys; sys.path[:0]='+repr([str(HERE.parent/'_shell')])+"; import brand; brand.finish("+repr(rd['film'])+','+repr(str(final))+','+repr(ctx.tmp)+',accent=False)')
         chain.sh(ctx,[chain.PY,str(job)],label='wf4-brand-'+ctx.run_id,heavy=True,timeout=7200)
         save(fs,dict(sha256=programme))
     base=brand.check(rd['film'],str(final),ctx.tmp)
@@ -564,10 +573,8 @@ def check(ctx,rd,sc):
     nar=nd/'narration_narrator.wav'
     if not nar.exists(): nar=Path(pack['narration'])
     metrics=Path(ctx.supply)/'voice-metrics'
-    with open(PX.NARRATE_LOCK,'a') as lk:
-        fcntl.flock(lk,fcntl.LOCK_EX)
-        chain.sh(ctx,[PX.NARRATE_PY,str(HERE/'measure_voice.py'),str(nar),str(nd/'narration_script.json'),str(metrics)],label='wf4-voice-measure-'+ctx.run_id,heavy=True,timeout=7200)
-        chain.sh(ctx,[PX.NARRATE_PY,str(HERE/'measure_mix.py'),str(final),pack['words'],str(nd/'narration_script.json'),str(metrics),PX.FF],label='wf4-mix-listen-'+ctx.run_id,heavy=True,timeout=7200)
+    guarded_voice(ctx,[PX.NARRATE_PY,str(HERE/'measure_voice.py'),str(nar),str(nd/'narration_script.json'),str(metrics)],'wf4-voice-measure-'+ctx.run_id)
+    guarded_voice(ctx,[PX.NARRATE_PY,str(HERE/'measure_mix.py'),str(final),pack['words'],str(nd/'narration_script.json'),str(metrics),PX.FF],'wf4-mix-listen-'+ctx.run_id)
     voice=read(metrics/'metrics.json')
     mix=read(metrics/'mix-wer.json')
     duration=brand.probe(str(final))['dur']

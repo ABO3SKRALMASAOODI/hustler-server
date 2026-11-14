@@ -230,18 +230,12 @@ def main():
         os.environ['NARRATE_ENGINE']='phonon'
         os.environ['NARRATE_KEEP_TAKES']='1'
         cache_take_analysis(a.out)
-        def easton_only(args):
-            # N.render's generic fallback changes voices when any later stage
-            # raises. This workflow keeps the owner's voice and its real error.
-            import lines as LN
-            import traceback
-            sc=N.load_script(args.script);N.VOCAB[:]=list(sc.get('names') or [])
-            args.engine='phonon';dest=Path(args.out);dest.mkdir(parents=True,exist_ok=True)
-            try:return LN.render_lines(args,sc,args.voice or sc.get('voice') or 'atlas',dest,N)
-            except Exception:
-                (dest/'engine-error.txt').write_text(traceback.format_exc())
-                raise
-        N.render=easton_only
+        os.environ.pop('NARRATE_ALLOW_FALLBACK',None)
+        original_finish=shared.finish
+        def finished_read(*args,**kwargs):
+            N.free_gate_listener();N.free_take_listener()
+            return original_finish(*args,**kwargs)
+        shared.finish=finished_read
         shared.render(a)
         rendered=json.loads((Path(a.out)/'render.json').read_text())
         if rendered.get('engine')!='lines:phonon':raise RuntimeError('WF4 requires Easton; a different-engine fallback cannot be delivered')

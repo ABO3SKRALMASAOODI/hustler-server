@@ -42,6 +42,7 @@ def main():
         i = argv.index("--args") if "--args" in argv else None
         args = json.loads(argv[i + 1]) if i is not None else {}
         args.setdefault("look", False)
+        args.setdefault("delivered_ledger", "off")
         if topic:
             args["line"] = topic
         if i is None:

@@ -29,6 +29,7 @@ def measure(path, expected, cache):
     else:
         text,words=N.listen_long(x,sr)
         heard=dict(text=text,words=words); wp.write_text(json.dumps(heard))
+    N.free_gate_listener();N.free_take_listener()
     words=[w for w in heard['words'] if w['end']>w['start']]
     span=words[-1]['end']-words[0]['start']
     gaps=[b['start']-a['end'] for a,b in zip(words,words[1:]) if b['start']-a['end']>=0.15]
