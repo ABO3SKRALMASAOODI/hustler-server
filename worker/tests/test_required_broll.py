@@ -22,7 +22,9 @@ def test_rejected_generic_pictures_trigger_archive_retry_without_relaxing_subjec
         assert name == 'retry_required_picture_search'
         assert 'coins and padlocks' in payload
         assert kw['model'] == 'gpt-6-sol'
-        return {'archive_name': 'Cryptocurrency mining', 'queries': ['Bitcoin mining hardware']}, {}
+        assert 'archive_name' not in schema['properties']
+        assert 'pictured subject' in schema['properties']['subject_name']['description']
+        return {'subject_name': 'Cryptocurrency mining', 'queries': ['Bitcoin mining hardware']}, {}
     monkeypatch.setattr(broll_source, 'search_named', search)
     monkeypatch.setattr(broll_source, 'check_named', check)
     monkeypatch.setattr(asks, '_call', retry)
@@ -33,6 +35,8 @@ def test_rejected_generic_pictures_trigger_archive_retry_without_relaxing_subjec
              latest_edl=lambda: {'json': {'frame': {'ratio': '16:9'}}})
     required_broll.supply(ctx, {'required_pictures': [p], 'picture_frame_ratio': '9:16'})
     assert len(queries) == 2
+    assert queries[1]['name'] == 'Cryptocurrency mining'
+    assert queries[1]['searches'] == ['Bitcoin mining hardware']
     assert p['subject'] == 'crypto mining'
     assert p['candidates'] == ['required:picture1:mining-rig']
 
