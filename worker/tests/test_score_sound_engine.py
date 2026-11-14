@@ -495,3 +495,11 @@ def test_a_pause_inside_a_words_span_has_nothing_to_mask():
     quiet = full.copy()
     quiet[int(1.2 * sr):int(4.8 * sr)] *= 0.1                             # the same seconds spoken softly: a voice is there, and is kept clear
     assert SD._masking(it, SD.frames_db(quiet)[0], speech, fps) > 0.0
+
+
+def test_branded_tail_counts_toward_export_density_without_extending_programme():
+    plain, _, _ = SD.allowance("P", 18.0, 25.5, True)
+    branded, _, al = SD.allowance("P", 18.0, 25.5, True, delivery_tail_s=5.0)
+    assert plain == 9 and branded == 11
+    assert branded <= al["sounds"]
+    assert branded / 30.5 * 10 >= SD.RATE_10S["P"]

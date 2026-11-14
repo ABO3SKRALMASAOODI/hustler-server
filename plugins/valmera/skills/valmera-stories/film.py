@@ -1004,7 +1004,8 @@ def engines_finish(l1, sup, stress, drive_ids, meta, d, turn_f=None, mono=(), cl
             [dict(t0=float(w["start"]), t1=float(max(w["end"], w["start"] + 0.02))) for w in wd["words"]]
         sounds, rep = SD.design(dict(out, spine=spine, sound=[]), index=dict(words=words, video=dict(duration=dur)), src=sup["narration"],
                                 turn_s=(turn_f / FPS if turn_f is not None else None), bed=bool(d.get("bed")),
-                                supply=dict(np10=float(np10), bed=bool(d.get("bed"))) if np10 else None)
+                                supply=dict(np10=float(np10) if np10 is not None else None, bed=bool(d.get("bed")),
+                                            delivery_tail_s=float(d.get("delivery_tail_s", 0.0))))
         out["sound"], out["sound_design"] = sounds, rep
     except Exception as e:  # noqa: BLE001 - a film is never lost to its sound design
         out["sound"], out["sound_design"] = [], {"fault": repr(e)[:300]}

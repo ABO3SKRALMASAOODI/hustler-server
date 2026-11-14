@@ -228,6 +228,8 @@ def build(script, sup, style_id, direction=None):
         "lab": {"font": "InterDisplay-Bold.ttf", "px": 38, "track": 6},
     }
     P = F.Plan(voices, sup.get("sounds") or {})
+    import config
+    d["delivery_tail_s"] = float(config.OUTRO_DURATION_S)
     pal = dict(ink=st["ink"], accent=d.get("accent") or st["accent"], plate="#0A0A0A")
     drop = set(d.get("drop") or [])
     pics = {k: [r for r in v if r.get("title") not in drop and os.path.basename(str(r.get("path"))) not in drop] for k, v in (sup.get("pictures") or {}).items()}

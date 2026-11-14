@@ -314,12 +314,16 @@ def floor_for(sid, ref):
     return ref + spec_of(sid)["lo"] - float(x.get("hit_lufs", -15.0))
 
 
-def allowance(cls, np10, dur_s, bed):
+def allowance(cls, np10, dur_s, bed, delivery_tail_s=0.0):
     """How many sounds a film of this supply carries, and how many in any 10 s: (total, in 10 s, the governor's row).
     The governor's allowance (taste.allow: what the picture supply earns) under the references' rate for the class."""
     al = dict(_allow(cls, np10, dur_s, bed))
     rate = min(float(RATE_10S.get(cls, 3.0)), float(al["sounds_10s"]) + 0.999) if al.get("sounds_10s") else float(RATE_10S.get(cls, 3.0))
-    total = max(1, min(int(al["sounds"]), (int(math.ceil(rate * dur_s / 10.0)) if dur_s < 10 else int(rate * dur_s / 10.0 + 1e-9))))
+    # A workflow is measured on its complete export, including its branded
+    # tail. Budget those seconds here, but keep every event in the programme.
+    budget_s = dur_s + max(0.0, float(delivery_tail_s))
+    count = math.ceil(rate * budget_s / 10.0) if delivery_tail_s > 0 or dur_s < 10 else int(rate * dur_s / 10.0 + 1e-9)
+    total = max(1, min(int(al["sounds"]), int(count)))
     return total, max(1, min(int(math.ceil(rate * BURST)), total)), al
 
 
@@ -853,7 +857,7 @@ def plan_sounds(events, ctx):
         np10 = len(pics) / max(dur_s, 1e-3) * 10
     cls = klass(np10, dur_s)
     bed = bool(ctx.get("bed"))
-    total, win, al = allowance(cls, np10, dur_s, bed)
+    total, win, al = allowance(cls, np10, dur_s, bed, ctx.get("delivery_tail_s", 0.0))
     gov = int(al["sounds"])
     # The tick layer is its own layer, under the audible one (round seven: capped by what the governor left of the
     # audible allowance, a film of some pictures carried none, and every display line of a Director film went unsounded:
@@ -866,7 +870,7 @@ def plan_sounds(events, ctx):
         seed = film_seed(D, [(e["f"], e["kind"]) for e in events][:400])
     report = {"class": cls, "np10": round(np10, 2), "bed": bed, "allow": total, "allow_10s": win, "allow_ticks": n_tick,
               "events": len(events), "placed": [], "body": [], "ticks": [], "dropped": [], "kept_director": len(ctx.get("existing") or []),
-              "seed": seed}
+              "seed": seed, "budget_duration_s": dur_s + float(ctx.get("delivery_tail_s", 0.0))}
     existing = list(ctx.get("existing") or [])
     ex_t = [float(s.get("event_f", 0)) / fps for s in existing]
     speech = ctx.get("speech")
@@ -1889,6 +1893,7 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
     ctx = {"fps": fps, "dur_f": D, "existing": existing, "speech": speech, "voice": voice, "voice_shift_db": shift,
            "words": words or [], "bed": bed, "ref_at": ref_at, "np10": (supply or {}).get("np10"), "own_tiers": bool(own_tiers),
            "turn_f": int(round(float(turn_s) * fps)) if turn_s is not None else None, "close_s": close_s,
+           "delivery_tail_s": float((supply or {}).get("delivery_tail_s", 0.0)),
            "seed": film_seed(l1.get("sid"), l1.get("seed"), D, [e.get("src") for e in (l1.get("spine") or [])][:64],
                              sorted(str((a or {}).get("path")) for a in (l1.get("assets") or {}).values())[:64])}
     sounds, report = plan_sounds(events, ctx)
