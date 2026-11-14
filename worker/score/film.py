@@ -608,7 +608,7 @@ def _applied(rep, l1, bin_doc):
 
 # ------------------------------------------------------------------ real footage: the quick film, then the full one
 
-def footage_start(job, work, sc, per):
+def footage_start(job, work, sc, per, cfg=None):
     """Real footage of the people, places and events the film names (lane FOOT's engine, worker/footage), found on
     a thread beside Supply, Direct and the first render. The engine takes minutes and the first film has a deadline,
     so the film is written without waiting for it (the quick film). When its clips are there by the time the last
@@ -619,7 +619,7 @@ def footage_start(job, work, sc, per):
         import footage.seam as seam
         import footage.switch as switch
         uid = job.get("user_id")
-        if not switch.allowed("customer", uid, seam.customer_cfg()):
+        if not switch.allowed("customer", uid, cfg if cfg is not None else seam.customer_cfg()):
             return None
         wishes = [dict(w) for w in (sc or {}).get("wishes") or [] if isinstance(w, dict) and not w.get("mine")]
         if not wishes:
@@ -646,7 +646,7 @@ def footage_start(job, work, sc, per):
                 finally:
                     box["ready"].set()
                 if any(s and s[0]["name"] not in have for s in subjects):
-                    box["offers"] = seam.bin_offers(work, wishes, subjects, time.monotonic() + 3600.0, box["report"], about, uid, W, H, skip=have)
+                    box["offers"] = seam.bin_offers(work, wishes, subjects, time.monotonic() + 3600.0, box["report"], about, uid, W, H, skip=have, cfg=cfg)
                     box["shelved"] = seam.shelve(box["offers"], W, H)
                 else:
                     box["offers"] = []
@@ -1113,7 +1113,7 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
     ctx.index = index
     rec["caption_evidence"] = index.get("caption_evidence") or {}
 
-    foot = footage_start(job, work, sc, per) if sc is not None else None      # None unless the footage switch opens this account
+    foot = footage_start(job, work, sc, per, cfg=getattr(ctx, "director_footage_cfg", None)) if sc is not None else None
     ctx.director_footage = foot  # library callers own cleanup even when a later stage fails
     rec["at"] = "supply"
     t = time.monotonic()
