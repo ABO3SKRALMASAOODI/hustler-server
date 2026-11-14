@@ -119,7 +119,7 @@ def _fake_run(tmp_path, monkeypatch, fail=()):
 
     def build_short(run, m, fetched, pod, tries=3):
         if m["id"] in fail:
-            return dict(id=m["id"], ok=False, error="supply: no footage")
+            return dict(id=m["id"], ok=False, error=fail[m["id"]] if isinstance(fail, dict) else "supply: no footage")
         folder = run.p("films", m["id"])
         _film(folder, f"Title {m['id']}", m["style"])
         return dict(id=m["id"], ok=True, folder=folder)
@@ -239,3 +239,41 @@ def test_a_long_stretch_of_the_take_takes_the_pictures_the_film_has_to_spare():
 def test_names_keep_their_apostrophes():
     assert podcast.clean_name("Humanity\u2019s Main Character Energy") == "Humanity's Main Character Energy"
     assert podcast.clean_name("a/b: c?") == "a b c" and podcast.clean_name("") == "untitled"
+
+
+def test_a_short_whose_footage_would_not_open_is_not_cut_from_photographs():
+    src = open(os.path.join(HERE, "wf1_short.py")).read()
+    ns = {}
+    exec(src[src.index("def refused(foot):"):src.index("def dull(c):")], ns)          # the rule alone: the module itself loads the engines
+    walled = ns["walled"]
+    ok, bad, way = dict(where="youtube"), dict(where="youtube", error="default: Sign in to confirm"), dict(where="youtube", rung="wayback")
+    arch = dict(where="archive")
+
+    def foot(clips, with_footage, lines, sources):
+        return dict(counts=dict(clips=clips, lines_with_footage=with_footage, lines=lines), sources=sources)
+    assert walled(foot(0, 0, 13, [bad, bad, bad]))
+    assert walled(foot(3, 3, 13, [way, way, bad, ok, arch, arch]))                    # a clip or three through the archive: still walled
+    assert not walled(foot(24, 13, 13, [ok, ok, bad]))                                # footage came: a film is made
+    assert not walled(foot(9, 5, 13, [way, bad, ok]))                                 # refused, but enough was found to cut on
+    assert not walled(foot(0, 0, 13, [ok, ok, ok, bad]))                              # the sources opened and showed nothing: photographs carry it
+    assert not walled(None) and not walled(foot(0, 0, 13, [])) and not walled(foot(0, 0, 13, [arch, arch]))
+    assert ns["refused"](foot(0, 0, 1, [ok, bad, way, arch])) == (3, 2)
+
+
+def test_shorts_waiting_for_footage_hold_the_delivery_and_the_run_continues_later(tmp_path, monkeypatch, capsys):
+    work_root, out = _fake_run(tmp_path, monkeypatch, fail={"m03": wf1_film.WALL + ": 9 of 10 footage sources would not open"})
+    monkeypatch.setattr(sys, "argv", ["podcast.py", "https://youtu.be/abcdefghijk", "--out", out])
+    assert podcast.main() == 2
+    rep = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert rep["stopped"]["stage"] == "deliver" and "waiting for footage" in rep["stopped"]["error"] and not os.path.exists(out)
+    work = os.path.join(work_root, os.listdir(work_root)[0])
+    assert sorted(os.listdir(os.path.join(work, "films"))) == ["m01", "m02"]           # what was made is kept for the run that completes the set
+
+
+def test_once_the_wall_is_seen_the_shorts_not_started_wait_without_spending(tmp_path, monkeypatch):
+    monkeypatch.setattr(podcast, "WORK_ROOT", str(tmp_path))
+    run = podcast.Run("https://youtu.be/abcdefghijk", str(tmp_path))
+    run.walled.set()
+    monkeypatch.setattr(podcast.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("a short was started behind the wall")))
+    rec = podcast.build_short(run, dict(id="m05", style="window", title="t"), dict(info={}, video="x"), {})
+    assert rec["ok"] is False and wf1_film.WALL in rec["error"] and not os.path.exists(os.path.join(str(tmp_path), "shorts", "m05", "done.json"))

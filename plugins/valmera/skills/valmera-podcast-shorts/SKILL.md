@@ -27,6 +27,12 @@ Nothing else is asked of the user: no brief, no count, no style, no song.
 4. If it stopped (exit 2, a `stopped` object), run the same command with the same link: it continues where it
    stopped. A short that failed is tried again on that run. Fix a real defect in the product, never by hand in a
    film.
+5. **"YouTube is refusing this Mac as a bot"** in `stopped` is not a defect to fix: a busy address is walled on
+   every player for a while (a seven-short run fetches about a hundred sources). The link cannot be read, or the
+   shorts cannot get their footage, and a short is never cut from photographs alone. The shorts already made are
+   kept in the work folder, nothing is delivered until the set is whole, and the wall lifts by itself, usually
+   within hours: tell the user that, and run the same command again later. Do not look for a way round it with
+   anyone's account or cookies.
 
 ## What the run does
 

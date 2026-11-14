@@ -159,6 +159,15 @@ def supply(ctx, script):
     wf3.given_footage(ctx, os.path.join(sup_dir, "footage"))
     fw, fh = style["footage"]
     foot = chain.footage(ctx, dict(script=fscript), [round(float(s["t1"]) - float(s["t0"]) + 0.2, 2) for s in sents], W=fw, H=fh)
+    if foot:
+        n_yt, n_bad = refused(foot)
+        ctx.log(f"footage sources: {n_yt} on YouTube, {n_bad} refused or archive-only; {foot['counts'].get('clips')} clips on "
+                f"{foot['counts'].get('lines_with_footage')} of {foot['counts'].get('lines')} sentences")
+    if walled(foot):                                           # nothing is cut from photographs and a clip or two: the same run continues when the wall lifts
+        import shutil
+        shutil.rmtree(os.path.join(sup_dir, "footage"), ignore_errors=True)
+        raise RuntimeError(f"{wf1_film.WALL}: {n_bad} of {n_yt} footage sources would not open ({foot['counts'].get('clips')} clips on "
+                           f"{foot['counts'].get('lines_with_footage')} of {foot['counts'].get('lines')} sentences). It lifts by itself; run the same link again later")
     pack = dict(sid=ctx.sid, words=wj, narration=src, ffmpeg=PX.FF, sounds={}, pictures={}, credits=[], footage=[], title=script.get("title"))
     subjects, by_line = [], {}
     if foot:
@@ -207,6 +216,25 @@ def supply(ctx, script):
                footage=(dict(clips=foot["counts"]["clips"], lines=foot["counts"]["lines_with_footage"], credits=foot["credits"]) if foot else None), spend=spend)
     json.dump(dict(pack=pack, record=rec), open(pk, "w"), ensure_ascii=False, indent=1)
     return rec
+
+
+def refused(foot):
+    """(YouTube sources the engine tried, how many of them failed or opened only through the Wayback Machine's copy)."""
+    yt = [s for s in (foot or {}).get("sources") or [] if s.get("where") in (None, "youtube")]
+    return len(yt), len([s for s in yt if s.get("error") or s.get("rung") == "wayback"])
+
+
+def walled(foot):
+    """True when the footage engine came back with too little because YouTube would not open its sources (it takes
+    a busy address for a bot, on every player at once): half of the YouTube sources it tried or more were refused,
+    and what it did find covers under a third of the sentences. A film cut then would be photographs with a clip
+    or two, under the bar; it is made when the wall lifts. Thin footage with the sources open is not this: the
+    moment simply names little, and photographs carry it."""
+    if not foot:
+        return False
+    n, bad = refused(foot)
+    c = foot.get("counts") or {}
+    return n >= 2 and bad * 2 >= n and int(c.get("lines_with_footage") or 0) * 3 < max(int(c.get("lines") or 0), 1)
 
 
 def dull(c):

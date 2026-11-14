@@ -109,6 +109,7 @@ class Run:
         self.state_path = os.path.join(work, "run.json")
         self.state = jload(self.state_path, None) or dict(link=link, video_id=video_id(link), started=now(), done=[], seconds={})
         self._log = os.path.join(work, "log.txt")
+        self.walled = threading.Event()                  # set when a short finds YouTube refusing this Mac: the rest wait too
 
     def save(self):
         with _LOCK:
@@ -220,7 +221,7 @@ def fetch(run):
             r = ladder(run, ["--skip-download", "--dump-single-json", run.link], lambda r: r.returncode == 0 and r.stdout.strip().startswith("{"),
                        timeout=300, what="read the link")
         except RuntimeError as e:
-            raise RuntimeError(f"the link could not be read: {e}")
+            raise RuntimeError(f"the link could not be read: {e}. When YouTube is refusing this Mac as a bot it lifts by itself: run the same link again later")
         j = json.loads(r.stdout)
         info = {k: j.get(k) for k in ("id", "title", "channel", "uploader", "upload_date", "duration", "webpage_url", "extractor_key")}
         info["description"] = str(j.get("description") or "")[:3000]
@@ -461,9 +462,12 @@ def build_short(run, m, fetched, pod, tries=3):
     """One moment through wf1_short.py. Returns its record: {id, ok, folder | error}."""
     state = run.p("shorts", m["id"])
     os.makedirs(state, exist_ok=True)
+    import wf1_film
     done = jload(os.path.join(state, "done.json"))
     if done and done.get("ok"):                          # a short that was not made is tried again when the link is run again
         return done
+    if run.walled.is_set():                              # footage cannot be fetched right now: nothing is spent on a short that would stop
+        return dict(id=m["id"], ok=False, error=f"{wf1_film.WALL}: not started")
     info = fetched["info"]
     args = dict(moment=m, words=run.p("words.json"), style=m["style"], music_ledger=run.p("music_used.json"),      # no two shorts of a run play one track
                 identity=(f"Speaker: {pod.get('speaker') or ''}. Host: {pod.get('host') or ''}. Show: {pod.get('show') or ''} "
@@ -504,6 +508,10 @@ def build_short(run, m, fetched, pod, tries=3):
         st = rep.get("stopped") or {}
         new = f"{st.get('stage') or 'start'}: {st.get('error') or (r.stdout or '')[-300:]}"
         run.log(f"{m['id']} stopped ({new[:200]})")
+        if wf1_film.WALL in new:                                 # not this short's fault and not gone in a minute: the run waits for the wall to lift
+            run.walled.set()
+            err = new
+            break
         if new == err:                                           # the same fault twice is not the network: this short cannot be made as planned
             break
         err = new
@@ -558,6 +566,11 @@ def _sources_md(pod_line, rows):
 
 
 def deliver(run, fetched, sel, built, out_root):
+    import wf1_film
+    waiting = [r for r in built["failed"] if wf1_film.WALL in str(r.get("error"))]
+    if waiting:                                          # a folder is delivered once, complete: not while shorts wait for their footage
+        raise RuntimeError(f"{len(waiting)} of {len(sel['moments'])} shorts are waiting for footage: {wf1_film.WALL} on every player. It lifts by "
+                           "itself, usually within hours. Run the same link again then: the shorts already made are kept and nothing is delivered until the set is whole")
     pod, info = sel.get("podcast") or {}, fetched["info"]
     made = {r["id"]: r for r in built["made"]}
     rows = []

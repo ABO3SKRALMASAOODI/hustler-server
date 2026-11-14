@@ -37,6 +37,7 @@ Clock, r4, smooth = F.Clock, F.r4, F.smooth
 
 # The alien bank (worker/scene/alien), by the independent verdict of 14 Nov 2026 (week-1112/notes/S.md):
 # diecut and answer are gimmicks, never used; lamp is not ready; rhyme and arc are for workflow films only, gated.
+WALL = "YouTube is refusing this Mac as a bot"       # the words a short stops with when its footage could not be fetched for that reason
 ALIEN_NEVER = ("diecut", "answer", "lamp")
 ALIEN_GATED = ("arc", "rhyme")
 
