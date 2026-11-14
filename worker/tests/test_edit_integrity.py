@@ -211,7 +211,7 @@ def test_budget_stop_cannot_claim_completion_after_ledger_failure(monkeypatch):
     import fulfillment
     posted = []
     ctx = NS(ask_ledger=None, ask_check_required=True, last_preview=None,
-             autorendered=False)
+             autorendered=False, latest_edl=lambda: {'version': 2})
     monkeypatch.setattr(agent_loop, '_auto_render_if_needed', lambda *a, **k: ({'version':2}, ''))
     monkeypatch.setattr(agent_loop, '_disclose_outstanding_quality', lambda c,t:t)
     monkeypatch.setattr(agent_loop, '_unused_fetched_audio_note', lambda c:'')
