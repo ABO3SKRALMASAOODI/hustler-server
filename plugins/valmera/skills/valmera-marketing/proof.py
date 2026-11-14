@@ -579,6 +579,18 @@ def quiet_snap(path, t, span=0.45):
     return round(max(t - span, 0) + (int(np.argmin(e)) + 0.5) * n / 8000, 3)
 
 
+def endcard_s():
+    """Seconds at the end of every export that are Valmera's end card (worker/brand/endcard.mp4), with a settle margin:
+    the film shows the export's own content, never its end card (the shell adds the film's own)."""
+    try:
+        p = os.path.join(F.scene_worker() if hasattr(F, "scene_worker") else "", "brand", "endcard.mp4")
+        r = subprocess.run([PX.FF.replace("ffmpeg", "ffprobe"), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", p],
+                           capture_output=True, text=True, timeout=30)
+        return float(r.stdout.strip()) + 0.6
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 5.6
+
+
 def product_clips(script, out):
     """The before and the after as clips with their own sound, and a frame of the after for the hook."""
     rec = json.load(open(script["record"]))
@@ -586,14 +598,16 @@ def product_clips(script, out):
     ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
     up = rec["upload"]
     os.makedirs(out, exist_ok=True)
-    a, b = [float(x) for x in (chk.get("after") or [0, min(7.0, ex["dur"])])]
-    a, b = quiet_snap(ex["file"], max(a, 0.0)), quiet_snap(ex["file"], min(max(b, a + 4.0), ex["dur"] - 0.1))
+    body = ex["dur"] - endcard_s()                       # the export without its end card
+    a, b = [float(x) for x in (chk.get("after") or [0, min(7.0, body)])]
+    a, b = min(max(a, 0.0), max(body - 4.0, 0.0)), min(max(b, a + 4.0), body)
+    a, b = quiet_snap(ex["file"], a), min(quiet_snap(ex["file"], b), body)
     ba, bb = [float(x) for x in (chk.get("before") or [1.0, 4.0])]
     ba, bb = quiet_snap(up["file"], max(ba, 0.0)), quiet_snap(up["file"], min(max(bb, ba + 2.0), up["dur"] - 0.1))
     cut(up["file"], ba, bb, os.path.join(out, "before.mp4"))
     cut(ex["file"], a, b, os.path.join(out, "after.mp4"))
     ts = float(chk.get("tease_s") or (a + b) / 2)
-    ts = min(max(ts - 0.6, 0.0), ex["dur"] - 1.4)
+    ts = min(max(ts - 0.6, 0.0), body - 1.4)
     cut(ex["file"], ts, ts + 1.3, os.path.join(out, "tease.mp4"), audio=False)
     return dict(before=dict(src=up["file"], t=[ba, bb], sha256=up["sha256"]), after=dict(src=ex["file"], t=[a, b], sha256=ex["sha256"]),
                 tease=dict(src=ex["file"], t=[ts, ts + 1.3]))
@@ -704,7 +718,7 @@ def supply(ctx, script):
     rec_ = json.load(open(script["record"]))
     ex_ = next((e for e in rec_["exports"] if e["tag"] == "final"), rec_["exports"][-1])
     srcs = {"THE UPLOAD": (rec_["upload"]["file"], rec_["upload"]["dur"], [pc["before"]["t"]]),
-            "THE EXPORT": (ex_["file"], ex_["dur"] - 4.5, [pc["after"]["t"], pc["tease"]["t"]])}
+            "THE EXPORT": (ex_["file"], ex_["dur"] - endcard_s(), [pc["after"]["t"], pc["tease"]["t"]])}
     n_own = {}
     for i, seg in enumerate(sc["segments"]):
         for name in [n for n in seg.get("pictures") or [] if n in srcs]:
@@ -722,7 +736,7 @@ def supply(ctx, script):
                 lines.setdefault(i, dict(i=i, clips=[]))["clips"].append(c)
     # a reserve on every line: one silent slice of the export (outside the after and the tease), so a line whose footage
     # was thin or left the film for not fitting its words cuts to the real result instead of holding a picture
-    free = [t for t in [0.3 + 1.5 * j for j in range(int(max(ex_["dur"] - 4.5, 0) / 1.5))]
+    free = [t for t in [0.3 + 1.5 * j for j in range(int(max(ex_["dur"] - endcard_s() - 0.3, 0) / 1.5))]
             if not any(a - 1.5 <= t <= b for a, b in (pc["after"]["t"], pc["tease"]["t"]))]
     for i in range(len(sc["segments"])):
         if not free:
