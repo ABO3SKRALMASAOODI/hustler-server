@@ -566,8 +566,9 @@ def test_changed_section_renderer_outputs_only_requested_seconds(tmp_path):
     assert mapped == [1.0]
 
 
+@pytest.mark.parametrize('ratio', ['source', '9:16'])
 def test_changed_section_renderer_handles_a_window_wholly_inside_broll(
-        monkeypatch, tmp_path):
+        monkeypatch, tmp_path, ratio):
     """A bounded proof may cut through a long insert with no A-roll at all."""
     source = tmp_path / "source.mp4"
     insert = tmp_path / "insert.mp4"
@@ -587,6 +588,7 @@ def test_changed_section_renderer_handles_a_window_wholly_inside_broll(
     monkeypatch.setattr(renderer.storage, "download_to", fake_download)
     edl = _edl(
         keep=[[0.0, 2.0]],
+        frame={'ratio': ratio},
         inserts=[{
             "id": "ins1", "asset_key": "clips/long-broll.mp4",
             "kind": "video", "at_output_s": 0.0,

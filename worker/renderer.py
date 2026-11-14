@@ -9454,7 +9454,8 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
     elapsed = 0.0
     for i, (a, b) in enumerate(ranges):
         window = stitch.window_edl(edl, tl, a, b, keep_audio=True,
-                                   fps=max(1.0, min(float(_fps), 60.0)))
+                                   fps=max(1.0, min(float(_fps), 60.0)),
+                                   render_fragment=True)
         if not window.get("keep") and window.get("inserts") \
                 and not window.get("canvas"):
             # A proof window entirely inside B-roll has no main-source span.
@@ -9464,6 +9465,14 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
                 "width": int(W), "height": int(H), "fps": float(_fps),
                 "bg_color": "#000000",
             }
+            # The canvas already carries the output aspect. Source framing
+            # and source-timed controls have no meaning on an insert-only
+            # proof; leaving them attached makes validation reject it.
+            window["frame"] = None
+            window["volume"] = []
+            if isinstance(window.get("captions"), dict) and \
+                    window["captions"].get("mode") == "from_transcript":
+                window["captions"] = None  # full-program ASS override below
         # Fades belong to the actual program ends. window_edl clears them for
         # stitched pieces; restore only the end a proof window truly contains.
         wfx = dict(window.get("effects") or {})

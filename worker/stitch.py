@@ -755,7 +755,8 @@ def _window_fx(items, w0, w1, fps, music_ids):
     return out
 
 
-def window_edl(edl, tl, w0, w1, keep_audio=False, fps=None):
+def window_edl(edl, tl, w0, w1, keep_audio=False, fps=None,
+               render_fragment=False):
     """The EDL that renders output [w0, w1] of `edl`, standalone.
 
     Full-preview stitching calls this with windows expand() grew to contain
@@ -788,7 +789,11 @@ def window_edl(edl, tl, w0, w1, keep_audio=False, fps=None):
                 # valid (production jobs 11851/11893/12058: 0.030s). It is
                 # below both the schema's useful span and render tolerance, so
                 # omit it from the temporary proof rather than blaming the edit.
-                if src_b - src_a < MIN_SPAN_S - 1e-9:
+                # Proofs retain boundary frames: dropping a 30ms keep moved
+                # every later graphic/audio event and shortened the proof.
+                # Ordinary callers retain the authored-EDL minimum.
+                minimum = 0.01 if render_fragment else MIN_SPAN_S
+                if src_b - src_a < minimum - 1e-9:
                     acc += plen
                     continue
                 keep.append([src_a, src_b])

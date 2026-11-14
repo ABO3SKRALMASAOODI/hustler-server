@@ -175,3 +175,28 @@ def test_proof_keeps_sound_in_last_frame_without_weakening_authored_edl():
     fragment['sfx'][0]['at'] = 1.34
     with pytest.raises(EDLValidationError, match='past the end'):
         validate_edl(fragment, 10, render_fragment=True)
+
+
+@pytest.mark.parametrize('factor', [1, 2])
+def test_proof_retains_boundary_frame_and_its_graphic_clock(factor):
+    from schemas import validate_edl, program_duration, EDLValidationError
+    import stitch
+    from timeline import Timeline
+    original = {'keep': [[0, 1.2], [1.2, 3]], 'captions': None,
+                'speed': ([{'id': 'fast', 'start': 0, 'end': 1.2,
+                            'factor': factor}] if factor != 1 else []),
+                'fx': [{'id': 'look', 'type': 'grade_window', 'stage': 'screen',
+                        'start': 0, 'end': 3 if factor == 1 else 2.4,
+                        'contrast': 1.12}]}
+    original = validate_edl(original, 3).model_dump()
+    start = 1.2 / factor - .03 / factor
+    stop = start + 1.33
+    fragment = stitch.window_edl(original, Timeline(original['keep'], [],
+                                original['speed']), start, stop,
+                                fps=30, render_fragment=True)
+    checked = validate_edl(fragment, 3, render_fragment=True).model_dump()
+    assert checked['keep'][0] == [1.17, 1.2]
+    assert program_duration(checked) == pytest.approx(1.33, abs=.01)
+    assert checked['fx'][0]['end'] <= program_duration(checked) + .01
+    with pytest.raises(EDLValidationError, match='shorter'):
+        validate_edl(fragment, 3)

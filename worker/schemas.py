@@ -3281,7 +3281,9 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                 raise EDLValidationError(
                     f"keep[{i}] must be [start, end], got {span}.")
             s, e = _r(span[0]), _r(span[1])
-            e = _check_span(f"keep[{i}]", s, e, duration, clamp_slack=0.75)
+            e = _check_span(f"keep[{i}]", s, e, duration,
+                            min_len=0.01 if render_fragment else MIN_SPAN_S,
+                            clamp_slack=0.75)
             keep.append([s, e])
 
         keep.sort(key=lambda x: x[0])
@@ -3306,7 +3308,7 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                 seen_sp.add(sp.id)
                 sp.start, sp.end = _r(sp.start), _r(sp.end)
                 sp.end = _check_span(f"speed[{i}]", sp.start, sp.end,
-                                     duration, min_len=0.2,
+                                     duration, min_len=0.01 if render_fragment else 0.2,
                                      clamp_slack=0.75)
                 sp.factor = round(min(max(float(sp.factor),
                                           SPEED_FACTOR_MIN),
