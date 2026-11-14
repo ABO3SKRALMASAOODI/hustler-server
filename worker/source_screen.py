@@ -19,6 +19,8 @@ def sample_times(duration, fps, shots):
     times = {0.0, last}
     tail = list(shots or [{"start": 0.0, "end": duration}])[-4:]
     for sh in tail:
+        if hasattr(sh, "model_dump"):
+            sh = sh.model_dump()  # scenes.detect_shots returns typed Shots
         a, b = float(sh["start"]), min(duration, float(sh["end"]))
         times.update((a + frame, (a + b) / 2, b - frame))
         if a > 0:
