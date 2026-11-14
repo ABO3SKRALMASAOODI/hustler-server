@@ -262,3 +262,30 @@ def test_probe_sanity_checks_reject_fake_zeros():
                 dict(good, subscriptions={"total": 0, "paddle": {}})):
         with pytest.raises(AssertionError):
             admin_probe.check_overview(bad, truth)
+
+
+@pytest.mark.parametrize("current_count,passes", [(17, True), (13, False)])
+def test_probe_checks_refreshed_counts_without_hiding_persistent_mismatch(monkeypatch, current_count, passes):
+    from types import SimpleNamespace
+    sys.path.insert(0, str(BACKEND / "scripts"))
+    import admin_probe
+
+    def check(body, truth):
+        assert body["count"] == truth["count"], "count differs"
+
+    def response(body):
+        return dict(body=body, status=200, seconds=0.1, wall=0.1,
+                    execs=1, connects=1, raw=b"{}")
+
+    responses = iter([response({"count": 13, "refreshing": True, "cache_age_s": 3600}),
+                      response({"count": current_count, "cache_age_s": 0})])
+    monkeypatch.setenv("DATABASE_URL", "postgresql://test/probe")
+    monkeypatch.setattr(admin_probe, "force_read_only", lambda: None)
+    monkeypatch.setattr(admin_probe, "ground_truth", lambda _: {"read_only": "on", "count": 17})
+    monkeypatch.setattr(admin_probe, "build_app", lambda: SimpleNamespace(test_client=lambda: None))
+    monkeypatch.setattr(admin_probe, "admin_token", lambda *args: "test")
+    monkeypatch.setattr(admin_probe, "ENDPOINTS", [("Subscribers", "/report", check)])
+    monkeypatch.setattr(admin_probe, "_call", lambda *args: next(responses))
+    monkeypatch.setattr(admin_probe, "_wait_for_background", lambda: (1.0, {}, []))
+    _, results = admin_probe.run(3)
+    assert results[0]["ok"] is passes

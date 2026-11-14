@@ -758,8 +758,9 @@ def run(budget_s, only=None, repeat=1, measure="server", retries=2):
         if status != 200:
             msg = body.get("error") if isinstance(body, dict) else first["raw"][:120]
             note = f"HTTP {status}: {msg}"
-        elif isinstance(body, dict) and body.get("pending"):
-            # The page shows "computing" and asks again; judge what it gets.
+        elif isinstance(body, dict) and (body.get("pending") or body.get("refreshing")):
+            # Judge the refreshed report against today's ground truth, not
+            # the stale snapshot returned while its refresh was running.
             if failed:
                 ok, note = False, "background compute failed: " + \
                     "; ".join(sorted(set(failed.values())))
@@ -768,8 +769,9 @@ def run(budget_s, only=None, repeat=1, measure="server", retries=2):
             else:
                 again = _call(client, path, headers, rtt, measure)
                 body = again["body"]
-                note = f"computed in the background in {waited:.1f}s"
-                if again["status"] != 200 or (isinstance(body, dict) and body.get("pending")):
+                note = f"refreshed in the background in {waited:.1f}s"
+                if again["status"] != 200 or (isinstance(body, dict) and
+                        (body.get("pending") or body.get("refreshing"))):
                     ok, note = False, note + ", but the next answer was not ready"
         if ok and status == 200 and check is not None:
             try:
