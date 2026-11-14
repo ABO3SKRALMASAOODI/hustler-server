@@ -3516,6 +3516,16 @@ def run(worker_db, job, project, index_row):
     ctx.user_message = "First cut"
     ctx.credit_budget = None
     ctx.first_cut_db, ctx.first_cut_session = worker_db, session_id
+    if getattr(ctx, "index", None) and not payload.get("url"):
+        import source_screen
+        if not ctx.index.get("source_screen"):
+            v = ctx.index["video"]
+            ctx.index["source_screen"] = source_screen.build(
+                ctx.proxy_path(), v["duration"], v["fps"], ctx.index.get("shots"),
+                index_row.get("video_sha256", ""), workdir, llm.get_recorder())
+        ctx.index = source_screen.first_film_index(ctx.index)
+        ctx.duration = ctx.index["video"]["duration"]
+        source_screen.clear_start_state(ctx)
     try:
         start_edl = ctx.latest_edl()
     except Exception:

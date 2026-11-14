@@ -959,7 +959,11 @@ def _execution_policy(ctx):
 def _child_payload(ctx, payload=None):
     body = dict(payload or {})
     body.setdefault("execution_policy", _execution_policy(ctx))
+    if (getattr(ctx, "index", None) or {}).get("_first_film_source_guard"):
+        body["first_film_source_screen"] = ctx.index["source_screen"]
     job = getattr(ctx, 'job', None) or {}
+    if (job.get('payload') or {}).get('first_cut'):
+        body['first_film'] = True
     if (job.get('type') == 'agent_turn' and job.get('id') is not None
             and body.get('source') in {'agent_preview', 'agent_preview_check'}):
         body.setdefault('root_agent_job_id',
@@ -10670,6 +10674,11 @@ def _auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
         return ("REJECTED: mode must be 'auto' (measure the footage and "
                 "choose), 'crop' (fill the frame, cutting the sides), 'pad' "
                 "or 'pad_blur' (fit the WHOLE picture into the new frame).")
+    from score import source_guard
+    index = getattr(ctx, "index", None) or {}
+    if index.get("_first_film_source_guard") and source_guard.missing_shot_boxes(
+            index, ctx.latest_edl()["json"].get("keep") or [[0, ctx.duration]]):
+        return set_frame(ctx, ratio, "pad_blur", _measured=True)
     # A call composited over a broadcast frame (source_layout.py) is framed
     # from its measured layout, not from a face and the detail around it:
     # that read the Diamandis call as a wide shot and fitted it (Oct 2026).
