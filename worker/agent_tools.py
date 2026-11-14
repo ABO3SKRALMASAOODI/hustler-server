@@ -3348,6 +3348,8 @@ def _audio_safe_keep(ctx, keep, prev_keep, words):
         return keep, [], set()
     quiet = {round(m["old"], 2) for m in moves if m["why"] == "quiet_word"}
     notes = cut_audio.report(moves, checked)
+    if level is None and not notes:
+        notes = ["AUDIO-SAFE CUTS: no source sound to measure; retained the transcript's word boundaries."]
     if level is not None and new:
         # Wave 2 (run report defect 26): untranscribed sound left on the
         # kept side of a cut — the tail of the word cut away, an "um" the
@@ -3475,8 +3477,15 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
         sentence_line = sentence_snap.note_line(_moved)
     audio_notes, quiet_edges = [], set()
     if snap_to_words is not False:
+        # Preserve the whole boundary word BEFORE acoustic placement too.
+        # Otherwise its old "small retained fraction" rule can discard the
+        # first word entirely, leaving no clipped word for the final guard.
+        import word_edges
+        new_keep, whole_before = word_edges.whole(new_keep, words, ctx.duration,
+                                                  previous=prev_keep, pad=True)
         new_keep, audio_notes, quiet_edges = _audio_safe_keep(
             ctx, new_keep, None if place_all else prev_keep, words)
+        audio_notes = whole_before + audio_notes
     else:
         audio_notes = _exact_keep_onset_notes(
             ctx, new_keep, None if place_all else prev_keep, words)
