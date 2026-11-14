@@ -66,9 +66,12 @@ def test_picture_candidate_is_checked_in_its_actual_cover_shape(monkeypatch, tmp
 def test_every_named_subject_becomes_durable_ask_with_word_anchor(monkeypatch):
     words = [{'w': x, 't0': float(i), 't1': i + .7} for i, x in enumerate(['Nike', 'Coke', 'Disney'])]
     def record(ctx, name, schema, system, content, **kw):
+        if name == 'identify_picture_subjects':
+            assert list(json.loads(content)) == ['request']
+            return {'pictures': [{'subject': w['w'], 'must_show': w['w'], 'query': w['w']} for w in words], 'spoken_categories': []}, {}
         assert json.loads(content)['words'][2]['id'] == 2
         return {'pictures': [{'subject': w['w'], 'must_show': w['w'], 'query': w['w'],
-                              'word_ids': [i, 999]} for i, w in enumerate(words)]}, {}
+                              'word_ids': [i, 999], 'picture_id': i} for i, w in enumerate(words)]}, {}
     monkeypatch.setattr(asks, '_call', record)
     ledger = {'asks': []}
     required_broll.record(NS(index={'words': words}), ledger, 'Show Nike, Coke and Disney pictures')
@@ -142,7 +145,7 @@ def test_requested_short_has_a_complete_story_end_and_continuation_is_not_done(m
              {'w': 'list.', 't0': 1.5, 't1': 2.},
              {'w': 'Next', 't0': 3., 't1': 3.5}]
     def record(*a, **kw):
-        return {'pictures': [{'subject': 'Disney', 'must_show': 'Disney picture', 'query': 'Disney', 'word_ids': [0]}],
+        return {'pictures': [{'subject': 'Disney', 'must_show': 'Disney picture', 'query': 'Disney', 'word_ids': [0], 'picture_id': 0}],
                 'preserve_speech_clock': True, 'short_story_end_word': 1,
                 'short_story_end_reason': 'The examples finish here; the next line changes topic.'}, {}
     monkeypatch.setattr(asks, '_call', record)
@@ -157,3 +160,29 @@ def test_requested_short_has_a_complete_story_end_and_continuation_is_not_done(m
     assert required_broll.check(ctx, ledger, {'keep': [[0, 3.7]]}, {})['picture_story_end']['state'] == 'not_done'
     assert required_broll.check(ctx, ledger, {'keep': [[0, 2.1]]}, {})['picture_story_end']['state'] == 'done'
     assert required_broll.check(ctx, ledger, {'keep': [[0, 1.8]]}, {})['picture_story_end']['state'] == 'not_done'
+
+
+def test_model_declared_names_align_to_every_repeated_transcript_mention():
+    words = [{'w': w} for w in ['Zorba', 'Studio', 'and', 'Zorba?', 'Other', 'Studio', 'ZORBA.']]
+    assert required_broll.repeated_anchors(words, ['Zorba', 'Zorba Studio']) == {0, 1, 3, 6}
+    assert required_broll.repeated_anchors(words, []) == set()
+    assert required_broll.repeated_anchors(words, ['Different name']) == set()
+
+
+def test_transcript_cannot_add_subjects_to_an_explicit_request(monkeypatch):
+    def check(ctx, name, schema, system, content, **kw):
+        data = json.loads(content)
+        if name == 'identify_picture_subjects':
+            assert data == {'request': 'Show Zorba pictures as named'}
+            return {'pictures': [{'subject': 'Zorba', 'must_show': 'Recognizable Zorba', 'query': 'Zorba'}],
+                    'spoken_categories': []}, {}
+        assert 'subject' not in schema['properties']['pictures']['items']['properties']
+        return {'pictures': [{'picture_id': 0, 'word_ids': [0], 'spoken_forms': ['Zorba']},
+                             {'picture_id': 99, 'subject': 'Unrequested company', 'word_ids': [1]}]}, {}
+    monkeypatch.setattr(asks, '_call', check)
+    ledger = {'asks': []}
+    pictures = required_broll.record(NS(index={'words': [
+        {'w': 'Zorba', 't0': 0, 't1': 1}, {'w': 'Other', 't0': 1, 't1': 2},
+        {'w': 'Zorba?', 't0': 2, 't1': 3}]}), ledger, 'Show Zorba pictures as named')
+    assert [p['subject'] for p in pictures] == ['Zorba']
+    assert pictures[0]['word_ids'] == [0, 2]
