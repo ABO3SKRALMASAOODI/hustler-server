@@ -34,3 +34,21 @@ def test_joints_cut_holes_that_reenter_on_the_word_and_accents_notch():
     assert curve[i(16.0)] - curve[i(24.0)] >= 8                         # the close's bed stays down
     assert curve[i(14.0)] <= curve[i(12.0)] - 15                        # dipped under the real voice
     assert notes["notches"] == [6.0] and curve[i(5.95)] < curve[i(5.0)] - 9 and abs(curve[i(6.02)] - curve[i(5.0)]) < 0.5
+
+
+def test_optional_joint_fields_set_the_close_bed_the_depth_and_a_swell():
+    """Round 2: a joint may carry its own depth (db), a close its dry bed (bed_db), and a swell joint lifts the bed into
+    a type page; joints without the fields are exactly the defaults."""
+    i = lambda s: int(s / .01)  # noqa: E731
+    base = [dict(kind="turn", last_word_t=8.9, next_first_word_t=10.0), dict(kind="close", last_word_t=21.5, next_first_word_t=22.4)]
+    words = [(0.5, 8.9), (10.0, 21.5), (22.4, 28.0)]
+    s0, f0, _ = music.flow(3000, .01, dict(words=words, payoff_s=None, accents=[], joints=base), _plan(), music.PROFILE, 0, 0)
+    joints = [dict(base[0], db=22.0), dict(base[1], bed_db=20.0), dict(kind="swell", t=15.0, rise_s=2.5, db=10.0)]
+    s1, f1, notes = music.flow(3000, .01, dict(words=words, payoff_s=None, accents=[], joints=joints), _plan(), music.PROFILE, 0, 0)
+    c0, c1 = s0 + f0, s1 + f1
+    assert c1[i(9.7)] <= c0[i(9.7)] - 5                                  # a deeper hole
+    assert c1[i(16.0)] - c1[i(24.0)] >= 20 - 1e-6 or c1[i(23.0)] <= c0[i(23.0)] - 10    # the close's bed 20 dB down
+    assert c1[i(15.0)] - c1[i(12.4)] >= 8                                 # the swell rises 8 dB and more into its mark
+    assert notes["swells"] and notes["close_bed_db"] == -20.0
+    s2, f2, n2 = music.flow(3000, .01, dict(words=words, payoff_s=None, accents=[], joints=[dict(j) for j in base]), _plan(), music.PROFILE, 0, 0)
+    assert np.array_equal(s0, s2) and np.array_equal(f0, f2)

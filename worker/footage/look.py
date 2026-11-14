@@ -57,11 +57,11 @@ def moments(subject, lines, sources, budget_s=90.0):
 LONG_SHOT_S = 6.0          # a long take (a drive, an interview) is looked at every LONG_STEP_S, not once
 
 
-def points(shots, long_step=4.0):
-    """A look point in every shot's middle, and every long_step seconds along a long take."""
+def points(shots, long_step=4.0, min_s=0.8):
+    """A look point in every shot's middle, and every long_step seconds along a long take (shots of min_s and more)."""
     out = []
     for a, b in shots:
-        if b - a < 0.8:
+        if b - a < min_s:
             continue
         if b - a <= LONG_SHOT_S:
             out.append((round(a + (b - a) * 0.5, 2), (a, b)))
@@ -71,10 +71,14 @@ def points(shots, long_step=4.0):
     return out
 
 
-def pick_times(shots, said, cap=PER_SOURCE, around_s=8.0):
+def pick_times(shots, said, cap=PER_SOURCE, around_s=8.0, moving=None, min_s=0.8):
     """Frame times for one source: every look point inside the moments the transcript pointed at, then an
-    even spread of the others (a source's best picture is often under words about something else)."""
-    pts = points(shots)
+    even spread of the others (a source's best picture is often under words about something else).
+    moving (a set of shots measured as moving, footage.motion; a caller asking for motion first): those shots' points
+    come first, and shots of min_s and more are looked at. Absent, exactly as before."""
+    pts = points(shots, min_s=min_s)
+    if moving is not None:
+        pts = sorted(pts, key=lambda q: (tuple(q[1]) not in moving, q[0]))
     near = []
     for t in said:
         for p, _ in pts:

@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 
-from . import cut, fetch, hear, look, plan, search, shots, voice
+from . import cut, fetch, hear, look, motion, plan, search, shots, voice
 
 MAX_SOURCES = 16
 WHOLE_UNDER_S = 600.0      # a caller that reads only a source's head still fetches a source this short whole (no section cut)
@@ -121,14 +121,22 @@ def line_shots(dur, shot_s=None, line_max=None):
 
 
 def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MAX_SOURCES, keep_work=False, anchors=None, avoid=None,
-         hear_s=None, read_s=None, per=None, want_voices=None, preserve_source=False, downloaded_only=False, shot_s=None, line_max=None):
+         hear_s=None, read_s=None, per=None, want_voices=None, preserve_source=False, downloaded_only=False, shot_s=None, line_max=None,
+         strict_lines=False, motion_first=False, alloc=None, reassign_lost=False):
     """downloaded_only: cut the scanned rendition without reopening remote streams.
     avoid: [{"url", "time_range"}] already cut for this film by an earlier run: those seconds of a source are not cut again.
     hear_s, read_s, per: a caller with a deadline (a first film, score.film) hears less or nothing of each source, reads
     less of it and opens fewer sources a subject; None keeps the engine's own (HEAR_MAX_S, fetch.PROXY_MAX_S, PER_SUBJECT).
     shot_s, line_max: a caller that cuts faster than SHOT_S (a story reel: a picture every 0.45 s) asks for
     min(line_max, ceil(dur / shot_s) + 2) clips a line, each window clamp(2 * shot_s, cut.MIN_S, 1.6) s; None keeps
-    min(4, round(dur / SHOT_S)) clips of dur / n s."""
+    min(4, round(dur / SHOT_S)) clips of dur / n s.
+    Opt-in (a story reel; all off by default, so every other caller cuts exactly as before):
+    strict_lines   a frame fills line i only when the look named i among its lines (never by its subject alone)
+    motion_first   each source shot's content motion is measured on the proxy (footage.motion): short shots (0.3 s and
+                   more) are looked at, moving shots first; a slot ranks (moving, named for the line, grade); the window
+                   sits on the shot's most moving span; every clip records motion_p90
+    alloc="round"  the lines take one pick each a round, the scarcest line first
+    reassign_lost  a pick whose cut fails marks its source dead; the lines that lost picks are assigned again and cut"""
     per = int(per) if per else PER_SUBJECT
     t_all = time.monotonic()
     os.makedirs(os.path.join(out_dir, "clips"), exist_ok=True)
@@ -240,7 +248,11 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             cands = []
             for k, s in enumerate(mine):
                 said = [m["t"] for m in ms if m["src"] == k]
-                times = look.pick_times(s["shots"], said)
+                if motion_first:
+                    mo = motion.of_shots(s.get("proxy"), s["shots"], log=log)
+                    times = look.pick_times(s["shots"], said, moving={sh for sh, v in mo.items() if v["p90"] >= motion.FLOOR}, min_s=0.3)
+                else:
+                    times = look.pick_times(s["shots"], said)
                 fr = shots.frames(s["proxy"], times, os.path.join(work, "frames", s["key"]))
                 for t, jpg in sorted(fr.items()):
                     cands.append(dict(src=k, t=t, jpg=jpg, said=look.said_at(s.get("transcript"), t), source=s["key"]))
@@ -268,50 +280,17 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         # 6. assign clips to lines: the best frame for each slot, its window inside its shot never
         #    overlapping a window already cut (a long interview take can carry several lines)
         src_of = {s["key"]: s for s in live}
-        taken, last_src, plan_rows, shot_uses = {}, None, [], {}
+        taken = {}
         for av in avoid or []:
             k = next((s["key"] for s in live if s["url"] == av.get("url")), None)
             if k and av.get("time_range"):
                 taken.setdefault(k, []).append((float(av["time_range"][0]), float(av["time_range"][1])))
-        for ln in lines:
-            dur = _line_dur(ln)
-            n, win_s = line_shots(dur, shot_s, line_max)
-            names = set((shows.get(ln["i"]) or {}).get("subjects") or []) | set(ln.get("pictures") or [])
-            chosen = []
-            for _ in range(n):
-                best, best_score = None, None
-                for c in good:
-                    s = src_of[c["source"]]
-                    shot = shots.shot_at(s["shots"], c["t"])
-                    if shot[1] - shot[0] < 0.6:
-                        continue
-                    w = cut.window(shot, c["t"], win_s)
-                    if any(w[0] < b + 0.3 and a < w[1] + 0.3 for a, b in taken.get(c["source"], [])):
-                        continue
-                    if ln["i"] in c["lines"]:
-                        score = c["grade"] + 1.0
-                    elif c["subject"] in names and not c["lines"]:
-                        score = c["grade"] - 0.5
-                    elif c["subject"] in names:
-                        score = c["grade"] - 1.0
-                    else:
-                        continue
-                    if c["source"] == last_src:
-                        score -= 0.7
-                    if any(x["source"] == c["source"] for x in chosen):
-                        score -= 0.6
-                    if any(x["source"] == c["source"] and x["shot"] == shot for x in chosen):
-                        score -= 2.0            # the same take twice in one line reads as one picture held
-                    score -= 0.8 * shot_uses.get((c["source"], shot[0]), 0)
-                    if best_score is None or score > best_score:
-                        best, best_score = dict(c, shot=shot, window=w), score
-                if not best:
-                    break
-                taken.setdefault(best["source"], []).append(best["window"])
-                shot_uses[(best["source"], best["shot"][0])] = shot_uses.get((best["source"], best["shot"][0]), 0) + 1
-                last_src = best["source"]
-                chosen.append(best)
-            plan_rows.append(dict(i=ln["i"], say=ln.get("say"), show=(shows.get(ln["i"]) or {}).get("show"), dur=round(dur, 2), want=n, picks=chosen))
+        motion_of = {}
+        if motion_first:
+            for s in live:
+                motion_of[s["key"]] = motion.of_shots(s.get("proxy"), s["shots"], log=log)
+        plan_rows = assign(lines, good, src_of, shows, taken, shot_s=shot_s, line_max=line_max, strict=strict_lines,
+                           motion_of=motion_of if motion_first else None, alloc=alloc)
         # 7. cut: resolve each used source's stream once, cut, measure, grade to one look, finish
         need_src = sorted({p["source"] for r in plan_rows for p in r["picks"]})
         def resolve(k):
@@ -357,6 +336,34 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             return p
         with cf.ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(grab, jobs))
+        if reassign_lost:
+            # a cut that failed (a bot wall, a timeout) marks its source dead for cutting; the lines that lost picks are
+            # assigned again over the frames left (other sources, archive twins) and cut once more
+            dead = {p["source"] for _, p in jobs if p.get("error")}
+            lost = {r["i"]: sum(1 for p in r["picks"] if p.get("error")) for r in plan_rows}
+            again = [ln for ln in lines if lost.get(ln["i"])]
+            if dead and again:
+                for r in plan_rows:
+                    r["picks"] = [p for p in r["picks"] if not p.get("error")]
+                    r["lost"] = lost.get(r["i"], 0)
+                for k_, w_ in [(p["source"], p["window"]) for r in plan_rows for p in r["picks"]]:
+                    taken.setdefault(k_, []).append(tuple(w_))
+                more = assign([dict(ln, want_n=lost[ln["i"]]) for ln in again], [c for c in good if c["source"] not in dead], src_of, shows, taken,
+                              shot_s=shot_s, line_max=line_max, strict=strict_lines, motion_of=motion_of if motion_first else None, alloc=alloc)
+                need2 = sorted({p["source"] for r in more for p in r["picks"]} - set(stream_of))
+                with cf.ThreadPoolExecutor(max_workers=4) as pool:
+                    stream_of.update(dict(pool.map(resolve, need2)))
+                jobs2 = []
+                by_i = {r["i"]: r for r in plan_rows}
+                for r2 in more:
+                    row = by_i[r2["i"]]
+                    row["replaced"] = len(r2["picks"])
+                    row["picks"] += r2["picks"]
+                    jobs2 += [(row, p) for p in r2["picks"]]
+                with cf.ThreadPoolExecutor(max_workers=4) as pool:
+                    list(pool.map(grab, jobs2))
+                jobs = [(r, p) for r in plan_rows for p in r["picks"]]
+                log(f"reassigned: {sum(lost.values())} lost picks on {len(again)} lines, {sum(r.get('replaced', 0) for r in plan_rows)} replaced")
         tgt = cut.target([p["stats"] for _, p in jobs if p.get("stats")])
 
         def finish(job):
@@ -412,9 +419,10 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 clips.append(dict(verification=p.get("verification"), file=p["file"], seconds=round(p["t1"] - p["t0"], 2), subject=p["subject"], shows=p["shows"], grade=p["grade"],
                                   source=dict(url=s["url"], title=s["title"], channel=s.get("channel"), where=s["where"]),
                                   time_range=[p["t0"], p["t1"]], frame_at=p["t"], x=p.get("x"), eq=p.get("eq"), trim=p.get("trim"),
-                                  how=p.get("how"), sheet=p.get("sheet")))
+                                  how=p.get("how"), sheet=p.get("sheet"), **({"motion_p90": p["motion_p90"]} if "motion_p90" in p else {})))
             out_lines.append(dict(i=r["i"], say=r["say"], show=r["show"], dur=r["dur"], want=r["want"], clips=clips,
-                                  subjects=(shows.get(r["i"]) or {}).get("subjects") or []))      # what the planner read the line as naming
+                                  subjects=(shows.get(r["i"]) or {}).get("subjects") or [],      # what the planner read the line as naming
+                                  **({"lost": r.get("lost", 0), "replaced": r.get("replaced", 0)} if reassign_lost else {})))
         spend = {k: round(v, 5) for k, v in spend.items()}
         res = dict(engine="worker/footage", model=dict(look="gpt-6-sol low", hear=hear.MODEL), about=about, frame=[W, H], preserve_source=bool(preserve_source), grade_target=tgt,
                    subjects=subjects, lines=out_lines, voices=voices,
@@ -435,6 +443,89 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
     finally:
         if not keep_work:
             shutil.rmtree(work, ignore_errors=True)
+
+
+def assign(lines, good, src_of, shows, taken, shot_s=None, line_max=None, strict=False, motion_of=None, alloc=None):
+    """Step 6, clips to lines: [{"i", "say", "show", "dur", "want", "picks"}]. Each slot takes the best frame whose window
+    inside its shot overlaps no window already cut (`taken`, updated). Defaults: line by line, a frame named for the line
+    first, then frames of its subjects (strict: only frames named for it); score = grade with penalties for the same
+    source and the same take. motion_of ({source key: {(a, b): {"p90", "peak"}}}): a slot ranks (moving, score), shots of
+    0.25 s and more are admitted, the window sits on the shot's most moving span and the pick records motion_p90.
+    alloc="round": one pick a line a round, the scarcest line first. A line's "want_n" caps its picks (a reassignment)."""
+    last_src, shot_uses = None, {}
+    rows, plan_rows = {}, []
+    meta = {}
+    for ln in lines:
+        dur = _line_dur(ln)
+        n, win_s = line_shots(dur, shot_s, line_max)
+        if ln.get("want_n"):
+            n = min(n, int(ln["want_n"]))
+        names = set((shows.get(ln["i"]) or {}).get("subjects") or []) | set(ln.get("pictures") or [])
+        meta[ln["i"]] = (n, win_s, names)
+        rows[ln["i"]] = dict(i=ln["i"], say=ln.get("say"), show=(shows.get(ln["i"]) or {}).get("show"), dur=round(dur, 2), want=n, picks=[])
+    min_len = 0.25 if motion_of is not None else 0.6
+
+    def best_for(ln):
+        nonlocal last_src
+        n, win_s, names = meta[ln["i"]]
+        chosen = rows[ln["i"]]["picks"]
+        best, best_score = None, None
+        for c in good:
+            s = src_of[c["source"]]
+            shot = shots.shot_at(s["shots"], c["t"])
+            if shot[1] - shot[0] < min_len:
+                continue
+            mo = ((motion_of or {}).get(c["source"]) or {}).get(tuple(shot)) if motion_of is not None else None
+            w = cut.window(shot, c["t"], win_s, peak=(mo or {}).get("peak")) if mo else cut.window(shot, c["t"], win_s)
+            if any(w[0] < b + 0.3 and a < w[1] + 0.3 for a, b in taken.get(c["source"], [])):
+                continue
+            if ln["i"] in c["lines"]:
+                score = c["grade"] + 1.0
+            elif strict:
+                continue
+            elif c["subject"] in names and not c["lines"]:
+                score = c["grade"] - 0.5
+            elif c["subject"] in names:
+                score = c["grade"] - 1.0
+            else:
+                continue
+            if c["source"] == last_src:
+                score -= 0.7
+            if any(x["source"] == c["source"] for x in chosen):
+                score -= 0.6
+            if any(x["source"] == c["source"] and x["shot"] == shot for x in chosen):
+                score -= 2.0            # the same take twice in one line reads as one picture held
+            score -= 0.8 * shot_uses.get((c["source"], shot[0]), 0)
+            key = (1 if (mo or {}).get("p90", 0.0) >= motion.FLOOR else 0, score) if motion_of is not None else score
+            if best_score is None or key > best_score:
+                best = dict(c, shot=shot, window=w, **({"motion_p90": round(float(mo["p90"]), 3)} if mo else {}))
+                best_score = key
+        if not best:
+            return False
+        taken.setdefault(best["source"], []).append(best["window"])
+        shot_uses[(best["source"], best["shot"][0])] = shot_uses.get((best["source"], best["shot"][0]), 0) + 1
+        last_src = best["source"]
+        chosen.append(best)
+        return True
+    if alloc == "round":
+        def eligible(ln):
+            return sum(1 for c in good if ln["i"] in c["lines"] or (not strict and c["subject"] in meta[ln["i"]][2]))
+        order = sorted(lines, key=lambda ln: (eligible(ln) / max(meta[ln["i"]][0], 1), ln["i"]))
+        open_ = {ln["i"] for ln in lines}
+        while open_:
+            for ln in order:
+                if ln["i"] not in open_:
+                    continue
+                if len(rows[ln["i"]]["picks"]) >= meta[ln["i"]][0] or not best_for(ln):
+                    open_.discard(ln["i"])
+    else:
+        for ln in lines:
+            for _ in range(meta[ln["i"]][0]):
+                if not best_for(ln):
+                    break
+    for ln in lines:
+        plan_rows.append(rows[ln["i"]])
+    return plan_rows
 
 
 def lines_of(script):
@@ -466,6 +557,10 @@ def main():
     ap.add_argument("--line-max", type=int, default=None, help="at most this many clips a line with --shot-s")
     ap.add_argument("--per", type=int, default=None, help="sources opened a subject (find's per)")
     ap.add_argument("--lines", default=None, help="comma-separated line numbers: only these lines are searched (a top-up)")
+    ap.add_argument("--strict-lines", action="store_true", help="a frame fills a line only when the look named that line")
+    ap.add_argument("--motion-first", action="store_true", help="moving shots first, windows on their motion peak")
+    ap.add_argument("--alloc", default=None, choices=["round"], help="round: one pick a line a round, the scarcest line first")
+    ap.add_argument("--reassign-lost", action="store_true", help="lines whose cuts failed are assigned again and cut")
     a = ap.parse_args()
     lines, named, title = lines_of(json.load(open(a.script)))
     if a.timing:
@@ -481,7 +576,8 @@ def main():
              for c in ln.get("clips") or []]
     res = seam.for_lines(lines, named, title, a.out, a.w, a.h, scope="workflow", log=lambda m: print("[footage] " + m, flush=True),
                          anchors=anchors, avoid=avoid, preserve_source=a.preserve_source,
-                         **{k: v for k, v in dict(shot_s=a.shot_s, line_max=a.line_max, per=a.per).items() if v})
+                         **{k: v for k, v in dict(shot_s=a.shot_s, line_max=a.line_max, per=a.per, strict_lines=a.strict_lines,
+                                                  motion_first=a.motion_first, alloc=a.alloc, reassign_lost=a.reassign_lost).items() if v})
     if res is None:
         print(json.dumps(dict(off="VALMERA_FOOTAGE=0")))
         return

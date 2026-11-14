@@ -11,11 +11,17 @@ MIN_S, MAX_S = 1.0, 3.0
 PRE_S = 2.0                     # fast seek lands this far before the cut, then an exact seek
 
 
-def window(shot, t, want):
-    """(t0, t1): want seconds (MIN_S..MAX_S) inside the shot, around t, a few frames clear of its cuts."""
+def window(shot, t, want, peak=None):
+    """(t0, t1): want seconds (MIN_S..MAX_S) inside the shot, around t, a few frames clear of its cuts. peak (the time
+    of the shot's most moving span, footage.motion): the window sits on it, keeping t inside it."""
     a, b = shot[0] + 0.12, shot[1] - 0.12
     want = min(max(want, MIN_S), MAX_S, max(b - a, 0.2))
     t0 = min(max(t - want / 2, a), max(a, b - want))
+    if peak is not None:
+        p0 = min(max(float(peak) - want / 2, a), max(a, b - want))
+        lo, hi = t - want + 0.05, t - 0.05                # the window still holds t, the frame the look checked
+        p0 = min(max(p0, lo), hi) if lo <= hi else p0
+        t0 = min(max(p0, a), max(a, b - want))
     return round(t0, 3), round(t0 + want, 3)
 
 

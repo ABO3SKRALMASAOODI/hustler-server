@@ -184,3 +184,27 @@ def test_a_scored_film_is_the_film_and_the_clean_one_sits_beside_it(tmp_path):
     assert chain.wants_music(ctx) and not chain.wants_music(sh_mod.Ctx(str(tmp_path / "run3"), dict(run_id="r3", workflow="wf3", args=dict(music=False)), str(tmp_path / "state")))
     assert not chain.wants_music(sh_mod.Ctx(str(tmp_path / "run4"), dict(run_id="r4", workflow="selftest"), str(tmp_path / "state")))
 
+
+
+def test_footage_passes_the_engines_opt_in_flags_only_when_given(tmp_path, monkeypatch):
+    """Round 2 (valmera-stories): strict lines, motion first, round-robin allocation and lost-cut reassignment reach
+    footage.run only when a caller asks; without them the command is exactly as before."""
+    import types
+    import chain
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append(cmd)
+        out = cmd[cmd.index("--out") + 1]
+        open(os.path.join(out, "footage.json"), "w").write("{}")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(chain.subprocess, "run", run)
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    for d in ("run", "sup", "tmp"):
+        (tmp_path / d).mkdir()
+    ctx = types.SimpleNamespace(supply=str(tmp_path / "sup"), run_dir=str(tmp_path / "run"), tmp=str(tmp_path / "tmp"), workflow="wf3", run_id="r",
+                                log=lambda m: None, log_raw=lambda m: None)
+    chain.footage(ctx, dict(script={}), out_name="a")
+    chain.footage(ctx, dict(script={}), out_name="b", strict_lines=True, motion_first=True, alloc="round", reassign_lost=True)
+    assert not any(f in seen[0] for f in ("--strict-lines", "--motion-first", "--alloc", "--reassign-lost"))
+    assert all(f in seen[1] for f in ("--strict-lines", "--motion-first", "--reassign-lost")) and seen[1][seen[1].index("--alloc") + 1] == "round"

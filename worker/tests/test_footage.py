@@ -409,3 +409,109 @@ def test_the_seam_passes_the_faster_pace_through(monkeypatch, tmp_path):
     monkeypatch.setattr(run, "find", fake_find)
     seam.for_lines([], [], "t", str(tmp_path), shot_s=0.45, line_max=10, per=5)
     assert seen["shot_s"] == 0.45 and seen["line_max"] == 10 and seen["per"] == 5
+
+
+# ----------------------------------------------------------------- round 2 (valmera-stories): opt-in strict lines, motion first, round robin
+
+def _good(src, t, lines, subject="A", grade=4):
+    return dict(source=src, t=t, lines=lines, subject=subject, grade=grade, ok=True, clean=True)
+
+
+def _src(key, shots_):
+    return dict(key=key, url=f"u{key}", shots=shots_)
+
+
+def test_assign_without_flags_is_todays_step_six():
+    from footage import run
+    src_of = {"s0": _src("s0", [(0.0, 3.0), (3.0, 6.0), (6.0, 9.0)]), "s1": _src("s1", [(0.0, 4.0)])}
+    good = [_good("s0", 1.5, [0]), _good("s0", 4.5, []), _good("s1", 2.0, [1]), _good("s0", 7.5, [1], subject="B")]
+    lines = [dict(i=0, say="a b c d", pictures=["A"], dur=2.0), dict(i=1, say="e f", pictures=["B"], dur=1.5)]
+    rows = run.assign(lines, good, src_of, {}, {})
+    assert [len(r["picks"]) for r in rows] == [1, 1] and rows[0]["picks"][0]["t"] == 1.5 and rows[1]["picks"][0]["source"] in ("s1", "s0")
+
+
+def test_strict_lines_never_fill_a_line_by_subject_alone():
+    from footage import run
+    src_of = {"s0": _src("s0", [(0.0, 3.0), (3.0, 6.0), (6.0, 9.0)])}
+    good = [_good("s0", 1.5, [0]), _good("s0", 4.5, []), _good("s0", 7.5, [2])]           # a frame of the subject named for no line
+    lines = [dict(i=1, say="x y z", pictures=["A"], dur=3.0)]
+    loose = run.assign(lines, good, src_of, {}, {})
+    strict = run.assign(lines, good, src_of, {}, {}, strict=True)
+    assert loose[0]["picks"] and strict[0]["picks"] == []
+
+
+def test_round_robin_gives_the_last_line_its_picks_from_a_shared_pool():
+    from footage import run
+    shots_ = [(k * 2.0, k * 2.0 + 2.0) for k in range(6)]
+    src_of = {"s0": _src("s0", shots_)}
+    good = [_good("s0", a + 1.0, [0, 1, 2]) for a, _ in shots_]
+    lines = [dict(i=i, say="w " * 10, pictures=["A"], dur=3.0) for i in range(3)]
+    seq = run.assign(lines, good, src_of, {}, {}, shot_s=0.45, line_max=4)
+    rr = run.assign(lines, good, src_of, {}, {}, shot_s=0.45, line_max=4, alloc="round")
+    assert len(seq[2]["picks"]) == 0 and len(seq[0]["picks"]) >= 4               # line by line: the first lines take the pool
+    assert [len(r["picks"]) for r in rr] == [2, 2, 2]                             # one a round: the pool is shared
+
+
+def test_motion_first_chooses_the_moving_shot_and_sits_on_its_peak(tmp_path):
+    import subprocess
+    from footage import motion, run
+    ff = os.environ.get("FOOTAGE_FFMPEG") or "/Users/masaoodi/Documents/Valmera/audit/subscriber-reliability-20260908/bin-arm/ffmpeg"
+    if not os.path.exists(ff):
+        import shutil
+        ff = shutil.which("ffmpeg")
+    if not ff:
+        import pytest
+        pytest.skip("no ffmpeg")
+    p = str(tmp_path / "src.mp4")
+    # 0-3 s one frozen frame (a still shot), 3-6 s a moving pattern
+    subprocess.run([ff, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:size=320x240:rate=15:duration=3", "-f", "lavfi", "-i",
+                    "testsrc2=size=320x240:rate=15:duration=3", "-filter_complex", "[0:v][1:v]concat=n=2:v=1[v]", "-map", "[v]", "-pix_fmt", "yuv420p", p],
+                   check=True)
+    os.environ["FOOTAGE_FFMPEG"] = ff
+    mo = motion.of_shots(p, [(0.0, 3.0), (3.0, 6.0)])
+    assert mo[(0.0, 3.0)]["p90"] < motion.FLOOR <= mo[(3.0, 6.0)]["p90"], mo
+    assert 3.0 <= mo[(3.0, 6.0)]["peak"] <= 6.0
+    src_of = {"s0": _src("s0", [(0.0, 3.0), (3.0, 6.0)])}
+    good = [_good("s0", 1.5, [0], grade=5), _good("s0", 3.6, [0], grade=3)]
+    lines = [dict(i=0, say="a b", pictures=["A"], dur=1.0)]
+    rows = run.assign(lines, good, src_of, {}, {}, motion_of={"s0": mo})
+    pick = rows[0]["picks"][0]
+    assert pick["t"] == 3.6 and pick["motion_p90"] >= motion.FLOOR                 # moving before a higher grade
+    assert pick["window"][0] <= 3.6 <= pick["window"][1]                         # the checked frame kept inside the window
+    peak = mo[(3.0, 6.0)]["peak"]
+    plain = cut.window((3.0, 6.0), 3.6, 1.0)
+    assert abs(sum(pick["window"]) / 2 - peak) <= abs(sum(plain) / 2 - peak) + 1e-6      # moved toward the motion peak
+
+
+def test_a_lost_cut_is_reassigned_to_another_source(monkeypatch, tmp_path):
+    """reassign_lost: a pick whose cut fails (a bot wall) marks its source dead; its line is assigned again over the frames
+    left and cut once more; footage.json records lost and replaced."""
+    from footage import fetch, run, shots as fshots, verify
+    monkeypatch.setenv("FOOTAGE_VOICES", "0")
+    monkeypatch.setattr(run.plan, "plan", lambda lines, named, about: (dict(subjects=[dict(name="A", kind="thing", must_show="A", searches=[dict(where="youtube", q="A")])],
+                                                                         lines=[dict(i=0, show="A", subjects=["A"])]), 0.0))
+    monkeypatch.setattr(run.search, "run", lambda qs: {0: [dict(id="h0", title="T0", url="u0", where="youtube", channel="c"),
+                                                           dict(id="h1", title="Other one", url="u1", where="youtube", channel="c")]})
+    monkeypatch.setattr(run.plan, "rank", lambda subjects, hits, per=3: ([(0, h, "w") for h in hits[0]], 0.0))
+    monkeypatch.setattr(run, "_open", lambda s, work, log, hear_s=None, read_s=None: dict(s, proxy=None, shots=[(0.0, 4.0), (4.0, 8.0), (8.0, 12.0), (12.0, 16.0)], transcript=[]))
+    monkeypatch.setattr(run.look, "moments", lambda sub, need, local: ([], 0.0))
+    monkeypatch.setattr(fshots, "frames", lambda proxy, times, d: {t: f"{d}/{t}.jpg" for t in times})
+    monkeypatch.setattr(run.look, "check", lambda sub, need, cands, local, work: ([dict(c, ok=True, clean=True, grade=4 if c["source"] == "s0" else 3,
+                                                                                           lines=[0], shows="A") for c in cands], 0.0))
+    monkeypatch.setattr(fetch, "streams", lambda url: None)
+
+    def source(s, stream, t0, t1, raw, whole=None, downloaded_only=False):
+        if s["key"] == "s0":
+            raise RuntimeError("bot wall")
+        open(raw, "wb").write(b"x")
+        return raw, "stream"
+    monkeypatch.setattr(run.cut, "source", source)
+    monkeypatch.setattr(run.cut, "measure", lambda raw: dict(y=0.5))
+    monkeypatch.setattr(run.cut, "target", lambda stats: dict(y=0.5))
+    monkeypatch.setattr(run.cut, "eq_for", lambda st, tgt: {})
+    monkeypatch.setattr(run.cut, "finish", lambda raw, out, W, H, x, eq, trim=None, preserve_source=False: open(out, "wb").write(b"c"))
+    monkeypatch.setattr(verify, "clip", lambda path, sub, dur: (dict(ok=True), 0.0))
+    lines = [dict(i=0, say="one two three four", pictures=["A"], dur=1.4)]
+    res = run.find(lines, [dict(name="A", **{"is": "thing"})], "t", str(tmp_path / "out"), shot_s=0.45, line_max=4, reassign_lost=True, keep_work=False)
+    ln = res["lines"][0]
+    assert ln["lost"] >= 1 and ln["replaced"] >= 1 and ln["clips"] and all(c["source"]["url"] == "u1" for c in ln["clips"])

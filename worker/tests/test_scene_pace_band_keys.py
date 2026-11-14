@@ -42,3 +42,20 @@ def test_the_keys_punch_the_first_framing_and_ease_short_ones():
             cw0 = it["_crop"][2] - it["_crop"][0]
             cw1 = to["crop"][2] - to["crop"][0]
             assert 0.03 <= cw0 / cw1 - 1 <= 0.095
+
+
+def test_a_move_budget_holds_the_rolling_ten_seconds():
+    """Round 2: band "moves_per_10s" (the references' 4.3) lets a punch, an eased move or a whip land only while the rolling
+    10 s count is under it; without the key the output is exactly today's."""
+    shots, stress = _shots(n=60, length=15)
+    band = {"punch_first": True, "ease_min_s": 0.4}
+    _, log0 = pace.drive([dict(s) for s in shots], stress, FPS, (W, H), "story", seed=4, band=band)
+    items, log = pace.drive([dict(s) for s in shots], stress, FPS, (W, H), "story", seed=4, band=dict(band, moves_per_10s=4.3))
+    moves = [m["f"][0] for m in log["moves"] if m.get("settle") or m.get("to")]
+    moves += [it["f"][0] for it in items if it.get("shutter") == pace.WHIP_SHUTTER and it["f"][0] > 0]
+    assert moves
+    end = max(it["f"][1] for it in items)
+    worst = max(sum(1 for m in moves if a <= m < a + 10 * FPS) for a in range(0, int(end), 5))
+    assert worst <= 7 and log["punches"] + log["eased"] < log0["punches"] + log0["eased"]
+    a, la = pace.drive([dict(s) for s in shots], stress, FPS, (W, H), "story", seed=4, band=band)
+    assert la == log0                                     # without the key: exactly today's

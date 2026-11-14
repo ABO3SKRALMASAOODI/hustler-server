@@ -768,11 +768,17 @@ def pin_voices(timeline, voices):
 
 # ----------------------------------------------------------------- captions that ink word by word; display words
 
-def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z=0, max_chars=22, max_words=4, late=2, script=None):
+def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z=0, max_chars=22, max_words=4, late=2, script=None, ink_lag_s=None):
     """Captions at one seat for the whole film (TASTE P1), the way the reference stories set them: a line is laid out
     centred as it will stand, and each word is inked on its own spoken word, where it will stay; the line leaves at
     once when the next begins. `hold`: [(f0, f1)] when a display word has the seat and the caption yields to it.
-    `script` with phrase spans (writer.annotate): its lines, broken only at a real pause (Clock.phrases_of)."""
+    `script` with phrase spans (writer.annotate): its lines, broken only at a real pause (Clock.phrases_of).
+    `ink_lag_s` (a story reel cut by its verdicts): every word, the first included, inks that long after its voice
+    (round(ink_lag_s x FPS) frames: the judge's captions follow the voice), not a frame before it; the lag of each word is
+    kept in P.cap_lags. Absent, the timing is as before."""
+    lag = int(round(float(ink_lag_s) * FPS)) if ink_lag_s is not None else None
+    if not hasattr(P, "cap_lags"):
+        P.cap_lags = []
     ph = clock.phrases_of(script) if script is not None else None
     if ph:
         # a phrase wider than the seat (the platform's rail on the right) is split at its middle word, never set narrower
@@ -789,9 +795,9 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
     ph = ph or clock.phrases(max_chars=max_chars, max_words=max_words)
     n_lines = 0
     for i, (t0, t1, text, ws) in enumerate(ph):
-        a, b = Clock.f(t0) - 1, Clock.f(t1)
+        a, b = (Clock.f(t0) - 1, Clock.f(t1)) if lag is None else (Clock.f(t0) + lag, Clock.f(t1) + lag)
         if i + 1 < len(ph):
-            b = min(b, Clock.f(ph[i + 1][0]) - 1)       # one line at a time, never two on the seat
+            b = min(b, Clock.f(ph[i + 1][0]) + (lag if lag is not None else 0) - 1)       # one line at a time, never two on the seat
         if f_end is not None:
             b = min(b, f_end)
         if any(s0 <= a < s1 for s0, s1 in skip):
@@ -815,9 +821,13 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
         toks = [t for _, t in pairs]
         previous_on = -1
         for j, (w, token) in enumerate(pairs):
-            on = max(Clock.f(w["t0"]) + late, first, previous_on + 1, 0) if j else max(first, 0)
+            if lag is not None:
+                on = max(Clock.f(w["t0"]) + lag, first, previous_on + 1, 0)
+            else:
+                on = max(Clock.f(w["t0"]) + late, first, previous_on + 1, 0) if j else max(first, 0)
             if on >= b - 1:
                 continue
+            P.cap_lags.append(on - Clock.f(w["t0"]))
             x = x_left + (P.R.width(v, " ".join(toks[:j]) + " x") - P.R.width(v, "x")) / W if j else x_left
             P.word([on, b], token, v, x, y, ink, 1.0, note=False, z=z, role="cap", stroke=dict(w=1.6, c="#0B0A09"))
             previous_on = on
@@ -826,13 +836,18 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
 
 
 def display_words(P, clock, script, v, y, f_end, skip_text=(), ink="#FFFFFF", accent="#F2C14E", gap_s=2.2, hold_s=1.15, max_w=0.70, px_max=190,
-                  dropped=None, roles_skip=(), figure_hold_s=1.7):
+                  dropped=None, roles_skip=(), figure_hold_s=1.7, anchored_only=False, cap_floor_px=None, wide_w=0.86, high_y=0.40):
     """The writer's display strings as large type on the caption seat, each landing on the word that says it (blur
     10 to 0, a rise of 0.03 h, a hair of overshoot, 9 frames: bake.BOUNCE): figures in the accent, names in ink.
     A string the film already prints elsewhere is left out (TASTE P7: say it once); two never come closer than gap_s.
     An item anchored to its spoken word (writer.annotate's word_i) lands on that word, no spelling matched; a figure
     holds figure_hold_s and is never kept back by the gap. `dropped`: a list that receives every item not placed, with
-    why; `roles_skip`: roles the caller sets itself (a name super). Returns [(f0, f1, text)]."""
+    why; `roles_skip`: roles the caller sets itself (a name super). Returns [(f0, f1, text)].
+    A story reel cut by its verdicts passes anchored_only (an item lands on its word_i or not at all, never found by
+    spelling) and cap_floor_px: a figure, or an item the writer split into {big, small}, sets its large part alone at a
+    cap height of at least cap_floor_px (the judge's 0.1 ruler: 108 px at 1080), fitted to at most wide_w of the width,
+    raised to high_y when it is wider than the seat allows beside the platform's rail; the small part sits under it at
+    0.4 of its size with the same landing."""
     _, _, bake = _engines()
     out, last, placed = [], -10 ** 6, []
     for i, s in enumerate(script["segments"]):
@@ -852,6 +867,8 @@ def display_words(P, clock, script, v, y, f_end, skip_text=(), ink="#FFFFFF", ac
             wi = item.get("word_i")
             if isinstance(wi, int) and not isinstance(wi, bool) and 0 <= wi < len(ws):
                 hit = (ws[wi]["t0"], 1)
+            elif anchored_only:
+                hit = None
             else:
                 hit = said_at(clock, i, text)
                 if hit is None and word:
@@ -873,16 +890,36 @@ def display_words(P, clock, script, v, y, f_end, skip_text=(), ink="#FFFFFF", ac
                 continue
             vk = f"{v}{a}"
             P.voices[vk] = dict(P.voices[v])
-            P.voices[vk]["px"] = P.R.fit_px(vk, text, max_w * W, px_max * (1.15 if fig else 1.0))
+            big = str(item.get("big") or "").strip() if cap_floor_px else ""
+            big = big if big and big in text else ""
+            shown = big or text
+            P.voices[vk]["px"] = P.R.fit_px(vk, shown, max_w * W, px_max * (1.15 if fig else 1.0))
+            y_at = y
+            if cap_floor_px and (fig or big):
+                ratio = P.R.cap(vk) / max(float(P.voices[vk]["px"]), 1e-6)
+                floor = math.ceil(float(cap_floor_px) / max(ratio, 1e-6))
+                if P.voices[vk]["px"] < floor:
+                    wide = P.R.fit_px(vk, shown, wide_w * W, 10 ** 4)
+                    P.voices[vk]["px"] = float(min(floor, wide))
+                    if P.R.width(vk, shown) > max_w * W:
+                        y_at = high_y              # wider than the seat beside the rail: set higher, clear of it
             n = b - a
             k = min(int(bake.BOUNCE["n"]), n)
             rise = bake.bounce(k, rest=0.0)
-            ys = [r4(y + float(q)) for q in rise] + [r4(y)] * (n - k)
+            ys = [r4(y_at + float(q)) for q in rise] + [r4(y_at)] * (n - k)
             bl = [round(float(q), 3) for q in bake.bounce_blur(k)] + [0.0] * (n - k)
             ops = [min(1.0, (q + 1) / 2) for q in range(n)]
-            num = fig or any(ch.isdigit() for ch in text)
-            placed.append(P.word([a, b], text, vk, 0.5, ys, accent if num else ink, ops, align="c", z=3, blur=bl, role="big",
+            num = fig or any(ch.isdigit() for ch in shown)
+            placed.append(P.word([a, b], shown, vk, 0.5, ys, accent if num else ink, ops, align="c", z=3, blur=bl, role="big",
                                  stroke=dict(w=3.0, c="#0B0A09")))
+            small = str(item.get("small") or "").strip() if big else ""
+            if small:
+                vs = f"{v}s{a}"
+                P.voices[vs] = dict(P.voices[v])
+                P.voices[vs]["px"] = float(max(int(0.4 * P.voices[vk]["px"]), 38))
+                dy = (P.R.cap(vs) * 1.9) / H
+                P.word([a, b], small, vs, 0.5, [r4(float(q) + dy) for q in ys], ink, ops, align="c", z=3, blur=bl, role="big",
+                       stroke=dict(w=2.0, c="#0B0A09"))
             P.events.append(a)
             out.append((a, b, text))
             last = a
@@ -2236,7 +2273,7 @@ def taste_check(l1, beats):
     """TASTE.md on the plan, as numbers: added type inside the safe area at rest and off the mark, at or above the
     reading floor, at most three type systems at once, every sound on an event, sounds within the supply's allowance."""
     R = Ruler(l1["voices"])
-    bad = []
+    bad, bad_ids = [], set()
     poster = bool(beats.get("poster"))
     words = [i for i in l1["items"] if i["k"] == "word"]
     for it in words:
@@ -2252,12 +2289,16 @@ def taste_check(l1, beats):
             continue
         if x < SAFE[0] - 2e-3 or x1 > SAFE[2] + 2e-3 or y0 < SAFE[1] - 2e-3 or y > SAFE[3] + 2e-3:
             bad.append(f"{it['id']} '{it['t'][:20]}': outside the safe area ({x:.3f},{y0:.3f})-({x1:.3f},{y:.3f})")
+            bad_ids.add(it['id'])
         if y > 0.55 and x1 > RAIL_X + 2e-3:
             bad.append(f"{it['id']} '{it['t'][:20]}': under the platform's right rail (x1 {x1:.3f})")
+            bad_ids.add(it['id'])
         if x < MARK[2] and x1 > MARK[0] and y0 < MARK[3] and y > MARK[1]:
             bad.append(f"{it['id']} '{it['t'][:20]}': in the watermark's keep-out")
+            bad_ids.add(it['id'])
         if float(v["px"]) * s < 38 - 1e-6:
             bad.append(f"{it['id']} '{it['t'][:20]}': {float(v['px']) * s:.0f} px is under the reading floor")
+            bad_ids.add(it['id'])
     fams = {}
     for f in range(0, l1["dur_f"], 5):
         fs = {l1["voices"][i["v"]]["font"].split("-")[0] for i in words if i["f"][0] <= f < i["f"][1]}
@@ -2283,5 +2324,8 @@ def taste_check(l1, beats):
         allow = max(allow, int(eng))
     if n_s > allow:
         bad.append(f"{n_s} sounds where the supply ({np10:.1f} new pictures a 10 s) allows {allow}")
+    bad_words = sorted(bad_ids)
+    bad_sounds = sorted({s["id"] for s in l1.get("sound") or [] if s.get("layer") not in ("lead", "riser")
+                         and (not events or min(abs(s["event_f"] - e) for e in events) > 3)})
     return dict(ok=not bad, problems=bad[:20], words=len(words), sounds=n_s, sounds_allowed=allow, new_pictures_10s=round(np10, 2),
-                sounds_per_10s=round(n_s / secs * 10, 2))
+                sounds_per_10s=round(n_s / secs * 10, 2), bad_words=bad_words, bad_sounds=bad_sounds, too_many_sounds=n_s > allow)

@@ -99,7 +99,9 @@ def _record(c, got, name):
 
 
 def pictures(named, out, per=4, min_px=700):
-    """{name: [picture records]} for every named subject, best first, and a report per subject."""
+    """{name: [picture records]} for every named subject, best first, and a report per subject. A subject may carry "key"
+    (the name its pictures gather under, when several searches look for one thing) and "search_for" (the line it was
+    searched for, kept in its report)."""
     B = _worker()
     os.makedirs(out, exist_ok=True)
 
@@ -134,14 +136,18 @@ def pictures(named, out, per=4, min_px=700):
             recs.append(_record(c, got, subj["name"]))
         rep = {k: v for k, v in rep.items() if k in ("subject", "candidates", "kept", "say", "errors", "usd")}
         rep["downloaded"] = len(recs)
+        if subj.get("search_for"):
+            rep["search_for"] = subj["search_for"]
         if fails:
             rep["download_errors"] = fails[:6]
-        return subj["name"], recs, rep
+        return subj.get("key") or subj["name"], recs, rep
 
     res, reports, usd = {}, [], 0.0
     with ThreadPoolExecutor(max_workers=2) as pool:
         for name, recs, rep in pool.map(one, named):
-            res[name] = recs
+            have = {r["path"] for r in res.get(name) or []}
+            # several searches for one thing (one per line's moment, writer.annotate's see.search) gather under its name
+            res.setdefault(name, []).extend(r for r in recs if r["path"] not in have)
             reports.append(rep)
             usd += float(rep.get("usd") or 0)
     return res, reports, round(usd, 4)

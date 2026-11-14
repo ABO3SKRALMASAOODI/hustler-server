@@ -350,7 +350,7 @@ def test_annotate_fills_fields_and_keeps_say_byte_identical():
     assert len(calls) == 1 and rep["ok"], rep["problems"]
     assert [s["say"] for s in out["segments"]] == [s["say"] for s in sc["segments"]]
     assert all(s["see"] for s in out["segments"]) and out["colour_turn"] == 2
-    assert out["segments"][2]["see"] == [dict(thing="Toy Story", as_of="1995 release", must_show="the film", moment=None)]   # not-named dropped
+    assert out["segments"][2]["see"] == [dict(thing="Toy Story", as_of="1995 release", must_show="the film", moment=None, search=None)]   # not-named dropped
     assert out["segments"][0]["show"] == [dict(text="nearly", role="key", word_i=1)]
     assert out["segments"][1]["show"][0]["word_i"] == 0 and out["segments"][1]["show"][0]["role"] == "name"     # an added name item
     assert out["segments"][0]["phrases"] == [[0, 3], [3, 5]]
@@ -400,3 +400,64 @@ def test_device_budget_keeps_best_ranked_within_a_quarter():
 def test_shown_strings_read_the_text_of_dict_items():
     sc = dict(segments=[dict(say="x", show=[dict(text="$5 million", role="figure", word_i=12)])])
     assert writer.shown_strings(sc) == ["$5 million"]
+
+
+# ----------------------------------------------------------------- round 2: the type lands on its word, large, after the voice
+
+def _type_setup(wi=2, text="$362M", big=None, small=None, role="figure"):
+    script = dict(segments=[dict(say="It made three hundred sixty two million dollars in the end.", beat="payoff",
+                                 show=[dict(text=text, role=role, **({"word_i": wi} if wi is not None else {}), **({"big": big, "small": small} if big else {}))])])
+    words = []
+    t = 0.2
+    for w in script["segments"][0]["say"].split():
+        words.append(dict(w=w, start=round(t, 3), end=round(t + 0.25, 3), seg=0))
+        t += 0.3
+    clock = F.Clock(dict(words=words, duration=round(t + 0.5, 2)), script)
+    voices = {"cap": {"font": "InterDisplay-Bold.ttf", "px": 56, "track": 0}, "dsp": {"font": "InterDisplay-Black.ttf", "px": 150, "track": -2}}
+    return script, clock, F.Plan(voices, {})
+
+
+def test_a_show_item_lands_by_word_i_whatever_its_spelling():
+    script, clock, P = _type_setup(wi=2, text="$362M")
+    shown = F.display_words(P, clock, script, "dsp", 0.627, F.Clock.f(clock.dur), anchored_only=True, cap_floor_px=108)
+    ws = clock.seg_words(0)
+    assert len(shown) == 1 and shown[0][0] == max(F.Clock.f(ws[2]["t0"]) - 1, 1)
+
+
+def test_without_word_i_an_anchored_item_is_not_placed_by_spelling():
+    script, clock, P = _type_setup(wi=None, text="million")
+    dropped = []
+    shown = F.display_words(P, clock, script, "dsp", 0.627, F.Clock.f(clock.dur), anchored_only=True, dropped=dropped)
+    assert shown == [] and dropped and dropped[0]["why"] == "not found in the words"
+
+
+def test_a_figure_stands_108_px_tall_at_1080():
+    script, clock, P = _type_setup(wi=2, text="$362M box office", big="$362M", small="box office, 1995")
+    shown = F.display_words(P, clock, script, "dsp", 0.627, F.Clock.f(clock.dur), anchored_only=True, cap_floor_px=108, px_max=60)
+    big = [it for it in P.items if it["k"] == "word" and it["t"] == "$362M"]
+    assert len(shown) == 1 and len(big) == 1
+    assert P.R.cap(big[0]["v"]) >= 108 - 1e-6
+    assert big[0]["f"][1] - big[0]["f"][0] >= int(1.5 * F.FPS)
+    assert any(it["t"] == "box office, 1995" for it in P.items if it["k"] == "word")
+
+
+def test_wf3_anchors_ok_raises_on_a_missing_word_i():
+    import pytest
+    import wf3 as W3
+    W3.anchors_ok(dict(segments=[dict(say="a b c", show=[dict(text="A", role="name", word_i=0)])]))
+    with pytest.raises(RuntimeError):
+        W3.anchors_ok(dict(segments=[dict(say="a b c", show=[dict(text="$5", role="figure")])]))
+
+
+def test_captions_ink_after_the_voice_only_with_the_lag():
+    script, clock, P = _type_setup()
+    script["segments"][0]["phrases"] = [[0, 4], [4, 8], [8, 11]]
+    F.caption_build(P, clock, "cap", 0.615, script=script, ink_lag_s=0.15)
+    ws = clock.seg_words(0)
+    caps = sorted((it for it in P.items if it["k"] == "word" and it.get("role") == "cap"), key=lambda it: it["f"][0])
+    assert caps and caps[0]["f"][0] - F.Clock.f(ws[0]["t0"]) >= 4
+    assert all(lag >= 4 for lag in P.cap_lags)
+    _, clock2, P2 = _type_setup()
+    F.caption_build(P2, clock2, "cap", 0.615)
+    caps2 = sorted((it for it in P2.items if it["k"] == "word" and it.get("role") == "cap"), key=lambda it: it["f"][0])
+    assert caps2[0]["f"][0] == F.Clock.f(ws[0]["t0"]) - 1          # unchanged outside fit mode

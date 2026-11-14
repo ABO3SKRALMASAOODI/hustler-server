@@ -269,6 +269,15 @@ def drive(shots, stress, fps=30.0, frame=(1080, 1920), family="story", seed=0, b
     s_at = dict(stress)
     items, log = [], {"changes": [], "moves": [], "whips": 0, "matches": 0, "eased": 0, "punches": 0}
     prev = None                      # the framing on screen before this one: dict(pic, name, crop, face)
+    # band "moves_per_10s" (a caller holding the references' move rate, e.g. 4.3): a punch, an eased move or a whip is
+    # placed only while the rolling 10 s count before it is under that budget. Absent: no budget, exactly as before.
+    budget = B.get("moves_per_10s")
+    moved = []
+
+    def room(f):
+        if budget is None:
+            return True
+        return sum(1 for g in moved if f - 10 * fps < g <= f) < float(budget)
     n_shots = len(shots)
     for si, sh in enumerate(shots):
         a, b = int(sh["f"][0]), int(sh["f"][1])
@@ -342,10 +351,12 @@ def drive(shots, stress, fps=30.0, frame=(1080, 1920), family="story", seed=0, b
                 # a drift across: toward the side with room, at the references' pan (0.019 frame widths a second, 0.049 at p75)
                 pan = (bake.PAN_RATE[2 if n < fps else 1] * (1 if lr[1] > lr[0] else -1), 0.0)
             kw["drift"] = dict(rate=rate, dir=1 if d_in else -1, pan=pan)
-            if (k > 0 or B.get("punch_first")) and st >= 0.6 and n >= int(0.4 * fps):
+            if (k > 0 or B.get("punch_first")) and st >= 0.6 and n >= int(0.4 * fps) and room(f0):
                 # a cut-in on a stressed word lands a little past its size and settles
                 kw["settle"] = dict(size=bake.CAM_SETTLE["size"] * (0.6 + 0.6 * st), dir=1)
                 log["punches"] += 1
+                if budget is not None:
+                    moved.append(f0)
             # the strongest word inside a long framing: an eased move in, on the measured curve
             # (band "ease_min_s": a family that cuts faster eases short framings too, a 4-9% move; "punch_first": the
             # settle may land on a picture's first framing when its word is stressed. Absent: 1.1 s and k > 0, as before.)
@@ -353,7 +364,7 @@ def drive(shots, stress, fps=30.0, frame=(1080, 1920), family="story", seed=0, b
             if n >= int(float(B.get("ease_min_s", 1.1)) * fps) and not tight:
                 m0, m1 = (int(0.1 * fps), int(0.1 * fps)) if short else (int(0.35 * fps), int(0.45 * fps))
                 inner = [(s, f) for f, s in stress if f0 + m0 <= f <= f1 - m1 and s >= B["ease"]]
-                if inner:
+                if inner and room(max(inner)[1]):
                     s_, f_ = max(inner)
                     if short:
                         size = 0.04 + 0.05 * rng.random()                                                 # 4 to 9% on a short framing
@@ -368,6 +379,8 @@ def drive(shots, stress, fps=30.0, frame=(1080, 1920), family="story", seed=0, b
                     kw["drift"] = dict(kw["drift"], rate=kw["drift"]["rate"] * 0.5)
                     log["eased"] += 1
                     log["changes"].append(f_)
+                    if budget is not None:
+                        moved.append(f_)
             it = {"id": sh["id"] if k == 0 else f"{sh['id']}.{k}", "k": "shot", "f": [f0, f1], "pic": sh["pic"]}
             it.update(sh.get("keep") or {})
             if sh.get("src"):
@@ -399,6 +412,8 @@ def drive(shots, stress, fps=30.0, frame=(1080, 1920), family="story", seed=0, b
         if any(abs(i - j) < 3 for j in [last]):
             continue
         p, q = items[i - 1], items[i]
+        if budget is not None and not room(q["f"][0]):
+            continue
         rp, rq = motion.room(p["_cam"], p["_crop"]), motion.room(q["_cam"], q["_crop"])
         # the pan runs one way through the cut: the outgoing picture needs room ahead, the incoming one behind
         best = max(((min(rp[1], rq[0]), 0.0), (min(rp[0], rq[1]), math.pi), (min(rp[3], rq[2]), math.pi / 2), (min(rp[2], rq[3]), -math.pi / 2)))
@@ -413,6 +428,8 @@ def drive(shots, stress, fps=30.0, frame=(1080, 1920), family="story", seed=0, b
         log["whips"] += 1
         want -= 1
         last = i
+        if budget is not None:
+            moved.append(q["f"][0])
     for it in items:
         if "_cam" not in it:
             continue

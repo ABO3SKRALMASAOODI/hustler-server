@@ -286,7 +286,7 @@ def test_fit_build_compiles_passes_taste_and_prints_keep_moving(tmp_path):
     sc["segments"][2]["show"] = [dict(text="Ada Lovelace", role="name", word_i=0)]
     for s in sc["segments"]:
         s["phrases"] = [[0, 4], [4, 9], [9, 14]]
-    pics, footage = _fit_supply(n_clips=4)
+    pics, footage = _fit_supply(n_clips=10)
     for lst in footage.values():
         for c in lst:
             c.update(w=1920, h=1080) if c["path"].endswith("_1.mp4") else None
@@ -307,8 +307,14 @@ def test_fit_build_compiles_passes_taste_and_prints_keep_moving(tmp_path):
     prints = [it for it in l1["items"] if it["k"] == "card" and isinstance(it.get("s"), list) and isinstance(it.get("x"), list)]
     assert prints
     for it in prints:
-        tail = it["s"][8:]
-        assert len(tail) < 2 or all(b > a for a, b in zip(tail, tail[1:]))      # never flat after landing
+        tail = it["s"]
+        assert len(tail) < 2 or all(b < a for a, b in zip(tail, tail[1:]))      # never flat: it settles, then keeps drifting
+    own = [p for p in beats["pictures"] if p["mode"] == "print"]
+    for it, p in zip(sorted(prints, key=lambda q: q["f"][0]), sorted(own, key=lambda q: q["f"][0])):
+        n = p["f"][1] - p["f"][0]
+        if n >= 6:
+            third = it["s"][max(n // 3, 1)]
+            assert (it["s"][0] - third) / it["s"][0] >= 0.08 - 1e-9          # a decelerating move of 8% and more in its first third
     figs = [it for it in l1["items"] if it["k"] == "word" and "5 MILLION" in it["t"]]
     assert len(figs) == 1 and figs[0]["f"][1] - figs[0]["f"][0] >= int(1.2 * F.FPS)      # said once: as display type or as a card
 
@@ -338,4 +344,190 @@ def test_a_build_without_fit_cuts_as_before(tmp_path):
     sp = R.Supply(pics, footage)
     tl = R.cut_story(sc, clock, sp, F.Clock.f(clock.dur) + 15, R.F.voice_stress(sup), aim_s=R.STYLES["reel"]["aim_s"])
     assert sorted((p["f"][0], p["path"]) for p in beats["pictures"]) == sorted((r[0], r[4]["path"]) for r in tl)
-    assert beats.get("display_dropped") is None and "repeat_share" not in beats["measured"]
+    assert beats.get("display_dropped") is None and "repeat_share" in beats["measured"]          # a measure on every cut (WF2's too)
+    assert beats["measured"]["cutter"]["name"] == "cut_story"
+
+
+# ----------------------------------------------------------------- round 2: planned assignment, own-line fill, motion, colour, pace
+
+def _cut(sc, pics, footage, fit, cards=None, stress=(), seed=1114, devices=()):
+    clock = F.Clock(_words(sc), sc)
+    sp = R.Supply(pics, footage, fit=fit, cards=cards)
+    tl = R.cut_fit(sc, clock, sp, F.Clock.f(clock.dur) + 15, stress=list(stress), seed=seed, device_lines=devices)
+    seg_f = [F.Clock.f(clock.segs[i][0]) if i else 0 for i in range(len(sc["segments"]))]
+    return tl, sp, seg_f
+
+
+def test_a_line_with_no_fitting_picture_gets_only_its_own_cards_and_reframes():
+    sc = _fit_script(n=3, words=14)
+    sc["segments"][1]["show"] = [dict(text="$5 million", role="figure", word_i=2)]
+    pics, footage = _fit_supply(n_clips=4)
+    fit = {c["path"]: ({i} if i != 1 else set()) for i, lst in footage.items() for c in lst}       # nothing fits line 1
+    tl, sp, seg_f = _cut(sc, {}, {i: footage[i] for i in range(3)}, fit, cards={1: [dict(text="$5 million", role="figure")]})
+    on1 = [r for r in tl if r[4].get("pick_line") == 1]
+    assert on1 and all(r[2] == "designed" for r in on1)                 # no clip of line 0 carried over, no stretched hold
+    assert on1[0][4]["text"] == "$5 million"
+    assert sp.shortfall.get(1, 0) > 0
+    for a, b in zip(tl, tl[1:]):
+        assert a[1] == b[0]                                              # no gap, no stretch
+    for r in tl:
+        line = max(i for i in range(len(seg_f)) if seg_f[i] <= r[0])
+        assert r[4]["pick_line"] == line                                 # every frame shows a picture picked for the line under it
+
+
+def test_an_early_line_never_spends_a_later_lines_reserved_take():
+    sc = _fit_script(n=3, words=10)
+    pics, footage = _fit_supply(n_clips=2)
+    shared = footage[2][0]
+    fit = {c["path"]: {i} for i, lst in footage.items() for c in lst}
+    fit[shared["path"]] = {0, 2}                                         # fits line 0 too, but line 2 has only two takes
+    tl, sp, _ = _cut(sc, {}, {i: footage[i] for i in range(3)}, fit)
+    used = [r for r in tl if r[2] == "clip" and r[4]["path"] == shared["path"]]
+    assert used and all(r[4]["pick_line"] == 2 for r in used)
+
+
+def test_no_shot_is_two_seconds_or_more():
+    sc = _fit_script(n=6, words=20)
+    for s in sc["segments"]:
+        s["pace"] = "slow"
+        s["beat"] = "low"
+    pics, footage = _fit_supply(n_clips=1)
+    fit = {c["path"]: {i} for i, lst in footage.items() for c in lst}
+    tl, sp, _ = _cut(sc, pics, footage, fit)
+    assert max(r[1] - r[0] for r in tl) < 2 * F.FPS
+
+
+def test_the_designed_card_off_a_device_line_is_colourful_and_driven(tmp_path):
+    sc = _fit_script(n=2, words=24)
+    sc["segments"][1]["show"] = [dict(text="$5 million", role="figure", word_i=3)]
+    for s in sc["segments"]:
+        s["phrases"] = [[0, 5], [5, 10], [10, 15], [15, 20], [20, 24]]
+    pics, footage = _fit_supply(n_clips=1)
+    _files(tmp_path, footage, pics)
+    fit = {footage[0][0]["path"]: [0], footage[1][0]["path"]: [1]}
+    sup = dict(sid="t", words=_words(sc), narration=str(tmp_path / "none.wav"), ffmpeg="ffmpeg", pictures={}, sounds={},
+               footage=[dict(i=i, clips=v) for i, v in footage.items() if i < 2], fit=fit, fit_verdicts={}, work=str(tmp_path / "fin"))
+    l1, beats = R.build(sc, sup, "reel", {"require_fit": True})
+    des = [p for p in beats["pictures"] if p["kind"] == "designed"]
+    assert des
+    for p in des:
+        plate = next(it for it in l1["items"] if it.get("pic") == "plate" and it["f"][0] == p["f"][0])
+        h = plate["plate"]["c0"].lstrip("#")
+        r_, g_, b_ = (int(h[k:k + 2], 16) for k in (0, 2, 4))
+        assert 0.3 * ((r_ - g_) ** 2 + (0.5 * (r_ + g_) - b_) ** 2) ** 0.5 >= 20          # a colourful plate, not a void
+        w = [it for it in l1["items"] if it["k"] == "word" and it.get("role") == "big" and it["f"][0] == p["f"][0]]
+        assert w and isinstance(w[0].get("s"), list) and (w[0]["s"][-1] - w[0]["s"][0]) / w[0]["s"][0] >= 0.08
+    assert all(p.get("tier") for p in beats["pictures"] if p["kind"] in ("clip", "photo", "designed"))     # every base shot has a tier
+
+
+def test_require_fit_never_falls_back_to_cut_story(tmp_path):
+    import pytest
+    sc = _script()
+    pics, footage = _supply()
+    _files(tmp_path, footage, pics)
+    sup = dict(sid="t", words=_words(sc), narration=str(tmp_path / "none.wav"), ffmpeg="ffmpeg", pictures=pics, sounds={},
+               footage=[dict(i=i, clips=v) for i, v in footage.items()], work=str(tmp_path / "fin"))
+    with pytest.raises(RuntimeError):
+        R.build(sc, sup, "reel", {"require_fit": True})
+
+
+def test_motion_of_the_plan_has_no_static_shot(tmp_path):
+    sc = _fit_script(n=4, words=14)
+    sc["segments"][1]["collage"] = True
+    sc["segments"][3]["show"] = [dict(text="$5 million", role="figure", word_i=2)]
+    pics, footage = _fit_supply(n_clips=6)
+    for c in footage[2]:
+        c.update(w=1920, h=1080, motion=dict(p90=0.1, curve=[0.1] * 24))       # still landscape takes: windows over a ground
+    _files(tmp_path, footage, pics)
+    fit = {c["path"]: [i] for i, lst in footage.items() for c in lst}
+    fit.update({r["path"]: [1] for lst in pics.values() for r in lst})
+    sup = dict(sid="t", words=_words(sc), narration=str(tmp_path / "none.wav"), ffmpeg="ffmpeg", pictures=pics, sounds={},
+               footage=[dict(i=i, clips=v) for i, v in footage.items() if i < 4], fit=fit, fit_verdicts={}, work=str(tmp_path / "fin"))
+    l1, beats = R.build(sc, sup, "reel", {"require_fit": True})
+    m = beats["measured"]
+    modes = {p["mode"] for p in beats["pictures"]}
+    assert "print" in modes and "window" in modes
+    assert m["static_shots"] == 0, m["static_list"]
+    grounds = [it for it in l1["items"] if it.get("k") == "shot" and it.get("blur") == R.GROUND_BLUR_FIT]
+    assert grounds and all(isinstance(it.get("crop"), list) and isinstance(it["crop"][0], list) for it in grounds)    # driven
+    assert m["collage_lines"] == [1]
+
+
+def test_grey_takes_count_against_the_black_and_white_budget(tmp_path):
+    sc = _fit_script(n=6, words=14)
+    sc["colour_turn"] = 4
+    for i, fin in ((0, "bw"), (2, "gate"), (3, "bw")):
+        sc["segments"][i].update(finish=fin, finish_rank=i + 1)
+    pics, footage = _fit_supply(n_clips=8)
+    for c in footage[1]:
+        c["take_chroma"] = [3.0]                                       # line 1 is grey by nature
+    _files(tmp_path, footage, pics)
+    fit = {c["path"]: [i] for i, lst in footage.items() for c in lst}
+    sup = dict(sid="t", words=_words(sc), narration=str(tmp_path / "none.wav"), ffmpeg="ffmpeg", pictures={}, sounds={},
+               footage=[dict(i=i, clips=v) for i, v in footage.items()], fit=fit, fit_verdicts={}, work=str(tmp_path / "fin"))
+    l1, beats = R.build(sc, sup, "reel", {"require_fit": True})
+    m = beats["measured"]
+    assert m["intrinsic_grey_share"] > 0
+    base = [p for p in beats["pictures"] if p["kind"] in ("clip", "photo", "designed")]
+    secs = beats["voice_f"][1]
+    bw_f = sum(p["f"][1] - p["f"][0] for p in base if p.get("finish") in ("mono", "gate") or (p.get("chroma") is not None and p["chroma"] < 8))
+    assert bw_f / secs <= 0.25 + 0.02
+    assert sum(p["f"][1] - p["f"][0] for p in base if p["mode"] == "print") / secs <= 0.10
+
+
+def _df043a_like(n=17, wps=2.6, ratio=1.3, seed=7):
+    import random
+    rng = random.Random(seed)
+    segs = []
+    for i in range(n):
+        k = rng.randint(8, 16)
+        segs.append(dict(say=" ".join(f"w{i}x{j}" for j in range(k)), beat=["hook", "setup", "turn", "low", "payoff", "close"][min(i // 3, 5)],
+                         see=[dict(thing="Alpha", as_of="x", must_show="x")], list=(i in (2, 7))))
+    sc = dict(title="t", segments=segs)
+    words = _words(sc, wps=wps)
+    clock = F.Clock(words, sc)
+    f_end = F.Clock.f(clock.dur) + 15
+    demand = R.shot_demand(sc, clock, f_end)
+    footage, fit = {}, {}
+    for i in range(n):
+        lst = []
+        for k in range(int(round(ratio * demand[i])) + 1):
+            p = f"/x/d{i}_{k}.mp4"
+            lst.append(dict(path=p, seconds=1.6, subject="Alpha", w=1080, h=1920, motion=dict(p90=2.0, curve=[2.0] * 24)))
+            fit[p] = {i}
+        footage[i] = lst
+    stress = [(F.Clock.f(w["t0"]), rng.random()) for w in clock.words]
+    return sc, clock, f_end, footage, fit, stress
+
+
+def test_the_cut_keeps_the_judges_pace_on_a_df043a_shaped_supply():
+    sc, clock, f_end, footage, fit, stress = _df043a_like()
+    sp = R.Supply({}, footage, fit=fit)
+    tl = R.cut_fit(sc, clock, sp, f_end, stress)
+    secs = F.Clock.f(clock.dur) / F.FPS
+    lens = sorted(r[1] - r[0] for r in tl)
+    cuts10 = len(tl) / secs * 10
+    med = lens[len(lens) // 2] / F.FPS
+    short = sum(1 for x in lens if x <= 2) / len(lens)
+    assert 16 <= cuts10 <= 19, cuts10
+    assert 0.45 <= med <= 0.52, med
+    assert sum(1 for r in tl if r[4].get("burst")) == 0 or len({r[4]["pick_line"] for r in tl if r[4].get("burst")}) <= 2
+    assert 0.06 <= short <= 0.10, short
+    assert not sp.shortfall
+
+
+def test_type_measures_read_the_figures_cap_height(tmp_path):
+    import wf3 as W3
+    sc = _fit_script(n=3, words=14)
+    sc["segments"][2]["show"] = [dict(text="$5 million", role="figure", word_i=2)]
+    for s in sc["segments"]:
+        s["phrases"] = [[0, 4], [4, 9], [9, 14]]
+    pics, footage = _fit_supply(n_clips=8)
+    _files(tmp_path, footage, pics)
+    fit = {c["path"]: [i] for i, lst in footage.items() for c in lst}
+    sup = dict(sid="t", words=_words(sc), narration=str(tmp_path / "none.wav"), ffmpeg="ffmpeg", pictures={}, sounds={},
+               footage=[dict(i=i, clips=v) for i, v in footage.items() if i < 3], fit=fit, fit_verdicts={}, work=str(tmp_path / "fin"))
+    l1, beats = R.build(sc, sup, "reel", {"require_fit": True})
+    tm = W3.type_measures(l1, beats, sc)
+    assert tm["figures_planned"] == 1 and tm["figures"][0]["cap_px"] >= 108 and tm["figures"][0]["held_s"] >= 1.5
+    assert tm["caption_lag_median_s"] is not None and 0.11 <= tm["caption_lag_median_s"] <= 0.20

@@ -721,26 +721,39 @@ NOTCH = (3.0, 0.8, 9.5, 0.15)      # a story's accent: -3 dB over 0.8 s, then 9.
 def _story_joints(t, joints, e, P, notes):
     """dB per frame (negative) for a narrated story's joints (marks["joints"], only a story's scene carries them): at
     each the bed leaves from the last word before it and comes back on the next section's first word (0.5-2.3 s,
-    12-20 dB); from the close's first word it stays down; under each real voice it dips. Without joints: nothing."""
+    12-20 dB); from the close's first word it stays down; under each real voice it dips. Without joints: nothing.
+    Optional per joint (absent, every caller gets exactly the defaults): "db" (the hole's or the dip's depth),
+    "bed_db" (a close's dry bed), and the kind "swell" {t, rise_s, db}: the bed rises db (8-12) over rise_s (2-3 s)
+    into t and settles back in 0.3 s."""
     out = np.zeros(len(t))
     for j in joints:
         kind = str(j.get("kind") or "turn")
+        if kind == "swell":
+            x, rise = float(j["t"]), float(j.get("rise_s") or 2.5)
+            amt = float(j.get("db") or 10.0)
+            if x < 0.5 or x > e - 0.3:
+                continue
+            out += amt * np.clip(np.minimum((t - (x - rise)) / rise, (x + 0.3 - t) / 0.3), 0.0, 1.0)
+            notes.setdefault("swells", []).append({"t": round(x, 3), "rise_s": round(rise, 2), "db": amt})
+            continue
         if kind == "voice":
             a, b = float(j["t0"]), float(j["t1"])
-            out -= VOICE_DIP_DB * np.clip(np.minimum((t - (a - 0.08)) / 0.08, (b + 0.1 - t) / 0.12), 0.0, 1.0)
-            notes.setdefault("voice_dips", []).append({"t": round(a, 3), "len_s": round(b - a, 3), "db": VOICE_DIP_DB})
+            vdb = float(j.get("db") or VOICE_DIP_DB)
+            out -= vdb * np.clip(np.minimum((t - (a - 0.08)) / 0.08, (b + 0.1 - t) / 0.12), 0.0, 1.0)
+            notes.setdefault("voice_dips", []).append({"t": round(a, 3), "len_s": round(b - a, 3), "db": vdb})
             continue
         b = float(j["next_first_word_t"])
         a = float(j.get("last_word_t") if j.get("last_word_t") is not None else b - JOINT_HOLE_S[0])
         a = min(max(a, b - JOINT_HOLE_S[1]), b - JOINT_HOLE_S[0])
         if b >= e - 0.2 or a < 0.3:
             continue
-        db = float(JOINT_DB.get(kind, 16.0))
+        db = float(j.get("db") or JOINT_DB.get(kind, 16.0))
         out -= db * np.clip(np.minimum((t - a) / P["hole_in_s"], (b - t) / 0.03), 0.0, 1.0)
         notes["holes"].append({"t": round(a, 3), "len_s": round(b - a, 3), "db": db, "before": kind})
         if kind == "close":
-            out -= CLOSE_BED_DB * np.clip(np.minimum((t - b) / 0.05, (e - 0.3 - t) / 0.3), 0.0, 1.0)
-            notes["close_bed_db"] = -CLOSE_BED_DB
+            bed = float(j.get("bed_db") or CLOSE_BED_DB)
+            out -= bed * np.clip(np.minimum((t - b) / 0.05, (e - 0.3 - t) / 0.3), 0.0, 1.0)
+            notes["close_bed_db"] = -bed
     return out
 
 
