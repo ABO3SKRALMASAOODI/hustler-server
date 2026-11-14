@@ -60,7 +60,8 @@ def test_lower_type_seat_moves_a_face_up_and_never_partly_down_into_it():
     assert shot['crop']==[.2,.1,.8,.9]
 
 
-def test_window_fallback_alternates_full_source_views_on_the_same_voice_clock(tmp_path,monkeypatch):
+@pytest.mark.parametrize("style", ["window", "archive-reel", "footage-cut", "prints"])
+def test_long_speaker_fallback_alternates_full_source_views_on_the_same_voice_clock(tmp_path,monkeypatch,style):
     words='Every new discovery changes how we understand ourselves and our place in the world'.split()
     script=dict(title='Our Place',segments=[dict(say=' '.join(words),pictures=[])])
     wj=dict(duration=5.5,words=[dict(w=w,start=.1+i*.34,end=.4+i*.34,seg=0) for i,w in enumerate(words)])
@@ -68,7 +69,7 @@ def test_window_fallback_alternates_full_source_views_on_the_same_voice_clock(tm
              take=dict(path='/take.mp4',w=1920,h=1080,fps=30,dur=5.5,faces=[]))
     monkeypatch.setattr(film.F,'voice_stress',lambda sup:[])
     monkeypatch.setattr(film.F,'engines_finish',lambda l1,*a,**k:l1)
-    l1,beats=film.build(script,sup,'window')
+    l1,beats=film.build(script,sup,style)
     cards=[i for i in l1['items'] if i['k']=='card' and i['pic']=='main']
     assert len(cards)>=3 and beats['pictures']==[]
     for card in cards:

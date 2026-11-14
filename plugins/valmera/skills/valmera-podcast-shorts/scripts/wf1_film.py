@@ -311,7 +311,9 @@ def build(script, sup, style_id, direction=None):
         # The driver may have only two valid framings; a later phrase may return
         # to the wider shot while the source sound and time stay continuous.
         pace, _, _ = F._engines()
-        phrase_band = (0.55, 0.85) if st["layout"] == "window" else (0.75, 1.15)
+        phrase_band = (0.55, 0.85)
+        # Caption entrances are not picture edits. Keep the speaker phrasing
+        # independent of where the face-safe caption seat ends up.
         phrase = pace.splits(a, b, stress, int(phrase_band[0] * FPS), int(phrase_band[1] * FPS))
         edges = sorted({a, b, *phrase, *[c for c in tcuts if a + 3 <= c <= b - 3]})
         for fa, fb in zip(edges, edges[1:]):
@@ -320,9 +322,9 @@ def build(script, sup, style_id, direction=None):
             t0 = max(fa - LEAD_F, 0) / FPS
             t1 = min(max(fb - LEAD_F, 1) / FPS, float(take["dur"]))
             src = [round(t0, 4), round(max(t1, t0 + 1 / FPS), 4)]
-            if st["layout"] == "window" and take_phrase % 2:
-                # A window film needs a genuinely wider view between its close
-                # framings. Small face-safe crop jumps can be visually identical
+            if (st["layout"] == "window" or b-a > 3*FPS) and take_phrase % 2:
+                # A long speaker-only passage needs a genuinely wider view
+                # between close framings. Small face-safe crop jumps can be visually identical
                 # after the camera move; preserve the source's complete frame.
                 P.shot([fa, fb], tkeys[k], F.cover_crop(take["w"], take["h"], W/H,
                        (.5,.45),(.5,.4)), src=src, blur=26, grade=dict(DIM))

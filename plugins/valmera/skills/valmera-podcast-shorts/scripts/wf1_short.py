@@ -423,34 +423,60 @@ def render(ctx, script, sc):
             rd["picture_review"] = history
             rd["spend"] = [dict(stage="render", what="composed picture-to-words check", **u) for h in history for u in h.get("spend", [])]
             return rd
-        pics = sc["beats"].get("pictures") or []
-        # Every failed pass permanently removes at least one source asset.
-        # The fixed supply makes this finite; keep independently approved
-        # pictures instead of discarding the whole montage after three passes.
-        doomed = [pics[r["id"]] for r in report["placements"] if not r["ok"]]
-        dropped = [os.path.basename(p["path"]) for p in doomed]
-        rejected_path = os.path.join(ctx.supply, "render_rejected.json")
-        previous = json.load(open(rejected_path)) if os.path.exists(rejected_path) else []
-        if not set(dropped) - set(previous):
-            raise RuntimeError("composed picture repair made no progress; no film may be delivered")
-        json.dump(sorted(set(previous+dropped)), open(rejected_path, "w"), indent=1)
-        ctx.log(f"composed picture check: rebuilding without {len(dropped)} rejected placements")
-        old_spend = sc.get("spend", [])
-        rebuilt = score(ctx, script)
-        rebuilt["spend"] = old_spend + [u for u in rebuilt.get("spend", []) if u.get("what") == "picture-to-words check"]
-        sc.clear()
-        sc.update(rebuilt)
-        json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
-        # These are this run's cached renders of the old plan, before delivery.
-        for name in ("film_engine.mp4", "film_engine.mp4.log.json", "sound.m4a"):
-            p = os.path.join(ctx.supply, name)
-            if os.path.exists(p):
-                os.remove(p)
+        _rebuild_rejected(ctx, script, sc, report)
+
+
+def _rebuild_rejected(ctx, script, sc, report):
+    """Monotonic repair shared by the engine and exact delivery-frame gates."""
+    pics = sc["beats"].get("pictures") or []
+    # Every failed pass permanently removes at least one source asset.
+    # The fixed supply makes this finite; keep independently approved
+    # pictures instead of discarding the whole montage after three passes.
+    doomed = [pics[r["id"]] for r in report["placements"] if not r["ok"]]
+    dropped = [os.path.basename(p["path"]) for p in doomed]
+    rejected_path = os.path.join(ctx.supply, "render_rejected.json")
+    previous = json.load(open(rejected_path)) if os.path.exists(rejected_path) else []
+    if not set(dropped) - set(previous):
+        raise RuntimeError("composed picture repair made no progress; no film may be delivered")
+    json.dump(sorted(set(previous+dropped)), open(rejected_path, "w"), indent=1)
+    ctx.log(f"composed picture check: rebuilding without {len(dropped)} rejected placements")
+    old_spend = sc.get("spend", [])
+    rebuilt = score(ctx, script)
+    rebuilt["spend"] = old_spend + [u for u in rebuilt.get("spend", []) if u.get("what") == "picture-to-words check"]
+    sc.clear()
+    sc.update(rebuilt)
+    json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
+    # These are this run's cached renders of the old plan, before delivery.
+    for name in ("film_engine.mp4", "film_engine.mp4.log.json", "sound.m4a",
+                 "film_engine_music.mp4", "music.json"):
+        p = os.path.join(ctx.supply, name)
+        if os.path.exists(p):
+            os.remove(p)
+    for name in ("final.mp4", "final_music.mp4", "final_song.mp4"):
+        path = os.path.join(ctx.run_dir, name)
+        if os.path.exists(path):
+            os.remove(path)
 
 
 
 def check(ctx, rd, sc):
-    r = wf3.check(ctx, rd, sc)
+    while True:
+        r = wf3.check(ctx, rd, sc)
+        final = r.get("final_music") or r["final"]
+        report = _render_review(ctx, dict(film=final), sc)
+        history_path = os.path.join(ctx.supply, "delivery_reviews.json")
+        history = json.load(open(history_path)) if os.path.exists(history_path) else []
+        history.append(report)
+        json.dump(history, open(history_path, "w"), indent=1)
+        if not report["rejected"]:
+            sc["beats"]["delivered_check"] = report
+            json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
+            break
+        script = json.load(open(os.path.join(ctx.run_dir, "script.json")))
+        _rebuild_rejected(ctx, script, sc, report)
+        fresh = render(ctx, script, sc)
+        rd.clear()
+        rd.update(fresh)
     b = sc.get("beats") or {}
     pics = b.get("pictures") or []
     secs = max(float(sc.get("frames") or 1) / F.FPS, 1.0)
@@ -459,6 +485,7 @@ def check(ctx, rd, sc):
         pictures=len(pics), clips=len([p for p in pics if p.get("kind") == "clip"]), photographs=len([p for p in pics if p.get("kind") == "photo"]),
         new_pictures_10s=round(len(pics) / secs * 10, 2), display_words=[x.get("text") for x in b.get("display") or []],
         placement_check=b.get("placement_check"), rendered_check=b.get("rendered_check"), render_reviews=rd.get("picture_review"),
+        delivered_check=b.get("delivered_check"), delivery_reviews=history,
         sources=[dict(f=p.get("f"), visible_f=p.get("visible_f"), kind=p.get("kind"), name=p.get("name"), source=p.get("source"), time_range=p.get("time_range")) for p in pics])
     r["checks"]["ok"] = bool(r["checks"].get("ok") and not (b.get("rendered_check") or {}).get("rejected"))
     return r

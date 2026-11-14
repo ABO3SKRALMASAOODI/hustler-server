@@ -68,3 +68,29 @@ def test_later_repairs_keep_the_picture_that_passed_every_review(tmp_path,monkey
     assert len(result['picture_review'])==5
     assert sc['beats']['pictures']==[dict(path='/supply/good.jpg')]
     assert 'good.jpg' not in json.load(open(tmp_path/'render_rejected.json'))
+
+
+def test_delivery_only_rejection_invalidates_brand_and_music_and_rebuilds(tmp_path,monkeypatch):
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda x:None)
+    (tmp_path/'script.json').write_text('{}')
+    sc=dict(frames=90,beats=dict(pictures=[dict(path='/supply/bad.jpg')]),spend=[])
+    rd=dict(film='engine.mp4');checks=[]
+    def finish(ctx,rd,sc):
+        if checks:
+            assert not (tmp_path/'final_music.mp4').exists()
+            assert not (tmp_path/'music.json').exists()
+        for name in ('final.mp4','final_music.mp4','music.json'):(tmp_path/name).write_text('old')
+        checks.append(1)
+        return dict(final='clean.mp4',final_music='branded.mp4',checks=dict(ok=True))
+    def review(ctx,rd,sc):
+        assert rd['film']=='branded.mp4'
+        bad=len(checks)==1
+        return dict(rejected=int(bad),placements=[dict(id=0,ok=not bad)] if bad else [],spend=[])
+    monkeypatch.setattr(wf.wf3,'check',finish)
+    monkeypatch.setattr(wf,'_render_review',review)
+    monkeypatch.setattr(wf,'score',lambda *a:dict(frames=90,beats=dict(pictures=[]),spend=[]))
+    monkeypatch.setattr(wf,'render',lambda *a:dict(film='new-engine.mp4'))
+    result=wf.check(ctx,rd,sc)
+    assert len(checks)==2 and result['checks']['ok']
+    assert result['checks']['podcast']['delivered_check']['rejected']==0
+    assert json.load(open(tmp_path/'render_rejected.json'))==['bad.jpg']
