@@ -539,15 +539,17 @@ def _render_review(ctx, rd, sc):
     clock = F.Clock(pack["words"], script)
     l1 = json.load(open(sc["l1"]))
     display = [it for it in l1["items"] if it.get("k") == "word" and it.get("role") == "big"]
+    captions = [it for it in l1["items"] if it.get("k") == "word" and it.get("role") == "cap"]
     rows = []
     for p in sc["beats"].get("pictures") or []:
         a, b = p.get("visible_f") or p["f"]
         words = [dict(f=it["f"], text=it["t"]) for it in display if it["f"][0] < b and it["f"][1] > a]
+        caption_words = [dict(f=it["f"], text=it["t"]) for it in captions if it["f"][0] < b and it["f"][1] > a]
         frames = {a, (a+b)//2, max(a,b-1)}
         for word in words:
             frames.update(f for edge in word["f"] for f in (edge-1,edge,edge+1) if a <= f < b)
         rows.append([a, b, "clip", p["name"], dict(path=rd["film"], src=[a/F.FPS,b/F.FPS],
-                    check_times=[f/F.FPS for f in sorted(frames)], composed_fps=F.FPS, display_words=words,
+                    check_times=[f/F.FPS for f in sorted(frames)], composed_fps=F.FPS, display_words=words, caption_words=caption_words,
                     illustration=p.get('illustration'),
                     source=p.get('source_evidence') or dict(url=p.get("source")))])
     _, report = placement_check(rows, script, clock, os.path.join(ctx.supply, "render-review"), pack["ffmpeg"])

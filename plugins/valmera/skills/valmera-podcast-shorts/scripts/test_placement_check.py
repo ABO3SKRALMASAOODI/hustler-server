@@ -60,3 +60,26 @@ def test_composed_frame_evidence_preserves_phone_resolution_and_half_open_cut(tm
     assert all(Image.open(io.BytesIO(x)).size==(720,1280) for x in frames)
     assert float(commands[-1][commands[-1].index('-ss')+1])<59/30
     assert float(commands[0][commands[0].index('-ss')+1])==0
+
+
+def test_caption_context_is_separate_from_display_claim_and_rechecked_on_change(tmp_path,monkeypatch):
+    import json
+    import placement_check as pc
+    path=tmp_path/'film.mp4';path.write_bytes(b'fixture')
+    monkeypatch.setattr(pc,'evidence',lambda *a:b'pixels')
+    class Clock:
+        words=[dict(w='the',t0=0,t1=.3),dict(w='Sun',t0=.3,t1=1)]
+        segs=[(0,1)]
+    calls=[]
+    def call(system,content,**kwargs):
+        calls.append(json.loads(content[0]['text']))
+        return json.dumps({'placements':[dict(id=0,ok=False,reason='fixture review')]}),{}
+    rec=dict(path=str(path),src=[.3,1],caption_words=[dict(f=[0,30],text='the')],display_words=[dict(f=[9,30],text='SUN')])
+    args=([[9,30,'clip','Sun',rec]],dict(segments=[dict(say='the Sun')]),Clock(),str(tmp_path),'unused')
+    pc.check(*args,call=call,review='transition');pc.check(*args,call=call,review='transition')
+    rec['caption_words']=[dict(f=[0,30],text='Earth')]
+    pc.check(*args,call=call,review='transition')
+    assert len(calls)==2
+    assert calls[0]['caption_words'][0]['text']=='the'
+    assert calls[1]['caption_words'][0]['text']=='Earth'
+    assert calls[0]['display_words']==calls[1]['display_words']
