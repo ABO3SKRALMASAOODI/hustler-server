@@ -39,6 +39,16 @@ def test_background_refinement_changes_sidecar_key_only_for_composites():
     assert 'refine' not in old
     assert new['refine'] == matte_refine.VERSION
     assert len(new['support_model']) == 64
+    assert new['source_quality'] == 'original'
+    assert new['max_side'] >= 640
+    assert new['warmup_s'] >= 4
+
+
+def test_compositing_reads_original_detail_without_changing_other_matte_inputs():
+    original = {'storage_key': 'original.mov', 'width': 720, 'height': 1280}
+    proxy = {'storage_key': 'proxy.mp4', 'width': 304, 'height': 540}
+    assert matte_track.analysis_asset({'fx': [{'type': 'background'}]}, original, proxy) is original
+    assert matte_track.analysis_asset({'fx': [{'type': 'subject'}]}, original, proxy) is proxy
 
 
 def test_body_fill_cannot_promote_an_outboard_background_fragment():
