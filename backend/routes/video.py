@@ -249,7 +249,9 @@ def _image_api_key():
 # concierge told a Pro customer "Yes, I can generate genuinely moving clips
 # from your photos" and the editor then had to retract it. Keep in lockstep
 # with that list (backend/tests/test_concierge_retired_generation.py).
-_RETIRED_GENERATION_TOOLS = frozenset(("generate_video", "generate_image"))
+# Configured video animation was restored with validated reference transport;
+# its availability remains conditional on the same provider gate as the worker.
+_RETIRED_GENERATION_TOOLS = frozenset(("generate_image",))
 
 
 def _image_gen_enabled():
@@ -499,8 +501,9 @@ def _concierge_reply(stage, history, attachments, index_error=None,
     if _image_gen_enabled():
         gen_now.append("generate images from a text description")
     if _video_gen_enabled():
-        gen_now.append("generate short video clips from a description, or "
-                       "animate a still image into a moving clip")
+        gen_now.append("animate a still image into a moving clip using the uploaded reference; "
+                       "this makes NEW animation, not the original video's motion with a "
+                       "character retouched. Inspect the generated result before promising fidelity")
     if _sfx_search_enabled():
         gen_now.append("find real recorded sound effects on the web — "
                        "whooshes, camera shutters, clicks — and place them")
@@ -667,9 +670,9 @@ def _concierge_reply(stage, history, attachments, index_error=None,
                "(direct file links and YouTube/TikTok/Vimeo/SoundCloud pages) "
                "and put it straight into the edit"
                if _url_fetch_enabled() else "")
-            + (", and generate short AI video clips from a text description "
-               "(or animate a still image into a moving clip) that splice "
-               "into the edit"
+            + (", and generate short AI video clips by animating an uploaded still image. "
+               "This is NEW animation, not original-motion character replacement. A checked "
+               "clip can replace the picture over existing speech without extending the edit"
                if _video_gen_enabled() else "")
             + ((", and generate images with AI from a text description"
                 + (", or by restyling a frame of their video or an uploaded "
