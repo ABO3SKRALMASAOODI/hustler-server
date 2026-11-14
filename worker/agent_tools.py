@@ -10674,6 +10674,11 @@ def _auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
         return ("REJECTED: mode must be 'auto' (measure the footage and "
                 "choose), 'crop' (fill the frame, cutting the sides), 'pad' "
                 "or 'pad_blur' (fit the WHOLE picture into the new frame).")
+    from score import source_guard
+    index = getattr(ctx, "index", None) or {}
+    if index.get("_first_film_source_guard") and source_guard.missing_shot_boxes(
+            index, ctx.latest_edl()["json"].get("keep") or [[0, ctx.duration]]):
+        return set_frame(ctx, ratio, "pad_blur", _measured=True)
     # A call composited over a broadcast frame (source_layout.py) is framed
     # from its measured layout, not from a face and the detail around it:
     # that read the Diamandis call as a wide shot and fitted it (Oct 2026).
