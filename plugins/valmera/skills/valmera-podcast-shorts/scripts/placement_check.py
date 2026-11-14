@@ -13,7 +13,7 @@ import os
 import subprocess
 
 MODEL = "gpt-6-sol"
-CONTRACT = 4
+CONTRACT = 5
 
 
 def words_under(clock, a, b, fps=30):
@@ -95,7 +95,9 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement"):
               "filename or a search title. Each strip is one proposed picture, at its actual spoken words. "
               "All supplied frames must fit. Reject wrong identity, event, era, place, company or object; a "
               "generic meeting is not evidence of a named company's team; an unrelated person must never stand "
-              "for a named one. A clear conceptual illustration is allowed only if it cannot imply a false fact. "
+              "for a named one. Never identify or compare faces. A named person needs readable on-screen attribution "
+              "unambiguously attached to that person in every sampled frame; otherwise reject. "
+              "A clear conceptual illustration is allowed only if it cannot imply a false fact. "
               "Reject illegible screenshots and incidental people or objects unrelated to the clause. "
               "Visible faces must remain whole: reject a frame cutting through a forehead, eyes, mouth or chin, "
               "or leaving the subject outside the picture. "

@@ -28,6 +28,13 @@ def test_research_budget_reaches_later_subjects_before_repeating_first():
     assert max(sum(row[0]==s for row in opened) for s in range(6)) <= 3
 
 
+def test_documentary_context_reaches_frame_checker_not_only_search_planner():
+    from footage.look import _listing,has_brief
+    lines=[dict(i=2,say='At Stanford in 2005',visual='Campus illustrates the setting, not a recording of this conversation.')]
+    assert lines[0]['visual'] in _listing(lines)
+    assert has_brief(lines)
+
+
 def test_research_clauses_join_only_identical_director_subjects():
     rows = [dict(name=n,first=i,last=i,t0=i,t1=i+1,say=str(i),must_show=n)
             for i,n in enumerate(['Google','Google','Facebook','Google'])]

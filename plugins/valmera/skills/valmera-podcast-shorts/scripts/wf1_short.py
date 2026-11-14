@@ -48,6 +48,8 @@ import shell  # noqa: E402
 import wf1_film  # noqa: E402
 import wf3  # noqa: E402
 
+RESEARCH_CONTRACT = 2  # contextual placement verification replaces context-free shelf admission
+
 
 def _llm():
     """The shell's llm.py under a name of its own: the worker has an `llm` module too, and its picture check must
@@ -150,17 +152,26 @@ def supply(ctx, script):
     import wf1_coverage
     coverage = wf1_coverage.plan(words, script.get('title'), sup_dir, _llm())
     windows = coverage['windows']
+    # Inventory records what was said; windows specify what can truthfully be photographed.
+    # Passing the inventory back as search subjects resurrects unnamed people and isolated dates.
+    research = {}
+    for window in windows:
+        research.setdefault(window['name'],[]).append(window['must_show'])
     fscript = dict(title=f"{script.get('title')}. A podcast clip; the speaker is on camera already, so show what he talks about, as it was then, "
                          f"never him as he looks today. Who is in it: {who}",
                    segments=[dict(say=s['say'], pictures=[s['name']], visual=s['must_show']) for s in windows],
-                   named=[dict(name=r["name"], must_show=r.get("must_show") or r["name"], **{"is": r.get("is") or "thing"}) for r in coverage['entities']])
+                   named=[dict(name=name,must_show=' '.join(requirements),**{'is':'thing'}) for name,requirements in research.items()])
     footage_name = f'footage-v{wf1_coverage.CONTRACT}'
     wf3.given_footage(ctx, os.path.join(sup_dir, footage_name))
     fw, fh = style["footage"]
+    # This workflow uses the engine's contextual-check route, as WF3 does. Every SELECTED
+    # cut gets entry/mid/exit checks against its actual words in wf1_film, then composed
+    # and branded transition checks. The generic shelf verifier has no placement context
+    # and incorrectly requires a montage's entire brief inside each individual 1 s shot.
     foot = chain.footage(ctx, dict(script=fscript), [round(float(s["t1"]) - float(s["t0"]), 2) for s in windows],
                          W=fw, H=fh, preserve_source=True, shot_s=1.15, line_max=20, per=5,
                          strict_lines=True, motion_first=True, alloc="round", reassign_lost=True,
-                         whole_first=True, keep_sources=True, out_name=footage_name)
+                         verify=False, whole_first=True, keep_sources=True, out_name=footage_name)
     if foot:
         n_yt, n_bad = refused(foot)
         ctx.log(f"footage sources: {n_yt} on YouTube, {n_bad} refused or archive-only; {foot['counts'].get('clips')} clips on "
@@ -361,10 +372,11 @@ def refill(ctx, script, pack, shortage):
     coverage = pack['coverage']
     windows = coverage['windows']
     wanted = shortage['weak_windows'] or list(range(len(windows)))
-    count = int(pack.get('coverage_repairs',0))+1
+    previous = pack.get('coverage_repairs',0) if pack.get('research_contract')==RESEARCH_CONTRACT else 0
+    count = int(previous)+1
     if count > 3:
         raise RuntimeError('documentary coverage still incomplete after three distinct research passes')
-    name = f"footage-v{coverage['contract']}-repair{count}"
+    name = f"footage-v{coverage['contract']}-context{RESEARCH_CONTRACT}-repair{count}"
     prior = [os.path.join(ctx.supply,n,'footage.json') for n in os.listdir(ctx.supply)
              if n.startswith('footage') and os.path.isfile(os.path.join(ctx.supply,n,'footage.json'))]
     subjects = {windows[i]['name']:windows[i]['must_show'] for i in wanted}
@@ -376,7 +388,7 @@ def refill(ctx, script, pack, shortage):
     foot = chain.footage(ctx,dict(script=fscript),[w['t1']-w['t0'] for w in windows],W=fw,H=fh,
                          preserve_source=True,shot_s=1.15,line_max=20,per=4,lines=wanted,avoid=prior,
                          strict_lines=True,motion_first=True,alloc='round',reassign_lost=True,
-                         whole_first=True,keep_sources=True,out_name=name)
+                         verify=False,whole_first=True,keep_sources=True,out_name=name)
     if not foot:
         raise RuntimeError('supplementary documentary research returned no record')
     by = {int(row['i']):row for row in pack['footage']}
@@ -388,6 +400,7 @@ def refill(ctx, script, pack, shortage):
     pack['credits'] += [dict(kind='footage',name=c['title'],title=c['title'],licence="footage, not licensed (the owner's decision)",
                             credit=c['channel'],page=c['url'],time_range=c['time_range'],line=c['line']) for c in foot['credits']]
     pack['coverage_repairs'] = count
+    pack['research_contract'] = RESEARCH_CONTRACT
     path = os.path.join(ctx.supply,'pack.json')
     stored = json.load(open(path));stored['pack']=pack
     with open(path,'w') as f:json.dump(stored,f,indent=1)
