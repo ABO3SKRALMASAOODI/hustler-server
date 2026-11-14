@@ -149,3 +149,32 @@ def test_global_director_hold_is_preserved(monkeypatch):
     monkeypatch.setattr(film, "_make", lambda *a: pytest.fail("Director is held"))
     assert typed.run(None, None, {}, 9, {"director": True}) == {
         "fell": "the Director is off (app_kv.director)"}
+
+
+def test_story_selector_reads_the_end_of_a_long_class_and_keeps_every_requested_option(monkeypatch):
+    import quality_verifier
+    ctx = NS(duration=7320, index={"sentences": [
+        {"t0": 0, "t1": 30, "text": "Opening context"},
+        {"t0": 7100, "t1": 7190, "text": "Late class complete payoff"}]},
+        latest_edl=lambda: {"json": {"keep": [[0, 30]]}}, ask_ledger={"asks": []})
+    monkeypatch.setattr(quality_verifier, "request_text_for", lambda ctx: "Give me two calm, interesting clips")
+    def select(ctx, name, schema, system, content, **kw):
+        assert "Late class complete payoff" in content
+        assert "7100.0-7190.0" in content
+        assert "SHORT IS A MICRO-STORY" in system
+        return {"mode": "clips", "clips": [
+            {"start": 7100, "end": 7190, "title": "Late", "hook": "Late payoff"},
+            {"start": 200, "end": 290, "title": "Other", "hook": "Other story"}]}, {}
+    monkeypatch.setattr(asks, "_call", select)
+    clips, _ = typed._selection(ctx)
+    assert [c["start"] for c in clips] == [7100, 200]
+
+
+def test_a_bad_story_window_is_not_silently_shortened_into_a_clip(monkeypatch):
+    import quality_verifier
+    ctx = NS(duration=7320, index={}, latest_edl=lambda: {"json": {}}, ask_ledger={"asks": []})
+    monkeypatch.setattr(quality_verifier, "request_text_for", lambda ctx: "A complete clip")
+    monkeypatch.setattr(asks, "_call", lambda *a, **k: ({"mode": "clips", "clips": [
+        {"start": 7300, "end": 7400, "title": "bad", "hook": "bad"}]}, {}))
+    with pytest.raises(ValueError, match="outside the source"):
+        typed._selection(ctx)
