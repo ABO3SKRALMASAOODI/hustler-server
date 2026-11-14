@@ -160,8 +160,12 @@ def test_legacy_metadata_patch_failure_cannot_drop_preview_checks(job):
 
 
 @pytest.mark.parametrize('missing', ['picture', 'audio'])
+@pytest.mark.parametrize('marker', [
+    {'first_film_source_screen': {'status': 'verified'}},
+    {'first_film': True},
+])
 def test_first_film_retries_without_publishing_when_a_check_did_not_finish(
-        job, monkeypatch, missing):
+        job, monkeypatch, missing, marker):
     if missing == 'picture':
         monkeypatch.setattr(renderer, 'picture_qc', lambda *a, **k: None)
     else:
@@ -169,8 +173,14 @@ def test_first_film_retries_without_publishing_when_a_check_did_not_finish(
     # Canvas fixtures need no source boundary; the payload still identifies
     # the first-film publication contract.
     with pytest.raises(RuntimeError, match='Preview QC did not finish'):
-        job.run(first_film_source_screen={'status': 'verified'})
+        job.run(**marker)
     assert job.assets == [] and job.deleted
+
+
+def test_automatic_canvas_first_film_carries_the_qc_publication_contract():
+    ctx = SimpleNamespace(job={'id': 7, 'type': 'agent_turn',
+                               'payload': {'first_cut': True}})
+    assert first_cut.agent_tools._child_payload(ctx)['first_film'] is True
 
 
 class _Waiting:
