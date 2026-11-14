@@ -76,3 +76,18 @@ def test_window_fallback_alternates_full_source_views_on_the_same_voice_clock(tm
         assert card['w']*1080/(card['h']*1920)==pytest.approx(1920/1080,abs=.001)
         assert card['src'][0]==pytest.approx(max(card['f'][0]-3,0)/30,abs=.001)
         assert card['src'][1]-card['src'][0]==pytest.approx((card['f'][1]-card['f'][0])/30,abs=.001)
+
+
+def test_all_caption_phrases_share_one_face_safe_seat():
+    F=film.F
+    plan=F.Plan({'cap':dict(font='InterDisplay-Bold.ttf',px=58,track=0)}, {})
+    plan.word([0,15],'one','cap',.3,.615,'#fff',1,role='cap')
+    plan.word([5,15],'two','cap',.4,.615,'#fff',1,role='cap')
+    plan.word([15,30],'three','cap',.3,.615,'#fff',1,role='cap')
+    shot=dict(k='shot',pic='main',f=[0,30],crop=[0,0,1,1])
+    l1=dict(frame=[1080,1920],voices=plan.voices,items=[shot]+plan.items)
+    result=seat_display(l1,{'main':dict(faces=[[.2,.3,.5,.4,.4]])},plan.R)
+    assert result['overlaps']==0
+    assert len({i['y'] for i in plan.items})==1
+    assert .73<plan.items[0]['y']<.80
+    assert caption_restarts(l1)==[]

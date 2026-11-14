@@ -60,7 +60,9 @@ def seat_display(l1, meta, ruler, _retry=0):
              and not (isinstance(i.get('blur'),(int,float)) and i['blur'] >= 20)]
     groups=collections.defaultdict(list)
     for i in l1['items']:
-        if i['k']=='word' and i.get('role')=='big':
+        if i['k']=='word' and i.get('role')=='cap':
+            groups['captions'].append(i)
+        elif i['k']=='word' and i.get('role')=='big':
             groups['title' if i['v'].startswith('dsp_t') else ('display',i.get('on',i['f'][0]),i['t'])].append(i)
     logs=[]
     for key, items in groups.items():

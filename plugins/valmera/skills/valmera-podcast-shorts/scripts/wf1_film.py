@@ -585,6 +585,14 @@ def build(script, sup, style_id, direction=None):
             rec = next((r for rows in list(pics.values()) + list(footage.values()) for r in rows if r["path"] == path), {})
             meta[key] = dict(faces=F.face_meta(rec))
     title_layout = seat_display(l1, meta, P.R)
+    caps = [i for i in l1["items"] if i["k"] == "word" and i.get("role") == "cap"]
+    if caps:
+        shift = float(caps[0]["y"]) - cap_y
+        for i in l1["items"]:
+            if i["k"] == "flash" and i.get("mode") == "pool" and i.get("rect"):
+                i["rect"][1] += shift
+                i["rect"][3] += shift
+        cap_y += shift
     restarts = caption_restarts(l1)
     if restarts:
         raise RuntimeError(f"caption track restarts in chunks: {restarts}")
