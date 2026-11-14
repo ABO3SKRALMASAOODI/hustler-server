@@ -53,7 +53,9 @@ def cut_refusal(ctx, before, after):
         "request": request, "removed_source_intervals": spans,
         "contract": getattr(ctx, "request_contract", None),
         "source_words": [w for w in (getattr(ctx, "index", None) or {}).get("words") or []
-                         if any(a - 1 <= float(w.get("start", 0)) <= b + 1 for a, b in spans)],
+                         if any(float(w.get("start", w.get("t0", 0))) <= b + 1
+                                and float(w.get("end", w.get("t1", w.get("start", w.get("t0", 0))))) >= a - 1
+                                for a, b in spans)],
     }, ensure_ascii=False, default=str)}]
     try:
         source = ctx.proxy_path()

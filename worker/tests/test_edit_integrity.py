@@ -24,12 +24,15 @@ def test_cut_checks_walk_pixels_not_just_silence(monkeypatch, tmp_path):
     monkeypatch.setattr(media, "frame_at", lambda *a, **k: seen.append(a[1]))
     monkeypatch.setattr(llm, "image_part", lambda p: {"type": "image_url", "image_url": {"url": p}})
     def call(ctx, name, schema, system, parts, **kw):
+        import json
         assert name == "check_cut_evidence"
         assert len([p for p in parts if p['type'] == 'image_url']) == 3
+        assert json.loads(parts[0]['text'])['source_words'] == [{'w':'still','t0':5,'t1':5.5}]
         return {"allow": False, "reason": "continuous walking, not a wait"}, {}
     monkeypatch.setattr(asks, "_call", call)
     ctx = NS(user_message="Remove waiting gaps, preserve natural pauses", llm_client=object(), agent_model="any",
-             workdir=str(tmp_path), proxy_path=lambda: "source.mp4", index={})
+             workdir=str(tmp_path), proxy_path=lambda: "source.mp4",
+             index={'words':[{'w':'outside','t0':0,'t1':.5},{'w':'still','t0':5,'t1':5.5}]})
     assert "continuous walking" in ei.cut_refusal(ctx, {"keep": [[0,11.264]]}, {"keep": [[0,3.6]]})
     assert len(seen) == 3
     assert ei.cut_refusal(ctx, {"keep": [[0,3.6]]}, {"keep": [[0,11.264]]}) is None
