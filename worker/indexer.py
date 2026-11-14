@@ -1509,7 +1509,8 @@ def _greet_via_llm(worker_db, project_id, stats, pending, out_of_credits,
         worker_db.run(dbx.insert_llm_call, project_id, None, "index_greet",
                       (res or {}).get("model") or config.AGENT_MODEL,
                       {"system": system, "user": user},
-                      {"text": res["text"]} if res
+                      {"text": res["text"], "cached_in": res.get("cached_in", 0),
+                       "provider_cost_usd": res.get("provider_cost_usd")} if res
                       # The REAL provider error, not "call failed" — this row
                       # is the only trace a failed greeting leaves in admin.
                       else {"error": llm.last_error() or "call failed"},

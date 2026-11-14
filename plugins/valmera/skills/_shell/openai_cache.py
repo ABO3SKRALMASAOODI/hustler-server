@@ -98,6 +98,11 @@ def responses(body, role, *, conversation=False):
         inp.insert(0, {"role": "developer", "content": [{"type": "input_text", "text": instructions}]})
     b["input"] = inp
     b["prompt_cache_options"] = {"mode": "implicit" if conversation else "explicit", "ttl": "30m"}
+    # 12h writes cost twice 30m writes. Keep the measured cheaper default;
+    # workflows reused across long gaps can explicitly opt into 12h.
+    ttl = os.environ.get("VALMERA_OPENAI_PREFIX_TTL", "30m")
+    if ttl not in ("30m", "12h"):
+        ttl = "30m"
     marked = 0
     for msg in inp:
         if msg.get("role") not in ("system", "developer") or marked == 2:
@@ -108,7 +113,7 @@ def responses(body, role, *, conversation=False):
             msg["content"] = parts
         for part in reversed(parts):
             if part.get("type") == "input_text":
-                part["prompt_cache_breakpoint"] = {"mode": "explicit", "ttl": "12h"}
+                part["prompt_cache_breakpoint"] = {"mode": "explicit", "ttl": ttl}
                 marked += 1
                 break
     return b

@@ -124,7 +124,9 @@ estimates. A lost stream with no usage has `usd: null` and
 `billing_unconfirmed: true`; the report counts it as unknown, never free.
 
 GPT-5.6/GPT-6 Responses requests mark the shared instruction prefix with a
-12h breakpoint. Changing one-shot frames/transcripts are outside that write;
+30m breakpoint. `VALMERA_OPENAI_PREFIX_TTL=12h` opts into the longer lifetime
+for repeated work across longer gaps (its writes cost twice as much).
+Changing one-shot frames/transcripts are outside that write;
 editor conversations also keep implicit 30m history caching. GPT-5.5 and
 other documented legacy models use `prompt_cache_retention: "24h"`. Short
 prefixes below the provider minimum are left short; no padding is added.

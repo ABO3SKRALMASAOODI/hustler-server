@@ -930,8 +930,11 @@ def _meter_concierge(conn, rec, user_id=None):
         prompt = int(rec.get("prompt_tokens") or 0)
         answer = int(rec.get("completion_tokens") or 0)
         claude = str(model).startswith("claude-")
-        usd = (model_prices.claude_usage_cost(model, prompt, answer) if claude
-               else model_prices.luna6_usage_cost(prompt, answer, model=model))
+        reported = (rec.get("response") or {}).get("provider_cost_usd")
+        usd = (float(reported) if isinstance(reported, (int, float)) else
+               model_prices.claude_usage_cost(model, prompt, answer) if claude
+               else model_prices.luna6_usage_cost(prompt, answer,
+                    cached=(rec.get("response") or {}).get("cached_in", 0), model=model))
         lane = spend_ledger.lane_of(user_id)
         claude_plans.safe(conn, spend_ledger.charge,
                           spend_ledger.provider_of(model), lane, "concierge", usd)

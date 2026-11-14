@@ -16,7 +16,7 @@ def test_cache_boundaries_preserve_content_and_do_not_mutate_input():
     b = cache.responses(body, 'director')
     assert a['input'][0] == b['input'][0]
     assert a['input'][1] == original['input'][0]
-    assert a['input'][0]['content'][0]['prompt_cache_breakpoint']['ttl'] == '12h'
+    assert a['input'][0]['content'][0]['prompt_cache_breakpoint']['ttl'] == '30m'
     assert b['input'][1]['content'][0]['text'] == 'film B'
     assert original['instructions'] == body['instructions']
     assert 'prompt_cache_breakpoint' not in body['input'][0]['content'][0]

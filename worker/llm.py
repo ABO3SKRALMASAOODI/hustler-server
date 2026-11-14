@@ -168,7 +168,7 @@ def provider_cost_usd(usage, model):
         return model_prices.claude_usage_cost(
             model, max(0, prompt - cached - written),
             int(getattr(usage, "completion_tokens", 0) or 0), cached, written)
-    if str(model or "").startswith("gpt-") and usage is not None:
+    if model in openai_cache.PRICES and usage is not None:
         return openai_cache.cost(model, usage)
     if not str(model or "").startswith("grok-") or str(model).startswith("grok-imagine-"):
         return None
@@ -2167,6 +2167,8 @@ def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text",
             if not text:
                 return None
             return {"text": text, "model": model,
+                    "cached_in": cached_input_tokens(usage),
+                    "provider_cost_usd": provider_cost_usd(usage, model),
                     "prompt_tokens": getattr(usage, "prompt_tokens", None),
                     "completion_tokens": getattr(usage, "completion_tokens", None)}
     except Exception as e:
