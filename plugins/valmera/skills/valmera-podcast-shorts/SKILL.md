@@ -166,3 +166,5 @@ word can trigger an eased move. A numerical hold detector never creates automati
 
 Repeated overlapping document crops or source-video intervals do not count as new pictures, even under different cache paths. Final review receives separate phone-resolution frames; a half-open placement ends before the next cut. Changed scene or audio plans invalidate the retained render and final mix before review.
 A meaningful silent reaction may carry a director-justified eased move anchored to the preceding spoken line; its timestamp must stay inside that line's following silence. Unresolved holds return to direction with their exact frame bounds, never an automatic crop pattern.
+
+New documentary stills do not consume a recovery attempt when moving coverage is short: that same attempt continues into moving-footage research.

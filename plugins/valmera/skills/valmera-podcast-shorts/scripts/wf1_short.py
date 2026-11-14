@@ -417,7 +417,10 @@ def refill(ctx, script, pack, shortage):
         stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
         with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
         ctx.log(f'acquired {added} primary-document crops; checking their actual words before further research')
-        return
+        # New stills cannot repair a moving-footage deficit. Continue into video
+        # research in this same attempt instead of consuming every retry on crops.
+        if shortage.get('real_seconds',0)>0 and shortage.get('moving_seconds',0)>=.6*shortage['real_seconds']:
+            return
     signature=source_signature(ctx.supply)
     previous = pack.get('coverage_repairs',0) if pack.get('research_contract')==RESEARCH_CONTRACT and pack.get('research_sources')==signature else 0
     count = int(previous)+1
