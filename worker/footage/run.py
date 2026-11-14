@@ -109,7 +109,7 @@ def _twin(a, b, n=28):
 
 
 def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MAX_SOURCES, keep_work=False, anchors=None, avoid=None,
-         hear_s=None, read_s=None, per=None, want_voices=None):
+         hear_s=None, read_s=None, per=None, want_voices=None, preserve_source=False):
     """anchors: {person's name: [photo paths already checked as that person]} for the identity step.
     avoid: [{"url", "time_range"}] already cut for this film by an earlier run: those seconds of a source are not cut again.
     hear_s, read_s, per: a caller with a deadline (a first film, score.film) hears less or nothing of each source, reads
@@ -359,7 +359,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             name = f"l{r['i']:02d}_{len([q for q in r['picks'] if q.get('file')]):d}_{p['source']}_{int(p['t0'] * 100)}.mp4"
             out = os.path.join(out_dir, "clips", name)
             try:
-                cut.finish(p["raw"], out, W, H, p.get("x", 0.5), p["eq"], trim=p.get("trim") or (0.0, 0.0))
+                cut.finish(p["raw"], out, W, H, p.get("x", 0.5), p["eq"], trim=p.get("trim") or (0.0, 0.0), preserve_source=preserve_source)
                 p["file"] = os.path.relpath(out, out_dir)
             except Exception as e:  # noqa: BLE001
                 p["error"] = str(e)[:200]
@@ -388,7 +388,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             out_lines.append(dict(i=r["i"], say=r["say"], show=r["show"], dur=r["dur"], want=r["want"], clips=clips,
                                   subjects=(shows.get(r["i"]) or {}).get("subjects") or []))      # what the planner read the line as naming
         spend = {k: round(v, 5) for k, v in spend.items()}
-        res = dict(engine="worker/footage", model=dict(look="gpt-6-sol low", hear=hear.MODEL), about=about, frame=[W, H], grade_target=tgt,
+        res = dict(engine="worker/footage", model=dict(look="gpt-6-sol low", hear=hear.MODEL), about=about, frame=[W, H], preserve_source=bool(preserve_source), grade_target=tgt,
                    subjects=subjects, lines=out_lines, voices=voices,
                    sources=[{k: s.get(k) for k in ("key", "url", "title", "channel", "where", "duration", "subjects", "why", "rung", "dur_read", "error")}
                             | dict(shots=len(s.get("shots") or []), heard=len(s.get("transcript") or [])) for s in sources],
@@ -424,6 +424,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--w", type=int, default=1080)
     ap.add_argument("--h", type=int, default=1920)
+    ap.add_argument("--preserve-source", action="store_true", help="Keep the full source aspect and pixels for a fitted workflow layout")
     ap.add_argument("--timing", help="json: [seconds per line] from the narration")
     ap.add_argument("--anchors", help="json: {person's name: [photo paths checked as that person]}")
     ap.add_argument("--avoid", nargs="*", default=[], help="footage.json records of earlier runs for this film: their clips are not cut again")
@@ -438,7 +439,7 @@ def main():
     avoid = [dict(url=c["source"]["url"], time_range=c["time_range"]) for p in a.avoid for ln in json.load(open(p)).get("lines") or []
              for c in ln.get("clips") or []]
     res = seam.for_lines(lines, named, title, a.out, a.w, a.h, scope="workflow", log=lambda m: print("[footage] " + m, flush=True),
-                         anchors=anchors, avoid=avoid)
+                         anchors=anchors, avoid=avoid, preserve_source=a.preserve_source)
     if res is None:
         print(json.dumps(dict(off="VALMERA_FOOTAGE=0")))
         return

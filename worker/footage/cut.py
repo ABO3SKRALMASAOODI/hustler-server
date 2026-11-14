@@ -120,17 +120,23 @@ def borders(path):
     return f"{w}:{h}:{x}:{y}"
 
 
-def finish(src, out_path, W, H, x=0.5, eq=None, fps=30, trim=(0.0, 0.0)):
+def finish(src, out_path, W, H, x=0.5, eq=None, fps=30, trim=(0.0, 0.0), preserve_source=False):
     """Reframe to W x H (cover, centred across on x), grade, encode for the film. trim: the fractions of
     height cut from the top and bottom first (a library's timecode band), so the cover crop zooms past it."""
     eq = eq or {}
     top, bottom = (min(max(float(t or 0.0), 0.0), 0.3) for t in (list(trim or (0.0, 0.0)) + [0.0, 0.0])[:2])
     band = f"crop=iw:ih*{1 - top - bottom:.4f}:0:ih*{top:.4f}," if top or bottom else ""
-    bars = borders(src)
+    bars = None if preserve_source else borders(src)
     vf = ((f"crop={bars}," if bars else "") + band + f"scale=w='if(gt(a,{W}/{H}),-2,{W})':h='if(gt(a,{W}/{H}),{H},-2)':flags=lanczos,"
           f"crop={W}:{H}:x='min(max(iw*{x:.3f}-{W}/2,0),iw-{W})':y='(ih-{H})/2',"
           f"eq=contrast={eq.get('contrast', 1.0)}:brightness={eq.get('brightness', 0.0)}:saturation={eq.get('saturation', 1.0)},"
           f"fps={fps},format=yuv420p")
+    if preserve_source:
+        # Keep every source pixel. Framing belongs to the layout after the
+        # placement check; a portrait supply crop cannot be undone there.
+        vf = (f"scale=w={W}:h={H}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,"
+              f"setsar=1,eq=contrast={eq.get('contrast', 1.0)}:brightness={eq.get('brightness', 0.0)}:saturation={eq.get('saturation', 1.0)},"
+              f"fps={fps},format=yuv420p")
     r = subprocess.run([fetch.ffmpeg(), "-hide_banner", "-loglevel", "error", "-i", src, "-vf", vf, "-an", "-c:v", "libx264", "-crf", "18",
                         "-preset", "medium", "-movflags", "+faststart", "-y", out_path], capture_output=True, text=True, timeout=300)
     if r.returncode != 0:

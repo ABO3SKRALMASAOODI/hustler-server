@@ -205,7 +205,7 @@ def seg_durs(words, n):
     return out
 
 
-def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None):
+def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None, preserve_source=False):
     """Real footage per line (worker/footage, through footage.seam's workflow scope): supply/footage/ with
     footage.json (clips per line, each with its source URL, channel and time range for the credits) and
     clips/*.mp4. None when VALMERA_FOOTAGE=0 or when the engine could not run (logged, never a stop).
@@ -220,6 +220,8 @@ def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None):
     sp = os.path.join(ctx.run_dir, "footage_script.json")
     json.dump(script, open(sp, "w"), ensure_ascii=False)
     cmd = [PY, "-m", "footage.run", "--script", sp, "--out", out, "--w", str(W), "--h", str(H)]
+    if preserve_source:
+        cmd += ["--preserve-source"]
     if durs:
         tp = os.path.join(ctx.run_dir, "footage_timing.json")
         json.dump(dict(durs=durs), open(tp, "w"))

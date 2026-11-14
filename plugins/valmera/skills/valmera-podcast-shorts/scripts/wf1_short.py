@@ -149,7 +149,7 @@ def supply(ctx, script):
                    named=[dict(name=r["name"], must_show=r.get("must_show") or r["name"], **{"is": r.get("is") or "thing"}) for r in script.get("named") or []])
     wf3.given_footage(ctx, os.path.join(sup_dir, "footage"))
     fw, fh = style["footage"]
-    foot = chain.footage(ctx, dict(script=fscript), [round(float(s["t1"]) - float(s["t0"]) + 0.2, 2) for s in sents], W=fw, H=fh)
+    foot = chain.footage(ctx, dict(script=fscript), [round(float(s["t1"]) - float(s["t0"]) + 0.2, 2) for s in sents], W=fw, H=fh, preserve_source=True)
     if foot:
         n_yt, n_bad = refused(foot)
         ctx.log(f"footage sources: {n_yt} on YouTube, {n_bad} refused or archive-only; {foot['counts'].get('clips')} clips on "

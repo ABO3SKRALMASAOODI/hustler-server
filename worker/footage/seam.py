@@ -31,14 +31,14 @@ _LOCK = threading.Lock()
 CFG_TTL_S = 300.0
 
 
-def for_lines(lines, named, about, out_dir, W=1080, H=1920, scope="workflow", log=print, anchors=None, avoid=None):
+def for_lines(lines, named, about, out_dir, W=1080, H=1920, scope="workflow", log=print, anchors=None, avoid=None, preserve_source=False):
     """The shell's call. None when the scope is switched off; else run.find's record. anchors: {person:
     [photographs already checked as that person]} to hold that person's clips to one face. avoid: clips an
     earlier run already cut for this film ([{"url", "time_range"}]): those seconds are not cut again."""
     if not switch.allowed(scope):
         return None
     from . import run
-    return run.find(lines, named, about, out_dir, W, H, log=log, anchors=anchors, avoid=avoid)
+    return run.find(lines, named, about, out_dir, W, H, log=log, anchors=anchors, avoid=avoid, preserve_source=preserve_source)
 
 
 def _read_cfg():
