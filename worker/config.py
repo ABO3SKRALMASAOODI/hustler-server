@@ -500,6 +500,9 @@ AGENT_RESPONSES_LANE = os.getenv("AGENT_RESPONSES_LANE", "1") == "1"
 # its reported token categories. Do not double the fallback constants when
 # selecting priority; Luna's recorded cost already includes the tier multiplier.
 OPENAI_SERVICE_TIER = os.getenv("OPENAI_SERVICE_TIER", "").strip()
+# Independent opt-in for first-film Director calls; keeps the same models,
+# reasoning and token budgets. Empty retains the existing serving policy.
+DIRECTOR_SERVICE_TIER = os.getenv("DIRECTOR_SERVICE_TIER", "").strip()
 # Vision (look_at) is the slowest thing the agent does, so it gets a MORE
 # generous per-call timeout than the text agent (grok multimodal latency is
 # spiky) — retries stay at the client default. The agent isn't capped on how
