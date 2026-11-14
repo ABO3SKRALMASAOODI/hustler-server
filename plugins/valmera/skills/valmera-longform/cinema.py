@@ -368,7 +368,12 @@ def supply(ctx, script):
             from document_evidence import supply as original_figures
             original_figures(ctx,script,ft,remaining.gaps)
             save(Path(ctx.supply)/'footage/footage.json',ft)
-            shots,clock,_=schedule(sc,coverage_words,ft)
+            try:shots,clock,_=schedule(sc,coverage_words,ft)
+            except CoverageError as tail:
+                from evidence_allocate import allocate
+                allocate(ctx,script,ft,tail)
+                save(Path(ctx.supply)/'footage/footage.json',ft)
+                shots,clock,_=schedule(sc,coverage_words,ft)
     still=sum((r['f'][1]-r['f'][0])/FPS for r in shots if r['clip'].get('kind')=='image')
     if still/clock.dur>.45:raise RuntimeError('evidence photos would displace the moving film')
     if not ft['voices']:witness_voices(ctx,script,ft)
@@ -414,8 +419,8 @@ def reserve(used, c, seconds):
 
 
 class CoverageError(ValueError):
-    def __init__(self, gaps):
-        self.gaps=gaps
+    def __init__(self, gaps, shots=()):
+        self.gaps=gaps;self.shots=list(shots)
         super().__init__('footage gaps require a new search, never a repeated picture: '+json.dumps(gaps)[:1500])
 
 
@@ -518,8 +523,9 @@ def schedule(sc, words, ft):
             pos+=n
             if pos>=b: break
         if pos<b:
-            missing.append(dict(seg=i,seconds=(b-pos)/FPS,words=s['say']))
-    if missing: raise CoverageError(missing)
+            heard=' '.join(w['w'] for w in clock.words if w['t0']<b/FPS and w['t1']>pos/FPS)
+            missing.append(dict(seg=i,seconds=(b-pos)/FPS,words=s['say'],heard=heard,start=pos/FPS,end=b/FPS))
+    if missing: raise CoverageError(missing,shots)
     for r in shots:
         r['context']=r['say']
         spoken=[w['w'] for w in clock.words if w['t0']<r['f'][1]/FPS and w['t1']>r['f'][0]/FPS]
