@@ -171,8 +171,24 @@ def face_cover_refusal(ctx, before, after):
         candidates.append((it['id'], float(it.get('start') or 0),
                            float(it.get('start') or 0)+float(it.get('duration_s') or 0),
                            [x-w/2,y-h/2,x+w/2,y+h/2]))
+    # A designed split replaces the source with an opaque backdrop, then seats
+    # its windows on that backdrop. The source face is no longer on screen.
+    # Only measured opaque generated images qualify: a transparent sticker or
+    # a dimming layer must still be checked against the source face.
+    if assets is None:
+        assets = {a.get('storage_key'): a for a in asks.project_assets(ctx)} if after.get('overlays') else {}
+    backdrops = []
+    for it in after.get("overlays") or []:
+        meta = (assets.get(it.get('asset_key')) or {}).get('meta') or {}
+        if (it.get('fit') == 'cover' and meta.get('made_from') == 'design' and meta.get('pixel_opaque') is True
+                and it.get('opacity') in (None, 1, 1.0) and not it.get('entrance') and not it.get('exit')
+                and not it.get('motion_motif') and not it.get('rotation')):
+            a = float(it.get('start') or 0)
+            backdrops.append((a, a + float(it.get('duration_s') or 0)))
     for ident, a, b, rect in candidates:
         for t, heads in samples:
+            if any(start <= t < end for start, end in backdrops):
+                continue
             if a <= t < b:
                 for head in heads:
                     if _intersects(rect, head):

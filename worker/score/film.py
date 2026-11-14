@@ -466,6 +466,14 @@ def _acquirer(ctx, worker_db, job, work):
 
 # ------------------------------------------------------------------ the EDL's keys
 
+def _baked_image_facts(path):
+    """Pixel evidence for a generated image; transparent cards are not opaque backdrops."""
+    from PIL import Image
+    with Image.open(path) as im:
+        opaque = im.convert("RGBA").getchannel("A").getextrema() == (255, 255)
+        return dict(width=im.width, height=im.height, opaque=opaque)
+
+
 def _publish(ctx, worker_db, edl, locals_, bin_doc, original_key):
     """Every local key in the lowered EDL becomes a project storage key with its asset row."""
     import concurrent.futures as cf
@@ -506,8 +514,10 @@ def _publish(ctx, worker_db, edl, locals_, bin_doc, original_key):
                               meta={"filename": os.path.basename(k), "director": True, "made_from": "a found still, moving", "finish": clip.get("finish")})
                 keys[k] = key
                 continue
+            image = _baked_image_facts(locals_[k]) if ext != ".wav" else {}
             worker_db.run(dbx.insert_asset, ctx.project_id, "music" if ext == ".wav" else "image_ref", key, bytes_=size,
-                          meta={"filename": os.path.basename(k), "director": True, "made_from": "the upload" if ext == ".wav" else "design"})
+                          meta={"filename": os.path.basename(k), "director": True, "made_from": "the upload" if ext == ".wav" else "design",
+                                **({"pixel_opaque": image["opaque"]} if image else {})})
             keys[k] = key
             if ext == ".wav":
                 music_gate.grant_sfx(ctx, key)

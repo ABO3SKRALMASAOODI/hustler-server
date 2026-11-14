@@ -76,6 +76,40 @@ def test_background_rectangle_cannot_dim_face():
     assert ei.face_cover_refusal(ctx,before,after) is None
 
 
+@pytest.mark.parametrize('opaque,opacity,entrance,at,allowed', [
+    (True, None, None, 2., True),
+    (False, None, None, 2., False),
+    (None, None, None, 2., False),
+    (True, .5, None, 2., False),
+    (True, None, 'fade', 2., False),
+    (True, None, None, 4., False),
+])
+def test_split_backdrop_hides_source_only_with_pixel_evidence(monkeypatch, opaque, opacity, entrance, at, allowed):
+    ctx = NS(index={"video":{"width":100,"height":100}, "spatial":{"samples":[{"t":at,"faces":[[.4,.2,.6,.4]]}]}})
+    monkeypatch.setattr(asks, 'project_assets', lambda ctx: [
+        {'storage_key':'plate.png','meta':{'made_from':'design','pixel_opaque':opaque}},
+        {'storage_key':'card.mp4','width':100,'height':100},
+    ])
+    before = {'keep':[[0,10]]}
+    after = dict(before, overlays=[
+        {'id':'backdrop','asset_key':'plate.png','fit':'cover','start':1.,'duration_s':2.,
+         'opacity':opacity,'entrance':entrance},
+        {'id':'window','asset_key':'card.mp4','fit':'contain','x':.5,'y':.3,'scale':.4,'start':0.,'duration_s':10.},
+    ])
+    assert (ei.face_cover_refusal(ctx,before,after) is None) is allowed
+
+
+def test_generated_backdrop_opacity_is_measured_from_pixels(tmp_path):
+    from PIL import Image
+    from score.film import _baked_image_facts
+    p = tmp_path/'plate.png'
+    Image.new('RGB',(8,8),'black').save(p)
+    assert _baked_image_facts(p)['opaque'] is True
+    im = Image.new('RGBA',(8,8),(0,0,0,255))
+    im.putpixel((3,3),(0,0,0,0)); im.save(p)
+    assert _baked_image_facts(p)['opaque'] is False
+
+
 def test_missing_frames_cannot_pass_visual_ask(monkeypatch):
     monkeypatch.setattr(asks,"frame_pages", lambda *a: [])
     monkeypatch.setattr(asks,"_call", lambda *a,**k: ({"asks":[{"id":"a1","state":"done","rests_on":"frames","seen":"changed","line":"Done"}],"unasked":[]},{}))
