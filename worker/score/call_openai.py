@@ -85,9 +85,13 @@ def parts(content):
 
 
 def body(model, system, content, max_tokens, effort, purpose):
-    return openai_cache.responses({"model": model, "instructions": instructions(system), "input": [{"role": "user", "content": parts(content)}],
-            "max_output_tokens": int(max_tokens), "reasoning": {"effort": EFFORT.get(effort, "low")},
-            "stream": True, "store": False}, purpose)
+    request = {"model": model, "instructions": instructions(system), "input": [{"role": "user", "content": parts(content)}],
+               "max_output_tokens": int(max_tokens), "reasoning": {"effort": EFFORT.get(effort, "low")},
+               "stream": True, "store": False}
+    tier = config.DIRECTOR_SERVICE_TIER or config.OPENAI_SERVICE_TIER
+    if tier:
+        request["service_tier"] = tier
+    return openai_cache.responses(request, purpose)
 
 
 def events(lines):
@@ -157,7 +161,8 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
                 r.close()
             except Exception:  # noqa: BLE001
                 pass
-        usage = Usage(model, {}, out_tokens=int(elapsed * OUT_TOKENS_PER_S))
+        usage = Usage(model, {"service_tier": req.get("service_tier")},
+                      out_tokens=int(elapsed * OUT_TOKENS_PER_S))
         llm.record(purpose, {"model": model, "max_tokens": max_tokens}, {"late": True, "provider_cost_usd": usage.provider_cost_usd}, usage)
         call._meter(model, usage.provider_cost_usd)
         raise call.Late(f"{purpose} past its deadline after {elapsed:.0f} s")
@@ -165,7 +170,10 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
         openai_cache.record(model, purpose, status="transport_or_http_error", billing_unconfirmed=True)
         raise box["error"]
     final = box.get("final") or {}
-    usage = Usage(model, final.get("usage") or {})
+    # The API reports the actual serving tier beside usage, not inside it.
+    # A downgraded Fast request must be charged at the returned tier.
+    usage = Usage(model, {**(final.get("usage") or {}),
+                          "service_tier": final.get("service_tier")})
     usd = float(usage.provider_cost_usd)
     status = final.get("status") or "completed"
     stop = "max_tokens" if status == "incomplete" else ("refusal" if box.get("refused") else "end_turn")
