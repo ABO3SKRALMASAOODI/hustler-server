@@ -302,11 +302,13 @@ def test_the_prefix_is_one_fixed_file_with_the_live_menu_under_its_cap():
     text = brief.prefix_text()
     assert text == brief.prefix_text()
     assert compiler.gesture_menu() in text                     # rebake director/first-result/bake_assets.py when gestures change
-    assert len(text) <= 42450       # 27,603 characters measured 11,160 tokens (count_tokens, 12 Nov); 13 Nov: what a film is, and a
+    assert len(text) <= 45000       # 27,603 characters measured 11,160 tokens (count_tokens, 12 Nov); 13 Nov: what a film is, and a
     #                                 designed talking take as the reference, about 13,400 tokens under a cap raised to 13,600;
     #                                 round four: the ten looks by name, the hook picture and the upload's own views, about 14,700;
     #                                 round five: the judge's pace, runs and bursts, the bed and its turn, about 16,500;
     #                                 round seven: the hook as a line, what is done after the Score, chapters, an upload already cut, about 16,800
+    # Round eight adds subject/word matching and readable product demonstrations;
+    # the shipped prefix is 44,309 characters. Keep a bounded 45k ceiling.
     for engine_only in ('"behind":true', "cut:paper", '"g":"whip"', "`glow`"):
         assert engine_only not in text
 

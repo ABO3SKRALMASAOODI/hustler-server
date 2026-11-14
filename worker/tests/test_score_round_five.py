@@ -265,14 +265,23 @@ def test_one_named_device_on_one_frame_does_not_buy_a_second_render():
 
 # ------------------------------------------------------------------ real footage: the quick film, then the full one
 
-def test_footage_takes_the_place_of_a_still_of_the_same_moment_and_nothing_else_changes(tmp_path):
+def test_footage_takes_the_place_of_a_still_of_the_same_moment_and_nothing_else_changes(tmp_path, monkeypatch):
     from PIL import Image
     from score import film as F
+    from score import supply
+
+    # This test measures placement after the separate semantic word check.
+    # The refusal path is covered by test_late_footage_must_pass_the_words_before_it_can_be_acquired.
+    checked = []
+    def word_check(work, candidates, wishes, deadline):
+        checked.extend(candidates)
+        return [dict(c, word_check={"ok": True}) for c in candidates], 0, []
+    monkeypatch.setattr(supply, "check_fit", word_check)
     work = str(tmp_path)
     os.makedirs(os.path.join(work, "bin"))
     for k in (0, 1):
         Image.new("RGB", (64, 64)).save(os.path.join(work, f"bin/{k}.jpg"))
-    json.dump({"items": [{"id": 0, "kind": "image", "path": "bin/0.jpg", "for": "w0-2", "provider": "wikimedia", "what": "the bridge", "named": "Golden Gate Bridge"},
+    json.dump({"items": [{"id": 0, "kind": "image", "path": "bin/0.jpg", "for": "w3-5", "provider": "wikimedia", "what": "the bridge", "named": "Golden Gate Bridge"},
                          {"id": 1, "kind": "image", "path": "bin/1.jpg", "for": "w9-11", "provider": "pexels", "what": "a wave"}], "credits": []},
               open(os.path.join(work, "bin.json"), "w"))
     text = "\n".join(json.dumps(o) for o in [
@@ -286,6 +295,8 @@ def test_footage_takes_the_place_of_a_still_of_the_same_moment_and_nothing_else_
     got = []
     out = F.footage_into(work, text, box, lambda c: got.append(c["id"]) or {"storage_key": "clips/7/a.mp4", "w": 1080, "h": 1920, "dur": 2.4, "fps": 30})
     assert out is not None and got == ["footage:a.mp4"]                 # acquired once, though it is cut in twice
+    assert checked and checked[0]["wish"] == 0
+    assert checked[0]["named"] == "Golden Gate Bridge"
     new, rows = out
     lines = [json.loads(ln) for ln in new.splitlines()]
     assert lines[1]["pic"] == ["bin:2", "main"] and lines[2]["pic"] == ["main", {"src": "bin:1", "crop": "upper"}, "bin:2"]
