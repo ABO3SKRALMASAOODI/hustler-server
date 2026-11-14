@@ -60,3 +60,10 @@ def test_choice_builds_before_style_and_restores_candidate_after_failure(monkeyp
     assert writes[-1]['overlays'][0]['asset_key'] == 'baked-source-window'
     assert result[-1] == 'restored preview'
     assert 'unavailable' in ctx.first_cut_phases['never_below']
+
+
+def test_an_edited_label_does_not_waive_a_zero_picture_fallback():
+    from first_cut_floor import needs_floor
+    assert needs_floor(reading('edited', motion=4))
+    assert not needs_floor(reading('edited', shots=3))
+    assert prefer_floor(reading('edited', sounds=0, motion=4), reading('light_touch', sounds=3, motion=1))
