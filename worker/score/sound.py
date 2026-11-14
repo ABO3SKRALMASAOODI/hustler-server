@@ -1964,7 +1964,7 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
            "seed": film_seed(l1.get("sid"), l1.get("seed"), D, [e.get("src") for e in (l1.get("spine") or [])][:64],
                              sorted(str((a or {}).get("path")) for a in (l1.get("assets") or {}).values())[:64])}
     sounds, report = plan_sounds(events, ctx)
-    if (index or {}).get("first_film") and voice is not None:
+    if (index or {}).get("first_film"):
         import first_film_sound
         sounds, proof = first_film_sound.level(sounds, voice, fps, shift)
         report["foreground"] = proof
