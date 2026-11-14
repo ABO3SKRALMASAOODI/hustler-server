@@ -202,3 +202,12 @@ def test_camera_feedback_uses_remaining_span_without_automatic_recrops(tmp_path)
     assert [m['word'] for m in moves]==[0,1]
     assert seen[0]['unchanged_spans']==[[0,135]]
     assert seen[1]['unchanged_spans']==[[9,135]]
+
+
+def test_director_can_earn_a_move_in_a_silent_reaction_but_not_another_word(tmp_path):
+    import json
+    from types import SimpleNamespace
+    cov=dict(words=[dict(w='impressive',start=0,end=.2),dict(w='then',start=4,end=4.4)],moves=[])
+    def ask(*args,**kwargs):return json.dumps(dict(moves=[dict(word=0,offset_s=2,why='The silent reaction undercuts his stated admiration')])),{}
+    moves,_=C.speaker_moves(cov,[],135,[],str(tmp_path),llm=SimpleNamespace(ask=ask,json_block=json.loads))
+    assert len(moves)==1 and C.move_frame(cov,moves[0])==63

@@ -165,3 +165,4 @@ After picture selection, exposed speaker passages are checked again: only a dire
 word can trigger an eased move. A numerical hold detector never creates automatic alternating crops.
 
 Repeated overlapping document crops or source-video intervals do not count as new pictures, even under different cache paths. Final review receives separate phone-resolution frames; a half-open placement ends before the next cut. Changed scene or audio plans invalidate the retained render and final mix before review.
+A meaningful silent reaction may carry a director-justified eased move anchored to the preceding spoken line; its timestamp must stay inside that line's following silence. Unresolved holds return to direction with their exact frame bounds, never an automatic crop pattern.

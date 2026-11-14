@@ -310,9 +310,9 @@ def build(script, sup, style_id, direction=None):
     if take.get("still"):
         look_pics.append(take["still"])
     tcuts = [int(round(float(s_["t0"]) * FPS)) + LEAD_F for s_ in tshots[1:]]      # the take's own cuts, in film frames
-    from wf1_coverage import speaker_moves
+    from wf1_coverage import speaker_moves, move_frame
     resolved_moves,move_spend=speaker_moves(coverage,ins,f_end,tcuts,sup['work'])
-    d['band']['motivated_frames']=[round(coverage['words'][m['word']]['start']*FPS)+LEAD_F for m in resolved_moves]
+    d['band']['motivated_frames']=[move_frame(coverage,m,FPS,LEAD_F) for m in resolved_moves]
     placement_report['spend']+=move_spend
     coverage_report['speaker_moves']=resolved_moves
 
