@@ -146,3 +146,20 @@ def test_rater_sound_measure_separates_bed_and_audible_hit(tmp_path,monkeypatch)
     assert r['chapter_rises'][0]['rise_db']>3
     assert r['audible_placed']==1
     assert r['blind_events']>=1
+
+
+def test_sentence_repair_invalidates_only_changed_takes(tmp_path):
+    import read_repair as R
+    nd=tmp_path/'voice';(nd/'_takes').mkdir(parents=True);(nd/'take-analysis').mkdir()
+    ns=dict(title='Test',names=[],band='04',segments=[dict(text=' '.join(['alpha']*35)+'.'),dict(text=' '.join(['beta']*35)+'.')])
+    old=R.voice.group_script(ns,R.voice.groups_of(ns['segments']))
+    C.save(nd/'_generations.json',old)
+    (nd/'_takes/s00_t0.wav').write_bytes(b'old first take')
+    (nd/'_takes/s01_t0.wav').write_bytes(b'unchanged second take')
+    ns['segments'][0]['text']=' '.join(['gamma']*35)+'.'
+    backup=tmp_path/'rejected';backup.mkdir()
+    r=R.prepare_takes(nd,ns,backup)
+    assert r['changed_generations']==[0]
+    assert (backup/'s00_t0.wav').read_bytes()==b'old first take'
+    assert not (nd/'_takes/s00_t0.wav').exists()
+    assert (nd/'_takes/s01_t0.wav').read_bytes()==b'unchanged second take'

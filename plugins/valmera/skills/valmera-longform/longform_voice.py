@@ -231,6 +231,18 @@ def main():
         os.environ['NARRATE_KEEP_TAKES']='1'
         cache_take_analysis(a.out)
         os.environ.pop('NARRATE_ALLOW_FALLBACK',None)
+        original_generate=shared.Read.generate_phonon
+        def bounded_generate(self,job,dest,log,seed0=7):
+            # A resume keeps its spent budget: six initial + four six-take rounds.
+            # The word gate remains unchanged, including after exhaustion.
+            import copy
+            bounded=copy.deepcopy(job)
+            for row in bounded['lines']:
+                requested=int(row.get('takes') or bounded.get('takes') or 6)
+                row['takes']=min(requested,30)
+                if requested>30:log(row['id']+': thirty-take retry budget spent; retaining strict gate')
+            return original_generate(self,bounded,dest,log,seed0)
+        shared.Read.generate_phonon=bounded_generate
         original_finish=shared.finish
         def finished_read(*args,**kwargs):
             N.free_gate_listener();N.free_take_listener()

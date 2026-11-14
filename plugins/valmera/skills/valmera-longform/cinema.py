@@ -53,6 +53,7 @@ def footage(ctx, script):
     """Each chapter is a bounded search; every previous source range stays reserved."""
     sc = script['script']
     root = Path(ctx.supply)/'footage'
+    if (root/'footage.json').exists():return read(root/'footage.json')
     rows, voices, credits, avoided, spends = [], [], [], [], []
     for ci, ch in enumerate(sc['chapters']):
         lines = [dict(i=i, say=s['say'], pictures=s.get('pictures',[]), dur=len(s['say'].split())/2.5+1)
@@ -84,7 +85,7 @@ def footage(ctx, script):
     return result
 
 
-def prefill_footage(ctx,script,ft):
+def prefill_footage(ctx,script,ft,pass_id=None):
     """Research obvious shortages while the narrator is still being made.
     This estimate only requests supply; the actual word clock decides coverage.
     """
@@ -99,7 +100,7 @@ def prefill_footage(ctx,script,ft):
             missing=len(s['say'].split())/2.8+.4-available
             if missing>=1.5:lines.append(dict(i=i,say=s['say'],pictures=s.get('pictures',[]),dur=missing+2))
         if not lines:continue
-        dest=Path(ctx.supply)/'footage'/('prefill-'+ch['id'])
+        dest=Path(ctx.supply)/'footage'/('prefill-'+ch['id']+('-'+pass_id if pass_id else ''))
         ctx.log(f"archive coverage research {ch['id']}: {len(lines)} lines")
         known=list({c['source']['url']:c['source'] for ln in ft['lines'] for c in ln['clips']}.values())
         extra=footage_box.fetch(dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title']+'. Find additional literal archive evidence; previous source seconds are reserved.',avoid=avoid,known_sources=known),dest,ctx.log)
@@ -264,6 +265,10 @@ def evidence_for_gaps(ctx,script,ft,gaps):
 
 
 def supply(ctx, script):
+    if (Path(ctx.run_dir)/'read-repair.pending.json').exists():
+        from read_repair import finish_pending
+        finish_pending(ctx.run_dir)
+        script.clear();script.update(read(Path(ctx.run_dir)/'script.json'))
     worker()
     pk=Path(ctx.supply)/'pack.json'
     if pk.exists(): return read(pk)['record']
