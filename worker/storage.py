@@ -32,6 +32,22 @@ TRANSFER_CONFIG = TransferConfig(
     max_concurrency=config.STORAGE_MULTIPART_CONCURRENCY,
     use_threads=config.STORAGE_MULTIPART_CONCURRENCY > 1,
 )
+UPLOAD_CONFIG = TransferConfig(
+    multipart_threshold=config.STORAGE_MULTIPART_CHUNK_MB * 1024 * 1024,
+    multipart_chunksize=config.STORAGE_MULTIPART_CHUNK_MB * 1024 * 1024,
+    max_concurrency=config.STORAGE_UPLOAD_CONCURRENCY,
+    use_threads=config.STORAGE_UPLOAD_CONCURRENCY > 1,
+)
+
+
+def _connection_config():
+    # Socket inactivity, not a whole-file deadline: large healthy transfers
+    # keep progressing. Botocore retries the failed part, not the whole film;
+    # s3transfer aborts an incomplete multipart upload on terminal failure.
+    return dict(connect_timeout=config.STORAGE_CONNECT_TIMEOUT_S,
+                read_timeout=config.STORAGE_READ_TIMEOUT_S,
+                max_pool_connections=max(10, config.STORAGE_UPLOAD_CONCURRENCY),
+                retries={"mode": "standard", "total_max_attempts": 3})
 
 
 def client():
@@ -43,7 +59,7 @@ def client():
         region_name=config.S3_REGION,
         config=Config(signature_version="s3v4",
                       s3={"addressing_style": "path"},
-                      retries={"max_attempts": 3}),
+                      **_connection_config()),
     )
 
 
@@ -243,7 +259,7 @@ def _next_client():
                 aws_secret_access_key=cfg["secret_access_key"],
                 region_name=cfg["region"],
                 config=Config(**routing.botocore_config_kwargs(
-                    cfg, retries={"max_attempts": 3})))
+                    cfg, **_connection_config())))
             creds.watch_client(c)
             _next_cached.clear()
             _next_cached[key] = c
@@ -481,7 +497,7 @@ def upload_file(path, key, content_type):
             store_client(name).upload_file(
                 path, store_bucket(name), key,
                 ExtraArgs={"ContentType": content_type},
-                Config=TRANSFER_CONFIG)
+                Config=UPLOAD_CONFIG)
         except Exception as exc:  # noqa: BLE001
             if i == 0:
                 raise

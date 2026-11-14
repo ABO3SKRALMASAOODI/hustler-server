@@ -9969,6 +9969,8 @@ def _run_render_job(worker_db, job):
     os.makedirs(workdir, exist_ok=True)
     timings, t0 = {}, time.monotonic()
     job_t0 = t0
+    from artifact_uploads import ArtifactUploads
+    artifact_uploads = ArtifactUploads()
     detail = {}
     detail_token = _RENDER_DETAIL.set(detail)
     # Motion items that degrade to absent (motion_layer.warn) must reach
@@ -10383,6 +10385,15 @@ def _run_render_job(worker_db, job):
                       f"{tp_guard['limit_dbfs']} dBFS, "
                       f"{tp_guard['passes']} pass(es))", flush=True)
         _mark("true_peak_s")
+        # No more frame/audio writes follow the peak guard. Send these exact
+        # bytes while the evidence sheets read them; all sheets and all checks
+        # still finish, with the same publication/lease gates below.
+        if not _still_ours(94):
+            raise dbx.JobLeaseLost("job was cancelled or handed to another worker")
+        stamp = _render_stamp(job_id)
+        render_key = f"media/{project_id}/{stamp}.mp4"
+        uploaded_keys = artifact_uploads.keys
+        artifact_uploads.submit(out_local, render_key, "video/mp4", "video_upload_s")
         try:
             fx_devices = fxgraph.job_report(
                 edl_row["json"], fx_rows,
@@ -10530,20 +10541,16 @@ def _run_render_job(worker_db, job):
         # ticks and a dispatcher deploy. Never upload or register those stale
         # bytes: they are both storage churn and a result nobody can consume.
         if not _still_ours(95):
+            artifact_uploads.wait()
+            storage.delete_keys(uploaded_keys)
             raise dbx.JobLeaseLost(
                 "job was cancelled or handed to another worker")
 
-        stamp = _render_stamp(job_id)
-        render_key = f"media/{project_id}/{stamp}.mp4"
         # Cancellation may remove only this job's objects. Reused evidence is
         # still owned by earlier completed renders and their issued receipts.
-        uploaded_keys = []
-
         def upload_output(local, key, mime):
-            storage.upload_file(local, key, mime)
-            uploaded_keys.append(key)
+            artifact_uploads.submit(local, key, mime)
 
-        upload_output(out_local, render_key, "video/mp4")
         if sheet_local and os.path.exists(sheet_local):
             sheet_key = f"media/{project_id}/{stamp}_s.jpg"
             upload_output(sheet_local, sheet_key, "image/jpeg")
@@ -10565,6 +10572,10 @@ def _run_render_job(worker_db, job):
             key = f"media/{project_id}/{stamp}_scr{page_n}.jpg"
             upload_output(local, key, "image/jpeg")
             screening_pages.append({"key": key, "frames": page})
+        upload_wait = time.monotonic()
+        artifact_uploads.wait()
+        timings["upload_wait_s"] = round(time.monotonic() - upload_wait, 3)
+        timings.update(artifact_uploads.seconds)
         if not _still_ours(96):
             storage.delete_keys(uploaded_keys)
             raise dbx.JobLeaseLost(
@@ -10878,6 +10889,7 @@ def _run_render_job(worker_db, job):
             pass
         raise
     finally:
+        artifact_uploads.close()
         timings.update(detail)
         _RENDER_DETAIL.reset(detail_token)
         motion_layer.stop_collecting(motion_token)

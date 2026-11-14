@@ -26,6 +26,7 @@ taken back; in both cases the chain runs in the same job. `taste.against` is the
 the new film replaces it only when the critic does not find it worse.
 """
 import json
+import concurrent.futures as futures
 import os
 import shutil
 import time
@@ -1004,6 +1005,14 @@ def _stage(rec, name, t0):
 
 
 def _make(ctx, worker_db, job, cfg, deadline, work, rec):
+    # Only file/signal work leaves this thread. Model spend and Db connections
+    # retain their owning thread. The context joins on *every* failure before
+    # _attempt can remove the film's folder.
+    with futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool)
+
+
+def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
     from . import brief, call, direct, lower, perceive, scout, supply
     import db as dbx
     os.makedirs(work, exist_ok=True)
@@ -1022,8 +1031,19 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
     if ledger and ledger.get("asks"):
         sess["ledger"] = [{"said": a["said"], "want": a["want"]} for a in ledger["asks"]]
     _say(ctx, worker_db, "director_read", "Reading your video")
+    p0 = time.monotonic()
     per = perceive.run(index, os.path.join(work, "source.mp4"), work)
-    grid, _times = brief.boards_for(work, index, per)
+    rec.setdefault("prep_detail", {})["perception_s"] = round(time.monotonic() - p0, 3)
+    p0 = time.monotonic()
+    grid, _times = brief.boards_for(work, index, per, pages=(1,))
+    rec["prep_detail"]["scout_board_s"] = round(time.monotonic() - p0, 3)
+    # Scout reads board 1 only. The other identical boards are needed by
+    # Direct, so build them beside Scout/Supply, not in front of both calls.
+    def remaining_boards():
+        at = time.monotonic()
+        brief.boards_for(work, index, per, pages=(2, 3, 4))
+        return round(time.monotonic() - at, 3)
+    board_future = pool.submit(remaining_boards)
     _stage(rec, "prep", t)
     if deadline - time.monotonic() < PREP_LEFT_S:
         raise Fall("prep", f"{deadline - time.monotonic():.0f} s left after reading the footage")
@@ -1068,6 +1088,8 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
             bed.unset(work, "the pick was late")
     rec["at"] = "direct"
     t = time.monotonic()
+    rec["prep_detail"]["remaining_boards_s"] = board_future.result()
+    rec["prep_detail"]["boards_wait_s"] = round(time.monotonic() - t, 3)
     _say(ctx, worker_db, "director_direct", "Directing your film")
     brief.build(work, index, sess, per, sc, grid)
     try:

@@ -1114,6 +1114,15 @@ STORAGE_MULTIPART_CHUNK_MB = max(5, int(os.getenv(
 STORAGE_MULTIPART_THRESHOLD_MB = max(
     STORAGE_MULTIPART_CHUNK_MB, int(os.getenv(
         "STORAGE_MULTIPART_THRESHOLD_MB", "16")))
+# Artifact uploads run on the media workers. Four bounded 8-MiB parts keep
+# one slow B2 connection from serialising the whole preview. Downloads retain
+# their existing memory/concurrency budget above.
+STORAGE_UPLOAD_CONCURRENCY = max(1, min(8, int(os.getenv(
+    "STORAGE_UPLOAD_CONCURRENCY", "4"))))
+STORAGE_CONNECT_TIMEOUT_S = max(1.0, float(os.getenv(
+    "STORAGE_CONNECT_TIMEOUT_S", "5")))
+STORAGE_READ_TIMEOUT_S = max(1.0, float(os.getenv(
+    "STORAGE_READ_TIMEOUT_S", "15")))
 
 # ── Handing the model the VIDEO itself (round 83, mcp_media.py) ────────────
 # Some models on the other end of MCP can watch video, not just read our

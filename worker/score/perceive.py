@@ -11,6 +11,7 @@ off his head). There is no body or pose track, so `body` stays None and the gest
 are not offered.
 """
 import json
+import concurrent.futures as futures
 import os
 import subprocess
 
@@ -119,12 +120,16 @@ def free_regions(frames_bgr, subject_boxes):
     return out
 
 
-def audio_facts(src, has_audio):
+def audio_facts(src, has_audio, work=None):
     """Loudness over time and sharp onsets. Wordless films are anchored on these."""
     if not has_audio:
         return dict(note="no audio stream")
-    p = subprocess.run([FF, "-nostdin", "-v", "error", "-i", src, "-ac", "1", "-ar", "16000", "-f", "f32le", "-"], capture_output=True, timeout=120)
-    x = np.frombuffer(p.stdout, dtype=np.float32)
+    if work is not None:
+        from . import source_audio
+        x = source_audio.decode(src, work)
+    else:
+        p = subprocess.run([FF, "-nostdin", "-v", "error", "-i", src, "-ac", "1", "-ar", "16000", "-f", "f32le", "-"], capture_output=True, timeout=120)
+        x = np.frombuffer(p.stdout, dtype=np.float32)
     if not len(x):
         return dict(note="audio stream decodes empty")
     win = 800                                    # 50 ms
@@ -250,6 +255,13 @@ def head_of_person(b):
 
 
 def run(index, src, work):
+    with futures.ThreadPoolExecutor(max_workers=1) as pool:
+        audio = pool.submit(audio_facts, src,
+                            (index.get("video") or {}).get("has_audio", True), work)
+        return _run(index, src, work, audio)
+
+
+def _run(index, src, work, audio):
     vid = index.get("video") or {}
     dur, W, H = float(vid.get("duration") or 0), int(vid.get("width") or 0), int(vid.get("height") or 0)
     if dur <= 0 or W <= 0 or H <= 0:
@@ -301,7 +313,7 @@ def run(index, src, work):
     from . import grade
     grade.keep(work, [f for _, f in keep])         # the look is solved on these (score.grade)
     res = dict(step=step, W=W, H=H, dur=dur, fps=vid.get("fps"), shots=shots, events=[], text=text_clusters(index.get("spatial")), palette=pal, accents=accents,
-               audio=audio_facts(src, vid.get("has_audio", True)), samples=samples)
+               audio=audio.result(), samples=samples)
     with open(os.path.join(work, "perception.json"), "w") as f:
         json.dump(res, f, ensure_ascii=False)
     return res

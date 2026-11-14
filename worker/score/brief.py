@@ -652,7 +652,7 @@ def film_text(work, idx, sess, per, x, scout, styles, cards, bin_items=None):
     return "\n".join(out) + "\n"
 
 
-def boards_for(work, idx, per):
+def boards_for(work, idx, per, pages=(1, 2, 3, 4)):
     """The four frame boards. The Scout reads the first, so these come before anything else."""
     out = os.path.join(work, "brief")
     os.makedirs(out, exist_ok=True)
@@ -661,8 +661,10 @@ def boards_for(work, idx, per):
     per_board = rows * cols
     times = pick_times(per, per_board * 3)
     for i in range(3):
-        boards.save(frame_board(src, per, idx, times[i * per_board:(i + 1) * per_board], rows, cols, cw, ch), f"{out}/board_{i + 1}.jpg", quality=86)
-    boards.save(detail_board(src, per, idx), f"{out}/board_4.jpg", quality=86)
+        if i + 1 in pages:
+            boards.save(frame_board(src, per, idx, times[i * per_board:(i + 1) * per_board], rows, cols, cw, ch), f"{out}/board_{i + 1}.jpg", quality=86)
+    if 4 in pages:
+        boards.save(detail_board(src, per, idx), f"{out}/board_4.jpg", quality=86)
     return dict(rows=rows, cols=cols, cell=[cw, ch], per_board=per_board), times
 
 
@@ -670,7 +672,8 @@ def build(work, idx, sess, per, scout, grid=None):
     out = os.path.join(work, "brief")
     os.makedirs(out, exist_ok=True)
     src = os.path.join(work, "source.mp4")
-    x = decode(src) if idx.get("words") else np.zeros(0)
+    from . import source_audio
+    x = source_audio.decode(src, work) if idx.get("words") else np.zeros(0)
     with open(STYLES, encoding="utf-8") as f:
         cards = json.load(f)
     bin_items = (jload(os.path.join(work, "bin.json")) or {}).get("items") or []

@@ -341,7 +341,7 @@ def clamp_to_duration_limit(info):
     return info
 
 
-def _stream_index_source(worker_db, job, asset, workdir):
+def _stream_index_source(worker_db, job, asset, workdir, prepare=None):
     """Keep large originals in storage and reserve scratch for bounded outputs.
 
     Returns (presigned source URL, sha256, probe, proxy ceiling in kbps).
@@ -356,6 +356,11 @@ def _stream_index_source(worker_db, job, asset, workdir):
     print(f"[index {job['id']}] streaming {int(asset.get('bytes') or 0) / 1e9:.2f}"
           f" GB source from storage; scratch need {need / 1e9:.2f} GB, proxy "
           f"<= {proxy_kbps} kbps", flush=True)
+    # The object is complete and scratch is reserved. Start decoding its
+    # first HTTP ranges now; the integrity hash can traverse the original
+    # beside that work. Nothing is published under a hash until it completes.
+    if prepare is not None:
+        prepare(src, info, proxy_kbps)
     last = [0.0]
 
     def progress(fraction):
@@ -574,6 +579,26 @@ def run_index_job(worker_db, job):
     trial_scope, trial_recorder = _claude_trial_index_scope(worker_db, job)
     # Our own account's upload: its captions and greeting are company spend.
     company_recorder, sound_recorder = _company_recorders(worker_db, job)
+    stream_pool = None
+    stream_prepared = {}
+    stream_stop = threading.Event()
+
+    def prepare_stream(src, facts, kbps):
+        nonlocal stream_pool
+        stream_pool = futures.ThreadPoolExecutor(max_workers=2)
+        stream_prepared["proxy"] = stream_pool.submit(
+            clock.timed, "stream_proxy_s", media.make_proxy,
+            src, os.path.join(workdir, "proxy.mp4"), facts["fps"], facts["vfr"],
+            facts["has_audio"], duration=facts["duration"],
+            maxrate_kbps=kbps, limit_s=facts.get("limit_s"),
+            cancelled_cb=lambda: stream_stop.is_set() or _cancelled(worker_db))
+        if facts["has_audio"]:
+            stream_prepared["wav"] = stream_pool.submit(
+                clock.timed, "stream_wav_s", media.extract_wav,
+                src, os.path.join(workdir, "audio.wav"),
+                limit_s=facts.get("limit_s"),
+                cancelled_cb=lambda: stream_stop.is_set() or _cancelled(worker_db))
+
     try:
         warnings_pre = []
         if from_client_proxy:
@@ -620,7 +645,7 @@ def run_index_job(worker_db, job):
             }
         elif streamed_source:
             src, sha, info, proxy_kbps = _stream_index_source(
-                worker_db, job, asset, workdir)
+                worker_db, job, asset, workdir, prepare=prepare_stream)
             proxy_kwargs = {"maxrate_kbps": proxy_kbps}
             _mark("stream_sha256_s")
         else:
@@ -655,9 +680,13 @@ def run_index_job(worker_db, job):
         cached = worker_db.run(dbx.get_index_by_sha, sha)
         if cached and cached.get("pipeline_version", 1) == \
                 config.PIPELINE_VERSION and _index_has_tiles(cached["json"]):
+            ready_proxy = src if from_client_proxy else None
+            if "proxy" in stream_prepared:
+                stream_prepared["proxy"].result()
+                ready_proxy = os.path.join(workdir, "proxy.mp4")
             _ensure_proxy(worker_db, project_id, sha, proxy_key, src, info,
                           workdir,
-                          ready_proxy=src if from_client_proxy else None,
+                          ready_proxy=ready_proxy,
                           **proxy_kwargs)
             _ensure_audio(worker_db, project_id, sha, info)
             _claude_trial_indexed(worker_db, job, trial_scope)
@@ -744,12 +773,16 @@ def run_index_job(worker_db, job):
                 _lane_progress("picture", 0.60)
             else:
                 proxy_local = os.path.join(workdir, "proxy.mp4")
-                media.make_proxy(
-                    src, proxy_local, info["fps"], info["vfr"],
-                    info["has_audio"], duration=info["duration"],
-                    progress_cb=lambda frac: _lane_progress(
-                        "picture", 0.02 + 0.58 * frac),
-                    cancelled_cb=lambda: _cancelled(worker_db), **proxy_kwargs)
+                if "proxy" in stream_prepared:
+                    clock.timed("stream_proxy_wait_s", stream_prepared["proxy"].result)
+                else:
+                    clock.timed(
+                        "pic_proxy_encode_s", media.make_proxy,
+                        src, proxy_local, info["fps"], info["vfr"],
+                        info["has_audio"], duration=info["duration"],
+                        progress_cb=lambda frac: _lane_progress(
+                            "picture", 0.02 + 0.58 * frac),
+                        cancelled_cb=lambda: _cancelled(worker_db), **proxy_kwargs)
                 # Probed here, not at upload time: tile extraction needs the
                 # proxy's REAL duration to keep frame seeks inside it.
                 state["proxy_info"] = clock.timed(
@@ -839,10 +872,13 @@ def run_index_job(worker_db, job):
             wav_local = None
             if info["has_audio"]:
                 wav_local = os.path.join(workdir, "audio.wav")
-                clock.timed(
-                    "snd_wav_s", media.extract_wav, src, wav_local,
-                    cancelled_cb=lambda: _cancelled(worker_db),
-                    limit_s=info.get("limit_s"))
+                if "wav" in stream_prepared:
+                    clock.timed("stream_wav_wait_s", stream_prepared["wav"].result)
+                else:
+                    clock.timed(
+                        "snd_wav_s", media.extract_wav, src, wav_local,
+                        cancelled_cb=lambda: _cancelled(worker_db),
+                        limit_s=info.get("limit_s"))
             state["wav_local"] = wav_local
             state["wav_done_at"] = time.monotonic()
             _lane_progress("sound", 0.12)
@@ -1045,6 +1081,11 @@ def run_index_job(worker_db, job):
                 "language": language, "warnings": warnings,
                 "timings": timings}
     finally:
+        if stream_pool is not None:
+            # A hash/cache/lease failure must not remove files still being
+            # encoded, or leave ffmpeg work behind after this job finishes.
+            stream_stop.set()
+            stream_pool.shutdown(wait=True, cancel_futures=True)
         if trial_scope is not None:
             claude_trial.deactivate(trial_recorder)
             if isinstance(trial_recorder, _TrialRecorder) and \

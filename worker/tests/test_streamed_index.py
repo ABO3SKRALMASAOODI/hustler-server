@@ -234,3 +234,18 @@ def test_real_streamed_video_finishes_index_without_original_on_disk(
     assert db.index["tile_keys"] == ["tile"]
     assert reads and db.progress == sorted(db.progress)
     assert not (tmp_path / "scratch" / "index_7").exists()
+
+
+def test_first_ranges_decode_before_full_hash_but_after_scratch_check(monkeypatch):
+    order = []
+    monkeypatch.setattr(storage, 'presign_get', lambda *a, **k: 'https://source.invalid/film')
+    monkeypatch.setattr(media, 'probe', lambda src: {'duration': 300, 'has_audio': True})
+    def scratch(*a):
+        order.append('scratch')
+        return 4000, 1
+    monkeypatch.setattr(indexer, '_streamed_scratch_plan', scratch)
+    monkeypatch.setattr(storage, 'sha256_object', lambda *a, **k: order.append('hash') or 'sha')
+    got = indexer._stream_index_source(None, {'id': 1}, {'storage_key': 'key', 'bytes': 10}, '.',
+        prepare=lambda *a: order.append('first_ranges'))
+    assert order == ['scratch', 'first_ranges', 'hash']
+    assert got[1] == 'sha'

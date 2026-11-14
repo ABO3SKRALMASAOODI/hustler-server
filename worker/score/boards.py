@@ -23,8 +23,12 @@ def font(size):
 def grab(path, t, width=None, height=None):
     """One frame as a PIL image, or None."""
     scale = f"scale={width}:-2" if width else f"scale=-2:{height}"
-    cmd = [FFMPEG, "-nostdin", "-v", "error", "-ss", f"{max(t, 0):.3f}", "-i", path, "-frames:v", "1",
-           "-vf", scale, "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "3", "-"]
+    # One frame has no frame-level parallelism. Auto decoder/encoder pools
+    # multiplied by every board cell throttle the 1.5-vCPU Director slots.
+    cmd = [FFMPEG, "-nostdin", "-v", "error", "-threads", "1",
+           "-ss", f"{max(t, 0):.3f}", "-i", path, "-frames:v", "1",
+           "-vf", scale, "-filter_threads", "1", "-f", "image2pipe",
+           "-vcodec", "mjpeg", "-threads:v", "1", "-q:v", "3", "-"]
     r = subprocess.run(cmd, capture_output=True, timeout=60)
     if r.returncode != 0 or not r.stdout:
         return None
