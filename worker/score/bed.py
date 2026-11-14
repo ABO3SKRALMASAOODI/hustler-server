@@ -428,7 +428,12 @@ def one_mix(work, l1, index=None):
             shift = SD.voice_shift(voice, speech)
         before = {str(x.get("id")): x.get("db") for x in l1["sound"]}
         sounds = MU.sounds_on_the_drop(l1["sound"], {"drop_at": arr.get("drop_at"), "turn_s": doc.get("turn_s")}, fps)
-        sounds = SD.present_over(sounds, voice, MU.to_ar(song)[:n_ar], fps, voice_shift_db=shift)
+        if (index or {}).get("first_film"):
+            import first_film_sound
+            sounds, foreground = first_film_sound.level(sounds, voice, fps, shift)
+            song = first_film_sound.bed_space(song, sounds, fps, AU.SR)
+        else:
+            sounds = SD.present_over(sounds, voice, MU.to_ar(song)[:n_ar], fps, voice_shift_db=shift)
         _v, fx, _ = AU.split_audio(MU._Plan(dict(l1, sound=sounds), src))
         own, ducks = getattr(fx, "own", None), getattr(fx, "ducks", None) or []
         rep = {"sounds": len(sounds), "taken_out": len(l1["sound"]) - len(sounds),
