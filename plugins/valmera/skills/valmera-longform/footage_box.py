@@ -136,7 +136,8 @@ if j.get('_voices'):
     (pathlib.Path(sys.argv[2])/'footage.json').write_text(json.dumps(result,indent=1))
     sys.exit(0)
 find(j['lines'],j['named'],j['about'],sys.argv[2],1920,1080,
-     max_sources=10, per=2, avoid=j.get('avoid'), log=lambda s:print(s,flush=True))
+     max_sources=10, per=2, avoid=j.get('avoid'), strict_lines=True, motion_first=True,
+     alloc='round', reassign_lost=True, whole_first=True, log=lambda s:print(s,flush=True))
 '''
 
 
