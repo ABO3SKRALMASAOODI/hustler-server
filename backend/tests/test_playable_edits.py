@@ -223,19 +223,20 @@ def test_short_edit_batches_return_individual_receipts_without_edl_bloat(monkeyp
 
 
 @pytest.mark.parametrize('owned',[False,True])
-def test_edit_head_checks_owner_and_omits_unchanged_document(monkeypatch,owned):
+@pytest.mark.parametrize('preview_id',[None,91])
+def test_edit_head_checks_owner_and_omits_unchanged_document(monkeypatch,owned,preview_id):
     app=Flask(__name__)
     class Cur:
         def execute(self,sql,args):
             assert 'p.user_id=%s' in sql and args==(7,1)
             assert 'video_jobs' not in sql
-        def fetchone(self):return {'version':4,'json':{'keep':[[0,5]]},'created_by':'agent'} if owned else None
+        def fetchone(self):return {'version':4,'json':{'keep':[[0,5]]},'created_by':'agent','preview_asset_id':preview_id} if owned else None
     @contextlib.contextmanager
     def connect():yield type('Conn',(),{'cursor':lambda _:Cur()})()
     monkeypatch.setattr(video,'vdb',connect)
     with app.test_request_context('/?since=4'):
         response=video.edit_head.__wrapped__(1,7)
-    if owned:assert response.get_json()=={'version':4,'edl':None}
+    if owned:assert response.get_json()=={'version':4,'edl':None,'preview_asset_id':preview_id}
     else:assert response[1]==404
 
 

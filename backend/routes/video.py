@@ -6674,18 +6674,27 @@ def edit_head(user_id, project_id):
     since = request.args.get("since", default=0, type=int)
     with vdb() as conn:
         cur = conn.cursor()
-        cur.execute("""SELECT e.version, e.json, e.created_by
+        cur.execute("""SELECT e.version, e.json, e.created_by, r.id AS preview_asset_id
                        FROM projects p JOIN LATERAL (
                          SELECT version,json,created_by FROM edls
                          WHERE project_id=p.id ORDER BY version DESC LIMIT 1
-                       ) e ON TRUE WHERE p.id=%s AND p.user_id=%s""",
+                       ) e ON TRUE LEFT JOIN LATERAL (
+                         SELECT id FROM assets WHERE project_id=p.id
+                           AND kind='render' AND meta->>'variant'='preview'
+                           AND NOT (COALESCE(meta, '{}'::jsonb) ? 'r2_purged_at')
+                         ORDER BY id DESC LIMIT 1
+                       ) r ON TRUE WHERE p.id=%s AND p.user_id=%s""",
                     (project_id, int(user_id)))
         row = cur.fetchone()
     # Never disclose an unowned project's existence or current revision.
     if not row:
         return jsonify(error="Project or edit not found"), 404
+    # This is only a change receipt, not a playback decision. The Studio
+    # refreshes /state, which keeps all current preview eligibility checks.
     return jsonify(version=row["version"],
-                   edl=dict(row) if row["version"] != since else None)
+                   preview_asset_id=row.get("preview_asset_id"),
+                   edl={k: row[k] for k in ("version", "json", "created_by")}
+                       if row["version"] != since else None)
 
 
 @video_bp.route("/projects/<int:project_id>/playback", methods=["GET"])
