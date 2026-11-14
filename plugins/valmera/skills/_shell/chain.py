@@ -397,6 +397,9 @@ def music_version(ctx, rd, sc):
                 open(hp, "w").write(MUSIC_USED)
                 cmd = cmd[:cmd.index(" -m music_film score ")] + f" '{hp}' '{aj}'"
             sh(ctx, ["zsh", "-c", cmd], label=f"wf-{tag}-{ctx.run_id}", heavy=True, timeout=1800)
+            rep = json.load(open(report)) if os.path.exists(report) else {}
+            if not rep.get("ok") or not os.path.exists(out + ".part.mp4"):
+                raise RuntimeError(json.dumps({k: rep.get(k) for k in ("why", "tried")}, ensure_ascii=False)[:600])
             os.replace(out + ".part.mp4", out)
             if ledger:
                 try:
@@ -502,6 +505,14 @@ def finish_and_check(ctx, rd, sc):
     mv = music_version(ctx, rd, sc)              # the film's music: Valmera's choice, or the song the owner handed this run
     if mv:
         out.update(mv)
+    elif ctx.workflow == "wf3" and (ctx.args or {}).get("one_command") and wants_music(ctx):
+        report = os.path.join(ctx.supply, "music.json")
+        try:
+            reason = json.load(open(report))
+        except (OSError, ValueError):
+            reason = {"why": "music generation produced no report"}
+        raise RuntimeError("required story music was not delivered: " +
+                           json.dumps({k: reason.get(k) for k in ("why", "tried")}, ensure_ascii=False)[:500])
     return out
 
 

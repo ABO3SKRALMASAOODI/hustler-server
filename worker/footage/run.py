@@ -323,25 +323,23 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             t0, t1 = p["window"]
             raw = os.path.join(work, "raw", f"l{r['i']:02d}_{p['source']}_{int(t0 * 100)}.mp4")
             os.makedirs(os.path.dirname(raw), exist_ok=True)
-            try:
-                try:
-                    if p["source"] in whole_of:              # this source's sections already failed once: its whole copy is used
-                        raise fetch.FetchError("sections of this source do not come")
-                    _, how = cut.grab(stream_of.get(p["source"]), s["url"], t0, t1, raw)
-                except Exception as e:  # noqa: BLE001
-                    if not (read_s and s.get("duration") and float(s["duration"]) <= WHOLE_UNDER_S and s.get("where") == "youtube"):
-                        raise
+            def whole():
+                if s.get("duration") and float(s["duration"]) <= WHOLE_UNDER_S and s.get("where") == "youtube":
                     with whole_lock:                         # one whole fetch a source, whoever asks first
                         if p["source"] not in whole_of:
                             try:
                                 whole_of[p["source"]] = fetch.whole(s["url"], os.path.join(work, "whole", p["source"]))
-                                log(f"source {p['source']} fetched whole for its cuts ({str(e)[:60]})")
+                                log(f"source {p['source']} fetched whole for its cuts")
                             except Exception as e2:  # noqa: BLE001
                                 whole_of[p["source"]] = None
                                 log(f"source {p['source']} would not come whole either: {str(e2)[:120]}")
-                    if not whole_of.get(p["source"]):
-                        raise
+                    return whole_of.get(p["source"])
+                return None
+            try:
+                if whole_of.get(p["source"]):
                     _, how = cut.local(whole_of[p["source"]], t0, t1, raw)
+                else:
+                    _, how = cut.source(s, stream_of.get(p["source"]), t0, t1, raw, whole=whole)
                 p.update(raw=raw, t0=t0, t1=t1, how=how, stats=cut.measure(raw))
             except Exception as e:  # noqa: BLE001 the line keeps its other clips
                 p["error"] = str(e)[:200]

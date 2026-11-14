@@ -85,6 +85,36 @@ def test_a_clip_is_one_to_three_seconds_inside_one_shot():
     assert a >= 3.12 and b <= 3.78 + 1e-9
 
 
+def test_archived_checked_source_is_cut_without_reopening_youtube(tmp_path, monkeypatch):
+    proxy = tmp_path / "proxy.mp4"
+    proxy.write_bytes(b"checked archive source")
+    monkeypatch.setattr(cut, "grab", lambda *args: (_ for _ in ()).throw(AssertionError("reopened blocked source")))
+    calls = []
+    monkeypatch.setattr(cut, "local", lambda *args: (calls.append(args) or (args[-1], "whole")))
+    src = dict(url="https://www.youtube.com/watch?v=x", proxy=str(proxy), rung="wayback", dur_read=120)
+    assert cut.source(src, None, 10, 12, "out.mp4") == ("out.mp4", "archive_proxy")
+    assert calls[0][:3] == (str(proxy), 10, 12)
+
+
+def test_remote_cut_failure_uses_whole_then_only_a_checked_proxy_range(tmp_path, monkeypatch):
+    import pytest
+    from footage import fetch
+    proxy = tmp_path / "proxy.mp4"
+    proxy.write_bytes(b"checked source")
+    def blocked(*args):
+        raise fetch.FetchError("remote seek blocked")
+    monkeypatch.setattr(cut, "grab", blocked)
+    calls = []
+    monkeypatch.setattr(cut, "local", lambda *args: (calls.append(args) or (args[-1], "whole")))
+    src = dict(url="https://www.youtube.com/watch?v=x", proxy=str(proxy), dur_read=20)
+    assert cut.source(src, None, 10, 12, "out", whole=lambda: "whole.mp4")[1] == "whole"
+    assert calls[-1][0] == "whole.mp4"
+    assert cut.source(src, None, 10, 12, "out", whole=blocked)[1] == "verified_proxy"
+    assert calls[-1][0] == str(proxy)
+    with pytest.raises(fetch.FetchError):
+        cut.source(src, None, 19, 22, "out", whole=blocked)
+
+
 def test_the_grade_moves_each_clip_toward_one_measured_look_and_never_wrecks_one():
     clips = [dict(yavg=60, ylow=10, yhigh=120, sat=30), dict(yavg=140, ylow=40, yhigh=230, sat=70), dict(yavg=110, ylow=20, yhigh=200, sat=50)]
     tgt = cut.target(clips)

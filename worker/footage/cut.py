@@ -50,6 +50,35 @@ def grab(stream, url, t0, t1, out_path):
     return out_path, "section"
 
 
+def source(source, stream, t0, t1, out_path, whole=None):
+    """Cut the checked source, retaining its downloaded fallback when remote seeks fail.
+
+    An archived scan is already the archive's available rendition. Reopening
+    the original YouTube URL must not lose those verified frames. A proxy may
+    only supply a range actually scanned by the vision/shot checks.
+    """
+    proxy = source.get("proxy")
+    covered = bool(proxy and os.path.isfile(proxy) and t0 >= 0 and
+                   t1 <= float(source.get("dur_read") or 0) + 0.001)
+    if covered and source.get("rung") == "wayback":
+        path, _ = local(proxy, t0, t1, out_path)
+        return path, "archive_proxy"
+    try:
+        return grab(stream, source["url"], t0, t1, out_path)
+    except Exception:
+        if whole:
+            try:
+                path = whole()
+                if path:
+                    return local(path, t0, t1, out_path)
+            except Exception:
+                pass
+        if covered:
+            path, _ = local(proxy, t0, t1, out_path)
+            return path, "verified_proxy"
+        raise
+
+
 def local(src, t0, t1, out_path):
     """The section cut from a copy of the source already on disk (fetch.whole), near-lossless, no sound."""
     r = subprocess.run([fetch.ffmpeg(), "-hide_banner", "-loglevel", "error", "-ss", f"{max(t0, 0):.3f}", "-i", src, "-t", f"{t1 - t0:.3f}",
