@@ -10005,7 +10005,8 @@ def _run_render_job(worker_db, job):
         try:
             matte_launch = matte_track.launch_source(
                 original.get("sha256"),
-                worker_db.run(dbx.latest_asset, project_id, "proxy"),
+                matte_track.analysis_asset(edl_row['json'], original,
+                    worker_db.run(dbx.latest_asset, project_id, "proxy")),
                 index, project_id)
         except Exception:  # noqa: BLE001 — read-only then
             matte_launch = None

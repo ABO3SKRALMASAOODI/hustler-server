@@ -17219,7 +17219,7 @@ BEHIND_VISIBLE_MIN = 0.35
 BEHIND_VISIBLE_WARN = 0.65
 
 
-def _matte_source(ctx):
+def _matte_source(ctx, edl=None):
     """A sidecar SourceRef for this project that may LAUNCH matte.person
     jobs (the original's sha, the proxy the job reads, the index's grid),
     or a read-only one, or None."""
@@ -17228,6 +17228,7 @@ def _matte_source(ctx):
             if getattr(ctx, "db", None) else None
         proxy = ctx.db.run(dbx.latest_asset, ctx.project_id, "proxy") \
             if getattr(ctx, "db", None) else None
+        proxy = matte_track.analysis_asset(edl, orig, proxy)
         sha = (orig or {}).get("sha256") or getattr(ctx, "_orig_sha", "")
         src = matte_track.launch_source(sha, proxy, ctx.index,
                                         ctx.project_id)
@@ -17268,7 +17269,7 @@ def _program_matte_request(ctx, edl, s, e, src=None):
                   edl.get("speed") or [])
     out = {"status": "absent", "estimate_s": None, "coverage": None,
            "source": None}
-    src = src or _matte_source(ctx)
+    src = src or _matte_source(ctx, edl)
     if src is None:
         return out
     pm = matte_track.ProgramMatte(
