@@ -283,9 +283,14 @@ def annotate_script(ctx, sc, idea_full, spend, reel=True):
         return sc, None
     base = writer.verify(sc)            # pages read once in this process: a second read is the cache
 
+    # a re-make whose delivered check stands for a page that will not open today (script(): `reused`) carries that
+    # page's figures unbacked in `base`; the annotation may add none. A new script was verified whole: none allowed.
+    was_unbacked = set(base["numbers_unbacked"]) if remake_of(ctx) else set()
+
     def held(s):
         r = writer.verify(s)            # the annotation can add figures; it can never touch a fact
-        return dict(r, ok=bool(r["facts"]) and not r["numbers_unbacked"] and set(r["facts_unverified"]) <= set(base["facts_unverified"]))
+        return dict(r, ok=bool(r["facts"]) and set(r["numbers_unbacked"]) <= was_unbacked
+                    and set(r["facts_unverified"]) <= set(base["facts_unverified"]))
     sc2, rep, err = None, None, None
     for attempt in range(2 if reel else 1):
         try:
