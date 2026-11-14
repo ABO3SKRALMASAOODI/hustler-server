@@ -216,6 +216,19 @@ def fetch(run):
     src_dir = run.p("source")
     os.makedirs(src_dir, exist_ok=True)
     info = jload(os.path.join(src_dir, "info.json"))
+    # A verified cached source must work even when the metadata endpoint is
+    # walled. Do not require another network lookup before using those bytes.
+    cached = os.environ.get("PODCAST_SOURCE_CACHE")
+    if cached:
+        ci = jload(os.path.join(cached, "info.json"), {})
+        cv = os.path.join(cached, "podcast.mp4")
+        if ci.get("id") == run.state["video_id"] and os.path.isfile(cv):
+            duration = probe_s(cv)
+            expected = float(ci.get("duration") or 0)
+            if duration >= 90 and expected >= 90 and abs(duration - expected) < 3:
+                caps = sorted(os.path.join(cached, n) for n in os.listdir(cached) if n.endswith(".json3"))
+                return dict(video=cv, captions=caps[0] if caps else None, info=ci, duration=duration,
+                            bytes=os.path.getsize(cv), how="verified cached source and metadata")
     if not info:
         try:
             r = ladder(run, ["--skip-download", "--dump-single-json", run.link], lambda r: r.returncode == 0 and r.stdout.strip().startswith("{"),
@@ -419,6 +432,16 @@ def moments(run, fetched):
     words = [(float(t), w) for t, w in jload(run.p("words.json"), [])]
     styles = shell.registry()["wf1"]["styles"]
     info = fetched["info"]
+    cache = os.environ.get("PODCAST_SOURCE_CACHE")
+    if cache and os.environ.get("PODCAST_REPLAY_SELECTION") == "1":
+        prior_info = jload(os.path.join(cache, "info.json"), {})
+        prior_words = jload(os.path.join(cache, "words.json"))
+        prior = jload(os.path.join(cache, "moments.json"))
+        if prior_info.get("id") != info.get("id") or prior_words != jload(run.p("words.json")) or not prior:
+            raise RuntimeError("selection replay requires identical source identity and word timings")
+        # A regression run reuses the model's untouched selection, never a
+        # hand-authored edit plan. Every short is rebuilt through the product.
+        return dict(prior, spend=[], replayed_selection=True)
     chunk = 45000
     parts = [words[i:i + chunk + 800] for i in range(0, len(words), chunk)] or [[]]
     rows, left, pod, spend = [], [], {}, []

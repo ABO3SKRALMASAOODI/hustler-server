@@ -277,3 +277,17 @@ def test_once_the_wall_is_seen_the_shorts_not_started_wait_without_spending(tmp_
     monkeypatch.setattr(podcast.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("a short was started behind the wall")))
     rec = podcast.build_short(run, dict(id="m05", style="window", title="t"), dict(info={}, video="x"), {})
     assert rec["ok"] is False and wf1_film.WALL in rec["error"] and not os.path.exists(os.path.join(str(tmp_path), "shorts", "m05", "done.json"))
+
+
+def test_verified_source_cache_works_without_contacting_walled_metadata(tmp_path, monkeypatch):
+    cache=tmp_path/'cache'; cache.mkdir()
+    (cache/'podcast.mp4').write_bytes(b'cached-source')
+    (cache/'info.json').write_text(json.dumps(dict(id='abcdefghijk',duration=120)))
+    (cache/'captions.en.json3').write_text('{}')
+    work=tmp_path/'work';work.mkdir()
+    run=podcast.Run('https://youtu.be/abcdefghijk',str(work))
+    monkeypatch.setenv('PODCAST_SOURCE_CACHE',str(cache))
+    monkeypatch.setattr(podcast,'probe_s',lambda p:120)
+    monkeypatch.setattr(podcast,'ladder',lambda *a,**k: (_ for _ in ()).throw(AssertionError('metadata contacted')))
+    got=podcast.fetch(run)
+    assert got['video']==str(cache/'podcast.mp4') and got['captions'].endswith('.json3')
