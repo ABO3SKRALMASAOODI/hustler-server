@@ -1,8 +1,10 @@
 """Moving subjects must be measured where the caption actually appears."""
 from types import SimpleNamespace
+import re
 
 import pytest
 
+import graphics
 from score import compiler, taste
 
 
@@ -81,3 +83,27 @@ def test_same_aspect_punch_in_keeps_burned_caption_whole():
         {"w": 1080, "h": 1920}, 1080, 1920)
     assert not compiler._cuts(result, text)
     assert result[3] >= text[3]
+
+
+@pytest.mark.parametrize("template", ["title", "subtitle", "lower_third"])
+@pytest.mark.parametrize("overrides", [{}, {"shadow": 4, "outline_width": 1,
+                                          "tracking": 2},
+                                      {"shadow": 0, "outline_width": 0}])
+def test_explicit_type_keeps_its_edges_and_spacing_when_canvas_turns(template, overrides):
+    """Small serif titles must not acquire a portrait-sized ghost silhouette."""
+    tx = {"text": "Morgan | Editor", "start": 0, "end": 3,
+          "template": template, "font_size": .046, **overrides}
+    tags = []
+    for size in [(1280, 720), (720, 1280), (720, 720)]:
+        event = graphics._compile_item(tx, 3, size)
+        tags.append(re.findall(r"\\(fs|fsp|bord|shad)([\d.]+)", event["text"]))
+    assert tags[0] == tags[1] == tags[2]
+
+
+def test_explicit_font_scales_decorations_with_the_type_size():
+    tx = {"text": "Morning", "start": 0, "end": 3, "template": "subtitle",
+          "font_size": .04, "shadow": 4}
+    def shadow(scale):
+        event = graphics._compile_item({**tx, "size_scale": scale}, 3, (720, 1280))
+        return float(re.search(r"\\shad([\d.]+)", event["text"])[1])
+    assert shadow(2) == pytest.approx(2 * shadow(1), abs=.1)
