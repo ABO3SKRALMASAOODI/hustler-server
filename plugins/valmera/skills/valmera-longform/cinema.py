@@ -264,16 +264,21 @@ def evidence_for_gaps(ctx,script,ft,gaps):
     ft['lines']=list(by.values())
 
 
-def photo_research_ready(root,gaps,duration):
-    """Two completed video searches may establish a genuinely scarce view.
-    Count the saved engine results, including uncovered lines, not an attempt
-    counter: a failed download or interrupted search is not research evidence.
-    """
-    if sum(g['seconds'] for g in gaps)>duration*.45:return False
+def video_search_counts(root):
+    """Count saved engine results, including uncovered lines, not attempts."""
     counts={}
     for path in Path(root).glob('*/footage.json'):
         for i in {r['i'] for r in read(path).get('lines',[])}:
             counts[i]=counts.get(i,0)+1
+    return counts
+
+
+def photo_research_ready(root,gaps,duration):
+    """Two completed video searches may establish a genuinely scarce view.
+    A failed download or interrupted search is not research evidence.
+    """
+    if sum(g['seconds'] for g in gaps)>duration*.45:return False
+    counts=video_search_counts(root)
     return all(counts.get(g['seg'],0)>=2 for g in gaps)
 
 
@@ -315,12 +320,16 @@ def supply(ctx, script):
             if photo_research_ready(Path(ctx.supply)/'footage',gaps,wj['duration']):
                 ctx.log('two completed video searches cover each remaining gap; researching unique archive photographs within the 45% limit')
                 break
+            research_gaps=gaps
+            if sum(g['seconds'] for g in gaps)<=wj['duration']*.45:
+                counts=video_search_counts(Path(ctx.supply)/'footage')
+                research_gaps=[g for g in gaps if counts.get(g['seg'],0)<2]
             avoid=[dict(url=c['source']['url'],time_range=c['time_range']) for ln in ft['lines'] for c in ln['clips']]
             avoid += [dict(url=v['source']['url'],time_range=v['time_range']) for v in ft['voices']]
-            ctx.log(f"footage repair {attempt+1}: {len(gaps)} gaps, {sum(g['seconds'] for g in gaps):.1f}s")
+            ctx.log(f"footage repair {attempt+1}: {len(gaps)} gaps, {sum(g['seconds'] for g in gaps):.1f}s; {len(research_gaps)} require more video research")
             for ch in sc['chapters']:
                 lines=[dict(i=g['seg'],say=sc['segments'][g['seg']]['say'],pictures=sc['segments'][g['seg']].get('pictures',[]),dur=g['seconds']+2)
-                       for g in gaps if sc['segments'][g['seg']]['chapter']==ch['id']]
+                       for g in research_gaps if sc['segments'][g['seg']]['chapter']==ch['id']]
                 if not lines:continue
                 dest=Path(ctx.supply)/'footage'/f"repair-{attempt+1}-{ch['id']}"
                 known=list({c['source']['url']:c['source'] for ln in ft['lines'] for c in ln['clips']}.values())
