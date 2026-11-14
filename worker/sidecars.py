@@ -1084,8 +1084,14 @@ def estimate_s(handle):
     fps = _rate(handle.kind, params)
     warm = float(params.get("warmup_s") or 0.0)
     groups = _group(todo, _group_span(handle.kind, todo))
+    ms_per_frame = sp['ms_per_frame']
+    if handle.kind == 'matte.person' and params.get('refine'):
+        # Refined compositing adds SAM every four frames plus optical flow.
+        # The 743-frame diagnostic measured about 0.5 s/frame on four threads;
+        # reporting the RVM-only rate made the additional work look stalled.
+        ms_per_frame = max(ms_per_frame, 500.)
     costs = sorted((sum((c.t1 - c.t0 + warm) * fps for c in g)
-                    * sp["ms_per_frame"] / 1000.0 for g in groups),
+                    * ms_per_frame / 1000.0 for g in groups),
                    reverse=True)
     shards = _shards()
     waves = [costs[i:i + shards] for i in range(0, len(costs), shards)]

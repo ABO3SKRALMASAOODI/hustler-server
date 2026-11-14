@@ -50,6 +50,20 @@ def _wait_for_matte(ctx, row, wait_s):
 def before_preview(ctx, row, wait_s=60):
     matte_state = _wait_for_matte(ctx, row, wait_s * MATTE_WAIT_FACTOR)
     ctx.render_dependency_key = None
+    if any(i.get('type') == 'background' for i in row['json'].get('fx') or []):
+        # A background swap cannot be approved as its missing-matte substitute.
+        # The refined matte may need several bounded waits; keep the same job.
+        if not matte_state:
+            return 'ERROR: the background replacement has no verified subject matte. The replacement is not ready.'
+        if matte_state.get('status') != 'ready':
+            _bind_preview(ctx, row, {'matte': matte_state})
+            states = {w.get('status') for w in matte_state.get('windows') or []}
+            if states & {'pending', 'running'}:
+                return ('IN_PROGRESS: the subject matte for the background replacement is still '
+                        'being measured. No preview was encoded. Continue with render_preview '
+                        'to wait for these same inputs; do not remove the effect or claim it is finished.')
+            return ('ERROR: the subject matte for the background replacement is unavailable. '
+                    'The replacement is not ready: ' + str(matte_state.get('reason') or 'no measured matte'))
     if not needed(ctx, row):
         ctx.render_dependency_state = None
         if matte_state:

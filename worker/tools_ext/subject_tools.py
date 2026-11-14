@@ -299,7 +299,7 @@ def _ensure_matte(ctx, edl, tl, windows, wait_s=0):
             src = launch(original["sha256"], proxy, ctx.index, ctx.project_id)
             if src is None:
                 return ""
-            params = fxgraph.peer("matte_track:sidecar_params", default=None)
+            params = fxgraph.peer("matte_track:sidecar_params", edl, default=None)
         else:
             video = (ctx.index or {}).get("video") or {}
             meta = proxy.get("meta") or {}
@@ -330,6 +330,10 @@ def _ensure_matte(ctx, edl, tl, windows, wait_s=0):
         if st == "ready":
             return ""
         est = sidecars.estimate_s(h)
+        if any(i.get('type') == 'background' for i in edl.get('fx') or []):
+            return (f"Measuring the subject for this background replacement (approximately {max(1, int(est))} s). "
+                    "render_preview waits for this same matte; keep the effect while it is pending. "
+                    "The background replacement is not finished until its rendered frames show it.")
         return (f"Measuring the subject for this (≈{max(1, int(est))} s): "
                 "previews until then show the stand-in (a full-frame flash "
                 "for a fill, a colour card for a poster, a halation for a "
@@ -743,7 +747,7 @@ def set_background(ctx, kind, start, end, colour=None, colour2=None,
                         f"set the background to {kind} {a:g}-{b:g}s"
                         f"{held} ({it['id']})")
     if out.startswith("EDL"):
-        note = _ensure_matte(ctx, edl, tl, [(a, b)])
+        note = _ensure_matte(ctx, ctx.latest_edl()['json'], tl, [(a, b)])
         if note:
             notes.append(note)
     return out + ("\n" + "\n".join(notes) if notes else "")
