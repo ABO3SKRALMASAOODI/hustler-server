@@ -213,6 +213,20 @@ def test_a_stale_verdict_never_vouches_for_a_newer_version(monkeypatch):
     assert outcome == "partial" and "can't confirm" in final
 
 
+def test_final_change_disclosure_cannot_drop_a_checked_unmet_ask(monkeypatch):
+    import edit_scope
+    ctx = _loop_ctx(_ledger())
+    ctx.ask_verdict = dict(_verdict("not_done"), edl_version=2)
+    line = "The short still runs beyond the requested examples."
+    ctx.ask_verdict['asks'][0]['line'] = line
+    monkeypatch.setattr(asks, 'true_reply', lambda ctx, ledger, verdict, text: text)
+    # The brands replay's last rewrite described pictures but lost the ending failure.
+    monkeypatch.setattr(edit_scope, 'disclose', lambda ctx, text: 'Three pictures were added.')
+    final, outcome = agent_loop._asks_settle(ctx, line, 'fulfilled')
+    assert outcome == 'partial'
+    assert line in final
+
+
 def test_the_check_uses_only_this_versions_render(monkeypatch):
     got = {}
 
