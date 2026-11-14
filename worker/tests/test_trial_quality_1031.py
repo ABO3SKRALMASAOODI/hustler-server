@@ -394,14 +394,39 @@ def test_design_runs_once_per_request_on_claude_lanes_only(monkeypatch):
 
 # ── 4. a question to the user is awaiting_user ────────────────────────────
 
-def test_ask_user_records_awaiting_user_not_blocked():
-    import inspect
-    src = inspect.getsource(agent_loop)
-    i = src.index('{"ask_user": True,')
-    window = src[i:i + 600]
-    assert '"outcome": AWAITING_USER' in window
-    assert '"outcome": "blocked"' not in window
-    assert agent_loop.AWAITING_USER == "awaiting_user"
+@pytest.mark.parametrize("verified", [True, False])
+def test_ask_user_records_awaiting_user_not_blocked(monkeypatch, verified):
+    import json
+    import reply_truth
+    from test_review_loop_after_preview import _delivered, _run
+
+    ctx, db, posted, checkpoint, _calls = _delivered(monkeypatch)
+    question = "Which uploaded image should I use?"
+    call = SimpleNamespace(id="question1", function=SimpleNamespace(
+        name="ask_user", arguments=json.dumps({"question": question})))
+    ctx.llm_client.chat.completions.create = lambda **kw: SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(
+            content=None, tool_calls=[call]), finish_reason="tool_calls")],
+        usage=None)
+
+    def ask(_ctx, name, args):
+        assert name == "ask_user"
+        raise agent_tools.AskUser(args["question"])
+
+    monkeypatch.setattr(agent_tools, "execute", ask)
+    monkeypatch.setattr(agent_loop.reply_language, "judge", lambda *a, **k: {})
+    monkeypatch.setattr(agent_loop, "_language_flip", lambda *a, **k: None)
+    monkeypatch.setattr(reply_truth, "check", lambda *a, **k: [] if verified else None)
+    result = _run(ctx, db)
+    expected = "awaiting_user" if verified else "partial"
+    assert result["outcome"] == expected
+    assert result["status"] == ("awaiting_user" if verified else "replied")
+    assert result["billable"] is False
+    text, meta = posted[-1]
+    assert meta["ask_user"] is verified
+    assert meta["outcome"] == expected
+    assert text == (question if verified else reply_truth.UNVERIFIED)
+    assert checkpoint == {}
 
 
 def test_the_title_sits_in_the_top_band():
