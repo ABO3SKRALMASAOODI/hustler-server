@@ -21,6 +21,8 @@ Pinned here, one block per rule:
      by the user's own request, never raising, gated to short-form.
 """
 
+from podcast_skill_contract import LEGACY, active_text
+
 import os
 import sys
 
@@ -768,10 +770,17 @@ def _read(*parts):
 
 def test_worker_skills_plugin_and_core_prompt_carry_the_same_rules():
     import agent_prompt
+    # v10 has its own engine grammar, not v9's MCP tools/type-role budgets.
+    current = active_text()
+    for phrase in ("hooks in its first sentence", "lands its payoff",
+                   "every display word is a word he says", "No spliced claims",
+                   "one continuous window", "each with its URL, channel and time range",
+                   "one consistent design", "film ends on his last word"):
+        assert phrase in current, phrase
     worker = {name: _flat(agent_prompt.read_skill_text(name))
               for name in ("short-form-direction", "hooks-retention",
                            "motion-design", "review", "cutting")}
-    plugin = {rel: _read(_PLUGIN, *rel.split("/"))
+    plugin = {rel: _read(LEGACY, *rel.split("/"))
               for rel in ("SKILL.md", "references/looks.md",
                           "references/editing.md", "references/review.md",
                           "references/selection.md")}

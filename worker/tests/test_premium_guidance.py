@@ -23,6 +23,7 @@ import os
 
 import agent_prompt
 import agent_tools
+from podcast_skill_contract import LEGACY, active_text, assert_current_motion_and_music
 
 
 def _skill(name):
@@ -231,10 +232,14 @@ _QUOTAS = (
 
 
 def test_one_restraint_rule_is_stated_verbatim_on_every_surface():
-    """Owner, Oct 10 2026: zooms and sound effects are optional, never
-    rules. The same rule, word for word, reaches Valmera's agent, the worker
-    playbooks and the podcast-shorts plugin; MCP clients get the same
-    behaviour in the authored MCP guide's own words."""
+    """November v10 doctrine is distinct from preserved v9/worker guidance.
+
+    The worker migration is outside this CI-pins lane; do not restore its
+    October defaults in the active podcast workflow to satisfy these pins.
+    """
+    # The November owner reversal applies to active v10; keep the archived
+    # v9/worker compatibility assertions without imposing them on new runs.
+    assert_current_motion_and_music(active_text())
     rule = _flat(agent_prompt.RESTRAINT_RULE)
     assert rule.startswith("ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES")
     for phrase in ("restraint is the default", "zero is a fine answer",
@@ -243,8 +248,8 @@ def test_one_restraint_rule_is_stated_verbatim_on_every_surface():
                    "sound per landing or transition", "childish"):
         assert phrase in rule, phrase
     surfaces = {"core prompt": agent_prompt.CORE_PROMPT,
-                "plugin SKILL.md": _read(_PLUGIN, "SKILL.md"),
-                "plugin looks.md": _read(_PLUGIN, "references", "looks.md")}
+                "legacy v9 SKILL.md": _read(LEGACY, "SKILL.md"),
+                "legacy v9 looks.md": _read(LEGACY, "references", "looks.md")}
     for name in ("short-form-direction", "zooms", "audio", "transitions",
                  "hooks-retention", "motion-design", "review"):
         surfaces["skill " + name] = _skill(name)
@@ -263,13 +268,17 @@ def test_one_restraint_rule_is_stated_verbatim_on_every_surface():
 
 
 def test_no_surface_turns_a_zoom_or_a_sound_into_a_quota():
+    current = active_text()
+    assert_current_motion_and_music(current)
+    assert "nothing is thrown in without a reason on screen" in current
+    assert "nothing sits on a face" in current
     surfaces = {"core prompt": agent_prompt.CORE_PROMPT,
                 "mcp workflow": _mcp_workflow()}
     for name in agent_prompt.skill_names():
         surfaces["skill " + name] = _skill(name)
     for rel in ("SKILL.md", "references/looks.md", "references/editing.md",
                 "references/review.md", "references/selection.md"):
-        surfaces["plugin " + rel] = _read(_PLUGIN, *rel.split("/"))
+        surfaces["legacy v9 " + rel] = _read(LEGACY, *rel.split("/"))
     for where, text in surfaces.items():
         low = _flat(text).lower()
         for phrase in _QUOTAS:

@@ -1,141 +1,139 @@
-"""Owner policy for the shared podcast-shorts skill (16 Oct 2026): a run
-never pauses to wait for a Valmera fix or asks the user to continue. It
-works around defects, finishes on its own and reports the real defects at
-the end. The owner's runs kept stopping and needed "continue" each time."""
-import pathlib
+"""Current podcast contract: owner decisions of 13-14 Nov 2026.
 
-SKILL = (pathlib.Path(__file__).resolve().parents[2]
-         / "plugins" / "valmera" / "skills" / "valmera-podcast-shorts")
+v10 replaces the v9 editor-agent protocol with a link-only engine run. Pin
+that entry point and its safeguards, not archived headings or tool calls.
+The native runtime tests below also exercise delivery, cleanup and resume.
+"""
+import os
+import subprocess
+import sys
 
-
-def _active_text():
-    files = [SKILL / "SKILL.md", *sorted((SKILL / "references").glob("*.md"))]
-    return "\n".join(p.read_text() for p in files)
+from podcast_skill_contract import SKILL, active_text, script
 
 
 def test_runs_never_stop_the_line():
-    text = _active_text()
-    assert "stop the line" not in text.lower()
-    assert "Defects: keep going, report at the end" in text
-    assert "never asks the user" in text
+    # A real source wall now holds delivery (134058d5), without losing work.
+    text = active_text()
+    for phrase in ("The only input is the link", "no brief, no count, no style, no song",
+                   "do not end your turn while it runs", "run the same command with the same link",
+                   "shorts already made are kept", "nothing is delivered until the set is whole"):
+        assert phrase in text, phrase
+    prompt = (SKILL / "agents/openai.yaml").read_text()
+    assert "link as its only argument" in prompt and "Ask me nothing else" in prompt
 
 
 def test_short_count_follows_the_podcast_never_a_number():
-    """Owner policy (16 Oct 2026): no target, minimum, maximum or rate for
-    the number of shorts; every story that clears the bar is made."""
-    import re
-    text = _active_text()
-    assert "count follows the podcast" in text
-    assert not re.search(r"\btop \d+-\d+\b", text)
-    assert "hero cap" not in text.lower()
-    run_py = (SKILL / "scripts" / "run.py").read_text()
-    assert "HERO_CAP" not in run_py
+    text = active_text()
+    assert "every moment at 7 or over is made" in text
+    assert "There is no count, minimum or maximum" in text
+    source = script()
+    assert "There is no target number" in source
+    assert "no minimum and no maximum" in source
+    assert "HERO_CAP" not in source
 
 
 def test_render_fix_and_call_counts_are_budgets_never_stops():
-    """Owner policy (16 Oct 2026): runs kept ending good shorts on the
-    two-render ceiling, the one-fix rule and the call cap, and the owner
-    overrode them twice ("ignore and solve it, report it at the end")."""
-    import re
-    text = _active_text()
-    low = text.lower()
-    assert "two renders is the ceiling" not in low
-    assert "two renders is a ceiling" not in low
-    assert not re.search(r"at most one targeted fix|one targeted fix\b", low)
-    assert "budgets, never stops" in low
-    prompt = (SKILL / "agents" / "openai.yaml").read_text().lower()
-    assert "stop the line" not in prompt
-    run_py = (SKILL / "scripts" / "run.py").read_text()
-    assert "already used" not in run_py
-
-
-# Quota-style exclusion wording (owner, 16 Oct 2026: a 2 h 41 min Elon Musk
-# episode he watched and loved gave 6 finals; its not-selected list parked
-# moments "beyond the bar for this batch", as a "third manufacturing story"
-# or for overlapping another short's theme). Such wording may appear in the
-# skill only inside quotes, as an example of an invalid reason.
-QUOTA_WORDING = (
-    r"for this batch", r"beyond the bar", r"select fewer", r"pick fewer",
-    r"fewer, stronger", r"\balready have \w+ (shorts|stories|on)\b",
-    r"\b(second|third|fourth) \w+ story\b", r"\bsame theme\b",
-    r"\boverlaps \w+'s\b", r"\b(joe|host)-led\b", r"\bbrand risk\b",
-)
-
-
-def _unquoted(text):
-    import re
-    flat = " ".join(text.split())
-    return re.sub(r'"[^"]{0,160}"', '""', flat)
+    # v10 checkpoints failed shorts, retries on resume and reports real failures;
+    # the old unlimited v9 render-budget wording is no longer the run protocol.
+    text = active_text()
+    for phrase in ("A short that failed is tried again on that run",
+                   "anything in `not_made` with its reason",
+                   "Fix a real defect in the product, never by hand in a film"):
+        assert phrase in text, phrase
+    assert "two renders is the ceiling" not in text.lower()
+    assert "one targeted fix" not in text.lower()
 
 
 def test_no_quota_style_exclusion_wording():
-    import re
-    text = _active_text()
-    bare = _unquoted(text).lower()
-    for pattern in QUOTA_WORDING:
-        assert not re.search(pattern, bare), pattern
-    prompt = (SKILL / "agents" / "openai.yaml").read_text().lower()
-    assert "rank the hero stories" not in prompt
-    selection = " ".join((SKILL / "references" / "selection.md").read_text().split())
-    assert "Valid reasons to leave a moment out" in selection
-    assert "Never valid:** quota or batch logic" in selection
-    for reason in ("no arc", "duplicate", "sponsor read", "private individual",
-                   "unfaithful", "footage"):
-        assert f"**{reason}**" in selection, reason
+    # Selection is model judgment, not a vocabulary classifier. It must explain
+    # exclusions; no count or theme quota may replace the individual bar.
+    source = script()
+    for phrase in ("Grade each moment on its own", "There is no target number",
+                   "no minimum and no maximum", "the strongest moments you left out",
+                   "the reason"):
+        assert phrase in source, phrase
+    text = active_text()
+    assert "No word list or regex decides what a moment means or whether a film is good" in text
+    assert "models read, signals measure" in text
 
 
 def test_selection_is_a_full_scan_graded_independently():
-    text = " ".join(_active_text().split())
-    assert "Full scan, not a skim" in text
-    assert "Grade every moment on its own against a fixed bar" in text
-    for grade in ("**hook**", "**payoff**", "**inspiration**"):
-        assert grade in text
-    assert "(hook + payoff + inspiration + visual) / 18" in text
+    source = script()
+    for phrase in ("Walk the whole transcript in order", "Grade each moment on its own",
+                   "hook_score", "payoff_score", "story_score", "strength"):
+        assert phrase in source, phrase
+    text = active_text()
+    assert "One reading of the whole conversation" in text
+    assert "Each is graded 1 to 10 on its own" in text
+    assert "A builder never rates its own film" in text
+    assert "measurements, not scores" in text
 
 
 def test_selection_reads_the_audience_heatmap():
-    text = " ".join(_active_text().split())
-    assert "## Audience signal" in text
-    assert "--skip-download --dump-json" in text
-    assert "`heatmap`" in text and "`chapters`" in text
-    assert "selection/audience.json" in text
-    assert "A high-replay moment you do not select needs a valid reason" in text
-    skill = " ".join((SKILL / "SKILL.md").read_text().split())
-    assert skill.index("**Audience signal**") < skill.index("4. **Materialize once.**")
+    # The manual heatmap step was replaced by v10's whole-conversation model
+    # selection. Source identity and word times remain mandatory evidence.
+    text = active_text()
+    assert "Every word with its time" in text
+    assert "else the whole source heard locally" in text
+    source = script()
+    for phrase in ("# The source", "# Transcript", "identity_text(info)",
+                   "lines_of(ws)", "llm.ask(SELECT_SYSTEM, content", 'effort="high"'):
+        assert phrase in source, phrase
 
 
 def test_challenge_pass_runs_before_make_shorts():
-    selection = " ".join((SKILL / "references" / "selection.md").read_text().split())
-    challenge = selection.index("### Challenge pass (before make_shorts)")
-    assert challenge < selection.index("## Materialize once")
-    assert '"would I miss this?"' in selection
-    assert "separate critic" in selection and "explicit second pass" in selection
-    assert "selection/challenge.md" in selection
-    skill = " ".join((SKILL / "SKILL.md").read_text().split())
-    assert skill.index("**challenge pass**") < skill.index("4. **Materialize once.**")
+    # The v9 separate critic/make_shorts protocol became a single selection
+    # stage before engine construction; the fixed bar still precedes the build.
+    source = script()
+    assert '("fetch", "hear", "moments", "shorts", "deliver")' in source
+    assert 'assign_styles(rank(rows)' in source
+    assert 'no moment of this source clears the bar' in source
+    assert 'shorts(run, results["fetch"], results["moments"]' in source
 
 
 def test_a_craft_defect_is_a_fix_never_a_kill():
-    review = " ".join((SKILL / "references" / "review.md").read_text().split())
-    assert "| attention is no, or several no |" not in review
-    assert "are several fixes, never a kill" in review
-    selection = (SKILL / "references" / "selection.md").read_text()
-    assert "**Kills are expensive.**" in selection
+    text = active_text()
+    assert "Fix a real defect in the product, never by hand in a film" in text
+    assert "A short that failed is tried again on that run" in text
+    assert "anything in `not_made` with its reason" in text
+    assert "Pictures never move to a different sentence without a fresh placement check" in text
+    assert "Rejected placements return to the take; no unexamined picture reaches the film" in text
 
 
 def test_payoff_never_holds_on_a_freeze_or_slow_tail():
-    """Owner (22 Oct 2026): a frozen or slowed last frame before the end card
-    reads as the video stalling. The payoff holds on live footage only."""
-    text = _active_text()
-    assert "audio_mode='hold'" not in text.replace("NEVER `add_freeze_frame`", "")
-    assert "0.5x slow tail" not in text and "slow last 0.4 s" not in text
-    assert "LIVE footage" in text
+    text = active_text()
+    assert "the payoff is always his face" in text
+    assert "film ends on his last word so the end card follows directly" in text
+    for retired in ("audio_mode='hold'", "0.5x slow tail", "slow last 0.4 s", "add_freeze_frame"):
+        assert retired not in text
+    film = script("wf1_film.py")
+    assert "the payoff is his face" in film
+    assert "never more than its last four seconds" in film
+    assert "A clip cut close to its last word has no tail" in film
 
 
 def test_persistent_editors_share_lessons_and_reviews_use_the_critic():
-    """Owner (22 Oct 2026): Codex runs must work like the Claude runs:
-    persistent editors with a shared lessons file, batch reviews with the
-    motion critic."""
-    text = _active_text()
-    assert "PERSISTENT editors" in text and "lanes/LESSONS.md" in text
-    assert "critique_short" in text and "in small\n   batches" in text
+    # Persistent editor agents were retired for the engine shell. The active
+    # handoff is one measured, complete local delivery, with immutable branding.
+    text = active_text()
+    for phrase in ("one run of the workflow shell", "Delivered once, complete",
+                   "Nothing is ever added to a delivered folder", "Never published by this skill",
+                   "never cropped, covered, moved or replaced", "run fails if anything of it is left",
+                   "No model call on Anthropic's API"):
+        assert phrase in text, phrase
+    assert "PERSISTENT editors" not in text
+
+
+def test_v10_runtime_delivery_resume_brand_and_cleanup_contracts(tmp_path):
+    """Keep the no-network native regression suite on check-editor's test path.
+
+    A separate interpreter isolates the workflow's llm/film module names from
+    the worker's modules. Fixtures write only beneath pytest's temporary root.
+    """
+    env = dict(os.environ, PODCAST_NO_REEXEC="1", PYTHONDONTWRITEBYTECODE="1")
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-o", "tmp_path_retention_policy=failed",
+         "--basetemp", str(tmp_path / "native"), str(SKILL / "scripts/test_podcast.py")],
+        cwd=SKILL, env=env, text=True, capture_output=True, timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

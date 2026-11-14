@@ -3,6 +3,8 @@ project_state, the critic's corroboration rule, the final-export DEGRADED
 gate and the close-out guidance (ROADMAP 1F; INTERFACES_W1.md §4, §6.3,
 §8)."""
 
+from podcast_skill_contract import LEGACY, active_text
+
 import json
 import os
 import re
@@ -396,8 +398,14 @@ def test_follow_crop_caveats_are_gone():
     assert "a window crossing a cut" not in tg
     md = agent_prompt.read_skill_text("motion-design")
     assert "a crop that follows the speaker)" not in md
-    plugin = os.path.join(ROOT, "plugins", "valmera", "skills",
-                          "valmera-podcast-shorts", "references")
+    # Archived MCP device examples remain supported for resuming v9 runs.
+    # v10 uses the scene engines and the November ALIEN gates instead.
+    current = active_text()
+    for phrase in ("faces stay whole", "worker/scene/pace.py", "motion.py",
+                   "`diecut` and `answer` are gimmicks: never used",
+                   "`lamp` is not ready", "only behind its gate"):
+        assert phrase in current, phrase
+    plugin = LEGACY / "references"
     with open(os.path.join(plugin, "editing.md")) as fh:
         editing = fh.read()
     assert "only inside one continuous shot" not in editing

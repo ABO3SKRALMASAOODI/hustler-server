@@ -16,6 +16,8 @@ The approved recordings themselves are never altered.
 
 Run:  python -m pytest tests/test_sfx_mix.py -q     (from worker/)
 """
+
+from podcast_skill_contract import LEGACY, active_text, assert_current_sound
 import json
 import os
 import shutil
@@ -484,6 +486,8 @@ def _read(*parts):
 
 
 def test_the_sound_rule_is_stated_verbatim_on_every_surface():
+    # November v10 sound design supersedes October zero-SFX doctrine.
+    assert_current_sound(active_text())
     rule = _flat(agent_prompt.SOUND_RULE)
     for phrase in ("DEFAULT TO ZERO", "at most 1-2 per short",
                    "a visual partner within ~50 ms",
@@ -494,7 +498,7 @@ def test_the_sound_rule_is_stated_verbatim_on_every_surface():
                    "screen is a payment", "Leave gain_db unset"):
         assert phrase in rule, phrase
     surfaces = {"core prompt": agent_prompt.CORE_PROMPT,
-                "plugin SKILL.md": _read(_PLUGIN, "SKILL.md")}
+                "legacy v9 SKILL.md": _read(LEGACY, "SKILL.md")}
     for name in ("audio", "short-form-direction", "motion-design",
                  "transitions", "review"):
         surfaces["skill " + name] = agent_prompt.read_skill_text(name)
@@ -532,7 +536,9 @@ def test_no_surface_prescribes_a_pun_or_a_fixed_gain():
         surfaces["skill " + name] = agent_prompt.read_skill_text(name)
     for rel in ("SKILL.md", "references/looks.md", "references/editing.md",
                 "references/review.md"):
-        surfaces["plugin " + rel] = _read(_PLUGIN, *rel.split("/"))
+        surfaces["legacy v9 " + rel] = _read(LEGACY, *rel.split("/"))
+    surfaces["active v10"] = active_text()
+    assert_current_sound(surfaces["active v10"])
     for where, text in surfaces.items():
         low = _flat(text).lower()
         for phrase in retired:

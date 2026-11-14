@@ -15,6 +15,8 @@ graphics and the picture floor; an EDL laid out around the v6 corner keeps
 the corner on re-export (no collision); and a rendered final carries the
 mark in the slot with the 5 s end card md5-identical to a clean final's.
 """
+
+from podcast_skill_contract import LEGACY as LEGACY_SKILL, active_text
 import os
 import shutil
 import sys
@@ -94,7 +96,8 @@ def test_the_card_rows_stack_and_archival_windows_sit_under_the_slot():
         assert not keepout._crosses(box, z), box
 
 
-# The podcast-shorts skill's card rows (references/looks.md, Card geometry)
+# The preserved v9 card rows (legacy/v9/references/looks.md, Card geometry).
+# These layouts still resume; v10 uses the product's own measured brand finish.
 ROWS = {
     "no band, 4:5 at 81%": [0.095, 0.205, 0.905, 0.795],
     "band + full width": [0.0, 0.305, 1.0, 0.794],
@@ -110,8 +113,11 @@ def test_the_skill_rows_clear_the_slot_and_meet_the_floor(name):
     assert box[1] >= keepout.card_top(W, H) - 1e-3
     assert (box[2] - box[0]) * (box[3] - box[1]) >= render_qc.PICTURE_FLOOR - 1e-3
     assert render_qc.PICTURE_FLOOR == source_layout.PICTURE_FLOOR == motion_tools.CARD_FLOOR
-    looks = open(os.path.join(HERE, "..", "..", "plugins", "valmera", "skills",
-                              "valmera-podcast-shorts", "references", "looks.md")).read()
+    current = active_text()
+    assert "The end card and the watermark are the product's own, on every short" in current
+    assert "never cropped, covered, moved or replaced" in current
+    assert "measured on the delivered file" in current
+    looks = (LEGACY_SKILL / "references/looks.md").read_text()
     assert "[" + ", ".join(f"{v:g}" if v not in (0.0, 1.0) else str(int(v)) for v in box) \
         + "]" in looks, name
 

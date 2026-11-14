@@ -9,6 +9,8 @@
 * RESTRAINT_RULE and SOUND_RULE are pinned word for word.
 """
 
+from podcast_skill_contract import LEGACY, active_text
+
 import hashlib
 import json
 import os
@@ -390,8 +392,9 @@ def test_no_live_guidance_offers_a_web_sound():
         surfaces["skill " + name] = agent_prompt.read_skill_text(name)
     root = os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), os.pardir)
-    plugin = os.path.join(root, "plugins", "valmera", "skills",
-                          "valmera-podcast-shorts", "references")
+    plugin = LEGACY / "references"
+    surfaces["active v10"] = active_text()
+    assert "real recordings only" in surfaces["active v10"]
     for rel in ("editing.md", "looks.md"):
         with open(os.path.join(plugin, rel), encoding="utf-8") as f:
             surfaces["plugin " + rel] = f.read()

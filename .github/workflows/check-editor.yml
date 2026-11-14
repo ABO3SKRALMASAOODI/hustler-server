@@ -4,6 +4,8 @@ on:
     paths:
       - 'backend/**'
       - 'worker/**'
+      - 'plugins/valmera/skills/valmera-podcast-shorts/**'
+      - 'plugins/valmera/skills/_shell/**'
       - '.github/workflows/check-editor.yml'
   # The worker suite on every push to main (12 Nov 2026): it ran inside
   # deploy-cloudflare-executor.yml, which is manual now. The backend suite runs
@@ -12,6 +14,8 @@ on:
     branches: [main]
     paths:
       - 'worker/**'
+      - 'plugins/valmera/skills/valmera-podcast-shorts/**'
+      - 'plugins/valmera/skills/_shell/**'
       - '.github/workflows/check-editor.yml'
 permissions:
   contents: read
