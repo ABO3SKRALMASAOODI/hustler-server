@@ -227,6 +227,28 @@ def test_final_change_disclosure_cannot_drop_a_checked_unmet_ask(monkeypatch):
     assert line in final
 
 
+def test_background_check_reads_dense_full_size_rendered_frames(monkeypatch, tmp_path):
+    import media
+    ctx = NS(turn_start_edl={'json': {'fx': []}}, project_id=1,
+             workdir=str(tmp_path), db=NS(run=lambda *a: {'duration_s': 24.8}))
+    monkeypatch.setattr(agent_tools, '_asset_local_path', lambda *a: 'actual-render.mp4')
+    seen = []
+    monkeypatch.setattr(media, 'frame_at', lambda path, t, dest, width: seen.append((path, t, width)))
+    frames = asks.composite_detail_frames(ctx, {'fx': [{'type': 'background'}]}, {'edl_version': 2})
+    assert len(frames) == len(seen) == 48
+    assert all(path == 'actual-render.mp4' and width >= 720 for path, t, width in seen)
+    assert max(b[1] - a[1] for a, b in zip(seen, seen[1:])) < .52
+    assert 'holes in clothing' in frames[0][1]
+
+
+def test_unchanged_background_needs_no_extra_frames_and_missing_new_preview_fails(tmp_path):
+    ctx = NS(turn_start_edl={'json': {'fx': [{'type': 'background'}]}},
+             project_id=1, workdir=str(tmp_path), db=NS(run=lambda *a: None))
+    assert asks.composite_detail_frames(ctx, {'fx': [{'type': 'background'}]}, {}) == []
+    with pytest.raises(RuntimeError, match='no rendered detail evidence'):
+        asks.composite_detail_frames(ctx, {'fx': [{'type': 'background', 'id': 'new'}]}, {})
+
+
 def test_the_check_uses_only_this_versions_render(monkeypatch):
     got = {}
 
