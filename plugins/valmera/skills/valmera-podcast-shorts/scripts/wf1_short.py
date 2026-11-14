@@ -48,7 +48,7 @@ import shell  # noqa: E402
 import wf1_film  # noqa: E402
 import wf3  # noqa: E402
 
-RESEARCH_CONTRACT = 2  # contextual placement verification replaces context-free shelf admission
+RESEARCH_CONTRACT = 3  # separate illustrative context from explicit archival-event requirements
 
 
 def _llm():

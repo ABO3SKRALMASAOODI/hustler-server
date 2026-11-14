@@ -32,7 +32,25 @@ def test_documentary_context_reaches_frame_checker_not_only_search_planner():
     from footage.look import _listing,has_brief
     lines=[dict(i=2,say='At Stanford in 2005',visual='Campus illustrates the setting, not a recording of this conversation.')]
     assert lines[0]['visual'] in _listing(lines)
-    assert has_brief(lines)
+    # Contextual depiction is not an explicit claim that this records the exact historical event.
+    assert not has_brief(lines)
+    assert has_brief([dict(lines[0],see=[dict(thing='Stanford',as_of='2005')])])
+
+
+def test_contextual_admission_does_not_require_archival_claim_fields(tmp_path,monkeypatch):
+    from footage import look
+    import json
+    monkeypatch.setattr(look,'sheet',lambda *a,**k:'sheet.jpg')
+    monkeypatch.setattr(look.ask,'image_block',lambda *a:{})
+    monkeypatch.setattr(look.ask,'ask',lambda *a,**k:(json.dumps(dict(cells=[dict(n=1,ok=True,clean=True,grade=4,lines=[0],shows='Stanford campus')])),0.))
+    subject=dict(name='Stanford',must_show='Actual campus exterior')
+    lines=[dict(i=0,say='I studied at Stanford',visual='Campus setting, not the actual conversation.')]
+    candidates=[dict(src=0,t=1.,jpg='frame.jpg')];sources=[dict(title='Campus tour',channel='Stanford')]
+    accepted,_=look.check(subject,lines,candidates,sources,str(tmp_path))
+    assert accepted[0]['lines']==[0]
+    exact=[dict(lines[0],see=[dict(thing='Stanford',as_of='2005')])]
+    checked,_=look.check(subject,exact,candidates,sources,str(tmp_path))
+    assert checked[0]['lines']==[]  # an archival claim still needs all three explicit checks
 
 
 def test_research_clauses_join_only_identical_director_subjects():

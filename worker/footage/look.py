@@ -61,7 +61,7 @@ def _listing(lines):
 
 
 def has_brief(lines):
-    return any(ln.get("see") or ln.get('visual') for ln in lines)
+    return any(ln.get("see") for ln in lines)
 
 
 def moments(subject, lines, sources, budget_s=90.0):
@@ -187,15 +187,16 @@ def check(subject, lines, cands, sources, work, budget_s=120.0):
     BRIEF_CELL_H. Without a brief, exactly as before."""
     import concurrent.futures as cf
     brief = has_brief(lines)
-    ls = _listing(lines) if brief else "\n".join(f"{ln['i']}. {ln['say']}  (show: {ln.get('show') or '-'})" for ln in lines)
-    per = BRIEF_PER_SHEET if brief else PER_SHEET
+    contextual = any(ln.get('visual') for ln in lines)
+    ls = _listing(lines)
+    per = BRIEF_PER_SHEET if brief or contextual else PER_SHEET
     system = LOOK_SYSTEM + LOOK_BRIEF if brief else LOOK_SYSTEM
     groups = [cands[i:i + per] for i in range(0, len(cands), per)]
 
     def one(gi):
         g = groups[gi]
         sp = sheet([(j + 1, c["jpg"]) for j, c in enumerate(g)], os.path.join(work, f"sheet_{_slug(subject['name'])}_{gi}.jpg"),
-                   **({"cell": (BRIEF_CELL_W, BRIEF_CELL_H)} if brief else {}))
+                   **({"cell": (BRIEF_CELL_W, BRIEF_CELL_H)} if brief or contextual else {}))
         listing = "\n".join(f"cell {j + 1}: video {c['src']} \"{sources[c['src']]['title'][:90]}\" ({sources[c['src']].get('channel') or '?'}), "
                             f"at {c['t']:.1f} s" + (f"; said there: \"{c['said'][:140]}\"" if c.get("said") else "") for j, c in enumerate(g))
         content = [{"type": "text", "text": f"Subject: {subject['name']}\nA frame must show: {subject['must_show']}\n\nLines:\n{ls}\n\n{listing}"},
