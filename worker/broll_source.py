@@ -918,14 +918,14 @@ def _caption(c):
     return _clip(text, 360) or "(no caption)"
 
 
-def check_named(subject, cands, workdir=None, budget_s=None):
+def check_named(subject, cands, workdir=None, budget_s=None, frame_size=None):
     """(kept, report, usd): the candidates a vision model passes as showing
     the subject, best first, each with what it shows. No answer passes
     nothing: an unchecked picture of a real person is never offered."""
     import base64
     import shutil
     import tempfile
-    from PIL import Image
+    from PIL import Image, ImageOps
     cands = cands[:NAMED_CHECK_MAX]
     if not cands:
         return [], [], 0.0
@@ -938,7 +938,13 @@ def check_named(subject, cands, workdir=None, budget_s=None):
                                    max_bytes=4 * 1024 * 1024, timeout_s=10)
                 with Image.open(p) as im:
                     im = im.convert("RGB")
-                    im.thumbnail((448, 448))
+                    if frame_size:
+                        w, h = map(float, frame_size)
+                        size = (max(1, round(448 * w / max(w, h))),
+                                max(1, round(448 * h / max(w, h))))
+                        im = ImageOps.fit(im, size, method=Image.Resampling.LANCZOS)
+                    else:
+                        im.thumbnail((448, 448))
                     im.save(p, quality=85)
                 return i, p
             except Exception:  # noqa: BLE001 — that candidate is not seen
