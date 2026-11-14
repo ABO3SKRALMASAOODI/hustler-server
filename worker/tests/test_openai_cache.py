@@ -128,3 +128,43 @@ def test_narration_script_is_a_cache_boundary_before_the_changing_chunk():
     assert bodies[0][0] == bodies[1][0]
     assert bodies[0][0]['prompt_cache_breakpoint']['ttl'] == '30m'
     assert bodies[0][1] != bodies[1][1]
+
+
+@pytest.mark.parametrize('relative', ['_shell/llm.py', 'valmera-stories/writer.py'])
+@pytest.mark.parametrize('terminal', [False, True])
+def test_each_interrupted_workflow_attempt_is_metered(tmp_path, monkeypatch, relative, terminal):
+    import importlib.util
+    import httpx
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location('interrupted_workflow', root / 'plugins/valmera/skills' / relative)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv('OPENAI_API_KEY', 'test-only')
+    monkeypatch.setenv('VALMERA_OPENAI_SPEND_LOG', str(tmp_path / 'spend.jsonl'))
+    monkeypatch.setattr(module.time, 'sleep', lambda _: None)
+    calls = []
+    class Stream(httpx.SyncByteStream):
+        def __iter__(self):
+            if terminal:
+                yield ('data: ' + json.dumps({'type':'response.completed','response':{
+                    'id':'resp_done','status':'completed','usage':{'input_tokens':2000,'output_tokens':20},
+                    'output':[]}}) + '\n\n').encode()
+                raise httpx.ReadError('connection ended after terminal event')
+            yield b'data: [DONE]\n\n'
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, stream=Stream())
+    real = httpx.Client
+    monkeypatch.setattr(httpx, 'Client', lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    if terminal:
+        module.ask_openai('same instructions', 'story input')
+    else:
+        with pytest.raises(RuntimeError, match='stream ended without a response'):
+            module.ask_openai('same instructions', 'story input')
+    rows = [json.loads(line) for line in (tmp_path / 'spend.jsonl').read_text().splitlines()]
+    assert len(calls) == len(rows) == (1 if terminal else 4)
+    if terminal:
+        assert rows[0]['request_id'] == 'resp_done' and rows[0]['usd'] > 0
+    else:
+        assert [r['attempt'] for r in rows] == [1,2,3,4]
+        assert all(r['usd'] is None and r['billing_unconfirmed'] for r in rows)

@@ -79,6 +79,7 @@ def ask_openai(system, content, *, model=None, effort="medium", max_tokens=16000
     headers = {"Authorization": "Bearer " + openai_key(), "Content-Type": "application/json"}
     t0, final = time.time(), None
     for attempt in range(4):
+        final = None
         try:
             with httpx.Client(timeout=httpx.Timeout(timeout, connect=30)) as cl, \
                     cl.stream("POST", "https://api.openai.com/v1/responses", headers=headers, json=body) as r:
@@ -104,14 +105,17 @@ def ask_openai(system, content, *, model=None, effort="medium", max_tokens=16000
                         final = ev.get("response") or {}
             if final is not None:
                 break
+            openai_cache.record(model, purpose, status="stream_without_usage", billing_unconfirmed=True,
+                                attempt=attempt + 1, force=True)
         except (httpx.TransportError, httpx.TimeoutException):
+            if final is not None:  # terminal usage arrived before the connection closed
+                break
             openai_cache.record(model, purpose, status="transport_error", billing_unconfirmed=True,
                                 attempt=attempt + 1, force=True)
             if attempt == 3:
                 raise
             time.sleep(10 * (attempt + 1))
     if final is None:
-        openai_cache.record(model, purpose, status="stream_without_usage", billing_unconfirmed=True, force=True)
         raise RuntimeError("openai: the stream ended without a response")
     openai_cache.record(model, purpose, final.get("usage"), request_id=final.get("id"),
                         status=final.get("status"), force=True)
