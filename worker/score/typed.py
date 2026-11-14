@@ -205,7 +205,7 @@ def run(ctx, worker_db, job, session_id, cfg):
     if not cfg.get("director", False):
         return {"fell": "typed Director is disabled"}
     dcfg = copy.deepcopy(flags.read(worker_db))
-    if dcfg.get("mode") != "on":
+    if dcfg.get("mode") != "on" and job.get("user_id") not in (dcfg.get("test_user_ids") or []):
         return {"fell": "the Director is off (app_kv.director)"}
     source_s = float(getattr(ctx, "duration", 0) or 0)
     if not getattr(ctx, "has_main_video", False) or source_s <= 0:
