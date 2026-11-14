@@ -106,6 +106,8 @@ def test_unchanged_failed_turn_offers_real_still_alternative(monkeypatch, check_
     reply = edit_scope.disclose(ctx, 'Animation failed.')
     assert 'unchanged' in reply
     assert offer in reply
+    assert ctx.retained_reply_facts['fields'] == ['unchanged', 'alternative']
+    assert offer in ctx.retained_reply_facts['description']
 
 
 def test_disclosure_cannot_silently_drop_available_alternative(monkeypatch):
