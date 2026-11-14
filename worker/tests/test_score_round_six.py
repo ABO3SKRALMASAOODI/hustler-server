@@ -161,6 +161,32 @@ def test_the_lowering_bakes_a_marked_still_and_draws_no_accent_over_the_frame(tm
     assert set(lower.FINISH_AS) == set(reel.FINISHES)
 
 
+def test_a_baked_still_is_published_as_the_clip_it_is(tmp_path, monkeypatch):
+    import db as dbx
+    import music_gate
+    import storage
+    clip, plate = str(tmp_path / "abc.mp4"), str(tmp_path / "p.png")
+    open(clip, "wb").write(b"x" * 900)
+    open(plate, "wb").write(b"y" * 90)
+    json.dump({"w": 720, "h": 1280, "dur": 0.87, "fps": 30.0, "how": "ffmpeg", "finish": "archive"}, open(clip + ".json", "w"))
+    sent, rows = [], []
+    monkeypatch.setattr(storage, "upload_file", lambda p, key, ct=None: sent.append((os.path.basename(p), ct)))
+    monkeypatch.setattr(film, "_publish_bed", lambda ctx, db, edl: None)
+
+    def run(fn, *a, **k):
+        if fn is dbx.insert_asset:
+            rows.append((a[1], k))
+        return None
+    ctx = types.SimpleNamespace(project_id=7)
+    edl = {"overlays": [{"id": "ov.a", "asset_key": "today/abc.mp4", "kind": "video"}, {"id": "ov.b", "asset_key": "today/p.png", "kind": "image"}], "sfx": []}
+    out = film._publish(ctx, types.SimpleNamespace(run=run), edl, {"today/abc.mp4": clip, "today/p.png": plate}, {"items": []}, "orig/k.mp4")
+    assert ("abc.mp4", "video/mp4") in sent and ("p.png", "image/png") in sent
+    video = next(k for kind, k in rows if kind == "video_clip")
+    assert video["duration_s"] == 0.87 and video["width"] == 720 and video["height"] == 1280 and video["meta"]["finish"] == "archive"
+    assert [kind for kind, _k in rows].count("image_ref") == 1                    # the plate is still an image; the clip is never one
+    assert all(o["asset_key"].startswith("fetched/7/") for o in out["overlays"]) and out["overlays"][0]["asset_key"].endswith(".mp4")
+
+
 def test_a_score_may_write_a_finish_on_a_bin_still():
     idx = selfie(20.0)
     text = film_text(beats_over(idx, 4, lambda k, a, z: {"cut": [30, 40, 999], "pic": ["main", {"src": f"bin:{k}", "treat": "archive"}, "main"]} if k == 1 else {"pic": "main"}))

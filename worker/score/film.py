@@ -470,11 +470,24 @@ def _publish(ctx, worker_db, edl, locals_, bin_doc, original_key):
         p = locals_[k]
         ext = os.path.splitext(p)[1].lower()
         key = f"fetched/{ctx.project_id}/{uuid.uuid4().hex[:12]}{ext}"
-        storage.upload_file(p, key, "audio/wav" if ext == ".wav" else "image/png")
+        storage.upload_file(p, key, {".wav": "audio/wav", ".mp4": "video/mp4"}.get(ext, "image/png"))
         return k, key, ext, os.path.getsize(p)
     baked = [k for k in locals_ if k.startswith("today/")]
     with cf.ThreadPoolExecutor(max_workers=6) as pool:
         for k, key, ext, size in pool.map(up, baked):
+            if ext == ".mp4":
+                # a found still baked as a clip of its own frames (score.reel): a video asset with its length, so a tool
+                # that reads the row later places it as the clip it is, never as an image
+                try:
+                    with open(locals_[k] + ".json") as f:
+                        clip = json.load(f)
+                except (OSError, ValueError):
+                    clip = {}
+                worker_db.run(dbx.insert_asset, ctx.project_id, "video_clip", key, bytes_=size, duration_s=clip.get("dur"), width=clip.get("w"),
+                              height=clip.get("h"), fps=clip.get("fps"),
+                              meta={"filename": os.path.basename(k), "director": True, "made_from": "a found still, moving", "finish": clip.get("finish")})
+                keys[k] = key
+                continue
             worker_db.run(dbx.insert_asset, ctx.project_id, "music" if ext == ".wav" else "image_ref", key, bytes_=size,
                           meta={"filename": os.path.basename(k), "director": True, "made_from": "the upload" if ext == ".wav" else "design"})
             keys[k] = key
