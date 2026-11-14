@@ -37,14 +37,17 @@ UA = "Mozilla/5.0 (compatible; ValmeraStories/1.0)"
 
 
 def worker_dir():
-    """The worker beside this plugin (repo checkout), else the synced main checkout."""
+    """The worker beside this plugin when it holds this week's engines (a repo checkout), else the synced main checkout
+    (.valmera/sync_skill.sh keeps worktrees/skill-main at main): the installed copy under hustler-server sits beside an
+    older worker, and the Codex cache has none."""
     if os.environ.get("VALMERA_WORKER"):
         return os.environ["VALMERA_WORKER"]
     d = HERE
     for _ in range(6):
         d = os.path.dirname(d)
-        if os.path.exists(os.path.join(d, "worker", "broll_source.py")):
-            return os.path.join(d, "worker")
+        w = os.path.join(d, "worker")
+        if all(os.path.exists(os.path.join(w, n)) for n in ("broll_source.py", "scene/run.py", "footage/run.py", "music_film.py")):
+            return w
     return f"{V}/worktrees/skill-main/worker"
 
 
@@ -58,8 +61,9 @@ def _worker():
 
 # ----------------------------------------------------------------- the voice
 
-def narrate(nscript, out, band="03", label="narrate", env=None, timeout=5400):
-    """narration.wav and words.json in `out`. A stopped render resumes at its next chunk (the tool keeps _state)."""
+def narrate(nscript, out, band="03", label="narrate", env=None, timeout=5400, reader=None):
+    """narration.wav and words.json in `out`. A stopped render resumes at its next chunk (the tool keeps _state).
+    reader: a script that reads with the narrate tool's parts its own way (workflow 3: voice.py), same arguments."""
     os.makedirs(out, exist_ok=True)
     sp = os.path.join(out, "narration_script.json")
     json.dump(nscript, open(sp, "w"), ensure_ascii=False, indent=1)
@@ -70,7 +74,7 @@ def narrate(nscript, out, band="03", label="narrate", env=None, timeout=5400):
         with open(NARRATE_LOCK, "a") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
             extra = os.environ.get("NARRATE_RENDER_ARGS", "").split()      # e.g. "--takes 1" on a loaded Mac
-            r = subprocess.run(["zsh", HEAVY, label, NARRATE_PY, NARRATE, "render", sp, "--out", out, "--band", band] + extra,
+            r = subprocess.run(["zsh", HEAVY, label, NARRATE_PY, reader or NARRATE, "render", sp, "--out", out, "--band", band] + ([] if reader else extra),
                                cwd=os.path.dirname(NARRATE), capture_output=True, text=True, timeout=timeout, env=env)
         if r.returncode != 0 or not os.path.exists(os.path.join(out, "words.json")):
             raise RuntimeError(f"narrate failed ({r.returncode}): {(r.stderr or r.stdout)[-800:]}")

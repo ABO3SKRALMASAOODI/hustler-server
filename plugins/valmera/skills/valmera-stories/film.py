@@ -878,7 +878,7 @@ def clear_of(items, assets_meta, rect, ids):
     return moved
 
 
-def engines_finish(l1, sup, stress, drive_ids, meta, d, turn_f=None, mono=(), clear=None, spoken=None):
+def engines_finish(l1, sup, stress, drive_ids, meta, d, turn_f=None, mono=(), clear=None, spoken=None, np10=None):
     """What the engines do to a baked scene (worker/scene, worker/score), in the order a film is finished:
     pace   every driven picture is cut into framings on the voice's stress and set moving: a slow push, a settle on a
            stressed cut-in, an eased move in on the strongest word, a whip through about one cut in eleven, a face cut
@@ -887,7 +887,8 @@ def engines_finish(l1, sup, stress, drive_ids, meta, d, turn_f=None, mono=(), cl
            black and white (the low point), colour back after them;
     soft   one new picture in three opens soft and is sharp by its fourth frame (the references: 28% of shots);
     sound  each chosen event gets the recording the references would use, its peak on the event, set against this
-           narration (score.sound.design)."""
+           narration (score.sound.design). `np10`: the film's new pictures a 10 s when the caller counts them (prints
+           and windows are cards the sound engine would not count as pictures); None lets the engine count."""
     import numpy as np
     pace, looks, bake = _engines()
     base = {it["id"]: it for it in l1["items"] if it.get("k") == "shot"}
@@ -923,7 +924,8 @@ def engines_finish(l1, sup, stress, drive_ids, meta, d, turn_f=None, mono=(), cl
         words = [dict(t0=float(a), t1=float(b)) for a, b in spoken] if spoken else \
             [dict(t0=float(w["start"]), t1=float(max(w["end"], w["start"] + 0.02))) for w in wd["words"]]
         sounds, rep = SD.design(dict(out, spine=spine, sound=[]), index=dict(words=words, video=dict(duration=dur)), src=sup["narration"],
-                                turn_s=(turn_f / FPS if turn_f is not None else None), bed=bool(d.get("bed")))
+                                turn_s=(turn_f / FPS if turn_f is not None else None), bed=bool(d.get("bed")),
+                                supply=dict(np10=float(np10), bed=bool(d.get("bed"))) if np10 else None)
         out["sound"], out["sound_design"] = sounds, rep
     except Exception as e:  # noqa: BLE001 - a film is never lost to its sound design
         out["sound"], out["sound_design"] = [], {"fault": repr(e)[:300]}

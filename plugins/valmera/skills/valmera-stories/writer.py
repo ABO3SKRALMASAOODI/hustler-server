@@ -31,7 +31,8 @@ UA = "Mozilla/5.0 (compatible; ValmeraStories/1.0)"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 FORMS = {
-    "short": dict(name="vertical short", seconds=(45, 75), words=(130, 190), segments=(8, 16), band="03",
+    # the judge's story reels run 61-124 s (median 87.5 s, teardown section 12): about a minute and a half of story
+    "short": dict(name="vertical short", seconds=(60, 90), words=(175, 250), segments=(12, 20), band="03",
                   shape="one story, one turn, one payoff; a hook a viewer cannot scroll past in the first second; no chapters"),
     "long": dict(name="long-form voiceover film", seconds=(600, 1200), words=(1600, 3200), segments=(40, 110), band="04",
                  shape="a promise on screen by 30 seconds, chapters of 40 to 120 seconds each opening a new question, a turn at "
@@ -259,17 +260,22 @@ def find_ideas(form, cards, avoid=(), line=None, n=6, effort="high"):
     system = ("You are the story finder of Valmera's story workflow. You find true stories about founders, companies, inventions "
               "and topics that make a viewer stop scrolling, for a narrated " + F["name"] + ". You use the web to find them and to "
               "check them. A story qualifies only if every fact in it can be sourced (Wikipedia, a major newspaper, the company's own "
-              "record, an archive), and if the people, places and things it names have real photographs under a free licence on "
-              "Wikimedia Commons, because the film shows only real pictures of what it names (no film clips, no stock lookalikes, "
-              "no generated faces).")
+              "record, an archive), and if the people, places and events it names were filmed or photographed: the film is cut from "
+              "real video of them (interviews, keynotes, launches, news reports, archive film on YouTube and archive.org) and free "
+              "photographs on Wikimedia Commons, a new picture about every half second, so a story whose subjects were never filmed "
+              "cannot be made. No stock lookalikes, no generated faces.")
     content = (f"# The bar\n{references()}\n\n# Styles this film can take\n{menu(cards)}\n\n"
                f"# Already made (never repeat a subject)\n{json.dumps(list(avoid), ensure_ascii=False)}\n\n"
-               + (f"# A line from the owner\n{line}\n\n" if line else "")
+               + (f"# What the owner asked for\n{line}\nEvery idea must be about this. When it names a person, a company or a "
+                  "topic, find the strongest true stories inside it (a single moment, decision or turn, not a biography).\n\n" if line else
+                  "# No subject given\nChoose the subjects yourself: founders, companies, inventions and moments in business or "
+                  "technology history that a curious viewer half knows, told through one decisive moment.\n\n")
                + f"# Form\n{F['name']}, {F['seconds'][0]}-{F['seconds'][1]} s, {F['shape']}.\n\n"
                "Search widely and think like an editor of the best founder-story accounts. Prefer stories most people half know with "
                "a detail they do not, an object that holds the story, a human turn (a betrayal, a humiliation, a bet), and a payoff "
                "with a figure. Avoid the stories the references already told (SpaceX's fourth launch, Airbnb's cereal, Xerox PARC, "
-               "the traitorous eight, the PayPal mafia). Check on Commons that the named things have photos.\n\n"
+               "the traitorous eight, the PayPal mafia). Check that the named people and events were filmed (an interview, a "
+               "keynote, a news report, archive footage) and have photos on Commons.\n\n"
                f"Return JSON only: {{\"ideas\": [{n} items, best first]}}. Each: {{\"id\": \"i1\", \"title\": a plain title, "
                "\"style\": one style id from the list, \"why_style\": what in this story that style needs, \"hook\": the first sentence "
                "as it would be spoken, \"story\": the story in four to six plain sentences with its figures, \"turn\": the human turn, "
@@ -287,7 +293,19 @@ def find_ideas(form, cards, avoid=(), line=None, n=6, effort="high"):
 
 # ----------------------------------------------------------------- the script
 
+REEL_DATA = (
+    '"era" in each segment: the year that segment speaks from, as a number (the year of the events it tells; the present year '
+    'for a segment about today): the film draws each section in the finish of its years. "collage": true on the two to four '
+    'segments that name or list several things (people, products, places) at once: their pictures land as stacked prints. '
+    'Mark beats truthfully: one "low" where the story is at its worst, one "turn", the "payoff" with its figure. Give every '
+    'segment two or three "pictures" (named things it shows, in the order it says them), so the cut can change picture '
+    'about every half second, and name in "named" every person, place, company, product and event a camera filmed, with '
+    'Commons searches; the footage engine finds the video of each.')
 STYLE_DATA = {
+    "reel": REEL_DATA,
+    "pinboard": REEL_DATA + ' This style stacks prints on most lines: mark "collage": true on more segments, about half.',
+    "archive": REEL_DATA,
+    "window": REEL_DATA,
     "character-sheet": (
         '"stats": [two to four {"id": short id, "label": capitals, at most 7 characters, "start": the value shown at frame 0 exactly '
         'as printed (e.g. "$5,000", "3", "0"), "number": that value as a plain number, "max": the most this stat reaches in the story '
@@ -314,7 +332,7 @@ def write(idea, card, form, voices=None, notes=None, effort="high"):
     F = FORMS[form]
     voices = voices or card.get("voice") or list(VOICES)
     system = ("You are the writer and voice director of Valmera's story workflow. You write narration that is spoken by a synthetic "
-              "narrator over real photographs, for a " + F["name"] + ". Every sentence is true and checked on the web now; nothing "
+              "narrator over real footage and photographs of what it names, for a " + F["name"] + ". Every sentence is true and checked on the web now; nothing "
               "is invented, rounded or dramatised beyond the sources. You also direct the actor: pace, energy, melody, emphasis and "
               "pauses per segment. Write for the ear: short sentences, concrete nouns, numbers a listener can hold.")
     content = (f"# The bar\n{references()}\n\n# The idea\n{json.dumps(idea, ensure_ascii=False)}\n\n# The style\n{json.dumps(card, ensure_ascii=False)}\n\n"
@@ -333,7 +351,8 @@ def write(idea, card, form, voices=None, notes=None, effort="high"):
                "would be printed, digits allowed (a year, a figure, a name), or [], \"beat\": hook|setup|turn|low|payoff|close, \"pace\": slow|steady|brisk|fast (how fast this "
                "segment's pictures change and its voice moves: brisk on a list or on money, slow on the turn), "
                "\"pictures\": names from the named list this segment talks about, in order, \"melody\": falling|rising|level|wide, "
-               "\"emphasis\": [one or two words of say], \"pause_after\": seconds of silence after it (0.15 to 0.9), \"direction\": a few "
+               "\"emphasis\": [one or two words of say], \"pause_after\": seconds of silence after it (0.18 to 0.26 inside the story; "
+               "0.35 to 0.5 only where the story turns, at most three times), \"direction\": a few "
                "words for the actor, \"facts\": ids of the facts it states}], \"facts\": [{\"id\": \"f1\", \"claim\": the fact in plain "
                "words, \"quote\": a sentence copied exactly, word for word, from the page at url that states it, \"url\": the page}], "
                "\"named\": [{\"name\", \"is\", \"searches\", \"must_show\"} for every person, place or thing the film shows], "
@@ -341,7 +360,8 @@ def write(idea, card, form, voices=None, notes=None, effort="high"):
                "Every digit that appears in `show` or in the style's data must appear in some fact's quote. Every quote is checked "
                "by fetching its URL with a plain script, so cite pages a script can read (Wikipedia, Wikimedia, archive.org, "
                "government and university pages, a company's own newsroom) and read each one with web_fetch before quoting it; "
-               "pages behind a paywall or a bot wall (Britannica, most newspapers) cannot be checked and will be dropped.")
+               "pages behind a paywall or a bot wall (Britannica, most newspapers) and PDF files cannot be checked and will be dropped: "
+               "cite the HTML page that says the same thing.")
     text, use = ask_web(system, content, effort=effort, max_tokens=32000, searches=8, fetches=10, what="write")
     return json_block(text), use
 
@@ -379,12 +399,36 @@ _PAGES = {}
 FETCHED = {}
 
 
-def page_text(url, timeout=20):
-    if url in _PAGES:
-        return _PAGES[url]
+def _read(url, timeout):
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,text/plain"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        raw = r.read(6 * 1024 * 1024).decode(r.headers.get_content_charset() or "utf-8", "replace")
+        if "pdf" in (r.headers.get_content_type() or ""):
+            raise ValueError("a PDF cannot be read here: quote an HTML page that says it")
+        return r.read(6 * 1024 * 1024).decode(r.headers.get_content_charset() or "utf-8", "replace")
+
+
+def page_text(url, timeout=20):
+    """The page's text. A site that refuses this machine (403, 429, a reset) is read from the Wayback Machine's copy of
+    the same URL (its original bytes, `id_`): the same page, fetched from an archive, never a model's account of it."""
+    if url in _PAGES:
+        return _PAGES[url]
+    if str(url).lower().split("?")[0].endswith(".pdf"):
+        raise ValueError("a PDF cannot be read here: quote an HTML page that says it")
+    try:
+        raw = _read(url, timeout)
+    except ValueError:
+        raise
+    except Exception as e:  # noqa: BLE001 - refused or unreachable: the archived copy, else the first error
+        raw = None
+        for wait in (0, 3, 8):          # the archive refuses a burst now and then: ask again, a little later
+            time.sleep(wait)
+            try:
+                raw = _read("https://web.archive.org/web/2026id_/" + url, timeout + 20)
+                break
+            except Exception:  # noqa: BLE001
+                continue
+        if raw is None:
+            raise e
     p = _Text()
     p.feed(raw)
     _PAGES[url] = norm(" ".join(p.out))
@@ -433,6 +477,17 @@ def verify(script):
             r["read"] = "here"
         except Exception as e:  # noqa: BLE001 - an unreadable page verifies nothing here
             r["found"], r["error"] = False, str(e)[:160]
+        if not r["found"] and not r.get("error") and not str(f.get("url", "")).startswith("https://web.archive.org/"):
+            try:                       # a page that hides its text from a script (scripts, a soft wall): its archived copy
+                arch = "https://web.archive.org/web/2026id_/" + f["url"]
+                if arch not in _PAGES:
+                    p_ = _Text()
+                    p_.feed(_read(arch, 40))
+                    _PAGES[arch] = norm(" ".join(p_.out))
+                if quote_found(f.get("quote", ""), _PAGES[arch]):
+                    r["found"], r["read"] = True, "wayback"
+            except Exception:  # noqa: BLE001 - not archived: the live page's verdict stands
+                pass
         if not r["found"] and f.get("url") in FETCHED:
             r["found"] = quote_found(f.get("quote", ""), norm(FETCHED[f["url"]]))
             r["read"] = "web_fetch"
@@ -458,7 +513,7 @@ def narration_script(script, band):
     segs = []
     for s in script["segments"]:
         seg = dict(text=" ".join(str(s["say"]).split()), pause_after=float(s.get("pause_after") or 0.3))
-        for k in ("melody", "emphasis", "direction", "pace", "energy"):
+        for k in ("melody", "emphasis", "direction", "pace", "energy", "beat"):
             if s.get(k):
                 seg[k] = s[k]
         segs.append(seg)

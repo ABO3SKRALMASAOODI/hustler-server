@@ -1,7 +1,7 @@
 interface:
   display_name: "Valmera Story Films"
-  short_description: "Narrated founder and topic stories on real pictures"
-  default_prompt: "Use $valmera-stories to make one narrated founder or topic story film: let the workflow find its own idea on the web, write and verify the script, narrate it, supply real free-licence pictures of what it names, stop at the director's look, then render on Valmera's engine, check, deliver once and delete the work folder. Never publish and never pick music."
+  short_description: "One command, a finished founder or topic story"
+  default_prompt: "Use $valmera-stories. Run story.py with my words as its only arguments (a name, a company or a topic; nothing when I gave none), in the background, wait for it to exit without polling, then tell me the delivered folder and the film's title. If it exits with stopped, run the same command again. Ask me nothing else."
 
 policy:
   allow_implicit_invocation: false

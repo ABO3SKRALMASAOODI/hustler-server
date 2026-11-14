@@ -41,6 +41,15 @@ SHAPE = (
     "(\"twenty-seven thousand dollars\", \"nineteen seventy-three\"), never two figures racing in one breath.\n"
     "- Every sentence ends low and settled except a real question; questions are rare and earn their place.\n")
 
+# the reference narrators' joins (VO2 check, 14 Nov: 0.25 s [0.18-0.26], about four real pauses a minute)
+PAUSES = {
+    "story": "0.18 to 0.26 inside the story; 0.35 to 0.5 only where the story turns, at most three in the film",
+    "long-form": "0.15 to 0.9; longer after a verdict, a turn or a chapter's end, short inside a run",
+}
+HARD = ("- Hard words: a long or rare compound a speech engine runs together is written split, the way it is said "
+        "(\"retro rockets\"); a word with two readings gets the spelling of the one meant; names stay exactly as spelled.\n")
+SHAPE += HARD
+
 QUESTION = {
     "story": "Exactly one segment in the setup asks the question the film will answer (the viewer's own question, said by "
              "the narrator: \"So how do you save a company with five thousand dollars?\"); never a question to the viewer "
@@ -84,8 +93,8 @@ def rewrite(script, form="story", effort="medium"):
                "it is said, no digits, no symbols, no abbreviations; punctuation is commas, full stops and question marks only (no "
                "dashes, colons, semicolons or brackets: a narrator breathes at a comma or a full stop).\n"
                "For each segment also direct the performance: `emphasis` one or two words of the new say that carry it (the "
-               "last stressed word of a sentence first), `pause_after` seconds of silence after it (0.15 to 0.9; longer after a "
-               "verdict, a turn or a chapter's end, short inside a run), `melody` falling|rising|level|wide, `pace` "
+               "last stressed word of a sentence first), `pause_after` seconds of silence after it ("
+               + PAUSES.get(form, PAUSES["story"]) + "), `melody` falling|rising|level|wide, `pace` "
                "slow|steady|brisk|fast, `direction` a few concrete words for the actor (energy, pace, where to lean).\n\n"
                "Return JSON only: {\"segments\": [{\"i\": the index, \"say\", \"emphasis\", \"pause_after\", \"melody\", "
                "\"pace\", \"direction\"}]}")

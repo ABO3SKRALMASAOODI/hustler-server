@@ -1,148 +1,90 @@
 ---
 name: valmera-stories
-description: Make narrated vertical films about founders, companies and topics (workflow 3, in the line of metromedia.house) on the workflow shell and Valmera's own engine. The workflow finds its own story on the web, writes it with every fact quoted from its source and checked here, narrates it with the local narrator voice, supplies real footage and free-licence photographs of every person, place and thing it names, cuts it at the references' pace on the engines (pacing, look, sound), delivers it once and deletes its work folder. Use when the user asks for a founder story, a company story or a topic story film. Never publishes; a song only when the owner hands one to the run.
+description: Make a finished narrated vertical story film about a founder, a company or a topic (workflow 3, cut like the @metromedia.house reels) with one command and at most a few words (/valmera-stories, or /valmera-stories <name or topic>). The run finds a true story worth telling on the web, checks every fact against its page, writes it for the ear, narrates it with the default narrator (Phonon 31M Easton), cuts real footage and free photographs of every person, place and event it names at the judge's pace (about 16 pictures a 10 s, never one picture twice, collages, flash frames, finishes by section, display words, captions word by word), lays the references' sound design and chosen music, delivers one complete folder once and deletes its work. Use when the user asks for a story, founder story, company story or topic story film, with or without a subject. Does not publish.
 ---
 
 # Valmera story films (workflow 3)
 
-One film per run, 45 to 75 seconds, in one of the built styles. The film is a true story told by a
-narrator over real pictures of what it names, with one device that no editor would build by hand.
-
-## Rules that decide everything
-
-1. **Only true things, with receipts.** The writer reads the web and gives every fact a quote copied
-   from its page and the page's URL. `writer.verify` fetches every page here and finds every quote on
-   it; every number on screen must stand in a verified quote. A script that does not verify is
-   rewritten once with the failures named, and otherwise the run stops. `film.json` keeps every fact,
-   quote and URL (`script.script.facts`, `script.verify`).
-2. **Real pictures of the real thing: footage first, then photographs.** Per line the footage engine
-   (`worker/footage`, through `_shell/chain.footage`) finds real video of what the line names on YouTube
-   and archive.org, every frame checked by a vision model and a person held to one face, cut to 1-3 s
-   clips with source, channel and time range. Photographs come from Wikimedia Commons and Openverse
-   under public domain, CC0, CC BY or CC BY-SA (`broll_source.find_named`), checked the same way. No
-   stock lookalikes, no generated faces. The footage is **not licensed** (the owner's decision, 13 Nov):
-   the shell never publishes, and every clip and photograph is in `film.json` under
-   `checks.stories.credits` (**the publisher pastes the credits into the post's caption**).
-3. **Taste** (`.valmera/week-1112/TASTE.md`, the owner's 13 Nov section first): a new picture about every
-   second, every picture moving and eased, faces whole, one caption seat, type inside the safe area and
-   off the mark, nothing under 38 px, sounds on the film's events in the references' classes and count,
-   no upscale past 3x. `score` checks the placement rules as numbers; the pace is in `film.json`.
-4. **Never** publish, put music in the plan (the shell lays the film's music after the render: a track chosen
-   from the licensed library, `film.mp4` with it and `film_clean.mp4` without, its credit line in `film.json`;
-   a song the owner hands to the run is `film_song.mp4` beside the clean `film.mp4`), touch a customer's project, alter the end card or the mark (the shell
-   adds both), or rate the film (a separate Opus session rates it on rubric v3).
-
-## Run it
+## Start it: one command, nothing or a few words
 
 ```
-PY=/Users/masaoodi/Documents/Valmera/.valmera/venv-worker/bin/python
-cd <this folder>
-zsh /Users/masaoodi/Documents/Valmera/.valmera/claude_trial_env.sh $PY run.py run \
-    --out /Users/masaoodi/Documents/Valmera/.valmera/week-1112/lanes/O [--args '{"style": "one-photograph"}']
-zsh /Users/masaoodi/Documents/Valmera/.valmera/claude_trial_env.sh $PY run.py run --resume <run_id>
-$PY run.py status
-$PY -m pytest -q test_film.py
+python3 /Users/masaoodi/Documents/Valmera/hustler-server/plugins/valmera/skills/valmera-stories/story.py [name or topic]
 ```
 
-`--args`: `style` keeps it to one style, `line` passes a line from the owner to the story finder,
-`notes` to the writer, `look: false` skips the stop for the director's look, `direction` sets knobs.
-Music is every film's: the build starts where the story turns and the drop lands on the payoff's landing
-(`worker/music_film.py`, `score.music`); `music: false` keeps a run dry. `song` (a file the owner handed over)
-adds `film_song.mp4` instead: that song cut the same way (a full part from the first frame, never its intro,
-under every word, a hit before the end card). `remake` (a delivered folder) makes
-that film's story and script again on today's engines with no model call: the facts are fetched and
-checked again. `narration` (a folder the narrate tool rendered for this very script) and `footage_from`
-(folders of `worker/footage` records for it) are reused instead of rendered and fetched again.
-`SHELL_RENDER_CMD=<script>` draws the film with that renderer in place of the Mac engine (the box image:
-`.valmera/week-1112/lanes/PROOF/tools/box_render.sh`); it gets the scene, the work folder, the sound and
-the output path.
-Run every stage in the background and let it wake you; never poll. **Do not start a new run while
-another run is stopped at its look**: every new start sweeps stopped runs (the shell's contract).
-Resume or finish it first. Runs may start together; their narrations queue on one lock
-(`.valmera/week-1106/.narrate.lock`), because the listeners (and VoxCPM2, the fallback voice) share the Apple GPU: VoxCPM2 three at once measured
-5-10 minutes a chunk against 20-50 seconds alone.
+- No words: the run chooses its own story. A name, a company or a topic ("Claude Shannon", "the Walkman"): the
+  run finds the strongest true story inside it. Ask the user for nothing else: no style, no length, no song.
+- Run it in the background (`run_in_background: true`); it takes 30 to 90 minutes. Do not poll; you are woken when it exits.
+- Its last line is one JSON object: `delivered` (the folder), `title`, `style`, `measured` (pictures a 10 s, collages,
+  flashes, finishes), `music`, `spend_usd`, `work_empty`. Tell the user the folder once, with the title.
+- Exit 2 (`stopped`): run the same command with the same words; it continues where it stopped. Exit 1: report the reason.
+- `--out <folder>` delivers somewhere else (default `/Users/masaoodi/Documents/Valmera/Story Films/`).
+- Never rate the film yourself: a separate Opus session rates it on rubric v3.
 
-| Stage | What happens | Time, cost |
-|---|---|---|
-| ideas | `writer.find_ideas`: Opus with web search and fetch finds six stories for the allowed styles (never one already in the ledger), each with the named things a camera could show; `wf3.probe` counts free photographs of each on Commons and Openverse. Ideas without pictures sink | 3-8 min, about $1 |
-| script | `writer.write`: the best idea in its style, segments with the actor's direction (pace, melody, emphasis, pauses), display strings, facts with quotes and URLs, the style's data. `writer.verify` checks it. Then `ear.for_ear` (lane VO2): a model rewrites every segment for the ear (sentences of 9-14 words, a hinge or a verdict where the story turns, the name landed alone, the stress word late, one figure a breath, the film's one question) and directs its delivery; a second call, blind to the first's reasons, names any segment whose facts changed, and that segment keeps its words; strings are checked (no digits, every name kept, no sentence said twice) and `verify` runs again. `--args '{"ear": false}'` skips it | 3-6 min, about $1 |
-| supply | `pictures.narrate`: the narrate tool (Phonon 31M Easton, local, `_shell/narrate`; three takes a line chosen by signal, the gate listener repairs a line it does not hear whole) through `heavy.sh`, with its VOICE gate; `pictures.pictures`: the named photographs, checked and downloaded, faces found (YuNet); `chain.footage`: real video per line, each clip with a still and its faces, and up to two real voices (`worker/footage/voice.py`: the person the film is about saying, in their own voice and on screen, a sentence that belongs after a line; the narrator stops, the person speaks, `narrate.py splice` puts the sound into the narration and Character Sheet pins the clip's own picture over those seconds). One Photograph: the one Commons file, its faces, who is who (a model reads the photo's own Commons description), and the microtext portrait. Whole Page: loudness and pitch per word | 3-12 min, about $1 on OpenAI |
-| score | `film.py` bakes the scene (L1); for Character Sheet the engines finish it (`film.engines_finish`: `scene.pace` cuts and moves every picture on the voice's stress, `scene.looks` solves one look on the film's own pictures, `score.sound` designs the sounds against the narration); stills of the beats go to `look/sheet.jpg`; taste is checked | **Look.** The run stops here |
-| render | `film.audio_master` (the engine's own mixer: narration from frame 3, the designed sounds on their events, -14 LUFS, under -1 dBTP), then `worker/scene` at `--tier master`, through `heavy.sh` (or `SHELL_RENDER_CMD`) | 2-10 min |
-| check, deliver, cleanup | the shell's brand finish (watermark, end card) and checks, the mark on six frames, the credits; `<out>/<date>-wf3-<style>-<title>-<id>/{film.mp4, film.json}`, once; the run folder is deleted | |
+The folder: `film.mp4` (with the music Valmera chose), `film_clean.mp4` (the same film without music), `film.json`
+(every fact with its quote and URL, every clip and photograph with its source, licence and time range, the music
+credit, the narration's gate, the measures) and `SOURCES.md` (the credits to paste into a post's caption: the footage
+is not licensed, by the owner's decision of 13 Nov). Nothing is published; nothing is ever added to a delivered folder.
 
-### The director's look
+## What the run does
 
-Open `.valmera/workflow/work/<run_id>/look/sheet.jpg`. Frame 0 must already be the hook's picture;
-every name must be on its own picture; nothing on a face or under the platform's buttons. Then write
-`<run folder>/direction.json` with only what you change, `touch <run folder>/look.ok`, and resume.
-`{"script": {...}}` replaces parts of the script's data (facts are verified again); any other key is
-a knob of the style's builder (the `d` dict at the top of each builder in `film.py`). Two knobs come up
-often: `"drop": [picture titles or file names, clip file names]` keeps a photograph or a clip the check
-passed out of the film (a 2025 meeting photo would read as 1973; a group photo would put a name on a
-stranger), `"open": clip file` names the clip that opens the film, `"aim_s"` is the seconds a picture
-holds (0.85), and `"low_stat": id` names the stat that goes red at the low point.
-Read each photograph's own title and date in `supply/pack.json` before approving: the vision check
-knows who is in a picture, not when it was taken.
+| Stage | What happens |
+|---|---|
+| ideas | The writer model (OpenAI, with web search) finds six true stories about the words given, or of its own choosing, each told through one decisive moment, with the people, places and events a camera filmed; each idea's free photographs are probed; the best idea with pictures wins, in the style that fits it among those not used in the last three films. |
+| script | Written in the chosen style with every fact quoted from its page; each quote is fetched here and must be found on its page, every number on screen must stand in a verified quote (`writer.verify`). Then written for the ear (`ear.py`: sentences of 9-14 words, hinges, verdicts, the name landed alone, the stress word late, joins of 0.18-0.26 s, hard words in their spoken form), audited by a second blind call, verified again. |
+| supply | The narrator (`voice.py`, below); real footage per line (`worker/footage`: YouTube and archive.org, every frame checked by a vision model, a person held to one face, 1-3 s clips, asked for 1.7 times the clips a line); six free photographs a named thing (Commons, Openverse, checked); a person speaking on camera is measured on the clip's own frames (`reel.talking`: the lip gap changing frame to frame) and never plays full frame under the narrator; up to two real voices cut in where the person said it, levelled to the narrator's loudness within 1 LU. |
+| score | The story reel (`reel.py`), then the taste check (`film.taste_check`). |
+| render | Valmera's engine (`worker/scene`) through `heavy.sh`, then the brand finish (watermark, end card), the film's music (`worker/music_film.py`: a track from the licensed library chosen the way the references choose it, its build on the turn and its drop on the payoff) on `film.mp4` and none on `film_clean.mp4`. |
+| deliver | Once, complete, then the work folder is deleted (the shell checks it is empty). |
 
-### A film that must be redone
+## The story reel (`reel.py`), against the judge's gaps
 
-A delivered folder is never changed or added to. Before handover: delete its folder, remove its row
-from `.valmera/workflow/ledger.json`, run again with `notes`. After handover: report the defect.
+The owner rated the first three story films 4-5 of 10 (`week-1112/lanes/RATINGS/2026-11-13-O.json`, `-PROOF.json`).
 
-## The styles (atlas/ALIEN.md 8.3)
+- **Pictures:** a new one about every 0.6 s (the judge: 16 cuts a 10 s, median shot 0.49 s), on the voice's stress, each
+  thing's pictures from the clause that names it: its line's footage, then its photographs, then its footage found for
+  other lines, then a clip cut inside itself on unplayed seconds. A photograph is shown once (a second time only after
+  12 s, on another part of it, never a third); a clip's seconds are never played twice. Every frame has a real picture.
+- **Collages:** lines that name several things (the writer marks them; then the longest lines naming two or more) land as
+  tilted prints stacking three to five deep, up to the style's share of the film (28% of the judge's shots are 3+ layers).
+- **Flash frames:** white into the turn and the payoff, negative into the low point and into a black-and-white section.
+- **Finishes by section:** each segment carries the year it speaks from (`era`, the writer's): before 1980 black and white
+  in a film gate, 1980-2005 television scanlines, today in colour; the low point is always black and white.
+- **The engines:** the judge's pace and camera moves (`scene.pace`), one look solved on the film's pictures (`scene.looks`),
+  a soft first frame on one new picture in three, captions inked word by word at one seat, the writer's display strings
+  landing large on the words that say them, the references' sound design (`score.sound`, SND3).
+- **Styles** (never one of the last three delivered): `reel` (bleed, yellow grotesk), `pinboard` (prints on a dark board on about
+  half the lines, orange serif), `archive` (the past in a film gate with projector flashes, cream serif italic), `window`
+  (each picture in a framed window over itself out of focus, cyan condensed capitals). The older `character-sheet`,
+  `whole-page` and `one-photograph` (`film.py`) run only when named: `run.py run --args '{"style": "..."}'`.
+- **Alien devices** (`worker/scene/alien`, verdict of 14 Nov): never `diecut`, `answer` or `lamp`; `rhyme` and `arc` only,
+  only when a direction asks (`direction.json` `alien`), never in a first film.
 
-| Style | Spine | As built |
-|---|---|---|
-| **Character Sheet** | G4, T4 | A new picture about every 0.85 s: each line's real footage first (a clip is never held past its length; a broadcast close-up plays as cut, with no push into the face), then photographs of what it names; a thing's pictures begin with the clause that says its name; frame 0 is the hook's subject in his world. The pacing driver cuts and moves every picture on the voice's stress (slow pushes, settles, eased moves, a whip through about one cut in eleven); one look is solved on the film's own pictures and the low point is drawn in black and white, opened by a negative frame, colour back on the turn with a white frame. Captions are laid out as they will stand and inked word by word at one seat; the writer's display strings land large on that seat on the words that say them (the caption yields). A compact stat block in the top-left corner changes on the word that causes each change: the number ticks over 7 frames in accent, its bar sets to the value; at the low point the bar goes red and blinks; heads are slid clear of it where the picture has room. At most one in five sentence endings is a cut through its own full stop. The last stat overflows on the film's last words: the number leaves the block and fills the frame. The sound design gives the events their recordings by the references' classes; the turn takes the hit with its climb |
-| **Whole Page** | N6, C1 | The whole script set as a page (one or two columns, sized to fill it), photographs as windows in the text. Words not yet spoken wait at 22% ink and are inked as they are said; a window opens when its line is said. The page is seen below a dark desk edge at y 0.215, so no word ever passes under the product's mark. The camera follows the spoken line and holds a window while it is talked about. Each word's size step and lift come from the narrator's own loudness and pitch (signal only). The close pulls back to the whole page: a poster |
-| **One Photograph** | T3, X2 | One free archive photograph. Hook: it lies blurred and dark, and its faces land sharp, a few on each spoken word. The camera travels inside it to each person as the script looks at them, with their name once. A person whose part is told keeps a small gold mark to the end. Once, a face turns out to be the sentence being spoken, set in tiny type in its tones; the camera pushes in and reads along it. The close pulls back to the whole photograph with every mark and one line |
-| Living Print, The Thread, Census | | not built: they need a stateful damage layer, a path planner over matte and depth, or particles from a photo's pixels |
+## The narrator (`voice.py`)
 
-A new style is one builder in `film.py` (`(script, supply, direction) -> (l1, beats)`), a row in
-`STYLES`, a card in `styles.json` with `buildable: true`, and its data in `writer.STYLE_DATA`.
+Phonon 31M Easton (the owner's choice), read through the narrate tool's own parts (`_shell/narrate`), closing the
+independent voice check's gaps (`lanes/RATINGS/2026-11-13-VO2.json`):
 
-## The alien bank (`worker/scene/alien`, since 13 Nov 2026)
+- whole sentences a generation (one to three, never a sentence cut between two), so there are a third as many joins;
+- six takes a generation, three at the runtime's temperature as the owner heard it and three freer; every word heard
+  first, then the tool's prosody score plus the line's pitch range and how high it restarts over the last line's end;
+- joins of 0.22 s, 0.40 s only where the story turns; room tone (-46 dB under the speech) in every pause;
+- the writer's one or two focus words per line ridden to +4.3 dB over their line, measured per word;
+- each line set by its beat and energy, scaled until the read measures about 3.3 LU (EBU R128); -14 LUFS, under -1 dBTP;
+- the VOICE gate (`narrate.py check`: word error under 1% on the spoken form, pace, pitch, loudness, joins) is in `film.json`.
 
-Five devices the engine lays into a scene before it draws it, each bound to this film's own frames, words and voice.
-A film asks for one by carrying it under `alien` in its scene: put `"alien": [asks]` in `direction.json`.
-The shell lays them in at the render (`_shell/chain.py alien_bank`, log in `supply/alien_bank.json`). A device that
-cannot stand on the film leaves it as it was and says why; it never fails a render. Frames are programme frames.
+## Rules
 
-- `rhyme` `{"dev":"rhyme","at":[a,z],"cuts":[f,f],"pool":[assets],"hints":{asset:{"t":s,"at":[x,y]}}}`: a chain of
-  pictures cut on one round shape, registered and growing through every cut. For a line that names like things.
-- `diecut` `{"dev":"diecut","at":[a,z],"t":"WORD"}`: the word is stamped out of the live picture, its letters lift
-  carrying the footage, and drop back. For a word about the thing itself.
-- `lamp` `{"dev":"lamp","at":[a,z],"t":"WORD","ink":"#FF3D1F","faces":[[x,y,w,h]]}`: the word is a light that relights
-  the take at the voice's level; needs the take's matte for the shadow. For the one quotable word of a take.
-- `arc` `{"dev":"arc","marks":[{"f":f,"year":1927,"stakes":-0.4}]}`: the finish follows the year each sentence speaks
-  from, the light and the frame follow the stakes. Once a film, for a story with dates or a fall and a turn.
-- `answer` `{"dev":"answer","at":[a,z],"picks":[{"f":f,"pic":asset,"word":"VEGAS"}]}`: each named picture is first
-  seen inside its own word, then takes the frame on the stressed vowel. For a hook or a list that names things.
+Only true things, with receipts. Real pictures of the real thing; no stock lookalikes, no generated faces. Never publish,
+never touch a customer's project, never alter the end card or the watermark, never rate the film. Model calls run on
+OpenAI (`story.py` reads the key from the backend `.env`, never printed, and unsets any Anthropic key). A run's state is
+in `.valmera/workflow/stories/` (its own work root, so a start sweeps only its own stopped runs; the ledger of delivered
+stories and styles is there too).
 
-One device a beat, each with a reason in the words. Which word, picture and year is your reading, never a rule.
-Proofs beside the judge: `.valmera/week-1112/side-by-side/S/`. Full asks: `.valmera/week-1112/notes/S.md`.
+## Files
 
-## Providers, the spoken form, pace
-
-- **Provider.** `writer.ask_web` and `writer.ask` run on Claude when the process holds an Anthropic key, else on OpenAI's
-  Responses API with its web search (`WRITER_PROVIDER=openai|anthropic` forces one; `WRITER_OPENAI_MODEL`, default
-  gpt-6.1-sol). Quotes are verified here either way.
-- **The spoken form.** `say` is the writer model's spoken form and `names` lists every proper noun as spelled; the
-  narrator's gate listener hears with the names and the VOICE gate compares spoken forms (`_shell/narrate/spoken.py`).
-- **Pace.** Each segment carries `pace` (slow, steady, brisk, fast); `film.assign_pictures` holds each framing between
-  that pace's shortest and longest (`film.PACE_S`), so picture density follows the story's pace.
-
-## Workflow 4 reuses this
-
-`valmera-longform` (the 10-20 minute voiceover) builds on `writer.py` (the web, the providers, `verify`) and on
-`pictures.narrate` / `pictures.pictures` / `pictures.commons_file` / `pictures.faces` for its supply, and on `film.py`'s
-clock, curves and ticks. Long-form voices are `sage` and `iris`.
-
-## Where things are
-
-`run.py` launcher; `wf3.py` the stages; `writer.py` the story finder, writer and fact check;
-`pictures.py` the narrator, the pictures and faces; `film.py` the styles, the sound, the taste check;
-`styles.json` the cards; `REFERENCES.md` what makes the reference films a 10 (the writer reads it);
-`test_film.py`. The engine is `worker/scene` beside this plugin; the narrator is
-`_shell/narrate` (`.valmera/venv-narrate`).
+`story.py` the one command; `run.py` the shell launcher (`run.py run --out <dir> --args '{...}'`, `--resume <id>`,
+`status`); `wf3.py` the stages; `writer.py` the story finder, writer and fact check; `ear.py` writing for the ear;
+`voice.py` the narrator; `pictures.py` photographs and faces; `reel.py` the story reels; `film.py` the older styles and
+the shared clock, captions, display words, engines and taste check (workflow 1's films import it too);
+`styles.json` the cards; `REFERENCES.md` the bar the writer reads; `test_film.py`, `test_reel.py`. The shell is
+`../_shell` (lane SKILL-WF1); the engines are `worker/scene`, `worker/score`, `worker/footage` beside this plugin.

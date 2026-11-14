@@ -1,58 +1,176 @@
 {
- "_about": "The six styles of workflow 3 (atlas/ALIEN.md 8.3), as the ideas and script stages read them. ids match _shell/styles.json. buildable: film.py has the builder and the engine draws the whole spine today; a style that is not buildable is never offered, so nothing is faked.",
+ "_about": "The styles of workflow 3, as the ideas and script stages read them. buildable: a builder draws it today; offer: a run with no style named may choose it. The four story reels (reel.py) are the judge's cut (week-1112/judge/metromedia): real footage at about 16 pictures a 10 s, collages, flash frames, finishes by section. The first three (film.py) are built but offered only by name: their films left text-only stretches and one photograph on screen too long.",
  "styles": [
+  {
+   "id": "reel",
+   "name": "Story Reel",
+   "buildable": true,
+   "offer": true,
+   "engine": "stories",
+   "spine": [
+    "metromedia"
+   ],
+   "pace": [
+    13,
+    19
+   ],
+   "look": "Real footage of what each line names fills the phone, a new picture about every 0.6 s, moving; lines that name several things land as stacked prints; the past is drawn in its own finish (black and white in a film gate for archive years, scanlines for the television years); a flash frame opens each turn; heavy grotesk display words in yellow on the words that matter, captions inked word by word.",
+   "hook": "Frame 0 is the subject in real footage, the hook's display word landing on the word that says it.",
+   "close": "The payoff's figure lands large on the last real picture; the end card follows.",
+   "needs": "a true story with a human turn and a payoff with a figure, whose people, places and events were filmed or photographed (interviews, launches, news, archive film) so real footage and free photographs exist for most lines",
+   "voice": [
+    "atlas"
+   ]
+  },
+  {
+   "id": "pinboard",
+   "name": "Pinboard",
+   "buildable": true,
+   "offer": true,
+   "engine": "stories",
+   "spine": [
+    "metromedia",
+    "G1"
+   ],
+   "pace": [
+    13,
+    19
+   ],
+   "look": "Most lines land as tilted prints pinned over each other on a dark board, three to five layers, each a real clip or photograph of what is said, between full-frame footage on the turns; orange accent, high-contrast serif display words.",
+   "hook": "The first print lands on the hook's first named thing.",
+   "close": "The last stack holds every print of the payoff, then the end card.",
+   "needs": "a true story with a human turn and a payoff with a figure, whose people, places and events were filmed or photographed (interviews, launches, news, archive film) so real footage and free photographs exist for most lines; best when lines list or compare several named things",
+   "voice": [
+    "atlas"
+   ]
+  },
+  {
+   "id": "archive",
+   "name": "Archive",
+   "buildable": true,
+   "offer": true,
+   "engine": "stories",
+   "spine": [
+    "metromedia"
+   ],
+   "pace": [
+    13,
+    19
+   ],
+   "look": "The past in black and white with grain and a film gate, a projector flash into each run of prints; colour arrives with today; cream serif italic display words.",
+   "hook": "An archive picture of the subject in its gate, the hook's word in serif italic.",
+   "close": "Colour returns on the payoff; the end card follows.",
+   "needs": "a true story with a human turn and a payoff with a figure, whose people, places and events were filmed or photographed (interviews, launches, news, archive film) so real footage and free photographs exist for most lines; best for a story set mostly before 2000",
+   "voice": [
+    "atlas"
+   ]
+  },
+  {
+   "id": "window",
+   "name": "Window",
+   "buildable": true,
+   "offer": true,
+   "engine": "stories",
+   "spine": [
+    "metromedia"
+   ],
+   "pace": [
+    13,
+    19
+   ],
+   "look": "Each picture plays in a framed window over itself out of focus (three layers), cut fast; cyan accent, condensed capitals; archive years in their own finish.",
+   "hook": "The subject in the window, the hook's word in condensed capitals under it.",
+   "close": "The payoff's picture in the window, its figure large; the end card follows.",
+   "needs": "a true story with a human turn and a payoff with a figure, whose people, places and events were filmed or photographed (interviews, launches, news, archive film) so real footage and free photographs exist for most lines",
+   "voice": [
+    "atlas"
+   ]
+  },
   {
    "id": "character-sheet",
    "name": "Character Sheet",
    "buildable": true,
-   "spine": ["G4", "T4"],
+   "spine": [
+    "G4",
+    "T4"
+   ],
    "look": "The founder's life as a run in a game. Real photographs of the named people, places and things fill the frame; a small stat block lives in the top-left corner and every event in the narration changes a stat on the word that causes it (cash, runway, age, planes, customers). At the low point a bar goes red and blinks. Some sentence endings are cuts: the full stop of the caption swells and swallows the frame with the next picture inside it.",
    "hook": "Frame 0 is the founder's real photo with the stat block already showing one absurd number.",
    "close": "The last stat overflows its box: the number grows past the block and fills the frame, then the end card.",
    "needs": "a money or survival story with three or four quantities that change over time, every value stated in a source; named people and places with free-licence photos",
-   "voice": ["atlas", "blaze"]
+   "voice": [
+    "atlas",
+    "blaze"
+   ],
+   "offer": false
   },
   {
    "id": "whole-page",
    "name": "Whole Page",
    "buildable": true,
-   "spine": ["N6", "C1"],
+   "spine": [
+    "N6",
+    "C1"
+   ],
    "look": "The story is set as one printed page, two columns, with real photographs as windows inside the text. The camera rides the line being spoken, a word at a time; words not yet spoken wait in grey, spoken words are inked, and the loud ones are set larger, measured from the narrator's voice. At the end the camera pulls back and the whole film is one page: a poster the viewer can screenshot.",
    "hook": "Frame 0 is the first line of the page, the hook sentence already set, its first word inked as it is said.",
    "close": "A pull-back to the whole page, every window still showing its picture; it holds as a poster before the end card.",
    "needs": "a story told in about 150 to 190 words with four to six named things that have free-licence photos; a strong first sentence",
-   "voice": ["nova", "atlas"]
+   "voice": [
+    "nova",
+    "atlas"
+   ],
+   "offer": false
   },
   {
    "id": "one-photograph",
    "name": "One Photograph",
    "buildable": true,
-   "spine": ["T3", "X2"],
+   "spine": [
+    "T3",
+    "X2"
+   ],
    "look": "One real archive photograph, public domain or free licence, is the whole world. It is assembled by the voice: its people arrive one per spoken beat out of a blurred copy. The camera travels inside it to each person as they are named, and each one keeps a small mark once their part of the story is told, so the photo fills up with the story. Once, the camera pushes into a face until its tones turn out to be the sentence being spoken, set in tiny type.",
    "hook": "Frame 0 is the blurred photograph with its first face landing sharp on the first word.",
    "close": "Pull back to the whole photograph, every mark lit, one line.",
    "needs": "one free-licence archive photograph on Wikimedia Commons, large (2000 px or more), whose people or things are the whole story",
-   "voice": ["nova", "atlas"]
+   "voice": [
+    "nova",
+    "atlas"
+   ],
+   "offer": false
   },
   {
    "id": "living-print",
    "name": "Living Print",
    "buildable": false,
-   "spine": ["X1", "T2", "N1", "L3"],
+   "spine": [
+    "X1",
+    "T2",
+    "N1",
+    "L3"
+   ],
    "needs": "a stateful damage layer in the engine (X1) and the residue word's falling tiles (T2)"
   },
   {
    "id": "the-thread",
    "name": "The Thread",
    "buildable": false,
-   "spine": ["N2", "T5"],
+   "spine": [
+    "N2",
+    "T5"
+   ],
    "needs": "a path planner over matte and depth per shot; stills have neither"
   },
   {
    "id": "census",
    "name": "Census",
    "buildable": false,
-   "spine": ["G1", "T10", "X5"],
+   "spine": [
+    "G1",
+    "T10",
+    "X5"
+   ],
    "needs": "particles from a photo's own pixels (engine class C)"
   }
  ]
