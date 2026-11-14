@@ -76,8 +76,9 @@ def test_alternate_scans_and_mirrors_are_one_picture(tmp_path):
 def test_archive_parser_ignores_site_navigation_images():
     from archive_pictures import ArticleImages
     parser=ArticleImages()
-    parser.feed('<article><nav><img src="news.jpg" alt="unrelated"></nav><div class="entry-content"><figure><img src="archive.jpg" alt="actual subject"></figure></div><img src="footer.jpg" alt="footer"></article>')
+    parser.feed('<article><nav><img src="news.jpg" alt="unrelated"></nav><div class="entry-content"><figure><img src="archive.jpg" alt="actual subject"></figure><figcaption>Named person, NASA 1973</figcaption></div><img src="footer.jpg" alt="footer"></article>')
     assert [r['src'] for r in parser.rows]==['archive.jpg']
+    assert parser.rows[0]['caption'].strip()=='Named person, NASA 1973'
 
 
 def test_coverage_failure_is_explicit():

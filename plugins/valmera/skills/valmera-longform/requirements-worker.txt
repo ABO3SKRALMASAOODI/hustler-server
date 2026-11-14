@@ -1,0 +1,2 @@
+# Original technical-report figures, in the workflow worker environment.
+pypdfium2==5.15.2

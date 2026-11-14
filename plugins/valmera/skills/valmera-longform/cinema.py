@@ -363,7 +363,12 @@ def supply(ctx, script):
         if sum(g['seconds'] for g in failure.gaps)>wj['duration']*.45:
             raise RuntimeError('moving footage still covers less than 55%; another real-video research pass is required')
         evidence_for_gaps(ctx,script,ft,failure.gaps)
-        shots,clock,_=schedule(sc,coverage_words,ft)
+        try:shots,clock,_=schedule(sc,coverage_words,ft)
+        except CoverageError as remaining:
+            from document_evidence import supply as original_figures
+            original_figures(ctx,script,ft,remaining.gaps)
+            save(Path(ctx.supply)/'footage/footage.json',ft)
+            shots,clock,_=schedule(sc,coverage_words,ft)
     still=sum((r['f'][1]-r['f'][0])/FPS for r in shots if r['clip'].get('kind')=='image')
     if still/clock.dur>.45:raise RuntimeError('evidence photos would displace the moving film')
     if not ft['voices']:witness_voices(ctx,script,ft)
@@ -549,8 +554,16 @@ def build(sc,pack):
         c=row['clip']
         if c.get('kind')=='image':
             key=P.image(f'evidence-photo-{j}',c)
-            crop=F.cover_crop(c['w'],c['h'],W/H,(.5,.5),(.5,.5))
-            P.shot(row['f'],key,F.push(crop,row['f'][1]-row['f'][0],.035,(.5,.5)))
+            if c.get('document'):
+                P.page(row['f'],'#14161A',grain=.005)
+                ratio=c['w']/c['h'];height=min(.72,.84*W/H/ratio);width=height*ratio/(W/H)
+                n=row['f'][1]-row['f'][0]
+                P.card(row['f'],key,[.5-width/2,.46-height/2,.5+width/2,.46+height/2],
+                       s=[1+.025*q/max(n-1,1) for q in range(n)])
+                P.word(row['f'],c['source']['credit']+' • archive record','cap',.055,.82,note=False)
+            else:
+                crop=F.cover_crop(c['w'],c['h'],W/H,(.5,.5),(.5,.5))
+                P.shot(row['f'],key,F.push(crop,row['f'][1]-row['f'][0],.035,(.5,.5)))
         else:
             key=P.video(f'archive-{j}',c)
             P.shot(row['f'],key,[0,0,1,1],src=row['src'])
