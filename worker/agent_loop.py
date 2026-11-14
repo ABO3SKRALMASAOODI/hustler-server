@@ -2816,8 +2816,8 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
         if got.get("path") == "podcast_shorts_engine":
             done_by = (f"The typed clip request is running through the podcast-shorts engine as job {got['job_id']}. "
                        "Its selected stories get their own child editors automatically under this request. "
-                       "Keep the parent source intact. Wait for this job, then wait for every returned editor_job "
-                       "and inspect each child's rendered result before the final reply. Raw story cards are not finished films.")
+                       "Keep the parent source intact. This job waits for the child attempts and returns their actual render receipts. "
+                       "Read those receipts before the final reply. Raw story cards are not finished films.")
         elif got.get("path") == "segmented_whole_film":
             from score import patch
             done_by = patch.pass_note(got)
@@ -5271,6 +5271,11 @@ def _resume_serial_background(ctx, continuation):
         return ""
     result = agent_tools.wait_for_job(ctx, job_id)
     _record_outer_tool_outcome(ctx, "wait_for_job", result)
+    job = ctx.db.run(dbx.get_job, job_id) or {}
+    if (job.get("project_id") == ctx.project_id and job.get("user_id") == ctx.job.get("user_id")
+            and (job.get("payload") or {}).get("typed_craft_request")
+            and (job.get("result") or {}).get("typed_films") is not None):
+        result = "Typed shorts engine settled. Child render receipts: " + json.dumps(job["result"]["typed_films"])
     return "\nBackground work from this same request: " + result
 
 

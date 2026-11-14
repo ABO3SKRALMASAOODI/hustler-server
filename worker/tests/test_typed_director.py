@@ -243,3 +243,41 @@ def test_short_child_director_is_bounded_to_its_story(monkeypatch, tmp_path):
     assert got["source_window"] == [7000, 7090]
     assert writes[0]["keep"] == [[7000, 7090]]
     assert not list(tmp_path.glob("typed-film-*"))
+
+
+def test_typed_short_wait_follows_continuations_and_requires_current_render(monkeypatch):
+    import shorts
+    import db as dbx
+    monkeypatch.setattr(shorts.time, "sleep", lambda seconds: None)
+    states = {20: {"id": 20, "project_id": 8, "user_id": 3, "state": "done",
+                   "result": {"continued_job_id": 21}},
+              21: {"id": 21, "project_id": 8, "user_id": 3, "state": "done"},
+              22: {"id": 22, "project_id": 9, "user_id": 3, "state": "failed"}}
+    def run(fn, *args):
+        if fn is dbx.get_job:
+            return states[args[0]]
+        if fn is dbx.get_project:
+            return {"id": args[0], "parent_project_id": 7, "user_id": 3}
+        if fn is dbx.latest_edl:
+            return {"version": 5}
+        if fn is dbx.latest_asset:
+            return {"id": 80 + args[0], "meta": {"edl_version": 5 if args[0] == 8 else 4},
+                    "width": 720, "height": 1280, "duration_s": 90}
+        raise AssertionError(fn)
+    films = shorts._wait_typed_children(NS(run=run), {"id": 10, "project_id": 7, "user_id": 3},
+        [{"child_project_id": 8, "editor_job_id": 20}, {"child_project_id": 9, "editor_job_id": 22}])
+    films = {f["child_project_id"]: f for f in films}
+    assert films[8]["editor_job_id"] == 21 and films[8]["render_asset_id"] == 88
+    assert films[9]["render_asset_id"] is None
+
+
+def test_typed_short_wait_refuses_cross_owner_child(monkeypatch):
+    import shorts
+    import db as dbx
+    def run(fn, *args):
+        if fn is dbx.get_project:
+            return {"id": 8, "parent_project_id": 7, "user_id": 999}
+        return {"project_id": 8, "user_id": 3, "state": "done"}
+    with pytest.raises(RuntimeError, match="ownership"):
+        shorts._wait_typed_children(NS(run=run), {"id": 10, "project_id": 7, "user_id": 3},
+            [{"child_project_id": 8, "editor_job_id": 20}])
