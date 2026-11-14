@@ -580,6 +580,14 @@ def _child_matte(spec, ch):
 
         def alpha_of(frame):
             return stream.step(frame, cv2)
+    refiner = None
+    if params.get('refine'):
+        import matte_refine
+        from sidecar_kinds import model_file
+        path, why = model_file('efficientsam_ti')
+        if not path:
+            raise RuntimeError('Compositing matte support model unavailable: ' + str(why))
+        refiner = matte_refine.Refiner(path, engine.get('threads') or 4)
     out = os.path.join(spec["outdir"], f"{ch['out_key']}.mp4")
     import tempfile
     enc_err = tempfile.TemporaryFile()
@@ -598,6 +606,8 @@ def _child_matte(spec, ch):
                              n_warm + n_out):
             t = time.perf_counter()
             a = alpha_of(frame)
+            if refiner is not None:
+                a = refiner.step(frame, a, cv2)
             t_model += time.perf_counter() - t
             i += 1
             if i <= n_warm:
