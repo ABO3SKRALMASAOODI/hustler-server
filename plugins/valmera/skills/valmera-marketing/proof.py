@@ -54,6 +54,7 @@ PY = f"{VV}/venv-worker/bin/python"
 SRC_ROOT = os.environ.get("WF2_SOURCES", f"{V}/.tmp/valmera-podcast-shorts")
 REFS = f"{V}/reference-library/2026-11-05/02-editing-tutorials-and-app-marketing"
 ATLAS = f"{VV}/week-1106/atlas/numbers.json"
+FOOTAGE_MORE = 2.6        # clips asked a line: the marketing references cut every 0.58 s, and a wrong picture leaves the film
 CHECK_MODEL = "gpt-6-sol"           # the picture checks: every picture against its words, the export against the sentence
 FORM = dict(words=(70, 130), segments=(7, 14), seconds=(30, 55))
 # the recording's stack: this week's main on a synthetic Pro account. Anthropic spend is $0 for this lane, so the Studio
@@ -211,7 +212,8 @@ def ideas(ctx):
               "sentence you write is typed into it, so write sentences the product can visibly deliver on a talking clip (a vertical "
               "reframe, a tighter cut that opens on the strongest line, captions in a stated style, pictures over what is said, a "
               "colour treatment, a title) and say exactly what must be visible for the film to be honest. Prefer a change an editor sees "
-              "in one frame (the reframe, the captions, the pictures, the look) over one that rests on the exact syllable a cut starts on.")
+              "in one frame (pictures over what is said, captions in a stated style, a look) over one that rests on the exact syllable a "
+              "cut starts on, and ask for the vertical frame to be filled (cropped to the speaker), never the wide picture boxed in it.")
     content = (f"# What editors answered to (the reference films, most comments first)\n{json.dumps(references()[:25], ensure_ascii=False)}\n\n"
                f"# The references' pace (medians)\n{json.dumps(pace)}\n\n"
                f"# Styles this film can take\n" + "\n".join(f"- {s['id']}: {s['look']} Hook: {s['hook']}" for s in able) + "\n\n"
@@ -641,7 +643,7 @@ def supply(ctx, script):
         pack["missing"] = [n["name"] for n in named if not got.get(n["name"])]
     words_all = json.load(open(nar["words"]))["words"]
     durs = chain.seg_durs(words_all, len(sc["segments"]))
-    durs = [round(float(x) * W3.FOOTAGE_MORE, 2) for x in durs] if durs else durs
+    durs = [round(float(x) * FOOTAGE_MORE, 2) for x in durs] if durs else durs
     anchors = {k: [r["path"] for r in v if r.get("path")] for k, v in (pack.get("pictures") or {}).items()}
     own = ("THE UPLOAD", "THE EXPORT")
     fscript = json.loads(json.dumps(script))         # the footage engine searches the web; the recording's own names are ours
