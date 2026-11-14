@@ -63,7 +63,8 @@ def test_typed_write_uses_request_guards_and_propagates_asset_grants():
     assert not hasattr(ctx, "director_version")
 
 
-def test_four_minute_typed_film_reaches_director_without_lifting_first_film_cap(monkeypatch, tmp_path):
+@pytest.mark.parametrize("test_rung", [False, True])
+def test_four_minute_typed_film_reaches_director_without_lifting_first_film_cap(monkeypatch, tmp_path, test_rung):
     source = tmp_path / "source.mp4"
     source.touch()
     ledger = {"asks": [{"kind": "film", "cut": "new", "said": "polish", "want": "polished film"}]}
@@ -72,7 +73,9 @@ def test_four_minute_typed_film_reaches_director_without_lifting_first_film_cap(
         agent_model="gpt-6.1-sol", ask_ledger=copy.deepcopy(ledger), versions_written=[])
     ctx.write_edl = lambda edl, note: ctx.versions_written.append(2) or "EDL v2"
     db = NS(run=lambda *a: {"storage_key": "original"})
-    monkeypatch.setattr(flags, "read", lambda db: dict(copy.deepcopy(flags.DEFAULTS), mode="on"))
+    dcfg = flags.parse({"mode": "on", **({"test_user_ids": [5],
+        "models": {"scout": "gpt-6.1-sol", "direct": "gpt-6.1-sol"}} if test_rung else {})})
+    monkeypatch.setattr(flags, "read", lambda db: dcfg)
 
     def make(view, db, job, cfg, deadline, work, rec):
         assert cfg["models"] == {"scout": "gpt-6.1-sol", "direct": "gpt-6.1-sol"}
@@ -81,7 +84,7 @@ def test_four_minute_typed_film_reaches_director_without_lifting_first_film_cap(
         view.director_version = 2
         return [], ["crafted film"], {}
     monkeypatch.setattr(film, "_make", make)
-    got = asks.direct_film(ctx, db, {"id": 1}, 9, asks.parse({"mode": "on"}))
+    got = asks.direct_film(ctx, db, {"id": 1, "user_id": 5}, 9, asks.parse({"mode": "on"}))
     assert got["version"] == 2 and got["path"] == "whole_film_director"
     assert ctx.ask_ledger == ledger
     assert not list(tmp_path.glob("typed-film-*"))
