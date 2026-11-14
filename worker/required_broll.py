@@ -7,7 +7,8 @@ import json
 import os
 
 SCHEMA = {"type": "object", "additionalProperties": False,
-          "required": ["pictures", "preserve_speech_clock", "short_story_end_word", "short_story_end_reason"], "properties": {
+          "required": ["pictures", "frame_ratio", "preserve_speech_clock", "short_story_end_word", "short_story_end_reason"], "properties": {
+    "frame_ratio": {"type": ["string", "null"], "enum": ["9:16", "16:9", "1:1", "4:5", None], "description": "The output shape requested by the customer, e.g. 9:16 for a vertical short. Null if no output shape is requested; then keep the existing film shape."},
     "short_story_end_word": {"type": ["integer", "null"], "description": "Only when asked to make a new short focused on the named examples: the last word id of a complete relevant thought after all those examples. Stop before the subsequent topic or unfinished sentence. Null when no shortening is requested, the full narration must stay, or no clear ending exists."},
     "short_story_end_reason": {"type": "string"},
     "preserve_speech_clock": {"type": "boolean", "description": "True for illustrative B-roll over ongoing speech; false when the customer actually asks for additional silent picture time or a separate montage."},
@@ -49,6 +50,7 @@ def record(ctx, ledger, request):
             cut='none', length='none', items=[], how='look', where='at the named words',
             **{'pass': p['must_show'], 'otherwise': ''}))
     ledger['required_pictures'] = pictures
+    ledger['picture_frame_ratio'] = value.get('frame_ratio')
     ledger['pictures_preserve_speech_clock'] = value.get('preserve_speech_clock') is True
     end_id = value.get('short_story_end_word')
     if pictures and isinstance(end_id, int) and 0 <= end_id < len(words):
@@ -80,13 +82,22 @@ def supply(ctx, ledger):
     import agent_tools
     import broll_source
     from score import asks
+    if not ledger.get('required_pictures'):
+        return ''
     notes = []
+    frame_edl = dict(ctx.latest_edl()['json'])
+    if ledger.get('picture_frame_ratio'):
+        frame_edl.pop('canvas', None)
+        frame_edl['frame'] = dict(frame_edl.get('frame') or {}, ratio=ledger['picture_frame_ratio'])
+    frame_size = asks.output_size(frame_edl, getattr(ctx, 'index', None) or {})
     for p in ledger.get('required_pictures') or []:
         subject = {'name': p['subject'], 'must_show': p['must_show'],
                    'searches': [p['query']]}
         try:
             hits, errors = broll_source.search_named(subject, count=4)
-            hits, report, _ = broll_source.check_named(subject, hits, workdir=ctx.workdir)
+            hits, report, _ = broll_source.check_named(subject, hits, workdir=ctx.workdir,
+                                                       frame_size=frame_size)
+            p['candidate_frame'] = {'fit': 'cover', 'size': list(frame_size)} if frame_size else None
             p['candidate_check'] = report
             if not hits:
                 # Archive queries are often literal AND searches; a descriptive
@@ -110,7 +121,8 @@ def supply(ctx, ledger):
                               searches=(retry.get('queries') or [])[:3])
                 p['retry_search'] = search
                 candidates, retry_errors = broll_source.search_named(search, count=4)
-                hits, retry_report, _ = broll_source.check_named(subject, candidates, workdir=ctx.workdir)
+                hits, retry_report, _ = broll_source.check_named(subject, candidates, workdir=ctx.workdir,
+                                                                  frame_size=frame_size)
                 p['candidate_check'] += retry_report
                 errors += retry_errors
             p['candidates'] = []
