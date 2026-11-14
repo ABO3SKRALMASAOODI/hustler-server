@@ -138,8 +138,20 @@ must not leave a new crop, lost title or other incidental 'quality' repair.
     return True
 
 
+def _remember_disclosure(ctx, delta, measured, offer=None):
+    description = ('The previous film is unchanged.' if not delta else
+                   'Changes kept in the film: ' + (measured or ', '.join(delta)) + '.')
+    if offer:
+        description += ' ' + offer
+    ctx.retained_reply_facts = {
+        'fields': (sorted(delta) if delta else ['unchanged']) + (['alternative'] if offer else []),
+        'description': description,
+    }
+
+
 def disclose(ctx, reply):
     """The reply covers the actual retained delta, including partial outcomes."""
+    ctx.retained_reply_facts = None
     baseline = (getattr(ctx, 'turn_start_edl', None) or {}).get('json')
     if not isinstance(baseline, dict):
         return reply
@@ -194,9 +206,13 @@ def disclose(ctx, reply):
         has_offer = (not alternatives or (optional_alternatives and offered is None)
                      or (type(offered) is int and 0 <= offered < len(alternatives)))
         if has_offer and str(value.get('reply') or '').strip() and set(value.get('covered') or []) >= set(delta):
+            _remember_disclosure(ctx, delta, measured, alternatives[offered]['offer']
+                                 if alternatives and offered is not None else None)
             return value['reply'].strip()
     except Exception:
         pass
+    _remember_disclosure(ctx, delta, measured, alternatives[0]['offer']
+                         if alternatives and not optional_alternatives else None)
     return reply + ('\nNo changes were kept; your previous film is unchanged.' if not delta else
                     '\nChanges kept in the film: ' + (measured or ', '.join(delta)) + '.') + (
                     '\n' + alternatives[0]['offer'] if alternatives and not optional_alternatives else '')
