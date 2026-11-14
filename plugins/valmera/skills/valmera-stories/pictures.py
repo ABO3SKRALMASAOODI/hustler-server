@@ -111,7 +111,7 @@ def pictures(named, out, per=4, min_px=700):
         try:
             kept, rep = B.find_named(s, kind=B.KIND_PHOTO, count=per + 2, workdir=out)
         except Exception as e:  # noqa: BLE001 - one subject without pictures is a gap, not a stop
-            return subj["name"], [], dict(subject=subj["name"], error=str(e)[:200])
+            return subj.get("key") or subj["name"], [], dict(subject=subj["name"], must_show=s["must_show"], searched=s["searches"], error=str(e)[:200])
         recs, fails = [], []
         for c in kept:
             if len(recs) >= per:
@@ -134,7 +134,11 @@ def pictures(named, out, per=4, min_px=700):
                 fails.append(f"{c.get('id')}: {got.get('width')}x{got.get('height')} is too small")
                 continue
             recs.append(_record(c, got, subj["name"]))
-        rep = {k: v for k, v in rep.items() if k in ("subject", "candidates", "kept", "say", "errors", "usd")}
+        # the check's own evidence stays with the report: what each picture was judged against (must_show), its grade and
+        # what it shows, and a check that could not run, so a refusal names why every picture was dropped
+        checked = [{k: c.get(k) for k in ("id", "ok", "grade", "shows") if k in c} for c in rep.get("checked") or [] if isinstance(c, dict)]
+        rep = {k: v for k, v in rep.items() if k in ("subject", "candidates", "kept", "say", "errors", "usd", "must_show", "searched", "check_error")}
+        rep["checked"] = checked[:12]
         rep["downloaded"] = len(recs)
         if subj.get("search_for"):
             rep["search_for"] = subj["search_for"]

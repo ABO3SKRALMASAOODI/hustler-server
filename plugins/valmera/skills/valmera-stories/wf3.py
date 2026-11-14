@@ -472,13 +472,22 @@ def given_narration(ctx, sc, out):
         ctx.log(f"the given narration could not be read ({str(e)[:120]}): narrating afresh")
 
 
+def is_person(n):
+    return str((n or {}).get("is") or "").lower() == "person"
+
+
 def photo_searches(sc, named):
     """The photograph searches of a story reel: one per line's brief item, the archivist's search writer.annotate wrote
     for that thing at its story time (see.search, e.g. "John Lasseter 1995"), gathered under the thing's name; a thing
     no brief item searches keeps the writer's own searches. A thing whose faithful pictures exist only in the work's own
     footage (writer.annotate's true_pictures "footage": an animated film's characters) is not searched at all: its lines
-    are the footage engine's. The must_show the picture check reads is the line's own must_show followed by its as_of,
-    so a toy, a ride, a sculpture or a later year is refused at search time. Pictures are then gated per line by fit."""
+    are the footage engine's.
+
+    The must_show the picture check reads says WHO or WHAT, never WHEN: a person's own must_show (the named entry: that
+    man, not "1993, during production"), a thing's line must_show without the line's as_of. The search-time check still
+    refuses a stand-in (a toy, a ride, a sculpture, another person); the story time and version are judged per line by
+    fit (time_ok, version_ok), which sees each picture against each line's words. An era-strict search-time check (r3,
+    15 Nov) dropped ten genuine photographs of John Lasseter for not being from 1993 before any line was asked."""
     named = [n for n in named if n.get("true_pictures") != "footage"]
     by = {n.get("name"): n for n in named}
     out, seen = [], set()
@@ -489,8 +498,8 @@ def photo_searches(sc, named):
             if not n or not q or (n["name"], q.lower()) in seen:
                 continue
             seen.add((n["name"], q.lower()))
-            must = " ".join(str(v).strip() for v in (x.get("must_show") or n.get("must_show") or n["name"], x.get("as_of")) if v and str(v).strip())
-            out.append(dict(name=n["name"], key=n["name"], searches=[q], must_show=must, search_for=k, **{"is": n.get("is", "thing")}))
+            must = (n.get("must_show") or n["name"]) if is_person(n) else (x.get("must_show") or n.get("must_show") or n["name"])
+            out.append(dict(name=n["name"], key=n["name"], searches=[q], must_show=str(must).strip(), search_for=k, **{"is": n.get("is", "thing")}))
     searched = {o["name"] for o in out}
     return out + [n for n in named if n.get("name") not in searched]
 
@@ -591,27 +600,51 @@ def supply(ctx, script):
         if (s.get("window") or {}).get("subject"):
             used.add(s["window"]["subject"])
     named = [n for n in sc.get("named") or [] if n.get("name") in used]
+    reel = sid in R.STYLES
+    subj = []
     if sid != "one-photograph" and named:
-        subj = photo_searches(sc, named) if sid in R.STYLES else named
-        got, reports, usd = PX.pictures(subj, os.path.join(sup_dir, "pics"), per=3 if sid in R.STYLES else 4 if sid == "character-sheet" else 2) \
-            if subj else ({}, [], 0.0)
-        B = PX._worker()          # the check's own model (gpt-6-sol on the OpenAI rung since 13 Nov; its fallback is named when it ran)
-        spend.append(dict(stage="supply", provider="openai" if str(B.NAMED_CHECK_MODEL).startswith("gpt") else "anthropic",
-                          model=B.NAMED_CHECK_MODEL, what="picture check", usd=usd))
-        for name, recs in got.items():
-            for r in recs:
-                try:
-                    r["faces"] = PX.faces(r["path"])
-                except Exception:  # noqa: BLE001
-                    r["faces"] = []
-        pack["pictures"] = {k: v for k, v in got.items() if v}
-        pack["picture_reports"] = reports
-        pack["credits"] = [dict(name=r["name"], title=r.get("title"), licence=r.get("licence"), credit=r.get("credit"), page=r.get("page"))
-                           for v in got.values() for r in v]
+        subj = photo_searches(sc, named) if reel else named
+    per = 3 if reel else 4 if sid == "character-sheet" else 2
+    words_all = json.load(open(nar["words"]))["words"]
+    durs = chain.seg_durs(words_all, len(sc["segments"]))
+    reel_kw = dict(preserve_source=True, shot_s=REEL_SHOT_S, line_max=REEL_LINE_MAX, per=REEL_PER) if reel else {}
+    # a story reel's first call already searches each line's named moment (moment_script) and the people's own voices
+    first = moment_script(script) if reel else script
+    foot = None
+    if reel:
+        # A story reel's true pictures are mostly footage (an animated film exists only as itself; the free archives hold
+        # its merchandise and parks): the footage engine runs for every story reel, ALONGSIDE the photograph search, and
+        # the supply is judged only after both, on what fits each line (supply_gate). The people's photographs are
+        # searched first: they are the engine's anchors for finding a person's own voice (footage voice.face_shows).
+        people = [x for x in subj if is_person(x)]
+        things = [x for x in subj if not is_person(x)]
+        got, reports, usd = PX.pictures(people, os.path.join(sup_dir, "pics"), per=per) if people else ({}, [], 0.0)
+        anchors = {k: [r["path"] for r in v if r.get("path")] for k, v in got.items() if v}
+        given_footage(ctx, os.path.join(sup_dir, "footage"))
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(PX.pictures, things, os.path.join(sup_dir, "pics"), per=per) if things else None
+            try:
+                foot = chain.footage(ctx, first, durs, anchors=anchors, **footage_kw(reel_kw, want_voices=True))     # real video per line
+            finally:
+                got2, reports2, usd2 = fut.result() if fut else ({}, [], 0.0)
+        for k, v in got2.items():
+            have = {r["path"] for r in got.get(k) or []}
+            got.setdefault(k, []).extend(r for r in v if r["path"] not in have)
+        reports, usd = reports + reports2, round(usd + usd2, 4)
+        keep_photos(pack, got, reports, usd, spend)
+        searched = {x.get("key") or x["name"] for x in subj}
+        pack["missing"] = [n["name"] for n in named if n["name"] in searched and not got.get(n["name"])]
+        if pack["missing"]:
+            ctx.log("no checked free photographs of " + "; ".join(photo_refusal(reports, n) for n in pack["missing"])[:1500])
+    elif sid != "one-photograph" and named:
+        got, reports, usd = PX.pictures(subj, os.path.join(sup_dir, "pics"), per=per) if subj else ({}, [], 0.0)
+        keep_photos(pack, got, reports, usd, spend)
         searched = {x.get("key") or x["name"] for x in subj}
         missing = [n["name"] for n in named if n["name"] in searched and not got.get(n["name"])]
-        if len(pack["pictures"]) < min(2, len(searched)):
-            raise RuntimeError(f"only {len(pack['pictures'])} named things have free pictures; missing {missing}")
+        if len(pack["pictures"]) < min(2, len(searched)):       # a photo-only style: its pictures ARE its supply
+            raise RuntimeError(f"only {len(pack['pictures'])} named things have free pictures; missing {missing}: "
+                               + "; ".join(photo_refusal(reports, n) for n in missing)[:1800])
         pack["missing"] = missing
     if sid == "one-photograph":
         ph = PX.commons_file(sc["photo"]["file"], os.path.join(sup_dir, "photo"))
@@ -624,14 +657,10 @@ def supply(ctx, script):
         pack["photo"] = ph
         pack["credits"] = [dict(name=ph["title"], title=ph["title"], licence=ph["licence"], credit=ph.get("credit"), page=ph.get("page"))]
         pack["microtext"] = portrait_of(ctx, ph, sc, sup_dir)
-    words_all = json.load(open(nar["words"]))["words"]
     anchors = {k: [r["path"] for r in v if r.get("path")] for k, v in (pack.get("pictures") or {}).items()}
-    given_footage(ctx, os.path.join(sup_dir, "footage"))
-    durs = chain.seg_durs(words_all, len(sc["segments"]))
-    reel_kw = dict(preserve_source=True, shot_s=REEL_SHOT_S, line_max=REEL_LINE_MAX, per=REEL_PER) if sid in R.STYLES else {}
-    # a story reel's first call already searches each line's named moment (moment_script) and the people's own voices
-    first = moment_script(script) if sid in R.STYLES else script
-    foot = chain.footage(ctx, first, durs, anchors=anchors, **footage_kw(reel_kw, want_voices=True))     # real video per line
+    if not reel:
+        given_footage(ctx, os.path.join(sup_dir, "footage"))
+        foot = chain.footage(ctx, first, durs, anchors=anchors, **footage_kw(reel_kw, want_voices=True))     # real video per line
     if foot:
         tag_things(foot, first)
     if foot:
@@ -682,15 +711,134 @@ def supply(ctx, script):
         fit_supply(ctx, script, pack, durs, spend, anchors, reel_kw)
     elif sid in R.STYLES:
         pack.setdefault("defects", []).append("fit skipped by --args fit:false: the cut has no per-line picture verdicts")
+    if reel and named:
+        gate = supply_gate(pack, named, subj)
+        pack["supply_gate"] = gate
+        ctx.log(f"supply: {gate['supplied']} of {gate['named']} named things have fitting pictures or footage "
+                f"({', '.join(f'{k}: {v}' for k, v in gate['things'].items())})")
+        if not gate["ok"]:
+            json.dump(gate, open(os.path.join(sup_dir, "refusal.json"), "w"), ensure_ascii=False, indent=1)
+            raise RuntimeError(gate["say"])
     if sid == "whole-page":
         w = words_all
         loud, pitch = F.voice_measures(nar["wav"], w, PX.FF)
         pack["loudness"], pack["pitch"] = loud, pitch
     rec = dict(narration_s=nar["duration"], voice=nar.get("voice"), gate=nar["gate"], pictures=sum(len(v) for v in pack["pictures"].values()),
                subjects=len(pack["pictures"]), missing=pack.get("missing"), spend=spend,
+               supplied=(pack.get("supply_gate") or {}).get("things"),
                footage=(dict(clips=foot["counts"]["clips"], lines=foot["counts"]["lines_with_footage"], credits=foot["credits"]) if foot else None))
     json.dump(dict(pack=pack, record=rec), open(pk, "w"), ensure_ascii=False, indent=1)
     return rec
+
+
+def keep_photos(pack, got, reports, usd, spend):
+    """The checked photographs into the pack: faces on each, the picture reports (with the check's own reasons), the
+    credits, and the check's spend."""
+    B = PX._worker()          # the check's own model (gpt-6-sol on the OpenAI rung since 13 Nov; its fallback is named when it ran)
+    spend.append(dict(stage="supply", provider="openai" if str(B.NAMED_CHECK_MODEL).startswith("gpt") else "anthropic",
+                      model=B.NAMED_CHECK_MODEL, what="picture check", usd=usd))
+    for recs in got.values():
+        for r in recs:
+            try:
+                r["faces"] = PX.faces(r["path"])
+            except Exception:  # noqa: BLE001
+                r["faces"] = []
+    pack["pictures"] = {k: v for k, v in got.items() if v}
+    pack["picture_reports"] = reports
+    pack["credits"] = [dict(name=r["name"], title=r.get("title"), licence=r.get("licence"), credit=r.get("credit"), page=r.get("page"))
+                       for v in got.values() for r in v]
+
+
+def photo_refusal(reports, name, most=4):
+    """One thing's photograph search, said plainly from its reports: the searches, what the check read (must_show), how
+    many free candidates, how many kept, and what the best rejected ones showed with their grades (or the error)."""
+    reps = [r for r in reports or [] if r.get("subject") == name]
+    if not reps:
+        return f"{name}: not photo-searched"
+    qs = [q for r in reps for q in r.get("searched") or []]
+    cands = sum(int(r.get("candidates") or 0) for r in reps)
+    kept = sum(int(r.get("kept") or 0) for r in reps)
+    errs = [str(r.get("error") or r.get("check_error")) for r in reps if r.get("error") or r.get("check_error")]
+    seen, why = set(), []
+    for r in reps:
+        for c in sorted(r.get("checked") or [], key=lambda c: -int(c.get("grade") or 0)):
+            t = str(c.get("shows") or c.get("id"))
+            if t not in seen and not c.get("ok"):
+                seen.add(t)
+                why.append(f"{t} (grade {c.get('grade')})")
+    must = next((r.get("must_show") for r in reps if r.get("must_show")), None)
+    return (f"{name}: searched {qs[:3] or len(reps)} for \"{str(must)[:90]}\", {cands} free candidates, {kept} kept"
+            + (f", rejected: {', '.join(why[:most])}" if why else "") + (f", errors: {errs[:2]}" if errs else ""))
+
+
+def supply_gate(pack, named, subj=()):
+    """A story reel's supply, judged once both engines have run: each named thing counts as supplied when a photograph or
+    a footage take OF it (its picture name, or the clip's subject or named thing) is usable on at least one line (fit's
+    per-line verdicts; without them, when --args fit:false, any picture or clip of it). The film stops only when fewer
+    than min(2, named) things are supplied, and its refusal names, for each thing, what was searched and why each
+    candidate was rejected (photo_refusal; for footage, the clips found and the verdict's own reason)."""
+    fit = pack.get("fit")
+    verd = pack.get("fit_verdicts") or {}
+    things = {}
+    names = [n["name"] for n in named]
+
+    def owner(c):
+        for k in (c.get("thing"), c.get("subject")):
+            if k in names:
+                return k
+        return None
+
+    def reason(path):
+        best = None
+        for lv in (verd.get(path) or {}).values():
+            for v in (lv or {}).values() if isinstance(lv, dict) else ():
+                if isinstance(v, dict) and (best is None or int(v.get("grade") or 0) > int(best.get("grade") or 0)):
+                    best = v
+        if not best:
+            return None
+        bad = [k for k, b in (("not the thing", best.get("exact_thing") is False), ("wrong time", best.get("time_ok") is False),
+                              ("contradicts", best.get("contradicts") is True)) if b]
+        return f"{best.get('shows') or '?'} ({', '.join(bad) or 'not accepted'}: {str(best.get('why') or '')[:80]})"
+    for nm in names:
+        things[nm] = dict(photos=0, clips=0, photos_found=0, clips_found=0, rejected=[])
+    for nm, recs in (pack.get("pictures") or {}).items():
+        if nm not in things:
+            continue
+        for r in recs:
+            things[nm]["photos_found"] += 1
+            ok = FIT.lines_fit(fit.get(r["path"])) if fit is not None else True
+            if ok:
+                things[nm]["photos"] += 1
+            elif reason(r["path"]):
+                things[nm]["rejected"].append(reason(r["path"]))
+    for ln in pack.get("footage") or []:
+        for c in ln.get("clips") or []:
+            nm = owner(c)
+            if not nm:
+                continue
+            things[nm]["clips_found"] += 1
+            ok = FIT.lines_fit(fit.get(c["path"])) if fit is not None else True
+            if ok:
+                things[nm]["clips"] += 1
+            elif reason(c["path"]):
+                things[nm]["rejected"].append(reason(c["path"]))
+    supplied = [nm for nm, t in things.items() if t["photos"] or t["clips"]]
+    need = min(2, len(names))
+    ok = len(supplied) >= need
+    short = [r["i"] for r in ((pack.get("fit_report") or {}).get("lines") or []) if r.get("short")]
+    say = None
+    if not ok:
+        parts = []
+        for nm, t in things.items():
+            if nm in supplied:
+                continue
+            parts.append(photo_refusal(pack.get("picture_reports"), nm) + f"; footage: {t['clips_found']} clips found, 0 fit a line"
+                         + (f" (best rejected: {'; '.join(t['rejected'][:2])})" if t["rejected"] else ""))
+        say = (f"supply: only {len(supplied)} of {len(names)} named things have fitting pictures or footage (needs {need}); "
+               f"supplied {supplied}; lines short {short}. " + " | ".join(parts))[:3000]
+    return dict(ok=ok, named=len(names), supplied=len(supplied), need=need, lines_short=short, say=say,
+                things={nm: ("photos %d/%d, clips %d/%d" % (t["photos"], t["photos_found"], t["clips"], t["clips_found"])) for nm, t in things.items()},
+                detail=things)
 
 
 def measure_clips(pack):

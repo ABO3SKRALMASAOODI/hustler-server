@@ -32,14 +32,29 @@ def _verdict(**kw):
     return v
 
 
-def test_the_gate_reads_only_the_booleans_and_the_grade():
+def test_the_gate_reads_only_the_booleans():
     assert FIT.usable(_verdict())
     assert not FIT.usable(_verdict(version_ok=False, why="looks right to me"))
+    assert not FIT.usable(_verdict(time_ok=False, why="looks right to me"))
+    assert not FIT.usable(_verdict(exact_thing=False, why="the exact moment, perfect"))
     assert not FIT.usable(_verdict(contradicts=True))
-    assert not FIT.usable(_verdict(grade=2, why="the exact moment, perfect"))
     assert not FIT.usable(_verdict(time_ok="yes"))                 # a string is not a boolean
-    assert FIT.usable(_verdict(fits_line=False, live_action=True))      # the gate is the five fields the plan names, nothing else
+    assert not FIT.usable(_verdict(fits_line=False, live_action=True))   # the model's own "would a careful viewer accept it"
+    assert not FIT.usable(_verdict(fits_line=None))
+    assert FIT.usable(_verdict(grade=2, why="the right thing, not the brief's moment"))   # the grade ranks; it never vetoes a fitting picture
     assert not FIT.usable(None)
+
+
+def test_the_two_times_are_kept_with_the_verdict():
+    v = FIT._clean(_verdict(story_time="1993 storyboard reel, before the rewrite", picture_time="1993 Black Friday reel"))
+    assert v["story_time"].startswith("1993") and v["picture_time"] == "1993 Black Friday reel"
+    assert "story_time" not in FIT._clean(_verdict())
+
+
+def test_the_prompt_states_one_time_rule_and_the_brief_as_wish_list():
+    s = FIT.SYSTEM
+    assert '"story_time"' in s and '"picture_time"' in s and "the same answer as time_ok" in s
+    assert "not the test" in s and "for ranking only" in s
 
 
 def test_the_cache_key_changes_when_the_words_change():

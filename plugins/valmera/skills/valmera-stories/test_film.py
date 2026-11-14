@@ -480,14 +480,61 @@ def test_annotate_keeps_true_pictures_and_still_only_and_falls_back_when_missing
     assert out["segments"][1]["see"][0]["still_only"] is True and out["segments"][0]["see"][0]["still_only"] is False
 
 
-def test_photo_searches_skip_footage_only_things_and_carry_as_of():
+def test_photo_searches_skip_footage_only_things_and_ask_who_or_what_not_when():
     import wf3 as W3
-    named = [dict(name="Buzz Lightyear", **{"is": "thing"}, true_pictures="footage"), dict(name="John Lasseter", **{"is": "person"}, true_pictures="both")]
+    named = [dict(name="Buzz Lightyear", **{"is": "thing"}, true_pictures="footage"),
+             dict(name="John Lasseter", **{"is": "person"}, true_pictures="both", must_show="John Lasseter, the Pixar director, himself"),
+             dict(name="Pixar", **{"is": "company"}, true_pictures="both")]
     sc = dict(named=named, segments=[dict(say="a", see=[dict(thing="Buzz Lightyear", as_of="the finished 1995 film", must_show="Buzz", search="Buzz 1995"),
-                                                       dict(thing="John Lasseter", as_of="1995", must_show="John Lasseter at Pixar", search="John Lasseter 1995")])])
+                                                       dict(thing="John Lasseter", as_of="1993, during production", must_show="production-era portrait",
+                                                            search="John Lasseter 1995"),
+                                                       dict(thing="Pixar", as_of="1993, not the later Emeryville campus", must_show="Pixar's studio and team",
+                                                            search="Pixar 1993")])])
     subj = W3.photo_searches(sc, named)
-    assert [s["name"] for s in subj] == ["John Lasseter"]
-    assert subj[0]["must_show"] == "John Lasseter at Pixar 1995"
+    assert [s["name"] for s in subj] == ["John Lasseter", "Pixar"]
+    assert subj[0]["must_show"] == "John Lasseter, the Pixar director, himself"   # a person: who, from the named entry
+    assert subj[1]["must_show"] == "Pixar's studio and team"                       # a thing: what; the time is fit's, per line
+    assert subj[0]["searches"] == ["John Lasseter 1995"]
+
+
+def _gate_pack(photo_fit, clip_fit):
+    pics = {"Disney": [dict(path="/p/disney.jpg")], "John Lasseter": [dict(path="/p/jl.jpg")]}
+    foot = [dict(i=0, clips=[dict(path="/c/trailer.mp4", subject="Toy Story trailer", thing="Toy Story"),
+                             dict(path="/c/reel.mp4", subject="Toy Story Black Friday reel"),
+                             dict(path="/c/ride.mp4", subject="Pixar")])]
+    fit = {p: {0: ([0] if ok else [])} for p, ok in dict(photo_fit, **clip_fit).items()}
+    verd = {p: {0: {0: dict(grade=4 if ok else 1, exact_thing=ok, time_ok=True, contradicts=False, shows="a ride figure" if not ok else "it",
+                            why="a theme-park figure, not the film")}} for p, ok in dict(photo_fit, **clip_fit).items()}
+    reports = [dict(subject="Pixar", searched=["Pixar 1993"], must_show="Pixar's team", candidates=10, kept=0,
+                    checked=[dict(id="w:1", ok=False, grade=1, shows="Pixar Image Computer in a museum")])]
+    return dict(pictures=pics, footage=foot, fit=fit, fit_verdicts=verd, picture_reports=reports, fit_report=dict(lines=[dict(i=0, short=True)]))
+
+
+def test_the_supply_gate_counts_fitting_footage_as_well_as_photographs():
+    import wf3 as W3
+    named = [dict(name=n) for n in ("Toy Story", "Pixar", "John Lasseter", "Toy Story Black Friday reel", "Disney")]
+    pk = _gate_pack({"/p/disney.jpg": True, "/p/jl.jpg": True}, {"/c/trailer.mp4": True, "/c/reel.mp4": True, "/c/ride.mp4": False})
+    g = W3.supply_gate(pk, named)
+    assert g["ok"] and g["supplied"] == 4 and g["things"]["Toy Story"].startswith("photos 0/0, clips 1/1")
+    assert g["things"]["Pixar"] == "photos 0/0, clips 0/1"                  # found, but no line takes it: not supplied
+
+
+def test_the_supply_refusal_names_what_was_searched_and_why_each_was_rejected():
+    import wf3 as W3
+    named = [dict(name=n) for n in ("Toy Story", "Pixar", "Disney")]
+    pk = _gate_pack({"/p/disney.jpg": False, "/p/jl.jpg": False}, {"/c/trailer.mp4": False, "/c/reel.mp4": False, "/c/ride.mp4": False})
+    g = W3.supply_gate(pk, named)
+    assert not g["ok"] and g["supplied"] == 0 and g["need"] == 2
+    assert "Pixar: searched ['Pixar 1993']" in g["say"] and "Pixar Image Computer in a museum (grade 1)" in g["say"]
+    assert "a ride figure (not the thing" in g["say"] and "lines short [0]" in g["say"]
+
+
+def test_without_verdicts_the_gate_counts_what_was_found():
+    import wf3 as W3
+    pk = _gate_pack({}, {})
+    pk["fit"] = None
+    g = W3.supply_gate(pk, [dict(name="Toy Story"), dict(name="Disney")])
+    assert g["ok"] and g["supplied"] == 2
 
 
 def test_an_added_figure_that_does_not_verify_leaves_the_other_added_items():
@@ -531,3 +578,98 @@ def test_the_first_footage_call_searches_moments_and_voices_and_records_every_tr
     assert v["tried"] == 2 and v["placed"] == 0 and all("John Lasseter" in r for r in v["rejected"])
     (sup / "footage" / "footage.json").write_text(json.dumps(dict(voices=[], voices_tried=[])))
     assert W3.voices_record(ctx, dict(voices=[]))["tried"] == 0
+
+
+def _supply_ctx(tmp_path):
+    import types
+    sup = tmp_path / "supply"
+    sup.mkdir()
+    logs = []
+    return types.SimpleNamespace(supply=str(sup), tmp=str(tmp_path), run_dir=str(tmp_path), run_id="t", sid="t", args={}, workflow="wf3",
+                                 log=logs.append), logs
+
+
+def _supply_script(style):
+    named = [dict(name="Toy Story", **{"is": "film"}, true_pictures="both"), dict(name="John Lasseter", **{"is": "person"}, must_show="John Lasseter"),
+             dict(name="Toy Story Black Friday reel", **{"is": "film"}, true_pictures="both")]
+    segs = [dict(say="Woody almost killed Toy Story.", pictures=["Toy Story"], see=[dict(thing="Toy Story", as_of="1993", search="Toy Story 1993")]),
+            dict(say="Disney saw the reel.", pictures=["Toy Story Black Friday reel"], see=[dict(thing="Toy Story Black Friday reel", as_of="1993", search="Black Friday reel")]),
+            dict(say="John Lasseter directed it.", pictures=["John Lasseter"], see=[dict(thing="John Lasseter", as_of="1993", search="John Lasseter 1993")])]
+    return dict(script=dict(named=named, segments=segs), style=dict(id=style))
+
+
+def _supply_stubs(monkeypatch, tmp_path, foot, fit_ok):
+    import wf3 as W3
+    words = tmp_path / "words.json"
+    words.write_text(json.dumps(dict(duration=3.0, words=[dict(w="a", start=float(i), end=i + 0.5, seg=i) for i in range(3)])))
+    calls = []
+    monkeypatch.setattr(W3.PX, "narrate", lambda *a, **k: dict(words=str(words), wav=str(tmp_path / "n.wav"), duration=3.0, gate=dict(ok=True), voice="x"))
+    monkeypatch.setattr(W3.PX, "sound_facts", lambda *a, **k: {})
+    monkeypatch.setattr(W3.PX, "faces", lambda *a, **k: [])
+    monkeypatch.setattr(W3.PX, "_worker", lambda: types_ns(NAMED_CHECK_MODEL="gpt-6-sol"))
+
+    def pictures(subj, out, per=3):
+        calls.append(("pictures", [s["name"] for s in subj]))
+        return {}, [dict(subject=s["name"], searched=s.get("searches"), must_show=s.get("must_show"), candidates=10, kept=0,
+                         checked=[dict(id="w:1", ok=False, grade=1, shows=f"a {s['name']} toy")]) for s in subj], 0.01
+    monkeypatch.setattr(W3.PX, "pictures", pictures)
+
+    def footage(ctx, script, durs, anchors=None, **kw):
+        calls.append(("footage", anchors))
+        return foot
+    monkeypatch.setattr(W3.chain, "footage", footage)
+    monkeypatch.setattr(W3, "clip_facts", lambda c: dict(c, faces=[]))
+    monkeypatch.setattr(W3.R, "talking", lambda c, ff, windows=True: (False, 0.0, None))
+
+    def fit_supply(ctx, script, pack, durs, spend, anchors, reel_kw):
+        calls.append(("fit", None))
+        pack["fit"] = {c["path"]: {0: ([0] if fit_ok else [])} for ln in pack.get("footage") or [] for c in ln["clips"]}
+        pack["fit_verdicts"] = {}
+        pack["fit_report"] = dict(lines=[])
+    monkeypatch.setattr(W3, "fit_supply", fit_supply)
+    return calls
+
+
+def types_ns(**kw):
+    import types
+    return types.SimpleNamespace(**kw)
+
+
+def _foot():
+    clips = [dict(file="a.mp4", subject="Toy Story", title="Toy Story trailer", channel="c", url="u", time_range=[0, 1], line=0, seconds=1.0),
+             dict(file="b.mp4", subject="Toy Story Black Friday reel", title="reel", channel="c", url="u2", time_range=[0, 1], line=1, seconds=1.0)]
+    return dict(lines=[dict(i=0, clips=clips[:1]), dict(i=1, clips=clips[1:]), dict(i=2, clips=[])],
+                counts=dict(clips=2, lines_with_footage=2, lines=3),
+                credits=[dict(title=c["title"], channel=c["channel"], url=c["url"], time_range=c["time_range"], line=c["line"]) for c in clips],
+                spend=dict(usd=0.1))
+
+
+@pytest.mark.parametrize("style", ["reel"])
+def test_a_story_reel_with_no_free_photographs_is_supplied_by_its_footage(tmp_path, monkeypatch, style):
+    import wf3 as W3
+    if style not in W3.R.STYLES:
+        pytest.skip("no reel style")
+    ctx, logs = _supply_ctx(tmp_path)
+    calls = _supply_stubs(monkeypatch, tmp_path, _foot(), fit_ok=True)
+    rec = W3.supply(ctx, _supply_script(style))
+    kinds = [c[0] for c in calls]
+    assert kinds[0] == "pictures" and calls[0][1] == ["John Lasseter"]          # the people first: the voice anchors
+    assert "footage" in kinds and kinds.index("fit") > kinds.index("footage")  # footage runs although no photograph passed
+    assert rec["supplied"]["Toy Story"] == "photos 0/0, clips 1/1" and rec["missing"]
+    assert any("no checked free photographs of" in m and "a Toy Story toy (grade 1)" in m for m in logs)
+
+
+@pytest.mark.parametrize("style", ["reel"])
+def test_a_story_reel_stops_after_fit_naming_what_was_searched_and_rejected(tmp_path, monkeypatch, style):
+    import wf3 as W3
+    if style not in W3.R.STYLES:
+        pytest.skip("no reel style")
+    ctx, _ = _supply_ctx(tmp_path)
+    calls = _supply_stubs(monkeypatch, tmp_path, _foot(), fit_ok=False)
+    with pytest.raises(RuntimeError) as e:
+        W3.supply(ctx, _supply_script(style))
+    assert "fit" in [c[0] for c in calls]
+    msg = str(e.value)
+    assert "only 0 of 3 named things have fitting pictures or footage" in msg and "John Lasseter: searched ['John Lasseter 1993']" in msg
+    assert "footage: 1 clips found, 0 fit a line" in msg
+    assert os.path.exists(os.path.join(ctx.supply, "refusal.json"))

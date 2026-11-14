@@ -10,7 +10,7 @@ exact thing, at the story time the line means, in the version it means, and noth
                               page; a clip as three frames of its window at 720 px with its source title, channel and
                               time range) judged against the lines whose brief names its subject (see.thing equals its
                               subject: field equality, not a word rule) and the line it was found for
-    usable(v)                 exact_thing, time_ok and version_ok true, contradicts false, grade 3 or more
+    usable(v)                 fits_line, exact_thing, time_ok and version_ok true, contradicts false (the grade ranks)
     audit(shots, ...)         the same question for a planned or rendered shot: three of its own frames and the exact
                               words under it
 
@@ -23,6 +23,16 @@ take) is now identified ONCE (identify: work, version, year, what it depicts, fr
 source's own title, channel, date and description; cached in supply/identity.json), and that frozen identity is given
 as text beside the take's frames to every per-line verdict, so the model only decides whether this identity and these
 frames carry this line's brief. The same footage gets the same identity on every line by construction.
+
+Round 4 (15 Nov): the remaining false rejects (about 4.9 s of df043a, measured against the rater's whole verdict: its
+four capped defects, the animatronics its dimension notes name and its uncapped note) came from two rules. time_ok was
+judged against the line's era even when the line's own words name the earlier state ("Woody was rewritten from tyrant to
+leader"), while version_ok was limited to the words: two booleans for one fact, by two standards, flipping run to run.
+And grade 3 or more vetoed verdicts the model itself called fitting. Now the model writes the story_time the narration
+means at this shot (the words under it, else the line's own words, else its era) and the picture_time, and time_ok and
+version_ok are one answer; stand-ins are named by kind; the brief is the wish list, not the test; the gate reads only
+the booleans and the grade ranks. On the same frames all four rater spans stay caught (14.77 of 14.8 s), the
+animatronics and other films' characters stay rejected, and the reel under the "rewritten" lines passes.
 """
 import base64
 import hashlib
@@ -37,29 +47,34 @@ MODEL = "gpt-6.1-sol"
 BATCH = 8
 PHOTO_PX, FRAME_PX = 1024, 720
 BOOLS = ("fits_line", "exact_thing", "time_ok", "version_ok", "contradicts", "live_action", "speaking_on_camera")
-GRADE_MIN = 3
 
-SYSTEM = """You are the picture checker of a narrated documentary film cut like the best founder-story reels. Each picture is shown while one line of narration is spoken. A viewer who sees a picture that does not match the words stops trusting the film: another film's characters, a toy, sculpture, ride figure or museum display standing in for the thing itself, a test reel under words about the finished film (or the finished film under words about the test reel), a later building under words about the early days, a portrait from decades later under a line about the founding, a different person.
+SYSTEM = """You are the picture checker of a narrated documentary film cut like the best founder-story reels. Each picture is shown while a few words of narration are spoken. A viewer who sees a picture that does not match the words stops trusting the film. Zero wrong pictures is the bar; a picture need not be the best one to pass.
 
-You get the film's lines, each with its words and the editor's brief ("see": the thing, the story time and version it must be in, what a picture must show, and the scene or event the line describes). Then candidates: each one a photograph or a clip (three frames: start, middle, end), with its source's own title, description, date and channel, and the lines to judge it against.
+You get the film's lines: each with its words, its story time ("speaks from"), sometimes the words spoken exactly under this shot, and the editor's brief ("see": the ideal thing, time, version and moment). The brief is the editor's wish list for choosing the BEST picture; it is not the test. Then candidates: a photograph or three frames of one take, with the source's own text and, when given, the take's identity (what it is, which version, which year), settled once from its frames and source for every line it may carry. Take that identity as given.
 
-The brief says what is best; a picture need not be the best to pass. The bar is a careful viewer: would they accept this picture under these words, or would it mislead them? The work itself (the film, the product, the person) illustrates any line about making it, unless the line sets two versions or two times against each other and the picture is the other one. Ignore the film's own treatment of a frame: black and white, grain, a film gate, scanlines, captions or type laid over it, a soft or blurred frame, an end card; judge only what the picture shows.
+Ignore the film's own treatment of a frame (black and white, grain, a film gate, scanlines, captions or type laid over it, a soft frame, an end card, a transition frame at the very end of a take); judge what the picture shows.
 
-For each candidate and EACH line listed with it, answer:
-- "fits_line": true when a careful viewer would accept this picture under this line.
-- "exact_thing": the picture shows the very thing the line is about (that person, that film, that product, that place, or the work itself), not a lookalike, a sequel or another film, a namesake, a toy, sculpture, ride or museum version, a fan remake.
-- "time_ok": false only when the picture plainly shows another time than the line means (a later building, a later film's characters, an older or younger person decades away from the moment the line tells); true when a viewer cannot tell.
-- "version_ok": false only when the WORDS spoken under the picture themselves set one version against another and the picture plainly is the other one (the test reel under words about the finished film, the finished film under words that say "an early version", a later model, the later campus under words about the early days). The brief's "as_of" is the editor's ideal, not a condition: when the words only name the work ("Disney stopped work on Toy Story", "the director was John Lasseter"), the work itself in any version carries them and version_ok is true.
-- "contradicts": true when what the picture shows says the opposite of the words (the deliberate version under words about the accident, a crowd under "nobody came", the wrong year printed in the frame).
-- "grade": 1-5, how well it carries the line (5: the exact moment the words describe; 3: the right thing, plainly; 1: wrong).
-- "live_action": the frames are camera footage of real people or places (not animation, drawings, renders or a still graphic).
-- "speaking_on_camera": a person's face is on screen and they are visibly speaking.
-- "shows": what the picture plainly shows, at most twelve words.
-- "why": at most twenty words.
+For each candidate and EACH line listed with it, decide in this order:
 
-Judge from what is visible and from the source's own text (a title, a date, a caption names what it is). A candidate may carry its "identity": what this exact take is (work, version, year, what it depicts), settled once from its frames and its source for every line it may carry. Take that identity as given; decide only whether a picture of that identity, showing these frames, carries this line.
+1. "exact_thing": the picture is the very thing the narration is about at this point (a thing named in the words under the shot or in the line): that person; that work in any of its own versions (its test reel, storyboards, finished film, trailer, poster, making-of footage of it); that product; that company (its people, its logo, its offices, its own products); that place. False for a stand-in: a toy, sculpture, maquette, statue, ride or park figure, costume character, museum replica, another film's or product's characters, a lookalike, a namesake, a fan remake, a different person.
 
-Answer with one JSON object only: {"verdicts": [{"c": candidate number, "line": line number, "fits_line": bool, "exact_thing": bool, "time_ok": bool, "version_ok": bool, "contradicts": bool, "grade": int, "live_action": bool, "speaking_on_camera": bool, "shows": "...", "why": "..."}]}"""
+2. "story_time": the time and version the narration means AT THIS SHOT, found in this order and no further:
+   (a) a time or version the words spoken under this shot name ("the finished film", "in 1993", "an early version", "today");
+   (b) else a time or version the line's own words name or point back to (a line that says a thing was changed, rewritten, replaced or "from X to Y" names BOTH the before and the after: a picture of either carries it);
+   (c) else the line's story time ("speaks from").
+   Write it in at most eight words, then "picture_time": the picture's own time and version from its identity and frames, at most eight words.
+
+3. "time_ok": the picture's time and version match story_time, or a viewer could not tell them apart. The finished work itself carries a line about its own making (being pitched, made, stopped, saved, rewritten, resumed) or about its people, unless the words under the shot or the line name another version against it (rule a or b). False when they plainly differ: a later building under the early days, a portrait decades away from the moment, a later film's characters, the test reel under the finished film or the finished film under the test reel. "version_ok": the same answer as time_ok.
+
+4. "contradicts": what the picture shows says the opposite of the words under it (a deliberate act under "an accident", a crowd under "nobody came", the wrong year printed in the frame, a villain under "leader" when the line does not name the villain).
+
+5. "fits_line": a careful viewer would accept this picture under these words: true only when exact_thing and time_ok are true and contradicts is false, and the picture shows the thing plainly enough to be recognised. A plain, recognisable picture of the right thing at the right time passes even when it does not show the brief's ideal moment.
+
+6. "grade": 1-5, how well it carries the words, for ranking only (5: the exact moment the words describe; 3: the right thing plainly; 1: wrong).
+
+Also "live_action" (camera footage of real people or places, not animation, drawings, renders or a still graphic), "speaking_on_camera" (a face on screen visibly speaking), "shows" (what the picture plainly shows, at most twelve words), "why" (at most twenty words).
+
+Answer with one JSON object only: {"verdicts": [{"c": candidate number, "line": line number, "exact_thing": bool, "story_time": "...", "picture_time": "...", "time_ok": bool, "version_ok": bool, "contradicts": bool, "fits_line": bool, "grade": int, "live_action": bool, "speaking_on_camera": bool, "shows": "...", "why": "..."}]}"""
 
 
 IDENTITY_SYSTEM = """You are the archivist of a narrated documentary film. You get takes: each one a photograph, or three frames from inside one continuous take of a video clip, with its source's own title, channel, upload date, description and time range. For each take, say once and for all what it is, so that every editor who later places it under a line of narration reads the same identity.
@@ -85,12 +100,12 @@ ID_FIELDS = ("work", "version", "year", "depicts", "live_action", "speaking_on_c
 
 
 def usable(v):
-    """The gate: read from the verdict's booleans and grade only."""
+    """The gate, read from the verdict's booleans only: fits_line and exact_thing, time_ok and version_ok true,
+    contradicts false. The grade ranks fitting pictures (reel.py, MOMENT_GRADE); it never vetoes a fitting one."""
     if not isinstance(v, dict):
         return False
-    g = v.get("grade")
-    return (v.get("exact_thing") is True and v.get("time_ok") is True and v.get("version_ok") is True and v.get("contradicts") is False
-            and isinstance(g, (int, float)) and not isinstance(g, bool) and g >= GRADE_MIN)
+    return (v.get("fits_line") is True and v.get("exact_thing") is True and v.get("time_ok") is True and v.get("version_ok") is True
+            and v.get("contradicts") is False)
 
 
 def say_hash(say):
@@ -206,6 +221,9 @@ def _clean(v):
         out["grade"] = int(round(g))
     out["shows"] = str(v.get("shows") or "")[:160]
     out["why"] = str(v.get("why") or "")[:240]
+    for k in ("story_time", "picture_time"):          # the model's own reading of the two times: why time_ok is what it is
+        if v.get(k):
+            out[k] = str(v[k])[:80]
     return out
 
 
@@ -486,7 +504,8 @@ def audit(shots, sc, ask=None, work=None, cache_path=None, log=print, detail="hi
         got, usd = judge(items, ln_tab, ask=ask, work=work, log=log, detail=detail)
         for k, _, v in got:
             row = dict(fit=usable(v), why=v.get("why"), shows=v.get("shows"), grade=v.get("grade"),
-                       live_action=v.get("live_action"), speaking_on_camera=v.get("speaking_on_camera"))
+                       live_action=v.get("live_action"), speaking_on_camera=v.get("speaking_on_camera"),
+                       **{k: v[k] for k in ("exact_thing", "time_ok", "contradicts", "story_time", "picture_time") if k in v})
             res[items[k]["key"]] = row
             cache[items[k]["_ck"]] = row
     if cache_path:
