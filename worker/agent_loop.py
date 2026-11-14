@@ -929,6 +929,12 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
                     print(f"[reference] profile skipped: {exc}", flush=True)
         images = worker_db.run(
             lambda conn: _image_assets(conn, ctx.project_id))
+        # Actual still-image options remain available even when the editor
+        # recognizes an unsupported animation request without calling a tool.
+        ctx.available_still_assets = [
+            {'asset_key': a['storage_key'], 'filename': (a.get('meta') or {}).get('filename')}
+            for a in reversed(images) if a.get('storage_key') and
+            (a.get('meta') or {}).get('role') != 'edit_reference']
         # State is text, but an unbounded filename dump still taxes every
         # model dispatch. Name a broad, fair slice and state the overflow;
         # list_assets returns the durable 200-row inventory on demand.
@@ -1993,6 +1999,7 @@ def run_agent_job(worker_db, job):
         list((continuation_state.get("tool_failure_memory") or {}).items())[-64:])
     ctx.turn_tool_outcomes = list(continuation_state.get("turn_tool_outcomes") or [])[-500:]
     ctx.edit_alternatives = list(continuation_state.get("edit_alternatives") or [])
+    ctx.available_still_assets = list(continuation_state.get("available_still_assets") or [])
     ctx.shorts_jobs_completed = list(continuation_state.get("shorts_jobs_completed") or [])
     # Historical coverage is separate from current-pixel evidence. Coordinates
     # still require fresh frames after a process boundary.
@@ -2954,6 +2961,7 @@ def _typed_pass(ctx, ledger, cfg, job):
 def _asks_checkpoint(ctx):
     return {"ask_ledger": getattr(ctx, "ask_ledger", None),
             "edit_alternatives": getattr(ctx, "edit_alternatives", None),
+            "available_still_assets": getattr(ctx, "available_still_assets", None),
             "ask_verdict": getattr(ctx, "ask_verdict", None),
             "ask_check_required": getattr(ctx, "ask_check_required", False)}
 
