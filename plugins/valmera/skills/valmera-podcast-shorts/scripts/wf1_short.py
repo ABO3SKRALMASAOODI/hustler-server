@@ -563,7 +563,7 @@ def render_revision(sc):
     # Audio fixes must invalidate both an engine soundtrack and a cached final mix.
     worker=os.environ.get('VALMERA_WORKER')
     if worker:
-        for rel in ('score/music.py','score/audibility.py','scene/pace.py'):
+        for rel in ('score/music.py','score/audibility.py','score/sound.py','score/sfx_quality.json','scene/pace.py'):
             path=os.path.join(worker,rel)
             if os.path.isfile(path):digest.update(open(path,'rb').read())
     return digest.hexdigest()

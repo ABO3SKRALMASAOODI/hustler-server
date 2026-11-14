@@ -125,8 +125,9 @@ def same_picture(left,right):
     return False
 
 
-def proposals(coverage, footage, pictures, fps=30, lead=3):
+def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None):
     """Only the semantic window can place a picture; a sentence start cannot."""
+    rejected=rejected or set()
     used, out = [], []
     for i, window in enumerate(coverage['windows']):
         a, b = round(window['t0']*fps)+lead, round(window['t1']*fps)+lead
@@ -135,6 +136,7 @@ def proposals(coverage, footage, pictures, fps=30, lead=3):
         candidates += [('photo', name, p) for name in names for p in pictures.get(name, [])]
         distinct=[]
         for row in candidates:
+            if (i,row[2]['path']) in rejected:continue
             if not any(same_picture(row[2],old) for old in used+[r[2] for r in distinct]):distinct.append(row)
         candidates=distinct
         wanted = max(1, math.ceil((b-a)/fps*.8))

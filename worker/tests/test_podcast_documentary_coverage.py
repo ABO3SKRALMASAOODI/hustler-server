@@ -211,3 +211,12 @@ def test_director_can_earn_a_move_in_a_silent_reaction_but_not_another_word(tmp_
     def ask(*args,**kwargs):return json.dumps(dict(moves=[dict(word=0,offset_s=2,why='The silent reaction undercuts his stated admiration')])),{}
     moves,_=C.speaker_moves(cov,[],135,[],str(tmp_path),llm=SimpleNamespace(ask=ask,json_block=json.loads))
     assert len(moves)==1 and C.move_frame(cov,moves[0])==63
+
+
+def test_context_rejection_does_not_destroy_a_picture_valid_under_a_later_clause():
+    cov=dict(windows=[dict(t0=0,t1=2,name='Project',subjects=['Accelerator'],must_show='the project'),dict(t0=3,t1=5,name='Accelerator',must_show='the accelerator')])
+    picture=dict(path='original-program-document.jpg')
+    first=C.proposals(cov,{},dict(Accelerator=[picture]))
+    assert [r[4]['window'] for r in first]==[0]
+    repaired=C.proposals(cov,{},dict(Accelerator=[picture]),rejected={(0,picture['path'])})
+    assert [r[4]['window'] for r in repaired]==[1]

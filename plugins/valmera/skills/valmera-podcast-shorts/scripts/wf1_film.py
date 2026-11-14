@@ -291,16 +291,16 @@ def build(script, sup, style_id, direction=None):
     from placement_check import propose, check
     from wf1_coverage import proposals, require_coverage
     ins = proposals(coverage, footage, pics)
-    attempts = []
-    for _ in range(1+sum(len(rows) for rows in footage.values())+sum(len(rows) for rows in pics.values())):
+    attempts = []; rejected_placements=set()
+    for _ in range(1+len(coverage['windows'])*(sum(len(rows) for rows in footage.values())+sum(len(rows) for rows in pics.values()))):
         accepted, placement_report = check(ins, script, clock, sup["work"], sup["ffmpeg"])
         attempts.append(placement_report)
         if not placement_report['rejected']:
             break
-        bad = {r[4]['path'] for r, decision in zip(ins,placement_report['placements']) if not decision['ok']}
-        footage = {i:[r for r in rows if r['path'] not in bad] for i,rows in footage.items()}
-        pics = {n:[r for r in rows if r['path'] not in bad] for n,rows in pics.items()}
-        ins = proposals(coverage,footage,pics)
+        # A truthful artifact can fail one clause and belong under a later one.
+        # Reject its placement, not all future uses of the original source.
+        rejected_placements.update((r[4]['window'],r[4]['path']) for r,decision in zip(ins,placement_report['placements']) if not decision['ok'])
+        ins = proposals(coverage,footage,pics,rejected=rejected_placements)
     ins = accepted
     placement_report = dict(placement_report, attempts=attempts,
                             spend=[s for attempt in attempts for s in attempt['spend']])
