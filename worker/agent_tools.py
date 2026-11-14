@@ -959,6 +959,8 @@ def _execution_policy(ctx):
 def _child_payload(ctx, payload=None):
     body = dict(payload or {})
     body.setdefault("execution_policy", _execution_policy(ctx))
+    if (getattr(ctx, "index", None) or {}).get("_first_film_source_guard"):
+        body["first_film_source_screen"] = ctx.index["source_screen"]
     job = getattr(ctx, 'job', None) or {}
     if (job.get('type') == 'agent_turn' and job.get('id') is not None
             and body.get('source') in {'agent_preview', 'agent_preview_check'}):

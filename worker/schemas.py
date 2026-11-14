@@ -4765,3 +4765,5 @@ class VideoIndex(BaseModel):
     # The first-film Director can work from its own frames while this is
     # built. Consumers needing the storyboard join it before choosing edits.
     visual_storyboard_pending: bool = False
+    # Semantic clearance required before automatic first films use the tail.
+    source_screen: Optional[dict] = None
