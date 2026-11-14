@@ -1,0 +1,69 @@
+import copy
+import json
+import pytest
+
+import source_screen
+from score import source_guard
+
+
+def test_semantic_tail_cut_stops_at_last_clear_frame_not_detected_shot_edge():
+    verdict = {"reviewed_all_frames": True, "branding_screen_present": True,
+               "last_content_frame_id": 1, "first_branding_frame_id": 2}
+    result = source_screen.interpret(json.dumps(verdict), [0, 9.9, 10.1, 14], 14.2, 30)
+    assert result["safe_end_s"] == 9.9
+    assert result["safe_end_s"] < 10.1
+
+
+@pytest.mark.parametrize("answer", [{}, {"reviewed_all_frames": False},
+    {"reviewed_all_frames": True, "branding_screen_present": True,
+     "last_content_frame_id": 3, "first_branding_frame_id": 2}])
+def test_incomplete_screen_evidence_never_admits_first_film(answer):
+    with pytest.raises(ValueError):
+        source_screen.interpret(json.dumps(answer), [0, 8, 10, 14], 14.2, 30)
+
+
+def test_private_view_does_not_edit_original_index_and_render_blocks_fallback_tail():
+    evidence = {"status": "verified", "version": 1, "safe_end_s": 9.9, "source_sha256": "sha"}
+    index = {"video": {"duration": 14.2}, "source_screen": evidence,
+             "shots": [{"start": 0, "end": 10.1}, {"start": 10.1, "end": 14.2}]}
+    before = copy.deepcopy(index)
+    bounded = source_screen.first_film_index(index)
+    assert index == before and bounded["video"]["duration"] == 9.9
+    assert bounded["shots"] == [{"start": 0, "end": 9.9}]
+    source_screen.check_render({"keep": [[0, 9.9]]}, evidence, "original", "sha")
+    with pytest.raises(ValueError):
+        source_screen.check_render({"keep": [[0, 10.1]]}, evidence, "original", "sha")
+    with pytest.raises(ValueError):
+        source_screen.check_render({"overlays": [{"asset_key": "original",
+            "source_start_s": 9.5, "duration_s": .5}]}, evidence, "original", "sha")
+
+
+def _scene():
+    return ({"frame": [720, 1280], "items": [{"id": "quay", "pic": "main",
+             "src": [6.6, 8.], "crop": [.15, 0, .65, 1]}]},
+            {"_first_film_source_guard": True, "video": {"width": 1920,
+             "height": 1080, "duration": 20}, "shots": [{"start": 0, "end": 6.52},
+             {"start": 6.52, "end": 12.85}]})
+
+
+def test_neighbouring_shot_face_does_not_authorize_quay_crop():
+    film, index = _scene()
+    rows = source_guard.apply(film, index, {"samples": [{"t": 6.5, "face": [.3, .2, .5, .4]}]})
+    c = film["items"][0]["crop"]
+    assert c[0] <= 0 and c[1] <= 0 and c[2] >= 1 and c[3] >= 1
+    assert rows[0]["reason"] == "full_frame_missing_subject_boxes"
+
+
+def test_subject_fully_outside_crop_still_counts_and_all_camera_frames_are_safe():
+    film, index = _scene()
+    film["items"][0]["crop"] = [[.15, 0, .65, 1], [.2, 0, .7, 1]]
+    rows = source_guard.apply(film, index, {"samples": [{"t": 7.5, "person": [.8, .1, .95, .9]}]})
+    assert all(c[0] <= 0 and c[2] >= 1 for c in film["items"][0]["crop"])
+    assert rows[0]["reason"] == "full_frame_subject_outside_crop"
+
+
+def test_existing_edits_outside_first_film_unchanged():
+    film, index = _scene()
+    del index["_first_film_source_guard"]
+    before = copy.deepcopy(film)
+    assert source_guard.apply(film, index, {}) == [] and film == before
