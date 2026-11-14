@@ -4767,3 +4767,5 @@ class VideoIndex(BaseModel):
     visual_storyboard_pending: bool = False
     # Semantic clearance required before automatic first films use the tail.
     source_screen: Optional[dict] = None
+    # Identical Director signal measurements prepared beside transcription.
+    director_preparation: Optional[dict] = None
