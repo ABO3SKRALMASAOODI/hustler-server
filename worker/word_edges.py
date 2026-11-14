@@ -3,11 +3,21 @@ import math
 
 
 def introduced(before, after, words, duration=None):
-    import audit
     old = {(round(float(t), 6), side) for a, b in before or []
            for t, side in ((a, 'start'), (b, 'end'))}
-    return [h for h in audit.midword_boundaries(after, words, duration)
-            if (round(float(h['boundary']), 6), h['kind']) not in old]
+    hits = []
+    spans = after or []
+    for i, (a, b) in enumerate(spans):
+        for t, side in ((float(a), 'start'), (float(b), 'end')):
+            if (round(t, 6), side) in old or t <= .0005 or (duration is not None and t >= duration - .0005):
+                continue
+            if (side == 'start' and i and abs(spans[i-1][1] - t) < .0005 or
+                    side == 'end' and i+1 < len(spans) and abs(spans[i+1][0] - t) < .0005):
+                continue
+            for w in words:
+                if float(w['t0']) + .0005 < t < float(w['t1']) - .0005:
+                    hits.append(dict(boundary=t, kind=side, word=w['w'], t0=w['t0'], t1=w['t1']))
+    return hits
 
 
 def whole(keep, words, duration, previous=None):
@@ -39,8 +49,6 @@ centisecond grid outwards, so normalization cannot put them back inside.
                 merged[-1][1] = max(merged[-1][1], b)
             else:
                 merged.append([a, b])
-        if merged == spans and all(abs(h['t0' if h['kind'] == 'start' else 't1'] - h['boundary']) < .011 for h in hits):
-            break
         spans = merged
     return spans, moves
 

@@ -13,7 +13,7 @@ def test_quiet_inside_first_word_cannot_survive_last_placement_pass():
 
 def test_batch_and_exact_time_writes_cannot_bypass_word_check():
     ctx = NS(index={'words': [{'w': 'Nike', 't0': 2, 't1': 2.5}]}, duration=10)
-    for keep in ([[2.2, 8]], [[0, 2.3]]):
+    for keep in ([[2.2, 8]], [[0, 2.3]], [[2.01, 8]]):
         assert 'Nike' in word_edges.refusal(ctx, {'keep': [[0, 10]]}, {'keep': keep})
 
 
