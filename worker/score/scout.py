@@ -66,6 +66,8 @@ def wishes_wanted(idx, per):
 def user_text(idx, sess, per):
     words = idx.get("words") or []
     lines = []
+    if sess.get("execution"):
+        lines.append("Library execution context: " + sess["execution"])
     for p in sess.get("prompts") or []:
         lines.append("Customer typed: " + json.dumps(p["text"], ensure_ascii=False))
     if not sess.get("prompts"):
