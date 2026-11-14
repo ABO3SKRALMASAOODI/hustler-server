@@ -244,3 +244,28 @@ def test_budget_stop_cannot_claim_completion_after_ledger_failure(monkeypatch):
     result = agent_loop._finalize(ctx,db,1,'Completed and saved.','budget',3,{})
     assert result['outcome']=='partial'
     assert "can't confirm" in posted[-1][2]
+
+
+@pytest.mark.parametrize("proofs,with_frames,state", [
+    (["numbers", "frames"], True, "done"),
+    (["numbers"], True, "cannot_tell"),
+    (["reply"], True, "cannot_tell"),
+    (["numbers", "frames"], False, "cannot_tell"),
+    ("frames", True, "done"),
+])
+def test_visual_ask_keeps_all_evidence_sources(monkeypatch, proofs, with_frames, state):
+    import llm
+    monkeypatch.setattr(asks, "frame_pages", lambda *a: [("frame.jpg", "render at 2 s")] if with_frames else [])
+    monkeypatch.setattr(llm, "image_part", lambda *a: {"type": "image_url", "image_url": {"url": "frame"}})
+    monkeypatch.setattr(asks, "_call", lambda *a, **k: ({"asks": [{
+        "id": "a1", "state": "done", "rests_on": proofs,
+        "seen": "1080x1920 output; rendered frames show the speaker with the face whole.",
+        "line": "Made a vertical short cropped to the speaker."}], "unasked": []}, {}))
+    ledger = asks.settle({"asks": [{"kind": "edit", "how": "look", "want": "vertical cropped to speaker"}]}, {"keep": [[0, 10]]})
+    verdict = asks.check(NS(index={}, duration=10), ledger, "Done", {"keep": [[0, 10]]}, preview={"edl_version": 2})
+    assert verdict["asks"][0]["state"] == state
+
+def test_check_schema_can_record_numbers_and_pixels_together():
+    proof = asks.CHECK_SCHEMA["properties"]["asks"]["items"]["properties"]["rests_on"]
+    assert proof["type"] == "array"
+    assert {"numbers", "frames"} <= set(proof["items"]["enum"])
