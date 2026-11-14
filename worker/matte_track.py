@@ -143,8 +143,16 @@ def sidecar_params(edl=None):
         import matte_refine
         import sidecars
         out.update(refine=matte_refine.VERSION,
+                   source_quality='original', max_side=640, warmup_s=4,
                    support_model=sidecars.model_info('efficientsam_ti')['sha256'])
     return out or None
+
+
+def analysis_asset(edl, original, proxy):
+    """Compositing needs source detail; a compressed browsing proxy loses edges."""
+    if any(i.get('type') == 'background' for i in (edl or {}).get('fx') or []):
+        return original
+    return proxy
 
 
 # ── geometry helpers ────────────────────────────────────────────────────

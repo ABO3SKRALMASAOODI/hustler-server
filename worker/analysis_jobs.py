@@ -561,6 +561,8 @@ def _child_matte(spec, ch):
     params, srcinfo, engine = spec["params"], spec["source"], spec["engine"]
     sw, sh = int(srcinfo["width"]), int(srcinfo["height"])
     w = _even(min(sw, int(params.get("max_w") or sw)))
+    if params.get('max_side'):
+        w = _even(min(w, sw * min(1., float(params['max_side']) / max(sw, sh))))
     h = _even(sh * w / float(sw))
     fps = min(float(params.get("fps_max") or 30.0), float(srcinfo["fps"]))
     warm = float(ch.get("warmup") or 0.0)
