@@ -77,3 +77,52 @@ def test_update_and_apply_use_the_per_run_bound(ctl, monkeypatch):
     monkeypatch.setattr(ctl, "sync_limits", lambda: None)
     ctl.cmd_apply()
     assert seen == [300.0]
+
+
+def test_wave_one_takes_the_idle_slot_of_a_lane_first(ctl, monkeypatch):
+    """Ticket #842 (13 Nov 2026, job 138508): agent1 was busy with a 20-min
+    turn, agent2 idle. Wave 1 took agent1 (config order) and waited its
+    300-s drain window while agent2 stayed on the old release; under skew
+    "hold" the customer's next turn waited 337 s for a new-release agent
+    slot. Wave 1 must take the idle slot, so it serves within seconds."""
+    slots = [{"name": "agent1", "lane": "agent", "port": 9201},
+             {"name": "agent2", "lane": "agent", "port": 9202},
+             {"name": "mcp1", "lane": "mcp", "port": 9301},
+             {"name": "mcp2", "lane": "mcp", "port": 9302},
+             {"name": "mcp3", "lane": "mcp", "port": 9303}]
+    busy = {"agent1", "mcp1"}
+    state = {"slot_detail": [{"name": s["name"], "busy": s["name"] in busy}
+                             for s in slots]}
+    monkeypatch.setattr(ctl, "provisioned", lambda: True)
+    monkeypatch.setattr(ctl, "ensure_network", lambda: None)
+    monkeypatch.setattr(ctl, "config", lambda: {"slots": slots})
+    monkeypatch.setattr(ctl, "stale_slots", lambda source: list(slots))
+    monkeypatch.setattr(ctl, "container_info", lambda name: {"running": True})
+    monkeypatch.setattr(ctl, "admission_state", lambda: state)
+    monkeypatch.setattr(ctl, "release", lambda: {})
+    monkeypatch.setattr(ctl, "write_json", lambda path, obj: None)
+    waves = []
+    monkeypatch.setattr(ctl, "roll_slots", lambda batch, source, wait:
+                        waves.append([s["name"] for s in batch]))
+    assert ctl.converge("v2", "c", 300.0)
+    assert sorted(waves[0]) == ["agent2", "mcp2", "mcp3"]
+    rest = [n for w in waves[1:] for n in w]
+    assert sorted(rest) == ["agent1", "mcp1"]
+
+
+def test_wave_one_keeps_config_order_when_nothing_runs(ctl, monkeypatch):
+    slots = [{"name": "agent1", "lane": "agent", "port": 9201},
+             {"name": "agent2", "lane": "agent", "port": 9202}]
+    monkeypatch.setattr(ctl, "provisioned", lambda: True)
+    monkeypatch.setattr(ctl, "ensure_network", lambda: None)
+    monkeypatch.setattr(ctl, "config", lambda: {"slots": slots})
+    monkeypatch.setattr(ctl, "stale_slots", lambda source: list(slots))
+    monkeypatch.setattr(ctl, "container_info", lambda name: {"running": True})
+    monkeypatch.setattr(ctl, "admission_state", lambda: None)
+    monkeypatch.setattr(ctl, "release", lambda: {})
+    monkeypatch.setattr(ctl, "write_json", lambda path, obj: None)
+    waves = []
+    monkeypatch.setattr(ctl, "roll_slots", lambda batch, source, wait:
+                        waves.append([s["name"] for s in batch]))
+    ctl.converge("v2", "c", 300.0)
+    assert waves == [["agent1"], ["agent2"]]

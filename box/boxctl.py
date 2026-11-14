@@ -662,12 +662,22 @@ def converge(source, commit, drain_timeout_s):
     by_lane = {}
     for slot in todo:
         by_lane.setdefault(slot["lane"], []).append(slot)
+    # Idle slots go into wave 1 before busy ones (ticket #842, 13 Nov 2026).
+    # Under skew "hold" the dispatcher runs a new job only on a slot of the
+    # new release, so the new release must serve each lane as soon as it can.
+    # Wave 1 used to take the first half of each lane in config order: agent1
+    # was mid-way through a 20-min turn, agent2 sat idle on the old release,
+    # and a customer's next request waited 337 s for wave 1's drain window
+    # before agent2 was replaced. An idle slot is replaced in seconds.
+    state = admission_state()
     first, second = [], []
     for lane, items in by_lane.items():
         dead = [s for s in items
                 if not (container_info(container_name(s)) or {}).get(
                     "running")]
         live = [s for s in items if s not in dead]
+        # Stable sort: idle first, config order kept within each group.
+        live.sort(key=lambda s: slot_busy(state, s["name"]))
         first.extend(dead)
         half = (len(live) + 1) // 2
         if lane_size[lane] > 1 and len(live) == lane_size[lane]:
