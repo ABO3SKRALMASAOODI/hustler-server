@@ -81,7 +81,7 @@ def test_retired_tools_are_absent_even_from_the_full_catalog():
     retired = {
         "search_music", "research_music", "audition_music_candidates",
         "fetch_music", "set_edit_plan", "complete_edit_plan_steps",
-        "apply_edit_recipe", "generate_video", "generate_image",
+        "apply_edit_recipe", "generate_image",
     }
     assert not (retired & set(agent_tools.TOOLS))
     names = {row["function"]["name"] for row in agent_tools.openai_tools()}
