@@ -748,6 +748,10 @@ class ToolContext:
                         "call reset_edit to start from the full video, then "
                         "rebuild what they asked for.")
             return msg
+        import word_edges
+        word_refusal = word_edges.refusal(self, prev['json'], normalized)
+        if word_refusal:
+            return f"REJECTED (EDL v{prev['version']} unchanged): {word_refusal}"
         import edit_integrity
         integrity_refusal = edit_integrity.write_refusal(self, prev["json"], normalized)
         if integrity_refusal:
@@ -3486,6 +3490,10 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
         quiet_edges, safe_edges = _exact_keep_quiet_edges(ctx, new_keep,
                                                           words)
     new_keep = _keep_exposed_cuts(prev_keep, new_keep)
+    if snap_to_words is not False:
+        import word_edges
+        new_keep, whole_notes = word_edges.whole(new_keep, words, ctx.duration, previous=prev_keep)
+        audio_notes += whole_notes
     edl = dict(prev["json"])
     edl["keep"] = new_keep
     speed = edl.get("speed") or []
@@ -17251,7 +17259,8 @@ def _program_matte_request(ctx, edl, s, e, src=None):
     if src is None:
         return out
     pm = matte_track.ProgramMatte(
-        tl, src, preview=True, launch=src if _launchable(src) else None)
+        tl, src, preview=True, launch=src if _launchable(src) else None,
+        params=matte_track.sidecar_params(edl))
     pm.want(s, e)
     info = pm.info("person")
     out.update(status=info["status"], source=info["source"],
@@ -21707,7 +21716,7 @@ def generate_video(ctx, prompt, from_image_asset_key=None, duration_s=5):
         if err:
             return err
         try:
-            image_url = storage.presign_get(asset["storage_key"], expires=3600)
+            image_url = videogen.reference_image(_asset_local_path(ctx, asset))
         except Exception as e:
             return (f"Could not prepare the source image for animation "
                     f"({str(e)[:140]}). Try again.")
@@ -21733,7 +21742,7 @@ def generate_video(ctx, prompt, from_image_asset_key=None, duration_s=5):
         seed_key = f"generated/{ctx.project_id}/{uuid.uuid4().hex[:12]}.png"
         try:
             storage.upload_file(seed_path, seed_key, "image/png")
-            image_url = storage.presign_get(seed_key, expires=3600)
+            image_url = videogen.reference_image(seed_path)
         except Exception as e:
             return (f"The first frame was generated but could not be staged "
                     f"for animation ({str(e)[:140]}). Try again.")
@@ -21791,9 +21800,12 @@ def generate_video(ctx, prompt, from_image_asset_key=None, duration_s=5):
                         + str(ctx._last_download_review_text)[:1000])
     return (f"Generated {seconds:.0f}s video saved{animated}: storage_key={key} "
             f"({round(dur, 1)}s). It is NOT in your program yet: place it with "
-            f"insert_media(asset_key='{key}', at_output_s=...), trimming with "
-            "duration_s/clip_start_s if you only want part, or check it first "
-            "with look_at_asset." + review_note + seeded_note)
+            f"add_overlay(asset_key='{key}', fit='cover', start=..., duration_s=...) "
+            "to replace picture over the existing audio and duration. insert_media instead "
+            "adds time. This is a new animation, not the original motion with a character "
+            "retouched. Preserve existing framing and titles unless their change was requested; "
+            "inspect faces and reference fidelity before using it, and disclose exactly what "
+            "was replaced." + review_note + seeded_note)
 
 
 # ── Fetching media from a link ───────────────────────────────────────────────
@@ -32516,7 +32528,10 @@ TOOLS = {
                        "existing image by passing from_image_asset_key (a "
                        "generated or uploaded image's storage_key). The clip "
                        "is saved as a project asset; it reaches the program "
-                       "ONLY after you insert_media its storage_key. This is "
+                       "ONLY after add_overlay (replace picture, preserve audio/time) or "
+                       "insert_media (add time). It creates NEW animation from a reference, "
+                       "not an identity-safe retargeting of existing video motion. Inspect "
+                       "the result and disclose this distinction. This is "
                        "the tool for 'make me a video of X' / 'bring this "
                        "photo to life'. It is SLOW (tens of seconds to a few "
                        "minutes) and costs credits per second, so use it "
@@ -34302,7 +34317,7 @@ TOOLS.update(music_library.TOOL_SPECS)
 # never sees these names in schemas.
 for _retired_tool in (
         "set_edit_plan", "complete_edit_plan_steps",
-        "apply_edit_recipe", "generate_video",
+        "apply_edit_recipe",
         # Four-day production evidence (2026-08-18..22): all 14 image calls
         # returned "not available" even though the dispatcher advertised the
         # tool. The open-catalog music chain spent 92 searches and then
@@ -34312,6 +34327,11 @@ for _retired_tool in (
         "generate_image", "research_music", "search_music",
         "audition_music_candidates", "fetch_music"):
     TOOLS.pop(_retired_tool, None)
+
+# This provider-backed tool was retired unconditionally after an old outage.
+# Advertise the real capability only on deployments that can execute it.
+if not videogen.video_gen_available():
+    TOOLS.pop('generate_video', None)
 
 # Blueprint close-out used to freeze writes after a clean preview. The editor
 # now edits, then may look at a render if it wants; it is never locked out.
@@ -34410,7 +34430,7 @@ TOOL_DOMAINS = {
     # still exposes this exact department for an explicit acquisition pass.
     "acquisition": {
         "list_assets", "find_song", "find_footage", "search_stock", "research_broll",
-        "add_stock_media",
+        "add_stock_media", "generate_video",
     },
     "motion": {
         "suggest_motion_beats",
