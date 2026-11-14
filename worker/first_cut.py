@@ -2309,18 +2309,10 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
     if talking and len(_keep(ctx) or []) > 1 and not q1:
         _run(ctx, steps, "conceal_jump_cuts", {}, started)
     if talking and not q1:
-        # The references change the picture every 2-3 s; on a single take
-        # the honest events are a punch on a stressed word and the key
-        # phrase slammed in type (beat_slams), kept sparse (a punch about
-        # every 7 s; the owner: restraint, never one per cut). On top of the
-        # band crop the punch is shallow: stacked on its 1.4x zoom a full
-        # punch pushed the chin out of frame (C1).
-        prog = sum(e - s for s, e in (_keep(ctx) or []))
-        if prog >= 12:
-            args = {"count": max(2, int(prog // 7))}
-            if bands:
-                args["strength"] = 0.08
-            _run(ctx, steps, "punch_in_on_emphasis", args, started)
+        import first_cut_visual as fcv
+        fcv.cut_ins(ctx, steps, started, _run, [],
+                    fcv.face_aim(ctx.index, bands, vertical_source), HOOK_S,
+                    bands=bool(bands))
     y = chest_y(faces, bands) if (talking and vertical_out) else None
     hook, hook_end = getattr(ctx, "first_cut_hook", None), HOOK_S
     hook_y, mute_under = y, True
@@ -3658,6 +3650,13 @@ def run(worker_db, job, project, index_row):
         if picked and picked.get("how") == "director" and not _on_screen(ctx):
             steps, applied, picked, render = _film_fell_at_render(
                 ctx, worker_db, job, started, spend, steps, start_edl, render)
+        if picked and picked.get("how") == "director" and _on_screen(ctx):
+            import first_cut_floor
+            def before_style():
+                more, craft, pick = video_chain(ctx, worker_db, time.monotonic(), spend)
+                return more, craft, pick, _render_cut(ctx, more, pick)
+            steps, applied, picked, render = first_cut_floor.choose(
+                ctx, worker_db, started, start_edl, steps, applied, picked, render, before_style)
     finally:
         pf = getattr(ctx, "broll_prefetch", None)
         if pf is not None:
