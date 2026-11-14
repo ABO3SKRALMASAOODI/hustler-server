@@ -38,9 +38,9 @@ V = "/Users/masaoodi/Documents/Valmera"
 VV = f"{V}/.valmera"
 PY = f"{VV}/venv-worker/bin/python"
 if os.path.exists(PY) and os.path.realpath(sys.executable) != os.path.realpath(PY) and not os.environ.get("STORY_NO_REEXEC"):
-    os.execv(PY, [PY, os.path.abspath(__file__)] + sys.argv[1:])
+    os.execv(PY, [PY, os.path.realpath(__file__)] + sys.argv[1:])     # through the Claude skill link to the plugin itself
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.realpath(__file__))        # through the Claude skill link to the plugin itself
 ENV_FILE = f"{V}/hustler-server/backend/.env"
 OUT_ROOT = os.environ.get("STORY_OUT_ROOT", f"{V}/Story Films")
 STATE_ROOT = os.environ.get("STORY_STATE_ROOT", f"{VV}/workflow/stories")     # its own work root: a start sweeps only its own runs
