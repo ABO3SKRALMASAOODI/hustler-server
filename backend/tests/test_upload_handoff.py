@@ -235,3 +235,16 @@ def test_a_local_stack_keeps_its_own_scheme_and_the_env_wins(monkeypatch):
         assert upload_handoff.public_base() == "http://127.0.0.1:5401"
         monkeypatch.setenv("UPLOAD_HANDOFF_BASE", "https://api.example/")
         assert upload_handoff.public_base() == "https://api.example"
+
+
+def test_a_phone_screen_recording_of_5_gb_can_be_handed_off(monkeypatch):
+    """#401 (14 Nov 2026): 4.8 GB were left of a 5.1 GB phone recording when
+    the phone hid the page; a 4 GiB bound made the page skip the hand-off."""
+    monkeypatch.delenv("UPLOAD_HANDOFF_MAX_BYTES", raising=False)
+    with _app().test_request_context("/", base_url="http://entrepreneur.test"):
+        out = upload_handoff.attach({"mode": "multipart", "upload_id": "u1",
+                                     "storage_key": KEY, "part_size": 16 * MIB},
+                                    60, 7, "original", 5127679342)
+    assert out["handoff_max_bytes"] >= 5127679342 - 315080704
+    monkeypatch.setenv("UPLOAD_HANDOFF_MAX_BYTES", "nonsense")
+    assert upload_handoff.max_bytes() == upload_handoff.DEFAULT_MAX_BYTES
