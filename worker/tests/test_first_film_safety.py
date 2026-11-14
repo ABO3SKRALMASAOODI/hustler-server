@@ -111,3 +111,10 @@ def test_safe_source_cutaway_is_contained_not_recropped_by_overlay_cover(tmp_pat
     assert not foreground.get("fit") and not foreground.get("source_crop")
     assert foreground["scale"] == 1 and foreground["x"] == foreground["y"] == .5
     assert overlays[0]["asset_key"] == "backing.png"
+    # Publication normalizes by (z_index, start, id), not insertion order.
+    # The backing must still sit below the source after that real boundary.
+    from schemas import default_edl, validate_edl
+    edl = default_edl(14.2)
+    edl["overlays"] = overlays
+    normalized = validate_edl(edl, 14.2).model_dump()
+    assert [o["asset_key"] for o in normalized["overlays"]] == ["backing.png", "main"]
