@@ -382,7 +382,8 @@ def source_signature(supply):
         p=row.get('path','')
         if os.path.isfile(p):
             stat=os.stat(p)
-            available.append((row['url'],row.get('sha256'),stat.st_size,stat.st_mtime_ns))
+            available.append((row['url'],row.get('sha256'),stat.st_size,stat.st_mtime_ns,
+                              row.get('where'),row.get('title'),row.get('channel'),row.get('subjects',[])))
     return hashlib.sha256(json.dumps(sorted(available)).encode()).hexdigest()[:12]
 
 

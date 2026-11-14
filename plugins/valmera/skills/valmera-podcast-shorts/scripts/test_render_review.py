@@ -204,3 +204,11 @@ def test_remote_music_adapter_keeps_payoff_and_shared_track_exclusions(tmp_path,
     monkeypatch.setattr(wf.chain,'sh',run)
     assert wf.chain.music_version(ctx,dict(film='actual-engine.mp4'),dict(l1='scene.json',l1_audio='audio-scene.json',turn_s=12.5)) is None
     assert calls and json.load(open(tmp_path/'used.json'))==['previous-track']
+
+
+def test_corrected_source_eligibility_and_subjects_invalidate_exhausted_search(tmp_path):
+    sources=tmp_path/'sources';sources.mkdir();path=sources/'original.mp4';path.write_bytes(b'original')
+    row=dict(url='https://publisher/film',path=str(path),where='unsupported',subjects=['Old subject'])
+    manifest=sources/'manifest.json';manifest.write_text(json.dumps([row]));first=wf.source_signature(str(tmp_path))
+    row.update(where='primary',subjects=['Actual subject']);manifest.write_text(json.dumps([row]))
+    assert wf.source_signature(str(tmp_path))!=first
