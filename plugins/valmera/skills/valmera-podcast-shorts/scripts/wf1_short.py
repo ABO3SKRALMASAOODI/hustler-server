@@ -487,7 +487,7 @@ def score(ctx, script):
     knobs.update({k: v for k, v in ((ctx.args or {}).get("direction") or {}).items()})
     rejected_path = os.path.join(ctx.supply, "render_rejected.json")
     if os.path.exists(rejected_path):
-        knobs["drop"] = sorted(set(knobs.get("drop") or []) | set(json.load(open(rejected_path))))
+        knobs["drop"] = sorted(set(knobs.get("drop") or []) | set(current_rejections(ctx.supply)))
     knobs.setdefault("bed", chain.wants_music(ctx) or bool((ctx.args or {}).get("song")))      # the film gets music: the sounds are designed for a film with a bed
     sys.path[:0] = [p for p in wf3.env_path().split(os.pathsep) if p not in sys.path]
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
@@ -537,7 +537,7 @@ def _render_review(ctx, rd, sc):
         for word in words:
             frames.update(f for edge in word["f"] for f in (edge-1,edge,edge+1) if a <= f < b)
         rows.append([a, b, "clip", p["name"], dict(path=rd["film"], src=[a/F.FPS,b/F.FPS],
-                    check_times=[f/F.FPS for f in sorted(frames)], display_words=words,
+                    check_times=[f/F.FPS for f in sorted(frames)], composed_fps=F.FPS, display_words=words,
                     illustration=p.get('illustration'),
                     source=p.get('source_evidence') or dict(url=p.get("source")))])
     _, report = placement_check(rows, script, clock, os.path.join(ctx.supply, "render-review"), pack["ffmpeg"])
@@ -572,6 +572,17 @@ def render(ctx, script, sc):
         _rebuild_rejected(ctx, script, sc, report)
 
 
+def current_rejections(supply):
+    from placement_check import CONTRACT
+    path = os.path.join(supply, "render_rejected.json")
+    marker = os.path.join(supply, "render_rejected_contract.json")
+    # A changed frame/layout contract requires fresh source AND composed checks;
+    # it never grants approval to a formerly rejected asset.
+    if not os.path.exists(marker) or json.load(open(marker)) != CONTRACT:
+        return []
+    return json.load(open(path)) if os.path.exists(path) else []
+
+
 def _rebuild_rejected(ctx, script, sc, report):
     """Monotonic repair shared by the engine and exact delivery-frame gates."""
     pics = sc["beats"].get("pictures") or []
@@ -581,10 +592,12 @@ def _rebuild_rejected(ctx, script, sc, report):
     doomed = [pics[r["id"]] for r in report["placements"] if not r["ok"]]
     dropped = [p["path"] for p in doomed]
     rejected_path = os.path.join(ctx.supply, "render_rejected.json")
-    previous = json.load(open(rejected_path)) if os.path.exists(rejected_path) else []
+    previous = current_rejections(ctx.supply)
     if not set(dropped) - set(previous):
         raise RuntimeError("composed picture repair made no progress; no film may be delivered")
     json.dump(sorted(set(previous+dropped)), open(rejected_path, "w"), indent=1)
+    from placement_check import CONTRACT
+    json.dump(CONTRACT, open(os.path.join(ctx.supply,"render_rejected_contract.json"),"w"))
     ctx.log(f"composed picture check: rebuilding without {len(dropped)} rejected placements")
     old_spend = sc.get("spend", [])
     rebuilt = score(ctx, script)

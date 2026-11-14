@@ -114,3 +114,13 @@ def test_rejection_identifies_asset_when_research_passes_reuse_filenames(tmp_pat
     monkeypatch.setattr(wf,'score',rebuilt)
     wf._rebuild_rejected(ctx,{},sc,dict(placements=[dict(id=0,ok=False),dict(id=1,ok=True)]))
     assert sc['beats']['pictures']==[dict(path=paths[1])]
+
+
+def test_changed_review_contract_rechecks_previously_rejected_assets(tmp_path):
+    from placement_check import CONTRACT
+    (tmp_path/'render_rejected.json').write_text('["old-layout.jpg"]')
+    assert wf.current_rejections(str(tmp_path))==[]
+    (tmp_path/'render_rejected_contract.json').write_text(str(CONTRACT))
+    assert wf.current_rejections(str(tmp_path))==['old-layout.jpg']
+    (tmp_path/'render_rejected_contract.json').write_text(str(CONTRACT-1))
+    assert wf.current_rejections(str(tmp_path))==[]

@@ -293,12 +293,6 @@ def build(script, sup, style_id, direction=None):
     ins = proposals(coverage, footage, pics)
     attempts = []
     for _ in range(1+sum(len(rows) for rows in footage.values())+sum(len(rows) for rows in pics.values())):
-        if st["layout"] == "prints":
-            # Replacements also remain behind later prints: check their entire visible life.
-            for run in _runs(ins):
-                end = ins[run[-1]][1]
-                for k in run:
-                    ins[k][4] = dict(ins[k][4], audit_until=end)
         accepted, placement_report = check(ins, script, clock, sup["work"], sup["ffmpeg"])
         attempts.append(placement_report)
         if not placement_report['rejected']:
@@ -431,42 +425,24 @@ def build(script, sup, style_id, direction=None):
         note(f0, f1, kind, name, rec, "bleed")
 
     def prints(run):
-        """A run of pictures as prints: each lands tilted, beside and over the one before, and stays to the run's end.
-        The ground under them is the newest print's own picture, far out of focus and dark."""
-        r1 = ins[run[-1]][1]
-        hw, hh = PRINT_W / 2, PRINT_W * W / H / 2
+        """One readable print at a time; prior UI/document detail cannot occlude it."""
         for q, k in enumerate(run):
             f0, f1, kind, name, rec = ins[k]
             key = keys[rec["path"]]
-            mono = is_mono(f0)
-            pw_, ph_ = float(rec.get("w") or W), float(rec.get("h") or H)
-            bed = dict(blur=34, grade=dict(BED))
-            if kind == "clip":
-                bed["src"] = list(rec["src"])
-            if mono:
-                bed["look"] = "mono_silver"
-            P.shot([f0, f1], key, F.cover_crop(pw_, ph_, W / H, (0.5, 0.45), (0.5, 0.40)), **bed)
-            n, m = f1 - f0, r1 - f1
-            cx, cy = PRINT_AT[q % len(PRINT_AT)]
-            aspect = pw_/ph_
-            hh = min(0.17, PRINT_W*W/H/aspect/2)
-            hw = hh*H/W*aspect
-            box = [cx - hw, cy - hh, cx + hw, cy + hh]
-            land = [r4(1.0 + 0.10 * (1 - smooth(j / 6.0))) if j < 7 else r4(1.0 + 0.018 * (j - 7) / max(n - 8, 1)) for j in range(n)]
-            kw = dict(z=1 + q, rot=PRINT_ROT[q % len(PRINT_ROT)], crop=[0.0, 0.0, 1.0, 1.0], radius=0.006,
-                      shadow=dict(a=0.62, blur=0.03, dx=0.004, dy=0.014))
-            if mono:
-                kw["look"] = "mono_silver"
-            live = dict(kw, s=land, op=[min(1.0, 0.4 + 0.3 * j) for j in range(n)])
-            if kind == "clip":
-                live["src"] = list(rec["src"])
-            P.card([f0, f1], key, box, **live)
-            if m > 0:                                         # under the next print it holds its last frame, as a print does
-                rest = dict(kw, s=land[-1])
-                if kind == "clip":
-                    rest["src"] = [round(max(rec["src"][1] - 1.0 / FPS, 0.0), 4), round(rec["src"][1], 4)]
-                P.card([f1, r1], key, box, **rest)
-            note(f0, f1, kind, name, rec, "print")
+            bed_of(f0, f1, key, kind, rec, is_mono(f0))
+            aspect = float(rec.get("w") or W)/float(rec.get("h") or H)
+            width = .91
+            height = min(.38, width*W/H/aspect)
+            width = height*H/W*aspect
+            cx,cy=.5,.40
+            n=f1-f0
+            kw=dict(z=1,rot=(-.7 if q%2 else .7),crop=[0,0,1,1],radius=.006,
+                    s=[r4(1+.025*(1-smooth(min(j/6,1)))) for j in range(n)],
+                    shadow=dict(a=.62,blur=.03,dx=.004,dy=.014))
+            if kind=="clip":kw['src']=list(rec['src'])
+            if is_mono(f0):kw['look']='mono_silver'
+            P.card([f0,f1],key,[cx-width/2,cy-height/2,cx+width/2,cy+height/2],**kw)
+            note(f0,f1,kind,name,rec,"print")
 
     pos, labelled, labels, flashes = 0, set(), [], []
     runs = _runs(ins)

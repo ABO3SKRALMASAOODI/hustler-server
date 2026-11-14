@@ -43,3 +43,20 @@ def test_source_provenance_reaches_checker_and_invalidates_cached_decision(tmp_p
     rec['source']['channel']='Different publisher'
     pc.check(*args,call=call)
     assert [x['channel'] for x in calls]==['Original publisher','Different publisher']
+
+
+def test_composed_frame_evidence_preserves_phone_resolution_and_half_open_cut(tmp_path,monkeypatch):
+    import io
+    from PIL import Image
+    import placement_check as pc
+    from types import SimpleNamespace
+    buffer=io.BytesIO();Image.new('RGB',(1080,1920),'red').save(buffer,format='JPEG')
+    commands=[]
+    def run(cmd,**kwargs):
+        commands.append(cmd);return SimpleNamespace(stdout=buffer.getvalue())
+    monkeypatch.setattr(pc.subprocess,'run',run)
+    frames=pc.evidence([0,60,'clip','subject',dict(path='composed.mp4',src=[0,2],check_times=[0,1,59/30],composed_fps=30)],'ffmpeg')
+    assert len(frames)==3
+    assert all(Image.open(io.BytesIO(x)).size==(720,1280) for x in frames)
+    assert float(commands[-1][commands[-1].index('-ss')+1])<59/30
+    assert float(commands[0][commands[0].index('-ss')+1])==0
