@@ -286,6 +286,8 @@ def _ensure_matte(ctx, edl, tl, windows, wait_s=0):
         import sidecars
         original = ctx.db.run(dbx.latest_asset, ctx.project_id, "original")
         proxy = ctx.db.run(dbx.latest_asset, ctx.project_id, "proxy")
+        import matte_track
+        proxy = matte_track.analysis_asset(edl, original, proxy)
         if not original or not proxy or not original.get("sha256"):
             return ""
         # Track 1A's program matte keys and launches its chunks: when it is
