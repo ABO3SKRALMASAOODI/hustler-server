@@ -311,8 +311,13 @@ def test_a_silent_database_is_given_up_on_in_seconds(monkeypatch):
         srv.close()
 
 
-def test_one_refresher_and_none_left_behind(stores):
-    name = f"kv-feed:{routing.KV_KEY}"
+@pytest.mark.parametrize("other_feed_starts", [False, True])
+def test_one_refresher_and_none_left_behind(stores, other_feed_starts):
+    # Other suite fixtures can lazily start the process-global storage feed
+    # while these callers run. Count this feed's threads, not every instance
+    # that happens to read the same KV row.
+    feed_name = f"{routing.KV_KEY}:concurrent-callers"
+    name = f"kv-feed:{feed_name}"
 
     def alive():
         return {t for t in threading.enumerate()
@@ -324,15 +329,24 @@ def test_one_refresher_and_none_left_behind(stores):
         reads.append(1)
         raise OperationalError("down")
     feed, router = storage._build_router(down)
+    feed.name = feed_name
     feed._backoff = feed._backoff_max = 0.01
+    other = None
     workers = [threading.Thread(target=lambda: [router.plan()
                                                 for _ in range(200)])
                for _ in range(12)]
-    for w in workers:
-        w.start()
-    for w in workers:
-        w.join(10)
-    assert _wait(lambda: len(reads) >= 5)
-    assert alive() - before == {feed._thread}
-    assert feed.stop()
+    try:
+        if other_feed_starts:
+            other, _ = storage._build_router(lambda: None)
+            other.start()
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join(10)
+        assert _wait(lambda: len(reads) >= 5)
+        assert alive() - before == {feed._thread}
+    finally:
+        assert feed.stop()
+        if other is not None:
+            assert other.stop()
     assert not alive() - before
