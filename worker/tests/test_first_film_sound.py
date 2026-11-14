@@ -27,7 +27,9 @@ def test_chain_uses_real_timeline_events_and_one_gated_write(monkeypatch):
     from score import sound
     from first_film_sound import chain
     edl = {'keep': [[0, 10]], 'inserts': [], 'motion': [{'start': 1, 'end': 2}],
-           'captions': [{'start': 3, 'end': 4}]}
+           'captions': [{'start': 3, 'end': 4}],
+           'fx': [{'type': 'broll', 'start': 5, 'end': 6,
+                   'source': {'asset_key': 'verified/thing.mp4'}}]}
     written = []
     ctx = SimpleNamespace(index={}, latest_edl=lambda: {'json': edl}, proxy_path=lambda: 'source.mp4',
                           apply_score=lambda value, why: written.append(value) or 'EDL v2')
@@ -35,6 +37,7 @@ def test_chain_uses_real_timeline_events_and_one_gated_write(monkeypatch):
         assert len([i for i in l1['items'] if i['k'] == 'word']) == 1
         assert l1['spine'] == [{'f': [0, 300], 'src': [0., 10.]}]
         assert kwargs['index']['first_film']['frame'] == '9:16'
+        assert [(e['f'],e['kind']) for e in sound.l1_events(l1)] == [(30,'display'),(150,'picture'),(180,'picture')]
         return [{'id': 'cue1', 's': 'click_1', 'start_s': .9, 'event_f': 30, 'db': -2}], {}
     monkeypatch.setattr(sound, 'design', design)
     monkeypatch.setattr(sound, 'library', lambda: {'click_1': {}})

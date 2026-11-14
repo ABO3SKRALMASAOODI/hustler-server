@@ -111,6 +111,37 @@ def chain(ctx):
             src = [block['src_start'], block['src_end']]
             items.append({'id': f'take{i}', 'k': 'shot', 'f': frames, 'pic': 'main', 'src': src})
             spine.append({'f': frames, 'src': src})
+    # Legacy cutaways live in fx, not in timeline inserts. Expose their
+    # actual entry AND return cuts to the sound designer while retaining
+    # the original voice spine underneath them.
+    cutaways = [fx for fx in edl.get('fx') or [] if fx.get('type') == 'broll'
+                and (fx.get('source') or {}).get('asset_key')]
+    if cutaways:
+        base, items = items, []
+        bounds = {f for shot in base for f in shot['f']}
+        for fx in cutaways:
+            bounds.update([max(0, min(round(duration*fps), round(float(fx.get(k) or 0)*fps)))
+                           for k in ('start', 'end')])
+        bounds = sorted(bounds)
+        for n, (a, b) in enumerate(zip(bounds, bounds[1:])):
+            if b <= a:
+                continue
+            active = next((fx for fx in reversed(cutaways)
+                           if float(fx.get('start') or 0)*fps <= (a+b)/2
+                           < float(fx.get('end') or 0)*fps), None)
+            if active:
+                items.append({'id': f'broll{n}', 'k': 'shot', 'f': [a,b],
+                              'pic': 'asset:' + active['source']['asset_key']})
+                continue
+            shot = next((shot for shot in base if shot['f'][0] <= a < shot['f'][1]), None)
+            if shot:
+                part = dict(shot, id=f"{shot['id']}.{n}", f=[a,b])
+                if shot.get('src'):
+                    start, end = shot['src']
+                    scale = (end-start)/max(1, shot['f'][1]-shot['f'][0])
+                    part['src'] = [start+(a-shot['f'][0])*scale,
+                                   start+(b-shot['f'][0])*scale]
+                items.append(part)
     for i, item in enumerate(edl.get('motion') or []):
         # Motion-caption templates are stored in captions, not this display list.
         a, b = float(item.get('start') or 0), float(item.get('end') or 0)
