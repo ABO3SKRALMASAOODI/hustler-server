@@ -2,8 +2,7 @@
 
 The speaker's take is the spine and the sound. Over the sentences that name real people, companies, places and
 events the picture goes to real footage and photographs of them (worker/footage, Commons), a new one about every
-second, then back to him; the payoff is his face. Captions ink word by word at one seat; the title holds that seat
-over his first breath; the words that carry the story land large on the words that say them; a named thing is
+second, then back to him; the payoff is his face. Captions ink word by word at one seat from the opening word; the words that carry the story land large on the words that say them; a named thing is
 labelled once. Sentences about the past are drawn in black and white (a finish by section, never film-wide, except
 in the style whose whole idea it is). Then the engines: the judge's pace and moves (scene.pace), one look solved on
 the film's own pictures (scene.looks), a soft first frame on one new picture in three, and the references' sounds on
@@ -340,7 +339,7 @@ def build(script, sup, style_id, direction=None):
 
     def note(f0, f1, kind, name, rec, mode):
         P.pictures.append(dict(f=[f0, f1], visible_f=[f0, rec.get("audit_until", f1)], kind=kind, name=name, path=rec["path"], shows=rec.get("shows"), mode=mode,
-                               finish="black and white" if is_mono(f0) else None,
+                               finish="black and white" if is_mono(f0) else None, motion_p90=rec.get('placed_motion_p90'),
                                source=(rec.get("source") or {}).get("url") if kind == "clip" else rec.get("page"), time_range=rec.get("time_range")))
         if rec.get("still") or kind == "photo":
             look_pics.append(rec.get("still") or rec["path"])
@@ -493,10 +492,9 @@ def build(script, sup, style_id, direction=None):
         if 0 < f < f_end - 3:
             P.flash([f, f + 2], mode="fill", c="#FFFFFF", a=[0.62, 0.22])
             P.events.append(f)
-    # ---- the title holds the caption seat over his first breath; the captions yield to it
+    # ---- Opening speech owns the caption seat; headlines are delivery metadata.
     _, _, bake = F._engines()
     shown = []
-    title = str(script.get("title") or "")
 
     def cased(t):
         return t.upper() if st["upper"] else t

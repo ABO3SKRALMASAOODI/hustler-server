@@ -225,7 +225,7 @@ def _eased_take(sh, cam, M, faces, stress, a, b, lo, hi, fps, rng, log, motivate
     start = cam.on_face(big, 0.34, eyes=eyes.get(tuple(big))) if big else (names.get("step1") or M[0][1])
     cx, cy, w = motion._cwz(start)
     tos, cur, run_in = [], w, 0
-    points = splits(a, b, stress, lo, hi) if motivated is None else sorted({int(f) for f in motivated if a+6 <= f < b-6})
+    points = splits(a, b, stress, lo, hi) if motivated is None else sorted({int(f) for f in motivated if a <= f < b-6})
     for f in points:
         size = 0.043 + 0.027 * rng.random()
         go_in = run_in < 3 and cur / (1 + size) >= cam.w_min * 1.01 and (run_in == 0 or rng.random() < 0.7)

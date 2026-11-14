@@ -61,7 +61,7 @@ def test_lower_type_seat_moves_a_face_up_and_never_partly_down_into_it():
 
 
 @pytest.mark.parametrize("style", ["window", "archive-reel", "footage-cut", "prints"])
-def test_long_speaker_fallback_alternates_full_source_views_on_the_same_voice_clock(tmp_path,monkeypatch,style):
+def test_missing_documentary_supply_cannot_be_hidden_by_speaker_recrops(tmp_path,monkeypatch,style):
     words='Every new discovery changes how we understand ourselves and our place in the world'.split()
     script=dict(title='Our Place',segments=[dict(say=' '.join(words),pictures=[])])
     wj=dict(duration=5.5,words=[dict(w=w,start=.1+i*.34,end=.4+i*.34,seg=0) for i,w in enumerate(words)])
@@ -69,14 +69,9 @@ def test_long_speaker_fallback_alternates_full_source_views_on_the_same_voice_cl
              take=dict(path='/take.mp4',w=1920,h=1080,fps=30,dur=5.5,faces=[]))
     monkeypatch.setattr(film.F,'voice_stress',lambda sup:[])
     monkeypatch.setattr(film.F,'engines_finish',lambda l1,*a,**k:l1)
-    l1,beats=film.build(script,sup,style)
-    cards=[i for i in l1['items'] if i['k']=='card' and i['pic']=='main']
-    assert len(cards)>=3 and beats['pictures']==[]
-    for card in cards:
-        assert card['crop']==[0,0,1,1]
-        assert card['w']*1080/(card['h']*1920)==pytest.approx(1920/1080,abs=.001)
-        assert card['src'][0]==pytest.approx(max(card['f'][0]-3,0)/30,abs=.001)
-        assert card['src'][1]-card['src'][0]==pytest.approx((card['f'][1]-card['f'][0])/30,abs=.001)
+    sup['coverage'] = dict(words=wj['words'], moves=[], windows=[dict(t0=.1,t1=5.2,name='world',must_show='actual Earth')])
+    with pytest.raises(RuntimeError,match='documentary supply incomplete'):
+        film.build(script,sup,style)
 
 
 def test_all_caption_phrases_share_one_face_safe_seat():

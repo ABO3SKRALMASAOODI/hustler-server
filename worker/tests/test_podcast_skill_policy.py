@@ -105,7 +105,8 @@ def test_a_craft_defect_is_a_fix_never_a_kill():
     assert "A short that failed is tried again on that run" in text
     assert "anything in `not_made` with its reason" in text
     assert "Pictures never move to a different sentence without a fresh placement check" in text
-    assert "Rejected placements return to the take; no unexamined picture reaches the film" in text
+    assert "Rejected assets are replaced from checked supply; insufficient coverage stops the run" in text
+    assert "zero rejected pictures with insufficient real-picture coverage is a failure" in text
 
 
 def test_payoff_never_holds_on_a_freeze_or_slow_tail():
