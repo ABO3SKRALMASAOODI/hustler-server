@@ -3071,14 +3071,17 @@ def _asks_settle(ctx, final, outcome):
     if edit_scope.restore_unmet(ctx, ledger, verdict):
         verdict = ctx.ask_verdict
         final = asks.checked_reply(ledger, verdict)
+    if not verdict:
+        final = asks.checked_reply(ledger, None)
+    final = edit_scope.disclose(ctx, final)
+    # Disclosure is itself a model rewrite. Check its claims last and retain
+    # the checker's unmet-ask lines after every rewrite (brands replay lost
+    # the unfinished ending while the new picture changes were summarized).
     if verdict:
         final = asks.true_reply(ctx, ledger, verdict, final or "")
         block = asks.reply_block(ledger, verdict)
         if block and not all(r.get("line") in final for r in asks.open_asks(verdict) if r.get("line")):
             final = (final or "") + block
-    else:
-        final = asks.checked_reply(ledger, None)
-    final = edit_scope.disclose(ctx, final)
     return final, asks.outcome(ledger, verdict, outcome)
 
 
