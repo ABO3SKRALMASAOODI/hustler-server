@@ -6,7 +6,7 @@ between fresh segmentations; no screen-space average trails a moving limb.
 """
 import numpy as np
 
-VERSION = 'sam-trimap-v2'
+VERSION = 'sam-trimap-v3'
 
 
 def bands(mask, cv2):
@@ -35,6 +35,21 @@ rejection signal, never the final alpha of a face, hair or a blurred hand.
 
 def support(mask, cv2):
     return bands(mask, cv2)[0]
+
+
+def supported_core(core, alpha, cv2):
+    """Fill missing interior, never invent an opaque subject outside its evidence.
+
+SAM can include a detached bit of wall. Its eroded seed repairs dark clothing
+only inside the hull of RVM's confident foreground; soft alpha outside that
+hull still renders normally. Recompute on each frame, including carried seeds.
+"""
+    points = cv2.findNonZero((alpha >= .5).astype(np.uint8))
+    if points is None or len(points) < 3:
+        return np.zeros_like(alpha)
+    hull = np.zeros(alpha.shape, np.uint8)
+    cv2.fillConvexPoly(hull, cv2.convexHull(points), 1)
+    return core * hull
 
 
 class Refiner:
@@ -83,4 +98,4 @@ class Refiner:
         self.previous, self.mask, self.core = small, current, core
         self.n += 1
         return alpha if current is None else np.clip(np.maximum(alpha * current,
-                                       core if core is not None else 0), 0, 1)
+                supported_core(core, alpha, cv2) if core is not None else 0), 0, 1)
