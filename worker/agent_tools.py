@@ -596,9 +596,13 @@ class ToolContext:
         owner = self.project.get("user_id") or self.job.get("user_id")
         job_id = self.db.run(dbx.enqueue_asset_index, self.project_id, owner,
                              asset["id"])
-        return (f"PREREQUISITE: that clip's analysis is running as job "
+        if job_id:
+            self.mcp_pending_analysis = {"index_job_id": job_id, "retry_after_s": 10}
+        state = "PENDING" if getattr(self, "sight_out", False) else "PREREQUISITE"
+        return (f"{state}: that clip's analysis is running as job "
                 f"{job_id}. Call wait_for_job(job_id={job_id}) until it "
-                "finishes, then repeat this call.")
+                "finishes, then repeat this call. Retry after 10 seconds; "
+                "this is normal pending analysis.")
 
     def clamp(self, t):
         return read_tools.clamp_seconds(self.duration, t)
@@ -1072,9 +1076,12 @@ def get_video_info(ctx):
         edl = ctx.latest_edl()
         ins = edl["json"].get("inserts") or []
         prog = _program_map(ctx, edl["json"])
-        return ("No main video in this project — this is a blank canvas. Build "
-                "the program from uploaded images/clips, then place them "
-                "with insert_media. "
+        return ("This project has no main video. Uploaded audio, clips and images "
+                "can form a finished film here in Valmera. Keep narration on "
+                "the timeline with add_voiceover, place checked footage with "
+                "place_search_result, and add captions and designed motion. "
+                "Review render_preview(complete=true), then export_final and "
+                "download_url(kind=final); downloaded source assets are not a finished film. "
                 f"Current EDL v{edl['version']}: {len(ins)} placed "
                 f"clip{'s' if len(ins) != 1 else ''}, "
                 f"{program_duration(edl['json'])}s total."
@@ -24281,6 +24288,8 @@ def _long_program_repeat_proof(ctx, row, plan):
     3-60 s cursor overlays; cost and wait scaled with the source, not the
     change. None = render as asked (short program, first draft, a changed
     length, or nothing to prove)."""
+    if getattr(ctx, "sight_out", False):
+        return None  # MCP has no later automatic full preview; honour complete=true.
     try:
         blocks = timeline_mod.program_blocks(row.get("json") or {})
         total = float(blocks[-1]["out_end"]) if blocks else 0.0

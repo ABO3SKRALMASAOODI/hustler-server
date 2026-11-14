@@ -1,13 +1,12 @@
 """MCP delivery facts, not a quality score or an intent classifier.
 
 Audio is measured on the encoded file. Motion samples the actual program at
-2 fps, excluding the automatic end card. Authored type counts are explicitly
+4 fps in bounded windows, excluding the automatic end card. Authored type counts are explicitly
 EDL facts: source-burned type needs frame review. Unknown never means pass.
 """
 import json
 import math
 import subprocess
-import threading
 
 
 def authored(edl):
@@ -29,49 +28,60 @@ def measure(path, edl, audio=None, duration_s=None):
     duration = min(float(duration_s or program_duration(edl)), float(program_duration(edl)))
     report = {'schema': 1, 'program_s': duration, 'authored': authored(edl),
               'silent': None, 'no_motion_detected': None,
-              'motion_sample_fps': 2, 'motion_pairs': 0,
+              'motion_sample_fps': 4, 'motion_pairs': 0,
+              'motion_basis': 'sampled 0.75-second windows, at most 16; not an exhaustive motion audit',
               'source_text_review': 'inspect rendered frames', 'warnings': []}
-    if not audio or audio.get('i') is None:
+    # The automatic end card cannot make an otherwise silent film pass.
+    if not audio or audio.get('i') is None or float(duration_s or duration) > duration + .1:
         try:
-            audio = audio_qc.measure(path, duration_s=duration)
+            import media
+            facts = media.probe(path)
+            if facts.get('has_audio') is False:
+                audio = {'i': -120.0}
+                report['audio_track_present'] = False
+            else:
+                proc = subprocess.run(
+                    ['ffmpeg', '-hide_banner', '-nostats', '-i', path, '-t', str(duration),
+                     '-map', '0:a:0', '-af', 'loudnorm=I=-14:TP=-2:LRA=11:print_format=json',
+                     '-f', 'null', '-'], capture_output=True, timeout=180, check=True)
+                loud, _ = audio_qc._parse(proc.stderr.decode('utf-8', 'replace'))
+                audio = {'i': float(loud['input_i'])} if loud else None
+                report['audio_track_present'] = True
         except Exception as exc:
+            audio = None
             report['audio_error'] = type(exc).__name__
     level = (audio or {}).get('i')
     if isinstance(level, (int, float)):
         report['integrated_lufs'] = level if math.isfinite(level) else -120.0
         report['silent'] = level < -70
-    # Fixed-resolution decoded pixels, streaming, with a bounded process.
-    cmd = ["ffmpeg", '-v', 'error', '-i', path, '-t', str(duration),
-           '-an', '-vf', 'fps=2,scale=96:54,format=gray', '-f', 'rawvideo', '-']
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    timer = threading.Timer(120, proc.kill)
-    timer.start()
-    diffs = []
-    previous = None
-    try:
-        while True:
-            raw = proc.stdout.read(96 * 54)
-            if len(raw) != 96 * 54:
-                break
-            frame = np.frombuffer(raw, dtype=np.uint8).astype(np.int16)
-            if previous is not None:
-                diffs.append(float(np.abs(frame - previous).mean()))
-            previous = frame
-        code = proc.wait(timeout=30)
-        if code == 0 and diffs:
-            report.update(motion_pairs=len(diffs),
-                          motion_delta_p90=round(float(np.percentile(diffs, 90)), 3),
-                          sampled_static_fraction=round(sum(v < .5 for v in diffs) / len(diffs), 4),
-                          no_motion_detected=all(v < .5 for v in diffs))
-        else:
-            report['motion_error'] = f'decode exit {code}; {len(diffs)} frame pairs'
-    finally:
-        timer.cancel()
-        timer.join()
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait()
-        proc.stdout.close()
+    # Seek before decoding. A 35-minute narration must not incur a second
+    # full video decode merely to report sampled motion.
+    diffs, sampled, failures = [], [], []
+    count = max(1, min(16, int(math.ceil(duration / 2))))
+    for start in np.linspace(0, max(0, duration - .75), count):
+        cmd = ['ffmpeg', '-v', 'error', '-ss', str(float(start)), '-i', path,
+               '-t', str(min(.75, duration - start)), '-an',
+               '-vf', 'fps=4,scale=96:54,format=gray', '-f', 'rawvideo', '-']
+        try:
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                  timeout=12, check=True)
+        except (subprocess.SubprocessError, OSError) as exc:
+            failures.append(type(exc).__name__)
+            continue
+        size = 96 * 54
+        frames = np.frombuffer(proc.stdout[:len(proc.stdout) // size * size], dtype=np.uint8)
+        frames = frames.reshape(-1, size).astype(np.int16)
+        if len(frames) > 1:
+            diffs.extend(np.abs(np.diff(frames, axis=0)).mean(axis=1).tolist())
+            sampled.append(round(float(start), 3))
+    report['motion_sample_starts'] = sampled
+    if diffs:
+        report.update(motion_pairs=len(diffs),
+                      motion_delta_p90=round(float(np.percentile(diffs, 90)), 3),
+                      sampled_static_fraction=round(sum(v < .5 for v in diffs) / len(diffs), 4),
+                      no_motion_detected=all(v < .5 for v in diffs) if not failures else None)
+    if failures or not diffs:
+        report['motion_error'] = failures or ['no decoded frame pairs']
     a = report['authored']
     report['no_authored_text'] = not (a['text_items'] or a['captions_enabled'] or a['caption_items'] or a['motion_graphics'])
     if report['silent']:
@@ -79,7 +89,7 @@ def measure(path, edl, audio=None, duration_s=None):
     if report['no_authored_text']:
         report['warnings'].append('NO AUTHORED TEXT: inspect frames for source-burned type; add appropriate captions or designed type.')
     if report['no_motion_detected']:
-        report['warnings'].append('NO MOTION DETECTED: all sampled program frame pairs are static.')
+        report['warnings'].append('NO MOTION DETECTED in sampled program windows; inspect the complete film.')
     report['next_step'] = ('Inspect the complete film and repair unintended gaps using Valmera editing tools, '
                            'then export_final for that version. These facts are not a quality rating.')
     return report

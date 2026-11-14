@@ -73,3 +73,11 @@ def test_studio_repeat_draft_uses_the_same_changed_section_guard(monkeypatch):
     out = agent_tools.render_preview(ctx, complete=True, quality="draft")
     assert calls == [[(296.0, 356.0)]]
     assert "CHANGED SECTIONS only" in out
+
+
+def test_mcp_complete_request_never_becomes_a_changed_section_proof(monkeypatch):
+    calls = _wire(monkeypatch)
+    ctx = _ctx({'id': 38140, 'edl_version': 10, 'duration_s': 2460.0, 'age_s': 1200})
+    ctx.sight_out = True
+    assert agent_tools._long_program_repeat_proof(ctx, LECTURE, []) is None
+    assert calls == []

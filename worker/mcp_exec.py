@@ -106,6 +106,13 @@ def catalog():
     tools = [t for t in agent_tools.openai_tools()
              if (t.get("function") or {}).get("name")
              not in MCP_DENIED_TOOLS | MCP_SESSION_OVERRIDES]
+    for spec in tools:
+        if spec["function"]["name"] == "render_preview":
+            spec["function"]["description"] = (
+                "MCP defaults to a complete watchable preview. Pass complete=false only "
+                "for a changed-section proof. A proof is never the finished film. "
+                "After reviewing, export_final and obtain download_url(kind=final). "
+                + spec["function"]["description"])
     published = {(t.get("function") or {}).get("name") for t in tools}
     return {
         "tools": tools,
@@ -273,6 +280,10 @@ def _tool_result_contract(ctx, text):
     success for that text caused callers and dashboards to count 192 refused
     operations as wins and encouraged models to continue from a false premise.
     """
+    pending = getattr(ctx, "mcp_pending_analysis", None)
+    if pending:
+        return {"is_error": False, "status": "pending", "retryable": True,
+                "code": "index_not_ready", **pending}
     return read_tools.tool_result_contract(
         getattr(ctx, "last_structured_tool_outcome", None), text)
 
@@ -526,7 +537,9 @@ def run_mcp_job(worker_db, job):
     is already in the bucket."""
     payload = job.get("payload") or {}
     tool = payload.get("tool") or ""
-    args = payload.get("args") or {}
+    args = dict(payload.get("args") or {})
+    if tool == "render_preview" and not args.get("report"):
+        args.setdefault("complete", True)
 
     if tool == CATALOG_TOOL:
         return catalog()
@@ -634,6 +647,7 @@ def run_mcp_job(worker_db, job):
             # A cached MCP context outlives individual calls. Never let one
             # call inherit the preceding tool's structured refusal metadata.
             ctx.last_structured_tool_outcome = None
+            ctx.mcp_pending_analysis = None
             _arm_render_park(ctx, tool, payload)
             try:
                 text = agent_tools.execute(ctx, tool, args)

@@ -3131,7 +3131,7 @@ def _t_make_first_cut(tok, args):
                 "wait for index_status 'done', then call make_first_cut.")
         if not (original.get("sha256") and _index_row(cur, original["sha256"])):
             return _text(
-                f"PREREQUISITE: project {project_id}'s video is still being "
+                f"PENDING: project {project_id}'s video is still being "
                 "analyzed. Poll index_status until it is done, then call "
                 "make_first_cut again. This is pending, not a failure; "
                 "retry after 10 seconds.", False)
