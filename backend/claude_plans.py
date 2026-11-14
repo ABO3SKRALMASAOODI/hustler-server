@@ -43,6 +43,7 @@ reserved for paid work after the trial cutoff.
 """
 
 import json
+import os
 from datetime import datetime, timezone
 
 KEY = "studio_for_all_plans"
@@ -83,9 +84,24 @@ def _parse_time(value):
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
 
+# The OpenAI models the Gauntlet scoreboard cleared to edit on the Claude lane
+# with the Claude fallback behind every call (worker/edit_rung.py, 14 Nov
+# 2026). The worker's config.EDIT_RUNG_MODELS reads the same variable.
+def rung_models():
+    return frozenset(m.strip().lower() for m in
+                     os.getenv("EDIT_RUNG_MODELS", "gpt-6.1-sol").split(",")
+                     if m.strip())
+
+
+def lane_capable(model):
+    """A model the paid Claude lane may run: a Claude model or a rung model."""
+    name = str(model or "").strip().lower()
+    return name.startswith("claude-") or name in rung_models()
+
+
 def _claude(model, default):
     model = str(model or "").strip()
-    return model if model.lower().startswith("claude-") else default
+    return model if lane_capable(model) else default
 
 
 def parse_flag(raw):
@@ -108,7 +124,7 @@ def parse_flag(raw):
     default_model = _claude(data.get("default_model"), DEFAULT_MODEL)
     models = dict(DEFAULT_PLAN_MODELS)
     for plan, model in (data.get("plan_models") or {}).items():
-        if str(model or "").lower().startswith("claude-"):
+        if lane_capable(model):
             models[str(plan)] = str(model).strip()
     studio = data.get("studio_plans")
     if not isinstance(studio, list):

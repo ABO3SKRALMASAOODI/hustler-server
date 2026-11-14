@@ -15,6 +15,7 @@ import uuid
 import agent_tools
 import claude_lane
 import claude_trial
+import edit_rung
 import config
 import db as dbx
 import director
@@ -2153,6 +2154,11 @@ def run_agent_job(worker_db, job):
         ctx.agent_lanes = [claude_lane.lane(ctx.claude_trial.model)]
         ctx.llm_client = ctx.agent_lanes[0]["client"]
         ctx.agent_model = ctx.claude_trial.model
+        if edit_rung.is_rung_model(ctx.agent_model):
+            # An OpenAI model on the rung: the allowance is priced at the
+            # fallback's card, as edit_rung meters it (14 Nov 2026).
+            ctx.credit_price_aliases = {
+                ctx.agent_model: edit_rung.fallback_model()}
         # The turn spends what the trial has left, in the same credit units
         # the in-turn cap already counts (cumulative across slices).
         ctx.credit_budget = ctx.running_credits() + model_prices.usd_to_credits(
@@ -2467,9 +2473,15 @@ def _claude_paid_lane(worker_db, job, subscribed, plan, payload):
         # older accounts. Cohort checks still own feature entitlements;
         # they must not send an entitled subscriber to an empty wallet.
         model = claude_plans.lane_model(flag, plan)
+        # An edit-rung model (an OpenAI model with Haiku behind every call)
+        # charges the customer's credits at the fallback's card: the price
+        # of the edit is what it was before the switch (14 Nov 2026).
+        credit_model = (claude_plans.contracted_model(plan)
+                        if flag["credit_parity"] else
+                        edit_rung.fallback_model()
+                        if edit_rung.is_rung_model(model) else None)
         return {"lane": claude_lane.lane(model, name="claude_paid"),
-                "credit_model": (claude_plans.contracted_model(plan)
-                                 if flag["credit_parity"] else None)}
+                "credit_model": credit_model}
     except Exception as exc:  # noqa: BLE001 - today's lanes on any doubt
         print(f"[agent] job {job.get('id')}: new-subscriber lane lookup "
               f"failed ({str(exc)[:160]}); contracted lanes", flush=True)
@@ -6765,6 +6777,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         if claude_lane.is_claude_model(model):
             step_effort = (config.CLAUDE_TRIAL_PLAN_EFFORT if iteration == 0
                            else config.CLAUDE_TRIAL_EFFORT)
+        elif edit_rung.is_rung_model(model):
+            # The effort the Gauntlet scoreboard measured on every plan.
+            step_effort = llm.editor_reasoning_effort(None, iteration)
         # THE TRIAL LANE'S PLANNER (TRIAL_QUALITY_BUILD, 31 Oct 2026): the
         # planning call on Opus at xhigh, every other call of the turn on the
         # lane model at high (app_kv.free_result.planner_model; trial only).
@@ -7325,6 +7340,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             final = _enforce_honesty(ctx, client, messages, tools, draft,
                                      start_version, honesty,
                                      user_text=quality_verifier.request_text_for(ctx))
+            if getattr(ctx, "ask_verdict", None) is None \
+                    and turn_deadline - time.monotonic() > 45:
+                # A reply never says "done" for what the film does not show
+                # (reply_truth, 14 Nov 2026): the screening sheets beside the
+                # draft, on the turn's own model.
+                import reply_truth
+                final = reply_truth.enforce(
+                    ctx, client, ctx.agent_model or model,
+                    quality_verifier.request_text_for(ctx), final, honesty)
             # Language MUST run on the model draft before the English
             # quality advisory is appended — otherwise a Cyrillic reply
             # plus a long Latin advisory fails the 60% script threshold

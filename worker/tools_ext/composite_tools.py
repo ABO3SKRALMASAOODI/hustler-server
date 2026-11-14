@@ -295,8 +295,28 @@ def add_type_window(ctx, text, fill_source, reveal="words_open", start=None,
     return _done(res, _notes(edl, item))
 
 
+def _region_box(reg):
+    """The bounding box of a rect / ellipse / polygon region (frame fractions), else None."""
+    if not isinstance(reg, dict):
+        return None
+    box = reg.get("box")
+    if isinstance(box, (list, tuple)) and len(box) == 4:
+        try:
+            return tuple(float(v) for v in box)
+        except (TypeError, ValueError):
+            return None
+    pts = reg.get("points")
+    try:
+        xs = [float(p[0]) for p in pts or []]
+        ys = [float(p[1]) for p in pts or []]
+    except (TypeError, ValueError, IndexError, KeyError):
+        return None
+    return (min(xs), min(ys), max(xs), max(ys)) if xs and ys else None
+
+
 def add_region_effect(ctx, effect, region, start, end, strength=None,
-                      colour=None, ev=None, scale=None, stage=None, id=None):
+                      colour=None, ev=None, scale=None, stage=None, id=None,
+                      on_face=False):
     """One effect inside a region (an EDL.fx ``region`` item)."""
     refusal = _executor_refusal()
     if refusal:
@@ -326,6 +346,17 @@ def add_region_effect(ctx, effect, region, start, end, strength=None,
     flash = _flash_refusal(edl, item)
     if flash:
         return flash
+    box = _region_box(reg) if (reg or {}).get("shape") not in (
+        "face", "card", "glyph") else None
+    if box is not None and on_face is not True:
+        # Overlays keep faces whole (face_guard, 14 Nov 2026): a box effect
+        # that lands on a person is written only when the customer asked for
+        # this effect on that face (the 'face' region is that choice).
+        import face_guard
+        hit = face_guard.output_hit(ctx, edl, box, s, e)
+        if hit is not None:
+            return face_guard.overlay_refusal(f"{effect} region", hit.get("when"),
+                                              "on_face")
     res = _write.commit(ctx, [_write.upsert_fx(item)],
                         f"region {effect} in {(reg or {}).get('shape')} at "
                         f"{s:g}-{e:g}s [{fid}]")
@@ -439,7 +470,10 @@ TOOL_SPECS = {
          "ev": {"type": "number"}, "scale": {"type": "number"},
          "stage": {"type": "string", "enum": [
              "world", "screen", "pre_captions", "over_type"]},
-         "id": {"type": "string"}}),
+         "id": {"type": "string"},
+         "on_face": {"type": "boolean", "description": (
+             "true ONLY when the customer asked for this effect on a "
+             "person's face; a box region on a face is refused otherwise.")}}),
     "remove_region_effect": (
         remove_region_effect,
         "Remove region effects by id (ids: a list or 'rg1,rg2').",

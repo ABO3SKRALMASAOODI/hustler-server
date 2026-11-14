@@ -293,6 +293,20 @@ EDITOR_MODEL = "gpt-6-luna"
 # in an editing turn, so a funded wallet can neither be picked nor be failed
 # over to. "1" lifts that, and only the Gauntlet's scoreboard may justify it.
 OPENAI_EDITS = os.getenv("OPENAI_EDITS", "0") == "1"
+# THE OPENAI EDIT RUNG (owner, 14 Nov 2026; worker/edit_rung.py). The one way
+# an OpenAI model edits while OPENAI_EDITS is 0: on the trial and paid Claude
+# lanes, named by app_kv free_result.model / studio_for_all_plans.plan_models,
+# with EDIT_RUNG_FALLBACK_MODEL answering the same call on any OpenAI failure.
+# Only models the Gauntlet scoreboard justified are listed
+# (.valmera/week-1112/lanes/EDIT-MODEL/table.json: gpt-6.1-sol 8/12 asks at
+# 4.4 against Haiku's 6/12 at 3.7). Setting the app_kv model back to
+# claude-haiku-5-5 is the switch-off; EDIT_RUNG_MODELS="" closes the rung.
+EDIT_RUNG_MODELS = os.getenv("EDIT_RUNG_MODELS", "gpt-6.1-sol")
+EDIT_RUNG_FALLBACK_MODEL = os.getenv("EDIT_RUNG_FALLBACK_MODEL",
+                                     "claude-haiku-5-5")
+EDIT_RUNG_TIMEOUT_S = float(os.getenv("EDIT_RUNG_TIMEOUT_S", "240"))
+EDIT_RUNG_RETRIES = int(os.getenv("EDIT_RUNG_RETRIES", "1"))
+EDIT_RUNG_LATCH_S = float(os.getenv("EDIT_RUNG_LATCH_S", "1800"))
 
 # ── The Claude-funded trial lane (owner decision D2, 25 Oct 2026) ────────────
 #

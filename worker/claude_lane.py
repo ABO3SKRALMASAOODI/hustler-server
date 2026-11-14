@@ -806,7 +806,21 @@ def from_anthropic(message, model):
 
 def create(model, messages, tools=None, max_tokens=None, effort=None,
            tool_choice=None, timeout=None, cache_policy=None, tool_plan=None):
-    """One Messages call in chat-completions shape. Raises on any failure."""
+    """One Messages call in chat-completions shape. Raises on any failure.
+
+    A rung model (edit_rung: an OpenAI model the Gauntlet scoreboard cleared
+    to edit) answers on OpenAI, and on any OpenAI failure this same call is
+    made here on the fallback Claude model instead."""
+    import edit_rung
+    if edit_rung.is_rung_model(model):
+        return edit_rung.create(
+            model, messages, tools=tools, max_tokens=max_tokens, effort=effort,
+            tool_choice=tool_choice, timeout=timeout,
+            fallback=lambda fb: create(fb, messages, tools=tools,
+                                       max_tokens=max_tokens, effort=effort,
+                                       tool_choice=tool_choice, timeout=timeout,
+                                       cache_policy=cache_policy,
+                                       tool_plan=tool_plan))
     if not configured():
         raise ClaudeLaneUnavailable(
             "Claude lane is not configured (no ANTHROPIC_API_KEY): no credit "
@@ -816,7 +830,7 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
             "Claude lane is closed after a provider refusal (credit balance "
             "or key): " + closed_reason())
     import claude_trial            # metering + hard per-account ceiling
-    claude_trial.guard_call()
+    claude_trial.guard_call(model)
     plan = tool_plan if plan_usable(tool_plan, model) else None
 
     def build(active):
@@ -879,6 +893,7 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
             raise
     result = from_anthropic(message, model)
     result.usage.prompt_cache = cache_info
+    result.usage.answered_model = model     # llm.record: the model that ran
     if claude_trial.current() is not None:
         claude_trial.meter(model, result.usage.provider_cost_usd)
     else:

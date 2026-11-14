@@ -141,7 +141,9 @@ def parse_flag(raw):
             continue
     model = str(data.get("model") or "").strip()
     if not model.lower().startswith("claude-"):
-        model = config.CLAUDE_TRIAL_MODEL
+        import edit_rung      # an OpenAI model the scoreboard cleared (14 Nov)
+        if not edit_rung.is_rung_model(model):
+            model = config.CLAUDE_TRIAL_MODEL
     pool = _num(data.get("pool_usd_cap"), config.CLAUDE_TRIAL_POOL_USD)
     planner, planner_effort, executor_effort = planner_setup(data)
     return {
@@ -589,12 +591,13 @@ def _metering_db():
     return _meter_db
 
 
-def guard_call():
-    """Before every Claude call: company spend stops at its share, and as a
-    hard backstop under the loop's own graceful stop a scope that is 15 % past
-    its ceiling makes no further calls (critics, vision)."""
+def guard_call(model="claude"):
+    """Before every Claude (or edit-rung) call: company spend stops at its
+    provider's share, and as a hard backstop under the loop's own graceful
+    stop a scope that is 15 % past its ceiling makes no further calls
+    (critics, vision)."""
     import llm
-    llm.fence("claude")
+    llm.fence(model or "claude")
     scope = current()
     if scope is None or scope.is_test:
         return
@@ -624,9 +627,11 @@ def meter(model, usd, kind="llm"):
         if not scope.granted:
             scope.pending_usd += usd
         try:
+            # kind "openai": an edit-rung call (edit_rung), metered at the
+            # fallback's card and, like an extra, never on the Claude line.
             spent, pool = _metering_db().run(
                 _meter_tx, scope.user_id, usd, scope.granted,
-                kind == "extras", customer, analysis)
+                kind in ("extras", "openai"), customer, analysis)
             if spent is not None and not analysis:
                 scope.spent_usd = max(scope.spent_usd, float(spent))
         except Exception as exc:  # noqa: BLE001 - the live scope still caps

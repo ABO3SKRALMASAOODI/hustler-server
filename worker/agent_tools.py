@@ -12909,6 +12909,14 @@ def erase_burned_text(ctx, scope="captions", start=None, end=None):
                 "end": None if w1 is None else round(w1, 2),
                 "fill": "text", "kind": r["kind"]}
         added.append(item)
+    face_line = ""
+    if added:
+        # Patches keep faces whole (face_guard, 14 Nov 2026).
+        import face_guard
+        added, on_face = face_guard.erase_split(ctx, added)
+        face_line = face_guard.erase_refusal_line(on_face)
+        if not added and face_line:
+            return "REJECTED: " + face_line
     if not added:
         return ("NO CHANGE: every detected region is already erased — the "
                 "repaint is in place. If the user still sees text THERE, "
@@ -12923,9 +12931,12 @@ def erase_burned_text(ctx, scope="captions", start=None, end=None):
                                   for a in added)
             + " from the source pixels")
     try:
-        return _apply_patches(
+        result = _apply_patches(
             ctx, added, what,
             drop=_superseded_patches(edl, added, ctx.duration))
+        if face_line and isinstance(result, str) and result.startswith("EDL v"):
+            result += "\n" + face_line
+        return result
     except ValueError as e:
         return f"REJECTED: {e}"
     except Exception as e:
@@ -13054,6 +13065,13 @@ def erase_region(ctx, x=None, y=None, w=None, h=None, start=None, end=None,
         if isinstance(item, str):
             return item
         new_items = [item]
+    # Patches keep faces whole (face_guard, 14 Nov 2026): a rectangle on a
+    # face is never repainted; the others in the call go ahead.
+    import face_guard
+    new_items, on_face = face_guard.erase_split(ctx, new_items)
+    face_line = face_guard.erase_refusal_line(on_face)
+    if not new_items:
+        return "REJECTED: " + face_line
     descs = []
     for it in new_items:
         window = (f" {it['start']}-{it['end']}s" if it["start"] is not None
@@ -13079,6 +13097,8 @@ def erase_region(ctx, x=None, y=None, w=None, h=None, start=None, end=None,
             result += ("\nNOTE: regions=[...] was used and the separate "
                        "x/y/w/h values were ignored. Pass only regions next "
                        "time; it already contains every rectangle.")
+        if face_line and isinstance(result, str) and result.startswith("EDL v"):
+            result += "\n" + face_line
         return result
     except ValueError as e:
         return f"REJECTED: {e}"

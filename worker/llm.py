@@ -145,7 +145,13 @@ def note_quota_error(exc, model=None, base_url=None):
 
 def provider_cost_usd(usage, model):
     """xAI invoice ticks, Luna 6 cost from reported token categories, or the
-    Claude lane's exact per-call cost (claude_lane._Usage)."""
+    Claude lane's exact per-call cost (claude_lane._Usage), or the edit
+    rung's (edit_rung._RespUsage: an OpenAI model on the Claude lane)."""
+    if str(model or "").lower().startswith("gpt-") and usage is not None:
+        recorded = getattr(usage, "provider_cost_usd", None)
+        if isinstance(recorded, (int, float)) and math.isfinite(recorded) \
+                and recorded >= 0:
+            return float(recorded)
     if str(model or "").lower().startswith("claude-") and usage is not None:
         recorded = getattr(usage, "provider_cost_usd", None)
         if isinstance(recorded, (int, float)) and math.isfinite(recorded) \
@@ -303,6 +309,11 @@ def charge_generation(purpose, model, usd):
 
 
 def record(purpose, request, response, usage=None):
+    answered = getattr(usage, "answered_model", None) if usage is not None else None
+    if answered and isinstance(request, dict) and answered != request.get("model"):
+        # The edit rung's fallback answered a call asked of an OpenAI model:
+        # the row, the ledger and the price are the model that ran.
+        request = dict(request, model=answered, asked_model=request.get("model"))
     _charge(purpose, request, response, usage)
     fn = get_recorder()
     if not fn:
@@ -327,6 +338,20 @@ def record(purpose, request, response, usage=None):
                 response['service_tier'] = (getattr(usage, 'service_tier', None)
                     or config.OPENAI_SERVICE_TIER or 'default')
                 response['cost_basis'] = 'reported_tokens_official_rates'
+            if getattr(usage, 'latency_s', None) is not None:
+                response['latency_s'] = usage.latency_s
+            if _is_rung_call(request, usage):
+                # The edit rung (edit_rung): paid from the OpenAI credit; the
+                # customer's credits are priced at the fallback's card (the
+                # price before the switch). provider_cost_usd stays the truth.
+                import edit_rung
+                response['provider'] = 'openai'
+                response['edit_rung'] = True
+                alias = ((getattr(fn, 'credit_price_aliases', None) or {})
+                         .get(str((request or {}).get('model') or ''))
+                         or edit_rung.fallback_model())
+                response['credit_price_model'] = alias
+                response['credit_cost_usd'] = credit_parity_cost_usd(usage, alias)
             elif str((request or {}).get('model') or '').lower().startswith('claude-'):
                 # The trial lane: whose $1 this call spent, and the cache
                 # write slice (Anthropic bills it at its own 1.25x rate).
@@ -365,6 +390,19 @@ def record(purpose, request, response, usage=None):
         fn(purpose, request, response, usage)
     except Exception as e:
         print(f"[llm] recorder failed: {e}", flush=True)
+
+
+def _is_rung_call(request, usage):
+    """A call the edit rung answered on OpenAI (its usage carries the cost)."""
+    model = str((request or {}).get("model") or "").lower()
+    if not model.startswith("gpt-") or usage is None:
+        return False
+    try:
+        import edit_rung
+        return edit_rung.is_rung_model(model) and isinstance(
+            getattr(usage, "provider_cost_usd", None), (int, float))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def credit_parity_cost_usd(usage, model):
@@ -825,7 +863,9 @@ def claude_trial_lane():
         return None
     if scope is None:
         lane = turn_lane()
-        if lane and str(lane.get("model", "")).startswith("claude-"):
+        if lane and (str(lane.get("model", "")).startswith("claude-")
+                     or getattr(lane.get("client"), "is_claude_lane", False)):
+            # a paid Claude lane, an edit-rung model on it included
             return lane["client"], lane["model"]
         return None
     import claude_lane
@@ -1649,6 +1689,10 @@ def responses_available(model, base_url, effort=None):
     (mark_responses_dead) so a doomed request is paid once per process, not
     once per step.
     """
+    if "anthropic.com" in str(base_url or ""):
+        # The Claude lane's client (an edit-rung model on it included):
+        # edit_rung answers the call, never this process's Responses lane.
+        return False
     if model == "gpt-6.1-sol":
         # Tool calls have no Chat Completions fallback on this model.
         return True
@@ -1838,7 +1882,8 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
     """chat.completions.create with automatic parameter-dialect adaptation.
     For the simple one-shot callers (ask_text / ask_vision / regen); the
     agent loop integrates the same helpers into its richer retry chain."""
-    if model == "gpt-6.1-sol" and "tools" in extra:
+    if model == "gpt-6.1-sol" and "tools" in extra \
+            and not getattr(client_obj, "is_claude_lane", False):
         return responses_create(
             str(client_obj.base_url), client_obj.api_key, model, messages,
             extra["tools"], max_tokens=max_tokens,
