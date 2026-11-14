@@ -369,6 +369,7 @@ def test_the_matte_is_asked_through_track_1as_helpers_when_present(
     fake.launch_source = lambda sha, proxy, index, pid: (
         seen.append(("launch", sha, proxy["storage_key"], pid)) or src)
     fake.sidecar_params = lambda edl=None: {"downsample_ratio": 0.375}
+    fake.analysis_asset = lambda edl, original, proxy: proxy
     monkeypatch.setitem(sys.modules, "matte_track", fake)
 
     def ensure(kind, source, ranges, priority="interactive", params=None):
