@@ -133,6 +133,8 @@ class Ctx:
         self.run_dir = run_dir
         self.run_id = state["run_id"]
         self.workflow = state["workflow"]
+        import openai_cache
+        openai_cache.workflow(self.workflow, self.run_id)
         self.args = state.get("args", {})
         self.source = state.get("source")
         self.state_root = state_root

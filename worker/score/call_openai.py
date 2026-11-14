@@ -16,6 +16,7 @@ import time
 
 import config
 import llm
+import openai_cache
 
 OUT_TOKENS_PER_S = 130.0
 URL = "https://api.openai.com/v1/responses"
@@ -36,14 +37,14 @@ class Usage:
         self.model = model
         self.prompt_tokens = self.total_in = int(raw.get("input_tokens") or 0)
         cached = int(details.get("cached_tokens") or 0)
-        self.prompt_tokens_details = {"cached_tokens": cached}
+        self.prompt_tokens_details = dict(details)
         self.completion_tokens = int(out_tokens if out_tokens is not None else raw.get("output_tokens") or 0)
         self.input_tokens = max(0, self.prompt_tokens - cached)
         self.cache_read_input_tokens = cached
         self.cache_creation_input_tokens = 0
         self.output_tokens = self.completion_tokens
         self.service_tier = raw.get("service_tier")
-        self.provider_cost_usd = cost(model, self.prompt_tokens, cached, self.completion_tokens)
+        self.provider_cost_usd = openai_cache.cost(model, self)
 
 
 def cost(model, tokens_in, cached, tokens_out):
@@ -77,16 +78,16 @@ def parts(content):
             src = b.get("source") or {}
             url = src.get("url") if src.get("type") == "url" else \
                 f"data:{src.get('media_type') or 'image/jpeg'};base64,{src.get('data', '')}"
-            out.append({"type": "input_image", "image_url": url, "detail": "high"})
+            out.append({"type": "input_image", "image_url": url, "detail": b.get("detail", "high")})
         else:
             out.append({"type": "input_text", "text": _text(b)})
     return out
 
 
 def body(model, system, content, max_tokens, effort, purpose):
-    return {"model": model, "instructions": instructions(system), "input": [{"role": "user", "content": parts(content)}],
+    return openai_cache.responses({"model": model, "instructions": instructions(system), "input": [{"role": "user", "content": parts(content)}],
             "max_output_tokens": int(max_tokens), "reasoning": {"effort": EFFORT.get(effort, "low")},
-            "stream": True, "store": False, "prompt_cache_key": f"valmera-{purpose}"[:64]}
+            "stream": True, "store": False}, purpose)
 
 
 def events(lines):

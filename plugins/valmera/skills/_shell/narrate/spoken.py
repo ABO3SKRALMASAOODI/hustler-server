@@ -15,6 +15,9 @@ The key is this process's OPENAI_API_KEY (never printed). Model: NARRATE_SPOKEN_
 """
 import json
 import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import openai_cache
 import string
 import time
 import unicodedata
@@ -105,12 +108,16 @@ def merge(heard, spoken):
 def _call(system, user, model, max_tokens=24000, timeout=600):
     body = {"model": model, "instructions": system, "input": [{"role": "user", "content": [{"type": "input_text", "text": user}]}],
             "max_output_tokens": max_tokens, "reasoning": {"effort": "low"}, "store": False}
+    body = openai_cache.responses(body, "narrate:spoken")
     req = urllib.request.Request("https://api.openai.com/v1/responses", data=json.dumps(body).encode(),
                                  headers={"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"], "Content-Type": "application/json"})
     for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.load(r)
+                result = json.load(r)
+            openai_cache.record(model, "narrate:spoken", result.get("usage"),
+                                request_id=result.get("id"), status=result.get("status"), force=True)
+            return result
         except Exception:  # noqa: BLE001 - a dropped call is asked again, then reported
             if attempt == 2:
                 raise

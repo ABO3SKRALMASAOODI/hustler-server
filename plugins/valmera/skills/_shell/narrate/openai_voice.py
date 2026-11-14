@@ -14,6 +14,9 @@ from __future__ import annotations
 import io
 import json
 import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import openai_cache
 import time
 import urllib.error
 import urllib.request

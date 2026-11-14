@@ -25,6 +25,7 @@ from openai import OpenAI
 
 import config
 import spend_ledger
+import openai_cache
 
 
 class ProviderHTTPError(RuntimeError):
@@ -167,17 +168,8 @@ def provider_cost_usd(usage, model):
         return model_prices.claude_usage_cost(
             model, max(0, prompt - cached - written),
             int(getattr(usage, "completion_tokens", 0) or 0), cached, written)
-    if model in ('gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol') and usage is not None:
-        import model_prices
-        get = lambda obj, key, default=None: (obj.get(key, default)
-            if isinstance(obj, dict) else getattr(obj, key, default))
-        details = (get(usage, 'prompt_tokens_details')
-                   or get(usage, 'input_tokens_details') or {})
-        return model_prices.luna6_usage_cost(
-            get(usage, 'prompt_tokens', get(usage, 'input_tokens', 0)),
-            get(usage, 'completion_tokens', get(usage, 'output_tokens', 0)),
-            get(details, 'cached_tokens', 0), get(details, 'cache_write_tokens', 0),
-            get(usage, 'service_tier') or config.OPENAI_SERVICE_TIER or 'default', model=model)
+    if str(model or "").startswith("gpt-") and usage is not None:
+        return openai_cache.cost(model, usage)
     if not str(model or "").startswith("grok-") or str(model).startswith("grok-imagine-"):
         return None
     raw = usage.get("cost_in_usd_ticks") if isinstance(usage, dict) else getattr(usage, "cost_in_usd_ticks", None)
@@ -315,6 +307,11 @@ def record(purpose, request, response, usage=None):
         # the row, the ledger and the price are the model that ran.
         request = dict(request, model=answered, asked_model=request.get("model"))
     _charge(purpose, request, response, usage)
+    model = (request or {}).get("model", "")
+    if str(model).startswith(("gpt-", "tts-", "whisper-")):
+        answer = response if isinstance(response, dict) else {}
+        openai_cache.record(model, purpose, usage, usd=_call_cost_usd(purpose, request, response, usage),
+                            request_id=answer.get("request_id"), status=answer.get("stop", "completed"))
     fn = get_recorder()
     if not fn:
         return
@@ -1391,6 +1388,8 @@ def completion_kwargs(model, max_tokens=None, temperature=None):
     if not str(model).startswith("grok-") and config.OPENAI_SERVICE_TIER and \
             "api.openai.com" in (config.OPENAI_BASE_URL or ""):
         kw["service_tier"] = config.OPENAI_SERVICE_TIER
+    if str(model).startswith("gpt-") and "api.openai.com" in (config.OPENAI_BASE_URL or ""):
+        kw["extra_body"] = openai_cache.chat_options(model, "editor")
     return kw
 
 
@@ -1823,10 +1822,6 @@ def responses_create(base_url, api_key, model, messages, tools,
     if cache_affinity(model):
         body["prompt_cache_key"] = cache_affinity(model)["x-grok-conv-id"]
     if model == "gpt-6.1-sol":
-        body["prompt_cache_options"] = {"ttl": "30m"}
-        key = getattr(_turn, "cache_key", None)
-        if key:
-            body["prompt_cache_key"] = key
         if effort in (None, "", "none", "minimal"):
             effort = "low"
     if tool_choice is not None:
@@ -1837,6 +1832,8 @@ def responses_create(base_url, api_key, model, messages, tools,
         body["reasoning"] = {"effort": effort}
     if config.OPENAI_SERVICE_TIER and "api.openai.com" in (base_url or ""):
         body["service_tier"] = config.OPENAI_SERVICE_TIER
+    if "api.openai.com" in (base_url or ""):
+        body = openai_cache.responses(body, "editor", conversation=True)
     fence(model)
     r = requests.post(url, json=body,
                       timeout=timeout or config.LLM_TIMEOUT_S,
@@ -1891,7 +1888,10 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
             timeout=config.AGENT_LANE_TIMEOUT_S,
             tool_choice=extra.get("tool_choice"))
     kw = completion_kwargs(model, max_tokens, temperature)
+    purpose = extra.pop("cache_role", "editor")
     kw.update(extra)
+    if str(model).startswith("gpt-") and "api.openai.com" in str(getattr(client_obj, "base_url", "")):
+        kw["extra_body"] = {**kw.get("extra_body", {}), **openai_cache.chat_options(model, purpose)}
     if model == "gpt-6.1-sol" and kw.get("reasoning_effort") in ("none", "minimal"):
         kw["reasoning_effort"] = "low"
     headers = cache_affinity(model)
@@ -2061,6 +2061,7 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
                 [{"role": "user", "content": content}],
                 max_tokens=cap,
                 temperature=0.1,
+                cache_role=purpose,
                 **extra,
             )
             answer = (resp.choices[0].message.content or "").strip() or None
@@ -2148,7 +2149,7 @@ def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text",
         for attempt in (1, 2):
             resp = create_with_dialect(
                 text_client, model, messages,
-                max_tokens=cap, temperature=temperature, **extra)
+                max_tokens=cap, temperature=temperature, cache_role=purpose, **extra)
             text = (resp.choices[0].message.content or "").strip()
             usage = getattr(resp, "usage", None)
             spent = max(reasoning_tokens(usage),

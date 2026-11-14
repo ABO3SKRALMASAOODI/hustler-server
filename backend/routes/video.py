@@ -789,7 +789,9 @@ def _concierge_openai(msgs, want_act):
     # used exactly 300 completion tokens) and the user got the canned line.
     # Low effort keeps the reply fast and cheap; a model that rejects the
     # field has it dropped below.
+    import openai_cache
     create_kwargs = dict(model=CONCIERGE_MODEL, messages=msgs,
+                         extra_body=openai_cache.chat_options(CONCIERGE_MODEL, "concierge"),
                          max_tokens=CONCIERGE_MAX_TOKENS,
                          reasoning_effort="low")
     if want_act:
@@ -812,7 +814,8 @@ def _concierge_openai(msgs, want_act):
     usage = getattr(resp, "usage", None)
     return raw, {"model": CONCIERGE_MODEL,
                  "request": {"model": CONCIERGE_MODEL, "messages": msgs},
-                 "response": {"reply": raw},
+                 "response": {"reply": raw, "cached_in": openai_cache.tokens(usage)["cached_tokens"],
+                              "provider_cost_usd": openai_cache.cost(CONCIERGE_MODEL, usage)},
                  "prompt_tokens": getattr(usage, "prompt_tokens", None),
                  "completion_tokens": getattr(usage, "completion_tokens",
                                               None)}

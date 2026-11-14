@@ -11,6 +11,7 @@ process when the environment has none. Nothing here prints or stores a key.
 import json
 import os
 import time
+import openai_cache
 
 MODEL = "claude-opus-5-5"
 OA_MODEL = os.environ.get("SHELL_OPENAI_MODEL", "gpt-6.1-sol")
@@ -73,6 +74,8 @@ def ask_openai(system, content, *, model=None, effort="medium", max_tokens=16000
     # reasoning shares the output budget: a small answer still needs room to think
     body = {"model": model, "instructions": system, "input": [{"role": "user", "content": _parts(content)}],
             "max_output_tokens": int(max(max_tokens, 16000)), "reasoning": {"effort": OA_EFFORT.get(effort, "medium")}, "stream": True, "store": False}
+    purpose = openai_cache.role_for(system)
+    body = openai_cache.responses(body, purpose)
     headers = {"Authorization": "Bearer " + openai_key(), "Content-Type": "application/json"}
     t0, final = time.time(), None
     for attempt in range(4):
@@ -105,6 +108,8 @@ def ask_openai(system, content, *, model=None, effort="medium", max_tokens=16000
             time.sleep(10 * (attempt + 1))
     if final is None:
         raise RuntimeError("openai: the stream ended without a response")
+    openai_cache.record(model, purpose, final.get("usage"), request_id=final.get("id"),
+                        status=final.get("status"), force=True)
     if final.get("status") == "failed":
         raise RuntimeError(f"openai failed: {json.dumps(final.get('error'))[:300]}")
     text = "".join(c.get("text", "") for item in final.get("output") or [] if item.get("type") == "message"
@@ -113,8 +118,8 @@ def ask_openai(system, content, *, model=None, effort="medium", max_tokens=16000
     tin, tout = int(u.get("input_tokens") or 0), int(u.get("output_tokens") or 0)
     cached = int((u.get("input_tokens_details") or {}).get("cached_tokens") or 0)
     pin, pc, pout = OA_PRICES.get(model, OA_PRICES["gpt-5.5"])
-    usd = (tin - cached) * pin + cached * pc + tout * pout
-    return text, dict(provider="openai", model=model, effort=effort, input=tin, cache_write=0, cache_read=cached, output=tout,
+    usd = openai_cache.cost(model, u)
+    return text, dict(provider="openai", model=model, effort=effort, input=tin, cache_write=openai_cache.tokens(u)["cache_write_tokens"], cache_read=cached, output=tout,
                       usd=round(usd, 5), seconds=round(time.time() - t0, 1), stop=final.get("status"),
                       incomplete=(final.get("incomplete_details") or {}).get("reason"))
 

@@ -182,18 +182,11 @@ class _RespUsage:
         self.cache_read_input_tokens = cached
         self.cache_creation_input_tokens = 0
         self.output_tokens = self.completion_tokens
-        self.prompt_tokens_details = {"cached_tokens": cached, "cache_write_tokens": 0}
+        self.prompt_tokens_details = dict(raw.get("input_tokens_details") or {})
         self.completion_tokens_details = {"reasoning_tokens": reasoning}
         self.service_tier = raw.get("service_tier")
-        if model in ("gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol"):
-            # the long-context and service-tier rules of the GPT-6 cards
-            self.provider_cost_usd = model_prices.luna6_usage_cost(
-                self.prompt_tokens, self.completion_tokens, cached, 0,
-                self.service_tier or "default", model=model)
-        else:
-            self.provider_cost_usd = model_prices.base_usage_cost(
-                model, self.prompt_tokens, self.completion_tokens, cached=cached,
-                fallback=model_prices.MODEL_PRICES["gpt-6.1-sol"])
+        import openai_cache
+        self.provider_cost_usd = openai_cache.cost(model, raw)
         self.prompt_cache = {}
 
 
@@ -296,10 +289,8 @@ def request_body(model, messages, tools=None, max_tokens=None, effort=None, tool
     e = _EFFORT.get(str(effort or "").lower())
     if e:
         body["reasoning"] = {"effort": e}
-    key = _cache_key()
-    if key:
-        body["prompt_cache_key"] = key
-    return body
+    import openai_cache
+    return openai_cache.responses(body, "editor", conversation=True)
 
 
 def _completion(model, data):

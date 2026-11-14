@@ -67,15 +67,20 @@ def openai_call(model=PICK_MODEL, effort="low", timeout=90):
     def call(system, user, schema):
         body = {"model": model, "instructions": system, "input": [{"role": "user", "content": [{"type": "input_text", "text": user}]}],
                 "reasoning": {"effort": effort}, "text": {"format": {"type": "json_schema", "name": "out", "schema": schema, "strict": True}}}
+        import openai_cache
+        body = openai_cache.responses(body, "music:choose")
         req = urllib.request.Request(URL, data=json.dumps(body).encode(), headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
         r = json.load(urllib.request.urlopen(req, timeout=timeout))
         u = r.get("usage") or {}
+        usd = openai_cache.cost(model, u)
+        call.usage["usd"] += usd
+        openai_cache.record(model, "music:choose", u, usd=usd, request_id=r.get("id"))
         call.usage["in"] += int(u.get("input_tokens") or 0)
         call.usage["out"] += int(u.get("output_tokens") or 0)
         txt = "".join(c.get("text", "") for o in r.get("output", []) if o.get("type") == "message"
                       for c in o.get("content", []) if c.get("type") == "output_text")
         return json.loads(txt)
-    call.usage = {"in": 0, "out": 0, "model": model}
+    call.usage = {"in": 0, "out": 0, "model": model, "usd": 0.0}
     return call
 
 
@@ -84,6 +89,8 @@ def spend(call):
     u = getattr(call, "usage", None)
     if not u:
         return 0.0
+    if "usd" in u:
+        return round(u["usd"], 6)
     try:
         import model_prices
         p = model_prices.MODEL_PRICES.get(str(u["model"]).lower()) or model_prices.MODEL_PRICES["gpt-5.5"]

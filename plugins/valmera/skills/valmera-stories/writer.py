@@ -29,6 +29,9 @@ PRICE = (4.00e-6, 5.00e-6, 0.20e-6, 20.00e-6)
 SEARCH_USD = 0.01
 UA = "Mozilla/5.0 (compatible; ValmeraStories/1.0)"
 HERE = os.path.dirname(os.path.abspath(__file__))
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shell"))
+import openai_cache
 
 FORMS = {
     # the judge's story reels run 61-124 s (median 87.5 s, teardown section 12): about a minute and a half of story
@@ -102,6 +105,7 @@ def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, 
     if searches:
         body["tools"] = [{"type": "web_search"}]
         body["include"] = ["web_search_call.action.sources"]
+    body = openai_cache.responses(body, "writer:" + what)
     headers = {"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"], "Content-Type": "application/json"}
     t0 = time.time()
     final = None
@@ -135,6 +139,11 @@ def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, 
             time.sleep(10 * (attempt + 1))
     if final is None:
         raise RuntimeError("openai: the stream ended without a response")
+    usage = final.get("usage") or {}
+    searches_used = sum(item.get("type") == "web_search_call" for item in final.get("output") or [])
+    openai_cache.record(model, "writer:" + what, usage,
+                        usd=openai_cache.cost(model, usage) + searches_used * OA_SEARCH_USD,
+                        request_id=final.get("id"), status=final.get("status"), force=True)
     if final.get("status") == "failed":
         raise RuntimeError(f"openai failed: {json.dumps(final.get('error'))[:300]}")
     text, n_search, cited = "", 0, []
@@ -153,9 +162,10 @@ def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, 
     tin, tout = int(u.get("input_tokens") or 0), int(u.get("output_tokens") or 0)
     cached = int((u.get("input_tokens_details") or {}).get("cached_tokens") or 0)
     pin, pc, pout = OA_PRICE.get(model, OA_PRICE["gpt-5.5"])
-    usd = (tin - cached) * pin + cached * pc + tout * pout + n_search * OA_SEARCH_USD
+    usd = openai_cache.cost(model, u) + n_search * OA_SEARCH_USD
     SEEN_URLS.update(u_ for u_ in cited if u_)
-    return text, dict(provider="openai", model=model, effort=effort, what=what, input=tin, output=tout, web_searches=n_search,
+    return text, dict(provider="openai", model=model, effort=effort, what=what, input=tin, output=tout, cache_read=cached,
+                      cache_write=openai_cache.tokens(u)["cache_write_tokens"], web_searches=n_search,
                       web_fetches=0, usd=round(usd, 4), seconds=round(time.time() - t0, 1), stop=final.get("status"),
                       incomplete=(final.get("incomplete_details") or {}).get("reason"))
 
