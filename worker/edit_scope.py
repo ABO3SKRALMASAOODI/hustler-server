@@ -54,19 +54,25 @@ def write_refusal(ctx, before, after):
 def restore_unmet(ctx, ledger, verdict):
     """Atomic product recovery: exact previous EDL and its existing rendered bytes.
 
-Partial delivery is retained. If no requested edit happened, the failed attempt
+Verified partial delivery is retained. If no requested edit happened, the failed attempt
 must not leave a new crop, lost title or other incidental 'quality' repair.
 """
     targets = {a['id'] for a in (ledger or {}).get('asks', [])
                if a.get('kind') in ('edit', 'change', 'film')}
     states = {r.get('id'): r.get('state') for r in (verdict or {}).get('asks', [])}
     baseline = getattr(ctx, 'turn_start_edl', None) or {}
-    if not targets or not verdict or not baseline.get('json'):
+    if not isinstance(baseline.get('json'), dict):
+        return False
+    # A failed check cannot certify a changed film. This also covers a ledger
+    # outage: preserve the existing film, rather than deliver an unchecked edit.
+    if verdict is None and not getattr(ctx, 'ask_check_required', False):
+        return False
+    if verdict is not None and not targets:
         return False
     if any(states.get(i) in ('done', 'partly') for i in targets):
         return False
     current = ctx.latest_edl()
-    if str(verdict.get('edl_version')) != str(current.get('version')):
+    if verdict is not None and str(verdict.get('edl_version')) != str(current.get('version')):
         return False  # an old verdict cannot roll back a newer successful edit
     if not changes(baseline['json'], current['json']):
         return False
@@ -95,10 +101,12 @@ must not leave a new crop, lost title or other incidental 'quality' repair.
     for field in ('last_preview_check', 'last_preview_check_critic', 'last_preview_failure'):
         if hasattr(ctx, field):
             setattr(ctx, field, None)
-    ctx.ask_verdict = dict(verdict, edl_version=version,
+    ctx.ask_verdict = (dict(verdict, edl_version=version,
                            preview_digest=asks.preview_fingerprint(ctx.last_preview or {}))
+                       if verdict else None)
     ctx.unmet_edit_restored = {'from_version': current['version'], 'baseline_version': baseline['version'], 'to_version': version}
-    ledger['restored_unmet'] = ctx.unmet_edit_restored
+    if ledger is not None:
+        ledger['restored_unmet'] = ctx.unmet_edit_restored
     return True
 
 
