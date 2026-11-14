@@ -161,13 +161,14 @@ def _trip(monkeypatch, record):
             monkeypatch.setattr(m, name, hit)
 
 
-def test_a_grandfathered_first_cut_reaches_no_round3_module(monkeypatch):
+def test_legacy_chain_without_q1_keeps_eased_camera_and_no_round3_modules(monkeypatch):
     record = []
     _trip(monkeypatch, record)
     names = _talking_chain(monkeypatch, q1=False)
     assert record == [], record
-    # C2's chain, as QI and Q1 pinned it
-    assert "punch_in_on_emphasis" in names
+    # Even the compatibility path must not restore unearned hard punches.
+    assert "punch_in_on_emphasis" not in names
+    assert "add_zoom" in names
     assert "source_broll" not in names
 
 
