@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import pytest
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -45,7 +46,5 @@ def test_unresolved_composed_rejection_cannot_claim_a_passing_check(tmp_path,mon
     monkeypatch.setattr(wf.wf3,'render',lambda *a:dict(film='fake.mp4'))
     monkeypatch.setattr(wf,'_render_review',lambda *a:dict(rejected=1,placements=[dict(id=0,ok=False)],spend=[]))
     monkeypatch.setattr(wf,'score',lambda *a:fresh())
-    rd=wf.render(ctx,{},sc)
-    assert len(rd['picture_review'])==3
-    monkeypatch.setattr(wf.wf3,'check',lambda *a:dict(checks=dict(ok=True)))
-    assert wf.check(ctx,rd,sc)['checks']['ok'] is False
+    with pytest.raises(RuntimeError, match='picture'):
+        wf.render(ctx,{},sc)

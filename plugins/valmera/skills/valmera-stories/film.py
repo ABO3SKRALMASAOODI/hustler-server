@@ -804,14 +804,23 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
                 b = h0
         if b - first < 5:
             continue
-        x_left = 0.5 - P.R.width(v, text) / W / 2
+        # A display hold must not replay already-spoken words as a new chunk.
+        # Lay out the surviving phrase once, keeping only the word still being
+        # spoken at the handoff and the words that follow it.
         toks = text.split()
-        for j, w in enumerate(ws):
-            on = max(Clock.f(w["t0"]) + late, first, 0) if j else max(first, 0)
+        pairs = [(w, toks[j] if j < len(toks) else w["w"]) for j, w in enumerate(ws)
+                 if first == a or Clock.f(w.get("t1", w["t0"])) > first]
+        text = " ".join(t for _, t in pairs)
+        x_left = 0.5 - P.R.width(v, text) / W / 2
+        toks = [t for _, t in pairs]
+        previous_on = -1
+        for j, (w, token) in enumerate(pairs):
+            on = max(Clock.f(w["t0"]) + late, first, previous_on + 1, 0) if j else max(first, 0)
             if on >= b - 1:
                 continue
             x = x_left + (P.R.width(v, " ".join(toks[:j]) + " x") - P.R.width(v, "x")) / W if j else x_left
-            P.word([on, b], toks[j] if j < len(toks) else w["w"], v, x, y, ink, 1.0, note=False, z=z, role="cap", stroke=dict(w=1.6, c="#0B0A09"))
+            P.word([on, b], token, v, x, y, ink, 1.0, note=False, z=z, role="cap", stroke=dict(w=1.6, c="#0B0A09"))
+            previous_on = on
         n_lines += 1
     return n_lines
 

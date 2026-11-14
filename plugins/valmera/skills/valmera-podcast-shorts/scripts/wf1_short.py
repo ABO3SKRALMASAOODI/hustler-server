@@ -382,11 +382,29 @@ def _render_review(ctx, rd, sc):
     pack = wf3.load_pack(ctx)
     script = dict(segments=[dict(say=ln["text"]) for ln in pack["lines"]])
     clock = F.Clock(pack["words"], script)
+    l1 = json.load(open(sc["l1"]))
+    display = [it for it in l1["items"] if it.get("k") == "word" and it.get("role") == "big"]
     rows = []
     for p in sc["beats"].get("pictures") or []:
         a, b = p.get("visible_f") or p["f"]
-        rows.append([a, b, "clip", p["name"], dict(path=rd["film"], src=[a/F.FPS,b/F.FPS], source=dict(url=p.get("source")))])
+        words = [dict(f=it["f"], text=it["t"]) for it in display if it["f"][0] < b and it["f"][1] > a]
+        frames = {a, (a+b)//2, max(a,b-1)}
+        for word in words:
+            frames.update(f for edge in word["f"] for f in (edge-1,edge,edge+1) if a <= f < b)
+        rows.append([a, b, "clip", p["name"], dict(path=rd["film"], src=[a/F.FPS,b/F.FPS],
+                    check_times=[f/F.FPS for f in sorted(frames)], display_words=words,
+                    source=dict(url=p.get("source")))])
     _, report = placement_check(rows, script, clock, os.path.join(ctx.supply, "render-review"), pack["ffmpeg"])
+    if not report["rejected"] and rows:
+        _, audit = placement_check(rows, script, clock, os.path.join(ctx.supply, "render-review"),
+                                   pack["ffmpeg"], review="transition")
+        report["spend"] += audit["spend"]
+        for first, second in zip(report["placements"], audit["placements"]):
+            first["transition_audit"] = dict(ok=second["ok"], reason=second["reason"])
+            if not second["ok"]:
+                first.update(ok=False, reason=second["reason"])
+        report["accepted"] = sum(r["ok"] for r in report["placements"])
+        report["rejected"] = len(rows) - report["accepted"]
     return report
 
 
@@ -394,19 +412,24 @@ def render(ctx, script, sc):
     """The product repairs rejected placements before branding and music, never a delivered film."""
     history_path = os.path.join(ctx.supply, "render_reviews.json")
     history = json.load(open(history_path)) if os.path.exists(history_path) else []
-    for attempt in range(3):
+    for attempt in range(4):
         rd = wf3.render(ctx, script, sc)
         report = _render_review(ctx, rd, sc)
         history.append(report)
         json.dump(history, open(history_path, "w"), indent=1)
         sc["beats"]["rendered_check"] = report
-        if not report["rejected"] or attempt == 2:
+        if not report["rejected"]:
             json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
             rd["picture_review"] = history
             rd["spend"] = [dict(stage="render", what="composed picture-to-words check", **u) for h in history for u in h.get("spend", [])]
             return rd
+        if attempt == 3:
+            raise RuntimeError("composed picture check still rejects a placement; no film may be delivered")
         pics = sc["beats"].get("pictures") or []
-        dropped = [os.path.basename(pics[r["id"]]["path"]) for r in report["placements"] if not r["ok"]]
+        # Repair is bounded, approval is not. If successive compositions still
+        # disagree, use the speaker's face-safe reframes instead of a near miss.
+        doomed = pics if attempt == 2 else [pics[r["id"]] for r in report["placements"] if not r["ok"]]
+        dropped = [os.path.basename(p["path"]) for p in doomed]
         rejected_path = os.path.join(ctx.supply, "render_rejected.json")
         previous = json.load(open(rejected_path)) if os.path.exists(rejected_path) else []
         json.dump(sorted(set(previous+dropped)), open(rejected_path, "w"), indent=1)

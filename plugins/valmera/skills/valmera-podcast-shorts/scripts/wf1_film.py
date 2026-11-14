@@ -306,7 +306,8 @@ def build(script, sup, style_id, direction=None):
         # The driver may have only two valid framings; a later phrase may return
         # to the wider shot while the source sound and time stay continuous.
         pace, _, _ = F._engines()
-        phrase = pace.splits(a, b, stress, int(0.75 * FPS), int(1.15 * FPS))
+        phrase_band = (0.55, 0.85) if st["layout"] == "window" else (0.75, 1.15)
+        phrase = pace.splits(a, b, stress, int(phrase_band[0] * FPS), int(phrase_band[1] * FPS))
         edges = sorted({a, b, *phrase, *[c for c in tcuts if a + 3 <= c <= b - 3]})
         for fa, fb in zip(edges, edges[1:]):
             mid = (fa + fb) / 2
@@ -555,6 +556,17 @@ def build(script, sup, style_id, direction=None):
                           clear=[0.10, cap_y - 0.085, 0.90, cap_y + 0.02],
                           spoken=[(w["t0"] - LEAD_F / FPS, w["t1"] - LEAD_F / FPS) for w in clock.words])
 
+    from wf1_layout import seat_display, caption_restarts
+    # Use the final camera crops, not the source face coordinates.
+    for path, key in keys.items():
+        if key not in meta:
+            rec = next((r for rows in list(pics.values()) + list(footage.values()) for r in rows if r["path"] == path), {})
+            meta[key] = dict(faces=F.face_meta(rec))
+    title_layout = seat_display(l1, meta, P.R)
+    restarts = caption_restarts(l1)
+    if restarts:
+        raise RuntimeError(f"caption track restarts in chunks: {restarts}")
+
     def frame_of(seg, word):
         if not (0 <= seg < nseg):
             return None
@@ -574,6 +586,7 @@ def build(script, sup, style_id, direction=None):
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, display=[dict(f=[a, b], text=t) for a, b, t in shown],
                  labels=[dict(f=[a, b], text=t) for a, b, t in labels], turn_f=turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
                  style=style_id, layout=st["layout"], placement_check=placement_report,
+                 title_layout=title_layout, caption_restarts=restarts, face_metadata=meta,
                  finishes=dict(black_and_white=len([p for p in P.pictures if p.get("finish")]), flashes=len(flashes), dark_ink_spans=len(bright)),
                  alien=dict(asked=[a["dev"] for a in l1.get("alien") or []], why=why, never=list(ALIEN_NEVER)),
                  sound_design={k: v for k, v in (l1.get("sound_design") or {}).items() if k != "dropped"},
