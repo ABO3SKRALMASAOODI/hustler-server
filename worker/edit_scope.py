@@ -160,8 +160,9 @@ def disclose(ctx, reply):
     restored = bool(getattr(ctx, 'unmet_edit_restored', None))
     alternatives = getattr(ctx, 'edit_alternatives', None) or []
     from score import asks
+    unmet = bool(asks.open_asks(getattr(ctx, 'ask_verdict', None)))
     optional_alternatives = False
-    if not alternatives and not delta and asks.open_asks(getattr(ctx, 'ask_verdict', None)):
+    if not alternatives and not delta and unmet:
         stills = getattr(ctx, 'available_still_assets', None) or []
         if stills:
             optional_alternatives = True
@@ -170,7 +171,7 @@ def disclose(ctx, reply):
                 'tool': 'add_overlay', 'assets': stills[:8]}, {
                 'offer': 'If you upload an animated replacement clip, I can place it over the original picture while preserving the existing audio and titles.',
                 'tool': 'add_overlay', 'requires': 'customer-supplied animated clip'}]
-    if not delta and not restored and not alternatives:
+    if not delta and not restored and not alternatives and not unmet:
         return reply
     import reply_grounding
     measured = reply_grounding.change_list_text(reply_grounding.edl_changes(baseline, current))
