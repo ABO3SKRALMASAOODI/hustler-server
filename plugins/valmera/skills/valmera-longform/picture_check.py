@@ -41,3 +41,20 @@ def check(film, shots, out, ffmpeg):
     total=sum(r['end']-r['start'] for r in rows)
     return dict(ok=not missing and not bad,moving_share=moving/total if total else 0,checked=len(by),total=len(rows),missing=missing,rejected=bad,
                 evidence=by,spend_usd=sum(g['usd'] for g in checked))
+
+
+def motion(film,shots,ffmpeg):
+    """One decode of the delivered picture; exclude caption/title seats and average away grain."""
+    p=subprocess.run([ffmpeg,'-v','error','-i',film,'-vf','fps=4,scale=160:90,format=gray','-f','rawvideo','-'],capture_output=True,check=True)
+    n=len(p.stdout)//(160*90)
+    frames=np.frombuffer(p.stdout[:n*160*90],np.uint8).reshape(n,90,160).astype(np.float32)
+    roi=frames[:,14:72,5:155]
+    delta=np.mean(np.abs(np.diff(roi,axis=0)),axis=(1,2))
+    rows=[]
+    for i,r in enumerate(shots):
+        a,b=r['f'][0]/30,r['f'][1]/30
+        lo,hi=int(a*4)+1,min(int(b*4)-1,len(delta))
+        ds=delta[lo:hi]
+        rows.append(dict(i=i,seconds=b-a,median_frame_delta=float(np.median(ds)) if len(ds) else None,
+                         moving_samples_share=float(np.mean(ds>0.4)) if len(ds) else 0))
+    return dict(rows=rows,method='delivered video 4fps, 160x90 grayscale; central image ROI, mean absolute consecutive-frame difference >0.4/255')

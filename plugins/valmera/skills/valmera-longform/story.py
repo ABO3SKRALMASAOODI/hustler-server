@@ -47,25 +47,25 @@ def find_ideas(card, avoid=(), line=None, n=6, effort="high", delivered=""):
               "The Sudden Theory, told by a narrator over real archive pictures and designed maps, documents and diagrams. "
               "You use the web to find stories and to check them. A story qualifies only if every fact in it can be sourced "
               "on pages a script can read (Wikipedia, NASA, the Library of Congress, archive.org, government and university "
-              "pages), and if the people, places, machines and documents it names have real photographs under a free licence "
+              "pages), and if the people, places, machines and documents it names have real moving archive footage under a suitable licence "
               "or in the public domain (Wikimedia Commons, NASA, US government works, pre-1930 archives), because the film "
-              "shows real moving footage of what it names and designed evidence where none exists. Prefer rich public archive video, "
+              "shows real moving footage of what it names and designed evidence where none exists. Prefer rich public archive video. No "
               "lookalikes, no generated faces.")
     system += "\n\n" + ((f"# Form\n{FORM['name']}, {FORM['seconds'][0] // 60}-{FORM['seconds'][1] // 60} minutes: {FORM['shape']}.\n\n"
                "Search widely. A long film holds with a promise and open questions, not with pace, so prefer a story with a "
                "mechanism the viewer can be taught step by step (how a thing was built, crossed, solved, survived), real stakes "
-               "that change and can be kept as a running ledger (money, lives, days, miles, tons), a human turn at two thirds "
-               "(a reversal, a failure, a bet), and a payoff. It must be rich in real moving footage and original voices: archive "
-               "photographs of its people, places and machines, maps, and documents (patents, letters, telegrams, reports) whose "
+               "that change, consequential turns throughout each chapter "
+               "(a reversal, a failure, a bet), and an earned payoff. It must be rich in real moving footage and original voices: archive "
+               "recordings of its people, places and machines, maps, and documents (patents, letters, telegrams, reports) whose "
                "real words can be quoted. Avoid stories the references already told (Musk's Mars plan, SpaceX's fourth launch, "
                "Airbnb's cereal, Xerox PARC, the traitorous eight, the PayPal mafia).\n\n"
                f"Return JSON only: {{\"ideas\": [{n} items, best first]}}. Each: {{\"id\": \"i1\", \"title\": a plain title, "
                "\"hook\": the first sentence as it would be spoken, \"promise\": what the viewer will know by the end, in one "
-               "sentence, \"story\": the story in six to ten plain sentences with its figures, \"chapters\": [six to nine "
+               "sentence, \"story\": the story in plain sentences, with consequences as well as figures, \"chapters\": [chapters arising from the story, "
                "{\"title\": two to four words, \"question\": the question the chapter opens}], \"turn\": the turn, \"payoff\": the "
                "payoff with its figure, \"ledger\": [two to four {\"label\": the stake, \"start\": its value at the start, \"end\": "
                "its value at the end}], \"named\": [twelve to twenty {\"name\": usual English name, \"is\": person|place|machine|"
-               "building|document|event|thing, \"searches\": one to three Wikimedia Commons searches, most specific first, "
+               "building|document|event|thing, \"searches\": one to three archive video and original interview searches, most specific first, "
                "\"must_show\": what a picture must visibly show to count}], \"sources\": [URLs you read], \"strength\": 1-10}."))
     system += f"\n\n# The bar\n{references()}\n\n"
     content = ((f"# The style\n{json.dumps(card, ensure_ascii=False)}\n\n"
@@ -92,7 +92,7 @@ def dossier(idea, effort="high"):
                "Return JSON only: {\"facts\": [45 to 80 {\"id\": \"f1\", \"claim\": the fact in plain words, \"quote\": "
                "sentences copied exactly from the page, \"url\": the page, \"year\": the year it happened or null}], "
                "\"named\": [25 to 45 {\"name\", \"is\": person|place|machine|building|document|event|thing, \"searches\": one "
-               "to three Wikimedia Commons searches, most specific first, \"must_show\": what a picture must visibly show, "
+               "to three archive video and original interview searches, most specific first, \"must_show\": what a picture must visibly show, "
                "\"era\": the years a photograph of it must come from to be true to the story, or null}], \"places\": [{\"name\", "
                "\"lat\", \"lon\", \"why\": what happened there}], \"routes\": [{\"from\": a place name, \"to\": a place name, "
                "\"what\": what travelled}], \"documents\": [up to eight {\"title\": the document's name, \"date\": as printed, "
@@ -139,8 +139,8 @@ def write(idea, dos, card, voices=None, notes=None, effort="high"):
                "How it holds: the first segment is a cold open that works in its first sentence (a stake or something that "
                "should not be true), never a greeting. By 30 seconds the narrator says the promise in one sentence (what the "
                "viewer will understand by the end) and names the open question the film will answer last. Each chapter opens "
-               "with an active situation and ends on something that pulls into the next one. Plant two or three open loops early and "
-               "close each one later, saying so (\"remember the telegram?\"). Every chapter has its own consequential turn, marked beat=turn on the segment where it happens. The last "
+               "with an active situation and ends on something that pulls into the next one. Plant curiosity where the actual story earns it and "
+               "resolve it without repetitive callbacks. Every chapter has its own consequential turn, marked beat=turn on the segment where it happens. The last "
                "segment answers the promise and reframes the first sentence. No call to action, no 'subscribe', no 'like'.\n\n"
                "The spoken form: `say` is exactly what the narrator says, every number, year, date, unit, currency and "
                "abbreviation written in words the way a narrator says it (\"nineteen fourteen\", \"five thousand six hundred "
@@ -237,8 +237,8 @@ def check_script(script, dos):
         if not c.get("turn"):
             problems.append(f"chapter {c.get('id')} needs a consequential turn")
     chs = {c.get("id") for c in script.get("chapters") or []}
-    if len(chs) < 5:
-        problems.append(f"{len(chs)} chapters; the form wants six to nine")
+    if len(chs) < 2:
+        problems.append(f"{len(chs)} chapters; a long film needs distinct story movements")
     return dict(ok=not problems, problems=problems, words=n, segments=len(script.get("segments") or []), facts_used=len(used),
                 figures_unbacked=unbacked)
 

@@ -1,6 +1,7 @@
 """Signal-only VO2-compatible measures; the ASR listener receives no name prompt."""
 from pathlib import Path
 import argparse
+import hashlib
 import json
 import sys
 import numpy as np
@@ -15,6 +16,12 @@ def measure(path, expected, cache):
     import measure as M
     import spoken
     cache=Path(cache); cache.mkdir(parents=True,exist_ok=True)
+    fingerprint=hashlib.sha256(Path(path).read_bytes()+expected.encode()).hexdigest()
+    stamp=cache/'input.sha256'
+    if not stamp.exists() or stamp.read_text()!=fingerprint:
+        for name in ('heard.json','f0.npy','metrics.json'):
+            (cache/name).unlink(missing_ok=True)
+        stamp.write_text(fingerprint)
     x,sr=sf.read(path,dtype='float32',always_2d=True); x=x.mean(1)
     N.VOCAB[:]=[]
     wp=cache/'heard.json'

@@ -2,8 +2,7 @@
 """Run workflow 4 (long-form voiceover stories) on the workflow shell.
 
     PY=/Users/masaoodi/Documents/Valmera/.valmera/venv-worker/bin/python
-    zsh /Users/masaoodi/Documents/Valmera/.valmera/claude_trial_env.sh $PY run.py run --out <deliver root> \
-        [--args '{"style": "character-sheet", "line": "...", "look": false}']
+    $PY run.py [--topic "a subject"] [--out <deliver root>]
     $PY run.py run --resume <run_id>
     $PY run.py status
 

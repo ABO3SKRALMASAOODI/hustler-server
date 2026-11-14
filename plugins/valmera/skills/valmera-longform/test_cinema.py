@@ -62,3 +62,10 @@ def test_pause_crossfade_keeps_word_clock_on_audio():
     for w in shifted:
         at=round((w['start']+0.1)*sr)
         assert np.max(np.abs(y[at:at+100]))>0.09
+
+
+def test_final_measure_detects_cross_file_source_reuse():
+    shots=[dict(clip=clip('download-a',100,110),src=[1,4]),dict(clip=clip('download-b',102,112),src=[0,4])]
+    assert C.duplicate_ranges(shots)==[[0,1]]
+    shots[1]['src']=[2,4]
+    assert C.duplicate_ranges(shots)==[]

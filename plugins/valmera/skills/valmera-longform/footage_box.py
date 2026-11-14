@@ -33,6 +33,39 @@ def ssh(command, **kw):
     return subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', '-i', KEY, HOST, command], check=True, **kw)
 
 
+PROBE = r'''import json, os, sys
+sys.path.insert(0,'/app')
+os.environ['OPENAI_API_KEY']=sys.stdin.readline().strip()
+os.environ['SKIP_DB_INIT']='1'
+from footage import plan,search
+j=json.loads(sys.stdin.read())
+lines=[dict(i=0,say=j['story'],pictures=[n['name'] for n in j['named']])]
+pl,usd=plan.plan(lines,j['named'],j['title']+'; long documentary, rich original archive footage required')
+subjects=pl['subjects'];flat=[(si,q) for si,s in enumerate(subjects) for q in s['searches']]
+found=search.run([q for si,q in flat]);hits={}
+for k,(si,q) in enumerate(flat):
+    have={h['id'] for h in hits.get(si,[])}
+    hits.setdefault(si,[]).extend(h for h in found.get(k,[]) if h['id'] not in have)
+kept,cost=plan.rank(subjects,hits,per=2);rows=[]
+for si,s in enumerate(subjects):
+    chosen=[dict(h,why=why) for ix,h,why in kept if ix==si]
+    rows.append(dict(name=s['name'],found=len(chosen),sources=chosen))
+covered=sum(r['found']>0 for r in rows)
+print(json.dumps(dict(subjects=rows,covered=covered,clips=sum(r['found'] for r in rows),
+    ok=bool(rows) and covered/len(rows)>=.6,usd=usd+cost,method='worker/footage planned and ranked real-video search results; fetched and visually verified during supply')))
+'''
+
+
+def probe(idea):
+    """Footage search evidence before choosing a story, on the working box network."""
+    names=ssh("docker ps --format '{{.Names}}'",capture_output=True,text=True).stdout.splitlines()
+    slot=next((n for n in names if n.startswith('vbox-batch')),None)
+    if not slot:raise RuntimeError('no box batch image available for footage discovery')
+    command=f'docker exec -i {shlex.quote(slot)} python -c {shlex.quote(PROBE)}'
+    r=ssh(command,input=os.environ['OPENAI_API_KEY']+'\n'+json.dumps(idea),text=True,capture_output=True,timeout=1200)
+    return json.loads(r.stdout.splitlines()[-1])
+
+
 def fetch(payload, out, log=print):
     out = Path(out)
     rec = out / 'footage.json'

@@ -53,7 +53,7 @@ SHAPE = (
 # the reference narrators' joins (VO2 check, 14 Nov: 0.25 s [0.18-0.26], about four real pauses a minute)
 PAUSES = {
     "story": "0.18 to 0.26 inside the story; 0.35 to 0.5 only where the story turns, at most three in the film",
-    "long-form": "0.15 to 0.9; longer after a verdict, a turn or a chapter's end, short inside a run",
+    "long-form": "0.18 to 0.26 inside a run; 0.4 only at a consequential turn, no routine long chapter pauses",
 }
 HARD = ("- Hard words: a long or rare compound a speech engine runs together is written split, the way it is said "
         "(\"retro rockets\"); a word with two readings gets the spelling of the one meant; names stay exactly as spelled.\n")
@@ -69,8 +69,8 @@ QUESTION = {
     "story": "Exactly one segment in the setup asks the question the film will answer (the viewer's own question, said by "
              "the narrator: \"So how do you save a company with five thousand dollars?\"); never a question to the viewer "
              "about themselves, never 'did you know'.",
-    "long-form": "Each chapter's first segment asks that chapter's question out loud, in the narrator's words (the chapter "
-                 "card prints it; the voice says it), and the chapter then answers it.",
+    "long-form": "Open chapters with concrete situations and changing stakes. Ask a question aloud only when it earns its place; "
+                 "never impose one on every chapter. Preserve varied sentence lengths and the slower breathing of a long documentary.",
 }
 
 SYSTEM = ("You are the voice editor of a documentary studio. A checked script reaches you; you rewrite it for the ear so a "

@@ -1,24 +1,9 @@
-"""Workflow 4 on the shell: long-form voiceover stories, 10-20 minutes, narrated, on real pictures and designed pages.
-
-ideas   the writer finds stories on the web itself (story.find_ideas); the named things of the best ideas are probed on
-        Wikimedia Commons and Openverse: an idea whose things have no free pictures cannot be made
-script  the researcher builds a dossier of quoted facts (story.dossier); every quote is fetched here from its own page and
-        only verified facts are kept; the writer writes chapters from those facts alone (story.write), and the script is
-        measured: cited facts verified, every printed figure inside a verified quote, length inside the form
-supply  the narrator (narrate tool, local, band 04, through heavy.sh, its VOICE gate with the spoken-form listener) and,
-        while it speaks, the pictures (worker/broll_source's named route, checked by a vision model, licence kept) and the
-        designed pages (design.py: documents from the quotes, maps on NASA's Blue Marble, timelines, charts, figures)
-score   film_long.py bakes the scene (L1): chapters, the ledger, prints landing on their words, picture density from each
-        chapter's pace, the camera breathing; the taste rules as numbers; stills of the beats for the look
-render  the film's sound (narration and a few library sounds on their events, lane J's master: -14 LUFS, under -1 dBTP;
-        never music), then Valmera's engine (worker/scene) at 1920x1080, through heavy.sh
-check   the shell's brand finish (watermark, end card) and checks, then this workflow's: length 10-20 min, picture changes
-        per 10 s per chapter, the longest single framing, the VOICE gate, the credits
+"""Autonomous researched films: Easton, real archive footage and voices, SND3,
+MUSIC2 per story chapter, and measured delivery gates. The shell owns checkpoints.
 """
 import json
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STORIES = os.path.join(os.path.dirname(HERE), "valmera-stories")
@@ -56,24 +41,9 @@ def able_cards(ctx):
     return able
 
 
-def probe(idea, n=14):
-    """How many free pictures the idea's named things have (unchecked candidates, 900 px or more)."""
-    B = PX._worker()
-
-    def one(nm):
-        s = dict(name=nm.get("name"), searches=(nm.get("searches") or [nm.get("name")])[:3], must_show=nm.get("must_show") or nm.get("name"))
-        try:
-            cands, _ = B.search_named(s, kind=B.KIND_PHOTO, count=6)
-        except Exception:  # noqa: BLE001 - a subject that cannot be searched counts as none
-            cands = []
-        big = [c for c in cands if max(int(c.get("width") or 0), int(c.get("height") or 0)) >= 900]
-        return dict(name=nm.get("name"), found=len(big))
-
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        rows = list(pool.map(one, (idea.get("named") or [])[:n]))
-    covered = sum(1 for r in rows if r["found"])
-    pics = sum(min(r["found"], 4) for r in rows)
-    return dict(subjects=rows, covered=covered, pictures=pics, ok=covered >= max(6, int(0.6 * len(rows))))
+def probe(idea):
+    import footage_box
+    return footage_box.probe(idea)
 
 
 def ideas(ctx):
@@ -88,18 +58,18 @@ def ideas(ctx):
     got.sort(key=lambda i: -float(i.get("strength") or 0))
     for i in got[:3]:
         i["supply"] = probe(i)
-        ctx.log(f"probe {i.get('title')}: {i['supply']['covered']}/{len(i['supply']['subjects'])} subjects, {i['supply']['pictures']} pictures")
-    got.sort(key=lambda i: (not (i.get("supply") or {}).get("ok"), -(float(i.get("strength") or 0) + min((i.get("supply") or {}).get("pictures", 0), 40) / 10)))
+        ctx.log(f"probe {i.get('title')}: {i['supply']['covered']}/{len(i['supply']['subjects'])} subjects, {i['supply']['clips']} ranked footage sources")
+    got.sort(key=lambda i: (not (i.get("supply") or {}).get("ok"), -(float(i.get("strength") or 0) + min((i.get("supply") or {}).get("clips", 0), 40) / 10)))
     srcs = sorted({u for i in got for u in i.get("sources") or []})
     return dict(source=dict(kind="web research by the writer model", origin="web_search", sources=srcs[:60], searches=use.get("web_searches")),
-                ideas=got, chosen=None, spend=[dict(stage="ideas", **use)])
+                ideas=got, chosen=None, spend=[dict(stage="ideas", **use)]+[dict(stage='ideas',provider='openai',what='footage discovery',usd=i['supply'].get('usd',0)) for i in got if i.get('supply')])
 
 
 def script(ctx, ideas_out):
     able = {s["id"]: s for s in able_cards(ctx)}
     pick = next((i for i in ideas_out["ideas"] if i.get("style") in able and (i.get("supply") or {}).get("ok")), None)
     if not pick:
-        raise RuntimeError("no idea with enough free pictures: " + json.dumps([(i.get("title"), (i.get("supply") or {}).get("covered")) for i in ideas_out["ideas"]])[:600])
+        raise RuntimeError("no idea with enough real footage evidence: " + json.dumps([(i.get("title"), (i.get("supply") or {}).get("covered")) for i in ideas_out["ideas"]])[:600])
     card = able[pick["style"]]
     spend = []
     dp = os.path.join(ctx.run_dir, "dossier.json")

@@ -31,8 +31,9 @@ def read(p):
 
 
 def save(p, data):
-    Path(p).parent.mkdir(parents=True, exist_ok=True)
-    Path(p).write_text(json.dumps(data, ensure_ascii=False, indent=1))
+    p=Path(p);p.parent.mkdir(parents=True, exist_ok=True)
+    tmp=p.with_suffix(p.suffix+'.tmp')
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1));os.replace(tmp,p)
 
 
 def worker():
@@ -75,7 +76,7 @@ def footage(ctx, script):
     return result
 
 
-def verify_structure(ctx, script):
+def verify_structure(ctx, script, attempt=0):
     """Model interpretation, never a word rule: point to the actual change in each chapter."""
     sc=script['script']
     report=Path(ctx.run_dir)/'structure.json'
@@ -93,6 +94,29 @@ def verify_structure(ctx, script):
     rows={r['id']:r for r in tagged.get('chapters',[])}
     if tagged.get('hook') is not True or set(rows)!=chs:
         raise ValueError('the story lacks a verified hook or chapter turn')
+    missing=[cid for cid,r in rows.items() if not isinstance(r.get('turn_segment'),int)]
+    if missing and attempt<2:
+        # A coda can belong to the chapter whose action earned it. Let the editor
+        # resolve the structure; never manufacture a twist or change a fact.
+        text,use=wf4.story.writer.ask('Repair this documentary chapter structure. The independent structural read found chapters without a consequential turn. '
+            'You may merge a payoff-only coda into the preceding chapter, or move existing segment boundaries where the story supports it. '
+            'Keep every spoken segment exactly once, in its existing order. Do not rewrite or invent facts. Preserve a meaningful multi-chapter story, '
+            'never collapse the film just to pass a check. Return JSON {chapters:[{id,title,question,turn,music_mood,pace}], '
+            'assignment:[one chapter id per segment, same order],why:string}.',
+            json.dumps(dict(script=sc,diagnosis=tagged)),effort='high',max_tokens=5000,what='WF4 chapter repair')
+        repair=wf4.story.writer.json_block(text)
+        assignment=repair.get('assignment',[]); chapters=repair.get('chapters',[])
+        ids=[c['id'] for c in chapters]
+        if len(assignment)!=len(sc['segments']) or set(assignment)!=set(ids) or len(ids)<2:
+            raise ValueError('chapter repair did not preserve the story')
+        runs=[v for i,v in enumerate(assignment) if i==0 or assignment[i-1]!=v]
+        if runs!=ids: raise ValueError('chapter repair interleaved the timeline')
+        sc['chapters']=chapters
+        for s,cid in zip(sc['segments'],assignment):s['chapter']=cid
+        save(Path(ctx.run_dir)/f'structure_repair{attempt}.json',dict(repair,usage=use))
+        save(Path(ctx.run_dir)/f'structure_rejected{attempt}.json',tagged)
+        report.unlink();save(Path(ctx.run_dir)/'script.json',script)
+        return verify_structure(ctx,script,attempt+1)
     for cid,r in rows.items():
         i=r.get('turn_segment')
         if not isinstance(i,int) or not 0<=i<len(sc['segments']) or sc['segments'][i]['chapter']!=cid:
@@ -100,6 +124,19 @@ def verify_structure(ctx, script):
         sc['segments'][i]['beat']='turn'
     save(Path(ctx.run_dir)/'script.json',script)
     return sc
+
+
+def narrated(ctx, ns, nd, reader):
+    """Resume a stopped correction even when the shared reader left word times."""
+    import fcntl
+    nar=PX.narrate(ns,str(nd),'04',f'wf4-{ctx.run_id}',dict(os.environ),18000,reader)
+    report=nd/'longform_voice.json'
+    if not report.exists() or not read(report)['after']['ok']:
+        with open(PX.NARRATE_LOCK,'a') as lk:
+            fcntl.flock(lk,fcntl.LOCK_EX)
+            chain.sh(ctx,[PX.NARRATE_PY,reader,'finish',str(nd/'narration_script.json'),'--out',str(nd)],label='wf4-voice-correct-'+ctx.run_id,heavy=True,timeout=7200)
+        nar=PX.narrate(ns,str(nd),'04',f'wf4-{ctx.run_id}',dict(os.environ),18000,reader)
+    return nar
 
 
 def supply(ctx, script):
@@ -110,10 +147,10 @@ def supply(ctx, script):
     sc=script['script']
     sc=verify_structure(ctx,script)
     ns=wf4.story.narration_script(sc)
-    reader=str(HERE.parent/'valmera-stories'/'voice.py')
+    reader=str(HERE/'longform_voice.py')
     nd=Path(ctx.supply)/'narration'
     with ThreadPoolExecutor(max_workers=2) as pool:
-        nj=pool.submit(PX.narrate,ns,str(nd),'04',f'wf4-{ctx.run_id}',dict(os.environ),18000,reader)
+        nj=pool.submit(narrated,ctx,ns,nd,reader)
         # Independent network work overlaps the serialized local narrator.
         ft=footage(ctx,script)
         nar=nj.result()
@@ -223,6 +260,10 @@ def schedule(sc, words, ft):
             if pos<b:
                 missing.append(dict(seg=i,seconds=(b-pos)/FPS,words=s['say']))
     if missing: raise CoverageError(missing)
+    for r in shots:
+        r['context']=r['say']
+        spoken=[w['w'] for w in clock.words if w['t0']<r['f'][1]/FPS and w['t1']>r['f'][0]/FPS]
+        if spoken:r['say']=' '.join(spoken)
     return sorted(shots,key=lambda r:r['f'][0]),clock,end
 
 
@@ -311,8 +352,20 @@ def render(ctx,script,sc):
     return result
 
 
+def duplicate_ranges(shots):
+    seen={}; repeats=[]
+    for i,r in enumerate(shots):
+        c=r['clip'];url=c['source']['url']
+        a=c['time_range'][0]+r['src'][0]; b=c['time_range'][0]+r['src'][1]
+        for j,lo,hi in seen.get(url,[]):
+            if min(hi,b)-max(lo,a)>0.04: repeats.append([j,i])
+        seen.setdefault(url,[]).append((i,a,b))
+    return repeats
+
+
 def check(ctx,rd,sc):
     import shutil
+    import fcntl
     worker()
     pack=read(Path(ctx.supply)/'pack.json')['pack']
     final=Path(ctx.run_dir)/'final.mp4'
@@ -322,34 +375,55 @@ def check(ctx,rd,sc):
         job.write_text('import sys; sys.path[:0]='+repr([str(HERE.parent/'_shell')])+"; import brand; brand.finish("+repr(rd['film'])+','+repr(str(final))+','+repr(ctx.tmp)+')')
         chain.sh(ctx,[chain.PY,str(job)],label='wf4-brand-'+ctx.run_id,heavy=True,timeout=7200)
     base=brand.check(rd['film'],str(final),ctx.tmp)
-    from picture_check import check as pictures_check
+    base['recorded_sound_library']=chain.no_music(sc['l1'])
+    base['ok']=base['ok'] and base['recorded_sound_library']['ok']
+    from picture_check import check as pictures_check, motion
     pr=Path(ctx.supply)/'picture_check.json'
     if not pr.exists(): save(pr,pictures_check(str(final),read(Path(ctx.supply)/'shots.json'),Path(ctx.supply)/'picture-evidence',PX.FF))
     pics=read(pr)
+    mp=Path(ctx.supply)/'motion.json'
+    if not mp.exists(): save(mp,motion(str(final),read(Path(ctx.supply)/'shots.json'),PX.FF))
+    measured_motion=read(mp)
+    real_ids={int(i) for i,r in pics['evidence'].items() if r.get('real_moving_footage')}
+    measured_real=sum(r['seconds'] for r in measured_motion['rows'] if r['i'] in real_ids and r['moving_samples_share']>=0.25)/sc['picture_time_s']
+    pics['moving_share']=measured_real
     nd=Path(pack['narration']).parent
     nar=nd/'narration_narrator.wav'
     if not nar.exists(): nar=Path(pack['narration'])
     metrics=Path(ctx.supply)/'voice-metrics'
-    if not (metrics/'metrics.json').exists():
-        chain.sh(ctx,[PX.NARRATE_PY,str(HERE/'measure_voice.py'),str(nar),str(nd/'narration_script.json'),str(metrics)],label='wf4-voice-measure-'+ctx.run_id,heavy=True,timeout=7200)
+    with open(PX.NARRATE_LOCK,'a') as lk:
+        fcntl.flock(lk,fcntl.LOCK_EX)
+        if not (metrics/'metrics.json').exists():
+            chain.sh(ctx,[PX.NARRATE_PY,str(HERE/'measure_voice.py'),str(nar),str(nd/'narration_script.json'),str(metrics)],label='wf4-voice-measure-'+ctx.run_id,heavy=True,timeout=7200)
+        chain.sh(ctx,[PX.NARRATE_PY,str(HERE/'measure_mix.py'),str(final),pack['words'],str(nd/'narration_script.json'),str(metrics),PX.FF],label='wf4-mix-listen-'+ctx.run_id,heavy=True,timeout=7200)
     voice=read(metrics/'metrics.json')
+    mix=read(metrics/'mix-wer.json')
     duration=brand.probe(str(final))['dur']
+    repeats=duplicate_ranges(read(Path(ctx.supply)/'shots.json'))
+    hj=Path(ctx.run_dir)/'hook_measured.json'
+    if not hj.exists():
+        opening=' '.join(w['w'] for w in read(pack['words'])['words'] if w['start']+F.LEAD_F/FPS<10)
+        text,use=wf4.story.writer.ask('Judge only whether the supplied words, heard in the first ten seconds of a documentary, establish concrete danger, a contradiction or an unanswered curiosity. Return JSON {hook:bool,why:string}. No numeric quality rating.',opening,effort='low',max_tokens=600,what='WF4 first ten seconds')
+        save(hj,dict(wf4.story.writer.json_block(text),words=opening,usage=use))
+    hook=read(hj)
     checks=dict(base,longform=dict(seconds=duration,pictures=sc['pictures'],cuts_per_10s=sc['pictures']/(sc['picture_time_s']/10),
                 real_moving_picture_time_share=pics['moving_share'],pictures_checked=pics['checked'],picture_matches=pics['ok'],
-                duplicate_source_ranges=sc['duplicates'],longest_shot_s=sc['max_hold_s'],music_share=rd['music']['music_share'],
+                duplicate_source_ranges=len(repeats),duplicate_pairs=repeats,hook=hook,longest_shot_s=sc['max_hold_s'],music_share=rd['music']['music_share'],
                 chapter_rises=[dict(chapter=r['chapter'],db=r['measured_rise_db'],at_s=r['rise_at_s']) for r in rd['music']['chapters']],
-                narration=voice,real_voices=pack['record']['real_voices'],chapters=sc['chapters'],credits=pack['footage']['credits']))
+                narration=voice,delivered_mix_wer=mix['wer'],real_voices=pack['record']['real_voices'],chapters=sc['chapters'],credits=pack['footage']['credits']))
     structure=read(Path(ctx.run_dir)/'structure.json')
-    targets=dict(hook=structure.get('hook') is True,turns=len(structure['chapters'])==len(sc['chapters']),length=600<=duration<=1200,footage=pics['moving_share']>=0.5,unique=sc['duplicates']==0,holds=sc['max_hold_s']<=8,
-                 pictures=pics['ok'],music=rd['music']['music_share']>=0.8,rises=all(r['measured_rise_db']>=3 for r in rd['music']['chapters']),voice=voice['ok'])
+    targets=dict(hook=hook.get('hook') is True,turns=len(structure['chapters'])==len(sc['chapters']),length=600<=duration<=1200,footage=pics['moving_share']>=0.5,unique=not repeats,holds=sc['max_hold_s']<=8,
+                 pictures=pics['ok'],music=rd['music']['music_share']>=0.8,rises=all(r['measured_rise_db']>=3 for r in rd['music']['chapters']),voice=voice['ok'],mix_wer=mix['ok'])
     checks['targets']=targets; checks['ok']=bool(base['ok'] and all(targets.values()))
     save(Path(ctx.run_dir)/'measured.json',checks)
     if not checks['ok']: raise RuntimeError('delivered-file gates failed: '+json.dumps(targets))
     evidence=Path(ctx.state_root).parent/'evidence'/ctx.run_id
     evidence.mkdir(parents=True,exist_ok=True)
-    for src in [pr,Path(ctx.run_dir)/'measured.json',Path(ctx.supply)/'shots.json',Path(rd['film']+'.json')]:
+    for src in [pr,mp,Path(ctx.run_dir)/'measured.json',Path(ctx.supply)/'shots.json',Path(rd['film']+'.json')]:
         shutil.copy2(src,evidence/src.name)
     shutil.copytree(Path(ctx.supply)/'picture-evidence',evidence/'pictures',dirs_exist_ok=True)
     shutil.copytree(metrics,evidence/'voice-metrics',dirs_exist_ok=True)
+    shutil.copy2(nar,evidence/'narration.wav')
+    shutil.copy2(pack['words'],evidence/'words.json')
     return dict(final=str(final),checks=checks,music=rd['music'],music_in_final=True,spend=[])
 
