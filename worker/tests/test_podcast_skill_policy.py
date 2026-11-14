@@ -4,6 +4,7 @@ v10 replaces the v9 editor-agent protocol with a link-only engine run. Pin
 that entry point and its safeguards, not archived headings or tool calls.
 The native runtime tests below also exercise delivery, cleanup and resume.
 """
+import ast
 import os
 import subprocess
 import sys
@@ -77,8 +78,15 @@ def test_selection_reads_the_audience_heatmap():
     assert "else the whole source heard locally" in text
     source = script()
     for phrase in ("# The source", "# Transcript", "identity_text(info)",
-                   "lines_of(ws)", "llm.ask(SELECT_SYSTEM, content", 'effort="high"'):
+                   "lines_of(ws)"):
         assert phrase in source, phrase
+    calls = [n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute) and n.func.attr in ("ask", "ask_metered")
+             and n.args and any(isinstance(x, ast.Name) and x.id == "SELECT_SYSTEM" for x in ast.walk(n.args[0]))]
+    assert calls
+    assert any(len(c.args) > 1 and isinstance(c.args[1], ast.Name) and c.args[1].id == "content"
+               and any(k.arg == "effort" and isinstance(k.value, ast.Constant) and k.value.value == "high" for k in c.keywords)
+               for c in calls)
 
 
 def test_challenge_pass_runs_before_make_shorts():
