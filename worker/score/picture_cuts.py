@@ -10,7 +10,6 @@ import subprocess
 
 import cv2
 import numpy as np
-from scipy import ndimage
 
 FPS, MAX_FRAMES = 15.0, 5400
 
@@ -28,7 +27,12 @@ def boundaries(frames, fps):
     pixels = np.abs(gray[1:] - gray[:-1]).mean(axis=(1, 2)) / 64.0
     hist = np.abs(hists[1:] - hists[:-1]).sum(axis=1) / 2.0
     score = 0.5 * np.clip(pixels, 0, 1.5) + 0.5 * hist
-    base = ndimage.median_filter(score, size=int(max(9, 1.2 * fps)), mode='nearest')
+    size = int(max(9, 1.2 * fps))
+    # ndimage's nearest-edge median, including its upper median for an even
+    # window. NumPy/OpenCV are on the production image; SciPy is not.
+    padded = np.pad(score, (size // 2, (size - 1) // 2), mode='edge')
+    windows = np.lib.stride_tricks.sliding_window_view(padded, size)
+    base = np.partition(windows, size // 2, axis=-1)[:, size // 2]
     hits = np.where((score > 0.22) & (score > 3.0 * base + 0.06))[0]
     cuts, flashes, i = [], [], 0
     while i < len(hits):
