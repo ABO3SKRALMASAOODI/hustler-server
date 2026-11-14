@@ -102,12 +102,31 @@ def test_long_whole_request_reaches_director_not_thin_patch_pass(monkeypatch, tm
     monkeypatch.setattr(patch, "throughout", lambda *a: pytest.fail("whole-film craft cannot fall to a patch"))
     def make(view, *a):
         assert view.duration == 2700
+        assert view.director_typed is True
         view.director_version = 3
         return [], ["whole film"], {}
     monkeypatch.setattr(film, "_make", make)
     got = typed.run(ctx, NS(run=lambda *a: {"storage_key": "original"}), {}, 9, {"director": True})
     assert got["path"] == "whole_film_director"
     assert got["source_window"] == [0, 2700]
+
+
+@pytest.mark.parametrize("is_typed", [False, True])
+def test_director_prompt_scope_override_is_confined_to_typed_execution(monkeypatch, tmp_path, is_typed):
+    import json
+    from score import brief
+    folder = tmp_path / "brief"
+    folder.mkdir()
+    (folder / "manifest.json").write_text(json.dumps({"styles": [], "typed_execution": is_typed}))
+    (folder / "film.txt").write_text("Customer: edit this into a 15-20 minute film.")
+    monkeypatch.setattr(brief, "prefix_text", lambda: "first-film defaults")
+    monkeypatch.setattr(brief, "image_block", lambda path: {"type": "image", "source": {}})
+    system, content = brief.load(str(tmp_path))
+    assert system[0]["text"] == "first-film defaults"
+    assert len(system) == (2 if is_typed else 1)
+    if is_typed:
+        assert system[1]["text"] == brief.TYPED_EXECUTION
+    assert content[0]["text"] == "Customer: edit this into a 15-20 minute film."
 
 
 def test_job_lease_loss_never_becomes_a_fallback(monkeypatch):

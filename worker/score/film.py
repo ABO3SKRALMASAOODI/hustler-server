@@ -1072,6 +1072,8 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
         raise Fall("prep", "no original asset")
     name = ((original.get("meta") or {}).get("filename")) or ""
     sess = {"prompts": _asks(worker_db, getattr(ctx, "first_cut_session", None)), "uploads": [{"filename": name}] if name else []}
+    if getattr(ctx, "director_typed", False):
+        sess["typed_execution"] = True
     if getattr(ctx, "director_execution", None):
         sess["execution"] = ctx.director_execution
     ledger = getattr(ctx, "ask_ledger", None)
