@@ -14,6 +14,12 @@ def test_screen_samples_accept_the_live_scene_detector_shot_type():
     assert any(9.9 <= t < 10.1 for t in times) and all(0 <= t < 14.167 for t in times)
 
 
+def test_final_frame_seek_cannot_round_past_the_last_decodable_frame():
+    times = source_screen.sample_times(35.4, 30, [{"start": 0, "end": 35.4}])
+    assert times[-1] == 35.366
+    assert float(f"{times[-1]:.3f}") <= 1061 / 30
+
+
 def test_semantic_tail_cut_stops_at_last_clear_frame_not_detected_shot_edge():
     verdict = {"reviewed_all_frames": True, "branding_screen_present": True,
                "last_content_frame_id": 1, "first_branding_frame_id": 2}

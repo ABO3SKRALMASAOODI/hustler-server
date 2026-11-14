@@ -26,7 +26,9 @@ def sample_times(duration, fps, shots):
         if a > 0:
             times.update(a + dt for dt in (-.3, -.2, -.1, -frame, 0, frame, .1, .2))
     times.update(max(0.0, duration - 12) + i * 2 for i in range(7))
-    return sorted({round(min(last, max(0.0, math.floor(t / frame) * frame)), 6)
+    # boards.grab seeks to milliseconds. Rounding a final frame's timestamp
+    # up (35.366667 -> 35.367) seeks beyond that last frame and yields EOF.
+    return sorted({math.floor(min(last, max(0.0, math.floor(t / frame) * frame)) * 1000 + 1e-7) / 1000
                    for t in times})
 
 
