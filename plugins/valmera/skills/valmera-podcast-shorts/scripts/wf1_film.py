@@ -219,7 +219,7 @@ def build(script, sup, style_id, direction=None):
     (wf1_short.supply); direction: {"display": [{"seg", "text"}], "past_segs": [i], "turn_seg": i, "arc": [...]}."""
     st = STYLES[style_id]
     d = dict(aim_s=st["aim_s"], look=st["look"], family="story", share=st["share"], bed=True, title=True,
-             band=dict(hold=(0.43, 0.82), never=2.8, ease_takes=False, whip=0.04, ease=0.85, shutter=0.6))
+             band=dict(hold=(0.34, 0.62), never=2.8, ease_takes=False, whip=0.04, ease=0.85, shutter=0.6))
     d.update(direction or {})
     clock = Clock(sup["words"], script)
     voices = {
@@ -306,7 +306,7 @@ def build(script, sup, style_id, direction=None):
         # The driver may have only two valid framings; a later phrase may return
         # to the wider shot while the source sound and time stay continuous.
         pace, _, _ = F._engines()
-        phrase = pace.splits(a, b, stress, int(0.95 * FPS), int(1.5 * FPS))
+        phrase = pace.splits(a, b, stress, int(0.75 * FPS), int(1.15 * FPS))
         edges = sorted({a, b, *phrase, *[c for c in tcuts if a + 3 <= c <= b - 3]})
         for fa, fb in zip(edges, edges[1:]):
             mid = (fa + fb) / 2

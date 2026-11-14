@@ -478,9 +478,31 @@ def _kshot_of(ks, t):
     return None
 
 
+def reframe_change(before, after):
+    """Visible viewport discontinuity, using the two frames at the join.
+
+    Continuous camera motion and a timing-only split are not sound events.
+    This uses the same distinct-framing threshold as the picture engine.
+    """
+    if not before or before["f"][1] != after["f"][0]:
+        return 0.0
+    from scene.pace import distinct
+    a = before.get("crop") or [0.0, 0.0, 1.0, 1.0]
+    b = after.get("crop") or [0.0, 0.0, 1.0, 1.0]
+    a = a[-1] if isinstance(a[0], (list, tuple)) else a
+    b = b[0] if isinstance(b[0], (list, tuple)) else b
+    if len(a) != 4 or len(b) != 4 or min(a[2]-a[0], a[3]-a[1], b[2]-b[0], b[3]-b[1]) <= 0:
+        return 0.0
+    if not distinct(a, b):
+        return 0.0
+    overlap = max(0.0, min(a[2], b[2])-max(a[0], b[0])) * max(0.0, min(a[3], b[3])-max(a[1], b[1]))
+    union = (a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - overlap
+    return round(1.0-overlap/union, 4)
+
+
 def l1_events(l1, kshots=()):
-    """What lands on screen, by programme frame: [{f, kind, ...}]. A crop of the same take is not a new picture;
-    a caption is never an event."""
+    """What lands on screen, by programme frame: [{f, kind, ...}]. Distinct designed reframes are cuts;
+    timing-only splits, continuous camera moves and captions are never cut events."""
     fps, D = float(l1["fps"]), int(l1["dur_f"])
     assets = l1.get("assets") or {}
     items = l1.get("items") or []
@@ -494,7 +516,7 @@ def l1_events(l1, kshots=()):
         if p == "main" or p.startswith("own:"):
             return ("take", _kshot_of(kshots, float((s.get("src") or [0.0])[0])))
         return (p,)
-    last = None
+    last, previous = None, None
     for s in shots:
         k = key_of(s)
         f = s["f"][0]
@@ -506,9 +528,11 @@ def l1_events(l1, kshots=()):
             else:
                 a = assets.get(str(s.get("pic"))) or {}
                 ev.append({"f": f, "kind": "picture", "id": s["id"], "still": a.get("kind") == "image" or k[0] == "framed"})
-        elif last is not None and k[0] == "take" and s.get("punch"):
-            ev.append({"f": f, "kind": "cut", "id": s["id"]})      # the take cut inside itself to a new framing (score.pace): a cut the eye sees
-        last = k
+        elif last is not None and k[0] == "take":
+            change = reframe_change(previous, s)
+            if change or s.get("punch"):
+                ev.append({"f": f, "kind": "cut", "id": s["id"], "designed": True, "change": change})
+        last, previous = k, s
         if k[0] == "take" and s.get("src") and kshots:      # the upload's own cuts inside one shot of it
             a0, z0 = float(s["src"][0]), float(s["src"][1])
             n = max(1, s["f"][1] - f)
@@ -1030,7 +1054,7 @@ def plan_sounds(events, ctx):
         sec_e = section_of(t, dur_s, turn_t, close_t)
         if quota["on"] and not hero and e["kind"] != "burst" and in_lay.get((sec_e, layer), 0) >= lay_cap.get((sec_e, layer), 0):
             return False                                  # held for the second pass (spare), logged there if it never sounds
-        if e["kind"] == "cut" and (state["own_cut"] >= own_cap or any(abs(u - t) < 10.0 for u in state["own_t"])):
+        if e["kind"] == "cut" and not e.get("designed") and (state["own_cut"] >= own_cap or any(abs(u - t) < 10.0 for u in state["own_t"])):
             return refuse(e, "the upload's own cuts already hold their share")
         if on_cut(e) and not hero and t >= open_s and state["cut_items"] + n_items > cut_budget:
             return refuse(e, f"the cuts already hold their share ({cut_budget}): the references sound type, graphics and moves too")
@@ -1110,7 +1134,7 @@ def plan_sounds(events, ctx):
         state["all"].append(t)
         if e["kind"] == "burst":
             state["busy"].append((t, end_t))
-        if e["kind"] == "cut":
+        if e["kind"] == "cut" and not e.get("designed"):
             state["own_cut"] += 1
             state["own_t"].append(t)
         state["items"] += n_items

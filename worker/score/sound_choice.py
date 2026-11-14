@@ -126,6 +126,8 @@ def weight_of(ev, part):
         return float(min(0.9, 0.35 + float(ev.get("area") or 0.1)))
     if k == "flash":
         return 0.55
+    if k == "cut" and ev.get("designed"):
+        return min(0.85, 0.35 + 0.5 * float(ev.get("change") or 0.0))
     return {"display": 0.3, "counter": 0.2, "cut": 0.4}.get(k, 0.4)
 
 

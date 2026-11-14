@@ -349,6 +349,9 @@ def score(ctx, script):
     d = direction_of(ctx, script, pack)
     knobs = {k: d.get(k) for k in ("display", "past_segs", "turn_seg", "arc")}
     knobs.update({k: v for k, v in ((ctx.args or {}).get("direction") or {}).items()})
+    rejected_path = os.path.join(ctx.supply, "render_rejected.json")
+    if os.path.exists(rejected_path):
+        knobs["drop"] = sorted(set(knobs.get("drop") or []) | set(json.load(open(rejected_path))))
     knobs.setdefault("bed", chain.wants_music(ctx) or bool((ctx.args or {}).get("song")))      # the film gets music: the sounds are designed for a film with a bed
     sys.path[:0] = [p for p in wf3.env_path().split(os.pathsep) if p not in sys.path]
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
@@ -373,7 +376,53 @@ def score(ctx, script):
                 [dict(stage="score", what="picture-to-words check", **u) for u in (beats.get("placement_check") or {}).get("spend", [])])
 
 
-render = wf3.render
+def _render_review(ctx, rd, sc):
+    """Check the composed phone frames: source approval cannot certify a crop or a tiny print."""
+    from placement_check import check as placement_check
+    pack = wf3.load_pack(ctx)
+    script = dict(segments=[dict(say=ln["text"]) for ln in pack["lines"]])
+    clock = F.Clock(pack["words"], script)
+    rows = []
+    for p in sc["beats"].get("pictures") or []:
+        a, b = p.get("visible_f") or p["f"]
+        rows.append([a, b, "clip", p["name"], dict(path=rd["film"], src=[a/F.FPS,b/F.FPS], source=dict(url=p.get("source")))])
+    _, report = placement_check(rows, script, clock, os.path.join(ctx.supply, "render-review"), pack["ffmpeg"])
+    return report
+
+
+def render(ctx, script, sc):
+    """The product repairs rejected placements before branding and music, never a delivered film."""
+    history_path = os.path.join(ctx.supply, "render_reviews.json")
+    history = json.load(open(history_path)) if os.path.exists(history_path) else []
+    for attempt in range(3):
+        rd = wf3.render(ctx, script, sc)
+        report = _render_review(ctx, rd, sc)
+        history.append(report)
+        json.dump(history, open(history_path, "w"), indent=1)
+        sc["beats"]["rendered_check"] = report
+        if not report["rejected"] or attempt == 2:
+            json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
+            rd["picture_review"] = history
+            rd["spend"] = [dict(stage="render", what="composed picture-to-words check", **u) for h in history for u in h.get("spend", [])]
+            return rd
+        pics = sc["beats"].get("pictures") or []
+        dropped = [os.path.basename(pics[r["id"]]["path"]) for r in report["placements"] if not r["ok"]]
+        rejected_path = os.path.join(ctx.supply, "render_rejected.json")
+        previous = json.load(open(rejected_path)) if os.path.exists(rejected_path) else []
+        json.dump(sorted(set(previous+dropped)), open(rejected_path, "w"), indent=1)
+        ctx.log(f"composed picture check: rebuilding without {len(dropped)} rejected placements")
+        old_spend = sc.get("spend", [])
+        rebuilt = score(ctx, script)
+        rebuilt["spend"] = old_spend + [u for u in rebuilt.get("spend", []) if u.get("what") == "picture-to-words check"]
+        sc.clear()
+        sc.update(rebuilt)
+        json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
+        # These are this run's cached renders of the old plan, before delivery.
+        for name in ("film_engine.mp4", "film_engine.mp4.log.json", "sound.m4a"):
+            p = os.path.join(ctx.supply, name)
+            if os.path.exists(p):
+                os.remove(p)
+
 
 
 def check(ctx, rd, sc):
@@ -385,8 +434,9 @@ def check(ctx, rd, sc):
         style=b.get("style"), layout=b.get("layout"), cutaway_share=b.get("cutaway_share"), finishes=b.get("finishes"), alien=b.get("alien"),
         pictures=len(pics), clips=len([p for p in pics if p.get("kind") == "clip"]), photographs=len([p for p in pics if p.get("kind") == "photo"]),
         new_pictures_10s=round(len(pics) / secs * 10, 2), display_words=[x.get("text") for x in b.get("display") or []],
-        placement_check=b.get("placement_check"),
-        sources=[dict(f=p.get("f"), kind=p.get("kind"), name=p.get("name"), source=p.get("source"), time_range=p.get("time_range")) for p in pics])
+        placement_check=b.get("placement_check"), rendered_check=b.get("rendered_check"), render_reviews=rd.get("picture_review"),
+        sources=[dict(f=p.get("f"), visible_f=p.get("visible_f"), kind=p.get("kind"), name=p.get("name"), source=p.get("source"), time_range=p.get("time_range")) for p in pics])
+    r["checks"]["ok"] = bool(r["checks"].get("ok") and not (b.get("rendered_check") or {}).get("rejected"))
     return r
 
 
