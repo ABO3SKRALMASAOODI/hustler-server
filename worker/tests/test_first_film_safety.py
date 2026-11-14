@@ -171,3 +171,15 @@ def test_fractional_eof_spine_rounding_matches_the_publication_gate():
     index["source_screen"]["source_duration_s"] = 14.
     with pytest.raises(ValueError, match="outside cleared"):
         source_guard.apply(film, index, {})
+
+
+def test_perception_cannot_relabel_a_neighbouring_shots_face_as_local():
+    from score.perceive import face_at
+    rows = [{"t": 6.5, "faces": [[.2, .1, .5, .4]]}]
+    shots = [{"start": 0, "end": 6.52}, {"start": 6.52, "end": 12.85}]
+    assert face_at(rows, 6.6, shots) is None
+    assert face_at(rows, 6.4, shots) == rows[0]["faces"][0]
+    # No inferred shot outside the known intervals; legacy non-first edits
+    # retain their existing nearest-sample behavior.
+    assert face_at(rows, 6.6, []) is None
+    assert face_at(rows, 6.6) == rows[0]["faces"][0]
