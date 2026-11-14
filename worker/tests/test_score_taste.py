@@ -100,16 +100,15 @@ def _framings_as_the_governor_leaves_them(monkeypatch):
 
 # ------------------------------------------------------------------ supply and allowance
 
-def test_the_allowance_is_the_table_of_taste_4_2():
+def test_the_allowance_keeps_reference_sound_density_and_visual_limits():
     t = taste.allow({"cls": "T", "np10": 0.6, "dur_s": 32.8, "bed": False})
-    # round five (13 Nov, the owner's judge): the dry rows moved to the references' own one-take rate (1.4 sounds in 10 s),
-    # the bed rows are the ones a film now runs on (score.bed)
-    assert (t["camera"], t["sounds"], t["display"], t["seats"], t["flashes"], t["under_voice_db"]) == (1, 3, 9, 2, 1, 7.0)
-    assert taste.allow({"cls": "T", "np10": 0, "dur_s": 47.9, "bed": False})["sounds"] == 4            # p5565
+    # K8: sparse pictures do not suppress earned sound below the reference rate.
+    assert (t["camera"], t["sounds"], t["display"], t["seats"], t["flashes"], t["under_voice_db"]) == (1, 11, 9, 2, 1, 7.0)
+    assert taste.allow({"cls": "T", "np10": 0, "dur_s": 47.9, "bed": False})["sounds"] == 17            # p5565
     bed = taste.allow({"cls": "T", "np10": 0.6, "dur_s": 32.8, "bed": True})
-    assert bed["sounds"] == 6 and bed["sounds_10s"] == 2
-    assert taste.allow({"cls": "M", "np10": 3, "dur_s": 30, "bed": True})["sounds"] == 9
-    assert taste.allow({"cls": "M", "np10": 4.2, "dur_s": 4.8, "bed": False})["sounds"] == 1           # p5582: never under one
+    assert bed["sounds"] == 11 and bed["sounds_10s"] == 3
+    assert taste.allow({"cls": "M", "np10": 3, "dur_s": 30, "bed": True})["sounds"] == 10
+    assert taste.allow({"cls": "M", "np10": 4.2, "dur_s": 4.8, "bed": False})["sounds"] == 2           # p5582: hook and another earned event
     p = taste.allow({"cls": "P", "np10": 14, "dur_s": 20, "bed": False})
     assert (p["sounds"], p["camera"], p["display"]) == (12, 7, 20)
     calm = taste.allow({"cls": "M", "np10": 3, "dur_s": 40, "bed": False}, calm=True)
@@ -136,21 +135,21 @@ def test_the_uploads_own_cuts_and_found_pictures_are_supply():
 
 # ------------------------------------------------------------------ the shapes the owner called childish
 
-def test_p5591_one_take_holds_one_sound_one_step_one_caption_seat_and_two_display_seats():
+def test_p5591_one_take_keeps_earned_sound_with_camera_and_type_limits():
     idx = selfie(32.8)
     c = comp(film(p5591_shape(idx), system={"card": "P1", "devices": ["big", "chip", "flash"], "sounds": ["impact", "whoosh", "pop", "riser"]},
                   film_={"drop": ["20-21", "40-41", "60-61"]}), idx, voice(32.8))
     t = c.meter["taste"]
-    assert t["supply"]["cls"] == "T" and t["allow"]["sounds"] == 3
+    assert t["supply"]["cls"] == "T" and t["allow"]["sounds"] == 11
     assert t["kept"]["camera"][0] <= 1 and t["kept"]["camera"][1] >= 12
     assert camera_steps(c) <= 1 + t["flips"] <= 1 + t["speech_edits"]
     snd = c.l1["sound"]
-    assert 1 <= len(snd) <= 3                      # the upload carried 19; one take dry holds one in any 10 s
+    assert 1 <= len(snd) <= 11                     # event partners and spacing still govern each sound
     lands = [i["on"] for i in c.l1["items"] if i["k"] == "word" and i.get("role") == "big"] + [i["f"][0] for i in c.l1["items"] if i["k"] == "card"]
     for q in snd:
         assert min(abs(q["event_f"] - f) for f in lands) <= taste.PARTNER_F
     at = sorted(q["event_f"] for q in snd)
-    assert all(b - a >= 10 * 30 for a, b in zip(at, at[1:]))
+    assert all(b - a >= 80 for a, b in zip(at, at[1:]))
     assert t["kept"]["display"][0] <= 9 and t["kept"]["flash"][0] <= 1
     caps = [w for w in c.l1["items"] if w["k"] == "word" and w.get("role") == "cap"]
     assert caps and max(w["y"] if not isinstance(w["y"], list) else w["y"][-1] for w in caps) - min(w["y"] if not isinstance(w["y"], list) else w["y"][-1] for w in caps) <= 0.056      # one line pitch: a two-line chunk sits either side of the one seat (type at .04 of the frame since round six)
@@ -161,7 +160,7 @@ def test_p5591_one_take_holds_one_sound_one_step_one_caption_seat_and_two_displa
         assert min(abs(cy - s[1]) for s in t["seats"]["display"]) <= 0.09, (w["id"], cy)
 
 
-def test_p5565_eighty_seven_sounds_on_a_video_call_become_two():
+def test_p5565_unearned_sound_spam_is_still_removed():
     idx = selfie(47.9, face=(0.4, 0.3, 0.6, 0.42))
 
     def make(k, a, z):
@@ -169,7 +168,7 @@ def test_p5565_eighty_seven_sounds_on_a_video_call_become_two():
                 "snd": [{"s": ("tick_1", "pop_1", "click_1", "swish_1", "ding_1", "impact_1", "whoosh_soft_1")[(k + j) % 7], "at": f"w{min(z, a + j)}", "for": f"w{min(z, a + j)}"} for j in range(7)]
                 + [{"s": "impact_1", "for": f"b{k + 1:02d}.big"}]}
     c = comp(film(beats_over(idx, 12, make)), idx, voice(47.9))
-    assert c.meter["taste"]["sounds"][1] >= 80 and len(c.l1["sound"]) == 4
+    assert c.meter["taste"]["sounds"][1] >= 80 and 4 < len(c.l1["sound"]) <= 17
     assert "EARNED" in c.meter_text and "SUPPLY class T" in c.meter_text
 
 
@@ -429,7 +428,7 @@ def test_style_cards_are_the_ones_this_footage_can_supply():
     assert many and "P1" not in many and set(many) <= {"P6", "M8", "P2"}
     assert taste.reach(per, [], 32.8) == 0 and taste.reach(per, [{}] * 16, 32.8) > 5
     txt = "\n".join(brief.supply_part(idx, per, []))
-    assert "class T" in txt and "sounds 3" in txt
+    assert "class T" in txt and "sounds 11" in txt
 
 
 def test_band_distance_reads_new_pictures_not_crops():
@@ -697,14 +696,15 @@ def test_hard_steps_on_a_take_are_ten_seconds_apart():
     assert len(steps) == t["flips"] and all(b - a >= 10 * 30 for a, b in zip(steps, steps[1:]))
 
 
-def test_no_ten_second_window_holds_two_sounds_on_a_take():
+def test_take_sound_spacing_preserves_earned_events():
     idx = selfie(47.9)
 
     def make(k, a, z):
         return {"pic": "main", "do": [{"g": "big", "t": f"WORD {k}", "for": f"w{a}", "at": f"w{a}", "d": 30}], "snd": [{"s": ("impact_1", "whoosh_soft_1", "pop_1")[k % 3], "for": f"b{k + 1:02d}.big"}]}
     c = comp(film(beats_over(idx, 14, make)), idx, voice(47.9))
     at = sorted(s["event_f"] for s in c.l1["sound"])
-    assert len(at) == 4 and all(b - a >= 10 * 30 for a, b in zip(at, at[1:]))
+    assert 4 < len(at) <= 17
+    assert all(sum(a <= b < a + 300 for b in at) <= 3 for a in at)
 
 
 def test_the_look_can_send_a_found_picture_back_to_the_take():

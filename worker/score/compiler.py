@@ -3339,7 +3339,20 @@ def on_print(rect, marks):
     """How much of a type block lies on what the picture already prints, 0-1. A corner on a logo is a touch; a word
     across a caption is on it."""
     area = max((rect[2] - rect[0]) * (rect[3] - rect[1]), 1e-9)
-    hit = sum(max(0.0, min(rect[2], r[2]) - max(rect[0], r[0])) * max(0.0, min(rect[3], r[3]) - max(rect[1], r[1])) for r in {tuple(m) for m in marks})
+    # The same printed label is sampled at several nearby frames. Count its
+    # occupied area once: summing jittered boxes could turn a small touch into
+    # a full collision and remove a title from otherwise clear wall space.
+    boxes = [(max(rect[0], r[0]), max(rect[1], r[1]), min(rect[2], r[2]), min(rect[3], r[3])) for r in marks]
+    boxes = [r for r in boxes if r[2] > r[0] and r[3] > r[1]]
+    xs = sorted({x for r in boxes for x in (r[0], r[2])})
+    hit = 0.0
+    for left, right in zip(xs, xs[1:]):
+        spans = sorted((r[1], r[3]) for r in boxes if r[0] < right and r[2] > left)
+        height, end = 0.0, float('-inf')
+        for lo, hi in spans:
+            height += max(0.0, hi - max(lo, end))
+            end = max(end, hi)
+        hit += (right - left) * height
     return min(1.0, hit / area)
 
 

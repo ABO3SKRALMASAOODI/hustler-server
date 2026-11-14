@@ -59,6 +59,15 @@ def test_short_film_can_sound_more_than_just_the_hook():
     assert sound.allowance('M', 3, 9.9, False)[0] >= 3
 
 
+def test_print_collision_counts_occupied_area_once_across_sampled_frames():
+    import pytest
+    title = [0, 0, 1, 1]
+    moving_label = [[.9, y, 1, y + .6] for y in (.1, .11, .12, .13)]
+    assert compiler.on_print(title, moving_label) == pytest.approx(.063)
+    assert compiler.on_print(title, moving_label + [[0, 0, .1, 1]]) == pytest.approx(.163)
+    assert compiler.on_print(title, [[-1, -1, 2, 2]]) == 1
+
+
 def test_supply_requires_an_explicit_word_match_and_uses_pair_numbers(tmp_path, monkeypatch):
     import time, types
     from score import supply
