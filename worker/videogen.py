@@ -14,6 +14,8 @@ Round 34 (CapCut initiative — see the capcut-any-asset-initiative memory).
 """
 
 import time
+import base64
+import os
 
 import requests
 
@@ -37,6 +39,26 @@ def needs_image(model=None):
     """
     m = (model or config.VIDEO_GEN_MODEL or "").lower()
     return "image-to-video" in m or m.endswith("/i2v") or "/i2v/" in m
+
+
+def reference_image(path):
+    """Provider-readable image bytes, including private/local object stores.
+
+fal accepts a data URI for image_url. Passing a presigned localhost URL
+successfully queued a job whose provider could never read the reference.
+Use the actual validated image, bounded, without changing its face or pixels.
+"""
+    from PIL import Image
+    if os.path.getsize(path) > 8 * 1024 * 1024:
+        raise ValueError('Reference image exceeds the 8 MB animation input limit.')
+    with Image.open(path) as im:
+        fmt = im.format
+        im.verify()
+    mime = {'JPEG': 'image/jpeg', 'PNG': 'image/png', 'WEBP': 'image/webp'}.get(fmt)
+    if not mime:
+        raise ValueError('Animation reference must be JPEG, PNG or WebP.')
+    with open(path, 'rb') as f:
+        return f'data:{mime};base64,' + base64.b64encode(f.read()).decode('ascii')
 
 
 # Per-model input-shape quirks (the research flagged these as real: duration

@@ -2790,6 +2790,12 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     ctx.ask_ledger = ledger
     if not ledger["asks"]:
         return ""
+    import required_broll
+    try:
+        required_broll.record(ctx, ledger, request)
+    except Exception as exc:
+        ledger['picture_manifest_error'] = type(exc).__name__
+        print(f"[asks] picture obligations unavailable: {type(exc).__name__}", flush=True)
     done_by = None
     reset_note = _typed_start_from_upload(ctx, ledger, job)
     held = _typed_hold_length(ctx, ledger, job)
@@ -2829,6 +2835,10 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     kept = _typed_keep_whole(ctx, ledger, job, request)
     if kept:
         done_by = (done_by + "\n" + kept) if done_by else kept
+    import required_broll
+    supplied = required_broll.supply(ctx, ledger)
+    if supplied:
+        done_by = (done_by or "") + supplied
     return asks.editor_note(ledger, done_by)
 
 
@@ -2964,6 +2974,11 @@ def _asks_check(ctx, draft, allow_repair=True):
     ledger = getattr(ctx, "ask_ledger", None)
     if not ledger or not ledger.get("asks") or not (ledger.get("cfg") or {}).get("check", True):
         return None
+    if ledger.get('picture_manifest_error'):
+        # Without subject enumeration, a generic visual pass cannot prove
+        # that none of the customer's named pictures were silently dropped.
+        ctx.ask_verdict = None
+        return None
     from score import asks
     try:
         row = ctx.latest_edl()
@@ -3034,10 +3049,13 @@ def _asks_settle(ctx, final, outcome):
     if not ledger or not ledger.get("asks"):
         if getattr(ctx, "ask_check_required", False):
             from score import asks
-            return asks.checked_reply(None, None), "partial"
+            import edit_scope
+            edit_scope.restore_unmet(ctx, ledger, None)
+            return edit_scope.disclose(ctx, asks.checked_reply(None, None)), "partial"
         return final, outcome
     from score import asks
     verdict = getattr(ctx, "ask_verdict", None)
+    import edit_scope
     try:
         if verdict and str(verdict.get("edl_version")) != str(ctx.latest_edl().get("version")):
             verdict = None
@@ -3048,6 +3066,9 @@ def _asks_settle(ctx, final, outcome):
             verdict = None
     except Exception:  # noqa: BLE001
         verdict = None
+    if edit_scope.restore_unmet(ctx, ledger, verdict):
+        verdict = ctx.ask_verdict
+        final = asks.checked_reply(ledger, verdict)
     if verdict:
         final = asks.true_reply(ctx, ledger, verdict, final or "")
         block = asks.reply_block(ledger, verdict)
@@ -3055,6 +3076,7 @@ def _asks_settle(ctx, final, outcome):
             final = (final or "") + block
     else:
         final = asks.checked_reply(ledger, None)
+    final = edit_scope.disclose(ctx, final)
     return final, asks.outcome(ledger, verdict, outcome)
 
 
@@ -6103,6 +6125,8 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
     if getattr(ctx, "ask_ledger", None) or getattr(ctx, "ask_check_required", False):
         _asks_check(ctx, final_text, allow_repair=False)
         final_text, outcome = _asks_settle(ctx, final_text, outcome)
+        latest = ctx.latest_edl()
+        quality = _quality_handoff(ctx)
         if isinstance(honesty, dict) and getattr(ctx, "ask_ledger", None):
             from score import asks as _asks
             honesty["ask_ledger"] = _asks.summary(
@@ -7396,6 +7420,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 ctx, "replied", fail_note=fail_note,
                 truncated=truncated_out)
             final, outcome = _asks_settle(ctx, final, outcome)
+            latest = ctx.latest_edl()
             if honesty.get("reply_truth_unverified"):
                 outcome = "partial"
             if getattr(ctx, "ask_ledger", None):

@@ -400,6 +400,9 @@ def test_estimate_reflects_the_measured_rate_and_shards():
         # ~57.6 s (plus warm-ups) and the call overhead
         est = sidecars.estimate_s(h)
         assert 130 <= est <= 160
+        refined = sidecars.ensure('matte.person', src, [(0, 60)],
+                                  params={'refine': 'sam-trimap-v2'})
+        assert sidecars.estimate_s(refined) > 2 * est
         f = sidecars.ensure("faces.yunet", src, [(0, 60)])
         assert sidecars.estimate_s(f) < 30
     finally:

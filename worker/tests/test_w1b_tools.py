@@ -306,6 +306,15 @@ def test_backgrounds_take_shorthand_sources_and_cards():
     assert out.startswith("EDL") and _fx(ctx)[-1]["radius"] == 0.03
 
 
+def test_background_warmer_reads_the_written_effect_not_the_old_edl(monkeypatch):
+    seen = []
+    monkeypatch.setattr(st, '_ensure_matte', lambda ctx, edl, *a, **kw: (seen.append(edl) or ''))
+    ctx = Ctx()
+    assert st.set_background(ctx, kind='solid', start=0, end=8, colour='black').startswith('EDL')
+    assert seen[0]['fx'][0]['type'] == 'background'
+    assert seen[0] == ctx.edl
+
+
 def test_a_fast_plate_strobe_needs_the_users_opt_in():
     srcs = ["media/p1/plate.png", 2.0, "#ff0000", "media/p1/clip.mp4"]
     out = st.set_background(Ctx(), kind="strobe", start=3.0, end=4.0,
@@ -359,7 +368,7 @@ def test_the_matte_is_asked_through_track_1as_helpers_when_present(
                                 "height": 540}, 7, [9.0])
     fake.launch_source = lambda sha, proxy, index, pid: (
         seen.append(("launch", sha, proxy["storage_key"], pid)) or src)
-    fake.sidecar_params = lambda: {"downsample_ratio": 0.375}
+    fake.sidecar_params = lambda edl=None: {"downsample_ratio": 0.375}
     monkeypatch.setitem(sys.modules, "matte_track", fake)
 
     def ensure(kind, source, ranges, priority="interactive", params=None):
