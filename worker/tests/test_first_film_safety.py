@@ -46,6 +46,12 @@ def _scene():
              {"start": 6.52, "end": 12.85}]})
 
 
+def test_frame_clearance_rounds_inward_to_the_edl_clock():
+    index = {"video": {"duration": 14.2}, "source_screen": {
+        "status": "verified", "version": 1, "safe_end_s": 9.866667}}
+    assert source_screen.first_film_index(index)["video"]["duration"] == 9.86
+
+
 def test_neighbouring_shot_face_does_not_authorize_quay_crop():
     film, index = _scene()
     rows = source_guard.apply(film, index, {"samples": [{"t": 6.5, "face": [.3, .2, .5, .4]}]})
