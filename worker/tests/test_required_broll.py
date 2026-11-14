@@ -6,6 +6,35 @@ import required_broll
 from score import asks
 
 
+def test_rejected_generic_pictures_trigger_archive_retry_without_relaxing_subject(monkeypatch, tmp_path):
+    import broll_source, agent_tools
+    queries = []
+    def search(subject, **kw):
+        queries.append(subject)
+        return [{'id': 'wrong' if len(queries) == 1 else 'mining-rig'}], []
+    def check(subject, hits, **kw):
+        assert subject['must_show'] == 'Real mining hardware'
+        if hits[0]['id'] == 'wrong':
+            return [], [{'shows': 'coins and padlocks', 'ok': False}], 0
+        return hits, [{'shows': 'operating mining rig', 'ok': True}], 0
+    def retry(ctx, name, schema, system, payload, **kw):
+        assert name == 'retry_required_picture_search'
+        assert 'coins and padlocks' in payload
+        assert kw['model'] == 'gpt-6-sol'
+        return {'archive_name': 'Cryptocurrency mining', 'queries': ['Bitcoin mining hardware']}, {}
+    monkeypatch.setattr(broll_source, 'search_named', search)
+    monkeypatch.setattr(broll_source, 'check_named', check)
+    monkeypatch.setattr(asks, '_call', retry)
+    monkeypatch.setattr(agent_tools, '_remember_search_hits', lambda *a, **kw: None)
+    p = {'id': 'picture1', 'subject': 'crypto mining', 'query': 'long vague query',
+         'must_show': 'Real mining hardware', 'source_words': []}
+    ctx = NS(workdir=str(tmp_path), stock_results={})
+    required_broll.supply(ctx, {'required_pictures': [p]})
+    assert len(queries) == 2
+    assert p['subject'] == 'crypto mining'
+    assert p['candidates'] == ['required:picture1:mining-rig']
+
+
 def test_every_named_subject_becomes_durable_ask_with_word_anchor(monkeypatch):
     words = [{'w': x, 't0': float(i), 't1': i + .7} for i, x in enumerate(['Nike', 'Coke', 'Disney'])]
     def record(ctx, name, schema, system, content, **kw):
