@@ -396,7 +396,7 @@ def voiceless(ctx):
 
 def _display_seats(ctx, cap_y, n, named, marks):
     """The film's display seats: at most n places for display type, inside the safe area, clear of the caption
-    seat, the watermark, the platform's buttons and the head for nine tenths of the film. A frame a close face
+    seat, the watermark, the platform's buttons and the head in every sampled frame. A frame a close face
     fills may have one, or none: then the film sets no display type, it does not set it on the face."""
     S = _S()
     rows = _take_heads(ctx, marks=marks)
@@ -411,7 +411,7 @@ def _display_seats(ctx, cap_y, n, named, marks):
             return False
         if S.rects_touch(r, S.KEEPOUT) or (not wide and S.rects_touch(r, BUTTONS)):
             return False
-        return _clear(rows, r) >= 0.9
+        return _clear(rows, r) == 1.0
     out = []
     bw, bh = SEAT_BLOCK
     for s in named or []:
