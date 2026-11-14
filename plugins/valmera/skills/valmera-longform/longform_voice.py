@@ -187,14 +187,16 @@ def finish(out, script):
         del x
         import gc
         gc.collect()
-        after=measure(audio,expected,out/'longform-metrics')
         joins=[]
-        if after['pauses_per_min']>17.4:
-            heard=json.loads((out/'longform-metrics/heard.json').read_text())
+        if before['pauses_per_min']*factor>17.4:
+            # Pitch resynthesis preserves time. The already measured original
+            # word clock is enough to locate joins; only the completed edit
+            # needs another independent listen and pitch pass.
+            heard=retime(json.loads((out/'performance-metrics/heard.json').read_text()),factor)
             ff=os.environ.get('NARRATE_FFMPEG') or '/Users/masaoodi/Documents/Valmera/audit/subscriber-reliability-20260908/bin-arm/ffmpeg'
             wj,joins=shorten_joins(audio,wj,heard,script,out,ff,aim=join_aim)
             words.write_text(json.dumps(wj,indent=1))
-            after=measure(audio,expected,out/'longform-metrics')
+        after=measure(audio,expected,out/'longform-metrics')
         result=dict(before=before,after=after,tempo=factor,contour_gain=gain,join_edits=joins,method='Easton + Praat overlap-add, existing pitch contour; short joins paced with WSOLA, phonemes retained')
         done.write_text(json.dumps(result,indent=1))
         if after['ok']:

@@ -15,7 +15,7 @@ def allocate(ctx,script,ft,failure):
             a=c['time_range'][0]
             used.setdefault(url,[]).append((a+row['src'][0],a+row['src'][1]))
     available={}
-    for line in ft['lines']:
+    for line in ft['lines']+[dict(clips=ft.get('editorial',{}).get('bank',[]))]:
         for c in line['clips']:
             if C.unused_seconds(used,c)<.05:continue
             key=(c['path'],tuple(c['time_range']))
@@ -23,6 +23,9 @@ def allocate(ctx,script,ft,failure):
     candidates=list(available.values())
     rows=[dict(i=i,available_s=C.unused_seconds(used,c),shows=c.get('shows'),subject=c.get('subject') or c.get('name'),
                source=c['source'],kind=c.get('kind','video')) for i,c in enumerate(candidates)]
+    from timeline_repair import identity
+    rejected=ft.get('editorial',{}).get('rejected',[])
+    for i,c in enumerate(candidates):rows[i]['rejected']=[r for r in rejected if r['clip']==identity(c)]
     payload=dict(gaps=failure.gaps,candidates=rows,title=script['title'])
     key=hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()[:16]
     root=Path(ctx.supply)/'evidence-allocation';root.mkdir(exist_ok=True);path=root/(key+'.json')
@@ -30,7 +33,8 @@ def allocate(ctx,script,ft,failure):
     else:
         text,usage=story.writer.ask('You are allocating UNUSED archive material to the final uncovered words of a documentary. '
             'The heard field is what is actually said during the gap; words supplies surrounding context. '
-            'Pick only candidates that literally fit those words, correct person, event and era. Ground tests can explain hardware but cannot pose as a flight event. '
+            'Pick only candidates that literally fit those words, correct person, event and era. Never assign a clip to a segment for which it was rejected. '
+            'Read rejection reasons as visual observations, including when the original source metadata was wrong. Ground tests can explain hardware but cannot pose as a flight event. '
             'A phrase about the delayed crew launch can use the actual crew launch vehicle. Never fill a gap with unrelated generic pictures. '
             'No candidate has been used; the allocator will reserve its original frames and still perform the final visual check. '
             'Return JSON {lines:[{seg,candidates:[indexes],why}]}. Offer several suitable alternatives when available. Empty candidates is better than a false match.',

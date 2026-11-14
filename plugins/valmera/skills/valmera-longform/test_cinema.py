@@ -61,6 +61,31 @@ def test_scarce_evidence_is_reserved_before_a_flexible_earlier_line():
     assert not C.duplicate_ranges(shots)
 
 
+def test_checked_picture_follows_its_word_when_narration_timing_changes():
+    import timeline_repair as R
+    sc={'segments':[{'say':'Alpha beta.','chapter':'c'}]}
+    original={'duration':4,'words':[dict(w='Alpha',start=.1,end=1,seg=0),dict(w='beta.',start=2,end=3.8,seg=0)]}
+    changed={'duration':5,'words':[dict(w='Alpha',start=.1,end=1,seg=0),dict(w='beta.',start=3,end=4.8,seg=0)]}
+    a=C.F.Clock(original,sc);b=C.F.Clock(changed,sc)
+    anchor=R.anchor(a,2.1)
+    assert abs(R.resolve(b,anchor)-3.1)<1e-6
+
+
+def test_failed_clip_cannot_return_to_rejected_line_and_checked_slot_stays():
+    import timeline_repair as R
+    sc={'segments':[{'say':'Words.','chapter':'c'}]}
+    words={'duration':7.9,'words':[dict(w='Words.',start=.1,end=7.8,seg=0)]}
+    a,b=clip('a',0,4),clip('b',10,14)
+    ft={'lines':[dict(i=0,clips=[a,b])]}
+    shots,clock,_=C.schedule(sc,words,ft)
+    R.retain(ft,shots,clock,dict(evidence={0:dict(matches=True),1:dict(matches=False,reason='wrong subject')}))
+    ft['lines'][0]['clips'].append(b)
+    with pytest.raises(C.CoverageError) as caught:C.schedule(sc,words,ft)
+    assert len(caught.value.shots)==1
+    assert caught.value.shots[0]['clip']['path']=='a'
+    assert caught.value.shots[0]['f']==shots[0]['f']
+
+
 def test_alternate_scans_and_mirrors_are_one_picture(tmp_path):
     import numpy as np
     from PIL import Image,ImageOps

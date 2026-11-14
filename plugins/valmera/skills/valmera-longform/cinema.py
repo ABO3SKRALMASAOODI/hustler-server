@@ -384,7 +384,8 @@ def supply(ctx, script):
         save(nd/'footage_voices.json',placed)
         subprocess.run([PX.NARRATE_PY,reader,'level-voices',str(nd)],check=True,capture_output=True)
     wj=read(nd/'words.json')
-    schedule(sc,nar['words'],ft)
+    from timeline_repair import repair as repair_timeline
+    repair_timeline(ctx,script,ft,nar['words'])
     save(Path(ctx.supply)/'footage'/'footage.json',ft)
     record=dict(narration_s=wj['duration'],voice=nar['voice'],gate=nar['gate'],footage_clips=sum(len(l['clips']) for l in ft['lines']),
                 real_voices=len(wj.get('voices',[])),spend=[dict(stage='supply',provider='openai',what='footage',usd=sum(s.get('usd',0) for s in ft['spend']))])
@@ -447,7 +448,9 @@ def unify_image_copies(ft):
     import numpy as np
     from PIL import Image,ImageOps
     known={};groups=[]
-    for line in ft['lines']:
+    editorial=ft.get('editorial',{})
+    extra=[dict(clips=editorial.get('bank',[])),dict(clips=[p['clip'] for p in editorial.get('pins',[])])]
+    for line in ft['lines']+extra:
         for c in line['clips']:
             if c.get('kind')!='image':continue
             path=c['path']
@@ -487,6 +490,22 @@ def schedule(sc, words, ft):
             stop=min(b,pos+234)
             shots.append(dict(f=[pos,stop],seg=v['after'],clip=c,src=[(pos-a)/FPS,(stop-a)/FPS],say=v['said'],real_voice=v['person']))
             pos=stop
+    from timeline_repair import resolve,identity
+    rejected={(r['seg'],r['clip']) for r in ft.get('editorial',{}).get('rejected',[])}
+    for pin in ft.get('editorial',{}).get('pins',[]):
+        a,b=[round(resolve(clock,t)*FPS) for t in pin['anchors']]
+        if a<0 or b>end or b<=a or (b-a)/FPS>8:continue
+        if any(min(b,hi)>max(a,lo) for lo,hi in voice_spans):continue
+        c=pin['clip'];offset=pin['src'][0];seconds=(b-a)/FPS
+        if offset+seconds>c['seconds']+.025:continue
+        url=c['source']['url'];lo=c['time_range'][0]+offset;hi=lo+seconds
+        if c.get('kind')=='image':
+            if reserve(used,c,seconds) is None:continue
+        else:
+            if any(min(hi,v)>max(lo,u)+.001 for u,v in used.get(url,[])):continue
+            used.setdefault(url,[]).append((lo,hi))
+        shots.append(dict(f=[a,b],seg=pin['seg'],clip=c,src=[offset,offset+seconds],say=sc['segments'][pin['seg']]['say']))
+        voice_spans.append((a,b))
     tasks=[]
     for i,s in enumerate(sc['segments']):
         a,b=starts[i:i+2]
@@ -498,7 +517,7 @@ def schedule(sc, words, ft):
                 if lo<va: cut.append((lo,va))
                 if vb<hi: cut.append((vb,hi))
             intervals=cut
-        clips=by.get(i,{}).get('clips',[])
+        clips=[c for c in by.get(i,{}).get('clips',[]) if (i,identity(c)) not in rejected]
         for a,b in intervals:
             # Allocate scarce evidence first. Chronological greed can spend a
             # unique image on a well-covered line and starve the only other
@@ -620,7 +639,7 @@ def score(ctx,script):
                 pictures=len(shots),max_hold_s=max((r['f'][1]-r['f'][0])/FPS for r in shots),spend=[])
 
 
-def source_review(ctx,shots):
+def source_review(ctx,shots,required=True):
     """Catch wrong archive material before spending a full-film render."""
     from picture_check import check
     key=hashlib.sha256(json.dumps(shots,sort_keys=True).encode()+(HERE/'picture_check.py').read_bytes()).hexdigest()[:16]
@@ -628,7 +647,7 @@ def source_review(ctx,shots):
     if report.exists():result=read(report)
     else:
         result=check(None,shots,folder,PX.FF,source=True);save(report,result)
-    if not result['ok']:raise ValueError('source pictures require repair: '+str(report))
+    if required and not result['ok']:raise ValueError('source pictures require repair: '+str(report))
     return result
 
 
