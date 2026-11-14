@@ -107,6 +107,9 @@ def first_film_index(index):
     if evidence.get("status") != "verified" or evidence.get("version") != VERSION:
         raise ValueError("first film is waiting for source screen evidence")
     end = min(float(out["video"]["duration"]), float(evidence["safe_end_s"]))
+    # EDL source clocks are stored to centiseconds. Round inward so lowering
+    # cannot round the last safe source frame outward across this boundary.
+    end = math.floor(end * 100 + 1e-7) / 100
     out["video"]["duration"] = end
     out["_first_film_source_guard"] = True
     out["shots"] = [dict(s, end=min(float(s["end"]), end)) for s in out.get("shots", [])
