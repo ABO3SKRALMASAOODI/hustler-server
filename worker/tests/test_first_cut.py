@@ -77,7 +77,7 @@ def test_vertical_phone_video_without_speech_skips_speech_and_reframe(
     assert "original sound preserved" in applied[0]
 
 
-def test_a_screen_recording_keeps_its_shape(monkeypatch):
+def test_a_screen_recording_fits_inside_the_promised_vertical_frame(monkeypatch):
     index = _index(50)
     index["spatial"] = {"samples": [{"t": i, "faces": [], "dense_ui": True,
                                      "text": []} for i in range(10)]}
@@ -87,8 +87,8 @@ def test_a_screen_recording_keeps_its_shape(monkeypatch):
     calls = _record(monkeypatch, ctx)
     _steps, applied, _p = first_cut.video_chain(ctx, None, _clock(), {"usd": 0})
     assert "auto_reframe" not in [c[0] for c in calls]
-    assert any("own shape" in a for a in applied)
-    assert first_cut._summary(applied, 30) .startswith("a 30-second version")
+    assert any(name == "set_frame" and args["ratio"] == "9:16" and args["mode"] == "pad_blur" for name, args in calls)
+    assert first_cut._summary(applied, 30).startswith("a 30-second vertical version")
 
 
 def test_no_face_table_geometry_is_not_a_screen_or_ui_camera(monkeypatch):

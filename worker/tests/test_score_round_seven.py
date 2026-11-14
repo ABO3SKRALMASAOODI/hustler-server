@@ -35,48 +35,17 @@ def width(r):
 
 # ------------------------------------------------------------------ the take under a voice
 
-def test_a_talking_take_is_cut_inside_itself_where_a_phrase_starts():
+def test_a_talking_take_keeps_continuous_camera_between_real_edits():
     idx = selfie(20.0)
     c = comp(film_text(beats_over(idx, 4, lambda k, a, z: {"pic": "main"})), idx, voice(20.0))
     take = [s for s in shots(c) if s.get("pic") == "main"]
-    cuts = [s for s in take if s.get("punch")]
-    assert len(cuts) >= 5 and all(s.get("talk") for s in cuts)                 # 20 s of one take: a framing every 2 s at most
-    assert c.meter["pace"]["take_punches"] == len(cuts) and c.meter["move"].get("talk_cuts") == len(cuts)
-    words = {int(f) for f in (int(round(w["t0"] * 30)) for w in idx["words"])}
-    spans, start = [], take[0]["f"][0]
-    for s in cuts:                                                              # never two cuts closer than a framing can be read
-        spans.append(s["f"][0] - start)
-        start = s["f"][0]
-    assert min(spans) >= pace.TALK_MIN_F - 1 and max(spans) <= pace.TALK_MAX_F + pace.TALK_MIN_F
-    assert words                                                                # the index has word times to cut on
-    for s in take:                                                              # every framing holds the head whole
+    assert take and not any(s.get("punch") for s in take)
+    assert c.meter["pace"]["take_punches"] == 0
+    assert any(len(rows(s)) > 1 for s in take)
+    for s in take:
         for r in rows(s):
-            assert r[0] <= 0.36 + 1e-6 and r[2] >= 0.64 - 1e-6 and r[1] <= 0.2 + 1e-6 and r[3] >= 0.4 - 1e-6
-
-
-def test_no_cut_inside_a_talking_take_goes_back_to_the_framing_just_left():
-    idx = selfie(20.0)
-    c = comp(film_text(beats_over(idx, 4, lambda k, a, z: {"pic": "main"})), idx, voice(20.0))
-    take = [s for s in shots(c) if s.get("pic") == "main"]
-    starts = [width(rows(take[0])[0])] + [width(rows(s)[0]) for s in take if s.get("punch")]
-    steps = [(width(rows(a)[-1]), width(rows(b)[0])) for a, b in zip(take, take[1:]) if b.get("punch")]
-    assert all(abs(x / y - 1) >= 0.05 for x, y in steps)                        # each cut is a step the eye reads
-    turned = all(abs(starts[i + 1] / starts[i - 1] - 1) > 0.03 for i in range(1, len(starts) - 1))
-    closing = all(x / y > 1.04 for x, y in steps)
-    assert turned or closing                                                    # wide, closer, closest, wide; or every cut closes in and the frame drifts back
-
-
-def test_a_talking_stretch_with_room_for_one_step_closes_in_and_drifts_back_out(monkeypatch):
-    monkeypatch.setattr(move, "TALK_MAX", 1.15)                                 # one step of room: two framings
-    idx = selfie(20.0)
-    c = comp(film_text(beats_over(idx, 4, lambda k, a, z: {"pic": "main"})), idx, voice(20.0))
-    take = [s for s in shots(c) if s.get("pic") == "main"]
-    cuts = [(a, b) for a, b in zip(take, take[1:]) if b.get("punch")]
-    assert len(cuts) >= 4
-    for a, b in cuts:
-        assert width(rows(a)[-1]) / width(rows(b)[0]) > 1.05                    # every cut closes on the speaker
-    drift = [s for s in take if s.get("punch") and len(rows(s)) > 4]
-    assert drift and all(width(rows(s)[-1]) > width(rows(s)[0]) for s in drift)  # and the frame eases wide again while they talk
+            assert r[0] <= .36 + 1e-6 and r[2] >= .64 - 1e-6
+            assert r[1] <= .2 + 1e-6 and r[3] >= .4 - 1e-6
 
 
 def test_a_wordless_stretch_with_room_for_one_step_takes_it_once(monkeypatch):
