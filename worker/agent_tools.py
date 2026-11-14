@@ -34380,11 +34380,6 @@ for _retired_tool in (
         "audition_music_candidates", "fetch_music"):
     TOOLS.pop(_retired_tool, None)
 
-# This provider-backed tool was retired unconditionally after an old outage.
-# Advertise the real capability only on deployments that can execute it.
-if not videogen.video_gen_available():
-    TOOLS.pop('generate_video', None)
-
 # Blueprint close-out used to freeze writes after a clean preview. The editor
 # now edits, then may look at a render if it wants; it is never locked out.
 def finishing_checkpoint(ctx):
@@ -34756,6 +34751,8 @@ def _tool_disabled(name, model=None):
         return True
     if name == "review_audio":
         return not llm.audio_review_available()
+    if name == "generate_video":
+        return not videogen.video_gen_available()
     if name == "fetch_url":
         return not config.URL_FETCH_ENABLED
     if name in ("record_website", "record_website_demo"):
