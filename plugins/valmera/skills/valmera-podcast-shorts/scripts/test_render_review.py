@@ -188,3 +188,19 @@ def test_remote_render_adapter_does_not_reserve_a_mac_compute_slot(tmp_path,monk
     monkeypatch.setattr(wf.chain,'sh',run)
     result=wf.wf3.render(ctx,{},dict(l1=str(l1)))
     assert os.path.exists(result['film'])
+
+
+def test_remote_music_adapter_keeps_payoff_and_shared_track_exclusions(tmp_path,monkeypatch):
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),state_root=str(tmp_path),run_id='test',workflow='wf1',log=lambda _:None,args={'music':True,'music_ledger':str(tmp_path/'used.json')})
+    (tmp_path/'used.json').write_text('["previous-track"]')
+    monkeypatch.setenv('SHELL_MUSIC_CMD','/remote-music.sh');monkeypatch.setenv('SHELL_MUSIC_REMOTE','1')
+    calls=[]
+    def run(ctx,args,**kw):
+        calls.append(1);a=json.load(open(args[-1]))
+        assert args[:2]==['zsh','/remote-music.sh'] and not kw['heavy']
+        assert a['used']==['previous-track'] and a['payoff']==12.5
+        assert a['l1']=='audio-scene.json' and a['kind']=='podcast'
+        raise RuntimeError('test dispatch boundary')
+    monkeypatch.setattr(wf.chain,'sh',run)
+    assert wf.chain.music_version(ctx,dict(film='actual-engine.mp4'),dict(l1='scene.json',l1_audio='audio-scene.json',turn_s=12.5)) is None
+    assert calls and json.load(open(tmp_path/'used.json'))==['previous-track']

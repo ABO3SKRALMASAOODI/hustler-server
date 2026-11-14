@@ -453,7 +453,17 @@ def music_version(ctx, rd, sc):
                                payoff=float(turn) if turn is not None else None, used=used), open(aj, "w"), ensure_ascii=False)
                 open(hp, "w").write(MUSIC_USED)
                 cmd = cmd[:cmd.index(" -m music_film score ")] + f" '{hp}' '{aj}'"
-            sh(ctx, ["zsh", "-c", cmd], label=f"wf-{tag}-{ctx.run_id}", heavy=True, timeout=1800)
+            adapter = os.environ.get("SHELL_MUSIC_CMD")
+            if adapter:
+                aj = os.path.join(ctx.supply, f"{tag}_args.json")
+                json.dump(dict(l1=sc.get("l1_audio") or sc["l1"], work=ctx.supply, film=rd["film"], out=out + ".part.mp4",
+                               kind=SONG_KIND.get(ctx.workflow, "stories"), cache=os.path.join(ctx.state_root, "music_cache"), report=report,
+                               brief=brief, payoff=float(turn) if turn is not None else None, used=used,
+                               song=song, vocals=(ctx.args or {}).get("song_vocals")), open(aj, "w"), ensure_ascii=False)
+                sh(ctx, ["zsh", adapter, aj], label=f"wf-{tag}-{ctx.run_id}",
+                   heavy=os.environ.get("SHELL_MUSIC_REMOTE") != "1", timeout=1800)
+            else:
+                sh(ctx, ["zsh", "-c", cmd], label=f"wf-{tag}-{ctx.run_id}", heavy=True, timeout=1800)
             rep = json.load(open(report)) if os.path.exists(report) else {}
             if not rep.get("ok") or not os.path.exists(out + ".part.mp4"):
                 raise RuntimeError(json.dumps({k: rep.get(k) for k in ("why", "tried")}, ensure_ascii=False)[:600])

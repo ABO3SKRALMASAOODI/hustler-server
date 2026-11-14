@@ -128,6 +128,10 @@ render through `wf3.render`): the script gets the scene, the work folder, the so
 If that adapter runs the renderer entirely on another host, set `SHELL_RENDER_REMOTE=1` so network
 transfer does not reserve a Mac render slot. Local renderers always retain `heavy.sh`; the remote
 adapter must bound resources on its own host and return the actual engine output for all normal checks.
+`SHELL_MUSIC_CMD=<script>` similarly receives one JSON argument file for `music_film.score`, including
+the film, audio scene, payoff, licensed-track exclusions, supplied song and report/output paths.
+`SHELL_MUSIC_REMOTE=1` declares remote compute. The shared track ledger stays locked until the actual
+mix and report return; branding and export checks remain local product stages.
 
 ## Never
 
