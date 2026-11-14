@@ -77,6 +77,7 @@ class WindowContext:
         self.director_footage = None
         self.director_bed_thread = None
         self.director_execution = None
+        self.director_typed = True
 
     def __getattr__(self, name):
         return getattr(self.parent, name)
