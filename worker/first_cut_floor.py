@@ -10,7 +10,6 @@ import os
 import signal
 import subprocess
 import sys
-import time
 
 CLASSES = {'same_upload': 0, 'trim_only': 1, 'light_touch': 2, 'edited': 3}
 
@@ -90,6 +89,7 @@ def choose(ctx, worker_db, started, start_edl, steps, applied, picked, render, b
     old = copy.deepcopy(edl)
     saved = (steps, applied, picked, render)
     changed = False
+    more, floor_applied, floor_picked, floor_render = [], applied, picked, render
     try:
         candidate = measure(ctx, worker_db, 'candidate')
         rec['candidate'] = candidate

@@ -1,31 +1,7 @@
-"""taste_ceil: TASTE.md (week-1112) ceilings for rubric v3.1, measured with
-signal processing only. No model, no word list, nothing read from what a
-customer asked.
+"""Fixed judge3 frame comparisons, without its subjective ceilings or quotas.
 
-Measured here, per 10 s window (hop 5 s) of the programme:
-  * every cut is classed from the frames either side of it:
-      step  the picture after is a zoom of the picture before (a crop of the same take)
-      jump  the same framing continues (a jump cut, no step)
-      new   anything else: a new picture
-  * speech edits (paired only): a cut at a join in the source's sound, pinned to
-    +-0.2 s by edit_delta's per-frame map (fine_joins), else the 3 s run interval.
-    A step on a speech edit hides the jump and is allowed, one per edit.
-  * placed sounds (paired only): hits of sound that the aligned source does not have,
-    counted only where the source at that instant (each 20 ms frame aligned on its
-    own) is not speech-shaped; hits within 1 s are one gesture (edit_delta.audio_added).
-  * flashes; paired, a flash the upload already has at that source time is not counted.
-  * asked (TASTE 4.5): devices the customer asked for are out of every count. Which
-    departments or moments were asked is read from the request by a model (the
-    Scout's ledger, or the judge reading it), passed as {dept: "all" | [times]}.
-The supply class (TASTE 4.1) comes from new pictures per 10 s (NP10) and the
-programme length; `bed` is added sound over half the programme.
-
-Ceilings (TASTE 5.4):
-  unearned_devices   any window over the class allowance of TASTE 4.2 by a factor of 2   cap 3
-  worse_than_upload  a harm of TASTE 4.4 in the delivery and not in the upload            cap 2
-                     measured: h7 density (any window over the allowance, paired only);
-                     the judge may also declare it (h1-h6, h8, h9 seen on the board)
-  type_said_twice, type_outside_safe_area   declared by the judge                         cap 6
+Copied from week-1106/rater/taste_ceil.py: classify a real new picture,
+jump cut, or scale step and align steps with measured speech edits.
 """
 import math
 

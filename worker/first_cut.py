@@ -3762,18 +3762,27 @@ def run(worker_db, job, project, index_row):
 
 def _render_cut(ctx, steps, picked):
     """The First cut's preview render (the chain's or the Director's film)."""
+    keep_whole = bool(picked and picked.get("how") in {"finished_piece", "continuous"})
+    if not ctx.versions_written and not keep_whole:
+        return None
     # Also covers early returns such as a finished-piece selection. Never
     # publish a landscape file with the vertical-first-film promise.
     row = ctx.latest_edl() or {}
     frame = (row.get("json") or {}).get("frame") or {}
     ratio = frame.get("ratio", "source")
-    if ratio != "9:16" and not (ratio == "source" and _orientation(ctx.index) == "vertical"):
+    if ratio != "9:16" and not (ratio == "source" and _orientation(getattr(ctx, "index", {}) or {}) == "vertical"):
         result = agent_tools.execute(ctx, "set_frame", {"ratio": "9:16", "mode": "pad_blur"})
         steps.append({"tool": "first_film_frame", "ok": not _failed(result), "note": str(result)[:160]})
         if _failed(result):
             return result
+    if not picked or picked.get("how") != "director":
+        try:
+            import first_film_sound
+            first_film_sound.chain(ctx)
+        except Exception as exc:  # a sound check never loses the existing cut
+            steps.append({"tool": "first_film_sound", "ok": False,
+                          "note": f"{type(exc).__name__}: {str(exc)[:120]}"})
     render = None
-    keep_whole = bool(picked and picked.get("how") in {"finished_piece", "continuous"})
     if ctx.versions_written or keep_whole:
         _say(ctx, "render", "Rendering your preview")
         if config.FIRST_CUT_DRAFT_FIRST and \

@@ -139,7 +139,8 @@ def test_a_grandfathered_payers_chain_is_the_c2_chain(monkeypatch):
     the old punches); with it the new devices run."""
     names_off = _talking_chain(monkeypatch, q1=False)
     names_on = _talking_chain(monkeypatch, q1=True)
-    assert "punch_in_on_emphasis" in names_off
+    assert "punch_in_on_emphasis" not in names_off
+    assert "add_zoom" in names_off
     for name in ("source_broll", "add_zoom_path", "action_follow"):
         assert name not in names_off
     assert "source_broll" in names_on
