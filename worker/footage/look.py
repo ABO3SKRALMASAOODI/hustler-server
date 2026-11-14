@@ -33,6 +33,36 @@ For every cell decide:
 Answer with one JSON object only: {"cells":[{"n":1,"ok":true,"clean":true,"grade":4,"lines":[3],"shows":"...","x":0.5,"trim":[0,0]}, ...]} with one entry per cell."""
 
 
+BRIEF_CELL_W, BRIEF_CELL_H = 768, 432
+BRIEF_PER_SHEET = 8        # with a writer's brief a sheet carries fewer, larger cells: the version and the moment must read
+
+LOOK_BRIEF = """
+
+The film's lines carry the writer's brief: for each line, the things it names ("see"), each with the version or time it means ("as of") and the moment the line tells. For every line a cell carries (each number in its "lines"), also return one entry in "line_checks": {"line": line number, "version_ok": bool, "time_ok": bool, "exact_thing": bool}, meaning:
+- "exact_thing": the frame shows the very thing the line is about (that person, that film, that product, that place, or the work itself), not a lookalike, a sequel or another film, a namesake, a toy, sculpture, ride or museum version, a fan remake.
+- "time_ok": false only when the frame plainly shows another time than the line means (a later building, a later film's characters, a person decades away from the moment the line tells); true when a viewer cannot tell.
+- "version_ok": false only when the line's words set one version against another and the frame plainly is the other one (a test reel under words about the finished film, the finished film under words about an early version, a later model); when the words only name the work, any version of it carries them.
+A line belongs in "lines" only when all three are true."""
+
+
+def _brief_text(ln):
+    """A line's brief items after its words: (thing, as of, moment), plain text."""
+    out = []
+    for x in ln.get("see") or []:
+        if isinstance(x, dict) and x.get("thing"):
+            bits = [str(x["thing"])] + [f"{k}: {x[v]}" for k, v in (("as of", "as_of"), ("moment", "moment")) if x.get(v)]
+            out.append("; ".join(bits))
+    return ("  [see: " + " | ".join(out) + "]") if out else ""
+
+
+def _listing(lines):
+    return "\n".join(f"{ln['i']}. {ln['say']}  (show: {ln.get('show') or '-'})" + _brief_text(ln) for ln in lines)
+
+
+def has_brief(lines):
+    return any(ln.get("see") for ln in lines)
+
+
 def moments(subject, lines, sources, budget_s=90.0):
     """([{src, t, lines, why}], usd). sources: [{title, channel, transcript: [{t0,t1,text}]}]."""
     blocks = []
@@ -42,7 +72,7 @@ def moments(subject, lines, sources, budget_s=90.0):
             blocks.append(f"Video {k}: {s['title']} ({s.get('channel') or '?'})\n" + "\n".join(tr)[:14000])
     if not blocks:
         return [], 0.0
-    ls = "\n".join(f"{ln['i']}. {ln['say']}  (show: {ln.get('show') or '-'})" for ln in lines)
+    ls = _listing(lines)
     content = f"Subject: {subject['name']} (must show: {subject['must_show']})\n\nLines:\n{ls}\n\n" + "\n\n".join(blocks)
     txt, usd = ask.ask(MOMENTS_SYSTEM, content, "footage_moments", budget_s=budget_s, max_tokens=3000)
     out = []
@@ -74,11 +104,12 @@ def points(shots, long_step=4.0, min_s=0.8):
 def pick_times(shots, said, cap=PER_SOURCE, around_s=8.0, moving=None, min_s=0.8):
     """Frame times for one source: every look point inside the moments the transcript pointed at, then an
     even spread of the others (a source's best picture is often under words about something else).
-    moving (a set of shots measured as moving, footage.motion; a caller asking for motion first): those shots' points
-    come first, and shots of min_s and more are looked at. Absent, exactly as before."""
-    pts = points(shots, min_s=min_s)
+    moving (a set of shots measured as moving, footage.motion; a caller asking for motion first): shots of min_s and more
+    are looked at; the moments' points are taken moving first, still ones at most a third of the cap; the room left is
+    filled with moving points first, spread evenly over the moving set, then still points. Absent, exactly as before."""
     if moving is not None:
-        pts = sorted(pts, key=lambda q: (tuple(q[1]) not in moving, q[0]))
+        return _pick_moving(shots, said, cap, around_s, moving, min_s)
+    pts = points(shots, min_s=min_s)
     near = []
     for t in said:
         for p, _ in pts:
@@ -93,8 +124,38 @@ def pick_times(shots, said, cap=PER_SOURCE, around_s=8.0, moving=None, min_s=0.8
     return sorted(near)
 
 
-def sheet(cells, path):
+def _spread(xs, n):
+    """n items spread evenly over xs (all of them when n covers it)."""
+    if n <= 0 or not xs:
+        return []
+    if n >= len(xs):
+        return list(xs)
+    return [xs[int(k * len(xs) / n)] for k in range(n)]
+
+
+def _pick_moving(shots, said, cap, around_s, moving, min_s):
+    pts = points(shots, min_s=min_s)
+    mv = {p for p, sh in pts if tuple(sh) in moving}
+    near_m, near_s = [], []
+    for t in said:
+        for p, _ in pts:
+            if abs(p - t) < around_s and p not in near_m and p not in near_s:
+                (near_m if p in mv else near_s).append(p)
+    lim = max(cap * 2 // 3, cap - 8)
+    near = near_m[:lim]
+    near += near_s[:max(0, min(cap // 3, lim - len(near)))]
+    room = cap - len(near)
+    rest_m = [p for p, _ in pts if p in mv and p not in near]
+    rest_s = [p for p, _ in pts if p not in mv and p not in near]
+    take_m = _spread(rest_m, room)
+    near += take_m
+    near += _spread(rest_s, cap - len(near))
+    return sorted(near)
+
+
+def sheet(cells, path, cell=(CELL_W, CELL_H)):
     """cells: [(n, jpg)] -> one numbered sheet."""
+    CELL_W, CELL_H = cell
     rows = (len(cells) + COLS - 1) // COLS
     im = Image.new("RGB", (COLS * (CELL_W + 6), rows * (CELL_H + 6)), (16, 16, 16))
     d = ImageDraw.Draw(im)
@@ -118,19 +179,27 @@ def sheet(cells, path):
 
 
 def check(subject, lines, cands, sources, work, budget_s=120.0):
-    """cands: [{src, t, jpg, said}] -> (the same with ok, clean, grade, lines, shows, x; usd)."""
+    """cands: [{src, t, jpg, said}] -> (the same with ok, clean, grade, lines, shows, x; usd).
+    Lines carrying the writer's brief (see: thing, as_of, moment; only the stories skill sends it): the listing names each
+    line's brief, the model also answers per line it gives a cell (version_ok, time_ok, exact_thing, LOOK_BRIEF), a
+    cell keeps only the lines where all three are true, and a sheet holds BRIEF_PER_SHEET cells at BRIEF_CELL_W x
+    BRIEF_CELL_H. Without a brief, exactly as before."""
     import concurrent.futures as cf
-    ls = "\n".join(f"{ln['i']}. {ln['say']}  (show: {ln.get('show') or '-'})" for ln in lines)
-    groups = [cands[i:i + PER_SHEET] for i in range(0, len(cands), PER_SHEET)]
+    brief = has_brief(lines)
+    ls = _listing(lines) if brief else "\n".join(f"{ln['i']}. {ln['say']}  (show: {ln.get('show') or '-'})" for ln in lines)
+    per = BRIEF_PER_SHEET if brief else PER_SHEET
+    system = LOOK_SYSTEM + LOOK_BRIEF if brief else LOOK_SYSTEM
+    groups = [cands[i:i + per] for i in range(0, len(cands), per)]
 
     def one(gi):
         g = groups[gi]
-        sp = sheet([(j + 1, c["jpg"]) for j, c in enumerate(g)], os.path.join(work, f"sheet_{_slug(subject['name'])}_{gi}.jpg"))
+        sp = sheet([(j + 1, c["jpg"]) for j, c in enumerate(g)], os.path.join(work, f"sheet_{_slug(subject['name'])}_{gi}.jpg"),
+                   **({"cell": (BRIEF_CELL_W, BRIEF_CELL_H)} if brief else {}))
         listing = "\n".join(f"cell {j + 1}: video {c['src']} \"{sources[c['src']]['title'][:90]}\" ({sources[c['src']].get('channel') or '?'}), "
                             f"at {c['t']:.1f} s" + (f"; said there: \"{c['said'][:140]}\"" if c.get("said") else "") for j, c in enumerate(g))
         content = [{"type": "text", "text": f"Subject: {subject['name']}\nA frame must show: {subject['must_show']}\n\nLines:\n{ls}\n\n{listing}"},
                    ask.image_block(sp)]
-        txt, usd = ask.ask(LOOK_SYSTEM, content, "footage_look", budget_s=budget_s, max_tokens=4000)
+        txt, usd = ask.ask(system, content, "footage_look", budget_s=budget_s, max_tokens=4000)
         got = {}
         for c in ask.json_obj(txt).get("cells") or []:
             if isinstance(c, dict) and isinstance(c.get("n"), int):
@@ -147,8 +216,17 @@ def check(subject, lines, cands, sources, work, budget_s=120.0):
                 trim += [0.0] * (2 - len(trim))
             except (TypeError, ValueError):
                 trim = [0.0, 0.0]
+            got_lines = [int(n) for n in v.get("lines") or [] if isinstance(n, int)]
+            extra = {}
+            if brief:
+                checks = {}
+                for lc in v.get("line_checks") or []:
+                    if isinstance(lc, dict) and isinstance(lc.get("line"), int):
+                        checks[lc["line"]] = all(lc.get(k) is True for k in ("version_ok", "time_ok", "exact_thing"))
+                extra = dict(lines_offered=got_lines)
+                got_lines = [n for n in got_lines if checks.get(n) is True]
             out.append(dict(c, ok=v.get("ok") is True, clean=v.get("clean") is not False, trim=[round(t, 3) for t in trim], grade=int(v.get("grade") or 0) if str(v.get("grade") or "0").isdigit() else 0,
-                            lines=[int(n) for n in v.get("lines") or [] if isinstance(n, int)], shows=str(v.get("shows") or "")[:80], x=round(x, 3), sheet=os.path.basename(sp)))
+                            lines=got_lines, shows=str(v.get("shows") or "")[:80], x=round(x, 3), sheet=os.path.basename(sp), **extra))
         return out, usd
     res, usd = [], 0.0
     with cf.ThreadPoolExecutor(max_workers=4) as pool:

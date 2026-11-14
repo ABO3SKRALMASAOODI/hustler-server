@@ -515,3 +515,63 @@ def test_a_lost_cut_is_reassigned_to_another_source(monkeypatch, tmp_path):
     res = run.find(lines, [dict(name="A", **{"is": "thing"})], "t", str(tmp_path / "out"), shot_s=0.45, line_max=4, reassign_lost=True, keep_work=False)
     ln = res["lines"][0]
     assert ln["lost"] >= 1 and ln["replaced"] >= 1 and ln["clips"] and all(c["source"]["url"] == "u1" for c in ln["clips"])
+
+
+# ----------------------------------------------------------------- round 3 (valmera-stories): motion-first sampling, the brief's per-line checks
+
+def _old_pick_times(shots, said, cap=look.PER_SOURCE, around_s=8.0, min_s=0.8):
+    pts = look.points(shots, min_s=min_s)
+    near = []
+    for t in said:
+        for p, _ in pts:
+            if abs(p - t) < around_s and p not in near:
+                near.append(p)
+    near = near[:max(cap * 2 // 3, cap - 8)]
+    rest = [p for p, _ in pts if p not in near]
+    room = cap - len(near)
+    if room > 0 and rest:
+        step = max(1, len(rest) // room)
+        near += rest[::step][:room]
+    return sorted(near)
+
+
+def test_motion_first_sampling_fills_with_moving_shots_and_caps_still_moments():
+    shots_ = [(k * 1.0, k * 1.0 + 1.0) for k in range(300)]
+    moving = {shots_[k] for k in range(0, 300, 3)[:97]}
+    mv_pts = {round(a + 0.5, 2) for a, _ in moving}
+    picks = look.pick_times(shots_, [], cap=36, moving=moving, min_s=0.3)
+    assert len(picks) == 36 and set(picks) <= mv_pts                         # all 36 moving
+    assert max(picks) - min(picks) > 200                                       # spread over the moving set
+    said = [40.0, 150.0, 250.0]
+    picks = look.pick_times(shots_, said, cap=36, moving=moving, min_s=0.3)
+    still_near = [p for p in picks if p not in mv_pts and any(abs(p - t) < 8.0 for t in said)]
+    assert len(still_near) <= 12 and len(picks) == 36
+    for sh, sd in (([(i * 2.0, i * 2.0 + 2.0) for i in range(100)], [101.0]), ([(0.0, 40.0)], [])):
+        assert look.pick_times(sh, sd, cap=12) == _old_pick_times(sh, sd, cap=12)   # moving=None: exactly as before
+
+
+def test_the_look_keeps_only_lines_whose_three_brief_checks_pass(monkeypatch, tmp_path):
+    from PIL import Image
+    jpg = str(tmp_path / "f.jpg")
+    Image.new("RGB", (64, 36), (90, 90, 90)).save(jpg)
+    seen = {}
+
+    def ask_(system, content, what, budget_s=0, max_tokens=0):
+        seen.setdefault("systems", []).append(system)
+        seen.setdefault("texts", []).append(content[0]["text"])
+        cells = [dict(n=1, ok=True, clean=True, grade=4, lines=[0, 1, 2], shows="x", x=0.5,
+                      line_checks=[dict(line=0, version_ok=True, time_ok=True, exact_thing=True),
+                                   dict(line=1, version_ok=False, time_ok=True, exact_thing=True)])]
+        return json.dumps(dict(cells=cells)), 0.0
+    monkeypatch.setattr(look.ask, "ask", ask_)
+    sub = dict(name="Toy Story", must_show="the film")
+    cands = [dict(src=0, t=1.0, jpg=jpg, said="")]
+    srcs = [dict(title="T", channel="c")]
+    brief = [dict(i=0, say="a", see=[dict(thing="Toy Story", as_of="1995 release", moment="the window fall")]), dict(i=1, say="b"), dict(i=2, say="c")]
+    out, _ = look.check(sub, brief, cands, srcs, str(tmp_path))
+    assert out[0]["lines"] == [0] and out[0]["lines_offered"] == [0, 1, 2]          # line 1 fails version, line 2 was not checked
+    assert "line_checks" in seen["systems"][0] and "as of: 1995 release" in seen["texts"][0] and "moment: the window fall" in seen["texts"][0]
+    plain = [dict(i=0, say="a"), dict(i=1, say="b"), dict(i=2, say="c")]
+    out, _ = look.check(sub, plain, cands, srcs, str(tmp_path))
+    assert out[0]["lines"] == [0, 1, 2] and "lines_offered" not in out[0] and seen["systems"][1] == look.LOOK_SYSTEM
+    assert "[see:" not in seen["texts"][1]

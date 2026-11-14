@@ -261,9 +261,10 @@ def lines_of(sc):
 
 
 def judged_lines(c, lines):
-    """The lines a candidate is judged against: those whose brief names its subject, and the line it was found for."""
-    subj = c.get("subject")
-    out = {i for i, ln in lines.items() if subj and any(x.get("thing") == subj for x in ln.get("see") or [])}
+    """The lines a candidate is judged against: those whose brief names its subject or the named thing it was found as
+    (c["thing"]: a clip found for a moment or a voice subject of that thing), and the line it was found for."""
+    names = {x for x in (c.get("subject"), c.get("thing")) if x}
+    out = {i for i, ln in lines.items() if names and any(x.get("thing") in names for x in ln.get("see") or [])}
     if isinstance(c.get("line"), int) and c["line"] in lines:
         out.add(c["line"])
     return sorted(out)
@@ -419,6 +420,7 @@ def candidates(pack):
         for c in ln.get("clips") or []:
             s = c.get("source") or {}
             d = dict(path=c["path"], kind="clip", subject=c.get("subject"), line=int(ln["i"]), seconds=c.get("seconds"), cuts=c.get("cuts") or [],
+                     **({"thing": c["thing"]} if c.get("thing") else {}),
                      meta=dict(title=s.get("title"), channel=s.get("channel"), upload_date=s.get("upload_date"), page=s.get("url"),
                                description=(s.get("description") or "")[:400] or None, time_range=c.get("time_range"), shows=c.get("shows")))
             d["takes"] = takes_of(d)

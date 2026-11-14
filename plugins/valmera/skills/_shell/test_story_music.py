@@ -66,6 +66,7 @@ def test_story_joints_from_the_beats_and_a_real_voice(tmp_path):
         t += 0.9
     pack = {"words": {"words": words, "duration": t}, "voices": [{"start": 2.0, "end": 3.5, "person": "X"}]}
     j = wf3.joints_of(sc, pack)
+    j = [x for x in j if x["kind"] != "swell"]          # round 3: a hole's exit may earn a swell in the narrator's next gap
     assert [x["kind"] for x in j] == ["turn", "payoff", "close", "voice"]
     for x in j[:3]:
         assert 0.5 <= x["next_first_word_t"] - x["last_word_t"] <= 2.3 and x["t"] == x["next_first_word_t"]

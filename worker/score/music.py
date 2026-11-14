@@ -772,6 +772,12 @@ def _story_notches(t, marks, d, e, P, notes):
     return ride
 
 
+def _nearest_hole(notes, x):
+    """The time of the joint hole nearest x (a story's merged drop or end hole), None when the story has none."""
+    hs = [h["t"] for h in notes.get("holes") or []]
+    return min(hs, key=lambda h: abs(h - x)) if hs else None
+
+
 def flow(nf, hop_s, marks, plan, P, base, open_gain):
     """The level the song is ridden at through the film, dB per 10 ms frame, before the song's own loudness is read:
     (slow, fast, notes). slow: under the voice while it speaks, up in its pauses (more in a longer one, none in a
@@ -835,13 +841,21 @@ def flow(nf, hop_s, marks, plan, P, base, open_gain):
         slow += np.where(t >= d, P["after_drop_db"], 0.0)
         fast += np.where(t >= d, (P["hit_db"] - P["after_drop_db"]) * np.where(t < d + bs, 1.0, after), 0.0)
         h0 = d - hole
-        fast -= P["hole_db"] * np.clip(np.minimum((t - h0) / P["hole_in_s"], (d - JOIN_S - 0.004 - t) / P["hole_out_s"]), 0.0, 1.0)
-        notes["holes"].append({"t": round(h0, 3), "len_s": round(hole, 3), "db": P["hole_db"], "before": "drop"})
+        if joints:
+            # a narrated story: the arrangement's drop breathes in the nearest joint's hole, never a hole of its own
+            # (the judge's one to three drops a reel)
+            notes.setdefault("holes_merged", []).append({"t": round(h0, 3), "before": "drop", "into": _nearest_hole(notes, h0)})
+        else:
+            fast -= P["hole_db"] * np.clip(np.minimum((t - h0) / P["hole_in_s"], (d - JOIN_S - 0.004 - t) / P["hole_out_s"]), 0.0, 1.0)
+            notes["holes"].append({"t": round(h0, 3), "len_s": round(hole, 3), "db": P["hole_db"], "before": "drop"})
         notes["hits"].append({"t": round(d, 3), "db": P["hit_db"], "what": "drop"})
     bs = (plan.get("spans") or [{"beat_s": plan["beat_s"]}])[-1]["beat_s"]
     hole = float(np.clip(bs, P["hole_min_s"], P["hole_max_s"]))
-    fast -= P["end_hole_db"] * np.clip(np.minimum((t - (e - hole)) / P["hole_in_s"], (e - JOIN_S - 0.004 - t) / P["hole_out_s"]), 0.0, 1.0)
-    notes["holes"].append({"t": round(e - hole, 3), "len_s": round(hole, 3), "db": P["end_hole_db"], "before": "last hit"})
+    if joints:
+        notes.setdefault("holes_merged", []).append({"t": round(e - hole, 3), "before": "last hit", "into": _nearest_hole(notes, e - hole)})
+    else:
+        fast -= P["end_hole_db"] * np.clip(np.minimum((t - (e - hole)) / P["hole_in_s"], (e - JOIN_S - 0.004 - t) / P["hole_out_s"]), 0.0, 1.0)
+        notes["holes"].append({"t": round(e - hole, 3), "len_s": round(hole, 3), "db": P["end_hole_db"], "before": "last hit"})
     slow = np.where(t >= e - JOIN_S, np.maximum(slow, open_gain + P["end_hit_db"]), slow)
     notes["hits"].append({"t": round(e, 3), "db": P["end_hit_db"], "what": "last hit"})
     return slow, fast, notes

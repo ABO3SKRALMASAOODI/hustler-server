@@ -48,6 +48,19 @@ def plan(lines, named, about="", budget_s=90.0):
         kind = str(s.get("kind") or given or "thing").lower()
         subs.append(dict(name=str(s["name"]), kind=kind, must_show=str(s.get("must_show") or s["name"]),
                          searches=[dict(where="archive" if x.get("where") == "archive" else "youtube", q=str(x["q"])[:120]) for x in q[:5]]))
+    # a caller's own video searches (opt-in "video_searches" on a named row; only the stories skill sends them, e.g. a
+    # person's interview of the story's year, the work's trailer): they lead that subject's searches, and a subject the
+    # model left out is added with them, so the caller's explicit search is always run
+    for n in named or []:
+        vq = [str(q)[:120] for q in n.get("video_searches") or [] if isinstance(q, str) and q.strip()]
+        if not vq or not n.get("name"):
+            continue
+        sub = next((x for x in subs if x["name"] == n["name"]), None)
+        if sub is None:
+            sub = dict(name=str(n["name"]), kind=str(n.get("is") or "thing").lower(), must_show=str(n.get("must_show") or n["name"]), searches=[])
+            subs.append(sub)
+        have = {x["q"] for x in sub["searches"]}
+        sub["searches"] = ([dict(where="youtube", q=q) for q in vq if q not in have] + sub["searches"])[:5]
     names = {s["name"] for s in subs}
     lns = []
     for ln in obj.get("lines") or []:

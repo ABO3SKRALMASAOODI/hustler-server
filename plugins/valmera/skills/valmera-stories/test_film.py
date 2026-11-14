@@ -347,10 +347,12 @@ def test_annotate_fills_fields_and_keeps_say_byte_identical():
     sc = _ann_script()
     ask, calls = _stub([_ann_answer()])
     out, rep = writer.annotate(sc, ask=ask, verify_fn=_ok_verify, log=lambda m: None)
-    assert len(calls) == 1 and rep["ok"], rep["problems"]
+    # the second call is the device repair: every device of this tiny script is over the cap, so the share is 0
+    assert len(calls) == 2 and rep["ok"] and "cover 0% of the spoken words" in calls[1], rep["problems"]
     assert [s["say"] for s in out["segments"]] == [s["say"] for s in sc["segments"]]
     assert all(s["see"] for s in out["segments"]) and out["colour_turn"] == 2
-    assert out["segments"][2]["see"] == [dict(thing="Toy Story", as_of="1995 release", must_show="the film", moment=None, search=None)]   # not-named dropped
+    assert out["segments"][2]["see"] == [dict(thing="Toy Story", as_of="1995 release", must_show="the film", moment=None, search=None,
+                                              still_only=False)]   # not-named dropped
     assert out["segments"][0]["show"] == [dict(text="nearly", role="key", word_i=1)]
     assert out["segments"][1]["show"][0]["word_i"] == 0 and out["segments"][1]["show"][0]["role"] == "name"     # an added name item
     assert out["segments"][0]["phrases"] == [[0, 3], [3, 5]]
@@ -362,11 +364,11 @@ def test_annotate_rejects_invalid_anchor_and_span_then_asks_again_or_drops():
     sc = _ann_script()
     ask, calls = _stub([_ann_answer(bad=True), _ann_answer()])
     out, rep = writer.annotate(sc, ask=ask, verify_fn=_ok_verify, log=lambda m: None)
-    assert len(calls) == 2 and "problems" in calls[1]          # the repair names what was wrong
+    assert len(calls) == 3 and "problems" in calls[1]          # the repair names what was wrong (the third: the device repair)
     assert out["segments"][0]["show"][0]["word_i"] == 1 and out["segments"][0]["phrases"] == [[0, 3], [3, 5]]
     ask, calls = _stub([_ann_answer(bad=True)])
     out, rep = writer.annotate(sc, ask=ask, verify_fn=_ok_verify, log=lambda m: None)
-    assert len(calls) == 2 and not rep["ok"]
+    assert len(calls) == 3 and not rep["ok"]
     assert "word_i" not in out["segments"][0]["show"][0] and "phrases" not in out["segments"][0]
     assert [s["say"] for s in out["segments"]] == [s["say"] for s in sc["segments"]]
 
@@ -461,3 +463,71 @@ def test_captions_ink_after_the_voice_only_with_the_lag():
     F.caption_build(P2, clock2, "cap", 0.615)
     caps2 = sorted((it for it in P2.items if it["k"] == "word" and it.get("role") == "cap"), key=lambda it: it["f"][0])
     assert caps2[0]["f"][0] == F.Clock.f(ws[0]["t0"]) - 1          # unchanged outside fit mode
+
+
+# ----------------------------------------------------------------- round 3
+
+def test_annotate_keeps_true_pictures_and_still_only_and_falls_back_when_missing():
+    sc = _ann_script()
+    a = _ann_answer()
+    a["true_pictures"] = {"Toy Story": "footage", "John Lasseter": "sideways"}
+    a["segments"][1]["see"][0]["still_only"] = True
+    a["segments"][0]["see"][0]["still_only"] = "yes"
+    ask, _ = _stub([a])
+    out, rep = writer.annotate(sc, ask=ask, verify_fn=_ok_verify, log=lambda m: None)
+    tp = {n["name"]: n["true_pictures"] for n in out["named"]}
+    assert tp == {"Toy Story": "footage", "John Lasseter": "both"}            # an invalid value means both
+    assert out["segments"][1]["see"][0]["still_only"] is True and out["segments"][0]["see"][0]["still_only"] is False
+
+
+def test_photo_searches_skip_footage_only_things_and_carry_as_of():
+    import wf3 as W3
+    named = [dict(name="Buzz Lightyear", **{"is": "thing"}, true_pictures="footage"), dict(name="John Lasseter", **{"is": "person"}, true_pictures="both")]
+    sc = dict(named=named, segments=[dict(say="a", see=[dict(thing="Buzz Lightyear", as_of="the finished 1995 film", must_show="Buzz", search="Buzz 1995"),
+                                                       dict(thing="John Lasseter", as_of="1995", must_show="John Lasseter at Pixar", search="John Lasseter 1995")])])
+    subj = W3.photo_searches(sc, named)
+    assert [s["name"] for s in subj] == ["John Lasseter"]
+    assert subj[0]["must_show"] == "John Lasseter at Pixar 1995"
+
+
+def test_an_added_figure_that_does_not_verify_leaves_the_other_added_items():
+    sc = _ann_script()
+    a = _ann_answer()
+    a["segments"][1]["show"].append(dict(text="1999", role="key", word_i=1))
+    ask, _ = _stub([a])
+
+    def vf(s):
+        bad = any("1999" == x.get("text") for g in s["segments"] for x in g.get("show") or [])
+        return dict(ok=not bad, numbers_unbacked=["1999"] if bad else [], facts_unverified=[], facts=[1])
+    out, rep = writer.annotate(sc, ask=ask, verify_fn=vf, log=lambda m: None)
+    texts = [x["text"] for g in out["segments"] for x in g["show"]]
+    assert "1999" not in texts and "John Lasseter" in texts and rep["dropped_unverified"] == ["1999"]
+
+
+def test_the_first_footage_call_searches_moments_and_voices_and_records_every_try(tmp_path):
+    import types
+    import wf3 as W3
+    named = [dict(name="Toy Story", **{"is": "thing"}, true_pictures="footage"), dict(name="John Lasseter", **{"is": "person"}, true_pictures="both")]
+    sc = dict(named=named, segments=[dict(say="a", pictures=["Toy Story"], see=[dict(thing="Toy Story", as_of="the finished 1995 film",
+                                                                                   moment="Woody knocks Buzz out of the window", must_show="x")]),
+                                     dict(say="b", pictures=["John Lasseter"], see=[dict(thing="John Lasseter", as_of="1995", moment=None, must_show="him")])])
+    rec = W3.moment_script(dict(script=sc, style=dict(id="reel")))
+    nm = {n["name"]: n for n in rec["script"]["named"]}
+    assert rec["script"]["segments"][0]["pictures"][0] == "Woody knocks Buzz out of the window"
+    assert nm["Woody knocks Buzz out of the window"]["thing"] == "Toy Story"
+    assert nm["John Lasseter interview"]["video_searches"] == ["John Lasseter interview 1995"] and nm["John Lasseter interview"]["thing"] == "John Lasseter"
+    assert nm["Toy Story trailer"]["video_searches"] == ["Toy Story trailer"]
+    assert rec["script"]["segments"][1]["pictures"] == ["John Lasseter"]           # a line without a moment keeps its own
+    foot = dict(lines=[dict(i=0, clips=[dict(subject="Woody knocks Buzz out of the window"), dict(subject="Toy Story")])])
+    W3.tag_things(foot, rec)
+    assert foot["lines"][0]["clips"][0]["thing"] == "Toy Story" and "thing" not in foot["lines"][0]["clips"][1]
+    sup = tmp_path / "sup"
+    (sup / "footage").mkdir(parents=True)
+    (sup / "footage" / "footage.json").write_text(json.dumps(dict(voices=[], voices_tried=[
+        dict(person="John Lasseter", after=3, source=dict(title="interview"), reason="the person is on 1 of 3 frames"),
+        dict(person="John Lasseter", after=5, source=dict(title="talk"), reason="7.0 s is outside 1.8-9.5 s")])))
+    ctx = types.SimpleNamespace(supply=str(sup))
+    v = W3.voices_record(ctx, dict(voices=[]))
+    assert v["tried"] == 2 and v["placed"] == 0 and all("John Lasseter" in r for r in v["rejected"])
+    (sup / "footage" / "footage.json").write_text(json.dumps(dict(voices=[], voices_tried=[])))
+    assert W3.voices_record(ctx, dict(voices=[]))["tried"] == 0

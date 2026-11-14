@@ -407,19 +407,20 @@ PHRASE_MAX = 5
 ANNOTATE_SYSTEM = """You are the picture editor of a narrated vertical story film cut like the best documentary reels. The script is final and checked: you never change a word of it. You read it and write the data the cut needs.
 
 For each segment:
-- "see": one to four items, in the order the line says them: {"thing": exactly one name from the named list, "as_of": the story time of that thing as THIS line means it, a year plus its version or state (e.g. "the finished 1995 release, not the 1993 test reel"; "Pixar's Point Richmond office in 1993, not the later Emeryville campus"), "must_show": one sentence, only what must be VISIBLE in a picture for it to carry this line (who or what, doing what, in which version); never the film's treatment of it (colour, black and white, muted, grain, composition, framing): treatment belongs to "finish" alone, "moment": the scene or event the line describes when it describes one (e.g. "Woody knocking Buzz out of the window in the finished 1995 film"), else null, "search": one photo search an archivist would type to find a photograph of exactly this thing at this time (e.g. "John Lasseter 1995"; "Pixar Point Richmond 1993")}. A line about a scene of a film names that scene as its moment, in the version the line means.
+- "see": one to four items, in the order the line says them: {"thing": exactly one name from the named list, "as_of": the story time of that thing as THIS line means it, a year plus its version or state (e.g. "the finished 1995 release, not the 1993 test reel"; "Pixar's Point Richmond office in 1993, not the later Emeryville campus"), "must_show": one sentence, only what must be VISIBLE in a picture for it to carry this line (who or what, doing what, in which version); never the film's treatment of it (colour, black and white, muted, grain, composition, framing): treatment belongs to "finish" alone, "moment": the scene or event the line describes when it describes one (e.g. "Woody knocking Buzz out of the window in the finished 1995 film"), else null, "search": one photo search an archivist would type to find a photograph of exactly this thing at this time (e.g. "John Lasseter 1995"; "Pixar Point Richmond 1993"), "still_only": true when the true picture of this line is still by its nature (a storyboard, a document, a drawing, a letter, a printed page), else false}. A line about a scene of a film names that scene as its moment, in the version the line means.
 - "list": true when the line itself reads as a list of several distinct things or a quick montage of them (the cut may burst through them in a few frames each), else false; "list_items": the things of the list, in order, as see things, when list is true.
 - "finish": bw|gate|crt|none and "finish_rank" (1 = the segment that most needs it). Black and white, a film gate or scanlines are a device for a memory, an early version, the past cut in, a low point; never a look for the whole film. The devices together cover 12 to 25 percent of the spoken words, never the payoff or the close, never a segment at or after the colour turn.
 - "show": the segment's display items, each {"text": as printed, "role": figure|name|key|chapter, "word_i": the index of the spoken word it lands on (a figure: the first word of the spoken figure; a name: the first word of the name; a chapter: the first word of the segment), "big": the part of the text set large (e.g. "$362M"), "small": the rest set small under it (e.g. "box office, 1995"), or null}. Every item needs its word_i. Keep every given item's text exactly. You may add: the payoff's figure if it lacks one (a figure printed with digits only when the same figure stands in a fact's quote), a name item for each person (is=person) at the line that first says them, one key word on the turn, and a short chapter title (two to four words) on the segment that opens each new section (the turn, the low point, the payoff). Display type lands on about one picture in six across the film: a figure card for each verified figure, a name for each person, a chapter at each turn. At most three items a segment.
 - "phrases": the caption lines: lists of word indices, each 1 to 5 consecutive indices, together covering every word of the segment once and in order. Never split a name, a figure, a date or a noun phrase across two lines; a line reads as one unit of sense.
 
-And once for the film: "colour_turn": the index of the one segment from which the film stays in colour (the turn or the release).
+And once for the film: "colour_turn": the index of the one segment from which the film stays in colour (the turn or the release); "true_pictures": for every named thing, where a faithful picture of it can exist: "stills" (a free photo archive holds true photographs of it: a real person, a building, an object), "footage" (it exists faithfully only in the work's own moving pictures: an animated film's characters and scenes, whose photographs are toys, rides, statues and costumes), or "both".
 
-Answer with one JSON object only: {"colour_turn": int, "segments": [{"i": int, "see": [...], "list": bool, "list_items": [...], "finish": ..., "finish_rank": int or null, "show": [...], "phrases": [[int, ...], ...]}]}"""
+Answer with one JSON object only: {"colour_turn": int, "true_pictures": {"<named thing>": "stills"|"footage"|"both", ...}, "segments": [{"i": int, "see": [...], "list": bool, "list_items": [...], "finish": ..., "finish_rank": int or null, "show": [...], "phrases": [[int, ...], ...]}]}"""
 
 SEE_SYSTEM = """You are the picture editor of a narrated documentary film. The script is final; you never change a word. For the ONE segment you are given, write what a picture must show to carry it.
 
-Answer with one JSON object only: {"see": [one to four items, in the order the line says them: {"thing": exactly one name from the named list, "as_of": the story time of that thing as THIS line means it, a year plus its version or state, "must_show": one sentence, only what must be VISIBLE (never colour, black and white or composition), "moment": the scene or event the line describes, or null, "search": one photo search an archivist would type to find exactly this thing at this time}]}"""
+Answer with one JSON object only: {"see": [one to four items, in the order the line says them: {"thing": exactly one name from the named list, "as_of": the story time of that thing as THIS line means it, a year plus its version or state, "must_show": one sentence, only what must be VISIBLE (never colour, black and white or composition), "moment": the scene or event the line describes, or null, "search": one photo search an archivist would type to find exactly this thing at this time, "still_only": true when the true picture of this line is still by its nature (a storyboard, a document, a drawing), else false}]}"""
+TRUE_PICTURES = ("stills", "footage", "both")
 
 
 def _ann_content(sc, idea_full, problems=None):
@@ -449,7 +450,8 @@ def _clean_see(v, names):
         m, q = x.get("moment"), x.get("search")
         out.append(dict(thing=x["thing"], as_of=str(x["as_of"]).strip(), must_show=str(x.get("must_show") or "").strip(),
                         moment=str(m).strip() if isinstance(m, str) and m.strip() else None,
-                        search=str(q).strip()[:120] if isinstance(q, str) and q.strip() else None))
+                        search=str(q).strip()[:120] if isinstance(q, str) and q.strip() else None,
+                        still_only=x.get("still_only") is True))
     return out[:4]
 
 
@@ -494,6 +496,14 @@ def _merge_ann(sc, got):
     out = json.loads(json.dumps(sc))
     problems = []
     nseg = len(out["segments"])
+    tp = (got or {}).get("true_pictures")
+    tp = tp if isinstance(tp, dict) else {}
+    for n in out.get("named") or []:
+        # where a faithful picture of each thing can exist (the model's reading; a missing or invalid value means both)
+        if tp.get(n.get("name")) in TRUE_PICTURES:
+            n["true_pictures"] = tp[n.get("name")]
+        elif n.get("true_pictures") not in TRUE_PICTURES:
+            n["true_pictures"] = "both"
     for k, s in enumerate(out["segments"]):
         g = segs.get(k) or {}
         n = len(str(s.get("say", "")).split())
@@ -630,8 +640,24 @@ def annotate(sc, idea_full=None, ask=None, verify_fn=None, log=print, problems=N
     if [s.get("say") for s in out["segments"]] != say0:
         raise RuntimeError("annotate changed the words")
     share = device_budget(out)
+    device_added = []
+    if share < DEVICE_SHARE[0] and out.get("segments"):
+        # under the judge's floor: the writer is asked once more for ONE device beat, where it chooses; the budget's cap
+        # (DEVICE_SHARE[1]) and its exclusions (payoff, close, from colour_turn on) still hold
+        share, device_added, use = device_repair(out, idea_full, ask, share)
+        if use is not None:
+            spend.append(use)
     rep = verify_fn(out)
     dropped = []
+    if not rep.get("ok"):
+        # only the added items whose own numbers stand in no verified quote go; the other added names, chapters and key
+        # words stay. When that does not verify, every added item goes, as before.
+        unb = set(rep.get("numbers_unbacked") or [])
+        for s in out["segments"]:
+            bad = [x for x in s.get("show") or [] if x.get("added") and set(digits(str(x.get("text") or ""))) & unb]
+            dropped += [x["text"] for x in bad]
+            s["show"] = [x for x in s.get("show") or [] if not any(x is b for b in bad)]
+        rep = verify_fn(out)
     if not rep.get("ok"):
         for s in out["segments"]:
             keep_ = [x for x in s.get("show") or [] if not x.get("added")]
@@ -642,7 +668,44 @@ def annotate(sc, idea_full=None, ask=None, verify_fn=None, log=print, problems=N
         for x in s.get("show") or []:
             x.pop("added", None)
     ok = bool(rep.get("ok")) and not problems
-    return out, dict(ok=ok, problems=problems or [], device_share_words=share, dropped_unverified=dropped, verify=rep, spend=spend)
+    return out, dict(ok=ok, problems=problems or [], device_share_words=share, dropped_unverified=dropped, verify=rep, spend=spend,
+                     device_added=device_added)
+
+
+def device_repair(out, idea_full, ask, share):
+    """(share, [segments given a device], usage): one more annotate call asking for one device beat when the devices
+    cover under DEVICE_SHARE[0] of the words. The first valid device the answer gives a segment without one (not the
+    payoff or close, before colour_turn) is laid in, then device_budget holds the cap again."""
+    probs = [f"the devices (bw, gate, crt) cover {share:.0%} of the spoken words, under {DEVICE_SHARE[0]:.0%}: choose one more segment "
+             "for a device (a memory, an early version, the past cut in, a low point) and give it its finish and finish_rank; "
+             "never the payoff, the close, or a segment at or after colour_turn. Answer in full."]
+    try:
+        text, use = ask(ANNOTATE_SYSTEM, _ann_content(out, idea_full, probs))
+    except Exception:  # noqa: BLE001 - the repair is one more ask; the film keeps its devices
+        return share, [], None
+    try:
+        got = json_block(text)
+    except ValueError:
+        return share, [], use
+    ct = out.get("colour_turn")
+    segs = out["segments"]
+    cands = []
+    for g in got.get("segments") or []:
+        if not isinstance(g, dict) or not _valid_i(g.get("i"), len(segs)) or g.get("finish") not in ("bw", "gate", "crt"):
+            continue
+        k = g["i"]
+        s = segs[k]
+        if s.get("finish") not in (None, "none") or s.get("beat") in ("payoff", "close") or (isinstance(ct, int) and k >= ct):
+            continue
+        fr = g.get("finish_rank")
+        cands.append((fr if isinstance(fr, (int, float)) and not isinstance(fr, bool) else 99, k, g["finish"]))
+    if not cands:
+        return share, [], use
+    _, k, fin = min(cands)
+    segs[k]["finish"], segs[k]["finish_rank"] = fin, 1
+    segs[k].pop("finish_cut", None)
+    share = device_budget(out)
+    return share, ([k] if segs[k].get("finish") == fin else []), use
 
 
 # ----------------------------------------------------------------- verify against the pages themselves

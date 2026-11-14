@@ -208,3 +208,39 @@ def test_footage_passes_the_engines_opt_in_flags_only_when_given(tmp_path, monke
     chain.footage(ctx, dict(script={}), out_name="b", strict_lines=True, motion_first=True, alloc="round", reassign_lost=True)
     assert not any(f in seen[0] for f in ("--strict-lines", "--motion-first", "--alloc", "--reassign-lost"))
     assert all(f in seen[1] for f in ("--strict-lines", "--motion-first", "--reassign-lost")) and seen[1][seen[1].index("--alloc") + 1] == "round"
+
+
+def test_footage_keeps_sources_skips_verify_and_logs_no_secret(tmp_path, monkeypatch):
+    """Round 3 (valmera-stories): verify=False, whole_first and keep_sources put FOOTAGE_VERIFY=0, --whole-first,
+    FOOTAGE_KEEP_SOURCES (<supply>/sources) and FOOTAGE_LOCAL_SOURCES (that manifest's rows) into the engine's
+    environment; without them none is set; nothing logged carries the key."""
+    import types
+    import chain
+    seen, logs = [], []
+
+    def run(cmd, **kw):
+        seen.append((cmd, kw.get("env") or {}))
+        out = cmd[cmd.index("--out") + 1]
+        open(os.path.join(out, "footage.json"), "w").write("{}")
+        return types.SimpleNamespace(returncode=0, stdout="done", stderr="")
+    monkeypatch.setattr(chain.subprocess, "run", run)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-secret-value-123")
+    for v in ("FOOTAGE_VERIFY", "FOOTAGE_KEEP_SOURCES", "FOOTAGE_LOCAL_SOURCES"):
+        monkeypatch.delenv(v, raising=False)
+    for d in ("run", "sup", "tmp"):
+        (tmp_path / d).mkdir()
+    keep = tmp_path / "sup" / "sources"
+    keep.mkdir()
+    kept = keep / "a.mp4"
+    kept.write_bytes(b"v" * 4000)
+    (keep / "manifest.json").write_text(json.dumps([dict(url="https://y/1", path=str(kept), rung="default"),
+                                                    dict(url="https://y/2", path=str(keep / "gone.mp4"), rung="default")]))
+    ctx = types.SimpleNamespace(supply=str(tmp_path / "sup"), run_dir=str(tmp_path / "run"), tmp=str(tmp_path / "tmp"), workflow="wf3", run_id="r",
+                                log=logs.append, log_raw=logs.append)
+    chain.footage(ctx, dict(script={}), out_name="a")
+    chain.footage(ctx, dict(script={}), out_name="b", verify=False, whole_first=True, keep_sources=True)
+    plain, opt = seen
+    assert not any(k in plain[1] for k in ("FOOTAGE_VERIFY", "FOOTAGE_KEEP_SOURCES", "FOOTAGE_LOCAL_SOURCES")) and "--whole-first" not in plain[0]
+    assert "--whole-first" in opt[0] and opt[1]["FOOTAGE_VERIFY"] == "0" and opt[1]["FOOTAGE_KEEP_SOURCES"] == str(keep)
+    assert json.loads(opt[1]["FOOTAGE_LOCAL_SOURCES"]) == [dict(url="https://y/1", path=str(kept))]       # a missing file is not claimed
+    assert not any("sk-secret-value-123" in str(m) for m in logs)

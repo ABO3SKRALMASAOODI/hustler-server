@@ -206,7 +206,8 @@ def seg_durs(words, n):
 
 
 def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None, preserve_source=False, shot_s=None, line_max=None, per=None,
-            out_name="footage", lines=None, avoid=None, strict_lines=False, motion_first=False, alloc=None, reassign_lost=False):
+            out_name="footage", lines=None, avoid=None, strict_lines=False, motion_first=False, alloc=None, reassign_lost=False,
+            verify=None, whole_first=False, keep_sources=False, want_voices=False):
     """Real footage per line (worker/footage, through footage.seam's workflow scope): supply/footage/ with
     footage.json (clips per line, each with its source URL, channel and time range for the credits) and
     clips/*.mp4. None when VALMERA_FOOTAGE=0 or when the engine could not run (logged, never a stop).
@@ -214,7 +215,12 @@ def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None, preserve_sourc
     shot_s, line_max, per: a caller that cuts faster asks for more, shorter clips a line (footage.run --shot-s,
     --line-max, --per); lines, avoid, out_name: a top-up for some lines only, never cutting again what an earlier
     record (footage.json) holds, into its own folder. strict_lines, motion_first, alloc ("round"), reassign_lost: the
-    engine's opt-in flags (a story reel), added to the command only when given. Absent, the call is exactly as before."""
+    engine's opt-in flags (a story reel), added to the command only when given. Absent, the call is exactly as before.
+    verify=False: the engine's per-clip verify pass is off (FOOTAGE_VERIFY=0; the caller gates every take by its own
+    per-line verdicts). whole_first: short sources fetched once, whole with sound (--whole-first). keep_sources: each
+    whole source is kept in <supply>/sources with a manifest (FOOTAGE_KEEP_SOURCES), and the manifest's rows are handed
+    back as FOOTAGE_LOCAL_SOURCES, so a top-up or a resumed remake never fetches a kept source again; the folder lives in
+    the run's supply, which the shell deletes with the run. want_voices: real voices looked for (--want-voices)."""
     if os.environ.get("VALMERA_FOOTAGE", "1") == "0":
         return None
     out = os.path.join(ctx.supply, out_name)
@@ -245,6 +251,10 @@ def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None, preserve_sourc
         cmd += ["--alloc", str(alloc)]
     if reassign_lost:
         cmd += ["--reassign-lost"]
+    if whole_first:
+        cmd += ["--whole-first"]
+    if want_voices:
+        cmd += ["--want-voices"]
     if durs:
         tp = os.path.join(ctx.run_dir, "footage_timing.json")
         json.dump(dict(durs=durs), open(tp, "w"))
@@ -261,6 +271,7 @@ def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None, preserve_sourc
         env["FOOTAGE_PATH"] = FOOTAGE_DENO
     if os.path.isdir(FOOTAGE_POT):                # PO tokens, the product's first rung against YouTube's bot wall (worker/ytaccess.pot_args)
         env.setdefault("YTDLP_POT_SERVER_HOME", FOOTAGE_POT)
+    env.update(footage_env(ctx, verify=verify, keep_sources=keep_sources))
     if not env.get("OPENAI_API_KEY") and os.path.exists(ENV_FILE):
         for line in open(ENV_FILE):
             if line.startswith("OPENAI_API_KEY="):
@@ -276,6 +287,27 @@ def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None, preserve_sourc
         ctx.log(f"footage skipped: exit {r.returncode}")
         return None
     return json.load(open(rec))
+
+
+def footage_env(ctx, verify=None, keep_sources=False):
+    """The footage engine's environment for chain.footage's opt-in kwargs: FOOTAGE_VERIFY=0 when verify is False;
+    FOOTAGE_KEEP_SOURCES (<supply>/sources) and FOOTAGE_LOCAL_SOURCES (that folder's manifest rows whose files exist)
+    when keep_sources. Paths and URLs only, never a key."""
+    env = {}
+    if verify is False:
+        env["FOOTAGE_VERIFY"] = "0"
+    if keep_sources:
+        keep = os.path.join(ctx.supply, "sources")
+        os.makedirs(keep, exist_ok=True)
+        env["FOOTAGE_KEEP_SOURCES"] = keep
+        rows = []
+        try:
+            got = json.load(open(os.path.join(keep, "manifest.json")))
+            rows = [dict(url=r["url"], path=r["path"]) for r in got if isinstance(r, dict) and r.get("url") and r.get("path") and os.path.isfile(r["path"])]
+        except (OSError, ValueError, TypeError, KeyError):
+            rows = []
+        env["FOOTAGE_LOCAL_SOURCES"] = json.dumps(rows)
+    return env
 
 
 def score(ctx, script):

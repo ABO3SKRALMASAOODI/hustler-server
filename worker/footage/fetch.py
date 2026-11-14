@@ -208,6 +208,30 @@ def whole(url, out_dir):
     return max((p for p in glob.glob(os.path.join(out_dir, "whole.*")) if not p.endswith((".part", ".ytdl"))), key=os.path.getsize)
 
 
+WHOLE_AV_MAX = "400M"
+
+
+def whole_av(url, out_dir):
+    """The source whole, at or under WHOLE_H WITH its sound, in one yt-dlp call: (path, rung). The one file a whole-first
+    open (run.find whole_first) scans, hears and cuts from, so the source is never resolved or fetched again. A source a
+    caller kept (local_source) is that file."""
+    cached = local_source(url)
+    if cached:
+        return cached, "verified-local-source"
+    os.makedirs(out_dir, exist_ok=True)
+    for p in glob.glob(os.path.join(out_dir, "whole.*")):
+        os.remove(p)
+    fmt = (f"b[height<={WHOLE_H}][ext=mp4]/bv*[height<={WHOLE_H}][vcodec^=avc1]+ba/bv*[height<={WHOLE_H}]+ba/"
+           f"b[height<={WHOLE_H}]/b")
+    args = ["-f", fmt, "--merge-output-format", "mp4", "--max-filesize", WHOLE_AV_MAX, "-o", os.path.join(out_dir, "whole.%(ext)s")]
+
+    def got(_):
+        return bool([p for p in glob.glob(os.path.join(out_dir, "whole.*")) if not p.endswith((".part", ".ytdl"))])
+    _, rung = run_ladder(url, args, done=got)
+    path = max((p for p in glob.glob(os.path.join(out_dir, "whole.*")) if not p.endswith((".part", ".ytdl"))), key=os.path.getsize)
+    return path, rung
+
+
 def section(url, t0, t1, out_path):
     """The source's own section, cut by yt-dlp (the rung for a stream ffmpeg could not seek)."""
     d = os.path.dirname(out_path)

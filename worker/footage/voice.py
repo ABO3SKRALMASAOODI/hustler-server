@@ -158,35 +158,49 @@ def face_shows(proxy, t0, t1, anchors, work):
     return hits
 
 
-def find_voices(lines, subjects, sources, anchors, out_dir, W, H, stream_of=None, log=print, most=MOST):
+def find_voices(lines, subjects, sources, anchors, out_dir, W, H, stream_of=None, log=print, most=MOST, tried=None):
     """The film's real-voice cut-ins: (records, usd). sources: the run's open sources (proxy, transcript, subjects);
-    subjects: the run's planned subjects (kind "person" ones are heard); anchors: {person: [checked photographs]}."""
+    subjects: the run's planned subjects (kind "person" ones are heard); anchors: {person: [checked photographs]}.
+    tried (a list, opt-in): every candidate considered is appended with its outcome ({person, after, source, said,
+    reason}; reason None when it was cut in), and a run that had no candidate at all appends why."""
+    tried = tried if tried is not None else []
+
+    def note(g, s, reason):
+        tried.append(dict(person=(g or {}).get("person"), after=(g or {}).get("after"), said=str((g or {}).get("said") or "")[:200],
+                          source=dict(url=s.get("url"), title=s.get("title")) if s else None, reason=reason))
     people = [s for s in subjects if s.get("kind") == "person"]
     if not people:
+        note(None, None, "no person among the planned subjects")
         return [], 0.0
     idx = {s["name"]: si for si, s in enumerate(subjects)}
     mine = [s for s in sources if s.get("transcript") and s.get("proxy") and any(idx.get(p["name"]) in s.get("subjects", []) for p in people)]
     if not mine:
+        note(None, None, "no opened source of a person was heard")
         return [], 0.0
     work = os.path.join(out_dir, "voices_work")
     os.makedirs(work, exist_ok=True)
     os.makedirs(os.path.join(out_dir, "voices"), exist_ok=True)
     picks, usd = pick(lines, [p["name"] for p in people], [dict(title=s["title"], channel=s.get("channel"), transcript=s["transcript"]) for s in mine], most)
     log(f"voices: {len(picks)} moments chosen from {len(mine)} sources")
+    if not picks:
+        note(None, None, f"the model chose no moment in {len(mine)} heard sources")
     out, used_lines = [], set()
     try:
         for g in picks:
-            if len(out) >= most or g["after"] in used_lines:
-                continue
             s = mine[g["src"]]
+            if len(out) >= most or g["after"] in used_lines:
+                note(g, s, "enough voices already, or one already after this line")
+                continue
             try:
                 words = heard_words(s["proxy"], max(g["piece_t0"] - 3.0, 0.0), g["piece_t0"] + 28.0, work)
             except Exception as e:  # noqa: BLE001
                 log(f"voices: hearing {s['key']} at {g['piece_t0']:.0f}s failed: {str(e)[:120]}")
+                note(g, s, f"hearing failed: {str(e)[:100]}")
                 continue
             al = align(words, g["said"])
             if not al or al[2] < 0.8:
                 log(f"voices: {s['key']} at {g['piece_t0']:.0f}s: the chosen words are not heard there ({al and round(al[2], 2)})")
+                note(g, s, f"the chosen words are not heard there (share {al and round(al[2], 2)})")
                 continue
             i, j, share = al
             t0 = words[i]["start"] - PAD_IN
@@ -197,10 +211,12 @@ def find_voices(lines, subjects, sources, anchors, out_dir, W, H, stream_of=None
                 t1 = min(t1, (words[j - 1]["end"] + words[j]["start"]) / 2)
             if not MIN_S <= t1 - t0 <= MAX_S:
                 log(f"voices: {s['key']} {t1 - t0:.1f}s is outside {MIN_S}-{MAX_S}s")
+                note(g, s, f"{t1 - t0:.1f} s is outside {MIN_S}-{MAX_S} s")
                 continue
             seen = face_shows(s["proxy"], t0, t1, (anchors or {}).get(g["person"]) or (), work)
             if seen is None or seen < 2:
                 log(f"voices: {s['key']} {t0:.1f}-{t1:.1f}s: the person is on {seen} of {FACE_FRAMES} frames; not cut in")
+                note(g, s, f"the person is on {seen} of {FACE_FRAMES} frames")
                 continue
             base = f"voice_{len(out)}_{s['key']}_{int(t0 * 100)}"
             wav = os.path.join(out_dir, "voices", base + ".wav")
@@ -208,7 +224,10 @@ def find_voices(lines, subjects, sources, anchors, out_dir, W, H, stream_of=None
             pic = os.path.join(out_dir, "voices", base + ".mp4")
             try:
                 raw = os.path.join(work, base + "_raw.mp4")
-                cut.grab((stream_of or {}).get(s["key"]), s["url"], t0, t1, raw)
+                if s.get("whole"):          # a source opened whole (run.find whole_first): cut from that file, never fetched again
+                    cut.local(s["whole"], t0, t1, raw)
+                else:
+                    cut.grab((stream_of or {}).get(s["key"]), s["url"], t0, t1, raw)
                 cut.finish(raw, pic, W, H, 0.5)
             except Exception as e:  # noqa: BLE001 the sound alone still carries the person; the film shows its own picture
                 log(f"voices: picture for {base} failed: {str(e)[:120]}")
@@ -220,6 +239,7 @@ def find_voices(lines, subjects, sources, anchors, out_dir, W, H, stream_of=None
                             source=dict(url=s["url"], title=s["title"], channel=s.get("channel"), where=s.get("where")),
                             time_range=[round(t0, 3), round(t1, 3)]))
             used_lines.add(g["after"])
+            note(g, s, None)
             log(f"voices: {g['person']} after line {g['after']}: {t1 - t0:.1f}s from {s['title'][:50]!r}")
     finally:
         subprocess.run(["rm", "-rf", work])

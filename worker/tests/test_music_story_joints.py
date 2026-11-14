@@ -52,3 +52,17 @@ def test_optional_joint_fields_set_the_close_bed_the_depth_and_a_swell():
     assert notes["swells"] and notes["close_bed_db"] == -20.0
     s2, f2, n2 = music.flow(3000, .01, dict(words=words, payoff_s=None, accents=[], joints=[dict(j) for j in base]), _plan(), music.PROFILE, 0, 0)
     assert np.array_equal(s0, s2) and np.array_equal(f0, f2)
+
+
+def test_with_joints_the_drop_and_end_holes_merge_into_the_joint_holes():
+    """Round 3: a story keeps at most its joints' holes (one to three); the arrangement's drop and end holes are merged
+    into the nearest joint hole, never cut as holes of their own. Without joints both stay (exactly as before)."""
+    plan = dict(_plan(), drop_at=18.0)
+    joints = [dict(kind="turn", last_word_t=8.9, next_first_word_t=10.0), dict(kind="payoff", last_word_t=16.5, next_first_word_t=17.6),
+              dict(kind="close", last_word_t=21.5, next_first_word_t=22.4)]
+    marks = dict(words=[(0.5, 8.9), (10.0, 16.5), (17.6, 21.5), (22.4, 28.0)], payoff_s=None, accents=[], joints=joints)
+    _, _, notes = music.flow(3000, .01, marks, plan, music.PROFILE, 0, 0)
+    assert len(notes["holes"]) <= 3 and all(h["before"] in ("turn", "payoff", "close") for h in notes["holes"])
+    assert {m["before"] for m in notes["holes_merged"]} == {"drop", "last hit"} and all(m["into"] is not None for m in notes["holes_merged"])
+    _, _, plain = music.flow(3000, .01, dict(marks, joints=None), plan, music.PROFILE, 0, 0)
+    assert {h["before"] for h in plain["holes"]} == {"drop", "last hit"} and "holes_merged" not in plain

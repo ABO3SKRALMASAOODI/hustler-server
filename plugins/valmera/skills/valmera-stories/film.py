@@ -1032,6 +1032,10 @@ def engines_finish(l1, sup, stress, drive_ids, meta, d, turn_f=None, mono=(), cl
         out["film"] = looks.film(d.get("look") or "story_low", base=out.get("film"))
         out["film"]["look_fault"] = repr(e)[:160]
     out["film"]["shutter"] = out["film"].get("shutter") or (out.get("pace") or {}).get("shutter") or 0.6
+    if d.get("film_vignette") is not None:
+        # colour is the base: the film-wide vignette is light (a story reel's fit mode); the heavy one rides only the
+        # device spans (mono), through their own finish
+        out["film"]["vignette"] = float(d["film_vignette"])
     # the sound design, against this film's own voice
     spine, wd, dur = narration_spine(out, sup)
     try:

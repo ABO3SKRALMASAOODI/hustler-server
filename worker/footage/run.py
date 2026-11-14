@@ -33,9 +33,18 @@ def _line_dur(ln):
     return max(1.2, len(str(ln.get("say") or "").split()) / WORDS_PER_S + float(ln.get("pause_after") or 0.2))
 
 
-def _open(src, work, log, hear_s=None, read_s=None):
+def _whole_first(src):
+    """A source the whole-first opener fetches once, whole (WHOLE_UNDER_S or less), or one kept by an earlier call."""
+    if fetch.local_source(src["url"]):
+        return True
+    return bool(src.get("duration")) and float(src["duration"]) <= WHOLE_UNDER_S
+
+
+def _open(src, work, log, hear_s=None, read_s=None, whole_first=False):
     """Proxy, shots and transcript of one source; the error on the source when it could not be read. hear_s: seconds
-    heard (0: none, the shots alone). read_s: seconds of the source read."""
+    heard (0: none, the shots alone). read_s: seconds of the source read. whole_first (opt-in, a story reel): a source of
+    WHOLE_UNDER_S or less is fetched ONCE, whole, at fetch.WHOLE_H or below with its sound (fetch.whole_av): that one file
+    is the scan, the transcript's audio and every cut's source (src["whole"]); its stream is never resolved."""
     d = os.path.join(work, "src", src["key"])
     t0 = time.monotonic()
     hear_s = HEAR_MAX_S if hear_s is None else float(hear_s)
@@ -44,7 +53,11 @@ def _open(src, work, log, hear_s=None, read_s=None):
         # a short source is fetched whole even when only its head is read: yt-dlp cuts a section with ffmpeg on the
         # resolved stream, which YouTube refuses from a proxy route more often than not (the box, 14 Nov: 2 of 8)
         whole = bool(read_s) and src.get("duration") and float(src["duration"]) <= WHOLE_UNDER_S
-        p, rung = fetch.proxy(src["url"], d, src.get("duration"), max_s=WHOLE_UNDER_S if whole else read_max)
+        if whole_first and _whole_first(src):
+            p, rung = fetch.whole_av(src["url"], d)
+            src["whole"] = p
+        else:
+            p, rung = fetch.proxy(src["url"], d, src.get("duration"), max_s=WHOLE_UNDER_S if whole else read_max)
         info = shots.probe(p)
         upto = min(info["dur"], read_max)
         src.update(proxy=p, rung=rung, dur_read=round(upto, 1), w=info["w"], h=info["h"])
@@ -122,7 +135,7 @@ def line_shots(dur, shot_s=None, line_max=None):
 
 def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MAX_SOURCES, keep_work=False, anchors=None, avoid=None,
          hear_s=None, read_s=None, per=None, want_voices=None, preserve_source=False, downloaded_only=False, shot_s=None, line_max=None,
-         strict_lines=False, motion_first=False, alloc=None, reassign_lost=False):
+         strict_lines=False, motion_first=False, alloc=None, reassign_lost=False, whole_first=False):
     """downloaded_only: cut the scanned rendition without reopening remote streams.
     avoid: [{"url", "time_range"}] already cut for this film by an earlier run: those seconds of a source are not cut again.
     hear_s, read_s, per: a caller with a deadline (a first film, score.film) hears less or nothing of each source, reads
@@ -136,9 +149,18 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                    more) are looked at, moving shots first; a slot ranks (moving, named for the line, grade); the window
                    sits on the shot's most moving span; every clip records motion_p90
     alloc="round"  the lines take one pick each a round, the scarcest line first
-    reassign_lost  a pick whose cut fails marks its source dead; the lines that lost picks are assigned again and cut"""
+    reassign_lost  a pick whose cut fails marks its source dead; the lines that lost picks are assigned again and cut
+    whole_first    a source of WHOLE_UNDER_S or less is fetched once, whole with its sound (_open): its scan, transcript and
+                   every cut come from that one file, its stream is never resolved and no section is fetched per cut. A
+                   source opened through the Wayback Machine is never resolved live: a pick outside what was read of it
+                   fails, so reassign_lost replaces it
+    Environment (any caller): FOOTAGE_VERIFY=0 skips the per-clip verify pass (a caller that gates every take by its own
+    per-line verdicts, the stories skill's fit); FOOTAGE_KEEP_SOURCES=<dir> keeps each whole source opened in <dir> with a
+    manifest.json of {url, path, rung} rows that fetch.local_source reads (FOOTAGE_LOCAL_SOURCES), so a later call for the
+    same film never fetches it again."""
     per = int(per) if per else PER_SUBJECT
     t_all = time.monotonic()
+    sources_seen = []
     os.makedirs(os.path.join(out_dir, "clips"), exist_ok=True)
     os.makedirs(os.path.join(out_dir, "sheets"), exist_ok=True)
     work = tempfile.mkdtemp(prefix="footage-", dir=os.environ.get("FOOTAGE_WORK") or out_dir)
@@ -184,8 +206,14 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         # No face recognition or reference-face comparison is used.
         anchors = dict(anchors or {})
         # 4. open them: proxy, shots, transcript
+        if whole_first:
+            def opener(s):
+                return _open(s, work, log, hear_s, read_s, whole_first=True)
+        else:
+            def opener(s):
+                return _open(s, work, log, hear_s, read_s)
         with cf.ThreadPoolExecutor(max_workers=4) as pool:
-            sources = list(pool.map(lambda s: _open(s, work, log, hear_s, read_s), sources))
+            sources = list(pool.map(opener, sources))
         # 4b. what YouTube would not open (it takes a machine for a bot, a video is gone) is looked for on archive.org:
         #     the same film under its own title first (the film libraries upload to both), then, for a subject none
         #     of whose sources opened, that subject's own searches among archive.org's moving images
@@ -227,7 +255,8 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             log(f"archive round: {len(failed)} sources would not open, {len(dead)} subjects had none; {len(more)} archive sources to open")
         if more:
             with cf.ThreadPoolExecutor(max_workers=4) as pool:
-                sources += list(pool.map(lambda s: _open(s, work, log, hear_s, read_s), more))
+                sources += list(pool.map(opener, more))
+        sources_seen[:] = sources
         spend["hear"] = round(sum(s.get("hear_usd") or 0.0 for s in sources), 5)
         live = [s for s in sources if not s.get("error") and s.get("shots")]
         # 5. moments and the picture check, per subject
@@ -296,6 +325,8 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         def resolve(k):
             if downloaded_only:
                 return k, None
+            if whole_first and (src_of[k].get("whole") or src_of[k].get("rung") == "wayback"):
+                return k, None                  # cut from the one file already here, never resolved again
             try:
                 return k, fetch.streams(src_of[k]["url"])
             except Exception as e:  # noqa: BLE001 the cut falls back to yt-dlp's own section download
@@ -325,7 +356,14 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                     return whole_of.get(p["source"])
                 return None
             try:
-                if whole_of.get(p["source"]):
+                if whole_first and s.get("whole"):
+                    _, how = cut.local(s["whole"], t0, t1, raw)
+                elif whole_first and s.get("rung") == "wayback":
+                    if t1 > float(s.get("dur_read") or 0) + 0.001 or not s.get("proxy"):
+                        raise fetch.FetchError("the pick lies outside the archived copy read")
+                    _, how = cut.local(s["proxy"], t0, t1, raw)
+                    how = "archive_proxy"
+                elif whole_of.get(p["source"]):
                     _, how = cut.local(whole_of[p["source"]], t0, t1, raw)
                 else:
                     _, how = cut.source(s, stream_of.get(p["source"]), t0, t1, raw, whole=whole, downloaded_only=downloaded_only)
@@ -398,16 +436,28 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 log(f"clip rejected for {p['subject']}: {record.get('reason')}")
                 os.remove(os.path.join(out_dir, p.pop("file")))
             return usd
-        with cf.ThreadPoolExecutor(max_workers=2) as pool:
-            spend["look"] += sum(pool.map(verify_cut, jobs))
+        if os.environ.get("FOOTAGE_VERIFY", "1") != "0":
+            with cf.ThreadPoolExecutor(max_workers=2) as pool:
+                spend["look"] += sum(pool.map(verify_cut, jobs))
+        else:
+            log("verify pass off (FOOTAGE_VERIFY=0): the caller gates every take by its own verdicts")
         # 7b. real voices: the person the film is about, heard saying a sentence that belongs after a line (voice.py)
-        voices = []
+        voices, voices_tried = [], None
         # a caller that hears nothing (the first film's wishes) has no sentence to cut in: voices only when asked or heard
         if (want_voices if want_voices is not None else hear_s != 0.0) and os.environ.get("FOOTAGE_VOICES", "1") != "0":
             try:
-                voices, spend["voices"] = voice.find_voices(lines, subjects, live, anchors, out_dir, W, H, stream_of=stream_of, log=log)
+                if whole_first:
+                    voices_tried = []
+                    voices, spend["voices"] = voice.find_voices(lines, subjects, live, anchors, out_dir, W, H, stream_of=stream_of, log=log,
+                                                                tried=voices_tried)
+                else:
+                    voices, spend["voices"] = voice.find_voices(lines, subjects, live, anchors, out_dir, W, H, stream_of=stream_of, log=log)
             except Exception as e:  # noqa: BLE001 the narrator alone, as before
                 log(f"voices failed: {str(e)[:160]}")
+                if voices_tried is not None:
+                    voices_tried.append(dict(person=None, after=None, said="", source=None, reason=f"voices failed: {str(e)[:120]}"))
+        elif whole_first:
+            voices_tried = [dict(person=None, after=None, said="", source=None, reason="voices not asked for (want_voices off or FOOTAGE_VOICES=0)")]
         # 8. the record
         out_lines = []
         for r in plan_rows:
@@ -428,6 +478,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                    subjects=subjects, lines=out_lines, voices=voices,
                    sources=[{k: s.get(k) for k in ("key", "url", "title", "channel", "where", "duration", "subjects", "why", "rung", "dur_read", "error")}
                             | dict(shots=len(s.get("shots") or []), heard=len(s.get("transcript") or [])) for s in sources],
+                   **({"voices_tried": voices_tried} if voices_tried is not None else {}),
                    counts=dict(lines=len(out_lines), lines_with_footage=sum(1 for r in out_lines if r["clips"]),
                                clips=sum(len(r["clips"]) for r in out_lines), frames_checked=len(pool_frames), frames_passed=len(good),
                                sources_opened=len(live), sources_tried=len(sources)),
@@ -441,8 +492,51 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             json.dump(res, f, ensure_ascii=False, indent=1)
         return res
     finally:
+        keep_sources(sources_seen, log)
         if not keep_work:
             shutil.rmtree(work, ignore_errors=True)
+
+
+def keep_sources(sources, log=print):
+    """FOOTAGE_KEEP_SOURCES=<dir>: each whole source this call fetched (src["whole"], not one already kept) is hard-linked
+    (moved when it cannot be) into <dir> before the work folder goes, and {url, path, rung} appended to <dir>/manifest.json,
+    the rows fetch.local_source honours. Unset, nothing is kept."""
+    keep = os.environ.get("FOOTAGE_KEEP_SOURCES")
+    if not keep or not sources:
+        return []
+    os.makedirs(keep, exist_ok=True)
+    mf = os.path.join(keep, "manifest.json")
+    try:
+        rows = json.load(open(mf)) if os.path.exists(mf) else []
+        rows = rows if isinstance(rows, list) else []
+    except (OSError, ValueError):
+        rows = []
+    have = {r.get("url") for r in rows if isinstance(r, dict)}
+    added = []
+    for s in sources:
+        p = s.get("whole")
+        if not p or s.get("error") or s.get("url") in have or not os.path.isfile(p):
+            continue
+        if os.path.realpath(p).startswith(os.path.realpath(keep) + os.sep):
+            continue
+        dst = os.path.join(keep, f"{_key(s.get('id') or s['url'])}_{len(rows) + len(added)}{os.path.splitext(p)[1] or '.mp4'}")
+        try:
+            try:
+                os.link(p, dst)
+            except OSError:
+                shutil.move(p, dst)
+        except OSError as e:
+            log(f"source {s.get('key')} not kept: {str(e)[:120]}")
+            continue
+        added.append(dict(url=s["url"], path=dst, rung=s.get("rung")))
+        have.add(s["url"])
+    if added:
+        tmp = mf + ".part"
+        with open(tmp, "w") as f:
+            json.dump(rows + added, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, mf)
+        log(f"kept {len(added)} whole sources for this film's later calls")
+    return added
 
 
 def assign(lines, good, src_of, shows, taken, shot_s=None, line_max=None, strict=False, motion_of=None, alloc=None):
@@ -561,6 +655,8 @@ def main():
     ap.add_argument("--motion-first", action="store_true", help="moving shots first, windows on their motion peak")
     ap.add_argument("--alloc", default=None, choices=["round"], help="round: one pick a line a round, the scarcest line first")
     ap.add_argument("--reassign-lost", action="store_true", help="lines whose cuts failed are assigned again and cut")
+    ap.add_argument("--whole-first", action="store_true", help="short sources fetched once, whole with sound: scan, transcript and every cut")
+    ap.add_argument("--want-voices", action="store_true", help="look for real voices even when nothing would otherwise be heard")
     a = ap.parse_args()
     lines, named, title = lines_of(json.load(open(a.script)))
     if a.timing:
@@ -577,7 +673,8 @@ def main():
     res = seam.for_lines(lines, named, title, a.out, a.w, a.h, scope="workflow", log=lambda m: print("[footage] " + m, flush=True),
                          anchors=anchors, avoid=avoid, preserve_source=a.preserve_source,
                          **{k: v for k, v in dict(shot_s=a.shot_s, line_max=a.line_max, per=a.per, strict_lines=a.strict_lines,
-                                                  motion_first=a.motion_first, alloc=a.alloc, reassign_lost=a.reassign_lost).items() if v})
+                                                  motion_first=a.motion_first, alloc=a.alloc, reassign_lost=a.reassign_lost,
+                                                  whole_first=a.whole_first, want_voices=a.want_voices).items() if v})
     if res is None:
         print(json.dumps(dict(off="VALMERA_FOOTAGE=0")))
         return

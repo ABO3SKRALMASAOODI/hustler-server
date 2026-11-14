@@ -357,14 +357,15 @@ def test_joints_open_their_hole_at_the_last_phrase_and_swell_into_type_pages():
         for w in s["say"].split():
             words.append(dict(w=w, start=round(t, 3), end=round(t + 0.25, 3), seg=i))
             t += 0.35
-        t += 0.4
+        t += 0.7                     # a narrator gap at each joint: a swell rises only in one
     pack = dict(words=dict(words=words, duration=t + 1))
     beats = dict(pictures=[dict(kind="designed", f=[20, 50], tier="designed")])
     js = W3.joints_of(sc, pack, beats)
     holes = [j for j in js if j["kind"] in ("turn", "close")]
     assert all(0.8 - 1e-6 <= j["next_first_word_t"] - j["last_word_t"] <= 2.3 + 1e-6 for j in holes)
     assert next(j for j in js if j["kind"] == "close")["bed_db"] >= 20
-    assert any(j["kind"] == "swell" for j in js)
+    # round 3: a swell rises only in a narrator gap, never into a hole's re-entry or the dry close
+    assert all(not any(0 <= h["next_first_word_t"] - j["t"] < 1.0 for h in holes) for j in js if j["kind"] == "swell")
 
 
 def test_sound_measures_read_drops_and_the_bed_from_two_mixes(tmp_path):
@@ -386,3 +387,209 @@ def test_sound_measures_read_drops_and_the_bed_from_two_mixes(tmp_path):
     m = W3.sound_measures(paths[1], paths[0], FIT._ffmpeg(), dict(sound=[]), [dict(next_first_word_t=5.95)])
     assert m["drops"]["count"] == 1 and abs(m["drops"]["list"][0]["t"] - 5.45) <= 0.15 and m["drops"]["reentry_on_word"], m
     assert 0.5 <= m["music_runtime_share"] <= 1.0
+
+
+# ----------------------------------------------------------------- round 3
+
+def test_a_clip_found_for_a_moment_is_judged_on_every_line_that_names_its_thing():
+    lines = FIT.lines_of(_sc())
+    assert FIT.judged_lines(dict(subject="Woody knocks Buzz out of the window", thing="Toy Story", line=1), lines) == [0, 1]
+    assert FIT.judged_lines(dict(subject="John Lasseter interview", thing="John Lasseter", line=None), lines) == [2]
+
+
+def _words_for(sc, wps=2.6):
+    out, t = [], 0.0
+    for i, s in enumerate(sc["segments"]):
+        for w in s["say"].split():
+            out.append(dict(w=w, start=round(t, 3), end=round(t + 0.25, 3), seg=i))
+            t += 1 / wps
+        t += 0.22
+    return dict(words=out, duration=round(t, 2))
+
+
+def test_demand_follows_the_cuts_shot_plan_and_moments_and_stills_shape_short():
+    import math
+    import film as F
+    import reel as R
+    import wf3 as W3
+    sc = dict(named=[], segments=[dict(say=" ".join(f"w{i}{k}" for k in range(12)), beat="setup",
+                                       see=[dict(thing="Toy Story", as_of="1995", moment="the window fall" if i == 1 else None,
+                                                 still_only=(i == 2))]) for i in range(3)])
+    words = _words_for(sc)
+    clock = F.Clock(words, sc)
+    plan = R.shot_plan(sc, clock, F.Clock.f(clock.dur) + 15, 1114)
+    pack = dict(_report_pack(), words=words)
+    want = {i: max(1, math.ceil(W3.DEMAND_K * sum(1 for x in plan[i] if x > W3.GLIMPSE_MAX_F))) for i in range(3)}
+    assert W3.line_demand(pack, sc, [4.0] * 3) == want
+    # line 1 names a moment: grade-3 takes only keep it short; line 2 is still by nature: no motion asked of it
+    clips = [dict(path=f"/m{k}.mp4", seconds=1.6, cuts=[], take_group=f"/m{k}.mp4", motion=dict(p90=0.1, curve=[0.1] * 24)) for k in range(40)]
+    fit = {c["path"]: {"0": [1, 2]} for c in clips}
+    ver = {c["path"]: {"0": {"1": dict(grade=3), "2": dict(grade=3)}} for c in clips}
+    pack = dict(footage=[dict(i=1, clips=clips)], pictures={}, fit=fit, fit_verdicts=ver, words=words)
+    rows = W3.fit_report(pack, sc, [4.0] * 3)
+    assert rows[1]["moment_ok"] is False and rows[1]["short"]
+    assert rows[2]["still_only"] and rows[2]["moving"] == 0 and not rows[2]["short"] and rows[2]["have"] >= rows[2]["need"]
+    ver[clips[0]["path"]]["0"]["1"]["grade"] = 5
+    rows = W3.fit_report(pack, sc, [4.0] * 3)
+    assert rows[1]["moment_ok"] is True and W3.moment_cover(rows) == 1.0
+
+
+def test_failing_shots_get_the_top_up_before_the_fill(tmp_path, monkeypatch):
+    import wf3 as W3
+    state = dict(topped=False)
+    calls = []
+
+    def build(sc, pack, knobs):
+        good = state["topped"]
+        pics = [dict(kind="photo", path="/p/good.jpg" if good else "/p/bad.jpg", line=1, f=[0, 30], finish=None, tier="photo")]
+        return dict(items=[]), dict(pictures=pics, measured=dict(repeat_share=0.0, static_shots=0), voice_f=[0, 30])
+
+    def audit(shots, sc, **kw):
+        return [dict(key=s["key"], line=s["line"], f=s["f"], path=s["path"], fit=not s["path"].endswith("bad.jpg"), why="w") for s in shots], 0.0
+
+    def topup(ctx, script_rec, pack, lines):
+        calls.append(("topup", lines))
+        state["topped"] = True
+        return dict(lines=lines, clips=3)
+    monkeypatch.setattr(W3.FIT, "audit", audit)
+    monkeypatch.setattr(W3, "topup_from_score", topup)
+    monkeypatch.setattr(W3.F, "taste_check", lambda l1, beats: dict(ok=True, problems=[]))
+    (tmp_path / "pack.json").write_text(json.dumps(dict(record=dict(spend=[]), pack={})))
+    ctx = SimpleNamespace(supply=str(tmp_path), tmp=str(tmp_path), args={}, log=lambda m: None)
+    words = dict(duration=2.0, words=[dict(w="a", start=0.0, end=0.5, seg=0), dict(w="b", start=0.6, end=1.0, seg=1)])
+    pack = dict(words=words, fit={}, pictures={}, footage=[])
+    sc = dict(segments=[dict(say="a"), dict(say="b")])
+    l1, beats, taste = W3.stories_gates(ctx, sc, pack, build, {}, *build(sc, pack, {}), dict(ok=True, problems=[]), script_rec=dict(script=sc))
+    assert calls[0] == ("topup", [1])
+    rounds = beats["measured"]["audit"]["rounds"]
+    assert rounds[-1]["round"] == "topup" and rounds[-1]["failed"] == 0 and not any(r["round"] == "fill" for r in rounds)
+    assert beats["pictures"][0]["path"] == "/p/good.jpg"
+
+
+def _fc(fail_s, defects=()):
+    return dict(picture_fit=dict(fail_s=fail_s, shots=[dict(key="s1", drop="bad.jpg@1", line=1, fit=fail_s == 0, why="w")]),
+                defects=list(defects), gates_ok=not defects)
+
+
+def test_the_picture_gate_draws_again_once_then_stops_before_delivery(tmp_path, monkeypatch):
+    import pytest
+    import wf3 as W3
+    ctx = _ctx(tmp_path)
+    (tmp_path / "run" / "script.json").write_text(json.dumps(dict(script=dict(segments=[]), style=dict(id="reel"))))
+    seen = []
+    monkeypatch.setattr(W3, "check_once", lambda ctx, rd, sc: (dict(checks=dict(ok=False)), _fc(1.2)))
+    monkeypatch.setattr(W3, "score", lambda ctx, s: seen.append(("score", W3.render_drop(ctx))) or {})
+    monkeypatch.setattr(W3, "render", lambda ctx, s, sc: seen.append("render") or {})
+    with pytest.raises(RuntimeError, match="picture gate"):
+        W3.check(ctx, {}, {})
+    assert seen == [("score", ["bad.jpg@1"]), "render"]                    # dropped, scored and drawn again once
+    with pytest.raises(RuntimeError):                                      # a resumed check never loops: it stops again
+        W3.check(ctx, {}, {})
+    assert len(seen) == 2
+
+
+def test_a_film_whose_only_defect_is_a_fill_overflow_is_delivered(tmp_path, monkeypatch):
+    import wf3 as W3
+    ctx = _ctx(tmp_path)
+    monkeypatch.setattr(W3, "check_once", lambda ctx, rd, sc: (dict(checks=dict(ok=False, stories=dict(defects=["fill 0.12"]))), _fc(0.0, ["fill 0.12"])))
+    monkeypatch.setattr(W3, "score", lambda *a: (_ for _ in ()).throw(AssertionError("no repair")))
+    r = W3.check(ctx, {}, {})
+    assert r["checks"]["stories"]["defects"] == ["fill 0.12"]
+
+
+def test_a_repeated_take_group_is_denied_on_its_later_line_and_the_plan_built_once_more(tmp_path, monkeypatch):
+    import wf3 as W3
+    seen = []
+    monkeypatch.setattr(W3.F, "taste_check", lambda l1, beats: dict(ok=True, problems=[]))
+
+    def build(sc, pack, knobs):
+        seen.append(list(knobs.get("drop") or []))
+        rep = 0.0 if knobs.get("drop") else 0.2
+        pics = [dict(kind="clip", path="/c/a.mp4", line=0, f=[0, 10], take=0), dict(kind="clip", path="/c/b.mp4", line=2, f=[10, 20], take=0),
+                dict(kind="clip", path="/c/a.mp4", line=2, f=[20, 22], take=0, cont=True)]
+        return dict(items=[]), dict(pictures=pics, measured=dict(repeat_share=rep, static_shots=0), voice_f=[0, 30])
+    (tmp_path / "pack.json").write_text(json.dumps(dict(record=dict(spend=[]), pack={})))
+    ctx = SimpleNamespace(supply=str(tmp_path), tmp=str(tmp_path), args={"audit": False, "topup": False}, log=lambda m: None)
+    pack = dict(words=dict(duration=1.0, words=[dict(w="a", start=0.0, end=0.5, seg=0)]), fit={},
+                footage=[dict(i=0, clips=[dict(path="/c/a.mp4", take_group="G"), dict(path="/c/b.mp4", take_group="G")])])
+    _, beats, taste = W3.stories_gates(ctx, dict(segments=[dict(say="a")]), pack, build, {}, *build(None, None, {}), dict(ok=True, problems=[]))
+    assert seen[-1] == ["b.mp4@2"] and beats["measured"]["repeat_rebuild"]["after"] == 0.0
+    assert not any("repeat a take" in p for p in taste["problems"])
+
+
+def test_render_measures_read_flips_whites_hash_repeats_and_layout():
+    import numpy as np
+    import wf3 as W3
+    rng = np.random.default_rng(3)
+    a = (rng.random((160, 90)) * 200).astype(np.uint8)
+    frames = [a, a, 255 - a, a, np.full((160, 90), 240, np.uint8), a]
+    flips, whites = W3.flips_and_whites(frames)
+    assert flips >= 1 and whites == 1                       # the negated frame flips, the white frame is white
+    b = (rng.random((160, 90)) * 200).astype(np.uint8)
+    seq = [a] * 10 + [b] * 10 + [a] * 10
+    pics = [dict(kind="clip", f=[0, 10], path="x"), dict(kind="clip", f=[10, 20], path="y"), dict(kind="clip", f=[20, 30], path="x")]
+    assert W3.hash_repeats(seq, pics) == round(1 / 3, 3)
+    pics[2]["cont"] = True                                   # a time-continuous cut-in is not a repeat
+    assert W3.hash_repeats(seq, pics) == 0.0
+    beats = dict(pictures=[dict(kind="clip", mode="bleed"), dict(kind="clip", mode="window"), dict(kind="photo", mode="print"),
+                           dict(kind="clip", mode="pushed")])
+    assert W3.bleed_share(beats) == (0.5, 0.5)
+
+
+def test_joints_keep_three_holes_swell_only_in_narrator_gaps_and_long_voices_keep_the_bed():
+    import wf3 as W3
+    beats_ = ["setup", "low", "turn", "low", "payoff", "close"]
+    sc = dict(segments=[dict(say="a b c d", beat=b, phrases=[[0, 4]]) for b in beats_])
+    words, t = [], 0.2
+    for i, s in enumerate(sc["segments"]):
+        for w in s["say"].split():
+            words.append(dict(w=w, start=round(t, 3), end=round(t + 0.25, 3), seg=i))
+            t += 0.3
+        t += 0.9                                                               # a 0.95 s gap at every joint
+    pack = dict(words=dict(words=words, duration=t + 1),
+                voices=[dict(start=2.0, end=3.5), dict(start=8.0, end=12.0)])
+    first = {}
+    for w in words:
+        first.setdefault(w["seg"], w["start"])
+    beats = dict(pictures=[dict(kind="designed", f=[int((first[2] + 0.2 + 1.0 / 3) * 30), int((first[2] + 1.5) * 30)], tier="designed")])
+    js = W3.joints_of(sc, pack, beats)
+    holes = [j for j in js if j["kind"] in W3.HOLE_RANK]
+    assert len(holes) == 3 and {j["kind"] for j in holes} == {"turn", "close", "payoff"}       # the lows go first
+    v = [j for j in js if j["kind"] == "voice"]
+    assert v[0]["db"] == W3.JOINT_HOLE_DB and v[1]["db"] == W3.VOICE_LONG_DB
+    sw = [j for j in js if j["kind"] == "swell"]
+    gaps = W3.narrator_gaps(W3.F.Clock(pack["words"], sc).words)
+    assert 1 <= len(sw) <= W3.SWELLS_MAX
+    for j in sw:
+        g = next(g for g in gaps if abs(g[1] - j["t"]) < 1e-3)                # each at a gap's end, rising inside it
+        assert g[1] - g[0] >= 0.6 and j["rise_s"] <= g[1] - g[0] + 1e-6
+
+
+def test_a_thin_display_density_asks_the_writer_once_and_builds_again(tmp_path, monkeypatch):
+    import wf3 as W3
+    calls = []
+    orig = W3.density_repair
+
+    def build(sc, pack, knobs):
+        n = sum(len(s_.get("show") or []) for s_ in sc["segments"])
+        pics = [dict(kind="clip", path="/c/a.mp4", line=0, spoken_line=0, f=[0, 10], take=0, mode="bleed")]
+        return dict(items=[], n=n), dict(pictures=pics, measured=dict(repeat_share=0.0, static_shots=0), voice_f=[0, 30], display=[])
+    monkeypatch.setattr(W3.F, "taste_check", lambda l1, beats: dict(ok=True, problems=[]))
+    monkeypatch.setattr(W3, "type_measures", lambda l1, beats, sc: dict(display_shot_share=0.05 if not l1.get("n") else 0.18))
+
+    def repair(sc, lines, ask=None, verify_fn=None):
+        calls.append(lines)
+        out = json.loads(json.dumps(sc))
+        out["segments"][0]["show"] = [dict(text="Woody", role="name", word_i=0)]
+        return out, [dict(i=0, text="Woody", role="name")], dict(usd=0.001)
+    monkeypatch.setattr(W3, "density_repair", repair)
+    (tmp_path / "pack.json").write_text(json.dumps(dict(record=dict(spend=[]), pack={})))
+    ctx = SimpleNamespace(supply=str(tmp_path), tmp=str(tmp_path), args={"audit": False, "topup": False}, log=lambda m: None)
+    pack = dict(words=dict(duration=1.0, words=[dict(w="a", start=0.0, end=0.5, seg=0)]), fit={}, footage=[])
+    sc = dict(segments=[dict(say="Woody fell")])
+    _, beats, _ = W3.stories_gates(ctx, sc, pack, build, {}, *build(sc, pack, {}), dict(ok=True, problems=[]))
+    assert calls == [[0]] and beats["measured"]["display_density"]["after"] == 0.18
+    out, added, _ = orig(dict(segments=[dict(say="the box office", show=[])]), [0],
+                                      ask=lambda system, content: (json.dumps(dict(items=[dict(i=0, text="BOX OFFICE", role="key", word_i=1),
+                                                                                            dict(i=0, text="$362M", role="key", word_i=2)])), {}))
+    assert [a["text"] for a in added] == ["BOX OFFICE"]                       # a number is never added here
