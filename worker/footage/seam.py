@@ -24,7 +24,10 @@ MIN_BUDGET_S = 600.0          # the engine took 225-660 s a story on the Mac (13
 # settings: 404 s and $0.61, of which hearing 4,300 s of sources was $0.31 and most of the minutes, and one clip a
 # wish. A wish wants a picture of its subject, not a line that was said: nothing is heard, the first five minutes of
 # a source are read, two sources a subject and eight in all are opened, and each wish is given two clips to cut on.
-FIRST_FILM = {"max_sources": 8, "hear_s": 0.0, "read_s": 300.0, "per": 2}
+# The first film uses the rendition already scanned. Resolving and fetching the
+# same source again consumed the upgrade deadline behind YouTube retries. The
+# finished crop still passes per-clip verification and the exact-word check.
+FIRST_FILM = {"max_sources": 8, "hear_s": 0.0, "read_s": 300.0, "per": 2, "downloaded_only": True}
 LINE_S = 3.0                  # two shots a wish at the engine's 1.5 s pace
 _CFG = {"cfg": None, "at": 0.0, "busy": False}
 _LOCK = threading.Lock()

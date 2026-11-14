@@ -50,7 +50,7 @@ def grab(stream, url, t0, t1, out_path):
     return out_path, "section"
 
 
-def source(source, stream, t0, t1, out_path, whole=None):
+def source(source, stream, t0, t1, out_path, whole=None, downloaded_only=False):
     """Cut the checked source, retaining its downloaded fallback when remote seeks fail.
 
     An archived scan is already the archive's available rendition. Reopening
@@ -60,6 +60,11 @@ def source(source, stream, t0, t1, out_path, whole=None):
     proxy = source.get("proxy")
     covered = bool(proxy and os.path.isfile(proxy) and t0 >= 0 and
                    t1 <= float(source.get("dur_read") or 0) + 0.001)
+    if downloaded_only:
+        if not covered:
+            raise fetch.FetchError("requested cut is outside the downloaded scan")
+        path, _ = local(proxy, t0, t1, out_path)
+        return path, "scanned_proxy"
     if covered and source.get("rung") == "wayback":
         path, _ = local(proxy, t0, t1, out_path)
         return path, "archive_proxy"

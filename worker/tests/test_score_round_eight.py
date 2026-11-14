@@ -68,6 +68,20 @@ def test_print_collision_counts_occupied_area_once_across_sampled_frames():
     assert compiler.on_print(title, [[-1, -1, 2, 2]]) == 1
 
 
+def test_first_film_cut_never_reopens_a_scanned_source(tmp_path, monkeypatch):
+    import pytest
+    from footage import cut, fetch
+    proxy=tmp_path/'scan.mp4'; proxy.write_bytes(b'scanned')
+    def network(*a, **k):
+        raise AssertionError('first-film cut must not reopen the network')
+    monkeypatch.setattr(cut, 'grab', network)
+    monkeypatch.setattr(cut, 'local', lambda p,a,z,out:(out,'local'))
+    src=dict(proxy=str(proxy),dur_read=30,url='https://example.test/video')
+    assert cut.source(src,None,10,12,'out',whole=network,downloaded_only=True)[1]=='scanned_proxy'
+    with pytest.raises(fetch.FetchError,match='outside'):
+        cut.source(src,None,29,32,'out',whole=network,downloaded_only=True)
+
+
 def test_supply_requires_an_explicit_word_match_and_uses_pair_numbers(tmp_path, monkeypatch):
     import time, types
     from score import supply

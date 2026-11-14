@@ -109,8 +109,8 @@ def _twin(a, b, n=28):
 
 
 def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MAX_SOURCES, keep_work=False, anchors=None, avoid=None,
-         hear_s=None, read_s=None, per=None, want_voices=None, preserve_source=False):
-    """anchors: {person's name: [photo paths already checked as that person]} for the identity step.
+         hear_s=None, read_s=None, per=None, want_voices=None, preserve_source=False, downloaded_only=False):
+    """downloaded_only: cut the scanned rendition without reopening remote streams.
     avoid: [{"url", "time_range"}] already cut for this film by an earlier run: those seconds of a source are not cut again.
     hear_s, read_s, per: a caller with a deadline (a first film, score.film) hears less or nothing of each source, reads
     less of it and opens fewer sources a subject; None keeps the engine's own (HEAR_MAX_S, fetch.PROXY_MAX_S, PER_SUBJECT)."""
@@ -300,6 +300,8 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         # 7. cut: resolve each used source's stream once, cut, measure, grade to one look, finish
         need_src = sorted({p["source"] for r in plan_rows for p in r["picks"]})
         def resolve(k):
+            if downloaded_only:
+                return k, None
             try:
                 return k, fetch.streams(src_of[k]["url"])
             except Exception as e:  # noqa: BLE001 the cut falls back to yt-dlp's own section download
@@ -332,7 +334,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 if whole_of.get(p["source"]):
                     _, how = cut.local(whole_of[p["source"]], t0, t1, raw)
                 else:
-                    _, how = cut.source(s, stream_of.get(p["source"]), t0, t1, raw, whole=whole)
+                    _, how = cut.source(s, stream_of.get(p["source"]), t0, t1, raw, whole=whole, downloaded_only=downloaded_only)
                 p.update(raw=raw, t0=t0, t1=t1, how=how, stats=cut.measure(raw))
             except Exception as e:  # noqa: BLE001 the line keeps its other clips
                 p["error"] = str(e)[:200]
