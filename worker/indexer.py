@@ -577,6 +577,8 @@ def run_index_job(worker_db, job):
     trial_scope, trial_recorder = _claude_trial_index_scope(worker_db, job)
     # Our own account's upload: its captions and greeting are company spend.
     company_recorder, sound_recorder = _company_recorders(worker_db, job)
+    import source_screen
+    needs_source_screen = storyboard_after_ready(worker_db, job, project_id, session_id)
     stream_pool = None
     stream_prepared = {}
     stream_stop = threading.Event()
@@ -689,7 +691,8 @@ def run_index_job(worker_db, job):
         # Cache hit: this exact file was indexed before (any project) BY THE
         # CURRENT PIPELINE, and its filmstrip is still readable in storage.
         cached = worker_db.run(dbx.get_index_by_sha, sha)
-        if cached and not (cached.get("json") or {}).get("visual_storyboard_pending") \
+        if cached and (not needs_source_screen or ((cached.get("json") or {}).get("source_screen") or {}).get("version") == source_screen.VERSION) \
+                and not (cached.get("json") or {}).get("visual_storyboard_pending") \
                 and cached.get("pipeline_version", 1) == \
                 config.PIPELINE_VERSION and _index_has_tiles(cached["json"]):
             ready_proxy = src if from_client_proxy else None
@@ -835,6 +838,11 @@ def run_index_job(worker_db, job):
                                   storage.upload_file, proxy_local,
                                   proxy_key, "video/mp4")
                 state["shots"] = f_shots.result()
+                f_screen = (sub.submit(clock.timed, "pic_source_screen_s",
+                            source_screen.build, proxy_local, info["duration"],
+                            info["fps"], state["shots"], sha, workdir,
+                            company_recorder or sound_recorder)
+                            if needs_source_screen else None)
                 _lane_progress("picture", 0.72)
                 try:
                     state["motion"] = f_motion.result()
@@ -869,6 +877,8 @@ def run_index_job(worker_db, job):
                     warnings.append(
                         f"source layout measurement failed ({str(e)[:120]})"
                         " — tools measure it on first use")
+                if f_screen is not None:
+                    state["source_screen"] = f_screen.result()
                 _lane_progress("picture", 0.96)
                 try:
                     f_up.result()
@@ -1044,6 +1054,7 @@ def run_index_job(worker_db, job):
             motion=motion_sidecar,
             spatial=spatial_sidecar,
             source_layout=layout_sidecar,
+            source_screen=state.get("source_screen"),
             visual_storyboard=visual_storyboard,
             visual_storyboard_pending=late_board,
         ).model_dump()
