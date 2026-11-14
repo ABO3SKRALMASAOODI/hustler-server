@@ -427,10 +427,10 @@ def _index_not_ready_result(tool, live, waited_s):
     if live:
         pct = int(live.get("progress") or 0)
         waited = f" after waiting {waited_s:.0f}s" if waited_s >= 1 else ""
-        text = (f"PREREQUISITE: this project's video is still being analyzed "
+        text = (f"PENDING: this project's media is still being analyzed "
                 f"(analysis job {live['id']}, {pct}% done{waited}). Nothing "
                 f"was changed. Call wait_for_job(job_id={live['id']}), then "
-                f"retry {label}.")
+                f"retry {label}. Retry after 10 seconds; analysis is proceeding normally.")
     else:
         text = ("PREREQUISITE: this project's video has not been analyzed "
                 "and no analysis is running. Nothing was changed. Call "
@@ -442,7 +442,9 @@ def _index_not_ready_result(tool, live, waited_s):
         evidence={"index_job_id": (live or {}).get("id"),
                   "index_progress": (live or {}).get("progress"),
                   "waited_s": round(waited_s, 1)})
-    return {"text": text, "is_error": True, "code": "index_not_ready",
+    return {"text": text, "is_error": not bool(live), "code": "index_not_ready",
+            "status": "pending" if live else "blocked",
+            "retry_after_s": 10 if live else None,
             "retryable": bool(live), "index_job_id": (live or {}).get("id"),
             "edl_changed": False, "tool_outcome": outcome.to_dict()}
 
@@ -690,6 +692,10 @@ def run_mcp_job(worker_db, job):
                 preview_asset = None
             if preview_asset:
                 out["preview"] = read_tools.preview_summary(preview_asset)
+                if tool == "render_preview":
+                    import mcp_craft
+                    out["text"] += "\n" + mcp_craft.summary(
+                        (preview_asset.get("meta") or {}).get("craft_report"))
             check = getattr(ctx, "last_preview_check", None)
             if check:
                 out["changed_section_preview"] = {

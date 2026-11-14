@@ -1837,7 +1837,8 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
             guidance = (f"Analysis job {analysis['id']} is {pct}% done"
                         + (f" (waited {_index_waited_s:.0f}s)"
                            if _index_waited_s >= 1 else "")
-                        + f". Call wait_for_job(job_id={analysis['id']}) "
+                        + f". Still analysing normally; retry after 10 seconds. "
+                        f"Call wait_for_job(job_id={analysis['id']}) "
                         "and then index_status before retrying this tool."
                         if waiting else
                         "Call index_status to inspect the analysis failure or "
@@ -1845,7 +1846,10 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
             text = (f"PROJECT {project_id} — video analysis is not "
                     f"ready. No editing job was started. {guidance}")
             result = {"text": text,
-                      "is_error": True, "code": "index_not_ready",
+                      "is_error": not waiting, "code": "index_not_ready",
+                      "status": "pending" if waiting else "blocked",
+                      "retry_after_s": 10 if waiting else None,
+                      "retry_tool": name, "retry_arguments": args,
                       "index_job_id": analysis.get("id"),
                       "index_progress": analysis.get("progress"),
                       "retryable": waiting, "edl_changed": False,
@@ -1862,7 +1866,8 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
                                            "progress"),
                                        "waited_s": round(_index_waited_s, 1)},
                           "affected_ranges": []}}
-            return _out(_session_error(result["text"]), result)
+            return _out(result["text"] if waiting else
+                        _session_error(result["text"]), result)
         if not wait_for_index and mcp_fast_reads.eligible(name) and \
                 name not in set(catalog.get("write_tools") or []):
             # A pure read of Postgres rows: answered here by the same code
@@ -3128,7 +3133,8 @@ def _t_make_first_cut(tok, args):
             return _text(
                 f"PREREQUISITE: project {project_id}'s video is still being "
                 "analyzed. Poll index_status until it is done, then call "
-                "make_first_cut again.", True)
+                "make_first_cut again. This is pending, not a failure; "
+                "retry after 10 seconds.", False)
         cur.execute("""SELECT id, state FROM video_jobs
                        WHERE project_id = %s AND type = 'agent_turn'
                          AND payload->>'first_cut' = 'true'
@@ -3631,6 +3637,7 @@ def _t_download_url(tok, args):
         return {"content": [{"type": "text", "text": text}],
                 "structuredContent": {"preview_receipt": receipt},
                 "isError": False}
+    receipt["craft_report"] = (row.get("meta") or {}).get("craft_report")
     receipt["url"] = url
     # The finished video reached the AI app: the MCP twin of a Studio
     # download, for the Health board and the funnel (strategy 1025 §4.6).
@@ -3643,7 +3650,8 @@ def _t_download_url(tok, args):
     inspect = (f"\nInspect this exact file: watch_video(project_id={project_id}, "
                f"kind='asset', asset_key={json.dumps(row['storage_key'])})")
     return {"content": [{"type": "text",
-                         "text": f"{kind} of EDL v{ver}:\n{url}{inspect}"}],
+                         "text": f"{kind} of EDL v{ver}:\n{url}{inspect}"
+                         + "\nCRAFT REPORT: " + json.dumps(receipt["craft_report"])}],
             "structuredContent": {"download_receipt": receipt}, "isError": False}
 
 

@@ -9916,6 +9916,7 @@ def _run_render_job(worker_db, job):
                           "times": cached_meta.get("caption_review_times") or []}]
                         if cached_meta.get("caption_sheet_key") else []),
                     "audio_qc": cached_meta.get("audio_qc"),
+                    "craft_report": cached_meta.get("craft_report"),
                     "picture_qc": render_qc.refresh_tail_classification(
                         cached_meta.get("picture_qc"), edl_row["json"]),
                     # New renders retain exact program windows. Historical
@@ -10605,6 +10606,7 @@ def _run_render_job(worker_db, job):
         # keeps its row behind them: its checks can hold the export.
         picture_qc_res = None
         audio_qc_res = None
+        craft_report = None
         listen_keys = []
         picture_first = variant == "preview" and not proof_only
 
@@ -10612,10 +10614,11 @@ def _run_render_job(worker_db, job):
             return {"listen_keys": [item["key"] for item in listen_keys],
                     "listen_clips": listen_keys,
                     "audio_qc": audio_qc_res,
+                    "craft_report": craft_report,
                     "picture_qc": picture_qc_res}
 
         def run_checks():
-            nonlocal picture_qc_res, audio_qc_res, listen_keys
+            nonlocal picture_qc_res, audio_qc_res, listen_keys, craft_report
             active_stage[0] = "qc_s"
             # The picture side of the same deterministic review (render_qc):
             # clipped faces, single-frame jumps off a cut, the end card and the
@@ -10712,6 +10715,15 @@ def _run_render_job(worker_db, job):
                         except Exception:
                             pass
                         listen_keys = []
+
+            if not audio_model_review and not proof_only and variant in ("preview", "final"):
+                try:
+                    import mcp_craft
+                    craft_report = mcp_craft.measure(out_local, edl_row["json"],
+                                                     audio_qc_res, out_dur)
+                except Exception as exc:
+                    craft_report = {"measurement_error": type(exc).__name__,
+                                    "silent": None, "no_motion_detected": None}
 
         if not picture_first:
             run_checks()
@@ -10889,6 +10901,7 @@ def _run_render_job(worker_db, job):
                    if motion_warnings else {}),
                 **({"devices": fx_devices} if fx_devices else {}),
                 "audio_qc": audio_qc_res, "listen_keys": listen_keys,
+                "craft_report": craft_report,
                 "picture_qc": picture_qc_res,
                 "audio_model_review": audio_model_review,
                 "rules": render_rules()}

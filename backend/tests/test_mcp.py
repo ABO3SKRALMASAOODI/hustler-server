@@ -2304,13 +2304,15 @@ def test_analysis_past_the_budget_reports_progress_and_retry(client,
         "name": "get_transcript", "arguments": {"project_id": 3},
     }).get_json()["result"]
     text = result["content"][0]["text"]
-    assert result["isError"] is True
+    assert result.get("isError") is not True
     assert "No editing job was started" in text
     assert "Analysis job 44 is 30% done" in text
     assert "wait_for_job(job_id=44)" in text
     assert DB["enqueued"] == []
     raw = mcpmod._run_tool_job({"user_id": 60}, "get_transcript", {},
                                raw=True, project_id=3)
+    assert raw["status"] == "pending" and raw["retry_after_s"] == 10
+    assert raw["is_error"] is False
     assert raw["retryable"] is True and raw["index_progress"] == 30
     assert raw["tool_outcome"]["status"] == "prerequisite"
     assert raw["tool_outcome"]["prerequisite_tool"] == "wait_for_job"

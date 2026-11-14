@@ -565,13 +565,17 @@ def summarize(items):
         if i.get("width") and i.get("height"):
             bits.append(f"{i['width']}x{i['height']}")
         if i.get("duration_s"):
-            bits.append(f"{int(i['duration_s'])}s")
+            bits.append(f"source 0-{float(i['duration_s']):g}s; select source_start_s and duration_s")
         if i.get("credit"):
             bits.append(f"by {i['credit']}")
         # The Openverse lane carries a real license obligation per hit —
         # the line the agent reads must say it (the music_search contract).
         if i.get("license_note"):
             bits.append(i["license_note"])
-        desc = i.get("description") or "(no description)"
+        if i.get("time_range"):
+            bits.append(f"original source window {i['time_range']}")
+        if i.get("description_basis"):
+            bits.append(i["description_basis"])
+        desc = i.get("description") or "Visual evidence unavailable; inspect before placement"
         lines.append(f"  {i['id']} — {desc[:90]} ({', '.join(bits)})")
     return "\n".join(lines)

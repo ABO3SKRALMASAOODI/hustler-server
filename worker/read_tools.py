@@ -1077,6 +1077,7 @@ def preview_summary(preview_asset):
         "audio_model_review": policy is None,
         "listener_policy": policy,
         "asset_id": preview_asset.get("id"),
+        "craft_report": preview_meta.get("craft_report"),
     }
     if preview_meta.get("motion_warnings"):
         # Motion items this render could not draw: the edit is

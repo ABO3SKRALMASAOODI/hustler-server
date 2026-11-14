@@ -249,7 +249,8 @@ def test_mcp_call_before_analysis_returns_retryable_prerequisite(monkeypatch):
     out = mcp_exec.run_mcp_job(worker_db, {
         "id": 5, "project_id": 7, "user_id": 2,
         "payload": {"tool": "add_zoom", "args": {}}})
-    assert out["is_error"] and out["code"] == "index_not_ready"
+    assert out["is_error"] is False and out["code"] == "index_not_ready"
+    assert out["status"] == "pending" and out["retry_after_s"] == 10
     assert out["retryable"] is True and out["index_job_id"] == 900
     assert out["tool_outcome"]["status"] == "prerequisite"
     assert out["tool_outcome"]["prerequisite_tool"] == "wait_for_job"

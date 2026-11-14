@@ -22163,7 +22163,13 @@ def search_stock(ctx, query, kind="video", orientation=None, count=6):
         return (f"Stock search failed ({str(e)[:160]}). Do NOT invent "
                 "results; tell the user it did not work.")
 
+    import mcp_search
+    hits, undescribed = mcp_search.describe_missing(ctx, hits)
+
     if not hits:
+        if undescribed:
+            return ("Search found candidates, but their pictures could not be described. "
+                    "No placeable results yet; retry search_stock. Nothing was placed.")
         return (f"No stock {kind}s matched \"{q}\" ({orientation}). Try a "
                 "simpler or more visual phrase (\"city traffic\" rather than "
                 "\"the hustle of modern life\"), or ask the user for a clip. "
@@ -22194,6 +22200,8 @@ def search_stock(ctx, query, kind="video", orientation=None, count=6):
             + stock.summarize(hits) + eye
             + "\n\nNothing is downloaded or in the video yet. Pick the ONE "
               "that best matches what the user asked for and call "
+              "place_search_result(id=..., at_output_s=..., duration_s=...) "
+              "to put it into the film in one call. For acquisition only, use "
               "add_stock_media(id=...). Prefer a candidate that actually "
               "depicts the subject over one that merely shares a "
               "keyword.")
