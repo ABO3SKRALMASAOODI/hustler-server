@@ -43,7 +43,8 @@ def test_saved_fractional_split_keeps_the_original_picture_dependencies():
     split['keep'] = [[0, 8.318], [8.318, 30]]
     split['split_keep_boundaries'] = [8.318]
     saved = validate_edl(split, 30).model_dump()
-    assert saved['keep'][1][0] == 8.32
+    # Keep legal word edges exactly; a no-op split still reuses the picture.
+    assert saved['keep'][1][0] == 8.318
     assert render_plan.can_reuse_picture(original, saved)
 
 
