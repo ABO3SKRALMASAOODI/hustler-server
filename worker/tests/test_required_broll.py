@@ -77,3 +77,26 @@ def test_subject_enumeration_outage_cannot_be_certified_by_a_generic_check(monke
     monkeypatch.setattr(asks, 'check', lambda *a, **kw: pytest.fail('No complete subject list'))
     assert agent_loop._asks_check(ctx, 'All pictures added.') is None
     assert ctx.ask_verdict is None
+
+
+def test_requested_short_has_a_complete_story_end_and_continuation_is_not_done(monkeypatch, tmp_path):
+    import agent_tools
+    words = [{'w': 'Disney', 't0': 1., 't1': 1.5},
+             {'w': 'list.', 't0': 1.5, 't1': 2.},
+             {'w': 'Next', 't0': 3., 't1': 3.5}]
+    def record(*a, **kw):
+        return {'pictures': [{'subject': 'Disney', 'must_show': 'Disney picture', 'query': 'Disney', 'word_ids': [0]}],
+                'preserve_speech_clock': True, 'short_story_end_word': 1,
+                'short_story_end_reason': 'The examples finish here; the next line changes topic.'}, {}
+    monkeypatch.setattr(asks, '_call', record)
+    ledger = {'asks': []}
+    required_broll.record(NS(index={'words': words}), ledger, 'Make a short with Disney pictures')
+    assert ledger['asks'][-1]['id'] == 'picture_story_end'
+    assert ledger['picture_story_end']['word'] == words[1]
+    ctx = NS(workdir=str(tmp_path), db=NS(run=lambda *a: {'kind': 'render'}), project_id=1)
+    monkeypatch.setattr(agent_tools, '_asset_local_path', lambda *a: 'render.mp4')
+    # The picture check has no anchor in this test; the ending is measured independently.
+    ledger['required_pictures'][0]['source_words'] = []
+    assert required_broll.check(ctx, ledger, {'keep': [[0, 3.7]]}, {})['picture_story_end']['state'] == 'not_done'
+    assert required_broll.check(ctx, ledger, {'keep': [[0, 2.1]]}, {})['picture_story_end']['state'] == 'done'
+    assert required_broll.check(ctx, ledger, {'keep': [[0, 1.8]]}, {})['picture_story_end']['state'] == 'not_done'
