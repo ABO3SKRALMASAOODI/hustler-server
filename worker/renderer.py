@@ -89,7 +89,6 @@ _RENDER_JOB_TYPE = ContextVar("render_job_type", default=None)
 CANVAS_MAX_DIRECT_INPUTS = 8
 
 
-@contextmanager
 def _joined_media_checks(picture, sound):
     """Overlap independent readers; join both before publication or cleanup.
 
@@ -104,6 +103,7 @@ def _joined_media_checks(picture, sound):
         pending.result()
 
 
+@contextmanager
 def _measure_render_detail(name):
     started = time.monotonic()
     try:
