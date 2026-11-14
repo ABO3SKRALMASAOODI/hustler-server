@@ -3565,8 +3565,8 @@ def run(worker_db, job, project, index_row):
         if llm.get_recorder() is None:
             recorder = _ScopeRecorder(worker_db, job)
             llm.set_recorder(recorder)
-    # Q1 (30 Oct): the visual-variety devices reach trial accounts and NEW
-    # subscribers only; a grandfathered payer's First cut is unchanged (D1)
+    # Owner, 15 Nov: visual craft applies to every admitted first film.
+    # Trial availability and billing admission above remain unchanged.
     try:
         import first_cut_visual
         ctx.first_cut_q1 = bool(worker_db.run(

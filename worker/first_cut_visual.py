@@ -9,9 +9,8 @@ The owner's references (.valmera/week-1029/REFERENCE_PLAYBOOK.md) change the
 picture every 2-3 s. This module is what the First cut adds, all with the
 editor's own shipped tools:
 
-  talking heads   CUT-INS: a closer camera on the same take at phrase turns
-                  (hard cuts, never animated zooms), alternating wide and
-                  close so no framing holds past ~4 s; CUTAWAYS: B-roll on
+  talking heads   MOVES: eased camera moves on phrase turns; real cuts
+                  come from source edits and checked new pictures; CUTAWAYS: B-roll on
                   the concrete things the speaker names (the scout's picks,
                   source_broll: licensed, judged, colour-matched, photos
                   moving); the C2 slams and cards stay, clear of both.
@@ -27,10 +26,9 @@ editor's own shipped tools:
                   confidence, a repeated chorus): a slow narrated clip over
                   music is a speech source and is cut and captioned.
 
-WHO GETS IT (owner rule D1, strategy-1025/DECISIONS.md): trial accounts and
-NEW subscribers only. A payer whose subscription began before the D1 cutoff
-(claude_plans.grandfathered) gets the First cut exactly as before this
-module (``engine_on``); tests/test_first_cut_visual.py proves it.
+WHO GETS IT (owner, 15 Nov 2026): every admitted first film, including the
+legacy chain. This is a craft switch; billing admission, trial availability
+and model spending remain controlled by first_cut.run.
 """
 import base64
 import json
@@ -43,17 +41,8 @@ import subprocess
 
 
 def engine_on(conn, user_id, subscribed):
-    """True for an unsubscribed (trial) account and a NEW subscriber
-    (claude_plans.applies: subscribed after the D1 cutoff, or an internal
-    test account); False for every grandfathered subscriber and on any
-    doubt about a payer."""
-    if not subscribed:
-        return True
-    if conn is None or user_id is None:
-        return False
-    import claude_plans
-    return bool(claude_plans.safe(conn, claude_plans.applies, user_id, True,
-                                  default=False))
+    """Every admitted first film gets the same visual treatment."""
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -131,8 +120,8 @@ ENDING_RULE = (
     "a tagline), END there, starting later if you must, so the piece pays "
     "off; the 20-60 seconds count speech after pauses are cut. ")
 BROLL_RULE = (
-    "BROLL: 5 to 8 moments inside your span (not in its first sentence), "
-    "about one for every 5 seconds of it, "
+    "BROLL: find concrete picture opportunities throughout your span, including "
+    "its opening sentence: aim for one every 1.5 to 2 seconds, up to 20, "
     "where a top editor would cut away to footage of what is said: a "
     "concrete thing, place, person, object or action the viewer could SEE "
     "(\"the sun\", \"a factory\", \"Stanford\", \"a rocket launch\"), never "
@@ -140,7 +129,8 @@ BROLL_RULE = (
     "words copied EXACTLY as written where the shot starts, and \"query\": "
     "a 2-5 word stock-footage search describing what the shot SHOWS, as "
     "literal as the words (\"the sun\" -> \"the sun in space\"). Spread "
-    "them through the WHOLE span, about 3-5 seconds apart, the last ones in "
+    "them through the WHOLE span, about 1.5-2 seconds apart where the words "
+    "support distinct pictures; never invent a thing to fill a quota. The last ones in "
     "its final third. ")
 BROLL_JSON = (", \"broll\": [{\"id\": \"<sentence id>\", \"word\": "
               "\"<1-2 words>\", \"query\": \"<2-5 words>\"}]")
@@ -151,7 +141,7 @@ def broll_spans(index, by_id, items):
     is said word for word in its sentence (anything else is dropped)."""
     import first_cut
     out = []
-    for item in (items or [])[:10]:
+    for item in (items or [])[:20]:
         if not isinstance(item, dict):
             continue
         query = " ".join(str(item.get("query") or "").split())[:80]
@@ -173,10 +163,10 @@ def broll_spans(index, by_id, items):
     return out
 
 
-BROLL_S = 2.1           # one cutaway (references: 0.5-2.5 s)
-BROLL_MIN_S = 1.3
-BROLL_GAP_S = 1.2       # the face returns at least this long between them
-BROLL_SHARE = 0.45      # at most this share of the program (refs 30-60%)
+BROLL_S = 1.0           # one cutaway (references: 0.5-2.5 s)
+BROLL_MIN_S = 1.0
+BROLL_GAP_S = 0.55       # the face returns at least this long between them
+BROLL_SHARE = 0.60      # at most this share of the program (refs 30-60%)
 BROLL_TAIL_S = 1.4      # the ending is on the speaker
 
 
@@ -275,7 +265,10 @@ def place_broll(ctx, steps, started, run, moments, hook_end, spend=None,
     import first_cut
     # Q8: the B-roll stage's wall time (both passes) in the First cut's meta
     with first_cut._timed(ctx, "broll_source"):
-        run(ctx, steps, "source_broll", first, started)
+        from tools_ext.broll_tools import MAX_MOMENTS
+        for offset in range(0, len(specs), MAX_MOMENTS):
+            batch = specs[offset:offset + MAX_MOMENTS]
+            run(ctx, steps, "source_broll", dict(first, moments=batch, max=len(batch)), started)
         if video:
             got = covered(ctx)
             missed = [dict(s, kind="any", id=s["id"] + "a") for s in specs
@@ -283,8 +276,10 @@ def place_broll(ctx, steps, started, run, moments, hook_end, spend=None,
             if missed:
                 print(f"[first_cut] b-roll: {len(missed)} moments without a "
                       "clip, any picture now", flush=True)
-                run(ctx, steps, "source_broll", {"moments": missed,
-                                                 "max": len(missed)}, started)
+                for offset in range(0, len(missed), MAX_MOMENTS):
+                    batch = missed[offset:offset + MAX_MOMENTS]
+                    run(ctx, steps, "source_broll", {"moments": batch,
+                                                     "max": len(batch)}, started)
     if spend is not None:
         import first_cut
         with first_cut._timed(ctx, "broll_check"):

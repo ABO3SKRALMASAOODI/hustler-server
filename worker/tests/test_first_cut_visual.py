@@ -62,24 +62,21 @@ def test_trial_accounts_get_the_new_devices():
     assert fcv.engine_on(None, 7, subscribed=False) is True
 
 
-def test_a_grandfathered_subscriber_never_gets_them():
-    # paid before the D1 cutoff: today's behaviour exactly
-    assert fcv.engine_on(_Conn(_ON, paid_before_cutoff=True), 7, True) is False
-    # the new-subscriber offer is off: every payer is grandfathered
-    assert fcv.engine_on(_Conn({"on": False}), 7, True) is False
-    # any doubt about a payer reads as grandfathered
-    assert fcv.engine_on(None, 7, True) is False
+def test_existing_subscribers_get_the_same_first_film_craft():
+    assert fcv.engine_on(_Conn(_ON, paid_before_cutoff=True), 7, True) is True
+    assert fcv.engine_on(_Conn({"on": False}), 7, True) is True
+    assert fcv.engine_on(None, 7, True) is True
 
 
 def test_a_new_subscriber_gets_them():
     assert fcv.engine_on(_Conn(_ON, paid_before_cutoff=False), 7, True) is True
 
 
-def test_a_lookup_that_fails_keeps_a_payer_grandfathered(monkeypatch):
+def test_craft_does_not_need_another_billing_lookup(monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("db down")
     monkeypatch.setattr(claude_plans, "applies", boom)
-    assert fcv.engine_on(_Conn(_ON), 7, True) is False
+    assert fcv.engine_on(_Conn(_ON), 7, True) is True
 
 
 def test_run_marks_the_context_for_the_account(monkeypatch):
@@ -90,7 +87,7 @@ def test_run_marks_the_context_for_the_account(monkeypatch):
     def chain(ctx, worker_db, started, spend):
         seen["q1"] = ctx.first_cut_q1
         return [], [], None
-    for subscribed, paid, want in ((False, False, True), (True, True, False),
+    for subscribed, paid, want in ((False, False, True), (True, True, True),
                                    (True, False, True)):
         db = _WorkerDb(_Conn(_ON, paid_before_cutoff=paid), subscribed)
         monkeypatch.setattr(first_cut, "video_chain", chain)
@@ -592,3 +589,21 @@ def test_a_colourful_set_does_not_outweigh_the_character_in_it():
     # (the frame-wide median put the window on the wall: centre 0.19-0.22)
     for k, (x0, x1) in enumerate(fcv.action_boxes(frames)):
         assert 0.65 < (x0 + x1) / 2.0 < 0.85, (k, x0, x1)
+
+
+def test_dense_first_film_cutaways_respect_tool_batch_limit(monkeypatch):
+    from types import SimpleNamespace
+    import stock
+    calls = []
+    ctx = SimpleNamespace(latest_edl=lambda: {'json': {'keep': [[0, 40]]}})
+    monkeypatch.setattr(stock, 'video_available', lambda: False)
+    monkeypatch.setattr(fcv, 'covered', lambda *args: [])
+    moments = [(t, t+.2, f'object {i}', f'exact object {i}')
+               for i, t in enumerate(np.arange(3, 35, 1.7))]
+    def run(ctx, steps, name, args, started):
+        calls.append(args)
+    fcv.place_broll(ctx, [], 0, run, moments, 1)
+    assert len(calls) == 3
+    assert all(1 <= len(call['moments']) <= 8 for call in calls)
+    assert sum(len(call['moments']) for call in calls) == len(moments)
+    assert all(m['duration_s'] >= 1 for call in calls for m in call['moments'])
