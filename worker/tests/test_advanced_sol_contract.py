@@ -64,8 +64,8 @@ def test_sol61_cache_request_and_supported_reasoning(monkeypatch, effort, expect
     finally:
         llm.clear_turn_plan()
     body=bodies[0]
-    assert body['prompt_cache_options'] == {'ttl':'30m'}
-    assert body['prompt_cache_key'] == 'valmera-project-123'
+    assert body['prompt_cache_options'] == {'mode':'implicit', 'ttl':'30m'}
+    assert body['prompt_cache_key'] == 'valmera:editor'
     assert 'prompt_cache_retention' not in body
     assert body['reasoning'] == {'effort':expected}
     assert body['tool_choice'] == 'none'

@@ -207,16 +207,8 @@ def ideas(ctx):
               "that names things a picture can show as themselves: real people, companies, places, products, documents, "
               "numbers. You find the ideas yourself; nobody gives you a topic.")
     used = ctx.windows_used()
-    content = (f"# Who is in it (the acquisition record)\n{identity_text(src)}\n\n"
-               f"# Styles a film can take (one each). These are the ones not used in the last three films:\n{style_menu(allowed)}\n\n"
-               + (f"# Already made from this source, do not repeat\n{json.dumps(used)}\n\n" if used else "")
-               + "# Transcript, one line per ~12 s: [h:mm:ss|seconds] words\n" + "\n".join(lines_of(words)) + "\n\n"
-               "Return JSON only: {\"ideas\": [ ... 8 items ... ]}, best first. Each item: "
-               "{\"id\": \"i1\", \"title\": short plain title, \"t0\": seconds, \"t1\": seconds (20-60 s apart, starting where the thought starts), "
-               "\"hook\": the first line a viewer hears or reads, from the words, \"payoff\": the line it lands on, "
-               "\"why\": why a stranger watches to the end, \"speakers\": how many people speak in it, "
-               "\"names\": people named or shown, \"styles\": [{\"id\": style id from the list, \"why\": what in this moment the style needs}] "
-               "only styles whose needs this moment truly has, best fit first, \"strength\": 1-10}.")
+    system += '\n\nReturn JSON only: {"ideas": [ ... 8 items ... ]}, best first. Each item: {"id": "i1", "title": short plain title, "t0": seconds, "t1": seconds (20-60 s apart, starting where the thought starts), "hook": the first line a viewer hears or reads, from the words, "payoff": the line it lands on, "why": why a stranger watches to the end, "speakers": how many people speak in it, "names": people named or shown, "styles": [{"id": style id from the list, "why": what in this moment the style needs}] only styles whose needs this moment truly has, best fit first, "strength": 1-10}.'
+    content = f'# Who is in it (the acquisition record)\n{identity_text(src)}\n\n# Styles a film can take (one each). These are the ones not used in the last three films:\n{style_menu(allowed)}\n\n' + (f'# Already made from this source, do not repeat\n{json.dumps(used)}\n\n' if used else '') + '# Transcript, one line per ~12 s: [h:mm:ss|seconds] words\n' + '\n'.join(lines_of(words))
     text, use = llm.ask(system, content, effort="medium", max_tokens=12000)
     got = llm.json_block(text)
     rows = got.get("ideas") if isinstance(got, dict) else got
@@ -287,19 +279,8 @@ def script(ctx, ideas_out):
     recipe = RECIPES.get(style["id"]) or {}
     made = (f"# How this style is made (binding: the engine does this part, you direct the rest around it)\n{recipe['made']}\n\n"
             if recipe else "")
-    content = (f"# The moment\n{json.dumps(idea, ensure_ascii=False)}\n\n# The style\n{style_menu([style])}\n"
-               f"Concepts in its spine are from Valmera's ALIEN list: {', '.join(style['spine'])}. Use what the footage can carry; "
-               "a device the engine cannot draw well is left out rather than faked.\n\n" + made +
-               f"# What the engine adds to every film (binding)\n{ENGINE}\n\n"
-               f"# Taste rules\n{TASTE}\n\n# Who is in it\n{identity_text(ctx.source)[:1500]}\n\n"
-               "# Words near the moment: seconds word\n" + " ".join(f"{t:.2f} {w}" for t, w in near) + "\n\n"
-               "Return JSON only: {\"in\": seconds (a little before the first word), \"out\": seconds (0.3-0.8 s after the last word), "
-               "\"title\": the film's title, \"hook_line\": exact words heard first, \"close_line\": exact last words, "
-               "\"speakers\": number of people heard, " + PICTURES +
-               "\"direction\": 120-200 words to the Director: the story in one line; how the style above looks on THIS footage; "
-               "the one framing of the take; the caption seat and which words take the second voice; the name chip and the words "
-               "it lands on; the close; and what stays plain. Anchor every moment on the quoted words, never on seconds: the "
-               "Director sees the clip from 0, not the episode's clock. Write it as an editor's brief, not a list of effects.}")
+    system += '\n\nReturn JSON only: {"in": seconds (a little before the first word), "out": seconds (0.3-0.8 s after the last word), "title": the film\'s title, "hook_line": exact words heard first, "close_line": exact last words, "speakers": number of people heard, ' + PICTURES + '"direction": 120-200 words to the Director: the story in one line; how the style above looks on THIS footage; the one framing of the take; the caption seat and which words take the second voice; the name chip and the words it lands on; the close; and what stays plain. Anchor every moment on the quoted words, never on seconds: the Director sees the clip from 0, not the episode\'s clock. Write it as an editor\'s brief, not a list of effects.}'
+    content = (f"# The moment\n{json.dumps(idea, ensure_ascii=False)}\n\n# The style\n{style_menu([style])}\nConcepts in its spine are from Valmera's ALIEN list: {', '.join(style['spine'])}. Use what the footage can carry; a device the engine cannot draw well is left out rather than faked.\n\n") + (made) + (f'# What the engine adds to every film (binding)\n{ENGINE}\n\n# Taste rules\n{TASTE}\n\n# Who is in it\n{identity_text(ctx.source)[:1500]}\n\n# Words near the moment: seconds word\n') + (' '.join((f'{t:.2f} {w}' for (t, w) in near)))
     spend, s = [], {}
     for _ in range(2):                                   # an answer cut short or missing a field is asked for once more
         text, use = llm.ask(system, content, effort="medium", max_tokens=16000)

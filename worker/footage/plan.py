@@ -24,7 +24,7 @@ Keep the sources most likely to hold real, clean video of that very subject: the
 
 Drop: another editor's short or reel (it carries their captions), slideshows of photos with a voice, AI narrations, reaction and commentary videos, top-10 lists, music videos, games, animations about the subject, a namesake that is not the subject, anything over an hour.
 
-Answer with one JSON object only: {"keep":[{"s":subject number,"h":result number,"why":"at most eight words"}]}, at most PER sources per subject, best first, and only sources you would bet on."""
+Answer with one JSON object only: {"keep":[{"s":subject number,"h":result number,"why":"at most eight words"}]}, at most the requested number of sources per subject, best first, and only sources you would bet on."""
 
 
 def plan(lines, named, about="", budget_s=90.0):
@@ -62,7 +62,7 @@ def rank(subjects, hits, per=3, budget_s=60.0):
             blocks.append(f"Subject {si}: {s['name']} (must show: {s['must_show']})\n" + "\n".join(rows))
     if not blocks:
         return [], 0.0
-    txt, usd = ask.ask(RANK_SYSTEM.replace("PER", str(per)), "\n\n".join(blocks), "footage_rank", budget_s=budget_s, max_tokens=3000)
+    txt, usd = ask.ask(RANK_SYSTEM, f"Keep at most {per} sources per subject.\n\n" + "\n\n".join(blocks), "footage_rank", budget_s=budget_s, max_tokens=3000)
     out, seen = [], set()
     for k in ask.json_obj(txt).get("keep") or []:
         try:

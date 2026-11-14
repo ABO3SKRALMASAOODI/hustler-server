@@ -81,18 +81,20 @@ def ideas(ctx):
               "sentence is typed, an edit comes back. You find short vertical films that market it to video editors and creators who edit: "
               "technique films and before-and-after films, with the call to action inside the film. You find the ideas yourself. An idea is an "
               "editor's real pain, one true claim about Valmera that answers it, and the one picture that proves it in the first second.")
-    content = ("# What the product really did (recorded sessions). A film may claim only what a row here proves, and a row can carry only the "
-               "styles in its `fits`.\n" + json.dumps(rows, ensure_ascii=False)
-               + "\n\n# What the product does\n" + json.dumps(evidence.capabilities(), ensure_ascii=False)
-               + "\n\n# What editors respond to: the owner's reference films in this genre (their captions, comments counted)\n"
-               + json.dumps([dict(kind=r["kind"], comments=r["comments"], caption=r["caption"][:220]) for r in refs[:16]], ensure_ascii=False)
-               + f"\n\n# Styles a film can take today\n{menu(able)}\n\n# Taste\n{TASTE}\n\n"
-               + (f"# A line from the owner\n{ctx.args['line']}\n\n" if ctx.args.get("line") else "")
-               + "Return JSON only: {\"ideas\": [up to 5 items, best first]}. Each: {\"id\": \"i1\", \"title\": short plain title, "
+    system += "\n\n" + (("Return JSON only: {\"ideas\": [up to 5 items, best first]}. Each: {\"id\": \"i1\", \"title\": short plain title, "
                "\"pain\": what the editor struggles with, in their words, \"claim\": the true thing the product did in that row, with its number, "
                "\"row_id\": the row that proves it, \"style\": a style id from that row's `fits`, \"records\": for a row with more than three "
                "recordings, the three whose films differ most, else the row's records, \"why_style\": what in this row the style needs, "
-               "\"first_second\": what the viewer sees before one second has passed, \"strength\": 1-10}.")
+               "\"first_second\": what the viewer sees before one second has passed, \"strength\": 1-10}."))
+    content = (("# What the product really did (recorded sessions). A film may claim only what a row here proves, and a row can carry only the "
+               "styles in its `fits`.\n") +
+               (json.dumps(rows, ensure_ascii=False)) +
+               ("\n\n# What the product does\n") +
+               (json.dumps(evidence.capabilities(), ensure_ascii=False)) +
+               ("\n\n# What editors respond to: the owner's reference films in this genre (their captions, comments counted)\n") +
+               (json.dumps([dict(kind=r["kind"], comments=r["comments"], caption=r["caption"][:220]) for r in refs[:16]], ensure_ascii=False)) +
+               (f"\n\n# Styles a film can take today\n{menu(able)}\n\n# Taste\n{TASTE}\n\n") +
+               (f"# A line from the owner\n{ctx.args['line']}\n\n" if ctx.args.get("line") else ""))
     text, use = llm.ask(system, content, effort="medium", max_tokens=6000)
     got = llm.json_block(text)
     got = got.get("ideas") if isinstance(got, dict) else got

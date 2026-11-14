@@ -122,7 +122,7 @@ def test_a_rung_call_answers_on_openai_and_meters_the_trial_at_haikus_card(rung)
     body = rung.posts[0]
     assert body["model"] == "gpt-6.1-sol" and body["store"] is False
     assert body["reasoning"] == {"effort": "medium"}
-    assert body["prompt_cache_key"] == "valmera-edit-77"
+    assert body["prompt_cache_key"] == "valmera:editor"
     kinds = [i.get("type") or i.get("role") for i in body["input"]]
     assert kinds == ["developer", "user", "function_call", "function_call_output"]
     assert body["input"][1]["content"][1]["type"] == "input_image"

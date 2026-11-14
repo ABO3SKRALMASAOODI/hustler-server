@@ -38,7 +38,7 @@ def engine_kind():
 def sh(ctx, cmd, label=None, heavy=False, model=False, timeout=None):
     """Run one tool. heavy: through heavy.sh. model: under the credited key wrapper.
     TMPDIR and SLICE_TMP point inside the run, so a tool's scratch is deleted with the run."""
-    env = dict(os.environ, TMPDIR=ctx.tmp, SLICE_TMP=ctx.tmp, PYTHONDONTWRITEBYTECODE="1",
+    env = dict(os.environ, VALMERA_SKILL=ctx.workflow, VALMERA_RUN=ctx.run_id, TMPDIR=ctx.tmp, SLICE_TMP=ctx.tmp, PYTHONDONTWRITEBYTECODE="1",
                PATH=os.path.dirname(brand.FF) + ":" + os.environ.get("PATH", "/usr/bin:/bin"))
     if model:
         cmd = ["zsh", CREDIT] + cmd
@@ -228,7 +228,7 @@ def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None):
         ap = os.path.join(ctx.run_dir, "footage_anchors.json")
         json.dump(anchors, open(ap, "w"))
         cmd += ["--anchors", ap]
-    env = dict(os.environ, TMPDIR=ctx.tmp, FOOTAGE_WORK=ctx.tmp, PYTHONPATH=brand.worker_dir(), PYTHONDONTWRITEBYTECODE="1",
+    env = dict(os.environ, VALMERA_SKILL=ctx.workflow, VALMERA_RUN=ctx.run_id, TMPDIR=ctx.tmp, FOOTAGE_WORK=ctx.tmp, PYTHONPATH=brand.worker_dir(), PYTHONDONTWRITEBYTECODE="1",
                FOOTAGE_FFMPEG=brand.FF, PATH=os.path.dirname(brand.FF) + ":" + os.environ.get("PATH", "/usr/bin:/bin"))
     if os.path.exists(FOOTAGE_YTDLP):
         env["FOOTAGE_YTDLP"] = FOOTAGE_YTDLP

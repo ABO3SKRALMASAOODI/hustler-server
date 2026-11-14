@@ -2330,12 +2330,12 @@ def find_visual_moments(ctx, query, start=0.0, end=None, max_results=12):
                 "You are doing focused visual retrieval over chronological "
                 "video contact sheets. Every frame has a burned SOURCE "
                 "timestamp. Find only frames that visibly match, or are "
-                "strong immediate context for, this query: " + q + "\n"
+                "strong immediate context for, the query below. "
                 "Return ONLY a JSON array, at most four rows: "
                 '[{"time":123.4,"confidence":"high|medium|low",'
                 '"evidence":"what pixels support the match"}]. '
                 "Copy time from a burned label; do not invent it. Return [] "
-                f"when none match. This batch covers about {a:.1f}-{b:.1f}s.")
+                f"when none match. This batch covers about {a:.1f}-{b:.1f}s.\nQuery: {q}")
             answer = llm.ask_vision(
                 prompt, [row[4] for row in batch], max_tokens=1100,
                 reasoning_effort="low", purpose="vision_visual_search",

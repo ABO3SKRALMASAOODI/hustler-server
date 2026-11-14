@@ -114,6 +114,8 @@ def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, 
             with httpx.Client(timeout=httpx.Timeout(timeout, connect=30)) as cl, \
                     cl.stream("POST", "https://api.openai.com/v1/responses", headers=headers, json=body) as r:
                 if r.status_code >= 400:
+                    openai_cache.record(model, "writer:" + what, status="http_error", usd=0.0,
+                                        http_status=r.status_code, attempt=attempt + 1, force=True)
                     msg = r.read().decode("utf-8", "replace")[:400]
                     if r.status_code in (429, 500, 502, 503, 504) and attempt < 3:
                         time.sleep(10 * (attempt + 1))
@@ -134,10 +136,13 @@ def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, 
             if final is not None:
                 break
         except (httpx.TransportError, httpx.TimeoutException):
+            openai_cache.record(model, "writer:" + what, status="transport_error", billing_unconfirmed=True,
+                                attempt=attempt + 1, force=True)
             if attempt == 3:
                 raise
             time.sleep(10 * (attempt + 1))
     if final is None:
+        openai_cache.record(model, "writer:" + what, status="stream_without_usage", billing_unconfirmed=True, force=True)
         raise RuntimeError("openai: the stream ended without a response")
     usage = final.get("usage") or {}
     searches_used = sum(item.get("type") == "web_search_call" for item in final.get("output") or [])
@@ -274,13 +279,8 @@ def find_ideas(form, cards, avoid=(), line=None, n=6, effort="high"):
               "real video of them (interviews, keynotes, launches, news reports, archive film on YouTube and archive.org) and free "
               "photographs on Wikimedia Commons, a new picture about every half second, so a story whose subjects were never filmed "
               "cannot be made. No stock lookalikes, no generated faces.")
-    content = (f"# The bar\n{references()}\n\n# Styles this film can take\n{menu(cards)}\n\n"
-               f"# Already made (never repeat a subject)\n{json.dumps(list(avoid), ensure_ascii=False)}\n\n"
-               + (f"# What the owner asked for\n{line}\nEvery idea must be about this. When it names a person, a company or a "
-                  "topic, find the strongest true stories inside it (a single moment, decision or turn, not a biography).\n\n" if line else
-                  "# No subject given\nChoose the subjects yourself: founders, companies, inventions and moments in business or "
-                  "technology history that a curious viewer half knows, told through one decisive moment.\n\n")
-               + f"# Form\n{F['name']}, {F['seconds'][0]}-{F['seconds'][1]} s, {F['shape']}.\n\n"
+    system += f"\n\n# The bar\n{references()}\n\n"
+    system += "\n\n" + ((f"# Form\n{F['name']}, {F['seconds'][0]}-{F['seconds'][1]} s, {F['shape']}.\n\n"
                "Search widely and think like an editor of the best founder-story accounts. Prefer stories most people half know with "
                "a detail they do not, an object that holds the story, a human turn (a betrayal, a humiliation, a bet), and a payoff "
                "with a figure. Avoid the stories the references already told (SpaceX's fourth launch, Airbnb's cereal, Xerox PARC, "
@@ -293,7 +293,13 @@ def find_ideas(form, cards, avoid=(), line=None, n=6, effort="high"):
                "thing|event, \"searches\": one to three Wikimedia Commons searches, most specific first, \"must_show\": one sentence: what "
                "a picture must visibly show to count}], \"photo\": for one-photograph only, {\"file\": the exact Commons file title "
                "starting File:, \"licence\": its licence, \"why\": why this one picture holds the whole story} else null, \"sources\": "
-               "[URLs you read], \"strength\": 1-10}.")
+               "[URLs you read], \"strength\": 1-10}."))
+    content = ((f"# Styles this film can take\n{menu(cards)}\n\n"
+               f"# Already made (never repeat a subject)\n{json.dumps(list(avoid), ensure_ascii=False)}\n\n") +
+               (f"# What the owner asked for\n{line}\nEvery idea must be about this. When it names a person, a company or a "
+                  "topic, find the strongest true stories inside it (a single moment, decision or turn, not a biography).\n\n" if line else
+                  "# No subject given\nChoose the subjects yourself: founders, companies, inventions and moments in business or "
+                  "technology history that a curious viewer half knows, told through one decisive moment.\n\n"))
     text, use = ask_web(system, content, effort=effort, max_tokens=24000, searches=14, fetches=10, what="find ideas")
     got = json_block(text)
     ideas = got.get("ideas") if isinstance(got, dict) else got
@@ -345,12 +351,8 @@ def write(idea, card, form, voices=None, notes=None, effort="high"):
               "narrator over real footage and photographs of what it names, for a " + F["name"] + ". Every sentence is true and checked on the web now; nothing "
               "is invented, rounded or dramatised beyond the sources. You also direct the actor: pace, energy, melody, emphasis and "
               "pauses per segment. Write for the ear: short sentences, concrete nouns, numbers a listener can hold.")
-    content = (f"# The bar\n{references()}\n\n# The idea\n{json.dumps(idea, ensure_ascii=False)}\n\n# The style\n{json.dumps(card, ensure_ascii=False)}\n\n"
-               f"# Form\n{F['name']}: {F['words'][0]}-{F['words'][1]} spoken words in {F['segments'][0]}-{F['segments'][1]} segments "
-               f"(about {F['seconds'][0]}-{F['seconds'][1]} s at 175 words a minute). {F['shape']}.\n\n"
-               f"# Voices\n{json.dumps({k: VOICES[k] for k in voices if k in VOICES})}\n\n"
-               + (f"# Notes from the last attempt\n{notes}\n\n" if notes else "")
-               + "Read the sources again with the web tools and check every fact. The first segment is the hook: it must work in the "
+    system += f"\n\n# The bar\n{references()}\n\n"
+    system += "\n\n" + (("Read the sources again with the web tools and check every fact. The first segment is the hook: it must work in the "
                "first second (a known name and something that should not be true, or a stake), never a greeting or a question to the "
                "viewer. The last segment reframes the hook in one sentence. No call to action, no 'follow for more'.\n\n"
                "Return JSON only: {\"title\": a plain title, \"voice\": one voice id, \"pace\": slow|steady|brisk|fast, \"energy\": "
@@ -365,13 +367,19 @@ def write(idea, card, form, voices=None, notes=None, effort="high"):
                "0.35 to 0.5 only where the story turns, at most three times), \"direction\": a few "
                "words for the actor, \"facts\": ids of the facts it states}], \"facts\": [{\"id\": \"f1\", \"claim\": the fact in plain "
                "words, \"quote\": a sentence copied exactly, word for word, from the page at url that states it, \"url\": the page}], "
-               "\"named\": [{\"name\", \"is\", \"searches\", \"must_show\"} for every person, place or thing the film shows], "
-               + STYLE_DATA.get(card["id"], "") + "}\n"
+               "\"named\": [{\"name\", \"is\", \"searches\", \"must_show\"} for every person, place or thing the film shows], ") +
+               (STYLE_DATA.get(card["id"], "")) +
+               ("}\n"
                "Every digit that appears in `show` or in the style's data must appear in some fact's quote. Every quote is checked "
                "by fetching its URL with a plain script, so cite pages a script can read (Wikipedia, Wikimedia, archive.org, "
                "government and university pages, a company's own newsroom) and read each one with web_fetch before quoting it; "
                "pages behind a paywall or a bot wall (Britannica, most newspapers) and PDF files cannot be checked and will be dropped: "
-               "cite the HTML page that says the same thing.")
+               "cite the HTML page that says the same thing."))
+    content = ((f"# The idea\n{json.dumps(idea, ensure_ascii=False)}\n\n# The style\n{json.dumps(card, ensure_ascii=False)}\n\n"
+               f"# Form\n{F['name']}: {F['words'][0]}-{F['words'][1]} spoken words in {F['segments'][0]}-{F['segments'][1]} segments "
+               f"(about {F['seconds'][0]}-{F['seconds'][1]} s at 175 words a minute). {F['shape']}.\n\n"
+               f"# Voices\n{json.dumps({k: VOICES[k] for k in voices if k in VOICES})}\n\n") +
+               (f"# Notes from the last attempt\n{notes}\n\n" if notes else ""))
     text, use = ask_web(system, content, effort=effort, max_tokens=32000, searches=8, fetches=10, what="write")
     return json_block(text), use
 

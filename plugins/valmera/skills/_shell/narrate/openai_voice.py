@@ -125,6 +125,10 @@ def speech(text, voice, instr, model=MODEL, timeout=180):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 x, sr = sf.read(io.BytesIO(r.read()), dtype="float32", always_2d=True)
+                # Binary WAV responses contain no token usage. Keep the published
+                # per-minute estimate explicit instead of inventing token counts.
+                openai_cache.record(model, "narrate:speech", usd=len(x) / sr / 60 * .015,
+                                    seconds=len(x) / sr, cost_basis="audio_duration_estimate", force=True)
                 return x.mean(1), sr
         except urllib.error.HTTPError as e:
             last = f"HTTP {e.code}"

@@ -7,6 +7,7 @@ https://developers.openai.com/api/docs/guides/prompt-caching
 import copy
 import datetime as dt
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,9 @@ import sys
 import uuid
 
 MODERN = ("gpt-5.6", "gpt-6")
-EXTENDED = ("gpt-5.5", "gpt-5.4", "gpt-5.2", "gpt-5.1", "gpt-5", "gpt-4.1")
+EXTENDED = ("gpt-5.5", "gpt-5.5-pro", "gpt-5.4", "gpt-5.2", "gpt-5.1-codex-max",
+            "gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-mini", "gpt-5.1-chat-latest",
+            "gpt-5", "gpt-5-codex", "gpt-4.1")
 DEFAULT_LOG = "/Users/masaoodi/Documents/Valmera/.valmera/week-1112/openai-spend.jsonl"
 # Standalone skills do not import worker/config or connect to a production DB.
 PRICES = {"gpt-6.1-sol": (2, .1, 10), "gpt-6.1-terra": (1, .05, 5),
@@ -68,7 +71,7 @@ def chat_options(model, role):
     if not str(model).startswith("gpt-"):
         return {}
     out = {"prompt_cache_key": key(role)}
-    if str(model).startswith(EXTENDED) and not str(model).startswith(MODERN):
+    if any(model == alias or str(model).startswith(alias + "-20") for alias in EXTENDED):
         out["prompt_cache_retention"] = "24h"
     return out
 
@@ -149,7 +152,8 @@ def record(model, purpose, usage=None, *, usd=None, request_id=None, status="com
         run = os.environ["VALMERA_RUN"]
     row = dict(ts=dt.datetime.now(dt.timezone.utc).isoformat(), skill=skill or "worker",
                run=run, purpose=str(purpose), model=model,
-               usd=cost(model, usage) if usd is None else float(usd), **tokens(usage),
+               usd=(cost(model, usage) if usage is not None else None) if usd is None else float(usd), **tokens(usage),
+               usage_reported=usage is not None,
                request_id=request_id, status=status, **extra)
     try:
         import fcntl
@@ -166,4 +170,9 @@ def record(model, purpose, usage=None, *, usd=None, request_id=None, status="com
 
 def role_for(system, prefix="workflow"):
     # Stable for the exact instructions, independent of film/run/frame data.
-    return prefix + ":" + hashlib.sha256(str(system).encode()).hexdigest()[:16]
+    for frame in inspect.stack(context=0)[1:]:
+        stem = Path(frame.filename).stem
+        if stem not in ("llm", "openai_cache"):
+            prefix = stem + ":" + frame.function
+            break
+    return prefix + ":" + hashlib.sha256(str(system).encode()).hexdigest()[:12]

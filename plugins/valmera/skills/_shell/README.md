@@ -111,3 +111,20 @@ Never publishes. The plan itself never carries music: it may only carry the soun
 check fails a plan with any other audio (the film's music is laid after the render, from the licensed library
 or the owner's own song, never anything else). The end card and the watermark are the product's own,
 on every film. A builder never rates its own film: `film.json` carries measurements, not scores.
+
+OpenAI usage is appended per provider response to
+`/Users/masaoodi/Documents/Valmera/.valmera/week-1112/openai-spend.jsonl`.
+The shell and podcast entry points bind `VALMERA_SKILL` and `VALMERA_RUN`;
+subprocesses inherit both. Set these explicitly for ad hoc helpers outside a
+workflow. `VALMERA_OPENAI_SPEND_LOG` overrides the destination for tests or a
+non-Mac runner. `python spend.py --run RUN_ID` summarizes actual input, cache
+reads, and dollars. Cache writes include their reported 30m/12h rates. Audio
+WAV responses have no usage block: their duration-based dollars are marked
+estimates. A lost stream with no usage has `usd: null` and
+`billing_unconfirmed: true`; the report counts it as unknown, never free.
+
+GPT-5.6/GPT-6 Responses requests mark the shared instruction prefix with a
+12h breakpoint. Changing one-shot frames/transcripts are outside that write;
+editor conversations also keep implicit 30m history caching. GPT-5.5 and
+other documented legacy models use `prompt_cache_retention: "24h"`. Short
+prefixes below the provider minimum are left short; no padding is added.

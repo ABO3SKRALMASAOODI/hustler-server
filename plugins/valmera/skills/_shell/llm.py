@@ -83,6 +83,8 @@ def ask_openai(system, content, *, model=None, effort="medium", max_tokens=16000
             with httpx.Client(timeout=httpx.Timeout(timeout, connect=30)) as cl, \
                     cl.stream("POST", "https://api.openai.com/v1/responses", headers=headers, json=body) as r:
                 if r.status_code >= 400:
+                    openai_cache.record(model, purpose, status="http_error", usd=0.0,
+                                        http_status=r.status_code, attempt=attempt + 1, force=True)
                     msg = r.read().decode("utf-8", "replace")[:400]
                     if r.status_code in (429, 500, 502, 503, 504) and attempt < 3:
                         time.sleep(10 * (attempt + 1))
@@ -103,10 +105,13 @@ def ask_openai(system, content, *, model=None, effort="medium", max_tokens=16000
             if final is not None:
                 break
         except (httpx.TransportError, httpx.TimeoutException):
+            openai_cache.record(model, purpose, status="transport_error", billing_unconfirmed=True,
+                                attempt=attempt + 1, force=True)
             if attempt == 3:
                 raise
             time.sleep(10 * (attempt + 1))
     if final is None:
+        openai_cache.record(model, purpose, status="stream_without_usage", billing_unconfirmed=True, force=True)
         raise RuntimeError("openai: the stream ended without a response")
     openai_cache.record(model, purpose, final.get("usage"), request_id=final.get("id"),
                         status=final.get("status"), force=True)

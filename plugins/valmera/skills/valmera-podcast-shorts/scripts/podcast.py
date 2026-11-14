@@ -106,6 +106,8 @@ def video_id(link):
 class Run:
     def __init__(self, link, work):
         self.link, self.work = link, work
+        import openai_cache
+        openai_cache.workflow("valmera-podcast-shorts", os.path.basename(work))
         self.state_path = os.path.join(work, "run.json")
         self.state = jload(self.state_path, None) or dict(link=link, video_id=video_id(link), started=now(), done=[], seconds={})
         self._log = os.path.join(work, "log.txt")
@@ -365,27 +367,13 @@ SELECT_SYSTEM = (
     "of the people, companies, places and events he names, a new picture about every second.")
 
 
+SELECT_CONTRACT = '\n\nWalk the whole transcript in order and return every moment that clears the bar: a stranger stops within two seconds, stays to the end, and leaves with something. Grade each moment on its own. There is no target number, no minimum and no maximum: a weak hour gives few, a strong one many. A moment must stand alone without the episode, open on its hook in its first sentence, end on its payoff, run 18 to 55 seconds, and name at least two real things a camera has filmed (people, companies, products, places, events), because the film shows real footage of what is said. A moment of pure opinion with nothing to show is left out. Moments never overlap.\n\nReturn JSON only: {"podcast": {"speaker": the main guest\'s full name, "host": the host\'s name or "", "show": the show\'s name or "", "year": the year it was recorded, "short_title": the episode in at most eight words}, "moments": [each {"title": a plain title in at most six words, "t0": seconds where the thought starts, "t1": seconds where the payoff ends, "hook": the first line a viewer hears, from the words, "payoff": the line it lands on, "why": why a stranger watches to the end, "speakers": how many people speak in it, "names": the people heard or named, "shows": the real filmed things a picture can show for it, most important first, "styles": [{"id": a style id from the list, "why": what in this moment that style needs}] best fit first, at least two, "hook_score": 1-10, "payoff_score": 1-10, "story_score": 1-10, "strength": 1-10 overall}], "left_out": [the strongest moments you left out, at most eight, each {"t0": seconds, "title": title, "why": the reason}]}'
+
+
 def select_prompt(info, styles, lines, part=None):
     import wf1_film
     menu = "\n".join(f"- {s['id']}: {s['name']}. {s.get('look', '')} Needs: {s.get('needs', '')}." for s in styles if s["id"] in wf1_film.STYLES)
-    return (f"# The source\n{identity_text(info)}\n\n# The styles a short can take\n{menu}\n\n"
-            + (f"# This is part {part[0]} of {part[1]} of the transcript\n\n" if part else "")
-            + "# Transcript, one line per ~12 s: [h:mm:ss|seconds] words\n" + "\n".join(lines) + "\n\n"
-            "Walk the whole transcript in order and return every moment that clears the bar: a stranger stops within two "
-            "seconds, stays to the end, and leaves with something. Grade each moment on its own. There is no target number, "
-            "no minimum and no maximum: a weak hour gives few, a strong one many. A moment must stand alone without the "
-            "episode, open on its hook in its first sentence, end on its payoff, run 18 to 55 seconds, and name at least "
-            "two real things a camera has filmed (people, companies, products, places, events), because the film shows "
-            "real footage of what is said. A moment of pure opinion with nothing to show is left out. Moments never overlap.\n\n"
-            "Return JSON only: {\"podcast\": {\"speaker\": the main guest's full name, \"host\": the host's name or \"\", \"show\": the "
-            "show's name or \"\", \"year\": the year it was recorded, \"short_title\": the episode in at most eight words}, "
-            "\"moments\": [each {\"title\": a plain title in at most six words, \"t0\": seconds where the thought starts, \"t1\": "
-            "seconds where the payoff ends, \"hook\": the first line a viewer hears, from the words, \"payoff\": the line it lands "
-            "on, \"why\": why a stranger watches to the end, \"speakers\": how many people speak in it, \"names\": the people "
-            "heard or named, \"shows\": the real filmed things a picture can show for it, most important first, \"styles\": "
-            "[{\"id\": a style id from the list, \"why\": what in this moment that style needs}] best fit first, at least two, "
-            "\"hook_score\": 1-10, \"payoff_score\": 1-10, \"story_score\": 1-10, \"strength\": 1-10 overall}], "
-            "\"left_out\": [the strongest moments you left out, at most eight, each {\"t0\": seconds, \"title\": title, \"why\": the reason}]}")
+    return f'# The source\n{identity_text(info)}\n\n# The styles a short can take\n{menu}\n\n' + (f'# This is part {part[0]} of {part[1]} of the transcript\n\n' if part else '') + '# Transcript, one line per ~12 s: [h:mm:ss|seconds] words\n' + '\n'.join(lines)
 
 
 def assign_styles(moments, order):
@@ -449,7 +437,7 @@ def moments(run, fetched):
         content = select_prompt(info, styles, lines_of(ws), part=(k + 1, len(parts)) if len(parts) > 1 else None)
         got = {}
         for _ in range(2):
-            text, use = llm.ask(SELECT_SYSTEM, content, effort="high", max_tokens=48000)
+            text, use = llm.ask(SELECT_SYSTEM + SELECT_CONTRACT, content, effort="high", max_tokens=48000)
             spend.append(dict(stage="moments", what="find and grade every moment", **use))
             try:
                 got = llm.json_block(text)

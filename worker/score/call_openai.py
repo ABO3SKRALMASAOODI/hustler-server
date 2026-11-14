@@ -162,6 +162,7 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
         call._meter(model, usage.provider_cost_usd)
         raise call.Late(f"{purpose} past its deadline after {elapsed:.0f} s")
     if box.get("error") is not None:
+        openai_cache.record(model, purpose, status="transport_or_http_error", billing_unconfirmed=True)
         raise box["error"]
     final = box.get("final") or {}
     usage = Usage(model, final.get("usage") or {})

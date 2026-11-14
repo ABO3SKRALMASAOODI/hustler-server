@@ -149,7 +149,7 @@ def spoken_form(heard, script, names=(), model=None):
                        for c in it.get("content") or [] if c.get("type") == "output_text")
         u = r.get("usage") or {}
         pin, pout = PRICE.get(model, PRICE["gpt-5.5"])
-        usd += int(u.get("input_tokens") or 0) * pin + int(u.get("output_tokens") or 0) * pout
+        usd += openai_cache.cost(model, u)
         try:
             s = text[text.index("{"):text.rindex("}") + 1]
             out.append(str(json.loads(s)["spoken"]))

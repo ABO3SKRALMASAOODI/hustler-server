@@ -94,17 +94,8 @@ def script(ctx, ideas_out):
               "into the exact clip for a vertical short. You cut on word edges, start on the first word of the thought (no "
               "throat-clearing, no 'and', 'so', 'yeah' when the next word can open), and end on the payoff with a breath "
               "of tail. The clip must stand alone for a stranger who never saw the episode.")
-    content = (f"# The moment\n{json.dumps(idea, ensure_ascii=False)}\n\n# Who is in it\n{str((ctx.args or {}).get('identity') or '')[:1500]}\n\n"
-               "# Words near the moment: seconds word\n" + " ".join(f"{t:.2f} {w}" for t, w in near) + "\n\n"
-               "Return JSON only: {\"in\": seconds (0.15-0.3 s before the first word), \"out\": seconds (0.3-0.8 s after the last "
-               "word; the clip is 18-55 s), \"title\": the film's title in at most five words, a headline a stranger stops for, "
-               "taken from what is said, \"hook_line\": the exact words heard first, \"close_line\": the exact last words, "
-               "\"speakers\": number of people heard, "
-               "\"named\": [the real people, companies, places, products and events this clip names or plainly points to, that "
-               "a camera has filmed; each {\"name\": its usual English name, \"is\": person|company|place|product|event|thing, "
-               "\"must_show\": one plain sentence on what footage of it must visibly show, as it was at the time he speaks of}; "
-               "never the speaker himself as he looks today: he is on screen], "
-               "\"brief\": two sentences on the story and its mood, for the editor who chooses the music}.")
+    system += '\n\nReturn JSON only: {"in": seconds (0.15-0.3 s before the first word), "out": seconds (0.3-0.8 s after the last word; the clip is 18-55 s), "title": the film\'s title in at most five words, a headline a stranger stops for, taken from what is said, "hook_line": the exact words heard first, "close_line": the exact last words, "speakers": number of people heard, "named": [the real people, companies, places, products and events this clip names or plainly points to, that a camera has filmed; each {"name": its usual English name, "is": person|company|place|product|event|thing, "must_show": one plain sentence on what footage of it must visibly show, as it was at the time he speaks of}; never the speaker himself as he looks today: he is on screen], "brief": two sentences on the story and its mood, for the editor who chooses the music}.'
+    content = f"# The moment\n{json.dumps(idea, ensure_ascii=False)}\n\n# Who is in it\n{str((ctx.args or {}).get('identity') or '')[:1500]}\n\n# Words near the moment: seconds word\n" + ' '.join((f'{t:.2f} {w}' for (t, w) in near))
     llm = _llm()
     spend, s = [], {}
     for _ in range(2):                                   # an answer cut short or missing a field is asked for once more
@@ -292,8 +283,7 @@ def direction_of(ctx, script, pack):
     lines = pack["lines"]
     system = ("You direct the type and the finish of a vertical short cut from a podcast. You read its sentences, numbered, "
               "and answer in JSON only. You never add a word he does not say.")
-    content = (f"# The film\n{script.get('title')}\nHook: {script.get('hook_line')}\nPayoff: {script.get('close_line')}\n\n# Sentences\n"
-               + "\n".join(f"{ln['i']}: {ln['text']}" for ln in lines) + "\n\n"
+    system += "\n\n" + (("\n\n"
                "Return JSON only: {"
                "\"display\": [four to eight strings to set large on screen, each on the word that says it: the figures, the "
                "names and the two or three words that carry the story; each {\"seg\": the sentence number, \"text\": one to three "
@@ -304,7 +294,9 @@ def direction_of(ctx, script, pack):
                "\"turn_seg\": the number of the sentence where the payoff begins (usually the last or the one before it), "
                "\"arc\": [only when he says a calendar year aloud: {\"seg\": sentence number, \"word\": the year as he says it in "
                "digits, \"year\": the year as a number, \"stakes\": how things stand for the story's hero at that point, -1 (worst) "
-               "to 1 (best)}; an empty list when no year is said]}")
+               "to 1 (best)}; an empty list when no year is said]}"))
+    content = ((f"# The film\n{script.get('title')}\nHook: {script.get('hook_line')}\nPayoff: {script.get('close_line')}\n\n# Sentences\n") +
+               ("\n".join(f"{ln['i']}: {ln['text']}" for ln in lines)))
     llm = _llm()
     text, use = llm.ask(system, content, effort="low", max_tokens=8000)
     try:

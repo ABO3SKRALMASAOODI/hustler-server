@@ -56,11 +56,19 @@ def _one(path, t0, t1, tmp, i):
                 r = httpx.post(URL, headers={"Authorization": f"Bearer {_key()}"}, files={"file": (f"{i}.mp3", f, "audio/mpeg")},
                                data={"model": MODEL, "response_format": "json"}, timeout=90)
             if r.status_code == 200:
-                return dict(t0=t0, t1=t1, text=(r.json().get("text") or "").strip())
+                import openai_cache
+                payload = r.json()
+                openai_cache.record(MODEL, "footage_hear", payload.get("usage"),
+                                    usd=(t1 - t0) / 60.0 * USD_PER_MIN,
+                                    seconds=t1 - t0, cost_basis="audio_duration_estimate")
+                return dict(t0=t0, t1=t1, text=(payload.get("text") or "").strip())
+            import openai_cache
+            openai_cache.record(MODEL, "footage_hear", usd=0.0, status="http_error", http_status=r.status_code)
             if r.status_code < 500 and r.status_code != 429:
                 break
         except httpx.HTTPError:
-            pass
+            import openai_cache
+            openai_cache.record(MODEL, "footage_hear", status="transport_error", billing_unconfirmed=True)
     return dict(t0=t0, t1=t1, text="", error="not heard")
 
 
@@ -78,7 +86,7 @@ def transcribe(path, dur, workers=8):
     usd = round(dur / 60.0 * USD_PER_MIN, 5)
     try:
         import llm
-        llm.record("footage_hear", {"model": MODEL}, {"provider": "openai", "provider_cost_usd": usd, "seconds_heard": round(dur, 1)})
+        llm.record("footage_hear", {"model": MODEL}, {"provider": "openai", "provider_cost_usd": usd, "seconds_heard": round(dur, 1), "local_spend_recorded": True})
     except Exception:  # noqa: BLE001 metering is never a stop
         pass
     return [dict(t0=round(r["t0"], 2), t1=round(r["t1"], 2), text=r["text"]) for r in rows], usd

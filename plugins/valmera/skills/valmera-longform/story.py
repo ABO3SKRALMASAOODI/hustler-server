@@ -52,10 +52,7 @@ def find_ideas(card, avoid=(), line=None, n=6, effort="high"):
               "or in the public domain (Wikimedia Commons, NASA, US government works, pre-1930 archives), because the film "
               "shows only real pictures of what it names, and designed pages where none exists. No film clips, no stock "
               "lookalikes, no generated faces.")
-    content = (f"# The bar\n{references()}\n\n# The style\n{json.dumps(card, ensure_ascii=False)}\n\n"
-               f"# Already made (never repeat a subject)\n{json.dumps(list(avoid), ensure_ascii=False)}\n\n"
-               + (f"# A line from the owner\n{line}\n\n" if line else "")
-               + f"# Form\n{FORM['name']}, {FORM['seconds'][0] // 60}-{FORM['seconds'][1] // 60} minutes: {FORM['shape']}.\n\n"
+    system += "\n\n" + ((f"# Form\n{FORM['name']}, {FORM['seconds'][0] // 60}-{FORM['seconds'][1] // 60} minutes: {FORM['shape']}.\n\n"
                "Search widely. A long film holds with a promise and open questions, not with pace, so prefer a story with a "
                "mechanism the viewer can be taught step by step (how a thing was built, crossed, solved, survived), real stakes "
                "that change and can be kept as a running ledger (money, lives, days, miles, tons), a human turn at two thirds "
@@ -70,7 +67,11 @@ def find_ideas(card, avoid=(), line=None, n=6, effort="high"):
                "payoff with its figure, \"ledger\": [two to four {\"label\": the stake, \"start\": its value at the start, \"end\": "
                "its value at the end}], \"named\": [twelve to twenty {\"name\": usual English name, \"is\": person|place|machine|"
                "building|document|event|thing, \"searches\": one to three Wikimedia Commons searches, most specific first, "
-               "\"must_show\": what a picture must visibly show to count}], \"sources\": [URLs you read], \"strength\": 1-10}.")
+               "\"must_show\": what a picture must visibly show to count}], \"sources\": [URLs you read], \"strength\": 1-10}."))
+    system += f"\n\n# The bar\n{references()}\n\n"
+    content = ((f"# The style\n{json.dumps(card, ensure_ascii=False)}\n\n"
+               f"# Already made (never repeat a subject)\n{json.dumps(list(avoid), ensure_ascii=False)}\n\n") +
+               (f"# A line from the owner\n{line}\n\n" if line else ""))
     text, use = writer.ask_web(system, content, effort=effort, max_tokens=40000, searches=16, fetches=8, what="find ideas")
     got = writer.json_block(text)
     return (got.get("ideas") if isinstance(got, dict) else got) or [], use
@@ -132,15 +133,7 @@ def write(idea, dos, card, voices=None, notes=None, effort="high"):
               "and pauses per segment. Write for the ear: short sentences, concrete nouns, numbers a listener can hold, the "
               "voice of a storyteller who knows where the story goes and makes the viewer want the next minute.")
     lo, hi = FORM["words"]
-    content = (f"# The bar\n{references()}\n\n# The idea\n{json.dumps(idea, ensure_ascii=False)}\n\n"
-               f"# The style\n{json.dumps(card, ensure_ascii=False)}\n\n"
-               f"# Verified facts (only these)\n{json.dumps(facts, ensure_ascii=False)}\n\n"
-               f"# Named things the camera can show\n{json.dumps([n.get('name') for n in dos.get('named') or []], ensure_ascii=False)}\n\n"
-               f"# Places\n{json.dumps(dos.get('places') or [], ensure_ascii=False)}\n\n# Routes\n{json.dumps(dos.get('routes') or [], ensure_ascii=False)}\n\n"
-               f"# Documents\n{json.dumps(dos.get('documents') or [], ensure_ascii=False)}\n\n"
-               f"# Voices\n{json.dumps({k: VOICES[k] for k in voices if k in VOICES})}\n\n"
-               + (f"# Notes from the last attempt (fix every one)\n{notes}\n\n" if notes else "")
-               + f"# Form\n{FORM['name']}: {lo}-{hi} spoken words in {FORM['segments'][0]}-{FORM['segments'][1]} segments (at about "
+    system += "\n\n" + ((f"# Form\n{FORM['name']}: {lo}-{hi} spoken words in {FORM['segments'][0]}-{FORM['segments'][1]} segments (at about "
                f"175 words a minute that is {lo // 175}-{hi // 175} minutes). {FORM['shape']}.\n\n"
                "How it holds: the first segment is a cold open that works in its first sentence (a stake or something that "
                "should not be true), never a greeting. By 30 seconds the narrator says the promise in one sentence (what the "
@@ -161,14 +154,25 @@ def write(idea, dos, card, voices=None, notes=None, effort="high"):
                "reflection)}], \"ledger\": {\"title\": one or two words, \"rows\": [two to four {\"id\": short id, \"label\": "
                "capitals, at most 10 characters, \"start\": the value shown at the start exactly as printed, \"number\": that "
                "value as a plain number}]}, \"segments\": [{\"chapter\": a chapter id, \"say\": the words spoken (the spoken "
-               "form), \"beat\": hook|promise|setup|loop|turn|low|payoff|close, \"pictures\": [names], " + DESIGN_KINDS + ", "
+               "form), \"beat\": hook|promise|setup|loop|turn|low|payoff|close, \"pictures\": [names], ") +
+               (DESIGN_KINDS) +
+               (", "
                "\"ticks\": [{\"row\": a ledger row id, \"to\": the new value as printed, \"number\": plain number, \"word\": the "
                "exact word of `say` on which it changes}] or [], \"pace\": slow|steady|brisk, \"melody\": falling|rising|level|"
                "wide, \"emphasis\": [one or two words of say], \"pause_after\": seconds of silence after it (0.2 to 1.2; longer "
                "at chapter ends and after the turn), \"direction\": a few words for the actor, \"facts\": ids of the facts it "
                "states}], \"close\": {\"balance\": a one-line sum of the ledger as printed, \"line\": the last sentence}}\n"
                "Every digit printed anywhere (the ledger, a design, the promise, a question) must stand in the quote of a fact "
-               "the same segment or design cites.")
+               "the same segment or design cites."))
+    system += f"\n\n# The bar\n{references()}\n\n"
+    content = ((f"# The idea\n{json.dumps(idea, ensure_ascii=False)}\n\n"
+               f"# The style\n{json.dumps(card, ensure_ascii=False)}\n\n"
+               f"# Verified facts (only these)\n{json.dumps(facts, ensure_ascii=False)}\n\n"
+               f"# Named things the camera can show\n{json.dumps([n.get('name') for n in dos.get('named') or []], ensure_ascii=False)}\n\n"
+               f"# Places\n{json.dumps(dos.get('places') or [], ensure_ascii=False)}\n\n# Routes\n{json.dumps(dos.get('routes') or [], ensure_ascii=False)}\n\n"
+               f"# Documents\n{json.dumps(dos.get('documents') or [], ensure_ascii=False)}\n\n"
+               f"# Voices\n{json.dumps({k: VOICES[k] for k in voices if k in VOICES})}\n\n") +
+               (f"# Notes from the last attempt (fix every one)\n{notes}\n\n" if notes else ""))
     text, use = writer.ask_web(system, content, effort=effort, max_tokens=64000, searches=0, fetches=0, what="write")
     return writer.json_block(text), use
 

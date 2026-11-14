@@ -296,12 +296,13 @@ def _semantic_prompt(rows):
     return (
         "You are indexing visual evidence for a professional video editor. "
         "Each contact-sheet frame is burned with its evidence_id and SOURCE "
-        "clock. Return ONLY a JSON array, one object for every ID, in this "
-        f"set: {ids}. Fields: evidence_id, subjects (short string array), "
+        "clock. Return ONLY a JSON array, one object for every ID in the set below. "
+        "Fields: evidence_id, subjects (short string array), "
         "actions (short string array), objects (short string array), setting "
         "(string), visible_text (exact text when readable), semantic_description "
         "(one concrete sentence), composition (one concise sentence). Never "
-        "invent unreadable text or off-screen facts.")
+        "invent unreadable text or off-screen facts.\n"
+        f"ID set: {ids}.")
 
 
 def _apply_semantic(row, semantic):

@@ -308,7 +308,7 @@ def record(purpose, request, response, usage=None):
         request = dict(request, model=answered, asked_model=request.get("model"))
     _charge(purpose, request, response, usage)
     model = (request or {}).get("model", "")
-    if str(model).startswith(("gpt-", "tts-", "whisper-")):
+    if str(model).startswith(("gpt-", "tts-", "whisper-")) and not (response or {}).get("local_spend_recorded"):
         answer = response if isinstance(response, dict) else {}
         openai_cache.record(model, purpose, usage, usd=_call_cost_usd(purpose, request, response, usage),
                             request_id=answer.get("request_id"), status=answer.get("stop", "completed"))

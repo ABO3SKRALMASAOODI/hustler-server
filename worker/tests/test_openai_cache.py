@@ -1,0 +1,106 @@
+import copy
+import json
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import pytest
+import openai_cache as cache
+
+
+def test_cache_boundaries_preserve_content_and_do_not_mutate_input():
+    body = {'model': 'gpt-6.1-sol', 'instructions': 'fixed rules',
+            'input': [{'role': 'user', 'content': [{'type': 'input_text', 'text': 'film A'}]}]}
+    original = copy.deepcopy(body)
+    a = cache.responses(body, 'director')
+    body['input'][0]['content'][0]['text'] = 'film B'
+    b = cache.responses(body, 'director')
+    assert a['input'][0] == b['input'][0]
+    assert a['input'][1] == original['input'][0]
+    assert a['input'][0]['content'][0]['prompt_cache_breakpoint']['ttl'] == '12h'
+    assert b['input'][1]['content'][0]['text'] == 'film B'
+    assert original['instructions'] == body['instructions']
+    assert 'prompt_cache_breakpoint' not in body['input'][0]['content'][0]
+    assert a['prompt_cache_options']['mode'] == 'explicit'
+
+
+def test_editor_kernel_boundary_survives_changing_project_state():
+    body = {'model': 'gpt-6.1-sol', 'input': [
+        {'role': 'system', 'content': 'kernel'}, {'role': 'system', 'content': 'tools directory'},
+        {'role': 'system', 'content': 'state'}, {'role': 'user', 'content': 'edit'}]}
+    out = cache.responses(body, 'editor', conversation=True)
+    assert out['prompt_cache_options']['mode'] == 'implicit'
+    assert all('prompt_cache_breakpoint' in m['content'][0] for m in out['input'][:2])
+    assert out['input'][2:] == body['input'][2:]
+
+
+def test_unsupported_models_never_get_extended_fields():
+    assert cache.chat_options('claude-haiku-5-5', 'role') == {}
+    assert cache.chat_options('gpt-4o-mini', 'role') == {'prompt_cache_key': 'valmera:role'}
+    assert cache.responses({'model': 'gpt-5.5', 'instructions': 'x'}, 'role')['prompt_cache_retention'] == '24h'
+    assert 'prompt_cache_retention' not in cache.responses({'model': 'gpt-6-sol'}, 'role')
+
+
+def test_real_usage_write_lifetimes_are_charged_once():
+    u = {'input_tokens': 12000, 'input_tokens_details': {'cached_tokens': 4000,
+         'cache_write_tokens': 7000, 'cache_write_tokens_details': {'ttl_30m_tokens': 3000, 'ttl_12h_tokens': 4000}},
+         'output_tokens': 100}
+    # 1000 ordinary, 4000 cached, 3000 short writes, 4000 long writes; output includes reasoning.
+    expected = (1000*2 + 4000*.1 + 3000*2*1.25 + 4000*2*2.5 + 100*10) / 1e6
+    assert cache.cost('gpt-6.1-sol', u) == pytest.approx(expected)
+    from score.call_openai import Usage
+    from edit_rung import _RespUsage
+    assert Usage('gpt-6.1-sol', u).provider_cost_usd == pytest.approx(expected)
+    assert _RespUsage('gpt-6.1-sol', u).provider_cost_usd == pytest.approx(expected)
+
+
+def test_parallel_workflow_calls_append_complete_attributed_lines(tmp_path, monkeypatch):
+    p = tmp_path / 'spend.jsonl'
+    monkeypatch.setenv('VALMERA_OPENAI_SPEND_LOG', str(p))
+    monkeypatch.setenv('VALMERA_SKILL', 'wf1')
+    monkeypatch.setenv('VALMERA_RUN', 'film-1')
+    u = {'input_tokens': 2000, 'input_tokens_details': {'cached_tokens': 1700}, 'output_tokens': 10}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda i: cache.record('gpt-6-sol', 'named_check', u, request_id=str(i)), range(40)))
+    rows = [json.loads(x) for x in p.read_text().splitlines()]
+    assert len(rows) == len({r['request_id'] for r in rows}) == 40
+    assert all(r['skill'] == 'wf1' and r['run'] == 'film-1' and r['cached_tokens'] == 1700 for r in rows)
+    assert all(r['usd'] == pytest.approx(.00104) for r in rows)
+
+
+def test_service_copies_are_identical():
+    root = Path(__file__).resolve().parents[2]
+    worker = (root / 'worker/openai_cache.py').read_bytes()
+    assert worker == (root / 'backend/openai_cache.py').read_bytes()
+    assert worker == (root / 'plugins/valmera/skills/_shell/openai_cache.py').read_bytes()
+
+
+def test_workflow_terminal_responses_are_logged_before_failures(tmp_path, monkeypatch):
+    import importlib.util
+    import httpx
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location('workflow_llm', root / 'plugins/valmera/skills/_shell/llm.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv('OPENAI_API_KEY', 'test-only')
+    monkeypatch.setenv('VALMERA_OPENAI_SPEND_LOG', str(tmp_path / 'spend.jsonl'))
+    monkeypatch.setenv('VALMERA_SKILL', 'wf3')
+    monkeypatch.setenv('VALMERA_RUN', 'story-1')
+    requests = []
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, content=('data: ' + json.dumps({'type':'response.failed','response':{
+            'id':'resp_failed', 'status':'failed', 'error':{'code':'test'},
+            'usage':{'input_tokens':2000,'input_tokens_details':{'cached_tokens':1800},'output_tokens':20}}})+'\n\n').encode())
+    real = httpx.Client
+    monkeypatch.setattr(httpx, 'Client', lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    with pytest.raises(RuntimeError, match='openai failed'):
+        module.ask_openai('same instructions', 'story input')
+    row = json.loads((tmp_path / 'spend.jsonl').read_text())
+    assert row['request_id'] == 'resp_failed' and row['cached_tokens'] == 1800
+    assert row['status'] == 'failed' and row['usd'] > 0 and row['run'] == 'story-1'
+    assert requests[0]['input'][0]['role'] == 'developer'
+
+
+def test_a_small_model_does_not_get_an_unsupported_24h_parameter():
+    assert 'prompt_cache_retention' not in cache.chat_options('gpt-5-mini', 'role')
+    assert 'prompt_cache_retention' not in cache.chat_options('gpt-4.1-mini', 'role')
