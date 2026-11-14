@@ -8,8 +8,7 @@ A found picture arrived here as one still, held a second or more, most of them s
 Three things, each on a picture the Bin already checked, none of them a new device and none a model call:
 
   * `parts`: a found picture held past SPLIT_F frames is cut inside itself, the way an editor cuts a photograph or a
-    clip he has only one of: a still to a second and third framing of itself (closer, on its subject), a clip to a
-    later second of itself. The first part keeps the shot's id, so every line that answers the shot still finds it.
+    clip he has only one of: a video clip to a later second of itself. A still stays one continuous shot. The first part keeps the shot's id, so every line that answers the shot still finds it.
   * `still_path`: every found still is a camera move for its whole length on the judge's curve (speed peaks in the
     first third): a push toward its subject, a pull back from it, or a travel across a wide photograph. A wide
     photograph fills the frame and is travelled, where round five set it small on a page.
@@ -274,7 +273,7 @@ def talk_parts(ctx, sid, ref, d, at, rng):
 def parts(ctx, b, sid, ref, d, rng, at=None):
     """One planned shot of a found picture as the shots it is cut into: [(id, ref, frames)]. The first keeps the
     shot's id. A shot too short to cut, a plate, a picture the Score framed or moved itself, and a clip with no
-    later second to jump to come back as they are. The take is cut only where nobody speaks (take_parts)."""
+    later second to jump to come back as they are. A continuous take and a still stay one shot; their camera moves ease."""
     one = [(sid, ref, d)]
     if on() and at is not None and ref.get("kind") == "main" and punch_on():
         return take_parts(ctx, b, sid, ref, d, at, rng)
@@ -306,14 +305,9 @@ def parts(ctx, b, sid, ref, d, rng, at=None):
             out.append((sid if k == 0 else f"{sid}x{k}", dict(ref, t0=round(t, 3), _part=k), ln))
             t += ln / ctx.fps + jump
         return out
-    if designed(ctx, ref["asset"]):
-        return one                                 # type is read whole, once: never cut inside itself
-    if zoom_room(ctx, ref["asset"], asset, ctx.W, ctx.H) < 1.0 + PUSH[0] + 0.1:
-        n = min(n, 2) if (asset.get("w") or 0) / max(asset.get("h") or 1, 1) > 1.2 * ctx.W / ctx.H else 1      # a small still: a travel has two halves, a push has one
-    if n <= 1:
-        return one
-    lens = compiler.jitter_split(d, n, rng)
-    return [(sid if k == 0 else f"{sid}x{k}", dict(ref, _part=k), ln) for k, ln in enumerate(lens)]
+    # One photograph stays one shot. Its continuous still_path supplies
+    # motion; a timer cannot earn 24–50% hard jumps within that photograph.
+    return one
 
 
 def parent(sid):
