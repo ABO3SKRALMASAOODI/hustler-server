@@ -290,9 +290,19 @@ def check(ctx, ledger, edl, preview):
                   'shown': {'type': 'boolean'}, 'seen': {'type': 'string'}, 'line': {'type': 'string'}}}
     for p in pictures:
         times = anchors(p, edl)
+        spoken = bool(p.get('source_words'))
+        if not spoken:
+            duration = asks.program_seconds(edl) or 0.
+            # A subject requested visually but never spoken is checked on the
+            # actual picture layers and throughout the film. This fallback is
+            # NEVER used when the editor cut away a subject's spoken mentions.
+            layers = [float(it.get('start') or 0) + float(it.get('duration_s') or 0) / 2
+                      for it in edl.get('overlays') or []]
+            times = sorted(set([t for t in layers[:48] if 0 <= t < duration] +
+                               [duration * (i + .5) / 16 for i in range(16) if duration > 0]))
         row = {'id': p['id'], 'state': 'cannot_tell',
-               'seen': 'No rendered evidence at the named words.',
-               'line': f"I couldn't verify {p['subject']} in the film where it is named."}
+               'seen': 'No rendered evidence at the named words.' if spoken else 'No rendered picture evidence.',
+               'line': f"I couldn't verify {p['subject']} in the film" + (' where it is named.' if spoken else '.')}
         try:
             if not path or not times:
                 out[p['id']] = row
@@ -300,14 +310,16 @@ def check(ctx, ledger, edl, preview):
             content = [{'type': 'text', 'text': json.dumps({
                 'subject': p['subject'], 'must_show': p['must_show'],
                 'spoken_words': p['source_words'], 'language': ledger.get('lang'),
-                'program_times': times}, ensure_ascii=False)}]
+                'program_times': times, 'spoken_anchor_check': spoken}, ensure_ascii=False)}]
             for n, t in enumerate(times):
                 frame = os.path.join(folder, f"{p['id']}-{n}.jpg")
                 media.frame_at(path, t, frame, width=960)
-                content += [{'type': 'text', 'text': f'Rendered frame at named word, {t:.3f}s'}, llm.image_part(frame)]
+                content += [{'type': 'text', 'text': f"Rendered {'named-word frame' if spoken else 'illustration sample'}, {t:.3f}s"}, llm.image_part(frame)]
             value, _ = asks._call(ctx, 'check_required_picture', schema,
                 'Check whether the requested subject is visibly illustrated in these rendered '
-                'film frames AT ITS NAMED WORDS. Every frame must show the correct subject. '
+                'film frames. When spoken_anchor_check=true, these are its named words: EVERY '
+                'frame must show the correct subject. When false, the subject is requested '
+                'visually but never spoken: at least one frame must clearly illustrate it. '
                 'A speaker saying the name, subtitles, a related industry or another brand do '
                 'not count as the requested picture. Judge pixels, never trust metadata. '
                 'Do not identify faces. Missing or uncertain evidence is shown=false. Explain '
