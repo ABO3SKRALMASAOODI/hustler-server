@@ -1,6 +1,7 @@
 import json
 from types import SimpleNamespace as NS
 
+import pytest
 import required_broll
 from score import asks
 
@@ -67,3 +68,12 @@ def test_illustration_does_not_extend_the_narration_clock():
     assert required_broll.write_refusal(ctx, before, {'overlays': [{'duration_s': 3}]}) is None
     ctx.ask_ledger['pictures_preserve_speech_clock'] = False
     assert required_broll.write_refusal(ctx, before, after) is None
+
+
+def test_subject_enumeration_outage_cannot_be_certified_by_a_generic_check(monkeypatch):
+    import agent_loop
+    ctx = NS(ask_ledger={'asks': [{'id': 'a1'}], 'picture_manifest_error': 'TimeoutError'},
+             ask_verdict={'asks': [{'id': 'a1', 'state': 'done'}]})
+    monkeypatch.setattr(asks, 'check', lambda *a, **kw: pytest.fail('No complete subject list'))
+    assert agent_loop._asks_check(ctx, 'All pictures added.') is None
+    assert ctx.ask_verdict is None
