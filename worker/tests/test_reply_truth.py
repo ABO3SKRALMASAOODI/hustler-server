@@ -40,7 +40,8 @@ class _Ctx:
         self.job = {"id": 1}
 
     def latest_edl(self):
-        return {"version": 8, "json": {}}
+        return {"version": 8, "json": {"fx": [{"type": "broll", "start": 45.52, "end": 48.02, "credit": {
+            "page_url": "https://www.pexels.com/video/a-person-adding-honey-in-tea-123/"}}]}}
 
 
 def _wire(monkeypatch, tmp_path):
@@ -69,6 +70,24 @@ def test_a_false_done_is_told_truthfully_in_the_customers_language(monkeypatch, 
     assert model == "gpt-6.1-sol"
     assert kw["tool_choice"]["function"]["name"] == "record_reply_truth"
     assert any(p.get("type") == "image_url" for p in messages[1]["content"])
+
+
+def test_a_clause_quote_replaces_its_whole_sentence():
+    draft = ("Added three cutaways: the Himalayas, honey in tea and bees, timed to your narration. "
+             "You remain the focus.")
+    out, swapped = reply_truth.corrected(draft, [
+        {"quote": "the Himalayas, honey in tea and bees", "status": "contradicted", "seen": "",
+         "honest": "Added two cutaways, the Himalayas and bees, timed to your narration."}])
+    assert out == "Added two cutaways, the Himalayas and bees, timed to your narration. You remain the focus."
+
+
+def test_the_check_reads_what_lies_between_the_tiles(monkeypatch, tmp_path):
+    _wire(monkeypatch, tmp_path)
+    monkeypatch.setattr(asks, "asset_names", lambda ctx, edl: {})
+    client = _Client([])
+    reply_truth.enforce(_Ctx(), client, "m", "add b roll", "Added honey in tea at 45 s.")
+    text = client.calls[0][1][1]["content"][0]["text"]
+    assert "[45.5-48.0 s] broll: a person adding honey in tea" in text
 
 
 def test_an_honest_line_whose_quote_drifted_is_added_after_the_lead():
