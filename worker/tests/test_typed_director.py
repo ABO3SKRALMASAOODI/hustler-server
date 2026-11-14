@@ -187,3 +187,17 @@ def test_pending_footage_is_joined_and_applied_before_cleanup(monkeypatch):
     monkeypatch.setattr(film, "upgrade", lambda *args: events.append("upgrade") or {"applied": ["real footage"]})
     assert typed._finish_footage(view, None, {}) == {"applied": ["real footage"]}
     assert events == ["joined", "handoff", "upgrade"]
+
+
+@pytest.mark.parametrize("row, mode", [(None, "on"), ({"mode": "off"}, "off"),
+    ({"mode": "on"}, "on"), ("broken", "off")])
+def test_typed_footage_permission_preserves_explicit_holds(row, mode):
+    from footage import switch
+    assert typed.footage_config(NS(run=lambda fn: row))["mode"] == mode
+    assert switch.DEFAULTS["mode"] == "off"  # first-film rollout unchanged
+
+
+def test_typed_footage_unreadable_switch_fails_closed():
+    def fail(fn):
+        raise RuntimeError("unavailable")
+    assert typed.footage_config(NS(run=fail))["mode"] == "off"
