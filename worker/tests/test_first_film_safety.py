@@ -6,6 +6,14 @@ import source_screen
 from score import source_guard
 
 
+def test_screen_samples_accept_the_live_scene_detector_shot_type():
+    from schemas import Shot
+    typed = [Shot(id=1, start=0., end=10.17), Shot(id=2, start=10.17, end=14.17)]
+    times = source_screen.sample_times(14.167, 30., typed)
+    assert times == source_screen.sample_times(14.167, 30., [s.model_dump() for s in typed])
+    assert any(9.9 <= t < 10.1 for t in times) and all(0 <= t < 14.167 for t in times)
+
+
 def test_semantic_tail_cut_stops_at_last_clear_frame_not_detected_shot_edge():
     verdict = {"reviewed_all_frames": True, "branding_screen_present": True,
                "last_content_frame_id": 1, "first_branding_frame_id": 2}
