@@ -3130,11 +3130,19 @@ def _t_make_first_cut(tok, args):
                 "(upload_start with kind='original', then upload_finish), "
                 "wait for index_status 'done', then call make_first_cut.")
         if not (original.get("sha256") and _index_row(cur, original["sha256"])):
-            return _text(
-                f"PENDING: project {project_id}'s video is still being "
-                "analyzed. Poll index_status until it is done, then call "
-                "make_first_cut again. This is pending, not a failure; "
-                "retry after 10 seconds.", False)
+            analysis = _index_job_state(cur, project_id, original.get("id"))
+            if not analysis.get("active"):
+                return _session_error(
+                    f"PROJECT {project_id}: no completed analysis and no analysis is running. "
+                    "Call index_status to inspect the missing or failed analysis before retrying.")
+            return {"content": [{"type": "text", "text": (
+                        f"PENDING: project {project_id}'s media is still being analyzed. "
+                        f"Call wait_for_job(job_id={analysis['id']}), then make_first_cut again. "
+                        "Retry after 10 seconds; this is normal pending analysis.")}],
+                    "isError": False,
+                    "structuredContent": {"status": "pending", "retry_after_s": 10,
+                                          "index_job_id": analysis["id"],
+                                          "index_progress": analysis.get("progress")}}
         cur.execute("""SELECT id, state FROM video_jobs
                        WHERE project_id = %s AND type = 'agent_turn'
                          AND payload->>'first_cut' = 'true'

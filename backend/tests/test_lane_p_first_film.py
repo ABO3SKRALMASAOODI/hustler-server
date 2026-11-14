@@ -173,6 +173,7 @@ def test_make_first_cut_never_runs_twice_or_over_an_edit(monkeypatch):
 
 
 def test_make_first_cut_needs_an_analyzed_video_and_a_plan(monkeypatch):
+    monkeypatch.setattr(mcpmod, "_index_job_state", lambda *a: {"active": False})
     for cur in (_Cur(original=None), _Cur(original=ORIGINAL, indexed=False),
                 _Cur(original=ORIGINAL, subscribed=False),
                 _Cur(project=False, original=ORIGINAL)):
@@ -249,3 +250,13 @@ def test_first_cut_on_upload_reads_the_same_rules():
     _fresh()
     assert free_trial.first_cut_on_upload(
         LaneDB(stored=_on(payer_first_cut=False)), 2380) is False
+
+
+def test_make_first_cut_waits_without_error_for_running_analysis(monkeypatch):
+    jobs = _wire(monkeypatch, _Cur(original=ORIGINAL, indexed=False))
+    monkeypatch.setattr(mcpmod, '_index_job_state', lambda *a: {'active': True, 'id': 62, 'progress': 45})
+    out = mcpmod._t_make_first_cut({'user_id': 2555}, {'project_id': 5})
+    assert jobs == [] and out['isError'] is False
+    assert out['structuredContent']['status'] == 'pending'
+    assert out['structuredContent']['index_job_id'] == 62
+    assert out['structuredContent']['retry_after_s'] == 10
