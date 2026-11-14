@@ -66,7 +66,8 @@ display words on 17% of shots, finishes that change by section, collages of thre
 
 Withdrawn: "sound effects default to zero", "restraint is the default", "music is off unless the owner supplies a
 song", "at most 1-2 sounds per short", "a steady picture is the default". They produced the bland, static films of
-12 and 13 Nov. What stays from them: nothing is thrown in without a reason on screen, and nothing sits on a face.
+12 and 13 Nov. What stays from them: nothing is thrown in without a reason on screen, and nothing sits on a face. Sounds keep one level hierarchy under the voice. Camera moves use
+`worker/scene/pace.py` and `motion.py`; faces stay whole.
 
 ## The styles (`scripts/wf1_film.py`, registry `../_shell/styles.json`)
 
