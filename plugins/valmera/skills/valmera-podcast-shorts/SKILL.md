@@ -66,7 +66,8 @@ display words on 17% of shots, finishes that change by section, collages of thre
 
 Withdrawn: "sound effects default to zero", "restraint is the default", "music is off unless the owner supplies a
 song", "at most 1-2 sounds per short", "a steady picture is the default". They produced the bland, static films of
-12 and 13 Nov. What stays from them: nothing is thrown in without a reason on screen, and nothing sits on a face.
+12 and 13 Nov. What stays from them: nothing is thrown in without a reason on screen, and nothing sits on a face. Sounds keep one level hierarchy under the voice. Camera moves use
+`worker/scene/pace.py` and `motion.py`; faces stay whole.
 
 ## The styles (`scripts/wf1_film.py`, registry `../_shell/styles.json`)
 
@@ -166,3 +167,5 @@ word can trigger an eased move. A numerical hold detector never creates automati
 
 Repeated overlapping document crops or source-video intervals do not count as new pictures, even under different cache paths. Final review receives separate phone-resolution frames; a half-open placement ends before the next cut. Changed scene or audio plans invalidate the retained render and final mix before review.
 A meaningful silent reaction may carry a director-justified eased move anchored to the preceding spoken line; its timestamp must stay inside that line's following silence. Unresolved holds return to direction with their exact frame bounds, never an automatic crop pattern.
+
+New documentary stills do not consume a recovery attempt when moving coverage is short: that same attempt continues into moving-footage research.

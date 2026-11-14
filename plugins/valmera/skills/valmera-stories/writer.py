@@ -11,6 +11,9 @@ call it; `FORMS` holds what differs. Two model calls, each with the web (search 
     verify(script)                         -> each quote fetched from its URL here, not trusted from
                                               the model; every number on screen must be in a
                                               verified quote. A comparison of measured strings.
+    settle(script)                         -> verify, then a failed fact is sourced again (one call),
+                                              else its lines are rewritten without it or dropped;
+                                              only an unverifiable hook, turn or payoff stops the film
 
 The model decides what a story is and how it is told; nothing here reads its words by rule.
 The key comes from this process's environment (run under .valmera/claude_trial_env.sh).
@@ -20,14 +23,17 @@ import html.parser
 import json
 import os
 import re
+import gzip
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
+import zlib
 
 MODEL = "claude-opus-5-5"
 # USD per token: input, cache write, cache read, output; and per web search
 PRICE = (4.00e-6, 5.00e-6, 0.20e-6, 20.00e-6)
 SEARCH_USD = 0.01
-UA = "Mozilla/5.0 (compatible; ValmeraStories/1.0)"
 HERE = os.path.dirname(os.path.abspath(__file__))
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shell"))
@@ -297,7 +303,9 @@ def find_ideas(form, cards, avoid=(), line=None, n=6, effort="high", delivered="
                "thing|event, \"searches\": one to three Wikimedia Commons searches, most specific first, \"must_show\": one sentence: what "
                "a picture must visibly show to count}], \"photo\": for one-photograph only, {\"file\": the exact Commons file title "
                "starting File:, \"licence\": its licence, \"why\": why this one picture holds the whole story} else null, \"sources\": "
-               "[URLs you read], \"strength\": 1-10}."))
+               "[URLs you read that a plain script can read too: Wikipedia, archive.org, a studio's or company's own site, free trade "
+               "press; never a document mirror (studylib, scribd), a paywall, a bot wall or a PDF: every fact is checked by fetching "
+               "its page], \"strength\": 1-10}."))
     content = ((f"# Styles this film can take\n{menu(cards)}\n\n"
                f"# Already made\n{json.dumps(list(avoid), ensure_ascii=False)}\nThe owner's rule: never the exact same idea told the same "
                "way as one of these (the same story through the same beats, even under a new title or a new look). A new angle "
@@ -325,9 +333,11 @@ REEL_DATA = (
     '1 for the segment that most needs it, 2 next, and so on: black and white, a film gate or scanlines are a device for a '
     'memory, the past cut in, a low point, never a look for the whole film; the device budget is 12 to 25 percent of the voice '
     'time, never on the payoff or the close. "colour_turn": the index of the one segment from which the film stays in colour '
-    '(the turn or the release). In this style each item of "show" is {"text": as printed, "role": figure|name|key|chapter}: the '
+    '(the turn or the release). In this style each item of "show" is {"text": as printed, "role": figure|name|key|chapter|ordinal}: the '
     'payoff carries its figure (role figure), each person (is=person) gets a name item at the line that first says them, at '
-    'most one key word on the turn, a chapter word only at a joint of the story. "collage": true on the two to four segments '
+    'most one key word on the turn, a chapter word only at a joint of the story; "ordinal" only for the numbers of a list the film '
+    'itself counts out ("1.", "2.", "3." on its items, one number each, from 1), never a rank, a date or a quantity: a rank ("#1", '
+    '"No. 1") is a figure. "collage": true on the two to four segments '
     'that name or list several things at once: their pictures land as stacked prints. Mark beats truthfully: one "low" where '
     'the story is at its worst, one "turn", the "payoff" with its figure. Name in "named" every person, place, company, '
     'product and event a camera filmed, with Commons searches; the footage engine finds the video of each.')
@@ -380,11 +390,14 @@ def write(idea, card, form, voices=None, notes=None, effort="high"):
                "\"emphasis\": [one or two words of say], \"pause_after\": seconds of silence after it (0.18 to 0.26 inside the story; "
                "0.35 to 0.5 only where the story turns, at most three times), \"direction\": a few "
                "words for the actor, \"facts\": ids of the facts it states}], \"facts\": [{\"id\": \"f1\", \"claim\": the fact in plain "
-               "words, \"quote\": a sentence copied exactly, word for word, from the page at url that states it, \"url\": the page}], "
+               "words, \"quote\": a sentence copied exactly, word for word, from the page at url that states it, \"url\": the page, "
+               "\"also\": [other readable pages you read that carry the same sentence, or []]}], "
                "\"named\": [{\"name\", \"is\", \"searches\", \"must_show\"} for every person, place or thing the film shows], ") +
                (STYLE_DATA.get(card["id"], "")) +
                ("}\n"
-               "Every digit that appears in `show` or in the style's data must appear in some fact's quote. Every quote is checked "
+               "Every digit that appears in `show` or in the style's data must appear in some fact's quote (only the numbers of a list the "
+               "film itself counts out, marked role ordinal, are exempt; a rank such as #1 is a figure and needs its quote, or say it in "
+               "words). Every quote is checked "
                "by fetching its URL with a plain script, so cite pages a script can read (Wikipedia, Wikimedia, archive.org, "
                "government and university pages, a company's own newsroom) and read each one with web_fetch before quoting it; "
                "pages behind a paywall or a bot wall (Britannica, most newspapers) and PDF files cannot be checked and will be dropped: "
@@ -402,7 +415,7 @@ def write(idea, card, form, voices=None, notes=None, effort="high"):
 
 ANNOTATE_MODEL = "gpt-6.1-sol"           # pinned to OpenAI: writer.ask would turn to Anthropic when its key is present
 FINISHES = ("bw", "gate", "crt", "none")
-ROLES = ("figure", "name", "key", "chapter")
+ROLES = ("figure", "name", "key", "chapter", "ordinal")
 DEVICE_SHARE = (0.12, 0.25)              # the judge: black and white, a gate or scanlines on 12-25% of the voice, never the payoff or close
 PHRASE_MAX = 5
 
@@ -412,7 +425,7 @@ For each segment:
 - "see": one to four items, in the order the line says them: {"thing": exactly one name from the named list, "as_of": the story time of that thing as THIS line means it, a year plus its version or state (e.g. "the finished 1995 release, not the 1993 test reel"; "Pixar's Point Richmond office in 1993, not the later Emeryville campus"), "must_show": one sentence, only what must be VISIBLE in a picture for it to carry this line (who or what, doing what, in which version); never the film's treatment of it (colour, black and white, muted, grain, composition, framing): treatment belongs to "finish" alone, "moment": the scene or event the line describes when it describes one (e.g. "Woody knocking Buzz out of the window in the finished 1995 film"), else null, "search": one photo search an archivist would type to find a photograph of exactly this thing at this time (e.g. "John Lasseter 1995"; "Pixar Point Richmond 1993"), "still_only": true when the true picture of this line is still by its nature (a storyboard, a document, a drawing, a letter, a printed page), else false}. A line about a scene of a film names that scene as its moment, in the version the line means.
 - "list": true when the line itself reads as a list of several distinct things or a quick montage of them (the cut may burst through them in a few frames each), else false; "list_items": the things of the list, in order, as see things, when list is true.
 - "finish": bw|gate|crt|none and "finish_rank" (1 = the segment that most needs it). Black and white, a film gate or scanlines are a device for a memory, an early version, the past cut in, a low point; never a look for the whole film. The devices together cover 12 to 25 percent of the spoken words, never the payoff or the close, never a segment at or after the colour turn.
-- "show": the segment's display items, each {"text": as printed, "role": figure|name|key|chapter, "word_i": the index of the spoken word it lands on (a figure: the first word of the spoken figure; a name: the first word of the name; a chapter: the first word of the segment), "big": the part of the text set large (e.g. "$362M"), "small": the rest set small under it (e.g. "box office, 1995"), or null}. Every item needs its word_i. Keep every given item's text exactly. You may add: the payoff's figure if it lacks one (a figure printed with digits only when the same figure stands in a fact's quote), a name item for each person (is=person) at the line that first says them, one key word on the turn, and a short chapter title (two to four words) on the segment that opens each new section (the turn, the low point, the payoff). Display type lands on about one picture in six across the film: a figure card for each verified figure, a name for each person, a chapter at each turn. At most three items a segment.
+- "show": the segment's display items, each {"text": as printed, "role": figure|name|key|chapter|ordinal (ordinal only for the numbers of a list the film itself counts out, "1.", "2.", from 1; a rank such as #1 is a figure), "word_i": the index of the spoken word it lands on (a figure: the first word of the spoken figure; a name: the first word of the name; a chapter: the first word of the segment), "big": the part of the text set large (e.g. "$362M"), "small": the rest set small under it (e.g. "box office, 1995"), or null}. Every item needs its word_i. Keep every given item's text exactly. You may add: the payoff's figure if it lacks one (a figure printed with digits only when the same figure stands in a fact's quote), a name item for each person (is=person) at the line that first says them, one key word on the turn, and a short chapter title (two to four words) on the segment that opens each new section (the turn, the low point, the payoff). Display type lands on about one picture in six across the film: a figure card for each verified figure, a name for each person, a chapter at each turn. At most three items a segment.
 - "phrases": the caption lines: lists of word indices, each 1 to 5 consecutive indices, together covering every word of the segment once and in order. Never split a name, a figure, a date or a noun phrase across two lines; a line reads as one unit of sense.
 
 And once for the film: "colour_turn": the index of the one segment from which the film stays in colour (the turn or the release); "true_pictures": for every named thing, where a faithful picture of it can exist: "stills" (a free photo archive holds true photographs of it: a real person, a building, an object), "footage" (it exists faithfully only in the work's own moving pictures: an animated film's characters and scenes, whose photographs are toys, rides, statues and costumes), or "both".
@@ -713,16 +726,19 @@ def device_repair(out, idea_full, ask, share):
 # ----------------------------------------------------------------- verify against the pages themselves
 
 class _Text(html.parser.HTMLParser):
+    """A page's readable text: what a reader sees, never its scripts, styles, footnote marks or hidden templates."""
+    SKIP = ("script", "style", "sup", "noscript", "template", "svg")
+
     def __init__(self):
         super().__init__()
         self.out, self.skip = [], 0
 
     def handle_starttag(self, tag, attrs):
-        if tag in ("script", "style", "sup"):
+        if tag in self.SKIP:
             self.skip += 1
 
     def handle_endtag(self, tag):
-        if tag in ("script", "style", "sup") and self.skip:
+        if tag in self.SKIP and self.skip:
             self.skip -= 1
 
     def handle_data(self, d):
@@ -733,58 +749,201 @@ class _Text(html.parser.HTMLParser):
 def norm(s):
     """Lower case, letters and digits only, single spaces; thousands separators dropped."""
     s = html.unescape(str(s)).lower().replace("’", "'")
-    s = re.sub(r"(?<=\d)[,  ](?=\d{3})", "", s)
+    s = re.sub("(?<=\\d)[,\u202f\u00a0](?=\\d{3})", "", s)
     return " ".join(re.sub(r"[^a-z0-9]+", " ", s).split())
+
+
+def readable(raw):
+    """HTML to the normalised text a reader sees (quote presence is measured on this, never on the markup)."""
+    p = _Text()
+    p.feed(raw)
+    p.close()
+    return norm(" ".join(p.out))
 
 
 _PAGES = {}
 # pages the web_fetch tool read during this process: fetched by Anthropic's servers, not written by the model, so a
 # quote is also checked against them when a site refuses this machine (a 403 to a script)
 FETCHED = {}
+# every fetch made for a page, in order: {url: [{"via", "url", "status"}]}; verify reports them per fact
+TRIED = {}
+_VIA = {}
+
+# a browser's request: some sites refuse an unknown agent outright (a 403 to "compatible; ...")
+BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/131.0.0.0 Safari/537.36")
+HEADERS = {"User-Agent": BROWSER_UA, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
+           "Accept-Language": "en-US,en;q=0.9", "Accept-Encoding": "gzip, deflate"}
+RETRY_STATUS = (403, 408, 425, 429, 500, 502, 503, 504, "unreachable")
+BACKOFF_S = 2.5
+WAYBACK_BACKOFF_S = 5.0     # the archive answers a burst with 429 for a while: its copy is asked for again over ~30 s
+UA = BROWSER_UA
+PDF = "a PDF cannot be read here: quote an HTML page that says it"
+_sleep = time.sleep
 
 
-def _read(url, timeout):
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,text/plain"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        if "pdf" in (r.headers.get_content_type() or ""):
-            raise ValueError("a PDF cannot be read here: quote an HTML page that says it")
-        return r.read(6 * 1024 * 1024).decode(r.headers.get_content_charset() or "utf-8", "replace")
+class FetchError(Exception):
+    """A page that would not open: `status` is the HTTP code, or "unreachable" (a reset, a timeout, no route)."""
+
+    def __init__(self, msg, status=None):
+        super().__init__(msg)
+        self.status = status
+
+
+def _decompress(body, enc):
+    """The page's bytes as sent: the Wayback Machine's raw copies (id_) keep the site's own gzip whatever was asked."""
+    enc = (enc or "").lower()
+    try:
+        if body[:2] == b"\x1f\x8b" or "gzip" in enc:
+            return gzip.decompress(body)
+        if "deflate" in enc:
+            try:
+                return zlib.decompress(body)
+            except zlib.error:
+                return zlib.decompress(body, -zlib.MAX_WBITS)
+    except (OSError, EOFError, zlib.error):
+        return body
+    return body
+
+
+def _get(url, timeout):
+    """One GET with a browser's headers: the page's text (decoded), or FetchError with its status."""
+    req = urllib.request.Request(url, headers=HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            if "pdf" in (r.headers.get_content_type() or ""):
+                raise ValueError(PDF)
+            body = r.read(6 * 1024 * 1024)
+            enc, charset = r.headers.get("Content-Encoding"), r.headers.get_content_charset()
+    except urllib.error.HTTPError as e:
+        raise FetchError(f"HTTP Error {e.code}: {e.reason}", status=e.code) from None
+    except ValueError:
+        raise
+    except Exception as e:  # noqa: BLE001 - a reset, a timeout, no route: unreachable from here
+        raise FetchError(f"unreachable: {str(getattr(e, 'reason', e))[:120]}", status="unreachable") from None
+    body = _decompress(body, enc)
+    if body[:5] == b"%PDF-":
+        raise ValueError(PDF)
+    return body.decode(charset or "utf-8", "replace")
+
+
+def _read(url, timeout, retries=1, backoff=BACKOFF_S, log_to=None, via="live"):
+    """The raw page, asked again after a short wait when the refusal may pass (403, 429, 5xx, a reset)."""
+    for k in range(retries + 1):
+        try:
+            raw = _get(url, timeout)
+            if log_to is not None:
+                log_to.append(dict(via=via, url=url, status=200))
+            return raw
+        except FetchError as e:
+            if log_to is not None:
+                log_to.append(dict(via=via, url=url, status=e.status))
+            if k == retries or e.status not in RETRY_STATUS:
+                raise
+            _sleep(backoff * (k + 1))
+
+
+def wikipedia_api(url):
+    """[(via, url)] of Wikipedia's own APIs for a Wikipedia article (REST html, then the parse API), else []."""
+    p = urllib.parse.urlsplit(str(url))
+    host = p.netloc.lower().replace(".m.wikipedia.org", ".wikipedia.org")
+    if not host.endswith("wikipedia.org") or not p.path.startswith("/wiki/") or len(p.path) <= 6:
+        return []
+    title = p.path[len("/wiki/"):]
+    return [("wikipedia_rest", f"https://{host}/api/rest_v1/page/html/{title}"),
+            ("wikipedia_parse", f"https://{host}/w/api.php?action=parse&page={title}&prop=text&format=json&formatversion=2&redirects=1")]
+
+
+def _wiki_html(via, raw):
+    if via == "wikipedia_parse":
+        return ((json.loads(raw) or {}).get("parse") or {}).get("text") or ""
+    return raw
+
+
+def wayback(url, timeout=40, log_to=None):
+    """The raw text of the Wayback Machine's latest copy of `url` (its original bytes, `id_`): the availability API's
+    newest snapshot, else the copy nearest this year. FetchError when it holds none."""
+    if str(url).startswith(("https://web.archive.org/", "http://web.archive.org/")):
+        raise FetchError("already an archived copy", status="archived")
+    last = None
+    try:
+        api = "https://archive.org/wayback/available?url=" + urllib.parse.quote(str(url), safe="")
+        snap = ((json.loads(_read(api, 30, retries=2, backoff=WAYBACK_BACKOFF_S, log_to=log_to, via="wayback_api")) or {})
+                .get("archived_snapshots") or {}).get("closest") or {}
+        ts = snap.get("timestamp") if str(snap.get("status", "200")) == "200" and snap.get("available", True) else None
+    except (FetchError, ValueError) as e:
+        ts, last = None, e
+    tries = ([f"https://web.archive.org/web/{ts}id_/{url}"] if ts else []) + [f"https://web.archive.org/web/{time.gmtime().tm_year}id_/{url}"]
+    for u in tries:
+        try:
+            return _read(u, timeout, retries=3, backoff=WAYBACK_BACKOFF_S, log_to=log_to, via="wayback")
+        except FetchError as e:
+            last = e
+            if e.status == 404:
+                continue
+    raise last if isinstance(last, FetchError) else FetchError("no archived copy", status="not archived")
 
 
 def page_text(url, timeout=20):
-    """The page's text. A site that refuses this machine (403, 429, a reset) is read from the Wayback Machine's copy of
-    the same URL (its original bytes, `id_`): the same page, fetched from an archive, never a model's account of it."""
+    """The page's readable text. The live page with a browser's headers, asked twice; when it will not open, Wikipedia's
+    own API for a Wikipedia article, then the Wayback Machine's latest copy of the same URL: the same page from another
+    door, never a model's account of it. Every fetch is kept in TRIED[url]; the copy read in _VIA[url]."""
     if url in _PAGES:
+        if isinstance(_PAGES[url], Exception):
+            raise _PAGES[url]
         return _PAGES[url]
     if str(url).lower().split("?")[0].endswith(".pdf"):
-        raise ValueError("a PDF cannot be read here: quote an HTML page that says it")
+        raise ValueError(PDF)
+    tried = TRIED.setdefault(url, [])
+    first = None
     try:
-        raw = _read(url, timeout)
+        text, via = readable(_read(url, timeout, log_to=tried)), "live"
     except ValueError:
         raise
-    except Exception as e:  # noqa: BLE001 - refused or unreachable: the archived copy, else the first error
-        raw = None
-        for wait in (0, 3, 8):          # the archive refuses a burst now and then: ask again, a little later
-            time.sleep(wait)
+    except FetchError as e:
+        first, text, via = e, None, None
+    if text is None:
+        for v, u in wikipedia_api(url):
             try:
-                raw = _read("https://web.archive.org/web/2026id_/" + url, timeout + 20)
+                text, via = readable(_wiki_html(v, _read(u, timeout, log_to=tried, via=v))), v
                 break
-            except Exception:  # noqa: BLE001
+            except (FetchError, ValueError):
                 continue
-        if raw is None:
-            raise e
-    p = _Text()
-    p.feed(raw)
-    _PAGES[url] = norm(" ".join(p.out))
-    return _PAGES[url]
+    if text is None:
+        try:
+            text, via = readable(wayback(url, timeout + 20, log_to=tried)), "wayback"
+        except FetchError:
+            pass
+    if text is None:
+        _PAGES[url] = first
+        raise first
+    _PAGES[url], _VIA[url] = text, via
+    return text
+
+
+def archived_text(url):
+    """The Wayback copy's readable text, for a live page whose text hides the quote (scripts, a soft wall); None when
+    there is none. Cached like the pages."""
+    key = "wayback:" + str(url)
+    if key not in _PAGES:
+        try:
+            _PAGES[key] = readable(wayback(url, log_to=TRIED.setdefault(url, [])))
+        except (FetchError, ValueError):
+            _PAGES[key] = None
+    return _PAGES[key]
 
 
 def quote_found(quote, page):
-    """True when the quote stands on the page: whole, or 85% of its six-word runs in place."""
+    """True when the quote stands on the page: whole, or 85% of its six-word runs in place, or (for a quote copied off a
+    table or inline markup, where cells and tags run together: "26Thanksgiving") its letters and digits in the same
+    unbroken order. Exact matching of measured strings only."""
     q = norm(quote)
     if not q:
         return False
     if q in page:
+        return True
+    tight = q.replace(" ", "")
+    if len(tight) >= 24 and tight in page.replace(" ", ""):
         return True
     w = q.split()
     if len(w) < 8:
@@ -797,10 +956,25 @@ def digits(text):
     return re.findall(r"\d+", norm(text))
 
 
+def ordinal_items(script):
+    """The display items that number the film's own list (role "ordinal": "1.", "2.", "3." on the items it counts), by
+    structure alone: each holds exactly one number, and together they are 1..n once each, n >= 2. Such a number is a
+    position in the film, not a claim about the world, so no quote has to hold it. Anything else marked ordinal (a
+    lone "1.", a "#1" rank, two numbers) is read as a figure and must stand in a verified quote."""
+    items = [x for s in script.get("segments") or [] for x in s.get("show") or [] if isinstance(x, dict) and x.get("role") == "ordinal"]
+    nums = [digits(str(x.get("text") or "")) for x in items]
+    if len(items) >= 2 and all(len(n) == 1 for n in nums) and sorted(int(n[0]) for n in nums) == list(range(1, len(items) + 1)):
+        return items
+    return []
+
+
 def shown_strings(script):
+    """Every string the film prints whose numbers are claims: display items (not a valid list's ordinals), the
+    character sheet's ticks, stats and overflow."""
     out = []
+    skip = {id(x) for x in ordinal_items(script)}
     for s in script.get("segments") or []:
-        out += [str(x.get("text") if isinstance(x, dict) else x) for x in s.get("show") or []]
+        out += [str(x.get("text") if isinstance(x, dict) else x) for x in s.get("show") or [] if id(x) not in skip]
         for t in s.get("ticks") or []:
             out.append(str(t.get("to")))
     for st in script.get("stats") or []:
@@ -810,31 +984,53 @@ def shown_strings(script):
     return [x for x in out if x and x != "None"]
 
 
+def check_fact(f):
+    """One fact's row: its quote looked for in the readable text of its own page (any door page_text opens), then of
+    the page's Wayback copy when the live text lacks it, then of the other pages the writer cited for the same quote
+    (`also`), then of a page the web_fetch tool read. Every fetch is listed with its status."""
+    r = dict(id=f.get("id"), url=f.get("url"), claim=f.get("claim"), found=False)
+    q = f.get("quote", "")
+    tried = []
+    urls = [f.get("url")] + [u for u in (f.get("also") or [])[:3] if isinstance(u, str) and u.startswith("http") and u != f.get("url")]
+    for k, u in enumerate(urls):
+        if not u:
+            continue
+        tag = "" if k == 0 else "also:"
+        try:
+            pg = page_text(u)
+            via = _VIA.get(u, "live")
+            if quote_found(q, pg):
+                r.update(found=True, read=tag + ("here" if via == "live" else via), source=u)
+            elif via == "live":
+                arch = archived_text(u)
+                if arch and quote_found(q, arch):
+                    r.update(found=True, read=tag + "wayback", source=u)
+                elif k == 0:
+                    r["missing"] = "the quote is not in the page's text"
+        except Exception as e:  # noqa: BLE001 - an unreadable page verifies nothing here
+            if k == 0:
+                r["error"] = str(e)[:160]
+        tried += [dict(t) for t in TRIED.get(u) or []]
+        if r["found"]:
+            break
+    if not r["found"] and f.get("url") in FETCHED:
+        r["found"] = quote_found(q, norm(FETCHED[f["url"]]))
+        r["read"] = "web_fetch"
+    if r["found"]:
+        r.pop("error", None)
+        r.pop("missing", None)
+    elif "read" not in r and "error" not in r:
+        r["read"] = "here"
+    if tried:
+        r["fetches"] = tried
+    return r
+
+
 def verify(script):
     """Each quote fetched from its own page; every number on screen inside a verified quote."""
     rows, ok_quotes = [], []
     for f in script.get("facts") or []:
-        r = dict(id=f.get("id"), url=f.get("url"), claim=f.get("claim"))
-        try:
-            pg = page_text(f["url"])
-            r["found"] = quote_found(f.get("quote", ""), pg)
-            r["read"] = "here"
-        except Exception as e:  # noqa: BLE001 - an unreadable page verifies nothing here
-            r["found"], r["error"] = False, str(e)[:160]
-        if not r["found"] and not r.get("error") and not str(f.get("url", "")).startswith("https://web.archive.org/"):
-            try:                       # a page that hides its text from a script (scripts, a soft wall): its archived copy
-                arch = "https://web.archive.org/web/2026id_/" + f["url"]
-                if arch not in _PAGES:
-                    p_ = _Text()
-                    p_.feed(_read(arch, 40))
-                    _PAGES[arch] = norm(" ".join(p_.out))
-                if quote_found(f.get("quote", ""), _PAGES[arch]):
-                    r["found"], r["read"] = True, "wayback"
-            except Exception:  # noqa: BLE001 - not archived: the live page's verdict stands
-                pass
-        if not r["found"] and f.get("url") in FETCHED:
-            r["found"] = quote_found(f.get("quote", ""), norm(FETCHED[f["url"]]))
-            r["read"] = "web_fetch"
+        r = check_fact(f)
         if r["found"]:
             ok_quotes.append(norm(f.get("quote", "")))
         rows.append(r)
@@ -846,6 +1042,201 @@ def verify(script):
     bad_facts = [r["id"] for r in rows if not r["found"] and r["id"] in used]
     return dict(facts=rows, verified=sum(r["found"] for r in rows), total=len(rows), numbers_unbacked=unbacked,
                 facts_unverified=bad_facts, ok=not unbacked and not bad_facts and bool(rows))
+
+
+# ----------------------------------------------------------------- a fact that fails is re-researched, never the film
+
+CORE_BEATS = ("hook", "turn", "payoff")
+RESEARCH_MODEL = "gpt-6.1-sol"          # pinned to OpenAI (ask_openai): Anthropic spend stays at zero
+
+RESEARCH_SYSTEM = """You are the fact checker of a narrated documentary film. Some of its facts could not be checked: the page cited would not open for a plain script (a bot wall, a 403, a reset), or the sentence quoted is not on that page. For each one, search the web for other pages that state the SAME claim, and copy from each one sentence that states it, word for word exactly as it stands on the page.
+
+Cite only pages a plain script can read: Wikipedia and Wikimedia, archive.org, government and university pages, a company's or studio's own site and newsroom, museums, and magazines and trade press that are free to read. Never the page that failed, never a PDF, never a page behind a paywall, a login or a bot wall (document mirrors such as studylib or scribd, Britannica, most newspapers). The sentence is checked by fetching the page and finding it in the page's text, so copy it exactly; a sentence that only implies the claim, or a paraphrase, is worth nothing. When no readable page states the claim, give no sources for it: never stretch a source.
+
+Answer with one JSON object only: {"facts": [{"id": the fact id, "sources": [up to three {"url": the page, "quote": the sentence copied word for word}]}]}"""
+
+REWRITE_SYSTEM = """You are the writer of a narrated documentary film. Every fact was checked against its page, and some could not be: no readable page states them, so the film must not say them. You get the whole script, the facts that were checked, the facts that were not, and the segments that rest on the unchecked ones. Rewrite each of those segments so it says only what the checked facts support (cite them in "facts"), keeping its place and job in the story and the narrator's voice and length, or drop it (say null) when nothing true is left to say there. Never change any other segment and never use an unchecked fact.
+
+"say" is spoken: numbers and years written as words the way they are said, no digits, no abbreviations, no symbols. "show": at most two display items in the same form as the script's ({"text": as printed, "role": one of the roles given}), digits only when the same figure stands in a checked fact's quote; or [].
+
+Answer with one JSON object only: {"segments": [{"i": the segment index, "say": the new words or null to drop it, "show": [...], "facts": [checked fact ids]}]}"""
+
+
+def core_segments(script):
+    """The segments the story stands on: its hook, turn and payoff (the first segment is the hook whatever its mark).
+    The script's own beat marks, read structurally."""
+    return {k for k, s in enumerate(script.get("segments") or []) if k == 0 or s.get("beat") in CORE_BEATS}
+
+
+def _why(row):
+    return row.get("error") or row.get("missing") or "the quote is not in the page's text"
+
+
+def research(script, rows, ask=None):
+    """({fact id: [{"url", "quote"}]}, usage): one web-search call (RESEARCH_MODEL on OpenAI) asking for other readable
+    pages that state each unverified fact's claim, with the sentence copied from each."""
+    ask = ask or (lambda system, content: ask_openai(system, content, effort="medium", max_tokens=16000, searches=10,
+                                                     what="re-research", model=RESEARCH_MODEL))
+    by = {f.get("id"): f for f in script.get("facts") or []}
+    want = [dict(id=r["id"], claim=(by.get(r["id"]) or {}).get("claim"), failed_url=r.get("url"),
+                 failed_quote=(by.get(r["id"]) or {}).get("quote"), why=_why(r)) for r in rows]
+    title = script.get("title") or ""
+    text, use = ask(RESEARCH_SYSTEM, f"# The film\n{title}\n\n# Facts to source again\n{json.dumps(want, ensure_ascii=False, indent=1)}")
+    try:
+        got = json_block(text)
+    except ValueError:
+        return {}, use
+    out = {}
+    for g in got.get("facts") or [] if isinstance(got, dict) else []:
+        if not isinstance(g, dict) or g.get("id") not in by:
+            continue
+        src = [dict(url=str(x["url"]).strip(), quote=str(x["quote"]).strip()) for x in g.get("sources") or []
+               if isinstance(x, dict) and str(x.get("url") or "").startswith("http") and str(x.get("quote") or "").strip()]
+        out[g["id"]] = src[:3]
+    return out, use
+
+
+def _norm_show(items, roles):
+    out = []
+    for x in items if isinstance(items, list) else []:
+        if isinstance(x, dict) and str(x.get("text") or "").strip() and x.get("role") in roles:
+            out.append(dict(text=str(x["text"]).strip(), role=x["role"]))
+        elif isinstance(x, str) and x.strip() and not roles:
+            out.append(x.strip())
+    return out[:2]
+
+
+def rewrite_without(script, bad, ask=None):
+    """(script, info, usage): the segments that cite an unverifiable fact rewritten on the checked facts alone, or
+    dropped, by one call (RESEARCH_MODEL on OpenAI, no web); the unverifiable facts leave the script. Structure is held
+    here: only those segments change, each cites checked facts only, and a segment the answer leaves invalid is
+    dropped. A core segment (the hook, the turn, the payoff: core_segments) is never dropped: it is restated on at
+    least one checked fact or listed in info["core_failed"], and the story then cannot stand. The caller verifies the
+    result again."""
+    ask = ask or (lambda system, content: ask_openai(system, content, effort="medium", max_tokens=12000, what="rewrite unverified",
+                                                     model=RESEARCH_MODEL))
+    sc = json.loads(json.dumps(script))
+    bad = set(bad)
+    good = [f for f in sc.get("facts") or [] if f.get("id") not in bad]
+    good_ids = {f.get("id") for f in good}
+    segs = sc.get("segments") or []
+    targets = [k for k, s in enumerate(segs) if set(s.get("facts") or []) & bad]
+    core = core_segments(sc)
+    dict_show = any(isinstance(x, dict) for s in segs for x in s.get("show") or [])
+    roles = ROLES if dict_show else ()
+    use, got = None, {}
+    if targets:
+        content = (f"# The script\n" + "\n".join(f"{k}. beat={s.get('beat')} facts={s.get('facts') or []} show={json.dumps(s.get('show') or [], ensure_ascii=False)}\n   {s.get('say')}"
+                                                for k, s in enumerate(segs)) +
+                   f"\n\n# Checked facts\n{json.dumps([dict(id=f.get('id'), claim=f.get('claim'), quote=f.get('quote')) for f in good], ensure_ascii=False)}"
+                   f"\n\n# Unchecked facts (the film must not say them)\n{json.dumps([dict(id=f.get('id'), claim=f.get('claim')) for f in sc.get('facts') or [] if f.get('id') in bad], ensure_ascii=False)}"
+                   f"\n\n# Rewrite or drop these segments\n{targets}" +
+                   (f"\n\n# Core segments (the hook, the turn, the payoff): never drop these; restate each on the checked facts "
+                    f"only when they still carry its point, else answer say null for it\n{[k for k in targets if k in core]}"
+                    if any(k in core for k in targets) else "") +
+                   (f"\n\n# Display roles\n{list(roles)}" if roles else ""))
+        try:
+            text, use = ask(REWRITE_SYSTEM, content)
+            ans = json_block(text)
+            got = {g["i"]: g for g in ans.get("segments") or [] if isinstance(g, dict) and _valid_i(g.get("i"), len(segs))}
+        except Exception:  # noqa: BLE001 - no answer: the segments resting on the unchecked facts are dropped
+            got = {}
+    rewritten, dropped, core_failed = [], [], []
+    for k in targets:
+        g = got.get(k) or {}
+        say = g.get("say")
+        facts = g.get("facts") if isinstance(g.get("facts"), list) else None
+        if k in core and not (facts and set(facts) & good_ids):
+            core_failed.append(k)               # the hook, turn or payoff restated on nothing checked does not stand
+        elif isinstance(say, str) and say.strip() and facts is not None and set(facts) <= good_ids and k in got:
+            segs[k]["say"] = " ".join(say.split())
+            segs[k]["facts"] = list(dict.fromkeys(facts))
+            segs[k]["show"] = _norm_show(g.get("show"), roles)
+            segs[k]["rewritten"] = True
+            rewritten.append(k)
+        else:
+            dropped.append(k)
+    if core_failed:
+        return json.loads(json.dumps(script)), dict(rewritten=[], dropped=[], facts_dropped=[], core_failed=core_failed), use
+    sc["segments"] = [s for k, s in enumerate(segs) if k not in dropped]
+    sc["facts"] = good
+    if sc["segments"]:
+        sc["hook_line"], sc["close_line"] = sc["segments"][0].get("say"), sc["segments"][-1].get("say")
+    return sc, dict(rewritten=rewritten, dropped=dropped, facts_dropped=sorted(bad), core_failed=[]), use
+
+
+def settle(script, log=print, ask_research=None, ask_rewrite=None):
+    """(script, report, spend): the script verified, and what fails repaired one claim at a time instead of the film.
+
+      1. every fact is checked (verify: its page through every door, its Wayback copy, its other cited copies);
+      2. each fact a segment cites that does not verify is re-researched: one call finds other readable pages for the
+         same claim; the first candidate whose quote is found on its page takes the fact's place;
+      3. a fact still unverified leaves the film: the segments resting on it are rewritten on the checked facts or
+         dropped (rewrite_without, one call), and the script is verified again. The hook, turn and payoff are never
+         dropped: each is restated on checked facts or the story cannot stand (report.ok False, report.core_unverified
+         naming the facts it rested on, report.core_why why each failed);
+      4. a display item whose number stands in no verified quote is taken off the screen (the words stay).
+    Facts no segment cites and that do not verify are removed, so the record lists checked facts only."""
+    sc = json.loads(json.dumps(script))
+    spend, info = [], dict(researched=[], replaced=[], core_unverified=[], rewritten=[], dropped_segments=[], facts_dropped=[],
+                           display_dropped=[], unused_dropped=[])
+    rep = verify(sc)
+    bad_rows = [r for r in rep["facts"] if r["id"] in rep["facts_unverified"]]
+    if bad_rows:
+        info["researched"] = [dict(id=r["id"], url=r.get("url"), why=_why(r)) for r in bad_rows]
+        log("fact check: re-researching " + "; ".join(f"{r['id']} ({_why(r)[:60]})" for r in bad_rows))
+        try:
+            found, use = research(sc, bad_rows, ask=ask_research)
+            if use:
+                spend.append(use)
+        except Exception as e:  # noqa: BLE001 - no new sources: the claims are treated as unverifiable below
+            log(f"fact check: re-research failed: {e!r}"[:300])
+            found = {}
+        by = {f.get("id"): f for f in sc.get("facts") or []}
+        for r in bad_rows:
+            f = by.get(r["id"])
+            for cand in found.get(r["id"]) or []:
+                trial = dict(f, url=cand["url"], quote=cand["quote"], also=[])
+                row = check_fact(trial)
+                if row["found"]:
+                    f["replaced"] = dict(url=f.get("url"), quote=f.get("quote"), why=_why(r))
+                    f["url"], f["quote"] = cand["url"], cand["quote"]
+                    f.pop("also", None)
+                    info["replaced"].append(dict(id=f["id"], old=f["replaced"]["url"], new=cand["url"], read=row.get("read")))
+                    break
+        rep = verify(sc)
+    unused = [r["id"] for r in rep["facts"] if not r["found"] and r["id"] not in rep["facts_unverified"]]
+    if unused:
+        sc["facts"] = [f for f in sc.get("facts") or [] if f.get("id") not in unused]
+        info["unused_dropped"] = unused
+        rep = verify(sc)
+    if rep["facts_unverified"]:
+        sc, ri, use = rewrite_without(sc, rep["facts_unverified"], ask=ask_rewrite)
+        if use:
+            spend.append(use)
+        if ri["core_failed"]:
+            rows, segs = {r["id"]: r for r in rep["facts"]}, sc.get("segments") or []
+            info["core_unverified"] = sorted({f for k in ri["core_failed"] for f in segs[k].get("facts") or [] if f in rep["facts_unverified"]})
+            info["core_why"] = {i: dict(claim=rows[i].get("claim"), url=rows[i].get("url"), why=_why(rows[i]),
+                                        beats=[segs[k].get("beat") or "hook" for k in ri["core_failed"] if i in (segs[k].get("facts") or [])])
+                                for i in info["core_unverified"]}
+            log(f"fact check: the core cannot stand without {info['core_unverified']}")
+            return sc, dict(rep, ok=False, settle=info), spend
+        info.update(rewritten=ri["rewritten"], dropped_segments=ri["dropped"], facts_dropped=ri["facts_dropped"])
+        log(f"fact check: unverifiable {ri['facts_dropped']} left the film; segments rewritten {ri['rewritten']}, dropped {ri['dropped']}")
+        rep = verify(sc)
+    if rep["numbers_unbacked"]:
+        unb = set(rep["numbers_unbacked"])
+        keep_ord = {id(x) for x in ordinal_items(sc)}
+        for k, s in enumerate(sc.get("segments") or []):
+            off = [x for x in s.get("show") or [] if id(x) not in keep_ord
+                   and set(digits(str(x.get("text") if isinstance(x, dict) else x))) & unb]
+            if off:
+                info["display_dropped"] += [dict(segment=k, text=str(x.get("text") if isinstance(x, dict) else x)) for x in off]
+                s["show"] = [x for x in s.get("show") or [] if not any(x is o for o in off)]
+        log(f"fact check: display items with unbacked numbers taken off screen: {info['display_dropped']}")
+        rep = verify(sc)
+    return sc, dict(rep, settle=info), spend
 
 
 def words_of(script):

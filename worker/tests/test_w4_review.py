@@ -299,7 +299,7 @@ def test_wave4_department_shares_stay_within_their_pins():
     import json
     import agent_tools
     from tools_ext import (broll_tools, critic_tools, depth_tools, photo_tools,
-                           ui_tools)
+                           search_place_tools, ui_tools)
 
     def size(names):
         return len(json.dumps(agent_tools.openai_tools(
@@ -313,9 +313,12 @@ def test_wave4_department_shares_stay_within_their_pins():
     # Wave 4's pin above is unchanged.
     photo = sorted(photo_tools.WRITE_TOOLS)
     assert size(photo) <= 1_500
-    assert set(world) | set(photo) == set(agent_tools.TOOL_DOMAINS["picture"])
+    saved_search = sorted(search_place_tools.WRITE_TOOLS)
+    assert saved_search == ["place_search_result"]
+    assert size(saved_search) <= 1_500
+    assert set(world) | set(photo) | set(saved_search) == set(agent_tools.TOOL_DOMAINS["picture"])
     assert size(critic_tools.VERBS) <= 1_200
-    for name in world + photo + list(critic_tools.VERBS):
+    for name in world + photo + saved_search + list(critic_tools.VERBS):
         assert len(agent_tools.TOOLS[name][1]) <= 900, name
 
 

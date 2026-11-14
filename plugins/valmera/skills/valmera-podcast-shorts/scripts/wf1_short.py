@@ -49,7 +49,7 @@ import shell  # noqa: E402
 import wf1_film  # noqa: E402
 import wf3  # noqa: E402
 
-RESEARCH_CONTRACT = 6  # primary documents can fill a truthful still-picture gap before more video research
+RESEARCH_CONTRACT = 7  # primary documents can fill a truthful still-picture gap before more video research
 
 
 def _llm():
@@ -375,6 +375,8 @@ def source_signature(supply):
     """A newly available original invalidates exhausted research, not previous frame checks."""
     path=os.path.join(supply,'sources','manifest.json')
     rows=json.load(open(path)) if os.path.exists(path) else []
+    documents=os.path.join(supply,'document-sources','manifest.json')
+    if os.path.exists(documents):rows+=json.load(open(documents))
     available=[]
     for row in rows:
         p=row.get('path','')
@@ -395,18 +397,20 @@ def refill(ctx, script, pack, shortage):
         pack['referent_research']=found
         pack.setdefault('research_spend',[]).extend(found['spend'])
     coverage['research_context']=pack['referent_research']
-    if pack.get('research_revision',0)<6:
+    if pack.get('research_revision',0)<7:
         import wf1_coverage
         checks=os.path.join(ctx.supply,'placement_checks.json')
         evidence=dict(available=[dict(i=r['i'],clips=[dict(subject=c.get('subject'),shows=c.get('shows'),source=c.get('source')) for c in r['clips']]) for r in pack['footage']],
                       rejected=[r['reason'] for r in json.load(open(checks)).values() if not r['ok']][-60:] if os.path.exists(checks) else [])
         usage=wf1_coverage.repair_requirements(coverage,wanted,evidence,_llm())
-        pack.setdefault('research_spend',[]).append(usage);pack['research_revision']=6
+        pack.setdefault('research_spend',[]).append(usage);pack['research_revision']=7
         stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
         with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
     import wf1_documents
     context=dict(identity=coverage.get('context'),primary_research=coverage.get('research_context'),prior_errors=[e for r in pack.get('document_research',[]) for e in r.get('errors',[])][-12:])
-    documents=wf1_documents.acquire([dict(windows[i],i=i,context=context) for i in wanted],os.path.join(ctx.supply,'primary-documents'),_llm())
+    cached_path=os.path.join(ctx.supply,'document-sources','manifest.json')
+    originals=json.load(open(cached_path)) if os.path.exists(cached_path) else []
+    documents=wf1_documents.acquire([dict(windows[i],i=i,context=context) for i in wanted],os.path.join(ctx.supply,'primary-documents'),_llm(),sources=originals)
     added=0
     for subject,records in documents['pictures'].items():
         dest=pack['pictures'].setdefault(subject,[]);have={r['path'] for r in dest}
@@ -417,7 +421,10 @@ def refill(ctx, script, pack, shortage):
         stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
         with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
         ctx.log(f'acquired {added} primary-document crops; checking their actual words before further research')
-        return
+        # New stills cannot repair a moving-footage deficit. Continue into video
+        # research in this same attempt instead of consuming every retry on crops.
+        if shortage.get('real_seconds',0)>0 and shortage.get('moving_seconds',0)>=.6*shortage['real_seconds']:
+            return
     signature=source_signature(ctx.supply)
     previous = pack.get('coverage_repairs',0) if pack.get('research_contract')==RESEARCH_CONTRACT and pack.get('research_sources')==signature else 0
     count = int(previous)+1
@@ -440,6 +447,9 @@ def refill(ctx, script, pack, shortage):
             if not any(r['url']==rec['url'] for r in manifest):manifest.append(rec)
         with open(manifest_path,'w') as f:json.dump(manifest,f,indent=1)
         if not primary:raise RuntimeError('no verified public publisher video found after platform research exhausted')
+    if count > 4 and added:
+        # Score the newly acquired original once even when video research is exhausted.
+        return
     if count > 4:
         raise RuntimeError('documentary coverage still incomplete after platform and original-publisher research')
     name = f"footage-v{coverage['contract']}-context{RESEARCH_CONTRACT}-{signature}-repair{count}"

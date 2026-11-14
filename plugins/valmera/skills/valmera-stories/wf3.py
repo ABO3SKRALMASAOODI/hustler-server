@@ -181,31 +181,7 @@ def script(ctx, ideas_out):
         raise RuntimeError("no idea with a buildable style and enough free pictures: " +
                            json.dumps([(i.get("title"), i.get("style"), (i.get("supply") or {}).get("covered")) for i in ideas_out["ideas"]])[:600])
     card = able[pick["style"]]
-    spend, notes, rep, sc = [], ctx.args.get("notes"), None, None
-    for attempt in range(4):
-        sc, use = writer.write(pick, card, FORM, voices=card.get("voice"), notes=notes)
-        spend.append(dict(stage="script", attempt=attempt, **use))
-        rep = writer.verify(sc)
-        json.dump(dict(script=sc, verify=rep), open(os.path.join(ctx.run_dir, f"script_attempt{attempt}.json"), "w"), ensure_ascii=False, indent=1)
-        n_words = writer.words_of(sc)
-        lo, hi = writer.FORMS[FORM]["words"]
-        problems = []
-        if rep["facts_unverified"]:
-            why = {r["id"]: (r.get("error") or "the quote is not on the page") + f" ({r['url']})" for r in rep["facts"] if r["id"] in rep["facts_unverified"]}
-            good = sorted({r["url"] for r in rep["facts"] if r["found"]})
-            problems.append(f"these facts did not verify: {json.dumps(why)}; quote a readable HTML page word for word (read it with web_fetch "
-                            "first; never a PDF), or use another source, or drop the fact and every sentence and number that rests on it. "
-                            f"These pages were read and checked here, so their quotes verify: {json.dumps(good)}; Wikipedia always reads")
-        if rep["numbers_unbacked"]:
-            problems.append(f"these numbers are on screen but in no verified quote: {rep['numbers_unbacked']}")
-        if not lo * 0.85 <= n_words <= hi * 1.15:
-            problems.append(f"{n_words} spoken words; the form wants {lo}-{hi}")
-        if not problems:
-            break
-        notes = "\n".join(problems)
-        ctx.log("script repair: " + notes[:400])
-    if rep is None or not rep["ok"]:
-        raise RuntimeError(f"the script's facts do not verify: {json.dumps(rep)[:600]}")
+    sc, rep, spend = write_checked(ctx, pick, card)
     sc, rep = for_the_ear(ctx, sc, rep, spend)
     ann = None
     if card["id"] in R.STYLES:
@@ -214,6 +190,62 @@ def script(ctx, ideas_out):
     return dict(title=sc.get("title") or pick.get("title"), style=reg, window=None, hook_line=sc.get("hook_line"),
                 close_line=sc.get("close_line"), direction=f"{card['name']}: {card['look']}", idea=pick.get("title"),
                 idea_full=pick, script=sc, verify=rep, words=writer.words_of(sc), annotate=ann, spend=spend)
+
+
+SCRIPT_TRIES = 3
+
+
+def script_problems(rep, sc):
+    """What a written and settled script still lacks, as notes the writer reads on its next attempt ([] = it stands)."""
+    problems = []
+    st = rep.get("settle") or {}
+    if st.get("core_unverified"):
+        problems.append("the story's core claims (its hook, turn or payoff) could not be verified on any readable page, even after "
+                        f"searching for other sources: {json.dumps(st.get('core_why') or st['core_unverified'], ensure_ascii=False)}. "
+                        "Build the hook, the turn and the payoff on facts a readable page states word for word (read it with web_fetch "
+                        "first: Wikipedia, archive.org, the studio's own site, free trade press; never a document mirror, a paywall or a PDF)")
+    elif rep.get("facts_unverified"):
+        problems.append(f"these facts still do not verify: {rep['facts_unverified']}")
+    if rep.get("numbers_unbacked"):
+        problems.append(f"these numbers are on screen but in no verified quote: {rep['numbers_unbacked']}")
+    n_words = writer.words_of(sc)
+    lo, hi = writer.FORMS[FORM]["words"]
+    if not lo * 0.85 <= n_words <= hi * 1.15:
+        problems.append(f"{n_words} spoken words; the form wants {lo}-{hi}")
+    return problems
+
+
+def write_checked(ctx, pick, card, write=None, settle=None):
+    """(script, verify report, spend): the script written, then settled claim by claim (writer.settle: a fact whose page
+    will not open or whose quote is absent is sourced again, else its sentences are rewritten without it or dropped; a
+    number on screen without a verified quote leaves the screen). The writer writes again only when the story's own
+    core (hook, turn, payoff) cannot be verified or the script is out of its form; after SCRIPT_TRIES the stage stops
+    and says which core claims failed and why."""
+    write = write or (lambda notes: writer.write(pick, card, FORM, voices=card.get("voice"), notes=notes))
+    settle = settle or (lambda sc_: writer.settle(sc_, log=ctx.log))
+    spend, notes, rep, sc, best = [], ctx.args.get("notes"), None, None, None
+    for attempt in range(SCRIPT_TRIES):
+        sc, use = write(notes)
+        spend.append(dict(stage="script", attempt=attempt, **use))
+        sc, rep, more = settle(sc)
+        spend += [dict(stage="script", attempt=attempt, **u) for u in more]
+        json.dump(dict(script=sc, verify=rep), open(os.path.join(ctx.run_dir, f"script_attempt{attempt}.json"), "w"), ensure_ascii=False, indent=1)
+        problems = script_problems(rep, sc)
+        if rep.get("ok"):
+            best = (sc, rep)            # a verified script out of its word range is kept if no later attempt does better
+        if not problems:
+            break
+        notes = "\n".join(problems)
+        ctx.log("script repair: " + notes[:400])
+    if (rep is None or not rep["ok"]) and best:
+        sc, rep = best
+    if rep is None or not rep["ok"]:
+        st = (rep or {}).get("settle") or {}
+        if st.get("core_unverified"):
+            raise RuntimeError("the story's core claims cannot be verified on any readable page: "
+                               f"{json.dumps(st.get('core_why'), ensure_ascii=False)[:700]}")
+        raise RuntimeError(f"the script's facts do not verify: {json.dumps({k: (rep or {}).get(k) for k in ('facts_unverified', 'numbers_unbacked', 'verified', 'total')})[:600]}")
+    return sc, rep, spend
 
 
 def needs_annotate(sc):
@@ -328,7 +360,7 @@ def for_the_ear(ctx, sc, rep, spend):
     if not rep2["ok"]:
         ctx.log("ear: the rewrite does not verify; the script stands as written")
         return sc, rep
-    return sc2, rep2
+    return sc2, (dict(rep2, settle=rep["settle"]) if rep.get("settle") else rep2)
 
 
 # ----------------------------------------------------------------- supply

@@ -139,3 +139,33 @@ def test_changed_plan_invalidates_old_render_before_frame_check(tmp_path,monkeyp
     monkeypatch.setattr(wf,'_render_review',lambda *a:dict(rejected=0,spend=[]))
     wf.render(ctx,{},dict(l1=str(l1),beats={}))
     assert json.load(open(tmp_path/'render_revision.json'))==wf.render_revision(dict(l1=str(l1)))
+
+
+def test_document_recovery_does_not_starve_moving_footage_research(tmp_path,monkeypatch):
+    import wf1_documents
+    ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
+    pack=dict(coverage=dict(contract=3,windows=[dict(name='Company',must_show='Original product footage',say='Company',t0=0,t1=5)]),
+              referent_research={'sources':[]},research_revision=7,footage=[],pictures={},credits=[])
+    (tmp_path/'pack.json').write_text(json.dumps({'pack':pack}))
+    monkeypatch.setattr(wf,'_llm',lambda:None)
+    monkeypatch.setattr(wf1_documents,'acquire',lambda *a,**kw:dict(pictures={'Company':[dict(path='new-original.jpg')]},credits=[],spend=[]))
+    calls=[]
+    def footage(*a,**kw):
+        calls.append(kw);return dict(lines=[],credits=[])
+    monkeypatch.setattr(wf.chain,'footage',footage)
+    wf.refill(ctx,dict(title='Company',style={'id':'window'}),pack,
+              dict(weak_windows=[0],real_seconds=12,moving_seconds=2))
+    assert len(calls)==1 and calls[0]['motion_first']
+    assert pack['pictures']['Company'][0]['path']=='new-original.jpg'
+    assert pack['coverage_repairs']==1
+
+
+def test_cached_primary_document_requires_exact_url_and_original_hash(tmp_path):
+    import wf1_documents as D
+    import hashlib
+    path=tmp_path/'original.html';data=b'<h1>Original publication</h1>';path.write_bytes(data)
+    sources=[dict(url='https://publisher.example/paper',path=str(path),sha256=hashlib.sha256(data).hexdigest())]
+    assert D.cached_document(sources[0]['url'],sources)==data
+    assert D.cached_document('https://different.example/paper',sources) is None
+    path.write_bytes(b'changed')
+    with pytest.raises(ValueError,match='hash mismatch'):D.cached_document(sources[0]['url'],sources)

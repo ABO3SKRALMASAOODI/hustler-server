@@ -60,8 +60,9 @@ def shell(tmp, *args, hang=None, wait=True):
     return subprocess.Popen(cmd, env=env_for(tmp, hang), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
-def new_run(tmp, **kw):
-    return shell(tmp, "--workflow", "selftest", "--source", "/dev/null", "--out", str(tmp / "out"), **kw)
+def new_run(tmp, until=None, **kw):
+    return shell(tmp, "--workflow", "selftest", "--source", "/dev/null", "--out", str(tmp / "out"),
+                 *(["--until", until] if until else []), **kw)
 
 
 def kill_after(tmp, stage):
@@ -107,6 +108,18 @@ def assert_clean(tmp, before, r):
 def test_clean_run(tmp):
     before = measured(tmp)
     assert_clean(tmp, before, new_run(tmp))
+
+
+def test_until_stops_after_the_stage_and_delivers_nothing(tmp):
+    """A stage test (--until script): the run stops after the script, its file kept, nothing delivered; the same run
+    resumed without --until goes on to deliver."""
+    before = measured(tmp)
+    r = new_run(tmp, until="script")
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    rep = json.loads(r.stdout.strip().splitlines()[-1])
+    assert rep["until"] == "script" and rep["done"] == ["ideas", "script"] and os.path.exists(rep["result"])
+    assert delivered(tmp) == []
+    assert_clean(tmp, before, shell(tmp, "--resume", rep["run_id"]))
 
 
 def test_kill_resume(tmp):

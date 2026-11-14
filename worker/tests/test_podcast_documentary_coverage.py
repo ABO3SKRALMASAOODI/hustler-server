@@ -72,7 +72,7 @@ def test_research_clauses_join_only_identical_director_subjects():
 
 def test_static_video_files_do_not_satisfy_moving_coverage():
     coverage = {'windows':[{'t0':0.,'t1':10.}]}
-    rows = [[i*30,(i+1)*30,'clip','subject',dict(window=0,placed_motion_p90=0.)] for i in range(8)]
+    rows = [[i*30,(i+1)*30,'clip','subject',dict(path=f'static-{i}.mp4',window=0,placed_motion_p90=0.)] for i in range(8)]
     with pytest.raises(RuntimeError,match='moving=0.000'):
         C.require_coverage(rows,coverage,10)
     for row in rows: row[4]['placed_motion_p90']=2.
@@ -217,6 +217,29 @@ def test_context_rejection_does_not_destroy_a_picture_valid_under_a_later_clause
     cov=dict(windows=[dict(t0=0,t1=2,name='Project',subjects=['Accelerator'],must_show='the project'),dict(t0=3,t1=5,name='Accelerator',must_show='the accelerator')])
     picture=dict(path='original-program-document.jpg')
     first=C.proposals(cov,{},dict(Accelerator=[picture]))
-    assert [r[4]['window'] for r in first]==[0]
+    assert [r[4]['window'] for r in first]==[0,1]
     repaired=C.proposals(cov,{},dict(Accelerator=[picture]),rejected={(0,picture['path'])})
     assert [r[4]['window'] for r in repaired]==[1]
+
+
+def test_research_can_resolve_a_wrong_pronoun_label_without_changing_word_bounds():
+    import json
+    from types import SimpleNamespace
+    cov=dict(windows=[dict(name='City',first=2,last=5,t0=1,t1=3,must_show='City')])
+    row=dict(i=0,name='Internship',must_show='Original employer premises',referent_evidence='The preceding clause identifies the internship as what he expects to dislike.',video_searches=['employer historical headquarters'])
+    llm=SimpleNamespace(ask=lambda *a,**k:(json.dumps({'windows':[row]}),{}),json_block=json.loads)
+    C.repair_requirements(cov,[0],{},llm)
+    assert cov['windows'][0]['name']=='Internship'
+    assert cov['windows'][0]['original_name']=='City'
+    assert (cov['windows'][0]['first'],cov['windows'][0]['last'])==(2,5)
+
+
+def test_repeated_primary_evidence_covers_a_callback_but_is_not_a_new_picture():
+    cov=dict(windows=[dict(name='Exact experiment',must_show='Original source',t0=0,t1=1),dict(name='Exact experiment',must_show='Original source',t0=2,t1=3)])
+    rows=C.proposals(cov,{}, {'Exact experiment':[dict(path='original-document.jpg')]})
+    assert len(rows)==2 and [r[4]['window'] for r in rows]==[0,1]
+    with pytest.raises(C.CoverageError) as error:C.require_coverage(rows,cov,3)
+    assert error.value.report['new_pictures']==1
+    assert error.value.report['repeated_pictures']==1
+    assert error.value.report['new_per_10s']==5
+    assert not error.value.report['missing_windows']
