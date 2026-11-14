@@ -103,7 +103,7 @@ def prefill_footage(ctx,script,ft,pass_id=None):
         dest=Path(ctx.supply)/'footage'/('prefill-'+ch['id']+('-'+pass_id if pass_id else ''))
         ctx.log(f"archive coverage research {ch['id']}: {len(lines)} lines")
         known=list({c['source']['url']:c['source'] for ln in ft['lines'] for c in ln['clips']}.values())
-        extra=footage_box.fetch(dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title']+'. Find additional literal archive evidence; previous source seconds are reserved.',avoid=avoid,known_sources=known),dest,ctx.log)
+        extra=footage_box.fetch(dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title']+'. Find additional literal archive evidence; previous source seconds are reserved.',avoid=avoid,known_sources=known,want_voices=not bool(ft.get('voices'))),dest,ctx.log)
         add_footage(ft,extra,dest)
         avoid.extend(dict(url=c['source']['url'],time_range=c['time_range']) for ln in extra['lines'] for c in ln['clips'])
         avoid.extend(dict(url=v['source']['url'],time_range=v['time_range']) for v in extra.get('voices',[]))
@@ -308,7 +308,7 @@ def supply(ctx, script):
                 if not lines:continue
                 dest=Path(ctx.supply)/'footage'/f"repair-{attempt+1}-{ch['id']}"
                 known=list({c['source']['url']:c['source'] for ln in ft['lines'] for c in ln['clips']}.values())
-                extra=footage_box.fetch(dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title'],avoid=avoid,known_sources=known),dest,ctx.log)
+                extra=footage_box.fetch(dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title'],avoid=avoid,known_sources=known,want_voices=not bool(ft.get('voices'))),dest,ctx.log)
                 add_footage(ft,extra,dest)
                 avoid.extend(dict(url=c['source']['url'],time_range=c['time_range']) for ln in extra['lines'] for c in ln['clips'])
                 avoid.extend(dict(url=v['source']['url'],time_range=v['time_range']) for v in extra.get('voices',[]))

@@ -53,6 +53,31 @@ fetch.WHOLE_H=720
 fetch.WHOLE_MAX='400M'
 import fcntl
 media=pathlib.Path('/wf4-model-cache/raw-media');media.mkdir(parents=True,exist_ok=True)
+originals=media/'originals';originals.mkdir(exist_ok=True)
+os.environ['FOOTAGE_KEEP_SOURCES']=str(originals)
+manifest=originals/'manifest.json'
+if manifest.exists():os.environ['FOOTAGE_LOCAL_SOURCES']=manifest.read_text()
+original_av=fetch.whole_av
+original_local=fetch.local_source
+def cached_av(url):
+    folder=media/'av'/hashlib.sha256(url.encode()).hexdigest()[:16]
+    marker=folder/'complete.json'
+    if marker.exists():
+        rec=json.loads(marker.read_text());p=pathlib.Path(rec['path'])
+        if rec['url']==url and p.is_file() and p.stat().st_size>2000:return str(p)
+    return None
+fetch.local_source=lambda url:original_local(url) or cached_av(url)
+def whole_av(url,out_dir):
+    key=hashlib.sha256(url.encode()).hexdigest()[:16]
+    with open(media/('av-'+key+'.lock'),'a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        known=fetch.local_source(url)
+        if known:return known,'verified-local-source'
+        folder=media/'av'/key;folder.mkdir(parents=True,exist_ok=True)
+        path,rung=original_av(url,str(folder))
+        (folder/'complete.json').write_text(json.dumps(dict(url=url,path=path,rung=rung)))
+        return path,rung
+fetch.whole_av=whole_av
 original_proxy=fetch.proxy
 def proxy(url,out_dir,duration=None,max_s=None):
     key=hashlib.sha256((url+':'+str(max_s or fetch.PROXY_MAX_S)).encode()).hexdigest()[:16]
@@ -139,7 +164,7 @@ if j.get('_voices'):
     sys.exit(0)
 find(j['lines'],j['named'],j['about'],sys.argv[2],1920,1080,
      max_sources=10, per=2, avoid=j.get('avoid'), strict_lines=True, motion_first=True,
-     alloc='round', reassign_lost=True, whole_first=True, log=lambda s:print(s,flush=True))
+     alloc='round', reassign_lost=True, whole_first=True, want_voices=j.get('want_voices'), log=lambda s:print(s,flush=True))
 '''
 
 
