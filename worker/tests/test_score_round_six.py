@@ -434,4 +434,4 @@ def test_the_upgraded_film_is_rendered_once_and_said_in_one_line_and_a_failed_re
 
 def test_a_first_films_footage_is_fetched_lean():
     import footage.seam as seam
-    assert seam.FIRST_FILM == {"max_sources": 8, "hear_s": 0.0, "read_s": 300.0, "per": 2} and seam.LINE_S >= 3.0      # nothing heard, two clips a wish
+    assert seam.FIRST_FILM == {"max_sources": 8, "hear_s": 0.0, "read_s": 300.0, "per": 2, "downloaded_only": True} and seam.LINE_S >= 3.0
