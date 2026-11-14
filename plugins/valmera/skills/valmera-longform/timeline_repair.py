@@ -1,5 +1,6 @@
 """Preserve checked picture/word pairings; repair only unverified intervals."""
 import math
+import hashlib,json
 from pathlib import Path
 
 
@@ -50,6 +51,33 @@ def retain(ft,shots,clock,report):
         line['clips']=[c for c in line['clips'] if (line['i'],identity(c)) not in rejected]
 
 
+def research(ctx,script,ft,failure,merge=True):
+    """A failed literal match triggers new evidence research, not a looser gate."""
+    import cinema as C
+    import footage_box
+    rows=[]
+    for gap in failure.gaps:
+        i=gap['seg'];segment=script['script']['segments'][i]
+        rejected=[r['why'] for r in ft.get('editorial',{}).get('rejected',[]) if r['seg']==i]
+        rows.append(dict(i=i,say=gap['heard'] or gap['words'],dur=gap['seconds']+1,pictures=segment.get('pictures',[]),
+                         visual='Literal event and repair state required. Prior rejected views: '+'; '.join(dict.fromkeys(rejected))))
+    # A segment can have several gaps; research each as a distinct shot request.
+    combined={}
+    for row in rows:
+        if row['i'] in combined:
+            combined[row['i']]['say']+=' '+row['say'];combined[row['i']]['dur']+=row['dur']
+        else:combined[row['i']]=row
+    avoid=[dict(url=r['clip']['source']['url'],time_range=[r['clip']['time_range'][0]+t for t in r['src']]) for r in failure.shots]
+    known=list({c['source']['url']:c['source'] for line in ft['lines'] for c in line['clips'] if c.get('kind')!='image'}.values())
+    key=hashlib.sha256(json.dumps(dict(rows=rows,avoid=avoid),sort_keys=True).encode()).hexdigest()[:12]
+    dest=Path(ctx.supply)/'footage'/('timing-research-'+key)
+    ctx.log(f'exact picture research: {len(combined)} lines in {dest.name}')
+    extra=footage_box.fetch(dict(lines=list(combined.values()),named=script['dossier']['named'],about=script['title'],
+                                 avoid=avoid,known_sources=known,want_voices=False),dest,ctx.log)
+    if merge:C.add_footage(ft,extra,dest)
+    return dest
+
+
 def repair(ctx,script,ft,words,rounds=3):
     import cinema as C
     from evidence_allocate import allocate
@@ -58,7 +86,18 @@ def repair(ctx,script,ft,words,rounds=3):
         try:shots,clock,_=C.schedule(script['script'],words,ft)
         except C.CoverageError as failure:
             allocate(ctx,script,ft,failure);C.save(path,ft)
-            shots,clock,_=C.schedule(script['script'],words,ft)
+            try:shots,clock,_=C.schedule(script['script'],words,ft)
+            except C.CoverageError as uncovered:
+                research(ctx,script,ft,uncovered);C.save(path,ft)
+                try:shots,clock,_=C.schedule(script['script'],words,ft)
+                except C.CoverageError as rare:
+                    from evidence_web import supply as exact_archive
+                    from document_evidence import supply as original_figures
+                    exact_archive(ctx,script,ft,rare.gaps);C.save(path,ft)
+                    try:shots,clock,_=C.schedule(script['script'],words,ft)
+                    except C.CoverageError as documented:
+                        original_figures(ctx,script,ft,documented.gaps);C.save(path,ft)
+                        shots,clock,_=C.schedule(script['script'],words,ft)
         report=C.source_review(ctx,shots,required=False)
         if report['ok']:return shots,clock
         retain(ft,shots,clock,report);C.save(path,ft)

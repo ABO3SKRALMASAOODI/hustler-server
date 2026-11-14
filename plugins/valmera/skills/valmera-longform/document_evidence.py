@@ -45,17 +45,16 @@ def supply(ctx,script,ft,gaps):
             json.dumps(dict(gaps=gaps,documents=docs,pages=pages)),effort='high',max_tokens=4000,what='WF4 technical figure selection')
         selected=story.writer.json_block(text);selected['usage']=usage;C.save(selection,selected)
     by={r['i']:r for r in ft['lines']};valid_lines={g['seg']:g['words'] for g in gaps}
-    for line in by.values():
-        line['clips']=[c for c in line['clips'] if not (c.get('document') and Path(c['path']).parent==root)]
     for row in selected['pages']:
         di,pi=int(row['document']),int(row['page']);doc=docs[di]
-        base=root/f'd{di}-p{pi}';preview=base.with_suffix('.jpg');verdict=root/(base.name+'-v2.json')
+        wanted={i:valid_lines[i] for i in row['lines'] if i in valid_lines}
+        request_hash=hashlib.sha256(json.dumps(wanted,sort_keys=True).encode()).hexdigest()[:12]
+        base=root/f'd{di}-p{pi}';preview=base.with_suffix('.jpg');verdict=root/(base.name+'-v3-'+request_hash+'.json')
         with pdfium.PdfDocument(files[di]) as pdf:
             with closing(pdf[pi]) as page:
                 if not preview.exists():page.render(scale=1.5).to_pil().convert('RGB').save(preview,quality=90)
                 if verdict.exists():check=C.read(verdict)
                 else:
-                    wanted={i:valid_lines[i] for i in row['lines'] if i in valid_lines}
                     text,cost=ask.ask('Inspect this original technical-report page. Select ONE genuine diagram or photograph that accurately illustrates '
                         'one or more supplied narration lines. Return JSON {ok:bool,usable:bool,lines:[indexes],crop:[left,top,right,bottom],rotation_cw:0|90|180|270,caption:string,why:string}. '
                         'Crop coordinates are fractions of this entire page. Keep all parts necessary to understand the figure and its labels. '
@@ -68,7 +67,7 @@ def supply(ctx,script,ft,gaps):
                 if check.get('ok') is not True or check.get('usable') is not True:continue
                 crop=check.get('crop',[])
                 if len(crop)!=4 or not 0<=crop[0]<crop[2]<=1 or not 0<=crop[1]<crop[3]<=1:raise ValueError('invalid original-document crop')
-                w,h=page.get_size();image=base.with_suffix('.png')
+                w,h=page.get_size();image=root/(base.name+'-'+request_hash+'.png')
                 rotation=check.get('rotation_cw',0)
                 if rotation not in (0,90,180,270):raise ValueError('invalid original-document orientation')
                 page.render(scale=3,crop=(crop[0]*w,(1-crop[3])*h,(1-crop[2])*w,crop[1]*h)).to_pil().rotate(-rotation,expand=True).save(image)
@@ -78,6 +77,7 @@ def supply(ctx,script,ft,gaps):
         rec=dict(path=str(image),kind='image',document=True,w=w,h=h,content_hash=C.digest(image),seconds=7.8,time_range=[0,7.8],source=source,shows=check['caption'])
         for i in check['lines']:
             if i not in valid_lines:continue
-            by.setdefault(i,dict(i=i,clips=[]))['clips'].append(rec)
+            line=by.setdefault(i,dict(i=i,clips=[]))
+            if not any(c['path']==str(image) for c in line['clips']):line['clips'].append(rec)
             ft['credits'].append(dict(line=i,**source))
     ft['lines']=list(by.values())
