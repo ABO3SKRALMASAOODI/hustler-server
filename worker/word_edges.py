@@ -20,7 +20,7 @@ def introduced(before, after, words, duration=None):
     return hits
 
 
-def whole(keep, words, duration, previous=None):
+def whole(keep, words, duration, previous=None, pad=False):
     """Final outward snap, after every acoustic/shot pass, before item remapping.
 
 Never discard the first word simply because an onset was chosen too late.
@@ -35,8 +35,19 @@ centisecond grid outwards, so normalization cannot put them back inside.
             break
         for h in hits:
             old, side = h['boundary'], h['kind']
-            new = (math.floor(h['t0'] * 100 + 1e-7) / 100 if side == 'start'
-                   else math.ceil(h['t1'] * 100 - 1e-7) / 100)
+            edge = h['t0'] if side == 'start' else h['t1']
+            if pad:
+                # Leave room for consonants outside ASR's voiced-core times,
+                # without entering the neighboring word on the removed side.
+                import cut_audio
+                if side == 'start':
+                    prev = max((float(w['t1']) for w in words if float(w['t1']) <= edge), default=0.)
+                    edge = max(prev, edge - cut_audio.PAD_START_S)
+                else:
+                    nxt = min((float(w['t0']) for w in words if float(w['t0']) >= edge), default=float(duration))
+                    edge = min(nxt, edge + cut_audio.PAD_END_S)
+            new = (math.floor(edge * 100 + 1e-7) / 100 if side == 'start'
+                   else math.ceil(edge * 100 - 1e-7) / 100)
             new = max(0., min(float(duration), new))
             for span in spans:
                 k = 0 if side == 'start' else 1
