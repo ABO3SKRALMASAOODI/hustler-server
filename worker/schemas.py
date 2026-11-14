@@ -3280,7 +3280,9 @@ def validate_edl(data, duration=None, *, render_fragment=False):
             if len(span) != 2:
                 raise EDLValidationError(
                     f"keep[{i}] must be [start, end], got {span}.")
-            s, e = _r(span[0]), _r(span[1])
+            # Adjacent ASR words can meet between centisecond ticks.
+            # Quantizing a legal edge there clips one word or the other.
+            s, e = round(float(span[0]), 6), round(float(span[1]), 6)
             e = _check_span(f"keep[{i}]", s, e, duration,
                             min_len=0.01 if render_fragment else MIN_SPAN_S,
                             clamp_slack=0.75)
