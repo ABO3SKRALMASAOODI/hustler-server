@@ -99,3 +99,21 @@ def test_same_entry_command_accepts_nothing_or_a_topic(monkeypatch,arguments,top
     assert got[1]=='run' and args['look'] is False
     assert args.get('line')==topic
     assert got[got.index('--out')+1].endswith('/lanes/WF4-LONGFORM')
+
+
+def test_failed_witness_search_can_resume_after_adapter_fix(tmp_path,monkeypatch):
+    import footage_box as B
+    (tmp_path/'footage.json').write_text(json.dumps(dict(voices=[],adapter_sha256='old')))
+    def retried(*a,**k):raise RuntimeError('network retry reached')
+    monkeypatch.setattr(B,'ssh',retried)
+    with pytest.raises(RuntimeError,match='network retry reached'):
+        B.fetch({'_voices':True},tmp_path)
+    assert (tmp_path/'footage-rejected-old.json').exists()
+    assert not (tmp_path/'footage.json').exists()
+
+
+def test_nested_research_shares_only_its_own_film_cache(tmp_path):
+    import footage_box as B
+    root=tmp_path/'run-one'/'footage'
+    assert B.cache_path(root)==B.cache_path(root/'witnesses')
+    assert B.cache_path(root)!=B.cache_path(tmp_path/'run-two'/'footage')

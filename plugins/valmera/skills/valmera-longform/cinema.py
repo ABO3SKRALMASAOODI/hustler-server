@@ -90,6 +90,7 @@ def prefill_footage(ctx,script,ft):
     """
     sc=script['script'];by={r['i']:r for r in ft['lines']}
     avoid=[dict(url=c['source']['url'],time_range=c['time_range']) for ln in ft['lines'] for c in ln['clips']]
+    avoid.extend(dict(url=v['source']['url'],time_range=v['time_range']) for v in ft['voices'])
     for ch in sc['chapters']:
         lines=[]
         for i,s in enumerate(sc['segments']):
@@ -100,9 +101,11 @@ def prefill_footage(ctx,script,ft):
         if not lines:continue
         dest=Path(ctx.supply)/'footage'/('prefill-'+ch['id'])
         ctx.log(f"archive coverage research {ch['id']}: {len(lines)} lines")
-        extra=footage_box.fetch(dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title']+'. Find additional literal archive evidence; previous source seconds are reserved.',avoid=avoid),dest,ctx.log)
+        known=list({c['source']['url']:c['source'] for ln in ft['lines'] for c in ln['clips']}.values())
+        extra=footage_box.fetch(dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title']+'. Find additional literal archive evidence; previous source seconds are reserved.',avoid=avoid,known_sources=known),dest,ctx.log)
         add_footage(ft,extra,dest)
         avoid.extend(dict(url=c['source']['url'],time_range=c['time_range']) for ln in extra['lines'] for c in ln['clips'])
+        avoid.extend(dict(url=v['source']['url'],time_range=v['time_range']) for v in extra.get('voices',[]))
 
 
 def verify_structure(ctx, script, attempt=0):
@@ -159,7 +162,11 @@ def verify_structure(ctx, script, attempt=0):
 def narrated(ctx, ns, nd, reader):
     """Resume a stopped correction even when the shared reader left word times."""
     import fcntl
-    nar=PX.narrate(ns,str(nd),'04',f'wf4-{ctx.run_id}',dict(os.environ),18000,reader)
+    try:nar=PX.narrate(ns,str(nd),'04',f'wf4-{ctx.run_id}',dict(os.environ),18000,reader)
+    except Exception as error:
+        ctx.log('narrator stopped: '+str(error))
+        save(nd/'failure.json',dict(error=str(error)))
+        raise
     report=nd/'longform_voice.json'
     if not report.exists() or not read(report)['after']['ok']:
         with open(PX.NARRATE_LOCK,'a') as lk:
@@ -286,9 +293,11 @@ def supply(ctx, script):
                        for g in gaps if sc['segments'][g['seg']]['chapter']==ch['id']]
                 if not lines:continue
                 dest=Path(ctx.supply)/'footage'/f"repair-{attempt+1}-{ch['id']}"
-                extra=footage_box.fetch(dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title'],avoid=avoid),dest,ctx.log)
+                known=list({c['source']['url']:c['source'] for ln in ft['lines'] for c in ln['clips']}.values())
+                extra=footage_box.fetch(dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title'],avoid=avoid,known_sources=known),dest,ctx.log)
                 add_footage(ft,extra,dest)
                 avoid.extend(dict(url=c['source']['url'],time_range=c['time_range']) for ln in extra['lines'] for c in ln['clips'])
+                avoid.extend(dict(url=v['source']['url'],time_range=v['time_range']) for v in extra.get('voices',[]))
             save(Path(ctx.supply)/'footage'/'footage.json',ft)
     try:shots,clock,_=schedule(sc,coverage_words,ft)
     except CoverageError as failure:

@@ -15,11 +15,51 @@ import shutil
 import subprocess
 import sys
 import math
+import hashlib
+import pickle
 
 HERE=Path(__file__).resolve().parent
 sys.path[:0]=[str(HERE.parent/'valmera-stories'),str(HERE.parent/'_shell'/'narrate')]
 import voice as shared
 from measure_voice import measure
+
+
+def cache_take_analysis(out):
+    """Keep expensive listening/pitch evidence per immutable take. Selecting a
+    film can then resume after a later listener error without rejudging an hour
+    of candidates. Compute the ending pitch while that take's track is hot.
+    """
+    import lines as LN
+    import prosody
+    import perform
+    import measure as signal
+    import numpy as np
+    root=Path(out)/'take-analysis';root.mkdir(parents=True,exist_ok=True)
+    version=hashlib.sha256(b''.join(Path(m.__file__).read_bytes() for m in (LN,prosody,perform,shared))).digest()
+    original=LN._judge_files
+    def judged(N,files,seg,script,band,names,sr0):
+        evidence=[]
+        context=json.dumps(dict(seg=seg,script=script,band=band,names=names),sort_keys=True).encode()
+        for f in files:
+            key=hashlib.sha256(version+context+f.read_bytes()).hexdigest()
+            cache=root/(key+'.pickle')
+            if cache.exists():
+                with open(cache,'rb') as stream:t=pickle.load(stream)
+                x,sr=signal.load_mono(f)
+                if sr0 and sr!=sr0:continue
+                t['_x']=LN.trim_take(x.astype(np.float32),sr)
+            else:
+                rows=original(N,[f],seg,script,band,names,sr0)
+                if not rows:continue
+                t=rows[0]
+                track=prosody.pitch_track(t['_x'],t['_sr']);v=track[np.isfinite(track)]
+                t['_ends']=(float(np.median(v[:25])),float(np.median(v[-25:]))) if len(v)>=30 else (None,None)
+                temp=cache.with_suffix('.tmp')
+                with open(temp,'wb') as stream:pickle.dump({k:v for k,v in t.items() if k!='_x'},stream,pickle.HIGHEST_PROTOCOL)
+                os.replace(temp,cache)
+            evidence.append(t)
+        return evidence
+    LN._judge_files=judged
 
 
 def tempo_factor(rate, median):
@@ -181,14 +221,27 @@ def main():
         import narrate as N
         import datetime
         original_log=N.log
-        def progress(message):
-            original_log(message)
+        def progress(*messages):
+            original_log(*messages)
             with open(Path(a.out)/'progress.jsonl','a') as f:
-                f.write(json.dumps(dict(at=datetime.datetime.now(datetime.timezone.utc).isoformat(),message=str(message)))+'\n')
+                f.write(json.dumps(dict(at=datetime.datetime.now(datetime.timezone.utc).isoformat(),message=' '.join(map(str,messages))))+'\n')
         Path(a.out).mkdir(parents=True,exist_ok=True)
         N.log=progress
         os.environ['NARRATE_ENGINE']='phonon'
         os.environ['NARRATE_KEEP_TAKES']='1'
+        cache_take_analysis(a.out)
+        def easton_only(args):
+            # N.render's generic fallback changes voices when any later stage
+            # raises. This workflow keeps the owner's voice and its real error.
+            import lines as LN
+            import traceback
+            sc=N.load_script(args.script);N.VOCAB[:]=list(sc.get('names') or [])
+            args.engine='phonon';dest=Path(args.out);dest.mkdir(parents=True,exist_ok=True)
+            try:return LN.render_lines(args,sc,args.voice or sc.get('voice') or 'atlas',dest,N)
+            except Exception:
+                (dest/'engine-error.txt').write_text(traceback.format_exc())
+                raise
+        N.render=easton_only
         shared.render(a)
         rendered=json.loads((Path(a.out)/'render.json').read_text())
         if rendered.get('engine')!='lines:phonon':raise RuntimeError('WF4 requires Easton; a different-engine fallback cannot be delivered')

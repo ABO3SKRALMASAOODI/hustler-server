@@ -49,20 +49,49 @@ fetch.PROXY_MAX_S=3600
 run.HEAR_MAX_S=1800
 # yt-dlp's native whole downloader works on the established box route where
 # ffmpeg's remote section seek is refused. Cut those same source seconds locally.
-fetch.WHOLE_H=1080
-fetch.WHOLE_MAX='900M'
+fetch.WHOLE_H=720
+fetch.WHOLE_MAX='400M'
+import fcntl
+media=pathlib.Path('/wf4-model-cache/raw-media');media.mkdir(parents=True,exist_ok=True)
+original_proxy=fetch.proxy
+def proxy(url,out_dir,duration=None,max_s=None):
+    key=hashlib.sha256((url+':'+str(max_s or fetch.PROXY_MAX_S)).encode()).hexdigest()[:16]
+    with open(media/('proxy-'+key+'.lock'),'a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        # A previous chapter already fetched these original picture bytes.
+        # Interviews still need the scanning copy's sound; picture research can
+        # inspect the retained original without paying for another download.
+        cached=list((media/'whole'/hashlib.sha256(url.encode()).hexdigest()[:16]).glob('whole.*'))
+        cached=[p for p in cached if p.suffix in ('.mp4','.mkv','.webm')]
+        if cached and not j.get('_voices'):return str(max(cached,key=lambda p:p.stat().st_size)),'cached original picture'
+        return original_proxy(url,str(media/'proxy'/key),duration,max_s)
+fetch.proxy=proxy
 whole={};locks={};guard=threading.Lock();original_grab=cut.grab
 def grab(stream,url,t0,t1,out):
     if not fetch.is_youtube(url):return original_grab(stream,url,t0,t1,out)
     with guard:lock=locks.setdefault(url,threading.Lock())
     with lock:
         if url not in whole:
-            whole[url]=fetch.whole(url,str(scratch/'whole'/hashlib.sha256(url.encode()).hexdigest()[:16]))
+            key=hashlib.sha256(url.encode()).hexdigest()[:16]
+            with open(media/('whole-'+key+'.lock'),'a') as file_lock:
+                fcntl.flock(file_lock,fcntl.LOCK_EX)
+                whole[url]=fetch.whole(url,str(media/'whole'/key))
     return cut.local(whole[url],t0,t1,out)
 cut.grab=grab
 plan.PLAN_SYSTEM += '\nThis run is a 16:9 long documentary. Average picture length is 4.5 seconds. Match every line exactly; exclude still montages.'
 find = run.find
 j=json.load(open(sys.argv[1]))
+from footage import search
+original_search=search.run
+def search_with_known(queries,*args,**kwargs):
+    found=original_search(queries,*args,**kwargs)
+    for k in range(len(queries)):
+        urls={h['url'] for h in found.get(k,[])}
+        for h in j.get('known_sources',[]):
+            if h['url'] not in urls:
+                found.setdefault(k,[]).append(dict(h,id=hashlib.sha256(h['url'].encode()).hexdigest(),where=h.get('where') or 'youtube',duration=None))
+    return found
+search.run=search_with_known
 if j.get('_voices'):
     from footage import search,voice
     from concurrent.futures import ThreadPoolExecutor
@@ -167,11 +196,14 @@ sys.exit(code)
 
 
 def cache_path(out_root):
+    # Nested witness retries share this film's archive bytes, too.
+    out_root=next((p for p in (Path(out_root),*Path(out_root).parents) if p.name=='footage'),Path(out_root))
     return '/tmp/wf4-model-'+hashlib.sha256(str(Path(out_root).resolve()).encode()).hexdigest()[:12]
 
 
 def cleanup_cache(out_root):
-    ssh('rm -rf -- '+shlex.quote(cache_path(out_root)),capture_output=True)
+    paths={cache_path(out_root),'/tmp/wf4-model-'+hashlib.sha256(str(Path(out_root).resolve()).encode()).hexdigest()[:12]}
+    ssh('rm -rf -- '+' '.join(shlex.quote(p) for p in paths),capture_output=True)
 
 
 def probe(idea):
