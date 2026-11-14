@@ -879,6 +879,23 @@ def run_index_job(worker_db, job):
                         " — tools measure it on first use")
                 if f_screen is not None:
                     state["source_screen"] = f_screen.result()
+                    try:
+                        from score import preparation
+                        prep_index = VideoIndex(
+                            video=VideoInfo(duration=info["duration"], fps=info["fps"],
+                                            width=info["width"], height=info["height"],
+                                            has_audio=info["has_audio"],
+                                            vfr_normalized=info["vfr"]),
+                            shots=state["shots"], spatial=state.get("spatial"),
+                            source_screen=state["source_screen"]).model_dump()
+                        state["director_preparation"] = clock.timed(
+                            "pic_director_prepare_s", preparation.build,
+                            prep_index, proxy_local, os.path.join(workdir, "director-prep"))
+                    except Exception as exc:
+                        # A failed optional cache never substitutes incomplete
+                        # evidence: the Director measures it itself as before.
+                        print(f"[index {job_id}] Director preparation deferred: "
+                              f"{type(exc).__name__}", flush=True)
                 _lane_progress("picture", 0.96)
                 try:
                     f_up.result()
@@ -1055,6 +1072,7 @@ def run_index_job(worker_db, job):
             spatial=spatial_sidecar,
             source_layout=layout_sidecar,
             source_screen=state.get("source_screen"),
+            director_preparation=state.get("director_preparation"),
             visual_storyboard=visual_storyboard,
             visual_storyboard_pending=late_board,
         ).model_dump()

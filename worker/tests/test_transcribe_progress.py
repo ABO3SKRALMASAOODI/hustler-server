@@ -47,3 +47,20 @@ def test_progress_callback_failure_never_fails_transcription(monkeypatch):
 
     assert words == []
     assert language == "en"
+
+
+def test_whisper_uses_slot_cpu_quota_without_changing_model(monkeypatch):
+    import follow
+    calls = []
+    fake = object()
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(
+        WhisperModel=lambda *a, **k: (calls.append((a, k)), fake)[1]))
+    monkeypatch.setattr(transcribe, "_guard_model_ram", lambda: None)
+    for quota, expected in [(0.5, 1), (2, 2), (8, 8), (64, 8)]:
+        monkeypatch.setattr(transcribe, "_model", None)
+        monkeypatch.setattr(follow, "cpu_count", lambda: quota)
+        assert transcribe.get_model() is fake
+        assert calls[-1] == ((transcribe.config.WHISPER_MODEL,), dict(
+            device=transcribe.config.WHISPER_DEVICE,
+            compute_type=transcribe.config.WHISPER_COMPUTE,
+            cpu_threads=expected))
