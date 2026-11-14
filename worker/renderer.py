@@ -6180,7 +6180,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         lt = f"(t-{o_start:.3f})"
         xe = f"main_w*({_anim_expr(item.get('x', 0.5), lt)})-w/2"
         ye = f"main_h*({_anim_expr(item.get('y', 0.5), lt)})-h/2"
-        if picture_cover:
+        if item.get("fit") in ("cover", "picture"):
+            # Fit owns both size and position. A full-frame cutaway carrying
+            # a PIP y=.8 otherwise exposes the speaker's forehead above it.
+            # x/y/scale are ignored by the cover contract (OverlayItem).
             xe = f"{rect[0]}+({rect[2]}-w)/2"
             ye = f"{rect[1]}+({rect[3]}-h)/2"
         if ent == "slide_left":       # arrives moving leftward: from right
