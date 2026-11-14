@@ -21787,6 +21787,17 @@ def generate_video(ctx, prompt, from_image_asset_key=None, duration_s=5):
     ok, err, seconds = videogen.generate_video(p, out_path, image_url=image_url,
                                                duration_s=duration_s)
     if not ok:
+        if from_image_asset_key:
+            ctx.edit_alternatives = [{
+                'offer': 'I can use your uploaded reference as a still-image cutaway while keeping the existing audio and titles. It would be a still, not an animated replacement.',
+                'asset_key': from_image_asset_key, 'tool': 'add_overlay', 'fit': 'cover'},
+                {'offer': 'If you upload an animated replacement clip, I can place it over the original picture while preserving the existing audio and titles.',
+                 'tool': 'add_overlay', 'requires': 'customer-supplied animated clip'}]
+        if getattr(err, 'status_code', None) in (401, 402, 403):
+            return ('UNAVAILABLE: video animation is unavailable on our side. No clip was created. '
+                    'Repeating this call cannot resolve the provider account restriction. '
+                    'Leave the existing film unchanged; offer the uploaded reference as a still '
+                    'or ask for an animated replacement clip. Do not apply that alternative without the customer choosing it.')
         return (f"Video generation FAILED: {err}. Try again or tell the user it "
                 "didn't work — do NOT claim a clip was created.")
     # The provider has billed it, whatever happens to the file from here.
