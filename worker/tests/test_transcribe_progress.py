@@ -56,7 +56,7 @@ def test_whisper_uses_slot_cpu_quota_without_changing_model(monkeypatch):
     monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(
         WhisperModel=lambda *a, **k: (calls.append((a, k)), fake)[1]))
     monkeypatch.setattr(transcribe, "_guard_model_ram", lambda: None)
-    for quota, expected in [(0.5, 1), (2, 2), (8, 8), (64, 8)]:
+    for quota, expected in [(0.5, 1), (1.5, 2), (2, 2), (8, 8), (64, 8)]:
         monkeypatch.setattr(transcribe, "_model", None)
         monkeypatch.setattr(follow, "cpu_count", lambda: quota)
         assert transcribe.get_model() is fake
