@@ -431,13 +431,19 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
     px = max(12, round(tpl["base_size"] * f * size_scale))
     if tx.get("font_size") is not None:
         px = max(6, round(float(tx["font_size"]) * min(W, H) * size_scale))
+    # An explicit font replaces the template's canvas-scaled size. Its
+    # spacing and edges must follow that replacement too: on a portrait
+    # canvas, using H/720 here gave a small serif line a second, displaced
+    # silhouette and letter spacing sized for a much larger headline.
+    # Keep the established template rendering when its size is implicit.
+    type_scale = px / tpl["base_size"] if tx.get("font_size") is not None else f
     # Letter-spacing is suppressed outright for shaping-sensitive scripts —
     # see SHAPING_SENSITIVE_RANGES. Resolved from the item's OWN text before
     # any wrapping so both decks and every line agree on one answer.
     shaped = needs_shaping(tx.get("text") or "")
-    sp = 0.0 if shaped else round(tpl["spacing"] * f, 1)
+    sp = 0.0 if shaped else round(tpl["spacing"] * type_scale, 1)
     if tx.get("tracking") is not None and not shaped:
-        sp = float(tx["tracking"]) * f
+        sp = float(tx["tracking"]) * type_scale
     upper = tx.get("uppercase")
     upper = tpl["uppercase"] if upper is None else bool(upper)
     accent = _inline_hl(tx.get("accent_color") or DEFAULT_HIGHLIGHT)
@@ -488,7 +494,7 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
         if tx.get("font_size") is not None:
             floor2 = max(floor2, DECK2_MIN_RATIO * px)
         px2 = min(max(px2, round(floor2)), max(px2, px))
-        sp2 = 0.0 if shaped else round(d2["spacing"] * f, 1)
+        sp2 = 0.0 if shaped else round(d2["spacing"] * type_scale, 1)
 
     edge_x, edge_y = round(0.04 * W), round(0.03 * H)
     # Wrap budget from the REAL usable width at the item's own anchor —
@@ -596,8 +602,9 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
     head += rf"\1c{text_c}\3c&H101010&"
     outline = tx.get("outline_width")
     shadow = tx.get("shadow")
-    head += rf"\bord{round((tpl['outline'] if outline is None else outline) * f, 1)}"
-    head += rf"\shad{round((tpl['shadow'] if shadow is None else shadow) * f, 1)}"
+    edge_scale = px / tpl["base_size"] if tx.get("font_size") is not None else f
+    head += rf"\bord{round((tpl['outline'] if outline is None else outline) * edge_scale, 1)}"
+    head += rf"\shad{round((tpl['shadow'] if shadow is None else shadow) * edge_scale, 1)}"
     if italic:
         head += r"\i1"
     if box:
