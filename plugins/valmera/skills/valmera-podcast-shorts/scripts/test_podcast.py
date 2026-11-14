@@ -104,6 +104,7 @@ def _film(folder, title, style, music=True):
 def _fake_run(tmp_path, monkeypatch, fail=()):
     work_root, out = str(tmp_path / "work"), str(tmp_path / "out")
     monkeypatch.setattr(podcast, "WORK_ROOT", work_root)
+    monkeypatch.setenv("VALMERA_DELIVERY_ROOTS", out)          # `out` is this test's Podcast Shorts: a delivery folder
     info = dict(id="abcdefghijk", title="The Episode", channel="Show", upload_date="20240329", duration=3600, webpage_url="https://youtu.be/abcdefghijk")
 
     def fetch(run):
@@ -358,3 +359,24 @@ def test_a_test_run_and_a_delivery_never_continue_each_other(tmp_path, monkeypat
     d, resumed = podcast.find_run("https://youtu.be/abcdefghijk")
     assert d != t and not resumed
     assert podcast.find_run("https://youtu.be/abcdefghijk", test=True) == (t, True)
+
+
+def test_an_out_outside_the_delivery_folders_is_a_test_never_recorded(tmp_path, monkeypatch, capsys):
+    """Only Podcast Shorts (or another delivery folder, however its path is spelled) is a delivery: any other --out is a
+    test, which may reuse a delivered source and is never recorded."""
+    work_root, out = _fake_run(tmp_path, monkeypatch)
+    import delivered as DL
+    DL.append(DL.make_row("wf1", "/delivered/The Episode", ["yt:abcdefghijk"], dict(title="The Episode")))
+    lane = str(tmp_path / "lanes" / "wf1")
+    monkeypatch.setattr(sys, "argv", ["podcast.py", "https://youtu.be/abcdefghijk", "--out", lane])
+    assert podcast.main() == 0
+    rep = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert rep["delivered"].startswith(lane + os.sep) and len(DL.rows()) == 1
+    # another spelling of the delivery folder is the delivery folder: refused there, and a test never writes into it
+    monkeypatch.setattr(sys, "argv", ["podcast.py", "https://youtu.be/abcdefghijk", "--out", out.upper()])
+    assert podcast.main() == 4
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["refused"]
+    monkeypatch.setattr(sys, "argv", ["podcast.py", "https://youtu.be/abcdefghijk", "--test-out", os.path.join(out.upper(), "t")])
+    with pytest.raises(SystemExit):
+        podcast.main()
+    assert not os.path.exists(out) and len(DL.rows()) == 1

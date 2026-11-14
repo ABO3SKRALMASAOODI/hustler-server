@@ -70,7 +70,9 @@ def find_ideas(card, avoid=(), line=None, n=6, effort="high", delivered=""):
                "\"must_show\": what a picture must visibly show to count}], \"sources\": [URLs you read], \"strength\": 1-10}."))
     system += f"\n\n# The bar\n{references()}\n\n"
     content = ((f"# The style\n{json.dumps(card, ensure_ascii=False)}\n\n"
-               f"# Already made (never repeat a subject)\n{json.dumps(list(avoid), ensure_ascii=False)}\n\n") + (delivered or "") +
+               f"# Already made\n{json.dumps(list(avoid), ensure_ascii=False)}\nThe owner's rule: never the exact same idea told the same "
+               "way as one of these (the same story through the same beats, even under a new title or a new look). A new angle "
+               "or a new version of the same subject is welcome.\n\n") + (delivered or "") +
                (f"# A line from the owner\n{line}\n\n" if line else ""))
     text, use = writer.ask_web(system, content, effort=effort, max_tokens=40000, searches=16, fetches=8, what="find ideas")
     got = writer.json_block(text)

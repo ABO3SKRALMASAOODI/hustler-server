@@ -5,7 +5,7 @@ description: Make a finished narrated vertical story film about a founder, a com
 
 # Valmera story films (workflow 3)
 
-Never the same idea told the same way twice (owner, 14 Nov 2026): the ideas stage sees this workflow's delivered ideas from `.valmera/workflow/delivered.jsonl` and a gpt-6-sol judgement takes out any exact repeat before scripting; a new angle, version or treatment is welcome. A test run uses `story.py --test-out <dir>`, which never delivers or records.
+Never the same idea told the same way twice (owner, 14 Nov 2026): the ideas stage sees this workflow's delivered ideas from `.valmera/workflow/delivered.jsonl` and a gpt-6-sol judgement takes out any exact repeat before scripting; a new angle, version, structure or story is welcome, but the same narration or beats with only a new visual look is a repeat. Only a folder inside the owner's delivery folders (Podcast Shorts, Story Films, Marketing Films, Long Films) is recorded; any other `--out` is a test. A test run uses `story.py --test-out <dir>`, which never delivers or records. A remake of a delivered film (`run.py --args '{"remake": ...}'`) is test-only: an `--out` outside the delivery folders, or it goes through the repeat judgement like any idea.
 
 ## Start it: one command, nothing or a few words
 

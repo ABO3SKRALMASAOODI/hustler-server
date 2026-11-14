@@ -5,7 +5,7 @@ description: Make a finished vertical marketing film that sells Valmera to video
 
 # Valmera marketing films (workflow 2)
 
-Never the same idea told the same way twice (owner, 14 Nov 2026): the ideas stage sees this workflow's delivered ideas from `.valmera/workflow/delivered.jsonl` and a gpt-6-sol judgement takes out any exact repeat before scripting; a new angle, version or treatment is welcome. A test run uses `market.py --test-out <dir>`, which never delivers or records.
+Never the same idea told the same way twice (owner, 14 Nov 2026): the ideas stage sees this workflow's delivered ideas from `.valmera/workflow/delivered.jsonl` and a gpt-6-sol judgement takes out any exact repeat before scripting; a new angle, version, structure or story is welcome, but the same narration or beats with only a new visual look is a repeat. Only a folder inside the owner's delivery folders (Podcast Shorts, Story Films, Marketing Films, Long Films) is recorded; any other `--out` is a test. A test run uses `market.py --test-out <dir>`, which never delivers or records.
 
 ## Start it: one command, nothing or a few words
 

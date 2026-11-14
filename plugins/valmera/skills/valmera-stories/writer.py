@@ -299,7 +299,9 @@ def find_ideas(form, cards, avoid=(), line=None, n=6, effort="high", delivered="
                "starting File:, \"licence\": its licence, \"why\": why this one picture holds the whole story} else null, \"sources\": "
                "[URLs you read], \"strength\": 1-10}."))
     content = ((f"# Styles this film can take\n{menu(cards)}\n\n"
-               f"# Already made (never repeat a subject)\n{json.dumps(list(avoid), ensure_ascii=False)}\n\n") + (delivered or "") +
+               f"# Already made\n{json.dumps(list(avoid), ensure_ascii=False)}\nThe owner's rule: never the exact same idea told the same "
+               "way as one of these (the same story through the same beats, even under a new title or a new look). A new angle "
+               "or a new version of the same subject is welcome.\n\n") + (delivered or "") +
                (f"# What the owner asked for\n{line}\nEvery idea must be about this. When it names a person, a company or a "
                   "topic, find the strongest true stories inside it (a single moment, decision or turn, not a biography).\n\n" if line else
                   "# No subject given\nChoose the subjects yourself: founders, companies, inventions and moments in business or "

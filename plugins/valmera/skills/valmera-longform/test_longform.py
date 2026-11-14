@@ -91,3 +91,21 @@ def test_script_check_finds_digits_and_unbacked_figures():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+def test_the_ideas_prompt_carries_the_owners_rule_not_a_subject_ban(monkeypatch):
+    """Owner, 14 Nov 2026: never the exact same idea told the same way; a new angle or version of a subject is welcome."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("longform_story_under_test", os.path.join(HERE, "story.py"))
+    story = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(story)
+    seen = {}
+
+    def ask_web(system, content, **kw):
+        seen["content"] = content
+        return '{"ideas": []}', {}
+    monkeypatch.setattr(story.writer, "ask_web", ask_web)
+    monkeypatch.setattr(story, "references", lambda: "")
+    story.find_ideas(dict(id="the-ledger"), avoid=["Saving Skylab"], delivered="")
+    assert "never repeat a subject" not in seen["content"] and "Saving Skylab" in seen["content"]
+    assert "never the exact same idea told the same way" in seen["content"] and "new version of the same subject is welcome" in seen["content"]

@@ -206,16 +206,20 @@ def deliver(ctx, state, out_root, results):
     if os.path.exists(final_dir):
         rec = jload(os.path.join(final_dir, "film.json"), {}) or {}
         if rec.get("run_id") == ctx.run_id:      # killed after the rename: it was delivered
-            if ledger_mode(ctx) == "shell":       # and recorded (a row of this run is never added twice)
+            if ledger_mode(ctx) == "shell" and DL.records(final_dir):     # and recorded (a row of this run is never added twice)
                 DL.append(delivered_row(ctx, script, results, final_dir), refuse=False)
             return dict(folder=final_dir, bytes=du(final_dir), already=True)
         raise RuntimeError(f"{final_dir} exists: a folder is delivered once, never added to")
     # the shared delivered ledger (delivered.py): a source delivered before is refused before anything is copied
+    # Only a folder inside the owner's delivery folders is a delivery; anywhere else the run is a test, never recorded.
     mode = ledger_mode(ctx)
     if mode == "off" and DL.in_delivery_root(out_root):
         raise RuntimeError(f"{out_root} is a delivery folder: a run outside the delivered ledger (a test, an inner short) never writes there")
-    row = delivered_row(ctx, script, results, final_dir) if mode != "off" else None
+    row = delivered_row(ctx, script, results, final_dir) if mode == "shell" and DL.records(final_dir) else None
     if row:
+        if row.get("remake_of") and not row.get("judged"):
+            raise DL.NotJudged(f"run {ctx.run_id} re-makes delivered run {row['remake_of']} without the repeat judgement: a "
+                               "remake is a test (an --out outside the delivery folders) or goes through the judgement like any idea")
         hit, sid = DL.find(row["source_ids"], ctx.workflow)
         if hit:
             raise DL.AlreadyDelivered(f"{sid} was delivered on {hit.get('delivered_at')} to {hit.get('folder')}: the exact same source is never delivered twice", hit, sid)
@@ -237,15 +241,16 @@ def deliver(ctx, state, out_root, results):
                window=script.get("window"), script=dict((k, v) for k, v in script.items() if k not in ("style", "idea")),
                engine=results["render"].get("engine"), checks=chk["checks"], stage_seconds=state.get("seconds"),
                spend=spend, spend_usd=round(sum(float(s.get("usd") or 0) for s in spend), 4),
-               rules=dict(published=False, music_picked=scored, end_card=chk["checks"].get("endcard_ok"), watermark=chk["checks"].get("mark_ok")))
+               rules=dict(published=False, music_picked=scored, end_card=chk["checks"].get("endcard_ok"), watermark=chk["checks"].get("mark_ok")),
+               no_repeat=(results.get("ideas") or {}).get("no_repeat"))
     if scored:
         rec["music"] = dict(chk.get("music") or {}, film="film.mp4", clean_export="film_clean.mp4")
     if chk.get("song"):
         rec["song"] = dict(chk["song"], film="film_song.mp4", clean_export="film.mp4")
     jsave(os.path.join(part, "film.json"), rec)
-    if mode == "shell":                          # the rename and the ledger row together, under the ledger's lock
+    if row:                                      # the rename and the ledger row together, under the ledger's lock
         DL.deliver_once(row, commit=lambda: os.rename(part, final_dir))
-    else:                                        # "driver": the skill's driver records it where the folder finally lands
+    else:                                        # "driver": the skill's driver records it where the folder lands; else a test
         os.rename(part, final_dir)
     ledger_add(ctx.state_root, ctx.workflow, dict(run_id=ctx.run_id, style=script["style"]["id"], idea=script.get("title"),
                                                   source=ctx.source, window=script.get("window"), delivered=final_dir, at=now()))
@@ -253,9 +258,16 @@ def deliver(ctx, state, out_root, results):
 
 
 def ledger_mode(ctx):
-    """Who records this delivery in the shared delivered ledger: "shell" (here), "driver" (story.py and market.py, once
-    the folder reaches its final root) or "off" (a podcast's inner short: podcast.py records the podcast's one folder)."""
+    """Who records this delivery in the shared delivered ledger: "shell" (here, and only when --out is one of the owner's
+    delivery folders: anywhere else the run is a test), "driver" (story.py and market.py, once the folder reaches its
+    final root) or "off" (a podcast's inner short: podcast.py records the podcast's one folder)."""
     return (ctx.args or {}).get("delivered_ledger") or ("off" if "moment" in (ctx.args or {}) else "shell")
+
+
+def may_deliver(ctx, out_root):
+    """Whether this run can end as a recorded delivery: a driver's run, or the shell's own into a delivery folder."""
+    mode = ledger_mode(ctx)
+    return mode == "driver" or (mode == "shell" and DL.in_delivery_root(out_root or ""))
 
 
 def delivered_row(ctx, script, results, folder):
@@ -274,7 +286,10 @@ def delivered_row(ctx, script, results, folder):
         idea["title"] = script["idea"]
     idea["title"] = idea.get("title") or script.get("title")
     idea["style"] = (script.get("style") or {}).get("id") or idea.get("style")
-    return DL.make_row(ctx.workflow, folder, ids, idea, run_id=ctx.run_id, film_title=script.get("title"))
+    ideas = results.get("ideas") or {}
+    remake = script.get("remake_of") or (ideas.get("source") or {}).get("remake_of") or ((ctx.args or {}).get("remake") and "remake")
+    return DL.make_row(ctx.workflow, folder, ids, idea, run_id=ctx.run_id, film_title=script.get("title"),
+                       remake_of=remake or None, judged=True if isinstance(ideas.get("no_repeat"), dict) else None)
 
 
 def run(a):
@@ -316,8 +331,9 @@ def run(a):
             ctx.log(f"stage {stage}")
             if stage == "ideas":
                 r = wf.ideas(ctx)
-                if ctx.workflow in DL.IDEA_WORKFLOWS and not ctx.args.get("remake"):
-                    # an exact repeat of a delivered idea is taken out by a model's judgement; the next idea leads
+                if ctx.workflow in DL.IDEA_WORKFLOWS and (not ctx.args.get("remake") or may_deliver(ctx, state.get("out_root"))):
+                    # an exact repeat of a delivered idea is taken out by a model's judgement; the next idea leads. A remake
+                    # of a delivered film skips it only as a test: one that can reach a delivery folder is judged like any idea
                     r = DL.guard_ideas(ctx.workflow, r, log=ctx.log)
             elif stage == "script":
                 r = wf.script(ctx, results["ideas"])

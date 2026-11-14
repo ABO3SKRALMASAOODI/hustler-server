@@ -711,12 +711,14 @@ def main():
     ap.add_argument("--lanes", type=int, default=LANES, help=argparse.SUPPRESS)
     ap.add_argument("--keep-work", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
-    test = bool(a.test_out)
-    if test and a.out:
+    if a.test_out and a.out:
         ap.error("--test-out cannot be combined with --out: a test run never delivers")
-    if test and DL.in_delivery_root(a.test_out):
+    if a.test_out and DL.in_delivery_root(a.test_out):
         ap.error(f"--test-out {a.test_out} is inside a delivery folder; a test run never writes there")
-    out_root = os.path.abspath(a.test_out if test else (a.out or OUT_ROOT))
+    out_root = os.path.abspath(a.test_out or a.out or OUT_ROOT)
+    # only a folder inside the owner's delivery folders is a delivery (however its path is spelled); any other --out
+    # is a test like --test-out: it may reuse a source and is never recorded
+    test = bool(a.test_out) or not DL.records(out_root)
     if not test:                                         # before anything is fetched: the link's own id against the ledger
         hit, sid = DL.find(link_ids(a.link), "wf1")
         if hit:

@@ -4,6 +4,10 @@
     $PY seed_delivered.py            seeds when the ledger holds no seeded row yet; prints the counts and the folders
                                      whose source could not be determined
     $PY seed_delivered.py --dry      prints what it would seed
+    $PY seed_delivered.py --enrich [--dry]
+                                     gives every film row that holds only a title and style (its folder moved) the idea,
+                                     angle and beats of a copy of the same film: a film.json of the same run, or of a
+                                     remake of it (script.remake_of), found under ENRICH_ROOTS; rewritten under the lock
 
 Sources, by identity only (a labelled field, never a reading of meaning):
   podcast folders   manifest.json `source` / `source_url`, publishing-manifest.json `source_url`, shorts.json
@@ -148,8 +152,87 @@ def shell_ledger_rows(have_run_ids):
     return rows
 
 
+ENRICH_ROOTS = [f"{V}/.valmera/week-1112/codex-tests", f"{V}/.valmera/week-1112/lanes", f"{V}/.valmera/workflow",
+                f"{V}/.valmera/workflow/stories/outbox", f"{V}/.valmera/workflow/marketing/outbox",
+                f"{V}/.valmera/workflow/longform/outbox"] + [r for rs in FILM_ROOTS.values() for r in rs]
+SKIP_DIRS = {"music_cache", "node_modules", ".git", "supply", "footage", "frames", "cache", "__pycache__"}
+
+
+def thin(r):
+    """A film row that knows only its title and style: no angle and no beats."""
+    i = r.get("idea") or {}
+    return r.get("wf") in DL.IDEA_WORKFLOWS and not i.get("angle") and not i.get("beats")
+
+
+def film_copies(roots, max_depth=6):
+    """{run_id: film.json path} of every film.json under the roots, by its own run_id and by the run it re-makes."""
+    own, remakes = {}, {}
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        base = root.rstrip(os.sep).count(os.sep)
+        for d, dirs, files in os.walk(root):
+            if d.count(os.sep) - base >= max_depth:
+                dirs[:] = []
+            dirs[:] = [x for x in dirs if x not in SKIP_DIRS and not x.startswith(".")]
+            if "film.json" not in files:
+                continue
+            p = os.path.join(d, "film.json")
+            rec = jload(p)
+            if not isinstance(rec, dict):
+                continue
+            if rec.get("run_id"):
+                own.setdefault(rec["run_id"], p)
+            rm = (rec.get("script") or {}).get("remake_of")
+            if rm:
+                remakes.setdefault(rm, p)
+    return own, remakes
+
+
+def enrich_row(r, copy):
+    """The row with the idea of its copy (title kept when the copy has none); identity fields stay as they were."""
+    got = DL.row_from_film(os.path.dirname(copy), r.get("wf"), folder=r.get("folder"))
+    idea = dict(r.get("idea") or {})
+    for k, v in (got.get("idea") or {}).items():
+        if v and not idea.get(k):
+            idea[k] = v
+    out = dict(r, idea=idea)
+    out["seed"] = dict(r.get("seed") or {}, enriched_from=copy, enriched_at=DL.now())
+    return out
+
+
+def enrich(dry=False, roots=None, p=None):
+    """Enrich the thin film rows in place (under the ledger's lock); returns (enriched, still thin)."""
+    own, remakes = film_copies(roots or ENRICH_ROOTS)
+    done, left = [], []
+
+    def fn(rows):
+        out = []
+        for r in rows:
+            if thin(r) and r.get("run_id"):
+                copy = own.get(r["run_id"]) or remakes.get(r["run_id"])
+                if copy:
+                    r = enrich_row(r, copy)
+                    done.append(dict(run_id=r["run_id"], title=r["idea"].get("title"), from_=copy))
+                else:
+                    left.append(dict(run_id=r.get("run_id"), title=(r.get("idea") or {}).get("title")))
+            elif thin(r):
+                left.append(dict(run_id=None, title=(r.get("idea") or {}).get("title")))
+            out.append(r)
+        return out
+    if dry:
+        fn(DL.rows(None, p))
+    else:
+        DL.rewrite(fn, p)
+    return done, left
+
+
 def main():
     dry = "--dry" in sys.argv
+    if "--enrich" in sys.argv:
+        done, left = enrich(dry)
+        print(json.dumps(dict(path=DL.path(), dry=dry, enriched=done, still_title_only=left), ensure_ascii=False, indent=1))
+        return 0
     if any(r.get("seeded") for r in DL.rows()) and not dry:
         print(json.dumps(dict(skipped="the ledger is already seeded", path=DL.path())))
         return 0

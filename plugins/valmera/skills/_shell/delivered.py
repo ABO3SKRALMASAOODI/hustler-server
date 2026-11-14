@@ -1,12 +1,16 @@
 """The delivered ledger: one file for all four workflows, so the exact same thing is never delivered twice.
 
-The owner, 14 Nov 2026: "the same exact thing in the same exact way must not be replayed". A new version of an idea,
-another angle or another treatment is welcome; the same podcast, or the same idea told the same way, is not.
+The owner, 14 Nov 2026: "the same exact thing in the same exact way must not be replayed". A new version of an idea or
+another angle, structure or story is welcome; the same podcast, or the same idea told the same way, is not. The same
+narration or beats with only a new visual look is the same idea told the same way (a reskin, not a new way).
 
     /Users/masaoodi/Documents/Valmera/.valmera/workflow/delivered.jsonl     (VALMERA_DELIVERED_LEDGER overrides it)
 
-One JSON object per line, appended under a file lock, never rewritten:
+One JSON object per line, appended under a file lock (rewritten only by rewrite(), under the same lock):
     {wf, delivered_at, folder, source_ids, idea: {title, subject, angle, style, beats, sources}, seeded, run_id?}
+
+Only a delivery into one of the owner's delivery folders (Podcast Shorts, Story Films, Marketing Films, Long Films; the
+same folder however its path is spelled) is recorded. A run that writes anywhere else is a test and is never recorded.
 
 Two kinds of check, and only two:
   identity   a source id (yt:<YouTube id>, sha256:<hex of the source file>, url:<canonical URL>) compared exactly.
@@ -20,13 +24,16 @@ import fcntl
 import hashlib
 import json
 import os
+import tempfile
+import unicodedata
 import urllib.parse
 
 DEFAULT = "/Users/masaoodi/Documents/Valmera/.valmera/workflow/delivered.jsonl"
 JUDGE_MODEL = "gpt-6-sol"
 IDEA_WORKFLOWS = ("wf2", "wf3", "wf4")          # workflows that find their own ideas; wf1 is guarded by its source
 RULE = ("No exact repeats: the shared delivered ledger (.valmera/workflow/delivered.jsonl) refuses a source already delivered "
-        "and a model refuses an idea told the same way as a delivered one; a new version, angle or treatment is welcome.")
+        "and a model refuses an idea told the same way as a delivered one (the same narration or beats with only a new look "
+        "is a repeat); a new version, angle, structure or story is welcome.")
 
 
 V = "/Users/masaoodi/Documents/Valmera"
@@ -36,13 +43,46 @@ DELIVERY_ROOTS = (f"{V}/Podcast Shorts", f"{V}/Story Films", f"{V}/Marketing Fil
 
 def delivery_roots():
     extra = [x for x in os.environ.get("VALMERA_DELIVERY_ROOTS", "").split(os.pathsep) if x]
-    return [os.path.realpath(r) for r in list(DELIVERY_ROOTS) + extra]
+    return [os.path.realpath(os.path.abspath(r)) for r in list(DELIVERY_ROOTS) + extra]
+
+
+def _fold(p):
+    """A path as the Mac's file system compares names: APFS is case-insensitive and normalisation-insensitive."""
+    return unicodedata.normalize("NFD", p).casefold()
+
+
+def _ancestors(p):
+    """The path itself and every folder above it, nearest first."""
+    out = [p]
+    while True:
+        up = os.path.dirname(out[-1])
+        if up == out[-1]:
+            return out
+        out.append(up)
 
 
 def in_delivery_root(p):
-    """True when the folder is one of the owner's delivery folders or inside one."""
+    """True when the folder is one of the owner's delivery folders or inside one, however its path is spelled.
+    Every existing folder on the path is compared with each existing root by identity (os.path.samefile: the same
+    folder under another case, a symlink or a hard link); a path that does not exist yet is compared case-folded."""
     rp = os.path.realpath(os.path.abspath(p))
-    return any(rp == r or rp.startswith(r + os.sep) for r in delivery_roots())
+    roots = delivery_roots()
+    folded = _fold(rp)
+    for r in roots:
+        fr = _fold(r)
+        if folded == fr or folded.startswith(fr.rstrip(os.sep) + os.sep):
+            return True
+    live = [r for r in roots if os.path.isdir(r)]
+    for a in _ancestors(rp):
+        if not os.path.exists(a):
+            continue
+        for r in live:
+            try:
+                if os.path.samefile(a, r):
+                    return True
+            except OSError:
+                continue
+    return False
 
 
 class AlreadyDelivered(RuntimeError):
@@ -190,9 +230,32 @@ def make_row(wf, folder, source_ids=(), idea=None, seeded=False, **extra):
     return row
 
 
+def records(folder):
+    """Whether a folder written here is a delivery the ledger records: only inside one of the owner's delivery folders.
+    Everything else (codex-tests, lanes, a workflow's test root, a scratch folder) is a test and is never recorded."""
+    return bool(folder) and in_delivery_root(folder)
+
+
+class NotJudged(AlreadyDelivered):
+    """A remake of a delivered film reached a delivery folder without the repeat judgement."""
+
+
 def deliver_once(row, commit=None, p=None, refuse=True):
-    """Under the lock: refuse when one of the row's exact source ids is already delivered by its workflow, else run
-    `commit` (the rename that delivers the folder) and append the row. Two deliveries of one source cannot both pass."""
+    """The delivery of one folder. Into a delivery folder, under the lock: refuse when one of the row's exact source ids
+    is already delivered by its workflow (or when the row is a remake that skipped the repeat judgement), else run
+    `commit` (the rename that delivers the folder) and append the row. Two deliveries of one source cannot both pass.
+    Anywhere else the run is a test: `commit` runs and nothing is recorded (row["recorded"] is False)."""
+    if not records(row.get("folder")):
+        if commit:
+            commit()
+        return dict(row, recorded=False)
+    if row.get("remake_of") and not row.get("judged"):
+        raise NotJudged(f"{row.get('folder')} re-makes delivered run {row['remake_of']} without the repeat judgement: a remake "
+                        "goes to --test-out, or through the ideas stage's judgement like any idea", {}, None)
+    return _record(row, commit, p, refuse)
+
+
+def _record(row, commit=None, p=None, refuse=True):
     p = p or path()
     with _locked(p):
         if refuse:
@@ -231,11 +294,49 @@ def row_from_film(film_dir, wf=None, folder=None, seeded=False):
         if isinstance(v, str) and canonical_url(v):
             ids.append(canonical_url(v))
     return make_row(wf or rec.get("workflow"), folder or film_dir, ids, idea, seeded=seeded, run_id=rec.get("run_id"),
-                    film_title=sc.get("title"), delivered_at=rec.get("delivered") if seeded else None)
+                    film_title=sc.get("title"), delivered_at=rec.get("delivered") if seeded else None,
+                    remake_of=sc.get("remake_of") or (src.get("remake_of") if isinstance(src, dict) else None),
+                    judged=True if isinstance(rec.get("no_repeat"), dict) else None)
 
 
 def append(row, p=None, refuse=True):
-    return deliver_once(row, None, p, refuse)
+    """Record a row as it is, wherever its folder is (the seed of past deliveries; tests)."""
+    return _record(row, None, p, refuse)
+
+
+def rewrite(fn, p=None, backup=None):
+    """Rewrite the ledger under its lock: `fn(rows)` returns the rows to keep (edited or not). A line that does not
+    parse is kept as it was. The new file replaces the old in one step; `backup` gets a copy of the old one first."""
+    p = p or path()
+    with _locked(p):
+        raw = open(p).read().splitlines() if os.path.exists(p) else []
+        parsed, bad = [], []
+        for line in raw:
+            if not line.strip():
+                continue
+            try:
+                r = json.loads(line)
+            except ValueError:
+                bad.append(line)
+                continue
+            (parsed if isinstance(r, dict) else bad).append(r if isinstance(r, dict) else line)
+        if backup:
+            if os.path.exists(backup):
+                raise RuntimeError(f"{backup} exists: a backup is never overwritten")
+            with open(backup, "w") as f:
+                f.write("\n".join(raw) + ("\n" if raw else ""))
+        kept = fn([dict(r) for r in parsed])
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p) or ".", prefix=".delivered.", suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            for line in bad:
+                f.write(line + "\n")
+            for r in kept:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, p)
+    return kept
 
 
 # ----------------------------------------------------------------- ideas (a model's judgement)
@@ -254,10 +355,16 @@ def idea_of(d):
                 beats=[str(b)[:200] for b in beats if b][:12], sources=list(d.get("sources") or [])[:8])
 
 
+TITLE_ONLY = "title and style only: judge on the subject and the story its title names"
+
+
 def _brief(r):
     i = r.get("idea") or {}
-    return {k: v for k, v in dict(title=i.get("title"), subject=i.get("subject"), angle=i.get("angle"), style=i.get("style"),
-                                  beats=(i.get("beats") or [])[:8]).items() if v}
+    b = {k: v for k, v in dict(title=i.get("title"), subject=i.get("subject"), angle=i.get("angle"), style=i.get("style"),
+                               beats=(i.get("beats") or [])[:8]).items() if v}
+    if not b.get("angle") and not b.get("beats"):
+        b["detail"] = TITLE_ONLY            # what was told is unknown: the judgement may never read that as "allowed"
+    return b
 
 
 def delivered_ideas(wf, p=None, n=80):
@@ -271,16 +378,24 @@ def prompt_block(wf, p=None):
     if not got:
         return ""
     return ("# Already delivered by this workflow (title, angle, beats)\n" + json.dumps(got, ensure_ascii=False) + "\n"
-            "Do not choose an exact repeat of any of these: the same idea told the same way. A different angle on the same "
-            "subject, a new version or a different treatment is not a repeat and is welcome.\n\n")
+            "Never choose the exact same idea told the same way as any of these. The same story told through the same beats "
+            "or the same narration is a repeat even under a new title or a new visual look. A new angle, structure or story "
+            "about the same subject, or a new version of it, is not a repeat and is welcome.\n\n")
 
 
 JUDGE_SYSTEM = (
     "You guard a video workflow against delivering the exact same film twice. You are given the ideas this workflow "
     "already delivered and the candidate ideas of a new run. For each candidate, decide one thing: is it the exact same "
-    "idea told the same way as one delivered idea? Same subject and same angle and the same beats in the same order is the "
-    "same. A different angle, a new version, a different treatment, another moment of the same story, or the same subject "
-    "told through different beats is NOT a repeat. When unsure, it is not a repeat.\n"
+    "idea told the same way as one delivered idea?\n"
+    "- The same subject told as the same story (the same event, turn and payoff) through the same angle or the same beats "
+    "is the same, however it is re-titled or re-worded.\n"
+    "- The same narration or script (the same beats and words) with only a new visual look (another style, grade, "
+    "footage, pace, music or captions) is the same: a reskin is not a new way of telling it.\n"
+    "- A different angle, a different structure, or a different story about the same subject (another moment, another "
+    "turn, another person's side) is NOT a repeat and is welcome.\n"
+    "- Some delivered ideas carry only a title and a style (\"detail\" says so). Judge them on what the title names: a "
+    "candidate about the same subject that tells the same story the title names is a repeat. Missing detail never "
+    "counts in the candidate's favour; it is not a repeat only when its angle or story is plainly different.\n"
     "Return JSON only: {\"verdicts\": [{\"id\": the candidate's id, \"same\": true|false, \"of\": the delivered title it "
     "repeats or null, \"why\": one short sentence}]}.")
 
