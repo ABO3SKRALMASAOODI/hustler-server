@@ -56,10 +56,14 @@ REFS = f"{V}/reference-library/2026-11-05/02-editing-tutorials-and-app-marketing
 ATLAS = f"{VV}/week-1106/atlas/numbers.json"
 CHECK_MODEL = "gpt-6-sol"           # the picture checks: every picture against its words, the export against the sentence
 FORM = dict(words=(70, 130), segments=(7, 14), seconds=(30, 55))
-# the recording's stack: this week's main, edits on OpenAI (Anthropic spend $0), a paid plan so no wall stands in the way
-STACK = {"be": "main", "fe": "main", "model": "gpt-5.5", "plan_models": {}, "planner_model": "off", "env": {"OPENAI_EDITS": "1"},
-         "openai_key": True, "trial_per_account_usd": 3.0, "spend_cap_usd": 3, "transcriber": "deepgram", "stock": True,
-         "slots": {"agent": 2, "index": 1, "media": 2}}
+# the recording's stack: this week's main on a synthetic Pro account. Anthropic spend is $0 for this lane, so the Studio
+# runs on Pro's own OpenAI lane (gpt-6.1-sol, llm.py) with the Claude switch for new subscribers off (studio_for_all_plans),
+# as production runs it for every subscriber the switch does not cover; OPENAI_EDITS lets that lane edit on a stack.
+PLAN = "pro_2026"
+STACK = {"be": "main", "fe": "main", "plan_models": {}, "planner_model": "off", "env": {"OPENAI_EDITS": "1"},
+         "kv": {"studio_for_all_plans": {"on": False}}, "openai_key": True, "trial_per_account_usd": 3.0, "spend_cap_usd": 3,
+         "transcriber": "deepgram", "stock": True, "slots": {"agent": 2, "index": 1, "media": 2}}
+STACK_V = 2           # a recording made on other stack settings is never reused
 
 
 def jload(p, default=None):
@@ -206,7 +210,8 @@ def ideas(ctx):
               "with a real before and after. The after is never mocked up: the clip you pick is uploaded to the real product and the "
               "sentence you write is typed into it, so write sentences the product can visibly deliver on a talking clip (a vertical "
               "reframe, a tighter cut that opens on the strongest line, captions in a stated style, pictures over what is said, a "
-              "colour treatment, a title) and say exactly what must be visible for the film to be honest.")
+              "colour treatment, a title) and say exactly what must be visible for the film to be honest. Prefer a change an editor sees "
+              "in one frame (the reframe, the captions, the pictures, the look) over one that rests on the exact syllable a cut starts on.")
     content = (f"# What editors answered to (the reference films, most comments first)\n{json.dumps(references()[:25], ensure_ascii=False)}\n\n"
                f"# The references' pace (medians)\n{json.dumps(pace)}\n\n"
                f"# Styles this film can take\n" + "\n".join(f"- {s['id']}: {s['look']} Hook: {s['hook']}" for s in able) + "\n\n"
@@ -255,13 +260,13 @@ def record(ctx, idea, k, ask_text):
     """One session on a local stack of the product: upload the clip, type the sentence before the first result, export.
     The record (upload, export, EDLs, journey, sha256s) is kept in this run's folder and deleted with it."""
     studio_root = os.path.join(ctx.tmp, "studio")
-    sid = f"m{ctx.run_id[-6:]}-{k}"
+    sid = f"m{ctx.run_id[-6:]}-{k}-s{STACK_V}"
     rec_p = os.path.join(studio_root, "records", sid, "record.json")
     if os.path.exists(rec_p):
         return json.load(open(rec_p))
     words = json3_words(next(s["captions"] for s in sources() if s["file"] == idea["file"]))
     t0, t1 = snap_window([w for w in words if idea["t0"] - 20 <= w[0] <= idea["t1"] + 20], float(idea["t0"]), float(idea["t1"]))
-    spec = dict(settings=STACK, sessions=[dict(sid=sid, source=idea["file"], t0=t0, t1=t1, plan="plus_2026",
+    spec = dict(settings=STACK, sessions=[dict(sid=sid, source=idea["file"], t0=t0, t1=t1, plan=PLAN,
                                                 asks=[dict(text=ask_text, phase="before_first_result")], note=idea.get("title"))])
     sp = os.path.join(ctx.run_dir, f"studio_spec_{k}.json")
     jsave(sp, spec)
@@ -303,7 +308,7 @@ def img(b64):
     return dict(type="image", source=dict(type="base64", media_type="image/jpeg", data=b64))
 
 
-CHECK_V = 2           # the export check reads the spoken words too (EDL keep ranges on the source's captions)
+CHECK_V = 3           # the export check reads the spoken words too (EDL keep ranges on the source's captions); the end card is the brand's
 
 
 def spoken(rec, ex):
@@ -336,10 +341,12 @@ def export_check(ctx, rec, ask_text, must_see):
     """The export against the sentence, element by element, on its own frames (one a second) and the upload's."""
     ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1] if rec.get("exports") else None)
     if not ex:
-        return dict(ok=False, why="no export")
+        return dict(ok=False, v=CHECK_V, why="no export")
+    if rec.get("failures") or rec.get("state") != "done":
+        return dict(ok=False, v=CHECK_V, why="the session failed: " + "; ".join(str(f.get("kind")) for f in rec.get("failures") or []), export=ex)
     up = rec["upload"]
     if ex["w"] >= ex["h"]:
-        return dict(ok=False, why=f"the export is {ex['w']}x{ex['h']}, not vertical", export=ex)
+        return dict(ok=False, v=CHECK_V, why=f"the export is {ex['w']}x{ex['h']}, not vertical", export=ex)
     n = min(int(ex["dur"]), 40)
     et = [round(0.5 + i * (ex["dur"] - 1) / max(n - 1, 1), 2) for i in range(n)]
     ut = [round(0.5 + i * (up["dur"] - 1) / 9, 2) for i in range(10)]
@@ -360,10 +367,13 @@ def export_check(ctx, rec, ask_text, must_see):
             content += [dict(type="text", text=f"export at {t} s"), img(b)]
     system = ("You check a product's real output before a marketing film shows it. Be strict and literal: a thing asked for counts as "
               "delivered only if it is plainly visible in the export's frames, or, for what is said and where the cut starts or ends, "
-              "plainly in the export's spoken words as given. You also choose the seconds the film will show.")
+              "plainly in the export's spoken words as given. The spoken words come from automatic captions whose times are "
+              "about a third of a second off, so a word at the very edge of a kept range may be listed or missing: judge a cut point by "
+              "the sentence, not by one edge word. Every Valmera export ends on Valmera's own end card and carries its small watermark: "
+              "that is the brand, never a defect, and never part of the after you choose. You also choose the seconds the film will show.")
     content.append(dict(type="text", text=(
         "Return JSON only: {\"elements\": [{\"asked\": a part of the sentence, \"visible\": true|false, \"seconds\": [export seconds where "
-        "it shows], \"how\": what is seen}], \"all_visible\": true|false, \"after\": [start, end] export seconds, 5 to 9 s, where the "
+        "it shows], \"how\": what is seen}], \"all_visible\": true|false, \"after\": [start, end] export seconds, 5 to 9 s, before the end card, where the "
         "asked change reads best (a cut, a picture, captions, a title landing), \"tease_s\": the export second of its most striking "
         "frame, \"before\": [start, end] upload seconds, 2.5 to 4 s, where the raw clip looks most like raw footage, \"looks\": one "
         "plain line on how the export looks to an editor, \"defects\": [anything an editor would call broken: a cut face, wrong "
@@ -381,12 +391,13 @@ def export_check(ctx, rec, ask_text, must_see):
 
 def receipts(rec, chk, ask_text):
     ex = chk["export"]
-    return dict(typed=ask_text, phase="before the first result", first_result_s=rec.get("first_result_s"), session_s=rec.get("seconds"),
+    up_words, ex_words = spoken(rec, ex)
+    return dict(typed=ask_text, upload_says=up_words, export_says=ex_words, phase="before the first result", first_result_s=rec.get("first_result_s"), session_s=rec.get("seconds"),
                 upload=dict(seconds=rec["upload"]["dur"], w=rec["upload"]["w"], h=rec["upload"]["h"], sha256=rec["upload"]["sha256"]),
                 export=dict(seconds=ex["dur"], w=ex["w"], h=ex["h"], sha256=ex["sha256"], edl_version=ex.get("edl_version")),
                 visible=[dict(asked=e.get("asked"), how=e.get("how"), seconds=e.get("seconds")) for e in chk.get("elements") or []],
-                looks=chk.get("looks"), product=dict(be_sha=rec.get("be_sha"), fe_sha=rec.get("fe_sha"), edit_model=STACK["model"],
-                                                     stack="local Gauntlet stack, synthetic account, plan plus_2026"),
+                looks=chk.get("looks"), product=dict(name="Valmera", url="valmera.io", be_sha=rec.get("be_sha"), fe_sha=rec.get("fe_sha"), edit_model="Pro's OpenAI lane (gpt-6.1-sol)",
+                                                     stack=f"local Gauntlet stack on main, synthetic account, plan {PLAN}"),
                 source=rec.get("source"), cost_usd=rec.get("cost_usd"))
 
 
@@ -427,8 +438,9 @@ def audit(sc, rc):
     """A second call: every claim the narration makes about Valmera or this recording, against the receipts."""
     system = ("You audit a marketing script for truth before it is narrated. You get the script and the receipts of the one real "
               "recording it shows. List every claim about Valmera, the edit or the recording (speed, what it did, what was typed, what "
-              "is visible) and whether the receipts support it. General statements about editing that make no claim about Valmera "
-              "need no receipt. Return JSON only: {\"claims\": [{\"text\": the words, \"supported\": true|false, \"why\": a few words}]}")
+              "is visible or said in the before and the after) and whether the receipts support it: what the upload and the export say "
+              "is in upload_says and export_says, what the export shows is in visible and looks. General statements about editing, and "
+              "plain descriptions of the before and the after that these receipts bear out, are supported. Return JSON only: {\"claims\": [{\"text\": the words, \"supported\": true|false, \"why\": a few words}]}")
     got, use = ask(system, f"# Receipts\n{json.dumps(rc, ensure_ascii=False)}\n\n# Script\n{json.dumps(sc.get('segments'), ensure_ascii=False)}",
                    what="claims audit", effort="low", model=CHECK_MODEL, max_tokens=4000)
     bad = [c for c in (got.get("claims") if isinstance(got, dict) else []) or [] if isinstance(c, dict) and not c.get("supported")]
@@ -441,7 +453,10 @@ def write(ctx, idea, card, rc, notes=None):
               "a calm documentary voice) reads your lines over real footage of what they name, cut fast; between two of your lines the "
               "film cuts to the real recording with its own sound: first the clip as uploaded (the before), later the export Valmera "
               "returned (the after). Write like the best editing accounts talk: concrete, a little dry, no hype words, no exclamation "
-              "marks, nothing a viewer cannot check in the film.")
+              "marks, nothing a viewer cannot check in the film. Every line earns its second: a hook that names the pain so an "
+              "editor nods, lines that each turn the screw or show the move, short spoken sentences with one stressed word, no filler "
+              "like 'here is what' or 'let me show you', no throat-clearing before the before or the after; the before and the after "
+              "speak for themselves, so the line before each sets it up in a few words and the line after lands what changed.")
     content = (f"# The idea\n{json.dumps(idea, ensure_ascii=False)}\n\n# The recording's receipts (the only facts about Valmera you may state)\n"
                f"{json.dumps(rc, ensure_ascii=False)}\n\n# The style\n{json.dumps(card, ensure_ascii=False)}\n\n# The references' pace (medians)\n"
                f"{json.dumps(pace)}\n\n"
@@ -466,7 +481,7 @@ def write(ctx, idea, card, rc, notes=None):
                "\"proof\": {\"before_after\": index of the segment the before plays after, \"after_after\": index of the segment the after "
                "plays after (the one that says the typed sentence)}}. Mark one \"low\" (the pain at its worst), one \"turn\", and the "
                "\"payoff\" right after the after.")
-    got, use = ask(system, content, what="write", effort="medium", max_tokens=16000)
+    got, use = ask(system, content, what="write", effort="high", max_tokens=16000)
     return (got if isinstance(got, dict) else {}), use
 
 
@@ -475,19 +490,17 @@ def script(ctx, ideas_out):
     stt = jload(keep, {}) or {}
     spend = []
     able = {s["id"]: s for s in able_cards(ctx)}
-    tries = []
-    for idea in ideas_out["ideas"][:2]:
-        for k, a in enumerate((idea.get("asks") or [])[:2]):
-            tries.append((idea, a, (idea.get("must_see") or [[]] * 2)[k] if k < len(idea.get("must_see") or []) else []))
-    tries = tries[:2]                    # two recordings at most a film
+    # the first sentence of each idea, best idea first, three recordings at most a film: an idea whose result the product
+    # does not visibly deliver gives way to the next idea, not to a second try of the same
+    tries = [(ii, idea, (idea.get("asks") or [""])[0], ((idea.get("must_see") or [[]])[0] or [])) for ii, idea in enumerate(ideas_out["ideas"][:3])]
     chosen = None
-    for k, (idea, ask_text, must) in enumerate(tries):
-        tag = f"r{k}"
+    for ii, idea, ask_text, must in tries:
+        tag = k = f"i{ii}"
         old = stt.get(tag, {}).get("check") or {}
-        if old.get("v") == CHECK_V and stt[tag].get("ok") is False:
+        if old.get("v") == CHECK_V and old.get("stack_v") == STACK_V and stt[tag].get("ok") is False:
             continue                     # checked by this check and not shown: never shown
         rec = record(ctx, idea, k, ask_text)
-        chk = old if old.get("v") == CHECK_V else export_check(ctx, rec, ask_text, must)
+        chk = old if old.get("v") == CHECK_V and old.get("stack_v") == STACK_V else dict(export_check(ctx, rec, ask_text, must), stack_v=STACK_V)
         spend += chk.pop("spend", []) if "spend" in chk else []
         stt[tag] = dict(ok=chk["ok"], check=chk, record=os.path.join(ctx.tmp, "studio", "records", rec["sid"], "record.json"))
         jsave(keep, stt)
