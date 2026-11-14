@@ -175,8 +175,9 @@ def test_corrupt_screen_sound_is_an_approved_library_recording(monkeypatch):
     out = agent_tools.add_corrupt_screen(ctx2, 5.0, duration_s=0.6,
                                          sound=True)
     assert built == [False], built
-    assert [s["storage_key"] for s in sounds] == ["sound:glitch_1"]
-    hit = sounds[0]["at"] - sound_library.hit_s("glitch_1")
+    g = sound_library.resolve("glitch_1")          # glitch_1 is flagged (15 Nov signal audit): its nearest clean one
+    assert g != "glitch_1" and [s["storage_key"] for s in sounds] == [f"sound:{g}"]
+    hit = sounds[0]["at"] - sound_library.hit_s(g)
     assert abs(hit - 5.0) < 1e-6, sounds
     assert sounds[0]["dur_s"] <= 0.6 and sounds[0]["gain_db"] == -14.0
     assert "approved glitch recording" in out and "EDL v3" in out

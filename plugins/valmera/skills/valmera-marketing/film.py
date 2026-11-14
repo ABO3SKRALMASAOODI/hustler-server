@@ -47,6 +47,19 @@ def scene_worker():
     return "/Users/masaoodi/Documents/Valmera/worktrees/lane-c-scene-1112/worker"
 
 
+def sfx_filter(worker=None):
+    """worker/sfx_filter.py of the worker this film is made with: the one SFX quality filter every sound path shares
+    (lane STING-REF's signal audit). A flagged recording is never placed: its nearest unflagged one is."""
+    import importlib.util
+    w = worker or scene_worker()
+    p = next((x for x in (os.path.join(w, "sfx_filter.py"), "/Users/masaoodi/Documents/Valmera/worktrees/skill-main/worker/sfx_filter.py")
+              if os.path.exists(x)), os.path.join(w, "sfx_filter.py"))      # an older worker without it: the synced main's
+    spec = importlib.util.spec_from_file_location("sfx_filter_" + str(abs(hash(p))), p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
 def _type():
     w = scene_worker()
     if w not in sys.path:
@@ -159,8 +172,11 @@ def sound(sid, name, lib, event_f, target_peak_db):
     trim = 0.0
     if start < 0:
         trim, start = -start, 0.0
-    return dict(id=sid, s=name, file=m["file"], event_f=int(event_f), start_s=round(start, 4), trim_s=round(trim, 4),
-                db=round(target_peak_db - m["max_db"], 2), peak_s=m["peak_s"])
+    out = dict(id=sid, s=m.get("id") or name, file=m["file"], event_f=int(event_f), start_s=round(start, 4), trim_s=round(trim, 4),
+               db=round(target_peak_db - m["max_db"], 2), peak_s=m["peak_s"])
+    if out["s"] != name:
+        out["asked"] = name                      # a flagged recording: its nearest unflagged one plays (sfx_filter)
+    return out
 
 
 def cell_runs(text, font_path, px, x, baseline, cell):
@@ -998,7 +1014,9 @@ def audio_master(ffmpeg, l1, out, tmp):
             seg[-fade:] *= np.linspace(1, 0, fade, dtype=np.float32)[:, None]
         mix[at:at + len(seg)] += seg
     lib_dir = os.path.join(scene_worker(), "sound_library")
+    SF = sfx_filter()
     for s in l1.get("sound") or []:
+        s, _ = SF.swap(s, lib_dir)               # a flagged recording never plays: its nearest unflagged one does
         p = os.path.join(lib_dir, os.path.basename(s["file"]))
         if p not in cache:
             cache[p] = pcm(p)

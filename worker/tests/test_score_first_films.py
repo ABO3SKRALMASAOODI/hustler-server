@@ -458,15 +458,16 @@ def test_a_placed_sound_on_a_film_with_no_voice_is_heard_over_its_track():
     idx = wordless_index(8.0)
     c = comp(clip_film(), idx, clip_perc(db=-25.0))
     table, _ = S.sound_table()
-    hit = float(table["impact_1"].get("hit_lufs", -15))
     snd = c.l1["sound"]
+    hit = float(table[snd[0]["s"]].get("hit_lufs", -15))          # impact_1 is flagged (15 Nov audit): impact_9 plays at its level
+    assert snd[0]["s"] != "impact_1"
     assert len(snd) == 1 and abs(snd[0]["db"] - max(-36, min(-2, -25.0 + 3.0 - hit))) < 0.11       # 3 dB over what the track plays there
     # a talking take keeps its sound under the voice, as before
     talk = selfie(20.0)
     make = lambda k, a, z: {"pic": "main", "do": [{"g": "big", "t": "ONE WORD", "for": f"w{a}", "at": f"w{a}", "d": 30}], "snd": [{"s": "impact_1", "for": "b01.big", "db": -6}]} if k == 0 else {"pic": "main"}
     c2 = comp(film(beats_over(talk, 3, make), system={"devices": ["big"], "sounds": ["impact"], "seats": [[0.5, 0.75]]}), talk, voice(20.0, db=-18.0))
     for s in c2.l1["sound"]:
-        assert s["db"] <= -18.0 - 7.0 - hit + 0.11          # class T: 7 dB under the voice since round five
+        assert s["db"] <= -18.0 - 7.0 - float(table[s["s"]].get("hit_lufs", -15)) + 0.11          # class T: 7 dB under the voice since round five
 
 
 def test_the_brief_has_the_open_ground_shot_by_shot_for_a_clip():

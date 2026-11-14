@@ -64,6 +64,15 @@ class _Ctx:
     def sfx(self, sid):
         return next(s for s in self._edl["sfx"] if s["id"] == sid)
 
+@pytest.fixture(autouse=True)
+def _no_sfx_flags(monkeypatch):
+    """These tests measure placement and timing mechanics on fixed recordings (impact_1's 0.69 s hit, ding_1, click_1),
+    not the library's quality verdict; the SFX quality filter (worker/sfx_filter.py) has its own tests in
+    test_sfx_filter.py, so here no recording is flagged."""
+    import sfx_filter
+    monkeypatch.setattr(sfx_filter, "flagged", lambda lib_dir=None: frozenset())
+
+
 
 @pytest.fixture
 def lib(monkeypatch):

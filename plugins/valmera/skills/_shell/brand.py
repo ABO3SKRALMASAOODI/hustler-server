@@ -5,13 +5,15 @@ Nothing is redrawn here. The mark's pixels and place come from the worker's rend
 film from a workflow closes exactly as a Valmera export does. The end card and the mark are
 untouchable: check() measures both on the delivered file.
 
-The end accent (owner, 14 Nov: make people look at the mark and come to the site). The card used to open on digital
-silence. Now, without touching a pixel of the mark or the card: one sting from the product's own licensed library (the
-unflagged recording nearest the references' own close, reveal and transition sounds, pick_sting) lands on the card's
-reveal, on the programme music's beat when its grid has one there (onsets and tempo, measured), and the
-programme's last moments ring under the card (the bed ducks; its reverberant tail falls as the references' music falls
-at their end, rests quietly under the card and fades out over its last second), with
-the card's loudness inside the programme's range and its true peak under -1 dBTP. Signals only: no model, no words.
+The close (owner, 15 Nov: the old ring under the card was a bass hum, the tail of the film's music through a dark
+reverb, 88% under 150 Hz for about 4 s). The film's sound now ends as the 28 reference reels' music does: it holds about
+1.2 s past the last word, then falls 20 dB in about a second (linear in dB), near mono under 150 Hz, and is gone at the
+card (accent_tail, tail_shape measures it on the file). Signals only: no model, no words.
+
+The end accent (owner, 14 Nov: make people look at the mark and come to the site), behind chain.STING_ON: one sting
+from the product's own licensed library (the unflagged recording nearest the references' own close, reveal and
+transition sounds, pick_sting) lands on the card's reveal, on the programme music's beat when its grid has one there
+(onsets and tempo, measured), with the card's loudness inside the programme's range and its true peak under -1 dBTP.
 No motion accent on the mark: at the sting the card's dissolve is already laying the card (which carries the mark's own
 robot and name) over it, so a pulse there would fight the card's reveal rather than read.
 """
@@ -83,12 +85,21 @@ STING_UNSPOKEN = ("riser", "typing", "shutter", "paper", "cash", "heartbeat")
 STING_VS_VOICE_PCT = 50     # the sting's 50 ms K peak at the references' median against the voice (-10.7 dB)
 DUCK_DB = 6.0               # the bed under the sting
 DUCK_RAMP_S = 0.05
-SEND_S = 1.2                # the programme's last moments that ring on under the card
-RING_UNDER_DB = 6.2         # the ring's first second this far under the closing loudness (the references' bed: 6.2 dB under the voice, p50)
-RING_RT60_S = 3.2           # its first fall: -20 dB in 1.07 s (the references' music falls from its bed to -20 dB in 1.01 s, p50 of 12 reels)
-RING_FLOOR_DB = 13.0        # then it rests this far under its first second (the references' music in their final 0.5 s: 12.85 dB under the bed, p50) ...
-RING_FLOOR_RT60_S = 20.0    # ... and keeps falling slowly: no reference ends in silence (final silence 0 s in 28 of 28)
-RING_END_FADE_S = 1.0       # the ring fades to nothing over the card's last second (the old sting's rumble filled the card; owner, 15 Nov)
+# The tail (owner, 15 Nov: a bass hum sat under the card, the old ring of "Too Cool", 88% under 150 Hz for 4 s). It now
+# follows the 28 references' close (lane STING-REF, ref_profile.json close.music_end): their music ends 1.17 s after the
+# last word (p50; p10 0.32 s), and in 15 of 28 it falls 12 dB or more, from its bed to -20 dB in 1.01 s (p50 of 12);
+# their bed is near mono under 150 Hz (side 9.7 dB under mid, p50). So the film's sound holds TAIL_AFTER_WORD_S past the
+# last word, falls TAIL_FALL_DB over TAIL_FALL_S (linear in dB, the references' fall), keeps falling at that rate, and is
+# gone at the card: nothing rings under it (the sting, when it is on, is the card's only sound).
+TAIL_AFTER_WORD_S = 1.2
+TAIL_AFTER_MIN_S = 0.3
+TAIL_FALL_S = 1.0
+TAIL_FALL_DB = 20.0
+TAIL_END_FADE_S = 0.03      # the last samples before the card, to digital zero without a click
+TAIL_LEAD_S = 0.5           # the tail is laid from this long before its fall starts (from the last word when it is known)
+MONO_LOW_HZ = 150.0         # under this the tail is brought near mono ...
+MONO_SIDE_DB = -12.0        # ... its side this far under what it was (the references' bed: side 9.7 dB under mid there)
+MONO_RAMP_S = 0.2
 TP_CEIL_DB = -1.6           # true peak of the closing section (the AAC encode adds a few tenths; the bar is -1 dBTP)
 BEAT_WIN_S = 8.0            # the beat grid is read on the programme's last 8 s
 BPM_LO, BPM_HI = 70.0, 180.0
@@ -340,69 +351,97 @@ def sting_time(prog_s, fps, j, reveal_k, settle_k, grid):
     return t_rev, "reveal", t_rev
 
 
-def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=True):
-    """The closing section's sound, as a 48 kHz stereo WAV laid from `cut` samples on: the programme's own samples
-    there (the bed ducked under the sting, the old 0.25 s fade at the join), the sting on its beat, and the
-    programme's last moments ringing on under the card. Returns (wav, cut_sample, info)."""
+def tail_start(prog_s, last_word_s):
+    """Where the film's sound starts its fall (programme seconds): TAIL_AFTER_WORD_S after the last word, early enough
+    that the fall to -20 dB ends with the programme, never sooner than TAIL_AFTER_MIN_S after the word (the references'
+    p10). Without a last word, the programme's last TAIL_FALL_S."""
+    if last_word_s is None or not (0 < float(last_word_s) < prog_s):
+        return max(0.0, prog_s - TAIL_FALL_S)
+    L = float(last_word_s)
+    return max(min(L + TAIL_AFTER_WORD_S, prog_s - TAIL_FALL_S), min(L + TAIL_AFTER_MIN_S, prog_s))
+
+
+def tail_gain(tt, t0, prog_s):
+    """The tail's gain at programme seconds tt: 1 until t0, then down TAIL_FALL_DB every TAIL_FALL_S (linear in dB),
+    to zero over TAIL_END_FADE_S at the programme's end, and zero under the card."""
     import numpy as np
-    from scipy.signal import fftconvolve, lfilter
+    db = -TAIL_FALL_DB * np.clip(tt - t0, 0.0, None) / TAIL_FALL_S
+    g = 10 ** (db / 20)
+    g *= np.clip((prog_s - tt) / TAIL_END_FADE_S, 0.0, 1.0)
+    return g
+
+
+def mono_low(x, ramp):
+    """x (n, 2) with its side under MONO_LOW_HZ brought MONO_SIDE_DB down, by `ramp` (0..1 per sample)."""
+    import numpy as np
+    from scipy.signal import butter, sosfiltfilt
+    if len(x) < 64:
+        return x
+    mid, side = (x[:, 0] + x[:, 1]) / 2, (x[:, 0] - x[:, 1]) / 2
+    sos = butter(4, MONO_LOW_HZ, "low", fs=SR, output="sos")
+    lo = sosfiltfilt(sos, side) if len(side) > 64 else side
+    side = side - (1 - 10 ** (MONO_SIDE_DB / 20)) * lo * ramp
+    return np.stack([mid + side, mid - side], axis=1)
+
+
+def last_word(l1_path, work=None):
+    """The film's last word end (programme seconds), read from its own voice track (the scene engine's split of the L1
+    with no sounds: score.music.voice_spans_of), or None."""
+    try:
+        _renderer()
+        from score import music as MU
+        l1 = json.load(open(l1_path))
+        spans = MU.voice_spans_of(l1, work or os.path.dirname(os.path.abspath(l1_path)))
+        return float(spans[-1][1]) if spans else None
+    except Exception:  # noqa: BLE001 - unknown: the tail falls over the programme's last second
+        return None
+
+
+def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=True, last_word_s=None, sting=True):
+    """The closing section's sound, as a 48 kHz stereo WAV laid from `cut` samples on: the programme's own samples
+    there, holding TAIL_AFTER_WORD_S past the last word and then falling as the references' music falls (tail_gain),
+    the low end near mono, nothing under the card; with `sting`, the sting on the card's reveal (on the music's beat
+    when its grid has one there), the bed ducked under it. Returns (wav, cut_sample, info)."""
+    import numpy as np
     R = _renderer()
     import config
     total = int(round(prog_s * SR))
     n_out = int(round(outro_s * SR))
-    card = R.endcard_path()
-    settle_k = math.ceil(config.ENDCARD_SETTLE_S * fps - 1e-6) if not card.lower().endswith(R.IMAGE_EXTS) else 0
-    reveal_k = card_reveal_frame(card, fps)
     w0 = max(0, total - int(BEAT_WIN_S * SR))
     tail_prog = _pcm(programme, w0, total, total=total) if has_audio else np.zeros((total - w0, 2), np.float32)
-    grid = beat_grid(tail_prog) if has_audio else None
-    if grid:
-        grid["abs_phase_s"] = w0 / SR + grid["phase_s"]
-    t_sting, on, t_rev = sting_time(prog_s, fps, j, reveal_k, settle_k, grid)
-    ns = min(int(SEND_S * SR), total)                        # the send: the programme's last moments
-    cut = max(w0, min(int((t_sting - 0.25) * SR), total - ns))
+    t0 = tail_start(prog_s, last_word_s)
+    info = dict(last_word_s=None if last_word_s is None else round(float(last_word_s), 3), fall_from_s=round(t0, 3))
+    t_sting = None
+    if sting:
+        card = R.endcard_path()
+        settle_k = math.ceil(config.ENDCARD_SETTLE_S * fps - 1e-6) if not card.lower().endswith(R.IMAGE_EXTS) else 0
+        reveal_k = card_reveal_frame(card, fps)
+        grid = beat_grid(tail_prog) if has_audio else None
+        if grid:
+            grid["abs_phase_s"] = w0 / SR + grid["phase_s"]
+        t_sting, on, t_rev = sting_time(prog_s, fps, j, reveal_k, settle_k, grid)
+        info.update(on=on, sting_s=round(t_sting, 4), reveal_s=round(t_rev, 4), grid=grid)
+    cut = max(w0, min(int((t0 - TAIL_LEAD_S) * SR), total))
+    if last_word_s is not None and 0 < float(last_word_s) < prog_s:
+        cut = max(w0, min(cut, int(float(last_word_s) * SR)))   # from the last word on the bed's low end goes near mono
+    if t_sting is not None:
+        cut = min(cut, max(w0, int((t_sting - 0.25) * SR)))
     dry = tail_prog[cut - w0:].astype(np.float64)
     n_tail = len(dry) + n_out
     tt = (cut + np.arange(n_tail)) / SR                       # programme seconds of each tail sample
     ref = _k_db(tail_prog[-int(CLOSE_S * SR):]) if has_audio else -99.0
     if ref < -40:
         ref = -18.0                                           # a near-silent close: the sting sits at a quiet speech level
-    # the bed: ducked under the sting, then the old 0.25 s fade to the join
     tdry = tt[:len(dry)]
-    duck = 10 ** (-DUCK_DB / 20)
-    g = np.interp(tdry, [t_sting - DUCK_RAMP_S, t_sting], [1.0, duck])
-    fade = float(getattr(config, "OUTRO_AUDIO_TAIL_FADE_S", 0.25))
-    g *= np.clip((prog_s - tdry) / fade, 0.0, 1.0)
+    g = tail_gain(tdry, t0, prog_s)
+    if t_sting is not None:
+        g *= np.interp(tdry, [t_sting - DUCK_RAMP_S, t_sting], [1.0, 10 ** (-DUCK_DB / 20)])
+    ramp = np.clip((tdry - cut / SR) / MONO_RAMP_S, 0.0, 1.0)
     out = np.zeros((n_tail, 2), np.float64)
-    out[:len(dry)] = dry * g[:, None]
+    out[:len(dry)] = mono_low(dry, ramp) * g[:, None]
     acc = np.zeros((n_tail, 2), np.float64)
-    info = dict(on=on, sting_s=round(t_sting, 4), reveal_s=round(t_rev, 4), grid=grid, ref_lufs=round(ref, 1))
-    # the ring: the programme's last moments through a dark, wide tail, rising under the sting, falling as the references'
-    # music falls at their end, resting quietly under the card and fading out over its last second
-    if has_audio and ns > SR // 10:
-        send = tail_prog[-ns:].astype(np.float64) * (np.sin(np.linspace(0, np.pi / 2, ns)) ** 2)[:, None]
-        rng = np.random.default_rng(1114)
-        nl = int((outro_s + SEND_S + 0.1) * SR)
-        tl = np.arange(nl) / SR
-        decay = np.maximum(np.exp(-6.9078 * tl / RING_RT60_S),
-                           10 ** (-RING_FLOOR_DB / 20) * np.exp(-6.9078 * tl / RING_FLOOR_RT60_S))
-        ir = rng.standard_normal((nl, 2)) * decay[:, None]
-        ir = lfilter([0.12], [1, -0.88], ir, axis=0)          # dark: a one-pole low-pass near 1 kHz
-        ir[: int(0.012 * SR)] *= np.linspace(0, 1, int(0.012 * SR))[:, None]
-        wet = np.stack([fftconvolve(send[:, c], ir[:, c]) for c in (0, 1)], axis=1)
-        start = total - ns - cut                              # the send's first sample in the tail
-        wet = wet[: n_tail - start]
-        lvl = _k_db(wet[ns: ns + SR].astype(np.float32))
-        if lvl > -90:
-            wet *= 10 ** ((ref - RING_UNDER_DB - lvl) / 20)
-            tw = tt[start:start + len(wet)]
-            env = np.interp(tw, [min(t_sting, prog_s) - DUCK_RAMP_S, prog_s], [0.0, 1.0])
-            fade_s = min(RING_END_FADE_S, outro_s / 2)
-            u = np.clip((tw - prog_s - (outro_s - fade_s)) / fade_s, 0.0, 1.0)
-            env = env * np.cos(u * np.pi / 2) ** 2
-            acc[start:start + len(wet)] += wet * env[:, None]
-            info["ring_lufs"] = round(ref - RING_UNDER_DB, 1)
-    st = pick_sting(used)
+    info["ref_lufs"] = round(ref, 1)
+    st = pick_sting(used) if sting else None
     if st:
         y = _pcm(st["path"]).astype(np.float64)
         d = st["desc"]
@@ -418,7 +457,7 @@ def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=
                              distance=st["distance"], numbers=st["numbers"], vs_voice_db=st["vs_voice_db"])
     # the closing section's true peak, kept under the ceiling by lowering the accent only (the programme is as it was)
     s = 1.0
-    if _true_peak_db(out + acc) > TP_CEIL_DB:
+    if acc.any() and _true_peak_db(out + acc) > TP_CEIL_DB:
         lo, hi = 0.0, 1.0
         for _ in range(12):
             mid = (lo + hi) / 2
@@ -438,10 +477,74 @@ def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=
     return wav, cut, info
 
 
-def finish(programme, out, workdir, used=(), accent=True):
+def tail_shape(final, prog_s, last_word_s=None, outro_s=None):
+    """The delivered film's close, measured on its file (signals only): the level in 50 ms steps, the bed (the sound
+    between the last word and its fall), when the sound ends after the last word (first under the bed by 3 dB), how
+    long it takes from there to -20 dB, how far it has fallen at the card, the loudest 400 ms under the card and its
+    share under 150 Hz against the bed's, and the side-to-mid ratio under 150 Hz from the last word to the card (else
+    over the last 2 s before it)."""
+    import numpy as np
+    outro_s = float(outro_s if outro_s is not None else probe(final)["dur"] - prog_s)
+    s0 = max(0.0, prog_s - 6.0)
+    x = _pcm(final, int(s0 * SR), int((prog_s + outro_s) * SR)).astype(np.float64)
+    hop = int(0.05 * SR)
+    m = x.mean(axis=1)
+    lv = np.array([10 * np.log10(max(float((m[i:i + hop] ** 2).mean()), 1e-14)) for i in range(0, len(m) - hop + 1, hop)])
+    tl = s0 + np.arange(len(lv)) * 0.05
+    L = float(last_word_s) if last_word_s is not None else prog_s - 2.0
+    win = (tl >= L + 0.1) & (tl < min(L + 1.1, prog_s - 1.0))
+    if not win.any():
+        win = (tl >= L) & (tl < prog_s)
+    bed = float(np.median(lv[win])) if win.any() else float(lv.max())
+    after = tl >= L
+    sm = np.convolve(lv, np.ones(3) / 3, mode="same")
+    end_i = next((i for i in np.where(after)[0] if sm[i] <= bed - 3.0), None)
+    m20 = next((i for i in np.where(after)[0] if sm[i] <= bed - 20.0 and (end_i is None or i >= end_i)), None)
+    end_s = None if end_i is None else float(tl[end_i])
+    fall_s = None if (end_i is None or m20 is None) else float(tl[m20] - tl[end_i])
+    pre = (tl >= prog_s - 0.5) & (tl < prog_s)
+    card = x[int((prog_s - s0) * SR):]
+    sec = int(0.4 * SR)
+    card_db, card_low = -140.0, 0.0
+    for i in range(0, max(1, len(card) - sec + 1), sec // 2):
+        seg = card[i:i + sec].mean(axis=1)
+        if len(seg) < 64:
+            continue
+        e = float((seg ** 2).mean())
+        db = 10 * np.log10(max(e, 1e-14))
+        if db > card_db:
+            F = np.abs(np.fft.rfft(seg)) ** 2
+            hz = np.fft.rfftfreq(len(seg), 1 / SR)
+            card_db, card_low = db, float(F[hz < 150].sum() / max(F.sum(), 1e-20))
+
+    def low_db(seg):
+        from scipy.signal import butter, sosfilt
+        sos = butter(4, 150.0, "low", fs=SR, output="sos")
+        y = sosfilt(sos, seg.mean(axis=1))
+        return 10 * np.log10(max(float((y ** 2).mean()), 1e-14))
+    bed_seg = x[int((L + 0.1 - s0) * SR):int((min(L + 1.1, prog_s) - s0) * SR)]
+    from scipy.signal import butter, sosfilt
+    sos = butter(4, 150.0, "low", fs=SR, output="sos")
+    a2 = L + 0.25 if last_word_s is not None and L + 0.5 < prog_s else prog_s - 2.0   # the bed after the last word
+    last2 = x[int((max(a2, s0) - s0) * SR):int((prog_s - s0) * SR)]
+    mid, side = sosfilt(sos, (last2[:, 0] + last2[:, 1]) / 2), sosfilt(sos, (last2[:, 0] - last2[:, 1]) / 2)
+    s2m = 10 * np.log10(max(float((side ** 2).mean()), 1e-14) / max(float((mid ** 2).mean()), 1e-14))
+    return dict(last_word_s=None if last_word_s is None else round(L, 3), bed_db=round(bed, 1),
+                ends_after_word_s=None if end_s is None else round(end_s - L, 2),
+                fall_to_minus20_s=None if fall_s is None else round(fall_s, 2),
+                at_card_vs_bed_db=round(float(np.max(lv[pre])) - bed, 1) if pre.any() else None,
+                card_peak400_vs_bed_db=round(card_db - bed, 1), card_peak400_low_share=round(card_low, 3),
+                card_low_vs_bed_low_db=round(low_db(card) - low_db(bed_seg), 1) if len(bed_seg) > 64 and len(card) > 64 else None,
+                side_to_mid_lt150_db=round(float(s2m), 1),
+                level_50ms=[[round(float(a), 2), round(float(b), 1)] for a, b in zip(tl, lv) if a >= L - 0.5])
+
+
+def finish(programme, out, workdir, used=(), accent=True, last_word_s=None):
     """programme (the engine's film) -> out, with the mark on every programme frame and the end card joined.
-    accent: the end accent (the sting on the reveal and the ring under the card; the module's docstring). `used`: the
-    library recordings the film already sounds, so the sting is never one of them."""
+    The film's sound holds a little past its last word (`last_word_s`, programme seconds; brand.last_word reads it from
+    the plan) and falls as the references' music falls, near mono in the low end, gone at the card (accent_tail).
+    accent: the sting on the card's reveal (pick_sting). `used`: the library recordings the film already sounds, so the
+    sting is never one of them."""
     R = _renderer()
     import config
     p = probe(programme)
@@ -456,7 +559,6 @@ def finish(programme, out, workdir, used=(), accent=True):
     parts, j = R.outro_card_parts(2, W, H, fps, outro_s, "", motion=not card.lower().endswith(R.IMAGE_EXTS), program_s=prog_s)
     n_prog = p["frames"] or math.ceil(prog_s * fps - 1e-6)
     t_join = max(0.0, (n_prog - j - 0.25) / fps)
-    fade = float(getattr(config, "OUTRO_AUDIO_TAIL_FADE_S", 0.25))
     g = [f"[0:v]setsar=1,format=yuv420p[pv]",
          f"[pv][1:v]overlay={x}:{y}:format=auto:shortest=1[vm]"] + parts + [
         "[ohead]format=yuva420p[oheadp]",
@@ -464,33 +566,25 @@ def finish(programme, out, workdir, used=(), accent=True):
         "[vm][oheadt]overlay=0:0:format=auto:eof_action=repeat[vjoin]"]
     cmd = [FF, "-v", "error", "-y", "-i", programme, "-loop", "1", "-r", str(fps), "-i", mark]
     cmd += R._endcard_input_args(card, outro_s, fps)
-    info = {}
-    if accent:
-        wav, cut, info = accent_tail(programme, workdir, n_prog / fps, fps, j, outro_s, used=used, has_audio=p["audio"])
-        total = int(round(n_prog / fps * SR))
-        cmd += ["-i", wav]
-        if p["audio"]:
-            g.append(f"[0:a]aresample={SR},aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_len={total},"
-                     f"atrim=start_sample=0:end_sample={cut},asetpts=N/SR/TB[ahead]")
-        else:
-            g.append(f"anullsrc=r={SR}:cl=stereo,atrim=end_sample={cut},aformat=sample_fmts=fltp:channel_layouts=stereo[ahead]")
-        g += [f"[3:a]aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=N/SR/TB[atail]",
-              "[ahead][atail]concat=n=2:v=0:a=1[aout]",
-              "[vjoin][ovid]concat=n=2:v=1:a=0[vout]"]
+    wav, cut, info = accent_tail(programme, workdir, n_prog / fps, fps, j, outro_s, used=used, has_audio=p["audio"],
+                                 last_word_s=last_word_s, sting=accent)
+    total = int(round(n_prog / fps * SR))
+    cmd += ["-i", wav]
+    if p["audio"]:
+        g.append(f"[0:a]aresample={SR},aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_len={total},"
+                 f"atrim=start_sample=0:end_sample={cut},asetpts=N/SR/TB[ahead]")
     else:
-        g.append(f"anullsrc=r=48000:cl=stereo:d={outro_s:.3f},aformat=sample_fmts=fltp:channel_layouts=stereo[osil]")
-        if p["audio"]:
-            g.append(f"[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                     f"afade=t=out:st={max(0.0, prog_s - fade):.3f}:d={fade:.3f},asetpts=N/SR/TB[aprogc]")
-        else:
-            g.append(f"anullsrc=r=48000:cl=stereo:d={prog_s:.3f},aformat=sample_fmts=fltp:channel_layouts=stereo[aprogc]")
-        g.append("[vjoin][aprogc][ovid][osil]concat=n=2:v=1:a=1[vout][aout]")
+        g.append(f"anullsrc=r={SR}:cl=stereo,atrim=end_sample={cut},aformat=sample_fmts=fltp:channel_layouts=stereo[ahead]")
+    g += [f"[3:a]aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=N/SR/TB[atail]",
+          "[ahead][atail]concat=n=2:v=0:a=1[aout]",
+          "[vjoin][ovid]concat=n=2:v=1:a=0[vout]"]
     cmd += ["-filter_complex", ";".join(g), "-map", "[vout]", "-map", "[aout]",
             "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-r", str(fps),
             "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out]
     subprocess.run(cmd, check=True, capture_output=True, text=True)
     res = dict(programme_s=round(prog_s, 3), outro_s=outro_s, join_frames=j, mark_xy=[x, y], card=os.path.basename(card))
-    if info:
+    res["tail"] = {k: v for k, v in info.items() if k in ("last_word_s", "fall_from_s")}
+    if accent:
         res["accent"] = info
     return res
 

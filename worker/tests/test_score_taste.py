@@ -262,7 +262,8 @@ def test_a_sound_sits_under_the_voice():
     c = comp(text, idx, voice(14.0, db=-18.0))
     table, _ = S.sound_table()
     s = c.l1["sound"][0]
-    assert s["db"] + table["impact_1"]["hit_lufs"] <= -18.0 - 7.0 + 0.06          # class T: 7 dB under the voice (was 9 before round five)
+    assert s["s"] != "impact_1" and s.get("replaced", {}).get("id") == "impact_1"   # flagged (15 Nov audit): its nearest clean one plays
+    assert s["db"] + table[s["s"]]["hit_lufs"] <= -18.0 - 7.0 + 0.06          # class T: 7 dB under the voice (was 9 before round five)
     old = S.compile_score(text, index=idx, perception=voice(14.0, db=-18.0), govern=False).l1["sound"]
     assert not old or old[0]["db"] > s["db"]
 

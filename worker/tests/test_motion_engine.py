@@ -291,16 +291,21 @@ def test_sound_library_is_real_approved_recordings_with_licences():
     assert sound_library.get("whoosh_soft_1") and sound_library.get("../manifest.json") is None
     assert sound_library.pick("whoosh_soft", "a")["role"] == "whoosh"      # template role alias
     # a template's cue keeps to the recordings it was authored on; a role only the new recordings fill picks those
-    assert all(not sound_library.pick(k, str(i)).get("reference") for k in ("whoosh", "impact", "click", "riser") for i in range(12))
+    # (the first library's impact_1 is flagged by the 15 Nov signal audit: an impact cue lands on a clean reference impact)
+    assert all(not sound_library.pick(k, str(i)).get("reference") for k in ("whoosh", "click", "riser") for i in range(12))
+    assert all(sound_library.pick("impact", str(i))["role"] == "impact" for i in range(12))
+    assert not {sound_library.pick(k, str(i))["id"] for k in sound_library.roles() for i in range(12)} & sound_library.flagged()
     assert sound_library.pick("paper")["reference"]["class"] in ("click", "hit", "whoosh")
     assert sound_library.pick("crowd_cheer") is None                        # nothing approved -> skipped
     hits = motion_tools.sound_search("camera photo")
     assert hits and hits[0]["role"] == "shutter" and hits[0]["id"].startswith("sound:")
     listing = motion_tools.list_sound_library(None)
-    assert "sound:impact_1" in listing and "never on" in listing.lower()
+    assert "sound:whoosh_soft_1" in listing and "never on" in listing.lower()
+    assert not any(f"sound:{b} " in listing for b in sound_library.flagged())   # a flagged recording is never listed
     # the whole library is long: the unfiltered listing names the roles of the rest, and a role lists its recordings
     assert "sound:impact_5" not in listing and "impact +" in listing and len(listing) < 9000
-    assert "sound:impact_5" in motion_tools.list_sound_library(None, role="impact")
+    assert "sound:impact_8" in motion_tools.list_sound_library(None, role="impact")
+    assert "sound:impact_5" not in motion_tools.list_sound_library(None, role="impact")   # flagged: a long rumbling tail
     assert "royalty-free, no attribution" in sound_library.describe(sound_library.get("impact_5"))
     assert "CC0" in sound_library.describe(sound_library.get("impact_1"))
 

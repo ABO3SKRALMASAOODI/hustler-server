@@ -44,16 +44,18 @@ def sha256(path, limit=None):
 
 
 def sound_facts(ids=("tick_1", "whoosh_soft_1", "riser_2", "click_1", "typing_2")):
-    """The library sounds a film may place: file, where its peak is, how loud its peak is."""
-    lib_dir = os.path.join(F.scene_worker(), "sound_library")
-    sounds = {}
-    for m in json.load(open(os.path.join(lib_dir, "manifest.json"))):
-        if m["id"] in ids:
-            r = subprocess.run([FF, "-hide_banner", "-i", os.path.join(lib_dir, m["file"]), "-af", "volumedetect", "-f", "null", "-"],
-                               capture_output=True, text=True)
-            mx = next(float(ln.split("max_volume:")[1].split()[0]) for ln in r.stderr.splitlines() if "max_volume" in ln)
-            sounds[m["id"]] = dict(file=m["file"], peak_s=float(m["peak_s"]), max_db=mx)
-    return sounds
+    """The library sounds a film may place: file, where its peak is, how loud its peak is. Keyed by the id the film
+    asks for; a flagged recording's entry is its nearest unflagged one's (`id` says which plays, `asked` the name)."""
+    w = F.scene_worker()
+    lib_dir = os.path.join(w, "sound_library")
+
+    def peak(path):
+        r = subprocess.run([FF, "-hide_banner", "-i", path, "-af", "volumedetect", "-f", "null", "-"], capture_output=True, text=True)
+        return dict(max_db=next(float(ln.split("max_volume:")[1].split()[0]) for ln in r.stderr.splitlines() if "max_volume" in ln))
+    out = F.sfx_filter(w).facts(ids, peak, lib_dir)
+    for f in out.values():
+        f.pop("path", None)
+    return out
 
 
 def studio_record(sid):

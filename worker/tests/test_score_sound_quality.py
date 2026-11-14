@@ -43,8 +43,9 @@ def test_the_audit_is_in_step_with_the_library():
 
 
 def test_the_fixed_table_steps_past_a_flagged_recording():
-    assert SD._free("impact_1", 10.0, []) == "impact_8"                    # sub only on a phone: the clean landing
-    assert SD._free("riser_3", 10.0, []) == "riser_2"                      # riser_3 and riser_1 are both out
+    # a flagged recording steps to its nearest unflagged one on the audit's ruler (worker/sfx_filter.py)
+    assert SD._free("impact_1", 10.0, []) == "impact_9"                    # sub only on a phone: the clean landing
+    assert SD._free("riser_3", 10.0, []) == "riser_8"                      # riser_3 and riser_1 are both out
     assert SD._free("glitch_1", 10.0, []) == "glitch_2"
     assert SD._free("whoosh_soft_2", 10.0, []) == "whoosh_soft_2"          # an unflagged one is kept as it is
 

@@ -169,8 +169,9 @@ def _sound_ctx(dur_s, existing, events, np10=6.0, bed=True, own_tiers=True):
 
 def test_the_directors_own_sounds_take_their_place_in_the_one_hierarchy():
     lib = sound.library()
-    hit = next(k for k, v in lib.items() if v.get("role") == "impact")
-    riser = next(k for k, v in lib.items() if v.get("role") == "riser")
+    # unflagged recordings: a flagged one is replaced before it takes its place (test_sfx_filter.py)
+    hit = next(k for k, v in lib.items() if v.get("role") == "impact" and k not in sound.excluded())
+    riser = next(k for k, v in lib.items() if v.get("role") == "riser" and k not in sound.excluded())
     existing = [{"id": "b01.snd0", "s": hit, "file": lib[hit]["file"], "event_f": 6, "start_s": 0.0, "trim_s": 0.0, "db": -30.0, "peak_s": 0.2},
                 {"id": "b09.snd0", "s": riser, "file": lib[riser]["file"], "event_f": 560, "start_s": 17.6, "trim_s": 0.0, "db": -30.0, "peak_s": 1.0},
                 {"id": "b09.snd1", "s": hit, "file": lib[hit]["file"], "event_f": 560, "start_s": 18.4, "trim_s": 0.0, "db": -30.0, "peak_s": 0.2}]

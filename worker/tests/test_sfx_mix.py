@@ -60,6 +60,15 @@ def test_every_recording_carries_its_measured_hit_loudness():
         k, hp = sfx_mix.hit_level(sid)
         assert k - hp > 4, sid
 
+@pytest.fixture(autouse=True)
+def _no_sfx_flags(monkeypatch):
+    """These tests measure placement and timing mechanics on fixed recordings (impact_1's 0.69 s hit, ding_1, click_1),
+    not the library's quality verdict; the SFX quality filter (worker/sfx_filter.py) has its own tests in
+    test_sfx_filter.py, so here no recording is flagged."""
+    import sfx_filter
+    monkeypatch.setattr(sfx_filter, "flagged", lambda lib_dir=None: frozenset())
+
+
 
 @needs_ffmpeg
 def test_hit_loudness_is_measured_from_the_untouched_files():

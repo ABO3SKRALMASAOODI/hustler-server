@@ -93,11 +93,33 @@ def _load():
 
 
 def catalog(role=None):
+    """Every recording on file (a flagged one included: measurements, an existing EDL's item). Choosing and listing
+    use playable()."""
     rows = _load()
     if role:
         role = ROLE_ALIASES.get(role, role)
         rows = [r for r in rows if r["role"] == role]
     return rows
+
+
+def _filter():
+    import sfx_filter
+    return sfx_filter
+
+
+def flagged():
+    """The recordings no film sounds (worker/sfx_filter.py: lane STING-REF's signal audit, score/sfx_quality.json)."""
+    return _filter().flagged(LIB_DIR)
+
+
+def playable(role=None):
+    """The recordings an editor or a template may choose: catalog() without the flagged ones."""
+    return _filter().playable(catalog(role), LIB_DIR)
+
+
+def resolve(sound_id):
+    """The recording that plays for an id: itself, or a flagged one's nearest unflagged recording (sfx_filter)."""
+    return _filter().nearest(sound_id, LIB_DIR) if get(sound_id) else sound_id
 
 
 def get(sound_id):
@@ -237,7 +259,10 @@ def pick(role, seed=""):
     authored on the first library (the owner's audition), so a role that has one of those keeps to them; a role
     that only reference-matched recordings fill (paper, hit, braam) picks among those. The Director chooses from the
     whole library by signal (score/sound_choice.py)."""
-    rows = catalog(role)
+    rows = playable(role)
+    if not rows:                                  # a role whose every recording is flagged: their nearest clean ones
+        alts = {resolve(r["id"]) for r in catalog(role)} - {None}
+        rows = [get(a) for a in sorted(alts) if get(a)]
     if not rows:
         return None
     rows = [r for r in rows if not r.get("reference")] or rows
@@ -257,7 +282,7 @@ def search(query, limit=6):
            "whip": "swish", "swipe": "swish", "clock": "tick", "counter": "tick"}
     words = [syn.get(w, w) for w in words]
     scored = []
-    for r in _load():
+    for r in _filter().playable(_load(), LIB_DIR):
         hay = set((r["role"] + " " + r["use"] + " " + r["title"]).lower().replace("/", " ").split())
         score = sum(3 if w == r["role"] else 1 for w in words if w == r["role"] or w in hay)
         if score:

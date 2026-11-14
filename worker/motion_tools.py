@@ -108,7 +108,7 @@ def ensure_library_asset(ctx, sound_id):
     row = sound_library.get(sound_id)
     if not row:
         raise ValueError(f"unknown sound '{sound_id}'. Library: "
-                         f"{', '.join(r['id'] for r in sound_library.catalog())}")
+                         f"{', '.join(r['id'] for r in sound_library.playable())}")
     local = sound_library.path(sound_id)
     key = sound_library.asset_key(ctx.project_id, sound_id)
     existing = ctx.db.run(dbx.asset_by_key, ctx.project_id, key)
@@ -137,6 +137,8 @@ def resolve_library_reference(ctx, storage_key):
     if not isinstance(storage_key, str) or not storage_key.startswith(SOUND_PREFIX):
         return None, None
     sound_id = storage_key[len(SOUND_PREFIX):].strip()
+    asked = sound_id
+    sound_id = sound_library.resolve(sound_id) or sound_id     # a flagged recording plays its nearest clean one
     try:
         key = ensure_library_asset(ctx, sound_id)
     except ValueError as e:
@@ -145,9 +147,15 @@ def resolve_library_reference(ctx, storage_key):
         return None, (f"Could not prepare the library sound ({str(e)[:160]}). Try again; "
                       "do NOT claim a sound was added.")
     row = sound_library.get(sound_id)
-    return {"name": f"{sound_id} (Valmera sound library)", "duration_s": row["duration_s"],
-            "library": True, "storage_key": key, "gain_db": row["gain_db"],
-            "sound_id": sound_id}, None
+    out = {"name": f"{sound_id} (Valmera sound library)", "duration_s": row["duration_s"],
+           "library": True, "storage_key": key, "gain_db": row["gain_db"],
+           "sound_id": sound_id}
+    if asked != sound_id:
+        out["replaced"] = asked
+        out["note"] = (f"{asked} is retired from the library (measured: "
+                       f"{', '.join(sound_library._filter().why(asked)) or 'flagged'}); its nearest clean "
+                       f"recording, {sound_id}, plays instead.")
+    return out, None
 
 
 SOUND_POLICY = (
@@ -170,7 +178,11 @@ SOUND_POLICY = (
 
 
 def list_sound_library(ctx, role=None):
-    rows = sound_library.catalog(role or None)
+    rows = sound_library.playable(role or None)       # a flagged recording is never listed (sfx_filter)
+    if not rows and role and sound_library.catalog(role):
+        # a role whose every recording is flagged: its nearest clean recordings answer for it
+        alts = {sound_library.resolve(r["id"]) for r in sound_library.catalog(role)} - {None}
+        rows = [sound_library.get(a) for a in sorted(alts) if sound_library.get(a)]
     if not rows and role:
         # A described sound ("crowd cheer") is matched against the library's
         # uses; one it lacks is filed for the owner to audition by ear

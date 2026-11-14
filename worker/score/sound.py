@@ -222,8 +222,7 @@ CLASS_MIX = _class_mix()
 # Alternates keep the one-recording rules without changing the gesture's kind.
 ALT = {"whoosh_soft_2": "whoosh_soft_1", "whoosh_soft_1": "whoosh_soft_2", "shutter_1": "shutter_2",
        "shutter_2": "shutter_1", "riser_3": "riser_1", "riser_1": "riser_2", "riser_2": "riser_4",
-       "swish_1": "whoosh_soft_2", "pop_1": "click_2", "click_2": "click_1", "glitch_1": "glitch_2",
-       "impact_1": "impact_8"}
+       "swish_1": "whoosh_soft_2", "pop_1": "click_2", "click_2": "click_1", "glitch_1": "glitch_2"}
 KIND_RANK = {"picture": 0, "burst": 0.5, "card": 1, "page": 1.5, "display": 2, "counter": 2.5, "move": 2.7, "flash": 3, "cut": 4}
 MOVE_FAST, MOVE_STILL = 0.012, 0.004        # a camera move's start: 1.2% of the frame in one frame, after three under 0.4%
 DESIGNED = ("picture", "card", "page", "display", "counter", "flash")
@@ -272,19 +271,32 @@ def library():
     return _lib["t"]
 
 
-_bad = {}
+_sf = {}
+
+
+def SF():
+    """worker/sfx_filter.py: the one SFX quality filter every sound path shares (lane STING-REF's library audit,
+    score/sfx_quality.json). Loaded from beside this package, whatever else is on sys.path."""
+    if "m" not in _sf:
+        import importlib.util
+        import sys
+        p = os.path.join(os.path.dirname(HERE), "sfx_filter.py")
+        m = sys.modules.get("sfx_filter")
+        if not (m and os.path.abspath(getattr(m, "__file__", "")) == os.path.abspath(p)):
+            spec = importlib.util.spec_from_file_location("sfx_filter", p)
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            sys.modules.setdefault("sfx_filter", m)
+        _sf["m"] = m
+    return _sf["m"]
 
 
 def excluded():
     """The recordings no film sounds: score/sfx_quality.json's `excluded` (lane STING-REF's library audit, 15 Nov 2026,
     signals only: a long rumbling or debris tail, clipped tops, an audible encoder wall, a sound a phone cannot play,
-    a class the references never use). Every pick skips them; the Director's own lines are left as written."""
-    if "t" not in _bad:
-        try:
-            _bad["t"] = frozenset(json.load(open(os.path.join(HERE, "sfx_quality.json"))).get("excluded") or ())
-        except (OSError, ValueError, AttributeError):
-            _bad["t"] = frozenset()
-    return _bad["t"]
+    a class the references never use). Every pick skips them, and a workflow's or the Director's own line that names
+    one plays its nearest unflagged recording instead (sfx_filter.swap), never the flagged file."""
+    return SF().flagged(SOUNDS)
 
 
 def role_of(sid):
@@ -918,7 +930,11 @@ def plan_sounds(events, ctx):
     report = {"class": cls, "np10": round(np10, 2), "bed": bed, "allow": total, "allow_10s": win, "allow_ticks": n_tick,
               "events": len(events), "placed": [], "body": [], "ticks": [], "dropped": [], "kept_director": len(ctx.get("existing") or []),
               "seed": seed, "budget_duration_s": dur_s + float(ctx.get("delivery_tail_s", 0.0))}
-    existing = list(ctx.get("existing") or [])
+    # a workflow's (or the Director's) own sounds pass through here and may be raised to hero level: a flagged recording
+    # among them plays its nearest unflagged one, re-placed on the same hit (sfx_filter.swap), never as written
+    existing, swapped = SF().swap_all(list(ctx.get("existing") or []), SOUNDS)
+    if swapped:
+        report["replaced"] = swapped
     ex_t = [float(s.get("event_f", 0)) / fps for s in existing]
     speech = ctx.get("speech")
     words = ctx.get("words") or []
@@ -1536,7 +1552,7 @@ def _free(sid, t, uses):
         if sid is None:
             return None
         if sid in excluded():
-            sid = ALT.get(sid)
+            sid = SF().nearest(sid, SOUNDS)          # the nearest unflagged recording on the audit's ruler
             continue
         near = [u for u, s in uses if s == sid]
         if not any(abs(u - t) < SAME_GAP_S for u in near) and sum(1 for u in near if abs(u - t) < SAME_WIN_S / 2) < SAME_MAX:
@@ -1900,7 +1916,7 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
             asks = {str(a.get("id")): a for a in json.load(open(os.path.join(work, "scout.json"))).get("asks") or [] if isinstance(a, dict)}
         except (OSError, ValueError):
             asks = None
-    existing = [dict(s) for s in l1.get("sound") or []]
+    existing, _swapped = SF().swap_all([dict(s) for s in l1.get("sound") or []], SOUNDS)   # never a flagged file, even as written
     if _asked(asks):
         return existing, {"asked": True, "sounds": len(existing), "placed": [], "dropped": []}
     if src is None:
@@ -1956,13 +1972,24 @@ def apply(l1, work=None, index=None, perc=None, asks=None, supply=None, turn_s=N
     """The seam for the compile path and the workflow shell: the L1 with its designed sound. Never raises; on any
     fault the L1 comes back as it was, with the fault in l1["sound_design"]. VALMERA_SOUND_DESIGN=0 turns it off."""
     if os.environ.get("VALMERA_SOUND_DESIGN", "1") == "0":
-        return l1
+        return _clean_l1(l1)
     try:
         sounds, report = design(l1, work=work, index=index, perc=perc, asks=asks, supply=supply, turn_s=turn_s, bed=bed, own_tiers=own_tiers)
         l1["sound"] = sounds
         l1["sound_design"] = report
     except Exception as e:  # noqa: BLE001 — a film is never lost to its sound design
         l1["sound_design"] = {"fault": repr(e)[:300]}
+        _clean_l1(l1)
+    return l1
+
+
+def _clean_l1(l1):
+    """The L1's own sounds with every flagged recording replaced (sfx_filter.swap): even with the design off or failed,
+    no flagged file plays."""
+    try:
+        l1["sound"], _ = SF().swap_all(l1.get("sound") or [], SOUNDS)
+    except Exception:  # noqa: BLE001 - the filter's data missing: the scene mixer's own swap still answers
+        pass
     return l1
 
 

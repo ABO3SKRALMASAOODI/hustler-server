@@ -8280,6 +8280,10 @@ def _resolve_sfx(ctx, storage_key):
     the sound off this clip" is a thing users ask for and the picture is
     simply never used.
     """
+    lib_id = sound_library.id_for_key(storage_key)
+    if lib_id and lib_id in sound_library.flagged():
+        # the project already holds a recording the library retired (sfx_filter): its nearest clean one plays
+        storage_key = motion_tools.SOUND_PREFIX + lib_id
     kit, kit_err = motion_tools.resolve_library_reference(ctx, storage_key)
     if kit or kit_err:
         return kit, kit_err
@@ -20131,6 +20135,7 @@ def _corrupt_screen_sound(ctx, before_ids, dur, style):
     and stopping with it. Returns add_sfx's result, or a sentence saying why
     the screen stays silent."""
     sid = "glitch_1" if dur <= 0.7 else "glitch_2"
+    sid = sound_library.resolve(sid) or sid          # a flagged recording plays its nearest clean one (sfx_filter)
     row = sound_library.get(sid)
     if not row:
         return f"it is silent (the approved {sid} recording is unavailable)"

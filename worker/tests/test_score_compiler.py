@@ -102,7 +102,11 @@ def test_design_sample_compiles():
     assert {"b01.s0", "b02.s0", "b03.s0"} <= ids
     assert any(w["t"] == "NARLAR NOVO" for w in r.l1["items"] if w["k"] == "word")
     assert len(r.l1["sound"]) == 2
-    assert any(s["s"] == "impact_1" and s["db"] == -10 for s in r.l1["sound"])
+    # the Director wrote impact_1 at -10 dB; it is flagged (15 Nov signal audit), so its nearest clean recording plays at
+    # the same hit loudness (worker/sfx_filter.py)
+    table, _ = S.sound_table()
+    imp = next(s for s in r.l1["sound"] if (s.get("replaced") or {}).get("id") == "impact_1")
+    assert imp["s"] == "impact_9" and abs(imp["db"] - (-10 + table["impact_1"]["hit_lufs"] - table["impact_9"]["hit_lufs"])) < 0.01
 
 
 def test_truncated_at_any_byte_compiles():
@@ -207,7 +211,7 @@ def test_sound_peak_lands_on_the_event():
     for s in r.l1["sound"]:
         peak = table[s["s"]]["peak_s"]
         assert abs(s["start_s"] + peak - s["trim_s"] - s["event_f"] / 30) < 1e-3
-    riser = next(s for s in r.l1["sound"] if s["s"] == "riser_1")
+    riser = next(s for s in r.l1["sound"] if (s.get("replaced") or {}).get("id") == "riser_1")   # flagged: riser_2 plays
     assert riser["start_s"] == 0 and riser["trim_s"] > 0     # head cut, peak still on the frame
 
 

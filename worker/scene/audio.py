@@ -134,6 +134,21 @@ def mix_audio(plan):
     return voice + fx, report
 
 
+_sf = {}
+
+
+def _filter():
+    """worker/sfx_filter.py, the SFX quality filter every sound path shares, loaded from beside this package."""
+    if "m" not in _sf:
+        import importlib.util
+        p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sfx_filter.py")
+        spec = importlib.util.spec_from_file_location("sfx_filter_scene", p)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        _sf["m"] = m
+    return _sf["m"]
+
+
 def split_audio(plan):
     """(voice, sounds, report): the spine, and every placed sound on its own track, so the master levels the
     voice before the sounds are laid on it."""
@@ -174,6 +189,9 @@ def split_audio(plan):
             mix[at:at + len(smp)] += smp
             report["sounds"] += 1
             continue
+        s, swapped = _filter().swap(s, SOUNDS)        # a flagged recording never plays: its nearest unflagged one does
+        if swapped:
+            report.setdefault("replaced", []).append(dict(id=s["replaced"]["id"], by=s["s"], at=s.get("event_f")))
         f = s.get("file") or (s.get("s", "") + ".flac")
         p = os.path.join(SOUNDS, os.path.basename(f))
         if not os.path.exists(p):

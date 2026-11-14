@@ -282,8 +282,11 @@ class Plan:
         trim = 0.0
         if start < 0:
             trim, start = -start, 0.0
-        self.sounds.append(dict(id=self.nid("s"), s=name, file=m["file"], event_f=int(f), start_s=r4(start), trim_s=r4(trim),
-                                db=round(db - m["max_db"], 2), peak_s=m["peak_s"]))
+        it = dict(id=self.nid("s"), s=m.get("id") or name, file=m["file"], event_f=int(f), start_s=r4(start), trim_s=r4(trim),
+                  db=round(db - m["max_db"], 2), peak_s=m["peak_s"])
+        if it["s"] != name:
+            it["asked"] = name                   # a flagged recording: its nearest unflagged one plays (sfx_filter)
+        self.sounds.append(it)
         self.events.append(int(f))
 
     def done(self, sid, dur, seed, film):

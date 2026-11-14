@@ -488,7 +488,7 @@ def music_version(ctx, rd, sc):
     final = os.path.join(ctx.run_dir, f"final_{tag}.mp4")
     if not os.path.exists(final):
         try:
-            brand.finish(out, final + ".part.mp4", ctx.tmp, **end_accent(ctx, sc))
+            brand.finish(out, final + ".part.mp4", ctx.tmp, last_word_s=last_word(ctx, sc), **end_accent(ctx, sc))
             os.replace(final + ".part.mp4", final)
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:     # the clean film is delivered either way
             ctx.log(f"{tag} version not finished: {str(e)[:300]}")
@@ -578,11 +578,20 @@ def end_accent(ctx, sc):
     return dict(accent=True, used=used)
 
 
+def last_word(ctx, sc):
+    """The film's last word (programme seconds), from its own voice track (the narration's spine for a narrated film):
+    the brand finish holds the sound about 1.2 s past it, then lets it fall as the references' music falls."""
+    l1 = sc.get("l1_audio") or sc.get("l1")
+    if not l1 or not os.path.exists(l1):
+        return None
+    return brand.last_word(l1, ctx.supply)
+
+
 def finish_and_check(ctx, rd, sc):
     """Brand finish, then the measured checks. A failed check is reported, never a stop."""
     final = os.path.join(ctx.run_dir, "final.mp4")
     if not os.path.exists(final):
-        info = brand.finish(rd["film"], final + ".part.mp4", ctx.tmp, **end_accent(ctx, sc))
+        info = brand.finish(rd["film"], final + ".part.mp4", ctx.tmp, last_word_s=last_word(ctx, sc), **end_accent(ctx, sc))
         os.replace(final + ".part.mp4", final)
     else:
         info = {}

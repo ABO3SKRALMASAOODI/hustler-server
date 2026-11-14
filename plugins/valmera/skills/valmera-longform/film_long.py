@@ -976,28 +976,35 @@ def thin_sounds(sounds, dur_f, lib=None, rate=1.0, gap_s=2.5):
     (a third use takes the role's other recording, lane J's alternates, else it goes). Kept by priority: the turn's
     impact, chapter pages, ledger ticks, prints, pages."""
     allow = max(1, int(rate * dur_f / FPS / 10))
-    order = sorted(sounds, key=lambda s: (PRIORITY.get(s["s"], 9), s["event_f"]))
+    def k(s):                                     # the name the film asked for (a flagged one plays its replacement)
+        return s.get("asked") or s["s"]
+    order = sorted(sounds, key=lambda s: (PRIORITY.get(k(s), 9), s["event_f"]))
     kept = []
     win = 15 * FPS
     for s in order:
         if len(kept) >= allow:
             break
-        if any(abs(s["event_f"] - k["event_f"]) < gap_s * FPS for k in kept):
+        if any(abs(s["event_f"] - x["event_f"]) < gap_s * FPS for x in kept):
             continue
-        near = [k for k in kept if abs(k["event_f"] - s["event_f"]) < win]
-        if len({ROLE.get(k["s"]) for k in near} | {ROLE.get(s["s"])}) > 2:
+        near = [x for x in kept if abs(x["event_f"] - s["event_f"]) < win]
+        if len({ROLE.get(k(x)) for x in near} | {ROLE.get(k(s))}) > 2:
             continue
-        if sum(1 for k in near if ROLE.get(k["s"]) == ROLE.get(s["s"])) >= ROLE_CAP.get(ROLE.get(s["s"]), 2):
+        if sum(1 for x in near if ROLE.get(k(x)) == ROLE.get(k(s))) >= ROLE_CAP.get(ROLE.get(k(s)), 2):
             continue
-        if sum(1 for k in near if k["s"] == s["s"]) >= 2:
-            alt = ALT.get(s["s"])
-            if not alt or not lib or alt not in lib or sum(1 for k in near if k["s"] == alt) >= 2:
+        if sum(1 for x in near if x["s"] == s["s"]) >= 2:
+            alt = ALT.get(k(s))
+            if not alt or not lib or alt not in lib or k(s) not in lib:
                 continue
-            target = float(s["db"]) + float(lib[s["s"]]["max_db"])
             m = lib[alt]
+            if sum(1 for x in near if x["s"] == (m.get("id") or alt)) >= 2:
+                continue
+            target = float(s["db"]) + float(lib[k(s)]["max_db"])
             start = s["event_f"] / FPS - m["peak_s"]
-            s = dict(s, s=alt, file=m["file"], start_s=r4(max(start, 0.0)), trim_s=r4(max(-start, 0.0)),
+            s = dict(s, s=m.get("id") or alt, file=m["file"], start_s=r4(max(start, 0.0)), trim_s=r4(max(-start, 0.0)),
                      db=round(target - m["max_db"], 2), peak_s=m["peak_s"])
+            s.pop("asked", None)
+            if s["s"] != alt:
+                s["asked"] = alt
         kept.append(s)
     return sorted(kept, key=lambda s: s["event_f"])
 
@@ -1168,7 +1175,9 @@ def audio_master(ctx, l1, narration_wav):
     voice[at:at + len(v)] += v
     fx = np.zeros((n, 2), np.float32)
     lib_dir = os.path.join(F.scene_worker(), "sound_library")
+    SF = PX.sfx_filter(F.scene_worker())
     for s in l1.get("sound") or []:
+        s, _ = SF.swap(s, lib_dir)               # a flagged recording never plays: its nearest unflagged one does
         smp = A.pcm(os.path.join(lib_dir, os.path.basename(s["file"])))[int(round(float(s.get("trim_s", 0)) * sr)):]
         a = int(round(float(s["start_s"]) * sr))
         if a >= n or not len(smp):

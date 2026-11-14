@@ -878,6 +878,25 @@ def voice_lufs(media):
     return val if val is not None else -20.0
 
 
+def sfx_filter():
+    """worker/sfx_filter.py of the worker this short is made with (the shell's worker_dir, else the synced main): the one
+    SFX quality filter every sound path shares (lane STING-REF's signal audit)."""
+    import importlib.util
+    import sys
+    shell = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "_shell")
+    if shell not in sys.path:
+        sys.path.insert(0, shell)
+    import brand
+    p = next((x for x in (os.path.join(brand.worker_dir(), "sfx_filter.py"),
+                          "/Users/masaoodi/Documents/Valmera/worktrees/skill-main/worker/sfx_filter.py") if os.path.exists(x)), None)
+    if p is None:
+        raise RuntimeError("no worker with sfx_filter.py: a flagged sound could play")
+    spec = importlib.util.spec_from_file_location("sfx_filter_" + str(abs(hash(p))), p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
 def place_sounds(l1, events, manifest, voice, np10, table=None):
     """Sounds on picture events only, thinned to the class's allowance and never more than the owner's two: the
     payoff's cut first, then a designed landing, then the first picture; one sample never inside 3 s of itself;
@@ -885,6 +904,8 @@ def place_sounds(l1, events, manifest, voice, np10, table=None):
     fps = l1.get("fps", 30)
     n = int(l1["dur_f"])
     table = dict(SOUNDS, **(table or {}))
+    SF = sfx_filter()
+    table = {k: (SF.nearest(v) if v else v) for k, v in table.items()}   # a flagged recording: its nearest unflagged one
     lib = {s["id"]: s for s in manifest}
     cls = "T" if np10 < 1 else "M" if np10 < 5 else "P"
     rate = RATE_10S.get(cls) or min(0.9 * np10, 6.0)

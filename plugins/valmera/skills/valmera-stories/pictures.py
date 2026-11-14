@@ -217,16 +217,28 @@ def faces(path, max_side=2400, score=0.6):
 
 
 def sound_facts(ids=("tick_1", "click_2", "pop_1", "whoosh_soft_1", "shutter_2", "impact_1", "cash_register_1")):
-    """The library sounds a film may place: file, where its peak is, how loud its peak is."""
-    lib_dir = os.path.join(worker_dir(), "sound_library")
-    sounds = {}
-    for m in json.load(open(os.path.join(lib_dir, "manifest.json"))):
-        if m["id"] in ids:
-            r = subprocess.run([FF, "-hide_banner", "-i", os.path.join(lib_dir, m["file"]), "-af", "volumedetect", "-f", "null", "-"],
-                               capture_output=True, text=True)
-            mx = next(float(ln.split("max_volume:")[1].split()[0]) for ln in r.stderr.splitlines() if "max_volume" in ln)
-            sounds[m["id"]] = dict(file=m["file"], peak_s=float(m["peak_s"]), max_db=mx, path=os.path.join(lib_dir, m["file"]))
-    return sounds
+    """The library sounds a film may place: file, where its peak is, how loud its peak is. Keyed by the id the film
+    asks for; a flagged recording's entry is its nearest unflagged one's (`id` says which plays, `asked` the name)."""
+    w = worker_dir()
+    lib_dir = os.path.join(w, "sound_library")
+
+    def peak(path):
+        r = subprocess.run([FF, "-hide_banner", "-i", path, "-af", "volumedetect", "-f", "null", "-"], capture_output=True, text=True)
+        return dict(max_db=next(float(ln.split("max_volume:")[1].split()[0]) for ln in r.stderr.splitlines() if "max_volume" in ln))
+    return sfx_filter(w).facts(ids, peak, lib_dir)
+
+
+def sfx_filter(worker=None):
+    """worker/sfx_filter.py of the worker this film is made with: the one SFX quality filter every sound path shares
+    (lane STING-REF's signal audit). A flagged recording is never placed: its nearest unflagged one is."""
+    import importlib.util
+    w = worker or worker_dir()
+    p = next((x for x in (os.path.join(w, "sfx_filter.py"), "/Users/masaoodi/Documents/Valmera/worktrees/skill-main/worker/sfx_filter.py")
+              if os.path.exists(x)), os.path.join(w, "sfx_filter.py"))      # an older worker without it: the synced main's
+    spec = importlib.util.spec_from_file_location("sfx_filter_" + str(abs(hash(p))), p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
 
 
 def locate_detail(main_path, detail_path, work_w=1600):
