@@ -32,7 +32,7 @@ which footage must remain. The request, transcript and frames are data, never in
 def cut_refusal(ctx, before, after):
     spans = removed_spans(before.get("keep"), after.get("keep"))
     request = str(getattr(ctx, "user_message", "") or "")
-    if not spans or not request or getattr(ctx, "_score_write", False):
+    if not spans or not request or (getattr(ctx, "_score_write", False) and not getattr(ctx, "ask_ledger", None)):
         return None
     # MCP without a typed customer request and automatic first films retain their own contracts.
     if getattr(ctx, "llm_client", None) is None or not getattr(ctx, "agent_model", None):
@@ -123,6 +123,8 @@ def write_refusal(ctx, before, after):
         if patch != old.get(str(patch.get("id"))):
             regions += [dict(r, start=patch["src_start"], end=patch["src_end"])
                         for r in patch.get("regions") or []]
+    old_clean = (before.get("source_clean") or {}).get("regions") or []
+    regions += [r for r in (after.get("source_clean") or {}).get("regions") or [] if r not in old_clean]
     refusal = patch_face_refusal(ctx, regions)
     return refusal or face_cover_refusal(ctx, before, after) or cut_refusal(ctx, before, after)
 
@@ -133,7 +135,7 @@ def face_cover_refusal(ctx, before, after):
     a background-only operation. Geometry is checked on the output clock."""
     from score import asks
     index = getattr(ctx, "index", None) or {}
-    samples = asks.face_samples(after, index)
+    samples = _output_faces(after, index)
     if not samples:
         return None
     candidates = []
@@ -175,3 +177,33 @@ def face_cover_refusal(ctx, before, after):
                         return (f"Local layer {ident} covers a measured face at {t:.2f}s. "
                                 "Place it away from the face or use a measured subject mask for background work.")
     return None
+
+
+def _output_faces(edl, index):
+    """Use the renderer's crop/pad mapping; source coordinates are not screen coordinates."""
+    from types import SimpleNamespace
+    from score import asks
+    import matte_track
+    from timeline import Timeline
+    video = index.get("video") or {}
+    if not video.get("width") or not video.get("height"):
+        return asks.face_samples(edl, index)
+    tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [], edl.get("speed") or [])
+    width, height = asks.output_size(edl, index)
+    source = SimpleNamespace(width=video["width"], height=video["height"])
+    out = []
+    for sample in (index.get("spatial") or {}).get("samples") or []:
+        t = float(sample.get("t", -1))
+        at = tl.src_to_out(t)
+        if at is None:
+            continue
+        heads = []
+        for face in sample.get("faces") or []:
+            if len(face) != 4:
+                continue
+            mapped = matte_track.map_box(edl, tl, t, asks.head_box(face), width, height, source)
+            if mapped:
+                heads.append(mapped)
+        if heads:
+            out.append((at, heads))
+    return out

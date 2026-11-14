@@ -80,3 +80,63 @@ def test_missing_frames_cannot_pass_visual_ask(monkeypatch):
     v=asks.check(NS(index={},duration=10),ledger,"Done",{"keep":[[0,10]]},preview={"edl_version":2})
     assert v['asks'][0]['state']=='cannot_tell'
     assert v['asks'][0]['line']!='Done'
+
+
+def test_reframed_face_uses_output_not_source_coordinates():
+    ctx = NS(index={"video":{"width":1920,"height":1080}, "spatial":{"samples":[{"t":2,"faces":[[.45,.2,.55,.4]]}]}})
+    before={"keep":[[0,11]],"frame":{"ratio":"9:16","mode":"crop"}}
+    after=dict(before,fx=[{"id":"rg1","type":"region","start":0,"end":11,
+                          "effect":"exposure","region":{"shape":"rect","box":[.35,.2,.65,.3]}}])
+    assert "face" in ei.face_cover_refusal(ctx,before,after)
+
+
+def test_batch_write_cannot_bypass_eye_guard():
+    import agent_tools
+    ctx = NS(_states_seen={}, duration=5.6, latest_edl=lambda:{"version":1,"json":{"keep":[[0,5.6]]}},
+             index={"spatial":{"samples":[{"t":2,"faces":[[.3,.1,.7,.4]]}]}})
+    proposed={"keep":[[0,5.6]],"patches":[{"id":"pa1","asset_key":"patches/1/p.mp4","fp":"x",
+                  "src_start":0,"src_end":5.6,"regions":[{"id":"er1","x":.3,"y":.2,"w":.2,"h":.1}]}]}
+    result=agent_tools.ToolContext.write_edl(ctx,proposed,"remove mark")
+    assert result.startswith("REJECTED") and "face" in result
+
+
+def test_same_edl_new_mask_render_is_checked_again(monkeypatch):
+    ledger=asks.settle({"asks":[{"kind":"edit","how":"look"}]},{"keep":[[0,5]]})
+    ledger['cfg']={"check":True,"repairs":0}
+    ctx=NS(ask_ledger=ledger, ask_verdict=None, latest_edl=lambda:{"version":2,"json":{"keep":[[0,5]]}},
+           last_preview={"edl_version":2,"media_key":"before-mask.mp4"})
+    seen=[]
+    def check(*a,**k):
+        seen.append(k)
+        return {"asks":[{"id":"a1","state":"not_done","seen":"unchanged","line":"Not done"}]}
+    monkeypatch.setattr(asks,'check',check)
+    monkeypatch.setattr(agent_loop,'_turn_change_list',lambda c:'')
+    agent_loop._asks_check(ctx,'Done')
+    ctx.last_preview={"edl_version":2,"media_key":"after-mask.mp4"}
+    agent_loop._asks_check(ctx,'Done')
+    assert len(seen)==2 and all('fixed' not in k for k in seen)
+
+
+def test_finished_matte_invalidates_same_edl_preview_cache(monkeypatch):
+    import render_dependencies as rd
+    monkeypatch.setattr(rd,'needed',lambda *a:False)
+    monkeypatch.setattr(rd,'_wait_for_matte',lambda *a:{"status":"pending"})
+    ctx=NS(rendered_versions=set(), last_preview={})
+    row={"version":2,"json":{"keep":[[0,5]]}}
+    rd.before_preview(ctx,row)
+    old=ctx.render_dependency_key
+    ctx.last_preview={"edl_version":2,"render_dependency_key":old}
+    ctx.rendered_versions={2}
+    monkeypatch.setattr(rd,'_wait_for_matte',lambda *a:{"status":"ready"})
+    rd.before_preview(ctx,row)
+    assert ctx.render_dependency_key!=old and 2 not in ctx.rendered_versions
+
+
+def test_new_tray_image_has_pixels_without_message_attachment_id(monkeypatch):
+    images=[{"id":i,"kind":"image_ref","storage_key":f"images/{i}","meta":{},"found":False} for i in range(1,202)]
+    monkeypatch.setattr(asks,'project_assets',lambda ctx:images)
+    ids=agent_loop._visual_priority_ids(NS(),{"meta":{}})
+    assert ids[0]==201
+    by_id={r['id']:r for r in images}
+    selected, omitted=agent_loop._image_visual_plan([by_id[i] for i in ids],4,ids)
+    assert selected[0]['id']==201 and omitted==197

@@ -14,6 +14,7 @@ The switch is app_kv.typed_asks, read per job. With no row the ledger and verifi
 typed request; routing is opt-in.
 """
 import copy
+import hashlib
 import json
 import os
 import time
@@ -26,8 +27,9 @@ DEFAULTS = {"mode": "on", "user_ids": [], "director": False, "patch": False, "pa
 # The check decides what the customer is told is done. Round 2 ran it on the turn's model (Haiku on the
 # plans replayed) and it answered both ways on the same film: p5345's music ask "not_done" on one run
 # and "their alternative was taken" on the next, with a line that said the reply gave no reason; its
-# capability question "done" and then "cannot_tell" on the same answer. The check runs on this model
-# unless the switch names another (check_model; "inherit" keeps the turn's model).
+# capability question "done" and then "cannot_tell" on the same answer. Verification uses a separate
+# call and configurable provider; the funded OpenAI rung avoids the closed Anthropic replay share.
+# check_model overrides it; "inherit" uses the turn's model.
 CHECK_MODEL = "gpt-6.1-sol"
 EDIT_KINDS = ("film", "change", "edit")
 OPEN_STATES = ("not_done", "partly", "cannot_tell")
@@ -36,8 +38,8 @@ OPEN_STATES = ("not_done", "partly", "cannot_tell")
 # ------------------------------------------------------------------ the switch
 
 def parse(raw):
-    """app_kv text to a normalised dict. A row that can't be read is off: a broken switch must not
-    open a path, and with no row at all the default (internal accounts) holds."""
+    """app_kv text to a normalised dict. Explicit off and unreadable rows stay off.
+    Without a row, request checks run on all accounts; alternate editing routes remain opt-in."""
     if raw is None:
         return dict(DEFAULTS)
     try:
@@ -954,6 +956,13 @@ def frame_pages(ctx, preview, limit=3):
             continue
         out.append((local, f"Rendered film, sheet {n}: {label}"))
     return out
+
+
+def preview_fingerprint(preview):
+    """A version can render again after a mask or other dependency finishes.
+    A verdict certifies those exact render bytes/reports, not just the EDL."""
+    return hashlib.sha256(json.dumps(preview or {}, sort_keys=True, default=str,
+                                     separators=(",", ":")).encode()).hexdigest()
 
 
 def stored_preview(ctx, version):

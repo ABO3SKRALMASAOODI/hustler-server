@@ -751,9 +751,9 @@ def _attachment_context(worker_db, ctx, user_message):
                 # block this turn (round 95) — no vision round trip, and
                 # never a false "you cannot see it".
                 notes.append(
-                    f'[User attached reference image "{name}" — its pixels '
+                    f'[User uploaded image "{name}" — its pixels '
                     "are attached in the FILMSTRIPS & STILLS block, labeled "
-                    f'with storage_key {asset["storage_key"]}.]')
+                    f'with storage_key {asset["storage_key"]}. The database kind image_ref is a still image, not an editorial instruction: it can replace the picture with add_overlay(fit=cover) for a chosen duration while preserving the original audio, or serve as a style reference, according to the request.]')
                 continue
             cap = m.get("caption")
             if not cap and llm.vision_available() and \
@@ -773,11 +773,11 @@ def _attachment_context(worker_db, ctx, user_message):
                 except Exception:
                     cap = None
             if cap:
-                notes.append(f'[User attached reference image "{name}" — '
+                notes.append(f'[User uploaded image "{name}" — '
                              f'what it shows: {cap}]')
             else:
                 notes.append(
-                    f'[User attached reference image "{name}" — no vision '
+                    f'[User uploaded image "{name}" — no vision '
                     "model is available, so you CANNOT see it. Say so "
                     "honestly and ask the user to describe what matters.]")
     return ("\n\n" + "\n".join(notes)) if notes else ""
@@ -1329,6 +1329,20 @@ def _thin_filmstrip(parts):
             if i not in images or i in chosen]
 
 
+def _visual_priority_ids(ctx, user_message):
+    """Tray uploads can lack message attachment IDs. Keep their pixels in the
+    first orientation page too, newest first, even in a library larger than that page."""
+    from score import asks
+    ids = [item.get("id") if isinstance(item, dict) else item
+           for item in (user_message.get("meta") or {}).get("attachments") or []]
+    for asset in reversed(asks.project_assets(ctx)):
+        if (asset.get("kind") == "image_ref" and not asset.get("found")
+                and asset["meta"].get("staged") not in (True, "true")
+                and asset.get("id") not in ids):
+            ids.append(asset["id"])
+    return ids
+
+
 def _build_messages(ctx, worker_db, user_message, attachment_note="",
                     include_visual_overview=True):
     def _component(name, value):
@@ -1381,16 +1395,7 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
     if include_visual_overview and ctx.direct_sight \
             and llm.agent_sees(ctx.agent_model):
         try:
-            attachment_ids = (user_message.get("meta") or {}).get(
-                "attachments") or []
-            attachment_ids = [
-                item.get("id") if isinstance(item, dict) else item
-                for item in attachment_ids]
-            from score import asks as _asset_asks
-            for asset in _asset_asks.project_assets(ctx):
-                if asset.get("kind") == "image_ref" and not asset.get("found") and asset["meta"].get("staged") not in (True, "true"):
-                    if asset.get("id") not in attachment_ids:
-                        attachment_ids.append(asset["id"])
+            attachment_ids = _visual_priority_ids(ctx, user_message)
             parts = filmstrip_parts(
                 ctx, worker_db, priority_asset_ids=attachment_ids)
             if parts:
@@ -2966,14 +2971,17 @@ def _asks_check(ctx, draft, allow_repair=True):
         # This request rendered nothing of this version (it changed nothing): the version's own
         # earlier preview, when there is one. Never a preview of another version.
         preview = asks.stored_preview(ctx, row.get("version"))
+    preview_digest = asks.preview_fingerprint(preview)
     previous = getattr(ctx, "ask_verdict", None) or {}
-    if previous.get("edl_version") == row.get("version") and previous.get("draft") == (draft or "")[:200]:
+    same_film = (previous.get("edl_version") == row.get("version")
+                 and previous.get("preview_digest") == preview_digest)
+    if same_film and previous.get("draft") == (draft or "")[:200]:
         verdict = previous
     else:
         # Same film as the last check: the asks judged on the film keep their verdict; only the asks
         # that read the reply are asked again (a new draft can answer them).
         fixed = {}
-        if previous.get("edl_version") is not None and previous.get("edl_version") == row.get("version"):
+        if previous.get("edl_version") is not None and same_film:
             bound = {a["id"] for a in ledger["asks"] if asks.reply_bound(a)}
             fixed = {r["id"]: r for r in previous.get("asks") or [] if r.get("id") not in bound}
         try:
@@ -2985,6 +2993,7 @@ def _asks_check(ctx, draft, allow_repair=True):
             print(f"[asks] check skipped: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
             return None
         verdict["edl_version"] = row.get("version")
+        verdict["preview_digest"] = preview_digest
         verdict["draft"] = (draft or "")[:200]
         if fixed and "unasked" not in verdict:
             verdict["unasked"] = previous.get("unasked") or []
@@ -3028,6 +3037,11 @@ def _asks_settle(ctx, final, outcome):
     verdict = getattr(ctx, "ask_verdict", None)
     try:
         if verdict and str(verdict.get("edl_version")) != str(ctx.latest_edl().get("version")):
+            verdict = None
+        preview = getattr(ctx, "last_preview", None) or {}
+        if (verdict and verdict.get("preview_digest") and
+                str(preview.get("edl_version")) == str(verdict.get("edl_version")) and
+                asks.preview_fingerprint(preview) != verdict["preview_digest"]):
             verdict = None
     except Exception:  # noqa: BLE001
         verdict = None

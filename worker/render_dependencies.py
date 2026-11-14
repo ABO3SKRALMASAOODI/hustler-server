@@ -38,15 +38,22 @@ def _wait_for_matte(ctx, row, wait_s):
         tl = Timeline(edl["keep"], edl.get("inserts") or [],
                       edl.get("speed") or [])
         _ensure_matte(ctx, edl, tl, windows, wait_s=wait_s)
+        # The same EDL can first render a substitute, then its measured subject.
+        # Bind preview caching to the dependency state, not just the EDL version.
+        state = matte_track.matte_status(edl, getattr(ctx, "index", None) or {})
+        return {"status": state.get("status"), "windows": state.get("windows"),
+                "reason": state.get("reason")}
     except Exception as e:  # noqa: BLE001 — a wait never fails a preview
         print(f"[render_dependencies] matte wait skipped: {e}", flush=True)
 
 
 def before_preview(ctx, row, wait_s=60):
-    _wait_for_matte(ctx, row, wait_s * MATTE_WAIT_FACTOR)
+    matte_state = _wait_for_matte(ctx, row, wait_s * MATTE_WAIT_FACTOR)
     ctx.render_dependency_key = None
     if not needed(ctx, row):
         ctx.render_dependency_state = None
+        if matte_state:
+            _bind_preview(ctx, row, {"matte": matte_state})
         return None
     from tools_ext.world_tools import _world_ctx, _launch_source
     import world_layer
@@ -73,11 +80,16 @@ def before_preview(ctx, row, wait_s=60):
     versions = {kind: {key: (sidecars.spec(kind) or {}).get(key)
                        for key in ("model_id", "model_version")}
                 for kind, _ranges, _params in requests}
-    material = {"source": source.sha256, "requests": requests, "models": versions}
+    material = {"source": source.sha256, "requests": requests, "models": versions, "matte": matte_state}
+    _bind_preview(ctx, row, material)
+    return None
+
+
+def _bind_preview(ctx, row, material):
     ctx.render_dependency_key = hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode()).hexdigest()
     # A previously rendered substitute is not the same picture as the now
     # measured composition, even when the EDL version did not change.
     preview = getattr(ctx, "last_preview", None) or {}
     if preview.get("edl_version") == row["version"] and preview.get("render_dependency_key") != ctx.render_dependency_key:
-        ctx.rendered_versions.discard(row["version"])
+        getattr(ctx, "rendered_versions", set()).discard(row["version"])
     return None
