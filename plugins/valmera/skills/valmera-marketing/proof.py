@@ -476,8 +476,11 @@ def write(ctx, idea, card, rc, notes=None):
                "segment, so the cut can change picture every half second), \"melody\": falling|rising|level|wide, \"emphasis\": [one or "
                "two words of say], \"pause_after\": 0.18 to 0.3 (0.4 where it turns, at most twice), \"direction\": a few words for the "
                "actor, \"era\": 2026, \"collage\": true on the one or two segments that list several things}], \"named\": [{\"name\": what a "
-               "camera filmed (an editor at a timeline, a podcast studio, a phone feed of shorts, a named app), \"is\": thing|place|"
-               "company|person|event, \"searches\": one to three searches, \"must_show\": what a picture must visibly show to count}], "
+               "camera filmed and anyone can find on YouTube or Wikimedia Commons (the speaker on stage, an editor at a timeline, a "
+               "podcast studio, a phone scrolling shorts, a named app's interface), \"is\": thing|place|company|person|event, \"searches\": "
+               "one to three searches, \"must_show\": what a picture must visibly show to count}]; never name the recording itself here: "
+               "in `pictures`, the names \"THE UPLOAD\" and \"THE EXPORT\" put silent seconds of the real clip and of the real export "
+               "on that segment, "
                "\"proof\": {\"before_after\": index of the segment the before plays after, \"after_after\": index of the segment the after "
                "plays after (the one that says the typed sentence)}}. Mark one \"low\" (the pain at its worst), one \"turn\", and the "
                "\"payoff\" right after the after.")
@@ -637,7 +640,11 @@ def supply(ctx, script):
     durs = chain.seg_durs(words_all, len(sc["segments"]))
     durs = [round(float(x) * W3.FOOTAGE_MORE, 2) for x in durs] if durs else durs
     anchors = {k: [r["path"] for r in v if r.get("path")] for k, v in (pack.get("pictures") or {}).items()}
-    foot = chain.footage(ctx, script, durs, anchors=anchors)
+    own = ("THE UPLOAD", "THE EXPORT")
+    fscript = json.loads(json.dumps(script))         # the footage engine searches the web; the recording's own names are ours
+    for seg in fscript["script"]["segments"]:
+        seg["pictures"] = [n for n in seg.get("pictures") or [] if n not in own]
+    foot = chain.footage(ctx, fscript, durs, anchors=anchors)
     fdir = os.path.join(sup_dir, "footage")
     os.makedirs(fdir, exist_ok=True)
     pack["footage"] = [dict(i=ln["i"], clips=[W3.clip_facts(dict(c, path=os.path.join(fdir, c["file"]))) for c in ln["clips"]])
@@ -665,6 +672,28 @@ def supply(ctx, script):
         pack["footage"][0]["clips"].insert(0, tease)
     else:
         pack["footage"] = [dict(i=0, clips=[tease])]
+    # THE UPLOAD / THE EXPORT in a segment's pictures: silent seconds of the real clip and export, outside the cut-ins
+    lines = {int(ln["i"]): ln for ln in pack["footage"]}
+    rec_ = json.load(open(script["record"]))
+    ex_ = next((e for e in rec_["exports"] if e["tag"] == "final"), rec_["exports"][-1])
+    srcs = {"THE UPLOAD": (rec_["upload"]["file"], rec_["upload"]["dur"], [pc["before"]["t"]]),
+            "THE EXPORT": (ex_["file"], ex_["dur"] - 4.5, [pc["after"]["t"], pc["tease"]["t"]])}
+    n_own = {}
+    for i, seg in enumerate(sc["segments"]):
+        for name in [n for n in seg.get("pictures") or [] if n in srcs]:
+            path, dur, busy = srcs[name]
+            for j in range(2):
+                k = n_own.get(name, 0)
+                t = 0.4 + (k * 2.9) % max(dur - 2.0, 1.0)
+                if any(a - 1.4 <= t <= b for a, b in busy):
+                    t = (max(b for a, b in busy) + 0.3 + k * 1.5) % max(dur - 2.0, 1.0)
+                n_own[name] = k + 1
+                fn = f"product/{'upload' if name == 'THE UPLOAD' else 'export'}_{k}.mp4"
+                cut(path, t, t + 1.4, os.path.join(fdir, fn), audio=False)
+                c = W3.clip_facts(dict(path=os.path.join(fdir, fn), file=fn, subject=name, seconds=1.4,
+                                       source=dict(url="valmera studio recording"), time_range=[round(t, 2), round(t + 1.4, 2)]))
+                lines.setdefault(i, dict(i=i, clips=[]))["clips"].append(c)
+    pack["footage"] = [lines[k] for k in sorted(lines)]
     talk = {}
     for ln in pack["footage"]:
         for c in ln["clips"]:
