@@ -444,7 +444,7 @@ def music_version(ctx, rd, sc):
     final = os.path.join(ctx.run_dir, f"final_{tag}.mp4")
     if not os.path.exists(final):
         try:
-            brand.finish(out, final + ".part.mp4", ctx.tmp)
+            brand.finish(out, final + ".part.mp4", ctx.tmp, **end_accent(ctx, sc))
             os.replace(final + ".part.mp4", final)
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:     # the clean film is delivered either way
             ctx.log(f"{tag} version not finished: {str(e)[:300]}")
@@ -512,11 +512,26 @@ def no_music(l1_path):
     return dict(sounds=len(l1.get("sound") or []), foreign_sounds=bad, audio_assets=audio_assets, ok=not bad and not audio_assets)
 
 
+def end_accent(ctx, sc):
+    """The brand finish's end accent (a sting on the card's reveal, the film's tail ringing under the card) for the
+    workflows that close on the product's card as a signature: podcast shorts, stories, long-form. The marketing film
+    sells Valmera inside the film and designs its own close, so it keeps the plain finish. `used`: the library
+    recordings the film's own sound design already plays, so the sting is never one of them."""
+    if getattr(ctx, "workflow", None) == "wf2":
+        return dict(accent=False)
+    used = []
+    try:
+        used = [s["file"] for s in json.load(open(sc["l1"])).get("sound") or [] if s.get("file")]
+    except (KeyError, TypeError, OSError, ValueError):
+        pass
+    return dict(accent=True, used=used)
+
+
 def finish_and_check(ctx, rd, sc):
     """Brand finish, then the measured checks. A failed check is reported, never a stop."""
     final = os.path.join(ctx.run_dir, "final.mp4")
     if not os.path.exists(final):
-        info = brand.finish(rd["film"], final + ".part.mp4", ctx.tmp)
+        info = brand.finish(rd["film"], final + ".part.mp4", ctx.tmp, **end_accent(ctx, sc))
         os.replace(final + ".part.mp4", final)
     else:
         info = {}
