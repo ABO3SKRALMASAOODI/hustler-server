@@ -1198,9 +1198,14 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
         lv, _ = AU.level_voice(voice, tmp) if float(np.abs(voice).max()) > 1e-5 else (voice, {})
         music, mrep = track(song_path, song, plan, marks, voice=lv[:int(marks["dur_s"] * SR)], profile=prof)
         # with the bed known, each placed sound is made to be there over the voice and the song together
-        l1["sound"] = SD.present_over(l1["sound"], to_ar(lv), to_ar(music), float(l1["fps"]))
         if kind == 'podcast':
             from . import audibility
+            # Normalize the existing recorded attacks before the spectral pass
+            # can discard a quiet sample. This adds no events or recordings.
+            l1['sound'] = audibility.present_hits(l1['sound'], lv, music,
+                lambda items: AU.split_audio(_Plan(dict(l1,sound=items),src))[1])
+        l1["sound"] = SD.present_over(l1["sound"], to_ar(lv), to_ar(music), float(l1["fps"]))
+        if kind == 'podcast':
             l1['sound'] = audibility.present_hits(l1['sound'], lv, music,
                 lambda items: AU.split_audio(_Plan(dict(l1,sound=items),src))[1])
         rep["lifted_for_bed"] = sum(1 for x in l1["sound"] if x.get("lifted_for_bed_db"))
