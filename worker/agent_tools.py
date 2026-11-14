@@ -752,6 +752,10 @@ class ToolContext:
         word_refusal = word_edges.refusal(self, prev['json'], normalized)
         if word_refusal:
             return f"REJECTED (EDL v{prev['version']} unchanged): {word_refusal}"
+        import required_broll
+        picture_refusal = required_broll.write_refusal(self, prev['json'], normalized)
+        if picture_refusal:
+            return f"REJECTED (EDL v{prev['version']} unchanged): {picture_refusal}"
         import edit_integrity
         integrity_refusal = edit_integrity.write_refusal(self, prev["json"], normalized)
         if integrity_refusal:
@@ -34574,6 +34578,7 @@ REQUIRED_ARGS = {
     "remove_aspect_shift": ["id"],
     "search_stock": ["query"],
     "research_broll": ["moments"],
+    "generate_video": ["prompt"],
     "add_stock_media": ["id"],
     "insert_media": ["asset_key", "at_output_s"],
     "start_media_sequence": ["asset_key"],

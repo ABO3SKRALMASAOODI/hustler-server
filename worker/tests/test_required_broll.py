@@ -56,3 +56,14 @@ def test_missing_render_cannot_claim_picture_done(tmp_path):
     result = required_broll.check(ctx, {'required_pictures': [p]}, {'keep': [[0, 5]]}, {})
     assert result['picture1']['state'] == 'cannot_tell'
     assert 'crypto mining' in result['picture1']['line']
+
+
+def test_illustration_does_not_extend_the_narration_clock():
+    ctx = NS(ask_ledger={'required_pictures': [{'subject': 'Disney'}],
+                        'pictures_preserve_speech_clock': True})
+    before = {'inserts': []}
+    after = {'inserts': [{'id': 'image1', 'duration_s': 3}]}
+    assert 'add_overlay' in required_broll.write_refusal(ctx, before, after)
+    assert required_broll.write_refusal(ctx, before, {'overlays': [{'duration_s': 3}]}) is None
+    ctx.ask_ledger['pictures_preserve_speech_clock'] = False
+    assert required_broll.write_refusal(ctx, before, after) is None
