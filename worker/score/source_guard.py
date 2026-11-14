@@ -11,6 +11,17 @@ def _boxes(sample):
             and 0 <= b[1] < b[3] <= 1]
 
 
+def missing_shot_boxes(index, keep):
+    """The fallback reframer may not infer a subject across source cuts."""
+    if not index.get("_first_film_source_guard"):
+        return False
+    samples = (index.get("spatial") or {}).get("samples") or []
+    shots = index.get("shots") or [{"start": 0, "end": index["video"]["duration"]}]
+    return any(not any(s["start"] <= row["t"] < s["end"] and _boxes(row)
+                       for row in samples)
+               for s in shots if any(s["start"] < b and s["end"] > a for a, b in keep))
+
+
 def apply(l1, index, perception):
     if not index.get("_first_film_source_guard"):
         return []
