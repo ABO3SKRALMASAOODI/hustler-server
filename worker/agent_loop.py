@@ -2974,6 +2974,11 @@ def _asks_check(ctx, draft, allow_repair=True):
     ledger = getattr(ctx, "ask_ledger", None)
     if not ledger or not ledger.get("asks") or not (ledger.get("cfg") or {}).get("check", True):
         return None
+    if ledger.get('picture_manifest_error'):
+        # Without subject enumeration, a generic visual pass cannot prove
+        # that none of the customer's named pictures were silently dropped.
+        ctx.ask_verdict = None
+        return None
     from score import asks
     try:
         row = ctx.latest_edl()
