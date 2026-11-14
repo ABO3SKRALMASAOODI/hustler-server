@@ -31,7 +31,7 @@ import subprocess
 import sys
 import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.realpath(__file__))
 SKILLS = os.path.dirname(HERE)
 STORIES = os.path.join(SKILLS, "valmera-stories")
 # this folder's own film.py (the three built styles) must not shadow the stories' film.py that reel.py and wf3.py import

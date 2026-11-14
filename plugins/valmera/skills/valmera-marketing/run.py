@@ -13,7 +13,7 @@ deleting the work folder. This file only tells it where workflow 2 lives.
 import os
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.realpath(__file__))
 SHELL = os.path.join(os.path.dirname(HERE), "_shell")
 sys.path.insert(0, SHELL)
 sys.path.insert(0, HERE)
