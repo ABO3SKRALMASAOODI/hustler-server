@@ -12,6 +12,7 @@ snap every cut to these word boundaries.
 
 import gc
 import inspect
+import math
 import os
 import re
 import subprocess
@@ -79,7 +80,7 @@ def get_model():
         from follow import cpu_count
         # Use the slot's CPU allocation, capped to avoid oversubscribing a
         # shared host. Model weights and decoding remain exactly the same.
-        threads = max(1, min(8, int(cpu_count())))
+        threads = max(1, min(8, math.ceil(cpu_count())))
         _model = WhisperModel(config.WHISPER_MODEL,
                               device=config.WHISPER_DEVICE,
                               compute_type=config.WHISPER_COMPUTE,
