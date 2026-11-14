@@ -23,7 +23,7 @@ LOOK_SYSTEM = """You check frames for a documentary editor before he may cut the
 
 For every cell decide:
 - ok: true only when a viewer would accept at once that the frame shows the subject in one of the allowed forms, large enough to read on a phone, and nothing in it contradicts the subject. You do not recognise faces: judge by the source's title and channel, what is said there, and what the frame plainly shows (a name on screen, a livery, a sign, the setting, a person where that person should be).
-- clean: false when the frame carries another editor's captions or subtitles, a burned-in timecode, a stock library's preview mark or web address, a big watermark, a split screen, a reaction face, a channel's title card, or is mostly text. A news channel's small corner logo or lower third is acceptable.
+- clean: false when the frame carries another editor's captions or subtitles, a burned-in timecode, a stock library's preview mark or web address, a big watermark, a split screen, a reaction face, a channel's title card, or is mostly text. A news channel's small corner logo or lower third is acceptable. Exception: when the documentary depiction requirements explicitly ask for an authentic source document, scientific visualization or software interface, its own text and diagrams are the subject itself, not another editor's captions. Keep that primary artifact only if it is legible and correctly identified; this never excuses an unrelated overlay.
 - grade: 1 to 5, 5 for a frame you would lead a film with (sharp, well lit, the subject large and plain).
 - lines: the line numbers it would carry best (it may carry none).
 - shows: at most eight plain words.
@@ -56,7 +56,8 @@ def _brief_text(ln):
 
 
 def _listing(lines):
-    return "\n".join(f"{ln['i']}. {ln['say']}  (show: {ln.get('show') or '-'})" + _brief_text(ln) for ln in lines)
+    return "\n".join(f"{ln['i']}. {ln['say']}  (show: {ln.get('show') or '-'})" + _brief_text(ln)
+                     + (f"  [documentary depiction requirements: {ln['visual']}]" if ln.get('visual') else '') for ln in lines)
 
 
 def has_brief(lines):
@@ -186,15 +187,16 @@ def check(subject, lines, cands, sources, work, budget_s=120.0):
     BRIEF_CELL_H. Without a brief, exactly as before."""
     import concurrent.futures as cf
     brief = has_brief(lines)
-    ls = _listing(lines) if brief else "\n".join(f"{ln['i']}. {ln['say']}  (show: {ln.get('show') or '-'})" for ln in lines)
-    per = BRIEF_PER_SHEET if brief else PER_SHEET
+    contextual = any(ln.get('visual') for ln in lines)
+    ls = _listing(lines)
+    per = BRIEF_PER_SHEET if brief or contextual else PER_SHEET
     system = LOOK_SYSTEM + LOOK_BRIEF if brief else LOOK_SYSTEM
     groups = [cands[i:i + per] for i in range(0, len(cands), per)]
 
     def one(gi):
         g = groups[gi]
         sp = sheet([(j + 1, c["jpg"]) for j, c in enumerate(g)], os.path.join(work, f"sheet_{_slug(subject['name'])}_{gi}.jpg"),
-                   **({"cell": (BRIEF_CELL_W, BRIEF_CELL_H)} if brief else {}))
+                   **({"cell": (BRIEF_CELL_W, BRIEF_CELL_H)} if brief or contextual else {}))
         listing = "\n".join(f"cell {j + 1}: video {c['src']} \"{sources[c['src']]['title'][:90]}\" ({sources[c['src']].get('channel') or '?'}), "
                             f"at {c['t']:.1f} s" + (f"; said there: \"{c['said'][:140]}\"" if c.get("said") else "") for j, c in enumerate(g))
         content = [{"type": "text", "text": f"Subject: {subject['name']}\nA frame must show: {subject['must_show']}\n\nLines:\n{ls}\n\n{listing}"},

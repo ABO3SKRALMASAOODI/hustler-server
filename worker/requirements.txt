@@ -1,4 +1,6 @@
 psycopg2-binary==2.9.10
+# Rasterize authentic source documents for documentary workflows (never generated evidence).
+pypdfium2==5.15.2
 boto3==1.35.99
 pydantic==2.9.2
 openai==1.59.9
@@ -25,7 +27,7 @@ modal==1.5.4
 # constantly and a months-old yt-dlp starts failing on the biggest ones first.
 # A failure here is honest (the tool reports the extractor's own reason) but it
 # is still a broken feature, so treat a stale pin as a bug, not as drift.
-yt-dlp==2026.7.4
+yt-dlp==2026.10.26
 # yt-dlp's recommended browser-impersonation transport. Production generic
 # page fetches were otherwise rejected by TLS-fingerprinting bot walls, and
 # yt-dlp itself reported this exact dependency as the missing recovery path.

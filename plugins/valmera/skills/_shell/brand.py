@@ -6,9 +6,11 @@ film from a workflow closes exactly as a Valmera export does. The end card and t
 untouchable: check() measures both on the delivered file.
 
 The end accent (owner, 14 Nov: make people look at the mark and come to the site). The card used to open on digital
-silence. Now, without touching a pixel of the mark or the card: one sting from the product's own licensed library lands
-on the card's reveal, on the programme music's beat when its grid has one there (onsets and tempo, measured), and the
-programme's last moments ring under the card (the bed ducks and its reverberant tail fades out across the card), with
+silence. Now, without touching a pixel of the mark or the card: one sting from the product's own licensed library (the
+unflagged recording nearest the references' own close, reveal and transition sounds, pick_sting) lands on the card's
+reveal, on the programme music's beat when its grid has one there (onsets and tempo, measured), and the
+programme's last moments ring under the card (the bed ducks; its reverberant tail falls as the references' music falls
+at their end, rests quietly under the card and fades out over its last second), with
 the card's loudness inside the programme's range and its true peak under -1 dBTP. Signals only: no model, no words.
 No motion accent on the mark: at the sting the card's dissolve is already laying the card (which carries the mark's own
 robot and name) over it, so a pulse there would fight the card's reveal rather than read.
@@ -65,16 +67,28 @@ def probe(path):
 # taken against the programme's own closing loudness (its last CLOSE_S), so a quiet film gets a quiet sting.
 SR = 48000
 CLOSE_S = 3.0               # the programme's closing loudness: its last 3 s (a short-term window)
-STING_UNDER_DB = 1.0        # the sting's loudest 200 ms this far under the closing loudness: a landing, not a jump
-STING_ROLES = ("impact", "hit", "braam")     # the library's landing roles; the signal decides among them
-STING_ATTACK_S = 0.09       # the sting must land on its frame: its peak within 90 ms of its start
-STING_DECAY_S = 1.4         # and ring into the card
+# The sting (owner, 15 Nov: the 1.4 s ring rule chose impact_10, "a mountain fall sound"). It is now the recording
+# nearest the 28 metromedia reels' own close / reveal / transition / title / lead-in effects (147 events, measured with
+# signals by lane STING-REF; score/sfx_quality.json carries them and the library on the same ruler), never a flagged one.
+# The references' end sounds are short, bright and under the voice: no reel ends on a long rumbling hit.
+STING_FEATS = ("attack_ms", "body_s", "tail30_any_s", "centroid_hz", "low_share_lt150", "noisiness")
+# Plain 40 Hz-16 kHz flatness is left out: on the references it is read with the bed under the effect (p50 0.0004),
+# on the library dry (clicks 0.06-0.15), so the two do not compare; noisiness (octave flatness 250 Hz-16 kHz, read only
+# where the effect is over the music) is the comparable one.
+STING_K = 10                # the mean distance to its 10 nearest reference events (about 7% of them) ...
+STING_GATE = ("attack_ms", "body_s", "tail30_any_s")   # inside the references' p10-p90 on these, or not a sting
+# A lead or a train is not one landing, and a recording that names an object (a camera, paper, a till, a heart; or one
+# the library gives a family) answers only the picture that shows it, never a brand card.
+STING_UNSPOKEN = ("riser", "typing", "shutter", "paper", "cash", "heartbeat")
+STING_VS_VOICE_PCT = 50     # the sting's 50 ms K peak at the references' median against the voice (-10.7 dB)
 DUCK_DB = 6.0               # the bed under the sting
 DUCK_RAMP_S = 0.05
 SEND_S = 1.2                # the programme's last moments that ring on under the card
-RING_UNDER_DB = 5.0         # the ring's first second this far under the closing loudness (the references' bed sits 5.3 dB under the voice)
-RING_RT60_S = 3.2
-RING_HOLD_S = 1.0           # the ring holds this long into the card, then fades to nothing at its far edge
+RING_UNDER_DB = 6.2         # the ring's first second this far under the closing loudness (the references' bed: 6.2 dB under the voice, p50)
+RING_RT60_S = 3.2           # its first fall: -20 dB in 1.07 s (the references' music falls from its bed to -20 dB in 1.01 s, p50 of 12 reels)
+RING_FLOOR_DB = 13.0        # then it rests this far under its first second (the references' music in their final 0.5 s: 12.85 dB under the bed, p50) ...
+RING_FLOOR_RT60_S = 20.0    # ... and keeps falling slowly: no reference ends in silence (final silence 0 s in 28 of 28)
+RING_END_FADE_S = 1.0       # the ring fades to nothing over the card's last second (the old sting's rumble filled the card; owner, 15 Nov)
 TP_CEIL_DB = -1.6           # true peak of the closing section (the AAC encode adds a few tenths; the bar is -1 dBTP)
 BEAT_WIN_S = 8.0            # the beat grid is read on the programme's last 8 s
 BPM_LO, BPM_HI = 70.0, 180.0
@@ -203,35 +217,112 @@ def beat_grid(x, sr=SR):
                 clarity=round(clarity, 3), on_grid=round(on_grid, 3))
 
 
-def pick_sting(used=()):
-    """The sting: a recording of the product's own library (the one SND3 designs with), chosen by its signal. Among the
-    landing roles, the ones that land on their frame (peak within STING_ATTACK_S of the start) and ring into the card
-    (decay STING_DECAY_S or longer), the one whose energy sits most in the band a phone plays (120-2000 Hz), never one
-    the film already used. None when the library offers none."""
-    S = _score_signal()
+_quality = {}
+
+
+def sfx_quality():
+    """score/sfx_quality.json of the worker these films are made with: the library audit's flags, the recordings no
+    film sounds, and the references' sting moments with the library on the same ruler. {} when it is missing."""
+    p = os.path.join(worker_dir(), "score", "sfx_quality.json")
+    if p not in _quality:
+        try:
+            _quality[p] = json.load(open(p))
+        except (OSError, ValueError):
+            _quality[p] = {}
+    return _quality[p]
+
+
+def _sting_vec(row):
+    """A sound's shape on the references' ruler, in the units the ear spaces it by (logs of time and frequency)."""
+    import numpy as np
+    a, b, t, c, lo, nz = (row.get(k) for k in STING_FEATS)
+    return np.array([math.log10(max(float(a or 5.0), 5.0)), math.log10(max(float(b or 0.01), 0.01)),
+                     math.log10(max(float(t or 0.02), 0.02)), math.log10(max(float(c or 50.0), 50.0)),
+                     float(lo or 0.0), float(nz if nz is not None else 0.36)])
+
+
+def sting_target():
+    """The references' sting moments: their vectors, the spread that scales a distance (p10-p90 / 2.56, a robust sd),
+    their centre, the p10-p90 range of each feature, and their median level against the voice. None without data."""
+    import numpy as np
+    q = sfx_quality()
+    feats = list((q.get("about") or {}).get("features") or [])
+    ref = (q.get("sting") or {}).get("reference") or []
+    if not ref or any(k not in feats for k in STING_FEATS):
+        return None
+    rows = [{k: r[feats.index(k)] for k in STING_FEATS} for r in ref]
+    X = np.stack([_sting_vec(r) for r in rows])
+    sc = np.maximum((np.percentile(X, 90, axis=0) - np.percentile(X, 10, axis=0)) / 2.56, 1e-3)
+    rng = {}
+    for k in STING_FEATS:
+        v = [float(r[k]) for r in rows if r[k] is not None]
+        rng[k] = (float(np.percentile(v, 10)), float(np.percentile(v, 50)), float(np.percentile(v, 90)))
+    lv = [float(r[-1]) for r in ref if r[-1] is not None]
+    return dict(X=X, scale=sc, centre=np.median(X, axis=0), range=rng, n=len(rows),
+                vs_voice_db=float(np.percentile(lv, STING_VS_VOICE_PCT)) if lv else -10.7)
+
+
+def sting_ranking(used=()):
+    """Every library recording that may be the sting, nearest first: [(distance, id, numbers)]. Distance = the
+    recording's distance to the references' centre plus its mean distance to its STING_K nearest reference events
+    (typical of the set, and inside a crowd of real ones). Never a recording the audit flagged at all, never one whose
+    file changed since it was measured (another sha), never a lead or a train, and only inside the references' p10-p90
+    on attack, body and tail."""
+    import numpy as np
+    T = sting_target()
+    if T is None:
+        return []
+    q = sfx_quality()
+    flagged = set(q.get("flags") or ()) | set(q.get("excluded") or ())
     lib = os.path.join(worker_dir(), "sound_library")
     try:
-        man = json.load(open(os.path.join(lib, "manifest.json")))
+        man = {x["id"]: x for x in json.load(open(os.path.join(lib, "manifest.json"))) if x.get("id") and x.get("file")}
     except (OSError, ValueError):
-        return None
+        return []
     used = {os.path.basename(str(u)) for u in used or ()} | {str(u) for u in used or ()}
-    rows = []
-    for x in man:
-        if x.get("role") not in STING_ROLES or not os.path.exists(os.path.join(lib, x["file"])):
+    out = []
+    for sid, row in ((q.get("sting") or {}).get("library") or {}).items():
+        x = man.get(sid)
+        if (not x or sid in flagged or row.get("sha") != x.get("sha") or x.get("role") in STING_UNSPOKEN or x.get("family")
+                or x.get("align") == "start" or sid in used or x["file"] in used
+                or not os.path.exists(os.path.join(lib, x["file"]))):
             continue
-        y = _pcm(os.path.join(lib, x["file"]), channels=1)[:, 0]
-        d = S.describe(y)
-        if not d or d["attack_s"] > STING_ATTACK_S or d["decay_s"] < STING_DECAY_S or d["kind"] != "impact":
+        if any(row.get(k) is None or not (T["range"][k][0] <= float(row[k]) <= T["range"][k][2]) for k in STING_GATE):
             continue
-        mid = sum(10 ** (b / 10) for b in d["bands"][1:4])
-        rows.append((-mid, x["id"], x, d))
-    rows.sort(key=lambda r: (r[0], r[1]))
-    fresh = [r for r in rows if r[1] not in used and r[2]["file"] not in used]
-    pick = (fresh or rows or [None])[0]
-    if not pick:
+        v = _sting_vec(row)
+        dd = np.sqrt((((T["X"] - v) / T["scale"]) ** 2).sum(axis=1))
+        d = float(np.sqrt((((T["centre"] - v) / T["scale"]) ** 2).sum()) + np.sort(dd)[:STING_K].mean())
+        out.append((round(d, 4), sid, {k: row.get(k) for k in STING_FEATS}))
+    out.sort(key=lambda r: (r[0], r[1]))
+    return out
+
+
+def pick_sting(used=()):
+    """The sting: the recording of the product's own library (the one SND3 designs with) nearest the references' close,
+    reveal and transition sounds (sting_ranking), never one the film already used. None when none qualifies (the card
+    then carries the ring alone)."""
+    import numpy as np
+    S = _score_signal()
+    rank = sting_ranking(used)
+    if not rank:
         return None
-    return dict(id=pick[1], path=os.path.join(lib, pick[2]["file"]), desc=pick[3], license=pick[2].get("license"),
-                title=pick[2].get("title"), author=pick[2].get("author"))
+    lib = os.path.join(worker_dir(), "sound_library")
+    man = {x["id"]: x for x in json.load(open(os.path.join(lib, "manifest.json"))) if x.get("id")}
+    dist, sid, nums = rank[0]
+    x = man[sid]
+    y = _pcm(os.path.join(lib, x["file"]), channels=1)[:, 0]
+    d = S.describe(y)
+    if not d:
+        return None
+    kl = S.k_level(S.power(y))                                   # its loudest 50 ms, K-weighted (the references' ruler)
+    w = int(round(0.05 * SR / S.HOP))
+    if len(kl) > w:
+        k50 = float(10 * np.log10(max(float(np.convolve(10 ** (kl / 10), np.ones(w) / w, mode="valid").max()), 1e-12)))
+    else:
+        k50 = float(kl.max())
+    d["k50"] = round(k50, 1)
+    return dict(id=sid, path=os.path.join(lib, x["file"]), desc=d, license=x.get("license"), title=x.get("title"),
+                author=x.get("author"), distance=dist, numbers=nums, vs_voice_db=round(sting_target()["vs_voice_db"], 1))
 
 
 def sting_time(prog_s, fps, j, reveal_k, settle_k, grid):
@@ -286,12 +377,15 @@ def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=
     out[:len(dry)] = dry * g[:, None]
     acc = np.zeros((n_tail, 2), np.float64)
     info = dict(on=on, sting_s=round(t_sting, 4), reveal_s=round(t_rev, 4), grid=grid, ref_lufs=round(ref, 1))
-    # the ring: the programme's last moments through a dark, wide tail, rising under the sting, fading across the card
+    # the ring: the programme's last moments through a dark, wide tail, rising under the sting, falling as the references'
+    # music falls at their end, resting quietly under the card and fading out over its last second
     if has_audio and ns > SR // 10:
         send = tail_prog[-ns:].astype(np.float64) * (np.sin(np.linspace(0, np.pi / 2, ns)) ** 2)[:, None]
         rng = np.random.default_rng(1114)
-        nl = int(RING_RT60_S * 1.1 * SR)
-        decay = np.exp(-6.9078 * np.arange(nl) / (RING_RT60_S * SR))
+        nl = int((outro_s + SEND_S + 0.1) * SR)
+        tl = np.arange(nl) / SR
+        decay = np.maximum(np.exp(-6.9078 * tl / RING_RT60_S),
+                           10 ** (-RING_FLOOR_DB / 20) * np.exp(-6.9078 * tl / RING_FLOOR_RT60_S))
         ir = rng.standard_normal((nl, 2)) * decay[:, None]
         ir = lfilter([0.12], [1, -0.88], ir, axis=0)          # dark: a one-pole low-pass near 1 kHz
         ir[: int(0.012 * SR)] *= np.linspace(0, 1, int(0.012 * SR))[:, None]
@@ -303,7 +397,8 @@ def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=
             wet *= 10 ** ((ref - RING_UNDER_DB - lvl) / 20)
             tw = tt[start:start + len(wet)]
             env = np.interp(tw, [min(t_sting, prog_s) - DUCK_RAMP_S, prog_s], [0.0, 1.0])
-            u = np.clip((tw - prog_s - RING_HOLD_S) / max(1e-3, outro_s - RING_HOLD_S), 0.0, 1.0)
+            fade_s = min(RING_END_FADE_S, outro_s / 2)
+            u = np.clip((tw - prog_s - (outro_s - fade_s)) / fade_s, 0.0, 1.0)
             env = env * np.cos(u * np.pi / 2) ** 2
             acc[start:start + len(wet)] += wet * env[:, None]
             info["ring_lufs"] = round(ref - RING_UNDER_DB, 1)
@@ -311,7 +406,7 @@ def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=
     if st:
         y = _pcm(st["path"]).astype(np.float64)
         d = st["desc"]
-        gdb = min(12.0, ref - STING_UNDER_DB - float(d["k200"]))
+        gdb = min(12.0, ref + st["vs_voice_db"] - float(d["k50"]))      # its 50 ms peak where the references' sit
         y *= 10 ** (gdb / 20)
         at = int(round((t_sting - float(d["hit_s"])) * SR)) - cut    # its hit (the attack within 6 dB of the peak) on the beat
         a0, b0 = max(0, at), min(n_tail, at + len(y))
@@ -319,7 +414,8 @@ def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=
             fo = min(float(config.OUTRO_FADE_OUT_S), outro_s / 3)   # it ends with the card's own far-edge fade
             acc[a0:b0] += y[a0 - at:b0 - at] * np.clip((prog_s + outro_s - tt[a0:b0]) / fo, 0.0, 1.0)[:, None]
         info["sting"] = dict(id=st["id"], file=os.path.basename(st["path"]), gain_db=round(gdb, 1),
-                             hit_in_file_s=d["hit_s"], license=st["license"], title=st["title"], author=st["author"])
+                             hit_in_file_s=d["hit_s"], license=st["license"], title=st["title"], author=st["author"],
+                             distance=st["distance"], numbers=st["numbers"], vs_voice_db=st["vs_voice_db"])
     # the closing section's true peak, kept under the ceiling by lowering the accent only (the programme is as it was)
     s = 1.0
     if _true_peak_db(out + acc) > TP_CEIL_DB:

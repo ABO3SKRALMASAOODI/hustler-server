@@ -122,7 +122,9 @@ def test_no_recording_twice_in_a_film_and_two_films_rotate_the_library():
             if s["for"] != "burst" and s["for"] != "counter":
                 gest.setdefault(s["s"], set()).add(s["id"].rsplit(".", 1)[0])
         assert all(len(g) == 1 for g in gest.values()), gest
-    for keep in (lambda s: s["tier"] != "tick",):                          # the audible layer (the library's short clicks are few)
+    # the audible layer (the library's short clicks are few). The landings are left out: since the 15 Nov audit took the
+    # seven rumbling impacts out (score/sfx_quality.json), four clean ones remain and every film uses each of them.
+    for keep in (lambda s: s["tier"] != "tick" and SD.role_of(s["s"]) not in ("impact", "braam"),):
         ra_ids = {s["s"] for s in a if keep(s)}
         rb_ids = {s["s"] for s in b if keep(s)}
         assert len(ra_ids & rb_ids) <= 0.65 * min(len(ra_ids), len(rb_ids)), (len(ra_ids & rb_ids), len(ra_ids), len(rb_ids))

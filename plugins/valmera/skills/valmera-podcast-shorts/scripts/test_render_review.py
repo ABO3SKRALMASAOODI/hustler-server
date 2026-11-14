@@ -8,6 +8,14 @@ sys.path.insert(0, os.path.dirname(__file__))
 import wf1_short as wf
 
 
+def test_newly_available_source_invalidates_exhausted_research_without_path_churn(tmp_path):
+    sources=tmp_path/'sources';sources.mkdir();path=sources/'original.mp4'
+    manifest=sources/'manifest.json';manifest.write_text(json.dumps([dict(url='https://publisher/film',path=str(path))]))
+    absent=wf.source_signature(str(tmp_path));path.write_bytes(b'original source bytes')
+    present=wf.source_signature(str(tmp_path));assert present!=absent
+    assert wf.source_signature(str(tmp_path))==present
+
+
 def test_composed_rejection_rebuilds_product_plan_and_invalidates_render(tmp_path, monkeypatch):
     ctx = SimpleNamespace(supply=str(tmp_path), run_dir=str(tmp_path), log=lambda x: None)
     sc = dict(beats=dict(pictures=[dict(path='/supply/bad.jpg')]), spend=[])
@@ -27,7 +35,7 @@ def test_composed_rejection_rebuilds_product_plan_and_invalidates_render(tmp_pat
         return dict(rejected=int(bad), placements=[dict(id=0,ok=not bad)], spend=[])
 
     def rebuild(ctx, script):
-        assert json.load(open(tmp_path/'render_rejected.json'))==['bad.jpg']
+        assert json.load(open(tmp_path/'render_rejected.json'))==['/supply/bad.jpg']
         return dict(beats=dict(pictures=[]),spend=[])
 
     monkeypatch.setattr(wf.wf3,'render',draw)
@@ -56,7 +64,7 @@ def test_later_repairs_keep_the_picture_that_passed_every_review(tmp_path,monkey
     def fresh(*args):
         p=tmp_path/'render_rejected.json'
         rejected=json.load(open(p)) if p.exists() else []
-        return dict(beats=dict(pictures=[dict(path='/supply/'+n) for n in names if n not in rejected]),spend=[])
+        return dict(beats=dict(pictures=[dict(path='/supply/'+n) for n in names if '/supply/'+n not in rejected]),spend=[])
     def review(ctx,rd,sc):
         pics=sc['beats']['pictures']
         bad=len(pics)>1
@@ -67,7 +75,7 @@ def test_later_repairs_keep_the_picture_that_passed_every_review(tmp_path,monkey
     sc=fresh();result=wf.render(ctx,{},sc)
     assert len(result['picture_review'])==5
     assert sc['beats']['pictures']==[dict(path='/supply/good.jpg')]
-    assert 'good.jpg' not in json.load(open(tmp_path/'render_rejected.json'))
+    assert '/supply/good.jpg' not in json.load(open(tmp_path/'render_rejected.json'))
 
 
 def test_delivery_only_rejection_invalidates_brand_and_music_and_rebuilds(tmp_path,monkeypatch):
@@ -93,4 +101,41 @@ def test_delivery_only_rejection_invalidates_brand_and_music_and_rebuilds(tmp_pa
     result=wf.check(ctx,rd,sc)
     assert len(checks)==2 and result['checks']['ok']
     assert result['checks']['podcast']['delivered_check']['rejected']==0
-    assert json.load(open(tmp_path/'render_rejected.json'))==['bad.jpg']
+    assert json.load(open(tmp_path/'render_rejected.json'))==['/supply/bad.jpg']
+
+
+def test_rejection_identifies_asset_when_research_passes_reuse_filenames(tmp_path,monkeypatch):
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda x:None)
+    paths=['/supply/first/clips/000.mp4','/supply/repair/clips/000.mp4']
+    sc=dict(beats=dict(pictures=[dict(path=p) for p in paths]),spend=[])
+    def rebuilt(*args):
+        rejected=json.load(open(tmp_path/'render_rejected.json'))
+        return dict(beats=dict(pictures=[dict(path=p) for p in paths if p not in rejected]),spend=[])
+    monkeypatch.setattr(wf,'score',rebuilt)
+    wf._rebuild_rejected(ctx,{},sc,dict(placements=[dict(id=0,ok=False),dict(id=1,ok=True)]))
+    assert sc['beats']['pictures']==[dict(path=paths[1])]
+
+
+def test_changed_review_contract_rechecks_previously_rejected_assets(tmp_path):
+    from placement_check import CONTRACT
+    (tmp_path/'render_rejected.json').write_text('["old-layout.jpg"]')
+    assert wf.current_rejections(str(tmp_path))==[]
+    (tmp_path/'render_rejected_contract.json').write_text(str(CONTRACT))
+    assert wf.current_rejections(str(tmp_path))==['old-layout.jpg']
+    (tmp_path/'render_rejected_contract.json').write_text(str(CONTRACT-1))
+    assert wf.current_rejections(str(tmp_path))==[]
+
+
+def test_changed_plan_invalidates_old_render_before_frame_check(tmp_path,monkeypatch):
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda x:None)
+    l1=tmp_path/'l1.json';l1.write_text('{"picture":"new"}')
+    (tmp_path/'film_engine.mp4').write_text('old')
+    (tmp_path/'final_music.mp4').write_text('old')
+    def draw(*args):
+        assert not (tmp_path/'film_engine.mp4').exists()
+        assert not (tmp_path/'final_music.mp4').exists()
+        return dict(film='new.mp4')
+    monkeypatch.setattr(wf.wf3,'render',draw)
+    monkeypatch.setattr(wf,'_render_review',lambda *a:dict(rejected=0,spend=[]))
+    wf.render(ctx,{},dict(l1=str(l1),beats={}))
+    assert json.load(open(tmp_path/'render_revision.json'))==wf.render_revision(dict(l1=str(l1)))

@@ -23,6 +23,7 @@ check    the product's watermark and end card, the measured checks, and the film
 Model calls are on the OpenAI rung (the shell's llm.py). Never publishes.
 """
 import importlib.util
+import hashlib
 import json
 import os
 import subprocess
@@ -47,6 +48,8 @@ import pictures as PX  # noqa: E402
 import shell  # noqa: E402
 import wf1_film  # noqa: E402
 import wf3  # noqa: E402
+
+RESEARCH_CONTRACT = 6  # primary documents can fill a truthful still-picture gap before more video research
 
 
 def _llm():
@@ -112,7 +115,7 @@ def script(ctx, ideas_out):
     t0, t1 = float(s["in"]), float(s["out"])
     if not (8.0 <= t1 - t0 <= 75.0):
         raise RuntimeError(f"script window {t0}-{t1} is not a short")
-    named = [r for r in s.get("named") or [] if isinstance(r, dict) and r.get("name")][:8]
+    named = [r for r in s.get("named") or [] if isinstance(r, dict) and r.get("name")]
     return dict(title=s.get("title") or idea.get("title"), style=reg, window=[round(t0, 2), round(t1, 2)], source=ctx.source,
                 hook_line=s.get("hook_line") or idea.get("hook"), close_line=s.get("close_line") or idea.get("payoff"),
                 speakers=int(s.get("speakers") or idea.get("speakers") or 1), names=[r["name"] for r in named], named=named,
@@ -120,12 +123,16 @@ def script(ctx, ideas_out):
 
 
 def supply(ctx, script):
+    import wf1_coverage
     sup_dir = ctx.supply
     os.makedirs(sup_dir, exist_ok=True)
     os.environ["TMPDIR"] = ctx.tmp
     pk = os.path.join(sup_dir, "pack.json")
     if os.path.exists(pk):
-        return json.load(open(pk))["record"]
+        prior = json.load(open(pk))
+        if (prior['pack'].get('coverage') or {}).get('contract') == wf1_coverage.CONTRACT:
+            return prior['record']
+        os.replace(pk,os.path.join(sup_dir,'previous-pack.json'))
     rec0 = chain.pack(ctx, script)                              # source.mp4 (the window), hearing.json, index.json
     idx = json.load(open(os.path.join(sup_dir, "index.json")))
     src = os.path.join(sup_dir, "source.mp4")
@@ -143,37 +150,58 @@ def supply(ctx, script):
     style = wf1_film.STYLES[script["style"]["id"]]
     # real video of what each sentence names: the footage engine's own planner reads the sentences (OpenAI)
     who = str((ctx.args or {}).get("identity") or "")[:400].replace("\n", " ")
+    import wf1_coverage
+    coverage = wf1_coverage.plan(words, script.get('title'), sup_dir, _llm())
+    coverage['context']=who
+    windows = coverage['windows']
+    # Inventory records what was said; windows specify what can truthfully be photographed.
+    # Passing the inventory back as search subjects resurrects unnamed people and isolated dates.
+    research = {}
+    for window in windows:
+        research.setdefault(window['name'],[]).append(window['must_show'])
     fscript = dict(title=f"{script.get('title')}. A podcast clip; the speaker is on camera already, so show what he talks about, as it was then, "
                          f"never him as he looks today. Who is in it: {who}",
-                   segments=[dict(say=s["text"], pictures=[]) for s in sents],
-                   named=[dict(name=r["name"], must_show=r.get("must_show") or r["name"], **{"is": r.get("is") or "thing"}) for r in script.get("named") or []])
-    wf3.given_footage(ctx, os.path.join(sup_dir, "footage"))
+                   segments=[dict(say=s['say'], pictures=[s['name']], visual=s['must_show']) for s in windows],
+                   named=[dict(name=name,must_show=' '.join(requirements),**{'is':'thing'}) for name,requirements in research.items()])
+    footage_name = f'footage-v{wf1_coverage.CONTRACT}'
+    wf3.given_footage(ctx, os.path.join(sup_dir, footage_name))
     fw, fh = style["footage"]
-    foot = chain.footage(ctx, dict(script=fscript), [round(float(s["t1"]) - float(s["t0"]) + 0.2, 2) for s in sents], W=fw, H=fh, preserve_source=True)
+    # This workflow uses the engine's contextual-check route, as WF3 does. Every SELECTED
+    # cut gets entry/mid/exit checks against its actual words in wf1_film, then composed
+    # and branded transition checks. The generic shelf verifier has no placement context
+    # and incorrectly requires a montage's entire brief inside each individual 1 s shot.
+    foot = chain.footage(ctx, dict(script=fscript), [round(float(s["t1"]) - float(s["t0"]), 2) for s in windows],
+                         W=fw, H=fh, preserve_source=True, shot_s=1.15, line_max=20, per=5,
+                         strict_lines=True, motion_first=True, scout_motion=True, alloc="round", reassign_lost=True,
+                         verify=False, whole_first=True, keep_sources=True, out_name=footage_name)
     if foot:
         n_yt, n_bad = refused(foot)
         ctx.log(f"footage sources: {n_yt} on YouTube, {n_bad} refused or archive-only; {foot['counts'].get('clips')} clips on "
                 f"{foot['counts'].get('lines_with_footage')} of {foot['counts'].get('lines')} sentences")
-    if walled(foot):                                           # nothing is cut from photographs and a clip or two: the same run continues when the wall lifts
+    if walled(foot) and not int(foot['counts'].get('clips') or 0):
         import shutil
-        shutil.rmtree(os.path.join(sup_dir, "footage"), ignore_errors=True)
+        shutil.rmtree(os.path.join(sup_dir, footage_name), ignore_errors=True)
         raise RuntimeError(f"{wf1_film.WALL}: {n_bad} of {n_yt} footage sources would not open ({foot['counts'].get('clips')} clips on "
                            f"{foot['counts'].get('lines_with_footage')} of {foot['counts'].get('lines')} sentences). It lifts by itself; run the same link again later")
-    pack = dict(sid=ctx.sid, words=wj, narration=src, ffmpeg=PX.FF, sounds={}, pictures={}, credits=[], footage=[], title=script.get("title"))
+    if walled(foot):
+        ctx.log('Some sources refused access; retaining acquired clips for the contextual coverage gate and targeted recovery')
+    pack = dict(sid=ctx.sid, words=wj, narration=src, ffmpeg=PX.FF, sounds={}, pictures={}, credits=[], footage=[], title=script.get("title"), coverage=coverage)
     subjects, by_line = [], {}
     if foot:
-        fdir = os.path.join(sup_dir, "footage")
+        fdir = os.path.join(sup_dir, footage_name)
         pack["footage"] = [dict(i=ln["i"], clips=[dull(wf3.clip_facts(dict(c, path=os.path.join(fdir, c["file"])))) for c in ln["clips"]]) for ln in foot["lines"]]
         pack["credits"] += [dict(kind="footage", name=c["title"], title=c["title"], licence="footage, not licensed (the owner's decision)", credit=c["channel"],
                                  page=c["url"], time_range=c["time_range"], line=c["line"]) for c in foot["credits"]]
         subjects = [s for s in foot.get("subjects") or [] if s.get("name")]
         by_line = {int(ln["i"]): list(ln.get("subjects") or []) for ln in foot["lines"]}
+        for i, window in enumerate(coverage['windows']):
+            window['subjects'] = by_line.get(i) or [window['name']]
         spend.append(dict(stage="supply", provider="openai", model="gpt-6-sol low + gpt-4o-transcribe", what="footage", usd=(foot.get("spend") or {}).get("usd")))
         ctx.log(f"footage: {foot['counts']['clips']} clips on {foot['counts']['lines_with_footage']} of {foot['counts']['lines']} sentences; "
                 f"subjects {[s['name'] for s in subjects]}")
     # photographs of the same things, for the sentences the footage left bare
     named = [dict(name=s["name"], searches=[s["name"]], must_show=s.get("must_show") or s["name"], **{"is": s.get("kind") or "thing"})
-             for s in subjects if any(s["name"] in v for v in by_line.values())][:6]
+             for s in subjects if any(s["name"] in v for v in by_line.values())]
     if named:
         sys.modules.pop("llm", None)                           # the worker's own llm answers its picture check
         try:
@@ -343,21 +371,136 @@ def _repair(l1, beats, taste):
     return n0 - len(l1["items"]) - len(l1["sound"])
 
 
+def source_signature(supply):
+    """A newly available original invalidates exhausted research, not previous frame checks."""
+    path=os.path.join(supply,'sources','manifest.json')
+    rows=json.load(open(path)) if os.path.exists(path) else []
+    available=[]
+    for row in rows:
+        p=row.get('path','')
+        if os.path.isfile(p):
+            stat=os.stat(p)
+            available.append((row['url'],row.get('sha256'),stat.st_size,stat.st_mtime_ns))
+    return hashlib.sha256(json.dumps(sorted(available)).encode()).hexdigest()[:12]
+
+
+def refill(ctx, script, pack, shortage):
+    """Research missing coverage through the same engines, preserving all checked originals."""
+    coverage = pack['coverage']
+    windows = coverage['windows']
+    wanted = shortage['weak_windows'] or list(range(len(windows)))
+    if not pack.get('referent_research'):
+        import wf1_context
+        found=wf1_context.research(coverage,os.path.join(ctx.supply,'referent-research'),_llm())
+        pack['referent_research']=found
+        pack.setdefault('research_spend',[]).extend(found['spend'])
+    coverage['research_context']=pack['referent_research']
+    if pack.get('research_revision',0)<6:
+        import wf1_coverage
+        checks=os.path.join(ctx.supply,'placement_checks.json')
+        evidence=dict(available=[dict(i=r['i'],clips=[dict(subject=c.get('subject'),shows=c.get('shows'),source=c.get('source')) for c in r['clips']]) for r in pack['footage']],
+                      rejected=[r['reason'] for r in json.load(open(checks)).values() if not r['ok']][-60:] if os.path.exists(checks) else [])
+        usage=wf1_coverage.repair_requirements(coverage,wanted,evidence,_llm())
+        pack.setdefault('research_spend',[]).append(usage);pack['research_revision']=6
+        stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
+        with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
+    import wf1_documents
+    context=dict(identity=coverage.get('context'),primary_research=coverage.get('research_context'),prior_errors=[e for r in pack.get('document_research',[]) for e in r.get('errors',[])][-12:])
+    documents=wf1_documents.acquire([dict(windows[i],i=i,context=context) for i in wanted],os.path.join(ctx.supply,'primary-documents'),_llm())
+    added=0
+    for subject,records in documents['pictures'].items():
+        dest=pack['pictures'].setdefault(subject,[]);have={r['path'] for r in dest}
+        fresh=[r for r in records if r['path'] not in have];dest.extend(fresh);added+=len(fresh)
+    if documents not in pack.setdefault('document_research',[]):pack['document_research'].append(documents)
+    if added:
+        pack['credits']+=documents['credits']
+        stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
+        with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
+        ctx.log(f'acquired {added} primary-document crops; checking their actual words before further research')
+        return
+    signature=source_signature(ctx.supply)
+    previous = pack.get('coverage_repairs',0) if pack.get('research_contract')==RESEARCH_CONTRACT and pack.get('research_sources')==signature else 0
+    count = int(previous)+1
+    primary={}
+    manifest_path=os.path.join(ctx.supply,'sources','manifest.json')
+    retained=json.load(open(manifest_path)) if os.path.exists(manifest_path) else []
+    for row in retained:
+        if not row.get('title') or not row.get('channel') or not os.path.isfile(row.get('path','')):continue
+        for subject in row.get('subjects',[]):
+            primary.setdefault(subject,[]).append(dict(row,id=row.get('id') or hashlib.sha256(row['url'].encode()).hexdigest(),where=row.get('where','youtube')))
+    if count == 4:
+        import wf1_primary_sources
+        original=wf1_primary_sources.acquire([dict(windows[i],i=i,context=coverage.get('context')) for i in wanted],os.path.join(ctx.supply,'primary-videos'),_llm())
+        pack.setdefault('research_spend',[]).extend(original['spend'])
+        for subject,rows in original['sources'].items():primary.setdefault(subject,[]).extend(rows)
+        source_dir=os.path.join(ctx.supply,'sources');os.makedirs(source_dir,exist_ok=True)
+        manifest_path=os.path.join(source_dir,'manifest.json')
+        manifest=json.load(open(manifest_path)) if os.path.exists(manifest_path) else []
+        for rec in json.load(open(os.path.join(ctx.supply,'primary-videos','manifest.json'))):
+            if not any(r['url']==rec['url'] for r in manifest):manifest.append(rec)
+        with open(manifest_path,'w') as f:json.dump(manifest,f,indent=1)
+        if not primary:raise RuntimeError('no verified public publisher video found after platform research exhausted')
+    if count > 4:
+        raise RuntimeError('documentary coverage still incomplete after platform and original-publisher research')
+    name = f"footage-v{coverage['contract']}-context{RESEARCH_CONTRACT}-{signature}-repair{count}"
+    prior = [os.path.join(ctx.supply,n,'footage.json') for n in os.listdir(ctx.supply)
+             if n.startswith('footage') and os.path.isfile(os.path.join(ctx.supply,n,'footage.json'))]
+    subjects = {windows[i]['name']:windows[i]['must_show'] for i in wanted}
+    fscript = dict(title=script['title']+' — supplementary documentary coverage. Prefer original institutional or company films with visible action; avoid influencer promotions and unrelated banners.',
+                   segments=[dict(i=i,say=w['say'],pictures=[w['name']],visual=w['must_show']) for i,w in enumerate(windows)],
+                   named=[dict(name=n,must_show=show,video_sources=primary.get(n,[]),video_searches=list(dict.fromkeys(q for w in windows if w['name']==n for q in w.get('video_searches',[]))),**{'is':'thing'}) for n,show in subjects.items()])
+    fw,fh = wf1_film.STYLES[script['style']['id']]['footage']
+    ctx.log(f"research missing documentary windows {wanted}; pass {count}")
+    foot = chain.footage(ctx,dict(script=fscript),[w['t1']-w['t0'] for w in windows],W=fw,H=fh,
+                         preserve_source=True,shot_s=1.15,line_max=20,per=4,lines=wanted,avoid=prior,
+                         strict_lines=True,motion_first=True,scout_motion=True,alloc='round',reassign_lost=True,
+                         verify=False,whole_first=True,keep_sources=True,out_name=name)
+    if not foot:
+        raise RuntimeError('supplementary documentary research returned no record')
+    by = {int(row['i']):row for row in pack['footage']}
+    for row in foot['lines']:
+        i = int(row['i'])
+        dest = by.setdefault(i,dict(i=i,clips=[]))
+        dest['clips'] += [dull(wf3.clip_facts(dict(c,path=os.path.join(ctx.supply,name,c['file'])))) for c in row['clips']]
+    pack['footage'] = list(by.values())
+    pack['credits'] += [dict(kind='footage',name=c['title'],title=c['title'],licence="footage, not licensed (the owner's decision)",
+                            credit=c['channel'],page=c['url'],time_range=c['time_range'],line=c['line']) for c in foot['credits']]
+    pack['coverage_repairs'] = count
+    pack['research_contract'] = RESEARCH_CONTRACT
+    pack['research_sources'] = source_signature(ctx.supply)
+    path = os.path.join(ctx.supply,'pack.json')
+    stored = json.load(open(path));stored['pack']=pack
+    with open(path,'w') as f:json.dump(stored,f,indent=1)
+
+
 def score(ctx, script):
+    import wf1_coverage
     pack = wf3.load_pack(ctx)
+    if (pack.get('coverage') or {}).get('contract') != wf1_coverage.CONTRACT:
+        supply(ctx,script)
+        pack = wf3.load_pack(ctx)
     pack["work"] = ctx.supply
+    if (ctx.args or {}).get('identity'):
+        pack['coverage']['context']=ctx.args['identity']
     d = direction_of(ctx, script, pack)
     knobs = {k: d.get(k) for k in ("display", "past_segs", "turn_seg", "arc")}
     knobs.update({k: v for k, v in ((ctx.args or {}).get("direction") or {}).items()})
     rejected_path = os.path.join(ctx.supply, "render_rejected.json")
     if os.path.exists(rejected_path):
-        knobs["drop"] = sorted(set(knobs.get("drop") or []) | set(json.load(open(rejected_path))))
+        knobs["drop"] = sorted(set(knobs.get("drop") or []) | set(current_rejections(ctx.supply)))
     knobs.setdefault("bed", chain.wants_music(ctx) or bool((ctx.args or {}).get("song")))      # the film gets music: the sounds are designed for a film with a bed
     sys.path[:0] = [p for p in wf3.env_path().split(os.pathsep) if p not in sys.path]
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     sc = dict(title=script.get("title"), hook_line=script.get("hook_line"), close_line=script.get("close_line"),
               segments=[dict(say=ln["text"], pictures=[n for n in ln.get("subjects") or []]) for ln in pack["lines"]])
-    l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
+    for attempt in range(8):
+        try:
+            l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
+            break
+        except wf1_coverage.CoverageError as error:
+            if attempt == 7:
+                raise
+            refill(ctx,script,pack,error.report)
     taste = F.taste_check(l1, beats)
     dropped = 0
     if not taste["ok"]:
@@ -373,6 +516,8 @@ def score(ctx, script):
     turn_s = round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None
     return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
                 frames=l1["dur_f"], items=len(l1["items"]), direction={k: v for k, v in d.items() if k != "spend"}, spend=([d["spend"]] if d.get("spend") else []) +
+                [dict(u,stage='supply',what='primary documents') for research in pack.get('document_research',[]) for u in research.get('spend',[])] +
+                [dict(u,stage='supply',what='documentary research revision') for u in pack.get('research_spend',[])] +
                 [dict(stage="score", what="picture-to-words check", **u) for u in (beats.get("placement_check") or {}).get("spend", [])])
 
 
@@ -392,8 +537,9 @@ def _render_review(ctx, rd, sc):
         for word in words:
             frames.update(f for edge in word["f"] for f in (edge-1,edge,edge+1) if a <= f < b)
         rows.append([a, b, "clip", p["name"], dict(path=rd["film"], src=[a/F.FPS,b/F.FPS],
-                    check_times=[f/F.FPS for f in sorted(frames)], display_words=words,
-                    source=dict(url=p.get("source")))])
+                    check_times=[f/F.FPS for f in sorted(frames)], composed_fps=F.FPS, display_words=words,
+                    illustration=p.get('illustration'),
+                    source=p.get('source_evidence') or dict(url=p.get("source")))])
     _, report = placement_check(rows, script, clock, os.path.join(ctx.supply, "render-review"), pack["ffmpeg"])
     if not report["rejected"] and rows:
         _, audit = placement_check(rows, script, clock, os.path.join(ctx.supply, "render-review"),
@@ -408,12 +554,42 @@ def _render_review(ctx, rd, sc):
     return report
 
 
+def render_revision(sc):
+    files=[sc.get('l1'),sc.get('l1_audio')]
+    if not files[0]:return None
+    digest=hashlib.sha256()
+    for path in files:
+        if path and os.path.isfile(path):digest.update(open(path,'rb').read())
+    # Audio fixes must invalidate both an engine soundtrack and a cached final mix.
+    worker=os.environ.get('VALMERA_WORKER')
+    if worker:
+        for rel in ('score/music.py','score/audibility.py','score/sound.py','score/sfx_quality.json','scene/pace.py'):
+            path=os.path.join(worker,rel)
+            if os.path.isfile(path):digest.update(open(path,'rb').read())
+    return digest.hexdigest()
+
+
+def invalidate_render(ctx):
+    for name in ('film_engine.mp4','film_engine.mp4.log.json','sound.m4a',
+                 'film_engine_music.mp4','music.json'):
+        path=os.path.join(ctx.supply,name)
+        if os.path.exists(path):os.remove(path)
+    for name in ('final.mp4','final_music.mp4','final_song.mp4'):
+        path=os.path.join(ctx.run_dir,name)
+        if os.path.exists(path):os.remove(path)
+
+
 def render(ctx, script, sc):
     """The product repairs rejected placements before branding and music, never a delivered film."""
     history_path = os.path.join(ctx.supply, "render_reviews.json")
     history = json.load(open(history_path)) if os.path.exists(history_path) else []
     while True:
+        revision=render_revision(sc)
+        marker=os.path.join(ctx.supply,'render_revision.json')
+        previous=json.load(open(marker)) if os.path.exists(marker) else None
+        if revision and revision!=previous:invalidate_render(ctx)
         rd = wf3.render(ctx, script, sc)
+        if revision:json.dump(revision,open(marker,'w'))
         report = _render_review(ctx, rd, sc)
         history.append(report)
         json.dump(history, open(history_path, "w"), indent=1)
@@ -426,6 +602,17 @@ def render(ctx, script, sc):
         _rebuild_rejected(ctx, script, sc, report)
 
 
+def current_rejections(supply):
+    from placement_check import CONTRACT
+    path = os.path.join(supply, "render_rejected.json")
+    marker = os.path.join(supply, "render_rejected_contract.json")
+    # A changed frame/layout contract requires fresh source AND composed checks;
+    # it never grants approval to a formerly rejected asset.
+    if not os.path.exists(marker) or json.load(open(marker)) != CONTRACT:
+        return []
+    return json.load(open(path)) if os.path.exists(path) else []
+
+
 def _rebuild_rejected(ctx, script, sc, report):
     """Monotonic repair shared by the engine and exact delivery-frame gates."""
     pics = sc["beats"].get("pictures") or []
@@ -433,29 +620,23 @@ def _rebuild_rejected(ctx, script, sc, report):
     # The fixed supply makes this finite; keep independently approved
     # pictures instead of discarding the whole montage after three passes.
     doomed = [pics[r["id"]] for r in report["placements"] if not r["ok"]]
-    dropped = [os.path.basename(p["path"]) for p in doomed]
+    dropped = [p["path"] for p in doomed]
     rejected_path = os.path.join(ctx.supply, "render_rejected.json")
-    previous = json.load(open(rejected_path)) if os.path.exists(rejected_path) else []
+    previous = current_rejections(ctx.supply)
     if not set(dropped) - set(previous):
         raise RuntimeError("composed picture repair made no progress; no film may be delivered")
     json.dump(sorted(set(previous+dropped)), open(rejected_path, "w"), indent=1)
+    from placement_check import CONTRACT
+    json.dump(CONTRACT, open(os.path.join(ctx.supply,"render_rejected_contract.json"),"w"))
     ctx.log(f"composed picture check: rebuilding without {len(dropped)} rejected placements")
     old_spend = sc.get("spend", [])
     rebuilt = score(ctx, script)
-    rebuilt["spend"] = old_spend + [u for u in rebuilt.get("spend", []) if u.get("what") == "picture-to-words check"]
+    rebuilt["spend"] = old_spend + [u for u in rebuilt.get("spend", []) if u not in old_spend]
     sc.clear()
     sc.update(rebuilt)
     json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
-    # These are this run's cached renders of the old plan, before delivery.
-    for name in ("film_engine.mp4", "film_engine.mp4.log.json", "sound.m4a",
-                 "film_engine_music.mp4", "music.json"):
-        p = os.path.join(ctx.supply, name)
-        if os.path.exists(p):
-            os.remove(p)
-    for name in ("final.mp4", "final_music.mp4", "final_song.mp4"):
-        path = os.path.join(ctx.run_dir, name)
-        if os.path.exists(path):
-            os.remove(path)
+    invalidate_render(ctx)
+
 
 
 

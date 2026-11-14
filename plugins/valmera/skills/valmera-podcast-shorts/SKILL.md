@@ -78,7 +78,7 @@ word so the end card follows directly. What differs is how a found picture is sh
 | `footage-cut` | fills the phone, in colour | heavy grotesk capitals, yellow accent |
 | `window` | plays in a four by three window the width of the phone over itself out of focus (three layers); footage that is wide or small in the archive is never blown up | condensed capitals, cyan accent |
 | `archive-reel` | fills the phone in black and white with heavy grain, a projector flash into each run; he stays in colour | cream serif italic |
-| `prints` | lands as a tilted print, beside and over the one before, on its own dark out-of-focus ground: four layers and more by the third print | high-contrast serif, orange accent |
+| `prints` | lands as a readable, nearly full-width tilted print on its own dark out-of-focus ground; the previous print clears so document and interface detail stays visible | high-contrast serif, orange accent |
 
 ## What every short is built from
 
@@ -87,14 +87,14 @@ word so the end card follows directly. What differs is how a found picture is sh
 | The clip | In and out on word edges, the title, the hook and close lines, and the real things it names | `wf1_short.script` (OpenAI) |
 | Real footage | Video of what each sentence names from YouTube and archive.org, every frame checked, a person held to one face, 1 to 3 s clips inside one shot, graded to one look, each with its URL, channel and time range. A clip that is near black or flat is left out. Source aspect and every edge are preserved before the layout; portrait crops are never baked into supply. Pictures never move to a different sentence without a fresh placement check | `worker/footage` through `_shell/chain.footage` |
 | Photographs | Of the same things, after the footage of them and where footage is thin: Commons and Openverse, checked by eye, licence kept |
-| No held take | The take cuts between face-safe framings on voice stress, in phrase-sized runs. Long speaker-only passages alternate portrait framing with a complete source view, so moving the captions cannot erase their picture changes. Cutaways remain within their model-assigned sentence; every proposed placement is checked by gpt-6-sol against its actual words and beginning/middle/end frames. Rejected placements return to the take; no unexamined picture reaches the film. The composed phone frames are checked again before branding and music and once more on the exact final branded export; the product checks the exact entry/exit and display-word transition frames in a second adversarial pass, rebuilds without rejected placements, and fails delivery if any rejection remains. Visible display words are part of the claim, including on transition frames | `placement_check.py`, `wf1_film.build` |
-| Pace and moves | Each picture is cut into framings on the voice's stress and set moving on the references' measured curves; the take cuts on speech stress between distinct framings; faces stay whole | `worker/scene/pace.py`, `motion.py` |
+| Documentary coverage | A model inventories every concrete named thing and assigns pictures to exact word spans. Actual pictures must cover at least 45% of the short; moving footage must cover at least 60% of picture time, with six new real pictures per ten seconds of named stretches. Every entry, middle, exit and display transition is checked on gpt-6-sol. Rejected assets are replaced from checked supply; insufficient coverage stops the run rather than passing an empty-picture audit | `wf1_coverage.py`, `placement_check.py` |
+| Pace and moves | New pictures carry pace. Speaker footage keeps its own camera cuts; only model-justified rhetorical words trigger eased, face-safe moves. Never alternate hard crops to fill a cut quota | `worker/scene/pace.py`, `wf1_film.py` |
 | Look | One look solved on the film's own pictures, skin kept | `worker/scene/looks.py` |
 | Finishes by section | When part of the story is about the past, that part's pictures are black and white (a story that is all past keeps its colour, except in `archive-reel`); one new picture in three opens soft and is sharp by its fourth frame; a white frame on the cut back to his face for the payoff | `wf1_film.build` |
 | Captions | One face-safe seat for the whole film, measured against every final camera crop; a line is laid as it will stand and each word is inked on its own spoken word. After a display hold, already-spoken words are omitted; only the current and following words resume, never a restarted chunk. On a picture that is bright under the seat the type is dark for as long as that picture is up | `film.caption_build`, `wf1_film.ink_by_ground` |
-| Display words | Four to eight strings, the figures, names and words that carry the story, large on the caption seat on the word that says them; the title holds the seat over his first breath; all display blocks are seated against final face boxes on every frame, shrinking long titles if needed; search-subject labels are omitted so they cannot make unsupported factual claims | `wf1_short.direction_of` (OpenAI), `wf1_film.build` |
-| Sound design | The references' kinds of sound on what lands, including distinct designed reframes measured at their joins, their amount by section, one level hierarchy under the voice, no recording twice | `worker/score/sound.py` (SND3) |
-| Music | A track chosen from the licensed library, opened on a full part, built where the story turns, shaped on the payoff even when fewer than two bars remain, under every word and up in the pauses, a hit before the end card. No two shorts of one run play the same track | `worker/music_film.py`, `worker/score/music.py` (MUSIC2) through `_shell/chain.music_version` |
+| Display words | Four to eight strings, the figures, names and words that carry the story, large on the caption seat on the word that says them; the first two seconds always show the spoken hook word by word; the headline stays in delivery metadata; all display blocks are seated against final face boxes on every frame, shrinking long titles if needed; search-subject labels are omitted so they cannot make unsupported factual claims | `wf1_short.direction_of` (OpenAI), `wf1_film.build` |
+| Sound design | The references' kinds of sound on what lands, on new pictures and meaningful graphic actions, no recording twice. Audibility is measured from 50 ms broadband onsets against the whole mix, with retained stems verified against the encoded export | `worker/score/sound.py` (SND3) |
+| Music | A track chosen from the licensed library, opened on a full part, built where the story turns, shaped on the payoff even when fewer than two bars remain, 5–6 dB below speech on the final broadband ruler, a 0.5–2.3 s payoff drop at 10–24 dB, and the current product brand finish (the owner has held the old end sting pending STING-REF). No two shorts of one run play the same track | `worker/music_film.py`, `worker/score/music.py` (MUSIC2) through `_shell/chain.music_version` |
 | Brand | The product's own watermark on every frame and its end card, measured on the delivered file | `_shell/brand.py` |
 
 ## The alien bank (`worker/scene/alien`): only as the verdict of 14 Nov allows
@@ -146,3 +146,23 @@ README.md             the list, what was not made and why
   kept only to resume a v9 run. Its rules on sound, music and restraint are withdrawn. `legacy/README.md` covers v6-v8.
 - `alien/` and `../_shell/wf1.py`: the earlier one-film styles (room-listens, lit-by-voice, receipts, second-camera).
   Not part of this workflow.
+
+Never report plan counts as viewer measurements. Use the independent rater’s final-film scripts and judge3; zero rejected pictures with insufficient real-picture coverage is a failure. A fixer does not independently rate its own work.
+
+Research the director's visual subjects, keeping the full spoken-entity inventory for audit. Pass the depiction context all the way to the footage reviewer. A contextual campus illustration is distinct from a claim to record a particular historical conversation; never invent the missing participant. The podcast uses the engine's contextual-check route: every selected source cut, composed placement and branded transition is checked against the actual words. Named people require visible attribution, never face comparison. Preliminary motion scouting is bounded to the source frames being examined; the selected clips still receive exact motion measurements. A failed coverage gate triggers targeted research with retained sources, never silent deletion of the pictures.
+
+For subjects that need primary evidence, the product also researches original institutional PDFs and images,
+renders their actual pixels with PDFium, and checks readable crops against the spoken passage. These remain
+stills and never count as moving footage. Source provenance follows each placement into the final-frame
+review; it cannot excuse a contradictory image. A failed source download does not discard other usable
+sources. The bounded research budget includes both documentary artifacts and moving-footage recovery.
+Before declaring a referent unfilmable, research the speaker's primary account and the original publication;
+an unnamed project or recent result may have a documented identity. Primary article pages are captured
+headlessly as actual publisher pixels and remain stills. Public original-publisher video files and verified
+cached originals can enter the same footage engine when platform access fails. A newly available original
+invalidates an exhausted search cache, while every placement still needs a fresh word-specific verdict.
+After picture selection, exposed speaker passages are checked again: only a director-justified rhetorical
+word can trigger an eased move. A numerical hold detector never creates automatic alternating crops.
+
+Repeated overlapping document crops or source-video intervals do not count as new pictures, even under different cache paths. Final review receives separate phone-resolution frames; a half-open placement ends before the next cut. Changed scene or audio plans invalidate the retained render and final mix before review.
+A meaningful silent reaction may carry a director-justified eased move anchored to the preceding spoken line; its timestamp must stay inside that line's following silence. Unresolved holds return to direction with their exact frame bounds, never an automatic crop pattern.

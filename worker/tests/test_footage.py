@@ -575,3 +575,14 @@ def test_the_look_keeps_only_lines_whose_three_brief_checks_pass(monkeypatch, tm
     out, _ = look.check(sub, plain, cands, srcs, str(tmp_path))
     assert out[0]["lines"] == [0, 1, 2] and "lines_offered" not in out[0] and seen["systems"][1] == look.LOOK_SYSTEM
     assert "[see:" not in seen["texts"][1]
+
+
+def test_research_document_links_are_model_context_not_video_searches(monkeypatch):
+    seen=[]
+    def ask(system,content,*args,**kwargs):
+        seen.append(content)
+        return json.dumps(dict(subjects=[dict(name='Research',searches=[dict(q='original research demonstration',where='youtube'),dict(q='https://publisher/paper.pdf')])],lines=[])),0
+    monkeypatch.setattr(plan.ask,'ask',ask)
+    result,_=plan.plan([], [dict(name='Research',video_searches=['https://publisher/paper.pdf','site:publisher research','original conference demo'])])
+    assert 'https://publisher/paper.pdf' in seen[0]
+    assert [q['q'] for q in result['subjects'][0]['searches']]==['original conference demo','original research demonstration']

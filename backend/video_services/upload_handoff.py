@@ -25,6 +25,7 @@ from flask import current_app
 AUDIENCE = "valmera-upload-handoff"
 TTL_S = 7 * 24 * 3600
 BEAT_EVERY_PARTS = 4
+DEFAULT_MAX_BYTES = 16 * 1024 ** 3
 
 
 def enabled():
@@ -35,13 +36,18 @@ def max_bytes():
     """Bytes a handed-off transfer may still have to send through our servers.
 
     Background Fetch posts to the API, which writes each part to storage, so
-    the remainder costs our bandwidth once. Bounded so one abandoned 50 GB
+    the remainder costs our bandwidth once. Bounded so one abandoned 80 GB
     file cannot become a bill; above it the transfer waits for the page, as
-    before."""
+    before.
+
+    16 GiB, not 4 (#401, 14 Nov 2026): an Android phone's 5.1 GB screen
+    recording was hidden 3 min in with 4.8 GB still to send, so the page
+    skipped the hand-off and the upload stopped for good. 40 customer uploads
+    in 30 days were over 4 GiB; 36 of them fit under 16."""
     try:
-        return int(os.getenv("UPLOAD_HANDOFF_MAX_BYTES", str(4 * 1024 ** 3)))
+        return int(os.getenv("UPLOAD_HANDOFF_MAX_BYTES", str(DEFAULT_MAX_BYTES)))
     except ValueError:
-        return 4 * 1024 ** 3
+        return DEFAULT_MAX_BYTES
 
 
 def mint(user_id, project_id, key, upload_id, kind, nbytes, part_size):

@@ -40,6 +40,17 @@ def _whole_first(src):
     return bool(src.get("duration")) and float(src["duration"]) <= WHOLE_UNDER_S
 
 
+def primary_hits(subjects, named):
+    """Only exact-URL, locally retained original sources can enter this opt-in route."""
+    out={}
+    for i,subject in enumerate(subjects):
+        rows=[h for n in named or [] if n.get('name')==subject['name'] for h in n.get('video_sources',[])]
+        kept=[dict(h) for h in rows if h.get('where') in ('primary','youtube','archive') and h.get('id') and h.get('url')
+              and h.get('title') and h.get('channel') and fetch.local_source(h['url'])]
+        if kept:out[i]=kept
+    return out
+
+
 def _open(src, work, log, hear_s=None, read_s=None, whole_first=False):
     """Proxy, shots and transcript of one source; the error on the source when it could not be read. hear_s: seconds
     heard (0: none, the shots alone). read_s: seconds of the source read. whole_first (opt-in, a story reel): a source of
@@ -135,7 +146,7 @@ def line_shots(dur, shot_s=None, line_max=None):
 
 def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MAX_SOURCES, keep_work=False, anchors=None, avoid=None,
          hear_s=None, read_s=None, per=None, want_voices=None, preserve_source=False, downloaded_only=False, shot_s=None, line_max=None,
-         strict_lines=False, motion_first=False, alloc=None, reassign_lost=False, whole_first=False):
+         strict_lines=False, motion_first=False, alloc=None, reassign_lost=False, whole_first=False, scout_motion=False):
     """downloaded_only: cut the scanned rendition without reopening remote streams.
     avoid: [{"url", "time_range"}] already cut for this film by an earlier run: those seconds of a source are not cut again.
     hear_s, read_s, per: a caller with a deadline (a first film, score.film) hears less or nothing of each source, reads
@@ -173,9 +184,12 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         shows = {ln["i"]: ln for ln in pl["lines"]}
         log(f"plan: {len(subjects)} subjects, {sum(len(s['searches']) for s in subjects)} searches")
         # 2. search
+        primary = primary_hits(subjects,named)
+        # Cached originals are candidates, not a closed source whitelist. A cache
+        # may contain only unsuitable footage; continue discovering alternatives.
         flat = [(si, q) for si, s in enumerate(subjects) for q in s["searches"]]
         found = search.run([q for _, q in flat])
-        hits = {}
+        hits = dict(primary)
         for k, (si, _) in enumerate(flat):
             have = {h["id"] for h in hits.get(si, [])}
             hits.setdefault(si, []).extend(h for h in found.get(k) or [] if h["id"] not in have)
@@ -183,6 +197,8 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         if read_s:
             hits = {si: ([h for h in hs if h.get("duration") and float(h["duration"]) <= WHOLE_UNDER_S] or hs) for si, hs in hits.items()}
         kept, spend["rank"] = plan.rank(subjects, hits, per=per)
+        if alloc == 'round':
+            kept = source_rounds(kept)
         sources, by_id = [], {}
         for si, h, why in kept:
             if h["id"] in by_id:
@@ -277,7 +293,10 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             cands = []
             for k, s in enumerate(mine):
                 said = [m["t"] for m in ms if m["src"] == k]
-                if motion_first:
+                if motion_first and scout_motion:
+                    times, mo = motion_at_candidates(s,said,log)
+                    s.setdefault('scout_motion',{}).update(mo)
+                elif motion_first:
                     mo = motion.of_shots(s.get("proxy"), s["shots"], log=log)
                     times = look.pick_times(s["shots"], said, moving={sh for sh, v in mo.items() if v["p90"] >= motion.FLOOR}, min_s=0.3)
                 else:
@@ -317,7 +336,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         motion_of = {}
         if motion_first:
             for s in live:
-                motion_of[s["key"]] = motion.of_shots(s.get("proxy"), s["shots"], log=log)
+                motion_of[s["key"]] = s.get('scout_motion',{}) if scout_motion else motion.of_shots(s.get("proxy"), s["shots"], log=log)
         plan_rows = assign(lines, good, src_of, shows, taken, shot_s=shot_s, line_max=line_max, strict=strict_lines,
                            motion_of=motion_of if motion_first else None, alloc=alloc)
         # 7. cut: resolve each used source's stream once, cut, measure, grade to one look, finish
@@ -497,6 +516,27 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             shutil.rmtree(work, ignore_errors=True)
 
 
+def motion_at_candidates(source,said,log=print):
+    """Bound preliminary flow to the actual scout frames; selected cuts are measured separately."""
+    times = look.pick_times(source['shots'],said,min_s=.3)
+    selected = sorted({tuple(shots.shot_at(source['shots'],t)) for t in times})
+    return times,motion.of_shots(source.get('proxy'),selected,log=log)
+
+
+def source_rounds(ranked):
+    """Spend the source cap across subjects before buying a fifth view of the first."""
+    from collections import defaultdict, deque
+    groups = defaultdict(deque)
+    for row in ranked:
+        groups[row[0]].append(row)
+    out = []
+    while any(groups.values()):
+        for group in groups.values():
+            if group:
+                out.append(group.popleft())
+    return out
+
+
 def keep_sources(sources, log=print):
     """FOOTAGE_KEEP_SOURCES=<dir>: each whole source this call fetched (src["whole"], not one already kept) is hard-linked
     (moved when it cannot be) into <dir> before the work folder goes, and {url, path, rung} appended to <dir>/manifest.json,
@@ -630,7 +670,7 @@ def lines_of(script):
     out = []
     for k, s in enumerate(sc.get("segments") or []):
         ln = dict(i=int(s.get("i", k)), say=s.get("say"), pictures=s.get("pictures") or [], dur=s.get("dur"), pause_after=s.get("pause_after"))
-        for key in ("see", "era", "beat"):            # the writer's picture brief, when the script carries one
+        for key in ("see", "era", "beat", "visual"):  # the writer's picture brief, when the script carries one
             if s.get(key) is not None:
                 ln[key] = s[key]
         out.append(ln)
@@ -653,6 +693,7 @@ def main():
     ap.add_argument("--lines", default=None, help="comma-separated line numbers: only these lines are searched (a top-up)")
     ap.add_argument("--strict-lines", action="store_true", help="a frame fills a line only when the look named that line")
     ap.add_argument("--motion-first", action="store_true", help="moving shots first, windows on their motion peak")
+    ap.add_argument("--scout-motion", action="store_true", help="measure preliminary flow only for shots represented in the scout's candidate frames")
     ap.add_argument("--alloc", default=None, choices=["round"], help="round: one pick a line a round, the scarcest line first")
     ap.add_argument("--reassign-lost", action="store_true", help="lines whose cuts failed are assigned again and cut")
     ap.add_argument("--whole-first", action="store_true", help="short sources fetched once, whole with sound: scan, transcript and every cut")
@@ -673,7 +714,7 @@ def main():
     res = seam.for_lines(lines, named, title, a.out, a.w, a.h, scope="workflow", log=lambda m: print("[footage] " + m, flush=True),
                          anchors=anchors, avoid=avoid, preserve_source=a.preserve_source,
                          **{k: v for k, v in dict(shot_s=a.shot_s, line_max=a.line_max, per=a.per, strict_lines=a.strict_lines,
-                                                  motion_first=a.motion_first, alloc=a.alloc, reassign_lost=a.reassign_lost,
+                                                  motion_first=a.motion_first, scout_motion=a.scout_motion, alloc=a.alloc, reassign_lost=a.reassign_lost,
                                                   whole_first=a.whole_first, want_voices=a.want_voices).items() if v})
     if res is None:
         print(json.dumps(dict(off="VALMERA_FOOTAGE=0")))

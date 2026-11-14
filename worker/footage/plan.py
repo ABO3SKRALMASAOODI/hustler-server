@@ -1,6 +1,7 @@
 """The two reading steps before any byte is fetched: what to search for, and which sources to open.
 A model reads the words and decides; nothing here reads them by rule."""
 import json
+from urllib.parse import urlparse
 
 from . import ask
 
@@ -12,7 +13,7 @@ For each subject (keep the writer's names; add a subject only when a line needs 
 - "name": the subject.
 - "kind": person, place, thing, company or event.
 - "must_show": one sentence, what a frame must plainly show to count (the person himself on camera; the jet in that livery; the strip at night; the machine and its panels). Name every form the subject can take on camera.
-- "searches": 3 to 5 searches, each {"where": "youtube" or "archive", "q": "..."}. YouTube for interviews ("Fred Smith interview"), news ("FedEx 1973 news report"), launches, documentaries and the company's own films; archive.org for newsreels, government and public-domain film before about 1980. Write them the way an archivist would search: the name with the kind of footage. Never a search for a still photo, a meme or a reaction.
+- "searches": 3 to 5 searches, each {"where": "youtube" or "archive", "q": "..."}. YouTube for interviews ("Fred Smith interview"), news ("FedEx 1973 news report"), launches, documentaries and the company's own films; archive.org for newsreels, government and public-domain film before about 1980. Return search phrases, never web URLs, PDF links or site: web operators. Research hints may contain document links; read them as context and produce actual video-platform queries instead. Write them the way an archivist would search: the name with the kind of footage. Never a search for a still photo, a meme or a reaction.
 
 For each line: "i" (its number), "show" (what the picture should show while it is said, plainly, the real thing first), and "subjects" (the subject names whose footage can carry it, best first).
 
@@ -22,9 +23,13 @@ Answer with one JSON object only: {"subjects":[...],"lines":[...]}"""
 
 RANK_SYSTEM = """You choose which videos a footage researcher should open. For each subject you get YouTube and archive.org results (number, title, channel, length in seconds, views).
 
+The actual subject identity is binding. Suggested example papers, films or angles in must_show are an editorial wish list, not an exclusive source whitelist. Do not reject another authentic original demonstration of the same category and era merely because it was not among those examples. Specific named people, systems and events still need that exact identity. Numerical edit quotas and earlier acquisition failures are not visual facts.
+
 Keep the sources most likely to hold real, clean video of that very subject: the person interviewed or filmed himself, a news report of the day, event or launch footage, archive newsreel, the company's own film, a documentary with real footage. A long interview or documentary is good: the editor takes 1-3 seconds of it.
 
 Drop: another editor's short or reel (it carries their captions), slideshows of photos with a voice, AI narrations, reaction and commentary videos, top-10 lists, music videos, games, animations about the subject, a namesake that is not the subject, anything over an hour.
+
+When the depiction requirements explicitly call for a scientific visualization, technical system, software interface or document, an original institution's published visualization or product demonstration is primary source material. Keep that exact artifact; do not reject it merely because it is rendered or screen-recorded. It must illustrate the named object accurately, with its provenance clear, and must never be mistaken for footage of a hypothetical event.
 
 Answer with one JSON object only: {"keep":[{"s":subject number,"h":result number,"why":"at most eight words"}]}, at most the requested number of sources per subject, best first, and only sources you would bet on."""
 
@@ -32,10 +37,11 @@ Answer with one JSON object only: {"keep":[{"s":subject number,"h":result number
 def plan(lines, named, about="", budget_s=90.0):
     """({"subjects": [...], "lines": [...]}, usd)."""
     rows = [f"{ln['i']}. {ln['say']}" + (f"   [writer's pictures: {', '.join(ln.get('pictures') or [])}]" if ln.get("pictures") else "")
+            + (f"   [documentary depiction requirements: {ln['visual']}]" if ln.get('visual') else '')
             + (f"   [see: {json.dumps([dict(thing=x.get('thing'), as_of=x.get('as_of'), moment=x.get('moment')) for x in ln['see'] if isinstance(x, dict)], ensure_ascii=False)}]"
                if ln.get("see") else "")
             for ln in lines]
-    subj = [dict(name=n.get("name"), kind=n.get("is"), must_show=n.get("must_show")) for n in named or []]
+    subj = [dict(name=n.get("name"), kind=n.get("is"), must_show=n.get("must_show"), research_hints=n.get("video_searches") or []) for n in named or []]
     content = (f"Film: {about}\n\nLines:\n" + "\n".join(rows) + "\n\nNamed things:\n" + json.dumps(subj, ensure_ascii=False))
     txt, usd = ask.ask(PLAN_SYSTEM, content, "footage_plan", budget_s=budget_s, max_tokens=6000)
     obj = ask.json_obj(txt)
@@ -43,7 +49,7 @@ def plan(lines, named, about="", budget_s=90.0):
     for s in obj.get("subjects") or []:
         if not isinstance(s, dict) or not s.get("name"):
             continue
-        q = [x for x in s.get("searches") or [] if isinstance(x, dict) and x.get("q")]
+        q = [x for x in s.get("searches") or [] if isinstance(x, dict) and x.get("q") and not urlparse(str(x["q"])).scheme]
         given = next((n.get("is") for n in named or [] if n.get("name") == s["name"]), None)
         kind = str(s.get("kind") or given or "thing").lower()
         subs.append(dict(name=str(s["name"]), kind=kind, must_show=str(s.get("must_show") or s["name"]),
@@ -52,7 +58,7 @@ def plan(lines, named, about="", budget_s=90.0):
     # person's interview of the story's year, the work's trailer): they lead that subject's searches, and a subject the
     # model left out is added with them, so the caller's explicit search is always run
     for n in named or []:
-        vq = [str(q)[:120] for q in n.get("video_searches") or [] if isinstance(q, str) and q.strip()]
+        vq = [str(q)[:120] for q in n.get("video_searches") or [] if isinstance(q, str) and q.strip() and not urlparse(q).scheme]
         if not vq or not n.get("name"):
             continue
         sub = next((x for x in subs if x["name"] == n["name"]), None)

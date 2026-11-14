@@ -115,7 +115,7 @@ def test_one_recording_twice_in_30s_never_inside_3s():
     uses = [(1.0, "whoosh_soft_2"), (5.0, "whoosh_soft_2")]
     assert SD._free("whoosh_soft_2", 9.0, uses) == "whoosh_soft_1"
     assert SD._free("whoosh_soft_2", 40.0, uses) == "whoosh_soft_2"
-    assert SD._free("impact_1", 2.0, [(0.5, "impact_1")]) is None
+    assert SD._free("impact_8", 2.0, [(0.5, "impact_8")]) is None      # no alternate (impact_1 is out since 15 Nov: impact_8)
 
 
 def test_a_sound_that_masks_the_voice_comes_down_or_goes(tmp_path):
