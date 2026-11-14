@@ -31,6 +31,7 @@ legacy chain. This is a craft switch; billing admission, trial availability
 and model spending remain controlled by first_cut.run.
 """
 import base64
+import first_cut_models
 import json
 import re
 import subprocess
@@ -313,7 +314,7 @@ def verify_broll(ctx, steps, started, run, spend):
         return covered(ctx)
     items = [it for it in edl.get("fx") or [] if isinstance(it, dict)
              and it.get("type") == "broll" and it.get("start") is not None]
-    if not items or not model or not claude_lane.available():
+    if not items or not model or not first_cut_models.available(model):
         return covered(ctx)
     try:
         words = device_planner.program_words(edl, ctx.index or {})
@@ -916,7 +917,7 @@ def _vision_boxes(ctx, frames_at, spend):
     import claude_lane
     import llm
     model = getattr(ctx, "first_cut_model", None)
-    if not model or not claude_lane.available():
+    if not model or not first_cut_models.available(model):
         return {}
     try:
         path = ctx.proxy_path()

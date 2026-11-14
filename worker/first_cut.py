@@ -43,6 +43,7 @@ import re
 import shutil
 import subprocess
 import time
+import first_cut_models
 
 import agent_tools
 import config
@@ -468,7 +469,7 @@ def scout_range(ctx, worker_db, spend):
             by_id.setdefault(digits, s)
     import claude_lane
     model = getattr(ctx, "first_cut_model", None)
-    if model and claude_lane.available():
+    if model and first_cut_models.available(model):
         lines, budget = [], 90000
         for s in rows:
             line = f"[{s['id']} {float(s['t0']):.1f}-{float(s['t1']):.1f}] {s['text']}"
@@ -744,7 +745,7 @@ def trim_range(ctx, worker_db, spend):
     hook = None
     import claude_lane
     model = getattr(ctx, "first_cut_model", None)
-    if model and claude_lane.available():
+    if model and first_cut_models.available(model):
         by_id = {str(r["id"]): r for r in rows}
         for r in rows:
             by_id.setdefault(re.sub(r"\D", "", str(r["id"])), r)
@@ -1708,7 +1709,7 @@ def montage_scout(ctx, windows, spend, title_only=False, boxes=False):
     import subprocess
     import claude_lane
     model = getattr(ctx, "first_cut_model", None)
-    if not model or not claude_lane.available():
+    if not model or not first_cut_models.available(model):
         return windows, None
     try:
         path = ctx.proxy_path()
@@ -3560,9 +3561,9 @@ def run(worker_db, job, project, index_row):
             recorder = _ScopeRecorder(worker_db, job)
             llm.set_recorder(recorder)
         claude_trial.activate(trial_scope, recorder)
-    elif subscribed and claude_trial.credit_status(worker_db).get("on"):
-        ctx.first_cut_model = claude_trial.flag(worker_db)["model"]
-        if llm.get_recorder() is None:
+    elif subscribed:
+        ctx.first_cut_model = first_cut_models.paid_scout(worker_db)
+        if ctx.first_cut_model and llm.get_recorder() is None:
             recorder = _ScopeRecorder(worker_db, job)
             llm.set_recorder(recorder)
     # Owner, 15 Nov: visual craft applies to every admitted first film.
