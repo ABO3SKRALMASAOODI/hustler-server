@@ -576,3 +576,17 @@ def test_a_drivers_command_line_reads_both_flag_forms_and_refuses_any_other_flag
         with pytest.raises(SystemExit) as e:
             DL.driver_cli(argv, "story.py", "/default")
         assert json.loads(str(e.value))["failed"], argv
+
+
+def test_driver_cli_reads_autocorrected_dashes_as_flags(tmp_path):
+    """An em or en dash typed for "--" (autocorrect) is a flag, never topic words: a test stays a test."""
+    import delivered as DL
+    x = str(tmp_path / "x")
+    for spelled in ("\u2014test-out=" + x, "\u2013test-out=" + x):
+        got = DL.driver_cli([spelled, "Toy", "Story"], "story.py", str(tmp_path / "out"))
+        assert got["test"] == x and got["topic"] == "Toy Story"
+    got = DL.driver_cli(["\u2014", "a", "dash"], "story.py", str(tmp_path / "out"))
+    assert got["test"] is None
+    import pytest
+    with pytest.raises(SystemExit):
+        DL.driver_cli(["\u2014bogus"], "story.py", str(tmp_path / "out"))

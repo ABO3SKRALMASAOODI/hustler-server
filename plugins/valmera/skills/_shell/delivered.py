@@ -137,6 +137,10 @@ def driver_cli(argv, prog, default_out):
     (--out x, --out=x), flags anywhere among the words. Any other argument that starts with "-" is refused, never read as
     the topic (a mistyped flag must not turn a test into a delivery); words after "--" are all topic.
     Returns dict(out_root, test, topic); raises SystemExit with one JSON line when the line is wrong."""
+    # macOS and chat apps autocorrect "--" into an em or en dash ("—test-out=/x"); such a word is a flag that was
+    # typed, never topic text, so it is read back as "--" (a missed test flag would otherwise make a test a delivery).
+    argv = ["--" + a.lstrip("—–-") if a[:1] in ("—", "–") and a.lstrip("—–-")[:1].isalpha() else a
+            for a in argv]
     ap = _Parser(prog=prog, allow_abbrev=False, add_help=False)
     ap.add_argument("--out")
     ap.add_argument("--test-out")
