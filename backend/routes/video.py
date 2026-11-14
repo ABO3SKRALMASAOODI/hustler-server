@@ -1412,11 +1412,13 @@ def _removed_between_keeps(keep):
         except (TypeError, ValueError, KeyError, IndexError, AttributeError):
             continue
     spans.sort()
-    removed, reach = 0.0, None
+    # The source starts at 0 s: time before the first kept span was left out
+    # too (p5755, 13 Nov: a 22 s pick from a 137 s upload).
+    removed, reach = 0.0, 0.0
     for a, b in spans:
-        if reach is not None and a > reach:
+        if a > reach:
             removed += a - reach
-        reach = b if reach is None else max(reach, b)
+        reach = max(reach, b)
     return removed
 
 
@@ -1454,11 +1456,16 @@ def _export_value_line(edl_json):
                 if isinstance(f, dict) and f.get("type") == "broll")
     if broll:
         have.append(f"{broll} B-roll cutaway" + ("s" if broll != 1 else ""))
-    # "The pauses cut" only when source time was actually removed between kept
-    # spans. Back-to-back spans (a film split at its shot changes for dissolves,
-    # p5725 on 13 Nov: 12 spans covering 0-98 s whole) cut nothing.
-    if _removed_between_keeps(edl_json.get("keep") or []) >= 0.1:
-        have.append("the pauses cut")
+    # Name what was measured, never why it was cut. The EDL proves how much
+    # source time is left out, not that it was a pause: p5755 (13 Nov), a
+    # 22 s pick of shots from a 137 s upload with no speech, was announced as
+    # "the pauses cut". Back-to-back spans (a film split at its shot changes
+    # for dissolves, p5725: 12 spans covering 0-98 s whole) cut nothing.
+    removed = _removed_between_keeps(edl_json.get("keep") or [])
+    if removed >= 1.0:
+        secs = int(round(removed))
+        have.append(f"{secs} second{'s' if secs != 1 else ''} of the footage "
+                    "cut out")
     if not total:
         return None
     length = f"{int(round(total))}-second "

@@ -30,7 +30,8 @@ FIRST_CUT = {
 def test_the_value_line_names_only_what_the_edit_holds():
     line = video._export_value_line(FIRST_CUT)
     assert line == ("Your 35-second vertical edit is ready to download: a hook "
-                    "title, captions, 2 B-roll cutaways and the pauses cut. "
+                    "title, captions, 2 B-roll cutaways and 3 seconds of the footage "
+                    "cut out. "
                     "Choose a plan and the full-quality export starts right away.")
     bare = video._export_value_line({"keep": [[0.0, 12.0]]})
     assert bare == ("Your 12-second edit is ready to download. Choose a plan "
@@ -50,7 +51,19 @@ def test_back_to_back_spans_are_not_called_pauses_cut():
     line = video._export_value_line(whole)
     assert line.startswith("Your 98-second edit") and "pauses" not in line
     cut = {"keep": [[0.0, 8.0], [9.2, 18.0]]}
-    assert "the pauses cut" in video._export_value_line(cut)
+    assert "1 second of the footage cut out" in video._export_value_line(cut)
+
+
+def test_a_shot_pick_is_never_called_pauses_cut():
+    # p5755 (13 Nov): the First cut picked 22 s of shots from a 137 s upload
+    # with no speech on its audio; the card said "the pauses cut". The line
+    # states the measured time left out, never a reason for it.
+    pick = {"keep": [[12.0, 16.0], [30.0, 36.0], [60.0, 66.0], [100.0, 106.0]],
+            "frame": {"ratio": "9:16"}}
+    line = video._export_value_line(pick)
+    assert "pause" not in line
+    assert line.startswith("Your 22-second vertical edit is ready to download: "
+                           "84 seconds of the footage cut out.")
 
 
 def test_the_export_reply_carries_the_line_and_a_repeat_updates_it():
