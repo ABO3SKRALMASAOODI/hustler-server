@@ -801,7 +801,9 @@ def test_a_p0_released_with_its_fix_live_is_no_customer_blocked_email(world):
         later = world.clock.now + timedelta(hours=hours)
         assert intake.unhandled(world.c, later) == [], hours
     world.clock.now += timedelta(hours=7)
-    assert [r["id"] for r in intake.pending_p0(world.c, world.clock.now)] == [tid]
+    # A deployed fix waits on VERIFY, not another Fixer claim. A recurrence
+    # below returns it to the Fixer queue.
+    assert intake.pending_p0(world.c, world.clock.now) == []
     store.record_failure(world.conn.cursor(), {
         "ref": "job:9", "source": "job", "at": world.clock.now, "user_id": 2869,
         "cause_key": "auto-x", "project_id": 5543, "severity": "P0",
@@ -1149,11 +1151,11 @@ def test_the_owner_hears_when_an_agent_stops_and_when_a_claim_goes_stale(monkeyp
             return []
     got = cockpit_alerts.event_alerts(C(), now, now)
     text = " ".join(line for _k, _s, line in got)
-    assert "the run has probably died" in text and "P0 #77" in text
+    assert "P0 #77" in text
     assert "3 customers" in text
     assert "p0_watch" in text and "2 h 5 min" in text
-    assert got[0][1] == "Blocked: A request ended partial (P0 #77)"
-    assert "wake the Mac" in got[0][2]
+    assert got[0][1] == "Issue: A request ended partial (P0 #77), being fixed"
+    assert not any(subject.startswith("Blocked:") for _, subject, _ in got)
     assert [s for _k, s, _l in got][1:] == ["An automatic agent stopped"]
 
 
