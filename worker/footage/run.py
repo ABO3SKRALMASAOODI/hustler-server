@@ -183,6 +183,8 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         if read_s:
             hits = {si: ([h for h in hs if h.get("duration") and float(h["duration"]) <= WHOLE_UNDER_S] or hs) for si, hs in hits.items()}
         kept, spend["rank"] = plan.rank(subjects, hits, per=per)
+        if alloc == 'round':
+            kept = source_rounds(kept)
         sources, by_id = [], {}
         for si, h, why in kept:
             if h["id"] in by_id:
@@ -495,6 +497,20 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         keep_sources(sources_seen, log)
         if not keep_work:
             shutil.rmtree(work, ignore_errors=True)
+
+
+def source_rounds(ranked):
+    """Spend the source cap across subjects before buying a fifth view of the first."""
+    from collections import defaultdict, deque
+    groups = defaultdict(deque)
+    for row in ranked:
+        groups[row[0]].append(row)
+    out = []
+    while any(groups.values()):
+        for group in groups.values():
+            if group:
+                out.append(group.popleft())
+    return out
 
 
 def keep_sources(sources, log=print):

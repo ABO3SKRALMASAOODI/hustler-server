@@ -120,12 +120,16 @@ def script(ctx, ideas_out):
 
 
 def supply(ctx, script):
+    import wf1_coverage
     sup_dir = ctx.supply
     os.makedirs(sup_dir, exist_ok=True)
     os.environ["TMPDIR"] = ctx.tmp
     pk = os.path.join(sup_dir, "pack.json")
     if os.path.exists(pk):
-        return json.load(open(pk))["record"]
+        prior = json.load(open(pk))
+        if (prior['pack'].get('coverage') or {}).get('contract') == wf1_coverage.CONTRACT:
+            return prior['record']
+        os.replace(pk,os.path.join(sup_dir,'previous-pack.json'))
     rec0 = chain.pack(ctx, script)                              # source.mp4 (the window), hearing.json, index.json
     idx = json.load(open(os.path.join(sup_dir, "index.json")))
     src = os.path.join(sup_dir, "source.mp4")
@@ -150,25 +154,26 @@ def supply(ctx, script):
                          f"never him as he looks today. Who is in it: {who}",
                    segments=[dict(say=s['say'], pictures=[s['name']], visual=s['must_show']) for s in windows],
                    named=[dict(name=r["name"], must_show=r.get("must_show") or r["name"], **{"is": r.get("is") or "thing"}) for r in coverage['entities']])
-    wf3.given_footage(ctx, os.path.join(sup_dir, "footage"))
+    footage_name = f'footage-v{wf1_coverage.CONTRACT}'
+    wf3.given_footage(ctx, os.path.join(sup_dir, footage_name))
     fw, fh = style["footage"]
     foot = chain.footage(ctx, dict(script=fscript), [round(float(s["t1"]) - float(s["t0"]), 2) for s in windows],
                          W=fw, H=fh, preserve_source=True, shot_s=1.15, line_max=20, per=5,
                          strict_lines=True, motion_first=True, alloc="round", reassign_lost=True,
-                         whole_first=True, keep_sources=True)
+                         whole_first=True, keep_sources=True, out_name=footage_name)
     if foot:
         n_yt, n_bad = refused(foot)
         ctx.log(f"footage sources: {n_yt} on YouTube, {n_bad} refused or archive-only; {foot['counts'].get('clips')} clips on "
                 f"{foot['counts'].get('lines_with_footage')} of {foot['counts'].get('lines')} sentences")
     if walled(foot):                                           # nothing is cut from photographs and a clip or two: the same run continues when the wall lifts
         import shutil
-        shutil.rmtree(os.path.join(sup_dir, "footage"), ignore_errors=True)
+        shutil.rmtree(os.path.join(sup_dir, footage_name), ignore_errors=True)
         raise RuntimeError(f"{wf1_film.WALL}: {n_bad} of {n_yt} footage sources would not open ({foot['counts'].get('clips')} clips on "
                            f"{foot['counts'].get('lines_with_footage')} of {foot['counts'].get('lines')} sentences). It lifts by itself; run the same link again later")
     pack = dict(sid=ctx.sid, words=wj, narration=src, ffmpeg=PX.FF, sounds={}, pictures={}, credits=[], footage=[], title=script.get("title"), coverage=coverage)
     subjects, by_line = [], {}
     if foot:
-        fdir = os.path.join(sup_dir, "footage")
+        fdir = os.path.join(sup_dir, footage_name)
         pack["footage"] = [dict(i=ln["i"], clips=[dull(wf3.clip_facts(dict(c, path=os.path.join(fdir, c["file"])))) for c in ln["clips"]]) for ln in foot["lines"]]
         pack["credits"] += [dict(kind="footage", name=c["title"], title=c["title"], licence="footage, not licensed (the owner's decision)", credit=c["channel"],
                                  page=c["url"], time_range=c["time_range"], line=c["line"]) for c in foot["credits"]]
@@ -351,8 +356,49 @@ def _repair(l1, beats, taste):
     return n0 - len(l1["items"]) - len(l1["sound"])
 
 
+def refill(ctx, script, pack, shortage):
+    """Research missing coverage through the same engines, preserving all checked originals."""
+    coverage = pack['coverage']
+    windows = coverage['windows']
+    wanted = shortage['weak_windows'] or list(range(len(windows)))
+    count = int(pack.get('coverage_repairs',0))+1
+    if count > 3:
+        raise RuntimeError('documentary coverage still incomplete after three distinct research passes')
+    name = f"footage-v{coverage['contract']}-repair{count}"
+    prior = [os.path.join(ctx.supply,n,'footage.json') for n in os.listdir(ctx.supply)
+             if n.startswith('footage') and os.path.isfile(os.path.join(ctx.supply,n,'footage.json'))]
+    subjects = {windows[i]['name']:windows[i]['must_show'] for i in wanted}
+    fscript = dict(title=script['title']+' — supplementary documentary coverage. Prefer original institutional or company films with visible action; avoid influencer promotions and unrelated banners.',
+                   segments=[dict(i=i,say=w['say'],pictures=[w['name']],visual=w['must_show']) for i,w in enumerate(windows)],
+                   named=[dict(name=n,must_show=show,**{'is':'thing'}) for n,show in subjects.items()])
+    fw,fh = wf1_film.STYLES[script['style']['id']]['footage']
+    ctx.log(f"research missing documentary windows {wanted}; pass {count}")
+    foot = chain.footage(ctx,dict(script=fscript),[w['t1']-w['t0'] for w in windows],W=fw,H=fh,
+                         preserve_source=True,shot_s=1.15,line_max=20,per=4,lines=wanted,avoid=prior,
+                         strict_lines=True,motion_first=True,alloc='round',reassign_lost=True,
+                         whole_first=True,keep_sources=True,out_name=name)
+    if not foot:
+        raise RuntimeError('supplementary documentary research returned no record')
+    by = {int(row['i']):row for row in pack['footage']}
+    for row in foot['lines']:
+        i = int(row['i'])
+        dest = by.setdefault(i,dict(i=i,clips=[]))
+        dest['clips'] += [dull(wf3.clip_facts(dict(c,path=os.path.join(ctx.supply,name,c['file'])))) for c in row['clips']]
+    pack['footage'] = list(by.values())
+    pack['credits'] += [dict(kind='footage',name=c['title'],title=c['title'],licence="footage, not licensed (the owner's decision)",
+                            credit=c['channel'],page=c['url'],time_range=c['time_range'],line=c['line']) for c in foot['credits']]
+    pack['coverage_repairs'] = count
+    path = os.path.join(ctx.supply,'pack.json')
+    stored = json.load(open(path));stored['pack']=pack
+    with open(path,'w') as f:json.dump(stored,f,indent=1)
+
+
 def score(ctx, script):
+    import wf1_coverage
     pack = wf3.load_pack(ctx)
+    if (pack.get('coverage') or {}).get('contract') != wf1_coverage.CONTRACT:
+        supply(ctx,script)
+        pack = wf3.load_pack(ctx)
     pack["work"] = ctx.supply
     d = direction_of(ctx, script, pack)
     knobs = {k: d.get(k) for k in ("display", "past_segs", "turn_seg", "arc")}
@@ -365,7 +411,14 @@ def score(ctx, script):
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     sc = dict(title=script.get("title"), hook_line=script.get("hook_line"), close_line=script.get("close_line"),
               segments=[dict(say=ln["text"], pictures=[n for n in ln.get("subjects") or []]) for ln in pack["lines"]])
-    l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
+    for attempt in range(3):
+        try:
+            l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
+            break
+        except wf1_coverage.CoverageError as error:
+            if attempt == 2:
+                raise
+            refill(ctx,script,pack,error.report)
     taste = F.taste_check(l1, beats)
     dropped = 0
     if not taste["ok"]:

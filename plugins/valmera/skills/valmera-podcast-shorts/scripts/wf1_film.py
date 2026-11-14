@@ -299,7 +299,7 @@ def build(script, sup, style_id, direction=None):
             for k in run:
                 ins[k][4] = dict(ins[k][4], audit_until=end)
     attempts = []
-    for _ in range(4):
+    for _ in range(1+sum(len(rows) for rows in footage.values())+sum(len(rows) for rows in pics.values())):
         accepted, placement_report = check(ins, script, clock, sup["work"], sup["ffmpeg"])
         attempts.append(placement_report)
         if not placement_report['rejected']:

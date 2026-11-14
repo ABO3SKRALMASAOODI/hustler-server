@@ -20,6 +20,21 @@ def test_empty_picture_audit_cannot_pass_coverage():
         C.require_coverage([],coverage,12)
 
 
+def test_research_budget_reaches_later_subjects_before_repeating_first():
+    from footage.run import source_rounds
+    ranked = [(subject, {'id':f'{subject}-{i}'}, 'checked') for subject in range(6) for i in range(5)]
+    opened = source_rounds(ranked)[:16]
+    assert {row[0] for row in opened} == set(range(6))
+    assert max(sum(row[0]==s for row in opened) for s in range(6)) <= 3
+
+
+def test_research_clauses_join_only_identical_director_subjects():
+    rows = [dict(name=n,first=i,last=i,t0=i,t1=i+1,say=str(i),must_show=n)
+            for i,n in enumerate(['Google','Google','Facebook','Google'])]
+    joined = C.join_windows(rows)
+    assert [(r['name'],r['first'],r['last']) for r in joined] == [('Google',0,1),('Facebook',2,2),('Google',3,3)]
+
+
 def test_static_video_files_do_not_satisfy_moving_coverage():
     coverage = {'windows':[{'t0':0.,'t1':10.}]}
     rows = [[i*30,(i+1)*30,'clip','subject',dict(window=0,placed_motion_p90=0.)] for i in range(8)]
