@@ -48,3 +48,15 @@ def test_chain_uses_real_timeline_events_and_one_gated_write(monkeypatch):
     assert granted == ['safe/project/click']
     assert written[0]['sfx'][0]['gain_db'] == -2
     assert 'sfx' not in edl
+
+
+def test_silent_upload_uses_nominal_reference_for_audible_cue(monkeypatch):
+    from score import sound
+    from first_film_sound import level
+    monkeypatch.setattr(sound, 'library', lambda: {'whoosh': {}})
+    t = np.arange(sound.AR)/sound.AR
+    monkeypatch.setattr(sound, 'sample_pcm', lambda sid: .1*np.sin(2*np.pi*1000*t))
+    cue={'id':'event','s':'whoosh','tier':'body','event_f':30,'db':-20}
+    sounds, evidence=level([cue],None,30)
+    assert abs(evidence[0]['body_over_voice_db']+3) < .1
+    assert sounds[0]['db'] > cue['db']
