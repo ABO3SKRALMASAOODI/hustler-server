@@ -5,7 +5,7 @@ import word_edges
 def test_quiet_inside_first_word_cannot_survive_last_placement_pass():
     words = [{'w': 'Photoshop', 't0': 1.123, 't1': 1.71}]
     keep, notes = word_edges.whole([[1.25, 4]], words, 5, [[0, 5]])
-    assert keep == [[1.12, 4]]
+    assert keep == [[1.123, 4]]
     assert notes
     assert word_edges.refusal(NS(index={'words': words}, duration=5),
                               {'keep': [[0, 5]]}, {'keep': keep}) is None
@@ -65,3 +65,21 @@ def test_late_boundary_cannot_discard_the_first_word_during_acoustic_placement(m
     monkeypatch.setattr(agent_tools, '_audio_safe_keep', audio)
     agent_tools._write_keep(ctx, [[1.8, 4]], 'Trim lead-in')
     assert saved and saved[0]['keep'][0][0] <= 1.
+
+
+def test_touching_words_have_a_representable_exact_cut():
+    from schemas import default_edl, validate_edl
+    from read_tools import clamp_seconds
+    words = [{'w': 'list,', 't0': 15.855, 't1': 16.415},
+             {'w': 'and', 't0': 16.415, 't1': 16.655}]
+    end = clamp_seconds(29.27, 16.415)
+    saved = validate_edl(dict(default_edl(29.27), keep=[[0, end]]), 29.27).model_dump()
+    assert saved['keep'] == [[0, 16.415]]
+    assert not word_edges.introduced([[0, 29.27]], saved['keep'], words, 29.27)
+
+
+def test_outward_word_snap_does_not_consume_the_next_touching_word():
+    words = [{'w': 'list,', 't0': 15.855, 't1': 16.415},
+             {'w': 'and', 't0': 16.415, 't1': 16.655}]
+    keep, _ = word_edges.whole([[0, 16.3]], words, 29.27, [[0, 29.27]], pad=True)
+    assert keep == [[0, 16.415]]
