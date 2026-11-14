@@ -98,7 +98,11 @@ def test_storyboard_pages_are_described_in_parallel_with_the_recorder(tmp_path, 
         if first_two:
             together.wait()
         llm.record("visual_index_semantics", {"model": "m"}, {"answer": "x"})
-        ids = [part.strip() for part in prompt.split("in this set: ")[1].split(".")[0].split(",")]
+        # Reply for the supplied sheets, independent of where cache-friendly
+        # prompt composition puts the IDs. Every requested ID must still reach
+        # the model alongside its image.
+        ids = [evidence_id for path in paths for evidence_id in sheet_ids[path]]
+        assert all(evidence_id in prompt for evidence_id in ids)
         return json.dumps([{"evidence_id": i, "semantic_description": f"frame {i}"}
                            for i in ids])
     monkeypatch.setattr(llm, "ask_vision", ask)
@@ -106,6 +110,7 @@ def test_storyboard_pages_are_described_in_parallel_with_the_recorder(tmp_path, 
                 for n in range(8)]
     sheets = [{"path": str(tmp_path / f"s{n}.jpg"), "digest": f"d{n}",
                "evidence_ids": [f"ve_{n:03d}"]} for n in range(8)]
+    sheet_ids = {sheet["path"]: sheet["evidence_ids"] for sheet in sheets}
     llm.set_recorder(lambda purpose, *a: recorded.append(purpose))
     try:
         status = visual_index._caption_semantics(evidence, sheets, str(tmp_path))
