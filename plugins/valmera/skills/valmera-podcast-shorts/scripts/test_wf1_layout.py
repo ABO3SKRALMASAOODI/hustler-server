@@ -58,3 +58,21 @@ def test_lower_type_seat_moves_a_face_up_and_never_partly_down_into_it():
     meta['main']['faces']=[[.4,.48,.2,.4,.5]]
     assert film.F.clear_of([shot],meta,[.05,.5,.95,.62],{'sh1'})==0
     assert shot['crop']==[.2,.1,.8,.9]
+
+
+def test_window_fallback_alternates_full_source_views_on_the_same_voice_clock(tmp_path,monkeypatch):
+    words='Every new discovery changes how we understand ourselves and our place in the world'.split()
+    script=dict(title='Our Place',segments=[dict(say=' '.join(words),pictures=[])])
+    wj=dict(duration=5.5,words=[dict(w=w,start=.1+i*.34,end=.4+i*.34,seg=0) for i,w in enumerate(words)])
+    sup=dict(words=wj,work=str(tmp_path),ffmpeg='ffmpeg',pictures={},footage=[],
+             take=dict(path='/take.mp4',w=1920,h=1080,fps=30,dur=5.5,faces=[]))
+    monkeypatch.setattr(film.F,'voice_stress',lambda sup:[])
+    monkeypatch.setattr(film.F,'engines_finish',lambda l1,*a,**k:l1)
+    l1,beats=film.build(script,sup,'window')
+    cards=[i for i in l1['items'] if i['k']=='card' and i['pic']=='main']
+    assert len(cards)>=3 and beats['pictures']==[]
+    for card in cards:
+        assert card['crop']==[0,0,1,1]
+        assert card['w']*1080/(card['h']*1920)==pytest.approx(1920/1080,abs=.001)
+        assert card['src'][0]==pytest.approx(max(card['f'][0]-3,0)/30,abs=.001)
+        assert card['src'][1]-card['src'][0]==pytest.approx((card['f'][1]-card['f'][0])/30,abs=.001)

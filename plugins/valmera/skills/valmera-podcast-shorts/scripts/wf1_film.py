@@ -300,8 +300,11 @@ def build(script, sup, style_id, direction=None):
         look_pics.append(take["still"])
     tcuts = [int(round(float(s_["t0"]) * FPS)) + LEAD_F for s_ in tshots[1:]]      # the take's own cuts, in film frames
 
+    take_phrase = 0
+
     def take_shot(a, b):
         """The take on frames a..b, split at its own cuts so every piece is framed on the speaker it shows."""
+        nonlocal take_phrase
         if b - a < 2:
             return
         # Break long takes into phrase-sized pieces before the face-safe driver.
@@ -316,9 +319,26 @@ def build(script, sup, style_id, direction=None):
             k = sum(1 for c in tcuts if c <= mid)
             t0 = max(fa - LEAD_F, 0) / FPS
             t1 = min(max(fb - LEAD_F, 1) / FPS, float(take["dur"]))
-            it = P.shot([fa, fb], tkeys[k], None, src=[round(t0, 4), round(max(t1, t0 + 1 / FPS), 4)])
-            it.pop("crop")
-            drive_ids.add(it["id"])
+            src = [round(t0, 4), round(max(t1, t0 + 1 / FPS), 4)]
+            if st["layout"] == "window" and take_phrase % 2:
+                # A window film needs a genuinely wider view between its close
+                # framings. Small face-safe crop jumps can be visually identical
+                # after the camera move; preserve the source's complete frame.
+                P.shot([fa, fb], tkeys[k], F.cover_crop(take["w"], take["h"], W/H,
+                       (.5,.45),(.5,.4)), src=src, blur=26, grade=dict(DIM))
+                x0,y0,x1,y1 = WINDOW_BOX
+                aspect = float(take["w"])/float(take["h"])
+                h = min(y1-y0,(x1-x0)*W/H/aspect)
+                w = h*H/W*aspect
+                cx,cy = (x0+x1)/2,(y0+y1)/2
+                P.card([fa,fb],tkeys[k],[cx-w/2,cy-h/2,cx+w/2,cy+h/2],
+                       src=src,crop=[0,0,1,1],z=1,radius=.010,
+                       shadow=dict(a=.55,blur=.03,dx=0,dy=.012))
+            else:
+                it = P.shot([fa, fb], tkeys[k], None, src=src)
+                it.pop("crop")
+                drive_ids.add(it["id"])
+            take_phrase += 1
             cut_pts.append(fa)
 
     past_share = sum(x[1] - x[0] for x in ins if seg_at(x[0]) in past) / max(sum(x[1] - x[0] for x in ins), 1)
