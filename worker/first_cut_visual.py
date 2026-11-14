@@ -659,8 +659,12 @@ def face_aim(index, bands=None, vertical_source=True):
 
 def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False,
             levels=None, target=None, hi=None):
-    """Write the close framings (add_zoom punch, ramp 0: a hard cut to a
-    tighter camera and a hard cut back). Returns how many landed."""
+    """Ease a modest move at a measured phrase turn; never fake a shot cut.
+
+    Word onsets and a pacing interval are not source edits. The old path
+    alternated 38-52% hard punches mid-sentence, including in long-source
+    first films that never reached the Director.
+    """
     import device_planner
     import schemas
     try:
@@ -672,10 +676,9 @@ def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False,
     if not words or prog < 6:
         return 0
     turns = phrase_points(words) + [round(b, 3) for _a, b in busy]
-    # whisper's words abut (no gap to read a phrase from): any word onset
-    # may take a cut-in, a phrase turn is preferred
-    onsets = [round(float(w["t0"]) - 0.02, 3) for w in words]
-    points = sorted(set(turns + onsets))
+    points = sorted(set(turns))
+    if not points:
+        return 0
     # the first change lands under the hook title (judges: "a first
     # visual change by 1.5-2 s"), on a word onset near 1.5 s; the opening
     # framing before it is the wide one
@@ -691,13 +694,12 @@ def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False,
     for a, b, close in segs:
         if not close:
             continue
-        strength = levels[n % len(levels)]
+        strength = min(0.10, levels[n % len(levels)])
         res = run(ctx, steps, "add_zoom", {
-            "start": a, "end": b, "strength": strength, "mode": "punch",
-            "ramp_s": 0.0, "cx": cx, "cy": cy,
-            "purpose": "a closer camera on the same take, cut in on a "
-                       "phrase turn (references: the framing changes every "
-                       "2-3 s)"}, started)
+            "start": a, "end": b, "strength": strength, "mode": "ease",
+            "ramp_s": min(0.5, (b - a) / 2), "cx": cx, "cy": cy,
+            "purpose": "an eased camera move at a phrase turn; the source "
+                       "remains one continuous shot"}, started)
         if res is not None and not str(res).lstrip().upper().startswith(
                 ("REJECTED", "FAILED", "CORRECTION")):
             n += 1
