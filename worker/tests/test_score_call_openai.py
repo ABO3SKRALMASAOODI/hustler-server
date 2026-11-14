@@ -103,3 +103,32 @@ def test_no_openai_key_refuses(monkeypatch):
     monkeypatch.setattr(call_openai.config, "OPENAI_API_KEY", "", raising=False)
     with pytest.raises(call.Refused):
         call.stream("gpt-6-sol", "s", "c", max_tokens=5, effort="low", purpose="p", deadline=time.monotonic() + 10)
+
+
+def test_director_tier_is_explicit_and_keeps_model_reasoning_and_budget(monkeypatch):
+    monkeypatch.setattr(call_openai.config, 'OPENAI_SERVICE_TIER', '')
+    monkeypatch.setattr(call_openai.config, 'DIRECTOR_SERVICE_TIER', '')
+    before = call_openai.body('gpt-6.1-sol', 's', 'c', 9000, 'high', 'director_direct')
+    assert 'service_tier' not in before
+    monkeypatch.setattr(call_openai.config, 'DIRECTOR_SERVICE_TIER', 'fast')
+    after = call_openai.body('gpt-6.1-sol', 's', 'c', 9000, 'high', 'director_direct')
+    assert after.pop('service_tier') == 'fast'
+    assert after == before
+
+
+@pytest.mark.parametrize('served,multiplier', [('fast', 2), ('priority', 2), ('default', 1)])
+def test_stream_cost_uses_actual_top_level_serving_tier(monkeypatch, served, multiplier):
+    usage = {'input_tokens': 1000, 'input_tokens_details': {'cached_tokens': 400}, 'output_tokens': 100}
+    monkeypatch.setattr(call_openai.config, 'DIRECTOR_SERVICE_TIER', 'fast')
+    def handler(request):
+        assert json.loads(request.content)['service_tier'] == 'fast'
+        return httpx.Response(200, content=_sse(
+            {'type': 'response.output_text.delta', 'delta': 'Score'},
+            {'type': 'response.completed', 'response': {
+                'id': 'resp_tier', 'status': 'completed', 'service_tier': served, 'usage': usage}}))
+    _client_with(monkeypatch, handler)
+    result = call.stream('gpt-6.1-sol', 's', 'c', max_tokens=500, effort='low',
+                         purpose='director_direct', deadline=time.monotonic()+10)
+    base = call_openai.Usage('gpt-6.1-sol', usage).provider_cost_usd
+    assert result.usage.service_tier == served
+    assert result.usd == pytest.approx(multiplier * base)
