@@ -800,7 +800,7 @@ def test_a_p0_released_with_its_fix_live_is_no_customer_blocked_email(world):
     for hours in (1, 6, 7, 30):
         later = world.clock.now + timedelta(hours=hours)
         assert intake.unhandled(world.c, later) == [], hours
-    world.clock.now += timedelta(hours=7)
+    world.clock.now += intake.RELEASE_QUIET + MIN
     assert [r["id"] for r in intake.pending_p0(world.c, world.clock.now)] == [tid]
     store.record_failure(world.conn.cursor(), {
         "ref": "job:9", "source": "job", "at": world.clock.now, "user_id": 2869,
@@ -1120,8 +1120,10 @@ def test_the_digest_says_what_is_held_and_who_stopped():
     assert "Not running" in text and "p0_watch" in text
 
 
-def test_the_owner_hears_when_an_agent_stops_and_when_a_claim_goes_stale(monkeypatch):
+def test_a_stale_claim_stays_tracked_and_a_stopped_agent_gets_one_notice(monkeypatch):
     import cockpit_alerts
+    # The Issue was mailed when the claim started; this tick observes it stale.
+    monkeypatch.setattr(cockpit_alerts, "_p0_sent", lambda cur, state: {"issue"})
     now = datetime(2026, 11, 8, 8, 0, tzinfo=timezone.utc)
     claim, failed = now - timedelta(hours=7), now - timedelta(hours=2)
     row = {"id": 77, "title": "A request ended partial", "severity": "P0",
@@ -1149,12 +1151,11 @@ def test_the_owner_hears_when_an_agent_stops_and_when_a_claim_goes_stale(monkeyp
             return []
     got = cockpit_alerts.event_alerts(C(), now, now)
     text = " ".join(line for _k, _s, line in got)
-    assert "the run has probably died" in text and "P0 #77" in text
-    assert "3 customers" in text
+    state = intake.p0_state(row, now)
+    assert state["stale_claim"] and state["stuck_now"] and state["customers"] == 3
+    assert "P0 #77" not in text  # the watcher owns the claim, not the owner
     assert "p0_watch" in text and "2 h 5 min" in text
-    assert got[0][1] == "Blocked: A request ended partial (P0 #77)"
-    assert "wake the Mac" in got[0][2]
-    assert [s for _k, s, _l in got][1:] == ["An automatic agent stopped"]
+    assert [s for _k, s, _l in got] == ["An automatic agent stopped"]
 
 
 def test_a_tool_defect_is_closed_on_the_defect_not_the_films_score():
