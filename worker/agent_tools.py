@@ -5930,8 +5930,7 @@ def _parse_partial_style(style, ctx=None):
                 '"outline_width":0-12,"shadow":0-12,'
                 '"background_color":"#RRGGBB","background_opacity":0-1,'
                 '"tracking":-8-24,"text_align":"left|center|right",'
-                '"anchor_y":0.05-0.95,"anchor_x":0-1,'
-                '"single_line":true|false}')
+                '"anchor_y":0.05-0.95,"single_line":true|false}')
     # Mirrors captions.STYLE_KEYS (+ dynamic/uppercase, which are booleans
     # handled separately there). A field missing HERE is rejected outright;
     # a field missing from STYLE_KEYS is accepted and then silently ignored.
@@ -5943,7 +5942,7 @@ def _parse_partial_style(style, ctx=None):
                                    "outline_width", "shadow",
                                    "background_color", "background_opacity",
                                    "tracking", "text_align", "anchor_y",
-                                   "anchor_x", "single_line"})
+                                   "single_line"})
     if unknown:
         style = {k: v for k, v in style.items() if k not in unknown}
         call_note(ctx, f"style field(s) {unknown} left out: not caption style "
@@ -30910,7 +30909,6 @@ _STYLE_PROPS = {
     "text_align": {"type": "string",
                    "enum": ["left", "center", "right"]},
     "anchor_y": {"type": "number", "minimum": 0.05, "maximum": 0.95},
-    "anchor_x": {"type": "number", "minimum": 0, "maximum": 1},
     "single_line": {"type": "boolean"},
 }
 

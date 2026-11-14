@@ -107,12 +107,19 @@ STYLE_KEYS = ("color", "size", "position", "highlight_color", "animation",
               "size_scale", "preset", "font", "effect", "layout", "leading",
               "emphasis", "emphasis_scale", "outline_color", "outline_width",
               "shadow", "background_color", "background_opacity", "tracking",
-              "text_align", "anchor_y", "single_line", "anchor_x")
+              "text_align", "anchor_y", "single_line")
+# Layout the Director's lowering writes on a dictated item (score.lower), read
+# by the composer and by nothing else. It is NOT part of the agent's style
+# contract: STYLE_KEYS is what add_captions and set_caption_style offer, and
+# the tool catalog has a byte budget. anchor_x: the line's own left (or
+# right) edge, so a line written one word longer each time keeps every
+# earlier word in place.
+LAYOUT_KEYS = ("anchor_x",)
 # Keys whose value is meaningful when falsy (0, 0.0) and so must NOT be copied
 # with a truthiness test.
 STYLE_KEYS_NUMERIC = ("leading", "emphasis_scale", "size_scale",
                       "outline_width", "shadow", "background_opacity",
-                      "tracking", "anchor_y", "anchor_x")
+                      "tracking", "anchor_y")
 # Fields where False is an authored value rather than an omission. Keeping
 # this separate from numeric fields makes partial restyles able to turn a
 # previously enabled contract off without changing any historical default.
@@ -569,6 +576,9 @@ def _norm_style(style):
             # False, so those fields are copied on presence, not truthiness.
             if v is not None if k in STYLE_KEYS_EXPLICIT else bool(v):
                 s[k] = v
+        for k in LAYOUT_KEYS:
+            if d.get(k) is not None:
+                s[k] = d[k]
         if d.get("position"):
             # remember an EXPLICIT position so presets only apply their own
             # default placement when the agent didn't choose one.
@@ -2973,6 +2983,9 @@ def write_ass(events, path, global_style=None, play_res=BASE_PLAY_RES):
             v = d.get(k)
             if v is not None if k in STYLE_KEYS_EXPLICIT else bool(v):
                 merged[k] = v
+        for k in LAYOUT_KEYS:
+            if d.get(k) is not None:
+                merged[k] = d[k]
         if d.get("uppercase") is not None:
             merged["uppercase"] = bool(d["uppercase"])
         if merged.get("preset") == "classic":

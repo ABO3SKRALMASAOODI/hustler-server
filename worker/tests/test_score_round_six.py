@@ -136,7 +136,13 @@ def test_anchor_x_is_a_frame_fraction_and_old_edls_render_as_before():
     assert schemas.CaptionStyle(anchor_x=0.25).anchor_x == 0.25 and schemas.CaptionStyle().anchor_x is None
     with pytest.raises(ValueError):
         schemas.CaptionStyle(anchor_x=1.4)
-    assert "anchor_x" in captions.STYLE_KEYS and captions.DEFAULT_STYLE["anchor_x"] is None
+    assert captions.DEFAULT_STYLE["anchor_x"] is None and captions.LAYOUT_KEYS == ("anchor_x",)
+    # the composer carries it from a dictated item to the line's geometry...
+    assert captions._norm_style({"text_align": "left", "anchor_x": 0.31})["anchor_x"] == 0.31 and captions._norm_style({})["anchor_x"] is None
+    # ...and it is no part of the agent's style contract: the tool catalog is pinned to the byte, and a field offered
+    # there is one the customer's editor may write (check-editor #179 failed on exactly this, 14 Nov)
+    import agent_tools
+    assert "anchor_x" not in captions.STYLE_KEYS and "anchor_x" not in agent_tools.TOOLS["add_captions"][2]["style"]["properties"]
 
 
 # ------------------------------------------------------------------ finishes by section

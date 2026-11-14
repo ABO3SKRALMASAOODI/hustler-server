@@ -49,6 +49,13 @@ def _without_inert(dump):
     tr = (d.get("effects") or {}).get("transition")
     if tr:
         assert tr.pop("per_junction") is None
+    # Lane K round six (14 Nov 2026): CaptionStyle.anchor_x, the line's own
+    # edge for a dictated item the Director's lowering builds word by word.
+    # Inert on every stored EDL: None, and never offered to the agent.
+    caps = d.get("captions")
+    for c in ([caps] if isinstance(caps, dict) else caps or []):
+        if isinstance(c, dict) and isinstance(c.get("style"), dict):
+            assert c["style"].pop("anchor_x") is None
     return d
 
 
