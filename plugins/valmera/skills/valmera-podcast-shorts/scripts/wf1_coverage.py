@@ -232,32 +232,36 @@ def speaker_moves(coverage, ins, end, camera_cuts, work, fps=30, lead=3, llm=Non
         return out
     missing=gaps(moves)
     if not missing:return moves,[]
-    content=dict(words=[dict(w,id=i) for i,w in enumerate(coverage['words'])],speaker_spans=spans,
-                 unchanged_spans=missing,existing=moves,fps=fps,lead_frames=lead)
-    key=hashlib.sha256(json.dumps(content,sort_keys=True).encode()).hexdigest()[:16]
-    path=os.path.join(work,'speaker-direction-'+key+'.json')
-    if os.path.exists(path):result=json.load(open(path));use=[]
-    else:
-        if llm is None:
-            spec=importlib.util.spec_from_file_location('wf1_camera_llm',os.path.join(os.path.dirname(__file__),'../../_shell/llm.py'))
-            llm=importlib.util.module_from_spec(spec);spec.loader.exec_module(llm)
-        prompt='''Direct only the exposed speaker passages of this documentary short.
-Return JSON {"moves":[{"word":integer,"why":specific rhetorical motivation}]}.
-The supplied unchanged spans exceed three seconds after picture selection. Choose sparse meaningful
-eased moves on actual words: a contrast, realization, emotional turn or change of argument. Each move
-must be justified by that word in the story. Never prescribe hard cuts, alternating sizes, regular
-half-second crops, moves on every word, or an arbitrary point merely to fill a quota. The renderer
-uses one continuous face-safe camera track. Pictures and original camera changes already provide
-the other transitions. A move's frame is round(word.start*fps)+lead_frames. Choose only within the
-exposed speaker spans. Preserve existing justified moves. If no honest rhetorical point can resolve
-a span, leave it unresolved; the film must return for direction rather than manufacture pace.'''
-        text,usage=llm.ask(prompt,json.dumps(content),effort='medium');result=llm.json_block(text);use=[usage]
-        with open(path,'w') as f:json.dump(result,f,indent=1)
-    have={m['word'] for m in moves}
-    for row in result.get('moves',[]):
-        i=row.get('word')
-        if not isinstance(i,int) or i in have or not 0<=i<len(coverage['words']) or not row.get('why'):continue
-        f=round(coverage['words'][i]['start']*fps)+lead
-        if any(a<=f<b-6 for a,b in spans):moves.append(dict(word=i,why=row['why']));have.add(i)
+    all_spend=[]
+    for attempt in range(3):
+        if not gaps(moves):break
+        content=dict(words=[dict(w,id=i) for i,w in enumerate(coverage['words'])],contract=2,speaker_spans=spans,
+                     unchanged_spans=gaps(moves),existing=moves,fps=fps,lead_frames=lead)
+        key=hashlib.sha256(json.dumps(content,sort_keys=True).encode()).hexdigest()[:16]
+        path=os.path.join(work,'speaker-direction-'+key+'.json')
+        if os.path.exists(path):result=json.load(open(path));use=[]
+        else:
+            if llm is None:
+                spec=importlib.util.spec_from_file_location('wf1_camera_llm',os.path.join(os.path.dirname(__file__),'../../_shell/llm.py'))
+                llm=importlib.util.module_from_spec(spec);spec.loader.exec_module(llm)
+            prompt='''Direct only the exposed speaker passages of this documentary short.
+    Return JSON {"moves":[{"word":integer,"why":specific rhetorical motivation}]}.
+    The supplied unchanged spans exceed three seconds after picture selection. Choose sparse meaningful
+    eased moves on actual words: a contrast, realization, emotional turn or change of argument. Each move
+    must be justified by that word in the story. Never prescribe hard cuts, alternating sizes, regular
+    half-second crops, moves on every word, or an arbitrary point merely to fill a quota. The renderer
+    uses one continuous face-safe camera track. Pictures and original camera changes already provide
+    the other transitions. A move's frame is round(word.start*fps)+lead_frames. Choose only within the
+    exposed speaker spans. Preserve existing justified moves. If a previous response left unresolved spans, their exact remaining frame bounds are supplied again: choose an earlier meaningful word where needed so BOTH adjacent unchanged holds are at most three seconds. Do not repeat an existing word or merely explain the violation. If no honest rhetorical point can resolve
+    a span, leave it unresolved; the film must return for direction rather than manufacture pace.'''
+            text,usage=llm.ask(prompt,json.dumps(content),effort='medium');result=llm.json_block(text);use=[usage]
+            with open(path,'w') as f:json.dump(result,f,indent=1)
+        all_spend.extend(use)
+        have={m['word'] for m in moves}
+        for row in result.get('moves',[]):
+            i=row.get('word')
+            if not isinstance(i,int) or i in have or not 0<=i<len(coverage['words']) or not row.get('why'):continue
+            f=round(coverage['words'][i]['start']*fps)+lead
+            if any(a<=f<b-6 for a,b in spans):moves.append(dict(word=i,why=row['why']));have.add(i)
     if gaps(moves):raise RuntimeError('speaker direction left an unchanged passage over three seconds; no automatic recrops allowed')
-    return moves,use
+    return moves,all_spend

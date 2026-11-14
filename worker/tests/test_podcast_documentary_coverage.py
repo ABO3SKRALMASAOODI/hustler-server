@@ -187,3 +187,18 @@ def test_new_picture_identity_survives_research_cache_paths():
     v=dict(path='a.mp4',source=dict(url='original'),time_range=[10,12])
     assert c.same_picture(v,dict(v,path='retry.mp4',time_range=[10.1,12.1]))
     assert not c.same_picture(v,dict(v,path='new.mp4',time_range=[20,22]))
+
+
+def test_camera_feedback_uses_remaining_span_without_automatic_recrops(tmp_path):
+    import json
+    from types import SimpleNamespace
+    seen=[]
+    def ask(prompt,content,**kwargs):
+        data=json.loads(content);seen.append(data)
+        word=0 if len(seen)==1 else 1
+        return json.dumps(dict(moves=[dict(word=word,why='The spoken contrast changes the argument') ])),{}
+    cov=dict(words=[dict(w='but',start=.2,end=.4),dict(w='instead',start=2.1,end=2.4)],moves=[])
+    moves,_=C.speaker_moves(cov,[],135,[],str(tmp_path),llm=SimpleNamespace(ask=ask,json_block=json.loads))
+    assert [m['word'] for m in moves]==[0,1]
+    assert seen[0]['unchanged_spans']==[[0,135]]
+    assert seen[1]['unchanged_spans']==[[9,135]]
