@@ -48,3 +48,23 @@ def test_unresolved_composed_rejection_cannot_claim_a_passing_check(tmp_path,mon
     monkeypatch.setattr(wf,'score',lambda *a:fresh())
     with pytest.raises(RuntimeError, match='picture'):
         wf.render(ctx,{},sc)
+
+
+def test_later_repairs_keep_the_picture_that_passed_every_review(tmp_path,monkeypatch):
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda x:None)
+    names=['a.jpg','b.jpg','c.jpg','d.jpg','good.jpg']
+    def fresh(*args):
+        p=tmp_path/'render_rejected.json'
+        rejected=json.load(open(p)) if p.exists() else []
+        return dict(beats=dict(pictures=[dict(path='/supply/'+n) for n in names if n not in rejected]),spend=[])
+    def review(ctx,rd,sc):
+        pics=sc['beats']['pictures']
+        bad=len(pics)>1
+        return dict(rejected=int(bad),placements=[dict(id=i,ok=not bad or i!=0) for i in range(len(pics))],spend=[])
+    monkeypatch.setattr(wf.wf3,'render',lambda *a:dict(film='fake.mp4'))
+    monkeypatch.setattr(wf,'_render_review',review)
+    monkeypatch.setattr(wf,'score',fresh)
+    sc=fresh();result=wf.render(ctx,{},sc)
+    assert len(result['picture_review'])==5
+    assert sc['beats']['pictures']==[dict(path='/supply/good.jpg')]
+    assert 'good.jpg' not in json.load(open(tmp_path/'render_rejected.json'))

@@ -412,7 +412,7 @@ def render(ctx, script, sc):
     """The product repairs rejected placements before branding and music, never a delivered film."""
     history_path = os.path.join(ctx.supply, "render_reviews.json")
     history = json.load(open(history_path)) if os.path.exists(history_path) else []
-    for attempt in range(4):
+    while True:
         rd = wf3.render(ctx, script, sc)
         report = _render_review(ctx, rd, sc)
         history.append(report)
@@ -423,15 +423,16 @@ def render(ctx, script, sc):
             rd["picture_review"] = history
             rd["spend"] = [dict(stage="render", what="composed picture-to-words check", **u) for h in history for u in h.get("spend", [])]
             return rd
-        if attempt == 3:
-            raise RuntimeError("composed picture check still rejects a placement; no film may be delivered")
         pics = sc["beats"].get("pictures") or []
-        # Repair is bounded, approval is not. If successive compositions still
-        # disagree, use the speaker's face-safe reframes instead of a near miss.
-        doomed = pics if attempt == 2 else [pics[r["id"]] for r in report["placements"] if not r["ok"]]
+        # Every failed pass permanently removes at least one source asset.
+        # The fixed supply makes this finite; keep independently approved
+        # pictures instead of discarding the whole montage after three passes.
+        doomed = [pics[r["id"]] for r in report["placements"] if not r["ok"]]
         dropped = [os.path.basename(p["path"]) for p in doomed]
         rejected_path = os.path.join(ctx.supply, "render_rejected.json")
         previous = json.load(open(rejected_path)) if os.path.exists(rejected_path) else []
+        if not set(dropped) - set(previous):
+            raise RuntimeError("composed picture repair made no progress; no film may be delivered")
         json.dump(sorted(set(previous+dropped)), open(rejected_path, "w"), indent=1)
         ctx.log(f"composed picture check: rebuilding without {len(dropped)} rejected placements")
         old_spend = sc.get("spend", [])
