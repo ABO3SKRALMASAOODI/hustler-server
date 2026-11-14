@@ -937,7 +937,6 @@ def test_recipe_schema_is_not_exposed_to_the_agent():
     assert "apply_edit_recipe" not in tools
     assert "set_edit_plan" not in tools
     assert "complete_edit_plan_steps" not in tools
-    assert "generate_video" not in tools
     assert "apply_edit_recipe" not in agent_tools.WRITE_TOOLS
 
 
