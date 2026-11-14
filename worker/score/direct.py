@@ -271,6 +271,7 @@ def direct(work, idx, scout, deadline, model=MODEL, effort="medium", budget_usd=
     fixes = fix_facts(first_lines, scout, idx.get("words") or [])
     q0 = quality(first, open_asks)
     usage["q_first"] = list(q0)
+    usage["first_meter"] = {k: first.meter.get(k) for k in ("rejects", "findings", "blanks")}
     kept, lines = first, first_lines
     weak = q0[0] or q0[1] or q0[2] or r.stop == "max_tokens"
     if weak and deadline - time.monotonic() >= REPAIR_NEEDS_S and spent_usd + r.usd < budget_usd - 0.12:

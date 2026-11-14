@@ -89,18 +89,21 @@ _RENDER_JOB_TYPE = ContextVar("render_job_type", default=None)
 CANVAS_MAX_DIRECT_INPUTS = 8
 
 
-def _joined_media_checks(picture, sound):
-    """Overlap independent readers; join both before publication or cleanup.
-
-    Sound keeps the calling thread because its policy can read worker_db.
-    Picture receives the same context (spend/cancellation/diagnostics).
-    """
+@contextmanager
+def _pending_picture_check(picture):
+    """Read immutable frames beside sheets/uploads; always join before cleanup."""
     from concurrent.futures import ThreadPoolExecutor
     from contextvars import copy_context
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="picture-review") as pool:
         pending = pool.submit(copy_context().run, picture)
+        yield pending.result
+
+
+def _joined_media_checks(picture, sound):
+    """Sound keeps the caller's DB thread; both readers finish before return."""
+    with _pending_picture_check(picture) as finish_picture:
         sound()
-        pending.result()
+        finish_picture()
 
 
 @contextmanager
@@ -10437,320 +10440,326 @@ def _run_render_job(worker_db, job):
                   f"({str(fe)[:160]})", flush=True)
             fx_devices = []
 
-        sheet_key = reused_visual_meta.get("sheet_key")
-        sheet_local = None if sheet_key else os.path.join(workdir, "result_sheet.jpg")
-        # The PROGRAMME duration, not the file duration. build_result_sheet
-        # samples at duration*(i+0.5)/9, so with the file duration the last
-        # tile of any render under ~45s lands on the end card — and the
-        # vision self-check that reads this sheet is told to flag
-        # unexpected black frames. It would report the branding as a defect
-        # and the agent would tell the user their video is broken.
-        sheet_dur = max(0.1, out_dur - (0.0 if proof_only else
-                                        outro_seconds(variant == "preview")))
-        # A complete preview deserves more than nine clock samples. Build a
-        # compact visual screening plan from the actual edit decisions and
-        # spread it across 4x4 pages. Proof renders stay intentionally narrow:
-        # their numbered verify sheet answers the changed-moment question and
-        # duplicating whole-program evidence would add latency and vision cost.
-        screening_locals = []
-        screening_frames = []
-        screening_pages = []
-        planned_screening = []
-        if variant == "preview" and not proof_only:
-            try:
-                program_dur = max(
-                    0.1, out_dur - outro_seconds(variant == "preview"))
-                screening_frames = screening.plan(
-                    edl_row["json"], program_dur,
-                    max_frames=config.SCREENING_MAX_FRAMES,
-                    base_frames=config.SCREENING_BASE_FRAMES,
-                    extra_frames=(job["payload"].get("screening_frames")
-                                  or []), index=index)
-                planned_screening = list(screening.pages(
-                    screening_frames, config.SCREENING_PAGE_TILES))
-                screening_pages = _matching_evidence_pages(
-                    reused_visual_meta.get("screening_pages"),
-                    planned_screening, "frames")
-            except Exception as exc:
-                print(f"[render {job_id}] screening sheets skipped: "
-                      f"{str(exc)[:160]}", flush=True)
-                screening_frames = []
-                screening_pages = []
-                planned_screening = []
-        vtimes = (mapped_verify_times if proof_only else
-                  (job["payload"].get("verify_times") or []))
-        # E3 (30 Oct 2026): the stills of these sheets in ONE decode of the
-        # render (byte-identical to frame_at's; sheets.prefetch).
-        try:
-            sheets.prefetch(out_local, (
-                (sheets.result_sheet_times(sheet_dur) if sheet_local else [])
-                + [row["time_s"] for page in
-                   ([] if screening_pages else planned_screening)
-                   for row in page]
-                + [float(t) for t in vtimes or []]),
-                os.path.join(workdir, "stills"))
-        except Exception:  # noqa: BLE001 — frame_at reads them instead
-            pass
-        try:
-            if sheet_local:
-                sheets.build_result_sheet(out_local, sheet_local, sheet_dur)
-        except Exception:
-            sheet_local = None
-        if planned_screening and not screening_pages:
-            try:
-                for page_n, page in enumerate(planned_screening, 1):
-                    local = os.path.join(
-                        workdir, f"screening_sheet_{page_n}.jpg")
-                    sheets.build_frames_sheet(
-                        out_local, local,
-                        [row["time_s"] for row in page], cols=4,
-                        max_tiles=len(page),
-                        parallelism=config.SCREENING_FRAME_PARALLELISM)
-                    screening_locals.append((local, page))
-            except Exception as exc:
-                print(f"[render {job_id}] screening sheets skipped: "
-                      f"{str(exc)[:160]}", flush=True)
-                screening_locals = []
-                screening_frames = []
-                screening_pages = []
-        # Round 81: the dispatcher may name the exact output seconds its edit
-        # changed (edl_diff.verify_plan); frames pulled HERE cost a few seeks
-        # on a file we already hold, where pulling them dispatcher-side would
-        # mean downloading the whole render to the box that must never decode
-        # video. Best-effort like the sheet — a render never fails over its
-        # own review artwork, and an executor that predates this field simply
-        # ignores it.
-        verify_local = None
-        if vtimes:
-            try:
-                verify_local = os.path.join(workdir, "verify_sheet.jpg")
-                sheets.build_frames_sheet(out_local, verify_local, vtimes)
-            except Exception:
-                verify_local = None
-        caption_local = None
-        caption_locals = []
-        caption_times = []
-        caption_pages = []
-        if not proof_only and variant == "preview" \
-                and edl_row["json"].get("captions"):
-            try:
-                caption_times = _bounded_review_times(
-                    caption_review_times(edl_row["json"], index, workdir,
-                                         out_dur, max_times=0),
-                    config.CAPTION_REVIEW_MAX_FRAMES)
-                if caption_times:
-                    planned_pages = [caption_times[offset:offset + 16]
-                                     for offset in range(0, len(caption_times), 16)]
-                    caption_pages = _matching_evidence_pages(
-                        reused_visual_meta.get("caption_pages"),
-                        planned_pages, "times")
-                    if not caption_pages:
-                        try:
-                            sheets.prefetch(out_local, caption_times,
-                                            os.path.join(workdir, "stills"))
-                        except Exception:  # noqa: BLE001
-                            pass
-                    for page_n, page_times in enumerate(
-                            [] if caption_pages else planned_pages, 1):
-                        local = os.path.join(
-                            workdir, f"caption_sheet_{page_n}.jpg")
-                        sheets.build_frames_sheet(
-                            out_local, local, page_times, cols=4,
-                            max_tiles=len(page_times),
-                            parallelism=config.SCREENING_FRAME_PARALLELISM)
-                        caption_locals.append((local, page_times))
-                    caption_local = caption_locals[0][0] if caption_locals else None
-            except Exception:
-                caption_local = None
-                caption_locals = []
-                caption_times = []
-                caption_pages = []
-        if reused_visual_meta:
-            detail["reused_visual_evidence_pages"] = (
-                int(bool(sheet_key)) + len(screening_pages) + len(caption_pages))
-        sheets.release(out_local)
-        _mark("sheet_s")
-
-        # The render itself can finish in the narrow window between progress
-        # ticks and a dispatcher deploy. Never upload or register those stale
-        # bytes: they are both storage churn and a result nobody can consume.
-        if not _still_ours(95):
-            artifact_uploads.wait()
-            storage.delete_keys(uploaded_keys)
-            raise dbx.JobLeaseLost(
-                "job was cancelled or handed to another worker")
-
-        # Cancellation may remove only this job's objects. Reused evidence is
-        # still owned by earlier completed renders and their issued receipts.
-        def upload_output(local, key, mime):
-            artifact_uploads.submit(local, key, mime)
-
-        if sheet_local and os.path.exists(sheet_local):
-            sheet_key = f"media/{project_id}/{stamp}_s.jpg"
-            upload_output(sheet_local, sheet_key, "image/jpeg")
-        verify_sheet_key = None
-        if verify_local and os.path.exists(verify_local):
-            verify_sheet_key = f"media/{project_id}/{stamp}_vf.jpg"
-            upload_output(verify_local, verify_sheet_key, "image/jpeg")
-        for page_n, (local, page_times) in enumerate(caption_locals, 1):
-            if not os.path.exists(local):
-                continue
-            key = f"media/{project_id}/{stamp}_cap{page_n}.jpg"
-            upload_output(local, key, "image/jpeg")
-            caption_pages.append({"key": key, "times": page_times})
-        caption_sheet_key = (caption_pages[0]["key"]
-                             if caption_pages else None)
-        for page_n, (local, page) in enumerate(screening_locals, 1):
-            if not os.path.exists(local):
-                continue
-            key = f"media/{project_id}/{stamp}_scr{page_n}.jpg"
-            upload_output(local, key, "image/jpeg")
-            screening_pages.append({"key": key, "frames": page})
-        upload_wait = time.monotonic()
-        artifact_uploads.wait()
-        timings["upload_wait_s"] = round(time.monotonic() - upload_wait, 3)
-        timings.update(artifact_uploads.seconds)
-        if not _still_ours(96):
-            storage.delete_keys(uploaded_keys)
-            raise dbx.JobLeaseLost(
-                "job was cancelled or handed to another worker")
-        _mark("upload_s")
-
         out_info = media.probe(out_local)
-        digest = hashlib.sha256()
-        with open(out_local, "rb") as rendered_file:
-            for block in iter(lambda: rendered_file.read(1024 * 1024), b""):
-                digest.update(block)
-        render_sha = digest.hexdigest()
-        # Publish the immutable film and its deterministic checks together.
-        # A customer-visible row must never depend on a later best-effort write.
         picture_qc_res = None
-        audio_qc_res = None
-        craft_report = None
-        listen_keys = []
-
-        def check_fields():
-            return {"listen_keys": [item["key"] for item in listen_keys],
-                    "listen_clips": listen_keys,
-                    "audio_qc": audio_qc_res,
-                    "craft_report": craft_report,
-                    "picture_qc": picture_qc_res}
-
         def picture_checks():
             nonlocal picture_qc_res
-            # The picture side of the same deterministic review (render_qc):
-            # clipped faces, single-frame jumps off a cut, the end card and the
-            # watermark this variant should carry — measured on the file that
-            # ships, advisory to the editor, never a change to the edit.
-            if not proof_only and variant in ("preview", "final"):
-                picture_qc_res = picture_qc(
-                    edl_row["json"], index, out_local, out_info, variant,
-                    want_wm, wm_settings, src_shape, job_id, src_path=src_local)
-                # Tool defects (owner, 9 Nov 2026): a caption plate or shadow
-                # off its text, text cut by the frame, overlapping items.
-                # Evidence for ops_loop intake (cause tool:<layer>:<defect>),
-                # never a gate on this render.
-                tool_defects = caption_tool_defects(
-                    edl_row["json"], index, workdir, out_info, out_dur,
-                    job_id)
-                if tool_defects:
-                    picture_qc_res = dict(picture_qc_res or {},
-                                          tool_defects=tool_defects)
+            with _measure_render_detail("picture_qc_total_s"):
+                # The picture side of the same deterministic review (render_qc):
+                # clipped faces, single-frame jumps off a cut, the end card and the
+                # watermark this variant should carry — measured on the file that
+                # ships, advisory to the editor, never a change to the edit.
+                if not proof_only and variant in ("preview", "final"):
+                    picture_qc_res = picture_qc(
+                        edl_row["json"], index, out_local, out_info, variant,
+                        want_wm, wm_settings, src_shape, job_id, src_path=src_local)
+                    # Tool defects (owner, 9 Nov 2026): a caption plate or shadow
+                    # off its text, text cut by the frame, overlapping items.
+                    # Evidence for ops_loop intake (cause tool:<layer>:<defect>),
+                    # never a gate on this render.
+                    tool_defects = caption_tool_defects(
+                        edl_row["json"], index, workdir, out_info, out_dur,
+                        job_id)
+                    if tool_defects:
+                        picture_qc_res = dict(picture_qc_res or {},
+                                              tool_defects=tool_defects)
 
-        def sound_checks():
-            nonlocal audio_qc_res, listen_keys, craft_report
-            # Deterministic measurements are always-on.  When the edit authors
-            # music/SFX/voiceover, also cut a few tiny excerpts while the finished
-            # render is already local.  The dispatcher can hand those to the
-            # bounded audio reviewer without downloading/decoding the whole MP4.
-            # These clips are evidence, never a render gate, and failures here do
-            # not fail the valid preview.
+        # Nothing below rewrites the movie. The identical picture checks can
+        # run while the caller builds evidence and waits for object uploads.
+        # The context joins even when sheet/upload/lease handling raises.
+        with _pending_picture_check(picture_checks) as finish_picture:
+            sheet_key = reused_visual_meta.get("sheet_key")
+            sheet_local = None if sheet_key else os.path.join(workdir, "result_sheet.jpg")
+            # The PROGRAMME duration, not the file duration. build_result_sheet
+            # samples at duration*(i+0.5)/9, so with the file duration the last
+            # tile of any render under ~45s lands on the end card — and the
+            # vision self-check that reads this sheet is told to flag
+            # unexpected black frames. It would report the branding as a defect
+            # and the agent would tell the user their video is broken.
+            sheet_dur = max(0.1, out_dur - (0.0 if proof_only else
+                                            outro_seconds(variant == "preview")))
+            # A complete preview deserves more than nine clock samples. Build a
+            # compact visual screening plan from the actual edit decisions and
+            # spread it across 4x4 pages. Proof renders stay intentionally narrow:
+            # their numbered verify sheet answers the changed-moment question and
+            # duplicating whole-program evidence would add latency and vision cost.
+            screening_locals = []
+            screening_frames = []
+            screening_pages = []
+            planned_screening = []
             if variant == "preview" and not proof_only:
                 try:
-                    _explicit = ((edl_row["json"].get("master") or {})
-                                 .get("loudness"))
-                    audio_qc_res = audio_qc.measure(
-                        out_local, duration_s=out_dur,
-                        master=(master_loudness(edl_row["json"], *src_shape)
-                                or _explicit),
-                        silent_by_design=silent_by_design(
-                            edl_row["json"], index,
-                            lambda key: _insert_asset_meta(
-                                worker_db, project_id, key)))
-                except Exception:
-                    audio_qc_res = None
-                authored = edl_row["json"]
-                has_designed_audio = bool(
-                    authored.get("music") or authored.get("sfx") or
-                    authored.get("voiceover"))
-                if has_designed_audio and audio_model_review:
-                    review_times = list(vtimes or [])
-                    # Ensure the bounded actual-audio listener hears the beginning,
-                    # middle and end of the final mix even when all authored SFX
-                    # happen near the opening. Event times below then compete on
-                    # real program position rather than insertion order.
-                    review_times.extend(
-                        out_dur * fraction for fraction in (0.08, 0.5, 0.92))
-                    # The dispatcher already maps measured Blueprint sequence
-                    # beats onto the output clock for visual screening. Reuse
-                    # those same semantic anchors for the final-mix listener so
-                    # intentional silence, build and payoff can be heard even
-                    # when no SFX happens to create an audio event there.
-                    for frame in job["payload"].get("screening_frames") or []:
-                        try:
-                            review_times.append(float(frame.get("time_s")))
-                        except (AttributeError, TypeError, ValueError):
-                            pass
-                    for item, field in (
-                            *((row, "start") for row in
-                              (authored.get("music") or [])),
-                            *((row, "at") for row in
-                              (authored.get("sfx") or [])),
-                            *((row, "start_output_s") for row in
-                              (authored.get("voiceover") or []))):
-                        try:
-                            review_times.append(float(item.get(field) or 0.0))
-                        except (TypeError, ValueError):
-                            pass
-                    try:
-                        for i, (ls, le) in enumerate(audio_qc.listen_windows(
-                                review_times, out_dur, max_windows=3)):
-                            local = os.path.join(workdir, f"listen_{i}.mp3")
-                            media.extract_audio_clip(out_local, ls, le, local)
-                            key = f"media/{project_id}/{stamp}_l{i}.mp3"
-                            # These excerpts are produced after the preview
-                            # is visible and handed straight to its reviewer.
-                            # Observe upload failures here so best-effort
-                            # cleanup never leaves a receipt for absent audio.
-                            storage.upload_file(local, key, "audio/mpeg")
-                            uploaded_keys.append(key)
-                            listen_keys.append({
-                                "key": key, "t0": round(ls, 2),
-                                "t1": round(le, 2)})
-                    except Exception as exc:
-                        print(f"[render {job_id}] listening excerpts skipped: "
-                              f"{str(exc)[:160]}", flush=True)
-                        try:
-                            storage.delete_keys(
-                                [item["key"] for item in listen_keys])
-                        except Exception:
-                            pass
-                        listen_keys = []
-
-            if not audio_model_review and not proof_only and variant in ("preview", "final"):
-                try:
-                    import mcp_craft
-                    craft_report = mcp_craft.measure(out_local, edl_row["json"],
-                                                     audio_qc_res, out_dur)
+                    program_dur = max(
+                        0.1, out_dur - outro_seconds(variant == "preview"))
+                    screening_frames = screening.plan(
+                        edl_row["json"], program_dur,
+                        max_frames=config.SCREENING_MAX_FRAMES,
+                        base_frames=config.SCREENING_BASE_FRAMES,
+                        extra_frames=(job["payload"].get("screening_frames")
+                                      or []), index=index)
+                    planned_screening = list(screening.pages(
+                        screening_frames, config.SCREENING_PAGE_TILES))
+                    screening_pages = _matching_evidence_pages(
+                        reused_visual_meta.get("screening_pages"),
+                        planned_screening, "frames")
                 except Exception as exc:
-                    craft_report = {"measurement_error": type(exc).__name__,
-                                    "silent": None, "no_motion_detected": None}
+                    print(f"[render {job_id}] screening sheets skipped: "
+                          f"{str(exc)[:160]}", flush=True)
+                    screening_frames = []
+                    screening_pages = []
+                    planned_screening = []
+            vtimes = (mapped_verify_times if proof_only else
+                      (job["payload"].get("verify_times") or []))
+            # E3 (30 Oct 2026): the stills of these sheets in ONE decode of the
+            # render (byte-identical to frame_at's; sheets.prefetch).
+            try:
+                sheets.prefetch(out_local, (
+                    (sheets.result_sheet_times(sheet_dur) if sheet_local else [])
+                    + [row["time_s"] for page in
+                       ([] if screening_pages else planned_screening)
+                       for row in page]
+                    + [float(t) for t in vtimes or []]),
+                    os.path.join(workdir, "stills"))
+            except Exception:  # noqa: BLE001 — frame_at reads them instead
+                pass
+            try:
+                if sheet_local:
+                    sheets.build_result_sheet(out_local, sheet_local, sheet_dur)
+            except Exception:
+                sheet_local = None
+            if planned_screening and not screening_pages:
+                try:
+                    for page_n, page in enumerate(planned_screening, 1):
+                        local = os.path.join(
+                            workdir, f"screening_sheet_{page_n}.jpg")
+                        sheets.build_frames_sheet(
+                            out_local, local,
+                            [row["time_s"] for row in page], cols=4,
+                            max_tiles=len(page),
+                            parallelism=config.SCREENING_FRAME_PARALLELISM)
+                        screening_locals.append((local, page))
+                except Exception as exc:
+                    print(f"[render {job_id}] screening sheets skipped: "
+                          f"{str(exc)[:160]}", flush=True)
+                    screening_locals = []
+                    screening_frames = []
+                    screening_pages = []
+            # Round 81: the dispatcher may name the exact output seconds its edit
+            # changed (edl_diff.verify_plan); frames pulled HERE cost a few seeks
+            # on a file we already hold, where pulling them dispatcher-side would
+            # mean downloading the whole render to the box that must never decode
+            # video. Best-effort like the sheet — a render never fails over its
+            # own review artwork, and an executor that predates this field simply
+            # ignores it.
+            verify_local = None
+            if vtimes:
+                try:
+                    verify_local = os.path.join(workdir, "verify_sheet.jpg")
+                    sheets.build_frames_sheet(out_local, verify_local, vtimes)
+                except Exception:
+                    verify_local = None
+            caption_local = None
+            caption_locals = []
+            caption_times = []
+            caption_pages = []
+            if not proof_only and variant == "preview" \
+                    and edl_row["json"].get("captions"):
+                try:
+                    caption_times = _bounded_review_times(
+                        caption_review_times(edl_row["json"], index, workdir,
+                                             out_dur, max_times=0),
+                        config.CAPTION_REVIEW_MAX_FRAMES)
+                    if caption_times:
+                        planned_pages = [caption_times[offset:offset + 16]
+                                         for offset in range(0, len(caption_times), 16)]
+                        caption_pages = _matching_evidence_pages(
+                            reused_visual_meta.get("caption_pages"),
+                            planned_pages, "times")
+                        if not caption_pages:
+                            try:
+                                sheets.prefetch(out_local, caption_times,
+                                                os.path.join(workdir, "stills"))
+                            except Exception:  # noqa: BLE001
+                                pass
+                        for page_n, page_times in enumerate(
+                                [] if caption_pages else planned_pages, 1):
+                            local = os.path.join(
+                                workdir, f"caption_sheet_{page_n}.jpg")
+                            sheets.build_frames_sheet(
+                                out_local, local, page_times, cols=4,
+                                max_tiles=len(page_times),
+                                parallelism=config.SCREENING_FRAME_PARALLELISM)
+                            caption_locals.append((local, page_times))
+                        caption_local = caption_locals[0][0] if caption_locals else None
+                except Exception:
+                    caption_local = None
+                    caption_locals = []
+                    caption_times = []
+                    caption_pages = []
+            if reused_visual_meta:
+                detail["reused_visual_evidence_pages"] = (
+                    int(bool(sheet_key)) + len(screening_pages) + len(caption_pages))
+            sheets.release(out_local)
+            _mark("sheet_s")
 
-        def run_checks():
-            active_stage[0] = "qc_s"
-            _joined_media_checks(picture_checks, sound_checks)
+            # The render itself can finish in the narrow window between progress
+            # ticks and a dispatcher deploy. Never upload or register those stale
+            # bytes: they are both storage churn and a result nobody can consume.
+            if not _still_ours(95):
+                artifact_uploads.wait()
+                storage.delete_keys(uploaded_keys)
+                raise dbx.JobLeaseLost(
+                    "job was cancelled or handed to another worker")
 
-        run_checks()
+            # Cancellation may remove only this job's objects. Reused evidence is
+            # still owned by earlier completed renders and their issued receipts.
+            def upload_output(local, key, mime):
+                artifact_uploads.submit(local, key, mime)
+
+            if sheet_local and os.path.exists(sheet_local):
+                sheet_key = f"media/{project_id}/{stamp}_s.jpg"
+                upload_output(sheet_local, sheet_key, "image/jpeg")
+            verify_sheet_key = None
+            if verify_local and os.path.exists(verify_local):
+                verify_sheet_key = f"media/{project_id}/{stamp}_vf.jpg"
+                upload_output(verify_local, verify_sheet_key, "image/jpeg")
+            for page_n, (local, page_times) in enumerate(caption_locals, 1):
+                if not os.path.exists(local):
+                    continue
+                key = f"media/{project_id}/{stamp}_cap{page_n}.jpg"
+                upload_output(local, key, "image/jpeg")
+                caption_pages.append({"key": key, "times": page_times})
+            caption_sheet_key = (caption_pages[0]["key"]
+                                 if caption_pages else None)
+            for page_n, (local, page) in enumerate(screening_locals, 1):
+                if not os.path.exists(local):
+                    continue
+                key = f"media/{project_id}/{stamp}_scr{page_n}.jpg"
+                upload_output(local, key, "image/jpeg")
+                screening_pages.append({"key": key, "frames": page})
+            upload_wait = time.monotonic()
+            artifact_uploads.wait()
+            timings["upload_wait_s"] = round(time.monotonic() - upload_wait, 3)
+            timings.update(artifact_uploads.seconds)
+            if not _still_ours(96):
+                storage.delete_keys(uploaded_keys)
+                raise dbx.JobLeaseLost(
+                    "job was cancelled or handed to another worker")
+            _mark("upload_s")
+
+            digest = hashlib.sha256()
+            with open(out_local, "rb") as rendered_file:
+                for block in iter(lambda: rendered_file.read(1024 * 1024), b""):
+                    digest.update(block)
+            render_sha = digest.hexdigest()
+            # Publish the immutable film and its deterministic checks together.
+            # A customer-visible row must never depend on a later best-effort write.
+            audio_qc_res = None
+            craft_report = None
+            listen_keys = []
+
+            def check_fields():
+                return {"listen_keys": [item["key"] for item in listen_keys],
+                        "listen_clips": listen_keys,
+                        "audio_qc": audio_qc_res,
+                        "craft_report": craft_report,
+                        "picture_qc": picture_qc_res}
+
+            def sound_checks():
+                nonlocal audio_qc_res, listen_keys, craft_report
+                # Deterministic measurements are always-on.  When the edit authors
+                # music/SFX/voiceover, also cut a few tiny excerpts while the finished
+                # render is already local.  The dispatcher can hand those to the
+                # bounded audio reviewer without downloading/decoding the whole MP4.
+                # These clips are evidence, never a render gate, and failures here do
+                # not fail the valid preview.
+                if variant == "preview" and not proof_only:
+                    try:
+                        _explicit = ((edl_row["json"].get("master") or {})
+                                     .get("loudness"))
+                        audio_qc_res = audio_qc.measure(
+                            out_local, duration_s=out_dur,
+                            master=(master_loudness(edl_row["json"], *src_shape)
+                                    or _explicit),
+                            silent_by_design=silent_by_design(
+                                edl_row["json"], index,
+                                lambda key: _insert_asset_meta(
+                                    worker_db, project_id, key)))
+                    except Exception:
+                        audio_qc_res = None
+                    authored = edl_row["json"]
+                    has_designed_audio = bool(
+                        authored.get("music") or authored.get("sfx") or
+                        authored.get("voiceover"))
+                    if has_designed_audio and audio_model_review:
+                        review_times = list(vtimes or [])
+                        # Ensure the bounded actual-audio listener hears the beginning,
+                        # middle and end of the final mix even when all authored SFX
+                        # happen near the opening. Event times below then compete on
+                        # real program position rather than insertion order.
+                        review_times.extend(
+                            out_dur * fraction for fraction in (0.08, 0.5, 0.92))
+                        # The dispatcher already maps measured Blueprint sequence
+                        # beats onto the output clock for visual screening. Reuse
+                        # those same semantic anchors for the final-mix listener so
+                        # intentional silence, build and payoff can be heard even
+                        # when no SFX happens to create an audio event there.
+                        for frame in job["payload"].get("screening_frames") or []:
+                            try:
+                                review_times.append(float(frame.get("time_s")))
+                            except (AttributeError, TypeError, ValueError):
+                                pass
+                        for item, field in (
+                                *((row, "start") for row in
+                                  (authored.get("music") or [])),
+                                *((row, "at") for row in
+                                  (authored.get("sfx") or [])),
+                                *((row, "start_output_s") for row in
+                                  (authored.get("voiceover") or []))):
+                            try:
+                                review_times.append(float(item.get(field) or 0.0))
+                            except (TypeError, ValueError):
+                                pass
+                        try:
+                            for i, (ls, le) in enumerate(audio_qc.listen_windows(
+                                    review_times, out_dur, max_windows=3)):
+                                local = os.path.join(workdir, f"listen_{i}.mp3")
+                                media.extract_audio_clip(out_local, ls, le, local)
+                                key = f"media/{project_id}/{stamp}_l{i}.mp3"
+                                # These excerpts are produced after the preview
+                                # is visible and handed straight to its reviewer.
+                                # Observe upload failures here so best-effort
+                                # cleanup never leaves a receipt for absent audio.
+                                storage.upload_file(local, key, "audio/mpeg")
+                                uploaded_keys.append(key)
+                                listen_keys.append({
+                                    "key": key, "t0": round(ls, 2),
+                                    "t1": round(le, 2)})
+                        except Exception as exc:
+                            print(f"[render {job_id}] listening excerpts skipped: "
+                                  f"{str(exc)[:160]}", flush=True)
+                            try:
+                                storage.delete_keys(
+                                    [item["key"] for item in listen_keys])
+                            except Exception:
+                                pass
+                            listen_keys = []
+
+                if not audio_model_review and not proof_only and variant in ("preview", "final"):
+                    try:
+                        import mcp_craft
+                        craft_report = mcp_craft.measure(out_local, edl_row["json"],
+                                                         audio_qc_res, out_dur)
+                    except Exception as exc:
+                        craft_report = {"measurement_error": type(exc).__name__,
+                                        "silent": None, "no_motion_detected": None}
+
+            def run_checks():
+                active_stage[0] = "qc_s"
+                sound_checks()
+                finish_picture()
+
+            run_checks()
         if first_film and variant == "preview" and not proof_only and (
                 not isinstance(picture_qc_res, dict) or
                 not isinstance(audio_qc_res, dict)):
