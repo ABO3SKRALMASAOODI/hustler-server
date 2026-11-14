@@ -118,6 +118,24 @@ def test_disclosure_cannot_silently_drop_available_alternative(monkeypatch):
     assert 'I can use your still reference.' in edit_scope.disclose(ctx, 'Animation failed.')
 
 
+def test_unchanged_failure_keeps_the_honest_clean_original_question(monkeypatch):
+    reply = 'الفيديو لم يتغير. هل يمكنك رفع النسخة الأصلية من دون العلامة؟'
+    verdict = {'asks': [{'id': 'a1', 'state': 'not_done',
+                        'seen': 'The mark remains across the face.',
+                        'line': 'العلامة ما زالت ظاهرة.'}]}
+    def check(ctx, name, schema, system, payload, **kw):
+        if name == 'disclose_retained_changes':
+            return {'reply': reply, 'covered': [], 'offered_alternative': None}, {}
+        assert name == 'record_true_reply'
+        return {'wrong': [], 'reply': '', 'covered': ['unchanged']}, {}
+    monkeypatch.setattr(asks, '_call', check)
+    ctx = NS(turn_start_edl={'json': {}}, latest_edl=lambda: {'json': {}},
+             ask_verdict=verdict)
+    out = edit_scope.disclose(ctx, reply)
+    assert asks.true_reply(ctx, {'asks': [{'id': 'a1', 'said': 'Remove the mark'}]},
+                           verdict, out) == reply
+
+
 @pytest.mark.parametrize('relevant', [True, False])
 def test_unsupported_reply_can_offer_a_real_upload_without_failed_tool_call(monkeypatch, relevant):
     def check(ctx, name, schema, system, payload, **kw):
