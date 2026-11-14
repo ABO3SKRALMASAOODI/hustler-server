@@ -112,6 +112,34 @@ class _Ctx:
         return f"EDL v{len(self.writes)} -> v{len(self.writes) + 1}: {description}"
 
 
+def test_full_frame_cover_ignores_pip_offset_in_rendered_pixels(tmp_path):
+    """Photoshop replay: y=.8 left the speaker's upper face over a cover image."""
+    edl = default_edl(1.0)
+    edl['overlays'] = [dict(id='cover', asset_key='picture.png', kind='image',
+        start=0., duration_s=1., fit='cover', x=.5, y=.8, scale=.9)]
+    edl = validate_edl(edl, 1.0).model_dump()
+    graph = renderer.build_filtergraph(edl, 1., False, Timeline(edl['keep']),
+        None, [], {'words': [], 'sentences': [], 'silences': [], 'shots': []},
+        False, W=160, H=284, fps=30., frame_mode=None, src_w=160, src_h=284,
+        silence_idx=1, overlay_inputs=[(2, edl['overlays'][0])])
+    out = tmp_path/'cover.mp4'
+    subprocess.run(['ffmpeg', '-y', '-v', 'error',
+        '-f', 'lavfi', '-i', 'color=c=blue:s=160x284:d=1:r=30',
+        '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo:d=1',
+        '-f', 'lavfi', '-i', 'color=c=red:s=200x100:d=1:r=30',
+        '-filter_complex', graph, '-map', '[vout]', '-map', '[aout]',
+        '-t', '1', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', str(out)],
+        check=True, timeout=30)
+    frame = tmp_path/'cover.png'
+    subprocess.run(['ffmpeg', '-y', '-v', 'error', '-ss', '0.5', '-i', str(out),
+        '-frames:v', '1', str(frame)], check=True, timeout=15)
+    im = Image.open(frame).convert('RGB')
+    for y in (2, 80, 160, 280):
+        for x in (2, 80, 157):
+            r, g, b = im.getpixel((x, y))
+            assert r > g+70 and r > b+70, 'Full-frame cover exposed the source picture'
+
+
 def test_set_overlay_motion_is_a_general_atomic_write_and_clips_on_trim():
     edl = default_edl(5.0)
     edl["overlays"] = [{
