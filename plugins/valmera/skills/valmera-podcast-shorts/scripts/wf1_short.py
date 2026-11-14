@@ -170,7 +170,7 @@ def supply(ctx, script):
     # and incorrectly requires a montage's entire brief inside each individual 1 s shot.
     foot = chain.footage(ctx, dict(script=fscript), [round(float(s["t1"]) - float(s["t0"]), 2) for s in windows],
                          W=fw, H=fh, preserve_source=True, shot_s=1.15, line_max=20, per=5,
-                         strict_lines=True, motion_first=True, alloc="round", reassign_lost=True,
+                         strict_lines=True, motion_first=True, scout_motion=True, alloc="round", reassign_lost=True,
                          verify=False, whole_first=True, keep_sources=True, out_name=footage_name)
     if foot:
         n_yt, n_bad = refused(foot)
@@ -387,7 +387,7 @@ def refill(ctx, script, pack, shortage):
     ctx.log(f"research missing documentary windows {wanted}; pass {count}")
     foot = chain.footage(ctx,dict(script=fscript),[w['t1']-w['t0'] for w in windows],W=fw,H=fh,
                          preserve_source=True,shot_s=1.15,line_max=20,per=4,lines=wanted,avoid=prior,
-                         strict_lines=True,motion_first=True,alloc='round',reassign_lost=True,
+                         strict_lines=True,motion_first=True,scout_motion=True,alloc='round',reassign_lost=True,
                          verify=False,whole_first=True,keep_sources=True,out_name=name)
     if not foot:
         raise RuntimeError('supplementary documentary research returned no record')

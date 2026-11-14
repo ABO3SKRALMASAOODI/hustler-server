@@ -28,6 +28,16 @@ def test_research_budget_reaches_later_subjects_before_repeating_first():
     assert max(sum(row[0]==s for row in opened) for s in range(6)) <= 3
 
 
+def test_preliminary_motion_scans_only_the_actual_scout_candidates(monkeypatch):
+    from footage import run
+    seen=[]
+    monkeypatch.setattr(run.look,'pick_times',lambda *a,**k:[1.,7.,8.])
+    monkeypatch.setattr(run.motion,'of_shots',lambda proxy,spans,**k:seen.extend(spans) or {})
+    source=dict(proxy='source.mp4',shots=[(0,3),(3,6),(6,9),(9,100)])
+    times,_=run.motion_at_candidates(source,[])
+    assert times==[1.,7.,8.] and seen==[(0,3),(6,9)]
+
+
 def test_documentary_context_reaches_frame_checker_not_only_search_planner():
     from footage.look import _listing,has_brief
     lines=[dict(i=2,say='At Stanford in 2005',visual='Campus illustrates the setting, not a recording of this conversation.')]
