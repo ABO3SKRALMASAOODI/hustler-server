@@ -141,3 +141,20 @@ def test_strict_question_without_frames_does_not_accept_a_claim_as_shown(monkeyp
     assert 'Done.' not in out and 'Which music?' in out
     question='Can you upload the original without the mark?'
     assert reply_truth.enforce(_Ctx(False),_Client([]),'m','req',question,strict=True)==question
+
+
+def test_strict_cross_sentence_quote_cannot_leave_the_original_claim():
+    draft = "Done. The wall is gone. Which music?"
+    out, swapped = reply_truth.corrected(draft, [{
+        "quote": "Done. The wall is gone.", "status": "contradicted",
+        "honest": "The wall is still visible."}], strict=True)
+    assert out == "The wall is still visible. Which music?"
+    assert swapped
+
+
+def test_strict_checks_require_pixels_despite_timeline_inventory(monkeypatch, tmp_path):
+    _wire(monkeypatch, tmp_path)
+    client = _Client([])
+    reply_truth.enforce(_Ctx(), client, "m", "req", "Added the clip.", strict=True)
+    system = client.calls[0][1][0]["content"]
+    assert "shown requires a rendered tile" in system

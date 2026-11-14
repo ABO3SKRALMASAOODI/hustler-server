@@ -151,7 +151,10 @@ def check(ctx, client, model, request_text, draft, limit=3, strict=False):
         system += ("\nThis text may be a question to the customer, but its claims of completed edits "
                    "still require evidence. For cannot_tell claims, supply an honest uncertainty line "
                    "in the customer's language too. No supplied frames means a visual completion "
-                   "claim cannot be verified. Preserve genuine questions and statements that an "
+                   "claim cannot be verified. For visual completion claims, the edit list records "
+                   "intent, not proof: shown requires a rendered tile visibly supporting the "
+                   "claim. A placement between sampled tiles is cannot_tell until inspected. "
+                   "Preserve genuine questions and statements that an "
                    "edit was not made; those are not completion claims.")
     messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
     t0 = time.monotonic()
@@ -208,6 +211,9 @@ def corrected(draft, rows, strict=False):
         if whole:
             text = text.replace(whole, honest, 1)
             swapped.append(whole)
+        elif strict:
+            text = text.replace(quote, honest, 1)
+            swapped.append(quote)
         elif honest not in text:
             added.append(honest)
             swapped.append(quote or honest)
