@@ -1262,11 +1262,14 @@ def checked_reply(ledger, verdict):
 def true_reply(ctx, ledger, verdict, reply_text):
     """The reply, with every sentence the check's rows contradict corrected. Never raises: on any fault
     only the checked result goes out."""
-    if open_asks(verdict):
-        return checked_reply(ledger, verdict)
+    facts = getattr(ctx, "retained_reply_facts", None)
+    def fallback():
+        return checked_reply(ledger, verdict) + ('\n' + facts['description'] if facts else '')
+    if open_asks(verdict) and not facts:
+        return fallback()
     rows = [r for r in (verdict or {}).get("asks") or [] if r.get("seen")]
     if not rows or not str(reply_text or "").strip():
-        return checked_reply(ledger, verdict)
+        return fallback()
     want = {a["id"]: a for a in (ledger or {}).get("asks") or []}
     content = "\n".join([
         "The reply:\n" + json.dumps(str(reply_text)[:6000], ensure_ascii=False),
@@ -1274,17 +1277,29 @@ def true_reply(ctx, ledger, verdict, reply_text):
             f"{r['id']} [{r['state']}] asked: {json.dumps(str((want.get(r['id']) or {}).get('said') or '')[:160], ensure_ascii=False)}; "
             f"seen: {r['seen']}" for r in rows),
         "Unrequested harm on the rendered film:\n" + json.dumps(harm(verdict), ensure_ascii=False)])
+    schema, system = TRUTH_SCHEMA, TRUTH_SYSTEM
+    if facts:
+        schema = copy.deepcopy(TRUTH_SCHEMA)
+        schema['required'].append('covered')
+        schema['properties']['covered'] = {'type': 'array', 'items': {'type': 'string'},
+            'description': 'Every supplied measured-fact field preserved in the final reply (or original reply if wrong is empty).'}
+        system += (" Preserve every supplied measured retained fact and real alternative. These facts "
+                   "describe actual EDL changes, unchanged film, or tool-supported offers; an offer "
+                   "does not mean the requested edit happened. Include all their field names in covered.")
+        content += "\nThe measured retained facts:\n" + json.dumps(facts, ensure_ascii=False)
     try:
-        value, u = _call(ctx, "record_true_reply", TRUTH_SCHEMA, TRUTH_SYSTEM, content, max_tokens=4000)
+        value, u = _call(ctx, "record_true_reply", schema, system, content, max_tokens=4000)
+        if facts and not set(value.get('covered') or []) >= set(facts['fields']):
+            return fallback()
     except Exception as exc:  # noqa: BLE001 - the reply as written
         print(f"[asks] reply not checked: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
-        return checked_reply(ledger, verdict)
+        return fallback()
     if ledger is not None:
         ledger.setdefault("checks", []).append({"edl_version": "reply", "usage": u, "open": []})
     fixed = str(value.get("reply") or "").strip()
     wrong = [str(w)[:200] for w in value.get("wrong") or [] if str(w).strip()]
     if wrong and not fixed:
-        return checked_reply(ledger, verdict)
+        return fallback()
     if not wrong:
         return reply_text
     if ledger is not None:
