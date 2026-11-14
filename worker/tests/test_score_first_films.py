@@ -497,7 +497,8 @@ def test_type_for_a_noise_transcript_follows_what_the_frames_print_not_english_b
     idx = selfie(8.0)
     idx["words"] = idx["words"][:3]
     line = brief.scout_part({"scope": "film", "lang": "fi", "asks": [], "about": "x"}, idx)[1]
-    assert "language the frames themselves print" in line and "not known" in line and "not their words" in line
+    assert "language the frames themselves print" in line and "not known" in line
+    assert "Never invent a slogan" in line
     silent = brief.scout_part({"scope": "film", "lang": "en", "asks": []}, wordless_index(5.0))[1]
     assert "language the frames themselves print" in silent              # no word spoken and nothing typed: not English by default
     asked = brief.scout_part({"scope": "film", "lang": "es", "asks": [{"id": "a1", "said": "x", "probe": "caption"}]}, wordless_index(5.0))[1]

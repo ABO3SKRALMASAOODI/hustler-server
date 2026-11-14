@@ -265,9 +265,12 @@ def test_one_named_device_on_one_frame_does_not_buy_a_second_render():
 
 # ------------------------------------------------------------------ real footage: the quick film, then the full one
 
-def test_footage_takes_the_place_of_a_still_of_the_same_moment_and_nothing_else_changes(tmp_path):
+def test_footage_takes_the_place_of_a_still_of_the_same_moment_and_nothing_else_changes(tmp_path, monkeypatch):
     from PIL import Image
     from score import film as F
+    from score import supply
+    monkeypatch.setattr(supply, "check_fit", lambda work, candidates, wishes, deadline:
+                        (candidates, 0.0, {"checked": len(candidates)}))
     work = str(tmp_path)
     os.makedirs(os.path.join(work, "bin"))
     for k in (0, 1):
@@ -282,7 +285,7 @@ def test_footage_takes_the_place_of_a_still_of_the_same_moment_and_nothing_else_
     clip = {"id": "footage:a.mp4", "provider": "footage", "kind": "video", "_wish": 0, "named": "Golden Gate Bridge", "shows": "the towers in fog",
             "width": 1080, "height": 1920, "duration_s": 2.4, "license": "Footage, not licensed", "credit": "Some Channel", "page_url": "https://example.org/v",
             "_img": Image.linear_gradient("L").resize((90, 160)).convert("RGB"), "footage": {"url": "https://example.org/v", "time_range": [12.0, 14.4]}}
-    box = {"wishes": [{"w": "3-5", "want": "the Golden Gate Bridge"}, {"w": "9-11", "want": "a wave"}], "offers": [clip]}
+    box = {"wishes": [{"w": "0-2", "want": "the Golden Gate Bridge"}, {"w": "9-11", "want": "a wave"}], "offers": [clip]}
     got = []
     out = F.footage_into(work, text, box, lambda c: got.append(c["id"]) or {"storage_key": "clips/7/a.mp4", "w": 1080, "h": 1920, "dur": 2.4, "fps": 30})
     assert out is not None and got == ["footage:a.mp4"]                 # acquired once, though it is cut in twice
