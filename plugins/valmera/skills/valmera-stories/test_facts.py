@@ -47,6 +47,10 @@ def web(monkeypatch):
         raise writer.FetchError("HTTP Error 404", status=404)
     monkeypatch.setattr(writer, "_get", get)
     monkeypatch.setattr(writer, "_sleep", lambda s: None)
+
+    def no_model(*a, **k):
+        raise AssertionError("no model call in these tests: every call is a stand-in")
+    monkeypatch.setattr(writer, "ask_openai", no_model)
     for name in ("_PAGES", "TRIED", "_VIA", "FETCHED"):        # every test reads its own pages
         monkeypatch.setattr(writer, name, {})
     return types.SimpleNamespace(routes=routes, calls=calls)
@@ -114,6 +118,17 @@ def _ask(answer):
     return ask
 
 
+def supported():
+    """A line-support judge that finds every line it is asked about supported, naming no quoted speech."""
+    def ask(system, content):
+        ask.calls.append(content)
+        lines = json.loads(content.split("each one cites\n", 1)[1])
+        return json.dumps({"lines": [{"i": x["i"], "supported": True, "unsupported": "", "speech": []} for x in lines]}), \
+            dict(provider="openai", model="gpt-6.1-sol", usd=0.002)
+    ask.calls = []
+    return ask
+
+
 def test_an_absent_quote_is_researched_again_and_the_new_source_verifies(web):
     web.routes[LIVE] = page("A page about something else entirely.")
     web.routes[GOOD] = page("Toy Story history.", QUOTE)
@@ -121,11 +136,14 @@ def test_an_absent_quote_is_researched_again_and_the_new_source_verifies(web):
                 [dict(say="Woody threw Buzz out of the window.", beat="hook", facts=["f1"], show=[])])
     research = _ask({"facts": [{"id": "f1", "sources": [{"url": LIVE, "quote": QUOTE}, {"url": GOOD, "quote": QUOTE}]}]})
     rewrite = _ask({})
-    sc2, rep, spend = writer.settle(sc, log=lambda m: None, ask_research=research, ask_rewrite=rewrite)
-    assert rep["ok"] and rep["settle"]["replaced"] == [dict(id="f1", old=LIVE, new=GOOD, read="here")]
+    judge = supported()
+    sc2, rep, spend = writer.settle(sc, log=lambda m: None, ask_research=research, ask_rewrite=rewrite, ask_judge=judge)
+    assert rep["ok"] and [{k: r[k] for k in ("id", "old", "new", "read")} for r in rep["settle"]["replaced"]] == \
+        [dict(id="f1", old=LIVE, new=GOOD, read="here")]
     f = sc2["facts"][0]
     assert f["url"] == GOOD and f["replaced"]["url"] == LIVE and "not in the page" in f["replaced"]["why"]
-    assert len(research.calls) == 1 and not rewrite.calls and len(spend) == 1
+    assert len(research.calls) == 1 and not rewrite.calls and len(spend) == 2
+    assert len(judge.calls) == 1 and rep["settle"]["lines_checked"][0]["ok"]     # the line on the new quote was judged
     assert sc2["segments"] == sc["segments"]                # the words stand
 
 
@@ -141,7 +159,8 @@ def test_a_side_claim_that_no_page_states_is_rewritten_out_and_the_rest_verifies
             dict(say="The cut that nearly ended it.", beat="close", facts=["f1", "f2"], show=[])]
     research = _ask({"facts": [{"id": "f2", "sources": []}]})
     rewrite = _ask({"segments": [{"i": 1, "say": None}, {"i": 3, "say": "The cowboy who nearly ended it.", "show": [], "facts": ["f1"]}]})
-    sc2, rep, spend = writer.settle(script(facts, segs), log=lambda m: None, ask_research=research, ask_rewrite=rewrite)
+    sc2, rep, spend = writer.settle(script(facts, segs), log=lambda m: None, ask_research=research, ask_rewrite=rewrite,
+                                    ask_judge=supported(), ask_repeats=_ask({"repeats": []}))
     assert rep["ok"] and rep["verified"] == rep["total"] == 2
     st = rep["settle"]
     assert st["facts_dropped"] == ["f2"] and st["dropped_segments"] == [1] and st["rewritten"] == [3] and not st["core_unverified"]
@@ -198,7 +217,8 @@ def test_a_payoff_restated_on_its_checked_facts_stands_and_is_never_dropped(web)
                  show=[dict(text="$29,140,617", role="figure")])]
     restate = _ask({"segments": [{"i": 1, "say": "Twenty-nine point one million dollars in one weekend.", "facts": ["f3"],
                                   "show": [{"text": "$29.1M", "role": "figure"}]}]})
-    sc2, rep, _ = writer.settle(script(facts, segs), log=lambda m: None, ask_research=_ask({"facts": []}), ask_rewrite=restate)
+    sc2, rep, _ = writer.settle(script(facts, segs), log=lambda m: None, ask_research=_ask({"facts": []}), ask_rewrite=restate,
+                                ask_judge=supported(), ask_repeats=_ask({"repeats": []}))
     assert rep["ok"] and rep["settle"]["rewritten"] == [1] and sc2["segments"][1]["facts"] == ["f3"]
     assert sc2["segments"][1]["show"] == [dict(text="$29.1M", role="figure")] and not rep["numbers_unbacked"]
     dropped = _ask({"segments": [{"i": 1, "say": None}]})
@@ -223,8 +243,9 @@ def test_a_core_claim_that_re_research_rescues_lets_the_stage_pass(web, tmp_path
     research = _ask({"facts": [{"id": "f1", "sources": [{"url": GOOD, "quote": QUOTE}]}]})
     ctx = types.SimpleNamespace(run_dir=str(tmp_path), args={}, log=lambda m: None)
     sc, rep, spend = wf3.write_checked(ctx, {}, {}, write=lambda n: (script(facts, segs), dict(provider="openai", usd=0.0)),
-                                       settle=lambda s: writer.settle(s, log=lambda m: None, ask_research=research, ask_rewrite=_ask({})))
-    assert rep["ok"] and sc["facts"][0]["url"] == GOOD and len(spend) == 2
+                                       settle=lambda s: writer.settle(s, log=lambda m: None, ask_research=research, ask_rewrite=_ask({}),
+                                                                      ask_judge=supported()))
+    assert rep["ok"] and sc["facts"][0]["url"] == GOOD and len(spend) == 3
 
 
 # ----------------------------------------------------------------- figures on screen

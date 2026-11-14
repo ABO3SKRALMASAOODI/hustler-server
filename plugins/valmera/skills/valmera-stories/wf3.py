@@ -204,10 +204,17 @@ def script_problems(rep, sc):
                         f"searching for other sources: {json.dumps(st.get('core_why') or st['core_unverified'], ensure_ascii=False)}. "
                         "Build the hook, the turn and the payoff on facts a readable page states word for word (read it with web_fetch "
                         "first: Wikipedia, archive.org, the studio's own site, free trade press; never a document mirror, a paywall or a PDF)")
+    elif st.get("core_unsupported"):
+        problems.append("the story's core lines (its hook, turn or payoff) say more than the quotes of the facts they cite: "
+                        f"{json.dumps(st['core_unsupported'], ensure_ascii=False)}. Say in each core line only what a fact's quote "
+                        "states, and give someone's own words only when a quote holds them word for word")
     elif rep.get("facts_unverified"):
         problems.append(f"these facts still do not verify: {rep['facts_unverified']}")
     if rep.get("numbers_unbacked"):
         problems.append(f"these numbers are on screen but in no verified quote: {rep['numbers_unbacked']}")
+    if rep.get("speech_unbacked"):
+        problems.append("these words are given as someone's own but stand in no verified quote the line cites: "
+                        f"{json.dumps(rep['speech_unbacked'], ensure_ascii=False)}")
     n_words = writer.words_of(sc)
     lo, hi = writer.FORMS[FORM]["words"]
     if not lo * 0.85 <= n_words <= hi * 1.15:
@@ -244,7 +251,10 @@ def write_checked(ctx, pick, card, write=None, settle=None):
         if st.get("core_unverified"):
             raise RuntimeError("the story's core claims cannot be verified on any readable page: "
                                f"{json.dumps(st.get('core_why'), ensure_ascii=False)[:700]}")
-        raise RuntimeError(f"the script's facts do not verify: {json.dumps({k: (rep or {}).get(k) for k in ('facts_unverified', 'numbers_unbacked', 'verified', 'total')})[:600]}")
+        if st.get("core_unsupported"):
+            raise RuntimeError("the story's core lines say more than their verified quotes state: "
+                               f"{json.dumps(st.get('core_unsupported'), ensure_ascii=False)[:700]}")
+        raise RuntimeError(f"the script's facts do not verify: {json.dumps({k: (rep or {}).get(k) for k in ('facts_unverified', 'numbers_unbacked', 'speech_unbacked', 'verified', 'total')}, ensure_ascii=False)[:600]}")
     return sc, rep, spend
 
 

@@ -144,6 +144,9 @@ def measured_problems(old, new, names):
     for t in old.get("ticks") or []:
         if t.get("word") and not _has(say, t["word"]):
             p.append(f"lost the ledger word {t['word']}")
+    for q in old.get("quotes") or []:
+        if isinstance(q, dict) and q.get("words") and writer.norm(q["words"]) not in writer.norm(say):
+            p.append(f"lost the quoted words {q['words']}")       # someone's own words stay exactly as the checked quote has them
     em = new.get("emphasis") or []
     if not isinstance(em, list) or not em or not all(_has(say, e) for e in em):
         p.append("stressed words not in the line")
