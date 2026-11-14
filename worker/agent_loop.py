@@ -2790,6 +2790,12 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     ctx.ask_ledger = ledger
     if not ledger["asks"]:
         return ""
+    import required_broll
+    try:
+        required_broll.record(ctx, ledger, request)
+    except Exception as exc:
+        ledger['picture_manifest_error'] = type(exc).__name__
+        print(f"[asks] picture obligations unavailable: {type(exc).__name__}", flush=True)
     done_by = None
     reset_note = _typed_start_from_upload(ctx, ledger, job)
     held = _typed_hold_length(ctx, ledger, job)
@@ -2829,6 +2835,10 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     kept = _typed_keep_whole(ctx, ledger, job, request)
     if kept:
         done_by = (done_by + "\n" + kept) if done_by else kept
+    import required_broll
+    supplied = required_broll.supply(ctx, ledger)
+    if supplied:
+        done_by = (done_by or "") + supplied
     return asks.editor_note(ledger, done_by)
 
 
@@ -6108,6 +6118,8 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
     if getattr(ctx, "ask_ledger", None) or getattr(ctx, "ask_check_required", False):
         _asks_check(ctx, final_text, allow_repair=False)
         final_text, outcome = _asks_settle(ctx, final_text, outcome)
+        latest = ctx.latest_edl()
+        quality = _quality_handoff(ctx)
         if isinstance(honesty, dict) and getattr(ctx, "ask_ledger", None):
             from score import asks as _asks
             honesty["ask_ledger"] = _asks.summary(
@@ -7401,6 +7413,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 ctx, "replied", fail_note=fail_note,
                 truncated=truncated_out)
             final, outcome = _asks_settle(ctx, final, outcome)
+            latest = ctx.latest_edl()
             if honesty.get("reply_truth_unverified"):
                 outcome = "partial"
             if getattr(ctx, "ask_ledger", None):

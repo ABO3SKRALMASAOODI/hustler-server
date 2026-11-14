@@ -1431,7 +1431,7 @@ class _Emit:
             sa = self.lab("ha")
             self.p.append(f"[{masks[0]}]trim=start_frame={hold}:end_frame="
                           f"{hold + 1},format=gray,"
-                          f"{self.firm_expr(FIRM_CRISP)},"
+                          f"{self.firm_expr((0., 1.))},"
                           f"loop=loop={self.n - 1}:size=1:start=0,"
                           f"{self.restamp}[{sa}]")
             pw = None
@@ -1447,7 +1447,7 @@ class _Emit:
                 else [pw]
             sp = sp_split[0]
             pw = sp_split[1] if len(sp_split) > 1 else None
-            sa = self.mask_window(masks[0], firm=FIRM_CRISP, region=False)
+            sa = self.mask_window(masks[0], firm=(0., 1.), region=False)
         bg = self.background_layer(kind, pw, masks[1] if len(masks) > 1
                                    else None, pics)
         # The subject picture is the overlay's MAIN input and the new world

@@ -1001,6 +1001,8 @@ def check(ctx, ledger, reply_text, edl, preview=None, changes="", fixed=None):
     the rest is asked (same film, same verdict)."""
     import llm
     fixed = {k: v for k, v in (fixed or {}).items() if isinstance(v, dict) and v.get("state")}
+    import required_broll
+    fixed.update(required_broll.check(ctx, ledger, edl, preview))
     todo = [a for a in ledger["asks"] if a["id"] not in fixed]
     usage = {"usd": 0.0, "s": 0.0, "model": None}
     by_id = {}
