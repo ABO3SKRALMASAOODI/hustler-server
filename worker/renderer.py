@@ -9605,9 +9605,6 @@ def cache_rules_current(cached, edl, variant, *, src_shape=(None, None),
     edl = edl or {}
     cached = cached or {}
     meta = cached.get("meta") or {}
-    if variant == "preview" and (not isinstance(meta.get("picture_qc"), dict) or
-                                 not isinstance(meta.get("audio_qc"), dict)):
-        return False
     _index = index_of or (lambda: {})
     caps = edl.get("captions")
     stored_fp = meta.get("caption_fp")
@@ -9885,6 +9882,10 @@ def _run_render_job(worker_db, job):
     # is served forever after the transcript gains words.
     cached = (None if force or proof_only else
               _stored_render(worker_db, project_id, variant, version, job_id))
+    if screen_clearance and cached and (
+            not isinstance((cached.get("meta") or {}).get("picture_qc"), dict) or
+            not isinstance((cached.get("meta") or {}).get("audio_qc"), dict)):
+        cached = None  # A first film may not reuse an unchecked preview.
     dependency_key = job["payload"].get("render_dependency_key")
     if cached and dependency_key and (cached.get("meta") or {}).get("render_dependency_key") != dependency_key:
         cached = None
