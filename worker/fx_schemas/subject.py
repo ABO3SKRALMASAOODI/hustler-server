@@ -234,8 +234,9 @@ class BackgroundFx(FxItemBase):
     def _kind_fields(self):
         k = self.kind
         if self.source_crop is not None:
-            from . import _check_box
-            _check_box(self.source_crop)
+            x0, y0, x1, y1 = self.source_crop
+            if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
+                raise ValueError("source_crop must stay inside the source frame (0..1)")
             if (self.source_crop[2] - self.source_crop[0] < .02 or
                     self.source_crop[3] - self.source_crop[1] < .02):
                 raise ValueError("a background sample must span at least 2% on each axis")

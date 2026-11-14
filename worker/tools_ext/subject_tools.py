@@ -717,7 +717,10 @@ def set_background(ctx, kind, start, end, colour=None, colour2=None,
     if source_crop is not None and (it.get("source") or {}).get("kind") == "source":
         try:
             import face_guard
-            hit = face_guard.source_hit(ctx, tuple(float(v) for v in source_crop),
+            box = tuple(float(v) for v in source_crop)
+            if len(box) != 4:
+                raise ValueError("source_crop needs four coordinates")
+            hit = face_guard.source_hit(ctx, box,
                                        [float(it["source"]["src_t"])])
             if hit:
                 return "REJECTED: the backdrop sample contains a measured face. Choose clean scenery without people."

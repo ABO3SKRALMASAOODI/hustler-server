@@ -118,6 +118,14 @@ def test_background_sample_requires_a_real_source_frame():
     assert result.startswith('REJECTED') and not ctx.writes
 
 
+@pytest.mark.parametrize('crop', [[-.1,0,.5,.5],[0,0,1.1,1],
+                                  [0,0,.001,.5],[0,float('nan'),1,1],[0,0,1]])
+def test_background_sample_cannot_read_outside_source(crop):
+    ctx = Ctx()
+    result = st.set_background(ctx,'source',0,8,source=1,source_crop=crop)
+    assert result.startswith('REJECTED') and not ctx.writes
+
+
 # ── the department ──────────────────────────────────────────────────────
 
 def test_the_verbs_are_installed_in_the_compositing_department():
