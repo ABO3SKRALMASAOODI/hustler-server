@@ -105,7 +105,7 @@ def acquire(windows,work,llm,sources=None):
     import writer
     from PIL import Image
     os.makedirs(work,exist_ok=True)
-    key=hashlib.sha256(json.dumps([4,windows,[(r.get("url"),r.get("sha256")) for r in sources or []]],sort_keys=True).encode()).hexdigest()[:16]
+    key=hashlib.sha256(json.dumps([5,windows,[(r.get("url"),r.get("sha256")) for r in sources or []]],sort_keys=True).encode()).hexdigest()[:16]
     record=os.path.join(work,key+'.json')
     if os.path.exists(record):return json.load(open(record))
     llm.openai_key()
@@ -115,7 +115,7 @@ Find real source papers, original institutional diagrams, maps, company records 
 that accurately depict the named subject. An authentic scientific diagram is useful for a theory;
 it must not imply that a hypothetical phenomenon has been observed. Do not invent a document,
 an identity, evidence of an unfilmed conversation or a URL. Avoid stock catalogs and reposts.
-Follow the supplied primary research and its actual paper/image/media links before searching anew. Respect prior acquisition errors: find a different authentic accessible primary source instead of retrying a blocked page. Existing documents are evidence; do not return repeated overlapping crops as new pictures.
+The available_originals list contains verified cached publisher bytes: prior HTTP errors for those exact URLs are resolved. Prefer those originals when they depict this passage. Follow the supplied primary research and its actual paper/image/media links before searching anew. Respect prior acquisition errors: find a different authentic accessible primary source instead of retrying a blocked page. Existing documents are evidence; do not return repeated overlapping crops as new pictures.
 Prefer a publisher, author, university, archive or the named institution. A direct PDF or image
 must be downloadable without sign-in. A primary HTML article is also valid with kind=page: the
 product captures its real rendered pixels. Use a concise original passage or diagram, never a
