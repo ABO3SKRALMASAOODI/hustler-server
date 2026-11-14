@@ -20,6 +20,15 @@ def test_empty_picture_audit_cannot_pass_coverage():
         C.require_coverage([],coverage,12)
 
 
+def test_static_video_files_do_not_satisfy_moving_coverage():
+    coverage = {'windows':[{'t0':0.,'t1':10.}]}
+    rows = [[i*30,(i+1)*30,'clip','subject',dict(window=0,placed_motion_p90=0.)] for i in range(8)]
+    with pytest.raises(RuntimeError,match='moving=0.000'):
+        C.require_coverage(rows,coverage,10)
+    for row in rows: row[4]['placed_motion_p90']=2.
+    assert C.require_coverage(rows,coverage,10)['moving_seconds']==8
+
+
 def test_picture_starts_at_its_word_window_not_sentence_start():
     coverage = {'windows':[{'t0':6.3,'t1':8.,'name':'Facebook','must_show':'actual social network'}]}
     footage = {0:[{'path':f'new-shot-{i}', 'seconds':2.,'subject':'Facebook'} for i in range(3)]}

@@ -339,6 +339,7 @@ def build(script, sup, style_id, direction=None):
 
     def note(f0, f1, kind, name, rec, mode):
         P.pictures.append(dict(f=[f0, f1], visible_f=[f0, rec.get("audit_until", f1)], kind=kind, name=name, path=rec["path"], shows=rec.get("shows"), mode=mode,
+                               illustration=rec.get('illustration'),
                                finish="black and white" if is_mono(f0) else None, motion_p90=rec.get('placed_motion_p90'),
                                source=(rec.get("source") or {}).get("url") if kind == "clip" else rec.get("page"), time_range=rec.get("time_range")))
         if rec.get("still") or kind == "photo":
@@ -523,6 +524,11 @@ def build(script, sup, style_id, direction=None):
         if a < 2*FPS or a - last < 2.0 * FPS or a >= f_voice_end - 12:
             continue
         b = int(min(a + 1.15 * FPS, f_end, Clock.f(clock.segs[seg][1]) + 10))
+        # A display word cannot label the next documentary subject. If the
+        # interval is too short for display, ordinary wordwise captions carry it.
+        next_subject = [round(w['t0']*FPS)+LEAD_F for w in coverage['windows'] if round(w['t0']*FPS)+LEAD_F>a+1]
+        if next_subject:
+            b = min(b,min(next_subject))
         if b - a < 14:
             continue
         vk = f"dsp{a}"

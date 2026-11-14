@@ -401,6 +401,7 @@ def _render_review(ctx, rd, sc):
             frames.update(f for edge in word["f"] for f in (edge-1,edge,edge+1) if a <= f < b)
         rows.append([a, b, "clip", p["name"], dict(path=rd["film"], src=[a/F.FPS,b/F.FPS],
                     check_times=[f/F.FPS for f in sorted(frames)], display_words=words,
+                    illustration=p.get('illustration'),
                     source=dict(url=p.get("source")))])
     _, report = placement_check(rows, script, clock, os.path.join(ctx.supply, "render-review"), pack["ffmpeg"])
     if not report["rejected"] and rows:
