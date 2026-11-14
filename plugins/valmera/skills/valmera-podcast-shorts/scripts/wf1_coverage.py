@@ -162,8 +162,9 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None):
 def repair_requirements(coverage, wanted, evidence, llm):
     """A director corrects over-specific research constraints without changing spoken facts or timing."""
     system='''Revise documentary acquisition requirements after real research failed.
-Return JSON {"windows":[{"i":integer,"name":unchanged subject name,"must_show":str,"video_searches":[str]}]}.
+Return JSON {"windows":[{"i":integer,"name":resolved subject name,"referent_evidence":str,"must_show":str,"video_searches":[str]}]}.
 must_show is a concise visual identity test, not an editing brief. Do not include numerical quotas, required durations, claims about unavailable footage, or a closed list of preferred sources. Earlier requirements may contain invented constraints: discard those while retaining facts from the actual words. A category such as deep learning permits any authentic period demonstration of that category; do not restrict it to the few papers already found. Specific named systems still require their exact identity.
+Resolve pronouns and formerly unnamed projects using the full spoken context and primary research. If an earlier subject label names the wrong referent, correct its canonical name and give referent_evidence explaining the exact words and primary source that establish it. For example a reaction to an internship must not retain the city as its subject merely because the city was named earlier. A corrected name directs research; it never approves a picture. Do not rename an explicit named entity to an easier substitute.
 Keep every actual identity, object, place and spoken fact. Do not replace a specific named thing with
 a merely related one. Requirements describe ANY ONE faithful shot, using alternatives (OR), not a
 whole montage that every one-second clip must contain. Do not require a specific paper, demo or
@@ -186,12 +187,17 @@ Every supplied window is EXTERNAL documentary coverage. Never replace its requir
 original interview or speaker. For an unnamed activity, seek truthful illustrative footage or an
 original document about that activity without inventing its participants, employer or exact location.
 If no faithful external depiction exists, state that research failure; never count the speaker as it.
-Do not change the subject name or any spoken words, window boundaries, or numerical quality targets.'''
-    content=json.dumps(dict(context=coverage.get('context'),primary_research=coverage.get('research_context'),windows=[dict(coverage['windows'][i],i=i) for i in wanted],research=evidence))
+Do not change any spoken words, window boundaries, or numerical quality targets. Keep the old canonical name unless referent evidence establishes that it is wrong or unresolved.'''
+    content=json.dumps(dict(context=coverage.get('context'),primary_research=coverage.get('research_context'),spoken_words=coverage.get('words'),windows=[dict(coverage['windows'][i],i=i) for i in wanted],research=evidence))
     text,use=llm.ask(system,content,effort='medium')
     for row in llm.json_block(text).get('windows',[]):
         i=row.get('i')
-        if i not in wanted or row.get('name')!=coverage['windows'][i]['name'] or not row.get('must_show'):continue
+        if i not in wanted or not row.get('name') or not row.get('must_show'):continue
+        window=coverage['windows'][i]
+        if row['name']!=window['name']:
+            if not row.get('referent_evidence'):continue
+            window.setdefault('original_name',window['name'])
+            window.update(name=row['name'],subjects=[row['name']],referent_evidence=row['referent_evidence'])
         coverage['windows'][i].update(must_show=row['must_show'],video_searches=row.get('video_searches') or [])
     return use
 

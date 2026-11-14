@@ -145,7 +145,7 @@ def test_document_recovery_does_not_starve_moving_footage_research(tmp_path,monk
     import wf1_documents
     ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
     pack=dict(coverage=dict(contract=3,windows=[dict(name='Company',must_show='Original product footage',say='Company',t0=0,t1=5)]),
-              referent_research={'sources':[]},research_revision=6,footage=[],pictures={},credits=[])
+              referent_research={'sources':[]},research_revision=7,footage=[],pictures={},credits=[])
     (tmp_path/'pack.json').write_text(json.dumps({'pack':pack}))
     monkeypatch.setattr(wf,'_llm',lambda:None)
     monkeypatch.setattr(wf1_documents,'acquire',lambda *a,**kw:dict(pictures={'Company':[dict(path='new-original.jpg')]},credits=[],spend=[]))

@@ -220,3 +220,15 @@ def test_context_rejection_does_not_destroy_a_picture_valid_under_a_later_clause
     assert [r[4]['window'] for r in first]==[0]
     repaired=C.proposals(cov,{},dict(Accelerator=[picture]),rejected={(0,picture['path'])})
     assert [r[4]['window'] for r in repaired]==[1]
+
+
+def test_research_can_resolve_a_wrong_pronoun_label_without_changing_word_bounds():
+    import json
+    from types import SimpleNamespace
+    cov=dict(windows=[dict(name='City',first=2,last=5,t0=1,t1=3,must_show='City')])
+    row=dict(i=0,name='Internship',must_show='Original employer premises',referent_evidence='The preceding clause identifies the internship as what he expects to dislike.',video_searches=['employer historical headquarters'])
+    llm=SimpleNamespace(ask=lambda *a,**k:(json.dumps({'windows':[row]}),{}),json_block=json.loads)
+    C.repair_requirements(cov,[0],{},llm)
+    assert cov['windows'][0]['name']=='Internship'
+    assert cov['windows'][0]['original_name']=='City'
+    assert (cov['windows'][0]['first'],cov['windows'][0]['last'])==(2,5)
