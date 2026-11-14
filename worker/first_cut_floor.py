@@ -15,7 +15,7 @@ CLASSES = {'same_upload': 0, 'trim_only': 1, 'light_touch': 2, 'edited': 3}
 
 
 def prefer_floor(candidate, floor):
-    """Pareto comparison: an extra crop or silent SFX item earns nothing."""
+    """A department floor: an extra crop or silent SFX item earns nothing."""
     if candidate.get('class') not in CLASSES or floor.get('class') not in CLASSES:
         return False
     if floor.get('taste', {}).get('off_edit_steps', 0) > candidate.get('taste', {}).get('off_edit_steps', 0):
@@ -26,11 +26,17 @@ def prefer_floor(candidate, floor):
         return (CLASSES[m['class']], float(m.get('shots_added') or 0) * 10 / dur,
                 sounds * 10 / dur, float(m.get('camera_moves_added') or 0) * 10 / dur)
     c, f = vector(candidate), vector(floor)
-    # More meaningful editing wins; within a class, do not trade a real
-    # picture away for more camera moves or more sound.
-    if f[0] > c[0] and f[1] >= c[1]:
-        return True
-    return all(a + .05 >= b for a, b in zip(f, c)) and any(a > b + .05 for a, b in zip(f, c))
+    # The before-style cut is the floor, not a weighted score to beat by
+    # trading away a department. Extra motion cannot buy inaudible sound,
+    # and a classifier's "edited" label alone cannot waive missing pictures.
+    if f[1] + .05 < c[1]:
+        return False
+    return any(a > b + .05 for a, b in zip(f, c))
+
+
+def needs_floor(measured):
+    return measured.get('class') in CLASSES and (
+        measured.get('class') != 'edited' or not measured.get('shots_added'))
 
 
 def measure(ctx, worker_db, label):
@@ -49,8 +55,7 @@ def measure(ctx, worker_db, label):
     source = ctx.proxy_path()
     storage.download_to(asset['storage_key'], path)
     prog = float(schemas.program_duration(row['json']))
-    tail = max(0, float((asset.get('meta') or {}).get('duration_s') or preview.get('duration_s') or prog) - prog)
-    cmd = [sys.executable, '-m', 'film_measure', path, source, str(tail), report]
+    cmd = [sys.executable, '-m', 'film_measure', path, source, str(prog), report]
     process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                start_new_session=True)
     try:
@@ -91,7 +96,7 @@ def choose(ctx, worker_db, started, start_edl, steps, applied, picked, render, b
     try:
         candidate = measure(ctx, worker_db, 'candidate')
         rec['candidate'] = candidate
-        if candidate.get('class') not in ('same_upload', 'trim_only', 'light_touch'):
+        if not needs_floor(candidate):
             rec['decision'] = 'candidate'
             return saved
         # Allow the chain its ordinary generation budget. Never silently
