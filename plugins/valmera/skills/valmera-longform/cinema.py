@@ -267,7 +267,8 @@ def evidence_for_gaps(ctx,script,ft,gaps):
     # Search the primary archive too; Commons has only a subset of its scans.
     from archive_pictures import find
     needed={name for gap in gaps for name in assigned.get(gap['seg'],[])}
-    extra,reports=find([s for s in plan['subjects'] if s['name'] in needed],root/'primary')
+    sources=sorted({f['url'] for f in script['dossier']['facts'] if f.get('url')})
+    extra,reports=find([s for s in plan['subjects'] if s['name'] in needed],root/'primary',sources)
     save(root/'primary/search.json',reports)
     for name,recs in extra.items():pictures.setdefault(name,[]).extend(recs)
     for gap in gaps:
@@ -427,7 +428,37 @@ def unused_seconds(used,c):
     return max(longest,b-cur,0.)
 
 
+def unify_image_copies(ft):
+    """Conservatively reserve alternate scans of a photograph as one picture.
+    A second URL, JPEG size or mirrored scan does not make a new photograph.
+    Final rendered sequences still receive the independent duplicate check.
+    """
+    import cv2
+    import numpy as np
+    from PIL import Image,ImageOps
+    known={};groups=[]
+    for line in ft['lines']:
+        for c in line['clips']:
+            if c.get('kind')!='image':continue
+            path=c['path']
+            if path not in known:
+                with Image.open(path) as im:
+                    gray=np.asarray(ImageOps.exif_transpose(im).convert('L').resize((32,32)),dtype=np.float32)
+                hs=[]
+                for frame in (gray,gray[:,::-1]):
+                    d=cv2.dct(frame.copy())[:8,:8].ravel()[1:]
+                    hs.append(sum(int(v)<<i for i,v in enumerate(d>np.median(d))))
+                identity=c['content_hash']
+                for prior,hashes in groups:
+                    if min((a^b).bit_count() for a in hs for b in hashes)<=6:
+                        identity=prior;break
+                else:groups.append((identity,hs))
+                known[path]=identity
+            c['content_hash']=known[path]
+
+
 def schedule(sc, words, ft):
+    unify_image_copies(ft)
     clock=F.Clock(words,sc)
     wj=read(words) if isinstance(words,(str,Path)) else words
     end=math.ceil(clock.dur*FPS)
@@ -446,6 +477,7 @@ def schedule(sc, words, ft):
             stop=min(b,pos+234)
             shots.append(dict(f=[pos,stop],seg=v['after'],clip=c,src=[(pos-a)/FPS,(stop-a)/FPS],say=v['said'],real_voice=v['person']))
             pos=stop
+    tasks=[]
     for i,s in enumerate(sc['segments']):
         a,b=starts[i:i+2]
         intervals=[(a,b)]
@@ -458,21 +490,30 @@ def schedule(sc, words, ft):
             intervals=cut
         clips=by.get(i,{}).get('clips',[])
         for a,b in intervals:
-            pos=a
-            for ci,c in enumerate(clips):
-                seconds=min(7.8,(b-pos)/FPS,unused_seconds(used,c))
-                tail=(b-pos)/FPS-seconds
-                if 0<tail<1.5 and seconds>3 and ci+1<len(clips):
-                    seconds-=1.5-tail
-                if seconds<1/FPS: continue
-                offset=reserve(used,c,seconds)
-                if offset is None: continue
-                n=min(round(seconds*FPS),b-pos)
-                shots.append(dict(f=[pos,pos+n],seg=i,clip=c,src=[offset,offset+n/FPS],say=s['say']))
-                pos+=n
-                if pos>=b: break
-            if pos<b:
-                missing.append(dict(seg=i,seconds=(b-pos)/FPS,words=s['say']))
+            # Allocate scarce evidence first. Chronological greed can spend a
+            # unique image on a well-covered line and starve the only other
+            # line it illustrates. Output chronology is restored below.
+            unique={('image:'+c['content_hash'] if c.get('kind')=='image' else
+                     c['source']['url']+':'+str(c['time_range'])):c for c in clips}
+            clips=list(unique.values())
+            spare=sum(min(7.8,unused_seconds(used,c)) for c in clips)-(b-a)/FPS
+            tasks.append((spare,i,s,a,b,clips))
+    for _,i,s,a,b,clips in sorted(tasks,key=lambda t:t[0]):
+        pos=a
+        for ci,c in enumerate(clips):
+            seconds=min(7.8,(b-pos)/FPS,unused_seconds(used,c))
+            tail=(b-pos)/FPS-seconds
+            if 0<tail<1.5 and seconds>3 and ci+1<len(clips):
+                seconds-=1.5-tail
+            if seconds<1/FPS: continue
+            offset=reserve(used,c,seconds)
+            if offset is None: continue
+            n=min(round(seconds*FPS),b-pos)
+            shots.append(dict(f=[pos,pos+n],seg=i,clip=c,src=[offset,offset+n/FPS],say=s['say']))
+            pos+=n
+            if pos>=b: break
+        if pos<b:
+            missing.append(dict(seg=i,seconds=(b-pos)/FPS,words=s['say']))
     if missing: raise CoverageError(missing)
     for r in shots:
         r['context']=r['say']

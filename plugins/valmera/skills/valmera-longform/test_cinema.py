@@ -51,6 +51,35 @@ def test_partly_used_clip_can_supply_only_its_unseen_remainder():
     assert shots[1]['src'][0]>3
 
 
+def test_scarce_evidence_is_reserved_before_a_flexible_earlier_line():
+    sc={'segments':[{'say':'First.','chapter':'c'},{'say':'Second.','chapter':'c'}]}
+    words={'duration':9.9,'words':[dict(w='First.',start=.1,end=4.5,seg=0),dict(w='Second.',start=5,end=9.8,seg=1)]}
+    shared=clip('shared',0,5.1);other=clip('other',10,16)
+    ft={'lines':[dict(i=0,clips=[shared,other]),dict(i=1,clips=[shared])]}
+    shots,_,_=C.schedule(sc,words,ft)
+    assert shots[-1]['clip']['path']=='shared'
+    assert not C.duplicate_ranges(shots)
+
+
+def test_alternate_scans_and_mirrors_are_one_picture(tmp_path):
+    import numpy as np
+    from PIL import Image,ImageOps
+    rng=np.random.default_rng(2)
+    im=Image.fromarray(rng.integers(0,255,(80,100),dtype=np.uint8))
+    a=tmp_path/'a.png';b=tmp_path/'b.jpg'
+    im.save(a);ImageOps.mirror(im.resize((500,400))).save(b,quality=90)
+    clips=[dict(kind='image',path=str(p),content_hash=C.digest(p)) for p in (a,b)]
+    C.unify_image_copies(dict(lines=[dict(clips=clips)]))
+    assert clips[0]['content_hash']==clips[1]['content_hash']
+
+
+def test_archive_parser_ignores_site_navigation_images():
+    from archive_pictures import ArticleImages
+    parser=ArticleImages()
+    parser.feed('<article><nav><img src="news.jpg" alt="unrelated"></nav><div class="entry-content"><figure><img src="archive.jpg" alt="actual subject"></figure></div><img src="footer.jpg" alt="footer"></article>')
+    assert [r['src'] for r in parser.rows]==['archive.jpg']
+
+
 def test_coverage_failure_is_explicit():
     sc={'segments':[{'say':'The real words.','chapter':'c'}]}
     words={'duration':8,'words':[{'w':'The','start':0.1,'end':1,'seg':0}]}

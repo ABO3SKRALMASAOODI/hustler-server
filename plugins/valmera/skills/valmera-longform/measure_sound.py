@@ -101,6 +101,8 @@ def measure(final,clean,plan,words,out,ffmpeg,stem_dir=None,music_stem=None):
     from stem_evidence import measure as measured_stems
     strict=measured_stems(final,*stem_files,plan,ffmpeg)
     r['residual_music_share']=r['music_share'];r['residual_chapter_rises']=r['chapter_rises']
+    r['diagnostic_method']=r['method'];r['diagnostic_source']=r['rater_source']
+    r['method']=strict['method'];r['rater_source']='week-1112/lanes/RATINGS/work1114WF1-r4/stems.py'
     r.update(stems=strict,music_share=strict['music_share'],chapter_rises=strict['chapter_rises'],
              music_under_voice_db=strict['bed_under_voice_db'],verified=strict['verified'])
     Path(out).write_text(json.dumps(r,indent=1));return r

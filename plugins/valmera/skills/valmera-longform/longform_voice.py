@@ -108,8 +108,8 @@ def shorten_joins(audio, wj, heard, script, out, ffmpeg, aim=14.0):
         g=b['start']-a['end'];mid=(a['end']+b['start'])/2
         if all(abs(mid-t)>.5 for t in protected):
             bounds=(max(a['start'],a['end']-.06),min(b['end'],b['start']+.06))
-            if g<=.26:candidates.append((g,*bounds,1.5))
-            elif .28<g<=.65:
+            if g<=.34:candidates.append((g,*bounds,min(2.0,(g+.12)/(.09+.12))))
+            elif .34<g<=.65:
                 ordinary.append((abs(g-.32),*bounds,min(1.7,(g+.12)/(.24+.12))))
     selected=sorted(sorted(candidates)[:min(need,math.ceil(span/60*9))]
                     +sorted(ordinary)[:math.ceil(span/60*5)],key=lambda c:c[1])
