@@ -43,7 +43,7 @@ def test_connected_pixels_do_not_join_diagonally():
 def test_choice_builds_before_style_and_restores_candidate_after_failure(monkeypatch):
     from types import SimpleNamespace
     import first_cut, first_cut_floor as floor
-    row = {'version': 2, 'json': {'keep': [[1, 10]]}}
+    row = {'version': 2, 'json': {'keep': [[1, 10]], 'overlays': [{'kind': 'video', 'asset_key': 'baked-source-window'}]}}
     writes = []
     def apply(edl, reason):
         writes.append(edl); row.update(version=row['version']+1, json=edl)
@@ -55,6 +55,8 @@ def test_choice_builds_before_style_and_restores_candidate_after_failure(monkeyp
         raise RuntimeError('baseline media unavailable')
     result = floor.choose(ctx, None, 0, {'json': {'keep': [[0, 10]]}}, [], [],
                           {'how': 'director'}, 'candidate preview', failed_baseline)
-    assert writes == [{'keep': [[0, 10]]}, {'keep': [[1, 10]]}]
+    assert writes[0] == {'keep': [[0, 10]]}
+    assert writes[-1]['keep'] == [[1, 10]]
+    assert writes[-1]['overlays'][0]['asset_key'] == 'baked-source-window'
     assert result[-1] == 'restored preview'
     assert 'unavailable' in ctx.first_cut_phases['never_below']

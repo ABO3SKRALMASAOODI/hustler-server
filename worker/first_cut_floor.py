@@ -77,14 +77,12 @@ def choose(ctx, worker_db, started, start_edl, steps, applied, picked, render, b
 
     The chain is itself the before-style floor on jobs that miss the Director.
     It must not be stripped by a later missing-footage fallback. Rich films
-    keep their checked pictures without spending another full render.
+    keep their checked pictures when the measured candidate is already edited.
     """
     if not picked or picked.get('how') != 'director' or not start_edl:
         return steps, applied, picked, render
     row = ctx.latest_edl() or {}
     edl = row.get('json') or {}
-    if edl.get('inserts') or edl.get('overlays'):
-        return steps, applied, picked, render
     rec = {}
     old = copy.deepcopy(edl)
     saved = (steps, applied, picked, render)
@@ -102,6 +100,7 @@ def choose(ctx, worker_db, started, start_edl, steps, applied, picked, render, b
         if not str(result).startswith('EDL v'):
             raise RuntimeError('cannot build baseline from upload')
         changed = True
+        ctx.director_version = None
         more, floor_applied, floor_picked, floor_render = build()
         baseline = measure(ctx, worker_db, 'before_style')
         rec['before_style'] = baseline
