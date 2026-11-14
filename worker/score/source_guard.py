@@ -32,13 +32,22 @@ def apply(l1, index, perception):
     samples = list((index.get("spatial") or {}).get("samples") or [])
     samples += (perception or {}).get("samples") or []
     shots = index.get("shots") or [{"start": 0, "end": v["duration"]}]
+    end_limit = float(v["duration"])
+    evidence = index.get("source_screen") or {}
+    # The compiler quantizes its spine to output frames. At a fully cleared
+    # EOF, the normal centisecond EDL tolerance cannot expose later footage.
+    # Match the renderer's final boundary gate; never extend a trimmed tail.
+    if (evidence.get("status") == "verified" and
+            end_limit >= float(evidence.get("source_duration_s") or float("inf"))):
+        end_limit += .01
     report = []
     for item in l1.get("items") or []:
         if item.get("pic") != "main" or not item.get("src"):
             continue
         start, end = item["src"]
-        if start < 0 or end > v["duration"] + 1e-6:
-            raise ValueError("first film reads outside cleared source footage")
+        if start < 0 or end > end_limit + 1e-6:
+            raise ValueError(f"first film reads outside cleared source footage: "
+                             f"{start:.6f}-{end:.6f}, limit {end_limit:.6f}")
         overlaps = [s for s in shots if s["start"] < end and s["end"] > start]
         boxes, missing = [], not overlaps
         for shot in overlaps:

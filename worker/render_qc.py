@@ -3027,158 +3027,194 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
            "orphans": [],
            "cut": [], "softened": [], "layout": [], "band": [],
            "endcard": None, "watermark": None, "faces": 0, "skipped": []}
-    # Cheapest and most important first: the branding a final must carry,
-    # then the faces, then the full-rate frame pass (shorts only — a long
-    # programme's every frame is minutes of decode).
-    if plan_.get("endcard"):
-        try:
-            res["endcard"] = endcard_match(path, plan_, deadline)
-        except Exception as exc:
-            res["skipped"].append(f"endcard: {str(exc)[:80]}")
-    if plan_.get("watermark"):
-        try:
-            res["watermark"] = robot_match(path, plan_, deadline)
-        except Exception as exc:
-            res["skipped"].append(f"watermark: {str(exc)[:80]}")
-    try:
-        res["stall"] = boundary_stall(path, plan_, deadline)
-    except Exception as exc:
-        res["skipped"].append(f"stall: {str(exc)[:80]}")
-    if res.get("stall"):
-        try:
-            res["black_tail"] = black_tail(path, plan_, deadline,
-                                           stall_rows=res["stall"])
-        except Exception as exc:  # noqa: BLE001
-            res["skipped"].append(f"black tail: {str(exc)[:80]}")
-    try:
-        samples = face_samples(path, prog, W, H, deadline,
-                               keyframes=prog > MAX_FULL_PASS_S)
-        rows, covered = None, []
-        if plan_.get("card_samples"):
+    # Independent read-only passes share the original deadline and sample
+    # plans. Each owns its result and detectors; merge in a stable order.
+    # Joining the pool is mandatory even on error: no decoder may outlive
+    # the render's work folder or its publication gate.
+    from concurrent.futures import ThreadPoolExecutor
+    from contextvars import copy_context
+    def branding_pass():
+        res = {"skipped": [], "band": []}
+        started = time.monotonic()
+        # Cheapest and most important first: the branding a final must carry,
+        # then the faces, then the full-rate frame pass (shorts only — a long
+        # programme's every frame is minutes of decode).
+        if plan_.get("endcard"):
             try:
-                rows = source_card_faces(src_path, plan_, deadline)
-            except Exception as exc:  # noqa: BLE001
-                res["skipped"].append(f"card faces: {str(exc)[:80]}")
-            if rows:
-                covered = [(a, b) for a, b, _ar in plan_.get("cards") or []
-                           if any(a <= r[0] < b for r in rows)]
-                samples = sorted(
-                    [(t, d) for t, d in samples
-                     if not any(a <= t < b for a, b in covered)]
-                    + [(t, d) for t, d, _dead in rows], key=lambda x: x[0])
-                res["card_faces"] = "source"
-            else:
-                res["skipped"].append(
-                    "card faces: read on the rendered card (no source frames)")
-        res["faces"] = sum(1 for _t_, d in samples if d)
-        res["clipped"] = [list(c) + [_limited(rows, c[0], c[1], c[2])]
-                          for c in clipped_faces(samples, plan_, covered)]
-        res["cut"] = [list(c) + [_limited(rows, c[0], c[1], c[2])]
-                      for c in cut_faces(samples, plan_, covered)]
-        res["softened"] = [list(c) for c in softened_faces(samples, plan_)]
-    except Exception as exc:
-        res["skipped"].append(f"faces: {str(exc)[:80]}")
-    if plan_.get("picture"):
-        res["picture"] = plan_["picture"]
-    if plan_.get("wm_slot"):
-        res["wm_slot"] = plan_["wm_slot"]
-    tplan = plan_.get("type") or {}
-    if tplan.get("unshown"):
-        res["unshown"] = list(tplan["unshown"][:12])
-    if tplan.get("unplaced"):
-        res["unplaced"] = list(tplan["unplaced"][:2])
-    face_tres = None
-    measurable = tplan.get("items") or tplan.get("captions")
-    if measurable and prog > MAX_FULL_PASS_S:
-        res["skipped"].append(f"type: a {prog:.0f}s programme is past the "
-                              f"{MAX_FULL_PASS_S:.0f}s type pass")
-    elif measurable:
-        # Measured right after the faces (Oct 11 run, s06: a 39 s short
-        # spent the whole budget on the eye and frame passes and reported
-        # no type size at all): MEASURES is what the editor and the
-        # reviewer read instead of hand-measuring frames.
-        try:
-            # within the check's own budget (it runs before the render job
-            # completes: a preview waits for it), at most TYPE_BUDGET_S
-            type_deadline = min(deadline, time.monotonic() + TYPE_BUDGET_S)
-            tres = type_pass(tplan, type_deadline)
-            if tres:
-                res["type"] = type_findings(tres, tplan, plan_.get("cards"))
-                face_tres = tres
-            elif type_deadline - time.monotonic() < 3.0:
-                res["skipped"].append("type: the check's time budget was spent")
-            else:
-                res["skipped"].append("type: no browser to measure it here")
-        except Exception as exc:  # noqa: BLE001
-            res["skipped"].append(f"type: {str(exc)[:80]}")
-    res["reframes"] = []
-    try:
-        res["reframes"] = [list(r) for r in reframes_off_cut(plan_)]
-    except Exception as exc:
-        res["skipped"].append(f"reframes: {str(exc)[:80]}")
-    if plan_.get("hook"):
-        try:
-            closed = closed_eyes(eye_counts(path, plan_, deadline), fps)
-            if closed:
-                res["hook_eyes"] = list(closed)
-                res["hook_fps"] = fps
-                res["hook_advice"] = hook_advice(plan_, closed, fps)
-        except Exception as exc:
-            res["skipped"].append(f"hook eyes: {str(exc)[:80]}")
-        if not plan_["hook"].get("music"):
-            try:
-                snd = opening_sound(path, deadline)
-                if snd and snd[0] > HOOK_SOUND_DB and \
-                        snd[0] > snd[1] + HOOK_SOUND_OVER:
-                    kind, w = hook_cut(plan_["hook"])
-                    if kind == "word":
-                        res["hook_sound"] = list(snd) + [
-                            w["w"], round(w["t0"], 2), round(w["t1"], 2)]
-                    elif kind is None:
-                        res["hook_sound"] = list(snd)
+                res["endcard"] = endcard_match(path, plan_, deadline)
             except Exception as exc:
-                res["skipped"].append(f"hook sound: {str(exc)[:80]}")
-    if prog <= MAX_FULL_PASS_S:
+                res["skipped"].append(f"endcard: {str(exc)[:80]}")
+        if plan_.get("watermark"):
+            try:
+                res["watermark"] = robot_match(path, plan_, deadline)
+            except Exception as exc:
+                res["skipped"].append(f"watermark: {str(exc)[:80]}")
         try:
-            lumas = []
-            changes = frame_changes(path, prog, W, H, deadline, lumas=lumas)
-            res["jumps"] = [list(j) for j in jumps(changes, plan_)]
-            res["orphans"] = [list(o) for o in orphans(changes, plan_)]
-            if res["jumps"] or res["orphans"]:
+            res["stall"] = boundary_stall(path, plan_, deadline)
+        except Exception as exc:
+            res["skipped"].append(f"stall: {str(exc)[:80]}")
+        if res.get("stall"):
+            try:
+                res["black_tail"] = black_tail(path, plan_, deadline,
+                                               stall_rows=res["stall"])
+            except Exception as exc:  # noqa: BLE001
+                res["skipped"].append(f"black tail: {str(exc)[:80]}")
+        return res, round(time.monotonic() - started, 3)
+
+    def faces_pass():
+        res = {"skipped": [], "band": []}
+        started = time.monotonic()
+        try:
+            samples = face_samples(path, prog, W, H, deadline,
+                                   keyframes=prog > MAX_FULL_PASS_S)
+            rows, covered = None, []
+            if plan_.get("card_samples"):
                 try:
-                    owned = SourceChanges(plan_, src_path, deadline)
-                    res["jumps"], res["source_jumps"] = owned.split(
-                        res["jumps"], lambda r: [r[1]])
-                    res["orphans"], src_orph = owned.split(
-                        res["orphans"], lambda r: [r[0], r[0] + r[1]])
-                    res["source_jumps"] += src_orph
-                except Exception as exc:  # noqa: BLE001 — judged unfiltered
-                    res["skipped"].append(f"source jumps: {str(exc)[:80]}")
-            res["layout"] = [list(g) for g in layout_glitches(lumas, plan_)]
+                    rows = source_card_faces(src_path, plan_, deadline)
+                except Exception as exc:  # noqa: BLE001
+                    res["skipped"].append(f"card faces: {str(exc)[:80]}")
+                if rows:
+                    covered = [(a, b) for a, b, _ar in plan_.get("cards") or []
+                               if any(a <= r[0] < b for r in rows)]
+                    samples = sorted(
+                        [(t, d) for t, d in samples
+                         if not any(a <= t < b for a, b in covered)]
+                        + [(t, d) for t, d, _dead in rows], key=lambda x: x[0])
+                    res["card_faces"] = "source"
+                else:
+                    res["skipped"].append(
+                        "card faces: read on the rendered card (no source frames)")
+            res["faces"] = sum(1 for _t_, d in samples if d)
+            res["clipped"] = [list(c) + [_limited(rows, c[0], c[1], c[2])]
+                              for c in clipped_faces(samples, plan_, covered)]
+            res["cut"] = [list(c) + [_limited(rows, c[0], c[1], c[2])]
+                          for c in cut_faces(samples, plan_, covered)]
+            res["softened"] = [list(c) for c in softened_faces(samples, plan_)]
         except Exception as exc:
-            res["skipped"].append(f"jumps: {str(exc)[:80]}")
-        for band in plan_.get("bands") or []:
+            res["skipped"].append(f"faces: {str(exc)[:80]}")
+        return res, round(time.monotonic() - started, 3)
+
+    def type_pass_local():
+        res = {"skipped": [], "band": []}
+        started = time.monotonic()
+        if plan_.get("picture"):
+            res["picture"] = plan_["picture"]
+        if plan_.get("wm_slot"):
+            res["wm_slot"] = plan_["wm_slot"]
+        tplan = plan_.get("type") or {}
+        if tplan.get("unshown"):
+            res["unshown"] = list(tplan["unshown"][:12])
+        if tplan.get("unplaced"):
+            res["unplaced"] = list(tplan["unplaced"][:2])
+        face_tres = None
+        measurable = tplan.get("items") or tplan.get("captions")
+        if measurable and prog > MAX_FULL_PASS_S:
+            res["skipped"].append(f"type: a {prog:.0f}s programme is past the "
+                                  f"{MAX_FULL_PASS_S:.0f}s type pass")
+        elif measurable:
+            # Type has its own lane so eye/frame decoding cannot consume
+            # the entire shared deadline before type measurement starts.
             try:
-                res["band"] += [list(g) + [band.get("id")] for g in band_gaps(
-                    band_ink(path, band, W, H, deadline, fps), fps,
-                    band.get("yields") or ())]
-            except Exception as exc:
-                res["skipped"].append(f"band: {str(exc)[:80]}")
-    else:
-        res["skipped"].append(f"jumps: a {prog:.0f}s programme is past the "
-                              f"{MAX_FULL_PASS_S:.0f}s frame pass")
-    if face_tres and res.get("type") is not None:
-        # last: the source frames under the graphics, on what the budget
-        # leaves (never at the cost of the passes above)
-        if deadline - time.monotonic() < 4.0:
-            res["skipped"].append("graphic faces: picture QC budget")
-        else:
-            try:
-                res["type"]["face"] = graphic_faces(
-                    _graphic_face_tracks(plan_, tplan, src_path, path,
-                                         deadline), tplan, face_tres)
+                # within the check's own budget (it runs before the render job
+                # completes: a preview waits for it), at most TYPE_BUDGET_S
+                type_deadline = min(deadline, time.monotonic() + TYPE_BUDGET_S)
+                tres = type_pass(tplan, type_deadline)
+                if tres:
+                    res["type"] = type_findings(tres, tplan, plan_.get("cards"))
+                    face_tres = tres
+                elif type_deadline - time.monotonic() < 3.0:
+                    res["skipped"].append("type: the check's time budget was spent")
+                else:
+                    res["skipped"].append("type: no browser to measure it here")
             except Exception as exc:  # noqa: BLE001
-                res["skipped"].append(f"graphic faces: {str(exc)[:80]}")
+                res["skipped"].append(f"type: {str(exc)[:80]}")
+        if face_tres and res.get("type") is not None:
+            # Source frames under graphics depend on the measured ink.
+            # They use the remainder of the same overall check budget.
+            if deadline - time.monotonic() < 4.0:
+                res["skipped"].append("graphic faces: picture QC budget")
+            else:
+                try:
+                    res["type"]["face"] = graphic_faces(
+                        _graphic_face_tracks(plan_, tplan, src_path, path,
+                                             deadline), tplan, face_tres)
+                except Exception as exc:  # noqa: BLE001
+                    res["skipped"].append(f"graphic faces: {str(exc)[:80]}")
+        return res, round(time.monotonic() - started, 3)
+
+    def temporal_pass():
+        res = {"skipped": [], "band": []}
+        started = time.monotonic()
+        res["reframes"] = []
+        try:
+            res["reframes"] = [list(r) for r in reframes_off_cut(plan_)]
+        except Exception as exc:
+            res["skipped"].append(f"reframes: {str(exc)[:80]}")
+        if plan_.get("hook"):
+            try:
+                closed = closed_eyes(eye_counts(path, plan_, deadline), fps)
+                if closed:
+                    res["hook_eyes"] = list(closed)
+                    res["hook_fps"] = fps
+                    res["hook_advice"] = hook_advice(plan_, closed, fps)
+            except Exception as exc:
+                res["skipped"].append(f"hook eyes: {str(exc)[:80]}")
+            if not plan_["hook"].get("music"):
+                try:
+                    snd = opening_sound(path, deadline)
+                    if snd and snd[0] > HOOK_SOUND_DB and \
+                            snd[0] > snd[1] + HOOK_SOUND_OVER:
+                        kind, w = hook_cut(plan_["hook"])
+                        if kind == "word":
+                            res["hook_sound"] = list(snd) + [
+                                w["w"], round(w["t0"], 2), round(w["t1"], 2)]
+                        elif kind is None:
+                            res["hook_sound"] = list(snd)
+                except Exception as exc:
+                    res["skipped"].append(f"hook sound: {str(exc)[:80]}")
+        if prog <= MAX_FULL_PASS_S:
+            try:
+                lumas = []
+                changes = frame_changes(path, prog, W, H, deadline, lumas=lumas)
+                res["jumps"] = [list(j) for j in jumps(changes, plan_)]
+                res["orphans"] = [list(o) for o in orphans(changes, plan_)]
+                if res["jumps"] or res["orphans"]:
+                    try:
+                        owned = SourceChanges(plan_, src_path, deadline)
+                        res["jumps"], res["source_jumps"] = owned.split(
+                            res["jumps"], lambda r: [r[1]])
+                        res["orphans"], src_orph = owned.split(
+                            res["orphans"], lambda r: [r[0], r[0] + r[1]])
+                        res["source_jumps"] += src_orph
+                    except Exception as exc:  # noqa: BLE001 — judged unfiltered
+                        res["skipped"].append(f"source jumps: {str(exc)[:80]}")
+                res["layout"] = [list(g) for g in layout_glitches(lumas, plan_)]
+            except Exception as exc:
+                res["skipped"].append(f"jumps: {str(exc)[:80]}")
+            for band in plan_.get("bands") or []:
+                try:
+                    res["band"] += [list(g) + [band.get("id")] for g in band_gaps(
+                        band_ink(path, band, W, H, deadline, fps), fps,
+                        band.get("yields") or ())]
+                except Exception as exc:
+                    res["skipped"].append(f"band: {str(exc)[:80]}")
+        else:
+            res["skipped"].append(f"jumps: a {prog:.0f}s programme is past the "
+                                  f"{MAX_FULL_PASS_S:.0f}s frame pass")
+        return res, round(time.monotonic() - started, 3)
+
+    passes = (branding_pass, faces_pass, type_pass_local, temporal_pass)
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="picture-qc") as pool:
+        pending = [pool.submit(copy_context().run, fn) for fn in passes]
+        phase_seconds = {}
+        for name, future in zip(("branding", "faces", "type", "temporal"), pending):
+            measured, seconds = future.result()
+            res["skipped"].extend(measured.pop("skipped"))
+            bands = measured.pop("band")
+            res["band"].extend(bands)
+            res.update(measured)
+            phase_seconds[name] = seconds
+    res["phase_seconds"] = phase_seconds
     res["findings"] = findings(res, plan_)
     res["advice"] = advice(res) + source_limit_advice(res, plan_)
     return res
