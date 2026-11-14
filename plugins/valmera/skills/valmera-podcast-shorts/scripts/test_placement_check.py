@@ -83,3 +83,20 @@ def test_caption_context_is_separate_from_display_claim_and_rechecked_on_change(
     assert calls[0]['caption_words'][0]['text']=='the'
     assert calls[1]['caption_words'][0]['text']=='Earth'
     assert calls[0]['display_words']==calls[1]['display_words']
+
+
+def test_rejected_frame_evidence_survives_replacing_the_render(tmp_path,monkeypatch):
+    import json
+    import placement_check as pc
+    path=tmp_path/'film.mp4';path.write_bytes(b'old-render')
+    monkeypatch.setattr(pc,'evidence',lambda *a:[b'exact-frame-one',b'exact-frame-two'])
+    class Clock:
+        words=[dict(w='Sun',t0=0,t1=1)]
+        segs=[(0,1)]
+    def call(*a,**kw):return json.dumps({'placements':[dict(id=0,ok=False,reason='wrong object')]}),{}
+    _,report=pc.check([[0,30,'clip','Sun',dict(path=str(path),src=[0,1])]],dict(segments=[dict(say='Sun')]),Clock(),str(tmp_path),'unused',call=call)
+    path.unlink()
+    saved=tmp_path/'rejected-frames'/report['placements'][0]['key']
+    assert (saved/'00.jpg').read_bytes()==b'exact-frame-one'
+    assert (saved/'01.jpg').read_bytes()==b'exact-frame-two'
+    assert json.loads((saved/'finding.json').read_text())['reason']=='wrong object'

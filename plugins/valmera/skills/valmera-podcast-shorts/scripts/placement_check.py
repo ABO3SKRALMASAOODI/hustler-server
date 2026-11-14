@@ -133,11 +133,12 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement"):
                    "when all sampled transition frames and their visible words are supported.")
     for offset in range(0, len(pending), 6):
         batch = pending[offset:offset + 6]
-        content = []
+        content, sampled = [], {}
         for entry, row in batch:
             content.append(dict(type="text", text=json.dumps(entry, ensure_ascii=False)))
             images = evidence(row, ffmpeg)
             if isinstance(images, bytes): images = [images]
+            sampled[entry['id']] = images
             for frame_no, pixels in enumerate(images):
                 content.append(dict(type="text", text=f"Placement {entry['id']}, sampled frame {frame_no+1}/{len(images)}"))
                 content.append(dict(type="image", source=dict(type="base64", media_type="image/jpeg",
@@ -148,6 +149,14 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement"):
         for entry, _ in batch:
             decision = decisions[entry["id"]]
             entry.update(ok=decision["ok"], reason=decision.get("reason", ""), model=MODEL)
+            if not decision['ok']:
+                # Keep the exact rejected frames inside this run before a
+                # replacement render removes them. Reasons alone are not QA.
+                directory = os.path.join(work,'rejected-frames',entry['key'])
+                os.makedirs(directory,exist_ok=True)
+                for n,pixels in enumerate(sampled[entry['id']]):
+                    with open(os.path.join(directory,f'{n:02d}.jpg'),'wb') as f:f.write(pixels)
+                with open(os.path.join(directory,'finding.json'),'w') as f:json.dump(entry,f,indent=1)
             cache[entry["key"]] = {k: entry[k] for k in ("ok", "reason", "model")}
         with open(cache_path + ".part", "w") as f:
             json.dump(cache, f, indent=1)
