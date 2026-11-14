@@ -51,22 +51,17 @@ def test_the_pace_switched_off_is_the_film_as_round_five_cut_it(monkeypatch):
     assert c.meter["pace"] == {"parts_added": 0, "take_punches": 0, "stills_moving": 0, "soft_starts": 0}
 
 
-def test_a_wordless_stretch_of_the_take_is_cut_inside_itself_and_a_spoken_one_never_is():
+def test_a_continuous_take_is_never_split_into_invented_punches():
     idx = wordless_index(8.0)
     text = film_text([{"k": "b", "id": "b01", "at": "@0.2..@4.0", "job": "x", "pic": "main@0.2-4.0"},
                       {"k": "b", "id": "b02", "at": "@4.6..@7.8", "job": "x", "pic": "main@4.6-7.8"}])
     c = comp(text, idx)
     one = [s for s in shots(c) if s["id"].startswith("b01.s0")]
-    assert len(one) >= 3 and [s["punch"] for s in one] == list(range(len(one)))
-    assert all(s["f"][1] - s["f"][0] >= pace.PUNCH_MIN_F for s in one)
-    assert abs(one[-1]["src"][1] - one[0]["src"][0] - (one[-1]["f"][1] - one[0]["f"][0]) / 30.0) < 0.2       # the take plays on through the cuts
-    assert c.meter["pace"]["take_punches"] >= 2
-    ev = sound.l1_events(c.l1)
-    assert not any(e["kind"] == "cut" and e["id"] == one[1]["id"] for e in ev)    # a small crop step is motion, not a new shot
+    assert len(one) == 1 and not one[0].get("punch")
+    assert c.meter["pace"]["take_punches"] == 0
     talk = selfie(20.0)
     said = comp(film_text(beats_over(talk, 4, lambda k, a, z: {"pic": "main"})), talk)
-    # round seven: under a voice the take is cut inside itself too, where a phrase starts (tests/test_score_round_seven.py)
-    assert not any(s.get("punch") for s in shots(said) if not s.get("talk"))
+    assert not any(s.get("punch") for s in shots(said))
 
 
 def test_a_punched_stretch_steps_closer_and_never_back_to_the_framing_it_left():

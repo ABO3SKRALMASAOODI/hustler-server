@@ -81,3 +81,75 @@ def bed_space(song, sounds, fps, rate):
         curve[a:b] = np.minimum(curve[a:b], env)
     out *= curve[:, None] if out.ndim == 2 else curve
     return out
+
+
+def chain(ctx):
+    """Give the old first-cut path the same sound designer on its real events.
+
+    Translate timeline facts, not transcript keywords. Captions are excluded.
+    Checked library recordings are resolved through the ordinary write gate.
+    """
+    import copy
+    import agent_tools
+    import music_gate
+    import schemas
+    import timeline
+    from score import sound
+    edl = copy.deepcopy(ctx.latest_edl()['json'])
+    if edl.get('sfx') or getattr(ctx, 'director_version', None):
+        return None
+    fps = 30.0
+    duration = float(schemas.program_duration(edl))
+    if duration <= .1:
+        return None
+    items, spine = [], []
+    for i, block in enumerate(timeline.program_blocks(edl)):
+        frames = [round(block['out_start']*fps), round(block['out_end']*fps)]
+        if block['kind'] == 'insert':
+            items.append({'id': f'insert{i}', 'k': 'shot', 'f': frames, 'pic': f'insert:{i}'})
+        else:
+            src = [block['src_start'], block['src_end']]
+            items.append({'id': f'take{i}', 'k': 'shot', 'f': frames, 'pic': 'main', 'src': src})
+            spine.append({'f': frames, 'src': src})
+    for i, item in enumerate(edl.get('motion') or []):
+        # Motion-caption templates are stored in captions, not this display list.
+        a, b = float(item.get('start') or 0), float(item.get('end') or 0)
+        if b > a:
+            items.append({'id': f'display{i}', 'k': 'word', 'role': 'big',
+                          'on': round(a*fps), 'f': [round(a*fps), round(b*fps)]})
+    for i, item in enumerate(edl.get('overlays') or []):
+        a = float(item.get('start') or 0)
+        b = a + float(item.get('duration_s') or 0)
+        if b > a:
+            items.append({'id': f'overlay{i}', 'k': 'card', 'pic': f'overlay:{i}',
+                          'w': 1, 'h': 1, 'f': [round(a*fps), round(b*fps)]})
+    src = ctx.proxy_path()
+    l1 = {'fps': fps, 'dur_f': round(duration*fps), 'spine': spine,
+          'items': items, 'assets': {'main': {'abs': src}}, 'sound': []}
+    index = dict(ctx.index or {}, first_film={'frame': '9:16'})
+    sounds, report = sound.design(l1, src=src, index=index, bed=bool(edl.get('music')))
+    placed = []
+    for item in sounds:
+        if item.get('s') not in sound.library():
+            continue
+        asset, error = agent_tools._resolve_sfx(ctx, 'sound:' + item['s'])
+        if error or not asset:
+            continue
+        key = asset['storage_key']
+        music_gate.grant_sfx(ctx, key)
+        cue = {'id': item['id'], 'storage_key': key, 'at': round(item['start_s'], 3),
+               'gain_db': item['db'], 'purpose': f"first-film {item.get('for') or 'picture event'}"}
+        if item.get('trim_s'):
+            cue['offset_s'] = item['trim_s']
+        if item.get('dur_s'):
+            cue['dur_s'] = item['dur_s']
+        placed.append(cue)
+    if placed:
+        edl['sfx'] = placed
+        result = ctx.apply_score(edl, 'sound design on the first film’s picture and graphic events')
+        report['write'] = str(result)[:120]
+    report['placed_on_chain'] = len(placed)
+    phases = dict(getattr(ctx, 'first_cut_phases', None) or {})
+    phases['chain_sound'] = report
+    ctx.first_cut_phases = phases
+    return report

@@ -24,7 +24,7 @@ def test_unknown_evidence_and_extra_punches_never_win():
 @pytest.mark.parametrize('size', [2, 3, 5, 18, 101])
 @pytest.mark.parametrize('mode', ['nearest', 'reflect'])
 def test_signal_filters_match_fixed_meter(size, mode):
-    from scipy import ndimage
+    ndimage = pytest.importorskip("scipy.ndimage")
     a = np.random.default_rng(48).normal(size=170)
     np.testing.assert_allclose(numeric.median_filter(a, size, mode), ndimage.median_filter(a, size, mode=mode))
     np.testing.assert_allclose(numeric.uniform_filter1d(a, size, mode), ndimage.uniform_filter1d(a, size, mode=mode), atol=1e-12)
@@ -32,9 +32,29 @@ def test_signal_filters_match_fixed_meter(size, mode):
 
 
 def test_connected_pixels_do_not_join_diagonally():
-    from scipy import ndimage
+    ndimage = pytest.importorskip("scipy.ndimage")
     a = np.eye(6, dtype=np.uint8)
     actual, n = numeric.label(a)
     expected, m = ndimage.label(a)
     assert n == m == 6
     np.testing.assert_array_equal(actual, expected)
+
+
+def test_choice_builds_before_style_and_restores_candidate_after_failure(monkeypatch):
+    from types import SimpleNamespace
+    import first_cut, first_cut_floor as floor
+    row = {'version': 2, 'json': {'keep': [[1, 10]]}}
+    writes = []
+    def apply(edl, reason):
+        writes.append(edl); row.update(version=row['version']+1, json=edl)
+        return 'EDL v' + str(row['version'])
+    ctx = SimpleNamespace(latest_edl=lambda: row, apply_score=apply, director_version=2)
+    monkeypatch.setattr(floor, 'measure', lambda *a: reading())
+    monkeypatch.setattr(first_cut, '_render_cut', lambda *a: 'restored preview')
+    def failed_baseline():
+        raise RuntimeError('baseline media unavailable')
+    result = floor.choose(ctx, None, 0, {'json': {'keep': [[0, 10]]}}, [], [],
+                          {'how': 'director'}, 'candidate preview', failed_baseline)
+    assert writes == [{'keep': [[0, 10]]}, {'keep': [[1, 10]]}]
+    assert result[-1] == 'restored preview'
+    assert 'unavailable' in ctx.first_cut_phases['never_below']
