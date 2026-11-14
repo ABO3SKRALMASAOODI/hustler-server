@@ -23,6 +23,7 @@ check    the product's watermark and end card, the measured checks, and the film
 Model calls are on the OpenAI rung (the shell's llm.py). Never publishes.
 """
 import importlib.util
+import hashlib
 import json
 import os
 import subprocess
@@ -370,22 +371,42 @@ def _repair(l1, beats, taste):
     return n0 - len(l1["items"]) - len(l1["sound"])
 
 
+def source_signature(supply):
+    """A newly available original invalidates exhausted research, not previous frame checks."""
+    path=os.path.join(supply,'sources','manifest.json')
+    rows=json.load(open(path)) if os.path.exists(path) else []
+    available=[]
+    for row in rows:
+        p=row.get('path','')
+        if os.path.isfile(p):
+            stat=os.stat(p)
+            available.append((row['url'],row.get('sha256'),stat.st_size,stat.st_mtime_ns))
+    return hashlib.sha256(json.dumps(sorted(available)).encode()).hexdigest()[:12]
+
+
 def refill(ctx, script, pack, shortage):
     """Research missing coverage through the same engines, preserving all checked originals."""
     coverage = pack['coverage']
     windows = coverage['windows']
     wanted = shortage['weak_windows'] or list(range(len(windows)))
-    if pack.get('research_revision',0)<2:
+    if not pack.get('referent_research'):
+        import wf1_context
+        found=wf1_context.research(coverage,os.path.join(ctx.supply,'referent-research'),_llm())
+        pack['referent_research']=found
+        pack.setdefault('research_spend',[]).extend(found['spend'])
+    coverage['research_context']=pack['referent_research']
+    if pack.get('research_revision',0)<4:
         import wf1_coverage
         checks=os.path.join(ctx.supply,'placement_checks.json')
         evidence=dict(available=[dict(i=r['i'],clips=[dict(subject=c.get('subject'),shows=c.get('shows'),source=c.get('source')) for c in r['clips']]) for r in pack['footage']],
                       rejected=[r['reason'] for r in json.load(open(checks)).values() if not r['ok']][-60:] if os.path.exists(checks) else [])
         usage=wf1_coverage.repair_requirements(coverage,wanted,evidence,_llm())
-        pack.setdefault('research_spend',[]).append(usage);pack['research_revision']=2
+        pack.setdefault('research_spend',[]).append(usage);pack['research_revision']=4
         stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
         with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
     import wf1_documents
-    documents=wf1_documents.acquire([dict(windows[i],i=i,context=coverage.get('context')) for i in wanted],os.path.join(ctx.supply,'primary-documents'),_llm())
+    context=dict(identity=coverage.get('context'),primary_research=coverage.get('research_context'))
+    documents=wf1_documents.acquire([dict(windows[i],i=i,context=context) for i in wanted],os.path.join(ctx.supply,'primary-documents'),_llm())
     added=0
     for subject,records in documents['pictures'].items():
         dest=pack['pictures'].setdefault(subject,[]);have={r['path'] for r in dest}
@@ -397,17 +418,37 @@ def refill(ctx, script, pack, shortage):
         with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
         ctx.log(f'acquired {added} primary-document crops; checking their actual words before further research')
         return
-    previous = pack.get('coverage_repairs',0) if pack.get('research_contract')==RESEARCH_CONTRACT else 0
+    signature=source_signature(ctx.supply)
+    previous = pack.get('coverage_repairs',0) if pack.get('research_contract')==RESEARCH_CONTRACT and pack.get('research_sources')==signature else 0
     count = int(previous)+1
-    if count > 3:
-        raise RuntimeError('documentary coverage still incomplete after three distinct research passes')
-    name = f"footage-v{coverage['contract']}-context{RESEARCH_CONTRACT}-repair{count}"
+    primary={}
+    manifest_path=os.path.join(ctx.supply,'sources','manifest.json')
+    retained=json.load(open(manifest_path)) if os.path.exists(manifest_path) else []
+    for row in retained:
+        if not row.get('title') or not row.get('channel') or not os.path.isfile(row.get('path','')):continue
+        for subject in row.get('subjects',[]):
+            primary.setdefault(subject,[]).append(dict(row,id=row.get('id') or hashlib.sha256(row['url'].encode()).hexdigest(),where=row.get('where','youtube')))
+    if count == 4:
+        import wf1_primary_sources
+        original=wf1_primary_sources.acquire([dict(windows[i],i=i,context=coverage.get('context')) for i in wanted],os.path.join(ctx.supply,'primary-videos'),_llm())
+        pack.setdefault('research_spend',[]).extend(original['spend'])
+        for subject,rows in original['sources'].items():primary.setdefault(subject,[]).extend(rows)
+        source_dir=os.path.join(ctx.supply,'sources');os.makedirs(source_dir,exist_ok=True)
+        manifest_path=os.path.join(source_dir,'manifest.json')
+        manifest=json.load(open(manifest_path)) if os.path.exists(manifest_path) else []
+        for rec in json.load(open(os.path.join(ctx.supply,'primary-videos','manifest.json'))):
+            if not any(r['url']==rec['url'] for r in manifest):manifest.append(rec)
+        with open(manifest_path,'w') as f:json.dump(manifest,f,indent=1)
+        if not primary:raise RuntimeError('no verified public publisher video found after platform research exhausted')
+    if count > 4:
+        raise RuntimeError('documentary coverage still incomplete after platform and original-publisher research')
+    name = f"footage-v{coverage['contract']}-context{RESEARCH_CONTRACT}-{signature}-repair{count}"
     prior = [os.path.join(ctx.supply,n,'footage.json') for n in os.listdir(ctx.supply)
              if n.startswith('footage') and os.path.isfile(os.path.join(ctx.supply,n,'footage.json'))]
     subjects = {windows[i]['name']:windows[i]['must_show'] for i in wanted}
     fscript = dict(title=script['title']+' — supplementary documentary coverage. Prefer original institutional or company films with visible action; avoid influencer promotions and unrelated banners.',
                    segments=[dict(i=i,say=w['say'],pictures=[w['name']],visual=w['must_show']) for i,w in enumerate(windows)],
-                   named=[dict(name=n,must_show=show,video_searches=list(dict.fromkeys(q for w in windows if w['name']==n for q in w.get('video_searches',[]))),**{'is':'thing'}) for n,show in subjects.items()])
+                   named=[dict(name=n,must_show=show,video_sources=primary.get(n,[]),video_searches=list(dict.fromkeys(q for w in windows if w['name']==n for q in w.get('video_searches',[]))),**{'is':'thing'}) for n,show in subjects.items()])
     fw,fh = wf1_film.STYLES[script['style']['id']]['footage']
     ctx.log(f"research missing documentary windows {wanted}; pass {count}")
     foot = chain.footage(ctx,dict(script=fscript),[w['t1']-w['t0'] for w in windows],W=fw,H=fh,
@@ -426,6 +467,7 @@ def refill(ctx, script, pack, shortage):
                             credit=c['channel'],page=c['url'],time_range=c['time_range'],line=c['line']) for c in foot['credits']]
     pack['coverage_repairs'] = count
     pack['research_contract'] = RESEARCH_CONTRACT
+    pack['research_sources'] = source_signature(ctx.supply)
     path = os.path.join(ctx.supply,'pack.json')
     stored = json.load(open(path));stored['pack']=pack
     with open(path,'w') as f:json.dump(stored,f,indent=1)

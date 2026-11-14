@@ -156,3 +156,10 @@ renders their actual pixels with PDFium, and checks readable crops against the s
 stills and never count as moving footage. Source provenance follows each placement into the final-frame
 review; it cannot excuse a contradictory image. A failed source download does not discard other usable
 sources. The bounded research budget includes both documentary artifacts and moving-footage recovery.
+Before declaring a referent unfilmable, research the speaker's primary account and the original publication;
+an unnamed project or recent result may have a documented identity. Primary article pages are captured
+headlessly as actual publisher pixels and remain stills. Public original-publisher video files and verified
+cached originals can enter the same footage engine when platform access fails. A newly available original
+invalidates an exhausted search cache, while every placement still needs a fresh word-specific verdict.
+After picture selection, exposed speaker passages are checked again: only a director-justified rhetorical
+word can trigger an eased move. A numerical hold detector never creates automatic alternating crops.

@@ -8,6 +8,14 @@ sys.path.insert(0, os.path.dirname(__file__))
 import wf1_short as wf
 
 
+def test_newly_available_source_invalidates_exhausted_research_without_path_churn(tmp_path):
+    sources=tmp_path/'sources';sources.mkdir();path=sources/'original.mp4'
+    manifest=sources/'manifest.json';manifest.write_text(json.dumps([dict(url='https://publisher/film',path=str(path))]))
+    absent=wf.source_signature(str(tmp_path));path.write_bytes(b'original source bytes')
+    present=wf.source_signature(str(tmp_path));assert present!=absent
+    assert wf.source_signature(str(tmp_path))==present
+
+
 def test_composed_rejection_rebuilds_product_plan_and_invalidates_render(tmp_path, monkeypatch):
     ctx = SimpleNamespace(supply=str(tmp_path), run_dir=str(tmp_path), log=lambda x: None)
     sc = dict(beats=dict(pictures=[dict(path='/supply/bad.jpg')]), spend=[])

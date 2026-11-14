@@ -154,3 +154,25 @@ def test_research_revision_preserves_named_subject_and_word_boundaries():
     assert coverage['windows'][0]['name']=='First' and 'must_show' not in coverage['windows'][0]
     assert coverage['windows'][1]['first']==5 and coverage['windows'][1]['last']==9
     assert coverage['windows'][1]['t0']==2. and coverage['windows'][1]['t1']==4.
+
+
+def test_original_publisher_candidates_require_exact_retained_source(monkeypatch):
+    from footage import run
+    monkeypatch.setattr(run.fetch,'local_source',lambda url:'/retained.mp4' if url=='https://publisher/real.mp4' else None)
+    def source(url):return dict(id=url,url=url,where='primary',title='Original film',channel='Publisher')
+    named=[dict(name='Actual subject',video_sources=[source('https://publisher/real.mp4'),source('https://publisher/missing.mp4')])]
+    got=run.primary_hits([dict(name='Other subject'),dict(name='Actual subject')],named)
+    assert list(got)==[1] and [r['url'] for r in got[1]]==['https://publisher/real.mp4']
+
+
+def test_exposed_speaker_gap_requires_actual_director_motivation(tmp_path):
+    import json
+    from types import SimpleNamespace
+    coverage=dict(words=[dict(w='then',start=0,end=.3),dict(w='but',start=2,end=2.3),dict(w='now',start=4,end=4.3)],moves=[])
+    llm=SimpleNamespace(ask=lambda *a,**k:(json.dumps({'moves':[{'word':1,'why':'The explicit contrast changes the argument.'}]}),{}),json_block=json.loads)
+    moves,_=C.speaker_moves(coverage,[],150,[],str(tmp_path),llm=llm)
+    assert moves==[dict(word=1,why='The explicit contrast changes the argument.')]
+    empty=SimpleNamespace(ask=lambda *a,**k:('{"moves":[]}',{}),json_block=json.loads)
+    other=tmp_path/'unresolved';other.mkdir()
+    with pytest.raises(RuntimeError,match='no automatic recrops'):
+        C.speaker_moves(coverage,[],150,[],str(other),llm=empty)

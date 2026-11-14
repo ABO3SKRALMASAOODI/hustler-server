@@ -316,6 +316,11 @@ def build(script, sup, style_id, direction=None):
     if take.get("still"):
         look_pics.append(take["still"])
     tcuts = [int(round(float(s_["t0"]) * FPS)) + LEAD_F for s_ in tshots[1:]]      # the take's own cuts, in film frames
+    from wf1_coverage import speaker_moves
+    resolved_moves,move_spend=speaker_moves(coverage,ins,f_end,tcuts,sup['work'])
+    d['band']['motivated_frames']=[round(coverage['words'][m['word']]['start']*FPS)+LEAD_F for m in resolved_moves]
+    placement_report['spend']+=move_spend
+    coverage_report['speaker_moves']=resolved_moves
 
     def take_shot(a, b):
         """Preserve the actual camera take; only word-motivated eased moves enter the driver."""
@@ -394,6 +399,8 @@ def build(script, sup, style_id, direction=None):
         note(f0, f1, kind, name, rec, "window")
 
     def bleed(f0, f1, kind, name, rec, key):
+        if rec.get('provider')=='primary-document':
+            return window(f0,f1,kind,name,rec,key)             # the approved document crop is already the editorial rectangle
         if kind == "clip" and int(rec.get("w") or W) > int(rec.get("h") or H):
             return window(f0, f1, kind, name, rec, key)          # footage kept wide is never blown up to fill the phone
         if kind == "clip":

@@ -2,6 +2,8 @@
 import json
 import math
 import os
+import hashlib
+import importlib.util
 
 CONTRACT = 3
 
@@ -163,7 +165,7 @@ original interview or speaker. For an unnamed activity, seek truthful illustrati
 original document about that activity without inventing its participants, employer or exact location.
 If no faithful external depiction exists, state that research failure; never count the speaker as it.
 Do not change the subject name or any spoken words, window boundaries, or numerical quality targets.'''
-    content=json.dumps(dict(context=coverage.get('context'),windows=[dict(coverage['windows'][i],i=i) for i in wanted],research=evidence))
+    content=json.dumps(dict(context=coverage.get('context'),primary_research=coverage.get('research_context'),windows=[dict(coverage['windows'][i],i=i) for i in wanted],research=evidence))
     text,use=llm.ask(system,content,effort='medium')
     for row in llm.json_block(text).get('windows',[]):
         i=row.get('i')
@@ -188,3 +190,54 @@ def require_coverage(ins, coverage, duration, fps=30):
                            f'moving={moving/max(real,.01):.3f}, new/10s={rate:.2f}, missing windows={missing}; '
                            'replace rejected pictures or fetch more before rendering',report)
     return report
+
+
+def speaker_moves(coverage, ins, end, camera_cuts, work, fps=30, lead=3, llm=None):
+    """Re-direct actual exposed speaker spans after picture rejection/replacement.
+
+    Numerical hold detection only asks the director a question. It never invents
+    a camera move or supplies an automatic rhythmic crop pattern.
+    """
+    moves=list(coverage.get('moves',[]));spans=[];pos=0
+    for a,b,*_ in sorted(ins):
+        if a>pos:spans.append((pos,a))
+        pos=max(pos,b)
+    if pos<end:spans.append((pos,end))
+    def frames(rows):return [round(coverage['words'][m['word']]['start']*fps)+lead for m in rows]
+    def gaps(rows):
+        points=frames(rows)+list(camera_cuts);out=[]
+        for a,b in spans:
+            edges=[a]+sorted({p for p in points if a<p<b})+[b]
+            out.extend((x,y) for x,y in zip(edges,edges[1:]) if y-x>3*fps)
+        return out
+    missing=gaps(moves)
+    if not missing:return moves,[]
+    content=dict(words=[dict(w,id=i) for i,w in enumerate(coverage['words'])],speaker_spans=spans,
+                 unchanged_spans=missing,existing=moves,fps=fps,lead_frames=lead)
+    key=hashlib.sha256(json.dumps(content,sort_keys=True).encode()).hexdigest()[:16]
+    path=os.path.join(work,'speaker-direction-'+key+'.json')
+    if os.path.exists(path):result=json.load(open(path));use=[]
+    else:
+        if llm is None:
+            spec=importlib.util.spec_from_file_location('wf1_camera_llm',os.path.join(os.path.dirname(__file__),'../../_shell/llm.py'))
+            llm=importlib.util.module_from_spec(spec);spec.loader.exec_module(llm)
+        prompt='''Direct only the exposed speaker passages of this documentary short.
+Return JSON {"moves":[{"word":integer,"why":specific rhetorical motivation}]}.
+The supplied unchanged spans exceed three seconds after picture selection. Choose sparse meaningful
+eased moves on actual words: a contrast, realization, emotional turn or change of argument. Each move
+must be justified by that word in the story. Never prescribe hard cuts, alternating sizes, regular
+half-second crops, moves on every word, or an arbitrary point merely to fill a quota. The renderer
+uses one continuous face-safe camera track. Pictures and original camera changes already provide
+the other transitions. A move's frame is round(word.start*fps)+lead_frames. Choose only within the
+exposed speaker spans. Preserve existing justified moves. If no honest rhetorical point can resolve
+a span, leave it unresolved; the film must return for direction rather than manufacture pace.'''
+        text,usage=llm.ask(prompt,json.dumps(content),effort='medium');result=llm.json_block(text);use=[usage]
+        with open(path,'w') as f:json.dump(result,f,indent=1)
+    have={m['word'] for m in moves}
+    for row in result.get('moves',[]):
+        i=row.get('word')
+        if not isinstance(i,int) or i in have or not 0<=i<len(coverage['words']) or not row.get('why'):continue
+        f=round(coverage['words'][i]['start']*fps)+lead
+        if any(a<=f<b-6 for a,b in spans):moves.append(dict(word=i,why=row['why']));have.add(i)
+    if gaps(moves):raise RuntimeError('speaker direction left an unchanged passage over three seconds; no automatic recrops allowed')
+    return moves,use

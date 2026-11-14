@@ -40,6 +40,17 @@ def _whole_first(src):
     return bool(src.get("duration")) and float(src["duration"]) <= WHOLE_UNDER_S
 
 
+def primary_hits(subjects, named):
+    """Only exact-URL, locally retained original sources can enter this opt-in route."""
+    out={}
+    for i,subject in enumerate(subjects):
+        rows=[h for n in named or [] if n.get('name')==subject['name'] for h in n.get('video_sources',[])]
+        kept=[dict(h) for h in rows if h.get('where') in ('primary','youtube','archive') and h.get('id') and h.get('url')
+              and h.get('title') and h.get('channel') and fetch.local_source(h['url'])]
+        if kept:out[i]=kept
+    return out
+
+
 def _open(src, work, log, hear_s=None, read_s=None, whole_first=False):
     """Proxy, shots and transcript of one source; the error on the source when it could not be read. hear_s: seconds
     heard (0: none, the shots alone). read_s: seconds of the source read. whole_first (opt-in, a story reel): a source of
@@ -173,9 +184,10 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         shows = {ln["i"]: ln for ln in pl["lines"]}
         log(f"plan: {len(subjects)} subjects, {sum(len(s['searches']) for s in subjects)} searches")
         # 2. search
-        flat = [(si, q) for si, s in enumerate(subjects) for q in s["searches"]]
+        primary = primary_hits(subjects,named)
+        flat = [(si, q) for si, s in enumerate(subjects) if si not in primary for q in s["searches"]]
         found = search.run([q for _, q in flat])
-        hits = {}
+        hits = dict(primary)
         for k, (si, _) in enumerate(flat):
             have = {h["id"] for h in hits.get(si, [])}
             hits.setdefault(si, []).extend(h for h in found.get(k) or [] if h["id"] not in have)
