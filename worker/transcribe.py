@@ -76,9 +76,14 @@ def get_model():
     if _model is None:
         _guard_model_ram()
         from faster_whisper import WhisperModel
+        from follow import cpu_count
+        # Use the slot's CPU allocation, capped to avoid oversubscribing a
+        # shared host. Model weights and decoding remain exactly the same.
+        threads = max(1, min(8, int(cpu_count())))
         _model = WhisperModel(config.WHISPER_MODEL,
                               device=config.WHISPER_DEVICE,
-                              compute_type=config.WHISPER_COMPUTE)
+                              compute_type=config.WHISPER_COMPUTE,
+                              cpu_threads=threads)
     return _model
 
 
