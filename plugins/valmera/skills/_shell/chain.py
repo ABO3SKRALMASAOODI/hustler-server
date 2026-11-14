@@ -205,14 +205,18 @@ def seg_durs(words, n):
     return out
 
 
-def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None, preserve_source=False):
+def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None, preserve_source=False, shot_s=None, line_max=None, per=None,
+            out_name="footage", lines=None, avoid=None):
     """Real footage per line (worker/footage, through footage.seam's workflow scope): supply/footage/ with
     footage.json (clips per line, each with its source URL, channel and time range for the credits) and
     clips/*.mp4. None when VALMERA_FOOTAGE=0 or when the engine could not run (logged, never a stop).
-    OpenAI only: the key is read from the backend .env into this one process's environment, never printed."""
+    OpenAI only: the key is read from the backend .env into this one process's environment, never printed.
+    shot_s, line_max, per: a caller that cuts faster asks for more, shorter clips a line (footage.run --shot-s,
+    --line-max, --per); lines, avoid, out_name: a top-up for some lines only, never cutting again what an earlier
+    record (footage.json) holds, into its own folder. Absent, the call is exactly as before."""
     if os.environ.get("VALMERA_FOOTAGE", "1") == "0":
         return None
-    out = os.path.join(ctx.supply, "footage")
+    out = os.path.join(ctx.supply, out_name)
     rec = os.path.join(out, "footage.json")
     if os.path.exists(rec):
         return json.load(open(rec))
@@ -222,6 +226,16 @@ def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None, preserve_sourc
     cmd = [PY, "-m", "footage.run", "--script", sp, "--out", out, "--w", str(W), "--h", str(H)]
     if preserve_source:
         cmd += ["--preserve-source"]
+    if shot_s:
+        cmd += ["--shot-s", f"{float(shot_s):g}"]
+    if line_max:
+        cmd += ["--line-max", str(int(line_max))]
+    if per:
+        cmd += ["--per", str(int(per))]
+    if lines:
+        cmd += ["--lines", ",".join(str(int(x)) for x in lines)]
+    if avoid:
+        cmd += ["--avoid"] + [str(x) for x in avoid]
     if durs:
         tp = os.path.join(ctx.run_dir, "footage_timing.json")
         json.dump(dict(durs=durs), open(tp, "w"))

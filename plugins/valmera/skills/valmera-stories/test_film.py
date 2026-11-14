@@ -307,3 +307,96 @@ def test_ear_never_lets_a_rewrite_say_a_sentence_twice():
            dict(say="What could one thin shield take with it? Skylab launched in May.")]
     assert ear.repeated(new, old, [0, 1]) == {0: "what could one thin shield take with it"}
     assert ear.repeated(old, old, [0, 1]) == {}
+
+
+# ----------------------------------------------------------------- writer.annotate on a stubbed model
+
+def _ann_script():
+    return dict(title="t", named=[dict(name="Toy Story", **{"is": "thing"}), dict(name="John Lasseter", **{"is": "person"})],
+                facts=[dict(id="f1", claim="c", quote="It made $362 million.", url="u")],
+                segments=[dict(say="Woody almost killed Toy Story.", beat="hook", show=["nearly"]),
+                          dict(say="John Lasseter was the director.", beat="low", show=[]),
+                          dict(say="It made three hundred sixty two million dollars.", beat="payoff", show=["$362 million"])])
+
+
+def _ann_answer(bad=False):
+    segs = [dict(i=0, see=[dict(thing="Toy Story", as_of="1993 reel", must_show="the reel", moment=None)], finish="gate", finish_rank=1,
+                 show=[dict(text="nearly", role="key", word_i=9 if bad else 1)], phrases=[[0, 1, 2], [3, 4]] if not bad else [[0, 2], [3, 4]]),
+            dict(i=1, see=[dict(thing="John Lasseter", as_of="1993", must_show="him", moment=None)], finish="bw", finish_rank=2,
+                 show=[dict(text="John Lasseter", role="name", word_i=0)], phrases=[[0, 1], [2, 3, 4]]),
+            dict(i=2, see=[dict(thing="Toy Story", as_of="1995 release", must_show="the film", moment=None),
+                           dict(thing="Not Named", as_of="x", must_show="x")], finish="bw", finish_rank=3,
+                 show=[dict(text="$362 million", role="figure", word_i=2)], phrases=[[0, 1], [2, 3, 4, 5, 6], [7]])]
+    return dict(colour_turn=2, segments=segs)
+
+
+def _stub(answers):
+    calls = []
+
+    def ask(system, content):
+        calls.append(content)
+        return json.dumps(answers[min(len(calls) - 1, len(answers) - 1)]), dict(provider="openai", usd=0.0)
+    return ask, calls
+
+
+def _ok_verify(s):
+    return dict(ok=True, numbers_unbacked=[], facts_unverified=[], facts=[1])
+
+
+def test_annotate_fills_fields_and_keeps_say_byte_identical():
+    sc = _ann_script()
+    ask, calls = _stub([_ann_answer()])
+    out, rep = writer.annotate(sc, ask=ask, verify_fn=_ok_verify, log=lambda m: None)
+    assert len(calls) == 1 and rep["ok"], rep["problems"]
+    assert [s["say"] for s in out["segments"]] == [s["say"] for s in sc["segments"]]
+    assert all(s["see"] for s in out["segments"]) and out["colour_turn"] == 2
+    assert out["segments"][2]["see"] == [dict(thing="Toy Story", as_of="1995 release", must_show="the film", moment=None)]   # not-named dropped
+    assert out["segments"][0]["show"] == [dict(text="nearly", role="key", word_i=1)]
+    assert out["segments"][1]["show"][0]["word_i"] == 0 and out["segments"][1]["show"][0]["role"] == "name"     # an added name item
+    assert out["segments"][0]["phrases"] == [[0, 3], [3, 5]]
+    assert out["segments"][2]["finish"] == "none"            # the payoff is always colour
+    assert out["segments"][1]["finish"] == "none" and out["segments"][1]["finish_cut"] == "bw"     # 5 of 16 words: over the budget
+
+
+def test_annotate_rejects_invalid_anchor_and_span_then_asks_again_or_drops():
+    sc = _ann_script()
+    ask, calls = _stub([_ann_answer(bad=True), _ann_answer()])
+    out, rep = writer.annotate(sc, ask=ask, verify_fn=_ok_verify, log=lambda m: None)
+    assert len(calls) == 2 and "problems" in calls[1]          # the repair names what was wrong
+    assert out["segments"][0]["show"][0]["word_i"] == 1 and out["segments"][0]["phrases"] == [[0, 3], [3, 5]]
+    ask, calls = _stub([_ann_answer(bad=True)])
+    out, rep = writer.annotate(sc, ask=ask, verify_fn=_ok_verify, log=lambda m: None)
+    assert len(calls) == 2 and not rep["ok"]
+    assert "word_i" not in out["segments"][0]["show"][0] and "phrases" not in out["segments"][0]
+    assert [s["say"] for s in out["segments"]] == [s["say"] for s in sc["segments"]]
+
+
+def test_annotate_takes_out_added_items_that_do_not_verify():
+    sc = _ann_script()
+    a = _ann_answer()
+    a["segments"][1]["show"].append(dict(text="1999", role="key", word_i=1))
+    ask, _ = _stub([a])
+    seen = []
+
+    def vf(s):
+        bad = any("1999" == x.get("text") for g in s["segments"] for x in g.get("show") or [])
+        seen.append(bad)
+        return dict(ok=not bad, numbers_unbacked=["1999"] if bad else [], facts_unverified=[], facts=[1])
+    out, rep = writer.annotate(sc, ask=ask, verify_fn=vf, log=lambda m: None)
+    assert seen == [True, False] and rep["verify"]["ok"]
+    assert all(x["text"] != "1999" for g in out["segments"] for x in g["show"])
+    assert out["segments"][2]["show"] == [dict(text="$362 million", role="figure", word_i=2)]   # given items stay
+
+
+def test_device_budget_keeps_best_ranked_within_a_quarter():
+    sc = dict(colour_turn=3, segments=[dict(say="a b c d", finish="bw", finish_rank=2), dict(say="a b c d", finish="gate", finish_rank=1),
+                                       dict(say="a b c d", finish="crt", finish_rank=3), dict(say="a b c d", finish="bw", finish_rank=1),
+                                       dict(say="a b c d", beat="payoff", finish="bw"), dict(say="a b c d", finish="none")])
+    share = writer.device_budget(sc)
+    assert [s["finish"] for s in sc["segments"]] == ["none", "gate", "none", "none", "none", "none"]
+    assert share == round(4 / 24, 3)
+
+
+def test_shown_strings_read_the_text_of_dict_items():
+    sc = dict(segments=[dict(say="x", show=[dict(text="$5 million", role="figure", word_i=12)])])
+    assert writer.shown_strings(sc) == ["$5 million"]

@@ -186,6 +186,30 @@ class Clock:
             out[i][1] = min(nxt, out[i][1] + 0.45) if nxt - out[i][1] > 0.6 else nxt
         return [tuple(x) for x in out]
 
+    def phrases_of(self, script, max_chars=28, pause=0.45):
+        """Caption chunks from the script's own phrase spans (writer.annotate: never a noun phrase split), broken
+        further only at a pause of `pause` s or more or past max_chars. None when a segment has no spans or its spoken
+        words do not match its spans one for one (then the caller chunks by the clock)."""
+        out = []
+        for i, s in enumerate(script.get("segments") or []):
+            ws = self.seg_words(i)
+            spans = s.get("phrases")
+            if not spans or not ws or spans[-1][1] != len(ws):
+                return None
+            for a, b in spans:
+                cur = []
+                for w in ws[a:b]:
+                    if cur and (w["t0"] - cur[-1]["t1"] >= pause or len(" ".join(x["w"] for x in cur + [w])) > max_chars):
+                        out.append([cur[0]["t0"], cur[-1]["t1"], " ".join(x["w"] for x in cur), cur])
+                        cur = []
+                    cur.append(w)
+                if cur:
+                    out.append([cur[0]["t0"], cur[-1]["t1"], " ".join(x["w"] for x in cur), cur])
+        for i in range(len(out)):
+            nxt = out[i + 1][0] if i + 1 < len(out) else out[i][1] + 0.5
+            out[i][1] = min(nxt, out[i][1] + 0.45) if nxt - out[i][1] > 0.6 else nxt
+        return [tuple(x) for x in out]
+
 
 # ----------------------------------------------------------------- the plan
 
@@ -744,11 +768,25 @@ def pin_voices(timeline, voices):
 
 # ----------------------------------------------------------------- captions that ink word by word; display words
 
-def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z=0, max_chars=22, max_words=4, late=2):
+def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z=0, max_chars=22, max_words=4, late=2, script=None):
     """Captions at one seat for the whole film (TASTE P1), the way the reference stories set them: a line is laid out
     centred as it will stand, and each word is inked on its own spoken word, where it will stay; the line leaves at
-    once when the next begins. `hold`: [(f0, f1)] when a display word has the seat and the caption yields to it."""
-    ph = clock.phrases(max_chars=max_chars, max_words=max_words)
+    once when the next begins. `hold`: [(f0, f1)] when a display word has the seat and the caption yields to it.
+    `script` with phrase spans (writer.annotate): its lines, broken only at a real pause (Clock.phrases_of)."""
+    ph = clock.phrases_of(script) if script is not None else None
+    if ph:
+        # a phrase wider than the seat (the platform's rail on the right) is split at its middle word, never set narrower
+        fit, todo = [], list(ph)
+        while todo:
+            t0, t1, text, ws = todo.pop(0)
+            if len(ws) > 1 and P.R.width(v, text) > 0.70 * W:
+                h = len(ws) // 2
+                a_, b_ = ws[:h], ws[h:]
+                todo[:0] = [(t0, b_[0]["t0"], " ".join(w["w"] for w in a_), a_), (b_[0]["t0"], t1, " ".join(w["w"] for w in b_), b_)]
+                continue
+            fit.append((t0, t1, text, ws))
+        ph = fit
+    ph = ph or clock.phrases(max_chars=max_chars, max_words=max_words)
     n_lines = 0
     for i, (t0, t1, text, ws) in enumerate(ph):
         a, b = Clock.f(t0) - 1, Clock.f(t1)
@@ -778,39 +816,64 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
     return n_lines
 
 
-def display_words(P, clock, script, v, y, f_end, skip_text=(), ink="#FFFFFF", accent="#F2C14E", gap_s=2.2, hold_s=1.15, max_w=0.70, px_max=190):
+def display_words(P, clock, script, v, y, f_end, skip_text=(), ink="#FFFFFF", accent="#F2C14E", gap_s=2.2, hold_s=1.15, max_w=0.70, px_max=190,
+                  dropped=None, roles_skip=(), figure_hold_s=1.7):
     """The writer's display strings as large type on the caption seat, each landing on the word that says it (blur
     10 to 0, a rise of 0.03 h, a hair of overshoot, 9 frames: bake.BOUNCE): figures in the accent, names in ink.
     A string the film already prints elsewhere is left out (TASTE P7: say it once); two never come closer than gap_s.
-    Returns [(f0, f1, text)]."""
+    An item anchored to its spoken word (writer.annotate's word_i) lands on that word, no spelling matched; a figure
+    holds figure_hold_s and is never kept back by the gap. `dropped`: a list that receives every item not placed, with
+    why; `roles_skip`: roles the caller sets itself (a name super). Returns [(f0, f1, text)]."""
     _, _, bake = _engines()
-    out, last = [], -10 ** 6
+    out, last, placed = [], -10 ** 6, []
     for i, s in enumerate(script["segments"]):
-        for text, word in shown_items(s):
-            if any(x in text or text in x for x in skip_text):
+        for x in s.get("show") or []:
+            item = x if isinstance(x, dict) else dict(text=str(x))
+            text, word, role = str(item.get("text") or ""), item.get("word"), item.get("role")
+            if not text or role in roles_skip:
                 continue
-            hit = said_at(clock, i, text)
-            if hit is None and word:
-                hit = (clock.word_t(i, word), 1)
+
+            def drop(why):
+                if dropped is not None:
+                    dropped.append(dict(seg=i, text=text, role=role, why=why))
+            if any(x_ in text or text in x_ for x_ in skip_text):
+                drop("printed elsewhere")
+                continue
+            ws = clock.seg_words(i)
+            wi = item.get("word_i")
+            if isinstance(wi, int) and not isinstance(wi, bool) and 0 <= wi < len(ws):
+                hit = (ws[wi]["t0"], 1)
+            else:
+                hit = said_at(clock, i, text)
+                if hit is None and word:
+                    hit = (clock.word_t(i, word), 1)
             if hit is None:
+                drop("not found in the words")
                 continue
             a = max(Clock.f(hit[0]) - 1, 1)
-            if a - last < gap_s * FPS or a >= f_end - 12:
+            fig = role == "figure"
+            if (a - last < gap_s * FPS and not fig) or a >= f_end - 12:
+                drop("too close to the last" if a < f_end - 12 else "at the end")
                 continue
-            b = int(min(a + hold_s * FPS, f_end, Clock.f(clock.segs[i][1]) + 10))
+            b = int(min(a + (max(hold_s, figure_hold_s) if fig else hold_s) * FPS, f_end, Clock.f(clock.segs[i][1]) + (int(figure_hold_s * FPS) if fig else 10)))
+            if out and out[-1][1] > a:          # never two at once: the one before yields
+                out[-1] = (out[-1][0], a, out[-1][2])
+                placed[-1]["f"][1] = a
             if b - a < 14:
+                drop("no room")
                 continue
             vk = f"{v}{a}"
             P.voices[vk] = dict(P.voices[v])
-            P.voices[vk]["px"] = P.R.fit_px(vk, text, max_w * W, px_max)
+            P.voices[vk]["px"] = P.R.fit_px(vk, text, max_w * W, px_max * (1.15 if fig else 1.0))
             n = b - a
             k = min(int(bake.BOUNCE["n"]), n)
             rise = bake.bounce(k, rest=0.0)
             ys = [r4(y + float(q)) for q in rise] + [r4(y)] * (n - k)
             bl = [round(float(q), 3) for q in bake.bounce_blur(k)] + [0.0] * (n - k)
             ops = [min(1.0, (q + 1) / 2) for q in range(n)]
-            num = any(ch.isdigit() for ch in text)
-            P.word([a, b], text, vk, 0.5, ys, accent if num else ink, ops, align="c", z=3, blur=bl, role="big", stroke=dict(w=3.0, c="#0B0A09"))
+            num = fig or any(ch.isdigit() for ch in text)
+            placed.append(P.word([a, b], text, vk, 0.5, ys, accent if num else ink, ops, align="c", z=3, blur=bl, role="big",
+                                 stroke=dict(w=3.0, c="#0B0A09")))
             P.events.append(a)
             out.append((a, b, text))
             last = a

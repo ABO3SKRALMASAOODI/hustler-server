@@ -16,6 +16,8 @@ For each subject (keep the writer's names; add a subject only when a line needs 
 
 For each line: "i" (its number), "show" (what the picture should show while it is said, plainly, the real thing first), and "subjects" (the subject names whose footage can carry it, best first).
 
+When a line's brief (see) names a moment, also search for that moment itself, such as the release film's own scene or the news report of the day, in the version the brief names.
+
 Answer with one JSON object only: {"subjects":[...],"lines":[...]}"""
 
 RANK_SYSTEM = """You choose which videos a footage researcher should open. For each subject you get YouTube and archive.org results (number, title, channel, length in seconds, views).
@@ -30,6 +32,8 @@ Answer with one JSON object only: {"keep":[{"s":subject number,"h":result number
 def plan(lines, named, about="", budget_s=90.0):
     """({"subjects": [...], "lines": [...]}, usd)."""
     rows = [f"{ln['i']}. {ln['say']}" + (f"   [writer's pictures: {', '.join(ln.get('pictures') or [])}]" if ln.get("pictures") else "")
+            + (f"   [see: {json.dumps([dict(thing=x.get('thing'), as_of=x.get('as_of'), moment=x.get('moment')) for x in ln['see'] if isinstance(x, dict)], ensure_ascii=False)}]"
+               if ln.get("see") else "")
             for ln in lines]
     subj = [dict(name=n.get("name"), kind=n.get("is"), must_show=n.get("must_show")) for n in named or []]
     content = (f"Film: {about}\n\nLines:\n" + "\n".join(rows) + "\n\nNamed things:\n" + json.dumps(subj, ensure_ascii=False))

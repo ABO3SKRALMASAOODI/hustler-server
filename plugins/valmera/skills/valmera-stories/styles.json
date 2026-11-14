@@ -14,7 +14,7 @@
     13,
     19
    ],
-   "look": "Real footage of what each line names fills the phone, a new picture about every 0.6 s, moving; lines that name several things land as stacked prints; the past is drawn in its own finish (black and white in a film gate for archive years, scanlines for the television years); a flash frame opens each turn; heavy grotesk display words in yellow on the words that matter, captions inked word by word.",
+   "look": "Real footage of what each line names fills the phone, a new picture about every 0.6 s, moving; lines that name several things land as stacked prints; colour throughout, black and white or a film gate only where the writer marks a memory (12-25% of the voice); a flash frame opens each turn; heavy grotesk display words in yellow on the words that matter, captions inked word by word.",
    "hook": "Frame 0 is the subject in real footage, the hook's display word landing on the word that says it.",
    "close": "The payoff's figure lands large on the last real picture; the end card follows.",
    "needs": "a true story with a human turn and a payoff with a figure, whose people, places and events were filmed or photographed (interviews, launches, news, archive film) so real footage and free photographs exist for most lines",
@@ -57,10 +57,10 @@
     13,
     19
    ],
-   "look": "The past in black and white with grain and a film gate, a projector flash into each run of prints; colour arrives with today; cream serif italic display words.",
+   "look": "Colour base under the film's look; the past cut in as black-and-white inserts in a film gate (the writer's device on 12-25% of the voice), a projector flash into each run of prints; colour arrives with the turn; cream serif italic display words.",
    "hook": "An archive picture of the subject in its gate, the hook's word in serif italic.",
-   "close": "Colour returns on the payoff; the end card follows.",
-   "needs": "a true story with a human turn and a payoff with a figure, whose people, places and events were filmed or photographed (interviews, launches, news, archive film) so real footage and free photographs exist for most lines; best for a story set mostly before 2000",
+   "close": "The payoff in colour; the end card follows.",
+   "needs": "a true story with a human turn and a payoff with a figure, whose people, places and events were filmed or photographed (interviews, launches, news, archive film) so real footage and free photographs exist for most lines",
    "voice": [
     "atlas"
    ]
@@ -78,7 +78,7 @@
     13,
     19
    ],
-   "look": "Each picture plays in a framed window over itself out of focus (three layers), cut fast; cyan accent, condensed capitals; archive years in their own finish.",
+   "look": "Each picture plays in a framed window over itself out of focus (three layers), cut fast; cyan accent, condensed capitals; black and white only where the writer marks a memory.",
    "hook": "The subject in the window, the hook's word in condensed capitals under it.",
    "close": "The payoff's picture in the window, its figure large; the end card follows.",
    "needs": "a true story with a human turn and a payoff with a figure, whose people, places and events were filmed or photographed (interviews, launches, news, archive film) so real footage and free photographs exist for most lines",

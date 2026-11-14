@@ -369,3 +369,43 @@ def test_voice_align_finds_the_chosen_words_in_what_was_heard():
     assert voice.align(heard, "") is None
     far = voice.align(heard, "the weather in Memphis was fine that day")
     assert far is None or far[2] < 0.8
+
+
+def test_a_faster_caller_asks_for_more_shorter_clips_and_the_default_is_unchanged():
+    from footage import run
+    for dur in (0.8, 1.5, 2.9, 4.4, 7.0):
+        n, w = run.line_shots(dur)
+        assert n == max(1, min(4, round(dur / run.SHOT_S))) and w == dur / n          # absent: exactly as before
+    n, w = run.line_shots(3.0, shot_s=0.45, line_max=10)
+    assert n == 9 and w == cut.MIN_S                                                   # ceil(3.0 / 0.45) + 2, window floor 1.0 s
+    assert run.line_shots(9.0, shot_s=0.45, line_max=10)[0] == 10
+    assert run.line_shots(2.0, shot_s=0.9)[1] == 1.6
+
+
+def test_a_brief_rides_with_its_line_into_the_plan(monkeypatch):
+    from footage import run
+    lines, _, _ = run.lines_of({"segments": [{"say": "a", "see": [{"thing": "X", "as_of": "1995", "moment": "the fall"}], "era": 1995, "beat": "turn"},
+                                             {"say": "b"}]})
+    assert lines[0]["see"][0]["moment"] == "the fall" and lines[0]["era"] == 1995 and "see" not in lines[1]
+    got = {}
+
+    def fake_ask(system, content, what, **kw):
+        got["content"] = content
+        return '{"subjects": [], "lines": []}', 0.0
+    monkeypatch.setattr(plan.ask, "ask", fake_ask)
+    plan.plan(lines, [], "t")
+    assert '"moment": "the fall"' in got["content"] and "b" in got["content"]
+    plan.plan([{"i": 0, "say": "a", "pictures": ["X"]}], [], "t")
+    assert got["content"].endswith("[]") and "see:" not in got["content"]
+
+
+def test_the_seam_passes_the_faster_pace_through(monkeypatch, tmp_path):
+    from footage import run
+    seen = {}
+
+    def fake_find(lines, named, about, out_dir, W=1080, H=1920, log=print, anchors=None, avoid=None, **kw):
+        seen.update(kw)
+        return {"counts": {}, "spend": {}, "seconds": 0}
+    monkeypatch.setattr(run, "find", fake_find)
+    seam.for_lines([], [], "t", str(tmp_path), shot_s=0.45, line_max=10, per=5)
+    assert seen["shot_s"] == 0.45 and seen["line_max"] == 10 and seen["per"] == 5

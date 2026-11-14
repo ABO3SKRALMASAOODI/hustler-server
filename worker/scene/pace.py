@@ -342,16 +342,23 @@ def drive(shots, stress, fps=30.0, frame=(1080, 1920), family="story", seed=0, b
                 # a drift across: toward the side with room, at the references' pan (0.019 frame widths a second, 0.049 at p75)
                 pan = (bake.PAN_RATE[2 if n < fps else 1] * (1 if lr[1] > lr[0] else -1), 0.0)
             kw["drift"] = dict(rate=rate, dir=1 if d_in else -1, pan=pan)
-            if k > 0 and st >= 0.6 and n >= int(0.4 * fps):
+            if (k > 0 or B.get("punch_first")) and st >= 0.6 and n >= int(0.4 * fps):
                 # a cut-in on a stressed word lands a little past its size and settles
                 kw["settle"] = dict(size=bake.CAM_SETTLE["size"] * (0.6 + 0.6 * st), dir=1)
                 log["punches"] += 1
             # the strongest word inside a long framing: an eased move in, on the measured curve
-            if n >= int(1.1 * fps) and not tight:
-                inner = [(s, f) for f, s in stress if f0 + int(0.35 * fps) <= f <= f1 - int(0.45 * fps) and s >= B["ease"]]
+            # (band "ease_min_s": a family that cuts faster eases short framings too, a 4-9% move; "punch_first": the
+            # settle may land on a picture's first framing when its word is stressed. Absent: 1.1 s and k > 0, as before.)
+            short = n < int(1.1 * fps)
+            if n >= int(float(B.get("ease_min_s", 1.1)) * fps) and not tight:
+                m0, m1 = (int(0.1 * fps), int(0.1 * fps)) if short else (int(0.35 * fps), int(0.45 * fps))
+                inner = [(s, f) for f, s in stress if f0 + m0 <= f <= f1 - m1 and s >= B["ease"]]
                 if inner:
                     s_, f_ = max(inner)
-                    size = bake.MOVE_SIZE[1] + (bake.MOVE_SIZE[2] - bake.MOVE_SIZE[1]) * rng.random()      # 6 to 12%: the eased moves' upper half
+                    if short:
+                        size = 0.04 + 0.05 * rng.random()                                                 # 4 to 9% on a short framing
+                    else:
+                        size = bake.MOVE_SIZE[1] + (bake.MOVE_SIZE[2] - bake.MOVE_SIZE[1]) * rng.random()      # 6 to 12%: the eased moves' upper half
                     cx, cy, w = motion._cwz(crop)
                     tgt = cam.keep_whole(cam.rect(cx, cy, w / (1 + size)), faces)
                     fr = max(int(round(bake.MOVE_FRAMES * fps / 30.0 * (0.75 + 0.5 * rng.random()))), 5)

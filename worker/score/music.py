@@ -711,6 +711,54 @@ def pauses(words, dur, min_gap):
     return out
 
 
+JOINT_HOLE_S = (0.5, 2.3)          # a story's breath at a section joint (the judge: 14 drops of 0.5-2.3 s over the 8 owner reels)
+JOINT_DB = {"turn": 16.0, "low": 14.0, "payoff": 18.0, "close": 16.0, "cold_open": 12.0}
+CLOSE_BED_DB = 9.0                 # after the close's first word the bed stays down: a dry close under the last line
+VOICE_DIP_DB = 18.0                # under a real voice cut into the narration
+NOTCH = (3.0, 0.8, 9.5, 0.15)      # a story's accent: -3 dB over 0.8 s, then 9.5 dB more in the last 0.15 s, back on the hit
+
+
+def _story_joints(t, joints, e, P, notes):
+    """dB per frame (negative) for a narrated story's joints (marks["joints"], only a story's scene carries them): at
+    each the bed leaves from the last word before it and comes back on the next section's first word (0.5-2.3 s,
+    12-20 dB); from the close's first word it stays down; under each real voice it dips. Without joints: nothing."""
+    out = np.zeros(len(t))
+    for j in joints:
+        kind = str(j.get("kind") or "turn")
+        if kind == "voice":
+            a, b = float(j["t0"]), float(j["t1"])
+            out -= VOICE_DIP_DB * np.clip(np.minimum((t - (a - 0.08)) / 0.08, (b + 0.1 - t) / 0.12), 0.0, 1.0)
+            notes.setdefault("voice_dips", []).append({"t": round(a, 3), "len_s": round(b - a, 3), "db": VOICE_DIP_DB})
+            continue
+        b = float(j["next_first_word_t"])
+        a = float(j.get("last_word_t") if j.get("last_word_t") is not None else b - JOINT_HOLE_S[0])
+        a = min(max(a, b - JOINT_HOLE_S[1]), b - JOINT_HOLE_S[0])
+        if b >= e - 0.2 or a < 0.3:
+            continue
+        db = float(JOINT_DB.get(kind, 16.0))
+        out -= db * np.clip(np.minimum((t - a) / P["hole_in_s"], (b - t) / 0.03), 0.0, 1.0)
+        notes["holes"].append({"t": round(a, 3), "len_s": round(b - a, 3), "db": db, "before": kind})
+        if kind == "close":
+            out -= CLOSE_BED_DB * np.clip(np.minimum((t - b) / 0.05, (e - 0.3 - t) / 0.3), 0.0, 1.0)
+            notes["close_bed_db"] = -CLOSE_BED_DB
+    return out
+
+
+def _story_notches(t, marks, d, e, P, notes):
+    """A story's accents (the film's own sounded moments): the bed eases down 3 dB over 0.8 s, then 9.5 dB more in the
+    last 0.15 s, and is back on the hit, so the hit stands out (in place of the swell other films get)."""
+    ride = np.zeros(len(t))
+    pre, pre_s, cut, cut_s = NOTCH
+    for x in sorted(float(v) for v in marks.get("accents") or []):
+        if x < 1.0 or x > e - 1.5 or (d is not None and d - P["swell_max_s"] - 0.5 < x < d + 2.0):
+            continue
+        w1 = np.clip((t - (x - pre_s)) / pre_s, 0.0, 1.0) * (t < x)
+        w2 = np.clip((t - (x - cut_s)) / cut_s, 0.0, 1.0) * (t < x)
+        ride = np.minimum(ride, -(pre * w1 + cut * w2))
+        notes.setdefault("notches", []).append(round(x, 2))
+    return ride
+
+
 def flow(nf, hop_s, marks, plan, P, base, open_gain):
     """The level the song is ridden at through the film, dB per 10 ms frame, before the song's own loudness is read:
     (slow, fast, notes). slow: under the voice while it speaks, up in its pauses (more in a longer one, none in a
@@ -757,7 +805,12 @@ def flow(nf, hop_s, marks, plan, P, base, open_gain):
         dn = np.clip(1.0 - (t - x) / P["accent_fall_s"], 0.0, 1.0)
         ride = np.maximum(ride, P["accent_db"] * np.where(t < x, up, dn))
         notes.setdefault("accents", []).append(round(x, 2))
+    joints = marks.get("joints")
+    if joints:
+        ride = _story_notches(t, marks, d, e, P, notes)          # a story's accents: a notch before each hit, never a swell
     slow += ride
+    if joints:
+        fast += _story_joints(t, joints, e, P, notes)
     if d is not None:
         bs = next((sp["beat_s"] for sp in plan.get("spans") or [] if abs(sp["t1"] - d) < 1e-3), plan["beat_s"])
         hole = float(np.clip(bs, P["hole_min_s"], P["hole_max_s"]))
@@ -1006,8 +1059,11 @@ def marks_from_l1(l1, index=None, turn_s=None, prog_end_f=None, payoff_s=None):
     after = [t for t in ev if last is not None and last - 0.1 <= t <= end_f / fps - 0.7]
     cuts = sorted({round(it["f"][0] / fps, 4) for it in l1.get("items") or [] if it.get("k") == "shot" and 0 < it["f"][0] < end_f})
     placed = sorted({round(float(p["t"]), 3) for p in (l1.get("sound_design") or {}).get("placed") or [] if p.get("t") is not None and 0 < float(p["t"]) < end_f / fps})
-    return {"dur_s": end_f / fps, "words": words, "cuts": cuts, "landings": [round(t, 4) for t in ev if 0 < t < end_f / fps], "accents": placed,
-            "turn_s": turn_s, "payoff_s": payoff_s, "end_hit_s": min(after) if after else None, "quiet": []}
+    out = {"dur_s": end_f / fps, "words": words, "cuts": cuts, "landings": [round(t, 4) for t in ev if 0 < t < end_f / fps], "accents": placed,
+           "turn_s": turn_s, "payoff_s": payoff_s, "end_hit_s": min(after) if after else None, "quiet": []}
+    if own.get("joints"):                 # a narrated story's section joints (valmera-stories): the bed breathes at them (flow)
+        out["joints"] = [dict(j) for j in own["joints"] if isinstance(j, dict)]
+    return out
 
 
 def to_ar(x):

@@ -39,9 +39,9 @@ is not licensed, by the owner's decision of 13 Nov). Nothing is published; nothi
 | Stage | What happens |
 |---|---|
 | ideas | The writer model (OpenAI, with web search) finds six true stories about the words given, or of its own choosing, each told through one decisive moment, with the people, places and events a camera filmed; each idea's free photographs are probed; the best idea with pictures wins, in the style that fits it among those not used in the last three films. |
-| script | Written in the chosen style with every fact quoted from its page; each quote is fetched here and must be found on its page, every number on screen must stand in a verified quote (`writer.verify`). Then written for the ear (`ear.py`: sentences of 9-14 words, hinges, verdicts, the name landed alone, the stress word late, joins of 0.18-0.26 s, hard words in their spoken form), audited by a second blind call, verified again. |
-| supply | The narrator (`voice.py`, below); real footage per line (`worker/footage`: YouTube and archive.org, every frame checked by a vision model, a person held to one face, 1-3 s clips, asked for 1.7 times the clips a line); six free photographs a named thing (Commons, Openverse, checked); a person speaking on camera is measured on the clip's own frames (`reel.talking`: the lip gap changing frame to frame) and never plays full frame under the narrator; up to two real voices cut in where the person said it, levelled to the narrator's loudness within 1 LU. |
-| score | The story reel (`reel.py`), then the taste check (`film.taste_check`). |
+| script | Written in the chosen style with every fact quoted from its page; each quote is fetched here and must be found on its page, every number on screen must stand in a verified quote (`writer.verify`). Then written for the ear (`ear.py`: sentences of 9-14 words, hinges, verdicts, the name landed alone, the stress word late, joins of 0.18-0.26 s, hard words in their spoken form), audited by a second blind call, verified again. Then the picture brief on the final words (`writer.annotate`, one OpenAI call, the words never changed): per line what a picture must show (`see`: the thing, the story time and version, the moment), the writer's devices (`finish`, `colour_turn`), each display item anchored to its spoken word (`word_i`) and the caption phrases. A re-made film gets the same pass on its own words, so its narration is reused. |
+| supply | The narrator (`voice.py`, below); real footage per line (`worker/footage`: YouTube and archive.org, every frame checked by a vision model, a person held to one face, a clip every 0.45 s of a line, windows of 1.0-1.6 s, five sources a subject, the brief's moments searched for themselves); eight free photographs a named thing (Commons, Openverse, checked); every clip's content motion and inner cuts measured (`reel.clip_motion`: optical flow, the camera move removed), clips of one take grouped (`reel.take_groups`); every picture judged against the lines it may carry (`fit.py`: the exact thing, at the line's time and version, nothing contradicting the words; gpt-6.1-sol vision, cached in `supply/fit.json`), and a line with fewer fitting pictures than it wants (one every 0.5 s) gets one top-up footage call; a person speaking on camera is measured on the clip's own frames (`reel.talking`: the lip gap changing frame to frame) and never plays full frame under the narrator; up to two real voices cut in where the person said it, levelled to the narrator's loudness within 1 LU. |
+| score | The story reel (`reel.py`), then the taste check (`film.taste_check`), then the story gates (`wf3.stories_gates`): every planned shot judged against the words under it (`fit.audit`), a failing shot dropped on that line and the plan built again (three rounds at most); black and white on 4-35% of shots or the devices halved once; repeats by distinct take at most 5%. |
 | render | Valmera's engine (`worker/scene`) through `heavy.sh`, then the brand finish (watermark, end card), the film's music (`worker/music_film.py`: a track from the licensed library chosen the way the references choose it, its build on the turn and its drop on the payoff) on `film.mp4` and none on `film_clean.mp4`. |
 | deliver | Once, complete, then the work folder is deleted (the shell checks it is empty). |
 
@@ -49,15 +49,23 @@ is not licensed, by the owner's decision of 13 Nov). Nothing is published; nothi
 
 The owner rated the first three story films 4-5 of 10 (`week-1112/lanes/RATINGS/2026-11-13-O.json`, `-PROOF.json`).
 
-- **Pictures:** a new one about every 0.6 s (the judge: 16 cuts a 10 s, median shot 0.49 s), on the voice's stress, each
-  thing's pictures from the clause that names it: its line's footage, then its photographs, then its footage found for
-  other lines, then a clip cut inside itself on unplayed seconds. A photograph is shown once (a second time only after
-  12 s, on another part of it, never a third); a clip's seconds are never played twice. Every frame has a real picture.
+- **Pictures:** only a picture whose verdict passes for its line (`fit.py`), never one recycled across lines. Per line: its
+  own fitting clips (the most moving first, played on their most moving part), then fitting clips found for other lines
+  and not yet played, then fitting photographs (at most 10% of shots on lines with footage), then a designed type card
+  from the line's own display item, then the current take held on a camera reframe (at most 1.2 s, logged as the line's
+  shortfall). Shot lengths are drawn from the judge's distribution (median 0.5 s), by the segment's pace and beat; a
+  line that lists three things bursts (4-8 pictures of 2-5 frames). A picture is new only by distinct take.
 - **Collages:** lines that name several things (the writer marks them; then the longest lines naming two or more) land as
-  tilted prints stacking three to five deep, up to the style's share of the film (28% of the judge's shots are 3+ layers).
-- **Flash frames:** white into the turn and the payoff, negative into the low point and into a black-and-white section.
-- **Finishes by section:** each segment carries the year it speaks from (`era`, the writer's): before 1980 black and white
-  in a film gate, 1980-2005 television scanlines, today in colour; the low point is always black and white.
+  tilted prints at their own aspect (0.78-0.86 of the width) that keep moving, stacking three to five deep.
+- **Flash frames:** white frames of 1-2 frames at full strength (also inside bursts), negatives on about one cut in twenty
+  on the voice's strongest stresses; the caption pool leaves the white frames whole.
+- **Finishes:** colour under the film's look. Black and white, a film gate or scanlines only on the segments the writer
+  marks (`finish`, ranked), held to 12-25% of the voice, never the payoff, the close or anything after `colour_turn`,
+  whose first shot comes up from black and white to colour over seven frames.
+- **Type:** display items land on their anchored word (`word_i`); a person's name large at their first mention; the
+  payoff's figure held 1.7 s; an item not placed is recorded (`beats.display_dropped`); captions by the writer's phrases.
+- **Checks on the film** (stories only): `checks.stories.picture_fit` (each rendered shot against its words; the film is
+  not ok while any second fails), `colour` (black-and-white share, colourfulness, the turn's step), `voices`.
 - **The engines:** the judge's pace and camera moves (`scene.pace`), one look solved on the film's pictures (`scene.looks`),
   a soft first frame on one new picture in three, captions inked word by word at one seat, the writer's display strings
   landing large on the words that say them, the references' sound design (`score.sound`, SND3).

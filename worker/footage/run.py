@@ -9,6 +9,7 @@ script.json: {"title", "segments": [{"say", "pictures", "dur"?}], "named": [{"na
 import argparse
 import concurrent.futures as cf
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -108,12 +109,26 @@ def _twin(a, b, n=28):
     return len(ka) >= 16 and len(kb) >= 16 and ka[:n] == kb[:n]
 
 
+def line_shots(dur, shot_s=None, line_max=None):
+    """(clips a line asks for, each one's window in seconds). Without shot_s: the engine's own pace, a clip about every
+    SHOT_S (at most four a line), each dur / n long. With shot_s (a caller that cuts faster): ceil(dur / shot_s) + 2,
+    at most line_max (10), each window clamp(2 * shot_s, cut.MIN_S, 1.6) s, so a clip holds its most moving part."""
+    if shot_s:
+        n = max(1, min(int(line_max or 10), math.ceil(dur / float(shot_s)) + 2))
+        return n, min(max(2 * float(shot_s), cut.MIN_S), 1.6)
+    n = max(1, min(4, round(dur / SHOT_S)))
+    return n, dur / n
+
+
 def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MAX_SOURCES, keep_work=False, anchors=None, avoid=None,
-         hear_s=None, read_s=None, per=None, want_voices=None, preserve_source=False, downloaded_only=False):
+         hear_s=None, read_s=None, per=None, want_voices=None, preserve_source=False, downloaded_only=False, shot_s=None, line_max=None):
     """downloaded_only: cut the scanned rendition without reopening remote streams.
     avoid: [{"url", "time_range"}] already cut for this film by an earlier run: those seconds of a source are not cut again.
     hear_s, read_s, per: a caller with a deadline (a first film, score.film) hears less or nothing of each source, reads
-    less of it and opens fewer sources a subject; None keeps the engine's own (HEAR_MAX_S, fetch.PROXY_MAX_S, PER_SUBJECT)."""
+    less of it and opens fewer sources a subject; None keeps the engine's own (HEAR_MAX_S, fetch.PROXY_MAX_S, PER_SUBJECT).
+    shot_s, line_max: a caller that cuts faster than SHOT_S (a story reel: a picture every 0.45 s) asks for
+    min(line_max, ceil(dur / shot_s) + 2) clips a line, each window clamp(2 * shot_s, cut.MIN_S, 1.6) s; None keeps
+    min(4, round(dur / SHOT_S)) clips of dur / n s."""
     per = int(per) if per else PER_SUBJECT
     t_all = time.monotonic()
     os.makedirs(os.path.join(out_dir, "clips"), exist_ok=True)
@@ -260,7 +275,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 taken.setdefault(k, []).append((float(av["time_range"][0]), float(av["time_range"][1])))
         for ln in lines:
             dur = _line_dur(ln)
-            n = max(1, min(4, round(dur / SHOT_S)))
+            n, win_s = line_shots(dur, shot_s, line_max)
             names = set((shows.get(ln["i"]) or {}).get("subjects") or []) | set(ln.get("pictures") or [])
             chosen = []
             for _ in range(n):
@@ -270,7 +285,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                     shot = shots.shot_at(s["shots"], c["t"])
                     if shot[1] - shot[0] < 0.6:
                         continue
-                    w = cut.window(shot, c["t"], dur / n)
+                    w = cut.window(shot, c["t"], win_s)
                     if any(w[0] < b + 0.3 and a < w[1] + 0.3 for a, b in taken.get(c["source"], [])):
                         continue
                     if ln["i"] in c["lines"]:
@@ -427,8 +442,14 @@ def lines_of(script):
     sc = script
     while "segments" not in sc and isinstance(sc.get("script"), dict):     # a film.json, a script.json or the writer's own
         sc = sc["script"]
-    return [dict(i=int(s.get("i", k)), say=s.get("say"), pictures=s.get("pictures") or [], dur=s.get("dur"), pause_after=s.get("pause_after"))
-            for k, s in enumerate(sc.get("segments") or [])], sc.get("named") or [], sc.get("title") or ""
+    out = []
+    for k, s in enumerate(sc.get("segments") or []):
+        ln = dict(i=int(s.get("i", k)), say=s.get("say"), pictures=s.get("pictures") or [], dur=s.get("dur"), pause_after=s.get("pause_after"))
+        for key in ("see", "era", "beat"):            # the writer's picture brief, when the script carries one
+            if s.get(key) is not None:
+                ln[key] = s[key]
+        out.append(ln)
+    return out, sc.get("named") or [], sc.get("title") or ""
 
 
 def main():
@@ -441,18 +462,26 @@ def main():
     ap.add_argument("--timing", help="json: [seconds per line] from the narration")
     ap.add_argument("--anchors", help="json: {person's name: [photo paths checked as that person]}")
     ap.add_argument("--avoid", nargs="*", default=[], help="footage.json records of earlier runs for this film: their clips are not cut again")
+    ap.add_argument("--shot-s", type=float, default=None, help="the caller's shot length: more, shorter clips a line (find's shot_s)")
+    ap.add_argument("--line-max", type=int, default=None, help="at most this many clips a line with --shot-s")
+    ap.add_argument("--per", type=int, default=None, help="sources opened a subject (find's per)")
+    ap.add_argument("--lines", default=None, help="comma-separated line numbers: only these lines are searched (a top-up)")
     a = ap.parse_args()
     lines, named, title = lines_of(json.load(open(a.script)))
     if a.timing:
         t = json.load(open(a.timing))
         for ln, d in zip(lines, t.get("durs") if isinstance(t, dict) else t):
             ln["dur"] = d
+    if a.lines:                       # a top-up: only these lines, each keeping its own number
+        keep = {int(x) for x in str(a.lines).split(",") if x.strip().isdigit()}
+        lines = [ln for ln in lines if int(ln["i"]) in keep]
     from . import seam
     anchors = json.load(open(a.anchors)) if a.anchors else None
     avoid = [dict(url=c["source"]["url"], time_range=c["time_range"]) for p in a.avoid for ln in json.load(open(p)).get("lines") or []
              for c in ln.get("clips") or []]
     res = seam.for_lines(lines, named, title, a.out, a.w, a.h, scope="workflow", log=lambda m: print("[footage] " + m, flush=True),
-                         anchors=anchors, avoid=avoid, preserve_source=a.preserve_source)
+                         anchors=anchors, avoid=avoid, preserve_source=a.preserve_source,
+                         **{k: v for k, v in dict(shot_s=a.shot_s, line_max=a.line_max, per=a.per).items() if v})
     if res is None:
         print(json.dumps(dict(off="VALMERA_FOOTAGE=0")))
         return
