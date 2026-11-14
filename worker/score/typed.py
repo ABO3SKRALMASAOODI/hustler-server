@@ -191,12 +191,27 @@ def footage_config(worker_db):
 def _trace(view, work, rec, job):
     """Keep the supply decision after temporary media is deleted; no URLs."""
     trace = {"job": job.get("id"), "footage_config": view.director_footage_cfg,
-             "stages": rec.get("stages"), "version": view.director_version}
+             "stages": rec.get("stages"), "version": view.director_version,
+             "at": rec.get("at"), "failure": rec.get("failure"),
+             "meter": rec.get("meter"), "lower": rec.get("lower")}
+    _record_supply(work, rec)
     trace["supply"] = rec.get("supply_trace")
     box = view.director_footage or {}
     trace["footage"] = {k: box.get(k) for k in
         ("subjects", "error", "seconds", "report", "word_check")}
     print("[typed-craft] " + json.dumps(trace, ensure_ascii=False, default=str), flush=True)
+
+
+def _record_supply(work, rec):
+    try:
+        with open(os.path.join(work, "film", "bin.json")) as f:
+            bin_ = json.load(f)
+        rec["supply_trace"] = {"usage": bin_.get("usage"), "wishes": [
+            {k: r[k] for k in ("wish", "want", "own", "mine", "hits", "bin",
+                "named", "named_found", "named_checked", "check", "dropped", "footage") if k in r}
+            for r in bin_.get("wishes") or []]}
+    except (OSError, ValueError):
+        pass
 
 
 def run(ctx, worker_db, job, session_id, cfg):
@@ -262,15 +277,7 @@ def run(ctx, worker_db, job, session_id, cfg):
                 "constraints override those defaults. This is execution context, not a new ask.")
         _steps, applied, _picked = film._make(view, worker_db, job, dcfg,
             time.monotonic() + cfg.get("film_s", 220.0), os.path.join(work, "film"), rec)
-        try:
-            with open(os.path.join(work, "film", "bin.json")) as f:
-                bin_ = json.load(f)
-            rec["supply_trace"] = {"usage": bin_.get("usage"), "wishes": [
-                {k: r[k] for k in ("wish", "want", "own", "mine", "hits", "bin",
-                    "named", "named_found", "named_checked", "check", "dropped", "footage") if k in r}
-                for r in bin_.get("wishes") or []]}
-        except (OSError, ValueError):
-            pass
+        _record_supply(work, rec)
         upgraded = _finish_footage(view, worker_db, job)
         if upgraded:
             applied = upgraded["applied"]
@@ -279,6 +286,9 @@ def run(ctx, worker_db, job, session_id, cfg):
                 "source_window": [a, b], "remaining_clips": (selections or [])[1:],
                 "selection_usage": selection_usage, "stages": rec["stages"],
                 "s": round(time.monotonic() - started, 1)}
+    except Exception as exc:
+        rec["failure"] = f"{type(exc).__name__}: {str(exc)[:500]}"
+        raise
     finally:
         if view is not None:
             _trace(view, work, rec, job)
