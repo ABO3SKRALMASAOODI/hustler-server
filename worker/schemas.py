@@ -3533,7 +3533,13 @@ def validate_edl(data, duration=None, *, render_fragment=False):
         # music — not by the source duration, which a heavily-cut edit is far
         # shorter than. An sfx past the end renders to nothing while the EDL
         # goes on claiming it exists.
-        if s.at > max(0.0, prog_dur - 0.05):
+        # A proof/stitch fragment is a window into an already valid film.
+        # Its right edge can fall one frame after a real sound's onset. Keep
+        # that audible tail at its exact time; the authored-film margin must
+        # not reject the excerpt (SPEED2 R-FIRST p5584: 1.30 in 1.34 s).
+        # An event at/past the fragment's actual end still renders nothing.
+        sfx_end_margin = 0.001 if render_fragment else 0.05
+        if s.at > max(0.0, prog_dur - sfx_end_margin):
             raise EDLValidationError(
                 f"sfx[{i}].at {s.at} is past the end of the program "
                 f"({round(prog_dur, 2)}s).")

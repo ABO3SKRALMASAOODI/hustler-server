@@ -157,3 +157,21 @@ def test_first_board_and_remaining_pages_have_the_same_sampling(monkeypatch, tmp
     first = brief.boards_for(str(tmp_path), {}, per, pages=(1,))
     rest = brief.boards_for(str(tmp_path), {}, per, pages=(2, 3, 4))
     assert full == first == rest and seen == original
+
+
+def test_proof_keeps_sound_in_last_frame_without_weakening_authored_edl():
+    from schemas import validate_edl, EDLValidationError
+    import stitch
+    from timeline import Timeline
+    original = validate_edl({'keep': [[0, 10]], 'captions': None,
+                            'sfx': [{'id': 'hit', 'storage_key': 'sfx:whoosh',
+                                     'at': 2.3}]}, 10).model_dump()
+    fragment = stitch.window_edl(original, Timeline(original['keep']),
+                                 1, 2.34, keep_audio=True, fps=30)
+    checked = validate_edl(fragment, 10, render_fragment=True)
+    assert checked.sfx[0].at == 1.3
+    with pytest.raises(EDLValidationError, match='past the end'):
+        validate_edl(fragment, 10)
+    fragment['sfx'][0]['at'] = 1.34
+    with pytest.raises(EDLValidationError, match='past the end'):
+        validate_edl(fragment, 10, render_fragment=True)
