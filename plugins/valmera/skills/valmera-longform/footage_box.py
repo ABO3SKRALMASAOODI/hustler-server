@@ -10,15 +10,32 @@ import os
 import shlex
 import subprocess
 import tarfile
+import tempfile
 import uuid
 
 HOST = 'root@13.140.241.231'
 KEY = str(Path.home() / '.ssh/valmera_box_ed25519')
+OFFLINE = r'''
+for key in ('ANTHROPIC_API_KEY','CLAUDE_API_KEY'):os.environ.pop(key,None)
+os.environ.update(NAMED_PICTURE_MODEL='gpt-6-sol',NAMED_CHECK_MODEL='gpt-6-sol',FOOTAGE_MODEL='gpt-6-sol',WRITER_PROVIDER='openai')
+if os.environ.get('DATABASE_URL'):raise RuntimeError('private footage jobs must have no database credentials')
+# Keep the engine's provider/budget fences. Its charge sink for this standalone
+# job is a local cost ledger; no production connection is created or written.
+import llm,threading,pathlib,time
+cost_lock=threading.Lock()
+pathlib.Path(sys.argv[2]).mkdir(parents=True,exist_ok=True)
+def local_charge(purpose,request,response,usage):
+    usd=llm._call_cost_usd(purpose,request,response,usage)
+    with cost_lock,open(pathlib.Path(sys.argv[2])/'model-costs.jsonl','a') as f:
+        f.write(json.dumps(dict(at=time.time(),purpose=purpose,model=(request or {}).get('model'),usd=usd))+'\n')
+llm._charge=local_charge
+'''
 REMOTE = r'''import json, os, sys, pathlib, threading, hashlib
 sys.path.insert(0, '/app')
 os.environ['OPENAI_API_KEY'] = sys.stdin.readline().strip()
 os.environ['VALMERA_FOOTAGE'] = '1'
 os.environ['SKIP_DB_INIT'] = '1'
+__OFFLINE__
 scratch=pathlib.Path(sys.argv[1]).parent
 os.environ['YUNET_MODEL']=str(scratch/'models/face_detection_yunet_2023mar.onnx')
 os.environ['FOOTAGE_SFACE']=str(scratch/'models/face_recognition_sface_2021dec.onnx')
@@ -26,6 +43,10 @@ from footage import run, cut, plan, fetch, identity
 if not identity.models():raise RuntimeError('identity models required for real speaker inserts')
 cut.MAX_S = 7.8
 run.SHOT_S = 4.5
+# Long-form rescue/mechanism scenes often occur after the short-form scanner's
+# first fifteen minutes. Read the complete ranked documentary (at most an hour).
+fetch.PROXY_MAX_S=3600
+run.HEAR_MAX_S=1800
 # yt-dlp's native whole downloader works on the established box route where
 # ffmpeg's remote section seek is refused. Cut those same source seconds locally.
 fetch.WHOLE_H=1080
@@ -42,6 +63,31 @@ cut.grab=grab
 plan.PLAN_SYSTEM += '\nThis run is a 16:9 long documentary. Average picture length is 4.5 seconds. Match every line exactly; exclude still montages.'
 find = run.find
 j=json.load(open(sys.argv[1]))
+if j.get('_voices'):
+    from footage import search,voice
+    from concurrent.futures import ThreadPoolExecutor
+    subjects=j['people'];flat=[(si,q) for si,s in enumerate(subjects) for q in s['searches']]
+    found=search.run([q for si,q in flat]);hits={}
+    for k,(si,q) in enumerate(flat):
+        have={h['id'] for h in hits.get(si,[])}
+        hits.setdefault(si,[]).extend(h for h in found.get(k,[]) if h['id'] not in have)
+    ranked,usd=plan.rank(subjects,hits,per=3);sources=[];by={}
+    for si,h,why in ranked:
+        if h['id'] in by:by[h['id']]['subjects'].append(si);continue
+        s=dict(h,key='w'+str(len(sources)),subjects=[si],why=why);sources.append(s);by[h['id']]=s
+    work=str(scratch/'witness-work');pathlib.Path(work).mkdir(exist_ok=True)
+    anchors={}
+    for sub in subjects:
+        anchors[sub['name']],cost=run.person_anchors(sub,work);usd+=cost
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        sources=list(pool.map(lambda s:run._open(s,work,print,hear_s=3600,read_s=3600),sources))
+    live=[s for s in sources if not s.get('error')]
+    voices,cost=voice.find_voices(j['lines'],subjects,live,anchors,sys.argv[2],1920,1080,most=4)
+    usd+=cost+sum(s.get('hear_usd',0) for s in live)
+    result=dict(lines=[],voices=voices,credits=[dict(v['source'],time_range=v['time_range'],voice=v['person']) for v in voices],spend=dict(usd=usd),
+        sources=[{k:v for k,v in s.items() if k not in ('proxy','shots','transcript')} for s in sources])
+    (pathlib.Path(sys.argv[2])/'footage.json').write_text(json.dumps(result,indent=1))
+    sys.exit(0)
 find(j['lines'],j['named'],j['about'],sys.argv[2],1920,1080,
      max_sources=10, per=2, avoid=j.get('avoid'), log=lambda s:print(s,flush=True))
 '''
@@ -51,12 +97,13 @@ def ssh(command, **kw):
     return subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', '-i', KEY, HOST, command], check=True, **kw)
 
 
-PROBE = r'''import json, os, sys
+PROBE = r'''import json, os, sys, pathlib
 sys.path.insert(0,'/app')
 os.environ['OPENAI_API_KEY']=sys.stdin.readline().strip()
 os.environ['SKIP_DB_INIT']='1'
+__OFFLINE__
 from footage import plan,search
-j=json.loads(sys.stdin.read())
+j=json.load(open(sys.argv[1]))['idea']
 lines=[dict(i=0,say=j['story'],pictures=[n['name'] for n in j['named']])]
 pl,usd=plan.plan(lines,j['named'],j['title']+'; long documentary, rich original archive footage required')
 subjects=pl['subjects'];flat=[(si,q) for si,s in enumerate(subjects) for q in s['searches']]
@@ -69,9 +116,13 @@ for si,s in enumerate(subjects):
     chosen=[dict(h,why=why) for ix,h,why in kept if ix==si]
     rows.append(dict(name=s['name'],found=len(chosen),sources=chosen))
 covered=sum(r['found']>0 for r in rows)
-print(json.dumps(dict(subjects=rows,covered=covered,clips=sum(r['found'] for r in rows),
-    ok=bool(rows) and covered/len(rows)>=.6,usd=usd+cost,method='worker/footage planned and ranked real-video search results; fetched and visually verified during supply')))
+result=dict(subjects=rows,covered=covered,clips=sum(r['found'] for r in rows),
+    ok=bool(rows) and covered/len(rows)>=.6,usd=usd+cost,method='worker/footage planned and ranked real-video search results; fetched and visually verified during supply')
+(pathlib.Path(sys.argv[2])/'probe.json').write_text(json.dumps(result,indent=1))
 '''
+
+REMOTE=REMOTE.replace('__OFFLINE__',OFFLINE)
+PROBE=PROBE.replace('__OFFLINE__',OFFLINE)
 
 
 RUNNER = r'''import json,os,sys,subprocess,pathlib
@@ -106,17 +157,15 @@ def cleanup_cache(out_root):
 
 def probe(idea):
     """Footage search evidence before choosing a story, on the working box network."""
-    names=ssh("docker ps --format '{{.Names}}'",capture_output=True,text=True).stdout.splitlines()
-    slot=next((n for n in names if n.startswith('vbox-batch')),None)
-    if not slot:raise RuntimeError('no box batch image available for footage discovery')
-    command=f'docker exec -i {shlex.quote(slot)} python -c {shlex.quote(PROBE)}'
-    r=ssh(command,input=os.environ['OPENAI_API_KEY']+'\n'+json.dumps(idea),text=True,capture_output=True,timeout=1200)
-    return json.loads(r.stdout.splitlines()[-1])
+    with tempfile.TemporaryDirectory(prefix='wf4-idea-') as td:
+        try:return fetch(dict(_probe=True,idea=idea),Path(td)/'scan')
+        finally:cleanup_cache(td)
 
 
 def fetch(payload, out, log=print):
     out = Path(out)
-    rec = out / 'footage.json'
+    probing=bool(payload.get('_probe'))
+    rec = out / ('probe.json' if probing else 'footage.json')
     if rec.exists():
         return json.loads(rec.read_text())
     out.mkdir(parents=True, exist_ok=True)
@@ -128,10 +177,10 @@ def fetch(payload, out, log=print):
     q = shlex.quote
     package = io.BytesIO()
     with tarfile.open(fileobj=package, mode='w') as tf:
-        for name, data in [('input.json', json.dumps(payload).encode()), ('fetch.py', REMOTE.encode()),('runner.py',RUNNER.encode())]:
+        for name, data in [('input.json', json.dumps(payload).encode()), ('fetch.py', (PROBE if probing else REMOTE).encode()),('runner.py',RUNNER.encode())]:
             t = tarfile.TarInfo(name); t.size = len(data); tf.addfile(t, io.BytesIO(data))
         models=Path('/Users/masaoodi/Documents/Valmera/.valmera/models')
-        for name in ('face_detection_yunet_2023mar.onnx','face_recognition_sface_2021dec.onnx'):
+        for name in (() if probing else ('face_detection_yunet_2023mar.onnx','face_recognition_sface_2021dec.onnx')):
             if not (models/name).is_file():raise RuntimeError('missing identity model: '+str(models/name))
             tf.add(models/name,arcname='models/'+name,recursive=False)
     ssh(f'mkdir -p {q(scratch)}', capture_output=True)
@@ -148,7 +197,7 @@ def fetch(payload, out, log=print):
             tf.extractall(out, filter='data')
         archive.unlink()
         result = json.loads(rec.read_text())
-        log(f"box footage: {result['counts']}")
+        log(f"box footage: {result.get('counts',dict(covered=result.get('covered'),clips=result.get('clips')))}")
         return result
     finally:
         # Only this invocation's private container and directory are touched.

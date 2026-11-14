@@ -69,3 +69,18 @@ def test_final_measure_detects_cross_file_source_reuse():
     assert C.duplicate_ranges(shots)==[[0,1]]
     shots[1]['src']=[2,4]
     assert C.duplicate_ranges(shots)==[]
+
+
+def test_research_keeps_new_testimony_without_repeating_a_source(tmp_path):
+    ft=dict(lines=[],voices=[],spend=[],credits=[])
+    v=dict(after=3,person='Witness',file='v.mp4',wav='v.wav',source={'url':'one'},time_range=[10,15])
+    C.add_footage(ft,dict(lines=[],voices=[v,v],credits=[]),tmp_path)
+    assert len(ft['voices'])==1
+    assert ft['voices'][0]['file']==str(tmp_path/'v.mp4')
+
+
+def test_short_tail_is_shared_between_adjacent_pictures():
+    sc={'segments':[{'say':'Words.','chapter':'c'}]}
+    words={'duration':8,'words':[{'w':'Words.','start':0.1,'end':1,'seg':0}]}
+    shots,_,_=C.schedule(sc,words,{'lines':[{'i':0,'clips':[clip('a',0,7.8),clip('b',10,15)]}]})
+    assert min(r['f'][1]-r['f'][0] for r in shots)>=44

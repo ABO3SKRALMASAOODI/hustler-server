@@ -60,7 +60,9 @@ def main():
         if key:
             os.environ["OPENAI_API_KEY"] = key
     os.environ["WRITER_PROVIDER"] = "openai"
-    os.environ.setdefault("NAMED_PICTURE_MODEL", "gpt-6-sol")
+    os.environ["NAMED_PICTURE_MODEL"]="gpt-6-sol"
+    os.environ["NAMED_CHECK_MODEL"]="gpt-6-sol"
+    os.environ["FOOTAGE_MODEL"]="gpt-6-sol"
     os.environ.setdefault("VALMERA_WORKER", __import__("brand").worker_dir())
     sys.argv = [sys.argv[0]] + argv
     shell.load_workflow = load

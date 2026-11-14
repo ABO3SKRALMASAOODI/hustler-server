@@ -177,7 +177,11 @@ def main():
         for line in Path('/Users/masaoodi/Documents/Valmera/hustler-server/backend/.env').read_text().splitlines():
             if line.startswith('OPENAI_API_KEY='): os.environ['OPENAI_API_KEY']=line.split('=',1)[1].strip().strip('"').strip("'")
     if a.cmd=='level-voices': return shared.level_voices(a)
-    if a.cmd=='render' and not (Path(a.out)/'narration_performance.wav').exists(): shared.render(a)
+    if a.cmd=='render' and not (Path(a.out)/'narration_performance.wav').exists():
+        os.environ['NARRATE_ENGINE']='phonon'
+        shared.render(a)
+        rendered=json.loads((Path(a.out)/'render.json').read_text())
+        if rendered.get('engine')!='lines:phonon':raise RuntimeError('WF4 requires Easton; a different-engine fallback cannot be delivered')
     print(json.dumps(finish(a.out,json.loads(Path(a.script).read_text()))))
 
 
