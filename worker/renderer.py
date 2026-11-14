@@ -9605,6 +9605,9 @@ def cache_rules_current(cached, edl, variant, *, src_shape=(None, None),
     edl = edl or {}
     cached = cached or {}
     meta = cached.get("meta") or {}
+    if variant == "preview" and (not isinstance(meta.get("picture_qc"), dict) or
+                                 not isinstance(meta.get("audio_qc"), dict)):
+        return False
     _index = index_of or (lambda: {})
     caps = edl.get("captions")
     stored_fp = meta.get("caption_fp")
@@ -9864,6 +9867,11 @@ def _run_render_job(worker_db, job):
         raise _source_not_ready(worker_db, project_id, original,
                                 "No indexed original video for this project")
     src_sha = original["sha256"] if original else "canvas"
+    screen_clearance = job["payload"].get("first_film_source_screen")
+    if screen_clearance and not is_canvas:
+        import source_screen
+        source_screen.check_render(edl_row["json"], screen_clearance,
+                                   original["storage_key"], src_sha)
     # The source's display shape: an unset master on a 'source' frame is
     # mastered when the footage itself is portrait or square.
     src_shape = ((original or {}).get("width"), (original or {}).get("height"))
@@ -10597,16 +10605,11 @@ def _run_render_job(worker_db, job):
             for block in iter(lambda: rendered_file.read(1024 * 1024), b""):
                 digest.update(block)
         render_sha = digest.hexdigest()
-        # The checks below read the finished file and take as long as the
-        # encode. A preview goes on screen first: the Studio plays the row the
-        # moment it exists, and the checks' result updates it. Nothing about
-        # them changes: this job still waits for them and returns their
-        # findings, which is what the editor and First cut repair from. A final
-        # keeps its row behind them: its checks can hold the export.
+        # Publish the immutable film and its deterministic checks together.
+        # A customer-visible row must never depend on a later best-effort write.
         picture_qc_res = None
         audio_qc_res = None
         listen_keys = []
-        picture_first = variant == "preview" and not proof_only
 
         def check_fields():
             return {"listen_keys": [item["key"] for item in listen_keys],
@@ -10713,13 +10716,17 @@ def _run_render_job(worker_db, job):
                             pass
                         listen_keys = []
 
-        if not picture_first:
-            run_checks()
-            _mark("qc_s")
-            if not _still_ours(98):
-                storage.delete_keys(uploaded_keys)
-                raise dbx.JobLeaseLost(
-                    "job was cancelled or handed to another worker")
+        run_checks()
+        if variant == "preview" and not proof_only and (
+                not isinstance(picture_qc_res, dict) or
+                not isinstance(audio_qc_res, dict)):
+            storage.delete_keys(uploaded_keys)
+            raise RuntimeError("Preview QC did not finish; publication will retry")
+        _mark("qc_s")
+        if not _still_ours(98):
+            storage.delete_keys(uploaded_keys)
+            raise dbx.JobLeaseLost(
+                "job was cancelled or handed to another worker")
         asset_id = worker_db.run(
             dbx.insert_asset, project_id, "render", render_key,
             sha256=render_sha,
@@ -10748,7 +10755,7 @@ def _run_render_job(worker_db, job):
                   "screening_pages": screening_pages,
                   "screening_frame_count": len(screening_frames),
                   "audio_model_review": audio_model_review,
-                  **({} if picture_first else check_fields()),
+                  **check_fields(),
                   "src_sha256": src_sha,
                   **({"engine": "scene"} if engine_drawn else {}),
                   **({"stitched_from": stitched_from}
@@ -10838,19 +10845,6 @@ def _run_render_job(worker_db, job):
             _start_scene_shadow(scene_prep, worker_db, job_id, edl_row,
                                 src_local, variant, want_wm, wm_settings)
         _mark("register_s")
-        if picture_first:
-            run_checks()
-            try:
-                worker_db.run(dbx.update_asset_meta, asset_id, check_fields())
-            except Exception as exc:  # noqa: BLE001 — the job's result has them
-                print(f"[render {job_id}] checks not stored on asset "
-                      f"{asset_id}: {str(exc)[:160]}", flush=True)
-            _mark("qc_s")
-            # The row stands either way: a good render of an immutable version,
-            # perhaps already on screen, that a retry serves from cache.
-            if not _still_ours(98):
-                raise dbx.JobLeaseLost(
-                    "job was cancelled or handed to another worker")
         # Completed renders, including proof reels, remain recoverable history.
         # Never delete an asset referenced by an issued receipt.
         # Deterministic mid-word audit: keep boundaries that clip a word,
