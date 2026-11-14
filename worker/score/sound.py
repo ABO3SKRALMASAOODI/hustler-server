@@ -222,7 +222,8 @@ CLASS_MIX = _class_mix()
 # Alternates keep the one-recording rules without changing the gesture's kind.
 ALT = {"whoosh_soft_2": "whoosh_soft_1", "whoosh_soft_1": "whoosh_soft_2", "shutter_1": "shutter_2",
        "shutter_2": "shutter_1", "riser_3": "riser_1", "riser_1": "riser_2", "riser_2": "riser_4",
-       "swish_1": "whoosh_soft_2", "pop_1": "click_2", "click_2": "click_1", "glitch_1": "glitch_2"}
+       "swish_1": "whoosh_soft_2", "pop_1": "click_2", "click_2": "click_1", "glitch_1": "glitch_2",
+       "impact_1": "impact_8"}
 KIND_RANK = {"picture": 0, "burst": 0.5, "card": 1, "page": 1.5, "display": 2, "counter": 2.5, "move": 2.7, "flash": 3, "cut": 4}
 MOVE_FAST, MOVE_STILL = 0.012, 0.004        # a camera move's start: 1.2% of the frame in one frame, after three under 0.4%
 DESIGNED = ("picture", "card", "page", "display", "counter", "flash")
@@ -269,6 +270,21 @@ def library():
             rows = []
         _lib["t"] = {r["id"]: r for r in rows if r.get("id") and r.get("file")}
     return _lib["t"]
+
+
+_bad = {}
+
+
+def excluded():
+    """The recordings no film sounds: score/sfx_quality.json's `excluded` (lane STING-REF's library audit, 15 Nov 2026,
+    signals only: a long rumbling or debris tail, clipped tops, an audible encoder wall, a sound a phone cannot play,
+    a class the references never use). Every pick skips them; the Director's own lines are left as written."""
+    if "t" not in _bad:
+        try:
+            _bad["t"] = frozenset(json.load(open(os.path.join(HERE, "sfx_quality.json"))).get("excluded") or ())
+        except (OSError, ValueError, AttributeError):
+            _bad["t"] = frozenset()
+    return _bad["t"]
 
 
 def role_of(sid):
@@ -917,6 +933,7 @@ def plan_sounds(events, ctx):
         desc = measured(choice.describe_library(lib, SOUNDS, pcm))
     except Exception:  # noqa: BLE001 - without the ruler the fixed table still answers
         desc = {}
+    desc = {k: d for k, d in desc.items() if k not in excluded()}     # every ruler pick draws from these
     used = {s.get("s") for s in existing if s.get("s") in lib}         # one recording answers one gesture in a film
     tally = {}
     for s in existing:
@@ -1518,6 +1535,9 @@ def _free(sid, t, uses):
     for _ in range(4):
         if sid is None:
             return None
+        if sid in excluded():
+            sid = ALT.get(sid)
+            continue
         near = [u for u, s in uses if s == sid]
         if not any(abs(u - t) < SAME_GAP_S for u in near) and sum(1 for u in near if abs(u - t) < SAME_WIN_S / 2) < SAME_MAX:
             return sid

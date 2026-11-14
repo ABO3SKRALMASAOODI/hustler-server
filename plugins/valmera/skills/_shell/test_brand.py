@@ -193,3 +193,39 @@ def test_marketing_keeps_the_plain_finish_and_others_pass_their_sounds(tmp_path)
         chain.STING_ON = False
     first = brand.pick_sting()
     assert first and brand.pick_sting([first["path"]])["id"] != first["id"]
+
+
+def test_the_sting_is_never_flagged_and_sounds_like_the_references_end():
+    """Owner, 15 Nov: the old rule (rings 1.4 s or more) chose impact_10, "a mountain fall sound". The sting is the
+    unflagged recording nearest the references' close / reveal / transition effects: never a flagged one, never a long
+    rumble, its tail inside the references' p10-p90, however many recordings the film already used."""
+    q = brand.sfx_quality()
+    flagged = set(q["flags"]) | set(q["excluded"])
+    assert {"impact_10", "impact_2", "impact_3", "impact_5", "impact_6"} <= flagged      # all five the old rule admitted
+    T = brand.sting_target()
+    assert T["n"] >= 140
+    lo, _mid, hi = T["range"]["tail30_any_s"]
+    rank = brand.sting_ranking()
+    assert len(rank) >= 5
+    used, seen = [], []
+    for _ in range(len(rank)):
+        st = brand.pick_sting(used)
+        if st is None:
+            break
+        assert st["id"] not in flagged and st["id"] not in seen
+        n = st["numbers"]
+        assert lo <= n["tail30_any_s"] <= hi, (st["id"], n)
+        assert T["range"]["body_s"][0] <= n["body_s"] <= T["range"]["body_s"][2], (st["id"], n)
+        seen.append(st["id"])
+        used.append(st["path"])
+    assert len(seen) == len(rank)
+    # the first choice sits at the references' median on every number that the old rule broke
+    first = brand.pick_sting()
+    assert first["numbers"]["tail30_any_s"] <= 0.4 and first["numbers"]["body_s"] <= 0.2
+    assert first["numbers"]["low_share_lt150"] <= 0.1                    # bright: no reference reel ends on a rumble
+    assert -14.0 <= first["vs_voice_db"] <= -7.0
+
+
+def test_without_the_audit_there_is_no_sting(monkeypatch):
+    monkeypatch.setattr(brand, "sfx_quality", lambda: {})
+    assert brand.sting_ranking() == [] and brand.pick_sting() is None
