@@ -140,6 +140,27 @@ def test_picture_naming_scopes_context_to_the_requested_subject(tmp_path, monkey
     assert seen[0][1]=='A branded container' and seen[0][2]==broll_source.NAME_SYSTEM+supply.WISH_NAME_SCOPE
 
 
+def test_source_cut_measure_ignores_flash_and_finds_real_picture_change():
+    import numpy as np
+    from score import picture_cuts
+    frames=np.zeros((60,32,32,3),np.uint8)
+    frames[10]=255  # a flash returns to the same picture
+    frames[30:]=[0,150,230]
+    cuts,flashes=picture_cuts.boundaries(frames,15)
+    assert cuts==[2.0] and flashes==[round(10/15,3)]
+
+
+def test_cut_refinement_is_local_and_keeps_the_index_on_measurement_failure(monkeypatch):
+    from score import picture_cuts
+    index=dict(video=dict(duration=10),shots=[dict(id=1,start=0,end=10)])
+    monkeypatch.setattr(picture_cuts,'measure',lambda *a:dict(cuts=[3,6,8],flashes=[],method='judge3_pixel_cuts'))
+    local=picture_cuts.refine(index,'source.mp4')
+    assert len(local['shots'])==4 and len(index['shots'])==1
+    def unavailable(*a):raise TimeoutError()
+    monkeypatch.setattr(picture_cuts,'measure',unavailable)
+    assert picture_cuts.refine(index,'source.mp4')['shots']==index['shots']
+
+
 def test_footage_retry_keeps_the_original_time_budget(monkeypatch):
     import types
     from footage import ask

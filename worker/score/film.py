@@ -1042,13 +1042,14 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
 
 
 def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
-    from . import brief, call, direct, lower, perceive, scout, supply
+    from . import brief, call, direct, lower, perceive, picture_cuts, scout, supply
     import db as dbx
     os.makedirs(work, exist_ok=True)
     rec["at"] = "prep"
     t = time.monotonic()
-    index = ctx.index or {}
-    os.symlink(ctx.proxy_path(), os.path.join(work, "source.mp4"))
+    source = ctx.proxy_path()
+    index = picture_cuts.refine(ctx.index or {}, source)
+    os.symlink(source, os.path.join(work, "source.mp4"))
     with open(os.path.join(work, "index.json"), "w") as f:
         json.dump(index, f, ensure_ascii=False)
     original = worker_db.run(dbx.latest_asset, ctx.project_id, "original") or {}
