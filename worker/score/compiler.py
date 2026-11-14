@@ -1887,9 +1887,10 @@ def head_of(f):
 
 
 def main_marks(ctx, s0, s1, words=True, aspect=1.0):
-    """What a crop of the upload must never cut through between two source seconds: heads, and when
-    the upload's shape is not the frame's, the printed words that stay in it (perception's text
-    clusters), in source fractions. A same-shape upload's punch-in leaving a sign out is a choice."""
+    """What a crop must not cut through between two source seconds: heads
+    and printed words (perception's text clusters), in source fractions.
+    A mark wholly outside the crop does not constrain it; a partly visible
+    word must remain whole even in a same-aspect punch-in."""
     out = [list(x["box"]) for x in ctx.perc.get("text") or [] if x.get("box") and x["t"][0] - 0.5 <= s1 and x["t"][1] + 0.5 >= s0] if words else []
     # A text box from the index hugs the strokes it found: a script title's first and last letters lie
     # past it (p5363: 'La Parka' read as 'a Park'). Each side gains the line's own height, a little above and below.
@@ -1953,19 +1954,24 @@ def keep_marks_whole(ctx, crop, src, asset, W, H):
     if sw <= 0 or sh <= 0:
         return crop
     target = (W / H) * (sh / sw)
-    marks = main_marks(ctx, src[0], src[1], words=abs(target - 1.0) > 0.02, aspect=sh / sw)
+    # Burned-in captions can be clipped by a punch-in even when source and
+    # output have the same aspect ratio. Their geometry still matters.
+    marks = main_marks(ctx, src[0], src[1], words=True, aspect=sh / sw)
     many = isinstance(crop[0], (list, tuple))
     if not marks:
         return [fill_floor(ctx, list(c), target) for c in crop] if many else fill_floor(ctx, list(crop), target)
     if many:
-        held = [hold_whole(c, marks, target) for c in crop]
+        held = [hold_whole(fill_floor(ctx, list(c), target), marks, target) for c in crop]
         if held != [list(c) for c in crop]:
             ctx.held_whole = getattr(ctx, "held_whole", 0) + 1
-        return [fill_floor(ctx, c, target) for c in held]
-    held = hold_whole(crop, marks, target)
+        return held
+    # Enlarge the picture BEFORE preserving its content. Applying the fill
+    # floor last cropped straight through the heads and printed words that
+    # hold_whole had just restored (a larger picture is not a safe crop).
+    held = hold_whole(fill_floor(ctx, list(crop), target), marks, target)
     if held != list(crop):
         ctx.held_whole = getattr(ctx, "held_whole", 0) + 1
-    return fill_floor(ctx, held, target)
+    return held
 
 
 def video_src(ctx, ref, asset, n, rng):
