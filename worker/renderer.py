@@ -10717,7 +10717,7 @@ def _run_render_job(worker_db, job):
                         listen_keys = []
 
         run_checks()
-        if variant == "preview" and not proof_only and (
+        if screen_clearance and variant == "preview" and not proof_only and (
                 not isinstance(picture_qc_res, dict) or
                 not isinstance(audio_qc_res, dict)):
             storage.delete_keys(uploaded_keys)
