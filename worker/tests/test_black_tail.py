@@ -112,3 +112,23 @@ def test_a_trace_longer_than_its_bound_says_at_least(monkeypatch):
     assert tail == [480.0, 600.0, False]
     text = render_qc.black_tail_finding(tail, p)
     assert "at least 120.00s of black picture before the end card" in text
+
+
+@pytest.mark.parametrize("start, finding_count", [(19.567, 0), (18.0, 1)])
+def test_tail_without_a_finding_does_not_disable_picture_qc(monkeypatch, start, finding_count):
+    """p5590: an ignored 33 ms tail must not turn the entire review into None."""
+    import renderer
+    p = _plan(19.6)
+    tail = [start, 19.6, True]
+    measured = {"black_tail": tail,
+                "stall": [["black", start, 19.6, "picture", "x"]]}
+    monkeypatch.setattr(render_qc, "plan", lambda *a, **k: p)
+    monkeypatch.setattr(render_qc, "check", lambda *a, **k:
+        dict(measured, findings=render_qc.findings(measured, p)))
+    result = renderer.picture_qc({"keep": [[0, 19.6]]}, {}, "unused.mp4",
+        {"width": W, "height": H, "fps": FPS}, "preview", False)
+    assert result is not None
+    assert result["black_tail"] == tail  # keep the raw observation
+    assert len(result["findings"]) == finding_count
+    if finding_count:
+        assert result["findings"][0].startswith("BLACK TAIL")
