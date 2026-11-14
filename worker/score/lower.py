@@ -504,9 +504,10 @@ def lower_pictures(l1, work, bake, rep):
             # silently crop it again after the compiler held it whole.
             # Fit it inside the canvas with an opaque backing so the old
             # underlying source shot cannot show through the letterbox.
+            # Equal layers are sorted by ID when the EDL is normalized.
             overlays.append({"id": f"safe.{pid}", "asset_key": bake.plate({"c0": "#000000"}, W, H),
                              "kind": "image", "start": start, "duration_s": dur,
-                             "fit": "cover"})
+                             "fit": "cover", "z_index": -1})
             ov.pop("fit", None)
             ov.pop("source_crop", None)
             ov.update(x=0.5, y=0.5, scale=min(1., (H / W) * (asset["w"] / asset["h"])))
