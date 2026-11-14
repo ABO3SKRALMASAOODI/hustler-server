@@ -321,7 +321,8 @@ class _StockCtx:
 
 def test_a_search_saves_which_thumbnails_the_editor_saw(monkeypatch):
     hits = [{"id": "pexels:video:20624465", "kind": "video",
-             "description": "", "_thumb": "https://x/t.jpg"}]
+             "description": "A silverback gorilla walking through green foliage.",
+             "_thumb": "https://x/t.jpg"}]
     monkeypatch.setattr(stock, "available", lambda: True)
     monkeypatch.setattr(stock, "search", lambda *a, **k: [dict(h)
                                                            for h in hits])
