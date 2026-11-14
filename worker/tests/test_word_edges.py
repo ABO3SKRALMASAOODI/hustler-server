@@ -83,3 +83,13 @@ def test_outward_word_snap_does_not_consume_the_next_touching_word():
              {'w': 'and', 't0': 16.415, 't1': 16.655}]
     keep, _ = word_edges.whole([[0, 16.3]], words, 29.27, [[0, 29.27]], pad=True)
     assert keep == [[0, 16.415]]
+
+
+def test_exact_word_boundary_reaches_audio_trim():
+    from schemas import validate_edl
+    from timeline import Timeline
+    from renderer import build_filtergraph
+    edl = validate_edl({'keep': [[0, 16.415]]}, 29.27).model_dump()
+    graph = build_filtergraph(edl, 29.27, True, Timeline(edl['keep']), None, [],
+                              {'video': {'duration': 29.27}}, preview=True)
+    assert 'atrim=start=0.000:end=16.415,' in graph
