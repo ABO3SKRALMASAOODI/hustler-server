@@ -67,3 +67,19 @@ def test_existing_edits_outside_first_film_unchanged():
     del index["_first_film_source_guard"]
     before = copy.deepcopy(film)
     assert source_guard.apply(film, index, {}) == [] and film == before
+
+
+def test_safe_source_cutaway_is_contained_not_recropped_by_overlay_cover(tmp_path):
+    from score import lower
+    from types import SimpleNamespace
+    film, index = _scene()
+    film.update(fps=30, spine=[], assets={"main": {"kind": "video", "path": "source.mp4",
+                                               "w": 1920, "h": 1080}})
+    film["items"][0].update(k="shot", f=[0, 42])
+    source_guard.apply(film, index, {})
+    bake = SimpleNamespace(locals={}, plate=lambda *a: "backing.png")
+    overlays, *_ = lower.lower_pictures(film, str(tmp_path), bake, {})
+    foreground = next(o for o in overlays if o["asset_key"] == "main")
+    assert not foreground.get("fit") and not foreground.get("source_crop")
+    assert foreground["scale"] == 1 and foreground["x"] == foreground["y"] == .5
+    assert overlays[0]["asset_key"] == "backing.png"
