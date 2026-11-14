@@ -57,6 +57,17 @@ def test_sparse_face_track_is_not_treated_as_an_empty_frame():
     assert [.4, .52, .6, .66] in taste._heads_near(ctx, ctx.shots[0], 0)
 
 
+def test_display_seat_cannot_trade_a_brief_face_collision_for_average_clearance():
+    ctx = context()
+    ctx.faces = [{"t": i / 2, "boxes": [[.4, .16, .6, .3]] if i == 0 else []}
+                 for i in range(20)]
+    seats = taste.display_seats(ctx, .7, 1, named=[[.5, .24]])
+    assert seats and [.5, .24] not in seats
+    rows = taste._take_heads(ctx, marks=False)
+    for x, y in seats:
+        assert taste._clear(rows, [x-.21, y-.03, x+.21, y+.03]) == 1
+
+
 @pytest.mark.parametrize("moving", [False, True])
 def test_fill_enlargement_cannot_reclip_protected_source_text(moving):
     ctx = context()
