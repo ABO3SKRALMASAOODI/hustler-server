@@ -427,10 +427,10 @@ def test_the_daily_email_limit_cannot_swallow_it(world, monkeypatch):
     assert "ran out of credits" in sent[0][1]
 
 
-def test_over_the_limit_only_not_handled_goes_and_the_rest_waits(world,
-                                                                  monkeypatch):
-    """NOT HANDLED is the one to act on (owner, 7 Nov 2026): it goes past the
-    daily cap; a P0 a Fixer holds waits unclaimed for room."""
+def test_silent_watch_and_ticket_alerts_respect_the_daily_limit(world,
+                                                               monkeypatch):
+    """Owner, 8 Nov: one stopped-agent warning, not per-ticket Blocked mail.
+    Only provider blockers and exhausted paid credits bypass the daily cap."""
     t = open_p0(world)
     other = open_p0(world, key="auto-job-final-oom")
     store.set_fixing(world.c, other["id"], "on it")
@@ -440,9 +440,7 @@ def test_over_the_limit_only_not_handled_goes_and_the_rest_waits(world,
     world.clock.now += 11 * MIN
     sent = []
     alert_tick(world, monkeypatch, sent)
-    assert [s for s, _ in sent] and len(sent) == 1
-    assert sent[0][0].startswith("Blocked: ")      # no P0 watch heartbeat
-    assert sent[0][0].endswith(f"(P0 #{t['id']})")
+    assert sent == []
     world.c.execute("SELECT count(*) AS n FROM app_kv WHERE key LIKE %s",
                     (f"cockpit_alert:p0:{other['id']}:%",))
     assert world.c.fetchone()["n"] == 0
@@ -571,19 +569,20 @@ def test_a_silent_watch_is_late_after_three_runs_missed(world):
                           intake.silent_agents(world.c, world.clock.now)]
 
 
-def test_the_email_says_why_nobody_took_it(world):
+def test_silent_watch_is_one_agent_warning_instead_of_ticket_blockers(world):
     open_p0(world)
     world.clock.now += 11 * MIN
     store.put_state(world.c, "ops_heartbeat_p0_watch",
                     {"at": (world.clock.now - 3 * MIN).isoformat()})
     lines = [i[2] for i in cockpit.event_alerts(world.c, world.clock.now,
                                                 world.clock.now)]
-    assert any("Fixers are all busy" in x for x in lines)
+    assert not any("Only you can clear it" in x for x in lines)
     store.put_state(world.c, "ops_heartbeat_p0_watch",
                     {"at": (world.clock.now - 40 * MIN).isoformat()})
     lines = [i[2] for i in cockpit.event_alerts(world.c, world.clock.now,
                                                 world.clock.now)]
-    assert any("Mac may be asleep" in x for x in lines)
+    assert any("p0_watch" in x and "Mac asleep" in x for x in lines)
+    assert not any("Only you can clear it" in x for x in lines)
 
 
 # ── Time to claim and time to live ───────────────────────────────────────
