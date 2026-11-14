@@ -23,7 +23,11 @@ no substitute edit unless the customer requested that alternative. If any part
 of this delta is unrelated, allowed=false and identify what must stay.
 A requested speaker crop authorizes reframing; do not demand rendered proof of
 its success before allowing the write. A requested short authorizes a coherent
-ending supported by the supplied transcript. Requested pictures authorize
+ending supported by the supplied transcript. Picture obligations specify what
+images must appear; they are not a whitelist of words allowed in the narration.
+An unpictured example may complete the same spoken sentence or list. Retaining
+that clause is in scope unless the customer actually asked to remove its speech;
+stop before the later topic, rather than cutting a connected thought in half. Requested pictures authorize
 replacing wrong imagery and adjusting its duration to the named words, including
 repairs identified by the independent rendered checks. Do not preserve a failed
 picture simply because it already exists. Separate cut, face, word-edge and final
