@@ -447,6 +447,9 @@ def refill(ctx, script, pack, shortage):
             if not any(r['url']==rec['url'] for r in manifest):manifest.append(rec)
         with open(manifest_path,'w') as f:json.dump(manifest,f,indent=1)
         if not primary:raise RuntimeError('no verified public publisher video found after platform research exhausted')
+    if count > 4 and added:
+        # Score the newly acquired original once even when video research is exhausted.
+        return
     if count > 4:
         raise RuntimeError('documentary coverage still incomplete after platform and original-publisher research')
     name = f"footage-v{coverage['contract']}-context{RESEARCH_CONTRACT}-{signature}-repair{count}"

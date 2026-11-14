@@ -134,11 +134,14 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None):
         candidates = [('clip', c.get('subject', window['name']), c) for c in sorted(footage.get(i, []),key=lambda c:-c.get('motion_p90',0))]
         names=list(dict.fromkeys([window['name'],*window.get('subjects',[])]))
         candidates += [('photo', name, p) for name in names for p in pictures.get(name, [])]
+        pool=[row for row in candidates if (i,row[2]['path']) not in rejected]
         distinct=[]
-        for row in candidates:
+        for row in pool:
             if (i,row[2]['path']) in rejected:continue
             if not any(same_picture(row[2],old) for old in used+[r[2] for r in distinct]):distinct.append(row)
-        candidates=distinct
+        # A later reference may return to the same authentic evidence. It still
+        # needs this window's check, and never counts as a new picture below.
+        candidates=distinct or pool[:1]
         wanted = max(1, math.ceil((b-a)/fps*.8))
         candidates = candidates[:wanted]
         pos = a
@@ -208,11 +211,14 @@ def require_coverage(ins, coverage, duration, fps=30):
     moving = sum(b-a for a,b,k,_,rec in ins if k=='clip' and rec.get('placed_motion_p90',0)>=1.)/fps
     missing = [i for i in range(len(coverage['windows'])) if not any(r[4].get('window')==i for r in ins)]
     named = sum(w['t1']-w['t0'] for w in coverage['windows'])
-    rate = len(ins)*10/max(named,.01)
+    unique=[]
+    for row in ins:
+        if not any(same_picture(row[4],old) for old in unique):unique.append(row[4])
+    rate = len(unique)*10/max(named,.01)
     weak = [i for i,w in enumerate(coverage['windows'])
             if sum(r[1]-r[0] for r in ins if r[4].get('window')==i)/fps < .8*(w['t1']-w['t0'])
             or sum(r[1]-r[0] for r in ins if r[4].get('window')==i and r[4].get('placed_motion_p90',0)>=1.)/fps < .6*(w['t1']-w['t0'])]
-    report = dict(real_seconds=real,moving_seconds=moving,named_seconds=named,new_per_10s=rate,weak_windows=weak,missing_windows=missing)
+    report = dict(real_seconds=real,moving_seconds=moving,named_seconds=named,new_per_10s=rate,new_pictures=len(unique),repeated_pictures=len(ins)-len(unique),weak_windows=weak,missing_windows=missing)
     if real/max(duration,.01)<.45 or moving/max(real,.01)<.60 or rate<6 or missing:
         raise CoverageError(f'documentary supply incomplete after frame checks: real={real/duration:.3f}, '
                            f'moving={moving/max(real,.01):.3f}, new/10s={rate:.2f}, missing windows={missing}; '
