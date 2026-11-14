@@ -185,6 +185,7 @@ class Read:
 
 def render(a):
     import narrate as N
+    N.malloc_returns_memory()            # a workflow calling render from its own entry point (long-form) gets it too
     import lines as LN
     import perform as PF
     import prosody
@@ -550,6 +551,9 @@ def main():
             for line in envf.read_text().splitlines():
                 if line.startswith("OPENAI_API_KEY="):
                     os.environ["OPENAI_API_KEY"] = line.split("=", 1)[1].strip().strip('"').strip("'")
+    if a.cmd == "render":
+        import narrate as N
+        N.malloc_returns_memory()        # before the chdir: the arguments may be relative paths
     os.chdir(NARR)
     if a.cmd == "render":
         return render(a)

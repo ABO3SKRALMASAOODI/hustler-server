@@ -19,9 +19,13 @@ Memory (lane NARRATE-LEAK, 14 Nov): one listener is in memory at a time. The tak
 (faster-whisper turbo int8, 1.9 GB) is dropped before the gate listener (mlx large-v3 fp16, 2.9 GB of
 weights, 3.8 GB at its peak inside one call) loads, and the other way round; MLX's buffer cache is
 capped (`NARRATE_MLX_CACHE_MB`, 256) and emptied after every gate call; the take pool keeps each take's
-signals and `lines.take_audio` loads its audio from `_takes` again when the gate needs it. Before, both
-listeners stayed loaded and MLX cached every freed buffer, so a render began at 6.4 GB and grew with
-every gate call. `test_memory.py` pins it.
+signals and `lines.take_audio` loads its audio from `_takes` again when the gate needs it; `deliver`
+gives the gate listener back before the mastering chain and after its last listening; and a render
+starts itself again once with `MallocLargeCache=0` (`malloc_returns_memory`), because macOS's malloc
+otherwise keeps freed large blocks in the footprint (1.3 GB after mastering the long-form read). Before,
+both listeners stayed loaded and MLX cached every freed buffer, so a render began at 6.4 GB and grew
+with every gate call (marketing peak 8.0-8.6 GB; now 4.6 GB, the gate's own weights and one call's
+activations being 3.8 GB of it). `test_memory.py` pins it.
 
 ```
 PY=/Users/masaoodi/Documents/Valmera/.valmera/venv-narrate/bin/python

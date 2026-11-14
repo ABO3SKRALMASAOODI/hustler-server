@@ -301,6 +301,25 @@ def vocab_prompt():
 MLX_CACHE_MB = int(os.environ.get("NARRATE_MLX_CACHE_MB", "256"))
 
 
+def malloc_returns_memory():
+    """macOS's malloc keeps freed large blocks in its large-entry cache, and they count in the process's footprint:
+    after the mastering chain on the long-form read 1.3 GB stayed held with nothing referencing it, and a freed 480 MB
+    array stayed too (NARRATE-LEAK, 14 Nov). MallocLargeCache=0 gives a freed block back at once; malloc reads it when
+    the process starts, so a render's entry point starts itself again with it, once, before any work (same pid, same
+    arguments). Marketing render: 5.5 -> 4.6 GB peak. NARRATE_MALLOC_REEXEC=0 turns it off."""
+    if sys.platform != "darwin" or os.environ.get("MallocLargeCache") == "0" or os.environ.get("NARRATE_MALLOC_REEXEC") == "0":
+        return
+    main = getattr(sys.modules.get("__main__"), "__file__", None)
+    orig = list(getattr(sys, "orig_argv", []))
+    if not main or not orig or sys.argv[0] not in orig[1:]:
+        return                     # not started as `python script.py ...`: nothing to start again
+    orig[orig.index(sys.argv[0], 1)] = os.path.abspath(main)
+    os.environ["MallocLargeCache"] = "0"
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(sys.executable, [sys.executable] + orig[1:])
+
+
 def _mlx():
     try:
         import mlx.core as mx
@@ -918,6 +937,9 @@ def deliver(x, sr, script, chunks, bounds, rep, args, out, t_all, gen_s, load_s=
         import master as MS
         import pauses as PZ
         _, heard = listen_long(x, sr)
+        # the finish's arrays never sit beside the gate's weights: on the long-form read (243 s) the mastering chain
+        # beside them took the render from 4.3 to 5.9 GB (NARRATE-LEAK, 14 Nov). Loaded again for the word times.
+        free_gate_listener()
         words0 = map_words(full, heard)
         me = sys.modules[__name__]
         x, edits = PZ.shape(x, sr, script["segments"], words0, me, bandname if bandname in PZ.CAP else "03")
@@ -934,6 +956,7 @@ def deliver(x, sr, script, chunks, bounds, rep, args, out, t_all, gen_s, load_s=
 
     # words, phrases and cut points from the finished signal
     _, heard = listen_long(x, sr)
+    free_gate_listener()          # the render's last listening: what runs after it (a workflow's own finish) gets the memory
     words = map_words(full, heard)
     seg_of = [si for si, s in enumerate(script["segments"]) for _ in s["text"].split()]
     k = 0
@@ -1274,6 +1297,7 @@ def main():
         for v in voice_list():
             print(f"{v['id']:<8} {v.get('f0_med_hz')} Hz  range {v.get('range_st')} st  {v['describe']}")
     elif a.cmd == "render":
+        malloc_returns_memory()
         render(a)
     elif a.cmd == "check":
         check(a)

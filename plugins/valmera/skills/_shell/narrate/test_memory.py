@@ -152,3 +152,56 @@ def test_the_pool_keeps_signals_and_the_gate_reloads_a_takes_audio_from_disk():
     finally:
         if old_key is not None:
             os.environ["OPENAI_API_KEY"] = old_key
+
+
+def test_the_render_gives_the_gate_listener_back_when_it_ends():
+    import argparse
+    x = np.concatenate([_tone(1.0, 150.0, 0), _tone(1.0, 170.0, 1)])
+    script = {"segments": [{"text": "a b"}]}
+    chunks = [{"seg": 0, "text": "a b"}]
+    args = argparse.Namespace(no_master=True, lufs=None)
+    with _Fakes(), tempfile.TemporaryDirectory() as td:
+        N.listen(x, SR)
+        assert N.listeners_loaded()["gate"]
+        N.deliver(x, SR, script, chunks, [], {"voice": "phonon:Easton", "engine": "lines:phonon"}, args, Path(td), 0.0, 0.0)
+        assert N.listeners_loaded() == {"take": False, "gate": False}
+        assert (Path(td) / "narration.wav").exists()
+
+
+def test_a_render_starts_itself_again_once_with_mallocs_large_cache_off():
+    """macOS keeps freed large blocks in malloc's cache, counted in the footprint, unless MallocLargeCache=0 is set
+    when the process starts: the entry point starts itself again with it, once, with the same arguments."""
+    saved = (sys.platform, sys.argv, getattr(sys, "orig_argv", None), sys.modules.get("__main__"), os.execv,
+             os.environ.get("MallocLargeCache"), os.environ.get("NARRATE_MALLOC_REEXEC"))
+    calls = []
+    try:
+        os.environ.pop("MallocLargeCache", None)
+        os.environ.pop("NARRATE_MALLOC_REEXEC", None)
+        sys.platform = "darwin"
+        main = types.ModuleType("__main__")
+        main.__file__ = "/abs/skills/valmera-stories/voice.py"
+        sys.modules["__main__"] = main
+        sys.argv = ["voice.py", "render", "s.json", "--out", "o"]
+        sys.orig_argv = ["python", "-u", "voice.py", "render", "s.json", "--out", "o"]
+        os.execv = lambda exe, argv: calls.append((exe, argv))
+        N.malloc_returns_memory()
+        assert calls == [(sys.executable, [sys.executable, "-u", "/abs/skills/valmera-stories/voice.py", "render",
+                                            "s.json", "--out", "o"])]
+        assert os.environ["MallocLargeCache"] == "0"
+        N.malloc_returns_memory()                 # started again with it: no second start
+        assert len(calls) == 1
+        os.environ.pop("MallocLargeCache")
+        os.environ["NARRATE_MALLOC_REEXEC"] = "0"   # the switch
+        N.malloc_returns_memory()
+        assert len(calls) == 1
+    finally:
+        sys.platform, sys.argv, orig, main0, os.execv, mlc, rex = saved
+        if orig is not None:
+            sys.orig_argv = orig
+        if main0 is not None:
+            sys.modules["__main__"] = main0
+        for k, v in (("MallocLargeCache", mlc), ("NARRATE_MALLOC_REEXEC", rex)):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
