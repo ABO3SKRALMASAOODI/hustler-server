@@ -70,7 +70,12 @@ def openai_call(model=PICK_MODEL, effort="low", timeout=90):
         import openai_cache
         body = openai_cache.responses(body, "music:choose")
         req = urllib.request.Request(URL, data=json.dumps(body).encode(), headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
-        r = json.load(urllib.request.urlopen(req, timeout=timeout))
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                r = json.load(response)
+        except Exception:
+            openai_cache.record(model, "music:choose", status="transport_or_http_error", billing_unconfirmed=True)
+            raise
         u = r.get("usage") or {}
         usd = openai_cache.cost(model, u)
         call.usage["usd"] += usd

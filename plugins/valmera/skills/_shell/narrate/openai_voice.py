@@ -131,10 +131,12 @@ def speech(text, voice, instr, model=MODEL, timeout=180):
                                     seconds=len(x) / sr, cost_basis="audio_duration_estimate", force=True)
                 return x.mean(1), sr
         except urllib.error.HTTPError as e:
+            openai_cache.record(model, "narrate:speech", usd=0.0, status="http_error", http_status=e.code, force=True)
             last = f"HTTP {e.code}"
             if e.code in (400, 401, 403, 404):
                 break
         except Exception as e:  # noqa: BLE001 - a network blip is retried
+            openai_cache.record(model, "narrate:speech", status="transport_error", billing_unconfirmed=True, force=True)
             last = type(e).__name__
         time.sleep(2 + 4 * attempt)
     raise RuntimeError(f"OpenAI speech failed: {last}")

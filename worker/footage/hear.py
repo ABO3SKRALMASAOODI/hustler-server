@@ -58,10 +58,12 @@ def _one(path, t0, t1, tmp, i):
             if r.status_code == 200:
                 import openai_cache
                 payload = r.json()
-                openai_cache.record(MODEL, "footage_hear", payload.get("usage"),
-                                    usd=(t1 - t0) / 60.0 * USD_PER_MIN,
-                                    seconds=t1 - t0, cost_basis="audio_duration_estimate")
-                return dict(t0=t0, t1=t1, text=(payload.get("text") or "").strip())
+                usage = payload.get("usage")
+                reported = isinstance(usage, dict) and usage.get("type") == "tokens" and MODEL in openai_cache.PRICES
+                usd = openai_cache.cost(MODEL, usage) if reported else (t1 - t0) / 60.0 * USD_PER_MIN
+                openai_cache.record(MODEL, "footage_hear", usage, usd=usd,
+                                    seconds=t1 - t0, cost_basis="reported_tokens" if reported else "audio_duration_estimate")
+                return dict(t0=t0, t1=t1, text=(payload.get("text") or "").strip(), usd=usd)
             import openai_cache
             openai_cache.record(MODEL, "footage_hear", usd=0.0, status="http_error", http_status=r.status_code)
             if r.status_code < 500 and r.status_code != 429:
@@ -83,7 +85,7 @@ def transcribe(path, dur, workers=8):
             rows = list(pool.map(lambda i: _one(path, cuts[i], cuts[i + 1], tmp, i), range(len(cuts) - 1)))
     finally:
         subprocess.run(["rm", "-rf", tmp])
-    usd = round(dur / 60.0 * USD_PER_MIN, 5)
+    usd = round(sum(r.get("usd", 0.0) for r in rows), 7)
     try:
         import llm
         llm.record("footage_hear", {"model": MODEL}, {"provider": "openai", "provider_cost_usd": usd, "seconds_heard": round(dur, 1), "local_spend_recorded": True})

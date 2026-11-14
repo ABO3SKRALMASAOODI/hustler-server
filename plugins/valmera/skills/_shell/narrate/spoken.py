@@ -106,7 +106,8 @@ def merge(heard, spoken):
 
 
 def _call(system, user, model, max_tokens=24000, timeout=600):
-    body = {"model": model, "instructions": system, "input": [{"role": "user", "content": [{"type": "input_text", "text": user}]}],
+    parts = [{"type": "input_text", "text": user}] if isinstance(user, str) else user
+    body = {"model": model, "instructions": system, "input": [{"role": "user", "content": parts}],
             "max_output_tokens": max_tokens, "reasoning": {"effort": "low"}, "store": False}
     body = openai_cache.responses(body, "narrate:spoken")
     req = urllib.request.Request("https://api.openai.com/v1/responses", data=json.dumps(body).encode(),
@@ -119,6 +120,8 @@ def _call(system, user, model, max_tokens=24000, timeout=600):
                                 request_id=result.get("id"), status=result.get("status"), force=True)
             return result
         except Exception:  # noqa: BLE001 - a dropped call is asked again, then reported
+            openai_cache.record(model, "narrate:spoken", status="transport_or_http_error",
+                                billing_unconfirmed=True, force=True)
             if attempt == 2:
                 raise
             time.sleep(5 * (attempt + 1))
@@ -137,10 +140,16 @@ def spoken_form(heard, script, names=(), model=None):
         if not any(_letters(t) is None for t in piece.split()):
             out.append(piece)                       # nothing written in digits or symbols: the piece is already spoken
             continue
-        user = (f"Names in the story, as spelled: {json.dumps(list(names)[:80], ensure_ascii=False)}\n\n"
-                f"The narrator's script (spoken form):\n{script}\n\n"
-                f"Transcript piece {k + 1} of {len(pieces)} (written form):\n{piece}\n\n"
-                "Answer JSON only: {\"spoken\": the transcript piece in spoken form}")
+        shared = {"type": "input_text", "text": (
+            f"Names in the story, as spelled: {json.dumps(list(names)[:80], ensure_ascii=False)}\n\n"
+            f"The narrator's script (spoken form):\n{script}\n\n")}
+        if str(model).startswith(openai_cache.MODERN):
+            # Every transcript piece reuses this film's complete script. Keep
+            # a boundary before the changing piece, not just the short rubric.
+            shared["prompt_cache_breakpoint"] = {"mode": "explicit", "ttl": "30m"}
+        user = [shared, {"type": "input_text", "text": (
+            f"Transcript piece {k + 1} of {len(pieces)} (written form):\n{piece}\n\n"
+            "Answer JSON only: {\"spoken\": the transcript piece in spoken form}")}]
         try:
             r = _call(SYSTEM, user, model)
         except Exception as e:  # noqa: BLE001

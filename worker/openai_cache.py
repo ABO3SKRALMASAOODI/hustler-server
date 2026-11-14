@@ -22,7 +22,8 @@ DEFAULT_LOG = "/Users/masaoodi/Documents/Valmera/.valmera/week-1112/openai-spend
 # Standalone skills do not import worker/config or connect to a production DB.
 PRICES = {"gpt-6.1-sol": (2, .1, 10), "gpt-6.1-terra": (1, .05, 5),
           "gpt-6-sol": (2, .2, 10), "gpt-6-luna": (.1, .01, .5),
-          "gpt-5.6-luna": (.2, .02, 1.2), "gpt-5.5": (5, .5, 30)}
+          "gpt-5.6-luna": (.2, .02, 1.2), "gpt-5.5": (5, .5, 30),
+          "gpt-4o-transcribe": (2.5, 2.5, 10), "gpt-4o-mini-transcribe": (1.25, 1.25, 5)}
 
 
 def get(obj, name, default=None):

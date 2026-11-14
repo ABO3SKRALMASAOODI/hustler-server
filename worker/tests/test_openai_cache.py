@@ -104,3 +104,27 @@ def test_workflow_terminal_responses_are_logged_before_failures(tmp_path, monkey
 def test_a_small_model_does_not_get_an_unsupported_24h_parameter():
     assert 'prompt_cache_retention' not in cache.chat_options('gpt-5-mini', 'role')
     assert 'prompt_cache_retention' not in cache.chat_options('gpt-4.1-mini', 'role')
+
+
+def test_transcription_prices_reported_tokens_not_duration_estimate():
+    raw = {'type':'tokens', 'input_tokens':120, 'input_token_details':{'audio_tokens':120, 'text_tokens':0}, 'output_tokens':36}
+    assert cache.cost('gpt-4o-transcribe', raw) == pytest.approx(.00066)
+
+
+def test_narration_script_is_a_cache_boundary_before_the_changing_chunk():
+    import importlib.util
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location('spoken_cache_test', root / 'plugins/valmera/skills/_shell/narrate/spoken.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    bodies = []
+    def call(system, user, model):
+        bodies.append(user)
+        return {'output':[{'type':'message','content':[{'type':'output_text','text':'{"spoken":"one"}'}]}]}
+    from unittest.mock import patch
+    with patch.dict('os.environ', {'OPENAI_API_KEY':'test-only'}), patch.object(module, '_call', call):
+        module.spoken_form('1 '*601, 'same whole film script', ['Skylab'])
+    assert len(bodies) == 2
+    assert bodies[0][0] == bodies[1][0]
+    assert bodies[0][0]['prompt_cache_breakpoint']['ttl'] == '30m'
+    assert bodies[0][1] != bodies[1][1]
