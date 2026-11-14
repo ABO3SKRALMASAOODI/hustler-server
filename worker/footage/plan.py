@@ -23,6 +23,8 @@ Answer with one JSON object only: {"subjects":[...],"lines":[...]}"""
 
 RANK_SYSTEM = """You choose which videos a footage researcher should open. For each subject you get YouTube and archive.org results (number, title, channel, length in seconds, views).
 
+The actual subject identity is binding. Suggested example papers, films or angles in must_show are an editorial wish list, not an exclusive source whitelist. Do not reject another authentic original demonstration of the same category and era merely because it was not among those examples. Specific named people, systems and events still need that exact identity. Numerical edit quotas and earlier acquisition failures are not visual facts.
+
 Keep the sources most likely to hold real, clean video of that very subject: the person interviewed or filmed himself, a news report of the day, event or launch footage, archive newsreel, the company's own film, a documentary with real footage. A long interview or documentary is good: the editor takes 1-3 seconds of it.
 
 Drop: another editor's short or reel (it carries their captions), slideshows of photos with a voice, AI narrations, reaction and commentary videos, top-10 lists, music videos, games, animations about the subject, a namesake that is not the subject, anything over an hour.

@@ -161,6 +161,7 @@ def repair_requirements(coverage, wanted, evidence, llm):
     """A director corrects over-specific research constraints without changing spoken facts or timing."""
     system='''Revise documentary acquisition requirements after real research failed.
 Return JSON {"windows":[{"i":integer,"name":unchanged subject name,"must_show":str,"video_searches":[str]}]}.
+must_show is a concise visual identity test, not an editing brief. Do not include numerical quotas, required durations, claims about unavailable footage, or a closed list of preferred sources. Earlier requirements may contain invented constraints: discard those while retaining facts from the actual words. A category such as deep learning permits any authentic period demonstration of that category; do not restrict it to the few papers already found. Specific named systems still require their exact identity.
 Keep every actual identity, object, place and spoken fact. Do not replace a specific named thing with
 a merely related one. Requirements describe ANY ONE faithful shot, using alternatives (OR), not a
 whole montage that every one-second clip must contain. Do not require a specific paper, demo or

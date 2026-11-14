@@ -185,7 +185,9 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         log(f"plan: {len(subjects)} subjects, {sum(len(s['searches']) for s in subjects)} searches")
         # 2. search
         primary = primary_hits(subjects,named)
-        flat = [(si, q) for si, s in enumerate(subjects) if si not in primary for q in s["searches"]]
+        # Cached originals are candidates, not a closed source whitelist. A cache
+        # may contain only unsuitable footage; continue discovering alternatives.
+        flat = [(si, q) for si, s in enumerate(subjects) for q in s["searches"]]
         found = search.run([q for _, q in flat])
         hits = dict(primary)
         for k, (si, _) in enumerate(flat):

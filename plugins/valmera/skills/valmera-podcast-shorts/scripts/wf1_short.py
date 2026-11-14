@@ -49,7 +49,7 @@ import shell  # noqa: E402
 import wf1_film  # noqa: E402
 import wf3  # noqa: E402
 
-RESEARCH_CONTRACT = 5  # primary documents can fill a truthful still-picture gap before more video research
+RESEARCH_CONTRACT = 6  # primary documents can fill a truthful still-picture gap before more video research
 
 
 def _llm():
@@ -395,13 +395,13 @@ def refill(ctx, script, pack, shortage):
         pack['referent_research']=found
         pack.setdefault('research_spend',[]).extend(found['spend'])
     coverage['research_context']=pack['referent_research']
-    if pack.get('research_revision',0)<5:
+    if pack.get('research_revision',0)<6:
         import wf1_coverage
         checks=os.path.join(ctx.supply,'placement_checks.json')
         evidence=dict(available=[dict(i=r['i'],clips=[dict(subject=c.get('subject'),shows=c.get('shows'),source=c.get('source')) for c in r['clips']]) for r in pack['footage']],
                       rejected=[r['reason'] for r in json.load(open(checks)).values() if not r['ok']][-60:] if os.path.exists(checks) else [])
         usage=wf1_coverage.repair_requirements(coverage,wanted,evidence,_llm())
-        pack.setdefault('research_spend',[]).append(usage);pack['research_revision']=5
+        pack.setdefault('research_spend',[]).append(usage);pack['research_revision']=6
         stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
         with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
     import wf1_documents
