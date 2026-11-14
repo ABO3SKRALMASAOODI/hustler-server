@@ -6607,6 +6607,8 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
             m["move"] = rep
         except Exception as e:  # noqa: BLE001 - the film stands as the Score framed it
             m["move"] = {"fault": f"{type(e).__name__}: {str(e)[:160]}"}
+    from . import source_guard
+    m["source_guard"] = source_guard.apply(l1, ctx.index, ctx.perc)
     txt = meter_text(ctx, m)
     return Compiled(l1, m, txt, (time.perf_counter() - t0_) * 1000)
 
