@@ -967,6 +967,46 @@ def preview_fingerprint(preview):
                                      separators=(",", ":")).encode()).hexdigest()
 
 
+def composite_detail_frames(ctx, edl, preview):
+    """A contact-sheet tile cannot prove a moving matte keeps a shirt whole.
+
+Changed background composites get individual, full-size rendered samples.
+This is triggered by the actual operation, never a keyword in the request.
+Missing detail evidence fails the check instead of certifying from thumbnails.
+"""
+    baseline = (getattr(ctx, 'turn_start_edl', None) or {}).get('json')
+    if not isinstance(baseline, dict):
+        return []
+    current = [i for i in edl.get('fx') or [] if i.get('type') == 'background']
+    prior = [i for i in baseline.get('fx') or [] if i.get('type') == 'background']
+    if not current or current == prior:
+        return []
+    import agent_tools
+    import db
+    import media
+    import math
+    asset = ctx.db.run(db.find_render_asset, ctx.project_id, 'preview',
+                       (preview or {}).get('edl_version'))
+    if not asset:
+        raise RuntimeError('The changed background has no rendered detail evidence')
+    path = agent_tools._asset_local_path(ctx, asset)
+    duration = float((preview or {}).get('duration_s') or asset.get('duration_s') or 0)
+    if not path or duration <= 0:
+        raise RuntimeError('The changed background preview cannot be inspected')
+    count = min(48, max(1, int(math.ceil(duration / .5))))
+    folder = os.path.join(ctx.workdir, 'asks_composite_detail')
+    os.makedirs(folder, exist_ok=True)
+    frames = []
+    for n in range(count):
+        t = duration * (n + .5) / count
+        dest = os.path.join(folder, f'{n}.jpg')
+        media.frame_at(path, t, dest, width=960)
+        frames.append((dest, f'Rendered background-composite detail at {t:.3f}s. '
+                       'Check for attached old backdrop, shadow blocks, holes in clothing, '
+                       'missing limbs and halos. Any such artifact means the people were not preserved.'))
+    return frames
+
+
 def stored_preview(ctx, version):
     """The newest finished preview of this EDL version, made earlier (a request that changed nothing
     renders nothing, and its check still sees the film). None when there is none."""
@@ -1022,6 +1062,7 @@ def check(ctx, ledger, reply_text, edl, preview=None, changes="", fixed=None):
                 "The editor's reply:\n" + json.dumps(str(reply_text or "")[:3000], ensure_ascii=False),
                 "No rendered frames: judge from the numbers and the reply." if not preview else ""])
             pages = frame_pages(ctx, preview) if preview else []
+            pages += composite_detail_frames(ctx, edl, preview)
         content = [{"type": "text", "text": "\n".join([
             f"Customer's language: {ledger.get('lang') or 'en'}",
             "Asks:\n" + "\n".join(f"{a['id']} [{a['kind']}, check by {a['how']}] said: {json.dumps(a['said'], ensure_ascii=False)}; "
