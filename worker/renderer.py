@@ -10694,7 +10694,12 @@ def _run_render_job(worker_db, job):
                             local = os.path.join(workdir, f"listen_{i}.mp3")
                             media.extract_audio_clip(out_local, ls, le, local)
                             key = f"media/{project_id}/{stamp}_l{i}.mp3"
-                            upload_output(local, key, "audio/mpeg")
+                            # These excerpts are produced after the preview
+                            # is visible and handed straight to its reviewer.
+                            # Observe upload failures here so best-effort
+                            # cleanup never leaves a receipt for absent audio.
+                            storage.upload_file(local, key, "audio/mpeg")
+                            uploaded_keys.append(key)
                             listen_keys.append({
                                 "key": key, "t0": round(ls, 2),
                                 "t1": round(le, 2)})
