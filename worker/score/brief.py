@@ -641,6 +641,13 @@ def film_text(work, idx, sess, per, x, scout, styles, cards, bin_items=None):
             out.append("Customer, verbatim: " + json.dumps(p["text"], ensure_ascii=False))
     else:
         out.append("The customer uploaded and typed nothing.")
+    typography = idx.get("source_typography") or {}
+    if typography.get("caption_track") == "complete":
+        out.append("The upload already carries its spoken narrative in changing printed type. Preserve that reading track, without adding a second caption track or repeating its words as display titles. "
+                   "This does not replace the edit: develop its story, footage, sound and intentional visual design around the existing type. Evidence: " + str(typography.get("reason") or ""))
+    if typography.get("designed_layout"):
+        out.append("The upload is a composed graphic layout. Unless the customer explicitly requests a new aspect ratio, keep its native canvas; preserve its printed words and designed picture arrangement. "
+                   "Do not place the whole design as a tiny strip between blurred bars or punch through its typography.")
     out += words_part(work, idx, per, x, scout)
     out += footage_part(per, idx)
     out += seats_part(work, idx, per)
