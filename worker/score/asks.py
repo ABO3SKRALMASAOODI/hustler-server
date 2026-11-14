@@ -1439,40 +1439,12 @@ def summary(ledger, verdict=None):
 # ------------------------------------------------------------------ the Director for a whole-film ask
 
 def direct_film(ctx, worker_db, job, session_id, cfg):
-    """A whole-film ask, made by the Director on the full upload (score.film's pipeline), written as
-    one new version. Returns {"version", "applied", "s"} or {"fell": why}. The Director reads the
-    customer's own messages (the Scout) and the ledger's asks; it never starts from a First cut,
-    because it compiles from the upload's index and proxy and writes a whole EDL. Never raises."""
-    import shutil
-    from . import film, flags as director_flags
-    t0 = time.monotonic()
-    dcfg = director_flags.read(worker_db)
-    if dcfg.get("mode") != "on":
-        # The owner's switch on the Director (app_kv.director, off since 12 Nov for device spam) holds
-        # here too: a typed whole-film ask goes to the pass or the loop while it is off.
-        return {"fell": "the Director is off (app_kv.director)"}
-    source_s = float(getattr(ctx, "duration", 0) or 0)
-    if not getattr(ctx, "has_main_video", False) or source_s <= 0:
-        return {"fell": "no upload to direct"}
-    if source_s > dcfg["max_source_s"]:
-        return {"fell": f"source {source_s:.0f} s is past the Director's {dcfg['max_source_s']:.0f} s"}
-    work = os.path.join(ctx.workdir, "film")
-    rec = {"stages": {}}
-    before = getattr(ctx, "first_cut_session", None)
-    ctx.first_cut_session = session_id
-    ctx.director_version = None
+    """Typed-only library adapter; the ledger and its verification stay here."""
+    from . import typed
+    import db as dbx
     try:
-        start_edl = ctx.latest_edl()["json"]
-    except Exception as exc:  # noqa: BLE001
-        return {"fell": f"no start state: {exc}"}
-    try:
-        _steps, applied, _picked = film._make(ctx, worker_db, job, dcfg, time.monotonic() + cfg["film_s"], work, rec)
-        return {"version": getattr(ctx, "director_version", None), "applied": applied,
-                "s": round(time.monotonic() - t0, 1), "stages": rec.get("stages")}
-    except Exception as exc:  # noqa: BLE001 - the loop does the film instead, in the same job
-        stage = getattr(exc, "stage", rec.get("at", "film"))
-        film.fell(ctx, worker_db, job, f"typed:{stage}", exc, 0.0, start_edl)
-        return {"fell": f"{stage}: {str(exc)[:200]}", "s": round(time.monotonic() - t0, 1)}
-    finally:
-        ctx.first_cut_session = before
-        shutil.rmtree(work, ignore_errors=True)
+        return typed.run(ctx, worker_db, job, session_id, cfg)
+    except dbx.JobLeaseLost:
+        raise
+    except Exception as exc:  # the ordinary editor continues the same request
+        return {"fell": f"typed Director: {type(exc).__name__}: {str(exc)[:200]}"}

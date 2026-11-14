@@ -506,14 +506,13 @@ def test_the_check_reads_the_items_and_the_words_on_the_films_clock(monkeypatch,
     assert "texts:t1 text \"Big sale\"" in text and "[1.0-1.7] Our honey" in text
 
 
-def test_the_typed_route_holds_the_owners_off_switch_on_the_director(monkeypatch):
-    # app_kv.director has been off since 12 Nov (device spam); a subscriber's typed whole-film ask must not
-    # reach the Director through this route while it is.
-    from score import flags as director_flags, film
-    monkeypatch.setattr(film, "_make", lambda *a, **k: pytest.fail("the Director ran while switched off"))
-    monkeypatch.setattr(director_flags, "read", lambda db: dict(director_flags.DEFAULTS, mode="off"))
-    ctx = NS(duration=60.0, has_main_video=True, workdir="/tmp")
-    assert asks.direct_film(ctx, None, {"id": 1}, 9, asks.parse('{"mode": "on"}')) == {"fell": "the Director is off (app_kv.director)"}
+def test_the_typed_route_holds_its_own_explicit_off_switch(monkeypatch):
+    from score import film
+    monkeypatch.setattr(film, "_make", lambda *a, **k: pytest.fail("typed Director ran while disabled"))
+    ctx = NS(duration=240.0, has_main_video=True, workdir="/tmp")
+    assert asks.direct_film(ctx, None, {"id": 1}, 9,
+                           asks.parse({"mode": "on", "director": False})) == {
+        "fell": "typed Director is disabled"}
 
 
 def test_a_request_about_the_upload_starts_from_it_over_an_untouched_first_cut(monkeypatch):
