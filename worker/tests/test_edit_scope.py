@@ -114,3 +114,21 @@ def test_disclosure_cannot_silently_drop_available_alternative(monkeypatch):
     ctx = NS(turn_start_edl={'json': {}}, latest_edl=lambda: {'json': {}},
              edit_alternatives=[{'offer': 'I can use your still reference.'}])
     assert 'I can use your still reference.' in edit_scope.disclose(ctx, 'Animation failed.')
+
+
+@pytest.mark.parametrize('relevant', [True, False])
+def test_unsupported_reply_can_offer_a_real_upload_without_failed_tool_call(monkeypatch, relevant):
+    def check(ctx, name, schema, system, payload, **kw):
+        data = json.loads(payload)
+        assert data['alternatives_optional'] is True
+        assert data['real_alternatives'][0]['assets'][0]['asset_key'] == 'uploaded-reference.png'
+        return {'reply': 'The film is unchanged.' + (' I can show the reference as a still.' if relevant else ''),
+                'covered': [], 'offered_alternative': 0 if relevant else None}, {}
+    monkeypatch.setattr(asks, '_call', check)
+    ctx = NS(turn_start_edl={'json': {}}, latest_edl=lambda: {'json': {}},
+             available_still_assets=[{'asset_key': 'uploaded-reference.png'}],
+             ask_verdict={'asks': [{'id': 'a1', 'state': 'not_done'}]},
+             user_message='Use the hair-down reference in the animation' if relevant else 'Remove the wind noise')
+    reply = edit_scope.disclose(ctx, 'The requested operation is unavailable.')
+    assert 'unchanged' in reply
+    assert ('as a still' in reply) is relevant
