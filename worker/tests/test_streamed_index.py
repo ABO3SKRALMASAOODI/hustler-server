@@ -194,9 +194,27 @@ def test_real_streamed_video_finishes_index_without_original_on_disk(
     monkeypatch.setattr(storage, "presign_get", lambda *a, **kw: url)
     object_client(monkeypatch, data)
     monkeypatch.setattr(storage, "download_to", lambda *a, **kw: pytest.fail("staged original"))
-    monkeypatch.setattr(storage, "upload_file", lambda *a, **kw: None)
+    transcribed, hashed = threading.Event(), threading.Event()
+    hash_object = storage.sha256_object
+    def checked_hash(*args, **kwargs):
+        if kind == 'original':
+            assert transcribed.wait(10), 'ASR waited for the full object hash'
+        result = hash_object(*args, **kwargs)
+        hashed.set()
+        return result
+    monkeypatch.setattr(storage, 'sha256_object', checked_hash)
+    def upload(*args, **kwargs):
+        assert hashed.is_set(), 'Published before the integrity check'
+    monkeypatch.setattr(storage, "upload_file", upload)
     monkeypatch.setattr(indexer, "_finish_setup", lambda *a, **kw: None)
-    monkeypatch.setattr(indexer, "_transcribe_wav", lambda *a, **kw: ([], [], "en"))
+    transcriptions = []
+    def transcribe(*args, **kwargs):
+        transcriptions.append(1)
+        if kind == 'original':
+            assert not hashed.is_set()
+        transcribed.set()
+        return [], [], 'en'
+    monkeypatch.setattr(indexer, "_transcribe_wav", transcribe)
     monkeypatch.setattr(indexer.motion_judge, "analyze_video", lambda *a: None)
     monkeypatch.setattr(indexer.source_layout, "analyze", lambda *a, **kw: None)
     monkeypatch.setattr(indexer.visual_index, "build", lambda *a, **kw: None)
@@ -234,6 +252,7 @@ def test_real_streamed_video_finishes_index_without_original_on_disk(
     assert db.index["tile_keys"] == ["tile"]
     assert reads and db.progress == sorted(db.progress)
     assert not (tmp_path / "scratch" / "index_7").exists()
+    assert transcriptions == [1]
 
 
 def test_first_ranges_decode_before_full_hash_but_after_scratch_check(monkeypatch):

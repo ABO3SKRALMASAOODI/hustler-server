@@ -591,11 +591,24 @@ def run_index_job(worker_db, job):
             maxrate_kbps=kbps, limit_s=facts.get("limit_s"),
             cancelled_cb=lambda: stream_stop.is_set() or _cancelled(worker_db))
         if facts["has_audio"]:
+            def prepare_audio():
+                if sound_recorder is not None:
+                    llm.set_recorder(sound_recorder)
+                wav = os.path.join(workdir, "audio.wav")
+                clock.timed("stream_wav_s", media.extract_wav, src, wav,
+                            limit_s=facts.get("limit_s"),
+                            cancelled_cb=lambda: stream_stop.is_set() or _cancelled(worker_db))
+                if stream_stop.is_set() or _cancelled(worker_db):
+                    raise RuntimeError("streamed audio analysis was cancelled")
+                # The landed object is immutable. Its first audio ranges can
+                # be decoded and transcribed while SHA traverses the rest;
+                # publication still waits for the verified full-object hash.
+                notes = []
+                transcript = _transcribe_wav(
+                    job_id, wav, facts["duration"], notes, clock=clock)
+                return transcript, notes
             stream_prepared["wav"] = stream_pool.submit(
-                clock.timed, "stream_wav_s", media.extract_wav,
-                src, os.path.join(workdir, "audio.wav"),
-                limit_s=facts.get("limit_s"),
-                cancelled_cb=lambda: stream_stop.is_set() or _cancelled(worker_db))
+                clock.timed, "stream_audio_analysis_s", prepare_audio)
 
     try:
         warnings_pre = []
@@ -869,10 +882,13 @@ def run_index_job(worker_db, job):
                 llm.set_recorder(sound_recorder)
             _lane_progress("sound", 0.02)
             wav_local = None
+            prepared_transcript = None
             if info["has_audio"]:
                 wav_local = os.path.join(workdir, "audio.wav")
                 if "wav" in stream_prepared:
-                    clock.timed("stream_wav_wait_s", stream_prepared["wav"].result)
+                    prepared_transcript, prepared_notes = clock.timed(
+                        "stream_audio_wait_s", stream_prepared["wav"].result)
+                    warnings.extend(prepared_notes)
                 else:
                     clock.timed(
                         "snd_wav_s", media.extract_wav, src, wav_local,
@@ -889,6 +905,7 @@ def run_index_job(worker_db, job):
                                     f"audio/{project_id}/{sha}.wav",
                                     "audio/wav")
                     state["words"], state["sentences"], state["language"] = \
+                        prepared_transcript if prepared_transcript is not None else \
                         _transcribe_wav(job_id, wav_local, info["duration"],
                                         warnings,
                                         progress_cb=lambda frac:
