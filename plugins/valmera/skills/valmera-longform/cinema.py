@@ -509,7 +509,7 @@ def render(ctx,script,sc):
     result=L.render(ctx,script,sc)
     out=Path(ctx.supply)/'film_scored.mp4'
     if not out.exists():
-        args=dict(l1=read(sc['l1']),pack=read(Path(ctx.supply)/'pack.json')['pack'],film=result['film'],out=str(out),cache=str(Path(ctx.state_root)/'music_cache'))
+        args=dict(l1=read(sc['l1']),pack=read(Path(ctx.supply)/'pack.json')['pack'],film=result['film'],out=str(out),cache=str(Path(ctx.supply)/'music-cache'))
         job=Path(ctx.supply)/'score_music.json'; save(job,args)
         chain.sh(ctx,[chain.PY,str(HERE/'music_chapters.py'),str(job)],label='wf4-music-'+ctx.run_id,heavy=True,timeout=7200)
     result['clean']=result['film']; result['film']=str(out)
@@ -577,6 +577,9 @@ def check(ctx,rd,sc):
     guarded_voice(ctx,[PX.NARRATE_PY,str(HERE/'measure_mix.py'),str(final),pack['words'],str(nd/'narration_script.json'),str(metrics),PX.FF],'wf4-mix-listen-'+ctx.run_id)
     voice=read(metrics/'metrics.json')
     mix=read(metrics/'mix-wer.json')
+    sound_metrics=Path(ctx.supply)/'sound-measured.json'
+    chain.sh(ctx,[chain.PY,str(HERE/'measure_sound.py'),str(final),rd['clean'],sc['l1'],pack['words'],str(sound_metrics),PX.FF],label='wf4-sound-measure-'+ctx.run_id,heavy=True,timeout=1800)
+    heard_sound=read(sound_metrics)
     duration=brand.probe(str(final))['dur']
     repeats=duplicate_ranges(read(Path(ctx.supply)/'shots.json'))
     hj=Path(ctx.run_dir)/'hook_measured.json'
@@ -585,23 +588,24 @@ def check(ctx,rd,sc):
         text,use=wf4.story.writer.ask('Judge only whether the supplied words, heard in the first ten seconds of a documentary, establish concrete danger, a contradiction or an unanswered curiosity. Return JSON {hook:bool,why:string}. No numeric quality rating.',opening,effort='low',max_tokens=600,what='WF4 first ten seconds')
         save(hj,dict(wf4.story.writer.json_block(text),words=opening,usage=use))
     hook=read(hj)
-    checks=dict(base,longform=dict(seconds=duration,pictures=sc['pictures'],cuts_per_10s=sc['pictures']/(sc['picture_time_s']/10),
+    checks=dict(base,longform=dict(seconds=duration,pictures=sc['pictures'],planned_picture_changes_per_10s=sc['pictures']/(sc['picture_time_s']/10),
                 real_moving_picture_time_share=pics['moving_share'],pictures_checked=pics['checked'],picture_matches=pics['ok'],
-                duplicate_source_ranges=len(repeats),duplicate_pairs=repeats,visual_duplicates=duplicates,hook=hook,longest_shot_s=sc['max_hold_s'],music_share=rd['music']['music_share'],
-                chapter_rises=[dict(chapter=r['chapter'],db=r['measured_rise_db'],at_s=r['rise_at_s']) for r in rd['music']['chapters']],
+                duplicate_source_ranges=len(repeats),duplicate_pairs=repeats,visual_duplicates=duplicates,hook=hook,longest_shot_s=sc['max_hold_s'],music_share=heard_sound['music_share'],sound=heard_sound,
+                chapter_rises=heard_sound['chapter_rises'],
                 narration=voice,delivered_mix_wer=mix['wer'],real_voices=pack['record']['real_voices'],chapters=sc['chapters'],credits=pack['footage']['credits']))
     structure=read(Path(ctx.run_dir)/'structure.json')
     targets=dict(hook=hook.get('hook') is True,turns=len(structure['chapters'])==len(sc['chapters']),length=600<=duration<=1200,footage=pics['moving_share']>=0.5,unique=not repeats and duplicates['ok'],holds=sc['max_hold_s']<=8,
-                 pictures=pics['ok'],music=rd['music']['music_share']>=0.8,rises=all(r['measured_rise_db']>=3 for r in rd['music']['chapters']),voice=voice['ok'],mix_wer=mix['ok'])
+                 pictures=pics['ok'],music=heard_sound['music_share']>=0.8,rises=all(r['rise_db']>=3 for r in heard_sound['chapter_rises']),voice=voice['ok'],mix_wer=mix['ok'])
     checks['targets']=targets; checks['ok']=bool(base['ok'] and all(targets.values()))
     save(Path(ctx.run_dir)/'measured.json',checks)
     if not checks['ok']: raise RuntimeError('delivered-file gates failed: '+json.dumps(targets))
     evidence=Path(ctx.state_root).parent/'evidence'/ctx.run_id
     evidence.mkdir(parents=True,exist_ok=True)
-    for src in [pr,mp,Path(ctx.run_dir)/'measured.json',Path(ctx.supply)/'shots.json',Path(rd['film']+'.json')]:
+    for src in [pr,mp,sound_metrics,Path(ctx.run_dir)/'measured.json',Path(ctx.supply)/'shots.json',Path(rd['film']+'.json')]:
         shutil.copy2(src,evidence/src.name)
     shutil.copytree(Path(ctx.supply)/'picture-evidence',evidence/'pictures',dirs_exist_ok=True)
     shutil.copytree(metrics,evidence/'voice-metrics',dirs_exist_ok=True)
+    subprocess.run([PX.FF,'-v','error','-y','-i',rd['clean'],'-vn','-c:a','flac',str(evidence/'clean-audio.flac')],check=True)
     shutil.copy2(nar,evidence/'narration.wav')
     shutil.copy2(pack['words'],evidence/'words.json')
     footage_box.cleanup_cache(Path(ctx.supply)/'footage')

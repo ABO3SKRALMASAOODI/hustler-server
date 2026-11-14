@@ -75,7 +75,9 @@ def grab(stream,url,t0,t1,out):
             key=hashlib.sha256(url.encode()).hexdigest()[:16]
             with open(media/('whole-'+key+'.lock'),'a') as file_lock:
                 fcntl.flock(file_lock,fcntl.LOCK_EX)
-                whole[url]=fetch.whole(url,str(media/'whole'/key))
+                folder=media/'whole'/key
+                existing=[p for p in folder.glob('whole.*') if p.suffix in ('.mp4','.mkv','.webm') and p.stat().st_size>2000]
+                whole[url]=str(max(existing,key=lambda p:p.stat().st_size)) if existing else fetch.whole(url,str(folder))
     return cut.local(whole[url],t0,t1,out)
 cut.grab=grab
 plan.PLAN_SYSTEM += '\nThis run is a 16:9 long documentary. Average picture length is 4.5 seconds. Match every line exactly; exclude still montages.'

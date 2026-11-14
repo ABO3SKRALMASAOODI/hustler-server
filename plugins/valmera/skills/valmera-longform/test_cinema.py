@@ -127,3 +127,22 @@ def test_completed_voice_does_not_start_another_model(tmp_path,monkeypatch):
     monkeypatch.setattr(C.PX,'narrate',lambda *a,**k:{'cached':True})
     class Context:run_id='test'
     assert C.narrated(Context(),{'segments':[]},tmp_path,'reader.py')=={'cached':True}
+
+
+def test_rater_sound_measure_separates_bed_and_audible_hit(tmp_path,monkeypatch):
+    import numpy as np
+    import measure_sound as M
+    t=np.arange(M.SR*8)/M.SR
+    voice=.1*np.sin(2*np.pi*200*t)
+    voice[3*M.SR:round(3.1*M.SR)]+=.5*np.sin(2*np.pi*70*t[:round(.1*M.SR)])
+    bed=(.002+.02*t/8)*np.sin(2*np.pi*517*t)
+    clean=tmp_path/'clean';clean.write_text('clean')
+    final=tmp_path/'final';final.write_text('final')
+    monkeypatch.setattr(M,'pcm',lambda p,ff:voice+bed if Path(p)==final else voice)
+    plan=tmp_path/'plan.json';C.save(plan,dict(dur_f=240,fps=30,chapters=[dict(id='c1',start=0,end=8)],sound_design=dict(placed=[dict(t=3)])))
+    words=tmp_path/'words.json';C.save(words,dict(words=[dict(start=0,end=8)]))
+    r=M.measure(final,clean,plan,words,tmp_path/'measured.json','unused')
+    assert r['music_share']>.8
+    assert r['chapter_rises'][0]['rise_db']>3
+    assert r['audible_placed']==1
+    assert r['blind_events']>=1
