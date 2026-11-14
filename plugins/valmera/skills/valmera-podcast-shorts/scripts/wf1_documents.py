@@ -82,7 +82,7 @@ def webpage(url,folder):
             with open(os.path.join(folder,'original.html'),'w') as f:f.write(page.content())
             out=[]
             for y in range(0,height,1200):
-                data=page.screenshot(clip=dict(x=0,y=y,width=900,height=min(1200,height-y)))
+                data=page.screenshot(full_page=True,clip=dict(x=0,y=y,width=900,height=min(1200,height-y)))
                 out.append(Image.open(io.BytesIO(data)).convert('RGB'))
             return out
         finally:browser.close()
@@ -92,7 +92,7 @@ def acquire(windows,work,llm):
     import writer
     from PIL import Image
     os.makedirs(work,exist_ok=True)
-    key=hashlib.sha256(json.dumps([2,windows],sort_keys=True).encode()).hexdigest()[:16]
+    key=hashlib.sha256(json.dumps([3,windows],sort_keys=True).encode()).hexdigest()[:16]
     record=os.path.join(work,key+'.json')
     if os.path.exists(record):return json.load(open(record))
     llm.openai_key()
@@ -102,7 +102,7 @@ Find real source papers, original institutional diagrams, maps, company records 
 that accurately depict the named subject. An authentic scientific diagram is useful for a theory;
 it must not imply that a hypothetical phenomenon has been observed. Do not invent a document,
 an identity, evidence of an unfilmed conversation or a URL. Avoid stock catalogs and reposts.
-Follow the supplied primary research and its actual paper/image/media links before searching anew.
+Follow the supplied primary research and its actual paper/image/media links before searching anew. Respect prior acquisition errors: find a different authentic accessible primary source instead of retrying a blocked page. Existing documents are evidence; do not return repeated overlapping crops as new pictures.
 Prefer a publisher, author, university, archive or the named institution. A direct PDF or image
 must be downloadable without sign-in. A primary HTML article is also valid with kind=page: the
 product captures its real rendered pixels. Use a concise original passage or diagram, never a

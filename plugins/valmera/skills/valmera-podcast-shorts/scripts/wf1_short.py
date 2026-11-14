@@ -49,7 +49,7 @@ import shell  # noqa: E402
 import wf1_film  # noqa: E402
 import wf3  # noqa: E402
 
-RESEARCH_CONTRACT = 4  # primary documents can fill a truthful still-picture gap before more video research
+RESEARCH_CONTRACT = 5  # primary documents can fill a truthful still-picture gap before more video research
 
 
 def _llm():
@@ -395,25 +395,25 @@ def refill(ctx, script, pack, shortage):
         pack['referent_research']=found
         pack.setdefault('research_spend',[]).extend(found['spend'])
     coverage['research_context']=pack['referent_research']
-    if pack.get('research_revision',0)<4:
+    if pack.get('research_revision',0)<5:
         import wf1_coverage
         checks=os.path.join(ctx.supply,'placement_checks.json')
         evidence=dict(available=[dict(i=r['i'],clips=[dict(subject=c.get('subject'),shows=c.get('shows'),source=c.get('source')) for c in r['clips']]) for r in pack['footage']],
                       rejected=[r['reason'] for r in json.load(open(checks)).values() if not r['ok']][-60:] if os.path.exists(checks) else [])
         usage=wf1_coverage.repair_requirements(coverage,wanted,evidence,_llm())
-        pack.setdefault('research_spend',[]).append(usage);pack['research_revision']=4
+        pack.setdefault('research_spend',[]).append(usage);pack['research_revision']=5
         stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
         with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
     import wf1_documents
-    context=dict(identity=coverage.get('context'),primary_research=coverage.get('research_context'))
+    context=dict(identity=coverage.get('context'),primary_research=coverage.get('research_context'),prior_errors=[e for r in pack.get('document_research',[]) for e in r.get('errors',[])][-12:])
     documents=wf1_documents.acquire([dict(windows[i],i=i,context=context) for i in wanted],os.path.join(ctx.supply,'primary-documents'),_llm())
     added=0
     for subject,records in documents['pictures'].items():
         dest=pack['pictures'].setdefault(subject,[]);have={r['path'] for r in dest}
         fresh=[r for r in records if r['path'] not in have];dest.extend(fresh);added+=len(fresh)
+    if documents not in pack.setdefault('document_research',[]):pack['document_research'].append(documents)
     if added:
         pack['credits']+=documents['credits']
-        pack.setdefault('document_research',[]).append(documents)
         stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
         with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
         ctx.log(f'acquired {added} primary-document crops; checking their actual words before further research')

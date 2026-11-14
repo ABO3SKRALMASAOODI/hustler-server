@@ -78,7 +78,7 @@ word so the end card follows directly. What differs is how a found picture is sh
 | `footage-cut` | fills the phone, in colour | heavy grotesk capitals, yellow accent |
 | `window` | plays in a four by three window the width of the phone over itself out of focus (three layers); footage that is wide or small in the archive is never blown up | condensed capitals, cyan accent |
 | `archive-reel` | fills the phone in black and white with heavy grain, a projector flash into each run; he stays in colour | cream serif italic |
-| `prints` | lands as a tilted print, beside and over the one before, on its own dark out-of-focus ground: four layers and more by the third print | high-contrast serif, orange accent |
+| `prints` | lands as a readable, nearly full-width tilted print on its own dark out-of-focus ground; the previous print clears so document and interface detail stays visible | high-contrast serif, orange accent |
 
 ## What every short is built from
 
@@ -94,7 +94,7 @@ word so the end card follows directly. What differs is how a found picture is sh
 | Captions | One face-safe seat for the whole film, measured against every final camera crop; a line is laid as it will stand and each word is inked on its own spoken word. After a display hold, already-spoken words are omitted; only the current and following words resume, never a restarted chunk. On a picture that is bright under the seat the type is dark for as long as that picture is up | `film.caption_build`, `wf1_film.ink_by_ground` |
 | Display words | Four to eight strings, the figures, names and words that carry the story, large on the caption seat on the word that says them; the first two seconds always show the spoken hook word by word; the headline stays in delivery metadata; all display blocks are seated against final face boxes on every frame, shrinking long titles if needed; search-subject labels are omitted so they cannot make unsupported factual claims | `wf1_short.direction_of` (OpenAI), `wf1_film.build` |
 | Sound design | The references' kinds of sound on what lands, on new pictures and meaningful graphic actions, no recording twice. Audibility is measured from 50 ms broadband onsets against the whole mix, with retained stems verified against the encoded export | `worker/score/sound.py` (SND3) |
-| Music | A track chosen from the licensed library, opened on a full part, built where the story turns, shaped on the payoff even when fewer than two bars remain, 5–6 dB below speech on the final broadband ruler, a 0.5–2.3 s payoff drop at 10–24 dB, and the product end accent. No two shorts of one run play the same track | `worker/music_film.py`, `worker/score/music.py` (MUSIC2) through `_shell/chain.music_version` |
+| Music | A track chosen from the licensed library, opened on a full part, built where the story turns, shaped on the payoff even when fewer than two bars remain, 5–6 dB below speech on the final broadband ruler, a 0.5–2.3 s payoff drop at 10–24 dB, and the current product brand finish (the owner has held the old end sting pending STING-REF). No two shorts of one run play the same track | `worker/music_film.py`, `worker/score/music.py` (MUSIC2) through `_shell/chain.music_version` |
 | Brand | The product's own watermark on every frame and its end card, measured on the delivered file | `_shell/brand.py` |
 
 ## The alien bank (`worker/scene/alien`): only as the verdict of 14 Nov allows
@@ -163,3 +163,5 @@ cached originals can enter the same footage engine when platform access fails. A
 invalidates an exhausted search cache, while every placement still needs a fresh word-specific verdict.
 After picture selection, exposed speaker passages are checked again: only a director-justified rhetorical
 word can trigger an eased move. A numerical hold detector never creates automatic alternating crops.
+
+Repeated overlapping document crops or source-video intervals do not count as new pictures, even under different cache paths. Final review receives separate phone-resolution frames; a half-open placement ends before the next cut. Changed scene or audio plans invalidate the retained render and final mix before review.
