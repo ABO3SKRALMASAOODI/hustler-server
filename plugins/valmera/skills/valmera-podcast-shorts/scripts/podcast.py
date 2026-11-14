@@ -532,6 +532,13 @@ def build_short(run, m, fetched, pod, tries=3):
 
 
 def shorts(run, fetched, sel, lanes):
+    # The fetched full podcast has already passed identity/duration checks.
+    # Let footage reuse that exact original when its research finds the same
+    # URL; a network wall must not make us download our own source again.
+    os.environ["FOOTAGE_LOCAL_SOURCES"] = json.dumps([
+        dict(url=url, path=os.path.realpath(fetched["video"]))
+        for url in dict.fromkeys([run.link, fetched["info"].get("webpage_url") or run.link])
+    ])
     ms = sel["moments"]
     with cf.ThreadPoolExecutor(max_workers=max(1, lanes)) as pool:
         recs = list(pool.map(lambda m: build_short(run, m, fetched, sel.get("podcast") or {}), ms))

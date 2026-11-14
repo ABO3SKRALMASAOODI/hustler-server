@@ -26,6 +26,26 @@ class FetchError(RuntimeError):
     pass
 
 
+def local_source(url):
+    """A caller-verified complete source, matched by exact source URL.
+
+    The workflow verifies its downloaded media and provenance before passing
+    this manifest. These are read-only originals, never an edited short or a
+    similarly named video. Ordinary footage identity and placement checks still
+    apply to every excerpt selected from them.
+    """
+    try:
+        rows = json.loads(os.environ.get("FOOTAGE_LOCAL_SOURCES", "[]"))
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict) and row.get("url") == url:
+                path = row.get("path")
+                if isinstance(path, str) and os.path.isfile(path) and os.path.getsize(path) > 2000:
+                    return os.path.realpath(path)
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
 def ytdlp_cmd():
     py = os.environ.get("FOOTAGE_YTDLP") or sys.executable
     cmd = [py, "-m", "yt_dlp", "--ignore-config", "--no-update", "--no-playlist", "--no-warnings", "--quiet", "--no-progress",
@@ -130,6 +150,9 @@ def run_ladder(url, args, timeout_s=CALL_S, done=None):
 def proxy(url, out_dir, duration=None, max_s=None):
     """A small copy with sound for scanning: (path, rung). The first PROXY_MAX_S seconds of a long source, or the
     first max_s when the caller has less time than that (a first film's footage, score.film)."""
+    cached = local_source(url)
+    if cached:
+        return cached, "verified-local-source"
     max_s = float(max_s) if max_s else PROXY_MAX_S
     os.makedirs(out_dir, exist_ok=True)
     for p in glob.glob(os.path.join(out_dir, "proxy.*")):
@@ -150,6 +173,9 @@ def proxy(url, out_dir, duration=None, max_s=None):
 def streams(url):
     """The best video stream at or under FINAL_H: {url, headers, w, h, fps, vcodec}, resolved once per source
     so every cut is a seek on it rather than another walk down the ladder."""
+    cached = local_source(url)
+    if cached:
+        return dict(url=cached, headers={}, rung="verified-local-source", expires=time.time() + 4 * 3600)
     fmt = f"bv*[height<={FINAL_H}][vcodec^=avc1]/bv*[height<={FINAL_H}]/b[height<={FINAL_H}]/b"
     out, rung = run_ladder(url, ["-f", fmt, "-J"], timeout_s=120, done=lambda s: s.strip().startswith("{"))
     info = json.loads(out)
@@ -167,6 +193,9 @@ def whole(url, out_dir):
     """The source's whole picture at or under WHOLE_H, no sound, by yt-dlp's own downloader: path. The rung for a
     short source whose sections will not come: a section is cut by ffmpeg on the resolved stream, which YouTube
     refuses from a proxy route more often than it allows (the box, 14 Nov: 5 of 15 cuts, then 4 of 4)."""
+    cached = local_source(url)
+    if cached:
+        return cached
     os.makedirs(out_dir, exist_ok=True)
     for p in glob.glob(os.path.join(out_dir, "whole.*")):
         os.remove(p)
