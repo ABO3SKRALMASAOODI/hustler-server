@@ -10,8 +10,8 @@ done and what is not, and a request with an ask open is never labelled fulfilled
 Nothing here reads the customer's words with a pattern. The model reads them; code only does set
 logic on the model's typed answer, and measures the film.
 
-The switch is app_kv.typed_asks, read per job. With no row the ledger and verification run for every
-typed request; routing is opt-in.
+The switch is app_kv.typed_asks, read per job. With no row the ledger, verification and whole-film
+craft routes run for typed requests; surgical patch routing remains opt-in.
 """
 import copy
 import hashlib
@@ -39,11 +39,11 @@ OPEN_STATES = ("not_done", "partly", "cannot_tell")
 
 def parse(raw):
     """app_kv text to a normalised dict. Explicit off and unreadable rows stay off.
-    Without a row, request checks run on all accounts; alternate editing routes remain opt-in."""
+    Without a row, request checks and whole-film craft run on all accounts."""
     if raw is None:
-        # Universal checking does not enroll customers into alternate editing routes.
-        # Existing explicit mode=on rows retain their original routing defaults.
-        return dict(DEFAULTS, director=False, patch=False, **{"pass": False})
+        # Film routing is separate from first-film rollout. Explicit rows
+        # still hold their off switches; named-item patches remain opt-in.
+        return dict(DEFAULTS, patch=False)
     try:
         data = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
     except (TypeError, ValueError):

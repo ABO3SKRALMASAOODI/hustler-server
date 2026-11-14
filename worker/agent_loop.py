@@ -3914,6 +3914,26 @@ def _rendered_this_turn(ctx):
         and not bool(isinstance(preview, dict) and preview.get("cached"))
 
 
+def _typed_question_hold(ctx, name, args):
+    """Optional choices cannot terminate a doable typed edit before its render.
+
+    The existing question model decides whether an essential input is missing.
+    A second optional question is still optional; the one-shot tool nudge must
+    not turn it into a terminal reply on the next iteration.
+    """
+    if name != "ask_user" or _rendered_this_turn(ctx):
+        return None
+    ledger = getattr(ctx, "ask_ledger", None) or {}
+    if not any(a.get("kind") in {"film", "edit", "change"} for a in ledger.get("asks") or []):
+        return None
+    if agent_tools._question_needs_customer(ctx, (args or {}).get("question")):
+        return None
+    return ("CORRECTION_NEEDED: the request can be attempted with the information already "
+            "available. Make the requested edit, choose the optional details, and render_preview "
+            "before ending this turn. If only one part needs an essential customer input, "
+            "complete and render the independent part first.")
+
+
 def _note_unread_brief(ctx, honesty):
     """On the job's own record, so a turn that ended fulfilled still files that
     its request ran with nothing protected (ops_loop.gaps). The reason lives on
@@ -7492,6 +7512,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             elif (ask_hold := _unmet_ask_hold(
                     ctx, name, args, user_message.get("content") or "")):
                 result = ask_hold
+            elif (typed_question := _typed_question_hold(ctx, name, args)):
+                result = typed_question
             elif (cut_refused := _look_only_cut_refusal(
                     ctx, name, user_message.get("content") or "")):
                 result = cut_refused
