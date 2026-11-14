@@ -185,6 +185,17 @@ def test_narration_phases_exit_before_next_memory_heavy_phase(tmp_path,monkeypat
     assert calls==['_render','_shared-finish','finish']
 
 
+def test_fast_room_floor_preserves_level_and_spectral_shape():
+    import numpy as np
+    import longform_voice as V
+    n=192113;sr=48000;tone=V.room_tone(n,sr,-60)
+    assert len(tone)==n and tone.dtype==np.float32
+    assert abs(20*np.log10(np.sqrt(np.mean(tone*tone)))+60)<.01
+    power=np.abs(np.fft.rfft(tone))**2;freq=np.fft.rfftfreq(n,1/sr)
+    high=power[(freq>10000)&(freq<12000)].sum();low=power[(freq>1000)&(freq<2000)].sum()
+    assert 10*np.log10(high/low)<-12
+
+
 def test_rater_sound_measure_separates_bed_and_audible_hit(tmp_path,monkeypatch):
     import numpy as np
     import measure_sound as M

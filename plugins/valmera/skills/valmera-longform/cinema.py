@@ -235,15 +235,28 @@ def evidence_for_gaps(ctx,script,ft,gaps):
     """
     root=Path(ctx.supply)/'evidence-photos';root.mkdir(exist_ok=True)
     job=root/'plan.json'
+    history=None
+    if job.exists() and read(job).get('_version')!=2:
+        history=dict(plan=read(job),reports=read(root/'search.json') if (root/'search.json').exists() else None)
+        save(root/'research-before-v2.json',history)
+        for name in ('plan.json','pictures.json','search.json'):
+            if (root/name).exists():(root/name).rename(root/(Path(name).stem+'-before-v2.json'))
     if job.exists():plan=read(job)
     else:
         text,use=wf4.story.writer.ask('You are researching documentary evidence for specific narration lines after two archive-video searches left gaps. '
             'Find literal, authentic archive photographs or documents of the named things and the correct era. No generic stock, metaphors, lookalikes, '
-            'AI pictures, or an invented historic camera view. Each image will appear once, briefly, with a restrained camera move. '
+            'AI pictures, or an invented historic camera view. Cover every supplied gap with enough unique images at no more than 7.8 seconds per image; '
+            'the supplied gaps already fit the film-wide 45% still limit. An empty subject list leaves the film unfinished. '
+            'must_show contains ONLY visible subject identity, relevant form and era. Never put reuse constraints, search instructions, timing quotas, '
+            'or requirements to prove every spoken date in a picture into must_show. The allocator enforces uniqueness. '
+            'Use actual relevant hardware or operations to illustrate a technical explanation; a narration reference to a report does not require '
+            'showing its cover unless the words explicitly describe that page. A factual launch schedule can be illustrated by genuine prelaunch '
+            'vehicles; do not invent a date card or demand printed dates on rockets. When a line explicitly describes a particular photograph, '
+            'find that exact photograph. Keep different crews, repair states and ground rehearsals distinct. '
             'Return JSON {subjects:[{name,searches:[specific Wikimedia Commons searches],must_show,is}],lines:[{i,subjects:[names]}]}. '
             'Reuse a subject definition if several lines genuinely need it. The full film must remain majority moving footage.',
-            json.dumps(dict(gaps=gaps,named=script['dossier']['named'],title=script['title'])),effort='high',max_tokens=5000,what='WF4 evidence photo research')
-        plan=wf4.story.writer.json_block(text);plan['usage']=use;save(job,plan)
+            json.dumps(dict(gaps=gaps,named=script['dossier']['named'],facts=script['dossier']['facts'],title=script['title'],prior=history)),effort='high',max_tokens=6000,what='WF4 evidence photo research')
+        plan=wf4.story.writer.json_block(text);plan.update(usage=use,_version=2);save(job,plan)
     cache=root/'pictures.json'
     if cache.exists():pictures=read(cache)
     else:
@@ -251,6 +264,12 @@ def evidence_for_gaps(ctx,script,ft,gaps):
         save(cache,pictures);save(root/'search.json',dict(reports=reports,usd=usd))
         ft['spend'].append(dict(usd=usd+plan.get('usage',{}).get('usd',0)))
     by={ln['i']:ln for ln in ft['lines']};assigned={r['i']:r['subjects'] for r in plan['lines']}
+    # Search the primary archive too; Commons has only a subset of its scans.
+    from archive_pictures import find
+    needed={name for gap in gaps for name in assigned.get(gap['seg'],[])}
+    extra,reports=find([s for s in plan['subjects'] if s['name'] in needed],root/'primary')
+    save(root/'primary/search.json',reports)
+    for name,recs in extra.items():pictures.setdefault(name,[]).extend(recs)
     for gap in gaps:
         line=by.setdefault(gap['seg'],dict(i=gap['seg'],clips=[]))
         for name in assigned.get(gap['seg'],[]):

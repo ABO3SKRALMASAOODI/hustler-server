@@ -87,7 +87,7 @@ def map_time(t, edits):
     return t-shift
 
 
-def shorten_joins(audio, wj, heard, script, out, ffmpeg, aim=16.0):
+def shorten_joins(audio, wj, heard, script, out, ffmpeg, aim=14.0):
     """Speed only short inter-word joins with WSOLA; retain all phonemes.
 
     A gap in ASR timestamps includes unvoiced consonants. Cutting it as silence
@@ -103,19 +103,23 @@ def shorten_joins(audio, wj, heard, script, out, ffmpeg, aim=16.0):
     protected=[w['start'] for w in wj['words'] if w.get('seg',0)<len(script['segments'])
                and script['segments'][w.get('seg',0)].get('beat') in ('turn','low','payoff')
                and not any(q.get('seg')==w.get('seg') and q['start']<w['start'] for q in wj['words'])]
-    candidates=[]
+    candidates=[];ordinary=[]
     for a,b in gaps:
         g=b['start']-a['end'];mid=(a['end']+b['start'])/2
-        if g<=.26 and all(abs(mid-t)>.5 for t in protected):
-            candidates.append((g,max(a['start'],a['end']-.06),min(b['end'],b['start']+.06)))
-    selected=sorted(sorted(candidates)[:min(need,math.ceil(span/60*6))],key=lambda c:c[1])
+        if all(abs(mid-t)>.5 for t in protected):
+            bounds=(max(a['start'],a['end']-.06),min(b['end'],b['start']+.06))
+            if g<=.26:candidates.append((g,*bounds,1.5))
+            elif .28<g<=.65:
+                ordinary.append((abs(g-.32),*bounds,min(1.7,(g+.12)/(.24+.12))))
+    selected=sorted(sorted(candidates)[:min(need,math.ceil(span/60*9))]
+                    +sorted(ordinary)[:math.ceil(span/60*5)],key=lambda c:c[1])
     chunks=[];edits=[];pos=0
-    for _,a,b in selected:
+    for _,a,b,speed in selected:
         ia,ib=round(a*sr),round(b*sr)
         if ia<pos or ib-ia<sr*.1:continue
         source=Path(out)/'join-in.wav';dest=Path(out)/'join-out.wav'
         sf.write(source,x[ia:ib],sr,subtype='FLOAT')
-        subprocess.run([ffmpeg,'-v','error','-y','-i',str(source),'-af','atempo=1.5','-c:a','pcm_f32le',str(dest)],check=True)
+        subprocess.run([ffmpeg,'-v','error','-y','-i',str(source),'-af',f'atempo={speed:.6f}','-c:a','pcm_f32le',str(dest)],check=True)
         y,_=sf.read(dest,dtype='float32')
         if not .5*(ib-ia)<=len(y)<ib-ia:continue
         fade=min(round(.006*sr),len(y)//4)
@@ -156,7 +160,8 @@ def finish(out, script):
     factor=1.0
     gain=1.0 if before['targets']['pitch'] else 14.5/before['pitch_range_st']
     if not .85<=gain<=1.3: raise ValueError('pitch correction would exceed the natural performance limit; regenerate')
-    for attempt in range(2):
+    join_aim=14.0
+    for attempt in range(3):
         x,sr=sf.read(origin,dtype='float32')
         if abs(gain-1)>.005:
             snd=parselmouth.Sound(x,sampling_frequency=sr)
@@ -187,7 +192,7 @@ def finish(out, script):
         if after['pauses_per_min']>17.4:
             heard=json.loads((out/'longform-metrics/heard.json').read_text())
             ff=os.environ.get('NARRATE_FFMPEG') or '/Users/masaoodi/Documents/Valmera/audit/subscriber-reliability-20260908/bin-arm/ffmpeg'
-            wj,joins=shorten_joins(audio,wj,heard,script,out,ff)
+            wj,joins=shorten_joins(audio,wj,heard,script,out,ff,aim=join_aim)
             words.write_text(json.dumps(wj,indent=1))
             after=measure(audio,expected,out/'longform-metrics')
         result=dict(before=before,after=after,tempo=factor,contour_gain=gain,join_edits=joins,method='Easton + Praat overlap-add, existing pitch contour; short joins paced with WSOLA, phonemes retained')
@@ -207,6 +212,8 @@ def finish(out, script):
         if not .85<=gain<=1.3: break
         if after['pauses_per_min']<=17.4:
             factor*=tempo_factor(after['pauses_per_min'],after['median_pause_s'])
+        else:
+            join_aim=max(10.,join_aim-max(1.,(after['pauses_per_min']-16.5)*1.6))
         if not .92<=factor<=1.08: break
     raise ValueError('measured Easton delivery remains outside VO2: '+json.dumps(after))
 
@@ -223,6 +230,28 @@ def raw_checkpoint(out,script,groups,picks=None):
     (out/'read-stage.json').write_text(json.dumps(dict(script=script,groups=groups,picks=picks or [])))
 
 
+def room_tone(n,sr,db):
+    """The shared pink floor, using a fast padded FFT rather than a costly
+    prime-length transform of twelve minutes. Float32 is ample for this floor.
+    """
+    import numpy as np
+    from scipy import fft
+    size=fft.next_fast_len(n,real=True)
+    rng=np.random.default_rng(1114)
+    spectrum=fft.rfft(rng.standard_normal(size,dtype=np.float32),overwrite_x=True)
+    frequencies=fft.rfftfreq(size,1/sr).astype(np.float32)
+    spectrum*=1/np.sqrt(np.maximum(frequencies,60.)/60.)
+    spectrum[frequencies>9000]*=.3
+    tone=fft.irfft(spectrum,size,overwrite_x=True)[:n].copy()
+    del spectrum,frequencies
+    tone*=10**(db/20)/(float(np.sqrt((tone*tone).mean()))+1e-12)
+    return tone
+
+
+def master_version():
+    return hashlib.sha256(Path(__file__).read_bytes()+Path(shared.__file__).read_bytes()).hexdigest()
+
+
 def isolated_render(a):
     """Each phase exits before the next loads models or whole-film FFT buffers.
     The outer guard observes every child; there is one shared lock for the job.
@@ -233,7 +262,8 @@ def isolated_render(a):
     if not ready or a.rerender:
         subprocess.run([sys.executable,str(Path(__file__).resolve()),'_render',a.script,'--out',a.out,'--band',a.band],check=True)
     rj=out/'render.json'
-    mastered=rj.exists() and json.loads(rj.read_text()).get('stories_read')
+    stamp=out/'shared-finish.sha256'
+    mastered=rj.exists() and json.loads(rj.read_text()).get('stories_read') and stamp.exists() and stamp.read_text()==master_version()
     if a.rerender or not mastered:
         subprocess.run([sys.executable,str(Path(__file__).resolve()),'_shared-finish',a.script,'--out',a.out,'--band',a.band],check=True)
     subprocess.run([sys.executable,str(Path(__file__).resolve()),'finish',a.script,'--out',a.out,'--band',a.band],check=True)
@@ -258,9 +288,13 @@ def main():
         if stage['script']!=json.loads(Path(a.script).read_text()):raise ValueError('raw read belongs to a different script')
         for name in ('narration.wav','words.json','render.json'):
             shutil.copy2(out/(Path(name).stem+'_raw'+Path(name).suffix),out/name)
+        for name in ('narration_performance.wav','words_performance.json','render_performance.json','longform_voice.json','check.json'):
+            (out/name).unlink(missing_ok=True)
         import narrate as N
         N.malloc_returns_memory()
-        return shared.finish(out,stage['script'],stage['groups'],stage['picks'])
+        shared.finish(out,stage['script'],stage['groups'],stage['picks'],tone_fn=room_tone)
+        (out/'shared-finish.sha256').write_text(master_version())
+        return
     if a.cmd=='_render':
         import narrate as N
         import datetime

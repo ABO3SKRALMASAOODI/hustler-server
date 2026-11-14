@@ -395,7 +395,7 @@ def word_db(x, sr, w):
     return 10 * math.log10(max(float((seg ** 2).mean()), 1e-12)) if len(seg) > 0.03 * sr else None
 
 
-def finish(out, script, groups, picks=None):
+def finish(out, script, groups, picks=None, tone_fn=None):
     """words.json back on the film's segments; focus words to +4.3 dB; lines by beat to a 3.3 LU range; room tone; -14 LUFS."""
     import soundfile as sf
     import master as MST
@@ -466,13 +466,16 @@ def finish(out, script, groups, picks=None):
         ws = [w for w in words if w.get("seg") == si]
         if ws:
             base.append((ws[0]["start"] - 0.06, ws[-1]["end"] + 0.06, BEAT_DB.get(s.get("beat"), 0.0) + ENERGY_DB.get(s.get("energy"), 0.0)))
-    rng = np.random.default_rng(1114)
-    z = np.fft.rfft(rng.standard_normal(len(x)))
-    fr = np.fft.rfftfreq(len(x), 1 / sr)
-    z *= 1 / np.sqrt(np.maximum(fr, 60.0) / 60.0)         # room tone: pink above 60 Hz, steady, ROOM_DB under the speech
-    z[fr > 9000] *= 0.3
-    tone = np.fft.irfft(z, len(x)).astype(np.float32)
-    tone *= 10 ** ((MST.LUFS + ROOM_DB) / 20) / (float(np.sqrt((tone ** 2).mean())) + 1e-12)
+    if tone_fn is not None:
+        tone = tone_fn(len(x), sr, MST.LUFS + ROOM_DB)
+    else:
+        rng = np.random.default_rng(1114)
+        z = np.fft.rfft(rng.standard_normal(len(x)))
+        fr = np.fft.rfftfreq(len(x), 1 / sr)
+        z *= 1 / np.sqrt(np.maximum(fr, 60.0) / 60.0)     # room tone: pink above 60 Hz, steady, ROOM_DB under the speech
+        z[fr > 9000] *= 0.3
+        tone = np.fft.irfft(z, len(x)).astype(np.float32)
+        tone *= 10 ** ((MST.LUFS + ROOM_DB) / 20) / (float(np.sqrt((tone ** 2).mean())) + 1e-12)
 
     def chain(k):
         # long ramps (0.8 s): the read's level moves through a line's edge, never steps at a join (the VOICE gate's join check)
