@@ -649,9 +649,14 @@ def render(args):
         try:
             args.engine = name
             return LN.render_lines(args, script, vid, out, sys.modules[__name__])
-        except Exception as e:  # noqa: BLE001 - the model would not load or read: the VoxCPM2 voice reads it
+        except Exception as e:  # noqa: BLE001
             fallback = f"{name}: {type(e).__name__}: {str(e)[:300]}"
-            log(f"line-by-line {name} failed ({fallback}); the VoxCPM2 voice reads this script")
+            # Owner's voice is Phonon Easton (14 Nov). A film must never change voice silently, and this fallback took
+            # one render to 11 GB (lane NARRATE-LEAK, 15 Nov). Another voice reads only when the caller asks for it.
+            if not os.environ.get("NARRATE_ALLOW_FALLBACK"):
+                raise RuntimeError(f"the {name} voice failed and no other voice may read this script "
+                                   f"(NARRATE_ALLOW_FALLBACK=1 allows VoxCPM2): {fallback}") from e
+            log(f"line-by-line {name} failed ({fallback}); the VoxCPM2 voice reads this script (NARRATE_ALLOW_FALLBACK)")
             if vid not in {v["id"] for v in voice_list()}:
                 vid = "atlas"
     if name == "openai":

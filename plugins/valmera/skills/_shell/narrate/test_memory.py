@@ -205,3 +205,33 @@ def test_a_render_starts_itself_again_once_with_mallocs_large_cache_off():
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+
+def test_a_failed_voice_never_switches_to_another():
+    """Phonon failing mid-render raises; VoxCPM2 reads only when NARRATE_ALLOW_FALLBACK is set (owner, 14-15 Nov)."""
+    import pytest
+    saved = LN.render_lines
+    seen = []
+
+    def broken(*a, **k):
+        raise OSError("scratch folder vanished")
+
+    LN.render_lines = broken
+    saved_engine = N.Engine
+    old_env = os.environ.pop("NARRATE_ALLOW_FALLBACK", None)
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            sp = Path(d) / "s.json"
+            sp.write_text('{"segments": [{"text": "One line."}], "engine": "phonon"}')
+            args = types.SimpleNamespace(script=str(sp), out=str(Path(d) / "o"), voice=None, engine="phonon", band=None,
+                                         takes=None)
+            N.Engine = lambda *a, **k: seen.append("voxcpm") or (_ for _ in ()).throw(AssertionError("VoxCPM2 loaded"))
+            with pytest.raises(RuntimeError, match="no other voice may read"):
+                N.render(args)
+            assert seen == []
+    finally:
+        LN.render_lines = saved
+        N.Engine = saved_engine
+        if old_env is not None:
+            os.environ["NARRATE_ALLOW_FALLBACK"] = old_env
