@@ -44,14 +44,24 @@ PUNCH_MAX = 1.26              # the closest framing of a punched stretch against
                               # frame leaves at each edge, so a subject no detector found still has its top and its sides
 PUNCH_MAX_PERSON = 1.2        # with someone in the frame: one step, the person and what they are doing both stay in it
 PUNCH_STEP = 0.12             # a framing differs from the last by at least this much, or it is not a cut the eye reads
+TALK_MAX = 1.3                # a talking take cut inside itself (score.pace.talk_parts): the face is the subject, so the closest
+                              # framing goes this far, never past what keeps the head whole or the governor's face height
+TALK_PUSH = 0.02              # and each framing drifts in this much a second, so no frame of it repeats the one before
 
 
-def punch_levels(zp):
-    """The framings a wordless stretch cycles through, as scales: wide, closer, closest, then wide again. Three when
-    the picture has the room, two when it has room for one step, none when it has not."""
-    if zp >= (1.0 + PUNCH_STEP) ** 2:
+CUT_SHOWN = 0.6               # a printed line the window already cuts still binds the camera while this share of it shows
+TALK_STEP = 0.10              # under a voice a framing differs from the last by a tenth: the step the film already takes where
+                              # words were cut out (taste.EDIT_STEP), so every cut inside a talking take reads as that one cut
+
+
+def punch_levels(zp, step=PUNCH_STEP):
+    """The framings a stretch cut inside itself goes through, as scales: wide, closer, closest, then wide again. Three
+    when the picture has the room. With room for one step there are two, and the stretch takes that step once and
+    stays (round seven: two framings in turn are wide, closer, wide, closer, each cut back to the framing just left,
+    which is what p5582's jar did). None when the picture has no room."""
+    if zp >= (1.0 + step) ** 2:
         return [1.0, math.sqrt(zp), zp]
-    if zp >= 1.0 + PUNCH_STEP:
+    if zp >= 1.0 + step:
         return [1.0, zp]
     return []
 
@@ -96,8 +106,14 @@ def _cap(c, marks, ax, ay):
     for m in marks:
         inside = c[0] - 1e-3 <= m[0] and c[1] - 1e-3 <= m[1] and m[2] <= c[2] + 1e-3 and m[3] <= c[3] + 1e-3
         if not inside:
-            if m[0] < c[2] and m[2] > c[0] and m[1] < c[3] and m[3] > c[1]:
-                return 1.0                    # the frame already cuts it: this run does not move
+            # The frame already cuts a line the viewer is reading: this run does not move. A mark that is mostly out of
+            # the window already (it touches the edge, or under three fifths of it shows) is not read as a line, and a
+            # closer frame only shows less of it (p5574: the film's own window cut the label under the speaker in half,
+            # and 14.5 s of the take were held as "no room"; a step closer leaves the label out).
+            ow, oh = min(m[2], c[2]) - max(m[0], c[0]), min(m[3], c[3]) - max(m[1], c[1])
+            area = max((m[2] - m[0]) * (m[3] - m[1]), 1e-9)
+            if ow > 0 and oh > 0 and ow * oh / area >= CUT_SHOWN:
+                return 1.0
             continue
         l, r = (m[0] - c[0]) / w, (m[2] - c[0]) / w
         t, b = (m[1] - c[1]) / h, (m[3] - c[1]) / h
@@ -221,6 +237,7 @@ def _unpunch(ctx, run):
             continue
         key = pace.parent(s["id"])
         first = heads.get(key)
+        s.pop("talk", None)
         if first is None:
             heads[key] = s
             s.pop("punch", None)
@@ -297,8 +314,11 @@ def ease_takes(ctx, punch=False):
         rows = []
         for s in run:
             rows += _rects(s["crop"], s["f"][1] - s["f"][0])
-        if any(len(set(map(tuple, _rects(s["crop"], s["f"][1] - s["f"][0])))) > 1 for s in run):
-            held("the Score already moves this framing")       # a followed subject, a written camera: theirs
+        # A camera the Score wrote is the Score's. A window that only follows the film's subject (dna.take "face") is
+        # still one framing: the camera closes on it inside that window, frame by frame (round seven: a followed take
+        # was neither eased nor cut, and p5574 held it 14.5 s).
+        if any(len(set(map(tuple, _rects(s["crop"], s["f"][1] - s["f"][0])))) > 1 and not s.get("_follow") for s in run):
+            held("the Score already moves this framing")
             last_end_z = 1.0
             continue
         s0, s1 = run[0]["src"][0], run[-1]["src"][1]
@@ -318,7 +338,10 @@ def ease_takes(ctx, punch=False):
         # prints stays whole, and an upload that carries its own captions keeps them whole in any shape. A small sign
         # in the background of a same-shape take is not held: a punch-in that leaves it out is a choice (main_marks).
         marks = [list(x["box"]) for x in (ctx.perc.get("text") or []) if x.get("box") and x["t"][0] - 0.5 <= s1 and x["t"][1] + 0.5 >= s0]
-        if not (other_shape or own_caps):
+        # A picture with nobody in it that prints words (an animated explainer, a diagram, a screen) is its words: every
+        # one of them stays whole (round seven: p5555's label "ARCTIC DEEP" was clipped by a closer frame).
+        drawn = not heads and face is None and bool(marks)
+        if not (other_shape or own_caps or drawn):
             # a line printed across the frame is the upload's own caption or title, whoever speaks or does not (p5572, 13
             # Nov: an eased step cut "POV: You have back pain" at both edges, and the last look took the film back)
             marks = [m for m in marks if m[2] - m[0] >= WIDE_LINE * w]
@@ -360,22 +383,55 @@ def ease_takes(ctx, punch=False):
             if _unsure(ctx, s0, s1):
                 held("someone is in the frame whose head is not found on every sample")
                 continue
-            zp = min(PUNCH_MAX if not heads else PUNCH_MAX_PERSON, room, max(1.0, taste.UPSCALE_MAX / max(up, 1e-6)))
-            levels = punch_levels(zp)
+            said = any(s.get("talk") for s in run)       # the voice's own cuts (score.pace.talk_parts): the face is the subject
+            zp = min(PUNCH_MAX if not heads else TALK_MAX if said else PUNCH_MAX_PERSON, room, max(1.0, taste.UPSCALE_MAX / max(up, 1e-6)))
+            levels = punch_levels(zp, TALK_STEP if said else PUNCH_STEP)
             if not levels:
                 held("no room for a second framing: a head, a printed word or the source's own pixels")
                 continue
-            i, k_part, last_p = 0, -1, object()
+            # The part a run opens on says which framing it opens on: a stretch whose first shots were left as shot
+            # opens its first cut on the second framing, never on the wide one the eye is already looking at.
+            first = int(run[0].get("punch") or 0)
+            push = TALK_PUSH if said else PUSH_RATE
+            # With room for one step only, a talking stretch is cut in and drifts back out: every cut closes on the
+            # speaker where a phrase starts, the frame eases wide again while they talk, and no cut ever goes back to
+            # the framing just left. (Two framings in turn would be wide, closer, wide, closer.)
+            loop = said and len(levels) == 2
+            plen, kk, lp = {}, first - 1, object()
+            for s in run:
+                if s.get("punch") != lp:
+                    kk, lp = kk + 1, s.get("punch")
+                plen[kk] = plen.get(kk, 0) + s["f"][1] - s["f"][0]
+            i, k_part, last_p = 0, first - 1, object()
+            li_prev, since, cuts_seen = None, 0, 0
             for s in run:
                 m = s["f"][1] - s["f"][0]
-                if s.get("punch") != last_p:
+                new = s.get("punch") != last_p
+                if new:
                     k_part, last_p = k_part + 1, s.get("punch")
-                lv = levels[k_part % len(levels)]
-                s["crop"] = [[round(v, 5) for v in _zoom(rows[i + j], min(zp, lv * math.exp(PUSH_RATE * j / fps)), ax, ay)] for j in range(m)]
+                # three framings turn (wide, closer, closest, wide); two are one step, taken once: never the framing just left
+                li = k_part % len(levels) if len(levels) >= 3 else min(k_part, len(levels) - 1)
+                cut_here = new and ((k_part >= 1) if loop else (li != li_prev if li_prev is not None else li != 0))
+                if cut_here or li_prev is None:
+                    since = 0
+                lv = levels[li]
+                if loop and k_part >= 1:
+                    span = max(plen.get(k_part, m) - 1, 1)
+                    rest = 1.0 + (zp - 1.0) * 0.12              # where the drift ends: nearly wide, still moving
+                    zs = [zp * (rest / zp) ** min(1.0, (since + j) / span) for j in range(m)]
+                else:
+                    zs = [min(zp, lv * math.exp(push * (since + j) / fps)) for j in range(m)]
+                s["crop"] = [[round(v, 5) for v in _zoom(rows[i + j], zs[j], ax, ay)] for j in range(m)]
                 s["_eased"] = True
+                # on the L1 a part says only whether the eye sees a cut where it starts: the sound pass and the meter read that
+                s["punch"] = max(1, k_part) if cut_here else 0
+                cuts_seen += 1 if cut_here else 0
+                li_prev, since = li, since + m
                 i += m
             rep["moved"] += 1
-            rep["punched"] = rep.get("punched", 0) + k_part
+            rep["punched"] = rep.get("punched", 0) + cuts_seen
+            if said:
+                rep["talk_cuts"] = rep.get("talk_cuts", 0) + cuts_seen
             rep["frames_moving"] += n
             continue
         if zcap < 1.0 + MOVE_IN[0] * 0.6:

@@ -69,21 +69,88 @@ def customer_cfg():
     return cfg
 
 
-def bin_offers(work, wishes, subjects, deadline, report=None, about="", user_id=None, W=1080, H=1920):
+# What real video exists of (round seven). The pictures route names people, places, brands and events, because a
+# photo archive is searched by a proper name; in round six a film about the Greenland shark, one about cupping and
+# acupuncture and one about a robotics league named "nothing" and got no footage. Video is found of a kind of thing
+# by its own name too: a species, a dish, a sport, a craft, a therapy, a machine, a natural phenomenon.
+NAME_SYSTEM = """You help a film editor find real video. You get moments of a film: the words said there and what the editor wants to show, in any language, perhaps misspelled or run together.
+
+For each moment, name the one real-world subject its words name or plainly point to that real video exists of: interviews, launches, races, news, archive, documentary and nature film. A named person, place or building, a brand, company or product by name, a named event, team, vehicle, artwork or organisation. Also a specific kind of thing by its own name: a species or breed (Greenland shark), a named dish (hakarl), a sport, craft, therapy or technique by its name (cupping therapy, acupuncture), a named kind of machine (a Formula One car), a natural phenomenon (the aurora). Fix the spelling to the subject's usual English name. Not an idea, a feeling, a mood or a metaphor; not an unnamed person or the speaker; not the customer's own product, shop or workplace; and not a thing so general that any library clip shows it (an office, a phone, a handshake, a city street, "students", "a customer").
+
+For each subject: "name" (the usual English name), "is" (person, place, brand, event or thing), "searches" (one to three video searches, most specific first, the bare name last), "must_show" (one plain sentence: what a clip must visibly show to count, naming every form the subject can take on camera: a racing driver "himself, or his own car on track"; a species "the animal itself, alive, filling the frame"; a therapy "the treatment being given, close on the body").
+
+Answer with one JSON object and nothing else."""
+
+
+def name_for_footage(work, wishes, about=""):
+    """(subjects per wish, usd), as score.supply.name_wishes, by the wider rule above. A moment that is the customer's
+    own (`mine`) is not asked."""
+    import broll_source
+    from score import supply
+    texts, idx = [], []
+    for i, w in enumerate(wishes):
+        if w.get("mine"):
+            continue
+        said = supply.clause_of(work, w.get("w") or w.get("at"))
+        texts.append((f'words said there: "{said}" | ' if said else "") + f"the editor wants: {w.get('want') or ''}")
+        idx.append(i)
+    out = [[] for _ in wishes]
+    if not texts:
+        return out, 0.0
+    got, usd = broll_source.name_many(texts, context=about, system=NAME_SYSTEM)
+    for j, subs in zip(idx, got):
+        out[j] = subs[:1]
+    return out, usd
+
+
+def shelved(wishes, subjects, W=1080, H=1920, per=2):
+    """The clips earlier films' engine runs cut of these moments' subjects (footage.cache), as Bin candidates: `per`
+    a moment, a clip offered once, each carrying the moment it is for (`_wish`, and `_w`, the moment's own words or
+    second, for a caller whose wishes are numbered another way). (offers, names with a shelf)."""
+    from . import cache
+    by_name, out, used = {}, [], set()
+    for i, w in enumerate(wishes):
+        sub = subjects[i][0] if i < len(subjects) and subjects[i] else None
+        if not sub or w.get("mine"):
+            continue
+        name = sub["name"]
+        if name not in by_name:
+            by_name[name] = cache.get(name, W, H)
+        n = 0
+        for c in by_name[name]:
+            if c["id"] in used or n >= per:
+                continue
+            used.add(c["id"])
+            n += 1
+            out.append(dict(c, _wish=i, _w=w.get("w") or w.get("at")))
+    return out, sorted(k for k, v in by_name.items() if v)
+
+
+def shelve(offers, W=1080, H=1920):
+    """An engine run's offers onto the shelf, a subject at a time. Returns {subject: clips shelved}."""
+    from . import cache
+    by = {}
+    for o in offers or []:
+        if o.get("named") and o.get("local_file"):
+            by.setdefault(o["named"], []).append(o)
+    return {name: cache.put(name, rows, W, H) for name, rows in by.items()}
+
+
+def bin_offers(work, wishes, subjects, deadline, report=None, about="", user_id=None, W=1080, H=1920, skip=()):
     """Footage candidates for score/supply.run's named route: [] while the switch is off for this account
     (no call, no cost) or when the budget is shorter than the engine needs (said in the report). Never
-    raises: a customer's supply is never lost to this engine."""
+    raises: a customer's supply is never lost to this engine. skip: subjects that came off the shelf."""
     try:
         if not switch.allowed("customer", user_id, customer_cfg()):
             return []
-        return _offers(work, wishes, subjects, deadline, report, about, W, H)
+        return _offers(work, wishes, subjects, deadline, report, about, W, H, skip=skip)
     except Exception as e:  # noqa: BLE001 the Bin stands without footage, and says why
         if report is not None:
             report.append(dict(footage_error=str(e)[:160]))
         return []
 
 
-def _offers(work, wishes, subjects, deadline, report, about, W, H):
+def _offers(work, wishes, subjects, deadline, report, about, W, H, skip=()):
     left = deadline - time.monotonic()
     if left < MIN_BUDGET_S:
         if report is not None:
@@ -92,7 +159,7 @@ def _offers(work, wishes, subjects, deadline, report, about, W, H):
     lines, named = [], []
     for i, w in enumerate(wishes):
         sub = subjects[i][0] if i < len(subjects) and subjects[i] else None
-        if not sub or w.get("mine"):
+        if not sub or w.get("mine") or sub["name"] in skip:
             continue
         lines.append(dict(i=i, say=str(w.get("want") or w.get("say") or sub["name"]), pictures=[sub["name"]], dur=LINE_S))
         if sub["name"] not in [n["name"] for n in named]:
@@ -129,6 +196,9 @@ def acquire(item, out_path, want_w, want_h):
     local = item.get("local_file")
     if local and os.path.exists(local):
         shutil.copyfile(local, out_path)
+    elif item.get("cache_key"):                # a clip an earlier film's engine run cut (footage.cache): the object as it was shelved
+        import storage
+        storage.download_to(item["cache_key"], out_path)
     else:
         from . import cut, fetch
         f = item.get("footage") or {}

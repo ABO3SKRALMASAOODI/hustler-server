@@ -33,6 +33,7 @@ import uuid
 
 from . import flags
 
+FILL_NEEDS_S = 10.0    # what the fill pass may take (two compiles): with less left the film goes out as the Score wrote it
 PREP_LEFT_S = 75.0     # what Scout, Supply and Direct need after perception and boards, or there is no film
 LOOK_USD = 0.10        # one board and a short answer, reserved on top of the account's allowance like the film
 LOOK_S = 30.0          # the look's own deadline
@@ -97,7 +98,8 @@ def close(ctx):
     ctx.director_state = None
     box = (st or {}).get("footage")
     if st and box is not None and st.get("acquire") and not st.get("footage_joined") and getattr(ctx, "director_version", None) is not None \
-            and (box.get("offers") or (box.get("thread") is not None and box["thread"].is_alive())):
+            and (box.get("offers") or (box.get("cached") and not box.get("cached_taken"))        # what the shelf held and the Bin did not take in time
+                 or (box.get("thread") is not None and box["thread"].is_alive())):
         ctx.director_upgrade = st
         return
     if st and st.get("work"):
@@ -120,6 +122,16 @@ def _bed_again(ctx, work, comp, text, about=""):
         bed.settle(work, comp, getattr(ctx, "index", None) or {}, compiler.parse_score(text)[0], about)
     except Exception as exc:  # noqa: BLE001 - the plain bed plays
         print(f"[director] bed not cut again: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
+
+
+def _one_mix(ctx, work, comp):
+    """The film's sounds and its bed as one mix, before the film is lowered (score.bed.one_mix). Never raises."""
+    try:
+        from . import bed
+        return bed.one_mix(work, comp.l1, getattr(ctx, "index", None) or None)
+    except Exception as exc:  # noqa: BLE001 - the film keeps the sounds and the bed it had
+        print(f"[director] one mix skipped: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
+        return None
 
 
 def _request_waiting(conn, project_id, job_id):
@@ -175,6 +187,7 @@ def upgrade(ctx, worker_db, job, started):
             return None
         bin_doc = dict(st.get("bin_doc") or {}, items=list((st.get("bin_doc") or {}).get("items") or []) + rows)
         _bed_again(ctx, work, comp2, text, st.get("about") or "")
+        _one_mix(ctx, work, comp2)
         edl, locals_, rep = lower.lower(comp2.l1, work)
         edl = _publish(ctx, worker_db, edl, locals_, bin_doc, st["original_key"])
         result = ctx.apply_score(edl, "the Director's First cut, with real footage")
@@ -308,6 +321,7 @@ def last_look(ctx, worker_db, job, started, spend, trial_scope, proof=None):
             text = taste.floor_text(st["text"])       # the start state could not be written: the plain film, as before
             comp2 = compiler.compile_score(text, work_dir=work)
         _bed_again(ctx, work, comp2, text if v["remove"] and what != "film" else st["text"], st.get("about") or "")
+        _one_mix(ctx, work, comp2)
         edl, locals_, rep = lower.lower(comp2.l1, work)
         edl = _publish(ctx, worker_db, edl, locals_, st["bin_doc"], st["original_key"])
         result = ctx.apply_score(edl, "the Director's First cut, after the last look")
@@ -598,22 +612,35 @@ def footage_start(job, work, sc, per):
             return None
         import threading
         import broll_source
-        from . import supply
-        box = {"t0": time.monotonic(), "wishes": wishes, "report": []}
+        box = {"t0": time.monotonic(), "wishes": wishes, "report": [], "cached": [], "ready": threading.Event()}
         about = str((sc or {}).get("about") or "")
         W, H = (1080, 1920) if int((per or {}).get("H") or 16) >= int((per or {}).get("W") or 9) else (1920, 1080)
 
         def run():
+            # Round seven. The subjects are named by what real video exists of (a species, a therapy, a league, beside
+            # people, places and brands). What an earlier film's run already cut of them is on the shelf (footage.cache)
+            # and is offered at once: Supply takes it into the Bin while the film is still being written, so the first
+            # film the customer sees has it. The engine then runs only for the subjects with no shelf, and what it cuts
+            # is shelved for the next film and written into this one when it arrives (`upgrade`).
+            have = []
             try:
-                subjects, usd = supply.name_wishes(work, wishes, about)
+                subjects, usd = seam.name_for_footage(work, wishes, about)
                 box["usd"] = float(usd or 0.0)
-                if any(subjects):
-                    box["offers"] = seam.bin_offers(work, wishes, subjects, time.monotonic() + 3600.0, box["report"], about, uid, W, H)
+                box["subjects"] = [s[0]["name"] if s else None for s in subjects]
+                try:
+                    box["cached"], have = seam.shelved(wishes, subjects, W, H)
+                finally:
+                    box["ready"].set()
+                if any(s and s[0]["name"] not in have for s in subjects):
+                    box["offers"] = seam.bin_offers(work, wishes, subjects, time.monotonic() + 3600.0, box["report"], about, uid, W, H, skip=have)
+                    box["shelved"] = seam.shelve(box["offers"], W, H)
                 else:
                     box["offers"] = []
             except Exception as exc:  # noqa: BLE001 - the film stands on what Supply found
                 box["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
                 box.setdefault("offers", [])
+            finally:
+                box["ready"].set()
             box["seconds"] = round(time.monotonic() - box["t0"], 1)
         th = threading.Thread(target=broll_source.carried(run), name="film-footage", daemon=True)
         th.start()
@@ -632,6 +659,8 @@ def footage_into(work, text, box, acquire, most=8):
     (_place_clips). Nothing else in the Score changes and no model is called. Returns (score text, [new Bin rows])."""
     from . import compiler, direct
     offers = [c for c in (box or {}).get("offers") or [] if isinstance(c, dict) and c.get("kind") == "video"]
+    if not (box or {}).get("cached_taken"):            # the shelf's clips Supply did not take in time are placed like the engine's
+        offers = [c for c in (box or {}).get("cached") or [] if isinstance(c, dict) and c.get("kind") == "video"] + offers
     if not offers:
         return None
     try:
@@ -1025,7 +1054,7 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
     bin_doc = None
     if sc is not None:       # with no wish too: the hook picture of a talking film and a wordless upload's own details are found here
         try:
-            bin_doc = supply.run(work, sc, per, _acquirer(ctx, worker_db, job, work), min(deadline - 70.0, time.monotonic() + flags.SUPPLY_S))
+            bin_doc = supply.run(work, sc, per, _acquirer(ctx, worker_db, job, work), min(deadline - 70.0, time.monotonic() + flags.SUPPLY_S), foot=foot)
         except call.Refused:
             raise
         except Exception as exc:  # noqa: BLE001 - DESIGN 3.5: the upload and plates
@@ -1050,6 +1079,14 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
         raise Fall("direct", f"refused: {exc}")
     except direct.Empty as exc:
         raise Fall("direct", f"empty: {exc}")
+    try:                     # every checked picture reaches the film: the Bin's unused pictures are cut in on their words
+        from . import fill
+        if deadline - time.monotonic() >= FILL_NEEDS_S:
+            text2, rec["fill"], comp2 = fill.fill(work, text)
+            if comp2 is not None:
+                comp, text = comp2, text2
+    except Exception as exc:  # noqa: BLE001 - the film as the Score wrote it
+        rec["fill"] = {"fault": f"{type(exc).__name__}: {str(exc)[:160]}"}
     with open(os.path.join(work, "score.jsonl"), "w", encoding="utf-8") as f:
         f.write(text)
     rec["direct"] = {k: usage.get(k) for k in ("rounds", "q_first", "q_repair", "repair_kept", "asks_open", "truncated")}
@@ -1069,6 +1106,7 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
         rec["bed"] = {k: got.get(k) for k in ("cid", "title", "kind", "gain_db", "offset_s", "turn_s", "chosen_by")} if got else None
     except Exception as exc:  # noqa: BLE001
         rec["bed_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+    rec["one_mix"] = _one_mix(ctx, work, comp)
     edl, locals_, rep = lower.lower(comp.l1, work)
     rec["lower"] = {k: rep.get(k) for k in ("counts", "burns_as_light", "burns_as_glow", "missing_pictures", "fonts_replaced", "bed", "bed_error")}
     edl = _publish(ctx, worker_db, edl, locals_, bin_doc, original["storage_key"])

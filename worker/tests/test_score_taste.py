@@ -14,6 +14,15 @@ import score.compiler as S
 from score import brief, direct, taste
 from tests.test_score_compiler import BIN, talk_index, wordless_index
 
+
+@pytest.fixture(autouse=True)
+def _take_as_before_round_seven(monkeypatch):
+    """These tests pin the governor's own steps and seats on a take that holds. Round seven cuts a talking take inside
+    itself where a phrase starts (score.pace.talk_parts): that is pinned in tests/test_score_round_seven.py, and is
+    off here so each test still reads the one thing it was written for."""
+    monkeypatch.setenv("VALMERA_TALK_CUTS", "0")
+
+
 FF = os.environ.get("FFMPEG_BIN", "ffmpeg")
 
 

@@ -65,7 +65,8 @@ def test_a_wordless_stretch_of_the_take_is_cut_inside_itself_and_a_spoken_one_ne
     assert any(e["kind"] == "cut" and e["id"] == one[1]["id"] for e in ev)        # a cut the eye sees is a cut the sound may land on
     talk = selfie(20.0)
     said = comp(film_text(beats_over(talk, 4, lambda k, a, z: {"pic": "main"})), talk)
-    assert all(s.get("punch") is None for s in shots(said))                       # under a voice the take is eased, never punched
+    # round seven: under a voice the take is cut inside itself too, where a phrase starts (tests/test_score_round_seven.py)
+    assert not any(s.get("punch") for s in shots(said) if not s.get("talk"))
 
 
 def test_a_punched_stretch_steps_closer_and_never_back_to_the_framing_it_left():

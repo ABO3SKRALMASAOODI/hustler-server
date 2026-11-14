@@ -67,6 +67,14 @@ def faces_of(ctx, key):
     return out
 
 
+def designed(ctx, key):
+    """The picture is one Valmera drew from the film's own words (a number, a quoted phrase): type, not a photograph.
+    It is shown whole. Round seven: framed "on its subject" and cut inside itself like a found still, two of p5555's
+    were pushed past both edges of the frame with their words cut off."""
+    row = ctx.bin.get(str(key).split(":", 1)[-1]) or {}
+    return bool(row.get("design")) or row.get("provider") == "designed"
+
+
 def focus_of(ctx, key, asset):
     """Where a still's subject is, (x, y) in source fractions: its largest head, or the centre of its detail (where
     the picture has edges and colour, read on a thumbnail), or the centre. Cached on the compile."""
@@ -139,6 +147,14 @@ def still_path(ctx, key, asset, W, H, n, rng, part=0, written=None):
     """Per-frame windows of one still shot: a camera move for its whole length. `written` is a rect the Score gave
     (a crop): the move stays inside it. part: which framing of this still this is (0 the first)."""
     room = zoom_room(ctx, key, asset, W, H)
+    if designed(ctx, key) and written is None:
+        # type drawn for this frame: whole, on its centre, breathing by a hundredth and a half so it is never a still frame
+        base = cover(ctx, key, asset, W, H, 1.0, (0.5, 0.5))
+        if n <= 2:
+            return base
+        w, h = base[2] - base[0], base[3] - base[1]
+        cx, cy = (base[0] + base[2]) / 2, (base[1] + base[3]) / 2
+        return [[cx - w / z / 2, cy - h / z / 2, cx + w / z / 2, cy + h / z / 2] for z in (1.0 + 0.015 * (1.0 - p) for p in _curve(n))]
     if written is not None:
         base, room = list(written), 1.0 + min(0.1, max(0.0, room - 1.0))
     else:
@@ -189,6 +205,14 @@ PUNCH_SPLIT_F = 24         # a stretch of the take nobody speaks over, held 0.8 
 PUNCH_F = 18               # about this long each framing (0.6 s): a product teaser's own pace
 PUNCH_MOST = 5
 PUNCH_MIN_F = 9
+# Under a voice (round seven, 14 Nov: the rated films held one framing of a talking take 14.5 s, and 3.5 s twice in the
+# best of them; the judge passes 2 s on one shot in forty). A stretch of the take somebody speaks over is cut inside
+# itself where a phrase starts: the word after a breath, or a word the voice stresses. Never mid-word, never two cuts
+# closer than a framing can be read, and never back to the framing just left (score.move sets the framings).
+TALK_MAX_F = 62            # a framing of a talking take holds this long at most (2.07 s)
+TALK_F = 46                # and about this long (1.5 s): the take is the slowest picture a film has, the face needs its line
+TALK_MIN_F = 26            # never two cuts closer than this (0.87 s)
+TALK_TAIL_F = 14           # what a cut leaves after itself in its shot, or the cut waits for the next shot
 
 
 def spoken(ctx, a, z):
@@ -214,9 +238,13 @@ def take_parts(ctx, b, sid, ref, d, at, rng):
     back to the framing just left). Under a voice the take is never punched: it is eased (score.move)."""
     one = [(sid, ref, d)]
     z = ref.get("zoom")
-    if d < PUNCH_SPLIT_F or ref.get("asset") != "main" or ref.get("_view") is not None or ref.get("crop") is not None or ref.get("cam") \
-            or ref.get("_cam") or ref.get("rate") or ref.get("step") or ref.get("k") is not None or ref.get("treat") \
-            or (isinstance(z, (int, float)) and not isinstance(z, bool) and z > 1) or spoken(ctx, at, at + d) or _counts(b):
+    plain = not (ref.get("asset") != "main" or ref.get("_view") is not None or ref.get("crop") is not None or ref.get("cam")
+                 or ref.get("_cam") or ref.get("rate") or ref.get("step") or ref.get("k") is not None or ref.get("treat")
+                 or (isinstance(z, (int, float)) and not isinstance(z, bool) and z > 1) or _counts(b))
+    if plain and ref.get("sync") and spoken(ctx, at, at + d) and talk_on():
+        return talk_parts(ctx, sid, ref, d, at, rng)
+    ctx.__dict__.pop("_talk", None)              # anything else on screen ends a talking stretch
+    if d < PUNCH_SPLIT_F or not plain or spoken(ctx, at, at + d):
         return one
     from . import compiler
     n = int(min(PUNCH_MOST, max(2, round(d / PUNCH_F))))
@@ -243,6 +271,79 @@ def take_parts(ctx, b, sid, ref, d, at, rng):
     return [(sid if k == 0 else f"{sid}x{k}", dict(ref, _punch=k), ln) for k, ln in enumerate(lens)]
 
 
+def talk_on():
+    return os.environ.get("VALMERA_TALK_CUTS", "1") != "0"
+
+
+def phrase_starts(ctx, a, z):
+    """Programme frames in (a, z) where a phrase starts: a word that follows a breath of three frames or more, or one
+    the voice stresses (the measured stress that prints the * marks). The strength of each, 0..1."""
+    ends = getattr(ctx, "wfe_any", None) or {}
+    rows = sorted((int(f), w) for w, f in (getattr(ctx, "wf_any", None) or {}).items())
+    stress = getattr(ctx, "stress", None) or {}
+    out, prev_end = [], None
+    for f, w in rows:
+        try:
+            st = float(stress.get(w, stress.get(str(w), 0.0)) or 0.0)
+        except (TypeError, ValueError):
+            st = 0.0
+        gap = f - prev_end if prev_end is not None else 0
+        if a < f < z and (gap >= 3 or st >= 0.6):
+            out.append((f, min(1.0, 0.25 * min(gap, 12) / 3.0 * 0.6 + st / 2.5)))
+        prev_end = max(prev_end or 0, int(ends.get(w, f + 1)))
+    return out
+
+
+def talk_parts(ctx, sid, ref, d, at, rng):
+    """A stretch of the take somebody speaks over as the framings it is cut into: [(id, ref, frames)]. The stretch is
+    read across the film's beats: a take that runs straight on from the shot before carries how long its framing has
+    already held, so a run of short sentences is cut as one stretch, and a cut may fall on the shot's own first frame
+    (a sentence starts there). A part marked `_punch` is a framing of its own; `_talk` says the cut is the voice's.
+    A stretch that never passes TALK_MAX_F stays one shot, eased by score.move as before."""
+    one = [(sid, ref, d)]
+    st = ctx.__dict__.get("_talk")
+    cont = bool(st) and st.get("end") == at
+    since = int(st["since"]) if cont else 0
+    k = int(st["k"]) if cont else 0
+    marked = bool(st.get("marked")) if cont else False
+    cuts = []
+    if since + d > TALK_MAX_F:
+        cand = phrase_starts(ctx, at, at + d)
+        if cont and since >= TALK_MIN_F:
+            cand = [(at, 0.6)] + cand                  # the shot's own first frame: a sentence starts on it
+        pos = at - since                               # where the framing on screen began
+        while True:
+            lo = max(pos + TALK_MIN_F, at)             # a framing that has already held past its time is cut at the first phrase from here
+            hi = max(pos + TALK_MAX_F, lo + TALK_MIN_F)
+            pool = [(f, s) for f, s in cand if lo <= f <= hi and (at + d - f) >= TALK_TAIL_F and (f == at or f - at >= 2)]
+            if not pool:
+                if at + d - pos <= TALK_MAX_F or hi >= at + d:
+                    break
+                # no phrase starts in reach: the nearest word start to the pulse, or the stretch runs on to its next shot
+                words = sorted(int(f) for f in (getattr(ctx, "wf_any", None) or {}).values() if lo <= f <= hi and at < f and at + d - f >= TALK_TAIL_F)
+                if not words:
+                    break
+                want = pos + TALK_F
+                pool = [(min(words, key=lambda f: abs(f - want)), 0.1)]
+            want = pos + TALK_F + int(rng.uniform(-6, 6))
+            f = max(pool, key=lambda c: (c[1] - abs(c[0] - want) / float(TALK_MAX_F), -c[0]))[0]
+            cuts.append(f - at)
+            pos = f
+    if not cuts:
+        ctx._talk = {"end": at + d, "since": since + d, "k": k, "marked": marked}
+        return [(sid, dict(ref, _punch=k, _talk=True), d)] if marked else one
+    out, edges = [], sorted(set(cuts))
+    bounds = [0] + [c for c in edges if c > 0] + [d]
+    if edges[0] == 0:
+        k += 1                                         # the cut falls on this shot's first frame
+    for j, (x, y) in enumerate(zip(bounds, bounds[1:])):
+        if j:
+            k += 1
+        out.append((sid if j == 0 else f"{sid}x{j}", dict(ref, _punch=k, _talk=True), y - x))
+    ctx._talk = {"end": at + d, "since": d - bounds[-2], "k": k, "marked": True}
+    return out
+
+
 def parts(ctx, b, sid, ref, d, rng, at=None):
     """One planned shot of a found picture as the shots it is cut into: [(id, ref, frames)]. The first keeps the
     shot's id. A shot too short to cut, a plate, a picture the Score framed or moved itself, and a clip with no
@@ -250,6 +351,7 @@ def parts(ctx, b, sid, ref, d, rng, at=None):
     one = [(sid, ref, d)]
     if on() and at is not None and ref.get("kind") == "main" and punch_on():
         return take_parts(ctx, b, sid, ref, d, at, rng)
+    ctx.__dict__.pop("_talk", None)
     if not on() or d < SPLIT_F or ref.get("kind") != "asset" or ref.get("crop") is not None or ref.get("cam") or ref.get("rate"):
         return one
     from . import compiler
@@ -277,6 +379,8 @@ def parts(ctx, b, sid, ref, d, rng, at=None):
             out.append((sid if k == 0 else f"{sid}x{k}", dict(ref, t0=round(t, 3), _part=k), ln))
             t += ln / ctx.fps + jump
         return out
+    if designed(ctx, ref["asset"]):
+        return one                                 # type is read whole, once: never cut inside itself
     if zoom_room(ctx, ref["asset"], asset, ctx.W, ctx.H) < 1.0 + PUSH[0] + 0.1:
         n = min(n, 2) if (asset.get("w") or 0) / max(asset.get("h") or 1, 1) > 1.2 * ctx.W / ctx.H else 1      # a small still: a travel has two halves, a push has one
     if n <= 1:

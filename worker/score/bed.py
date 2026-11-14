@@ -381,6 +381,84 @@ def arranged(work, doc, l1, index, f, turn_s):
     return doc.get("arranged")
 
 
+RAW_FILE = "bed_arranged_raw.m4a"
+
+
+def one_mix(work, l1, index=None):
+    """SND3's one mix, on today's renderer (lane K round seven, 14 Nov). The workflow shell mixes a film's sounds and its
+    song together (score.music.mix): each placed sound is made to be there over the voice and the song, the turn's hit
+    lands on the song's drop, and the song dips under each hero hit. A Director film had none of it: its sounds were
+    set against the voice alone before the bed existed, the bed was cut for the film afterwards, and today's renderer
+    lays one on the other as they are. The rated round-six films measured 0.7 added sounds in 10 s where the pass had
+    placed 4. This is the same three steps on the film as lowered: the L1's sounds are lifted over the arranged bed
+    (sound.present_over: by their tier's lift at most, never into the voice; a body hit the song still covers goes),
+    the turn's sounds move onto the drop, and the dips under the hero hits are baked into the arranged track itself
+    (scene.audio.duck_curve), because the renderer plays that track at one gain. The film's sound items change in
+    place; the track keeps its name and gets a new digest, so the project's asset is the audio the item plays.
+    Returns what it did, or None when the film has no arranged bed. Never raises."""
+    try:
+        doc = chosen(work)
+        arr = (doc or {}).get("arranged")
+        if not arr or not (l1.get("sound") or []):
+            return None
+        path = os.path.join(work, str(arr.get("file")))
+        fps = float(l1["fps"])
+        prog = float(l1["dur_f"]) / fps
+        if not os.path.exists(path) or abs(float(arr.get("dur_s") or 0.0) - prog) > 0.15:
+            return None
+        import hashlib
+        import shutil
+        import subprocess
+        import numpy as np
+        from scene import audio as AU
+        from . import music as MU
+        from . import sound as SD
+        raw = os.path.join(work, RAW_FILE)
+        if not arr.get("mixed") or not os.path.exists(raw):
+            shutil.copyfile(path, raw)                  # the track as it was cut: every mix starts from it
+        src = MU._source(l1, work)
+        song = AU.pcm(raw)
+        if not len(song):
+            return None
+        n_ar = int(round(prog * SD.AR))
+        voice = SD.spine_audio(l1.get("spine"), fps, src, n_ar)[:, 0] if src else np.zeros(n_ar, np.float32)
+        shift = 0.0
+        if float(np.abs(voice).max()) > 1e-5:
+            speech, _ = SD.speech_frames(voice, SD.words_in_programme(l1, index))
+            shift = SD.voice_shift(voice, speech)
+        before = {str(x.get("id")): x.get("db") for x in l1["sound"]}
+        sounds = MU.sounds_on_the_drop(l1["sound"], {"drop_at": arr.get("drop_at"), "turn_s": doc.get("turn_s")}, fps)
+        sounds = SD.present_over(sounds, voice, MU.to_ar(song)[:n_ar], fps, voice_shift_db=shift)
+        _v, fx, _ = AU.split_audio(MU._Plan(dict(l1, sound=sounds), src))
+        own, ducks = getattr(fx, "own", None), getattr(fx, "ducks", None) or []
+        rep = {"sounds": len(sounds), "taken_out": len(l1["sound"]) - len(sounds),
+               "lifted": sum(1 for x in sounds if x.get("lifted_for_bed_db")), "ducks": 0}
+        n = min(len(song), len(own)) if own is not None else 0
+        if ducks and n:
+            g, drep = AU.duck_curve(song[:n], np.asarray(own[:n], np.float32), ducks, n)
+            song[:n] *= g[:, None]
+            rep["ducks"] = sum(1 for r in drep if r.get("db"))
+            rep["duck_db"] = [r.get("db") for r in drep]
+        tmp = path + ".mix.m4a"
+        r = subprocess.run([AU.FF, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-f", "f32le", "-ar", str(AU.SR), "-ac", "2", "-i", "pipe:0",
+                            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", tmp], input=song.tobytes(), capture_output=True, timeout=120)
+        if r.returncode:
+            raise RuntimeError(f"bed encode failed: {r.stderr.decode(errors='replace')[-160:]}")
+        os.replace(tmp, path)
+        with open(path, "rb") as f:
+            arr["sha"] = hashlib.sha256(f.read()).hexdigest()[:12]
+        arr["mixed"] = rep
+        doc["arranged"] = arr
+        _write(work, doc)
+        l1["sound"] = sounds
+        if isinstance(l1.get("sound_design"), dict):
+            l1["sound_design"]["one_mix"] = dict(rep, moved=sum(1 for x in sounds if before.get(str(x.get("id"))) != x.get("db")))
+        return rep
+    except Exception as e:  # noqa: BLE001 - the film keeps the sounds and the bed it had
+        print(f"[director] sounds not mixed with the bed: {type(e).__name__}: {str(e)[:160]}", flush=True)
+        return None
+
+
 def chosen(work):
     d = _read(work)
     return d if d.get("on") and d.get("cid") and d.get("settled") else None

@@ -1679,6 +1679,10 @@ def picture_fields(ctx, b, ref, a, z, W=None, H=None, src=None):
                 ctx.cam_marks.sort(key=lambda m: m[0])
             else:
                 out["crop"] = settled_take(ctx, ref, asset, out.get("src"), n, rng, a, base)
+                c = out["crop"]
+                if isinstance(c, list) and c and isinstance(c[0], list) and ref.get("crop") is None and not ref.get("cam") \
+                        and not (isinstance(ref.get("zoom"), (int, float)) and not isinstance(ref.get("zoom"), bool) and ref["zoom"] > 1):
+                    out["_follow"] = True      # the window follows the film's subject (dna.take): where it sits moves, how close it is is still the camera's
         elif ctx.governed and asset["kind"] == "image" and ref.get("kind") == "asset" and str(ref["asset"]).startswith("bin:") \
                 and (W, H) == (ctx.W, ctx.H) and not ref.get("cam") and not isinstance(ref.get("crop"), str) and _pace_on():
             # a found still on the frame (score.pace): framed on its subject, heads whole, and never standing still
@@ -2277,9 +2281,11 @@ def plan_shots(ctx):
             cut = pace.parts(ctx, b, sid0, ref0, d0, rng_for(ctx.seed, "parts", sid0), at=t) if ctx.governed else [(sid0, ref0, d0)]
             for sid, ref, d in cut:
                 its = emit_ref(ctx, b, ref, t, t + d, sid)
-                if ref.get("_punch") is not None:           # a framing of the take cut inside a wordless stretch (score.pace, score.move)
+                if ref.get("_punch") is not None:           # a framing of the take cut inside itself (score.pace, score.move)
                     for it in its:
                         it["punch"] = int(ref["_punch"])
+                        if ref.get("_talk"):                # under a voice: the cut is on a phrase the voice starts
+                            it["talk"] = True
                 b.shots += its
                 if ref.get("_cam"):
                     ctx.cam_land.setdefault(ref["_cam"], t)
@@ -6549,12 +6555,14 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
             turn_s = tf / ctx.fps if tf is not None else None
         except Exception:  # noqa: BLE001 - a film is never lost to its music line
             turn_s = None
-    l1 = sound.apply(l1, work_dir, index, perc, ctx.asks or None, (facts or {}).get("supply"), turn_s=turn_s)
+    l1 = sound.apply(l1, work_dir, index, perc, ctx.asks or None, (facts or {}).get("supply"), turn_s=turn_s, own_tiers=bool(governed))
     m = meter(ctx, l1)
     if governed:
         from . import pace
         m["pace"] = pace.report(ctx)
         m["taste"] = taste_meter(ctx, facts, rounds)
+        light_finding(ctx, m)
+        steps_finding(ctx, l1)
         m["findings"] = list(ctx.findings)
         m["hold_s"] = hold_s
         # The take is never still (score.move, 13 Nov): each run of the upload becomes one eased camera track. Done
@@ -6565,6 +6573,8 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
             pr = getattr(ctx, "punch_rep", None) or {}
             if pr.get("punched") or pr.get("fault") or pr.get("why_held"):
                 rep["punched"], rep["punch_held"] = pr.get("punched") or 0, pr.get("why_held") or pr.get("fault")
+                if pr.get("talk_cuts"):
+                    rep["talk_cuts"] = pr["talk_cuts"]
             if rep.get("moved") or rep.get("stills"):
                 l1e = to_l1(ctx)
                 l1e["sound"] = l1["sound"]
@@ -6580,6 +6590,43 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
             m["move"] = {"fault": f"{type(e).__name__}: {str(e)[:160]}"}
     txt = meter_text(ctx, m)
     return Compiled(l1, m, txt, (time.perf_counter() - t0_) * 1000)
+
+
+def light_finding(ctx, m):
+    """A film that is still the upload is told to the repair round, with what an edit of it would be. Round seven:
+    p5572 went out 99.5% the upload and p5584 83%, a title at each end, and rated 2 and 2.5; an upload that is
+    already cut, with its own type across the frame, cannot be re-framed, so its edit is in time."""
+    f = m.get("facts") or {}
+    if f.get("class") not in ("light_touch", "same_upload"):
+        return
+    ctx.find(f"edit: this is still the upload: no picture was added, {f.get('reframed_pct', 0)}% of it is re-framed and something designed stands on "
+             f"{f.get('overlay_pct', 0)}% of it. Make the edit in time: open on its strongest second under a title its own words do not already say, "
+             "cut its shots so none runs past 2 s (`main@4.3-5.1` jumps to another moment of it), cut to its views where the Bin lists them, "
+             "land a sound on each action that lands, and close on a line")
+
+
+STEPS_MIN_S, STEPS_PICTURES = 6.0, 3
+
+
+def steps_finding(ctx, l1):
+    """A wordless film of several pictures that says nothing between its title and its last line is told so, with the
+    chapter form, and the repair round decides whether it goes step by step. Round seven: the round-five film of
+    p5575 counted a morning routine in chapters (01 wake ... 04 and breathe) and rated 4.5; round six lost them and
+    the rater asked for them back. Which words a step takes is the Director's reading, never a rule here."""
+    from . import taste
+    dur = ctx.dur_f / ctx.fps
+    if len(ctx.words) / max(ctx.src_dur, 1e-3) >= 1.0 or dur < STEPS_MIN_S \
+            or any(i.get("k") == "word" and i.get("role") == "cap" for i in l1.get("items") or []):
+        return                                         # a film that speaks, or carries captions, is saying something
+    lines = {".".join(str(i.get("id")).split(".")[:2]) for i in l1.get("items") or []
+             if (i.get("k") == "word" and i.get("role") == "big") or (i.get("k") == "card" and i.get("pic") in (None, "plate"))}
+    pictures = len(taste.picture_changes(ctx)) + 1
+    if len(lines) > 2 or pictures < STEPS_PICTURES + 1:
+        return
+    ctx.find(f"type: between its title and its last line this film shows {pictures} pictures in {dur:.0f} s and says nothing. If it goes step by step "
+             "(a routine, a recipe, a how-to, a build), count the steps in chapters: one `counter` on each step's first shot, "
+             '{"g":"counter","from":2,"to":2,"fmt":"{n:02d} rinse","size":.04,"seat":[.5,.66],"font":"grotesk-bold","for":"b03.s0","at":"b03.in"}, '
+             "one or two words a step, three to five steps, all at one seat. If it does not, leave it and say why in `rest`")
 
 
 def hook_finding(ctx):

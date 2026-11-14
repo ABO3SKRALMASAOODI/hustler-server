@@ -23,7 +23,7 @@ DEADLINE_S = 150.0
 # The Scout: 22 s lost a film its whole Bin (p5565, 13 Nov: a video call with a slide of text; Haiku had written nothing
 # by 22 s, the film went out with no wish, no picture and no hook). It writes up to 14 wishes now and reads a board;
 # 9 to 16 s is its usual time, and a late Scout costs the film everything Supply would have found.
-SCOUT_S, SUPPLY_S = 32.0, 44.0     # supply: the look every Bin picture passes (lane B, 12 Nov), the fetch (13 Nov), and since round five up to 14 pictures a film
+SCOUT_S, SUPPLY_S = 32.0, 50.0     # supply: the look every Bin picture passes (lane B, 12 Nov), the fetch (13 Nov), and since round seven up to 20 pictures a film (a run a moment)
 FILM_USD = 0.70            # what one film may spend: the dearest slice run was $0.56, and a Look and a Scout are under a cent
 DEFAULTS = {"mode": "off", "percent": 100, "test_user_ids": [], "deadline_s": DEADLINE_S, "max_source_s": MAX_SOURCE_S, "film_usd": FILM_USD,
             "models": {"scout": "claude-haiku-5-5", "direct": "claude-opus-5-5"}, "effort": {"direct": "low"},

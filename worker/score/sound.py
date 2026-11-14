@@ -831,7 +831,10 @@ def plan_sounds(events, ctx):
     bed = bool(ctx.get("bed"))
     total, win, al = allowance(cls, np10, dur_s, bed)
     gov = int(al["sounds"])
-    n_tick = max(0, min(int(TICK_10S.get(cls, 0.0) * dur_s / 10.0 + 1e-9), gov - total))
+    # The tick layer is its own layer, under the audible one (round seven: capped by what the governor left of the
+    # audible allowance, a film of some pictures carried none, and every display line of a Director film went unsounded:
+    # "the film carries 0 small ticks" on 4 of 4 lines in p5574 and p5565).
+    n_tick = max(0, int(TICK_10S.get(cls, 0.0) * dur_s / 10.0 + 1e-9))
     tick_win = max(1, int(math.ceil(TICK_10S.get(cls, 0.0) * TICK_BURST))) if n_tick else 0
     al["sounds"], al["sounds_10s"] = total, win
     seed = ctx.get("seed")
@@ -952,16 +955,50 @@ def plan_sounds(events, ctx):
     report["cut_budget"] = cut_budget
     state = {"aud": [], "tick": [], "all": [], "busy": [], "cut_items": 0, "items": 0, "own_cut": 0, "own_t": []}
     placed = []
-    for s in existing:                       # the Director's own library sounds: same levels, same signal check
-        if s.get("s") not in lib:
-            continue
+    # The Director's own library sounds are the film's own gestures (the impact under the hook title, the riser into
+    # the payoff's hit): they take their place in the one hierarchy. Round seven: they were set at the first library's
+    # role levels (an impact 10.5 dB under the voice) while the pass's own hook hit sits at the voice, so the film's
+    # designed opening and close were its quietest sounds, and nothing else could land where they stood.
+    own = sorted((s for s in existing if s.get("s") in lib), key=lambda s: float(s.get("event_f", 0)))
+    hits_own = [s for s in own if role_of(s["s"]) != "riser"]
+    dir_hook = dir_close = False
+    for s in own:
         t = float(s.get("event_f", 0)) / fps
         ref = ctx["ref_at"](t) if callable(ctx.get("ref_at")) else VOICE_LUFS
         was = s.get("db")
-        s["db"] = gain_for(s["s"], ref, al["under_voice_db"] if spoken(t) else None)
+        if not ctx.get("own_tiers"):             # a caller that sets its own sounds' place (the workflow shell): the role levels, as before
+            s["db"] = gain_for(s["s"], ref, al["under_voice_db"] if spoken(t) else None)
+            s["director_db"] = was
+            placed.append({"t": t, "ev": {"kind": s.get("for") or "director", "f": s.get("event_f", 0)}, "part": "director", "tier": "body",
+                           "items": [dict(s, layer="hit", **({"for": "director"} if "for" not in s else {}))], "ref": ref, "director": True})
+            state["aud"].append(t)
+            state["all"].append(t)
+            continue
+        lead = role_of(s["s"]) == "riser"
+        nxt = next((h for h in hits_own if 0 <= float(h.get("event_f", 0)) / fps - t <= 1.5), None) if lead else s
+        tn = float(nxt.get("event_f", 0)) / fps if nxt is not None else t
+        if nxt is not None and hits_own and nxt is hits_own[0] and tn <= HOOK_S:
+            tier, part_d, dir_hook = "hero", "hook", True
+        elif nxt is not None and hits_own and nxt is hits_own[-1] and tn >= PAYOFF_FROM * dur_s:
+            tier, part_d, dir_close = "hero", "close", True
+        else:
+            tier, part_d = "accent", "plain"
+        under = TIER_UNDER[tier] if spoken(t) else None
+        s["db"] = gain_tier(s["s"], ref, tier, HERO_W.get(part_d, 1.0) if tier == "hero" else TIER_MID["accent"], under, lead=lead)
         s["director_db"] = was
-        placed.append({"t": t, "ev": {"kind": s.get("for") or "director", "f": s.get("event_f", 0)}, "part": "director", "tier": "body",
-                       "items": [dict(s, layer="hit", **({"for": "director"} if "for" not in s else {}))], "ref": ref, "director": True})
+        s["tier"] = tier
+        if lead:
+            s["tier"] = "accent"                      # a climb is never raised like its hit: it stays under it
+        it = dict(s, layer="hit", **({"for": "director"} if "for" not in s else {}))
+        if tier == "hero" and not lead:
+            it["duck_db"] = DUCK_DB
+        try:
+            if it.get("start_s") is not None and not lead:
+                _heard([it], ctx, ref, under, True, tier)
+        except Exception:  # noqa: BLE001 - unread: the tier's own level stands
+            pass
+        placed.append({"t": t, "ev": {"kind": s.get("for") or "director", "f": s.get("event_f", 0)}, "part": "director", "tier": tier,
+                       "items": [it], "ref": ref, "director": True})
         state["aud"].append(t)
         state["all"].append(t)
     own_cap = max(1, int(round(0.5 * want)))
@@ -1019,31 +1056,42 @@ def plan_sounds(events, ctx):
             used.update(voices)
             tally["click"] = tally.get("click", 0) + 1
         else:
-            under = (TIER_UNDER[tier] if TIER_UNDER[tier] is not None else al["under_voice_db"]) if spoken(t) and tier != "tick" else None
             ref = ctx["ref_at"](t) if callable(ctx.get("ref_at")) else VOICE_LUFS
-            w = HERO_W.get(part, 1.0) if hero else _weight(e)     # the close is the film's heaviest hit, the turn next
-            avoid, hidden, group, kcls, layers = set(), None, [], None, []
-            for _ in range(TRIES):
-                layers, kcls = _layers_for(e, part, tier, t, st, avoid)
-                if not layers:
+            hidden, group, kcls, layers = None, [], None, []
+            # Round seven: a hit that still sat in the voice at its tier's floor was planned, then taken out by the last
+            # signal check, and the moment went silent (the turn of p5574, three pictures of p5565). It is given another
+            # recording, then the tier under it: a landing under a word is a quieter landing, never no landing.
+            for tier_now in {"hero": ("hero", "accent", "body"), "accent": ("accent", "body")}.get(tier, (tier,)):
+                part_now = part if tier_now == "hero" else "plain" if tier != tier_now else part
+                hero_now = tier_now == "hero"
+                under = (TIER_UNDER[tier_now] if TIER_UNDER[tier_now] is not None else al["under_voice_db"]) if spoken(t) and tier_now != "tick" else None
+                w = HERO_W.get(part_now, 1.0) if hero_now else _weight(e)     # the close is the film's heaviest hit, the turn next
+                avoid = set()
+                for _ in range(TRIES):
+                    layers, kcls = _layers_for(e, part_now, tier_now, t, st, avoid)
+                    if not layers:
+                        break
+                    group = []
+                    if steps:                               # a counter: one tick a step, the roll one gesture
+                        sid = layers[-1][0]
+                        for sf in steps:
+                            group.append(_item(f"snd.j{len(placed)}.{len(group)}", sid, sf, fps, gain_tier(sid, ref, "tick", 0.2, under), e, part_now, "hit"))
+                    else:
+                        for sid, what in layers:
+                            group.append(_item(f"snd.j{len(placed)}.{len(group)}", sid, e["f"], fps,
+                                               gain_tier(sid, ref, tier_now, w, under, lead=what == "lead"), e, part_now, what))
+                    for it in group:
+                        it["tier"] = tier_now
+                        if hero_now and it["layer"] == "hit":
+                            it["duck_db"] = DUCK_DB          # the song makes room under a hero hit (scene.audio.master)
+                    hidden = _heard(group, ctx, ref, under, hero_now, tier_now)
+                    if not hidden or steps:
+                        break
+                    avoid |= {sid for sid, what in layers if what == "hit"}
+                if layers and not hidden:
                     break
-                group = []
-                if steps:                               # a counter: one tick a step, the roll one gesture
-                    sid = layers[-1][0]
-                    for sf in steps:
-                        group.append(_item(f"snd.j{len(placed)}.{len(group)}", sid, sf, fps, gain_tier(sid, ref, "tick", 0.2, under), e, part, "hit"))
-                else:
-                    for sid, what in layers:
-                        group.append(_item(f"snd.j{len(placed)}.{len(group)}", sid, e["f"], fps, gain_tier(sid, ref, tier, w, under, lead=what == "lead"),
-                                           e, part, what))
-                for it in group:
-                    it["tier"] = tier
-                    if hero and it["layer"] == "hit":
-                        it["duck_db"] = DUCK_DB          # the song makes room under a hero hit (scene.audio.master)
-                hidden = _heard(group, ctx, ref, under, hero, tier)
-                if not hidden or steps:
-                    break
-                avoid |= {sid for sid, what in layers if what == "hit"}
+            if tier_now != tier:
+                tier, part, hero = tier_now, part_now, hero_now
             if not layers:
                 return refuse(e, hidden or "no recording of its class is left unused in this film")
             if hidden:
@@ -1079,8 +1127,12 @@ def plan_sounds(events, ctx):
 
     spare, done, cap = [], set(), {"aud": total}
     for e, part in sorted(((hook, "hook"), (turn, "payoff"), (close, "close")), key=lambda x: (x[1] != "close", x[1] != "payoff")):
-        if e is not None:
-            attempt(e, part)
+        if e is None:
+            continue
+        if (part == "hook" and dir_hook) or (part == "close" and dir_close):
+            attempt(e, "plain")                  # the Director wrote that landing: this event is one more moment of the film
+            continue
+        attempt(e, part)
     # Then the sections: always the part of the film furthest under its share, and inside it the stretch furthest under
     # its own, is given its next best event, until every part holds its share or has nothing left that can sound.
     while True:
@@ -1542,7 +1594,7 @@ def _heard(group, ctx, ref, under, structural, tier="body"):
     if vb is None:
         return None
     speech, fps = ctx["speech"], float(ctx["fps"])
-    worst = None
+    worst = masked = None
     for it in list(group):
         t_ = it.get("tier") or tier
         if it.get("layer") == "lead":
@@ -1569,7 +1621,10 @@ def _heard(group, ctx, ref, under, structural, tier="body"):
         it["_fps"] = fps
         need = _masking(it, vb, speech, fps)
         if need > 0:
-            it["db"] = round(max(it["db"] - need, tier_floor(it["s"], ref, t_)), 1)
+            fl = tier_floor(it["s"], ref, t_)
+            it["db"] = round(max(it["db"] - need, fl), 1)
+            if it["db"] <= fl + 0.05 and _masking(it, vb, speech, fps) > 0.5:
+                masked = "at its tier's floor it still sits in the voice"
         p = _presence(it, vbands)
         goal = TIER_PRESENT.get(t_, PRESENT_DB)
         if p < goal:
@@ -1589,7 +1644,7 @@ def _heard(group, ctx, ref, under, structural, tier="body"):
         it["present_db"] = round(min(p, 60.0), 1)
         if p < TIER_HEARD.get(t_, PRESENT_MIN) and not structural:
             worst = f"the voice would hide it here ({p:.1f} dB over it)"
-    return worst
+    return masked or worst
 
 
 def present_over(sounds, voice, bed, fps, voice_shift_db=0.0):
@@ -1691,7 +1746,6 @@ def _signal_check(placed, ctx, report):
             continue
         if g.get("director"):
             for i in keep:
-                i.pop("layer", None)
                 if i.get("for") == "director":
                     i.pop("for")
         out += keep
@@ -1746,11 +1800,13 @@ def _asked(asks):
     return False
 
 
-def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=None, turn_s=None, bed=None):
+def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=None, turn_s=None, bed=None, own_tiers=False):
     """The designed sound for a compiled film: (sounds, report). The Director's own sounds stay and count first.
     supply: the governor's {np10, bed} (taste.supply) when the compiler has it; else read from the L1 and the upload.
     turn_s: the story's turn on the film's clock, when the caller knows it (a workflow's script names its payoff).
-    bed: True when a song will play under the film (the owner or the customer supplied one)."""
+    bed: True when a song will play under the film (the owner or the customer supplied one).
+    own_tiers: the sounds already in the film are the Director's own gestures and take their place in the level hierarchy
+    (the hook's impact and the close are hero hits); without it they keep their role levels."""
     fps, D = float(l1["fps"]), int(l1["dur_f"])
     if turn_s is None:                       # the scene's own marks, as the music engine reads them: the drop lands on the payoff
         own = l1.get("music_marks") or {}
@@ -1806,7 +1862,7 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
     # the song's last hit goes)
     close_s, _by = close_time([e["f"] / fps for e in l1_events(l1)], [(a, b) for a, b in (words or []) if a < D / fps], D / fps, bed)
     ctx = {"fps": fps, "dur_f": D, "existing": existing, "speech": speech, "voice": voice, "voice_shift_db": shift,
-           "words": words or [], "bed": bed, "ref_at": ref_at, "np10": (supply or {}).get("np10"),
+           "words": words or [], "bed": bed, "ref_at": ref_at, "np10": (supply or {}).get("np10"), "own_tiers": bool(own_tiers),
            "turn_f": int(round(float(turn_s) * fps)) if turn_s is not None else None, "close_s": close_s,
            "seed": film_seed(l1.get("sid"), l1.get("seed"), D, [e.get("src") for e in (l1.get("spine") or [])][:64],
                              sorted(str((a or {}).get("path")) for a in (l1.get("assets") or {}).values())[:64])}
@@ -1815,13 +1871,13 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
     return sounds, report
 
 
-def apply(l1, work=None, index=None, perc=None, asks=None, supply=None, turn_s=None, bed=None):
+def apply(l1, work=None, index=None, perc=None, asks=None, supply=None, turn_s=None, bed=None, own_tiers=False):
     """The seam for the compile path and the workflow shell: the L1 with its designed sound. Never raises; on any
     fault the L1 comes back as it was, with the fault in l1["sound_design"]. VALMERA_SOUND_DESIGN=0 turns it off."""
     if os.environ.get("VALMERA_SOUND_DESIGN", "1") == "0":
         return l1
     try:
-        sounds, report = design(l1, work=work, index=index, perc=perc, asks=asks, supply=supply, turn_s=turn_s, bed=bed)
+        sounds, report = design(l1, work=work, index=index, perc=perc, asks=asks, supply=supply, turn_s=turn_s, bed=bed, own_tiers=own_tiers)
         l1["sound"] = sounds
         l1["sound_design"] = report
     except Exception as e:  # noqa: BLE001 — a film is never lost to its sound design

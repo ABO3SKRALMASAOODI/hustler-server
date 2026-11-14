@@ -815,9 +815,10 @@ def name_subjects(text, context=""):
     return subs, usd
 
 
-def name_many(texts, context=""):
+def name_many(texts, context="", system=None):
     """(list of subject lists, one per text, usd): one call for a film's
-    moments. Raises when the model did not answer."""
+    moments. Raises when the model did not answer. `system`: another naming
+    rule with the same answer (worker/footage names what video exists of)."""
     if not texts:
         return [], 0.0
     lines = [f"moment {i}: {str(t)[:300]}" for i, t in enumerate(texts)]
@@ -826,7 +827,7 @@ def name_many(texts, context=""):
             "nothing is named.\n" + "\n".join(lines))
     if context:
         user += f"\nWhat the film is about: {str(context)[:600]}"
-    txt, usd = _ask(NAME_SYSTEM, [{"type": "text", "text": user}],
+    txt, usd = _ask(system or NAME_SYSTEM, [{"type": "text", "text": user}],
                     "named_subjects", NAMED_NAME_S, 1800)
     obj = _json_obj(txt)
     if obj is None:

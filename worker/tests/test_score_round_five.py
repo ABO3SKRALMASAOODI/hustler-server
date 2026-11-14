@@ -30,7 +30,7 @@ def widths(s):
 def test_the_scout_may_wish_a_metaphor_and_names_which_kind_each_picture_is():
     text = scout.SYSTEM
     assert "Never a mood, a metaphor" not in text
-    assert '"how":"thing|like"' in text and "up to 14" in text
+    assert '"how":"thing|like"' in text and "up to 16" in text
     assert "ids, never the words themselves" in text            # a wish lands on word ids, so the cut can find its word
     for bad in ("handshake", "skyline"):                           # what taste still throws away is named
         assert bad in text
@@ -57,7 +57,8 @@ def talking(seconds=24.0, **kw):
     return idx, text
 
 
-def test_a_take_is_eased_on_one_continuous_track_and_ends_no_closer_than_the_picture_allows():
+def test_a_take_is_eased_on_one_continuous_track_and_ends_no_closer_than_the_picture_allows(monkeypatch):
+    monkeypatch.setenv("VALMERA_TALK_CUTS", "0")              # the eased track itself: a take cut inside itself (round seven) is tested there
     idx, text = talking()
     c = comp(text, idx, voice(24.0))
     mv = c.meter["move"]
@@ -81,7 +82,8 @@ def test_no_head_is_cut_and_a_face_never_passes_the_governors_height():
             assert r[0] <= 0.30 and r[2] >= 0.70 and r[1] <= 0.22 and r[3] >= 0.52
 
 
-def test_a_selfie_held_against_one_edge_still_moves_away_from_that_edge():
+def test_a_selfie_held_against_one_edge_still_moves_away_from_that_edge(monkeypatch):
+    monkeypatch.setenv("VALMERA_TALK_CUTS", "0")              # the eased track itself: a take cut inside itself (round seven) is tested there
     idx, text = talking(face=(0.04, 0.3, 0.42, 0.56))                 # the hair already leaves the frame on the left
     c = comp(text, idx, voice(24.0))
     assert c.meter["move"]["moved"] >= 1
@@ -107,7 +109,8 @@ def test_the_switch_turns_the_eased_track_off(monkeypatch):
     assert all(not isinstance(s["crop"][0], list) for s in shots(c))
 
 
-def test_an_eased_track_lowers_to_waypoints_that_follow_its_curve(tmp_path):
+def test_an_eased_track_lowers_to_waypoints_that_follow_its_curve(tmp_path, monkeypatch):
+    monkeypatch.setenv("VALMERA_TALK_CUTS", "0")
     idx, text = talking()
     c = comp(text, idx, voice(24.0))
     edl, _loc, rep = lower.lower(c.l1, str(tmp_path))
@@ -329,7 +332,8 @@ def test_one_picture_held_past_five_seconds_is_a_finding_the_repair_round_reads(
     assert c2.meter["hold_s"] < c.meter["hold_s"] and (c2.meter["hold_s"] <= S.HOLD_FIND_S or any(f.startswith("hold:") for f in c2.meter["findings"]))
 
 
-def test_a_line_the_upload_prints_across_the_frame_is_never_cut_by_the_eased_track():
+def test_a_line_the_upload_prints_across_the_frame_is_never_cut_by_the_eased_track(monkeypatch):
+    monkeypatch.setenv("VALMERA_TALK_CUTS", "0")              # the eased track itself: a take cut inside itself (round seven) is tested there
     idx, text = talking()
     wide = dict(voice(24.0), text=[{"box": [0.06, 0.08, 0.94, 0.14], "t": [0.0, 24.0]}])          # a title burned in across the top
     c = S.compile_score(text, index=idx, sid="five", perception=wide, bin_items=BIN)

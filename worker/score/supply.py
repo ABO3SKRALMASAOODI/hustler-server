@@ -21,7 +21,7 @@ from PIL import Image, ImageDraw
 from . import boards, brief, call
 
 BOARD_W, BOARD_H = 1568, 880
-MAX_ITEMS = 14             # round five: a film cuts to a new picture every 2 to 3 s of speech (was 8)
+MAX_ITEMS = 20             # round seven: a moment is a run of two or three pictures, as the judge cuts it (round five: 14, one a moment; before: 8)
 WISH_BUDGET_S = 6.0
 LOOK_MODEL = "claude-haiku-5-5"
 
@@ -123,8 +123,10 @@ def contact_sheet(cands):
 
 
 LOOK_SYSTEM = """You help a film editor choose cutaways. You see numbered stock candidates and a list of moments from a film, each with what the editor wants to show there and the words said. Each picture would take the whole frame for a second or two while the voice runs on. Keep a picture when an editor at the top of the craft would cut to it on those words. For a moment marked thing, it shows the very thing the words name. For a moment marked like, it shows what the words mean so plainly that a stranger gets it at once with nothing explained: one clear subject, concrete, alive, the way a film cuts to a cheetah for "no plan B" or to dominoes for "it collapsed". Either way it must look like a film and not a stock catalogue: real light, a clear subject, depth, something happening. Prefer dark, rich, graphic or cinematic frames over flat bright ones. Drop anything off-subject; a general scene of the topic's field that says nothing by itself (an office, a handshake, a laptop, a skyline); a picture that matches one word but not what the sentence means; anything cheesy, watermarked, staged with grinning models; generic sale or discount signs; a product the film doesn't sell, or a lookalike of what the customer sells. Drop any person who could be taken for the speaker, or who stands in for the speaker: this film already has its person. Objects, hands, animals, machines, textures and places travel; a stranger's face looking at the lens doesn't.
-Answer with one JSON object and nothing else: {"keep":[{"c":number,"wish":number,"what":"six to ten plain words on what the picture shows"}]}. Up to 2 for each moment, the best first. A moment may keep none: an honest gap is better than a picture that does not land."""
-SECOND_SEARCHES = 6        # wishes that get a second library search (the words' own thing, or the Scout's second query)
+Answer with one JSON object and nothing else: {"keep":[{"c":number,"wish":number,"what":"six to ten plain words on what the picture shows"}]}. Up to 3 for each moment, the best first, and each a different picture: another subject, another angle, another action. Two or three in a row under one sentence are a run, and a run is what makes a film read as edited; two frames of the same clip or the same scene are one picture, keep one. A moment may keep none: an honest gap is better than a picture that does not land."""
+SECOND_SEARCHES = 8        # wishes that get a second library search (the words' own thing, or the Scout's second query)
+LOOK_S = 12.0              # the Look's own time on its sheets
+FOOT_WAIT_S = 3.0          # how long the Bin waits for the footage shelf's answer (a naming call and a few small reads, begun before Supply)
 LOOK_CELLS = 60            # candidates on one sheet: past this a cell is too small to judge, and a second sheet is read beside it
 
 
@@ -530,6 +532,7 @@ def search_thing(stock, wish, thing, budget_s):
 
 OWN_FRAMES = 16
 OWN_ZOOM_MAX = 2.0
+VIEW_UPSCALE = 3.0         # taste.UPSCALE_MAX: what a view may be enlarged by on the film's frame
 OWN_SYSTEM = """You help a film editor re-use the customer's own footage. You see numbered frames from the upload with their times, and moments of the film that want a picture, each with the second it lands and what is said there. For each moment, find a frame from ANOTHER time whose detail shows the very thing the words name, better than the frame at that moment does: the product, hands at work, a sign, a tool, a place, a gesture. Give the box around that detail as fractions of the frame, x0 y0 x1 y1 from the top left, tight on it but never cutting it, never cutting a head or printed words. Only a detail that is plainly there, sharp, and still reads when enlarged up to 2 times. Leave a moment out when no other frame shows its thing better than the moment itself, or when the words name nothing a frame could show: most moments are left out.
 Answer with one JSON object and nothing else: {"own":[{"m":moment number,"f":frame number,"box":[x0,y0,x1,y1],"what":"at most eight plain words"}]}."""
 
@@ -569,7 +572,9 @@ def reframe(box, W, H, out_ratio=9 / 16):
     if x1 - x0 < 0.02 or y1 - y0 < 0.02:
         return None
     bw, bh = (x1 - x0) * W * 1.3, (y1 - y0) * H * 1.3            # air round the detail
-    h = max(bh, bw / out_ratio, H / OWN_ZOOM_MAX)
+    # never closer than the source has pixels for: the frame is at most VIEW_UPSCALE times the window (round seven: a
+    # detail of a 576 px upload was shown six times its size, and read as a soft block)
+    h = max(bh, bw / out_ratio, H / OWN_ZOOM_MAX, (1920.0 if out_ratio < 1 else 1080.0) / VIEW_UPSCALE)
     w = h * out_ratio
     if w > W:
         w, h = W, W / out_ratio
@@ -579,6 +584,53 @@ def reframe(box, W, H, out_ratio=9 / 16):
     left = min(max(cx - w / 2, 0.0), W - w)
     top = min(max(cy - h / 2, 0.0), H - h)
     return [round(left / W, 3), round(top / H, 3), round((left + w) / W, 3), round((top + h) / H, 3)]
+
+
+def keep_heads(per, t, crop, box, reach=0.6):
+    """A view of the upload never cuts through a head the upload shows at that moment. The model boxes a detail and
+    never cuts a head with its box, but the box is then grown to the frame's shape, and that window can: round seven,
+    p5591's view of the photograph above the speaker ended at his eyes. The window is moved the least it takes to
+    leave every head whole or out, with the detail still inside it; when no such window exists there is no view."""
+    heads = []
+    for s in (per or {}).get("samples") or []:
+        f = s.get("face")
+        try:
+            ts = float(s.get("t"))
+        except (TypeError, ValueError):
+            continue
+        if f and len(f) >= 4 and abs(ts - t) <= reach:
+            w, h = f[2] - f[0], f[3] - f[1]
+            heads.append([max(0.0, f[0] - 0.25 * w), max(0.0, f[1] - 0.6 * h), min(1.0, f[2] + 0.25 * w), min(1.0, f[3] + 0.15 * h)])
+
+    def cuts(c):
+        for hd in heads:
+            inside = c[0] <= hd[0] + 2e-3 and c[1] <= hd[1] + 2e-3 and hd[2] <= c[2] + 2e-3 and hd[3] <= c[3] + 2e-3
+            apart = hd[2] <= c[0] + 2e-3 or hd[0] >= c[2] - 2e-3 or hd[3] <= c[1] + 2e-3 or hd[1] >= c[3] - 2e-3
+            if not (inside or apart):
+                return True
+        return False
+    if not heads or not cuts(crop):
+        return crop
+    try:
+        bx0, by0, bx1, by1 = (min(max(float(v), 0.0), 1.0) for v in box)
+    except (TypeError, ValueError):
+        return None
+    x0, y0, x1, y1 = crop
+    cw, ch = x1 - x0, y1 - y0
+    best = None
+    for hd in heads:
+        moves = [(x0, hd[1] - ch), (x0, hd[3]), (x0, min(y0, hd[1])), (x0, max(y0, hd[3] - ch)),
+                 (hd[0] - cw, y0), (hd[2], y0), (min(x0, hd[0]), y0), (max(x0, hd[2] - cw), y0)]
+        for nx, ny in moves:
+            c = [round(nx, 3), round(ny, 3), round(nx + cw, 3), round(ny + ch, 3)]
+            if c[0] < -1e-3 or c[1] < -1e-3 or c[2] > 1 + 1e-3 or c[3] > 1 + 1e-3 or cuts(c):
+                continue
+            if not (c[0] <= bx0 + 0.01 and c[1] <= by0 + 0.01 and bx1 <= c[2] + 0.01 and by1 <= c[3] + 0.01):
+                continue                                # the detail itself would leave the window
+            d = abs(nx - x0) + abs(ny - y0)
+            if best is None or d < best[0]:
+                best = (d, c)
+    return best[1] if best else None
 
 
 def own_moments(work, wishes, per, deadline):
@@ -612,6 +664,7 @@ def own_moments(work, wishes, per, deadline):
             if not (isinstance(j, int) and isinstance(f, int) and 0 <= j < len(want) and 0 <= f < n) or (j, f) in seen:
                 continue
             crop = reframe(o.get("box"), W, H)
+            crop = keep_heads(per, times[f], crop, o.get("box")) if crop is not None else None
             if crop is None or crop[3] - crop[1] > 0.87:     # no closer than the take itself: nothing re-framed
                 continue
             i, w = want[j]
@@ -729,6 +782,7 @@ def own_views(work, per, deadline, n_have=0):
             if not (isinstance(f, int) and 0 <= f < n):
                 continue
             crop = reframe(o.get("box"), W, H)
+            crop = keep_heads(per, times[f], crop, o.get("box")) if crop is not None else None
             if crop is None or crop[3] - crop[1] > 0.72:      # under 1.4 times closer is the take again, not a detail
                 continue
             cx, cy = (crop[0] + crop[2]) / 2, (crop[1] + crop[3]) / 2
@@ -769,8 +823,10 @@ def own_cells(work, rows, cw, ch):
     return out
 
 
-def run(work, scout, per, acquire, deadline):
+def run(work, scout, per, acquire, deadline, foot=None):
     """acquire(candidate) -> {"storage_key","w","h","dur","fps"} or None. Writes bin.json and the board.
+    foot: the film's footage box (score.film.footage_start), when the footage switch opens this account: the clips
+    the shelf already holds of the film's subjects join the Bin here, so the first film has them.
 
     Three supplies at once: the libraries for each wish; for a wish whose words name a real person,
     place, brand or event, Commons and Openverse by that name with one check that each picture shows
@@ -864,7 +920,7 @@ def run(work, scout, per, acquire, deadline):
         if cands:
             try:
                 seen_as = [dict(w, _said=clause_of(work, w.get("w") or w.get("at")), _thing=things.get(i)) for i, w in enumerate(wishes)]
-                keep, look_usd, look_errs = look_all(tmp, cands, seen_as, min(deadline - CHECK_RESERVE_S - ACQUIRE_S, time.monotonic() + 12.0))
+                keep, look_usd, look_errs = look_all(tmp, cands, seen_as, min(deadline - CHECK_RESERVE_S - ACQUIRE_S, time.monotonic() + LOOK_S))
                 usd += look_usd
                 if look_errs:
                     report.append(dict(look_error="; ".join(look_errs)[:200]))
@@ -892,6 +948,17 @@ def run(work, scout, per, acquire, deadline):
         import footage.seam                      # real footage of the named subjects: the switch is off for customers
         named += footage.seam.bin_offers(work, wishes, subjects, deadline - CHECK_RESERVE_S - ACQUIRE_S, report,
                                          str((scout or {}).get("about") or ""))
+        if foot is not None:                     # what the shelf holds of this film's subjects (footage.cache), by the moment it is for
+            try:
+                foot["ready"].wait(max(0.0, min(FOOT_WAIT_S, deadline - CHECK_RESERVE_S - ACQUIRE_S - time.monotonic())))
+                if foot["ready"].is_set():
+                    foot["cached_taken"] = True
+                    at = {str(w.get("w") or w.get("at")): i for i, w in reversed(list(enumerate(wishes)))}
+                    took = [dict(c, _wish=at[str(c.get("_w"))]) for c in foot.get("cached") or [] if str(c.get("_w")) in at]
+                    named += took
+                    report.append(dict(footage_shelf=len(took), subjects=sorted({c.get("named") for c in took})))
+            except Exception as e:  # noqa: BLE001 the Bin stands without it
+                report.append(dict(footage_shelf_error=str(e)[:120]))
         named = fetch_stills(named, tmp)
         first_named = len(cands)
         cands = cands + named
@@ -918,7 +985,7 @@ def run(work, scout, per, acquire, deadline):
                 c = dict(broll_source.designed_hit(sp), _wish=i)
                 picks.append((dict(c=-1, wish=i, what=f"designed {sp['kind']}: {sp.get('what') or ''}".strip(": ")), c))
                 designed += 1
-        pool = cf.ThreadPoolExecutor(max_workers=8)
+        pool = cf.ThreadPoolExecutor(max_workers=12)
         jobs = [(k, c, pool.submit(acquire, c)) for k, c in picks]
         for k, c, fut in jobs:
             try:
