@@ -178,7 +178,17 @@ def main():
             if line.startswith('OPENAI_API_KEY='): os.environ['OPENAI_API_KEY']=line.split('=',1)[1].strip().strip('"').strip("'")
     if a.cmd=='level-voices': return shared.level_voices(a)
     if a.cmd=='render' and not (Path(a.out)/'narration_performance.wav').exists():
+        import narrate as N
+        import datetime
+        original_log=N.log
+        def progress(message):
+            original_log(message)
+            with open(Path(a.out)/'progress.jsonl','a') as f:
+                f.write(json.dumps(dict(at=datetime.datetime.now(datetime.timezone.utc).isoformat(),message=str(message)))+'\n')
+        Path(a.out).mkdir(parents=True,exist_ok=True)
+        N.log=progress
         os.environ['NARRATE_ENGINE']='phonon'
+        os.environ['NARRATE_KEEP_TAKES']='1'
         shared.render(a)
         rendered=json.loads((Path(a.out)/'render.json').read_text())
         if rendered.get('engine')!='lines:phonon':raise RuntimeError('WF4 requires Easton; a different-engine fallback cannot be delivered')

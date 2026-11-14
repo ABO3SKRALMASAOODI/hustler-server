@@ -79,8 +79,30 @@ def footage(ctx, script):
             avoided.append(dict(url=v['source']['url'],time_range=v['time_range']))
         credits.extend(r.get('credits',[])); spends.append(r.get('spend',{}))
     result = dict(lines=rows, voices=voices, credits=credits, spend=spends)
+    prefill_footage(ctx,script,result)
     save(root/'footage.json',result)
     return result
+
+
+def prefill_footage(ctx,script,ft):
+    """Research obvious shortages while the narrator is still being made.
+    This estimate only requests supply; the actual word clock decides coverage.
+    """
+    sc=script['script'];by={r['i']:r for r in ft['lines']}
+    avoid=[dict(url=c['source']['url'],time_range=c['time_range']) for ln in ft['lines'] for c in ln['clips']]
+    for ch in sc['chapters']:
+        lines=[]
+        for i,s in enumerate(sc['segments']):
+            if s['chapter']!=ch['id']:continue
+            available=sum(min(7.8,c['seconds']) for c in by.get(i,{}).get('clips',[]))
+            missing=len(s['say'].split())/2.8+.4-available
+            if missing>=1.5:lines.append(dict(i=i,say=s['say'],pictures=s.get('pictures',[]),dur=missing+2))
+        if not lines:continue
+        dest=Path(ctx.supply)/'footage'/('prefill-'+ch['id'])
+        ctx.log(f"archive coverage research {ch['id']}: {len(lines)} lines")
+        extra=footage_box.fetch(dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title']+'. Find additional literal archive evidence; previous source seconds are reserved.',avoid=avoid),dest,ctx.log)
+        add_footage(ft,extra,dest)
+        avoid.extend(dict(url=c['source']['url'],time_range=c['time_range']) for ln in extra['lines'] for c in ln['clips'])
 
 
 def verify_structure(ctx, script, attempt=0):
@@ -165,19 +187,29 @@ def witness_voices(ctx,script,ft):
     search need not rank an interview highly enough to hear its witness.
     """
     root=Path(ctx.supply)/'footage'/'witnesses';root.mkdir(parents=True,exist_ok=True)
-    job=root/'research.json'
-    if job.exists():research=read(job)
-    else:
-        text,use=wf4.story.writer.ask('Research firsthand interview or speech footage for this documentary. Choose up to three named people who lived its consequential events, '
-            'and whose own words would add something after an existing narration line. Return JSON {people:[{name,kind:"person",must_show,searches:[{where:"youtube",q:string}]}]}. '
-            'Searches must identify the specific person, event and original interview, oral history, press conference or archive film. No impersonation, AI voice or narrator quotes. '
-            'If no recorded witness could exist, return an empty list.',json.dumps(dict(title=script['title'],named=script['dossier']['named'],segments=script['script']['segments'])),
-            effort='high',max_tokens=3000,what='WF4 witness research')
-        research=wf4.story.writer.json_block(text);research['usage']=use;save(job,research)
-    if not research['people']:return
+    history=[]
+    known=list({c['source']['url']:c['source'] for ln in ft['lines'] for c in ln['clips'] if c.get('kind')!='image'}.values())
     lines=[dict(i=i,say=s['say']) for i,s in enumerate(script['script']['segments'])]
-    extra=footage_box.fetch(dict(_voices=True,people=research['people'],lines=lines,avoid=ft['voices']),root,ctx.log)
-    add_footage(ft,extra,root)
+    for attempt in range(3):
+        dest=root if attempt==0 else root/f'attempt-{attempt+1}'
+        job=dest/'research.json'
+        if job.exists():research=read(job)
+        else:
+            text,use=wf4.story.writer.ask('Research firsthand interview or speech footage for this documentary. Choose up to three named people who lived its consequential events, '
+                'and whose own words would add something after an existing narration line. Return JSON {people:[{name,kind:"person",must_show,purpose,searches:[{where:"youtube"|"archive",q:string}]}]}. '
+                'Use the canonical person name. must_show is ONLY a simple identity requirement, not a demand that a video title prove an exact incident. '
+                'Put the narrative purpose in purpose. Include concise broad interview searches and focused archive searches, each at most ten words. '
+                'Read unsuccessful research evidence and broaden or change the sources; never repeat failed queries. Known archive films may carry interviews between their narration. '
+                'No impersonation, AI voice or narrator quotes. If no recorded witness could exist, return an empty list.',
+                json.dumps(dict(title=script['title'],named=script['dossier']['named'],lines=lines,known_sources=known,prior=history)),
+                effort='high',max_tokens=3000,what='WF4 witness research')
+            research=wf4.story.writer.json_block(text);research['usage']=use;save(job,research)
+        if not research['people']:return
+        extra=footage_box.fetch(dict(_voices=True,people=research['people'],lines=lines,avoid=ft['voices'],known_sources=known),dest,ctx.log)
+        add_footage(ft,extra,dest)
+        if ft['voices']:return
+        history.append(dict(research=research,result=extra))
+    raise RuntimeError('firsthand witnesses were identified, but no identity-verified speaking footage passed; research must continue')
 
 
 def evidence_for_gaps(ctx,script,ft,gaps):
@@ -557,5 +589,6 @@ def check(ctx,rd,sc):
     shutil.copy2(nar,evidence/'narration.wav')
     shutil.copy2(pack['words'],evidence/'words.json')
     footage_box.cleanup_cache(Path(ctx.supply)/'footage')
+    footage_box.cleanup_cache(Path(ctx.supply)/'footage'/'witnesses')
     return dict(final=str(final),checks=checks,music=rd['music'],music_in_final=True,spend=[])
 

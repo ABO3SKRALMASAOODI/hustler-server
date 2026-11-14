@@ -84,3 +84,18 @@ def test_short_tail_is_shared_between_adjacent_pictures():
     words={'duration':8,'words':[{'w':'Words.','start':0.1,'end':1,'seg':0}]}
     shots,_,_=C.schedule(sc,words,{'lines':[{'i':0,'clips':[clip('a',0,7.8),clip('b',10,15)]}]})
     assert min(r['f'][1]-r['f'][0] for r in shots)>=44
+
+
+@pytest.mark.parametrize('arguments,topic', [([],None),(['--topic','The first rescue'],'The first rescue')])
+def test_same_entry_command_accepts_nothing_or_a_topic(monkeypatch,arguments,topic):
+    import importlib.util
+    spec=importlib.util.spec_from_file_location('wf4_entry_test',Path(__file__).with_name('run.py'))
+    entry=importlib.util.module_from_spec(spec);spec.loader.exec_module(entry)
+    monkeypatch.setattr(sys,'argv',['run.py',*arguments])
+    monkeypatch.setenv('OPENAI_API_KEY','test-not-a-secret')
+    monkeypatch.setattr(entry.shell,'main',lambda:list(sys.argv))
+    monkeypatch.setattr(entry.shell,'load_workflow',entry.shell.load_workflow)
+    got=entry.main();args=json.loads(got[got.index('--args')+1])
+    assert got[1]=='run' and args['look'] is False
+    assert args.get('line')==topic
+    assert got[got.index('--out')+1].endswith('/lanes/WF4-LONGFORM')

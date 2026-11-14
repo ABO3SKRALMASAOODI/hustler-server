@@ -66,11 +66,26 @@ j=json.load(open(sys.argv[1]))
 if j.get('_voices'):
     from footage import search,voice
     from concurrent.futures import ThreadPoolExecutor
+    voice.MAX_S=22.0
+    voice.PICK_SYSTEM=voice.PICK_SYSTEM.replace('about 2 to 9 seconds spoken','about 4 to 20 seconds spoken')
+    voice.PICK_SYSTEM+='\nThe person field must exactly copy one canonical name from The people; never substitute an alias from a video title.'
+    original_pick=voice.pick
+    def logged_pick(*args,**kwargs):
+        picks,cost=original_pick(*args,**kwargs)
+        (pathlib.Path(sys.argv[2])/'voice-picks.json').write_text(json.dumps(picks,indent=1))
+        return picks,cost
+    voice.pick=logged_pick
     subjects=j['people'];flat=[(si,q) for si,s in enumerate(subjects) for q in s['searches']]
     found=search.run([q for si,q in flat]);hits={}
     for k,(si,q) in enumerate(flat):
         have={h['id'] for h in hits.get(si,[])}
         hits.setdefault(si,[]).extend(h for h in found.get(k,[]) if h['id'] not in have)
+    for si in range(len(subjects)):
+        urls={h['url'] for h in hits.get(si,[])}
+        for h in j.get('known_sources',[]):
+            if h['url'] not in urls:
+                hits.setdefault(si,[]).append(dict(h,id=hashlib.sha256(h['url'].encode()).hexdigest(),where=h.get('where') or 'youtube',duration=None))
+    print('witness sources found:',sum(len(v) for v in hits.values()),flush=True)
     ranked,usd=plan.rank(subjects,hits,per=3);sources=[];by={}
     for si,h,why in ranked:
         if h['id'] in by:by[h['id']]['subjects'].append(si);continue
@@ -78,7 +93,10 @@ if j.get('_voices'):
     work=str(scratch/'witness-work');pathlib.Path(work).mkdir(exist_ok=True)
     anchors={}
     for sub in subjects:
-        anchors[sub['name']],cost=run.person_anchors(sub,work);usd+=cost
+        portrait=dict(sub,must_show='A clear portrait of '+sub['name']+', the named person; an identity photograph, not a speaking moment.')
+        anchors[sub['name']],cost=run.person_anchors(portrait,work);usd+=cost
+        print('identity portraits:',sub['name'],len(anchors[sub['name']]),flush=True)
+    (pathlib.Path(sys.argv[2])/'voice-anchors.json').write_text(json.dumps({k:len(v) for k,v in anchors.items()},indent=1))
     with ThreadPoolExecutor(max_workers=3) as pool:
         sources=list(pool.map(lambda s:run._open(s,work,print,hear_s=3600,read_s=3600),sources))
     live=[s for s in sources if not s.get('error')]
@@ -134,7 +152,8 @@ for item in info['Config']['Env']:
     k,sep,v=item.partition('=')
     if k in allowed:env[k]=v
 pathlib.Path(cache).mkdir(exist_ok=True)
-cmd=['docker','run','--rm','-i','--name',name,'--cpus','4','--memory','8g',
+job=json.load(open(scratch+'/input.json'));cpus,memory=(2,4) if job.get('_voices') else (4,8)
+cmd=['docker','run','--rm','-i','--name',name,'--cpus',str(cpus),'--memory',str(memory)+'g',
      '-v',scratch+':'+scratch,'-v',cache+':/wf4-model-cache','-e','HF_HOME=/wf4-model-cache',
      '--entrypoint','python']
 for k in sorted(allowed):
@@ -142,7 +161,7 @@ for k in sorted(allowed):
 cmd.extend([info['Image'],'-u',scratch+'/fetch.py',scratch+'/input.json',scratch+'/out'])
 code=subprocess.call(cmd,env=env)
 out=pathlib.Path(scratch)/'out'
-if out.exists():(out/'runner.json').write_text(json.dumps({'image':info['Image'],'image_tag':info['Config']['Image'],'private_container':name,'cpus':4,'memory_gb':8}))
+if out.exists():(out/'runner.json').write_text(json.dumps({'image':info['Image'],'image_tag':info['Config']['Image'],'private_container':name,'cpus':cpus,'memory_gb':memory}))
 sys.exit(code)
 '''
 
@@ -166,8 +185,13 @@ def fetch(payload, out, log=print):
     out = Path(out)
     probing=bool(payload.get('_probe'))
     rec = out / ('probe.json' if probing else 'footage.json')
+    adapter=hashlib.sha256((PROBE if probing else REMOTE).encode()).hexdigest()
     if rec.exists():
-        return json.loads(rec.read_text())
+        cached=json.loads(rec.read_text())
+        if not (payload.get('_voices') and not cached.get('voices') and cached.get('adapter_sha256')!=adapter):return cached
+        prior=cached.get('adapter_sha256','unversioned')[:12]
+        rec.rename(out/('footage-rejected-'+prior+'.json'))
+        if (out/'fetch.log').exists():(out/'fetch.log').rename(out/('fetch-rejected-'+prior+'.log'))
     out.mkdir(parents=True, exist_ok=True)
     names = ssh("docker ps --format '{{.Names}}'", capture_output=True, text=True).stdout.splitlines()
     slot = next((n for n in names if n.startswith('vbox-batch')), None)
@@ -197,6 +221,8 @@ def fetch(payload, out, log=print):
             tf.extractall(out, filter='data')
         archive.unlink()
         result = json.loads(rec.read_text())
+        result['adapter_sha256']=adapter
+        rec.write_text(json.dumps(result,indent=1))
         log(f"box footage: {result.get('counts',dict(covered=result.get('covered'),clips=result.get('clips')))}")
         return result
     finally:

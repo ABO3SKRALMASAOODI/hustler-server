@@ -21,7 +21,8 @@ def check(film, words, script, out, ffmpeg):
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
     wj=json.loads(Path(words).read_text());sj=json.loads(Path(script).read_text())
     expected=' '.join(s['text'] for s in sj['segments'])
-    fingerprint=hashlib.sha256(Path(film).read_bytes()+Path(words).read_bytes()).hexdigest()
+    with open(film,'rb') as f:stamp=hashlib.file_digest(f,'sha256')
+    stamp.update(Path(words).read_bytes());fingerprint=stamp.hexdigest()
     rp=out/'mix-wer.json'
     if rp.exists():
         r=json.loads(rp.read_text())
