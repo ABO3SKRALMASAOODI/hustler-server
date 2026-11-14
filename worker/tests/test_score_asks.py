@@ -308,7 +308,7 @@ def test_a_trial_turn_gets_the_same_ledger(monkeypatch):
     monkeypatch.setattr(asks, "build", lambda *a, **k: _ledger())
     ctx = _seam_ctx()
     ctx.claude_trial = object()
-    assert "ASK LEDGER" in agent_loop._typed_asks_start(ctx, _Db('{"mode": "on"}'), {"id": 1, "user_id": 5}, 9, {}, None)
+    assert "ASK LEDGER" in agent_loop._typed_asks_start(ctx, _Db(None), {"id": 1, "user_id": 5}, 9, {}, None)
     assert ctx.ask_ledger is not None
 
 

@@ -162,3 +162,9 @@ def test_authorized_shorter_cut_is_allowed_and_evidence_is_cached(monkeypatch,tm
     for _ in range(2):
         assert ei.cut_refusal(ctx,{'keep':[[0,11]]},{'keep':[[6,11]]}) is None
     assert calls==['check_cut_evidence']
+
+
+def test_default_check_does_not_change_existing_route_opt_in():
+    assert asks.parse(None)['mode']=='on'
+    assert not asks.parse(None)['director'] and not asks.parse(None)['patch']
+    assert asks.parse({'mode':'on'})['director'] and asks.parse({'mode':'on'})['patch']

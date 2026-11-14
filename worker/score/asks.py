@@ -21,7 +21,7 @@ import time
 
 KEY = "typed_asks"
 MODES = ("off", "internal", "on")
-DEFAULTS = {"mode": "on", "user_ids": [], "director": False, "patch": False, "pass": False,
+DEFAULTS = {"mode": "on", "user_ids": [], "director": True, "patch": True, "pass": True,
             "check": True, "repairs": 1, "film_s": 220.0, "pass_s": 600.0, "model": None,
             "check_model": None}
 # The check decides what the customer is told is done. Round 2 ran it on the turn's model (Haiku on the
@@ -41,7 +41,9 @@ def parse(raw):
     """app_kv text to a normalised dict. Explicit off and unreadable rows stay off.
     Without a row, request checks run on all accounts; alternate editing routes remain opt-in."""
     if raw is None:
-        return dict(DEFAULTS)
+        # Universal checking does not enroll customers into alternate editing routes.
+        # Existing explicit mode=on rows retain their original routing defaults.
+        return dict(DEFAULTS, director=False, patch=False, **{"pass": False})
     try:
         data = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
     except (TypeError, ValueError):
