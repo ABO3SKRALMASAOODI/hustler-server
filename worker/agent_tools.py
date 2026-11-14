@@ -962,6 +962,8 @@ def _child_payload(ctx, payload=None):
     if (getattr(ctx, "index", None) or {}).get("_first_film_source_guard"):
         body["first_film_source_screen"] = ctx.index["source_screen"]
     job = getattr(ctx, 'job', None) or {}
+    if (job.get('payload') or {}).get('first_cut'):
+        body['first_film'] = True
     if (job.get('type') == 'agent_turn' and job.get('id') is not None
             and body.get('source') in {'agent_preview', 'agent_preview_check'}):
         body.setdefault('root_agent_job_id',
