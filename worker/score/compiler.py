@@ -733,6 +733,10 @@ def read_film(ctx, lines):
     except (TypeError, ValueError):
         ctx.fps = 30
     fr = film.get("frame", "9:16")
+    if (ctx.index.get("first_film") or {}).get("frame") == "9:16":
+        if fr != "9:16":
+            ctx.find("first film: portrait output is required; compose the source inside 9:16")
+        fr = film["frame"] = "9:16"
     ctx.W, ctx.H = FRAMES.get(str(fr), FRAMES["9:16"]) if not isinstance(fr, list) else (int(fr[0]), int(fr[1]))
     if ctx.seed is None:
         try:
@@ -1019,6 +1023,11 @@ def read_fix(ctx, l):
     toks = str(l.get("t", "")).split()
     rng = [w for w in range(a, z + 1) if 0 <= w < len(ctx.words)]
     for i, w in enumerate(rng):
+        proof = (ctx.index.get("caption_evidence") or {}).get(str(w))
+        if proof and proof.get("evidence") == "screen" and proof.get("text"):
+            ctx.text[w] = proof["text"]
+            ctx.fixed.add(w)
+            continue
         if i == len(rng) - 1:
             ctx.text[w] = " ".join(toks[i:])
         else:

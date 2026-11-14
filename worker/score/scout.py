@@ -26,7 +26,7 @@ Answer with one JSON object and nothing else:
  "asks":[{{"id":"a1","said":"the clause as typed","probe":"one probe","min":number or null,"note":"a fact a checker needs, or null"}}],
  "windows":[{{"t0":0,"t1":30,"why":"the story window"}}],
  "wishes":[{{"w":"16-20","at":null,"how":"thing|like","want":"what this moment shows","own":false,"mine":false,"q":["search 1","search 2"],"kind":"video|photo"}}],
- "fixes":[{{"w":7,"t":"corrected text"}}]}}
+ "fixes":[{{"w":7,"t":"corrected text","evidence":"speech|screen","read":"exact visible inscription when evidence is screen"}}]}}
 
 scope: film is one film up to about 120 s, and it is the default even when the ask is small talk about captions or effects. surgical is one precise change that stands alone, such as a recolour of one object. set is several films from one source. long is one film over about 120 s.
 
@@ -40,6 +40,8 @@ wishes: the cutaways an editor at the top of the craft would make, in order, up 
 `q` is two stock-library searches in English for the picture: the subject itself, what it is doing, where; specific and photographable, three to five words. A library has no brands and no real people, so `q` never names one. `kind` is "video" unless only a photograph can show it (a named person, a document, a historic thing). `own` true when the upload itself can show it by a crop or a frame. `mine` true when the thing is the customer's own: the product they sell, their shop, their vehicle, their person. A library picture of something similar would be a lie about what they have, so nothing is searched for a `mine` wish and the upload shows it. For wordless footage give `at` seconds in place of `w`, and wish only for what the upload does not already show and that belongs to what it is about (the raw material of the product in a hand, the place a routine happens, the thing a clip is a joke about); a short product hold may wish for one exact ingredient, material or process explicitly visible or readable on its packaging, when that adds a meaningful second picture. Keep the customer's own product in its upload; do not substitute a similar product or invent benefits. If the label does not establish that ingredient or process, give no such wish.
 
 fixes: the transcript is machine-made and ? marks doubt. Go through every ? word and every word that makes no sense in its sentence. Say each sentence aloud in the speaker's language and ask what a person really said. A name garbled in one place is usually spelled clearly in another. An event name is said the same way twice. Words can run together, so one id can hold two words. `t` is what was really said, in normal case. Keep numbers that are numbers; a digit standing for an ordinary word becomes the word.
+
+Read the upload's own titles, name cards and labels in the magnified text board. When those establish the spelling of the same person or thing being spoken about, they outrank a phonetic transcript guess. Correct every affected word id, with evidence="screen" and read=the exact visible inscription. Do not infer identity from faces. Do not substitute a different person merely because a name appears elsewhere. If the text is illegible or the connection is uncertain, do not mark it screen-backed. These verified spellings are preserved in captions, even if the Director omits a fix line.
 
 Example of fixes, for a bakery: transcript "0:bem 1:vinda? 2:ah 3:PADARIA? 4:Sol? ... 20:na 21:Padaria 22:do 23:Sol" gives [{{"w":2,"t":"à"}},{{"w":3,"t":"Padaria"}},{{"w":4,"t":"do Sol"}}].
 
@@ -104,6 +106,40 @@ def content(work, idx, sess, per):
     b = os.path.join(work, "brief", "board_1.jpg")
     if os.path.exists(b):
         out.append(brief.image_block(b))
+    detail = os.path.join(work, "brief", "board_4.jpg")
+    if os.path.exists(detail):
+        out.append(brief.image_block(detail))
+    return out
+
+
+def printed_spellings(idx, scout):
+    """Apply the model's explicit word-to-inscription evidence, preserving time.
+
+    This validates the structured claim; it does not guess names from strings.
+    Conflicting claims for an id are discarded rather than taking the last.
+    """
+    import copy
+    out = copy.deepcopy(idx)
+    words = out.get("words") or []
+    claims = {}
+    for fix in (scout or {}).get("fixes") or []:
+        if not isinstance(fix, dict) or fix.get("evidence") != "screen":
+            continue
+        wid = fix.get("w")
+        if isinstance(wid, bool) or not isinstance(wid, int) or not 0 <= wid < len(words):
+            continue
+        text, read = str(fix.get("t") or "").strip(), str(fix.get("read") or "").strip()
+        if not text or not read or len(text) > 120 or text.casefold() not in read.casefold():
+            continue
+        claims.setdefault(wid, []).append((text, read))
+    proof = {}
+    for wid, rows in claims.items():
+        if len({text for text, _ in rows}) != 1:
+            continue
+        text, read = rows[0]
+        proof[str(wid)] = {"before": words[wid]["w"], "text": text, "read": read, "evidence": "screen"}
+        words[wid]["w"] = text
+    out["caption_evidence"] = proof
     return out
 
 
