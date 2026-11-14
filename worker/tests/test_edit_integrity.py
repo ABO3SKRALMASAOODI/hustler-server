@@ -5,6 +5,21 @@ from score import asks, patch
 import agent_loop
 
 
+def test_contained_original_cutaway_is_not_a_local_face_patch(monkeypatch):
+    ctx = NS(index={"video": {"width": 576, "height": 1024}})
+    monkeypatch.setattr(ei, "_output_faces", lambda *a: [(2., [[.4, .2, .6, .4]])])
+    monkeypatch.setattr(asks, "project_assets", lambda *a: [
+        {"storage_key": "original", "kind": "original", "width": 576, "height": 1024}])
+    monkeypatch.setattr(asks, "output_size", lambda *a: (720, 1280))
+    shot = {"id": "ov.shot", "asset_key": "original", "kind": "video",
+            "start": 0, "duration_s": 4, "x": .5, "y": .5, "scale": 1.}
+    assert ei.face_cover_refusal(ctx, {}, {"overlays": [shot]}) is None
+    assert "covers a measured face" in ei.face_cover_refusal(
+        ctx, {}, {"overlays": [dict(shot, scale=.6)]})
+    assert "covers a measured face" in ei.face_cover_refusal(
+        ctx, {}, {"overlays": [dict(shot, source_crop=[0, 0, .8, 1])]})
+
+
 def test_removed_spans_measures_exact_source_coverage():
     assert ei.removed_spans([[0, 11.264]], [[0, 3.6]]) == [(3.6, 11.264)]
     assert ei.removed_spans([[0, 2], [4, 7]], [[0, 7]]) == []

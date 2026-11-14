@@ -168,6 +168,15 @@ def face_cover_refusal(ctx, before, after):
         w = float(it.get('scale', .4))
         h = w * ow / oh * float(height) / float(width)
         x, y = float(it.get('x', .5)), float(it.get('y', .5))
+        # A centered, contained original-video shot replaces the picture
+        # just as a cover cutaway does. It is not a local face-cover patch.
+        # Require actual original asset identity and full-frame geometry;
+        # a small picture-in-picture or a cropped source still gets checked.
+        if (asset.get("kind") == "original" and it.get("kind") == "video"
+                and not it.get("source_crop") and abs(x - .5) < 1e-6
+                and abs(y - .5) < 1e-6 and w <= 1.001 and h <= 1.001
+                and max(w, h) >= .999):
+            continue
         candidates.append((it['id'], float(it.get('start') or 0),
                            float(it.get('start') or 0)+float(it.get('duration_s') or 0),
                            [x-w/2,y-h/2,x+w/2,y+h/2]))

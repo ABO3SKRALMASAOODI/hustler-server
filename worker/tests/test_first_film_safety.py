@@ -6,6 +6,33 @@ import source_screen
 from score import source_guard
 
 
+def test_both_editor_fallbacks_start_from_the_persisted_cleared_upload():
+    from types import SimpleNamespace
+    rows = [{"version": 1, "json": {"keep": [[0., 14.17]], "texts": []}}]
+    evidence = {"status": "verified", "version": 1, "safe_end_s": 10.1,
+                "source_duration_s": 14.167, "source_sha256": "sha"}
+    def save(edl, note):
+        rows.append({"version": 2, "json": edl})
+        return "saved"
+    ctx = SimpleNamespace(duration=10.1, index={"source_screen": evidence},
+                          latest_edl=lambda: rows[-1], apply_score=save)
+    start = source_screen.clear_start_state(ctx)
+    assert start["version"] == 2 and start["json"]["keep"] == [[0., 10.1]]
+    assert rows[0]["json"]["keep"] == [[0., 14.17]]
+    source_screen.check_render(start["json"], evidence, "original", "sha")
+    source_screen.clear_start_state(ctx)
+    assert len(rows) == 2
+
+
+def test_failed_clearance_write_cannot_continue_to_the_unbounded_fallback():
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(duration=10.1, index={"source_screen": {}},
+        latest_edl=lambda: {"json": {"keep": [[0., 14.17]]}},
+        apply_score=lambda *a: "REJECTED")
+    with pytest.raises(ValueError, match="not saved"):
+        source_screen.clear_start_state(ctx)
+
+
 def test_screen_samples_accept_the_live_scene_detector_shot_type():
     from schemas import Shot
     typed = [Shot(id=1, start=0., end=10.17), Shot(id=2, start=10.17, end=14.17)]

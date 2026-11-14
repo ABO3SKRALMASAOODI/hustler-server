@@ -146,3 +146,27 @@ def check_render(edl, evidence, source_key, source_sha):
         last = float(item.get("source_start_s") or 0) + float(item.get("duration_s") or 0)
         if last > end + 1e-6:
             raise ValueError("first-film picture crosses the cleared source boundary")
+
+
+def clear_start_state(ctx):
+    """Persist the cleared upload before either editor can fall back to it.
+
+    The Director and the legacy chain both restore this row on failure. A
+    private index alone cannot change that saved full-source starting row.
+    """
+    import copy
+    row = ctx.latest_edl()
+    end = float(ctx.duration)
+    keep = [[a, min(b, end)] for a, b in row["json"].get("keep", []) if a < end]
+    evidence = ctx.index["source_screen"]
+    # Full-source clearance preserves the normal centisecond EOF rounding.
+    if end >= float(evidence.get("source_duration_s") or float("inf")):
+        return row
+    if keep != row["json"].get("keep"):
+        edl = copy.deepcopy(row["json"])
+        edl["keep"] = keep
+        note = ctx.apply_score(edl, "exclude the source tail identified by screen review")
+        row = ctx.latest_edl()
+        if row["json"].get("keep") != keep:
+            raise ValueError(f"cleared first-film starting cut was not saved: {note}")
+    return row
