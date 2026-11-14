@@ -2074,6 +2074,10 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
     whole take, trial_turn.whole_cleanup): no best-moment pick, the source's
     own ends trimmed (a mic check, a trailing fragment) and the rest kept."""
     _await_first_cut_storyboard(ctx, worker_db)
+    import source_typography
+    typography = source_typography.prepare(ctx)
+    import talk_craft
+    burned = source_typography.captioned(ctx.index) or (_talk_source(ctx) and talk_craft.burned_captions(ctx.index))
     steps, applied = [], []
     duration = float(ctx.duration or 0)
     picked = None
@@ -2265,7 +2269,10 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
     vertical_source = _orientation(ctx.index) == "vertical"
     vertical_out = vertical_source
     screen_kept = False
-    if not vertical_source and (picked or {}).get("how") == "continuous":
+    if not vertical_source and typography.get("designed_layout"):
+        _run(ctx, steps, "set_frame", {"ratio": "source", "mode": "crop"}, started)
+        applied.append("the upload's composed type and picture layout preserved")
+    elif not vertical_source and (picked or {}).get("how") == "continuous":
         # the whole scene, fitted: a crop would cut the action it preserves
         if _ok(_run(ctx, steps, "set_frame",
                     {"ratio": "9:16", "mode": "pad_blur"}, started)):
@@ -2322,7 +2329,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             applied.append("the source's bars cropped")
     if talking and len(_keep(ctx) or []) > 1 and not q1:
         _run(ctx, steps, "conceal_jump_cuts", {}, started)
-    if talking and not q1:
+    if talking and not q1 and not typography.get("designed_layout"):
         import first_cut_visual as fcv
         fcv.cut_ins(ctx, steps, started, _run, [],
                     fcv.face_aim(ctx.index, bands, vertical_source), HOOK_S,
@@ -2367,7 +2374,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
     # the corner-mark guard removed every such title, scoring hook 2.5-4.
     # The spoken line stays the title, at the chest; the scout's opening
     # rule keeps it a self-contained claim.)
-    if talking:
+    if talking and not burned:
         opening = spoken_opening(ctx)
         if q1 and _talk_source(ctx):
             import talk_craft
@@ -2378,6 +2385,8 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         # the references hold the opening title 2.5-3.5 s (C2: it left at
         # 1.6 s on a fast speaker); it owns its zone, the captions wait
         hook_end = round(min(max(hook_end + 0.15, HOOK_MIN_S), HOOK_MAX_S), 2)
+    if burned:
+        hook = None
     if hook:
         params = hook_params(hook, hook_y, vertical_out)
         if q1:
@@ -2461,13 +2470,8 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         if _ok(fcv.screen_follow(ctx, steps, started, _run, spend,
                                  max(hook_end, 1.5))):
             applied.append("a camera that follows what is discussed")
-    burned = False
-    if _talk_source(ctx):
-        import talk_craft
-        burned = talk_craft.burned_captions(ctx.index)
-        if burned:
-            print("[first_cut] the source carries its own captions: no "
-                  "captions or slams added on top", flush=True)
+    if burned:
+        print("[first_cut] preserving the source's existing caption track", flush=True)
     if cut_speech and not screen_kept and not burned:
         beats = list(getattr(ctx, "first_cut_beats", None) or [])
         if len(beats) < 3:
@@ -2483,7 +2487,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                 # 33.2-34.1 s), measured on the exact frames
                 import talk_craft
                 talk_craft.clear_slams(ctx, steps, started, _run)
-    if q1 and talking:
+    if q1 and talking and not typography.get("designed_layout"):
         import first_cut_visual as fcv
         busy = sorted(cutaways + list(ctx.first_cut_cards or []))
         aim = fcv.face_aim(ctx.index, bands, vertical_source)
@@ -2492,7 +2496,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             applied.append("a closer camera at the turns")
         if len(_keep(ctx) or []) > 1:
             _run(ctx, steps, "conceal_jump_cuts", {}, started)
-    elif q1 and cut_speech and not screen_kept and vertical_out:
+    elif q1 and cut_speech and not screen_kept and vertical_out and not typography.get("designed_layout"):
         # Q1: a narrated animation's long shots get the same rhythm, softer
         # (judges: "one cut every 4.5 s across long camera moves")
         import first_cut_visual as fcv
@@ -3863,6 +3867,9 @@ def _on_screen(ctx):
 def _director_film(ctx, worker_db, job, started, spend, trial_scope, subscribed):
     """(steps, applied, picked) from the Director, or None for the chain. Never raises."""
     try:
+        _await_first_cut_storyboard(ctx, worker_db)
+        import source_typography
+        source_typography.prepare(ctx)
         from score import film
         return film.attempt(ctx, worker_db, job, started, spend, trial_scope,
                             subscribed)
