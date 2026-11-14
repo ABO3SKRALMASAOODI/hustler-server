@@ -131,16 +131,20 @@ def live():
         return bool(LIVE)
 
 
-def sidecar_params():
+def sidecar_params(edl=None):
     """The ``matte.person`` params every Wave 1 reader and writer keys with.
     None keeps Wave 0's keys (sidecars.py defaults). Set by config: the
     measured speed option (ROADMAP 1A design 5) is ``downsample_ratio`` —
     RVM's coarse pass at 0.375 of the 960 px proxy instead of 0.533."""
     cfg = _config()
     ds = getattr(cfg, "MATTE_DOWNSAMPLE_RATIO", None) if cfg else None
-    if ds:
-        return {"downsample_ratio": round(float(ds), 4)}
-    return None
+    out = {"downsample_ratio": round(float(ds), 4)} if ds else {}
+    if any(it.get('type') == 'background' for it in (edl or {}).get('fx') or []):
+        import matte_refine
+        import sidecars
+        out.update(refine=matte_refine.VERSION,
+                   support_model=sidecars.model_info('efficientsam_ti')['sha256'])
+    return out or None
 
 
 # ── geometry helpers ────────────────────────────────────────────────────
@@ -767,7 +771,9 @@ class ProgramMatte:
                       float((f.get("meta") or {}).get("fps") or sf))
                      for f in self.files]
             w, h = self.mw, self.mh
-            curve = curve_expr(FIRM_LO, FIRM_HI)
+            # Background compositing needs the measured soft alpha. Firming
+            # it here and again in subject_fx turned blurred hands into wall patches.
+            curve = None if (self.params or {}).get('refine') else curve_expr(FIRM_LO, FIRM_HI)
         else:
             files = [(f["t0"], int(round((f["t1"] - f["t0"]) * f["fps"])),
                       f"pmface:{k}", float(f["fps"]))
@@ -1001,7 +1007,7 @@ def for_plan(plan, create=True):
     if pm is None and create and getattr(plan, "tl", None) is not None \
             and getattr(plan, "source", None) is not None:
         pm = ProgramMatte(plan.tl, plan.source, preview=plan.preview,
-                          workdir=plan.workdir)
+                          workdir=plan.workdir, params=sidecar_params(getattr(plan, 'edl', None)))
     if pm is not None:
         plan.pm = pm
     return pm
@@ -1108,7 +1114,7 @@ def matte_status(edl, index, source=None):
         src = source or read_source(index)
         tl = Timeline(edl["keep"], edl.get("inserts") or [],
                       edl.get("speed") or [])
-        pm = ProgramMatte(tl, src, preview=True)
+        pm = ProgramMatte(tl, src, preview=True, params=sidecar_params(edl))
         for it in needs_program_matte(edl, tl):
             pm.want(it[0], it[1], it[2])
         if not pm.wants:

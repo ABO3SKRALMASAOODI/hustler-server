@@ -90,6 +90,11 @@ must not leave a new crop, lost title or other incidental 'quality' repair.
     ctx.versions_written.append(version)
     ctx.last_preview = dict(prior_preview, edl_version=version) if prior_preview else None
     ctx.last_change = None
+    if hasattr(ctx, 'rendered_versions') and prior_preview:
+        ctx.rendered_versions.add(version)
+    for field in ('last_preview_check', 'last_preview_check_critic', 'last_preview_failure'):
+        if hasattr(ctx, field):
+            setattr(ctx, field, None)
     ctx.ask_verdict = dict(verdict, edl_version=version,
                            preview_digest=asks.preview_fingerprint(ctx.last_preview or {}))
     ctx.unmet_edit_restored = {'from_version': current['version'], 'baseline_version': baseline['version'], 'to_version': version}

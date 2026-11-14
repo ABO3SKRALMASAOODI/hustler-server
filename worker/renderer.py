@@ -5338,7 +5338,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             parts.append(f"[{labs[0]}]null[{out}]" if len(labs) == 1 else
                          "".join(f"[{x}]" for x in labs)
                          + f"concat=n={len(labs)}:v=1:a=0[{out}]")
-            edge = matte_track.edge_lut() if lab == "person" else None
+            edge = (matte_track.edge_lut() if lab == "person" and
+                    not (pm.params or {}).get('refine') else None)
             if edge:
                 # the edge at render resolution (matte_track.edge_lut)
                 parts.append(f"[{out}]lut=c0='{edge}'[{out}e]")
@@ -7990,6 +7991,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         if pm_src is not None:
             pm = matte_track.ProgramMatte(
                 tl, pm_src, preview=preview, workdir=workdir,
+                params=matte_track.sidecar_params(edl),
                 launch=matte_track.RENDER_LAUNCH.get(),
                 final_wait_s=(0.0 if preview
                               else float(getattr(config,
