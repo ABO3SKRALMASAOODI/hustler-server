@@ -63,7 +63,7 @@ def test_typed_write_uses_request_guards_and_propagates_asset_grants():
     assert not hasattr(ctx, "director_version")
 
 
-def test_four_minute_typed_film_reaches_director_with_first_film_switch_off(monkeypatch, tmp_path):
+def test_four_minute_typed_film_reaches_director_without_lifting_first_film_cap(monkeypatch, tmp_path):
     source = tmp_path / "source.mp4"
     source.touch()
     ledger = {"asks": [{"kind": "film", "cut": "new", "said": "polish", "want": "polished film"}]}
@@ -72,7 +72,7 @@ def test_four_minute_typed_film_reaches_director_with_first_film_switch_off(monk
         agent_model="gpt-6.1-sol", ask_ledger=copy.deepcopy(ledger), versions_written=[])
     ctx.write_edl = lambda edl, note: ctx.versions_written.append(2) or "EDL v2"
     db = NS(run=lambda *a: {"storage_key": "original"})
-    monkeypatch.setattr(flags, "read", lambda db: copy.deepcopy(flags.DEFAULTS))
+    monkeypatch.setattr(flags, "read", lambda db: dict(copy.deepcopy(flags.DEFAULTS), mode="on"))
 
     def make(view, db, job, cfg, deadline, work, rec):
         assert cfg["models"] == {"scout": "gpt-6.1-sol", "direct": "gpt-6.1-sol"}
@@ -90,6 +90,7 @@ def test_four_minute_typed_film_reaches_director_with_first_film_switch_off(monk
 
 def test_long_whole_request_uses_existing_segmented_library_not_clip_selection(monkeypatch):
     ctx = NS(duration=2700, has_main_video=True, ask_ledger={"asks": []})
+    monkeypatch.setattr(flags, "read", lambda db: dict(copy.deepcopy(flags.DEFAULTS), mode="on"))
     monkeypatch.setattr(typed, "_selection", lambda ctx: (None, {"usd": .01}))
     import quality_verifier
     monkeypatch.setattr(quality_verifier, "request_text_for", lambda ctx: "the entire match")
@@ -107,3 +108,44 @@ def test_job_lease_loss_never_becomes_a_fallback(monkeypatch):
     monkeypatch.setattr(typed, "run", lost)
     with pytest.raises(db.JobLeaseLost):
         asks.direct_film(None, None, {}, None, {})
+
+
+def test_optional_question_stays_nonterminal_until_an_attempt_is_rendered(monkeypatch):
+    import agent_loop
+    import agent_tools
+    ctx = NS(ask_ledger={"asks": [{"kind": "film"}]}, rendered_versions=set(),
+             last_preview=None, _question_held=True)
+    monkeypatch.setattr(agent_tools, "_question_needs_customer", lambda *a: False)
+    assert agent_loop._typed_question_hold(ctx, "ask_user", {"question": "Which font?"})
+    # An earlier cached preview is not this request's rendered attempt.
+    ctx.rendered_versions = {1}
+    ctx.last_preview = {"cached": True}
+    assert agent_loop._typed_question_hold(ctx, "ask_user", {"question": "Which font?"})
+    ctx.last_preview = {"edl_version": 2}
+    ctx.rendered_versions = {2}
+    assert agent_loop._typed_question_hold(ctx, "ask_user", {"question": "Which font?"}) is None
+
+
+def test_essential_input_and_nonediting_questions_are_not_held(monkeypatch):
+    import agent_loop
+    import agent_tools
+    ctx = NS(ask_ledger={"asks": [{"kind": "film"}]}, rendered_versions=set())
+    monkeypatch.setattr(agent_tools, "_question_needs_customer", lambda *a: True)
+    assert agent_loop._typed_question_hold(ctx, "ask_user", {"question": "Upload the missing clip?"}) is None
+    ctx.ask_ledger = {"asks": [{"kind": "answer"}]}
+    monkeypatch.setattr(agent_tools, "_question_needs_customer", lambda *a: pytest.fail("not an edit"))
+    assert agent_loop._typed_question_hold(ctx, "ask_user", {}) is None
+
+
+def test_default_film_routing_and_explicit_holds():
+    cfg = asks.parse(None)
+    assert cfg["director"] and cfg["pass"] and not cfg["patch"]
+    assert not asks.parse({"mode": "on", "director": False})["director"]
+    assert asks.parse({"mode": "off"})["mode"] == "off"
+
+
+def test_global_director_hold_is_preserved(monkeypatch):
+    monkeypatch.setattr(flags, "read", lambda db: dict(flags.DEFAULTS, mode="off"))
+    monkeypatch.setattr(film, "_make", lambda *a: pytest.fail("Director is held"))
+    assert typed.run(None, None, {}, 9, {"director": True}) == {
+        "fell": "the Director is off (app_kv.director)"}
