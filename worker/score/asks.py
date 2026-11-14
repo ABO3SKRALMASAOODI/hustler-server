@@ -502,8 +502,8 @@ CHECK_SCHEMA = {
             "full_length": {"type": "boolean",
                             "description": "This ask wants the film as long as the whole upload, nothing of it cut (keep my full narration, my duration, do not shorten)."},
             "seen": {"type": "string", "description": "First: what the numbers, the frames or the reply show for this ask, with times and figures. At most two short sentences."},
-            "rests_on": {"type": "string", "enum": ["numbers", "frames", "reply", "nothing"],
-                         "description": "What the state below rests on: the edit's numbers, the rendered frames, the reply (only for an answer ask, or for said_why_not), or nothing given shows it."},
+            "rests_on": {"type": "array", "items": {"type": "string", "enum": ["numbers", "frames", "reply", "nothing"]},
+                         "description": "Every evidence source supporting the state. Include both numbers and frames when dimensions/duration AND visible content support it. For a visual edit, include frames only when the supplied rendered frames actually show it. Reply alone never proves an edit."},
             "state": {"type": "string", "enum": ["done", "partly", "not_done", "cannot_tell"]},
             "said_why_not": {"type": "boolean",
                              "description": "The reply says plainly that this ask itself was not done or can't be done here, and why."},
@@ -515,7 +515,7 @@ CHECK_SCHEMA = {
 
 CHECK_SYSTEM = """You check a finished video edit against the customer's asks, one by one. You see frames of the rendered film with their times, the edit's measured numbers, what changed in this request, and the reply the editor wrote.
 
-Work the same way every time, so the same film always gets the same verdict. For each ask, first write seen: what the numbers, the frames or the reply show for it. Then rests_on: what that evidence is. Then state, from that evidence alone:
+Work the same way every time, so the same film always gets the same verdict. For each ask, first write seen: what the numbers, the frames or the reply show for it. Then rests_on: list every evidence source used, including both numbers and frames for a measured format with visible subject framing. Then state, from that evidence alone:
 - done: the pass condition is met on the numbers or the frames (for an answer ask, the reply answers the question).
 - partly: some of the pass condition is met and some is not.
 - not_done: the evidence shows it missing or wrong.
@@ -1104,12 +1104,16 @@ def check(ctx, ledger, reply_text, edl, preview=None, changes="", fixed=None):
         r = by_id.get(a["id"]) or {}
         state = r.get("state") if r.get("state") in ("done", "partly", "not_done", "cannot_tell") else "cannot_tell"
         seen = str(r.get("seen") or "")
+        # A compound ask can need measurements AND pixels. Preserve old cached
+        # single-source verdicts while recording every source for new checks.
+        proof = r.get("rests_on") or []
+        proof = {proof} if isinstance(proof, str) else set(proof)
         if state == "done" and a["kind"] in EDIT_KINDS and a.get("how") != "reply" \
-                and r.get("rests_on") in ("reply", "nothing"):
+                and not proof.intersection(("numbers", "frames")):
             # An edit is never done on the reply's word: what was made shows in the numbers or frames.
             # A keep (nothing bought, nothing carried over) or an ask checked by the reply may rest on it.
             state = "cannot_tell"
-        if state == "done" and a.get("how") == "look" and a["kind"] in EDIT_KINDS and (not pages or r.get("rests_on") != "frames"):
+        if state == "done" and a.get("how") == "look" and a["kind"] in EDIT_KINDS and (not pages or "frames" not in proof):
             state, seen = "cannot_tell", "The visual change has no rendered-frame evidence."
             r = dict(r, line="I couldn't verify this visual change in the rendered preview.")
         if state != "done" and a.get("otherwise") and r.get("said_why_not") is True and r.get("made_against") is False:
