@@ -25,7 +25,8 @@ def whole(keep, words, duration, previous=None, pad=False):
 
 Never discard the first word simply because an onset was chosen too late.
 Repeated passes cover overlapping ASR word intervals; edges use the EDL's
-centisecond grid outwards, so normalization cannot put them back inside.
+microsecond precision outwards, so normalization cannot put them back inside
+without swallowing an adjacent word that begins at a millisecond boundary.
 """
     spans = [[float(a), float(b)] for a, b in keep]
     moves = []
@@ -46,8 +47,8 @@ centisecond grid outwards, so normalization cannot put them back inside.
                 else:
                     nxt = min((float(w['t0']) for w in words if float(w['t0']) >= edge), default=float(duration))
                     edge = min(nxt, edge + cut_audio.PAD_END_S)
-            new = (math.floor(edge * 100 + 1e-7) / 100 if side == 'start'
-                   else math.ceil(edge * 100 - 1e-7) / 100)
+            new = (math.floor(edge * 1000000 + 1e-7) / 1000000 if side == 'start'
+                   else math.ceil(edge * 1000000 - 1e-7) / 1000000)
             new = max(0., min(float(duration), new))
             for span in spans:
                 k = 0 if side == 'start' else 1
