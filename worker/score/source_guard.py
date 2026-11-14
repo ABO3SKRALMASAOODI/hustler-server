@@ -41,6 +41,7 @@ def apply(l1, index, perception):
         rects = crop if track else [crop]
         if missing:
             item["crop"] = [list(full) for _ in rects] if track else list(full)
+            item["source_full_frame"] = True
             reason = "full_frame_missing_subject_boxes"
         else:
             # A subject wholly outside a proposed crop must count too.
@@ -49,6 +50,7 @@ def apply(l1, index, perception):
                        and c[3] >= b[3] for c in rects for b in boxes)
             if not safe:
                 item["crop"] = [list(full) for _ in rects] if track else list(full)
+                item["source_full_frame"] = True
             reason = "subject_boxes_contained" if safe else "full_frame_subject_outside_crop"
         report.append({"id": item["id"], "source": [start, end], "reason": reason,
                        "subject_boxes": len(boxes), "crop": item.get("crop")})
