@@ -10,10 +10,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def load():
+    """proof.py on the stories' film.py; this folder's tests (test_film.py) import this folder's film.py, so the path and
+    the module table are put back as they were once it is loaded."""
+    path, mods = list(sys.path), dict(sys.modules)
     sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shell"))
     spec = importlib.util.spec_from_file_location("wf_proof_test", os.path.join(HERE, "proof.py"))
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
+    sys.path[:] = path
+    for k in [k for k in sys.modules if k not in mods]:
+        del sys.modules[k]
     return m
 
 

@@ -39,12 +39,16 @@ sys.path[:] = [p for p in sys.path if os.path.abspath(p or ".") != HERE]
 for p in (os.path.join(SKILLS, "_shell"), STORIES):
     if p not in sys.path:
         sys.path.insert(0, p)
+# a `film` already imported from another folder (this one's) steps aside while the stories' modules bind theirs
+_held = {k: sys.modules.pop(k) for k in ("film",) if k in sys.modules
+         and os.path.dirname(os.path.abspath(getattr(sys.modules[k], "__file__", "") or "")) != STORIES}
 import chain  # noqa: E402
 import film as F  # noqa: E402
 import pictures as PX  # noqa: E402
 import reel as R  # noqa: E402
 import wf3 as W3  # noqa: E402
 import writer  # noqa: E402
+sys.modules.update(_held)
 
 V = "/Users/masaoodi/Documents/Valmera"
 VV = f"{V}/.valmera"
