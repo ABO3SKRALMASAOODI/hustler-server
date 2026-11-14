@@ -23,7 +23,7 @@ from . import boards, brief, call
 BOARD_W, BOARD_H = 1568, 880
 MAX_ITEMS = 20             # round seven: a moment is a run of two or three pictures, as the judge cuts it (round five: 14, one a moment; before: 8)
 WISH_BUDGET_S = 6.0
-LOOK_MODEL = "claude-haiku-5-5"
+LOOK_MODEL = os.environ.get("BIN_LOOK_MODEL", "claude-haiku-5-5")
 
 
 def licence_class(item):
@@ -182,7 +182,9 @@ def look_all(tmp, cands, wishes, deadline):
     return keep, usd, errs
 
 
-CHECK_MODEL = os.environ.get("BIN_CHECK_MODEL", "claude-opus-5-5")   # the last look's eyes: what it removes never enters
+CHECK_MODEL = os.environ.get("BIN_CHECK_MODEL", "gpt-6-sol")   # the last look's eyes: what it removes never enters
+EXACT_WORDS = """
+For EACH pair also return exact_match (boolean) in the pair object. First translate and read the complete spoken clause, then inspect the candidate's pixels. For a literal picture it must depict the exact thing in that clause, including species, person, material, preparation and action. Red meat is not evidence of shark meat; an animal alive is not its prepared dish. A source caption or supplied 'showing' description is a claim, not proof. For an explicitly marked association assess the full intended comparison instead. Do not identify or compare faces. Use readable labels and shot-specific provenance for named people. If attribution or material is uncertain, exact_match=false and post=upload. Missing evidence never means true. Explain the visible subject in why."""
 CHECK_S = 18.0
 CHECK_RESERVE_S = 8.0      # the end of the budget belongs to the look: a picture nobody checked never enters
 ACQUIRE_S = 5.0            # and the seconds before it to the fetch: three named pictures were found and none arrived (p5591, 13 Nov), since
@@ -272,7 +274,7 @@ def check_fit(work, items, wishes, deadline, asks=()):
     the caption. It stays only when the look would leave it in the film (12 Nov: the last look removed a
     found picture on 5 of 7 films as "a library picture of something loosely like it, in place of the
     person talking"; each removal cost a second render). Returns (kept items, usd, report). No answer
-    keeps only the named pictures, which a check that each shows its subject already passed."""
+    keeps no picture: an attribution check is not a check against this moment's words."""
     from . import taste
     if not items:
         return items, 0.0, []
@@ -294,16 +296,18 @@ def check_fit(work, items, wishes, deadline, asks=()):
             ask = ["The pairs, with what the editor added at each moment:"]
             for j, n in enumerate(chunk, 1):
                 shows = str(items[n].get("what") or "")[:90]      # the look can't tell Webber's car from any car unless told what it is
-                like = (wishes[items[n]["wish"]] if 0 <= int(items[n].get("wish", -1)) < len(wishes) else {}).get("how") == "like"
+                wish = wishes[items[n]["wish"]] if 0 <= int(items[n].get("wish", -1)) < len(wishes) else {}
+                like = wish.get("how") == "like"
                 ask.append(f"pair {j} @{rows[n][0]:.1f}s: b{n}.s1: " + ("a designed picture made of the words said" if items[n].get("provider") == "designed"
                                                                       else "a found picture cut to as a picture of what the words mean (an association, not the thing named)" if like else "a found picture")
                            + ", full frame for a second or two" + (f", showing {shows}" if shows else "")
+                           + (f"; requested picture: {wish['want']}" if wish.get("want") else "")
                            + (f"; cap: the caption, reading {saids[n]}" if saids[n] else ""))
             if asks:        # what the customer asked for is theirs: the film's own look leaves an ask-bound picture in
                 ask.append("The customer typed these asks: " + json.dumps([a.get("said") for a in asks if a.get("said")], ensure_ascii=False)[:900]
                            + ". A picture that shows what an ask asked for is the customer's own choice: post film for it unless it does not show that.")
             ask.append("Now the JSON.")
-            r = call.stream(CHECK_MODEL, taste.LOOK_SYSTEM, [brief.image_block(board), {"type": "text", "text": "\n".join(ask)}],
+            r = call.stream(CHECK_MODEL, taste.LOOK_SYSTEM + EXACT_WORDS, [brief.image_block(board), {"type": "text", "text": "\n".join(ask)}],
                             max_tokens=1200, effort="low", purpose="director_bin_check",
                             deadline=min(deadline, time.monotonic() + CHECK_S), thinking=False)
             return chunk, r
@@ -323,15 +327,21 @@ def check_fit(work, items, wishes, deadline, asks=()):
                     pass
                 if v is None:
                     continue
+                by_pair = {}
+                for p in pairs:
+                    if isinstance(p, dict) and isinstance(p.get("n"), int):
+                        # Duplicated pair numbers carry conflicting evidence: neither verdict is trusted.
+                        by_pair[p["n"]] = p if p["n"] not in by_pair else {}
                 for j, n in enumerate(chunk):
-                    p = pairs[j] if j < len(pairs) and isinstance(pairs[j], dict) else {}
+                    p = by_pair.get(j + 1, {})
                     post = str(p.get("post", "")).strip().lower()
-                    verdict[n] = (f"b{n}.s1" not in v["remove"] and post in ("film", "same"), str(p.get("why") or "")[:100])
+                    verdict[n] = (p.get("exact_match") is True and f"b{n}.s1" not in v["remove"] and post in ("film", "same"), str(p.get("why") or "")[:100])
         kept, rep = [], []
         for n, it in enumerate(items):
-            ok, why = verdict.get(n, (bool(it.get("named")) if errors else False, "no verdict"))
+            ok, why = verdict.get(n, (False, "no exact-word verdict"))
             rep.append(dict(id=it["id"], what=it.get("what"), designed=it.get("provider") == "designed", ok=ok, why=why))
             if ok:
+                it["word_check"] = dict(ok=True, model=CHECK_MODEL, said=saids[n], why=why)
                 kept.append(it)
         if errors:
             rep.append(dict(check_error="; ".join(errors)[:200]))
@@ -1023,6 +1033,8 @@ def run(work, scout, per, acquire, deadline, foot=None):
                         "page": c.get("page_url"), "query": c.get("_q")})
             if c.get("named"):
                 row.update(named=c["named"], shows=c.get("shows"))
+            if c.get("verification"):
+                row.update(verification=c["verification"], footage=c.get("footage"))
             if c.get("design"):
                 row.update(design=c["design"])
             items.append(row)

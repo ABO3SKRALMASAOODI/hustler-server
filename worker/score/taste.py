@@ -95,14 +95,14 @@ def allow(sup, calm=False):
     c, n, d, bed = sup["cls"], sup["np10"], sup["dur_s"], sup["bed"]
     k = 0.5 if calm else 1.0
     cam = {"T": 0.3, "M": 1.0, "L": 0.25}.get(c, min(0.25 * n, 7.5))
-    snd = {"T": 2.0 if bed else 1.0, "M": 3.0 if bed else 2.0, "L": 1.2}.get(c, min(0.9 * n, 8.0 if bed else 6.0))
+    snd = {"T": 3.6, "M": 3.6, "L": 1.2}.get(c, min(0.9 * n, 8.0 if bed else 6.0))
     disp = {"T": 3.0, "M": 5.0, "P": 10.0, "L": 1.0}[c]
     cards = {"T": 1.5, "M": 3.0, "P": 6.0, "L": 1.0}[c]
     if c == "T":
         flashes = 1 if d < 20 else _count(0.5 * k, d, 1)
     else:
         flashes = _count({"M": 1.5, "P": 3.0, "L": 0.2}[c] * k, d, 0)
-    return {"camera": _count(cam * k, d, 1), "sounds": _count(snd * k, d, 1), "display": _count(disp * k, d, 1),
+    return {"camera": _count(cam * k, d, 1), "sounds": (max(1, int(math.ceil(snd * k * d / 10.0))) if d < 10 else _count(snd * k, d, 1)), "display": _count(disp * k, d, 1),
             "cards": _count(cards * k, d, 0), "flashes": flashes,
             # in any 10 s: never more than the whole of the rate, and always room for one
             "sounds_10s": max(1, int(snd * k)), "flashes_10s": max(1, int({"T": 0.5, "M": 1.5, "P": 3.0, "L": 0.2}[c] * k)),

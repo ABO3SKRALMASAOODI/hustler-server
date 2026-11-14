@@ -5840,14 +5840,13 @@ def rest_check(ctx):
 
 def distinct_cuts(shots):
     """Boundaries where the picture really changes: a source, a framing or a jump."""
+    from .sound import reframe_change
     out = []
     for p, q in zip(shots, shots[1:]):
-        same = p.get("pic") == q.get("pic") and p.get("plate") == q.get("plate") and not p.get("treat") and not q.get("treat")
-        if same and "src" in p and "src" in q:
-            same = abs(p["src"][1] - q["src"][0]) < 0.05 and _crop_end(p) == _crop_start(q)
-        elif same and "crop" in p and "crop" in q:
-            same = _crop_end(p) == _crop_start(q)
-        if not same:
+        different = p.get("pic") != q.get("pic") or p.get("plate") != q.get("plate")
+        # A timing split and a small crop adjustment are not new shots.
+        jump = ("src" in p and "src" in q and abs(p["src"][1] - q["src"][0]) >= 0.25)
+        if different or jump or reframe_change(p, q):
             out.append(q["f"][0])
     return out
 
@@ -6116,7 +6115,7 @@ def meter(ctx, l1):
     first3 = sum(1 for c in cuts if c <= 3 * fps)
     facts = compile_facts(ctx, l1, cuts, per_frame)
     busy = quiet_meter(ctx, l1, cuts)
-    m = {"dur_s": round(dur, 2), "beats": len(ctx.beats), "shots": len(shots), "cuts": len(cuts), "cuts10": round(len(cuts) / max(dur, 1e-3) * 10, 1),
+    m = {"measurement_source": "score_plan", "dur_s": round(dur, 2), "beats": len(ctx.beats), "shots": len(shots), "cuts": len(cuts), "cuts10": round(len(cuts) / max(dur, 1e-3) * 10, 1),
          "new_pictures10": round(new_pictures(ctx, shots) / max(dur, 1e-3) * 10, 1), "median_shot": round(statistics.median(lens), 2) if lens else 0, "fast4f": round(sum(1 for x in lens if x <= 4 / fps + 1e-6) / max(1, len(lens)), 2),
          "longest": round(lens[-1], 2) if lens else 0, "cuts_first3s": first3, "type_events10": round(events / max(dur, 1e-3) * 10, 1),
          "words_on_screen": round(sum(per_frame) / max(1, with_text), 2), "text_frames": round(with_text / max(1, ctx.dur_f), 2),
@@ -6135,7 +6134,7 @@ def meter_text(ctx, m):
     head = f"FILM {m['dur_s']}s, {m['beats']} beats, {m['shots']} shots, band {m['band'] or 'none'}"
     out.append(head)
     want = f" (band {b.get('cuts10')})" if b.get("cuts10") else ""
-    out.append(f"PICTURE cuts/10s {m['cuts10']}{want}, of which to a new picture and not a crop of the take {m['new_pictures10']}, median shot {m['median_shot']}s (band {b.get('med')}), shots of 4 frames or less {m['fast4f']}, longest {m['longest']}s, cuts in first 3s {m['cuts_first3s']}")
+    out.append(f"PICTURE planned cuts/10s {m['cuts10']}{want} (estimate; rendered pictures must be measured), of which to a new picture and not a crop of the take {m['new_pictures10']}, median shot {m['median_shot']}s (band {b.get('med')}), shots of 4 frames or less {m['fast4f']}, longest {m['longest']}s, cuts in first 3s {m['cuts_first3s']}")
     want = f" (band {b.get('type10')})" if b.get("type10") else ""
     wos = f" (band {b.get('wos')})" if b.get("wos") is not None else ""
     out.append(f"TYPE events/10s {m['type_events10']}{want}, words on screen {m['words_on_screen']}{wos}, frames with text {m['text_frames']}, chunks {m['captions']}")

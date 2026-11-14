@@ -7,9 +7,9 @@ names that subject wants the same clips, and so does this film written again.
 
 One shelf in object storage, by subject and frame shape:
 
-    footage-cache/v1/<subject>/<W>x<H>/index.json     {"name", "clips": [{file, thumb, shows, seconds, source, ...}]}
-    footage-cache/v1/<subject>/<W>x<H>/<clip>.mp4     the clip as the engine cut it
-    footage-cache/v1/<subject>/<W>x<H>/<clip>.jpg     one frame of it, for the Bin's board
+    footage-cache/v2/<subject>/<W>x<H>/index.json     {"name", "clips": [{file, thumb, shows, seconds, source, ...}]}
+    footage-cache/v2/<subject>/<W>x<H>/<clip>.mp4     the clip as the engine cut it
+    footage-cache/v2/<subject>/<W>x<H>/<clip>.jpg     one frame of it, for the Bin's board
 
 get() answers in the Bin's candidate shape (as footage.seam._offers does), with `cache_key` in place of a local
 file; footage.seam.acquire copies the object. put() shelves what an engine run cut. Nothing here is on a customer's
@@ -23,7 +23,7 @@ import re
 import tempfile
 import time
 
-PREFIX = "footage-cache/v1/"
+PREFIX = "footage-cache/v2/"
 MOST = 6                   # clips kept on a subject's shelf, and offered from it
 MAX_AGE_S = 90 * 86400.0   # a shelf older than this is read as empty: sources go, and a subject's pictures date
 
@@ -64,7 +64,7 @@ def get(name, W=1080, H=1920, most=MOST):
     try:
         import io
         from PIL import Image
-        from . import seam
+        from . import seam, verify
         base = shelf(name, W, H)
         raw = _read(base + "index.json")
         doc = json.loads(raw.decode("utf-8")) if raw else None
@@ -72,6 +72,8 @@ def get(name, W=1080, H=1920, most=MOST):
             return []
         out = []
         for c in (doc.get("clips") or [])[:most]:
+            if not verify.valid(c.get("verification"), name):
+                continue
             img = _read(base + str(c["thumb"]))
             if not img:
                 continue
@@ -80,6 +82,7 @@ def get(name, W=1080, H=1920, most=MOST):
                             cache_key=base + str(c["file"]), width=int(W), height=int(H), duration_s=float(c.get("seconds") or 0.0), license=seam.LICENCE,
                             credit=src.get("channel"), page_url=src.get("url"), title=src.get("title"), _thumb=None,
                             _img=Image.open(io.BytesIO(img)).convert("RGB"),
+                            verification=c["verification"],
                             footage=dict(url=src.get("url"), time_range=c.get("time_range"), x=c.get("x"), eq=c.get("eq"), trim=c.get("trim"))))
         return out
     except Exception as e:  # noqa: BLE001 - an unreadable shelf is an empty one
@@ -94,12 +97,15 @@ def put(name, offers, W=1080, H=1920, most=MOST):
         return 0
     try:
         import storage
+        from . import verify
         base = shelf(name, W, H)
         rows = []
         with tempfile.TemporaryDirectory() as tmp:
             for o in offers[:most]:
                 path = o.get("local_file")
-                if not path or not os.path.exists(path) or o.get("_img") is None:
+                if (not path or not os.path.exists(path) or o.get("_img") is None
+                        or not verify.valid(o.get("verification"), name)
+                        or verify.digest(path) != o["verification"]["sha256"]):
                     continue
                 stem = hashlib.sha1((str((o.get("footage") or {}).get("url")) + str((o.get("footage") or {}).get("time_range"))).encode()).hexdigest()[:12]
                 thumb = os.path.join(tmp, stem + ".jpg")
@@ -107,7 +113,7 @@ def put(name, offers, W=1080, H=1920, most=MOST):
                 storage.upload_file(path, base + stem + ".mp4", "video/mp4")
                 storage.upload_file(thumb, base + stem + ".jpg", "image/jpeg")
                 f = o.get("footage") or {}
-                rows.append(dict(file=stem + ".mp4", thumb=stem + ".jpg", shows=o.get("shows"), seconds=o.get("duration_s"),
+                rows.append(dict(verification=o["verification"], file=stem + ".mp4", thumb=stem + ".jpg", shows=o.get("shows"), seconds=o.get("duration_s"),
                                  source=dict(url=o.get("page_url"), title=o.get("title"), channel=o.get("credit")),
                                  time_range=f.get("time_range"), x=f.get("x"), eq=f.get("eq"), trim=f.get("trim")))
             if not rows:

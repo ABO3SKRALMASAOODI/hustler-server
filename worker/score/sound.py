@@ -105,7 +105,7 @@ PRESENT_BANDS = ((60.0, 300.0), (300.0, 1000.0), (1000.0, 3400.0), (3400.0, 8000
 # The references' placed layer per 10 s by the film's supply: clearly audible sounds (50 ms peak 6 dB or more over the
 # bed). P: the judge's median of 8 (TEARDOWN section 9: 3.6, range 1.1-10.4). L: the study's 20 long films (0.8 placed).
 # M and T are the governor's own rates (taste.allow: 3 and 2 over a bed), under the judge's.
-RATE_10S = {"P": 3.6, "M": 3.0, "T": 2.0, "L": 0.8}
+RATE_10S = {"P": 3.6, "M": 3.6, "T": 3.6, "L": 0.8}
 BURST = 1.5                 # in any 10 s, at most the rate and a half (the references' densest 10 s runs to twice their median)
 KINDS_30S = 5               # the references' five classes may all sound inside 30 s; a sixth kind of sound may not
 OWN_CUT_10S = 1             # the upload's own cuts: at most one sounded in any 10 s
@@ -319,7 +319,7 @@ def allowance(cls, np10, dur_s, bed):
     The governor's allowance (taste.allow: what the picture supply earns) under the references' rate for the class."""
     al = dict(_allow(cls, np10, dur_s, bed))
     rate = min(float(RATE_10S.get(cls, 3.0)), float(al["sounds_10s"]) + 0.999) if al.get("sounds_10s") else float(RATE_10S.get(cls, 3.0))
-    total = max(1, min(int(al["sounds"]), int(rate * dur_s / 10.0 + 1e-9)))
+    total = max(1, min(int(al["sounds"]), (int(math.ceil(rate * dur_s / 10.0)) if dur_s < 10 else int(rate * dur_s / 10.0 + 1e-9))))
     return total, max(1, min(int(math.ceil(rate * BURST)), total)), al
 
 
@@ -530,7 +530,7 @@ def l1_events(l1, kshots=()):
                 ev.append({"f": f, "kind": "picture", "id": s["id"], "still": a.get("kind") == "image" or k[0] == "framed"})
         elif last is not None and k[0] == "take":
             change = reframe_change(previous, s)
-            if change or s.get("punch"):
+            if change:
                 ev.append({"f": f, "kind": "cut", "id": s["id"], "designed": True, "change": change})
         last, previous = k, s
         if k[0] == "take" and s.get("src") and kshots:      # the upload's own cuts inside one shot of it
@@ -1025,7 +1025,8 @@ def plan_sounds(events, ctx):
                        "items": [it], "ref": ref, "director": True})
         state["aud"].append(t)
         state["all"].append(t)
-    own_cap = max(1, int(round(0.5 * want)))
+    own_cap = max(1, want)
+    own_spacing = max(SPACE_S, 10.0 / max(RATE_10S.get(cls, 3.6), 0.1))
     st = {"desc": desc, "seed": seed, "tally": tally, "used": used, "spoken": spoken, "cls_at": [], "open_s": open_s}
 
     def refuse(e, why):
@@ -1054,7 +1055,7 @@ def plan_sounds(events, ctx):
         sec_e = section_of(t, dur_s, turn_t, close_t)
         if quota["on"] and not hero and e["kind"] != "burst" and in_lay.get((sec_e, layer), 0) >= lay_cap.get((sec_e, layer), 0):
             return False                                  # held for the second pass (spare), logged there if it never sounds
-        if e["kind"] == "cut" and not e.get("designed") and (state["own_cut"] >= own_cap or any(abs(u - t) < 10.0 for u in state["own_t"])):
+        if e["kind"] == "cut" and not e.get("designed") and (state["own_cut"] >= own_cap or any(abs(u - t) < own_spacing for u in state["own_t"])):
             return refuse(e, "the upload's own cuts already hold their share")
         if on_cut(e) and not hero and t >= open_s and state["cut_items"] + n_items > cut_budget:
             return refuse(e, f"the cuts already hold their share ({cut_budget}): the references sound type, graphics and moves too")
@@ -1724,7 +1725,7 @@ def present_over(sounds, voice, bed, fps, voice_shift_db=0.0):
         p = _presence(it, both)
         if p < goal:
             was = it["db"]
-            top = tier_ceiling(it["s"], VOICE_LUFS - float(voice_shift_db), tier) if it.get("tier") else GAIN_MAX
+            top = tier_ceiling(it["s"], VOICE_LUFS, tier) if it.get("tier") else GAIN_MAX
             it["db"] = round(max(was, min(it["db"] + min(goal - p, TIER_LIFT.get(tier, PRESENT_LIFT) if it.get("tier") else PRESENT_LIFT), top)), 1)
             back = _masking(it, vb, speech, fps) if speech.any() else 0.0
             if back > 0:

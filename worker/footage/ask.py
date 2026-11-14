@@ -17,13 +17,16 @@ def ask(system, content, purpose, budget_s=120.0, max_tokens=6000, model=None):
     """(text, usd). content: text or Claude-shaped blocks (text and base64 images)."""
     from score import call
     tries = 2
+    deadline = time.monotonic() + budget_s
     for k in range(tries):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Footage model budget exhausted")
         try:
             r = call.stream(model or MODEL, system, content, max_tokens=max_tokens, effort=EFFORT, purpose=purpose,
-                            deadline=time.monotonic() + budget_s, thinking=False)
+                            deadline=deadline, thinking=False)
             return r.text, float(r.usd or 0.0)
         except Exception:  # noqa: BLE001 one retry, then the caller's honest fallback
-            if k == tries - 1:
+            if k == tries - 1 or deadline - time.monotonic() <= 3.0:
                 raise
             time.sleep(3.0)
 

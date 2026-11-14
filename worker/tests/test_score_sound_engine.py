@@ -164,8 +164,8 @@ def test_a_film_of_new_pictures_carries_the_judges_amount_and_no_more():
     total, win, _al = SD.allowance("P", 12.0, 60.0, True)
     assert total == 21 and win == 6
     assert SD.allowance("P", 3.0, 60.0, True)[0] <= 16                    # the picture supply still earns it
-    assert SD.allowance("M", 3.0, 60.0, True)[0] == 18 and SD.allowance("T", 0.5, 60.0, True)[0] == 12
-    assert SD.allowance("T", 0.5, 30.0, False)[0] <= 3 and SD.allowance("L", 6.0, 600.0, True)[0] == 48
+    assert SD.allowance("M", 3.0, 60.0, True)[0] == 21 and SD.allowance("T", 0.5, 60.0, True)[0] == 21
+    assert SD.allowance("T", 0.5, 30.0, False)[0] == 10 and SD.allowance("L", 6.0, 600.0, True)[0] == 48
     fps, dur = 30, 60.0
     D = int(dur * fps)
     ev = [{"f": 45, "kind": "display"}] + [{"f": f, "kind": "picture", "size": 0.4 + 0.5 * ((f // 21) % 2)} for f in range(90, D - 60, 21)]

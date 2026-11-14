@@ -247,7 +247,9 @@ def shelf(tmp_path, monkeypatch):
 def _offer(tmp_path, name, n):
     f = os.path.join(str(tmp_path), f"clip{n}.mp4")
     open(f, "wb").write(b"clip" + bytes([n]))
-    return {"id": f"footage:clip{n}.mp4", "provider": "footage", "kind": "video", "named": name, "shows": f"{name} on camera", "local_file": f, "width": 1080,
+    from footage import verify
+    verified = dict(version=verify.VERSION, model=verify.MODEL, ok=True, subject=name, kind="thing", sha256=verify.digest(f), frames_match=[True]*3)
+    return {"verification": verified, "id": f"footage:clip{n}.mp4", "provider": "footage", "kind": "video", "named": name, "shows": f"{name} on camera", "local_file": f, "width": 1080,
             "height": 1920, "duration_s": 1.5, "credit": "A Channel", "page_url": f"https://example.org/v{n}", "title": "A title",
             "_img": Image.linear_gradient("L").resize((90, 160)).convert("RGB"), "footage": {"url": f"https://example.org/v{n}", "time_range": [12.0, 13.5]}}
 

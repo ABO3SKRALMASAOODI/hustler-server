@@ -166,7 +166,9 @@ def test_stock_download_routes_a_footage_candidate_through_the_seam(tmp_path):
     clip = tmp_path / "clip.mp4"
     clip.write_bytes(b"\x00" * 4096)
     out = tmp_path / "got.mp4"
-    item = dict(provider="footage", kind="video", local_file=str(clip), footage=dict(url="https://www.youtube.com/watch?v=x", time_range=[1, 2]))
+    from footage import verify
+    proof = dict(version=verify.VERSION, model=verify.MODEL, subject="test thing", kind="thing", ok=True, frames_match=[True]*3, sha256=verify.digest(str(clip)))
+    item = dict(verification=proof, named="test thing", provider="footage", kind="video", local_file=str(clip), footage=dict(url="https://www.youtube.com/watch?v=x", time_range=[1, 2]))
     got = stock.download(item, str(out), 1080, 1920)
     assert out.read_bytes() == clip.read_bytes() and got["source_url"] == "https://www.youtube.com/watch?v=x"
 

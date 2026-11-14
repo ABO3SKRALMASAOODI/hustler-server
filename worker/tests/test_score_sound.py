@@ -90,7 +90,7 @@ def test_every_peak_lands_13ms_before_its_event_and_validates(tmp_path):
 
 
 def test_density_follows_the_supply_and_the_10s_window(tmp_path):
-    """A talking take with display words everywhere: the class T allowance (1 sound in 20 s), not one per word."""
+    """A talking take with display words everywhere: reference density at meaningful events, not one per word."""
     work = _work(tmp_path, 20.0, [(0.3, 19.5)])
     items = [_shot("s0", 0, 600)] + [{"id": f"b{k:02d}.big.0", "k": "word", "f": [k * 60 + 5, k * 60 + 40], "t": "W",
                                       "v": "a", "role": "big", "on": k * 60 + 5} for k in range(10)]
@@ -98,7 +98,7 @@ def test_density_follows_the_supply_and_the_10s_window(tmp_path):
     assert rep["class"] == "T"
     times = sorted(s["event_f"] / FPS for s in sounds)
     gestures = SD._gestures(times)
-    assert 1 <= len(gestures) <= rep["allow"] <= 2, rep
+    assert 1 <= len(gestures) <= rep["allow"] <= 8, rep
     for w in np.arange(0, 20, 0.5):
         assert sum(1 for g in gestures if w <= g < w + 10) <= rep["allow_10s"]
 

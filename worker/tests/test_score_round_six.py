@@ -62,7 +62,7 @@ def test_a_wordless_stretch_of_the_take_is_cut_inside_itself_and_a_spoken_one_ne
     assert abs(one[-1]["src"][1] - one[0]["src"][0] - (one[-1]["f"][1] - one[0]["f"][0]) / 30.0) < 0.2       # the take plays on through the cuts
     assert c.meter["pace"]["take_punches"] >= 2
     ev = sound.l1_events(c.l1)
-    assert any(e["kind"] == "cut" and e["id"] == one[1]["id"] for e in ev)        # a cut the eye sees is a cut the sound may land on
+    assert not any(e["kind"] == "cut" and e["id"] == one[1]["id"] for e in ev)    # a small crop step is motion, not a new shot
     talk = selfie(20.0)
     said = comp(film_text(beats_over(talk, 4, lambda k, a, z: {"pic": "main"})), talk)
     # round seven: under a voice the take is cut inside itself too, where a phrase starts (tests/test_score_round_seven.py)
@@ -373,7 +373,9 @@ def test_the_upgrade_writes_the_footage_as_the_next_version(tmp_path, monkeypatc
     assert ctx.first_cut_phases["director"]["footage_later"]["clips"] == 2 and not os.path.isdir(st["work"])
 
 
-def test_footage_is_cut_in_on_the_word_of_a_moment_the_film_showed_no_picture_for(tmp_path):
+def test_footage_is_cut_in_on_the_word_of_a_moment_the_film_showed_no_picture_for(tmp_path, monkeypatch):
+    from score import supply
+    monkeypatch.setattr(supply, "check_fit", lambda work, items, wishes, deadline: (items, 0.0, []))
     from PIL import Image
     from tests.test_score_round_four import _work
     idx = selfie(20.0)

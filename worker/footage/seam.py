@@ -77,7 +77,7 @@ NAME_SYSTEM = """You help a film editor find real video. You get moments of a fi
 
 For each moment, name the one real-world subject its words name or plainly point to that real video exists of: interviews, launches, races, news, archive, documentary and nature film. A named person, place or building, a brand, company or product by name, a named event, team, vehicle, artwork or organisation. Also a specific kind of thing by its own name: a species or breed (Greenland shark), a named dish (hakarl), a sport, craft, therapy or technique by its name (cupping therapy, acupuncture), a named kind of machine (a Formula One car), a natural phenomenon (the aurora). Fix the spelling to the subject's usual English name. Not an idea, a feeling, a mood or a metaphor; not an unnamed person or the speaker; not the customer's own product, shop or workplace; and not a thing so general that any library clip shows it (an office, a phone, a handshake, a city street, "students", "a customer").
 
-For each subject: "name" (the usual English name), "is" (person, place, brand, event or thing), "searches" (one to three video searches, most specific first, the bare name last), "must_show" (one plain sentence: what a clip must visibly show to count, naming every form the subject can take on camera: a racing driver "himself, or his own car on track"; a species "the animal itself, alive, filling the frame"; a therapy "the treatment being given, close on the body").
+For each subject: "name" (the usual English name), "is" (person, place, brand, event or thing), "searches" (one to three video searches, most specific first, the bare name last), "must_show" (one plain sentence: the exact subject and form the words require on camera; a therapy means the treatment being given, close on the body; prepared meat is distinct from a living animal). File clips by the subject visibly depicted: a racing car belongs under its car or team, never under the driver's name. A named person requires readable on-screen attribution attached to that exact shot; never identify or compare faces. Do not broaden the requested form to increase matches.
 
 Answer with one JSON object and nothing else."""
 
@@ -183,7 +183,7 @@ def _offers(work, wishes, subjects, deadline, report, about, W, H, skip=()):
             except Exception:  # noqa: BLE001 a clip with no frame is not offered
                 continue
             out.append(dict(id=f"footage:{os.path.basename(path)}", provider=PROVIDER, kind="video", _wish=ln["i"], named=c["subject"],
-                            shows=c["shows"], local_file=path, width=W, height=H, duration_s=c["seconds"], license=LICENCE,
+                            shows=c["shows"], verification=c.get("verification"), local_file=path, width=W, height=H, duration_s=c["seconds"], license=LICENCE,
                             credit=c["source"]["channel"], page_url=c["source"]["url"], title=c["source"]["title"], _thumb=None, _img=img,
                             footage=dict(url=c["source"]["url"], time_range=c["time_range"], x=c.get("x"), eq=c.get("eq"), trim=c.get("trim"))))
     if report is not None:
@@ -214,6 +214,10 @@ def acquire(item, out_path, want_w, want_h):
         finally:
             if os.path.exists(raw):
                 os.remove(raw)
+    from . import verify
+    if not verify.valid(item.get("verification"), item.get("named")) or verify.digest(out_path) != item["verification"]["sha256"]:
+        os.remove(out_path)
+        raise ValueError("Footage clip lacks matching frame verification")
     item["source_url"] = (item.get("footage") or {}).get("url")
     item["picked_width"], item["picked_height"] = want_w, want_h
     return item

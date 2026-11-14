@@ -29,6 +29,7 @@ import json
 import concurrent.futures as futures
 import os
 import shutil
+import tempfile
 import time
 import uuid
 
@@ -479,7 +480,9 @@ def _publish(ctx, worker_db, edl, locals_, bin_doc, original_key):
             worker_db.run(dbx.insert_asset, ctx.project_id, "video_clip" if it["kind"] == "video" else "image_ref", it["storage_key"],
                           duration_s=it.get("dur"), width=it.get("w"), height=it.get("h"), fps=it.get("fps"),
                           meta={"filename": f"{(it.get('what') or 'stock')[:60]}.{'mp4' if it['kind'] == 'video' else 'jpg'}", "stock": True,
-                                "provider": it.get("provider"), "credit": it.get("author"), "license": it.get("licence"), "director": True})
+                                "provider": it.get("provider"), "credit": it.get("author"), "license": it.get("licence"), "director": True,
+                                "named": it.get("named"), "footage": it.get("footage"), "verification": it.get("verification"),
+                                "word_check": it.get("word_check")})
 
     def up(k):
         p = locals_[k]
@@ -654,10 +657,10 @@ def footage_start(job, work, sc, per):
 
 def footage_into(work, text, box, acquire, most=8):
     """The Score with real footage in it, or None when there is none to add. Each clip the engine cut (checked there:
-    it shows its subject, and a person's clips are held to that person's face) joins the Bin with its source and
+    it shows its subject with shot-specific attribution) joins the Bin with its source and
     credit, and takes the place of one still of the same moment in the film: the same cut, the same length, now a
     moving picture of the real thing. A moment the film showed no picture for gets its clip cut in on its word
-    (_place_clips). Nothing else in the Score changes and no model is called. Returns (score text, [new Bin rows])."""
+    (_place_clips). Every offered clip also passes Supply's exact-word check. Returns (score text, [new Bin rows])."""
     from . import compiler, direct
     offers = [c for c in (box or {}).get("offers") or [] if isinstance(c, dict) and c.get("kind") == "video"]
     if not (box or {}).get("cached_taken"):            # the shelf's clips Supply did not take in time are placed like the engine's
@@ -671,22 +674,48 @@ def footage_into(work, text, box, acquire, most=8):
         return None
     items = doc.get("items") or []
     wishes = box.get("wishes") or []
-    # A clip takes the place of a still of the same subject (the Bin names it in `named`), or of the same moment (the
-    # Bin names the words it lands on in `for`): the film opens on a photograph of the driver, the clip is that driver.
+    # A subject match is insufficient: a living shark is not a picture of shark meat.
+    # Late-arriving footage must face the same word check as the initial Bin.
+    from . import supply
+    check_dir = tempfile.mkdtemp(prefix="late-clip-check-", dir=work)
+    try:
+        candidates = []
+        for i, c in enumerate(offers):
+            wi = c.get("_wish")
+            if not isinstance(wi, int) or not 0 <= wi < len(wishes) or c.get("_img") is None:
+                continue
+            path = os.path.join(check_dir, f"{i}.jpg")
+            c["_img"].convert("RGB").save(path, quality=90)
+            candidates.append(dict(id=i, wish=wi, path=os.path.relpath(path, work),
+                                   what=c.get("shows"), provider="footage", named=c.get("named")))
+        kept, usd, report = supply.check_fit(work, candidates, wishes, time.monotonic() + supply.CHECK_S)
+        box["word_check"] = report
+        box["usd"] = float(box.get("usd") or 0.0) + usd
+        passed = {r["id"] for r in kept}
+        checked = {r["id"]: r.get("word_check") for r in kept}
+        for i, c in enumerate(offers):
+            if i in passed:
+                c["word_check"] = checked.get(i)
+        offers = [c for i, c in enumerate(offers) if i in passed]
+    finally:
+        shutil.rmtree(check_dir, ignore_errors=True)
+    if not offers:
+        return None
+    # A clip replaces only a still at the same checked moment, never another use of the subject elsewhere.
     def name_of(x):
         return "n:" + str(x).strip().casefold() if x else None
     by_for = {}
     for c in offers:
         w = wishes[c["_wish"]] if isinstance(c.get("_wish"), int) and 0 <= c["_wish"] < len(wishes) else {}
         moment = "f:" + (f"w{w.get('w')}" if w.get("w") else str(w.get("at")))
-        for key in (name_of(c.get("named")), moment):
+        for key in (moment,):
             if key and c not in by_for.setdefault(key, []):
                 by_for[key].append(c)
     stills = {}
     for it in items:
         if it.get("provider") == "footage" or it.get("kind") == "video":
             continue                                   # a clip that already moves keeps its place
-        key = next((k for k in (name_of(it.get("named")), "f:" + str(it.get("for"))) if k in by_for), None)
+        key = next((k for k in ("f:" + str(it.get("for")),) if k in by_for), None)
         if key:
             stills.setdefault(key, []).append(f"bin:{it['id']}")
     lines, _bad = compiler.parse_score(text)
@@ -721,9 +750,9 @@ def footage_into(work, text, box, acquire, most=8):
                 return None
             c["_row"] = dict(id=iid, kind="video", path=rel, w=got.get("w") or c.get("width"), h=got.get("h") or c.get("height"), storage_key=got["storage_key"],
                              dur=round(float(got.get("dur") or c.get("duration_s") or 0), 2), fps=got.get("fps"),
-                             what=f"{c.get('named')}: {c.get('shows') or ''}".strip(": "), wish=None, **{"for": key[2:], "class": "F"},
+                             what=f"{c.get('named')}: {c.get('shows') or ''}".strip(": "), wish=c.get("_wish"), **{"for": key[2:], "class": "F"},
                              licence=c.get("license"), licence_url=c.get("page_url"), provider="footage", author=c.get("credit"), page=c.get("page_url"),
-                             named=c.get("named"), shows=c.get("shows"), footage=c.get("footage"))
+                             named=c.get("named"), shows=c.get("shows"), footage=c.get("footage"), verification=c.get("verification"), word_check=c.get("word_check"))
             rows.append(c["_row"])
         return f"bin:{c['_row']['id']}" if c["_row"] else None
 

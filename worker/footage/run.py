@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 
-from . import cut, fetch, hear, identity, look, plan, search, shots, voice
+from . import cut, fetch, hear, look, plan, search, shots, voice
 
 MAX_SOURCES = 16
 WHOLE_UNDER_S = 600.0      # a caller that reads only a source's head still fetches a source this short whole (no section cut)
@@ -157,15 +157,9 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             if not s.get("channel") and s.get("where") == "youtube":
                 s["channel"] = search.channel_of(s["url"])
         log(f"rank: {len(sources)} sources to open of {sum(len(v) for v in hits.values())} found")
-        # 3b. a person's face to hold the clips to: photographs the product's picture check already
-        #     passed as that person (broll_source: Commons, gpt-6-sol), unless the caller gave its own
+        # Named clips are checked for visible attribution after the final crop.
+        # No face recognition or reference-face comparison is used.
         anchors = dict(anchors or {})
-        for sub in subjects:
-            if sub.get("kind") == "person" and not anchors.get(sub["name"]):
-                given = next((n.get("searches") for n in named or [] if n.get("name") == sub["name"]), None)
-                anchors[sub["name"]], au = person_anchors(sub, work, searches=given)
-                spend["look"] += au
-                log(f"anchors for {sub['name']}: {len(anchors[sub['name']])} checked photographs")
         # 4. open them: proxy, shots, transcript
         with cf.ThreadPoolExecutor(max_workers=4) as pool:
             sources = list(pool.map(lambda s: _open(s, work, log, hear_s, read_s), sources))
@@ -243,13 +237,6 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             for c in checked:
                 c["subject"] = sub["name"]
                 c["source"] = mine[c["src"]]["key"]
-            if sub.get("kind") == "person":
-                try:
-                    checked, rep = identity.keep_person(checked, {k: s["proxy"] for k, s in enumerate(mine)}, work,
-                                                        (anchors or {}).get(sub["name"]) or ())
-                except Exception as e:  # noqa: BLE001 the look's verdict stands, said in the log
-                    rep = dict(identity=f"failed: {str(e)[:120]}")
-                log(f"identity for {sub['name']}: {rep}")
             return checked, mu, lu
         pool_frames = []
         with cf.ThreadPoolExecutor(max_workers=4) as pool:
@@ -369,6 +356,26 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 p["error"] = str(e)[:200]
         with cf.ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(finish, jobs))
+        # Verify each finished cut, not the source video's title or a single scout frame.
+        from . import verify
+        subject_by_name = {s["name"]: s for s in subjects}
+        def verify_cut(job):
+            _, p = job
+            if not p.get("file"):
+                return 0.0
+            sub = subject_by_name.get(p["subject"])
+            if sub is None:
+                os.remove(os.path.join(out_dir, p.pop("file")))
+                return 0.0
+            record, usd = verify.clip(os.path.join(out_dir, p["file"]), sub,
+                                      p["t1"] - p["t0"])
+            p["verification"] = record
+            if not record["ok"]:
+                log(f"clip rejected for {p['subject']}: {record.get('reason')}")
+                os.remove(os.path.join(out_dir, p.pop("file")))
+            return usd
+        with cf.ThreadPoolExecutor(max_workers=2) as pool:
+            spend["look"] += sum(pool.map(verify_cut, jobs))
         # 7b. real voices: the person the film is about, heard saying a sentence that belongs after a line (voice.py)
         voices = []
         # a caller that hears nothing (the first film's wishes) has no sentence to cut in: voices only when asked or heard
@@ -385,7 +392,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 if not p.get("file"):
                     continue
                 s = src_of[p["source"]]
-                clips.append(dict(file=p["file"], seconds=round(p["t1"] - p["t0"], 2), subject=p["subject"], shows=p["shows"], grade=p["grade"],
+                clips.append(dict(verification=p.get("verification"), file=p["file"], seconds=round(p["t1"] - p["t0"], 2), subject=p["subject"], shows=p["shows"], grade=p["grade"],
                                   source=dict(url=s["url"], title=s["title"], channel=s.get("channel"), where=s["where"]),
                                   time_range=[p["t0"], p["t1"]], frame_at=p["t"], x=p.get("x"), eq=p.get("eq"), trim=p.get("trim"),
                                   how=p.get("how"), sheet=p.get("sheet")))

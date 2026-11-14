@@ -149,7 +149,7 @@ def test_a_picture_the_customer_asked_for_is_checked_as_theirs(tmp_path, monkeyp
 
     def fake(model, system, content, **kw):
         seen["text"] = content[-1]["text"]
-        return NS(text='{"pairs":[{"n":1,"post":"film","remove":[]}]}', usd=0.01)
+        return NS(text='{"pairs":[{"n":1,"post":"film","exact_match":true,"remove":[]}]}', usd=0.01)
     monkeypatch.setattr(supply.call, "stream", fake)
     items = [dict(id=0, kind="image", path="bin/0.jpg", wish=0, what="Oscar Piastri: McLaren on track", named="Oscar Piastri")]
     kept, usd, rep = supply.check_fit(str(tmp_path), items, [{"w": "0", "want": "Piastri"}], 1e12,
