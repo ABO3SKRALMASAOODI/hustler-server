@@ -3038,6 +3038,10 @@ def _asks_settle(ctx, final, outcome):
         return final, outcome
     from score import asks
     verdict = getattr(ctx, "ask_verdict", None)
+    import edit_scope
+    if edit_scope.restore_unmet(ctx, ledger, verdict):
+        verdict = ctx.ask_verdict
+        final = asks.checked_reply(ledger, verdict)
     try:
         if verdict and str(verdict.get("edl_version")) != str(ctx.latest_edl().get("version")):
             verdict = None
@@ -3055,6 +3059,7 @@ def _asks_settle(ctx, final, outcome):
             final = (final or "") + block
     else:
         final = asks.checked_reply(ledger, None)
+    final = edit_scope.disclose(ctx, final)
     return final, asks.outcome(ledger, verdict, outcome)
 
 
