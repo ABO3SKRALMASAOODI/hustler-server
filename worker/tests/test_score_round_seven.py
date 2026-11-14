@@ -334,3 +334,20 @@ def test_a_picture_the_score_only_weighed_as_a_hook_is_still_cut_in(tmp_path):
     assert "bin:0" in text
     _t, rep, c2 = fill.fill(work, text)
     assert rep["placed"] == 1 and c2 is not None
+
+
+def test_crop_heavy_plan_still_reports_missing_real_picture_changes():
+    from tests.test_score_taste import p5591_shape
+    idx = selfie(20.0)
+    c = comp(film_text(p5591_shape(idx)), idx, voice(20.0))
+    assert any('planned picture changes/10s' in f for f in c.meter['findings'])
+
+
+def test_text_cards_and_take_windows_do_not_resolve_a_picture_hold():
+    from types import SimpleNamespace
+    from score import taste
+    ctx = SimpleNamespace(fps=30, dur_f=300, kshots={0: (0, 10)},
+        shots=[{'pic': 'main', 'f': [0, 300], 'src': [0, 10]}],
+        items=[{'k': 'card', 'pic': p, 'f': [30 * (j+1), 30 * (j+2)], 'w': 1, 'h': 1}
+               for j, p in enumerate([None, 'plate', 'main', 'bin:0'])])
+    assert taste.picture_changes(ctx) == [120]

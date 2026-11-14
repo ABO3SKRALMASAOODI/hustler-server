@@ -151,7 +151,7 @@ def picture_changes(ctx):
                     out.append(s["f"][0] + int(round((k0 - a) / max(z - a, 1e-6) * n)))
                     last = ("take", _kshot(ctx, k0))
     for c in ctx.items:
-        if c.get("k") == "card" and c.get("pic") != "plate" and float(c.get("w", 0)) * float(c.get("h", 0)) >= 0.35:
+        if c.get("k") == "card" and c.get("pic") not in (None, "plate", "main") and float(c.get("w", 0)) * float(c.get("h", 0)) >= 0.35:
             out.append(c["f"][0])
     return sorted(set(f for f in out if 0 < f < ctx.dur_f))
 
