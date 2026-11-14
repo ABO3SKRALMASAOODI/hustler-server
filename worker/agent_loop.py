@@ -2811,11 +2811,16 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
         reset_note = (reset_note + "\n" + held) if reset_note else held
     if ledger["route"] == "film" and cfg["director"]:
         got = asks.direct_film(ctx, worker_db, job, session_id, cfg)
-        ledger["routed"] = {"to": "director", **{k: got.get(k) for k in ("version", "fell", "applied", "s")}}
+        ledger["routed"] = {"to": "director", **{k: got.get(k) for k in (
+            "version", "fell", "applied", "s", "path", "source_window", "selection_usage")}}
         if got.get("version"):
             done_by = (f"The Director already made the whole film from the full upload as EDL "
                        f"v{got['version']} ({', '.join(got.get('applied') or [])}). Build on it: do any ask it "
                        "left, render, look, and reply. Don't rebuild it.")
+            if got.get("remaining_clips"):
+                done_by += (" This is the first requested option. The other selected stories still "
+                            "need their own finished, captioned vertical renders before this request "
+                            "is complete: " + json.dumps(got["remaining_clips"], ensure_ascii=False))
         else:
             done_by = ("Asks of kind film are about the customer's whole upload: work from the full "
                        "upload, not from an automatic first cut.")
@@ -7569,6 +7574,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                             # it the question is translated and delivered.
                             q.question = _translate_question(
                                 ctx, client, q.question, _u_texts, _q_flip)
+                        # A question must not strand the portion of an edit
+                        # already completed. Use the same render/recovery
+                        # path as a normal reply before checking its claims.
+                        _auto_render_if_needed(ctx, worker_db, session_id,
+                                               timings, turn_deadline=turn_deadline)
                         _cur_v = (ctx.versions_written[-1]
                                   if ctx.versions_written
                                   else start_version)
