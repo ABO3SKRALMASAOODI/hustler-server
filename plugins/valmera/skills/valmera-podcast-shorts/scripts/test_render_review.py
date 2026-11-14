@@ -169,3 +169,22 @@ def test_cached_primary_document_requires_exact_url_and_original_hash(tmp_path):
     assert D.cached_document('https://different.example/paper',sources) is None
     path.write_bytes(b'changed')
     with pytest.raises(ValueError,match='hash mismatch'):D.cached_document(sources[0]['url'],sources)
+
+
+@pytest.mark.parametrize('remote,expected',[(None,True),('1',False)])
+def test_remote_render_adapter_does_not_reserve_a_mac_compute_slot(tmp_path,monkeypatch,remote,expected):
+    ctx=SimpleNamespace(supply=str(tmp_path),tmp=str(tmp_path/'tmp'),run_id='test')
+    l1=tmp_path/'l1.json';l1.write_text('{}');(tmp_path/'sound.m4a').write_bytes(b'already mixed')
+    monkeypatch.setenv('SHELL_RENDER_CMD','/remote-render-adapter.sh')
+    if remote:monkeypatch.setenv('SHELL_RENDER_REMOTE',remote)
+    else:monkeypatch.delenv('SHELL_RENDER_REMOTE',raising=False)
+    monkeypatch.setattr(wf.wf3,'load_pack',lambda ctx:{})
+    monkeypatch.setattr(wf.chain,'alien_bank',lambda ctx,path:path)
+    def run(ctx,args,**kw):
+        assert kw['heavy'] is expected
+        from pathlib import Path
+        Path(args[-1]).write_bytes(b'engine output')
+        return '{}'
+    monkeypatch.setattr(wf.chain,'sh',run)
+    result=wf.wf3.render(ctx,{},dict(l1=str(l1)))
+    assert os.path.exists(result['film'])
