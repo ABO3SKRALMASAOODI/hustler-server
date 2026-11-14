@@ -1620,7 +1620,9 @@ def _editor_structured_content(result):
     result = result or {}
     out = {key: result[key] for key in (
                "edl_version", "edl_changed", "mutation_status",
-               "visual_evidence", "tool_outcome", "code")
+               "visual_evidence", "tool_outcome", "code", "status",
+               "retry_after_s", "retryable", "retry_tool", "retry_arguments",
+               "index_job_id", "index_progress")
            if key in result}
     preview = result.get("preview")
     if isinstance(preview, dict):

@@ -2308,6 +2308,12 @@ def test_analysis_past_the_budget_reports_progress_and_retry(client,
     assert "No editing job was started" in text
     assert "Analysis job 44 is 30% done" in text
     assert "wait_for_job(job_id=44)" in text
+    structured = result["structuredContent"]
+    assert structured["status"] == "pending"
+    assert structured["retry_after_s"] == 10
+    assert structured["index_job_id"] == 44
+    assert structured["index_progress"] == 30
+    assert structured["retry_tool"] == "get_transcript"
     assert DB["enqueued"] == []
     raw = mcpmod._run_tool_job({"user_id": 60}, "get_transcript", {},
                                raw=True, project_id=3)
