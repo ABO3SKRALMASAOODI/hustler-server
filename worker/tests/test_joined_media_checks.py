@@ -45,3 +45,22 @@ def test_reader_failure_is_raised_only_after_both_readers_join(failed_lane):
     with pytest.raises(RuntimeError, match=failed_lane):
         renderer._joined_media_checks(picture, sound)
     assert joined.is_set()
+
+
+def test_evidence_upload_failure_joins_picture_reader_before_cleanup():
+    from threading import Timer
+    started, finish, done = Event(), Event(), Event()
+    def picture():
+        started.set()
+        assert finish.wait(2)
+        done.set()
+    timer = Timer(.05, finish.set)
+    timer.start()
+    try:
+        with pytest.raises(RuntimeError, match="upload"):
+            with renderer._pending_picture_check(picture):
+                assert started.wait(2)
+                raise RuntimeError("upload failed")
+        assert done.is_set(), "cleanup must never race a reader"
+    finally:
+        timer.join()
