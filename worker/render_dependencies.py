@@ -22,8 +22,9 @@ def _wait_for_matte(ctx, row, wait_s):
     preview shows the edit without it and the turn takes the effect for a
     failure (p5533: the matte was 8 s old when the preview ran, and the
     editor removed the one tool that could separate the dancers from the
-    wall). The wait is bounded and never refuses: a matte that does not arrive
-    renders as the device's substitute, reported like any degraded device."""
+    wall). This bounded wait reports its state. Background replacements keep
+    waiting before encoding; decorative subject effects retain their existing
+    substitute behavior."""
     try:
         edl = row["json"]
         import matte_track

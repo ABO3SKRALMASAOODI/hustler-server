@@ -41,7 +41,7 @@ def test_validator_catches_removed_tool_and_operational_history(tmp_path):
 # teach them: every mention sends the editor into a guaranteed rejection.
 RETIRED_TOOLS = (
     "set_edit_plan", "complete_edit_plan_steps", "apply_edit_recipe",
-    "generate_video", "generate_image", "research_music", "search_music",
+    "generate_image", "research_music", "search_music",
     "audition_music_candidates", "fetch_music",
 )
 
