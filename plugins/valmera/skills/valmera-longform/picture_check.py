@@ -5,10 +5,10 @@ import io
 import json
 import subprocess
 import numpy as np
-from PIL import Image,ImageDraw
+from PIL import Image,ImageDraw,ImageOps
 
 
-def check(film, shots, out, ffmpeg):
+def check(film, shots, out, ffmpeg, source=False):
     from footage import ask
     out=Path(out); out.mkdir(parents=True,exist_ok=True)
     rows=[]
@@ -17,13 +17,23 @@ def check(film, shots, out, ffmpeg):
         path=out/f'shot-{i:04d}.jpg'
         if not path.exists():
             cells=[]
-            for t in (a+0.08,(a+b)/2,max(a+0.08,b-0.08)):
-                p=subprocess.run([ffmpeg,'-v','error','-ss',str(t),'-i',film,'-frames:v','1','-vf','scale=480:270','-f','image2pipe','-vcodec','mjpeg','-'],capture_output=True,check=True)
-                cells.append(Image.open(io.BytesIO(p.stdout)).convert('RGB'))
+            if source and r['clip'].get('kind')=='image':
+                with Image.open(r['clip']['path']) as im:
+                    if r['clip'].get('document'):
+                        cell=Image.new('RGB',(480,270),'#14161A');im=ImageOps.contain(im.convert('RGB'),(450,230));cell.paste(im,((480-im.width)//2,(270-im.height)//2))
+                    else:cell=ImageOps.fit(im.convert('RGB'),(480,270))
+                cells=[cell]*3
+            else:
+                lo,hi=r['src'] if source else (a,b)
+                for t in (lo+(hi-lo)*.05,(lo+hi)/2,lo+(hi-lo)*.95):
+                    p=subprocess.run([ffmpeg,'-v','error','-ss',str(t),'-i',r['clip']['path'] if source else film,'-frames:v','1','-vf','scale=480:270','-f','image2pipe','-vcodec','mjpeg','-'],capture_output=True,check=True)
+                    cells.append(Image.open(io.BytesIO(p.stdout)).convert('RGB'))
             board=Image.new('RGB',(1440,300),'black')
             for j,im in enumerate(cells): board.paste(im,(j*480,30))
             ImageDraw.Draw(board).text((10,8),f'Shot {i} | {a:.2f}-{b:.2f}',fill='white'); board.save(path)
-        rows.append(dict(i=i,path=str(path),start=a,end=b,say=r['say'],context=r.get('context',r['say']),source=r['clip']['source']))
+        metadata=dict(r['clip']['source'])
+        if r['clip'].get('document'):metadata['presentation']='Original technical figure, displayed with an archive-record label'
+        rows.append(dict(i=i,path=str(path),start=a,end=b,say=r['say'],context=r.get('context',r['say']),source=metadata))
     def one(group):
         rp=out/f"check-{group[0]['i']:04d}.json"
         if rp.exists(): return json.loads(rp.read_text())

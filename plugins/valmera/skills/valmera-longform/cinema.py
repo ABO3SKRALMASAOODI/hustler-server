@@ -613,10 +613,23 @@ def build(sc,pack):
 def score(ctx,script):
     pack=read(Path(ctx.supply)/'pack.json')['pack']
     l1,shots,chapters=build(script['script'],pack)
+    source_review(ctx,shots)
     p=Path(ctx.supply)/'l1.json'; save(p,l1)
     save(Path(ctx.supply)/'shots.json',shots)
     return dict(l1=str(p),chapters=chapters,picture_time_s=sum((r['f'][1]-r['f'][0])/FPS for r in shots),
                 pictures=len(shots),max_hold_s=max((r['f'][1]-r['f'][0])/FPS for r in shots),spend=[])
+
+
+def source_review(ctx,shots):
+    """Catch wrong archive material before spending a full-film render."""
+    from picture_check import check
+    key=hashlib.sha256(json.dumps(shots,sort_keys=True).encode()+(HERE/'picture_check.py').read_bytes()).hexdigest()[:16]
+    folder=Path(ctx.supply)/'source-evidence'/key;report=folder/'report.json'
+    if report.exists():result=read(report)
+    else:
+        result=check(None,shots,folder,PX.FF,source=True);save(report,result)
+    if not result['ok']:raise ValueError('source pictures require repair: '+str(report))
+    return result
 
 
 def render(ctx,script,sc):
