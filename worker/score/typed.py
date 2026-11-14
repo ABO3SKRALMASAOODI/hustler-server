@@ -1,7 +1,7 @@
 """Typed-film adapter for the Director. First-film size admission is not used here.
 
 The ask ledger owns scope. This adapter changes only how an admitted film
-request is executed: longer films get the existing segmented pass; clips
+request is executed: whole films use the Director without upload admission; clips
 are selected with the podcast story contract before the Director reads a
 bounded source window. All writes use the typed request's normal guards.
 """
@@ -199,7 +199,7 @@ def _trace(view, work, rec, job):
 
 
 def run(ctx, worker_db, job, session_id, cfg):
-    from . import film, flags, patch
+    from . import film, flags
     import db as dbx
     import quality_verifier
     if not cfg.get("director", False):
@@ -217,17 +217,12 @@ def run(ctx, worker_db, job, session_id, cfg):
         selections = [child_clip]
     elif source_s > WINDOW_S:
         selections, selection_usage = _selection(ctx)
-        if selections is None:
-            result = patch.throughout(ctx, ctx.ask_ledger,
-                quality_verifier.request_text_for(ctx), cfg.get("pass_s", 600.0))
-            result["path"] = "segmented_whole_film"
+        if selections is not None:
+            import shorts
+            result = shorts.start_typed_craft(ctx, selections,
+                quality_verifier.request_text_for(ctx))
             result["selection_usage"] = selection_usage
             return result
-        import shorts
-        result = shorts.start_typed_craft(ctx, selections,
-            quality_verifier.request_text_for(ctx))
-        result["selection_usage"] = selection_usage
-        return result
     # Both switches admitted this request. The first-film account admission
     # and 180-second cap stay confined to first films.
     model = getattr(ctx, "agent_model", None) or "gpt-6.1-sol"
