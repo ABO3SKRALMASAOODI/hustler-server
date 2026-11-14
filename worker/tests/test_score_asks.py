@@ -25,8 +25,8 @@ def _ask(kind="edit", items=(), **kw):
 
 # ------------------------------------------------------------------ the switch
 
-def test_no_row_is_internal_accounts_only_and_a_bad_row_is_off():
-    assert asks.parse(None)["mode"] == "internal"
+def test_no_row_checks_every_account_and_a_bad_row_is_off():
+    assert asks.parse(None)["mode"] == "on"
     for raw in ("", "{", "[]", '{"mode": "maybe"}', '{"mode": "on", "repairs": "x"}'):
         assert asks.parse(raw)["mode"] == "off", raw
     assert asks.parse('{"mode": "on", "director": false}')["director"] is False
@@ -36,7 +36,7 @@ def test_admission():
     internal = next(iter(spend_ledger.INTERNAL_USER_IDS))
     cfg = asks.parse(None)
     assert asks.admitted(cfg, internal)
-    assert not asks.admitted(cfg, 999999)
+    assert asks.admitted(cfg, 999999)
     assert asks.admitted(asks.parse('{"mode": "internal", "user_ids": [999999]}'), 999999)
     assert asks.admitted(asks.parse('{"mode": "on"}'), 999999)
     assert not asks.admitted(asks.parse('{"mode": "off"}'), internal)
@@ -163,7 +163,7 @@ def test_the_check_reads_the_rendered_film_and_an_unanswered_ask_cannot_be_told(
     monkeypatch.setattr(asks, "frame_pages", lambda ctx, preview, limit=3: [])
     ledger = asks.settle({"lang": "en", "asks": [_ask("change", ["texts:t1"]), _ask("edit")]}, EDL)
     v = asks.check(NS(workdir=str(tmp_path)), ledger, "Done.", EDL, {"duration_s": 24.0, "edl_version": 2}, "title bigger")
-    assert [r["state"] for r in v["asks"]] == ["done", "cannot_tell"]
+    assert [r["state"] for r in v["asks"]] == ["cannot_tell", "cannot_tell"]
     text = seen["content"][0]["text"]
     assert '"rendered_seconds": 24.0' in text and "title bigger" in text
 
@@ -210,7 +210,7 @@ def test_a_stale_verdict_never_vouches_for_a_newer_version(monkeypatch):
     ctx = _loop_ctx(ledger, version=5)
     ctx.ask_verdict = dict(_verdict("done"), edl_version=4)
     final, outcome = agent_loop._asks_settle(ctx, "Done.", "fulfilled")
-    assert outcome == "partial" and final == "Done."
+    assert outcome == "partial" and "can't confirm" in final
 
 
 def test_the_check_uses_only_this_versions_render(monkeypatch):
@@ -269,7 +269,7 @@ def test_a_change_routes_to_the_patch_and_the_editor_is_told(monkeypatch):
     monkeypatch.setattr(asks, "build", lambda ctx, req, hist=None: _ledger())
     monkeypatch.setattr(patch, "run", lambda ctx, ledger, req: {"version": 2, "applied": ["texts:t1 bigger"], "usage": {}})
     ctx = _seam_ctx()
-    note = agent_loop._typed_asks_start(ctx, _Db('{"mode": "on"}'), {"id": 1, "user_id": 5}, 9, {}, None)
+    note = agent_loop._typed_asks_start(ctx, _Db('{"mode": "on", "patch": true, "director": true, "pass": true}'), {"id": 1, "user_id": 5}, 9, {}, None)
     assert "ASK LEDGER" in note and "Patch already made the change as EDL v2" in note
     assert ctx.ask_ledger["routed"]["to"] == "patch"
 
@@ -278,10 +278,10 @@ def test_a_whole_film_ask_goes_to_the_director_and_a_fall_tells_the_loop_to_use_
     monkeypatch.setattr(asks, "build", lambda ctx, req, hist=None: asks.settle({"lang": "en", "asks": [_ask("film")]}, EDL))
     monkeypatch.setattr(asks, "direct_film", lambda *a: {"fell": "source 900 s is past the Director's 180 s"})
     ctx = _seam_ctx()
-    note = agent_loop._typed_asks_start(ctx, _Db('{"mode": "on"}'), {"id": 1, "user_id": 5}, 9, {}, None)
+    note = agent_loop._typed_asks_start(ctx, _Db('{"mode": "on", "patch": true, "director": true, "pass": true}'), {"id": 1, "user_id": 5}, 9, {}, None)
     assert "full upload" in note and ctx.ask_ledger["routed"]["fell"].startswith("source")
     monkeypatch.setattr(asks, "direct_film", lambda *a: {"version": 4, "applied": ["9 shots", "captions"]})
-    note = agent_loop._typed_asks_start(_seam_ctx(), _Db('{"mode": "on"}'), {"id": 1, "user_id": 5}, 9, {}, None)
+    note = agent_loop._typed_asks_start(_seam_ctx(), _Db('{"mode": "on", "patch": true, "director": true, "pass": true}'), {"id": 1, "user_id": 5}, 9, {}, None)
     assert "Director already made the whole film from the full upload as EDL v4" in note
 
 
@@ -304,15 +304,17 @@ def test_a_ledger_fault_leaves_todays_loop(monkeypatch):
     assert ctx.ask_ledger is None
 
 
-def test_a_trial_turn_never_enters():
+def test_a_trial_turn_gets_the_same_ledger(monkeypatch):
+    monkeypatch.setattr(asks, "build", lambda *a, **k: _ledger())
     ctx = _seam_ctx()
     ctx.claude_trial = object()
-    assert agent_loop._typed_asks_start(ctx, _Db('{"mode": "on"}'), {"id": 1, "user_id": 5}, 9, {}, None) == ""
+    assert "ASK LEDGER" in agent_loop._typed_asks_start(ctx, _Db('{"mode": "on"}'), {"id": 1, "user_id": 5}, 9, {}, None)
+    assert ctx.ask_ledger is not None
 
 
 def test_the_switch_may_name_a_claude_model_for_the_ledger_and_check_only():
     assert asks.parse('{"mode": "on", "model": "claude-sonnet-5-5"}')["model"] == "claude-sonnet-5-5"
-    assert asks.parse('{"mode": "on", "model": "gpt-6-luna"}')["model"] is None
+    assert asks.parse('{"mode": "on", "model": "gpt-6-luna"}')["model"] == "gpt-6-luna"
     assert asks.parse(None)["model"] is None
 
 
@@ -328,7 +330,7 @@ def test_a_named_model_is_used_only_on_a_claude_lane(monkeypatch):
     asks._call(NS(llm_client=None, agent_model="claude-haiku-5-5", ask_model="claude-sonnet-5-5"), "record_x", {}, "s", "c")
     asks._call(NS(llm_client=None, agent_model="gpt-6-luna", ask_model="claude-sonnet-5-5"), "record_x", {}, "s", "c")
     asks._call(NS(llm_client=None, agent_model="claude-haiku-5-5"), "record_x", {}, "s", "c")
-    assert used == ["claude-sonnet-5-5", "gpt-6-luna", "claude-haiku-5-5"]
+    assert used == ["claude-sonnet-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
 
 
 def test_an_empty_ledger_for_a_typed_request_is_asked_again_then_dropped(monkeypatch):
@@ -536,7 +538,7 @@ def test_the_alternative_is_two_facts_combined_in_code(monkeypatch, tmp_path):
 
 
 def test_an_edit_is_never_done_on_the_replys_word(monkeypatch, tmp_path):
-    ledger = asks.settle({"lang": "en", "asks": [_ask("edit"), _ask("answer"), _ask("edit"), _ask("keep"), _ask("edit", how="reply")]}, EDL)
+    ledger = asks.settle({"lang": "en", "asks": [_ask("edit"), _ask("answer"), _ask("edit", how="measure"), _ask("keep"), _ask("edit", how="reply")]}, EDL)
     monkeypatch.setattr(asks, "_call", lambda *a, **k: ({"asks": [
         {"id": f"a{i}", "state": "done", "rests_on": on, "said_why_not": False, "made_against": False, "seen": "", "line": ""}
         for i, on in ((1, "reply"), (2, "reply"), (3, "numbers"), (4, "reply"), (5, "reply"))]},
@@ -557,7 +559,7 @@ def test_the_check_runs_on_the_check_model_unless_the_switch_says_inherit(monkey
     asks.check(NS(workdir=str(tmp_path)), ledger, "x", EDL, None, "")
     # an answer that reached no ask is asked once more, so each check is two calls here
     assert used == [asks.CHECK_MODEL] * 2 + ["claude-sonnet-5-5"] * 2 + [None] * 2
-    assert asks.parse('{"mode": "on", "check_model": "gpt-6-luna"}')["check_model"] is None
+    assert asks.parse('{"mode": "on", "check_model": "gpt-6-luna"}')["check_model"] == "gpt-6-luna"
 
 
 def test_the_same_film_keeps_its_verdict_and_only_reply_asks_are_asked_again(monkeypatch):
@@ -593,7 +595,7 @@ def test_every_move_is_listed_with_its_aim():
 
 def test_a_check_cut_short_is_asked_again_for_the_asks_it_missed(monkeypatch, tmp_path):
     # r10, p5520: 20 asks hit the token cap, the answer came back "{}" and every ask read cannot_tell.
-    ledger = asks.settle({"lang": "en", "asks": [_ask("edit"), _ask("edit"), _ask("keep")]}, EDL)
+    ledger = asks.settle({"lang": "en", "asks": [_ask("edit", how="measure"), _ask("edit"), _ask("keep")]}, EDL)
     answers = [{}, {"asks": [{"id": "a1", "state": "done", "rests_on": "numbers", "said_why_not": False, "made_against": False, "seen": "s", "line": "l"},
                             {"id": "a2", "state": "partly", "rests_on": "frames", "said_why_not": False, "made_against": False, "seen": "s", "line": "l"}]}]
     asked = []

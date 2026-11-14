@@ -173,7 +173,7 @@ def test_a_reply_that_denies_what_the_frames_show_is_corrected(monkeypatch):
     assert ledger["reply_fixed"] == ["The b-roll was not added."]
     monkeypatch.setattr(asks, "_call", lambda *a, **k: ({"wrong": [], "reply": ""}, {"usd": 0, "s": 0, "model": "m"}))
     assert asks.true_reply(NS(), ledger, verdict, "All in.") == "All in."
-    assert asks.true_reply(NS(), ledger, {"asks": []}, "All in.") == "All in."
+    assert "can't confirm" in asks.true_reply(NS(), ledger, {"asks": []}, "All in.")
 
 
 # ------------------------------------------------------------------ names as the customer spells them

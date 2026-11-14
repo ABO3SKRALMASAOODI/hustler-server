@@ -748,6 +748,10 @@ class ToolContext:
                         "call reset_edit to start from the full video, then "
                         "rebuild what they asked for.")
             return msg
+        import edit_integrity
+        integrity_refusal = edit_integrity.write_refusal(self, prev["json"], normalized)
+        if integrity_refusal:
+            return f"REJECTED (EDL v{prev['version']} unchanged): {integrity_refusal}"
         import counter_facts
         if counter_facts.candidates(prev["json"], normalized):
             clock = timeline_mod.Timeline(normalized.get("keep") or [],
@@ -12446,7 +12450,7 @@ def _apply_clean(ctx, regions, what, cursor=_KEEP_CURSOR, base_edl=None):
                        "the strokes. Do NOT tell the user it was removed "
                        "until this measures clean.")
         else:
-            result += ("\nThe pixels are genuinely repainted — say REMOVED, "
+            result += ("\nThe pixel measurement changed; this does not prove removal. "
                        "not covered. Renders now read the cleaned video; "
                        "cuts, captions and every timestamp are unchanged.")
     stats = getattr(ctx, "_clean_stats", None) or {}
@@ -12789,6 +12793,10 @@ def _apply_patches(ctx, new_items, what, drop=None):
     all_patches = [dict(p) for p in (edl.get("patches") or [])]
     dropped = {p["id"] for p in (drop or [])}
     existing = [p for p in all_patches if p["id"] not in dropped]
+    import edit_integrity
+    refusal = edit_integrity.patch_face_refusal(ctx, new_items)
+    if refusal:
+        return "REJECTED: " + refusal
     groups = _patch_groups(new_items, ctx.duration)
     entries, lines = [], []
     for window, members in groups:
@@ -12830,8 +12838,8 @@ def _apply_patches(ctx, new_items, what, drop=None):
                        "tell the user it was removed until this measures "
                        "clean.")
         else:
-            result += ("\nThe pixels are genuinely repainted — say REMOVED, "
-                       "not covered. The repaint applies instantly to every "
+            result += ("\nThe pixel measurement changed; this does not prove removal. "
+                       "Check the rendered result before claiming success. The repaint applies to every "
                        "render; cuts, captions and timestamps are unchanged. "
                        "Ink is a stroke count, not a beauty check: over "
                        "MOVING marks (animated caption boxes, stickers) a "

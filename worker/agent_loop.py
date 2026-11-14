@@ -1386,6 +1386,11 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
             attachment_ids = [
                 item.get("id") if isinstance(item, dict) else item
                 for item in attachment_ids]
+            from score import asks as _asset_asks
+            for asset in _asset_asks.project_assets(ctx):
+                if asset.get("kind") == "image_ref" and not asset.get("found") and asset["meta"].get("staged") not in (True, "true"):
+                    if asset.get("id") not in attachment_ids:
+                        attachment_ids.append(asset["id"])
             parts = filmstrip_parts(
                 ctx, worker_db, priority_asset_ids=attachment_ids)
             if parts:
@@ -2756,7 +2761,7 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
         ctx.ask_verdict = cont.get("ask_verdict")
         ctx.ask_model = (ctx.ask_ledger.get("cfg") or {}).get("model")
         return ""
-    if cont or _trial_lane(ctx) or getattr(ctx, "claude_trial", None) is not None:
+    if cont:
         return ""
     try:
         from score import asks
@@ -2765,6 +2770,9 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
             return ""
         ctx.ask_model = cfg.get("model")
         request = quality_verifier.request_text_for(ctx)
+        if not str(request or "").strip():
+            return ""
+        ctx.ask_check_required = cfg.get("check", True)
         ledger = asks.build(ctx, request, getattr(ctx, "request_contract_history", None))
     except dbx.JobLeaseLost:
         raise
@@ -3012,6 +3020,9 @@ def _asks_settle(ctx, final, outcome):
     """The reply says what is done and what is not; the outcome is never fulfilled with an ask open."""
     ledger = getattr(ctx, "ask_ledger", None)
     if not ledger or not ledger.get("asks"):
+        if getattr(ctx, "ask_check_required", False):
+            from score import asks
+            return asks.checked_reply(None, None), "partial"
         return final, outcome
     from score import asks
     verdict = getattr(ctx, "ask_verdict", None)
@@ -3022,7 +3033,11 @@ def _asks_settle(ctx, final, outcome):
         verdict = None
     if verdict:
         final = asks.true_reply(ctx, ledger, verdict, final or "")
-        final = (final or "") + asks.reply_block(ledger, verdict)
+        block = asks.reply_block(ledger, verdict)
+        if block and not all(r.get("line") in final for r in asks.open_asks(verdict) if r.get("line")):
+            final = (final or "") + block
+    else:
+        final = asks.checked_reply(ledger, None)
     return final, asks.outcome(ledger, verdict, outcome)
 
 
