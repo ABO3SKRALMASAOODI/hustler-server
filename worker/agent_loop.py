@@ -2812,8 +2812,11 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     if ledger["route"] == "film" and cfg["director"]:
         got = asks.direct_film(ctx, worker_db, job, session_id, cfg)
         ledger["routed"] = {"to": "director", **{k: got.get(k) for k in (
-            "version", "fell", "applied", "s", "path", "source_window", "selection_usage")}}
-        if got.get("version"):
+            "version", "fell", "applied", "s", "path", "source_window", "selection_usage", "remaining_clips")}}
+        if got.get("path") == "segmented_whole_film":
+            from score import patch
+            done_by = patch.pass_note(got)
+        elif got.get("version"):
             done_by = (f"The Director already made the whole film from the full upload as EDL "
                        f"v{got['version']} ({', '.join(got.get('applied') or [])}). Build on it: do any ask it "
                        "left, render, look, and reply. Don't rebuild it.")
