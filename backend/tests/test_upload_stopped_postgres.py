@@ -101,6 +101,25 @@ def test_one_that_landed_failed_or_finished_its_original_is_not_stopped(cur):
     assert stopped(cur) == []
 
 
+def test_a_beat_recorded_just_after_the_landing_is_not_a_stop(cur):
+    """#401, 14 Nov: user 3048's 58 MB original landed at 01:54:56.335; the
+    page's 30 s beat, sent as the last part finished, was recorded 0.3 s later.
+    The file was in the project, and the watch paged a P0 for it."""
+    event(cur, "upload_started", GONE + JUST, bytes_=58_638_069, kind="original")
+    landed = GONE + timedelta(milliseconds=300)
+    event(cur, "upload_landed", landed, bytes_=58_638_069, kind="original")
+    event(cur, "upload_progress", GONE, bytes_=58_638_069, kind="original",
+          sent_bytes=58_638_069)
+    assert stopped(cur) == []
+
+
+def test_the_same_file_sent_again_after_landing_is_judged_again(cur):
+    event(cur, "upload_started", timedelta(hours=1))
+    event(cur, "upload_landed", timedelta(minutes=50))
+    eid = event(cur, "upload_started", GONE + JUST)
+    assert [f["ref"] for f in stopped(cur)] == [f"stopped:{eid}"]
+
+
 def test_a_landed_proxy_first_original_is_only_landed_when_its_bytes_are(cur):
     eid = event(cur, "upload_started", GONE + JUST)
     event(cur, "upload_landed", GONE, original_pending=True)

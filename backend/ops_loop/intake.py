@@ -340,7 +340,9 @@ def _stopped_uploads(cur, since, now, p):
     import has no transfer (no bytes): its index job reports it. One row per
     project and size: a resumed transfer is the same upload, judged by its last
     sign of life, and its ref is that row, so a transfer that comes back and
-    stops again is a new stop. Only a row about this file ends it: another file
+    stops again is a new stop. A landing ends it from the moment the transfer
+    began (its last start or resume), so a beat recorded just after the landing
+    does not reopen it. Only a row about this file ends it: another file
     landing or failing in the project says nothing about this one. A row with no
     size cannot be told apart, so it counts."""
     q = dict(p, kinds=list(UPLOAD_ALIVE_KINDS),
@@ -367,7 +369,19 @@ def _stopped_uploads(cur, since, now, p):
                  SELECT 1 FROM client_events done
                   WHERE done.project_id = last.project_id
                     AND done.user_id = last.user_id
-                    AND done.created_at >= last.at
+                    -- Since this transfer began, not since its last beat: a
+                    -- beat the page sent as the parts finished can be recorded
+                    -- after the server's own landing row (#401, 14 Nov: landed
+                    -- 01:54:56.335, the 30 s beat 01:54:56.620).
+                    AND done.created_at >= COALESCE((
+                          SELECT max(st.created_at) FROM client_events st
+                           WHERE st.project_id = last.project_id
+                             AND st.user_id = last.user_id
+                             AND st.kind IN ('upload_started', 'upload_resumed')
+                             AND st.detail->>'bytes' = last.detail->>'bytes'
+                             AND st.created_at <= last.at
+                             AND st.created_at > last.at - interval '2 days'),
+                        last.at)
                     AND (done.detail->>'bytes' = last.detail->>'bytes'
                          OR done.detail->>'bytes' IS NULL
                          OR last.detail->>'bytes' IS NULL)
