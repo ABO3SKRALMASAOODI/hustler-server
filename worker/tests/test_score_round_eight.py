@@ -126,6 +126,20 @@ def test_word_check_keeps_the_named_subject_beyond_the_local_phrase(tmp_path, mo
     assert 'this animal' in seen[0]
 
 
+def test_picture_naming_scopes_context_to_the_requested_subject(tmp_path, monkeypatch):
+    import broll_source
+    from score import supply
+    seen=[]
+    def names(texts,context='',system=None):
+        seen.append((texts,context,system))
+        return [[]],0
+    monkeypatch.setattr(broll_source,'name_many',names)
+    wishes=[dict(at=1.8,want='fresh turmeric root',mine=False)]
+    assert supply.name_wishes(str(tmp_path),wishes,'A branded container')[0]==[[]]
+    assert seen[0][0]==['the editor wants: fresh turmeric root']
+    assert seen[0][1]=='A branded container' and seen[0][2]==broll_source.NAME_SYSTEM+supply.WISH_NAME_SCOPE
+
+
 def test_footage_retry_keeps_the_original_time_budget(monkeypatch):
     import types
     from footage import ask

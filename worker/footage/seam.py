@@ -93,6 +93,8 @@ For each moment, name the one real-world subject its words name or plainly point
 
 For each subject: "name" (the usual English name), "is" (person, place, brand, event or thing), "searches" (one to three video searches, most specific first, the bare name last), "must_show" (one plain sentence: the exact subject and form the words require on camera; a therapy means the treatment being given, close on the body; prepared meat is distinct from a living animal). File clips by the subject visibly depicted: a racing car belongs under its car or team, never under the driver's name. A named person requires readable on-screen attribution attached to that exact shot; never identify or compare faces. Do not broaden the requested form to increase matches.
 
+The requested picture controls the subject. Film context only resolves ambiguity; it must not replace an explicitly requested ingredient, material or process with the film's product brand. A specific ingredient or plant named on a customer's packaging can be shown in documentary footage of that ingredient; the ingredient is not the customer's own branded product. Preserve that distinction.
+
 Answer with one JSON object and nothing else."""
 
 

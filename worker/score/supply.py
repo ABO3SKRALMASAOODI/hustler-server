@@ -457,6 +457,7 @@ def fetch_stills(cands, tmp):
 # ------------------------------------------------------------------ named subjects
 
 NAME_WAIT_S = 10.0         # how long the libraries' answers wait for the naming call before the film goes on without named pictures
+WISH_NAME_SCOPE = """\nThese inputs are individual picture requests. Resolve an ambiguous name from the film context, but select only the subject the editor wants pictured at that moment. The topic or brand of the whole film is not a substitute for a requested ingredient, material or action. A request for turmeric root beside a branded container asks for the root, not a photograph of the brand. If that requested subject is generic under your naming rule, return no named subject and let the stock search answer it."""
 
 
 def name_wishes(work, wishes, about=""):
@@ -476,7 +477,7 @@ def name_wishes(work, wishes, about=""):
     out = [[] for _ in wishes]
     if not texts:
         return out, 0.0
-    got, usd = broll_source.name_many(texts, context=about)        # what the film is about turns "Oscar" into Oscar Piastri
+    got, usd = broll_source.name_many(texts, context=about, system=broll_source.NAME_SYSTEM + WISH_NAME_SCOPE)
     for j, subs in zip(idx, got):
         out[j] = subs[:1]
     return out, usd
