@@ -207,7 +207,7 @@ def _runs(ins):
     """Cutaways that follow each other without the take between them, as lists of indexes."""
     out = []
     for k, x in enumerate(ins):
-        if out and ins[out[-1][-1]][1] == x[0]:
+        if out and ins[out[-1][-1]][1] == x[0] and ins[out[-1][-1]][4].get("window") == x[4].get("window"):
             out[-1].append(k)
         else:
             out.append([k])
@@ -218,9 +218,14 @@ def build(script, sup, style_id, direction=None):
     """(l1, beats) for one short. script: {"title", "segments": [{"say", "pictures": [names]}]}; sup: the pack
     (wf1_short.supply); direction: {"display": [{"seg", "text"}], "past_segs": [i], "turn_seg": i, "arc": [...]}."""
     st = STYLES[style_id]
-    d = dict(aim_s=st["aim_s"], look=st["look"], family="story", share=st["share"], bed=True, title=True,
-             band=dict(hold=(0.34, 0.62), never=2.8, ease_takes=False, whip=0.04, ease=0.85, shutter=0.6))
+    d = dict(aim_s=st["aim_s"], look=st["look"], family="podcast", share=st["share"], bed=True, title=False,
+             band=dict(hold=(0.9, 2.6), never=3.0, ease_takes=True, motivated_frames=[], whip=0, ease=0.85, shutter=0.5))
     d.update(direction or {})
+    coverage = sup.get("coverage")
+    if not coverage:
+        raise RuntimeError("podcast supply needs a word-addressed documentary coverage plan; refresh supply")
+    d["band"] = dict(d["band"], motivated_frames=[round(coverage["words"][m["word"]]["start"]*FPS)+LEAD_F
+                       for m in coverage.get("moves", []) if m.get("why") and 0 <= m.get("word", -1) < len(coverage["words"])])
     clock = Clock(sup["words"], script)
     voices = {
         "cap": {"font": "InterDisplay-Bold.ttf", "px": 58, "track": 0, "shadow": {"a": 0.85, "blur": 0.006}},
@@ -264,7 +269,7 @@ def build(script, sup, style_id, direction=None):
             return int(c.get("w") or W) <= int(c.get("h") or H) and any(f["box"][3] > seat and f["box"][3] - f["box"][1] > 0.3 for f in c.get("faces") or [])
         for i, lst in footage.items():
             ok = [c for c in lst if not under_seat(c)]
-            if ok or any(pics.get(n) for n in (script["segments"][i].get("pictures") or []) if i < len(script["segments"])):
+            if ok:
                 footage[i] = ok
     f_voice_end = Clock.f(clock.dur)
     f_end = min(f_voice_end + 8, int((float(take["dur"]) + LEAD_F / FPS) * FPS))      # out on his last word: the end card follows
@@ -285,7 +290,8 @@ def build(script, sup, style_id, direction=None):
     # the payoff is his face, but never more than its last four seconds: a long close on one framing is a held picture
     f_last = max(turn_f - 6, f_voice_end - int(4.0 * FPS)) if turn_f is not None else f_voice_end - 45
     from placement_check import propose, check
-    ins = propose(script, clock, footage, pics, int(0.6 * FPS), f_voice_end - 24, stress)
+    from wf1_coverage import proposals, require_coverage
+    ins = proposals(coverage, footage, pics)
     if st["layout"] == "prints":
         # A retained print is still visible after the next one lands. Check
         # everything said during that visible lifetime, not only its entrance.
@@ -293,54 +299,37 @@ def build(script, sup, style_id, direction=None):
             end = ins[run[-1]][1]
             for k in run:
                 ins[k][4] = dict(ins[k][4], audit_until=end)
-    ins, placement_report = check(ins, script, clock, sup["work"], sup["ffmpeg"])
+    attempts = []
+    for _ in range(4):
+        accepted, placement_report = check(ins, script, clock, sup["work"], sup["ffmpeg"])
+        attempts.append(placement_report)
+        if not placement_report['rejected']:
+            break
+        bad = {r[4]['path'] for r, decision in zip(ins,placement_report['placements']) if not decision['ok']}
+        footage = {i:[r for r in rows if r['path'] not in bad] for i,rows in footage.items()}
+        pics = {n:[r for r in rows if r['path'] not in bad] for n,rows in pics.items()}
+        ins = proposals(coverage,footage,pics)
+    ins = accepted
+    placement_report = dict(placement_report, attempts=attempts,
+                            spend=[s for attempt in attempts for s in attempt['spend']])
+    coverage_report = require_coverage(ins, coverage, f_end/FPS)
     past = {int(i) for i in d.get("past_segs") or [] if isinstance(i, int)}
     cut_pts, drive_ids, look_pics, mono_spans, bright = [], set(), [], [], []
     if take.get("still"):
         look_pics.append(take["still"])
     tcuts = [int(round(float(s_["t0"]) * FPS)) + LEAD_F for s_ in tshots[1:]]      # the take's own cuts, in film frames
 
-    take_phrase = 0
-
     def take_shot(a, b):
-        """The take on frames a..b, split at its own cuts so every piece is framed on the speaker it shows."""
-        nonlocal take_phrase
-        if b - a < 2:
+        """Preserve the actual camera take; only word-motivated eased moves enter the driver."""
+        if b-a < 2:
             return
-        # Break long takes into phrase-sized pieces before the face-safe driver.
-        # The driver may have only two valid framings; a later phrase may return
-        # to the wider shot while the source sound and time stay continuous.
-        pace, _, _ = F._engines()
-        phrase_band = (0.55, 0.85)
-        # Caption entrances are not picture edits. Keep the speaker phrasing
-        # independent of where the face-safe caption seat ends up.
-        phrase = pace.splits(a, b, stress, int(phrase_band[0] * FPS), int(phrase_band[1] * FPS))
-        edges = sorted({a, b, *phrase, *[c for c in tcuts if a + 3 <= c <= b - 3]})
+        edges = sorted({a, b, *[c for c in tcuts if a+3 <= c <= b-3]})
         for fa, fb in zip(edges, edges[1:]):
-            mid = (fa + fb) / 2
-            k = sum(1 for c in tcuts if c <= mid)
-            t0 = max(fa - LEAD_F, 0) / FPS
-            t1 = min(max(fb - LEAD_F, 1) / FPS, float(take["dur"]))
-            src = [round(t0, 4), round(max(t1, t0 + 1 / FPS), 4)]
-            if (st["layout"] == "window" or b-a > 3*FPS) and take_phrase % 2:
-                # A long speaker-only passage needs a genuinely wider view
-                # between close framings. Small face-safe crop jumps can be visually identical
-                # after the camera move; preserve the source's complete frame.
-                P.shot([fa, fb], tkeys[k], F.cover_crop(take["w"], take["h"], W/H,
-                       (.5,.45),(.5,.4)), src=src, blur=26, grade=dict(DIM))
-                x0,y0,x1,y1 = WINDOW_BOX
-                aspect = float(take["w"])/float(take["h"])
-                h = min(y1-y0,(x1-x0)*W/H/aspect)
-                w = h*H/W*aspect
-                cx,cy = (x0+x1)/2,(y0+y1)/2
-                P.card([fa,fb],tkeys[k],[cx-w/2,cy-h/2,cx+w/2,cy+h/2],
-                       src=src,crop=[0,0,1,1],z=1,radius=.010,
-                       shadow=dict(a=.55,blur=.03,dx=0,dy=.012))
-            else:
-                it = P.shot([fa, fb], tkeys[k], None, src=src)
-                it.pop("crop")
-                drive_ids.add(it["id"])
-            take_phrase += 1
+            k = sum(1 for c in tcuts if c <= (fa+fb)/2)
+            t0, t1 = max(fa-LEAD_F,0)/FPS, min(max(fb-LEAD_F,1)/FPS,float(take["dur"]))
+            it = P.shot([fa,fb], tkeys[k], None, src=[round(t0,4),round(max(t1,t0+1/FPS),4)])
+            it.pop("crop")
+            drive_ids.add(it["id"])
             cut_pts.append(fa)
 
     past_share = sum(x[1] - x[0] for x in ins if seg_at(x[0]) in past) / max(sum(x[1] - x[0] for x in ins), 1)
@@ -520,18 +509,6 @@ def build(script, sup, style_id, direction=None):
         P.word([a + delay, b], text, vk, 0.5, ys[delay:] if delay else ys, ink, [min(1.0, (q + 1) / 2) for q in range(n - delay)],
                align="c", z=8, blur=bl[delay:] if delay else bl, role="big", stroke=dict(w=3.0, c="#0B0A09"))
 
-    if d.get("title") and title:
-        ws = cased(title).split()
-        cut = min(range(1, len(ws)), key=lambda k: abs(len(" ".join(ws[:k])) - len(" ".join(ws[k:])))) if len(title) > 16 and len(ws) > 1 else len(ws)
-        rows = [" ".join(ws[:cut])] + ([" ".join(ws[cut:])] if cut < len(ws) else [])
-        a, b = 2, int(2.3 * FPS)
-        px = min([P.R.fit_px("dsp", r, 0.70 * W, 132) for r in rows])      # inside the platform's right rail, as every display word
-        for k, row in enumerate(rows):
-            vk = f"dsp_t{k}"
-            P.voices[vk] = dict(P.voices["dsp"], px=px)
-            land(a, b, row, vk, cap_y + 0.012 - (len(rows) - 1 - k) * px * 1.04 / H, pal["accent"] if k == len(rows) - 1 else pal["ink"], delay=2 * k)
-        shown.append((a, b, title))
-        P.events.append(a)
     # ---- the words that carry the story, large, each on the word that says it; never two inside two seconds
     last = shown[-1][1] + 6 if shown else -10 ** 6
     for row in d.get("display") or []:
@@ -545,7 +522,7 @@ def build(script, sup, style_id, direction=None):
         if hit is None:
             continue
         a = max(Clock.f(hit[0]) - 1, 1)
-        if a - last < 2.0 * FPS or a >= f_voice_end - 12:
+        if a < 2*FPS or a - last < 2.0 * FPS or a >= f_voice_end - 12:
             continue
         b = int(min(a + 1.15 * FPS, f_end, Clock.f(clock.segs[seg][1]) + 10))
         if b - a < 14:
@@ -617,7 +594,7 @@ def build(script, sup, style_id, direction=None):
                  events=sorted(set(P.events) | set(cut_pts) | set(changes) | {it["f"][0] for it in l1["items"] if it["k"] == "card"}),
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, display=[dict(f=[a, b], text=t) for a, b, t in shown],
                  labels=[dict(f=[a, b], text=t) for a, b, t in labels], turn_f=turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
-                 style=style_id, layout=st["layout"], placement_check=placement_report,
+                 style=style_id, layout=st["layout"], placement_check=placement_report, coverage=coverage_report,
                  title_layout=title_layout, caption_restarts=restarts, face_metadata=meta,
                  finishes=dict(black_and_white=len([p for p in P.pictures if p.get("finish")]), flashes=len(flashes), dark_ink_spans=len(bright)),
                  alien=dict(asked=[a["dev"] for a in l1.get("alien") or []], why=why, never=list(ALIEN_NEVER)),

@@ -213,7 +213,7 @@ def _face_on_screen(crop, face, eyes=None):
     return ((face[0] + face[2] / 2 - crop[0]) / w, (ey - crop[1]) / h, face[3] / h)
 
 
-def _eased_take(sh, cam, M, faces, stress, a, b, lo, hi, fps, rng, log):
+def _eased_take(sh, cam, M, faces, stress, a, b, lo, hi, fps, rng, log, motivated=None):
     """A take, re-framed the way the references re-frame one: no cut. On the stress peaks the camera eases a step
     in (4 to 7%, the references' eased moves on a take), up to three in a row or as far as the pixels go, then
     eases back out further than one step; between moves it keeps a slow push. One item, one continuous track."""
@@ -225,7 +225,8 @@ def _eased_take(sh, cam, M, faces, stress, a, b, lo, hi, fps, rng, log):
     start = cam.on_face(big, 0.34, eyes=eyes.get(tuple(big))) if big else (names.get("step1") or M[0][1])
     cx, cy, w = motion._cwz(start)
     tos, cur, run_in = [], w, 0
-    for f in splits(a, b, stress, lo, hi):
+    points = splits(a, b, stress, lo, hi) if motivated is None else sorted({int(f) for f in motivated if a+6 <= f < b-6})
+    for f in points:
         size = 0.043 + 0.027 * rng.random()
         go_in = run_in < 3 and cur / (1 + size) >= cam.w_min * 1.01 and (run_in == 0 or rng.random() < 0.7)
         if go_in:
@@ -243,7 +244,7 @@ def _eased_take(sh, cam, M, faces, stress, a, b, lo, hi, fps, rng, log):
         log["eased"] += 1
     it = {"id": sh["id"], "k": "shot", "f": [a, b], "pic": sh["pic"], "src": list(sh["src"])}
     it.update(sh.get("keep") or {})
-    it["_cam"], it["_kw"], it["_crop"], it["_faces"], it["_name"] = cam, dict(to=tos, drift=dict(rate=0.012, dir=1)), list(start), faces, "take"
+    it["_cam"], it["_kw"], it["_crop"], it["_faces"], it["_name"] = cam, dict(to=tos, drift=dict(rate=0.012 if motivated is None else 0.0, dir=1)), list(start), faces, "take"
     if faces and "window" not in it:
         it["window"] = looks.window_of(max(faces, key=lambda f: f[2] * f[3]), pad=1.25)
     log["changes"].append(a)
@@ -292,7 +293,7 @@ def drive(shots, stress, fps=30.0, frame=(1080, 1920), family="story", seed=0, b
         eyes = {tuple(f[:4]): f[4] for f in sh.get("faces") or [] if len(f) > 4}
         M = menu(cam, sh, W)
         if B.get("ease_takes") and sh.get("src"):
-            items.append(_eased_take(sh, cam, M, faces, stress, a, b, lo, hi, fps, rng, log))
+            items.append(_eased_take(sh, cam, M, faces, stress, a, b, lo, hi, fps, rng, log, B.get("motivated_frames")))
             prev = None
             continue
         pts = splits(a, b, stress, lo, hi) if len(M) >= 2 else []

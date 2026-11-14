@@ -26,12 +26,15 @@ Keep the sources most likely to hold real, clean video of that very subject: the
 
 Drop: another editor's short or reel (it carries their captions), slideshows of photos with a voice, AI narrations, reaction and commentary videos, top-10 lists, music videos, games, animations about the subject, a namesake that is not the subject, anything over an hour.
 
+When the depiction requirements explicitly call for a scientific visualization, technical system, software interface or document, an original institution's published visualization or product demonstration is primary source material. Keep that exact artifact; do not reject it merely because it is rendered or screen-recorded. It must illustrate the named object accurately, with its provenance clear, and must never be mistaken for footage of a hypothetical event.
+
 Answer with one JSON object only: {"keep":[{"s":subject number,"h":result number,"why":"at most eight words"}]}, at most the requested number of sources per subject, best first, and only sources you would bet on."""
 
 
 def plan(lines, named, about="", budget_s=90.0):
     """({"subjects": [...], "lines": [...]}, usd)."""
     rows = [f"{ln['i']}. {ln['say']}" + (f"   [writer's pictures: {', '.join(ln.get('pictures') or [])}]" if ln.get("pictures") else "")
+            + (f"   [documentary depiction requirements: {ln['visual']}]" if ln.get('visual') else '')
             + (f"   [see: {json.dumps([dict(thing=x.get('thing'), as_of=x.get('as_of'), moment=x.get('moment')) for x in ln['see'] if isinstance(x, dict)], ensure_ascii=False)}]"
                if ln.get("see") else "")
             for ln in lines]

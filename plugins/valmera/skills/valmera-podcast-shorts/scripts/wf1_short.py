@@ -112,7 +112,7 @@ def script(ctx, ideas_out):
     t0, t1 = float(s["in"]), float(s["out"])
     if not (8.0 <= t1 - t0 <= 75.0):
         raise RuntimeError(f"script window {t0}-{t1} is not a short")
-    named = [r for r in s.get("named") or [] if isinstance(r, dict) and r.get("name")][:8]
+    named = [r for r in s.get("named") or [] if isinstance(r, dict) and r.get("name")]
     return dict(title=s.get("title") or idea.get("title"), style=reg, window=[round(t0, 2), round(t1, 2)], source=ctx.source,
                 hook_line=s.get("hook_line") or idea.get("hook"), close_line=s.get("close_line") or idea.get("payoff"),
                 speakers=int(s.get("speakers") or idea.get("speakers") or 1), names=[r["name"] for r in named], named=named,
@@ -143,13 +143,19 @@ def supply(ctx, script):
     style = wf1_film.STYLES[script["style"]["id"]]
     # real video of what each sentence names: the footage engine's own planner reads the sentences (OpenAI)
     who = str((ctx.args or {}).get("identity") or "")[:400].replace("\n", " ")
+    import wf1_coverage
+    coverage = wf1_coverage.plan(words, script.get('title'), sup_dir, _llm())
+    windows = coverage['windows']
     fscript = dict(title=f"{script.get('title')}. A podcast clip; the speaker is on camera already, so show what he talks about, as it was then, "
                          f"never him as he looks today. Who is in it: {who}",
-                   segments=[dict(say=s["text"], pictures=[]) for s in sents],
-                   named=[dict(name=r["name"], must_show=r.get("must_show") or r["name"], **{"is": r.get("is") or "thing"}) for r in script.get("named") or []])
+                   segments=[dict(say=s['say'], pictures=[s['name']], visual=s['must_show']) for s in windows],
+                   named=[dict(name=r["name"], must_show=r.get("must_show") or r["name"], **{"is": r.get("is") or "thing"}) for r in coverage['entities']])
     wf3.given_footage(ctx, os.path.join(sup_dir, "footage"))
     fw, fh = style["footage"]
-    foot = chain.footage(ctx, dict(script=fscript), [round(float(s["t1"]) - float(s["t0"]) + 0.2, 2) for s in sents], W=fw, H=fh, preserve_source=True)
+    foot = chain.footage(ctx, dict(script=fscript), [round(float(s["t1"]) - float(s["t0"]), 2) for s in windows],
+                         W=fw, H=fh, preserve_source=True, shot_s=1.15, line_max=20, per=5,
+                         strict_lines=True, motion_first=True, alloc="round", reassign_lost=True,
+                         whole_first=True, keep_sources=True)
     if foot:
         n_yt, n_bad = refused(foot)
         ctx.log(f"footage sources: {n_yt} on YouTube, {n_bad} refused or archive-only; {foot['counts'].get('clips')} clips on "
@@ -159,7 +165,7 @@ def supply(ctx, script):
         shutil.rmtree(os.path.join(sup_dir, "footage"), ignore_errors=True)
         raise RuntimeError(f"{wf1_film.WALL}: {n_bad} of {n_yt} footage sources would not open ({foot['counts'].get('clips')} clips on "
                            f"{foot['counts'].get('lines_with_footage')} of {foot['counts'].get('lines')} sentences). It lifts by itself; run the same link again later")
-    pack = dict(sid=ctx.sid, words=wj, narration=src, ffmpeg=PX.FF, sounds={}, pictures={}, credits=[], footage=[], title=script.get("title"))
+    pack = dict(sid=ctx.sid, words=wj, narration=src, ffmpeg=PX.FF, sounds={}, pictures={}, credits=[], footage=[], title=script.get("title"), coverage=coverage)
     subjects, by_line = [], {}
     if foot:
         fdir = os.path.join(sup_dir, "footage")
@@ -168,12 +174,14 @@ def supply(ctx, script):
                                  page=c["url"], time_range=c["time_range"], line=c["line"]) for c in foot["credits"]]
         subjects = [s for s in foot.get("subjects") or [] if s.get("name")]
         by_line = {int(ln["i"]): list(ln.get("subjects") or []) for ln in foot["lines"]}
+        for i, window in enumerate(coverage['windows']):
+            window['subjects'] = by_line.get(i) or [window['name']]
         spend.append(dict(stage="supply", provider="openai", model="gpt-6-sol low + gpt-4o-transcribe", what="footage", usd=(foot.get("spend") or {}).get("usd")))
         ctx.log(f"footage: {foot['counts']['clips']} clips on {foot['counts']['lines_with_footage']} of {foot['counts']['lines']} sentences; "
                 f"subjects {[s['name'] for s in subjects]}")
     # photographs of the same things, for the sentences the footage left bare
     named = [dict(name=s["name"], searches=[s["name"]], must_show=s.get("must_show") or s["name"], **{"is": s.get("kind") or "thing"})
-             for s in subjects if any(s["name"] in v for v in by_line.values())][:6]
+             for s in subjects if any(s["name"] in v for v in by_line.values())]
     if named:
         sys.modules.pop("llm", None)                           # the worker's own llm answers its picture check
         try:

@@ -87,12 +87,15 @@ PROFILE = {
 }
 # under_voice_db by the kind of film. Stories: the judge. Marketing, speech clips and long form: the references of those
 # kinds on the same ruler (lanes/MUSIC study: 8.0, 4.7 with the owner's speech reels, 15.6), a talking take kept clear.
-UNDER_VOICE = {"stories": 5.0, "marketing": 8.0, "podcast": 9.0, "longform": 15.0}
+UNDER_VOICE = {"stories": 5.0, "marketing": 8.0, "podcast": 5.5, "longform": 15.0}
 
 
 def profile_for(kind):
     """The PROFILE for a kind of film (stories | marketing | podcast | longform)."""
-    return dict(PROFILE, under_voice_db=UNDER_VOICE.get(kind, PROFILE["under_voice_db"]))
+    out = dict(PROFILE, under_voice_db=UNDER_VOICE.get(kind, PROFILE["under_voice_db"]))
+    if kind == 'podcast':
+        out.update(hole_min_s=1.0, hole_max_s=1.3, broadband_bed_db=5.5)
+    return out
 
 
 # ----------------------------------------------------------------- the song's map
@@ -961,6 +964,10 @@ def track(path, song, plan, marks, voice=None, profile=None, song_pcm=None):
     out = _apply_gains(music, g, carve, hop)
     end_at = min(n, hit_at + int((float(plan.get("end_tail_s") or P["end_tail_beats"] * plan["beat_s"]) + 0.02) * SR))
     out[end_at:] = 0.0
+    broadband_gain = 0.
+    if P.get('broadband_bed_db') is not None and voice is not None and len(voice):
+        from .audibility import calibrate_bed
+        out, broadband_gain = calibrate_bed(voice, out, P['broadband_bed_db'])
     kk4 = int(0.4 / hop_s)
     lvl = 10 * np.log10(np.convolve(10 ** ((mk + g) / 10) * live, np.ones(kk4) / kk4, mode="same") + 1e-12)       # the music as mixed, 0.4 s K
     rest = (~spoken) & live & (t < plan["end_hit_s"])
@@ -976,6 +983,7 @@ def track(path, song, plan, marks, voice=None, profile=None, song_pcm=None):
            "music_share": round(float(live[:int(dur / hop_s)].mean()), 3),
            "carved_frames": rep_mask, "carve_max_db": round(float(-carve.min()), 1), "end_hit_s": plan["end_hit_s"],
            "silent_from_s": math.ceil(end_at / SR * 1000.0) / 1000.0, "drop_at": plan.get("drop_at"), "tempo": plan["tempo"]}
+    rep['broadband_gain_db'] = round(broadband_gain,2)
     return out, rep
 
 
@@ -1191,9 +1199,27 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
         music, mrep = track(song_path, song, plan, marks, voice=lv[:int(marks["dur_s"] * SR)], profile=prof)
         # with the bed known, each placed sound is made to be there over the voice and the song together
         l1["sound"] = SD.present_over(l1["sound"], to_ar(lv), to_ar(music), float(l1["fps"]))
+        if kind == 'podcast':
+            from . import audibility
+            l1['sound'] = audibility.present_hits(l1['sound'], lv, music,
+                lambda items: AU.split_audio(_Plan(dict(l1,sound=items),src))[1])
         rep["lifted_for_bed"] = sum(1 for x in l1["sound"] if x.get("lifted_for_bed_db"))
         _v, fx, _ = AU.split_audio(_Plan(l1, src))
-        fx[:len(music)] += music[:len(fx)]
+        if kind == 'podcast':
+            # Save the exact post-duck components for verification against the encoded film.
+            bed = np.zeros_like(fx)
+            bed[:min(len(bed),len(music))] = music[:len(bed)]
+            ducks = getattr(fx,'ducks',None)
+            if ducks:
+                gain, _ = AU.duck_curve(bed,fx,ducks,len(fx))
+                bed *= gain[:,None]
+            bed, _ = audibility.calibrate_bed(lv,bed,prof['broadband_bed_db'])
+            rep['audibility'] = audibility.measure(lv,fx,bed)
+            np.savez_compressed(os.path.join(work,'mix_stems.npz'), voice=audibility.mono(lv).astype(np.float32),
+                                sfx=audibility.mono(fx).astype(np.float32),bed=audibility.mono(bed).astype(np.float32))
+            fx = np.asarray(fx)+bed
+        else:
+            fx[:len(music)] += music[:len(fx)]
         m4a = os.path.join(tmp, "song.m4a")
         rep["master"] = AU.master(voice, fx, m4a, tmp, total)
         rep["music"] = mrep
