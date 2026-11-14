@@ -67,6 +67,67 @@ def voice_layer(dry, s, fps):
     return at, out * gain
 
 
+# SND3 (14 Nov): music and sound effects as one mix. A hero hit (the hook, the turn, the close: a placed sound with
+# duck_db) gets room in the song under it: the song starts down DUCK_LEAD_S before the hit, sits under it through its
+# body and comes back over DUCK_OUT_S. How far is read from the signal, never fixed: deep enough that the hit stands
+# DUCK_OVER_DB over the song in the hit's first 150 ms, at least DUCK_MIN_DB, at most the sound's duck_db. Where the song
+# makes its own room (its level in the 0.15 s before the hit DUCK_HOLE_DB or more under its level just after: the music
+# engine's hole before its drop and its last hit) the song's landing and the hit are one, and the landing is only eased
+# when it would cover the hit.
+DUCK_LEAD_S, DUCK_IN_S, DUCK_HOLD_S, DUCK_OUT_S = 0.15, 0.06, 0.12, 0.35
+DUCK_OVER_DB, DUCK_MIN_DB, DUCK_HOLE_DB = 10.0, 3.0, 8.0
+# On the song's own landing (its drop, its last hit) the two are one, but the hit leads: when the landing would still
+# cover the hit, the landing is eased until the hit stands DUCK_LANDING_OVER_DB over it, by DUCK_LANDING_DB at most.
+DUCK_LANDING_OVER_DB, DUCK_LANDING_DB = 3.0, 4.0
+
+
+class Sounds(np.ndarray):
+    """The sounds track split_audio lays: a plain array to every caller, that remembers what it held (`own`) and
+    where a hero hit asks for room (`ducks`: [(sample, most dB)]). Whatever a caller lays on it afterwards (a song,
+    music.mix) is the bed, and master() dips that bed under the hero hits."""
+    own = None
+    ducks = None
+
+
+def duck_curve(bed, own, ducks, n):
+    """Per-sample gain for the bed (stereo arrays at SR) and a report: each hero hit's dip, read from the signal."""
+    g_db = np.zeros(n, np.float32)
+    rep = []
+    mono_b = bed.mean(axis=1) if bed.ndim == 2 else bed
+    mono_s = own.mean(axis=1) if own.ndim == 2 else own
+
+    def lv(x, a, b):
+        a, b = max(0, int(a)), min(len(x), int(b))
+        return 10 * np.log10(float(np.mean(x[a:b].astype(np.float64) ** 2)) + 1e-12) if b > a else -120.0
+    for at, most in ducks:
+        if at <= 0 or at >= n:
+            continue
+        pre = lv(mono_b, at - DUCK_LEAD_S * SR, at)
+        post = lv(mono_b, at, at + 0.3 * SR)
+        bed_hit = lv(mono_b, at, at + 0.15 * SR)
+        hit = lv(mono_s, at, at + 0.15 * SR)
+        row = {"t": round(at / SR, 3), "bed_db": round(bed_hit, 1), "hit_over_bed_db": round(hit - bed_hit, 1)}
+        if bed_hit < -70.0:
+            rep.append(dict(row, db=0.0, why="no song under it"))
+            continue
+        if post - pre >= DUCK_HOLE_DB:
+            depth = float(min(float(most), DUCK_LANDING_DB, DUCK_LANDING_OVER_DB - (hit - bed_hit)))
+            if depth < 0.5:
+                rep.append(dict(row, db=0.0, why="the song makes its own room: a hole, then its landing with the hit"))
+                continue
+            why = "the song's own landing with the hit, eased so the hit leads it"
+        else:
+            depth = float(min(float(most), max(DUCK_MIN_DB, DUCK_OVER_DB - (hit - bed_hit))))
+            why = None
+        t = (np.arange(n) - at) / SR
+        down = np.clip((t + DUCK_LEAD_S) / DUCK_IN_S, 0.0, 1.0)
+        up = np.clip(1.0 - (t - DUCK_HOLD_S) / DUCK_OUT_S, 0.0, 1.0)
+        env = np.where(t < DUCK_HOLD_S, down, up) * (t > -DUCK_LEAD_S)
+        g_db = np.minimum(g_db, (-depth * env).astype(np.float32))
+        rep.append(dict(row, db=round(depth, 1), **({"why": why} if why else {})))
+    return (10 ** (g_db / 20)).astype(np.float32), rep
+
+
 def mix_audio(plan):
     """The spine in programme order, plus each sound with its peak on its event. Sample exact."""
     voice, fx, report = split_audio(plan)
@@ -103,6 +164,7 @@ def split_audio(plan):
     cache = {}
     dry = mix.copy()
     voice, mix = mix, np.zeros((n, 2), np.float32)
+    ducks = []
     for s in plan.doc.get("sound") or []:
         if s.get("s") in ("echo", "swell"):
             at, smp = voice_layer(dry, s, plan.fps)
@@ -132,7 +194,11 @@ def split_audio(plan):
         smp = smp[:n - at] * (10 ** (float(s.get("db", 0)) / 20))
         mix[at:at + len(smp)] += smp
         report["sounds"] += 1
-    return voice, mix, report
+        if s.get("duck_db") and s.get("event_f") is not None:
+            ducks.append((int(round((float(s["event_f"]) / plan.fps - 0.013) * SR)), float(s["duck_db"])))
+    fx = mix.view(Sounds)
+    fx.own, fx.ducks = mix.copy(), ducks
+    return voice, fx, report
 
 
 def write_audio(plan, out, tmp):
@@ -200,12 +266,30 @@ def level_voice(voice, tmp):
     return x, rep
 
 
-def master(voice, fx, out, tmp, dur, bitrate="256k"):
+def master(voice, fx, out, tmp, dur, bitrate="256k", bed=None, ducks=None):
     """Voice levelled, sounds laid on it at their own gains, the whole to -14 LUFS by one gain, true peaks held
     under -1 dBTP by a 4x oversampled limiter (5 ms look-ahead, 50 ms release: it touches transients, never the
     voice's level), AAC. Measured after the encode: the limit comes down while the true peak is over -1 dBTP, the
-    gain comes back while the limiter's work leaves the film under -14.2 LUFS, five passes at most. Returns the report."""
+    gain comes back while the limiter's work leaves the film under -14.2 LUFS, five passes at most. Returns the report.
+    A song is dipped under each hero hit (duck_curve): handed apart as `bed` (fx then holds the sounds alone, ducks
+    the hits' [(sample, dB)]), or laid by the caller onto split_audio's own track, which remembers what it held."""
+    own = getattr(fx, "own", None)
+    ducks = ducks if ducks is not None else getattr(fx, "ducks", None)
+    fx = np.asarray(fx, np.float32)
+    duck_rep = None
+    if bed is not None:
+        bed = np.asarray(bed, np.float32)
+        m = min(len(bed), len(fx))
+        own, fx = fx, fx.copy()
+        fx[:m] += bed[:m]
+    if ducks and own is not None and own.shape == fx.shape:
+        laid = fx - own                                     # what the caller laid on the sounds: the song
+        if float(np.abs(laid).max()) > 1e-6:
+            g, duck_rep = duck_curve(laid, own, ducks, len(fx))
+            fx = own + laid * g[:, None]
     v, rep = level_voice(voice, tmp) if voice is not None and np.abs(voice).max() > 1e-5 else (voice, {"curve": False})
+    if duck_rep is not None:
+        rep = dict(rep, ducks=duck_rep)
     mix = (v if v is not None else 0) + fx
     mix = np.asarray(mix, np.float32)
     if float(np.abs(mix).max()) < 1e-5:

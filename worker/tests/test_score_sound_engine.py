@@ -171,9 +171,11 @@ def test_a_film_of_new_pictures_carries_the_judges_amount_and_no_more():
     ev = [{"f": 45, "kind": "display"}] + [{"f": f, "kind": "picture", "size": 0.4 + 0.5 * ((f // 21) % 2)} for f in range(90, D - 60, 21)]
     ctx = {"fps": fps, "dur_f": D, "existing": [], "speech": None, "voice": None, "words": [], "bed": True, "np10": 14.0, "turn_f": 1200}
     sounds, rep = SD.plan_sounds(ev, ctx)
-    t = sorted(p["t"] for p in rep["placed"])
+    aud = rep["placed"] + rep["body"]                                     # SND3: the audible layer is the heroes, accents and body
+    t = sorted(p["t"] for p in aud)
     assert 18 <= len(t) <= 21, len(t)                                     # 3.0 to 3.6 per 10 s
-    assert min(b - a for a, b in zip(t, t[1:])) >= SD.SPACE_S - 1e-6
+    plain = sorted(p["t"] for p in aud if p["tier"] != "hero")
+    assert all(b - a >= (SD.OPEN_SPACE_S if b < rep["shape"]["open_s"] else SD.SPACE_S) - 1e-6 for a, b in zip(plain, plain[1:]))
     for w in np.arange(0, dur, 0.5):
         assert sum(1 for x in t if w <= x < w + 10) <= rep["allow_10s"]
     for a in sorted({s["s"] for s in sounds}):                             # one recording: twice in 30 s, never inside 3 s
@@ -181,10 +183,11 @@ def test_a_film_of_new_pictures_carries_the_judges_amount_and_no_more():
         assert all(b - c >= SD.SAME_GAP_S for c, b in zip(at, at[1:])), a
     assert all(s["event_f"] in {e["f"] for e in ev} for s in sounds)      # every sound has a picture event under it
     # the allowance reaches the end of the film: every 10 s of it carries sound, and no silence runs past 8 s
-    assert all(any(w <= x < w + 10 for x in t) for w in np.arange(0, dur - 10, 2.0))
-    assert max(b - a for a, b in zip([0.0] + t, t + [dur])) <= 8.0, t
-    halves = [sum(1 for x in t if x < dur / 2), sum(1 for x in t if x >= dur / 2)]
-    assert abs(halves[0] - halves[1]) <= 4, halves
+    every = sorted(p["t"] for p in aud + rep["ticks"])                    # SND3: the middle breathes on quiet ticks, never in silence
+    assert all(any(w <= x < w + 10 for x in every) for w in np.arange(0, dur - 10, 2.0))
+    assert max(b - a for a, b in zip([0.0] + every, every + [dur])) <= 8.0, every
+    rate = lambda a, b: sum(1 for x in t if a <= x < b) / (b - a)
+    assert rate(0, rep["shape"]["open_s"]) > rate(rep["shape"]["open_s"], 30.0)      # SND3: the opening is denser than the middle
 
 
 @needs_ffmpeg
@@ -201,7 +204,7 @@ def test_a_burst_of_quick_cuts_is_one_train_of_clicks():
     assert [[e["f"] for e in r] for r in SD.bursts(ev, fps)] == [run, again]
     sounds, rep = SD.plan_sounds([dict(e) for e in ev], ctx)
     lib = SD.library()
-    trains = [p for p in rep["placed"] if p["kind"] == "burst"]
+    trains = [p for p in rep["ticks"] if p["kind"] == "burst"]                 # SND3: a train is the tick layer
     assert len(trains) == 1 and trains[0]["t"] == 8.0 and trains[0]["class"] == "click" and trains[0]["train"] == 8
     clicks = sorted((s["event_f"], s["s"]) for s in sounds if s["for"] == "burst")
     assert [f for f, _ in clicks] == run                                   # one on each cut, its peak on the cut
@@ -210,7 +213,7 @@ def test_a_burst_of_quick_cuts_is_one_train_of_clicks():
     # each a single short click of one kind: nothing with a second clack in it, nothing that rings into the next cut
     assert all(not lib[sid].get("hit_s") and (lib[sid].get("max_s") or lib[sid]["duration_s"]) <= SD.TRAIN_CLICK_S for sid in ids)
     assert len({lib[sid].get("family") for sid in ids}) == 1
-    others = [p["t"] for p in rep["placed"] if p["kind"] != "burst"]
+    others = [p["t"] for p in rep["placed"] + rep["body"] + rep["ticks"] if p["kind"] != "burst"]
     assert not [t for t in others if 8.0 - SD.SPACE_S < t < run[-1] / fps + SD.SPACE_S]                 # the display word inside it stays silent
     assert len(rep["placed"]) <= rep["allow"]                               # a train is one gesture to the allowance
     # three quick cuts are not a burst
@@ -238,8 +241,9 @@ def test_the_plan_names_the_class_of_every_gesture_and_keeps_the_library(tmp_pat
     sounds, rep = SD.plan_sounds(ev, ctx)
     lib = SD.library()
     assert sounds and all(s["s"] in lib for s in sounds)
-    kinds = {p["class"] for p in rep["placed"]}
-    assert None not in kinds and len(kinds) >= 3, rep["placed"]           # a film of cuts does not hear one sound
+    every = rep["placed"] + rep["body"] + rep["ticks"]
+    kinds = {p["class"] for p in every}
+    assert None not in kinds and len(kinds) >= 3, every                   # a film of cuts does not hear one sound
     turn = [p for p in rep["placed"] if abs(p["t"] - 20.0) < 0.05]
     assert turn and turn[0]["part"] == "payoff" and turn[0]["class"] == "impact"
     for w in np.arange(0, dur, 0.5):                                      # the footage's allowance still holds
