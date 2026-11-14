@@ -33,3 +33,6 @@ def test_only_requested_subjects_become_obligations(case, monkeypatch):
     ending = ledger.get('picture_story_end')
     assert ending is not None
     assert ending['word']['t1'] < case['words'][-1]['t1'] + .001
+
+    if case.get('complete_thought_end_word') is not None:
+        assert ending['word_id'] == case['complete_thought_end_word'], ending
