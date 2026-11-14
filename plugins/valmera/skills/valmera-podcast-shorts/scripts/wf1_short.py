@@ -495,7 +495,7 @@ def _rebuild_rejected(ctx, script, sc, report):
     # The fixed supply makes this finite; keep independently approved
     # pictures instead of discarding the whole montage after three passes.
     doomed = [pics[r["id"]] for r in report["placements"] if not r["ok"]]
-    dropped = [os.path.basename(p["path"]) for p in doomed]
+    dropped = [p["path"] for p in doomed]
     rejected_path = os.path.join(ctx.supply, "render_rejected.json")
     previous = json.load(open(rejected_path)) if os.path.exists(rejected_path) else []
     if not set(dropped) - set(previous):

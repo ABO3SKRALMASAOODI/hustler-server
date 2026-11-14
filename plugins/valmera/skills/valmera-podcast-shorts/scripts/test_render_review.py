@@ -27,7 +27,7 @@ def test_composed_rejection_rebuilds_product_plan_and_invalidates_render(tmp_pat
         return dict(rejected=int(bad), placements=[dict(id=0,ok=not bad)], spend=[])
 
     def rebuild(ctx, script):
-        assert json.load(open(tmp_path/'render_rejected.json'))==['bad.jpg']
+        assert json.load(open(tmp_path/'render_rejected.json'))==['/supply/bad.jpg']
         return dict(beats=dict(pictures=[]),spend=[])
 
     monkeypatch.setattr(wf.wf3,'render',draw)
@@ -56,7 +56,7 @@ def test_later_repairs_keep_the_picture_that_passed_every_review(tmp_path,monkey
     def fresh(*args):
         p=tmp_path/'render_rejected.json'
         rejected=json.load(open(p)) if p.exists() else []
-        return dict(beats=dict(pictures=[dict(path='/supply/'+n) for n in names if n not in rejected]),spend=[])
+        return dict(beats=dict(pictures=[dict(path='/supply/'+n) for n in names if '/supply/'+n not in rejected]),spend=[])
     def review(ctx,rd,sc):
         pics=sc['beats']['pictures']
         bad=len(pics)>1
@@ -67,7 +67,7 @@ def test_later_repairs_keep_the_picture_that_passed_every_review(tmp_path,monkey
     sc=fresh();result=wf.render(ctx,{},sc)
     assert len(result['picture_review'])==5
     assert sc['beats']['pictures']==[dict(path='/supply/good.jpg')]
-    assert 'good.jpg' not in json.load(open(tmp_path/'render_rejected.json'))
+    assert '/supply/good.jpg' not in json.load(open(tmp_path/'render_rejected.json'))
 
 
 def test_delivery_only_rejection_invalidates_brand_and_music_and_rebuilds(tmp_path,monkeypatch):
@@ -93,4 +93,16 @@ def test_delivery_only_rejection_invalidates_brand_and_music_and_rebuilds(tmp_pa
     result=wf.check(ctx,rd,sc)
     assert len(checks)==2 and result['checks']['ok']
     assert result['checks']['podcast']['delivered_check']['rejected']==0
-    assert json.load(open(tmp_path/'render_rejected.json'))==['bad.jpg']
+    assert json.load(open(tmp_path/'render_rejected.json'))==['/supply/bad.jpg']
+
+
+def test_rejection_identifies_asset_when_research_passes_reuse_filenames(tmp_path,monkeypatch):
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda x:None)
+    paths=['/supply/first/clips/000.mp4','/supply/repair/clips/000.mp4']
+    sc=dict(beats=dict(pictures=[dict(path=p) for p in paths]),spend=[])
+    def rebuilt(*args):
+        rejected=json.load(open(tmp_path/'render_rejected.json'))
+        return dict(beats=dict(pictures=[dict(path=p) for p in paths if p not in rejected]),spend=[])
+    monkeypatch.setattr(wf,'score',rebuilt)
+    wf._rebuild_rejected(ctx,{},sc,dict(placements=[dict(id=0,ok=False),dict(id=1,ok=True)]))
+    assert sc['beats']['pictures']==[dict(path=paths[1])]

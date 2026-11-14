@@ -236,10 +236,10 @@ def build(script, sup, style_id, direction=None):
     d["delivery_tail_s"] = float(config.OUTRO_DURATION_S)
     pal = dict(ink=st["ink"], accent=d.get("accent") or st["accent"], plate="#0A0A0A")
     drop = set(d.get("drop") or [])
-    pics = {k: [r for r in v if r.get("title") not in drop and os.path.basename(str(r.get("path"))) not in drop] for k, v in (sup.get("pictures") or {}).items()}
+    pics = {k: [r for r in v if r.get("title") not in drop and r.get('path') not in drop and os.path.basename(str(r.get("path"))) not in drop] for k, v in (sup.get("pictures") or {}).items()}
     pics = {k: v for k, v in pics.items() if v}
     footage = {int(ln["i"]): [c for c in ln.get("clips") or [] if os.path.basename(str(c.get("file") or c.get("path"))) not in drop
-                              and os.path.exists(str(c.get("path"))) and not c.get("dull")] for ln in sup.get("footage") or []}
+                              and c.get('path') not in drop and os.path.exists(str(c.get("path"))) and not c.get("dull")] for ln in sup.get("footage") or []}
     take = sup["take"]
     keys, meta = {}, {}
     # the take's own shots (a show cut between cameras): each is framed on its own speaker. One file, one asset a shot
@@ -291,15 +291,14 @@ def build(script, sup, style_id, direction=None):
     from placement_check import propose, check
     from wf1_coverage import proposals, require_coverage
     ins = proposals(coverage, footage, pics)
-    if st["layout"] == "prints":
-        # A retained print is still visible after the next one lands. Check
-        # everything said during that visible lifetime, not only its entrance.
-        for run in _runs(ins):
-            end = ins[run[-1]][1]
-            for k in run:
-                ins[k][4] = dict(ins[k][4], audit_until=end)
     attempts = []
     for _ in range(1+sum(len(rows) for rows in footage.values())+sum(len(rows) for rows in pics.values())):
+        if st["layout"] == "prints":
+            # Replacements also remain behind later prints: check their entire visible life.
+            for run in _runs(ins):
+                end = ins[run[-1]][1]
+                for k in run:
+                    ins[k][4] = dict(ins[k][4], audit_until=end)
         accepted, placement_report = check(ins, script, clock, sup["work"], sup["ffmpeg"])
         attempts.append(placement_report)
         if not placement_report['rejected']:
