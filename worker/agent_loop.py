@@ -7396,6 +7396,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 ctx, "replied", fail_note=fail_note,
                 truncated=truncated_out)
             final, outcome = _asks_settle(ctx, final, outcome)
+            if honesty.get("reply_truth_unverified"):
+                outcome = "partial"
             if getattr(ctx, "ask_ledger", None):
                 from score import asks as _asks
                 honesty["ask_ledger"] = _asks.summary(

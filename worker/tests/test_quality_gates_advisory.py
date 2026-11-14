@@ -90,6 +90,12 @@ def test_quality_repair_pushback_is_once_per_version_with_a_backstop():
 
 def _loop_ctx(monkeypatch):
     from test_director_blueprint import _tool_ctx
+    import reply_truth
+
+    # These fixtures supply synthetic previews and test continuation/advisory
+    # behavior. The independent claim checker certifies that fixture; its
+    # missing-evidence and provider-failure behavior has dedicated tests.
+    monkeypatch.setattr(reply_truth, 'check', lambda *a, **k: [])
 
     ctx, db = _tool_ctx()
     edl = canvas_edl('9:16')

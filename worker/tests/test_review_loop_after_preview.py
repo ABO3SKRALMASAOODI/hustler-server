@@ -45,7 +45,8 @@ def _contract(ctx, mode="edit"):
 
 def _delivered(monkeypatch, draft=DRAFT):
     """The state p5464 was in at 124 s: one write, its complete preview
-    rendered, nothing measured open. Every model call is counted."""
+    rendered, nothing measured open. Editor calls are counted; the fixture
+    supplies the independent claim check separately."""
     ctx, db, posted, checkpoint = _loop_ctx(monkeypatch)
     edl = ctx.latest_edl()["json"]
     edl["texts"] = []
@@ -68,16 +69,27 @@ def _run(ctx, db):
         2, {"id": 1, "content": ctx.user_message})
 
 
-def test_the_turn_ends_on_the_first_complete_preview_with_one_model_call(monkeypatch):
+def test_the_turn_ends_after_claim_check_without_another_editor_call(monkeypatch):
     ctx, db, posted, checkpoint, calls = _delivered(monkeypatch)
     result = _run(ctx, db)
     assert result["status"] == "replied"
     assert result["outcome"] == "fulfilled"
     assert checkpoint == {}
-    # The reply was drafted. Nothing runs after it: no structured review, no
-    # repair re-entry, no second draft.
+    # After the fixture's independent claim check, no editor repair re-entry
+    # or second draft is needed.
     assert len(calls) == 1
     assert not any("tool_choice" in call for call in calls)
+
+
+def test_unavailable_claim_check_is_partial_and_never_posts_the_done_draft(monkeypatch):
+    import reply_truth
+    ctx, db, posted, checkpoint, calls = _delivered(monkeypatch)
+    monkeypatch.setattr(reply_truth, 'check', lambda *a, **k: None)
+    result = _run(ctx, db)
+    assert posted[-1][0] == reply_truth.UNVERIFIED
+    assert result['outcome'] == 'partial'
+    assert posted[-1][1]['outcome'] == 'partial'
+    assert checkpoint == {} and len(calls) == 1
 
 
 def test_the_customer_reads_the_editors_own_reply(monkeypatch):

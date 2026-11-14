@@ -181,6 +181,12 @@ def check(ctx, client, model, request_text, draft, limit=3, strict=False):
 UNVERIFIED = "I couldn't verify the requested changes in the preview, so I can't confirm they're complete."
 
 
+def _unverified(honesty):
+    if isinstance(honesty, dict):
+        honesty["reply_truth_unverified"] = True
+    return UNVERIFIED
+
+
 def corrected(draft, rows, strict=False):
     """(reply, swapped): every contradicted claim's quoted words replaced by its honest line; an
     honest line whose quote is not verbatim in the draft is added after the first paragraph."""
@@ -214,17 +220,19 @@ def corrected(draft, rows, strict=False):
 def enforce(ctx, client, model, request_text, draft, honesty=None, strict=False):
     """The draft with its contradicted claims told truthfully. Never raises."""
     if not draft or not str(draft).strip() or client is None or not model:
-        return UNVERIFIED if strict else draft
+        return _unverified(honesty) if strict else draft
     try:
         rows = check(ctx, client, model, request_text, draft, **({"strict": True} if strict else {}))
     except Exception as exc:  # noqa: BLE001 - an unchecked reply goes out as drafted
         print(f"[reply-truth] check skipped: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
-        return UNVERIFIED if strict else draft
+        return _unverified(honesty) if strict else draft
     if rows is None and strict:
-        return UNVERIFIED
+        return _unverified(honesty)
     if not rows:
         return draft
     text, swapped = corrected(draft, rows, strict=strict)
+    if strict and swapped and isinstance(honesty, dict):
+        honesty["reply_truth_unverified"] = True
     if isinstance(honesty, dict):
         honesty["reply_truth"] = {
             "claims": len(rows),
