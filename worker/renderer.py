@@ -10715,6 +10715,11 @@ def _run_render_job(worker_db, job):
             meta={"variant": asset_variant, "edl_version": version,
                   **({"render_dependency_key": dependency_key} if dependency_key else {}),
                   "render_job_id": job_id,
+                  # A last-look correction can supersede the job after its
+                  # first film is already visible. Keep the stages with the
+                  # actual asset too, so that first-watchable latency remains
+                  # measurable even if the job result becomes "superseded".
+                  "render_stage_timings": dict(timings),
                   "quality": _quality_label(),
                   # A reused picture keeps the encode it was made with.
                   **({"preview_enc": reused_visual_meta.get(
