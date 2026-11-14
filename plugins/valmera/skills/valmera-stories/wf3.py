@@ -30,6 +30,7 @@ import fit as FIT  # noqa: E402
 import pictures as PX  # noqa: E402
 import reel as R  # noqa: E402
 import writer  # noqa: E402
+import delivered as DL  # noqa: E402
 
 FORM = "short"
 # every buildable style: the story reels (reel.py, the judge's cut) and the first three (film.py), which a run takes only
@@ -141,7 +142,7 @@ def ideas(ctx):
     if not able:
         raise RuntimeError(f"no buildable style outside the last three ({ctx.styles_last()})")
     avoid = [r.get("idea") for r in ledger_rows(ctx) if r.get("idea")]
-    got, use = writer.find_ideas(FORM, able, avoid=avoid, line=ctx.args.get("line"))
+    got, use = writer.find_ideas(FORM, able, avoid=avoid, line=ctx.args.get("line"), delivered=DL.prompt_block(ctx.workflow))
     for i in got[:6]:
         i["supply"] = probe(i)
     got.sort(key=lambda i: (not i.get("supply", {}).get("ok"), -(float(i.get("strength") or 0) + min(i.get("supply", {}).get("pictures", 0), 16) / 8)))

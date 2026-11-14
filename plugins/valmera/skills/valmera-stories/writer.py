@@ -273,7 +273,7 @@ def menu(cards):
     return "\n".join(f"- {s['id']} ({s['name']}): {s['look']} Hook: {s['hook']} Close: {s['close']} Needs: {s['needs']}." for s in cards)
 
 
-def find_ideas(form, cards, avoid=(), line=None, n=6, effort="high"):
+def find_ideas(form, cards, avoid=(), line=None, n=6, effort="high", delivered=""):
     """Ranked ideas for the styles in `cards`, found on the web by the model itself."""
     F = FORMS[form]
     system = ("You are the story finder of Valmera's story workflow. You find true stories about founders, companies, inventions "
@@ -299,7 +299,7 @@ def find_ideas(form, cards, avoid=(), line=None, n=6, effort="high"):
                "starting File:, \"licence\": its licence, \"why\": why this one picture holds the whole story} else null, \"sources\": "
                "[URLs you read], \"strength\": 1-10}."))
     content = ((f"# Styles this film can take\n{menu(cards)}\n\n"
-               f"# Already made (never repeat a subject)\n{json.dumps(list(avoid), ensure_ascii=False)}\n\n") +
+               f"# Already made (never repeat a subject)\n{json.dumps(list(avoid), ensure_ascii=False)}\n\n") + (delivered or "") +
                (f"# What the owner asked for\n{line}\nEvery idea must be about this. When it names a person, a company or a "
                   "topic, find the strongest true stories inside it (a single moment, decision or turn, not a biography).\n\n" if line else
                   "# No subject given\nChoose the subjects yourself: founders, companies, inventions and moments in business or "

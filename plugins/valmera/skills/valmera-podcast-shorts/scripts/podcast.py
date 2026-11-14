@@ -62,6 +62,7 @@ WHISPER = f"{VV}/week-1106/atlas/models/whisper-large-v3-mlx"
 BAR = 7.0                 # a moment is made when the selection grades it this strong or stronger (1-10); there is no count
 LANES = 2                 # shorts made at once on this Mac (the footage search is the long part and waits on the network)
 _LOCK = threading.Lock()
+import delivered as DL  # noqa: E402  the shared delivered ledger (_shell/delivered.py): the same podcast is never delivered twice
 
 
 def now():
@@ -128,17 +129,18 @@ class Run:
         return os.path.join(self.work, *parts)
 
 
-def find_run(link):
-    """The unfinished run of this link when there is one (it continues), else a new work folder."""
+def find_run(link, test=False):
+    """The unfinished run of this link when there is one (it continues), else a new work folder. A test run and a
+    delivery never continue each other."""
     vid = video_id(link)
     os.makedirs(WORK_ROOT, exist_ok=True)
     for n in sorted(os.listdir(WORK_ROOT), reverse=True):
         st = jload(os.path.join(WORK_ROOT, n, "run.json"), {}) or {}
-        if st.get("video_id") == vid and not st.get("delivered"):
+        if st.get("video_id") == vid and not st.get("delivered") and bool(st.get("test")) == bool(test):
             if alive(st.get("pid")) and st.get("pid") != os.getpid():
                 raise SystemExit(f"this link is already running (pid {st['pid']}, {os.path.join(WORK_ROOT, n)})")
             return os.path.join(WORK_ROOT, n), True
-    work = os.path.join(WORK_ROOT, f"{vid}-{dt.datetime.now():%Y%m%d-%H%M%S}")
+    work = os.path.join(WORK_ROOT, f"{vid}-{dt.datetime.now():%Y%m%d-%H%M%S}{'-test' if test else ''}")
     os.makedirs(work)
     return work, False
 
@@ -481,6 +483,7 @@ def build_short(run, m, fetched, pod, tries=3):
         return dict(id=m["id"], ok=False, error=f"{wf1_film.WALL}: not started")
     info = fetched["info"]
     args = dict(moment=m, words=run.p("words.json"), style=m["style"], music_ledger=run.p("music_used.json"),      # no two shorts of a run play one track
+                delivered_ledger="off",                  # an inner short; podcast.py records the podcast's one folder
                 identity=(f"Speaker: {pod.get('speaker') or ''}. Host: {pod.get('host') or ''}. Show: {pod.get('show') or ''} "
                           f"({pod.get('year') or ''}).\n" + identity_text(info))[:1800],
                 source_url=info.get("webpage_url") or run.link, video_id=run.state["video_id"], source_title=info.get("title"),
@@ -583,7 +586,40 @@ def _sources_md(pod_line, rows):
     return "\n".join(out)
 
 
-def deliver(run, fetched, sel, built, out_root):
+# ----------------------------------------------------------------- never the same podcast twice
+
+def link_ids(link):
+    """The exact ids a link names before anything is fetched: yt:<video id> for YouTube, else its canonical URL."""
+    sid = DL.source_id_of_link(link)
+    return [sid] if sid else []
+
+
+def source_ids(run, fetched):
+    """The exact ids of the fetched source: the link's, the platform's own id, and the sha256 of the video's bytes
+    (hashed once per run)."""
+    ids = link_ids(run.link)
+    info = fetched.get("info") or {}
+    if str(info.get("extractor_key") or "").lower().startswith("youtube") and info.get("id"):
+        ids.append(f"yt:{info['id']}")
+    if info.get("webpage_url"):
+        ids += link_ids(info["webpage_url"])
+    if not run.state.get("source_sha256") and os.path.isfile(fetched.get("video") or ""):
+        run.state["source_sha256"] = DL.sha256_file(fetched["video"])
+        run.save()
+    if run.state.get("source_sha256"):
+        ids.append(run.state["source_sha256"])
+    return sorted(set(ids))
+
+
+def refused(hit, sid, link):
+    """The one JSON line a refused link prints."""
+    return json.dumps(dict(refused="already delivered: the same podcast is never delivered twice", link=link, source_id=sid,
+                           delivered=hit.get("folder"), delivered_at=hit.get("delivered_at"), title=(hit.get("idea") or {}).get("title"),
+                           note="another version of it needs another source, or --test-out <dir> for a test that never delivers"),
+                      ensure_ascii=False)
+
+
+def deliver(run, fetched, sel, built, out_root, test=False):
     import wf1_film
     waiting = [r for r in built["failed"] if wf1_film.WALL in str(r.get("error"))]
     if waiting:                                          # a folder is delivered once, complete: not while shorts wait for their footage
@@ -652,19 +688,43 @@ def deliver(run, fetched, sel, built, out_root):
                  + "\n".join(f"| {x['n']:02d} | {x['title']} | {x['style']} | {x['seconds'] or 0:.1f} | {x['pictures'] or 0} | {(x['music'] or {}).get('title') or 'none'} |" for x in listing)
                  + "\n\n" + (("Not made:\n" + "\n".join(f"- {x['title']}: {x['error']}" for x in failed) + "\n\n") if failed else "")
                  + f"Moments found: {sel.get('found')}; at or over the bar ({sel.get('bar'):g} of 10): {len(sel['moments'])}. shorts.json has every number.\n")
-    os.rename(part, final)
-    return dict(folder=final, shorts=len(rows), not_made=failed, spend_usd=spend)
+    if test:                                             # a test run: its own folder, never the ledger
+        os.rename(part, final)
+    else:                                                # the rename and the ledger row in one lock; an exact source delivered meanwhile is refused
+        idea = dict(title=info.get("title"), subject=pod.get("speaker") or info.get("channel"), angle=pod.get("short_title"),
+                    style="podcast shorts", beats=[x["title"] for x in listing], sources=[link])
+        try:
+            DL.deliver_once(DL.make_row("wf1", final, source_ids(run, fetched), idea, shorts=len(rows)),
+                            commit=lambda: os.rename(part, final))
+        except DL.AlreadyDelivered:
+            shutil.rmtree(part, ignore_errors=True)
+            raise
+    return dict(folder=final, shorts=len(rows), not_made=failed, spend_usd=spend, test=test)
 
 
 def main():
     ap = argparse.ArgumentParser(description="A podcast or interview link in, one folder of finished shorts out.")
     ap.add_argument("link")
-    ap.add_argument("--out", default=OUT_ROOT, help=argparse.SUPPRESS)          # where the one folder goes; the owner's Podcast Shorts by default
+    ap.add_argument("--out", default=None, help=argparse.SUPPRESS)              # where the one folder goes; the owner's Podcast Shorts by default
+    ap.add_argument("--test-out", default=None,
+                    help="a test run: may reuse a delivered source, writes only here, never to a delivery folder or the ledger")
     ap.add_argument("--lanes", type=int, default=LANES, help=argparse.SUPPRESS)
     ap.add_argument("--keep-work", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
-    work, resumed = find_run(a.link)
+    test = bool(a.test_out)
+    if test and a.out:
+        ap.error("--test-out cannot be combined with --out: a test run never delivers")
+    if test and DL.in_delivery_root(a.test_out):
+        ap.error(f"--test-out {a.test_out} is inside a delivery folder; a test run never writes there")
+    out_root = os.path.abspath(a.test_out if test else (a.out or OUT_ROOT))
+    if not test:                                         # before anything is fetched: the link's own id against the ledger
+        hit, sid = DL.find(link_ids(a.link), "wf1")
+        if hit:
+            print(refused(hit, sid, a.link))
+            return 4
+    work, resumed = find_run(a.link, test)
     run = Run(a.link, work)
+    run.state["test"] = test
     run.state["pid"] = os.getpid()
     run.save()
     run.log(f"{'continuing' if resumed else 'new run'}: {a.link} in {work}")
@@ -675,6 +735,13 @@ def main():
             cached = jload(run.p(f"{stage}.json")) if stage in run.state["done"] else None
             if cached is not None and stage != "shorts":
                 results[stage] = cached
+                if stage == "fetch" and not test:
+                    hit, sid = DL.find(source_ids(run, cached), "wf1")
+                    if hit:
+                        run.state["pid"] = None
+                        run.save()
+                        print(refused(hit, sid, a.link))
+                        return 4
                 continue
             run.log(f"stage {stage}")
             if stage == "fetch":
@@ -691,13 +758,28 @@ def main():
             elif stage == "shorts":
                 r = shorts(run, results["fetch"], results["moments"], a.lanes)
             else:
-                r = deliver(run, results["fetch"], results["moments"], results["shorts"], os.path.abspath(a.out))
+                r = deliver(run, results["fetch"], results["moments"], results["shorts"], out_root, test=test)
             results[stage] = r
             jsave(run.p(f"{stage}.json"), r)
+            if stage == "fetch" and not test:            # the platform's id and the bytes' sha256, before any model is paid
+                hit, sid = DL.find(source_ids(run, r), "wf1")
+                if hit:
+                    run.state["pid"] = None
+                    run.state["refused"] = dict(source_id=sid, delivered=hit.get("folder"), at=now())
+                    run.save()
+                    print(refused(hit, sid, a.link))
+                    if not a.keep_work:
+                        shutil.rmtree(work, ignore_errors=True)
+                    return 4
             if stage not in run.state["done"]:
                 run.state["done"].append(stage)
             run.state["seconds"][stage] = round(run.state["seconds"].get(stage, 0) + time.time() - t0, 1)
             run.save()
+    except DL.AlreadyDelivered as e:                     # delivered by another run meanwhile: nothing is delivered twice
+        run.state["pid"] = None
+        run.save()
+        print(refused(e.row, e.source_id, a.link))
+        return 4
     except Exception as e:  # noqa: BLE001 - a stopped run is kept and continues when the same link is given again
         run.log(f"STOPPED in {stage}: {e}")
         run.state["pid"] = None

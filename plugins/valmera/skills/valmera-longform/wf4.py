@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shell"))
 import pictures as PX  # noqa: E402  lane O's supply: narrate, pictures, faces, commons_file
 import story  # noqa: E402
 import ear  # noqa: E402
+import delivered as DL  # noqa: E402
 
 STYLE = "the-ledger"
 
@@ -78,7 +79,7 @@ def ideas(ctx):
         raise RuntimeError(f"no buildable style outside the last three ({ctx.styles_last()})")
     card = able[0]
     avoid = [r.get("idea") for r in ledger_rows(ctx) if r.get("idea")]
-    got, use = story.find_ideas(card, avoid=avoid, line=ctx.args.get("line"))
+    got, use = story.find_ideas(card, avoid=avoid, line=ctx.args.get("line"), delivered=DL.prompt_block(ctx.workflow))
     for i in got:
         i["style"] = card["id"]
     got.sort(key=lambda i: -float(i.get("strength") or 0))

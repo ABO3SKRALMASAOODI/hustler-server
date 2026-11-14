@@ -5,6 +5,8 @@ description: Turn a podcast or interview link into finished vertical shorts with
 
 # Valmera Podcast Shorts (v10, 14 Nov 2026)
 
+Never the same podcast twice (owner, 14 Nov 2026): a link whose video id or source sha256 is in the shared delivered ledger (`.valmera/workflow/delivered.jsonl`) stops at once with one JSON line naming the delivered folder (exit 4); a test run uses `--test-out <dir>`, which never delivers, never writes to a delivery folder and cannot be combined with `--out`.
+
 The only input is the link.
 
 ```

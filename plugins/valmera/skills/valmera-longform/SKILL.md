@@ -5,6 +5,8 @@ description: Make long-form narrated story films of 10 to 20 minutes (workflow 4
 
 # Valmera long-form films (workflow 4)
 
+Never the same idea told the same way twice (owner, 14 Nov 2026): the ideas stage sees this workflow's delivered ideas from `.valmera/workflow/delivered.jsonl` and a gpt-6-sol judgement takes out any exact repeat before scripting; a new angle, version or treatment is welcome. A test run passes `--args '{"delivered_ledger": "off"}'` and an `--out` outside the delivery folders, and is not recorded.
+
 One film per run, 10 to 20 minutes, 1920x1080. A true story told by a narrator over real archive pictures and designed
 pages, held together by a promise said by 30 s, chapters that each open a question, open loops closed out loud, a turn at
 two thirds, and a ledger of the stakes that balances at the end. `REFERENCES.md` is the bar (three reference films watched).

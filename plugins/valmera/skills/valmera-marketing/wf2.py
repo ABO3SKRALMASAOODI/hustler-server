@@ -24,6 +24,7 @@ import chain  # noqa: E402
 import llm  # noqa: E402
 import evidence  # noqa: E402
 import film as F  # noqa: E402
+import delivered as DL  # noqa: E402
 
 TASTE = ("Restraint is the design. One device carries the film; everything else is plain. A sound belongs to something landing on "
          "screen. Type has one seat per kind, sits off faces and inside the safe area, and never repeats what is already legible. "
@@ -94,6 +95,7 @@ def ideas(ctx):
                ("\n\n# What editors respond to: the owner's reference films in this genre (their captions, comments counted)\n") +
                (json.dumps([dict(kind=r["kind"], comments=r["comments"], caption=r["caption"][:220]) for r in refs[:16]], ensure_ascii=False)) +
                (f"\n\n# Styles a film can take today\n{menu(able)}\n\n# Taste\n{TASTE}\n\n") +
+               DL.prompt_block(ctx.workflow) +
                (f"# A line from the owner\n{ctx.args['line']}\n\n" if ctx.args.get("line") else ""))
     text, use = llm.ask(system, content, effort="medium", max_tokens=6000)
     got = llm.json_block(text)

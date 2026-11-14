@@ -43,7 +43,7 @@ def references():
 
 # ----------------------------------------------------------------- ideas
 
-def find_ideas(card, avoid=(), line=None, n=6, effort="high"):
+def find_ideas(card, avoid=(), line=None, n=6, effort="high", delivered=""):
     system = ("You are the story finder of Valmera's long-form workflow: narrated films of 10 to 20 minutes in the line of "
               "The Sudden Theory, told by a narrator over real archive pictures and designed maps, documents and diagrams. "
               "You use the web to find stories and to check them. A story qualifies only if every fact in it can be sourced "
@@ -70,7 +70,7 @@ def find_ideas(card, avoid=(), line=None, n=6, effort="high"):
                "\"must_show\": what a picture must visibly show to count}], \"sources\": [URLs you read], \"strength\": 1-10}."))
     system += f"\n\n# The bar\n{references()}\n\n"
     content = ((f"# The style\n{json.dumps(card, ensure_ascii=False)}\n\n"
-               f"# Already made (never repeat a subject)\n{json.dumps(list(avoid), ensure_ascii=False)}\n\n") +
+               f"# Already made (never repeat a subject)\n{json.dumps(list(avoid), ensure_ascii=False)}\n\n") + (delivered or "") +
                (f"# A line from the owner\n{line}\n\n" if line else ""))
     text, use = writer.ask_web(system, content, effort=effort, max_tokens=40000, searches=16, fetches=8, what="find ideas")
     got = writer.json_block(text)

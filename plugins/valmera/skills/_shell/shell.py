@@ -29,6 +29,7 @@ import uuid
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import chain  # noqa: E402
+import delivered as DL  # noqa: E402
 
 V = "/Users/masaoodi/Documents/Valmera/.valmera"
 STATE_ROOT = os.environ.get("SHELL_STATE_ROOT", f"{V}/workflow")
@@ -205,8 +206,19 @@ def deliver(ctx, state, out_root, results):
     if os.path.exists(final_dir):
         rec = jload(os.path.join(final_dir, "film.json"), {}) or {}
         if rec.get("run_id") == ctx.run_id:      # killed after the rename: it was delivered
+            if ledger_mode(ctx) == "shell":       # and recorded (a row of this run is never added twice)
+                DL.append(delivered_row(ctx, script, results, final_dir), refuse=False)
             return dict(folder=final_dir, bytes=du(final_dir), already=True)
         raise RuntimeError(f"{final_dir} exists: a folder is delivered once, never added to")
+    # the shared delivered ledger (delivered.py): a source delivered before is refused before anything is copied
+    mode = ledger_mode(ctx)
+    if mode == "off" and DL.in_delivery_root(out_root):
+        raise RuntimeError(f"{out_root} is a delivery folder: a run outside the delivered ledger (a test, an inner short) never writes there")
+    row = delivered_row(ctx, script, results, final_dir) if mode != "off" else None
+    if row:
+        hit, sid = DL.find(row["source_ids"], ctx.workflow)
+        if hit:
+            raise DL.AlreadyDelivered(f"{sid} was delivered on {hit.get('delivered_at')} to {hit.get('folder')}: the exact same source is never delivered twice", hit, sid)
     part = os.path.join(out_root, f".{name}.partial")
     shutil.rmtree(part, ignore_errors=True)
     os.makedirs(part)
@@ -231,10 +243,38 @@ def deliver(ctx, state, out_root, results):
     if chk.get("song"):
         rec["song"] = dict(chk["song"], film="film_song.mp4", clean_export="film.mp4")
     jsave(os.path.join(part, "film.json"), rec)
-    os.rename(part, final_dir)
+    if mode == "shell":                          # the rename and the ledger row together, under the ledger's lock
+        DL.deliver_once(row, commit=lambda: os.rename(part, final_dir))
+    else:                                        # "driver": the skill's driver records it where the folder finally lands
+        os.rename(part, final_dir)
     ledger_add(ctx.state_root, ctx.workflow, dict(run_id=ctx.run_id, style=script["style"]["id"], idea=script.get("title"),
                                                   source=ctx.source, window=script.get("window"), delivered=final_dir, at=now()))
     return dict(folder=final_dir, bytes=du(final_dir), spend_usd=rec["spend_usd"])
+
+
+def ledger_mode(ctx):
+    """Who records this delivery in the shared delivered ledger: "shell" (here), "driver" (story.py and market.py, once
+    the folder reaches its final root) or "off" (a podcast's inner short: podcast.py records the podcast's one folder)."""
+    return (ctx.args or {}).get("delivered_ledger") or ("off" if "moment" in (ctx.args or {}) else "shell")
+
+
+def delivered_row(ctx, script, results, folder):
+    """The delivered ledger's row for this film: the exact source ids and the idea in its compact form."""
+    ids = []
+    if ctx.source and os.path.isfile(ctx.source):
+        ids.append(DL.sha256_file(ctx.source))
+    src = (results.get("ideas") or {}).get("source") or {}
+    for k in ("url", "link", "origin_url", "webpage_url"):
+        v = src.get(k) if isinstance(src, dict) else None
+        if isinstance(v, str) and DL.canonical_url(v):
+            ids.append(DL.canonical_url(v))
+    base = script.get("idea_full") or (script.get("idea") if isinstance(script.get("idea"), dict) else None) or {}
+    idea = DL.idea_of(base)
+    if not idea.get("title") and isinstance(script.get("idea"), str):
+        idea["title"] = script["idea"]
+    idea["title"] = idea.get("title") or script.get("title")
+    idea["style"] = (script.get("style") or {}).get("id") or idea.get("style")
+    return DL.make_row(ctx.workflow, folder, ids, idea, run_id=ctx.run_id, film_title=script.get("title"))
 
 
 def run(a):
@@ -276,6 +316,9 @@ def run(a):
             ctx.log(f"stage {stage}")
             if stage == "ideas":
                 r = wf.ideas(ctx)
+                if ctx.workflow in DL.IDEA_WORKFLOWS and not ctx.args.get("remake"):
+                    # an exact repeat of a delivered idea is taken out by a model's judgement; the next idea leads
+                    r = DL.guard_ideas(ctx.workflow, r, log=ctx.log)
             elif stage == "script":
                 r = wf.script(ctx, results["ideas"])
                 r["styles_banned"] = ctx.styles_last()

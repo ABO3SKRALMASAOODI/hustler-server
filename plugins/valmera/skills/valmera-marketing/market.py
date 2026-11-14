@@ -167,6 +167,18 @@ def main():
         k = args.index("--out")
         out_root = os.path.abspath(args[k + 1])
         args = args[:k] + args[k + 2:]
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shell"))
+    import delivered as DL
+    test = None
+    if "--test-out" in args:                         # a test run: never a delivery, never in the ledger, never a delivery folder
+        k = args.index("--test-out")
+        test = os.path.abspath(args[k + 1])
+        args = args[:k] + args[k + 2:]
+        if "--out" in sys.argv[1:]:
+            raise SystemExit(json.dumps(dict(failed="--test-out cannot be combined with --out: a test run never delivers")))
+        if DL.in_delivery_root(test):
+            raise SystemExit(json.dumps(dict(failed=f"--test-out {test} is inside a delivery folder; a test run never writes there")))
+        out_root = test
     topic = " ".join(args).strip() or None
     env = environment()
     prepare_state()
@@ -180,7 +192,7 @@ def main():
     res, last_err = {}, None
     for attempt in range(TRIES + 1):
         cmd = run_py + (["--resume", rid, "--out", outbox] if rid else
-                        ["--out", outbox, "--args", json.dumps(dict(line=topic, look=False, one_command=True), ensure_ascii=False)])
+                        ["--out", outbox, "--args", json.dumps(dict(line=topic, look=False, one_command=True, delivered_ledger="off" if test else "driver"), ensure_ascii=False)])
         with open(log, "a") as lf:
             r = subprocess.run(cmd, cwd=HERE, env=env, stdout=subprocess.PIPE, stderr=lf, text=True)
             lf.write(r.stdout)
@@ -207,7 +219,14 @@ def main():
         folder = os.path.join(out_root, os.path.basename(staged))
         if os.path.exists(folder):
             raise SystemExit(json.dumps(dict(failed=f"{folder} exists: a folder is delivered once", staged=staged)))
-        os.rename(staged, folder)                         # complete, in one step: nothing is added after this
+        # complete, in one step: nothing is added after this. The shared delivered ledger records it in the same lock
+        try:
+            if test:
+                os.rename(staged, folder)
+            else:
+                DL.deliver_once(DL.row_from_film(staged, "wf2", folder=folder), commit=lambda: os.rename(staged, folder))
+        except DL.AlreadyDelivered as e:
+            raise SystemExit(json.dumps(dict(refused=f"already delivered: {e}", delivered=e.row.get("folder"), staged=staged)))
         rec = jload(os.path.join(folder, "film.json"), {}) or {}
         st = (rec.get("checks") or {}).get("stories") or {}
         mk = (rec.get("checks") or {}).get("marketing") or {}

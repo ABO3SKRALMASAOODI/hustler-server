@@ -6,6 +6,8 @@ import json
 import os
 import sys
 
+import pytest
+
 os.environ["PODCAST_NO_REEXEC"] = "1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -149,11 +151,13 @@ def test_a_run_delivers_one_complete_folder_once_and_deletes_its_work(tmp_path, 
                    "Photograph (Travis Kalanick): Kalanick.jpg | J. Doe | CC BY 2.0 | https://commons/x", "Found and not used: 1 more clips",
                    "Track by A (CC-BY 4.0)", "not licensed"):
         assert needle in src
-    # the same link again is a new run and a new folder: a delivered folder is never added to
-    monkeypatch.setattr(sys, "argv", ["podcast.py", "https://youtu.be/abcdefghijk", "--out", out])
-    assert podcast.main() == 0
-    again = json.loads(capsys.readouterr().out.strip().splitlines()[-1])["delivered"]
-    assert again != folder and sorted(os.listdir(folder)) == names and len(os.listdir(out)) == 2
+    # the same podcast again is refused before anything is fetched (owner, 14 Nov: never the same podcast twice), with
+    # one JSON line naming the delivered folder; the delivered folder is never added to
+    monkeypatch.setattr(sys, "argv", ["podcast.py", "https://www.youtube.com/watch?v=abcdefghijk&t=5", "--out", out])
+    assert podcast.main() == 4
+    ref = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert ref["source_id"] == "yt:abcdefghijk" and ref["delivered"] == folder and ref["refused"]
+    assert sorted(os.listdir(folder)) == names and len(os.listdir(out)) == 1 and os.listdir(work_root) == []
 
 
 def test_a_run_that_makes_nothing_delivers_nothing_and_keeps_its_work_to_continue(tmp_path, monkeypatch, capsys):
@@ -291,3 +295,66 @@ def test_verified_source_cache_works_without_contacting_walled_metadata(tmp_path
     monkeypatch.setattr(podcast,'ladder',lambda *a,**k: (_ for _ in ()).throw(AssertionError('metadata contacted')))
     got=podcast.fetch(run)
     assert got['video']==str(cache/'podcast.mp4') and got['captions'].endswith('.json3')
+
+
+# ----------------------------------------------------------------- never the same podcast twice (owner, 14 Nov 2026)
+
+def _ledger():
+    import delivered as DL
+    return DL, DL.rows()
+
+
+def test_a_delivery_is_recorded_with_its_exact_source_ids(tmp_path, monkeypatch, capsys):
+    work_root, out = _fake_run(tmp_path, monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["podcast.py", "https://youtu.be/abcdefghijk?si=x", "--out", out])
+    assert podcast.main() == 0
+    folder = json.loads(capsys.readouterr().out.strip().splitlines()[-1])["delivered"]
+    DL, rows = _ledger()
+    assert len(rows) == 1 and rows[0]["wf"] == "wf1" and rows[0]["folder"] == folder and rows[0]["seeded"] is False
+    import hashlib
+    assert set(rows[0]["source_ids"]) == {"yt:abcdefghijk", "sha256:" + hashlib.sha256(b"x" * 1000).hexdigest()}
+    assert rows[0]["idea"]["title"] == "The Episode" and rows[0]["idea"]["beats"] == ["Title m01", "Title m02", "Title m03"]
+
+
+def test_the_same_bytes_under_another_link_are_refused_after_the_fetch_before_any_model(tmp_path, monkeypatch, capsys):
+    work_root, out = _fake_run(tmp_path, monkeypatch)
+    import hashlib
+    import delivered as DL
+    DL.append(DL.make_row("wf1", "/delivered/Earlier Folder", ["yt:zzzzzzzzzzz", "sha256:" + hashlib.sha256(b"x" * 1000).hexdigest()], dict(title="Earlier")))
+    monkeypatch.setattr(podcast, "moments", lambda run, fetched: (_ for _ in ()).throw(AssertionError("a model was asked")))
+    monkeypatch.setattr(sys, "argv", ["podcast.py", "https://example.com/the-same-episode.mp4", "--out", out])
+    assert podcast.main() == 4
+    lines = capsys.readouterr().out.strip().splitlines()
+    ref = json.loads(lines[-1])
+    assert ref["delivered"] == "/delivered/Earlier Folder" and ref["source_id"].startswith("sha256:")
+    assert not os.path.exists(out) and os.listdir(work_root) == [] and len(DL.rows()) == 1
+
+
+def test_a_test_run_may_reuse_a_delivered_source_and_never_delivers(tmp_path, monkeypatch, capsys):
+    work_root, out = _fake_run(tmp_path, monkeypatch)
+    import delivered as DL
+    DL.append(DL.make_row("wf1", "/delivered/The Episode", ["yt:abcdefghijk"], dict(title="The Episode")))
+    test_out = str(tmp_path / "test-out")
+    monkeypatch.setattr(sys, "argv", ["podcast.py", "https://youtu.be/abcdefghijk", "--test-out", test_out])
+    assert podcast.main() == 0
+    rep = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert rep["delivered"].startswith(test_out + os.sep) and not os.path.exists(out)
+    assert len(DL.rows()) == 1                                    # a test is never recorded as a delivery
+    # never combined with a delivery, never inside a delivery folder
+    monkeypatch.setattr(sys, "argv", ["podcast.py", "https://youtu.be/abcdefghijk", "--test-out", test_out, "--out", out])
+    with pytest.raises(SystemExit):
+        podcast.main()
+    monkeypatch.setenv("VALMERA_DELIVERY_ROOTS", str(tmp_path / "Podcast Shorts"))
+    monkeypatch.setattr(sys, "argv", ["podcast.py", "https://youtu.be/abcdefghijk", "--test-out", str(tmp_path / "Podcast Shorts" / "x")])
+    with pytest.raises(SystemExit):
+        podcast.main()
+    assert len(DL.rows()) == 1 and not os.path.exists(tmp_path / "Podcast Shorts")
+
+
+def test_a_test_run_and_a_delivery_never_continue_each_other(tmp_path, monkeypatch):
+    monkeypatch.setattr(podcast, "WORK_ROOT", str(tmp_path / "work"))
+    t, _ = podcast.find_run("https://youtu.be/abcdefghijk", test=True)
+    json.dump(dict(video_id="abcdefghijk", test=True, done=[]), open(os.path.join(t, "run.json"), "w"))
+    d, resumed = podcast.find_run("https://youtu.be/abcdefghijk")
+    assert d != t and not resumed
+    assert podcast.find_run("https://youtu.be/abcdefghijk", test=True) == (t, True)
