@@ -104,3 +104,51 @@ def test_a_remake_without_the_judgement_is_refused_by_the_driver(tmp_path, monke
     with pytest.raises(DL.NotJudged):
         DL.deliver_once(DL.row_from_film(str(staged), "wf3", folder=str(final)), commit=lambda: os.rename(staged, final))
     assert staged.is_dir() and not final.exists() and DL.rows() == []
+
+
+def _with_env(story, calls):
+    """The stand-in shell, recording the environment each shell is started with."""
+    envs, inner = [], story.subprocess.run
+
+    def run(cmd, **kw):
+        envs.append(dict(kw.get("env") or {}))
+        return inner(cmd, **kw)
+    story.subprocess.run = run
+    return envs
+
+
+def test_the_driver_proves_itself_to_its_shell_and_a_test_does_not(tmp_path, monkeypatch, capsys):
+    """Hole 4 (15 Nov): the shell leaves the ledger to the driver only with the driver's token (its workflow and pid)."""
+    monkeypatch.setenv("VALMERA_DELIVERY_ROOTS", str(tmp_path / "Story Films"))
+    story, calls = _driver(tmp_path, monkeypatch)
+    envs = _with_env(story, calls)
+    monkeypatch.setattr(sys, "argv", ["story.py", "--out", str(tmp_path / "Story Films"), "Pixar"])
+    assert story.main() == 0
+    assert envs[-1][DL.DRIVER_ENV] == f"wf3:{os.getpid()}" and json.loads(calls[-1][calls[-1].index("--args") + 1])["delivered_ledger"] == "driver"
+    monkeypatch.setattr(sys, "argv", ["story.py", "--test-out", str(tmp_path / "codex-tests" / "t"), "Pixar"])
+    assert story.main() == 0
+    assert DL.DRIVER_ENV not in envs[-1] and len(DL.rows()) == 1
+
+
+def test_the_driver_reads_both_flag_forms_and_refuses_an_unknown_flag(tmp_path, monkeypatch, capsys):
+    """Hole 6 (15 Nov): "--test-out=/path" became part of the topic and the run delivered."""
+    monkeypatch.setenv("VALMERA_DELIVERY_ROOTS", str(tmp_path / "Story Films"))
+    story, calls = _driver(tmp_path, monkeypatch)
+    monkeypatch.setattr(story, "OUT_ROOT", str(tmp_path / "Story Films"))
+    test = tmp_path / "codex-tests" / "eq"
+    monkeypatch.setattr(sys, "argv", ["story.py", "Claude", f"--test-out={test}", "Shannon"])
+    assert story.main() == 0
+    got = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    args = json.loads(calls[-1][calls[-1].index("--args") + 1])
+    assert args["delivered_ledger"] == "off" and args["line"] == "Claude Shannon" and got["topic"] == "Claude Shannon"
+    assert got["delivered"].startswith(str(test)) and DL.rows() == [] and not (tmp_path / "Story Films").exists()
+    for argv in (["--test_out", str(test), "Pixar"], ["--testout=" + str(test), "Pixar"], ["--dry", "Pixar"], ["Pixar", "--test"]):
+        monkeypatch.setattr(sys, "argv", ["story.py"] + argv)
+        with pytest.raises(SystemExit) as e:
+            story.main()
+        assert "the only flags are --out" in json.loads(str(e.value))["failed"], argv
+    assert len(calls) == 1 and DL.rows() == []
+    monkeypatch.setattr(sys, "argv", ["story.py", f"--test-out={tmp_path / 'story films' / 't'}", "Pixar"])
+    with pytest.raises(SystemExit) as e:
+        story.main()
+    assert "inside a delivery folder" in str(e.value)

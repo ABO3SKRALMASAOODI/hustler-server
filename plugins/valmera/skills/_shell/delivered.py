@@ -18,6 +18,7 @@ Two kinds of check, and only two:
   meaning    whether a new idea is the same idea told the same way is a model's judgement (OpenAI gpt-6-sol, low
              effort, titles, angles and beats only). No word list and no pattern ever decides it.
 """
+import argparse
 import contextlib
 import datetime as dt
 import fcntl
@@ -41,14 +42,26 @@ V = "/Users/masaoodi/Documents/Valmera"
 DELIVERY_ROOTS = (f"{V}/Podcast Shorts", f"{V}/Story Films", f"{V}/Marketing Films", f"{V}/Long Films")
 
 
+FIRMLINK = "/System/Volumes/Data"    # the Mac's data volume: /System/Volumes/Data/Users/... is /Users/... (a firmlink)
+_FIRMLINK_FOLDED = unicodedata.normalize("NFD", FIRMLINK).casefold()
+
+
 def delivery_roots():
     extra = [x for x in os.environ.get("VALMERA_DELIVERY_ROOTS", "").split(os.pathsep) if x]
     return [os.path.realpath(os.path.abspath(r)) for r in list(DELIVERY_ROOTS) + extra]
 
 
 def _fold(p):
-    """A path as the Mac's file system compares names: APFS is case-insensitive and normalisation-insensitive."""
-    return unicodedata.normalize("NFD", p).casefold()
+    """A path as the Mac's file system compares names: APFS is case-insensitive and normalisation-insensitive, and the
+    data volume's firmlink (/System/Volumes/Data/Users/...) names the same folder as /Users/..."""
+    f = unicodedata.normalize("NFD", p).casefold()
+    while f.startswith("//"):
+        f = f[1:]
+    if f == _FIRMLINK_FOLDED:
+        return "/"
+    if f.startswith(_FIRMLINK_FOLDED + "/"):
+        f = f[len(_FIRMLINK_FOLDED):]
+    return f
 
 
 def _ancestors(p):
@@ -61,16 +74,19 @@ def _ancestors(p):
         out.append(up)
 
 
-def in_delivery_root(p):
-    """True when the folder is one of the owner's delivery folders or inside one, however its path is spelled.
-    Every existing folder on the path is compared with each existing root by identity (os.path.samefile: the same
-    folder under another case, a symlink or a hard link); a path that does not exist yet is compared case-folded."""
+def inside(p, roots):
+    """True when the folder is one of `roots` or inside one, however either path is spelled. Every root, whether it
+    exists yet or not, is compared with the path case-folded, normalised and with the data volume's firmlink prefix
+    taken off (both sides); every existing folder on the path is also compared with each existing root by identity
+    (os.path.samefile: the same folder under a symlink or a hard link)."""
+    if not p:
+        return False
     rp = os.path.realpath(os.path.abspath(p))
-    roots = delivery_roots()
+    roots = [os.path.realpath(os.path.abspath(r)) for r in roots]
     folded = _fold(rp)
     for r in roots:
-        fr = _fold(r)
-        if folded == fr or folded.startswith(fr.rstrip(os.sep) + os.sep):
+        fr = _fold(r).rstrip("/")
+        if folded == (fr or "/") or folded.startswith(fr + "/"):
             return True
     live = [r for r in roots if os.path.isdir(r)]
     for a in _ancestors(rp):
@@ -83,6 +99,63 @@ def in_delivery_root(p):
             except OSError:
                 continue
     return False
+
+
+def in_delivery_root(p):
+    """True when the folder is one of the owner's delivery folders or inside one, however its path is spelled (inside())."""
+    return inside(p, delivery_roots())
+
+
+# ----------------------------------------------------------------- the drivers (story.py, market.py)
+
+DRIVER_ENV = "VALMERA_DELIVERY_DRIVER"
+
+
+def driver_token(wf):
+    """The token a driver (story.py, market.py) hands the shell it starts: its workflow and its own process id. Only the
+    shell started by that driver, with it, can leave the delivered ledger to the driver."""
+    return f"{wf}:{os.getpid()}"
+
+
+def driver_proven(wf, env=None):
+    """Whether this process was started by the driver of `wf` with its token (the driver is this process's parent)."""
+    tok = (env if env is not None else os.environ).get(DRIVER_ENV) or ""
+    return bool(wf) and tok == f"{wf}:{os.getppid()}"
+
+
+class _ArgError(Exception):
+    pass
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise _ArgError(message)
+
+
+def driver_cli(argv, prog, default_out):
+    """A driver's command line: [--out <folder> | --test-out <folder>] [words ...], either form of each flag
+    (--out x, --out=x), flags anywhere among the words. Any other argument that starts with "-" is refused, never read as
+    the topic (a mistyped flag must not turn a test into a delivery); words after "--" are all topic.
+    Returns dict(out_root, test, topic); raises SystemExit with one JSON line when the line is wrong."""
+    ap = _Parser(prog=prog, allow_abbrev=False, add_help=False)
+    ap.add_argument("--out")
+    ap.add_argument("--test-out")
+    ap.add_argument("words", nargs="*")
+    try:
+        a = ap.parse_intermixed_args(list(argv))
+    except _ArgError as e:
+        raise SystemExit(json.dumps(dict(failed=f"{prog}: {e}; the only flags are --out <folder> and --test-out <folder> "
+                                                "(put topic words that start with a dash after --)")))
+    if a.out is not None and a.test_out is not None:
+        raise SystemExit(json.dumps(dict(failed="--test-out cannot be combined with --out: a test run never delivers")))
+    for k in ("out", "test_out"):
+        if getattr(a, k) is not None and not getattr(a, k).strip():
+            raise SystemExit(json.dumps(dict(failed=f"--{k.replace('_', '-')} needs a folder")))
+    test = os.path.abspath(a.test_out) if a.test_out is not None else None
+    if test and in_delivery_root(test):
+        raise SystemExit(json.dumps(dict(failed=f"--test-out {test} is inside a delivery folder; a test run never writes there")))
+    out_root = test or (os.path.abspath(a.out) if a.out is not None else default_out)
+    return dict(out_root=out_root, test=test, topic=" ".join(a.words).strip() or None)
 
 
 class AlreadyDelivered(RuntimeError):
@@ -380,22 +453,33 @@ def prompt_block(wf, p=None):
     return ("# Already delivered by this workflow (title, angle, beats)\n" + json.dumps(got, ensure_ascii=False) + "\n"
             "Never choose the exact same idea told the same way as any of these. The same story told through the same beats "
             "or the same narration is a repeat even under a new title or a new visual look. A new angle, structure or story "
-            "about the same subject, or a new version of it, is not a repeat and is welcome.\n\n")
+            "about the same subject, or a new version of it, is not a repeat and is welcome: the same events told in a new "
+            "structure (a dated timeline, a list, a countdown, another narrator's frame) with new narration and beats are a "
+            "new way.\n\n")
 
 
 JUDGE_SYSTEM = (
     "You guard a video workflow against delivering the exact same film twice. You are given the ideas this workflow "
     "already delivered and the candidate ideas of a new run. For each candidate, decide one thing: is it the exact same "
     "idea told the same way as one delivered idea?\n"
-    "- The same subject told as the same story (the same event, turn and payoff) through the same angle or the same beats "
-    "is the same, however it is re-titled or re-worded.\n"
-    "- The same narration or script (the same beats and words) with only a new visual look (another style, grade, "
-    "footage, pace, music or captions) is the same: a reskin is not a new way of telling it.\n"
-    "- A different angle, a different structure, or a different story about the same subject (another moment, another "
-    "turn, another person's side) is NOT a repeat and is welcome.\n"
+    "Judge how the story is told, not what happened. The events of a true story belong to every telling of it: the same "
+    "subject and the same events are never by themselves a repeat.\n"
+    "- A repeat (same: true): the candidate tells a delivered idea the same way: the same structure carrying the same "
+    "narration and beats (the same hook, the same beats in the same order, the same turn and payoff), however it is "
+    "re-titled or re-worded.\n"
+    "- A reskin is a repeat: the same narration or script (the same beats and words) with only a new visual look (another "
+    "style, grade, footage, pace, music or captions) is the same idea told the same way; a reskin is not a new way of "
+    "telling it.\n"
+    "- A new way is NOT a repeat, even on exactly the same events: a different structure (a dated timeline, a list, a "
+    "countdown, one moment told in depth, another narrator's or another person's frame), a different angle, or a "
+    "different story about the same subject (another moment, another turn, another person's side). Re-ordering, "
+    "re-framing or re-structuring the same events into a new form is a new way, never \"only repackaging\" them. A new "
+    "structure is a repeat only when its narration and beats are still the delivered ones: the same lines under a new "
+    "heading.\n"
     "- Some delivered ideas carry only a title and a style (\"detail\" says so). Judge them on what the title names: a "
-    "candidate about the same subject that tells the same story the title names is a repeat. Missing detail never "
-    "counts in the candidate's favour; it is not a repeat only when its angle or story is plainly different.\n"
+    "candidate about the same subject that tells the same story the title names, in the plain way the title names it, is a "
+    "repeat. Missing detail never counts in the candidate's favour; it is not a repeat only when its angle, story or "
+    "structure is plainly different from what the title names.\n"
     "Return JSON only: {\"verdicts\": [{\"id\": the candidate's id, \"same\": true|false, \"of\": the delivered title it "
     "repeats or null, \"why\": one short sentence}]}.")
 

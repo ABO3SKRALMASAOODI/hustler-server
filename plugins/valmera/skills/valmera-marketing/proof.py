@@ -43,6 +43,7 @@ for p in (os.path.join(SKILLS, "_shell"), STORIES):
 _held = {k: sys.modules.pop(k) for k in ("film",) if k in sys.modules
          and os.path.dirname(os.path.abspath(getattr(sys.modules[k], "__file__", "") or "")) != STORIES}
 import chain  # noqa: E402
+import delivered as DL  # noqa: E402
 import film as F  # noqa: E402
 import pictures as PX  # noqa: E402
 import reel as R  # noqa: E402
@@ -221,7 +222,11 @@ def ideas(ctx):
     content = (f"# What editors answered to (the reference films, most comments first)\n{json.dumps(references()[:25], ensure_ascii=False)}\n\n"
                f"# The references' pace (medians)\n{json.dumps(pace)}\n\n"
                f"# Styles this film can take\n" + "\n".join(f"- {s['id']}: {s['look']} Hook: {s['hook']}" for s in able) + "\n\n"
-               f"# Films already made (never the same pain with the same clip)\n{json.dumps([r.get('idea') for r in rows[-12:]], ensure_ascii=False)}\n\n"
+               f"# Films this workflow made lately (their titles, clips and windows)\n{json.dumps([dict(idea=r.get('idea'), source=os.path.basename(r.get('source') or '') or None, window=r.get('window')) for r in rows[-12:]], ensure_ascii=False)}\n"
+               "Never the exact same film twice (the owner's rule): never the same idea told the same way. Another version of an "
+               "idea, or the same idea told in a different way (another angle, structure, clip or story), is welcome; the same "
+               "narration or beats with only a new look is a repeat.\n\n"
+               + DL.prompt_block(ctx.workflow)
                + (f"# What the owner asked for\n{line}\nEvery idea must serve this.\n\n" if line else
                   "# No subject given\nChoose the pain or technique yourself: the one these clips can prove best today.\n\n")
                + f"# The clips the owner works from (transcripts in windows with their seconds)\n{json.dumps(menu_src, ensure_ascii=False)}\n\n"

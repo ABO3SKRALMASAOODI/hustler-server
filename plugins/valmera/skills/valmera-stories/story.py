@@ -158,26 +158,15 @@ def sources_md(folder):
 
 
 def main():
-    args = sys.argv[1:]
-    out_root = OUT_ROOT
-    if "--out" in args:
-        k = args.index("--out")
-        out_root = os.path.abspath(args[k + 1])
-        args = args[:k] + args[k + 2:]
     sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shell"))
     import delivered as DL
-    test = None
-    if "--test-out" in args:                         # a test run: never a delivery, never in the ledger, never a delivery folder
-        k = args.index("--test-out")
-        test = os.path.abspath(args[k + 1])
-        args = args[:k] + args[k + 2:]
-        if "--out" in sys.argv[1:]:
-            raise SystemExit(json.dumps(dict(failed="--test-out cannot be combined with --out: a test run never delivers")))
-        if DL.in_delivery_root(test):
-            raise SystemExit(json.dumps(dict(failed=f"--test-out {test} is inside a delivery folder; a test run never writes there")))
-        out_root = test
-    topic = " ".join(args).strip() or None
+    # --out <folder> | --test-out <folder> (either form, anywhere) and the topic's words; any other flag is refused. A test
+    # run is never a delivery, never in the ledger and never in a delivery folder
+    cli = DL.driver_cli(sys.argv[1:], "story.py", OUT_ROOT)
+    out_root, test, topic = cli["out_root"], cli["test"], cli["topic"]
     env = environment()
+    if not test:                                     # the shell started here leaves the delivered ledger to this driver
+        env[DL.DRIVER_ENV] = DL.driver_token("wf3")
     prepare_state()
     os.makedirs(out_root, exist_ok=True)
     run_py = [PY, os.path.join(HERE, "run.py"), "run"]

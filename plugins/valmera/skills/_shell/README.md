@@ -69,15 +69,21 @@ VOICE gate). See `narrate/README.md`.
 `folder`, `source_ids` such as `yt:<id>`, `sha256:<hex>`, `url:<canonical>`, the `idea` as title, subject, angle, style
 and one-line beats, `seeded`). Exact source ids are compared exactly (identity); whether an idea is the same idea told
 the same way is a gpt-6-sol judgement at the ideas stage of wf2, wf3 and wf4 (the shell takes a repeat out and the next
-idea leads; a new angle, version, structure or story is welcome; the same narration or beats with only a new look is a
-repeat, and a delivered idea known only by its title is judged on the subject and story the title names). Only a folder
+idea leads; a new angle, version, structure or story is welcome, and the same events told in a new structure (a dated
+timeline, a list, a countdown, another narrator's frame) are a new way unless the narration and beats are the same; the
+same narration or beats with only a new look is a repeat, and a delivered idea known only by its title is judged on the subject and story the title names). Only a folder
 inside the owner's delivery folders (Podcast Shorts, Story Films, Marketing Films, Long Films, compared with
-`os.path.samefile` and case-folded, as APFS compares names) is a delivery: the deliver stage refuses an exact source
+`os.path.samefile` and case-folded with the `/System/Volumes/Data` firmlink taken off, as APFS compares names,
+whether the root exists yet or not) is a delivery: the deliver stage refuses an exact source
 already delivered and records the folder in the same lock (`delivered_ledger` in `--args`: `shell` by default, `driver`
-when story.py or market.py record where the folder lands, `off` for a podcast's inner shorts and tests, which never
+when story.py or market.py record where the folder lands, honoured only with the driver's token in
+`VALMERA_DELIVERY_DRIVER` (its workflow and pid, the shell's parent) and a folder outside the delivery folders, else the
+shell records it, `off` for a podcast's inner shorts and tests, which never
 write into a delivery folder); any other `--out` is a test and is never recorded. A remake (`--args '{"remake": ...}'`)
 is test-only, or is judged at the ideas stage like any idea; one that skipped the judgement is refused at delivery. `podcast.py` refuses a delivered video id before fetching and a delivered sha256 after it, and
-`--test-out <dir>` is its only way to reuse a source. `seed_delivered.py` seeded the ledger from past deliveries once.
+`--test-out <dir>` is its only way to reuse a source. `seed_delivered.py` seeded the ledger from past deliveries once, and only from delivery folders (a film
+under `.valmera`, a lane or an outbox is a test); `seed_delivered.py --prune` takes such rows out under the lock, with a
+backup.
 
 ## Workspace rules
 

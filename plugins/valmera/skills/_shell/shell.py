@@ -206,13 +206,13 @@ def deliver(ctx, state, out_root, results):
     if os.path.exists(final_dir):
         rec = jload(os.path.join(final_dir, "film.json"), {}) or {}
         if rec.get("run_id") == ctx.run_id:      # killed after the rename: it was delivered
-            if ledger_mode(ctx) == "shell" and DL.records(final_dir):     # and recorded (a row of this run is never added twice)
+            if ledger_mode(ctx, final_dir) == "shell" and DL.records(final_dir):     # and recorded (a row of this run is never added twice)
                 DL.append(delivered_row(ctx, script, results, final_dir), refuse=False)
             return dict(folder=final_dir, bytes=du(final_dir), already=True)
         raise RuntimeError(f"{final_dir} exists: a folder is delivered once, never added to")
     # the shared delivered ledger (delivered.py): a source delivered before is refused before anything is copied
     # Only a folder inside the owner's delivery folders is a delivery; anywhere else the run is a test, never recorded.
-    mode = ledger_mode(ctx)
+    mode = ledger_mode(ctx, final_dir)
     if mode == "off" and DL.in_delivery_root(out_root):
         raise RuntimeError(f"{out_root} is a delivery folder: a run outside the delivered ledger (a test, an inner short) never writes there")
     row = delivered_row(ctx, script, results, final_dir) if mode == "shell" and DL.records(final_dir) else None
@@ -250,23 +250,30 @@ def deliver(ctx, state, out_root, results):
     jsave(os.path.join(part, "film.json"), rec)
     if row:                                      # the rename and the ledger row together, under the ledger's lock
         DL.deliver_once(row, commit=lambda: os.rename(part, final_dir))
-    else:                                        # "driver": the skill's driver records it where the folder lands; else a test
+    else:                                        # a proven "driver": the skill's driver records it where the folder lands; else a test
         os.rename(part, final_dir)
     ledger_add(ctx.state_root, ctx.workflow, dict(run_id=ctx.run_id, style=script["style"]["id"], idea=script.get("title"),
                                                   source=ctx.source, window=script.get("window"), delivered=final_dir, at=now()))
     return dict(folder=final_dir, bytes=du(final_dir), spend_usd=rec["spend_usd"])
 
 
-def ledger_mode(ctx):
+def ledger_mode(ctx, folder=None):
     """Who records this delivery in the shared delivered ledger: "shell" (here, and only when --out is one of the owner's
     delivery folders: anywhere else the run is a test), "driver" (story.py and market.py, once the folder reaches its
-    final root) or "off" (a podcast's inner short: podcast.py records the podcast's one folder)."""
-    return (ctx.args or {}).get("delivered_ledger") or ("off" if "moment" in (ctx.args or {}) else "shell")
+    final root) or "off" (a podcast's inner short: podcast.py records the podcast's one folder).
+    "driver" must be proven: the driver that started this process hands it its token (delivered.DRIVER_ENV). Unproven, or
+    when the folder lands in a delivery folder itself (a driver stages outside them), the shell records it as its own."""
+    mode = (ctx.args or {}).get("delivered_ledger") or ("off" if "moment" in (ctx.args or {}) else "shell")
+    if mode == "driver" and not DL.driver_proven(ctx.workflow):
+        mode = "shell"
+    if mode == "driver" and folder and DL.in_delivery_root(folder):
+        mode = "shell"
+    return mode
 
 
 def may_deliver(ctx, out_root):
     """Whether this run can end as a recorded delivery: a driver's run, or the shell's own into a delivery folder."""
-    mode = ledger_mode(ctx)
+    mode = ledger_mode(ctx, out_root)
     return mode == "driver" or (mode == "shell" and DL.in_delivery_root(out_root or ""))
 
 

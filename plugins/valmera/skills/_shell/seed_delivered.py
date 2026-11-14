@@ -4,10 +4,18 @@
     $PY seed_delivered.py            seeds when the ledger holds no seeded row yet; prints the counts and the folders
                                      whose source could not be determined
     $PY seed_delivered.py --dry      prints what it would seed
+    $PY seed_delivered.py --prune [--dry]
+                                     takes out the seeded rows whose folder is not a delivery folder (a test film under
+                                     .valmera: a lane, a codex test, a workflow's outbox), under the lock, after a backup
+                                     (delivered.jsonl.bak-<MMDD>, never overwritten)
     $PY seed_delivered.py --enrich [--dry]
                                      gives every film row that holds only a title and style (its folder moved) the idea,
                                      angle and beats of a copy of the same film: a film.json of the same run, or of a
                                      remake of it (script.remake_of), found under ENRICH_ROOTS; rewritten under the lock
+
+Only a delivery is seeded: a folder inside the owner's delivery folders, or one of the older delivery folders below
+(OLDER, exports). A film that stayed under .valmera (a lane, a codex test, a workflow's outbox) never reached a delivery
+folder: it is a test, never a delivery, and is never seeded.
 
 Sources, by identity only (a labelled field, never a reading of meaning):
   podcast folders   manifest.json `source` / `source_url`, publishing-manifest.json `source_url`, shorts.json
@@ -33,6 +41,17 @@ EXPORTS = f"{V}/exports"
 FILM_ROOTS = {"wf3": [f"{V}/Story Films"], "wf2": [f"{V}/Marketing Films"], "wf4": [f"{V}/Long Films"]}
 SHELL_LEDGERS = [f"{V}/.valmera/workflow/ledger.json", f"{V}/.valmera/workflow/stories/ledger.json",
                  f"{V}/.valmera/workflow/marketing/ledger.json", f"{V}/.valmera/workflow/longform/ledger.json"]
+
+
+VALMERA_STATE = f"{V}/.valmera"
+
+
+def seedable(folder):
+    """Whether a past folder is a delivery the ledger may hold: inside a delivery folder (delivered.in_delivery_root) or one
+    of the older delivery folders, and never under .valmera (tests and work). Compared by path (identity), never by name."""
+    if not folder or DL.inside(folder, [VALMERA_STATE]):
+        return False
+    return DL.in_delivery_root(folder) or DL.inside(folder, OLDER + [EXPORTS])
 
 
 def jload(p):
@@ -140,8 +159,10 @@ def shell_ledger_rows(have_run_ids):
                 rid = it.get("run_id")
                 if not it.get("idea") or (rid and rid in have_run_ids):
                     continue
-                have_run_ids.add(rid)
                 folder = it.get("delivered")
+                if not seedable(folder):            # a test film (a lane, an outbox): it never reached a delivery folder
+                    continue
+                have_run_ids.add(rid)
                 if folder and os.path.isfile(os.path.join(folder, "film.json")):
                     r = DL.row_from_film(folder, wf, seeded=True)
                 else:
@@ -227,8 +248,36 @@ def enrich(dry=False, roots=None, p=None):
     return done, left
 
 
+def prune(dry=False, p=None, backup=None):
+    """Take out every seeded row whose folder is not a delivery (seedable()), under the ledger's lock, after a backup.
+    Returns the rows taken out."""
+    gone = []
+
+    def fn(rows):
+        keep = []
+        for r in rows:
+            if r.get("seeded") and not seedable(r.get("folder")):
+                gone.append(r)
+            else:
+                keep.append(r)
+        return keep
+    if dry:
+        fn(DL.rows(None, p))
+        return gone
+    DL.rewrite(fn, p, backup=backup)
+    return gone
+
+
 def main():
     dry = "--dry" in sys.argv
+    if "--prune" in sys.argv:
+        import datetime as dt
+        backup = None if dry else f"{DL.path()}.bak-{dt.datetime.now():%m%d}"
+        gone = prune(dry, backup=backup)
+        print(json.dumps(dict(path=DL.path(), dry=dry, backup=backup, removed=len(gone),
+                              rows=[dict(wf=r.get("wf"), run_id=r.get("run_id"), folder=r.get("folder"),
+                                         title=(r.get("idea") or {}).get("title")) for r in gone]), ensure_ascii=False, indent=1))
+        return 0
     if "--enrich" in sys.argv:
         done, left = enrich(dry)
         print(json.dumps(dict(path=DL.path(), dry=dry, enriched=done, still_title_only=left), ensure_ascii=False, indent=1))
@@ -242,7 +291,7 @@ def main():
     o_rows, o_unknown = podcast_rows(older, "older shorts folder")
     f_rows = film_rows()
     s_rows = shell_ledger_rows({r.get("run_id") for r in f_rows if r.get("run_id")})
-    rows = p_rows + o_rows + f_rows + s_rows
+    rows = [r for r in p_rows + o_rows + f_rows + s_rows if seedable(r.get("folder"))]
     if not dry:
         for r in rows:
             DL.append(r, refuse=False)          # past deliveries are recorded as they were, repeats included

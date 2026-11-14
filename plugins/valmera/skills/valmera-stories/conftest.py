@@ -5,3 +5,4 @@ import pytest
 @pytest.fixture(autouse=True)
 def _own_delivered_ledger(tmp_path, monkeypatch):
     monkeypatch.setenv("VALMERA_DELIVERED_LEDGER", str(tmp_path / "delivered.jsonl"))
+    monkeypatch.delenv("VALMERA_DELIVERY_DRIVER", raising=False)      # no test runs as a driver's shell unless it says so
