@@ -1,6 +1,5 @@
-"""A preview's row is written before its checks: the Studio plays the row the
-moment it exists, and the checks can take as long as the encode. The checks
-still run, still reach the editor, and still drive First cut's repairs."""
+"""Preview publication includes durable picture and audio checks in its first write.
+The checks still reach the editor and drive First cut's repairs."""
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -85,11 +84,10 @@ def job(monkeypatch, tmp_path):
     return state
 
 
-def test_the_row_is_written_before_the_checks_run(job):
+def test_the_row_is_written_with_completed_checks(job):
     result = job.run(quality='approval')
-    assert job.order == [('row', 0), ('picture_qc', 1), ('audio_qc', 1)]
-    # the checks' result updates the row that is already on screen
-    assert job.patches[0][0] == 1
+    assert job.order == [('picture_qc', 0), ('audio_qc', 0), ('row', 0)]
+    assert job.patches == []
     meta = job.assets[0]['meta']
     assert meta['picture_qc']['findings'] == [CORNER]
     assert meta['audio_qc'] == {'lufs': -14}
@@ -97,21 +95,14 @@ def test_the_row_is_written_before_the_checks_run(job):
     assert result['render_asset_id'] == 1
 
 
-def test_the_rows_first_write_says_the_checks_have_not_reported(job):
-    seen = {}
-    real = job.run
-
-    def peek(*a, **k):
-        seen.update(job.assets[0]['meta'])
-        return {'findings': []}
-
-    renderer.picture_qc, keep = peek, renderer.picture_qc
-    try:
-        real()
-    finally:
-        renderer.picture_qc = keep
-    assert seen and 'picture_qc' not in seen and 'audio_qc' not in seen
-    assert seen['variant'] == 'preview' and seen['render_job_id'] == 7
+def test_publication_needs_no_later_metadata_patch(job):
+    job.patch_fails = True
+    job.run()
+    meta = job.assets[0]['meta']
+    assert meta['picture_qc']['findings'] == [CORNER]
+    assert meta['audio_qc'] == {'lufs': -14}
+    assert meta['variant'] == 'preview' and meta['render_job_id'] == 7
+    assert job.patches == []
 
 
 def test_the_timings_name_the_checks_and_when_the_picture_appeared(job):
@@ -155,16 +146,14 @@ def test_a_final_abandoned_during_its_checks_still_leaves_nothing(job):
     assert job.assets == [] and job.deleted
 
 
-def test_a_preview_abandoned_during_its_checks_keeps_its_picture(job):
-    """It is a good render of an immutable version, maybe on screen already."""
+def test_a_preview_abandoned_during_its_checks_is_not_published(job):
     job.lost_at = 98
     with pytest.raises(renderer.dbx.JobLeaseLost):
         job.run()
-    assert len(job.assets) == 1 and job.deleted == []
-    assert job.assets[0]['meta']['picture_qc']['findings'] == [CORNER]
+    assert job.assets == [] and job.deleted
 
 
-def test_failing_to_store_the_checks_does_not_fail_a_visible_preview(job):
+def test_legacy_metadata_patch_failure_cannot_drop_preview_checks(job):
     job.patch_fails = True
     assert job.run()['picture_qc']['findings'] == [CORNER]
     assert len(job.assets) == 1
