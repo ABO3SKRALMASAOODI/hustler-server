@@ -88,17 +88,23 @@ def test_four_minute_typed_film_reaches_director_without_lifting_first_film_cap(
     assert flags.MAX_SOURCE_S == 180  # first-film admission remains unchanged
 
 
-def test_long_whole_request_uses_existing_segmented_library_not_clip_selection(monkeypatch):
-    ctx = NS(duration=2700, has_main_video=True, ask_ledger={"asks": []})
+def test_long_whole_request_reaches_director_not_thin_patch_pass(monkeypatch, tmp_path):
+    ctx = NS(duration=2700, has_main_video=True, ask_ledger={"asks": []}, project_id=7,
+        workdir=str(tmp_path), index={"video": {"duration": 2700}},
+        proxy_path=lambda: str(tmp_path / "source.mp4"), agent_model="gpt-6.1-sol")
     monkeypatch.setattr(flags, "read", lambda db: dict(copy.deepcopy(flags.DEFAULTS), mode="on"))
     monkeypatch.setattr(typed, "_selection", lambda ctx: (None, {"usd": .01}))
     import quality_verifier
     monkeypatch.setattr(quality_verifier, "request_text_for", lambda ctx: "the entire match")
-    monkeypatch.setattr(patch, "throughout", lambda ctx, ledger, request, budget:
-                        {"version": 3, "applied": {}, "request": request})
-    got = typed.run(ctx, None, {}, 9, {"director": True})
-    assert got["path"] == "segmented_whole_film"
-    assert got["request"] == "the entire match"
+    monkeypatch.setattr(patch, "throughout", lambda *a: pytest.fail("whole-film craft cannot fall to a patch"))
+    def make(view, *a):
+        assert view.duration == 2700
+        view.director_version = 3
+        return [], ["whole film"], {}
+    monkeypatch.setattr(film, "_make", make)
+    got = typed.run(ctx, NS(run=lambda *a: {"storage_key": "original"}), {}, 9, {"director": True})
+    assert got["path"] == "whole_film_director"
+    assert got["source_window"] == [0, 2700]
 
 
 def test_job_lease_loss_never_becomes_a_fallback(monkeypatch):
