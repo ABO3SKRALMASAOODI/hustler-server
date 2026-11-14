@@ -310,7 +310,7 @@ def img(b64):
     return dict(type="image", source=dict(type="base64", media_type="image/jpeg", data=b64))
 
 
-CHECK_V = 3           # the export check reads the spoken words too (EDL keep ranges on the source's captions); the end card is the brand's
+CHECK_V = 4           # the export check reads the spoken words too (EDL keep ranges on the source's captions); the end card is the brand's
 
 
 def spoken(rec, ex):
@@ -352,7 +352,9 @@ def export_check(ctx, rec, ask_text, must_see):
     n = min(int(ex["dur"]), 40)
     et = [round(0.5 + i * (ex["dur"] - 1) / max(n - 1, 1), 2) for i in range(n)]
     ut = [round(0.5 + i * (up["dur"] - 1) / 9, 2) for i in range(10)]
-    content = [dict(type="text", text=f"The sentence typed into the product: {ask_text!r}\nWhat must be visible: {json.dumps(must_see)}\n"
+    content = [dict(type="text", text=f"The sentence typed into the product: {ask_text!r}\nThe elements are the parts of this sentence, "
+                                      "and only those: what the film's planner hoped to see as well (a note, never a reason to fail): "
+                                      f"{json.dumps(must_see)}\n"
                                       f"First, the clip as uploaded ({up['w']}x{up['h']}, {up['dur']} s), ten frames:")]
     for t, b in zip(ut, frames(up["file"], ut)):
         if b:
@@ -374,12 +376,12 @@ def export_check(ctx, rec, ask_text, must_see):
               "the sentence, not by one edge word. Every Valmera export ends on Valmera's own end card and carries its small watermark: "
               "that is the brand, never a defect, and never part of the after you choose. You also choose the seconds the film will show.")
     content.append(dict(type="text", text=(
-        "Return JSON only: {\"elements\": [{\"asked\": a part of the sentence, \"visible\": true|false, \"seconds\": [export seconds where "
+        "Return JSON only: {\"elements\": [{\"asked\": a part of the typed sentence, \"visible\": true|false, \"seconds\": [export seconds where "
         "it shows], \"how\": what is seen}], \"all_visible\": true|false, \"after\": [start, end] export seconds, 5 to 9 s, before the end card, where the "
         "asked change reads best (a cut, a picture, captions, a title landing), \"tease_s\": the export second of its most striking "
         "frame, \"before\": [start, end] upload seconds, 2.5 to 4 s, where the raw clip looks most like raw footage, \"looks\": one "
         "plain line on how the export looks to an editor, \"defects\": [anything an editor would call broken: a cut face, wrong "
-        "framing, unreadable or misspelled captions, a black frame]}")))
+        "framing, unreadable or misspelled captions, a black frame; never the end card, never a planner's note]}")))
     got, use = ask(system, content, what="export check", effort="low", model=CHECK_MODEL, max_tokens=6000)
     got = got if isinstance(got, dict) else {}
     vis = [e for e in got.get("elements") or [] if isinstance(e, dict)]
