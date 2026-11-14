@@ -95,6 +95,32 @@ def test_talking_without_a_file_is_false():
     assert R.talking(dict(path="/nonexistent.mp4")) == (False, 0.0)
 
 
+def test_caption_seat_stays_dark_over_white_archive_and_flash(tmp_path):
+    import numpy as np
+    import pytest
+    pytest.importorskip("moderngl")
+    from scene import compile as compile_scene
+    from scene.run import Engine
+
+    for transition in (False, True):
+        plan = F.Plan({}, {})
+        plan.page([0, 30], "#FFFFFF", "#FFFFFF", grain=0)
+        if transition:
+            plan.flash([0, 30], mode="fill", c="#FFFFFF", a=0.8, z=8)
+        R.caption_pool(plan, 30, 0.615)
+        l1 = plan.done("caption-contrast", 30, 1,
+                       dict(grain=0, vignette=0, over_type=False))
+        engine = Engine(compile_scene.compile(l1, str(tmp_path), segment=False))
+        try:
+            frame = engine.stills([15])[15]
+        finally:
+            engine.close()
+        h, w = frame.shape[:2]
+        band = frame[int((0.615 - 0.045) * h):int((0.615 + 0.012) * h),
+                     int(0.2 * w):int(0.8 * w), :3]
+        assert float(np.median(band)) / 255 < 0.6
+
+
 def test_generations_are_whole_sentences():
     segs = [dict(text="One two three four five six.", beat="hook"), dict(text="Seven eight nine ten,", beat="setup"),
             dict(text="eleven twelve.", beat="setup"), dict(text="A turn comes here.", beat="turn"),

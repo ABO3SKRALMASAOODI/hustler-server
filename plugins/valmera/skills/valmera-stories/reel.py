@@ -415,6 +415,12 @@ def section_finish(style, seg):
 
 # ----------------------------------------------------------------- the film
 
+def caption_pool(plan, end_frame, y, amount=0.70):
+    """Keep caption contrast over bright footage and section flashes."""
+    plan.flash([0, end_frame], mode="pool", a=amount,
+               rect=[0.06, y - 0.105, 0.94, y + 0.075], z=9)
+
+
 def build(script, sup, style_id, direction=None):
     """(l1, beats) for one story. script: the writer's (segments with say, pictures, beat, era, collage, show, emphasis);
     sup: the pack (wf3.supply: words, narration, pictures, footage, voices, talking); direction: the style's knobs."""
@@ -693,7 +699,9 @@ def build(script, sup, style_id, direction=None):
     shown = F.display_words(P, clock, sc, "dsp", cap_y + 0.012, f_voice_end, ink=pal["ink"], accent=pal["accent"], gap_s=1.8, hold_s=1.05,
                             px_max=float(st["dsp"]["px"]) * 1.25) if d.get("display", True) else []
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=f_voice_end + 8, hold=[(a - 1, b) for a, b, _ in shown], z=5)
-    P.flash([0, f_end], mode="pool", a=float(d.get("pool", 0.42)), rect=[0.06, cap_y - 0.105, 0.94, cap_y + 0.075], z=-1)
+    # Bright archive drawings and white transition flashes need the caption
+    # seat protected after the flashes, just before the screen-plane type.
+    caption_pool(P, f_end, cap_y, float(d.get("pool", 0.70)))
     pay = next((i for i, s in enumerate(script["segments"]) if s.get("beat") == "payoff"), None)
     turn_f = min((c for c in cut_pts if c >= seg_f[pay] - 4), default=seg_f[pay]) if pay is not None else None
     film = dict(grain=float(st["grain"]), vignette=float(st["vignette"]), over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0))
