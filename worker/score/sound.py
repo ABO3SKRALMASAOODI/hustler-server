@@ -551,7 +551,16 @@ def l1_events(l1, kshots=()):
         if k == "card":
             area = float(it.get("w") or 0) * float(it.get("h") or 0) if not isinstance(it.get("w"), list) else 0.2
             photo = it.get("pic") not in (None, "plate")
-            ev.append({"f": f, "kind": "card" if (photo or area >= 0.08) else "display", "id": iid, "photo": photo, "area": area})
+            own = str(it.get("pic")) == "main" or str(it.get("pic")).startswith("own:")
+            prior_take = any(s["f"][1] == f and key_of(s)[0] == "take" and
+                             not (isinstance(s.get("blur"), (int, float)) and s["blur"] >= 20) for s in shots)
+            if own and it.get("src") and prior_take and 0 < area < 0.85:
+                # A full take replaced by its complete source window is a
+                # visible designed reframe, not a small decorative graphic.
+                ev.append({"f": f, "kind": "cut", "id": iid, "designed": True,
+                           "change": round(1-area, 4), "source_window": True})
+            else:
+                ev.append({"f": f, "kind": "card" if (photo or area >= 0.08) else "display", "id": iid, "photo": photo, "area": area})
         elif k == "word" and it.get("role") == "big":
             if ".counter" in iid:
                 g = iid.split(".counter")[0] + ".counter"

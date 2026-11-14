@@ -503,3 +503,18 @@ def test_branded_tail_counts_toward_export_density_without_extending_programme()
     assert plain == 9 and branded == 11
     assert branded <= al["sounds"]
     assert branded / 30.5 * 10 >= SD.RATE_10S["P"]
+
+
+def test_full_take_to_source_window_counts_as_a_designed_reframe():
+    l1=dict(fps=30,dur_f=120,assets={'main':{'kind':'video'}},items=[
+        dict(id='take',k='shot',pic='main',f=[0,30],src=[0,1],crop=[.3,0,.6,1]),
+        dict(id='bed',k='shot',pic='main',f=[30,60],src=[1,2],crop=[.3,0,.6,1],blur=26),
+        dict(id='window',k='card',pic='main',f=[30,60],src=[1,2],w=.92,h=.17),
+        dict(id='archive',k='card',pic='broll',f=[90,120],src=[0,1],w=.92,h=.17)])
+    events=SD.l1_events(l1)
+    own=next(e for e in events if e['f']==30)
+    assert own['kind']=='cut' and own['designed'] and own['source_window']
+    assert next(e for e in events if e['f']==90)['kind']=='card'
+    # A card that continues unchanged across a timing split is not another reframe.
+    l1['items'].append(dict(id='continued',k='card',pic='main',f=[60,90],src=[2,3],w=.92,h=.17))
+    assert next(e for e in SD.l1_events(l1) if e['f']==60)['kind']=='card'
