@@ -672,7 +672,7 @@ def _solve_hue(ctx, it):
 
 def set_background(ctx, kind, start, end, colour=None, colour2=None,
                    source=None, sources=None, hold_subject=None,
-                   hold_t=None, style=None):
+                   hold_t=None, style=None, region=None, source_crop=None):
     """WRITE: the background behind the subject over [start, end)."""
     from tools_ext import _write
     gate = _gate(ctx, "background")
@@ -696,6 +696,10 @@ def set_background(ctx, kind, start, end, colour=None, colour2=None,
             it["colour2"] = colour2
         if source is not None:
             it["source"] = _source(source)
+        if region is not None:
+            it["region"] = region
+        if source_crop is not None:
+            it["source_crop"] = source_crop
         if sources is not None:
             it["sources"] = [_source(s) for s in sources]
         if hold_subject:
@@ -710,6 +714,15 @@ def set_background(ctx, kind, start, end, colour=None, colour2=None,
                              + ", ".join(sorted(style)))
     except ValueError as e:
         return f"REJECTED: {e}"
+    if source_crop is not None and (it.get("source") or {}).get("kind") == "source":
+        try:
+            import face_guard
+            hit = face_guard.source_hit(ctx, tuple(float(v) for v in source_crop),
+                                       [float(it["source"]["src_t"])])
+            if hit:
+                return "REJECTED: the backdrop sample contains a measured face. Choose clean scenery without people."
+        except (TypeError, ValueError, KeyError):
+            return "REJECTED: source_crop needs four source-frame fractions and a source second."
     it["device"] = (BACKGROUND_CARDS["hold"] if it.get("hold_subject")
                     else BACKGROUND_CARDS["strobe"] if kind == "strobe"
                     else BACKGROUND_CARDS["blur"]
@@ -798,7 +811,9 @@ TOOL_SPECS = {
         "next or previous shot) or strobe (sources swapped every "
         "style.hold_f frames). hold_subject freezes the subject cut-out at "
         "hold_t while the background swaps. Flash-safety applies to "
-        "strobes. No sound, no zoom.",
+        "strobes. region bounds the replacement (e.g. excludes a floor). "
+        "source_crop samples a clean rectangle from source=<source second> "
+        "as a frozen backdrop texture; choose an area without people. No sound, no zoom.",
         {"kind": {"type": "string", "enum": ["solid", "gradient", "blur",
                                               "radial_blur", "source",
                                               "strobe"]},
@@ -807,6 +822,9 @@ TOOL_SPECS = {
          "source": {"description": "media key | source second | next | "
                     "previous | FxSource"},
          "sources": {"type": "array", "items": {}},
+         "region": _REGION,
+         "source_crop": {"type": "array", "items": {"type": "number"},
+                         "description": "[x0,y0,x1,y1] SOURCE-frame fractions; frozen sample, stretched across background"},
          "hold_subject": {"type": "boolean"},
          "hold_t": {"type": "number"},
          "style": {"type": "object", "description": "angle, radius, "
@@ -832,6 +850,7 @@ COMPACT = {
         "changes only. read_skill subject-fx."),
     "set_background": (
         "Background behind the subject: solid|gradient|blur|radial_blur|"
-        "source|strobe over [start, end); hold_subject freezes the subject."),
+        "source|strobe over [start, end); region preserves excluded areas; "
+        "source_crop + source second samples a clean backdrop texture."),
     "remove_subject_effect": "Remove subject effects/backgrounds by ids.",
 }

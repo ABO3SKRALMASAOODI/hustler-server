@@ -227,10 +227,20 @@ class BackgroundFx(FxItemBase):
     hold_f: int = Field(default=2, ge=1, le=12)
     hold_subject: bool = False
     hold_t: Optional[float] = Field(default=None, ge=0.0, allow_inf_nan=False)
+    region: Optional[FxRegion] = None
+    source_crop: Optional[List[float]] = Field(default=None, min_length=4, max_length=4)
 
     @model_validator(mode="after")
     def _kind_fields(self):
         k = self.kind
+        if self.source_crop is not None:
+            from . import _check_box
+            _check_box(self.source_crop)
+            if (self.source_crop[2] - self.source_crop[0] < .02 or
+                    self.source_crop[3] - self.source_crop[1] < .02):
+                raise ValueError("a background sample must span at least 2% on each axis")
+            if k != "source" or self.source is None or self.source.kind != "source":
+                raise ValueError("source_crop samples a frozen main-video frame: use kind source and a source second")
         if k in ("solid", "gradient") and self.colour is None:
             raise ValueError(f"a {k} background names its colour")
         if k == "gradient" and self.colour2 is None:
@@ -258,6 +268,7 @@ class BackgroundFx(FxItemBase):
                              "(this program is a canvas)")
         for src in [self.source] + list(self.sources or []):
             source_check(src, ctx, f"fx {self.id}")
+        region_check(self.region, ctx, f"fx {self.id}")
         if self.hold_t is not None and (
                 ctx.render_fragment
                 or self.hold_t >= float(ctx.program_s)):

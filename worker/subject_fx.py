@@ -458,6 +458,18 @@ def _source_plan(plan, item, src, n, tag):
     reads, or (None, reason) when this render cannot draw it."""
     kind = src.get("kind")
     f0, f1 = _span_frames(plan, item)
+    if item.get("type") == "background" and item.get("source_crop") is not None:
+        # A backdrop sample uses untouched SOURCE pixels, never the already
+        # graded/reframed program (which could include people or this effect).
+        got = _main_plan(plan, item, src.get("src_t"), n, tag, freeze=True)
+        if got is None:
+            return None, "the sampled backdrop needs the main video"
+        x0, y0, x1, y1 = (float(v) for v in item["source_crop"])
+        got["fit"] = (f"crop=w='max(2,floor(iw*{x1-x0:.8f}/2)*2)':"
+                      f"h='max(2,floor(ih*{y1-y0:.8f}/2)*2)':"
+                      f"x=iw*{x0:.8f}:y=ih*{y0:.8f},"
+                      f"scale={int(plan.W)}:{int(plan.H)}:flags=bicubic")
+        return got, None
     if kind == "colour":
         return {"kind": "colour", "colour": src.get("colour")}, None
     if kind == "program":

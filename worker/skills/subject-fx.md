@@ -95,6 +95,13 @@ camera move with it, and none is added to "support" it. Flashing is held to
   a white wall needs about -7 to reach a black curtain, and -3 or -4 leaves it grey. If the preview
   still shows a pale patch, move the region's edge to take it in, not a second rectangle: stacked
   rectangles leave hard edges, so keep it to the one effect.
+- **Continue an existing backdrop across the room**: exposure changes brightness but leaves wall,
+  door and ceiling shapes. For an actual replacement, `set_background(kind="source", source=<source
+  second>, source_crop=[x0,y0,x1,y1], region={...}, start=..., end=...)` samples a clean patch of the
+  existing curtain/wallpaper into a frozen backdrop plate. Choose SOURCE coordinates with no people;
+  the patch stretches across the output. The region bounds what changes, so stop it at the floor
+  boundary (animate its keys if the camera moves). The person matte preserves the moving people.
+  Inspect the rendered texture and edges; a stretched sample is not a reconstruction of missing scenery.
 - **Clean defocus**: `set_background(kind="blur", start=…, end=…,
   style={"radius": 0.025})` — the subject never bleeds into the blur.
 

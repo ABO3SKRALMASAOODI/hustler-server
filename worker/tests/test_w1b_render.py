@@ -186,6 +186,28 @@ def _outside_window_identical(base, res, f0=50, f1=70):
     assert diff and min(diff) >= f0 and max(diff) < f1, diff[:5]
 
 
+def test_sampled_backdrop_preserves_people_and_excluded_floor(work):
+    frames = [55,60]
+    effect = _bg('sample', kind='source', colour=None,
+                 source={'kind':'source', 'src_t':1.0},
+                 source_crop=[0.02,0.05,0.15,0.35],
+                 region={'shape':'rect','box':[0,0,1,.7]})
+    cases = [_case(work,'sample_base',_edl(),dump_frames=frames),
+             _case(work,'sample_plate',_edl([effect]),dump_frames=frames)]
+    got = w1b_probe.run(cases,os.path.join(work['dir'],'sampled'))
+    base, res = got['sample_base'], got['sample_plate']
+    _ok(res)
+    _outside_window_identical(base,res)
+    masks = program_masks(work,frames)
+    for k in frames:
+        a,_,_ = _yuv(base,k)
+        b,_,_ = _yuv(res,k)
+        keep = _shrink(masks[k]>=250,3)
+        keep[int(H*.73):] = True
+        assert np.abs(a-b)[keep].max()==0
+        assert (np.abs(a-b)>6).sum()>200
+
+
 @pytest.mark.parametrize("name", ["fill", "poster", "silhouette", "glow",
                                   "outline", "negs", "negb", "expo", "iso",
                                   "echo", "solid", "blur", "radial", "hold",

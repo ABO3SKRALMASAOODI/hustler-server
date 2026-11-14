@@ -99,6 +99,25 @@ def _fx(ctx):
     return ctx.edl["fx"]
 
 
+def test_background_sample_and_floor_boundary_survive_the_write():
+    ctx = Ctx()
+    region = {"shape": "rect", "box": [0, 0, 1, .7]}
+    result = st.set_background(ctx, 'source', 0, 8, source=1,
+                               source_crop=[.1,.1,.3,.5], region=region)
+    assert result.startswith('EDL'), result
+    item = _fx(ctx)[0]
+    assert item['region']['box'] == region['box']
+    assert item['source_crop'] == [.1,.1,.3,.5]
+    assert item['source']['src_t'] == 1
+
+
+def test_background_sample_requires_a_real_source_frame():
+    ctx = Ctx()
+    result = st.set_background(ctx, 'solid', 0, 8, colour='black',
+                               source_crop=[.1,.1,.3,.5])
+    assert result.startswith('REJECTED') and not ctx.writes
+
+
 # ── the department ──────────────────────────────────────────────────────
 
 def test_the_verbs_are_installed_in_the_compositing_department():
