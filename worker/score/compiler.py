@@ -696,6 +696,12 @@ def src_anchor(ctx, a):
         return k[0] + float(m["ks"] or 0) + off
     if m["at"] is not None:
         return float(m["at"]) + off
+    if m["d"] is not None:
+        beats = (ctx.index.get("perception") or {}).get("beats") or []
+        d = int(m["d"])
+        if not 0 <= d < len(beats):
+            raise ValueError(f"no music beat d{d}")
+        return float(beats[d]) + off
     raise ValueError(f"anchor {a!r} has no source time")
 
 

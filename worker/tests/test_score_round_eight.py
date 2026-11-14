@@ -8,6 +8,25 @@ from score import compiler, sound
 from tests.test_score_round_seven import shelf, _offer
 
 
+def test_music_grid_can_anchor_source_beats_as_well_as_effects():
+    from tests.test_score_compiler import wordless_index
+    idx = wordless_index()
+    idx['perception'] = {'beats': [0.0, 1.5, 3.0, 4.5]}
+    text = '\n'.join(json.dumps(line) for line in [
+        {'k': 'film', 'fps': 30, 'w': 1080, 'h': 1920},
+        {'k': 'b', 'id': 'grid', 'at': 'd1..d3', 'pic': 'main'},
+    ])
+    result = compiler.compile_score(text, index=idx, govern=False)
+    assert not result.meter['rejects']
+    assert result.l1['spine'][0]['src'] == [1.5, 4.5]
+    from types import SimpleNamespace
+    import pytest
+    ctx = SimpleNamespace(index=idx, fps=30)
+    assert compiler.src_anchor(ctx, 'd1+3f') == pytest.approx(1.6)
+    with pytest.raises(ValueError, match='no music beat d9'):
+        compiler.src_anchor(ctx, 'd9')
+
+
 def test_unverified_or_changed_clips_never_enter_shelf(tmp_path, shelf):
     offer = _offer(tmp_path, 'Oscar Piastri', 1)
     offer.pop('verification')
