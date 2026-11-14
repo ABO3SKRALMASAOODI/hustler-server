@@ -41,6 +41,23 @@ def test_background_refinement_changes_sidecar_key_only_for_composites():
     assert len(new['support_model']) == 64
 
 
+def test_body_fill_cannot_promote_an_outboard_background_fragment():
+    from types import SimpleNamespace
+    mask = np.zeros((200, 180), np.uint8)
+    mask[20:180, 30:105] = 255
+    mask[55:90, 135:170] = 255  # SAM's spurious detached wall fragment
+    alpha = np.zeros(mask.shape, np.float32)
+    alpha[20:180, 30:105] = 1
+    alpha[80:110, 40:95] = 0  # actual dark clothing still needs restoration
+    ref = object.__new__(matte_refine.Refiner)
+    ref.previous = ref.mask = ref.core = None
+    ref.n = ref.accepted = ref.rejected = 0
+    ref.seg = SimpleNamespace(segment=lambda *a, **kw: (mask, .95))
+    out = ref.step(np.zeros((*mask.shape, 3), np.uint8), alpha, cv2)
+    assert out[95, 70] == 1
+    assert out[70, 150] == 0
+
+
 def test_support_moves_with_the_subject_instead_of_clipping_the_new_position():
     """A carried mask follows a moving limb; the previous silhouette cannot cut it."""
     from types import SimpleNamespace
