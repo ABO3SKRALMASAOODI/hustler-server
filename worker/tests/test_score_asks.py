@@ -643,3 +643,33 @@ def test_a_check_cut_short_is_asked_again_for_the_asks_it_missed(monkeypatch, tm
     v = asks.check(NS(workdir=str(tmp_path)), ledger, "x", EDL, None, "")
     assert asked == [["a1", "a2", "a3"], ["a1", "a2", "a3"]]
     assert [r["state"] for r in v["asks"]] == ["done", "partly", "cannot_tell"] and v["usage"]["usd"] == 0.02
+
+
+def test_open_ask_truth_check_keeps_measured_changes_and_real_alternative(monkeypatch):
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(retained_reply_facts={
+        'fields': ['unchanged', 'alternative'],
+        'description': 'The previous film is unchanged. I can show your reference as a still.'})
+    verdict = {'asks': [{'id': 'a1', 'state': 'not_done', 'seen': 'Original character remains.',
+                         'line': 'The character was not replaced.'}]}
+    reply = 'The character was not replaced. The previous film is unchanged. I can show your reference as a still.'
+    called = []
+    def check(ctx, name, schema, system, content, **kwargs):
+        called.append(name)
+        assert 'measured retained facts' in content
+        return {'wrong': [], 'reply': '', 'covered': ['unchanged', 'alternative']}, {}
+    monkeypatch.setattr(asks, '_call', check)
+    assert asks.true_reply(ctx, {}, verdict, reply) == reply
+    assert called == ['record_true_reply']
+
+
+def test_truth_rewrite_failure_retains_only_measured_disclosure(monkeypatch):
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(retained_reply_facts={
+        'fields': ['frame'], 'description': 'Changes kept in the film: frame changed to 9:16.'})
+    verdict = {'asks': [{'id': 'a1', 'state': 'not_done', 'seen': 'No mining image.',
+                         'line': 'Crypto mining was not shown.'}]}
+    monkeypatch.setattr(asks, '_call', lambda *a, **kw: (_ for _ in ()).throw(TimeoutError()))
+    reply = asks.true_reply(ctx, {}, verdict, 'Everything is done, including the mining picture.')
+    assert 'not shown' in reply and 'frame changed to 9:16' in reply
+    assert 'Everything is done' not in reply
