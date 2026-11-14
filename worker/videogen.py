@@ -23,6 +23,14 @@ import config
 import llm
 
 
+class ProviderFailure(str):
+    """Keep the legacy error text and the provider's measured HTTP status."""
+    def __new__(cls, message, status_code):
+        value = super().__new__(cls, message)
+        value.status_code = status_code
+        return value
+
+
 def video_gen_available():
     return bool(config.FAL_KEY) and config.VIDEO_PROVIDER == "fal"
 
@@ -131,7 +139,7 @@ def generate_video(prompt, out_path, image_url=None, duration_s=5):
             detail = r.json().get("detail") or r.text[:200]
         except Exception:
             detail = (r.text or "")[:200]
-        return False, f"video provider returned {r.status_code}: {detail}", 0.0
+        return False, ProviderFailure(f"video provider returned {r.status_code}: {detail}", r.status_code), 0.0
     try:
         sub = r.json()
     except Exception:

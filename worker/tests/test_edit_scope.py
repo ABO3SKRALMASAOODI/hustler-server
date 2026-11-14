@@ -86,3 +86,31 @@ def test_reply_discloses_actual_delta_even_when_main_ask_failed(monkeypatch):
     ctx = NS(turn_start_edl={'json': {'texts': [{'text': 'Title'}]}},
              latest_edl=lambda: {'json': {'texts': []}})
     assert 'title was removed' in edit_scope.disclose(ctx, 'The replacement failed.')
+
+
+@pytest.mark.parametrize('check_available', [True, False])
+def test_unchanged_failed_turn_offers_real_still_alternative(monkeypatch, check_available):
+    offer = 'I can show your uploaded reference as a still; it will not animate.'
+    def check(ctx, name, schema, system, payload, **kw):
+        data = json.loads(payload)
+        assert data['retained_changes'] == {}
+        assert data['real_alternatives'][0]['offer'] == offer
+        if not check_available:
+            raise TimeoutError()
+        return {'reply': 'The film is unchanged. ' + offer,
+                'covered': [], 'offered_alternative': 0}, {}
+    monkeypatch.setattr(asks, '_call', check)
+    ctx = NS(turn_start_edl={'json': {'texts': [{'text': 'Title'}]}},
+             latest_edl=lambda: {'json': {'texts': [{'text': 'Title'}]}},
+             edit_alternatives=[{'offer': offer}])
+    reply = edit_scope.disclose(ctx, 'Animation failed.')
+    assert 'unchanged' in reply
+    assert offer in reply
+
+
+def test_disclosure_cannot_silently_drop_available_alternative(monkeypatch):
+    monkeypatch.setattr(asks, '_call', lambda *a, **k: (
+        {'reply': 'Animation failed.', 'covered': [], 'offered_alternative': None}, {}))
+    ctx = NS(turn_start_edl={'json': {}}, latest_edl=lambda: {'json': {}},
+             edit_alternatives=[{'offer': 'I can use your still reference.'}])
+    assert 'I can use your still reference.' in edit_scope.disclose(ctx, 'Animation failed.')
