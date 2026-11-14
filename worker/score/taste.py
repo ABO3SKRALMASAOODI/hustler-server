@@ -588,6 +588,9 @@ def upload_captions(ctx):
     """P7, measured on boxes: the share of speech samples where the upload already prints a caption-like line: wide,
     short, in the lower part of the frame, and changing as the voice goes on. A paragraph on a slide stays the same
     box for its whole life and is not a caption. At a half or more the film adds no captions of its own."""
+    import source_typography
+    if source_typography.captioned(ctx.index):
+        return 1.0
     rows = (ctx.index.get("spatial") or {}).get("samples") or []
     if not rows or not ctx.words:
         return 0.0
