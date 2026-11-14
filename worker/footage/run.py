@@ -185,7 +185,13 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         dead = [si for si in range(len(subjects)) if not any(si in s["subjects"] and not s.get("error") and s.get("shots") for s in sources)
                 and not any(si in s["subjects"] for s in more)]
         if dead:
-            flat2 = [(si, dict(where="archive", q=q["q"])) for si in dead for q in subjects[si]["searches"]]
+            # Archive metadata often names the subject without the interview,
+            # date and channel terms in a YouTube query. Keep the model's exact
+            # canonical subject within the five-query budget; rank and visual
+            # checks still decide whether any result can be used.
+            flat2 = [(si, dict(where="archive", q=q)) for si in dead
+                     for q in list(dict.fromkeys([subjects[si]["name"]] +
+                                                 [s["q"] for s in subjects[si]["searches"]]))[:5]]
             found2 = search.run([q for _, q in flat2])
             hits2 = {}
             for k, (si, _) in enumerate(flat2):
