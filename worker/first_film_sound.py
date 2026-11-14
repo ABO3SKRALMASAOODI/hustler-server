@@ -31,7 +31,7 @@ def power200(signal, rate):
 def level(sounds, voice, fps, shift_db=0.0):
     from score import sound
     out, evidence = [], []
-    v = np.asarray(voice, np.float32).reshape(-1) * 10 ** (shift_db / 20)
+    v = (np.asarray(voice, np.float32).reshape(-1) if voice is not None else np.zeros(0, np.float32)) * 10 ** (shift_db / 20)
     for item in sounds:
         it = dict(item)
         if it.get('s') not in sound.library() or it.get('layer') == 'lead':
@@ -47,7 +47,8 @@ def level(sounds, voice, fps, shift_db=0.0):
             continue
         # A quiet source gets the nominal dialogue reference, not a huge
         # boost from matching an unmeasurable silence or noise floor.
-        voice_db = max(-26.0, min(-12.0, 10 * math.log10(max(vp, 1e-12))))
+        voice_db = (-20.0 if vp <= 1e-8 else
+                    max(-26.0, min(-12.0, 10 * math.log10(vp))))
         target = voice_db + RELATIVE_DB.get(it.get('tier'), -3.0)
         wanted = target - 10 * math.log10(sp)
         peak = float(np.abs(raw).max()) if len(raw) else 0
