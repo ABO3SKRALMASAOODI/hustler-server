@@ -72,6 +72,7 @@ class WindowContext:
         self.first_cut_session = session_id
         self.director_version = None
         self.director_state = None
+        self.director_upgrade = None
         self.director_bed = None
         self.director_footage = None
         self.director_bed_thread = None
@@ -154,6 +155,23 @@ def _clean(view, work):
     shutil.rmtree(work, ignore_errors=True)
 
 
+def _finish_footage(view, worker_db, job):
+    """Consume the library's pending footage before its work folder is removed.
+
+    First films have a later upgrade phase. A typed call has no such phase,
+    so waiting only during cleanup would discard the pictures it fetched.
+    The existing upgrade still checks the active version and writes through
+    WindowContext's normal typed-request guards.
+    """
+    from . import film
+    state = view.director_state or {}
+    thread = (state.get("footage") or {}).get("thread")
+    if thread is not None:
+        thread.join()
+    film.close(view)
+    return film.upgrade(view, worker_db, job, time.monotonic())
+
+
 def run(ctx, worker_db, job, session_id, cfg):
     from . import film, flags, patch
     import db as dbx
@@ -213,6 +231,9 @@ def run(ctx, worker_db, job, session_id, cfg):
                 "constraints override those defaults. This is execution context, not a new ask.")
         _steps, applied, _picked = film._make(view, worker_db, job, dcfg,
             time.monotonic() + cfg.get("film_s", 220.0), os.path.join(work, "film"), rec)
+        upgraded = _finish_footage(view, worker_db, job)
+        if upgraded:
+            applied = upgraded["applied"]
         return {"version": view.director_version, "applied": applied,
                 "path": "podcast_story_director" if selections else "whole_film_director",
                 "source_window": [a, b], "remaining_clips": (selections or [])[1:],
