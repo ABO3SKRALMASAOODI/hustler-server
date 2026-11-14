@@ -34,7 +34,7 @@ def windows(x,seconds=.1):
     return 10*np.log10((x[:k*n].reshape(k,n)**2).mean(1)+1e-12)
 
 def measure(final,clean,plan,words,out,ffmpeg):
-    fingerprint=hashlib.sha256()
+    fingerprint=hashlib.sha256(Path(__file__).read_bytes())
     for source in (final,clean,plan,words):
         with open(source,'rb') as f:fingerprint.update(hashlib.file_digest(f,'sha256').digest())
     signature=fingerprint.hexdigest()
@@ -43,7 +43,8 @@ def measure(final,clean,plan,words,out,ffmpeg):
         if prior.get('input_sha256')==signature:return prior
     plan=json.loads(Path(plan).read_text());wj=json.loads(Path(words).read_text())
     dur=plan['dur_f']/plan['fps'];P=round(dur*SR)
-    m,c=pcm(final,ffmpeg)[:P],pcm(clean,ffmpeg)[:P]
+    final_pcm=pcm(final,ffmpeg);film_seconds=len(final_pcm)/SR
+    m,c=final_pcm[:P],pcm(clean,ffmpeg)[:P]
     L=min(len(m),len(c));m,c=m[:L],c[:L]
     gain=float(np.dot(m,c)/(np.dot(c,c)+1e-12));cc=gain*c;bed=m-cc
     vc,bd=windows(cc),windows(bed);on=bd>-50
@@ -89,11 +90,11 @@ def measure(final,clean,plan,words,out,ffmpeg):
         if merged and t-merged[-1][0]<.25:merged[-1][1].add(name)
         else:merged.append([t,{name}])
     audible=[r for r in placed if r['final_step_db']>=6]
-    r=dict(input_sha256=signature,programme_s=dur,gain_fit=gain,music_share=float(on.mean()),music_under_voice_db=under,
+    r=dict(input_sha256=signature,programme_s=dur,film_s=film_seconds,gain_fit=gain,music_share=float(on.sum()*.1/film_seconds),programme_music_share=float(on.mean()),music_under_voice_db=under,
            chapter_rises=chapters,placed=len(placed),audible_placed=len(audible),audible_placed_per_10s=len(audible)*10/dur,
            blind_events=len(merged),blind_per_10s=len(merged)*10/dur,placed_measurements=placed,
            blind=[dict(t=t,bands=sorted(ns)) for t,ns in merged],
-           method='Independent WF1-r4 audio rater: final minus gain-fitted clean; bed 100ms RMS > -50 dBFS; audible final-mix 50ms/10ms transient >=6 dB over preceding .5s; blind events present in clean, speech starts excluded',
+           method='Independent WF1-r4 audio rater: final minus gain-fitted clean; bed 100ms RMS > -50 dBFS, verified programme bed divided by full film duration (tail excluded conservatively); audible final-mix 50ms/10ms transient >=6 dB over preceding .5s; blind events present in clean, speech starts excluded',
            rater_source='week-1112/lanes/RATINGS/work1114WF1-r4/audio.py')
     Path(out).write_text(json.dumps(r,indent=1));return r
 

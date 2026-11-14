@@ -505,7 +505,8 @@ def render(ctx,script,sc):
     # Use the established scene renderer, unchanged brand finish, and SND3 master.
     import film_long as L
     pack=read(Path(ctx.supply)/'pack.json')['pack']
-    inputs=dict(narration=digest(pack['narration']),l1=digest(sc['l1']),mixer=digest(HERE/'film_long.py'),music=digest(HERE/'music_chapters.py'))
+    from version import code_version
+    inputs=dict(engine=code_version(),narration=digest(pack['narration']),l1=digest(sc['l1']),mixer=digest(HERE/'film_long.py'),music=digest(HERE/'music_chapters.py'))
     stamp=Path(ctx.supply)/'render-inputs.json'
     if not stamp.exists() or read(stamp)!=inputs:
         for name in ('sound.m4a','sound.report.json','film_engine.mp4','film_engine.mp4.log.json','film_scored.mp4','film_scored.mp4.json','film_scored.bed.wav'):
@@ -540,21 +541,22 @@ def check(ctx,rd,sc):
     pack=read(Path(ctx.supply)/'pack.json')['pack']
     final=Path(ctx.run_dir)/'final.mp4'
     fs=Path(ctx.run_dir)/'finish-input.json'; programme=digest(rd['film'])
-    if not fs.exists() or read(fs).get('sha256')!=programme:
+    finish_inputs=dict(sha256=programme,brand=digest(Path(brand.__file__)),accent=False)
+    if not fs.exists() or read(fs)!=finish_inputs:
         final.unlink(missing_ok=True)
     if not final.exists():
         # Brand's own watermark and end card, never recreated or altered here.
         job=Path(ctx.supply)/'finish.py'
         job.write_text('import sys; sys.path[:0]='+repr([str(HERE.parent/'_shell')])+"; import brand; brand.finish("+repr(rd['film'])+','+repr(str(final))+','+repr(ctx.tmp)+',accent=False)')
         chain.sh(ctx,[chain.PY,str(job)],label='wf4-brand-'+ctx.run_id,heavy=True,timeout=7200)
-        save(fs,dict(sha256=programme))
+        save(fs,finish_inputs)
     base=brand.check(rd['film'],str(final),ctx.tmp)
     base['recorded_sound_library']=chain.no_music(sc['l1'])
     base['ok']=base['ok'] and base['recorded_sound_library']['ok']
     from picture_check import check as pictures_check, motion, duplicate_check
     pr=Path(ctx.supply)/'picture_check.json'
     stamp=Path(ctx.supply)/'picture-input.json'
-    inputs=dict(film=digest(final),shots=digest(Path(ctx.supply)/'shots.json'))
+    inputs=dict(film=digest(final),shots=digest(Path(ctx.supply)/'shots.json'),checker=digest(HERE/'picture_check.py'))
     if not stamp.exists() or read(stamp)!=inputs:
         for name in ('picture_check.json','motion.json'):(Path(ctx.supply)/name).unlink(missing_ok=True)
         folder=Path(ctx.supply)/'picture-evidence'
@@ -613,6 +615,18 @@ def check(ctx,rd,sc):
     subprocess.run([PX.FF,'-v','error','-y','-i',rd['clean'],'-vn','-c:a','flac',str(evidence/'clean-audio.flac')],check=True)
     shutil.copy2(nar,evidence/'narration.wav')
     shutil.copy2(pack['words'],evidence/'words.json')
+    shutil.copy2(nd/'narration_script.json',evidence/'narration_script.json')
+    memory_folders=list((Path(ctx.supply)/'memory').glob('*'))+list(Path(ctx.run_dir).glob('voice-memory-*'))
+    for folder in memory_folders:
+        if not folder.is_dir():continue
+        target=evidence/'memory'/folder.name;target.mkdir(parents=True,exist_ok=True)
+        for name in ('memory.json','run.log'):
+            if (folder/name).exists():shutil.copy2(folder/name,target/name)
+    for folder in (Path(ctx.run_dir)/'read-repairs').glob('round-*'):
+        target=evidence/'read-repairs'/folder.name;target.mkdir(parents=True,exist_ok=True)
+        for name in ('proposal.json','fact-check.json','script-check.json','applied.json'):
+            if (folder/name).exists():shutil.copy2(folder/name,target/name)
+
     footage_box.cleanup_cache(Path(ctx.supply)/'footage')
     footage_box.cleanup_cache(Path(ctx.supply)/'footage'/'witnesses')
     return dict(final=str(final),checks=checks,music=rd['music'],music_in_final=True,spend=[])
