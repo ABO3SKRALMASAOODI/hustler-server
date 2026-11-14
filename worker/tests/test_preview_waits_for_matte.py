@@ -24,6 +24,21 @@ def test_a_subject_effect_waits_past_a_lone_preview_budget(monkeypatch):
     assert seen == {"windows": [(0.0, 24.8)], "wait_s": 90.0}
 
 
+def test_device_readiness_uses_the_refined_compositing_matte(monkeypatch):
+    import fxgraph
+    import matte_track
+    from timeline import Timeline
+    edl = {'keep': [[0, 24.8]], 'fx': [{'id': 'bg', 'device': 'background_swap',
+        'type': 'background', 'start': 0, 'end': 24.8}]}
+    expected = matte_track.sidecar_params(edl)
+    monkeypatch.setattr(fxgraph, '_card', lambda _: {'needs': {'sidecars': ['matte.person']}})
+    monkeypatch.setattr(sidecars, 'ensure', lambda *a, **kw: kw.get('params'))
+    monkeypatch.setattr(sidecars, 'wait', lambda *a: None)
+    monkeypatch.setattr(sidecars, 'status', lambda h: 'ready' if h == expected else 'pending')
+    plan = SimpleNamespace(edl=edl, tl=Timeline(edl['keep']), preview=True)
+    assert fxgraph._sidecar_status(edl['fx'][0], 'source', plan) == {'matte.person': 'ready'}
+
+
 def test_an_edit_with_no_matte_effect_does_not_wait(monkeypatch):
     ctx, seen = ctx_for(monkeypatch)
     row = {"version": 7, "json": {"keep": [[0.0, 24.8]], "fx": [
