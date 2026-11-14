@@ -228,20 +228,20 @@ def test_a_found_picture_the_last_look_would_remove_never_enters_the_bin(tmp_pat
 
     def fake(model, system, content, **kw):
         seen.update(model=model, system=system, purpose=kw["purpose"], images=sum(1 for c in content if c.get("type") == "image"), text=content[-1]["text"])
-        return NS(text='{"pairs":[{"n":1,"post":"film","why":"a wardrobe","remove":[]},{"n":2,"post":"upload","why":"chipboard","remove":["b1.s1"]},'
-                       '{"n":3,"post":"same","why":"a shop","remove":[]}]}', usd=0.0121)
+        return NS(text='{"pairs":[{"n":1,"post":"film","exact_match":true,"why":"a wardrobe","remove":[]},{"n":2,"post":"upload","why":"chipboard","remove":["b1.s1"]},'
+                       '{"n":3,"post":"same","exact_match":true,"why":"a shop","remove":[]}]}', usd=0.0121)
     monkeypatch.setattr(supply.call, "stream", fake)
     kept, usd, rep = supply.check_fit(work, items, wishes, 1e12)
     from score import taste
     assert [k["id"] for k in kept] == [0, 2] and usd == 0.0121
-    assert seen["model"] == supply.CHECK_MODEL and seen["system"] == taste.LOOK_SYSTEM and seen["purpose"] == "director_bin_check"
+    assert seen["model"] == supply.CHECK_MODEL and seen["system"] == taste.LOOK_SYSTEM + supply.EXACT_WORDS and seen["purpose"] == "director_bin_check"
     assert seen["images"] == 1 and "b1.s1: a found picture, full frame" in seen["text"] and "palavra" in seen["text"]
     ren = supply.renumber(work, kept)
     assert [r["id"] for r in ren] == [0, 1] and ren[1]["path"] == "bin/1.jpg" and ren[1]["storage_key"] == "k2"
     assert os.path.exists(os.path.join(work, "bin", "1.jpg"))
 
 
-def test_no_verdict_keeps_only_the_pictures_already_checked_to_show_their_subject(tmp_path, monkeypatch):
+def test_no_verdict_keeps_no_picture_even_when_its_subject_was_checked(tmp_path, monkeypatch):
     work, items, wishes = _bin(tmp_path)
     items[1]["named"] = "Oscar Piastri"
 
@@ -249,4 +249,4 @@ def test_no_verdict_keeps_only_the_pictures_already_checked_to_show_their_subjec
         raise TimeoutError("late")
     monkeypatch.setattr(supply.call, "stream", boom)
     kept, usd, rep = supply.check_fit(work, items, wishes, 1e12)
-    assert [k["id"] for k in kept] == [1] and usd == 0.0 and rep[-1]["check_error"]
+    assert kept == [] and usd == 0.0 and rep[-1]["check_error"]

@@ -28,7 +28,9 @@ FIRST_FILM = {"max_sources": 8, "hear_s": 0.0, "read_s": 300.0, "per": 2}
 LINE_S = 3.0                  # two shots a wish at the engine's 1.5 s pace
 _CFG = {"cfg": None, "at": 0.0, "busy": False}
 _LOCK = threading.Lock()
+_READY = threading.Event()
 CFG_TTL_S = 300.0
+CFG_FIRST_READ_S = 0.25
 
 
 def for_lines(lines, named, about, out_dir, W=1080, H=1920, scope="workflow", log=print, anchors=None, avoid=None, preserve_source=False):
@@ -53,19 +55,26 @@ def _read_cfg():
         cfg = dict(switch.DEFAULTS)
     with _LOCK:
         _CFG.update(cfg=cfg, at=time.monotonic(), busy=False)
+    _READY.set()
 
 
 def customer_cfg():
-    """The switch row, read off the caller's path: a stale or missing value starts one background read
-    and answers with what it has (off before the first read). A customer's supply never waits on it."""
+    """Refresh stale values off the caller's path. The first read gets a bounded quarter second:
+    otherwise every cold worker silently skips footage on the very first film it serves."""
     with _LOCK:
+        cold = _CFG["cfg"] is None
         stale = _CFG["cfg"] is None or time.monotonic() - _CFG["at"] > CFG_TTL_S
         start = stale and not _CFG["busy"]
         if start:
             _CFG["busy"] = True
+            _READY.clear()
         cfg = _CFG["cfg"] or dict(switch.DEFAULTS)
     if start:
         threading.Thread(target=_read_cfg, name="footage-switch", daemon=True).start()
+    if cold:
+        _READY.wait(CFG_FIRST_READ_S)
+        with _LOCK:
+            cfg = _CFG["cfg"] or dict(switch.DEFAULTS)
     return cfg
 
 

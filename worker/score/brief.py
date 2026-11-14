@@ -567,7 +567,7 @@ def scout_part(scout, idx=None):
         # English by default: a tin labelled in Spanish, with no word spoken, was titled "Turmeric", then "Gold you
         # take daily" (p5582)
         said = ("The customer's language is not known: nothing is spoken that can be trusted as speech, and nothing was typed. Write every `job` and every word of type in the "
-                "language the frames themselves print (a label, a caption, a sign). Their language, not their words: a title says what the frame does not already print. "
+                "language the frames themselves print (a label, a caption, a sign). A title may identify the exact product from its label when that label is too small to read in the wide shot; remove the title on the readable label close-up. Never invent a slogan just to avoid repeating a label. "
                 "With nothing printed, in `en`.")
     out = ["## Asks", f"The Scout read the request. Scope `{scout.get('scope')}`. {said} {scout.get('about', '')}".strip()]
     if scout.get("scope") == "surgical":

@@ -56,20 +56,22 @@ def test_when_on_a_short_supply_budget_is_said_not_spent(monkeypatch):
     assert "skipped" in report[0]["footage"]
 
 
-def test_the_switch_row_is_read_off_the_callers_path(monkeypatch):
+def test_a_slow_first_switch_read_is_bounded_and_stays_off(monkeypatch):
+    import threading
     seam._CFG.update(cfg=None, at=0.0, busy=False)
-    slow = []
+    release, finished = threading.Event(), threading.Event()
 
     def read():
-        time.sleep(0.3)
-        slow.append(1)
+        release.wait(2)
         seam._CFG.update(cfg={"mode": "on", "test_user_ids": []}, at=time.monotonic(), busy=False)
+        seam._READY.set()
+        finished.set()
     monkeypatch.setattr(seam, "_read_cfg", read)
     t0 = time.monotonic()
-    assert seam.customer_cfg()["mode"] == "off"          # before the first read: off, at once
-    assert time.monotonic() - t0 < 0.1
-    time.sleep(0.5)
-    assert slow and seam.customer_cfg()["mode"] == "on"
+    assert seam.customer_cfg()["mode"] == "off"
+    assert time.monotonic() - t0 < seam.CFG_FIRST_READ_S + 0.15
+    release.set()
+    assert finished.wait(1) and seam.customer_cfg()["mode"] == "on"
     seam._CFG.update(cfg=None, at=0.0, busy=False)
 
 

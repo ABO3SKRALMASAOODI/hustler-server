@@ -4350,6 +4350,11 @@ def g_counter(ctx, b, g, i):
     if a is None or z <= a:
         return ctx.find(f"{b.id}: counter has no span")
     v0, v1 = float(g.get("from", 0)), float(g.get("to", 100))
+    # A fixed counter is a held label, not a stream of changing digits. It must
+    # stay readable in the phone preview; the old .04 example disappeared at the last look.
+    if ctx.governed and v0 == v1:
+        g = dict(g, size=max(float(g.get("size") or 0.055), 0.055))
+        g.setdefault("font", "grotesk-bold")
     step = max(1, int(g.get("step", 3)))
     n = max(1, (z - a) // step)
     fmt = str(g.get("fmt", "{n}"))
@@ -6113,6 +6118,8 @@ def meter(ctx, l1):
         ctx.find("HOOK the first second is the upload as it was: " + ("nothing designed lands in this film" if hook_f is None else f"the first title, card or picture lands at {hook_f / fps:.1f} s")
                  + ". The hook title lands at the first beat's `in`: on the take's display seat, beside a found picture that opens the film, or on a page of 1 s")
     first3 = sum(1 for c in cuts if c <= 3 * fps)
+    if len(ctx.words) / max(ctx.src_dur, 1e-3) >= 1.0 and dur >= 8 and len(cuts) * 10 / dur < 10:
+        ctx.find(f"pace: only {len(cuts) * 10 / dur:.1f} planned cuts/10s. Talking films need at least 10 perceptibly distinct cuts/10s: use the Bin on its words, different source shots and readable designed evidence. Tiny crops do not qualify; do not insert an unrelated picture.")
     facts = compile_facts(ctx, l1, cuts, per_frame)
     busy = quiet_meter(ctx, l1, cuts)
     m = {"measurement_source": "score_plan", "dur_s": round(dur, 2), "beats": len(ctx.beats), "shots": len(shots), "cuts": len(cuts), "cuts10": round(len(cuts) / max(dur, 1e-3) * 10, 1),
@@ -6624,7 +6631,7 @@ def steps_finding(ctx, l1):
         return
     ctx.find(f"type: between its title and its last line this film shows {pictures} pictures in {dur:.0f} s and says nothing. If it goes step by step "
              "(a routine, a recipe, a how-to, a build), count the steps in chapters: one `counter` on each step's first shot, "
-             '{"g":"counter","from":2,"to":2,"fmt":"{n:02d} rinse","size":.04,"seat":[.5,.66],"font":"grotesk-bold","for":"b03.s0","at":"b03.in"}, '
+             '{"g":"counter","from":2,"to":2,"fmt":"{n:02d} rinse","size":.065,"seat":[.5,.66],"font":"grotesk-bold","for":"b03.s0","at":"b03.in"}, '
              "one or two words a step, three to five steps, all at one seat. If it does not, leave it and say why in `rest`")
 
 
@@ -6642,7 +6649,7 @@ def hook_finding(ctx):
                  + ". A talking film shows one inside its first 3 s: open on the Bin's hook picture with the title, or cut the first picture in earlier")
 
 
-HOLD_FIND_S = 5.0          # one picture on screen this long is told to the repair round (the judge: one shot in forty passes 2 s)
+HOLD_FIND_S = 4.0          # K8: no talking-film stretch may exceed four seconds without a new picture
 
 
 def hold_finding(ctx):
