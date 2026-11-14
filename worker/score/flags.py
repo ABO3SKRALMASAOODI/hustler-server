@@ -2,7 +2,9 @@
 
 Off by default. A bad row means off. mode "on" opens the film to new trial accounts, or to a percent
 of them; test_user_ids opens it to named trial accounts while everyone else stays on the chain.
-Nothing here can admit a subscriber: the seam only asks about a job that holds a live trial scope.
+A subscriber is admitted only as `payer_first` (round six, 14 Nov): the automatic First cut of a paying account's
+project, which runs on today's chain while the owner's trial is off. `payers: false` in the row puts those films back
+on the chain; nothing about a trial account changes with it.
 
 engine (lane D, 12 Nov): which renderer draws a Director film whose scene plan was kept.
 "off" (default, and what any bad value reads as): today's renderer only. "shadow": today's renderer
@@ -25,7 +27,7 @@ SCOUT_S, SUPPLY_S = 32.0, 44.0     # supply: the look every Bin picture passes (
 FILM_USD = 0.70            # what one film may spend: the dearest slice run was $0.56, and a Look and a Scout are under a cent
 DEFAULTS = {"mode": "off", "percent": 100, "test_user_ids": [], "deadline_s": DEADLINE_S, "max_source_s": MAX_SOURCE_S, "film_usd": FILM_USD,
             "models": {"scout": "claude-haiku-5-5", "direct": "claude-opus-5-5"}, "effort": {"direct": "low"},
-            "engine": "off", "engine_user_ids": []}
+            "engine": "off", "engine_user_ids": [], "payers": True}
 ENGINE_MODES = ("off", "shadow", "on")
 # OpenAI models a Director row may name for its test_user_ids only (lane Q, 13 Nov; prices in model_prices).
 OPENAI_MODELS = ("gpt-5.5", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna")
@@ -68,6 +70,7 @@ def parse(raw):
     e = str(effort.get("direct") or DEFAULTS["effort"]["direct"])
     out["effort"] = {"direct": e if e in ("low", "medium", "high", "xhigh", "max") else DEFAULTS["effort"]["direct"]}
     out.update(_engine(data))
+    out["payers"] = data.get("payers") is not False
     return out
 
 
@@ -110,11 +113,19 @@ def _bucket(user_id):
     return int(hashlib.sha256(f"director:{user_id}".encode()).hexdigest()[:8], 16) % 100
 
 
-def admit(cfg, user_id, *, trial_active, subscribed, engine_on, source_s, url=None):
+def admit(cfg, user_id, *, trial_active, subscribed, engine_on, source_s, url=None, payer_first=False):
     """(True, "") when this job may try a film, else (False, why). A trial scope is the account rule
-    (never paid, admitted project); subscribed is checked again so no path can reach a payer."""
+    (never paid, admitted project). A subscriber is reached by one door only: payer_first, the automatic
+    First cut of a paying account's project (the caller says so), while the row is on for everyone and
+    does not say `payers: false`. The percent is the trial's and is not read for it."""
     if subscribed:
-        return False, "subscribed"
+        if not payer_first or not cfg.get("payers", True) or url:
+            return False, "subscribed"
+        if cfg["mode"] != "on" and user_id not in cfg["test_user_ids"]:
+            return False, "off"
+        if not source_s or float(source_s) > cfg["max_source_s"]:
+            return False, "source_length"
+        return True, ""
     if url:
         return False, "url"
     if not trial_active:

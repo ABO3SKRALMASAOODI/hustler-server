@@ -144,7 +144,7 @@ def test_p5591_one_take_holds_one_sound_one_step_one_caption_seat_and_two_displa
     assert all(b - a >= 10 * 30 for a, b in zip(at, at[1:]))
     assert t["kept"]["display"][0] <= 9 and t["kept"]["flash"][0] <= 1
     caps = [w for w in c.l1["items"] if w["k"] == "word" and w.get("role") == "cap"]
-    assert caps and max(w["y"] if not isinstance(w["y"], list) else w["y"][-1] for w in caps) - min(w["y"] if not isinstance(w["y"], list) else w["y"][-1] for w in caps) <= 0.045
+    assert caps and max(w["y"] if not isinstance(w["y"], list) else w["y"][-1] for w in caps) - min(w["y"] if not isinstance(w["y"], list) else w["y"][-1] for w in caps) <= 0.056      # one line pitch: a two-line chunk sits either side of the one seat (type at .04 of the frame since round six)
     assert len(t["seats"]["display"]) <= 2
     for w in (i for i in c.l1["items"] if i["k"] == "word" and i.get("role") == "big"):
         r = S.type_rect(type("C", (), {"voices": c.l1["voices"], "W": 1080, "H": 1920})(), w)
@@ -712,9 +712,10 @@ def test_the_look_can_send_a_found_picture_back_to_the_take():
     assert {i["pic"] for i in floor.l1["items"] if i["k"] == "shot"} == {"main"}        # the plain film is the upload's own picture
 
 
-def test_a_two_line_caption_and_a_one_line_caption_share_one_anchor():
+def test_a_two_line_caption_and_a_one_line_caption_share_one_anchor(monkeypatch):
     """The renderer centres a caption on its anchor: the lowered anchor is the block's middle, so the seat holds."""
     from score import lower
+    monkeypatch.setenv("VALMERA_CAP_BUILD", "0")      # a chunk set whole; round six builds it word by word (test_score_round_six)
     idx = selfie(20.0)
     long_ = lambda a, z: f"{a}-{min(z, a + 7)}"          # noqa: E731  eight words: two lines at .72 of the frame
     c = comp(film(beats_over(idx, 4, lambda k, a, z: {"pic": "main", "type": f"{a} {a + 1}|{long_(a + 2, z)}"})), idx)

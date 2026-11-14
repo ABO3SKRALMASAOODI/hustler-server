@@ -1340,10 +1340,19 @@ AGAINST_SYSTEM = """Two editors each made a short film from the same upload. You
 Answer with one JSON object and nothing else: {"better":"A" or "B" or "same","why":"what on the frames decides it, under 30 words"}."""
 
 
-def against(current, film, out_path, deadline, model, effort="low", cell_h=360):
+AGAINST_UPLOAD = """ The board has a third row: six frames of the raw upload both films were made from. Say also, for each film, whether it is worse to post than that raw upload left alone: a film is worse than its upload when what was added harms it (type over a face or over the upload's own words, type that can't be read, the subject cropped out or shrunk into a corner, pictures that have nothing to do with it) more than anything added helps.
+Answer with one JSON object and nothing else: {"better":"A" or "B" or "same","a_worse_than_upload":true or false,"b_worse_than_upload":true or false,"why":"what on the frames decides it, under 30 words"}."""
+
+
+def against(current, film, out_path, deadline, model, effort="low", cell_h=360, upload=None):
     """The critic, for a project that already holds a first film: is the new film worse than the one the customer
     has now? Returns ({"better": "current" | "new" | "same", "why"}, usd), or (None, usd) when it can't be told.
-    A is the current film and B the new one. It rates nothing: the new film goes out unless the current one is better."""
+    A is the current film and B the new one. It rates nothing: the new film goes out unless the current one is better.
+
+    upload (round six): the raw upload, set under both as a third row. The critic then also says whether each film is
+    worse than the upload left alone, and a current film that is cannot hold its place against a new one that is not
+    (p5554, 13 Nov: the critic kept the customer's film for its bold title; that film measured worse than its upload,
+    and the film it turned away rated a point higher). The verdict carries `current_below_upload`, `new_below_upload`."""
     import concurrent.futures as cf
     import subprocess
 
@@ -1362,23 +1371,29 @@ def against(current, film, out_path, deadline, model, effort="low", cell_h=360):
     if da <= 0 or db <= 0:
         return None, 0.0
     n = LOOK_PAIRS
+    du = dur(upload) if upload else 0.0
     with cf.ThreadPoolExecutor(max_workers=4) as pool:
         fa = list(pool.map(lambda k: boards.grab(current, da * (k + 0.5) / n, height=cell_h), range(n)))
         fb = list(pool.map(lambda k: boards.grab(film, db * (k + 0.5) / n, height=cell_h), range(n)))
+        fu = list(pool.map(lambda k: boards.grab(upload, du * (k + 0.5) / n, height=cell_h), range(n))) if du > 0 else []
     if sum(f is not None for f in fa) < 3 or sum(f is not None for f in fb) < 3:
         return None, 0.0
-    cw = max(max(f.size[0] for f in fa + fb if f is not None), 8)
+    with_upload = sum(f is not None for f in fu) >= 3
+    rows = [("film A", fa), ("film B", fb)] + ([("the raw upload", fu)] if with_upload else [])
+    cw = max(max(f.size[0] for _n, fr in rows for f in fr if f is not None), 8)
     gap, head = 6, 22
-    im = Image.new("RGB", (n * (cw + gap) - gap, 2 * (head + cell_h) + gap), boards.BG)
+    im = Image.new("RGB", (n * (cw + gap) - gap, len(rows) * (head + cell_h) + (len(rows) - 1) * gap), boards.BG)
     d = ImageDraw.Draw(im)
-    for row, (name, frames) in enumerate((("film A", fa), ("film B", fb))):
+    for row, (name, frames) in enumerate(rows):
         y = row * (head + cell_h + gap)
         d.text((3, y + 2), name, fill=boards.FG, font=boards.font(14))
         for i, f in enumerate(frames):
             if f is not None:
                 im.paste(f, (i * (cw + gap) + (cw - f.size[0]) // 2, y + head))
     boards.save(im, out_path, quality=86)
-    r = call.stream(model, AGAINST_SYSTEM, [brief.image_block(out_path), {"type": "text", "text": "Film A above, film B below. Now the JSON."}],
+    system = AGAINST_SYSTEM.rsplit("\nAnswer with one JSON object", 1)[0].replace("the bottom row is", "the second row is") + AGAINST_UPLOAD if with_upload else AGAINST_SYSTEM
+    ask = "Film A on top, film B under it, the raw upload at the bottom. Now the JSON." if with_upload else "Film A above, film B below. Now the JSON."
+    r = call.stream(model, system, [brief.image_block(out_path), {"type": "text", "text": ask}],
                     max_tokens=1200, effort=effort, purpose="director_against", deadline=deadline, thinking=False)       # room to answer: at 300 one of eleven came back empty
     a, b = (r.text or "").find("{"), (r.text or "").rfind("}")
     try:
@@ -1386,7 +1401,13 @@ def against(current, film, out_path, deadline, model, effort="low", cell_h=360):
     except (ValueError, TypeError):
         return None, r.usd
     pick = str(o.get("better", "")).strip().upper()
-    return {"better": {"A": "current", "B": "new"}.get(pick, "same"), "why": str(o.get("why", ""))[:200]}, r.usd
+    out = {"better": {"A": "current", "B": "new"}.get(pick, "same"), "why": str(o.get("why", ""))[:200]}
+    if with_upload:
+        out["current_below_upload"], out["new_below_upload"] = o.get("a_worse_than_upload") is True, o.get("b_worse_than_upload") is True
+        if out["better"] == "current" and out["current_below_upload"] and not out["new_below_upload"]:
+            # the film the customer holds loses to its own upload and the new one does not: it cannot hold its place
+            out.update(better="new", critic_pick="current", why=("the film held is worse than its upload: " + out["why"])[:200])
+    return out, r.usd
 
 
 def silent_beats_emptied(text, ids):

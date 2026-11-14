@@ -19,6 +19,13 @@ PROVIDER = "footage"
 LICENCE = "Footage, not licensed: the owner's decision (app_kv footage)"
 MIN_BUDGET_S = 600.0          # the engine took 225-660 s a story on the Mac (13 Nov): it has no deadline of its own yet,
                               # so a customer's supply (36 s today) always skips it and says so
+# A first film's footage (score.film, round six of lane K): the film is already the customer's when this arrives, and
+# it is waited for only so long. Measured on the box, 14 Nov, for one film's four subjects with the engine's own
+# settings: 404 s and $0.61, of which hearing 4,300 s of sources was $0.31 and most of the minutes, and one clip a
+# wish. A wish wants a picture of its subject, not a line that was said: nothing is heard, the first five minutes of
+# a source are read, two sources a subject and eight in all are opened, and each wish is given two clips to cut on.
+FIRST_FILM = {"max_sources": 8, "hear_s": 0.0, "read_s": 300.0, "per": 2}
+LINE_S = 3.0                  # two shots a wish at the engine's 1.5 s pace
 _CFG = {"cfg": None, "at": 0.0, "busy": False}
 _LOCK = threading.Lock()
 CFG_TTL_S = 300.0
@@ -87,13 +94,13 @@ def _offers(work, wishes, subjects, deadline, report, about, W, H):
         sub = subjects[i][0] if i < len(subjects) and subjects[i] else None
         if not sub or w.get("mine"):
             continue
-        lines.append(dict(i=i, say=str(w.get("want") or w.get("say") or sub["name"]), pictures=[sub["name"]], dur=2.0))
+        lines.append(dict(i=i, say=str(w.get("want") or w.get("say") or sub["name"]), pictures=[sub["name"]], dur=LINE_S))
         if sub["name"] not in [n["name"] for n in named]:
             named.append({"name": sub["name"], "is": sub.get("is"), "must_show": sub.get("must_show")})
     if not lines:
         return []
     from . import run
-    res = run.find(lines, named, about, os.path.join(work, "footage"), W, H, log=lambda m: print("[footage] " + m, flush=True))
+    res = run.find(lines, named, about, os.path.join(work, "footage"), W, H, log=lambda m: print("[footage] " + m, flush=True), **FIRST_FILM)
     from PIL import Image
     out = []
     for ln in res["lines"]:
@@ -102,9 +109,10 @@ def _offers(work, wishes, subjects, deadline, report, about, W, H):
             thumb = path[:-4] + ".jpg"
             try:
                 from . import shots
-                shots.frames(path, [min(0.5, c["seconds"] / 2)], os.path.dirname(thumb))
-                frame = sorted(f for f in os.listdir(os.path.dirname(thumb)) if f.startswith("f"))[-1]
-                img = Image.open(os.path.join(os.path.dirname(thumb), frame)).convert("RGB")
+                # each clip's frame in a folder of its own: shots.frames names a frame by its time and keeps one that is
+                # there, so in one folder every clip stood for by the first clip's frame (14 Nov: ten offers, one picture)
+                got = shots.frames(path, [min(0.5, c["seconds"] / 2)], path[:-4] + "_frame")
+                img = Image.open(next(iter(got.values()))).convert("RGB")
             except Exception:  # noqa: BLE001 a clip with no frame is not offered
                 continue
             out.append(dict(id=f"footage:{os.path.basename(path)}", provider=PROVIDER, kind="video", _wish=ln["i"], named=c["subject"],

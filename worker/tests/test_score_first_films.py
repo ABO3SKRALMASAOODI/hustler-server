@@ -28,7 +28,8 @@ def bigs(c):
 
 # ------------------------------------------------------------------ a wide still is shown whole
 
-def test_a_wide_still_cut_into_a_vertical_film_is_framed_on_the_plate_and_counts_as_a_picture():
+def test_a_wide_still_cut_into_a_vertical_film_is_framed_on_the_plate_and_counts_as_a_picture(monkeypatch):
+    monkeypatch.setenv("VALMERA_PACE", "0")       # round six fills the frame with it and travels it (test_score_round_six); this is the pace switched off
     idx = selfie(20.0)
     text = film(beats_over(idx, 4, lambda k, a, z: {"cut": [40, 45, 999], "pic": ["main", f"bin:{k}", "main"]} if k == 1 else {"pic": "main"}))
     c = comp(text, idx)
@@ -53,7 +54,8 @@ def test_a_written_crop_or_a_portrait_still_fills_the_frame_as_before():
     assert not [i for i in c.l1["items"] if i["k"] == "card"]
 
 
-def test_a_label_for_a_framed_still_stands_on_the_plate_beside_it_in_its_own_ink_and_leaves_with_it():
+def test_a_label_for_a_framed_still_stands_on_the_plate_beside_it_in_its_own_ink_and_leaves_with_it(monkeypatch):
+    monkeypatch.setenv("VALMERA_PACE", "0")
     idx = selfie(20.0)
 
     def make(k, a, z):
@@ -117,8 +119,9 @@ def test_display_over_a_found_picture_keeps_the_seat_the_score_wrote():
                 "do": [{"g": "big", "t": "ON IT", "for": "b02.s1", "at": "b02.s1.in", "d": 120, "seat": [0.5, 0.5], "size": 0.07}]}
     c = comp(film(beats_over(idx, 4, make), system={"devices": ["big"], "sounds": [], "seats": [[0.5, 0.5]]}), idx)
     s = next(i for i in shots(c) if i["id"] == "b02.s1")
+    end = max(i["f"][1] for i in shots(c) if i["id"].startswith("b02.s1") and i["pic"] == "bin:4")      # the picture, through every framing it is cut into
     w = bigs(c)
-    assert s["pic"] == "bin:4" and len(w) == 1 and w[0]["f"][1] <= s["f"][1] and 0.4 <= w[0]["y"] <= 0.6
+    assert s["pic"] == "bin:4" and len(w) == 1 and w[0]["f"][1] <= end and 0.4 <= w[0]["y"] <= 0.6
 
 
 # ------------------------------------------------------------------ fitted before it is left out
@@ -185,7 +188,7 @@ def test_a_chunk_whose_words_are_all_starred_is_drawn_in_the_second_voice():
     rep = {}
     caps = lower.lower_captions(c.l1, rep)
     by = {x["text"]: x["style"] for x in caps}
-    second = [by["palavra2"], by["palavra7 palavra8"]]
+    second = [by["palavra2"], by["palavra7"]]              # round six: a chunk is written word by word, and its entrance plays on its first word
     first = [by["palavra0 palavra1"], by["palavra3 palavra4"], by["palavra5 palavra6"]]       # a star inside a mixed chunk changes nothing
     assert all(s["font"] == "DM Serif Display" and s["animation"] == "pop" for s in second)
     assert all(s["font"] == "Inter Display Bold" and s["animation"] == "none" for s in first)
@@ -229,7 +232,8 @@ def test_a_cut_from_the_person_to_a_found_picture_lands_on_a_breath_near_it():
 
 # ------------------------------------------------------------------ the last look
 
-def test_the_look_is_told_what_a_found_picture_shows_and_what_a_title_page_is(tmp_path):
+def test_the_look_is_told_what_a_found_picture_shows_and_what_a_title_page_is(tmp_path, monkeypatch):
+    monkeypatch.setenv("VALMERA_PACE", "0")
     idx = close_selfie(24.0)
 
     def make(k, a, z):

@@ -29,9 +29,17 @@ class Result:
         self.first_s, self.seconds, self.usd, self.request_id = first_s, seconds, usd, request_id
 
 
+TALLIES = []           # payer films being made in this process: each counts what its own calls cost (film._Payer)
+_tally_lock = threading.Lock()
+
+
 def _meter(model, usd):
     if claude_trial.current() is not None:
         claude_trial.meter(model, usd)
+        return
+    with _tally_lock:
+        for t in TALLIES:
+            t.spent_usd += max(0.0, float(usd or 0.0))
 
 
 def _late_cost(model, snap, elapsed):

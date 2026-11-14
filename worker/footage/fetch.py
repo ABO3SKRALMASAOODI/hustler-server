@@ -127,16 +127,18 @@ def run_ladder(url, args, timeout_s=CALL_S, done=None):
     raise FetchError(last)
 
 
-def proxy(url, out_dir, duration=None):
-    """A small copy with sound for scanning: (path, rung). The first PROXY_MAX_S seconds of a long source."""
+def proxy(url, out_dir, duration=None, max_s=None):
+    """A small copy with sound for scanning: (path, rung). The first PROXY_MAX_S seconds of a long source, or the
+    first max_s when the caller has less time than that (a first film's footage, score.film)."""
+    max_s = float(max_s) if max_s else PROXY_MAX_S
     os.makedirs(out_dir, exist_ok=True)
     for p in glob.glob(os.path.join(out_dir, "proxy.*")):
         os.remove(p)
     fmt = (f"b[height<={PROXY_H}][ext=mp4]/bv*[height<={PROXY_H}]+ba/b[height<={PROXY_H}]/"
            f"bv*[height<=480]+ba/b[height<=480]/b")
     args = ["-f", fmt, "--merge-output-format", "mp4", "--max-filesize", "400M", "-o", os.path.join(out_dir, "proxy.%(ext)s")]
-    if duration and duration > PROXY_MAX_S + 30:
-        args += ["--download-sections", f"*0-{int(PROXY_MAX_S)}"]
+    if duration and duration > max_s + 30:
+        args += ["--download-sections", f"*0-{int(max_s)}"]
 
     def got(_):
         return bool([p for p in glob.glob(os.path.join(out_dir, "proxy.*")) if not p.endswith((".part", ".ytdl"))])
@@ -155,6 +157,26 @@ def streams(url):
     v = next((f for f in fs if f.get("vcodec") not in (None, "none")), fs[0])
     return dict(url=v.get("url"), headers=v.get("http_headers") or info.get("http_headers") or {}, w=v.get("width"), h=v.get("height"),
                 fps=v.get("fps"), vcodec=v.get("vcodec"), rung=rung, expires=time.time() + 4 * 3600)
+
+
+WHOLE_H = 720                 # a whole source fetched for its cuts: enough for a vertical film's cover crop, a tenth of 1080p's bytes
+WHOLE_MAX = "160M"
+
+
+def whole(url, out_dir):
+    """The source's whole picture at or under WHOLE_H, no sound, by yt-dlp's own downloader: path. The rung for a
+    short source whose sections will not come: a section is cut by ffmpeg on the resolved stream, which YouTube
+    refuses from a proxy route more often than it allows (the box, 14 Nov: 5 of 15 cuts, then 4 of 4)."""
+    os.makedirs(out_dir, exist_ok=True)
+    for p in glob.glob(os.path.join(out_dir, "whole.*")):
+        os.remove(p)
+    fmt = f"bv*[height<={WHOLE_H}][vcodec^=avc1]/bv*[height<={WHOLE_H}]/b[height<={WHOLE_H}]/b"
+    args = ["-f", fmt, "--max-filesize", WHOLE_MAX, "-o", os.path.join(out_dir, "whole.%(ext)s")]
+
+    def got(_):
+        return bool([p for p in glob.glob(os.path.join(out_dir, "whole.*")) if not p.endswith((".part", ".ytdl"))])
+    run_ladder(url, args, done=got)
+    return max((p for p in glob.glob(os.path.join(out_dir, "whole.*")) if not p.endswith((".part", ".ytdl"))), key=os.path.getsize)
 
 
 def section(url, t0, t1, out_path):

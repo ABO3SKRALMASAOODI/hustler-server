@@ -785,21 +785,31 @@ def read_system(ctx):
     ctx.calm = str(ctx.film.get("intensity") or sy.get("intensity") or "") == "calm"
 
 
+CAP_FLOOR_V, CAP_CEIL_V = 0.04, 0.054      # caption sizes of a vertical film, as shares of its height
+
+
 def voices(ctx):
     dna = ctx.dna
     pair = dna.get("pair") or {}
     if isinstance(pair, (list, tuple)) and len(pair) == 2:
         pair = {"a": pair[0], "b": pair[1]}
     safe = {"a": ("InterDisplay-Bold.ttf", 0.03, -3), "b": ("InstrumentSerif-Italic.ttf", 0.034, 0)}
+    got = {}
     for key in ("a", "b"):
         font, size, track = parse_font_spec(pair.get(key)) if isinstance(pair, dict) and pair.get(key) else (None, None, None)
         if font is None:
             if isinstance(pair, dict) and pair.get(key):
                 ctx.find(f"font {pair.get(key)!r} is not in the set, safety font used")
             font = safe[key][0]
-        size = size if size else safe[key][1]
+        got[key] = (font, size if size else safe[key][1], track)
+    # A vertical film is read on a phone at arm's length: the plain voice is never under CAP_FLOOR_V of the frame's
+    # height, and the second voice keeps its step over it (round six: the rater and the critic both read the captions
+    # of the round-five films as tiny, and a customer's own film was kept for its readable ones).
+    lift = max(1.0, CAP_FLOOR_V / max(got["a"][1], 1e-6)) if ctx.governed and ctx.H > ctx.W else 1.0
+    for key in ("a", "b"):
+        font, size, track = got[key]
         if ctx.governed:
-            size = clamp(size, 0.022, 0.05)        # P5: a caption is read on a phone: 28 px at 720x1280 or more
+            size = clamp(size * lift, 0.022, 0.05 if lift == 1.0 else CAP_CEIL_V)        # P5: a caption is read on a phone: 28 px at 720x1280 or more
         ctx.voices[key] = {"font": font, "px": max(14, int(round(size * ctx.H))), "track": safe[key][2] if track is None else track}
         sh = dna.get("shadow", {"a": 0.35, "blur": 0.012})
         if sh:
@@ -1669,6 +1679,14 @@ def picture_fields(ctx, b, ref, a, z, W=None, H=None, src=None):
                 ctx.cam_marks.sort(key=lambda m: m[0])
             else:
                 out["crop"] = settled_take(ctx, ref, asset, out.get("src"), n, rng, a, base)
+        elif ctx.governed and asset["kind"] == "image" and ref.get("kind") == "asset" and str(ref["asset"]).startswith("bin:") \
+                and (W, H) == (ctx.W, ctx.H) and not ref.get("cam") and not isinstance(ref.get("crop"), str) and _pace_on():
+            # a found still on the frame (score.pace): framed on its subject, heads whole, and never standing still
+            from . import pace
+            wr = None
+            if ref.get("crop") is not None or (isinstance(ref.get("zoom"), (int, float)) and not isinstance(ref.get("zoom"), bool) and ref["zoom"] > 1):
+                wr = base_rect(ctx, ref, asset, t, W, H, rng, 0)
+            out["crop"] = pace.still_path(ctx, ref["asset"], asset, W, H, n, rng, part=int(ref.get("_part") or 0) or min(repeat, 2), written=wr)
         else:
             base = tracked_crop(ctx, ref, asset, out.get("src"), W, H, n) or base_rect(ctx, ref, asset, t, W, H, rng, repeat)
             cam = ref.get("cam") or ctx.dna.get("cam")
@@ -1991,6 +2009,11 @@ FRAMED_LOSS = 2.0          # a still this many times wider than the frame's shap
 FRAMED_W, FRAMED_Y = 0.9, 0.42
 
 
+def _pace_on():
+    from . import pace
+    return pace.on()
+
+
 def framed_rect(ctx, f):
     """Where a framed still rests at this frame, settled, in frame fractions, or None."""
     for c in ctx.items:
@@ -2007,6 +2030,8 @@ def framed_still(ctx, ref):
     is shown whole: framed on the film's plate, the way the folder sets its archive pictures."""
     if not ctx.governed or ctx.H <= ctx.W or ref.get("kind") != "asset" or ref.get("crop") is not None:
         return False
+    if _pace_on() and str(ref.get("asset")).startswith("bin:"):
+        return False           # round six: it fills the frame on its subject and the camera travels it (score.pace.still_path)
     z = ref.get("zoom")
     if isinstance(z, (int, float)) and not isinstance(z, bool) and z > 1:
         return False
@@ -2238,19 +2263,28 @@ def plan_shots(ctx):
         if ctx.governed:
             lens = on_the_breath(ctx, b, lens)
         t = b.pf0
-        for j, d in enumerate(lens):
-            ref = b.pics[j % len(b.pics)]
-            sid = f"{b.id}.s{j}"
-            if ctx.governed and ref.get("asset") != "main" and ref.get("kind") != "plate":
-                gone = _gone(ctx, sid, "picture", None)        # the last look, or the floor: the take stands in
+        from . import pace
+        for j, d0 in enumerate(lens):
+            ref0 = b.pics[j % len(b.pics)]
+            sid0 = f"{b.id}.s{j}"
+            if ctx.governed and ref0.get("asset") != "main" and ref0.get("kind") != "plate":
+                # the last look, or the floor: the take stands in. A picture cut into parts goes whole when any part was named
+                gone = _gone(ctx, sid0, "picture", None) or next((_gone(ctx, k, "picture", None) for k in list(ctx.cuts) if pace.parent(k) == sid0 and k != sid0), None)
                 if gone:
-                    ctx.taste_rows.append({"id": sid, "did": gone[0], "why": gone[1], "dept": "picture"})
-                    ref = {"kind": "main", "asset": "main", "sync": True}
-            b.shots += emit_ref(ctx, b, ref, t, t + d, sid)
-            if ref.get("_cam"):
-                ctx.cam_land.setdefault(ref["_cam"], t)
-                ctx.cam_len[ref["_cam"]] = ctx.cam_len.get(ref["_cam"], 0) + d
-            t += d
+                    ctx.taste_rows.append({"id": sid0, "did": gone[0], "why": gone[1], "dept": "picture"})
+                    ref0 = {"kind": "main", "asset": "main", "sync": True}
+            # the judge's pace (score.pace): a found picture held about a second or more is cut inside itself
+            cut = pace.parts(ctx, b, sid0, ref0, d0, rng_for(ctx.seed, "parts", sid0), at=t) if ctx.governed else [(sid0, ref0, d0)]
+            for sid, ref, d in cut:
+                its = emit_ref(ctx, b, ref, t, t + d, sid)
+                if ref.get("_punch") is not None:           # a framing of the take cut inside a wordless stretch (score.pace, score.move)
+                    for it in its:
+                        it["punch"] = int(ref["_punch"])
+                b.shots += its
+                if ref.get("_cam"):
+                    ctx.cam_land.setdefault(ref["_cam"], t)
+                    ctx.cam_len[ref["_cam"]] = ctx.cam_len.get(ref["_cam"], 0) + d
+                t += d
         ctx.shots += b.shots
 
 
@@ -2804,6 +2838,11 @@ def build_captions(ctx):
     reflowed, or swapped whole, as the DNA says. A caption holds through cuts."""
     cfg = cap_cfg(ctx)
     layout = cfg.get("layout", "prelaid")
+    if ctx.governed and layout == "chunk" and os.environ.get("VALMERA_CAP_BUILD", "1") != "0":
+        # round six: a chunk is written word by word as the voice says it, each word where it will stay (all eight of
+        # the judge's reels build their captions; ours swapped whole chunks, which the rater read as plain). The chunk's
+        # words, seat and length are the Score's: only the moment each word appears changes.
+        layout = "prelaid"
     chunks = []
     said = " ".join(ctx.text.values())
     if joined_script(said):
@@ -5909,8 +5948,11 @@ def compile_facts(ctx, l1, cuts, per_frame):
         kind = "light_touch"
     else:
         kind = "edited"
-    # the upload again but for its colour: no picture added, no cut moved, type on under an eighth of it (film.bare)
-    bare = refills == 0 and not cuts and overlay < 0.12
+    # the upload again but for its colour: no picture added, no cut moved, type on under an eighth of it (film.bare).
+    # A wordless stretch cut inside itself (score.pace) is the compiler's own doing, not a film anyone directed: with
+    # nothing else on it the film is still bare, and today's first cut is delivered
+    punched = {s["f"][0] for s in shots if s.get("punch")}
+    bare = refills == 0 and not [c for c in cuts if c not in punched] and overlay < 0.12
     return {"class": kind, "bare": bare, "opening_changed": opening, "new_sources": len(sources), "plates": plates, "pictures_added": refills,
             "overlay_pct": round(overlay * 100), "reframed_pct": round(moved / D * 100), "grade_applied": grade, "sfx_added": len(l1["sound"]),
             "design_items10": round(designed / max(ctx.dur_f / ctx.fps, 1e-3) * 10, 1)}
@@ -6417,6 +6459,10 @@ def compile_once(text, index, work_dir, bin_items, tray, faces, sid, owner, seed
     build_spine(ctx)
     asset_for(ctx, "main")
     plan_shots(ctx)
+    if governed:
+        from . import move, pace
+        pace.soft_in(ctx)
+        ctx.punch_rep = move.punch_takes(ctx)          # the wordless stretches cut inside themselves get their framings, or are one shot again
     ctx.planned = {x["id"]: list(x["f"]) for x in ctx.shots}
     ctx.waiting = []
     run_gestures(ctx)
@@ -6506,6 +6552,8 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
     l1 = sound.apply(l1, work_dir, index, perc, ctx.asks or None, (facts or {}).get("supply"), turn_s=turn_s)
     m = meter(ctx, l1)
     if governed:
+        from . import pace
+        m["pace"] = pace.report(ctx)
         m["taste"] = taste_meter(ctx, facts, rounds)
         m["findings"] = list(ctx.findings)
         m["hold_s"] = hold_s
@@ -6514,6 +6562,9 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
         try:
             from . import move
             rep = move.ease_takes(ctx)
+            pr = getattr(ctx, "punch_rep", None) or {}
+            if pr.get("punched") or pr.get("fault") or pr.get("why_held"):
+                rep["punched"], rep["punch_held"] = pr.get("punched") or 0, pr.get("why_held") or pr.get("fault")
             if rep.get("moved") or rep.get("stills"):
                 l1e = to_l1(ctx)
                 l1e["sound"] = l1["sound"]

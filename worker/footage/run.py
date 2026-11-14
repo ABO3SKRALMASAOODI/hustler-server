@@ -12,11 +12,13 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import time
 
 from . import cut, fetch, hear, identity, look, plan, search, shots
 
 MAX_SOURCES = 16
+WHOLE_UNDER_S = 600.0      # a caller that reads only a source's head still fetches a source this short whole (no section cut)
 HEAR_MAX_S = 480.0         # a source's first 8 minutes are heard; its shots are read to PROXY_MAX_S
 PER_SUBJECT = 3
 WORDS_PER_S = 2.8
@@ -30,18 +32,24 @@ def _line_dur(ln):
     return max(1.2, len(str(ln.get("say") or "").split()) / WORDS_PER_S + float(ln.get("pause_after") or 0.2))
 
 
-def _open(src, work, log):
-    """Proxy, shots and transcript of one source; the error on the source when it could not be read."""
+def _open(src, work, log, hear_s=None, read_s=None):
+    """Proxy, shots and transcript of one source; the error on the source when it could not be read. hear_s: seconds
+    heard (0: none, the shots alone). read_s: seconds of the source read."""
     d = os.path.join(work, "src", src["key"])
     t0 = time.monotonic()
+    hear_s = HEAR_MAX_S if hear_s is None else float(hear_s)
+    read_max = float(read_s) if read_s else fetch.PROXY_MAX_S
     try:
-        p, rung = fetch.proxy(src["url"], d, src.get("duration"))
+        # a short source is fetched whole even when only its head is read: yt-dlp cuts a section with ffmpeg on the
+        # resolved stream, which YouTube refuses from a proxy route more often than not (the box, 14 Nov: 2 of 8)
+        whole = bool(read_s) and src.get("duration") and float(src["duration"]) <= WHOLE_UNDER_S
+        p, rung = fetch.proxy(src["url"], d, src.get("duration"), max_s=WHOLE_UNDER_S if whole else read_max)
         info = shots.probe(p)
-        upto = min(info["dur"], fetch.PROXY_MAX_S)
+        upto = min(info["dur"], read_max)
         src.update(proxy=p, rung=rung, dur_read=round(upto, 1), w=info["w"], h=info["h"])
         src["shots"] = shots.cuts(p, upto)
-        if info.get("audio"):
-            src["transcript"], src["hear_usd"] = hear.transcribe(p, min(upto, HEAR_MAX_S))
+        if info.get("audio") and hear_s > 0:
+            src["transcript"], src["hear_usd"] = hear.transcribe(p, min(upto, hear_s))
         else:
             src["transcript"], src["hear_usd"] = [], 0.0
         log(f"source {src['key']} {src['title'][:50]!r}: {len(src['shots'])} shots, {len(src['transcript'])} pieces heard, "
@@ -100,9 +108,13 @@ def _twin(a, b, n=28):
     return len(ka) >= 16 and len(kb) >= 16 and ka[:n] == kb[:n]
 
 
-def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MAX_SOURCES, keep_work=False, anchors=None, avoid=None):
+def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MAX_SOURCES, keep_work=False, anchors=None, avoid=None,
+         hear_s=None, read_s=None, per=None):
     """anchors: {person's name: [photo paths already checked as that person]} for the identity step.
-    avoid: [{"url", "time_range"}] already cut for this film by an earlier run: those seconds of a source are not cut again."""
+    avoid: [{"url", "time_range"}] already cut for this film by an earlier run: those seconds of a source are not cut again.
+    hear_s, read_s, per: a caller with a deadline (a first film, score.film) hears less or nothing of each source, reads
+    less of it and opens fewer sources a subject; None keeps the engine's own (HEAR_MAX_S, fetch.PROXY_MAX_S, PER_SUBJECT)."""
+    per = int(per) if per else PER_SUBJECT
     t_all = time.monotonic()
     os.makedirs(os.path.join(out_dir, "clips"), exist_ok=True)
     os.makedirs(os.path.join(out_dir, "sheets"), exist_ok=True)
@@ -122,8 +134,10 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         for k, (si, _) in enumerate(flat):
             have = {h["id"] for h in hits.get(si, [])}
             hits.setdefault(si, []).extend(h for h in found.get(k) or [] if h["id"] not in have)
-        # 3. which sources to open
-        kept, spend["rank"] = plan.rank(subjects, hits, per=PER_SUBJECT)
+        # 3. which sources to open. A caller with a deadline is offered the short sources first: they open whole and fast
+        if read_s:
+            hits = {si: ([h for h in hs if h.get("duration") and float(h["duration"]) <= WHOLE_UNDER_S] or hs) for si, hs in hits.items()}
+        kept, spend["rank"] = plan.rank(subjects, hits, per=per)
         sources, by_id = [], {}
         for si, h, why in kept:
             if h["id"] in by_id:
@@ -154,7 +168,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 log(f"anchors for {sub['name']}: {len(anchors[sub['name']])} checked photographs")
         # 4. open them: proxy, shots, transcript
         with cf.ThreadPoolExecutor(max_workers=4) as pool:
-            sources = list(pool.map(lambda s: _open(s, work, log), sources))
+            sources = list(pool.map(lambda s: _open(s, work, log, hear_s, read_s), sources))
         # 4b. what YouTube would not open (it takes a machine for a bot, a video is gone) is looked for on archive.org:
         #     the same film under its own title first (the film libraries upload to both), then, for a subject none
         #     of whose sources opened, that subject's own searches among archive.org's moving images
@@ -177,7 +191,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             for k, (si, _) in enumerate(flat2):
                 have = {h["id"] for h in hits2.get(si, [])} | set(by_id)
                 hits2.setdefault(si, []).extend(h for h in found2.get(k) or [] if h["id"] not in have)
-            kept2, ru = plan.rank(subjects, hits2, per=PER_SUBJECT) if any(hits2.values()) else ([], 0.0)
+            kept2, ru = plan.rank(subjects, hits2, per=per) if any(hits2.values()) else ([], 0.0)
             spend["rank"] += ru
             for si, h, why in kept2:
                 if h["id"] in by_id:
@@ -190,7 +204,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             log(f"archive round: {len(failed)} sources would not open, {len(dead)} subjects had none; {len(more)} archive sources to open")
         if more:
             with cf.ThreadPoolExecutor(max_workers=4) as pool:
-                sources += list(pool.map(lambda s: _open(s, work, log), more))
+                sources += list(pool.map(lambda s: _open(s, work, log, hear_s, read_s), more))
         spend["hear"] = round(sum(s.get("hear_usd") or 0.0 for s in sources), 5)
         live = [s for s in sources if not s.get("error") and s.get("shots")]
         # 5. moments and the picture check, per subject
@@ -301,6 +315,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         with cf.ThreadPoolExecutor(max_workers=4) as pool:
             stream_of = dict(pool.map(resolve, need_src))
         jobs = [(r, p) for r in plan_rows for p in r["picks"]]
+        whole_of, whole_lock = {}, threading.Lock()
 
         def grab(job):
             r, p = job
@@ -309,10 +324,28 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             raw = os.path.join(work, "raw", f"l{r['i']:02d}_{p['source']}_{int(t0 * 100)}.mp4")
             os.makedirs(os.path.dirname(raw), exist_ok=True)
             try:
-                _, how = cut.grab(stream_of.get(p["source"]), s["url"], t0, t1, raw)
+                try:
+                    if p["source"] in whole_of:              # this source's sections already failed once: its whole copy is used
+                        raise fetch.FetchError("sections of this source do not come")
+                    _, how = cut.grab(stream_of.get(p["source"]), s["url"], t0, t1, raw)
+                except Exception as e:  # noqa: BLE001
+                    if not (read_s and s.get("duration") and float(s["duration"]) <= WHOLE_UNDER_S and s.get("where") == "youtube"):
+                        raise
+                    with whole_lock:                         # one whole fetch a source, whoever asks first
+                        if p["source"] not in whole_of:
+                            try:
+                                whole_of[p["source"]] = fetch.whole(s["url"], os.path.join(work, "whole", p["source"]))
+                                log(f"source {p['source']} fetched whole for its cuts ({str(e)[:60]})")
+                            except Exception as e2:  # noqa: BLE001
+                                whole_of[p["source"]] = None
+                                log(f"source {p['source']} would not come whole either: {str(e2)[:120]}")
+                    if not whole_of.get(p["source"]):
+                        raise
+                    _, how = cut.local(whole_of[p["source"]], t0, t1, raw)
                 p.update(raw=raw, t0=t0, t1=t1, how=how, stats=cut.measure(raw))
             except Exception as e:  # noqa: BLE001 the line keeps its other clips
                 p["error"] = str(e)[:200]
+                log(f"cut of {p['source']} at {t0:.1f} s failed: {p['error'][:140]}")
             return p
         with cf.ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(grab, jobs))

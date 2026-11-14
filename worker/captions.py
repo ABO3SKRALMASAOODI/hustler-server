@@ -89,7 +89,11 @@ DEFAULT_STYLE = {"color": "#FFFFFF", "size": "m", "position": "bottom",
                  "outline_color": None, "outline_width": None,
                  "shadow": None, "background_color": None,
                  "background_opacity": None, "tracking": None,
-                 "text_align": None, "anchor_y": None, "single_line": None}
+                 "text_align": None, "anchor_y": None, "single_line": None,
+                 # the line's own left/right edge for a left/right-aligned
+                 # dictated item (score.lower's word-by-word build); None =
+                 # the preset's side margin
+                 "anchor_x": None}
 
 # Every style key that flows from the EDL into a render. Kept as ONE tuple
 # because it has to be applied in three places (_norm_style, write_ass's
@@ -103,12 +107,12 @@ STYLE_KEYS = ("color", "size", "position", "highlight_color", "animation",
               "size_scale", "preset", "font", "effect", "layout", "leading",
               "emphasis", "emphasis_scale", "outline_color", "outline_width",
               "shadow", "background_color", "background_opacity", "tracking",
-              "text_align", "anchor_y", "single_line")
+              "text_align", "anchor_y", "single_line", "anchor_x")
 # Keys whose value is meaningful when falsy (0, 0.0) and so must NOT be copied
 # with a truthiness test.
 STYLE_KEYS_NUMERIC = ("leading", "emphasis_scale", "size_scale",
                       "outline_width", "shadow", "background_opacity",
-                      "tracking", "anchor_y")
+                      "tracking", "anchor_y", "anchor_x")
 # Fields where False is an authored value rather than an omission. Keeping
 # this separate from numeric fields makes partial restyles able to turn a
 # previously enabled contract off without changing any historical default.
@@ -2054,12 +2058,17 @@ def _geom_prefix(p, s, play_res, lines, treats, px):
     block_h = _geom_block_h(p, lines, treats, px)
     edge = 0.03 * H
     align = _align_of(p, s)
+    # anchor_x (14 Nov 2026): the line's own edge, so a dictated line that is
+    # written one word longer each time keeps every earlier word in place.
+    ax = s.get("anchor_x")
     if align == "left":
-        x = round(PREMIUM_MARGIN_X["left"] * W)
+        x = round(PREMIUM_MARGIN_X["left"] * W) if ax is None \
+            else round(min(max(float(ax), 0.0), 1.0) * W)
         y = max(edge, min(anchor - block_h / 2, H - block_h - edge))
         return rf"{{\an7\pos({x},{round(y)})}}"
     if align == "right":
-        x = round(W - PREMIUM_MARGIN_X["right"] * W)
+        x = round(W - PREMIUM_MARGIN_X["right"] * W) if ax is None \
+            else round(min(max(float(ax), 0.0), 1.0) * W)
         y = max(edge, min(anchor - block_h / 2, H - block_h - edge))
         return rf"{{\an9\pos({x},{round(y)})}}"
     x = round(W / 2)

@@ -3694,6 +3694,17 @@ def run(worker_db, job, project, index_row):
             # Q8: delivered on the draft; the approval render is on its way
             meta["upgrading"] = True
         worker_db.run(dbx.add_message, session_id, "assistant", text, meta)
+        if picked and picked.get("how") == "director" and \
+                getattr(ctx, "director_upgrade", None):
+            # The quick film is the customer's now. Real footage the
+            # engine is still fetching joins it as the next version, with
+            # its own line (score.film.upgrade; footage switch accounts).
+            _director_upgrade(ctx, worker_db, job, session_id, started,
+                              steps, picked, meta)
+            try:
+                latest = ctx.latest_edl() or latest
+            except Exception:  # noqa: BLE001
+                pass
         try:
             worker_db.run(dbx.record_client_event, job["user_id"],
                           job["project_id"], "free_result_delivered",
@@ -3914,6 +3925,45 @@ def _director_close(ctx):
         film.close(ctx)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _director_upgrade(ctx, worker_db, job, session_id, started, steps,
+                      picked, meta):
+    """The quick film, then the upgraded one (lane K round six, 14 Nov 2026).
+
+    The footage engine needs minutes and a first film has a deadline, so
+    the film the customer just got was cut on the pictures Supply found.
+    When the engine's clips arrive (score.film.upgrade waits for them, and
+    stops waiting the moment the customer asks for anything), they take the
+    place of the stills of the same subjects as the next version, which is
+    rendered once and announced in one line. Nothing here can take the
+    first film away: every failure leaves it on screen. Never raises."""
+    try:
+        from score import film
+        got = film.upgrade(ctx, worker_db, job, started)
+        if not got:
+            return
+        render = _render_cut(ctx, steps, dict(picked, footage=True))
+        if _failed(render) or not _on_screen(ctx):
+            # The player still shows the first film: the project goes back
+            # to it, so what is on screen is what the next request edits.
+            if got.get("was") is not None:
+                ctx.apply_score(got["was"], "the First cut as it was")
+            return
+        latest = ctx.latest_edl()
+        preview = getattr(ctx, "last_preview", None) or {}
+        named = [str(n) for n in got.get("named") or [] if n]
+        what = ", ".join(named[:3]) if named else "what you talk about"
+        text = (f"I've added real footage of {what} to your film. It's "
+                "playing in the player. If you'd rather have it without, "
+                "tell me and I'll take it out.")
+        more = dict(meta, edl_version=latest["version"], preview=preview)
+        more["first_cut"] = dict(meta.get("first_cut") or {}, footage={
+            "clips": got.get("clips"), "sources": got.get("sources")})
+        worker_db.run(dbx.add_message, session_id, "assistant", text, more)
+    except Exception as exc:  # noqa: BLE001 — the first film stands
+        print(f"[first_cut] footage upgrade skipped: {type(exc).__name__}: "
+              f"{str(exc)[:200]}", flush=True)
 
 
 def _film_fell_at_render(ctx, worker_db, job, started, spend, steps,

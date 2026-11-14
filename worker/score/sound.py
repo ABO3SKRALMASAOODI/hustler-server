@@ -506,6 +506,8 @@ def l1_events(l1, kshots=()):
             else:
                 a = assets.get(str(s.get("pic"))) or {}
                 ev.append({"f": f, "kind": "picture", "id": s["id"], "still": a.get("kind") == "image" or k[0] == "framed"})
+        elif last is not None and k[0] == "take" and s.get("punch"):
+            ev.append({"f": f, "kind": "cut", "id": s["id"]})      # the take cut inside itself to a new framing (score.pace): a cut the eye sees
         last = k
         if k[0] == "take" and s.get("src") and kshots:      # the upload's own cuts inside one shot of it
             a0, z0 = float(s["src"][0]), float(s["src"][1])

@@ -86,12 +86,121 @@ def fell(ctx, worker_db, job, stage, reason, usd=0.0, start_edl=None):
     close(ctx)
 
 
+UPGRADE_BY_S = 540.0   # seconds from the First cut job's start: footage that is not there by then is not waited for (the box, 14 Nov: 397 s for ten clips)
+UPGRADE_POLL_S = 2.0   # how often the wait asks whether the customer typed something
+
+
 def close(ctx):
-    """The film's folder goes when nothing more will read it."""
+    """The film's folder goes when nothing more will read it. A film whose real footage is still being fetched keeps
+    it for `upgrade`: the quick film is the customer's now, and the footage joins it when it arrives."""
     st = getattr(ctx, "director_state", None)
     ctx.director_state = None
+    box = (st or {}).get("footage")
+    if st and box is not None and st.get("acquire") and not st.get("footage_joined") and getattr(ctx, "director_version", None) is not None \
+            and (box.get("offers") or (box.get("thread") is not None and box["thread"].is_alive())):
+        ctx.director_upgrade = st
+        return
     if st and st.get("work"):
         shutil.rmtree(st["work"], ignore_errors=True)
+
+
+def _bed_again(ctx, work, comp, text, about=""):
+    """A film written again at another length (the look took a beat out, footage came in) is not the film its bed was
+    cut for: lane MUSIC2's arranged track would give way to the plain bed. The track is cut for this film instead.
+    Nothing happens when the length held, which is nearly always; never raises."""
+    try:
+        from . import bed, compiler
+        doc = bed.chosen(work)
+        arr = (doc or {}).get("arranged")
+        if not arr:
+            return
+        prog = float(comp.l1["dur_f"]) / float(comp.l1["fps"])
+        if abs(float(arr.get("dur_s") or 0.0) - prog) <= 0.15:
+            return
+        bed.settle(work, comp, getattr(ctx, "index", None) or {}, compiler.parse_score(text)[0], about)
+    except Exception as exc:  # noqa: BLE001 - the plain bed plays
+        print(f"[director] bed not cut again: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
+
+
+def _request_waiting(conn, project_id, job_id):
+    """A request of the customer's is queued behind this job (one editor a project: it runs when this job ends)."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT 1 FROM video_jobs WHERE project_id = %s AND id <> %s AND state = 'queued'
+                          AND type IN ('agent_turn', 'first_cut') LIMIT 1""", (int(project_id), int(job_id)))
+        return cur.fetchone() is not None
+
+
+def upgrade(ctx, worker_db, job, started):
+    """The quick film, then the upgraded one (round six). The footage engine takes minutes and the first film has a
+    deadline, so the film went out on the pictures Supply found. Here, after the customer has that film and its
+    reply, the job waits for the engine (to UPGRADE_BY_S from its start, and not one poll longer once the customer
+    asks for anything), sets the clips in place of the stills of the same subjects (footage_into: the same cuts, the
+    same lengths, nothing else changed, no model) and writes that as the next version. Returns {"clips", "named",
+    "edl_version", "applied"} when a version was written (the caller renders it and says so), else None. Never
+    raises; the film on screen stands on every other path. Only an account the footage switch opens gets here."""
+    st = getattr(ctx, "director_upgrade", None)
+    ctx.director_upgrade = None
+    if not st:
+        return None
+    from . import compiler, lower
+    rec, out = {}, None
+    work, box = st["work"], st["footage"]
+    try:
+        th = box.get("thread")
+        by = started + UPGRADE_BY_S
+        while th is not None and th.is_alive() and time.monotonic() < by:
+            th.join(UPGRADE_POLL_S)
+            try:
+                if worker_db.run(_request_waiting, ctx.project_id, job.get("id")):
+                    rec["skipped"] = "the customer asked for something: their request runs now"
+                    return None
+            except Exception:  # noqa: BLE001 - unread: the wait goes on to its own deadline
+                pass
+        rec["waited_s"] = round(time.monotonic() - started, 1)
+        if "offers" not in box:
+            rec["skipped"] = f"the footage was not there {UPGRADE_BY_S:.0f} s into the job"
+            return None
+        row = ctx.latest_edl()
+        if not row or row.get("version") != getattr(ctx, "director_version", None):
+            rec["skipped"] = "the film on screen is no longer the one this footage was found for"
+            return None
+        full = footage_into(work, st["text"], box, st.get("acquire"))
+        if full is None:
+            rec["skipped"] = box.get("error") or "no clip of a subject the film shows a still of"
+            return None
+        text, rows = full
+        comp2 = compiler.compile_score(text, work_dir=work)
+        if bare(comp2) or comp2.json() == st["comp"].json():
+            rec["skipped"] = "the footage changed nothing on screen"
+            return None
+        bin_doc = dict(st.get("bin_doc") or {}, items=list((st.get("bin_doc") or {}).get("items") or []) + rows)
+        _bed_again(ctx, work, comp2, text, st.get("about") or "")
+        edl, locals_, rep = lower.lower(comp2.l1, work)
+        edl = _publish(ctx, worker_db, edl, locals_, bin_doc, st["original_key"])
+        result = ctx.apply_score(edl, "the Director's First cut, with real footage")
+        if not str(result).startswith("EDL v"):
+            rec["error"] = f"write: {str(result)[:200]}"
+            return None
+        ctx.director_version = (ctx.versions_written or [None])[-1]
+        named = []
+        for r in rows:
+            if r.get("named") and r["named"] not in named:
+                named.append(r["named"])
+        out = {"clips": len(rows), "named": named[:4], "edl_version": ctx.director_version, "applied": _applied(rep, comp2.l1, bin_doc), "was": row.get("json"),
+               "sources": sorted({str(r.get("page")) for r in rows})[:8]}
+        rec.update({k: out[k] for k in ("clips", "named", "edl_version", "sources")}, engine_s=box.get("seconds"), usd=box.get("usd"))
+        _event(worker_db, job, "director_footage", {"job_id": job.get("id"), "clips": len(rows), "edl_version": ctx.director_version,
+                                                    "engine_s": box.get("seconds"), "sources": out["sources"]})
+        return out
+    except Exception as exc:  # noqa: BLE001 - the quick film stands
+        rec["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+        print(f"[director] job {job.get('id')}: the footage did not join the film: {rec['error']}", flush=True)
+        return None
+    finally:
+        phases = dict(getattr(ctx, "first_cut_phases", None) or {})
+        phases["director"] = dict(phases.get("director") or {}, footage_later=rec)
+        ctx.first_cut_phases = phases
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def look_on():
@@ -156,6 +265,7 @@ def last_look(ctx, worker_db, job, started, spend, trial_scope, proof=None):
                 rec["footage_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
         if full is not None:
             st["text"], rows = full
+            st["footage_joined"] = True
             st["bin_doc"] = dict(st.get("bin_doc") or {}, items=list((st.get("bin_doc") or {}).get("items") or []) + rows)
             rec["footage"] = {"clips": len(rows), "seconds": (st.get("footage") or {}).get("seconds"),
                               "sources": sorted({str(r.get("page")) for r in rows})[:8]}
@@ -197,6 +307,7 @@ def last_look(ctx, worker_db, job, started, spend, trial_scope, proof=None):
                 return None
             text = taste.floor_text(st["text"])       # the start state could not be written: the plain film, as before
             comp2 = compiler.compile_score(text, work_dir=work)
+        _bed_again(ctx, work, comp2, text if v["remove"] and what != "film" else st["text"], st.get("about") or "")
         edl, locals_, rep = lower.lower(comp2.l1, work)
         edl = _publish(ctx, worker_db, edl, locals_, st["bin_doc"], st["original_key"])
         result = ctx.apply_score(edl, "the Director's First cut, after the last look")
@@ -205,6 +316,8 @@ def last_look(ctx, worker_db, job, started, spend, trial_scope, proof=None):
             return None
         ctx.director_first = {"edl": st["edl"], "version": getattr(ctx, "director_version", None)}
         ctx.director_version = (ctx.versions_written or [None])[-1]
+        if v["remove"] and what != "film":          # what `upgrade` builds on is the film as the look left it
+            st["text"], st["comp"] = text, comp2
         t = comp2.meter.get("taste") or {}
         rec.update(edl_version=ctx.director_version, counts=rep.get("counts"), removed=v["remove"][:24])
         _event(worker_db, job, "director_taste", {
@@ -502,8 +615,8 @@ def footage_into(work, text, box, acquire, most=8):
     """The Score with real footage in it, or None when there is none to add. Each clip the engine cut (checked there:
     it shows its subject, and a person's clips are held to that person's face) joins the Bin with its source and
     credit, and takes the place of one still of the same moment in the film: the same cut, the same length, now a
-    moving picture of the real thing. Nothing else in the Score changes, no model is called, and a moment the film
-    showed no picture for gets none. Returns (score text, [new Bin rows])."""
+    moving picture of the real thing. A moment the film showed no picture for gets its clip cut in on its word
+    (_place_clips). Nothing else in the Score changes and no model is called. Returns (score text, [new Bin rows])."""
     from . import compiler, direct
     offers = [c for c in (box or {}).get("offers") or [] if isinstance(c, dict) and c.get("kind") == "video"]
     if not offers:
@@ -535,15 +648,19 @@ def footage_into(work, text, box, acquire, most=8):
             stills.setdefault(key, []).append(f"bin:{it['id']}")
     lines, _bad = compiler.parse_score(text)
     lines = [direct.clean(o) for o in lines]
-    used, rows, swapped = {}, [], 0
+    used, rows, swapped, took = {}, [], 0, {}
 
     def clip_for(key):
         """The next clip of this moment as a Bin row, acquired once."""
         pool = by_for.get(key) or []
         n = used.get(key, 0)
-        if not pool:
-            return None
-        c = pool[n % len(pool)]
+        while n < len(pool) and pool[n].get("_row") is None and not _reads(pool[n].get("_img")):
+            pool[n]["_row"] = False                    # a frame that is mostly black, or flat: the cover crop missed what the clip shows
+            n += 1
+        if n >= len(pool):
+            used[key] = n
+            return None                                # every clip of this subject is in the film once: the next still stays a still
+        c = pool[n]
         used[key] = n + 1
         if c.get("_row") is None:
             if len(rows) >= most:
@@ -576,17 +693,28 @@ def footage_into(work, text, box, acquire, most=8):
         key = next((k for k, v in stills.items() if head in v), None)
         if key is None:
             return ref
-        new = clip_for(key)
+        if head not in took:                           # a still that comes back (a callback) comes back as the same clip
+            took[head] = clip_for(key)
+        new = took[head]
         if new is None:
             return ref
         swapped += 1
-        return new if isinstance(ref, str) else dict({k: v for k, v in ref.items() if k not in ("crop", "zoom", "cam")}, src=new)
+        # the framing, the move and the finish were written for the still (an old photograph in black and white): the clip is another picture
+        return new if isinstance(ref, str) else dict({k: v for k, v in ref.items() if k not in ("crop", "zoom", "cam", "treat")}, src=new)
     for o in lines:
         if o.get("k") == "b" and o.get("pic") is not None:
             o["pic"] = [swap(r) for r in o["pic"]] if isinstance(o["pic"], list) else swap(o["pic"])
         elif o.get("k") == "pics" and isinstance(o.get("of"), list):
             o["of"] = [swap(r) for r in o["of"]]
-    if not swapped or not rows:
+    placed = 0
+    try:                 # a moment the film showed no picture for (Supply found none in time): its clip is cut in on its word
+        def bin_now():      # the compiles below read the Bin from the folder: the clips that joined so far are in it
+            with open(os.path.join(work, "bin.json"), "w") as f:
+                json.dump(dict(doc, items=items + rows), f, ensure_ascii=False, indent=1)
+        placed = _place_clips(work, lines, wishes, offers, by_for, used, clip_for, name_of, rows, bin_now)
+    except Exception as exc:  # noqa: BLE001 - the clips that took a still's place stand
+        print(f"[director] footage not cut in on its words: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
+    if not (swapped or placed) or not rows:
         return None
     doc["items"] = items + rows
     doc["credits"] = list(doc.get("credits") or []) + [f"{r['what']}: {r['author'] or 'footage'}, {r['licence']}, {r['page']}" for r in rows]
@@ -595,17 +723,183 @@ def footage_into(work, text, box, acquire, most=8):
     return direct.dump(lines), rows
 
 
+def _reads(img):
+    """A clip's frame, as it was cut to the film's shape, shows something: under three fifths of it is near black and
+    it is not one flat tone. A clip of a person cut from a wide source can come out as the dark wall beside them
+    (p5591, 14 Nov: an elbow at the edge of a black frame, and the critic set the film under its upload for it)."""
+    try:
+        import numpy as np
+        a = np.asarray(img.convert("L").resize((48, 80)), dtype=np.float32)
+        return float((a < 31.0).mean()) < 0.6 and float(a.std()) >= 8.0
+    except Exception:  # noqa: BLE001 - unread: the engine's own check stands
+        return True
+
+
+INSERT_F = 36          # a clip cut in on a moment the film showed no picture for plays this long (1.2 s)
+INSERT_GAP_F = 54      # and no two of them land closer than this
+INSERT_MOST = 6
+
+
+def _place_clips(work, lines, wishes, offers, by_for, used, clip_for, name_of, rows, bin_now):
+    """Real footage for the moments the film showed no picture for. The Scout wished a picture on those words, no
+    library had one, and the film was written on the take alone there; the engine has since cut a clip of that very
+    subject. The clip is cut in on the wish's first word, over the take, for INSERT_F frames: the beat's own `cut`
+    and `pic` are rewritten so the take plays to the word, the clip plays, the take comes back, and the voice runs
+    on under it. Never a beat whose shots another line names (an id would move), never two closer than
+    INSERT_GAP_F, never inside the first half second. The Score is compiled before and after: a film that does not
+    compile, or comes out another length, keeps none of them. Returns how many were cut in."""
+    import copy
+    import re
+    from . import compiler, direct
+    with open(os.path.join(work, "index.json"), encoding="utf-8") as f:
+        words = (json.load(f) or {}).get("words") or []
+    text0 = direct.dump(lines)
+    bin_now()
+    comp = compiler.compile_score(text0, work_dir=work)
+    l1 = comp.l1
+    fps = float(l1["fps"])
+    shots = sorted((i for i in l1["items"] if i["k"] == "shot"), key=lambda i: i["f"][0])
+    snapshot, n_rows = copy.deepcopy(lines), len(rows)
+    by_id = {o.get("id"): o for o in lines if o.get("k") == "b"}
+
+    def moment_s(w):
+        ref = w.get("w")
+        if isinstance(ref, int) or (isinstance(ref, str) and ref.strip()):
+            first = str(ref).split("-")[0].strip().lstrip("w")
+            if first.isdigit() and int(first) < len(words):
+                return float(words[int(first)].get("t0", words[int(first)].get("start", 0.0)) or 0.0)
+        return float(w["at"]) if isinstance(w.get("at"), (int, float)) and not isinstance(w.get("at"), bool) else None
+
+    def prog_f(t):
+        for sp in l1.get("spine") or []:
+            if sp["src"][0] <= t < sp["src"][1]:
+                return sp["f"][0] + int(round((t - sp["src"][0]) * fps))
+        return None
+
+    todo = []
+    for wi, w in enumerate(wishes):
+        pool = [c for c in offers if c.get("_wish") == wi]
+        if not pool:
+            continue
+        keys = [k for k in (name_of(pool[0].get("named")), "f:" + (f"w{w.get('w')}" if w.get("w") else str(w.get("at")))) if k in by_for]
+        if not keys or any(used.get(k) for k in keys):
+            continue                                   # its subject is on screen already, in a still's place
+        t = moment_s(w)
+        f = prog_f(t) if t is not None else None
+        if f is not None:
+            todo.append((f, keys[0]))
+    placed, last_f, beats_done = 0, -10 ** 9, set()
+    for f, key in sorted(todo):
+        if placed >= INSERT_MOST or f < fps // 2 or f - last_f < INSERT_GAP_F:
+            continue
+        shot = next((x for x in shots if x["f"][0] <= f < x["f"][1]), None)
+        m = re.match(r"^([A-Za-z][\w\-]*)\.s(\d+)", str((shot or {}).get("id") or ""))      # the Score's own ids: beat, then its picture's index
+        if not m or shot.get("pic") != "main" or shot.get("view") is not None or shot.get("treat"):
+            continue
+        bid, k_at = m.group(1), int(m.group(2))
+        o = by_id.get(bid)
+        if o is None or bid in beats_done or o.get("f") is not None or f"{bid}.s" in text0:
+            continue
+        groups = {}
+        for x in shots:
+            mm = re.match(r"^([A-Za-z][\w\-]*)\.s(\d+)", str(x.get("id") or ""))
+            if mm and mm.group(1) == bid:
+                g = groups.setdefault(int(mm.group(2)), [x["f"][0], x["f"][1]])
+                g[0], g[1] = min(g[0], x["f"][0]), max(g[1], x["f"][1])
+        order = sorted(groups)
+        if order != list(range(len(order))) or any(groups[a][1] != groups[b][0] for a, b in zip(order, order[1:])):
+            continue
+        pics = o.get("pic")
+        pics = pics if isinstance(pics, list) else [pics if pics is not None else "main"]
+        a, z = groups[k_at]
+        before = f - a
+        if before < 10:
+            before = 0
+        room = z - a - before
+        ln = INSERT_F if room >= INSERT_F + 10 else room if room >= 20 else 0
+        if not ln:
+            continue
+        new = clip_for(key)
+        if new is None:
+            continue
+        cut, pic = [], []
+        for k in order:
+            ref, n = pics[k % len(pics)], groups[k][1] - groups[k][0]
+            if k != k_at:
+                cut.append(n)
+                pic.append(ref)
+                continue
+            if before:
+                cut.append(before)
+                pic.append(ref)
+            cut.append(ln)
+            pic.append(new)
+            if room - ln > 0:
+                cut.append(room - ln)
+                pic.append(ref)
+        cut[-1] = 999                                  # the last picture takes what is left, as the Score's own lists do
+        o["cut"], o["pic"] = cut, pic
+        beats_done.add(bid)
+        placed, last_f = placed + 1, f
+    if not placed:
+        return 0
+    try:
+        bin_now()
+        comp2 = compiler.compile_score(direct.dump(lines), work_dir=work)
+        ok = comp2.l1["dur_f"] == l1["dur_f"] and not compiler.validate_l1(comp2.l1)
+    except Exception:  # noqa: BLE001
+        ok = False
+    if not ok:                                         # the film as it was: no clip is cut in, and none stays in the Bin for it
+        lines[:] = snapshot
+        for r in rows[n_rows:]:
+            for c in offers:
+                if c.get("_row") is r:
+                    c["_row"] = None
+        del rows[n_rows:]
+        bin_now()
+        return 0
+    return placed
+
+
 # ------------------------------------------------------------------ the film
+
+class _Payer:
+    """A paying account's first film (round six): no trial budget row and no pool. What its calls cost is the
+    company's and is counted here from score.call, so the job record carries it as a trial film's does."""
+    is_test = True          # nothing here reads or writes trial_budgets
+
+    def __init__(self, user_id):
+        self.user_id, self.spent_usd, self.cap_usd = user_id, 0.0, 0.0
+
 
 def attempt(ctx, worker_db, job, started, spend, trial_scope, subscribed):
     cfg = flags.read(worker_db)
     payload = job.get("payload") or {}
+    # a paying account's automatic First cut, on the Claude lane (first_cut.run set its model): while the owner's
+    # trial is off these are the only first films a customer gets, and the last look is their never-below guard too
+    payer = bool(subscribed and trial_scope is None and getattr(ctx, "first_cut_model", None))
     ok, why = flags.admit(cfg, job.get("user_id"), trial_active=trial_scope is not None, subscribed=subscribed,
-                          engine_on=bool(getattr(ctx, "first_cut_q1", False)), source_s=getattr(ctx, "duration", None), url=payload.get("url"))
+                          engine_on=bool(getattr(ctx, "first_cut_q1", False)), source_s=getattr(ctx, "duration", None), url=payload.get("url"),
+                          payer_first=payer)
     if not ok:
         if why not in ("off", "not_trial", "subscribed", "url"):
             ctx.first_cut_phases = dict(getattr(ctx, "first_cut_phases", None) or {}, director={"skipped": why})
         return None
+    if payer:
+        from . import call
+        trial_scope = _Payer(job.get("user_id"))
+        with call._tally_lock:
+            call.TALLIES.append(trial_scope)
+        try:
+            return _attempt(ctx, worker_db, job, started, spend, trial_scope, cfg, payer=True)
+        finally:
+            with call._tally_lock:
+                if trial_scope in call.TALLIES:
+                    call.TALLIES.remove(trial_scope)
+    return _attempt(ctx, worker_db, job, started, spend, trial_scope, cfg)
+
+
+def _attempt(ctx, worker_db, job, started, spend, trial_scope, cfg, payer=False):
     try:
         if not _room_today(worker_db, cfg, trial_scope):
             ctx.first_cut_phases = dict(getattr(ctx, "first_cut_phases", None) or {}, director={"skipped": "daily_pacing"})
@@ -617,6 +911,8 @@ def attempt(ctx, worker_db, job, started, spend, trial_scope, subscribed):
     deadline = started + cfg["deadline_s"]
     work = os.path.join(ctx.workdir, "film")
     rec = {"stages": {}}
+    if payer:
+        rec["payer"] = True
     spent0 = trial_scope.spent_usd
     start_edl = None
     reserve = 0.0
@@ -777,6 +1073,7 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
     rec["taste"] = usage.get("taste")
     # what the last look needs once the preview is on screen (last_look closes it)
     ctx.director_state = {"work": work, "text": text, "comp": comp, "edl": edl, "bin_doc": bin_doc, "original_key": original["storage_key"], "cfg": cfg,
+                          "about": str((sc or {}).get("about") or ""),
                           "footage": foot, "acquire": _acquirer(ctx, worker_db, job, work) if foot else None}
     if flags.engine_mode(cfg, job.get("user_id")) != "off":
         _keep_scene_plan(ctx, comp.l1, work, rec)

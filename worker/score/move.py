@@ -40,6 +40,22 @@ EDGE = 0.012                  # a head keeps this much of the frame between itse
 WIDE_LINE = 0.4               # printed text this wide in the frame is a caption or a title of the upload's own, never a sign behind someone
 
 
+PUNCH_MAX = 1.26              # the closest framing of a punched stretch against the framing the film gave it: a tenth of the
+                              # frame leaves at each edge, so a subject no detector found still has its top and its sides
+PUNCH_MAX_PERSON = 1.2        # with someone in the frame: one step, the person and what they are doing both stay in it
+PUNCH_STEP = 0.12             # a framing differs from the last by at least this much, or it is not a cut the eye reads
+
+
+def punch_levels(zp):
+    """The framings a wordless stretch cycles through, as scales: wide, closer, closest, then wide again. Three when
+    the picture has the room, two when it has room for one step, none when it has not."""
+    if zp >= (1.0 + PUNCH_STEP) ** 2:
+        return [1.0, math.sqrt(zp), zp]
+    if zp >= 1.0 + PUNCH_STEP:
+        return [1.0, zp]
+    return []
+
+
 def on():
     return os.environ.get("VALMERA_EASE", "1") != "0"
 
@@ -169,7 +185,8 @@ def _runs(ctx, S):
     runs, cur = [], []
     for s in shots:
         take = s.get("pic") == "main" and s.get("src") and s.get("crop") and s.get("view") is None and not s.get("treat") and not s.get("framed")
-        if take and cur and cur[-1]["f"][1] == s["f"][0] and abs(s["src"][0] - cur[-1]["src"][1]) < 0.12:
+        if take and cur and cur[-1]["f"][1] == s["f"][0] and abs(s["src"][0] - cur[-1]["src"][1]) < 0.12 \
+                and (s.get("punch") is None) == (cur[-1].get("punch") is None):       # a punched stretch is a run of its own
             cur.append(s)
             continue
         if cur:
@@ -180,10 +197,67 @@ def _runs(ctx, S):
     return runs
 
 
-def ease_takes(ctx):
-    """Every run of the take as one camera track. Returns what it did, for the meter."""
+def _unsure(ctx, s0, s1):
+    """Someone is in these seconds of the upload and the faces read there do not say where their head is on every
+    sample (turned away, arms up, eyes shut): a closer framing set by the heads that were found could cut the one
+    that was not (p5575, 14 Nov: a punch left a pyjama top with no head)."""
+    for smp in (ctx.perc or {}).get("samples") or []:
+        try:
+            t = float(smp.get("t"))
+        except (TypeError, ValueError):
+            continue
+        if s0 - 0.6 <= t <= s1 + 0.6 and (smp.get("persons") or smp.get("body")) and not smp.get("face"):
+            return True
+    return False
+
+
+def _unpunch(ctx, run):
+    """The parts of a punched stretch that cannot be framed apart become the one shot they were: the first part takes
+    the others' frames and source, and the others leave the film (a cut nobody can see is not a cut)."""
+    from . import pace
+    heads = {}
+    for s in run:
+        if s.get("punch") is None:
+            continue
+        key = pace.parent(s["id"])
+        first = heads.get(key)
+        if first is None:
+            heads[key] = s
+            s.pop("punch", None)
+            continue
+        first["f"] = [first["f"][0], s["f"][1]]
+        if first.get("src") and s.get("src"):
+            first["src"] = [first["src"][0], s["src"][1]]
+        if isinstance(first.get("crop"), list) and first["crop"] and isinstance(first["crop"][0], (list, tuple)):
+            first["crop"] = list(first["crop"][0])
+        s["_gone"] = True
+    if any(s.get("_gone") for s in run):
+        ctx.shots[:] = [s for s in ctx.shots if not s.get("_gone")]
+        for b in getattr(ctx, "beats", None) or []:
+            if getattr(b, "shots", None):
+                b.shots[:] = [s for s in b.shots if not s.get("_gone")]
+
+
+def punch_takes(ctx):
+    """The wordless stretches score.pace cut inside themselves get their framings, before anything is set on them or
+    sounded on their cuts; a stretch that cannot be framed apart is one shot again. Returns what it did."""
+    try:
+        return ease_takes(ctx, punch=True)
+    except Exception as e:  # noqa: BLE001 - no punch at all: every stretch is the shot it was
+        try:
+            _unpunch(ctx, [s for s in ctx.shots if s.get("punch") is not None])
+        except Exception:  # noqa: BLE001
+            pass
+        return {"fault": f"{type(e).__name__}: {str(e)[:160]}"}
+
+
+def ease_takes(ctx, punch=False):
+    """Every run of the take as one camera track. Returns what it did, for the meter. punch: only the stretches
+    score.pace cut inside themselves (punch_takes); without it those are left as that pass framed them."""
     rep = {"runs": 0, "moved": 0, "moves": 0, "held": 0, "frames_moving": 0, "frames": 0, "why_held": {}}
     if not on() or not ctx.shots:
+        if punch and ctx.shots:
+            _unpunch(ctx, [s for s in ctx.shots if s.get("punch") is not None])
         return rep
     from . import compiler as S
     from . import taste
@@ -204,11 +278,18 @@ def ease_takes(ctx):
     except Exception:  # noqa: BLE001 - unread: the words are held, the careful side
         own_caps = True
 
+    at = {"run": None}
+
     def held(why):
         rep["held"] += 1
         rep["why_held"][why] = rep["why_held"].get(why, 0) + 1
+        if punch and at["run"] is not None:
+            _unpunch(ctx, at["run"])
 
     for run in _runs(ctx, S):
+        if punch != any(s.get("punch") is not None for s in run):
+            continue
+        at["run"] = run
         a, b = run[0]["f"][0], run[-1]["f"][1]
         n = b - a
         rep["runs"] += 1
@@ -270,7 +351,33 @@ def ease_takes(ctx):
             z_face = taste.FACE_H_MAX / max((face[3] - face[1]) / h, 1e-6)
         up = ctx.W / max(1.0, w * aw)
         z_up = max(1.0, min(TOTAL_MAX, taste.UPSCALE_MAX / max(up, 1e-6)))
-        zcap = min(TOTAL_MAX, z_face, z_up, _cap(c, marks, ax, ay), _cap(c, heads, ax, ay))
+        room = min(z_face, _cap(c, marks, ax, ay), _cap(c, heads, ax, ay))
+        zcap = min(TOTAL_MAX, z_up, room)
+        if punch:
+            # a stretch nobody speaks over, cut inside itself (score.pace.take_parts): each part is a framing of its
+            # own, a step closer on what the frame keeps whole, then wide again, never the framing just left; inside
+            # a part the slow push goes on. Hard, on the cut: there is no word here for an eased move to land on.
+            if _unsure(ctx, s0, s1):
+                held("someone is in the frame whose head is not found on every sample")
+                continue
+            zp = min(PUNCH_MAX if not heads else PUNCH_MAX_PERSON, room, max(1.0, taste.UPSCALE_MAX / max(up, 1e-6)))
+            levels = punch_levels(zp)
+            if not levels:
+                held("no room for a second framing: a head, a printed word or the source's own pixels")
+                continue
+            i, k_part, last_p = 0, -1, object()
+            for s in run:
+                m = s["f"][1] - s["f"][0]
+                if s.get("punch") != last_p:
+                    k_part, last_p = k_part + 1, s.get("punch")
+                lv = levels[k_part % len(levels)]
+                s["crop"] = [[round(v, 5) for v in _zoom(rows[i + j], min(zp, lv * math.exp(PUSH_RATE * j / fps)), ax, ay)] for j in range(m)]
+                s["_eased"] = True
+                i += m
+            rep["moved"] += 1
+            rep["punched"] = rep.get("punched", 0) + k_part
+            rep["frames_moving"] += n
+            continue
         if zcap < 1.0 + MOVE_IN[0] * 0.6:
             held("no room: a head, a printed word or the source's own pixels")
             last_end_z = 1.0
@@ -339,6 +446,8 @@ def ease_takes(ctx):
         rep["moves"] += len(moves)
         rep["frames_moving"] += n
         last_end_z = path[-1]
+    if punch:
+        return rep
     rep["moves10"] = round(rep["moves"] / max(ctx.dur_f / fps, 1e-3) * 10, 2)
     rep["stills"] = push_stills(ctx)
     return rep

@@ -432,6 +432,9 @@ def fetch_stills(cands, tmp):
 
 # ------------------------------------------------------------------ named subjects
 
+NAME_WAIT_S = 10.0         # how long the libraries' answers wait for the naming call before the film goes on without named pictures
+
+
 def name_wishes(work, wishes, about=""):
     """(subjects per wish, usd): what each moment's words and want name that a real picture could
     show (a driver, a city, a brand), by one model call. The customer's own (`mine`) are not asked:
@@ -675,6 +678,33 @@ def hook_wish(work, scout, wishes, per, deadline):
                 q=q, kind="video" if o.get("kind") == "video" else "photo", hook=True), float(r.usd or 0.0)
 
 
+def _own_cuts(per):
+    """Where the upload cuts, as (from, to) seconds a cut lies between: the shots perception lists, and every sample
+    whose frame differs from the sample before it far more than this upload's samples do. The index misses a cut
+    between two shots of one room in one light (p5575: two shots listed, five on screen); the difference does not."""
+    out = []
+    rows = sorted((float(r["t"][0]), float(r["t"][1])) for r in (per or {}).get("shots") or [] if isinstance(r.get("t"), (list, tuple)) and len(r["t"]) == 2)
+    for (_a, z), (a2, _z2) in zip(rows, rows[1:]):
+        out.append((min(z, a2) - 0.05, max(z, a2) + 0.05))
+    smp = [(float(x["t"]), x.get("diff")) for x in (per or {}).get("samples") or [] if x.get("t") is not None]
+    diffs = sorted(float(d) for _t, d in smp if isinstance(d, (int, float)))
+    if len(diffs) >= 4:
+        med = diffs[len(diffs) // 2]
+        for (t0, _d0), (t1, d1) in zip(smp, smp[1:]):
+            if isinstance(d1, (int, float)) and d1 >= max(28.0, 2.2 * med):
+                out.append((t0, t1))
+    return out
+
+
+def _own_shot(per, t, dur):
+    """(start, end) of the upload's own shot that holds source second t, or None when a cut lies too near t to say
+    which shot the frame at t belongs to."""
+    cuts = _own_cuts(per)
+    if any(lo < t < hi for lo, hi in cuts):
+        return None
+    return max([0.0] + [hi for _lo, hi in cuts if hi <= t]), min([float(dur)] + [lo for lo, _hi in cuts if lo >= t])
+
+
 def own_views(work, per, deadline, n_have=0):
     """(rows, usd): for footage with no words to follow, details of the upload itself worth a shot of their own,
     each another moment re-framed. One model call looks at sixteen frames; the boxes are checked here."""
@@ -707,6 +737,17 @@ def own_views(work, per, deadline, n_have=0):
             seen.append((times[f], cx, cy))
             span = min(2.4, dur)
             t0 = min(max(0.0, times[f] - 0.8), max(0.0, dur - span))
+            # the detail is of one shot of the upload: its window stays inside that shot. A window that began in the shot
+            # before it showed that shot through the detail's box (p5575, 14 Nov: "hands catching water" opened on a
+            # pyjama top with no head, eight tenths of a second before the cut to the basin)
+            shot = _own_shot(per, times[f], dur)
+            if shot is None:
+                continue                                # a cut of the upload's own lies beside this frame
+            a, z = shot
+            t0 = min(max(t0, a + 0.04), max(a + 0.04, z - 0.04 - span))
+            span = min(span, z - 0.04 - t0)
+            if span < 0.45:
+                continue                                # too little of that shot to cut to
             rows.append(dict(id=n_have + len(rows), src=f"main@{t0:.2f}-{t0 + span:.2f}", crop=crop, box=[round(float(v), 3) for v in o["box"]], at=times[f],
                              wish=None, what=str(o.get("what") or "")[:80], **{"for": f"@{times[f]:.1f}"}))
         return rows[:6], float(r.usd or 0.0)
@@ -788,7 +829,7 @@ def run(work, scout, per, acquire, deadline):
     with cf.ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(lambda w: search_wish(stock, broll_source, w) if not w.get("mine") else ([], [], 0.0), wishes))
     try:
-        subjects, name_usd = name_f.result(timeout=max(0.05, min(deadline, t_search + 10.0) - time.monotonic()))
+        subjects, name_usd = name_f.result(timeout=max(0.05, min(deadline, t_search + NAME_WAIT_S) - time.monotonic()))
         usd += name_usd
     except Exception as e:  # noqa: BLE001 no naming: the libraries answer as before
         subjects = [[] for _ in wishes]

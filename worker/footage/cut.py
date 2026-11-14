@@ -50,6 +50,16 @@ def grab(stream, url, t0, t1, out_path):
     return out_path, "section"
 
 
+def local(src, t0, t1, out_path):
+    """The section cut from a copy of the source already on disk (fetch.whole), near-lossless, no sound."""
+    r = subprocess.run([fetch.ffmpeg(), "-hide_banner", "-loglevel", "error", "-ss", f"{max(t0, 0):.3f}", "-i", src, "-t", f"{t1 - t0:.3f}",
+                        "-an", "-c:v", "libx264", "-crf", "12", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-y", out_path],
+                       capture_output=True, text=True, timeout=120)
+    if r.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) < 2000:
+        raise fetch.FetchError("the section could not be cut from the whole source: " + (r.stderr or "")[-200:])
+    return out_path, "whole"
+
+
 def measure(path):
     """{yavg, ylow, yhigh, sat, w, h}: the clip's light and colour, over its frames."""
     r = subprocess.run([fetch.ffmpeg(), "-hide_banner", "-nostats", "-i", path, "-vf", "scale=320:-2,signalstats,metadata=print",

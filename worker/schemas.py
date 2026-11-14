@@ -461,6 +461,12 @@ class CaptionStyle(BaseModel):
     # letterboxed 9:16 edit sit on the actual foreground picture rather than
     # in detached blurred padding. Users may also request a precise safe band.
     anchor_y: Optional[float] = None
+    # Exact output-frame horizontal anchor of a LEFT- or RIGHT-aligned dictated
+    # item, as a fraction of frame width: the line's own left (or right) edge.
+    # Written by the Director's lowering (score.lower) so a caption line builds
+    # word by word with every word already in its final place. None keeps the
+    # preset's side margin, so every historical EDL renders as before.
+    anchor_x: Optional[float] = None
     # Transcript-caption production contract. When true, every visual state
     # is composed as one rendered row even when the chosen preset normally
     # uses a stacked/multi-line layout. Optional keeps every historical EDL's
@@ -551,6 +557,19 @@ class CaptionStyle(BaseModel):
             raise ValueError("anchor_y must be a frame fraction between 0.05 and 0.95")
         if not (0.05 <= v <= 0.95):
             raise ValueError(f"anchor_y {v} must be between 0.05 and 0.95")
+        return round(v, 4)
+
+    @field_validator("anchor_x")
+    @classmethod
+    def _caption_anchor_x_range(cls, v):
+        if v is None:
+            return v
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            raise ValueError("anchor_x must be a frame fraction between 0 and 1")
+        if not (0.0 <= v <= 1.0):
+            raise ValueError(f"anchor_x {v} must be between 0 and 1")
         return round(v, 4)
 
     @field_validator("color")

@@ -278,7 +278,7 @@ def test_footage_takes_the_place_of_a_still_of_the_same_moment_and_nothing_else_
         {"k": "b", "id": "b02", "w": "7-12", "job": "x", "cut": [30, 30, 999], "pic": ["main", {"src": "bin:1", "crop": "upper"}, "bin:0@1.0"]}]) + "\n"
     clip = {"id": "footage:a.mp4", "provider": "footage", "kind": "video", "_wish": 0, "named": "Golden Gate Bridge", "shows": "the towers in fog",
             "width": 1080, "height": 1920, "duration_s": 2.4, "license": "Footage, not licensed", "credit": "Some Channel", "page_url": "https://example.org/v",
-            "_img": Image.new("RGB", (90, 160)), "footage": {"url": "https://example.org/v", "time_range": [12.0, 14.4]}}
+            "_img": Image.linear_gradient("L").resize((90, 160)).convert("RGB"), "footage": {"url": "https://example.org/v", "time_range": [12.0, 14.4]}}
     box = {"wishes": [{"w": "3-5", "want": "the Golden Gate Bridge"}, {"w": "9-11", "want": "a wave"}], "offers": [clip]}
     got = []
     out = F.footage_into(work, text, box, lambda c: got.append(c["id"]) or {"storage_key": "clips/7/a.mp4", "w": 1080, "h": 1920, "dur": 2.4, "fps": 30})

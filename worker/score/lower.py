@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import time
 import wave
 
 import numpy as np
@@ -152,6 +153,21 @@ class Bake:
             return self.done(key, p)
         except Exception:  # noqa: BLE001 - the flat plate stands
             return None
+
+    def clip(self, still, rects, W, H, fps, soft, finish=None):
+        """A still shot whose window moves, or that opens soft, as a clip of exactly its frames (score.reel). Returns
+        (key, job): the job bakes it, and is run with the film's other stills at the end of the picture lane."""
+        from . import reel
+        h = reel.key_of(still, rects, W, H, fps, soft, finish)
+        key, p = f"today/{h}.mp4", os.path.join(self.dir, f"{h}.mp4")
+
+        def job():
+            if not os.path.exists(p):
+                meta = reel.bake(still, rects, W, H, fps, p, soft, finish)
+                with open(p + ".json", "w") as f:
+                    json.dump(meta, f)
+            return key
+        return key, p, job
 
     def glow(self):
         """A soft white light, alpha only where it shines. Placed and scaled as an overlay."""
@@ -425,7 +441,7 @@ def still_crop(it):
 def lower_pictures(l1, work, bake, rep):
     fps, W, H = float(l1["fps"]), l1["frame"][0], l1["frame"][1]
     assets = l1.get("assets") or {}
-    overlays, zooms, fx = [], [], []
+    overlays, zooms, fx, clips = [], [], [], []
     shots = sorted((i for i in l1["items"] if i.get("k") == "shot"), key=lambda i: i["f"][0])
     n_min = int(math.ceil(OV_MIN_S * fps - 1e-6))
     runs = shot_runs(shots, n_min)
@@ -466,7 +482,22 @@ def lower_pictures(l1, work, bake, rep):
             c = still_crop(it)
             if c:
                 ov["source_crop"] = c
-            if isinstance(it.get("crop"), list) and isinstance(it["crop"][0], (list, tuple)) and len({tuple(x) for x in it["crop"]}) > 1:
+            moves = isinstance(it.get("crop"), list) and isinstance(it["crop"][0], (list, tuple)) and len({tuple(x) for x in it["crop"]}) > 1
+            finish = finish_of(it)
+            if asset["kind"] == "image" and pic != "main" and (moves or it.get("soft") or finish) and reel_on():
+                # a still that moves, or opens soft, is baked as a clip of its own frames (score.reel): today's
+                # renderer has no camera on a cutaway
+                rects = [list(x) for x in it["crop"]] if moves else [list(rect_mid(it["crop"]) or [0.0, 0.0, 1.0, 1.0])] * (it["f"][1] - it["f"][0])
+                rects = [[min(max(float(v), 0.0), 1.0) for v in r] for r in rects]
+                rects = (rects + [rects[-1]] * (b - a))[:b - a]
+                ckey, cpath, job = bake.clip(os.path.join(work, asset["path"]), rects, W, H, fps, int(it.get("soft") or 0), finish)
+                if finish:
+                    it = dict(it, treat=None)          # the finish is in the picture now: no accent is drawn over the frame for it
+                    rep.setdefault("finishes", {})[finish] = rep.get("finishes", {}).get(finish, 0) + 1
+                clips.append((ov, dict(ov), ckey, cpath, job))
+                ov.update(asset_key=ckey, kind="video")
+                ov.pop("source_crop", None)
+            elif moves:
                 rep["moves_held_on_pictures"] = rep.get("moves_held_on_pictures", 0) + 1
         overlays.append(ov)
         gain = float((it.get("grade") or {}).get("gain", 1.0))
@@ -475,6 +506,8 @@ def lower_pictures(l1, work, bake, rep):
                              "fit": "cover", "opacity": round(min(1 - gain, 0.92), 3), "z_index": 1})
             rep["dimmed_pictures"] = rep.get("dimmed_pictures", 0) + 1
         treat = (it.get("treat") or {}).get("mode")
+        if treat in FINISH_AS:          # a finish on a clip, or on a still that was not baked: its nearest accent, or nothing
+            treat = FINISH_AS[treat]
         if treat == "burn":          # the shot opens on the burn's light, never a white shot
             fx.append(burn_hit(f"tr.{pid}", a, fps))
             rep["treat_burns_as_light"] = rep.get("treat_burns_as_light", 0) + 1
@@ -484,7 +517,44 @@ def lower_pictures(l1, work, bake, rep):
                 fx.append({"id": f"tr.{pid}", "type": "accent", "kind": kind, "stage": "pre_captions", "start": start, "end": r2(b / fps)})
             else:
                 rep.setdefault("treats_dropped", []).append(pid)
+    if clips:
+        import concurrent.futures as cf
+        t_reel = time.monotonic()
+        pool = cf.ThreadPoolExecutor(max_workers=REEL_WORKERS)
+        try:
+            futs = [(row, pool.submit(row[4])) for row in clips]
+            for (ov, still, ckey, cpath, _job), fut in futs:
+                try:
+                    # one bake has REEL_S, and all of a film's bakes together have REEL_ALL_S: the first film has a
+                    # deadline, and a still that is not baked by then is drawn as it always was
+                    fut.result(timeout=max(0.05, min(REEL_S, t_reel + REEL_ALL_S - time.monotonic())))
+                    bake.locals[ckey] = cpath
+                    rep["stills_as_clips"] = rep.get("stills_as_clips", 0) + 1
+                except Exception as e:  # noqa: BLE001 - the still is drawn as it always was: one fixed window
+                    ov.clear()
+                    ov.update(still)
+                    rep["stills_not_baked"] = rep.get("stills_not_baked", 0) + 1
+                    rep.setdefault("reel_errors", []).append(f"{type(e).__name__}: {str(e)[:120]}")
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        rep["reel_s"] = round(time.monotonic() - t_reel, 1)
     return overlays, zooms, fx, runs
+
+
+REEL_WORKERS, REEL_S = 3, 40.0     # stills baked side by side, and the longest one bake may take
+REEL_ALL_S = 24.0                  # the longest a film's bakes may take together (about twenty stills take 8 s on a slot's 2 CPUs)
+FINISH_AS = {"archive": "mono", "tape": None}      # what a finish is on a picture the bake does not reach (a clip): black and white, or left clean
+
+
+def finish_of(it):
+    """The finish the Score gave this picture (`treat` archive or tape), when the bake can draw it."""
+    from . import reel
+    mode = (it.get("treat") or {}).get("mode")
+    return mode if mode in reel.FINISHES else None
+
+
+def reel_on():
+    return os.environ.get("VALMERA_REEL", "1") != "0"
 
 
 def lower_cards(l1, work, bake, rep):
@@ -715,20 +785,69 @@ def lower_captions(l1, rep, src_dur=0.0):
                 merged[-1][1] = r[1]
             else:
                 merged.append(r)
+        states = build_states(lines, a, b, fps, l1["frame"][0], H, px) if build_on() and not score.joined_script(text) else None
+        if states:
+            rep["captions_built"] = rep.get("captions_built", 0) + 1
         for r in merged:
-            s0, s1 = src_at(l1, r[0], fps), src_at(l1, r[1], fps)
-            if s0 is None or s1 is None:
-                continue
             st = {**style, "color": r[2] or style["color"]}
             if r[3]:
                 st.update(edge_style(st["color"]))
                 rep["captions_edged"] = rep.get("captions_edged", 0) + 1
+            if states:
+                # the line builds word by word, every word already where it will stay (the judge's captions, TEARDOWN
+                # row 7): the same line written one word longer each time, from its own left edge
+                for k_state, (f0, f1, said, x_left, y_line) in enumerate(states):
+                    p0, p1 = max(f0, r[0]), min(f1, r[1])
+                    if p1 - p0 < 2:
+                        continue
+                    s0, s1 = src_at(l1, p0, fps), src_at(l1, p1, fps)
+                    if s0 is None or s1 is None:
+                        continue
+                    out.append({"text": said, "start": r2(s0), "end": r2(max(s1, s0 + 0.06)),
+                                "style": {**st, "text_align": "left", "anchor_x": round(min(max(x_left, 0.0), 1.0), 4),
+                                          "anchor_y": round(min(max(y_line, 0.05), 0.95), 4), "single_line": True,
+                                          # the chunk's own entrance plays once, on its first word; a word that joins the line lands plainly
+                                          **({} if k_state == 0 and p0 == r[0] else {"animation": "none"})}})
+                continue
+            s0, s1 = src_at(l1, r[0], fps), src_at(l1, r[1], fps)
+            if s0 is None or s1 is None:
+                continue
             out.append({"text": text.replace("\n", " "), "start": r2(s0), "end": r2(max(s1, s0 + 0.06)), "style": st})
     if src_dur:
         for c in out:
             c["end"] = r2(min(c["end"], src_dur))
         out = [c for c in out if c["end"] - c["start"] >= 0.06]
     rep["captions"] = len(out)
+    return out
+
+
+def build_on():
+    return os.environ.get("VALMERA_CAP_BUILD", "1") != "0"
+
+
+def build_states(lines, a, b, fps, W, H, px):
+    """A chunk whose words arrive one after another (the compiler's `prelaid` layout) as the states it passes through:
+    [(first frame, end frame, text so far, the line's left edge, the line's y)] per line, or None when it lands whole
+    (every word on one frame, a single word, or a word that moves). Words under three frames apart land together."""
+    out = []
+    rest = lambda v: float(v[-1] if isinstance(v, list) else v)       # where a word that settles in comes to rest
+    for ln in lines:
+        ws = sorted(ln, key=lambda w: rest(w["x"]))
+        ons = [max(a, min(int(w["f"][0]), b - 1)) for w in ws]
+        if ons != sorted(ons):
+            return None                     # a line that does not read left to right in time is set whole
+        x_left = rest(ws[0]["x"])
+        y_line = float(np.mean([rest(w["y"]) for w in ws])) - 0.36 * px / H
+        k = 0
+        while k < len(ws):
+            j = k
+            while j + 1 < len(ws) and ons[j + 1] - ons[k] < 3:
+                j += 1
+            end = ons[j + 1] if j + 1 < len(ws) else b
+            out.append((ons[k], end, " ".join(w["t"] for w in ws[:j + 1]), x_left, y_line))
+            k = j + 1
+    if len(out) <= len(lines):
+        return None
     return out
 
 
