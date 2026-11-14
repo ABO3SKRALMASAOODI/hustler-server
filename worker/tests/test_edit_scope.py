@@ -132,3 +132,29 @@ def test_unsupported_reply_can_offer_a_real_upload_without_failed_tool_call(monk
     reply = edit_scope.disclose(ctx, 'The requested operation is unavailable.')
     assert 'unchanged' in reply
     assert ('as a still' in reply) is relevant
+
+
+def test_picture_repair_and_sentence_end_evidence_reaches_scope_gate(monkeypatch):
+    seen = []
+    def check(ctx, name, schema, system, payload, **kwargs):
+        data = json.loads(payload)
+        seen.append(data)
+        evidence = data['evidence']
+        assert evidence['word_context'][-1]['w'] == 'models.'
+        assert evidence['required_pictures'][0]['source_words'][0]['w'] == 'mining'
+        assert evidence['proposed_story_end']['word']['t1'] == 38.11
+        return {'allowed': bool(evidence['picture_check']), 'reason': 'Repair evidence missing'}, {}
+    monkeypatch.setattr(asks, '_call', check)
+    words = [{'w': 'mining', 't0': 32.83, 't1': 33.55},
+             {'w': 'models.', 't0': 37.55, 't1': 38.11}]
+    ledger = {'required_pictures': [{'id': 'picture2', 'subject': 'crypto mining',
+               'source_words': [words[0]], 'must_show': 'Recognizable mining imagery'}],
+              'picture_story_end': {'word': words[-1]}}
+    ctx = NS(ask_check_required=True, user_message='Make a short; show crypto mining',
+             ask_ledger=ledger, index={'words': words})
+    before = {'keep': [[0, 39.37]], 'overlays': [{'id': 'wrong-computer'}]}
+    after = {'keep': [[0, 38.11]], 'overlays': [{'id': 'mining-software'}]}
+    assert edit_scope.write_refusal(ctx, before, after)
+    ledger['picture_check'] = {'picture2': {'state': 'not_done', 'seen': 'Generic motherboard'}}
+    assert edit_scope.write_refusal(ctx, before, after) is None
+    assert len(seen) == 2  # new evidence invalidates a cached refusal of the same delta
