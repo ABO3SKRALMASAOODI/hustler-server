@@ -372,7 +372,8 @@ def static_report(edl_dict, index=None, source=None):
                     status[kind] = "absent"
                     continue
                 h = matte_track.read_handle(kind, src, sidecars.chunks_for(
-                    src.shots, src.duration_s, ranges))
+                    src.shots, src.duration_s, ranges),
+                    params=matte_track.sidecar_params(edl_dict) if kind == 'matte.person' else None)
                 status[kind] = sidecars.status(h)
             d = _device_detail(it, status)
             reason = d.get("reason") or d["rung"]
@@ -609,7 +610,9 @@ def _sidecar_status(item, source, plan):
         ranges = _source_ranges(item, plan)
         ask = _launching_source(source)
         for kind in kinds:
-            h = sidecars.ensure(kind, ask, ranges, priority="interactive")
+            import matte_track
+            params = matte_track.sidecar_params(getattr(plan, 'edl', None)) if kind == 'matte.person' else None
+            h = sidecars.ensure(kind, ask, ranges, params=params, priority="interactive")
             sidecars.wait([h], 0 if plan.preview else 90)
             out[kind] = sidecars.status(h)
     except Exception:  # noqa: BLE001
