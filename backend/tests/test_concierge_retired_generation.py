@@ -68,20 +68,19 @@ def _system_prompt(monkeypatch, stage="no_video"):
     return seen[0]
 
 
-def test_provider_keys_do_not_advertise_retired_generation(monkeypatch):
-    """THE REGRESSION: with FAL_KEY and an image key set, the old FACTS
-    offered image-to-video and AI images on a blank canvas."""
+def test_configured_video_matches_restored_worker_tool(monkeypatch):
+    """Configured reference animation is live; retired image generation is not."""
+    monkeypatch.delenv('FAL_KEY', raising=False)
     assert not v._video_gen_enabled()
     assert not v._image_gen_enabled()
     system = _system_prompt(monkeypatch)
-    assert "animate a still image into a moving clip" not in system
-    assert "generate short video clips" not in system
+    assert v._video_gen_enabled()
+    assert "animate a still image into a moving clip" in system
     assert "generate images from a text description" not in system
-    assert "AI-generated" not in system
-    assert "canNOT generate moving VIDEO footage" in system
+    assert "canNOT generate moving VIDEO footage" not in system
 
 
-def test_ready_project_list_denies_generation_too(monkeypatch):
+def test_ready_project_list_matches_available_video(monkeypatch):
     system = _system_prompt(monkeypatch, stage="ready")
-    assert "generate short AI video clips" not in system
-    assert "canNOT: generate footage or images from nothing" in system
+    assert "generate short AI video clips" in system
+    assert "canNOT: generate footage or images from nothing" not in system
