@@ -554,12 +554,42 @@ def _render_review(ctx, rd, sc):
     return report
 
 
+def render_revision(sc):
+    files=[sc.get('l1'),sc.get('l1_audio')]
+    if not files[0]:return None
+    digest=hashlib.sha256()
+    for path in files:
+        if path and os.path.isfile(path):digest.update(open(path,'rb').read())
+    # Audio fixes must invalidate both an engine soundtrack and a cached final mix.
+    worker=os.environ.get('VALMERA_WORKER')
+    if worker:
+        for rel in ('score/music.py','score/audibility.py','scene/pace.py'):
+            path=os.path.join(worker,rel)
+            if os.path.isfile(path):digest.update(open(path,'rb').read())
+    return digest.hexdigest()
+
+
+def invalidate_render(ctx):
+    for name in ('film_engine.mp4','film_engine.mp4.log.json','sound.m4a',
+                 'film_engine_music.mp4','music.json'):
+        path=os.path.join(ctx.supply,name)
+        if os.path.exists(path):os.remove(path)
+    for name in ('final.mp4','final_music.mp4','final_song.mp4'):
+        path=os.path.join(ctx.run_dir,name)
+        if os.path.exists(path):os.remove(path)
+
+
 def render(ctx, script, sc):
     """The product repairs rejected placements before branding and music, never a delivered film."""
     history_path = os.path.join(ctx.supply, "render_reviews.json")
     history = json.load(open(history_path)) if os.path.exists(history_path) else []
     while True:
+        revision=render_revision(sc)
+        marker=os.path.join(ctx.supply,'render_revision.json')
+        previous=json.load(open(marker)) if os.path.exists(marker) else None
+        if revision and revision!=previous:invalidate_render(ctx)
         rd = wf3.render(ctx, script, sc)
+        if revision:json.dump(revision,open(marker,'w'))
         report = _render_review(ctx, rd, sc)
         history.append(report)
         json.dump(history, open(history_path, "w"), indent=1)
@@ -605,16 +635,8 @@ def _rebuild_rejected(ctx, script, sc, report):
     sc.clear()
     sc.update(rebuilt)
     json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
-    # These are this run's cached renders of the old plan, before delivery.
-    for name in ("film_engine.mp4", "film_engine.mp4.log.json", "sound.m4a",
-                 "film_engine_music.mp4", "music.json"):
-        p = os.path.join(ctx.supply, name)
-        if os.path.exists(p):
-            os.remove(p)
-    for name in ("final.mp4", "final_music.mp4", "final_song.mp4"):
-        path = os.path.join(ctx.run_dir, name)
-        if os.path.exists(path):
-            os.remove(path)
+    invalidate_render(ctx)
+
 
 
 

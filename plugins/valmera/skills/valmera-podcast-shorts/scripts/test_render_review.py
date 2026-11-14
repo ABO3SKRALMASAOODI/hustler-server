@@ -124,3 +124,18 @@ def test_changed_review_contract_rechecks_previously_rejected_assets(tmp_path):
     assert wf.current_rejections(str(tmp_path))==['old-layout.jpg']
     (tmp_path/'render_rejected_contract.json').write_text(str(CONTRACT-1))
     assert wf.current_rejections(str(tmp_path))==[]
+
+
+def test_changed_plan_invalidates_old_render_before_frame_check(tmp_path,monkeypatch):
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda x:None)
+    l1=tmp_path/'l1.json';l1.write_text('{"picture":"new"}')
+    (tmp_path/'film_engine.mp4').write_text('old')
+    (tmp_path/'final_music.mp4').write_text('old')
+    def draw(*args):
+        assert not (tmp_path/'film_engine.mp4').exists()
+        assert not (tmp_path/'final_music.mp4').exists()
+        return dict(film='new.mp4')
+    monkeypatch.setattr(wf.wf3,'render',draw)
+    monkeypatch.setattr(wf,'_render_review',lambda *a:dict(rejected=0,spend=[]))
+    wf.render(ctx,{},dict(l1=str(l1),beats={}))
+    assert json.load(open(tmp_path/'render_revision.json'))==wf.render_revision(dict(l1=str(l1)))

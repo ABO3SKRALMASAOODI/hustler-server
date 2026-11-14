@@ -176,3 +176,14 @@ def test_exposed_speaker_gap_requires_actual_director_motivation(tmp_path):
     other=tmp_path/'unresolved';other.mkdir()
     with pytest.raises(RuntimeError,match='no automatic recrops'):
         C.speaker_moves(coverage,[],150,[],str(other),llm=empty)
+
+
+def test_new_picture_identity_survives_research_cache_paths():
+    c=C
+    a=dict(path='first.jpg',document=dict(sha256='same',page=1,box=[.1,.1,.8,.4]))
+    b=dict(path='retry.jpg',document=dict(sha256='same',page=1,box=[.11,.12,.81,.42]))
+    other=dict(path='figure.jpg',document=dict(sha256='same',page=1,box=[.1,.6,.8,.9]))
+    assert c.same_picture(a,b) and not c.same_picture(a,other)
+    v=dict(path='a.mp4',source=dict(url='original'),time_range=[10,12])
+    assert c.same_picture(v,dict(v,path='retry.mp4',time_range=[10.1,12.1]))
+    assert not c.same_picture(v,dict(v,path='new.mp4',time_range=[20,22]))
