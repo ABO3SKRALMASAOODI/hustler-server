@@ -25,6 +25,15 @@ The folder: `film.mp4` (with the music Valmera chose), `film_clean.mp4` (the sam
 credit, the narration's gate, the measures) and `SOURCES.md` (the credits to paste into a post's caption: the footage
 is not licensed, by the owner's decision of 13 Nov). Nothing is published; nothing is ever added to a delivered folder.
 
+## How to run it (Claude Code and Codex alike)
+
+- Claude Code: `/valmera-stories` or `/valmera-stories <name or topic>`. Codex: `$valmera-stories` or
+  `$valmera-stories <name or topic>`. Either way the words after the command, if any, are the topic, passed to
+  `story.py` as its only arguments; with none, the run picks its own story.
+- Start `story.py` as a background job (`run_in_background` in Claude Code; a background terminal in Codex), do not poll
+  and do not end the turn while it runs, read the last JSON line when it exits, and on exit 2 start the same command
+  again. Measured on 14 Nov 2026: a name gave a delivered film in 84 minutes for $2.81 of OpenAI credit.
+
 ## What the run does
 
 | Stage | What happens |

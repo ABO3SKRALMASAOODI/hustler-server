@@ -1,7 +1,7 @@
 interface:
   display_name: "Valmera Story Films"
   short_description: "One command, a finished founder or topic story"
-  default_prompt: "Use $valmera-stories. Run story.py with my words as its only arguments (a name, a company or a topic; nothing when I gave none), in the background, wait for it to exit without polling, then tell me the delivered folder and the film's title. If it exits with stopped, run the same command again. Ask me nothing else."
+  default_prompt: "Use $valmera-stories. Run story.py (python3 /Users/masaoodi/Documents/Valmera/hustler-server/plugins/valmera/skills/valmera-stories/story.py) with my words as its only arguments (a name, a company or a topic; nothing when I gave none), in the background, wait for it to exit without polling, then tell me the delivered folder and the film's title. If it exits with stopped, run the same command again. Ask me nothing else."
 
 policy:
   allow_implicit_invocation: false
