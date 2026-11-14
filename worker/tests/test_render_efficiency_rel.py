@@ -242,7 +242,16 @@ def test_caption_review_frames_are_bounded():
     # The production call site applies the cap.
     src = open(os.path.join(os.path.dirname(__file__), "..",
                             "renderer.py")).read()
-    assert "_bounded_review_times(\n                    caption_review_times(" in src
+    import ast
+    calls = [node for node in ast.walk(ast.parse(src))
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+             and node.func.id == "_bounded_review_times"]
+    assert any(len(node.args) == 2
+               and isinstance(node.args[0], ast.Call)
+               and isinstance(node.args[0].func, ast.Name)
+               and node.args[0].func.id == "caption_review_times"
+               and ast.unparse(node.args[1]) == "config.CAPTION_REVIEW_MAX_FRAMES"
+               for node in calls)
 
 
 def test_cover_mode_stills_are_cut_to_the_exact_frame(tmp_path):
