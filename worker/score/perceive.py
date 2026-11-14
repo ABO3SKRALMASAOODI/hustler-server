@@ -179,7 +179,14 @@ def text_clusters(spatial, limit=6):
     return [dict(read="", box=[round(v, 4) for v in c["box"]], t=c["t"], seen=c["seen"]) for c in keep[:limit]]
 
 
-def face_at(spatial_rows, t):
+def face_at(spatial_rows, t, shots=None):
+    # First-film evidence must belong to this shot. A nearby indexed face
+    # across a cut cannot be relabelled as an observation at the new time.
+    if shots is not None:
+        shot = next((s for s in shots if s["start"] <= t < s["end"]), None)
+        spatial_rows = ([r for r in spatial_rows
+                         if shot["start"] <= r["t"] < shot["end"]]
+                        if shot else [])
     if not spatial_rows:
         return None
     r = min(spatial_rows, key=lambda q: abs(q["t"] - t))
@@ -275,7 +282,8 @@ def _run(index, src, work, audio):
     for t, f in frames(src, step, w, h):
         gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
         st = stats(gray)
-        face = face_at(rows, t) or seer.face(gray)
+        face = face_at(rows, t, index.get("shots", [])
+                       if index.get("_first_film_source_guard") else None) or seer.face(gray)
         person = None if face else seer.person(f)
         diff = None if prev is None else round(float(np.abs(gray.astype(np.int16) - prev).mean()), 2)
         prev = gray.astype(np.int16)
