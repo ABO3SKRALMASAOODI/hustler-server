@@ -144,9 +144,13 @@ def test_a_picture_the_score_names_or_whose_words_are_gone_is_left_alone(tmp_pat
     assert fill.fill(work, text)[1] == {"unused": 0, "placed": 0, "beats": 0}
 
 
-def test_a_designed_picture_of_type_is_shown_whole_and_never_cut_inside_itself():
+@pytest.mark.parametrize("from_disk", [False, True])
+def test_a_designed_picture_of_type_is_shown_whole_and_never_cut_inside_itself(tmp_path, from_disk):
     idx = selfie(20.0)
     bin_items = dict(BIN, **{"0": dict(BIN["0"], w=1080, h=1920, design={"kind": "number"}, provider="designed")})
+    if from_disk:
+        (tmp_path / "bin.json").write_text(json.dumps({"items": [dict(row, id=key) for key, row in bin_items.items()]}))
+        bin_items = S.load_bin(str(tmp_path))
     text = film_text(beats_over(idx, 4, lambda k, a, z: {"cut": [30, 48, 999], "pic": ["main", "bin:0", "main"]} if k == 1 else {"pic": "main"}))
     c = comp(text, idx, bin_items=bin_items)
     parts = [s for s in shots(c) if s["id"].startswith("b02.s1")]

@@ -6301,6 +6301,11 @@ def load_bin(work_dir):
         kind = "video" if "video" in str(kind) else "image"
         w, h = it.get("w") or it.get("width"), it.get("h") or it.get("height")
         out[key] = {"kind": kind, "path": rel, "w": w, "h": h, "dur": it.get("dur") or it.get("duration") or it.get("duration_s"), "fps": it.get("fps"), "seen": it.get("seen")}
+        # Supply's drawn type must survive the disk boundary. Without its provenance,
+        # pace treats a number card as a photograph and crops the number itself.
+        for field in ("design", "provider"):
+            if field in it:
+                out[key][field] = it[field]
         if (not w or not h) and kind == "image":
             try:
                 from PIL import Image
