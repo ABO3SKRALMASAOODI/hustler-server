@@ -218,7 +218,8 @@ def build(script, sup, style_id, direction=None):
     """(l1, beats) for one short. script: {"title", "segments": [{"say", "pictures": [names]}]}; sup: the pack
     (wf1_short.supply); direction: {"display": [{"seg", "text"}], "past_segs": [i], "turn_seg": i, "arc": [...]}."""
     st = STYLES[style_id]
-    d = dict(aim_s=st["aim_s"], look=st["look"], family="podcast", share=st["share"], bed=True, title=True)
+    d = dict(aim_s=st["aim_s"], look=st["look"], family="story", share=st["share"], bed=True, title=True,
+             band=dict(hold=(0.43, 0.82), never=2.8, ease_takes=False, whip=0.04, ease=0.85, shutter=0.6))
     d.update(direction or {})
     clock = Clock(sup["words"], script)
     voices = {
@@ -254,16 +255,6 @@ def build(script, sup, style_id, direction=None):
         for c in lst:
             if c["path"] not in keys:
                 keys[c["path"]] = P.video(f"v{len(keys):02d}", c)
-    # a sentence that names nothing itself usually carries on the thought before it: it takes the pictures that
-    # sentence had to spare (beyond its first two), so the film does not fall back to the take for a whole sentence
-    for i in range(1, len(script["segments"])):
-        if footage.get(i) or any(pics.get(n) for n in script["segments"][i].get("pictures") or []):
-            continue
-        j = next((q for q in (i - 1, i - 2) if q >= 0 and len(footage.get(q) or []) >= 3), None)
-        if j is not None:
-            spare = footage[j][2:][:2]
-            footage[j] = [c for c in footage[j] if c not in spare]
-            footage[i] = spare
     if st["layout"] == "bleed":
         seat = float(st["cap_y"]) - 0.045
 
@@ -291,8 +282,16 @@ def build(script, sup, style_id, direction=None):
         turn_f = max(seg_f[ts] - 1, 0)
     # the payoff is his face, but never more than its last four seconds: a long close on one framing is a held picture
     f_last = max(turn_f - 6, f_voice_end - int(4.0 * FPS)) if turn_f is not None else f_voice_end - 45
-    ins = F.cut_ins(script, clock, pics, footage, int(1.2 * FPS), f_last, stress, aim_s=float(d["aim_s"]), share=float(d["share"]))
-    ins = fill_gaps(ins, footage, pics, script, seg_f, int(1.2 * FPS), f_last, stress)
+    from placement_check import propose, check
+    ins = propose(script, clock, footage, pics, int(0.6 * FPS), f_voice_end - 24, stress)
+    if st["layout"] == "prints":
+        # A retained print is still visible after the next one lands. Check
+        # everything said during that visible lifetime, not only its entrance.
+        for run in _runs(ins):
+            end = ins[run[-1]][1]
+            for k in run:
+                ins[k][4] = dict(ins[k][4], audit_until=end)
+    ins, placement_report = check(ins, script, clock, sup["work"], sup["ffmpeg"])
     past = {int(i) for i in d.get("past_segs") or [] if isinstance(i, int)}
     cut_pts, drive_ids, look_pics, mono_spans, bright = [], set(), [], [], []
     if take.get("still"):
@@ -303,7 +302,12 @@ def build(script, sup, style_id, direction=None):
         """The take on frames a..b, split at its own cuts so every piece is framed on the speaker it shows."""
         if b - a < 2:
             return
-        edges = [a] + [c for c in tcuts if a + 3 <= c <= b - 3] + [b]
+        # Break long takes into phrase-sized pieces before the face-safe driver.
+        # The driver may have only two valid framings; a later phrase may return
+        # to the wider shot while the source sound and time stay continuous.
+        pace, _, _ = F._engines()
+        phrase = pace.splits(a, b, stress, int(0.95 * FPS), int(1.5 * FPS))
+        edges = sorted({a, b, *phrase, *[c for c in tcuts if a + 3 <= c <= b - 3]})
         for fa, fb in zip(edges, edges[1:]):
             mid = (fa + fb) / 2
             k = sum(1 for c in tcuts if c <= mid)
@@ -321,7 +325,7 @@ def build(script, sup, style_id, direction=None):
         return st["mono"] == "all" or (st["mono"] == "past" and by_section and seg_at(f0) in past)
 
     def note(f0, f1, kind, name, rec, mode):
-        P.pictures.append(dict(f=[f0, f1], kind=kind, name=name, path=rec["path"], shows=rec.get("shows"), mode=mode,
+        P.pictures.append(dict(f=[f0, f1], visible_f=[f0, rec.get("audit_until", f1)], kind=kind, name=name, path=rec["path"], shows=rec.get("shows"), mode=mode,
                                finish="black and white" if is_mono(f0) else None,
                                source=(rec.get("source") or {}).get("url") if kind == "clip" else rec.get("page"), time_range=rec.get("time_range")))
         if rec.get("still") or kind == "photo":
@@ -361,8 +365,13 @@ def build(script, sup, style_id, direction=None):
         mono = is_mono(f0)
         bed_of(f0, f1, key, kind, rec, mono)
         x0, y0, x1, y1 = WINDOW_BOX
+        aspect = float(rec.get("w") or W) / float(rec.get("h") or H)
+        height = min(y1-y0, (x1-x0)*W/H/aspect)
+        width = height*H/W*aspect
+        cx, cy = (x0+x1)/2, (y0+y1)/2
+        x0, x1, y0, y1 = cx-width/2, cx+width/2, cy-height/2, cy+height/2
         asp = (x1 - x0) * W / ((y1 - y0) * H)
-        kw = dict(z=1, s=settle_push(n), crop=card_crop(rec, kind, asp), radius=0.010, op=[min(1.0, 0.5 + 0.25 * q) for q in range(n)],
+        kw = dict(z=1, s=1.0, crop=[0.0, 0.0, 1.0, 1.0], radius=0.010, op=[min(1.0, 0.5 + 0.25 * q) for q in range(n)],
                   shadow=dict(a=0.55, blur=0.03, dx=0, dy=0.012))
         if kind == "clip":
             kw["src"] = list(rec["src"])
@@ -419,9 +428,12 @@ def build(script, sup, style_id, direction=None):
             P.shot([f0, f1], key, F.cover_crop(pw_, ph_, W / H, (0.5, 0.45), (0.5, 0.40)), **bed)
             n, m = f1 - f0, r1 - f1
             cx, cy = PRINT_AT[q % len(PRINT_AT)]
+            aspect = pw_/ph_
+            hh = min(0.17, PRINT_W*W/H/aspect/2)
+            hw = hh*H/W*aspect
             box = [cx - hw, cy - hh, cx + hw, cy + hh]
             land = [r4(1.0 + 0.10 * (1 - smooth(j / 6.0))) if j < 7 else r4(1.0 + 0.018 * (j - 7) / max(n - 8, 1)) for j in range(n)]
-            kw = dict(z=1 + q, rot=PRINT_ROT[q % len(PRINT_ROT)], crop=card_crop(rec, kind, 1.0), radius=0.006,
+            kw = dict(z=1 + q, rot=PRINT_ROT[q % len(PRINT_ROT)], crop=[0.0, 0.0, 1.0, 1.0], radius=0.006,
                       shadow=dict(a=0.62, blur=0.03, dx=0.004, dy=0.014))
             if mono:
                 kw["look"] = "mono_silver"
@@ -451,7 +463,7 @@ def build(script, sup, style_id, direction=None):
                 window(f0, f1, kind, name, rec, keys[rec["path"]])
             cut_pts.append(f0)
             P.events.append(f0)
-            if name not in labelled:                         # a named thing is labelled once, small, while its own pictures are up
+            if d.get("labels", False) and name not in labelled:                         # a named thing is labelled once, small, while its own pictures are up
                 labelled.add(name)
                 b_lab, j = f1, k + 1
                 while j < len(ins) and ins[j][0] == b_lab and ins[j][3] == name:
@@ -561,7 +573,7 @@ def build(script, sup, style_id, direction=None):
                  events=sorted(set(P.events) | set(cut_pts) | set(changes) | {it["f"][0] for it in l1["items"] if it["k"] == "card"}),
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, display=[dict(f=[a, b], text=t) for a, b, t in shown],
                  labels=[dict(f=[a, b], text=t) for a, b, t in labels], turn_f=turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
-                 style=style_id, layout=st["layout"],
+                 style=style_id, layout=st["layout"], placement_check=placement_report,
                  finishes=dict(black_and_white=len([p for p in P.pictures if p.get("finish")]), flashes=len(flashes), dark_ink_spans=len(bright)),
                  alien=dict(asked=[a["dev"] for a in l1.get("alien") or []], why=why, never=list(ALIEN_NEVER)),
                  sound_design={k: v for k, v in (l1.get("sound_design") or {}).items() if k != "dropped"},

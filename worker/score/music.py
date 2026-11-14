@@ -740,6 +740,15 @@ def flow(nf, hop_s, marks, plan, P, base, open_gain):
     fast = np.zeros(nf)
     d = plan.get("drop_at")
     e = plan["end_hit_s"]
+    # A short's payoff often leaves fewer than two full bars before the close.
+    # arrange() correctly keeps that phrase intact, but the semantic landing
+    # must still have its swell and breath. Ride the existing bars on the exact
+    # payoff word instead of silently dropping all payoff dynamics with the join.
+    if d is None:
+        payoff = marks.get("payoff_s")
+        if payoff is not None and 1.0 <= float(payoff) <= e - 0.15:
+            d = float(payoff)
+            notes["payoff_flow_s"] = d
     ride = np.zeros(nf)                                             # the music rises into the film's own sounded moments and sinks after them
     for x in sorted(float(v) for v in marks.get("accents") or []):
         if x < 1.0 or x > e - 1.5 or (d is not None and d - P["swell_max_s"] - 0.5 < x < d + 2.0):
@@ -879,7 +888,7 @@ def track(path, song, plan, marks, voice=None, profile=None, song_pcm=None):
     rep = {"song_k": round(song_lv, 1), "base_db": round(float(base), 1), "voice_k": round(v_ref, 1),
            "under_voice_db": round(float(v_ref - np.median(lvl[sp])), 1) if sp.any() else None,
            "in_breaths_db": round(float(v_ref - np.median(lvl[rest])), 1) if rest.any() else None,
-           "lifts": notes["lifts"], "holes": notes["holes"], "hits": notes["hits"], "accents": notes.get("accents") or [],
+           "payoff_flow_s": notes.get("payoff_flow_s"), "lifts": notes["lifts"], "holes": notes["holes"], "hits": notes["hits"], "accents": notes.get("accents") or [],
            # how much the ride itself moves the level at syllable rate under the words (pumping would show here)
            "ride_wobble_db": round(float(np.std((slow - s1)[sp])), 2) if sp.any() else None,
            "level_p10_p90": [round(float(np.percentile(loc[live] + g[live], 10) - np.median(loc[live] + g[live])), 1),

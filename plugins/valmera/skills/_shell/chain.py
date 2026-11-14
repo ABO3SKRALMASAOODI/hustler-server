@@ -424,7 +424,8 @@ def music_version(ctx, rd, sc):
     mix = rep.get("mix") or {}
     plan, levels = mix.get("plan") or {}, mix.get("music") or {}
     does = dict(marks=rep.get("marks"), drop_at=plan.get("drop_at"), build_at=plan.get("build_at"), end_hit_s=plan.get("end_hit_s"), jumps=plan.get("jumps"),
-                tempo=plan.get("tempo"), cuts=plan.get("cuts"), under_voice_db=levels.get("under_voice_db"), lifts=len(levels.get("lifts") or []),
+                tempo=plan.get("tempo"), cuts=plan.get("cuts"), payoff_flow_s=levels.get("payoff_flow_s"),
+                holes=levels.get("holes"), hits=levels.get("hits"), under_voice_db=levels.get("under_voice_db"), lifts=len(levels.get("lifts") or []),
                 accents=len(levels.get("accents") or []), lufs=(mix.get("master") or {}).get("lufs"))
     if rep.get("chapters"):                      # a long film: a track a chapter, each opening on an entrance and closing on a hit
         does["chapters"] = [dict(film=c.get("film"), title=(c.get("choice") or {}).get("title"), end_hit_s=c.get("end_hit_s"), why=c.get("why")) for c in rep["chapters"]]
