@@ -544,12 +544,18 @@ def no_music(l1_path):
     return dict(sounds=len(l1.get("sound") or []), foreign_sounds=bad, audio_assets=audio_assets, ok=not bad and not audio_assets)
 
 
+STING_ON = False      # owner, 15 Nov: off until a reference-matched sting passes (lane STING-REF)
+
+
 def end_accent(ctx, sc):
     """The brand finish's end accent (a sting on the card's reveal, the film's tail ringing under the card) for the
     workflows that close on the product's card as a signature: podcast shorts, stories, long-form. The marketing film
     sells Valmera inside the film and designs its own close, so it keeps the plain finish. `used`: the library
     recordings the film's own sound design already plays, so the sting is never one of them."""
-    if getattr(ctx, "workflow", None) == "wf2":
+    # OFF (owner, 15 Nov): the first sting (impact_10, chosen by a "rings 1.4 s or more" rule) sounded like a rock fall
+    # under the card. The accent returns only with a sting chosen against the reference reels' own end and transition
+    # sounds (lane STING-REF). Until then every workflow keeps the plain finish.
+    if getattr(ctx, "workflow", None) == "wf2" or not STING_ON:
         return dict(accent=False)
     used = []
     try:

@@ -181,8 +181,15 @@ def test_marketing_keeps_the_plain_finish_and_others_pass_their_sounds(tmp_path)
     l1 = tmp_path / "l1.json"
     l1.write_text(json.dumps({"sound": [{"file": "impact_10.flac"}, {"file": "click_3.flac"}, {"kind": "x"}]}))
     assert chain.end_accent(SimpleNamespace(workflow="wf2"), {"l1": str(l1)}) == {"accent": False}
-    got = chain.end_accent(SimpleNamespace(workflow="wf1"), {"l1": str(l1)})
-    assert got == {"accent": True, "used": ["impact_10.flac", "click_3.flac"]}
-    assert chain.end_accent(SimpleNamespace(workflow="wf3"), {}) == {"accent": True, "used": []}
+    # off until a reference-matched sting passes (owner, 15 Nov): every workflow keeps the plain finish
+    assert chain.end_accent(SimpleNamespace(workflow="wf1"), {"l1": str(l1)}) == {"accent": False}
+    assert chain.end_accent(SimpleNamespace(workflow="wf3"), {}) == {"accent": False}
+    chain.STING_ON = True
+    try:
+        got = chain.end_accent(SimpleNamespace(workflow="wf1"), {"l1": str(l1)})
+        assert got == {"accent": True, "used": ["impact_10.flac", "click_3.flac"]}
+        assert chain.end_accent(SimpleNamespace(workflow="wf3"), {}) == {"accent": True, "used": []}
+    finally:
+        chain.STING_ON = False
     first = brand.pick_sting()
     assert first and brand.pick_sting([first["path"]])["id"] != first["id"]
