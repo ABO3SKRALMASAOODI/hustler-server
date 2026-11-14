@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 
-from . import cut, fetch, hear, identity, look, plan, search, shots
+from . import cut, fetch, hear, identity, look, plan, search, shots, voice
 
 MAX_SOURCES = 16
 WHOLE_UNDER_S = 600.0      # a caller that reads only a source's head still fetches a source this short whole (no section cut)
@@ -109,7 +109,7 @@ def _twin(a, b, n=28):
 
 
 def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MAX_SOURCES, keep_work=False, anchors=None, avoid=None,
-         hear_s=None, read_s=None, per=None):
+         hear_s=None, read_s=None, per=None, want_voices=None):
     """anchors: {person's name: [photo paths already checked as that person]} for the identity step.
     avoid: [{"url", "time_range"}] already cut for this film by an earlier run: those seconds of a source are not cut again.
     hear_s, read_s, per: a caller with a deadline (a first film, score.film) hears less or nothing of each source, reads
@@ -365,6 +365,14 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 p["error"] = str(e)[:200]
         with cf.ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(finish, jobs))
+        # 7b. real voices: the person the film is about, heard saying a sentence that belongs after a line (voice.py)
+        voices = []
+        # a caller that hears nothing (the first film's wishes) has no sentence to cut in: voices only when asked or heard
+        if (want_voices if want_voices is not None else hear_s != 0.0) and os.environ.get("FOOTAGE_VOICES", "1") != "0":
+            try:
+                voices, spend["voices"] = voice.find_voices(lines, subjects, live, anchors, out_dir, W, H, stream_of=stream_of, log=log)
+            except Exception as e:  # noqa: BLE001 the narrator alone, as before
+                log(f"voices failed: {str(e)[:160]}")
         # 8. the record
         out_lines = []
         for r in plan_rows:
@@ -381,14 +389,16 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                                   subjects=(shows.get(r["i"]) or {}).get("subjects") or []))      # what the planner read the line as naming
         spend = {k: round(v, 5) for k, v in spend.items()}
         res = dict(engine="worker/footage", model=dict(look="gpt-6-sol low", hear=hear.MODEL), about=about, frame=[W, H], grade_target=tgt,
-                   subjects=subjects, lines=out_lines,
+                   subjects=subjects, lines=out_lines, voices=voices,
                    sources=[{k: s.get(k) for k in ("key", "url", "title", "channel", "where", "duration", "subjects", "why", "rung", "dur_read", "error")}
                             | dict(shots=len(s.get("shots") or []), heard=len(s.get("transcript") or [])) for s in sources],
                    counts=dict(lines=len(out_lines), lines_with_footage=sum(1 for r in out_lines if r["clips"]),
                                clips=sum(len(r["clips"]) for r in out_lines), frames_checked=len(pool_frames), frames_passed=len(good),
                                sources_opened=len(live), sources_tried=len(sources)),
                    credits=[dict(line=r["i"], url=c["source"]["url"], channel=c["source"]["channel"], title=c["source"]["title"],
-                                 time_range=c["time_range"]) for r in out_lines for c in r["clips"]],
+                                 time_range=c["time_range"]) for r in out_lines for c in r["clips"]]
+                           + [dict(line=v["after"], url=v["source"]["url"], channel=v["source"]["channel"], title=v["source"]["title"],
+                                   time_range=v["time_range"], voice=v["person"]) for v in voices],
                    spend=dict(spend, usd=round(sum(spend.values()), 4)), seconds=round(time.monotonic() - t_all, 1),
                    rights="Not licensed: owner's decision. Customers: switch off (footage/switch.py).")
         with open(os.path.join(out_dir, "footage.json"), "w") as f:

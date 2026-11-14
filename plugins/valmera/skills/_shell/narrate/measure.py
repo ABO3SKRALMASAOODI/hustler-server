@@ -204,13 +204,36 @@ def align(ref, hyp):
     return S, D, I, pairs
 
 
+def compounds(r, h):
+    """The listener's words with a compound written the script's way: two heard words whose letters make one script
+    word ("retro rockets" for "retrorockets") become that word, and one heard word that is a pair of script words
+    run together becomes the pair. Spelling only: the letters are the same, in the same order (14 Nov: whisper wrote
+    "retro rockets" in every one of 33 takes of a line that said "retrorockets")."""
+    rset = set(r)
+    pairs = {a + b: (a, b) for a, b in zip(r, r[1:])}
+    rpairs = set(zip(r, r[1:]))
+    out, i = [], 0
+    while i < len(h):
+        if i + 1 < len(h) and h[i] + h[i + 1] in rset and (h[i], h[i + 1]) not in rpairs:
+            out.append(h[i] + h[i + 1])
+            i += 2
+            continue
+        if h[i] not in rset and h[i] in pairs:
+            out += list(pairs[h[i]])
+        else:
+            out.append(h[i])
+        i += 1
+    return out
+
+
 def _best_norm(ref_text, hyp_text):
     """A number written as digits can be read two ways (two thousand seven,
     twenty oh seven); score the reading that matches what was heard."""
     best = None
     for ry in (False, True):
         for hy in (False, True):
-            r, h = norm_words(ref_text, ry), norm_words(hyp_text, hy)
+            r = norm_words(ref_text, ry)
+            h = compounds(r, norm_words(hyp_text, hy))
             S, D, I, _ = align(r, h)
             if best is None or S + D + I < sum(best[2:]):
                 best = (r, h, S, D, I)
@@ -330,7 +353,9 @@ def join_metrics(x, sr, boundaries, natural=None, ctx_s=1.5):
         # the noise floor inside the pause itself: its first half against its second
         g = gap_at(x, sr, t)
         fa = fb = None
-        if g and g[1] - g[0] >= 0.1:
+        # each half at least 0.1 s: a shorter half is the last word's own release (Phonon's fall from -48 to -80 dB
+        # takes 100-150 ms), which read as a 10 dB floor step in a 0.18 s pause between two lines (Skylab, 14 Nov)
+        if g and g[1] - g[0] >= 0.2:
             m = (g[0] + g[1]) / 2
             fa, fb = floor(g[0], m), floor(m, g[1])
         out["gap"] = [round(g[0], 3), round(g[1], 3)] if g else None

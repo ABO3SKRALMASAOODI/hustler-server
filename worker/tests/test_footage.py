@@ -323,3 +323,15 @@ def test_a_youtube_video_no_rung_opens_is_asked_of_the_wayback_machine(monkeypat
         assert False
     except fetch.FetchError:
         pass
+
+
+def test_voice_align_finds_the_chosen_words_in_what_was_heard():
+    from footage import voice
+    heard = [dict(w=w, start=i * 0.3, end=i * 0.3 + 0.25) for i, w in enumerate(
+        "and so I said look I was willing to take a chance because losing wasn't the worst thing yeah".split())]
+    i, j, share = voice.align(heard, "I was willing to take a chance because losing wasn't the worst thing.")
+    assert [w["w"] for w in heard[i:j]][0] == "I" and heard[j - 1]["w"] == "thing" and share == 1.0
+    assert heard[i - 1]["w"] == "look"            # the first "I" (before "said") is not where the sentence starts
+    assert voice.align(heard, "") is None
+    far = voice.align(heard, "the weather in Memphis was fine that day")
+    assert far is None or far[2] < 0.8

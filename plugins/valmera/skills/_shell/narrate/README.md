@@ -1,10 +1,19 @@
-# narrate: the narrator voice for workflows 3 and 4
+# narrate: the narrator voice for every workflow (stories, long-form, marketing)
 
-VoxCPM2 (Apache-2.0, open weights, on the Mac) speaks by default; OpenAI gpt-4o-mini-tts, directed
-line by line, is the second engine (`--engine openai`). whisper hears. No person's recording: every
-voice is designed from a description (VoxCPM2) or is a stock voice (OpenAI). Every read, from either
-engine, gets the same finish: pauses set from the script and the reference narrators, the writer's
-stressed words ridden, and a mastering chain solved against the references by signal.
+**Phonon 31M, voice Easton** (Apache-2.0, open weights, the `ptts` runtime on the Mac's CPU, no
+PyTorch) speaks by default since 14 Nov 2026. The owner chose it by ear from the A/B of the four
+strongest free candidates (`.valmera/week-1112/side-by-side/voice/voice_compare_ab2.mp4`, "C ... seems
+ok"). Each line of the script is read as three takes (seeds 7 + 101 x take + 7 x line, the runtime's
+temperature 0.3, as the owner heard them), the kept take is chosen by signal against the metromedia
+narrators (`perform.py`: every word heard first, then the prosody nearest the references, minus
+drift from the lines already kept), and the gate's own listener then hears the joined lines: a line
+it does not hear whole gets its next take that listener hears whole, or new takes
+(`lines.gate_repair`, up to 3 rounds). About 0.1 s a take; the listening is the time.
+VoxCPM2 (`--engine voxcpm`) reads when Phonon cannot load or read; OpenAI gpt-4o-mini-tts, directed
+line by line, is `--engine openai`. whisper hears. Every read, from any engine, gets the same
+finish: pauses set from the script and the reference narrators, the writer's stressed words ridden,
+and a mastering chain solved against the references by signal. Real voices from the footage engine
+are cut in after their lines with `splice`.
 
 ```
 PY=/Users/masaoodi/Documents/Valmera/.valmera/venv-narrate/bin/python
@@ -16,8 +25,12 @@ $PY narrate.py check DIR --band 03
 ```
 
 Setup (once): `python3.12 -m venv .valmera/venv-narrate` then
-`pip install voxcpm==2.0.3 torch==2.15.0 torchaudio==2.11.1 faster-whisper==1.1.1 mlx-whisper==0.4.3 inflect==7.6.0 librosa==1.0.1 soundfile==0.14.0 scipy==1.18.1`.
-Weights: `openbmb/VoxCPM2`, `mobiuslabsgmbh/faster-whisper-large-v3-turbo`, whisper large-v3 mlx
+`pip install voxcpm==2.0.3 torch==2.15.0 torchaudio==2.11.1 faster-whisper==1.1.1 mlx-whisper==0.4.3 inflect==7.6.0 librosa==1.0.1 soundfile==0.14.0 scipy==1.18.1`,
+then `zsh setup_phonon.sh`: it installs `ptts==0.7.1` and puts the Phonon weights and the Easton voice
+in `.valmera/models/narrate/phonon` (`NARRATE_MODELS`), every file checked against `phonon.json`
+(Hub revisions pinned, sha256 per file), and reads one line offline. `zsh setup_phonon.sh --check`
+only reports. Without the folder the engine loads the same pinned revisions from the Hub.
+Weights: `gradium/phonon-31m-en` and `gradium/phonon-voices` (pinned in `phonon.json`), `openbmb/VoxCPM2`, `mobiuslabsgmbh/faster-whisper-large-v3-turbo`, whisper large-v3 mlx
 (`.valmera/week-1106/atlas/models/whisper-large-v3-mlx`, or `mlx-community/whisper-large-v3-mlx`).
 
 ## Script
@@ -96,6 +109,13 @@ sentence gaps of 0.22 s and none inside a phrase; 13.8 semitones of range, pitch
 the stressed word 4.9 dB louder and 8.2 st higher than its phrase; a -6.0 dB/octave spectrum, a dry
 room (72 ms fall), 15 dB crest.
 
+The 14 Nov study (lane VO2, `.valmera/week-1112/lanes/VO2`): candidates read line by line with takes
+chosen by signal (Phonon Easton and Miles, Chatterbox multilingual v3, Qwen voice design, Kokoro, CSM,
+Breeze, VoxCPM2 tuned, gpt-4o-mini-tts, gpt-realtime, gpt-audio; Audio8 and Higgs Audio 3 would not
+load or run on this Mac), the top four by ear in `side-by-side/voice/ab2.html`. The signals do not
+decide alone: the owner chose Phonon Easton by ear (FedEx 64.3, Skylab 67.6 on the 23 signals as
+assembled for the A/B). The table below is the 13 Nov study.
+
 | candidate (FedEx story, 177 words, band 03) | score | in band |
 |---|---|---|
 | VoxCPM2 atlas, today, as delivered | 64.5 | |
@@ -144,7 +164,10 @@ About $0.015 a minute of speech. If the service fails, the VoxCPM2 voice reads t
   The old figure (inflect and patterns over the written form) stays in `check.json` as
   `wer_rule_normalised`, for comparison only. Replayed on lane O's three WF3 films
   (`.valmera/week-1112/lanes/R/wer_replay.json`): 3.80, 3.65, 2.60% by the rule became 1.09, 0.52,
-  0.00%; what remains is spoken ("reach" heard "reached", "way" inserted).
+  0.00%; what remains is spoken ("reach" heard "reached", "way" inserted). **14 Nov:** a currency
+  sign's word said after the scale word ("$30 million" = "thirty million dollars") is taken from the
+  model's form; a compound the listener spells apart or together ("retro rockets") counts as the
+  script's word (`measure.compounds`, the same letters in the same order, nothing else).
 - Pace (wpm and wpm while speaking) and pitch range (p5..p95 of f0, semitones) inside p10..p90 of
   the reference narrators in `reference-library/2026-11-05` folders 03 and 04 (`ref_band.json`,
   measured by `.valmera/week-1112/lanes/M/tools/ref_band.py`: demucs vocal stem, whisper-large-v3 word
@@ -152,7 +175,11 @@ About $0.015 a minute of speech. If the service fails, the VoxCPM2 voice reads t
   inside that band).
 - No join artefact at any chunk boundary: energy step and spectral flux under the file's own p99,
   no click (sample step over the file's p99.9), noise floor inside the pause steady within 3 dB,
-  level and pitch drift no larger than at the natural sentence gaps (+1 dB / +1 st).
+  level and pitch drift no larger than at the natural sentence gaps (+1 dB / +1 st). The floor is read
+  in pauses of 0.2 s or more (each half 0.1 s): a shorter half is the last word's own release.
+  Line engines (Phonon): a take loses the tick Phonon puts before its first word, a line join is the
+  takes' own floor (`lines.room_tone`: their noise where they have one, digital silence where their own
+  pauses are digital silence, as Phonon's are).
 
 `measure.py` measures both sides (the reference narrators and our renders) the same way.
 

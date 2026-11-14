@@ -280,3 +280,30 @@ def test_a_podcast_cut_keeps_the_take_as_spine_and_cuts_away_on_what_is_named(tm
     assert 0.15 <= beats["cutaway_share"] <= 0.7
     assert [x["text"] for x in beats["labels"]] == ["UberCab"]              # a named thing is labelled once
     assert F.taste_check(l1, beats)["ok"], F.taste_check(l1, beats)["problems"]
+
+
+def test_pin_voices_gives_the_real_voice_its_own_picture(tmp_path):
+    """The seconds a real voice speaks show its own clip from its first frame; the pictures around it are trimmed."""
+    clip = tmp_path / "voice.mp4"
+    clip.write_bytes(b"x")
+    tl = [[0, 60, "photo", "A", {"path": "a.jpg"}], [60, 120, "clip", "B", {"path": "b.mp4", "src": [0.0, 2.0], "seconds": 4.0}],
+          [120, 200, "photo", "C", {"path": "c.jpg"}]]
+    v = dict(start=1.0, end=3.5, person="Fred Smith", clip=dict(path=str(clip), seconds=2.5))
+    out = F.pin_voices(tl, [v])
+    f0, f1 = F.Clock.f(1.0 + F.LEAD_F / F.FPS), F.Clock.f(3.5 + F.LEAD_F / F.FPS)
+    pinned = [r for r in out if r[4].get("voice")]
+    assert len(pinned) == 1 and pinned[0][:2] == [f0, f1] and pinned[0][4]["src"][0] == 0.0
+    assert all(r[1] <= f0 or r[0] >= f1 for r in out if not r[4].get("voice"))
+    after = next(r for r in out if r[0] == f1)
+    assert after[3] == "B" and after[4]["src"][0] > 0.0          # the clip it cut into resumes where it would have been
+    assert F.pin_voices(tl, [dict(v, clip=dict(path=str(tmp_path / "missing.mp4"), seconds=2.5))]) == tl
+
+
+def test_ear_never_lets_a_rewrite_say_a_sentence_twice():
+    import ear
+    old = [dict(say="Sixty-three seconds into launch, the warning came."),
+           dict(say="What could one thin shield take with it? Skylab launched in May.")]
+    new = [dict(say="What could one thin shield take with it? Sixty-three seconds in, the warning came."),
+           dict(say="What could one thin shield take with it? Skylab launched in May.")]
+    assert ear.repeated(new, old, [0, 1]) == {0: "what could one thin shield take with it"}
+    assert ear.repeated(old, old, [0, 1]) == {}

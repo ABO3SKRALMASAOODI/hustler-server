@@ -17,6 +17,7 @@ import json
 import os
 import string
 import time
+import unicodedata
 import urllib.request
 
 MODEL = os.environ.get("NARRATE_SPOKEN_MODEL", "gpt-6.1-sol")
@@ -61,7 +62,22 @@ def merge(heard, spoken):
     hn = [_letters(t) or ("#" + _norm(t)) for t in h]
     on = [_norm(t) for t in o]
     out, took, kept, rejected = [], 0, 0, 0
-    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(a=hn, b=on, autojunk=False).get_opcodes():
+    ops = difflib.SequenceMatcher(a=hn, b=on, autojunk=False).get_opcodes()
+    # A currency sign is said after the amount's scale word: "$30 million" is "thirty million dollars". The aligner
+    # shows that as the number replaced, the scale word equal, and the sign's word inserted after it; the three are
+    # one written token's reading, judged as one span by the rule below (14 Nov: every take of the FedEx line
+    # "nearly thirty million dollars" counted a dropped word).
+    k, merged = 0, []
+    while k < len(ops):
+        op, i1, i2, j1, j2 = ops[k]
+        if (op != "equal" and any(unicodedata.category(c) == "Sc" for t in h[i1:i2] for c in t) and k + 2 < len(ops)
+                and ops[k + 1][0] == "equal" and ops[k + 1][2] - ops[k + 1][1] <= 2 and ops[k + 2][0] == "insert"):
+            merged.append(("replace", i1, ops[k + 2][2], j1, ops[k + 2][4]))
+            k += 3
+            continue
+        merged.append(ops[k])
+        k += 1
+    for op, i1, i2, j1, j2 in merged:
         if op == "equal":
             out += h[i1:i2]
             continue

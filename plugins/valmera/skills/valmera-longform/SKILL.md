@@ -61,8 +61,8 @@ state root, so a run that will stop at its look should use its own `--state-root
 | Stage | What happens | Time, cost (13 Nov) |
 |---|---|---|
 | ideas | `story.find_ideas`: six stories for The Ledger with their chapters and ledgers; the best three are probed for free pictures | 15-25 min, about $1 |
-| script | `story.dossier` (45-80 quoted facts, named things, places, documents) checked page by page; `story.write` writes 1850-2500 words in chapters from the verified facts only; `story.check_script` measures it, two repair rounds | 15-30 min, $1-3 |
-| supply | the narrator (VoxCPM2, band 04; 71 chunks for 12.6 min of speech; about a minute a chunk on a quiet Mac, 7-30 min a chunk when other lanes load it; one narration at a time on `.narrate.lock`) while the pictures are found, checked and downloaded and the designed pages are drawn (`design.py`) | 1-3 h |
+| script | `story.dossier` (45-80 quoted facts, named things, places, documents) checked page by page; `story.write` writes 1850-2500 words in chapters from the verified facts only; `story.check_script` measures it, two repair rounds; then `ear.for_ear` (stories, lane VO2) rewrites it for the ear: each chapter asks its question aloud, short spoken lines, the stress word late, figures one a breath; a blind second call keeps any segment whose facts moved as written, and the rewrite must pass `check_script` again or the script stands | 15-30 min, $1-3 |
+| supply | the narrator (Phonon 31M Easton, band 04, three takes a line chosen by signal; VoxCPM2 reads only if Phonon cannot; one narration at a time on `.narrate.lock`) while the pictures are found, checked and downloaded and the designed pages are drawn (`design.py`) | 1-3 h |
 | score | NASA's archive tops up any subject with fewer than seven pictures (`nasa_top_up`, the same vision check); maps lost in supply are drawn again; `film_long.build`: the L1 at 1920x1080; density, taste; stills of the beats into `look/sheet.jpg` | **Look.** The run stops here |
 | render | `film_long.audio_master`: each narration chunk brought to the read's median level (`level_chunks`, signal only), the placed sounds, lane J's `scene.audio.master`; then `worker/scene` at `--tier master` through `heavy.sh` | 20-40 min |
 | check, deliver, cleanup | the shell's brand finish and checks, the mark on ten frames, length 10-20 min; `<out>/<date>-wf4-the-ledger-<title>-<id>/{film.mp4, film.json}`, once; the run folder is deleted | |
@@ -91,4 +91,4 @@ Not built yet: Memory Palace, The Dark Room, Worn Print, One Day (`styles.json`,
 `run.py` launcher; `wf4.py` the stages; `story.py` the finder, researcher and writer (on lane O's `writer.py`);
 `film_long.py` supply, the builder, sound, render and check; `design.py` the designed pages; `styles.json`;
 `REFERENCES.md`; `test_longform.py`. Shared: `valmera-stories/pictures.py` (narrator, pictures, faces),
-`valmera-stories/film.py` (clock, curves, ticks, `PACE_S`), `_shell/narrate` (VoxCPM2, the VOICE gate), `worker/scene`.
+`valmera-stories/film.py` (clock, curves, ticks, `PACE_S`), `_shell/narrate` (Phonon Easton, the VOICE gate), `worker/scene`.

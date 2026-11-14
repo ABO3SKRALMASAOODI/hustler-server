@@ -1,7 +1,14 @@
-"""narrate: the narrator voice for workflows 3 (stories) and 4 (long-form voiceover).
+"""narrate: the narrator voice for every workflow (stories, long-form voiceover, marketing).
 
-VoxCPM2 (Apache-2.0, on the Mac) speaks by default; OpenAI gpt-4o-mini-tts,
-directed per line, is the second engine (--engine openai, openai_voice.py).
+Phonon 31M with its Easton voice (Apache-2.0, on the Mac's CPU, the ptts runtime)
+speaks by default since 14 Nov 2026: the owner chose it by ear from the four
+strongest free candidates (.valmera/week-1112/side-by-side/voice/voice_compare_ab2.mp4).
+Every line is read as several takes and the kept take is chosen by signal against
+the metromedia narrators (lines.py, perform.py); the gate's listener then hears the
+joined lines and a line it does not hear whole is replaced (lines.gate_repair).
+setup_phonon.sh puts the runtime and the pinned weights (phonon.json) in place.
+VoxCPM2 (--engine voxcpm) is the fallback when Phonon cannot load or read; OpenAI
+gpt-4o-mini-tts, directed per line, is --engine openai (openai_voice.py).
 whisper large-v3-turbo (faster-whisper, CPU) hears every take; whisper large-v3
 (mlx) times the finished words and is the gate's listener.
 
@@ -15,6 +22,7 @@ de-ess, -14 LUFS / -1 dBTP). --no-master restores the old finish.
   $PY narrate.py voices
   $PY narrate.py render SCRIPT.json --out DIR [--voice ID] [--band 03|04] [--takes 3] [--lufs -15.6]
   $PY narrate.py check DIR [--band 03|04|all]
+  $PY narrate.py splice DIR FOOTAGE_DIR      (real voices the footage engine found, cut in after their lines)
   $PY narrate.py make-voice --id ID --describe "..." --line "..." [--takes 4] [--meta '{"gender":..,"band":..}']
   $PY narrate.py make-voices SPEC.json [--takes 5]
 
@@ -95,8 +103,11 @@ CHUNK_WORDS = 42
 # 23 signal features, every candidate through the same finish) measured VoxCPM2 with the new finish
 # nearest the references (79 of 100; 64.5 before it), OpenAI gpt-4o-mini-tts directed per line next (76),
 # tts-1-hd 68.
-# NARRATE_ENGINE / --engine / the script's "engine" choose; openai needs OPENAI_API_KEY.
-DEFAULT_ENGINE = "voxcpm"
+# 14 Nov (lane VO2): the four strongest of eleven free candidates, line by line with takes chosen by signal, went to
+# the owner as an A/B by ear (side-by-side/voice/ab2.html); he chose C, Phonon 31M Easton ("seems ok"), for every
+# workflow. NARRATE_ENGINE / --engine / the script's "engine" choose; openai needs OPENAI_API_KEY; a Phonon that
+# cannot load or read falls back to VoxCPM2.
+DEFAULT_ENGINE = "phonon"
 
 
 def log(*a):
@@ -537,7 +548,7 @@ def loudness_set(x, sr, target, tp_db=-1.5):
 # ================================================================ render
 
 def pick_engine(args, script):
-    """VoxCPM2 on the Mac by default; openai when asked and a key is there."""
+    """Phonon Easton on the Mac by default; VoxCPM2 or openai when asked (openai only with a key)."""
     name = getattr(args, "engine", None) or script.get("engine") or os.environ.get("NARRATE_ENGINE") or DEFAULT_ENGINE
     if name == "openai":
         import openai_voice
@@ -555,7 +566,18 @@ def render(args):
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     fallback = None
-    if pick_engine(args, script) == "openai":
+    name = pick_engine(args, script)
+    import lines as LN
+    if name in LN.ENGINES:
+        try:
+            args.engine = name
+            return LN.render_lines(args, script, vid, out, sys.modules[__name__])
+        except Exception as e:  # noqa: BLE001 - the model would not load or read: the VoxCPM2 voice reads it
+            fallback = f"{name}: {type(e).__name__}: {str(e)[:300]}"
+            log(f"line-by-line {name} failed ({fallback}); the VoxCPM2 voice reads this script")
+            if vid not in {v["id"] for v in voice_list()}:
+                vid = "atlas"
+    if name == "openai":
         try:
             return render_openai(args, script, vid, out)
         except Exception as e:  # noqa: BLE001 - the service down or refusing: the local voice reads it
@@ -1160,7 +1182,8 @@ def main():
     r.add_argument("--no-tempo-anchor", dest="tempo_anchor", action="store_false",
                    help="continue every chunk from the kept chunk as generated")
     r.add_argument("--lufs", type=float, help="the narration's loudness (default: the mastering chain's -14 LUFS)")
-    r.add_argument("--engine", choices=["openai", "voxcpm"], help="default: " + DEFAULT_ENGINE + " (NARRATE_ENGINE)")
+    import lines as LN
+    r.add_argument("--engine", choices=["openai", "voxcpm"] + sorted(LN.ENGINES), help="default: " + DEFAULT_ENGINE + " (NARRATE_ENGINE)")
     r.add_argument("--chunk-words", type=int, help="openai: words per request (default 60)")
     r.add_argument("--no-master", action="store_true", help="pauses as generated and loudness only (the pre-13 Nov finish)")
     r.add_argument("--band", choices=["03", "04", "all"], help="reference band the takes must sit in")
@@ -1180,8 +1203,16 @@ def main():
     vs.add_argument("spec")
     vs.add_argument("--takes", type=int, default=4)
     vs.add_argument("--preview-dir")
+    sl = sp.add_parser("splice", help="cut the real voices the footage engine found into a rendered narration (realvoice.py)")
+    sl.add_argument("dir", help="the narration folder (narration.wav, words.json)")
+    sl.add_argument("footage", help="the footage folder whose footage.json carries `voices`")
     a = ap.parse_args()
-    if a.cmd == "voices":
+    if a.cmd == "splice":
+        import realvoice
+        rec = json.load(open(Path(a.footage) / "footage.json"))
+        placed = realvoice.splice(a.dir, rec.get("voices") or [], a.footage)
+        print(json.dumps({"voices": placed}))
+    elif a.cmd == "voices":
         for v in voice_list():
             print(f"{v['id']:<8} {v.get('f0_med_hz')} Hz  range {v.get('range_st')} st  {v['describe']}")
     elif a.cmd == "render":

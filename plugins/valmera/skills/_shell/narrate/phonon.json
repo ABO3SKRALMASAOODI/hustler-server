@@ -1,0 +1,69 @@
+{
+ "note": "Phonon 31M English (Apache-2.0) and the owner's voice, Easton (14 Nov 2026). setup_phonon.sh installs the runtime and puts these files in NARRATE_MODELS/phonon; lines.py loads them from there, or from these Hub revisions when the folder is missing.",
+ "runtime": "ptts==0.7.1",
+ "model": "hf://gradium/phonon-31m-en@92741c5b07d085ff840e26fea8ce43110b87852f",
+ "voice_catalog": "hf://gradium/phonon-voices@da6c9ec0d47be8df5c87c730a3aa97187f3229c3",
+ "voices": [
+  "Easton"
+ ],
+ "files": {
+  "config.json": {
+   "size": 4634,
+   "sha256": "b5d0f88353638370d94035b7d73d7d6577c0554d78f8d7ecfd40490aae39ae85"
+  },
+  "generation_config.json": {
+   "size": 220,
+   "sha256": "ffb086e8f531b10a43bfd17a56069f90b649171a55aae98b5e9a28c8411cffc0"
+  },
+  "model.q8.gguf": {
+   "size": 64512352,
+   "sha256": "a7d9aad2cd6dc66473f24a08bc6d2939030ef4d751ef82349361fbef3272dbae"
+  },
+  "processor_config.json": {
+   "size": 747,
+   "sha256": "1ba08d75f0aba95fb494e8264e65e6b3e6b0b50981e1d49f183cb70eed58cfee"
+  },
+  "tokenizer.json": {
+   "size": 277967,
+   "sha256": "691a00068fa7b989f2f3e5ae5daa2d1a5bb319f2d5360deafcfb19a8bb6e7936"
+  },
+  "tokenizer.model": {
+   "size": 65045,
+   "sha256": "82e4572006d64d483317074c22c368e87779640b6f3a9dcd07b7caae32b030ce"
+  },
+  "tokenizer_config.json": {
+   "size": 575,
+   "sha256": "17d12cf8dee2891506648bb1d5657e26fb165263686d0e2ef311513488d6446f"
+  },
+  "tokenizer.5.0.0.json": {
+   "size": 302879,
+   "sha256": "28161547feed30fa70e9ce6da0b791835db9c9720683d87f17e0327f01687cc5"
+  },
+  "chat_template.jinja": {
+   "size": 1513,
+   "sha256": "7dbe65d426b02c082cdbb61e7db1d58a7a1f6152328dc929d971e3ce3ad932cc"
+  },
+  "default-voice.safetensors": {
+   "size": 256136,
+   "sha256": "dc537478eaadc1a5257fcda2e3501ab81e14c111a5d95a5838f350db2afd0f1a"
+  },
+  "README.md": {
+   "size": 10478,
+   "sha256": "fc04467c0e5560e89cd5bbded052e9b7f6c23e2abcdd03a32a3a07a27a7ea3ed"
+  }
+ },
+ "voice_files": {
+  "Easton": {
+   "file": "voices/LMDIYE0Oa377Qh6Z.safetensors",
+   "size": 256136,
+   "sha256": "45c582673cb20edb04ddcca2b5a8865ddfb0a82599efadb269021e87d20fbdd4",
+   "line": "{\"filename\": \"voices/LMDIYE0Oa377Qh6Z.safetensors\", \"name\": \"Easton\", \"voice_id\": \"LMDIYE0Oa377Qh6Z\", \"language\": \"en\", \"locale\": \"en-us\", \"gender\": \"male\", \"age\": \"Young Adult\", \"description\": \"Punchy and close in, with crisp consonant attack that cuts through a music bed and pitch that lifts across each line.\"}"
+  }
+ },
+ "settings": {
+  "lang": "en",
+  "quant": "q8",
+  "temperature": "runtime default (0.3)",
+  "seed": "7 + 101 * take + 7 * line"
+ }
+}

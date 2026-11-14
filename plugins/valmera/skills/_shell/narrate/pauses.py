@@ -47,13 +47,14 @@ def boundaries(words, segments, band):
     out = []
     for i, (a, b) in enumerate(zip(words, words[1:])):
         mid = (a["end"] + b["start"]) / 2
+        gap = max(float(b["start"]) - float(a["end"]), 0.0)
         if i in seg_last:
             out.append({"t": mid, "want": max(float(segments[seg_last[i]].get("pause_after") or 0.0), 0.06),
-                        "exact": True, "kind": "segment", "after": a["w"]})
+                        "exact": True, "kind": "segment", "after": a["w"], "gap": gap})
             continue
         p = a["w"].rstrip("\"'”’)")[-1:]
         kind = "sentence" if p in ".!?" else "comma" if p in ",;:—–-" else "word"
-        out.append({"t": mid, "want": cap[kind], "exact": False, "kind": kind, "after": a["w"]})
+        out.append({"t": mid, "want": cap[kind], "exact": False, "kind": kind, "after": a["w"], "gap": gap})
     return out
 
 
@@ -107,10 +108,17 @@ def shape(x, sr, text_segments, words, N, band="03"):
     for (a, b), bd in sorted(plan, key=lambda r: -r[0][0]):
         have = b - a
         want = bd["want"]
-        if not bd["exact"] and have <= want + 0.02:
+        # The band is the gap between words as a listener times them (the references were measured that way), and a
+        # word's soft edges (a breath, a decaying vowel above the floor) sit inside that gap but outside the silence:
+        # an engine that joins line takes leaves ~0.1 s of edge on each side (14 Nov, lane VO2: 0.24 s silences read
+        # as 0.44 s gaps, 10-12 pauses a minute against the references' 4). The silence is set so the gap is the want.
+        edge = min(max(bd.get("gap", have) - have, 0.0), 0.35) if bd.get("gap") is not None else 0.0
+        heard = have + edge
+        if not bd["exact"] and heard <= want + 0.02:
             continue
-        if bd["exact"] and abs(have - want) <= 0.02:
+        if bd["exact"] and abs(heard - want) <= 0.02:
             continue
+        want = max(want - edge, 0.04)
         x, dlt, had = N.set_pause(x, sr, (a + b) / 2, want, floor_db)
         edits.append({"t": round(a, 3), "kind": bd["kind"], "after": bd["after"], "had": round(had, 3), "want": round(want, 3),
                       "asked": bd.get("asked"), "shift_s": round(dlt / sr, 3)})

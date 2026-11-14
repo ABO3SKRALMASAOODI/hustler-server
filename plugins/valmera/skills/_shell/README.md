@@ -47,7 +47,7 @@ in its supply; `VALMERA_FOOTAGE=0` turns it off. A source YouTube will not open 
 a bot) is looked for on archive.org: the same film by its title, then the subject's own searches. OpenAI only (credit until 30 Nov 2026, money after).
 Rights: not licensed, so the shell never publishes and customers stay behind `app_kv.footage` (off).
 
-WF3 and WF4 speak through `narrate/` (VoxCPM2, local open weights): a script with a performance
+WF3 and WF4 speak through `narrate/` (Phonon 31M Easton, local open weights, the owner's choice of 14 Nov): a script with a performance
 layer per segment becomes `narration.wav`, `words.json` (every word timed) and `check.json` (the
 VOICE gate). See `narrate/README.md`.
 

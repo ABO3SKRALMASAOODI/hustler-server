@@ -712,6 +712,36 @@ def supply_shots(script, clock, pics, footage, f_end, stress, aim_s=1.0, lo_s=0.
     return [r for r in out if r[1] - r[0] >= 2]
 
 
+def pin_voices(timeline, voices):
+    """The seconds a real voice speaks (sup["voices"]: narration start/end, its clip) show that voice's own picture,
+    whole, from its first frame, so the lips meet the words; the pictures around it are trimmed to make room."""
+    for v in voices:
+        c = v.get("clip") or {}
+        if not c.get("path") or not os.path.exists(c["path"]):
+            continue
+        f0, f1 = Clock.f(float(v["start"]) + LEAD_F / FPS), Clock.f(float(v["end"]) + LEAD_F / FPS)
+        f1 = min(f1, f0 + int(float(c.get("seconds") or (f1 - f0) / FPS) * FPS))
+        if f1 - f0 < 6:
+            continue
+        out = []
+        for r in timeline:
+            a, b = r[0], r[1]
+            if b <= f0 or a >= f1:
+                out.append(r)
+                continue
+            if a < f0:
+                out.append([a, f0] + r[2:])
+            if b > f1:
+                rec = r[4]
+                if r[2] == "clip" and rec.get("src"):
+                    k = (f1 - a) / FPS
+                    rec = dict(rec, src=[round(min(rec["src"][0] + k, float(rec["seconds"])), 3), rec["src"][1]])
+                out.append([f1, b, r[2], r[3], rec])
+        out.append([f0, f1, "clip", v.get("person"), dict(c, voice=v.get("person"), src=[0.0, round((f1 - f0) / FPS, 3)])])
+        timeline = sorted((r for r in out if r[1] - r[0] >= 2), key=lambda r: r[0])
+    return timeline
+
+
 # ----------------------------------------------------------------- captions that ink word by word; display words
 
 def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z=0, max_chars=22, max_words=4, late=2):
@@ -969,6 +999,11 @@ def character_sheet(script, sup, direction=None):
 
     # ---- the pictures: the line's real footage, then photographs, a new one about every second
     timeline = supply_shots(script, clock, pics, footage, f_ovf, stress, aim_s=float(d["aim_s"]), opener=d.get("open"))
+    for v in sup.get("voices") or []:            # a real voice cut in (narrate realvoice.py): its own picture, lips with words
+        if (v.get("clip") or {}).get("path") and os.path.exists(v["clip"]["path"]):
+            if v["clip"]["path"] not in keys:
+                keys[v["clip"]["path"]] = P.video(f"v{len(keys):02d}", v["clip"])
+    timeline = pin_voices(timeline, sup.get("voices") or [])
     low_seg = next((i for i, s in enumerate(script["segments"]) if s.get("beat") == "low"), None)
     cap_y = 0.615
     # ---- display words on the caption seat: what the sheet prints from its first frame, and its last number, are left to it
@@ -1002,7 +1037,7 @@ def character_sheet(script, sup, direction=None):
         if f1 - f0 < 2:
             continue
         key = keys[rec["path"]]
-        if kind == "clip" and too_close(rec):
+        if kind == "clip" and (too_close(rec) or rec.get("voice")):
             # a broadcast close-up cut to the phone already holds its head as large as a talking-head short does (the
             # references' 0.34 of the height): it plays as it was cut, whole, with no push into the face
             P.shot([f0, f1], key, [0.0, 0.0, 1.0, 1.0], src=list(rec["src"]))

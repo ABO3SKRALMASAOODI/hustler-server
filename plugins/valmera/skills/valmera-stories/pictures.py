@@ -2,7 +2,7 @@
 
 Workflow 3 and workflow 4 share it. Everything lands under the run's supply folder.
 
-    narrate(script, out, band, label)     the narrate tool (VoxCPM2, local) through heavy.sh, then its VOICE gate
+    narrate(script, out, band, label)     the narrate tool (Phonon Easton, local) through heavy.sh, then its VOICE gate
     pictures(named, out, per)             each named subject: Wikimedia Commons (by Wikidata 'depicts', then text) and
                                           Openverse through the worker's pictures route (broll_source.find_named),
                                           checked by a vision model against what the picture must show, downloaded,
@@ -64,7 +64,7 @@ def narrate(nscript, out, band="03", label="narrate", env=None, timeout=5400):
     sp = os.path.join(out, "narration_script.json")
     json.dump(nscript, open(sp, "w"), ensure_ascii=False, indent=1)
     if not os.path.exists(os.path.join(out, "words.json")):
-        # One narration at a time on this Mac: VoxCPM2 shares the Apple GPU, and three at once measured a chunk in
+        # One narration at a time on this Mac: the gate listener (and VoxCPM2, the fallback) share the Apple GPU; VoxCPM2 three at once measured a chunk in
         # 5-10 min against 20-50 s alone (13 Nov). The lock is the kernel's: a dead holder releases it.
         import fcntl
         with open(NARRATE_LOCK, "a") as lk:

@@ -23,6 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shell"))
 import chain  # noqa: E402
+import ear  # noqa: E402
 import film as F  # noqa: E402
 import pictures as PX  # noqa: E402
 import writer  # noqa: E402
@@ -161,10 +162,33 @@ def script(ctx, ideas_out):
         ctx.log("script repair: " + notes[:400])
     if rep is None or not rep["ok"]:
         raise RuntimeError(f"the script's facts do not verify: {json.dumps(rep)[:600]}")
+    sc, rep = for_the_ear(ctx, sc, rep, spend)
     reg = next(s for s in ctx.styles_allowed() if s["id"] == card["id"])
     return dict(title=sc.get("title") or pick.get("title"), style=reg, window=None, hook_line=sc.get("hook_line"),
                 close_line=sc.get("close_line"), direction=f"{card['name']}: {card['look']}", idea=pick.get("title"),
                 idea_full=pick, script=sc, verify=rep, words=writer.words_of(sc), spend=spend)
+
+
+def for_the_ear(ctx, sc, rep, spend):
+    """The checked script rewritten for the ear by a model (ear.py: short spoken lines, the stress word placed, a real
+    turn, the film's question), audited for facts by a second call and checked again on its pages. Any failure keeps the
+    script as written. --args '{"ear": false}' skips it."""
+    if ctx.args.get("ear") is False:
+        return sc, rep
+    try:
+        sc2, er = ear.for_ear(sc, "story", log=ctx.log)
+    except Exception as e:  # noqa: BLE001
+        ctx.log(f"ear: {e!r}"[:300])
+        return sc, rep
+    spend += [dict(stage="ear", **u) for u in er.get("spend") or []]
+    json.dump(dict(script=sc2, report=er), open(os.path.join(ctx.run_dir, "script_ear.json"), "w"), ensure_ascii=False, indent=1)
+    if not er.get("ok"):
+        return sc, rep
+    rep2 = writer.verify(sc2)
+    if not rep2["ok"]:
+        ctx.log("ear: the rewrite does not verify; the script stands as written")
+        return sc, rep
+    return sc2, rep2
 
 
 # ----------------------------------------------------------------- supply
@@ -290,15 +314,19 @@ def given_narration(ctx, sc, out):
         return
     import shutil
     try:
-        got = [F.norm_word(w["w"]) for w in json.load(open(os.path.join(src, "words.json")))["words"]]
+        # a narration with a real voice cut in is reused as the narrator read it (the run cuts its own voices in again)
+        wsrc = os.path.join(src, "words_narrator.json") if os.path.exists(os.path.join(src, "words_narrator.json")) else os.path.join(src, "words.json")
+        got = [F.norm_word(w["w"]) for w in json.load(open(wsrc))["words"]]
         want = [F.norm_word(x) for s in sc["segments"] for x in str(s["say"]).split()]
         if [g for g in got if g] != [x for x in want if x]:
             ctx.log(f"the given narration is another script's ({len(got)} words against {len(want)}): narrating afresh")
             return
         os.makedirs(out, exist_ok=True)
+        spliced = os.path.exists(os.path.join(src, "narration_narrator.wav"))
         for n in ("narration.wav", "words.json", "check.json"):
-            if os.path.exists(os.path.join(src, n)):
-                shutil.copyfile(os.path.join(src, n), os.path.join(out, n))
+            m = {"narration.wav": "narration_narrator.wav", "words.json": "words_narrator.json"}.get(n, n) if spliced else n
+            if os.path.exists(os.path.join(src, m)):
+                shutil.copyfile(os.path.join(src, m), os.path.join(out, n))
         ctx.log(f"narration reused from {src}")
     except (OSError, ValueError, KeyError) as e:
         ctx.log(f"the given narration could not be read ({str(e)[:120]}): narrating afresh")
@@ -422,6 +450,25 @@ def supply(ctx, script):
         spend.append(dict(stage="supply", provider="openai", model="gpt-6-sol low + gpt-4o-transcribe", what="footage",
                           usd=foot["spend"]["usd"]))
         ctx.log(f"footage: {foot['counts']['clips']} clips on {foot['counts']['lines_with_footage']} of {foot['counts']['lines']} lines")
+    if foot and foot.get("voices"):
+        # the person the film is about, in their own voice, after the line it belongs to (footage voice.py finds and cuts
+        # it; narrate realvoice.py puts it into the narration; the film pins its picture over those seconds)
+        try:
+            import subprocess
+            r = subprocess.run([PX.NARRATE_PY, PX.NARRATE, "splice", os.path.join(sup_dir, "narration"), os.path.join(sup_dir, "footage")],
+                               cwd=os.path.dirname(PX.NARRATE), capture_output=True, text=True, timeout=600, env=env)
+            placed = json.loads(r.stdout.strip().splitlines()[-1]).get("voices") if r.returncode == 0 and r.stdout.strip() else []
+            if placed:
+                pack["voices"] = [dict(p, clip=clip_facts(dict(path=p["file"], file=os.path.basename(p["file"]), subject=p["person"],
+                                                               seconds=round(p["end"] - p["start"], 3))) if p.get("file") else None)
+                                  for p in placed]
+                wj = json.load(open(nar["words"]))
+                words_all, nar["duration"] = wj["words"], wj["duration"]
+                ctx.log("real voices: " + "; ".join(f"{p['person']} after line {p['after']} ({p['end'] - p['start']:.1f} s)" for p in placed))
+            elif r.returncode:
+                ctx.log(f"real voices not spliced: {(r.stderr or '')[-300:]}")
+        except Exception as e:  # noqa: BLE001 the narrator alone, as before
+            ctx.log(f"real voices: {e!r}"[:300])
     if sid == "whole-page":
         w = words_all
         loud, pitch = F.voice_measures(nar["wav"], w, PX.FF)

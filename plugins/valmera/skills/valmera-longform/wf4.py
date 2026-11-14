@@ -27,6 +27,7 @@ sys.path.insert(0, STORIES)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shell"))
 import pictures as PX  # noqa: E402  lane O's supply: narrate, pictures, faces, commons_file
 import story  # noqa: E402
+import ear  # noqa: E402
 
 STYLE = "the-ledger"
 
@@ -121,6 +122,21 @@ def script(ctx, ideas_out):
         notes = "\n".join(rep["problems"])
     if not rep["ok"]:
         raise RuntimeError(f"the script does not hold: {rep['problems'][:6]}")
+    if ctx.args.get("ear") is not False:
+        # the held script rewritten for the ear (stories/ear.py: each chapter asks its question aloud, short spoken lines,
+        # the stress word placed), audited for facts by a second call, then held to the same script check
+        try:
+            sc2, er = ear.for_ear(sc, "long-form", log=ctx.log)
+            spend += [dict(stage="ear", **u) for u in er.get("spend") or []]
+            json.dump(dict(script=sc2, report=er), open(os.path.join(ctx.run_dir, "script_ear.json"), "w"), ensure_ascii=False, indent=1)
+            if er.get("ok"):
+                rep2 = story.check_script(sc2, dos)
+                if rep2["ok"]:
+                    sc, rep = sc2, rep2
+                else:
+                    ctx.log(f"ear: the rewrite fails the script check {rep2['problems'][:3]}; the script stands")
+        except Exception as e:  # noqa: BLE001
+            ctx.log(f"ear: {e!r}"[:300])
     reg = next(s for s in ctx.styles_allowed() if s["id"] == card["id"])
     facts = {f["id"]: f for f in dos["facts"]}
     used = sorted({fid for s in sc["segments"] for fid in s.get("facts") or []})
