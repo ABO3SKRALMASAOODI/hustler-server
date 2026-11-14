@@ -170,8 +170,9 @@ def test_a_core_claim_that_cannot_be_verified_stops_the_stage_clearly(web, tmp_p
     research = _ask({"facts": [{"id": "f1", "sources": []}]})
     rewrite = _ask({"segments": [{"i": 0, "say": "Something else.", "facts": []}]})
     sc2, rep, _ = writer.settle(script(facts, segs), log=lambda m: None, ask_research=research, ask_rewrite=rewrite)
-    assert not rep["ok"] and rep["settle"]["core_unverified"] == ["f1"] and not rewrite.calls     # the core is never rewritten away
-    assert "403" in rep["settle"]["core_why"]["f1"]["why"]
+    assert not rep["ok"] and rep["settle"]["core_unverified"] == ["f1"]       # a hook restated on nothing checked does not stand
+    assert "403" in rep["settle"]["core_why"]["f1"]["why"] and rep["settle"]["core_why"]["f1"]["beats"] == ["hook"]
+    assert sc2["segments"][0]["say"] == "Woody threw Buzz out."                # and the script is not changed by the failed repair
     ctx = types.SimpleNamespace(run_dir=str(tmp_path), args={}, log=lambda m: None)
     writes = []
 
@@ -182,6 +183,35 @@ def test_a_core_claim_that_cannot_be_verified_stops_the_stage_clearly(web, tmp_p
         wf3.write_checked(ctx, {}, {}, write=write,
                           settle=lambda s: writer.settle(s, log=lambda m: None, ask_research=research, ask_rewrite=rewrite))
     assert len(writes) == wf3.SCRIPT_TRIES and "core claims" in writes[1]
+
+
+def test_a_payoff_restated_on_its_checked_facts_stands_and_is_never_dropped(web):
+    """The payoff cites a table-row figure no page states as quoted and a checked article that carries the same point:
+    it is restated on the checked fact; a rewrite that drops a payoff is refused (the story would lose its core)."""
+    web.routes[GOOD] = page(QUOTE, "Toy Story opened at number one with $29.1 million over the weekend.")
+    web.routes[LIVE] = page("Nothing about the weekend.")
+    facts = [dict(id="f1", claim="the throw", quote=QUOTE, url=GOOD),
+             dict(id="f2", claim="opening weekend exact", quote="The weekend earned $29,140,617 exactly.", url=LIVE),
+             dict(id="f3", claim="opening weekend", quote="Toy Story opened at number one with $29.1 million over the weekend.", url=GOOD)]
+    segs = [dict(say="Woody threw Buzz out.", beat="hook", facts=["f1"], show=[]),
+            dict(say="Twenty-nine million, one hundred forty thousand dollars.", beat="payoff", facts=["f2", "f3"],
+                 show=[dict(text="$29,140,617", role="figure")])]
+    restate = _ask({"segments": [{"i": 1, "say": "Twenty-nine point one million dollars in one weekend.", "facts": ["f3"],
+                                  "show": [{"text": "$29.1M", "role": "figure"}]}]})
+    sc2, rep, _ = writer.settle(script(facts, segs), log=lambda m: None, ask_research=_ask({"facts": []}), ask_rewrite=restate)
+    assert rep["ok"] and rep["settle"]["rewritten"] == [1] and sc2["segments"][1]["facts"] == ["f3"]
+    assert sc2["segments"][1]["show"] == [dict(text="$29.1M", role="figure")] and not rep["numbers_unbacked"]
+    dropped = _ask({"segments": [{"i": 1, "say": None}]})
+    sc3, rep3, _ = writer.settle(script(facts, segs), log=lambda m: None, ask_research=_ask({"facts": []}), ask_rewrite=dropped)
+    assert not rep3["ok"] and rep3["settle"]["core_unverified"] == ["f2"] and len(sc3["segments"]) == 2
+
+
+def test_a_quote_copied_off_a_table_row_is_found_letter_for_letter(web):
+    web.routes[GOOD] = ("<table><tr><td>Nov 24-26</td><td>Thanksgiving 3-day</td><td>1</td><td>$29,140,617</td></tr></table>")
+    rep = writer.verify(script([dict(id="f1", claim="c", quote="Nov 24-26Thanksgiving 3-day 1 $29,140,617", url=GOOD),
+                                dict(id="f2", claim="c", quote="Nov 24-26Thanksgiving 3-day 1 $29,140,618", url=GOOD)],
+                               [dict(say="x", beat="hook", facts=["f1", "f2"], show=[])]))
+    assert [r["found"] for r in rep["facts"]] == [True, False]
 
 
 def test_a_core_claim_that_re_research_rescues_lets_the_stage_pass(web, tmp_path):

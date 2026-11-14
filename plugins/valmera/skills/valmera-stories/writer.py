@@ -934,11 +934,16 @@ def archived_text(url):
 
 
 def quote_found(quote, page):
-    """True when the quote stands on the page: whole, or 85% of its six-word runs in place."""
+    """True when the quote stands on the page: whole, or 85% of its six-word runs in place, or (for a quote copied off a
+    table or inline markup, where cells and tags run together: "26Thanksgiving") its letters and digits in the same
+    unbroken order. Exact matching of measured strings only."""
     q = norm(quote)
     if not q:
         return False
     if q in page:
+        return True
+    tight = q.replace(" ", "")
+    if len(tight) >= 24 and tight in page.replace(" ", ""):
         return True
     w = q.split()
     if len(w) < 8:
@@ -1057,14 +1062,10 @@ REWRITE_SYSTEM = """You are the writer of a narrated documentary film. Every fac
 Answer with one JSON object only: {"segments": [{"i": the segment index, "say": the new words or null to drop it, "show": [...], "facts": [checked fact ids]}]}"""
 
 
-def core_facts(script):
-    """The facts the story stands on: those its hook, turn and payoff cite (the first segment is the hook whatever its
-    mark). The script's own beat marks, read structurally."""
-    out = set()
-    for k, s in enumerate(script.get("segments") or []):
-        if k == 0 or s.get("beat") in CORE_BEATS:
-            out.update(s.get("facts") or [])
-    return out
+def core_segments(script):
+    """The segments the story stands on: its hook, turn and payoff (the first segment is the hook whatever its mark).
+    The script's own beat marks, read structurally."""
+    return {k for k, s in enumerate(script.get("segments") or []) if k == 0 or s.get("beat") in CORE_BEATS}
 
 
 def _why(row):
@@ -1109,7 +1110,9 @@ def rewrite_without(script, bad, ask=None):
     """(script, info, usage): the segments that cite an unverifiable fact rewritten on the checked facts alone, or
     dropped, by one call (RESEARCH_MODEL on OpenAI, no web); the unverifiable facts leave the script. Structure is held
     here: only those segments change, each cites checked facts only, and a segment the answer leaves invalid is
-    dropped. The caller verifies the result again."""
+    dropped. A core segment (the hook, the turn, the payoff: core_segments) is never dropped: it is restated on at
+    least one checked fact or listed in info["core_failed"], and the story then cannot stand. The caller verifies the
+    result again."""
     ask = ask or (lambda system, content: ask_openai(system, content, effort="medium", max_tokens=12000, what="rewrite unverified",
                                                      model=RESEARCH_MODEL))
     sc = json.loads(json.dumps(script))
@@ -1118,6 +1121,7 @@ def rewrite_without(script, bad, ask=None):
     good_ids = {f.get("id") for f in good}
     segs = sc.get("segments") or []
     targets = [k for k, s in enumerate(segs) if set(s.get("facts") or []) & bad]
+    core = core_segments(sc)
     dict_show = any(isinstance(x, dict) for s in segs for x in s.get("show") or [])
     roles = ROLES if dict_show else ()
     use, got = None, {}
@@ -1126,19 +1130,25 @@ def rewrite_without(script, bad, ask=None):
                                                 for k, s in enumerate(segs)) +
                    f"\n\n# Checked facts\n{json.dumps([dict(id=f.get('id'), claim=f.get('claim'), quote=f.get('quote')) for f in good], ensure_ascii=False)}"
                    f"\n\n# Unchecked facts (the film must not say them)\n{json.dumps([dict(id=f.get('id'), claim=f.get('claim')) for f in sc.get('facts') or [] if f.get('id') in bad], ensure_ascii=False)}"
-                   f"\n\n# Rewrite or drop these segments\n{targets}" + (f"\n\n# Display roles\n{list(roles)}" if roles else ""))
+                   f"\n\n# Rewrite or drop these segments\n{targets}" +
+                   (f"\n\n# Core segments (the hook, the turn, the payoff): never drop these; restate each on the checked facts "
+                    f"only when they still carry its point, else answer say null for it\n{[k for k in targets if k in core]}"
+                    if any(k in core for k in targets) else "") +
+                   (f"\n\n# Display roles\n{list(roles)}" if roles else ""))
         try:
             text, use = ask(REWRITE_SYSTEM, content)
             ans = json_block(text)
             got = {g["i"]: g for g in ans.get("segments") or [] if isinstance(g, dict) and _valid_i(g.get("i"), len(segs))}
         except Exception:  # noqa: BLE001 - no answer: the segments resting on the unchecked facts are dropped
             got = {}
-    rewritten, dropped = [], []
+    rewritten, dropped, core_failed = [], [], []
     for k in targets:
         g = got.get(k) or {}
         say = g.get("say")
         facts = g.get("facts") if isinstance(g.get("facts"), list) else None
-        if isinstance(say, str) and say.strip() and facts is not None and set(facts) <= good_ids and k in got:
+        if k in core and not (facts and set(facts) & good_ids):
+            core_failed.append(k)               # the hook, turn or payoff restated on nothing checked does not stand
+        elif isinstance(say, str) and say.strip() and facts is not None and set(facts) <= good_ids and k in got:
             segs[k]["say"] = " ".join(say.split())
             segs[k]["facts"] = list(dict.fromkeys(facts))
             segs[k]["show"] = _norm_show(g.get("show"), roles)
@@ -1146,11 +1156,13 @@ def rewrite_without(script, bad, ask=None):
             rewritten.append(k)
         else:
             dropped.append(k)
+    if core_failed:
+        return json.loads(json.dumps(script)), dict(rewritten=[], dropped=[], facts_dropped=[], core_failed=core_failed), use
     sc["segments"] = [s for k, s in enumerate(segs) if k not in dropped]
     sc["facts"] = good
     if sc["segments"]:
         sc["hook_line"], sc["close_line"] = sc["segments"][0].get("say"), sc["segments"][-1].get("say")
-    return sc, dict(rewritten=rewritten, dropped=dropped, facts_dropped=sorted(bad)), use
+    return sc, dict(rewritten=rewritten, dropped=dropped, facts_dropped=sorted(bad), core_failed=[]), use
 
 
 def settle(script, log=print, ask_research=None, ask_rewrite=None):
@@ -1159,11 +1171,11 @@ def settle(script, log=print, ask_research=None, ask_rewrite=None):
       1. every fact is checked (verify: its page through every door, its Wayback copy, its other cited copies);
       2. each fact a segment cites that does not verify is re-researched: one call finds other readable pages for the
          same claim; the first candidate whose quote is found on its page takes the fact's place;
-      3. a fact still unverified on the hook, turn or payoff (core_facts): the story cannot stand, report.ok is False
-         with report.core_unverified naming them, and nothing is rewritten;
-      4. any other unverified fact leaves the film: the segments resting on it are rewritten on the checked facts or
-         dropped (rewrite_without), and the script is verified again;
-      5. a display item whose number stands in no verified quote is taken off the screen (the words stay).
+      3. a fact still unverified leaves the film: the segments resting on it are rewritten on the checked facts or
+         dropped (rewrite_without, one call), and the script is verified again. The hook, turn and payoff are never
+         dropped: each is restated on checked facts or the story cannot stand (report.ok False, report.core_unverified
+         naming the facts it rested on, report.core_why why each failed);
+      4. a display item whose number stands in no verified quote is taken off the screen (the words stay).
     Facts no segment cites and that do not verify are removed, so the record lists checked facts only."""
     sc = json.loads(json.dumps(script))
     spend, info = [], dict(researched=[], replaced=[], core_unverified=[], rewritten=[], dropped_segments=[], facts_dropped=[],
@@ -1198,16 +1210,18 @@ def settle(script, log=print, ask_research=None, ask_rewrite=None):
         sc["facts"] = [f for f in sc.get("facts") or [] if f.get("id") not in unused]
         info["unused_dropped"] = unused
         rep = verify(sc)
-    core = core_facts(sc)
-    info["core_unverified"] = [r["id"] for r in rep["facts"] if r["id"] in rep["facts_unverified"] and r["id"] in core]
-    if info["core_unverified"]:
-        rows = {r["id"]: r for r in rep["facts"]}
-        info["core_why"] = {i: dict(claim=rows[i].get("claim"), url=rows[i].get("url"), why=_why(rows[i])) for i in info["core_unverified"]}
-        return sc, dict(rep, ok=False, settle=info), spend
     if rep["facts_unverified"]:
         sc, ri, use = rewrite_without(sc, rep["facts_unverified"], ask=ask_rewrite)
         if use:
             spend.append(use)
+        if ri["core_failed"]:
+            rows, segs = {r["id"]: r for r in rep["facts"]}, sc.get("segments") or []
+            info["core_unverified"] = sorted({f for k in ri["core_failed"] for f in segs[k].get("facts") or [] if f in rep["facts_unverified"]})
+            info["core_why"] = {i: dict(claim=rows[i].get("claim"), url=rows[i].get("url"), why=_why(rows[i]),
+                                        beats=[segs[k].get("beat") or "hook" for k in ri["core_failed"] if i in (segs[k].get("facts") or [])])
+                                for i in info["core_unverified"]}
+            log(f"fact check: the core cannot stand without {info['core_unverified']}")
+            return sc, dict(rep, ok=False, settle=info), spend
         info.update(rewritten=ri["rewritten"], dropped_segments=ri["dropped"], facts_dropped=ri["facts_dropped"])
         log(f"fact check: unverifiable {ri['facts_dropped']} left the film; segments rewritten {ri['rewritten']}, dropped {ri['dropped']}")
         rep = verify(sc)
