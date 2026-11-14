@@ -1070,6 +1070,8 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
         raise Fall("prep", "no original asset")
     name = ((original.get("meta") or {}).get("filename")) or ""
     sess = {"prompts": _asks(worker_db, getattr(ctx, "first_cut_session", None)), "uploads": [{"filename": name}] if name else []}
+    if getattr(ctx, "director_execution", None):
+        sess["execution"] = ctx.director_execution
     ledger = getattr(ctx, "ask_ledger", None)
     if ledger and ledger.get("asks"):
         sess["ledger"] = [{"said": a["said"], "want": a["want"]} for a in ledger["asks"]]
@@ -1110,6 +1112,7 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
     rec["caption_evidence"] = index.get("caption_evidence") or {}
 
     foot = footage_start(job, work, sc, per) if sc is not None else None      # None unless the footage switch opens this account
+    ctx.director_footage = foot  # library callers own cleanup even when a later stage fails
     rec["at"] = "supply"
     t = time.monotonic()
     _say(ctx, worker_db, "director_supply", "Finding pictures for it")
@@ -1119,6 +1122,7 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
         ctx.director_bed = {"work": work}
         if bed.available():
             bed_th = bed.start(work, sc, per, index, min(deadline - 80.0, time.monotonic() + 12.0), cfg["models"]["scout"], fetch=bed.fetch_library)
+            ctx.director_bed_thread = bed_th
     except Exception as exc:  # noqa: BLE001 - no bed, the film is written dry
         rec["bed_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
     bin_doc = None
