@@ -754,6 +754,14 @@ def section_targets(dur_s, total, turn_s, close_s, bin_s=None):
     return [(a, b, sec, total * w / s) for a, b, sec, w in rows]
 
 
+class WeightLadder(tuple):
+    """Two compatible weight thresholds plus deterministic ranks for tied events."""
+    def __new__(cls, hi, lo, ranked=None):
+        obj = super().__new__(cls, (hi, lo))
+        obj.ranked = ranked or {}
+        return obj
+
+
 def tiers_for(cands):
     """The film's own weight ladder: the weights (sound_choice.weight_of) at which its moments become accents and at
     which they fall to ticks. Ranked inside the film (its heaviest ACCENT_Q are accents, its lightest TICK_Q ticks), so
@@ -764,7 +772,18 @@ def tiers_for(cands):
         return ACCENT_W, BODY_W
     hi = max(ACCENT_W, float(np.percentile(ws, 100 * (1 - ACCENT_Q))))
     lo = max(BODY_W, float(np.percentile(ws, 100 * TICK_Q)))
-    return hi, min(lo, hi)
+    # Percentile values alone make every equal-weight card an accent. Rank
+    # ties as well, so a run of equally sized source windows still has a body
+    # and quiet layer. A stable frame/id hash spreads ties through the film.
+    rows = sorted((e for e in cands if e["kind"] not in ("counter", "burst", "move")),
+                  key=lambda e: (_weight(e), zlib.crc32(f"{e.get('f')}:{e.get('id', '')}".encode())))
+    ranked = {}
+    for i, e in enumerate(rows):
+        q = (i + 0.5) / max(len(rows), 1)
+        w = _weight(e)
+        ranked[id(e)] = ("accent" if q >= 1-ACCENT_Q and w >= ACCENT_W else
+                         "body" if q >= TICK_Q and w > BODY_W else "tick")
+    return WeightLadder(hi, min(lo, hi), ranked)
 
 
 def tier_of(e, part, ladder=None):
@@ -778,6 +797,9 @@ def tier_of(e, part, ladder=None):
         return "tick"
     if k == "move":
         return "body"
+    ranked = getattr(ladder, "ranked", {})
+    if id(e) in ranked:
+        return ranked[id(e)]
     hi, lo = ladder or (ACCENT_W + 0.15, BODY_W)
     w = _weight(e)
     return "accent" if w >= hi else "body" if w > lo else "tick"

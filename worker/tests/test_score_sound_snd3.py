@@ -219,3 +219,15 @@ def test_a_hero_hit_with_its_own_fly_in_takes_no_lead_and_a_lift_stays_under_the
         if s.get("tier") in ("accent", "body", "tick") and s.get("layer") == "hit":
             assert _level(s) <= SD.TIER_CEIL[s["tier"]] + 0.06, (s["s"], s["tier"], _level(s))
     assert lib["impact_10"].get("hit_lufs") is not None
+
+
+def test_equal_weight_source_windows_do_not_all_become_accents():
+    from collections import Counter
+    events=[dict(f=i*23,id=f'card-{i}',kind='card',photo=True,area=.3) for i in range(50)]
+    ladder=SD.tiers_for(events)
+    tiers={e['id']:SD.tier_of(e,'plain',ladder) for e in events}
+    assert Counter(tiers.values())=={'accent':10,'body':20,'tick':20}
+    backwards=SD.tiers_for(list(reversed(events)))
+    assert tiers=={e['id']:SD.tier_of(e,'plain',backwards) for e in events}
+    assert SD.tier_of(events[0],'payoff',ladder)=='hero'
+    assert len(ladder)==2
