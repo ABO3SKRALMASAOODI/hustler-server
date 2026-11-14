@@ -169,12 +169,13 @@ def test_the_lowering_bakes_a_marked_still_and_draws_no_accent_over_the_frame(tm
 
 
 def test_a_baked_still_is_published_as_the_clip_it_is(tmp_path, monkeypatch):
+    from PIL import Image
     import db as dbx
     import music_gate
     import storage
     clip, plate = str(tmp_path / "abc.mp4"), str(tmp_path / "p.png")
     open(clip, "wb").write(b"x" * 900)
-    open(plate, "wb").write(b"y" * 90)
+    Image.new("RGB", (24, 32), "navy").save(plate)
     json.dump({"w": 720, "h": 1280, "dur": 0.87, "fps": 30.0, "how": "ffmpeg", "finish": "archive"}, open(clip + ".json", "w"))
     sent, rows = [], []
     monkeypatch.setattr(storage, "upload_file", lambda p, key, ct=None: sent.append((os.path.basename(p), ct)))
@@ -191,6 +192,7 @@ def test_a_baked_still_is_published_as_the_clip_it_is(tmp_path, monkeypatch):
     video = next(k for kind, k in rows if kind == "video_clip")
     assert video["duration_s"] == 0.87 and video["width"] == 720 and video["height"] == 1280 and video["meta"]["finish"] == "archive"
     assert [kind for kind, _k in rows].count("image_ref") == 1                    # the plate is still an image; the clip is never one
+    assert next(k for kind, k in rows if kind == "image_ref")["meta"]["pixel_opaque"] is True
     assert all(o["asset_key"].startswith("fetched/7/") for o in out["overlays"]) and out["overlays"][0]["asset_key"].endswith(".mp4")
 
 
