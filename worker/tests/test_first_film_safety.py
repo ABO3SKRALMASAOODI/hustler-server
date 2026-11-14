@@ -109,6 +109,19 @@ def test_neighbouring_shot_face_does_not_authorize_quay_crop():
     assert rows[0]["reason"] == "full_frame_missing_subject_boxes"
 
 
+def test_fallback_reframer_holds_whole_source_until_every_kept_shot_has_boxes(monkeypatch):
+    import agent_tools
+    from types import SimpleNamespace
+    _, index = _scene()
+    index["spatial"] = {"samples": [{"t": 6.5, "faces": [[.3, .2, .5, .4]]}]}
+    ctx = SimpleNamespace(index=index, duration=20,
+                          latest_edl=lambda: {"json": {"keep": [[6.6, 8.]]}})
+    monkeypatch.setattr(agent_tools, "set_frame", lambda ctx, ratio, mode, **kw: (ratio, mode))
+    assert agent_tools._auto_reframe(ctx) == ("9:16", "pad_blur")
+    index["spatial"]["samples"].append({"t": 7., "faces": [[.3, .2, .5, .4]]})
+    assert not source_guard.missing_shot_boxes(index, [[6.6, 8.]])
+
+
 def test_subject_fully_outside_crop_still_counts_and_all_camera_frames_are_safe():
     film, index = _scene()
     film["items"][0]["crop"] = [[.15, 0, .65, 1], [.2, 0, .7, 1]]
