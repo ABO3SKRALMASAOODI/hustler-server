@@ -93,8 +93,32 @@ class WindowContext:
         return self.proxy
 
     def apply_score(self, edl, description):
-        return self.parent.write_edl(source_clock(edl, self.start, self.original_key),
-                                     "Director: typed film")
+        return write_film(self.parent, source_clock(edl, self.start, self.original_key))
+
+
+def write_film(ctx, edl):
+    """Keep the typed cut-evidence gate's batch size, including on long films.
+
+    The Director proposes the cuts. The existing keep writer checks their
+    source evidence and reanchors existing layers in each saved batch. No
+    scope or evidence guard is bypassed, and a refused batch stops here.
+    The complete designed film is written only after those cuts are accepted.
+    """
+    import audit
+    import agent_tools
+    import edit_integrity
+    before = ctx.latest_edl()["json"]
+    spans = edit_integrity.removed_spans(before.get("keep"), edl.get("keep"))
+    if len(spans) > 12:
+        for offset in range(0, len(spans), 12):
+            current = ctx.latest_edl()["json"]
+            keep = [list(s) for s in audit.subtract_spans(
+                current.get("keep") or [], spans[offset:offset + 12])]
+            result = agent_tools._write_keep(ctx, keep,
+                "Director: source-checked cut batch", snap_to_words=False)
+            if not str(result).startswith("EDL v"):
+                return result
+    return ctx.write_edl(edl, "Director: typed film")
 
 
 def _selection(ctx):

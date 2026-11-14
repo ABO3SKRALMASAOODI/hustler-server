@@ -54,6 +54,7 @@ def test_source_clock_does_not_move_program_layers_or_external_media(captions):
 def test_typed_write_uses_request_guards_and_propagates_asset_grants():
     writes = []
     ctx = NS(write_edl=lambda edl, note: writes.append(edl) or "REJECTED: keep protected",
+             latest_edl=lambda: {"json": {"keep": [[0, 7320]]}},
              apply_score=lambda *a: pytest.fail("first-film scope bypass"))
     view = typed.WindowContext(ctx, {"video": {"duration": 90}}, "proxy", 7000, "original", 9)
     view._sfx_grants = {"sound"}
@@ -61,6 +62,39 @@ def test_typed_write_uses_request_guards_and_propagates_asset_grants():
     assert view.apply_score({"keep": [[0, 90]]}, "film").startswith("REJECTED")
     assert writes[0]["keep"] == [[7000, 7090]]
     assert not hasattr(ctx, "director_version")
+
+
+@pytest.mark.parametrize("refuse_batch", [None, 2])
+def test_long_director_cut_uses_checked_batches_and_stops_on_refusal(monkeypatch, refuse_batch):
+    import agent_tools
+    import edit_integrity
+    row = {"version": 1, "json": {"keep": [[0, 100]], "texts": [{"text": "existing"}]}}
+    target = {"keep": [[2 * i, 2 * i + 1] for i in range(25)], "texts": [{"text": "directed"}]}
+    batches, final_writes = [], []
+    ctx = NS(latest_edl=lambda: copy.deepcopy(row))
+    def write_keep(got, keep, desc, snap_to_words):
+        assert got is ctx and snap_to_words is False
+        removed = edit_integrity.removed_spans(row["json"]["keep"], keep)
+        assert 1 <= len(removed) <= 12
+        batches.append(removed)
+        if len(batches) == refuse_batch:
+            return "REJECTED: the source evidence does not support these deletions"
+        row["version"] += 1
+        row["json"]["keep"] = keep
+        return f"EDL v{row['version']}"
+    def write(edl, note):
+        assert not edit_integrity.removed_spans(row["json"]["keep"], edl["keep"])
+        final_writes.append(edl)
+        return "EDL v5"
+    monkeypatch.setattr(agent_tools, "_write_keep", write_keep)
+    ctx.write_edl = write
+    result = typed.write_film(ctx, target)
+    if refuse_batch:
+        assert result.startswith("REJECTED") and len(batches) == 2
+        assert final_writes == []
+    else:
+        assert result == "EDL v5" and [len(b) for b in batches] == [12, 12, 1]
+        assert final_writes == [target]
 
 
 @pytest.mark.parametrize("test_rung", [False, True])
@@ -72,6 +106,7 @@ def test_four_minute_typed_film_reaches_director_without_lifting_first_film_cap(
         index={"video": {"duration": 240}}, proxy_path=lambda: str(source),
         agent_model="gpt-6.1-sol", ask_ledger=copy.deepcopy(ledger), versions_written=[])
     ctx.write_edl = lambda edl, note: ctx.versions_written.append(2) or "EDL v2"
+    ctx.latest_edl = lambda: {"json": {"keep": [[0, 240]]}}
     db = NS(run=lambda *a: {"storage_key": "original"})
     dcfg = flags.parse({"mode": "on", **({"test_user_ids": [5],
         "models": {"scout": "gpt-6.1-sol", "direct": "gpt-6.1-sol"}} if test_rung else {})})
@@ -257,6 +292,7 @@ def test_short_child_director_is_bounded_to_its_story(monkeypatch, tmp_path):
         agent_model="gpt-6.1-sol", versions_written=[])
     writes = []
     ctx.write_edl = lambda edl, note: writes.append(edl) or "EDL v2"
+    ctx.latest_edl = lambda: {"json": {"keep": [[7000, 7090]]}}
     db = NS(run=lambda *a: {"storage_key": "original"})
     monkeypatch.setattr(flags, "read", lambda db: dict(copy.deepcopy(flags.DEFAULTS), mode="on"))
     monkeypatch.setattr(typed, "_selection", lambda *a: pytest.fail("do not reselect from the long parent"))
