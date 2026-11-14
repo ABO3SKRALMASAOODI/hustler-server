@@ -28,6 +28,8 @@ def test_cut_checks_walk_pixels_not_just_silence(monkeypatch, tmp_path):
         assert name == "check_cut_evidence"
         assert len([p for p in parts if p['type'] == 'image_url']) == 3
         assert json.loads(parts[0]['text'])['source_words'] == [{'w':'still','t0':5,'t1':5.5}]
+        assert json.loads(parts[0]['text'])['retained_context_words'][0]['w'] == 'outside'
+        assert json.loads(parts[0]['text'])['after_keep'] == [[0, 3.6]]
         return {"allow": False, "reason": "continuous walking, not a wait"}, {}
     monkeypatch.setattr(asks, "_call", call)
     ctx = NS(user_message="Remove waiting gaps, preserve natural pauses", llm_client=object(), agent_model="any",
