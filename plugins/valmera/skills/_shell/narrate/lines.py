@@ -275,6 +275,22 @@ def trim_take(x, sr):
     return OV.trim(x, sr)
 
 
+def take_audio(takes_dir, t):
+    """A take's audio as it was judged (trim_take of the file on disk), loaded when it is needed again. The pool keeps
+    each take's signals, not its audio: holding every take's audio grew a long-form render line by line (lane
+    NARRATE-LEAK, 14 Nov: 697 takes, about 0.8 MB each)."""
+    import measure
+    x, sr = measure.load_mono(Path(takes_dir) / t["file"])
+    return trim_take(x.astype(np.float32), sr), sr
+
+
+def drop_audio(takes):
+    """the takes' audio out of the pool (take_audio brings one back)"""
+    for t in takes:
+        t.pop("_x", None)
+    return takes
+
+
 def _judge_files(N, files, seg, script, band, names, sr0):
     """every take of one line: what the take listener heard, its word errors, its signals"""
     import measure
@@ -408,7 +424,7 @@ def gate_repair(N, eng, job, takes_dir, script, band, names, sr0, kept, kept_v, 
                                key=lambda t: -(t["score"] - P.drift_penalty(t["voice"], kept_v[:i] + kept_v[i + 1:])))
                 hit = None
                 for t in cands:
-                    text, _ = N.listen(t["_x"], t["_sr"])
+                    text, _ = N.listen(*take_audio(takes_dir, t))
                     e = errs_of(N, segs[i]["text"], text, names)
                     if e == 0:
                         hit = t
@@ -417,7 +433,7 @@ def gate_repair(N, eng, job, takes_dir, script, band, names, sr0, kept, kept_v, 
                         nearest = (e, t)
                     failed.add(t["file"])
                 if hit:
-                    kept[i], kept_v[i], chosen[i] = hit["_x"], hit["voice"], dict(hit, gate_failed=sorted(failed))
+                    kept[i], kept_v[i], chosen[i] = take_audio(takes_dir, hit)[0], hit["voice"], dict(hit, gate_failed=sorted(failed))
                     report[i].update(kept=hit["file"], errs=hit["errs"], score=hit["score"], gate_round=rnd + 1)
                     N.log(f"line {i}: the gate listener hears {hit['file']} whole")
                     break
@@ -428,12 +444,12 @@ def gate_repair(N, eng, job, takes_dir, script, band, names, sr0, kept, kept_v, 
                     generate(dict(job, lines=[dict(job["lines"][i], takes=n + more)]), eng, takes_dir, N.log)
                     new = [f for f in sorted(takes_dir.glob(f"s{i:02d}_t*.wav"), key=lambda p: int(p.stem.split("_t")[1]))
                            if f.name not in {t["file"] for t in pool[i]}]
-                    pool[i] += _judge_files(N, new, segs[i], script, band, names, sr0)
+                    pool[i] += drop_audio(_judge_files(N, new, segs[i], script, band, names, sr0))
             else:
                 spent.add(i)          # every take this line will get has been heard: the gate reports what is left
                 if nearest and nearest[0] < cur_e:
                     t = nearest[1]
-                    kept[i], kept_v[i], chosen[i] = t["_x"], t["voice"], dict(t, gate_failed=sorted(failed))
+                    kept[i], kept_v[i], chosen[i] = take_audio(takes_dir, t)[0], t["voice"], dict(t, gate_failed=sorted(failed))
                     report[i].update(kept=t["file"], errs=t["errs"], score=t["score"], gate_round=rnd + 1, gate_errs=nearest[0])
                     N.log(f"line {i}: no take heard whole; {t['file']} is heard best ({nearest[0]} against {cur_e})")
     return hist
@@ -487,7 +503,7 @@ def render_lines(args, script, vid, out, N):
         kept.append(x)
         kept_v.append(best["voice"])
         chosen.append(best)
-        pool.append(takes)
+        pool.append(drop_audio(takes))     # signals only; gate_repair loads a take's audio again when it needs it
         report.append({"line": i, "kept": best["file"], "errs": best["errs"], "score": best["score"], "net": best["net"], "tempo": round(f, 3)})
         N.log(f"line {i + 1}/{len(script['segments'])}: kept {best['file']} errs {best['errs']} score {best['score']} tempo x{f:.2f}")
     gate = gate_repair(N, eng, job, takes_dir, script, band, names, sr0, kept, kept_v, chosen, pool, report)

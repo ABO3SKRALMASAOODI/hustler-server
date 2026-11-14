@@ -290,13 +290,69 @@ def vocab_prompt():
     return ("Names: " + ", ".join(names[:60]) + ".") if names else None
 
 
+# One listener in memory at a time (lane NARRATE-LEAK, 14 Nov). Measured in this process on the marketing script: the
+# take listener (faster-whisper turbo int8) holds 1.9 GB, the gate listener (mlx large-v3 fp16) 2.9 GB of weights, and
+# MLX keeps every freed buffer in its cache: 1.1 GB after the first second of audio, 1.9 GB after one 100 s
+# listen_long, +60-80 MB on every further take it heard, never given back. Both listeners stayed loaded for the whole
+# render, so a render started at 6.4 GB and grew with every gate call (marketing 7 GB; long-form 8.4 -> 11 GB, when the
+# coordinator stopped it). Now the listener a call needs is the only one loaded (the other is dropped first), MLX's
+# cache is capped and emptied after every gate call, and the takes' audio stays on disk (lines.py). The listeners,
+# their settings and every gate are unchanged.
+MLX_CACHE_MB = int(os.environ.get("NARRATE_MLX_CACHE_MB", "256"))
+
+
+def _mlx():
+    try:
+        import mlx.core as mx
+        return mx
+    except Exception:  # noqa: BLE001 - no MLX in this venv: nothing of MLX's to free
+        return None
+
+
+def free_gate_listener():
+    """The gate listener's weights and MLX's buffer cache given back (mlx_whisper keeps one model in ModelHolder)."""
+    import sys as _sys
+    tr = _sys.modules.get("mlx_whisper.transcribe")
+    holder = getattr(tr, "ModelHolder", None)
+    if holder is not None and holder.model is not None:
+        holder.model, holder.model_path = None, None
+        import gc
+        gc.collect()
+    mx = _mlx()
+    if mx is not None:
+        mx.clear_cache()
+
+
+def free_take_listener():
+    """The take listener (faster-whisper) given back."""
+    if _asr_cache.pop("fw", None) is not None:
+        import gc
+        gc.collect()
+
+
+def listeners_loaded():
+    """which listeners hold memory now: {"take": bool, "gate": bool} (the memory test pins one at a time)"""
+    tr = sys.modules.get("mlx_whisper.transcribe")
+    holder = getattr(tr, "ModelHolder", None)
+    return {"take": "fw" in _asr_cache, "gate": bool(holder is not None and holder.model is not None)}
+
+
 def listen(x, sr, model=None):
-    """whisper large-v3 (mlx) words with timings: [{w,start,end,p}]."""
+    """whisper large-v3 (mlx) words with timings: [{w,start,end,p}]. The take listener is dropped first; MLX's
+    buffer cache is capped at MLX_CACHE_MB and emptied after the call (the weights stay for the next gate call)."""
     import mlx_whisper
+    free_take_listener()
+    mx = _mlx()
+    if mx is not None:
+        mx.set_cache_limit(MLX_CACHE_MB << 20)
     y = measure.resample(x, sr, 16000) if sr != 16000 else x
-    r = mlx_whisper.transcribe(y.astype(np.float32), path_or_hf_repo=model or ASR_MODEL, language="en",
-                               word_timestamps=True, condition_on_previous_text=False, verbose=None,
-                               temperature=0.0, initial_prompt=vocab_prompt())
+    try:
+        r = mlx_whisper.transcribe(y.astype(np.float32), path_or_hf_repo=model or ASR_MODEL, language="en",
+                                   word_timestamps=True, condition_on_previous_text=False, verbose=None,
+                                   temperature=0.0, initial_prompt=vocab_prompt())
+    finally:
+        if mx is not None:
+            mx.clear_cache()
     words = [{"w": w["word"].strip(), "start": float(w["start"]), "end": float(w["end"]),
               "p": float(w.get("probability", 1))} for s in r["segments"] for w in s.get("words", [])]
     return r["text"], words
@@ -307,8 +363,10 @@ def listen_fast(x, sr):
     the CPU. Takes are heard while VoxCPM holds the GPU; a second large model in
     unified memory pushed VoxCPM's weights to swap between takes (12 Nov: 15 s
     stalls on every take), so takes are heard on the CPU and the large-v3
-    listener runs once, on the finished narration."""
+    listener runs once, on the finished narration. The gate listener is dropped
+    first: the two are never in memory together."""
     from faster_whisper import WhisperModel
+    free_gate_listener()
     m = _asr_cache.get("fw") or WhisperModel(CHECK_ASR, device="cpu", compute_type="int8",
                                              cpu_threads=int(os.environ.get("NARRATE_ASR_THREADS", "6")))
     _asr_cache["fw"] = m

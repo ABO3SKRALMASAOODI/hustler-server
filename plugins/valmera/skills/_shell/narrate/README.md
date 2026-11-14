@@ -15,6 +15,14 @@ finish: pauses set from the script and the reference narrators, the writer's str
 and a mastering chain solved against the references by signal. Real voices from the footage engine
 are cut in after their lines with `splice`.
 
+Memory (lane NARRATE-LEAK, 14 Nov): one listener is in memory at a time. The take listener
+(faster-whisper turbo int8, 1.9 GB) is dropped before the gate listener (mlx large-v3 fp16, 2.9 GB of
+weights, 3.8 GB at its peak inside one call) loads, and the other way round; MLX's buffer cache is
+capped (`NARRATE_MLX_CACHE_MB`, 256) and emptied after every gate call; the take pool keeps each take's
+signals and `lines.take_audio` loads its audio from `_takes` again when the gate needs it. Before, both
+listeners stayed loaded and MLX cached every freed buffer, so a render began at 6.4 GB and grew with
+every gate call. `test_memory.py` pins it.
+
 ```
 PY=/Users/masaoodi/Documents/Valmera/.valmera/venv-narrate/bin/python
 cd plugins/valmera/skills/_shell/narrate
