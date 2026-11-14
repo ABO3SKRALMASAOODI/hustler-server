@@ -23,7 +23,10 @@ _load = shell.load_workflow
 
 
 def load(name):
-    return _load(os.path.join(HERE, "wf2.py") if name == "wf2" else name)
+    """wf2: the three built styles (wf2.py), or with WF2_ENGINE=proof the one-command proof reels (proof.py, market.py)."""
+    if name == "wf2":
+        return _load(os.path.join(HERE, "proof.py" if os.environ.get("WF2_ENGINE") == "proof" else "wf2.py"))
+    return _load(name)
 
 
 def main():

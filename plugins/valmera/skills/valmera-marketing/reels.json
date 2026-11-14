@@ -1,0 +1,15 @@
+{"about": "Proof reels (proof.py, the one-command path): the story reel builder's four looks (valmera-stories/reel.py), each carrying a real Valmera before and after with its own sound. A style rests for three films.",
+ "styles": [
+  {"id": "reel", "name": "Proof Reel", "buildable": true, "spine": ["metromedia", "before-after"], "pace": [10, 18],
+   "look": "Real footage of what each line names fills the phone, a new picture about every half second, moving; heavy grotesk display words in yellow; the raw clip in a window over itself, the export full frame on its own sound.",
+   "hook": "Frame 0 is footage of the pain (or the export itself), the hook's word large over it."},
+  {"id": "window", "name": "Proof Window", "buildable": true, "spine": ["metromedia", "before-after"], "pace": [10, 18],
+   "look": "Each picture plays in a framed window over itself out of focus (three layers), cut fast; cyan accent, condensed capitals; the export breaks out of the window full frame.",
+   "hook": "The pain in the window, its word in condensed capitals under it."},
+  {"id": "pinboard", "name": "Proof Pinboard", "buildable": true, "spine": ["metromedia", "before-after"], "pace": [10, 18],
+   "look": "Lines that list the editor's chores land as prints stacked on a dark board; orange accent, high-contrast serif; then the export, whole, full frame.",
+   "hook": "A first print lands on the board with the pain's word."},
+  {"id": "archive", "name": "Proof Archive", "buildable": true, "spine": ["metromedia", "before-after"], "pace": [10, 18],
+   "look": "Cream serif italic display words, grain and a projector flash into each run of pictures; the export plays clean and whole.",
+   "hook": "Footage of the pain with a projector flash and the hook's word in serif."}
+ ]}
