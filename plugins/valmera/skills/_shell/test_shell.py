@@ -257,3 +257,17 @@ def test_footage_keeps_sources_skips_verify_and_logs_no_secret(tmp_path, monkeyp
     assert "--whole-first" in opt[0] and opt[1]["FOOTAGE_VERIFY"] == "0" and opt[1]["FOOTAGE_KEEP_SOURCES"] == str(keep)
     assert json.loads(opt[1]["FOOTAGE_LOCAL_SOURCES"]) == [dict(url="https://y/1", path=str(kept))]       # a missing file is not claimed
     assert not any("sk-secret-value-123" in str(m) for m in logs)
+def test_chapter_scored_master_keeps_credit_without_fake_clean_export(tmp_path):
+    import shell as sh_mod
+    source=tmp_path/'master.mp4';source.write_bytes(b'already scored')
+    (tmp_path/'state').mkdir()
+    ctx=sh_mod.Ctx(str(tmp_path/'run'),dict(run_id='wf4-score',workflow='wf4'),str(tmp_path/'state'))
+    res=dict(script=dict(style=dict(id='documentary'),title='Film'),ideas={},render={},
+             check=dict(final=str(source),checks={},music_in_final=True,music=dict(credit='Track by Composer')))
+    from pathlib import Path
+    folder=Path(sh_mod.deliver(ctx,{},str(tmp_path/'out'),res)['folder'])
+    rec=json.loads((folder/'film.json').read_text())
+    assert (folder/'film.mp4').read_bytes()==b'already scored'
+    assert rec['rules']['music_picked'] is True
+    assert rec['music']['credit']=='Track by Composer'
+    assert 'clean_export' not in rec['music'] and not (folder/'film_clean.mp4').exists()

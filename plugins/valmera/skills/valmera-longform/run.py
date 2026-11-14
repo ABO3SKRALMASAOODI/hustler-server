@@ -12,6 +12,8 @@ folder. This file only tells it where workflow 4 lives.
 """
 import os
 import sys
+import json
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SHELL = os.path.join(os.path.dirname(HERE), "_shell")
@@ -27,6 +29,41 @@ def load(name):
 
 
 def main():
+    # One command in either host; a topic is optional. Existing shell arguments
+    # and resumable run IDs remain supported.
+    argv = sys.argv[1:]
+    if not argv or argv[0] not in ("run", "status"):
+        argv.insert(0, "run")
+    topic = None
+    if "--topic" in argv:
+        i = argv.index("--topic")
+        topic = argv.pop(i + 1)
+        argv.pop(i)
+    if argv[0] == "run":
+        i = argv.index("--args") if "--args" in argv else None
+        args = json.loads(argv[i + 1]) if i is not None else {}
+        args.setdefault("look", False)
+        if topic:
+            args["line"] = topic
+        if i is None:
+            argv += ["--args", json.dumps(args)]
+        else:
+            argv[i + 1] = json.dumps(args)
+        if "--out" not in argv and "--resume" not in argv:
+            argv += ["--out", "/Users/masaoodi/Documents/Valmera/.valmera/week-1112/lanes/WF4-LONGFORM"]
+        if "--state-root" not in argv:
+            argv += ["--state-root", "/Users/masaoodi/Documents/Valmera/.valmera/week-1112/lanes/WF4-LONGFORM/state"]
+    env_file = Path("/Users/masaoodi/Documents/Valmera/hustler-server/backend/.env")
+    if not os.environ.get("OPENAI_API_KEY") and env_file.exists():
+        key = next((line.partition("=")[2].strip().strip("\"'")
+                    for line in env_file.read_text().splitlines()
+                    if line.startswith("OPENAI_API_KEY=")), None)
+        if key:
+            os.environ["OPENAI_API_KEY"] = key
+    os.environ["WRITER_PROVIDER"] = "openai"
+    os.environ.setdefault("NAMED_PICTURE_MODEL", "gpt-6-sol")
+    os.environ.setdefault("VALMERA_WORKER", __import__("brand").worker_dir())
+    sys.argv = [sys.argv[0]] + argv
     shell.load_workflow = load
     if "--workflow" not in sys.argv:
         sys.argv[2:2] = ["--workflow", "wf4"]

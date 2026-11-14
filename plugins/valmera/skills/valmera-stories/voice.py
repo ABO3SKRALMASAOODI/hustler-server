@@ -307,6 +307,10 @@ def tighten(x, sr, words, segs):
             r = np.linspace(0, 1, xf, dtype=np.float32)
             parts[-1][-xf:] = parts[-1][-xf:] * (1 - r) + seg[:xf] * r
             seg = seg[xf:]
+            # The overlap removes samples too. Carry that removal into every
+            # word, caption and chapter time after this splice.
+            at, removed = cuts[j - 1]
+            cuts[j - 1] = (at, removed + xf / sr)
         parts.append(seg)
     y = np.concatenate(parts) if parts else x
     for w in words:

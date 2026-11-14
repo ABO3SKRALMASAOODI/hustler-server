@@ -34,7 +34,7 @@ import chain  # noqa: E402
 import design  # noqa: E402
 import film as F  # noqa: E402  lane O: Clock, Ruler, curves, cover_crop, focus_of, tick_text
 import pictures as PX  # noqa: E402
-import story  # noqa: E402
+from wf4 import story  # noqa: E402
 
 FPS, W, H = 30, 1920, 1080
 LEAD_F = F.LEAD_F

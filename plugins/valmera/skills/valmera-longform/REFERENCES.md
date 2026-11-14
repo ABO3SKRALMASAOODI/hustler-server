@@ -16,5 +16,7 @@ reads this file; it is the bar, not a template. Numbers: `week-1106/atlas/ATLAS.
 - **Chapters a viewer can count.** A numbered step, a checklist, a calendar page: the film's structure is an object on screen that returns.
 - **Every new thing lands on its word.** About 2.2 picture changes per 10 s (1.9-3.5), never a single framing past about 9 s without something new landing in it.
 - **Designed pictures where no photograph exists**, made of the story's own material: the real quote typed as a document, the real route on a map, the real dates on a calendar, the real figures on a chart.
-- **The voice carries it.** About 1.2 sounds per 10 s; Valmera adds no music, so the narrator's performance, the pauses and a few placed sounds carry the film.
+- **The voice carries it.** About 1.2 sounds per 10 s; a cinematic music bed carries about 97% of reference picture time, rising with consequential turns. Music selection, volume and flow are part of the story.
 - **The close answers the open.** The last minute pays the promise and says the first line again, changed.
+
+The references are evidence, never a mandatory chapter skeleton. WF4 uses its own narrative chapters for MUSIC2, not automatic eighty-second blocks. Target about 2.2 picture changes and 1.2 sound events per ten seconds; do not import the shorts' sixteen-cuts cadence.

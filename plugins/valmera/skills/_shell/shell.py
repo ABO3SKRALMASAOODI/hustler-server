@@ -227,8 +227,9 @@ def deliver(ctx, state, out_root, results):
     part = os.path.join(out_root, f".{name}.partial")
     shutil.rmtree(part, ignore_errors=True)
     os.makedirs(part)
-    scored = bool(chk.get("final_music") and os.path.exists(chk["final_music"]))
-    if scored:                                   # the film with the music Valmera chose for it; the same film without music beside it
+    music_in_final = bool(chk.get("music_in_final"))
+    scored = music_in_final or bool(chk.get("final_music") and os.path.exists(chk["final_music"]))
+    if scored and not music_in_final:             # an optional separate score, with its clean export
         shutil.copyfile(chk["final_music"], os.path.join(part, "film.mp4"))
         shutil.copyfile(chk["final"], os.path.join(part, "film_clean.mp4"))
     else:
@@ -245,7 +246,9 @@ def deliver(ctx, state, out_root, results):
                rules=dict(published=False, music_picked=scored, end_card=chk["checks"].get("endcard_ok"), watermark=chk["checks"].get("mark_ok")),
                no_repeat=(results.get("ideas") or {}).get("no_repeat"))
     if scored:
-        rec["music"] = dict(chk.get("music") or {}, film="film.mp4", clean_export="film_clean.mp4")
+        rec["music"] = dict(chk.get("music") or {}, film="film.mp4")
+        if not music_in_final:
+            rec["music"]["clean_export"] = "film_clean.mp4"
     if chk.get("song"):
         rec["song"] = dict(chk["song"], film="film_song.mp4", clean_export="film.mp4")
     jsave(os.path.join(part, "film.json"), rec)

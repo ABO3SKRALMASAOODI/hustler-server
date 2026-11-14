@@ -78,7 +78,7 @@ def test_spoken_merge_never_changes_a_heard_word():
 
 
 def test_script_check_finds_digits_and_unbacked_figures():
-    import story
+    from wf4 import story
     dos = dict(facts=[dict(id="f1", quote="It cost 5,000 dollars in 1904.", url="https://x")])
     sc = dict(segments=[dict(say="It cost 5000 dollars.", facts=["f1"]), dict(say="nineteen oh four", facts=["f9"],
               design=dict(kind="number", print="$7,000", fact="f1"))], chapters=[dict(id="c1")])

@@ -28,9 +28,8 @@ sys.path.insert(0, STORIES)
 import writer  # noqa: E402  lane O's writer: ask_web, ask, json_block, verify, quote_found, page_text, VOICES
 
 FORM = dict(name="long-form voiceover film", seconds=(600, 1200), words=(1850, 2500), segments=(55, 110), band="04",
-            shape="a cold open, a promise said and shown by 30 seconds, six to nine chapters of 60 to 120 seconds each "
-                  "opening a new question, open loops that are closed later, a turn at about two thirds, the promise paid "
-                  "at the end and a last line that reframes the first")
+            shape="a hook within ten seconds, chapters whose lengths and order emerge from the researched story, "
+                  "a consequential turn in every chapter, open questions answered and a satisfying final payoff")
 VOICES = {k: writer.VOICES[k] for k in ("sage", "iris", "atlas")}
 
 
@@ -50,13 +49,13 @@ def find_ideas(card, avoid=(), line=None, n=6, effort="high", delivered=""):
               "on pages a script can read (Wikipedia, NASA, the Library of Congress, archive.org, government and university "
               "pages), and if the people, places, machines and documents it names have real photographs under a free licence "
               "or in the public domain (Wikimedia Commons, NASA, US government works, pre-1930 archives), because the film "
-              "shows only real pictures of what it names, and designed pages where none exists. No film clips, no stock "
+              "shows real moving footage of what it names and designed evidence where none exists. Prefer rich public archive video, "
               "lookalikes, no generated faces.")
     system += "\n\n" + ((f"# Form\n{FORM['name']}, {FORM['seconds'][0] // 60}-{FORM['seconds'][1] // 60} minutes: {FORM['shape']}.\n\n"
                "Search widely. A long film holds with a promise and open questions, not with pace, so prefer a story with a "
                "mechanism the viewer can be taught step by step (how a thing was built, crossed, solved, survived), real stakes "
                "that change and can be kept as a running ledger (money, lives, days, miles, tons), a human turn at two thirds "
-               "(a betrayal, a failure, a bet), and a payoff with a figure. It must be rich in public-domain pictures: archive "
+               "(a reversal, a failure, a bet), and a payoff. It must be rich in real moving footage and original voices: archive "
                "photographs of its people, places and machines, maps, and documents (patents, letters, telegrams, reports) whose "
                "real words can be quoted. Avoid stories the references already told (Musk's Mars plan, SpaceX's fourth launch, "
                "Airbnb's cereal, Xerox PARC, the traitorous eight, the PayPal mafia).\n\n"
@@ -140,19 +139,22 @@ def write(idea, dos, card, voices=None, notes=None, effort="high"):
                "How it holds: the first segment is a cold open that works in its first sentence (a stake or something that "
                "should not be true), never a greeting. By 30 seconds the narrator says the promise in one sentence (what the "
                "viewer will understand by the end) and names the open question the film will answer last. Each chapter opens "
-               "with its question and ends on something that pulls into the next one. Plant two or three open loops early and "
-               "close each one later, saying so (\"remember the telegram?\"). The turn comes at about two thirds. The last "
+               "with an active situation and ends on something that pulls into the next one. Plant two or three open loops early and "
+               "close each one later, saying so (\"remember the telegram?\"). Every chapter has its own consequential turn, marked beat=turn on the segment where it happens. The last "
                "segment answers the promise and reframes the first sentence. No call to action, no 'subscribe', no 'like'.\n\n"
                "The spoken form: `say` is exactly what the narrator says, every number, year, date, unit, currency and "
                "abbreviation written in words the way a narrator says it (\"nineteen fourteen\", \"five thousand six hundred "
                "dollars\", \"the eighteen nineties\", \"twenty-five percent\", \"Doctor\"), no digits and no symbols. `names` lists "
                "every proper noun in the narration exactly as spelled.\n\n"
+               "Hard words: write difficult compounds in intelligible spoken forms (for example retro rockets) and preserve their meaning. "
+               "Performance: use whole sentences per segment, one or two focus words, varied pitch; ordinary joins 0.22 seconds, "
+               "long pauses only at consequential turns. Do not make every line a rhetorical question. "
                "Pictures: each segment lists the named things it talks about, in order (`pictures`, names from the list), so "
                "the film can show each on the word that names it; a segment may also ask for one designed picture.\n\n"
                "Return JSON only: {\"title\": a plain title, \"voice\": one voice id, \"pace\": slow|steady|brisk, \"energy\": "
                "low|mid|high, \"promise\": the promise as it is printed on screen, six to twelve words, \"names\": [proper nouns], "
                "\"chapters\": [{\"id\": \"c1\", \"title\": two to four words, \"question\": the chapter's question as printed, "
-               "\"pace\": slow|steady|brisk (how fast its pictures change: brisk for lists, money and action, slow for "
+               "\"turn\": the factual reversal in this chapter, \"music_mood\": the emotional movement, \"pace\": slow|steady|brisk (how fast its pictures change: brisk for lists, money and action, slow for "
                "reflection)}], \"ledger\": {\"title\": one or two words, \"rows\": [two to four {\"id\": short id, \"label\": "
                "capitals, at most 10 characters, \"start\": the value shown at the start exactly as printed, \"number\": that "
                "value as a plain number}]}, \"segments\": [{\"chapter\": a chapter id, \"say\": the words spoken (the spoken "
@@ -161,7 +163,7 @@ def write(idea, dos, card, voices=None, notes=None, effort="high"):
                (", "
                "\"ticks\": [{\"row\": a ledger row id, \"to\": the new value as printed, \"number\": plain number, \"word\": the "
                "exact word of `say` on which it changes}] or [], \"pace\": slow|steady|brisk, \"melody\": falling|rising|level|"
-               "wide, \"emphasis\": [one or two words of say], \"pause_after\": seconds of silence after it (0.2 to 1.2; longer "
+               "wide, \"emphasis\": [one or two words of say], \"pause_after\": seconds of silence after it (0.18 to 0.26 normally, 0.4 only "
                "at chapter ends and after the turn), \"direction\": a few words for the actor, \"facts\": ids of the facts it "
                "states}], \"close\": {\"balance\": a one-line sum of the ledger as printed, \"line\": the last sentence}}\n"
                "Every digit printed anywhere (the ledger, a design, the promise, a question) must stand in the quote of a fact "
@@ -229,6 +231,11 @@ def check_script(script, dos):
     lo, hi = FORM["words"]
     if not lo <= n <= hi * 1.1:
         problems.append(f"{n} spoken words; the form wants {lo}-{hi}")
+    for c in script.get("chapters") or []:
+        if not any(s.get("chapter")==c.get("id") and s.get("beat")=="turn" for s in script.get("segments",[])):
+            problems.append(f"chapter {c.get('id')} needs a beat=turn segment")
+        if not c.get("turn"):
+            problems.append(f"chapter {c.get('id')} needs a consequential turn")
     chs = {c.get("id") for c in script.get("chapters") or []}
     if len(chs) < 5:
         problems.append(f"{len(chs)} chapters; the form wants six to nine")
@@ -241,8 +248,8 @@ def narration_script(script):
     listeners hear with."""
     segs = []
     for s in script["segments"]:
-        seg = dict(text=" ".join(str(s["say"]).split()), pause_after=float(s.get("pause_after") or 0.35))
-        for k in ("melody", "emphasis", "direction", "pace", "energy"):
+        seg = dict(text=" ".join(str(s["say"]).split()), pause_after=float(s.get("pause_after") or 0.22))
+        for k in ("beat", "melody", "emphasis", "direction", "pace", "energy"):
             if s.get(k):
                 seg[k] = s[k]
         segs.append(seg)

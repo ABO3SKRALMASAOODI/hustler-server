@@ -26,7 +26,10 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, STORIES)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "_shell"))
 import pictures as PX  # noqa: E402  lane O's supply: narrate, pictures, faces, commons_file
-import story  # noqa: E402
+import importlib.util
+_spec = importlib.util.spec_from_file_location("longform_story", os.path.join(HERE, "story.py"))
+story = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(story)
 import ear  # noqa: E402
 import delivered as DL  # noqa: E402
 
@@ -138,7 +141,7 @@ def script(ctx, ideas_out):
                     ctx.log(f"ear: the rewrite fails the script check {rep2['problems'][:3]}; the script stands")
         except Exception as e:  # noqa: BLE001
             ctx.log(f"ear: {e!r}"[:300])
-    reg = next(s for s in ctx.styles_allowed() if s["id"] == card["id"])
+    reg = card
     facts = {f["id"]: f for f in dos["facts"]}
     used = sorted({fid for s in sc["segments"] for fid in s.get("facts") or []})
     return dict(title=sc.get("title") or pick.get("title"), style=reg, window=None, hook_line=sc["segments"][0]["say"],
@@ -151,20 +154,20 @@ def script(ctx, ideas_out):
 # ----------------------------------------------------------------- supply, score, render, check: film_long.py
 
 def supply(ctx, script):
-    import film_long
-    return film_long.supply(ctx, script)
+    import cinema
+    return cinema.supply(ctx, script)
 
 
 def score(ctx, script):
-    import film_long
-    return film_long.score(ctx, script)
+    import cinema
+    return cinema.score(ctx, script)
 
 
 def render(ctx, script, sc):
-    import film_long
-    return film_long.render(ctx, script, sc)
+    import cinema
+    return cinema.render(ctx, script, sc)
 
 
 def check(ctx, rd, sc):
-    import film_long
-    return film_long.check(ctx, rd, sc)
+    import cinema
+    return cinema.check(ctx, rd, sc)
