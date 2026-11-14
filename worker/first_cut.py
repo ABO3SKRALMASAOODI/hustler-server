@@ -2259,9 +2259,12 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             vertical_out = True
     elif not vertical_source:
         if _screen_like(ctx.index) and not talking:
-            # Screen text at 9:16 is unreadable (bake-off vfr runs); the
-            # references keep tutorials landscape (R07, R11).
-            applied.append("the screen's own shape kept so its text reads")
+            # Keep source text whole inside the promised portrait canvas.
+            # The travelling content window below supplies readable detail.
+            if _ok(_run(ctx, steps, "set_frame",
+                        {"ratio": "9:16", "mode": "pad_blur"}, started)):
+                vertical_out = True
+                applied.append("the screen composed inside vertical 9:16")
             screen_kept = True
             if q1:
                 pass    # the travelling camera comes after the hook (below)
@@ -3760,6 +3763,16 @@ def run(worker_db, job, project, index_row):
 
 def _render_cut(ctx, steps, picked):
     """The First cut's preview render (the chain's or the Director's film)."""
+    # Also covers early returns such as a finished-piece selection. Never
+    # publish a landscape file with the vertical-first-film promise.
+    row = ctx.latest_edl() or {}
+    frame = (row.get("json") or {}).get("frame") or {}
+    ratio = frame.get("ratio", "source")
+    if ratio != "9:16" and not (ratio == "source" and _orientation(ctx.index) == "vertical"):
+        result = agent_tools.execute(ctx, "set_frame", {"ratio": "9:16", "mode": "pad_blur"})
+        steps.append({"tool": "first_film_frame", "ok": not _failed(result), "note": str(result)[:160]})
+        if _failed(result):
+            return result
     render = None
     keep_whole = bool(picked and picked.get("how") in {"finished_piece", "continuous"})
     if ctx.versions_written or keep_whole:

@@ -1059,6 +1059,9 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
     t = time.monotonic()
     source = ctx.proxy_path()
     index = picture_cuts.refine(ctx.index or {}, source)
+    # This entry point builds the automatic first film. Its product contract
+    # is portrait, even when a landscape upload needs a fitted composition.
+    index["first_film"] = {"frame": "9:16"}
     os.symlink(source, os.path.join(work, "source.mp4"))
     with open(os.path.join(work, "index.json"), "w") as f:
         json.dump(index, f, ensure_ascii=False)
@@ -1075,13 +1078,13 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
     per = perceive.run(index, os.path.join(work, "source.mp4"), work)
     rec.setdefault("prep_detail", {})["perception_s"] = round(time.monotonic() - p0, 3)
     p0 = time.monotonic()
-    grid, _times = brief.boards_for(work, index, per, pages=(1,))
+    grid, _times = brief.boards_for(work, index, per, pages=(1, 4))
     rec["prep_detail"]["scout_board_s"] = round(time.monotonic() - p0, 3)
     # Scout reads board 1 only. The other identical boards are needed by
     # Direct, so build them beside Scout/Supply, not in front of both calls.
     def remaining_boards():
         at = time.monotonic()
-        brief.boards_for(work, index, per, pages=(2, 3, 4))
+        brief.boards_for(work, index, per, pages=(2, 3))
         return round(time.monotonic() - at, 3)
     board_future = pool.submit(remaining_boards)
     _stage(rec, "prep", t)
@@ -1098,6 +1101,13 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
         rec["scout_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
         sc = None
     _stage(rec, "scout", t)
+
+    index = scout.printed_spellings(index, sc)
+    with open(os.path.join(work, "index.json"), "w") as f:
+        json.dump(index, f, ensure_ascii=False)
+    # Any fallback captions in this same job retain the evidence too.
+    ctx.index = index
+    rec["caption_evidence"] = index.get("caption_evidence") or {}
 
     foot = footage_start(job, work, sc, per) if sc is not None else None      # None unless the footage switch opens this account
     rec["at"] = "supply"

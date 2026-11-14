@@ -232,43 +232,14 @@ def _counts(b):
 
 
 def take_parts(ctx, b, sid, ref, d, at, rng):
-    """A stretch of the take with no word on it as the framings it is cut into: [(id, ref, frames)], each part
-    marked `_punch` (0 the first). The upload's own moment, re-framed: the cut falls on the upload's own sound where
-    it has an onset there, and score.move sets each part's framing (closer on what the frame must keep whole, never
-    back to the framing just left). Under a voice the take is never punched: it is eased (score.move)."""
-    one = [(sid, ref, d)]
-    z = ref.get("zoom")
-    plain = not (ref.get("asset") != "main" or ref.get("_view") is not None or ref.get("crop") is not None or ref.get("cam")
-                 or ref.get("_cam") or ref.get("rate") or ref.get("step") or ref.get("k") is not None or ref.get("treat")
-                 or (isinstance(z, (int, float)) and not isinstance(z, bool) and z > 1) or _counts(b))
-    if plain and ref.get("sync") and spoken(ctx, at, at + d) and talk_on():
-        return talk_parts(ctx, sid, ref, d, at, rng)
-    ctx.__dict__.pop("_talk", None)              # anything else on screen ends a talking stretch
-    if d < PUNCH_SPLIT_F or not plain or spoken(ctx, at, at + d):
-        return one
-    from . import compiler
-    n = int(min(PUNCH_MOST, max(2, round(d / PUNCH_F))))
-    cuts = []
-    try:
-        from . import move
-        ons = sorted({f - at for f, _s in move.stress_frames(ctx) if PUNCH_MIN_F <= f - at <= d - PUNCH_MIN_F})
-    except Exception:  # noqa: BLE001 - no sound read: an even pulse
-        ons = []
-    for f in ons:                                  # the upload's own onsets first, never two closer than a framing can be read
-        if all(abs(f - c) >= PUNCH_MIN_F for c in cuts) and len(cuts) < n - 1:
-            cuts.append(f)
-    if len(cuts) < n - 1:                          # the rest on an even pulse, in the longest stretch left
-        for _ in range(n - 1 - len(cuts)):
-            edges = [0] + sorted(cuts) + [d]
-            a, b_ = max(zip(edges, edges[1:]), key=lambda e: e[1] - e[0])
-            if b_ - a < 2 * PUNCH_MIN_F + 4:
-                break
-            cuts.append(int(a + (b_ - a) * rng.uniform(0.42, 0.58)))
-    if not cuts:
-        return one
-    edges = [0] + sorted(cuts) + [d]
-    lens = [y - x for x, y in zip(edges, edges[1:])]
-    return [(sid if k == 0 else f"{sid}x{k}", dict(ref, _punch=k), ln) for k, ln in enumerate(lens)]
+    """Keep a continuous take continuous. Sound/word onsets are not edits.
+
+    The camera still eases through score.move. A framing step may hide a
+    real source discontinuity (compiler.speech_edit_flip); a pulse, stress
+    peak or a missing cutaway cannot manufacture that discontinuity.
+    """
+    ctx.__dict__.pop("_talk", None)
+    return [(sid, ref, d)]
 
 
 def talk_on():
@@ -295,53 +266,9 @@ def phrase_starts(ctx, a, z):
 
 
 def talk_parts(ctx, sid, ref, d, at, rng):
-    """A stretch of the take somebody speaks over as the framings it is cut into: [(id, ref, frames)]. The stretch is
-    read across the film's beats: a take that runs straight on from the shot before carries how long its framing has
-    already held, so a run of short sentences is cut as one stretch, and a cut may fall on the shot's own first frame
-    (a sentence starts there). A part marked `_punch` is a framing of its own; `_talk` says the cut is the voice's.
-    A stretch that never passes TALK_MAX_F stays one shot, eased by score.move as before."""
-    one = [(sid, ref, d)]
-    st = ctx.__dict__.get("_talk")
-    cont = bool(st) and st.get("end") == at
-    since = int(st["since"]) if cont else 0
-    k = int(st["k"]) if cont else 0
-    marked = bool(st.get("marked")) if cont else False
-    cuts = []
-    if since + d > TALK_MAX_F:
-        cand = phrase_starts(ctx, at, at + d)
-        if cont and since >= TALK_MIN_F:
-            cand = [(at, 0.6)] + cand                  # the shot's own first frame: a sentence starts on it
-        pos = at - since                               # where the framing on screen began
-        while True:
-            lo = max(pos + TALK_MIN_F, at)             # a framing that has already held past its time is cut at the first phrase from here
-            hi = max(pos + TALK_MAX_F, lo + TALK_MIN_F)
-            pool = [(f, s) for f, s in cand if lo <= f <= hi and (at + d - f) >= TALK_TAIL_F and (f == at or f - at >= 2)]
-            if not pool:
-                if at + d - pos <= TALK_MAX_F or hi >= at + d:
-                    break
-                # no phrase starts in reach: the nearest word start to the pulse, or the stretch runs on to its next shot
-                words = sorted(int(f) for f in (getattr(ctx, "wf_any", None) or {}).values() if lo <= f <= hi and at < f and at + d - f >= TALK_TAIL_F)
-                if not words:
-                    break
-                want = pos + TALK_F
-                pool = [(min(words, key=lambda f: abs(f - want)), 0.1)]
-            want = pos + TALK_F + int(rng.uniform(-6, 6))
-            f = max(pool, key=lambda c: (c[1] - abs(c[0] - want) / float(TALK_MAX_F), -c[0]))[0]
-            cuts.append(f - at)
-            pos = f
-    if not cuts:
-        ctx._talk = {"end": at + d, "since": since + d, "k": k, "marked": marked}
-        return [(sid, dict(ref, _punch=k, _talk=True), d)] if marked else one
-    out, edges = [], sorted(set(cuts))
-    bounds = [0] + [c for c in edges if c > 0] + [d]
-    if edges[0] == 0:
-        k += 1                                         # the cut falls on this shot's first frame
-    for j, (x, y) in enumerate(zip(bounds, bounds[1:])):
-        if j:
-            k += 1
-        out.append((sid if j == 0 else f"{sid}x{j}", dict(ref, _punch=k, _talk=True), y - x))
-    ctx._talk = {"end": at + d, "since": d - bounds[-2], "k": k, "marked": True}
-    return out
+    """Compatibility entry point: words alone never create picture cuts."""
+    ctx.__dict__.pop("_talk", None)
+    return [(sid, ref, d)]
 
 
 def parts(ctx, b, sid, ref, d, rng, at=None):

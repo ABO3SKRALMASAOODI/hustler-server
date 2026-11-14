@@ -200,7 +200,7 @@ def footage_part(per, idx):
     out = ["## Footage",
            f"Source {W}x{H}, {per.get('fps') or 0:.0f} fps, {per['dur']:.2f} s, {len(per['shots'])} shot(s). Final frame {FINAL_W}x{FINAL_H}: "
            f"the full width upscales {up:.1f}x, a crop to half width {up * 2:.1f}x. Past 3.4x it reads soft."
-           + (f" Kept landscape (`\"frame\":\"16:9\"`, {FINAL_H}x{FINAL_W}) the whole upload shows at {FINAL_H / W:.1f}x." if W > H else "")]
+           + (" Compose the landscape source inside the portrait canvas without clipping its subject or printed text." if W > H else "")]
     samples = per["samples"]
     step = per["step"]
     for sh in per["shots"]:
