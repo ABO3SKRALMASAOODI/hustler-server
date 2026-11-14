@@ -1052,13 +1052,15 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
 
 
 def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
-    from . import brief, call, direct, lower, perceive, picture_cuts, scout, supply
+    from . import brief, call, direct, lower, perceive, picture_cuts, preparation, scout, supply
     import db as dbx
     os.makedirs(work, exist_ok=True)
     rec["at"] = "prep"
     t = time.monotonic()
     source = ctx.proxy_path()
-    index = picture_cuts.refine(ctx.index or {}, source)
+    prepared = preparation.restore(ctx.index or {}, source, work)
+    index = prepared[0] if prepared else picture_cuts.refine(ctx.index or {}, source)
+    rec.setdefault("prep_detail", {})["cached_measurements"] = bool(prepared)
     # This entry point builds the automatic first film. Its product contract
     # is portrait, even when a landscape upload needs a fitted composition.
     index["first_film"] = {"frame": "9:16"}
@@ -1075,7 +1077,7 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
         sess["ledger"] = [{"said": a["said"], "want": a["want"]} for a in ledger["asks"]]
     _say(ctx, worker_db, "director_read", "Reading your video")
     p0 = time.monotonic()
-    per = perceive.run(index, os.path.join(work, "source.mp4"), work)
+    per = prepared[1] if prepared else perceive.run(index, os.path.join(work, "source.mp4"), work)
     rec.setdefault("prep_detail", {})["perception_s"] = round(time.monotonic() - p0, 3)
     p0 = time.monotonic()
     grid, _times = brief.boards_for(work, index, per, pages=(1, 4))
