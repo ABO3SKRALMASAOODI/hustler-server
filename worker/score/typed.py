@@ -1,4 +1,4 @@
-"""Typed-film adapter for the Director. First-film admission is not used here.
+"""Typed-film adapter for the Director. First-film size admission is not used here.
 
 The ask ledger owns scope. This adapter changes only how an admitted film
 request is executed: longer films get the existing segmented pass; clips
@@ -160,6 +160,9 @@ def run(ctx, worker_db, job, session_id, cfg):
     import quality_verifier
     if not cfg.get("director", False):
         return {"fell": "typed Director is disabled"}
+    dcfg = copy.deepcopy(flags.read(worker_db))
+    if dcfg.get("mode") != "on":
+        return {"fell": "the Director is off (app_kv.director)"}
     source_s = float(getattr(ctx, "duration", 0) or 0)
     if not getattr(ctx, "has_main_video", False) or source_s <= 0:
         return {"fell": "no upload to direct"}
@@ -173,9 +176,8 @@ def run(ctx, worker_db, job, session_id, cfg):
             result["path"] = "segmented_whole_film"
             result["selection_usage"] = selection_usage
             return result
-    # The typed-asks switch admitted this request. First-film rollout,
-    # account admission and its 180-second cap stay confined to first films.
-    dcfg = copy.deepcopy(flags.read(worker_db))
+    # Both switches admitted this request. The first-film account admission
+    # and 180-second cap stay confined to first films.
     model = getattr(ctx, "agent_model", None) or "gpt-6.1-sol"
     dcfg["models"] = {"scout": model, "direct": model}
     # A source-window scene plan uses a different clock; ordinary lowered
