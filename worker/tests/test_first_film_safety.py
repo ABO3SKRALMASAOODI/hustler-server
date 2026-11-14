@@ -52,6 +52,14 @@ def test_frame_clearance_rounds_inward_to_the_edl_clock():
     assert source_screen.first_film_index(index)["video"]["duration"] == 9.86
 
 
+def test_full_source_clearance_preserves_a_last_word_at_fractional_eof():
+    index = {"video": {"duration": 3.582}, "words": [{"w": "end", "t0": 3, "t1": 3.582}],
+             "source_screen": {"status": "verified", "version": 1,
+                               "safe_end_s": 3.582, "source_duration_s": 3.582}}
+    bounded = source_screen.first_film_index(index)
+    assert bounded["words"] == index["words"] and bounded["video"]["duration"] == 3.582
+
+
 def test_neighbouring_shot_face_does_not_authorize_quay_crop():
     film, index = _scene()
     rows = source_guard.apply(film, index, {"samples": [{"t": 6.5, "face": [.3, .2, .5, .4]}]})

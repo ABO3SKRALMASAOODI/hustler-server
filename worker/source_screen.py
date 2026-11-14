@@ -109,7 +109,8 @@ def first_film_index(index):
     end = min(float(out["video"]["duration"]), float(evidence["safe_end_s"]))
     # EDL source clocks are stored to centiseconds. Round inward so lowering
     # cannot round the last safe source frame outward across this boundary.
-    end = math.floor(end * 100 + 1e-7) / 100
+    if end < float(out["video"]["duration"]) - 1e-6:
+        end = math.floor(end * 100 + 1e-7) / 100
     out["video"]["duration"] = end
     out["_first_film_source_guard"] = True
     out["shots"] = [dict(s, end=min(float(s["end"]), end)) for s in out.get("shots", [])
@@ -129,6 +130,10 @@ def check_render(edl, evidence, source_key, source_sha):
     if evidence.get("source_sha256") != source_sha:
         raise ValueError("source screen evidence belongs to different footage")
     end = float(evidence["safe_end_s"])
+    # Full-source clearance has no forbidden footage beyond EOF. Preserve
+    # normal EDL rounding there, without cutting a final transcript word.
+    if end >= float(evidence.get("source_duration_s") or float("inf")):
+        end += .01
     if any(float(b) > end + 1e-6 for a, b in edl.get("keep") or []):
         raise ValueError("first-film keep crosses the cleared source boundary")
     for item in list(edl.get("overlays") or []) + list(edl.get("inserts") or []):
