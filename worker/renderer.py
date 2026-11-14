@@ -90,6 +90,20 @@ CANVAS_MAX_DIRECT_INPUTS = 8
 
 
 @contextmanager
+def _joined_media_checks(picture, sound):
+    """Overlap independent readers; join both before publication or cleanup.
+
+    Sound keeps the calling thread because its policy can read worker_db.
+    Picture receives the same context (spend/cancellation/diagnostics).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from contextvars import copy_context
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="picture-review") as pool:
+        pending = pool.submit(copy_context().run, picture)
+        sound()
+        pending.result()
+
+
 def _measure_render_detail(name):
     started = time.monotonic()
     try:
@@ -10622,9 +10636,8 @@ def _run_render_job(worker_db, job):
                     "craft_report": craft_report,
                     "picture_qc": picture_qc_res}
 
-        def run_checks():
-            nonlocal picture_qc_res, audio_qc_res, listen_keys, craft_report
-            active_stage[0] = "qc_s"
+        def picture_checks():
+            nonlocal picture_qc_res
             # The picture side of the same deterministic review (render_qc):
             # clipped faces, single-frame jumps off a cut, the end card and the
             # watermark this variant should carry — measured on the file that
@@ -10643,6 +10656,9 @@ def _run_render_job(worker_db, job):
                 if tool_defects:
                     picture_qc_res = dict(picture_qc_res or {},
                                           tool_defects=tool_defects)
+
+        def sound_checks():
+            nonlocal audio_qc_res, listen_keys, craft_report
             # Deterministic measurements are always-on.  When the edit authors
             # music/SFX/voiceover, also cut a few tiny excerpts while the finished
             # render is already local.  The dispatcher can hand those to the
@@ -10729,6 +10745,10 @@ def _run_render_job(worker_db, job):
                 except Exception as exc:
                     craft_report = {"measurement_error": type(exc).__name__,
                                     "silent": None, "no_motion_detected": None}
+
+        def run_checks():
+            active_stage[0] = "qc_s"
+            _joined_media_checks(picture_checks, sound_checks)
 
         run_checks()
         if first_film and variant == "preview" and not proof_only and (
