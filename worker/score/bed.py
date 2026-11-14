@@ -444,6 +444,12 @@ def one_mix(work, l1, index=None):
             song[:n] *= g[:, None]
             rep["ducks"] = sum(1 for r in drep if r.get("db"))
             rep["duck_db"] = [r.get("db") for r in drep]
+        if (index or {}).get("first_film"):
+            from . import audibility
+            # Actual arranged components on the output clock, after bed
+            # dips. This is evidence; planned sounds are never a pass count.
+            rep["audibility"] = audibility.measure(
+                _v * (10 ** (shift / 20)), fx, song)
         tmp = path + ".mix.m4a"
         r = subprocess.run([AU.FF, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-f", "f32le", "-ar", str(AU.SR), "-ac", "2", "-i", "pipe:0",
                             "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", tmp], input=song.tobytes(), capture_output=True, timeout=120)
