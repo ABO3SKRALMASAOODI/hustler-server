@@ -474,3 +474,30 @@ Cloudflare container ceilings; a regression test enforces that relationship.
 | `WORKER_MCP_POLL_INTERVAL_S` | worker | 0.25 | queue poll for the MCP lane |
 | `WORKER_MCP_SESSION_TTL_S` | worker | 300 | how long a project's cached context lives |
 | `WORKER_MCP_MAX_SESSIONS` | worker | 2 | idle cached project contexts; live calls are never evicted |
+
+### Finishing and delivery evidence
+
+MCP `render_preview` now defaults to a complete watchable preview. Request
+`complete=false` explicitly for a changed-section proof; a proof is not a film.
+A complete MCP request is not silently substituted with a repeat-edit proof.
+Review the result, call `export_final` for its EDL version, wait for its job,
+and retrieve `download_url(kind='final')`.
+
+Active media analysis returns a non-error pending result with the analysis
+job and a ten-second retry hint. Wait for that job and repeat the original
+call. Failed or missing analysis remains an error requiring recovery.
+
+`place_search_result(id, at_output_s, duration_s, source_start_s=0,
+mode='overlay')` acquires the exact persistent search result and places it in
+one call. Overlay keeps narration running; insert adds time. Missing provider
+descriptions are filled from thumbnail pixels. Candidates whose visual
+content cannot be described are reported as unavailable for placement, never
+labelled from the search query. Inspect downloaded footage before delivery.
+
+New MCP complete previews and exports carry `craft_report`: integrated audio
+level, silence, sampled pixel motion, and separately labelled timeline type
+and camera counts. These are diagnostics, not a quality score. Motion samples
+at most sixteen short windows; unmeasured results remain unknown. Source-burned
+type requires frame review. The automatic end card is excluded from program
+motion and silence checks, so sound on a brand tail cannot disguise a silent
+film. Repair unintended gaps through the editing tools before final delivery.

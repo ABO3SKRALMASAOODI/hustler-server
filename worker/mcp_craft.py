@@ -42,7 +42,8 @@ def measure(path, edl, audio=None, duration_s=None):
             else:
                 proc = subprocess.run(
                     ['ffmpeg', '-hide_banner', '-nostats', '-i', path, '-t', str(duration),
-                     '-map', '0:a:0', '-af', 'loudnorm=I=-14:TP=-2:LRA=11:print_format=json',
+                     '-map', '0:a:0', '-af', f'atrim=end={duration},asetpts=PTS-STARTPTS,'
+                     'loudnorm=I=-14:TP=-2:LRA=11:print_format=json',
                      '-f', 'null', '-'], capture_output=True, timeout=180, check=True)
                 loud, _ = audio_qc._parse(proc.stderr.decode('utf-8', 'replace'))
                 audio = {'i': float(loud['input_i'])} if loud else None
