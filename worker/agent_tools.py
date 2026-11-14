@@ -752,6 +752,12 @@ class ToolContext:
         word_refusal = word_edges.refusal(self, prev['json'], normalized)
         if word_refusal:
             return f"REJECTED (EDL v{prev['version']} unchanged): {word_refusal}"
+        if prev['json'].get('keep') != normalized.get('keep'):
+            onsets = _keep_onset_lines(self, normalized.get('keep'), prev['json'].get('keep'),
+                                      (getattr(self, 'index', None) or {}).get('words') or [])
+            if onsets:
+                return (f"REJECTED (EDL v{prev['version']} unchanged): Cut would clip a measured spoken onset: "
+                        + '; '.join(onsets) + '. Move the boundary before saving.')
         import required_broll
         picture_refusal = required_broll.write_refusal(self, prev['json'], normalized)
         if picture_refusal:
@@ -3363,12 +3369,8 @@ def _audio_safe_keep(ctx, keep, prev_keep, words):
     return ([list(x) for x in new] or keep), notes, quiet
 
 
-def _exact_keep_onset_notes(ctx, keep, prev_keep, words):
-    """ADVISORY lines for exact-time keeps (snap_to_words=false): a start
-    that cuts the onset of the word it keeps (cut_audio.clipped_onsets).
-    The times are written as given; the line says where the word's sound
-    begins. The owner's JRE #2190 run wrote every keep exact and five shorts
-    went back for a clipped first word ('Galaxy' heard as 'Policy')."""
+def _keep_onset_lines(ctx, keep, prev_keep, words):
+    """Measured clipped onsets, including cuts exactly on an inaccurate ASR edge."""
     import cut_audio
     try:
         starts = [b for _i, side, b in cut_audio.cut_edges(
@@ -3387,7 +3389,13 @@ def _exact_keep_onset_notes(ctx, keep, prev_keep, words):
             keep, words, ctx.duration, level, prev_keep))
     except Exception:  # noqa: BLE001 — an advisory never fails a write
         return []
-    return ["ADVISORY (exact times kept as written): " + ln for ln in lines]
+    return lines
+
+
+def _exact_keep_onset_notes(ctx, keep, prev_keep, words):
+    """Legacy tool notes; the shared write boundary now enforces this evidence."""
+    return ['ADVISORY (exact times kept as written): ' + ln
+            for ln in _keep_onset_lines(ctx, keep, prev_keep, words)]
 
 
 def _exact_keep_quiet_edges(ctx, keep, words):
