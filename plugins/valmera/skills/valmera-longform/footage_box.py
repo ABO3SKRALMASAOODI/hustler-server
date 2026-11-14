@@ -4,6 +4,7 @@ No service, switch, customer's project or production data is changed.
 """
 from pathlib import Path
 import io
+import hashlib
 import json
 import os
 import shlex
@@ -13,14 +14,31 @@ import uuid
 
 HOST = 'root@13.140.241.231'
 KEY = str(Path.home() / '.ssh/valmera_box_ed25519')
-REMOTE = r'''import json, os, sys
+REMOTE = r'''import json, os, sys, pathlib, threading, hashlib
 sys.path.insert(0, '/app')
 os.environ['OPENAI_API_KEY'] = sys.stdin.readline().strip()
 os.environ['VALMERA_FOOTAGE'] = '1'
 os.environ['SKIP_DB_INIT'] = '1'
-from footage import run, cut, plan
+scratch=pathlib.Path(sys.argv[1]).parent
+os.environ['YUNET_MODEL']=str(scratch/'models/face_detection_yunet_2023mar.onnx')
+os.environ['FOOTAGE_SFACE']=str(scratch/'models/face_recognition_sface_2021dec.onnx')
+from footage import run, cut, plan, fetch, identity
+if not identity.models():raise RuntimeError('identity models required for real speaker inserts')
 cut.MAX_S = 7.8
 run.SHOT_S = 4.5
+# yt-dlp's native whole downloader works on the established box route where
+# ffmpeg's remote section seek is refused. Cut those same source seconds locally.
+fetch.WHOLE_H=1080
+fetch.WHOLE_MAX='900M'
+whole={};locks={};guard=threading.Lock();original_grab=cut.grab
+def grab(stream,url,t0,t1,out):
+    if not fetch.is_youtube(url):return original_grab(stream,url,t0,t1,out)
+    with guard:lock=locks.setdefault(url,threading.Lock())
+    with lock:
+        if url not in whole:
+            whole[url]=fetch.whole(url,str(scratch/'whole'/hashlib.sha256(url.encode()).hexdigest()[:16]))
+    return cut.local(whole[url],t0,t1,out)
+cut.grab=grab
 plan.PLAN_SYSTEM += '\nThis run is a 16:9 long documentary. Average picture length is 4.5 seconds. Match every line exactly; exclude still montages.'
 find = run.find
 j=json.load(open(sys.argv[1]))
@@ -56,6 +74,36 @@ print(json.dumps(dict(subjects=rows,covered=covered,clips=sum(r['found'] for r i
 '''
 
 
+RUNNER = r'''import json,os,sys,subprocess,pathlib
+slot,scratch,cache,name=sys.argv[1:]
+info=json.loads(subprocess.check_output(['docker','inspect',slot]))[0]
+allowed={'YTDLP_PROXY','YTDLP_PROXY_FALLBACK','YTDLP_REMOTE_COMPONENTS','YTDLP_FALLBACK_CLIENTS','YTDLP_POT_SERVER_HOME'}
+env=dict(os.environ)
+for item in info['Config']['Env']:
+    k,sep,v=item.partition('=')
+    if k in allowed:env[k]=v
+pathlib.Path(cache).mkdir(exist_ok=True)
+cmd=['docker','run','--rm','-i','--name',name,'--cpus','4','--memory','8g',
+     '-v',scratch+':'+scratch,'-v',cache+':/wf4-model-cache','-e','HF_HOME=/wf4-model-cache',
+     '--entrypoint','python']
+for k in sorted(allowed):
+    if k in env:cmd.extend(['-e',k])
+cmd.extend([info['Image'],'-u',scratch+'/fetch.py',scratch+'/input.json',scratch+'/out'])
+code=subprocess.call(cmd,env=env)
+out=pathlib.Path(scratch)/'out'
+if out.exists():(out/'runner.json').write_text(json.dumps({'image':info['Image'],'image_tag':info['Config']['Image'],'private_container':name,'cpus':4,'memory_gb':8}))
+sys.exit(code)
+'''
+
+
+def cache_path(out_root):
+    return '/tmp/wf4-model-'+hashlib.sha256(str(Path(out_root).resolve()).encode()).hexdigest()[:12]
+
+
+def cleanup_cache(out_root):
+    ssh('rm -rf -- '+shlex.quote(cache_path(out_root)),capture_output=True)
+
+
 def probe(idea):
     """Footage search evidence before choosing a story, on the working box network."""
     names=ssh("docker ps --format '{{.Names}}'",capture_output=True,text=True).stdout.splitlines()
@@ -80,17 +128,22 @@ def fetch(payload, out, log=print):
     q = shlex.quote
     package = io.BytesIO()
     with tarfile.open(fileobj=package, mode='w') as tf:
-        for name, data in [('input.json', json.dumps(payload).encode()), ('fetch.py', REMOTE.encode())]:
+        for name, data in [('input.json', json.dumps(payload).encode()), ('fetch.py', REMOTE.encode()),('runner.py',RUNNER.encode())]:
             t = tarfile.TarInfo(name); t.size = len(data); tf.addfile(t, io.BytesIO(data))
-    ssh(f'docker exec {q(slot)} mkdir -p {q(scratch)}', capture_output=True)
+        models=Path('/Users/masaoodi/Documents/Valmera/.valmera/models')
+        for name in ('face_detection_yunet_2023mar.onnx','face_recognition_sface_2021dec.onnx'):
+            if not (models/name).is_file():raise RuntimeError('missing identity model: '+str(models/name))
+            tf.add(models/name,arcname='models/'+name,recursive=False)
+    ssh(f'mkdir -p {q(scratch)}', capture_output=True)
+    container='wf4-private-'+scratch.rsplit('-',1)[-1]
     try:
-        ssh(f'docker exec -i {q(slot)} tar xf - -C {q(scratch)}', input=package.getvalue(), capture_output=True)
-        cmd = f'docker exec -i {q(slot)} python -u {q(scratch)}/fetch.py {q(scratch)}/input.json {q(scratch)}/out'
+        ssh(f'tar xf - -C {q(scratch)}', input=package.getvalue(), capture_output=True)
+        cmd = f'python3 {q(scratch)}/runner.py {q(slot)} {q(scratch)} {q(cache_path(out.parent))} {q(container)}'
         with open(out / 'fetch.log', 'w') as f:
             ssh(cmd, input=os.environ['OPENAI_API_KEY']+'\n', text=True, stdout=f, stderr=subprocess.STDOUT, timeout=7200)
         archive = out / 'transfer.tar'
         with open(archive, 'wb') as f:
-            ssh(f'docker exec {q(slot)} tar cf - -C {q(scratch)}/out .', stdout=f, timeout=600)
+            ssh(f'tar cf - -C {q(scratch)}/out .', stdout=f, timeout=600)
         with tarfile.open(archive) as tf:
             tf.extractall(out, filter='data')
         archive.unlink()
@@ -98,4 +151,6 @@ def fetch(payload, out, log=print):
         log(f"box footage: {result['counts']}")
         return result
     finally:
-        ssh(f'docker exec {q(slot)} rm -rf {q(scratch)}', capture_output=True)
+        # Only this invocation's private container and directory are touched.
+        ssh(f'docker rm -f {q(container)} >/dev/null 2>&1 || true', capture_output=True)
+        ssh(f'rm -rf -- {q(scratch)}', capture_output=True)

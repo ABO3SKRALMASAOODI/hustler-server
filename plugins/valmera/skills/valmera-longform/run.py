@@ -50,8 +50,8 @@ def main():
             argv[i + 1] = json.dumps(args)
         if "--out" not in argv and "--resume" not in argv:
             argv += ["--out", "/Users/masaoodi/Documents/Valmera/.valmera/week-1112/lanes/WF4-LONGFORM"]
-        if "--state-root" not in argv:
-            argv += ["--state-root", "/Users/masaoodi/Documents/Valmera/.valmera/week-1112/lanes/WF4-LONGFORM/state"]
+    if "--state-root" not in argv:
+        argv += ["--state-root", "/Users/masaoodi/Documents/Valmera/.valmera/week-1112/lanes/WF4-LONGFORM/state"]
     env_file = Path("/Users/masaoodi/Documents/Valmera/hustler-server/backend/.env")
     if not os.environ.get("OPENAI_API_KEY") and env_file.exists():
         key = next((line.partition("=")[2].strip().strip("\"'")

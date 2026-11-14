@@ -324,6 +324,7 @@ def run(a):
         state = dict(run_id=rid, workflow=a.workflow, source=os.path.abspath(a.source) if a.source else None,
                      out_root=os.path.abspath(a.out), args=json.loads(a.args or "{}"), started=now(), done=[], seconds={})
     state["pid"] = os.getpid()
+    state.pop("stopped", None)
     if a.out:
         state["out_root"] = os.path.abspath(a.out)
     jsave(os.path.join(run_dir, "run.json"), state)

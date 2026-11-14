@@ -43,7 +43,7 @@ def measure(path, expected, cache):
     normalized=spoken.spoken_form(heard['text'],expected,[])
     final=M.wer(expected,normalized['text']) if normalized.get('ok') else raw
     r=dict(seconds=len(x)/sr,words=len(words),wer=final['wer'],wer_raw=raw['wer'],errors=final,
-           pauses_per_min=len(gaps)/span*60,median_pause_s=float(np.median(gaps)) if gaps else None,
+           pauses_per_min=round(len(gaps)/span*60,5),median_pause_s=round(float(np.median(gaps)),5) if gaps else None,
            pitch_range_st=float(np.nanpercentile(st,95)-np.nanpercentile(st,5)),
            method='unprompted whisper large-v3; gaps >=0.15s; pyin 60..400Hz, 10ms, voiced p95-p5; VO2 independent-check method')
     r['targets']=dict(wer=r['wer']<0.01,pause_rate=11.7<=r['pauses_per_min']<=17.4,

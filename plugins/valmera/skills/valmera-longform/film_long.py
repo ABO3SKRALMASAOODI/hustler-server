@@ -1157,6 +1157,23 @@ def level_chunks(v, sr, chunks, tol_db=3.0, max_db=12.0):
 def audio_master(ctx, l1, narration_wav):
     """The film's sound as one file: the narration from frame LEAD_F, each library sound with its peak on its event, then
     lane J's master (voice levelled, -14 LUFS, true peak under -1 dBTP). No music, no bed."""
+    rj = os.path.join(os.path.dirname(narration_wav), "render.json")
+    performance = json.load(open(rj)) if os.path.exists(rj) else {}
+    if performance.get("stories_read") or performance.get("longform_read"):
+        # The shared Easton performance is already directed and mastered. The
+        # current mixer honours SND3 dur_s/fades; the legacy loop below did not.
+        # Do not flatten its intentional dynamics using stale generation times.
+        out = os.path.join(ctx.supply, "sound.m4a")
+        report = os.path.join(ctx.supply, "sound.report.json")
+        plan = os.path.join(ctx.supply, "sound.plan.json")
+        json.dump(l1, open(plan, "w"))
+        job = os.path.join(ctx.supply, "mix_current.py")
+        code = ('import sys,json; sys.path[:0]=' + repr([STORIES]) + '; import film; '
+                'r=film.audio_master(' + ','.join([repr(PX.FF), 'json.load(open('+repr(plan)+'))', repr(narration_wav), repr(out), repr(ctx.tmp)]) + '); '
+                'json.dump(r,open('+repr(report)+',"w"))')
+        open(job, "w").write(code)
+        chain.sh(ctx, ["env", f"PYTHONPATH={env_path()}", chain.PY, job], label=f"wf4-sound-{ctx.run_id}", heavy=True, timeout=7200)
+        return out, json.load(open(report))
     import numpy as np
     sys.path[:0] = [p for p in env_path().split(os.pathsep) if p not in sys.path]
     os.environ["PATH"] = os.path.dirname(PX.FF) + os.pathsep + os.environ.get("PATH", "")

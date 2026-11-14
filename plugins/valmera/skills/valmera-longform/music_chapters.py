@@ -52,7 +52,13 @@ def score(l1, pack, film, out, cache):
     if share<0.8: raise RuntimeError(f'music coverage {share:.3f} below 80%')
     sf.write(str(Path(out).with_suffix('.bed.wav')),whole,MU.SR,subtype='PCM_24')
     marks=dict(dur_s=dur,words=[(w['start']+lead,w['end']+lead) for w in wd['words']])
-    report['mix']=MU.mix_film(film,'chapter score',marks,out=out,kind='longform',supplied=False,music=(whole,dict(report)))
+    from scene import audio as AU
+    ceiling,limit=AU.CEIL_DBTP,AU.LIMIT_DBFS
+    AU.CEIL_DBTP,AU.LIMIT_DBFS=min(ceiling,-2.0),min(limit,-2.6)
+    try:
+        report['mix']=MU.mix_film(film,'chapter score',marks,out=out,kind='longform',supplied=False,music=(whole,dict(report)))
+    finally:
+        AU.CEIL_DBTP,AU.LIMIT_DBFS=ceiling,limit
     Path(out+'.json').write_text(json.dumps(report,indent=1))
     return report
 

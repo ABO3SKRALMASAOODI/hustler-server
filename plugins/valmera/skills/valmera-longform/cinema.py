@@ -30,6 +30,10 @@ def read(p):
     return json.loads(Path(p).read_text())
 
 
+def digest(p):
+    with open(p,'rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
+
+
 def save(p, data):
     p=Path(p);p.parent.mkdir(parents=True, exist_ok=True)
     tmp=p.with_suffix(p.suffix+'.tmp')
@@ -152,7 +156,10 @@ def supply(ctx, script):
     with ThreadPoolExecutor(max_workers=2) as pool:
         nj=pool.submit(narrated,ctx,ns,nd,reader)
         # Independent network work overlaps the serialized local narrator.
-        ft=footage(ctx,script)
+        try:ft=footage(ctx,script)
+        except Exception as e:
+            ctx.log('footage stopped; the independent narrator will finish its checkpoint: '+str(e)[:500])
+            raise
         nar=nj.result()
     if nar['gate'].get('wer') is None or nar['gate']['wer']>=0.01:
         raise RuntimeError(f"narration WER must be <1%: {nar['gate']}")
@@ -335,12 +342,19 @@ def score(ctx,script):
     p=Path(ctx.supply)/'l1.json'; save(p,l1)
     save(Path(ctx.supply)/'shots.json',shots)
     return dict(l1=str(p),chapters=chapters,picture_time_s=sum((r['f'][1]-r['f'][0])/FPS for r in shots),
-                pictures=len(shots),moving_share=1.0,duplicates=0,max_hold_s=max((r['f'][1]-r['f'][0])/FPS for r in shots),spend=[])
+                pictures=len(shots),max_hold_s=max((r['f'][1]-r['f'][0])/FPS for r in shots),spend=[])
 
 
 def render(ctx,script,sc):
     # Use the established scene renderer, unchanged brand finish, and SND3 master.
     import film_long as L
+    pack=read(Path(ctx.supply)/'pack.json')['pack']
+    inputs=dict(narration=digest(pack['narration']),l1=digest(sc['l1']),mixer=digest(HERE/'film_long.py'),music=digest(HERE/'music_chapters.py'))
+    stamp=Path(ctx.supply)/'render-inputs.json'
+    if not stamp.exists() or read(stamp)!=inputs:
+        for name in ('sound.m4a','sound.report.json','film_engine.mp4','film_engine.mp4.log.json','film_scored.mp4','film_scored.mp4.json','film_scored.bed.wav'):
+            (Path(ctx.supply)/name).unlink(missing_ok=True)
+        save(stamp,inputs)
     result=L.render(ctx,script,sc)
     out=Path(ctx.supply)/'film_scored.mp4'
     if not out.exists():
@@ -369,21 +383,37 @@ def check(ctx,rd,sc):
     worker()
     pack=read(Path(ctx.supply)/'pack.json')['pack']
     final=Path(ctx.run_dir)/'final.mp4'
+    fs=Path(ctx.run_dir)/'finish-input.json'; programme=digest(rd['film'])
+    if not fs.exists() or read(fs).get('sha256')!=programme:
+        final.unlink(missing_ok=True)
     if not final.exists():
         # Brand's own watermark and end card, never recreated or altered here.
         job=Path(ctx.supply)/'finish.py'
         job.write_text('import sys; sys.path[:0]='+repr([str(HERE.parent/'_shell')])+"; import brand; brand.finish("+repr(rd['film'])+','+repr(str(final))+','+repr(ctx.tmp)+')')
         chain.sh(ctx,[chain.PY,str(job)],label='wf4-brand-'+ctx.run_id,heavy=True,timeout=7200)
+        save(fs,dict(sha256=programme))
     base=brand.check(rd['film'],str(final),ctx.tmp)
     base['recorded_sound_library']=chain.no_music(sc['l1'])
     base['ok']=base['ok'] and base['recorded_sound_library']['ok']
-    from picture_check import check as pictures_check, motion
+    from picture_check import check as pictures_check, motion, duplicate_check
     pr=Path(ctx.supply)/'picture_check.json'
+    stamp=Path(ctx.supply)/'picture-input.json'
+    inputs=dict(film=digest(final),shots=digest(Path(ctx.supply)/'shots.json'))
+    if not stamp.exists() or read(stamp)!=inputs:
+        for name in ('picture_check.json','motion.json'):(Path(ctx.supply)/name).unlink(missing_ok=True)
+        folder=Path(ctx.supply)/'picture-evidence'
+        if folder.exists():
+            prior=read(stamp)['film'][:12] if stamp.exists() else 'unversioned'
+            rejected=Path(ctx.supply)/('picture-evidence-rejected-'+prior)
+            if rejected.exists():shutil.rmtree(rejected)
+            folder.rename(rejected)
+        save(stamp,inputs)
     if not pr.exists(): save(pr,pictures_check(str(final),read(Path(ctx.supply)/'shots.json'),Path(ctx.supply)/'picture-evidence',PX.FF))
     pics=read(pr)
     mp=Path(ctx.supply)/'motion.json'
     if not mp.exists(): save(mp,motion(str(final),read(Path(ctx.supply)/'shots.json'),PX.FF))
     measured_motion=read(mp)
+    duplicates=duplicate_check(measured_motion,read(Path(ctx.supply)/'shots.json'),Path(ctx.supply)/'picture-evidence')
     real_ids={int(i) for i,r in pics['evidence'].items() if r.get('real_moving_footage')}
     measured_real=sum(r['seconds'] for r in measured_motion['rows'] if r['i'] in real_ids and r['moving_samples_share']>=0.25)/sc['picture_time_s']
     pics['moving_share']=measured_real
@@ -393,8 +423,7 @@ def check(ctx,rd,sc):
     metrics=Path(ctx.supply)/'voice-metrics'
     with open(PX.NARRATE_LOCK,'a') as lk:
         fcntl.flock(lk,fcntl.LOCK_EX)
-        if not (metrics/'metrics.json').exists():
-            chain.sh(ctx,[PX.NARRATE_PY,str(HERE/'measure_voice.py'),str(nar),str(nd/'narration_script.json'),str(metrics)],label='wf4-voice-measure-'+ctx.run_id,heavy=True,timeout=7200)
+        chain.sh(ctx,[PX.NARRATE_PY,str(HERE/'measure_voice.py'),str(nar),str(nd/'narration_script.json'),str(metrics)],label='wf4-voice-measure-'+ctx.run_id,heavy=True,timeout=7200)
         chain.sh(ctx,[PX.NARRATE_PY,str(HERE/'measure_mix.py'),str(final),pack['words'],str(nd/'narration_script.json'),str(metrics),PX.FF],label='wf4-mix-listen-'+ctx.run_id,heavy=True,timeout=7200)
     voice=read(metrics/'metrics.json')
     mix=read(metrics/'mix-wer.json')
@@ -408,11 +437,11 @@ def check(ctx,rd,sc):
     hook=read(hj)
     checks=dict(base,longform=dict(seconds=duration,pictures=sc['pictures'],cuts_per_10s=sc['pictures']/(sc['picture_time_s']/10),
                 real_moving_picture_time_share=pics['moving_share'],pictures_checked=pics['checked'],picture_matches=pics['ok'],
-                duplicate_source_ranges=len(repeats),duplicate_pairs=repeats,hook=hook,longest_shot_s=sc['max_hold_s'],music_share=rd['music']['music_share'],
+                duplicate_source_ranges=len(repeats),duplicate_pairs=repeats,visual_duplicates=duplicates,hook=hook,longest_shot_s=sc['max_hold_s'],music_share=rd['music']['music_share'],
                 chapter_rises=[dict(chapter=r['chapter'],db=r['measured_rise_db'],at_s=r['rise_at_s']) for r in rd['music']['chapters']],
                 narration=voice,delivered_mix_wer=mix['wer'],real_voices=pack['record']['real_voices'],chapters=sc['chapters'],credits=pack['footage']['credits']))
     structure=read(Path(ctx.run_dir)/'structure.json')
-    targets=dict(hook=hook.get('hook') is True,turns=len(structure['chapters'])==len(sc['chapters']),length=600<=duration<=1200,footage=pics['moving_share']>=0.5,unique=not repeats,holds=sc['max_hold_s']<=8,
+    targets=dict(hook=hook.get('hook') is True,turns=len(structure['chapters'])==len(sc['chapters']),length=600<=duration<=1200,footage=pics['moving_share']>=0.5,unique=not repeats and duplicates['ok'],holds=sc['max_hold_s']<=8,
                  pictures=pics['ok'],music=rd['music']['music_share']>=0.8,rises=all(r['measured_rise_db']>=3 for r in rd['music']['chapters']),voice=voice['ok'],mix_wer=mix['ok'])
     checks['targets']=targets; checks['ok']=bool(base['ok'] and all(targets.values()))
     save(Path(ctx.run_dir)/'measured.json',checks)
@@ -425,5 +454,6 @@ def check(ctx,rd,sc):
     shutil.copytree(metrics,evidence/'voice-metrics',dirs_exist_ok=True)
     shutil.copy2(nar,evidence/'narration.wav')
     shutil.copy2(pack['words'],evidence/'words.json')
+    footage_box.cleanup_cache(Path(ctx.supply)/'footage')
     return dict(final=str(final),checks=checks,music=rd['music'],music_in_final=True,spend=[])
 
