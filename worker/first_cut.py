@@ -3525,6 +3525,7 @@ def run(worker_db, job, project, index_row):
                 index_row.get("video_sha256", ""), workdir, llm.get_recorder())
         ctx.index = source_screen.first_film_index(ctx.index)
         ctx.duration = ctx.index["video"]["duration"]
+        source_screen.clear_start_state(ctx)
     try:
         start_edl = ctx.latest_edl()
     except Exception:
