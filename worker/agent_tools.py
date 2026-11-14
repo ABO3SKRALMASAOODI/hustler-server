@@ -16517,7 +16517,7 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
         return "REJECTED: text is empty."
     if not isinstance(mute_captions, bool):
         return "REJECTED: mute_captions must be true or false."
-    # font_size is a fraction of the frame height; a pixel size (24, 30: the
+    # font_size is a fraction of the canvas short side; a pixel size (24, 30: the
     # owner's Codex editors, 13-14 Oct, twice) is read as pixels of the output
     # frame instead of refused.
     px_note = ""
@@ -16528,13 +16528,14 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
     if px is not None and 4 <= px <= 600:
         try:
             import motion_tools
-            _w, frame_h = motion_tools._canvas_size(ctx, ctx.latest_edl()["json"])
+            frame_w, frame_h = motion_tools._canvas_size(ctx, ctx.latest_edl()["json"])
+            short_side = min(frame_w, frame_h)
         except Exception:  # noqa: BLE001
-            frame_h = 1920
-        font_size = round(px / float(frame_h or 1920), 4)
-        px_note = (f"\nFONT SIZE: {px:g} read as pixels of the {frame_h}px-tall "
+            short_side = 1080
+        font_size = round(px / float(short_side or 1080), 4)
+        px_note = (f"\nFONT SIZE: {px:g} read as pixels of the {short_side}px short-side "
                    f"frame: stored as {font_size:g} (font_size is a fraction of "
-                   "the frame height, 0.012-0.3).")
+                   "the canvas short side, 0.012-0.3).")
     for name, value, low, high in (("font_size", font_size, .012, .3),
                                    ("max_width", max_width, .1, .96)):
         if value is not None:
