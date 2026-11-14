@@ -7,7 +7,9 @@ import json
 import os
 
 SCHEMA = {"type": "object", "additionalProperties": False,
-          "required": ["pictures", "preserve_speech_clock"], "properties": {
+          "required": ["pictures", "preserve_speech_clock", "short_story_end_word", "short_story_end_reason"], "properties": {
+    "short_story_end_word": {"type": ["integer", "null"], "description": "Only when asked to make a new short focused on the named examples: the last word id of a complete relevant thought after all those examples. Stop before the subsequent topic or unfinished sentence. Null when no shortening is requested, the full narration must stay, or no clear ending exists."},
+    "short_story_end_reason": {"type": "string"},
     "preserve_speech_clock": {"type": "boolean", "description": "True for illustrative B-roll over ongoing speech; false when the customer actually asks for additional silent picture time or a separate montage."},
     "pictures": {
     "type": "array", "items": {"type": "object", "additionalProperties": False,
@@ -48,6 +50,14 @@ def record(ctx, ledger, request):
             **{'pass': p['must_show'], 'otherwise': ''}))
     ledger['required_pictures'] = pictures
     ledger['pictures_preserve_speech_clock'] = value.get('preserve_speech_clock') is True
+    end_id = value.get('short_story_end_word')
+    if pictures and isinstance(end_id, int) and 0 <= end_id < len(words):
+        ledger['picture_story_end'] = dict(word=words[end_id], word_id=end_id,
+                                          reason=value.get('short_story_end_reason') or '')
+        ledger['asks'].append(dict(id='picture_story_end', said='Make a short',
+            want='Finish the focused short at a complete relevant thought', kind='edit', span='whole',
+            cut='none', length='none', items=[], how='measure', where='the final spoken thought',
+            **{'pass': 'Stop after the requested examples, before unrelated or unfinished following speech.', 'otherwise': ''}))
     return pictures
 
 
@@ -94,6 +104,10 @@ def supply(ctx, ledger):
         notes.append(f"{p['id']}: {p['subject']}; source words {p['source_words']}; {p['supply']}")
     if not notes:
         return ''
+    if ledger.get('picture_story_end'):
+        ending = ledger['picture_story_end']
+        notes.append(f"STORY END: end after source word {ending['word']} (word id {ending['word_id']}). "
+                     f"{ending['reason']} Keep that complete word, with a natural release; do not continue into the next topic.")
     return ('\nREQUIRED PICTURES (each remains an individual ask):\n' + '\n'.join(notes) +
             '\nDownload a checked candidate with add_stock_media, inspect its actual frames, then '
             "place it with add_overlay(fit='cover') at the named words on the CURRENT program clock. "
@@ -136,6 +150,17 @@ def check(ctx, ledger, edl, preview):
     except Exception:
         pass
     out = {}
+    ending = ledger.get('picture_story_end')
+    if ending:
+        end = float(ending['word']['t1'])
+        spans = edl.get('keep') or []
+        kept_end = float(spans[-1][1]) if spans else 0.
+        # A short release is fine; subsequent speech is not the requested story.
+        good = end - .001 <= kept_end <= end + .25
+        out['picture_story_end'] = dict(id='picture_story_end', state=('done' if good else 'not_done') if path else 'cannot_tell',
+            seen=f"Requested thought ends at source {end:.3f}s; last kept source time is {kept_end:.3f}s.",
+            line=('The short ends after the requested examples.' if good and path else
+                  "The short's ending still needs to finish the requested examples cleanly."))
     schema = {'type': 'object', 'additionalProperties': False,
               'required': ['shown', 'seen', 'line'], 'properties': {
                   'shown': {'type': 'boolean'}, 'seen': {'type': 'string'}, 'line': {'type': 'string'}}}
