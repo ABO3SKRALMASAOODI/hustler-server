@@ -6828,7 +6828,7 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
     m["source_guard"] = source_guard.apply(l1, ctx.index, ctx.perc, views=ctx.views)
     m["final_type_clearance"] = final_type_clearance(ctx, l1)
     for key in m["final_type_clearance"]["unresolved"]:
-        m.setdefault("findings", []).append(
+        ctx.find(
             f"type {key}: final crop intersects a face or source text and no clear seat fits; "
             "redesign its picture/type composition while preserving every word and its readable size")
     m["final_type_contrast"] = final_type_contrast(ctx, l1)
