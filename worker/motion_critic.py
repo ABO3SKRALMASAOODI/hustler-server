@@ -853,6 +853,16 @@ def lens_type(report):
     qc = (report or {}).get("picture_qc") or (report or {}).get("qc") or {}
     caps = ((qc.get("type") or {}).get("caps")) or {}
     measure = {}
+    for row in (qc.get("type") or {}).get("low_contrast_html") or []:
+        out.append(_f("fix", "type", "html_type_low_contrast",
+                      f"graphic '{row['id']}' measures APCA Lc {row['lc']:.1f} "
+                      "(<60) against its finished picture: "
+                      + "; ".join(row.get("text") or []),
+                      fix="Preserve the words and requested ink colour. Use "
+                          "set_motion_graphic to move to a clear seat or add "
+                          "measured local backing with MG.legible (dark:false "
+                          "keeps white ink). Inspect the corrected render; "
+                          "never remove the text to pass.", id=row['id'], t=row['t']))
     for row in (qc.get("type") or {}).get("small_html") or []:
         out.append(_f("fix", "type", "html_type_too_small",
                       f"graphic '{row['id']}' has visible secondary type at "
