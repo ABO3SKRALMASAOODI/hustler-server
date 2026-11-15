@@ -105,21 +105,35 @@ def continue_still(ctx,script,ft,failure,words):
     """
     import copy
     import cinema as C
-    if not any(p['clip'].get('kind')=='image' for p in ft.get('editorial',{}).get('pins',[])):return False
     clock=C.F.Clock(str(words) if isinstance(words,Path) else words,script['script']);changed=False
+    seeds=[p for p in ft.get('editorial',{}).get('pins',[]) if p['clip'].get('kind')=='image']
+    # Newly allocated figures have not been pinned yet. They can also supply
+    # one continuous use, but only after the entire expanded span is checked.
+    known={(identity(p['clip']),tuple(round(resolve(clock,t)*30) for t in p['anchors'])) for p in seeds}
+    for row in failure.shots:
+        if row['clip'].get('kind')!='image' or row.get('real_voice'):continue
+        key=(identity(row['clip']),tuple(row['f']))
+        if key not in known:
+            seeds.append(dict(seg=row['seg'],clip=row['clip'],src=row['src'],anchors=[anchor(clock,f/30) for f in row['f']]))
+            known.add(key)
+    if not seeds:return False
     for gap in failure.gaps:
         ga,gb=[round(gap[k]*30) for k in ('start','end')]
-        for index,pin in enumerate(ft.get('editorial',{}).get('pins',[])):
-            if pin['seg']!=gap['seg'] or pin['clip'].get('kind')!='image':continue
+        for index,pin in enumerate(seeds):
             a,b=[round(resolve(clock,t)*30) for t in pin['anchors']]
             if b!=ga and gb!=a:continue
             lo,hi=min(a,ga),max(b,gb);seconds=(hi-lo)/30
             if seconds>12:continue
             clip=copy.deepcopy(pin['clip']);clip.update(seconds=seconds,time_range=[0,seconds],editorial_hold_move=True)
-            say=' '.join(w['w'] for w in clock.words if w['t0']<hi/30 and w['t1']>lo/30)
-            shot=dict(f=[lo,hi],seg=pin['seg'],clip=clip,src=[0,seconds],say=say,context=script['script']['segments'][pin['seg']]['say'])
+            spoken=[w for w in clock.words if w['t0']<hi/30 and w['t1']>lo/30]
+            say=' '.join(w['w'] for w in spoken)
+            context=' '.join(script['script']['segments'][i]['say'] for i in dict.fromkeys(w['seg'] for w in spoken))
+            shot=dict(f=[lo,hi],seg=pin['seg'],clip=clip,src=[0,seconds],say=say,context=context)
             if not C.source_review(ctx,[shot],required=False)['ok']:continue
-            ft['editorial']['pins'][index]=dict(seg=pin['seg'],clip=clip,src=[0,seconds],anchors=[anchor(clock,f/30) for f in (lo,hi)])
+            replacement=dict(seg=pin['seg'],clip=clip,src=[0,seconds],anchors=[anchor(clock,f/30) for f in (lo,hi)])
+            editorial=ft.setdefault('editorial',dict(pins=[],rejected=[],bank=[]))
+            editorial['pins']=[p for p in editorial['pins'] if p is not pin]+[replacement]
+            seeds[index]=replacement
             changed=True;break
     return changed
 
@@ -204,7 +218,11 @@ def repair(ctx,script,ft,words,rounds=3):
                     try:shots,clock,_=C.schedule(script['script'],words,ft)
                     except C.CoverageError as documented:
                         original_figures(ctx,script,ft,documented.gaps);C.save(path,ft)
-                        shots,clock,_=C.schedule(script['script'],words,ft)
+                        try:shots,clock,_=C.schedule(script['script'],words,ft)
+                        except C.CoverageError as tail:
+                            if not continue_still(ctx,script,ft,tail,words):raise
+                            C.save(path,ft)
+                            shots,clock,_=C.schedule(script['script'],words,ft)
         report=C.source_review(ctx,shots,required=False)
         if report['ok']:return shots,clock
         retain(ft,shots,clock,report);C.save(path,ft)

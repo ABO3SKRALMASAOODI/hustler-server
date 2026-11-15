@@ -253,6 +253,35 @@ def test_checked_figure_can_continue_as_one_moving_use_but_never_skip_word_revie
     assert rows[0]['clip']['editorial_hold_move'] and not C.duplicate_ranges(rows)
 
 
+def test_new_figure_can_cover_adjacent_sentences_only_after_complete_review(tmp_path,monkeypatch):
+    import copy
+    import timeline_repair as R
+    from types import SimpleNamespace
+    from PIL import Image
+    path=tmp_path/'figure.jpg';Image.new('RGB',(32,32),'blue').save(path)
+    image=dict(clip(str(path),0,7.8),kind='image',content_hash='figure')
+    script=dict(script=dict(segments=[dict(say='It opened.',chapter='c'),dict(say='They recoiled.',chapter='c')]))
+    words=dict(duration=9.2,words=[dict(w='Opened.',start=.1,end=.9,seg=0),dict(w='Recoiled.',start=1.1,end=9.1,seg=1)])
+    row=dict(f=[30,264],seg=1,clip=image,src=[0,7.8])
+    failure=C.CoverageError([dict(seg=0,start=0,end=1),dict(seg=1,start=8.8,end=9.3)],[row])
+    ft=dict(lines=[dict(i=0,clips=[]),dict(i=1,clips=[image])],editorial=dict(pins=[],bank=[],rejected=[]))
+    before=copy.deepcopy(ft);checked=[]
+    monkeypatch.setattr(C,'source_review',lambda ctx,rows,**kw:checked.extend(rows) or dict(ok=False))
+    assert not R.continue_still(SimpleNamespace(),script,ft,failure,words) and ft==before
+    assert checked[0]['say']=='Opened. Recoiled.' and checked[0]['context']=='It opened. They recoiled.'
+    checked.clear()
+    monkeypatch.setattr(C,'source_review',lambda ctx,rows,**kw:checked.extend(rows) or dict(ok=True))
+    assert R.continue_still(SimpleNamespace(),script,ft,failure,words)
+    rows,_,end=C.schedule(script['script'],words,ft)
+    assert len(rows)==1 and rows[0]['f']==[0,end] and len(ft['editorial']['pins'])==1
+    assert rows[0]['clip']['editorial_hold_move'] and not C.duplicate_ranges(rows)
+    assert len(checked)==2 and checked[-1]['f']==[0,279]
+    # A longer hold cannot gain coverage by bypassing the bounded continuation.
+    excessive=C.CoverageError([dict(seg=1,start=9.3,end=13)],rows)
+    before=copy.deepcopy(ft)
+    assert not R.continue_still(SimpleNamespace(),script,ft,excessive,words) and ft==before
+
+
 def test_archive_revision_preserves_prior_read_and_resumes_without_erasing_new_audio(tmp_path):
     from types import SimpleNamespace
     import archive_script as A
