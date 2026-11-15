@@ -295,6 +295,28 @@ def _run(index, src, work, audio):
             samples[-1]["focus"] = list(subject._energy_point(np, gray))
             samples[-1]["focus_method"] = "local_saliency"
         keep.append((t, f))
+    # A fixed sampling grid can miss an entire short shot. Give every
+    # refined shot a local observation rather than borrowing across its cut.
+    for sh in index.get("shots") or []:
+        if any(sh["start"] <= row["t"] < sh["end"] for row in samples):
+            continue
+        from . import boards
+        import subject
+        t = (sh["start"]+sh["end"])/2
+        still = boards.grab(src, t, width=w)
+        if still is None:
+            continue
+        f = cv2.cvtColor(np.asarray(still), cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+        face = seer.face(gray)
+        person = None if face else seer.person(f)
+        samples.append(dict(t=t, face=face, person=person, body=None, diff=0.,
+                            persons=int(bool(face or person)),
+                            focus=list(subject._energy_point(np, gray)),
+                            focus_method="local_saliency", **stats(gray)))
+        keep.append((t,f))
+    samples.sort(key=lambda row: row["t"])
+    keep.sort(key=lambda row: row[0])
     if not samples:
         raise ValueError("no frames could be read from the footage")
     spaced = keep[:: max(1, len(keep) // 24)]

@@ -64,3 +64,37 @@ def test_caption_contrast_uses_the_rendered_clock_after_a_cut():
     edl={'captions':[{'start':10,'end':11,'text':'still','style':{'color':'#111111'}}]}
     cue=render_qc.reading_plan(edl,Timeline([[9,12]]))[0]
     assert cue['time']==pytest.approx(1.6)
+
+
+def test_crop_uses_nearby_saliency_not_a_later_face_or_empty_index_row():
+    index={'_first_film_source_guard':True,
+           'video':{'width':1280,'height':720,'duration':12},
+           'shots':[{'start':0,'end':12}],
+           'spatial':{'samples':[{'t':7,'faces':[]},
+                                 {'t':10,'faces':[[.8,.2,.95,.5]]}]}}
+    l1={'frame':[720,1280], 'items':[{'id':'quay','pic':'main','src':[6.5,7.5],
+                                   'f':[0,30]}]}
+    source_guard.apply(l1,index,{'samples':[{'t':7,'focus':[.52,.5]}]})
+    crops=l1['items'][0]['crop']
+    assert len(crops)==30
+    for c in crops:
+        assert (c[0]+c[2])/2==pytest.approx(.52)
+        assert (c[2]-c[0])/(c[3]-c[1])==pytest.approx((9/16)/(16/9))
+
+
+def test_master_rejects_unmeasurable_corrected_audio(monkeypatch,tmp_path):
+    import mastering
+    seq=iter([{'i':-18,'tp':-2},None])
+    monkeypatch.setattr(mastering,'measure',lambda _:next(seq))
+    monkeypatch.setattr(mastering.subprocess,'run',lambda *a,**k:None)
+    monkeypatch.setattr(mastering.true_peak,'guard',lambda *a,**k:None)
+    with pytest.raises(ValueError,match='could not be measured'):
+        mastering.guard(str(tmp_path/'original.mp4'),str(tmp_path))
+
+
+def test_master_leaves_compliant_audio_untouched(monkeypatch,tmp_path):
+    import mastering
+    monkeypatch.setattr(mastering,'measure',lambda _:{'i':-14.4,'tp':-1.5})
+    def forbidden(*a,**k):raise AssertionError('unnecessary re-encode')
+    monkeypatch.setattr(mastering.subprocess,'run',forbidden)
+    assert mastering.guard('original',str(tmp_path))['passes']==0
