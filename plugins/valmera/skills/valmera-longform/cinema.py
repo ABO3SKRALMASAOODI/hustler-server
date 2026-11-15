@@ -825,6 +825,10 @@ def check(ctx,rd,sc):
     chain.sh(ctx,[chain.PY,str(HERE/'measure_sound.py'),str(final),rd['clean'],sc['l1'],pack['words'],str(sound_metrics),PX.FF,
                   '--stems',str(stems),'--bed',str(bed)],label='wf4-sound-measure-'+ctx.run_id,heavy=True,timeout=1800)
     heard_sound=read(sound_metrics)
+    picture_metrics=Path(ctx.supply)/'picture-rater.json'
+    chain.sh(ctx,[chain.PY,str(HERE/'measure_picture.py'),str(final),str(picture_metrics)],
+             label='wf4-picture-measure-'+ctx.run_id,heavy=True,timeout=1800)
+    actual_picture=read(picture_metrics)
     duration=brand.probe(str(final))['dur']
     repeats=duplicate_ranges(read(Path(ctx.supply)/'shots.json'))
     hj=Path(ctx.run_dir)/'hook_measured.json'
@@ -833,13 +837,13 @@ def check(ctx,rd,sc):
         text,use=wf4.story.writer.ask('Judge only whether the supplied words, heard in the first ten seconds of a documentary, establish concrete danger, a contradiction or an unanswered curiosity. Return JSON {hook:bool,why:string}. No numeric quality rating.',opening,effort='low',max_tokens=600,what='WF4 first ten seconds')
         save(hj,dict(wf4.story.writer.json_block(text),words=opening,usage=use))
     hook=read(hj)
-    checks=dict(base,longform=dict(seconds=duration,pictures=sc['pictures'],planned_picture_changes_per_10s=sc['pictures']/(sc['picture_time_s']/10),
+    checks=dict(base,longform=dict(seconds=duration,pictures=sc['pictures'],planned_picture_changes_per_10s=sc['pictures']/(sc['picture_time_s']/10),rater_picture=actual_picture,
                 real_moving_picture_time_share=pics['moving_share'],pictures_checked=pics['checked'],picture_matches=pics['ok'],
                 duplicate_source_ranges=len(repeats),duplicate_pairs=repeats,visual_duplicates=duplicates,hook=hook,longest_shot_s=sc['max_hold_s'],music_share=heard_sound['music_share'],sound=heard_sound,
                 chapter_rises=heard_sound['chapter_rises'],
                 narration=voice,delivered_mix_wer=mix['wer'],real_voices=pack['record']['real_voices'],chapters=sc['chapters'],credits=pack['footage']['credits']))
     structure=read(Path(ctx.run_dir)/'structure.json')
-    targets=dict(hook=hook.get('hook') is True,turns=len(structure['chapters'])==len(sc['chapters']),length=600<=duration<=1200,footage=pics['moving_share']>=0.5,unique=not repeats and duplicates['ok'],holds=sc['max_hold_s']<=8,
+    targets=dict(hook=hook.get('hook') is True,turns=len(structure['chapters'])==len(sc['chapters']),length=600<=duration<=1200,footage=pics['moving_share']>=0.5,unique=not repeats and duplicates['ok'],holds=actual_picture['holds_ok'],
                  pictures=pics['ok'],sound_fit=heard_sound['verified'],audible_sound=heard_sound['stems']['T2']>0,
                  music=heard_sound['music_share']>=0.8,rises=all(r['rise_db']>=3 for r in heard_sound['chapter_rises']),voice=voice['ok'],mix_wer=mix['ok'])
     checks['targets']=targets; checks['ok']=bool(base['ok'] and all(targets.values()))
@@ -847,7 +851,7 @@ def check(ctx,rd,sc):
     if not checks['ok']: raise RuntimeError('delivered-file gates failed: '+json.dumps(targets))
     evidence=Path(ctx.state_root).parent/'evidence'/ctx.run_id
     evidence.mkdir(parents=True,exist_ok=True)
-    for src in [pr,mp,sound_metrics,Path(ctx.run_dir)/'measured.json',Path(ctx.run_dir)/'structure.json',
+    for src in [pr,mp,sound_metrics,picture_metrics,Path(ctx.run_dir)/'measured.json',Path(ctx.run_dir)/'structure.json',
                 Path(sc['l1']),Path(ctx.supply)/'shots.json',Path(rd['film']+'.json')]:
         shutil.copy2(src,evidence/src.name)
     shutil.copytree(Path(ctx.supply)/'picture-evidence',evidence/'pictures',dirs_exist_ok=True)

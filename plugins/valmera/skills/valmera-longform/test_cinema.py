@@ -442,3 +442,19 @@ def test_visual_repreflight_preserves_newly_researched_sources():
     revised=dict(script=dict(segments=[dict(say='Unchanged words.',visual_beats=[dict(word_start=0,archive_ids=['a'])])]))
     apply_choices(sc,ft,revised,cat)
     assert [c['path'] for c in ft['lines'][0]['clips']]==['catalogued','newly-researched']
+
+
+def test_hold_gate_uses_detected_shots_even_if_plan_would_split_them(tmp_path,monkeypatch):
+    import measure_picture as M
+    import numpy as np
+    import sys
+    from types import SimpleNamespace
+    (tmp_path/'edit_delta.py').write_text('test rater')
+    monkeypatch.setattr(M,'RATER',tmp_path)
+    film=tmp_path/'film.mp4';film.write_bytes(b'encoded picture')
+    fake=SimpleNamespace(probe=lambda p:{},cut_analysis=lambda *a:dict(gray=np.zeros((160,2,2)),fps=10,duration=16,cuts=[]),
+                         shots_from=lambda *a:[(0,16)],camera_moves=lambda *a:dict(moves=0))
+    monkeypatch.setitem(sys.modules,'edit_delta',fake)
+    result=M.measure(film,tmp_path/'result.json')
+    assert result['cuts']==0 and result['holds_ok'] is False
+    assert result['holds_over_8s_without_camera_move'][0]['seconds']==16
