@@ -418,3 +418,27 @@ def test_visual_preflight_hands_empty_candidates_to_actual_clock_research(tmp_pa
     assert result['script']['segments'][0]['visual_beats'][0]['archive_ids']==[]
     assert result['preflight']['complete'] is False
     assert result['preflight']['gaps']==[dict(seg=0,seconds=2)]
+
+
+def test_published_caption_keeps_exact_description_and_excludes_other_rows():
+    from caption_context import CommonsDescription
+    p=CommonsDescription()
+    p.feed('<table><tr><td id="fileinfotpl_desc">Description</td><td>NASA: <b>two</b> astronauts.<br>Original art.</td></tr><tr><td>Unrelated licence navigation</td></tr></table>')
+    assert p.description=='Description NASA: two astronauts. Original art.'
+
+
+def test_prior_draft_searches_do_not_count_for_revised_words(tmp_path):
+    C.save(tmp_path/'old/footage.json',dict(lines=[dict(i=3,say='Previous sentence.',clips=[])]))
+    C.save(tmp_path/'current/footage.json',dict(lines=[dict(i=3,say='Revised sentence.',clips=[])]))
+    assert C.video_search_counts(tmp_path,{3:'Revised sentence.'})=={3:1}
+
+
+def test_visual_repreflight_preserves_newly_researched_sources():
+    from archive_visual import apply_choices
+    old=clip('catalogued',0,5);fresh=clip('newly-researched',0,5)
+    sc=dict(script=dict(segments=[dict(say='Unchanged words.',visual_beats=[])]))
+    ft=dict(lines=[dict(i=0,clips=[old,fresh])],voices=[])
+    cat=[dict(id='a',usable=True,clip=old)]
+    revised=dict(script=dict(segments=[dict(say='Unchanged words.',visual_beats=[dict(word_start=0,archive_ids=['a'])])]))
+    apply_choices(sc,ft,revised,cat)
+    assert [c['path'] for c in ft['lines'][0]['clips']]==['catalogued','newly-researched']

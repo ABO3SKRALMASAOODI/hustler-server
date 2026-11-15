@@ -102,6 +102,8 @@ def apply_choices(script,ft,revised,catalogue):
     before=script['script']['segments'];after=revised['script']['segments']
     if [s['say'] for s in before]!=[s['say'] for s in after]:raise ValueError('visual revision changed spoken words')
     available={r['id']:r['clip'] for r in catalogue if r['usable']}
+    archive_paths={c['path'] for c in available.values()}
+    extra_by={r['i']:[c for c in r['clips'] if c['path'] not in archive_paths] for r in ft.get('lines',[])}
     lines=[];credits=[]
     for i,(s,new) in enumerate(zip(before,after)):
         s['visual_beats']=copy.deepcopy(new['visual_beats']);clips=[]
@@ -110,6 +112,8 @@ def apply_choices(script,ft,revised,catalogue):
                 c=copy.deepcopy(available[key]);c['catalogue_id']=key
                 if beat.get('label'):c['editorial_label']=beat['label']
                 clips.append(c);credits.append(dict(line=i,**c['source']))
+        clips.extend(extra_by.get(i,[]))
+        credits.extend(dict(line=i,**c['source']) for c in extra_by.get(i,[]))
         lines.append(dict(i=i,clips=clips))
     credits.extend(dict(voice=v['person'],**v['source']) for v in ft.get('voices',[]))
     ft.update(lines=lines,credits=credits,editorial=dict(pins=[],rejected=[],bank=list(available.values())))

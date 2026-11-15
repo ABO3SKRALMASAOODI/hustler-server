@@ -209,18 +209,18 @@ def add_footage(ft,extra,dest):
         ft['voices'].append(dict(v,**{k:str(dest/v[k]) for k in ('file','wav')}))
 
 
-def witness_voices(ctx,script,ft,additional=False):
+def witness_voices(ctx,script,ft,additional=False,chapter=None):
     """Seek firsthand testimony separately from mechanism pictures. A picture
     search need not rank an interview highly enough to hear its witness.
     """
     digest_script=dict(lines=[s['say'] for s in script['script']['segments']],
-                                purpose=script['script'].get('testimony_purpose'))
+                                purpose=script['script'].get('testimony_purpose'),chapter=chapter)
     signature=hashlib.sha256(json.dumps(digest_script,sort_keys=True).encode()).hexdigest()[:12]
     root=Path(ctx.supply)/'footage'/('witnesses-additional' if additional else 'witnesses')/signature
     root.mkdir(parents=True,exist_ok=True)
     history=[]
     known=list({c['source']['url']:c['source'] for ln in ft['lines'] for c in ln['clips'] if c.get('kind')!='image'}.values())
-    lines=[dict(i=i,say=s['say']) for i,s in enumerate(script['script']['segments'])]
+    lines=[dict(i=i,say=s['say']) for i,s in enumerate(script['script']['segments']) if chapter is None or s['chapter']==chapter['id']]
     count=len(ft['voices'])
     for attempt in range(1 if additional else 3):
         dest=root if attempt==0 else root/f'attempt-{attempt+1}'
@@ -235,7 +235,8 @@ def witness_voices(ctx,script,ft,additional=False):
                 'No impersonation, AI voice or narrator quotes. If no recorded witness could exist, return an empty list.',
                 json.dumps(dict(title=script['title'],named=script['dossier']['named'],lines=lines,known_sources=known,prior=history,
                                 already_selected=ft['voices'],story_purpose=script['script'].get('testimony_purpose'),
-                                purpose='Add consequential first-person testimony which is missing from these existing inserts; no repetition.' if additional else 'Find the subject speaking.')),
+                                chapter=chapter,
+                                purpose='Add consequential first-person testimony which is missing from these existing inserts; no repetition. Prefer a complete account of what the witness did or experienced, not general praise or motivation.' if additional else 'Find the subject speaking.')),
                 effort='high',max_tokens=3000,what='WF4 witness research')
             research=wf4.story.writer.json_block(text);research['usage']=use;save(job,research)
         if not research['people']:return
@@ -301,21 +302,21 @@ def evidence_for_gaps(ctx,script,ft,gaps):
     ft['lines']=list(by.values())
 
 
-def video_search_counts(root):
+def video_search_counts(root,expected=None):
     """Count saved engine results, including uncovered lines, not attempts."""
     counts={}
     for path in Path(root).glob('*/footage.json'):
-        for i in {r['i'] for r in read(path).get('lines',[])}:
+        for i in {r['i'] for r in read(path).get('lines',[]) if expected is None or r.get('say')==expected.get(r['i'])}:
             counts[i]=counts.get(i,0)+1
     return counts
 
 
-def photo_research_ready(root,gaps,duration):
+def photo_research_ready(root,gaps,duration,expected=None):
     """Two completed video searches may establish a genuinely scarce view.
     A failed download or interrupted search is not research evidence.
     """
     if sum(g['seconds'] for g in gaps)>duration*.45:return False
-    counts=video_search_counts(root)
+    counts=video_search_counts(root,expected)
     return all(counts.get(g['seg'],0)>=2 for g in gaps)
 
 
@@ -358,18 +359,19 @@ def supply(ctx, script):
     clean_words=nd/'words_narrator.json'
     coverage_words=str(clean_words if clean_words.exists() else nd/'words.json')
     wj=read(coverage_words)
+    expected={i:s['say'] for i,s in enumerate(sc['segments'])}
     for attempt in range(2):
         try:
             schedule(sc,coverage_words,ft)
             break
         except CoverageError as failure:
             gaps=failure.gaps
-            if photo_research_ready(Path(ctx.supply)/'footage',gaps,wj['duration']):
+            if photo_research_ready(Path(ctx.supply)/'footage',gaps,wj['duration'],expected):
                 ctx.log('two completed video searches cover each remaining gap; researching unique archive photographs within the 45% limit')
                 break
             research_gaps=gaps
             if sum(g['seconds'] for g in gaps)<=wj['duration']*.45:
-                counts=video_search_counts(Path(ctx.supply)/'footage')
+                counts=video_search_counts(Path(ctx.supply)/'footage',expected)
                 research_gaps=[g for g in gaps if counts.get(g['seg'],0)<2]
             avoid=[dict(url=c['source']['url'],time_range=c['time_range']) for ln in ft['lines'] for c in ln['clips']]
             avoid += [dict(url=v['source']['url'],time_range=v['time_range']) for v in ft['voices']]
@@ -378,7 +380,8 @@ def supply(ctx, script):
                 lines=[dict(i=g['seg'],say=sc['segments'][g['seg']]['say'],pictures=sc['segments'][g['seg']].get('pictures',[]),dur=g['seconds']+2)
                        for g in research_gaps if sc['segments'][g['seg']]['chapter']==ch['id']]
                 if not lines:continue
-                dest=Path(ctx.supply)/'footage'/f"repair-{attempt+1}-{ch['id']}"
+                request_id=hashlib.sha256(json.dumps(lines,sort_keys=True).encode()).hexdigest()[:12]
+                dest=Path(ctx.supply)/'footage'/f"repair-{attempt+1}-{ch['id']}-{request_id}"
                 known=list({c['source']['url']:c['source'] for ln in ft['lines'] for c in ln['clips']}.values())
                 extra=footage_box.fetch(dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title'],avoid=avoid,known_sources=known,want_voices=not bool(ft.get('voices'))),dest,ctx.log)
                 add_footage(ft,extra,dest)
@@ -404,7 +407,10 @@ def supply(ctx, script):
     still=sum((r['f'][1]-r['f'][0])/FPS for r in shots if r['clip'].get('kind')=='image')
     if still/clock.dur>.45:raise RuntimeError('evidence photos would displace the moving film')
     if not ft['voices']:witness_voices(ctx,script,ft)
-    witness_voices(ctx,script,ft,additional=True)
+    for chapter in sc['chapters']:
+        indices={i for i,s in enumerate(sc['segments']) if s['chapter']==chapter['id']}
+        if not any(v['after'] in indices for v in ft['voices']):
+            witness_voices(ctx,script,ft,additional=True,chapter=chapter)
     sys.path.insert(0,str(HERE.parent/'_shell'/'narrate'))
     import realvoice
     if ft['voices']:
@@ -719,6 +725,8 @@ def source_review(ctx,shots,required=True):
     from picture_check import check
     from document_context import enrich
     enrich(ctx,[r['clip'] for r in shots])
+    from caption_context import enrich as captions
+    captions(ctx,[r['clip'] for r in shots])
     key=hashlib.sha256(json.dumps(shots,sort_keys=True).encode()+(HERE/'picture_check.py').read_bytes()).hexdigest()[:16]
     folder=Path(ctx.supply)/'source-evidence'/key;report=folder/'report.json'
     if report.exists():result=read(report)

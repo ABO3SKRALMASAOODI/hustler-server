@@ -22,10 +22,14 @@ def catalogue(ctx,ft):
     items=[dict(id=hashlib.sha256(k.encode()).hexdigest()[:16],clip=c) for k,c in unique.items()]
     from document_context import enrich
     enrich(ctx,[r['clip'] for r in items])
+    from caption_context import enrich as captions
+    captions(ctx,[r['clip'] for r in items])
     def one(item):
         c=item['clip'];key=item['id'];out=root/(key+'.json');board=root/(key+'.jpg')
         version=3 if c.get('kind')=='image' else 2
-        if out.exists() and C.read(out).get('version')==version:return C.read(out)
+        if out.exists():
+            prior=C.read(out)
+            if prior.get('version')==version and prior['clip']['source']==c['source']:return prior
         if not board.exists():
             cells=[]
             if c.get('kind')=='image':
