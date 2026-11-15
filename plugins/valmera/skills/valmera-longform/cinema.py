@@ -181,8 +181,10 @@ def narrated(ctx, ns, nd, reader):
     nd=Path(nd);nd.mkdir(parents=True,exist_ok=True)
     save(nd/'narration_script.json',ns)
     report=nd/'longform_voice.json'
+    stage=nd/'read-stage.json'
+    same_read=stage.exists() and read(stage).get('script')==ns
     try:
-        if not report.exists() or not read(report)['after']['ok']:
+        if not same_read or not report.exists() or not read(report)['after']['ok']:
             guarded_voice(ctx,[PX.NARRATE_PY,reader,'render',str(nd/'narration_script.json'),
                               '--out',str(nd),'--band','04'],'wf4-narration-'+ctx.run_id)
         if not (nd/'check.json').exists():

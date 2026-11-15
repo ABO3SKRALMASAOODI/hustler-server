@@ -22,6 +22,19 @@ def test_cached_idea_helper_cannot_shadow_worker_models(monkeypatch):
     assert callable(llm.fence)
 
 
+def test_passing_narration_for_old_words_cannot_skip_a_new_read(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    C.save(tmp_path/'read-stage.json',dict(script={'segments':[dict(text='Before.')]}))
+    C.save(tmp_path/'longform_voice.json',dict(after=dict(ok=True)))
+    C.save(tmp_path/'check.json',dict(gate=dict(pass_=True)))
+    calls=[]
+    monkeypatch.setattr(C,'guarded_voice',lambda ctx,cmd,label:calls.append(cmd))
+    monkeypatch.setattr(C.PX,'narrate',lambda *a:dict(test=True))
+    C.narrated(SimpleNamespace(run_id='test',log=lambda *a:None),
+               {'segments':[dict(text='After.')]},tmp_path,'reader.py')
+    assert calls and calls[0][2]=='render'
+
+
 def test_rater_stem_fit_recovers_delay_and_final_gains():
     import numpy as np
     import stem_evidence as E
