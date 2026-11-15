@@ -51,6 +51,10 @@ def classify(index, ask):
 
 def prepare(ctx):
     if "source_typography" not in ctx.index:
+        # A late storyboard is absence of evidence, not a negative decision.
+        # Keep the call non-blocking; a later pass can classify fresh evidence.
+        if ctx.index.get("visual_storyboard_pending") and len(observations(ctx.index)) < 3:
+            return {}
         import llm
         try:
             value = classify(ctx.index, llm.ask_text)
