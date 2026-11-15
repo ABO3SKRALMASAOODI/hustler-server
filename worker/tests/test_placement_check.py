@@ -108,3 +108,33 @@ def test_removing_a_video_use_rechecks_the_later_compilers_shifted_source(tmp_pa
     assert later_checks[0]["picture_source_s"] == later_original[0]
     assert any(p["picture_source_s"] != later_original[0] for p in later_checks[3:])
     assert not any(i.get("pic") == "bin:0" for i in after.l1["items"])
+
+
+def test_rejected_collage_child_removes_its_device_without_abandoning_the_film(tmp_path, monkeypatch):
+    from score import pace
+    from tests.test_score_compiler import talk_index
+    from tests.test_score_taste import film, beats_over
+    monkeypatch.setattr(pace, "on", lambda: False)
+    idx = talk_index(12.)
+    (tmp_path/"index.json").write_text(json.dumps(idx))
+    rows = []
+    (tmp_path/"bin").mkdir()
+    for n in range(3):
+        Image.new("RGB", (300, 500), (n*70, 80, 100)).save(tmp_path/"bin"/f"{n}.jpg")
+        rows.append({"id": n, "path": f"bin/{n}.jpg", "kind": "image", "w": 300, "h": 500})
+    (tmp_path/"bin.json").write_text(json.dumps({"items": rows, "wishes": []}))
+    text = film(beats_over(idx, 2, lambda k, a, z: {
+        "pic": "main" if k == 0 else "bin:0",
+        "do": [{"g": "split", "pic": ["bin:1", "bin:2"],
+                "at": f"w{a+2}..w{a+4}.e", "for": f"w{a+2}"}] if k == 0 else []}))
+    before = compiler.compile_score(text, work_dir=str(tmp_path), govern=True)
+    child = next(i for i in before.l1["items"] if i["id"] == "b01.split.0")
+    monkeypatch.setattr(pc.supply, "check_fit", lambda w, c, wishes, d:
+        ([x for x in c if x["path"] != "bin/1.jpg"], 0.,
+         [{"id": x["id"], "ok": x["path"] != "bin/1.jpg"} for x in c]))
+    after, _, report = pc.check(str(tmp_path), before, text, 1e20)
+    assert child["id"] in report["removed"]
+    assert not any(i["id"].startswith("b01.split") for i in after.l1["items"])
+    assert any(i.get("pic") == "bin:0" for i in after.l1["items"])
+    assert any(i.get("pic") == "main" and i["f"][0] <= child["f"][0]
+               and i["f"][1] >= child["f"][1] for i in after.l1["items"])

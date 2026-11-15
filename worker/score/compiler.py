@@ -2353,6 +2353,13 @@ def _gone(ctx, key, dept, bound):
     """Was this device line already decided against? (did, why) from the last look, the floor or the reading before."""
     if not bound and (key in ctx.cuts or "*" in ctx.cuts):
         return ("cut", ctx.cuts.get(key) or ctx.cuts["*"])
+    if not bound:
+        # A split/pile/card emits child picture IDs. Rejecting one of those
+        # must remove its owning device, including its background, so the
+        # ordinary take is restored instead of regenerating the bad picture.
+        child = next((k for k in ctx.cuts if k.startswith(key + ".")), None)
+        if child is not None:
+            return ("cut", ctx.cuts[child])
     for lane in ("drop_g", "drop_cam", "drop_snd", "drop_item"):
         if key in ctx.plan.get(lane, {}):
             return tuple(ctx.plan[lane][key])
