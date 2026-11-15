@@ -722,6 +722,21 @@ def test_the_look_can_send_a_found_picture_back_to_the_take():
     assert {i["pic"] for i in floor.l1["items"] if i["k"] == "shot"} == {"main"}        # the plain film is the upload's own picture
 
 
+def test_rejected_framed_picture_replaces_its_card_and_plate_with_the_take(monkeypatch):
+    from score import pace
+    monkeypatch.setattr(pace, "on", lambda: False)
+    idx = selfie(20.0)
+    text = film(beats_over(idx, 4, lambda k, a, z: {"cut": [40, 40], "pic": ["main", f"bin:{k}"]}))
+    before = comp(text, idx)
+    card = next(i for i in before.l1["items"] if i["id"] == "b02.s1.pic")
+    assert card["pic"] == "bin:1" and card["framed"]
+    after = comp(taste.cut_text(text, [card["id"]]), idx)
+    assert not any(i["id"] == card["id"] for i in after.l1["items"])
+    replacement = next(i for i in after.l1["items"] if i["id"] == "b02.s1")
+    assert replacement["pic"] == "main" and replacement["f"] == card["f"]
+    assert any(i["id"] == "b01.s1.pic" and i["pic"] == "bin:0" for i in after.l1["items"])
+
+
 def test_a_two_line_caption_and_a_one_line_caption_share_one_anchor(monkeypatch):
     """The renderer centres a caption on its anchor: the lowered anchor is the block's middle, so the seat holds."""
     from score import lower

@@ -2288,7 +2288,10 @@ def plan_shots(ctx):
             sid0 = f"{b.id}.s{j}"
             if ctx.governed and ref0.get("asset") != "main" and ref0.get("kind") != "plate":
                 # the last look, or the floor: the take stands in. A picture cut into parts goes whole when any part was named
-                gone = _gone(ctx, sid0, "picture", None) or next((_gone(ctx, k, "picture", None) for k in list(ctx.cuts) if pace.parent(k) == sid0 and k != sid0), None)
+                # A wide still is emitted as a plate plus <shot>.pic. The
+                # placement checker sees that card; rejecting it must replace
+                # its complete occurrence, not leave the picture or its plate.
+                gone = _gone(ctx, sid0, "picture", None) or next((_gone(ctx, k, "picture", None) for k in list(ctx.cuts) if pace.parent(k.removesuffix(".pic")) == sid0 and k != sid0), None)
                 if gone:
                     ctx.taste_rows.append({"id": sid0, "did": gone[0], "why": gone[1], "dept": "picture"})
                     ref0 = {"kind": "main", "asset": "main", "sync": True}
