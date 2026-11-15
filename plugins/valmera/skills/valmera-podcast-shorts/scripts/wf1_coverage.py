@@ -266,6 +266,14 @@ An illustration intent cannot override the actual words: depict the activity or 
 discussed, not merely an unrelated example of the broad category used as its search label.
 Revise an unsuitable acquisition brief instead of requesting more shots of the same unsuitable activity.
 If a rejection concerns only cropping, readability or timing, preserve the semantic requirement.
+When faithful pictures fail subject-motion checks, use those motion reasons to change acquisition,
+not the definition of moving footage. Seek genuine visible activity: actual use of the named software,
+an attributed live demonstration or an authentic institutional/customer film of that workflow.
+More static screens, document crops or cursor-only demos do not solve this failure. Do not merely
+reword the same queries. Keep an unchanged brief when no different faithful approach is supported.
+For a broad historical observation, authentic period footage can illustrate the named field without
+proving the entire observation in every frame. Keep exact named systems, events, numbers and dates;
+never replace a specific experiment with generic activity or invent a recording of a private event.
 must_show is a concise visual identity test, not an editing brief. Do not include numerical quotas, required durations, claims about unavailable footage, or a closed list of preferred sources. Earlier requirements may contain invented constraints: discard those while retaining facts from the actual words. A category such as deep learning permits any authentic period demonstration of that category; do not restrict it to the few papers already found. Specific named systems still require their exact identity.
 Resolve pronouns and formerly unnamed projects using the full spoken context and primary research. If an earlier subject label names the wrong referent, correct its canonical name and give referent_evidence explaining the exact words and primary source that establish it. For example a reaction to an internship must not retain the city as its subject merely because the city was named earlier. A corrected name directs research; it never approves a picture. Do not rename an explicit named entity to an easier substitute.
 Keep every actual identity, object, place and spoken fact. Do not replace a specific named thing with

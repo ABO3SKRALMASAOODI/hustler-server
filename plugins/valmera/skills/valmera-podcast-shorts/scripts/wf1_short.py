@@ -397,6 +397,52 @@ def source_signature(supply):
     return hashlib.sha256(json.dumps(sorted(available)).encode()).hexdigest()[:12]
 
 
+def motion_research(ctx, pack, shortage):
+    """Change a static-only acquisition approach once; never relax a picture verdict."""
+    if (pack.get('motion_requirements_checked') or not pack.get('coverage_repairs')
+            or shortage.get('missing_windows')
+            or shortage.get('moving_seconds',0)>=shortage.get('required_moving_seconds',0)):
+        return False
+    path=os.path.join(ctx.supply,'placement_checks.json')
+    checks=json.load(open(path)) if os.path.isfile(path) else {}
+    stills=[dict(reason=r.get('reason'),motion_reason=r.get('motion_reason'))
+            for r in checks.values() if r.get('ok') and r.get('motion_ok') is False]
+    if not stills:return False
+    import wf1_coverage, wf1_primary_sources
+    coverage=pack['coverage'];wanted=shortage['weak_windows']
+    before=json.dumps(coverage['windows'],sort_keys=True)
+    evidence=dict(stage='faithful pictures lack subject motion',measurements=shortage,
+                  faithful_stills=stills[-24:],
+                  available=[dict(i=r['i'],clips=[dict(shows=c.get('shows'),source=c.get('source'),
+                    subject_motion=c.get('subject_motion')) for c in r['clips'][:12]]) for r in pack['footage']])
+    def save():
+        target=os.path.join(ctx.supply,'pack.json');stored=json.load(open(target));stored['pack']=pack
+        with open(target,'w') as f:json.dump(stored,f,indent=1)
+    # Persist admission before the call: an unchanged failed call is not retried.
+    pack['motion_requirements_checked']=True;save()
+    use=wf1_coverage.repair_requirements(coverage,wanted,evidence,_llm())
+    pack.setdefault('research_spend',[]).append(use)
+    changed=json.dumps(coverage['windows'],sort_keys=True)!=before
+    if changed:pack['coverage_context_rescout_pending']=True
+    save()
+    if not changed:return False
+    ctx.log('motion verdicts changed acquisition direction; one original-publisher pass on the revised brief')
+    original=wf1_primary_sources.acquire([dict(coverage['windows'][i],i=i,context=coverage.get('context'))
+        for i in wanted],os.path.join(ctx.supply,'primary-videos'),_llm())
+    pack.setdefault('research_spend',[]).extend(original['spend'])
+    manifest_path=os.path.join(ctx.supply,'sources','manifest.json')
+    manifest=json.load(open(manifest_path)) if os.path.exists(manifest_path) else []
+    found=os.path.join(ctx.supply,'primary-videos','manifest.json')
+    for rec in json.load(open(found)) if os.path.exists(found) else []:
+        prior=next((r for r in manifest if r['url']==rec['url']),None)
+        if prior is None:manifest.append(rec)
+        elif not os.path.isfile(prior.get('path','')) and os.path.isfile(rec.get('path','')):prior.update(rec)
+    os.makedirs(os.path.dirname(manifest_path),exist_ok=True)
+    with open(manifest_path,'w') as f:json.dump(manifest,f,indent=1)
+    save()
+    return True
+
+
 def refill(ctx, script, pack, shortage):
     """Research missing coverage through the same engines, preserving all checked originals."""
     coverage = pack['coverage']
@@ -422,6 +468,8 @@ def refill(ctx, script, pack, shortage):
     # evidence, but spend this recovery pass on moving originals first.
     motion_ready = (shortage.get('real_seconds',0)>0 and
                     shortage.get('moving_seconds',0)>=shortage.get('required_moving_seconds',.6*shortage['real_seconds']))
+    if not motion_ready and motion_research(ctx,pack,shortage):
+        return
     if (not motion_ready and pack.get('coverage_repairs',0)>=1
             and not pack.get('coverage_context_checked')):
         import wf1_coverage

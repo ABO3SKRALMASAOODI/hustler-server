@@ -61,6 +61,54 @@ def test_composed_feedback_revises_a_window_brief_once_without_editing_media(tmp
     assert saved['composed_requirement_windows']==[0]
 
 
+@pytest.mark.parametrize('changed,missing',[(True,False),(False,False),(True,True)])
+def test_motion_feedback_changes_research_once_without_resetting_budget(tmp_path,monkeypatch,changed,missing):
+    import wf1_short as wf
+    data=story();data['windows'][0]['must_show']='Authentic software'
+    pack=dict(coverage=data,coverage_repairs=4,footage=[dict(i=0,clips=[dict(path='unchanged.mp4')])])
+    (tmp_path/'pack.json').write_text(json.dumps(dict(pack=pack,record={})))
+    (tmp_path/'placement_checks.json').write_text(json.dumps({'a':dict(ok=True,motion_ok=False,
+        reason='Faithful interface',motion_reason='Cursor movement over an unchanged screen')}))
+    calls=[]
+    def revise(coverage,wanted,evidence,llm):
+        assert wanted==[0] and evidence['faithful_stills'][0]['motion_reason']
+        calls.append('direction')
+        if changed:coverage['windows'][0]['must_show']='Authentic live software workflow'
+        return {}
+    def acquire(windows,work,llm):
+        calls.append('publisher');assert windows[0]['say']==story()['windows'][0]['say']
+        return dict(sources={},spend=[])
+    monkeypatch.setattr(coverage,'repair_requirements',revise)
+    monkeypatch.setattr(primary,'acquire',acquire)
+    monkeypatch.setattr(wf,'_llm',lambda:None)
+    ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
+    shortage=dict(weak_windows=[0],missing_windows=[0] if missing else [],moving_seconds=1,required_moving_seconds=4)
+    assert wf.motion_research(ctx,pack,shortage) is (changed and not missing)
+    assert wf.motion_research(ctx,pack,shortage) is False
+    assert calls==([] if missing else ['direction','publisher'] if changed else ['direction'])
+    assert pack['coverage_repairs']==4 and pack['footage'][0]['clips'][0]['path']=='unchanged.mp4'
+    for old,new in zip(story()['windows'],pack['coverage']['windows']):
+        for key in ('name','first','last','t0','t1','say'):assert old[key]==new[key]
+    assert bool(pack.get('coverage_context_rescout_pending')) is (changed and not missing)
+
+
+def test_failed_motion_research_is_not_retried_unchanged(tmp_path,monkeypatch):
+    import wf1_short as wf
+    pack=dict(coverage=story(),coverage_repairs=4,footage=[])
+    path=tmp_path/'pack.json';path.write_text(json.dumps(dict(pack=pack,record={})))
+    (tmp_path/'placement_checks.json').write_text(json.dumps({'a':dict(ok=True,motion_ok=False)}))
+    calls=[]
+    def failed(*args):
+        calls.append(1);raise RuntimeError('local adapter unavailable')
+    monkeypatch.setattr(coverage,'repair_requirements',failed)
+    monkeypatch.setattr(wf,'_llm',lambda:None)
+    ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
+    shortage=dict(weak_windows=[0],missing_windows=[],moving_seconds=1,required_moving_seconds=4)
+    with pytest.raises(RuntimeError):wf.motion_research(ctx,pack,shortage)
+    resumed=json.loads(path.read_text())['pack']
+    assert wf.motion_research(ctx,resumed,shortage) is False and calls==[1]
+
+
 def test_primary_referent_direction_precedes_acquisition_and_is_cached(tmp_path,monkeypatch):
     import wf1_context
     calls=[]

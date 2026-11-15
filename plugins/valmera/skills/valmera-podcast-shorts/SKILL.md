@@ -206,3 +206,7 @@ resumes once the moving share is sufficient. A queued model call is never retrie
 Physical camera travel through a real three-dimensional scene counts as moving footage when the
 frames show depth/parallax or newly revealed geometry. A flat pan/zoom over a still, cursor-only
 movement or an editorial card transform does not. The final-film residual-motion gate remains.
+
+When all referents have faithful pictures but motion remains short, pass the actual failed motion
+verdicts back to acquisition once. A changed brief may research different original footage once;
+it never resets the platform budget or approves a formerly static or incorrect placement.
