@@ -753,7 +753,7 @@ def witness_crop(row):
     crops=[]
     for q in range(row['f'][1]-row['f'][0]):
         t=min(1.,(row['src'][0]+q/FPS)/duration)
-        width=1/(1+.055*t)
+        width=1/(1+.12*t)
         crops.append([.5-width/2,.5-width/2,.5+width/2,.5+width/2])
     return crops
 
@@ -914,7 +914,7 @@ def render(ctx,script,sc):
     pack=read(Path(ctx.supply)/'pack.json')['pack']
     from version import code_version
     inputs=dict(engine=code_version(),narration=digest(pack['narration']),l1=digest(sc['l1']),mixer=digest(HERE/'film_long.py'),
-                stem_capture=digest(HERE/'stem_evidence.py'),music=digest(HERE/'music_chapters.py'))
+                stem_capture=digest(HERE/'stem_evidence.py'),music=digest(HERE/'music_chapters.py'),chapter_mix=digest(HERE/'chapter_audio.py'))
     stamp=Path(ctx.supply)/'render-inputs.json'
     if not stamp.exists() or read(stamp)!=inputs:
         for name in ('sound.m4a','sound.report.json','film_engine.mp4','film_engine.mp4.log.json','film_scored.mp4','film_scored.mp4.json','film_scored.bed.wav'):
@@ -926,7 +926,7 @@ def render(ctx,script,sc):
         args=dict(l1=read(sc['l1']),pack=read(Path(ctx.supply)/'pack.json')['pack'],film=result['film'],out=str(out),cache=str(Path(ctx.supply)/'music-cache'))
         job=Path(ctx.supply)/'score_music.json'; save(job,args)
         chain.sh(ctx,[chain.PY,str(HERE/'music_chapters.py'),str(job)],label='wf4-music-'+ctx.run_id,heavy=True,timeout=7200)
-    result['clean']=result['film']; result['film']=str(out)
+    result['clean']=str(Path(ctx.supply)/'clean-final.flac'); result['film']=str(out)
     result['music']=read(str(out)+'.json')
     return result
 
@@ -1027,7 +1027,7 @@ def check(ctx,rd,sc):
     evidence=Path(ctx.state_root).parent/'evidence'/ctx.run_id
     evidence.mkdir(parents=True,exist_ok=True)
     for src in [pr,mp,sound_metrics,picture_metrics,Path(ctx.run_dir)/'measured.json',Path(ctx.run_dir)/'structure.json',
-                Path(sc['l1']),Path(ctx.supply)/'shots.json',Path(rd['film']+'.json')]:
+                Path(sc['l1']),Path(ctx.supply)/'shots.json',Path(rd['film']+'.json'),Path(ctx.supply)/'sound-final.json']:
         shutil.copy2(src,evidence/src.name)
     shutil.copytree(Path(ctx.supply)/'picture-evidence',evidence/'pictures',dirs_exist_ok=True)
     for calibration in Path(ctx.supply).glob('picture-calibration-*'):

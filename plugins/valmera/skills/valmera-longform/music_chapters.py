@@ -17,7 +17,7 @@ def score(l1, pack, film, out, cache):
     import film as F
     lead=F.LEAD_F/F.FPS
     dur=l1['dur_f']/l1['fps']
-    voice=MU._decode(film,MU.SR,2)
+    voice=MU._decode(str(Path(film).parent/'audio-stems/voice.flac'),MU.SR,2)
     whole=np.zeros((round(dur*MU.SR),2),np.float32)
     used=[]; rows=[]; call=MF.openai_call(timeout=1205 if os.environ.get('CODEX_PROXY_LOCAL')=='1' else 90)
     for ch in l1['chapters']:
@@ -50,13 +50,12 @@ def score(l1, pack, film, out, cache):
     report=dict(chapters=rows,music_share=share,method='100ms music-stem RMS above -50 dBFS; chapter rises measured over 2-8s',
                 credit='; '.join(dict.fromkeys(r['choice'].get('credit','') for r in rows)))
     if share<0.8: raise RuntimeError(f'music coverage {share:.3f} below 80%')
-    write_audio(Path(out).with_suffix('.bed.wav'),whole,MU.SR,os.environ['FFMPEG_BIN'])
-    marks=dict(dur_s=dur,words=[(w['start']+lead,w['end']+lead) for w in wd['words']])
     from scene import audio as AU
     ceiling,limit=AU.CEIL_DBTP,AU.LIMIT_DBFS
     AU.CEIL_DBTP,AU.LIMIT_DBFS=min(ceiling,-2.0),min(limit,-2.6)
     try:
-        report['mix']=MU.mix_film(film,'chapter score',marks,out=out,kind='longform',supplied=False,music=(whole,dict(report)))
+        from chapter_audio import mix
+        report['mix']=mix(l1,voice,whole,film,out)
     finally:
         AU.CEIL_DBTP,AU.LIMIT_DBFS=ceiling,limit
     Path(out+'.json').write_text(json.dumps(report,indent=1))

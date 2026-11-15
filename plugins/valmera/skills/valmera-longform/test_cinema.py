@@ -160,7 +160,7 @@ def test_long_interview_camera_continues_across_internal_source_slices():
     assert C.witness_crop(a)==full[:234]
     import numpy as np
     assert np.allclose(C.witness_crop(b),full[234:468])
-    assert full[0]==[0,0,1,1] and full[-1][0]<.03
+    assert full[0]==[0,0,1,1] and full[-1][0]<.06
 
 
 def test_document_display_uses_title_and_never_renders_full_research_citation():
