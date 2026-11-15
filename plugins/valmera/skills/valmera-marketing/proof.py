@@ -1149,6 +1149,7 @@ def score(ctx, script):
     knobs.setdefault("aim_s", aim)
     knobs.setdefault("bed", chain.wants_music(ctx))
     knobs.setdefault("require_fit", True)
+    knobs["prefer_new_pictures"] = True
     knobs.setdefault("layout", "bleed")
     knobs["full_frame_paths"] = list(pack["product"]["paths"])
     sys.path[:0] = [p for p in W3.env_path().split(os.pathsep) if p not in sys.path]

@@ -631,7 +631,7 @@ def plan_lengths(rng, L, k, hi_s, spread=False):
     return [min(x, cap) for x in out]
 
 
-def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=()):
+def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer_new=False):
     """[[f0, f1, kind, name, rec]] when every picture carries a verdict for its line and take (sp.fit). Planned before
     it is cut:
       demand    each line's shots are drawn first (shot_demand: the judge's distribution by pace and beat)
@@ -854,7 +854,7 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=()):
             last = out[-1][4]["path"] if out else None
             lead = shots_on == 0 and s.get("beat") in ("hook", "payoff", "close") and not in_burst
             rf_move = None
-            if not in_burst and not lead and not still_only and n_static[0] + 1 > STATIC_SHARE * (n_shots[0] + 1) + 1 and \
+            if not in_burst and not lead and not still_only and not (prefer_new and photos_for(line)) and n_static[0] + 1 > STATIC_SHARE * (n_shots[0] + 1) + 1 and \
                     not any(units[u]["moving"] for u in reserved[line] + [v for v in free if line in units[v]["lines"]] if units[u]["c"]["path"] != last):
                 # past the film's static budget with no moving take left: a moving take of this line again on a reframe,
                 # before any photograph or still take
@@ -1529,7 +1529,7 @@ def build(script, sup, style_id, direction=None):
         talk_fit = {p for p in talk if any(v.get("live_action") is True and v.get("speaking_on_camera") is True for v in _verdict_rows(ver.get(p)))}
         sp = Supply(pics, footage, talk=(), allow=collage, fit=sup.get("fit") or {}, deny=deny, cards=cards, only_ok=d.get("only_ok"),
                     grades=fit_grades(sup.get("fit_verdicts")))
-        timeline = cut_fit(script, clock, sp, f_end, stress, seed=int(d.get("seed", 1114)), device_lines=[i for i, f_ in enumerate(fin) if f_])
+        timeline = cut_fit(script, clock, sp, f_end, stress, seed=int(d.get("seed", 1114)), device_lines=[i for i, f_ in enumerate(fin) if f_], prefer_new=bool(d.get("prefer_new_pictures")))
         cutter = dict(name="cut_fit", why="every picture carries a verdict for its line and take")
         # grey footage counts against the black-and-white budget: the devices get what the pictures leave
         intrinsic = intrinsic_grey(timeline, fin, f_voice_end)
@@ -1759,7 +1759,17 @@ def build(script, sup, style_id, direction=None):
         P.voices[vk] = dict(P.voices["dsp"])
         # Fit the largest animated frame, with room for glyph bearings and
         # the platform rail. The old 80% static width overflowed as it grew.
-        P.voices[vk]["px"] = P.R.fit_px(vk, text, 0.70 * W / (1.0 + DESIGNED_SCALE), float(st["dsp"]["px"]) * 1.6)
+        max_width = 0.70 * W / (1.0 + DESIGNED_SCALE)
+        P.voices[vk]["px"] = max(64, P.R.fit_px(vk, text, max_width, float(st["dsp"]["px"]) * 1.6))
+        text_lines, current = [], []
+        for token in text.split():
+            if current and P.R.width(vk, " ".join(current + [token])) > max_width:
+                text_lines.append(" ".join(current))
+                current = []
+            current.append(token)
+        if current:
+            text_lines.append(" ".join(current))
+        line_step = float(P.voices[vk]["px"]) * 1.2 / H
         n = f1 - f0
         try:
             _, _, bake_ = F._engines()
@@ -1770,7 +1780,10 @@ def build(script, sup, style_id, direction=None):
             ys, bl = [0.44] * n, [0.0] * n
         sc_ = [r4(1.0 + DESIGNED_SCALE * (1.0 - (1.0 - j / max(n - 1, 1)) ** 2)) for j in range(n)]
         ink_ = pal["ink"] if not dev else (pal["accent"] if rec.get("role") == "figure" else pal["ink"])
-        P.word([f0, f1], text, vk, 0.5, ys, ink_, 1.0, align="c", z=3, blur=bl, role="big", stroke=dict(w=3.0, c="#0B0A09"), s=sc_)
+        for j, text_line in enumerate(text_lines):
+            offset = (j - (len(text_lines) - 1) / 2) * line_step
+            P.word([f0, f1], text_line, vk, 0.5, [r4(y + offset) for y in ys], ink_, 1.0, align="c", z=3,
+                   blur=bl, role="big", stroke=dict(w=3.0, c="#0B0A09"), s=sc_)
         if rec.get("small") and rec.get("big"):
             vs = f"dsp_cards{f0}"
             P.voices[vs] = dict(P.voices["dsp"])
