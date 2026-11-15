@@ -1366,6 +1366,10 @@ def score(ctx, script):
         l1, beats, taste = drop_offenders(ctx, l1, beats, taste)
     if reel and pack.get("fit") is not None:
         l1, beats, taste = stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=script)
+        if not taste["ok"]:
+            # the gates rebuild the plan, and a rebuilt display line can land a hair past the safe area again: the
+            # offending item goes here too, never the film
+            l1, beats, taste = drop_offenders(ctx, l1, beats, taste)
     if d.get("script"):
         rep = writer.verify(sc)
         if not rep["ok"]:
