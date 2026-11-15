@@ -714,7 +714,11 @@ def boards_for(work, idx, per, pages=(1, 2, 3, 4)):
             boards.save(frame_board(src, per, idx, times[i * per_board:(i + 1) * per_board], rows, cols, cw, ch), f"{out}/board_{i + 1}.jpg", quality=86)
     if 4 in pages:
         boards.save(detail_board(src, per, idx), f"{out}/board_4.jpg", quality=86)
-        boards.save(printed_text_board(src, per), f"{out}/printed_text.jpg", quality=86)
+        printed = f"{out}/printed_text.jpg"
+        if per.get("text"):
+            boards.save(printed_text_board(src, per), printed, quality=86)
+        elif os.path.exists(printed):
+            os.unlink(printed)
     return dict(rows=rows, cols=cols, cell=[cw, ch], per_board=per_board), times
 
 
