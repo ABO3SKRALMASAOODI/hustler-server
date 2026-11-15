@@ -6090,9 +6090,19 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             off = float(item.get("source_start_s") or 0.0)
             # Keep a frame available through a fractional-rate handoff;
             # otherwise EOF can expose the source for the last frame.
-            chain.append(f"trim=start={off:.3f}:end={off + o_dur + .15:.3f}")
-            chain.append("tpad=stop_mode=clone:stop_duration=0.15")
-            chain.append("setpts=PTS-STARTPTS")
+            if item.get("rate") is not None:
+                rate = float(item["rate"])
+                # Sample the preceding decoded source frame on the output
+                # clock. A source interval shorter than one frame may have
+                # no timestamp inside it, but still has a visible picture.
+                chain.append(f"setpts=(PTS-{off:.6f}/TB)/{rate:.12f}")
+                chain.append(f"fps={fps}:round=up:start_time=0")
+                chain.append(f"trim=duration={o_dur:.6f}")
+                chain.append("tpad=stop_mode=clone:stop_duration=0.15")
+            else:
+                chain.append(f"trim=start={off:.3f}:end={off + o_dur + .15:.3f}")
+                chain.append("tpad=stop_mode=clone:stop_duration=0.15")
+                chain.append("setpts=PTS-STARTPTS")
         if item.get("source_crop"):
             left, top, right, bottom = item["source_crop"]
             chain.append(
