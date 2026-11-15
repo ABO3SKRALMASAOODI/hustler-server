@@ -521,6 +521,7 @@ def refill(ctx, script, pack, shortage):
     fscript = dict(title=script['title']+' — supplementary documentary coverage. Prefer original institutional or company films with visible action; avoid influencer promotions and unrelated banners.',
                    segments=[dict(i=i,say=w['say'],pictures=[w['name']],visual=w['must_show']) for i,w in enumerate(windows)],
                    named=[dict(name=n,must_show=show,video_sources=primary.get(n,[]),video_searches=list(dict.fromkeys(q for w in windows if w['name']==n for q in w.get('video_searches',[]))),**{'is':'thing'}) for n,show in subjects.items()])
+    if rescout:name+='-'+hashlib.sha256(json.dumps(fscript,sort_keys=True).encode()).hexdigest()[:12]
     fw,fh = wf1_film.STYLES[script['style']['id']]['footage']
     ctx.log(f"research missing documentary windows {wanted}; pass {count}")
     foot = chain.footage(ctx,dict(script=fscript),[w['t1']-w['t0'] for w in windows],W=fw,H=fh,
@@ -665,6 +666,18 @@ def render(ctx, script, sc):
     """The product repairs rejected placements before branding and music, never a delivered film."""
     history_path = os.path.join(ctx.supply, "render_reviews.json")
     history = json.load(open(history_path)) if os.path.exists(history_path) else []
+    # A pause can occur after persisting a rejection but before saving its rebuilt
+    # score. Resume that repair before rendering the stale, already-rejected plan.
+    rejected=set(current_rejections(ctx.supply))
+    if any(p.get('path') in rejected for p in sc.get('beats',{}).get('pictures',[])):
+        if history:
+            _repair_window_boundaries(ctx,[r for r in history[-1]['placements'] if not r['ok']])
+        previous_spend=sc.get('spend',[])
+        rebuilt=score(ctx,script)
+        rebuilt['spend']=previous_spend+[u for u in rebuilt.get('spend',[]) if u not in previous_spend]
+        sc.clear();sc.update(rebuilt)
+        json.dump(sc,open(os.path.join(ctx.run_dir,'score.json'),'w'),indent=1)
+        invalidate_render(ctx)
     while True:
         revision=render_revision(sc)
         marker=os.path.join(ctx.supply,'render_revision.json')
@@ -722,6 +735,23 @@ def _repair_window_boundaries(ctx, rejected):
     import wf1_coverage
     pack=wf3.load_pack(ctx)
     wf1_coverage.repair_boundaries(pack['coverage'],rejected,_llm())
+    coverage=pack['coverage'];windows=coverage['windows']
+    reviewed=set(pack.get('composed_requirement_windows',[]))
+    wanted=set()
+    for row in rejected:
+        bounds=row.get('f') or []
+        if len(bounds)!=2:continue
+        mid=(sum(bounds)/2-3)/30
+        wanted.update(i for i,w in enumerate(windows) if w['t0']<=mid<w['t1'] and i not in reviewed)
+    if wanted:
+        before=json.dumps(windows,sort_keys=True)
+        usage=wf1_coverage.repair_requirements(coverage,sorted(wanted),
+            dict(stage='composed-frame rejection',rejected=rejected),_llm())
+        pack.setdefault('research_spend',[]).append(usage)
+        pack['composed_requirement_windows']=sorted(reviewed|wanted)
+        if json.dumps(windows,sort_keys=True)!=before:
+            pack['coverage_context_rescout_pending']=True
+            ctx.log('composed feedback revised acquisition requirements; recheck retained originals on the unchanged words')
     path=os.path.join(ctx.supply,'pack.json');stored=json.load(open(path));stored['pack']=pack
     json.dump(stored,open(path,'w'),indent=1)
     json.dump(pack['coverage'],open(os.path.join(ctx.supply,'coverage.json'),'w'),indent=1)

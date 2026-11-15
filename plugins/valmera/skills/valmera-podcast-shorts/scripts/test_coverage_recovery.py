@@ -37,6 +37,30 @@ def test_retained_originals_need_bytes_and_attribution_and_keep_exact_subjects(t
     assert original.read_bytes()==b'original' and len(list(sources.iterdir()))==2
 
 
+def test_composed_feedback_revises_a_window_brief_once_without_editing_media(tmp_path,monkeypatch):
+    import wf1_short as wf
+    window=dict(name='Research',first=0,last=3,t0=0,t1=4,say='the history of science',must_show='People')
+    pack=dict(coverage=dict(words=[],windows=[window]),footage=[dict(i=0,clips=[dict(path='unchanged.mp4')])])
+    path=tmp_path/'pack.json';path.write_text(json.dumps(dict(pack=pack,record={})))
+    monkeypatch.setattr(wf.wf3,'load_pack',lambda _:json.loads(path.read_text())['pack'])
+    monkeypatch.setattr(wf,'_llm',lambda:None)
+    monkeypatch.setattr(coverage,'repair_boundaries',lambda *a:False)
+    calls=[]
+    def revise(data,wanted,evidence,llm):
+        assert wanted==[0] and evidence['stage']=='composed-frame rejection'
+        calls.append(evidence);data['windows'][0]['must_show']='Actual scientific work'
+        return {}
+    monkeypatch.setattr(coverage,'repair_requirements',revise)
+    ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
+    rejection=[dict(f=[3,33],reason='Unrelated activity',source='https://publisher.example/film')]
+    wf._repair_window_boundaries(ctx,rejection);wf._repair_window_boundaries(ctx,rejection)
+    saved=json.loads(path.read_text())['pack']
+    assert len(calls)==1 and saved['coverage_context_rescout_pending'] is True
+    assert saved['footage']==pack['footage']
+    assert saved['coverage']['windows'][0]['say']==window['say']
+    assert saved['composed_requirement_windows']==[0]
+
+
 def test_primary_referent_direction_precedes_acquisition_and_is_cached(tmp_path,monkeypatch):
     import wf1_context
     calls=[]

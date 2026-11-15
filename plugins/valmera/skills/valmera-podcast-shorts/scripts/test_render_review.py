@@ -91,6 +91,26 @@ def test_unresolved_composed_rejection_cannot_claim_a_passing_check(tmp_path,mon
         wf.render(ctx,{},sc)
 
 
+def test_resume_repairs_a_persisted_rejection_before_rendering_stale_score(tmp_path,monkeypatch):
+    from placement_check import CONTRACT
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda _:None)
+    (tmp_path/'render_rejected_contract.json').write_text(json.dumps(CONTRACT))
+    (tmp_path/'render_rejected.json').write_text('["bad.mp4"]')
+    (tmp_path/'render_reviews.json').write_text(json.dumps([dict(placements=[dict(id=0,ok=False)],spend=[])]))
+    (tmp_path/'film_engine.mp4').write_bytes(b'stale rejected render')
+    sc=dict(beats=dict(pictures=[dict(path='bad.mp4')]),spend=[])
+    monkeypatch.setattr(wf,'score',lambda *a:dict(beats=dict(pictures=[dict(path='replacement.mp4')]),spend=[]))
+    def render(ctx,script,score):
+        assert not (tmp_path/'film_engine.mp4').exists()
+        assert score['beats']['pictures']==[dict(path='replacement.mp4')]
+        return dict(film='replacement-render.mp4')
+    monkeypatch.setattr(wf.wf3,'render',render)
+    monkeypatch.setattr(wf,'_render_review',lambda *a:dict(rejected=0,moving_share=1.,placements=[],spend=[]))
+    result=wf.render(ctx,{},sc)
+    assert result['film']=='replacement-render.mp4'
+    assert json.loads((tmp_path/'render_rejected.json').read_text())==['bad.mp4']
+
+
 def test_later_repairs_keep_the_picture_that_passed_every_review(tmp_path,monkeypatch):
     ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda x:None)
     names=['a.jpg','b.jpg','c.jpg','d.jpg','good.jpg']

@@ -261,6 +261,11 @@ def repair_requirements(coverage, wanted, evidence, llm):
     """A director corrects over-specific research constraints without changing spoken facts or timing."""
     system='''Direct documentary acquisition requirements using primary research and any previous failures.
 Return JSON {"windows":[{"i":integer,"name":resolved subject name,"referent_evidence":str,"must_show":str,"video_searches":[str]}]}.
+Composed-frame rejections are evidence that an earlier depiction brief may have been too broad.
+An illustration intent cannot override the actual words: depict the activity or relationship being
+discussed, not merely an unrelated example of the broad category used as its search label.
+Revise an unsuitable acquisition brief instead of requesting more shots of the same unsuitable activity.
+If a rejection concerns only cropping, readability or timing, preserve the semantic requirement.
 must_show is a concise visual identity test, not an editing brief. Do not include numerical quotas, required durations, claims about unavailable footage, or a closed list of preferred sources. Earlier requirements may contain invented constraints: discard those while retaining facts from the actual words. A category such as deep learning permits any authentic period demonstration of that category; do not restrict it to the few papers already found. Specific named systems still require their exact identity.
 Resolve pronouns and formerly unnamed projects using the full spoken context and primary research. If an earlier subject label names the wrong referent, correct its canonical name and give referent_evidence explaining the exact words and primary source that establish it. For example a reaction to an internship must not retain the city as its subject merely because the city was named earlier. A corrected name directs research; it never approves a picture. Do not rename an explicit named entity to an easier substitute.
 Keep every actual identity, object, place and spoken fact. Do not replace a specific named thing with

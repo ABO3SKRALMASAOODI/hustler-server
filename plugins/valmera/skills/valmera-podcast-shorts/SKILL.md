@@ -181,6 +181,9 @@ frames. Card transforms, pans over documents, and cursor-only changes on a stati
 Their failed motion verdict lowers their acquisition priority; it does not falsely reject a faithful picture.
 Retained publisher originals enter the first acquisition pass as attributed candidates for their exact
 subjects, as well as later recovery. Reusing their bytes never bypasses motion or placement checks.
+Composed-picture failures also return to the acquisition director once per affected window, so a broad
+but unsuitable depiction brief cannot keep asking for the same unrelated activity. Changed briefs
+invalidate source-scan reuse. A paused rejection repair resumes before rendering a stale rejected plan.
 The composed and branded films must also reach 60% moving picture time. A still discovered there stays
 eligible as a still, while the product returns to footage research; it cannot regain moving credit from an earlier source check.
 Research is split into small referent groups with retained answers. A source replay can reuse verified word
