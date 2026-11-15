@@ -1067,7 +1067,14 @@ def score(ctx, script):
         bad, sp = picture_check(ctx, beats, clock, product, cache)
         spend += sp
         jsave(cache_p, cache)
-        rounds.append(dict(round=rnd, pictures=len(beats.get("pictures") or []), misfits=[dict(file=b, words=w, why=y) for b, w, y in bad]))
+        shown = []
+        for picture in beats.get("pictures") or []:
+            words = words_under(clock, *picture["f"])
+            verdict = cache.get(picture_key(picture, words)) or dict(fits=False, why="missing picture verdict")
+            shown.append(dict(file=os.path.basename(picture["path"]), frames=picture["f"], source=picture.get("src"),
+                              words=words, **verdict))
+        rounds.append(dict(round=rnd, pictures=len(shown), shown=shown,
+                           misfits=[dict(file=b, words=w, why=y) for b, w, y in bad]))
         ctx.log(f"picture check round {rnd}: {len(bad)} of {len(beats.get('pictures') or [])} do not fit their words")
         if not bad or rnd == 3:
             break
