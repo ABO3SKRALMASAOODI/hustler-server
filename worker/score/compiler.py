@@ -2703,8 +2703,34 @@ def under_rect(ctx, s, f, rect):
         cx, cy = _last(c["x"]), _last(c["y"])
         if abs(x - cx) < hw and abs(y - cy) < hh and c["f"][1] - c["f"][0] > 6:
             inner = [(rect[0] - cx + hw) / (2 * hw), (rect[1] - cy + hh) / (2 * hh), (rect[2] - cx + hw) / (2 * hw), (rect[3] - cy + hh) / (2 * hh)]
-            return luma_in(ctx, c, f, [clamp(q, 0, 1) for q in inner])
-    return luma_in(ctx, s, f, rect) if s else None
+            q = luma_in(ctx, c, f, [clamp(q, 0, 1) for q in inner])
+            return q if c.get("z", 0) >= 1 else pool_luma(ctx, f, rect, q)
+    return pool_luma(ctx, f, rect, luma_in(ctx, s, f, rect) if s else None)
+
+
+def pool_luma(ctx, f, rect, measured):
+    """Read type against its dark pool too, using the ellipse lower.Bake
+    actually renders. Choosing ink from the bare source made black words
+    disappear after the pool darkened that source (p5572, Fitted wrap)."""
+    if measured is None:
+        return None
+    import numpy as np
+    yy, xx = np.meshgrid(np.linspace(rect[1], rect[3], 5),
+                         np.linspace(rect[0], rect[2], 5), indexing="ij")
+    transmission = np.ones_like(xx)
+    for it in ctx.items:
+        if it.get("k") != "flash" or it.get("mode") != "pool" or not it["f"][0] <= f < it["f"][1]:
+            continue
+        r = it.get("rect")
+        if not r or isinstance(r[0], (list, tuple)):
+            continue
+        rx = max(r[2] - r[0], 0.1) / 2
+        ry = rx * ctx.W / ctx.H  # lower renders the square bake at this width
+        d = np.hypot((xx - (r[0] + r[2]) / 2) / rx,
+                     (yy - (r[1] + r[3]) / 2) / ry)
+        alpha = min(float(it.get("a", 1)) * 1.3, 1.0)
+        transmission *= 1 - np.exp(-(d * 1.9) ** 2) * (d < 1) * alpha
+    return measured[0] * float(transmission.min()), measured[1] * float(transmission.max())
 
 
 DARK_INK = "#111111"
