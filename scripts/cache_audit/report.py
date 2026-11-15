@@ -90,7 +90,7 @@ def main():
                           else 'sanitized images/tool names, wire options missing; exact prefix unidentifiable'))
     # Diagnostic simulation across every available message log, not cherry-picked.
     import tiktoken
-    enc=tiktoken.get_encoding('o200k_base'); diag=[]
+    enc=tiktoken.get_encoding('o200k_base'); diag=[]; results=[]; sim=Simulator()
     for r in sorted(data,key=lambda x:x['ts']):
         flat=flatten(r['request'],enc)
         if flat is None:continue
@@ -99,8 +99,10 @@ def main():
                  key=r['purpose'],modern=r['model'].startswith(('gpt-6','gpt-5.6')),
                  boundaries=dict.fromkeys(bounds,1800),lookup=tuple(bounds),complete=False,
                  actual=r['cached'],reported_input=r['input'])
+        results.append(sim.run(p))
+        p.tokens=()  # retain scalar calibration data, not millions of tokens
         diag.append(p)
-    sim=Simulator();results=[sim.run(p) for p in diag];cal=calibration(diag,results)
+    cal=calibration(diag,results)
     missing=collections.Counter()
     for r in data:
         req=r['request']

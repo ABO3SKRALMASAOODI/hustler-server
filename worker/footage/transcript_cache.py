@@ -80,6 +80,12 @@ def write(path, rows):
 
 
 def prune(directory, max_bytes=128 * 1024 * 1024, max_age=30 * 86400):
+    for p in directory.glob(".transcript-*"):
+        try:
+            if p.stat().st_mtime < time.time() - 3600:
+                p.unlink()
+        except FileNotFoundError:
+            pass
     files = []
     for p in directory.glob("*.json"):
         try:

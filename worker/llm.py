@@ -1818,7 +1818,7 @@ def looks_like_responses_unsupported(exc):
 
 
 def responses_create(base_url, api_key, model, messages, tools,
-                     max_tokens=None, effort=None, timeout=None, tool_choice=None):
+                     max_tokens=None, effort=None, timeout=None, tool_choice=None, cache_role="editor"):
     """One /v1/responses call, in and out in chat-completions shape.
 
     Raises on ANY problem — transport, HTTP status, or a body this does not
@@ -1843,7 +1843,7 @@ def responses_create(base_url, api_key, model, messages, tools,
     if config.OPENAI_SERVICE_TIER and "api.openai.com" in (base_url or ""):
         body["service_tier"] = config.OPENAI_SERVICE_TIER
     if "api.openai.com" in (base_url or ""):
-        body = openai_cache.responses(body, "editor", conversation=True)
+        body = openai_cache.responses(body, cache_role, conversation=True)
     fence(model)
     r = requests.post(url, json=body,
                       timeout=timeout or config.LLM_TIMEOUT_S,
@@ -1931,7 +1931,7 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
                 extra["tools"], max_tokens=max_tokens,
                 effort=extra.get("reasoning_effort") or "high",
                 timeout=config.AGENT_LANE_TIMEOUT_S,
-                tool_choice=extra.get("tool_choice"))
+                tool_choice=extra.get("tool_choice"), cache_role=purpose)
         except Exception as e:
             if openai_bound and openai_credit.note(e, "llm:" + str(model)):
                 raise openai_credit.CreditOut(str(e)[:300]) from e
