@@ -181,6 +181,14 @@ def repair(ctx,script,ft,words,rounds=3):
     import cinema as C
     from evidence_allocate import allocate
     path=Path(ctx.supply)/'footage/footage.json'
+    # Resume after completed video/figure research without searching the same
+    # archive films again. Literal-source and final picture gates still apply.
+    try:C.schedule(script['script'],words,ft)
+    except C.CoverageError as tail:
+        from document_evidence import discovery_key
+        if (Path(ctx.supply)/'evidence-documents'/('discovery-'+discovery_key(tail.gaps)+'.json')).exists():
+            from primary_passage import supply as original_passages
+            original_passages(ctx,script,ft,tail.gaps);C.save(path,ft)
     for attempt in range(rounds):
         # A nearly covered edit can still contain wrong pictures. Review those
         # now, so research sees every unsupported interval, not just a few
@@ -220,7 +228,11 @@ def repair(ctx,script,ft,words,rounds=3):
                         original_figures(ctx,script,ft,documented.gaps);C.save(path,ft)
                         try:shots,clock,_=C.schedule(script['script'],words,ft)
                         except C.CoverageError as tail:
-                            if not continue_still(ctx,script,ft,tail,words):raise
+                            from primary_passage import supply as original_passages
+                            original_passages(ctx,script,ft,tail.gaps);C.save(path,ft)
+                            try:shots,clock,_=C.schedule(script['script'],words,ft)
+                            except C.CoverageError as unresolved:
+                                if not continue_still(ctx,script,ft,unresolved,words):raise
                             C.save(path,ft)
                             shots,clock,_=C.schedule(script['script'],words,ft)
         report=C.source_review(ctx,shots,required=False)

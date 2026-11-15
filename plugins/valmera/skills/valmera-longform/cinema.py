@@ -810,7 +810,8 @@ def build(sc,pack):
             key=P.video(f'archive-{j}',c)
             P.shot(row['f'],key,witness_crop(row),src=row['src'])
         if c.get('editorial_label') and not c.get('document'):
-            P.word(row['f'],c['editorial_label'],'source',.055,.84 if c.get('kind')=='image' else .78,note=False,z=3)
+            label=archive_label(c,lambda t:P.R.width('source',t)) if c.get('kind')=='image' else c['editorial_label']
+            P.word(row['f'],label,'source',.055,.84 if c.get('kind')=='image' else .78,note=False,z=3)
     # Subtitles remain legible and subordinate to the archive. No held number pages.
     for si in range(len(sc['segments'])):
         ws=clock.seg_words(si)
