@@ -147,3 +147,20 @@ def test_writer_web_search_keeps_implicit_history(monkeypatch,tmp_path):
     assert requests[0]['prompt_cache_options']['mode']=='explicit'
     assert requests[1]['prompt_cache_options']['mode']=='implicit'
     assert requests[0]['input']==requests[1]['input']
+
+
+def test_failed_cache_storage_does_not_lose_the_transcript(speech,tmp_path,monkeypatch):
+    p,calls=speech
+    blocked=tmp_path/'not-a-directory';blocked.write_text('file')
+    monkeypatch.setenv('FOOTAGE_TRANSCRIPT_CACHE',str(blocked))
+    rows,usd=hear.transcribe(str(p),20.)
+    assert len(rows)==2 and usd==pytest.approx(.02)
+
+
+def test_cache_prunes_old_and_over_budget_entries(tmp_path):
+    import os,time
+    old=tmp_path/'old.json';old.write_text('x'*20);os.utime(old,(1,1))
+    new=tmp_path/'new.json';new.write_text('y'*20)
+    partial=tmp_path/'.transcript-crashed';partial.write_text('partial');os.utime(partial,(1,1))
+    transcript_cache.prune(tmp_path,max_bytes=20,max_age=86400)
+    assert not old.exists() and not partial.exists() and new.exists()

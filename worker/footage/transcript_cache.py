@@ -12,12 +12,17 @@ from pathlib import Path
 import sys
 import tempfile
 import time
+import threading
+
+_PRUNE_LOCK = threading.Lock()
+_LAST_PRUNE = {}
 
 
 def root():
     override = os.environ.get("FOOTAGE_TRANSCRIPT_CACHE")
     base = Path(override) if override else (
         Path.home() / "Library/Caches/valmera/transcripts" if sys.platform == "darwin"
+        else Path("/var/cache/valmera/transcripts") if Path("/var/cache/valmera").is_dir()
         else Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "valmera/transcripts")
     base.mkdir(parents=True, exist_ok=True, mode=0o700)
     return base
@@ -36,7 +41,9 @@ def locked(key, namespace="piece"):
     # Bounded striped locks, never unlinked while a process might hold one.
     try:
         p = root()
-        lock = (p / (namespace + "-" + key[:2] + ".lock")).open("a")
+        lock_path = p / (namespace + "-" + key[:2] + ".lock")
+        lock = lock_path.open("a")
+        os.utime(lock_path, None)  # the janitor must not unlink an active lock
     except OSError as exc:
         print(f"[transcript-cache] unavailable: {type(exc).__name__}", file=sys.stderr)
         yield None
@@ -55,6 +62,10 @@ def read(path):
                 and all(isinstance(r, dict) and isinstance(r.get('text'), str)
                         and isinstance(r.get('t0'), (int, float)) and isinstance(r.get('t1'), (int, float))
                         for r in obj['rows'])):
+            try:
+                os.utime(path, None)
+            except OSError:
+                pass
             return obj["rows"]
     except (OSError, ValueError, AttributeError):
         pass
@@ -71,7 +82,12 @@ def write(path, rows):
         with os.fdopen(fd, "w") as f:
             json.dump(dict(version=1, rows=rows), f, ensure_ascii=False)
         os.replace(tmp, path)
-        prune(path.parent)
+        # Do not rescan thousands of JSON files on every 12-second piece.
+        with _PRUNE_LOCK:
+            now = time.monotonic()
+            if now - _LAST_PRUNE.get(str(path.parent), -300) >= 300:
+                _LAST_PRUNE[str(path.parent)] = now
+                prune(path.parent)
     except OSError as exc:
         print(f"[transcript-cache] write failed: {type(exc).__name__}", file=sys.stderr)
     finally:
