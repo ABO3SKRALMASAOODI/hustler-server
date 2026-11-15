@@ -132,12 +132,13 @@ def printed_spellings(idx, scout):
         if not text or not read or len(text) > 120 or text.casefold() not in read.casefold():
             continue
         claims.setdefault(wid, []).append((text, read))
-    proof = {}
+    proof = copy.deepcopy(out.get("caption_evidence") or {})
     for wid, rows in claims.items():
         if len({text for text, _ in rows}) != 1:
             continue
         text, read = rows[0]
-        proof[str(wid)] = {"before": words[wid]["w"], "text": text, "read": read, "evidence": "screen"}
+        before = (proof.get(str(wid)) or {}).get("before", words[wid]["w"])
+        proof[str(wid)] = {"before": before, "text": text, "read": read, "evidence": "screen"}
         words[wid]["w"] = text
     out["caption_evidence"] = proof
     return out

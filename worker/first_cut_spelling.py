@@ -41,3 +41,40 @@ def apply(ctx, answer):
             backed.append(fix)
     if backed:
         ctx.index = printed_spellings(ctx.index, {'fixes': backed})
+
+
+def persist(ctx):
+    """Carry proved spellings into the EDL read by the separate renderer.
+
+    The renderer loads the immutable source index, not this scout's working
+    copy. Scope each correction to the same word's assembled program time.
+    """
+    import copy
+    from timeline import Timeline, Voice
+    index = getattr(ctx, 'index', None) or {}
+    proof = index.get('caption_evidence') or {}
+    edl = copy.deepcopy((ctx.latest_edl() or {}).get('json') or {})
+    caps = edl.get('captions') or {}
+    if not proof or not isinstance(caps, dict) or caps.get('mode') != 'from_transcript':
+        return None
+    tl = Timeline(edl.get('keep') or [], edl.get('inserts'), edl.get('speed'))
+    voice = Voice.from_index(index)
+    words = index.get('words') or []
+    rules = list(caps.get('corrections') or [])
+    for key, claim in proof.items():
+        wid = int(key)
+        if not 0 <= wid < len(words) or claim.get('evidence') != 'screen':
+            continue
+        before, after = claim.get('before'), claim.get('text')
+        if not before or not after or before == after:
+            continue
+        word = dict(words[wid], w=before)
+        for kept in tl.kept_words([word], rescue=True, voice=voice):
+            rule = {'from': before, 'to': after,
+                    'start': kept['t0'], 'end': kept['t1']}
+            if rule not in rules:
+                rules.append(rule)
+    if rules == list(caps.get('corrections') or []):
+        return None
+    caps['corrections'] = rules
+    return ctx.apply_score(edl, 'preserve upload-backed caption spelling in the rendered film')

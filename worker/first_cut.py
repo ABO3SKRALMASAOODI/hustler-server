@@ -3792,6 +3792,13 @@ def _render_cut(ctx, steps, picked):
         steps.append({"tool": "first_film_frame", "ok": not _failed(result), "note": str(result)[:160]})
         if _failed(result):
             return result
+    import first_cut_spelling
+    spelling = first_cut_spelling.persist(ctx)
+    if spelling:
+        steps.append({"tool": "first_film_spelling", "ok": not _failed(spelling),
+                      "note": str(spelling)[:160]})
+        if _failed(spelling):
+            return spelling
     if not picked or picked.get("how") != "director":
         try:
             import first_film_sound
