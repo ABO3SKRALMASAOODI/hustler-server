@@ -995,7 +995,8 @@ def check(ctx,rd,sc):
     if not nar.exists(): nar=Path(pack['narration'])
     metrics=Path(ctx.supply)/'voice-metrics'
     guarded_voice(ctx,[PX.NARRATE_PY,str(HERE/'measure_voice.py'),str(nar),str(nd/'narration_script.json'),str(metrics)],'wf4-voice-measure-'+ctx.run_id)
-    guarded_voice(ctx,[PX.NARRATE_PY,str(HERE/'measure_mix.py'),str(final),pack['words'],str(nd/'narration_script.json'),str(metrics),PX.FF],'wf4-mix-listen-'+ctx.run_id)
+    guarded_voice(ctx,[PX.NARRATE_PY,str(HERE/'measure_mix.py'),str(final),pack['words'],str(nd/'narration_script.json'),str(metrics),PX.FF,
+                       '--voice',str(Path(ctx.supply)/'audio-stems/voice.flac')],'wf4-mix-listen-'+ctx.run_id)
     voice=read(metrics/'metrics.json')
     mix=read(metrics/'mix-wer.json')
     sound_metrics=Path(ctx.supply)/'sound-measured.json'
