@@ -64,7 +64,7 @@ def test_review_cache_keeps_semantics_and_ignores_only_concurrency():
     assert checker_bytes(text.replace('(lo+hi)/2','lo+(hi-lo)*.4')) != checker_bytes(text)
 
 
-def test_recorded_edit_requires_same_words_pins_and_complete_clock(tmp_path,monkeypatch):
+def test_recorded_edit_resume_requires_same_words_and_pins(tmp_path,monkeypatch):
     import archive_visual as A
     import cinema as C
     ctx=SimpleNamespace(supply=str(tmp_path))
@@ -80,7 +80,52 @@ def test_recorded_edit_requires_same_words_pins_and_complete_clock(tmp_path,monk
     assert not A.recorded_edit_ready(ctx,{'script':{'words':'same'}},{})
     assert not calls
     assert A.recorded_edit_ready(ctx,{'script':{'words':'same'}},ft)
-    assert len(calls)==1
-    def uncovered(*a):raise C.CoverageError([],[])
-    monkeypatch.setattr(C,'schedule',uncovered)
-    assert not A.recorded_edit_ready(ctx,{'script':{'words':'same'}},ft)
+    assert not calls  # Actual-clock coverage and picture gates run in supply, never in provisional preflight.
+
+
+def test_parallel_scanners_share_one_subscription_request_slot(monkeypatch):
+    import cinema as C
+    C.worker()
+    from footage import ask
+    from score import call
+    import threading,time
+    from concurrent.futures import ThreadPoolExecutor
+    active=0;peak=0
+    lock=threading.Lock()
+    def respond(*args,**kwargs):
+        nonlocal active,peak
+        with lock:active+=1;peak=max(peak,active)
+        time.sleep(.02)
+        with lock:active-=1
+        return SimpleNamespace(text='checked',usd=0)
+    monkeypatch.setenv('CODEX_PROXY_LOCAL','1')
+    monkeypatch.setattr(call,'stream',respond)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results=list(pool.map(lambda i:ask.ask('Check',[],'test'),range(4)))
+    assert results==[('checked',0.)]*4 and peak==1
+
+
+def test_source_table_keeps_every_provenance_field_without_repeating_it():
+    from model_payload import source_table
+    import copy,json
+    source={'url':'https://archive.test/document','caption':'Original evidence. '*200,'licence':'public domain'}
+    payload={'candidates':[{'i':i,'source':copy.deepcopy(source),'rejected':['wrong mission']} for i in range(20)]}
+    before=copy.deepcopy(payload);packed=source_table(payload)
+    restored=copy.deepcopy({k:v for k,v in packed.items() if k not in ('source_records','reading_note')})
+    for row in restored['candidates']:row['source']=packed['source_records'][row['source']]
+    assert restored==payload==before
+    assert len(json.dumps(packed))<len(json.dumps(payload))*.15
+
+
+def test_box_search_uses_only_model_referenced_subjects():
+    import ast
+    import footage_box as F
+    tree=ast.parse(F.REMOTE)
+    function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='scoped_plan')
+    result={'subjects':[{'name':'needed mechanism'},{'name':'unrelated person'}],
+            'lines':[{'i':21,'subjects':['needed mechanism']}]}
+    namespace={'original_plan':lambda *a,**k:(result,0)}
+    exec(compile(ast.Module(body=[function],type_ignores=[]),'scoped_plan','exec'),namespace)
+    scoped,usd=namespace['scoped_plan']([],[])
+    assert scoped['subjects']==[{'name':'needed mechanism'}]
+    assert scoped['lines']==result['lines'] and usd==0

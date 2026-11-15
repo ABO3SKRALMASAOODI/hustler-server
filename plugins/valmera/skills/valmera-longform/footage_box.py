@@ -122,6 +122,15 @@ def grab(stream,url,t0,t1,out):
     return cut.local(whole[url],t0,t1,out)
 cut.grab=grab
 plan.PLAN_SYSTEM += '\nThis run is a 16:9 long documentary. Average picture length is 4.5 seconds. Match every line exactly; exclude still montages.'
+plan.PLAN_SYSTEM += '\nThe named list is the whole-film reference catalogue, not a search checklist. Research ONLY the supplied lines. Include a subject only when one of these lines needs its footage; preserve the precise identity and repair state. Every subject must appear in a returned line subjects list.'
+original_plan=plan.plan
+def scoped_plan(*args,**kwargs):
+    result,usd=original_plan(*args,**kwargs)
+    referenced={name for line in result['lines'] for name in line['subjects']}
+    result['subjects']=[subject for subject in result['subjects'] if subject['name'] in referenced]
+    return result,usd
+plan.plan=scoped_plan
+
 find = run.find
 j=json.load(open(sys.argv[1]))
 if j.get('verification_owner')=='wf4-source-and-encoded-picture-check':

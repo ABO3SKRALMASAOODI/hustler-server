@@ -1,6 +1,7 @@
 """Replace archive stills only with unused, independently checked moving views."""
 from pathlib import Path
 import copy,hashlib,json
+from model_payload import source_table
 
 
 def replacement(ctx,script,ft,words,shot,candidates):
@@ -64,7 +65,7 @@ def improve(ctx,script,ft,words,shots,research=True):
             'whose actual event or activity is likely to survive in moving archive. Prefer well-documented observable work and daily life; '
             'do not request nonexistent cameras for unfilmed mechanisms or replace a precise technical figure with generic activity. '
             'Every proposed replacement will be checked on its actual spoken interval.',
-            json.dumps(payload),effort='high',max_tokens=5000,what='WF4 moving archive alternatives')
+            json.dumps(source_table(payload)),effort='high',max_tokens=5000,what='WF4 moving archive alternatives')
         proposal=story.writer.json_block(text);proposal['usage']=use;C.save(path,proposal)
     accepted=[]
     for row in proposal['replacements']:

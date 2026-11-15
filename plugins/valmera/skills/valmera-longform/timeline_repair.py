@@ -60,7 +60,7 @@ def research(ctx,script,ft,failure,merge=True):
         i=gap['seg'];segment=script['script']['segments'][i]
         rejected=[r['why'] for r in ft.get('editorial',{}).get('rejected',[]) if r['seg']==i]
         rows.append(dict(i=i,say=gap['heard'] or gap['words'],dur=gap['seconds']+1,pictures=segment.get('pictures',[]),
-                         visual='Show the correct named people, location or hardware in its accurate state. Truthful context may support an unfilmed action, '
+                         visual='Surrounding narration: '+segment['say']+'\nShow the correct named people, location or hardware in its accurate state. Truthful context may support an unfilmed action, '
                          'but must never imply a different mission, component or repair state is that event. Prior rejected views: '+'; '.join(dict.fromkeys(rejected))))
     # A segment can have several gaps; research each as a distinct shot request.
     combined={}

@@ -1,6 +1,7 @@
 """Offer genuinely unused archive material to the exact words still uncovered."""
 from pathlib import Path
 import hashlib,json
+from model_payload import source_table
 
 
 def allocate(ctx,script,ft,failure,words=None):
@@ -58,7 +59,7 @@ def allocate(ctx,script,ft,failure,words=None):
             'swaps:[{move:move_only candidate index,replacements:[UNUSED candidate indexes in display order],why}]}. '
             'Use swaps only when a specific later passage needs an image already used as broader context. No recursive swaps. Keep different gaps of the same segment separate. '
             'Offer several suitable alternatives when available. Empty candidates is better than a false match.',
-            json.dumps(payload),effort='high',max_tokens=3500,what='WF4 unused evidence allocation')
+            json.dumps(source_table(payload)),effort='high',max_tokens=3500,what='WF4 unused evidence allocation')
         allocation=story.writer.json_block(text);allocation['usage']=usage;C.save(path,allocation)
     from timeline_repair import anchor
     if words is None:words=Path(ctx.supply)/'narration/words.json'

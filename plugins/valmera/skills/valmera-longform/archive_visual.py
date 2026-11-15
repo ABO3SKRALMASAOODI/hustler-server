@@ -180,8 +180,7 @@ def recorded_edit_ready(ctx,script,ft):
     clock=nd/'words_narrator.json'
     if not clock.exists():clock=nd/'words.json'
     if not clock.exists():return False
-    try:shots,_,_=C.schedule(script['script'],str(clock),ft)
-    except C.CoverageError:return False
-    # supply() immediately runs timeline_repair and the mandatory source
-    # gate on this clock, including any failed or changed pairings.
+    # supply() resumes coverage repair and the mandatory source gate on
+    # this clock. Missing spans are work to repair, not reason to overwrite
+    # the later edit with provisional choices.
     return True
