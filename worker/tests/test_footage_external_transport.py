@@ -47,3 +47,18 @@ def test_structured_transport_failure_preserves_source_access_reason(tmp_path,mo
     monkeypatch.setattr(fetch.subprocess,'run',lambda *a,**k:SimpleNamespace(returncode=1,stdout=json.dumps(receipt)))
     with pytest.raises(fetch.FetchError,match='external original fetch failed: source unavailable on authorized egress'):
         fetch.whole_av(url,str(tmp_path))
+
+
+def test_retained_original_gains_provenance_without_copying_media_again(tmp_path,monkeypatch):
+    from footage import run
+    source=tmp_path/'original.mp4';source.write_bytes(b'x'*3000)
+    retained=tmp_path/'retained';monkeypatch.setenv('FOOTAGE_KEEP_SOURCES',str(retained))
+    item=dict(whole=str(source),url='https://publisher.example/original',rung='box-direct')
+    run.keep_sources([item],log=lambda _:None)
+    before=json.loads((retained/'manifest.json').read_text())[0]
+    run.keep_sources([dict(item,title='Original demo',channel='Publisher',where='primary',subjects=['Product'],duration=12.)],log=lambda _:None)
+    rows=json.loads((retained/'manifest.json').read_text())
+    assert len(rows)==1 and rows[0]['path']==before['path']
+    assert rows[0]['title']=='Original demo' and rows[0]['subjects']==['Product']
+    assert rows[0]['duration']==12.
+    assert len(list(retained.glob('*.mp4')))==1

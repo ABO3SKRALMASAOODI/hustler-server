@@ -521,7 +521,8 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             json.dump(res, f, ensure_ascii=False, indent=1)
         return res
     finally:
-        keep_sources(sources_seen, log)
+        keep_sources([dict(s,subjects=[subjects[i]['name'] for i in s.get('subjects',[])
+                      if type(i) is int and 0<=i<len(subjects)]) for s in sources_seen], log)
         if not keep_work:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -572,13 +573,22 @@ def _keep_sources(sources, log=print):
         rows = rows if isinstance(rows, list) else []
     except (OSError, ValueError):
         rows = []
-    have = {r.get("url") for r in rows if isinstance(r, dict)}
-    added = []
+    added = [];updated=False
     for s in sources:
         p = s.get("whole")
-        if not p or s.get("error") or s.get("url") in have or not os.path.isfile(p):
+        if not p or s.get("error") or not os.path.isfile(p):
             continue
+        metadata={k:s[k] for k in ('id','title','channel','where') if isinstance(s.get(k),str) and s[k]}
+        if isinstance(s.get('duration'),(int,float)) and s['duration']>0:metadata['duration']=s['duration']
+        names=[n for n in s.get('subjects',[]) if isinstance(n,str) and n]
+        if names:metadata['subjects']=names
+        current=next((r for r in rows+added if r.get('url')==s.get('url')),None)
+        if current and os.path.isfile(current.get('path','')):
+            current.update(metadata);updated=updated or bool(metadata)
+            continue
+        if current:(rows if current in rows else added).remove(current)
         if os.path.realpath(p).startswith(os.path.realpath(keep) + os.sep):
+            added.append(dict(url=s['url'],path=p,rung=s.get('rung'),**metadata))
             continue
         dst = os.path.join(keep, f"{_key(s.get('id') or s['url'])}_{len(rows) + len(added)}{os.path.splitext(p)[1] or '.mp4'}")
         try:
@@ -589,9 +599,8 @@ def _keep_sources(sources, log=print):
         except OSError as e:
             log(f"source {s.get('key')} not kept: {str(e)[:120]}")
             continue
-        added.append(dict(url=s["url"], path=dst, rung=s.get("rung")))
-        have.add(s["url"])
-    if added:
+        added.append(dict(url=s["url"], path=dst, rung=s.get("rung"),**metadata))
+    if added or updated:
         tmp = mf + ".part"
         with open(tmp, "w") as f:
             json.dump(rows + added, f, ensure_ascii=False, indent=1)
