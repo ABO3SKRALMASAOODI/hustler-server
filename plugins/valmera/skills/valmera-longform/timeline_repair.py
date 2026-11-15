@@ -124,6 +124,45 @@ def continue_still(ctx,script,ft,failure,words):
     return changed
 
 
+def smooth(ctx,script,ft,words):
+    """Remove accidental blink shots, retaining every word and source limits."""
+    import copy
+    import cinema as C
+    for _ in range(40):
+        shots,clock,_=C.schedule(script['script'],words,ft)
+        changed=False
+        for i,short in enumerate(shots):
+            if short.get('real_voice') or short['f'][1]-short['f'][0]>=15:continue
+            for j in (i-1,i+1):
+                if not 0<=j<len(shots):continue
+                neighbor=shots[j]
+                if neighbor.get('real_voice'):continue
+                lo=min(short['f'][0],neighbor['f'][0]);hi=max(short['f'][1],neighbor['f'][1])
+                if hi-lo!=sum(r['f'][1]-r['f'][0] for r in (short,neighbor)):continue
+                seconds=(hi-lo)/30;clip=copy.deepcopy(neighbor['clip']);offset=neighbor['src'][0]
+                if clip.get('kind')=='image':
+                    if seconds>12:continue
+                    offset=0;clip.update(seconds=seconds,time_range=[0,seconds],editorial_hold_move=seconds>8)
+                else:
+                    if seconds>8 or offset+seconds>clip['seconds']+.001:continue
+                    a=clip['time_range'][0]+offset;b=a+seconds
+                    if any(r['clip']['source']['url']==clip['source']['url'] and
+                           min(b,r['clip']['time_range'][0]+r['src'][1])-max(a,r['clip']['time_range'][0]+r['src'][0])>.001
+                           for k,r in enumerate(shots) if k not in (i,j)):continue
+                spoken=[w for w in clock.words if w['t0']<hi/30 and w['t1']>lo/30]
+                context=' '.join(script['script']['segments'][k]['say'] for k in dict.fromkeys(w['seg'] for w in spoken))
+                replacement=dict(f=[lo,hi],seg=neighbor['seg'],clip=clip,src=[offset,offset+seconds],
+                                 say=' '.join(w['w'] for w in spoken),context=context)
+                if not C.source_review(ctx,[replacement],required=False)['ok']:continue
+                keep=[r for k,r in enumerate(shots) if k not in (i,j) and not r.get('real_voice')]+[replacement]
+                ft['editorial']['pins']=[dict(seg=r['seg'],clip=r['clip'],src=r['src'],
+                    anchors=[anchor(clock,f/30) for f in r['f']]) for r in keep]
+                C.save(Path(ctx.supply)/'footage/footage.json',ft);changed=True;break
+            if changed:break
+        if not changed:return shots,clock
+    raise ValueError('picture continuity repair exceeded its bounded pass')
+
+
 def repair(ctx,script,ft,words,rounds=3):
     import cinema as C
     from evidence_allocate import allocate

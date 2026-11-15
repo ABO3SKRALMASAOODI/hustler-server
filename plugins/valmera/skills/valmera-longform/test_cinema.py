@@ -315,6 +315,29 @@ def test_checked_picture_follows_its_word_when_narration_timing_changes():
     assert abs(R.resolve(b,anchor)-3.1)<1e-6
 
 
+def test_blink_repair_requires_a_checked_expanded_pairing(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    import timeline_repair as R
+    sc=dict(segments=[dict(say='Alpha beta.',chapter='c')])
+    words=dict(duration=6.1,words=[dict(w='Alpha',start=.1,end=2.9,seg=0),dict(w='beta.',start=2.95,end=6,seg=0)])
+    clock=C.F.Clock(words,sc)
+    from PIL import Image
+    image=tmp_path/'still.jpg';Image.new('RGB',(80,50),'gray').save(image)
+    a=dict(clip(str(image),0,3),kind='image',content_hash='a')
+    a['source']={'url':'https://archive.test/photograph'}
+    b=clip('blink',10,10.1);c=clip('next',20,23.1)
+    shots=[dict(f=f,seg=0,clip=p,src=[0,(f[1]-f[0])/30]) for f,p in [([0,90],a),([90,93],b),([93,186],c)]]
+    ft=dict(lines=[dict(i=0,clips=[a,b,c])],editorial=dict(pins=[dict(seg=0,clip=r['clip'],src=r['src'],anchors=[R.anchor(clock,f/30) for f in r['f']]) for r in shots],rejected=[],bank=[]))
+    ctx=SimpleNamespace(supply=str(tmp_path));script=dict(script=sc)
+    monkeypatch.setattr(C,'source_review',lambda *a,**kw:dict(ok=False))
+    assert len(R.smooth(ctx,script,ft,words)[0])==3
+    checked=[]
+    monkeypatch.setattr(C,'source_review',lambda ctx,rows,**kw:checked.extend(rows) or dict(ok=True))
+    result,_=R.smooth(ctx,script,ft,words)
+    assert len(result)==2 and result[0]['f']==[0,93]
+    assert checked[0]['say']=='Alpha beta.' and not C.duplicate_ranges(result)
+
+
 def test_download_duration_cannot_reserve_frames_beyond_encoded_end(tmp_path,monkeypatch):
     p=tmp_path/'clip.mp4';p.write_bytes(b'fixture')
     c=dict(clip(str(p),10,15),file='clip.mp4')

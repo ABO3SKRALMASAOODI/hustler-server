@@ -419,7 +419,7 @@ def supply(ctx, script):
                 allocate(ctx,script,ft,tail,coverage_words)
                 save(Path(ctx.supply)/'footage/footage.json',ft)
                 shots,clock,_=schedule(sc,coverage_words,ft)
-    from timeline_repair import repair as repair_timeline,retain
+    from timeline_repair import repair as repair_timeline,retain,smooth
     shots,clock=repair_timeline(ctx,script,ft,coverage_words)
     report=source_review(ctx,shots)
     retain(ft,shots,clock,report)
@@ -444,6 +444,7 @@ def supply(ctx, script):
         subprocess.run([PX.NARRATE_PY,reader,'level-voices',str(nd)],check=True,capture_output=True)
     wj=read(nd/'words.json')
     repair_timeline(ctx,script,ft,nar['words'])
+    smooth(ctx,script,ft,nar['words'])
     save(Path(ctx.supply)/'footage'/'footage.json',ft)
     record=dict(narration_s=wj['duration'],voice=nar['voice'],gate=nar['gate'],footage_clips=sum(len(l['clips']) for l in ft['lines']),
                 real_voices=len(wj.get('voices',[])),spend=[dict(stage='supply',provider='openai',what='footage',usd=sum(s.get('usd',0) for s in ft['spend']))])
@@ -655,9 +656,9 @@ def schedule(sc, words, ft):
             heard=' '.join(w['w'] for w in clock.words if w['t0']<b/FPS and w['t1']>pos/FPS)
             missing.append(dict(seg=i,seconds=(b-pos)/FPS,words=s['say'],heard=heard,start=pos/FPS,end=b/FPS))
     for r in shots:
-        r['context']=r['say']
-        spoken=[w['w'] for w in clock.words if w['t0']<r['f'][1]/FPS and w['t1']>r['f'][0]/FPS]
-        if spoken:r['say']=' '.join(spoken)
+        spoken=[w for w in clock.words if w['t0']<r['f'][1]/FPS and w['t1']>r['f'][0]/FPS]
+        r['context']=' '.join(sc['segments'][i]['say'] for i in dict.fromkeys(w['seg'] for w in spoken)) if spoken else r['say']
+        if spoken:r['say']=' '.join(w['w'] for w in spoken)
     if missing: raise CoverageError(missing,sorted(shots,key=lambda r:r['f'][0]))
     return sorted(shots,key=lambda r:r['f'][0]),clock,end
 
