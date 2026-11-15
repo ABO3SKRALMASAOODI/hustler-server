@@ -71,13 +71,18 @@ def apply(l1, index, perception):
                 and c[2] >= b[2] and c[3] >= b[3] for b in boxes) for c in rects))
         reason = "subject_boxes_contained"
         if not safe:
-            local = [s for s in samples if any(sh["start"] <= s["t"] < sh["end"] for sh in overlaps)]
-            known = [s for s in samples if _boxes(s) and s["t"] <= start]
+            count = len(rects)
+            if not track and item.get("f") and len(item["f"]) == 2:
+                count = max(1, int(item["f"][1]-item["f"][0]))
+                track = count > 1
             points = []
-            for n in range(len(rects)):
-                t = start + (end-start) * (n / max(1, len(rects)-1) if track else .5)
+            for n in range(count):
+                t = start + (end-start) * ((n + .5) / count if track else .5)
+                shot = next((sh for sh in overlaps if sh["start"] <= t < sh["end"]), None)
+                local = [s for s in samples if shot and shot["start"] <= s["t"] < shot["end"]
+                         and abs(s["t"]-t) <= .75 and (_boxes(s) or s.get("focus"))]
                 nearby = sorted(local, key=lambda s: abs(s["t"]-t))
-                row = next((s for s in nearby if _boxes(s)), None)
+                row = nearby[0] if nearby and _boxes(nearby[0]) else None
                 if row is not None:
                     box = max(_boxes(row), key=lambda b: (b[2]-b[0])*(b[3]-b[1]))
                     point = [(box[0]+box[2])/2, (box[1]+box[3])/2]
@@ -85,15 +90,14 @@ def apply(l1, index, perception):
                 elif nearby and nearby[0].get("focus"):
                     point = nearby[0]["focus"]
                     reason = "local_saliency_crop"
-                elif known:
+                else:
+                    known = [s for s in samples if _boxes(s) and s["t"] <= t]
+                    if not known:
+                        raise ValueError("first-film crop awaits local subject or saliency evidence")
                     box = max(_boxes(max(known, key=lambda s:s["t"])),
                               key=lambda b:(b[2]-b[0])*(b[3]-b[1]))
                     point = [(box[0]+box[2])/2, (box[1]+box[3])/2]
                     reason = "last_known_subject_crop"
-                else:
-                    # A decoder with no observations cannot justify a crop.
-                    # Production perception always records a local focus.
-                    raise ValueError("first-film crop awaits local subject or saliency evidence")
                 points.append(centered(point))
             item["crop"] = points if track else points[0]
         item.pop("source_full_frame", None)

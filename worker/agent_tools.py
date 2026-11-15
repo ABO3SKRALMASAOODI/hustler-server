@@ -24339,6 +24339,8 @@ def _mcp_adopted_render(ctx, job_type, version, match):
             or job.get("project_id") != ctx.project_id:
         return None
     body = job.get("payload") or {}
+    if bool(body.get("first_film_comparison")) != bool(getattr(ctx, "first_film_comparison", False)):
+        return None
     try:
         if int(body.get("edl_version")) != int(version):
             return None
