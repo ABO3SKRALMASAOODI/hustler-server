@@ -699,3 +699,23 @@ def test_caption_text_filter_rejects_tall_texture_but_keeps_real_lines():
 def test_caption_effect_none_is_a_canonical_no_effect_not_a_retry():
     assert CaptionStyle.model_validate({"effect": "none"}).effect is None
     assert CaptionStyle.model_validate({"effect": "off"}).effect is None
+
+
+def test_spatial_retains_neural_faces_when_cascades_miss_the_pose(monkeypatch, tmp_path):
+    import keepout
+    frame = str(tmp_path / 'sample.jpg')
+    cv2.imwrite(frame, np.full((640, 360, 3), 180, np.uint8))
+    boxes = [([.44, .21, .65, .37], .91), ([.05, .3, .2, .5], .88)]
+    monkeypatch.setattr(keepout, 'yunet_detect', lambda img: boxes)
+    monkeypatch.setattr(spatial.subject, '_faces_in', lambda *a: [])
+    assert spatial.analyze_frame(frame)['faces'] == [x[0] for x in boxes]
+
+
+def test_spatial_keeps_cascade_fallback_without_a_baked_neural_model(monkeypatch, tmp_path):
+    import keepout
+    frame = str(tmp_path / 'sample.jpg')
+    cv2.imwrite(frame, np.full((200, 200, 3), 180, np.uint8))
+    monkeypatch.setattr(keepout, 'yunet_detect', lambda img: None)
+    monkeypatch.setattr(spatial, '_face_detectors', lambda cv: [object()])
+    monkeypatch.setattr(spatial.subject, '_faces_in', lambda *a: [(40, 30, 50, 60)])
+    assert spatial.analyze_frame(frame)['faces'] == [[.2, .15, .45, .45]]
