@@ -1110,7 +1110,7 @@ def _band_frames(ctx, n=12, width=96):
     return out if len(out) >= 6 else None
 
 
-def deband(ctx, steps, started):
+def deband(ctx, steps, started, black_only=False):
     """Crop the source's own static bands (letterbox, decorative bars): one
     static camera zoom over the whole program that maps the live picture's
     rows onto the full frame. Returns (result, [top, bottom]) or (None,
@@ -1119,6 +1119,14 @@ def deband(ctx, steps, started):
     bands = static_bands(frames) if frames else None
     if not bands:
         return None, None
+    if black_only:
+        # A non-talking film may have authored labels or decorations in its
+        # border. Only uniformly empty black rows can be removed here.
+        import numpy as np
+        pixels = np.asarray(frames)
+        a, b = round(bands[0] * pixels.shape[1]), round(bands[1] * pixels.shape[1])
+        if pixels[:, :a].max() > 16 or pixels[:, b:].max() > 16:
+            return None, None
     top, bottom = bands
     span = bottom - top
     k = 1.0 / span
@@ -1136,6 +1144,25 @@ def deband(ctx, steps, started):
                            f"(rows {top:.2f}-{bottom:.2f} are the picture)"},
                started)
     return res, bands
+
+
+def _clear_empty_source_bands(ctx, steps):
+    """Remove measured empty source bars from an otherwise unzoomed crop.
+
+    The source fills the output height in this geometry. Fitted pictures,
+    authored camera moves and borders containing marks keep their geometry.
+    """
+    edl = (ctx.latest_edl() or {}).get("json") or {}
+    frame = edl.get("frame") or {}
+    if frame.get("ratio") != "9:16" or frame.get("mode") != "crop" or frame.get("picture"):
+        return
+    if (edl.get("effects") or {}).get("zooms") or any(
+            s.get("mode") in ("pad", "pad_blur") for s in frame.get("focus_track") or []):
+        return
+    video = (ctx.index or {}).get("video") or {}
+    if float(video.get("width") or 0) / max(1, float(video.get("height") or 0)) < 9 / 16:
+        return
+    deband(ctx, steps, time.monotonic(), black_only=True)
 
 
 def screen_focus(ctx, steps, started):
@@ -3829,6 +3856,8 @@ def _render_cut(ctx, steps, picked):
         steps.append({"tool": "first_film_frame", "ok": not _failed(result), "note": str(result)[:160]})
         if _failed(result):
             return result
+    if not picked or picked.get("how") != "director":
+        _clear_empty_source_bands(ctx, steps)
     import first_cut_spelling
     spelling = first_cut_spelling.persist(ctx)
     if spelling:
