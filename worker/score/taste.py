@@ -18,6 +18,8 @@ import math
 import os
 import re
 
+from . import transcript_confidence
+
 SAFE = (0.05, 0.10, 0.95, 0.80)         # P2: added type and cards stay inside this, 9:16
 BUTTONS = (0.86, 0.55, 1.0, 0.80)       # the platform's own buttons
 CAP_BAND, CAP_PREF = (0.48, 0.78), (0.50, 0.62)
@@ -377,8 +379,7 @@ def captions_off(ctx):
     words = ctx.index.get("words") or []
     if not words:
         return True
-    conf = [float(w.get("confidence", 1.0)) for w in words]
-    if sum(conf) / len(conf) < S.CAPTION_CONFIDENCE or len(words) < S.CAPTION_WORDS:
+    if transcript_confidence.low_mean(words, S.CAPTION_CONFIDENCE) or len(words) < S.CAPTION_WORDS:
         return True
     return upload_captions(ctx) >= 0.5
 
@@ -390,8 +391,7 @@ def voiceless(ctx):
     words = ctx.index.get("words") or []
     if not ctx.wf_any or not words:
         return True
-    conf = [float(w.get("confidence", 1.0)) for w in words]
-    return sum(conf) / len(conf) < S.CAPTION_CONFIDENCE or len(words) < S.CAPTION_WORDS
+    return transcript_confidence.low_mean(words, S.CAPTION_CONFIDENCE) or len(words) < S.CAPTION_WORDS
 
 
 def _display_seats(ctx, cap_y, n, named, marks):
