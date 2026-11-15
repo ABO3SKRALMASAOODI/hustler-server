@@ -429,10 +429,9 @@ def supply(ctx, script):
     save(Path(ctx.supply)/'footage/footage.json',ft)
     still=sum((r['f'][1]-r['f'][0])/FPS for r in shots if r['clip'].get('kind')=='image')
     if not ft['voices']:witness_voices(ctx,script,ft)
-    for chapter in sc['chapters']:
-        indices={i for i,s in enumerate(sc['segments']) if s['chapter']==chapter['id']}
-        if not any(v['after'] in indices for v in ft['voices']):
-            witness_voices(ctx,script,ft,additional=True,chapter=chapter)
+    # Firsthand testimony follows the story's purpose, not a chapter quota.
+    # A chapter about unfilmed hardware need not trigger another interview
+    # search once consequential, verified witness inserts are already found.
     # Original on-camera testimony is picture time too. This is only a supply
     # check; actual motion and the final >=50% gate remain mandatory below.
     with_testimony=clock.dur+sum(v['seconds'] for v in ft['voices'])
