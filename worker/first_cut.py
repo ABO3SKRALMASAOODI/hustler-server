@@ -2569,7 +2569,8 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                 import motion_tools
                 W, H = motion_tools._canvas_size(ctx, ctx.latest_edl()["json"])
                 style, placement = first_cut_type.place(
-                    ctx.latest_edl()["json"], ctx.index, style, W, H)
+                    ctx.latest_edl()["json"], ctx.index, style, W, H,
+                    measure=motion_tools._face_measure(ctx))
                 if placement.get("moved") or placement.get("clear") is False:
                     steps.append({"tool": "automatic_caption_placement",
                                   "ok": placement.get("clear", True),
