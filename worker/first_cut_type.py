@@ -11,7 +11,7 @@ import keepout
 from timeline import Timeline
 
 
-def place(edl, index, style, W, H):
+def place(edl, index, style, W, H, measure=None):
     """Return a stable anchor when source text occupies the automatic one.
 
     Keep a clear original anchor. If it collides, use a band that fits the
@@ -38,11 +38,21 @@ def place(edl, index, style, W, H):
         # text_boxes maps source words through zooms and picture windows,
         # unlike a source-coordinate band score at one shot midpoint.
         text.extend(caption_place.text_boxes(edl, index, tl, W, H, t, t))
-    if not caption_place.hits(lo, hi, text, col):
-        return dict(style), {"moved": False, "reason": "source text clear"}
-    faces = keepout.zones_of(keepout.face_track(edl, index, W, H, 0, duration))
+    # A text-free upload can still put the automatic anchor on a mouth.
+    # Short windows retain the tracker's temporal support on long excerpts;
+    # its six measurement moments are intended for a graphic, not a film.
+    # Decode work stays bounded by the context's existing face-measure cache.
+    track = []
+    windows = min(10, max(1, math.ceil(duration / 6)))
+    for i in range(windows):
+        track.extend(keepout.face_track(edl, index, W, H,
+            duration * i / windows, duration * (i + 1) / windows,
+            measure=measure))
+    faces = keepout.zones_of(track)
     mark = caption_place.watermark_box(W, H, edl)
     zones = text + faces + ([mark] if mark else [])
+    if not caption_place.hits(lo, hi, zones, col):
+        return dict(style), {"moved": False, "reason": "source text clear"}
     safe = (.10, .80) if H / max(W, 1) >= 1.6 else (.04, .94)
     choices = []
     above = one / 2 if motion else tall / 2
