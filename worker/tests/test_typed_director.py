@@ -264,6 +264,43 @@ def test_long_director_cut_uses_checked_batches_and_stops_on_refusal(monkeypatch
         assert final_writes == [target]
 
 
+def test_typed_score_word_edges_move_pictures_with_their_source():
+    import word_edges
+    from timeline import Timeline
+    original = {"keep": [[0, 10]]}
+    words = [{"w": "whole", "t0": 1., "t1": 2.},
+             {"w": "word", "t0": 3., "t1": 4.}]
+    target = {"keep": [[1.2, 3.8]],
+        "texts": [{"id": "title", "text": "same", "start": .9, "end": 1.5}],
+        "overlays": [{"id": "picture", "asset_key": "checked-footage",
+                      "kind": "video", "start": .9, "duration_s": .6,
+                      "source_start_s": 7.}],
+        "captions": {"items": [{"start": 1., "end": 2., "text": "whole"}]}}
+    untouched = copy.deepcopy(target)
+    ctx = NS(index={"words": words}, duration=10,
+             latest_edl=lambda: {"json": original})
+    assert word_edges.refusal(ctx, original, target)
+    saved = []
+    def checked_write(edl, desc):
+        assert word_edges.refusal(ctx, original, edl) is None
+        saved.append(edl)
+        return "REJECTED: source-evidence check still owns authorization"
+    ctx.write_edl = checked_write
+    assert typed.write_film(ctx, target).startswith("REJECTED")
+    assert target == untouched
+    got = saved[0]
+    assert got["keep"][0][0] <= 1 and got["keep"][0][1] >= 4
+    old_tl, new_tl = Timeline(target["keep"]), Timeline(got["keep"])
+    for lane in ("texts", "overlays"):
+        assert new_tl.out_to_src(got[lane][0]["start"]) == pytest.approx(
+            old_tl.out_to_src(target[lane][0]["start"]), abs=.01)
+    assert got["texts"][0]["end"] - got["texts"][0]["start"] == pytest.approx(.6)
+    assert got["overlays"][0]["duration_s"] == .6
+    assert got["overlays"][0]["asset_key"] == "checked-footage"
+    assert got["overlays"][0]["source_start_s"] == 7
+    assert got["captions"] == target["captions"]
+
+
 @pytest.mark.parametrize("test_rung", [False, True])
 def test_four_minute_typed_film_reaches_director_without_lifting_first_film_cap(monkeypatch, tmp_path, test_rung):
     source = tmp_path / "source.mp4"
