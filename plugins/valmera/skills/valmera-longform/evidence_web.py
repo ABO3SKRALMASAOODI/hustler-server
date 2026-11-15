@@ -3,8 +3,19 @@ from pathlib import Path
 import hashlib,json
 
 
-def supply(ctx,script,ft,gaps):
-    import requests
+def download(url):
+    import requests,shlex
+    try:
+        response=requests.get(url,timeout=60);response.raise_for_status()
+        return response.content
+    except requests.RequestException:
+        # The Mac's established archive wall also affects original image URLs.
+        # Fetch the same public bytes on the already-authorized box route.
+        from footage_box import ssh
+        return ssh('curl --fail --location --silent --show-error --max-time 60 '+shlex.quote(url),capture_output=True).stdout
+
+
+def supply(ctx,script,ft,gaps,reuse_only=False):
     from PIL import Image
     import cinema as C
     from wf4 import story
@@ -12,7 +23,9 @@ def supply(ctx,script,ft,gaps):
     root=Path(ctx.supply)/'exact-evidence';root.mkdir(exist_ok=True)
     signature=hashlib.sha256(json.dumps(gaps,sort_keys=True).encode()).hexdigest()[:16]
     plan=root/(signature+'.json')
-    if plan.exists():data=C.read(plan)
+    known={r['url']:r for p in root.glob('*.json') for r in C.read(p).get('images',[])}
+    if reuse_only:data=dict(images=list(known.values()))
+    elif plan.exists():data=C.read(plan)
     else:
         text,usage=story.writer.ask_web('Find exact original archive images for these documentary gaps. Broad catalogue searches have failed. '
             'Research primary archives and their original captions. Return JSON {images:[{url,page,title,credit,licence,licence_url,caption,lines:[segment indexes]}]}. '
@@ -21,16 +34,19 @@ def supply(ctx,script,ft,gaps):
             'No museum substitutes for a historical event, wrong crews, modern reconstructions, generated illustrations or duplicate scans. '
             'Do not substitute a picture of a spacecraft for a named person sewing, or a later EVA for an earlier hatch repair. '
             'Return only evidence you actually find. Original mission diagrams explaining the precise operation are useful; distinguish them from filmed events.',
-            json.dumps(dict(title=script['title'],gaps=gaps,facts=script['dossier']['facts'])),searches=12,fetches=12,
+            json.dumps(dict(title=script['title'],gaps=gaps,facts=script['dossier']['facts'],known=list(known.values()))),searches=12,fetches=12,max_tool_calls=12,
             effort='high',max_tokens=5000,what='WF4 exact archive evidence')
         data=story.writer.json_block(text);data['usage']=usage;C.save(plan,data)
-    by={r['i']:r for r in ft['lines']};wanted={g['seg']:g['words'] for g in gaps}
+    by={r['i']:r for r in ft['lines']};wanted={}
+    for gap in gaps:wanted[gap['seg']]=(wanted.get(gap['seg'],'')+' '+(gap.get('heard') or gap['words'])).strip()
     for row in data.get('images',[]):
         key=hashlib.sha256(row['url'].encode()).hexdigest()[:20];path=root/(key+'.jpg');vp=root/(key+'-'+signature+'-check.json')
         if not path.exists():
-            response=requests.get(row['url'],timeout=60);response.raise_for_status()
-            if len(response.content)>30_000_000:raise ValueError('archive image exceeds 30 MB')
-            raw=root/(key+'.download');raw.write_bytes(response.content)
+            try:content=download(row['url'])
+            except Exception as error:
+                C.save(root/(key+'-download-error.json'),dict(url=row['url'],error=str(error)[:500]));continue
+            if len(content)>30_000_000:raise ValueError('archive image exceeds 30 MB')
+            raw=root/(key+'.download');raw.write_bytes(content)
             try:
                 with Image.open(raw) as im:
                     if max(im.size)<1000:continue

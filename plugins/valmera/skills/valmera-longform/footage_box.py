@@ -126,8 +126,18 @@ if j.get('_voices'):
     voice.PICK_SYSTEM=voice.PICK_SYSTEM.replace('about 2 to 9 seconds spoken','about 4 to 20 seconds spoken')
     voice.PICK_SYSTEM+='\nThe person field must exactly copy one canonical name from The people; never substitute an alias from a video title.'
     original_pick=voice.pick
-    def logged_pick(*args,**kwargs):
-        picks,cost=original_pick(*args,**kwargs)
+    def logged_pick(lines,persons,sources,*args,**kwargs):
+        avoid=j.get('avoid',[])
+        lines=[ln for ln in lines if ln['i'] not in {v.get('after') for v in avoid}]
+        fresh=[]
+        for source in sources:
+            # The shared picker strips URL from its transcript-only records.
+            # Recover its exact source metadata, without fuzzy title matching.
+            urls={s['url'] for s in live if s['title']==source['title'] and s.get('channel')==source.get('channel')}
+            ranges=[v['time_range'] for v in avoid if v.get('source',{}).get('url',v.get('url')) in urls]
+            transcript=[p for p in source.get('transcript',[]) if not any(min(p['t1'],b)>max(p['t0'],a) for a,b in ranges)]
+            fresh.append(dict(source,transcript=transcript))
+        picks,cost=original_pick(lines,persons,fresh,*args,**kwargs)
         (pathlib.Path(sys.argv[2])/'voice-picks.json').write_text(json.dumps(picks,indent=1))
         return picks,cost
     voice.pick=logged_pick

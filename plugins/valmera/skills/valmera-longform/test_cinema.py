@@ -71,6 +71,23 @@ def test_checked_picture_follows_its_word_when_narration_timing_changes():
     assert abs(R.resolve(b,anchor)-3.1)<1e-6
 
 
+def test_download_duration_cannot_reserve_frames_beyond_encoded_end(tmp_path,monkeypatch):
+    p=tmp_path/'clip.mp4';p.write_bytes(b'fixture')
+    c=dict(clip(str(p),10,15),file='clip.mp4')
+    monkeypatch.setattr(C.subprocess,'check_output',lambda *a,**k:json.dumps(dict(streams=[dict(duration='4.7',nb_frames='141',avg_frame_rate='30/1')])).encode())
+    C.encoded_durations(dict(lines=[dict(clips=[c])]))
+    assert c['seconds']==4.7
+    assert C.unused_seconds({},c)==pytest.approx(4.7)
+
+
+def test_a_broad_line_releases_the_only_image_needed_by_a_scarce_line():
+    import timeline_repair as R
+    image=dict(kind='image',content_hash='same',path='one')
+    ft=dict(lines=[dict(i=1,clips=[image])],editorial=dict(pins=[dict(seg=0,clip=image)]))
+    released=R.release_borrowed_images(ft,C.CoverageError([dict(seg=1)]))
+    assert len(released)==1 and not ft['editorial']['pins']
+
+
 def test_failed_clip_cannot_return_to_rejected_line_and_checked_slot_stays():
     import timeline_repair as R
     sc={'segments':[{'say':'Words.','chapter':'c'}]}

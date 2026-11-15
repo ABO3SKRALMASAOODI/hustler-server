@@ -78,6 +78,22 @@ def research(ctx,script,ft,failure,merge=True):
     return dest
 
 
+def release_borrowed_images(ft,failure):
+    """A broad checked line must not monopolize a scarce line's only picture."""
+    by={r['i']:r['clips'] for r in ft['lines']}
+    wanted={}
+    for gap in failure.gaps:
+        for c in by.get(gap['seg'],[]):
+            if c.get('kind')=='image':wanted.setdefault(c['content_hash'],set()).add(gap['seg'])
+    editorial=ft.get('editorial',{});keep=[];released=[]
+    for pin in editorial.get('pins',[]):
+        c=pin['clip'];claimants=wanted.get(c.get('content_hash'),set())
+        if c.get('kind')=='image' and claimants and pin['seg'] not in claimants:released.append(pin)
+        else:keep.append(pin)
+    if released:editorial['pins']=keep
+    return released
+
+
 def repair(ctx,script,ft,words,rounds=3):
     import cinema as C
     from evidence_allocate import allocate
@@ -85,6 +101,15 @@ def repair(ctx,script,ft,words,rounds=3):
     for attempt in range(rounds):
         try:shots,clock,_=C.schedule(script['script'],words,ft)
         except C.CoverageError as failure:
+            if release_borrowed_images(ft,failure):
+                C.save(path,ft)
+                try:shots,clock,_=C.schedule(script['script'],words,ft)
+                except C.CoverageError as rebalanced:failure=rebalanced
+                else:
+                    report=C.source_review(ctx,shots,required=False)
+                    if report['ok']:return shots,clock
+                    retain(ft,shots,clock,report);C.save(path,ft)
+                    continue
             allocate(ctx,script,ft,failure);C.save(path,ft)
             try:shots,clock,_=C.schedule(script['script'],words,ft)
             except C.CoverageError as uncovered:

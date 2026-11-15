@@ -199,15 +199,16 @@ def add_footage(ft,extra,dest):
         ft['voices'].append(dict(v,**{k:str(dest/v[k]) for k in ('file','wav')}))
 
 
-def witness_voices(ctx,script,ft):
+def witness_voices(ctx,script,ft,additional=False):
     """Seek firsthand testimony separately from mechanism pictures. A picture
     search need not rank an interview highly enough to hear its witness.
     """
-    root=Path(ctx.supply)/'footage'/'witnesses';root.mkdir(parents=True,exist_ok=True)
+    root=Path(ctx.supply)/'footage'/('witnesses-additional' if additional else 'witnesses');root.mkdir(parents=True,exist_ok=True)
     history=[]
     known=list({c['source']['url']:c['source'] for ln in ft['lines'] for c in ln['clips'] if c.get('kind')!='image'}.values())
     lines=[dict(i=i,say=s['say']) for i,s in enumerate(script['script']['segments'])]
-    for attempt in range(3):
+    count=len(ft['voices'])
+    for attempt in range(1 if additional else 3):
         dest=root if attempt==0 else root/f'attempt-{attempt+1}'
         job=dest/'research.json'
         if job.exists():research=read(job)
@@ -218,15 +219,16 @@ def witness_voices(ctx,script,ft):
                 'Put the narrative purpose in purpose. Include concise broad interview searches and focused archive searches, each at most ten words. '
                 'Read unsuccessful research evidence and broaden or change the sources; never repeat failed queries. Known archive films may carry interviews between their narration. '
                 'No impersonation, AI voice or narrator quotes. If no recorded witness could exist, return an empty list.',
-                json.dumps(dict(title=script['title'],named=script['dossier']['named'],lines=lines,known_sources=known,prior=history)),
+                json.dumps(dict(title=script['title'],named=script['dossier']['named'],lines=lines,known_sources=known,prior=history,
+                                already_selected=ft['voices'],purpose='Add consequential first-person testimony which is missing from these existing inserts; no repetition.' if additional else 'Find the subject speaking.')),
                 effort='high',max_tokens=3000,what='WF4 witness research')
             research=wf4.story.writer.json_block(text);research['usage']=use;save(job,research)
         if not research['people']:return
         extra=footage_box.fetch(dict(_voices=True,people=research['people'],lines=lines,avoid=ft['voices'],known_sources=known),dest,ctx.log)
         add_footage(ft,extra,dest)
-        if ft['voices']:return
+        if len(ft['voices'])>count:return
         history.append(dict(research=research,result=extra))
-    raise RuntimeError('firsthand witnesses were identified, but no identity-verified speaking footage passed; research must continue')
+    if not additional:raise RuntimeError('firsthand witnesses were identified, but no identity-verified speaking footage passed; research must continue')
 
 
 def evidence_for_gaps(ctx,script,ft,gaps):
@@ -377,6 +379,7 @@ def supply(ctx, script):
     still=sum((r['f'][1]-r['f'][0])/FPS for r in shots if r['clip'].get('kind')=='image')
     if still/clock.dur>.45:raise RuntimeError('evidence photos would displace the moving film')
     if not ft['voices']:witness_voices(ctx,script,ft)
+    witness_voices(ctx,script,ft,additional=True)
     sys.path.insert(0,str(HERE.parent/'_shell'/'narrate'))
     import realvoice
     if ft['voices']:
@@ -470,8 +473,28 @@ def unify_image_copies(ft):
             c['content_hash']=known[path]
 
 
+def encoded_durations(ft):
+    """Reserve encoded frames, never the downloader's longer requested range."""
+    editorial=ft.get('editorial',{});seen={}
+    extra=[dict(clips=editorial.get('bank',[])),dict(clips=[p['clip'] for p in editorial.get('pins',[])])]
+    for line in ft['lines']+extra:
+        for c in line['clips']:
+            if c.get('kind')=='image' or not c.get('file'):continue
+            path=Path(c['path']);stat=path.stat();stamp=[stat.st_size,stat.st_mtime_ns]
+            rec=seen.get(str(path)) or c.get('encoded')
+            if not rec or rec['file']!=stamp:
+                probe=json.loads(subprocess.check_output([PX.FP,'-v','error','-select_streams','v:0',
+                    '-show_entries','stream=duration,nb_frames,avg_frame_rate','-of','json',str(path)]))['streams'][0]
+                num,den=map(float,probe['avg_frame_rate'].split('/'))
+                duration=float(probe['nb_frames'])*den/num if probe.get('nb_frames','N/A')!='N/A' and num else float(probe['duration'])
+                rec=dict(file=stamp,seconds=duration)
+            seen[str(path)]=rec;c['encoded']=rec;c['seconds']=min(c['seconds'],rec['seconds'])
+
+
 def schedule(sc, words, ft):
+    encoded_durations(ft)
     unify_image_copies(ft)
+    if isinstance(words,Path):words=str(words)
     clock=F.Clock(words,sc)
     wj=read(words) if isinstance(words,(str,Path)) else words
     end=math.ceil(clock.dur*FPS)
@@ -544,11 +567,11 @@ def schedule(sc, words, ft):
         if pos<b:
             heard=' '.join(w['w'] for w in clock.words if w['t0']<b/FPS and w['t1']>pos/FPS)
             missing.append(dict(seg=i,seconds=(b-pos)/FPS,words=s['say'],heard=heard,start=pos/FPS,end=b/FPS))
-    if missing: raise CoverageError(missing,shots)
     for r in shots:
         r['context']=r['say']
         spoken=[w['w'] for w in clock.words if w['t0']<r['f'][1]/FPS and w['t1']>r['f'][0]/FPS]
         if spoken:r['say']=' '.join(spoken)
+    if missing: raise CoverageError(missing,sorted(shots,key=lambda r:r['f'][0]))
     return sorted(shots,key=lambda r:r['f'][0]),clock,end
 
 

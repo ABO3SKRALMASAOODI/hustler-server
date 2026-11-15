@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import subprocess
+import math
 import numpy as np
 from PIL import Image,ImageDraw,ImageOps
 
@@ -26,6 +27,9 @@ def check(film, shots, out, ffmpeg, source=False):
             else:
                 lo,hi=r['src'] if source else (a,b)
                 for t in (lo+(hi-lo)*.05,(lo+hi)/2,lo+(hi-lo)*.95):
+                    # A frame occupies its full 1/30 second interval. Seeking
+                    # inside the final frame's interval can seek past EOF.
+                    t=max(0,math.floor((min(t,hi-1/30)+1e-7)*30)/30)
                     p=subprocess.run([ffmpeg,'-v','error','-ss',str(t),'-i',r['clip']['path'] if source else film,'-frames:v','1','-vf','scale=480:270','-f','image2pipe','-vcodec','mjpeg','-'],capture_output=True,check=True)
                     cells.append(Image.open(io.BytesIO(p.stdout)).convert('RGB'))
             board=Image.new('RGB',(1440,300),'black')
