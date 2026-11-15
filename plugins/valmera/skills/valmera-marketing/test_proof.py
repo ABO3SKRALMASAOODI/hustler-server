@@ -130,3 +130,25 @@ def test_instruction_panel_preserves_submitted_sentence():
     assert " ".join(panel["lines"]) == text
     assert all(v["px"] >= 38 for v in scene["voices"].values())
     assert panel["frames"] == [120, 240]
+
+
+def test_reused_recording_is_hash_verified_and_keeps_provenance(tmp_path):
+    import hashlib
+    import json
+    import pytest
+    original = tmp_path / "original"
+    original.mkdir()
+    source = original / "upload.mp4"
+    source.write_bytes(b"original fixture")
+    media = dict(file=str(source), sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+    record = original / "record.json"
+    record.write_text(json.dumps(dict(sid="synthetic", upload=media, exports=[media],
+                                      recorded_at="2026-11-13", be_sha="historical-revision")))
+    destination = tmp_path / "copy"
+    copied = P.reuse_record(str(record), str(destination))
+    assert copied["upload"]["file"] == str(destination / "upload.mp4")
+    assert copied["reused_from"]["be_sha"] == "historical-revision"
+    assert source.read_bytes() == b"original fixture"
+    source.write_bytes(b"modified")
+    with pytest.raises(RuntimeError, match="hash mismatch"):
+        P.reuse_record(str(record), str(tmp_path / "tampered"))

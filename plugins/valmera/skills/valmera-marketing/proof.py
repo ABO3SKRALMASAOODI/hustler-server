@@ -23,6 +23,7 @@ render  Valmera's engine, then the shell's brand finish and the music it chooses
 Model calls run on OpenAI; nothing is spent on Anthropic. Nothing is published.
 """
 import base64
+import hashlib
 import json
 import os
 import shutil
@@ -196,6 +197,65 @@ def ref_pace():
                 sfx10=med("sfx10", 13.6))
 
 
+def recorded_pool(srcs):
+    """Explicit reuse of synthetic Studio receipts, never a customer project."""
+    root = os.environ.get("WF2_REUSE_RECORDINGS")
+    if not root:
+        return {}
+    by_file = {s["file"]: s for s in srcs}
+    out = {}
+    for sid in sorted(os.listdir(root)):
+        path = os.path.join(root, sid, "record.json")
+        rec = jload(path, {}) or {}
+        source = rec.get("source") or {}
+        asks = rec.get("asks") or []
+        exports = rec.get("exports") or []
+        # A one-sentence film needs a one-sentence before-first-result recording.
+        if (source.get("file") not in by_file or rec.get("state") != "done" or rec.get("failures")
+                or len(asks) != 1 or asks[0].get("phase") != "before_first_result"
+                or not exports or exports[-1].get("h", 0) <= exports[-1].get("w", 0)):
+            continue
+        if not all(os.path.isfile(x.get("file", "")) for x in [rec.get("upload") or {}, *exports]):
+            continue
+        out[sid] = dict(record=path, source=by_file[source["file"]]["id"], file=source["file"],
+                        t0=source["t0"], t1=source["t1"], typed=asks[0]["text"],
+                        recorded_at=rec.get("recorded_at"), be_sha=rec.get("be_sha"))
+    if not out:
+        raise RuntimeError("no eligible synthetic Studio recordings in WF2_REUSE_RECORDINGS")
+    return out
+
+
+def reuse_record(path, destination):
+    """Verify immutable receipts before copying them into this run's cleanup boundary."""
+    rec = json.load(open(path))
+    root = os.path.realpath(os.path.dirname(path))
+    for media in [rec["upload"], *rec["exports"]]:
+        source = os.path.realpath(media["file"])
+        if os.path.commonpath([root, source]) != root:
+            raise RuntimeError("Studio recording media escaped its recording folder")
+        digest = hashlib.sha256()
+        with open(source, "rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if not media.get("sha256") or digest.hexdigest() != media["sha256"]:
+            raise RuntimeError("Studio recording receipt hash mismatch: " + os.path.basename(source))
+    shutil.copytree(root, destination)
+
+    def remap(value):
+        if isinstance(value, dict):
+            return {k: remap(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [remap(v) for v in value]
+        if isinstance(value, str) and value.startswith(root + os.sep):
+            return destination + value[len(root):]
+        return value
+
+    rec = remap(rec)
+    rec["reused_from"] = dict(record=path, recorded_at=rec.get("recorded_at"), be_sha=rec.get("be_sha"))
+    jsave(os.path.join(destination, "record.json"), rec)
+    return rec
+
+
 # ----------------------------------------------------------------- ideas
 
 def ideas(ctx):
@@ -203,6 +263,7 @@ def ideas(ctx):
     srcs = sources()
     if not srcs:
         raise RuntimeError(f"no source clip with captions under {SRC_ROOT}")
+    recordings = recorded_pool(srcs)
     rows = ledger_rows(ctx)
     used = {}
     for r in rows:
@@ -239,11 +300,23 @@ def ideas(ctx):
                "them, each asking for a vertical short], \"must_see\": [for each ask, the list of things that must be visible in the "
                "export for the film to show it honestly], \"hook\": the first spoken line, under 12 words, a pain or a stake, never a "
                "greeting, \"style\": one style id, \"why\": one line}.")
+    if recordings:
+        content += ("\n# Existing REAL synthetic Studio recordings\n" + json.dumps(recordings, ensure_ascii=False)
+                    + "\nFor each idea select recording_id from this menu. Build a NEW editing-pain argument around "
+                    "that actual result, not a story about the speaker. Use its typed sentence verbatim as the first "
+                    "ask and its source window unchanged. Its export will still undergo the full visual check. "
+                    "Choose different recordings across the ranked ideas. Do not claim it was recorded today.")
     got, use = ask(system, content, what="find ideas", effort="medium", max_tokens=12000)
     ids = {s["id"] for s in able}
     by = {s["id"]: s for s in srcs}
     out = []
     for i in (got.get("ideas") if isinstance(got, dict) else got) or []:
+        if recordings:
+            prior = recordings.get(i.get("recording_id"))
+            if not prior:
+                continue
+            i.update(source=prior["source"], t0=prior["t0"], t1=prior["t1"],
+                     asks=[prior["typed"]], recording=prior["record"])
         if i.get("source") in by and len(i.get("asks") or []) >= 1:
             i["style"] = i.get("style") if i.get("style") in ids else able[0]["id"]
             i["file"] = by[i["source"]]["file"]
@@ -276,6 +349,15 @@ def record(ctx, idea, k, ask_text):
     rec_p = os.path.join(studio_root, "records", sid, "record.json")
     if os.path.exists(rec_p):
         return json.load(open(rec_p))
+    if idea.get("recording"):
+        original = json.load(open(idea["recording"]))
+        if original["asks"][0]["text"] != ask_text:
+            raise RuntimeError("the reused recording's instruction changed")
+        destination = os.path.join(studio_root, "records", original["sid"])
+        if os.path.exists(os.path.join(destination, "record.json")):
+            return json.load(open(os.path.join(destination, "record.json")))
+        ctx.log(f"reusing verified synthetic recording {original['sid']} from {original.get('recorded_at')}")
+        return reuse_record(idea["recording"], destination)
     words = json3_words(next(s["captions"] for s in sources() if s["file"] == idea["file"]))
     t0, t1 = snap_window([w for w in words if idea["t0"] - 20 <= w[0] <= idea["t1"] + 20], float(idea["t0"]), float(idea["t1"]))
     spec = dict(settings=STACK, sessions=[dict(sid=sid, source=idea["file"], t0=t0, t1=t1, plan=PLAN,
@@ -414,9 +496,10 @@ def receipts(rec, chk, ask_text):
                 upload=dict(seconds=rec["upload"]["dur"], w=rec["upload"]["w"], h=rec["upload"]["h"], sha256=rec["upload"]["sha256"]),
                 export=dict(seconds=ex["dur"], w=ex["w"], h=ex["h"], sha256=ex["sha256"], edl_version=ex.get("edl_version")),
                 visible=[dict(asked=e.get("asked"), how=e.get("how"), seconds=e.get("seconds")) for e in chk.get("elements") or []],
-                looks=chk.get("looks"), product=dict(name="Valmera", url="valmera.io", be_sha=rec.get("be_sha"), fe_sha=rec.get("fe_sha"), edit_model="Pro's OpenAI lane (gpt-6.1-sol)",
-                                                     stack=f"local Gauntlet stack on main, synthetic account, plan {PLAN}"),
-                source=rec.get("source"), cost_usd=rec.get("cost_usd"))
+                looks=chk.get("looks"), product=dict(name="Valmera", url="valmera.io", be_sha=rec.get("be_sha"), fe_sha=rec.get("fe_sha"),
+                                                     edit_model=rec.get("models"), recorded_at=rec.get("recorded_at"),
+                                                     stack="local Gauntlet stack, synthetic account", account=rec.get("account")),
+                source=rec.get("source"), cost_usd=rec.get("cost_usd"), reused_from=rec.get("reused_from"))
 
 
 def norm_words(s):

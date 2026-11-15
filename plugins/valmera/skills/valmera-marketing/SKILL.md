@@ -32,6 +32,12 @@ What the run does (`proof.py` on the workflow shell, `market.py` the launcher):
 The styles of the one-command path are in `reels.json` (Proof Reel, Window, Pinboard, Archive); a style rests for three
 films. The state root is `.valmera/workflow/marketing` (its own ledger and work folder).
 
+For film-only iteration, `WF2_REUSE_RECORDINGS=<Studio records directory>` explicitly offers existing synthetic
+recordings to the ideas stage. Only owner-source, successful, single-instruction recordings qualify. Upload and export
+hashes must match before a private copy is made inside this run; the export still passes the same visual check.
+The receipts retain the original date, model information and revision. This is never evidence of a fresh product replay.
+Without this option, `studio.py` records a new session under the replay lock.
+
 The rest of this page is the older, hand-directed path (three built styles on recordings made beforehand, with a stop
 for the director's look). It still works through `run.py` without `WF2_ENGINE=proof`.
 
