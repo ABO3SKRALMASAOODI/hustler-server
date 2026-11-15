@@ -197,3 +197,7 @@ WF1 uses the interview as its voice spine, so documentary acquisition passes `--
 When measured moving coverage is short, recovery prioritizes new original video before requesting
 additional still documents. Existing primary documents stay available and checked; more still research
 resumes once the moving share is sufficient. A queued model call is never retried unchanged.
+
+Physical camera travel through a real three-dimensional scene counts as moving footage when the
+frames show depth/parallax or newly revealed geometry. A flat pan/zoom over a still, cursor-only
+movement or an editorial card transform does not. The final-film residual-motion gate remains.

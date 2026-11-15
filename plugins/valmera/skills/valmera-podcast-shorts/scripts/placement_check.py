@@ -13,7 +13,7 @@ import os
 import subprocess
 
 MODEL = "gpt-6-sol"
-CONTRACT = 9
+CONTRACT = 10
 
 
 def words_under(clock, a, b, fps=30):
@@ -126,9 +126,13 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement"):
               "readable technical diagram may illustrate the named system. Neither proves a particular conversation "
               "or prediction. Reject when the actual words/labels imply that false event, identity or era. "
               "Also inspect change BETWEEN the ordered frames: motion_ok is true only for visible action in "
-              "the depicted subject, a genuinely changing scientific simulation, or a substantive live software "
+              "the depicted subject, actual camera translation through a three-dimensional filmed scene with "
+              "visible depth/parallax or newly revealed geometry, a genuinely changing scientific simulation, "
+              "or a substantive live software "
               "workflow. A still document, slide, static interface, cursor movement alone, editorial card "
-              "transform, pan or zoom across a still never qualifies. If motion cannot be established, false. "
+              "transform, pan or zoom across a still never qualifies. Do not demand that a real building or server "
+              "rack itself move when an actual camera travels through its space. Ordinary framing changes "
+              "alone do not prove such physical camera movement. If motion cannot be established, false. "
               "This is separate from fidelity: a faithful still may have ok=true and motion_ok=false. "
               "Return JSON {\"placements\":[{\"id\":integer,\"ok\":boolean,\"reason\":string,"
               "\"motion_ok\":boolean,\"motion_reason\":string}]}, one per ID. "
