@@ -36,6 +36,36 @@ def test_shared_write_rejects_measured_clipped_onset_even_at_asr_word_boundary(m
     assert result.startswith('REJECTED') and 'Galaxy' in result
 
 
+def test_shared_write_keeps_the_release_after_an_early_asr_word_end(monkeypatch):
+    import pytest
+    import agent_tools, cut_audio
+    from schemas import default_edl
+    # The existing acoustic regression: Whisper ends "fonts" before its /s/.
+    words = [{'w': 'fonts,', 't0': .7, 't1': 1.30},
+             {'w': 'and', 't0': 1.8, 't1': 2.1}]
+    monkeypatch.setattr(cut_audio, 'source_levels', lambda *a, **k:
+        lambda t: -13. if .7 <= t < 1.45 else -60.)
+    before = default_edl(4.)
+    ctx = NS(_states_seen={}, duration=4., index={'words': words}, user_message='',
+             project_id=1, job={}, db=NS(run=lambda *a, **k: pytest.fail('Clipped release reached persistence')),
+             latest_edl=lambda: {'version': 1, 'json': before},
+             cut_sound_source=lambda: 'actual-source.wav')
+    result = agent_tools.ToolContext.write_edl(ctx, dict(before, keep=[[0., 1.30]]), 'Trim')
+    assert result.startswith('REJECTED') and 'fonts' in result and 'release' in result
+
+
+def test_release_guard_does_not_move_existing_seams_or_swallow_the_next_word():
+    import cut_audio
+    words = [{'w': 'fonts', 't0': .7, 't1': 1.3},
+             {'w': 'and', 't0': 1.31, 't1': 1.6}]
+    level = lambda t: -13. if .7 <= t < 1.45 else -60.
+    assert not cut_audio.clipped_releases([[0, 1.3]], words, 4., level)
+    assert not cut_audio.clipped_releases([[0, 1.3], [1.3, 4]], words, 4., level)
+    assert not cut_audio.clipped_releases([[0, 1.3]], words[:1], 4., level, [[0, 1.3]])
+    assert not cut_audio.clipped_releases([[0, 1.3]], words[:1], 1.3, level)
+    assert not cut_audio.clipped_releases([[0, 1.3]], words[:1], 4., lambda t: -13.)
+
+
 def test_unrelated_edit_does_not_move_existing_cut_or_split_camera_seam():
     words = [{'w': 'Coke', 't0': 1, 't1': 2}]
     assert not word_edges.introduced([[1.2, 4]], [[1.2, 3]], words, 5)
