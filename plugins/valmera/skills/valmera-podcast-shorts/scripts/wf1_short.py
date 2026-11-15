@@ -157,6 +157,8 @@ def supply(ctx, script):
     import wf1_coverage
     coverage = wf1_coverage.plan(words, script.get('title'), sup_dir, _llm())
     coverage['context']=who
+    import wf1_context
+    primary_direction=wf1_context.direct(coverage,os.path.join(sup_dir,'referent-research'),_llm())
     windows = coverage['windows']
     # Inventory records what was said; windows specify what can truthfully be photographed.
     # Passing the inventory back as search subjects resurrects unnamed people and isolated dates.
@@ -166,7 +168,9 @@ def supply(ctx, script):
     fscript = dict(title=f"{script.get('title')}. A podcast clip; the speaker is on camera already, so show what he talks about, as it was then, "
                          f"never him as he looks today. Who is in it: {who}",
                    segments=[dict(say=s['say'], pictures=[s['name']], visual=s['must_show']) for s in windows],
-                   named=[dict(name=name,must_show=' '.join(requirements),**{'is':'thing'}) for name,requirements in research.items()])
+                   named=[dict(name=name,must_show=' '.join(requirements),
+                               video_searches=list(dict.fromkeys(q for w in windows if w['name']==name for q in w.get('video_searches',[]))),
+                               **{'is':'thing'}) for name,requirements in research.items()])
     footage_name = f'footage-v{wf1_coverage.CONTRACT}'
     wf3.given_footage(ctx, os.path.join(sup_dir, footage_name))
     fw, fh = style["footage"]
@@ -186,6 +190,7 @@ def supply(ctx, script):
     if platform_walled:
         ctx.log('Platform footage unavailable; retain its evidence and seek public original-publisher video before stopping')
     pack = dict(platform_walled=platform_walled,sid=ctx.sid, words=wj, narration=src, ffmpeg=PX.FF, sounds={}, pictures={}, credits=[], footage=[], title=script.get("title"), coverage=coverage)
+    pack.update(referent_research=primary_direction['references'],research_spend=primary_direction['spend'])
     subjects, by_line = [], {}
     if foot:
         fdir = os.path.join(sup_dir, footage_name)

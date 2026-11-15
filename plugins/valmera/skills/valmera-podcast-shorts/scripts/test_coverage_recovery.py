@@ -21,6 +21,24 @@ def story():
                          dict(name='B',first=6,last=7,t0=6,t1=7.8,say='6 7')])
 
 
+def test_primary_referent_direction_precedes_acquisition_and_is_cached(tmp_path,monkeypatch):
+    import wf1_context
+    calls=[]
+    found=dict(references=[dict(referent='Documented project',sources=[dict(url='https://publisher.example/original')])],spend=[{}])
+    monkeypatch.setattr(wf1_context,'research',lambda *a:calls.append('research') or found)
+    def revise(data,wanted,evidence,llm):
+        assert data['research_context']==found
+        assert evidence['stage']=='before first footage search'
+        calls.append('direction');data['windows'][0]['name']='Documented project'
+        return {}
+    monkeypatch.setattr(coverage,'repair_requirements',revise)
+    first=story();wf1_context.direct(first,str(tmp_path),None)
+    assert calls==['research','direction']
+    second=story();wf1_context.direct(second,str(tmp_path),None)
+    assert calls==['research','direction'] and first==second
+    assert first['windows'][0]['first']==1 and first['windows'][0]['last']==2
+
+
 def test_context_extension_keeps_all_named_words_and_source_identity(tmp_path):
     data=story()
     changed,_=coverage.expand_context(data,[],str(tmp_path),decision([dict(i=0,first=0,last=4,why='The explanation continues')]))

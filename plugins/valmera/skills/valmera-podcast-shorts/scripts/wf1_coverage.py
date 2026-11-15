@@ -232,7 +232,7 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None):
 
 def repair_requirements(coverage, wanted, evidence, llm):
     """A director corrects over-specific research constraints without changing spoken facts or timing."""
-    system='''Revise documentary acquisition requirements after real research failed.
+    system='''Direct documentary acquisition requirements using primary research and any previous failures.
 Return JSON {"windows":[{"i":integer,"name":resolved subject name,"referent_evidence":str,"must_show":str,"video_searches":[str]}]}.
 must_show is a concise visual identity test, not an editing brief. Do not include numerical quotas, required durations, claims about unavailable footage, or a closed list of preferred sources. Earlier requirements may contain invented constraints: discard those while retaining facts from the actual words. A category such as deep learning permits any authentic period demonstration of that category; do not restrict it to the few papers already found. Specific named systems still require their exact identity.
 Resolve pronouns and formerly unnamed projects using the full spoken context and primary research. If an earlier subject label names the wrong referent, correct its canonical name and give referent_evidence explaining the exact words and primary source that establish it. For example a reaction to an internship must not retain the city as its subject merely because the city was named earlier. A corrected name directs research; it never approves a picture. Do not rename an explicit named entity to an easier substitute.

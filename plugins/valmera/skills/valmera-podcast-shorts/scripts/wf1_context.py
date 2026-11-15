@@ -4,6 +4,24 @@ import json
 import os
 
 
+def direct(coverage,work,llm):
+    """Resolve the speaker's referents before spending downloads on generic substitutes."""
+    import wf1_coverage
+    key=hashlib.sha256(json.dumps([1,coverage],sort_keys=True).encode()).hexdigest()[:16]
+    os.makedirs(work,exist_ok=True);path=os.path.join(work,'direction-'+key+'.json')
+    if os.path.exists(path):
+        record=json.load(open(path))
+    else:
+        found=research(coverage,work,llm)
+        coverage['research_context']=found
+        use=wf1_coverage.repair_requirements(coverage,list(range(len(coverage['windows']))),
+                 dict(stage='before first footage search',available=[],rejected=[]),llm)
+        record=dict(coverage=coverage,references=found,spend=found['spend']+[use])
+        with open(path,'w') as f:json.dump(record,f,indent=1)
+    coverage.update(record['coverage'])
+    return record
+
+
 def research(coverage,work,llm):
     import writer
     data=dict(context=coverage.get('context'),words=coverage['words'],
