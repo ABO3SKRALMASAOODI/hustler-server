@@ -299,6 +299,29 @@ def test_pin_voices_gives_the_real_voice_its_own_picture(tmp_path):
     assert F.pin_voices(tl, [dict(v, clip=dict(path=str(tmp_path / "missing.mp4"), seconds=2.5))]) == tl
 
 
+def test_pin_voices_preserves_single_frame_remainders(tmp_path):
+    """A four-second insert must not erase the original frames on either side."""
+    clip = tmp_path / "voice.mp4"
+    clip.write_bytes(b"x")
+    start, end = 18.452, 22.452
+    f0 = F.Clock.f(start + F.LEAD_F / F.FPS)
+    f1 = min(F.Clock.f(end + F.LEAD_F / F.FPS), f0 + 120)
+    tl = [[0, f0 - 1, "photo", "A", {"path": "a.jpg"}],
+          [f0 - 1, f1 + 1, "photo", "B", {"path": "b.jpg"}],
+          [f1 + 1, 883, "photo", "C", {"path": "c.jpg"}]]
+    out = F.pin_voices(tl, [dict(start=start, end=end, person="after",
+                               clip=dict(path=str(clip), seconds=4.0))])
+    coverage = [0] * 883
+    for a, b, *_ in out:
+        for f in range(a, b):
+            coverage[f] += 1
+    assert set(coverage) == {1}
+    assert [(r[:2], r[3]) for r in out if r[1] - r[0] == 1] == [([f0 - 1, f0], "B"), ([f1, f1 + 1], "B")]
+    pinned = next(r for r in out if r[4].get("voice"))
+    assert pinned[:2] == [f0, f1]
+    assert pinned[4]["src"] == [0.0, 4.0]
+
+
 def test_ear_never_lets_a_rewrite_say_a_sentence_twice():
     import ear
     old = [dict(say="Sixty-three seconds into launch, the warning came."),

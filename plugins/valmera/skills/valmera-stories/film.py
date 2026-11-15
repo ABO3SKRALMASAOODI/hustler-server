@@ -765,7 +765,10 @@ def pin_voices(timeline, voices):
                     rec = dict(rec, src=[round(min(rec["src"][0] + k, float(rec["seconds"])), 3), rec["src"][1]])
                 out.append([f1, b, r[2], r[3], rec])
         out.append([f0, f1, "clip", v.get("person"), dict(c, voice=v.get("person"), src=[0.0, round((f1 - f0) / FPS, 3)])])
-        timeline = sorted((r for r in out if r[1] - r[0] >= 2), key=lambda r: r[0])
+        # Pinning can leave a single original frame beside the voice. Dropping
+        # that remainder opens a hole in an otherwise continuous base track.
+        # Keep its original picture rather than extending the source voice.
+        timeline = sorted((r for r in out if r[1] > r[0]), key=lambda r: r[0])
     return timeline
 
 
