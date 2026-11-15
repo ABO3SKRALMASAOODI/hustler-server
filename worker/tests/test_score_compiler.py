@@ -886,6 +886,35 @@ def test_a_beat_in_seconds_plays_the_words_inside_it():
     assert abs(c.meter["dur_s"] - end) < 0.1
 
 
+@pytest.mark.parametrize("fps", [24, 30, 60])
+def test_adjacent_second_beats_preserve_continuous_source_audio(fps):
+    boundaries = [0, 1.35, 2.65, 3.8, 5.2, 6.4, 8.57]
+    beats = [{"k": "b", "id": f"b{i}", "at": f"@{a}..@{z}",
+              "pic": "main", "rest": {**REST, "do": "continuous upload"}}
+             for i, (a, z) in enumerate(zip(boundaries, boundaries[1:]))]
+    text = _film(beats).splitlines()
+    for i, line in enumerate(text):
+        row = json.loads(line)
+        if row["k"] == "film":
+            row["fps"] = fps
+            text[i] = json.dumps(row)
+    c = S.compile_score("\n".join(text), index=wordless_index(9))
+    assert len(c.l1["spine"]) == 1
+    assert c.l1["spine"][0]["src"] == pytest.approx([0, round(8.57 * fps) / fps], abs=1e-4)
+    assert c.l1["spine"][0]["f"] == [0, round(8.57 * fps)]
+
+
+def test_second_beats_preserve_an_explicit_gap_and_reorder():
+    spans = [(0, 1.35), (1.45, 2.65), (0, 1)]
+    beats = [{"k": "b", "id": f"b{i}", "at": f"@{a}..@{z}",
+              "pic": "main", "rest": {**REST, "do": "authored cut"}}
+             for i, (a, z) in enumerate(spans)]
+    c = S.compile_score(_film(beats), index=wordless_index(9))
+    assert len(c.l1["spine"]) == 3
+    assert c.l1["spine"][1]["src"][0] == pytest.approx(1.45)
+    assert c.l1["spine"][2]["src"][0] == 0
+
+
 def test_a_bare_shot_id_is_its_span():
     t = _film([{"k": "b", "id": "b01", "at": "@0..@4", "job": "x", "cut": [60, 60], "pic": ["main", "main"],
                 "do": [{"g": "recolour", "key": "#C81E28", "c": "#1FA8A0", "at": "b01.s1"}, {"g": "chip", "t": "X", "at": "b01.s1", "seat": [0.3, 0.8], "in": "cut"}], "rest": REST}])

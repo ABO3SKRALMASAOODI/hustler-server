@@ -1116,6 +1116,13 @@ def build_spine(ctx):
             r["s0"] = t0(ctx, r["ws"][0]) - PAD_IN
             r["s1"] = t1(ctx, r["ws"][-1]) + PAD_OUT
     for r, n in zip(runs, runs[1:]):
+        if not r["ws"] and not n["ws"] and "s1" in r and "s0" in n:
+            # Adjacent picture beats are one continuous source range. Decide
+            # continuity before frame rounding: 0..1.35 at 30 fps otherwise
+            # ends at 1.333 while the next beat still starts at 1.35, cutting
+            # a hole in the source audio (p5719). Explicit gaps/reorders stay.
+            if abs(r["s1"] - n["s0"]) < 1e-6:
+                n["joined"] = True
         if r["ws"] and n["ws"] and n["ws"][0] == r["ws"][-1] + 1:
             pause = t0(ctx, n["ws"][0]) - t1(ctx, r["ws"][-1])
             if ctx.gap is None or pause <= ctx.gap:
