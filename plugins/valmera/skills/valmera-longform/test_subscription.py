@@ -177,3 +177,42 @@ def test_cli_keeps_new_media_outside_lane_and_resumes_existing_state(tmp_path,mo
     folder=legacy/'work/existing';folder.mkdir(parents=True);(folder/'run.json').write_text('{}')
     assert entry.state_root(['run','--resume','existing'])==str(legacy)
     assert entry.state_root(['run','--resume','new'])==str(tmp_path/'workflow/longform')
+
+
+def test_coverage_repair_searches_missing_words_with_context_verification(tmp_path,monkeypatch):
+    import cinema as C
+    import archive_script,archive_visual,footage_box
+    import os
+    for key in ('TMPDIR','VALMERA_SKILL','VALMERA_RUN','WF4_SPEND_LOG'):
+        monkeypatch.setenv(key,os.environ.get(key,''))
+    ctx=SimpleNamespace(run_dir=str(tmp_path),supply=str(tmp_path/'supply'),tmp=str(tmp_path/'tmp'),workflow='wf4',run_id='test',log=lambda *a:None)
+    sentence='The crew pulled the rope. Then the wing sprang open.'
+    sc=dict(title='Repair',segments=[dict(say=sentence,chapter='c1',pictures=['Skylab'])],chapters=[dict(id='c1',title='Repair')])
+    script=dict(script=sc,dossier=dict(named=[]))
+    ft=dict(lines=[],voices=[])
+    C.save(tmp_path/'supply/narration/words.json',dict(duration=100,words=[]))
+    monkeypatch.setattr(C,'worker',lambda:None)
+    monkeypatch.setattr(C,'footage',lambda *a:ft)
+    monkeypatch.setattr(archive_script,'conform',lambda *a:None)
+    monkeypatch.setattr(C,'verify_structure',lambda *a:sc)
+    monkeypatch.setattr(C.wf4.story,'narration_script',lambda *a:{})
+    monkeypatch.setattr(C,'narrated',lambda *a:dict(gate=dict(wer=0)))
+    monkeypatch.setattr(archive_visual,'prepare',lambda *a:None)
+    def uncovered(*a):
+        raise C.CoverageError([dict(seg=0,seconds=1.8,heard='Then the wing sprang open.',words=sentence)])
+    monkeypatch.setattr(C,'schedule',uncovered)
+    class StopAfterRequest(Exception):pass
+    seen=[]
+    def capture(payload,*a):
+        seen.append(payload);raise StopAfterRequest()
+    monkeypatch.setattr(footage_box,'fetch',capture)
+    with pytest.raises(StopAfterRequest):C.supply(ctx,script)
+    payload=seen[0]
+    assert payload['lines'][0]['say']=='Then the wing sprang open.'
+    assert sentence in payload['lines'][0]['visual']
+    assert payload['verification_owner']=='wf4-source-and-encoded-picture-check'
+    assert payload['narration_context']=={'0':sentence}
+    result=dict(lines=payload['lines'],narration_context=payload['narration_context'],counts=dict(frames_checked=8,sources_opened=1))
+    C.save(tmp_path/'results/pass/footage.json',result)
+    assert C.video_search_counts(tmp_path/'results',{0:sentence})=={0:1}
+    assert C.video_search_counts(tmp_path/'results',{0:'Changed narration.'})=={}

@@ -323,7 +323,8 @@ def video_search_counts(root,expected=None):
     for path in Path(root).glob('*/footage.json'):
         result=read(path)
         if not footage_box.completed_research(result):continue
-        for i in {r['i'] for r in result.get('lines',[]) if expected is None or r.get('say')==expected.get(r['i'])}:
+        context=result.get('narration_context',{})
+        for i in {r['i'] for r in result.get('lines',[]) if expected is None or context.get(str(r['i']),r.get('say'))==expected.get(r['i'])}:
             counts[i]=counts.get(i,0)+1
     return counts
 
@@ -394,13 +395,19 @@ def supply(ctx, script):
             avoid += [dict(url=v['source']['url'],time_range=v['time_range']) for v in ft['voices']]
             ctx.log(f"footage repair {attempt+1}: {len(gaps)} gaps, {sum(g['seconds'] for g in gaps):.1f}s; {len(research_gaps)} require more video research")
             for ch in sc['chapters']:
-                lines=[dict(i=g['seg'],say=sc['segments'][g['seg']]['say'],pictures=sc['segments'][g['seg']].get('pictures',[]),dur=g['seconds']+2)
+                lines=[dict(i=g['seg'],say=g.get('heard') or g.get('words') or sc['segments'][g['seg']]['say'],
+                            pictures=sc['segments'][g['seg']].get('pictures',[]),dur=g['seconds']+2,
+                            visual='Find a picture for only this missing spoken interval. Surrounding narration: '+sc['segments'][g['seg']]['say']+
+                            '\nPreserve the exact mission, hardware and repair state; source attribution and truthful context labels must be supported by evidence.')
                        for g in research_gaps if sc['segments'][g['seg']]['chapter']==ch['id']]
                 if not lines:continue
-                request_id=hashlib.sha256(json.dumps(lines,sort_keys=True).encode()).hexdigest()[:12]
+                verifier='wf4-source-and-encoded-picture-check'
+                context={str(r['i']):sc['segments'][r['i']]['say'] for r in lines}
+                request_id=hashlib.sha256(json.dumps(dict(lines=lines,verification_owner=verifier),sort_keys=True).encode()).hexdigest()[:12]
                 dest=Path(ctx.supply)/'footage'/f"repair-{attempt+1}-{ch['id']}-{request_id}"
                 known=list({c['source']['url']:c['source'] for ln in ft['lines'] for c in ln['clips']}.values())
-                extra=footage_box.fetch(dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title'],avoid=avoid,known_sources=known,want_voices=not bool(ft.get('voices'))),dest,ctx.log)
+                extra=footage_box.fetch(dict(lines=lines,named=script['dossier']['named'],about=sc['title']+': '+ch['title'],avoid=avoid,known_sources=known,
+                                            want_voices=False,verification_owner=verifier,narration_context=context),dest,ctx.log)
                 add_footage(ft,extra,dest)
                 avoid.extend(dict(url=c['source']['url'],time_range=c['time_range']) for ln in extra['lines'] for c in ln['clips'])
                 avoid.extend(dict(url=v['source']['url'],time_range=v['time_range']) for v in extra.get('voices',[]))

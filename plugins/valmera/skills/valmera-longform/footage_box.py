@@ -401,6 +401,8 @@ def fetch(payload, out, log=print, _port=None):
         if payload.get('verification_owner'):
             result['verification_owner']=payload['verification_owner']
             result['research_candidates_only']=True
+        if payload.get('narration_context'):
+            result['narration_context']=payload['narration_context']
         rec.write_text(json.dumps(result,indent=1))
         log(f"box footage: {result.get('counts',dict(covered=result.get('covered'),clips=result.get('clips')))}")
         return result
