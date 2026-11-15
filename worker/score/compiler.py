@@ -29,6 +29,7 @@ import time
 import unicodedata
 
 from scene.spine import source_at, start_s
+from . import transcript_confidence
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORKER = os.path.dirname(HERE)
@@ -2965,10 +2966,11 @@ def build_captions(ctx):
         asked = any(str(a.get("probe")) in ("caption_coverage", "caption_language") for a in ctx.asks.values())
         # Words the transcript itself doubts are not set on screen: a firework clip came back captioned "tämä on hän"
         # in Finnish, eight words at 0.64 confidence (p5571). Measured on the index, never on what the words say.
-        conf = [float(w.get("confidence", 1.0)) for w in ctx.index.get("words") or []]
-        if not asked and ctx.words and (sum(conf) / len(conf) < CAPTION_CONFIDENCE or len(ctx.words) < CAPTION_WORDS):
+        conf = transcript_confidence.mean(ctx.index.get("words") or [])
+        if not asked and ctx.words and ((conf is not None and conf < CAPTION_CONFIDENCE) or len(ctx.words) < CAPTION_WORDS):
+            confidence_label = f"{conf:.2f}" if conf is not None else "unknown"
             ctx.taste_rows.append({"id": "cap", "did": "thinned", "dept": "caption",
-                                   "why": f"{len(ctx.words)} words at a transcript confidence of {sum(conf) / len(conf):.2f}: not speech a caption can be trusted with"})
+                                   "why": f"{len(ctx.words)} words at a measured transcript confidence of {confidence_label}: not speech a caption can be trusted with"})
             ctx.n_chunks = 0
             return
         own = taste.upload_captions(ctx)

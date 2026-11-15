@@ -12,7 +12,7 @@ import json
 import os
 import unicodedata
 
-from . import brief, call
+from . import brief, call, transcript_confidence
 
 MODEL = "claude-haiku-5-5"
 PROBES = ("duration removed kept caption_coverage caption_language text_shown logo_shown music sfx_count loudness "
@@ -85,7 +85,7 @@ def user_text(idx, sess, per):
         for s in idx.get("sentences") or []:
             row = []
             for i in range(s["wi0"], s["wi1"] + 1):
-                q = "?" if float(words[i].get("confidence", 1)) < 0.75 else ""
+                q = "?" if transcript_confidence.low(words[i]) else ""
                 row.append(f"{i}:{words[i]['w']}{q}")
             lines.append(f"{s['t0']:.1f} " + " ".join(row))
     else:
