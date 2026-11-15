@@ -1227,8 +1227,12 @@ def follow_spine(ctx, a, z):
             f = s["f"][0]
         b = min(z, s["f"][1])
         s0 = source_at(s, f, ctx.fps)
-        out.append((f, b, s0, s0 + (b - f) / ctx.fps))
-        last_t = s0 + (b - f - 1) / ctx.fps
+        # The final output frame can extend beyond a fractional source end.
+        # Keep its picture inside the same cleared span as its audio; p5555
+        # otherwise read 83.2033s from a source cleared only through 83.2s.
+        s1 = source_at(s, b, ctx.fps)
+        out.append((f, b, s0, s1))
+        last_t = max(s0, s1 - 1.0 / ctx.fps)
         f = b
         if f >= z:
             break

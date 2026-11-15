@@ -28,6 +28,26 @@ def make_spine(fps, groups):
 
 
 @pytest.mark.parametrize("fps", [24, 30, 60])
+def test_picture_piece_cannot_read_past_cleared_fractional_source_end(fps):
+    import math
+    from score import source_guard
+    n = math.ceil(1.63 * fps)
+    ctx = SimpleNamespace(fps=fps, spine=[
+        {"f": [0, n], "src": [81.57, 83.2], "at_s": 0.0}])
+    pieces = compiler.follow_spine(ctx, 0, n)
+    assert pieces == [(0, n, 81.57, 83.2)]
+    l1 = {"frame": [1080, 1920], "items": [
+        {"id": "last", "k": "shot", "pic": "main", "f": [0, n],
+         "src": list(pieces[0][2:]), "crop": [0., 0., 1., 1.]}]}
+    index = {"_first_film_source_guard": True,
+             "video": {"width": 1080, "height": 1920, "duration": 83.2},
+             "shots": [{"start": 81., "end": 83.2}],
+             "spatial": {"samples": [{"t": 82., "faces": [[.2, .2, .8, .8]]}]}}
+    # The unchanged source-boundary guard accepts the actual picture pieces.
+    assert source_guard.apply(l1, index, {})[0]['source'] == [81.57, 83.2]
+
+
+@pytest.mark.parametrize("fps", [24, 30, 60])
 def test_omitted_words_and_reorders_keep_exact_audio_clock(fps, tmp_path, monkeypatch):
     groups = [[i, i + 1] for i in range(0, 100, 3)]
     groups = groups[12:] + groups[:12]
