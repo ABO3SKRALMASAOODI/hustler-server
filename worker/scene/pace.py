@@ -239,6 +239,13 @@ def _eased_take(sh, cam, M, faces, stress, a, b, lo, hi, fps, rng, log, motivate
         fr = max(int(round((14 if kind == "out" else 18) * fps / 30.0 * (0.8 + 0.4 * rng.random()))), 6)
         tgt = cam.keep_whole(cam.rect(cx, cy, cur), faces)
         cur = tgt[2] - tgt[0]
+        previous = tos[-1]["crop"] if tos else start
+        if [motion.r5(v) for v in tgt] == [motion.r5(v) for v in previous]:
+            # The source resolution or whole-head constraint can leave no
+            # camera room. A requested move that renders identically is a hold,
+            # not an eased change; keep it out of the pace and sound reports.
+            log.setdefault("clamped_moves", []).append(dict(frame=f, pic=sh["pic"]))
+            continue
         tos.append(dict(crop=tgt, at=max(f - a - max(fr // 5, 1), 0), frames=fr, kind=kind, over=bake.MOVE_OVER if (kind == "out" and rng.random() < bake.MOVE_OVER_SHARE) else 0.0))
         log["changes"].append(f)
         log["eased"] += 1

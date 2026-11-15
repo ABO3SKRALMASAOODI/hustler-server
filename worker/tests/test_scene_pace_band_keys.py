@@ -59,3 +59,27 @@ def test_a_move_budget_holds_the_rolling_ten_seconds():
     assert worst <= 7 and log["punches"] + log["eased"] < log0["punches"] + log0["eased"]
     a, la = pace.drive([dict(s) for s in shots], stress, FPS, (W, H), "story", seed=4, band=band)
     assert la == log0                                     # without the key: exactly today's
+
+
+def test_resolution_clamped_take_is_reported_as_a_hold():
+    shot = dict(id="take", f=[0, 234], pic="main", pw=1280, ph=720,
+                src=[0, 7.8], max_up=2.4,
+                faces=[[.50767, .25742, .15596, .36195]])
+    items, report = pace.drive([shot], [], FPS, (W, H), "podcast", seed=1114,
+                              band=dict(motivated_frames=[60, 140, 205]))
+    assert len({tuple(c) for c in items[0]["crop"]}) == 1
+    assert report["eased"] == 0
+    assert report["changes"] == [0]
+    assert report["hold_max"] == 7.8
+    assert len(report["clamped_moves"]) == 3
+
+
+def test_resolved_take_retains_actual_eased_motion():
+    shot = dict(id="take", f=[0, 234], pic="main", pw=3840, ph=2160,
+                src=[0, 7.8], max_up=2.4,
+                faces=[[.50767, .25742, .15596, .36195]])
+    items, report = pace.drive([shot], [], FPS, (W, H), "podcast", seed=1114,
+                              band=dict(motivated_frames=[60, 140, 205]))
+    assert len({tuple(c) for c in items[0]["crop"]}) > 1
+    assert report["eased"] > 0
+    assert report["hold_max"] < 3
