@@ -5658,7 +5658,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # `enable`; schema/tool validation therefore make it whole-video
             # only instead of silently pretending a window works. `mirror`
             # hides the small transformed borders without a permanent crop.
-            radius = 8 + int(round(40 * i_))
+            # FFmpeg accepts only multiples of 16 here, despite exposing
+            # rx/ry as integer options. Intermediate strengths used to
+            # compile (e.g. 28 at .5) but fail at filter initialization.
+            radius = max(16, 16 * int(round((8 + 40 * i_) / 16)))
             parts.append(
                 f"[{vlabel}]deshake=rx={radius}:ry={radius}:edge=mirror:"
                 f"blocksize=8:search=less[{out_lab}]")
