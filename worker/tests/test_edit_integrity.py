@@ -302,3 +302,27 @@ def test_length_target_cut_with_many_stretches_is_checked_not_refused(monkeypatc
     ctx2 = NS(**{**vars(ctx), "_cut_evidence": {}})
     assert "keeps the payoff" in ei.cut_refusal(ctx2, {"keep": [[0, 4858.0]]}, {"keep": after})
     assert groups == [1]
+
+
+def test_length_target_hands_selection_to_editor_and_blank_refusal_is_rechecked(monkeypatch, tmp_path):
+    """Ticket #1318 (user 3120, project 5857, 15 Nov): after #1301 the judge accepted a
+    58.5-minute cut of an 81-minute family video as on target, then refused it because the
+    removed events were "not clearly weaker than what stays"; on footage that is all content no
+    selection could pass, three requests in a row. The judge is now told that a length or
+    highlights request hands the choice of moments to the editor, and a refusal with no
+    reason is a malformed check (retried, never cached), not a final verdict."""
+    import media, llm
+    assert "weaker, idler or more" not in ei.CUT_SYSTEM
+    assert "editor's" in ei.CUT_SYSTEM and "never a reason to refuse" in ei.CUT_SYSTEM
+    monkeypatch.setattr(media, "frame_at", lambda *a, **k: None)
+    monkeypatch.setattr(llm, "image_part", lambda p: {"type": "image_url", "image_url": {"url": p}})
+    answers = [{"allow": False, "reason": ""}, {"allow": True, "reason": "58.5 min, on target"}]
+    monkeypatch.setattr(asks, "_call", lambda *a, **k: (answers.pop(0), {}))
+    after = [[0, 780], [1285, 1849], [2251, 2751], [3192, 4858.22]]
+    ctx = NS(user_message="compile highlights from this video and make it last close to 60 mins",
+             llm_client=object(), agent_model="any", workdir=str(tmp_path),
+             proxy_path=lambda: "source.mp4", index={})
+    first = ei.cut_refusal(ctx, {"keep": [[0, 4858.22]]}, {"keep": after})
+    assert first == ei._UNCHECKED
+    assert ei.cut_refusal(ctx, {"keep": [[0, 4858.22]]}, {"keep": after}) is None
+    assert answers == []

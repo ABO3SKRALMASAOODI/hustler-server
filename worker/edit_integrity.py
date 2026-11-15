@@ -26,9 +26,14 @@ is not evidence of a waiting gap: walking, dancing, demonstrations, reactions an
 can be the content. Removing dead air or repeated takes is not permission to discard that action.
 A deliberate highlights/shorter-cut request can authorize action cuts. A request for a target
 length ("under N minutes", "cut it to N seconds") authorizes removing whatever content is needed to
-reach that length, action included: compare the measured lengths before and after with the target,
-and judge only whether the choice is sensible (the removed stretches are weaker, idler or more
-repetitive than what stays, and the cut does not go far below the target). Keep complete sentences
+reach that length, action included: compare the measured lengths before and after with the target.
+A target length or a highlights request with no named criteria hands the choice of WHICH moments
+go to the editor. Refuse it only when the measured result lands far from the target (still well
+over it, or far below it), when a removed stretch cuts a sentence or thought in the middle, or when
+it removes something the request or contract names to keep. That a removed stretch is watchable
+content too (an event, a performance, people playing) is never a reason to refuse: when the whole
+source is content, content must go to reach the length, and which moments stay is the editor's
+call, not yours. Do not ask for proof that the removed part is weaker than what stays. Keep complete sentences
 and qualifications when requested. For a requested short, a complete relevant thought can end
 the film before an unfinished start of the next thought. Inspect the retained context and the
 actual before/after keep intervals, not only the removed tail. The independently proposed story
@@ -108,8 +113,13 @@ def _check_group(ctx, request, all_spans, spans, first, before, after, story_end
                 parts += [{"type": "text", "text": f"Deleted interval {a:.2f}-{b:.2f}, source {t:.2f}s"},
                           llm.image_part(path)]
         value, _usage = asks._call(ctx, "check_cut_evidence", CUT_SCHEMA, CUT_SYSTEM, parts, max_tokens=1000)
+        reason = str(value.get("reason") or "").strip()
+        if value.get("allow") is not True and not reason:
+            # Ticket #1318: a refusal with no reason ("keep these stretches") is a malformed
+            # check, not a verdict; it is not cached, so the same cut is checked again.
+            return _UNCHECKED
         refusal = None if value.get("allow") is True else (
-            "This cut is not supported by the source evidence: " + str(value.get("reason") or "keep these stretches"))
+            "This cut is not supported by the source evidence: " + reason)
     except Exception as exc:
         print(f"[edit-integrity] cut evidence unavailable: {type(exc).__name__}", flush=True)
         return _UNCHECKED
