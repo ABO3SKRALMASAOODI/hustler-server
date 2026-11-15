@@ -394,6 +394,7 @@ def test_the_scout_boxes_each_kept_shot_for_the_crop(monkeypatch):
     seen = {}
 
     def create(model, messages, **k):
+        assert model == "claude-haiku-5-5"
         seen["system"] = messages[0]["content"]
         return NS(choices=[NS(message=NS(content=answer))],
                   usage=NS(provider_cost_usd=0.001))
