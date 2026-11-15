@@ -969,4 +969,3 @@ def check(ctx,rd,sc):
     footage_box.cleanup_cache(Path(ctx.supply)/'footage')
     footage_box.cleanup_cache(Path(ctx.supply)/'footage'/'witnesses')
     return dict(final=str(final),checks=checks,music=rd['music'],music_in_final=True,spend=[])
-
