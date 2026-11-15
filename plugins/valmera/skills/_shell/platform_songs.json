@@ -1,0 +1,1614 @@
+{
+ "about": "Songs the 28 @metromedia.house reels (the owner's 10/10 judge) actually play, identified by fingerprint (lane MUSIC-REF, 15 Nov 2026). Titles only, no audio. The publisher attaches the chosen song from the platform's own licensed catalog (TikTok, YouTube, Instagram), so the film itself never carries a commercial recording.",
+ "house_sequence": "Hook: Back To Black (Amy Winehouse), Clubbed To Death (Kurayamino Variation) (Rob Dougan) or Stress (Justice); story: Succession (Main Title Theme) (Nicholas Britell); close and call to action: METAMORPHOSIS (INTERWORLD).",
+ "measured": {
+  "bed_under_voice_db_median": -7.1,
+  "enters_at_intro_share": 0.63,
+  "bpm_median": 123.0
+ },
+ "songs": [
+  {
+   "song": "METAMORPHOSIS",
+   "artist": "INTERWORLD",
+   "genre": "Electronic",
+   "released": "2021",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "bill ackman might be the only investor where being completely fucking",
+     "part": "close",
+     "seconds": 34,
+     "enters_at_s": 4,
+     "bpm": 172.3,
+     "mood": [
+      "major",
+      "fast",
+      "dark timbre",
+      "bass-heavy",
+      "builds"
+     ],
+     "under_voice_db": -5.0
+    },
+    {
+     "reel": "This photo has some of the biggest names in Silicon Valley before anyo",
+     "part": "close",
+     "seconds": 24,
+     "enters_at_s": 9,
+     "bpm": 172.3,
+     "mood": [
+      "minor",
+      "fast",
+      "dark timbre",
+      "bass-heavy",
+      "steady"
+     ],
+     "under_voice_db": -7.2
+    },
+    {
+     "reel": "the PayPal Mafia gets treated like seven legendary founders sitting ar",
+     "part": "close",
+     "seconds": 26,
+     "enters_at_s": 123,
+     "bpm": 172.3,
+     "mood": [
+      "minor",
+      "fast",
+      "dark timbre",
+      "bass-heavy",
+      "steady"
+     ],
+     "under_voice_db": -3.4
+    },
+    {
+     "reel": "Everyone knows the PayPal Mafia.",
+     "part": "close",
+     "seconds": 22,
+     "enters_at_s": 296,
+     "bpm": 172.3,
+     "mood": [
+      "fast",
+      "dark timbre",
+      "bass-heavy",
+      "steady"
+     ],
+     "under_voice_db": -2.9
+    },
+    {
+     "reel": "Larry Fink got fired for misreading risk, then built the risk system W",
+     "part": "close",
+     "seconds": 25,
+     "enters_at_s": 8,
+     "bpm": 172.3,
+     "mood": [
+      "fast",
+      "dark timbre",
+      "bass-heavy",
+      "steady"
+     ],
+     "under_voice_db": -6.5
+    }
+   ],
+   "reels": 5
+  },
+  {
+   "song": "Succession (Main Title Theme)",
+   "artist": "Nicholas Britell",
+   "genre": "Soundtrack",
+   "released": "2018",
+   "source": "film/TV score or trailer cue",
+   "uses": [
+    {
+     "reel": "bill ackman might be the only investor where being completely fucking",
+     "part": "body",
+     "seconds": 46,
+     "enters_at_s": 0,
+     "bpm": 136.0,
+     "mood": [
+      "major",
+      "fast",
+      "dark timbre",
+      "bass-heavy",
+      "falls away"
+     ],
+     "under_voice_db": -9.6
+    },
+    {
+     "reel": "the PayPal Mafia gets treated like seven legendary founders sitting ar",
+     "part": "body",
+     "seconds": 38,
+     "enters_at_s": 4,
+     "bpm": 143.6,
+     "mood": [
+      "minor",
+      "fast",
+      "dark timbre",
+      "bass-heavy",
+      "steady"
+     ],
+     "under_voice_db": -8.9
+    },
+    {
+     "reel": "Everyone knows the PayPal Mafia.",
+     "part": "body",
+     "seconds": 38,
+     "enters_at_s": 6,
+     "bpm": 136.0,
+     "mood": [
+      "minor",
+      "fast",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -7.7
+    },
+    {
+     "reel": "Larry Fink got fired for misreading risk, then built the risk system W",
+     "part": "body",
+     "seconds": 58,
+     "enters_at_s": 0,
+     "bpm": 129.2,
+     "mood": [
+      "minor",
+      "driving",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -10.5
+    }
+   ],
+   "reels": 4
+  },
+  {
+   "song": "Clubbed To Death (Kurayamino Variation)",
+   "artist": "Rob Dougan",
+   "genre": "Pop",
+   "released": "2015",
+   "source": "film/TV score or trailer cue",
+   "uses": [
+    {
+     "reel": "bill ackman might be the only investor where being completely fucking",
+     "part": "opening",
+     "seconds": 22,
+     "enters_at_s": 0,
+     "bpm": 103.4,
+     "mood": [
+      "major",
+      "mid-tempo",
+      "mid timbre",
+      "falls away"
+     ],
+     "under_voice_db": -3.9
+    },
+    {
+     "reel": "This photo has some of the biggest names in Silicon Valley before anyo",
+     "part": "body",
+     "seconds": 54,
+     "enters_at_s": 24,
+     "bpm": 103.4,
+     "mood": [
+      "major",
+      "mid-tempo",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -2.5
+    },
+    {
+     "reel": "the food industry spent a century getting insanely good at making us w",
+     "part": "body",
+     "seconds": 22,
+     "enters_at_s": 23,
+     "bpm": 103.4,
+     "mood": [
+      "minor",
+      "mid-tempo",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -1.3
+    }
+   ],
+   "reels": 3
+  },
+  {
+   "song": "Back To Black",
+   "artist": "Amy Winehouse",
+   "genre": "R&B/Soul",
+   "released": "2006",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "the PayPal Mafia gets treated like seven legendary founders sitting ar",
+     "part": "opening",
+     "seconds": 22,
+     "enters_at_s": 0,
+     "bpm": 123.0,
+     "mood": [
+      "major",
+      "driving",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -4.6
+    },
+    {
+     "reel": "Everyone knows the PayPal Mafia.",
+     "part": "opening",
+     "seconds": 18,
+     "enters_at_s": 0,
+     "bpm": 123.0,
+     "mood": [
+      "major",
+      "driving",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -5.9
+    }
+   ],
+   "reels": 2
+  },
+  {
+   "song": "Over",
+   "artist": "Drake",
+   "genre": "Hip-Hop/Rap",
+   "released": "2010",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "every founder you idolize probably owes some of their success to first",
+     "part": "opening",
+     "seconds": 30,
+     "enters_at_s": 0,
+     "bpm": 117.5,
+     "mood": [
+      "driving",
+      "bright timbre",
+      "steady"
+     ],
+     "under_voice_db": -5.8
+    },
+    {
+     "reel": "Max Verstappen gets all the attention.",
+     "part": "body",
+     "seconds": 30,
+     "enters_at_s": 2,
+     "bpm": 152.0,
+     "mood": [
+      "major",
+      "fast",
+      "bright timbre",
+      "builds"
+     ],
+     "under_voice_db": -9.7
+    }
+   ],
+   "reels": 2
+  },
+  {
+   "song": "2099",
+   "artist": "Wave Saver",
+   "genre": "Electronic",
+   "released": "2020",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "In 2008, SpaceX had enough money for one more launch.",
+     "part": "body",
+     "seconds": 46,
+     "enters_at_s": 0,
+     "bpm": 117.5,
+     "mood": [
+      "major",
+      "driving",
+      "dark timbre",
+      "bass-heavy",
+      "builds"
+     ],
+     "under_voice_db": -7.9
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "2am",
+   "artist": "Ben Elson",
+   "genre": "Electronic",
+   "released": "2026",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "In 2008, SpaceX had enough money for one more launch.",
+     "part": "close",
+     "seconds": 39,
+     "enters_at_s": 0,
+     "bpm": 99.4,
+     "mood": [
+      "minor",
+      "mid-tempo",
+      "dark timbre",
+      "steady"
+     ],
+     "under_voice_db": -12.2
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "A New Error",
+   "artist": "Moderat",
+   "genre": "Electronic",
+   "released": "2009",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "@a24 and @a16z figured out the same cheat code.",
+     "part": "opening",
+     "seconds": 70,
+     "enters_at_s": 0,
+     "bpm": 112.3,
+     "mood": [
+      "minor",
+      "driving",
+      "dark timbre",
+      "bass-heavy",
+      "steady"
+     ],
+     "under_voice_db": -0.2
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Aggressive Expansion",
+   "artist": "Hans Zimmer & James Newton Howard",
+   "genre": "Soundtrack",
+   "released": "2008",
+   "source": "film/TV score or trailer cue",
+   "uses": [
+    {
+     "reel": "Robert Pattinson spent years trying to escape being the Twilight guy.",
+     "part": "close",
+     "seconds": 30,
+     "enters_at_s": 12,
+     "bpm": 92.3,
+     "mood": [
+      "mid-tempo",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -14.4
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "An Abyss of Sadness",
+   "artist": "Jon Björk",
+   "genre": "Alternative",
+   "released": "2014",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "In 2008, SpaceX had enough money for one more launch.",
+     "part": "body",
+     "seconds": 26,
+     "enters_at_s": 33,
+     "bpm": 99.4,
+     "mood": [
+      "minor",
+      "mid-tempo",
+      "dark timbre",
+      "falls away"
+     ],
+     "under_voice_db": -9.0
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Black Skinhead",
+   "artist": "Kanye West",
+   "genre": "Hip-Hop/Rap",
+   "released": "2013",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "Palmer Luckey’s career has a pattern: look at what exists, decide it i",
+     "part": "body",
+     "seconds": 22,
+     "enters_at_s": 17,
+     "bpm": 129.2,
+     "mood": [
+      "driving",
+      "dark timbre",
+      "bass-heavy",
+      "falls away"
+     ],
+     "under_voice_db": -1.7
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Blurry",
+   "artist": "Bankston",
+   "genre": "Pop",
+   "released": "2025",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "Intel, AMD and modern Silicon Valley all trace back to eight engineers",
+     "part": "close",
+     "seconds": 18,
+     "enters_at_s": 140,
+     "bpm": 117.5,
+     "mood": [
+      "driving",
+      "mid timbre",
+      "builds"
+     ],
+     "under_voice_db": -6.4
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Call On Me Maybe",
+   "artist": "DJ K.O.",
+   "genre": "Pop",
+   "released": null,
+   "source": "independent / self-released",
+   "uses": [
+    {
+     "reel": "the PayPal Mafia gets treated like seven legendary founders sitting ar",
+     "part": "body",
+     "seconds": 18,
+     "enters_at_s": 138,
+     "bpm": 172.3,
+     "mood": [
+      "major",
+      "fast",
+      "dark timbre",
+      "bass-heavy",
+      "builds"
+     ],
+     "under_voice_db": -5.1
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Catalyst",
+   "artist": "BalloonPlanet",
+   "genre": "Instrumental",
+   "released": "2026",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "Before Demis Hassabis won a Nobel Prize, he was designing video games.",
+     "part": "close",
+     "seconds": 38,
+     "enters_at_s": 129,
+     "bpm": 117.5,
+     "mood": [
+      "minor",
+      "driving",
+      "bright timbre",
+      "falls away"
+     ],
+     "under_voice_db": -5.3
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Chaos at the Spaceship",
+   "artist": "Out of Flux",
+   "genre": "Electronic",
+   "released": "2021",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "Legora’s first office was a hallway. Its first customer was a friend’s",
+     "part": "opening",
+     "seconds": 22,
+     "enters_at_s": 15,
+     "bpm": 123.0,
+     "mood": [
+      "driving",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -4.7
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Cosmic Countdown",
+   "artist": "Ben Elson",
+   "genre": "Electronic",
+   "released": "2024",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "Intel, AMD and modern Silicon Valley all trace back to eight engineers",
+     "part": "opening",
+     "seconds": 62,
+     "enters_at_s": 14,
+     "bpm": 99.4,
+     "mood": [
+      "minor",
+      "mid-tempo",
+      "dark timbre",
+      "steady"
+     ],
+     "under_voice_db": -8.3
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Cross the Line",
+   "artist": "Audiomachine & Harry Lightfoot",
+   "genre": "Soundtrack",
+   "released": "2024",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "i think “grow your audience” is some of the worst startup advice on th",
+     "part": "opening",
+     "seconds": 22,
+     "enters_at_s": 91,
+     "bpm": 143.6,
+     "mood": [
+      "fast",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -13.2
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "DON'T STOP GRINDING (Eric Thomas)",
+   "artist": "Daily Motivation",
+   "genre": "World",
+   "released": null,
+   "source": "independent / self-released",
+   "uses": [
+    {
+     "reel": "In 2008, SpaceX had enough money for one more launch.",
+     "part": "opening",
+     "seconds": 22,
+     "enters_at_s": 89,
+     "bpm": 152.0,
+     "mood": [
+      "minor",
+      "fast",
+      "dark timbre",
+      "bass-heavy",
+      "steady"
+     ],
+     "under_voice_db": -10.8
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Dies Irae (Just Raw)",
+   "artist": "Aloboi",
+   "genre": "Electronica",
+   "released": "2024",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "one thing we’ve noticed after working with great founders:",
+     "part": "opening",
+     "seconds": 18,
+     "enters_at_s": 0,
+     "bpm": 143.6,
+     "mood": [
+      "minor",
+      "fast",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -9.9
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Dirty Harry (feat. Bootie Brown)",
+   "artist": "Gorillaz",
+   "genre": "Alternative",
+   "released": "2005",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "Palmer Luckey’s career has a pattern: look at what exists, decide it i",
+     "part": "body",
+     "seconds": 30,
+     "enters_at_s": 38,
+     "bpm": 129.2,
+     "mood": [
+      "major",
+      "driving",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -0.3
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Fable",
+   "artist": "Jakob Ahlbom",
+   "genre": "Classical",
+   "released": "2026",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "Airbnb once sold cereal to keep the company alive.",
+     "part": "close",
+     "seconds": 49,
+     "enters_at_s": 112,
+     "bpm": 123.0,
+     "mood": [
+      "minor",
+      "driving",
+      "dark timbre",
+      "bass-heavy",
+      "falls away"
+     ],
+     "under_voice_db": -12.2
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Fast Bow",
+   "artist": "FableForte",
+   "genre": "Instrumental",
+   "released": "2026",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "Jan Koum was rejected by Facebook in 2009. Five years later, Facebook",
+     "part": "body",
+     "seconds": 22,
+     "enters_at_s": 1,
+     "bpm": 123.0,
+     "mood": [
+      "minor",
+      "driving",
+      "dark timbre",
+      "bass-heavy",
+      "builds"
+     ],
+     "under_voice_db": -3.2
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Flashing Lights (feat. Dwele)",
+   "artist": "Kanye West",
+   "genre": "Hip-Hop/Rap",
+   "released": "2007",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "Palmer Luckey’s career has a pattern: look at what exists, decide it i",
+     "part": "opening",
+     "seconds": 30,
+     "enters_at_s": 10,
+     "bpm": 92.3,
+     "mood": [
+      "minor",
+      "mid-tempo",
+      "mid timbre",
+      "builds"
+     ],
+     "under_voice_db": 1.2
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "George Bondo (feat. Conway the Machine & BENNY the BUTCHER)",
+   "artist": "Westside Gunn",
+   "genre": "Hip-Hop/Rap",
+   "released": "2020",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "We call it psychotic when it goes in the wrong direction.",
+     "part": "body",
+     "seconds": 26,
+     "enters_at_s": 0,
+     "bpm": 161.5,
+     "mood": [
+      "fast",
+      "mid timbre",
+      "builds"
+     ],
+     "under_voice_db": -5.7
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Gimme More",
+   "artist": "Britney Spears",
+   "genre": "Pop",
+   "released": "2007",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "people still talk about Nico Rosberg’s 2016 title like he caught light",
+     "part": "opening",
+     "seconds": 46,
+     "enters_at_s": 0,
+     "bpm": 112.3,
+     "mood": [
+      "driving",
+      "dark timbre",
+      "steady"
+     ],
+     "under_voice_db": -8.8
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Impossible Theory",
+   "artist": "Rachel Sandy",
+   "genre": "Classical",
+   "released": "2025",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "In 1979, Steve Jobs walked into Xerox PARC and saw what computers were",
+     "part": "close",
+     "seconds": 68,
+     "enters_at_s": 0,
+     "bpm": 99.4,
+     "mood": [
+      "mid-tempo",
+      "dark timbre",
+      "bass-heavy",
+      "steady"
+     ],
+     "under_voice_db": -6.8
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Invictus",
+   "artist": "Lance Conrad",
+   "genre": "Instrumental",
+   "released": "2026",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "Before Demis Hassabis won a Nobel Prize, he was designing video games.",
+     "part": "body",
+     "seconds": 30,
+     "enters_at_s": 116,
+     "bpm": 161.5,
+     "mood": [
+      "major",
+      "fast",
+      "mid timbre",
+      "builds"
+     ],
+     "under_voice_db": -4.0
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Just a Lil Bit",
+   "artist": "50 Cent",
+   "genre": "Hip-Hop/Rap",
+   "released": "2005",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "being the best is useless if nobody thinks you’re the one to bet on.",
+     "part": "body",
+     "seconds": 22,
+     "enters_at_s": 57,
+     "bpm": 95.7,
+     "mood": [
+      "mid-tempo",
+      "mid timbre",
+      "falls away"
+     ],
+     "under_voice_db": -6.7
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Les",
+   "artist": "Childish Gambino",
+   "genre": "Hip-Hop/Rap",
+   "released": "2011",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "people still talk about Nico Rosberg’s 2016 title like he caught light",
+     "part": "close",
+     "seconds": 27,
+     "enters_at_s": 94,
+     "bpm": 136.0,
+     "mood": [
+      "fast",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -17.2
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Light Sail",
+   "artist": "Kevin Graham",
+   "genre": "Instrumental",
+   "released": "2026",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "Before Demis Hassabis won a Nobel Prize, he was designing video games.",
+     "part": "body",
+     "seconds": 42,
+     "enters_at_s": 11,
+     "bpm": 117.5,
+     "mood": [
+      "major",
+      "driving",
+      "dark timbre",
+      "bass-heavy",
+      "builds"
+     ],
+     "under_voice_db": -6.6
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Many Men (Wish Death)",
+   "artist": "50 Cent",
+   "genre": "Hip-Hop/Rap",
+   "released": "2003",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "We call it psychotic when it goes in the wrong direction.",
+     "part": "close",
+     "seconds": 51,
+     "enters_at_s": 11,
+     "bpm": 107.7,
+     "mood": [
+      "major",
+      "mid-tempo",
+      "mid timbre",
+      "bass-heavy",
+      "steady"
+     ],
+     "under_voice_db": -5.5
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Mirrors",
+   "artist": "Justin Timberlake",
+   "genre": "Pop",
+   "released": "2013",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "being the best is useless if nobody thinks you’re the one to bet on.",
+     "part": "close",
+     "seconds": 42,
+     "enters_at_s": 0,
+     "bpm": 103.4,
+     "mood": [
+      "minor",
+      "mid-tempo",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -12.9
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "My House",
+   "artist": "Flo Rida",
+   "genre": "Hip-Hop/Rap",
+   "released": "2015",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "being the best is useless if nobody thinks you’re the one to bet on.",
+     "part": "body",
+     "seconds": 26,
+     "enters_at_s": 0,
+     "bpm": 95.7,
+     "mood": [
+      "major",
+      "mid-tempo",
+      "mid timbre",
+      "builds"
+     ],
+     "under_voice_db": -9.2
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "National Treasures",
+   "artist": "Drake",
+   "genre": "Hip-Hop/Rap",
+   "released": "2026",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "Palmer Luckey’s career has a pattern: look at what exists, decide it i",
+     "part": "close",
+     "seconds": 38,
+     "enters_at_s": 187,
+     "bpm": 129.2,
+     "mood": [
+      "minor",
+      "driving",
+      "dark timbre",
+      "bass-heavy",
+      "steady"
+     ],
+     "under_voice_db": 1.0
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "New Computers",
+   "artist": "Girlfriends",
+   "genre": "Indie Rock",
+   "released": "2005",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "i think “grow your audience” is some of the worst startup advice on th",
+     "part": "body",
+     "seconds": 26,
+     "enters_at_s": 0,
+     "bpm": 99.4,
+     "mood": [
+      "minor",
+      "mid-tempo",
+      "dark timbre",
+      "builds"
+     ],
+     "under_voice_db": -11.7
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "New World",
+   "artist": "Ian Post",
+   "genre": "Electronic",
+   "released": "2020",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "Anthropic named Claude after Claude Shannon, a man who used to juggle",
+     "part": "close",
+     "seconds": 13,
+     "enters_at_s": 8,
+     "bpm": 129.2,
+     "mood": [
+      "major",
+      "driving",
+      "dark timbre",
+      "falls away"
+     ],
+     "under_voice_db": -18.7
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Nightcall",
+   "artist": "Kavinsky",
+   "genre": "Electronic",
+   "released": "2010",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "Max Verstappen gets all the attention.",
+     "part": "close",
+     "seconds": 30,
+     "enters_at_s": 239,
+     "bpm": 92.3,
+     "mood": [
+      "major",
+      "mid-tempo",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -7.5
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "One More Win",
+   "artist": "BalloonPlanet",
+   "genre": "Indie Rock",
+   "released": "2026",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "Before Demis Hassabis won a Nobel Prize, he was designing video games.",
+     "part": "opening",
+     "seconds": 18,
+     "enters_at_s": 0,
+     "bpm": 136.0,
+     "mood": [
+      "fast",
+      "mid timbre",
+      "falls away"
+     ],
+     "under_voice_db": -9.1
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Outrun the Night",
+   "artist": "Between Planets",
+   "genre": "Downtempo",
+   "released": "2023",
+   "source": "independent / self-released",
+   "uses": [
+    {
+     "reel": "every founder you idolize probably owes some of their success to first",
+     "part": "close",
+     "seconds": 56,
+     "enters_at_s": 45,
+     "bpm": 103.4,
+     "mood": [
+      "mid-tempo",
+      "mid timbre",
+      "builds"
+     ],
+     "under_voice_db": -7.3
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Pacification",
+   "artist": "Siddharth Parashar",
+   "genre": "Classical",
+   "released": "2026",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "In 1979, Steve Jobs walked into Xerox PARC and saw what computers were",
+     "part": "opening",
+     "seconds": 38,
+     "enters_at_s": 1,
+     "bpm": 143.6,
+     "mood": [
+      "fast",
+      "mid timbre",
+      "falls away"
+     ],
+     "under_voice_db": -8.5
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Pocket Money",
+   "artist": "Steven Beddall",
+   "genre": "Funk",
+   "released": "2026",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "Jan Koum was rejected by Facebook in 2009. Five years later, Facebook",
+     "part": "body",
+     "seconds": 42,
+     "enters_at_s": 1,
+     "bpm": 117.5,
+     "mood": [
+      "driving",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": 0.4
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Poker Face",
+   "artist": "Lady Gaga",
+   "genre": "Pop",
+   "released": "2008",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "one thing we’ve noticed after working with great founders:",
+     "part": "body",
+     "seconds": 38,
+     "enters_at_s": 0,
+     "bpm": 117.5,
+     "mood": [
+      "driving",
+      "mid timbre",
+      "builds"
+     ],
+     "under_voice_db": -12.6
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Quick",
+   "artist": "Boudicca",
+   "genre": "Rock",
+   "released": "2025",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "Legora’s first office was a hallway. Its first customer was a friend’s",
+     "part": "body",
+     "seconds": 22,
+     "enters_at_s": 9,
+     "bpm": 172.3,
+     "mood": [
+      "fast",
+      "bright timbre",
+      "steady"
+     ],
+     "under_voice_db": -8.3
+    },
+    {
+     "reel": "Legora’s first office was a hallway. Its first customer was a friend’s",
+     "part": "close",
+     "seconds": 28,
+     "enters_at_s": 11,
+     "bpm": 172.3,
+     "mood": [
+      "fast",
+      "bright timbre",
+      "steady"
+     ],
+     "under_voice_db": -10.2
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Run Boy Run",
+   "artist": "Woodkid",
+   "genre": "Alternative",
+   "released": "2012",
+   "source": "film/TV score or trailer cue",
+   "uses": [
+    {
+     "reel": "Man City might be the closest football ever got to a VC-backed startup",
+     "part": "body",
+     "seconds": 22,
+     "enters_at_s": 87,
+     "bpm": 136.0,
+     "mood": [
+      "major",
+      "fast",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -12.2
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Shoot to Thrill",
+   "artist": "AC/DC",
+   "genre": "Hard Rock",
+   "released": "1980",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "the food industry spent a century getting insanely good at making us w",
+     "part": "body",
+     "seconds": 34,
+     "enters_at_s": 0,
+     "bpm": 136.0,
+     "mood": [
+      "major",
+      "fast",
+      "mid timbre",
+      "builds"
+     ],
+     "under_voice_db": -4.4
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "States",
+   "artist": "Christoffer Moe Ditlevsen",
+   "genre": "Classical",
+   "released": "2025",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "Descript started as an internal tool nobody planned to sell. Its found",
+     "part": "body",
+     "seconds": 18,
+     "enters_at_s": 69,
+     "bpm": 129.2,
+     "mood": [
+      "major",
+      "driving",
+      "dark timbre",
+      "bass-heavy",
+      "builds"
+     ],
+     "under_voice_db": -6.9
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Still D.R.E. (feat. Snoop Dogg)",
+   "artist": "Dr. Dre",
+   "genre": "Pop",
+   "released": "1999",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "one viral launch video has killed more startup content strategies than",
+     "part": "body",
+     "seconds": 26,
+     "enters_at_s": 0,
+     "bpm": 92.3,
+     "mood": [
+      "mid-tempo",
+      "mid timbre",
+      "builds"
+     ],
+     "under_voice_db": -5.9
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Stress",
+   "artist": "Justice",
+   "genre": "Electronic",
+   "released": "2007",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "McConaughey changed the way Hollywood saw him, and everything changed",
+     "part": "close",
+     "seconds": 35,
+     "enters_at_s": 160,
+     "bpm": 129.2,
+     "mood": [
+      "driving",
+      "mid timbre",
+      "falls away"
+     ],
+     "under_voice_db": -5.5
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Superhero (Heroes & Villains)",
+   "artist": "Metro Boomin, Future & Chris Brown",
+   "genre": "Hip-Hop/Rap",
+   "released": "2022",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "one viral launch video has killed more startup content strategies than",
+     "part": "body",
+     "seconds": 18,
+     "enters_at_s": 12,
+     "bpm": 117.5,
+     "mood": [
+      "minor",
+      "driving",
+      "dark timbre",
+      "bass-heavy",
+      "steady"
+     ],
+     "under_voice_db": -4.9
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Sweet Dreams",
+   "artist": "Elisabetta Mattia",
+   "genre": "Pop",
+   "released": "2020",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "one thing we’ve noticed after working with great founders:",
+     "part": "close",
+     "seconds": 26,
+     "enters_at_s": 0,
+     "bpm": 123.0,
+     "mood": [
+      "minor",
+      "driving",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -12.4
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Take On Me",
+   "artist": "a-ha",
+   "genre": "Pop",
+   "released": "1985",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "Max Verstappen gets all the attention.",
+     "part": "body",
+     "seconds": 18,
+     "enters_at_s": 2,
+     "bpm": 172.3,
+     "mood": [
+      "fast",
+      "bright timbre",
+      "steady"
+     ],
+     "under_voice_db": -6.6
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Tartan",
+   "artist": "EsDeeKid & Fimiguerrero",
+   "genre": "Rap",
+   "released": "2025",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "the food industry spent a century getting insanely good at making us w",
+     "part": "close",
+     "seconds": 18,
+     "enters_at_s": 95,
+     "bpm": 143.6,
+     "mood": [
+      "minor",
+      "fast",
+      "bright timbre",
+      "steady"
+     ],
+     "under_voice_db": 0.2
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Tempesta",
+   "artist": "Steven Beddall & Nono",
+   "genre": "Instrumental",
+   "released": "2026",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "Anthropic named Claude after Claude Shannon, a man who used to juggle",
+     "part": "opening",
+     "seconds": 50,
+     "enters_at_s": 0,
+     "bpm": 129.2,
+     "mood": [
+      "major",
+      "driving",
+      "dark timbre",
+      "steady"
+     ],
+     "under_voice_db": -18.8
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "The Redline Principle",
+   "artist": "Rachel Sandy",
+   "genre": "Classical",
+   "released": "2026",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "Descript started as an internal tool nobody planned to sell. Its found",
+     "part": "close",
+     "seconds": 54,
+     "enters_at_s": 52,
+     "bpm": 143.6,
+     "mood": [
+      "fast",
+      "dark timbre",
+      "steady"
+     ],
+     "under_voice_db": -6.4
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Thunderstruck",
+   "artist": "AC/DC",
+   "genre": "Hard Rock",
+   "released": "1990",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "the food industry spent a century getting insanely good at making us w",
+     "part": "opening",
+     "seconds": 26,
+     "enters_at_s": 1,
+     "bpm": 136.0,
+     "mood": [
+      "fast",
+      "bright timbre",
+      "builds"
+     ],
+     "under_voice_db": -5.5
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Toxicity",
+   "artist": "System Of A Down",
+   "genre": "Hard Rock",
+   "released": "2001",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "people still talk about Nico Rosberg’s 2016 title like he caught light",
+     "part": "body",
+     "seconds": 22,
+     "enters_at_s": 0,
+     "bpm": 123.0,
+     "mood": [
+      "minor",
+      "driving",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -22.6
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Tread Lightly",
+   "artist": "Francesco D'Andrea",
+   "genre": "Instrumental",
+   "released": "2026",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "Jan Koum was rejected by Facebook in 2009. Five years later, Facebook",
+     "part": "close",
+     "seconds": 27,
+     "enters_at_s": 62,
+     "bpm": 107.7,
+     "mood": [
+      "minor",
+      "mid-tempo",
+      "dark timbre",
+      "steady"
+     ],
+     "under_voice_db": -3.6
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Unseen",
+   "artist": "Elin Piel",
+   "genre": "Electronica",
+   "released": "2026",
+   "source": "production library",
+   "uses": [
+    {
+     "reel": "Airbnb once sold cereal to keep the company alive.",
+     "part": "opening",
+     "seconds": 22,
+     "enters_at_s": 0,
+     "bpm": 117.5,
+     "mood": [
+      "minor",
+      "driving",
+      "dark timbre",
+      "steady"
+     ],
+     "under_voice_db": -12.1
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "WE ON GO",
+   "artist": "BIA",
+   "genre": "Hip-Hop/Rap",
+   "released": "2025",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "i think “grow your audience” is some of the worst startup advice on th",
+     "part": "close",
+     "seconds": 36,
+     "enters_at_s": 0,
+     "bpm": 129.2,
+     "mood": [
+      "major",
+      "driving",
+      "mid timbre",
+      "steady"
+     ],
+     "under_voice_db": -13.7
+    }
+   ],
+   "reels": 1
+  },
+  {
+   "song": "Work Bitch",
+   "artist": "Britney Spears",
+   "genre": "Pop",
+   "released": "2013",
+   "source": "commercial release",
+   "uses": [
+    {
+     "reel": "people still talk about Nico Rosberg’s 2016 title like he caught light",
+     "part": "body",
+     "seconds": 30,
+     "enters_at_s": 8,
+     "bpm": 129.2,
+     "mood": [
+      "minor",
+      "driving",
+      "bright timbre",
+      "builds"
+     ],
+     "under_voice_db": -17.1
+    }
+   ],
+   "reels": 1
+  }
+ ]
+}

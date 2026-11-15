@@ -158,3 +158,14 @@ Changing one-shot frames/transcripts are outside that write;
 editor conversations also keep implicit 30m history caching. GPT-5.5 and
 other documented legacy models use `prompt_cache_retention: "24h"`. Short
 prefixes below the provider minimum are left short; no padding is added.
+
+## The platform song (owner, 15 Nov 2026)
+
+TikTok and YouTube mute or take down a film that carries a commercial recording; the same song added from the app's own
+licensed catalog is allowed. So every delivered film also gets `platform_music.json` (`platform_song.py`): Valmera's
+choice of one song from what the 28 @metromedia.house reels actually play (`platform_songs.json`, lane MUSIC-REF,
+titles only, no audio), its entrance (`start`, m:ss into the song), two alternates, and the owner's standing level
+(original sound 100%, added song 25%). The publisher posts the `upload` file (the film without our music bed) and adds
+that song from the platform's catalog. A model chooses (the palette is the cached prefix, the film comes last); the
+answer must name a palette song. A podcast folder has one `platform_music.json` listing every short's `clean/` file.
+A failure never stops a delivery; `--args '{"platform_song": false}'` turns it off.

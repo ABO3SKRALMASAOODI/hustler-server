@@ -31,6 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import chain  # noqa: E402
 import delivered as DL  # noqa: E402
+import platform_song  # noqa: E402
 
 V = "/Users/masaoodi/Documents/Valmera/.valmera"
 STATE_ROOT = os.environ.get("SHELL_STATE_ROOT", f"{V}/workflow")
@@ -251,6 +252,18 @@ def deliver(ctx, state, out_root, results):
             rec["music"]["clean_export"] = "film_clean.mp4"
     if chk.get("song"):
         rec["song"] = dict(chk["song"], film="film_song.mp4", clean_export="film.mp4")
+    # The song the film is posted with (owner, 15 Nov 2026): Valmera chooses it from what the judge's reels play, the
+    # publisher adds it from the platform's own catalog to the film without our music bed. A film whose music is baked
+    # in has no clean export to post; a song the owner handed over is his choice already.
+    upload = None if music_in_final or chk.get("song") else ("film_clean.mp4" if scored else "film.mp4")
+    if upload and wants_platform_song(ctx):
+        pm, pspend = platform_song.choose_safely(ctx.workflow, script, (chk.get("checks") or {}).get("final_s"), upload,
+                                                 state_root=ctx.state_root, log=ctx.log)
+        if pm:
+            jsave(os.path.join(part, "platform_music.json"), pm)
+            rec["platform_music"] = pm
+            rec["spend"] = spend + pspend
+            rec["spend_usd"] = round(sum(float(s.get("usd") or 0) for s in rec["spend"]), 4)
     jsave(os.path.join(part, "film.json"), rec)
     if row:                                      # the rename and the ledger row together, under the ledger's lock
         DL.deliver_once(row, commit=lambda: os.rename(part, final_dir))
@@ -259,6 +272,11 @@ def deliver(ctx, state, out_root, results):
     ledger_add(ctx.state_root, ctx.workflow, dict(run_id=ctx.run_id, style=script["style"]["id"], idea=script.get("title"),
                                                   source=ctx.source, window=script.get("window"), delivered=final_dir, at=now()))
     return dict(folder=final_dir, bytes=du(final_dir), spend_usd=rec["spend_usd"])
+
+
+def wants_platform_song(ctx):
+    """Every delivered film gets its platform song unless the run says otherwise: --args '{"platform_song": false}'."""
+    return (ctx.args or {}).get("platform_song", True) is not False and ctx.workflow != "selftest"
 
 
 def ledger_mode(ctx, folder=None):

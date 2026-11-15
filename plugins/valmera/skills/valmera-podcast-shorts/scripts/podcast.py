@@ -681,7 +681,8 @@ def deliver(run, fetched, sel, built, out_root, test=False):
                             display_words=pc.get("display_words"), finishes=pc.get("finishes"), alien=pc.get("alien"),
                             sounds=(ch.get("music") or {}).get("sounds"),
                             music=(dict(title=mu.get("title"), author=mu.get("author"), license=mu.get("license"), credit=mu.get("credit")) if has_music and mu.get("title") else None),
-                            sources=pc.get("sources"), spend_usd=f.get("spend_usd")))
+                            sources=pc.get("sources"), spend_usd=f.get("spend_usd"),
+                            platform_music=(dict(f["platform_music"], upload=f"clean/{fn}") if f.get("platform_music") else None)))
     spend = round(sum(float(x.get("spend_usd") or 0) for x in listing) + sum(float(s.get("usd") or 0) for s in sel.get("spend") or []), 2)
     failed = [dict(id=r["id"], title=next((m.get("title") for m in sel["moments"] if m["id"] == r["id"]), None), error=r.get("error")) for r in built["failed"]]
     manifest = dict(contract=1, workflow="valmera-podcast-shorts", delivered=now(), published=False,
@@ -690,12 +691,20 @@ def deliver(run, fetched, sel, built, out_root, test=False):
                     podcast=pod, moments_found=sel.get("found"), bar=sel.get("bar"), shorts=listing, not_made=failed, left_out=sel.get("left_out"),
                     spend_usd=spend, seconds=run.state.get("seconds"))
     jsave(os.path.join(part, "shorts.json"), manifest)
+    songs = [x["platform_music"] for x in listing if x.get("platform_music")]
+    if songs:   # the song each short is posted with, from the platform's own catalog (owner, 15 Nov 2026; _shell/platform_song.py)
+        jsave(os.path.join(part, "platform_music.json"), dict(contract=1, how=songs[0].get("how"), shorts=[
+            dict(n=x["n"], upload=x["platform_music"]["upload"], **{k: x["platform_music"].get(k) for k in (
+                "song", "artist", "start", "original_sound_pct", "added_sound_pct", "alternates", "why")})
+            for x in listing if x.get("platform_music")]))
     pod_line = f"- {info.get('title')} | {info.get('channel') or info.get('uploader')} | {link} | published {info.get('upload_date')}"
     with open(os.path.join(part, "SOURCES.md"), "w") as fh:
         fh.write(_sources_md(pod_line, rows) + "\n")
     with open(os.path.join(part, "README.md"), "w") as fh:
         fh.write(f"# {os.path.basename(final)}\n\n{len(rows)} shorts from {link}, strongest first. Delivered once, complete: nothing is added to this folder later.\n\n"
                  "Not published. Each short keeps Valmera's watermark and end card. `clean/` holds the same shorts without music.\n"
+                 + ("Post the `clean/` file of each short with the song platform_music.json names, added from the platform's own catalog.\n" if any(x.get("platform_music") for x in listing) else "")
+                 + 
                  "Rights: the real footage is not licensed, and the music needs its credit line wherever a short is posted. See SOURCES.md.\n\n"
                  "| # | Short | Style | Seconds | Pictures | Music |\n|---|---|---|---:|---:|---|\n"
                  + "\n".join(f"| {x['n']:02d} | {x['title']} | {x['style']} | {x['seconds'] or 0:.1f} | {x['pictures'] or 0} | {(x['music'] or {}).get('title') or 'none'} |" for x in listing)

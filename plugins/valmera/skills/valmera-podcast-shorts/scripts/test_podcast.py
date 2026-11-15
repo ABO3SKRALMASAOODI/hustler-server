@@ -380,3 +380,29 @@ def test_an_out_outside_the_delivery_folders_is_a_test_never_recorded(tmp_path, 
     with pytest.raises(SystemExit):
         podcast.main()
     assert not os.path.exists(out) and len(DL.rows()) == 1
+
+
+def test_each_short_carries_its_platform_song_to_the_podcast_folder(tmp_path, monkeypatch, capsys):
+    """Owner, 15 Nov 2026: the publisher adds the song Valmera chose from the platform's own catalog. Each short's choice
+    (made at its delivery, _shell/platform_song.py) reaches shorts.json and one platform_music.json naming the clean/ file."""
+    work_root, out = _fake_run(tmp_path, monkeypatch)
+    made = podcast.build_short
+
+    def build_short(run, m, fetched, pod, tries=3):
+        r = made(run, m, fetched, pod, tries)
+        p = os.path.join(r["folder"], "film.json")
+        rec = json.load(open(p))
+        rec["platform_music"] = dict(upload="film_clean.mp4", song=f"Song {m['id']}", artist="A", start="0:00", original_sound_pct=100,
+                                     added_sound_pct=25, alternates=[], why="fits", how="post it")
+        json.dump(rec, open(p, "w"))
+        return r
+    monkeypatch.setattr(podcast, "build_short", build_short)
+    monkeypatch.setattr(sys, "argv", ["podcast.py", "https://youtu.be/abcdefghijk", "--out", out])
+    assert podcast.main() == 0
+    folder = json.loads(capsys.readouterr().out.strip().splitlines()[-1])["delivered"]
+    pm = json.load(open(os.path.join(folder, "platform_music.json")))
+    assert [s["upload"] for s in pm["shorts"]] == ["clean/01 - Title m01.mp4", "clean/02 - Title m02.mp4", "clean/03 - Title m03.mp4"]
+    assert pm["shorts"][0]["song"] == "Song m01" and pm["shorts"][0]["added_sound_pct"] == 25 and pm["how"] == "post it"
+    man = json.load(open(os.path.join(folder, "shorts.json")))
+    assert man["shorts"][1]["platform_music"]["upload"] == "clean/02 - Title m02.mp4"
+    assert "platform_music.json" in open(os.path.join(folder, "README.md")).read()
