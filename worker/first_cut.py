@@ -1808,10 +1808,20 @@ def _run(ctx, steps, name, args, started):
         steps.append({"tool": name, "skipped": "time"})
         return None
     t0 = time.monotonic()
+    # These sizes are the chain's design choices, not a customer's pinned
+    # dimensions. Let the measured face keep-out fit them when necessary.
+    missing = object()
+    previous_fit = getattr(ctx, "first_cut_auto_graphic", missing)
+    ctx.first_cut_auto_graphic = name in {"add_motion_graphic", "set_motion_graphic"}
     try:
         result = agent_tools.execute(ctx, name, args)
     except Exception as exc:  # noqa: BLE001 — one step never sinks the cut
         result = f"FAILED: {type(exc).__name__}: {str(exc)[:200]}"
+    finally:
+        if previous_fit is missing:
+            delattr(ctx, "first_cut_auto_graphic")
+        else:
+            ctx.first_cut_auto_graphic = previous_fit
     steps.append({"tool": name, "ok": not _failed(result),
                   "s": round(time.monotonic() - t0, 1),
                   "note": str(result or "")[:160]})
