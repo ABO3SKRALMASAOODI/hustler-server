@@ -30,7 +30,7 @@ def widths(s):
 def test_the_scout_may_wish_a_metaphor_and_names_which_kind_each_picture_is():
     text = scout.SYSTEM
     assert "Never a mood, a metaphor" not in text
-    assert '"how":"thing|like"' in text and "up to 16" in text
+    assert '"how":"thing|like"' in text and f"up to {scout.WISHES_MOST}" in text
     assert "ids, never the words themselves" in text            # a wish lands on word ids, so the cut can find its word
     for bad in ("handshake", "skyline"):                           # what taste still throws away is named
         assert bad in text
