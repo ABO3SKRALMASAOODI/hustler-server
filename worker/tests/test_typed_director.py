@@ -184,6 +184,53 @@ def test_typed_write_uses_request_guards_and_propagates_asset_grants():
     assert not hasattr(ctx, "director_version")
 
 
+def test_wordless_montage_declares_canvas_without_changing_pictures_or_bypassing_guard():
+    from schemas import validate_edl
+    writes = []
+    ctx = NS(latest_edl=lambda: {"json": {"keep": [[0, 10]]}},
+             write_edl=lambda edl, note: writes.append(edl) or "REJECTED: source must remain")
+    view = typed.WindowContext(ctx, {"video": {"duration": 10}}, "proxy", 0, "original", 9)
+    edl = {"keep": [], "frame": {"ratio": "9:16", "mode": "crop"},
+        "inserts": [{"id": "shot", "asset_key": "original", "kind": "video",
+                     "at_output_s": 0, "duration_s": 3, "source_start_s": 2}]}
+    before = copy.deepcopy(edl)
+    prepared = view.director_prepare_edl(edl, {"frame": [720, 1280], "fps": 30})
+    normalized = validate_edl(prepared, 10).model_dump()
+    assert normalized["canvas"] == {"width": 720, "height": 1280, "fps": 30, "bg_color": "#000000"}
+    assert prepared["inserts"] == before["inserts"] and edl == before
+    assert view.apply_score(prepared, "montage").startswith("REJECTED")
+    assert writes == [prepared]
+    assert not hasattr(ctx, "_score_write")
+
+
+def test_canvas_transition_checks_final_deletions_with_pictures_in_one_valid_write(monkeypatch):
+    import agent_tools
+    import edit_integrity
+    from schemas import validate_edl
+    row = {"json": {"keep": [[i*2, i*2+1] for i in range(25)]}}
+    ctx = NS(latest_edl=lambda: copy.deepcopy(row))
+    target = {"keep": [], "canvas": {"width": 720, "height": 1280, "fps": 30},
+              "inserts": [{"id": "shot", "asset_key": "original", "kind": "video",
+                           "at_output_s": 0, "duration_s": 3, "source_start_s": 2}]}
+    batches = []
+    def checked_keep(got, keep, *args, **kwargs):
+        assert got is ctx and keep  # never save an empty keep-only intermediate
+        spans = edit_integrity.removed_spans(row["json"]["keep"], keep)
+        assert len(spans) <= 12
+        batches.append(len(spans))
+        row["json"]["keep"] = keep
+        return "EDL v2"
+    def checked_write(edl, note):
+        validate_edl(edl, 50)
+        assert len(edit_integrity.removed_spans(row["json"]["keep"], edl["keep"])) == 12
+        assert edl["inserts"] == target["inserts"]
+        return "REJECTED: final source-evidence check still refuses"
+    monkeypatch.setattr(agent_tools, "_write_keep", checked_keep)
+    ctx.write_edl = checked_write
+    assert typed.write_film(ctx, target).startswith("REJECTED")
+    assert batches == [12, 1]
+
+
 @pytest.mark.parametrize("refuse_batch", [None, 2])
 def test_long_director_cut_uses_checked_batches_and_stops_on_refusal(monkeypatch, refuse_batch):
     import agent_tools
