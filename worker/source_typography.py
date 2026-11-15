@@ -68,16 +68,19 @@ def captioned(index):
     return ((index or {}).get("source_typography") or {}).get("caption_track") == "complete"
 
 
-def refresh(ctx, worker_db, sha):
+def refresh(ctx, worker_db, sha=None):
     """Join an already completed storyboard; never wait behind indexing.
 
     Director preparation overlaps the late storyboard. Read once after that
     preparation, preserving the edit's corrected transcript and other evidence.
     """
-    if ctx.index.get("visual_storyboard_pending") and sha:
+    if ctx.index.get("visual_storyboard_pending") and worker_db is not None:
         import db as dbx
         try:
-            row = worker_db.run(dbx.get_index_by_sha, sha) or {}
+            if not sha:
+                original = worker_db.run(dbx.latest_asset, ctx.project_id, "original") or {}
+                sha = original.get("sha256")
+            row = (worker_db.run(dbx.get_index_by_sha, sha) or {}) if sha else {}
             fresh = row.get("json") or {}
             if fresh and not fresh.get("visual_storyboard_pending"):
                 ctx.index = {**ctx.index, "visual_storyboard": fresh.get("visual_storyboard"),

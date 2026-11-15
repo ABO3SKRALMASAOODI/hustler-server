@@ -108,3 +108,35 @@ def test_first_cut_preserves_existing_type_but_still_builds_the_edit(monkeypatch
     assert "set_master_loudness" in calls
     assert "source_broll" in calls
     assert frames == [{"ratio": "9:16", "mode": "pad_blur"}]
+
+
+def test_fallback_joins_completed_storyboard_before_adding_type(monkeypatch):
+    import db
+    import llm
+    import test_first_cut_visual as fixtures
+    monkeypatch.setattr(fixtures._EdlCtx, "project_id", 1, raising=False)
+    original = fixtures._talk_index
+    monkeypatch.setattr(fixtures, "_talk_index", lambda: {
+        **original(), "visual_storyboard_pending": True})
+    reads, asks = [], []
+
+    def read(fn, *args):
+        reads.append(fn)
+        if fn is db.latest_asset:
+            return {"sha256": "source-sha"}
+        assert fn is db.get_index_by_sha and args == ("source-sha",)
+        return {"json": {**index(), "visual_storyboard_pending": False}}
+
+    def ask(*args, **kwargs):
+        asks.append(kwargs["purpose"])
+        return {"text": json.dumps(dict(caption_track="complete", designed_layout=True,
+                                        evidence_ids=["e0", "e1", "e2"]))}
+
+    monkeypatch.setattr(llm, "ask_text", ask)
+    calls = fixtures._talking_chain(monkeypatch, q1=True, worker_db=SimpleNamespace(run=read))
+    assert reads == [db.latest_asset, db.get_index_by_sha]
+    assert asks == ["source_typography"]
+    assert "add_captions" not in calls
+    assert "add_motion_graphic" not in calls
+    assert "set_master_loudness" in calls
+    assert "source_broll" in calls
