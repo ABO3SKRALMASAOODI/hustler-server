@@ -22,7 +22,40 @@ def missing_shot_boxes(index, keep):
                for s in shots if any(s["start"] < b and s["end"] > a for a, b in keep))
 
 
-def apply(l1, index, perception):
+def _named_detail(item, views, rects, ratio, shots, boxes):
+    """Keep the model's shot-local detail when its measured geometry is safe.
+
+    Saliency is not a subject decision: desktop chrome can be more salient
+    than the preview that the editor selected. A named view carries the
+    existing Supply model's box and source interval, not a new model call.
+    """
+    view = (views or {}).get(str(item.get("view")))
+    if not view:
+        return False
+    box = view.get("box") or []
+    start, end = item["src"]
+    if (len(box) != 4 or not 0 <= box[0] < box[2] <= 1
+            or not 0 <= box[1] < box[3] <= 1
+            or start < view["t0"] - .01 or end > view["t1"] + .01
+            or not any(s["start"] <= start and end <= s["end"] for s in shots)):
+        return False
+    for c in rects:
+        if not (0 <= c[0] < c[2] <= 1 and 0 <= c[1] < c[3] <= 1
+                and abs((c[2]-c[0])/(c[3]-c[1])-ratio) < .005
+                and c[0] <= box[0] and c[1] <= box[1]
+                and c[2] >= box[2] and c[3] >= box[3]):
+            return False
+        # An intentional detail may omit another subject, but cannot slice
+        # through a subject that intersects its window.
+        for b in boxes:
+            intersects = min(c[2], b[2]) > max(c[0], b[0]) and min(c[3], b[3]) > max(c[1], b[1])
+            if intersects and not (c[0] <= b[0] and c[1] <= b[1]
+                                   and c[2] >= b[2] and c[3] >= b[3]):
+                return False
+    return True
+
+
+def apply(l1, index, perception, *, views=None):
     if not index.get("_first_film_source_guard"):
         return []
     v = index["video"]
@@ -69,7 +102,9 @@ def apply(l1, index, perception):
         safe = (not missing and all(0 <= c[0] < c[2] <= 1 and
                 0 <= c[1] < c[3] <= 1 and abs((c[2]-c[0])/(c[3]-c[1])-ratio) < .005 and all(c[0] <= b[0] and c[1] <= b[1]
                 and c[2] >= b[2] and c[3] >= b[3] for b in boxes) for c in rects))
-        reason = "subject_boxes_contained"
+        detail = _named_detail(item, views, rects, ratio, shots, boxes)
+        safe = safe or detail
+        reason = "named_detail_crop" if detail else "subject_boxes_contained"
         if not safe:
             count = len(rects)
             if not track and item.get("f") and len(item["f"]) == 2:
