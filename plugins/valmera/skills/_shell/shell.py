@@ -337,6 +337,7 @@ def run(a):
     defects = []
     try:
         for stage in STAGES:
+            __import__("openai_budget").raise_if_stopped(lane="workflow")
             if stage in state["done"]:
                 continue
             t0 = time.time()
@@ -364,6 +365,7 @@ def run(a):
                     defects.append(dict(stage="check", checks=r["checks"]))
             elif stage == "deliver":
                 r = deliver(ctx, state, state["out_root"], results)
+            __import__("openai_budget").raise_if_stopped(lane="workflow")
             results[stage] = r
             jsave(os.path.join(run_dir, f"{stage}.json"), r)
             state["done"].append(stage)

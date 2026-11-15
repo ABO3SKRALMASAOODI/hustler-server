@@ -24,7 +24,8 @@ QUOTA = ("Error code: 429 - {'error': {'message': 'You have no credits remaining
 
 
 @pytest.fixture
-def gate(monkeypatch):
+def gate(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOOTAGE_TRANSCRIPT_CACHE", str(tmp_path/"cache"))
     openai_credit.reopen()
     monkeypatch.setattr(config, "OPENAI_CREDIT_LATCH_S", 900.0, raising=False)
     monkeypatch.setattr(llm, "record", lambda *a, **k: None)
@@ -291,6 +292,7 @@ def test_footage_is_heard_locally_when_openai_is_out(gate, monkeypatch, tmp_path
 def test_a_credit_429_mid_source_moves_the_rest_to_local_hearing(gate, monkeypatch, tmp_path):
     import transcribe as asr
     from footage import hear
+    monkeypatch.setenv("FOOTAGE_HEAR_PROVIDER", "openai")
     src = str(tmp_path / "src.wav")
     _tone(src)
     whisper = _Whisper([NS(start=2.0, end=4.0, text="local words")])

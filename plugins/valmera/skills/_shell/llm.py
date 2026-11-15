@@ -69,15 +69,21 @@ def _parts(content):
     return out
 
 
-def ask_openai(system, content, *, model=None, effort="medium", max_tokens=16000, timeout=1800):
-    """(text, usage record): one streamed Responses call, retried on a busy or broken line."""
-    import httpx
-    model = model or OA_MODEL
+def openai_body(system, content, *, model, effort, max_tokens, purpose):
     # reasoning shares the output budget: a small answer still needs room to think
     body = {"model": model, "instructions": system, "input": [{"role": "user", "content": _parts(content)}],
             "max_output_tokens": int(max(max_tokens, 16000)), "reasoning": {"effort": OA_EFFORT.get(effort, "medium")}, "stream": True, "store": False}
-    purpose = openai_cache.role_for(system)
     body = openai_cache.responses(body, purpose)
+    return body
+
+
+def ask_openai(system, content, *, model=None, effort="medium", max_tokens=16000, timeout=1800):
+    """(text, usage record): one streamed Responses call, retried on a busy or broken line."""
+    import httpx
+    import openai_budget
+    model = model or OA_MODEL
+    purpose = openai_cache.role_for(system)
+    body = openai_body(system, content, model=model, effort=effort, max_tokens=max_tokens, purpose=purpose)
     headers = {"Authorization": "Bearer " + openai_key(), "Content-Type": "application/json"}
     t0, final = time.time(), None
     # The subscription adapter owns its deadline and caches failures. Repeating
@@ -87,9 +93,12 @@ def ask_openai(system, content, *, model=None, effort="medium", max_tokens=16000
     for attempt in range(attempts):
         final = None
         try:
-            with httpx.Client(timeout=httpx.Timeout(timeout, connect=30)) as cl, \
+            with openai_budget.call(body, purpose, lane="workflow", endpoint=endpoint) as lease, \
+                    httpx.Client(timeout=httpx.Timeout(timeout, connect=30)) as cl, \
                     cl.stream("POST", endpoint, headers=headers, json=body) as r:
                 if r.status_code >= 400:
+                    if r.status_code in (400, 401, 403, 404, 422, 429):
+                        lease.settle(usd=0)
                     openai_cache.record(model, purpose, status="http_error", usd=0.0,
                                         http_status=r.status_code, attempt=attempt + 1, force=True)
                     msg = r.read().decode("utf-8", "replace")[:400]
@@ -109,6 +118,7 @@ def ask_openai(system, content, *, model=None, effort="medium", max_tokens=16000
                         continue
                     if ev.get("type") in ("response.completed", "response.incomplete", "response.failed"):
                         final = ev.get("response") or {}
+                        lease.settle(final.get("usage"), payload=final)
             if final is not None:
                 break
             openai_cache.record(model, purpose, status="stream_without_usage", billing_unconfirmed=True,

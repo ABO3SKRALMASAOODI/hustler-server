@@ -603,6 +603,7 @@ def run_mcp_job(worker_db, job):
                           getattr(usage, "completion_tokens", None) if usage else None)
 
         _recorder.spend_lane = spend_ledger.lane_of(job.get("user_id"))
+        _recorder.job_id = job["id"]
         llm.set_recorder(_recorder)
         llm.set_turn_plan(ctx.plan if ctx.subscribed else "", project_id=ctx.project_id)
         ctx.begin_call_edl_cache()

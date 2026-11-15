@@ -259,6 +259,7 @@ def judge(items, lines, ask=None, work=None, log=print, batch=BATCH, detail="hig
             usd += float(use.get("usd") or 0)
             got = writer.json_block(text)
         except Exception as e:  # noqa: BLE001 - an unanswered batch leaves its candidates unjudged: not usable
+            __import__("openai_budget").propagate(e)
             log(f"fit: a batch of {len(ok_part)} was not judged: {str(e)[:160]}")
             continue
         by_no = dict(ok_part)

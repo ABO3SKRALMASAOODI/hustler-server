@@ -20,3 +20,14 @@ def _openai_credit_gate_open(monkeypatch):
     openai_credit._real_alert = real_alert
     yield
     openai_credit.reopen()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_internal_budget(monkeypatch):
+    import openai_budget
+    openai_budget._stopped.clear()
+    def no_live_budget():
+        raise RuntimeError("a unit test attempted a non-injected budget DB")
+    monkeypatch.setattr(openai_budget, "connect", no_live_budget)
+    yield
+    openai_budget._stopped.clear()

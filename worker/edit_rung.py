@@ -328,7 +328,8 @@ def _post(body, timeout):
     while True:
         attempt += 1
         try:
-            r = httpx.post(url, json=body, headers=headers, timeout=float(timeout))
+            import openai_budget
+            r = openai_budget.post(httpx.post, url, json=body, headers=headers, timeout=float(timeout))
         except httpx.HTTPError as exc:
             if attempt <= config.EDIT_RUNG_RETRIES:
                 time.sleep(1.5 * attempt)
@@ -423,7 +424,9 @@ def create(model, messages, tools=None, max_tokens=None, effort=None, tool_choic
                 else:
                     _close(why)          # a key refusal (401/403): this rung's own latch and alert
                     _alert(why)
-        except Exception as exc:  # noqa: BLE001 - every rung failure is the fallback's
+        except Exception as exc:  # noqa: BLE001 - provider failures may fall back
+            import openai_budget
+            openai_budget.propagate(exc)
             why = f"{type(exc).__name__}: {str(exc)[:200]}"
         else:
             result.usage.latency_s = round(time.monotonic() - t0, 2)

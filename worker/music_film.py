@@ -74,14 +74,17 @@ def openai_call(model=PICK_MODEL, effort="low", timeout=90):
 
     def call(system, user, schema):
         body = {"model": model, "instructions": system, "input": [{"role": "user", "content": [{"type": "input_text", "text": user}]}],
-                "reasoning": {"effort": effort}, "text": {"format": {"type": "json_schema", "name": "out", "schema": schema, "strict": True}}}
+                "max_output_tokens": 4096, "reasoning": {"effort": effort}, "text": {"format": {"type": "json_schema", "name": "out", "schema": schema, "strict": True}}}
         import openai_cache
         body = openai_cache.responses(body, "music:choose")
         req = urllib.request.Request(URL, data=json.dumps(body).encode(), headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as response:
+            import openai_budget
+            with openai_budget.call(body, "music:choose", lane="workflow") as lease, urllib.request.urlopen(req, timeout=timeout) as response:
                 r = json.load(response)
+                lease.settle(r.get("usage"), payload=r)
         except Exception as exc:
+            __import__("openai_budget").propagate(exc)
             openai_cache.record(model, "music:choose", status="transport_or_http_error", billing_unconfirmed=True)
             if openai_credit is not None:
                 try:

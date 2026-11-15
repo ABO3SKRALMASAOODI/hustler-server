@@ -183,9 +183,12 @@ def _verify(words, wav_path, language, warnings):
                     target.writeframes(frames)
                 extra = {'languages': [str(language).lower()]} if language else {}
                 llm.fence(MODEL)
-                with open(path, 'rb') as audio:
+                import openai_budget
+                with openai_budget.call({"model": MODEL}, "transcript_verification", lane=llm.spend_lane(),
+                        ceiling_usd=(end-start)/60*USD_PER_MINUTE + .005) as lease, open(path, 'rb') as audio:
                     response = client.audio.transcriptions.create(
                         model=MODEL, file=audio, extra_body=extra)
+                    lease.settle(usd=(end-start)/60*USD_PER_MINUTE)
                 heard = str(getattr(response, 'text', '') or '')
                 local = aligned_votes([words[i] for i in positions], heard)
                 llm.record('transcript_verification',
@@ -194,6 +197,7 @@ def _verify(words, wav_path, language, warnings):
                      'cost_basis': 'audio_duration_official_rate'})
                 return {positions[i]: token for i, token in local.items()}
         except Exception as exc:
+            __import__("openai_budget").propagate(exc)
             # Stop queued calls after an outage or rate limit; two in flight at
             # most. Do not turn a provider incident into minutes of retries.
             import openai_credit

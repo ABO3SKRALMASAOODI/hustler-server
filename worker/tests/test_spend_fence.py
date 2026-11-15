@@ -311,7 +311,7 @@ def test_the_fence_stands_before_the_wire_on_a_clip(ledger, monkeypatch):
 
 def test_a_lane_switch_inside_the_chat_loop_is_fenced():
     text = _source(WORKER / "agent_loop.py")
-    loop = text[:text.index("resp = step_client.chat.completions.create(")]
+    loop = text[:text.index("resp = openai_budget.completion(")]
     loop = loop[loop.rindex("while resp is None:"):]
     assert "llm.fence(call_model)" in loop
 
@@ -469,15 +469,18 @@ def test_every_job_that_makes_a_recorder_says_whose_money_it_spends():
 PROVIDER_CALLS = {
     "worker/claude_lane.py": 2,       # guard_call, metered, recorded; the
                                       # on-demand credit probe (fenced, P0 #60)
-    "worker/llm.py": 5,               # create_with_dialect, responses_create,
+    "worker/llm.py": 6,               # create_with_dialect, responses_create,
                                       # ask_audio, both image calls
+    "worker/edit_rung.py": 1,         # centralized OpenAI admission
+    "worker/openai_budget.py": 2,      # central admission; non-OpenAI pass-through
     "worker/agent_loop.py": 1,        # the agent step
     "worker/transcript_verify.py": 1,
     "worker/videogen.py": 1,
 }
 CALL = re.compile(r"\.messages\.(?:stream|create)\(|\.chat\.completions\.create\("
                   r"|\.responses\.create\(|\.audio\.transcriptions\.create\("
-                  r"|\.images\.generate\(|requests\.post\(\s*(?:url|submit_url)\b")
+                  r"|\.images\.generate\(|requests\.post\(\s*(?:url|submit_url)\b"
+                  r"|openai_budget\.(?:completion|post)\(")
 # Executors and downloads, and speech to text (billed by the minute, by Deepgram).
 OUR_OWN_HTTP = ("worker/remote.py", "worker/net_fetch.py", "worker/transcribe.py")
 
@@ -494,7 +497,8 @@ def test_no_worker_module_reaches_a_provider_off_the_ledger():
         found[name] = len(hits)
         for hit in hits:
             before = doc_free[:hit.start()].splitlines()[-60:]
-            assert any("fence(" in line or "guard_call(" in line
+            assert hit.group().startswith("openai_budget.") or any("fence(" in line or "guard_call(" in line or "with call(" in line
+                       or (name == "worker/openai_budget.py" and 'if "api.openai.com" not in' in line)
                        for line in before), (name, doc_free[hit.start():hit.end()])
     assert found == PROVIDER_CALLS
 

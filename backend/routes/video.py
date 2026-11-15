@@ -738,6 +738,7 @@ def _concierge_reply(stage, history, attachments, index_error=None,
         try:
             raw, rec = answer(msgs, want_act)
         except Exception as e:  # the next provider answers
+            __import__("openai_budget").propagate(e)
             print(f"[concierge] LLM call failed: {e}", flush=True)
             rec = {"model": getattr(answer, "model", CONCIERGE_MODEL),
                    "request": {"model": getattr(answer, "model",
@@ -808,6 +809,7 @@ def _concierge_openai(msgs, want_act):
     try:
         resp = _concierge_create(create_kwargs)
     except Exception as e:
+        __import__("openai_budget").propagate(e)
         import openai_credit
         if openai_credit.note(str(e), "concierge") \
                 or "insufficient_quota" in str(e) or "no credits" in str(e).lower():
@@ -817,7 +819,7 @@ def _concierge_openai(msgs, want_act):
         # blips and each got the same tone-deaf template.
         print(f"[concierge] retrying after: {e}", flush=True)
         time.sleep(1.5)
-        resp = _concierge_llm().chat.completions.create(**create_kwargs)
+        resp = __import__("openai_budget").completion(_concierge_llm(), lane="customer", purpose="concierge", **create_kwargs)
     raw = (resp.choices[0].message.content or "").strip()
     usage = getattr(resp, "usage", None)
     return raw, {"model": CONCIERGE_MODEL,
@@ -839,7 +841,7 @@ def _concierge_create(create_kwargs):
     # cap. A non-dialect provider failure still escapes to the caller.
     for _dialect_attempt in range(4):
         try:
-            resp = _concierge_llm().chat.completions.create(**create_kwargs)
+            resp = __import__("openai_budget").completion(_concierge_llm(), lane="customer", purpose="concierge", **create_kwargs)
             break
         except Exception as adapt_e:
             msg = str(adapt_e).lower()
@@ -874,7 +876,7 @@ def _concierge_create(create_kwargs):
         raise RuntimeError("concierge dialect adaptation did not settle")
     if not (resp.choices[0].message.content or "").strip():
         # One quiet retry on an empty completion.
-        resp = _concierge_llm().chat.completions.create(**create_kwargs)
+        resp = __import__("openai_budget").completion(_concierge_llm(), lane="customer", purpose="concierge", **create_kwargs)
     return resp
 
 
@@ -5411,10 +5413,12 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
     connection. _concierge_reply already degrades to the template on any
     model failure, so only a DB failure can swallow the reply (logged)."""
     try:
-        reply, reply_meta, llm_rec, act = _concierge_reply(
-            ctx["stage"], ctx["history"], attachments,
-            index_error=ctx.get("index_error"), can_act=ctx.get("can_act"),
-            tray_count=ctx.get("tray_count") or 0)
+        import openai_budget, spend_ledger
+        with openai_budget.scope(spend_ledger.lane_of(ctx.get("user_id")), "concierge:" + str(project_id)):
+            reply, reply_meta, llm_rec, act = _concierge_reply(
+                ctx["stage"], ctx["history"], attachments,
+                index_error=ctx.get("index_error"), can_act=ctx.get("can_act"),
+                tray_count=ctx.get("tray_count") or 0)
         conn = psycopg2.connect(db_url, cursor_factory=RealDictCursor)
         try:
             cur = conn.cursor()

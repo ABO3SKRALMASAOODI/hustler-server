@@ -113,23 +113,29 @@ def _oa_parts(content):
     return out
 
 
+def openai_body(system, content, *, model, effort, max_tokens, searches, what, max_tool_calls=None):
+    body = {"model": model, "instructions": system, "input": [{"role": "user", "content": _oa_parts(content)}],
+            "max_output_tokens": int(max_tokens), "reasoning": {"effort": OA_EFFORT.get(effort, "high")}, "stream": True, "store": False}
+    if searches:
+        body["tools"] = [{"type": "web_search"}]
+        body["include"] = ["web_search_call.action.sources"]
+        body["max_tool_calls"] = int(max_tool_calls or searches)
+    # Web search grows an internal conversation. Explicit-only caching drops
+    # that history boundary and rebills it on each search inside this call.
+    body = openai_cache.responses(body, "writer:" + what, conversation=bool(searches))
+    return body
+
+
 def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, what="writer", model=None, timeout=2400,
                max_tool_calls=None):
     """(text, usage): one streamed Responses call; with `searches`, the model may use OpenAI's web search. The key comes
     from this process's environment (OPENAI_API_KEY) and is never printed or stored. `max_tool_calls` caps the searches
     of one call (each one feeds its results back as input: uncapped, an ideas call ran 21 searches and read 191k tokens)."""
     import httpx
+    import openai_budget
     model = model or OA_MODEL
-    body = {"model": model, "instructions": system, "input": [{"role": "user", "content": _oa_parts(content)}],
-            "max_output_tokens": int(max_tokens), "reasoning": {"effort": OA_EFFORT.get(effort, "high")}, "stream": True, "store": False}
-    if searches:
-        body["tools"] = [{"type": "web_search"}]
-        body["include"] = ["web_search_call.action.sources"]
-        if max_tool_calls:
-            body["max_tool_calls"] = int(max_tool_calls)
-    # Web search grows an internal conversation. Explicit-only caching drops
-    # that history boundary and rebills it on each search inside this call.
-    body = openai_cache.responses(body, "writer:" + what, conversation=bool(searches))
+    body = openai_body(system, content, model=model, effort=effort, max_tokens=max_tokens,
+                       searches=searches, what=what, max_tool_calls=max_tool_calls)
     headers = {"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"], "Content-Type": "application/json"}
     t0 = time.time()
     final = None
@@ -138,9 +144,12 @@ def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, 
     for attempt in range(attempts):
         final = None
         try:
-            with httpx.Client(timeout=httpx.Timeout(timeout, connect=30)) as cl, \
+            with openai_budget.call(body, "writer:" + what, lane="workflow", endpoint=endpoint) as lease, \
+                    httpx.Client(timeout=httpx.Timeout(timeout, connect=30)) as cl, \
                     cl.stream("POST", endpoint, headers=headers, json=body) as r:
                 if r.status_code >= 400:
+                    if r.status_code in (400, 401, 403, 404, 422, 429):
+                        lease.settle(usd=0)
                     openai_cache.record(model, "writer:" + what, status="http_error", usd=0.0,
                                         http_status=r.status_code, attempt=attempt + 1, force=True)
                     msg = r.read().decode("utf-8", "replace")[:400]
@@ -160,6 +169,7 @@ def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, 
                         continue
                     if ev.get("type") in ("response.completed", "response.incomplete", "response.failed"):
                         final = ev.get("response") or {}
+                        lease.settle(final.get("usage"), payload=final)
             if final is not None:
                 break
             openai_cache.record(model, "writer:" + what, status="stream_without_usage", billing_unconfirmed=True,

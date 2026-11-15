@@ -41,7 +41,8 @@ def _ask(system, content, purpose, budget_s=120.0, max_tokens=6000, model=None):
             return r.text, float(r.usd or 0.0)
         except call.Refused:
             raise                # out of credit or a refusal: a retry would hear the same answer
-        except Exception:  # noqa: BLE001 one retry, then the caller's honest fallback
+        except Exception as exc:  # noqa: BLE001 one retry for provider failures only
+            __import__("openai_budget").propagate(exc)
             if k == tries - 1 or deadline - time.monotonic() <= 3.0:
                 raise
             time.sleep(3.0)

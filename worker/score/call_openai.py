@@ -123,6 +123,8 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
         raise call.Refused("OpenAI credit out: " + openai_credit.closed_reason()[:200])
     llm.fence(model)
     req = body(model, system, content, max_tokens, effort, purpose)
+    import openai_budget
+    lease = openai_budget.reserve(req, purpose, lane=llm.spend_lane())
     box = {}
     t0 = time.monotonic()
 
@@ -132,6 +134,8 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
                 with client.stream("POST", url, json=req, headers={"Authorization": f"Bearer {key}"}) as r:
                     box["resp"] = r
                     if r.status_code != 200:
+                        if r.status_code in (400, 401, 403, 404, 422, 429):
+                            lease.settle(usd=0)
                         text = r.read().decode(errors='replace')[:300]
                         box["error"] = RuntimeError(f"OpenAI HTTP {r.status_code}: {text}")
                         if openai_credit.note(text, "director:" + str(purpose), status=r.status_code):
@@ -150,6 +154,7 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
                             box["refused"] = True
                         elif kind in ("response.completed", "response.incomplete", "response.failed"):
                             box["final"] = d.get("response") or {}
+                            lease.settle(box["final"].get("usage"), payload=box["final"])
                         elif kind == "error":
                             box["error"] = RuntimeError(f"OpenAI stream error: {str(d)[:300]}")
                             if openai_credit.note(str(d), "director:" + str(purpose)):

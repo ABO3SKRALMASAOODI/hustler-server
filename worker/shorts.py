@@ -1377,6 +1377,7 @@ def run_shorts_plan(worker_db, job):
                   flush=True)
 
     _recorder.spend_lane = spend_ledger.lane_of(job.get("user_id"))
+    _recorder.job_id = job["id"]
     llm.set_recorder(_recorder)
     # A subscriber's clip picks run on the paid Claude lane, as their edits do
     # (the turn's helpers follow a Claude lane on this thread).

@@ -988,6 +988,38 @@ def cmd_spend(a):
     return 0
 
 
+def cmd_openai_budget(a):
+    """Owned app_kv controls only; no provider call and no customer limit."""
+    import openai_budget
+    if a.install_defaults or a.enabled is not None or a.day_usd is not None or a.credit_available is not None:
+        with Writer(a.dry_run) as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(74821115)")
+            raw = openai_budget._load(cur, "spend_fence") or {}
+            cfg = {**openai_budget.DEFAULTS, **raw.get("openai", {})}
+            if a.enabled is not None:
+                cfg["enabled"] = a.enabled == "on"
+            if a.day_usd is not None:
+                openai_budget._money(a.day_usd)
+                cfg["internal_day_usd"] = a.day_usd
+            if a.credit_available is not None:
+                cfg["credit_available"] = a.credit_available == "on"
+                if cfg["credit_available"]:
+                    cfg["refill_confirmed_at"] = datetime.now(timezone.utc).isoformat()
+            raw["openai"] = cfg
+            cur.execute("INSERT INTO app_kv(key,value) VALUES(%s,%s) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()",
+                        ("spend_fence", json.dumps(raw)))
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cfg = (openai_budget._load(cur, "spend_fence") or {}).get("openai", {})
+            state = openai_budget._load(cur, openai_budget.STATE) or {}
+        out({"openai": cfg, "days_micro_usd": state.get("days", {}),
+             "pending_calls": len(state.get("pending", {})), "bound_breach": state.get("bound_breach", False)})
+    finally:
+        conn.close()
+    return 0
+
+
 def cmd_whoami(a):
     out(call("GET", "/ops/review/whoami"))
     return 0
@@ -1185,6 +1217,13 @@ def parser():
     p.add_argument("--provider", default="anthropic")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_spend)
+    p = sub.add_parser("openai-budget", help="internal OpenAI cap status/config; never caps customers")
+    p.add_argument("--install-defaults", action="store_true")
+    p.add_argument("--enabled", choices=("on", "off"))
+    p.add_argument("--day-usd", type=float)
+    p.add_argument("--credit-available", choices=("on", "off"), help="operator-observed funding state; never an API probe")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_openai_budget)
     p = sub.add_parser("whoami", help="check the backend accepts this CLI")
     p.set_defaults(fn=cmd_whoami)
     return ap

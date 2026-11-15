@@ -114,12 +114,15 @@ def _call(system, user, model, max_tokens=24000, timeout=600):
                                  headers={"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"], "Content-Type": "application/json"})
     for attempt in range(3):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            import openai_budget
+            with openai_budget.call(body, "narrate:spoken", lane="workflow") as lease, urllib.request.urlopen(req, timeout=timeout) as r:
                 result = json.load(r)
+                lease.settle(result.get("usage"), payload=result)
             openai_cache.record(model, "narrate:spoken", result.get("usage"),
                                 request_id=result.get("id"), status=result.get("status"), force=True)
             return result
-        except Exception:  # noqa: BLE001 - a dropped call is asked again, then reported
+        except Exception as exc:  # noqa: BLE001
+            __import__("openai_budget").propagate(exc)
             openai_cache.record(model, "narrate:spoken", status="transport_or_http_error",
                                 billing_unconfirmed=True, force=True)
             if attempt == 2:

@@ -50,16 +50,18 @@ def test_role_does_not_hash_variable_system_content():
 
 @pytest.fixture
 def speech(tmp_path,monkeypatch):
+    from types import SimpleNamespace as NS
     monkeypatch.setenv('FOOTAGE_TRANSCRIPT_CACHE',str(tmp_path/'cache'))
+    monkeypatch.setenv('FOOTAGE_HEAR_PROVIDER','local')
     p=tmp_path/'clip.mp4';p.write_bytes(b'same content')
-    monkeypatch.setattr(hear,'splits',lambda path,dur:[0.,12.,dur])
     calls=[]
-    def one(path,t0,t1,tmp,i):
-        calls.append((t0,t1))
-        return dict(t0=t0,t1=t1,text=f'words {i}',usd=.01)
-    monkeypatch.setattr(hear,'_transcribe_piece',one)
-    import llm
-    monkeypatch.setattr(llm,'record',lambda *a,**kw:None)
+    def ffmpeg(argv,**kw):
+        Path(argv[-1]).write_bytes(b'wav');return NS(returncode=0)
+    monkeypatch.setattr(hear.subprocess,'run',ffmpeg)
+    def one(wav,dur):
+        calls.append(dur)
+        return [dict(t0=1.,t1=3.,text='words 0'),dict(t0=14.,t1=17.,text='words 1')]
+    monkeypatch.setattr(hear,'_local_clip',one)
     return p,calls
 
 
@@ -67,32 +69,30 @@ def test_transcript_cache_reuses_content_across_paths_and_concurrent_runs(speech
     p,calls=speech;q=tmp_path/'other.mp4';q.write_bytes(p.read_bytes())
     with ThreadPoolExecutor(max_workers=2) as pool:
         results=list(pool.map(lambda x:hear.transcribe(str(x),20.,workers=2),[p,q]))
-    assert len(calls)==2
+    assert len(calls)==1
     assert results[0][0]==results[1][0]
-    assert sum(usd for _,usd in results)==pytest.approx(.02)
+    assert sum(usd for _,usd in results)==0
     assert hear.transcribe(str(p),20.)[1]==0
     assert not list(tmp_path.glob('hear-*'))
 
 
-def test_errors_are_not_cached_but_successful_pieces_are(speech,monkeypatch):
+def test_failed_whole_clip_is_not_cached(speech,monkeypatch):
     p,calls=speech
-    original=hear._transcribe_piece
-    def fails(path,t0,t1,tmp,i):
-        if i==1:return dict(t0=t0,t1=t1,text='',error='failed')
-        return original(path,t0,t1,tmp,i)
-    monkeypatch.setattr(hear,'_transcribe_piece',fails)
-    hear.transcribe(str(p),20.)
-    monkeypatch.setattr(hear,'_transcribe_piece',original)
+    original=hear._local_clip
+    monkeypatch.setattr(hear,'_local_clip',lambda *a: (_ for _ in ()).throw(RuntimeError('failed')))
+    with pytest.raises(RuntimeError):hear.transcribe(str(p),20.)
+    monkeypatch.setattr(hear,'_local_clip',original)
     rows,usd=hear.transcribe(str(p),20.)
-    assert len(calls)==2 and rows[1]['text']=='words 1' and usd==.01
+    assert len(calls)==1 and rows[1]['text']=='words 1' and usd==0
 
 
 def test_cache_model_and_content_invalidation(speech,monkeypatch):
+    import config
     p,calls=speech
     hear.transcribe(str(p),20.)
     p.write_bytes(b'changed content');hear.transcribe(str(p),20.)
-    monkeypatch.setattr(hear,'MODEL','other-model');hear.transcribe(str(p),20.)
-    assert len(calls)==6
+    monkeypatch.setattr(config,'WHISPER_MODEL','other-model');hear.transcribe(str(p),20.)
+    assert len(calls)==3
 
 
 def test_batched_look_warms_first_and_preserves_candidate_mapping(tmp_path,monkeypatch):
@@ -135,6 +135,8 @@ def test_writer_web_search_keeps_implicit_history(monkeypatch,tmp_path):
     root=Path(__file__).resolve().parents[2]
     spec=importlib.util.spec_from_file_location('cache_writer',root/'plugins/valmera/skills/valmera-stories/writer.py')
     m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+    import openai_budget
+    monkeypatch.setattr(openai_budget,'reserve',lambda *a,**kw:openai_budget.Lease())
     requests=[];client=httpx.Client
     def handler(request):
         requests.append(json.loads(request.content))
@@ -154,7 +156,7 @@ def test_failed_cache_storage_does_not_lose_the_transcript(speech,tmp_path,monke
     blocked=tmp_path/'not-a-directory';blocked.write_text('file')
     monkeypatch.setenv('FOOTAGE_TRANSCRIPT_CACHE',str(blocked))
     rows,usd=hear.transcribe(str(p),20.)
-    assert len(rows)==2 and usd==pytest.approx(.02)
+    assert len(rows)==2 and usd==0
 
 
 def test_cache_prunes_old_and_over_budget_entries(tmp_path):

@@ -2282,6 +2282,7 @@ def run_agent_job(worker_db, job):
                       getattr(usage, "prompt_tokens", None) if usage else None,
                       getattr(usage, "completion_tokens", None) if usage else None)
     _llm_recorder.spend_lane = spend_ledger.lane_of(job.get("user_id"))
+    _llm_recorder.job_id = job["id"]
     llm.set_recorder(_llm_recorder)
     if getattr(ctx, "credit_price_aliases", None):
         # Credit parity for a new subscriber's Claude lane (llm.record).
@@ -7079,7 +7080,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 if not claude_lane.is_claude_model(call_model):
                     llm.fence(call_model)     # claude_lane.create fences its own
                 try:
-                    resp = step_client.chat.completions.create(
+                    import openai_budget
+                    resp = openai_budget.completion(step_client, lane=llm.spend_lane(),
                         model=call_model, messages=messages, tools=tools,
                         **kw)
                     break

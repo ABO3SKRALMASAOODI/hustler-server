@@ -26,6 +26,7 @@ from openai import OpenAI
 import config
 import spend_ledger
 import openai_cache
+import openai_budget
 
 
 class ProviderHTTPError(RuntimeError):
@@ -82,6 +83,7 @@ def last_error():
 
 
 def _note_error(e):
+    openai_budget.propagate(e)
     _tls.last_error = f"{type(e).__name__}: {str(e)[:400]}"
     note_quota_error(e)
 
@@ -252,6 +254,7 @@ def fence(model):
     lane = spend_lane()
     if lane == spend_ledger.CUSTOMER:
         return
+    openai_budget.raise_if_stopped(lane)
     provider = spend_ledger.provider_of(model)
     try:
         room = _on_ledger(spend_ledger.room, lane, provider)
@@ -1206,8 +1209,8 @@ def ask_audio(prompt, audio_paths, labels=None, max_tokens=260,
             else:
                 request_body = body
                 url = base_url + "/chat/completions"
-            response = requests.post(
-                url, json=request_body,
+            response = openai_budget.post(requests.post,
+                url, json=request_body, purpose="audio_review", lane=spend_lane(),
                 timeout=config.AUDIO_REVIEW_TIMEOUT_S,
                 headers=headers)
             lowered = response.text.lower()
@@ -1845,7 +1848,7 @@ def responses_create(base_url, api_key, model, messages, tools,
     if "api.openai.com" in (base_url or ""):
         body = openai_cache.responses(body, cache_role, conversation=True)
     fence(model)
-    r = requests.post(url, json=body,
+    r = openai_budget.post(requests.post, url, json=body, purpose=cache_role, lane=spend_lane(),
                       timeout=timeout or config.LLM_TIMEOUT_S,
                       headers={"Authorization": f"Bearer {api_key}",
                                "Content-Type": "application/json"})
@@ -1952,7 +1955,7 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
         fence(model)
     while True:
         try:
-            return client_obj.chat.completions.create(
+            return openai_budget.completion(client_obj, purpose=purpose, lane=spend_lane(),
                 model=model, messages=messages, **kw)
         except Exception as e:
             if openai_bound and openai_credit.note(e, "llm:" + str(model)):
@@ -2143,6 +2146,7 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
                    {"answer": answer}, usage)
             return answer
     except Exception as e:
+        openai_budget.propagate(e)
         global _vision_blind
         msg = str(e)
         print(f"[vision] call failed: {msg}", flush=True)
@@ -2386,11 +2390,17 @@ def _openai_image_gen(model, prompt, out_path):
     endpoint at all (DeepSeek does not)."""
     try:
         fence(model)
-        resp = image_client().images.generate(model=model, prompt=prompt, n=1)
+        ic = image_client()
+        if is_openai_client(ic):
+            with openai_budget.call({"model": model, "prompt": prompt}, "image_gen", lane=spend_lane()):
+                resp = ic.images.generate(model=model, prompt=prompt, n=1)
+        else:
+            resp = ic.images.generate(model=model, prompt=prompt, n=1)
         d = resp.data[0]
         b64 = getattr(d, "b64_json", None)
         url = getattr(d, "url", None)
     except Exception as e:
+        openai_budget.propagate(e)
         err = f"image API error: {str(e)[:200]}"
         record("image_gen", {"model": model, "prompt": prompt},
                {"error": err}, None)

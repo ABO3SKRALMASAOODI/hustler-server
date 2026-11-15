@@ -123,7 +123,8 @@ def speech(text, voice, instr, model=MODEL, timeout=180):
     last = None
     for attempt in range(4):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            import openai_budget
+            with openai_budget.call(body, "narrate:speech", lane="workflow") as lease, urllib.request.urlopen(req, timeout=timeout) as r:
                 x, sr = sf.read(io.BytesIO(r.read()), dtype="float32", always_2d=True)
                 # Binary WAV responses contain no token usage. Keep the published
                 # per-minute estimate explicit instead of inventing token counts.
@@ -136,6 +137,7 @@ def speech(text, voice, instr, model=MODEL, timeout=180):
             if e.code in (400, 401, 403, 404):
                 break
         except Exception as e:  # noqa: BLE001 - a network blip is retried
+            __import__("openai_budget").propagate(e)
             openai_cache.record(model, "narrate:speech", status="transport_error", billing_unconfirmed=True, force=True)
             last = type(e).__name__
         time.sleep(2 + 4 * attempt)

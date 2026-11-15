@@ -18,6 +18,8 @@ import requests
 
 import openai_credit
 import provider_creds
+import openai_budget
+import spend_ledger
 
 _lock = threading.Lock()
 _cache = {}
@@ -42,8 +44,8 @@ def advanced_readiness():
             result['reason'] = 'provider_funding'
         elif key:
             try:
-                r = requests.post(os.getenv('OPENAI_BASE_URL', 'https://api.openai.com/v1').rstrip('/') + '/responses',
-                    headers={'Authorization': 'Bearer ' + key},
+                r = openai_budget.post(requests.post, os.getenv('OPENAI_BASE_URL', 'https://api.openai.com/v1').rstrip('/') + '/responses',
+                    headers={'Authorization': 'Bearer ' + key}, lane=spend_ledger.lane_of(), run='readiness', purpose='readiness',
                     json={'model': 'gpt-6.1-sol', 'input': 'Reply OK.', 'reasoning': {'effort': 'low'},
                           'max_output_tokens': 512, 'store': False}, timeout=(3.05, 12))
                 body = r.json()
@@ -55,7 +57,7 @@ def advanced_readiness():
                     result['reason'] = 'provider_funding'
                     if openai_credit.available():
                         openai_credit.trip('checkout_readiness', str(body.get('error') or '')[:300])
-            except (requests.RequestException, ValueError):
+            except (requests.RequestException, ValueError, openai_budget.OverBudget):
                 pass
         if not result['ready']:
             _fallback_ready(result, result['reason'])
