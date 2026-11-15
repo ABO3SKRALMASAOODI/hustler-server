@@ -115,6 +115,25 @@ def test_picture_verdict_is_bound_to_played_window():
     assert P.picture_key(a, "the edit") != P.picture_key(b, "the edit")
 
 
+def test_picture_check_supplies_phrase_context_without_widening_exact_words(monkeypatch):
+    from types import SimpleNamespace
+    clock = SimpleNamespace(words=[dict(w="a", t0=0, t1=.2, seg=0),
+                                   dict(w="lamp", t0=.2, t1=.8, seg=0),
+                                   dict(w="chairs", t0=1, t1=2, seg=1)])
+    seen = []
+    monkeypatch.setattr(P, "still", lambda *args, **kw: "jpeg")
+    def ask(system, content, **kw):
+        seen.extend(x.get("text", "") for x in content)
+        return {"pictures": [{"n": 1, "fit": "yes"}]}, {}
+    monkeypatch.setattr(P, "ask", ask)
+    picture = dict(path="lamp.jpg", f=[0, 6], src=[0, 0])
+    bad, _ = P.picture_check(None, {"pictures": [picture]}, clock, set(), {})
+    assert not bad
+    text = " ".join(seen)
+    assert "words: 'a'" in text and "fragments only: 'a lamp'" in text
+    assert "chairs" not in text
+
+
 def test_proof_holds_stay_bounded_after_audio_snap(tmp_path, monkeypatch):
     import json
     record = tmp_path / "record.json"
