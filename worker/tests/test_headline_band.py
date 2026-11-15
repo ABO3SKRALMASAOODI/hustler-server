@@ -427,9 +427,15 @@ def test_a_pad_letterbox_leaves_a_band_without_a_picture_rect(monkeypatch):
 
 
 @needs_browser
-def test_pieces_of_a_long_headline_play_exactly_the_frames_of_one_clip(tmp_path, monkeypatch):
+@pytest.mark.parametrize('template', ['headline', 'html'])
+def test_pieces_of_a_long_graphic_play_exactly_the_frames_of_one_clip(tmp_path, monkeypatch, template):
     monkeypatch.setattr(motion_engine, "CACHE_DIR", str(tmp_path / "cache"))
     item = dict(_hl(end=3.0), footprint=None)
+    if template == 'html':
+        item.update(template='html', params={}, html=(
+            '<div id="ink" style="position:absolute;left:0;top:0;width:100px;height:100px;background:white"></div>'
+            '<script>MG.box=[0,0,100,100];MG.active([[0,3]]);'
+            'MG.frame(t=>{MG.$("#ink").style.opacity=(t+1)/4;});</script>'))
     ydoc = motion_layer.yields_doc([[1.0, 2.0]])
     whole = motion_templates.build_job(item, 270, 480, 30, yields=ydoc)
     monkeypatch.setattr(motion_engine, "MAX_DURATION_S", 1.3)
