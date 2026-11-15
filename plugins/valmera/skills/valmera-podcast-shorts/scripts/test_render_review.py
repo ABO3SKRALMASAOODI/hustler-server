@@ -23,6 +23,20 @@ def test_newly_available_source_invalidates_exhausted_research_without_path_chur
     assert wf.source_signature(str(tmp_path))==present
 
 
+def test_final_audit_uses_extended_coverage_not_shorter_initial_ruler(tmp_path,monkeypatch):
+    supply=tmp_path/'supply';supply.mkdir();audit=tmp_path/'audit'
+    initial=dict(windows=[dict(t0=2,t1=4,name='Subject')])
+    final=dict(windows=[dict(t0=1,t1=6,name='Subject')])
+    (supply/'coverage.json').write_text(json.dumps(initial))
+    (supply/'pack.json').write_text(json.dumps(dict(pack=dict(coverage=final))))
+    for name in ('script.json','score.json'):(tmp_path/name).write_text('{}')
+    monkeypatch.setattr(wf.wf3,'load_pack',lambda ctx:json.loads((supply/'pack.json').read_text())['pack'])
+    wf.retain_audit(SimpleNamespace(supply=str(supply),run_dir=str(tmp_path)),str(audit))
+    assert json.loads((audit/'coverage.json').read_text())==final
+    assert json.loads((supply/'coverage.json').read_text())==initial
+    assert json.loads((audit/'pack.json').read_text())['pack']['coverage']==final
+
+
 def test_recovered_original_rescans_frames_without_repeating_exhausted_searches(tmp_path,monkeypatch):
     import wf1_primary_sources
     sources=tmp_path/'sources';sources.mkdir();movie=sources/'original.mp4';movie.write_bytes(b'original')

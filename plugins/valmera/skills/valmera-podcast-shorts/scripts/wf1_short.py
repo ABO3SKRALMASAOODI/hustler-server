@@ -873,18 +873,25 @@ def check(ctx, rd, sc):
         sources=[dict(f=p.get("f"), visible_f=p.get("visible_f"), kind=p.get("kind"), name=p.get("name"), source=p.get("source"), time_range=p.get("time_range")) for p in pics])
     r["checks"]["ok"] = bool(r["checks"].get("ok") and not (b.get("rendered_check") or {}).get("rejected"))
     audit=(ctx.args or {}).get('audit_out')
-    if audit:
-        # Explicit replay evidence survives normal workflow scratch cleanup.
-        # No customer project or media decisions are changed by this capture.
-        import shutil
-        os.makedirs(audit,exist_ok=True)
-        for name in ('pack.json','words.json','index.json','l1.json','l1_audio.json','music.json','direction.json',
-                     'coverage.json','beats.json','mix_stems.npz','render_reviews.json','delivery_reviews.json'):
-            path=os.path.join(ctx.supply,name)
-            if os.path.isfile(path):shutil.copy2(path,os.path.join(audit,name))
-        for name in ('script.json','score.json'):
-            shutil.copy2(os.path.join(ctx.run_dir,name),os.path.join(audit,name))
+    if audit:retain_audit(ctx,audit)
     return r
+
+
+def retain_audit(ctx,audit):
+    """Retain the actual final coverage ruler, including researched context extensions."""
+    import shutil
+    os.makedirs(audit,exist_ok=True)
+    for name in ('pack.json','words.json','index.json','l1.json','l1_audio.json','music.json','direction.json',
+                 'beats.json','mix_stems.npz','render_reviews.json','delivery_reviews.json'):
+        path=os.path.join(ctx.supply,name)
+        if os.path.isfile(path):shutil.copy2(path,os.path.join(audit,name))
+    # coverage.json is the initial planning cache; acquisition can subsequently
+    # expand timed windows in pack.json. The shorter initial ruler would inflate
+    # new-pictures-per-second in an independent final-film audit.
+    with open(os.path.join(audit,'coverage.json'),'w') as f:
+        json.dump(wf3.load_pack(ctx)['coverage'],f,indent=1)
+    for name in ('script.json','score.json'):
+        shutil.copy2(os.path.join(ctx.run_dir,name),os.path.join(audit,name))
 
 
 _load = shell.load_workflow
