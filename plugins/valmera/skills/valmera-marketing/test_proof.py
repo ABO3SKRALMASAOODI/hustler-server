@@ -75,3 +75,58 @@ def test_recording_is_shown_as_delivered():
     assert pools == [[0, 100], [300, 400]]
     gates = sorted((it["f"], len(it["op"])) for it in l1["items"] if it.get("pic") == "gate")
     assert gates == [([50, 100], 50), ([300, 350], 50)]
+
+
+def test_unreadable_product_picture_cannot_pass(monkeypatch):
+    monkeypatch.setattr(P, "words_under", lambda *args: "the finished edit")
+    monkeypatch.setattr(P, "still", lambda *args, **kwargs: None)
+    monkeypatch.setattr(P, "ask", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no frames")))
+    picture = dict(path="/x/after.mp4", name="after", f=[0, 90], src=[0, 3])
+    bad, spend = P.picture_check(None, {"pictures": [picture]}, None, {picture["path"]}, {})
+    assert len(bad) == 1 and "could not be inspected" in bad[0][2]
+    assert not spend
+
+
+def test_missing_and_loose_verdicts_fail_including_product(monkeypatch):
+    monkeypatch.setattr(P, "words_under", lambda *args: "captions on the words")
+    monkeypatch.setattr(P, "still", lambda *args, **kwargs: "jpeg")
+    monkeypatch.setattr(P, "ask", lambda *args, **kwargs: (
+        {"pictures": [{"n": 1, "fit": "loose", "why": "only the same speaker"}]}, {}))
+    pictures = [dict(path=f"/x/{i}.mp4", name="after", f=[i * 30, (i + 1) * 30], src=[0, 1]) for i in range(2)]
+    bad, _ = P.picture_check(None, {"pictures": pictures}, None, {p["path"] for p in pictures}, {})
+    assert len(bad) == 2
+    assert bad[1][2] == "missing picture verdict"
+
+
+def test_picture_verdict_is_bound_to_played_window():
+    a = dict(path="/x/a.mp4", src=[0, 1])
+    b = dict(a, src=[8, 9])
+    assert P.picture_key(a, "the edit") != P.picture_key(b, "the edit")
+
+
+def test_proof_holds_stay_bounded_after_audio_snap(tmp_path, monkeypatch):
+    import json
+    record = tmp_path / "record.json"
+    record.write_text(json.dumps(dict(upload=dict(file="raw.mp4", dur=30, sha256="raw"),
+                                      exports=[dict(tag="final", file="export.mp4", dur=35, sha256="export")])))
+    cuts = []
+    monkeypatch.setattr(P, "endcard_s", lambda: 5)
+    monkeypatch.setattr(P, "quiet_snap", lambda path, t: t + (0.4 if t > 4 else -0.1))
+    monkeypatch.setattr(P, "cut", lambda src, a, b, out, **kw: cuts.append((src, a, b, out)))
+    script = dict(record=str(record), export_check=dict(before=[1, 9], after=[4, 13], tease_s=15))
+    product = P.product_clips(script, str(tmp_path / "product"))
+    assert product["before"]["t"][1] - product["before"]["t"][0] <= 3
+    assert product["after"]["t"][1] - product["after"]["t"][0] <= 4
+    assert len(cuts) == 3
+
+
+def test_instruction_panel_preserves_submitted_sentence():
+    class Clock:
+        def seg_words(self, i):
+            return [dict(t0=4.0, t1=8.0)]
+    text = "Make a vertical short cropped to the speaker with white captions on black."
+    scene = dict(voices={}, items=[])
+    panel = P.instruction_panel(scene, Clock(), dict(proof=dict(after_after=2)), text)
+    assert " ".join(panel["lines"]) == text
+    assert all(v["px"] >= 38 for v in scene["voices"].values())
+    assert panel["frames"] == [120, 240]
