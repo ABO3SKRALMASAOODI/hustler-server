@@ -31,6 +31,24 @@ FPS = 30
 PROG_F = 180                       # a 6 s programme
 
 
+@pytest.mark.parametrize('size',[(192,108),(108,192)])
+def test_end_card_reference_uses_the_renderer_aspect_fit(tmp_path,size):
+    from PIL import Image
+    W,H=size
+    pixels=np.zeros((192,108,3),np.uint8)
+    pixels[20:170,15:90]=[210,80,40]
+    pixels[50:100,35:65]=[250,250,250]
+    card=tmp_path/'portrait.png';Image.fromarray(pixels).save(card)
+    R=brand._renderer()
+    parts,_=R.outro_card_parts(0,W,H,30,5,motion=False,program_s=10)
+    graph=';'.join(parts+['[ohead]nullsink','[ovid]trim=start_frame=75:end_frame=76,setpts=PTS-STARTPTS,format=rgb24[frame]'])
+    raw=subprocess.run([brand.FF,'-v','error',*R._endcard_input_args(str(card),5,30),
+        '-filter_complex',graph,'-map','[frame]','-frames:v','1','-f','rawvideo','-'],capture_output=True,check=True).stdout
+    rendered=np.frombuffer(raw,np.uint8).reshape(H,W,3).astype(float)
+    expected=brand._card_frame(str(card),2.5,W,H)
+    assert np.abs(rendered-expected).mean()<1.0
+
+
 def clicks(dur, period, phase, sr=SR, level=0.5, seed=0):
     """A click track (a decaying 1.5 kHz blip on each beat) over a quiet bed of noise."""
     rng = np.random.default_rng(seed)

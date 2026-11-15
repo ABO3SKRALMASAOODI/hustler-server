@@ -598,6 +598,23 @@ def _frame(path, t, W, H):
     return np.frombuffer(r.stdout, dtype=np.uint8)[: W * H * 3].reshape(H, W, 3).astype(np.float32)
 
 
+def _card_frame(path,t,W,H):
+    """Compare the asset in its actual renderer seat, preserving its aspect.
+
+    A portrait end card is fitted inside the 98% box on landscape films, not
+    stretched to their canvas. Keep the same pixel-error threshold for both.
+    """
+    import numpy as np
+    R=_renderer();cw,ch=R._even(W*.98),R._even(H*.98)
+    graph=(f'[0:v]scale={cw}:{ch}:force_original_aspect_ratio=decrease,format=rgba[c];'
+           '[1:v]format=rgba[b];[b][c]overlay=(W-w)/2:(H-h)/2:shortest=1,'
+           'format=yuv420p,format=rgb24[out]')
+    seek=[] if path.lower().endswith(R.IMAGE_EXTS) else ['-ss',str(t)]
+    r=subprocess.run([FF,'-v','error',*seek,'-i',path,'-f','lavfi','-i',f'color=black:s={W}x{H}:r=30',
+                      '-filter_complex',graph,'-map','[out]','-frames:v','1','-f','rawvideo','-'],capture_output=True,check=True)
+    return np.frombuffer(r.stdout,np.uint8).reshape(H,W,3).astype(np.float32)
+
+
 def check(programme, final, workdir):
     """Measured on the files: length, the mark on the programme, the end card at the close, the sound level."""
     import numpy as np
@@ -616,7 +633,7 @@ def check(programme, final, workdir):
     rest = np.abs(a - b).mean()
     out.update(mark_roi_diff=round(float(roi), 2), outside_diff=round(float(rest), 2), mark_ok=bool(roi > 4 * max(rest, 0.5)))
     card = R.endcard_path()
-    c = _frame(card, 2.5, W, H)
+    c = _card_frame(card, 2.5, W, H)
     e = _frame(final, f["dur"] - 2.5, W, H)
     cd = float(np.abs(c - e).mean())
     out.update(endcard_diff=round(cd, 2), endcard_ok=cd < 6.0)
