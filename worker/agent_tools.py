@@ -10765,6 +10765,21 @@ def _auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
     from score import source_guard
     index = getattr(ctx, "index", None) or {}
     if index.get("_first_film_source_guard"):
+        # The legacy first-cut chain shares the same indexed measurements
+        # as the Director. A static slide must not lose its printed words
+        # merely because the Director fell back or was not selected.
+        prepared = index.get("director_preparation") or {}
+        per = prepared.get("perception") if prepared.get("version") == 1 else None
+        video = index.get("video") or {}
+        try:
+            fw, fh = (float(n) for n in str(ratio).split(":"))
+            relative = (fw / fh) * (float(video["height"]) / float(video["width"]))
+            fit = source_guard.static_text_needs_fit(
+                per, 0., float(video["duration"]), min(1., relative), min(1., 1 / relative))
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            fit = False
+        if fit:
+            return set_frame(ctx, ratio, "pad_blur")
         mode = "crop"  # local face/saliency tracking below, never a first-film strip
     # A call composited over a broadcast frame (source_layout.py) is framed
     # from its measured layout, not from a face and the detail around it:

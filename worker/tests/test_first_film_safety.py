@@ -211,6 +211,15 @@ def test_static_slide_text_survives_source_guard_and_portrait_lowering():
     assert window[0] <= .1 and window[2] >= .9
 
 
+def test_legacy_first_cut_preserves_the_same_measured_static_text(monkeypatch):
+    import agent_tools
+    from types import SimpleNamespace
+    _, index = _scene()
+    index["director_preparation"] = {"version": 1, "perception": _static_text_perception()}
+    monkeypatch.setattr(agent_tools, "set_frame", lambda ctx, ratio, mode: (ratio, mode))
+    assert agent_tools._auto_reframe(SimpleNamespace(index=index)) == ("9:16", "pad_blur")
+
+
 @pytest.mark.parametrize("change,faces", [(None, 0.), (.18, 0.), (0., .5)])
 def test_missing_motion_or_a_live_subject_does_not_trigger_slide_fit(change, faces):
     film, index = _scene()
