@@ -38,3 +38,12 @@ def test_original_survives_later_acquisition_failure(tmp_path,monkeypatch):
     from pathlib import Path
     assert record['url']=='https://example.org/original.mp4'
     assert Path(record['path']).read_bytes()==b'x'*3000
+
+
+def test_structured_transport_failure_preserves_source_access_reason(tmp_path,monkeypatch):
+    monkeypatch.setenv('FOOTAGE_FETCH_CMD','operator-fetch')
+    url='https://example.org/original.mp4'
+    receipt=dict(ok=False,url=url,error='source unavailable on authorized egress')
+    monkeypatch.setattr(fetch.subprocess,'run',lambda *a,**k:SimpleNamespace(returncode=1,stdout=json.dumps(receipt)))
+    with pytest.raises(fetch.FetchError,match='external original fetch failed: source unavailable on authorized egress'):
+        fetch.whole_av(url,str(tmp_path))

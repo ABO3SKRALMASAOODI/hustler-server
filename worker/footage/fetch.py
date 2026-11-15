@@ -229,6 +229,10 @@ def whole_av(url, out_dir):
                                 text=True, capture_output=True, timeout=900)
         try:
             receipt = json.loads(result.stdout)
+            if receipt.get('url') == url and receipt.get('ok') is False:
+                # A structured operator receipt preserves the actual access
+                # failure, rather than disguising it as a missing path/JSON bug.
+                raise FetchError('external original fetch failed: '+str(receipt.get('error') or 'source unavailable')[:400])
             path = os.path.realpath(receipt['path'])
             if result.returncode or receipt.get('url') != url or os.path.commonpath([path,os.path.realpath(out_dir)]) != os.path.realpath(out_dir):
                 raise ValueError('invalid external fetch receipt')
