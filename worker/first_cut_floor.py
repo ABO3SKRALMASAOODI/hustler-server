@@ -110,6 +110,7 @@ def choose(ctx, worker_db, started, start_edl, steps, applied, picked, render, b
     edl = row.get('json') or {}
     rec = {}
     old = copy.deepcopy(edl)
+    public_preview = copy.deepcopy(getattr(ctx, 'last_preview', None))
     saved = (steps, applied, picked, render)
     changed = False
     more, floor_applied, floor_picked, floor_render = [], applied, picked, render
@@ -166,6 +167,7 @@ def choose(ctx, worker_db, started, start_edl, steps, applied, picked, render, b
             import first_cut
             render = first_cut._render_cut(ctx, steps, picked)
         else:
-            rec['restore_error'] = 'candidate write refused; before-style preview retained'
-            return steps + more, floor_applied, floor_picked, floor_render
+            rec['restore_error'] = 'candidate write refused; existing public preview retained'
+            ctx.last_preview = public_preview
+            return saved
     return steps, applied, picked, render

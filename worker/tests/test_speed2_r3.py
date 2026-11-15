@@ -111,3 +111,21 @@ def test_first_cut_fallback_uses_local_subject_reframe_before_render(monkeypatch
     result=first_cut._render_cut(ctx,[],{'how':'finished_piece'})
     assert result.startswith('REJECTED')
     assert calls==[('auto_reframe',{'ratio':'9:16','mode':'crop'})]
+
+
+def test_rejected_floor_restore_never_returns_a_private_comparison(monkeypatch):
+    from types import SimpleNamespace
+    import first_cut_floor as floor
+    row={'version':2,'json':{'keep':[[0,10]]}}
+    public={'render_asset_id':44,'edl_version':2}
+    ctx=SimpleNamespace(latest_edl=lambda:row,project_id=1,last_preview=public)
+    writes=iter(['EDL v3','REJECTED'])
+    ctx.apply_score=lambda *a:next(writes)
+    reads=iter([{'class':'light_touch'},{'class':'trim_only'}])
+    monkeypatch.setattr(floor,'measure',lambda *a:next(reads))
+    def build():
+        ctx.last_preview={'render_asset_id':45,'edl_version':3}
+        return [],[],{},'private comparison'
+    result=floor.choose(ctx,None,0,{'json':{}},[],[],{'how':'director'},'public candidate',build)
+    assert result[-1]=='public candidate'
+    assert ctx.last_preview==public
