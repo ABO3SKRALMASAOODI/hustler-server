@@ -2794,6 +2794,42 @@ def ink_margin(ctx, s, f, rect, ink):
     return 1.0 - hi if luma(ink) > 0.5 else lo - 0.07
 
 
+def final_type_contrast(ctx, l1):
+    """Recheck ink after camera easing and source clearance have settled the picture.
+
+    The earlier type pass sees the authored crop. A late crop can put the same
+    cream words on a pale shirt (p5719). Keep every word, seat, ink and timing;
+    carry the existing contrasting edge only where final pixels need it.
+    """
+    import copy
+    final = copy.copy(ctx)
+    final.shots = [it for it in l1["items"] if it.get("k") == "shot"]
+    final.items = [it for it in l1["items"] if it.get("k") != "shot"]
+    measured, edged = 0, []
+    step = max(1, int(round(ctx.fps / THUMB_FPS)))
+    cuts = {s["f"][0] for s in final.shots}
+    for it in final.items:
+        if it.get("k") != "word" or it.get("edge"):
+            continue
+        a, z = it["f"]
+        times = set(range(a, z, step)) | {z - 1} | {f for f in cuts if a <= f < z}
+        seen = False
+        for f in sorted(times):
+            def at(value):
+                return value[min(f - a, len(value) - 1)] if isinstance(value, list) else value
+            rect = word_rect(final, it["t"], it["v"], at(it["x"]), at(it["y"]))
+            margin = ink_margin(final, shot_at(final, f), f, rect, it.get("ink") or "#FFFFFF")
+            if margin is None:
+                continue
+            seen = True
+            if margin < EDGE_BELOW:
+                it["edge"] = True
+                edged.append(it["id"])
+                break
+        measured += int(seen)
+    return {"measured_words": measured, "edged_words": edged}
+
+
 def under_plate(ctx, f):
     s = shot_at(ctx, f)
     return s.get("plate") if s and s.get("pic") == "plate" else None
@@ -6683,6 +6719,7 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
             m["move"] = {"fault": f"{type(e).__name__}: {str(e)[:160]}"}
     from . import source_guard
     m["source_guard"] = source_guard.apply(l1, ctx.index, ctx.perc, views=ctx.views)
+    m["final_type_contrast"] = final_type_contrast(ctx, l1)
     txt = meter_text(ctx, m)
     return Compiled(l1, m, txt, (time.perf_counter() - t0_) * 1000)
 
