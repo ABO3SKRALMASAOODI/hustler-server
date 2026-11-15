@@ -2885,7 +2885,10 @@ def final_type_clearance(ctx, l1):
         original = authored.get(it["id"], {})
         key = original.get("_g") or it.get("chunk") or it["id"]
         units.setdefault(key, []).append(it)
-    units = {k: ms for k, ms in units.items() if any(it.get("k") == "word" for it in ms)}
+    # Authored behind-subject words are intentionally occluded by the matte;
+    # their overlap with a face is not foreground ink covering that face.
+    units = {k: ms for k, ms in units.items()
+             if any(it.get("k") == "word" and not it.get("behind") for it in ms)}
 
     def bounds(members):
         boxes = [r for it in members if (r := type_rect(final, it)) is not None]
