@@ -115,6 +115,27 @@ def test_script_reorder_keeps_unchanged_sentence_take_budget(tmp_path):
     assert not list((new/'_takes').glob('s00_t*.wav'))
 
 
+def test_factual_repair_preserves_unaffected_script_and_order():
+    from archive_script import patch_script
+    sc=dict(chapters=[dict(id='c',turn='Old')],segments=[dict(say='Keep.',facts=['a']),dict(say='Correct.',facts=['b'])])
+    revised=patch_script(sc,dict(segments=[dict(index=1,changes=dict(say='Corrected.'))],chapters=[dict(id='c',changes=dict(turn='Supported'))]))
+    assert revised['segments']==[sc['segments'][0],dict(say='Corrected.',facts=['b'])]
+    assert sc['segments'][1]['say']=='Correct.'
+    with pytest.raises(ValueError):patch_script(sc,dict(segments=[dict(index=2,changes=dict(say='Extra.'))]))
+
+
+def test_visual_repair_cannot_change_a_recording_or_its_verified_turn():
+    from archive_visual import apply_choices
+    original=dict(say='Keep these words.',beat='turn',visual_beats=[])
+    sc=dict(script=dict(segments=[original]));ft=dict(voices=[])
+    cat=[dict(id='a',usable=True,clip=clip('archive',0,5))]
+    with pytest.raises(ValueError):apply_choices(sc,ft,dict(script=dict(segments=[dict(say='Changed.')])),cat)
+    revised=dict(script=dict(segments=[dict(say='Keep these words.',beat='setup',visual_beats=[dict(word_start=0,archive_ids=['a'])])]))
+    apply_choices(sc,ft,revised,cat)
+    assert original['beat']=='turn' and original['say']=='Keep these words.'
+    assert ft['lines'][0]['clips'][0]['catalogue_id']=='a'
+
+
 def test_checked_picture_follows_its_word_when_narration_timing_changes():
     import timeline_repair as R
     sc={'segments':[{'say':'Alpha beta.','chapter':'c'}]}

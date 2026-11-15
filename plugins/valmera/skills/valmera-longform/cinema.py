@@ -328,7 +328,14 @@ def supply(ctx, script):
     ns=wf4.story.narration_script(sc)
     reader=str(HERE/'longform_voice.py')
     nd=Path(ctx.supply)/'narration'
-    nar=narrated(ctx,ns,nd,reader)
+    # Spoken wording has passed its factual audit and is now frozen. Picture
+    # choices can be checked while the guarded reader works; they cannot edit
+    # a sentence or reset any take budget.
+    from archive_visual import prepare as prepare_visuals
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        voice_job=pool.submit(narrated,ctx,ns,nd,reader)
+        visual_job=pool.submit(prepare_visuals,ctx,script,ft)
+        nar=voice_job.result();visual_job.result()
     if nar['gate'].get('wer') is None or nar['gate']['wer']>=0.01:
         raise RuntimeError(f"narration WER must be <1%: {nar['gate']}")
     # Coverage is solved on the narrator-only clock. Inserted testimony brings

@@ -29,6 +29,23 @@ def preserve_takes(prior,current,new_groups):
     return kept
 
 
+def patch_script(script,edits):
+    revised=copy.deepcopy(script);seen=set()
+    for row in edits.get('segments',[]):
+        i=row['index'];changes=row['changes']
+        if not isinstance(i,int) or not 0<=i<len(revised['segments']) or i in seen:
+            raise ValueError('invalid screenplay repair index')
+        if not set(changes)<=set(revised['segments'][i]):raise ValueError('unknown screenplay field')
+        revised['segments'][i].update(changes);seen.add(i)
+    chapters={c['id']:c for c in revised['chapters']};seen=set()
+    for row in edits.get('chapters',[]):
+        key=row['id'];changes=row['changes']
+        if key not in chapters or key in seen or not set(changes)<=(set(chapters[key])-{'id'}):
+            raise ValueError('invalid chapter repair')
+        chapters[key].update(changes);seen.add(key)
+    return revised
+
+
 def propose(ctx,script,catalogue):
     import cinema as C
     from wf4 import story
@@ -59,33 +76,50 @@ def propose(ctx,script,catalogue):
     if critique:critique=critique.get('diagnosis',critique)
     notes=None
     for attempt in range(3):
-        text,use=story.writer.ask('Write the final documentary script from the inspected archive and verified facts. '
-            'The old script is a research draft, not a structure to preserve. Its long repeated explanations and multiple endings must go. '
-            'Tell a compelling true story with concrete stakes, human choices, reversals and a single earned ending. Never add filler or turn the film into an archive inventory. '
-            'The final film must last 10–20 minutes. Write 1900–2200 spoken words in 55–90 complete-sentence segments, with a hook in the first ten seconds and a real turn in each story chapter. '
-            'Each chapter comes from this story. Do not announce a question mechanically at every chapter or repeatedly explain what the audience will understand. '
-            'Use the actual available moving archive for most of the picture time, with original illustrations and cited records only where they genuinely explain an unfilmed event. '
-            'A picture may supply truthful context without visibly proving an invisible cause or motive; never imply that it depicts the wrong person, action, hardware, era or repair state. '
-            'Do not claim every decisive action was filmed. Clearly identify original drawings and ground rehearsals when used to explain a flight operation. '
-            'No fabricated historical views, generic substitutes or reused pictures. Do not turn a claimed source description into a fact when the catalogue marks it uncertain. '
-            'Give the actual scientific and human stakes enough space to matter. Keep the repair climax continuous, and let genuine onboard work earn the ending. '
-            'Preserve excellent complete sentences from the old script when useful, including its hook, but remove repetition. '
-            'All spoken numbers must be written out. Use clear spoken forms for difficult names and compounds; explain technical language simply. '
-            'Return JSON {script:{title,promise,names:[proper nouns],chapters:[{id,title,question,turn,music_mood,pace}], '
-            'testimony_purpose:string,segments:[{chapter,say,beat:"hook"|"promise"|"setup"|"loop"|"turn"|"low"|"payoff"|"close", '
-            'facts:[verified fact IDs],pictures:[named subjects],design:null,pace:"slow"|"steady"|"brisk",melody:"falling"|"rising"|"level"|"wide", '
-            'emphasis:[one or two spoken words],pause_after:0.22,direction:string, '
-            'visual_beats:[{word_start:zero-based whitespace-word index in this say,archive_ids:[catalogue IDs in intended order],label:optional truthful source-context label}]}]},why:string}. '
-            'Every segment begins with a visual beat at word_start 0. Introduce a new beat when the pictured subject changes. '
-            'Choose enough unseen source seconds for each beat at about three spoken words per second; each individual picture plays at most 7.8 seconds. '
-            'Use unique actual source intervals, not new crops of one still. Prefer the moving clips when they fit. A label clarifies a verified source, never manufactures its identity. '
-            'Keep archive_ids as literal catalogue IDs. Do not invent them. A segment facts list must support all its factual claims. '
-            'Return the full revised script, not editing notes.',
-            json.dumps(dict(old_script=old_script,facts=dossier['facts'],archive=material,editorial_review=critique,repair_notes=notes)),
-            effort='high',max_tokens=36000,what='WF4 archive-conformed screenplay')
-        C.save(root/f'response-{attempt}.json',dict(text=text,usage=use))
-        if use.get('stop')!='completed':raise ValueError('archive screenplay response incomplete; preserved for diagnosis')
-        proposal=story.writer.json_block(text);sc=proposal['script'];check=story.check_script(sc,dossier)
+        checkpoint=root/f'attempt-{attempt}.json'
+        if checkpoint.exists():
+            saved=C.read(checkpoint);proposal={k:saved[k] for k in ('script','why')};use=saved['usage']
+        elif attempt:
+            text,use=story.writer.ask('Repair ONLY the stated audit issues in this documentary. Preserve every unaffected sentence, visual choice, chapter and their order. '
+                'Return JSON {segments:[{index:zero-based segment index,changes:{only fields needing replacement}}], '
+                'chapters:[{id,changes:{only fields needing replacement}}],why:string}. '
+                'If spoken words change, keep the visual_beats word_start anchors valid for the revised wording. '
+                'Use only supplied facts and literal catalogue IDs. Do not rewrite the whole screenplay.',
+                json.dumps(dict(script=proposal['script'],issues=notes,facts=dossier['facts'],archive=material)),
+                effort='high',max_tokens=16000,what='WF4 precise screenplay repair')
+            C.save(root/f'response-{attempt}.json',dict(text=text,usage=use))
+            if use.get('stop')!='completed':raise ValueError('screenplay repair response incomplete; preserved for diagnosis')
+            edits=story.writer.json_block(text)
+            proposal=dict(script=patch_script(proposal['script'],edits),why=edits['why'])
+        else:
+            text,use=story.writer.ask('Write the final documentary script from the inspected archive and verified facts. '
+                'The old script is a research draft, not a structure to preserve. Its long repeated explanations and multiple endings must go. '
+                'Tell a compelling true story with concrete stakes, human choices, reversals and a single earned ending. Never add filler or turn the film into an archive inventory. '
+                'The final film must last 10–20 minutes. Write 1900–2200 spoken words in 55–90 complete-sentence segments, with a hook in the first ten seconds and a real turn in each story chapter. '
+                'Each chapter comes from this story. Do not announce a question mechanically at every chapter or repeatedly explain what the audience will understand. '
+                'Use the actual available moving archive for most of the picture time, with original illustrations and cited records only where they genuinely explain an unfilmed event. '
+                'A picture may supply truthful context without visibly proving an invisible cause or motive; never imply that it depicts the wrong person, action, hardware, era or repair state. '
+                'Do not claim every decisive action was filmed. Clearly identify original drawings and ground rehearsals when used to explain a flight operation. '
+                'No fabricated historical views, generic substitutes or reused pictures. Do not turn a claimed source description into a fact when the catalogue marks it uncertain. '
+                'Give the actual scientific and human stakes enough space to matter. Keep the repair climax continuous, and let genuine onboard work earn the ending. '
+                'Preserve excellent complete sentences from the old script when useful, including its hook, but remove repetition. '
+                'All spoken numbers must be written out. Use clear spoken forms for difficult names and compounds; explain technical language simply. '
+                'Return JSON {script:{title,promise,names:[proper nouns],chapters:[{id,title,question,turn,music_mood,pace}], '
+                'testimony_purpose:string,segments:[{chapter,say,beat:"hook"|"promise"|"setup"|"loop"|"turn"|"low"|"payoff"|"close", '
+                'facts:[verified fact IDs],pictures:[named subjects],design:null,pace:"slow"|"steady"|"brisk",melody:"falling"|"rising"|"level"|"wide", '
+                'emphasis:[one or two spoken words],pause_after:0.22,direction:string, '
+                'visual_beats:[{word_start:zero-based whitespace-word index in this say,archive_ids:[catalogue IDs in intended order],label:optional truthful source-context label}]}]},why:string}. '
+                'Every segment begins with a visual beat at word_start 0. Introduce a new beat when the pictured subject changes. '
+                'Choose enough unseen source seconds for each beat at about three spoken words per second; each individual picture plays at most 7.8 seconds. '
+                'Use unique actual source intervals, not new crops of one still. Prefer the moving clips when they fit. A label clarifies a verified source, never manufactures its identity. '
+                'Keep archive_ids as literal catalogue IDs. Do not invent them. A segment facts list must support all its factual claims. '
+                'Return the full revised script, not editing notes.',
+                json.dumps(dict(old_script=old_script,facts=dossier['facts'],archive=material,editorial_review=critique,repair_notes=notes)),
+                effort='high',max_tokens=36000,what='WF4 archive-conformed screenplay')
+            C.save(root/f'response-{attempt}.json',dict(text=text,usage=use))
+            if use.get('stop')!='completed':raise ValueError('archive screenplay response incomplete; preserved for diagnosis')
+            proposal=story.writer.json_block(text)
+        sc=proposal['script'];check=story.check_script(sc,dossier)
         ids={r['id'] for r in catalogue if r['usable']};issues=list(check['problems'])
         for i,segment in enumerate(sc['segments']):
             beats=segment.get('visual_beats',[]);starts=[b.get('word_start') for b in beats]
@@ -95,12 +129,14 @@ def propose(ctx,script,catalogue):
                 if not beat.get('archive_ids') or any(k not in ids for k in beat['archive_ids']):issues.append(f'segment {i} needs real usable catalogue IDs')
         C.save(root/f'attempt-{attempt}.json',dict(proposal,usage=use,check=check,issues=issues))
         if issues:notes=issues;continue
-        text,audit_use=story.writer.ask('Audit this documentary narration against its cited verified source quotes and archive catalogue. '
-            'Every factual claim, identity, chronology, causal statement, quantity and source-context label must be supported. '
-            'Check that visual choices do not represent the wrong event, crew, hardware or repair state. A contextual image need not prove an invisible cause, '
-            'but it must not contradict the words. No quality score. Return JSON {faithful:bool,issues:[specific fixes],why:string}.',
-            json.dumps(dict(script=sc,facts=dossier['facts'],archive=material)),effort='high',max_tokens=4000,what='WF4 conformed screenplay fact audit')
-        audit=story.writer.json_block(text);C.save(root/f'audit-{attempt}.json',dict(audit,usage=audit_use))
+        if (root/f'audit-{attempt}.json').exists():audit=C.read(root/f'audit-{attempt}.json')
+        else:
+            text,audit_use=story.writer.ask('Audit this documentary narration against its cited verified source quotes and archive catalogue. '
+                'Every factual claim, identity, chronology, causal statement, quantity and source-context label must be supported. '
+                'Check that visual choices do not represent the wrong event, crew, hardware or repair state. A contextual image need not prove an invisible cause, '
+                'but it must not contradict the words. No quality score. Return JSON {faithful:bool,issues:[specific fixes],why:string}.',
+                json.dumps(dict(script=sc,facts=dossier['facts'],archive=material)),effort='high',max_tokens=4000,what='WF4 conformed screenplay fact audit')
+            audit=story.writer.json_block(text);C.save(root/f'audit-{attempt}.json',dict(audit,usage=audit_use))
         if audit.get('faithful') is not True:notes=audit['issues'];continue
         result=dict(script=sc,dossier=dossier,check=check,audit=audit,why=proposal['why'])
         C.save(existing,result);return result
