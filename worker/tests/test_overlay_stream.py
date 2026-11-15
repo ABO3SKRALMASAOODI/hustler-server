@@ -35,10 +35,11 @@ def test_frame_ownership_gaps_overlaps_and_top_layers():
 
 
 @pytest.mark.skipif(not shutil.which('ffmpeg'), reason='ffmpeg required')
-def test_stream_preserves_visible_frames_and_cleans_staging(tmp_path, monkeypatch):
+@pytest.mark.parametrize('fps', [30, 25.984])
+def test_stream_preserves_visible_frames_and_cleans_staging(tmp_path, monkeypatch, fps):
     src = str(tmp_path/'source.mp4')
     subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i',
-                    'testsrc2=s=160x288:r=30:d=8','-c:v','libx264',
+                    f'testsrc2=s=160x288:r={fps}:d=8','-c:v','libx264',
                     '-threads','2','-preset','ultrafast','-qp','0',src],
                    check=True, capture_output=True, timeout=60)
     items = covers(8)

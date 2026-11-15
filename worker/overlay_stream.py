@@ -12,6 +12,11 @@ import tempfile
 import media
 
 
+def _clock(value):
+    # The ordinary overlay graph emits its authored bounds to milliseconds.
+    return float(f'{float(value):.3f}')
+
+
 def plan(items, fps):
     prefix = []
     for item in items:
@@ -24,8 +29,8 @@ def plan(items, fps):
         return []
     # Work on the output frame grid. Last layer wins at rounded overlaps,
     # just as it does in the ordinary ordered overlay chain.
-    spans = [(math.ceil(float(x['start']) * fps - 1e-7),
-              math.ceil((float(x['start']) + float(x['duration_s'])) * fps - 1e-7))
+    spans = [(math.ceil(_clock(x['start']) * fps - 1e-7),
+              math.ceil(_clock(float(x['start']) + float(x['duration_s'])) * fps - 1e-7))
              for x in prefix]
     edges = sorted({0, *(n for pair in spans for n in pair)})
     pieces = []
@@ -46,7 +51,12 @@ def prepare(items, edl, width, height, fps, workdir, fetch, input_args,
         return None
     prefix, pieces = planned
     folder = tempfile.mkdtemp(prefix='cutaway_stream_', dir=workdir)
-    files, windows = [], []
+    files = []
+    # Keep the original enable bounds. A frame-grid timestamp rounded to
+    # decimal text can be a fraction of a nanosecond later than that frame
+    # and incorrectly expose the base picture for one frame after a gap.
+    windows = [(_clock(x['start']), _clock(float(x['start']) + float(x['duration_s'])))
+               for x in prefix]
     try:
         for n, (a, b, owner) in enumerate(pieces):
             duration = (b-a)/fps
@@ -70,10 +80,11 @@ def prepare(items, edl, width, height, fps, workdir, fetch, input_args,
                 chain += look_chain(edl, float(item['start']), dur)
                 # Grade/texture clocks above remain relative to the authored
                 # shot, including a shot partially hidden by a later layer.
-                elapsed = a/fps - float(item['start'])
+                elapsed = a/fps - _clock(item['start'])
                 chain += [f'setpts=PTS-{elapsed:.9f}/TB']
-                windows.append((a/fps, b/fps))
-            chain += [f'fps={fps}:start_time=0', f'trim=end_frame={b-a}',
+            # Overlay framesync holds the preceding source frame. Nearest
+            # rounding can advance a VFR source across an internal cut.
+            chain += [f'fps={fps}:round=up:start_time=0', f'trim=end_frame={b-a}',
                       'setpts=N/FRAME_RATE/TB', 'setsar=1', 'format=yuv420p']
             path = os.path.join(folder, f'{n}.nut')
             media.run(['ffmpeg', '-y', '-v', 'error', '-threads:v', '2', *args,

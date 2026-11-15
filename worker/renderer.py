@@ -6064,7 +6064,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # crop and look. Gaps expose the original picture, never black.
             enabled = '+'.join(f'gte(t,{a:.9f})*lt(t,{b:.9f})'
                                for a, b in item['_cover_windows']) or '0'
-            parts.append(f'[{idx}:v]setpts=PTS-STARTPTS[ovp{j}]')
+            # Like a normal cutaway, keep its last frame through a
+            # fractional-rate framesync handoff. EOF must not reveal the
+            # base picture before the authored window ends.
+            # Concat demuxer durations round to microseconds. Restore the
+            # exact frame grid so a sub-microsecond positive offset cannot
+            # make framesync retain the previous shot for another frame.
+            parts.append(f'[{idx}:v]setpts=N/{fps:.9f}/TB,'
+                         f'tpad=stop_mode=clone:stop_duration=0.15[ovp{j}]')
             parts.append(f"[{vlabel}][ovp{j}]overlay=0:0:eof_action=pass"
                          f":enable='{enabled}'[vov{j}]")
             vlabel = f'vov{j}'
