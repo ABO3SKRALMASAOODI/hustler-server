@@ -888,9 +888,9 @@ def window_edl(edl, tl, w0, w1, keep_audio=False, fps=None,
                    "start": round(clipped_start - w0, 3),
                    "duration_s": round(clipped_dur, 3)}
         left_trim = max(0.0, clipped_start - original_start)
-        if left_trim and shifted.get("source_start_s") is not None:
+        if left_trim and (shifted.get("source_start_s") is not None or shifted.get("rate") is not None):
             shifted["source_start_s"] = round(
-                float(shifted["source_start_s"]) + left_trim, 3)
+                float(shifted.get("source_start_s") or 0) + left_trim * float(shifted.get("rate") or 1), 3)
         if left_trim:
             shifted["entrance"] = None
         if clipped_end < original_end - 0.001:

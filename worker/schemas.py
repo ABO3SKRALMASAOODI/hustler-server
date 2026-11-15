@@ -2069,6 +2069,9 @@ class OverlayItem(BaseModel):
     opacity: Optional[AnimFloat] = None  # 0-1; None = fully opaque
     rotation: Optional[AnimFloat] = None # degrees; curves may cross 0/360
     source_start_s: Optional[float] = None   # video overlays: seek into clip
+    # Source seconds per programme second, matching InsertItem's clock.
+    # Omitted on existing overlays; their playback remains unchanged.
+    rate: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     # Preserve a region of uploaded footage above a cutaway (for example
     # burned-in subtitles or a logo), without transcribing/recreating pixels.
     source_crop: Optional[List[float]] = None
@@ -2098,6 +2101,8 @@ class OverlayItem(BaseModel):
     def _crop_is_not_screen_locked(self):
         if self.source_crop is not None and self.screen is not None:
             raise ValueError("source_crop and screen locking are separate overlay modes")
+        if self.rate is not None and (self.kind != "video" or self.screen is not None):
+            raise ValueError("rate requires a video overlay without screen locking")
         return self
 
 
