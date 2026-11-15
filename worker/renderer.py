@@ -8704,7 +8704,13 @@ def _prune_source_cache(cache_dir, protect=None):
             st = os.stat(fp)
         except OSError:
             continue
-        # Interrupted downloads have no reuse value.  The remaining rules
+        # A concurrent render may still be writing this transfer (including
+        # boto's random suffix under our .part path). It has not acquired a
+        # job-owned hardlink yet. Reap only stale transfers; deleting a live
+        # one makes download_file's atomic rename fail and redownload it.
+        if ".part" in fn and now - st.st_mtime <= 6 * 3600:
+            continue
+        # Stale interrupted downloads have no reuse value. The remaining rules
         # are inclusive limits: an exactly-4-GiB source is still cacheable.
         if ".part" in fn or now - st.st_mtime > 6 * 3600 \
                 or st.st_size > config.SOURCE_CACHE_MAX_ITEM_BYTES:
