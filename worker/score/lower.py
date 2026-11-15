@@ -480,8 +480,12 @@ def lower_pictures(l1, work, bake, rep):
             if asset["kind"] == "video":
                 t0, t1 = (it.get("src") or [0, 0])[:2]
                 ov["source_start_s"] = r2(t0)
-                if abs((t1 - t0) - (it["f"][1] - it["f"][0]) / fps) > 0.05:
-                    rep.setdefault("rate_held", []).append(pid)
+                # The output run can be longer than this source interval
+                # (including merged short shots). Keep its authored pacing
+                # without reading into the next source scene under this crop.
+                if dur > 0 and t1 > t0 and abs((t1 - t0) - dur) > .005:
+                    ov["rate"] = (t1 - t0) / dur
+                    rep.setdefault("picture_rates", {})[pid] = ov["rate"]
             c = still_crop(it)
             if c:
                 ov["source_crop"] = c
