@@ -1,6 +1,12 @@
 """First-film source geometry: no speculative crop without shot-local subjects."""
 
 
+def _overlaps(start, end, lo, hi):
+    # A held frame has src=[t,t]. It belongs to the shot beginning at a
+    # cut, never the preceding shot; an empty interval overlap loses it.
+    return lo <= start < hi if start == end else lo < end and hi > start
+
+
 def _boxes(sample):
     boxes = list(sample.get("faces") or [])
     for key in ("face", "person", "body"):
@@ -30,14 +36,14 @@ def static_text_needs_fit(perception, start, end, width, height):
     """
     per = perception or {}
     shots = [s for s in per.get("shots") or []
-             if s.get("t") and s["t"][0] < end and s["t"][1] > start]
+             if s.get("t") and _overlaps(start, end, *s["t"])]
     if not shots or any(s.get("change") is None or s["change"] > .01 or
                         s.get("faces_seen") is None or s["faces_seen"] > 0
                         for s in shots):
         return False
     boxes = [r["box"] for r in per.get("text") or []
              if r.get("box") and len(r["box"]) == 4 and r.get("t") and
-             r["t"][0] < end and r["t"][1] > start and r.get("seen", 0) >= 3]
+             _overlaps(start, end, *r["t"]) and r.get("seen", 0) >= 3]
     return any(b[2] - b[0] > width + .005 or b[3] - b[1] > height + .005
                for b in boxes)
 
@@ -57,7 +63,9 @@ def _named_detail(item, views, rects, ratio, shots, boxes):
     if (len(box) != 4 or not 0 <= box[0] < box[2] <= 1
             or not 0 <= box[1] < box[3] <= 1
             or start < view["t0"] - .01 or end > view["t1"] + .01
-            or not any(s["start"] <= start and end <= s["end"] for s in shots)):
+            or (start == end and not view["t0"] <= start < view["t1"])
+            or not any(s["start"] <= start and end <= s["end"] and
+                       _overlaps(start, end, s["start"], s["end"]) for s in shots)):
         return False
     for c in rects:
         if not (0 <= c[0] < c[2] <= 1 and 0 <= c[1] < c[3] <= 1
@@ -112,7 +120,7 @@ def apply(l1, index, perception, *, views=None):
         if start < 0 or end > end_limit + 1e-6:
             raise ValueError(f"first film reads outside cleared source footage: "
                              f"{start:.6f}-{end:.6f}, limit {end_limit:.6f}")
-        overlaps = [s for s in shots if s["start"] < end and s["end"] > start]
+        overlaps = [s for s in shots if _overlaps(start, end, s["start"], s["end"])]
         boxes, missing = [], not overlaps
         for shot in overlaps:
             # Never borrow the nearest face from across a cut.
