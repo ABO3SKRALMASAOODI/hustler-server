@@ -1896,7 +1896,7 @@ def _asked(asks):
     return False
 
 
-def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=None, turn_s=None, bed=None, own_tiers=False):
+def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=None, turn_s=None, bed=None, own_tiers=False, level_source=False):
     """The designed sound for a compiled film: (sounds, report). The Director's own sounds stay and count first.
     supply: the governor's {np10, bed} (taste.supply) when the compiler has it; else read from the L1 and the upload.
     turn_s: the story's turn on the film's clock, when the caller knows it (a workflow's script names its payoff).
@@ -1929,12 +1929,18 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
         # no upload to listen to: nothing can be checked against the voice, so nothing is added or moved
         return existing, {"no_signal": True, "sounds": len(existing), "placed": [], "dropped": []}
     n = int(round(D / fps * AR))
-    voice = spine_audio(l1.get("spine"), fps, src, n)[:, 0]
+    source_knots = None
+    if level_source:
+        import first_film_sound
+        source = spine_audio(l1.get("spine"), fps, src, n, ch=2)
+        voice, source_knots = first_film_sound.renderer_source(source, AR)
+    else:
+        voice = spine_audio(l1.get("spine"), fps, src, n)[:, 0]
     words = words_in_programme(l1, index)
     speech, shift = None, 0.0
     if voice is not None and np.abs(voice).max() > 1e-5:
         speech, _ = speech_frames(voice, words)
-        shift = voice_shift(voice, speech)
+        shift = 0.0 if level_source else voice_shift(voice, speech)
     else:
         voice = None
     src_dur = float(((index or {}).get("video") or {}).get("duration") or D / fps)
@@ -1969,6 +1975,8 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
         sounds, proof = first_film_sound.level(sounds, voice, fps, shift, speaks=bool(speaks))
         report["foreground"] = proof
     report["speaks"] = bool(speaks)
+    if level_source:
+        report["renderer_source_gain_knots"] = source_knots
     return sounds, report
 
 

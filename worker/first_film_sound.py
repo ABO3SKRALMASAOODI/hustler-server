@@ -13,6 +13,34 @@ RELATIVE_DB = {'hero': 0.0, 'accent': -2.0, 'body': -3.0, 'tick': -6.0}
 BACKGROUND_DB = {'hero': 10.0, 'accent': 8.0, 'body': 7.0, 'tick': 5.0}
 
 
+def renderer_source(signal, rate):
+    """Predict the legacy renderer's source leveller, before the cue mix.
+
+    Its local gain can differ from a film-wide loudness shift by >10 dB.
+    Measure stereo exactly as the renderer does, then use the same knots.
+    The temporary metadata belongs to the worker's run-local TMPDIR.
+    """
+    import pathlib
+    import subprocess
+    import tempfile
+    import dialogue_level
+    x = np.asarray(signal, np.float32)
+    if x.ndim == 1:
+        x = x[:, None]
+    with tempfile.TemporaryDirectory(prefix='first-film-level-') as temp:
+        path = pathlib.Path(temp) / 'levels.txt'
+        subprocess.run(['ffmpeg', '-v', 'error', '-f', 'f32le', '-ar', str(rate),
+                        '-ac', str(x.shape[1]), '-i', 'pipe:0', '-af',
+                        dialogue_level.probe_chain(str(path)), '-f', 'null', '-'],
+                       input=x.tobytes(), capture_output=True, check=True, timeout=20)
+        knots = dialogue_level.gain_knots(dialogue_level.parse_probe(path.read_text()))
+    if not knots:
+        return x.mean(axis=1), []
+    ts, gains = zip(*knots)
+    gain = np.interp(np.arange(len(x)) / rate, ts, gains)
+    return x.mean(axis=1) * 10 ** (gain / 20), knots
+
+
 def peak_power(signal, rate, window_s=.2):
     x = np.asarray(signal, np.float32).reshape(-1)
     if not len(x):
@@ -214,8 +242,11 @@ def chain(ctx):
     # The coarse scene index misses cuts within montages. Reuse only the
     # source-validated pixel measurements already made during indexing.
     # No arranged track does not imply no music: the upload may carry a bed.
+    video = index.get('video') or {}
     sounds, report = sound.design(l1, src=src, index=index, perc=perception,
-                                  bed=True if edl.get('music') else None)
+                                  bed=True if edl.get('music') else None,
+                                  level_source=schemas.master_loudness(
+                                      edl, video.get('width'), video.get('height')) == 'social')
     placed = []
     for item in sounds:
         if item.get('s') not in sound.library():

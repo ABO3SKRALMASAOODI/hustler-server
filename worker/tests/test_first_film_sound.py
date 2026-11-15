@@ -136,6 +136,7 @@ def test_chain_uses_validated_source_cuts_and_keeps_source_bed_detection(monkeyp
     from first_film_sound import chain
     edl = {'keep': [[0, 10]]}
     index = {'director_preparation': {'version': 1},
+             'video': {'width': 720, 'height': 1280},
              'shots': [{'start': 0, 'end': 10}]}
     ctx = SimpleNamespace(index=index, duration=10, workdir=str(tmp_path),
                           latest_edl=lambda: {'json': edl}, proxy_path=lambda: 'source.mp4')
@@ -147,8 +148,41 @@ def test_chain_uses_validated_source_cuts_and_keeps_source_bed_detection(monkeyp
     monkeypatch.setattr(preparation, 'restore', restore)
     def design(l1, **kwargs):
         assert kwargs['bed'] is None
+        assert kwargs['level_source'] is True
         events = sound.l1_events(l1, sound._kshots(kwargs['perc'], kwargs['index']))
         assert [e['f'] for e in events] == [60, 120, 180, 240]
         return [], {}
     monkeypatch.setattr(sound, 'design', design)
     assert chain(ctx)['placed_on_chain'] == 0
+
+
+def test_source_reference_matches_renderer_local_gain(tmp_path, monkeypatch):
+    import subprocess
+    import dialogue_level
+    from first_film_sound import renderer_source
+    # A quiet opening followed by louder music: a single integrated shift
+    # underpredicts the rendered opening, which buried the p5575 cue.
+    rate = 16000
+    t = np.arange(6*rate)/rate
+    mono = np.sin(2*np.pi*700*t)*np.where(t < 2, .004, .04)
+    stereo = np.stack([mono, mono*.8], axis=1).astype(np.float32)
+    out, knots = renderer_source(stereo, rate)
+    assert knots[0][1] > knots[-1][1] + 4
+    # Compare against the renderer's actual volume filter, including its
+    # audio-frame evaluation cadence, not another copy of interpolation.
+    raw = subprocess.check_output(['ffmpeg', '-v', 'error', '-f', 'f32le',
+                                  '-ar', str(rate), '-ac', '2', '-i', 'pipe:0',
+                                  '-af', dialogue_level.volume_filter(knots),
+                                  '-f', 'f32le', '-'], input=stereo.tobytes())
+    rendered = np.frombuffer(raw, np.float32).reshape(-1, 2).mean(axis=1)
+    for a in [.4, 1.4, 3., 5.]:
+        lo, hi = round(a*rate), round((a+.2)*rate)
+        ratio = np.mean(out[lo:hi]**2)/np.mean(rendered[lo:hi]**2)
+        assert abs(10*np.log10(ratio)) < .4
+
+
+def test_silent_source_has_no_predicted_gain():
+    from first_film_sound import renderer_source
+    out, knots = renderer_source(np.zeros((32000, 2), np.float32), 16000)
+    assert knots == []
+    assert not out.any()
