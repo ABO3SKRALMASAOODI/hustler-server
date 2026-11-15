@@ -93,7 +93,12 @@ def measure(ctx, worker_db, label):
     process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                start_new_session=True)
     try:
-        process.wait(timeout=45)
+        # The fixed meter matches up to three frames per programme second.
+        # A 119s before-style film took 117s on the same retained preview;
+        # the old 45s deadline discarded it after a successful render.
+        # Give longer programmes a bounded measurement budget without
+        # changing sampling, thresholds or the contender decision.
+        process.wait(timeout=min(300., max(45., 30. + 2. * prog)))
         if process.returncode:
             raise RuntimeError('rendered comparison failed')
         with open(report) as handle:

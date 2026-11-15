@@ -69,6 +69,40 @@ def test_an_edited_label_does_not_waive_a_zero_picture_fallback():
     assert prefer_floor(reading('edited', sounds=0, motion=4), reading('light_touch', sounds=3, motion=1))
 
 
+@pytest.mark.parametrize('program_s', [119.267, 3600.])
+def test_long_completed_contender_can_finish_measurement(monkeypatch, tmp_path, program_s):
+    """p5746: the unchanged meter took 117s for a 119s comparison."""
+    import json
+    from pathlib import Path
+    from types import SimpleNamespace
+    import first_cut_floor as floor
+    import storage, schemas
+    observed = []
+    ctx = SimpleNamespace(workdir=str(tmp_path),
+        last_preview={'edl_version': 2, 'render_asset_id': 8},
+        latest_edl=lambda: {'version': 2, 'json': {}},
+        proxy_path=lambda: 'retained-source-proxy.mp4')
+    db = SimpleNamespace(run=lambda *a: {'storage_key': 'preview'})
+    monkeypatch.setattr(storage, 'download_to', lambda key, path: Path(path).write_bytes(b'preview'))
+    monkeypatch.setattr(schemas, 'program_duration', lambda edl: program_s)
+    class Process:
+        returncode = None
+        def __init__(self, cmd, **kwargs):
+            self.report = cmd[-1]
+        def wait(self, timeout=None):
+            observed.append(timeout)
+            if timeout < 117.25:
+                raise floor.subprocess.TimeoutExpired('film_measure', timeout)
+            Path(self.report).write_text(json.dumps(reading('edited')))
+            self.returncode = 0
+        def poll(self):
+            return self.returncode
+    monkeypatch.setattr(floor.subprocess, 'Popen', Process)
+    assert floor.measure(ctx, db, 'before_style')['class'] == 'edited'
+    assert 117.25 < observed[0] <= 300
+    assert not list(tmp_path.iterdir())
+
+
 def test_camera_motion_cannot_buy_lost_real_cuts_or_longer_holds():
     candidate = reading('edited', motion=0, steps=4)
     candidate['program_s'] = 15.44
