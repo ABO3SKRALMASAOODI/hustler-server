@@ -240,6 +240,10 @@ def build(script, sup, style_id, direction=None):
     pics = {k: v for k, v in pics.items() if v}
     footage = {int(ln["i"]): [c for c in ln.get("clips") or [] if os.path.basename(str(c.get("file") or c.get("path"))) not in drop
                               and c.get('path') not in drop and os.path.exists(str(c.get("path"))) and not c.get("dull")] for ln in sup.get("footage") or []}
+    composed_stills=set(sup.get("composed_stills") or [])
+    for candidates in footage.values():
+        for candidate in candidates:
+            if candidate["path"] in composed_stills:candidate["subject_motion"]=False
     take = sup["take"]
     keys, meta = {}, {}
     # the take's own shots (a show cut between cameras): each is framed on its own speaker. One file, one asset a shot
@@ -297,6 +301,9 @@ def build(script, sup, style_id, direction=None):
         # Retain the actual action verdict for acquisition ranking. It is never
         # an approval at another time: each new placement is checked again.
         for row, decision in zip(ins, placement_report['placements']):
+            if row[4]['path'] in composed_stills:
+                decision['motion_ok']=False
+                row[4]['verified_motion']=False
             for candidate in footage.get(row[4]['window'], []):
                 if candidate['path'] == row[4]['path']:
                     candidate['subject_motion'] = decision.get('motion_ok') is True

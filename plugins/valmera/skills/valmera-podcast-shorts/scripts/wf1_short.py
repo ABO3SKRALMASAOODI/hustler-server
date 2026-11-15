@@ -613,12 +613,35 @@ def render(ctx, script, sc):
         history.append(report)
         json.dump(history, open(history_path, "w"), indent=1)
         sc["beats"]["rendered_check"] = report
+        if not report["rejected"] and report["moving_share"]<.6:
+            _rebuild_motion(ctx,script,sc,report)
+            continue
         if not report["rejected"]:
             json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
             rd["picture_review"] = history
             rd["spend"] = [dict(stage="render", what="composed picture-to-words check", **u) for h in history for u in h.get("spend", [])]
             return rd
         _rebuild_rejected(ctx, script, sc, report)
+
+
+def _rebuild_motion(ctx, script, sc, report):
+    """Keep faithful stills, but never recertify their card motion as footage."""
+    pack=wf3.load_pack(ctx)
+    pics=sc['beats'].get('pictures') or []
+    stills={pics[row['id']]['path'] for row in report['placements'] if row.get('motion_ok') is not True}
+    previous=set(pack.get('composed_stills') or [])
+    if not stills-previous:
+        raise RuntimeError('final frames lack verified moving footage; no film may be delivered')
+    pack['composed_stills']=sorted(previous|stills)
+    path=os.path.join(ctx.supply,'pack.json');stored=json.load(open(path));stored['pack']=pack
+    json.dump(stored,open(path,'w'),indent=1)
+    ctx.log('final frames require more subject motion; retaining truthful stills and researching footage')
+    old_spend=sc.get('spend',[])
+    rebuilt=score(ctx,script)
+    rebuilt['spend']=old_spend+[u for u in rebuilt.get('spend',[]) if u not in old_spend]
+    sc.clear();sc.update(rebuilt)
+    json.dump(sc,open(os.path.join(ctx.run_dir,'score.json'),'w'),indent=1)
+    invalidate_render(ctx)
 
 
 def current_rejections(supply):
@@ -682,6 +705,12 @@ def check(ctx, rd, sc):
         history = json.load(open(history_path)) if os.path.exists(history_path) else []
         history.append(report)
         json.dump(history, open(history_path, "w"), indent=1)
+        if not report["rejected"] and report["moving_share"]<.6:
+            script=json.load(open(os.path.join(ctx.run_dir,"script.json")))
+            _rebuild_motion(ctx,script,sc,report)
+            fresh=render(ctx,script,sc)
+            rd.clear();rd.update(fresh)
+            continue
         if not report["rejected"]:
             sc["beats"]["delivered_check"] = report
             json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)

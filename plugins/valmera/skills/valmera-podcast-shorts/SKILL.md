@@ -179,8 +179,11 @@ New documentary stills do not consume a recovery attempt when moving coverage is
 Moving footage needs both the residual-motion measurement and visible subject action across the checked
 frames. Card transforms, pans over documents, and cursor-only changes on a static interface remain stills.
 Their failed motion verdict lowers their acquisition priority; it does not falsely reject a faithful picture.
+The composed and branded films must also reach 60% moving picture time. A still discovered there stays
+eligible as a still, while the product returns to footage research; it cannot regain moving credit from an earlier source check.
 Research is split into small referent groups with retained answers. A source replay can reuse verified word
 timings while recovering the same original at a resolution that permits real, face-safe eased movement.
 Sound attacks are balanced against the calibrated bed, then checked against decoded AAC using the rater's
-stem fit and T2 test. One bounded rebalance changes only already-earned effects. Test runs retain their
+stem fit and T2 test. One bounded rebalance changes only already-earned effects; one further bed-only
+correction handles changed limiter gain. Test runs retain their
 stems and scene evidence beside the exports before ordinary workflow scratch cleanup.

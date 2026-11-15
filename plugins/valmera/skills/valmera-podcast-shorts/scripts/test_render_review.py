@@ -39,7 +39,7 @@ def test_composed_rejection_rebuilds_product_plan_and_invalidates_render(tmp_pat
 
     def review(ctx, rd, score):
         bad = len(calls)==1
-        return dict(rejected=int(bad), placements=[dict(id=0,ok=not bad)], spend=[])
+        return dict(moving_share=1.,rejected=int(bad), placements=[dict(id=0,ok=not bad)], spend=[])
 
     def rebuild(ctx, script):
         assert json.load(open(tmp_path/'render_rejected.json'))==['/supply/bad.jpg']
@@ -59,7 +59,7 @@ def test_unresolved_composed_rejection_cannot_claim_a_passing_check(tmp_path,mon
     def fresh():return dict(beats=dict(pictures=[dict(path='/supply/bad.jpg')]),spend=[])
     sc=fresh()
     monkeypatch.setattr(wf.wf3,'render',lambda *a:dict(film='fake.mp4'))
-    monkeypatch.setattr(wf,'_render_review',lambda *a:dict(rejected=1,placements=[dict(id=0,ok=False)],spend=[]))
+    monkeypatch.setattr(wf,'_render_review',lambda *a:dict(moving_share=1.,rejected=1,placements=[dict(id=0,ok=False)],spend=[]))
     monkeypatch.setattr(wf,'score',lambda *a:fresh())
     with pytest.raises(RuntimeError, match='picture'):
         wf.render(ctx,{},sc)
@@ -75,7 +75,7 @@ def test_later_repairs_keep_the_picture_that_passed_every_review(tmp_path,monkey
     def review(ctx,rd,sc):
         pics=sc['beats']['pictures']
         bad=len(pics)>1
-        return dict(rejected=int(bad),placements=[dict(id=i,ok=not bad or i!=0) for i in range(len(pics))],spend=[])
+        return dict(moving_share=1.,rejected=int(bad),placements=[dict(id=i,ok=not bad or i!=0) for i in range(len(pics))],spend=[])
     monkeypatch.setattr(wf.wf3,'render',lambda *a:dict(film='fake.mp4'))
     monkeypatch.setattr(wf,'_render_review',review)
     monkeypatch.setattr(wf,'score',fresh)
@@ -86,7 +86,7 @@ def test_later_repairs_keep_the_picture_that_passed_every_review(tmp_path,monkey
 
 
 def test_delivery_only_rejection_invalidates_brand_and_music_and_rebuilds(tmp_path,monkeypatch):
-    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda x:None)
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),args={},log=lambda x:None)
     (tmp_path/'script.json').write_text('{}')
     sc=dict(frames=90,beats=dict(pictures=[dict(path='/supply/bad.jpg')]),spend=[])
     rd=dict(film='engine.mp4');checks=[]
@@ -100,7 +100,7 @@ def test_delivery_only_rejection_invalidates_brand_and_music_and_rebuilds(tmp_pa
     def review(ctx,rd,sc):
         assert rd['film']=='branded.mp4'
         bad=len(checks)==1
-        return dict(rejected=int(bad),placements=[dict(id=0,ok=not bad)] if bad else [],spend=[])
+        return dict(moving_share=1.,rejected=int(bad),placements=[dict(id=0,ok=not bad)] if bad else [],spend=[])
     monkeypatch.setattr(wf.wf3,'check',finish)
     monkeypatch.setattr(wf,'_render_review',review)
     monkeypatch.setattr(wf,'score',lambda *a:dict(frames=90,beats=dict(pictures=[]),spend=[]))
@@ -143,7 +143,7 @@ def test_changed_plan_invalidates_old_render_before_frame_check(tmp_path,monkeyp
         assert not (tmp_path/'final_music.mp4').exists()
         return dict(film='new.mp4')
     monkeypatch.setattr(wf.wf3,'render',draw)
-    monkeypatch.setattr(wf,'_render_review',lambda *a:dict(rejected=0,spend=[]))
+    monkeypatch.setattr(wf,'_render_review',lambda *a:dict(moving_share=1.,rejected=0,spend=[]))
     wf.render(ctx,{},dict(l1=str(l1),beats={}))
     assert json.load(open(tmp_path/'render_revision.json'))==wf.render_revision(dict(l1=str(l1)))
 
@@ -219,3 +219,37 @@ def test_corrected_source_eligibility_and_subjects_invalidate_exhausted_search(t
     manifest=sources/'manifest.json';manifest.write_text(json.dumps([row]));first=wf.source_signature(str(tmp_path))
     row.update(where='primary',subjects=['Actual subject']);manifest.write_text(json.dumps([row]))
     assert wf.source_signature(str(tmp_path))!=first
+
+
+def test_composed_still_is_retained_but_cannot_certify_moving_coverage(tmp_path,monkeypatch):
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda _:None)
+    pack=dict(footage=[dict(i=0,clips=[dict(path='faithful-still.mp4')])])
+    (tmp_path/'pack.json').write_text(json.dumps(dict(pack=pack)))
+    monkeypatch.setattr(wf.wf3,'load_pack',lambda _:json.load(open(tmp_path/'pack.json'))['pack'])
+    sc=dict(beats=dict(pictures=[dict(path='faithful-still.mp4')]),spend=[])
+    calls=[]
+    def review(*args):
+        calls.append(1)
+        return dict(rejected=0,moving_share=.2 if len(calls)==1 else .7,
+                    placements=[dict(id=0,ok=True,motion_ok=False)],spend=[])
+    def rebuild(*args):
+        saved=json.load(open(tmp_path/'pack.json'))['pack']
+        assert saved['composed_stills']==['faithful-still.mp4']
+        assert saved['footage']==pack['footage']
+        assert not (tmp_path/'render_rejected.json').exists()
+        return dict(beats=dict(pictures=[dict(path='new-motion.mp4')]),spend=[])
+    monkeypatch.setattr(wf.wf3,'render',lambda *a:dict(film='fake.mp4'))
+    monkeypatch.setattr(wf,'_render_review',review)
+    monkeypatch.setattr(wf,'score',rebuild)
+    result=wf.render(ctx,{},sc)
+    assert len(result['picture_review'])==2
+    assert sc['beats']['rendered_check']['moving_share']==.7
+
+
+def test_unchanged_final_motion_failure_stops_without_retry(tmp_path,monkeypatch):
+    pack=dict(composed_stills=['still.mp4'])
+    monkeypatch.setattr(wf.wf3,'load_pack',lambda _:pack)
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path))
+    sc=dict(beats=dict(pictures=[dict(path='still.mp4')]))
+    with pytest.raises(RuntimeError,match='lack verified moving footage'):
+        wf._rebuild_motion(ctx,{},sc,dict(placements=[dict(id=0,ok=True,motion_ok=False)]))
