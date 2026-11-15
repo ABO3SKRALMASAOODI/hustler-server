@@ -2114,7 +2114,10 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                        "over its song)")
         if drop_app_cards(ctx, steps, started, duration):
             applied.append("the app's end card left out")
-        if _orientation(ctx.index) != "vertical" and not _screen_like(ctx.index):
+        if not whole and typography.get("designed_layout"):
+            _run(ctx, steps, "set_frame", {"ratio": "source", "mode": "crop"}, started)
+            applied.append("the upload's composed picture layout preserved")
+        elif _orientation(ctx.index) != "vertical" and not _screen_like(ctx.index):
             if _ok(_run(ctx, steps, "auto_reframe", {"ratio": "9:16"}, started)):
                 applied.append("reframed to 9:16")
         return steps, applied, {"how": "finished_piece"}
@@ -2262,7 +2265,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
     vertical_source = _orientation(ctx.index) == "vertical"
     vertical_out = vertical_source
     screen_kept = False
-    if not vertical_source and typography.get("designed_layout"):
+    if not whole and not vertical_source and typography.get("designed_layout"):
         _run(ctx, steps, "set_frame", {"ratio": "source", "mode": "crop"}, started)
         applied.append("the upload's composed type and picture layout preserved")
     elif not vertical_source and (picked or {}).get("how") == "continuous":
