@@ -66,3 +66,22 @@ def prepare(ctx):
 
 def captioned(index):
     return ((index or {}).get("source_typography") or {}).get("caption_track") == "complete"
+
+
+def refresh(ctx, worker_db, sha):
+    """Join an already completed storyboard; never wait behind indexing.
+
+    Director preparation overlaps the late storyboard. Read once after that
+    preparation, preserving the edit's corrected transcript and other evidence.
+    """
+    if ctx.index.get("visual_storyboard_pending") and sha:
+        import db as dbx
+        try:
+            row = worker_db.run(dbx.get_index_by_sha, sha) or {}
+            fresh = row.get("json") or {}
+            if fresh and not fresh.get("visual_storyboard_pending"):
+                ctx.index = {**ctx.index, "visual_storyboard": fresh.get("visual_storyboard"),
+                             "visual_storyboard_pending": False}
+        except Exception:
+            pass
+    return prepare(ctx)
