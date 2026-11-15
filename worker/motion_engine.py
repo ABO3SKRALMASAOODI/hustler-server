@@ -568,6 +568,7 @@ class RenderJob:
     assets: dict = field(default_factory=dict)   # url path -> local file
     label: str = "motion"
     t0: float = 0.0                 # composition time of the first frame
+    glyph_exposure: bool = False   # probe only; never changes rendered clips
 
     def key(self):
         h = hashlib.sha256()
@@ -1279,6 +1280,49 @@ _DOM_TYPE = """() => {
   return out;
 }"""
 
+# A separate glyph-only exposure keeps an opaque HTML card or its shadow
+# from being mistaken for letters. Restore every inline style before the
+# next animation seek. This is read-only measurement, never the render.
+_GLYPH_EXPOSURE = """() => {
+  const els = Array.from(document.body.querySelectorAll('*')).concat(document.body,document.documentElement);
+  const saved = els.map(e => [e, e.getAttribute('style')]);
+  const visible = new Set();
+  const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = walk.nextNode())) {
+    const e = n.parentElement;
+    if (!n.textContent.trim() || !(e instanceof HTMLElement) ||
+        ['SCRIPT','STYLE','NOSCRIPT'].includes(e.tagName)) continue;
+    let alpha = 1, hidden = false;
+    for (let p = e; p; p = p.parentElement) {
+      const s = getComputedStyle(p); alpha *= Number(s.opacity);
+      hidden ||= s.display === 'none' || s.visibility !== 'visible';
+    }
+    const s = getComputedStyle(e);
+    const c = document.createElement('canvas').getContext('2d');
+    c.fillStyle = s.webkitTextFillColor || s.color; c.fillRect(0,0,1,1);
+    if (!hidden && alpha * c.getImageData(0,0,1,1).data[3] >= 204) visible.add(e);
+  }
+  const css = document.createElement('style');
+  css.textContent = '*::before,*::after{visibility:hidden!important}';
+  document.head.appendChild(css);
+  for (const e of els) {
+    for (const [k,v] of Object.entries({background:'transparent',boxShadow:'none',
+        borderColor:'transparent',outlineColor:'transparent',textShadow:'none',
+        webkitTextStrokeWidth:'0px',color:visible.has(e)?'white':'transparent',
+        webkitTextFillColor:visible.has(e)?'white':'transparent'}))
+      e.style.setProperty((k.startsWith('webkit')?'-':'')+
+        k.replace(/[A-Z]/g, x => '-'+x.toLowerCase()),v,'important');
+    if (['IMG','VIDEO','CANVAS','SVG'].includes(e.tagName.toUpperCase()))
+      e.style.setProperty('visibility','hidden','important');
+  }
+  window.__mgRestoreGlyphExposure = () => {
+    css.remove();
+    saved.forEach(([e,s]) => s === null ? e.removeAttribute('style') : e.setAttribute('style',s));
+    delete window.__mgRestoreGlyphExposure;
+  };
+}"""
+
 
 async def _probe_all(jobs, times_list, budget_s, measure=None):
     from playwright.async_api import async_playwright
@@ -1309,7 +1353,7 @@ async def _probe_all(jobs, times_list, budget_s, measure=None):
                     await cdp.send("Emulation.setDefaultBackgroundColorOverride",
                                    {"color": {"r": 0, "g": 0, "b": 0, "a": 0}})
                     visible, bboxes, inks, covers, measures = 0, [], [], [], []
-                    type_runs = []
+                    type_runs, glyph_masks = [], []
 
                     def frac(bb):
                         return [round(v * 4.0 / dw, 3) if i % 2 == 0 else round(v * 4.0 / dh, 3)
@@ -1339,6 +1383,16 @@ async def _probe_all(jobs, times_list, budget_s, measure=None):
                                 measures.append(measure(base64.b64decode(full["data"])))
                             except Exception as e:  # noqa: BLE001
                                 measures.append({"error": str(e)[:120]})
+                            if job.glyph_exposure:
+                                await page.evaluate(_GLYPH_EXPOSURE)
+                                try:
+                                    mask = await cdp.send("Page.captureScreenshot", {
+                                        "format": "png", "optimizeForSpeed": True,
+                                        "clip": {"x": 0, "y": 0, "width": dw, "height": dh,
+                                                 "scale": 1.0}})
+                                    glyph_masks.append(mask["data"])
+                                finally:
+                                    await page.evaluate("window.__mgRestoreGlyphExposure()")
                     errs = await page.evaluate("window.__mgErrors || []")
                     # what a template reports about its own layout (hook_title:
                     # the type's size and lines, so "bigger" is read from the
@@ -1352,7 +1406,8 @@ async def _probe_all(jobs, times_list, budget_s, measure=None):
                                 "cover": covers,
                                 **({"info": info} if isinstance(info, dict) else {}),
                                 **({"measures": measures, "type_runs": type_runs}
-                                   if measure is not None else {})})
+                                   if measure is not None else {}),
+                                **({"glyph_masks": glyph_masks} if glyph_masks else {})})
                   except Exception as e:  # noqa: BLE001 — one bad composition
                     out.append({"errors": [str(e).splitlines()[0][:200]], "visible_frames": 0,
                                 "samples": len(times), "bboxes": [], "ink": [], "cover": []})
@@ -1440,7 +1495,7 @@ def _probe_memo_keys(jobs, times_list, measure):
     for job, times in zip(jobs, times_list):
         try:
             keys.append(render_memo.key(
-                "motion_engine.probe", code, tag, job.key(),
+                "motion_engine.probe", code, tag, job.key(), job.glyph_exposure,
                 [float(t) for t in times]))
         except Exception:  # noqa: BLE001
             keys.append(None)
