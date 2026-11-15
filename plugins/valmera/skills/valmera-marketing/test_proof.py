@@ -175,3 +175,21 @@ def test_claim_audit_receives_viewer_copy_not_production_notes(monkeypatch):
     assert P.audit(sc, {})[0] == []
     assert "Bold captions" in seen[0] and "READABLE" in seen[0]
     assert "production-only-placement" not in seen[0] and "actor-only-note" not in seen[0]
+
+
+def test_photo_plan_preserves_visual_requirement_and_resumes(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(supply=str(tmp_path))
+    subject = dict(name="Hands typing", searches=["typing laptop tutorial 4K"],
+                   must_show="Both hands type on the visible laptop keys.")
+    calls = []
+    def response(*args, **kwargs):
+        calls.append(1)
+        return {"subjects": [{"name": "Hands typing", "searches": ["typing keyboard", "laptop hands"]}]}, {"usd": 0}
+    monkeypatch.setattr(P, "ask", response)
+    briefs, _ = P.photo_briefs(ctx, [subject])
+    assert briefs[0]["must_show"] == subject["must_show"]
+    assert briefs[0]["searches"] == ["typing keyboard", "laptop hands"]
+    assert subject["searches"] == ["typing laptop tutorial 4K"]
+    assert P.photo_briefs(ctx, [subject]) == (briefs, [])
+    assert len(calls) == 1

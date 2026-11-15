@@ -590,7 +590,8 @@ def write(ctx, idea, card, rc, notes=None):
                "actor, \"era\": 2026, \"collage\": true on the one or two segments that list several things}], \"named\": [{\"name\": what a "
                "camera filmed and anyone can find on YouTube or Wikimedia Commons (the speaker on stage, an editor at a timeline, a "
                "podcast studio, a phone scrolling shorts, a named app's interface), \"is\": thing|place|company|person|event (a generic scene "
-               "such as an editor's timeline is a thing, not a person), \"searches\": one to three YouTube searches, \"must_show\": one "
+               "such as an editor's timeline is a thing, not a person), \"searches\": two or three short image-library queries "
+               "of two to four words each, \"video_searches\": one to three YouTube searches, \"must_show\": one "
                "plain sentence of what is visible in a frame (a face and its setting, a screen, an object), never how the film shows it "
                "and never which words are said}]; prefer subjects a camera filmed often (a named editing app's timeline, a phone "
                "scrolling short videos, a podcast studio, the speaker of the clip); never name the recording itself here: "
@@ -737,6 +738,30 @@ def splice(ctx, narr_dir, foot_dir, voices):
     return placed
 
 
+def photo_briefs(ctx, named):
+    """Image libraries need subject queries, not the documentary video's search sentence."""
+    path = os.path.join(ctx.supply, "photo_plan.json")
+    cached = jload(path, {}) or {}
+    if cached.get("subjects") == named:
+        return cached["briefs"], []
+    result, use = ask(
+        "Translate these exact visual subjects into image-library search queries for Wikimedia Commons and Openverse. "
+        "Use two or three concrete queries per subject, two to four words each. Preserve the actual object or action; "
+        "never replace the requested thing with a generic mood or change its identity. Do not use video-platform terms "
+        "such as tutorial, stock footage or 4K. Do not claim these searches guarantee a match: the existing must_show "
+        "and per-line frame checks remain binding. Return JSON {subjects:[{name:exact original name, searches:[...]}]}.",
+        json.dumps(named, ensure_ascii=False), what="photo search plan", effort="low", max_tokens=3000)
+    by_name = {r.get("name"): r.get("searches") for r in result.get("subjects", []) if isinstance(r, dict)}
+    briefs = []
+    for subject in named:
+        queries = by_name.get(subject["name"])
+        if not isinstance(queries, list) or not queries or not all(isinstance(q, str) and q.strip() for q in queries):
+            raise RuntimeError(f"photo search plan omitted {subject['name']}")
+        briefs.append(dict(subject, searches=queries[:3]))
+    jsave(path, dict(subjects=named, briefs=briefs))
+    return briefs, [use]
+
+
 def supply(ctx, script):
     sc = script["script"]
     sup_dir = ctx.supply
@@ -756,7 +781,11 @@ def supply(ctx, script):
     used = {n for s in sc["segments"] for n in s.get("pictures") or []}
     named = [n for n in sc.get("named") or [] if n.get("name") in used]
     if named:                    # free photographs are the fallback; the film is cut from footage, so too few is no stop
-        got, reports, usd = PX.pictures(named, os.path.join(sup_dir, "pics"), per=4)
+        photo_named, photo_spend = photo_briefs(ctx, named)
+        spend += photo_spend
+        got, reports, usd = PX.pictures(photo_named, os.path.join(sup_dir, "pics"), per=4)
+        jsave(os.path.join(sup_dir, "photo_reports.json"), reports)
+        ctx.log(f"photographs: {sum(len(v) for v in got.values())} across {len(named)} subjects")
         spend.append(dict(stage="supply", provider="openai", model="picture check", what="photographs", usd=usd))
         for recs in got.values():
             for r in recs:
