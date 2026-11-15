@@ -7,6 +7,79 @@ import pytest
 from score import asks, film, flags, patch, typed
 
 
+def _empty_picture_search(tmp_path):
+    return dict(ctx=NS(director_footage_cfg={"mode": "on"}, director_footage=None),
+        job={"id": 7}, cfg={"models": {"scout": "gpt-6.1-sol"}}, deadline=220,
+        work=str(tmp_path), index={}, sess={"prompts": [{"text": "Polish my film"}]},
+        per={}, sc={"asks": [{"id": "a1", "said": "Polish my film"}],
+            "scope": "long", "windows": [{"t0": 0, "t1": 900}],
+            "wishes": [{"w": "1-3", "want": "sunrise", "mine": False, "own": False}]},
+        bin_doc={"items": [], "own": [], "wishes": [{"check": [
+            {"ok": False, "why": "Could be sunset; sunrise is not established"}]}]},
+        foot=None, rec={}, acquire=object())
+
+
+def test_empty_typed_supply_replans_pictures_but_keeps_original_asks_and_checks(monkeypatch, tmp_path):
+    from score import scout, supply
+    monkeypatch.setattr(typed, "time", NS(monotonic=lambda: 0))
+    args = _empty_picture_search(tmp_path)
+    alternate = [{"w": "1-3", "want": "a clock at dawn", "mine": False}]
+    calls = []
+    def propose(work, index, session, per, deadline, model):
+        assert "Could be sunset" in session["execution"]
+        assert session["prompts"] == args["sess"]["prompts"]
+        assert model == "gpt-6.1-sol"
+        return {"wishes": alternate, "asks": [], "windows": [{"t0": 0, "t1": 20}]}
+    checked = {"items": [], "own": [], "wishes": [{"check": [{"ok": False}]}]}
+    def check(work, sc, per, acquire, deadline, foot):
+        calls.append(sc)
+        assert acquire is args["acquire"]
+        return checked  # the second search can still reject everything
+    monkeypatch.setattr(scout, "run", propose)
+    monkeypatch.setattr(film, "footage_start", lambda *a, **k: None)
+    monkeypatch.setattr(supply, "run", check)
+    sc, doc, foot = typed.recover_supply(**args)
+    assert len(calls) == 1 and doc is checked
+    assert sc["wishes"] == alternate
+    assert sc["asks"] == args["sc"]["asks"]
+    assert sc["windows"] == args["sc"]["windows"] and sc["scope"] == "long"
+    assert args["rec"]["picture_recovery"]["result"] == "alternative checked"
+
+
+@pytest.mark.parametrize("reason", ["picture", "own_view", "own_only", "no_wish", "deadline", "pending", "late_picture"])
+def test_picture_recovery_keeps_usable_or_pending_supply_and_source_only_wishes(monkeypatch, tmp_path, reason):
+    from score import scout
+    monkeypatch.setattr(typed, "time", NS(monotonic=lambda: 0))
+    args = _empty_picture_search(tmp_path)
+    if reason == "picture": args["bin_doc"]["items"] = [{"id": 0}]
+    if reason == "own_view": args["bin_doc"]["own"] = [{"id": 0}]
+    if reason == "own_only": args["sc"]["wishes"][0]["mine"] = True
+    if reason == "no_wish": args["sc"]["wishes"] = []
+    if reason == "deadline": args["deadline"] = 100
+    if reason == "pending": args["foot"] = {"thread": NS(join=lambda seconds: None, is_alive=lambda: True)}
+    if reason == "late_picture": args["foot"] = {"offers": [{"id": 0}]}
+    monkeypatch.setattr(scout, "run", lambda *a, **k: pytest.fail("must preserve existing supply"))
+    assert typed.recover_supply(**args) == (args["sc"], args["bin_doc"], args["foot"])
+
+
+def test_recovery_failure_keeps_the_empty_bin_and_owns_the_new_footage_thread(monkeypatch, tmp_path):
+    import json
+    from score import scout, supply
+    monkeypatch.setattr(typed, "time", NS(monotonic=lambda: 0))
+    args = _empty_picture_search(tmp_path)
+    foot = {"thread": object()}
+    monkeypatch.setattr(scout, "run", lambda *a, **k: {"wishes": [{"want": "another honest picture"}]})
+    monkeypatch.setattr(film, "footage_start", lambda *a, **k: foot)
+    def fail(*a, **k):
+        raise RuntimeError("search unavailable")
+    monkeypatch.setattr(supply, "run", fail)
+    sc, doc, got = typed.recover_supply(**args)
+    assert got is foot and args["ctx"].director_footage is foot
+    assert doc == args["bin_doc"] == json.loads((tmp_path / "bin.json").read_text())
+    assert sc["asks"] == args["sc"]["asks"]
+    assert "search unavailable" in args["rec"]["picture_recovery"]["error"]
+
+
 def test_window_index_keeps_late_class_words_and_spatial_clock():
     source = {"video": {"duration": 7320, "width": 1920, "height": 1080},
         "words": [{"w": "early", "t0": 1, "t1": 2},
