@@ -84,7 +84,15 @@ def test_director_refresh_reads_once_without_waiting_or_replacing_corrected_word
 
 
 def test_first_cut_preserves_existing_type_but_still_builds_the_edit(monkeypatch):
+    import first_cut
     from test_first_cut_visual import _talking_chain
+    frames = []
+    run = first_cut._run
+    def record(ctx, steps, name, args, started):
+        if name == "set_frame":
+            frames.append(args)
+        return run(ctx, steps, name, args, started)
+    monkeypatch.setattr(first_cut, "_run", record)
 
     def prepare(ctx):
         value = dict(caption_track="complete", designed_layout=True)
@@ -99,3 +107,4 @@ def test_first_cut_preserves_existing_type_but_still_builds_the_edit(monkeypatch
     assert "set_frame" in calls
     assert "set_master_loudness" in calls
     assert "source_broll" in calls
+    assert frames == [{"ratio": "9:16", "mode": "pad_blur"}]
