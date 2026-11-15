@@ -138,8 +138,8 @@ def recover_write(ctx, *, work, cfg, index, sc, bin_doc, original_key,
             "story, picture constraints and all necessary source events. Restore any "
             "distinct action the guard says you removed. Do not claim evidence you have "
             "not seen, relabel a rejected deletion, or trade away an ask to pass the guard. "
-            "Some earlier cut batches may already be saved; the current source keep is "
-            "below. Return complete replacement JSONL lines (same IDs replace; del removes), "
+            "The current source keep is below. Return complete replacement JSONL lines "
+            "(same IDs replace; del removes), "
             "using the Score's local source clock. The guard will check the revised film again.\n"
             f"Source-clock offset: {ctx.start}\nCurrent keep, full-source seconds: "
             + json.dumps(current.get("keep")) + "\nWrite rejection:\n" + str(refusal))
@@ -257,20 +257,17 @@ def recover_supply(ctx, *, job, cfg, deadline, work, index, sess, per,
 
 
 def write_film(ctx, edl):
-    """Keep the typed cut-evidence gate's batch size, including on long films.
+    """Write the complete film through the ordinary typed evidence guards.
 
-    The Director proposes the cuts. The existing keep writer checks their
-    source evidence and reanchors existing layers in each saved batch. No
-    scope or evidence guard is bypassed, and a refused batch stops here.
-    The complete designed film is written only after those cuts are accepted.
+    The source guard checks long cuts in bounded groups before saving. Keep
+    the full target and pictures together so every group sees the intended
+    film, and a refusal cannot leave a partially trimmed intermediate.
     """
-    import audit
     import agent_tools
-    import edit_integrity
     before = ctx.latest_edl()["json"]
     # Score picture beats can use second anchors, and frame quantization can
     # also leave a speech edge inside a word. Normalize on the full source
-    # clock before computing deletion batches, exactly as the ordinary keep
+    # clock before checking deletions, exactly as the ordinary keep
     # writer does. Re-anchor the designed layers with the same timeline pass;
     # changing keep alone would desynchronize the film from its pictures.
     import word_edges
@@ -290,20 +287,6 @@ def write_film(ctx, edl):
                 edl.get("inserts") or [], old_keep, keep, speed, speed)
             new_tl = timeline.Timeline(keep, edl["inserts"], speed)
             agent_tools._remap_program_items(edl, old_tl, new_tl)
-    spans = edit_integrity.removed_spans(before.get("keep"), edl.get("keep"))
-    if len(spans) > 12:
-        # A montage with no main spine must install its canvas and pictures
-        # atomically with the last deletions. Never save an empty keep-only
-        # intermediate. The final ordinary write still checks <=12 removals.
-        batches = spans[:-12] if not edl.get("keep") and edl.get("canvas") else spans
-        for offset in range(0, len(batches), 12):
-            current = ctx.latest_edl()["json"]
-            keep = [list(s) for s in audit.subtract_spans(
-                current.get("keep") or [], batches[offset:offset + 12])]
-            result = agent_tools._write_keep(ctx, keep,
-                "Director: source-checked cut batch", snap_to_words=False)
-            if not str(result).startswith("EDL v"):
-                return result
     return ctx.write_edl(edl, "Director: typed film")
 
 

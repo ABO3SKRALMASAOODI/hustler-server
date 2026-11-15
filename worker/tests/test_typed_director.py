@@ -203,65 +203,52 @@ def test_wordless_montage_declares_canvas_without_changing_pictures_or_bypassing
     assert not hasattr(ctx, "_score_write")
 
 
-def test_canvas_transition_checks_final_deletions_with_pictures_in_one_valid_write(monkeypatch):
+@pytest.mark.parametrize("canvas", [False, True])
+@pytest.mark.parametrize("refuse_group", [None, 2])
+def test_long_director_write_checks_complete_film_before_saving(monkeypatch, tmp_path, canvas, refuse_group):
+    import json
     import agent_tools
     import edit_integrity
+    import llm
+    import media
     from schemas import validate_edl
-    row = {"json": {"keep": [[i*2, i*2+1] for i in range(25)]}}
-    ctx = NS(latest_edl=lambda: copy.deepcopy(row))
-    target = {"keep": [], "canvas": {"width": 720, "height": 1280, "fps": 30},
-              "inserts": [{"id": "shot", "asset_key": "original", "kind": "video",
-                           "at_output_s": 0, "duration_s": 3, "source_start_s": 2}]}
-    batches = []
-    def checked_keep(got, keep, *args, **kwargs):
-        assert got is ctx and keep  # never save an empty keep-only intermediate
-        spans = edit_integrity.removed_spans(row["json"]["keep"], keep)
-        assert len(spans) <= 12
-        batches.append(len(spans))
-        row["json"]["keep"] = keep
-        return "EDL v2"
+    original = {"keep": [[i * 2, i * 2 + 1] for i in range(25)]} if canvas else {"keep": [[0, 100]]}
+    target = ({"keep": [], "canvas": {"width": 720, "height": 1280, "fps": 30},
+               "inserts": [{"id": "shot", "asset_key": "original", "kind": "video",
+                            "at_output_s": 0, "duration_s": 3, "source_start_s": 2}]}
+              if canvas else {"keep": [[2 * i, 2 * i + 1] for i in range(25)]})
+    saved, groups = [], []
+    ctx = NS(latest_edl=lambda: {"json": copy.deepcopy(original)}, index={},
+             user_message="Make a shorter film from the strongest moments", llm_client=object(),
+             agent_model="any", workdir=str(tmp_path), proxy_path=lambda: "source.mp4")
+    monkeypatch.setattr(agent_tools, "_write_keep", lambda *a, **k: pytest.fail("no partial cut writes"))
+    monkeypatch.setattr(media, "frame_at", lambda *a, **k: None)
+    monkeypatch.setattr(llm, "image_part", lambda p: {"type": "image_url", "image_url": {"url": p}})
+    def evidence(ctx, name, schema, system, parts, **kw):
+        body = json.loads(parts[0]["text"])
+        assert body["before_keep"] == original["keep"]
+        assert body["after_keep"] == target["keep"]
+        assert body["measured_length_after_s"] == (0 if canvas else 25)
+        groups.append(body["removed_source_intervals"])
+        assert len([p for p in parts if p["type"] == "image_url"]) == 3 * len(groups[-1])
+        return {"allow": len(groups) != refuse_group, "reason": "keep the payoff"}, {}
+    monkeypatch.setattr(asks, "_call", evidence)
     def checked_write(edl, note):
-        validate_edl(edl, 50)
-        assert len(edit_integrity.removed_spans(row["json"]["keep"], edl["keep"])) == 12
-        assert edl["inserts"] == target["inserts"]
-        return "REJECTED: final source-evidence check still refuses"
-    monkeypatch.setattr(agent_tools, "_write_keep", checked_keep)
+        validate_edl(edl, 100)
+        refusal = edit_integrity.cut_refusal(ctx, original, edl)
+        if refusal:
+            return "REJECTED: " + refusal
+        saved.append(edl)
+        return "EDL v2"
     ctx.write_edl = checked_write
-    assert typed.write_film(ctx, target).startswith("REJECTED")
-    assert batches == [12, 1]
-
-
-@pytest.mark.parametrize("refuse_batch", [None, 2])
-def test_long_director_cut_uses_checked_batches_and_stops_on_refusal(monkeypatch, refuse_batch):
-    import agent_tools
-    import edit_integrity
-    row = {"version": 1, "json": {"keep": [[0, 100]], "texts": [{"text": "existing"}]}}
-    target = {"keep": [[2 * i, 2 * i + 1] for i in range(25)], "texts": [{"text": "directed"}]}
-    batches, final_writes = [], []
-    ctx = NS(latest_edl=lambda: copy.deepcopy(row))
-    def write_keep(got, keep, desc, snap_to_words):
-        assert got is ctx and snap_to_words is False
-        removed = edit_integrity.removed_spans(row["json"]["keep"], keep)
-        assert 1 <= len(removed) <= 12
-        batches.append(removed)
-        if len(batches) == refuse_batch:
-            return "REJECTED: the source evidence does not support these deletions"
-        row["version"] += 1
-        row["json"]["keep"] = keep
-        return f"EDL v{row['version']}"
-    def write(edl, note):
-        assert not edit_integrity.removed_spans(row["json"]["keep"], edl["keep"])
-        final_writes.append(edl)
-        return "EDL v5"
-    monkeypatch.setattr(agent_tools, "_write_keep", write_keep)
-    ctx.write_edl = write
     result = typed.write_film(ctx, target)
-    if refuse_batch:
-        assert result.startswith("REJECTED") and len(batches) == 2
-        assert final_writes == []
+    if refuse_group:
+        assert result.startswith("REJECTED") and len(groups) == 2
+        assert saved == []
     else:
-        assert result == "EDL v5" and [len(b) for b in batches] == [12, 12, 1]
-        assert final_writes == [target]
+        assert result == "EDL v2" and saved == [target]
+        assert [len(g) for g in groups] == [12, 12, 1]
+    assert ctx.latest_edl()["json"] == original
 
 
 def test_typed_score_word_edges_move_pictures_with_their_source():
