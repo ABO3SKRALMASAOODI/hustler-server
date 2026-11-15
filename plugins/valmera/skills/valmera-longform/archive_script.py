@@ -30,9 +30,11 @@ def propose(ctx,script,catalogue):
     for fact in supplement['facts']:
         if fact['id'] in existing_ids:raise ValueError('additional fact ID collides with the dossier')
         dossier['facts'].append(fact);existing_ids.add(fact['id'])
+    old_script=dict(title=script['script']['title'],chapters=script['script']['chapters'],
+                    segments=[{k:s[k] for k in ('say','chapter','beat','facts') if k in s} for s in script['script']['segments']])
     review=Path(ctx.run_dir)/'editorial-review.json'
     critique=C.read(review) if review.exists() else None
-    if critique:critique={k:v for k,v in critique.items() if k not in ('archive','usage')}
+    if critique:critique=critique.get('diagnosis',critique)
     notes=None
     for attempt in range(3):
         text,use=story.writer.ask('Write the final documentary script from the inspected archive and verified facts. '
@@ -57,8 +59,10 @@ def propose(ctx,script,catalogue):
             'Use unique actual source intervals, not new crops of one still. Prefer the moving clips when they fit. A label clarifies a verified source, never manufactures its identity. '
             'Keep archive_ids as literal catalogue IDs. Do not invent them. A segment facts list must support all its factual claims. '
             'Return the full revised script, not editing notes.',
-            json.dumps(dict(old_script=script['script'],facts=dossier['facts'],archive=material,editorial_review=critique,repair_notes=notes)),
-            effort='high',max_tokens=19000,what='WF4 archive-conformed screenplay')
+            json.dumps(dict(old_script=old_script,facts=dossier['facts'],archive=material,editorial_review=critique,repair_notes=notes)),
+            effort='high',max_tokens=36000,what='WF4 archive-conformed screenplay')
+        C.save(root/f'response-{attempt}.json',dict(text=text,usage=use))
+        if use.get('stop')!='completed':raise ValueError('archive screenplay response incomplete; preserved for diagnosis')
         proposal=story.writer.json_block(text);sc=proposal['script'];check=story.check_script(sc,dossier)
         ids={r['id'] for r in catalogue if r['usable']};issues=list(check['problems'])
         for i,segment in enumerate(sc['segments']):

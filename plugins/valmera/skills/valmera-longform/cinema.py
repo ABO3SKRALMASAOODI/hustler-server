@@ -552,7 +552,8 @@ def schedule(sc, words, ft):
             active=[beat for f,beat in beat_frames if f<=a]
             if active:
                 ids=active[-1]['archive_ids'];order={key:k for k,key in enumerate(ids)}
-                interval_clips=sorted((c for c in clips if c.get('catalogue_id') in order),key=lambda c:order[c['catalogue_id']])
+                interval_clips=sorted((c for c in clips if not c.get('catalogue_id') or c['catalogue_id'] in order),
+                                      key=lambda c:order.get(c.get('catalogue_id'),len(order)))
             for slot in ft.get('editorial',{}).get('assignments',[]):
                 if slot['seg']!=i:continue
                 sa,sb=[round(resolve(clock,t)*FPS) for t in slot['anchors']]
