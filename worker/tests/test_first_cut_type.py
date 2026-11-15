@@ -88,7 +88,7 @@ def test_first_film_passes_the_measured_anchor_to_the_caption_tool(monkeypatch):
     calls = []
     original = first_cut._run
 
-    def placed(edl, index, style, W, H):
+    def placed(edl, index, style, W, H, measure=None):
         return dict(style, anchor_y=.72), {'moved': True, 'clear': True}
 
     def run(ctx, steps, name, args, started):
@@ -101,3 +101,27 @@ def test_first_film_passes_the_measured_anchor_to_the_caption_tool(monkeypatch):
     _talking_chain(monkeypatch, True)
     assert len(calls) == 1 and calls[0]['style']['anchor_y'] == .72
     assert calls[0]['mode'] == 'from_transcript'
+
+
+def test_text_free_excerpt_measures_faces_before_accepting_anchor():
+    edl = default_edl(60)
+    edl['keep'] = [[180, 225]]
+    edl['frame'] = {'ratio': '9:16', 'mode': 'crop'}
+    index = {'video': {'width': 720, 'height': 1280}}
+    style = dict(preset='reels', anchor_y=.58, single_line=True)
+    sampled = []
+
+    def measure(t):
+        sampled.append(t)
+        return [[.25, .30, .70, .65]]
+
+    fixed, report = first_cut_type.place(edl, index, style, 720, 1280, measure)
+    assert report['moved'] and report['clear']
+    assert 2 <= len(sampled) <= 60
+    assert min(sampled) < 181 and max(sampled) > 224
+    assert {k: v for k, v in fixed.items() if k != 'anchor_y'} == {
+        k: v for k, v in style.items() if k != 'anchor_y'}
+    one, tall, motion = caption_place.block_metrics(
+        dict(edl, captions={'mode': 'from_transcript', 'style': fixed}), 720, 1280)
+    lo, hi = caption_place.natural_block(fixed['anchor_y'], one, tall, motion)
+    assert not caption_place.hits(lo, hi, [[.25, .30, .70, .65]], (.15, .85))
