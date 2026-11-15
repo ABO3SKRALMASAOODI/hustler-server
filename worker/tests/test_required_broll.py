@@ -208,3 +208,25 @@ def test_unspoken_picture_can_be_seen_but_cutting_its_words_cannot_evade_check(m
     assert (len(samples) == 0) is cut_away
     if not cut_away:
         assert .1 + .4 / 2 in samples
+
+
+def test_rendered_picture_check_keeps_customer_scope_not_only_model_examples(monkeypatch, tmp_path):
+    import agent_tools,media,llm
+    request = 'Show gaming, crypto mining and AI.'
+    ctx = NS(workdir=str(tmp_path), project_id=1, db=NS(run=lambda *a: {'kind':'render'}),
+             verification_request=request)
+    monkeypatch.setattr(agent_tools, '_asset_local_path', lambda *a: 'render.mp4')
+    monkeypatch.setattr(media, 'frame_at', lambda *a, **k: None)
+    monkeypatch.setattr(llm, 'image_part', lambda p: {'type':'image','path':p})
+    def check(ctx, name, schema, system, content, **kw):
+        data=json.loads(content[0]['text'])
+        assert data['customer_request'] == request
+        # The semantic check can distinguish an illustrative example in its
+        # own proposed criterion from an activity the customer actually asked for.
+        assert data['must_show'] == 'Video gaming, such as gameplay on a screen.'
+        return {'shown':True,'seen':'A recognizable game console.','line':'Gaming is shown.'}, {}
+    monkeypatch.setattr(asks, '_call', check)
+    p={'id':'picture1','subject':'gaming','must_show':'Video gaming, such as gameplay on a screen.',
+       'source_words':[{'w':'gaming','t0':1.,'t1':1.5}]}
+    result=required_broll.check(ctx,{'required_pictures':[p]},{'keep':[[0,3]]},{'edl_version':1})
+    assert result['picture1']['state']=='done'
