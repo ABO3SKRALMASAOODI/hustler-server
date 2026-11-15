@@ -145,16 +145,19 @@ def _cpus():
         return os.cpu_count() or 1
 
 
-def _graph_thread_args(graph):
+def _graph_thread_args(graph, max_threads=None):
     scalers = graph.count("scale") + graph.count("format")
+    if max_threads is not None:
+        return ["-filter_complex_threads", str(max(1, min(
+            int(max_threads), GRAPH_THREAD_BUDGET // max(1, scalers))))]
     if scalers * _cpus() <= GRAPH_THREAD_BUDGET:
         return []
     return ["-filter_complex_threads",
             str(max(1, GRAPH_THREAD_BUDGET // scalers))]
 
 
-def _graph_args(graph, workdir):
-    threads = _graph_thread_args(graph)
+def _graph_args(graph, workdir, max_threads=None):
+    threads = _graph_thread_args(graph, max_threads=max_threads)
     if len(graph.encode("utf-8")) <= GRAPH_ARG_MAX_BYTES:
         return [*threads, "-filter_complex", graph]
     path = os.path.join(workdir, f"filtergraph-{uuid.uuid4().hex[:12]}.txt")
@@ -8332,10 +8335,19 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     expected_out_s = (program_render_s(tl, fps)
                       + music_tail_ext(edl, tl.out_duration) + outro_s)
 
+    # Every reused source window opens a decoder. A Director first film
+    # with 20 windows of one 4K upload otherwise gives each read and each
+    # RGB scaler a full CPU-sized pool, multiplying buffered full-size
+    # frames even though only a few windows are visible at once (p5716).
+    video_reads = 1 + sum(item.get("kind") == "video" for _, item in overlay_inputs)
+    video_reads += sum(item.get("kind") != "image" for _, item, _ in insert_inputs)
+    bounded_threads = _many_video_threads(info["width"], info["height"], video_reads)
+
     def _video_cmd(g):
         return ["ffmpeg", "-y", *_filter_thread_args(g),
-                *_stable_video_inputs(main_input_args + extra_inputs),
-                *_graph_args(g, workdir), "-map", "[vout]", "-map", "[aout]",
+                *_stable_video_inputs(main_input_args + extra_inputs,
+                                      decoder_threads=bounded_threads),
+                *_graph_args(g, workdir, max_threads=bounded_threads), "-map", "[vout]", "-map", "[aout]",
                 *encode, *_output_clock(fps), "-t", f"{expected_out_s:.3f}",
                 "-movflags", "+faststart",
                 "-progress", "pipe:1", "-nostats", out_path]
@@ -8358,6 +8370,17 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
 # What a render's checks may take beyond the picture check's own budget: the
 # sound measures and listening excerpts, which run after it.
 RENDER_CHECKS_GRACE_S = 15.0
+
+
+def _many_video_threads(width, height, readers):
+    """Bound frame-thread buffering for multiple high-resolution readers.
+
+    Sixteen megapixels across at least four readers already retain hundreds
+    of MB per frame in their reference and conversion queues. Two threads
+    per reader/filter keep parallel decoding without changing the picture,
+    timestamps, requested resolution or authored effects.
+    """
+    return 2 if readers >= 4 and width * height * readers >= 16_000_000 else None
 
 
 def _stable_video_inputs(args, decoder_threads=None):

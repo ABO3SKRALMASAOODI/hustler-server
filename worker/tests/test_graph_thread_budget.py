@@ -48,6 +48,29 @@ def test_the_long_graph_file_keeps_the_limit(tmp_path):
     assert _threads(args) == 1 and os.path.isfile(args[-1])
 
 
+def test_many_4k_source_windows_bound_decoder_and_scaler_frame_queues(tmp_path):
+    # p5716's final opened the same original for twenty simultaneous
+    # windows. A source's identity does not make those decoders shared.
+    cap = renderer._many_video_threads(2160, 3840, 20)
+    assert cap == 2
+    inputs = renderer._stable_video_inputs(
+        [x for n in range(20) for x in ("-ss", str(n), "-i", "same.mov")],
+        decoder_threads=cap)
+    for n, value in enumerate(inputs):
+        if value == "-i":
+            assert inputs[n-4:n] == ["-threads:v", "2", "-reinit_filter:v", "0"]
+    # Many source readers can exhaust memory well before the old 2400
+    # scaler-thread ceiling. The cap also survives the long-graph path.
+    graph = "[a]scale=2160:3840,format=rgba[b];" * 300
+    assert _threads(renderer._graph_args(graph, str(tmp_path), max_threads=cap)) == 2
+    assert _threads(renderer._graph_args("scale" * 3000, str(tmp_path), max_threads=cap)) == 1
+
+
+def test_ordinary_sources_keep_their_existing_parallelism():
+    assert renderer._many_video_threads(2160, 3840, 1) is None
+    assert renderer._many_video_threads(640, 360, 4) is None
+
+
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg")
 def test_ffmpeg_takes_the_limit_as_written(tmp_path):
     out = str(tmp_path / "o.mp4")
