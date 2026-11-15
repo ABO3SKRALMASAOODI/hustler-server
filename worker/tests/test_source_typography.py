@@ -40,6 +40,17 @@ def test_no_model_call_when_the_index_has_no_printed_text():
     assert st.classify({}, lambda *a, **k: pytest.fail("no evidence to classify")) == {}
 
 
+def test_picture_layout_can_be_grounded_without_claiming_burned_captions():
+    idx = index()
+    for row in idx["visual_storyboard"]["evidence"]:
+        row["visible_text"] = ""
+        row["semantic_description"] = "Three photographs arranged across the canvas"
+    answer = dict(caption_track="none", designed_layout=True, evidence_ids=["e0", "e1", "e2"])
+    assert st.classify(idx, lambda *a, **k: {"text": json.dumps(answer)})["designed_layout"]
+    answer["caption_track"] = "complete"
+    assert st.classify(idx, lambda *a, **k: {"text": json.dumps(answer)}) == {}
+
+
 def test_first_cut_preserves_existing_type_but_still_builds_the_edit(monkeypatch):
     from test_first_cut_visual import _talking_chain
 
