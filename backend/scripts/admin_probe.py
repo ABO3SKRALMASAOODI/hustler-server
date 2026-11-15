@@ -564,11 +564,32 @@ def check_ops_journeys(b, t):
             f"{steps[0]['n']} → subscribed {steps[-1]['n']}")
 
 
+def ticket_ids(dsn):
+    """Read-only boundary snapshot for the live Tickets response."""
+    import psycopg2
+    conn = psycopg2.connect(dsn, connect_timeout=10,
+                           options="-c statement_timeout=20000 " + READ_ONLY)
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM tickets")
+            return {int(row[0]) for row in cur.fetchall()}
+    finally:
+        conn.close()
+
+
 def check_ops_tickets(b, t):
     groups = b.get("groups")
     need(isinstance(groups, list), "no groups")
     n = sum(len(g["tickets"]) for g in groups)
-    if b.get("loop_ready") and t.get("tickets") is not None:
+    if b.get("loop_ready") and "ticket_ids_before" in t:
+        need(not t.get("ticket_snapshot_error"), "ticket boundary snapshot unavailable")
+        ids = [int(x["id"]) for g in groups for x in g["tickets"]]
+        before, after = t["ticket_ids_before"], t["ticket_ids_after"]
+        need(len(set(ids)) == n, "duplicate ticket IDs")
+        need(before & after <= set(ids), "stable tickets missing from response")
+        need(set(ids) <= before | after, "unexpected ticket IDs in response")
+    elif b.get("loop_ready") and t.get("tickets") is not None:
         need(n == t["tickets"], f"{n} tickets shown, table has {t['tickets']}")
     for g in groups:
         for x in g["tickets"]:
@@ -733,6 +754,13 @@ def run(budget_s, only=None, repeat=1, measure="server", retries=2):
                                 "seconds": None, "ok": False,
                                 "note": f"no {missing} id to try"})
                 continue
+        check_truth = truth
+        if check is check_ops_tickets:
+            check_truth = dict(truth, ticket_ids_before=set())
+            try:
+                check_truth["ticket_ids_before"] = ticket_ids(dsn)
+            except Exception:
+                check_truth["ticket_snapshot_error"] = True
         first = _call(client, path, headers, rtt, measure)
         best, attempts = first, 1
         # The shared database's speed swings 2-5x from minute to minute; an
@@ -773,9 +801,14 @@ def run(budget_s, only=None, repeat=1, measure="server", retries=2):
                 if again["status"] != 200 or (isinstance(body, dict) and
                         (body.get("pending") or body.get("refreshing"))):
                     ok, note = False, note + ", but the next answer was not ready"
+        if check is check_ops_tickets:
+            try:
+                check_truth["ticket_ids_after"] = ticket_ids(dsn)
+            except Exception:
+                check_truth["ticket_snapshot_error"] = True
         if ok and status == 200 and check is not None:
             try:
-                extra = check(body, truth) or ""
+                extra = check(body, check_truth) or ""
                 note = (note + " · " if note else "") + extra
             except AssertionError as e:
                 ok, note = False, f"implausible: {e}"
