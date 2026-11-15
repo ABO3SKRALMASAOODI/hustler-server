@@ -6721,7 +6721,7 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
         except Exception as e:  # noqa: BLE001 - the film stands as the Score framed it
             m["move"] = {"fault": f"{type(e).__name__}: {str(e)[:160]}"}
     from . import source_guard
-    m["source_guard"] = source_guard.apply(l1, ctx.index, ctx.perc)
+    m["source_guard"] = source_guard.apply(l1, ctx.index, ctx.perc, views=ctx.views)
     from . import picture_cuts
     m["selected_source_blanks"] = picture_cuts.selected_blanks(l1, ctx.index)
     for blank in m["selected_source_blanks"]:
