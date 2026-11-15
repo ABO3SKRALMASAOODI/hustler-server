@@ -262,13 +262,34 @@ def witness_voices(ctx,script,ft,additional=False,chapter=None):
     if not additional:raise RuntimeError('firsthand witnesses were identified, but no identity-verified speaking footage passed; research must continue')
 
 
+def evidence_request(script,gaps):
+    return hashlib.sha256(json.dumps(dict(gaps=gaps,narration={str(g['seg']):script['script']['segments'][g['seg']]['say'] for g in gaps}),sort_keys=True).encode()).hexdigest()[:16]
+
+
+def prune_unchecked_photos(ft,archive,root=None,segments=None):
+    checked={(p['seg'],p['clip']['path']) for p in ft.get('editorial',{}).get('pins',[])}
+    def keep(c,seg):
+        path=Path(c['path'])
+        if (segments is not None and seg not in segments) or c.get('kind')!='image' or not path.is_relative_to(archive) or (seg,c['path']) in checked:return True
+        return path.is_relative_to(root) if root else path.relative_to(archive).parts[0].startswith('request-')
+    for line in ft['lines']:line['clips']=[c for c in line['clips'] if keep(c,line['i'])]
+    editorial=ft.get('editorial',{})
+    if 'assignments' in editorial:
+        editorial['assignments']=[dict(row,candidates=cs) for row in editorial['assignments']
+                                  if (cs:=[c for c in row['candidates'] if keep(c,row['seg'])])]
+
+
 def evidence_for_gaps(ctx,script,ft,gaps):
     """Rare events can survive only as photographs. Use each evidence image once;
     the delivered moving-footage gate still applies and no photo fills a reel.
     """
-    root=Path(ctx.supply)/'evidence-photos';root.mkdir(exist_ok=True)
+    archive=Path(ctx.supply)/'evidence-photos';archive.mkdir(exist_ok=True)
+    root=archive/('request-'+evidence_request(script,gaps));root.mkdir(exist_ok=True)
     job=root/'plan.json'
     history=None
+    # Old segment-number plans can belong to a different draft. Keep checked
+    # uses, but never let those unverified assignments silently fill new words.
+    prune_unchecked_photos(ft,archive,root,{g['seg'] for g in gaps})
     if job.exists() and read(job).get('_version')!=2:
         history=dict(plan=read(job),reports=read(root/'search.json') if (root/'search.json').exists() else None)
         save(root/'research-before-v2.json',history)
@@ -378,6 +399,9 @@ def supply(ctx, script):
     coverage_words=str(clean_words if clean_words.exists() else nd/'words.json')
     wj=read(coverage_words)
     expected={i:s['say'] for i,s in enumerate(sc['segments'])}
+    if ft.get('editorial',{}).get('pins'):
+        prune_unchecked_photos(ft,Path(ctx.supply)/'evidence-photos')
+        save(Path(ctx.supply)/'footage'/'footage.json',ft)
     # Resume a recorded edit before commissioning more source research. A
     # newly assigned figure may cover an adjacent clause as one checked move.
     try:schedule(sc,coverage_words,ft)

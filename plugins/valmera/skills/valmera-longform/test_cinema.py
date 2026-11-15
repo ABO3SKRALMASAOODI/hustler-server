@@ -70,6 +70,28 @@ def test_renamed_download_cannot_replay_source_seconds():
     assert C.reserve(used,clip('c',0,8),1) is None
 
 
+def test_photo_request_cannot_reuse_a_segment_number_from_another_draft():
+    gaps=[dict(seg=0,heard='The restraint.',seconds=1.1)]
+    a=dict(script=dict(segments=[dict(say='The restraint was intact.')]))
+    b=dict(script=dict(segments=[dict(say='They examined a tooth.')]))
+    assert C.evidence_request(a,gaps)!=C.evidence_request(b,gaps)
+    assert C.evidence_request(a,gaps)!=C.evidence_request(a,[dict(gaps[0],heard='It was cut.')])
+
+
+def test_legacy_photo_invalidation_preserves_checked_uses_and_source_bank(tmp_path):
+    root=tmp_path/'evidence-photos'
+    def photo(path):return dict(kind='image',path=str(root/path))
+    wrong=photo('pics/old.jpg');checked=photo('primary/good.jpg');current=photo('request-new/pics/new.jpg')
+    ft=dict(lines=[dict(i=0,clips=[wrong,checked,current])],editorial=dict(pins=[dict(seg=0,clip=checked)],bank=[wrong,checked],
+            assignments=[dict(seg=0,candidates=[wrong]),dict(seg=0,candidates=[checked])]))
+    C.prune_unchecked_photos(ft,root)
+    assert ft['lines'][0]['clips']==[checked,current]
+    assert ft['editorial']['bank']==[wrong,checked]
+    assert ft['editorial']['assignments']==[dict(seg=0,candidates=[checked])]
+    C.prune_unchecked_photos(ft,root,root/'request-other',{0})
+    assert ft['lines'][0]['clips']==[checked]
+
+
 def test_long_interview_camera_continues_across_internal_source_slices():
     c=clip('interview',0,19)
     a=dict(f=[0,234],src=[0,7.8],clip=c,real_voice='Speaker')
