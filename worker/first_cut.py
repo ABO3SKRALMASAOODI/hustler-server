@@ -2115,8 +2115,8 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         if drop_app_cards(ctx, steps, started, duration):
             applied.append("the app's end card left out")
         if not whole and typography.get("designed_layout"):
-            _run(ctx, steps, "set_frame", {"ratio": "source", "mode": "crop"}, started)
-            applied.append("the upload's composed picture layout preserved")
+            _run(ctx, steps, "set_frame", {"ratio": "9:16", "mode": "pad_blur"}, started)
+            applied.append("the upload's composed picture kept whole inside vertical 9:16")
         elif _orientation(ctx.index) != "vertical" and not _screen_like(ctx.index):
             if _ok(_run(ctx, steps, "auto_reframe", {"ratio": "9:16"}, started)):
                 applied.append("reframed to 9:16")
@@ -2266,8 +2266,9 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
     vertical_out = vertical_source
     screen_kept = False
     if not whole and not vertical_source and typography.get("designed_layout"):
-        _run(ctx, steps, "set_frame", {"ratio": "source", "mode": "crop"}, started)
-        applied.append("the upload's composed type and picture layout preserved")
+        _run(ctx, steps, "set_frame", {"ratio": "9:16", "mode": "pad_blur"}, started)
+        vertical_out = True
+        applied.append("the upload's type and picture layout kept whole inside vertical 9:16")
     elif not vertical_source and (picked or {}).get("how") == "continuous":
         # the whole scene, fitted: a crop would cut the action it preserves
         if _ok(_run(ctx, steps, "set_frame",
