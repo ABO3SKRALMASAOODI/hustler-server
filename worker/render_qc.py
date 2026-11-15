@@ -2187,6 +2187,7 @@ def type_pass(tplan, deadline):
                                      "box": m.get("box"),
                                      "grid": m.get("grid"),
                                      "t": round(prog_t[0], 2)}
+                out["items"][ref]["type_runs"] = (rep.get("type_runs") or [[]])[-1]
             continue
         for text, t, m in zip(ref, prog_t, ms):
             if m and not m.get("error") and m.get("box"):
@@ -2505,7 +2506,17 @@ def type_findings(tres, tplan, cards):
                 if hit:
                     cross.append((t, c["text"], hit))
                     break
-    return {"caps": caps, "collide": collide, "cross": cross,
+    # Custom compositions can have a perfectly large headline and unreadably
+    # small secondary labels on opaque cards. Measure those labels separately.
+    small = []
+    for i, m in meas.items():
+        if (items.get(i) or {}).get("template") != "html":
+            continue
+        runs = [r for r in m.get("type_runs") or [] if 0 < r.get("cap", 0) < .022]
+        if runs:
+            small.append({"id": i, "t": m["t"], "cap": min(r["cap"] for r in runs),
+                          "text": [r["text"] for r in runs[:8]]})
+    return {"caps": caps, "collide": collide, "cross": cross, "small_html": small,
             "mark": mark_hits}
 
 
@@ -3586,6 +3597,13 @@ def measured_findings(res):
     Oct 10 podcast run)."""
     out = []
     tq = res.get("type") or {}
+    for row in (tq.get("small_html") or [])[:3]:
+        out.append(
+            f"SMALL GRAPHIC TYPE at {row['t']:.1f}s: '{row['id']}' has visible "
+            f"labels at {100 * row['cap']:.1f}% of frame height (<2.2%): "
+            + "; ".join(row.get("text") or [])
+            + " — enlarge and reflow with MG.minType / MG.fitSecondary, "
+              "preserving the words, then inspect the corrected render")
     for t, text, gid, share, how in (tq.get("collide") or [])[:2]:
         out.append(
             f"CAPTION {'UNDER' if how == 'under' else 'OVER'} A GRAPHIC at "
