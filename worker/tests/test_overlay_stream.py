@@ -1,6 +1,5 @@
 """The p5716 many-cutaway export must stream, retaining shot clocks and looks."""
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -81,19 +80,22 @@ import json,pathlib,resource,subprocess,sys,time
 sys.path.insert(0,sys.argv[1])
 import renderer
 w=pathlib.Path(sys.argv[2]);n=int(sys.argv[3]);src=w/'source.mp4'
-subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i','testsrc2=s=360x640:r=30:d=14','-c:v','libx264','-threads','2','-preset','ultrafast',str(src)],check=True)
-edl={'keep':[[0,12]],'frame':{'ratio':'9:16','mode':'crop'},'overlays':[{'id':f'ov{i}','asset_key':'source','kind':'video','fit':'cover','start':i*12/n,'duration_s':12/n,'source_start_s':(i%12)*.7} for i in range(n)],'fx':[{'id':'look','type':'grade_window','stage':'screen','start':0,'end':12,'ev':-.25,'contrast':1.24,'saturation':.9}]}
+large=sys.argv[4]=='4k';size='2160x3840' if large else '360x640';duration=4.8 if large else 12
+subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i',f'testsrc2=s={size}:r=30:d={duration+2}','-c:v','libx264','-threads','2','-preset','ultrafast',str(src)],check=True)
+edl={'keep':[[0,duration]],'frame':{'ratio':'9:16','mode':'crop'},'overlays':[{'id':f'ov{i}','asset_key':'source','kind':'video','fit':'cover','start':i*duration/n,'duration_s':duration/n,'source_start_s':(i%12)*duration/18} for i in range(n)],'fx':[{'id':'look','type':'grade_window','stage':'screen','start':0,'end':duration,'ev':-.25,'contrast':1.24,'saturation':.9}]}
 renderer.render_edl(edl,{'words':[],'sentences':[],'silences':[]},str(src),str(w/'out.mp4'),str(w),False,asset_locals={'source':str(src)},suppress_outro=True)
 r=resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
 print('RSS_RESULT',json.dumps({'peak_bytes':r if sys.platform=='darwin' else r*1024,'info':renderer.media.probe(str(w/'out.mp4'))}))
 '''
-    for count in [24,48]:
-        work=tmp_path/str(count);work.mkdir()
+    for count, size in [(24,'small'), (48,'small'), (24,'4k')]:
+        work=tmp_path/f'{count}-{size}';work.mkdir()
         p=subprocess.run([sys.executable,'-c',script,str(Path(renderer.__file__).parent),
-                          str(work),str(count)],capture_output=True,text=True,timeout=240)
+                          str(work),str(count),size],capture_output=True,text=True,timeout=240)
         assert p.returncode == 0, p.stdout+p.stderr
         assert 're-rendering without fx' not in p.stdout+p.stderr
         result=json.loads(p.stdout.split('RSS_RESULT ')[-1])
-        assert result['info']['width']==1080 and result['info']['height']==1920
-        assert abs(result['info']['duration']-12) < .1
-        assert result['peak_bytes'] < 1024**3, result
+        print('RSS', count, size, result)
+        width, height = (2160,3840) if size=='4k' else (1080,1920)
+        assert result['info']['width']==width and result['info']['height']==height
+        assert abs(result['info']['duration']-(4.8 if size=='4k' else 12)) < .1
+        assert result['peak_bytes'] < (5 if size=='4k' else 1)*1024**3, result
