@@ -211,3 +211,10 @@ def test_product_windows_use_grounded_candidates_once_and_reserve_cutins(tmp_pat
     assert len(rows) == 2 and len({r['id'] for r in rows}) == 2
     assert all(not (r['end'] > 1 and r['start'] < 3) for r in rows)
     assert 'Lamp shown' in seen[0] and any('Candidate 0' in x for x in seen)
+
+
+def test_picture_words_do_not_include_an_adjacent_unplayed_claim():
+    from types import SimpleNamespace
+    clock = SimpleNamespace(words=[dict(w='monitor', t0=0, t1=1), dict(w='phone', t0=1, t1=2)])
+    assert P.words_under(clock, 0, 30) == 'monitor'
+    assert P.words_under(clock, 30, 60) == 'phone'

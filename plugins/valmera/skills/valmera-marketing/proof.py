@@ -564,7 +564,9 @@ def write(ctx, idea, card, rc, notes=None):
               "The story is the editor's problem, never the celebrity or the archive clip's subject. Each line must progress "
               "from a concrete editing pain to the typed instruction to visible proof. Do not narrate the source clip's "
               "celebrity story. Name Valmera in the spoken call to action. Plan genuinely distinct pictures, never slices "
-              "of the same talking take masquerading as new shots.")
+              "of the same talking take masquerading as new shots. Each segment makes one visible claim. "
+              "Split comparisons and different named objects across segments: a monitor and a phone, or a lamp "
+              "and chairs, need separate lines so the cutter cannot swap their pictures under the wrong words.")
     system += (" The supplied product assets are the upload and the export only. Do not invent a shot of this export "
                "playing on a physical phone, a view of its editing timeline, or a product interface recording. "
                "THE UPLOAD and THE EXPORT play as their actual files. Generic editing footage may illustrate a "
@@ -810,7 +812,8 @@ def product_windows(ctx, script, sources):
         "Use zero to three candidates per line, only when the exact stated operation or result is visible. "
         "Show lamps for lamp claims and captions for caption claims; a speaker alone is not proof of B-roll. "
         "These files are authenticated Studio recordings, but their provenance does not make every moment fit. "
-        "Never assign one candidate to different words. Preserve distinct moments and do not invent an interface. "
+        "Never assign one candidate or one visual shot to different words. Adjacent frames of the same "
+        "lamp, chair or speaker shot are one picture, not separate choices. Preserve distinct moments and do not invent an interface. "
         "The mandatory before/after real-voice passages are already reserved; candidates exclude them.",
         content, what="product source windows", model=CHECK_MODEL, effort="low", max_tokens=3000)
     out, used = [], set()
@@ -1030,15 +1033,15 @@ def still(path, t, w=320):
 
 
 def words_under(clock, f0, f1):
-    ws = [w["w"] for w in clock.words if F.Clock.f(w["t1"]) > f0 - 4 and F.Clock.f(w["t0"]) < f1 + 4]
+    ws = [w["w"] for w in clock.words if F.Clock.f(w["t1"]) > f0 and F.Clock.f(w["t0"]) < f1]
     return " ".join(ws)
 
 
 def picture_key(p, words):
-    return json.dumps([3, p["path"], p.get("src"), words], ensure_ascii=False)
+    return json.dumps([4, p["path"], p.get("src"), words], ensure_ascii=False)
 
 
-def picture_check(ctx, beats, clock, product_paths, cache):
+def picture_check(ctx, beats, clock, product_paths, cache, recording=None):
     """Every played source window checked; absent frames/verdicts never pass."""
     todo = []
     for p in beats.get("pictures") or []:
@@ -1054,7 +1057,11 @@ def picture_check(ctx, beats, clock, product_paths, cache):
               "valid evidence when the words describe those exact states or their visible editing. "
               "An intentional metaphor must clearly carry these words; generic thematic filler is loose. "
               "Blank, broken, contradictory or unidentified pictures fail. Judge all pictures including "
-              "product clips. Only yes passes; loose and wrong both need another picture.")
+              "product clips. Authenticated before/after passages speak in the source clip's own voice; "
+              "blank narrator words in those passages are not evidence of a blank or mismatched picture. "
+              "Use the recording receipts to identify the state and the adjacent narration only to resolve "
+              "pronouns or incomplete phrase boundaries. The shown picture must still carry the exact words. "
+              "Only yes passes; loose and wrong both need another picture.")
     for k in range(0, len(todo), 8):
         batch = todo[k:k + 8]
         content, readable = [], set()
@@ -1068,6 +1075,8 @@ def picture_check(ctx, beats, clock, product_paths, cache):
             readable.add(n)
             content.append(dict(type="text", text=f"Picture {n}; words: {ws!r}; source role: {p.get('name')!r}; "
                                 f"real product recording: {p['path'] in product_paths}"))
+            if recording and p["path"] in product_paths:
+                content.append(dict(type="text", text="Authenticated recording receipts: " + json.dumps(recording, ensure_ascii=False)))
             content.extend(img(b) for b in samples)
         if not readable:
             continue
@@ -1162,7 +1171,7 @@ def score(ctx, script):
                     break
         spans = as_delivered(l1, product)
         receipt_panel = instruction_panel(l1, clock, sc, script["receipts"]["typed"])
-        bad, sp = picture_check(ctx, beats, clock, product, cache)
+        bad, sp = picture_check(ctx, beats, clock, product, cache, script.get("receipts"))
         spend += sp
         jsave(cache_p, cache)
         shown = []
