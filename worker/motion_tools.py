@@ -796,8 +796,28 @@ def _scene_boxes(ctx, edl, item):
         return []
 
 
+def _automatic_source_words(ctx, edl, item, W, H):
+    """Printed source words across an automatic graphic's camera movement."""
+    if not getattr(ctx, "first_cut_auto_graphic", False) or not edl.get("keep"):
+        return []
+    import math
+    from timeline import Timeline
+    from talk_craft import _on_card
+    tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed") or [])
+    a, b = float(item["start"]), min(float(item["end"]), tl.out_duration)
+    steps = min(keepout.MAX_TRACK, max(2, math.ceil(max(0, b-a) / .1) + 1))
+    boxes = set()
+    for i in range(steps):
+        t = a + max(0, b-a-.001) * i / (steps-1)
+        if _on_card(edl, t, t):
+            continue  # an opaque full-frame card actually hides the upload
+        boxes.update(tuple(z) for z in caption_place.text_boxes(
+            edl, getattr(ctx, "index", None) or {}, tl, W, H, t, t))
+    return sorted(boxes)
+
+
 def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True, scene=(),
-              mark=None, pin=None):
+              mark=None, pin=None, obstacles=()):
     """Search and verify a clear placement: (patch, real ink box, params,
     the verifying probe report) or None. Alternatives the solver cannot
     predict (another align/side) are probed first, then the cheapest
@@ -846,7 +866,7 @@ def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True, scene=(
         else:
             kw = dict(captions=bands[0], near_captions=bands[1], predict=rnd == 0,
                       mouths=mouths, scene=scene, chins=chins, mark=mark,
-                      pin_size=bool(pin),
+                      pin_size=bool(pin), obstacles=obstacles,
                       clear_penalty=keepout.CLEAR_PENALTY if off_face else 0.0)
             args = (item["template"], spec, item.get("params") or {},
                     box if rnd == 0 else None, variants if rnd == 0 else known,
@@ -878,7 +898,8 @@ def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True, scene=(
             if not real:
                 continue
             if not keepout.safe_issues(real, W, H) and not keepout.assess(real, track)["hit"] \
-                    and not keepout.on_mark(real, mark):
+                    and not keepout.on_mark(real, mark) \
+                    and not any(keepout.inter(real, z) > 1e-6 for z in obstacles):
                 return patch, real, trial["params"], rep
             # the real box of that knob setting, for a y-only second round
             dy = float(patch.get("y", ycur)) - ycur if "y" in patch else 0.0
@@ -1168,7 +1189,8 @@ def _band_mark_fix(ctx, edl, item, spec, box, zone, W, H, pin, kw):
                                    chins=kw.get("chins") or (),
                                    captions=kw.get("captions") or (),
                                    near_captions=kw.get("near_captions") or (),
-                                   scene=kw.get("scene") or ())
+                                   scene=kw.get("scene") or (),
+                                   obstacles=kw.get("obstacles") or ())
         for cost, patch, nb in cands:
             if nb[1] < top - keepout.EDGE_TOL or nb[3] > pic + tol:
                 continue
@@ -1226,6 +1248,8 @@ def _keep_out_estimated(ctx, edl, item):
     allow = bool(item.get("allow_face_overlap"))
     hit = keepout.assess(box, track)
     face_bad = hit["hit"] and not allow
+    source_words = _automatic_source_words(ctx, edl, item, W, H)
+    source_bad = any(keepout.inter(box, z) > 1e-6 for z in source_words)
     issues = ([i for i in keepout.safe_issues(box, W, H) if i in ("side", "rail")]
               if template in keepout.COLUMN_TEMPLATES else [])
     mark = _mark_of(item, W, H, ctx, edl)
@@ -1235,8 +1259,10 @@ def _keep_out_estimated(ctx, edl, item):
     pin = _pinned_size(spec, item, ctx)
     bands = _caption_anchors(ctx, edl, item)
     notes = []
-    if face_bad or (issues and not allow):
+    if face_bad or ((issues or source_bad) and not allow):
         why = []
+        if source_bad:
+            why.append("covered the upload's printed words")
         what = _what_hit(hit)
         if face_bad:
             w0, w1 = hit["when"]
@@ -1249,7 +1275,7 @@ def _keep_out_estimated(ctx, edl, item):
                   chins=keepout.zones_of(track, keepout.chin_zone),
                   mark=mark if mark is not None else bmark, pin_size=bool(pin),
                   clear_penalty=keepout.CLEAR_PENALTY if face_bad else 0.0,
-                  scene=_scene_boxes(ctx, edl, item))
+                  scene=_scene_boxes(ctx, edl, item), obstacles=source_words)
         params0 = item.get("params") or {}
         # another side/align the estimate can draw (the lower third's side)
         variants = []
@@ -1311,7 +1337,7 @@ def _keep_out_estimated(ctx, edl, item):
                     chins=keepout.zones_of(track, keepout.chin_zone),
                     captions=[keepout.caption_band(y) for y in bands],
                     near_captions=[keepout.caption_obstacle(y) for y in bands],
-                    scene=_scene_boxes(ctx, edl, item))
+                    scene=_scene_boxes(ctx, edl, item), obstacles=source_words)
         fix = _band_mark_fix(ctx, edl, item, spec, box, bmark, W, H, pin, kw_b)
         params = None
         if fix:
@@ -1372,8 +1398,12 @@ def _keep_out_inner(ctx, edl, item, rep):
     bands = _caption_anchors(ctx, edl, item)
     notes = []
     face_bad = hit["hit"] and not allow and item.get("layer") != "behind_subject"
-    if movable and not allow and (face_bad or issues):
+    source_words = _automatic_source_words(ctx, edl, item, W, H)
+    source_bad = any(keepout.inter(box, z) > 1e-6 for z in source_words)
+    if movable and not allow and (face_bad or issues or source_bad):
         why = []
+        if source_bad:
+            why.append("covered the upload's printed words")
         if face_bad:
             what = _what_hit(hit)
             w0, w1 = hit["when"]
@@ -1389,7 +1419,8 @@ def _keep_out_inner(ctx, edl, item, rep):
                            [keepout.caption_obstacle(y, grow) for y in bands],
                            keepout.caption_room(bands, zones, W, H, grow)),
                           off_face=face_bad, scene=_scene_boxes(ctx, edl, item),
-                          mark=mark if mark is not None else bmark, pin=pin)
+                          mark=mark if mark is not None else bmark, pin=pin,
+                          obstacles=source_words)
         if found:
             patch, real, params, rep = found
             old = item.get("params") or {}
