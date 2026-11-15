@@ -380,6 +380,17 @@ def test_footage_remote_program_compiles_without_embedded_secret():
     assert 'sys.stdin.readline' in B.REMOTE
 
 
+@pytest.mark.parametrize('attributed,frames,expected',[(False,[True,True,True],False),(True,[False,True,False],False),(True,[True,True,True],True)])
+def test_witness_requires_both_text_attribution_and_on_camera_presentation(tmp_path,monkeypatch,attributed,frames,expected):
+    import witness_evidence as W
+    from footage import ask,shots
+    monkeypatch.setattr(shots,'frames',lambda *a:{1:'a',2:'b',3:'c'})
+    monkeypatch.setattr(ask,'image_block',lambda path:dict(type='text',text=path))
+    monkeypatch.setattr(ask,'ask',lambda *a,**k:(json.dumps(dict(attributed=attributed,attribution_text='Interview with the named subject',on_camera=frames)),0))
+    result=W.verify(dict(proxy='original',url='https://archive.test/interview',title='Interview',transcript=[]),'Subject',1,4,tmp_path)
+    assert result['ok'] is expected
+
+
 def test_pause_crossfade_keeps_word_clock_on_audio():
     import numpy as np
     import voice

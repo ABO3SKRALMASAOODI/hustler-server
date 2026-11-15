@@ -37,10 +37,7 @@ os.environ['VALMERA_FOOTAGE'] = '1'
 os.environ['SKIP_DB_INIT'] = '1'
 __OFFLINE__
 scratch=pathlib.Path(sys.argv[1]).parent
-os.environ['YUNET_MODEL']=str(scratch/'models/face_detection_yunet_2023mar.onnx')
-os.environ['FOOTAGE_SFACE']=str(scratch/'models/face_recognition_sface_2021dec.onnx')
-from footage import run, cut, plan, fetch, identity
-if not identity.models():raise RuntimeError('identity models required for real speaker inserts')
+from footage import run, cut, plan, fetch
 cut.MAX_S = 7.8
 run.SHOT_S = 4.5
 # Long-form rescue/mechanism scenes often occur after the short-form scanner's
@@ -121,6 +118,7 @@ def search_with_known(queries,*args,**kwargs):
 search.run=search_with_known
 if j.get('_voices'):
     from footage import search,voice
+    from witness_evidence import verify as witness_verdict
     from concurrent.futures import ThreadPoolExecutor
     voice.MAX_S=45.0
     voice.PICK_SYSTEM=voice.PICK_SYSTEM.replace('short documentary','long documentary').replace('about 2 to 9 seconds spoken','about 4 to 40 seconds spoken')
@@ -169,22 +167,25 @@ if j.get('_voices'):
         if h['id'] in by:by[h['id']]['subjects'].append(si);continue
         s=dict(h,key='w'+str(len(sources)),subjects=[si],why=why);sources.append(s);by[h['id']]=s
     work=str(scratch/'witness-work');pathlib.Path(work).mkdir(exist_ok=True)
-    anchors={}
-    for sub in subjects:
-        portrait=dict(sub,must_show='A clear portrait of '+sub['name']+', the named person; an identity photograph, not a speaking moment.')
-        anchors[sub['name']],cost=run.person_anchors(portrait,work);usd+=cost
-        print('identity portraits:',sub['name'],len(anchors[sub['name']]),flush=True)
-    (pathlib.Path(sys.argv[2])/'voice-anchors.json').write_text(json.dumps({k:len(v) for k,v in anchors.items()},indent=1))
+    anchors={sub['name']:[dict(person=sub['name'])] for sub in subjects}
     with ThreadPoolExecutor(max_workers=3) as pool:
         sources=list(pool.map(lambda s:run._open(s,work,print,hear_s=3600,read_s=3600),sources))
     live=[s for s in sources if not s.get('error')]
+    def attributed_speaker(proxy,t0,t1,metadata,work):
+        source=next((s for s in live if s['proxy']==proxy),None)
+        if source is None or not metadata:return 0
+        result=witness_verdict(source,metadata[0]['person'],t0,t1,sys.argv[2])
+        return sum(x is True for x in result.get('on_camera',[])) if result['ok'] else 0
+    # The legacy hook name is retained only for interface compatibility. This
+    # verifier reads source attribution; no identity photos/models are used.
+    voice.face_shows=attributed_speaker
     trials=[];rejected_ranges=[];voices=[]
     for attempt_id in range(3):
         tried=[]
         voices,cost=voice.find_voices(j['lines'],subjects,live,anchors,sys.argv[2],1920,1080,most=4,tried=tried)
         usd+=cost;trials.append(dict(attempt=attempt_id,picks=list(last_picks),tried=tried,accepted=len(voices)))
         if voices or not last_picks:break
-        # The same identity and spoken-word gates remain binding. If a chosen
+        # Source attribution and the spoken-word gate remain binding. If a chosen
         # passage is off-camera, select another passage from the already-open
         # source, rather than treating that one failure as no witness existing.
         for g in last_picks:
@@ -192,6 +193,9 @@ if j.get('_voices'):
                 rejected_ranges.append(dict(source=dict(url=url),time_range=[max(0,g['piece_t0']-3),g['piece_t0']+53]))
         j['avoid']=j.get('avoid',[])+rejected_ranges
     usd+=sum(s.get('hear_usd',0) for s in live)
+    for v in voices:
+        v['attribution_frames']=v.pop('face_frames',None)
+        v['speaker_verification']='source_attribution'
     (pathlib.Path(sys.argv[2])/'voice-attempts.json').write_text(json.dumps(trials,indent=1))
     result=dict(lines=[],voices=voices,credits=[dict(v['source'],time_range=v['time_range'],voice=v['person']) for v in voices],spend=dict(usd=usd),
         rejected_ranges=rejected_ranges,sources=[{k:v for k,v in s.items() if k not in ('proxy','shots','transcript')} for s in sources])
@@ -199,7 +203,7 @@ if j.get('_voices'):
     sys.exit(0)
 find(j['lines'],j['named'],j['about'],sys.argv[2],1920,1080,
      max_sources=10, per=2, avoid=j.get('avoid'), strict_lines=True, motion_first=True, scout_motion=True,
-     alloc='round', reassign_lost=True, whole_first=True, want_voices=j.get('want_voices'), log=lambda s:print(s,flush=True))
+     alloc='round', reassign_lost=True, whole_first=True, want_voices=False, log=lambda s:print(s,flush=True))
 '''
 
 
@@ -280,7 +284,8 @@ def fetch(payload, out, log=print):
     out = Path(out)
     probing=bool(payload.get('_probe'))
     rec = out / ('probe.json' if probing else 'footage.json')
-    adapter=hashlib.sha256((PROBE if probing else REMOTE).encode()).hexdigest()
+    adapter=hashlib.sha256((PROBE if probing else REMOTE).encode()+
+                          (b'' if probing else Path(__file__).with_name('witness_evidence.py').read_bytes())).hexdigest()
     if rec.exists():
         cached=json.loads(rec.read_text())
         if not (payload.get('_voices') and not cached.get('voices') and cached.get('adapter_sha256')!=adapter):return cached
@@ -298,10 +303,7 @@ def fetch(payload, out, log=print):
     with tarfile.open(fileobj=package, mode='w') as tf:
         for name, data in [('input.json', json.dumps(payload).encode()), ('fetch.py', (PROBE if probing else REMOTE).encode()),('runner.py',RUNNER.encode())]:
             t = tarfile.TarInfo(name); t.size = len(data); tf.addfile(t, io.BytesIO(data))
-        models=Path('/Users/masaoodi/Documents/Valmera/.valmera/models')
-        for name in (() if probing else ('face_detection_yunet_2023mar.onnx','face_recognition_sface_2021dec.onnx')):
-            if not (models/name).is_file():raise RuntimeError('missing identity model: '+str(models/name))
-            tf.add(models/name,arcname='models/'+name,recursive=False)
+        if not probing:tf.add(Path(__file__).with_name('witness_evidence.py'),arcname='witness_evidence.py',recursive=False)
     ssh(f'mkdir -p {q(scratch)}', capture_output=True)
     container='wf4-private-'+scratch.rsplit('-',1)[-1]
     try:
