@@ -20,7 +20,7 @@ UNREVIEWED = "source screen not reviewed (no model answered); first film cut wit
 
 
 class Unavailable(ValueError):
-    """No model answered the source-screen review. Not a verdict about the footage."""
+    """No model answered the source-screen review, or its frames could not be read. Not a verdict about the footage."""
 
 
 def sample_times(duration, fps, shots):
@@ -89,7 +89,8 @@ def build(src, duration, fps, shots, sha, workdir, recorder=None, video_info=Non
         for j, t in enumerate(group):
             im = boards.grab(src, t, width=400)
             if im is None:
-                raise ValueError(f"source screen frame {offset + j} could not be read")
+                # unreadable frames cannot be reviewed: the same as no model answering (never a failed first film)
+                raise Unavailable(f"source screen frame {offset + j} could not be read")
             x, y = (j % 5) * 240, (j // 5) * 330
             sheet.paste(boards.fit(im, 240, 300), (x, y + 30))
             draw.text((x + 4, y + 4), f"F{offset + j}  {t:.3f}s", font=boards.font(18), fill=boards.FG)

@@ -349,6 +349,15 @@ def _broll_check_claude(parts, spend, pictures):
     return text
 
 
+def _verdict(text):
+    """The check's {"keep": [...], "drop": [...]} object from its answer, or None when it has none (machine syntax)."""
+    try:
+        v = json.loads(text[text.index("{"):text.rindex("}")+1])
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return v if isinstance(v, dict) and ("keep" in v or "drop" in v) else None
+
+
 def verify_broll(ctx, steps, started, run, spend):
     """Keep only explicitly approved actual intervals; unavailable checks fail closed."""
     import device_planner
@@ -393,9 +402,15 @@ def verify_broll(ctx, steps, started, run, spend):
                 print(f"[first_cut] b-roll {n} unverified: {type(exc).__name__}", flush=True)
         if ids:
             text = _broll_check_openai(parts, spend)
-            if text is None:
-                text = _broll_check_claude(parts, spend, len(ids))
-            verdict = json.loads(text[text.index("{"):text.rindex("}")+1])
+            verdict = _verdict(text) if text is not None else None
+            if text is not None and verdict is None:
+                # 15 Nov 2026: an OpenAI answer without a verdict (empty, cut off, prose) is no answer: the Claude
+                # lane checks, instead of every picture being dropped as unverified.
+                print(f"[first_cut] b-roll check on {BROLL_CHECK_MODEL} gave no verdict; checking on the Claude lane", flush=True)
+            if verdict is None:
+                verdict = _verdict(_broll_check_claude(parts, spend, len(ids)))
+            if verdict is None:
+                raise ValueError("the picture check gave no verdict")
             drop = {n for n in verdict.get("drop", []) if type(n) is int}
             approved = {ids[n] for n in verdict.get("keep", [])
                         if type(n) is int and n in ids and n not in drop}

@@ -474,3 +474,23 @@ def test_the_queue_confirms_an_insert_or_a_row_another_process_queued(monkeypatc
     assert openai_credit._queue_alert("k", "s", "h") is False
     rows["t"] = False                            # no table
     assert openai_credit._queue_alert("k", "s", "h") is False
+
+
+# ------------------------------------------------------------------ 15 Nov follow-ups from the independent check
+
+
+@pytest.mark.parametrize("answer", ["", "I could not decide about these pictures.", '{"keep": [1'])
+def test_an_openai_answer_without_a_verdict_is_checked_on_haiku_not_dropped(gate, broll, monkeypatch, answer):
+    """An OpenAI answer with no verdict (empty, prose, cut off) is no answer: Haiku checks, the cutaway survives."""
+    _openai_http(monkeypatch, lambda req: _answer(answer))
+    assert broll.fcv.verify_broll(broll.ctx, [], 0, broll.run, {"usd": 0.0}) == [(4., 4.5)]
+    assert broll.anthropic == ["claude-haiku-5-5"] and broll.removed == []
+
+
+def test_unreadable_source_screen_frames_are_unavailable_not_a_failed_first_film(monkeypatch, tmp_path):
+    import source_screen
+    from score import boards
+    monkeypatch.setattr(boards, "grab", lambda *a, **k: None)
+    monkeypatch.setattr(source_screen.llm, "ask_vision", lambda *a, **k: pytest.fail("no frames, no review"))
+    with pytest.raises(source_screen.Unavailable, match="could not be read"):
+        source_screen.build("proxy.mp4", 10., 30., [], "sha", str(tmp_path), video_info={"duration": 10., "fps": 30.})
