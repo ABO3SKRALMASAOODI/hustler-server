@@ -1,5 +1,5 @@
 import numpy as np
-from first_film_sound import power200, bed_space
+from first_film_sound import peak_power, bed_space
 
 
 def test_tiny_spectral_peak_is_not_a_full_audible_event():
@@ -7,9 +7,9 @@ def test_tiny_spectral_peak_is_not_a_full_audible_event():
     t = np.arange(rate) / rate
     long = .1 * np.sin(2*np.pi*1000*t)
     tiny = long.copy(); tiny[int(.02*rate):] = 0
-    assert power200(tiny, rate) < power200(long, rate) * .12
+    assert peak_power(tiny, rate) < peak_power(long, rate) * .12
     sub = .4 * np.sin(2*np.pi*60*t)
-    assert power200(sub, rate) < power200(long, rate) * .01
+    assert peak_power(sub, rate) < peak_power(long, rate) * .01
 
 
 def test_music_dip_is_on_the_hit_and_returns_smoothly():
@@ -58,5 +58,36 @@ def test_silent_upload_uses_nominal_reference_for_audible_cue(monkeypatch):
     monkeypatch.setattr(sound, 'sample_pcm', lambda sid: .1*np.sin(2*np.pi*1000*t))
     cue={'id':'event','s':'whoosh','tier':'body','event_f':30,'db':-20}
     sounds, evidence=level([cue],None,30)
-    assert abs(evidence[0]['body_over_voice_db']+3) < .1
+    assert abs(evidence[0]['peak50_over_voice400_db']+3) < .1
     assert sounds[0]['db'] > cue['db']
+
+
+def test_short_recording_gets_reference_peak_level_without_clipping(monkeypatch):
+    from score import sound
+    from first_film_sound import level
+    t = np.arange(sound.AR)/sound.AR
+    # A real-recording-shaped short attack against sustained dialogue.
+    raw = .4*np.sin(2*np.pi*1200*t)*np.exp(-t/0.008)
+    voice = .35*np.sin(2*np.pi*800*t)
+    monkeypatch.setattr(sound, 'library', lambda: {'hit': {}})
+    monkeypatch.setattr(sound, 'sample_pcm', lambda sid: raw)
+    cue = {'id':'hit','s':'hit','tier':'body','event_f':15,'db':-20}
+    result, proof = level([cue],voice,30)
+    assert abs(proof[0]['peak50_over_voice400_db']+3)<.15
+    assert np.max(np.abs(raw))*10**(result[0]['db']/20) < .9
+    assert result[0]['db'] > -6-20*np.log10(np.max(np.abs(raw)))
+
+
+def test_a_cue_in_a_breath_keeps_nearby_dialogue_reference(monkeypatch):
+    from score import sound
+    from first_film_sound import level
+    t = np.arange(3*sound.AR)/sound.AR
+    voice = .2*np.sin(2*np.pi*900*t)
+    gap = voice.copy(); gap[sound.AR:2*sound.AR] = 0
+    raw = .1*np.sin(2*np.pi*1200*t[:sound.AR])
+    monkeypatch.setattr(sound, 'library', lambda: {'cue': {}})
+    monkeypatch.setattr(sound, 'sample_pcm', lambda sid: raw)
+    cue={'id':'cue','s':'cue','tier':'body','event_f':45,'db':-20}
+    on_voice, _=level([cue],voice,30)
+    in_breath, _=level([cue],gap,30)
+    assert in_breath[0]['db'] == on_voice[0]['db']

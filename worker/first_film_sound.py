@@ -1,8 +1,8 @@
-"""Make first-film cues audible as 200 ms events over the finished programme.
+"""Level first-film cues on the reference's transient and voice windows.
 
 A maximum in one 20 ms FFT band is not a perceptual level: a tiny bright
-click could pass that test while sitting 15 dB under the voice. Measure the
-recording's body and leave space in the music at its audible attack.
+click could pass that test while sitting 15 dB under the voice. The reference
+uses a 50 ms cue peak against 400 ms of voice, not a 200 ms cue average.
 """
 import math
 import numpy as np
@@ -12,7 +12,7 @@ import numpy as np
 RELATIVE_DB = {'hero': 0.0, 'accent': -2.0, 'body': -3.0, 'tick': -6.0}
 
 
-def power200(signal, rate):
+def peak_power(signal, rate, window_s=.2):
     x = np.asarray(signal, np.float32).reshape(-1)
     if not len(x):
         return 0.0
@@ -21,7 +21,7 @@ def power200(signal, rate):
     spectrum = np.fft.rfft(x)
     spectrum[(bins < 150) | (bins > 6500)] = 0
     x = np.fft.irfft(spectrum, len(x))
-    n = max(1, int(.2 * rate))
+    n = max(1, int(window_s * rate))
     if len(x) < n:
         return float(np.sum(x*x) / n)
     sums = np.concatenate(([0.0], np.cumsum(x*x)))
@@ -39,9 +39,14 @@ def level(sounds, voice, fps, shift_db=0.0):
             continue
         raw = sound.sample_pcm(it['s'])
         raw = raw[int(round(float(it.get('trim_s') or 0) * sound.AR)):]
+        if it.get('dur_s') is not None:
+            raw = raw[:max(0, int(round(float(it['dur_s']) * sound.AR)))]
         hit = float(it.get('event_f') or 0) / fps
+        # Use nearby dialogue, including when the cue lands in a breath.
+        # Matching only the silence at the exact hit made gap cues disappear.
         a, b = max(0, int((hit - 1.5) * sound.AR)), min(len(v), int((hit + 1.5) * sound.AR))
-        vp, sp = power200(v[a:b], sound.AR), power200(raw, sound.AR)
+        vp = peak_power(v[a:b], sound.AR, min(.4, max(1, b-a)/sound.AR))
+        sp = peak_power(raw, sound.AR, .05)
         if sp <= 1e-12:
             out.append(it)
             continue
@@ -52,15 +57,21 @@ def level(sounds, voice, fps, shift_db=0.0):
         target = voice_db + RELATIVE_DB.get(it.get('tier'), -3.0)
         wanted = target - 10 * math.log10(sp)
         peak = float(np.abs(raw).max()) if len(raw) else 0
-        headroom = -6 - 20 * math.log10(max(peak, 1e-9))
-        gain = round(min(6.0, headroom, wanted), 1)
+        # A blanket -6 dB sample-peak ceiling left short, high-crest real
+        # recordings 7-13 dB under dialogue, regardless of the target. Keep
+        # each recording below full scale; the ordinary float mix/master
+        # owns the combined peak. Do not clip or synthesize the recording.
+        headroom = -1 - 20 * math.log10(max(peak, 1e-9))
+        gain = round(min(12.0, headroom, max(float(it.get('db', -30)), wanted)), 1)
         # Explicitly softer authored cues stay soft unless they are part of
         # the automatic hierarchy. All generated body/tick cues are levelled.
         if it.get('tier'):
             it['db'] = gain
         evidence.append({'id': it.get('id'), 'gain_db': it.get('db'),
-                         'body_over_voice_db': round(10 * math.log10(sp) + float(it['db']) - voice_db, 1),
-                         'method': '200ms phone-band power; pre-master'})
+                         'peak50_over_voice400_db': round(10 * math.log10(sp) + float(it['db']) - voice_db, 1),
+                         'target_over_voice_db': RELATIVE_DB.get(it.get('tier'), -3.0),
+                         'headroom_limited': wanted > headroom,
+                         'method': '50ms phone-band cue peak / nearby 400ms voice; pre-master, not a final-mix audible count'})
         out.append(it)
     return out, evidence
 
