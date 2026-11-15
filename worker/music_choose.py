@@ -37,6 +37,32 @@ How a track is chosen
   Nothing here reads what a customer typed: the film's kind, arc and pace
   are the input. No word lists, no regex on intent.
 
+Bad tracks are retired (owner, 15 Nov 2026: "if they are bad they shouldn't
+be used ... focus on quality, like that metromedia account")
+  * ``music_library/gate.json``: every library track measured against the
+    references' music beds by signal (lane MUSIC-SET's gate: bandwidth,
+    clipping, loudness, LRA, crest, tilt, mud, the voice's band, stereo,
+    energy shape). A track that FAILED is never chosen again, anywhere
+    (``choosable``); ``find`` still knows it, so a project that already plays
+    it keeps rendering. ``pass`` = the full gate; ``provisional`` = passed the
+    partial measures only.
+  * The workflow films (``music_film``, the workflow shell) are strict: they
+    choose from the reference music set first (``set_tracks``), and fall back
+    only to library tracks that PASSED the full gate (``workflow_pools``).
+  * The reference music set lives only on the owner's Mac (never in this
+    public repository): ``$VALMERA_MUSIC_SET/index.json`` (default unset =
+    no set; the shell points it at ``.valmera/models/music_ref``). Each row:
+    ``cid``, ``file`` (relative to the set's folder), ``title``, ``author``,
+    optional ``credit``/``license``/``kinds``/``z``/``ref_fit``/``mode``/
+    ``vocals``, and lane MUSIC-SET's gate output for the file (``pass`` with
+    no ``fails``, ``ebur128.I``, and its tagger's ``tempo_bpm``, ``bar_s``,
+    ``first_downbeat_s``, ``sections`` [intro/build/drop/break/body/outro],
+    ``entry_points``, ``energy_curve_db_1s``), flat or under ``tags``/``gate``.
+    A row that did not pass, or whose file is missing or outside the folder,
+    is dropped. A set track is chosen with its entry point (the top of the
+    song, a drop, a re-entry after a break) and its sections landed on the
+    film's turn and payoff, the way the references enter their tracks.
+
 Seam for the music engine (lane SND, worker/score/music.py): ``choose``
 returns the track, the section (``start_s``/``end_s`` in the track), the
 alignment pairs (film second <-> track second) and the level targets;
@@ -59,6 +85,9 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 LIB_DIR = os.path.join(_DIR, "music_library")
 MANIFEST_PATH = os.path.join(LIB_DIR, "manifest.json")
 PROFILES_PATH = os.path.join(LIB_DIR, "profiles.json")
+GATE_PATH = os.path.join(LIB_DIR, "gate.json")
+SET_ENV = "VALMERA_MUSIC_SET"            # the folder of the reference music set (its index.json); unset = no set
+SET_SIM = 0.75                           # a set track's closeness to the references when its row carries no measure of it
 STORAGE_PREFIX = "music-library/"
 PROVENANCE = "valmera_chosen"
 KINDS = ("podcast", "marketing", "story", "longform")
@@ -127,7 +156,129 @@ def tracks():
 
 
 def find(cid):
-    return next((t for t in tracks() if t["cid"] == str(cid or "")), None)
+    """Any library track by id, a retired-by-the-gate one included (a project that already plays it keeps it), or a
+    reference-set track."""
+    c = str(cid or "")
+    return next((t for t in tracks() if t["cid"] == c), None) or next((t for t in set_tracks() if t["cid"] == c), None)
+
+
+def gate():
+    """The signal gate's verdicts on the library: {"pass": set, "fail": {cid: [reasons]}, "provisional": set}."""
+    g = _load(GATE_PATH, "gate") or {}
+    return {"pass": set(g.get("pass") or ()), "fail": dict(g.get("fail") or {}), "provisional": set(g.get("provisional") or ())}
+
+
+def choosable(strict=False):
+    """The library tracks that may be chosen: never one the gate failed; with ``strict`` (the workflow films) only
+    the ones that passed the full gate."""
+    g = gate()
+    if strict:
+        return [t for t in tracks() if t["cid"] in g["pass"] and t["cid"] not in g["fail"]]
+    return [t for t in tracks() if t["cid"] not in g["fail"]]
+
+
+# ---------------------------------------------------------------- the reference music set (owner's Mac only)
+
+def set_dir():
+    d = str(os.environ.get(SET_ENV) or "").strip()
+    return os.path.realpath(d) if d and os.path.isdir(d) else None
+
+
+def _num(x):
+    return float(x) if isinstance(x, (int, float)) and math.isfinite(float(x)) else None
+
+
+def _set_row(raw, root):
+    """A set index row as a chooser track, or None when it may not be chosen (not passed, no file, file outside)."""
+    if not isinstance(raw, dict):
+        return None
+    cid = raw.get("cid")
+    if not (isinstance(cid, str) and _CID_RE.match(cid)):
+        return None
+    g = raw.get("gate") if isinstance(raw.get("gate"), dict) else {}
+    passed = raw.get("pass", g.get("pass"))
+    fails = raw.get("fails", g.get("fails")) or []
+    if passed is not True or fails:
+        return None
+    rel = raw.get("file") or raw.get("path")
+    if not isinstance(rel, str) or not rel:
+        return None
+    path = os.path.realpath(rel if os.path.isabs(rel) else os.path.join(root, rel))
+    if not path.startswith(root + os.sep) or not os.path.isfile(path):
+        return None
+    tg = raw.get("tags") if isinstance(raw.get("tags"), dict) else {}
+    tg = dict(g.get("tags") or {}, **tg) if isinstance(g.get("tags"), dict) else tg
+
+    def pick(k):
+        return raw.get(k) if raw.get(k) is not None else tg.get(k)
+    curve_rel = [float(x) for x in (pick("energy_curve_db_1s") or []) if _num(x) is not None]
+    if len(curve_rel) < 8:
+        return None
+    ref_db = _num(pick("energy_curve_ref_db")) or -18.0
+    secs = []
+    for x in pick("sections") or []:
+        if isinstance(x, dict) and _num(x.get("t0")) is not None and _num(x.get("t1")) is not None:
+            secs.append({"t0": float(x["t0"]), "t1": float(x["t1"]), "label": str(x.get("label") or "body"),
+                         "db": round(ref_db + float(_num(x.get("level_db_vs_median")) or 0.0), 2)})
+    dur = _num(raw.get("duration_s")) or _num((raw.get("probe") or {}).get("duration_s")) or float(len(curve_rel))
+    bar = _num(pick("bar_s"))
+    first = _num(pick("first_downbeat_s")) or 0.0
+    downs = [round(first + k * bar, 2) for k in range(int((dur - first) / bar) + 1)] if bar and bar > 0.5 else []
+    entries = [dict(e, t=float(e["t"])) for e in pick("entry_points") or [] if isinstance(e, dict) and _num(e.get("t")) is not None]
+    lufs = _num(raw.get("lufs"))
+    if lufs is None:
+        lufs = _num((raw.get("ebur128") or g.get("ebur128") or {}).get("I"))
+    z = raw.get("z") if isinstance(raw.get("z"), list) and len(raw.get("z")) >= 8 else None
+    kinds = [k for k in raw.get("kinds") or [] if k in KINDS] or list(KINDS)
+    return {"cid": cid, "title": str(raw.get("title") or cid), "author": str(raw.get("author") or ""), "set": True, "path": path,
+            "license": raw.get("license"), "credit": raw.get("credit"), "license_url": raw.get("license_url"),
+            "page_url": raw.get("page_url"), "storage_key": None, "source_url": None, "source_sha256": raw.get("sha256"),
+            "duration_s": dur, "lufs": lufs, "bpm": _num(pick("tempo_bpm")) or _num(raw.get("bpm")), "mode": raw.get("mode"),
+            "tags": [str(x) for x in raw.get("labels") or raw.get("genres") or []] if not isinstance(raw.get("tags"), list) else raw["tags"],
+            "vocals": float(_num(raw.get("vocals")) or 0.0), "style": raw.get("style") or cid, "z": z, "ref_fit": _num(raw.get("ref_fit")),
+            "kinds": kinds, "reels": raw.get("reels") or [], "curve": [round(ref_db + v, 2) for v in curve_rel], "sections": secs,
+            "downbeats": downs, "phrase_ends": sorted({s["t1"] for s in secs[:-1]}),
+            "drops": [s["t0"] for i, s in enumerate(secs) if s["label"] == "drop" or (s["label"] in ("body", "build") and i and secs[i - 1]["label"] == "break")],
+            "entry_points": entries}
+
+
+def set_tracks():
+    """The reference music set's choosable tracks ([] when $VALMERA_MUSIC_SET is unset, missing or has no index)."""
+    root = set_dir()
+    if not root:
+        return []
+    idx = os.path.join(root, "index.json")
+    try:
+        st = os.stat(idx)
+    except OSError:
+        return []
+    key = ("set", idx, st.st_mtime_ns, st.st_size)
+    with _LOCK:
+        if key in _CACHE:
+            return _CACHE[key]
+    try:
+        with open(idx) as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        doc = {}
+    rows = doc.get("tracks") if isinstance(doc, dict) else doc
+    out, seen = [], set()
+    for r in rows or []:
+        t = _set_row(r, root)
+        if t and t["cid"] not in seen:
+            seen.add(t["cid"])
+            out.append(t)
+    with _LOCK:
+        _CACHE[key] = out
+    return out
+
+
+def workflow_pools(film):
+    """What a workflow film chooses from, in order: the reference set (the film's kind), then the library tracks that
+    passed the full gate. A failed track is in neither."""
+    kind = kind_of(film.get("kind"))
+    pools = [("set", [t for t in set_tracks() if kind in t["kinds"]]), ("library", choosable(strict=True))]
+    return [(name, rows) for name, rows in pools if rows]
 
 
 def profiles():
@@ -178,12 +329,16 @@ def target_bpm(prof, film):
 def track_fit(track, prof, film, used=()):
     """(score 0..1, facts) of one track for the film, before its section is chosen."""
     refs = prof.get("refs") or []
-    sims = sorted((_cos(track["z"], r["z"]) for r in refs if r.get("z")), reverse=True)
+    sims = sorted((_cos(track["z"], r["z"]) for r in refs if r.get("z")), reverse=True) if track.get("z") else []
     sim = float(np.mean(sims[:3])) if sims else 0.0
+    if track.get("set") and not sims:        # a reference reel's own kind of track: its measured fit, else the set's
+        sim = track["ref_fit"] if track.get("ref_fit") is not None else SET_SIM
     tb = target_bpm(prof, film)
     tempo = math.exp(-(_octave_dist(track.get("bpm"), tb) / 0.18) ** 2)
     minor = prof.get("minor_share", 0.5)
     mode = minor if track.get("mode") == "minor" else 1.0 - minor
+    if track.get("set") and track.get("mode") not in ("minor", "major"):
+        mode = 0.5                           # a set row with no measured mode: neither for nor against
     dur = float(film.get("duration_s") or 30.0)
     length = 1.0 if (track.get("duration_s") or 0) >= dur + 2 else max(0.2, (track.get("duration_s") or 0) / (dur + 2))
     voc = float(track.get("vocals") or 0.0)
@@ -252,6 +407,13 @@ def best_section(track, film, prof, top=2):
              if s.get("db") is not None and secs[i - 1].get("db") is not None and s["db"] - secs[i - 1]["db"] >= 2.5]
     rises += [float(x) for x in track.get("drops") or []]
     turn_t, turn_role = main_turn(film)
+    # where the track may be entered (a set track's tagged entry points: the top, a drop, a re-entry after a break)
+    entries = {round(float(e["t"]), 2): e for e in track.get("entry_points") or []}
+    if entries:
+        starts = sorted(set(starts) | {t for t in entries if t + D <= T + 0.5})
+    # the film's turn (where its tension opens), apart from its payoff: a build or a break of the track lands there
+    opens = [float(x["t"]) for x in film.get("turns") or [] if x.get("role") == "turn" and float(x["t"]) != turn_t]
+    pulls = [float(x["t0"]) for x in secs if str(x.get("label")) in ("build", "break")]
     quiet_start = (prof.get("shape10") or [0])[0] < -3.0
     med = float(np.median(curve))
     out = []
@@ -268,6 +430,16 @@ def best_section(track, film, prof, top=2):
                 bonus += 0.25
                 why.append(f"the track lifts at {near[0]:.1f} s, on the film's {turn_role} at {turn_t:.1f} s")
                 align.append({"film_s": round(turn_t, 2), "track_s": round(near[0], 2), "what": f"lift on the {turn_role}"})
+        if opens and pulls:
+            near = [p for p in pulls if abs((p - s) - opens[0]) <= 1.5]
+            if near:
+                bonus += 0.1
+                why.append(f"the track pulls back at {near[0]:.1f} s, on the film's turn at {opens[0]:.1f} s")
+                align.append({"film_s": round(opens[0], 2), "track_s": round(near[0], 2), "what": "build on the turn"})
+        e = entries.get(round(s, 2))
+        if e is not None:
+            bonus += 0.15 * float(e.get("score") or 0.5)
+            why.append(f"enters at the track's {e.get('why') or 'entry point'} ({s:.1f} s)")
         end_t = s + D
         e_near = [e for e in ends if -1.5 <= e - end_t <= 0.25]       # a phrase that ends by the film's end
         if e_near:
@@ -281,7 +453,8 @@ def best_section(track, film, prof, top=2):
         if corr > 0.3:
             why.append(f"its level follows the references' shape for this kind (r {corr:.2f})")
         out.append({"start_s": round(s, 2), "end_s": round(min(T, s + D), 2), "score": round(corr * 0.5 + bonus, 3),
-                    "why": why, "align": align, "loop": s + D > T + 0.5})
+                    "why": why, "align": align, "loop": s + D > T + 0.5,
+                    "entry": None if e is None else {"t": round(s, 2), "why": e.get("why")}})
     out.sort(key=lambda x: -x["score"])
     keep = []
     for o in out:
@@ -305,12 +478,13 @@ def levels(prof, film):
             "bed_lift_db": g.get("p50")}
 
 
-def shortlist(film, used=(), n=6):
-    """The best (track, section) options for a film, by signal only."""
+def shortlist(film, used=(), n=6, pool=None):
+    """The best (track, section) options for a film, by signal only, from ``pool`` (default: every library track the
+    gate did not fail)."""
     kind = kind_of(film.get("kind"))
     prof = profiles().get(kind) or {}
     scored = []
-    for t in tracks():
+    for t in (choosable() if pool is None else pool):
         s, facts = track_fit(t, prof, film, used)
         scored.append((s, t, facts))
     scored.sort(key=lambda x: -x[0])

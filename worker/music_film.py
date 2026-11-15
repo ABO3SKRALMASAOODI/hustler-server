@@ -6,7 +6,8 @@ keeps it, removes it or takes the clean export.
 
 Three modules do the work and this one joins them for a film:
 
-    music_choose      which track: the licensed library against the references of the film's kind (signal), one model pick
+    music_choose      which track: the reference music set first, else the library tracks that passed the signal gate,
+                      against the references of the film's kind (signal), one model pick
     score.music       which part of it, cut how, at what level: any song, the owner's own included
     here              the film's facts and story marks, the audition (the model's first picks tried against the film
                       by the engine, the one whose bars fit it kept), the supplied song or the chosen track laid under
@@ -28,6 +29,7 @@ import os
 import subprocess
 import time
 
+NO_ARRANGEMENT = 99.0       # carries() of a song the engine could not arrange for the film at all
 AUDITION = 3                 # how many of the model's picks the engine tries against the film
 PICK_MODEL = "gpt-6.1-sol"   # the shell's music calls (OpenAI; the product's own lanes use their own client)
 URL = "https://api.openai.com/v1/responses"
@@ -221,7 +223,7 @@ def carries(plan, wants_drop):
     payoff without an entrance to land on it, intro or flat bars it had to play, a sung voice under the film's own,
     then its joins."""
     if not plan or not plan.get("ok"):
-        return 99.0
+        return NO_ARRANGEMENT
     c = 0.0
     if wants_drop and plan.get("drop_at") is None:
         c += 4.0
@@ -233,15 +235,53 @@ def carries(plan, wants_drop):
     return round(c, 3)
 
 
+def track_file(track, cache):
+    """A chosen track's audio on this machine: a reference-set track is its own file in the set's folder (never
+    fetched, never copied); a library track is the publisher's file (local_track)."""
+    if track.get("set"):
+        if not os.path.isfile(str(track.get("path") or "")):
+            raise FileNotFoundError(f"the reference set's file for {track.get('cid')!r} is missing")
+        return track["path"]
+    return local_track(track, cache)
+
+
 def choose(film, marks, cache, used=(), call=None, n=AUDITION, fetch=None, profile=None):
-    """A library track for this film: (choice, path, tried). The signal shortlist (music_choose), a model's ranking
-    of it, then the engine itself: each of the first `n` is fetched, read and arranged against the film's marks,
-    and the first whose bars carry the film is kept (an entrance for the payoff, no intro, no flat stretch, no sung
-    voice under the narrator). Without a model the signal's order is tried. (None, None, tried) when nothing can be
-    had. fetch(track) -> path replaces the publisher fetch (a test, a replay with its own cache)."""
+    """A track for this film: (choice, path, tried). The workflow films choose from the reference music set first and
+    fall back only to library tracks that passed the signal gate (music_choose.workflow_pools; a failed track is never
+    offered). In each pool: the signal shortlist, a model's ranking of it, then the engine itself: each of the first
+    `n` is fetched, read and arranged against the film's marks, and the first whose bars carry the film is kept (an
+    entrance for the payoff, no intro, no flat stretch, no sung voice under the narrator). Without a model the
+    signal's order is tried. (None, None, tried) when nothing can be had. fetch(track) -> path replaces the file
+    lookup (a test, a replay with its own cache)."""
+    import music_choose
+    tried, keep = [], None
+    for pool_name, pool in music_choose.workflow_pools(film):
+        ch, path, got = _choose_from(film, marks, cache, pool, pool_name, used=used, call=call, n=n, fetch=fetch, profile=profile)
+        tried += got
+        if ch is None:
+            continue
+        if ch.get("carries", 0.0) < NO_ARRANGEMENT:
+            return ch, path, tried
+        keep = keep or (ch, path)              # the engine could not arrange it: the next pool is tried first
+    return (keep[0], keep[1], tried) if keep else (None, None, tried)
+
+
+def _with_entry(marks, opt):
+    """The film's marks with the chooser's entry point into the song (a set track's drop, re-entry or top), when the
+    shortlist named one: the engine then opens the film there unless the bars say otherwise."""
+    e = ((opt or {}).get("section") or {}).get("entry")
+    return dict(marks, open_s=float(e["t"])) if e and e.get("t") is not None else marks
+
+
+def entry_s(choice):
+    p = ((choice or {}).get("entry") or {}).get("point")
+    return float(p["t"]) if p and p.get("t") is not None else None
+
+
+def _choose_from(film, marks, cache, pool, pool_name, used=(), call=None, n=AUDITION, fetch=None, profile=None):
     import music_choose
     from score import music as MU
-    opts, prof = music_choose.shortlist(film, used=used, n=8)
+    opts, prof = music_choose.shortlist(film, used=used, n=8, pool=pool)
     opts = [o for o in opts if o["cid"] not in set(used or ())] or opts      # a track this film already plays is not offered again while others are
     if not opts:
         return None, None, []
@@ -260,11 +300,11 @@ def choose(film, marks, cache, used=(), call=None, n=AUDITION, fetch=None, profi
     for rank, i in enumerate(order[:max(1, n)]):
         o = opts[i]
         t = o["track"]
-        row = {"cid": t["cid"], "title": t.get("title"), "rank": rank + 1}
+        row = {"cid": t["cid"], "title": t.get("title"), "rank": rank + 1, "pool": pool_name}
         try:
-            path = (fetch or (lambda tr: local_track(tr, cache)))(t)
+            path = (fetch or (lambda tr: track_file(tr, cache)))(t)
             song = MU.analyse(path, sung=sung_of(t))
-            plan = MU.arrange(song, marks, profile=profile)
+            plan = MU.arrange(song, _with_entry(marks, o), profile=profile)
             row.update(carries=carries(plan, wants), drop_is=plan.get("drop_is"), intro_bars=plan.get("intro_bars"), low_bars=plan.get("low_bars"),
                        jumps=plan.get("jumps"), tempo=plan.get("tempo"))
         except Exception as ex:  # noqa: BLE001 - the next one is tried
@@ -281,11 +321,13 @@ def choose(film, marks, cache, used=(), call=None, n=AUDITION, fetch=None, profi
         return None, None, tried
     rank, o, path, row = best
     t = o["track"]
+    sec = o.get("section") or {}
     ch = {"cid": t["cid"], "title": t.get("title"), "author": t.get("author"), "license": t.get("license"), "credit": t.get("credit"),
-          "license_url": t.get("license_url"), "source_url": t.get("source_url"), "page_url": t.get("page_url"), "storage_key": t["storage_key"],
+          "license_url": t.get("license_url"), "source_url": t.get("source_url"), "page_url": t.get("page_url"), "storage_key": t.get("storage_key"),
           "source_sha256": t.get("source_sha256"), "bpm": t.get("bpm"), "tags": t.get("tags"), "kind": music_choose.kind_of(film.get("kind")),
           "why": why if rank == 0 else f"{why} (the engine kept pick {rank + 1}: the first could not carry this film)", "chosen_by": by,
-          "auditioned": len(tried), "sung": sung_of(t), "removable": True}
+          "auditioned": len(tried), "sung": sung_of(t), "removable": True, "pool": pool_name, "carries": row.get("carries"),
+          "entry": {"start_s": sec.get("start_s"), "end_s": sec.get("end_s"), "point": sec.get("entry"), "why": sec.get("why"), "align": sec.get("align")}}
     return ch, path, tried
 
 
@@ -340,7 +382,7 @@ def score_chapters(film, marks, kind, cache, call=None, used=(), fetch=None, voi
             if not ch:
                 raise ValueError("no track could be had")
             song = MU.analyse(path, sung=ch.get("sung"))
-            plan = MU.arrange(song, sub, profile=prof)
+            plan = MU.arrange(song, dict(sub, open_s=entry_s(ch)) if entry_s(ch) is not None else sub, profile=prof)
             if not plan.get("ok"):
                 raise ValueError(plan.get("why") or "no arrangement")
             a, b = int(round(t0 * MU.SR)), int(round(t1 * MU.SR))
@@ -434,9 +476,11 @@ def score(l1, work, film=None, out=None, kind="stories", song=None, vocals=None,
         rep["choice"] = {"file": os.path.basename(str(song)), "supplied": True}
     sung = choice.get("sung") if choice else None
     if whole:
-        rep["mix"] = MU.mix_film(film, song, marks, out=out, kind=kind, vocals=vocals, sung=sung, supplied=choice is None)
+        rep["mix"] = MU.mix_film(film, song, dict(marks, open_s=entry_s(choice)) if entry_s(choice) is not None else marks, out=out, kind=kind,
+                                 vocals=vocals, sung=sung, supplied=choice is None)
     else:
-        rep["mix"] = MU.mix(l1, work, song, film=film, out=out, vocals=vocals, turn_s=turn_s, payoff_s=payoff_s, kind=kind, index=index, supplied=choice is None, sung=sung)
+        rep["mix"] = MU.mix(l1, work, song, film=film, out=out, vocals=vocals, turn_s=turn_s, payoff_s=payoff_s, kind=kind, index=index, supplied=choice is None, sung=sung,
+                            **({"open_s": entry_s(choice)} if entry_s(choice) is not None else {}))
     rep["ok"] = bool((rep["mix"].get("plan") or {}).get("ok") and (not out or rep["mix"].get("out")))
     rep["spend_usd"] = spend(call)
     return rep

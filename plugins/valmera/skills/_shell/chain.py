@@ -185,6 +185,7 @@ FOOTAGE_YTDLP = f"{VV}/tools/ytdlp-venv/bin/python"      # yt-dlp newer than the
 FOOTAGE_DENO = f"{VV}/tools/deno"                          # the JS runtime yt-dlp's challenge solver needs
 FOOTAGE_POT = f"{VV}/tools/bgutil-pot/server"              # the PO-token script yt-dlp's bgutil plugin runs
 ENV_FILE = f"{V}/hustler-server/backend/.env"
+MUSIC_SET = f"{VV}/models/music_ref"                      # the reference music set's folder (index.json + audio), this Mac only
 
 
 def seg_durs(words, n):
@@ -423,7 +424,9 @@ def music_version(ctx, rd, sc):
         bf = os.path.join(ctx.supply, f"{tag}_brief.txt")
         open(bf, "w", encoding="utf-8").write(brief)
         # a narrated film's voice is not an upload: its workflow hands the scene with the narration as its spine (l1_audio)
-        cmd = (f"cd '{wk}' && export OPENAI_API_KEY=\"${{OPENAI_API_KEY:-$(grep -E '^OPENAI_API_KEY=' '{ENV_FILE}' | tail -1 | cut -d= -f2- | tr -d '\"')}}\" && "
+        # the reference music set (owner's Mac only, never in the repository): chosen first; without it the library
+        # tracks that passed the signal gate (worker/music_choose.workflow_pools); a failed track never plays
+        cmd = (f"cd '{wk}' && export VALMERA_MUSIC_SET=\"${{VALMERA_MUSIC_SET:-{MUSIC_SET}}}\" && export OPENAI_API_KEY=\"${{OPENAI_API_KEY:-$(grep -E '^OPENAI_API_KEY=' '{ENV_FILE}' | tail -1 | cut -d= -f2- | tr -d '\"')}}\" && "
                f"PYTHONPATH=. FFMPEG_BIN='{brand.FF}' SCENE_CEIL_DBTP=-2.0 SKIP_DB_INIT=1 '{PY}' -m music_film score --l1 '{sc.get('l1_audio') or sc['l1']}' "
                f"--work '{ctx.supply}' --film '{rd['film']}' --out '{out}.part.mp4' --kind {SONG_KIND.get(ctx.workflow, 'stories')} "
                f"--cache '{os.path.join(ctx.state_root, 'music_cache')}' --report '{report}' --brief \"$(cat '{bf}')\"")    # the publishers' own files, sha256-checked, kept between runs
@@ -515,7 +518,7 @@ def music_version(ctx, rd, sc):
         return None
     music = dict(picked_by_valmera=True, title=ch.get("title"), author=ch.get("author"), license=ch.get("license"), credit=ch.get("credit"),
                  page_url=ch.get("page_url"), cid=ch.get("cid"), why=ch.get("why"), chosen_by=ch.get("chosen_by"), tried=rep.get("tried"), does=does,
-                 tracks=ch.get("tracks"),
+                 tracks=ch.get("tracks"), pool=ch.get("pool"), entry=ch.get("entry"),
                  checks={k: chk.get(k) for k in ("length_ok", "endcard_ok", "mark_ok", "lufs", "loud_ok")}, removable=True,
                  note="CC-BY: the credit line goes wherever the film is published; film_clean.mp4 is the same film without music")
     return dict(final_music=final, music=music, spend=spend)

@@ -97,7 +97,7 @@ def _opt(cid):
 @needs_ffmpeg
 def test_the_engine_tries_the_models_picks_and_keeps_the_first_that_carries_the_film(songs, monkeypatch):
     import music_choose
-    monkeypatch.setattr(music_choose, "shortlist", lambda film, used=(), n=8: ([_opt("flat"), _opt("full")], {"n": 2, "bpm": {"p25": 100, "p75": 130}, "minor_share": 0.7, "top_tags": {}}))
+    monkeypatch.setattr(music_choose, "shortlist", lambda film, used=(), n=8, pool=None: ([_opt("flat"), _opt("full")], {"n": 2, "bpm": {"p25": 100, "p75": 130}, "minor_share": 0.7, "top_tags": {}}))
     film = {"kind": "story", "duration_s": 32.0, "turns": [{"t": 14.1, "role": "climax"}], "pace": {"cuts10": 8.0}, "speech_share": 0.8, "brief": "a gamble"}
     asked = []
 
@@ -137,7 +137,7 @@ def test_a_long_film_is_scored_chapter_by_chapter_a_track_each(songs, tmp_path, 
     assert all(any(abs(b - x) < 2.0 for x in (70.5, 142.5, 216.5)) for _a, b in chs[:-1])       # in the narrator's pauses
     lib = {"one": songs["full"], "two": _wav(tmp_path, "two", bars=40, intro_bars=4), "three": _wav(tmp_path, "three", bars=44, intro_bars=6),
            "four": _wav(tmp_path, "four", bars=48, intro_bars=2)}
-    monkeypatch.setattr(music_choose, "shortlist", lambda film, used=(), n=8: ([_opt(c) for c in lib], {"n": 4, "bpm": {"p25": 100, "p75": 130}, "minor_share": 0.7, "top_tags": {}}))
+    monkeypatch.setattr(music_choose, "shortlist", lambda film, used=(), n=8, pool=None: ([_opt(c) for c in lib], {"n": 4, "bpm": {"p25": 100, "p75": 130}, "minor_share": 0.7, "top_tags": {}}))
     film = {"kind": "longform", "duration_s": 300.0, "turns": [], "pace": {"cuts10": 2.0}, "speech_share": 0.8, "brief": "a long story"}
     music, rep = MF.score_chapters(film, marks, "longform", "/nonexistent", fetch=lambda t: lib[t["cid"]])
     rows = rep["chapters"]

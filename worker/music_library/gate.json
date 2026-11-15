@@ -1,0 +1,722 @@
+{
+ "made": "2026-11-15",
+ "how": "Signal-only gate against the @metromedia.house music beds (lane MUSIC-SET, tools/gate.py; no listening model): full bandwidth, no clipping, -26..-7 LUFS, LRA 3-15 LU, 3 s crest 9-19 dB, tilt -6..-1.2 dB/oct, under 85% of the energy below 150 Hz, at most 75% in the voice's band, stereo width and phase with a mono low end, an energy shape with lift. 'pass': the full gate on the decoded file. 'fail': a measured defect (full gate, or the partial measures); never chosen again. 'provisional': passed the partial measures only (loudness, peak, low-end share, a loudness-range proxy, bitrate).",
+ "pass": [
+  "jm-1540296",
+  "jm-1715120",
+  "km-future-gladiator",
+  "km-werq"
+ ],
+ "provisional": [
+  "jm-1076985",
+  "jm-1076986",
+  "jm-1076987",
+  "jm-1076988",
+  "jm-1123613",
+  "jm-1159437",
+  "jm-1163228",
+  "jm-1172854",
+  "jm-1172855",
+  "jm-1291882",
+  "jm-1291888",
+  "jm-1291889",
+  "jm-1291891",
+  "jm-1323431",
+  "jm-1354479",
+  "jm-1368707",
+  "jm-1529576",
+  "jm-1567021",
+  "jm-1614967",
+  "jm-162036",
+  "jm-1653906",
+  "jm-1670666",
+  "jm-1670669",
+  "jm-1806072",
+  "jm-1968571",
+  "jm-467047",
+  "jm-540316",
+  "jm-578088",
+  "jm-682365",
+  "jm-682398",
+  "jm-682443",
+  "jm-686972",
+  "jm-689204",
+  "jm-703571",
+  "jm-703933",
+  "jm-719562",
+  "jm-734201",
+  "jm-764954",
+  "jm-80137",
+  "jm-80138",
+  "jm-822777",
+  "jm-844073",
+  "km-almost-new",
+  "km-amazing-grace-2011",
+  "km-bump-in-the-night",
+  "km-cuban-sandwich",
+  "km-darkest-child",
+  "km-deadly-roulette",
+  "km-death-of-kings",
+  "km-dream-culture",
+  "km-dreams-become-real",
+  "km-edm-detection-mode",
+  "km-enchanted-journey",
+  "km-energizing",
+  "km-floating-cities",
+  "km-fresh-air",
+  "km-full-on",
+  "km-funeral-march-for-brass",
+  "km-gathering-darkness",
+  "km-giant-wyrm",
+  "km-guzheng-city",
+  "km-immersed",
+  "km-in-your-arms",
+  "km-industrial-cinematic",
+  "km-inexorable",
+  "km-jerry-five",
+  "km-laser-groove",
+  "km-lithium",
+  "km-mandeville",
+  "km-master-disorder",
+  "km-mirage",
+  "km-ossuary-1-a-beginning",
+  "km-ossuary-2-turn",
+  "km-ossuary-3-words",
+  "km-ossuary-4-animate",
+  "km-ossuary-5-rest",
+  "km-ossuary-7-resolve",
+  "km-pale-rider",
+  "km-phantom-from-space",
+  "km-plaint",
+  "km-pyro-flow",
+  "km-relent",
+  "km-ropocolypse-2",
+  "km-scp-x1x-gateway-to-hell",
+  "km-scp-x2x-unseen-presence",
+  "km-scp-x5x-outer-thoughts",
+  "km-shadowlands-1-horizon",
+  "km-shadowlands-2-bridge",
+  "km-shadowlands-3-machine",
+  "km-shadowlands-4-breath",
+  "km-shadowlands-5-antechamber",
+  "km-shadowlands-6-the-pit",
+  "km-the-complex",
+  "km-vanes",
+  "km-virtutes-instrumenti",
+  "sb-a-dragon-s-lullaby-2023-remaster",
+  "sb-adrift-among-infinite-stars",
+  "sb-amberlight",
+  "sb-at-the-end-of-all-things",
+  "sb-borealis",
+  "sb-call-to-adventure",
+  "sb-castles-in-the-sky",
+  "sb-catalyst",
+  "sb-cirrus",
+  "sb-clarion",
+  "sb-echoes-of-home",
+  "sb-ephemera",
+  "sb-escape-velocity",
+  "sb-fate-and-fortune",
+  "sb-filaments",
+  "sb-first-snow",
+  "sb-goliath",
+  "sb-helios",
+  "sb-hymn-to-the-dawn",
+  "sb-hyperion",
+  "sb-i-walk-with-ghosts",
+  "sb-ice-cream",
+  "sb-ignis",
+  "sb-in-search-of-solitude",
+  "sb-in-this-moment",
+  "sb-inbound",
+  "sb-incredulity",
+  "sb-into-the-unknown",
+  "sb-into-the-wilds",
+  "sb-juggernaut",
+  "sb-jul",
+  "sb-last-and-first-light",
+  "sb-latin-dish-pigs",
+  "sb-life-in-motion",
+  "sb-march-of-midnight",
+  "sb-meanwhile",
+  "sb-midvinter",
+  "sb-monomyth-the-endurance",
+  "sb-monomyth-the-fury",
+  "sb-monomyth-the-rise",
+  "sb-pathfinder",
+  "sb-penumbra",
+  "sb-permafrost",
+  "sb-reverie",
+  "sb-ride-the-wind",
+  "sb-sentinel",
+  "sb-shadows-and-dust",
+  "sb-simulacra",
+  "sb-soar",
+  "sb-solace",
+  "sb-terminus",
+  "sb-the-climb",
+  "sb-the-great-sea",
+  "sb-the-illusionist",
+  "sb-the-long-dark",
+  "sb-the-long-way-home",
+  "sb-the-weight-of-air-anabasis-i",
+  "sb-this-too-shall-pass",
+  "sb-undertow",
+  "sb-uprising",
+  "sb-vanguard",
+  "sb-victor-lux",
+  "sb-what-we-don-t-say",
+  "sb-winter-waltz",
+  "sb-within-our-nature"
+ ],
+ "fail": {
+  "jm-1014174": [
+   "LRA proxy 2.7 dB outside (3, 15) (energy shape)",
+   "mud: 92% under 150 Hz"
+  ],
+  "jm-1036143": [
+   "mud: 85% under 150 Hz"
+  ],
+  "jm-1172851": [
+   "LRA proxy 2.2 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-1174444": [
+   "LRA proxy 2.1 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-1192225": [
+   "mud: 89% under 150 Hz"
+  ],
+  "jm-1196244": [
+   "mud: 95% under 150 Hz"
+  ],
+  "jm-1208881": [
+   "clipped hot master: decoded peak +3.44 dBFS",
+   "LRA proxy 1.6 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-1291884": [
+   "LRA proxy 1.4 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-1291885": [
+   "LRA proxy 1.6 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-1291887": [
+   "LRA proxy 2.3 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-1291895": [
+   "LRA proxy 1.8 dB outside (3, 15) (energy shape)",
+   "mud: 86% under 150 Hz"
+  ],
+  "jm-1305125": [
+   "clipped: 261 pinned samples in a row, 1.941% at full scale",
+   "crest 7.72 dB outside (9.0, 19.0)",
+   "mud: 94% of energy under 150 Hz",
+   "energy shape: short-term sd 2.44 dB, p10-p90 range 3.64 dB"
+  ],
+  "jm-1308698": [
+   "mud: 94% under 150 Hz"
+  ],
+  "jm-1331624": [
+   "clipped hot master: decoded peak +3.32 dBFS"
+  ],
+  "jm-1333889": [
+   "clipped hot master: decoded peak +4.62 dBFS"
+  ],
+  "jm-1336314": [
+   "clipped hot master: decoded peak +3.42 dBFS"
+  ],
+  "jm-1355577": [
+   "clipped hot master: decoded peak +3.01 dBFS",
+   "LRA proxy 17.5 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-1356976": [
+   "clipped hot master: decoded peak +3.22 dBFS"
+  ],
+  "jm-1364261": [
+   "clipped hot master: decoded peak +3.25 dBFS"
+  ],
+  "jm-1380968": [
+   "clipped hot master: decoded peak +5.46 dBFS",
+   "loudness -4.9 LUFS outside (-26, -7)",
+   "LRA proxy 2.5 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-1440519": [
+   "clipped hot master: decoded peak +3.68 dBFS",
+   "LRA proxy 18.4 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-1484366": [
+   "band-limited: 82.8 dB wall at 15800 Hz",
+   "loudness -6.7 LUFS outside (-26.0, -7.0)",
+   "LRA 2.3 LU outside (3.0, 15.0)",
+   "crest 8.18 dB outside (9.0, 19.0)",
+   "energy shape: short-term sd 1.89 dB, p10-p90 range 2.4 dB"
+  ],
+  "jm-1497577": [
+   "LRA 1.6 LU outside (3.0, 15.0)",
+   "energy shape: short-term sd 0.61 dB, p10-p90 range 1.4 dB"
+  ],
+  "jm-1497585": [
+   "clipped hot master: decoded peak +4.06 dBFS"
+  ],
+  "jm-1511639": [
+   "clipped hot master: decoded peak +4.12 dBFS"
+  ],
+  "jm-1540833": [
+   "spectral tilt 2.7 dB/oct outside (-6.0, -1.2)",
+   "sits on the voice: 100% of energy at 150 Hz-4 kHz",
+   "stereo width: side/mid -1.9 dB outside (-24.0, -3.0)",
+   "stereo phase: L/R correlation 0.194",
+   "wide low end: side/mid under 150 Hz 1.0 dB"
+  ],
+  "jm-1557386": [
+   "clipped hot master: decoded peak +3.56 dBFS",
+   "mud: 90% under 150 Hz"
+  ],
+  "jm-1576703": [
+   "LRA proxy 1.5 dB outside (3, 15) (energy shape)",
+   "mud: 88% under 150 Hz"
+  ],
+  "jm-1583593": [
+   "clipped hot master: decoded peak +6.09 dBFS",
+   "loudness -0.31 LUFS outside (-26, -7)",
+   "LRA proxy 0.9 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-1594047": [
+   "clipped hot master: decoded peak +4.55 dBFS",
+   "LRA proxy 1.8 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-1611791": [
+   "LRA proxy 1.8 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-1614698": [
+   "clipped hot master: decoded peak +3.28 dBFS",
+   "LRA proxy 2.2 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-163760": [
+   "LRA proxy 1.4 dB outside (3, 15) (energy shape)",
+   "mud: 89% under 150 Hz"
+  ],
+  "jm-163761": [
+   "mud: 97% under 150 Hz"
+  ],
+  "jm-164177": [
+   "LRA proxy 2.7 dB outside (3, 15) (energy shape)",
+   "mud: 96% under 150 Hz"
+  ],
+  "jm-164839": [
+   "clipped hot master: decoded peak +3.54 dBFS",
+   "LRA proxy 2.1 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-1687755": [
+   "LRA proxy 17.0 dB outside (3, 15) (energy shape)",
+   "mud: 95% under 150 Hz"
+  ],
+  "jm-1712532": [
+   "clipped hot master: decoded peak +3.28 dBFS"
+  ],
+  "jm-1718278": [
+   "clipped: 39 pinned samples in a row, 0.097% at full scale"
+  ],
+  "jm-1734230": [
+   "clipped hot master: decoded peak +3.86 dBFS"
+  ],
+  "jm-225617": [
+   "LRA proxy 2.6 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-454035": [
+   "loudness -5.85 LUFS outside (-26, -7)",
+   "LRA proxy 1.2 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-499186": [
+   "LRA proxy 1.3 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-605085": [
+   "mud: 90% of energy under 150 Hz",
+   "stereo width: side/mid -26.8 dB outside (-24.0, -3.0)"
+  ],
+  "jm-689205": [
+   "clipped hot master: decoded peak +3.64 dBFS"
+  ],
+  "jm-725532": [
+   "LRA proxy 15.4 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-725801": [
+   "clipped hot master: decoded peak +3.61 dBFS"
+  ],
+  "jm-758515": [
+   "clipped hot master: decoded peak +3.86 dBFS"
+  ],
+  "jm-795279": [
+   "LRA proxy 2.1 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-80136": [
+   "clipped hot master: decoded peak +3.21 dBFS",
+   "LRA proxy 15.8 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-823659": [
+   "LRA proxy 2.9 dB outside (3, 15) (energy shape)"
+  ],
+  "jm-826754": [
+   "LRA proxy 16.0 dB outside (3, 15) (energy shape)"
+  ],
+  "km-adventure-meme": [
+   "LRA proxy 0.8 dB outside (3, 15) (energy shape)"
+  ],
+  "km-airship-serenity": [
+   "stereo width: side/mid -27.1 dB outside (-24.0, -3.0)"
+  ],
+  "km-anguish": [
+   "sits on the voice: 77% of energy at 150 Hz-4 kHz",
+   "stereo width: side/mid -1.5 dB outside (-24.0, -3.0)",
+   "stereo phase: L/R correlation 0.199",
+   "wide low end: side/mid under 150 Hz -4.7 dB"
+  ],
+  "km-basic-implosion": [
+   "LRA proxy 2.1 dB outside (3, 15) (energy shape)",
+   "mud: 91% under 150 Hz"
+  ],
+  "km-bent-and-broken": [
+   "LRA proxy 16.1 dB outside (3, 15) (energy shape)"
+  ],
+  "km-blown-away-no-percussion": [
+   "LRA proxy 1.9 dB outside (3, 15) (energy shape)"
+  ],
+  "km-bossabossa": [
+   "LRA proxy 2.9 dB outside (3, 15) (energy shape)"
+  ],
+  "km-brain-dance": [
+   "crest 19.51 dB outside (9.0, 19.0)",
+   "spectral tilt -0.91 dB/oct outside (-6.0, -1.2)",
+   "energy shape: short-term sd 2.52 dB, p10-p90 range 2.52 dB"
+  ],
+  "km-canon-in-d-for-8-bit-synths": [
+   "LRA proxy 0.8 dB outside (3, 15) (energy shape)"
+  ],
+  "km-cephalopod": [
+   "clipped: 15 pinned samples in a row, 0.086% at full scale",
+   "LRA 1.6 LU outside (3.0, 15.0)",
+   "energy shape: short-term sd 1.56 dB, p10-p90 range 1.44 dB"
+  ],
+  "km-chee-zee-caves-v2": [
+   "LRA proxy 1.9 dB outside (3, 15) (energy shape)"
+  ],
+  "km-chill-wave": [
+   "clipped hot master: decoded peak +3.07 dBFS",
+   "mud: 90% under 150 Hz"
+  ],
+  "km-club-diver": [
+   "clipped hot master: decoded peak +3.02 dBFS",
+   "LRA proxy 1.0 dB outside (3, 15) (energy shape)"
+  ],
+  "km-cottages": [
+   "low bitrate 152 kbps (band-limit proxy)"
+  ],
+  "km-crossing-the-divide": [
+   "LRA proxy 20.5 dB outside (3, 15) (energy shape)"
+  ],
+  "km-cut-and-dry": [
+   "clipped hot master: decoded peak +3.3 dBFS",
+   "LRA proxy 1.7 dB outside (3, 15) (energy shape)",
+   "mud: 91% under 150 Hz"
+  ],
+  "km-cut-and-run": [
+   "mud: 95% under 150 Hz"
+  ],
+  "km-darkest-child-var-a": [
+   "sits on the voice: 89% of energy at 150 Hz-4 kHz",
+   "stereo width: side/mid 0.7 dB outside (-24.0, -3.0)",
+   "stereo phase: L/R correlation -0.084",
+   "wide low end: side/mid under 150 Hz 1.1 dB",
+   "energy shape: short-term sd 2.33 dB, p10-p90 range 3.9 dB"
+  ],
+  "km-decisions": [
+   "LRA proxy 2.3 dB outside (3, 15) (energy shape)"
+  ],
+  "km-delightful-d": [
+   "clipped hot master: decoded peak +3.27 dBFS",
+   "LRA proxy 1.9 dB outside (3, 15) (energy shape)"
+  ],
+  "km-despair-and-triumph": [
+   "LRA proxy 15.1 dB outside (3, 15) (energy shape)"
+  ],
+  "km-destiny-day": [
+   "LRA proxy 0.7 dB outside (3, 15) (energy shape)"
+  ],
+  "km-disco-medusae": [
+   "LRA proxy 1.9 dB outside (3, 15) (energy shape)"
+  ],
+  "km-echoes-of-time": [
+   "mud: 92% under 150 Hz"
+  ],
+  "km-echoes-of-time-v2": [
+   "LRA proxy 15.9 dB outside (3, 15) (energy shape)",
+   "mud: 94% under 150 Hz"
+  ],
+  "km-enter-the-maze": [
+   "mud: 94% under 150 Hz"
+  ],
+  "km-fantasia-fantasia": [
+   "LRA proxy 1.7 dB outside (3, 15) (energy shape)"
+  ],
+  "km-farm": [
+   "low bitrate 147 kbps (band-limit proxy)"
+  ],
+  "km-getting-it-done": [
+   "clipped hot master: decoded peak +3.03 dBFS",
+   "LRA proxy 2.7 dB outside (3, 15) (energy shape)"
+  ],
+  "km-ghost-story": [
+   "LRA proxy 21.5 dB outside (3, 15) (energy shape)"
+  ],
+  "km-go-cart": [
+   "clipped hot master: decoded peak +3.14 dBFS"
+  ],
+  "km-go-cart-drop-mix": [
+   "clipped hot master: decoded peak +3.16 dBFS"
+  ],
+  "km-go-cart-loop-mix": [
+   "clipped hot master: decoded peak +3.21 dBFS"
+  ],
+  "km-grim-league": [
+   "spectral tilt -6.65 dB/oct outside (-6.0, -1.2)",
+   "mud: 94% of energy under 150 Hz"
+  ],
+  "km-ice-flow": [
+   "mud: 85% of energy under 150 Hz",
+   "energy shape: short-term sd 1.49 dB, p10-p90 range 2.71 dB"
+  ],
+  "km-journey-to-ascend": [
+   "LRA proxy 1.5 dB outside (3, 15) (energy shape)"
+  ],
+  "km-latin-industries": [
+   "clipped hot master: decoded peak +3.17 dBFS"
+  ],
+  "km-level-up": [
+   "clipped hot master: decoded peak +3.26 dBFS"
+  ],
+  "km-lewis-and-dekalb": [
+   "mud: 98% of energy under 150 Hz",
+   "stereo width: side/mid -29.1 dB outside (-24.0, -3.0)"
+  ],
+  "km-loopster": [
+   "LRA proxy 2.2 dB outside (3, 15) (energy shape)"
+  ],
+  "km-maccary-bay": [
+   "LRA proxy 2.1 dB outside (3, 15) (energy shape)",
+   "mud: 91% under 150 Hz"
+  ],
+  "km-magic-forest": [
+   "sits on the voice: 75% of energy at 150 Hz-4 kHz",
+   "stereo width: side/mid -1.4 dB outside (-24.0, -3.0)",
+   "stereo phase: L/R correlation 0.164",
+   "wide low end: side/mid under 150 Hz -2.0 dB"
+  ],
+  "km-man-down": [
+   "LRA proxy 0.9 dB outside (3, 15) (energy shape)"
+  ],
+  "km-manor": [
+   "low bitrate 152 kbps (band-limit proxy)"
+  ],
+  "km-mesmerizing-galaxy": [
+   "LRA proxy 0.5 dB outside (3, 15) (energy shape)"
+  ],
+  "km-miami-viceroy": [
+   "LRA 2.3 LU outside (3.0, 15.0)",
+   "wide low end: side/mid under 150 Hz -4.1 dB",
+   "energy shape: short-term sd 1.2 dB, p10-p90 range 2.46 dB"
+  ],
+  "km-mountain-emperor": [
+   "mud: 88% under 150 Hz"
+  ],
+  "km-movement-proposition": [
+   "LRA proxy 16.8 dB outside (3, 15) (energy shape)",
+   "mud: 87% under 150 Hz"
+  ],
+  "km-naraina": [
+   "LRA proxy 2.9 dB outside (3, 15) (energy shape)"
+  ],
+  "km-newer-wave": [
+   "clipped hot master: decoded peak +3.07 dBFS"
+  ],
+  "km-night-of-chaos": [
+   "loudness -26.09 LUFS outside (-26, -7)"
+  ],
+  "km-northern-glade": [
+   "low bitrate 146 kbps (band-limit proxy)"
+  ],
+  "km-odyssey": [
+   "spectral tilt -11.09 dB/oct outside (-6.0, -1.2)"
+  ],
+  "km-ossuary-6-air": [
+   "mud: 86% under 150 Hz"
+  ],
+  "km-overworld": [
+   "clipped hot master: decoded peak +3.42 dBFS",
+   "LRA proxy 1.6 dB outside (3, 15) (energy shape)"
+  ],
+  "km-port-horizon": [
+   "loudness -26.74 LUFS outside (-26, -7)"
+  ],
+  "km-raving-energy": [
+   "LRA proxy 0.5 dB outside (3, 15) (energy shape)"
+  ],
+  "km-realizer": [
+   "LRA proxy 1.8 dB outside (3, 15) (energy shape)"
+  ],
+  "km-rising-tide-faster": [
+   "LRA proxy 1.4 dB outside (3, 15) (energy shape)"
+  ],
+  "km-scattershot": [
+   "mud: 86% under 150 Hz"
+  ],
+  "km-secrets-of-the-schoolyard": [
+   "clipped hot master: decoded peak +3.17 dBFS",
+   "LRA proxy 1.6 dB outside (3, 15) (energy shape)"
+  ],
+  "km-severe-tire-damage": [
+   "mud: 91% under 150 Hz"
+  ],
+  "km-silver-flame": [
+   "loudness -27.51 LUFS outside (-26, -7)"
+  ],
+  "km-space-1990-b": [
+   "clipped hot master: decoded peak +3.13 dBFS",
+   "mud: 94% under 150 Hz"
+  ],
+  "km-stay-the-course": [
+   "LRA proxy 2.2 dB outside (3, 15) (energy shape)",
+   "mud: 88% under 150 Hz"
+  ],
+  "km-stormfront": [
+   "mud: 88% under 150 Hz"
+  ],
+  "km-symmetry": [
+   "LRA proxy 16.1 dB outside (3, 15) (energy shape)"
+  ],
+  "km-the-escalation": [
+   "loudness -26.04 LUFS outside (-26, -7)",
+   "LRA proxy 19.4 dB outside (3, 15) (energy shape)",
+   "mud: 86% under 150 Hz"
+  ],
+  "km-too-cool": [
+   "mud: 94% of energy under 150 Hz"
+  ],
+  "km-twisted": [
+   "clipped hot master: decoded peak +3.54 dBFS",
+   "LRA proxy 2.3 dB outside (3, 15) (energy shape)",
+   "mud: 92% under 150 Hz"
+  ],
+  "km-tyrant": [
+   "LRA proxy 0.4 dB outside (3, 15) (energy shape)"
+  ],
+  "km-ultralounge": [
+   "mud: 88% under 150 Hz"
+  ],
+  "km-undaunted": [
+   "mud: 87% under 150 Hz"
+  ],
+  "km-unity": [
+   "clipped: 57 pinned samples in a row, 0.076% at full scale",
+   "energy shape: short-term sd 2.31 dB, p10-p90 range 2.54 dB"
+  ],
+  "km-urban-gauntlet": [
+   "clipped hot master: decoded peak +3.39 dBFS",
+   "mud: 96% under 150 Hz"
+  ],
+  "km-vadodora-chill-mix": [
+   "clipped hot master: decoded peak +3.71 dBFS",
+   "mud: 93% under 150 Hz"
+  ],
+  "km-voltaic": [
+   "clipped hot master: decoded peak +3.46 dBFS"
+  ],
+  "km-welcome-to-horrorland": [
+   "mud: 92% under 150 Hz"
+  ],
+  "km-wepa": [
+   "LRA proxy 1.5 dB outside (3, 15) (energy shape)"
+  ],
+  "km-who-likes-to-party": [
+   "LRA proxy 2.2 dB outside (3, 15) (energy shape)"
+  ],
+  "km-yallahs": [
+   "LRA proxy 2.6 dB outside (3, 15) (energy shape)"
+  ],
+  "km-zigzag": [
+   "LRA proxy 2.1 dB outside (3, 15) (energy shape)"
+  ],
+  "sb-a-kind-of-hope": [
+   "LRA proxy 18.6 dB outside (3, 15) (energy shape)"
+  ],
+  "sb-beautiful-oblivion": [
+   "sits on the voice: 76% of energy at 150 Hz-4 kHz"
+  ],
+  "sb-celestial": [
+   "LRA proxy 18.4 dB outside (3, 15) (energy shape)"
+  ],
+  "sb-decoherence": [
+   "LRA 16.1 LU outside (3.0, 15.0)",
+   "sits on the voice: 86% of energy at 150 Hz-4 kHz",
+   "stereo width: side/mid -0.2 dB outside (-24.0, -3.0)",
+   "stereo phase: L/R correlation 0.04",
+   "wide low end: side/mid under 150 Hz -0.7 dB"
+  ],
+  "sb-hour-of-the-witch": [
+   "LRA proxy 18.4 dB outside (3, 15) (energy shape)"
+  ],
+  "sb-incantation": [
+   "LRA proxy 15.1 dB outside (3, 15) (energy shape)"
+  ],
+  "sb-legionnaire-2022-remaster": [
+   "LRA proxy 2.3 dB outside (3, 15) (energy shape)"
+  ],
+  "sb-maleficus": [
+   "LRA proxy 17.5 dB outside (3, 15) (energy shape)"
+  ],
+  "sb-monomyth-the-distant-sun": [
+   "loudness -33.78 LUFS outside (-26, -7)"
+  ],
+  "sb-monomyth-the-fall": [
+   "LRA proxy 21.1 dB outside (3, 15) (energy shape)"
+  ],
+  "sb-monomyth-the-restoration": [
+   "loudness -27.96 LUFS outside (-26, -7)"
+  ],
+  "sb-monomyth-the-spaces-between": [
+   "LRA proxy 15.1 dB outside (3, 15) (energy shape)"
+  ],
+  "sb-monomyth-the-things-that-keep-us-here": [
+   "loudness -26.76 LUFS outside (-26, -7)",
+   "LRA proxy 16.4 dB outside (3, 15) (energy shape)"
+  ],
+  "sb-monomyth-the-vision": [
+   "loudness -27.7 LUFS outside (-26, -7)"
+  ],
+  "sb-petrichor": [
+   "LRA proxy 20.5 dB outside (3, 15) (energy shape)"
+  ],
+  "sb-phase-shift": [
+   "LRA proxy 15.8 dB outside (3, 15) (energy shape)"
+  ],
+  "sb-precipice": [
+   "LRA proxy 15.4 dB outside (3, 15) (energy shape)"
+  ],
+  "sb-resolutions": [
+   "LRA proxy 15.7 dB outside (3, 15) (energy shape)"
+  ],
+  "sb-rise-above": [
+   "LRA proxy 16.7 dB outside (3, 15) (energy shape)"
+  ],
+  "sb-tears-in-rain": [
+   "LRA proxy 15.6 dB outside (3, 15) (energy shape)",
+   "mud: 86% under 150 Hz"
+  ],
+  "sb-where-stars-fall": [
+   "stereo width: side/mid -0.7 dB outside (-24.0, -3.0)",
+   "stereo phase: L/R correlation 0.08",
+   "wide low end: side/mid under 150 Hz -1.0 dB"
+  ],
+  "sb-with-these-hands": [
+   "LRA proxy 16.3 dB outside (3, 15) (energy shape)"
+  ]
+ }
+}

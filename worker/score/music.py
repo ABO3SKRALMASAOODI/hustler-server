@@ -474,6 +474,9 @@ def arrange(song, marks, profile=None):
             s["role"] = "open" if i == first_full else "groove"
         s["sp"] = _spoken_share(words, max(s["t0"], 0.0), s["t1"])
         s["quiet"] = any(min(s["t1"], q1) - max(s["t0"], q0) > 0.5 * (s["t1"] - s["t0"]) for q0, q1 in quiet)
+    open_s = marks.get("open_s")
+    open_near = (np.array([abs(float(b["t0"]) - float(open_s)) <= 0.5 * B for b in bars], np.float64)
+                 if open_s is not None else None)
     vfree = voc < VOICED
     has_free = vfree.sum() >= 4
     lowp = np.maximum(0.45 - en, 0.0) / 0.45
@@ -503,6 +506,8 @@ def arrange(song, marks, profile=None):
                 c = 1.0 * np.maximum(tgt - en, 0.0) + 2.5 * intro + 2.0 * lowp + vp   # never the intro, never a flat stretch
             if role == "open":
                 c = c - 0.5 * (entry | (F["sec_start"] & (en >= 0.6))) - 0.25 * hitn  # the film opens on an entrance
+                if open_near is not None:
+                    c = c - 1.0 * open_near                    # the chooser's entry point into this song, when it named one
         return c * (s["beats"] / 4.0) if s["part"] != "full" and role not in ("drop",) else c
 
     sim = np.clip(np.asarray(song["sim"], np.float64), 0.0, 1.0)
@@ -1169,7 +1174,7 @@ def voice_spans_of(l1, work):
 
 
 def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind="stories", index=None, prog_end_f=None, payoff_s=None, supplied=True,
-        sung=None):
+        sung=None, open_s=None):
     """A compiled film's sound with a song under it: the voice and the designed sounds as the engine mixes them
     (scene.audio), the song arranged and levelled here, one master at -14 LUFS. With `film` and `out` the picture is
     copied and the new sound laid on it. The film without the song is the engine's own render: nothing here touches
@@ -1181,6 +1186,8 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
         index = json.load(open(os.path.join(work, "index.json")))
     src = _source(l1, work)
     marks = marks_from_l1(l1, index, turn_s=turn_s, prog_end_f=prog_end_f, payoff_s=payoff_s)
+    if open_s is not None:
+        marks["open_s"] = float(open_s)               # the chooser's entry point into the song (a drop, a re-entry, its top)
     voice, _fx0, _ = AU.split_audio(_Plan(dict(l1, sound=[]), src))
     if not marks["words"]:                            # no word times came with the film: its voice says where it speaks
         marks["words"] = [(a, b) for a, b in voice_spans(voice) if a < marks["dur_s"]]

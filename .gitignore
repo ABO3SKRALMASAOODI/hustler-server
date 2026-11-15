@@ -28,3 +28,17 @@ tiktok_sessions/
 tiktok_state/
 _to_delete/
 backend/backend/
+
+# ---- music: the audio never enters this public repository (15 Nov 2026) ----
+# The reference music set lives only on the owner's Mac (.valmera/models/music_ref,
+# read through $VALMERA_MUSIC_SET); the library keeps metadata here and its audio in storage.
+music_ref/
+**/music_ref/
+worker/music_library/**/*.mp3
+worker/music_library/**/*.m4a
+worker/music_library/**/*.wav
+worker/music_library/**/*.flac
+worker/music_library/**/*.ogg
+worker/music_library/**/*.aac
+worker/music_library/**/*.opus
+**/music_cache/

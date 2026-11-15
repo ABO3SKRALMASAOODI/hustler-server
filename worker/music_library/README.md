@@ -15,6 +15,13 @@ decides whether to keep it, and the clean export without it is always kept.
   per reference, tempo band, minor share, level under the voice (K-weighted and plain RMS), lift in the voice's
   gaps, energy shape, rises / drops / stops per minute, what the music does at each kind of story turn, endings.
 - `LICENSES.md`: every track's licence and credit line.
+- `gate.json` (15 Nov 2026): every track's verdict on the signal gate against the @metromedia.house music beds (lane
+  MUSIC-SET, `.valmera/week-1112/lanes/MUSIC-SET/tools/gate.py`): `pass` (full gate), `fail` (with its reasons; such a
+  track is never chosen again, anywhere) and `provisional` (passed the partial measures only). The workflow films take
+  only `pass` tracks, after the reference music set.
+- The reference music set is NOT here: its audio and `index.json` live only on the owner's Mac
+  (`.valmera/models/music_ref`, read through `VALMERA_MUSIC_SET`). This repository is public: no audio file of either
+  is ever committed (`.gitignore`, `worker/tests/test_music_ref_set.py`).
 
 Code: `worker/music_choose.py` (the chooser; read its module doc). Study and build tools:
 `.valmera/week-1112/lanes/MUSIC/tools/`. Notes: `.valmera/week-1112/notes/MUSIC.md`.
