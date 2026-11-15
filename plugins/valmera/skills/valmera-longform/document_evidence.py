@@ -6,28 +6,42 @@ import hashlib,json
 from contextlib import closing
 
 
+def discovery_key(gaps):
+    return hashlib.sha256(json.dumps(gaps,sort_keys=True).encode()).hexdigest()[:16]
+
+
+def figure_base(root,doc,page):
+    return Path(root)/('d'+hashlib.sha256(doc['url'].encode()).hexdigest()[:16]+'-p'+str(page))
+
+
 def supply(ctx,script,ft,gaps):
-    import requests,pypdfium2 as pdfium
+    import pypdfium2 as pdfium
+    from evidence_web import download
     import cinema as C
     from wf4 import story
     from footage import ask
     root=Path(ctx.supply)/'evidence-documents';root.mkdir(exist_ok=True)
-    discovery=root/'discovery.json'
+    # A later uncovered mechanism may need a different primary report. The
+    # first search's three documents must not become a permanent whitelist.
+    discovery=root/('discovery-'+discovery_key(gaps)+'.json')
+    known={d['url']:d for p in root.glob('discovery*.json') for d in C.read(p).get('documents',[])}
     if discovery.exists():docs=C.read(discovery)['documents']
     else:
         text,usage=story.writer.ask_web('Research original public-domain or openly licensed technical reports with diagrams or archival photographs '
             'that can literally illustrate these documentary narration gaps. Find at most three downloadable PDF URLs from primary archives. '
-            'No modern invented reconstructions or unrelated technical manuals. Verify the title and licence. Return JSON '
-            '{documents:[{url,title,credit,licence,licence_url}]}.',json.dumps(dict(title=script['title'],gaps=gaps,facts=script['dossier']['facts'])),
+            'No modern invented reconstructions or unrelated technical manuals. Previous reports did not resolve these exact remaining gaps; '
+            'research other directly relevant primary reports, or a specific overlooked figure in a known report. '
+            'Verify the title and licence. Return JSON {documents:[{url,title,credit,licence,licence_url}]}.',
+            json.dumps(dict(title=script['title'],gaps=gaps,facts=script['dossier']['facts'],previous_reports=list(known.values()))),
             searches=6,effort='high',max_tokens=3000,what='WF4 original technical evidence')
         data=story.writer.json_block(text);data['usage']=usage;C.save(discovery,data);docs=data['documents']
     pages=[];files={}
     for di,doc in enumerate(docs):
         key=hashlib.sha256(doc['url'].encode()).hexdigest()[:16];path=root/(key+'.pdf')
         if not path.exists():
-            response=requests.get(doc['url'],timeout=90);response.raise_for_status()
-            if len(response.content)>50_000_000:raise ValueError('technical report exceeds 50 MB budget')
-            path.write_bytes(response.content)
+            content=download(doc['url'])
+            if len(content)>50_000_000:raise ValueError('technical report exceeds 50 MB budget')
+            path.write_bytes(content)
         files[di]=path
         with pdfium.PdfDocument(path) as pdf:
             for pi in range(min(len(pdf),300)):
@@ -49,7 +63,7 @@ def supply(ctx,script,ft,gaps):
         di,pi=int(row['document']),int(row['page']);doc=docs[di]
         wanted={i:valid_lines[i] for i in row['lines'] if i in valid_lines}
         request_hash=hashlib.sha256(json.dumps(wanted,sort_keys=True).encode()).hexdigest()[:12]
-        base=root/f'd{di}-p{pi}';preview=base.with_suffix('.jpg');verdict=root/(base.name+'-v3-'+request_hash+'.json')
+        base=figure_base(root,doc,pi);preview=base.with_suffix('.jpg');verdict=root/(base.name+'-v3-'+request_hash+'.json')
         with pdfium.PdfDocument(files[di]) as pdf:
             with closing(pdf[pi]) as page:
                 if not preview.exists():page.render(scale=1.5).to_pil().convert('RGB').save(preview,quality=90)

@@ -225,6 +225,12 @@ def test_source_verdict_cache_binds_words_and_original_bytes(tmp_path,monkeypatc
     assert calls==[1,1,1]
 
 
+def test_later_document_gap_can_find_a_new_report_without_page_cache_collision(tmp_path):
+    import document_evidence as D
+    assert D.discovery_key([dict(seg=1,heard='Shade.')])!=D.discovery_key([dict(seg=2,heard='Docking.')])
+    assert D.figure_base(tmp_path,dict(url='https://archive.test/first.pdf'),12)!=D.figure_base(tmp_path,dict(url='https://archive.test/second.pdf'),12)
+
+
 def test_archive_revision_preserves_prior_read_and_resumes_without_erasing_new_audio(tmp_path):
     from types import SimpleNamespace
     import archive_script as A
