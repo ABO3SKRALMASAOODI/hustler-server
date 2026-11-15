@@ -158,10 +158,10 @@ def prepare(ctx,script,ft):
     root=work_dir(ctx,proposal,catalogue);marker=root/'applied.json'
     if marker.exists():return
     # A resumed, recorded edit has a more precise word clock than preflight.
-    # Validate that actual edit before considering a provisional-clock redo;
+    # Resume its actual-clock repairs instead of a provisional-clock redo;
     # otherwise a planner update can overwrite later, checked picture repairs.
     if recorded_edit_ready(ctx,script,ft):
-        C.save(marker,dict(words_unchanged=True,planning=False,verified_on_recorded_clock=True))
+        C.save(marker,dict(words_unchanged=True,planning=False,recorded_clock_ready=True))
         return
     revised=refine(ctx,proposal,catalogue)
     apply_choices(script,ft,revised,catalogue)
@@ -171,6 +171,7 @@ def prepare(ctx,script,ft):
 
 def recorded_edit_ready(ctx,script,ft):
     import cinema as C
+    if not ft.get('editorial',{}).get('pins'):return False
     nd=Path(ctx.supply)/'narration'
     stage=nd/'read-stage.json';gate=nd/'check.json'
     if not stage.exists() or not gate.exists():return False
@@ -181,4 +182,6 @@ def recorded_edit_ready(ctx,script,ft):
     if not clock.exists():return False
     try:shots,_,_=C.schedule(script['script'],str(clock),ft)
     except C.CoverageError:return False
-    return C.source_review(ctx,shots,required=False)['ok']
+    # supply() immediately runs timeline_repair and the mandatory source
+    # gate on this clock, including any failed or changed pairings.
+    return True

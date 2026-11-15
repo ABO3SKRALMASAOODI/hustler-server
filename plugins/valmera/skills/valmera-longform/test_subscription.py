@@ -64,7 +64,7 @@ def test_review_cache_keeps_semantics_and_ignores_only_concurrency():
     assert checker_bytes(text.replace('(lo+hi)/2','lo+(hi-lo)*.4')) != checker_bytes(text)
 
 
-def test_recorded_edit_requires_same_words_and_actual_clock_review(tmp_path,monkeypatch):
+def test_recorded_edit_requires_same_words_pins_and_complete_clock(tmp_path,monkeypatch):
     import archive_visual as A
     import cinema as C
     ctx=SimpleNamespace(supply=str(tmp_path))
@@ -74,11 +74,13 @@ def test_recorded_edit_requires_same_words_and_actual_clock_review(tmp_path,monk
     C.save(nd/'words.json',{'duration':20})
     monkeypatch.setattr(C.wf4.story,'narration_script',lambda s:{'words':s['words']})
     calls=[]
-    monkeypatch.setattr(C,'schedule',lambda *a:([{'say':'same'}],None,None))
-    monkeypatch.setattr(C,'source_review',lambda *a,**k:calls.append(a) or {'ok':False})
-    assert not A.recorded_edit_ready(ctx,{'script':{'words':'changed'}},{})
-    assert not calls
+    monkeypatch.setattr(C,'schedule',lambda *a:calls.append(a) or ([{'say':'same'}],None,None))
+    ft={'editorial':{'pins':[{'previously_checked':True}]}}
+    assert not A.recorded_edit_ready(ctx,{'script':{'words':'changed'}},ft)
     assert not A.recorded_edit_ready(ctx,{'script':{'words':'same'}},{})
+    assert not calls
+    assert A.recorded_edit_ready(ctx,{'script':{'words':'same'}},ft)
     assert len(calls)==1
-    monkeypatch.setattr(C,'source_review',lambda *a,**k:{'ok':True})
-    assert A.recorded_edit_ready(ctx,{'script':{'words':'same'}},{})
+    def uncovered(*a):raise C.CoverageError([],[])
+    monkeypatch.setattr(C,'schedule',uncovered)
+    assert not A.recorded_edit_ready(ctx,{'script':{'words':'same'}},ft)
