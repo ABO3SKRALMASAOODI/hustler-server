@@ -70,25 +70,47 @@ def alert_key():
     return "openai_credit_out:" + time.strftime("%Y-%m", time.gmtime())
 
 
+def _queue_alert(key, subject, html):
+    """True once the alert row is durably in trial_alerts: inserted now, or already there from
+    another process (the dedupe key is shared). False or an exception: not confirmed."""
+    import claude_trial
+
+    def queue(conn):
+        if claude_trial.queue_alert(conn, key, "openai_credit", subject, html):
+            return True
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.trial_alerts') AS t")
+            if not claude_trial._v(cur.fetchone(), "t", 0):
+                return False
+            cur.execute("SELECT 1 FROM trial_alerts WHERE dedupe_key = %s", (key,))
+            return cur.fetchone() is not None
+    return bool(claude_trial._metering_db().run(queue))   # run() commits before it returns
+
+
 def _alert(where, detail):
+    """One admin alert per outage month. Marked sent only after the queue insert is confirmed
+    (15 Nov 2026: it was marked first, so one failed insert silenced the month); an unconfirmed
+    alert is tried again at the next refusal."""
     key = alert_key()
     if key in _alerted:
         return
-    _alerted.add(key)
     try:
-        import claude_trial
-        claude_trial._alert(
-            key, "openai_credit",
-            "OpenAI API credit is out: fallbacks are answering",
-            "<p>OpenAI refused a call for credit "
-            f"(first seen in <b>{where}</b>). Every OpenAI role now runs its fallback: transcription on "
-            "the box's local faster-whisper, picture checks on Haiku where a wrong picture could "
-            "reach a customer, optional checks skipped, the concierge and greetings on Haiku or "
-            "their plain reply, checkout never blocked. OpenAI is re-tried every "
-            f"{int(latch_s() // 60)} minutes and comes back by itself when the credit is refilled."
-            f"</p><p>Provider said: {str(detail)[:300]}</p>")
-    except Exception:  # noqa: BLE001 - an alert never breaks a call
-        pass
+        if _queue_alert(
+                key, "OpenAI API credit is out: fallbacks are answering",
+                "<p>OpenAI refused a call for credit "
+                f"(first seen in <b>{where}</b>). Every OpenAI role now runs its fallback: transcription on "
+                "the box's local faster-whisper, picture checks on Haiku where a wrong picture could "
+                "reach a customer, optional checks skipped, the concierge and greetings on Haiku or "
+                "their plain reply, checkout never blocked. OpenAI is re-tried every "
+                f"{int(latch_s() // 60)} minutes and comes back by itself when the credit is refilled."
+                f"</p><p>Provider said: {str(detail)[:300].replace('<', '&lt;')}</p>"):
+            _alerted.add(key)
+        else:
+            print(f"[openai-credit] alert not confirmed ({key}); retried at the next refusal",
+                  flush=True)
+    except Exception as exc:  # noqa: BLE001 - an alert never breaks a call
+        print(f"[openai-credit] alert not queued ({key}): {type(exc).__name__}: "
+              f"{str(exc)[:120]}", flush=True)
 
 
 def trip(where, detail=""):

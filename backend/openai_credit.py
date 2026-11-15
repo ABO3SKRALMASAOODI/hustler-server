@@ -52,7 +52,6 @@ def _alert(where, detail):
     key = alert_key()
     if key in _alerted:
         return
-    _alerted.add(key)
     try:
         from claude_trial import _connect
         conn = _connect()
@@ -61,6 +60,7 @@ def _alert(where, detail):
                 cur.execute("SELECT to_regclass('public.trial_alerts') AS t")
                 row = cur.fetchone()
                 if not (row.get("t") if isinstance(row, dict) else row[0]):
+                    print("[openai-credit] alert not queued: no trial_alerts table", flush=True)
                     return
                 cur.execute(
                     """INSERT INTO trial_alerts (dedupe_key, kind, subject, html_content)
@@ -74,6 +74,9 @@ def _alert(where, detail):
                      "the credit is refilled.</p><p>Provider said: %s</p>"
                      % (where, int(latch_s() // 60), str(detail)[:300].replace("<", "&lt;"))))
             conn.commit()
+            # Marked sent only after the insert is committed (inserted now, or already queued by
+            # another process under the shared key): a failed insert is tried again next refusal.
+            _alerted.add(key)
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 - an alert never breaks a request

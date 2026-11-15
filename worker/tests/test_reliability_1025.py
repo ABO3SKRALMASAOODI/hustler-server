@@ -367,13 +367,36 @@ def test_an_empty_wallet_alarms_the_owner_once_per_window(monkeypatch):
     monkeypatch.setattr(llm, "_quota_last", {})
     exc = RuntimeError('responses HTTP 429: {"error": {"message": "You have '
                        'no credits remaining", "code": "insufficient_quota"}}')
-    assert llm.note_quota_error(exc, "gpt-6-luna", "https://api.openai.com/v1")
-    assert llm.note_quota_error(exc, "gpt-6-luna", "https://api.openai.com/v1")
+    assert llm.note_quota_error(exc, "grok-4.5", "https://api.x.ai/v1")
+    assert llm.note_quota_error(exc, "grok-4.5", "https://api.x.ai/v1")
     assert len(noted) == 1
     fn, args, kw = noted[0]
     assert fn is dbx.note_owner_alarm and args[0] == "llm_balance"
-    assert "api.openai.com" in args[1] and kw["provider"] == "api.openai.com"
+    assert "api.x.ai" in args[1] and kw["provider"] == "api.x.ai"
     assert not llm.note_quota_error(RuntimeError("HTTP 429 rate limit"))
+
+
+def test_an_empty_openai_wallet_alerts_once_through_the_credit_gate_only(monkeypatch):
+    """15 Nov 2026: OpenAI's outage has one alert (openai_credit, trial_alerts). The older
+    llm_balance owner alarm said the same thing for the same outage and is no longer written."""
+    import openai_credit
+    noted, tripped = [], []
+
+    class Probe:
+        def run(self, fn, *args, **kw):
+            noted.append((fn, args, kw))
+
+        def reset(self):
+            pass
+    monkeypatch.setattr(dbx, "Db", Probe)
+    monkeypatch.setattr(llm, "_quota_last", {})
+    monkeypatch.setattr(openai_credit, "trip", lambda where, detail="": tripped.append(where))
+    exc = RuntimeError('responses HTTP 429: {"error": {"message": "You have '
+                       'no credits remaining", "code": "insufficient_quota"}}')
+    assert llm.note_quota_error(exc, "gpt-6-luna", "https://api.openai.com/v1")
+    assert llm.note_quota_error(exc, "gpt-6-luna", "https://api.openai.com/v1")
+    assert noted == []
+    assert tripped == ["llm:gpt-6-luna", "llm:gpt-6-luna"]
 
 
 def test_paying_users_fail_over_only_to_an_explicit_second_wallet(monkeypatch):

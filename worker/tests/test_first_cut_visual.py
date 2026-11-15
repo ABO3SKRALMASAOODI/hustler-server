@@ -4,6 +4,7 @@ trial accounts and NEW subscribers only)."""
 from types import SimpleNamespace as NS
 
 import numpy as np
+import pytest
 
 import agent_tools
 import claude_plans
@@ -427,6 +428,8 @@ def test_off_topic_cutaways_are_removed_after_one_look(monkeypatch, tmp_path):
         {"id": "br2", "type": "broll", "start": 9.0, "end": 11.0,
          "media": "still", "source": {"asset_key": "a/2.jpg"}}]
     monkeypatch.setattr(fcv.first_cut_models, "available", lambda model: True)
+    monkeypatch.setattr(__import__("config"), "OPENAI_API_KEY", "",
+                        raising=False)            # no OpenAI key: the Claude lane's check
     monkeypatch.setattr(media_cache, "lease",
                         lambda key, d, name: str(tmp_path / name))
     monkeypatch.setattr(sp, "run", lambda *a, **k: NS(stdout=b"\xff\xd8jpg"))
@@ -434,7 +437,7 @@ def test_off_topic_cutaways_are_removed_after_one_look(monkeypatch, tmp_path):
 
     def create(model, messages, **kw):
         seen["n"] = sum(1 for p in messages[1]["content"]
-                        if p["type"] == "image_url")
+                        if p["type"] == "image")
         return NS(choices=[NS(message=NS(content='{"keep": [1], "drop": [2]}'))],
                   usage=NS(provider_cost_usd=0.002))
     monkeypatch.setattr(claude_lane, "create", create)
@@ -612,13 +615,18 @@ def test_dense_first_film_cutaways_respect_tool_batch_limit(monkeypatch):
 
 
 def test_video_checker_sees_only_played_interval_and_requires_explicit_approval(monkeypatch, tmp_path):
-    import claude_lane, media_cache
+    """The check names gpt-6-sol, so it goes to OpenAI through score.call (never claude_lane)."""
+    import claude_lane, config, media_cache
+    from score import call
     ctx = _EdlCtx(_talk_index())
     ctx.workdir = str(tmp_path)
     item = {'id': 'br1', 'type': 'broll', 'start': 4., 'end': 4.5,
             'media': 'video', 'source': {'asset_key': 'a/clip.mp4', 'offset_s': 9.}}
+    monkeypatch.setattr(config, 'OPENAI_API_KEY', 'sk-test', raising=False)
     monkeypatch.setattr(fcv.first_cut_models, 'available', lambda model: True)
     monkeypatch.setattr(media_cache, 'lease', lambda *a: 'clip.mp4')
+    monkeypatch.setattr(claude_lane, 'create',
+                        lambda *a, **k: pytest.fail('the OpenAI check reached the Claude lane'))
     seeks = []
     def grab(argv, **kw):
         seeks.append(float(argv[argv.index('-ss')+1]))
@@ -630,15 +638,16 @@ def test_video_checker_sees_only_played_interval_and_requires_explicit_approval(
                             ('{"keep":[1],"drop":[1]}', []),
                             ('{"keep":[1]}', [(4.,4.5)])]:
         ctx.edl['fx'] = [dict(item)]
-        def call(model, messages, **kw):
-            assert model == 'gpt-6-sol'
-            assert sum(p['type']=='image_url' for p in messages[1]['content']) == 3
-            return NS(choices=[NS(message=NS(content=reply))], usage=NS(provider_cost_usd=0))
-        monkeypatch.setattr(claude_lane, 'create', call)
+        def stream(model, system, content, **kw):
+            assert model == 'gpt-6-sol' and kw['purpose'] == 'first_cut_broll_check'
+            assert sum(p['type'] == 'image' for p in content) == 3
+            return call.Result(reply, None, 'end_turn', 0.1, 0.2, 0.0)
+        monkeypatch.setattr(call, 'stream', stream)
         assert fcv.verify_broll(ctx, [], 0, run, {'usd':0}) == expected
     assert len(seeks) == 15 and min(seeks) >= 9 and max(seeks) < 9.5
     def unavailable(*a, **kw):
         raise RuntimeError('quota unavailable')
+    monkeypatch.setattr(call, 'stream', unavailable)
     monkeypatch.setattr(claude_lane, 'create', unavailable)
     ctx.edl['fx'] = [dict(item)]
     assert fcv.verify_broll(ctx, [], 0, run, {'usd':0}) == []

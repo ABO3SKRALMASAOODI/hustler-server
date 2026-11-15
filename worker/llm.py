@@ -123,13 +123,12 @@ def note_quota_error(exc, model=None, base_url=None):
         return False
     host = _host(base_url or config.OPENAI_BASE_URL) or "provider"
     if host == "api.openai.com":
-        # The OpenAI credit gate latches every OpenAI role and alerts once (openai_credit); the
-        # owner alarm below is written for the first refusal only, not for every re-probe.
+        # The OpenAI credit gate latches every OpenAI role and queues the outage's one admin alert
+        # (openai_credit, trial_alerts). The older llm_balance owner alarm below said the same thing
+        # for the same outage, so OpenAI no longer writes it; other providers still do.
         import openai_credit
-        already = openai_credit.alert_key() in openai_credit._alerted
         openai_credit.trip("llm:" + str(model or "call"), exc)
-        if already:
-            return True
+        return True
     now = time.monotonic()
     with _quota_lock:
         if now - _quota_last.get(host, -1e9) < QUOTA_ALARM_THROTTLE_S:
@@ -1911,6 +1910,45 @@ def openai_out_lane(purpose):
         return None
 
 
+def sdk_would_retry(exc):
+    """Would the OpenAI SDK have retried this failure? The same rule (its x-should-retry header,
+    then 408/409/429/5xx and connection errors), minus every wallet refusal, which waiting does not
+    refill. Used where the SDK's own retries are off so a credit refusal is one request."""
+    if openai_budget_stop(exc) or is_quota_error(exc):
+        return False
+    import openai_credit
+    if openai_credit.is_credit_refusal(exc):
+        return False
+    try:
+        hint = getattr(getattr(exc, "response", None), "headers", {}).get("x-should-retry")
+    except Exception:  # noqa: BLE001
+        hint = None
+    if hint == "false":
+        return False
+    if hint == "true":
+        return True
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status in (408, 409, 429) or status >= 500
+    try:
+        import openai as _openai
+        return isinstance(exc, _openai.APIConnectionError)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def openai_budget_stop(exc):
+    return isinstance(exc, getattr(openai_budget, "OverBudget", ()))
+
+
+def transient_retry_wait(exc, attempt):
+    """The SDK's backoff (0.5 s doubling to 8 s), or the provider's named wait up to 60 s."""
+    hinted = retry_after_seconds(exc)
+    if hinted is not None and 0 < hinted <= 60:
+        return float(hinted)
+    return min(8.0, 0.5 * (2 ** (attempt - 1)))
+
+
 def create_with_dialect(client_obj, model, messages, max_tokens=None,
                         temperature=None, **extra):
     """chat.completions.create with automatic parameter-dialect adaptation.
@@ -1920,9 +1958,18 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
     A call bound for OpenAI while its credit is out raises openai_credit.CreditOut at once (no
     request sent), and a credit refusal latches every OpenAI role (worker/openai_credit.py)."""
     import openai_credit
+    if is_openai_client(client_obj) and str(model or "").startswith("claude-"):
+        # api.openai.com serves no Claude id: a 404 after a paid round trip. Refused before sending.
+        raise ValueError(f"{model!r} is a Claude model; it is not sent to api.openai.com")
     openai_bound = is_openai_client(client_obj) and not str(model or "").startswith("claude-")
     if openai_bound:
         openai_credit.check("llm:" + str(model))
+        # One request per attempt. The SDK's own retries (LLM_MAX_RETRIES) re-sent a credit
+        # refusal five more times before openai_credit saw it (15 Nov 2026: a re-probe was six
+        # requests, ~16 s on a customer's call). Transient failures are retried below instead,
+        # and a credit refusal never is.
+        client_obj = without_sdk_retries(client_obj)
+    transient = 0
     purpose = extra.pop("cache_role", "editor")
     if extra.get("tools") and str(model).startswith("gpt-"):
         extra["tools"] = openai_cache.stable_tools(extra["tools"])
@@ -1960,6 +2007,11 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
         except Exception as e:
             if openai_bound and openai_credit.note(e, "llm:" + str(model)):
                 raise openai_credit.CreditOut(str(e)[:300]) from e
+            if openai_bound and transient < int(config.LLM_MAX_RETRIES) \
+                    and sdk_would_retry(e):
+                transient += 1
+                time.sleep(transient_retry_wait(e, transient))
+                continue
             attempts += 1
             if attempts > 3:
                 raise

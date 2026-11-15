@@ -3507,6 +3507,26 @@ def _message_text(worker_db, message_id):
         return None
 
 
+def bound_to_source_screen(ctx, index_row, workdir):
+    """Bound the first film to the source's reviewed picture (source_screen). When no model can
+    review it (source_screen.Unavailable, recorded in llm_calls by build) the first film is cut
+    from the whole source, as before the review existed: never left waiting, never failed."""
+    import source_screen
+    if not ctx.index.get("source_screen"):
+        v = ctx.index["video"]
+        try:
+            ctx.index["source_screen"] = source_screen.build(
+                ctx.proxy_path(), v["duration"], v["fps"], ctx.index.get("shots"),
+                (index_row or {}).get("video_sha256", ""), workdir, llm.get_recorder())
+        except source_screen.Unavailable as exc:
+            print(f"[first_cut] {source_screen.UNREVIEWED}: {exc}", flush=True)
+            return False
+    ctx.index = source_screen.first_film_index(ctx.index)
+    ctx.duration = ctx.index["video"]["duration"]
+    source_screen.clear_start_state(ctx)
+    return True
+
+
 def run(worker_db, job, project, index_row):
     """Run one First cut. Returns the agent_turn result dict."""
     payload = job.get("payload") or {}
@@ -3526,15 +3546,7 @@ def run(worker_db, job, project, index_row):
     ctx.credit_budget = None
     ctx.first_cut_db, ctx.first_cut_session = worker_db, session_id
     if getattr(ctx, "index", None) and not payload.get("url"):
-        import source_screen
-        if not ctx.index.get("source_screen"):
-            v = ctx.index["video"]
-            ctx.index["source_screen"] = source_screen.build(
-                ctx.proxy_path(), v["duration"], v["fps"], ctx.index.get("shots"),
-                index_row.get("video_sha256", ""), workdir, llm.get_recorder())
-        ctx.index = source_screen.first_film_index(ctx.index)
-        ctx.duration = ctx.index["video"]["duration"]
-        source_screen.clear_start_state(ctx)
+        bound_to_source_screen(ctx, index_row, workdir)
     try:
         start_edl = ctx.latest_edl()
     except Exception:

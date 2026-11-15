@@ -173,6 +173,11 @@ class ClaudeLaneUnavailable(RuntimeError):
     ("credit balance") so every caller treats it as a wallet problem."""
 
 
+class ClaudeLaneWrongModel(ValueError):
+    """A model id Anthropic does not serve (not claude-*, not an edit-rung model): refused
+    before any request. Not a wallet problem, so it never latches the lane or alarms."""
+
+
 class TrialBudgetSpent(ClaudeLaneUnavailable):
     """ONE trial account's own budget is spent (claude_trial.guard_call).
     Callers still see a lane refusal (plan cards, no raw error), but it is a
@@ -821,6 +826,13 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
                                        tool_choice=tool_choice, timeout=timeout,
                                        cache_policy=cache_policy,
                                        tool_plan=tool_plan))
+    if not is_claude_model(model):
+        # Anthropic serves only Claude ids: anything else is a 404 not_found_error after a paid
+        # round trip (15 Nov 2026: gpt-6-sol sent here removed every first-film cutaway). Say so
+        # before sending; the caller's fallback answers.
+        raise ClaudeLaneWrongModel(
+            f"{model!r} is not a Claude model and not an edit-rung model; the Claude lane "
+            "does not send it to Anthropic")
     if not configured():
         raise ClaudeLaneUnavailable(
             "Claude lane is not configured (no ANTHROPIC_API_KEY): no credit "

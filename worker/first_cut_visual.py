@@ -301,19 +301,58 @@ _BROLL_CHECK = (
     "Answer JSON only: {\"keep\": [<picture numbers>], \"drop\": [<picture numbers>]}." )
 
 
+# The first film's picture check (verify_broll). An OpenAI model, so it is sent to OpenAI through
+# score.call's OpenAI rung (score/call_openai.py), never to Anthropic: from 13 Nov to 15 Nov 2026 this
+# id went through claude_lane.create, Anthropic answered 404 not_found_error, and every cutaway of a
+# paying customer's first film was removed while OpenAI was funded. When OpenAI cannot answer (out of
+# credit, latched, no key, or any failure of that call) the same check runs on the Claude lane's
+# fallback model (claude-haiku-5-5). Only when neither answers are the unchecked pictures removed.
+BROLL_CHECK_MODEL = "gpt-6-sol"
+BROLL_CHECK_S = 120.0
+
+
+def _broll_check_openai(parts, spend):
+    """The check's answer from OpenAI, or None when OpenAI is not reachable for it."""
+    import config
+    import openai_credit
+    from score import call
+    if not (config.OPENAI_API_KEY and openai_credit.available()):
+        return None
+    import time
+    try:
+        r = call.stream(BROLL_CHECK_MODEL, _BROLL_CHECK, parts, max_tokens=2000, effort="low",
+                        purpose="first_cut_broll_check", thinking=False,
+                        deadline=time.monotonic() + BROLL_CHECK_S)
+    except Exception as exc:  # noqa: BLE001 - the Claude lane checks instead (its own fence)
+        print(f"[first_cut] b-roll check on {BROLL_CHECK_MODEL} unavailable "
+              f"({type(exc).__name__}: {str(exc)[:120]}); checking on the Claude lane", flush=True)
+        return None
+    spend["usd"] += float(r.usd or 0)
+    return r.text or ""
+
+
+def _broll_check_claude(parts, spend, pictures):
+    """The check's answer from the Claude lane's fallback model. Raises when the lane is closed."""
+    import claude_lane
+    import edit_rung
+    import llm
+    model = edit_rung.fallback_model()
+    if not (claude_lane.is_claude_model(model) and first_cut_models.available(model)):
+        raise RuntimeError("picture verifier unavailable")
+    resp = claude_lane.create(
+        model, [{"role": "system", "content": _BROLL_CHECK},
+                {"role": "user", "content": parts}], max_tokens=2000, effort="low")
+    text = resp.choices[0].message.content or ""
+    spend["usd"] += float(getattr(resp.usage, "provider_cost_usd", 0) or 0)
+    llm.record("first_cut_broll_check", {"model": model, "pictures": pictures},
+               {"content": text}, resp.usage)
+    return text
+
+
 def verify_broll(ctx, steps, started, run, spend):
     """Keep only explicitly approved actual intervals; unavailable checks fail closed."""
-    import claude_lane
     import device_planner
-    import llm
     import media_cache
-    model = "gpt-6-sol"
-    import openai_credit
-    if not openai_credit.available():
-        # OpenAI out of credit (worker/openai_credit.py): Haiku checks the pictures, so the first
-        # film keeps the ones it approves instead of losing every cutaway to a closed check.
-        import edit_rung
-        model = edit_rung.fallback_model()
     edl = ctx.latest_edl()["json"]
     items = [it for it in edl.get("fx") or [] if isinstance(it, dict)
              and it.get("type") == "broll" and it.get("start") is not None]
@@ -321,8 +360,6 @@ def verify_broll(ctx, steps, started, run, spend):
         return []
     approved, ids, parts = set(), {}, []
     try:
-        if not first_cut_models.available(model):
-            raise RuntimeError("picture verifier unavailable")
         words = device_planner.program_words(edl, ctx.index or {})
         for n, it in enumerate(items, 1):
             key = (it.get("source") or {}).get("asset_key")
@@ -344,8 +381,9 @@ def verify_broll(ctx, steps, started, run, spend):
                         capture_output=True, timeout=30)
                     if not result.stdout:
                         raise ValueError("missing picture frame")
-                    pictures.append({"type": "image_url", "image_url": {
-                        "url": "data:image/jpeg;base64," + base64.b64encode(result.stdout).decode()}})
+                    pictures.append({"type": "image", "source": {
+                        "type": "base64", "media_type": "image/jpeg",
+                        "data": base64.b64encode(result.stdout).decode()}})
                 said = " ".join(str(w.get("w") or "") for w in words
                                 if a-1.2 <= float(w["t0"]) <= b+.3)
                 parts.append({"type": "text", "text": f"Picture {n}, words: {said[:300]}"})
@@ -354,13 +392,9 @@ def verify_broll(ctx, steps, started, run, spend):
             except Exception as exc:
                 print(f"[first_cut] b-roll {n} unverified: {type(exc).__name__}", flush=True)
         if ids:
-            resp = claude_lane.create(
-                model, [{"role": "system", "content": _BROLL_CHECK},
-                        {"role": "user", "content": parts}], max_tokens=2000, effort="low")
-            text = resp.choices[0].message.content or ""
-            spend["usd"] += float(getattr(resp.usage, "provider_cost_usd", 0) or 0)
-            llm.record("first_cut_broll_check", {"model": model, "pictures": len(ids)},
-                       {"content": text}, resp.usage)
+            text = _broll_check_openai(parts, spend)
+            if text is None:
+                text = _broll_check_claude(parts, spend, len(ids))
             verdict = json.loads(text[text.index("{"):text.rindex("}")+1])
             drop = {n for n in verdict.get("drop", []) if type(n) is int}
             approved = {ids[n] for n in verdict.get("keep", [])

@@ -82,7 +82,8 @@ def test_the_admin_is_alerted_once_never_per_call(gate, monkeypatch):
     import claude_trial
     sent = []
     monkeypatch.setattr(openai_credit, "_alert", openai_credit._real_alert)
-    monkeypatch.setattr(claude_trial, "_alert", lambda key, kind, subject, html: sent.append((key, kind)))
+    monkeypatch.setattr(openai_credit, "_queue_alert",
+                        lambda key, subject, html: sent.append((key, "openai_credit")) or True)
     for where in ("vision", "concierge", "footage_hear", "director", "vision"):
         gate.note(QUOTA, where, status=429)
     assert sent == [(gate.alert_key(), "openai_credit")]

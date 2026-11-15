@@ -78,6 +78,9 @@ def rung(monkeypatch):
     import openai_credit
     openai_credit.reopen()
     monkeypatch.setattr(openai_credit, "_alert", getattr(openai_credit, "_real_alert", openai_credit._alert))
+    # the credit gate's alert row is confirmed by its own queue (openai_credit._queue_alert)
+    monkeypatch.setattr(openai_credit, "_queue_alert",
+                        lambda key, subject, html: alerts.append((key, "openai_credit")) or True)
     posts = []
     replies = []
 

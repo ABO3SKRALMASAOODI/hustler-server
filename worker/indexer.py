@@ -878,7 +878,17 @@ def run_index_job(worker_db, job):
                         f"source layout measurement failed ({str(e)[:120]})"
                         " — tools measure it on first use")
                 if f_screen is not None:
-                    state["source_screen"] = f_screen.result()
+                    try:
+                        state["source_screen"] = f_screen.result()
+                    except Exception as e:  # noqa: BLE001 - the index never fails on it
+                        # No model could review the source screen (or its frames could not
+                        # be read): the upload completes, and the first film is cut without
+                        # source-tail clearance (source_screen.UNREVIEWED), recorded here.
+                        warnings.append(f"{source_screen.UNREVIEWED} "
+                                        f"({type(e).__name__}: {str(e)[:120]})")
+                        print(f"[index {job_id}] source screen not reviewed: "
+                              f"{type(e).__name__}: {str(e)[:160]}", flush=True)
+                if state.get("source_screen") is not None:
                     try:
                         from score import preparation
                         prep_index = VideoIndex(
