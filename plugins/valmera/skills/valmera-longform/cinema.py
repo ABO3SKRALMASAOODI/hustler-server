@@ -578,7 +578,13 @@ def schedule(sc, words, ft):
             index=beat['word_start']
             if index>=len(spoken):raise ValueError(f'visual beat is beyond spoken segment {i}')
             beat_frames.append((a if index==0 else round(spoken[index]['t0']*FPS),beat))
-        edges=[a]+[f for f,_ in beat_frames if a<f<b]+[b]
+        slots=[(round(resolve(clock,t['anchors'][0])*FPS),round(resolve(clock,t['anchors'][1])*FPS))
+               for t in ft.get('editorial',{}).get('assignments',[]) if t['seg']==i]
+        # A proposed replacement spans the former shot, even when an older
+        # visual draft had a word-beat edge inside it. Its complete new pairing
+        # still goes through source_review on the actual clock.
+        edges=sorted({a,b,*[f for f,_ in beat_frames if a<f<b and not any(lo<f<hi for lo,hi in slots)],
+                      *[f for span in slots for f in span if a<f<b]})
         intervals=list(zip(edges,edges[1:]))
         for va,vb in voice_spans:
             cut=[]

@@ -149,6 +149,35 @@ def test_exact_gap_assignment_does_not_replace_its_neighbour():
     assert [r['clip']['path'] for r in shots]==['station','repaired-pool']
 
 
+def test_scarce_image_moves_only_with_a_complete_replacement_for_its_old_use(tmp_path,monkeypatch):
+    import evidence_allocate as A
+    import timeline_repair as R
+    import wf4
+    from types import SimpleNamespace
+    from PIL import Image
+    photo=tmp_path/'airlock.jpg';Image.new('RGB',(32,32),'blue').save(photo)
+    image=dict(clip(str(photo),0,7.8),kind='image',content_hash='airlock-photo',shows='The experiment airlock')
+    image['source']={'url':'https://archive.test/airlock.jpg'}
+    video=dict(clip('interior',20,26),shows='The workshop interior')
+    sc=dict(title='Example',script=dict(segments=[dict(say='Inside.',chapter='c'),dict(say='Airlock.',chapter='c')]))
+    words=dict(duration=9.9,words=[dict(w='Inside.',start=.1,end=4.8,seg=0),dict(w='Airlock.',start=5,end=9.8,seg=1)])
+    clock=C.F.Clock(words,sc['script']);cut=clock.segs[1][0]
+    prior=dict(f=[0,round(cut*30)],seg=0,clip=image,src=[0,cut],say='Inside.')
+    ft=dict(lines=[dict(i=0,clips=[image]),dict(i=1,clips=[])],editorial=dict(
+        pins=[dict(seg=0,clip=image,src=prior['src'],anchors=[R.anchor(clock,0),R.anchor(clock,cut)])],
+        rejected=[],bank=[image,video]))
+    failure=C.CoverageError([dict(seg=1,seconds=clock.dur-cut,heard='Airlock.',words='Airlock.',start=cut,end=clock.dur)],[prior])
+    def ask(system,payload,**kw):
+        rows=json.loads(payload)['candidates'];new=next(r['i'] for r in rows if not r.get('move_only'));old=next(r['i'] for r in rows if r.get('move_only'))
+        return json.dumps(dict(allocations=[dict(gap=0,candidates=[old],why='Specific evidence')],
+                               swaps=[dict(move=old,replacements=[new],why='Interior covers earlier context')])),{}
+    monkeypatch.setattr(wf4.story.writer,'ask',ask)
+    A.allocate(SimpleNamespace(supply=str(tmp_path)),sc,ft,failure,words)
+    shots,_,_=C.schedule(sc['script'],words,ft)
+    assert [s['clip']['path'] for s in shots]==['interior',str(photo)]
+    assert not C.duplicate_ranges(shots)
+
+
 def test_archive_revision_preserves_prior_read_and_resumes_without_erasing_new_audio(tmp_path):
     from types import SimpleNamespace
     import archive_script as A
