@@ -58,13 +58,18 @@ def check(film, shots, out, ffmpeg, source=False):
         metadata=dict(r['clip']['source'])
         if r['clip'].get('document'):metadata['presentation']='Original technical figure, displayed with an archive-record label'
         if r['clip'].get('editorial_label'):metadata['on_screen_source_label']=r['clip']['editorial_label']
-        rows.append(dict(i=i,path=str(path),start=a,end=b,say=r['say'],context=r.get('context',r['say']),source=metadata))
+        detail=None
+        if source and r['clip'].get('kind')=='image':
+            detail=out/f'detail-{i:04d}.jpg'
+            with Image.open(r['clip']['path']) as im:ImageOps.contain(im.convert('RGB'),(1600,1200)).save(detail,quality=92)
+        rows.append(dict(i=i,path=str(path),detail=str(detail) if detail else None,start=a,end=b,say=r['say'],context=r.get('context',r['say']),source=metadata))
     def one(group):
         rp=out/f"check-{group[0]['i']:04d}.json"
         if rp.exists(): return json.loads(rp.read_text())
         content=[]
         for r in group:
             content.extend([dict(type='text',text=f"Shot {r['i']}. Words actually heard during this shot: {r['say']}\nSurrounding narration for context: {r['context']}\nSource metadata (not proof): {r['source']}"),ask.image_block(r['path'])])
+            if r['detail']:content.extend([dict(type='text',text='Full-picture detail of the same source still.'),ask.image_block(r['detail'])])
         text,usd=ask.ask(REVIEW_PROMPT,content,'wf4_picture_check',max_tokens=3000)
         result=dict(usd=usd,shots=ask.json_obj(text).get('shots',[])); rp.write_text(json.dumps(result,indent=1)); return result
     groups=[rows[i:i+5] for i in range(0,len(rows),5)]

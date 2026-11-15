@@ -717,6 +717,8 @@ def score(ctx,script):
 def source_review(ctx,shots,required=True):
     """Catch wrong archive material before spending a full-film render."""
     from picture_check import check
+    from document_context import enrich
+    enrich(ctx,[r['clip'] for r in shots])
     key=hashlib.sha256(json.dumps(shots,sort_keys=True).encode()+(HERE/'picture_check.py').read_bytes()).hexdigest()[:16]
     folder=Path(ctx.supply)/'source-evidence'/key;report=folder/'report.json'
     if report.exists():result=read(report)

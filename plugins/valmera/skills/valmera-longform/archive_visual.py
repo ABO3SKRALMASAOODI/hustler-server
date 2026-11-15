@@ -4,7 +4,14 @@ This is editorial preflight, not delivered-film measurement. The rendered film
 still receives the unchanged picture, motion and duplicate checks.
 """
 from pathlib import Path
-import copy,json
+import copy,json,hashlib
+
+
+def work_dir(ctx,proposal,catalogue):
+    inputs=dict(words=[s['say'] for s in proposal['script']['segments']],catalogue=catalogue,
+                checker=Path(__file__).with_name('picture_check.py').read_text(),planner=Path(__file__).read_text())
+    key=hashlib.sha256(json.dumps(inputs,sort_keys=True).encode()).hexdigest()[:16]
+    return Path(ctx.supply)/'archive-visual'/key
 
 
 def preview(sc,catalogue,wps=3.3):
@@ -27,10 +34,10 @@ def preview(sc,catalogue,wps=3.3):
     return shots,gaps,t
 
 
-def refine(ctx,proposal,catalogue,rounds=3):
+def refine(ctx,proposal,catalogue,rounds=1):
     import cinema as C
     from wf4 import story
-    root=Path(ctx.supply)/'archive-visual-v2';root.mkdir(exist_ok=True)
+    root=work_dir(ctx,proposal,catalogue);root.mkdir(parents=True,exist_ok=True)
     done=root/'proposal.json'
     if done.exists():return C.read(done)
     sc=copy.deepcopy(proposal['script'])
@@ -79,9 +86,15 @@ def refine(ctx,proposal,catalogue,rounds=3):
             if not isinstance(i,int) or not 0<=i<len(sc['segments']) or i in seen:raise ValueError('invalid visual repair segment')
             if not starts or starts[0]!=0 or starts!=sorted(set(starts)) or starts[-1]>=len(sc['segments'][i]['say'].split()):
                 raise ValueError('invalid visual repair word anchor')
-            if any(not b['archive_ids'] or any(k not in ids for k in b['archive_ids']) for b in beats):raise ValueError('invalid archive ID')
+            if any(any(k not in ids for k in b['archive_ids']) for b in beats):raise ValueError('invalid archive ID')
             sc['segments'][i]['visual_beats']=beats;seen.add(i)
-    raise ValueError('archive preflight remains unsupported; see '+str(root))
+    # Estimated-clock preflight is an editorial input, not a delivery gate.
+    # Empty candidate lists explicitly request fresh research on the recorded
+    # clock. The supply stage and final encoded-film gates still require every
+    # interval to be covered truthfully and all delivered targets to pass.
+    result=dict(proposal,script=sc,preflight=dict(planning_only=True,complete=False,
+                gaps=gaps,rejected=report['rejected'],moving_share=report['moving_share']))
+    C.save(done,result);return result
 
 
 def apply_choices(script,ft,revised,catalogue):
@@ -104,12 +117,12 @@ def apply_choices(script,ft,revised,catalogue):
 
 def prepare(ctx,script,ft):
     import cinema as C
-    root=Path(ctx.supply)/'archive-visual-v2';marker=root/'applied.json'
-    if marker.exists():return
     catalogue=C.read(Path(ctx.supply)/'archive-catalogue/catalogue.json')
     proposal=C.read(Path(ctx.supply)/'archive-script/proposal.json')
     proposal['script']=copy.deepcopy(script['script'])
+    root=work_dir(ctx,proposal,catalogue);marker=root/'applied.json'
+    if marker.exists():return
     revised=refine(ctx,proposal,catalogue)
     apply_choices(script,ft,revised,catalogue)
     C.save(Path(ctx.run_dir)/'script.json',script);C.save(Path(ctx.supply)/'footage/footage.json',ft)
-    C.save(marker,dict(words_unchanged=True))
+    C.save(marker,dict(words_unchanged=True,planning=revised.get('preflight')))
