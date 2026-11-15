@@ -758,6 +758,24 @@ def witness_crop(row):
     return crops
 
 
+def archive_label(clip,measure,max_width=.89*W):
+    """Bibliographic titles are display text; full credits stay in the ledger.
+
+    Ellipsis is typographic only. A factual context label must fit intact.
+    """
+    explicit=clip.get('editorial_label')
+    text=explicit or (clip['source'].get('title') or 'Original technical document')+' • archive record'
+    if measure(text)<=max_width:return text
+    if explicit:raise ValueError('factual archive label exceeds its display width: '+text)
+    suffix='… • archive record';title=clip['source'].get('title') or 'Original technical document'
+    lo,hi=0,len(title)
+    while lo<hi:
+        mid=(lo+hi+1)//2
+        if measure(title[:mid].rstrip()+suffix)<=max_width:lo=mid
+        else:hi=mid-1
+    return title[:lo].rstrip()+suffix
+
+
 def build(sc,pack):
     worker()
     from film_long import Plan
@@ -777,7 +795,7 @@ def build(sc,pack):
                 n=row['f'][1]-row['f'][0]
                 P.card(row['f'],key,[.5-width/2,.46-height/2,.5+width/2,.46+height/2],
                        s=[1+(.065 if n>240 else .025)*q/max(n-1,1) for q in range(n)])
-                P.word(row['f'],c.get('editorial_label') or c['source']['credit']+' • archive record','source',.055,.82,note=False)
+                P.word(row['f'],archive_label(c,lambda t:P.R.width('source',t)),'source',.055,.82,note=False)
             else:
                 # Archive portraits and machinery must survive landscape
                 # presentation whole; a centre crop can erase the evidence.
@@ -834,7 +852,7 @@ def score(ctx,script):
     source_review(ctx,shots)
     p=Path(ctx.supply)/'l1.json'; save(p,l1)
     save(Path(ctx.supply)/'shots.json',shots)
-    return dict(l1=str(p),chapters=chapters,picture_time_s=sum((r['f'][1]-r['f'][0])/FPS for r in shots),
+    return dict(builder=digest(HERE/'cinema.py'),l1=str(p),chapters=chapters,picture_time_s=sum((r['f'][1]-r['f'][0])/FPS for r in shots),
                 pictures=len(shots),max_hold_s=max((r['f'][1]-r['f'][0])/FPS for r in shots),spend=[])
 
 
@@ -885,6 +903,10 @@ def source_review(ctx,shots,required=True):
 def render(ctx,script,sc):
     # Use the established scene renderer, unchanged brand finish, and SND3 master.
     import film_long as L
+    if sc.get('builder')!=digest(HERE/'cinema.py'):
+        ctx.log('rebuilding the score for the current picture builder')
+        sc.clear();sc.update(score(ctx,script))
+        save(Path(ctx.run_dir)/'score.json',sc)
     pack=read(Path(ctx.supply)/'pack.json')['pack']
     from version import code_version
     inputs=dict(engine=code_version(),narration=digest(pack['narration']),l1=digest(sc['l1']),mixer=digest(HERE/'film_long.py'),

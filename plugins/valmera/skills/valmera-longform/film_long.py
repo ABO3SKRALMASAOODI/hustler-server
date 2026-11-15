@@ -1074,7 +1074,9 @@ def taste_check(l1, beats):
 # ----------------------------------------------------------------- score, render, check
 
 def env_path():
-    return F.scene_worker() + os.pathsep + os.path.join(chain.SLICE, "pylib")
+    # Keep the subscription adapter's sitecustomize network guard in children.
+    paths=[F.scene_worker(),os.path.join(chain.SLICE,"pylib"),*os.environ.get('PYTHONPATH','').split(os.pathsep)]
+    return os.pathsep.join(dict.fromkeys(p for p in paths if p))
 
 
 def direction_of(ctx):

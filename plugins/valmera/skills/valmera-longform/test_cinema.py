@@ -163,6 +163,24 @@ def test_long_interview_camera_continues_across_internal_source_slices():
     assert full[0]==[0,0,1,1] and full[-1][0]<.03
 
 
+def test_document_display_uses_title_and_never_renders_full_research_citation():
+    c=dict(source=dict(title='Apollo Docking System',credit='Long citation and research context. '*100))
+    assert C.archive_label(c,len,80)=='Apollo Docking System • archive record'
+    c['source']['title']='A very long original report title '*100
+    label=C.archive_label(c,len,80)
+    assert len(label)<=80 and label.endswith('… • archive record')
+    assert len(c['source']['credit'])>1000
+    c['editorial_label']='Ground rehearsal, not the actual repair'
+    assert C.archive_label(c,len,80)==c['editorial_label']
+    with pytest.raises(ValueError,match='factual archive label'):C.archive_label(c,len,20)
+
+
+def test_render_environment_preserves_subscription_network_guard(monkeypatch):
+    import film_long as L
+    monkeypatch.setenv('PYTHONPATH','/subscription/guard')
+    assert '/subscription/guard' in L.env_path().split(C.os.pathsep)
+
+
 def test_partial_picture_edit_research_includes_rejected_coverage(tmp_path,monkeypatch):
     import timeline_repair as R
     import evidence_allocate as A
