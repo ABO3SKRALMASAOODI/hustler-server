@@ -184,6 +184,9 @@ def upgrade(ctx, worker_db, job, started):
             return None
         text, rows = full
         comp2 = compiler.compile_score(text, work_dir=work)
+        from . import placement_check, supply
+        comp2, text, rec["placement_check"] = placement_check.check(
+            work, comp2, text, time.monotonic()+supply.CHECK_S)
         if bare(comp2) or comp2.json() == st["comp"].json():
             rec["skipped"] = "the footage changed nothing on screen"
             return None
@@ -322,7 +325,12 @@ def last_look(ctx, worker_db, job, started, spend, trial_scope, proof=None):
                 return None
             text = taste.floor_text(st["text"])       # the start state could not be written: the plain film, as before
             comp2 = compiler.compile_score(text, work_dir=work)
-        _bed_again(ctx, work, comp2, text if v["remove"] and what != "film" else st["text"], st.get("about") or "")
+        from . import placement_check, supply
+        text = text if v["remove"] and what != "film" else st["text"]
+        comp2, text, rec["placement_check"] = placement_check.check(
+            work, comp2, text, time.monotonic()+supply.CHECK_S)
+        st["text"], st["comp"] = text, comp2
+        _bed_again(ctx, work, comp2, text, st.get("about") or "")
         _one_mix(ctx, work, comp2)
         edl, locals_, rep = lower.lower(comp2.l1, work)
         edl = _publish(ctx, worker_db, edl, locals_, st["bin_doc"], st["original_key"])
@@ -1145,7 +1153,7 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
     _say(ctx, worker_db, "director_direct", "Directing your film")
     brief.build(work, index, sess, per, sc, grid)
     try:
-        comp, text, usage = direct.direct(work, index, sc, deadline, model=cfg["models"]["direct"], effort=cfg["effort"]["direct"],
+        comp, text, usage = direct.direct(work, index, sc, deadline-supply.CHECK_S, model=cfg["models"]["direct"], effort=cfg["effort"]["direct"],
                                           budget_usd=cfg["film_usd"], spent_usd=0.0)
     except call.Late as exc:
         raise Fall("direct", f"late: {exc}")
@@ -1161,6 +1169,8 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
                 comp, text = comp2, text2
     except Exception as exc:  # noqa: BLE001 - the film as the Score wrote it
         rec["fill"] = {"fault": f"{type(exc).__name__}: {str(exc)[:160]}"}
+    from . import placement_check
+    comp, text, rec["placement_check"] = placement_check.check(work, comp, text, deadline)
     with open(os.path.join(work, "score.jsonl"), "w", encoding="utf-8") as f:
         f.write(text)
     rec["direct"] = {k: usage.get(k) for k in ("rounds", "q_first", "q_repair", "repair_kept", "asks_open", "truncated")}

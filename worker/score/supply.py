@@ -184,7 +184,7 @@ def look_all(tmp, cands, wishes, deadline):
 
 CHECK_MODEL = os.environ.get("BIN_CHECK_MODEL", "gpt-6-sol")   # the last look's eyes: what it removes never enters
 EXACT_WORDS = """
-For EACH pair also return exact_match (boolean) in the pair object. First translate and read the complete spoken clause, then inspect the candidate's pixels. For a literal picture it must depict the exact thing in that clause, including species, person, material, preparation and action. Red meat is not evidence of shark meat; an animal alive is not its prepared dish. A source caption or supplied 'showing' description is a claim, not proof. For an explicitly marked association assess the full intended comparison instead. Do not identify or compare faces. Use readable labels and shot-specific provenance for named people. If attribution or material is uncertain, exact_match=false and post=upload. Missing evidence never means true. Explain the visible subject in why."""
+For EACH pair also return exact_match (boolean) in the pair object. First translate and read the complete spoken clause, then inspect the candidate's pixels. For a literal picture it must depict the exact thing in that clause, including species, person, material, preparation, action, vehicle type and role. Keep the spoken qualifiers: a broad category match is insufficient. Red meat is not evidence of shark meat; an animal alive is not its prepared dish; an unmanned drone is not an airliner for an airline-pilot claim. A source caption or supplied 'showing' description is a claim, not proof. For an explicitly marked association assess the full intended comparison instead. Do not identify or compare faces. Use readable labels and shot-specific provenance for named people. If attribution or material is uncertain, exact_match=false and post=upload. Missing evidence never means true. Explain the visible subject in why."""
 CHECK_S = 18.0
 CHECK_RESERVE_S = 8.0      # the end of the budget belongs to the look: a picture nobody checked never enters
 ACQUIRE_S = 5.0            # and the seconds before it to the fetch: three named pictures were found and none arrived (p5591, 13 Nov), since
@@ -314,7 +314,11 @@ def check_fit(work, items, wishes, deadline, asks=()):
                                                                       else "a found picture cut to as a picture of what the words mean (an association, not the thing named)" if like else "a found picture")
                            + ", full frame for a second or two" + (f", showing {shows}" if shows else "")
                            + (f"; requested picture: {wish['want']}" if wish.get("want") else "")
-                           + (f"; cap: the caption, reading {saids[n]}" if saids[n] else ""))
+                           + (f"; cap: the caption, reading {saids[n]}" if saids[n] else "")
+                           + (f"; ACTUAL words while this picture is visible: {wish['placed_words']}. "
+                              "Judge this occurrence against those words, with the wider clause supplying their qualifiers. "
+                              "In a spoken list a picture may illustrate the current item; it need not depict every list item at once."
+                              if wish.get("placed_words") else ""))
             if asks:        # what the customer asked for is theirs: the film's own look leaves an ask-bound picture in
                 ask.append("The customer typed these asks: " + json.dumps([a.get("said") for a in asks if a.get("said")], ensure_ascii=False)[:900]
                            + ". A picture that shows what an ask asked for is the customer's own choice: post film for it unless it does not show that.")
@@ -926,7 +930,7 @@ def run(work, scout, per, acquire, deadline, foot=None):
     named_f = {}
     for i, (wish, (hits, errs, secs)) in enumerate(zip(wishes, results)):
         sub = subjects[i][0] if i < len(subjects) and subjects[i] else None
-        report.append(dict(wish=i, w=wish.get("w") or wish.get("at"), want=wish.get("want"), own=wish.get("own"), mine=bool(wish.get("mine")),
+        report.append(dict(wish=i, w=wish.get("w") or wish.get("at"), want=wish.get("want"), how=wish.get("how"), own=wish.get("own"), mine=bool(wish.get("mine")),
                            seconds=secs, hits=len(hits), errors=errs, named=sub["name"] if sub else None, thing=things.get(i)))
         if sub:     # its pictures come from the named route, checked; the library's join that check
             named_f[i] = side.submit(broll_source.carried(named_for), work, wish, sub, hits, min(deadline - CHECK_RESERVE_S - ACQUIRE_S, time.monotonic() + 16.0))
