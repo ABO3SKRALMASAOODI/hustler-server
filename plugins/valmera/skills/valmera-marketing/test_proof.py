@@ -77,6 +77,16 @@ def test_recording_is_shown_as_delivered():
     assert gates == [([50, 100], 50), ([300, 350], 50)]
 
 
+def test_recording_does_not_acquire_new_captions_even_on_short_cuts():
+    scene = dict(assets={"raw": dict(path="/product/upload.mp4")}, items=[
+        dict(id="upload", k="shot", f=[20, 35], pic="raw", z=0),
+        dict(id="fake_caption", k="word", f=[15, 30], text="ADDED"),
+        dict(id="outside", k="word", f=[40, 60], text="VALMERA.IO"),
+    ])
+    assert P.as_delivered(scene, {"/product/upload.mp4"}) == [(20, 35)]
+    assert {item["id"] for item in scene["items"]} == {"upload", "outside"}
+
+
 def test_unreadable_product_picture_cannot_pass(monkeypatch):
     monkeypatch.setattr(P, "words_under", lambda *args: "the finished edit")
     monkeypatch.setattr(P, "still", lambda *args, **kwargs: None)

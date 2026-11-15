@@ -873,7 +873,8 @@ def supply(ctx, script):
     # Pin the actual export at frame zero; the narrator keeps its audio spine.
     pack["voices"].append(dict(person="export hook", start=-F.LEAD_F / F.FPS,
                                end=1.3 - F.LEAD_F / F.FPS, clip=tease))
-    pack["product"] = dict(pc, paths=[os.path.join(fdir, "product", n) for n in ("before.mp4", "after.mp4", "tease.mp4")])
+    product_dir = os.path.join(fdir, "product")
+    pack["product"] = dict(pc, paths=[os.path.join(product_dir, n) for n in sorted(os.listdir(product_dir)) if n.endswith(".mp4")])
     wj = json.load(open(nar["words"]))
     rec = dict(narration_s=wj["duration"], voice=nar.get("voice"), gate=nar["gate"], pictures=sum(len(v) for v in pack["pictures"].values()),
                subjects=len(pack["pictures"]), missing=pack.get("missing"), spend=spend, product=pc,
@@ -895,11 +896,10 @@ def content_pace(pack, sc):
 
 
 def as_delivered(l1, product_paths):
-    """The recording is shown as the product delivered it: no section finish, flash or caption pool over its seconds."""
+    """Preserve the upload/export comparison: no new captions, section finish or flash over the actual recording."""
     keys = {k for k, a in (l1.get("assets") or {}).items() if a.get("path") in product_paths}
     spans = sorted(tuple(it["f"]) for it in l1["items"] if it.get("k") in ("shot", "card") and it.get("pic") in keys and it.get("z", 0) <= 1
                    and not it.get("blur"))
-    spans = [s for s in spans if s[1] - s[0] >= 30]                # the cut-ins, not the tease's frame
     for it in l1["items"]:
         if it.get("pic") in keys:
             it.pop("look", None)
@@ -909,6 +909,8 @@ def as_delivered(l1, product_paths):
         if not over or it.get("pic") in keys:
             out.append(it)
             continue
+        if it["k"] == "word":
+            continue                                       # neither caption the raw upload nor double-caption its export
         if it["k"] == "flash" and it.get("mode") != "pool":
             continue                                       # a flash frame inside the recording
         if it["k"] == "flash" or (it["k"] == "card" and it.get("z", 0) >= 40):
