@@ -101,6 +101,24 @@ def test_text_detector_finds_burned_caption_lines_not_plain_background(tmp_path)
     assert any(box[1] > 0.65 for box in boxes)
 
 
+def test_pale_slide_lines_keep_their_whole_reading_width(tmp_path):
+    # Eight small, pale lesson lines at the filmstrip's native resolution.
+    # The old 360px pass found fragments, leaving real words available for
+    # an added caption to cover. Test geometry, not recognition or wording.
+    img = np.full((270, 480, 3), 250, np.uint8)
+    for i in range(8):
+        cv2.putText(img, "Reading every pale line", (200, 95 + i * 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, .29, (190, 175, 210), 1,
+                    cv2.LINE_AA)
+    path = str(tmp_path / "lesson.png")
+    cv2.imwrite(path, img)
+    boxes = spatial.analyze_frame(path)["text"]
+    for i in range(8):
+        centre = (91 + i * 20) / 270
+        assert any(b[0] <= .42 and b[2] >= .64 and
+                   b[1] <= centre <= b[3] for b in boxes), (i, boxes)
+
+
 def test_burned_caption_score_uses_speaking_moments_and_excludes_dense_ui():
     words = [{"w": "hello", "t0": 0.0, "t1": 1.0},
              {"w": "world", "t0": 2.0, "t1": 3.0}]
