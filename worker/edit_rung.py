@@ -399,6 +399,10 @@ def create(model, messages, tools=None, max_tokens=None, effort=None, tool_choic
         why = "no OpenAI key"
     elif not available():
         why = "rung latched: " + closed_reason()
+    else:
+        import openai_credit
+        if not openai_credit.available():
+            why = "OpenAI credit out: " + openai_credit.closed_reason()
     if why is None:
         claude_trial.guard_call(model)
         body = request_body(model, messages, tools, max_tokens, effort, tool_choice)
@@ -410,8 +414,13 @@ def create(model, messages, tools=None, max_tokens=None, effort=None, tool_choic
         except RungFailed as exc:
             why = str(exc)
             if exc.wallet:
-                _close(why)
-                _alert(why)
+                import openai_credit
+                if openai_credit.note(why, "edit_rung", status=exc.status):
+                    # the shared credit latch alerts once; both re-probe after its 15 min
+                    _close(why, openai_credit.latch_s())
+                else:
+                    _close(why)          # a key refusal (401/403): this rung's own latch and alert
+                    _alert(why)
         except Exception as exc:  # noqa: BLE001 - every rung failure is the fallback's
             why = f"{type(exc).__name__}: {str(exc)[:200]}"
         else:

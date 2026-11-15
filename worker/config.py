@@ -307,6 +307,16 @@ EDIT_RUNG_FALLBACK_MODEL = os.getenv("EDIT_RUNG_FALLBACK_MODEL",
 EDIT_RUNG_TIMEOUT_S = float(os.getenv("EDIT_RUNG_TIMEOUT_S", "240"))
 EDIT_RUNG_RETRIES = int(os.getenv("EDIT_RUNG_RETRIES", "1"))
 EDIT_RUNG_LATCH_S = float(os.getenv("EDIT_RUNG_LATCH_S", "1800"))
+# The OpenAI credit gate (worker/openai_credit.py, 15 Nov 2026): after a credit refusal every
+# OpenAI role runs its fallback for this long, then one real call re-probes.
+OPENAI_CREDIT_LATCH_S = float(os.getenv("OPENAI_CREDIT_LATCH_S", "900"))
+# Out-of-turn model calls whose answer a customer's film needs (the first film's source screen,
+# the index's picture captions): on Haiku while OpenAI is out of credit. Every other OpenAI
+# helper returns None and its caller's plain fallback answers.
+OPENAI_OUT_HAIKU_PURPOSES = tuple(p.strip() for p in os.getenv(
+    "OPENAI_OUT_HAIKU_PURPOSES",
+    "first_film_source_screen,visual_index_semantics,visual_index_semantics_fallback,vision_index",
+).split(",") if p.strip())
 
 # ── The Claude-funded trial lane (owner decision D2, 25 Oct 2026) ────────────
 #

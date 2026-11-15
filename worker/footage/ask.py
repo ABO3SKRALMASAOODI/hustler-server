@@ -25,6 +25,8 @@ def ask(system, content, purpose, budget_s=120.0, max_tokens=6000, model=None):
             r = call.stream(model or MODEL, system, content, max_tokens=max_tokens, effort=EFFORT, purpose=purpose,
                             deadline=deadline, thinking=False)
             return r.text, float(r.usd or 0.0)
+        except call.Refused:
+            raise                # out of credit or a refusal: a retry would hear the same answer
         except Exception:  # noqa: BLE001 one retry, then the caller's honest fallback
             if k == tries - 1 or deadline - time.monotonic() <= 3.0:
                 raise

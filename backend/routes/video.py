@@ -775,8 +775,11 @@ def _concierge_providers():
     """Who may answer, in order, each ``fn(msgs, want_act) -> (raw, record)``.
     OpenAI first, for the concierge that already runs there; Claude when
     OpenAI is dry, down or unkeyed."""
+    import openai_credit
     out = []
-    if provider_creds.key("OPENAI_API_KEY"):
+    # Out of OpenAI credit (openai_credit: latched 15 min after a credit refusal, then one
+    # re-probe) the concierge goes straight to Claude, with no failed call in front.
+    if provider_creds.key("OPENAI_API_KEY") and openai_credit.available():
         out.append(_concierge_openai)
     if provider_creds.key("ANTHROPIC_API_KEY"):
         out.append(_concierge_claude)
@@ -805,7 +808,9 @@ def _concierge_openai(msgs, want_act):
     try:
         resp = _concierge_create(create_kwargs)
     except Exception as e:
-        if "insufficient_quota" in str(e) or "no credits" in str(e).lower():
+        import openai_credit
+        if openai_credit.note(str(e), "concierge") \
+                or "insufficient_quota" in str(e) or "no credits" in str(e).lower():
             raise   # an empty wallet is the next provider's cue, at once
         # ONE retry after a beat. On 2026-08-09 three real users asked real
         # questions ("how many files did i share?") during transient provider

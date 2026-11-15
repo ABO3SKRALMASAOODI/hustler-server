@@ -114,6 +114,10 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
     key = config.OPENAI_API_KEY
     if not key or "api.openai.com" not in str(config.OPENAI_BASE_URL):
         raise call.Refused("the OpenAI rung has no OpenAI key")
+    import openai_credit
+    if not openai_credit.available():
+        # Out of credit (worker/openai_credit.py): nothing is sent, the caller's fallback answers.
+        raise call.Refused("OpenAI credit out: " + openai_credit.closed_reason()[:200])
     llm.fence(model)
     req = body(model, system, content, max_tokens, effort, purpose)
     box = {}
@@ -125,7 +129,10 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
                 with client.stream("POST", URL, json=req, headers={"Authorization": f"Bearer {key}"}) as r:
                     box["resp"] = r
                     if r.status_code != 200:
-                        box["error"] = RuntimeError(f"OpenAI HTTP {r.status_code}: {r.read().decode(errors='replace')[:300]}")
+                        text = r.read().decode(errors='replace')[:300]
+                        box["error"] = RuntimeError(f"OpenAI HTTP {r.status_code}: {text}")
+                        if openai_credit.note(text, "director:" + str(purpose), status=r.status_code):
+                            box["error"] = call.Refused(f"OpenAI credit out (HTTP {r.status_code}): {text[:200]}")
                         return
                     for kind, d in events(r.iter_lines()):
                         if box.get("cancel"):
@@ -142,6 +149,8 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
                             box["final"] = d.get("response") or {}
                         elif kind == "error":
                             box["error"] = RuntimeError(f"OpenAI stream error: {str(d)[:300]}")
+                            if openai_credit.note(str(d), "director:" + str(purpose)):
+                                box["error"] = call.Refused(f"OpenAI credit out: {str(d)[:200]}")
         except BaseException as exc:  # noqa: BLE001 - carried to the caller's thread
             box["error"] = exc
     th = threading.Thread(target=read, name=f"film-{purpose}", daemon=True)

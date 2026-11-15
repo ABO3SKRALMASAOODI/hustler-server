@@ -114,8 +114,18 @@ def apply_votes(words, votes):
     return result, changes
 
 
+def _credit_open():
+    try:
+        import openai_credit
+        return openai_credit.available()
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def verify(words, wav_path, language, warnings=None):
-    if (not config.TRANSCRIPT_VERIFY_ENABLED or not config.OPENAI_API_KEY
+    # Out of OpenAI credit (worker/openai_credit.py) the second recognizer is skipped like an
+    # unkeyed one: the primary recognizer's words stand, nothing is sent, nothing is warned.
+    if (not config.TRANSCRIPT_VERIFY_ENABLED or not config.OPENAI_API_KEY or not _credit_open()
             or urlparse(config.OPENAI_BASE_URL).hostname != 'api.openai.com'
             # The phonetic/number safeguards are English. Expand only with
             # equivalent safeguards and source-audio replays for each language.
@@ -154,6 +164,7 @@ def _verify(words, wav_path, language, warnings):
     client = llm.client().with_options(timeout=25, max_retries=0)
     recorder = llm.get_recorder()
     unavailable = threading.Event()
+    credit_out = threading.Event()
 
     def recognize(item):
         if unavailable.is_set():
@@ -185,6 +196,9 @@ def _verify(words, wav_path, language, warnings):
         except Exception as exc:
             # Stop queued calls after an outage or rate limit; two in flight at
             # most. Do not turn a provider incident into minutes of retries.
+            import openai_credit
+            if openai_credit.note(exc, 'transcript_verification'):
+                credit_out.set()
             unavailable.set()
             print(f'[transcript-verify] retained primary: {type(exc).__name__}', flush=True)
             return {}
@@ -201,7 +215,7 @@ def _verify(words, wav_path, language, warnings):
     if changes:
         print(f'[transcript-verify] corrected {len(changes)} isolated word(s); timing preserved', flush=True)
         llm.record('transcript_corrections', {'model': MODEL}, {'corrections': changes})
-    if unavailable.is_set() and warnings is not None:
+    if unavailable.is_set() and not credit_out.is_set() and warnings is not None:
         warnings.append('Independent transcript verification was unavailable for some speech; '
                         'the primary recognizer\'s words were retained there.')
     return result

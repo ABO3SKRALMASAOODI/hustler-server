@@ -120,6 +120,14 @@ def note_quota_error(exc, model=None, base_url=None):
     if not is_quota_error(exc) or is_budget_stop(exc):
         return False
     host = _host(base_url or config.OPENAI_BASE_URL) or "provider"
+    if host == "api.openai.com":
+        # The OpenAI credit gate latches every OpenAI role and alerts once (openai_credit); the
+        # owner alarm below is written for the first refusal only, not for every re-probe.
+        import openai_credit
+        already = openai_credit.alert_key() in openai_credit._alerted
+        openai_credit.trip("llm:" + str(model or "call"), exc)
+        if already:
+            return True
     now = time.monotonic()
     with _quota_lock:
         if now - _quota_last.get(host, -1e9) < QUOTA_ALARM_THROTTLE_S:
@@ -1709,6 +1717,7 @@ _QUOTA_MARKERS = (
     "insufficient_quota", "no credits remaining",
     "used all available credits", "exceeded your current quota",
     "spending limit", "credit balance", "billing/", "billing_error",
+    "credit_balance_exhausted",
 )
 
 
@@ -1874,19 +1883,54 @@ def adapt_completion_kwargs(exc, model, kw):
     return None
 
 
+def is_openai_client(client_obj):
+    """Does a call on this client spend the OpenAI credit (api.openai.com, not the Claude lane)?"""
+    return (client_obj is not None and not getattr(client_obj, "is_claude_lane", False)
+            and "api.openai.com" in str(getattr(client_obj, "base_url", "") or ""))
+
+
+def openai_out_lane(purpose):
+    """(client, model) on the Claude lane's Haiku for an out-of-turn call a customer's film needs
+    (config.OPENAI_OUT_HAIKU_PURPOSES) while OpenAI is out of credit; None for every other
+    purpose, whose caller keeps its plain fallback. Metered on the Claude credit cycle like any
+    paid Claude call; a replay's $0 Anthropic share stops it in claude_trial.guard_call."""
+    if purpose not in tuple(getattr(config, "OPENAI_OUT_HAIKU_PURPOSES", ()) or ()):
+        return None
+    try:
+        import claude_lane
+        if not (claude_lane.configured() and claude_lane.available()):
+            return None
+        return (claude_lane.ClaudeLaneClient(),
+                getattr(config, "EDIT_RUNG_FALLBACK_MODEL", "") or "claude-haiku-5-5")
+    except Exception:  # noqa: BLE001 - no lane: the caller's plain fallback
+        return None
+
+
 def create_with_dialect(client_obj, model, messages, max_tokens=None,
                         temperature=None, **extra):
     """chat.completions.create with automatic parameter-dialect adaptation.
     For the simple one-shot callers (ask_text / ask_vision / regen); the
-    agent loop integrates the same helpers into its richer retry chain."""
+    agent loop integrates the same helpers into its richer retry chain.
+
+    A call bound for OpenAI while its credit is out raises openai_credit.CreditOut at once (no
+    request sent), and a credit refusal latches every OpenAI role (worker/openai_credit.py)."""
+    import openai_credit
+    openai_bound = is_openai_client(client_obj) and not str(model or "").startswith("claude-")
+    if openai_bound:
+        openai_credit.check("llm:" + str(model))
     if model == "gpt-6.1-sol" and "tools" in extra \
             and not getattr(client_obj, "is_claude_lane", False):
-        return responses_create(
-            str(client_obj.base_url), client_obj.api_key, model, messages,
-            extra["tools"], max_tokens=max_tokens,
-            effort=extra.get("reasoning_effort") or "high",
-            timeout=config.AGENT_LANE_TIMEOUT_S,
-            tool_choice=extra.get("tool_choice"))
+        try:
+            return responses_create(
+                str(client_obj.base_url), client_obj.api_key, model, messages,
+                extra["tools"], max_tokens=max_tokens,
+                effort=extra.get("reasoning_effort") or "high",
+                timeout=config.AGENT_LANE_TIMEOUT_S,
+                tool_choice=extra.get("tool_choice"))
+        except Exception as e:
+            if openai_bound and openai_credit.note(e, "llm:" + str(model)):
+                raise openai_credit.CreditOut(str(e)[:300]) from e
+            raise
     kw = completion_kwargs(model, max_tokens, temperature)
     purpose = extra.pop("cache_role", "editor")
     kw.update(extra)
@@ -1907,6 +1951,8 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
             return client_obj.chat.completions.create(
                 model=model, messages=messages, **kw)
         except Exception as e:
+            if openai_bound and openai_credit.note(e, "llm:" + str(model)):
+                raise openai_credit.CreditOut(str(e)[:300]) from e
             attempts += 1
             if attempts > 3:
                 raise
@@ -2019,7 +2065,7 @@ def image_part(jpeg_path):
 
 
 def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
-               image_names=None, reasoning_effort=None):
+               image_names=None, reasoning_effort=None, _after_credit=False):
     """One call to VISION_MODEL with N images. Returns text, or None on any
     failure — vision is always optional. image_names (storage keys / labels)
     are what gets recorded to llm_calls — never the image bytes.
@@ -2045,6 +2091,14 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
     # answered — every credit charge and admin cost view prices a row from its
     # own `model` column.
     vclient, vmodel = vision_client_for(turn_plan())
+    import openai_credit
+    if is_openai_client(vclient) and (_after_credit or not openai_credit.available()):
+        # OpenAI is out of credit: a look a customer's film needs runs on Haiku, any other
+        # look is skipped with no failed call (its caller's plain fallback answers).
+        alt = openai_out_lane(purpose)
+        if alt is None:
+            return None
+        vclient, vmodel = alt
     try:
         # Vision gets a MORE generous timeout than the text agent (spiky
         # multimodal latency); retries stay at the client default. Dialect-
@@ -2086,6 +2140,13 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
         global _vision_blind
         msg = str(e)
         print(f"[vision] call failed: {msg}", flush=True)
+        if is_openai_client(vclient) and openai_credit.note(e, "vision:" + str(purpose)):
+            # The latch is shut now: the same look once more, on Haiku or skipped.
+            record(purpose, {"model": vmodel, "question": prompt, "images": names},
+                   _failure(e, msg), None)
+            return ask_vision(prompt, image_paths, max_tokens=max_tokens, purpose=purpose,
+                              image_names=image_names, reasoning_effort=reasoning_effort,
+                              _after_credit=True)
         # A provider that rejects the image PART is not having a bad minute —
         # it will reject every future call identically. Stop asking, and let
         # vision_available() tell the tools so they say "no vision configured"
@@ -2123,7 +2184,7 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
 
 
 def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text",
-             reasoning_effort=None, retry_empty=False, lane=None):
+             reasoning_effort=None, retry_empty=False, lane=None, _after_credit=False):
     """One plain-text completion using the current plan’s editor model, or
     ``lane`` ((client, model)) when the caller's thread holds no turn. Returns
     {"text", "model", "prompt_tokens", "completion_tokens"} or None on any
@@ -2137,11 +2198,17 @@ def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text",
     model = (trial[1] if trial is not None else
              config.EDITOR_MODEL if paid_editor_plan(turn_plan())
              else config.AGENT_MODEL)
+    import openai_credit
     try:
         text_client, model = (trial if trial is not None else
                               agent_client_for(True, turn_plan())
                               if paid_editor_plan(turn_plan())
                               else (client(), model))
+        if is_openai_client(text_client) and (_after_credit or not openai_credit.available()):
+            alt = openai_out_lane(purpose)
+            if alt is None:
+                return None          # OpenAI out of credit: the caller's plain fallback answers
+            text_client, model = alt
         extra = {}
         if reasoning_effort and not reasoning_effort_rejected(model):
             extra["reasoning_effort"] = reasoning_effort
@@ -2173,6 +2240,13 @@ def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text",
                     "completion_tokens": getattr(usage, "completion_tokens", None)}
     except Exception as e:
         print(f"[llm] ask_text failed: {e}", flush=True)
+        if isinstance(e, openai_credit.CreditOut) and openai_out_lane(purpose) is not None \
+                and lane is None and not _after_credit:
+            _note_error(e)
+            record(purpose, {"model": model, "system": system, "user": user}, _failure(e), None)
+            return ask_text(system, user, max_tokens=max_tokens, temperature=temperature,
+                            purpose=purpose, reasoning_effort=reasoning_effort,
+                            retry_empty=retry_empty, _after_credit=True)
         _note_error(e)
         record(purpose,
                {"model": model, "system": system, "user": user},

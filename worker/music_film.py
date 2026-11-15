@@ -64,6 +64,12 @@ def openai_call(model=PICK_MODEL, effort="low", timeout=90):
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
         return None
+    try:
+        import openai_credit
+        if not openai_credit.available():
+            return None          # out of OpenAI credit: the signal's choice stands, as with no key
+    except ImportError:          # pragma: no cover - the shell without the worker on its path
+        openai_credit = None
     import urllib.request
 
     def call(system, user, schema):
@@ -75,8 +81,14 @@ def openai_call(model=PICK_MODEL, effort="low", timeout=90):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 r = json.load(response)
-        except Exception:
+        except Exception as exc:
             openai_cache.record(model, "music:choose", status="transport_or_http_error", billing_unconfirmed=True)
+            if openai_credit is not None:
+                try:
+                    detail = exc.read().decode(errors="replace")[:400] if hasattr(exc, "read") else str(exc)
+                except Exception:  # noqa: BLE001
+                    detail = str(exc)
+                openai_credit.note(detail, "music:choose", status=getattr(exc, "code", None))
             raise
         u = r.get("usage") or {}
         usd = openai_cache.cost(model, u)

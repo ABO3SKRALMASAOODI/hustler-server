@@ -75,6 +75,9 @@ def rung(monkeypatch):
     monkeypatch.setattr(claude_trial, "meter_paid",
                         lambda model, usd: paid.append((model, usd)))
     monkeypatch.setattr(claude_trial, "_alert", lambda *a: alerts.append(a))
+    import openai_credit
+    openai_credit.reopen()
+    monkeypatch.setattr(openai_credit, "_alert", getattr(openai_credit, "_real_alert", openai_credit._alert))
     posts = []
     replies = []
 

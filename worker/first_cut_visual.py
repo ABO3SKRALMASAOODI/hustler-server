@@ -308,6 +308,12 @@ def verify_broll(ctx, steps, started, run, spend):
     import llm
     import media_cache
     model = "gpt-6-sol"
+    import openai_credit
+    if not openai_credit.available():
+        # OpenAI out of credit (worker/openai_credit.py): Haiku checks the pictures, so the first
+        # film keeps the ones it approves instead of losing every cutaway to a closed check.
+        import edit_rung
+        model = edit_rung.fallback_model()
     edl = ctx.latest_edl()["json"]
     items = [it for it in edl.get("fx") or [] if isinstance(it, dict)
              and it.get("type") == "broll" and it.get("start") is not None]

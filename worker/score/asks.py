@@ -286,11 +286,26 @@ def _call(ctx, name, schema, system, content, max_tokens=4000, model=None):
         except Exception:  # noqa: BLE001 - no lane: the turn's own model checks
             model = None
     model = model or ctx.agent_model
+    own = (ctx.llm_client, ctx.agent_model)
+    import openai_credit
     if str(model).startswith("gpt-") and getattr(client, "is_claude_lane", False):
-        client = llm.client()
-    response = llm.create_with_dialect(
-        client, model, messages, max_tokens=max_tokens,
-        tools=[tool], tool_choice={"type": "function", "function": {"name": name}})
+        # A check named on OpenAI. While its credit is out (worker/openai_credit.py) the turn's
+        # own model checks instead: a customer's edit is never refused for want of a checker.
+        if openai_credit.available():
+            client = llm.client()
+        else:
+            client, model = own
+    try:
+        response = llm.create_with_dialect(
+            client, model, messages, max_tokens=max_tokens,
+            tools=[tool], tool_choice={"type": "function", "function": {"name": name}})
+    except openai_credit.CreditOut:
+        if not getattr(own[0], "is_claude_lane", False) or (client, model) == own:
+            raise
+        client, model = own
+        response = llm.create_with_dialect(
+            client, model, messages, max_tokens=max_tokens,
+            tools=[tool], tool_choice={"type": "function", "function": {"name": name}})
     message = response.choices[0].message
     calls = list(message.tool_calls or [])
     usd = 0.0

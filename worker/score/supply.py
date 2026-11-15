@@ -183,6 +183,12 @@ def look_all(tmp, cands, wishes, deadline):
 
 
 CHECK_MODEL = os.environ.get("BIN_CHECK_MODEL", "gpt-6-sol")   # the last look's eyes: what it removes never enters
+
+
+def credit_fallback_model():
+    """Who looks when OpenAI is out of credit: the edit rung's fallback (Haiku)."""
+    import config
+    return getattr(config, "EDIT_RUNG_FALLBACK_MODEL", "") or "claude-haiku-5-5"
 EXACT_WORDS = """
 For EACH pair also return exact_match (boolean) in the pair object. First translate and read the complete spoken clause, then inspect the candidate's pixels. For a literal picture it must depict the exact thing in that clause, including species, person, material, preparation, action, vehicle type and role. Keep the spoken qualifiers: a broad category match is insufficient. Red meat is not evidence of shark meat; an animal alive is not its prepared dish; an unmanned drone is not an airliner for an airline-pilot claim. A source caption or supplied 'showing' description is a claim, not proof. For an explicitly marked association assess the full intended comparison instead. Do not identify or compare faces. Use readable labels and shot-specific provenance for named people. If attribution or material is uncertain, exact_match=false and post=upload. Missing evidence never means true. Explain the visible subject in why."""
 CHECK_S = 18.0
@@ -323,9 +329,18 @@ def check_fit(work, items, wishes, deadline, asks=()):
                 ask.append("The customer typed these asks: " + json.dumps([a.get("said") for a in asks if a.get("said")], ensure_ascii=False)[:900]
                            + ". A picture that shows what an ask asked for is the customer's own choice: post film for it unless it does not show that.")
             ask.append("Now the JSON.")
-            r = call.stream(CHECK_MODEL, taste.LOOK_SYSTEM + EXACT_WORDS, [brief.image_block(board), {"type": "text", "text": "\n".join(ask)}],
-                            max_tokens=1200, effort="low", purpose="director_bin_check",
-                            deadline=min(deadline, time.monotonic() + CHECK_S), thinking=False)
+            look = dict(max_tokens=1200, effort="low", purpose="director_bin_check",
+                        deadline=min(deadline, time.monotonic() + CHECK_S), thinking=False)
+            content = [brief.image_block(board), {"type": "text", "text": "\n".join(ask)}]
+            try:
+                r = call.stream(CHECK_MODEL, taste.LOOK_SYSTEM + EXACT_WORDS, content, **look)
+            except call.Refused:
+                # OpenAI out of credit (worker/openai_credit.py): the last look still looks, on Haiku,
+                # so the film keeps its checked pictures; anything else unchecked never enters.
+                import openai_credit
+                if not str(CHECK_MODEL).startswith("gpt-") or openai_credit.available():
+                    raise
+                r = call.stream(credit_fallback_model(), taste.LOOK_SYSTEM + EXACT_WORDS, content, **look)
             return chunk, r
         with cf.ThreadPoolExecutor(max_workers=4) as pool:
             for fut in [pool.submit(one, k) for k in range(0, len(items), n_pairs)]:
