@@ -113,9 +113,14 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
     import httpx
     from . import call
     key = config.OPENAI_API_KEY
-    base = str(config.OPENAI_BASE_URL or "").rstrip("/")
-    if not key or not base:
+    if not key:
         raise call.Refused("the OpenAI rung has no OpenAI key")
+    # Use the same configured OpenAI-compatible endpoint as the other
+    # callers. A valid local or hosted proxy must not silently fall through
+    # to the older editing chain, nor send its key to a different host.
+    base = str(config.OPENAI_BASE_URL or "").strip().rstrip("/")
+    if not base:
+        raise call.Refused("the OpenAI rung has no base URL")
     url = base + "/responses"
     import openai_credit
     if not openai_credit.available():
