@@ -805,20 +805,22 @@ def supply(ctx, script):
     fscript = json.loads(json.dumps(script))         # the footage engine searches the web; the recording's own names are ours
     for seg in fscript["script"]["segments"]:
         seg["pictures"] = [n for n in seg.get("pictures") or [] if n not in own]
+        seg["see"] = [v for v in seg.get("see") or [] if v.get("thing") not in own]
+    search_lines = [i for i, seg in enumerate(fscript["script"]["segments"]) if seg.get("pictures")]
     # Illustrative footage is silent. The two real-voice passages come only
     # from our verified Studio recording, so source transcripts are unused.
     reel_kw = dict(preserve_source=True, shot_s=0.55, line_max=12, per=4, hear_s=0.0)
-    foot = chain.footage(ctx, fscript, durs, anchors=anchors, **W3.footage_kw(reel_kw))
-    if foot and foot["counts"]["lines_with_footage"] < len(sc["segments"]) / 2:
+    foot = chain.footage(ctx, fscript, durs, anchors=anchors, lines=search_lines, **W3.footage_kw(reel_kw)) if search_lines else None
+    if foot and foot["counts"]["lines_with_footage"] < len(search_lines) / 2:
         # too little passed: once more with each subject as a plain thing to see (the writer's must_show can be too narrow)
-        ctx.log(f"footage: {foot['counts']['lines_with_footage']} of {len(sc['segments'])} lines; searching again with plain subjects")
+        ctx.log(f"footage: {foot['counts']['lines_with_footage']} of {len(search_lines)} external-footage lines; searching again with plain subjects")
         keep_dir = os.path.join(sup_dir, "footage_first")
         shutil.rmtree(keep_dir, ignore_errors=True)
         os.rename(os.path.join(sup_dir, "footage"), keep_dir)
         for n in fscript["script"].get("named") or []:
             n["must_show"] = f"{n['name']}, plainly visible."
             n["is"] = "person" if n.get("is") == "person" and len(str(n["name"]).split()) <= 3 else "thing"
-        foot2 = chain.footage(ctx, fscript, durs, anchors=anchors, **W3.footage_kw(reel_kw))
+        foot2 = chain.footage(ctx, fscript, durs, anchors=anchors, lines=search_lines, **W3.footage_kw(reel_kw))
         if foot2 and foot2["counts"]["clips"] > foot["counts"]["clips"]:
             foot = foot2
             shutil.rmtree(keep_dir, ignore_errors=True)
