@@ -18,8 +18,11 @@ import os
 import re
 import subprocess
 import tempfile
+import shutil
+import hashlib
+import json
 
-from . import fetch
+from . import fetch, transcript_cache
 
 MODEL = os.environ.get("FOOTAGE_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
 USD_PER_MIN = 0.006
@@ -58,15 +61,29 @@ def _credit_open():
         return True
 
 
-def _one(path, t0, t1, tmp, i):
+def _one(path, t0, t1, tmp, i, source_hash=None):
+    # Content plus exact interval/model, never a URL, filename or project ID.
+    source_hash = source_hash or transcript_cache.digest(path, {"version": 1})
+    key = hashlib.sha256(json.dumps([source_hash, MODEL, t0, t1, 1]).encode()).hexdigest()
+    with transcript_cache.locked(key) as cache:
+        rows = transcript_cache.read(cache)
+        if rows is not None:
+            return dict(rows[0], usd=0.0)
+        row = _transcribe_piece(path, t0, t1, tmp, i)
+        if not row.get("local"):
+            transcript_cache.write(cache, [row])
+        return row
+
+
+def _transcribe_piece(path, t0, t1, tmp, i):
     import httpx
     if not _credit_open():
         return dict(t0=t0, t1=t1, text="", local=True)
     piece = os.path.join(tmp, f"{i}.mp3")
-    subprocess.run([fetch.ffmpeg(), "-hide_banner", "-loglevel", "error", "-ss", f"{t0:.2f}", "-t", f"{t1 - t0:.2f}", "-i", path,
+    encoded = subprocess.run([fetch.ffmpeg(), "-hide_banner", "-loglevel", "error", "-ss", f"{t0:.2f}", "-t", f"{t1 - t0:.2f}", "-i", path,
                     "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k", "-y", piece], capture_output=True)
-    if not os.path.exists(piece) or os.path.getsize(piece) < 1500:
-        return dict(t0=t0, t1=t1, text="")
+    if encoded.returncode or not os.path.exists(piece) or os.path.getsize(piece) < 1500:
+        return dict(t0=t0, t1=t1, text="", error="audio extraction failed")
     for k in range(3):
         try:
             with open(piece, "rb") as f:
@@ -98,11 +115,24 @@ def transcribe(path, dur, workers=8):
     """([{t0, t1, text}], usd) for the first dur seconds of path."""
     if dur <= 1.0:
         return [], 0.0
+    key = transcript_cache.digest(path, {"model": MODEL, "duration": dur, "piece_s": PIECE_S, "version": 1})
+    with transcript_cache.locked(key, namespace="clip") as cache:
+        rows = transcript_cache.read(cache)
+        if rows is not None:
+            return rows, 0.0
+        rows, usd, complete = _transcribe_clip(path, dur, workers)
+        if complete:
+            transcript_cache.write(cache, rows)
+        return rows, usd
+
+
+def _transcribe_clip(path, dur, workers):
     cuts = splits(path, dur)
+    source_hash = transcript_cache.digest(path, {"version": 1})
     tmp = tempfile.mkdtemp(prefix="hear-", dir=os.path.dirname(path))
     try:
         with cf.ThreadPoolExecutor(max_workers=workers) as pool:
-            rows = list(pool.map(lambda i: _one(path, cuts[i], cuts[i + 1], tmp, i), range(len(cuts) - 1)))
+            rows = list(pool.map(lambda i: _one(path, cuts[i], cuts[i + 1], tmp, i, source_hash), range(len(cuts) - 1)))
         need = [i for i, r in enumerate(rows) if r.get("local")]
         if need:
             try:
@@ -116,14 +146,14 @@ def transcribe(path, dur, workers=8):
                 else:
                     rows[i] = dict(t0=cuts[i], t1=cuts[i + 1], text="", error="not heard")
     finally:
-        subprocess.run(["rm", "-rf", tmp])
+        shutil.rmtree(tmp)
     usd = round(sum(r.get("usd", 0.0) for r in rows), 7)
     try:
         import llm
         llm.record("footage_hear", {"model": MODEL}, {"provider": "openai", "provider_cost_usd": usd, "seconds_heard": round(dur, 1), "local_spend_recorded": True})
     except Exception:  # noqa: BLE001 metering is never a stop
         pass
-    return [dict(t0=round(r["t0"], 2), t1=round(r["t1"], 2), text=r["text"]) for r in rows], usd
+    return [dict(t0=round(r["t0"], 2), t1=round(r["t1"], 2), text=r["text"]) for r in rows], usd, not need and not any(r.get("error") for r in rows)
 
 
 def local_hear(path, cuts, idx, tmp, model=None):

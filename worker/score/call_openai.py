@@ -81,6 +81,8 @@ def parts(content):
             out.append({"type": "input_image", "image_url": url, "detail": b.get("detail", "high")})
         else:
             out.append({"type": "input_text", "text": _text(b)})
+        if isinstance(b, dict) and b.get("cache_control"):
+            out[-1]["prompt_cache_breakpoint"] = {"mode": "explicit", "ttl": "30m"}
     return out
 
 
@@ -186,7 +188,7 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
     usd = float(usage.provider_cost_usd)
     status = final.get("status") or "completed"
     stop = "max_tokens" if status == "incomplete" else ("refusal" if box.get("refused") else "end_turn")
-    llm.record(purpose, {"model": model, "max_tokens": max_tokens},
+    llm.record(purpose, {"model": model, "max_tokens": max_tokens, "cache_request": openai_cache.describe(req)},
                {"stop": stop, "provider_cost_usd": usd, "request_id": final.get("id"), "provider": "openai"}, usage)
     call._meter(model, usd)
     if box.get("refused") and not box.get("text"):

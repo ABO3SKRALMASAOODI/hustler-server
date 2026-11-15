@@ -65,7 +65,45 @@ def cost(model, usage):
 
 def key(role):
     # Role is a code label, never inferred from the customer's words.
-    return "valmera:" + str(role)[:55]
+    role = str(role)
+    return "valmera:" + (role if len(role) <= 55 else role[:38] + ":" + hashlib.sha256(role.encode()).hexdigest()[:16])
+
+
+def stable_tools(tools):
+    """Canonical object keys and tool order; preserve every schema value/list.
+
+    Sorting a schema's enum/required/oneOf lists would change its content. Only
+    the tool registry is a set; all other lists retain the caller's order.
+    """
+    canonical = json.loads(json.dumps(tools, sort_keys=True, ensure_ascii=False))
+    return sorted(canonical, key=lambda t: (t.get("type", ""), t.get("name") or
+                  (t.get("function") or {}).get("name", ""), json.dumps(t, sort_keys=True)))
+
+
+def describe(body):
+    """Content-free wire evidence: ordered prefix hashes, not customer text/images.
+
+    These are identities, NOT provider token counts. Historical logs lacking
+    the wire body cannot be reconstructed from their usage totals.
+    """
+    settings = {k: body[k] for k in ("model", "tools", "reasoning", "text", "parallel_tool_calls") if k in body}
+    h = hashlib.sha256(json.dumps(settings, sort_keys=True, ensure_ascii=False).encode())
+    boundaries = []
+    for msg in body.get("input") or []:
+        if not isinstance(msg, dict):
+            continue
+        h.update(json.dumps({k: v for k, v in msg.items() if k != "content"}, sort_keys=True).encode())
+        parts = msg.get("content", [])
+        if isinstance(parts, str):
+            parts = [{"type": "input_text", "text": parts}]
+        for part in parts:
+            clean = {k: v for k, v in part.items() if k != "prompt_cache_breakpoint"}
+            h.update(json.dumps(clean, sort_keys=True, ensure_ascii=False).encode())
+            boundaries.append(dict(role=msg.get("role"), type=part.get("type"),
+                                   prefix_sha256=h.hexdigest(), text_bytes=len(str(part.get("text", "")).encode()),
+                                   breakpoint=part.get("prompt_cache_breakpoint")))
+    return dict(version=1, model=body.get("model"), key=body.get("prompt_cache_key"),
+                options=body.get("prompt_cache_options"), boundaries=boundaries)
 
 
 def chat_options(model, role):
@@ -86,6 +124,8 @@ def responses(body, role, *, conversation=False):
     kernel boundary. No content is removed, shortened, or inferred here.
     """
     b = copy.deepcopy(body)
+    if b.get("tools"):
+        b["tools"] = stable_tools(b["tools"])
     model = str(b.get("model", ""))
     b.update(chat_options(model, role))
     if not model.startswith(MODERN):
@@ -99,11 +139,11 @@ def responses(body, role, *, conversation=False):
         inp.insert(0, {"role": "developer", "content": [{"type": "input_text", "text": instructions}]})
     b["input"] = inp
     b["prompt_cache_options"] = {"mode": "implicit" if conversation else "explicit", "ttl": "30m"}
-    # 12h writes cost twice 30m writes. Keep the measured cheaper default;
-    # workflows reused across long gaps can explicitly opt into 12h.
-    ttl = os.environ.get("VALMERA_OPENAI_PREFIX_TTL", "30m")
+    # Only the shared instruction prefix gets the long write. Project context
+    # and evolving conversations retain short writes. Never pad short prompts.
+    ttl = os.environ.get("VALMERA_OPENAI_PREFIX_TTL", "12h")
     if ttl not in ("30m", "12h"):
-        ttl = "30m"
+        ttl = "12h"
     marked = 0
     for msg in inp:
         if msg.get("role") not in ("system", "developer") or marked == 2:
@@ -181,4 +221,4 @@ def role_for(system, prefix="workflow"):
         if stem not in ("llm", "openai_cache"):
             prefix = stem + ":" + frame.function
             break
-    return prefix + ":" + hashlib.sha256(str(system).encode()).hexdigest()[:12]
+    return prefix

@@ -108,6 +108,8 @@ def _oa_parts(content):
             out.append({"type": "input_image", "image_url": url, "detail": b.get("detail") or "high"})
         else:
             out.append({"type": "input_text", "text": b.get("text", "") if isinstance(b, dict) else str(b)})
+        if isinstance(b, dict) and b.get("cache_control"):
+            out[-1]["prompt_cache_breakpoint"] = {"mode": "explicit", "ttl": "30m"}
     return out
 
 
@@ -125,7 +127,9 @@ def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, 
         body["include"] = ["web_search_call.action.sources"]
         if max_tool_calls:
             body["max_tool_calls"] = int(max_tool_calls)
-    body = openai_cache.responses(body, "writer:" + what)
+    # Web search grows an internal conversation. Explicit-only caching drops
+    # that history boundary and rebills it on each search inside this call.
+    body = openai_cache.responses(body, "writer:" + what, conversation=bool(searches))
     headers = {"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"], "Content-Type": "application/json"}
     t0 = time.time()
     final = None
@@ -172,7 +176,8 @@ def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, 
     searches_used = sum(item.get("type") == "web_search_call" for item in final.get("output") or [])
     openai_cache.record(model, "writer:" + what, usage,
                         usd=openai_cache.cost(model, usage) + searches_used * OA_SEARCH_USD,
-                        request_id=final.get("id"), status=final.get("status"), force=True)
+                        request_id=final.get("id"), status=final.get("status"), force=True,
+                        cache_request=openai_cache.describe(body))
     if final.get("status") == "failed":
         raise RuntimeError(f"openai failed: {json.dumps(final.get('error'))[:300]}")
     text, n_search, cited, queries = "", 0, [], []

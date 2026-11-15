@@ -706,8 +706,7 @@ def _concierge_reply(stage, history, attachments, index_error=None,
                                for a in attachments) + ".")
     system = (
         "You are Valmera, an AI video editor the user chats with inside "
-        "the studio.\nFACTS — every reply must respect all of them:\n- " +
-        "\n- ".join(facts))
+        "the studio.")
     if want_act:
         system += (
             "\n\nDecide whether the user's latest message is a REQUEST to "
@@ -729,6 +728,7 @@ def _concierge_reply(stage, history, attachments, index_error=None,
             "questions about what you can do, and if they asked for an edit "
             "confirm it's saved and say what happens next. Never promise a "
             "specific completion time.")
+    system += "\nFACTS — every reply must respect all of them:\n- " + "\n- ".join(facts)
     msgs = [{"role": "system", "content": system}]
     for h in history[-10:]:
         msgs.append({"role": h["role"],

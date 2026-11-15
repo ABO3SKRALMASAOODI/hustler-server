@@ -951,7 +951,10 @@ def check_named(subject, cands, workdir=None, budget_s=None, frame_size=None):
                 return i, None
         with ThreadPoolExecutor(max_workers=6) as pool:
             seen = dict(pool.map(thumb, range(len(cands))))
-        content, rows = [], []
+        content, rows = [{"type": "text", "text":
+                         f"Subject: {subject['name']}. Each picture must "
+                         f"show: {subject['must_show']}",
+                         "cache_control": {"type": "ephemeral"}}], []
         for i, c in enumerate(cands):
             p = seen.get(i)
             if not p:
@@ -960,15 +963,12 @@ def check_named(subject, cands, workdir=None, budget_s=None, frame_size=None):
                 data = base64.standard_b64encode(f.read()).decode()
             content += [{"type": "text", "text": f"picture {i}: caption: "
                          f"{_caption(c)}"},
-                        {"type": "image", "source": {
+                        {"type": "image", "detail": "low", "source": {
                             "type": "base64", "media_type": "image/jpeg",
                             "data": data}}]
             rows.append(i)
         if not rows:
             return [], [dict(error="no thumbnail could be read")], 0.0
-        content.append({"type": "text", "text":
-                        f"Subject: {subject['name']}. Each picture must "
-                        f"show: {subject['must_show']}"})
         txt, usd = _ask(CHECK_NAMED_SYSTEM, content, "named_check",
                         budget_s or NAMED_CHECK_S, 2400,
                         model=NAMED_CHECK_MODEL)

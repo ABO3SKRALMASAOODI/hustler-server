@@ -1918,6 +1918,9 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
     openai_bound = is_openai_client(client_obj) and not str(model or "").startswith("claude-")
     if openai_bound:
         openai_credit.check("llm:" + str(model))
+    purpose = extra.pop("cache_role", "editor")
+    if extra.get("tools") and str(model).startswith("gpt-"):
+        extra["tools"] = openai_cache.stable_tools(extra["tools"])
     if model == "gpt-6.1-sol" and "tools" in extra \
             and not getattr(client_obj, "is_claude_lane", False):
         try:
@@ -1932,7 +1935,6 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
                 raise openai_credit.CreditOut(str(e)[:300]) from e
             raise
     kw = completion_kwargs(model, max_tokens, temperature)
-    purpose = extra.pop("cache_role", "editor")
     kw.update(extra)
     if str(model).startswith("gpt-") and "api.openai.com" in str(getattr(client_obj, "base_url", "")):
         kw["extra_body"] = {**kw.get("extra_body", {}), **openai_cache.chat_options(model, purpose)}

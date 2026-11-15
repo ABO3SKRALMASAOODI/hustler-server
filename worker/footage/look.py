@@ -199,7 +199,9 @@ def check(subject, lines, cands, sources, work, budget_s=120.0):
                    **({"cell": (BRIEF_CELL_W, BRIEF_CELL_H)} if brief or contextual else {}))
         listing = "\n".join(f"cell {j + 1}: video {c['src']} \"{sources[c['src']]['title'][:90]}\" ({sources[c['src']].get('channel') or '?'}), "
                             f"at {c['t']:.1f} s" + (f"; said there: \"{c['said'][:140]}\"" if c.get("said") else "") for j, c in enumerate(g))
-        content = [{"type": "text", "text": f"Subject: {subject['name']}\nA frame must show: {subject['must_show']}\n\nLines:\n{ls}\n\n{listing}"},
+        content = [{"type": "text", "text": f"Subject: {subject['name']}\nA frame must show: {subject['must_show']}\n\nLines:\n{ls}\n\n",
+                    "cache_control": {"type": "ephemeral"}},
+                   {"type": "text", "text": listing},
                    ask.image_block(sp)]
         txt, usd = ask.ask(system, content, "footage_look", budget_s=budget_s, max_tokens=4000)
         got = {}
@@ -231,8 +233,12 @@ def check(subject, lines, cands, sources, work, budget_s=120.0):
                             lines=got_lines, shows=str(v.get("shows") or "")[:80], x=round(x, 3), sheet=os.path.basename(sp), **extra))
         return out, usd
     res, usd = [], 0.0
+    # Finish the first real batch before fanning out. Concurrent cold writes
+    # cannot reuse one another; every batch still checks the same candidates.
+    if groups:
+        res, usd = one(0)
     with cf.ThreadPoolExecutor(max_workers=4) as pool:
-        for out, u in pool.map(one, range(len(groups))):
+        for out, u in pool.map(one, range(1, len(groups))):
             res += out
             usd += u
     return res, usd

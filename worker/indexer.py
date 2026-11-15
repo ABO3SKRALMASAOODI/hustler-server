@@ -1576,9 +1576,8 @@ def _greet_via_llm(worker_db, project_id, stats, pending, out_of_credits,
               "Portuguese because their video was). Quote the transcript "
               "opening verbatim in its own language, but every word around "
               "it is English.")
-    user = (f"Real stats to state: {stats}.\n"
-            f"Transcript opening (verbatim, may be empty): \"{snippet}\"\n"
-            f"{branch}")
+    user = (f"{branch}\nReal stats to state: {stats}.\n"
+            f"Transcript opening (verbatim, may be empty): \"{snippet}\"")
     # A reasoning model spends its cap thinking before it writes: at 220,
     # 147 of 204 greetings in the two weeks to 15 Oct came back empty and
     # the template went out instead. Room to answer, low effort, and one

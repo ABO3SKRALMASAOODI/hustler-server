@@ -61,9 +61,11 @@ def _parts(content):
         if isinstance(b, dict) and b.get("type") == "image":
             src = b.get("source") or {}
             url = src.get("url") if src.get("type") == "url" else f"data:{src.get('media_type') or 'image/jpeg'};base64,{src.get('data', '')}"
-            out.append({"type": "input_image", "image_url": url, "detail": "high"})
+            out.append({"type": "input_image", "image_url": url, "detail": b.get("detail") or "high"})
         else:
             out.append({"type": "input_text", "text": b.get("text", "") if isinstance(b, dict) else str(b)})
+        if isinstance(b, dict) and b.get("cache_control"):
+            out[-1]["prompt_cache_breakpoint"] = {"mode": "explicit", "ttl": "30m"}
     return out
 
 
@@ -118,7 +120,7 @@ def ask_openai(system, content, *, model=None, effort="medium", max_tokens=16000
     if final is None:
         raise RuntimeError("openai: the stream ended without a response")
     openai_cache.record(model, purpose, final.get("usage"), request_id=final.get("id"),
-                        status=final.get("status"), force=True)
+                        status=final.get("status"), force=True, cache_request=openai_cache.describe(body))
     if final.get("status") == "failed":
         raise RuntimeError(f"openai failed: {json.dumps(final.get('error'))[:300]}")
     text = "".join(c.get("text", "") for item in final.get("output") or [] if item.get("type") == "message"
