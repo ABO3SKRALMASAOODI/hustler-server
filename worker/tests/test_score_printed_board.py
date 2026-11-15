@@ -50,3 +50,16 @@ def test_scout_can_read_a_preserved_older_brief(tmp_path, monkeypatch):
     monkeypatch.setattr(scout, 'user_text', lambda *args: 'Transcript')
     monkeypatch.setattr(brief, 'image_block', lambda p: {'image': p})
     assert scout.content(str(tmp_path), {}, {}, {})[1]['image'].endswith('board_4.jpg')
+
+
+def test_no_text_keeps_detail_evidence_and_removes_a_stale_reading_board(tmp_path, monkeypatch):
+    out = tmp_path / 'brief'
+    out.mkdir()
+    (out / 'printed_text.jpg').write_bytes(b'stale')
+    monkeypatch.setattr(brief, 'layout', lambda *args: (1, 1, 10, 10))
+    monkeypatch.setattr(brief, 'pick_times', lambda *args: [])
+    monkeypatch.setattr(brief, 'detail_board', lambda *args: Image.new('RGB', (20, 20), 'red'))
+    monkeypatch.setattr(brief.boards, 'save', lambda image, path, **kwargs: image.save(path))
+    brief.boards_for(str(tmp_path), {}, {'W': 1280, 'H': 720, 'text': []}, pages=(4,))
+    assert (out / 'board_4.jpg').exists()
+    assert not (out / 'printed_text.jpg').exists()
