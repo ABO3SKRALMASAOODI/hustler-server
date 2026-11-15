@@ -6,6 +6,13 @@ sys.path.insert(0,str(Path(__file__).resolve().parent))
 import cinema as C
 
 
+def test_worker_imports_precede_the_shell_even_when_already_on_pythonpath(monkeypatch):
+    p=C.PX.worker_dir()
+    monkeypatch.setattr(C.sys,'path',['/some/shell',p])
+    C.worker()
+    assert C.sys.path==[p,'/some/shell']
+
+
 def test_rater_stem_fit_recovers_delay_and_final_gains():
     import numpy as np
     import stem_evidence as E

@@ -42,10 +42,15 @@ def save(p, data):
 
 def worker():
     p = PX.worker_dir()
-    if p not in sys.path:
-        sys.path.insert(0, p)
+    # The shell also has an llm.py. PYTHONPATH may already contain the worker
+    # later in the list; it must still precede the shell for worker imports.
+    while p in sys.path:sys.path.remove(p)
+    sys.path.insert(0,p)
     os.environ['PATH'] = str(Path(PX.FF).parent)+os.pathsep+os.environ.get('PATH','')
     os.environ['FFMPEG_BIN'] = PX.FF
+    if os.environ.get('WF4_SPEND_LOG'):
+        from local_meter import install
+        install(os.environ['WF4_SPEND_LOG'])
     return p
 
 
@@ -310,6 +315,8 @@ def photo_research_ready(root,gaps,duration):
 
 
 def supply(ctx, script):
+    os.environ.update(TMPDIR=ctx.tmp,VALMERA_SKILL=ctx.workflow,VALMERA_RUN=ctx.run_id,
+                      WF4_SPEND_LOG=str(Path(ctx.run_dir)/'model-spend.jsonl'))
     if (Path(ctx.run_dir)/'read-repair.pending.json').exists():
         from read_repair import finish_pending
         finish_pending(ctx.run_dir)
@@ -335,6 +342,9 @@ def supply(ctx, script):
     with ThreadPoolExecutor(max_workers=2) as pool:
         voice_job=pool.submit(narrated,ctx,ns,nd,reader)
         visual_job=pool.submit(prepare_visuals,ctx,script,ft)
+        def completed(future):
+            if future.exception() is not None:ctx.log('parallel supply stage failed: '+repr(future.exception()))
+        voice_job.add_done_callback(completed);visual_job.add_done_callback(completed)
         nar=voice_job.result();visual_job.result()
     if nar['gate'].get('wer') is None or nar['gate']['wer']>=0.01:
         raise RuntimeError(f"narration WER must be <1%: {nar['gate']}")
@@ -843,6 +853,16 @@ def check(ctx,rd,sc):
         target=evidence/'read-repairs'/folder.name;target.mkdir(parents=True,exist_ok=True)
         for name in ('proposal.json','fact-check.json','script-check.json','applied.json'):
             if (folder/name).exists():shutil.copy2(folder/name,target/name)
+
+    archive_proof=Path(ctx.supply)/'archive-script'
+    if archive_proof.exists():
+        target=evidence/'archive-script';target.mkdir(exist_ok=True)
+        for source in [archive_proof/'proposal.json',archive_proof/'additional-facts.json',
+                       archive_proof/'reused-takes.json',*archive_proof.glob('audit-*.json')]:
+            if source.exists():shutil.copy2(source,target/source.name)
+        shutil.copy2(Path(ctx.run_dir)/'script.json',target/'final-script.json')
+    if (Path(ctx.run_dir)/'model-spend.jsonl').exists():
+        shutil.copy2(Path(ctx.run_dir)/'model-spend.jsonl',evidence/'model-spend.jsonl')
 
     footage_box.cleanup_cache(Path(ctx.supply)/'footage')
     footage_box.cleanup_cache(Path(ctx.supply)/'footage'/'witnesses')
