@@ -54,6 +54,14 @@ def test_clear_final_picture_keeps_every_item_exactly():
     assert l1==before
 
 
+def test_authored_type_behind_subject_keeps_its_composition():
+    ctx,l1=scene()
+    for word in l1['items'][1:]:word['behind']=True
+    before=copy.deepcopy(l1)
+    assert S.final_type_clearance(ctx,l1)=={'moved':[],'unresolved':[]}
+    assert l1==before
+
+
 def test_compile_checks_type_against_late_crop_not_authored_picture(monkeypatch):
     import json
     from score import source_guard
