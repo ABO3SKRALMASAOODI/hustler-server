@@ -24,7 +24,8 @@ from datetime import datetime, timezone
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
-from flask import Blueprint, request, jsonify, current_app
+import jwt
+from flask import Blueprint, Response, request, jsonify, current_app
 
 from video_services.direct_edits import command_identity, read_receipt, receipt_meta
 from routes.auth import token_required
@@ -9279,12 +9280,141 @@ def asset_url(user_id, asset_id):
     if download:
         meta = a.get("meta") or {}
         name = meta.get("filename") or f"valmera_{a['kind']}_{a['id']}.mp4"
+    if request.args.get("relay") == "1" and not download:
+        # The device could not reach the storage host (the player's direct
+        # fetch threw and every re-presign failed the same way) but it does
+        # reach us: hand it a same-API address that streams the same bytes.
+        return jsonify({
+            "relay_path": (f"/assets/{asset_id}/stream?t="
+                           f"{_stream_token(user_id, asset_id)}"),
+            "expires_in": STREAM_TOKEN_TTL_S})
     url = storage.presign_get(a["storage_key"], download_name=name)
     if download:
         record_client_event(
             user_id, a["project_id"], "download_url_ready", asset_id=asset_id,
             detail={"asset_kind": a["kind"]}, origin="server")
     return jsonify({"url": url, "expires_in": storage.PRESIGN_GET_EXPIRY})
+
+
+# ------------------------------------------------------------------ #
+#  Playback relay (P0 #43)                                            #
+# ------------------------------------------------------------------ #
+# Some customers' networks cannot reach the storage host at all: the 15 Nov
+# Android phone's direct upload sent 0 bytes (the upload relay carried it) and
+# its player then failed with MediaError 4 on the original and on the proxy,
+# while its probe fetch threw a TypeError. Re-presigning only produced another
+# address on the same unreachable host. The player's last retry now streams
+# through this API, which that device already reaches.
+#
+# A <video> cannot send an Authorization header, so the address carries a
+# short-lived token bound to one asset and one user. Each response is capped
+# at STREAM_CHUNK_BYTES: this service runs sync workers, so one open-ended
+# GET must never hold a worker for a whole film; the browser asks for the
+# next range itself, as it does from any server that caps ranges.
+STREAM_TOKEN_TTL_S = int(os.getenv("STREAM_TOKEN_TTL_S", "21600"))
+STREAM_CHUNK_BYTES = int(os.getenv("STREAM_CHUNK_BYTES", str(4 * 1024 * 1024)))
+_STREAM_READ_BYTES = 256 * 1024
+
+
+def _stream_token(user_id, asset_id, now=None):
+    now = int(now if now is not None else time.time())
+    return jwt.encode({"sub": str(user_id), "aid": int(asset_id),
+                       "typ": "asset_stream", "iat": now,
+                       "exp": now + STREAM_TOKEN_TTL_S},
+                      current_app.config["SECRET_KEY"], algorithm="HS256")
+
+
+def _stream_claims(token, asset_id):
+    try:
+        data = jwt.decode(token or "", current_app.config["SECRET_KEY"],
+                          algorithms=["HS256"])
+    except Exception:  # noqa: BLE001 — expired, forged or missing
+        return None
+    if data.get("typ") != "asset_stream":
+        return None
+    try:
+        if int(data.get("aid")) != int(asset_id):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return data
+
+
+def _byte_range(header):
+    """(first, last-or-None, suffix-or-None) from a Range header; (0, None,
+    None) when there is none or it is not a single byte range."""
+    value = (header or "").strip()
+    if not value.startswith("bytes=") or "," in value:
+        return 0, None, None
+    first, _, last = value[len("bytes="):].partition("-")
+    try:
+        if first == "":
+            return None, None, int(last)
+        return int(first), (int(last) if last else None), None
+    except ValueError:
+        return 0, None, None
+
+
+@video_bp.route("/assets/<int:asset_id>/stream", methods=["GET"])
+def asset_stream(asset_id):
+    claims = _stream_claims(request.args.get("t"), asset_id)
+    if not claims:
+        return jsonify({"error": "This playback link has expired"}), 401
+    if not storage.is_configured():
+        return jsonify({"error": "Video storage is not configured yet"}), 503
+    with vdb() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT a.* FROM assets a
+                       JOIN projects p ON p.id = a.project_id
+                       WHERE a.id = %s AND p.user_id = %s""",
+                    (asset_id, int(claims["sub"])))
+        a = cur.fetchone()
+    if not a:
+        return jsonify({"error": "Asset not found"}), 404
+    if _is_purged(a):
+        return jsonify({"error": _purged_message(a),
+                        "code": "media_purged"}), 410
+    first, last, suffix = _byte_range(request.headers.get("Range"))
+    if suffix is not None:
+        total = a.get("bytes") or storage.head_bytes(a["storage_key"])
+        if not total:
+            return jsonify({"error": "Could not read the video"}), 502
+        first, last = max(0, int(total) - suffix), int(total) - 1
+    cap = first + STREAM_CHUNK_BYTES - 1
+    last = cap if last is None else min(last, cap)
+    if last < first:
+        return Response(status=416, headers={"Accept-Ranges": "bytes"})
+    got = storage.open_range(a["storage_key"], first, last)
+    if got is None:
+        return jsonify({"error": "Could not read the video"}), 502
+    if got.get("unsatisfiable"):
+        headers = {"Accept-Ranges": "bytes"}
+        if got.get("total"):
+            headers["Content-Range"] = f"bytes */{got['total']}"
+        return Response(status=416, headers=headers)
+    body = got["body"]
+
+    def chunks():
+        try:
+            while True:
+                data = body.read(_STREAM_READ_BYTES)
+                if not data:
+                    break
+                yield data
+        finally:
+            try:
+                body.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    total = got["total"] if got["total"] is not None else "*"
+    return Response(chunks(), status=206, headers={
+        "Content-Type": got["content_type"] or "video/mp4",
+        "Content-Length": str(got["end"] - got["start"] + 1),
+        "Content-Range": f"bytes {got['start']}-{got['end']}/{total}",
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, max-age=3600",
+    })
 
 
 # ------------------------------------------------------------------ #

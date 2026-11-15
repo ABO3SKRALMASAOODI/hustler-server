@@ -1178,6 +1178,47 @@ def get_range_at(key, offset, length):
     return _read_first(one)
 
 
+def _content_range(value):
+    """(start, end, total) from an S3 Content-Range header, or None."""
+    try:
+        unit, _, rest = str(value or "").partition(" ")
+        span, _, total = rest.partition("/")
+        first, _, last = span.partition("-")
+        if unit != "bytes":
+            return None
+        return int(first), int(last), (int(total) if total != "*" else None)
+    except ValueError:
+        return None
+
+
+def open_range(key, first, last=None):
+    """A streaming read of bytes ``first``..``last`` (inclusive; None = to the
+    end) from the store that holds ``key``, for the playback relay.
+
+    Returns {"body", "start", "end", "total", "content_type"}, or
+    {"unsatisfiable": True, "total"} for a range past the end, or None when no
+    store could serve it. The body is a botocore stream the caller must close.
+    """
+    rng = f"bytes={int(first)}-" + ("" if last is None else str(int(last)))
+    name = _locate(key)
+    try:
+        obj = store_client(name).get_object(
+            Bucket=store_bucket(name), Key=key, Range=rng)
+    except Exception as exc:  # noqa: BLE001
+        if error_code(exc) == "InvalidRange":
+            return {"unsatisfiable": True, "total": head_bytes(key)}
+        return None
+    span = _content_range(obj.get("ContentRange"))
+    length = obj.get("ContentLength")
+    if span is None:
+        start, end = int(first), int(first) + int(length or 0) - 1
+        total = int(length or 0) if int(first) == 0 else None
+    else:
+        start, end, total = span
+    return {"body": obj["Body"], "start": start, "end": end, "total": total,
+            "content_type": obj.get("ContentType") or None}
+
+
 def get_object_whole(key, max_bytes, fast=True):
     """A WHOLE object in memory, or None if it is bigger than max_bytes.
 
