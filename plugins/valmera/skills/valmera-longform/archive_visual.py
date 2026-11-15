@@ -30,7 +30,7 @@ def preview(sc,catalogue,wps=3.3):
 def refine(ctx,proposal,catalogue,rounds=3):
     import cinema as C
     from wf4 import story
-    root=Path(ctx.supply)/'archive-visual';root.mkdir(exist_ok=True)
+    root=Path(ctx.supply)/'archive-visual-v2';root.mkdir(exist_ok=True)
     done=root/'proposal.json'
     if done.exists():return C.read(done)
     sc=copy.deepcopy(proposal['script'])
@@ -51,6 +51,7 @@ def refine(ctx,proposal,catalogue,rounds=3):
         else:
             failures=[dict(seg=shots[i]['seg'],words=shots[i]['say'],archive=shots[i]['clip'].get('catalogue_id'),
                            reason=report['evidence'].get(str(i),report['evidence'].get(i))['reason']) for i in report['rejected']]
+            from picture_check import REVIEW_PROMPT
             text,use=story.writer.ask('Offer truthful picture alternatives for this documentary using ONLY the inspected archive. '
                 'Keep every spoken word and chapter unchanged. Correct the rejected picture/word pairings where possible. '
                 'A label saying the action is not visible does not make irrelevant hardware illustrate that action. '
@@ -64,7 +65,8 @@ def refine(ctx,proposal,catalogue,rounds=3):
                 'Use short truthful source labels viewers can read, not internal review instructions. '
                 'Return JSON {segments:[{index,visual_beats:[{word_start,archive_ids:[literal IDs],label:optional source label}]}],unresolved:[specific remaining limitations],why:string}. '
                 'Return only segments whose visual choices change. Every listed segment must start at word_start zero. '
-                'Return concrete corrections promptly. Leaving an unsupported passage unresolved is valid and required when no candidate fits; never fake coverage.',
+                'Return concrete corrections promptly. Leaving an unsupported passage unresolved is valid and required when no candidate fits; never fake coverage. '
+                'Select pictures using this same distinction between truthful documentary context and false depiction: '+REVIEW_PROMPT,
                 json.dumps(dict(script=sc,archive=material,failures=failures,gaps=gaps,
                                 estimated_seconds=duration,covered_moving_share=report['moving_share'])),
                 effort='medium',max_tokens=24000,what='WF4 exact archive visual repair')
@@ -102,7 +104,7 @@ def apply_choices(script,ft,revised,catalogue):
 
 def prepare(ctx,script,ft):
     import cinema as C
-    root=Path(ctx.supply)/'archive-visual';marker=root/'applied.json'
+    root=Path(ctx.supply)/'archive-visual-v2';marker=root/'applied.json'
     if marker.exists():return
     catalogue=C.read(Path(ctx.supply)/'archive-catalogue/catalogue.json')
     proposal=C.read(Path(ctx.supply)/'archive-script/proposal.json')

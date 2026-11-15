@@ -841,6 +841,8 @@ def check(ctx,rd,sc):
                 Path(sc['l1']),Path(ctx.supply)/'shots.json',Path(rd['film']+'.json')]:
         shutil.copy2(src,evidence/src.name)
     shutil.copytree(Path(ctx.supply)/'picture-evidence',evidence/'pictures',dirs_exist_ok=True)
+    for calibration in Path(ctx.supply).glob('picture-calibration-*'):
+        shutil.copytree(calibration,evidence/calibration.name,dirs_exist_ok=True)
     shutil.copytree(metrics,evidence/'voice-metrics',dirs_exist_ok=True)
     shutil.copytree(stems,evidence/'audio-stems',dirs_exist_ok=True)
     subprocess.run([PX.FF,'-v','error','-y','-i',str(bed),'-c:a','flac',str(evidence/'audio-stems/music.flac')],check=True)
