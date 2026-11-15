@@ -289,97 +289,91 @@ def place_broll(ctx, steps, started, run, moments, hook_end, spend=None,
 
 
 _BROLL_CHECK = (
-    "Each numbered picture is a cutaway an editor placed while the speaker "
-    "says the quoted words. KEEP it when a viewer would see at once that it "
-    "shows what is being said (the thing named, literally or as a clear "
-    "example). DROP it when it is off-topic, a different thing that only "
-    "shares a word with the line, mostly text, a screenshot, a QR code, a "
-    "diagram nobody can read, noise, or broken. Answer with JSON only: "
-    "{\"drop\": [<picture numbers>]}.")
+    "Each numbered cutaway has the exact words spoken over its actual played interval. "
+    "Video pictures have three frames from that interval. Keep only pictures that "
+    "visibly show the exact thing described, or an unambiguous generic example when "
+    "the words are generic. A related category is insufficient (red meat is not shark "
+    "meat; a drone is not an airline pilot). Do not infer a named person's identity "
+    "from a video title, filename or caption: without an independently verified "
+    "reference comparison, reject a picture that purports to show a named person. "
+    "Reject uncertainty, off-topic pictures, mostly text, unreadable diagrams, "
+    "screenshots, noise or broken frames. Explicitly list every approved picture. "
+    "Answer JSON only: {\"keep\": [<picture numbers>], \"drop\": [<picture numbers>]}." )
 
 
 def verify_broll(ctx, steps, started, run, spend):
-    """One look by the trial model at every placed cutaway with the words
-    said over it; the off-topic ones are removed (judges: "a QR code on
-    'AlexNet'", "power lines with a moon on 'roughly'"). Returns the
-    cutaway windows that stand. Without the lane every cutaway stands."""
+    """Keep only explicitly approved actual intervals; unavailable checks fail closed."""
     import claude_lane
     import device_planner
     import llm
     import media_cache
-    model = getattr(ctx, "first_cut_model", None)
-    try:
-        edl = ctx.latest_edl()["json"]
-    except Exception:
-        return covered(ctx)
+    model = "gpt-6-sol"
+    edl = ctx.latest_edl()["json"]
     items = [it for it in edl.get("fx") or [] if isinstance(it, dict)
              and it.get("type") == "broll" and it.get("start") is not None]
-    if not items or not model or not first_cut_models.available(model):
-        return covered(ctx)
+    if not items:
+        return []
+    approved, ids, parts = set(), {}, []
     try:
+        if not first_cut_models.available(model):
+            raise RuntimeError("picture verifier unavailable")
         words = device_planner.program_words(edl, ctx.index or {})
-    except Exception:
-        words = []
-    parts, ids = [], {}
-    for n, it in enumerate(items, 1):
-        key = ((it.get("source") or {}).get("asset_key"))
-        try:
-            local = media_cache.lease(key, ctx.workdir, f"broll_check_{n}")
-        except Exception:
-            local = None
-        if not local:
-            continue
-        seek = [] if it.get("media") == "still" else \
-            ["-ss", f"{float((it.get('source') or {}).get('offset_s') or 0) + 0.8:.2f}"]
-        try:
-            jpg = subprocess.run(
-                ["ffmpeg", "-v", "error", "-nostdin", *seek, "-i", local,
-                 "-frames:v", "1", "-vf", "scale=384:-2", "-f", "image2",
-                 "-c:v", "mjpeg", "-q:v", "6", "-"],
-                capture_output=True, timeout=30).stdout
-        except Exception:
-            jpg = b""
-        if not jpg:
-            continue
-        a, b = float(it["start"]), float(it["end"])
-        said = " ".join(str(w.get("w") or "") for w in words
-                        if a - 1.2 <= float(w["t0"]) <= b + 0.3)
-        ids[n] = str(it.get("id"))
-        meant = str(it.get("moment") or "")[:90]
-        parts.append({"type": "text", "text": f"Picture {n}, said over it: "
-                                              f"\"{said[:200]}\""
-                                              + (f" (the editor wanted: {meant})"
-                                                 if meant else "")})
-        parts.append({"type": "image_url", "image_url": {
-            "url": "data:image/jpeg;base64," + base64.b64encode(jpg).decode()}})
-    if not ids:
-        return covered(ctx)
-    try:
-        resp = claude_lane.create(
-            model, [{"role": "system", "content": _BROLL_CHECK},
-                    {"role": "user", "content": parts}],
-            max_tokens=2000, effort="low")
-        text = resp.choices[0].message.content or ""
-        spend["usd"] += float(getattr(resp.usage, "provider_cost_usd", 0) or 0)
-        llm.record("first_cut_broll_check", {"model": model,
-                                              "pictures": len(ids)},
-                   {"content": text}, resp.usage)
-        print(f"[first_cut] b-roll check: {text.strip()[:200]}", flush=True)
-        match = re.search(r"\{.*\}", text, re.S)
-        drop = (json.loads(match.group(0)) if match else {}).get("drop") or []
-    except Exception as exc:  # noqa: BLE001 — the cutaways stand
-        print(f"[first_cut] b-roll check failed: {type(exc).__name__}: "
+        for n, it in enumerate(items, 1):
+            key = (it.get("source") or {}).get("asset_key")
+            try:
+                local = media_cache.lease(key, ctx.workdir, f"broll_check_{n}")
+                if not local:
+                    continue
+                a, b = float(it["start"]), float(it["end"])
+                offset = float((it.get("source") or {}).get("offset_s") or 0)
+                times = [None] if it.get("media") == "still" else [
+                    offset + max(0., b-a-.04)*fraction for fraction in (.1,.5,.9)]
+                pictures = []
+                for at in times:
+                    seek = [] if at is None else ["-ss", f"{at:.3f}"]
+                    result = subprocess.run(
+                        ["ffmpeg", "-v", "error", "-nostdin", *seek, "-i", local,
+                         "-frames:v", "1", "-vf", "scale=384:-2", "-f", "image2",
+                         "-c:v", "mjpeg", "-q:v", "6", "-"],
+                        capture_output=True, timeout=30)
+                    if not result.stdout:
+                        raise ValueError("missing picture frame")
+                    pictures.append({"type": "image_url", "image_url": {
+                        "url": "data:image/jpeg;base64," + base64.b64encode(result.stdout).decode()}})
+                said = " ".join(str(w.get("w") or "") for w in words
+                                if a-1.2 <= float(w["t0"]) <= b+.3)
+                parts.append({"type": "text", "text": f"Picture {n}, words: {said[:300]}"})
+                parts.extend(pictures)
+                ids[n] = str(it.get("id"))
+            except Exception as exc:
+                print(f"[first_cut] b-roll {n} unverified: {type(exc).__name__}", flush=True)
+        if ids:
+            resp = claude_lane.create(
+                model, [{"role": "system", "content": _BROLL_CHECK},
+                        {"role": "user", "content": parts}], max_tokens=2000, effort="low")
+            text = resp.choices[0].message.content or ""
+            spend["usd"] += float(getattr(resp.usage, "provider_cost_usd", 0) or 0)
+            llm.record("first_cut_broll_check", {"model": model, "pictures": len(ids)},
+                       {"content": text}, resp.usage)
+            verdict = json.loads(text[text.index("{"):text.rindex("}")+1])
+            drop = {n for n in verdict.get("drop", []) if type(n) is int}
+            approved = {ids[n] for n in verdict.get("keep", [])
+                        if type(n) is int and n in ids and n not in drop}
+    except Exception as exc:
+        print(f"[first_cut] b-roll verification unavailable: {type(exc).__name__}: "
               f"{str(exc)[:160]}", flush=True)
-        return covered(ctx)
-    gone = []
-    for d in drop:
-        try:
-            if int(d) in ids:
-                gone.append(ids[int(d)])
-        except (TypeError, ValueError):
-            continue
+    gone = [str(it.get("id")) for it in items if str(it.get("id")) not in approved]
     if gone:
         run(ctx, steps, "remove_broll", {"ids": gone}, started)
+        remaining = ctx.latest_edl()["json"].get("fx") or []
+        if any(str(it.get("id")) in gone for it in remaining):
+            # The ordinary craft runner can skip work near its render reserve.
+            # Removing an unverified picture is a mandatory, non-model write.
+            import agent_tools
+            agent_tools.execute(ctx, "remove_broll", {"ids": gone})
+            remaining = ctx.latest_edl()["json"].get("fx") or []
+        if any(str(it.get("id")) in gone for it in remaining):
+            raise ValueError("Unverified first-film pictures were not removed")
     return covered(ctx)
 
 

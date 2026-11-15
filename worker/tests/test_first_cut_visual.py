@@ -198,8 +198,10 @@ def _talking_chain(monkeypatch, q1):
         c.versions_written.append(1)
         if name == "source_broll":
             for m in args["moments"]:
-                c.edl["fx"].append({"type": "broll", "start": m["at"],
+                c.edl["fx"].append({"id": m["id"], "type": "broll", "start": m["at"],
                                     "end": m["at"] + m["duration_s"]})
+        if name == "remove_broll":
+            c.edl["fx"] = [f for f in c.edl["fx"] if f["id"] not in args["ids"]]
         return "EDL v2 ok"
     monkeypatch.setattr(agent_tools, "execute", execute)
 
@@ -424,7 +426,7 @@ def test_off_topic_cutaways_are_removed_after_one_look(monkeypatch, tmp_path):
          "media": "still", "source": {"asset_key": "a/1.jpg"}},
         {"id": "br2", "type": "broll", "start": 9.0, "end": 11.0,
          "media": "still", "source": {"asset_key": "a/2.jpg"}}]
-    monkeypatch.setattr(claude_lane, "available", lambda: True)
+    monkeypatch.setattr(fcv.first_cut_models, "available", lambda model: True)
     monkeypatch.setattr(media_cache, "lease",
                         lambda key, d, name: str(tmp_path / name))
     monkeypatch.setattr(sp, "run", lambda *a, **k: NS(stdout=b"\xff\xd8jpg"))
@@ -433,7 +435,7 @@ def test_off_topic_cutaways_are_removed_after_one_look(monkeypatch, tmp_path):
     def create(model, messages, **kw):
         seen["n"] = sum(1 for p in messages[1]["content"]
                         if p["type"] == "image_url")
-        return NS(choices=[NS(message=NS(content='{"drop": [2]}'))],
+        return NS(choices=[NS(message=NS(content='{"keep": [1], "drop": [2]}'))],
                   usage=NS(provider_cost_usd=0.002))
     monkeypatch.setattr(claude_lane, "create", create)
     calls = []
@@ -446,11 +448,11 @@ def test_off_topic_cutaways_are_removed_after_one_look(monkeypatch, tmp_path):
     left = fcv.verify_broll(ctx, [], 0.0, run, spend)
     assert seen["n"] == 2 and calls == [("remove_broll", {"ids": ["br2"]})]
     assert left == [(4.0, 6.0)] and spend["usd"] == 0.002
-    # without the lane every cutaway stands and no model is called
-    monkeypatch.setattr(claude_lane, "available", lambda: False)
+    # No unchecked picture survives an unavailable verifier.
+    monkeypatch.setattr(fcv.first_cut_models, "available", lambda model: False)
     ctx.edl["fx"].append({"id": "br3", "type": "broll", "start": 12.0,
                           "end": 14.0, "source": {"asset_key": "a/3.jpg"}})
-    assert fcv.verify_broll(ctx, [], 0.0, run, spend) == [(4.0, 6.0), (12.0, 14.0)]
+    assert fcv.verify_broll(ctx, [], 0.0, run, spend) == []
 
 
 def test_a_screen_ends_live_with_the_runon_muted():
@@ -607,3 +609,39 @@ def test_dense_first_film_cutaways_respect_tool_batch_limit(monkeypatch):
     assert all(1 <= len(call['moments']) <= 8 for call in calls)
     assert sum(len(call['moments']) for call in calls) == len(moments)
     assert all(m['duration_s'] >= 1 for call in calls for m in call['moments'])
+
+
+def test_video_checker_sees_only_played_interval_and_requires_explicit_approval(monkeypatch, tmp_path):
+    import claude_lane, media_cache
+    ctx = _EdlCtx(_talk_index())
+    ctx.workdir = str(tmp_path)
+    item = {'id': 'br1', 'type': 'broll', 'start': 4., 'end': 4.5,
+            'media': 'video', 'source': {'asset_key': 'a/clip.mp4', 'offset_s': 9.}}
+    monkeypatch.setattr(fcv.first_cut_models, 'available', lambda model: True)
+    monkeypatch.setattr(media_cache, 'lease', lambda *a: 'clip.mp4')
+    seeks = []
+    def grab(argv, **kw):
+        seeks.append(float(argv[argv.index('-ss')+1]))
+        return NS(stdout=b'jpg')
+    monkeypatch.setattr(fcv.subprocess, 'run', grab)
+    def run(c, steps, name, args, started):
+        c.edl['fx'] = [f for f in c.edl['fx'] if f['id'] not in args['ids']]
+    for reply, expected in [('{}', []), ('{"drop":[]}', []), ('not json', []),
+                            ('{"keep":[1],"drop":[1]}', []),
+                            ('{"keep":[1]}', [(4.,4.5)])]:
+        ctx.edl['fx'] = [dict(item)]
+        def call(model, messages, **kw):
+            assert model == 'gpt-6-sol'
+            assert sum(p['type']=='image_url' for p in messages[1]['content']) == 3
+            return NS(choices=[NS(message=NS(content=reply))], usage=NS(provider_cost_usd=0))
+        monkeypatch.setattr(claude_lane, 'create', call)
+        assert fcv.verify_broll(ctx, [], 0, run, {'usd':0}) == expected
+    assert len(seeks) == 15 and min(seeks) >= 9 and max(seeks) < 9.5
+    def unavailable(*a, **kw):
+        raise RuntimeError('quota unavailable')
+    monkeypatch.setattr(claude_lane, 'create', unavailable)
+    ctx.edl['fx'] = [dict(item)]
+    assert fcv.verify_broll(ctx, [], 0, run, {'usd':0}) == []
+    monkeypatch.setattr(fcv.subprocess, 'run', lambda *a, **kw: NS(stdout=b''))
+    ctx.edl['fx'] = [dict(item)]
+    assert fcv.verify_broll(ctx, [], 0, run, {'usd':0}) == []
