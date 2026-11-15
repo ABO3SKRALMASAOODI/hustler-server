@@ -156,6 +156,7 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
                     if r.status_code != 200:
                         if r.status_code in (400, 401, 403, 404, 422, 429):
                             lease.settle(usd=0)
+                            box["rejected"] = r.status_code      # refused before any generation: nothing was billed
                         text = r.read().decode(errors='replace')[:300]
                         box["error"] = RuntimeError(f"OpenAI HTTP {r.status_code}: {text}")
                         if not subscription and openai_credit.note(text, "director:" + str(purpose), status=r.status_code):
@@ -204,8 +205,13 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
         call._meter(model, usage.provider_cost_usd)
         raise call.Late(f"{purpose} past its deadline after {elapsed:.0f} s")
     if box.get("error") is not None:
-        openai_cache.record(model, purpose, status="transport_or_http_error",
-                            usd=0.0 if subscription else None, billing_unconfirmed=not subscription)
+        # 15 Nov 2026: a definite rejection before generation (a 429 credit refusal, a 400) bills nothing. Journaling it
+        # as unconfirmed billing made openai_budget refuse every Mac workflow and replay call for the rest of the day.
+        # Only an error whose billing is truly unknown (a broken stream, a timeout mid-answer) stays unconfirmed.
+        known_zero = subscription or box.get("rejected") is not None
+        openai_cache.record(model, purpose, status="http_rejected" if box.get("rejected") else "transport_or_http_error",
+                            usd=0.0 if known_zero else None, billing_unconfirmed=not known_zero,
+                            http_status=box.get("rejected"))
         raise box["error"]
     final = box.get("final") or {}
     # The API reports the actual serving tier beside usage, not inside it.

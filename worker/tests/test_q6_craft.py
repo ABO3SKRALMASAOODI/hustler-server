@@ -399,7 +399,7 @@ def test_the_scout_boxes_each_kept_shot_for_the_crop(monkeypatch):
                   usage=NS(provider_cost_usd=0.001))
     monkeypatch.setattr(claude_lane, "create", create)
     monkeypatch.setattr(first_cut.llm, "record", lambda *a, **k: None)
-    ctx = NS(first_cut_model="m", proxy_path=lambda: "x.mp4")
+    ctx = NS(first_cut_model="claude-haiku-5-5", proxy_path=lambda: "x.mp4")
     out, title = first_cut.montage_scout(ctx, windows, {"usd": 0.0}, boxes=True)
     assert "BOXES" in seen["system"] and "aftermath" in seen["system"]
     assert out == [w for n, w in enumerate(windows, 1) if n <= 9 and n != 2]

@@ -187,3 +187,34 @@ def test_local_transport_failure_does_not_create_unknown_paid_billing(monkeypatc
                     purpose="local_test", deadline=time.monotonic()+5)
     assert journal[-1]["usd"] == 0.0
     assert journal[-1]["billing_unconfirmed"] is False
+
+
+@pytest.mark.parametrize("status,body,unconfirmed", [
+    (429, b'{"error":{"code":"insufficient_quota","message":"credit_balance_exhausted"}}', False),
+    (400, b'{"error":{"message":"bad request"}}', False),
+    (503, b"upstream busy", True),
+])
+def test_a_rejection_before_generation_is_journaled_as_zero_not_unknown_billing(monkeypatch, tmp_path, status, body, unconfirmed):
+    """15 Nov 2026: a 429 credit refusal was journaled as unconfirmed billing, and openai_budget then refused every Mac
+    workflow and replay call for the rest of the day. A pre-generation rejection bills nothing; only an error whose
+    billing is truly unknown stays unconfirmed (and still closes the day)."""
+    import openai_budget
+    import openai_credit
+    _client_with(monkeypatch, lambda req: httpx.Response(status, content=body))
+    monkeypatch.setattr(openai_credit, "available", lambda: True)
+    monkeypatch.setattr(openai_credit, "note", lambda *a, **k: status == 429)
+    journal = []
+    monkeypatch.setattr(call_openai.openai_cache, "record", lambda *a, **kw: journal.append(kw))
+    with pytest.raises((RuntimeError, call.Refused)):
+        call.stream("gpt-6-sol", "s", "c", max_tokens=10, effort="low", purpose="p", deadline=time.monotonic() + 5)
+    row = journal[-1]
+    assert row["billing_unconfirmed"] is unconfirmed and (row["usd"] is None) is unconfirmed
+    log = tmp_path / "spend.jsonl"
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    log.write_text(json.dumps(dict(ts=day + "T10:00:00Z", **row)) + "\n")
+    monkeypatch.setenv("VALMERA_OPENAI_SPEND_LOG", str(log))
+    if unconfirmed:
+        with pytest.raises(openai_budget.OverBudget):
+            openai_budget.legacy_workflow_total(day)
+    else:
+        assert openai_budget.legacy_workflow_total(day) == 0
