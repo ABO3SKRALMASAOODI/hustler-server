@@ -194,7 +194,7 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None):
         candidates += [('photo', name, p) for name in names for p in pictures.get(name, [])]
         blocked={r['source'] for r in coverage.get('blocked_sources',[]) if r['window']==i}
         pool=[row for row in candidates if (i,row[2]['path']) not in rejected
-              and (row[2].get('source') or {}).get('url') not in blocked]
+              and ((row[2].get('source') or {}).get('url') or row[2].get('page')) not in blocked]
         distinct=[]
         for row in pool:
             if (i,row[2]['path']) in rejected:continue

@@ -100,6 +100,9 @@ def test_source_rejection_is_confined_to_the_contradictory_passage():
     footage={i:[dict(path=f'clip-{i}',seconds=1.,source=dict(url='later-interview'))] for i in range(2)}
     rows=C.proposals(cov,footage,{})
     assert len(rows)==1 and rows[0][4]['window']==1
+    pages={'Institution':[dict(path='later-page',page='later-interview')]}
+    stills=C.proposals(cov,{},pages)
+    assert len(stills)==1 and stills[0][4]['window']==1
     assert cov['windows'][0]['first']==0
 
 
