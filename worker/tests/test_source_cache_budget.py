@@ -3,6 +3,7 @@
 import hashlib
 import os
 import time
+from pathlib import Path
 
 import config
 import renderer
@@ -72,6 +73,39 @@ def test_cache_hit_does_not_issue_a_storage_size_request(tmp_path, monkeypatch):
     monkeypatch.setattr(renderer.storage, "object_bytes", unexpected)
 
     assert renderer._cached_source(key) == str(cached)
+
+
+def test_concurrent_prune_does_not_delete_a_download_before_its_atomic_rename(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "TMP_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "SOURCE_CACHE_MAX_ITEM_BYTES", 20)
+    monkeypatch.setattr(config, "SOURCE_CACHE_MAX_BYTES", 20)
+    monkeypatch.setattr(renderer.storage, "object_bytes", lambda _key: 7)
+
+    def download(_key, path):
+        partial = Path(path + ".boto-transfer")
+        partial.write_bytes(b"source!")
+        renderer._prune_source_cache(str(partial.parent))
+        os.replace(partial, path)
+
+    monkeypatch.setattr(renderer.storage, "download_to", download)
+    cached = renderer._cached_source("originals/concurrent.mp4")
+    assert cached is not None
+    assert Path(cached).read_bytes() == b"source!"
+
+
+def test_prune_reaps_stale_transfer_parts_but_keeps_live_transfers(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "SOURCE_CACHE_MAX_ITEM_BYTES", 20)
+    monkeypatch.setattr(config, "SOURCE_CACHE_MAX_BYTES", 10)
+    now = time.time()
+    stale, active, finished = (tmp_path / n for n in ("old.mp4.part-old", "new.mp4.part-live", "done.mp4"))
+    _sized(stale, 7, now - 7 * 3600)
+    _sized(active, 7, now)
+    _sized(finished, 11, now - 10)
+    renderer._prune_source_cache(str(tmp_path))
+    assert not stale.exists()
+    assert active.exists()
+    assert not finished.exists()
 
 
 def test_job_hardlink_survives_concurrent_prune_before_ffmpeg_open(
