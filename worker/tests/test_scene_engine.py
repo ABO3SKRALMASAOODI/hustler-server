@@ -1062,6 +1062,55 @@ def test_a_seam_shows_the_new_picture_to_its_left_and_leans(pics):
     assert np.abs(moved[:, :240] - b[:, :240]).max() <= 2, "the seam follows its baked x"
 
 
+def test_long_asset_sequence_releases_textures_without_changing_pixels(tmp_path):
+    """Real GL uploads stay bounded, including revisits and two-picture junctions."""
+    still = str(tmp_path / "still.png")
+    Image.fromarray(bars_img(160, 90)).save(still)
+    video = str(tmp_path / "video.mp4")
+    encode(video, (barcode(n, 160, 90) for n in range(4)), 160, 90)
+    assets, items = {}, []
+    for i in range(24):
+        aid = f"asset{i}"
+        assets[aid] = {"kind": "video" if i % 2 else "image", "path": video if i % 2 else still}
+        items.append({"id": f"s{i}", "k": "shot", "f": [i * 4, i * 4 + 4],
+                      "pic": aid, "src": [0, 4 / FPS], "crop": [0, 0, 1, 1]})
+    items.append({"id": "j", "k": "join", "f": [92, 96], "mode": "seam",
+                  "pic": "asset0", "crop": [0, 0, 1, 1], "x": 0.5})
+    l1 = film(items, dur=96, assets=assets, frame=(160, 90))
+    revisit = [5, 94, 0, 95]
+    frames = [f for f in range(96) if f not in revisit] + revisit
+
+    def draw(bounded):
+        e = RUN.Engine(SC.compile(l1, str(tmp_path), segment=False))
+        if not bounded:
+            e.rt.retire_pictures = lambda: None
+        pixels, counts, retired = [], [], []
+        e.start(frames)
+        try:
+            for f in frames:
+                previous = [s["tex"] for v in e.rt.pics.values()
+                            for s in (v if isinstance(v, list) else [v])]
+                pixels.append(e.rt.frame_array(f, e.advance(f)).copy())
+                e.rt.reader.release(f)
+                current = [s["tex"] for v in e.rt.pics.values()
+                           for s in (v if isinstance(v, list) else [v])]
+                retired.extend(t for t in previous if t not in current)
+                counts.append(len(current))
+            if bounded:
+                assert max(counts) <= 7, counts
+                assert retired and all(type(t.mglo).__name__ == "InvalidObject" for t in retired)
+            else:
+                assert max(counts) >= 48
+            return pixels
+        finally:
+            e.close()
+
+    control = draw(False)
+    bounded = draw(True)
+    for f, expected, actual in zip(frames, control, bounded):
+        assert np.array_equal(actual, expected), f
+
+
 def test_a_weave_goes_over_and_under(pics):
     a, b = one(small([pic_shot("a")], 4, pics)), one(small([pic_shot("b")], 4, pics))
     j = {"id": "j", "k": "join", "f": [0, 4], "mode": "weave", "pic": "b", "crop": [0, 0, 1, 1], "pitch": 0.1, "falloff": 0.0, "shadow": 0.0}

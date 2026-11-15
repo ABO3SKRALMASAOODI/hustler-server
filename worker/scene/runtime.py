@@ -221,6 +221,8 @@ class Runtime:
             self.mask_tex.repeat_x = self.mask_tex.repeat_y = False
             self.mask_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
         self.pics = {}
+        self.picture_epoch = 0
+        self.picture_seen = {}
         self.soft = {}                     # blurred sprites, kept while a word's blur holds (``soft_sprite``)
         self.base = self.base_fb = None    # the base picture, kept for the frames where the person is drawn again over what stands behind him
         self.reader = None
@@ -304,6 +306,21 @@ class Runtime:
 
     # src ---------------------------------------------------------
 
+    def retire_pictures(self):
+        """Keep only the previous draw's working set, not every asset in the film.
+
+        Draw epochs are independent of source/timeline frames: segment rendering can
+        jump backwards, and a junction can read clamped frames from two pictures.
+        Retire only at the next frame boundary, never while a draw holds a texture.
+        """
+        self.picture_epoch += 1
+        for aid, seen in list(self.picture_seen.items()):
+            if seen < self.picture_epoch - 1:
+                slots = self.pics.pop(aid)
+                for slot in slots if isinstance(slots, list) else [slots]:
+                    slot["tex"].release()
+                del self.picture_seen[aid]
+
     def picture(self, it, f):
         """The texture of this item's picture on this frame, uploaded once."""
         from PIL import Image, ImageOps
@@ -311,6 +328,7 @@ class Runtime:
         a = self.plan.assets.get(aid)
         if a is None:
             return None
+        self.picture_seen[aid] = self.picture_epoch
         if a.get("kind") == "video":
             n = self.plan.src_frame(it, f)
             slots = self.pics.setdefault(aid, [])
@@ -364,6 +382,7 @@ class Runtime:
 
     def matte_tex(self, shot, f):
         """The person's matte for this shot and frame, uploaded once per frame of the matte."""
+        self.picture_seen["matte"] = self.picture_epoch
         n = self.plan.matte_frame(shot, f)
         a = self.plan.assets["matte"]
         s = self.pics.get("matte")
@@ -913,6 +932,7 @@ class Runtime:
         pass. It is the same sum (type over film over the composite, then the way out), so the frame
         is the same. A frame with a flash, a blend-mode word, a junction over the type, or a film
         that lays grain or mesh over its type is drawn in the order of the stages, as it always was."""
+        self.retire_pictures()
         ctx, mgl = self.ctx, self.mgl
         self.mark("between")
         t = time.perf_counter()
