@@ -561,8 +561,6 @@ def _child_matte(spec, ch):
     params, srcinfo, engine = spec["params"], spec["source"], spec["engine"]
     sw, sh = int(srcinfo["width"]), int(srcinfo["height"])
     w = _even(min(sw, int(params.get("max_w") or sw)))
-    if params.get('max_side'):
-        w = _even(min(w, sw * min(1., float(params['max_side']) / max(sw, sh))))
     h = _even(sh * w / float(sw))
     fps = min(float(params.get("fps_max") or 30.0), float(srcinfo["fps"]))
     warm = float(ch.get("warmup") or 0.0)
@@ -582,14 +580,6 @@ def _child_matte(spec, ch):
 
         def alpha_of(frame):
             return stream.step(frame, cv2)
-    refiner = None
-    if params.get('refine'):
-        import matte_refine
-        from sidecar_kinds import model_file
-        path, why = model_file('efficientsam_ti')
-        if not path:
-            raise RuntimeError('Compositing matte support model unavailable: ' + str(why))
-        refiner = matte_refine.Refiner(path, engine.get('threads') or 4)
     out = os.path.join(spec["outdir"], f"{ch['out_key']}.mp4")
     import tempfile
     enc_err = tempfile.TemporaryFile()
@@ -608,8 +598,6 @@ def _child_matte(spec, ch):
                              n_warm + n_out):
             t = time.perf_counter()
             a = alpha_of(frame)
-            if refiner is not None:
-                a = refiner.step(frame, a, cv2)
             t_model += time.perf_counter() - t
             i += 1
             if i <= n_warm:
