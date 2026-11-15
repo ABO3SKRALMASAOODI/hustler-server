@@ -139,6 +139,33 @@ def index_from_hearing(h, video, shots, speakers):
                 speakers=speakers, silences=[], moments=[], perception=None, warnings=[], version="wf-shell-1")
 
 
+def external_hearing(ctx, src, duration):
+    """Optional isolated local-ASR transport; bind its word times to these bytes."""
+    import hashlib
+    import math
+    import shlex
+    command=os.environ.get('SHELL_HEAR_CMD')
+    if not command:return False
+    digest=hashlib.file_digest(open(src,'rb'),'sha256').hexdigest()
+    request=dict(source=os.path.abspath(src),source_sha256=digest,duration_s=duration)
+    result=subprocess.run(shlex.split(command),input=json.dumps(request),capture_output=True,text=True,timeout=900)
+    if result.returncode:raise RuntimeError('external local transcription failed: '+result.stderr[-400:])
+    response=json.loads(result.stdout)
+    if response.get('source_sha256')!=digest:raise ValueError('transcription source hash mismatch')
+    hearing=response.get('hearing') or {}
+    previous=-1.
+    for line in hearing.get('lines') or []:
+        for word in line.get('words') or []:
+            a,b=float(word['t0']),float(word['t1'])
+            if not word.get('w') or not all(math.isfinite(t) for t in (a,b)) or a<0 or b<a or b>duration+.1 or a<previous:
+                raise ValueError('invalid external word timing')
+            previous=a
+    if previous<0:raise ValueError('external transcription returned no timed words')
+    hearing['transport']=dict(source_sha256=digest,engine=response.get('engine'))
+    with open(os.path.join(ctx.supply,'hearing.json'),'w') as f:json.dump(hearing,f,ensure_ascii=False)
+    return True
+
+
 def pack(ctx, script):
     """supply/{source.mp4, hearing.json, index.json, session.json}: the window as a session the slice reads."""
     link(ctx)
@@ -148,8 +175,9 @@ def pack(ctx, script):
     if not os.path.exists(os.path.join(w, "index.json")):
         cut(ctx, script["source"], t0, t1, src + ".part.mp4")
         os.replace(src + ".part.mp4", src)
-        sh(ctx, [ATLAS_PY, "hear.py", ctx.sid], label=f"wf-hear-{ctx.run_id}", heavy=True, timeout=3600)
         p = brand.probe(src)
+        if not external_hearing(ctx,src,p["dur"]):
+            sh(ctx, [ATLAS_PY, "hear.py", ctx.sid], label=f"wf-hear-{ctx.run_id}", heavy=True, timeout=3600)
         video = dict(fps=round(p["fps"], 3), width=p["w"], height=p["h"], duration=round(p["dur"], 3), has_audio=p["audio"], vfr_normalized=False)
         idx = index_from_hearing(json.load(open(os.path.join(w, "hearing.json"))), video, shots_of(src, p["dur"]), script.get("speakers", 1))
         sess = dict(sid=ctx.sid, project_id=None, family="workflow", title=script.get("title"), kind="workflow", mode=ctx.workflow,

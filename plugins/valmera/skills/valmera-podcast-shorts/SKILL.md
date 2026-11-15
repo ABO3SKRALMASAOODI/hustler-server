@@ -187,3 +187,5 @@ Sound attacks are balanced against the calibrated bed, then checked against deco
 stem fit and T2 test. One bounded rebalance changes only already-earned effects; one further bed-only
 correction handles changed limiter gain. Test runs retain their
 stems and scene evidence beside the exports before ordinary workflow scratch cleanup.
+
+When local ASR is queued behind shared Mac jobs, `SHELL_HEAR_CMD` may route the exact clip to an isolated local Whisper worker. The transport returns source SHA-256, engine provenance, and ordered word times; the shell rejects another source or out-of-range timings. It never substitutes untimed platform captions for alignment.

@@ -253,3 +253,25 @@ def test_unchanged_final_motion_failure_stops_without_retry(tmp_path,monkeypatch
     sc=dict(beats=dict(pictures=[dict(path='still.mp4')]))
     with pytest.raises(RuntimeError,match='lack verified moving footage'):
         wf._rebuild_motion(ctx,{},sc,dict(placements=[dict(id=0,ok=True,motion_ok=False)]))
+
+
+@pytest.mark.parametrize('wrong_hash,bad_time',[(True,False),(False,True),(False,False)])
+def test_external_hearing_is_bound_to_source_and_valid_times(tmp_path,monkeypatch,wrong_hash,bad_time):
+    import hashlib
+    import chain
+    source=tmp_path/'source.mp4';source.write_bytes(b'original media')
+    digest=hashlib.sha256(source.read_bytes()).hexdigest()
+    hearing=dict(lines=[dict(words=[dict(w='Actual',t0=0,t1=99 if bad_time else .4)])])
+    response=dict(source_sha256='wrong' if wrong_hash else digest,hearing=hearing,engine={'provider':'local-whisper'})
+    monkeypatch.setenv('SHELL_HEAR_CMD','isolated-transcriber')
+    def process(cmd,**kwargs):
+        assert json.loads(kwargs['input'])['source_sha256']==digest
+        return SimpleNamespace(returncode=0,stdout=json.dumps(response),stderr='')
+    monkeypatch.setattr(chain.subprocess,'run',process)
+    ctx=SimpleNamespace(supply=str(tmp_path))
+    if wrong_hash or bad_time:
+        with pytest.raises(ValueError):chain.external_hearing(ctx,str(source),1.)
+        assert not (tmp_path/'hearing.json').exists()
+    else:
+        assert chain.external_hearing(ctx,str(source),1.)
+        assert json.load(open(tmp_path/'hearing.json'))['transport']['source_sha256']==digest
