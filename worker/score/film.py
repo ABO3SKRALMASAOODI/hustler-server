@@ -1103,6 +1103,10 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
 
     rec["at"] = "scout"
     t = time.monotonic()
+    import source_typography
+    ctx.index = index
+    source_typography.refresh_index(ctx, worker_db, original.get("sha256"))
+    index = ctx.index
     try:
         sc = scout.run(work, index, sess, per, min(deadline - 60.0, time.monotonic() + flags.SCOUT_S), model=cfg["models"]["scout"])
     except call.Refused:
@@ -1113,6 +1117,8 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
     _stage(rec, "scout", t)
 
     index = scout.printed_spellings(index, sc)
+    if (sc or {}).get("source_typography"):
+        index = {**index, "source_typography": sc["source_typography"]}
     with open(os.path.join(work, "index.json"), "w") as f:
         json.dump(index, f, ensure_ascii=False)
     # Any fallback captions in this same job retain the evidence too.
@@ -1151,8 +1157,9 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
     rec["prep_detail"]["remaining_boards_s"] = board_future.result()
     rec["prep_detail"]["boards_wait_s"] = round(time.monotonic() - t, 3)
     _say(ctx, worker_db, "director_direct", "Directing your film")
-    import source_typography
-    source_typography.refresh(ctx, worker_db, original.get("sha256"))
+    # Scout reads the upload's typography in its existing bounded call.
+    # Never spend the remaining Direct/render reserve on a second model call.
+    source_typography.refresh_index(ctx, worker_db, original.get("sha256"))
     index = ctx.index
     with open(os.path.join(work, "index.json"), "w") as f:
         json.dump(index, f, ensure_ascii=False)
