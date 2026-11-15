@@ -188,7 +188,7 @@ class _EdlCtx:
         raise RuntimeError("no proxy in tests")
 
 
-def _talking_chain(monkeypatch, q1):
+def _talking_chain(monkeypatch, q1, worker_db=None):
     ctx = _EdlCtx(_talk_index())
     ctx.first_cut_q1 = q1
     calls = []
@@ -211,7 +211,7 @@ def _talking_chain(monkeypatch, q1):
                              for k in range(5)] if q1 else None
         return 0.0, c.duration, "rules"
     monkeypatch.setattr(first_cut, "trim_range", trim)
-    first_cut.video_chain(c := ctx, None, _clock(), {"usd": 0})
+    first_cut.video_chain(c := ctx, worker_db, _clock(), {"usd": 0})
     assert c is ctx
     return calls
 

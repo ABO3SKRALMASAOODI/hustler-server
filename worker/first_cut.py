@@ -2078,7 +2078,9 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
     own ends trimmed (a mic check, a trailing fragment) and the rest kept."""
     _await_first_cut_storyboard(ctx, worker_db)
     import source_typography
-    typography = source_typography.prepare(ctx)
+    # Director can fall back before joining the late storyboard. The chain
+    # must use evidence completed since that earlier attempt too.
+    typography = source_typography.refresh(ctx, worker_db)
     import talk_craft
     burned = source_typography.captioned(ctx.index) or (_talk_source(ctx) and talk_craft.burned_captions(ctx.index))
     steps, applied = [], []
