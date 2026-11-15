@@ -269,7 +269,9 @@ def test_render_version_stamps_are_unchanged():
     56b8736 cards align to indexed camera cuts) after the Wave 1 base was
     cut, so the integration re-pinned it to 3. PIPELINE_VERSION 13 refreshes
     cached transcripts after independent ASR verification; render stamps
-    are unchanged. No Wave 1 track moves a stamp."""
+    are unchanged. SPEED2 round3 moves MASTER_VERSION to 2: the encoded
+    social master now verifies integrated loudness, so pre-fix quiet
+    renders must not be cache hits. No Wave 1 track moves a stamp."""
     import config
     with open(os.path.join(FIX, "w1_render_stamps.json")) as f:
         pin = json.load(f)
