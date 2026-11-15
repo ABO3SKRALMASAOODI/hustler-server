@@ -72,6 +72,14 @@ def apply(l1, index, perception):
                 item["crop"] = [list(full) for _ in rects] if track else list(full)
                 item["source_full_frame"] = True
             reason = "subject_boxes_contained" if safe else "full_frame_subject_outside_crop"
+            if safe and all(c[0] <= 0 and c[1] <= 0 and c[2] >= 1 and c[3] >= 1
+                            for c in rects) and any(
+                    c[0] < 0 or c[1] < 0 or c[2] > 1 or c[3] > 1 for c in rects):
+                # The compiler already fitted the entire source to preserve
+                # its marks. Carry that intent through the existing lowering
+                # contract too; otherwise an off-spine shot is covered again.
+                item["source_full_frame"] = True
+                reason = "full_frame_existing_fit"
         report.append({"id": item["id"], "source": [start, end], "reason": reason,
                        "subject_boxes": len(boxes), "crop": item.get("crop")})
     return report
