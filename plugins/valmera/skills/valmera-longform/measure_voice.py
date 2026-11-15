@@ -42,6 +42,9 @@ def measure(path, expected, cache):
     st=12*np.log2(f0/100)
     raw=M.wer(expected,heard['text'])
     normalized=spoken.spoken_form(heard['text'],expected,[])
+    # Keep the exact normalization and its letter-preservation guard for the
+    # independent reviewer; raw WER stays visible beside the spoken-form WER.
+    (cache/'wer-spoken.json').write_text(json.dumps(normalized,indent=1))
     final=M.wer(expected,normalized['text']) if normalized.get('ok') else raw
     r=dict(seconds=len(x)/sr,words=len(words),wer=final['wer'],wer_raw=raw['wer'],errors=final,
            pauses_per_min=round(len(gaps)/span*60,5),median_pause_s=round(float(np.median(gaps)),5) if gaps else None,
