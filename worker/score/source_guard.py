@@ -112,19 +112,6 @@ def apply(l1, index, perception, *, views=None):
         if start < 0 or end > end_limit + 1e-6:
             raise ValueError(f"first film reads outside cleared source footage: "
                              f"{start:.6f}-{end:.6f}, limit {end_limit:.6f}")
-        if static_text_needs_fit(perception, start, end, w, h):
-            # Lowering already supports a source rectangle extending past
-            # the canvas: the on-spine source is fitted over its blurred
-            # backdrop. Do not override that geometry with a saliency crop.
-            fit_w, fit_h = max(1., ratio), max(1., 1 / ratio)
-            item["crop"] = [.5 - fit_w / 2, .5 - fit_h / 2,
-                            .5 + fit_w / 2, .5 + fit_h / 2]
-            item["source_full_frame"] = True
-            palette = (perception or {}).get("palette") or []
-            item["source_fit_background"] = palette[0].get("hex", "#202020") if palette else "#202020"
-            report.append({"id": item["id"], "source": [start, end],
-                           "reason": "static_source_text_fit", "crop": item["crop"]})
-            continue
         overlaps = [s for s in shots if s["start"] < end and s["end"] > start]
         boxes, missing = [], not overlaps
         for shot in overlaps:
@@ -145,6 +132,21 @@ def apply(l1, index, perception, *, views=None):
         detail = _named_detail(item, views, rects, ratio, shots, boxes)
         safe = safe or detail
         reason = "named_detail_crop" if detail else "subject_boxes_contained"
+        # A verified named view is already a model-selected source detail;
+        # unrelated desktop headings must not replace it with the whole screen.
+        if not detail and static_text_needs_fit(perception, start, end, w, h):
+            # Lowering already supports a source rectangle extending past
+            # the canvas: the on-spine source is fitted over its blurred
+            # backdrop. Do not override that geometry with a saliency crop.
+            fit_w, fit_h = max(1., ratio), max(1., 1 / ratio)
+            item["crop"] = [.5 - fit_w / 2, .5 - fit_h / 2,
+                            .5 + fit_w / 2, .5 + fit_h / 2]
+            item["source_full_frame"] = True
+            palette = (perception or {}).get("palette") or []
+            item["source_fit_background"] = palette[0].get("hex", "#202020") if palette else "#202020"
+            report.append({"id": item["id"], "source": [start, end],
+                           "reason": "static_source_text_fit", "crop": item["crop"]})
+            continue
         if not safe:
             count = len(rects)
             if not track and item.get("f") and len(item["f"]) == 2:
