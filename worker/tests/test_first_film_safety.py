@@ -137,14 +137,22 @@ def test_existing_edits_outside_first_film_unchanged():
     assert source_guard.apply(film, index, {}) == [] and film == before
 
 
-def test_safe_source_cutaway_is_contained_not_recropped_by_overlay_cover(tmp_path):
+@pytest.mark.parametrize("already_fitted", [False, True])
+def test_safe_source_cutaway_is_contained_not_recropped_by_overlay_cover(tmp_path, already_fitted):
     from score import lower
     from types import SimpleNamespace
     film, index = _scene()
     film.update(fps=30, spine=[], assets={"main": {"kind": "video", "path": "source.mp4",
                                                "w": 1920, "h": 1080}})
     film["items"][0].update(k="shot", f=[0, 42])
-    source_guard.apply(film, index, {})
+    perception = {}
+    if already_fitted:
+        # Printed source words made the compiler fit the picture before the
+        # subject guard. A visible face must not turn that fit back into cover.
+        h = (1920 / 1080) / (720 / 1280)
+        film["items"][0]["crop"] = [0, (1-h)/2, 1, (1+h)/2]
+        perception = {"samples": [{"t": 7.5, "face": [.3, .2, .5, .4]}]}
+    source_guard.apply(film, index, perception)
     bake = SimpleNamespace(locals={}, plate=lambda *a: "backing.png")
     overlays, *_ = lower.lower_pictures(film, str(tmp_path), bake, {})
     foreground = next(o for o in overlays if o["asset_key"] == "main")
