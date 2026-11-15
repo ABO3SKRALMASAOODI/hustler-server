@@ -762,6 +762,15 @@ def photo_briefs(ctx, named):
     return briefs, [use]
 
 
+def recording_source(script, role):
+    """Carry the authenticated recording's identity into the ordinary visual matcher."""
+    receipts = script["receipts"]
+    title = "THE UPLOAD — original clip uploaded to Valmera" if role == "upload" else "THE EXPORT — actual Valmera export"
+    return dict(url="valmera studio recording", title=title,
+                description=f"Recorded synthetic Studio session. {role} SHA256: {receipts[role]['sha256']}. "
+                            f"Exact submitted request: {receipts['typed']}")
+
+
 def supply(ctx, script):
     sc = script["script"]
     sup_dir = ctx.supply
@@ -840,16 +849,16 @@ def supply(ctx, script):
     pc = product_clips(script, os.path.join(fdir, "product"))
     pr = sc["proof"]
     voices = [dict(after=int(pr["before_after"]), person="before", wav="product/before.wav", file="product/before.mp4", said=None,
-                   source=dict(url="valmera studio recording: the clip as uploaded"), time_range=pc["before"]["t"]),
+                   source=recording_source(script, "upload"), time_range=pc["before"]["t"]),
               dict(after=int(pr["after_after"]), person="after", wav="product/after.wav", file="product/after.mp4", said=None,
-                   source=dict(url="valmera studio recording: the export"), time_range=pc["after"]["t"])]
+                   source=recording_source(script, "export"), time_range=pc["after"]["t"])]
     placed = splice(ctx, narr_dir, fdir, voices)
     if len(placed) != 2:
         raise RuntimeError(f"the recording was not cut into the narration: {placed}")
     pack["voices"] = [dict(p, clip=W3.clip_facts(dict(path=p["file"], file=os.path.basename(p["file"]), subject=p["person"],
                                                       seconds=round(p["end"] - p["start"], 3)))) for p in placed]
     tease = W3.clip_facts(dict(path=os.path.join(fdir, "product", "tease.mp4"), file="product/tease.mp4", subject="valmera export", seconds=1.3,
-                               source=dict(url="valmera studio recording: the export"), time_range=pc["tease"]["t"]))
+                               source=recording_source(script, "export"), time_range=pc["tease"]["t"]))
     if pack["footage"]:
         pack["footage"][0]["clips"].insert(0, tease)
     else:
@@ -873,7 +882,8 @@ def supply(ctx, script):
                 fn = f"product/{'upload' if name == 'THE UPLOAD' else 'export'}_{k}.mp4"
                 cut(path, t, t + 1.4, os.path.join(fdir, fn), audio=False)
                 c = W3.clip_facts(dict(path=os.path.join(fdir, fn), file=fn, subject=name, seconds=1.4,
-                                       source=dict(url="valmera studio recording"), time_range=[round(t, 2), round(t + 1.4, 2)]))
+                                       source=recording_source(script, "upload" if name == "THE UPLOAD" else "export"),
+                                       time_range=[round(t, 2), round(t + 1.4, 2)]))
                 lines.setdefault(i, dict(i=i, clips=[]))["clips"].append(c)
     pack["footage"] = [lines[k] for k in sorted(lines)]
     talk = {}
