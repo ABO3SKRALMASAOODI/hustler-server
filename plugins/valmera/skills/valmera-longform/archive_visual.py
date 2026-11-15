@@ -8,8 +8,9 @@ import copy,json,hashlib
 
 
 def work_dir(ctx,proposal,catalogue):
+    from review_cache import checker_bytes
     inputs=dict(words=[s['say'] for s in proposal['script']['segments']],catalogue=catalogue,
-                checker=Path(__file__).with_name('picture_check.py').read_text(),planner=Path(__file__).read_text())
+                checker=checker_bytes().decode(),planner=Path(__file__).read_text())
     key=hashlib.sha256(json.dumps(inputs,sort_keys=True).encode()).hexdigest()[:16]
     return Path(ctx.supply)/'archive-visual'/key
 
@@ -156,7 +157,28 @@ def prepare(ctx,script,ft):
         raise ValueError('audited words changed before visual preflight')
     root=work_dir(ctx,proposal,catalogue);marker=root/'applied.json'
     if marker.exists():return
+    # A resumed, recorded edit has a more precise word clock than preflight.
+    # Validate that actual edit before considering a provisional-clock redo;
+    # otherwise a planner update can overwrite later, checked picture repairs.
+    if recorded_edit_ready(ctx,script,ft):
+        C.save(marker,dict(words_unchanged=True,planning=False,verified_on_recorded_clock=True))
+        return
     revised=refine(ctx,proposal,catalogue)
     apply_choices(script,ft,revised,catalogue)
     C.save(Path(ctx.run_dir)/'script.json',script);C.save(Path(ctx.supply)/'footage/footage.json',ft)
     C.save(marker,dict(words_unchanged=True,planning=revised.get('preflight')))
+
+
+def recorded_edit_ready(ctx,script,ft):
+    import cinema as C
+    nd=Path(ctx.supply)/'narration'
+    stage=nd/'read-stage.json';gate=nd/'check.json'
+    if not stage.exists() or not gate.exists():return False
+    if C.read(stage).get('script')!=C.wf4.story.narration_script(script['script']):return False
+    if not C.read(gate).get('gate',{}).get('pass'):return False
+    clock=nd/'words_narrator.json'
+    if not clock.exists():clock=nd/'words.json'
+    if not clock.exists():return False
+    try:shots,_,_=C.schedule(script['script'],str(clock),ft)
+    except C.CoverageError:return False
+    return C.source_review(ctx,shots,required=False)['ok']

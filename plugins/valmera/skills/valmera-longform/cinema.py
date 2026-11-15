@@ -777,6 +777,7 @@ def score(ctx,script):
 def source_review(ctx,shots,required=True):
     """Catch wrong archive material before spending a full-film render."""
     from picture_check import check
+    from review_cache import checker_bytes
     from document_context import enrich
     enrich(ctx,[r['clip'] for r in shots])
     from caption_context import enrich as captions
@@ -790,7 +791,7 @@ def source_review(ctx,shots,required=True):
         # Words, context, label, source provenance, bytes or checker changes do.
         material={k:v for k,v in row.items() if k!='f'}
         material.update(seconds=(row['f'][1]-row['f'][0])/FPS,bytes_sha256=digests[file])
-        signatures.append(hashlib.sha256(json.dumps(material,sort_keys=True).encode()+(HERE/'picture_check.py').read_bytes()).hexdigest())
+        signatures.append(hashlib.sha256(json.dumps(material,sort_keys=True).encode()+checker_bytes()).hexdigest())
     key=hashlib.sha256(json.dumps(dict(shots=shots,signatures=signatures),sort_keys=True).encode()).hexdigest()[:16]
     folder=Path(ctx.supply)/'source-evidence'/key;report=folder/'report.json'
     if report.exists():result=read(report)

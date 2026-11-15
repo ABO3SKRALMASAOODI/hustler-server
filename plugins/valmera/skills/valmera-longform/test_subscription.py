@@ -52,3 +52,33 @@ def test_private_container_installs_guard_before_worker(tmp_path, monkeypatch):
     assert 'PYTHONPATH='+str(tmp_path)+'/client' in cmd
     assert 'OPENAI_BASE_URL=http://127.0.0.1:44535/v1' in cmd
     assert not any('DATABASE_URL' in arg for arg in cmd)
+
+
+def test_review_cache_keeps_semantics_and_ignores_only_concurrency():
+    import hashlib
+    from review_cache import checker_bytes
+    # Published review identities before the subscription scheduling changes.
+    assert hashlib.sha256(checker_bytes()).hexdigest() == '7637971d1b898fcc9e6ac97ab6f2f19d7f7c365864aa04e3d59b3e34c494b5e6'
+    text=Path(__file__).with_name('picture_check.py').read_text()
+    assert checker_bytes(text.replace('Reject wrong people','Reject incorrect people')) != checker_bytes(text)
+    assert checker_bytes(text.replace('(lo+hi)/2','lo+(hi-lo)*.4')) != checker_bytes(text)
+
+
+def test_recorded_edit_requires_same_words_and_actual_clock_review(tmp_path,monkeypatch):
+    import archive_visual as A
+    import cinema as C
+    ctx=SimpleNamespace(supply=str(tmp_path))
+    nd=tmp_path/'narration';nd.mkdir()
+    C.save(nd/'read-stage.json',{'script':{'words':'same'}})
+    C.save(nd/'check.json',{'gate':{'pass':True}})
+    C.save(nd/'words.json',{'duration':20})
+    monkeypatch.setattr(C.wf4.story,'narration_script',lambda s:{'words':s['words']})
+    calls=[]
+    monkeypatch.setattr(C,'schedule',lambda *a:([{'say':'same'}],None,None))
+    monkeypatch.setattr(C,'source_review',lambda *a,**k:calls.append(a) or {'ok':False})
+    assert not A.recorded_edit_ready(ctx,{'script':{'words':'changed'}},{})
+    assert not calls
+    assert not A.recorded_edit_ready(ctx,{'script':{'words':'same'}},{})
+    assert len(calls)==1
+    monkeypatch.setattr(C,'source_review',lambda *a,**k:{'ok':True})
+    assert A.recorded_edit_ready(ctx,{'script':{'words':'same'}},{})
