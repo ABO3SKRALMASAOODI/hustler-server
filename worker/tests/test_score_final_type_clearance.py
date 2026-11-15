@@ -41,6 +41,20 @@ def test_final_crop_clears_print_and_keeps_caption_chunk_together():
     assert all(not S.rects_touch(S.type_rect(ctx,w),[.2,.18,.8,.32]) for w in l1['items'][1:])
 
 
+def test_late_clearance_preserves_a_list_made_by_separate_gestures():
+    ctx,l1=scene();before=copy.deepcopy(l1)
+    for n,word in enumerate(ctx.items):
+        word.update(_g=f'label{n}',_type_layout='one-list')
+    result=S.final_type_clearance(ctx,l1)
+    assert len(result['moved'])==1 and result['moved'][0]['id']=='one-list'
+    assert not result['unresolved']
+    deltas=[after['y']-old['y'] for old,after in zip(before['items'][1:],l1['items'][1:])]
+    assert abs(deltas[0]-deltas[1])<1e-9
+    assert all(not S.rects_touch(S.type_rect(ctx,w),[.28,.17,.7,.3]) for w in l1['items'][1:])
+    for old,after in zip(before['items'][1:],l1['items'][1:]):
+        assert {k:v for k,v in old.items() if k!='y'}=={k:v for k,v in after.items() if k!='y'}
+
+
 def test_no_safe_place_reports_collision_and_preserves_content():
     ctx,l1=scene(False);ctx.perc={'text':[{'t':[0,2],'box':[0,0,1,1]}]}
     before=copy.deepcopy(l1)
