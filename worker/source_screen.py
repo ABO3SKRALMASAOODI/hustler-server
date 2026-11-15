@@ -58,12 +58,13 @@ def interpret(answer, times, duration, fps):
 
 def build(src, duration, fps, shots, sha, workdir, recorder=None, video_info=None):
     from score import boards
+    import media
     if recorder is not None:
         llm.set_recorder(recorder)
-    # The proxy can have a different frame rate, and its picture track can
-    # end before the upload's audio/container clock. Seeking on the upload
-    # clock made valid 120-fps and audio-tail uploads fail at proxy EOF.
-    video_info = video_info or {}
+    # Use the inspected proxy's picture clock, which may have a different
+    # frame rate or end before the upload's audio/container tail. Callers
+    # that already probed it pass video_info; direct callers probe here.
+    video_info = video_info or media.probe(src)
     picture_end = min(float(duration), float(video_info.get("video_duration")
                       or video_info.get("duration") or duration))
     picture_fps = float(video_info.get("fps") or fps)
