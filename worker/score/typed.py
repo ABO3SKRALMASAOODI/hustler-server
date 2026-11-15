@@ -101,6 +101,21 @@ class WindowContext:
     def director_recover_write(self, **kwargs):
         return recover_write(self, **kwargs)
 
+    def director_prepare_edl(self, edl, l1):
+        """Declare the existing canvas representation for a picture-only montage.
+
+        A wordless Score can have no source-audio spine: Lower already supplies
+        its full-duration insert and picture overlays. No pixels, timing or
+        request permissions change here; normal typed write guards still run.
+        """
+        if edl.get("keep") or edl.get("canvas") or not edl.get("inserts"):
+            return edl
+        out = copy.deepcopy(edl)
+        out["canvas"] = {"width": int(l1["frame"][0]), "height": int(l1["frame"][1]),
+                         "fps": float(l1["fps"]), "bg_color": "#000000"}
+        out["frame"] = {"ratio": "source", "mode": "crop"}
+        return out
+
 
 def recover_write(ctx, *, work, cfg, index, sc, bin_doc, original_key,
                   worker_db, comp, text, refusal, rec):
@@ -153,6 +168,7 @@ def recover_write(ctx, *, work, cfg, index, sc, bin_doc, original_key,
         film._one_mix(ctx, work, candidate)
         edl, locals_, rep = lower.lower(candidate.l1, work)
         edl = film._publish(ctx, worker_db, edl, locals_, bin_doc, original_key)
+        edl = ctx.director_prepare_edl(edl, candidate.l1)
         result = ctx.apply_score(edl, "Director: revised from source evidence")
         receipt["result"] = str(result)
         if not str(result).startswith("EDL v"):
@@ -254,10 +270,14 @@ def write_film(ctx, edl):
     before = ctx.latest_edl()["json"]
     spans = edit_integrity.removed_spans(before.get("keep"), edl.get("keep"))
     if len(spans) > 12:
-        for offset in range(0, len(spans), 12):
+        # A montage with no main spine must install its canvas and pictures
+        # atomically with the last deletions. Never save an empty keep-only
+        # intermediate. The final ordinary write still checks <=12 removals.
+        batches = spans[:-12] if not edl.get("keep") and edl.get("canvas") else spans
+        for offset in range(0, len(batches), 12):
             current = ctx.latest_edl()["json"]
             keep = [list(s) for s in audit.subtract_spans(
-                current.get("keep") or [], spans[offset:offset + 12])]
+                current.get("keep") or [], batches[offset:offset + 12])]
             result = agent_tools._write_keep(ctx, keep,
                 "Director: source-checked cut batch", snap_to_words=False)
             if not str(result).startswith("EDL v"):
