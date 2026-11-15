@@ -106,6 +106,11 @@ def test_no_openai_key_refuses(monkeypatch):
 
 
 def test_director_uses_configured_local_responses_endpoint(monkeypatch):
+    import openai_budget
+    import openai_credit
+    monkeypatch.setenv("CODEX_PROXY_LOCAL", "1")
+    monkeypatch.setattr(openai_budget, "reserve", lambda *a, **k: pytest.fail("local call reserved paid credit"))
+    monkeypatch.setattr(openai_credit, "available", lambda: False)
     seen = []
 
     def handler(request):
@@ -122,6 +127,7 @@ def test_director_uses_configured_local_responses_endpoint(monkeypatch):
     result = call.stream("gpt-6-sol", "s", "c", max_tokens=10, effort="low",
                          purpose="director_scout", deadline=time.monotonic() + 5)
     assert result.text == "local score"
+    assert result.usd == result.usage.provider_cost_usd == 0.0
     assert seen == ["http://127.0.0.1:8787/v1/responses"]
 
 
@@ -152,3 +158,32 @@ def test_stream_cost_uses_actual_top_level_serving_tier(monkeypatch, served, mul
     base = call_openai.Usage('gpt-6.1-sol', usage).provider_cost_usd
     assert result.usage.service_tier == served
     assert result.usd == pytest.approx(multiplier * base)
+
+
+@pytest.mark.parametrize("url", ["https://api.openai.com/v1/responses",
+    "http://127.0.0.1.evil.test:8787/v1/responses",
+    "http://127.0.0.1:8787/paid", "http://127.0.0.1:8888/v1/responses",
+    "http://127.0.0.1:8787/v1/responses?forward=paid"])
+def test_subscription_flag_cannot_exempt_another_transport(monkeypatch, url):
+    monkeypatch.setenv("CODEX_PROXY_LOCAL", "1")
+    assert not call_openai.subscription_endpoint(url)
+
+
+def test_local_endpoint_without_subscription_optin_remains_metered(monkeypatch):
+    monkeypatch.delenv("CODEX_PROXY_LOCAL", raising=False)
+    assert not call_openai.subscription_endpoint("http://127.0.0.1:8787/v1/responses")
+
+
+def test_local_transport_failure_does_not_create_unknown_paid_billing(monkeypatch):
+    import openai_budget
+    _client_with(monkeypatch, lambda req: httpx.Response(503, content=b"adapter busy"))
+    monkeypatch.setenv("CODEX_PROXY_LOCAL", "1")
+    monkeypatch.setattr(call_openai.config, "OPENAI_BASE_URL", "http://127.0.0.1:8787/v1")
+    monkeypatch.setattr(openai_budget, "reserve", lambda *a, **k: pytest.fail("paid admission"))
+    journal = []
+    monkeypatch.setattr(call_openai.openai_cache, "record", lambda *a, **kw: journal.append(kw))
+    with pytest.raises(RuntimeError, match="503"):
+        call.stream("gpt-6-sol", "s", "c", max_tokens=10, effort="low",
+                    purpose="local_test", deadline=time.monotonic()+5)
+    assert journal[-1]["usd"] == 0.0
+    assert journal[-1]["billing_unconfirmed"] is False

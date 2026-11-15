@@ -11,6 +11,8 @@ call.py: the read runs on its own thread and is closed when time is up, and the 
 already bought are estimated and metered.
 """
 import json
+import os
+from urllib.parse import urlsplit
 import threading
 import time
 
@@ -23,6 +25,21 @@ OUT_TOKENS_PER_S = 130.0
 EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "xhigh"}
 
 
+def subscription_endpoint(url):
+    """Only the explicitly enabled, loopback Codex adapter is subscription-funded.
+
+    Classify the actual transport URL; a flag alone cannot exempt a paid host.
+    HTTP redirects remain disabled in the transport below.
+    """
+    target = urlsplit(url)
+    return (os.environ.get("CODEX_PROXY_LOCAL") == "1"
+            and target.scheme == "http"
+            and target.hostname in ("127.0.0.1", "localhost", "::1")
+            and target.port == 8787 and target.path == "/v1/responses"
+            and not target.username and not target.password
+            and not target.query and not target.fragment)
+
+
 def is_openai(model):
     return str(model or "").lower().startswith("gpt-")
 
@@ -30,7 +47,7 @@ def is_openai(model):
 class Usage:
     """One call's tokens under both spellings the callers read (OpenAI's and Claude's), and its dollars."""
 
-    def __init__(self, model, raw=None, out_tokens=None):
+    def __init__(self, model, raw=None, out_tokens=None, *, subscription=False):
         raw = raw or {}
         details = raw.get("input_tokens_details") or {}
         self.model = model
@@ -43,7 +60,7 @@ class Usage:
         self.cache_creation_input_tokens = 0
         self.output_tokens = self.completion_tokens
         self.service_tier = raw.get("service_tier")
-        self.provider_cost_usd = openai_cache.cost(model, self)
+        self.provider_cost_usd = 0.0 if subscription else openai_cache.cost(model, self)
 
 
 def cost(model, tokens_in, cached, tokens_out):
@@ -117,14 +134,17 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
     if not key or not base:
         raise call.Refused("the OpenAI rung has no OpenAI key")
     url = base + "/responses"
+    subscription = subscription_endpoint(url)
     import openai_credit
-    if not openai_credit.available():
+    if not subscription and not openai_credit.available():
         # Out of credit (worker/openai_credit.py): nothing is sent, the caller's fallback answers.
         raise call.Refused("OpenAI credit out: " + openai_credit.closed_reason()[:200])
-    llm.fence(model)
+    if not subscription:
+        llm.fence(model)
     req = body(model, system, content, max_tokens, effort, purpose)
     import openai_budget
-    lease = openai_budget.reserve(req, purpose, lane=llm.spend_lane())
+    lease = (openai_budget.Lease() if subscription else
+             openai_budget.reserve(req, purpose, lane=llm.spend_lane()))
     box = {}
     t0 = time.monotonic()
 
@@ -138,7 +158,7 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
                             lease.settle(usd=0)
                         text = r.read().decode(errors='replace')[:300]
                         box["error"] = RuntimeError(f"OpenAI HTTP {r.status_code}: {text}")
-                        if openai_credit.note(text, "director:" + str(purpose), status=r.status_code):
+                        if not subscription and openai_credit.note(text, "director:" + str(purpose), status=r.status_code):
                             box["error"] = call.Refused(f"OpenAI credit out (HTTP {r.status_code}): {text[:200]}")
                         return
                     for kind, d in events(r.iter_lines()):
@@ -157,7 +177,7 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
                             lease.settle(box["final"].get("usage"), payload=box["final"])
                         elif kind == "error":
                             box["error"] = RuntimeError(f"OpenAI stream error: {str(d)[:300]}")
-                            if openai_credit.note(str(d), "director:" + str(purpose)):
+                            if not subscription and openai_credit.note(str(d), "director:" + str(purpose)):
                                 box["error"] = call.Refused(f"OpenAI credit out: {str(d)[:200]}")
         except BaseException as exc:  # noqa: BLE001 - carried to the caller's thread
             box["error"] = exc
@@ -179,18 +199,19 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
             except Exception:  # noqa: BLE001
                 pass
         usage = Usage(model, {"service_tier": req.get("service_tier")},
-                      out_tokens=int(elapsed * OUT_TOKENS_PER_S))
+                      out_tokens=int(elapsed * OUT_TOKENS_PER_S), subscription=subscription)
         llm.record(purpose, {"model": model, "max_tokens": max_tokens}, {"late": True, "provider_cost_usd": usage.provider_cost_usd}, usage)
         call._meter(model, usage.provider_cost_usd)
         raise call.Late(f"{purpose} past its deadline after {elapsed:.0f} s")
     if box.get("error") is not None:
-        openai_cache.record(model, purpose, status="transport_or_http_error", billing_unconfirmed=True)
+        openai_cache.record(model, purpose, status="transport_or_http_error",
+                            usd=0.0 if subscription else None, billing_unconfirmed=not subscription)
         raise box["error"]
     final = box.get("final") or {}
     # The API reports the actual serving tier beside usage, not inside it.
     # A downgraded Fast request must be charged at the returned tier.
     usage = Usage(model, {**(final.get("usage") or {}),
-                          "service_tier": final.get("service_tier")})
+                          "service_tier": final.get("service_tier")}, subscription=subscription)
     usd = float(usage.provider_cost_usd)
     status = final.get("status") or "completed"
     stop = "max_tokens" if status == "incomplete" else ("refusal" if box.get("refused") else "end_turn")
