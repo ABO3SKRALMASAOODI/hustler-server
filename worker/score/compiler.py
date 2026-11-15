@@ -2883,7 +2883,7 @@ def final_type_clearance(ctx, l1):
     units = {}
     for it in final.items:
         original = authored.get(it["id"], {})
-        key = original.get("_g") or it.get("chunk") or it["id"]
+        key = original.get("_type_layout") or original.get("_g") or it.get("chunk") or it["id"]
         units.setdefault(key, []).append(it)
     # Authored behind-subject words are intentionally occluded by the matte;
     # their overlap with a face is not foreground ink covering that face.
@@ -4896,12 +4896,17 @@ def g_chip(ctx, b, g, i):
     scale = [(SETTLE["s_inf"] + (1 - SETTLE["s_inf"]) * math.exp(-j / SETTLE["tau"])) / SETTLE["s_inf"] for j in range(n)] if settle else 1
     plate = plate_of(ctx, g.get("bg", "#FFFFFF"))
     plate["grain"] = 0
+    # The chips already flowed into a list at one requested seat. A late
+    # source crop must move that composition together, not pull its labels
+    # apart one gesture at a time. Distinct seats remain independent.
+    layout = ({"_type_layout": f"{b.id}.chip-list:{float(seat[0]):.6f}:{float(seat[1]):.6f}"}
+              if ctx.governed and listed else {})
     ctx.add({"id": g["_gid"], "k": "card", "f": [a, z], "z": 2, "pic": "plate", "plate": plate, "x": x, "y": y, "w": w, "h": h, "s": scale, "rot": float(g.get("rot", 0)), "op": 1,
-             "radius": float(g.get("radius", 0.006)), "_cap_edge": False})
+             "radius": float(g.get("radius", 0.006)), "_cap_edge": False, **layout})
     ctx.blocks.append((a, z, [x - w / 2, y - h / 2, x + w / 2, y + h / 2], g["_gid"]))
     ink = g.get("ink") or ("#111111" if luma(plate["c0"]) > 0.5 else "#FFFFFF")
     ex = {} if not settle else {"s": list(scale)}
-    emit_word(ctx, f"{g['_gid']}.t", t, key, x - tw / 2, y + 0.36 * v["px"] / ctx.H, a, z, ink, "big", z=2, _label=plate["c0"], **ex)
+    emit_word(ctx, f"{g['_gid']}.t", t, key, x - tw / 2, y + 0.36 * v["px"] / ctx.H, a, z, ink, "big", z=2, _label=plate["c0"], **layout, **ex)
     g_snd(ctx, b, g, a)
 
 
