@@ -91,7 +91,7 @@ def _run(monkeypatch, tmp_path, flag_row, seam=None, film_attempt=None, scope=No
                 return flag_row
             return None
 
-    ctx = _Ctx(duration=5.0, project_id=1, versions_written=[])
+    ctx = _Ctx(duration=5.0, project_id=1, versions_written=[], index={})
     monkeypatch.setattr(config, "TMP_DIR", str(tmp_path))
     monkeypatch.setattr(agent_tools, "ToolContext", lambda *a: ctx)
     decision = (claude_trial.Decision(claude_trial.Decision.ACTIVE, scope=scope) if scope
