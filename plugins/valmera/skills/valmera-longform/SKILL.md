@@ -33,6 +33,7 @@ Read [REFERENCES.md](REFERENCES.md) for the long-form pacing and music bar. This
 - Exact-gap research uses the footage engine's supported caller-verification mode. Its output is explicitly marked as research candidates: WF4's context/provenance check on the spoken interval replaces the generic subject-only filter, and the encoded-picture gate remains mandatory. Candidate counts are never reported as verified film coverage.
 - A model transport failure or a scan with no checked frames is incomplete research, never evidence that footage is unavailable. It stops resumably and cannot count toward the two completed searches before a photograph fallback.
 - A shared check that finds join defects triggers bounded, smooth level rides through `join_repair.py`, preserving all samples and timing. The unprompted VO2 measurement and the complete shared gate both run again; neither gate is relaxed.
+- Completed witness splices retain a fingerprint of their inputs and audio/word outputs. A resume continues picture repair on that combined clock, with each interview slice carrying its actual full quote as context. It still passes both source and encoded-picture checks.
 - The scene renderer supplies picture; the existing brand finish supplies the unchanged watermark and end card. Heavy Mac work goes through `heavy.sh`; narration uses the shared kernel lock. `guarded.py` records `/usr/bin/time -l` and physical footprint, and stops its own process group if a process exceeds 6 GB. The same guard covers verification listeners.
 
 ## Delivery gates

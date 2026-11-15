@@ -386,6 +386,12 @@ def supply(ctx, script):
     ns=wf4.story.narration_script(sc)
     reader=str(HERE/'longform_voice.py')
     nd=Path(ctx.supply)/'narration'
+    from witness_audio import completed as witness_complete
+    job=dict(narration_dir=str(nd),voices=ft['voices'],footage_dir=str(Path(ctx.supply)/'footage'))
+    if (nd/'read-stage.json').exists() and read(nd/'read-stage.json').get('script')==ns and witness_complete(job,Path(ctx.supply)/'witness-audio.json'):
+        ctx.log('resuming verified witness audio on its combined word clock')
+        nar=narrated(ctx,ns,nd,reader)
+        return finish_supply(ctx,script,ft,nar,nd)
     # Spoken wording has passed its factual audit and is now frozen. Picture
     # choices can be checked while the guarded reader works; they cannot edit
     # a sentence or reset any take budget.
@@ -490,6 +496,15 @@ def supply(ctx, script):
     if still/with_testimony>.5:raise RuntimeError('evidence photos would displace the moving film, including its testimony')
     if ft['voices']:
         splice_voices(ctx,nd,ft['voices'],Path(ctx.supply)/'footage')
+    return finish_supply(ctx,script,ft,nar,nd)
+
+
+def finish_supply(ctx,script,ft,nar,nd):
+    """Both new and resumed splices pass the same final source timing gate."""
+    from timeline_repair import repair as repair_timeline,smooth
+    sc=script['script']
+    if nar['gate'].get('wer') is None or nar['gate']['wer']>=.01:
+        raise RuntimeError(f"narration WER must be <1%: {nar['gate']}")
     wj=read(nd/'words.json')
     repair_timeline(ctx,script,ft,nar['words'])
     smooth(ctx,script,ft,nar['words'])
@@ -502,7 +517,7 @@ def supply(ctx, script):
         world=PX.commons_file(legacy.WORLD,str(Path(ctx.supply)/'world'),want_w=4000)
     designs=legacy._designs(ctx,sc,script['dossier'],world,str(Path(ctx.supply)/'design'))
     pack=dict(designs=designs,sid=ctx.sid,narration=nar['wav'],words=nar['words'],ffmpeg=PX.FF,footage=ft,record=record)
-    save(pk,dict(pack=pack,record=record))
+    save(Path(ctx.supply)/'pack.json',dict(pack=pack,record=record))
     return record
 
 
@@ -616,7 +631,7 @@ def schedule(sc, words, ft):
         pos=a
         while pos<b:
             stop=min(b,pos+234)
-            shots.append(dict(f=[pos,stop],seg=v['after'],clip=c,src=[(pos-a)/FPS,(stop-a)/FPS],say=v['said'],real_voice=v['person']))
+            shots.append(dict(f=[pos,stop],seg=v['after'],clip=c,src=[(pos-a)/FPS,(stop-a)/FPS],say=v['said'],context=v['said'],real_voice=v['person']))
             pos=stop
     from timeline_repair import resolve,identity
     rejected={(r['seg'],r['clip']) for r in ft.get('editorial',{}).get('rejected',[])}
@@ -705,7 +720,8 @@ def schedule(sc, words, ft):
             missing.append(dict(seg=i,seconds=(b-pos)/FPS,words=s['say'],heard=heard,start=pos/FPS,end=b/FPS))
     for r in shots:
         spoken=[w for w in clock.words if w['t0']<r['f'][1]/FPS and w['t1']>r['f'][0]/FPS]
-        r['context']=' '.join(sc['segments'][i]['say'] for i in dict.fromkeys(w['seg'] for w in spoken)) if spoken else r['say']
+        if not r.get('real_voice'):
+            r['context']=' '.join(sc['segments'][i]['say'] for i in dict.fromkeys(w['seg'] for w in spoken)) if spoken else r['say']
         if spoken:r['say']=' '.join(w['w'] for w in spoken)
     if missing: raise CoverageError(missing,sorted(shots,key=lambda r:r['f'][0]))
     return sorted(shots,key=lambda r:r['f'][0]),clock,end

@@ -56,8 +56,9 @@ def test_witness_audio_resume_preserves_narrator_and_does_not_insert_twice(tmp_p
         with wave.open(str(path),'wb') as f:f.setnchannels(1);f.setsampwidth(2);f.setframerate(sr);f.writeframes(samples.tobytes())
     audio(tmp_path/'narration.wav',4,180);audio(tmp_path/'witness.wav',1,220)
     original=(tmp_path/'narration.wav').read_bytes()
+    C.save(tmp_path/'read-stage.json',dict(script='fixture'))
     C.save(tmp_path/'words.json',dict(duration=4,words=[dict(w='Before.',start=.2,end=.8,seg=0),dict(w='After.',start=2,end=3.8,seg=1)]))
-    job=tmp_path/'job.json';C.save(job,dict(narration_dir=str(tmp_path),footage_dir=str(tmp_path),voices=[dict(after=0,person='Witness',wav='witness.wav',file=None,said='Here.',words=[dict(w='Here.',start=0,end=1)],source=dict(url='https://archive.test/interview'),time_range=[0,1])]))
+    job=tmp_path/'job.json';C.save(job,dict(narration_dir=str(tmp_path),footage_dir=str(tmp_path),voices=[dict(after=0,person='Witness',wav='witness.wav',file='witness.mp4',said='Here.',words=[dict(w='Here.',start=0,end=1)],source=dict(url='https://archive.test/interview'),time_range=[0,1])]))
     cmd=[C.PX.NARRATE_PY,str(C.HERE/'witness_audio.py'),str(job)]
     subprocess.run(cmd,check=True,capture_output=True,timeout=60)
     first=(tmp_path/'narration.wav').read_bytes();words=C.read(tmp_path/'words.json')
@@ -66,6 +67,31 @@ def test_witness_audio_resume_preserves_narrator_and_does_not_insert_twice(tmp_p
     assert (tmp_path/'narration.wav').read_bytes()==first and C.read(tmp_path/'words.json')==words
     assert len(words['voices'])==1 and sum(bool(w.get('voice')) for w in words['words'])==1
     assert words['duration']==pytest.approx(5)
+    import witness_audio as WA
+    spec=C.read(job)
+    assert WA.completed(spec,job)
+    (tmp_path/'witness-complete.json').unlink()
+    assert WA.completed(spec,job)  # adopt a fully completed older splice
+    assert (tmp_path/'witness-complete.json').exists()
+    # Changed inputs or a partially overwritten output cannot reuse the splice.
+    changed=dict(spec,voices=[dict(spec['voices'][0],said='Changed.')])
+    assert not WA.completed(changed,job)
+    with (tmp_path/'narration.wav').open('ab') as f:f.write(b'changed')
+    assert not WA.completed(spec,job)
+
+
+def test_interview_tail_keeps_witness_context_not_preceding_narration():
+    sc=dict(segments=[dict(say='They occupied it for months.',chapter='c'),dict(say='Then they returned.',chapter='c')])
+    quote='Our goal was to build space stations.'
+    words=dict(duration=12,words=[dict(w='Months.',start=.1,end=.8,seg=0),
+        dict(w='Our',start=1,end=2,seg=0,voice='Witness'),dict(w='goal',start=2,end=4,seg=0,voice='Witness'),
+        dict(w='stations.',start=8.9,end=9.4,seg=0,voice='Witness'),dict(w='Returned.',start=10,end=11.9,seg=1)],
+        voices=[dict(start=1,end=9.5,after=0,file='interview',source={'url':'https://archive.test/witness'},time_range=[20,28.5],person='Witness',said=quote)])
+    ft=dict(lines=[dict(i=0,clips=[clip('before',0,8)]),dict(i=1,clips=[clip('after',20,28)])])
+    shots,_,_=C.schedule(sc,words,ft)
+    witness=[r for r in shots if r.get('real_voice')]
+    assert len(witness)==2 and witness[-1]['say']=='stations.'
+    assert all(r['context']==quote for r in witness)
 
 
 def test_rater_stem_fit_recovers_delay_and_final_gains():
