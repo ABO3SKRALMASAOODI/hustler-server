@@ -1,6 +1,8 @@
 """High-end finishing effects compile instead of silently disappearing."""
 
 import os
+import shutil
+import subprocess
 import sys
 
 import pytest
@@ -27,7 +29,24 @@ def test_stabilize_is_a_real_renderer_pass():
     assert "stabilize" in STYLIZE_KINDS
     graph = _graph([{"id": "st1", "kind": "stabilize",
                      "intensity": 0.5}])
-    assert "deshake=rx=28:ry=28:edge=mirror:blocksize=8:search=less" in graph
+    assert "deshake=rx=32:ry=32:edge=mirror:blocksize=8:search=less" in graph
+
+
+@pytest.mark.parametrize("intensity", [0, .5, 1])
+def test_stabilization_filter_accepts_low_middle_and_high_strength(intensity):
+    ffmpeg = shutil.which(os.environ.get("FFMPEG_BIN", "ffmpeg"))
+    if not ffmpeg:
+        pytest.skip("ffmpeg unavailable")
+    graph = _graph([{"id": "st1", "kind": "stabilize", "intensity": intensity}])
+    effect = next(part.split("]", 1)[1].split("[", 1)[0]
+                  for part in graph.split(";") if "]deshake=" in part)
+    result = subprocess.run(
+        [ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+         "testsrc2=size=320x180:rate=30:duration=0.1", "-filter_threads", "1",
+         "-vf", effect, "-frames:v", "3", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert len(result.stdout) == 3 * 320 * 180 * 3
 
 
 def test_stabilize_rejects_a_fake_window_instead_of_ignoring_it():
