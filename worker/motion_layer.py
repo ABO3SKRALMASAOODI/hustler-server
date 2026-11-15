@@ -294,14 +294,14 @@ def yield_windows(item, items, W, H):
 
 def render_pieces(item, fps):
     """``item`` as the clips the engine renders: [item], or — a persistent
-    item held longer than one clip may last (motion_engine.MAX_DURATION_S:
-    a whole-program headline on a long program) — consecutive frame-aligned
+    headline or custom HTML held longer than one clip may last
+    (motion_engine.MAX_DURATION_S) — consecutive frame-aligned
     pieces on the SAME composition clock (phase_s / full_duration_s, exactly
     like a stitched preview's pieces), so the band never silently drops out
     of a long render."""
     s, e = float(item["start"]), float(item["end"])
     cap = float(motion_engine.MAX_DURATION_S)
-    if e - s <= cap or not motion_templates.persistent(item) \
+    if e - s <= cap or not (motion_templates.persistent(item) or item.get("template") == "html") \
             or item.get("layer") == "behind_subject":
         return [item]
     fps = float(fps or 30.0)
