@@ -190,6 +190,55 @@ def test_source_crop_does_not_create_a_black_backing(tmp_path):
     assert not film["items"][0].get("source_full_frame")
 
 
+def _static_text_perception():
+    return {"shots": [{"t": [0., 20.], "change": 0., "faces_seen": 0.}],
+            "text": [{"t": [0., 20.], "box": [.1, .2, .9, .4], "seen": 12}],
+            "palette": [{"hex": "#E8E2C9", "share": .8}]}
+
+
+def test_static_slide_text_survives_source_guard_and_portrait_lowering():
+    from score import lower
+    film, index = _scene()
+    film.update(fps=30, spine=[{"f": [0, 42], "src": [6.6, 8.]}],
+                assets={"main": {"kind": "video", "path": "source.mp4",
+                                  "w": 1920, "h": 1080}})
+    film["items"][0].update(k="shot", f=[0, 42])
+    result = source_guard.apply(film, index, _static_text_perception())
+    assert result[0]["reason"] == "static_source_text_fit"
+    window, frame = lower.base_window(film)
+    assert frame["ratio"] == "9:16" and frame["mode"] == "pad_blur"
+    assert window == pytest.approx(film["items"][0]["crop"])
+    assert window[0] <= .1 and window[2] >= .9
+
+
+@pytest.mark.parametrize("change,faces", [(None, 0.), (.18, 0.), (0., .5)])
+def test_missing_motion_or_a_live_subject_does_not_trigger_slide_fit(change, faces):
+    film, index = _scene()
+    per = _static_text_perception()
+    per["shots"][0].update(change=change, faces_seen=faces)
+    assert source_guard.apply(film, index, per)[0]["reason"] != "static_source_text_fit"
+    assert not film["items"][0].get("source_full_frame")
+
+
+def test_off_spine_static_slide_keeps_full_source_and_measured_palette(tmp_path):
+    from score import lower
+    from types import SimpleNamespace
+    film, index = _scene()
+    film.update(fps=30, spine=[], assets={"main": {"kind": "video",
+                "path": "source.mp4", "w": 1920, "h": 1080}})
+    film["items"][0].update(k="shot", f=[0, 42])
+    source_guard.apply(film, index, _static_text_perception())
+    plates = []
+    def plate(style, *size):
+        plates.append(style)
+        return "backing.png"
+    overlays, *_ = lower.lower_pictures(film, str(tmp_path),
+                                      SimpleNamespace(locals={}, plate=plate), {})
+    main = next(o for o in overlays if o["asset_key"] == "main")
+    assert not main.get("source_crop") and not main.get("fit")
+    assert main["scale"] == 1. and plates == [{"c0": "#E8E2C9"}]
+
+
 def test_fractional_eof_spine_rounding_matches_the_publication_gate():
     film, index = _scene()
     index["video"]["duration"] = 10.026

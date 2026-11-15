@@ -22,6 +22,26 @@ def missing_shot_boxes(index, keep):
                for s in shots if any(s["start"] < b and s["end"] > a for a, b in keep))
 
 
+def static_text_needs_fit(perception, start, end, width, height):
+    """A measured still with persistent text wider than the possible crop.
+
+    This is geometry, not an interpretation of the slide or its words. A
+    missing motion reading is not evidence that the source is a still.
+    """
+    per = perception or {}
+    shots = [s for s in per.get("shots") or []
+             if s.get("t") and s["t"][0] < end and s["t"][1] > start]
+    if not shots or any(s.get("change") is None or s["change"] > .01 or
+                        s.get("faces_seen") is None or s["faces_seen"] > 0
+                        for s in shots):
+        return False
+    boxes = [r["box"] for r in per.get("text") or []
+             if r.get("box") and len(r["box"]) == 4 and r.get("t") and
+             r["t"][0] < end and r["t"][1] > start and r.get("seen", 0) >= 3]
+    return any(b[2] - b[0] > width + .005 or b[3] - b[1] > height + .005
+               for b in boxes)
+
+
 def apply(l1, index, perception):
     if not index.get("_first_film_source_guard"):
         return []
@@ -52,6 +72,19 @@ def apply(l1, index, perception):
         if start < 0 or end > end_limit + 1e-6:
             raise ValueError(f"first film reads outside cleared source footage: "
                              f"{start:.6f}-{end:.6f}, limit {end_limit:.6f}")
+        if static_text_needs_fit(perception, start, end, w, h):
+            # Lowering already supports a source rectangle extending past
+            # the canvas: the on-spine source is fitted over its blurred
+            # backdrop. Do not override that geometry with a saliency crop.
+            fit_w, fit_h = max(1., ratio), max(1., 1 / ratio)
+            item["crop"] = [.5 - fit_w / 2, .5 - fit_h / 2,
+                            .5 + fit_w / 2, .5 + fit_h / 2]
+            item["source_full_frame"] = True
+            palette = (perception or {}).get("palette") or []
+            item["source_fit_background"] = palette[0].get("hex", "#202020") if palette else "#202020"
+            report.append({"id": item["id"], "source": [start, end],
+                           "reason": "static_source_text_fit", "crop": item["crop"]})
+            continue
         overlaps = [s for s in shots if s["start"] < end and s["end"] > start]
         boxes, missing = [], not overlaps
         for shot in overlaps:

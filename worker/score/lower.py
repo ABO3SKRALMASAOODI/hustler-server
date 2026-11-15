@@ -508,7 +508,7 @@ def lower_pictures(l1, work, bake, rep):
             # Fit it inside the canvas with an opaque backing so the old
             # underlying source shot cannot show through the letterbox.
             # Equal layers are sorted by ID when the EDL is normalized.
-            overlays.append({"id": f"safe.{pid}", "asset_key": bake.plate({"c0": "#000000"}, W, H),
+            overlays.append({"id": f"safe.{pid}", "asset_key": bake.plate({"c0": it.get("source_fit_background") or "#000000"}, W, H),
                              "kind": "image", "start": start, "duration_s": dur,
                              "fit": "cover", "z_index": -1})
             ov.pop("fit", None)
