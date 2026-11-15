@@ -132,7 +132,11 @@ def present_hits(sounds, voice, bed, render, alternatives=None):
                 measured = levels(sample)
                 peak_i = lo+int(np.argmax(measured[lo:hi]))
                 room = 20*np.log10(.7/max(np.max(np.abs(sample)),1e-9))
-                gain = max(0.,min(target-measured[peak_i],ceiling-measured[peak_i],room,24.))
+                # The old recording may already carry a large gain. A fuller
+                # replacement must be allowed to turn DOWN before it is tested;
+                # otherwise copying that gain overloads the master and masks
+                # neighboring attacks despite the new sample's headroom limit.
+                gain = min(target-measured[peak_i],ceiling-measured[peak_i],room,24.)
                 if measured[peak_i]+gain >= min(target,ceiling)-.5:
                     it,own,lift = candidate,sample,gain
                     out[position] = it

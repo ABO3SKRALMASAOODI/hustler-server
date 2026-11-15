@@ -303,7 +303,8 @@ def test_cropped_face_does_not_need_a_semantic_boundary_change():
     assert cov['windows'][0]['first']==cov['windows'][0]['last']==0
 
 
-def test_needle_click_uses_fuller_same_event_recording_without_clipping():
+@pytest.mark.parametrize('initial_gain',[-5.,10.])
+def test_needle_click_uses_fuller_same_event_recording_without_clipping(initial_gain):
     from score import audibility
     sr=48000; t=np.arange(sr*3)/sr
     voice=.08*np.sin(2*np.pi*220*t); bed=.04*np.sin(2*np.pi*110*t)
@@ -311,10 +312,10 @@ def test_needle_click_uses_fuller_same_event_recording_without_clipping():
         out=np.zeros_like(t)
         for it in items:
             at=int(it['start_s']*sr)
-            length=48 if it['s']=='needle' else 2400
+            length=1 if it['s']=='needle' else 2400
             out[at:at+length]+=.6*np.cos(2*np.pi*800*np.arange(length)/sr)*10**(it['db']/20)
         return out
-    original=[dict(s='needle',layer='hit',tier='tick',start_s=1.,peak_s=0.,db=-5.)]
+    original=[dict(s='needle',layer='hit',tier='tick',start_s=1.,peak_s=0.,db=initial_gain)]
     out=audibility.present_hits(original,voice,bed,render,alternatives=lambda item:[dict(item,s='fuller')])
     assert len(out)==1 and out[0]['s']=='fuller' and out[0]['start_s']==1.
     assert np.max(np.abs(render(out)))<.701
