@@ -40,7 +40,7 @@ def test_requested_change_allowed(monkeypatch):
     assert edit_scope.write_refusal(ctx, {'texts': [1]}, {'texts': []}) is None
 
 
-@pytest.mark.parametrize('failure', ['unmet', 'check_unavailable', 'ledger_unavailable'])
+@pytest.mark.parametrize('failure', ['unmet', 'check_unavailable', 'ledger_unavailable', 'harm_restore'])
 def test_unmet_edit_restores_exact_edl_and_existing_preview_atomically(monkeypatch, failure):
     import db
     before = {'keep': [[0, 4.566]], 'frame': {'fit': 'cover'}, 'texts': [{'text': 'A PAPER SNOWFLAKE'}]}
@@ -59,7 +59,14 @@ def test_unmet_edit_restores_exact_edl_and_existing_preview_atomically(monkeypat
              ask_check_required=True)
     ledger = {'asks': [{'id': 'a1', 'kind': 'edit'}]}
     verdict = {'asks': [{'id': 'a1', 'state': 'not_done'}], 'edl_version': 9}
-    if failure != 'unmet':
+    if failure == 'harm_restore':
+        # Actual p5533 check: the curtain partly worked, but a shirt hole
+        # required restoration and could not be assigned a removable item id.
+        verdict['asks'][0].update(state='partly', line='The curtain covers most of the background.')
+        verdict['unasked'] = [{'what': 'The composite damages clothing.',
+                              'evidence': 'A dark hole in the white shirt at 13.2s.',
+                              'items': [], 'fix': 'restore'}]
+    elif failure != 'unmet':
         verdict = None
     if failure == 'ledger_unavailable':
         ledger = None
@@ -68,6 +75,9 @@ def test_unmet_edit_restores_exact_edl_and_existing_preview_atomically(monkeypat
     assert saved[1][1] == 'original-preview.mp4'
     assert saved[1][2]['edl_version'] == 10
     assert ctx.last_preview['screening_pages'] == ['before.jpg']
+    if failure == 'harm_restore':
+        assert ctx.ask_verdict is None  # the discarded composite proves nothing about the restored film
+        assert ctx.unmet_edit_restored['harm'][0]['fix'] == 'restore'
 
 
 @pytest.mark.parametrize('state', ['done', 'partly'])
@@ -75,6 +85,29 @@ def test_partial_requested_delivery_is_retained(state):
     ctx = NS(turn_start_edl={'json': {'keep': [[0, 4]]}})
     assert not edit_scope.restore_unmet(ctx, {'asks': [{'id': 'a1', 'kind': 'edit'}]},
                                        {'asks': [{'id': 'a1', 'state': state}]})
+
+
+def test_old_restore_finding_cannot_roll_back_a_newer_film():
+    ctx = NS(turn_start_edl={'json': {'fx': []}, 'version': 8},
+             latest_edl=lambda: {'json': {'fx': [{'id': 'repaired'}]}, 'version': 10})
+    verdict = {'edl_version': 9, 'asks': [{'id': 'a1', 'state': 'partly'}],
+               'unasked': [{'fix': 'restore', 'evidence': 'Old shirt hole'}]}
+    assert not edit_scope.restore_unmet(ctx, {'asks': [{'id': 'a1', 'kind': 'edit'}]}, verdict)
+
+
+def test_restored_reply_explains_discarded_damage_without_claiming_success(monkeypatch):
+    harm = [{'fix': 'restore', 'what': 'The attempted composite damaged clothing.',
+             'evidence': 'A hole in the shirt.'}]
+    def check(ctx, name, schema, system, payload, **kw):
+        data = json.loads(payload)
+        assert data['rollback_harm'] == harm
+        assert data['retained_changes'] == {}
+        return {'reply': 'The background attempt damaged the shirt, so I restored your previous film. The background change was not kept.',
+                'covered': [], 'offered_alternative': None}, {}
+    monkeypatch.setattr(asks, '_call', check)
+    ctx = NS(turn_start_edl={'json': {'fx': []}}, latest_edl=lambda: {'json': {'fx': []}},
+             unmet_edit_restored={'harm': harm})
+    assert 'was not kept' in edit_scope.disclose(ctx, 'Could not verify.')
 
 
 def test_reply_discloses_actual_delta_even_when_main_ask_failed(monkeypatch):
