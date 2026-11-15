@@ -6,6 +6,8 @@ test, and $8 per workflow run. `enabled: false` stops internal OpenAI admission.
 Production customer calls return before configuration, pricing or database
 access; this budget cannot cap them. The existing provider-credit latch remains
 separate. No live model calls were made for this change.
+The existing local subscription proxy is not an API-credit call and bypasses
+this admission guard; its separate deadline and retry policy are preserved.
 
 ## Hard admission
 

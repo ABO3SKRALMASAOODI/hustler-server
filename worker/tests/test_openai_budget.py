@@ -160,3 +160,10 @@ def test_legacy_workflow_usage_is_read_without_treating_unknown_as_free(tmp_path
 def test_priority_extra_body_is_included_in_admission():
     body={'model':'gpt-6-sol','input':'fixed','max_output_tokens':512}
     assert b.upper_bound(dict(body,extra_body={'service_tier':'priority'})) >= 2*b.upper_bound(body)
+
+
+def test_local_subscription_proxy_does_not_touch_api_credit_budget(monkeypatch):
+    monkeypatch.setattr(b,'reserve',lambda *a,**k:pytest.fail('local proxy reached API budget'))
+    with b.call({'model':'gpt-6-sol'},'workflow',lane='workflow',endpoint='http://127.0.0.1:8144/v1/responses') as lease:
+        assert lease.token is None
+        lease.settle({'input_tokens':10,'output_tokens':1})
