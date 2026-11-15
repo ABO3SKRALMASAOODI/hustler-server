@@ -791,34 +791,36 @@ def build(sc,pack):
             key=P.image(f'evidence-photo-{j}',c)
             if c.get('document'):
                 P.page(row['f'],'#14161A',grain=.005)
-                ratio=c['w']/c['h'];height=min(.72,.84*W/H/ratio);width=height*ratio/(W/H)
+                ratio=c['w']/c['h'];height=min(.66,.84*W/H/ratio);width=height*ratio/(W/H)
                 n=row['f'][1]-row['f'][0]
-                P.card(row['f'],key,[.5-width/2,.46-height/2,.5+width/2,.46+height/2],
+                P.card(row['f'],key,[.5-width/2,.45-height/2,.5+width/2,.45+height/2],
                        s=[1+(.065 if n>240 else .025)*q/max(n-1,1) for q in range(n)])
-                P.word(row['f'],archive_label(c,lambda t:P.R.width('source',t)),'source',.055,.82,note=False)
+                P.word(row['f'],archive_label(c,lambda t:P.R.width('source',t)),'source',.055,.84,note=False,z=3)
             else:
                 # Archive portraits and machinery must survive landscape
                 # presentation whole; a centre crop can erase the evidence.
                 P.page(row['f'],'#14161A',grain=.005)
-                ratio=c['w']/c['h'];height=min(.82,.94*W/H/ratio);width=height*ratio/(W/H)
+                # Reserve independent chapter, source and caption seats even
+                # at the end of the largest card move. Text renders above cards.
+                ratio=c['w']/c['h'];height=min(.66,.88*W/H/ratio);width=height*ratio/(W/H)
                 n=row['f'][1]-row['f'][0]
-                P.card(row['f'],key,[.5-width/2,.46-height/2,.5+width/2,.46+height/2],
+                P.card(row['f'],key,[.5-width/2,.45-height/2,.5+width/2,.45+height/2],
                        s=[1+(.065 if n>240 else .035)*q/max(n-1,1) for q in range(n)])
         else:
             key=P.video(f'archive-{j}',c)
             P.shot(row['f'],key,witness_crop(row),src=row['src'])
         if c.get('editorial_label') and not c.get('document'):
-            P.word(row['f'],c['editorial_label'],'source',.055,.78,note=False)
+            P.word(row['f'],c['editorial_label'],'source',.055,.84 if c.get('kind')=='image' else .78,note=False,z=3)
     # Subtitles remain legible and subordinate to the archive. No held number pages.
     for si in range(len(sc['segments'])):
         ws=clock.seg_words(si)
         for j in range(0,len(ws),7):
             chunk=ws[j:j+7]; a=round(chunk[0]['t0']*FPS); b=round(chunk[-1]['t1']*FPS)
             if b>a:
-                P.word([a,b],' '.join(w['w'] for w in chunk),'cap',0.5,0.89,align='c',role='caption',note=False)
+                P.word([a,b],' '.join(w['w'] for w in chunk),'cap',0.5,0.89,align='c',role='caption',note=False,z=3)
     for ch in chapters:
         a=round(ch['start']*FPS)
-        P.word([a,min(a+75,end)],ch['title'],'chapter',0.055,0.08)
+        P.word([a,min(a+75,end)],ch['title'],'chapter',0.055,0.08,z=3)
     for sid,rec in pack.get('designs',{}).items():
         si=int(sid); a=round(clock.segs[si][0]*FPS)
         b=min(round(clock.segs[si][1]*FPS),a+150)
