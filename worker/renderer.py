@@ -5358,8 +5358,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             parts.append(f"[{labs[0]}]null[{out}]" if len(labs) == 1 else
                          "".join(f"[{x}]" for x in labs)
                          + f"concat=n={len(labs)}:v=1:a=0[{out}]")
-            edge = (matte_track.edge_lut() if lab == "person" and
-                    not (pm.params or {}).get('refine') else None)
+            edge = matte_track.edge_lut() if lab == "person" else None
             if edge:
                 # the edge at render resolution (matte_track.edge_lut)
                 parts.append(f"[{out}]lut=c0='{edge}'[{out}e]")
@@ -10056,8 +10055,7 @@ def _run_render_job(worker_db, job):
         try:
             matte_launch = matte_track.launch_source(
                 original.get("sha256"),
-                matte_track.analysis_asset(edl_row['json'], original,
-                    worker_db.run(dbx.latest_asset, project_id, "proxy")),
+                worker_db.run(dbx.latest_asset, project_id, "proxy"),
                 index, project_id)
         except Exception:  # noqa: BLE001 — read-only then
             matte_launch = None
