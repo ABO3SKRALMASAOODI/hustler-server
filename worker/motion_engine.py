@@ -1233,6 +1233,40 @@ def render_jobs(jobs, out_dir, pages=None, budget_s=900.0):
     return box["r"]
 
 
+# Read computed glyph sizes, not CSS source strings: custom HTML may inherit
+# fonts, scale a whole card, or hide an element. Opaque picture backgrounds
+# make the alpha/connected-component type pass see a rectangle, not its labels.
+_DOM_TYPE = """() => {
+  const c = document.createElement('canvas').getContext('2d'), out = [];
+  const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = walk.nextNode())) {
+    const text = n.textContent.trim(), el = n.parentElement;
+    if (!text || !el || !(el instanceof HTMLElement)) continue;
+    if (['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(el.tagName)) continue;
+    let opacity = 1, matrix = new DOMMatrix(), hidden = false;
+    for (let p = el; p; p = p.parentElement) {
+      const s = getComputedStyle(p);
+      opacity *= Number(s.opacity);
+      if (s.display === 'none' || s.visibility !== 'visible') hidden = true;
+      if (s.transform !== 'none') matrix = new DOMMatrix(s.transform).multiply(matrix);
+    }
+    if (hidden || opacity < .8) continue;
+    const r = document.createRange(); r.selectNodeContents(n);
+    const boxes = Array.from(r.getClientRects());
+    if (!boxes.some(b => b.width > 0 && b.height > 0 && b.right > 0 &&
+        b.bottom > 0 && b.left < innerWidth && b.top < innerHeight)) continue;
+    const s = getComputedStyle(el);
+    // Canvas text metrics use the browser's loaded font, including fallback.
+    c.font = `${s.fontStyle} ${s.fontWeight} ${s.fontSize} ${s.fontFamily}`;
+    const cap = c.measureText('H').actualBoundingBoxAscent *
+                Math.hypot(matrix.c, matrix.d) / innerHeight;
+    if (cap > 0) out.push({text: text.slice(0, 100), cap});
+  }
+  return out;
+}"""
+
+
 async def _probe_all(jobs, times_list, budget_s, measure=None):
     from playwright.async_api import async_playwright
     out = []
@@ -1262,6 +1296,7 @@ async def _probe_all(jobs, times_list, budget_s, measure=None):
                     await cdp.send("Emulation.setDefaultBackgroundColorOverride",
                                    {"color": {"r": 0, "g": 0, "b": 0, "a": 0}})
                     visible, bboxes, inks, covers, measures = 0, [], [], [], []
+                    type_runs = []
 
                     def frac(bb):
                         return [round(v * 4.0 / dw, 3) if i % 2 == 0 else round(v * 4.0 / dh, 3)
@@ -1280,6 +1315,7 @@ async def _probe_all(jobs, times_list, budget_s, measure=None):
                         inks.append(frac(ib) if ib else None)
                         covers.append(frac(cb) if cb else None)
                         if measure is not None:
+                            type_runs.append(await page.evaluate(_DOM_TYPE))
                             # the full design canvas, for a caller that
                             # measures the type itself (render_qc)
                             full = await cdp.send("Page.captureScreenshot", {
@@ -1302,7 +1338,8 @@ async def _probe_all(jobs, times_list, budget_s, measure=None):
                                 "samples": len(times), "bboxes": bboxes, "ink": inks,
                                 "cover": covers,
                                 **({"info": info} if isinstance(info, dict) else {}),
-                                **({"measures": measures} if measure is not None else {})})
+                                **({"measures": measures, "type_runs": type_runs}
+                                   if measure is not None else {})})
                   except Exception as e:  # noqa: BLE001 — one bad composition
                     out.append({"errors": [str(e).splitlines()[0][:200]], "visible_frames": 0,
                                 "samples": len(times), "bboxes": [], "ink": [], "cover": []})
