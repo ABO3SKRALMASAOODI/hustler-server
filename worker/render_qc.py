@@ -2093,6 +2093,8 @@ def type_pass(tplan, deadline):
             continue
         try:
             jobs.append(motion_templates.build_job(it["item"], dw, dh, fps))
+            jobs[-1].glyph_exposure = (it.get("template") == "html" and
+                                       it.get("layer") != "behind_subject")
         except Exception:  # noqa: BLE001 — that item stays unmeasured
             continue
         # settled: a build lands its last row by ~85% of its span
@@ -2139,6 +2141,8 @@ def type_pass(tplan, deadline):
                                      "grid": m.get("grid"),
                                      "t": round(prog_t[0], 2)}
                 out["items"][ref]["type_runs"] = (rep.get("type_runs") or [[]])[-1]
+                if rep.get("glyph_masks"):
+                    out["items"][ref]["glyph_mask"] = rep["glyph_masks"][-1]
             continue
         for text, t, m in zip(ref, prog_t, ms):
             if m and not m.get("error") and m.get("box"):
@@ -3143,6 +3147,10 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
                 tres = type_pass(tplan, type_deadline)
                 if tres:
                     res["type"] = type_findings(tres, tplan, plan_.get("cards"))
+                    import rendered_type
+                    contrast = rendered_type.findings(path, tres, tplan, deadline)
+                    if contrast:
+                        res["type"]["low_contrast_html"] = contrast
                     face_tres = tres
                 elif type_deadline - time.monotonic() < 3.0:
                     res["skipped"].append("type: the check's time budget was spent")
@@ -3536,6 +3544,14 @@ def measured_findings(res):
     Oct 10 podcast run)."""
     out = []
     tq = res.get("type") or {}
+    for row in (tq.get("low_contrast_html") or [])[:3]:
+        out.append(
+            f"LOW-CONTRAST GRAPHIC TYPE at {row['t']:.1f}s: '{row['id']}' "
+            f"measures APCA Lc {row['lc']:.1f} (<60) against the finished picture: "
+            + "; ".join(row.get("text") or [])
+            + " — preserve the words and use a clearer seat or measured local backing; "
+              "MG.legible supports dark:false when white type is required. "
+              "Inspect the corrected render; do not remove the title to pass")
     for row in (tq.get("small_html") or [])[:3]:
         out.append(
             f"SMALL GRAPHIC TYPE at {row['t']:.1f}s: '{row['id']}' has visible "
