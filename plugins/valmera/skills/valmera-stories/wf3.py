@@ -2,8 +2,10 @@
 
 ideas   the writer finds stories on the web itself (writer.find_ideas), then each idea's pictures are probed on
         Wikimedia Commons and Openverse: an idea whose named things have no free photographs cannot be made
-script  the writer writes the best idea in its style, every fact with a quote and its URL; each quote is fetched
-        here from its own page and every number on screen must stand in a verified quote, or the stage fails
+script  VERIFY FIRST: the best idea's spine (hook, turn, payoff, close) is researched and every claim verified on its
+        page before a word is written (writer.spine_bank; the next idea when it cannot be); the writer writes from the
+        verified bank alone (writer.write_from_bank), every line judged on its quotes and the spine held
+        (writer.hold_spine), then the ear and the final support pass; every number on screen stands in a verified quote
 supply  the narrator (narrate tool, local, through heavy.sh) and the pictures (worker/broll_source: Commons and
         Openverse, checked by a vision model against what each must show, licence kept), and real video per line
         (worker/footage through _shell/chain.footage: YouTube and archive.org, transcribed and checked on OpenAI,
@@ -123,6 +125,33 @@ def probe(idea):
     return dict(subjects=rows, covered=covered, pictures=total, photo=photo, ok=bool(ok))
 
 
+def spine_probe(idea):
+    """How much of the idea's spine its own sources verify, cheaply: no model call, only fetches. Each spine claim's
+    quote (writer.idea_spine) is looked for on its page through every door (writer.check_fact; a bare number or date is
+    refused). `share` is the part of the four beats (hook, turn, payoff, close) with a verified quote; `ok` when every
+    beat has one. The full research (writer.spine_bank) runs in the script stage on the idea chosen."""
+    rows = []
+    for x in writer.idea_spine(idea):
+        ok, why = False, "no source given"
+        for c in x["evidence"][:2]:
+            r = writer.check_fact(dict(id="probe", claim=x["claim"], quote=c["quote"], url=c["url"], also=[]))
+            if r["found"]:
+                ok, why = True, None
+                break
+            why = writer._why(r)
+        rows.append(dict(beat=x["beat"], claim=x["claim"], verified=ok, why=why))
+    beats = {b: any(r["verified"] for r in rows if r["beat"] == b) for b in writer.SPINE_BEATS}
+    share = round(sum(beats.values()) / len(beats), 2)
+    return dict(claims=rows, beats=beats, share=share, ok=all(beats.values()))
+
+
+def idea_rank(i):
+    """The order ideas are tried in: buildable first, then the writer's strength, the pictures found and the spine
+    the probe verified (a verified spine is worth up to four points of strength)."""
+    sup, sp = i.get("supply") or {}, i.get("spine_probe") or {}
+    return (not sup.get("ok"), -(float(i.get("strength") or 0) + min(sup.get("pictures", 0), 16) / 8 + 4 * float(sp.get("share") or 0)))
+
+
 def remake_of(ctx):
     """A delivered film's record when this run re-makes it (--args '{"remake": "<its folder or film.json>"}'): the
     same story and script on today's engines. No model writes anything: the facts are fetched and checked again."""
@@ -143,9 +172,14 @@ def ideas(ctx):
         raise RuntimeError(f"no buildable style outside the last three ({ctx.styles_last()})")
     avoid = [r.get("idea") for r in ledger_rows(ctx) if r.get("idea")]
     got, use = writer.find_ideas(FORM, able, avoid=avoid, line=ctx.args.get("line"), delivered=DL.prompt_block(ctx.workflow))
-    for i in got[:6]:
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(4) as ex:
+        sp = list(ex.map(spine_probe, got[:6]))
+    for i, p in zip(got[:6], sp):
         i["supply"] = probe(i)
-    got.sort(key=lambda i: (not i.get("supply", {}).get("ok"), -(float(i.get("strength") or 0) + min(i.get("supply", {}).get("pictures", 0), 16) / 8)))
+        i["spine_probe"] = p
+        ctx.log(f"idea {i.get('title')!r}: pictures {i['supply'].get('covered')}, spine verified by its own sources {p['beats']}")
+    got.sort(key=idea_rank)
     srcs = sorted({u for i in got for u in i.get("sources") or []})
     return dict(source=dict(kind="web research by the writer model", origin="web_search + web_fetch", sources=srcs[:40],
                             searches=use.get("web_searches"), fetches=use.get("web_fetches")),
@@ -176,12 +210,22 @@ def script(ctx, ideas_out):
                     idea_full=prev.get("idea_full"), script=sc, verify=rep, words=writer.words_of(sc), remake_of=old.get("run_id"),
                     annotate=ann, spend=spend)
     able = {s["id"]: s for s in able_cards(ctx)}
-    pick = next((i for i in ideas_out["ideas"] if i.get("style") in able and (i.get("supply") or {}).get("ok")), None)
-    if not pick:
+    picks = [i for i in ideas_out["ideas"] if i.get("style") in able and (i.get("supply") or {}).get("ok")]
+    if not picks:
         raise RuntimeError("no idea with a buildable style and enough free pictures: " +
                            json.dumps([(i.get("title"), i.get("style"), (i.get("supply") or {}).get("covered")) for i in ideas_out["ideas"]])[:600])
-    card = able[pick["style"]]
-    sc, rep, spend = write_checked(ctx, pick, card)
+    spend, tried, got = [], [], None
+    for n, pick in enumerate(picks[:SPINE_IDEAS]):
+        card = able[pick["style"]]
+        got = from_spine(ctx, pick, card, spend, n)
+        if got["ok"]:
+            break
+        tried.append(got["tried"])
+        ctx.log(f"spine: {pick.get('title')!r} cannot stand: {got['tried']['why'][:300]}; the next idea")
+    if not got or not got["ok"]:
+        raise RuntimeError("no idea's spine stands on verified quotes (each claim searched at least three ways): " +
+                           json.dumps(tried, ensure_ascii=False)[:900])
+    sc, rep, bank = got["script"], got["verify"], got["bank"]
     sc, rep = for_the_ear(ctx, sc, rep, spend)
     sc, rep = final_gate(ctx, sc, rep, spend)          # the last text gate: the narration's words are frozen after it
     frozen = [s_.get("say") for s_ in sc["segments"]]
@@ -193,7 +237,78 @@ def script(ctx, ideas_out):
     reg = registry_row(card)
     return dict(title=sc.get("title") or pick.get("title"), style=reg, window=None, hook_line=sc.get("hook_line"),
                 close_line=sc.get("close_line"), direction=f"{card['name']}: {card['look']}", idea=pick.get("title"),
-                idea_full=pick, script=sc, verify=rep, words=writer.words_of(sc), annotate=ann, spend=spend)
+                idea_full=pick, script=sc, verify=rep, words=writer.words_of(sc), annotate=ann, spend=spend,
+                spine=spine_record(sc, bank), ideas_tried=tried)
+
+
+SPINE_IDEAS = 3           # ideas whose spine is researched before the stage stops
+BANK_TRIES = 2            # scripts written from one idea's bank before the next idea is taken
+
+
+def spine_record(sc, bank):
+    """The spine as delivered: each beat's final line, the claim it carries and the verified quotes (with their pages)
+    it cites; the bank's claims with the quotes that state them and the queries searched."""
+    facts = {f.get("id"): f for f in sc.get("facts") or []}
+    segs = sc.get("segments") or []
+    lines = writer.spine_lines(sc)
+    beats = {b: dict(line=k, say=segs[k].get("say"), point=[x.get("claim") for x in sc.get("spine") or [] if x.get("beat") == b],
+                     quotes=[dict(id=f, quote=facts[f].get("quote"), url=facts[f].get("url"), source=facts[f].get("source"),
+                                  when=facts[f].get("when")) for f in segs[k].get("facts") or [] if f in facts])
+             for b, k in lines.items()}
+    by = {f["id"]: f for f in (bank or {}).get("facts") or []}
+    claims = [dict(id=c["id"], beat=c["beat"], claim=c.get("as_stated") or c["claim"], stated=c.get("stated"),
+                   quotes=[by[i]["quote"] for i in c.get("by") or [] if i in by], queries=c.get("queries") or [],
+                   rounds=c.get("rounds") or 0) for c in (bank or {}).get("claims") or []]
+    return dict(beats=beats, claims=claims, bank_quotes=len((bank or {}).get("facts") or []),
+                close_from_hook=(bank or {}).get("close_from_hook"))
+
+
+def from_spine(ctx, pick, card, spend, n, bank_fn=None, write=None, settle=None, hold=None):
+    """{"ok", "script", "verify", "bank", "tried"}: VERIFY FIRST, then WRITE FROM THE BANK.
+      1. the idea's spine (hook, turn, payoff, close) is researched and verified as claims before a word is written
+         (writer.spine_bank: the idea's own sources, then up to three search rounds a claim with new queries, primary
+         sources first; report spine<n>.json). A spine that cannot be verified gives the next idea.
+      2. the script is written from the bank alone (writer.write_from_bank), settled, every line judged on its quotes
+         and the spine held (writer.hold_spine: a beat that lost its point is rewritten on the bank, its claims searched
+         again when the bank cannot carry it); BANK_TRIES scripts at most, then the next idea."""
+    bank_fn = bank_fn or (lambda: writer.spine_bank(pick, log=ctx.log))
+    bank, more = bank_fn()
+    spend += [dict(stage="spine", idea=n, **u) for u in more if u]
+    json.dump(bank, open(os.path.join(ctx.run_dir, f"spine{n}.json"), "w"), ensure_ascii=False, indent=1)
+    tried = dict(title=pick.get("title"), why=bank.get("why") or "",
+                 claims=[dict(beat=c["beat"], claim=c["claim"], stated=c.get("stated"), missing=c.get("missing"),
+                              queries=len(c.get("queries") or [])) for c in bank.get("claims") or []])
+    if not bank.get("ok"):
+        return dict(ok=False, tried=tried)
+    write = write or (lambda notes, bank_: writer.write_from_bank(pick, card, FORM, bank_, voices=card.get("voice"), notes=notes))
+    hold = hold or (lambda sc_, bank_: writer.hold_spine(
+        sc_, bank_, pick, log=ctx.log,
+        again=lambda b, cids, why: writer.spine_again(b, pick, cids, why, log=ctx.log)))
+    state = dict(bank=bank)
+
+    def write_n(notes):
+        return write(notes, state["bank"])
+
+    def settle_held(sc_):
+        sc_, rep_, more_ = (settle or (lambda s_: writer.settle(s_, log=ctx.log)))(sc_)
+        if not rep_.get("ok"):
+            return sc_, rep_, more_
+        sc2, hr, more2, state["bank"] = hold(sc_, state["bank"])
+        json.dump(dict(script=sc2, report=hr), open(os.path.join(ctx.run_dir, f"spine{n}_hold.json"), "w"), ensure_ascii=False, indent=1)
+        rep2 = dict(hr["verify"], settle=dict(rep_.get("settle") or {}, hold=dict({k: v for k, v in hr.items() if k != "verify"})))
+        if not hr.get("ok"):
+            rep2["ok"] = False
+            rep2["spine_lost"] = (hr.get("why") if hr.get("why") != "core_unsupported" else
+                                  "a core line cannot stand on its quotes: " + json.dumps(hr.get("core_unsupported"), ensure_ascii=False))
+            return sc_, rep2, list(more_) + list(more2)
+        return sc2, rep2, list(more_) + list(more2)
+    try:
+        sc, rep, more = write_checked(ctx, pick, card, write=write_n, settle=settle_held, tries=BANK_TRIES)
+    except RuntimeError as e:
+        tried["why"] = f"written from its verified bank, the script did not stand: {e}"[:600]
+        return dict(ok=False, tried=tried)
+    spend += more
+    return dict(ok=True, script=sc, verify=rep, bank=state["bank"], tried=tried)
 
 
 SCRIPT_TRIES = 3
@@ -219,6 +334,13 @@ def script_problems(rep, sc):
     if rep.get("speech_unbacked"):
         problems.append("these words are given as someone's own but stand in no verified quote the line cites: "
                         f"{json.dumps(rep['speech_unbacked'], ensure_ascii=False)}")
+    if rep.get("spine_lost"):
+        hold = ((rep.get("settle") or {}).get("hold") or {})
+        last = (hold.get("spine") or [{}])[-1].get("beats") or {}
+        lost = {b: dict(line=v.get("say"), lost=v.get("lost")) for b, v in last.items() if not v.get("carried")}
+        problems.append(("the spine lost its point: " + json.dumps(lost, ensure_ascii=False) if lost else rep["spine_lost"]) +
+                        ". Write each beat (hook, turn, payoff, close) from the bank facts the spine names for it, saying the point "
+                        "itself (both halves of the collision, the price and who paid it, the irony) in words those quotes support")
     n_words = writer.words_of(sc)
     lo, hi = writer.FORMS[FORM]["words"]
     if not lo * 0.85 <= n_words <= hi * 1.15:
@@ -226,7 +348,7 @@ def script_problems(rep, sc):
     return problems
 
 
-def write_checked(ctx, pick, card, write=None, settle=None):
+def write_checked(ctx, pick, card, write=None, settle=None, tries=SCRIPT_TRIES):
     """(script, verify report, spend): the script written, then settled claim by claim (writer.settle: a fact whose page
     will not open or whose quote is absent is sourced again, else its sentences are rewritten without it or dropped; a
     number on screen without a verified quote leaves the screen). The writer writes again only when the story's own
@@ -235,7 +357,7 @@ def write_checked(ctx, pick, card, write=None, settle=None):
     write = write or (lambda notes: writer.write(pick, card, FORM, voices=card.get("voice"), notes=notes))
     settle = settle or (lambda sc_: writer.settle(sc_, log=ctx.log))
     spend, notes, rep, sc, best = [], ctx.args.get("notes"), None, None, None
-    for attempt in range(SCRIPT_TRIES):
+    for attempt in range(tries):
         sc, use = write(notes)
         spend.append(dict(stage="script", attempt=attempt, **use))
         sc, rep, more = settle(sc)
@@ -258,6 +380,8 @@ def write_checked(ctx, pick, card, write=None, settle=None):
         if st.get("core_unsupported"):
             raise RuntimeError("the story's core lines say more than their verified quotes state: "
                                f"{json.dumps(st.get('core_unsupported'), ensure_ascii=False)[:700]}")
+        if (rep or {}).get("spine_lost"):
+            raise RuntimeError(f"the spine lost its point: {rep['spine_lost'][:600]}")
         raise RuntimeError(f"the script's facts do not verify: {json.dumps({k: (rep or {}).get(k) for k in ('facts_unverified', 'numbers_unbacked', 'speech_unbacked', 'verified', 'total')}, ensure_ascii=False)[:600]}")
     return sc, rep, spend
 

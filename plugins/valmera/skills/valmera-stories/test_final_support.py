@@ -187,14 +187,21 @@ def test_a_hook_that_lost_its_point_in_the_rewrite_is_rewritten_once_to_win_it_b
     assert len(j.calls) == 2 and json.loads(j.calls[1].split("each one cites\n", 1)[1])[0]["say"] == back   # judged for support
 
 
-def test_a_point_rewrite_that_is_not_supported_is_not_kept(web):
+def test_a_point_rewrite_that_is_not_supported_is_not_kept_and_the_held_line_comes_back(web):
+    """The new words do not stand: they are not kept, the reason is recorded, and the line the spine was held on (its
+    first words, which still stand on their quotes) comes back instead of the flat one (15 Nov, the spine check)."""
     sc = flat_hook(web)
     point = answers({"lines": [{"i": 0, "kept": False, "lost": "the shutdown"}]})
     fix = answers({"segments": [{"i": 0, "say": "Disney killed Toy Story overnight.", "facts": ["f3"], "show": []}]})
     j = judge(lambda i, say: (False, "Disney, overnight: no quote", []) if "Disney" in say else (True, "", []))
     sc2, rep, _ = writer.final_support(sc, log=quiet, ask_judge=j, ask_rewrite=fix, ask_point=point)
-    assert rep["ok"] and sc2["segments"][0]["say"] == "Katzenberg asked for changes to Woody, and work on the film paused."
-    assert rep["point_kept_old"] == [0] and all(x["supported"] for x in rep["final_lines"])
+    assert rep["ok"] and sc2["segments"][0]["say"] == "Katzenberg wanted an edgier Woody. Then he shut Toy Story down."
+    assert rep["point_kept_old"] == [0] and rep["point_restored"] == [0] and all(x["supported"] for x in rep["final_lines"])
+    assert "do not stand on their quotes: Disney, overnight" in rep["point_failed"][0]["why"]
+    strict = judge(lambda i, say: (False, "no quote", []) if "Disney" in say or "edgier" in say else (True, "", []))
+    sc3, rep3, _ = writer.final_support(sc, log=quiet, ask_judge=strict, ask_rewrite=fix, ask_point=point)
+    assert rep3["ok"] and sc3["segments"][0]["say"] == "Katzenberg asked for changes to Woody, and work on the film paused."
+    assert rep3["point_kept_old"] == [0] and not rep3["point_restored"]          # the held line does not stand either
 
 
 def test_an_unchanged_core_line_is_not_sent_to_the_point_judge(web):

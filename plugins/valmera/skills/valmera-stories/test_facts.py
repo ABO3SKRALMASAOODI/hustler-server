@@ -51,7 +51,7 @@ def web(monkeypatch):
     def no_model(*a, **k):
         raise AssertionError("no model call in these tests: every call is a stand-in")
     monkeypatch.setattr(writer, "ask_openai", no_model)
-    for name in ("_PAGES", "TRIED", "_VIA", "FETCHED"):        # every test reads its own pages
+    for name in ("_PAGES", "TRIED", "_VIA", "FETCHED", "_RAW"):        # every test reads its own pages
         monkeypatch.setattr(writer, name, {})
     return types.SimpleNamespace(routes=routes, calls=calls)
 
@@ -174,10 +174,11 @@ def test_a_rewrite_that_cites_an_unchecked_fact_drops_the_segment(web):
     web.routes[LIVE] = 403
     facts = [dict(id="f1", claim="c", quote=QUOTE, url=GOOD), dict(id="f2", claim="d", quote="Nothing here.", url=LIVE)]
     segs = [dict(say="Woody threw Buzz out.", beat="hook", facts=["f1"], show=[]),
-            dict(say="Side line.", beat="setup", facts=["f2"], show=[])]
+            dict(say="Side line.", beat="setup", facts=["f2"], show=[]),
+            dict(say="The cowboy nearly sank it.", beat="close", facts=["f1"], show=[])]      # the close is core: never dropped
     sc2, rep, _ = writer.settle(script(facts, segs), log=lambda m: None, ask_research=_ask({"facts": []}),
                                 ask_rewrite=_ask({"segments": [{"i": 1, "say": "Still says it.", "facts": ["f2"]}]}))
-    assert rep["ok"] and [s["say"] for s in sc2["segments"]] == ["Woody threw Buzz out."]
+    assert rep["ok"] and [s["say"] for s in sc2["segments"]] == ["Woody threw Buzz out.", "The cowboy nearly sank it."]
 
 
 def test_a_core_claim_that_cannot_be_verified_stops_the_stage_clearly(web, tmp_path):
@@ -227,11 +228,14 @@ def test_a_payoff_restated_on_its_checked_facts_stands_and_is_never_dropped(web)
 
 
 def test_a_quote_copied_off_a_table_row_is_found_letter_for_letter(web):
-    web.routes[GOOD] = ("<table><tr><td>Nov 24-26</td><td>Thanksgiving 3-day</td><td>1</td><td>$29,140,617</td></tr></table>")
-    rep = writer.verify(script([dict(id="f1", claim="c", quote="Nov 24-26Thanksgiving 3-day 1 $29,140,617", url=GOOD),
-                                dict(id="f2", claim="c", quote="Nov 24-26Thanksgiving 3-day 1 $29,140,618", url=GOOD)],
-                               [dict(say="x", beat="hook", facts=["f1", "f2"], show=[])]))
-    assert [r["found"] for r in rep["facts"]] == [True, False]
+    web.routes[GOOD] = ("<table><tr><td>Nov 24-26</td><td>Thanksgiving 3-day weekend gross of Toy Story</td><td>1</td>"
+                        "<td>$29,140,617</td></tr></table>")
+    rep = writer.verify(script([dict(id="f1", claim="c", quote="Nov 24-26Thanksgiving 3-day weekend gross of Toy Story 1 $29,140,617", url=GOOD),
+                                dict(id="f2", claim="c", quote="Nov 24-26Thanksgiving 3-day weekend gross of Toy Story 1 $29,140,618", url=GOOD),
+                                dict(id="f3", claim="c", quote="Nov 24-26Thanksgiving 3-day", url=GOOD)],
+                               [dict(say="x", beat="hook", facts=["f1", "f2", "f3"], show=[])]))
+    assert [r["found"] for r in rep["facts"]] == [True, False, False]
+    assert rep["facts"][2]["thin"] and "bare number or date" in rep["facts"][2]["missing"]      # a bare row verifies nothing
 
 
 def test_a_core_claim_that_re_research_rescues_lets_the_stage_pass(web, tmp_path):

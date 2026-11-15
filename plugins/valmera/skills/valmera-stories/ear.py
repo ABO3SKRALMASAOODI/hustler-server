@@ -19,6 +19,9 @@ Nothing here interprets the words by rule; the model rewrites, the model audits,
 movie this long"). Each segment now carries the verified quotes it stands on, the rewrite is told to add no fact beyond
 them and the auditor checks against them; both calls are pinned to OpenAI (EAR_MODEL). The ear is never the last word:
 writer.final_support judges every line on its quotes after it (wf3.final_gate).
+
+15 Nov, later (the spine check): the core segments (hook, turn, payoff, close) also carry `its_point`, the claim the
+story's verified spine gives that beat (writer.spine_points), and the rewrite must say it at least as sharply.
 """
 import json
 import os
@@ -78,7 +81,9 @@ SYSTEM = ("You are the voice editor of a documentary studio. A checked script re
           "stands on: say nothing that the segment and those quotes do not already state. No new superlative, record, first, "
           "never, only or comparison; no new count, length, setting, scene, time, title, role, motive or feeling; no new "
           "person or company as the one who acted (keep who did what exactly as the segment names them); a restated verb "
-          "keeps its exact strength (\"made changes\" never becomes \"rewrote\").")
+          "keeps its exact strength (\"made changes\" never becomes \"rewrote\"). A segment with `its_point` carries the "
+          "story's spine (the hook, the turn, the payoff, the close): its rewrite says that point at least as sharply, both "
+          "halves of a collision, the price and who paid it, the irony, never a flat statement of record or one half.")
 
 
 def _quotes_of(script):
@@ -88,8 +93,11 @@ def _quotes_of(script):
 def _segments_view(script):
     out = []
     qb = _quotes_of(script)
+    points = writer.spine_points(script)
     for i, s in enumerate(script.get("segments") or []):
         v = {"i": i, "say": s.get("say", ""), "its_quotes": [qb[f] for f in s.get("facts") or [] if f in qb]}
+        if i in points:
+            v["its_point"] = [p["claim"] for p in points[i]]
         for k in ("beat", "chapter", "pace", "melody", "emphasis", "pause_after", "direction"):
             if s.get(k) not in (None, "", []):
                 v[k] = s[k]

@@ -13,7 +13,15 @@ call it; `FORMS` holds what differs. Two model calls, each with the web (search 
                                               verified quote. A comparison of measured strings.
     settle(script)                         -> verify, then a failed fact is sourced again (one call),
                                               else its lines are rewritten without it or dropped;
-                                              only an unverifiable hook, turn or payoff stops the film
+                                              only an unverifiable hook, turn, payoff or close stops the film
+    spine_bank(idea)                       -> VERIFY FIRST (15 Nov): the idea's spine (hook, turn, payoff,
+                                              close) researched as claims and verified before a word is
+                                              written: its own sources, then up to three search rounds a
+                                              claim with new queries, primary sources first
+    write_from_bank(idea, card, form, bank) -> the script written from the verified bank alone (no web)
+    hold_spine(script, bank)               -> every line judged on its quotes; each spine beat must carry
+                                              the idea's point, rewritten on the bank or searched again
+    final_support(script)                  -> the last text gate after the ear
 
 The model decides what a story is and how it is told; nothing here reads its words by rule.
 The key comes from this process's environment (run under .valmera/claude_trial_env.sh).
@@ -24,6 +32,7 @@ import json
 import os
 import re
 import gzip
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -166,11 +175,13 @@ def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, 
                         request_id=final.get("id"), status=final.get("status"), force=True)
     if final.get("status") == "failed":
         raise RuntimeError(f"openai failed: {json.dumps(final.get('error'))[:300]}")
-    text, n_search, cited = "", 0, []
+    text, n_search, cited, queries = "", 0, [], []
     for item in final.get("output") or []:
         if item.get("type") == "web_search_call":
             n_search += 1
-            for s in ((item.get("action") or {}).get("sources") or []):
+            act = item.get("action") or {}
+            queries += [q for q in [act.get("query")] + list(act.get("queries") or []) if isinstance(q, str) and q.strip()]
+            for s in (act.get("sources") or []):
                 if s.get("url"):
                     cited.append(s["url"])
         if item.get("type") == "message":
@@ -187,7 +198,8 @@ def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, 
     return text, dict(provider="openai", model=model, effort=effort, what=what, input=tin, output=tout, cache_read=cached,
                       cache_write=openai_cache.tokens(u)["cache_write_tokens"], web_searches=n_search,
                       web_fetches=0, usd=round(usd, 4), seconds=round(time.time() - t0, 1), stop=final.get("status"),
-                      incomplete=(final.get("incomplete_details") or {}).get("reason"))
+                      incomplete=(final.get("incomplete_details") or {}).get("reason"),
+                      **(dict(queries=list(dict.fromkeys(queries))) if queries else {}))
 
 
 SEEN_URLS = set()
@@ -311,10 +323,21 @@ def find_ideas(form, cards, avoid=(), line=None, n=IDEAS_N, effort="high", deliv
                "with a figure. Avoid the stories the references already told (SpaceX's fourth launch, Airbnb's cereal, Xerox PARC, "
                "the traitorous eight, the PayPal mafia). Check that the named people and events were filmed (an interview, a "
                "keynote, a news report, archive footage) and have photos on Commons.\n\n"
+               "Truth and grip are one test: a story qualifies only when its spine (the hook's collision, the turn, the payoff's "
+               "figure and who paid it, the close's irony) is stated in so many words on pages a plain script can read. Before you "
+               "offer an idea, find for each spine claim one whole sentence that states it, primary sources first (a court record "
+               "or judgment, a filing, the company's or the person's own statement, a contemporary news report), else Wikipedia "
+               "or another free reference page. An idea whose point no readable page states is not offered.\n\n"
                f"Return JSON only: {{\"ideas\": [{n} items, best first]}}. Each: {{\"id\": \"i1\", \"title\": a plain title, "
                "\"style\": one style id from the list, \"why_style\": what in this story that style needs, \"hook\": the first sentence "
                "as it would be spoken, \"story\": the story in four to six plain sentences with its figures, \"turn\": the human turn, "
-               "\"payoff\": the payoff with its figure, \"named\": [up to 8 {\"name\": usual English name, \"is\": person|place|company|"
+               "\"payoff\": the payoff with its figure, \"spine\": [one or two items for each beat hook, turn, payoff and close: "
+               "{\"beat\": hook|turn|payoff|close, \"claim\": the one fact this beat cannot do without, as one plain checkable "
+               "sentence (who did what to whom, when, the figure; no detail the point does not need): the hook's claims are both "
+               "halves of its collision, the payoff's claim names the figure and who paid or got it, the close's claim is the fact "
+               "that makes the irony true, \"source\": {\"url\": a readable page that states it, \"quote\": one whole sentence "
+               "copied word for word from that page that states it, never a bare date, number or heading}}], "
+               "\"named\": [up to 8 {\"name\": usual English name, \"is\": person|place|company|"
                "thing|event, \"searches\": one to three Wikimedia Commons searches, most specific first, \"must_show\": one sentence: what "
                "a picture must visibly show to count}], \"photo\": for one-photograph only, {\"file\": the exact Commons file title "
                "starting File:, \"licence\": its licence, \"why\": why this one picture holds the whole story} else null, \"sources\": "
@@ -409,7 +432,8 @@ def write(idea, card, form, voices=None, notes=None, effort="high"):
                "someone's own words (in quotation marks, or as what they said, recalled, wrote or asked) as {\"words\": the span "
                "exactly as in say, \"who\": whose words, \"fact\": the id of the fact whose quote holds those words word for word}, "
                "or [] (never put words in anyone's mouth that a fact's quote does not hold verbatim)}], \"facts\": [{\"id\": \"f1\", \"claim\": the fact in plain "
-               "words, \"quote\": a sentence copied exactly, word for word, from the page at url that states it, \"url\": the page, "
+               "words, \"quote\": a whole sentence copied exactly, word for word, from the page at url that states it (never a bare "
+               "date, number or fragment: a quote of fewer than four words besides its numbers is refused), \"url\": the page, "
                "\"also\": [other readable pages you read that carry the same sentence, or []]}], "
                "\"named\": [{\"name\", \"is\", \"searches\", \"must_show\"} for every person, place or thing the film shows], ") +
                (STYLE_DATA.get(card["id"], "")) +
@@ -795,15 +819,42 @@ def has_words(text, span):
     return bool(b) and any(a[k:k + n] == b for k in range(len(a) - n + 1))
 
 
-def readable(raw):
-    """HTML to the normalised text a reader sees (quote presence is measured on this, never on the markup)."""
+MIN_QUOTE_WORDS = 4
+
+
+def quote_words(q):
+    """The quote's words that hold no digit (a word with a digit is a figure, a year or a date): a structural count."""
+    return [w for w in speech_words(q) if not any(c.isdigit() for c in w)]
+
+
+def thin_quote(q):
+    """Why a quote is too thin to verify anything (None when it is a meaningful fragment): fewer than MIN_QUOTE_WORDS
+    words besides its numbers, so a bare number, year or date ("1983", "on 13th October 2000", "Thursday 4th October
+    2001") never passes as a verified quote. Structure only, never a reading of meaning."""
+    n = len(quote_words(q))
+    if n < MIN_QUOTE_WORDS:
+        return (f"a quote must be a meaningful fragment of at least {MIN_QUOTE_WORDS} words besides its numbers, never a "
+                f"bare number or date (this one has {n})")
+    return None
+
+
+def _both(raw):
+    """HTML to (the normalised text a quote is measured on, the readable text as a reader sees it, case and punctuation
+    kept, for a model to copy sentences from)."""
     p = _Text()
     p.feed(raw)
     p.close()
-    return norm(" ".join(p.out))
+    t = " ".join(" ".join(p.out).split())
+    return norm(t), t
+
+
+def readable(raw):
+    """HTML to the normalised text a reader sees (quote presence is measured on this, never on the markup)."""
+    return _both(raw)[0]
 
 
 _PAGES = {}
+_RAW = {}                  # {url: the page's readable text with its case and punctuation}: what an extraction call reads
 # pages the web_fetch tool read during this process: fetched by Anthropic's servers, not written by the model, so a
 # quote is also checked against them when a site refuses this machine (a 403 to a script)
 FETCHED = {}
@@ -946,10 +997,28 @@ def wayback(url, timeout=WAYBACK_TIMEOUT_S, log_to=None):
     raise last if isinstance(last, FetchError) else FetchError("no archived copy", status="not archived")
 
 
+_LOCK = threading.Lock()
+_URL_LOCKS = {}
+
+
+def _url_lock(key):
+    """One lock a page: threads asking for the same page wait for the first fetch and read its cached answer (15 Nov: two
+    threads fetched one page at once, the site refused the second with a 403, and that refusal overwrote the cached text,
+    so 23 sentences verified on that page failed)."""
+    with _LOCK:
+        return _URL_LOCKS.setdefault(str(key), threading.Lock())
+
+
 def page_text(url, timeout=20):
     """The page's readable text. The live page with a browser's headers, asked twice; when it will not open, Wikipedia's
     own API for a Wikipedia article, then the Wayback Machine's latest copy of the same URL: the same page from another
-    door, never a model's account of it. Every fetch is kept in TRIED[url]; the copy read in _VIA[url]."""
+    door, never a model's account of it. Every fetch is kept in TRIED[url]; the copy read in _VIA[url]. One fetch a page,
+    whatever the threads (_url_lock)."""
+    with _url_lock(url):
+        return _page_text(url, timeout)
+
+
+def _page_text(url, timeout=20):
     if url in _PAGES:
         if isinstance(_PAGES[url], Exception):
             raise _PAGES[url]
@@ -957,9 +1026,9 @@ def page_text(url, timeout=20):
     if str(url).lower().split("?")[0].endswith(".pdf"):
         raise ValueError(PDF)
     tried = TRIED.setdefault(url, [])
-    first = None
+    first, raw = None, None
     try:
-        text, via = readable(_read(url, timeout, log_to=tried)), "live"
+        (text, raw), via = _both(_read(url, timeout, log_to=tried)), "live"
     except ValueError:
         raise
     except FetchError as e:
@@ -967,19 +1036,19 @@ def page_text(url, timeout=20):
     if text is None:
         for v, u in wikipedia_api(url):
             try:
-                text, via = readable(_wiki_html(v, _read(u, timeout, log_to=tried, via=v))), v
+                (text, raw), via = _both(_wiki_html(v, _read(u, timeout, log_to=tried, via=v))), v
                 break
             except (FetchError, ValueError):
                 continue
     if text is None:
         try:
-            text, via = readable(wayback(url, log_to=tried)), "wayback"
+            (text, raw), via = _both(wayback(url, log_to=tried)), "wayback"
         except FetchError:
             pass
     if text is None:
         _PAGES[url] = first
         raise first
-    _PAGES[url], _VIA[url] = text, via
+    _PAGES[url], _VIA[url], _RAW[url] = text, via, raw
     return text
 
 
@@ -987,12 +1056,13 @@ def archived_text(url):
     """The Wayback copy's readable text, for a live page whose text hides the quote (scripts, a soft wall); None when
     there is none. Cached like the pages."""
     key = "wayback:" + str(url)
-    if key not in _PAGES:
-        try:
-            _PAGES[key] = readable(wayback(url, log_to=TRIED.setdefault(url, [])))
-        except (FetchError, ValueError):
-            _PAGES[key] = None
-    return _PAGES[key]
+    with _url_lock(key):
+        if key not in _PAGES:
+            try:
+                _PAGES[key], _RAW[key] = _both(wayback(url, log_to=TRIED.setdefault(url, [])))
+            except (FetchError, ValueError):
+                _PAGES[key] = None
+        return _PAGES[key]
 
 
 def quote_found(quote, page):
@@ -1052,6 +1122,9 @@ def check_fact(f):
     (`also`), then of a page the web_fetch tool read. Every fetch is listed with its status."""
     r = dict(id=f.get("id"), url=f.get("url"), claim=f.get("claim"), found=False)
     q = f.get("quote", "")
+    thin = thin_quote(q)
+    if thin:                            # a bare number or date verifies nothing, wherever it stands
+        return dict(r, read="here", missing=thin, thin=True)
     tried = []
     urls = [f.get("url")] + [u for u in (f.get("also") or [])[:3] if isinstance(u, str) and u.startswith("http") and u != f.get("url")]
     for k, u in enumerate(urls):
@@ -1097,29 +1170,49 @@ def speech_of(seg):
     return out
 
 
-def speech_backed(words, seg, quotes_by_id):
-    """Why a span presented as someone's words cannot stand, or None when it can: it must be in the line and stand
-    word for word in the verified quote of a fact the line cites (identity of whole words in order: speech_words,
-    has_words; never a substring, never a reading of meaning). `quotes_by_id` holds each verified fact's quote as
-    written."""
+def same_person(a, b):
+    """True when two names name the same person, by identity of their words only: one name's words stand whole inside
+    the other's ("Hanks" in "Tom Hanks"), or both end in the same word (a surname: "Mr Dyson", "James Dyson")."""
+    wa, wb = speech_words(a), speech_words(b)
+    if not wa or not wb:
+        return False
+    return has_words(" ".join(wa), " ".join(wb)) or has_words(" ".join(wb), " ".join(wa)) or wa[-1] == wb[-1]
+
+
+def speakers_of(script):
+    """{fact id: the person whose own words its quote holds}, for facts that say (the bank records it; a fact without the
+    field is unknown, never a mismatch)."""
+    return {f.get("id"): str(f.get("speaker")) for f in script.get("facts") or [] if f.get("speaker")}
+
+
+def speech_backed(words, seg, quotes_by_id, who=None, speakers=None):
+    """Why a span presented as someone's words cannot stand, or None when it can. Both, by identity of whole words in
+    order (speech_words, has_words; never a substring, never a reading of meaning):
+      - the span stands in the LINE (a span the judge copied from the quote but the line does not say, "I'm in" for a
+        line saying "I'm all in", is not the line's words);
+      - it stands verbatim in the verified quote of a fact the line cites, and that quote is that person's (when the
+        facts record whose words their quotes hold, `speakers`, and `who` is given, one holding quote must be theirs).
+    `quotes_by_id` holds each verified fact's quote as written."""
     if not speech_words(words):
         return None
-    cited = [quotes_by_id[f] for f in (seg.get("facts") or []) if f in quotes_by_id]
-    if any(has_words(q, words) for q in cited):
-        return None
     if not has_words(seg.get("say") or "", words):
-        return "the quoted words are not in the line as given (a loose copy is not someone's words)"
-    return "the quoted words stand in no verified quote the line cites"
+        return "the quoted words are not in the line as given (the line says other words than the ones named as someone's)"
+    holding = [f for f in (seg.get("facts") or []) if f in quotes_by_id and has_words(quotes_by_id[f], words)]
+    if not holding:
+        return "the quoted words stand in no verified quote the line cites"
+    speakers = speakers or {}
+    if who and all(speakers.get(f) for f in holding) and not any(same_person(who, speakers[f]) for f in holding):
+        return f"the quoted words stand only in a quote of {speakers[holding[0]]}'s, not {who}'s"
+    return None
 
 
 def speech_problems(script, quotes_by_id):
     """[{segment, words, who, why}] for every declared quoted span that is not in its line, or not verbatim in a
-    verified quote the line cites."""
-    out = []
+    verified quote of that person the line cites."""
+    out, speakers = [], speakers_of(script)
     for k, s in enumerate(script.get("segments") or []):
         for q in speech_of(s):
-            why = None if has_words(s.get("say") or "", q["words"]) else "the quoted words are no longer in the line"
-            why = why or speech_backed(q["words"], s, quotes_by_id)
+            why = speech_backed(q["words"], s, quotes_by_id, who=q.get("who"), speakers=speakers)
             if why:
                 out.append(dict(segment=k, words=q["words"], who=q.get("who"), why=why))
     return out
@@ -1149,7 +1242,7 @@ def verify(script):
 
 # ----------------------------------------------------------------- a fact that fails is re-researched, never the film
 
-CORE_BEATS = ("hook", "turn", "payoff")
+CORE_BEATS = ("hook", "turn", "payoff", "close")
 RESEARCH_MODEL = "gpt-6.1-sol"          # pinned to OpenAI (ask_openai): Anthropic spend stays at zero
 
 RESEARCH_SYSTEM = """You are the fact checker of a narrated documentary film. Some of its facts could not be checked: the page cited would not open for a plain script (a bot wall, a 403, a reset), or the sentence quoted is not on that page. For each one, search the web for other pages that state the SAME claim, and copy from each one sentence that states it, word for word exactly as it stands on the page.
@@ -1169,21 +1262,28 @@ SUPPORT_ROUNDS = 2                      # an unsupported line is rewritten at mo
 
 SUPPORT_SYSTEM = """You are the fact checker of a narrated documentary film. Every quote below was fetched from its page and found there word for word. For each line you are asked about, decide whether EVERY claim the line makes is stated by the quotes of the facts it cites: a person, a number, a date, an order of events, a cause, a feeling, who said what. A claim the quotes only suggest, a detail they do not hold, or a quote put in a different person's mouth is not supported. The other lines of the script are there only so you know who "he" or "it" is.
 
-Also list every span of the line that presents someone's own words: in quotation marks, or given as what a person said, recalled, wrote, asked or thought in their own words. Copy each span exactly as the line has it, with whose words the line says they are. Paraphrase in the narrator's own voice ("he agreed to do it") is not such a span.
+Also list every span of the line that presents someone's own words: in quotation marks, or given as what a person said, recalled, wrote, asked or thought in their own words. Copy each span exactly as the LINE has it (never as the quote has it), with whose words the line says they are, by name. Paraphrase in the narrator's own voice ("he agreed to do it") is not such a span.
 
-Answer with one JSON object only: {"lines": [{"i": the line index, "supported": true or false, "unsupported": the claim no quote states (empty when supported), "speech": [{"words": the span exactly as in the line, "who": whose words}]}]}"""
+And name the cited facts the line actually uses: those whose words it says or paraphrases. A fact cited for a date, a figure or a detail the line never says is not used.
+
+Answer with one JSON object only: {"lines": [{"i": the line index, "supported": true or false, "unsupported": the claim no quote states (empty when supported), "speech": [{"words": the span exactly as in the line, "who": whose words}], "uses": [the ids of the cited facts the line uses]}]}"""
 
 REPEAT_SYSTEM = """You are the story editor of a narrated documentary film of about a minute and a half. Some lines were rewritten just now. Read the whole script and find any line that says again what another line already says: the same claim or point made twice, or the same phrasing used twice. A line that adds a new detail, a consequence or a turn is not a repeat; a deliberate echo of the hook in the last line (the close reframing it) is not a repeat.
 
-For each repeat, name the line that should change: the line rewritten just now when one of the two was; never a hook, turn or payoff line when the other is not one.
+For each repeat, name the line that should change: the line rewritten just now when one of the two was; never a hook, turn, payoff or close line (marked CORE) when the other is not one.
 
 Answer with one JSON object only: {"repeats": [{"i": the line that should change, "of": the line it repeats, "why": a few words}]} (an empty list when nothing repeats)."""
 
 
 def core_segments(script):
-    """The segments the story stands on: its hook, turn and payoff (the first segment is the hook whatever its mark).
-    The script's own beat marks, read structurally."""
-    return {k for k, s in enumerate(script.get("segments") or []) if k == 0 or s.get("beat") in CORE_BEATS}
+    """The segments the story stands on: its hook, turn, payoff and close (the first segment is the hook whatever its
+    mark; the last segment is the close when no segment is marked close). The close is restated, never silently dropped
+    (15 Nov: it was dropped in two runs in a row). The script's own beat marks, read structurally."""
+    segs = script.get("segments") or []
+    out = {k for k, s in enumerate(segs) if k == 0 or s.get("beat") in CORE_BEATS}
+    if segs and not any(s.get("beat") == "close" for s in segs):
+        out.add(len(segs) - 1)
+    return out
 
 
 def _why(row):
@@ -1259,9 +1359,10 @@ def rewrite_without(script, bad, ask=None, targets=None, why=None, style=None):
         if set(segs[k].get("facts") or []) & bad:
             why.setdefault(k, "it rests on a fact no readable page states")
     core = core_segments(sc)
+    points = spine_points(sc)
     dict_show = any(isinstance(x, dict) for s in segs for x in s.get("show") or [])
     roles = ROLES if dict_show else ()
-    use, got = None, {}
+    use, got, err = None, {}, None
     if targets:
         content = (f"# The script\n" + _script_lines(segs) +
                    f"\n\n# Checked facts\n{json.dumps([dict(id=f.get('id'), claim=f.get('claim'), quote=f.get('quote')) for f in good], ensure_ascii=False)}"
@@ -1271,14 +1372,18 @@ def rewrite_without(script, bad, ask=None, targets=None, why=None, style=None):
                    (f"\n\n# Core segments (the hook, the turn, the payoff): never drop these; restate each on the checked facts "
                     f"only when they still carry its point, else answer say null for it\n{[k for k in targets if k in core]}"
                     if any(k in core for k in targets) else "") +
+                   (f"\n\n# The point each core segment must carry (the story's spine, with the checked facts that state it): "
+                    f"restate the segment so it says that point as sharply, in words those facts support\n"
+                    f"{json.dumps({str(k): points[k] for k in targets if k in points}, ensure_ascii=False)}"
+                    if any(k in points for k in targets) else "") +
                    (f"\n\n# Display roles\n{list(roles)}" if roles else "") +
                    (f"\n\n# The spoken style to keep in every rewritten segment\n{style}" if style else ""))
         try:
             text, use = ask(REWRITE_SYSTEM, content)
             ans = json_block(text)
             got = {g["i"]: g for g in ans.get("segments") or [] if isinstance(g, dict) and _valid_i(g.get("i"), len(segs))}
-        except Exception:  # noqa: BLE001 - no answer: the segments that must change are dropped
-            got = {}
+        except Exception as e:  # noqa: BLE001 - no answer: the segments that must change are dropped
+            got, err = {}, repr(e)[:200]
     rewritten, dropped, core_failed = [], [], []
     for k in targets:
         g = got.get(k) or {}
@@ -1299,14 +1404,20 @@ def rewrite_without(script, bad, ask=None, targets=None, why=None, style=None):
             rewritten.append(k)
         else:
             dropped.append(k)
+    # why a target was not restated, in the rewrite's own terms (recorded by the callers: a rejection always has a reason)
+    answer = {k: ("the rewrite call failed: " + err if err else "the rewrite gave no answer for it" if k not in got
+                  else "the rewrite answered null: it found no checked quote that says it" if got[k].get("say") is None
+                  else "the rewrite cited a fact that is not checked" if not set(got[k].get("facts") or []) <= good_ids
+                  else "the rewrite cited no checked fact" if not got[k].get("facts") else "the rewrite's answer was not usable")
+              for k in targets if k not in rewritten}
     if core_failed:
         return json.loads(json.dumps(script)), dict(rewritten=[], dropped=[], facts_dropped=[], core_failed=core_failed,
-                                                    why={k: why.get(k) for k in core_failed}), use
+                                                    why={k: why.get(k) for k in core_failed}, answer=answer, error=err), use
     sc["segments"] = [s for k, s in enumerate(segs) if k not in dropped]
     sc["facts"] = good
     if sc["segments"]:
         sc["hook_line"], sc["close_line"] = sc["segments"][0].get("say"), sc["segments"][-1].get("say")
-    return sc, dict(rewritten=rewritten, dropped=dropped, facts_dropped=sorted(bad), core_failed=[]), use
+    return sc, dict(rewritten=rewritten, dropped=dropped, facts_dropped=sorted(bad), core_failed=[], answer=answer, error=err), use
 
 
 def _verified_quotes(script, rep=None):
@@ -1344,6 +1455,7 @@ def judge_support(script, idx, ask=None, quotes_by_id=None):
     except Exception as e:  # noqa: BLE001 - no judgement: every line asked about counts as unsupported
         got, use = {}, use
         out["_error"] = repr(e)[:200]
+    speakers = speakers_of(script)
     for k in idx:
         g = got.get(k)
         if g is None:
@@ -1354,14 +1466,17 @@ def judge_support(script, idx, ask=None, quotes_by_id=None):
         declared = [dict(words=q["words"], who=q.get("who")) for q in speech_of(segs[k])]
         bad_speech = []
         for q in declared + speech:
-            # fail closed: every span given as someone's words, the writer's and the judge's alike, must stand word for
-            # word in a verified quote the line cites; a span the judge copied loosely ("Im in") stands in none, so the
-            # line is unsupported whatever the verdict says
-            w = speech_backed(q["words"], segs[k], quotes_by_id)
+            # fail closed: every span given as someone's words, the writer's and the judge's alike, must stand in the
+            # line AND word for word in a verified quote of that person the line cites; a span the judge copied loosely
+            # ("Im in") or from the quote instead of the line ("I'm in" for "I'm all in") makes the line unsupported
+            # whatever the verdict says
+            w = speech_backed(q["words"], segs[k], quotes_by_id, who=q.get("who"), speakers=speakers)
             if w and not any(speech_words(q["words"]) == speech_words(b["words"]) for b in bad_speech):
                 bad_speech.append(dict(q, why=w))
+        cited = [f for f in segs[k].get("facts") or [] if f in quotes_by_id]
+        uses = [f for f in g.get("uses") if f in cited] if isinstance(g.get("uses"), list) else None
         if not bad_speech and g.get("supported") is True:
-            out[k] = dict(ok=True, why="", speech=speech)
+            out[k] = dict(ok=True, why="", speech=speech, uses=uses)
         else:
             why = str(g.get("unsupported") or "") if g.get("supported") is not True else ""
             if bad_speech:
@@ -1406,6 +1521,22 @@ def _at(sc, sid):
     return None
 
 
+def uncite(seg, verdict, qb, info, stage):
+    """A supported line cites only the facts whose words it uses or paraphrases (the judge's `uses`, a model's
+    judgement): the others leave its `facts` (a bare "1983" cited by lines that never say it, 15 Nov). A fact holding
+    words the line gives as someone's own is kept. No `uses` in the answer changes nothing."""
+    uses = verdict.get("uses")
+    if uses is None:
+        return
+    facts = list(seg.get("facts") or [])
+    spans = [q["words"] for q in speech_of(seg)] + [q["words"] for q in verdict.get("speech") or []]
+    keep = [f for f in facts if f in uses or f not in qb or any(has_words(qb[f], w) for w in spans)]
+    if keep != facts:
+        info.setdefault("uncited", []).append(dict(stage=stage, sid=seg.get("_sid"), say=seg.get("say"),
+                                                   removed=[f for f in facts if f not in keep]))
+        seg["facts"] = keep
+
+
 def check_lines(sc, info, spend, log, ask_judge=None, ask_rewrite=None, rounds=SUPPORT_ROUNDS, style=None, stage="settle"):
     """(script, core_failed {sid: why}): every segment marked `_check` (it cites a fact whose quote was replaced, it was
     rewritten, or it declares quoted speech no verified quote holds) is judged for support; an unsupported line is
@@ -1433,6 +1564,7 @@ def check_lines(sc, info, spend, log, ask_judge=None, ask_rewrite=None, rounds=S
         for k in idx:
             if verdicts[k]["ok"]:
                 segs[k].pop("_check", None)
+                uncite(segs[k], verdicts[k], qb, info, stage)
         if not bad:
             break
         log(f"line support (round {rnd}): unsupported {[(k, w[:80]) for k, w in bad.items()]}"[:600])
@@ -1631,9 +1763,665 @@ def settle(script, log=print, ask_research=None, ask_rewrite=None, ask_judge=Non
     return done(sc, rep)
 
 
+# ----------------------------------------------------------------- verify first: the spine bank, then write from it
+#
+# 15 Nov (the independent check of dcbe553e): every final line stood on verified quotes, but the stories lost their spine.
+# The Dyson idea "Hoover rejected James Dyson, then had to pay for copying his invention" ended as a flat legal line (no
+# rejection, no reversal, no price): the writer had cited weak fragments ("1983", "The appeal should be dismissed.") and
+# the gates cut every claim those fragments did not carry. Now the spine is researched and verified BEFORE a word is
+# written, and the writer writes only from the verified bank. Truth is never traded for punch; punch never dies for truth.
+
+SPINE_BEATS = ("hook", "turn", "payoff", "close")
+SPINE_MODEL = "gpt-6.1-sol"              # pinned to OpenAI (ask_openai): Anthropic spend stays at zero
+SPINE_ROUNDS = 3                         # search rounds a spine claim gets, each with new queries, before the idea is let go
+SPINE_TIERS = (
+    "primary sources first: court records and judgments, filings and official registers, the company's or the person's own "
+    "statements, newsroom and history pages, and news reports written at the time",
+    "news reports and trade press written at the time, and any primary source not tried yet",
+    "any readable page that states it: reference works (Wikipedia, encyclopaedias), museums, universities, later news")
+EXTRACT_PAGES = 3                        # pages one extraction call reads
+EXTRACT_CHARS = 45000                    # of one page's readable text
+STORY_SENTENCES = 14                     # sentences that tell the rest of the story, copied from the pages read first
+BANK_MAX = 40
+SKIP_HOSTS = ("commons.wikimedia.org",)  # a picture category holds no sentence of the story (identity of the host only)
+FETCH_THREADS = 6
+
+SPINE_CLAIMS_SYSTEM = """You are the story editor of a narrated documentary film of about a minute and a half. Before a word is written, the story's spine is researched as claims. From the idea below write its spine: for each beat (hook, turn, payoff, close) the one or two facts it cannot do without, each one plain checkable sentence naming who did what to whom, when, and the figure, with no detail the point does not need. The hook's claims are both halves of its collision (a rejection AND what came of it); the turn's claim is the moment the story turns; the payoff's claim names the figure and who paid or got it; the close's claim is the fact that makes the irony true. Use only what the idea says.
+
+Answer with one JSON object only: {"spine": [{"beat": "hook" | "turn" | "payoff" | "close", "claim": the claim}]}"""
+
+RESEARCH_SPINE_SYSTEM = """You are the researcher of a narrated documentary film. The film is written only after every claim its story stands on is found stated on a page a plain script can read. For each claim below, search the web and copy sentences that state it, word for word exactly as they stand on the page.
+
+Search with new queries for each claim, never one already tried (listed with the claim), and at least two different ways for each claim before you give up on it. This round: {tier}.
+
+Cite only pages a plain script can read: no paywall, no login, no bot wall, no PDF, no document mirror (studylib, scribd), and never a page listed under a claim as failed with a refusal (a 403, a 429, unreachable): it refused this script and will refuse it again, so find another page that states the same claim. Copy a whole sentence (or a clause of at least eight words) that states the claim with its subject and its verb: never a bare date, a number, a heading or a fragment. A sentence that only implies the claim, or a paraphrase, is worth nothing: the sentence is checked by fetching the page and finding it there. When no readable page states a claim, give no sources for it; never stretch a source.
+
+For each sentence say whose statement it is (the court, the company, the newspaper, the author), the person whose own words it quotes when it quotes someone (else null), and when (the date of the event it states, else the page's date, else null).
+
+Answer with one JSON object only: {"claims": [{"id": the claim id, "queries": [every search you ran for it], "sources": [up to four {"url": the page, "quote": the sentence copied word for word, "source": whose statement, "speaker": a person or null, "when": a date or null}]}]}"""
+
+EXTRACT_SYSTEM = """You copy sentences from web pages a script has already fetched, for the fact bank of a narrated documentary film. Every sentence you give is checked against the page text below word for word, so copy it exactly: the same words in the same order (you may leave out a footnote mark).
+
+For each claim, copy every sentence on these pages that states it (or the part of it the page states). Then copy the number of sentences asked for that tell the rest of this story: what happened, to whom, when, the figures, the turn, anyone's own words. Each one a whole sentence, or a clause of at least eight words that makes sense alone: never a heading, a caption, a short list item, a bare date or a number.
+
+For each sentence say whose statement it is (the court, the company, the newspaper, the author), the person whose own words it quotes when it quotes someone (else null), and when (the date of the event it states, as the page gives it, else null).
+
+Answer with one JSON object only: {"quotes": [{"page": the page number, "quote": the sentence, "claims": [ids of the claims it states, or []], "source": whose statement, "speaker": a person or null, "when": a date or null}]}"""
+
+CLAIMS_JUDGE_SYSTEM = """You are the fact checker of a narrated documentary film. Before it is written, each claim of its spine must be stated by quotes found word for word on their pages. For each claim decide whether the quotes below state its point in full: who did what to whom, the reversal, the figure and who paid or got it. Quotes may be combined when together they plainly state it (one names the payer, another the amount of the same payment). A quote that only suggests the claim, or states a different or weaker version (an amount accepted without who paid it, a ruling without whom it went against), does not state it. A detail the point does not need (an exact day, a place) may be missing: the claim is then stated, and "as_stated" gives the claim exactly as the quotes state it, without that detail.
+
+Answer with one JSON object only: {"claims": [{"id": the claim id, "stated": true or false, "by": [ids of the quotes that state it], "as_stated": the claim as the quotes state it (when stated), "missing": what no quote states (when not stated)}]}"""
+
+
+def idea_spine(idea):
+    """[{beat, claim, evidence: [{url, quote}]}]: the idea's own spine, as the ideas stage gave it (shape only)."""
+    out = []
+    for x in idea.get("spine") or [] if isinstance(idea.get("spine"), list) else []:
+        if not isinstance(x, dict) or x.get("beat") not in SPINE_BEATS or not str(x.get("claim") or "").strip():
+            continue
+        ev = []
+        for c in (([x.get("source")] if isinstance(x.get("source"), dict) else []) +
+                  [c for c in x.get("sources") or [] if isinstance(c, dict)] + ([x] if x.get("url") and x.get("quote") else [])):
+            if str(c.get("url") or "").startswith("http") and str(c.get("quote") or "").strip():
+                ev.append(dict(url=str(c["url"]).strip(), quote=" ".join(str(c["quote"]).split())))
+        out.append(dict(beat=x["beat"], claim=" ".join(str(x["claim"]).split()), evidence=ev))
+    return out
+
+
+def spine_claims(idea, ask=None):
+    """([claims], usage): the idea's spine as claims {id, beat, claim, evidence}, one or two a beat (hook, turn, payoff,
+    close): the idea's own when it gives every beat, else the beats it lacks written by one model call (no web)."""
+    rows, use = idea_spine(idea), None
+    if not {r["beat"] for r in rows} >= set(SPINE_BEATS):
+        ask = ask or (lambda system, content: ask_openai(system, content, effort="medium", max_tokens=6000, what="spine claims",
+                                                         model=SPINE_MODEL))
+        view = {k: idea.get(k) for k in ("title", "hook", "story", "turn", "payoff") if idea.get(k)}
+        try:
+            text, use = ask(SPINE_CLAIMS_SYSTEM, f"# The idea\n{json.dumps(view, ensure_ascii=False)}")
+            got = json_block(text)
+            got = idea_spine(dict(spine=got.get("spine") if isinstance(got, dict) else None))
+        except Exception:  # noqa: BLE001 - no spine: the idea cannot be researched and the next one is taken
+            got = []
+        have = {r["beat"] for r in rows}
+        rows += [r for r in got if r["beat"] not in have]
+    return [dict(id=f"c{k + 1}", beat=r["beat"], claim=r["claim"], evidence=r["evidence"], queries=[], stated=False)
+            for k, r in enumerate(rows)], use
+
+
+def _host(url):
+    return urllib.parse.urlsplit(str(url)).netloc.lower()
+
+
+def _cand(x, claim_ids=()):
+    """A candidate quote in one shape, or None (shape only)."""
+    if not isinstance(x, dict):
+        return None
+    url, q = str(x.get("url") or "").strip(), " ".join(str(x.get("quote") or "").split())
+    if not url.startswith("http") or not q:
+        return None
+    sp = x.get("speaker")
+    own = [i for i in x.get("for") or [] if isinstance(i, str)] if isinstance(x.get("for"), list) else []
+    return dict(url=url, quote=q, source=str(x.get("source") or "") or None, speaker=str(sp) if sp and str(sp).lower() != "null" else None,
+                when=str(x.get("when") or "") or None, **{"for": sorted(set(claim_ids) | set(own))})
+
+
+def _take(bank, cands, how, log):
+    """Each candidate's quote looked for on its page through every door (check_fact: the live page, Wikipedia's API,
+    the Wayback copy; a thin quote refused); the found ones join the bank once (by their normalised words). Returns the
+    ids added; the misses are kept in bank["failed"] with why."""
+    from concurrent.futures import ThreadPoolExecutor
+    cands = [c for c in cands if c]
+    with ThreadPoolExecutor(FETCH_THREADS) as ex:
+        rows = list(ex.map(lambda c: check_fact(dict(id="candidate", quote=c["quote"], url=c["url"], also=[])), cands))
+    added = []
+    for c, row in zip(cands, rows):
+        if not row["found"]:
+            bank["failed"].append(dict(url=c["url"], quote=c["quote"][:200], why=_why(row), how=how, **{"for": c["for"]}))
+            continue
+        key = norm(c["quote"])
+        old = next((f for f in bank["facts"] if norm(f["quote"]) == key), None)
+        if old:
+            old["for"] = sorted(set(old.get("for") or []) | set(c["for"]))
+            continue
+        if len(bank["facts"]) >= BANK_MAX and not c["for"]:
+            bank.setdefault("over_cap", 0)
+            bank["over_cap"] += 1           # a story sentence past the cap; a quote found for a spine claim always joins
+            continue
+        f = dict(id=f"b{len(bank['facts']) + 1}", quote=c["quote"], url=c["url"], source=c.get("source") or _host(c["url"]),
+                 speaker=c.get("speaker"), when=c.get("when"), read=row.get("read"), how=how, **{"for": c["for"]})
+        bank["facts"].append(f)
+        added.append(f["id"])
+    if cands:
+        log(f"spine bank ({how}): {len(added)} of {len(cands)} quotes verified on their pages; the bank holds {len(bank['facts'])}")
+    return added
+
+
+def extract_quotes(urls, claims, story=STORY_SENTENCES, ask=None):
+    """([candidates], usage): one model call (no web) reads pages already fetched (their readable text, `_RAW`) and copies
+    the sentences that state each claim, plus `story` sentences that tell the rest of the story; each is then verified
+    word for word on its page like any quote."""
+    pages = [(u, _RAW[u]) for u in urls if _RAW.get(u)][:EXTRACT_PAGES]
+    if not pages:
+        return [], None
+    ask = ask or (lambda system, content: ask_openai(system, content, effort="low", max_tokens=12000, what="spine extract",
+                                                     model=SPINE_MODEL))
+    content = (f"# Claims\n{json.dumps([dict(id=c['id'], claim=c['claim']) for c in claims], ensure_ascii=False)}\n\n"
+               f"# Sentences that tell the rest of the story: {story}\n\n" +
+               "\n\n".join(f"# Page {k}: {u}\n{t[:EXTRACT_CHARS]}" for k, (u, t) in enumerate(pages)))
+    text, use = ask(EXTRACT_SYSTEM, content)
+    try:
+        got = json_block(text)
+    except ValueError:
+        return [], use
+    ids, out = {c["id"] for c in claims}, []
+    for g in (got.get("quotes") if isinstance(got, dict) else None) or []:
+        if isinstance(g, dict) and isinstance(g.get("page"), int) and 0 <= g["page"] < len(pages):
+            c = _cand(dict(g, url=pages[g["page"]][0], **{"for": [i for i in g.get("claims") or [] if i in ids]}))
+            if c:
+                out.append(c)
+    return out, use
+
+
+def _extract(bank, urls, claims, story, ask, spend, log, how):
+    """Pages read but not yet copied from (pictures' pages aside) go through extract_quotes; what verifies joins."""
+    todo = [u for u in dict.fromkeys(urls) if u and u in _RAW and u not in bank["extracted"] and _host(u) not in SKIP_HOSTS]
+    todo = todo[:EXTRACT_PAGES]
+    if not todo:
+        return []
+    bank["extracted"] += todo
+    if story >= STORY_SENTENCES:
+        bank["story_copied"] += todo
+    try:
+        cands, use = extract_quotes(todo, claims, story=story, ask=ask)
+    except Exception as e:  # noqa: BLE001 - no copy from the pages: the research rounds still run
+        log(f"spine bank: extraction failed: {e!r}"[:200])
+        return []
+    if use:
+        spend.append(use)
+    return _take(bank, cands, how, log)
+
+
+def _open_all(urls):
+    """Pages fetched (cached) so their readable text is in hand for an extraction call; refusals are ignored here."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(u):
+        try:
+            page_text(u)
+        except Exception:  # noqa: BLE001 - an unreadable page gives nothing to copy
+            pass
+    with ThreadPoolExecutor(FETCH_THREADS) as ex:
+        list(ex.map(one, [u for u in dict.fromkeys(urls) if u and _host(u) not in SKIP_HOSTS]))
+
+
+def judge_claims(claims, facts, ask=None):
+    """({claim id: {"stated", "by", "as_stated", "missing"}}, usage): one model call (no web) decides whether the
+    verified quotes state each claim's point in full. A claim the answer leaves out, or calls stated without naming a
+    verified quote, is not stated (fail closed)."""
+    ask = ask or (lambda system, content: ask_openai(system, content, effort="medium", max_tokens=8000, what="spine judge",
+                                                     model=SPINE_MODEL))
+    ids = {f["id"] for f in facts}
+    content = (f"# The spine's claims\n{json.dumps([dict(id=c['id'], beat=c['beat'], claim=c['claim']) for c in claims], ensure_ascii=False)}\n\n"
+               f"# Verified quotes (each found word for word on its page)\n"
+               f"{json.dumps([dict(id=f['id'], quote=f['quote'], source=f.get('source'), speaker=f.get('speaker'), when=f.get('when'), url=f['url']) for f in facts], ensure_ascii=False, indent=0)}")
+    got, use = {}, None
+    try:
+        text, use = ask(CLAIMS_JUDGE_SYSTEM, content)
+        ans = json_block(text)
+        got = {g.get("id"): g for g in (ans.get("claims") if isinstance(ans, dict) else None) or [] if isinstance(g, dict)}
+    except Exception:  # noqa: BLE001 - no judgement: every claim counts as not stated
+        got = {}
+    out = {}
+    for c in claims:
+        g = got.get(c["id"]) or {}
+        by = [b for b in g.get("by") or [] if b in ids] if isinstance(g.get("by"), list) else []
+        stated = g.get("stated") is True and bool(by)
+        out[c["id"]] = dict(stated=stated, by=by, as_stated=" ".join(str(g.get("as_stated") or c["claim"]).split()) if stated else None,
+                            missing="" if stated else (str(g.get("missing") or "") or ("no judgement" if not g else "no verified quote named")))
+    return out, use
+
+
+def _judge(bank, claims, ask, spend, log, how):
+    if not bank["facts"]:
+        for c in claims:
+            c.update(stated=False, by=[], missing=c.get("missing") or "no verified quote yet")
+        return
+    verdict, use = judge_claims(claims, bank["facts"], ask=ask)
+    if use:
+        spend.append(use)
+    for c in claims:
+        v = verdict[c["id"]]
+        c.update(stated=v["stated"], by=v["by"], missing=v["missing"])
+        if v["stated"]:
+            c["as_stated"] = v["as_stated"]
+    log(f"spine bank ({how}): stated {[c['beat'] for c in claims if c['stated']]}, not yet "
+        f"{[(c['beat'], c['missing'][:80]) for c in claims if not c['stated']]}"[:600])
+
+
+def research_spine(story, claims, rnd, bank=None, ask=None):
+    """([candidates], {claim id: [queries]}, usage): one web-search call (SPINE_MODEL on OpenAI) asks, for each claim not
+    yet stated, other readable pages that state it, with queries never tried before; round `rnd` sets where to look
+    (SPINE_TIERS: primary sources first)."""
+    n = len(claims)
+    ask = ask or (lambda system, content: ask_openai(system, content, effort="medium", max_tokens=16000, searches=1,
+                                                     what="spine research", model=SPINE_MODEL, max_tool_calls=min(16, 2 * n + 2)))
+    rows = [dict(id=c["id"], beat=c["beat"], claim=c["claim"], tried=c.get("queries") or [],
+                 why_not_yet=c.get("missing") or "no readable page found yet",
+                 failed=[dict(url=x["url"], why=x["why"][:120]) for x in (bank or {}).get("failed") or [] if c["id"] in x.get("for", [])][-6:])
+            for c in claims]
+    have = [dict(id=f["id"], quote=f["quote"], url=f["url"]) for f in (bank or {}).get("facts") or []]
+    content = (f"# The story\n{json.dumps(story, ensure_ascii=False)}\n\n"
+               f"# Claims to source (round {rnd + 1} of {SPINE_ROUNDS})\n{json.dumps(rows, ensure_ascii=False, indent=1)}\n\n"
+               f"# Verified already (no need to search for these sentences again)\n{json.dumps(have, ensure_ascii=False)}")
+    text, use = ask(RESEARCH_SPINE_SYSTEM.replace("{tier}", SPINE_TIERS[min(rnd, len(SPINE_TIERS) - 1)]), content)
+    try:
+        got = json_block(text)
+    except ValueError:
+        return [], {}, use
+    ids, cands, queries = {c["id"] for c in claims}, [], {}
+    for g in (got.get("claims") if isinstance(got, dict) else None) or []:
+        if not isinstance(g, dict) or g.get("id") not in ids:
+            continue
+        queries[g["id"]] = [" ".join(str(q).split()) for q in g.get("queries") or [] if str(q).strip()]
+        cands += [c for c in (_cand(x, [g["id"]]) for x in (g.get("sources") or [])[:4]) if c]
+    return cands, queries, use
+
+
+def _research_round(bank, story, claims, rnd, asks, spend, log, why=None):
+    """One search round for `claims`: new queries (never one tried), the candidates verified on their pages, the new
+    pages copied from, the claims judged again."""
+    for c in claims:
+        if why and why.get(c["id"]):
+            c["missing"] = why[c["id"]]
+    try:
+        cands, queries, use = research_spine(story, claims, rnd, bank=bank, ask=asks.get("research"))
+    except Exception as e:  # noqa: BLE001 - a failed search round counts as a round with nothing found
+        log(f"spine bank: research round {rnd + 1} failed: {e!r}"[:200])
+        cands, queries, use = [], {}, None
+    api = list((use or {}).pop("queries", None) or []) if isinstance(use, dict) else []
+    if use:
+        spend.append(use)
+    for c in claims:
+        c["queries"] = list(dict.fromkeys((c.get("queries") or []) + (queries.get(c["id"]) or api)))
+        c["rounds"] = int(c.get("rounds") or 0) + 1
+    bank["rounds"].append(dict(round=rnd + 1, claims=[c["id"] for c in claims], candidates=len(cands), queries=api or
+                               sorted({q for v in queries.values() for q in v})))
+    added = _take(bank, cands, f"research {rnd + 1}", log)
+    _open_all([c["url"] for c in cands])
+    added += _extract(bank, [c["url"] for c in cands], claims, 4, asks.get("extract"), spend, log, f"page copy {rnd + 1}")
+    _judge(bank, claims, asks.get("judge"), spend, log, f"round {rnd + 1}")
+    return added
+
+
+def spine_view(bank):
+    """[{beat, claim, by}]: the spine as the writer and the later point checks read it (stated claims only, as stated)."""
+    return [dict(beat=c["beat"], claim=c.get("as_stated") or c["claim"], by=list(c.get("by") or []))
+            for c in bank.get("claims") or [] if c.get("stated")]
+
+
+def bank_facts(bank):
+    """The bank as the script's facts: every verified quote with its page, whose statement it is and when."""
+    return [dict(id=f["id"], claim=f.get("claim") or f["quote"], quote=f["quote"], url=f["url"], source=f.get("source"),
+                 speaker=f.get("speaker"), when=f.get("when"), also=[]) for f in bank.get("facts") or []]
+
+
+def spine_bank(idea, log=print, ask_claims=None, ask_research=None, ask_extract=None, ask_judge=None, rounds=SPINE_ROUNDS):
+    """(bank, spend): VERIFY FIRST. The idea's spine (hook, turn, payoff, close) is researched as claims and verified
+    before a word is written:
+      0. the idea's own evidence for each claim is fetched and looked for on its page (every door: check_fact), and the
+         pages it read are copied from (extract_quotes: one call, the sentences that state each claim and that tell the
+         rest of the story), each sentence verified word for word; a model judges which claims the verified quotes state;
+      1. a claim not stated gets up to `rounds` search rounds, each with queries never tried before, primary sources
+         first (SPINE_TIERS: court records, filings, the company's own statements, news written at the time; then any
+         readable page), its candidates verified the same way and the new pages copied from, then judged again.
+    bank["ok"] only when every spine claim is stated by verified quotes; else bank["why"] names each claim, what is
+    missing and the queries tried, and the caller takes the next idea. Every quote is a meaningful fragment (thin_quote)."""
+    spend = []
+    claims, use = spine_claims(idea, ask=ask_claims)
+    if use:
+        spend.append(use)
+    bank = dict(idea=idea.get("title"), claims=claims, facts=[], rounds=[], failed=[], extracted=[], story_copied=[], ok=False, why="")
+    lack = sorted(set(SPINE_BEATS) - {c["beat"] for c in claims})
+    if lack:
+        bank["why"] = f"the idea gives no spine claim for {lack}"
+        return bank, spend
+    asks = dict(research=ask_research, extract=ask_extract, judge=ask_judge)
+    story = {k: idea.get(k) for k in ("title", "hook", "story", "turn", "payoff") if idea.get(k)}
+    cands = [_cand(e, [c["id"]]) for c in claims for e in c.get("evidence") or []]
+    _take(bank, cands, "idea", log)
+    pages = [c["url"] for c in cands if c] + [u for u in idea.get("sources") or [] if isinstance(u, str) and u.startswith("http")]
+    _open_all(pages)
+    _extract(bank, pages, claims, STORY_SENTENCES, ask_extract, spend, log, "page copy")
+    _judge(bank, claims, ask_judge, spend, log, "the idea's own sources")
+    for rnd in range(rounds):
+        missing = [c for c in claims if not c["stated"]]
+        if not missing:
+            break
+        _research_round(bank, story, missing, rnd, asks, spend, log)
+    if len([f for f in bank["facts"] if not f.get("for")]) < 4:
+        # a thin bank: the pages found in the search rounds that hold the spine are copied from for the rest of the story
+        used = [f["url"] for f in bank["facts"] if f["url"] not in bank["story_copied"]]
+        bank["extracted"] = [u for u in bank["extracted"] if u not in used]
+        _extract(bank, used, [c for c in claims if c["stated"]], STORY_SENTENCES, ask_extract, spend, log, "story copy")
+    missing = [c for c in claims if not c["stated"]]
+    hook_ok = all(c["stated"] for c in claims if c["beat"] == "hook")
+    if missing and hook_ok and all(c["beat"] == "close" for c in missing):
+        # the close reframes the hook (TEARDOWN section 12): its material is the hook's verified facts; a close claim of
+        # its own that no readable page states never costs a verified story (recorded, never silent)
+        bank["close_from_hook"] = [dict(claim=c["claim"], missing=c.get("missing")) for c in missing]
+        log(f"spine bank: the close's own claim is not stated ({missing[0].get('missing', '')[:120]}); the close reframes "
+            "the hook on the hook's verified facts")
+        missing = []
+    bank["ok"] = not missing
+    bank["why"] = "" if not missing else (
+        f"no readable page states these spine claims after {rounds} search rounds: " +
+        "; ".join(f"{c['beat']}: {c['claim']} (missing: {c.get('missing') or '?'}; queries tried: {len(c.get('queries') or [])})"
+                  for c in missing))
+    log(f"spine bank: {'verified' if bank['ok'] else 'NOT verified'}: {len(bank['facts'])} quotes, "
+        f"{sum(c['stated'] for c in claims)}/{len(claims)} claims stated" + ("" if bank["ok"] else f"; {bank['why'][:300]}"))
+    return bank, spend
+
+
+def spine_again(bank, idea, cids, why, log=print, ask_research=None, ask_extract=None, ask_judge=None):
+    """(bank, spend): back to step 1 for some claims (the bank could not carry their point in a line): one more search
+    round for them, with queries never tried, the reason given; their verdicts are judged again."""
+    spend = []
+    claims = [c for c in bank["claims"] if c["id"] in set(cids)]
+    if not claims:
+        return bank, spend
+    story = {k: idea.get(k) for k in ("title", "hook", "story", "turn", "payoff") if idea.get(k)}
+    rnd = max([int(c.get("rounds") or 0) for c in claims] + [0])
+    _research_round(bank, story, claims, rnd, dict(research=ask_research, extract=ask_extract, judge=ask_judge), spend, log, why=why)
+    bank["ok"] = all(c["stated"] for c in bank["claims"] if not (c["beat"] == "close" and bank.get("close_from_hook")))
+    return bank, spend
+
+
+# ----------------------------------------------------------------- write from the bank
+
+BANK_WRITE_MODEL = OA_MODEL
+
+BANK_WRITE_RULES = (
+    "# The spine\nThe hook, the turn, the payoff and the close each carry the idea's point (the reversal, the price, the irony) "
+    "in words the bank supports. The spine below gives, for each beat, the claim it must carry and the bank facts that state "
+    "it: write that beat from those facts, as sharply as they allow. The first segment is the hook: it works in the first "
+    "second, a known name and the collision itself (when the idea is 'X rejected Y, then paid for copying him', the hook says "
+    "the rejection AND the price), never a greeting, a question to the viewer, or one flat half of the story. The turn is "
+    "said as a turn. The payoff lands its figure and who paid or got it. The last segment is the close: it reframes the hook "
+    "in one sentence that says the hook's collision again, resolved, in new words, with the facts that carry it (never a "
+    "moral, a lesson or someone's comment on the story, never flatter than the hook). A true line and a "
+    "sharp line are the same line here: the bank holds the words for the point, so never write a flat line where the bank "
+    "holds the point. No call to action, no 'follow for more'.\n\n"
+    "Mark the beats: segment 0 is the hook, exactly one segment the turn, one the payoff, the last segment the close; the "
+    "others setup or low (one low where the story is at its worst).\n\n"
+    "Every line says only what the quotes of the facts it cites state, each fact read with whose statement it is and when: "
+    "an order of events only when the quotes or their dates give it, never a motive, feeling, 'first', 'never' or 'only' "
+    "no quote states. Cite in each segment's facts only the bank facts whose words that line uses or paraphrases, never one "
+    "for a date or a detail the line does not say. Give someone's own words only when a bank fact holds them word for word "
+    "and is that person's (its speaker).\n\n")
+
+
+def write_from_bank(idea, card, form, bank, voices=None, notes=None, effort="high", ask=None):
+    """(script, usage): the script written from the verified bank alone (one call, no web: the writer cannot reach a
+    fact the bank does not hold). Every segment cites bank facts only; the script's facts are the bank's, and the
+    spine is kept on the script (`spine`) for the point checks after it."""
+    F = FORMS[form]
+    voices = voices or card.get("voice") or list(VOICES)
+    ask = ask or (lambda system, content: ask_openai(system, content, effort=effort, max_tokens=48000, what="write from bank",
+                                                     model=BANK_WRITE_MODEL))
+    system = ("You are the writer and voice director of Valmera's story workflow. You write narration spoken by a synthetic narrator "
+              "over real footage and photographs of what it names, for a " + F["name"] + ". You write ONLY from the bank of verified "
+              "facts you are given: each is a sentence found word for word on its page, with whose statement it is and when. "
+              "Nothing is invented, rounded or dramatised beyond them. You also direct the actor: pace, energy, melody, emphasis "
+              "and pauses per segment. Write for the ear: short sentences, concrete nouns, numbers a listener can hold.")
+    system += f"\n\n# The bar\n{references()}\n\n" + BANK_WRITE_RULES
+    system += ("Return JSON only: {\"title\": a plain title, \"voice\": one voice id, \"pace\": slow|steady|brisk|fast, \"energy\": "
+               "low|mid|high, \"hook_line\": the first segment's words, \"close_line\": the last segment's words, \"names\": [every "
+               "proper noun the narration says, exactly as spelled], \"segments\": [{\"say\": the words spoken, numbers and years "
+               "written as words the way they are said (\"nineteen seventy-three\", \"five thousand dollars\"), no digits, no "
+               "abbreviations, no symbols, \"show\": at most two short display strings for this segment as they would be printed, "
+               "digits allowed (a year, a figure, a name), or [], \"beat\": hook|setup|turn|low|payoff|close, \"pace\": "
+               "slow|steady|brisk|fast, \"pictures\": names from the named list this segment talks about, in order, \"melody\": "
+               "falling|rising|level|wide, \"emphasis\": [one or two words of say], \"pause_after\": seconds of silence after it "
+               "(0.18 to 0.26 inside the story; 0.35 to 0.5 only where the story turns, at most three times), \"direction\": a few "
+               "words for the actor, \"facts\": ids of the bank facts it states, \"quotes\": every span of say that presents "
+               "someone's own words as {\"words\": the span exactly as in say, \"who\": whose words, \"fact\": the id of the bank "
+               "fact whose quote holds those words word for word}, or []}], \"named\": [{\"name\", \"is\", \"searches\", "
+               "\"must_show\"} for every person, place or thing the film shows], " + STYLE_DATA.get(card["id"], "") + "}\n"
+               "Every digit in `show` or in the style's data must appear in the quote of a bank fact (only the numbers of a list the "
+               "film itself counts out, role ordinal, are exempt).")
+    view = {k: idea.get(k) for k in ("title", "hook", "story", "turn", "payoff", "named") if idea.get(k)}
+    content = (f"# The idea\n{json.dumps(view, ensure_ascii=False)}\n\n# The style\n{json.dumps(card, ensure_ascii=False)}\n\n"
+               f"# Form\n{F['name']}: {F['words'][0]}-{F['words'][1]} spoken words in {F['segments'][0]}-{F['segments'][1]} segments "
+               f"(about {F['seconds'][0]}-{F['seconds'][1]} s at 175 words a minute). {F['shape']}.\n\n"
+               f"# Voices\n{json.dumps({k: VOICES[k] for k in voices if k in VOICES})}\n\n"
+               f"# The spine (each beat's claim, as the verified quotes state it, and the bank facts that state it; the close "
+               f"reframes the hook on the hook's facts, and its own claim, when given, may support it)\n"
+               f"{json.dumps(spine_view(bank), ensure_ascii=False, indent=1)}\n\n"
+               f"# The bank: the only facts this film may state\n"
+               f"{json.dumps([dict(id=f['id'], quote=f['quote'], source=f.get('source'), speaker=f.get('speaker'), when=f.get('when')) for f in bank['facts']], ensure_ascii=False, indent=0)}\n\n" +
+               (f"# Notes from the last attempt\n{notes}\n\n" if notes else ""))
+    text, use = ask(system, content)
+    sc = json_block(text)
+    ids = {f["id"] for f in bank["facts"]}
+    for s in sc.get("segments") or []:
+        s["facts"] = [f for f in s.get("facts") or [] if f in ids] if isinstance(s.get("facts"), list) else []
+        s["quotes"] = [q for q in s.get("quotes") or [] if isinstance(q, dict) and q.get("fact") in ids] if isinstance(s.get("quotes"), list) else []
+    sc["facts"] = bank_facts(bank)
+    sc["spine"] = spine_view(bank)
+    sc["idea_point"] = {k: idea.get(k) for k in ("hook", "turn", "payoff") if idea.get(k)}
+    if sc.get("segments"):
+        sc["hook_line"], sc["close_line"] = sc["segments"][0].get("say"), sc["segments"][-1].get("say")
+    return sc, use
+
+
+# ----------------------------------------------------------------- the spine held on the written lines
+
+SPINE_JUDGE_SYSTEM = """You are the story editor of a narrated documentary film of about a minute and a half, cut like the best founder-story reels: true AND gripping. Its spine was researched first: for each beat (hook, turn, payoff, close) you get the claim the beat must carry (the idea's point: the reversal, the price, the irony), the line that carries that beat now, and the verified quotes it cites; the idea's own promise is given too. Decide whether the line carries the point in its own words: the claim at its centre AND its tension (both halves of a collision, the price and who paid it). A line that says only one half, buries the point in background, or turns the collision into a flat statement of record has lost it. The close carries its point only when it reframes the hook: the hook's collision said again, resolved, in new words (the best reels end on a reframe or a loop back to the hook); a moral, a lesson, a comment on the story or a repeat of the hook's own words has lost it. Judge the point and the grip only: whether the quotes support the line is checked elsewhere.
+
+Answer with one JSON object only: {"beats": [{"beat": "hook" | "turn" | "payoff" | "close", "carried": true or false, "lost": what the line lacks, in a few words (empty when carried)}]}"""
+
+BANK_WHY = "written from the bank: every line is judged on the quotes it cites before the ear"
+HOLD_STEPS = 3
+
+
+def spine_lines(sc):
+    """{beat: segment index} of the lines that carry the spine: the hook is the first line, the turn and the payoff the
+    first lines so marked, the close the last line marked close, else the last line. Structure only."""
+    segs = sc.get("segments") or []
+    out = {"hook": 0} if segs else {}
+    for b in ("turn", "payoff"):
+        k = next((k for k, s in enumerate(segs) if k and s.get("beat") == b), None)
+        if k is not None:
+            out[b] = k
+    if len(segs) > 1:
+        close = [k for k, s in enumerate(segs) if k and s.get("beat") == "close"]
+        out["close"] = close[-1] if close else len(segs) - 1
+    return out
+
+
+REFRAME = "it reframes the hook: the hook's collision said again, resolved, in new words ({})"
+
+
+def spine_points(sc):
+    """{segment index: [{"beat", "claim", "by"}]}: the point each core line must carry, from the script's spine. The
+    close also carries the hook's point, reframed (the references end on a reframe or a loop back to the hook, never on
+    a moral: TEARDOWN section 12)."""
+    out, spine = {}, sc.get("spine") or []
+    for b, k in spine_lines(sc).items():
+        pts = [dict(beat=b, claim=x.get("claim"), by=x.get("by") or []) for x in spine if x.get("beat") == b]
+        if b == "close":
+            hook = [x for x in spine if x.get("beat") == "hook"]
+            pts = [dict(beat=b, claim=REFRAME.format(x.get("claim")), by=x.get("by") or []) for x in hook] + pts
+        if pts:
+            out.setdefault(k, []).extend(pts)
+    return out
+
+
+def judge_spine(sc, ask=None):
+    """({beat: {"carried", "lost", "line"}}, usage): one model call (SUPPORT_MODEL) decides whether the line of each
+    spine beat carries the beat's point (its claim and its tension) in its words. A beat without a line, or left out of
+    the answer, is not carried (fail closed); a failed call is asked once more."""
+    ask = ask or (lambda system, content: ask_openai(system, content, effort="medium", max_tokens=6000, what="spine point",
+                                                     model=SUPPORT_MODEL))
+    segs = sc.get("segments") or []
+    lines = spine_lines(sc)
+    points = spine_points(sc)
+    qb = {f.get("id"): f.get("quote") for f in sc.get("facts") or []}
+    rows = []
+    for b in SPINE_BEATS:
+        if not any(x.get("beat") in ((b, "hook") if b == "close" else (b,)) for x in sc.get("spine") or []):
+            continue
+        k = lines.get(b)
+        rows.append(dict(beat=b, point=[p["claim"] for p in points.get(k, []) if p["beat"] == b], line=k,
+                         say=segs[k].get("say") if k is not None else None,
+                         quotes=[qb[f] for f in (segs[k].get("facts") or []) if f in qb] if k is not None else []))
+    if not rows:
+        return {}, None
+    promise = {k: v for k, v in (sc.get("idea_point") or {}).items() if v}
+    content = ("# The whole script (context)\n" + "\n".join(f"{k}. {s.get('say')}" for k, s in enumerate(segs)) +
+               (f"\n\n# The idea's own promise\n{json.dumps(promise, ensure_ascii=False)}" if promise else "") +
+               f"\n\n# The spine's beats: the point each must carry, the line that carries it now, its quotes\n"
+               f"{json.dumps([r for r in rows if r['line'] is not None], ensure_ascii=False, indent=1)}")
+    got, use = None, None
+    for _ in range(2):
+        try:
+            text, use = ask(SPINE_JUDGE_SYSTEM, content)
+            ans = json_block(text)
+            got = {g.get("beat"): g for g in (ans.get("beats") if isinstance(ans, dict) else None) or [] if isinstance(g, dict)}
+            break
+        except Exception:  # noqa: BLE001 - asked once more, then every beat counts as not carried
+            got = None
+    out = {}
+    for r in rows:
+        g = (got or {}).get(r["beat"])
+        if r["line"] is None:
+            out[r["beat"]] = dict(carried=False, lost=f"no line carries the {r['beat']}", line=None)
+        elif g is None:
+            out[r["beat"]] = dict(carried=False, lost="no judgement", line=r["line"])
+        else:
+            out[r["beat"]] = dict(carried=g.get("carried") is True, lost=str(g.get("lost") or ""), line=r["line"])
+    return out, use
+
+
+def hold_spine(script, bank, idea=None, log=print, ask_judge=None, ask_rewrite=None, ask_repeats=None, ask_point=None,
+               again=None, style=None):
+    """(script, report, spend, bank): the script written from the bank, held to its spine before the ear.
+      1. every line is judged on the quotes it cites (check_lines: an unsupported line is rewritten on the bank, at most
+         twice, else dropped; a core line, the close included, is restated or the script fails); a supported line keeps
+         citing only the facts it uses;
+      2. the line of each spine beat is judged for its point (judge_spine). A beat that lost it is rewritten on the bank
+         to carry the point; when that does not carry it, its claims go back to step 1 (`again`: one more search round,
+         new queries) and the line is rewritten on the grown bank; still lost after that, the report is not ok and the
+         caller writes again or takes the next idea. A flat line is never kept as the spine.
+    The words that hold the spine become every line's `say_first`: the later point checks (writer.final_support) compare
+    with them."""
+    original = json.loads(json.dumps(script))
+    sc = json.loads(json.dumps(script))
+    for k, s in enumerate(sc.get("segments") or []):
+        s["_sid"] = k
+        s["_check"] = BANK_WHY
+    spend = []
+    info = dict(lines_checked=[], support_rewritten=[], support_dropped=[], repeats=[], repeat_rewritten=[], repeat_dropped=[],
+                uncited=[], spine=[], spine_rewritten=[], spine_failed=[], researched=[], core_unsupported={})
+
+    def done(sc_, ok, why=""):
+        for s in sc_.get("segments") or []:
+            s.pop("_sid", None)
+            s.pop("_check", None)
+            if ok:
+                s["say_first"], s["facts_first"] = s.get("say"), list(s.get("facts") or [])
+        rep_ = verify(sc_)
+        ok = bool(ok and rep_["ok"])
+        return sc_, dict(info, ok=ok, why=why or ("" if ok else "the script does not verify"), verify=rep_,
+                         usd=round(sum(float((u or {}).get("usd") or 0) for u in spend), 4)), spend, bank
+
+    sc, failed = check_lines(sc, info, spend, log, ask_judge=ask_judge, ask_rewrite=ask_rewrite, style=style, stage="bank")
+    if failed:
+        segs0 = original.get("segments") or []
+        info["core_unsupported"] = {str(sid): dict(say=segs0[sid].get("say") if sid < len(segs0) else None, why=w,
+                                                   beat=segs0[sid].get("beat") if sid < len(segs0) else None)
+                                    for sid, w in failed.items()}
+        return done(original, False, "core_unsupported")
+    if info["support_rewritten"]:
+        sc = check_repeats(sc, set(info["support_rewritten"]), info, spend, log, ask_judge=ask_judge, ask_rewrite=ask_rewrite,
+                           ask_repeats=ask_repeats, style=style, stage="bank")
+    lost = {}
+    for step in range(HOLD_STEPS):
+        pv, use = judge_spine(sc, ask=ask_point)
+        if use:
+            spend.append(use)
+        segs = sc["segments"]
+        info["spine"].append(dict(step=step, beats={b: dict(v, say=segs[v["line"]].get("say") if v["line"] is not None else None)
+                                                    for b, v in pv.items()}))
+        lost = {b: v for b, v in pv.items() if not v["carried"]}
+        if not lost:
+            log(f"spine: every beat carries its point ({sorted(pv)})")
+            return done(sc, True)
+        log(f"spine (step {step}): lost {[(b, v['lost'][:80]) for b, v in lost.items()]}"[:400])
+        if step == HOLD_STEPS - 1:
+            break
+        if step == 1:
+            if again is None:
+                break
+            cids = [c["id"] for c in bank["claims"] if c["beat"] in lost]
+            reasons = {c["id"]: f"the line for the {c['beat']} could not carry it: {lost[c['beat']]['lost']}" for c in bank["claims"]
+                       if c["beat"] in lost}
+            n0 = len(bank["facts"])
+            bank, more = again(bank, cids, reasons)
+            spend += [u for u in more if u]
+            have = {f.get("id") for f in sc.get("facts") or []}
+            sc["facts"] = list(sc.get("facts") or []) + [f for f in bank_facts(bank) if f["id"] not in have]
+            sc["spine"] = spine_view(bank)
+            info["researched"].append(dict(claims=cids, new_quotes=len(bank["facts"]) - n0))
+        lines = spine_lines(sc)
+        targets = {lines[b]: b for b in lost if lines.get(b) is not None}
+        if not targets:
+            info["spine_failed"].append(dict(step=step, beats=sorted(lost), why="no line is marked for these beats"))
+            break
+        points = spine_points(sc)
+        hook_now = sc["segments"][lines["hook"]].get("say") if "hook" in lines else ""
+        why = {}
+        for k, b in targets.items():
+            pts = [p for p in points.get(k, []) if p["beat"] == b]
+            ids = ", ".join(sorted({i for p in pts for i in p["by"]}))
+            if b == "close":
+                why[k] = (f"it must carry the close's point and it does not ({lost[b]['lost'] or 'the point is flat'}): the close "
+                          f"reframes the hook ({hook_now!r}): the hook's collision said again, resolved, in new words, with the "
+                          f"facts that state it ({ids}); never a moral, a lesson or someone's comment on the story, never the "
+                          "hook's own words again. The points: " + "; ".join(p["claim"] for p in pts))
+            else:
+                why[k] = (f"it must carry the {b}'s point and it does not ({lost[b]['lost'] or 'the point is flat'}): "
+                          + "; ".join(p["claim"] for p in pts) +
+                          f". Say that point as sharply as the facts that state it allow ({ids}), in words those quotes support")
+        before = json.loads(json.dumps(sc))
+        sc2, ri, use = rewrite_without(sc, (), ask=ask_rewrite, targets=sorted(targets), why=why, style=style)
+        if use:
+            spend.append(use)
+        if ri["core_failed"] or not ri["rewritten"]:
+            info["spine_failed"] += [dict(step=step, beat=b, line=k, why=(ri.get("answer") or {}).get(k) or "no line restated")
+                                     for k, b in targets.items()]
+            continue
+        n0 = len(info["lines_checked"])
+        sc2, failed = check_lines(sc2, info, spend, log, ask_judge=ask_judge, rounds=0, style=style, stage="spine")
+        if failed or len(sc2["segments"]) != len(before["segments"]):
+            judged = {r.get("sid"): r for r in info["lines_checked"][n0:]}
+            info["spine_failed"] += [dict(step=step, beat=b, line=k, why="its new words do not stand on their quotes: " +
+                                          str((judged.get(before["segments"][k]["_sid"]) or {}).get("why") or "a line was dropped"))
+                                     for k, b in targets.items()]
+            sc = before
+            for s in sc["segments"]:
+                s.pop("_check", None)
+            continue
+        info["spine_rewritten"] += [sc2["segments"][k]["_sid"] for k in ri["rewritten"]]
+        sc = sc2
+    return done(sc, False, "the spine's point is not carried: " + "; ".join(f"{b}: {v['lost']}" for b, v in lost.items()))
+
+
 # ----------------------------------------------------------------- the final support pass: the last text gate
 
 POINT_SYSTEM = """You are the story editor of a narrated documentary film of about a minute. Its core lines (the hook that must stop a viewer in the first second, the turn, the payoff) were rewritten after fact checking and for the narrator's ear. For each one you get the line as the writer first wrote it and as it stands now. Decide whether the line now still makes the same point: the claim at its centre (who did what, what was at stake) and its tension (the surprise, the collision or the stake that makes a viewer need the next line). The new line may name the person the sources name instead of a company, drop a detail no source states, and change its wording and rhythm; it has lost the point when its central claim is gone, buried or softened into background, or when its collision or stake is gone (a flat statement where there was a turn of the knife).
+
+When a line comes with "point" (the claim the story's spine gives its beat: the reversal, the price, the irony), it has also lost its point when it no longer carries that claim's collision, price or irony, whatever its first words were.
 
 Answer with one JSON object only: {"lines": [{"i": the line index, "kept": true or false, "lost": what the line lost and what it must win back, in a few words (empty when kept)}]}"""
 
@@ -1647,7 +2435,9 @@ def judge_point(script, idx, ask=None):
     ask = ask or (lambda system, content: ask_openai(system, content, effort="medium", max_tokens=6000, what="hook point",
                                                      model=SUPPORT_MODEL))
     segs = script.get("segments") or []
-    rows = [dict(i=k, beat=segs[k].get("beat") or ("hook" if k == 0 else None), first=segs[k].get("_origin"), now=segs[k].get("say"))
+    points = spine_points(script)
+    rows = [dict(i=k, beat=segs[k].get("beat") or ("hook" if k == 0 else None), first=segs[k].get("_origin"), now=segs[k].get("say"),
+                 **(dict(point=[p["claim"] for p in points[k]]) if k in points else {}))
             for k in idx if _valid_i(k, len(segs))]
     if not rows:
         return {}, None
@@ -1688,11 +2478,11 @@ def final_support(script, log=print, ask_judge=None, ask_rewrite=None, ask_repea
         s["_check"] = FINAL_WHY
     spend = []
     info = dict(lines_checked=[], support_rewritten=[], support_dropped=[], repeats=[], repeat_rewritten=[], repeat_dropped=[],
-                point=[], point_rewritten=[], point_kept_old=[], core_unsupported={})
+                point=[], point_rewritten=[], point_kept_old=[], point_failed=[], point_restored=[], core_unsupported={}, uncited=[])
 
     def done(sc_, ok, why=None):
         for s in sc_.get("segments") or []:
-            for k in ("_sid", "_check", "_origin"):
+            for k in ("_sid", "_check", "_origin", "facts_first"):
                 s.pop(k, None)
         rep_ = verify(sc_)
         ok = bool(ok and rep_["ok"])
@@ -1731,16 +2521,52 @@ def final_support(script, log=print, ask_judge=None, ask_rewrite=None, ask_repea
             sc2, ri, use = rewrite_without(sc, (), ask=ask_rewrite, targets=sorted(lost), why=why, style=style)
             if use:
                 spend.append(use)
-            if ri["core_failed"] or not ri["rewritten"]:
+
+            def refused(reason_of):
+                # a rejected point rewrite always says why (15 Nov: "the point rewrite failed without a recorded reason")
                 info["point_kept_old"] += [segs[k]["_sid"] for k in lost]
-                sc = before
+                info["point_failed"] += [dict(line=k, sid=segs[k]["_sid"], first=segs[k]["_origin"], now=segs[k].get("say"),
+                                              lost=lost[k], why=reason_of(k)) for k in lost]
+                log(f"final support: the point rewrite was not kept: {[(k, reason_of(k)[:100]) for k in lost]}"[:500])
+            def restore_held(sc_):
+                # the point could not be won back in new words: the line the spine was held on (its first words, judged
+                # supported and pointed before the ear, `say_first` with `facts_first`) is restored when it still stands
+                # on its quotes; a flatter line is kept only when that one does not
+                ks = [k for k in lost if sc_["segments"][k].get("_origin")
+                      and speech_words(sc_["segments"][k]["_origin"]) != speech_words(sc_["segments"][k].get("say"))]
+                if not ks:
+                    return sc_
+                trial = json.loads(json.dumps(sc_))
+                for k in ks:
+                    t = trial["segments"][k]
+                    t["say"] = t["_origin"]
+                    if isinstance(t.get("facts_first"), list):
+                        t["facts"] = list(t["facts_first"])
+                    if isinstance(t.get("emphasis"), list):
+                        t["emphasis"] = [e for e in t["emphasis"] if has_words(t["say"], e)]
+                    t["_check"] = "the held line restored: the point rewrite was not kept"
+                trial2, bad = check_lines(trial, info, spend, log, ask_judge=ask_judge, rounds=0, stage="final-restore")
+                if bad or len(trial2["segments"]) != len(trial["segments"]):
+                    log("final support: the held line does not stand either: the supported line stays")
+                    return sc_
+                info["point_restored"] += [trial2["segments"][k]["_sid"] for k in ks]
+                log(f"final support: restored the held line(s) {ks}")
+                return trial2
+            if ri["core_failed"] or not ri["rewritten"]:
+                refused(lambda k: (ri.get("answer") or {}).get(k) or "the rewrite restated no line")
+                sc = restore_held(before)
             else:
+                n0 = len(info["lines_checked"])
                 sc2, failed = check_lines(sc2, info, spend, log, ask_judge=ask_judge, rounds=0, stage="final-point")
                 if failed or len(sc2["segments"]) != len(before["segments"]):
-                    info["point_kept_old"] += [segs[k]["_sid"] for k in lost]
+                    judged = {r.get("sid"): r for r in info["lines_checked"][n0:]}
+                    refused(lambda k: (f"its new words do not stand on their quotes: {(judged.get(segs[k]['_sid']) or {}).get('why')}"
+                                       if not (judged.get(segs[k]["_sid"]) or {}).get("ok", True)
+                                       else (ri.get("answer") or {}).get(k) or "the rewrite dropped a line"))
                     sc = before                                # its new words do not stand: the supported line stays
                     for s in sc["segments"]:
                         s.pop("_check", None)
+                    sc = restore_held(sc)
                 else:
                     info["point_rewritten"] += [segs[k]["_sid"] for k in ri["rewritten"]]
                     again = [k for k, s in enumerate(sc2["segments"]) if s["_sid"] in info["point_rewritten"]]
@@ -1750,6 +2576,10 @@ def final_support(script, log=print, ask_judge=None, ask_rewrite=None, ask_repea
                     info["point"] += [dict(line=k, sid=sc2["segments"][k]["_sid"], first=sc2["segments"][k]["_origin"],
                                            now=sc2["segments"][k].get("say"), kept=(pv2.get(k) or {}).get("kept", True),
                                            lost=(pv2.get(k) or {}).get("lost", ""), after_rewrite=True) for k in again]
+                    info["point_failed"] += [dict(line=k, sid=sc2["segments"][k]["_sid"], now=sc2["segments"][k].get("say"),
+                                                  lost=pv2[k]["lost"], why="kept (it stands on its quotes) but the point judge "
+                                                  "still finds the point lost: " + (pv2[k]["lost"] or "no reason given"))
+                                             for k in again if k in pv2 and not pv2[k]["kept"]]
                     sc = sc2
     last = {}
     for row in info["lines_checked"]:                  # the latest judgement of each line's exact final words
