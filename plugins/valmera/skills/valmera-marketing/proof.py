@@ -577,7 +577,11 @@ def write(ctx, idea, card, rc, notes=None):
                "never show another editing application's interface as the product being offered. "
                "Each segment also needs fallback_text: a viewer-facing display phrase of one to five words, "
                "drawn from that line's meaning. Never use production directions or a subject label there. "
-               "This is an emergency text accent, not a substitute for acquiring the actual pictures.")
+               "This is an emergency text accent, not a substitute for acquiring the actual pictures. "
+               "The final fallback_text names Valmera as the action to take. Choose a brief section finish for "
+               "the editing pain when it helps the story: bw, gate or crt, then colour for the result. "
+               "Set finish to null, bw, gate or crt on each segment, with finish_rank one for the most useful device. "
+               "The real uploaded clip and export remain untouched by those effects.")
     content = (f"# The idea\n{json.dumps(idea, ensure_ascii=False)}\n\n# The recording's receipts (the only facts about Valmera you may state)\n"
                f"{json.dumps(rc, ensure_ascii=False)}\n\n# The style\n{json.dumps(card, ensure_ascii=False)}\n\n# The references' pace (medians)\n"
                f"{json.dumps(pace)}\n\n"
