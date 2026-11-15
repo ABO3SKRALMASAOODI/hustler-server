@@ -24,7 +24,11 @@ its existing contract, the exact source intervals being deleted, transcript and 
 Allow only if those intervals meet the customer's actual removal criteria. Non-speaking footage
 is not evidence of a waiting gap: walking, dancing, demonstrations, reactions and natural pauses
 can be the content. Removing dead air or repeated takes is not permission to discard that action.
-A deliberate highlights/shorter-cut request can authorize action cuts. Keep complete sentences
+A deliberate highlights/shorter-cut request can authorize action cuts. A request for a target
+length ("under N minutes", "cut it to N seconds") authorizes removing whatever content is needed to
+reach that length, action included: compare the measured lengths before and after with the target,
+and judge only whether the choice is sensible (the removed stretches are weaker, idler or more
+repetitive than what stays, and the cut does not go far below the target). Keep complete sentences
 and qualifications when requested. For a requested short, a complete relevant thought can end
 the film before an unfinished start of the next thought. Inspect the retained context and the
 actual before/after keep intervals, not only the removed tail. The independently proposed story
@@ -40,9 +44,6 @@ def cut_refusal(ctx, before, after):
     # MCP without a typed customer request and automatic first films retain their own contracts.
     if getattr(ctx, "llm_client", None) is None or not getattr(ctx, "agent_model", None):
         return None
-    from score import asks
-    import llm
-    import media
     story_end = (getattr(ctx, 'ask_ledger', None) or {}).get('picture_story_end')
     sig = hashlib.sha256(json.dumps([request, spans, before.get('keep'), after.get('keep'),
                                     story_end, getattr(ctx, "request_contract", None)],
@@ -50,12 +51,42 @@ def cut_refusal(ctx, before, after):
     cache = getattr(ctx, "_cut_evidence", {})
     if sig in cache:
         return cache[sig]
-    if len(spans) > 12:
-        return "Check the cut in smaller batches (up to 12 removed stretches) so every deletion has source evidence."
+    # Ticket #1301: a length target ("reduce 81 min to under 60") needs dozens of removed
+    # stretches; refusing above 12 left the editor no way to make the cut. Every stretch is
+    # still checked on its own frames, in groups of CUT_GROUP, each group with the whole cut.
+    refusal = None
+    for g in range(0, len(spans), CUT_GROUP):
+        refusal = _check_group(ctx, request, spans, spans[g:g + CUT_GROUP], g, before, after,
+                               story_end, sig)
+        if refusal:
+            break
+    if refusal == _UNCHECKED:
+        return refusal  # transient faults are not cached
+    cache[sig] = refusal
+    ctx._cut_evidence = cache
+    return refusal
+
+
+CUT_GROUP = 12
+_UNCHECKED = "The footage being removed could not be checked; keep it and retry the evidence check."
+
+
+def _keep_length(keep):
+    return round(sum(max(0.0, float(b) - float(a)) for a, b in keep or []), 2)
+
+
+def _check_group(ctx, request, all_spans, spans, first, before, after, story_end, sig):
+    from score import asks
+    import llm
+    import media
     root = os.path.join(ctx.workdir, "cut_evidence")
     os.makedirs(root, exist_ok=True)
     parts = [{"type": "text", "text": json.dumps({
         "request": request, "removed_source_intervals": spans,
+        "removed_stretches_in_this_cut": len(all_spans),
+        "this_check_covers": f"removed stretches {first + 1}-{first + len(spans)} of {len(all_spans)}",
+        "measured_length_before_s": _keep_length(before.get('keep')),
+        "measured_length_after_s": _keep_length(after.get('keep')),
         "contract": getattr(ctx, "request_contract", None),
         "before_keep": before.get('keep'), "after_keep": after.get('keep'),
         "proposed_story_end": story_end,
@@ -70,7 +101,7 @@ def cut_refusal(ctx, before, after):
     }, ensure_ascii=False, default=str)}]
     try:
         source = ctx.proxy_path()
-        for n, (a, b) in enumerate(spans):
+        for n, (a, b) in enumerate(spans, first):
             for j, t in enumerate((a + (b-a)*.1, (a+b)/2, a+(b-a)*.9)):
                 path = os.path.join(root, f"{sig[:12]}_{n}_{j}.jpg")
                 media.frame_at(source, t, path, width=480)
@@ -80,11 +111,8 @@ def cut_refusal(ctx, before, after):
         refusal = None if value.get("allow") is True else (
             "This cut is not supported by the source evidence: " + str(value.get("reason") or "keep these stretches"))
     except Exception as exc:
-        refusal = "The footage being removed could not be checked; keep it and retry the evidence check."
         print(f"[edit-integrity] cut evidence unavailable: {type(exc).__name__}", flush=True)
-        return refusal  # transient faults are not cached
-    cache[sig] = refusal
-    ctx._cut_evidence = cache
+        return _UNCHECKED
     return refusal
 
 

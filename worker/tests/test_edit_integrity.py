@@ -269,3 +269,36 @@ def test_check_schema_can_record_numbers_and_pixels_together():
     proof = asks.CHECK_SCHEMA["properties"]["asks"]["items"]["properties"]["rests_on"]
     assert proof["type"] == "array"
     assert {"numbers", "frames"} <= set(proof["items"]["enum"])
+
+
+def test_length_target_cut_with_many_stretches_is_checked_not_refused(monkeypatch, tmp_path):
+    """Ticket #1301 (user 3120, 15 Nov): "reduce the footage to just under 60 minutes" on an
+    81-minute source needed ~40 removed stretches; the guard refused anything above 12 without
+    looking, three times in a row. Every stretch is now checked on its own frames, in groups,
+    and the judge is given the measured lengths so a length target can authorize the cut."""
+    import json, media, llm
+    monkeypatch.setattr(media, "frame_at", lambda *a, **k: None)
+    monkeypatch.setattr(llm, "image_part", lambda p: {"type": "image_url", "image_url": {"url": p}})
+    groups = []
+    def call(ctx, name, schema, system, parts, **kw):
+        assert "target" in system and "length" in system
+        body = json.loads(parts[0]["text"])
+        groups.append(body)
+        assert len([p for p in parts if p["type"] == "image_url"]) == 3 * len(body["removed_source_intervals"])
+        assert body["measured_length_before_s"] == 4858.0
+        return {"allow": True, "reason": "the target length needs these idle stretches gone"}, {}
+    monkeypatch.setattr(asks, "_call", call)
+    after = [[i * 120.0, i * 120.0 + 88.0] for i in range(40)] + [[4800.0, 4858.0]]
+    ctx = NS(user_message="help me reduce the footage to just under 60 minutes", llm_client=object(),
+             agent_model="any", workdir=str(tmp_path), proxy_path=lambda: "source.mp4", index={})
+    assert ei.cut_refusal(ctx, {"keep": [[0, 4858.0]]}, {"keep": after}) is None
+    removed = sum(len(g["removed_source_intervals"]) for g in groups)
+    assert removed == 40 and len(groups) == 4
+    assert all(len(g["removed_source_intervals"]) <= ei.CUT_GROUP for g in groups)
+    assert groups[0]["measured_length_after_s"] == 40 * 88.0 + 58.0
+    # A refusal in any group refuses the whole write, and a cached verdict is reused.
+    groups.clear()
+    monkeypatch.setattr(asks, "_call", lambda *a, **k: (groups.append(1) or {"allow": False, "reason": "keeps the payoff"}, {}))
+    ctx2 = NS(**{**vars(ctx), "_cut_evidence": {}})
+    assert "keeps the payoff" in ei.cut_refusal(ctx2, {"keep": [[0, 4858.0]]}, {"keep": after})
+    assert groups == [1]
