@@ -179,9 +179,10 @@ def test_cli_keeps_new_media_outside_lane_and_resumes_existing_state(tmp_path,mo
     assert entry.state_root(['run','--resume','new'])==str(tmp_path/'workflow/longform')
 
 
-def test_coverage_repair_searches_missing_words_with_context_verification(tmp_path,monkeypatch):
+@pytest.mark.parametrize('prior_rejection',[False,True])
+def test_coverage_repair_searches_missing_words_with_context_verification(tmp_path,monkeypatch,prior_rejection):
     import cinema as C
-    import archive_script,archive_visual,footage_box,timeline_repair
+    import archive_script,archive_visual,footage_box,timeline_repair,evidence_allocate
     import os
     for key in ('TMPDIR','VALMERA_SKILL','VALMERA_RUN','WF4_SPEND_LOG'):
         monkeypatch.setenv(key,os.environ.get(key,''))
@@ -190,6 +191,7 @@ def test_coverage_repair_searches_missing_words_with_context_verification(tmp_pa
     sc=dict(title='Repair',segments=[dict(say=sentence,chapter='c1',pictures=['Skylab'])],chapters=[dict(id='c1',title='Repair')])
     script=dict(script=sc,dossier=dict(named=[]))
     ft=dict(lines=[],voices=[])
+    if prior_rejection:ft['editorial']=dict(pins=[],rejected=[dict(seg=0,why='Misleading context')],bank=[])
     C.save(tmp_path/'supply/narration/words.json',dict(duration=100,words=[]))
     monkeypatch.setattr(C,'worker',lambda:None)
     monkeypatch.setattr(C,'footage',lambda *a:ft)
@@ -204,11 +206,20 @@ def test_coverage_repair_searches_missing_words_with_context_verification(tmp_pa
     continued=[]
     monkeypatch.setattr(timeline_repair,'continue_still',lambda *a:continued.append(a[3]) or False)
     class StopAfterRequest(Exception):pass
+    class StopAfterAllocation(Exception):pass
+    def allocate(*a):
+        assert len(continued)==1
+        raise StopAfterAllocation()
+    monkeypatch.setattr(evidence_allocate,'allocate',allocate)
     seen=[]
     def capture(payload,*a):
         assert len(continued)==1
         seen.append(payload);raise StopAfterRequest()
     monkeypatch.setattr(footage_box,'fetch',capture)
+    if prior_rejection:
+        with pytest.raises(StopAfterAllocation):C.supply(ctx,script)
+        assert not seen
+        return
     with pytest.raises(StopAfterRequest):C.supply(ctx,script)
     payload=seen[0]
     assert payload['lines'][0]['say']=='Then the wing sprang open.'

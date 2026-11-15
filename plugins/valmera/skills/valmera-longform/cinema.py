@@ -385,6 +385,12 @@ def supply(ctx, script):
         from timeline_repair import continue_still
         if continue_still(ctx,script,ft,partial,coverage_words):
             save(Path(ctx.supply)/'footage'/'footage.json',ft)
+        if ft.get('editorial',{}).get('rejected'):
+            try:schedule(sc,coverage_words,ft)
+            except CoverageError as remaining:
+                from evidence_allocate import allocate
+                allocate(ctx,script,ft,remaining,coverage_words)
+                save(Path(ctx.supply)/'footage'/'footage.json',ft)
     for attempt in range(2):
         try:
             schedule(sc,coverage_words,ft)
