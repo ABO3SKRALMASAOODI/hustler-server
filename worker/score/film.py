@@ -1251,6 +1251,10 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
     _stage(rec, "lower", t)
 
     rec["at"] = "write"
+    prepare_edl = (getattr(ctx, "director_prepare_edl", None)
+                   if getattr(ctx, "director_typed", False) is True else None)
+    if callable(prepare_edl):
+        edl = prepare_edl(edl, comp.l1)
     result = ctx.apply_score(edl, "the Director's First cut")
     recover_write = (getattr(ctx, "director_recover_write", None)
                      if getattr(ctx, "director_typed", False) is True else None)
