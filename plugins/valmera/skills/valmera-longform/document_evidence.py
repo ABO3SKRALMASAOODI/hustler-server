@@ -14,6 +14,13 @@ def figure_base(root,doc,page):
     return Path(root)/('d'+hashlib.sha256(doc['url'].encode()).hexdigest()[:16]+'-p'+str(page))
 
 
+def spoken_intervals(gaps):
+    rows={}
+    for gap in gaps:
+        rows.setdefault(gap['seg'],[]).append(dict(heard=gap.get('heard') or gap['words'],context=gap['words']))
+    return rows
+
+
 def supply(ctx,script,ft,gaps):
     import pypdfium2 as pdfium
     from evidence_web import download
@@ -58,7 +65,7 @@ def supply(ctx,script,ft,gaps):
             'Return JSON {pages:[{document,page,lines:[segment indexes],why}]}. Pages will be visually verified and cropped to one useful figure.',
             json.dumps(dict(gaps=gaps,documents=docs,pages=pages)),effort='high',max_tokens=4000,what='WF4 technical figure selection')
         selected=story.writer.json_block(text);selected['usage']=usage;C.save(selection,selected)
-    by={r['i']:r for r in ft['lines']};valid_lines={g['seg']:g['words'] for g in gaps}
+    by={r['i']:r for r in ft['lines']};valid_lines=spoken_intervals(gaps)
     for row in selected['pages']:
         di,pi=int(row['document']),int(row['page']);doc=docs[di]
         wanted={i:valid_lines[i] for i in row['lines'] if i in valid_lines}
@@ -70,7 +77,8 @@ def supply(ctx,script,ft,gaps):
                 if verdict.exists():check=C.read(verdict)
                 else:
                     text,cost=ask.ask('Inspect this original technical-report page. Select ONE genuine diagram or photograph that accurately illustrates '
-                        'one or more supplied narration lines. Return JSON {ok:bool,usable:bool,lines:[indexes],crop:[left,top,right,bottom],rotation_cw:0|90|180|270,caption:string,why:string}. '
+                        'the heard words of one or more supplied intervals; context is the surrounding narration and must not be contradicted. '
+                        'A candidate need not cover words outside its actual interval. Return JSON {ok:bool,usable:bool,lines:[indexes],crop:[left,top,right,bottom],rotation_cw:0|90|180|270,caption:string,why:string}. '
                         'Crop coordinates are fractions of this entire page. Keep all parts necessary to understand the figure and its labels. '
                         'Specify rotation to make the cropped labels upright. usable requires a clear, legible reproduction; reject blown-out or unreadable photocopies. '
                         'Reject wrong repair states, dates, people or unrelated machinery, and text-only filler. A ground rehearsal must never pose as flight. '

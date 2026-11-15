@@ -251,6 +251,17 @@ def test_later_document_gap_can_find_a_new_report_without_page_cache_collision(t
     assert D.figure_base(tmp_path,dict(url='https://archive.test/first.pdf'),12)!=D.figure_base(tmp_path,dict(url='https://archive.test/second.pdf'),12)
 
 
+def test_document_review_preserves_each_heard_interval_and_its_context():
+    import document_evidence as D
+    gaps=[dict(seg=4,heard='Still intact.',words='They positioned the cutter. The restraint was still intact.'),
+          dict(seg=4,heard='The cutter.',words='They positioned the cutter. The restraint was still intact.'),
+          dict(seg=5,words='Then it opened.')]
+    rows=D.spoken_intervals(gaps)
+    assert [r['heard'] for r in rows[4]]==['Still intact.','The cutter.']
+    assert all(r['context']==gaps[0]['words'] for r in rows[4])
+    assert rows[5]==[dict(heard='Then it opened.',context='Then it opened.')]
+
+
 def test_checked_figure_can_continue_as_one_moving_use_but_never_skip_word_review(tmp_path,monkeypatch):
     import copy
     import timeline_repair as R
