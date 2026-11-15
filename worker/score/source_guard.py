@@ -59,13 +59,12 @@ def apply(l1, index, perception, *, views=None):
     if not index.get("_first_film_source_guard"):
         return []
     v = index["video"]
-    ratio = (l1["frame"][0] / l1["frame"][1]) * (v["height"] / v["width"])
-    w, h = min(1., ratio), min(1., 1 / ratio)
-    def centered(point):
+    frame_ratio = (l1["frame"][0] / l1["frame"][1]) * (v["height"] / v["width"])
+    def centered(point, ratio):
+        w, h = min(1., ratio), min(1., 1 / ratio)
         x = min(1. - w / 2, max(w / 2, point[0]))
         y = min(1. - h / 2, max(h / 2, point[1]))
         return [x - w / 2, y - h / 2, x + w / 2, y + h / 2]
-    full = centered((.5, .5))
     samples = list((index.get("spatial") or {}).get("samples") or [])
     samples += (perception or {}).get("samples") or []
     shots = index.get("shots") or [{"start": 0, "end": v["duration"]}]
@@ -81,6 +80,13 @@ def apply(l1, index, perception, *, views=None):
     for item in l1.get("items") or []:
         if item.get("pic") != "main" or not item.get("src"):
             continue
+        # A card is a separately framed picture. Its uniform settle/scale
+        # animation changes size, not aspect. Using the film's aspect here
+        # silently replaced a safe landscape inset with a portrait crop.
+        ratio = frame_ratio
+        if item.get("k") == "card":
+            ratio *= float(item.get("w", .5)) / float(item.get("h", .5))
+        full = centered((.5, .5), ratio)
         start, end = item["src"]
         if start < 0 or end > end_limit + 1e-6:
             raise ValueError(f"first film reads outside cleared source footage: "
@@ -137,7 +143,7 @@ def apply(l1, index, perception, *, views=None):
                               key=lambda b:(b[2]-b[0])*(b[3]-b[1]))
                     point = [(box[0]+box[2])/2, (box[1]+box[3])/2]
                     reason = "last_known_subject_crop"
-                points.append(centered(point))
+                points.append(centered(point, ratio))
             item["crop"] = points if track else points[0]
         item.pop("source_full_frame", None)
         report.append({"id": item["id"], "source": [start, end], "reason": reason,
