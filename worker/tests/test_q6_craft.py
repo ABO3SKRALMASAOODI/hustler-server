@@ -594,6 +594,32 @@ def test_a_short_reel_is_lengthened_inside_its_shots():
     assert montage_cut.fit_length(long, shots, 60.0) == long
 
 
+
+def test_an_unfillable_montage_requests_a_coherent_source_plan(monkeypatch):
+    # The apartment-tour failure: many motion peaks, only three seconds of
+    # film. A valid shot count must not bypass the existing length floor.
+    wins = [[k * 6.0, k * 6.0 + .4] for k in range(6)]
+    shots = [{"start": 0., "end": 40.2}]
+    assert montage_cut.fit_length(wins, shots, 40.2) is None
+    ctx = _ChainCtx(q1=True, duration=40.2)
+    ctx.index["shots"] = shots
+    monkeypatch.setattr(first_cut, "_motion_curve", lambda c: _curve())
+    monkeypatch.setattr(montage_cut, "windows", lambda *a: wins)
+    monkeypatch.setattr(montage_cut, "hit_end", lambda curve, w, *a: w)
+    monkeypatch.setattr(montage_cut, "framable", lambda w, *a: w)
+    monkeypatch.setattr(first_cut, "montage_scout", lambda c, w, *a, **k: (w, None))
+    calls = []
+    monkeypatch.setattr(agent_tools, "execute", lambda c, n, a: calls.append(n))
+    class ReachedPlanner(Exception):
+        pass
+    def plan(*a, **k):
+        raise ReachedPlanner
+    monkeypatch.setattr(first_cut, "continuous_take", plan)
+    with pytest.raises(ReachedPlanner):
+        first_cut.video_chain(ctx, None, time.monotonic(), {"usd": 0.})
+    assert "keep_segments" not in calls
+
+
 def test_a_long_hold_reads_down_the_column_in_discrete_steps():
     t1, _ = fcv.window_for([0.3, 0.15, 0.5, 0.25], 1.6)
     held = fcv.reading_steps([(1.0, t1, 2.2)], 12.0)

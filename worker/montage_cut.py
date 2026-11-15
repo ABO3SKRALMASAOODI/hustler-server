@@ -221,7 +221,9 @@ def fit_length(wins, shots, duration, least=MIN_TOTAL_S, most_span=MAX_SPAN_S):
     shot, never into a neighbour, never past ``most_span``) until the reel
     runs ``least`` seconds: after the scout drops broken and off-topic shots
     a 74 s launch kept 15 moments, 5.5 s (references: 7-13 s). The payoff
-    (last) window keeps its hit."""
+    (last) window keeps its hit. If the available shots cannot reach that
+    length, return None so the chain asks for a coherent continuous plan
+    instead of delivering a few seconds of motion peaks from a long take."""
     if not wins or len(wins) < 3:
         return wins
     out = [list(w) for w in wins]
@@ -240,7 +242,10 @@ def fit_length(wins, shots, duration, least=MIN_TOTAL_S, most_span=MAX_SPAN_S):
         b2 = min(hi, a2 + (b - a) + extra)
         a2 = max(lo, min(a2, b2 - (b - a)))
         out[k] = [round(a2, 2), round(max(b, b2), 2)]
-    return out
+    # p5714: six peaks from a 40-second apartment tour could only grow to
+    # 3.18 seconds under the per-shot cap. That is not a successful fit.
+    # The caller already routes a missing montage to the visual planner.
+    return out if sum(b - a for a, b in out) >= min(least, duration) - .05 else None
 
 
 def end_flash(ctx, steps, started, run):
