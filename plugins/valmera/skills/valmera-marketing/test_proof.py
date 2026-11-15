@@ -26,6 +26,14 @@ def load():
 P = load()
 
 
+def test_inventory_images_survive_the_real_writer_adapter():
+    inventory = {"pictures": {"lamp": [dict(path="lamp.jpg", inventory_id=0, shows="A lamp")]}}
+    content = P.VI.writer_content(inventory, lambda *args, **kwargs: "jpeg-bytes")
+    parts = P.writer._oa_parts(content)
+    images = [part for part in parts if part["type"] == "input_image"]
+    assert images == [{"type": "input_image", "image_url": "data:image/jpeg;base64,jpeg-bytes", "detail": "high"}]
+
+
 def test_uses_the_stories_film_not_this_folders():
     assert os.path.dirname(P.F.__file__).endswith("valmera-stories")
     assert set(P.cards()) <= set(P.R.STYLES)

@@ -85,7 +85,7 @@ def prepare(ctx, idea, receipts, ask, pictures, still):
         k = row["inventory_id"]
         readable[k] = row
         content.extend([dict(type="text", text=f"Picture {k}; subject {row['name']}; library description: {row.get('shows')}"),
-                        dict(type="image_url", image_url=dict(url="data:image/jpeg;base64," + picture))])
+                        dict(type="image", source=dict(type="base64", media_type="image/jpeg", data=picture))])
     if not readable:
         raise RuntimeError("the acquired visual inventory could not be opened")
     judged, use = ask(
@@ -96,6 +96,7 @@ def prepare(ctx, idea, receipts, ask, pictures, still):
         'Return JSON {"pictures":[{"id":number,"usable":boolean,"group":earliest picture id,"shows":string}]}.',
         content, what="visual inventory inspection", effort="low", max_tokens=6500)
     spend.append(use)
+    _save(root / "inspection.json", judged)
     selected, groups = {}, set()
     for verdict in judged.get("pictures", []):
         k, group = verdict.get("id"), verdict.get("group")
@@ -124,7 +125,7 @@ def writer_content(inventory, still):
             if not frame:
                 raise RuntimeError("a writer inventory picture disappeared")
             content.extend([dict(type="text", text=f"Subject {name}; picture {row['inventory_id']}: {row['shows']}"),
-                            dict(type="image_url", image_url=dict(url="data:image/jpeg;base64," + frame))])
+                            dict(type="image", source=dict(type="base64", media_type="image/jpeg", data=frame))])
     return content
 
 

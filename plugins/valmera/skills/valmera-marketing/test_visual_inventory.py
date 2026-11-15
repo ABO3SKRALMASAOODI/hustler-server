@@ -26,6 +26,7 @@ def test_inspected_inventory_survives_resume_and_rejects_mutation(tmp_path):
         calls.append(kwargs["what"])
         if kwargs["what"] == "visual inventory plan":
             return {"subjects": [{"name": "lamps", "searches": ["lamp", "table lamp"]}]}, {}
+        assert sum(x.get("type") == "image" and x["source"]["data"] == "frame" for x in content) == 2
         return {"pictures": [{"id": 0, "usable": True, "group": 0, "shows": "A lamp"},
                              {"id": 1, "usable": True, "group": 0, "shows": "The same lamp cropped"}]}, {}
     def acquire(subjects, out, **kwargs):
