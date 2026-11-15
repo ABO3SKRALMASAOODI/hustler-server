@@ -193,3 +193,21 @@ def test_photo_plan_preserves_visual_requirement_and_resumes(tmp_path, monkeypat
     assert subject["searches"] == ["typing laptop tutorial 4K"]
     assert P.photo_briefs(ctx, [subject]) == (briefs, [])
     assert len(calls) == 1
+
+
+def test_product_windows_use_grounded_candidates_once_and_reserve_cutins(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    seen = []
+    monkeypatch.setattr(P, 'still', lambda path, t, w: 'aW1hZ2U=')
+    def response(system, content, **kwargs):
+        seen.extend(x.get('text', '') for x in content)
+        return {'windows': [dict(line=0, candidate=0), dict(line=1, candidate=0),
+                            dict(line=1, candidate=1), dict(line=0, candidate=999)]}, {'usd': 0}
+    monkeypatch.setattr(P, 'ask', response)
+    sc = dict(receipts={}, script=dict(segments=[dict(say='Lamp shown', pictures=['THE EXPORT']),
+                                                dict(say='Chairs shown', pictures=['THE EXPORT'])]))
+    rows, _ = P.product_windows(SimpleNamespace(supply=str(tmp_path)), sc,
+                                {'THE EXPORT': ('/fixture.mp4', 6, [(1, 3)])})
+    assert len(rows) == 2 and len({r['id'] for r in rows}) == 2
+    assert all(not (r['end'] > 1 and r['start'] < 3) for r in rows)
+    assert 'Lamp shown' in seen[0] and any('Candidate 0' in x for x in seen)

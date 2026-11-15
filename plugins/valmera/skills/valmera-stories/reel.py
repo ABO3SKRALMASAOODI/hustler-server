@@ -780,6 +780,10 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=()):
         return None
 
     def designed_text(line):
+        # A workflow may supply viewer-facing fallback copy. Production briefs
+        # (see.moment / see.thing) must never become the visible sentence.
+        if segs[line].get("fallback_text"):
+            return dict(text=segs[line]["fallback_text"], role="key"), True
         for x in sp.cards.get(line) or []:
             if (line, x["text"]) not in sp.cards_used and x["text"] not in {t for _, t in sp.cards_used}:
                 return dict(text=x["text"], role=x.get("role"), big=x.get("big"), small=x.get("small")), False
@@ -1814,14 +1818,15 @@ def build(script, sup, style_id, direction=None):
             note(f0, f1, kind, name, rec, "print")
 
     flashes = []
+    full_frame = set(d.get("full_frame_paths") or [])
     runs, k = [], 0
     while k < len(timeline):
         i = seg_at(timeline[k][0])
-        if i in collage and not timeline[k][4].get("voice") and timeline[k][2] != "designed":
+        if i in collage and not timeline[k][4].get("voice") and timeline[k][2] != "designed" and timeline[k][4]["path"] not in full_frame:
             # a run of prints: consecutive pictures of the collage line, five at most (a pinned voice breaks it)
             run, j = [k], k + 1
             while j < len(timeline) and len(run) < len(PRINT_AT) and seg_at(timeline[j][0]) == i and not timeline[j][4].get("voice") \
-                    and timeline[j][2] != "designed":
+                    and timeline[j][2] != "designed" and timeline[j][4]["path"] not in full_frame:
                 run.append(j)
                 j += 1
             if len(run) >= 3:
@@ -1838,7 +1843,10 @@ def build(script, sup, style_id, direction=None):
                 flashes.append((f0, "fill"))
         else:
             f0, f1, kind, name, rec = timeline[run[0]]
-            if kind == "designed":
+            if kind == "clip" and rec["path"] in full_frame:
+                P.shot([f0, f1], keys[rec["path"]], [0.0, 0.0, 1.0, 1.0], src=list(rec["src"]))
+                note(f0, f1, kind, name, rec, "product")
+            elif kind == "designed":
                 designed(f0, f1, rec)
             elif fit_on and kind == "clip" and rec["path"] in talk_fit and not rec.get("voice") and seg_at(f0) not in collage:
                 # a person speaking on camera (live action, by the verdict): full frame only on a stretch where the lips are

@@ -526,6 +526,8 @@ def script_problems(sc, ask_text, rc):
         p.append(f"no segment says the typed sentence word for word: {ask_text!r}")
     have = json.dumps(rc)
     for s in segs:
+        if not 1 <= len(str(s.get("fallback_text") or "").split()) <= 5:
+            p.append("every segment needs viewer-facing fallback_text of one to five words")
         for x in s.get("show") or []:
             for d in [w for w in str(x).replace(",", "").split() if any(c.isdigit() for c in w)]:
                 if "".join(c for c in d if c.isdigit() or c == ".").strip(".") not in have:
@@ -542,7 +544,7 @@ def audit(sc, rc):
               "is visible or said in the before and the after) and whether the receipts support it: what the upload and the export say "
               "is in upload_says and export_says, what the export shows is in visible and looks. General statements about editing, and "
               "plain descriptions of the before and the after that these receipts bear out, are supported. Return JSON only: {\"claims\": [{\"text\": the words, \"supported\": true|false, \"why\": a few words}]}")
-    copy = [dict(say=s.get("say"), show=s.get("show") or []) for s in sc.get("segments") or []]
+    copy = [dict(say=s.get("say"), show=s.get("show") or [], fallback_text=s.get("fallback_text")) for s in sc.get("segments") or []]
     got, use = ask(system, f"# Receipts\n{json.dumps(rc, ensure_ascii=False)}\n\n# Viewer-facing script\n{json.dumps(copy, ensure_ascii=False)}",
                    what="claims audit", effort="low", model=CHECK_MODEL, max_tokens=4000)
     bad = [c for c in (got.get("claims") if isinstance(got, dict) else []) or [] if isinstance(c, dict) and not c.get("supported")]
@@ -570,7 +572,10 @@ def write(ctx, idea, card, rc, notes=None):
                "Open on a striking full-frame picture that actually fits the hook's words, or the actual export when "
                "those words describe its visible result; never an editing timeline. Do not describe a finished export "
                "as if it were the broken before. Under the Valmera call to action, use the authenticated export; "
-               "never show another editing application's interface as the product being offered.")
+               "never show another editing application's interface as the product being offered. "
+               "Each segment also needs fallback_text: a viewer-facing display phrase of one to five words, "
+               "drawn from that line's meaning. Never use production directions or a subject label there. "
+               "This is an emergency text accent, not a substitute for acquiring the actual pictures.")
     content = (f"# The idea\n{json.dumps(idea, ensure_ascii=False)}\n\n# The recording's receipts (the only facts about Valmera you may state)\n"
                f"{json.dumps(rc, ensure_ascii=False)}\n\n# The style\n{json.dumps(card, ensure_ascii=False)}\n\n# The references' pace (medians)\n"
                f"{json.dumps(pace)}\n\n"
@@ -775,6 +780,54 @@ def recording_source(script, role):
                             f"Exact submitted request: {receipts['typed']}")
 
 
+def product_windows(ctx, script, sources):
+    """Choose source moments from frames for the words, not an arithmetic walk through the export."""
+    plan_path = os.path.join(ctx.supply, "product_windows.json")
+    old = jload(plan_path)
+    if old:
+        return old["windows"], old.get("spend", [])
+    lines = [dict(i=i, say=seg["say"], see=seg.get("see"), sources=[n for n in seg.get("pictures", []) if n in sources])
+             for i, seg in enumerate(script["script"]["segments"]) if any(n in sources for n in seg.get("pictures", []))]
+    if not lines:
+        return [], []
+    content = [dict(type="text", text=json.dumps(dict(lines=lines, receipts=script["receipts"]), ensure_ascii=False))]
+    candidates = []
+    for name, (path, duration, busy) in sources.items():
+        times = [0.6 + i for i in range(max(0, int(duration - 1.1) + 1))]
+        for t in times:
+            if any(t + .5 > a and t - .5 < b for a, b in busy):
+                continue
+            frame = still(path, t, w=540)
+            if not frame:
+                continue
+            candidate = dict(id=len(candidates), source=name, center=t, start=round(t-.5, 3), end=round(t+.5, 3))
+            candidates.append(candidate)
+            content.append(dict(type="text", text=f"Candidate {candidate['id']}: {name} at {t:.2f}s"))
+            content.append(img(frame))
+    content.append(dict(type="text", text='Return JSON {"windows":[{"line": index, "candidate": id, "why": visible match}]}.'))
+    result, use = ask(
+        "Select real upload/export pictures for each marketing narration line from the labelled frames. "
+        "Use zero to three candidates per line, only when the exact stated operation or result is visible. "
+        "Show lamps for lamp claims and captions for caption claims; a speaker alone is not proof of B-roll. "
+        "These files are authenticated Studio recordings, but their provenance does not make every moment fit. "
+        "Never assign one candidate to different words. Preserve distinct moments and do not invent an interface. "
+        "The mandatory before/after real-voice passages are already reserved; candidates exclude them.",
+        content, what="product source windows", model=CHECK_MODEL, effort="low", max_tokens=3000)
+    out, used = [], set()
+    by_line = {ln["i"]: ln for ln in lines}
+    for row in result.get("windows", []):
+        i, k = row.get("line"), row.get("candidate")
+        if i not in by_line or not isinstance(k, int) or not 0 <= k < len(candidates) or k in used:
+            continue
+        c = candidates[k]
+        if c["source"] not in by_line[i]["sources"]:
+            continue
+        out.append(dict(c, line=i, why=row.get("why")))
+        used.add(k)
+    jsave(plan_path, dict(windows=out, spend=[use]))
+    return out, [use]
+
+
 def supply(ctx, script):
     sc = script["script"]
     sup_dir = ctx.supply
@@ -873,22 +926,18 @@ def supply(ctx, script):
     ex_ = next((e for e in rec_["exports"] if e["tag"] == "final"), rec_["exports"][-1])
     srcs = {"THE UPLOAD": (rec_["upload"]["file"], rec_["upload"]["dur"], [pc["before"]["t"]]),
             "THE EXPORT": (ex_["file"], ex_["dur"] - endcard_s(), [pc["after"]["t"], pc["tease"]["t"]])}
-    n_own = {}
-    for i, seg in enumerate(sc["segments"]):
-        for name in [n for n in seg.get("pictures") or [] if n in srcs]:
-            path, dur, busy = srcs[name]
-            for j in range(2):
-                k = n_own.get(name, 0)
-                t = 0.4 + (k * 2.9) % max(dur - 2.0, 1.0)
-                if any(a - 1.4 <= t <= b for a, b in busy):
-                    t = (max(b for a, b in busy) + 0.3 + k * 1.5) % max(dur - 2.0, 1.0)
-                n_own[name] = k + 1
-                fn = f"product/{'upload' if name == 'THE UPLOAD' else 'export'}_{k}.mp4"
-                cut(path, t, t + 1.4, os.path.join(fdir, fn), audio=False)
-                c = W3.clip_facts(dict(path=os.path.join(fdir, fn), file=fn, subject=name, seconds=1.4,
-                                       source=recording_source(script, "upload" if name == "THE UPLOAD" else "export"),
-                                       time_range=[round(t, 2), round(t + 1.4, 2)]))
-                lines.setdefault(i, dict(i=i, clips=[]))["clips"].append(c)
+    chosen, uses = product_windows(ctx, script, srcs)
+    spend += uses
+    for k, window in enumerate(chosen):
+        name, i = window["source"], window["line"]
+        path, _, _ = srcs[name]
+        t, end = window["start"], window["end"]
+        fn = f"product/{'upload' if name == 'THE UPLOAD' else 'export'}_{k}.mp4"
+        cut(path, t, end, os.path.join(fdir, fn), audio=False)
+        c = W3.clip_facts(dict(path=os.path.join(fdir, fn), file=fn, subject=name, seconds=end-t,
+                               source=recording_source(script, "upload" if name == "THE UPLOAD" else "export"),
+                               time_range=[t, end]))
+        lines.setdefault(i, dict(i=i, clips=[]))["clips"].append(c)
     pack["footage"] = [lines[k] for k in sorted(lines)]
     talk = {}
     for ln in pack["footage"]:
@@ -943,8 +992,7 @@ def content_pace(pack, sc):
 def as_delivered(l1, product_paths):
     """Preserve the upload/export comparison: no new captions, section finish or flash over the actual recording."""
     keys = {k for k, a in (l1.get("assets") or {}).items() if a.get("path") in product_paths}
-    spans = sorted(tuple(it["f"]) for it in l1["items"] if it.get("k") in ("shot", "card") and it.get("pic") in keys and it.get("z", 0) <= 1
-                   and not it.get("blur"))
+    spans = sorted(tuple(it["f"]) for it in l1["items"] if it.get("k") in ("shot", "card") and it.get("pic") in keys and it.get("z", 0) <= 1)
     for it in l1["items"]:
         if it.get("pic") in keys:
             it.pop("look", None)
@@ -958,7 +1006,7 @@ def as_delivered(l1, product_paths):
             continue                                       # neither caption the raw upload nor double-caption its export
         if it["k"] == "flash" and it.get("mode") != "pool":
             continue                                       # a flash frame inside the recording
-        if it["k"] == "flash" or (it["k"] == "card" and it.get("z", 0) >= 40):
+        if it["k"] == "flash" or (it["k"] == "card" and it.get("z", 0) >= 1):
             a = it["f"][0]
             for s0, s1 in over:                            # the pool and the finish stop at the recording and start after it
                 if s0 - a >= 2:
@@ -1093,6 +1141,7 @@ def score(ctx, script):
     knobs.setdefault("bed", chain.wants_music(ctx))
     knobs.setdefault("require_fit", True)
     knobs.setdefault("layout", "bleed")
+    knobs["full_frame_paths"] = list(pack["product"]["paths"])
     sys.path[:0] = [p for p in W3.env_path().split(os.pathsep) if p not in sys.path]
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     build = R.builder(script["style"]["id"])
@@ -1135,7 +1184,8 @@ def score(ctx, script):
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")
     jsave(l1_audio, F.audio_scene(l1, pack))
     jsave(os.path.join(ctx.supply, "beats.json"), beats)
-    turn_s = round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None
+    payoff = next((v for v in pack.get("voices") or [] if v.get("person") == "after"), None)
+    turn_s = round(float(payoff["start"]) + F.LEAD_F / F.FPS, 3) if payoff else (round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None)
     return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, beats={k: v for k, v in beats.items() if k != "look"}, taste=taste,
                 frames=l1["dur_f"], items=len(l1["items"]), direction=dict(knobs, drop=drop), pace=pace_rec, recording_spans=spans,
                 instruction_panel=receipt_panel,

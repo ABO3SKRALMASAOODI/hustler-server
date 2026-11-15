@@ -695,3 +695,31 @@ def test_taste_checks_tick_budget_separately_from_audible_layer():
     assert any("tick events" in p for p in F.taste_check(l1, beats)["problems"])
     sounds[-1]["tier"] = "body"
     assert F.taste_check(l1, beats)["too_many_sounds"]
+
+
+def test_fallback_copy_never_prints_a_production_brief():
+    sc = _fit_script(n=1, words=16)
+    sc['segments'][0]['fallback_text'] = 'MAKE IT READABLE'
+    clock = F.Clock(_words(sc), sc)
+    sp = R.Supply({}, {}, fit={})
+    tl = R.cut_fit(sc, clock, sp, F.Clock.f(clock.dur)+15, stress=[])
+    assert tl and all(r[4]['text'] == 'MAKE IT READABLE' for r in tl)
+    assert sp.shortfall  # readable fallback still does not satisfy the picture supply
+
+
+def test_protected_product_cuts_stay_whole_even_in_window_style(tmp_path):
+    sc = _fit_script(n=2, words=12)
+    pics, footage = _fit_supply(n_clips=6)
+    footage = {i: rows for i, rows in footage.items() if i < 2}
+    _files(tmp_path, footage, pics)
+    paths = [c['path'] for rows in footage.values() for c in rows]
+    sup = dict(sid='product', words=_words(sc), narration=str(tmp_path/'none.wav'), ffmpeg='ffmpeg',
+               pictures={}, sounds={}, footage=[dict(i=i, clips=rows) for i, rows in footage.items()],
+               fit={c['path']: [i] for i, rows in footage.items() for c in rows}, fit_verdicts={},
+               talking={p: dict(talking=True, score=1) for p in paths}, work=str(tmp_path/'fin'))
+    l1, beats = R.build(sc, sup, 'window', dict(require_fit=True, full_frame_paths=paths))
+    product = [p for p in beats['pictures'] if p['path'] in paths]
+    assert product and all(p['mode'] == 'product' for p in product)
+    keys = {k for k,a in l1['assets'].items() if a.get('path') in paths}
+    shots = [it for it in l1['items'] if it.get('pic') in keys]
+    assert shots and all(it['k']=='shot' and it['crop']==[0.,0.,1.,1.] for it in shots)
