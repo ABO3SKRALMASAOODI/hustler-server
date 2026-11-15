@@ -31,6 +31,17 @@ FPS = 30.0
 STEP = 1.0 / FPS
 
 
+def test_standard_540p_wide_speaker_reaches_subject_measurement():
+    from types import SimpleNamespace
+    # The replay's 960x540 speaker must not become a tiny strip solely
+    # because 1920/540 sits just above the old 3.5x resolution boundary.
+    ctx = SimpleNamespace(index={"video": {"width": 960, "height": 540}})
+    assert not agent_tools._window_note(ctx, "9:16")
+    # Softer archival material still receives the measured window policy.
+    ctx.index["video"] = {"width": 646, "height": 480}
+    assert agent_tools._window_note(ctx, "9:16")
+
+
 class _Ctx:
     def __init__(self, width=1920, height=1080, shots=None, words=None,
                  edl=None, workdir=None):

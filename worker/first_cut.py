@@ -532,11 +532,13 @@ def scout_range(ctx, worker_db, spend):
                     import longform
                     with _timed(ctx, "closing_pick"):
                         closed = longform.pick_ending(ctx, rows,
-                                                      [[start, end]], spend)
-                    if closed[-1][1] - start >= 12.0:
+                                                      [[start, end]], spend,
+                                                      minimum_s=min(20.0, end-start),
+                                                      tail_s=15.0)
+                    if closed[-1][1] - start >= min(20.0, end-start):
                         end = closed[-1][1]
-                    if talk:
-                        end = _landing_end(ctx, rows, start, end)
+                    # The closing model has read the selected story. Do not
+                    # override its payoff with language-specific word rules.
                 if 12.0 <= end - start <= 75.0:
                     ctx.first_cut_hook = clean_hook(pick.get("hook"),
                                                     ctx.index)

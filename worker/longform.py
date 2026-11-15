@@ -246,7 +246,10 @@ def shape_runs(rows, runs, duration_s):
 
 
 END_SYSTEM = (
-    "You pick the last line of a cut talk. Below are candidate last "
+    "You pick the last line of a cut talk. Read the selected story first; "
+    "the ending must resolve that story, not merely sound complete alone. "
+    "Keep the selected ending when no earlier candidate preserves its payoff. "
+    "Below are candidate last "
     "sentences, each with the sentence before it. Pick the id of the one that "
     "makes the strongest ending: a complete thought that lands a conclusion, "
     "a result or the lesson. Never a joke or an example that was just "
@@ -292,7 +295,7 @@ def _lands(rows, m):
     return talk_craft.lands(talk_craft.sentence_text(rows, m))
 
 
-def pick_ending(ctx, rows, segs, spend):
+def pick_ending(ctx, rows, segs, spend, *, minimum_s=6.0, tail_s=None):
     """Ask the trial model which of the last few sentence ends closes the
     program best (QB, 30 Oct: the scout's own last line was "do the first
     thing, do the second thing, question mark, question mark..." in 3 of 4
@@ -308,7 +311,17 @@ def pick_ending(ctx, rows, segs, spend):
           if abs(float(r["t1"]) - last[1]) < 0.05]
     if not ks:
         return segs
-    cands = end_candidates(rows, ks[0], last[0] + 6.0)
+    floor = last[0] + minimum_s
+    if tail_s is None:
+        cands = end_candidates(rows, ks[0], floor)
+    else:
+        # A first-film closing pass trims the story's tail. It cannot
+        # replace a minute's selected story with its twelve-second setup.
+        # Timing supplies candidates; the model judges their meaning.
+        floor = max(floor, last[1] - tail_s)
+        cands = [m for m in range(ks[0] + 1)
+                 if float(rows[m]["t1"]) >= floor
+                 and (m == ks[0] or has_breath(rows, m))][-4:]
     if len(cands) == 1 and cands[0] != ks[0] and has_breath(rows, cands[0]):
         out = [list(x) for x in segs]
         out[-1][1] = round(float(rows[cands[0]]["t1"]), 2)
@@ -321,9 +334,13 @@ def pick_ending(ctx, rows, segs, spend):
         lines.append(f"[{rows[m]['id']}] (before it: \"{before[:160]}\") "
                      f"{rows[m]['text']}")
     try:
+        story = [r for r in rows if any(float(r["t0"]) < b and
+                                        float(r["t1"]) > a for a, b in segs)]
+        context = "\n".join(f"[{r['id']}] {r['text']}" for r in story)
         resp = claude_lane.create(
             model, [{"role": "system", "content": END_SYSTEM},
-                    {"role": "user", "content": "\n".join(lines)}],
+                    {"role": "user", "content": "SELECTED STORY:\n" + context +
+                     "\n\nCANDIDATE ENDINGS (choose only one of these ids):\n" + "\n".join(lines)}],
             max_tokens=600, effort="low")
         text = resp.choices[0].message.content or ""
         spend["usd"] += float(getattr(resp.usage, "provider_cost_usd", 0) or 0)

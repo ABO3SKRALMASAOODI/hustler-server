@@ -8924,10 +8924,13 @@ FRAME_WINDOW_UPSCALE = 2.5
 # ...but only when the fitted picture is a real window — at least this share
 # of the frame (4:3 in 9:16 is 0.42). A 16:9 source fitted into 9:16 is a
 # 0.32 strip, so a 720p podcast (2.67x) keeps filling the phone, and only
-# footage that would smear worse than STRIP_UPSCALE (540p and below) is
+# footage that would smear worse than STRIP_UPSCALE (below 540p) is
 # shown as a strip instead.
 FRAME_WINDOW_MIN_SHARE = 0.4
-FRAME_STRIP_UPSCALE = 3.5
+# Standard 960x540 footage needs 3.556x at delivery, not 3.5x. The old
+# boundary reduced p5563's single-speaker short to a 32%-height strip.
+# It still goes through subject/detail measurement before choosing a crop.
+FRAME_STRIP_UPSCALE = 3.6
 # Zooms multiply the framing's enlargement, and overlapping moves sum their
 # strengths (camera.camera_chain). Past this combined factor the footage is
 # visibly soft under sharp type, so zoom writes cap their strength to it.

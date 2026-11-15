@@ -338,6 +338,33 @@ def test_a_talking_head_first_cut_closes_on_the_picked_sentence(monkeypatch):
     assert len(calls) == 1
 
 
+def test_first_film_closing_pass_cannot_replace_story_with_its_setup(monkeypatch):
+    import claude_lane
+    import llm
+    rows = [{"id": f"s{k}", "t0": 170.0 + k * 3,
+             "t1": 172.5 + k * 3,
+             "text": ("Please come here; I need your help." if k == 3 else
+                      "He stayed beside us until our son recovered." if k == 20 else
+                      f"The next part of the story is {k}.")}
+            for k in range(21)]
+    ctx = SimpleNamespace(first_cut_model="claude-haiku-5-5")
+    monkeypatch.setattr(claude_lane, "available", lambda: True)
+    monkeypatch.setattr(llm, "record", lambda *a, **k: None)
+    seen = {}
+    def create(model, messages, **kwargs):
+        seen["prompt"] = messages[1]["content"]
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content='{"end_id":"s3"}'))],
+            usage=SimpleNamespace(provider_cost_usd=0.0))
+    monkeypatch.setattr(claude_lane, "create", create)
+    spans = [[170.0, 232.5]]
+    assert longform.pick_ending(ctx, rows, spans, {"usd": 0.0},
+                               minimum_s=20, tail_s=15) == spans
+    story, candidates = seen["prompt"].split("CANDIDATE ENDINGS", 1)
+    assert "Please come here" in story and "son recovered" in story
+    assert "[s3]" not in candidates and "[s20]" in candidates
+
+
 def test_a_closing_line_is_followed_by_a_breath():
     """A full sentence that runs straight into the next one leaves the mouth
     open on the last frame (the judge: "ends mid-thought, tail silence 0.0 s")."""
