@@ -6688,6 +6688,16 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
             m["move"] = {"fault": f"{type(e).__name__}: {str(e)[:160]}"}
     from . import source_guard
     m["source_guard"] = source_guard.apply(l1, ctx.index, ctx.perc)
+    from . import picture_cuts
+    m["selected_source_blanks"] = picture_cuts.selected_blanks(l1, ctx.index)
+    for blank in m["selected_source_blanks"]:
+        a, b = blank["source"]
+        t0, t1 = blank["programme"]
+        ctx.find(f"blank source: {blank['id']} selects {a:.3f}-{b:.3f}s of near-uniform "
+                 f"black at programme {t0:.3f}-{t1:.3f}s. Choose a clear source interval "
+                 "or a relevant checked picture while preserving whole speech. This is "
+                 "not a new picture; keep a fade only when the story earns it.")
+    m["findings"] = list(ctx.findings)
     txt = meter_text(ctx, m)
     return Compiled(l1, m, txt, (time.perf_counter() - t0_) * 1000)
 

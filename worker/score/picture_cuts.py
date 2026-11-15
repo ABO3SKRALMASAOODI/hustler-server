@@ -14,6 +14,46 @@ import numpy as np
 FPS, MAX_FRAMES = 15.0, 5400
 
 
+def blank_intervals(frames, fps):
+    """Nearly uniform black, not a dark subject, measured on decoded pixels.
+
+    Two consecutive samples are required. These are source facts for the
+    editor, not new shots or a verdict about an intentional fade.
+    """
+    if not len(frames):
+        return []
+    gray = np.stack([cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in frames])
+    flat = gray.reshape(len(gray), -1).astype(np.float32)
+    black = (np.quantile(flat, .99, axis=1) <= 12) & (flat.std(axis=1) <= 2)
+    edges = np.diff(np.r_[False, black, False].astype(np.int8))
+    return [[round(a / fps, 4), round(b / fps, 4)]
+            for a, b in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1))
+            if b - a >= 2]
+
+
+def selected_blanks(l1, index):
+    """Locate source blanks within actual compiled picture selections."""
+    intervals = (index.get('director_cut_measure') or {}).get('blank_intervals') or []
+    fps = float(l1['fps'])
+    rows = []
+    for item in l1.get('items') or []:
+        if item.get('k') != 'shot' or item.get('pic') != 'main' or not item.get('src'):
+            continue
+        a, b = item['src']
+        if b <= a:
+            continue
+        f0, f1 = item['f']
+        for lo, hi in intervals:
+            start, end = max(a, lo), min(b, hi)
+            if end - start < 1 / fps:
+                continue
+            scale = (f1 - f0) / fps / (b - a)
+            rows.append({'id': item['id'], 'source': [start, end],
+                         'programme': [f0 / fps + (start - a) * scale,
+                                       f0 / fps + (end - a) * scale]})
+    return rows
+
+
 def boundaries(frames, fps):
     if len(frames) < 3:
         return [], []
@@ -63,7 +103,9 @@ def measure(path, video, timeout=12.0):
         raise ValueError('source cut measurement has fewer than three frames')
     frames = np.frombuffer(raw[:n*w*h*3], np.uint8).reshape(n, h, w, 3)
     cuts, flashes = boundaries(frames, fps)
-    return dict(method='judge3_pixel_cuts', fps=fps, frames=n, cuts=cuts, flashes=flashes)
+    return dict(method='judge3_pixel_cuts', fps=fps, frames=n, cuts=cuts, flashes=flashes,
+                blank_intervals=[[a, min(b, dur)] for a, b in blank_intervals(frames, fps)
+                                 if a < dur])
 
 
 def refine(index, path):

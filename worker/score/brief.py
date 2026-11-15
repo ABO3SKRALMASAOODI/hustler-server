@@ -203,6 +203,13 @@ def footage_part(per, idx):
            + (" Compose the landscape source inside the portrait canvas without clipping its subject or printed text." if W > H else "")]
     samples = per["samples"]
     step = per["step"]
+    blanks = (idx.get("director_cut_measure") or {}).get("blank_intervals") or []
+    if blanks:
+        out.append("Measured near-uniform black source intervals (seconds): " +
+                   "; ".join(f"{a:.3f}-{b:.3f}" for a, b in blanks) +
+                   ". These are blank frames, not extra shots. Do not move or repeat them "
+                   "into the hook. Choose clear source pictures or a relevant checked "
+                   "cutaway over speech; preserve a fade only when the story earns it.")
     for sh in per["shots"]:
         a, b = sh["t"]
         cam = "locked off" if sh["drift_per_s"] < 0.006 else "handheld or moving"
