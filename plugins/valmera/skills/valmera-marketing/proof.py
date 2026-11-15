@@ -542,7 +542,8 @@ def audit(sc, rc):
               "is visible or said in the before and the after) and whether the receipts support it: what the upload and the export say "
               "is in upload_says and export_says, what the export shows is in visible and looks. General statements about editing, and "
               "plain descriptions of the before and the after that these receipts bear out, are supported. Return JSON only: {\"claims\": [{\"text\": the words, \"supported\": true|false, \"why\": a few words}]}")
-    got, use = ask(system, f"# Receipts\n{json.dumps(rc, ensure_ascii=False)}\n\n# Script\n{json.dumps(sc.get('segments'), ensure_ascii=False)}",
+    copy = [dict(say=s.get("say"), show=s.get("show") or []) for s in sc.get("segments") or []]
+    got, use = ask(system, f"# Receipts\n{json.dumps(rc, ensure_ascii=False)}\n\n# Viewer-facing script\n{json.dumps(copy, ensure_ascii=False)}",
                    what="claims audit", effort="low", model=CHECK_MODEL, max_tokens=4000)
     bad = [c for c in (got.get("claims") if isinstance(got, dict) else []) or [] if isinstance(c, dict) and not c.get("supported")]
     return bad, use
@@ -562,6 +563,10 @@ def write(ctx, idea, card, rc, notes=None):
               "from a concrete editing pain to the typed instruction to visible proof. Do not narrate the source clip's "
               "celebrity story. Name Valmera in the spoken call to action. Plan genuinely distinct pictures, never slices "
               "of the same talking take masquerading as new shots.")
+    system += (" The supplied product assets are the upload and the export only. Do not invent a shot of this export "
+               "playing on a physical phone, a view of its editing timeline, or a product interface recording. "
+               "THE UPLOAD and THE EXPORT play as their actual files. Generic editing footage may illustrate a "
+               "general editing problem, but cannot impersonate this recorded session or the Valmera interface.")
     content = (f"# The idea\n{json.dumps(idea, ensure_ascii=False)}\n\n# The recording's receipts (the only facts about Valmera you may state)\n"
                f"{json.dumps(rc, ensure_ascii=False)}\n\n# The style\n{json.dumps(card, ensure_ascii=False)}\n\n# The references' pace (medians)\n"
                f"{json.dumps(pace)}\n\n"

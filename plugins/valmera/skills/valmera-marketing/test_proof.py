@@ -152,3 +152,16 @@ def test_reused_recording_is_hash_verified_and_keeps_provenance(tmp_path):
     source.write_bytes(b"modified")
     with pytest.raises(RuntimeError, match="hash mismatch"):
         P.reuse_record(str(record), str(tmp_path / "tampered"))
+
+
+def test_claim_audit_receives_viewer_copy_not_production_notes(monkeypatch):
+    seen = []
+    def ask(system, content, **kwargs):
+        seen.append(content)
+        return {"claims": [{"text": "Bold captions", "supported": True}]}, {}
+    monkeypatch.setattr(P, "ask", ask)
+    sc = dict(segments=[dict(say="Bold captions", show=["READABLE"],
+                             see=[dict(must_show="production-only-placement")], direction="actor-only-note")])
+    assert P.audit(sc, {})[0] == []
+    assert "Bold captions" in seen[0] and "READABLE" in seen[0]
+    assert "production-only-placement" not in seen[0] and "actor-only-note" not in seen[0]
