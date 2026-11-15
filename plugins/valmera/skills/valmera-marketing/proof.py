@@ -566,7 +566,11 @@ def write(ctx, idea, card, rc, notes=None):
     system += (" The supplied product assets are the upload and the export only. Do not invent a shot of this export "
                "playing on a physical phone, a view of its editing timeline, or a product interface recording. "
                "THE UPLOAD and THE EXPORT play as their actual files. Generic editing footage may illustrate a "
-               "general editing problem, but cannot impersonate this recorded session or the Valmera interface.")
+               "general editing problem, but cannot impersonate this recorded session or the Valmera interface. "
+               "Open on a striking full-frame picture that actually fits the hook's words, or the actual export when "
+               "those words describe its visible result; never an editing timeline. Do not describe a finished export "
+               "as if it were the broken before. Under the Valmera call to action, use the authenticated export; "
+               "never show another editing application's interface as the product being offered.")
     content = (f"# The idea\n{json.dumps(idea, ensure_ascii=False)}\n\n# The recording's receipts (the only facts about Valmera you may state)\n"
                f"{json.dumps(rc, ensure_ascii=False)}\n\n# The style\n{json.dumps(card, ensure_ascii=False)}\n\n# The references' pace (medians)\n"
                f"{json.dumps(pace)}\n\n"
@@ -911,9 +915,9 @@ def supply(ctx, script):
         if not added or sum(r["deficit"] for r in rows) >= deficit:
             break
     pack["fit_report"] = dict(lines=rows, deficit=sum(r["deficit"] for r in rows))
-    # Pin the actual export at frame zero; the narrator keeps its audio spine.
-    pack["voices"].append(dict(person="export hook", start=-F.LEAD_F / F.FPS,
-                               end=1.3 - F.LEAD_F / F.FPS, clip=tease))
+    # The export is an opening candidate, not an unconditional override of
+    # the hook's meaning. The verified cutter chooses its fitting picture;
+    # the full-frame, real-voice payoff remains mandatory above.
     product_dir = os.path.join(fdir, "product")
     pack["product"] = dict(pc, paths=[os.path.join(product_dir, n) for n in sorted(os.listdir(product_dir)) if n.endswith(".mp4")])
     wj = json.load(open(nar["words"]))
