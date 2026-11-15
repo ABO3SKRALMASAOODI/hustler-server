@@ -69,8 +69,15 @@ def prepare(items, edl, width, height, fps, workdir, fetch, input_args,
                 args, rebased = input_args(item, fetch(item['asset_key']), fps)
                 off = float(rebased.get('source_start_s') or 0)
                 dur = float(item['duration_s'])
-                chain = [f'trim=start={off:.3f}:end={off+dur+.15:.3f}',
-                         'tpad=stop_mode=clone:stop_duration=0.15', 'setpts=PTS-STARTPTS']
+                if item.get('rate') is not None:
+                    rate = float(item['rate'])
+                    chain = [f'setpts=(PTS-{off:.6f}/TB)/{rate:.12f}',
+                             f'fps={fps}:round=up:start_time=0',
+                             f'trim=duration={dur:.6f}',
+                             'tpad=stop_mode=clone:stop_duration=0.15']
+                else:
+                    chain = [f'trim=start={off:.3f}:end={off+dur+.15:.3f}',
+                             'tpad=stop_mode=clone:stop_duration=0.15', 'setpts=PTS-STARTPTS']
                 if item.get('source_crop'):
                     l, t, r, d = item['source_crop']
                     chain += [f"crop=w='trunc(iw*{r-l:.6f}/2)*2':h='trunc(ih*{d-t:.6f}/2)*2':"
