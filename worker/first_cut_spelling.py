@@ -23,10 +23,11 @@ def context(index, frames=False):
     return ('\nThe upload has these frame-read inscriptions and transcript word IDs:\n'
             + json.dumps({'inscriptions': printed[:60], 'word_ids': words}, ensure_ascii=False)
             + '\nIf an inscription establishes the spelling of the SAME person or thing being spoken about, '
-            'use it in titles and return fixes:[{w:word_id,t:exact_corrected_word,evidence:"screen",'
+            'audit every mentioned name, including confident transcript words, and correct every spelling mismatch. '
+            'Use the established spelling in titles and return fixes:[{w:word_id,t:exact_corrected_word,evidence:"screen",'
             'read:exact_inscription}]. Read the attached source frames as well, including small name cards and labels; '
             'the earlier frame summary may omit them. Match the speech context, never faces. Do not replace one person '
-            'with another whose name merely appears elsewhere. Omit uncertain fixes. This optional fixes '
+            'with another whose name merely appears elsewhere. Omit uncertain fixes. This fixes '
             'array belongs beside start_id, end_id, hook and beats in the JSON answer.\n')
 
 

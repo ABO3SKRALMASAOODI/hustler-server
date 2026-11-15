@@ -88,3 +88,19 @@ def test_missing_frame_does_not_authorize_unseen_spelling(monkeypatch):
     assert not ctx.first_cut_spelling_frames
     apply(ctx, {'fixes': [{'w': 0, 't': 'Jakoet', 'read': 'Fatima Jakoet', 'evidence': 'screen'}]})
     assert ctx.index['words'][0]['w'] == 'Jadot'
+
+
+def test_screen_backed_name_keeps_spoken_sentence_punctuation():
+    from score.scout import printed_spellings
+    idx = {'words': [{'w': 'Chakut,', 't0': 1, 't1': 2}]}
+    result = printed_spellings(idx, {'fixes': [
+        {'w': 0, 't': 'Jakoet,', 'read': 'Fatima Jakoet', 'evidence': 'screen'}]})
+    assert result['words'][0]['w'] == 'Jakoet,'
+    assert result['caption_evidence']['0']['before'] == 'Chakut,'
+    # Punctuation removal cannot supply missing lexical evidence.
+    wrong = printed_spellings(idx, {'fixes': [
+        {'w': 0, 't': 'Other,', 'read': 'Fatima Jakoet', 'evidence': 'screen'}]})
+    assert wrong['words'][0]['w'] == 'Chakut,'
+    empty = printed_spellings(idx, {'fixes': [
+        {'w': 0, 't': '...', 'read': 'Fatima Jakoet', 'evidence': 'screen'}]})
+    assert not empty['caption_evidence']

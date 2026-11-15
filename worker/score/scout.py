@@ -10,6 +10,7 @@ cut them. The rule that forbade those is gone; Supply's look and the last look d
 """
 import json
 import os
+import unicodedata
 
 from . import brief, call
 
@@ -112,6 +113,20 @@ def content(work, idx, sess, per):
     return out
 
 
+def _inscribed_word(text):
+    """Compare lexical spelling while retaining sentence-edge punctuation.
+
+    This is formatting validation of an explicit model claim, not inference
+    of a person's identity or of what the customer asked for.
+    """
+    text = unicodedata.normalize("NFC", text).strip()
+    while text and unicodedata.category(text[0]).startswith("P"):
+        text = text[1:].lstrip()
+    while text and unicodedata.category(text[-1]).startswith("P"):
+        text = text[:-1].rstrip()
+    return text.casefold()
+
+
 def printed_spellings(idx, scout):
     """Apply the model's explicit word-to-inscription evidence, preserving time.
 
@@ -129,7 +144,8 @@ def printed_spellings(idx, scout):
         if isinstance(wid, bool) or not isinstance(wid, int) or not 0 <= wid < len(words):
             continue
         text, read = str(fix.get("t") or "").strip(), str(fix.get("read") or "").strip()
-        if not text or not read or len(text) > 120 or text.casefold() not in read.casefold():
+        spelling = _inscribed_word(text)
+        if not spelling or not read or len(text) > 120 or spelling not in unicodedata.normalize("NFC", read).casefold():
             continue
         claims.setdefault(wid, []).append((text, read))
     proof = copy.deepcopy(out.get("caption_evidence") or {})
