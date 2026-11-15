@@ -190,6 +190,16 @@ def narrated(ctx, ns, nd, reader):
         if not (nd/'check.json').exists():
             guarded_voice(ctx,[PX.NARRATE_PY,PX.NARRATE,'check',str(nd),'--band','04'],
                           'wf4-voice-check-'+ctx.run_id)
+        for attempt in range(2):
+            checked=read(nd/'check.json')
+            if checked.get('gate',{}).get('pass'):break
+            if not checked.get('joins',{}).get('with_artefact'):break
+            guarded_voice(ctx,[PX.NARRATE_PY,str(HERE/'join_repair.py'),str(nd)],
+                          f'wf4-join-repair-{attempt}-'+ctx.run_id)
+            guarded_voice(ctx,[PX.NARRATE_PY,PX.NARRATE,'check',str(nd),'--band','04'],
+                          f'wf4-join-check-{attempt}-'+ctx.run_id)
+        if not read(nd/'check.json').get('gate',{}).get('pass'):
+            raise ValueError('shared narration gate remains failed: '+str(nd/'check.json'))
         # With both checkpoints present, the shared adapter only reads metadata.
         return PX.narrate(ns,str(nd),'04',f'wf4-{ctx.run_id}',dict(os.environ),18000,reader)
     except Exception as error:

@@ -26,7 +26,7 @@ def test_passing_narration_for_old_words_cannot_skip_a_new_read(tmp_path,monkeyp
     from types import SimpleNamespace
     C.save(tmp_path/'read-stage.json',dict(script={'segments':[dict(text='Before.')]}))
     C.save(tmp_path/'longform_voice.json',dict(after=dict(ok=True)))
-    C.save(tmp_path/'check.json',dict(gate=dict(pass_=True)))
+    C.save(tmp_path/'check.json',dict(gate={'pass':True}))
     calls=[]
     monkeypatch.setattr(C,'guarded_voice',lambda ctx,cmd,label:calls.append(cmd))
     monkeypatch.setattr(C.PX,'narrate',lambda *a:dict(test=True))
@@ -471,6 +471,16 @@ def test_completed_voice_does_not_start_another_model(tmp_path,monkeypatch):
     monkeypatch.setattr(C.PX,'narrate',lambda *a,**k:{'cached':True})
     class Context:run_id='test'
     assert C.narrated(Context(),{'segments':[]},tmp_path,'reader.py')=={'cached':True}
+
+
+def test_join_level_ride_keeps_time_and_samples_outside_its_envelope():
+    import numpy as np
+    import join_repair as J
+    sr=1000;x=np.ones(6000,dtype=np.float32)
+    J.ride(x,sr,[1,2,3,4],[0,-3,-3,0])
+    assert len(x)==6000 and np.all(x[:1000]==1) and np.all(x[4000:]==1)
+    assert np.allclose(x[2000:3000],10**(-3/20))
+    assert np.max(np.abs(np.diff(x)))<.001
 
 
 def test_narration_phases_exit_before_next_memory_heavy_phase(tmp_path,monkeypatch):
