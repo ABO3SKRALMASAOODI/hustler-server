@@ -203,7 +203,11 @@ def witness_voices(ctx,script,ft,additional=False):
     """Seek firsthand testimony separately from mechanism pictures. A picture
     search need not rank an interview highly enough to hear its witness.
     """
-    root=Path(ctx.supply)/'footage'/('witnesses-additional' if additional else 'witnesses');root.mkdir(parents=True,exist_ok=True)
+    digest_script=dict(lines=[s['say'] for s in script['script']['segments']],
+                                purpose=script['script'].get('testimony_purpose'))
+    signature=hashlib.sha256(json.dumps(digest_script,sort_keys=True).encode()).hexdigest()[:12]
+    root=Path(ctx.supply)/'footage'/('witnesses-additional' if additional else 'witnesses')/signature
+    root.mkdir(parents=True,exist_ok=True)
     history=[]
     known=list({c['source']['url']:c['source'] for ln in ft['lines'] for c in ln['clips'] if c.get('kind')!='image'}.values())
     lines=[dict(i=i,say=s['say']) for i,s in enumerate(script['script']['segments'])]
@@ -220,7 +224,8 @@ def witness_voices(ctx,script,ft,additional=False):
                 'Read unsuccessful research evidence and broaden or change the sources; never repeat failed queries. Known archive films may carry interviews between their narration. '
                 'No impersonation, AI voice or narrator quotes. If no recorded witness could exist, return an empty list.',
                 json.dumps(dict(title=script['title'],named=script['dossier']['named'],lines=lines,known_sources=known,prior=history,
-                                already_selected=ft['voices'],purpose='Add consequential first-person testimony which is missing from these existing inserts; no repetition.' if additional else 'Find the subject speaking.')),
+                                already_selected=ft['voices'],story_purpose=script['script'].get('testimony_purpose'),
+                                purpose='Add consequential first-person testimony which is missing from these existing inserts; no repetition.' if additional else 'Find the subject speaking.')),
                 effort='high',max_tokens=3000,what='WF4 witness research')
             research=wf4.story.writer.json_block(text);research['usage']=use;save(job,research)
         if not research['people']:return
