@@ -186,12 +186,16 @@ def test_a_bad_scout_answer_falls_back_to_the_deterministic_pick(monkeypatch):
 
 
 def test_a_late_chain_skips_edits_and_keeps_time_for_the_render(monkeypatch):
+    import first_cut_type
+    placement_calls = []
+    monkeypatch.setattr(first_cut_type, "place", lambda *a: placement_calls.append(a))
     ctx = Ctx(_index(60))
     calls = _record(monkeypatch, ctx)
     late = _clock(elapsed=config.FIRST_CUT_MAX_S - 60)
     steps, applied, _picked = first_cut.video_chain(ctx, None, late,
                                                     {"usd": 0})
     assert calls == [] and applied == []
+    assert placement_calls == []
     assert all(step.get("skipped") == "time" for step in steps)
 
 
