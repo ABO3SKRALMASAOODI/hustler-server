@@ -19,7 +19,7 @@ import subject
 import tiles as tilestrip
 
 
-SPATIAL_VERSION = 1
+SPATIAL_VERSION = 2
 # Reusing every one of the 144 filmstrip JPEGs added ~18s of OpenCV work on
 # the indexing critical path. Sixty-four evenly retained coarse moments plus
 # up to 32 real shot-boundary moments cover both long static takes and cuts
@@ -257,14 +257,22 @@ def analyze_frame(path):
     # block noise into thousands of fake character components. Text detection
     # therefore reads the un-equalized pixels.
     gray = cv2.equalizeHist(raw_gray)
-    cascades = _face_detectors(cv2)
-    faces = []
+    # The existing YuNet detector also sees lowered and three-quarter faces
+    # that the frontal/profile cascades miss (p5575's waking face). A missed
+    # face is not empty ground for the opening title. Use the baked model
+    # when available, retaining the cascade fallback on older executors.
+    import keepout
+    neural = keepout.yunet_detect(img)
+    faces = [[round(v, 4) for v in box] for box, _score in neural or []]
     # Most talking-head frames are frontal. Avoid paying for the profile
     # cascade unless the frontal detector found nothing; profile speakers and
     # no-face B-roll still receive the fallback detector.
-    face_hits = subject._faces_in(cv2, cascades[:1], gray)
-    if not face_hits and len(cascades) > 1:
-        face_hits = subject._faces_in(cv2, cascades[1:], gray)
+    face_hits = []
+    if not faces:
+        cascades = _face_detectors(cv2)
+        face_hits = subject._faces_in(cv2, cascades[:1], gray)
+        if not face_hits and len(cascades) > 1:
+            face_hits = subject._faces_in(cv2, cascades[1:], gray)
     for x, y, bw, bh in face_hits[:2]:
         faces.append([round(x / w, 4), round(y / h, 4),
                       round((x + bw) / w, 4), round((y + bh) / h, 4)])
