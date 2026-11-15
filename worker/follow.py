@@ -151,7 +151,10 @@ ROI_PAD = (0.9, 0.6)
 # ~0.1 s late at 4 fps, so the last sample before a camera cut could show
 # the next shot (round 7 final review: Elon's crop glided toward Musk's
 # position for the last 1.2 s of Rogan's shot and cut the back of his head).
-FACES_VERSION = 4
+# 5: the image-baked YuNet detector precedes the cascade fallback. A chair
+# and a collar counted as a second person on compressed podcast proxies,
+# disabling the crop's follow for the whole single-speaker shot.
+FACES_VERSION = 5
 # ...the decode that samples it: round=up hands tick i the last frame at or
 # before it, start_time=0 fills tick 0 with the first frame (a seek lands
 # up to a frame past A), so grid frame i is A + i/fps as _sample_plan
@@ -417,7 +420,8 @@ def _hits(cv2, cascade, img, lo, hi):
 def detect(gray, cv2=None, cascades=None, face_px=None, roi=None):
     """[(box, look)] faces in one grayscale frame: box in fractions, look
     -1 (the face turns toward screen-left), +1 (screen-right) or 0 (frontal
-    or unknown). Frontal Haar plus the profile cascade on the frame and on
+    or unknown). YuNet when available; otherwise frontal Haar plus the
+    profile cascade on the frame and on
     its mirror (the cascade finds faces turned screen-left; mirrored, it
     finds the ones turned right) — a three-quarter speaker the frontal
     cascade misses is still found, and the side he looks to is known.
@@ -430,9 +434,6 @@ def detect(gray, cv2=None, cascades=None, face_px=None, roi=None):
     cv2 = cv2 or subject._cv2()
     if cv2 is None:
         return []
-    cascades = cascades if cascades is not None else subject._cascades(cv2)
-    if not cascades:
-        return []
     h, w = gray.shape[:2]
     x0 = y0 = 0
     img = gray
@@ -442,6 +443,25 @@ def detect(gray, cv2=None, cascades=None, face_px=None, roi=None):
         if x1 - x0 < 24 or y1 - y0 < 24:
             return []
         img = gray[y0:y1, x0:x1]
+    # Reuse the detector already baked into the worker image and used by
+    # graphic keep-out. It distinguishes faces from the chair/collar hits
+    # that otherwise turn a close-up into a group shot. Retain the existing
+    # cascades when the model is unavailable or detects no face.
+    try:
+        import keepout
+        learned = keepout.yunet_detect(cv2.cvtColor(img, cv2.COLOR_GRAY2BGR))
+    except Exception:  # detector absence retains the established fallback
+        learned = None
+    if learned:
+        ih, iw = img.shape[:2]
+        return [([round((b[0] * iw + x0) / w, 4),
+                  round((b[1] * ih + y0) / h, 4),
+                  round((b[2] * iw + x0) / w, 4),
+                  round((b[3] * ih + y0) / h, 4)], 0)
+                for b, _score in learned]
+    cascades = cascades if cascades is not None else subject._cascades(cv2)
+    if not cascades:
+        return []
     if face_px:
         lo = max(24, int(SIZE_BAND[0] * face_px))
         hi = max(lo + 2, int(math.ceil(SIZE_BAND[1] * face_px)))
@@ -503,20 +523,23 @@ def detect_memo(gray, cv2=None, cascades=None, face_px=None, roi=None):
     """detect() with its answer remembered by the frame's exact bytes
     (render_memo; E3, 30 Oct 2026). For the DEFAULT cascades only
     (subject._cascades), which every picture-check caller passes: the key
-    holds the cascade files' digests, the OpenCV version and this module's
-    and subject's source, so a hit is exactly what detect() returns.
+    holds the cascade and YuNet model digests, the OpenCV version and the
+    detector implementation's source, so a hit is what detect() returns.
     Without render_memo enabled this is detect()."""
     import render_memo
     if not render_memo.enabled():
         return detect(gray, cv2, cascades, face_px, roi)
     import subject
+    import keepout
+    import config
     cv2 = cv2 or subject._cv2()
     if cv2 is None:
         return detect(gray, cv2, cascades, face_px, roi)
     try:
         k = render_memo.key(
-            "follow.detect", render_memo.code_digest(__file__, subject),
+            "follow.detect", render_memo.code_digest(__file__, subject, keepout),
             cv2.__version__, cascade_files(cv2),
+            render_memo.file_digest(config.YUNET_MODEL),
             len(cascades) if cascades is not None else None,
             face_px, roi, render_memo.array_part(gray))
     except Exception:  # noqa: BLE001 — never the measurement
