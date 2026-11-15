@@ -290,12 +290,17 @@ def place_broll(ctx, steps, started, run, moments, hook_end, spend=None,
 
 _BROLL_CHECK = (
     "Each numbered cutaway has the exact words spoken over its actual played interval. "
+    "Read the programme speech as context: resolve pronouns, roles, relationships, "
+    "actions and materials from the surrounding story. A broad noun match alone "
+    "is not enough: hospital staff cannot stand for friends visiting a patient. "
+    "Context explains the pictured words; it does not make an unrelated picture relevant. "
     "Video pictures have three frames from that interval. Keep only pictures that "
     "visibly show the exact thing described, or an unambiguous generic example when "
     "the words are generic. A related category is insufficient (red meat is not shark "
-    "meat; a drone is not an airline pilot). Do not infer a named person's identity "
-    "from a video title, filename or caption: without an independently verified "
-    "reference comparison, reject a picture that purports to show a named person. "
+    "meat; a drone is not an airline pilot). Do not identify people from their faces. "
+    "A title, filename or added caption is not proof of who appears in a clip. "
+    "A picture purporting to show a named person needs unambiguous attribution "
+    "in the source shot and reliable clip provenance; reject uncertain attribution. "
     "Reject uncertainty, off-topic pictures, mostly text, unreadable diagrams, "
     "screenshots, noise or broken frames. Explicitly list every approved picture. "
     "Answer JSON only: {\"keep\": [<picture numbers>], \"drop\": [<picture numbers>]}." )
@@ -370,6 +375,9 @@ def verify_broll(ctx, steps, started, run, spend):
     approved, ids, parts = set(), {}, []
     try:
         words = device_planner.program_words(edl, ctx.index or {})
+        context = " ".join(str(w.get("w") or "") for w in words)
+        parts.append({"type": "text", "text":
+                      "Programme speech (context for roles and references): " + context[:12000]})
         for n, it in enumerate(items, 1):
             key = (it.get("source") or {}).get("asset_key")
             try:
@@ -394,8 +402,10 @@ def verify_broll(ctx, steps, started, run, spend):
                         "type": "base64", "media_type": "image/jpeg",
                         "data": base64.b64encode(result.stdout).decode()}})
                 said = " ".join(str(w.get("w") or "") for w in words
-                                if a-1.2 <= float(w["t0"]) <= b+.3)
-                parts.append({"type": "text", "text": f"Picture {n}, words: {said[:300]}"})
+                                if float(w.get("t1", w["t0"])) > a
+                                and float(w["t0"]) < b)
+                parts.append({"type": "text", "text":
+                              f"Picture {n}, words during playback: {said[:300]}"})
                 parts.extend(pictures)
                 ids[n] = str(it.get("id"))
             except Exception as exc:

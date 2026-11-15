@@ -458,6 +458,31 @@ def test_off_topic_cutaways_are_removed_after_one_look(monkeypatch, tmp_path):
     assert fcv.verify_broll(ctx, [], 0.0, run, spend) == []
 
 
+def test_picture_check_gets_story_roles_and_exact_played_words(monkeypatch, tmp_path):
+    import device_planner
+    import media_cache
+    ctx = _EdlCtx(_talk_index())
+    ctx.workdir = str(tmp_path)
+    ctx.edl['fx'] = [{'id': 'br1', 'type': 'broll', 'start': 12., 'end': 13.,
+                      'media': 'still', 'source': {'asset_key': 'people.jpg'}}]
+    words = [{'w': 'Our friends visited him in hospital.', 't0': 1., 't1': 4.},
+             {'w': 'Only', 't0': 11.7, 't1': 12.1},
+             {'w': 'three people', 't0': 12.1, 't1': 12.9},
+             {'w': 'took turns staying overnight.', 't0': 20., 't1': 22.}]
+    monkeypatch.setattr(device_planner, 'program_words', lambda *a: words)
+    monkeypatch.setattr(media_cache, 'lease', lambda *a: 'people.jpg')
+    monkeypatch.setattr(fcv.subprocess, 'run', lambda *a, **k: NS(stdout=b'jpg'))
+    seen = []
+    def check(parts, spend):
+        seen.extend(p['text'] for p in parts if p['type'] == 'text')
+        return '{"keep":[1]}'
+    monkeypatch.setattr(fcv, '_broll_check_openai', check)
+    assert fcv.verify_broll(ctx, [], 0, lambda *a: None, {'usd': 0}) == [(12., 13.)]
+    assert 'Our friends visited him in hospital.' in seen[0]
+    assert 'took turns staying overnight.' in seen[0]
+    assert seen[1] == 'Picture 1, words during playback: Only three people'
+
+
 def test_a_screen_ends_live_with_the_runon_muted():
     idx = _talk_index(20.0)
     ctx = _EdlCtx(idx)
