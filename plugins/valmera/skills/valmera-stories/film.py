@@ -2330,6 +2330,7 @@ def taste_check(l1, beats):
     if eng:                                                 # (a take cut to a picture and back is two): its allowance stands
         allow = max(allow, int(eng))
     tick_hits = sorted({int(s["event_f"]) for s in l1.get("sound") or [] if s.get("tier") == "tick"})
+    tick_hits = [f for i, f in enumerate(tick_hits) if i == 0 or f - tick_hits[i - 1] > FPS]
     tick_allow = int((l1.get("sound_design") or {}).get("allow_ticks") or 0)
     if len(tick_hits) > tick_allow:
         bad.append(f"{len(tick_hits)} tick events exceed their separate allowance {tick_allow}")

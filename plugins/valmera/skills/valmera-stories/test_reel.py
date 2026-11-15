@@ -687,6 +687,10 @@ def test_taste_checks_tick_budget_separately_from_audible_layer():
     beats = dict(events=[s["event_f"] for s in sounds], pictures=[])
     check = F.taste_check(l1, beats)
     assert check["ok"], check["problems"]
+    sounds.append(dict(id="tick-train", event_f=190, tier="tick", layer="hit"))
+    beats["events"].append(190)
+    assert F.taste_check(l1, beats)["ok"]
+    sounds.pop()
     l1["sound_design"]["allow_ticks"] = 0
     assert any("tick events" in p for p in F.taste_check(l1, beats)["problems"])
     sounds[-1]["tier"] = "body"
