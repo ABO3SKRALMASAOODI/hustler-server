@@ -35,6 +35,39 @@ def test_passing_narration_for_old_words_cannot_skip_a_new_read(tmp_path,monkeyp
     assert calls and calls[0][2]=='render'
 
 
+def test_witness_splice_uses_guarded_narrator_environment(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    calls=[]
+    monkeypatch.setattr(C,'guarded_voice',lambda ctx,cmd,label:calls.append((cmd,label)))
+    C.splice_voices(SimpleNamespace(supply=str(tmp_path),run_id='test'),tmp_path/'narration',[dict(person='Witness')],tmp_path/'footage')
+    cmd,label=calls[0]
+    assert cmd[0]==C.PX.NARRATE_PY and Path(cmd[1]).name=='witness_audio.py'
+    assert C.read(cmd[2])['voices']==[dict(person='Witness')]
+    assert label=='wf4-witness-audio-test'
+
+
+@pytest.mark.skipif(not Path(C.PX.NARRATE_PY).exists(),reason='installed narrator environment is local')
+def test_witness_audio_resume_preserves_narrator_and_does_not_insert_twice(tmp_path):
+    import subprocess,wave
+    import numpy as np
+    sr=24000
+    def audio(path,seconds,hz):
+        samples=(np.sin(np.arange(round(seconds*sr))*2*np.pi*hz/sr)*4000).astype('<i2')
+        with wave.open(str(path),'wb') as f:f.setnchannels(1);f.setsampwidth(2);f.setframerate(sr);f.writeframes(samples.tobytes())
+    audio(tmp_path/'narration.wav',4,180);audio(tmp_path/'witness.wav',1,220)
+    original=(tmp_path/'narration.wav').read_bytes()
+    C.save(tmp_path/'words.json',dict(duration=4,words=[dict(w='Before.',start=.2,end=.8,seg=0),dict(w='After.',start=2,end=3.8,seg=1)]))
+    job=tmp_path/'job.json';C.save(job,dict(narration_dir=str(tmp_path),footage_dir=str(tmp_path),voices=[dict(after=0,person='Witness',wav='witness.wav',file=None,said='Here.',words=[dict(w='Here.',start=0,end=1)],source=dict(url='https://archive.test/interview'),time_range=[0,1])]))
+    cmd=[C.PX.NARRATE_PY,str(C.HERE/'witness_audio.py'),str(job)]
+    subprocess.run(cmd,check=True,capture_output=True,timeout=60)
+    first=(tmp_path/'narration.wav').read_bytes();words=C.read(tmp_path/'words.json')
+    subprocess.run(cmd,check=True,capture_output=True,timeout=60)
+    assert (tmp_path/'narration_narrator.wav').read_bytes()==original
+    assert (tmp_path/'narration.wav').read_bytes()==first and C.read(tmp_path/'words.json')==words
+    assert len(words['voices'])==1 and sum(bool(w.get('voice')) for w in words['words'])==1
+    assert words['duration']==pytest.approx(5)
+
+
 def test_rater_stem_fit_recovers_delay_and_final_gains():
     import numpy as np
     import stem_evidence as E

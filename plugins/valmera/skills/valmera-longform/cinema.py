@@ -176,6 +176,12 @@ def guarded_voice(ctx, command, label):
                          '--label',label,'--',*command])
 
 
+def splice_voices(ctx,nd,voices,footage_dir):
+    job=Path(ctx.supply)/'witness-audio.json'
+    save(job,dict(narration_dir=str(nd),voices=voices,footage_dir=str(footage_dir)))
+    guarded_voice(ctx,[PX.NARRATE_PY,str(HERE/'witness_audio.py'),str(job)],'wf4-witness-audio-'+ctx.run_id)
+
+
 def narrated(ctx, ns, nd, reader):
     """Every model/listener process uses the shared locks and 6 GB stop."""
     nd=Path(nd);nd.mkdir(parents=True,exist_ok=True)
@@ -482,12 +488,8 @@ def supply(ctx, script):
     # check; actual motion and the final >=50% gate remain mandatory below.
     with_testimony=clock.dur+sum(v['seconds'] for v in ft['voices'])
     if still/with_testimony>.5:raise RuntimeError('evidence photos would displace the moving film, including its testimony')
-    sys.path.insert(0,str(HERE.parent/'_shell'/'narrate'))
-    import realvoice
     if ft['voices']:
-        placed=realvoice.splice(nd,ft['voices'],Path(ctx.supply)/'footage')
-        save(nd/'footage_voices.json',placed)
-        subprocess.run([PX.NARRATE_PY,reader,'level-voices',str(nd)],check=True,capture_output=True)
+        splice_voices(ctx,nd,ft['voices'],Path(ctx.supply)/'footage')
     wj=read(nd/'words.json')
     repair_timeline(ctx,script,ft,nar['words'])
     smooth(ctx,script,ft,nar['words'])
