@@ -193,3 +193,7 @@ When local ASR is queued behind shared Mac jobs, `SHELL_HEAR_CMD` may route the 
 After local ASR, a small model reconciliation compares the timed hearing with the source captions and selected hook/close. It corrects clear transcription homophones and chooses heard word edges. The product recuts the original clip and shifts its word times together; it cannot remove interior speech or rewrite the story. Changed timed text invalidates its coverage/direction and line-assigned footage caches while preserving downloaded originals.
 
 WF1 uses the interview as its voice spine, so documentary acquisition passes `--hear-seconds 0`: it does not transcribe unused B-roll audio or seek voice cameos. Every source still receives its normal provenance, motion, word-placement and final-frame checks. Fetched originals enter the run-local retained source cache immediately, before any later stage can fail. Other workflows retain main’s whole-clip local Whisper path.
+
+When measured moving coverage is short, recovery prioritizes new original video before requesting
+additional still documents. Existing primary documents stay available and checked; more still research
+resumes once the moving share is sufficient. A queued model call is never retried unchanged.

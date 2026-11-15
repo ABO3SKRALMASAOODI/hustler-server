@@ -409,3 +409,30 @@ def test_each_short_carries_its_platform_song_to_the_podcast_folder(tmp_path, mo
     man = json.load(open(os.path.join(folder, "shorts.json")))
     assert man["shorts"][1]["platform_music"]["upload"] == "clean/02 - Title m02.mp4"
     assert "platform_music.json" in open(os.path.join(folder, "README.md")).read()
+
+
+@pytest.mark.parametrize("real,moving,documents_first", [(0, 0, False), (10, 4, False), (10, 7, True)])
+def test_recovery_spends_on_motion_before_more_stills(tmp_path, monkeypatch, real, moving, documents_first):
+    from types import SimpleNamespace
+    import wf1_short, wf1_documents
+    calls=[]
+    old=dict(path="existing-original.jpg")
+    pack=dict(coverage=dict(contract=3,windows=[dict(name="Google",must_show="Its actual premises",say="Google",t0=0,t1=5)]),
+              referent_research={"references":[]},research_revision=7,
+              footage=[],pictures={"Google":[old]},credits=[])
+    (tmp_path/"pack.json").write_text(json.dumps(dict(pack=pack)))
+    def documents(*args, **kwargs):
+        calls.append("documents")
+        return dict(pictures={"Google":[dict(path="new-original.jpg")]},credits=[],errors=[],spend=[])
+    def footage(*args, **kwargs):
+        calls.append("footage")
+        assert kwargs["hear_s"]==0 and kwargs["motion_first"] and kwargs["scout_motion"]
+        return dict(lines=[],credits=[])
+    monkeypatch.setattr(wf1_documents,"acquire",documents)
+    monkeypatch.setattr(wf1_short.chain,"footage",footage)
+    monkeypatch.setattr(wf1_short,"_llm",lambda:object())
+    ctx=SimpleNamespace(supply=str(tmp_path),log=lambda text:None)
+    wf1_short.refill(ctx,dict(title="Company scale",style=dict(id="prints")),pack,
+                     dict(weak_windows=[0],real_seconds=real,moving_seconds=moving))
+    assert calls==(["documents"] if documents_first else ["footage"])
+    assert old in pack["pictures"]["Google"]

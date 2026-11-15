@@ -408,25 +408,29 @@ def refill(ctx, script, pack, shortage):
         pack.setdefault('research_spend',[]).append(usage);pack['research_revision']=7
         stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
         with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
-    import wf1_documents
-    context=dict(identity=coverage.get('context'),primary_research=coverage.get('research_context'),prior_errors=[e for r in pack.get('document_research',[]) for e in r.get('errors',[])][-12:])
-    cached_path=os.path.join(ctx.supply,'document-sources','manifest.json')
-    originals=json.load(open(cached_path)) if os.path.exists(cached_path) else []
-    documents=wf1_documents.acquire([dict(windows[i],i=i,context=context) for i in wanted],os.path.join(ctx.supply,'primary-documents'),_llm(),sources=originals)
     added=0
-    for subject,records in documents['pictures'].items():
-        dest=pack['pictures'].setdefault(subject,[]);have={r['path'] for r in dest}
-        fresh=[r for r in records if r['path'] not in have];dest.extend(fresh);added+=len(fresh)
-    if documents not in pack.setdefault('document_research',[]):pack['document_research'].append(documents)
-    if added:
-        pack['credits']+=documents['credits']
-        stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
-        with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
-        ctx.log(f'acquired {added} primary-document crops; checking their actual words before further research')
-        # New stills cannot repair a moving-footage deficit. Continue into video
-        # research in this same attempt instead of consuming every retry on crops.
-        if shortage.get('real_seconds',0)>0 and shortage.get('moving_seconds',0)>=.6*shortage['real_seconds']:
+    # A still cannot repair a motion deficit. Preserve existing documentary
+    # evidence, but spend this recovery pass on moving originals first.
+    motion_ready = (shortage.get('real_seconds',0)>0 and
+                    shortage.get('moving_seconds',0)>=.6*shortage['real_seconds'])
+    if motion_ready:
+        import wf1_documents
+        context=dict(identity=coverage.get('context'),primary_research=coverage.get('research_context'),prior_errors=[e for r in pack.get('document_research',[]) for e in r.get('errors',[])][-12:])
+        cached_path=os.path.join(ctx.supply,'document-sources','manifest.json')
+        originals=json.load(open(cached_path)) if os.path.exists(cached_path) else []
+        documents=wf1_documents.acquire([dict(windows[i],i=i,context=context) for i in wanted],os.path.join(ctx.supply,'primary-documents'),_llm(),sources=originals)
+        for subject,records in documents['pictures'].items():
+            dest=pack['pictures'].setdefault(subject,[]);have={r['path'] for r in dest}
+            fresh=[r for r in records if r['path'] not in have];dest.extend(fresh);added+=len(fresh)
+        if documents not in pack.setdefault('document_research',[]):pack['document_research'].append(documents)
+        if added:
+            pack['credits']+=documents['credits']
+            stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
+            with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
+            ctx.log(f'acquired {added} primary-document crops; checking their actual words before further research')
             return
+    else:
+        ctx.log('moving coverage is short; prioritize original video over additional still documents')
     signature=source_signature(ctx.supply)
     previous = pack.get('coverage_repairs',0) if pack.get('research_contract')==RESEARCH_CONTRACT and pack.get('research_sources')==signature else 0
     count = max(4,int(previous)+1) if pack.get('platform_walled') else int(previous)+1
