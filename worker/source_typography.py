@@ -22,17 +22,12 @@ def observations(index):
             for r in rows if r.get("evidence_id")][:96]
 
 
-def classify(index, ask):
+def validate(index, data):
+    """The same evidence contract for standalone and Scout decisions."""
     rows = observations(index)
-    if len(rows) < 3:
-        return {}
-    payload = dict(frames=rows, sentences=[{k: s.get(k) for k in ("t0", "t1", "text")}
-                                          for s in (index.get("sentences") or [])[:160]])
-    result = ask(SYSTEM, json.dumps(payload, ensure_ascii=False), max_tokens=1200,
-                 temperature=0, reasoning_effort="low", purpose="source_typography")
     try:
-        raw = (result or {}).get("text") or ""
-        data = json.JSONDecoder().raw_decode(raw[raw.index("{"):])[0]
+        if not isinstance(data, dict):
+            return {}
         ids = list(dict.fromkeys(data.get("evidence_ids") or []))
         valid = {r["id"] for r in rows}
         if len(ids) < 3 or not set(ids) <= valid:
@@ -46,6 +41,21 @@ def classify(index, ask):
         return dict(caption_track=track, designed_layout=data.get("designed_layout") is True,
                     evidence_ids=ids, reason=str(data.get("reason") or "")[:500])
     except (ValueError, TypeError, KeyError):
+        return {}
+
+
+def classify(index, ask):
+    rows = observations(index)
+    if len(rows) < 3:
+        return {}
+    payload = dict(frames=rows, sentences=[{k: s.get(k) for k in ("t0", "t1", "text")}
+                                          for s in (index.get("sentences") or [])[:160]])
+    result = ask(SYSTEM, json.dumps(payload, ensure_ascii=False), max_tokens=1200,
+                 temperature=0, reasoning_effort="low", purpose="source_typography")
+    try:
+        raw = (result or {}).get("text") or ""
+        return validate(index, json.JSONDecoder().raw_decode(raw[raw.index("{"):])[0])
+    except (ValueError, TypeError):
         return {}
 
 
@@ -68,7 +78,7 @@ def captioned(index):
     return ((index or {}).get("source_typography") or {}).get("caption_track") == "complete"
 
 
-def refresh(ctx, worker_db, sha=None):
+def refresh_index(ctx, worker_db, sha=None):
     """Join an already completed storyboard; never wait behind indexing.
 
     Director preparation overlaps the late storyboard. Read once after that
@@ -87,4 +97,9 @@ def refresh(ctx, worker_db, sha=None):
                              "visual_storyboard_pending": False}
         except Exception:
             pass
+    return ctx.index
+
+
+def refresh(ctx, worker_db, sha=None):
+    refresh_index(ctx, worker_db, sha)
     return prepare(ctx)
