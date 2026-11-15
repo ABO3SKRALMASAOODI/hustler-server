@@ -104,6 +104,15 @@ def test_shortening_does_not_buy_a_lost_picture_change():
     assert not prefer_floor(candidate, baseline)
 
 
+def test_one_jump_cannot_replace_one_distinct_subject_picture():
+    candidate, baseline = reading(), reading('edited')
+    candidate['program_s'] = 8.
+    candidate['taste']['raw'] = {'kinds': [[5.467, 'new', .889]]}
+    baseline['program_s'] = 3.42
+    baseline['taste']['raw'] = {'kinds': [[1.467, 'jump', .815]]}
+    assert not prefer_floor(candidate, baseline)
+
+
 @pytest.mark.parametrize('department', ['shots', 'sounds'])
 def test_shortening_does_not_buy_lost_added_pictures_or_sounds(department):
     candidate = reading(**{department: 3})

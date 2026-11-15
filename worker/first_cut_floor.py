@@ -42,12 +42,18 @@ def prefer_floor(candidate, floor):
         duration = max(float(m.get('program_s') or 1), 1)
         at = sorted(float(row[0]) for row in raw['kinds']
                     if row[1] in ('new', 'jump') and 0 < float(row[0]) < duration)
-        return len(at) * 10 / duration, max(b-a for a, b in zip([0.] + at, at + [duration])), len(at)
+        new = sum(row[1] == 'new' and 0 < float(row[0]) < duration for row in raw['kinds'])
+        return len(at) * 10 / duration, max(b-a for a, b in zip([0.] + at, at + [duration])), len(at), new
     cp, fp = pictures(candidate), pictures(floor)
     # p5755: a 137-second take won over a 15-second cut because its
     # camera was counted more often. Source reorders are real cuts even
     # when shots_added is zero; a slower sequence is not a better floor.
     if cp is not None and (fp is None or fp[0] + .05 < cp[0] or fp[1] > cp[1] + .1 or fp[2] < cp[2]):
+        return False
+    # One jump inside the remaining take cannot replace a distinct subject
+    # picture. In p5571 the floor removed the fountain entirely, leaving
+    # only the person, yet its shorter duration made one detected jump win.
+    if cp is not None and fp[3] < cp[3]:
         return False
     # A shorter denominator must not manufacture a better floor. p5571
     # lost a real picture change (2 -> 1), while its cut rate increased
