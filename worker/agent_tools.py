@@ -760,7 +760,7 @@ class ToolContext:
             onsets = _keep_onset_lines(self, normalized.get('keep'), prev['json'].get('keep'),
                                       (getattr(self, 'index', None) or {}).get('words') or [])
             if onsets:
-                return (f"REJECTED (EDL v{prev['version']} unchanged): Cut would clip a measured spoken onset: "
+                return (f"REJECTED (EDL v{prev['version']} unchanged): Cut would clip measured speech: "
                         + '; '.join(onsets) + '. Move the boundary before saving.')
         import required_broll
         picture_refusal = required_broll.write_refusal(self, prev['json'], normalized)
@@ -3386,22 +3386,23 @@ def _audio_safe_keep(ctx, keep, prev_keep, words):
 
 
 def _keep_onset_lines(ctx, keep, prev_keep, words):
-    """Measured clipped onsets, including cuts exactly on an inaccurate ASR edge."""
+    """Measured onsets and releases, including inaccurate exact ASR edges."""
     import cut_audio
     try:
-        starts = [b for _i, side, b in cut_audio.cut_edges(
-            keep, ctx.duration, prev_keep) if side == "start"]
+        edges = [b for _i, side, b in cut_audio.cut_edges(keep, ctx.duration, prev_keep)]
     except Exception:  # noqa: BLE001
         return []
     hook = getattr(ctx, "cut_sound_source", None)
-    if not starts or not callable(hook):
+    if not edges or not callable(hook):
         return []
     try:
         source = hook()
-        level = cut_audio.source_levels(source, starts, ctx.duration,
+        level = cut_audio.source_levels(source, edges, ctx.duration,
                                         timeout=CUT_SOUND_BUDGET_S) \
             if source else None
         lines = cut_audio.onset_lines(cut_audio.clipped_onsets(
+            keep, words, ctx.duration, level, prev_keep))
+        lines += cut_audio.release_lines(cut_audio.clipped_releases(
             keep, words, ctx.duration, level, prev_keep))
     except Exception:  # noqa: BLE001 — an advisory never fails a write
         return []
