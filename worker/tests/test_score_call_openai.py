@@ -105,6 +105,34 @@ def test_no_openai_key_refuses(monkeypatch):
         call.stream("gpt-6-sol", "s", "c", max_tokens=5, effort="low", purpose="p", deadline=time.monotonic() + 10)
 
 
+@pytest.mark.parametrize('base', ['http://127.0.0.1:8787/v1/', 'https://proxy.example/v1'])
+def test_director_uses_the_configured_responses_host(monkeypatch, base):
+    seen = []
+    def handler(request):
+        seen.append(str(request.url))
+        assert str(request.url) == base.rstrip('/') + '/responses'
+        assert request.headers['authorization'] == 'Bearer local-codex-only'
+        return httpx.Response(200, content=_sse(
+            {'type': 'response.output_text.delta', 'delta': 'Score'},
+            {'type': 'response.completed', 'response': {'status': 'completed',
+                'usage': {'input_tokens': 10, 'output_tokens': 1}}}))
+    _client_with(monkeypatch, handler)
+    monkeypatch.setattr(call_openai.config, 'OPENAI_BASE_URL', base)
+    monkeypatch.setattr(call_openai.config, 'OPENAI_API_KEY', 'local-codex-only')
+    result = call.stream('gpt-6-sol', 's', 'c', max_tokens=5, effort='low',
+                         purpose='p', deadline=time.monotonic() + 10)
+    assert result.text == 'Score' and len(seen) == 1
+
+
+def test_empty_responses_host_refuses_before_transport(monkeypatch):
+    monkeypatch.setattr(call_openai.config, 'OPENAI_API_KEY', 'local-codex-only')
+    monkeypatch.setattr(call_openai.config, 'OPENAI_BASE_URL', '')
+    monkeypatch.setattr(httpx, 'Client', lambda **kw: pytest.fail('transport must not start'))
+    with pytest.raises(call.Refused, match='no base URL'):
+        call.stream('gpt-6-sol', 's', 'c', max_tokens=5, effort='low',
+                    purpose='p', deadline=time.monotonic() + 10)
+
+
 def test_director_tier_is_explicit_and_keeps_model_reasoning_and_budget(monkeypatch):
     monkeypatch.setattr(call_openai.config, 'OPENAI_SERVICE_TIER', '')
     monkeypatch.setattr(call_openai.config, 'DIRECTOR_SERVICE_TIER', '')
