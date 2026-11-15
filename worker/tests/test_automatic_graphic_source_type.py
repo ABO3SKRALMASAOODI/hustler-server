@@ -87,4 +87,6 @@ def test_automatic_display_actual_ink_clears_the_upload_reading_track():
     assert all(keepout.inter(actual, z) <= 1e-6 for z in source)
     assert params['text'] == item['params']['text']
     assert params['width'] == item['params']['width']
-    assert actual[3] - actual[1] >= .07
+    # This test proves relocation preserves the original glyph size. The
+    # independent frame audit still decides whether that design is readable.
+    assert actual[3] - actual[1] >= box[3] - box[1] - .005
