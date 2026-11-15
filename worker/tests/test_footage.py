@@ -159,6 +159,21 @@ def test_the_sources_kept_are_the_models_choice_and_a_broken_row_costs_that_row(
     assert [(s, h["id"]) for s, h, _ in kept] == [(0, "b"), (1, "c")] and usd == 0.002
 
 
+def test_local_source_rank_batches_keep_global_subject_indices(monkeypatch):
+    monkeypatch.setenv('CODEX_PROXY_LOCAL','1')
+    subjects=[dict(name=f'Subject-{i}',must_show='actual subject') for i in range(5)]
+    hits={i:[dict(id=str(i),title='original',where='youtube')] for i in range(5)}
+    batches=[]
+    def answer(system,content,*a,**kw):
+        ids=[i for i in range(5) if f'Subject {i}:' in content]
+        batches.append(ids)
+        return json.dumps(dict(keep=[dict(s=i,h=0,why='original') for i in ids])),0.
+    monkeypatch.setattr(plan.ask,'ask',answer)
+    kept,_=plan.rank(subjects,hits)
+    assert batches==[[0,1],[2,3],[4]]
+    assert [(i,h['id']) for i,h,_ in kept]==[(i,str(i)) for i in range(5)]
+
+
 def test_a_footage_candidate_has_its_own_licence_class_and_is_credited():
     c = dict(provider="footage", license=seam.LICENCE, page_url="https://www.youtube.com/watch?v=x")
     assert supply.licence_class(c) == ("F", seam.LICENCE, "https://www.youtube.com/watch?v=x")

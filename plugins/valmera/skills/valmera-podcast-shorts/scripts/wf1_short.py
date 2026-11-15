@@ -130,7 +130,8 @@ def supply(ctx, script):
     pk = os.path.join(sup_dir, "pack.json")
     if os.path.exists(pk):
         prior = json.load(open(pk))
-        if (prior['pack'].get('coverage') or {}).get('contract') == wf1_coverage.CONTRACT:
+        if ((prior['pack'].get('coverage') or {}).get('contract') == wf1_coverage.CONTRACT
+                and any(row.get('clips') for row in prior['pack'].get('footage',[]))):
             return prior['record']
         os.replace(pk,os.path.join(sup_dir,'previous-pack.json'))
     rec0 = chain.pack(ctx, script)                              # source.mp4 (the window), hearing.json, index.json
@@ -487,7 +488,8 @@ def refill(ctx, script, pack, shortage):
 def score(ctx, script):
     import wf1_coverage
     pack = wf3.load_pack(ctx)
-    if (pack.get('coverage') or {}).get('contract') != wf1_coverage.CONTRACT:
+    if ((pack.get('coverage') or {}).get('contract') != wf1_coverage.CONTRACT
+            or not any(row.get('clips') for row in pack.get('footage',[]))):
         supply(ctx,script)
         pack = wf3.load_pack(ctx)
     pack["work"] = ctx.supply

@@ -1,6 +1,7 @@
 """The two reading steps before any byte is fetched: what to search for, and which sources to open.
 A model reads the words and decides; nothing here reads them by rule."""
 import json
+import os
 from urllib.parse import urlparse
 
 from . import ask
@@ -85,9 +86,14 @@ def rank(subjects, hits, per=3, budget_s=60.0):
             blocks.append(f"Subject {si}: {s['name']} (must show: {s['must_show']})\n" + "\n".join(rows))
     if not blocks:
         return [], 0.0
-    txt, usd = ask.ask(RANK_SYSTEM, f"Keep at most {per} sources per subject.\n\n" + "\n\n".join(blocks), "footage_rank", budget_s=budget_s, max_tokens=3000)
+    decisions,usd=[],0.
+    width=2 if os.environ.get('CODEX_PROXY_LOCAL')=='1' else len(blocks)
+    for start in range(0,len(blocks),width):
+        txt,cost=ask.ask(RANK_SYSTEM, f"Keep at most {per} sources per subject.\n\n" + "\n\n".join(blocks[start:start+width]),
+                         "footage_rank", budget_s=budget_s, max_tokens=3000)
+        decisions.extend(ask.json_obj(txt).get('keep') or []);usd+=cost
     out, seen = [], set()
-    for k in ask.json_obj(txt).get("keep") or []:
+    for k in decisions:
         try:
             si, hi = int(k.get("s")), int(k.get("h"))
             h = (hits.get(si) or [])[hi]

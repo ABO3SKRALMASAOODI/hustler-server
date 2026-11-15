@@ -294,6 +294,8 @@ def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None, preserve_sourc
         ctx.log(f"footage skipped: {str(e)[:300]}")
         return None
     if r.returncode != 0 or not os.path.exists(rec):
+        if os.environ.get('CODEX_PROXY_LOCAL')=='1':
+            raise RuntimeError(f'footage acquisition stopped ({r.returncode}); inspect its logged error before spending quota on replacement research')
         ctx.log(f"footage skipped: exit {r.returncode}")
         return None
     return json.load(open(rec))
