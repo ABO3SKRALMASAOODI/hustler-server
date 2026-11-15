@@ -1137,6 +1137,16 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
             rec["supply_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
     _stage(rec, "supply", t)
 
+    recover_supply = (getattr(ctx, "director_recover_supply", None)
+                      if getattr(ctx, "director_typed", False) is True else None)
+    if callable(recover_supply):
+        t = time.monotonic()
+        sc, bin_doc, foot = recover_supply(job=job, cfg=cfg, deadline=deadline,
+            work=work, index=index, sess=sess, per=per, sc=sc, bin_doc=bin_doc,
+            foot=foot, rec=rec, acquire=_acquirer(ctx, worker_db, job, work))
+        ctx.director_footage = foot
+        _stage(rec, "picture_recovery", t)
+
     if bed_th is not None:
         bed_th.join(max(0.0, min(3.0, deadline - 75.0 - time.monotonic())))      # long done by now; a late pick only means this film is dry
         if bed_th.is_alive():
