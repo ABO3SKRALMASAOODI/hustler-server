@@ -186,3 +186,33 @@ def test_silent_source_has_no_predicted_gain():
     out, knots = renderer_source(np.zeros((32000, 2), np.float32), 16000)
     assert knots == []
     assert not out.any()
+
+
+def test_director_design_uses_rendered_source_level_from_loaded_index(tmp_path, monkeypatch):
+    import json
+    import wave
+    from score import sound
+    rate = sound.AR
+    t = np.arange(6 * rate) / rate
+    mono = np.sin(2*np.pi*700*t) * np.where(t < 2, .004, .04)
+    stereo = np.stack([mono, mono*.8], axis=1)
+    source = tmp_path / 'source.wav'
+    with wave.open(str(source), 'wb') as handle:
+        handle.setnchannels(2); handle.setsampwidth(2); handle.setframerate(rate)
+        handle.writeframes((stereo*32767).astype('<i2').tobytes())
+    index = {'first_film': {'frame': '9:16'}, 'words': [], 'video': {'duration': 6}}
+    (tmp_path / 'index.json').write_text(json.dumps(index))
+    l1 = {'fps': 30, 'dur_f': 180, 'items': [], 'sound': [],
+          'spine': [{'f': [0, 180], 'src': [0., 6.]}]}
+    observed = []
+    def plan(events, ctx):
+        observed.append(ctx['voice_shift_db'])
+        return [], {}
+    monkeypatch.setattr(sound, 'plan_sounds', plan)
+    _, report = sound.design(l1, work=str(tmp_path), src=str(source))
+    knots = report['renderer_source_gain_knots']
+    assert knots[0][1] > knots[-1][1] + 4
+    assert observed[-1] == 0  # no second global shift after the renderer curve
+    # The legacy caller can explicitly select natural mastering.
+    _, natural = sound.design(l1, work=str(tmp_path), src=str(source), level_source=False)
+    assert 'renderer_source_gain_knots' not in natural

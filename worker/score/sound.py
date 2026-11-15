@@ -1896,7 +1896,7 @@ def _asked(asks):
     return False
 
 
-def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=None, turn_s=None, bed=None, own_tiers=False, level_source=False):
+def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=None, turn_s=None, bed=None, own_tiers=False, level_source=None):
     """The designed sound for a compiled film: (sounds, report). The Director's own sounds stay and count first.
     supply: the governor's {np10, bed} (taste.supply) when the compiler has it; else read from the L1 and the upload.
     turn_s: the story's turn on the film's clock, when the caller knows it (a workflow's script names its payoff).
@@ -1909,6 +1909,11 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
         turn_s = own.get("payoff_s") if own.get("payoff_s") is not None else own.get("turn_s")
     if work and index is None and os.path.exists(os.path.join(work, "index.json")):
         index = json.load(open(os.path.join(work, "index.json")))
+    if level_source is None:
+        # First films lower to social mastering. The old chain can override
+        # this for an explicitly natural master; workflows retain their own
+        # renderer. Decide after loading the index for file-based callers.
+        level_source = bool((index or {}).get("first_film"))
     if work and perc is None and os.path.exists(os.path.join(work, "perception.json")):
         perc = json.load(open(os.path.join(work, "perception.json")))
     if work and asks is None and os.path.exists(os.path.join(work, "scout.json")):

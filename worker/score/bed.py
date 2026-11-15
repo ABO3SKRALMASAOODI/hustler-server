@@ -421,9 +421,16 @@ def one_mix(work, l1, index=None):
         if not len(song):
             return None
         n_ar = int(round(prog * SD.AR))
-        voice = SD.spine_audio(l1.get("spine"), fps, src, n_ar)[:, 0] if src else np.zeros(n_ar, np.float32)
+        first_film = bool((index or {}).get("first_film"))
+        source_knots = None
+        if first_film:
+            import first_film_sound
+            source = SD.spine_audio(l1.get("spine"), fps, src, n_ar, ch=2) if src else np.zeros((n_ar, 2), np.float32)
+            voice, source_knots = first_film_sound.renderer_source(source, SD.AR)
+        else:
+            voice = SD.spine_audio(l1.get("spine"), fps, src, n_ar)[:, 0] if src else np.zeros(n_ar, np.float32)
         shift = 0.0
-        if float(np.abs(voice).max()) > 1e-5:
+        if not first_film and float(np.abs(voice).max()) > 1e-5:
             speech, _ = SD.speech_frames(voice, SD.words_in_programme(l1, index))
             shift = SD.voice_shift(voice, speech)
         before = {str(x.get("id")): x.get("db") for x in l1["sound"]}
@@ -449,8 +456,13 @@ def one_mix(work, l1, index=None):
             rep["duck_db"] = [r.get("db") for r in drep]
         if (index or {}).get("first_film"):
             from . import audibility
+            rep["renderer_source_gain_knots"] = source_knots
             # Actual arranged components on the output clock, after bed
             # dips. This is evidence; planned sounds are never a pass count.
+            if source_knots:
+                times, gains = zip(*source_knots)
+                gain = np.interp(np.arange(len(_v)) / AU.SR, times, gains)
+                _v = _v * (10 ** (gain / 20))[:, None]
             rep["audibility"] = audibility.measure(
                 _v * (10 ** (shift / 20)), fx, song)
         tmp = path + ".mix.m4a"

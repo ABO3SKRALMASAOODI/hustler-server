@@ -14,7 +14,7 @@ BACKGROUND_DB = {'hero': 10.0, 'accent': 8.0, 'body': 7.0, 'tick': 5.0}
 
 
 def renderer_source(signal, rate):
-    """Predict the legacy renderer's source leveller, before the cue mix.
+    """Predict the renderer's source leveller, before the cue mix.
 
     Its local gain can differ from a film-wide loudness shift by >10 dB.
     Measure stereo exactly as the renderer does, then use the same knots.

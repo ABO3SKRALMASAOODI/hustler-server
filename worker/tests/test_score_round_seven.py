@@ -177,7 +177,9 @@ def test_the_films_sounds_and_its_arranged_bed_are_one_mix(tmp_path, monkeypatch
     np.stack([song, song], axis=1).tofile(raw)
     import subprocess
     subprocess.run([AU.FF, "-hide_banner", "-loglevel", "error", "-y", "-f", "f32le", "-ar", str(sr), "-ac", "2", "-i", raw, "-c:a", "aac", os.path.join(work, "bed_arranged.m4a")], check=True)
-    subprocess.run([AU.FF, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"anullsrc=r={sr}:cl=stereo", "-t", str(dur), "-c:a", "aac", os.path.join(work, "source.mp4")], check=True)
+    source_filter = (f"aevalsrc=sin(2*PI*700*t)*if(lt(t\\,2)\\,0.004\\,0.04):s={sr}:c=stereo"
+                     if first_film else f"anullsrc=r={sr}:cl=stereo")
+    subprocess.run([AU.FF, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", source_filter, "-t", str(dur), "-c:a", "aac", os.path.join(work, "source.mp4")], check=True)
     json.dump({"on": True, "settled": True, "cid": "x", "title": "t", "turn_s": None, "arranged": {"file": "bed_arranged.m4a", "dur_s": dur, "end_s": dur - 0.1, "sha": "old", "drop_at": None}},
               open(os.path.join(work, bed.FILE), "w"))
     lib = sound.library()
@@ -190,6 +192,9 @@ def test_the_films_sounds_and_its_arranged_bed_are_one_mix(tmp_path, monkeypatch
     index = {"words": [], "first_film": {"frame": "9:16"} if first_film else None}
     rep = bed.one_mix(work, l1, index)
     assert rep and rep["sounds"] == 1 and rep["ducks"] == 1                     # the song makes room under the hero hit
+    if first_film:
+        knots = rep['renderer_source_gain_knots']
+        assert knots[0][1] > knots[-1][1] + 4  # the bed pass retains the renderer's local source reference
     after = AU.pcm(os.path.join(work, "bed_arranged.m4a"))
     a, z = int(3.0 * sr), int(3.1 * sr)
     assert float(np.abs(after[a:z]).mean()) < 0.8 * float(np.abs(before[a:z]).mean())
