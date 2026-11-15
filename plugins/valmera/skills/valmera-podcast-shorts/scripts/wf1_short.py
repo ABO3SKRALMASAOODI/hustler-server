@@ -171,7 +171,8 @@ def supply(ctx, script):
                    named=[dict(name=name,must_show=' '.join(requirements),
                                video_searches=list(dict.fromkeys(q for w in windows if w['name']==name for q in w.get('video_searches',[]))),
                                **{'is':'thing'}) for name,requirements in research.items()])
-    footage_name = f'footage-v{wf1_coverage.CONTRACT}'
+    direction_key=hashlib.sha256(json.dumps(fscript,sort_keys=True).encode()).hexdigest()[:16]
+    footage_name = f'footage-v{wf1_coverage.CONTRACT}-{direction_key}'
     wf3.given_footage(ctx, os.path.join(sup_dir, footage_name))
     fw, fh = style["footage"]
     # This workflow uses the engine's contextual-check route, as WF3 does. Every SELECTED
