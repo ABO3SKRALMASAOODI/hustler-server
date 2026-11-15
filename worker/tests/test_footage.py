@@ -601,3 +601,18 @@ def test_research_document_links_are_model_context_not_video_searches(monkeypatc
     result,_=plan.plan([], [dict(name='Research',video_searches=['https://publisher/paper.pdf','site:publisher research','original conference demo'])])
     assert 'https://publisher/paper.pdf' in seen[0]
     assert [q['q'] for q in result['subjects'][0]['searches']]==['original conference demo','original research demonstration']
+
+
+
+def test_cli_preserves_explicit_zero_source_hearing(tmp_path,monkeypatch):
+    import sys,json
+    from footage import run,seam
+    script=tmp_path/'script.json';script.write_text(json.dumps(dict(segments=[dict(say='A company',pictures=['Company'])])))
+    monkeypatch.setattr(sys,'argv',['footage','--script',str(script),'--out',str(tmp_path/'out'),'--hear-seconds','0'])
+    seen=[]
+    def find(*args,**kwargs):seen.append(kwargs);return None
+    monkeypatch.setattr(seam,'for_lines',find)
+    run.main()
+    assert seen[0]['hear_s']==0
+
+

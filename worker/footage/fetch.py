@@ -234,7 +234,10 @@ def whole_av(url, out_dir):
                 raise ValueError('invalid external fetch receipt')
             if os.path.getsize(path) < 2000:
                 raise ValueError('empty external source')
-            return path, 'external-original:' + str(receipt.get('rung',''))
+            rung='external-original:' + str(receipt.get('rung',''))
+            from .run import keep_sources
+            keep_sources([dict(whole=path,url=url,rung=rung)],log=lambda _:None)
+            return path,rung
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise FetchError('external source transport failed: ' + type(exc).__name__) from exc
     for p in glob.glob(os.path.join(out_dir, "whole.*")):

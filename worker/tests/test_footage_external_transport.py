@@ -24,3 +24,17 @@ def test_external_fetch_cannot_substitute_another_source_or_file(tmp_path,monkey
     monkeypatch.setattr(fetch.subprocess,'run',lambda *a,**k:SimpleNamespace(returncode=0,stdout=json.dumps(receipt)))
     with pytest.raises(fetch.FetchError,match='external source transport failed'):
         fetch.whole_av('https://example.org/original.mp4',str(tmp_path))
+
+
+
+def test_original_survives_later_acquisition_failure(tmp_path,monkeypatch):
+    downloaded=tmp_path/'fetch';downloaded.mkdir();movie=downloaded/'whole.mp4';movie.write_bytes(b'x'*3000)
+    kept=tmp_path/'retained';monkeypatch.setenv('FOOTAGE_KEEP_SOURCES',str(kept))
+    monkeypatch.setenv('FOOTAGE_FETCH_CMD','operator-fetch')
+    monkeypatch.setattr(fetch.subprocess,'run',lambda *a,**k:SimpleNamespace(returncode=0,stdout=json.dumps(dict(path=str(movie),url='https://example.org/original.mp4',rung='box'))))
+    fetch.whole_av('https://example.org/original.mp4',str(downloaded))
+    movie.unlink()  # the later stage failed and its temporary source folder was cleaned
+    record=json.load(open(kept/'manifest.json'))[0]
+    from pathlib import Path
+    assert record['url']=='https://example.org/original.mp4'
+    assert Path(record['path']).read_bytes()==b'x'*3000

@@ -539,6 +539,17 @@ def source_rounds(ranked):
 
 
 def keep_sources(sources, log=print):
+    """Retain originals even when another stage later stops; concurrent fetches serialize their manifest."""
+    import fcntl
+    keep=os.environ.get("FOOTAGE_KEEP_SOURCES")
+    if not keep or not sources:return []
+    os.makedirs(keep,exist_ok=True)
+    with open(os.path.join(keep,".manifest.lock"),"a") as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        return _keep_sources(sources,log)
+
+
+def _keep_sources(sources, log=print):
     """FOOTAGE_KEEP_SOURCES=<dir>: each whole source this call fetched (src["whole"], not one already kept) is hard-linked
     (moved when it cannot be) into <dir> before the work folder goes, and {url, path, rung} appended to <dir>/manifest.json,
     the rows fetch.local_source honours. Unset, nothing is kept."""
@@ -698,8 +709,11 @@ def main():
     ap.add_argument("--alloc", default=None, choices=["round"], help="round: one pick a line a round, the scarcest line first")
     ap.add_argument("--reassign-lost", action="store_true", help="lines whose cuts failed are assigned again and cut")
     ap.add_argument("--whole-first", action="store_true", help="short sources fetched once, whole with sound: scan, transcript and every cut")
+    ap.add_argument("--hear-seconds",type=float,default=None,help="source audio seconds to transcribe; zero for visual-only documentary acquisition")
     ap.add_argument("--want-voices", action="store_true", help="look for real voices even when nothing would otherwise be heard")
     a = ap.parse_args()
+    if a.hear_seconds is not None and a.hear_seconds<0:ap.error("--hear-seconds must be nonnegative")
+    hearing={} if a.hear_seconds is None else dict(hear_s=a.hear_seconds)
     lines, named, title = lines_of(json.load(open(a.script)))
     if a.timing:
         t = json.load(open(a.timing))
@@ -713,7 +727,7 @@ def main():
     avoid = [dict(url=c["source"]["url"], time_range=c["time_range"]) for p in a.avoid for ln in json.load(open(p)).get("lines") or []
              for c in ln.get("clips") or []]
     res = seam.for_lines(lines, named, title, a.out, a.w, a.h, scope="workflow", log=lambda m: print("[footage] " + m, flush=True),
-                         anchors=anchors, avoid=avoid, preserve_source=a.preserve_source,
+                         anchors=anchors, avoid=avoid, preserve_source=a.preserve_source, **hearing,
                          **{k: v for k, v in dict(shot_s=a.shot_s, line_max=a.line_max, per=a.per, strict_lines=a.strict_lines,
                                                   motion_first=a.motion_first, scout_motion=a.scout_motion, alloc=a.alloc, reassign_lost=a.reassign_lost,
                                                   whole_first=a.whole_first, want_voices=a.want_voices).items() if v})
