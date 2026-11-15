@@ -165,7 +165,8 @@ def test_a_film_of_some_pictures_carries_small_ticks_on_its_type():
     assert not any("small ticks" in d["why"] and "carries 0" in d["why"] for d in rep["dropped"])
 
 
-def test_the_films_sounds_and_its_arranged_bed_are_one_mix(tmp_path, monkeypatch):
+@pytest.mark.parametrize("first_film", [False, True])
+def test_the_films_sounds_and_its_arranged_bed_are_one_mix(tmp_path, monkeypatch, first_film):
     from scene import audio as AU
     from score import bed
     work = str(tmp_path)
@@ -186,14 +187,15 @@ def test_the_films_sounds_and_its_arranged_bed_are_one_mix(tmp_path, monkeypatch
     l1 = {"fps": 30, "dur_f": int(dur * 30), "spine": [{"f": [0, int(dur * 30)], "src": [0.0, dur]}], "assets": {"main": {"path": "source.mp4"}},
           "sound": [one], "sound_design": {}}
     before = AU.pcm(os.path.join(work, "bed_arranged.m4a"))
-    rep = bed.one_mix(work, l1, {"words": []})
+    index = {"words": [], "first_film": {"frame": "9:16"} if first_film else None}
+    rep = bed.one_mix(work, l1, index)
     assert rep and rep["sounds"] == 1 and rep["ducks"] == 1                     # the song makes room under the hero hit
     after = AU.pcm(os.path.join(work, "bed_arranged.m4a"))
     a, z = int(3.0 * sr), int(3.1 * sr)
     assert float(np.abs(after[a:z]).mean()) < 0.8 * float(np.abs(before[a:z]).mean())
     doc = json.load(open(os.path.join(work, bed.FILE)))
     assert doc["arranged"]["sha"] != "old" and doc["arranged"]["mixed"]["ducks"] == 1 and os.path.exists(os.path.join(work, bed.RAW_FILE))
-    rep2 = bed.one_mix(work, l1, {"words": []})                                  # mixed again (the look cut a line): from the track as it was cut, not twice dipped
+    rep2 = bed.one_mix(work, l1, index)                                  # mixed again (the look cut a line): from the track as it was cut, not twice dipped
     again = AU.pcm(os.path.join(work, "bed_arranged.m4a"))
     assert rep2["ducks"] == 1 and abs(float(np.abs(again[a:z]).mean()) - float(np.abs(after[a:z]).mean())) < 0.02
 
