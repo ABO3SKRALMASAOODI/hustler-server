@@ -2558,19 +2558,20 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                 vertical=vertical_out)
         if y is not None:
             style["anchor_y"] = y
-        try:
-            import first_cut_type
-            import motion_tools
-            W, H = motion_tools._canvas_size(ctx, ctx.latest_edl()["json"])
-            style, placement = first_cut_type.place(
-                ctx.latest_edl()["json"], ctx.index, style, W, H)
-            if placement.get("moved") or placement.get("clear") is False:
-                steps.append({"tool": "automatic_caption_placement",
-                              "ok": placement.get("clear", True),
-                              "note": placement})
-        except Exception as exc:  # measurement failure never deletes words
-            steps.append({"tool": "automatic_caption_placement", "ok": False,
-                          "note": str(exc)[:160]})
+        if time.monotonic() - started <= config.FIRST_CUT_MAX_S - _RENDER_RESERVE_S:
+            try:
+                import first_cut_type
+                import motion_tools
+                W, H = motion_tools._canvas_size(ctx, ctx.latest_edl()["json"])
+                style, placement = first_cut_type.place(
+                    ctx.latest_edl()["json"], ctx.index, style, W, H)
+                if placement.get("moved") or placement.get("clear") is False:
+                    steps.append({"tool": "automatic_caption_placement",
+                                  "ok": placement.get("clear", True),
+                                  "note": placement})
+            except Exception as exc:  # measurement failure never deletes words
+                steps.append({"tool": "automatic_caption_placement", "ok": False,
+                              "note": str(exc)[:160]})
         if _ok(_run(ctx, steps, "add_captions",
                     {"mode": "from_transcript", "style": style,
                      "max_words_per_caption": words_per},
