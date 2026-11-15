@@ -18,7 +18,7 @@ import time
 import numpy as np
 from PIL import Image, ImageDraw
 
-from . import boards, taste
+from . import boards, taste, transcript_confidence
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FF = os.environ.get("FFMPEG_BIN", "ffmpeg")
@@ -94,7 +94,7 @@ def sentence_line(n, s, words, x, shown):
     out = []
     for i, wid in enumerate(ids):
         t = ws[i]["w"]
-        doubt = float(ws[i].get("confidence", 1.0)) < 0.75 and wid not in shown
+        doubt = transcript_confidence.low(ws[i]) and wid not in shown
         if i in marks:
             t = f"*{t}*"
         elif i in held:
@@ -132,9 +132,10 @@ def words_part(work, idx, per, x, scout):
         w0, w1 = words[0]["t0"], words[-1]["t1"]
         dur = per["dur"]
         out.append(f"Speech runs {w0:.2f} to {w1:.2f} of {dur:.2f} s. Language {idx.get('language')}, {idx.get('speakers', 1)} speaker(s).")
-        conf = float(np.mean([float(w.get("confidence", 1.0)) for w in words]))
-        if conf < 0.75 or len(words) < 4:
-            out.append(f"{len(words)} words at a mean transcript confidence of {conf:.2f}: this is likely a song, a crowd or noise rather than speech, and the language is a guess. "
+        conf = transcript_confidence.mean(words)
+        if (conf is not None and conf < 0.75) or len(words) < 4:
+            confidence_label = f"{conf:.2f}" if conf is not None else "unknown"
+            out.append(f"{len(words)} words at a mean measured transcript confidence of {confidence_label}: this is likely a song, a crowd or noise rather than speech, and the language is a guess. "
                        "These words are not captioned (the compiler leaves them out) and no title is taken from them. Build the film on the picture and the sound.")
     else:
         out.append("## Words")
@@ -554,7 +555,7 @@ def doubtful_words(idx):
     words = idx.get("words") or []
     if not words:
         return False
-    return len(words) < 4 or float(np.mean([float(w.get("confidence", 1.0)) for w in words])) < 0.75
+    return len(words) < 4 or transcript_confidence.low_mean(words)
 
 
 def scout_part(scout, idx=None):
