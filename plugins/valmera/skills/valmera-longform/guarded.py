@@ -11,6 +11,10 @@ def run(command,out,label,ceiling=6_000_000_000):
     out=Path(out);out.mkdir(parents=True,exist_ok=True)
     tmp=out/'tmp';tmp.mkdir(exist_ok=True)
     env=dict(os.environ,TMPDIR=str(tmp),MallocLargeCache='0')
+    # This is a separate narrator environment. A worker PYTHONPATH leaks
+    # worker/coverage.py into numba's optional coverage-package import.
+    # Each narrator entry point already establishes its own local imports.
+    env.pop('PYTHONPATH',None)
     peak=0;samples=[];stopped=None
     def stop_owned(p):
         if p.poll() is not None:return
