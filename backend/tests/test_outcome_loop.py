@@ -886,3 +886,20 @@ def test_a_later_download_is_not_leaving():
     data["events"] = []
     found, _ = _discover(data)
     assert sessions.context(found[0])["next_summary"]["left"] is True
+
+
+def test_all_tickets_keeps_oldest_ticket_after_three_hundred_causes():
+    rows=[dict(id=i,status="open",severity="P1",root_cause=None,cause_key=f"cause-{i}",
+               recurrence_count=1,reviews=[],history=[],first_seen=NOW,last_seen=NOW,
+               closed_at=None,created_at=NOW,updated_at=NOW) for i in range(301)]
+    class TicketCursor(Cur):
+        def execute(self,sql,params=None):
+            super().execute(sql,params)
+            if "FROM tickets t" in sql:
+                self.answers=[rows[:params["limit"]] if "limit" in params else rows]
+    cur=TicketCursor([{"r":"x","t":"y","l":"z"}])
+    got=views.tickets(cur)
+    assert got["total"]==301
+    assert {t["id"] for g in got["groups"] for t in g["tickets"]}==set(range(301))
+    cur=TicketCursor([{"r":"x","t":"y","l":"z"}])
+    assert views.tickets(cur,limit=20)["total"]==20

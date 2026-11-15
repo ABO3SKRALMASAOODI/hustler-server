@@ -252,11 +252,15 @@ def clocks(cur, days=7, ticket=None, now=None):
                            and "claimed_at" not in r["clock"])}}
 
 
-def tickets(cur, status="all", presign=None, limit=300, now=None):
+def tickets(cur, status="all", presign=None, limit=None, now=None):
     if not tables_ready(cur):
         return {"loop_ready": False, "groups": [], "total": 0}
     now = now or ranges.utc_now()
-    where, p = "TRUE", {"limit": max(1, min(int(limit), 500))}
+    where, p = "TRUE", {}
+    limit_sql = ""
+    if limit is not None:
+        p["limit"] = max(1, min(int(limit), 500))
+        limit_sql = "LIMIT %(limit)s"
     if status == "active":
         where = "t.status IN ('open', 'fixing')"
     elif status in STATUS_ORDER:
@@ -276,7 +280,7 @@ def tickets(cur, status="all", presign=None, limit=300, now=None):
           FROM tickets t
          WHERE {where}
          ORDER BY t.last_seen DESC
-         LIMIT %(limit)s""", p)
+         {limit_sql}""", p)
     groups = {}
     for t in cur.fetchall():
         t = dict(t)
