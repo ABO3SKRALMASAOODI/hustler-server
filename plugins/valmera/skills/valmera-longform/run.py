@@ -14,6 +14,10 @@ import sys
 import json
 from pathlib import Path
 
+# Imports and subprocesses must not leave bytecode outside the run folder.
+sys.dont_write_bytecode = True
+os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SHELL = os.path.join(os.path.dirname(HERE), "_shell")
 sys.path.insert(0, SHELL)
