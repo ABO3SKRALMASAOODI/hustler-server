@@ -554,6 +554,41 @@ def onset_lines(found):
             f"{f['t']:g}" for f in found]
 
 
+def clipped_releases(keep, words, duration=None, level=None, prev_keep=None):
+    """Ends on an early ASR boundary that still cut audible word release.
+
+Require a nearby kept word, loud sound at the cut and a measured quiet point
+after it, before the next word. Continuous speech/music with no such evidence
+is not classified as a clipped release. Source edges and existing seams stay.
+"""
+    if level is None:
+        return []
+    ws = words if isinstance(words, _Words) else _Words(words)
+    spans = [(float(s), float(e)) for s, e in keep or []]
+    out = []
+    for i, side, b in cut_edges(spans, duration, prev_keep):
+        if side != 'end' or ws.inside(b):
+            continue
+        word = ws.word_ending(b)
+        if not word or b - word[1] > TAIL_REACH_S:
+            continue
+        db_b = level(b)
+        if db_b is None or not _is_loud(db_b, _floor(level, b)):
+            continue
+        limit = spans[i + 1][0] if i + 1 < len(spans) else duration
+        got = place_edge('end', b, ws, level, lo_limit=b, hi_limit=limit)
+        if got['t'] > b + .005 and not got.get('loud') and got.get('db') is not None \
+                and db_b - got['db'] >= ONSET_DIP_DB:
+            out.append({'b': b, 't': got['t'], 'db_b': db_b, 'db_t': got['db'], 'word': word[2]})
+    return out
+
+
+def release_lines(found):
+    return [f"end {f['b']:g} clips the release of '{f['word']}': its sound is still "
+            f"running ({f['db_b']:.0f} dB), before a pause at {f['t']:g} "
+            f"({f['db_t']:.0f} dB) — end at {f['t']:g}" for f in found]
+
+
 def unsafe_edges(keep, words, duration=None, prev_keep=None, level=None):
     """Advisory form for writers that must keep their exact times (an edit
     batch): [(side, old, suggested, why)] for each edge refine_keep would
