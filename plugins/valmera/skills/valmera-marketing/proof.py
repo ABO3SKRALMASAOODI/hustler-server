@@ -1004,7 +1004,7 @@ def instruction_panel(l1, clock, sc, typed):
         raise RuntimeError("the typed instruction has no spoken timing")
     start, end = F.Clock.f(words[0]["t0"]), F.Clock.f(words[-1]["t1"])
     voices = dict(l1["voices"], receipt=dict(font="InterDisplay-Bold.ttf", px=64, track=0),
-                  receipt_label=dict(font="InterDisplay-Bold.ttf", px=40, track=1))
+                  receipt_label=dict(font="InterDisplay-Bold.ttf", px=56, track=1))
     panel = F.Plan(voices, {})
     lines, line = [], []
     for word in typed.split():
@@ -1020,10 +1020,10 @@ def instruction_panel(l1, clock, sc, typed):
     if bottom > 0.80:
         raise RuntimeError("typed instruction cannot fit readably in the receipt panel")
     panel.block([start, end], [0.08, top, 0.92, bottom], "#121A27", z=20, op=0.96)
-    panel.word([start, end], "TYPED IN VALMERA", "receipt_label", 0.12, top + 35 / F.H,
+    panel.word([start, end], "TYPED IN VALMERA", "receipt_label", 0.12, top + 54 / F.H,
                ink="#7FE3FF", z=21)
     for k, line in enumerate(lines):
-        panel.word([start, end], line, "receipt", 0.12, top + (106 + k * 78) / F.H, z=21)
+        panel.word([start, end], line, "receipt", 0.12, top + (126 + k * 78) / F.H, z=21)
     for it in panel.items:
         it["id"] = "receipt." + it["id"]
     l1["voices"] = voices
@@ -1031,7 +1031,7 @@ def instruction_panel(l1, clock, sc, typed):
     l1["items"] = [it for it in l1["items"] if not (
         it.get("k") == "word" and it["f"][0] < end and it["f"][1] > start)]
     l1["items"].extend(panel.items)
-    return dict(typed=typed, frames=[start, end], lines=lines, minimum_px=40)
+    return dict(typed=typed, frames=[start, end], lines=lines, minimum_px=56)
 
 
 def score(ctx, script):
