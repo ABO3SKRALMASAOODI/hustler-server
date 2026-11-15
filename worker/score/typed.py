@@ -268,6 +268,28 @@ def write_film(ctx, edl):
     import agent_tools
     import edit_integrity
     before = ctx.latest_edl()["json"]
+    # Score picture beats can use second anchors, and frame quantization can
+    # also leave a speech edge inside a word. Normalize on the full source
+    # clock before computing deletion batches, exactly as the ordinary keep
+    # writer does. Re-anchor the designed layers with the same timeline pass;
+    # changing keep alone would desynchronize the film from its pictures.
+    import word_edges
+    import timeline
+    words = (getattr(ctx, "index", None) or {}).get("words") or []
+    if words and edl.get("keep"):
+        old_keep = edl["keep"]
+        keep, _ = word_edges.whole(old_keep, words, ctx.duration,
+                                   previous=before.get("keep"), pad=True)
+        keep = agent_tools._keep_exposed_cuts(old_keep, keep)
+        if keep != old_keep:
+            edl = copy.deepcopy(edl)
+            speed = edl.get("speed") or []
+            old_tl = timeline.Timeline(old_keep, edl.get("inserts") or [], speed)
+            edl["keep"] = keep
+            edl["inserts"], _ = timeline.resnap_inserts(
+                edl.get("inserts") or [], old_keep, keep, speed, speed)
+            new_tl = timeline.Timeline(keep, edl["inserts"], speed)
+            agent_tools._remap_program_items(edl, old_tl, new_tl)
     spans = edit_integrity.removed_spans(before.get("keep"), edl.get("keep"))
     if len(spans) > 12:
         # A montage with no main spine must install its canvas and pictures
