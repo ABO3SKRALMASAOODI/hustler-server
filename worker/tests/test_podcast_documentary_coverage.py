@@ -76,6 +76,10 @@ def test_static_video_files_do_not_satisfy_moving_coverage():
     with pytest.raises(RuntimeError,match='moving=0.000'):
         C.require_coverage(rows,coverage,10)
     for row in rows: row[4]['placed_motion_p90']=2.
+    # Moving a card or cursor can cross the flow threshold without depicting action.
+    with pytest.raises(RuntimeError,match='moving=0.000'):
+        C.require_coverage(rows,coverage,10)
+    for row in rows: row[4]['verified_motion']=True
     assert C.require_coverage(rows,coverage,10)['moving_seconds']==8
 
 

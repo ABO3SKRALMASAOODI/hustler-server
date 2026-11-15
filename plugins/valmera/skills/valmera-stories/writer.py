@@ -133,16 +133,18 @@ def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, 
     headers = {"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"], "Content-Type": "application/json"}
     t0 = time.time()
     final = None
-    for attempt in range(4):
+    attempts = 1 if os.environ.get("CODEX_PROXY_LOCAL") == "1" else 4
+    endpoint = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/") + "/responses"
+    for attempt in range(attempts):
         final = None
         try:
             with httpx.Client(timeout=httpx.Timeout(timeout, connect=30)) as cl, \
-                    cl.stream("POST", "https://api.openai.com/v1/responses", headers=headers, json=body) as r:
+                    cl.stream("POST", endpoint, headers=headers, json=body) as r:
                 if r.status_code >= 400:
                     openai_cache.record(model, "writer:" + what, status="http_error", usd=0.0,
                                         http_status=r.status_code, attempt=attempt + 1, force=True)
                     msg = r.read().decode("utf-8", "replace")[:400]
-                    if r.status_code in (429, 500, 502, 503, 504) and attempt < 3:
+                    if r.status_code in (429, 500, 502, 503, 504) and attempt + 1 < attempts:
                         time.sleep(10 * (attempt + 1))
                         continue
                     raise RuntimeError(f"openai {r.status_code}: {msg}")
@@ -167,7 +169,7 @@ def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, 
                 break
             openai_cache.record(model, "writer:" + what, status="transport_error", billing_unconfirmed=True,
                                 attempt=attempt + 1, force=True)
-            if attempt == 3:
+            if attempt + 1 == attempts:
                 raise
             time.sleep(10 * (attempt + 1))
     if final is None:
@@ -198,7 +200,7 @@ def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, 
     tin, tout = int(u.get("input_tokens") or 0), int(u.get("output_tokens") or 0)
     cached = int((u.get("input_tokens_details") or {}).get("cached_tokens") or 0)
     pin, pc, pout = OA_PRICE.get(model, OA_PRICE["gpt-5.5"])
-    usd = openai_cache.cost(model, u) + n_search * OA_SEARCH_USD
+    usd = 0.0 if os.environ.get("CODEX_PROXY_LOCAL") == "1" else openai_cache.cost(model, u) + n_search * OA_SEARCH_USD
     SEEN_URLS.update(u_ for u_ in cited if u_)
     return text, dict(provider="openai", model=model, effort=effort, what=what, input=tin, output=tout, cache_read=cached,
                       cache_write=openai_cache.tokens(u)["cache_write_tokens"], web_searches=n_search,

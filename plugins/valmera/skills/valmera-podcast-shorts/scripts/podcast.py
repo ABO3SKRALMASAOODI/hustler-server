@@ -323,6 +323,16 @@ def whisper_words(run, video):
 
 def hear(run, fetched):
     words, how = [], None
+    cache = os.environ.get('PODCAST_SOURCE_CACHE')
+    if cache and os.environ.get('PODCAST_REPLAY_SELECTION') == '1':
+        info = jload(os.path.join(cache,'info.json'),{})
+        prior = jload(os.path.join(cache,'words.json'))
+        if info.get('id') == fetched['info'].get('id') and prior:
+            # Cached alignment belongs to the same complete source, even when
+            # its higher-resolution representation has different encoded bytes.
+            # fetch() has already verified the source ID and full duration.
+            jsave(run.p('words.json'), prior)
+            return dict(words=len(prior), transcript='verified source replay word timings',path=run.p('words.json'))
     if fetched.get("captions"):
         words, how = captions_words(fetched["captions"]), f"the platform's captions ({os.path.basename(fetched['captions'])})"
     dur = float(fetched["duration"] or 0)

@@ -12,6 +12,7 @@ changes faster than the image's pin); FOOTAGE_PATH puts a JS runtime (deno) on t
 import glob
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -219,6 +220,23 @@ def whole_av(url, out_dir):
     if cached:
         return cached, "verified-local-source"
     os.makedirs(out_dir, exist_ok=True)
+    adapter = os.environ.get('FOOTAGE_FETCH_CMD')
+    if adapter:
+        # An operator-controlled fetch transport can use the deployment's
+        # egress without copying proxy credentials onto an editing machine.
+        # It supplies original bytes only; identity and motion checks still run.
+        result = subprocess.run(shlex.split(adapter), input=json.dumps(dict(url=url, out_dir=os.path.abspath(out_dir))),
+                                text=True, capture_output=True, timeout=900)
+        try:
+            receipt = json.loads(result.stdout)
+            path = os.path.realpath(receipt['path'])
+            if result.returncode or receipt.get('url') != url or os.path.commonpath([path,os.path.realpath(out_dir)]) != os.path.realpath(out_dir):
+                raise ValueError('invalid external fetch receipt')
+            if os.path.getsize(path) < 2000:
+                raise ValueError('empty external source')
+            return path, 'external-original:' + str(receipt.get('rung',''))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise FetchError('external source transport failed: ' + type(exc).__name__) from exc
     for p in glob.glob(os.path.join(out_dir, "whole.*")):
         os.remove(p)
     fmt = (f"b[height<={WHOLE_H}][ext=mp4]/bv*[height<={WHOLE_H}][vcodec^=avc1]+ba/bv*[height<={WHOLE_H}]+ba/"

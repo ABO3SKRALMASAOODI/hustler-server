@@ -294,6 +294,12 @@ def build(script, sup, style_id, direction=None):
     attempts = []; rejected_placements=set()
     for _ in range(1+len(coverage['windows'])*(sum(len(rows) for rows in footage.values())+sum(len(rows) for rows in pics.values()))):
         accepted, placement_report = check(ins, script, clock, sup["work"], sup["ffmpeg"])
+        # Retain the actual action verdict for acquisition ranking. It is never
+        # an approval at another time: each new placement is checked again.
+        for row, decision in zip(ins, placement_report['placements']):
+            for candidate in footage.get(row[4]['window'], []):
+                if candidate['path'] == row[4]['path']:
+                    candidate['subject_motion'] = decision.get('motion_ok') is True
         attempts.append(placement_report)
         if not placement_report['rejected']:
             break

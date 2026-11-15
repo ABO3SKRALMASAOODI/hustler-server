@@ -80,16 +80,20 @@ def ask_openai(system, content, *, model=None, effort="medium", max_tokens=16000
     body = openai_cache.responses(body, purpose)
     headers = {"Authorization": "Bearer " + openai_key(), "Content-Type": "application/json"}
     t0, final = time.time(), None
-    for attempt in range(4):
+    # The subscription adapter owns its deadline and caches failures. Repeating
+    # the same stalled call spends quota without changing the work.
+    attempts = 1 if os.environ.get("CODEX_PROXY_LOCAL") == "1" else 4
+    endpoint = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/") + "/responses"
+    for attempt in range(attempts):
         final = None
         try:
             with httpx.Client(timeout=httpx.Timeout(timeout, connect=30)) as cl, \
-                    cl.stream("POST", "https://api.openai.com/v1/responses", headers=headers, json=body) as r:
+                    cl.stream("POST", endpoint, headers=headers, json=body) as r:
                 if r.status_code >= 400:
                     openai_cache.record(model, purpose, status="http_error", usd=0.0,
                                         http_status=r.status_code, attempt=attempt + 1, force=True)
                     msg = r.read().decode("utf-8", "replace")[:400]
-                    if r.status_code in (429, 500, 502, 503, 504) and attempt < 3:
+                    if r.status_code in (429, 500, 502, 503, 504) and attempt + 1 < attempts:
                         time.sleep(10 * (attempt + 1))
                         continue
                     raise RuntimeError(f"openai {r.status_code}: {msg}")
@@ -114,7 +118,7 @@ def ask_openai(system, content, *, model=None, effort="medium", max_tokens=16000
                 break
             openai_cache.record(model, purpose, status="transport_error", billing_unconfirmed=True,
                                 attempt=attempt + 1, force=True)
-            if attempt == 3:
+            if attempt + 1 == attempts:
                 raise
             time.sleep(10 * (attempt + 1))
     if final is None:
@@ -129,7 +133,7 @@ def ask_openai(system, content, *, model=None, effort="medium", max_tokens=16000
     tin, tout = int(u.get("input_tokens") or 0), int(u.get("output_tokens") or 0)
     cached = int((u.get("input_tokens_details") or {}).get("cached_tokens") or 0)
     pin, pc, pout = OA_PRICES.get(model, OA_PRICES["gpt-5.5"])
-    usd = openai_cache.cost(model, u)
+    usd = 0.0 if os.environ.get("CODEX_PROXY_LOCAL") == "1" else openai_cache.cost(model, u)
     return text, dict(provider="openai", model=model, effort=effort, input=tin, cache_write=openai_cache.tokens(u)["cache_write_tokens"], cache_read=cached, output=tout,
                       usd=round(usd, 5), seconds=round(time.time() - t0, 1), stop=final.get("status"),
                       incomplete=(final.get("incomplete_details") or {}).get("reason"))

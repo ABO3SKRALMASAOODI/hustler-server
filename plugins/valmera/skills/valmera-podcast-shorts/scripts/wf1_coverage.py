@@ -189,7 +189,8 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None):
     used, out = [], []
     for i, window in enumerate(coverage['windows']):
         a, b = round(window['t0']*fps)+lead, round(window['t1']*fps)+lead
-        candidates = [('clip', c.get('subject', window['name']), c) for c in sorted(footage.get(i, []),key=lambda c:-c.get('motion_p90',0))]
+        candidates = [('clip', c.get('subject', window['name']), c) for c in sorted(footage.get(i, []),
+            key=lambda c:(c.get('subject_motion') is False, -c.get('motion_p90',0)))]
         names=list(dict.fromkeys([window['name'],*window.get('subjects',[])]))
         candidates += [('photo', name, p) for name in names for p in pictures.get(name, [])]
         blocked={r['source'] for r in coverage.get('blocked_sources',[]) if r['window']==i}
@@ -268,7 +269,9 @@ Do not change any spoken words, window boundaries, or numerical quality targets.
 def require_coverage(ins, coverage, duration, fps=30):
     """A rejected asset leaves an explicit supply failure, never a vacuous fidelity pass."""
     real = sum(b-a for a,b,*_ in ins)/fps
-    moving = sum(b-a for a,b,k,_,rec in ins if k=='clip' and rec.get('placed_motion_p90',0)>=1.)/fps
+    def moving_picture(row):
+        return row[2]=='clip' and row[4].get('verified_motion') is True and row[4].get('placed_motion_p90',0)>=1.
+    moving = sum(r[1]-r[0] for r in ins if moving_picture(r))/fps
     missing = [i for i in range(len(coverage['windows'])) if not any(r[4].get('window')==i for r in ins)]
     named = sum(w['t1']-w['t0'] for w in coverage['windows'])
     unique=[]
@@ -277,7 +280,7 @@ def require_coverage(ins, coverage, duration, fps=30):
     rate = len(unique)*10/max(named,.01)
     weak = [i for i,w in enumerate(coverage['windows'])
             if sum(r[1]-r[0] for r in ins if r[4].get('window')==i)/fps < .8*(w['t1']-w['t0'])
-            or sum(r[1]-r[0] for r in ins if r[4].get('window')==i and r[4].get('placed_motion_p90',0)>=1.)/fps < .6*(w['t1']-w['t0'])]
+            or sum(r[1]-r[0] for r in ins if r[4].get('window')==i and moving_picture(r))/fps < .6*(w['t1']-w['t0'])]
     report = dict(real_seconds=real,moving_seconds=moving,named_seconds=named,new_per_10s=rate,new_pictures=len(unique),repeated_pictures=len(ins)-len(unique),weak_windows=weak,missing_windows=missing)
     if real/max(duration,.01)<.45 or moving/max(real,.01)<.60 or rate<6 or missing:
         raise CoverageError(f'documentary supply incomplete after frame checks: real={real/duration:.3f}, '

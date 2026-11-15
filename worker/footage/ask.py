@@ -16,7 +16,7 @@ EFFORT = os.environ.get("FOOTAGE_EFFORT", "low")
 def ask(system, content, purpose, budget_s=120.0, max_tokens=6000, model=None):
     """(text, usd). content: text or Claude-shaped blocks (text and base64 images)."""
     from score import call
-    tries = 2
+    tries = 1 if os.environ.get("CODEX_PROXY_LOCAL") == "1" else 2
     deadline = time.monotonic() + budget_s
     for k in range(tries):
         if time.monotonic() >= deadline:

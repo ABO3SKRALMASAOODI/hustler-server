@@ -1212,6 +1212,11 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
         # with the bed known, each placed sound is made to be there over the voice and the song together
         if kind == 'podcast':
             from . import audibility
+            # Judge attacks against the bed the listener will actually hear.
+            # Previously broadband calibration happened only AFTER the hits
+            # were balanced, raising their masker without rechecking attacks.
+            music, initial_bed_gain = audibility.calibrate_bed(lv, music, prof['broadband_bed_db'])
+            rep['initial_bed_gain_db'] = initial_bed_gain
             # Normalize the existing recorded attacks before the spectral pass
             # can discard a quiet sample. This adds no events or recordings.
             l1['sound'] = audibility.present_hits(l1['sound'], lv, music,
