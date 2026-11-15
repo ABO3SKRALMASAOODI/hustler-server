@@ -53,7 +53,7 @@ def before_preview(ctx, row, wait_s=60):
     ctx.render_dependency_key = None
     if any(i.get('type') == 'background' for i in row['json'].get('fx') or []):
         # A background swap cannot be approved as its missing-matte substitute.
-        # The refined matte may need several bounded waits; keep the same job.
+        # Measurement may need several bounded waits; keep the same job.
         if not matte_state:
             return 'ERROR: the background replacement has no verified subject matte. The replacement is not ready.'
         if matte_state.get('status') != 'ready':

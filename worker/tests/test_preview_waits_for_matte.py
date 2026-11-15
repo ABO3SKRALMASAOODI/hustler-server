@@ -24,12 +24,13 @@ def test_a_subject_effect_waits_past_a_lone_preview_budget(monkeypatch):
     assert seen == {"windows": [(0.0, 24.8)], "wait_s": 90.0}
 
 
-def test_device_readiness_uses_the_refined_compositing_matte(monkeypatch):
+def test_device_readiness_uses_the_configured_compositing_matte(monkeypatch):
     import fxgraph
     import matte_track
     from timeline import Timeline
     edl = {'keep': [[0, 24.8]], 'fx': [{'id': 'bg', 'device': 'background_swap',
         'type': 'background', 'start': 0, 'end': 24.8}]}
+    monkeypatch.setattr(matte_track, '_config', lambda: SimpleNamespace(MATTE_DOWNSAMPLE_RATIO=.375))
     expected = matte_track.sidecar_params(edl)
     monkeypatch.setattr(fxgraph, '_card', lambda _: {'needs': {'sidecars': ['matte.person']}})
     monkeypatch.setattr(sidecars, 'ensure', lambda *a, **kw: kw.get('params'))
@@ -68,10 +69,11 @@ def test_the_wait_reaches_the_sidecar_and_never_refuses(monkeypatch):
     assert "Measuring the subject" in note
 
 
-def test_background_warms_the_exact_refined_matte_the_renderer_reads(monkeypatch):
+def test_background_warms_the_exact_configured_matte_the_renderer_reads(monkeypatch):
     import fxgraph
     import matte_track
     edl = {'keep': [[0, 24.8]], 'fx': [{'type': 'background', 'start': 0, 'end': 24.8}]}
+    monkeypatch.setattr(matte_track, '_config', lambda: SimpleNamespace(MATTE_DOWNSAMPLE_RATIO=.375))
     seen = {}
     monkeypatch.setattr(fxgraph, 'peer_fn', lambda name: lambda *a: 'source')
     def params(name, actual_edl, default=None):
@@ -87,7 +89,7 @@ def test_background_warms_the_exact_refined_matte_the_renderer_reads(monkeypatch
         db=SimpleNamespace(run=lambda *a: {'sha256': 'source', 'storage_key': 'proxy'}))
     subject_tools._ensure_matte(ctx, edl, SimpleNamespace(out_to_src=lambda t: t), [(0, 24.8)])
     assert seen['params'] == matte_track.sidecar_params(edl)
-    assert seen['params']['refine']
+    assert seen['params']['downsample_ratio'] == .375
 
 
 def test_pending_background_cannot_render_a_substitute_as_the_requested_swap(monkeypatch):
