@@ -231,6 +231,28 @@ def test_later_document_gap_can_find_a_new_report_without_page_cache_collision(t
     assert D.figure_base(tmp_path,dict(url='https://archive.test/first.pdf'),12)!=D.figure_base(tmp_path,dict(url='https://archive.test/second.pdf'),12)
 
 
+def test_checked_figure_can_continue_as_one_moving_use_but_never_skip_word_review(tmp_path,monkeypatch):
+    import copy
+    import timeline_repair as R
+    from types import SimpleNamespace
+    from PIL import Image
+    path=tmp_path/'figure.jpg';Image.new('RGB',(32,32),'blue').save(path)
+    image=dict(clip(str(path),0,7.8),kind='image',content_hash='figure')
+    sc=dict(script=dict(segments=[dict(say='Mechanism.',chapter='c')]))
+    words=tmp_path/'words.json';C.save(words,dict(duration=9.9,words=[dict(w='Mechanism.',start=.1,end=9.8,seg=0)]))
+    clock=C.F.Clock(str(words),sc['script'])
+    ft=dict(lines=[dict(i=0,clips=[image])],editorial=dict(pins=[dict(seg=0,clip=image,src=[0,7.8],anchors=[R.anchor(clock,0),R.anchor(clock,7.8)])]))
+    with pytest.raises(C.CoverageError) as caught:C.schedule(sc['script'],words,ft)
+    before=copy.deepcopy(ft)
+    monkeypatch.setattr(C,'source_review',lambda *a,**k:dict(ok=False))
+    assert not R.continue_still(SimpleNamespace(),sc,ft,caught.value,words) and ft==before
+    monkeypatch.setattr(C,'source_review',lambda *a,**k:dict(ok=True))
+    assert R.continue_still(SimpleNamespace(),sc,ft,caught.value,words)
+    rows,_,end=C.schedule(sc['script'],words,ft)
+    assert len(rows)==1 and rows[0]['f']==[0,end] and rows[0]['clip']['kind']=='image'
+    assert rows[0]['clip']['editorial_hold_move'] and not C.duplicate_ranges(rows)
+
+
 def test_archive_revision_preserves_prior_read_and_resumes_without_erasing_new_audio(tmp_path):
     from types import SimpleNamespace
     import archive_script as A

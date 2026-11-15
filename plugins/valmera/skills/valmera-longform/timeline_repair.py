@@ -96,6 +96,34 @@ def release_borrowed_images(ft,failure):
     return released
 
 
+def continue_still(ctx,script,ft,failure,words):
+    """Continue one checked figure through adjacent words, with a real move.
+
+    A 7.8-second source budget is artificial for an image. A longer contiguous
+    use is allowed only after the complete new word span is checked; it never
+    becomes moving footage or a second picture, and is capped at 12 seconds.
+    """
+    import copy
+    import cinema as C
+    if not any(p['clip'].get('kind')=='image' for p in ft.get('editorial',{}).get('pins',[])):return False
+    clock=C.F.Clock(str(words) if isinstance(words,Path) else words,script['script']);changed=False
+    for gap in failure.gaps:
+        ga,gb=[round(gap[k]*30) for k in ('start','end')]
+        for index,pin in enumerate(ft.get('editorial',{}).get('pins',[])):
+            if pin['seg']!=gap['seg'] or pin['clip'].get('kind')!='image':continue
+            a,b=[round(resolve(clock,t)*30) for t in pin['anchors']]
+            if b!=ga and gb!=a:continue
+            lo,hi=min(a,ga),max(b,gb);seconds=(hi-lo)/30
+            if seconds>12:continue
+            clip=copy.deepcopy(pin['clip']);clip.update(seconds=seconds,time_range=[0,seconds],editorial_hold_move=True)
+            say=' '.join(w['w'] for w in clock.words if w['t0']<hi/30 and w['t1']>lo/30)
+            shot=dict(f=[lo,hi],seg=pin['seg'],clip=clip,src=[0,seconds],say=say,context=script['script']['segments'][pin['seg']]['say'])
+            if not C.source_review(ctx,[shot],required=False)['ok']:continue
+            ft['editorial']['pins'][index]=dict(seg=pin['seg'],clip=clip,src=[0,seconds],anchors=[anchor(clock,f/30) for f in (lo,hi)])
+            changed=True;break
+    return changed
+
+
 def repair(ctx,script,ft,words,rounds=3):
     import cinema as C
     from evidence_allocate import allocate
@@ -116,7 +144,7 @@ def repair(ctx,script,ft,words,rounds=3):
             ctx.log(f"partial edit review: {len(initial_report['rejected'])} mismatches; retaining {len(ft['editorial']['pins'])} checked intervals before research")
         try:shots,clock,_=C.schedule(script['script'],words,ft)
         except C.CoverageError as failure:
-            if release_borrowed_images(ft,failure):
+            if continue_still(ctx,script,ft,failure,words) or release_borrowed_images(ft,failure):
                 C.save(path,ft)
                 try:shots,clock,_=C.schedule(script['script'],words,ft)
                 except C.CoverageError as rebalanced:failure=rebalanced

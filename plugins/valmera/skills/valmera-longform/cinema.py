@@ -574,9 +574,11 @@ def schedule(sc, words, ft):
     rejected={(r['seg'],r['clip']) for r in ft.get('editorial',{}).get('rejected',[])}
     for pin in ft.get('editorial',{}).get('pins',[]):
         a,b=[round(resolve(clock,t)*FPS) for t in pin['anchors']]
-        if a<0 or b>end or b<=a or (b-a)/FPS>8:continue
+        c=pin['clip']
+        limit=12 if c.get('kind')=='image' and c.get('editorial_hold_move') else 8
+        if a<0 or b>end or b<=a or (b-a)/FPS>limit:continue
         if any(min(b,hi)>max(a,lo) for lo,hi in voice_spans):continue
-        c=pin['clip'];offset=pin['src'][0];seconds=(b-a)/FPS
+        offset=pin['src'][0];seconds=(b-a)/FPS
         if offset+seconds>c['seconds']+.025:continue
         url=c['source']['url'];lo=c['time_range'][0]+offset;hi=lo+seconds
         if c.get('kind')=='image':
@@ -710,7 +712,7 @@ def build(sc,pack):
                 ratio=c['w']/c['h'];height=min(.72,.84*W/H/ratio);width=height*ratio/(W/H)
                 n=row['f'][1]-row['f'][0]
                 P.card(row['f'],key,[.5-width/2,.46-height/2,.5+width/2,.46+height/2],
-                       s=[1+.025*q/max(n-1,1) for q in range(n)])
+                       s=[1+(.065 if n>240 else .025)*q/max(n-1,1) for q in range(n)])
                 P.word(row['f'],c.get('editorial_label') or c['source']['credit']+' • archive record','source',.055,.82,note=False)
             else:
                 # Archive portraits and machinery must survive landscape
@@ -719,7 +721,7 @@ def build(sc,pack):
                 ratio=c['w']/c['h'];height=min(.82,.94*W/H/ratio);width=height*ratio/(W/H)
                 n=row['f'][1]-row['f'][0]
                 P.card(row['f'],key,[.5-width/2,.46-height/2,.5+width/2,.46+height/2],
-                       s=[1+.035*q/max(n-1,1) for q in range(n)])
+                       s=[1+(.065 if n>240 else .035)*q/max(n-1,1) for q in range(n)])
         else:
             key=P.video(f'archive-{j}',c)
             P.shot(row['f'],key,witness_crop(row),src=row['src'])
