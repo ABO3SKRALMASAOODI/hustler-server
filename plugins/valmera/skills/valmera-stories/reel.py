@@ -1832,6 +1832,7 @@ def build(script, sup, style_id, direction=None):
 
     flashes = []
     full_frame = set(d.get("full_frame_paths") or [])
+    whole_frame = set(d.get("whole_frame_paths") or [])
     runs, k = [], 0
     while k < len(timeline):
         i = seg_at(timeline[k][0])
@@ -1857,11 +1858,20 @@ def build(script, sup, style_id, direction=None):
         else:
             f0, f1, kind, name, rec = timeline[run[0]]
             if kind == "clip" and rec["path"] in full_frame:
-                # Preserve geometry when the upload is landscape; an uncropped
-                # source mapped directly to portrait would stretch the subject.
-                focus, _ = F.focus_of(rec)
-                crop = F.cover_crop(float(rec.get("w") or W), float(rec.get("h") or H), W / H, focus, (0.5, 0.42))
-                P.shot([f0, f1], keys[rec["path"]], crop, src=list(rec["src"]))
+                pw, ph = float(rec.get("w") or W), float(rec.get("h") or H)
+                if rec["path"] in whole_frame:
+                    # The before must retain its uploaded framing. Cropping a
+                    # landscape upload here would silently perform the very
+                    # vertical reframing that the product comparison promises.
+                    scale = min(W / pw, H / ph)
+                    cw, ch = pw * scale / W, ph * scale / H
+                    P.page([f0, f1], "#000000", grain=0)
+                    P.card([f0, f1], keys[rec["path"]], [.5-cw/2, .5-ch/2, .5+cw/2, .5+ch/2],
+                           z=0, crop=[0, 0, 1, 1], src=list(rec["src"]))
+                else:
+                    focus, _ = F.focus_of(rec)
+                    crop = F.cover_crop(pw, ph, W / H, focus, (0.5, 0.42))
+                    P.shot([f0, f1], keys[rec["path"]], crop, src=list(rec["src"]))
                 note(f0, f1, kind, name, rec, "product")
             elif kind == "designed":
                 designed(f0, f1, rec)

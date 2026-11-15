@@ -730,3 +730,12 @@ def test_protected_product_cuts_stay_whole_even_in_window_style(tmp_path):
         w,h = dimensions[l1['assets'][it['pic']]['path']]
         x0,y0,x1,y1 = it['crop']
         assert abs((x1-x0)*w/((y1-y0)*h) - F.W/F.H) < 0.001
+    l1, beats = R.build(sc, sup, 'window', dict(require_fit=True, full_frame_paths=paths, whole_frame_paths=paths))
+    keys = {k for k,a in l1['assets'].items() if a.get('path') in paths}
+    cards = [it for it in l1['items'] if it.get('pic') in keys]
+    assert cards and all(it['k'] == 'card' and it['crop'] == [0,0,1,1] for it in cards)
+    for it in cards:
+        w,h = dimensions[l1['assets'][it['pic']]['path']]
+        assert abs(it['w']*F.W/(it['h']*F.H) - w/h) < .001
+        assert it['w'] == 1 or it['h'] == 1
+        assert it['rot'] == 0 and it['s'] == 1

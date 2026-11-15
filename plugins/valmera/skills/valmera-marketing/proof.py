@@ -1184,6 +1184,8 @@ def score(ctx, script):
     knobs["prefer_new_pictures"] = True
     knobs.setdefault("layout", "bleed")
     knobs["full_frame_paths"] = list(pack["product"]["paths"])
+    knobs["whole_frame_paths"] = [p for p in pack["product"]["paths"]
+                                   if os.path.basename(p) == "before.mp4" or os.path.basename(p).startswith("upload_")]
     sys.path[:0] = [p for p in W3.env_path().split(os.pathsep) if p not in sys.path]
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     build = R.builder(script["style"]["id"])
