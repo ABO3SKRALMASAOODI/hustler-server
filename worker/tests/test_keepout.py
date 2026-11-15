@@ -142,6 +142,24 @@ def _index(samples, video=VIDEO):
     return {"video": dict(video), "spatial": {"v": 1, "samples": samples}}
 
 
+def test_one_false_head_does_not_erase_the_consistent_real_face():
+    # Exact five measured source moments behind p5563's opening title.
+    # The second detection is a false positive above the speaker. It used
+    # to label every other, mutually consistent face as a collar, leaving
+    # no keep-out zone and a title across the eyes.
+    boxes = [
+        [0.2188, 0.3778, 0.4417, 0.7741],
+        [0.2188, 0.0074, 0.3354, 0.2148],
+        [0.2521, 0.3889, 0.4854, 0.8037],
+        [0.2167, 0.3704, 0.4396, 0.7667],
+        [0.2208, 0.3963, 0.4229, 0.7556],
+    ]
+    moments = [(i*.58, 'same-take', [b]) for i, b in enumerate(boxes)]
+    got = keepout._consistent(moments)
+    assert [bool(faces) for _t, _key, faces in got] == [True, False, True, True, True]
+    assert moments[1][2] == [boxes[1]]
+
+
 def test_face_track_borrows_a_nearby_face_and_ignores_a_lone_hand():
     edl = _edl(frame={"ratio": "9:16", "mode": "crop", "focus_x": 0.38})
     head = [0.32, 0.2, 0.48, 0.5]

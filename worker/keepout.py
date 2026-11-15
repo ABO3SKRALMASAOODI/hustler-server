@@ -913,16 +913,21 @@ def _consistent(moments):
     moments do see a face (a lone hand or collar where the cascade missed
     the head, e.g. Thiel at 860.3 s), and a box stacked under a face the
     other moments agree on."""
-    out = []
+    # Resolve single-frame false positives first. A stray box above a real
+    # face must not then suppress that face in every other moment merely
+    # because it looks like a head above a collar (p5563's opening title).
+    supported = []
     for i, (t, key, faces) in enumerate(moments):
         peers = [b for j, (_t, k, fs) in enumerate(moments) if j != i and k == key for b in fs]
         if not peers or not faces:
-            out.append((t, key, faces))
+            supported.append((t, key, faces))
             continue
+        supported.append((t, key, [b for b in faces if any(_agrees(b, p) for p in peers)]))
+    out = []
+    for i, (t, key, faces) in enumerate(supported):
+        peers = [b for j, (_t, k, fs) in enumerate(supported) if j != i and k == key for b in fs]
         kept = []
         for b in faces:
-            if not any(_agrees(b, p) for p in peers):
-                continue
             w = b[2] - b[0]
             if any(min(b[2], p[2]) - max(b[0], p[0]) >= 0.5 * min(w, p[2] - p[0])
                    and b[1] >= p[1] + 0.5 * (p[3] - p[1]) for p in peers
