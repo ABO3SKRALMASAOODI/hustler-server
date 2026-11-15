@@ -266,3 +266,38 @@ def test_attack_in_speech_pause_can_clear_bed_without_adding_events():
     assert len(out)==1 and out[0]['id']==original[0]['id']
     assert audibility.measure(voice,render(out),bed)['T2']==1
     assert np.max(np.abs(render(out)))<=.701
+
+
+def test_attack_remains_distinct_after_measured_master_attenuation():
+    sr=48000;t=np.arange(sr*4)/sr
+    voice=.1*np.sin(2*np.pi*220*t);bed=.045*np.sin(2*np.pi*110*t)
+    sample=np.zeros_like(t);a=sr*2
+    sample[a:a+4800]=.03*np.sin(2*np.pi*1200*t[:4800])*np.hanning(4800)
+    def render(items):return sample*sum(10**(x['db']/20) for x in items)
+    sounds=[dict(id='actual-picture-change',layer='hit',start_s=2.,peak_s=.05,db=-5.)]
+    out=audibility.present_hits(sounds,voice,bed,render)
+    # Final-export stem fits found 1.6 dB less gain on SFX than on the bed.
+    # Exercise a conservative 2 dB loss without changing the audibility ruler.
+    assert audibility.measure(voice,render(out)*10**(-2/20),bed)['T2']==1
+    assert [s['id'] for s in out]==[s['id'] for s in sounds]
+
+
+def test_semantic_boundary_repair_preserves_subjects_and_moves_the_actual_word():
+    import json
+    from types import SimpleNamespace
+    words=[dict(w=w,start=i,end=i+1) for i,w in enumerate(['the','Sun','around','Earth','and','beyond'])]
+    cov=dict(words=words,windows=[dict(name='Sun',first=0,last=3,t0=0,t1=4),dict(name='Earth',first=4,last=5,t0=4,t1=6)])
+    answer=dict(updates=[dict(i=0,first=0,last=2,why='The next named object begins at word 3.'),dict(i=1,first=3,last=5,why='Enter Earth on its own word.')])
+    llm=SimpleNamespace(ask=lambda *a,**k:(json.dumps(answer),{}),json_block=json.loads)
+    assert C.repair_boundaries(cov,[dict(reason='Earth is read over the Sun')],llm)
+    assert [x['name'] for x in cov['windows']]==['Sun','Earth']
+    assert cov['windows'][0]['t1']==cov['windows'][1]['t0']==3
+
+
+def test_cropped_face_does_not_need_a_semantic_boundary_change():
+    import json
+    from types import SimpleNamespace
+    cov=dict(words=[dict(w='people',start=0,end=1)],windows=[dict(name='People',first=0,last=0,t0=0,t1=1)])
+    llm=SimpleNamespace(ask=lambda *a,**k:(json.dumps(dict(updates=[])),{}),json_block=json.loads)
+    assert not C.repair_boundaries(cov,[dict(reason='A face is cropped')],llm)
+    assert cov['windows'][0]['first']==cov['windows'][0]['last']==0

@@ -8,6 +8,13 @@ sys.path.insert(0, os.path.dirname(__file__))
 import wf1_short as wf
 
 
+@pytest.fixture(autouse=True)
+def isolated_retry_bookkeeping(monkeypatch):
+    # These tests isolate render invalidation; semantic word-boundary repair
+    # is exercised with complete timed coverage in documentary-coverage tests.
+    monkeypatch.setattr(wf, '_repair_window_boundaries', lambda *args: None)
+
+
 def test_newly_available_source_invalidates_exhausted_research_without_path_churn(tmp_path):
     sources=tmp_path/'sources';sources.mkdir();path=sources/'original.mp4'
     manifest=sources/'manifest.json';manifest.write_text(json.dumps([dict(url='https://publisher/film',path=str(path))]))

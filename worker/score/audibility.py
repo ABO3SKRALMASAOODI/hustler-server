@@ -78,7 +78,13 @@ def present_hits(sounds, voice, bed, render):
         # neighbouring effects' tails, not the music stem in isolation.
         ln = levels(surroundings)
         med = np.median(ln[max(0,i-100):min(len(ln),i+100)])
-        target = max(med+7.,lvb[i]-5.)
+        # The final master attenuates short effects more than the bed. Leave
+        # real transient headroom, and clear the preceding effects' tail as
+        # well as the two-second baseline. Otherwise a nominally loud tick
+        # following a whoosh never becomes a distinct audible onset.
+        prior = levels(surroundings-b)
+        pre = 10*np.log10(np.mean(10**(prior[max(0,i-30):max(1,i-2)]/10))+1e-12)
+        target = max(med+9.,lvb[i]-3.,pre+8.)
         # A short attack may rise above speech, but never become a sustained competing voice.
         # A pause has no local speech peak: it must not force the effect below
         # a still-playing bed. Bound attacks against the film's spoken level.

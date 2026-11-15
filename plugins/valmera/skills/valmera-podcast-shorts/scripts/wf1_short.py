@@ -626,6 +626,15 @@ def current_rejections(supply):
     return json.load(open(path)) if os.path.exists(path) else []
 
 
+def _repair_window_boundaries(ctx, rejected):
+    import wf1_coverage
+    pack=wf3.load_pack(ctx)
+    wf1_coverage.repair_boundaries(pack['coverage'],rejected,_llm())
+    path=os.path.join(ctx.supply,'pack.json');stored=json.load(open(path));stored['pack']=pack
+    json.dump(stored,open(path,'w'),indent=1)
+    json.dump(pack['coverage'],open(os.path.join(ctx.supply,'coverage.json'),'w'),indent=1)
+
+
 def _rebuild_rejected(ctx, script, sc, report):
     """Monotonic repair shared by the engine and exact delivery-frame gates."""
     pics = sc["beats"].get("pictures") or []
@@ -642,6 +651,11 @@ def _rebuild_rejected(ctx, script, sc, report):
     from placement_check import CONTRACT
     json.dump(CONTRACT, open(os.path.join(ctx.supply,"render_rejected_contract.json"),"w"))
     ctx.log(f"composed picture check: rebuilding without {len(dropped)} rejected placements")
+    # Replacing a correct subject with another picture of that subject cannot
+    # repair a cut that arrives after the next named object. Let the director
+    # correct that boundary; all rejected assets remain rejected regardless.
+    rejected=[r for r in report['placements'] if not r['ok']]
+    _repair_window_boundaries(ctx,rejected)
     old_spend = sc.get("spend", [])
     rebuilt = score(ctx, script)
     rebuilt["spend"] = old_spend + [u for u in rebuilt.get("spend", []) if u not in old_spend]
