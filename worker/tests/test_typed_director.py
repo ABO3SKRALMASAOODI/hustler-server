@@ -7,6 +7,53 @@ import pytest
 from score import asks, film, flags, patch, typed
 
 
+@pytest.mark.parametrize("outcome", ["accepted", "rejected", "lost_ask", "lease_lost"])
+def test_director_write_revision_uses_rejection_evidence_and_keeps_guards(monkeypatch, tmp_path, outcome):
+    import db
+    from score import brief, call, compiler, direct, lower
+    initial = [{"k": "b", "id": "b1", "at": [0, 3]}]
+    replacement = [{"k": "b", "id": "b1", "at": [0, 8]}]
+    before, candidate = NS(l1={}), NS(l1={})
+    row = {"json": {"keep": [[7000, 7090]]}}
+    writes = []
+    def write(edl, note):
+        writes.append(edl)
+        if outcome == "lease_lost":
+            raise db.JobLeaseLost("changed")
+        return "EDL v3" if outcome == "accepted" else "REJECTED: still removes a distinct action"
+    parent = NS(latest_edl=lambda: copy.deepcopy(row), write_edl=write)
+    ctx = typed.WindowContext(parent, {"video": {"duration": 90}}, "proxy", 7000, "original", 1)
+    monkeypatch.setattr(brief, "load", lambda work: ([], []))
+    def model(model, system, content, **kw):
+        assert model == "gpt-6.1-sol"
+        assert "distinct conveyor action" in content[-1]["text"]
+        assert "7000" in content[-1]["text"] and "7090" in content[-1]["text"]
+        assert kw["purpose"] == "director_write_repair"
+        return NS(text=direct.dump(replacement), usd=.01)
+    monkeypatch.setattr(call, "stream", model)
+    monkeypatch.setattr(compiler, "compile_score", lambda *a, **k: candidate)
+    monkeypatch.setattr(compiler, "validate_l1", lambda l1: [])
+    monkeypatch.setattr(film, "bare", lambda comp: False)
+    monkeypatch.setattr(direct, "ask_facts", lambda lines, comp, *a:
+        ([], ["a1"] if comp is candidate and outcome == "lost_ask" else [], {}))
+    monkeypatch.setattr(film, "_one_mix", lambda *a: None)
+    monkeypatch.setattr(lower, "lower", lambda *a: ({"keep": [[0, 90]]}, {}, {}))
+    monkeypatch.setattr(film, "_publish", lambda ctx, worker_db, edl, *a: edl)
+    rec = {}
+    args = dict(work=str(tmp_path), cfg={"models": {"direct": "gpt-6.1-sol"},
+        "effort": {"direct": "medium"}}, index={}, sc={}, bin_doc={}, original_key="original",
+        worker_db=None, comp=before, text=direct.dump(initial),
+        refusal="REJECTED: distinct conveyor action removed", rec=rec)
+    if outcome == "lease_lost":
+        with pytest.raises(db.JobLeaseLost):
+            typed.recover_write(ctx, **args)
+        return
+    got = typed.recover_write(ctx, **args)
+    assert bool(got) == (outcome == "accepted")
+    assert writes == ([] if outcome == "lost_ask" else [{"keep": [[7000, 7090]]}])
+    assert (tmp_path / "score.jsonl").exists() == (outcome == "accepted")
+
+
 def _empty_picture_search(tmp_path):
     return dict(ctx=NS(director_footage_cfg={"mode": "on"}, director_footage=None),
         job={"id": 7}, cfg={"models": {"scout": "gpt-6.1-sol"}}, deadline=220,
