@@ -639,7 +639,11 @@ def film_text(work, idx, sess, per, x, scout, styles, cards, bin_items=None):
         out.append("The upload already carries its spoken narrative in changing printed type. Preserve that reading track, without adding a second caption track or repeating its words as display titles. "
                    "This does not replace the edit: develop its story, footage, sound and intentional visual design around the existing type. Evidence: " + str(typography.get("reason") or ""))
     if typography.get("designed_layout"):
-        out.append("The upload is a composed graphic layout. Unless the customer explicitly requests a new aspect ratio, keep its native canvas; preserve its printed words and designed picture arrangement. "
+        shape = (idx.get("first_film") or {}).get("frame")
+        layout = (f"Compose it for the required {shape} canvas, giving its pictures and words readable space in a deliberate arrangement. "
+                  if shape else "Unless the customer explicitly requests a new aspect ratio, keep its native canvas. ")
+        out.append("The upload is a composed graphic layout. " + layout +
+                   "Preserve its printed words and the relationships between its pictures. "
                    "Do not place the whole design as a tiny strip between blurred bars or punch through its typography.")
     out += words_part(work, idx, per, x, scout)
     out += footage_part(per, idx)
