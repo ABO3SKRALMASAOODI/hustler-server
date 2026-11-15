@@ -841,7 +841,7 @@ def run_index_job(worker_db, job):
                 f_screen = (sub.submit(clock.timed, "pic_source_screen_s",
                             source_screen.build, proxy_local, info["duration"],
                             info["fps"], state["shots"], sha, workdir,
-                            company_recorder or sound_recorder)
+                            company_recorder or sound_recorder, video_info=p_info)
                             if needs_source_screen else None)
                 _lane_progress("picture", 0.72)
                 try:

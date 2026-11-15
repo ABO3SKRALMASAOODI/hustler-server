@@ -47,6 +47,31 @@ def test_final_frame_seek_cannot_round_past_the_last_decodable_frame():
     assert float(f"{times[-1]:.3f}") <= 1061 / 30
 
 
+@pytest.mark.parametrize("duration,source_fps,picture_end,proxy_fps", [
+    (45.720, 120., 45.700, 30.), (83.243, 30., 83.200, 30.),
+])
+def test_source_screen_reads_proxy_frames_and_never_clears_unseen_audio_tail(
+        monkeypatch, tmp_path, duration, source_fps, picture_end, proxy_fps):
+    from PIL import Image
+    from score import boards
+    seen = []
+    last = (round(picture_end * proxy_fps) - 1) / proxy_fps
+    def grab(src, t, **kw):
+        seen.append(t)
+        return Image.new("RGB", (40, 60)) if t <= last else None
+    monkeypatch.setattr(boards, "grab", grab)
+    monkeypatch.setattr(source_screen.llm, "ask_vision", lambda *a, **kw:
+        '{"reviewed_all_frames":true,"branding_screen_present":false}')
+    result = source_screen.build("proxy.mp4", duration, source_fps,
+        [{"start": 0, "end": duration}], "sha", str(tmp_path),
+        video_info={"duration": duration, "video_duration": picture_end, "fps": proxy_fps})
+    assert last - .002 <= seen[-1] <= last
+    assert result["safe_end_s"] == picture_end
+    assert result["source_duration_s"] == duration
+    with pytest.raises(ValueError, match="cleared source boundary"):
+        source_screen.check_render({"keep": [[0, duration]]}, result, "original", "sha")
+
+
 def test_semantic_tail_cut_stops_at_last_clear_frame_not_detected_shot_edge():
     verdict = {"reviewed_all_frames": True, "branding_screen_present": True,
                "last_content_frame_id": 1, "first_branding_frame_id": 2}

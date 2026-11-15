@@ -56,11 +56,18 @@ def interpret(answer, times, duration, fps):
             "source_duration_s": duration, "sample_times": times, "verdict": data}
 
 
-def build(src, duration, fps, shots, sha, workdir, recorder=None):
+def build(src, duration, fps, shots, sha, workdir, recorder=None, video_info=None):
     from score import boards
     if recorder is not None:
         llm.set_recorder(recorder)
-    times = sample_times(duration, fps, shots)
+    # The proxy can have a different frame rate, and its picture track can
+    # end before the upload's audio/container clock. Seeking on the upload
+    # clock made valid 120-fps and audio-tail uploads fail at proxy EOF.
+    video_info = video_info or {}
+    picture_end = min(float(duration), float(video_info.get("video_duration")
+                      or video_info.get("duration") or duration))
+    picture_fps = float(video_info.get("fps") or fps)
+    times = sample_times(picture_end, picture_fps, shots)
     folder = os.path.join(workdir, "source-screen")
     os.makedirs(folder, exist_ok=True)
     paths = []
@@ -98,7 +105,10 @@ def build(src, duration, fps, shots, sha, workdir, recorder=None):
                             reasoning_effort="low")
     if not answer:
         raise ValueError("source screen review did not finish; the first film must wait")
-    result = interpret(answer, times, float(duration), float(fps))
+    result = interpret(answer, times, picture_end, float(fps))
+    result["source_duration_s"] = float(duration)
+    result["sample_video_duration_s"] = picture_end
+    result["sample_video_fps"] = picture_fps
     result["source_sha256"] = sha
     return result
 
