@@ -51,6 +51,19 @@ def test_picture_layout_can_be_grounded_without_claiming_burned_captions():
     assert st.classify(idx, lambda *a, **k: {"text": json.dumps(answer)}) == {}
 
 
+def test_pending_evidence_can_be_classified_when_it_arrives(monkeypatch):
+    import llm
+    ctx = SimpleNamespace(index={"visual_storyboard_pending": True})
+    def ask(*a, **k):
+        return {"text": json.dumps(dict(caption_track="complete", designed_layout=True,
+                                        evidence_ids=["e0", "e1", "e2"]))}
+    monkeypatch.setattr(llm, "ask_text", ask)
+    assert st.prepare(ctx) == {}
+    assert "source_typography" not in ctx.index
+    ctx.index.update(index(), visual_storyboard_pending=False)
+    assert st.prepare(ctx)["caption_track"] == "complete"
+
+
 def test_first_cut_preserves_existing_type_but_still_builds_the_edit(monkeypatch):
     from test_first_cut_visual import _talking_chain
 
