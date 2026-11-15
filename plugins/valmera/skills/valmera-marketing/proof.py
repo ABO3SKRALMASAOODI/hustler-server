@@ -896,7 +896,7 @@ def supply(ctx, script):
         pack["missing"] = [n["name"] for n in named if not got.get(n["name"])]
     words_all = json.load(open(nar["words"]))["words"]
     durs = chain.seg_durs(words_all, len(sc["segments"]))
-    durs = [round(float(x) * FOOTAGE_MORE, 2) for x in durs] if durs else durs
+    search_durs = [round(float(x) * FOOTAGE_MORE, 2) for x in durs] if durs else durs
     anchors = {k: [r["path"] for r in v if r.get("path")] for k, v in (pack.get("pictures") or {}).items()}
     own = ("THE UPLOAD", "THE EXPORT")
     fscript = json.loads(json.dumps(script))         # the footage engine searches the web; the recording's own names are ours
@@ -907,7 +907,7 @@ def supply(ctx, script):
     # Illustrative footage is silent. The two real-voice passages come only
     # from our verified Studio recording, so source transcripts are unused.
     reel_kw = dict(preserve_source=True, shot_s=0.55, line_max=12, per=4, hear_s=0.0)
-    foot = chain.footage(ctx, fscript, durs, anchors=anchors, lines=search_lines, **W3.footage_kw(reel_kw)) if search_lines else None
+    foot = chain.footage(ctx, fscript, search_durs, anchors=anchors, lines=search_lines, **W3.footage_kw(reel_kw)) if search_lines else None
     if foot and foot["counts"]["lines_with_footage"] < len(search_lines) / 2:
         # too little passed: once more with each subject as a plain thing to see (the writer's must_show can be too narrow)
         ctx.log(f"footage: {foot['counts']['lines_with_footage']} of {len(search_lines)} external-footage lines; searching again with plain subjects")
@@ -917,7 +917,7 @@ def supply(ctx, script):
         for n in fscript["script"].get("named") or []:
             n["must_show"] = f"{n['name']}, plainly visible."
             n["is"] = "person" if n.get("is") == "person" and len(str(n["name"]).split()) <= 3 else "thing"
-        foot2 = chain.footage(ctx, fscript, durs, anchors=anchors, lines=search_lines, **W3.footage_kw(reel_kw))
+        foot2 = chain.footage(ctx, fscript, search_durs, anchors=anchors, lines=search_lines, **W3.footage_kw(reel_kw))
         if foot2 and foot2["counts"]["clips"] > foot["counts"]["clips"]:
             foot = foot2
             shutil.rmtree(keep_dir, ignore_errors=True)
@@ -981,6 +981,9 @@ def supply(ctx, script):
     usd, calls = W3.judge_supply(ctx, sc, pack)
     spend.append(dict(stage="supply", provider="openai", model=CHECK_MODEL,
                       what="per-line picture identity", usd=usd, calls=calls))
+    # The initial search offers extra choices; coverage is measured against
+    # actual spoken duration. Multiplying the coverage demand as well caused
+    # repeated acquisitions for a line that already had enough distinct takes.
     rows = W3.fit_report(pack, sc, durs)
     for attempt in range(2):
         short = [r["i"] for r in rows if r["short"] and fscript["script"]["segments"][r["i"]].get("pictures")]
