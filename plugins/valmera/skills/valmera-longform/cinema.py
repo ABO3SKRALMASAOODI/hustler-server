@@ -960,6 +960,7 @@ def check(ctx,rd,sc):
         chain.sh(ctx,[chain.PY,str(job)],label='wf4-brand-'+ctx.run_id,heavy=True,timeout=7200)
         save(fs,finish_inputs)
     base=brand.check(rd['film'],str(final),ctx.tmp)
+    duration=brand.probe(str(final))['dur']
     base['recorded_sound_library']=chain.no_music(sc['l1'])
     base['ok']=base['ok'] and base['recorded_sound_library']['ok']
     from picture_check import check as pictures_check, motion, duplicate_check
@@ -986,7 +987,8 @@ def check(ctx,rd,sc):
     duplicates=duplicate_check(measured_motion,read(Path(ctx.supply)/'shots.json'),Path(ctx.supply)/'picture-evidence')
     shot_rows=read(Path(ctx.supply)/'shots.json')
     real_ids={int(i) for i,r in pics['evidence'].items() if r.get('real_moving_footage') and shot_rows[int(i)]['clip'].get('kind')!='image'}
-    measured_real=sum(r['seconds'] for r in measured_motion['rows'] if r['i'] in real_ids and r['moving_samples_share']>=0.25)/sc['picture_time_s']
+    # The viewer sees the whole encoded film, including its end card.
+    measured_real=sum(r['seconds'] for r in measured_motion['rows'] if r['i'] in real_ids and r['moving_samples_share']>=0.25)/duration
     pics['moving_share']=measured_real
     nd=Path(pack['narration']).parent
     nar=nd/'narration_narrator.wav'
@@ -1005,7 +1007,6 @@ def check(ctx,rd,sc):
     chain.sh(ctx,[chain.PY,str(HERE/'measure_picture.py'),str(final),str(picture_metrics)],
              label='wf4-picture-measure-'+ctx.run_id,heavy=True,timeout=1800)
     actual_picture=read(picture_metrics)
-    duration=brand.probe(str(final))['dur']
     repeats=duplicate_ranges(read(Path(ctx.supply)/'shots.json'))
     hj=Path(ctx.run_dir)/'hook_measured.json'
     if not hj.exists():
