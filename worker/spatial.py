@@ -19,7 +19,7 @@ import subject
 import tiles as tilestrip
 
 
-SPATIAL_VERSION = 2
+SPATIAL_VERSION = 3
 # Reusing every one of the 144 filmstrip JPEGs added ~18s of OpenCV work on
 # the indexing critical path. Sixty-four evenly retained coarse moments plus
 # up to 32 real shot-boundary moments cover both long static takes and cuts
@@ -245,9 +245,14 @@ def analyze_frame(path):
     if img is None:
         return {"faces": [], "text": [], "dense_ui": False}
     h, w = img.shape[:2]
-    # Geometry is normalized and both detectors are scale-invariant. Large
-    # source stills/contact sheets otherwise turn a bounded sidecar into a
-    # minute-long CPU pass for no additional placement accuracy.
+    # Small printed glyphs are not scale-invariant: reducing a 480px
+    # filmstrip to 360px erased pale slide lines before MSER could see them.
+    # Preserve up to 480px for text, independently of the cheaper face pass.
+    text_img = img
+    if w > 480:
+        text_img = cv2.resize(img, (480, max(1, int(h * 480.0 / w))))
+    text_gray = cv2.cvtColor(text_img, cv2.COLOR_BGR2GRAY)
+    # Keep face detection and frame statistics at their existing bound.
     if w > 360:
         scale = 360.0 / w
         img = cv2.resize(img, (360, max(1, int(h * scale))))
@@ -276,7 +281,7 @@ def analyze_frame(path):
     for x, y, bw, bh in face_hits[:2]:
         faces.append([round(x / w, 4), round(y / h, 4),
                       round((x + bw) / w, 4), round((y + bh) / h, 4)])
-    text = _text_regions(cv2, raw_gray)
+    text = _text_regions(cv2, text_gray)
     edges = cv2.Canny(raw_gray, 80, 180)
     edge_density = float((edges > 0).sum()) / max(1, edges.size)
     dense_ui = bool(len(text) >= 5 and edge_density >= 0.07)
@@ -299,7 +304,7 @@ def analyze_video(media_path, duration, workdir, shots=None, keep=None,
     frames = tilestrip.extract_frames(
         media_path, times, frame_dir,
         seek_ceiling=max(0.0, float(duration) - 0.05),
-        parallelism=4, width=360)
+        parallelism=4, width=480)
     return analyze_frames(times, frames)
 
 
@@ -379,7 +384,7 @@ def augment_with_shot_frames(media_path, duration, workdir, sidecar, shots,
     frame_dir = os.path.join(workdir, "spatial_shot_frames")
     frames = tilestrip.extract_frames(
         media_path, candidates, frame_dir,
-        seek_ceiling=max(0.0, duration - 0.05), parallelism=4, width=360)
+        seek_ceiling=max(0.0, duration - 0.05), parallelism=4, width=480)
     try:
         extra = analyze_frames(candidates, frames).get("samples") or []
     except SpatialError:
