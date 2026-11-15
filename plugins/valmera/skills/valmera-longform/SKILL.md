@@ -41,7 +41,7 @@ Read [REFERENCES.md](REFERENCES.md) for the long-form pacing and music bar. This
 
 ## Delivery gates
 
-When completed footage and figure research leaves an unfilmed action, `primary_passage.py` can find a short passage in an original witness transcript or official report. It verifies literal source text and crops the actual page, with visible attribution; it never retypes a quotation or presents testimony as event photography. These passages remain still images, must be readable, unique and relevant to their exact words, and pass the unchanged source and encoded-picture checks.
+When completed footage and figure research leaves an unfilmed action, `primary_passage.py` can find a short passage in an original witness transcript or official report. It first consults the primary passages already retained with the archive, preserving their attribution and reusing their original PDFs, before searching the web. It verifies literal source text and crops the actual page, with visible attribution; it never retypes a quotation or presents testimony as event photography. These passages remain still images, must be readable, unique and relevant to their exact words, and pass the unchanged source and encoded-picture checks.
 
 Before delivery, measure the finished file and retained evidence:
 
