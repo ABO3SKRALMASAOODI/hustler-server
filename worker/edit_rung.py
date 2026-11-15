@@ -411,6 +411,8 @@ def create(model, messages, tools=None, max_tokens=None, effort=None, tool_choic
             data = _post(body, min(float(timeout or config.EDIT_RUNG_TIMEOUT_S),
                                    float(config.EDIT_RUNG_TIMEOUT_S)))
             result = _completion(model, data)
+            import openai_cache
+            result.usage.prompt_cache = openai_cache.describe(body)
         except RungFailed as exc:
             why = str(exc)
             if exc.wallet:

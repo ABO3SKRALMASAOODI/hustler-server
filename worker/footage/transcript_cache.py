@@ -19,7 +19,7 @@ def root():
     base = Path(override) if override else (
         Path.home() / "Library/Caches/valmera/transcripts" if sys.platform == "darwin"
         else Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "valmera/transcripts")
-    base.mkdir(parents=True, exist_ok=True)
+    base.mkdir(parents=True, exist_ok=True, mode=0o700)
     return base
 
 
@@ -34,16 +34,27 @@ def digest(path, settings):
 @contextlib.contextmanager
 def locked(key, namespace="piece"):
     # Bounded striped locks, never unlinked while a process might hold one.
-    p = root()
-    with (p / (namespace + "-" + key[:2] + ".lock")).open("a") as f:
+    try:
+        p = root()
+        lock = (p / (namespace + "-" + key[:2] + ".lock")).open("a")
+    except OSError as exc:
+        print(f"[transcript-cache] unavailable: {type(exc).__name__}", file=sys.stderr)
+        yield None
+        return
+    with lock as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         yield p / (key + ".json")
 
 
 def read(path):
+    if path is None:
+        return None
     try:
         obj = json.loads(path.read_text())
-        if obj.get("version") == 1 and isinstance(obj.get("rows"), list):
+        if (obj.get("version") == 1 and isinstance(obj.get("rows"), list) and obj['rows']
+                and all(isinstance(r, dict) and isinstance(r.get('text'), str)
+                        and isinstance(r.get('t0'), (int, float)) and isinstance(r.get('t1'), (int, float))
+                        for r in obj['rows'])):
             return obj["rows"]
     except (OSError, ValueError, AttributeError):
         pass
@@ -52,17 +63,20 @@ def read(path):
 
 def write(path, rows):
     # Failures are never memoized. An empty successful transcript (silence) is.
-    if any(r.get("error") for r in rows):
+    if path is None or any(r.get("error") for r in rows):
         return
-    fd, tmp = tempfile.mkstemp(prefix=".transcript-", dir=path.parent)
+    tmp = None
     try:
+        fd, tmp = tempfile.mkstemp(prefix=".transcript-", dir=path.parent)
         with os.fdopen(fd, "w") as f:
             json.dump(dict(version=1, rows=rows), f, ensure_ascii=False)
         os.replace(tmp, path)
+        prune(path.parent)
+    except OSError as exc:
+        print(f"[transcript-cache] write failed: {type(exc).__name__}", file=sys.stderr)
     finally:
-        if os.path.exists(tmp):
+        if tmp and os.path.exists(tmp):
             os.unlink(tmp)
-    prune(path.parent)
 
 
 def prune(directory, max_bytes=128 * 1024 * 1024, max_age=30 * 86400):

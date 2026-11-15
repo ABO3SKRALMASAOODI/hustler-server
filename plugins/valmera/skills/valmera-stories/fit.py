@@ -237,7 +237,8 @@ def judge(items, lines, ask=None, work=None, log=print, batch=BATCH, detail="hig
     for b0 in range(0, len(todo), batch):
         part = todo[b0:b0 + batch]
         need = sorted({ln for k in part for ln in items[k]["lines"]})
-        content = [{"type": "text", "text": "# Lines\n" + "\n".join(_line_text(lines[ln]) for ln in need if ln in lines) + "\n\n# Candidates"}]
+        content = [{"type": "text", "text": "# Lines\n" + "\n".join(_line_text(lines[ln]) for ln in need if ln in lines) + "\n\n# Candidates",
+                    "cache_control": {"type": "ephemeral"}}]
         ok_part = []
         for c_no, k in enumerate(part):
             it = items[k]

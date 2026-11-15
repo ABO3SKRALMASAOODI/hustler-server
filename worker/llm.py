@@ -319,7 +319,8 @@ def record(purpose, request, response, usage=None):
     if str(model).startswith(("gpt-", "tts-", "whisper-")) and not (response or {}).get("local_spend_recorded"):
         answer = response if isinstance(response, dict) else {}
         openai_cache.record(model, purpose, usage, usd=_call_cost_usd(purpose, request, response, usage),
-                            request_id=answer.get("request_id"), status=answer.get("stop", "completed"))
+                            request_id=answer.get("request_id"), status=answer.get("stop", "completed"),
+                            cache_request=(request or {}).get("cache_request") or getattr(usage, "prompt_cache", None))
     fn = get_recorder()
     if not fn:
         return
@@ -1856,6 +1857,7 @@ def responses_create(base_url, api_key, model, messages, tools,
         raise ProviderHTTPError("responses", r.status_code, r.text[:300], error_payload)
     payload = r.json()
     result = _from_responses(payload)
+    result.usage.prompt_cache = openai_cache.describe(body)
     result.usage.service_tier = payload.get('service_tier')
     result.usage.tpm_limit = note_rate_limit_headers(
         model, getattr(r, "headers", None))
@@ -2067,7 +2069,7 @@ def image_part(jpeg_path):
 
 
 def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
-               image_names=None, reasoning_effort=None, _after_credit=False):
+               image_names=None, reasoning_effort=None, _after_credit=False, system=None):
     """One call to VISION_MODEL with N images. Returns text, or None on any
     failure — vision is always optional. image_names (storage keys / labels)
     are what gets recorded to llm_calls — never the image bytes.
@@ -2087,6 +2089,8 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
         return None
     content = [{"type": "text", "text": prompt}]
     content += [image_part(p) for p in image_paths]
+    messages = ([{"role": "system", "content": system}] if system else [])
+    messages.append({"role": "user", "content": content})
     names = image_names or [str(p).rsplit("/", 1)[-1] for p in image_paths]
     # The Frontier plan looks at footage with the frontier model too, not just
     # reasons with it. The model recorded below MUST be the one that actually
@@ -2114,7 +2118,7 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
             resp = create_with_dialect(
                 vclient.with_options(timeout=config.VISION_TIMEOUT_S),
                 vmodel,
-                [{"role": "user", "content": content}],
+                messages,
                 max_tokens=cap,
                 temperature=0.1,
                 cache_role=purpose,
@@ -2129,13 +2133,13 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
                 # budget ran out. Record the starved attempt so admin shows
                 # both calls, then retry with room to finish.
                 record(purpose,
-                       {"model": vmodel, "question": prompt, "images": names},
+                       {"model": vmodel, "question": prompt, "images": names, **({"system": system} if system else {})},
                        {"answer": None, "starved_at_max_tokens": cap}, usage)
                 cap *= 3
                 continue
             record(purpose,
                    {"model": vmodel, "question": prompt,
-                    "images": names},
+                    "images": names, **({"system": system} if system else {})},
                    {"answer": answer}, usage)
             return answer
     except Exception as e:
@@ -2148,7 +2152,7 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
                    _failure(e, msg), None)
             return ask_vision(prompt, image_paths, max_tokens=max_tokens, purpose=purpose,
                               image_names=image_names, reasoning_effort=reasoning_effort,
-                              _after_credit=True)
+                              _after_credit=True, system=system)
         # A provider that rejects the image PART is not having a bad minute —
         # it will reject every future call identically. Stop asking, and let
         # vision_available() tell the tools so they say "no vision configured"

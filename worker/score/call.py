@@ -72,7 +72,9 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
         raise Refused("the Claude lane is closed: " + claude_lane.closed_reason())
     claude_trial.guard_call()
     body = {"model": model, "max_tokens": int(max_tokens), "output_config": {"effort": effort}, "system": system,
-            "messages": [{"role": "user", "content": content}]}
+            "messages": [{"role": "user", "content": [
+                {k: v for k, v in b.items() if k != "detail"} if isinstance(b, dict) else b
+                for b in content] if isinstance(content, list) else content}]}
     if thinking:
         body["thinking"] = THINKING
     box = {}

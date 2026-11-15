@@ -96,7 +96,9 @@ def _transcribe_piece(path, t0, t1, tmp, i):
                 reported = isinstance(usage, dict) and usage.get("type") == "tokens" and MODEL in openai_cache.PRICES
                 usd = openai_cache.cost(MODEL, usage) if reported else (t1 - t0) / 60.0 * USD_PER_MIN
                 openai_cache.record(MODEL, "footage_hear", usage, usd=usd,
-                                    seconds=t1 - t0, cost_basis="reported_tokens" if reported else "audio_duration_estimate")
+                                    seconds=t1 - t0, audio_sha256=transcript_cache.digest(piece, {"model": MODEL}),
+                                    piece_start_s=t0, piece_end_s=t1,
+                                    cost_basis="reported_tokens" if reported else "audio_duration_estimate")
                 return dict(t0=t0, t1=t1, text=(payload.get("text") or "").strip(), usd=usd)
             import openai_cache
             openai_cache.record(MODEL, "footage_hear", usd=0.0, status="http_error", http_status=r.status_code)

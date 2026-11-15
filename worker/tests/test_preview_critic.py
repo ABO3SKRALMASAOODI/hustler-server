@@ -369,7 +369,8 @@ def test_critic_compares_framing_treatment_across_shots(monkeypatch):
     monkeypatch.setattr(preview_critic.llm, "vision_available", lambda: True)
 
     def ask(prompt, _paths, **_kwargs):
-        seen["prompt"] = prompt
+        seen["prompt"] = _kwargs.get("system", "")
+        seen["evidence"] = prompt
         return '{"verdict":"pass","findings":[]}'
 
     monkeypatch.setattr(preview_critic.llm, "ask_vision", ask)
@@ -384,6 +385,8 @@ def test_critic_compares_framing_treatment_across_shots(monkeypatch):
     assert '"finish_quality"' in seen["prompt"]
     assert "restraint" not in seen["prompt"]
     assert "STILLS CANNOT PROVE MOTION" in seen["prompt"]
+    assert "brief asks for shot-specific framing" in seen["evidence"]
+    assert "brief asks for shot-specific framing" not in seen["prompt"]
 
 
 def test_a_critic_opinion_alone_never_asks_for_another_render(monkeypatch):
