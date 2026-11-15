@@ -70,6 +70,53 @@ def test_source_screen_reads_proxy_frames_and_never_clears_unseen_audio_tail(
     assert result["source_duration_s"] == duration
     with pytest.raises(ValueError, match="cleared source boundary"):
         source_screen.check_render({"keep": [[0, duration]]}, result, "original", "sha")
+def test_screen_review_includes_the_final_picture_on_a_short_track(tmp_path, monkeypatch):
+    from PIL import Image
+    from score import boards
+    seen = []
+    def grab(_path, t, **_):
+        seen.append(t)
+        return Image.new("RGB", (160, 90), "red") if t <= .08 else None
+    monkeypatch.setattr(boards, "grab", grab)
+    monkeypatch.setattr(source_screen.llm, "ask_vision", lambda *a, **k:
+        '{"reviewed_all_frames":true,"branding_screen_present":false}')
+    result = source_screen.build("source.mp4", .2, 25, [], "sha", str(tmp_path),
+        video_info={"duration": .2, "video_duration": .12, "fps": 25})
+    assert max(seen) == .08
+    assert result["safe_end_s"] == .12
+    assert result["source_duration_s"] == .2
+
+
+def test_real_picture_tail_is_reviewed_when_audio_runs_longer(tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+    from score import boards
+    ffmpeg = shutil.which(boards.FFMPEG)
+    if not ffmpeg or not shutil.which("ffprobe"):
+        pytest.skip("FFmpeg tools unavailable")
+    path = tmp_path / "longer-audio.mp4"
+    subprocess.run([ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+        "color=c=blue:s=160x90:r=25:d=0.12", "-f", "lavfi", "-i",
+        "anullsrc=r=48000:cl=mono:d=0.2", "-vf",
+        "drawbox=color=red:t=fill:enable='gte(t,0.08)'", "-c:v", "libx264",
+        "-threads", "1", "-filter_threads", "1", "-c:a", "aac", str(path)],
+        check=True, capture_output=True, timeout=20)
+    grab, frames = boards.grab, []
+    def observe(*a, **k):
+        im = grab(*a, **k)
+        frames.append(im)
+        return im
+    monkeypatch.setattr(boards, "grab", observe)
+    monkeypatch.setattr(source_screen.llm, "ask_vision", lambda *a, **k:
+        '{"reviewed_all_frames":true,"branding_screen_present":false}')
+    import media
+    result = source_screen.build(str(path), .2, 25, [], "sha", str(tmp_path),
+                                 video_info=media.probe(str(path)))
+    assert all(im is not None for im in frames)
+    red, _green, blue = frames[-1].getpixel((80, 45))
+    assert red > 200 and blue < 50  # the final picture, not an earlier substitute
+    assert result["safe_end_s"] == .12
+    assert result["source_duration_s"] == .2
 
 
 def test_semantic_tail_cut_stops_at_last_clear_frame_not_detected_shot_edge():
