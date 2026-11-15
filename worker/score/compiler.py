@@ -2830,6 +2830,66 @@ def final_type_contrast(ctx, l1):
     return {"measured_words": measured, "edged_words": edged}
 
 
+def final_type_clearance(ctx, l1):
+    """Keep type clear after the last crop, without removing words or timing.
+
+    Film seats were solved before camera easing/source clearance. A later
+    crop can move a call participant or printed question into those seats.
+    Translate each complete gesture or caption chunk as one unit; preserve
+    its font, size, animation, duration and the final picture. If no clear
+    seat exists, retain the content and report the unresolved collision.
+    """
+    import copy
+    from . import taste
+    final = copy.copy(ctx)
+    final.shots = [it for it in l1["items"] if it.get("k") == "shot"]
+    final.items = [it for it in l1["items"] if it.get("k") != "shot"]
+    authored = {it["id"]: it for it in ctx.items}
+    units = {}
+    for it in final.items:
+        original = authored.get(it["id"], {})
+        key = original.get("_g") or it.get("chunk") or it["id"]
+        units.setdefault(key, []).append(it)
+    units = {k: ms for k, ms in units.items() if any(it.get("k") == "word" for it in ms)}
+
+    def bounds(members):
+        boxes = [r for it in members if (r := type_rect(final, it)) is not None]
+        return [min(r[0] for r in boxes), min(r[1] for r in boxes),
+                max(r[2] for r in boxes), max(r[3] for r in boxes)]
+
+    rows = [(key, members, min(it["f"][0] for it in members),
+             max(it["f"][1] for it in members)) for key, members in units.items()]
+    moved, unresolved = [], []
+    step = max(1, round(ctx.fps / 4))
+    cuts = {s["f"][0] for s in final.shots}
+    for key, members, a, z in rows:
+        r = bounds(members)
+        obstacles = []
+        for f in sorted(set(range(a, z, step)) | {z - 1} | {f for f in cuts if a <= f < z}):
+            s = shot_at(final, f)
+            if s:
+                obstacles += taste._heads_near(final, s, f) + marks_of(final, s, f)
+        if not any(rects_touch(r, q) for q in obstacles):
+            continue
+        obstacles += [bounds(ms) for k, ms, b, e in rows if k != key and a < e and b < z]
+        obstacles.append(list(KEEPOUT))
+        if ctx.H > ctx.W:
+            obstacles.append(list(taste.BUTTONS))
+        top, bottom = (taste.SAFE[1], taste.SAFE[3]) if ctx.H > ctx.W else (.03, .96)
+        tries = sorted({q[3] + TRAFFIC_GAP - r[1] for q in obstacles} |
+                       {q[1] - TRAFFIC_GAP - r[3] for q in obstacles}, key=abs)
+        dy = next((d for d in tries if r[1] + d >= top and r[3] + d <= bottom
+                   and not any(rects_touch([r[0], r[1]+d, r[2], r[3]+d], q)
+                               for q in obstacles)), None)
+        if dy is None:
+            unresolved.append(key)
+            continue
+        for it in members:
+            _shift_item(it, dy)
+        moved.append({"id": key, "dy": round(dy, 4)})
+    return {"moved": moved, "unresolved": unresolved}
+
+
 def under_plate(ctx, f):
     s = shot_at(ctx, f)
     return s.get("plate") if s and s.get("pic") == "plate" else None
@@ -6719,6 +6779,11 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
             m["move"] = {"fault": f"{type(e).__name__}: {str(e)[:160]}"}
     from . import source_guard
     m["source_guard"] = source_guard.apply(l1, ctx.index, ctx.perc, views=ctx.views)
+    m["final_type_clearance"] = final_type_clearance(ctx, l1)
+    for key in m["final_type_clearance"]["unresolved"]:
+        m.setdefault("findings", []).append(
+            f"type {key}: final crop intersects a face or source text and no clear seat fits; "
+            "redesign its picture/type composition while preserving every word and its readable size")
     m["final_type_contrast"] = final_type_contrast(ctx, l1)
     txt = meter_text(ctx, m)
     return Compiled(l1, m, txt, (time.perf_counter() - t0_) * 1000)
