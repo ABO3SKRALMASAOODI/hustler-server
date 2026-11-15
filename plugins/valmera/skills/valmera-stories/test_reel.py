@@ -712,6 +712,8 @@ def test_protected_product_cuts_stay_whole_even_in_window_style(tmp_path):
     pics, footage = _fit_supply(n_clips=6)
     footage = {i: rows for i, rows in footage.items() if i < 2}
     _files(tmp_path, footage, pics)
+    for rows in footage.values():
+        rows[0].update(w=1920, h=1080)
     paths = [c['path'] for rows in footage.values() for c in rows]
     sup = dict(sid='product', words=_words(sc), narration=str(tmp_path/'none.wav'), ffmpeg='ffmpeg',
                pictures={}, sounds={}, footage=[dict(i=i, clips=rows) for i, rows in footage.items()],
@@ -722,4 +724,9 @@ def test_protected_product_cuts_stay_whole_even_in_window_style(tmp_path):
     assert product and all(p['mode'] == 'product' for p in product)
     keys = {k for k,a in l1['assets'].items() if a.get('path') in paths}
     shots = [it for it in l1['items'] if it.get('pic') in keys]
-    assert shots and all(it['k']=='shot' and it['crop']==[0.,0.,1.,1.] for it in shots)
+    assert shots and all(it['k']=='shot' for it in shots)
+    dimensions = {c['path']: (c['w'],c['h']) for rows in footage.values() for c in rows}
+    for it in shots:
+        w,h = dimensions[l1['assets'][it['pic']]['path']]
+        x0,y0,x1,y1 = it['crop']
+        assert abs((x1-x0)*w/((y1-y0)*h) - F.W/F.H) < 0.001

@@ -1857,7 +1857,11 @@ def build(script, sup, style_id, direction=None):
         else:
             f0, f1, kind, name, rec = timeline[run[0]]
             if kind == "clip" and rec["path"] in full_frame:
-                P.shot([f0, f1], keys[rec["path"]], [0.0, 0.0, 1.0, 1.0], src=list(rec["src"]))
+                # Preserve geometry when the upload is landscape; an uncropped
+                # source mapped directly to portrait would stretch the subject.
+                focus, _ = F.focus_of(rec)
+                crop = F.cover_crop(float(rec.get("w") or W), float(rec.get("h") or H), W / H, focus, (0.5, 0.42))
+                P.shot([f0, f1], keys[rec["path"]], crop, src=list(rec["src"]))
                 note(f0, f1, kind, name, rec, "product")
             elif kind == "designed":
                 designed(f0, f1, rec)
