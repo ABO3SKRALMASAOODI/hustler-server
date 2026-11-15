@@ -36,12 +36,18 @@ def guard(path, workdir, bitrate='192k'):
                 '-map', '0:v?', '-map', '0:a:0', '-c:v', 'copy', '-af', chain,
                 '-c:a', 'aac', '-b:a', bitrate, '-movflags', '+faststart', tmp],
                 capture_output=True, check=True, timeout=1800)
-            true_peak.guard(tmp, bitrate=bitrate, workdir=workdir)
+            # loudnorm reports hundredths, while the default ebur128 meter
+            # rounds to tenths. A -0.96 dBTP file can pass that guard as
+            # -1.0 and then fail this verifier. Correct with this same meter;
+            # do not relax the delivery ceiling or retry an unchanged mix.
+            peak_report = true_peak.guard(tmp, bitrate=bitrate, workdir=workdir,
+                                          meter=lambda p: (measure(p) or {}).get('tp'))
             checked = measure(tmp)
             if checked is None or not math.isfinite(checked['i']):
                 raise ValueError('mastered sound could not be measured')
             if checked['tp'] > -1.0:
-                raise ValueError('mastered sound exceeds the true-peak ceiling')
+                raise ValueError(f"mastered sound exceeds the true-peak ceiling: "
+                                 f"{checked['tp']} dBTP; correction={peak_report}")
             os.replace(tmp, path)
             current = checked
             report['passes'] += 1

@@ -110,6 +110,27 @@ def test_each_pass_lowers_the_limiter_by_the_measured_excess():
     assert chain.endswith("channel_layouts=stereo")
 
 
+def test_guard_uses_verifier_precision_for_every_pass(tmp_path, monkeypatch):
+    # The default meter rounds -0.96 to -1.0, but mastering rejects -0.96.
+    # The same meter must admit the input and verify the corrected bytes.
+    path = tmp_path / "near.mp4"
+    path.write_bytes(b"original")
+    monkeypatch.setattr(true_peak, "measure", lambda _: -1.0)
+    monkeypatch.setattr(true_peak, "_duration", lambda _: 8.0)
+    def encode(src, dst, *args):
+        from pathlib import Path
+        Path(dst).write_bytes(b"corrected")
+    monkeypatch.setattr(true_peak, "_reencode", encode)
+    def precise(p):
+        from pathlib import Path
+        return -0.96 if Path(p).read_bytes() == b"original" else -1.55
+    report = true_peak.guard(str(path), workdir=str(tmp_path), meter=precise)
+    assert report["passes"] == 1 and report["held"]
+    assert report["tp_in"] == -0.96 and report["tp"] == -1.55
+    assert path.read_bytes() == b"corrected"
+    assert not list(tmp_path.glob("tp_guard_*"))
+
+
 def test_guard_keeps_the_original_when_a_correction_fails(tmp_path,
                                                           monkeypatch):
     path = tmp_path / "x.mp4"

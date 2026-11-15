@@ -103,16 +103,18 @@ def _duration(path):
 
 def guard(path, bitrate="192k", workdir=None, ceiling=CEILING_DBTP,
           target=TARGET_DBTP, max_passes=MAX_PASSES, timeout=1800,
-          measured=None):
+          measured=None, meter=None):
     """Hold ``path``'s true peak at or under ``ceiling`` in place.
 
     Returns {"tp_in", "tp", "passes", "limit_dbfs", "held"} — ``held`` False
     only when the file is still over the ceiling after every pass (it then
     keeps the best measured file) — or None when the file has no audio or
     could not be measured. ``measured`` skips the first measurement when
-    the caller already holds it.
+    the caller already holds it. ``meter`` lets a downstream verifier use
+    its own peak measurement consistently for admission and correction.
     """
-    tp0 = measure(path) if measured is None else measured
+    read_peak = measure if meter is None else meter
+    tp0 = read_peak(path) if measured is None else measured
     if tp0 is None:
         return None
     report = {"tp_in": _round(tp0), "tp": _round(tp0), "passes": 0,
@@ -136,7 +138,7 @@ def guard(path, bitrate="192k", workdir=None, ceiling=CEILING_DBTP,
                 # A correction must never change what plays; drop it.
                 os.remove(out)
                 break
-            tp = measure(out)
+            tp = read_peak(out)
             if tp is None:
                 os.remove(out)
                 break
