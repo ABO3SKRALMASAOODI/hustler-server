@@ -122,8 +122,9 @@ search.run=search_with_known
 if j.get('_voices'):
     from footage import search,voice
     from concurrent.futures import ThreadPoolExecutor
-    voice.MAX_S=22.0
-    voice.PICK_SYSTEM=voice.PICK_SYSTEM.replace('about 2 to 9 seconds spoken','about 4 to 20 seconds spoken')
+    voice.MAX_S=45.0
+    voice.PICK_SYSTEM=voice.PICK_SYSTEM.replace('short documentary','long documentary').replace('about 2 to 9 seconds spoken','about 4 to 40 seconds spoken')
+    voice.PICK_SYSTEM+='\nA long-form witness can complete a consequential thought. Prefer personal experience, a decision, difficulty or discovery over a generic mission description. Length follows the thought; do not pad or repeat the narrator.'
     voice.PICK_SYSTEM+='\nThe person field must exactly copy one canonical name from The people; never substitute an alias from a video title.'
     original_pick=voice.pick
     def logged_pick(lines,persons,sources,*args,**kwargs):

@@ -51,21 +51,23 @@ def refine(ctx,proposal,catalogue,rounds=3):
         else:
             failures=[dict(seg=shots[i]['seg'],words=shots[i]['say'],archive=shots[i]['clip'].get('catalogue_id'),
                            reason=report['evidence'].get(str(i),report['evidence'].get(i))['reason']) for i in report['rejected']]
-            text,use=story.writer.ask('Repair the visual plan of this documentary using ONLY the inspected archive. '
-                'Keep every spoken word and chapter unchanged. Replace all rejected picture/word pairings. '
+            text,use=story.writer.ask('Offer truthful picture alternatives for this documentary using ONLY the inspected archive. '
+                'Keep every spoken word and chapter unchanged. Correct the rejected picture/word pairings where possible. '
                 'A label saying the action is not visible does not make irrelevant hardware illustrate that action. '
                 'Original technical illustrations may explain an unfilmed mechanism, but must match its actual state and be clearly identified. '
                 'Do not put an unrelated spacewalk, ground object or wrong stage of repair under a literal action. '
                 'Also use more of the suitable unused moving archive where current stills can be replaced honestly. '
-                'The provisional edit should be majority moving with some margin for actual timing, never by mislabelling stills. '
-                'Respect unique source intervals and the 7.8-second maximum per picture. Supply enough unique seconds for each visual beat at about three words per second. '
+                'Prefer suitable moving footage, never by mislabelling stills. '
+                'Do NOT solve global timeline coverage, duration arithmetic or source allocation. The scheduler handles those, with strict non-reuse. '
+                'You may offer the same candidate in several alternative lists; the scheduler will only use its original frames once. '
+                'Give several genuinely suitable alternatives per beat when available. Rank moving alternatives first when they illustrate the words equally well. '
                 'Use short truthful source labels viewers can read, not internal review instructions. '
                 'Return JSON {segments:[{index,visual_beats:[{word_start,archive_ids:[literal IDs],label:optional source label}]}],unresolved:[specific remaining limitations],why:string}. '
                 'Return only segments whose visual choices change. Every listed segment must start at word_start zero. '
-                'If the archive cannot honestly support a passage, report it unresolved; never fake coverage.',
+                'Return concrete corrections promptly. Leaving an unsupported passage unresolved is valid and required when no candidate fits; never fake coverage.',
                 json.dumps(dict(script=sc,archive=material,failures=failures,gaps=gaps,
                                 estimated_seconds=duration,covered_moving_share=report['moving_share'])),
-                effort='high',max_tokens=24000,what='WF4 exact archive visual repair')
+                effort='medium',max_tokens=24000,what='WF4 exact archive visual repair')
             C.save(root/f'response-{attempt}.json',dict(text=text,usage=use))
             if use.get('stop')!='completed':raise ValueError('visual repair response incomplete')
             repair=dict(story.writer.json_block(text),usage=use);C.save(edits,repair)

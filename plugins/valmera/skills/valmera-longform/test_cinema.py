@@ -13,6 +13,15 @@ def test_worker_imports_precede_the_shell_even_when_already_on_pythonpath(monkey
     assert C.sys.path==[p,'/some/shell']
 
 
+def test_cached_idea_helper_cannot_shadow_worker_models(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setitem(C.sys.modules,'llm',SimpleNamespace(__file__='/some/shell/llm.py'))
+    C.worker()
+    import llm
+    assert Path(llm.__file__).resolve()==(Path(C.PX.worker_dir())/'llm.py').resolve()
+    assert callable(llm.fence)
+
+
 def test_rater_stem_fit_recovers_delay_and_final_gains():
     import numpy as np
     import stem_evidence as E

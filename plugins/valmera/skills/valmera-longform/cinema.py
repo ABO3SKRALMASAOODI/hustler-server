@@ -46,6 +46,11 @@ def worker():
     # later in the list; it must still precede the shell for worker imports.
     while p in sys.path:sys.path.remove(p)
     sys.path.insert(0,p)
+    loaded=sys.modules.get('llm')
+    if loaded is not None and Path(getattr(loaded,'__file__','')).resolve()!=(Path(p)/'llm.py').resolve():
+        # Idea selection may already have loaded the shell helper. Existing
+        # shell callers keep their module object; worker imports get theirs.
+        del sys.modules['llm']
     os.environ['PATH'] = str(Path(PX.FF).parent)+os.pathsep+os.environ.get('PATH','')
     os.environ['FFMPEG_BIN'] = PX.FF
     if os.environ.get('WF4_SPEND_LOG'):
