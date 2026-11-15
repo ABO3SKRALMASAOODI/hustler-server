@@ -946,3 +946,20 @@ def test_named_ink_that_vanishes_on_its_plate_turns_readable():
     c = S.compile_score(t, index=wordless_index(10))
     w = next(i for i in c.l1["items"] if i["k"] == "word" and i["t"] == "ESPETACULARES")
     assert w["ink"] == "#FFFFFF"
+
+
+def test_display_ink_reads_the_dark_pool_added_over_bright_footage(monkeypatch):
+    import numpy as np
+    monkeypatch.setattr(S, 'thumbs', lambda *a: np.full((1, S.THUMB_H, S.THUMB_W), .9))
+    def compile_with(pool):
+        text = _film([{'k': 'b', 'id': 'b01', 'at': '@0..@3', 'job': 'x',
+                       'cut': 'hold', 'pic': 'bin:0', 'rest': REST,
+                       'do': [{'g': 'big', 't': 'Fitted wrap', 'at': '@0..@3',
+                               'size': .06, 'seat': [.5, .5], 'pool': pool}]}])
+        return S.compile_score(text, index=wordless_index(10), bin_items=printed_bin([]))
+    bare = compile_with(0)
+    shaded = compile_with(.8)
+    assert all(S.luma(i['ink']) < .5 for i in bare.l1['items'] if i['k'] == 'word')
+    words = [i for i in shaded.l1['items'] if i['k'] == 'word']
+    assert words and all(S.luma(i['ink']) > .5 for i in words)
+    assert any(i.get('mode') == 'pool' for i in shaded.l1['items'])
