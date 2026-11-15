@@ -599,6 +599,11 @@ def finish_and_check(ctx, rd, sc):
     else:
         info = {}
     c = brand.check(rd["film"], final, ctx.tmp)
+    if not info:
+        # A resumed run still needs the measured programme boundary. Returning
+        # an empty finish record makes downstream audits treat the card as
+        # speech time (or fail), despite the cached film being valid.
+        info = dict(programme_s=c["programme_s"], outro_s=c["outro_s"], reused=True)
     m = no_music(sc["l1"]) if sc.get("l1") and os.path.exists(sc["l1"]) else dict(ok=True, note="no plan")
     c.update(music=m, finish=info)
     c["ok"] = bool(c["ok"] and m["ok"])

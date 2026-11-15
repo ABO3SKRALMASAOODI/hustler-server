@@ -605,7 +605,8 @@ def check(programme, final, workdir):
     W, H = f["w"], f["h"]
     prog_s = p["frames"] / round(p["fps"]) if p["frames"] else p["dur"]
     want = prog_s + float(config.OUTRO_DURATION_S)
-    out = dict(final_s=round(f["dur"], 3), want_s=round(want, 3), length_ok=abs(f["dur"] - want) <= 0.1)
+    out = dict(final_s=round(f["dur"], 3), want_s=round(want, 3), length_ok=abs(f["dur"] - want) <= 0.1,
+               programme_s=round(prog_s, 3), outro_s=round(f["dur"] - prog_s, 3))
     ix0, iy0, iw, ih = R.watermark_geometry(W, H)["image"]
     t = min(prog_s * 0.5, max(0.5, prog_s - 1.0))
     a, b = _frame(programme, t, W, H), _frame(final, t, W, H)
