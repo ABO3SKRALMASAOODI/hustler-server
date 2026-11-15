@@ -1,5 +1,6 @@
 """Run the existing footage engine on the box, in a private scratch directory.
-Only the funded OpenAI key crosses stdin over SSH; it is never saved or logged.
+Local subscription calls cross a private loopback SSH bridge when opted in.
+Provider credentials otherwise cross stdin only; neither is saved or logged.
 No service, switch, customer's project or production data is changed.
 """
 from pathlib import Path
@@ -22,6 +23,10 @@ if os.environ.get('DATABASE_URL'):raise RuntimeError('private footage jobs must 
 # Keep the engine's provider/budget fences. Its charge sink for this standalone
 # job is a local cost ledger; no production connection is created or written.
 import llm,threading,pathlib,time
+if os.environ.get('CODEX_PROXY_LOCAL')=='1':
+    import footage.ask
+    patch=pathlib.Path(sys.argv[1]).parent/'footage_ask.py'
+    exec(compile(patch.read_text(),str(patch),'exec'),vars(footage.ask))
 cost_lock=threading.Lock()
 pathlib.Path(sys.argv[2]).mkdir(parents=True,exist_ok=True)
 def local_charge(purpose,request,response,usage):
@@ -259,7 +264,7 @@ PROBE=PROBE.replace('__OFFLINE__',OFFLINE)
 
 
 RUNNER = r'''import json,os,sys,subprocess,pathlib
-slot,scratch,cache,name=sys.argv[1:]
+slot,scratch,cache,name,port=sys.argv[1:]
 info=json.loads(subprocess.check_output(['docker','inspect',slot]))[0]
 allowed={'YTDLP_PROXY','YTDLP_PROXY_FALLBACK','YTDLP_REMOTE_COMPONENTS','YTDLP_FALLBACK_CLIENTS','YTDLP_POT_SERVER_HOME'}
 env=dict(os.environ)
@@ -271,6 +276,11 @@ job=json.load(open(scratch+'/input.json'));cpus,memory=(2,4) if job.get('_voices
 cmd=['docker','run','--rm','-i','--name',name,'--cpus',str(cpus),'--memory',str(memory)+'g',
      '-v',scratch+':'+scratch,'-v',cache+':/wf4-model-cache','-e','HF_HOME=/wf4-model-cache',
      '--entrypoint','python']
+if port!='off':
+    cmd.extend(['--network','host','-e','CODEX_PROXY_LOCAL=1',
+                '-e','OPENAI_BASE_URL=http://127.0.0.1:'+port+'/v1',
+                '-e','PYTHONPATH='+scratch+'/client',
+                '-e','CODEX_PROXY_PROOF=wf4-box-'+name])
 for k in sorted(allowed):
     if k in env:cmd.extend(['-e',k])
 cmd.extend([info['Image'],'-u',scratch+'/fetch.py',scratch+'/input.json',scratch+'/out'])
@@ -299,7 +309,7 @@ def probe(idea):
         finally:cleanup_cache(td)
 
 
-def fetch(payload, out, log=print):
+def fetch(payload, out, log=print, _port=None):
     out = Path(out)
     probing=bool(payload.get('_probe'))
     rec = out / ('probe.json' if probing else 'footage.json')
@@ -311,6 +321,10 @@ def fetch(payload, out, log=print):
         prior=cached.get('adapter_sha256','unversioned')[:12]
         rec.rename(out/('footage-rejected-'+prior+'.json'))
         if (out/'fetch.log').exists():(out/'fetch.log').rename(out/('fetch-rejected-'+prior+'.log'))
+    if os.environ.get('CODEX_PROXY_LOCAL')=='1' and _port is None:
+        from subscription_box import bridge
+        with bridge(HOST,KEY) as port:
+            return fetch(payload,out,log,_port=port)
     out.mkdir(parents=True, exist_ok=True)
     names = ssh("docker ps --format '{{.Names}}'", capture_output=True, text=True).stdout.splitlines()
     slot = next((n for n in names if n.startswith('vbox-batch')), None)
@@ -320,6 +334,12 @@ def fetch(payload, out, log=print):
     q = shlex.quote
     package = io.BytesIO()
     with tarfile.open(fileobj=package, mode='w') as tf:
+        if _port is not None:
+            from subscription_box import client_files
+            files=client_files(_port)
+            files['footage_ask.py']=(Path(__file__).resolve().parents[4]/'worker/footage/ask.py').read_bytes()
+            for name,data in files.items():
+                t=tarfile.TarInfo(name);t.size=len(data);tf.addfile(t,io.BytesIO(data))
         for name, data in [('input.json', json.dumps(payload).encode()), ('fetch.py', (PROBE if probing else REMOTE).encode()),('runner.py',RUNNER.encode())]:
             t = tarfile.TarInfo(name); t.size = len(data); tf.addfile(t, io.BytesIO(data))
         if not probing:tf.add(Path(__file__).with_name('witness_evidence.py'),arcname='witness_evidence.py',recursive=False)
@@ -327,7 +347,7 @@ def fetch(payload, out, log=print):
     container='wf4-private-'+scratch.rsplit('-',1)[-1]
     try:
         ssh(f'tar xf - -C {q(scratch)}', input=package.getvalue(), capture_output=True)
-        cmd = f'python3 {q(scratch)}/runner.py {q(slot)} {q(scratch)} {q(cache_path(out.parent))} {q(container)}'
+        cmd = f'python3 {q(scratch)}/runner.py {q(slot)} {q(scratch)} {q(cache_path(out.parent))} {q(container)} {q(str(_port) if _port else 'off')}'
         with open(out / 'fetch.log', 'w') as f:
             ssh(cmd, input=os.environ['OPENAI_API_KEY']+'\n', text=True, stdout=f, stderr=subprocess.STDOUT, timeout=7200)
         archive = out / 'transfer.tar'

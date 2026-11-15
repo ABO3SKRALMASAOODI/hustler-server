@@ -27,10 +27,10 @@ def ask(system, content, purpose, budget_s=120.0, max_tokens=6000, model=None):
 def _ask(system, content, purpose, budget_s=120.0, max_tokens=6000, model=None):
     """(text, usd). content: text or Claude-shaped blocks (text and base64 images)."""
     from score import call
-    tries = 1 if os.environ.get("CODEX_PROXY_LOCAL") == "1" else 2
-    # Buffered local SSE has no early token stream. Allow the adapter's full
-    # 180-second response window, while the planner bounds individual inputs.
-    if os.environ.get('CODEX_PROXY_LOCAL')=='1':budget_s=max(budget_s,185.)
+    local = os.environ.get('CODEX_PROXY_LOCAL') == '1'
+    tries = 1 if local else 2
+    if local:
+        budget_s = max(budget_s, 185.0)  # buffered subscription response, queue included
     deadline = time.monotonic() + budget_s
     for k in range(tries):
         if time.monotonic() >= deadline:

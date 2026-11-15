@@ -19,7 +19,7 @@ def score(l1, pack, film, out, cache):
     dur=l1['dur_f']/l1['fps']
     voice=MU._decode(film,MU.SR,2)
     whole=np.zeros((round(dur*MU.SR),2),np.float32)
-    used=[]; rows=[]; call=MF.openai_call()
+    used=[]; rows=[]; call=MF.openai_call(timeout=185 if os.environ.get('CODEX_PROXY_LOCAL')=='1' else 90)
     for ch in l1['chapters']:
         a,b=ch['start'],ch['end']; d=b-a
         marks=dict(dur_s=d,words=[(max(0,w['start']+lead-a),min(d,w['end']+lead-a)) for w in wd['words'] if a<=w['start']+lead<b],

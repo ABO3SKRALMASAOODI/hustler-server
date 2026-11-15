@@ -15,6 +15,11 @@ def run(command,out,label,ceiling=6_000_000_000):
     # worker/coverage.py into numba's optional coverage-package import.
     # Each narrator entry point already establishes its own local imports.
     env.pop('PYTHONPATH',None)
+    if env.get('CODEX_PROXY_LOCAL')=='1':
+        client=ROOT/'.valmera/tools/codex-proxy/client'
+        if not (client/'sitecustomize.py').is_file():
+            raise RuntimeError('Local subscription network guard is unavailable')
+        env['PYTHONPATH']=str(client)
     peak=0;samples=[];stopped=None
     def stop_owned(p):
         if p.poll() is not None:return

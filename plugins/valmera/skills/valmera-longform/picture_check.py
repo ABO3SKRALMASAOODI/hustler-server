@@ -5,6 +5,7 @@ import io
 import json
 import subprocess
 import math
+import os
 import numpy as np
 from PIL import Image,ImageDraw,ImageOps
 
@@ -74,7 +75,7 @@ def check(film, shots, out, ffmpeg, source=False):
         text,usd=ask.ask(REVIEW_PROMPT,content,'wf4_picture_check',max_tokens=3000)
         result=dict(usd=usd,shots=ask.json_obj(text).get('shots',[])); rp.write_text(json.dumps(result,indent=1)); return result
     groups=[rows[i:i+5] for i in range(0,len(rows),5)]
-    with ThreadPoolExecutor(max_workers=3) as pool: checked=list(pool.map(one,groups))
+    with ThreadPoolExecutor(max_workers=1 if os.environ.get('CODEX_PROXY_LOCAL')=='1' else 3) as pool: checked=list(pool.map(one,groups))
     by={r['i']:r for g in checked for r in g['shots']}
     missing=[r['i'] for r in rows if r['i'] not in by]
     bad=[i for i,r in by.items() if r.get('matches') is not True]
