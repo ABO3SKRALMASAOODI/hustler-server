@@ -151,6 +151,7 @@ def retain_evidence(ctx,evidence):
 
 def check(ctx,rd,sc):
     import cinema as C
+    C.worker()
     pointer=Path(ctx.run_dir)/'encoded-repair.json'
     if pointer.exists():repair(ctx,C.read(pointer)['folder'],rd,sc)
     else:
