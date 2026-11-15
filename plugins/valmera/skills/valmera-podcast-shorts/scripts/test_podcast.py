@@ -15,6 +15,17 @@ import podcast  # noqa: E402
 import wf1_film  # noqa: E402
 
 
+def test_incomplete_test_set_is_not_marked_delivered(tmp_path):
+    from types import SimpleNamespace
+    work=tmp_path/'run';work.mkdir()
+    state=dict(video_id='anAmTGcewX8',test=True,pid=None,done=['fetch','hear','moments','shorts'])
+    (work/'run.json').write_text(json.dumps(state))
+    with pytest.raises(RuntimeError,match='Incomplete test set remains resumable.*m02'):
+        podcast.deliver(SimpleNamespace(),{}, {},dict(made=[dict(id='m01')],failed=[dict(id='m02',error='coverage short')]),str(tmp_path/'out'),test=True)
+    assert not (tmp_path/'out').exists()
+    assert json.loads((work/'run.json').read_text())==state
+
+
 def test_video_id_reads_every_youtube_shape_and_hashes_the_rest():
     for link in ("https://youtu.be/0cn3VBjfN8g?si=abc", "https://www.youtube.com/watch?v=0cn3VBjfN8g&t=10s",
                  "https://youtube.com/live/0cn3VBjfN8g", "https://www.youtube.com/shorts/0cn3VBjfN8g"):

@@ -634,6 +634,9 @@ def refused(hit, sid, link):
 
 def deliver(run, fetched, sel, built, out_root, test=False):
     import wf1_film
+    if test and built['failed']:
+        failed=', '.join(r['id'] for r in built['failed'])
+        raise RuntimeError('Incomplete test set remains resumable; fix the recorded failures and resume: '+failed)
     waiting = [r for r in built["failed"] if wf1_film.WALL in str(r.get("error"))]
     if waiting:                                          # a folder is delivered once, complete: not while shorts wait for their footage
         raise RuntimeError(f"{len(waiting)} of {len(sel['moments'])} shorts are waiting for footage: {wf1_film.WALL} on every player. It lifts by "
