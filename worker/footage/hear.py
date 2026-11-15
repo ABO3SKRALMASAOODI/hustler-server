@@ -52,8 +52,17 @@ def _timed_rows(segments, duration):
 
 def _local_clip(wav, duration):
     import transcribe as asr
+    import wave
+    import numpy as np
+    # transcribe() already decoded this exact PCM contract with ffmpeg. Pass
+    # samples directly: older bundled PyAV cannot accept Whisper's
+    # metadata_errors keyword when reopening even a valid WAV file.
+    with wave.open(str(wav), 'rb') as audio:
+        if (audio.getnchannels(),audio.getsampwidth(),audio.getframerate()) != (1,2,16000):
+            raise ValueError('local hearing requires mono 16-bit 16 kHz PCM')
+        samples=np.frombuffer(audio.readframes(audio.getnframes()),dtype='<i2').astype(np.float32)/32768.0
     segments, _ = asr.get_model().transcribe(
-        wav, beam_size=1, vad_filter=True, word_timestamps=True,
+        samples, beam_size=1, vad_filter=True, word_timestamps=True,
         condition_on_previous_text=False)
     return _timed_rows(segments, duration)
 

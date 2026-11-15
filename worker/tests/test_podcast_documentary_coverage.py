@@ -410,3 +410,20 @@ def test_originals_only_recovery_does_not_repeat_platform_search(monkeypatch,tmp
     result=run.find([],[],'test',str(tmp_path),source_only=True,hear_s=0)
     assert result['counts']['clips']==0
     assert result['counts']['sources_tried']==0
+
+
+def test_source_programming_error_is_not_a_platform_refusal(monkeypatch,tmp_path):
+    from footage import run
+    monkeypatch.setattr(run.fetch,'whole_av',lambda *a:('video.mp4','cached'))
+    monkeypatch.setattr(run.shots,'probe',lambda _:dict(dur=3,w=1920,h=1080,audio=True))
+    monkeypatch.setattr(run.shots,'cuts',lambda *a:[(0,3)])
+    monkeypatch.setattr(run.hear,'transcribe',lambda *a:(_ for _ in ()).throw(TypeError("metadata_errors")))
+    with pytest.raises(TypeError,match='metadata_errors'):
+        run._open(dict(key='s0',url='https://video.example/source',duration=3,title='Source'),str(tmp_path),lambda _:None,whole_first=True)
+
+
+def test_source_fetch_failure_keeps_its_stage(monkeypatch,tmp_path):
+    from footage import run
+    monkeypatch.setattr(run.fetch,'whole_av',lambda *a:(_ for _ in ()).throw(run.fetch.FetchError('provider refused')))
+    out=run._open(dict(key='s0',url='https://video.example/source',duration=3,title='Source'),str(tmp_path),lambda _:None,whole_first=True)
+    assert out['error_stage']=='fetch' and out['error_type']=='FetchError'

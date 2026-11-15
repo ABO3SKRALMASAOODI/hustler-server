@@ -241,7 +241,7 @@ def supply(ctx, script):
 def refused(foot):
     """(YouTube sources the engine tried, how many of them failed or opened only through the Wayback Machine's copy)."""
     yt = [s for s in (foot or {}).get("sources") or [] if s.get("where") in (None, "youtube")]
-    return len(yt), len([s for s in yt if s.get("error") or s.get("rung") == "wayback"])
+    return len(yt), len([s for s in yt if (s.get("error") and s.get("error_stage")=="fetch") or s.get("rung") == "wayback"])
 
 
 def walled(foot):

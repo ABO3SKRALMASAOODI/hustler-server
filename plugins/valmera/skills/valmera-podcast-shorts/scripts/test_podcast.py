@@ -251,7 +251,7 @@ def test_a_short_whose_footage_would_not_open_is_not_cut_from_photographs():
     ns = {}
     exec(src[src.index("def refused(foot):"):src.index("def dull(c):")], ns)          # the rule alone: the module itself loads the engines
     walled = ns["walled"]
-    ok, bad, way = dict(where="youtube"), dict(where="youtube", error="default: Sign in to confirm"), dict(where="youtube", rung="wayback")
+    ok, bad, way = dict(where="youtube"), dict(where="youtube", error="default: Sign in to confirm", error_stage="fetch"), dict(where="youtube", rung="wayback")
     arch = dict(where="archive")
 
     def foot(clips, with_footage, lines, sources):
@@ -263,6 +263,9 @@ def test_a_short_whose_footage_would_not_open_is_not_cut_from_photographs():
     assert not walled(foot(0, 0, 13, [ok, ok, ok, bad]))                              # the sources opened and showed nothing: photographs carry it
     assert not walled(None) and not walled(foot(0, 0, 13, [])) and not walled(foot(0, 0, 13, [arch, arch]))
     assert ns["refused"](foot(0, 0, 1, [ok, bad, way, arch])) == (3, 2)
+    internal=dict(where="youtube",error="open() got an unexpected keyword argument",error_stage="hear")
+    assert not walled(foot(0,0,5,[internal,internal]))
+    assert not walled(foot(0,0,5,[dict(where="youtube",error="unclassified old failure")]*2))
 
 
 def test_shorts_waiting_for_footage_hold_the_delivery_and_the_run_continues_later(tmp_path, monkeypatch, capsys):

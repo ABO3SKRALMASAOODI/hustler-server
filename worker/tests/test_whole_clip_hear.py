@@ -11,7 +11,12 @@ from footage import hear
 def clip(tmp_path, monkeypatch):
     path=tmp_path/'input.wav';path.write_bytes(b'same audio')
     monkeypatch.setenv('FOOTAGE_TRANSCRIPT_CACHE',str(tmp_path/'cache'))
-    def encode(argv,**kw): Path(argv[-1]).write_bytes(b'encoded audio');return NS(returncode=0)
+    def encode(argv,**kw):
+        import wave
+        with wave.open(str(argv[-1]),'wb') as out:
+            out.setparams((1,2,16000,0,'NONE','not compressed'))
+            out.writeframes(b'\x00\x20\x00\xe0'*160)
+        return NS(returncode=0)
     monkeypatch.setattr(hear.subprocess,'run',encode)
     return str(path)
 
@@ -20,6 +25,9 @@ def test_local_pass_retains_actual_segment_times_and_memo(clip,monkeypatch):
     import transcribe
     calls=[]
     def recognize(path,**kw):
+        import numpy as np
+        assert isinstance(path,np.ndarray) and path.dtype==np.float32
+        assert np.allclose(path[:2],[.25,-.25])
         calls.append(kw)
         return iter([NS(start=.71,end=2.83,text=' Hello, world!'), NS(start=13.19,end=16.07,text=' Second phrase.')]),NS()
     monkeypatch.setattr(transcribe,'get_model',lambda:NS(transcribe=recognize))

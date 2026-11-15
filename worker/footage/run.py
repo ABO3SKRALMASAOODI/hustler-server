@@ -61,6 +61,7 @@ def _open(src, work, log, hear_s=None, read_s=None, whole_first=False):
     t0 = time.monotonic()
     hear_s = HEAR_MAX_S if hear_s is None else float(hear_s)
     read_max = float(read_s) if read_s else fetch.PROXY_MAX_S
+    stage="fetch"
     try:
         # a short source is fetched whole even when only its head is read: yt-dlp cuts a section with ffmpeg on the
         # resolved stream, which YouTube refuses from a proxy route more often than not (the box, 14 Nov: 2 of 8)
@@ -70,10 +71,13 @@ def _open(src, work, log, hear_s=None, read_s=None, whole_first=False):
             src["whole"] = p
         else:
             p, rung = fetch.proxy(src["url"], d, src.get("duration"), max_s=WHOLE_UNDER_S if whole else read_max)
+        stage="probe"
         info = shots.probe(p)
         upto = min(info["dur"], read_max)
         src.update(proxy=p, rung=rung, dur_read=round(upto, 1), w=info["w"], h=info["h"])
+        stage="shots"
         src["shots"] = shots.cuts(p, upto)
+        stage="hear"
         if info.get("audio") and hear_s > 0:
             src["transcript"], src["hear_usd"] = hear.transcribe(p, min(upto, hear_s))
         else:
@@ -81,6 +85,11 @@ def _open(src, work, log, hear_s=None, read_s=None, whole_first=False):
         log(f"source {src['key']} {src['title'][:50]!r}: {len(src['shots'])} shots, {len(src['transcript'])} pieces heard, "
             f"{upto:.0f} s read, {time.monotonic() - t0:.0f} s")
     except Exception as e:  # noqa: BLE001 the source is out; the others carry its subject
+        openai_budget.propagate(e)
+        if isinstance(e,(TypeError,AttributeError,ImportError)):
+            raise  # programming/dependency failures are not unavailable source videos
+        src["error_stage"]=stage
+        src["error_type"]=type(e).__name__
         src["error"] = str(e)[:240]
         log(f"source {src['key']} failed: {src['error'][:160]}")
     return src
@@ -496,7 +505,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         spend = {k: round(v, 5) for k, v in spend.items()}
         res = dict(engine="worker/footage", model=dict(look="gpt-6-sol low", hear=hear.MODEL), about=about, frame=[W, H], preserve_source=bool(preserve_source), grade_target=tgt,
                    subjects=subjects, lines=out_lines, voices=voices,
-                   sources=[{k: s.get(k) for k in ("key", "url", "title", "channel", "where", "duration", "subjects", "why", "rung", "dur_read", "error")}
+                   sources=[{k: s.get(k) for k in ("key", "url", "title", "channel", "where", "duration", "subjects", "why", "rung", "dur_read", "error", "error_stage", "error_type")}
                             | dict(shots=len(s.get("shots") or []), heard=len(s.get("transcript") or [])) for s in sources],
                    **({"voices_tried": voices_tried} if voices_tried is not None else {}),
                    counts=dict(lines=len(out_lines), lines_with_footage=sum(1 for r in out_lines if r["clips"]),
