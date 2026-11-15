@@ -16,6 +16,12 @@ python3 scripts/podcast.py "<podcast or interview link>"
 `scripts/` is beside this file. Any `python3` starts it: the script moves itself onto the engines' interpreter.
 Nothing else is asked of the user: no brief, no count, no style, no song.
 
+For the owner's local subscription adapter, source `.valmera/tools/codex-proxy/env.sh` before the command
+or wrap it with `zsh .valmera/tools/codex-proxy/run.sh`. Keep one short lane active (`--lanes 1`), never
+retry an unchanged failed model call, and keep all model decisions on that guarded local route. The
+operator-controlled `FOOTAGE_FETCH_CMD` can fetch original public video through a box's authorized egress;
+it returns media and provenance, never account credentials. Remote rendering needs no model access.
+
 ## How to run it (Claude Code and Codex alike)
 
 1. Start the command above as a background job (`run_in_background` in Claude Code; a background terminal in
@@ -169,3 +175,12 @@ Repeated overlapping document crops or source-video intervals do not count as ne
 A meaningful silent reaction may carry a director-justified eased move anchored to the preceding spoken line; its timestamp must stay inside that line's following silence. Unresolved holds return to direction with their exact frame bounds, never an automatic crop pattern.
 
 New documentary stills do not consume a recovery attempt when moving coverage is short: that same attempt continues into moving-footage research.
+
+Moving footage needs both the residual-motion measurement and visible subject action across the checked
+frames. Card transforms, pans over documents, and cursor-only changes on a static interface remain stills.
+Their failed motion verdict lowers their acquisition priority; it does not falsely reject a faithful picture.
+Research is split into small referent groups with retained answers. A source replay can reuse verified word
+timings while recovering the same original at a resolution that permits real, face-safe eased movement.
+Sound attacks are balanced against the calibrated bed, then checked against decoded AAC using the rater's
+stem fit and T2 test. One bounded rebalance changes only already-earned effects. Test runs retain their
+stems and scene evidence beside the exports before ordinary workflow scratch cleanup.

@@ -137,8 +137,9 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement"):
         system += (" This is a separate adversarial transition audit. Look specifically for an image implying "
                    "the wrong event, era or claim, and text left over from the preceding picture. Accept only "
                    "when all sampled transition frames and their visible words are supported.")
-    for offset in range(0, len(pending), 6):
-        batch = pending[offset:offset + 6]
+    batch_size=3 if os.environ.get('CODEX_PROXY_LOCAL')=='1' else 6
+    for offset in range(0, len(pending), batch_size):
+        batch = pending[offset:offset + batch_size]
         content, sampled = [], {}
         for entry, row in batch:
             content.append(dict(type="text", text=json.dumps(entry, ensure_ascii=False)))

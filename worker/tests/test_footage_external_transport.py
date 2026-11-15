@@ -1,0 +1,26 @@
+import json
+from types import SimpleNamespace
+import pytest
+from footage import fetch
+
+
+def test_external_fetch_keeps_identity_and_run_directory(tmp_path,monkeypatch):
+    movie=tmp_path/'whole.mp4';movie.write_bytes(b'x'*3000)
+    monkeypatch.setenv('FOOTAGE_FETCH_CMD','operator-fetch --original')
+    def external(command,**kw):
+        assert command==['operator-fetch','--original']
+        assert json.loads(kw['input'])==dict(url='https://example.org/original.mp4',out_dir=str(tmp_path))
+        return SimpleNamespace(returncode=0,stdout=json.dumps(dict(path=str(movie),url='https://example.org/original.mp4',rung='box-primary')))
+    monkeypatch.setattr(fetch.subprocess,'run',external)
+    assert fetch.whole_av('https://example.org/original.mp4',str(tmp_path))==(str(movie),'external-original:box-primary')
+
+
+@pytest.mark.parametrize('mismatch',['url','path'])
+def test_external_fetch_cannot_substitute_another_source_or_file(tmp_path,monkeypatch,mismatch):
+    movie=tmp_path/'whole.mp4';movie.write_bytes(b'x'*3000)
+    receipt=dict(path=str(movie),url='https://example.org/original.mp4')
+    receipt[mismatch]='https://example.org/unrelated.mp4' if mismatch=='url' else str(tmp_path.parent/'unrelated.mp4')
+    monkeypatch.setenv('FOOTAGE_FETCH_CMD','operator-fetch')
+    monkeypatch.setattr(fetch.subprocess,'run',lambda *a,**k:SimpleNamespace(returncode=0,stdout=json.dumps(receipt)))
+    with pytest.raises(fetch.FetchError,match='external source transport failed'):
+        fetch.whole_av('https://example.org/original.mp4',str(tmp_path))

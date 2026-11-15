@@ -101,7 +101,7 @@ def script(ctx, ideas_out):
     content = f"# The moment\n{json.dumps(idea, ensure_ascii=False)}\n\n# Who is in it\n{str((ctx.args or {}).get('identity') or '')[:1500]}\n\n# Words near the moment: seconds word\n" + ' '.join((f'{t:.2f} {w}' for (t, w) in near))
     llm = _llm()
     spend, s = [], {}
-    for _ in range(2):                                   # an answer cut short or missing a field is asked for once more
+    for _ in range(1 if os.environ.get('CODEX_PROXY_LOCAL') == '1' else 2):
         text, use = llm.ask(system, content, effort="medium", max_tokens=16000)
         spend.append(dict(stage="script", what="clip, title and what it names", **use))
         try:
@@ -560,10 +560,14 @@ def _render_review(ctx, rd, sc):
         report["spend"] += audit["spend"]
         for first, second in zip(report["placements"], audit["placements"]):
             first["transition_audit"] = dict(ok=second["ok"], reason=second["reason"])
+            first['motion_ok']=first.get('motion_ok') is True and second.get('motion_ok') is True
             if not second["ok"]:
                 first.update(ok=False, reason=second["reason"])
         report["accepted"] = sum(r["ok"] for r in report["placements"])
         report["rejected"] = len(rows) - report["accepted"]
+    real=sum(p['f'][1]-p['f'][0] for p in report['placements'])/F.FPS
+    moving=sum(p['f'][1]-p['f'][0] for p in report['placements'] if p.get('motion_ok') is True)/F.FPS
+    report.update(real_seconds=real,moving_seconds=moving,moving_share=moving/max(real,.001))
     return report
 
 
@@ -696,6 +700,18 @@ def check(ctx, rd, sc):
         delivered_check=b.get("delivered_check"), delivery_reviews=history,
         sources=[dict(f=p.get("f"), visible_f=p.get("visible_f"), kind=p.get("kind"), name=p.get("name"), source=p.get("source"), time_range=p.get("time_range")) for p in pics])
     r["checks"]["ok"] = bool(r["checks"].get("ok") and not (b.get("rendered_check") or {}).get("rejected"))
+    audit=(ctx.args or {}).get('audit_out')
+    if audit:
+        # Explicit replay evidence survives normal workflow scratch cleanup.
+        # No customer project or media decisions are changed by this capture.
+        import shutil
+        os.makedirs(audit,exist_ok=True)
+        for name in ('pack.json','words.json','index.json','l1.json','l1_audio.json','music.json','direction.json',
+                     'coverage.json','beats.json','mix_stems.npz','render_reviews.json','delivery_reviews.json'):
+            path=os.path.join(ctx.supply,name)
+            if os.path.isfile(path):shutil.copy2(path,os.path.join(audit,name))
+        for name in ('script.json','score.json'):
+            shutil.copy2(os.path.join(ctx.run_dir,name),os.path.join(audit,name))
     return r
 
 

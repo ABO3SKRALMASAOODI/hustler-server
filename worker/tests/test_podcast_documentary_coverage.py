@@ -142,6 +142,17 @@ def test_spectral_or_planned_presence_cannot_count_a_masked_hit():
     assert abs(audibility.measure(voice,hit,calibrated)['bed_under_voice_db']-5.5)<.1
 
 
+def test_encoded_ruler_recovers_independent_stem_gains_and_codec_delay():
+    rng=np.random.default_rng(71)
+    stems=rng.normal(0,.01,(3,48000))
+    coefficients=np.array([2.4,1.1,1.8])
+    encoded=np.pad(coefficients@stems,(144,0))
+    result=audibility.verified_mix(*stems,encoded)
+    assert result['lag_ms']==3
+    assert np.allclose(result['gains'],coefficients,atol=1e-8)
+    assert result['fit_residual_db'] < -100
+
+
 def test_podcast_payoff_hole_survives_half_second_measurement():
     p=music.profile_for('podcast')
     assert 1 <= p['hole_min_s'] <= p['hole_max_s'] <= 2.3

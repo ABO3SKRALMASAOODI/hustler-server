@@ -50,6 +50,32 @@ def calibrate_bed(voice, bed, target=5.5):
     return bed*(10**(delta/20)), delta
 
 
+def verified_mix(voice, sfx, bed, encoded):
+    """The rater's stem fit against decoded audio, followed by its T1/T2 ruler.
+
+    Planned gains cannot certify audibility after limiting and AAC. Search the
+    same +/-50 ms alignment at 1 ms steps, fitting all three retained stems.
+    """
+    v,s,b,m = [mono(x) for x in (voice,sfx,bed,encoded)]
+    n=min(map(len,(v,s,b,m)));best=None
+    if n<=4800:raise ValueError('not enough encoded audio to verify stems')
+    for lag in range(-2400,2401,48):
+        a0=max(0,lag);target=m[a0:a0+n-2400]
+        X=np.stack([x[a0-lag:a0-lag+len(target)] for x in (v,s,b)],1)
+        coef,*_=np.linalg.lstsq(X,target,rcond=None)
+        residual=target-X@coef
+        q=10*np.log10(max(np.mean(residual**2),1e-20)/max(np.mean(target**2),1e-20))
+        if best is None or q<best[0]:best=(q,lag,coef)
+    q,lag,coef=best
+    report=measure(v[:n]*coef[0],s[:n]*coef[1],b[:n]*coef[2])
+    hits=[e['db'] for e in report['events'] if e['T2']]
+    report.update(fit_residual_db=float(q),lag_ms=lag*1000/SR,gains=coef.tolist(),
+                  seconds=n/SR,T2_per_10s=report['T2']*10/(n/SR),
+                  audible_range_db=float(np.ptp(hits)) if hits else 0.,
+                  audible_iqr_db=float(np.percentile(hits,75)-np.percentile(hits,25)) if hits else 0.)
+    return report
+
+
 def recording_alternatives(item):
     """Nearby approved recordings of the same gesture, with the original landing preserved."""
     from . import sound

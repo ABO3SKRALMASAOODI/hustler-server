@@ -83,3 +83,14 @@ def test_resolved_take_retains_actual_eased_motion():
     assert len({tuple(c) for c in items[0]["crop"]}) > 1
     assert report["eased"] > 0
     assert report["hold_max"] < 3
+
+
+def test_full_hd_recovered_source_supports_the_directed_moves_without_more_upscale():
+    shot = dict(id="take",f=[0,234],pic="main",pw=1920,ph=1080,src=[0,7.8],max_up=2.4,
+                faces=[[.50767,.25742,.15596,.36195]])
+    items,report=pace.drive([shot],[],FPS,(W,H),"podcast",seed=1114,
+                            band=dict(motivated_frames=[60,140,205]))
+    from scene.motion import Cam
+    cam=Cam(1920,1080,W/H,out_w=W,max_up=2.4)
+    assert report['hold_max']<3 and report['eased']==3
+    assert all(cam.whole(c,shot['faces']) and cam.up(c)<=2.4*1.001 for c in items[0]['crop'])

@@ -40,6 +40,13 @@ def sh(ctx, cmd, label=None, heavy=False, model=False, timeout=None):
     TMPDIR and SLICE_TMP point inside the run, so a tool's scratch is deleted with the run."""
     env = dict(os.environ, VALMERA_SKILL=ctx.workflow, VALMERA_RUN=ctx.run_id, TMPDIR=ctx.tmp, SLICE_TMP=ctx.tmp, PYTHONDONTWRITEBYTECODE="1",
                PATH=os.path.dirname(brand.FF) + ":" + os.environ.get("PATH", "/usr/bin:/bin"))
+    if cmd and cmd[0] == ATLAS_PY:
+        # The MLX interpreter must not import worker/coverage.py as numba's
+        # third-party coverage package. Preserve other paths, including the
+        # local subscription network guard, instead of disabling site startup.
+        worker=os.path.realpath(brand.worker_dir())
+        env['PYTHONPATH']=os.pathsep.join(p for p in env.get('PYTHONPATH','').split(os.pathsep)
+                                        if p and os.path.realpath(p)!=worker)
     if model:
         cmd = ["zsh", CREDIT] + cmd
     if heavy:

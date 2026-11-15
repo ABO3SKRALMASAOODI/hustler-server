@@ -8,12 +8,23 @@ import base64
 import json
 import os
 import time
+import threading
 
 MODEL = os.environ.get("FOOTAGE_MODEL", "gpt-6-sol")
 EFFORT = os.environ.get("FOOTAGE_EFFORT", "low")
+_LOCAL_CALL = threading.BoundedSemaphore(1)
 
 
 def ask(system, content, purpose, budget_s=120.0, max_tokens=6000, model=None):
+    if os.environ.get('CODEX_PROXY_LOCAL') == '1':
+        # The adapter is shared with other lanes. Start the call's own deadline
+        # after admission rather than queuing many calls that expire together.
+        with _LOCAL_CALL:
+            return _ask(system,content,purpose,budget_s,max_tokens,model)
+    return _ask(system,content,purpose,budget_s,max_tokens,model)
+
+
+def _ask(system, content, purpose, budget_s=120.0, max_tokens=6000, model=None):
     """(text, usd). content: text or Claude-shaped blocks (text and base64 images)."""
     from score import call
     tries = 1 if os.environ.get("CODEX_PROXY_LOCAL") == "1" else 2

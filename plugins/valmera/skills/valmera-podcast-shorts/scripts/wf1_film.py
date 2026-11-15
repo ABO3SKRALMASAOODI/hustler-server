@@ -345,6 +345,7 @@ def build(script, sup, style_id, direction=None):
         P.pictures.append(dict(f=[f0, f1], visible_f=[f0, rec.get("audit_until", f1)], kind=kind, name=name, path=rec["path"], shows=rec.get("shows"), mode=mode,
                                illustration=rec.get('illustration'), source_evidence=rec.get('source') or dict(url=rec.get('page'),title=rec.get('title'),channel=rec.get('credit')),
                                finish="black and white" if is_mono(f0) else None, motion_p90=rec.get('placed_motion_p90'),
+                               verified_motion=rec.get('verified_motion') is True,
                                source=(rec.get("source") or {}).get("url") if kind == "clip" else rec.get("page"), time_range=rec.get("time_range")))
         if rec.get("still") or kind == "photo":
             look_pics.append(rec.get("still") or rec["path"])

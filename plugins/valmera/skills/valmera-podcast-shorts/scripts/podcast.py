@@ -484,6 +484,7 @@ def _last_json(text):
 def build_short(run, m, fetched, pod, tries=3):
     """One moment through wf1_short.py. Returns its record: {id, ok, folder | error}."""
     state = run.p("shorts", m["id"])
+    if os.environ.get('CODEX_PROXY_LOCAL') == '1':tries=1
     os.makedirs(state, exist_ok=True)
     import wf1_film
     done = jload(os.path.join(state, "done.json"))
@@ -498,6 +499,8 @@ def build_short(run, m, fetched, pod, tries=3):
                           f"({pod.get('year') or ''}).\n" + identity_text(info))[:1800],
                 source_url=info.get("webpage_url") or run.link, video_id=run.state["video_id"], source_title=info.get("title"),
                 channel=info.get("channel") or info.get("uploader"), upload_date=info.get("upload_date"))
+    if run.state.get('test') and run.state.get('audit_root'):
+        args['audit_out']=os.path.join(run.state['audit_root'],m['id'])
     films = run.p("films")
     os.makedirs(films, exist_ok=True)
     base = [PY, os.path.join(HERE, "wf1_short.py"), "run", "--state-root", state]
@@ -737,6 +740,7 @@ def main():
     work, resumed = find_run(a.link, test)
     run = Run(a.link, work)
     run.state["test"] = test
+    if test:run.state['audit_root']=os.path.join(out_root,'evidence')
     run.state["pid"] = os.getpid()
     run.save()
     run.log(f"{'continuing' if resumed else 'new run'}: {a.link} in {work}")

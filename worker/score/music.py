@@ -1245,6 +1245,27 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
             fx[:len(music)] += music[:len(fx)]
         m4a = os.path.join(tmp, "song.m4a")
         rep["master"] = AU.master(voice, fx, m4a, tmp, total)
+        if kind == 'podcast':
+            # Inspect what survived the encoder, then rebalance the existing
+            # earned events once. Never add effects to meet a numerical count.
+            own = np.asarray(fx)-bed
+            actual=audibility.verified_mix(lv,own,bed,_decode(m4a,SR,1))
+            rep['encoded_balance_before']=actual
+            gap=actual['bed_under_voice_db']
+            if gap is not None and (not 5<=gap<=6 or actual['T2_per_10s']<3.6):
+                a,b,c=actual['gains']
+                if actual['fit_residual_db'] < -10 and min(a,b,c)>0:
+                    bed *= 10**((gap-prof['broadband_bed_db'])/20)
+                    l1['sound']=audibility.present_hits(l1['sound'],lv,bed*(c/a),
+                        lambda items: np.asarray(AU.split_audio(_Plan(dict(l1,sound=items),src))[1])*(b/a),
+                        alternatives=audibility.recording_alternatives)
+                    _v,own,_=AU.split_audio(_Plan(l1,src))
+                    rep['master']=AU.master(voice,np.asarray(own)+bed,m4a,tmp,total)
+                    actual=audibility.verified_mix(lv,own,bed,_decode(m4a,SR,1))
+            rep['encoded_audibility']=actual
+            rep['final_sounds']=l1['sound']
+            np.savez_compressed(os.path.join(work,'mix_stems.npz'),voice=audibility.mono(lv).astype(np.float32),
+                                sfx=audibility.mono(own).astype(np.float32),bed=audibility.mono(bed).astype(np.float32))
         rep["music"] = mrep
         if film and out:
             AU.mux(film, m4a, out)
