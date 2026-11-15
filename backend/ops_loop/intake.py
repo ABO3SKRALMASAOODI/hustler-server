@@ -93,7 +93,23 @@ HEARTBEAT_LATE = {"p0_watch": timedelta(minutes=20),    # 3 runs missed
                   # Hourly again from 12 Nov (it ran every 6 h with 7 h
                   # late until the weekly reset): 3 runs missed.
                   "reviewer": timedelta(hours=3)}
+# Reviews are late when a settled, reviewable session has waited this long with
+# no review that covers it: the oldest one `ops_review.py pending` would list.
+# 15 Nov: this read "no review written for 24 h" and told the owner the
+# reviews had stopped while the Reviewer ran every hour and nobody had a
+# session to review (the paywall is on); 2 reviews came 2 minutes later. A
+# Reviewer that stops running is the heartbeat's alert above.
 REVIEWS_LATE = timedelta(hours=24)
+# The Reviewer's own window (REVIEWER.md: `pending --days 3`).
+REVIEWS_LOOKBACK = timedelta(days=3)
+# Finding the pending sessions reads three days of every customer's work
+# (5-70 s from the Mac), too slow for an admin request or the alert's minute.
+# The intake tick looks once a quarter hour, after its own pass, and keeps the
+# answer in app_kv; the alert and the admin read that row. A look older than
+# REVIEW_LOOK_LATE is itself reported, so a broken look never goes quiet.
+REVIEW_BACKLOG_KEY = "ops_review_backlog"
+REVIEWS_CHECK_EVERY = timedelta(minutes=15)
+REVIEW_LOOK_LATE = timedelta(hours=2)
 # The intake's own last pass. It ticks every minute; a pass that keeps raising
 # leaves no ticket and no row, and until now only the next morning's digest said
 # so. The alert runs on its own scheduler, so it outlives a broken tick.
@@ -1066,31 +1082,107 @@ def watch_beat(cur, now=None):
 
 def silent_agents(cur, now=None):
     """The scheduled agents that stopped, read from their own heartbeats, the
-    intake's own last pass, and the reviews that stopped arriving. An agent that
-    never beat yet says nothing: its first beat arms it. Nobody watched the
-    watcher for 70 hours."""
+    intake's own last pass and its review-backlog look, and customer sessions
+    left unreviewed for REVIEWS_LATE (none waiting is never an alert). An agent that never beat yet
+    says nothing: its first beat arms it. Nobody watched the watcher for 70
+    hours."""
     now = _aware(now) or datetime.now(timezone.utc)
     keys = {f"ops_heartbeat_{a}": a for a in HEARTBEAT_LATE}
     keys[WATERMARK_KEY] = "intake"
+    keys[REVIEW_BACKLOG_KEY] = "session review check"
     late = dict(HEARTBEAT_LATE, intake=INTAKE_LATE)
+    late["session review check"] = REVIEW_LOOK_LATE
     cur.execute("SELECT key, value FROM app_kv WHERE key = ANY(%s)",
                 (sorted(keys),))
     out = []
     for r in cur.fetchall():
         try:
-            at = _aware(json.loads(r["value"])["at"])
+            value = json.loads(r["value"])
+            at = _aware(value["at"])
         except (TypeError, ValueError, KeyError):
             continue
         agent = keys[r["key"]]
         if now - at > late[agent]:
             out.append({"agent": agent, "last_at": at,
                         "silent_min": int((now - at).total_seconds() // 60)})
-    cur.execute("SELECT max(reviewed_at) AS at FROM session_reviews")
-    at = _aware((cur.fetchone() or {}).get("at"))
-    if at and now - at > REVIEWS_LATE:
-        out.append({"agent": "session reviews", "last_at": at,
-                    "silent_min": int((now - at).total_seconds() // 60)})
+        if agent == "session review check" and value.get("since"):
+            since = _aware(value["since"])
+            if now - since > REVIEWS_LATE:
+                out.append({"agent": "session reviews", "last_at": since,
+                            "silent_min": int((now - since).total_seconds()
+                                              // 60),
+                            "waiting": value.get("waiting"),
+                            "oldest": value.get("key")})
     return out
+
+
+def _waiting_since(s):
+    """When a pending session started waiting for a review: when it settled;
+    for a reviewed one whose fingerprint moved, when what moved it happened
+    (never before that review)."""
+    from ops_loop import sessions
+    at = _aware(s["ended_at"]) + sessions.SETTLE
+    prev = s.get("previous_review")
+    if prev:
+        later = [_aware(prev.get("reviewed_at"))]
+        later += [_aware(e.get("created_at"))
+                  for e in getattr(s, "next_events", [])]
+        later += [_aware(p.get("at")) for p in getattr(s, "next_payments", [])]
+        later += [_aware(h.get("at"))
+                  for h in getattr(s, "next_subscription", [])]
+        at = max([at] + [t for t in later if t])
+    return at
+
+
+def review_backlog(cur, now=None):
+    """The settled, reviewable sessions no review covers, found exactly as
+    `ops_review.py pending` finds them: {"since": when the oldest began
+    waiting, "key": its session key, "waiting": how many}, or None when there
+    is nothing to review."""
+    from ops_loop import sessions
+    now = _aware(now) or datetime.now(timezone.utc)
+    conn = getattr(cur, "connection", None)
+    # A failed read inside an open transaction must not abort the caller's.
+    guard = conn is not None and getattr(conn, "autocommit", True) is False
+    if guard:
+        cur.execute("SAVEPOINT review_backlog")
+    try:
+        found, _ = sessions.pending(cur, now - REVIEWS_LOOKBACK, now)
+    except Exception:
+        if guard:
+            cur.execute("ROLLBACK TO SAVEPOINT review_backlog")
+        raise
+    if guard:
+        cur.execute("RELEASE SAVEPOINT review_backlog")
+    backlog = None
+    if found:
+        oldest = min(found, key=_waiting_since)
+        backlog = {"since": _waiting_since(oldest), "key": oldest["key"],
+                   "waiting": len(found)}
+    return backlog
+
+
+def look_review_backlog(rcur, wcur, now=None):
+    """Once a quarter hour: find the review backlog and keep it in app_kv
+    for silent_agents. Returns what it kept, or None when the last look is
+    still fresh."""
+    from ops_loop import store
+    now = _aware(now) or datetime.now(timezone.utc)
+    rcur.execute("SELECT value FROM app_kv WHERE key = %s",
+                 (REVIEW_BACKLOG_KEY,))
+    row = rcur.fetchone()
+    try:
+        last = _aware(json.loads(row["value"])["at"]) if row else None
+    except (TypeError, ValueError, KeyError):
+        last = None
+    if last and timedelta(0) <= now - last < REVIEWS_CHECK_EVERY:
+        return None
+    backlog = review_backlog(rcur, now) or {}
+    value = {"at": now.isoformat(),
+             "since": backlog["since"].isoformat() if backlog else None,
+             "key": backlog.get("key"), "waiting": backlog.get("waiting", 0)}
+    store.put_state(wcur, REVIEW_BACKLOG_KEY, value)
+    return value
 
 
 # ── The scheduler ────────────────────────────────────────────────────────
@@ -1127,10 +1219,20 @@ def run_tick(now=None, rconn=None, wconn=None):
             with rconn.cursor() as r, wconn.cursor() as w:
                 out = run(r, w, now)
             wconn.commit()
-            return out
         except Exception:
             wconn.rollback()
             raise
+        else:
+            # After the pass is committed: a slow look never holds a filing.
+            try:
+                with rconn.cursor() as r, wconn.cursor() as w:
+                    look_review_backlog(r, w, now)
+                wconn.commit()
+            except Exception as e:  # noqa: BLE001 - its own row goes stale
+                wconn.rollback()
+                print(f"⚠️ [ops_intake] review backlog look failed: "
+                      f"{type(e).__name__}: {e}", flush=True)
+            return out
         finally:
             with wconn.cursor() as w:
                 w.execute("SELECT pg_advisory_unlock(%s)", (TICK_LOCK_ID,))

@@ -967,15 +967,45 @@ def test_an_intake_that_stops_passing_is_reported_within_minutes(world):
     assert [a["agent"] for a in got] == ["intake"] and got[0]["silent_min"] == 16
 
 
-def test_reviews_that_stop_arriving_are_reported(world):
+def test_no_review_for_a_day_with_nothing_to_review_is_not_an_alert(world):
+    """15 Nov: the last review was 24 h old, the Reviewer ran every hour and
+    no customer session had settled (the paywall is on); the owner was told
+    the reviews had stopped."""
     world.c.execute(
         """INSERT INTO session_reviews (session_key, surface, user_id, project_id,
            started_at, settled_at, fingerprint, verdict, score, reasoning,
            reviewed_at) VALUES ('k', 'studio', 2846, 5600, %s, %s, 'f',
            'delivered_poor', 3, 'r', %s)""",
         (T0, T0, T0 - timedelta(hours=25)))
-    assert [a["agent"] for a in intake.silent_agents(world.c, T0)] == \
-        ["session reviews"]
+    store.put_state(world.c, "ops_heartbeat_reviewer",
+                    {"at": (T0 - timedelta(minutes=8)).isoformat()})
+    assert intake.silent_agents(world.c, T0) == []
+
+
+def test_reviews_late_means_a_session_waited(world, monkeypatch):
+    """The tick's look keeps the oldest waiting session in app_kv; the alert
+    reads it. (The temp schema has no session tables: pending is given.)"""
+    from ops_loop import sessions
+    found = []
+    monkeypatch.setattr(sessions, "pending",
+                        lambda cur, since, now=None, **kw: (list(found), {}))
+    assert intake.look_review_backlog(world.c, world.c, T0)["since"] is None
+    assert intake.silent_agents(world.c, T0) == []
+    # Fresh for a quarter hour: no second look.
+    found.append(sessions.Session(key="p5600-1",
+                                  ended_at=T0 - timedelta(hours=25),
+                                  previous_review=None))
+    assert intake.look_review_backlog(world.c, world.c, T0 + 14 * MIN) is None
+    kept = intake.look_review_backlog(world.c, world.c, T0 + 15 * MIN)
+    assert kept["key"] == "p5600-1" and kept["waiting"] == 1
+    got = intake.silent_agents(world.c, T0 + 15 * MIN)
+    assert [a["agent"] for a in got] == ["session reviews"]
+    assert got[0]["waiting"] == 1 and got[0]["oldest"] == "p5600-1"
+    # A look that stops is reported after two hours.
+    store.put_state(world.c, intake.WATERMARK_KEY,
+                    {"at": (T0 + 3 * 60 * MIN).isoformat()})
+    assert "session review check" in {
+        a["agent"] for a in intake.silent_agents(world.c, T0 + 3 * 60 * MIN)}
 
 
 def test_a_mute_sweep_reopens_only_what_is_not_the_owners(world):

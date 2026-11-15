@@ -806,7 +806,9 @@ def _auto_summary(f, occurrences, users):
 STATE_KEYS = ("ops_intake_watermark",
               # When each scheduled agent last ran (ops_review.py heartbeat).
               "ops_heartbeat_p0_watch", "ops_heartbeat_fixer",
-              "ops_heartbeat_reviewer")
+              "ops_heartbeat_reviewer",
+              # The oldest session waiting for a review (intake tick).
+              "ops_review_backlog")
 
 
 def guard_state(sql, key):

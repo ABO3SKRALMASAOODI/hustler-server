@@ -453,6 +453,18 @@ def event_alerts(rcur, since, now):
     try:
         from ops_loop import intake
         for a in intake.silent_agents(rcur, now):
+            if a["agent"] == "session reviews":
+                n = a.get("waiting") or 1
+                out.append((f"silent:{a['agent']}:{now:%Y%m%d}",
+                            "Customer sessions wait for a review",
+                            f"<b>{n} customer session{'s' if n != 1 else ''}"
+                            f"</b> waiting for a review, the oldest for "
+                            f"{a['silent_min'] // 60} h "
+                            f"{a['silent_min'] % 60} min (waiting since "
+                            f"{a['last_at']:%d %b %H:%M} UTC, "
+                            f"{_e(a.get('oldest') or '')}). No review has "
+                            "reached them."))
+                continue
             out.append((f"silent:{a['agent']}:{now:%Y%m%d}",
                         "An automatic agent stopped",
                         f"<b>{_e(a['agent'])}</b> has not run for "
@@ -461,6 +473,10 @@ def event_alerts(rcur, since, now):
                         + ("New failures are not reaching a ticket: the "
                            "backend's intake pass is failing."
                            if a["agent"] == "intake" else
+                           "The backend cannot tell whether customer "
+                           "sessions are waiting for a review: its look "
+                           "(intake tick) is failing."
+                           if a["agent"] == "session review check" else
                            "New failures wait on tickets until it runs: the "
                            "Claude weekly limit, the Mac asleep, or the "
                            "scheduled task off.")))
@@ -696,6 +712,12 @@ def digest_sections(f):
                           f"{t['users']} customer"
                           f"{'s' if t['users'] != 1 else ''} · {_e(t['reason'])}")
         for a in fail.get("silent_agents") or []:
+            if a["agent"] == "session reviews":
+                failed.append(f"<b>Waiting for a review</b>: "
+                              f"{a.get('waiting') or 1} customer session(s), "
+                              f"the oldest since "
+                              f"{a['last_at']:%d %b %H:%M} UTC")
+                continue
             failed.append(f"<b>Not running</b>: {_e(a['agent'])}, last "
                           f"{a['last_at']:%d %b %H:%M} UTC")
         failed.append(f"Tickets now: {fail['open']} open, {fail['fixing']} "
