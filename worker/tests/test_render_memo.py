@@ -312,6 +312,17 @@ def test_probe_never_remembers_a_failed_or_cut_report(memo, monkeypatch):
     assert runs == [["broken"], ["broken"]]
 
 
+def test_glyph_exposure_does_not_reuse_an_ordinary_probe(memo, monkeypatch):
+    me, runs = _probe_env(monkeypatch)
+    ordinary = _Job("a" * 40)  # existing probe callers omit the optional flag
+    glyphs = _Job("a" * 40)
+    glyphs.glyph_exposure = True
+    me.probe([ordinary], [[0.5]])
+    me.probe([glyphs], [[0.5]])
+    me.probe([ordinary, glyphs], [[0.5], [0.5]])
+    assert runs == [["a" * 40], ["a" * 40]]
+
+
 def test_probe_with_a_measure_keys_on_the_measuring_code(memo, monkeypatch):
     import render_qc
     me, runs = _probe_env(monkeypatch)
