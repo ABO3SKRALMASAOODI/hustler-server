@@ -341,6 +341,7 @@ def test_nested_research_shares_only_its_own_film_cache(tmp_path):
 
 
 def test_completed_voice_does_not_start_another_model(tmp_path,monkeypatch):
+    C.save(tmp_path/'read-stage.json',{'script':{'segments':[]}})
     C.save(tmp_path/'longform_voice.json',{'after':{'ok':True}})
     C.save(tmp_path/'check.json',{'gate':{'pass':True}})
     monkeypatch.setattr(C,'guarded_voice',lambda *a:pytest.fail('completed checkpoint restarted'))
