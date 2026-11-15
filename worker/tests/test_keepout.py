@@ -339,6 +339,48 @@ def test_no_clear_zone_keeps_the_placement_and_says_why(monkeypatch):
     assert ctx.latest_edl()["json"]["motion"][0]["params"]["y"] == 0.4
 
 
+def test_automatic_hook_can_fit_below_faces_but_explicit_size_stays(monkeypatch):
+    # p5760: two faces span nearly the whole opening picture. Its automatic
+    # size 1.3 could neither clear their chins nor fit the lower safe band.
+    import first_cut
+    import time
+    monkeypatch.setattr(motion_tools, "_probe_item",
+                        _probe_by_y(height=0.16, width=(0.167, 0.833)))
+    track = [(t, [[0.0, 0.15, 0.935, 0.627], [0.42, 0.115, 1.0, 0.602]])
+             for t in (0.0, 0.5, 1.0, 1.5, 2.0, 2.5)]
+    monkeypatch.setattr(keepout, "face_track", lambda *a, **kw: track)
+    monkeypatch.setattr(first_cut.agent_tools, "execute",
+                        lambda ctx, name, args: motion_tools.add_motion_graphic(ctx, **args))
+    args = dict(template="hook_title", start=0, end=3,
+                params=first_cut.hook_params("Мы вначале все вперёд *побежали*", 0.42),
+                mute_captions=True)
+    ctx = _Ctx(default_edl(10), {"video": {"width": 1080, "height": 1920}}, 10)
+    explicit = motion_tools.add_motion_graphic(ctx, **args)
+    assert "stays where it is" in explicit
+    assert ctx._edl["motion"][0]["params"]["size"] == 1.3
+    ctx._edl["motion"] = []
+    result = first_cut._run(ctx, [], "add_motion_graphic", args, time.monotonic())
+    item = ctx._edl["motion"][0]
+    assert "KEEP-OUT" in result
+    assert item["params"]["size"] < 1.3
+    assert not keepout.assess(item["footprint"]["box"], track)["hit"]
+    assert not keepout.safe_issues(item["footprint"]["box"], 1080, 1920)
+    assert ctx.first_cut_auto_title_size is False
+
+
+def test_automatic_hook_size_scope_resets_after_failure(monkeypatch):
+    import first_cut
+    import time
+    from types import SimpleNamespace
+    ctx = SimpleNamespace()
+    def fail(ctx, name, args):
+        assert ctx.first_cut_auto_title_size
+        raise RuntimeError("probe unavailable")
+    monkeypatch.setattr(first_cut.agent_tools, "execute", fail)
+    first_cut._run(ctx, [], "add_motion_graphic", {"template": "hook_title"}, time.monotonic())
+    assert ctx.first_cut_auto_title_size is False
+
+
 def test_behind_subject_and_pointing_callouts_are_exempt():
     spec = motion_templates.spec
     assert not keepout.applicable("counter", spec("counter"), "behind_subject")

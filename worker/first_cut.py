@@ -1808,10 +1808,17 @@ def _run(ctx, steps, name, args, started):
         steps.append({"tool": name, "skipped": "time"})
         return None
     t0 = time.monotonic()
+    previous_auto_size = getattr(ctx, "first_cut_auto_title_size", False)
     try:
+        # This size is the chain's starting design, not an editor's pinned
+        # choice. Let the measured keep-out fit it clear of the speaker.
+        ctx.first_cut_auto_title_size = (
+            name == "add_motion_graphic" and args.get("template") == "hook_title")
         result = agent_tools.execute(ctx, name, args)
     except Exception as exc:  # noqa: BLE001 — one step never sinks the cut
         result = f"FAILED: {type(exc).__name__}: {str(exc)[:200]}"
+    finally:
+        ctx.first_cut_auto_title_size = previous_auto_size
     steps.append({"tool": name, "ok": not _failed(result),
                   "s": round(time.monotonic() - t0, 1),
                   "note": str(result or "")[:160]})

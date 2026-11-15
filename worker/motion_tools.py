@@ -1037,7 +1037,7 @@ BRIDGE_LINE_CHARS = caption_carry.BRIDGE_LINE_CHARS
 _bridged = caption_carry.bridged_box
 
 
-def _pinned_size(spec, item):
+def _pinned_size(spec, item, ctx=None):
     """The size knob (width/size/scale) the keep-out may NOT step down: one
     the editor set (a value other than the template's default). Oct 11 run:
     set_motion_graphic(width=0.544) came back at 0.435 — and an end-time-only
@@ -1046,6 +1046,9 @@ def _pinned_size(spec, item):
     the 7% floor, and the short was killed. An explicit size moves (y, x,
     align) or stays where it is with a NOTE; it is never shrunk silently.
     None when the size is the template's own default."""
+    if (getattr(ctx, "first_cut_auto_title_size", False)
+            and item.get("template") == "hook_title"):
+        return None
     pspec = (spec or {}).get("params") or {}
     sizer = next((k for k in ("width", "size", "scale")
                   if (pspec.get(k) or {}).get("type") == "float"), None)
@@ -1227,7 +1230,7 @@ def _keep_out_estimated(ctx, edl, item):
     bmark = None if mark is not None else _band_mark(item, W, H, ctx, edl)
     if keepout.on_mark(box, mark):
         issues.append("mark")
-    pin = _pinned_size(spec, item)
+    pin = _pinned_size(spec, item, ctx)
     bands = _caption_anchors(ctx, edl, item)
     notes = []
     if face_bad or (issues and not allow):
@@ -1362,7 +1365,7 @@ def _keep_out_inner(ctx, edl, item, rep):
     bmark = None if mark is not None else _band_mark(item, W, H, ctx, edl)
     if keepout.on_mark(box, mark):
         issues.append("mark")
-    pin = _pinned_size(spec, item)
+    pin = _pinned_size(spec, item, ctx)
     movable = keepout.applicable(template, spec, item.get("layer"))
     bands = _caption_anchors(ctx, edl, item)
     notes = []
