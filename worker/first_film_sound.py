@@ -205,7 +205,17 @@ def chain(ctx):
     l1 = {'fps': fps, 'dur_f': round(duration*fps), 'spine': spine,
           'items': items, 'assets': {'main': {'abs': src}}, 'sound': []}
     index = dict(ctx.index or {}, first_film={'frame': '9:16'})
-    sounds, report = sound.design(l1, src=src, index=index, bed=bool(edl.get('music')))
+    perception = None
+    if index.get('director_preparation'):
+        from score import preparation
+        restored = preparation.restore(index, src, ctx.workdir)
+        if restored:
+            index, perception = restored
+    # The coarse scene index misses cuts within montages. Reuse only the
+    # source-validated pixel measurements already made during indexing.
+    # No arranged track does not imply no music: the upload may carry a bed.
+    sounds, report = sound.design(l1, src=src, index=index, perc=perception,
+                                  bed=True if edl.get('music') else None)
     placed = []
     for item in sounds:
         if item.get('s') not in sound.library():

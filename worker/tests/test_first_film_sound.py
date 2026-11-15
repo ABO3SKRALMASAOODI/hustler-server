@@ -127,3 +127,28 @@ def test_opening_impact_keeps_its_attack_and_tail(monkeypatch):
     assert abs(out[0]['dur_s']+out[0]['trim_s']-.813)<1e-6
     assert out[0]['start_s'] == 0
     assert cue['trim_s'] == .513
+
+
+def test_chain_uses_validated_source_cuts_and_keeps_source_bed_detection(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    import agent_tools, music_gate
+    from score import sound, preparation
+    from first_film_sound import chain
+    edl = {'keep': [[0, 10]]}
+    index = {'director_preparation': {'version': 1},
+             'shots': [{'start': 0, 'end': 10}]}
+    ctx = SimpleNamespace(index=index, duration=10, workdir=str(tmp_path),
+                          latest_edl=lambda: {'json': edl}, proxy_path=lambda: 'source.mp4')
+    per = {'shots': [{'t': [i, i+2]} for i in range(0, 10, 2)]}
+    def restore(idx, src, work):
+        assert idx['first_film']['frame'] == '9:16'
+        assert src == 'source.mp4'
+        return idx, per
+    monkeypatch.setattr(preparation, 'restore', restore)
+    def design(l1, **kwargs):
+        assert kwargs['bed'] is None
+        events = sound.l1_events(l1, sound._kshots(kwargs['perc'], kwargs['index']))
+        assert [e['f'] for e in events] == [60, 120, 180, 240]
+        return [], {}
+    monkeypatch.setattr(sound, 'design', design)
+    assert chain(ctx)['placed_on_chain'] == 0
