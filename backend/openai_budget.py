@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
 
 CONFIG = "spend_fence"
 STATE = "openai_internal_budget"
@@ -26,6 +27,7 @@ LOCAL_CONFIG = Path.home() / ".config/valmera/openai-spend.json"
 ENV_FILE = Path("/Users/masaoodi/Documents/Valmera/hustler-server/backend/.env")
 _scope = contextvars.ContextVar("openai_internal_scope", default=None)
 _stopped = {}
+_resolved_scope = contextvars.ContextVar("openai_resolved_scope", default=None)
 
 
 class OverBudget(RuntimeError):
@@ -47,6 +49,9 @@ def scope(lane, run):
 
 
 def identity(lane=None, run=None):
+    inherited = _resolved_scope.get()
+    if inherited is not None:
+        return inherited
     bound = _scope.get()
     if bound:
         if bound[0] == "customer":
@@ -75,6 +80,19 @@ def identity(lane=None, run=None):
     if not run:
         raise OverBudget("OpenAI internal run identity missing; set OPENAI_INTERNAL_RUN (stable across retries).")
     return lane, hashlib.sha256((lane + ":" + str(run)).encode()).hexdigest()
+
+
+class ThreadPoolExecutor(_ThreadPoolExecutor):
+    """Propagate the owning spend identity, not a DB connection, into helpers."""
+    def submit(self, fn, /, *args, **kwargs):
+        owner = identity()
+        def invoke():
+            token = _resolved_scope.set(owner)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                _resolved_scope.reset(token)
+        return super().submit(invoke)
 
 
 def local_config():
@@ -193,8 +211,11 @@ class Lease:
         if usd is None:
             if usage is None:
                 return  # unknown billing stays reserved
-            if payload and payload.get("service_tier") and isinstance(usage, dict):
-                usage = dict(usage, service_tier=payload["service_tier"])
+            if payload and payload.get("service_tier"):
+                if not isinstance(usage, dict) and hasattr(usage, "model_dump"):
+                    usage = usage.model_dump()
+                if isinstance(usage, dict):
+                    usage = dict(usage, service_tier=payload["service_tier"])
             usd = openai_cache.cost(self.model, usage)
             if payload:
                 usd += .01 * sum(i.get("type") == "web_search_call" for i in payload.get("output", []))
@@ -249,7 +270,8 @@ def upper_bound(body):
         extra = .01 * n
     # Every input token may be a long cache write; reserve 2.5x, and the
     # long-context/priority surcharges. Savings release only after usage.
-    tier = 2 if body.get("service_tier") in ("priority", "fast") else 1
+    tier_name = body.get("service_tier") or (body.get("extra_body") or {}).get("service_tier")
+    tier = 2 if tier_name in ("priority", "fast") else 1
     long = 2 if tin > 272000 and model in ("gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol") else 1
     return tier * (tin * pin * 2.5 * long + cap * pout * (1.5 if long == 2 else 1)) / 1e6 + extra
 
@@ -345,7 +367,7 @@ def call(body, purpose, *, endpoint=None, **kw):
         yield lease
     except BaseException as exc:
         # Only a definite pre-generation HTTP rejection releases the money.
-        code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+        code = getattr(exc, "status_code", None) or getattr(exc, "code", None) or getattr(getattr(exc, "response", None), "status_code", None)
         if code in (400, 401, 403, 404, 422, 429):
             lease.settle(usd=0)
         raise
@@ -373,5 +395,5 @@ def completion(client, *, purpose="editor", lane=None, run=None, **body):
         if lease.token is not None:
             client = client.with_options(max_retries=0)
         response = client.chat.completions.create(**body)
-        lease.settle(getattr(response, "usage", None))
+        lease.settle(getattr(response, "usage", None), payload={"service_tier": getattr(response, "service_tier", None)})
         return response

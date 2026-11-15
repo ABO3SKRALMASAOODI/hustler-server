@@ -8,6 +8,7 @@ script.json: {"title", "segments": [{"say", "pictures", "dur"?}], "named": [{"na
 """
 import argparse
 import concurrent.futures as cf
+import openai_budget
 import json
 import math
 import os
@@ -228,7 +229,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         else:
             def opener(s):
                 return _open(s, work, log, hear_s, read_s)
-        with cf.ThreadPoolExecutor(max_workers=4) as pool:
+        with openai_budget.ThreadPoolExecutor(max_workers=4) as pool:
             sources = list(pool.map(opener, sources))
         # 4b. what YouTube would not open (it takes a machine for a bot, a video is gone) is looked for on archive.org:
         #     the same film under its own title first (the film libraries upload to both), then, for a subject none
@@ -270,7 +271,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         if failed or dead:
             log(f"archive round: {len(failed)} sources would not open, {len(dead)} subjects had none; {len(more)} archive sources to open")
         if more:
-            with cf.ThreadPoolExecutor(max_workers=4) as pool:
+            with openai_budget.ThreadPoolExecutor(max_workers=4) as pool:
                 sources += list(pool.map(opener, more))
         sources_seen[:] = sources
         spend["hear"] = round(sum(s.get("hear_usd") or 0.0 for s in sources), 5)
@@ -314,7 +315,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 c["source"] = mine[c["src"]]["key"]
             return checked, mu, lu
         pool_frames = []
-        with cf.ThreadPoolExecutor(max_workers=4) as pool:
+        with openai_budget.ThreadPoolExecutor(max_workers=4) as pool:
             for checked, mu, lu in pool.map(per_subject, range(len(subjects))):
                 pool_frames += checked
                 spend["moments"] += mu
@@ -351,7 +352,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             except Exception as e:  # noqa: BLE001 the cut falls back to yt-dlp's own section download
                 log(f"stream of {k} not resolved: {str(e)[:120]}")
                 return k, None
-        with cf.ThreadPoolExecutor(max_workers=4) as pool:
+        with openai_budget.ThreadPoolExecutor(max_workers=4) as pool:
             stream_of = dict(pool.map(resolve, need_src))
         jobs = [(r, p) for r in plan_rows for p in r["picks"]]
         whole_of, whole_lock = {}, threading.Lock()
@@ -391,7 +392,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 p["error"] = str(e)[:200]
                 log(f"cut of {p['source']} at {t0:.1f} s failed: {p['error'][:140]}")
             return p
-        with cf.ThreadPoolExecutor(max_workers=4) as pool:
+        with openai_budget.ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(grab, jobs))
         if reassign_lost:
             # a cut that failed (a bot wall, a timeout) marks its source dead for cutting; the lines that lost picks are
@@ -408,7 +409,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 more = assign([dict(ln, want_n=lost[ln["i"]]) for ln in again], [c for c in good if c["source"] not in dead], src_of, shows, taken,
                               shot_s=shot_s, line_max=line_max, strict=strict_lines, motion_of=motion_of if motion_first else None, alloc=alloc)
                 need2 = sorted({p["source"] for r in more for p in r["picks"]} - set(stream_of))
-                with cf.ThreadPoolExecutor(max_workers=4) as pool:
+                with openai_budget.ThreadPoolExecutor(max_workers=4) as pool:
                     stream_of.update(dict(pool.map(resolve, need2)))
                 jobs2 = []
                 by_i = {r["i"]: r for r in plan_rows}
@@ -417,7 +418,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                     row["replaced"] = len(r2["picks"])
                     row["picks"] += r2["picks"]
                     jobs2 += [(row, p) for p in r2["picks"]]
-                with cf.ThreadPoolExecutor(max_workers=4) as pool:
+                with openai_budget.ThreadPoolExecutor(max_workers=4) as pool:
                     list(pool.map(grab, jobs2))
                 jobs = [(r, p) for r in plan_rows for p in r["picks"]]
                 log(f"reassigned: {sum(lost.values())} lost picks on {len(again)} lines, {sum(r.get('replaced', 0) for r in plan_rows)} replaced")
@@ -435,7 +436,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 p["file"] = os.path.relpath(out, out_dir)
             except Exception as e:  # noqa: BLE001
                 p["error"] = str(e)[:200]
-        with cf.ThreadPoolExecutor(max_workers=4) as pool:
+        with openai_budget.ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(finish, jobs))
         # Verify each finished cut, not the source video's title or a single scout frame.
         from . import verify
@@ -456,7 +457,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 os.remove(os.path.join(out_dir, p.pop("file")))
             return usd
         if os.environ.get("FOOTAGE_VERIFY", "1") != "0":
-            with cf.ThreadPoolExecutor(max_workers=2) as pool:
+            with openai_budget.ThreadPoolExecutor(max_workers=2) as pool:
                 spend["look"] += sum(pool.map(verify_cut, jobs))
         else:
             log("verify pass off (FOOTAGE_VERIFY=0): the caller gates every take by its own verdicts")

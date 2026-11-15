@@ -36,7 +36,8 @@ import json
 import os
 import re
 import subprocess
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from openai_budget import ThreadPoolExecutor
+from concurrent.futures import as_completed
 
 import config
 import net_fetch

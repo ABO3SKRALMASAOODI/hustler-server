@@ -58,7 +58,7 @@ def read(path):
         return None
     try:
         obj = json.loads(path.read_text())
-        if (obj.get("version") == 1 and isinstance(obj.get("rows"), list) and obj['rows']
+        if (obj.get("version") == 1 and isinstance(obj.get("rows"), list)
                 and all(isinstance(r, dict) and isinstance(r.get('text'), str)
                         and isinstance(r.get('t0'), (int, float)) and isinstance(r.get('t1'), (int, float))
                         for r in obj['rows'])):

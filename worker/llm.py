@@ -252,9 +252,9 @@ def fence(model):
     nothing bought on doubt is worth another 4 Nov."""
     global _unmigrated_said
     lane = spend_lane()
+    openai_budget.raise_if_stopped(lane)
     if lane == spend_ledger.CUSTOMER:
         return
-    openai_budget.raise_if_stopped(lane)
     provider = spend_ledger.provider_of(model)
     try:
         room = _on_ledger(spend_ledger.room, lane, provider)

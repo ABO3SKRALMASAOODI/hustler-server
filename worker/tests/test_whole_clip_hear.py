@@ -60,3 +60,12 @@ def test_budget_stop_never_falls_back_or_sends(clip,monkeypatch):
 def test_bad_timestamps_cannot_become_a_cached_success():
     with pytest.raises(ValueError):
         hear._timed_rows([dict(start=5,end=7,text='later'),dict(start=1,end=3,text='earlier')],10)
+
+
+def test_silent_whole_clip_is_cached(clip,monkeypatch):
+    monkeypatch.setenv('FOOTAGE_HEAR_PROVIDER','local')
+    calls=[]
+    monkeypatch.setattr(hear,'_local_clip',lambda *a: calls.append(1) or [])
+    assert hear.transcribe(clip,4)==([],0)
+    assert hear.transcribe(clip,4)==([],0)
+    assert calls==[1]

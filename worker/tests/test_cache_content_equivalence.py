@@ -1,6 +1,6 @@
 """Execute pre-fix builders from a pinned Git snapshot and current builders.
 
-Compare all text tokens (multiplicity), image bytes, tools and generation knobs.
+Compare exact nonempty text lines (multiplicity), image bytes and tool values.
 Whitespace/message boundaries/cache metadata may differ. This proves content
 preservation, not identical stochastic answers or instruction-role semantics.
 Named thumbnails retain identical pixels; their explicit low detail is separately
@@ -140,3 +140,15 @@ def test_cache_wrapper_preserves_all_tools_and_request_content():
     assert result['input'][1:]==original['input']
     assert sorted(result['tools'],key=lambda x:x['name'])==sorted(original['tools'],key=lambda x:x['name'])
     assert result['max_output_tokens']==original['max_output_tokens']
+
+
+@pytest.mark.parametrize('key',['shell_parts','writer_parts','director_parts'])
+def test_provider_converters_preserve_exact_text_images_and_order(key):
+    before,after=functions(key,{'_text':lambda b:b.get('text','') if isinstance(b,dict) else str(b)})
+    parts=[{'type':'text','text':'First line.\nSecond line!', 'cache_control':{'type':'ephemeral'}},
+           {'type':'image','source':{'type':'base64','media_type':'image/png','data':'EXACT-BYTES'}},
+           {'type':'text','text':'The final request.'}]
+    old,new=before(parts),after(parts)
+    assert old == [{k:v for k,v in p.items() if k!='prompt_cache_breakpoint'} for p in new]
+    assert new[0]['prompt_cache_breakpoint']['ttl']=='30m'
+    assert parts[0]['cache_control']=={'type':'ephemeral'}

@@ -186,6 +186,7 @@ def check(subject, lines, cands, sources, work, budget_s=120.0):
     cell keeps only the lines where all three are true, and a sheet holds BRIEF_PER_SHEET cells at BRIEF_CELL_W x
     BRIEF_CELL_H. Without a brief, exactly as before."""
     import concurrent.futures as cf
+    import openai_budget
     brief = has_brief(lines)
     contextual = any(ln.get('visual') for ln in lines)
     ls = _listing(lines)
@@ -237,7 +238,7 @@ def check(subject, lines, cands, sources, work, budget_s=120.0):
     # cannot reuse one another; every batch still checks the same candidates.
     if groups:
         res, usd = one(0)
-    with cf.ThreadPoolExecutor(max_workers=4) as pool:
+    with openai_budget.ThreadPoolExecutor(max_workers=4) as pool:
         for out, u in pool.map(one, range(1, len(groups))):
             res += out
             usd += u

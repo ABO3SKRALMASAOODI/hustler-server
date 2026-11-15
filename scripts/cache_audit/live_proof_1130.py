@@ -125,6 +125,7 @@ def usage_row(site,attempt,body,payload):
     tokens=openai_cache.tokens(u)
     cached=details.get('cached_tokens')
     return dict(site=site,attempt=attempt,model=body['model'],request_id=payload.get('id'),
+                request_sha256=hashlib.sha256(json.dumps(body,sort_keys=True).encode()).hexdigest(),
                 input_tokens=tokens['prompt_tokens'],cached_tokens=cached,
                 cached_share=cached/tokens['prompt_tokens'] if cached is not None and tokens['prompt_tokens'] else None,
                 usd=openai_cache.cost(body['model'],dict(u,service_tier=payload.get('service_tier'))) if u else None,

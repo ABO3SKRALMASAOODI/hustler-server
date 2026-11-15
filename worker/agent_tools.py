@@ -26042,6 +26042,8 @@ class _DeferredRecorder:
             self.credit_price_aliases = real.credit_price_aliases
         if hasattr(real, "spend_lane"):
             self.spend_lane = real.spend_lane
+        if hasattr(real, "job_id"):
+            self.job_id = real.job_id
 
     def __call__(self, *args):
         self.rows.append(args)

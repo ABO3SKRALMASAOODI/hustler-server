@@ -143,6 +143,7 @@ def test_the_store_may_write_the_ledger_and_still_nothing_else():
 # purpose, with its charge. The rest are one-token probes and the retired app
 # builder, which CLAUDE.md says not to touch.
 BACKEND_PROVIDER_FILES = {
+    "openai_budget.py",               # centralized reservation before SDK transport
     "routes/video.py",                # the concierge: _meter_concierge
     "routes/auth.py", "routes/ai_proxy.py",   # retired app builder
     "scripts/claude_credit_probe.py", "scripts/probe_advanced_model.py",

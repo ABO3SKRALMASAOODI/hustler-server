@@ -2,20 +2,15 @@
 
 One pass preserves actual segment times; repeats use the bounded content cache.
 """
-import concurrent.futures as cf
 import os
-import re
+import math
 import subprocess
 import tempfile
-import shutil
-import hashlib
-import json
 
 from . import fetch, transcript_cache
 
-MODEL = os.environ.get("FOOTAGE_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+MODEL = "whisper-1"  # explicit OpenAI opt-in; supports actual timestamps
 USD_PER_MIN = 0.006
-PIECE_S = 12.0
 URL = "https://api.openai.com/v1/audio/transcriptions"
 LOCAL_MAX_S = float(os.environ.get("FOOTAGE_HEAR_LOCAL_MAX_S", "900"))
 
@@ -25,86 +20,12 @@ def _key():
     return config.OPENAI_API_KEY
 
 
-def splits(path, dur):
-    """Piece boundaries: every PIECE_S, moved to the middle of a silence within 4 s of the mark."""
-    r = subprocess.run([fetch.ffmpeg(), "-hide_banner", "-nostats", "-t", f"{dur:.2f}", "-i", path, "-vn",
-                        "-af", "silencedetect=noise=-32dB:d=0.25", "-f", "null", "-"], capture_output=True, text=True)
-    starts = [float(x) for x in re.findall(r"silence_start: ([0-9.]+)", r.stderr)]
-    ends = [float(x) for x in re.findall(r"silence_end: ([0-9.]+)", r.stderr)]
-    mids = [(a + b) / 2 for a, b in zip(starts, ends)]
-    out, t = [0.0], 0.0
-    while t + PIECE_S < dur - 2.0:
-        mark = t + PIECE_S
-        near = [m for m in mids if abs(m - mark) <= 4.0 and m > t + 4.0]
-        t = min(near, key=lambda m: abs(m - mark)) if near else mark
-        out.append(round(t, 2))
-    out.append(round(dur, 2))
-    return out
-
-
 def _credit_open():
     try:
         import openai_credit
         return openai_credit.available()
     except Exception:  # noqa: BLE001 - no gate module: OpenAI as before
         return True
-
-
-def _one(path, t0, t1, tmp, i, source_hash=None):
-    # Content plus exact interval/model, never a URL, filename or project ID.
-    source_hash = source_hash or transcript_cache.digest(path, {"version": 1})
-    key = hashlib.sha256(json.dumps([source_hash, MODEL, t0, t1, 1]).encode()).hexdigest()
-    with transcript_cache.locked(key) as cache:
-        rows = transcript_cache.read(cache)
-        if rows is not None:
-            return dict(rows[0], usd=0.0)
-        row = _transcribe_piece(path, t0, t1, tmp, i)
-        if not row.get("local"):
-            transcript_cache.write(cache, [row])
-        return row
-
-
-def _transcribe_piece(path, t0, t1, tmp, i):
-    import httpx, openai_budget
-    if not _credit_open():
-        return dict(t0=t0, t1=t1, text="", local=True)
-    piece = os.path.join(tmp, f"{i}.mp3")
-    encoded = subprocess.run([fetch.ffmpeg(), "-hide_banner", "-loglevel", "error", "-ss", f"{t0:.2f}", "-t", f"{t1 - t0:.2f}", "-i", path,
-                    "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k", "-y", piece], capture_output=True)
-    if encoded.returncode or not os.path.exists(piece) or os.path.getsize(piece) < 1500:
-        return dict(t0=t0, t1=t1, text="", error="audio extraction failed")
-    for k in range(3):
-        try:
-            with openai_budget.call({"model": MODEL}, "footage_hear", ceiling_usd=(t1-t0)/60*.02) as lease, open(piece, "rb") as f:
-                r = httpx.post(URL, headers={"Authorization": f"Bearer {_key()}"}, files={"file": (f"{i}.mp3", f, "audio/mpeg")},
-                               data={"model": MODEL, "response_format": "json"}, timeout=90)
-            if r.status_code == 200:
-                import openai_cache
-                payload = r.json()
-                usage = payload.get("usage")
-                reported = isinstance(usage, dict) and usage.get("type") == "tokens" and MODEL in openai_cache.PRICES
-                usd = openai_cache.cost(MODEL, usage) if reported else (t1 - t0) / 60.0 * USD_PER_MIN
-                lease.settle(usage, usd=usd)
-                openai_cache.record(MODEL, "footage_hear", usage, usd=usd,
-                                    seconds=t1 - t0, audio_sha256=transcript_cache.digest(piece, {"model": MODEL}),
-                                    piece_start_s=t0, piece_end_s=t1,
-                                    cost_basis="reported_tokens" if reported else "audio_duration_estimate")
-                return dict(t0=t0, t1=t1, text=(payload.get("text") or "").strip(), usd=usd)
-            if r.status_code in (400, 401, 403, 404, 422, 429):
-                lease.settle(usd=0)
-            import openai_cache
-            openai_cache.record(MODEL, "footage_hear", usd=0.0, status="http_error", http_status=r.status_code)
-            import openai_credit
-            if openai_credit.note(r.text[:400], "footage_hear", status=r.status_code):
-                return dict(t0=t0, t1=t1, text="", local=True)
-            if r.status_code < 500 and r.status_code != 429:
-                break
-        except httpx.HTTPError:
-            if r.status_code in (400, 401, 403, 404, 422, 429):
-                lease.settle(usd=0)
-            import openai_cache
-            openai_cache.record(MODEL, "footage_hear", status="transport_error", billing_unconfirmed=True)
-    return dict(t0=t0, t1=t1, text="", error="not heard")
 
 
 def _provider():
@@ -117,7 +38,10 @@ def _timed_rows(segments, duration):
     rows = []
     for seg in segments:
         get = seg.get if isinstance(seg, dict) else lambda k, d=None: getattr(seg, k, d)
-        a, b = max(0.0, float(get("start", 0))), min(duration, float(get("end", 0)))
+        raw_a, raw_b = float(get("start")), float(get("end"))
+        if not math.isfinite(raw_a) or not math.isfinite(raw_b) or raw_b < raw_a:
+            raise ValueError("transcriber returned invalid timestamps")
+        a, b = max(0.0, raw_a), min(duration, raw_b)
         text = str(get("text", "") or "").strip()
         if b > a and text:
             rows.append(dict(t0=round(a, 3), t1=round(b, 3), text=text))
@@ -142,7 +66,7 @@ def _openai_clip(audio, duration):
     is validated. Local Whisper remains the default.
     """
     import httpx, openai_budget, openai_cache, openai_credit
-    model = "whisper-1"
+    model = MODEL
     with openai_budget.call({"model": model}, "footage_hear", ceiling_usd=duration / 60 * USD_PER_MIN + .006) as lease:
         with open(audio, "rb") as f:
             response = httpx.post(URL, headers={"Authorization": f"Bearer {_key()}"},
@@ -180,7 +104,7 @@ def transcribe(path, dur, workers=8):
     model = "whisper-1" if provider == "openai" else str(config.WHISPER_MODEL)
     key = transcript_cache.digest(path, dict(provider=provider, model=model, duration=duration,
                                             version=2, beam_size=1, vad=True, word_timestamps=True))
-    with transcript_cache.locked(key, namespace="clip") as cache:
+    with transcript_cache.locked(key, namespace=provider + "-clip") as cache:
         rows = transcript_cache.read(cache)
         if rows is not None:
             return rows, 0.0
@@ -204,7 +128,13 @@ def transcribe(path, dur, workers=8):
                     openai_budget.propagate(exc)
                     # Cache the local fallback under its own provider identity.
                     # No recursive provider call, no second paid attempt.
-                    rows = _local_clip(wav, duration)
+                    local_key = transcript_cache.digest(path, dict(provider="local", model=str(config.WHISPER_MODEL),
+                        duration=duration, version=2, beam_size=1, vad=True, word_timestamps=True))
+                    with transcript_cache.locked(local_key, namespace="local-clip") as local_cache:
+                        rows = transcript_cache.read(local_cache)
+                        if rows is None:
+                            rows = _local_clip(wav, duration)
+                            transcript_cache.write(local_cache, rows)
                     return rows, 0.0
             else:
                 rows = _local_clip(wav, duration)

@@ -75,6 +75,9 @@ def test_service_copies_are_identical():
 
 
 def test_workflow_terminal_responses_are_logged_before_failures(tmp_path, monkeypatch):
+    import openai_budget
+    # Admission/DB concurrency is exercised in test_openai_budget_postgres.
+    monkeypatch.setattr(openai_budget, "reserve", lambda *a, **kw: openai_budget.Lease())
     import importlib.util
     import httpx
     root = Path(__file__).resolve().parents[2]
@@ -133,6 +136,9 @@ def test_narration_script_is_a_cache_boundary_before_the_changing_chunk():
 @pytest.mark.parametrize('relative', ['_shell/llm.py', 'valmera-stories/writer.py'])
 @pytest.mark.parametrize('terminal', [False, True])
 def test_each_interrupted_workflow_attempt_is_metered(tmp_path, monkeypatch, relative, terminal):
+    import openai_budget
+    # Admission/DB concurrency is exercised in test_openai_budget_postgres.
+    monkeypatch.setattr(openai_budget, "reserve", lambda *a, **kw: openai_budget.Lease())
     import importlib.util
     import httpx
     root = Path(__file__).resolve().parents[2]

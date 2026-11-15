@@ -123,3 +123,40 @@ def test_mirrors_are_identical():
     root = Path(__file__).resolve().parents[2]
     assert (root/'worker/openai_budget.py').read_bytes() == (root/'backend/openai_budget.py').read_bytes()
     assert (root/'worker/openai_budget.py').read_bytes() == (root/'plugins/valmera/skills/_shell/openai_budget.py').read_bytes()
+
+
+def test_nested_pools_keep_the_same_run_and_customer_identity(monkeypatch):
+    monkeypatch.delenv('VALMERA_SKILL', raising=False)
+    monkeypatch.delenv('VALMERA_RUN', raising=False)
+    monkeypatch.delenv('GAUNTLET_RUN', raising=False)
+    for lane in ('customer','replay','workflow'):
+        with b.scope(lane,'same-film'):
+            expected=b.identity()
+            def nested():
+                with b.ThreadPoolExecutor(max_workers=1) as pool:
+                    return pool.submit(b.identity).result()
+            with b.ThreadPoolExecutor(max_workers=2) as pool:
+                assert pool.submit(nested).result()==expected
+
+
+def test_budget_stop_is_not_a_provider_fallback(monkeypatch):
+    monkeypatch.setattr(b,'_reserve',lambda *a,**k: (_ for _ in ()).throw(b.OverBudget('daily cap')))
+    with b.scope('replay','one'):
+        with pytest.raises(b.OverBudget): b.reserve({},'test')
+        with pytest.raises(b.OverBudget): b.raise_if_stopped()
+    with b.scope('customer','two'):
+        b.raise_if_stopped()
+
+
+def test_legacy_workflow_usage_is_read_without_treating_unknown_as_free(tmp_path,monkeypatch):
+    path=tmp_path/'spend.jsonl'
+    monkeypatch.setenv('VALMERA_OPENAI_SPEND_LOG',str(path))
+    path.write_text(json.dumps({'ts':'2026-11-30T01:00:00Z','usd':1.25})+'\n')
+    assert b.legacy_workflow_total('2026-11-30')==1_250_000
+    with path.open('a') as f:f.write(json.dumps({'ts':'2026-11-30T01:01:00Z','usd':None,'billing_unconfirmed':True})+'\n')
+    with pytest.raises(b.OverBudget):b.legacy_workflow_total('2026-11-30')
+
+
+def test_priority_extra_body_is_included_in_admission():
+    body={'model':'gpt-6-sol','input':'fixed','max_output_tokens':512}
+    assert b.upper_bound(dict(body,extra_body={'service_tier':'priority'})) >= 2*b.upper_bound(body)
