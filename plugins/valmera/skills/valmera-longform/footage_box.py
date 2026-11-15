@@ -43,6 +43,9 @@ os.environ['SKIP_DB_INIT'] = '1'
 __OFFLINE__
 scratch=pathlib.Path(sys.argv[1]).parent
 from footage import run, cut, plan, fetch
+if os.environ.get('CODEX_PROXY_LOCAL')=='1':
+    import box_hear
+    box_hear.install()
 cut.MAX_S = 7.8
 run.SHOT_S = 4.5
 # Long-form rescue/mechanism scenes often occur after the short-form scanner's
@@ -283,10 +286,12 @@ for item in info['Config']['Env']:
 pathlib.Path(cache).mkdir(exist_ok=True)
 job=json.load(open(scratch+'/input.json'));cpus,memory=(2,4) if job.get('_voices') else (4,8)
 cmd=['docker','run','--rm','-i','--name',name,'--cpus',str(cpus),'--memory',str(memory)+'g',
-     '-v',scratch+':'+scratch,'-v',cache+':/wf4-model-cache','-e','HF_HOME=/wf4-model-cache',
+     '-v',scratch+':'+scratch,'-v',cache+':/wf4-model-cache',
+     '-e','FOOTAGE_TRANSCRIPT_CACHE=/wf4-model-cache/transcripts',
      '--entrypoint','python']
 if port!='off':
     cmd.extend(['--network','host','-e','CODEX_PROXY_LOCAL=1',
+                '-e','HF_HOME=/opt/hf','-e','HF_HUB_OFFLINE=1',
                 '-e','OPENAI_BASE_URL=http://127.0.0.1:'+port+'/v1',
                 '-e','PYTHONPATH='+scratch+'/client',
                 '-e','CODEX_PROXY_PROOF=wf4-box-'+name])
@@ -346,6 +351,7 @@ def fetch(payload, out, log=print, _port=None):
         if _port is not None:
             from subscription_box import client_files
             files=client_files(_port)
+            if not probing:files['box_hear.py']=Path(__file__).with_name('box_hear.py').read_bytes()
             files['footage_ask.py']=(Path(__file__).resolve().parents[4]/'worker/footage/ask.py').read_bytes()
             for name,data in files.items():
                 t=tarfile.TarInfo(name);t.size=len(data);tf.addfile(t,io.BytesIO(data))

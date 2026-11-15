@@ -129,3 +129,25 @@ def test_box_search_uses_only_model_referenced_subjects():
     scoped,usd=namespace['scoped_plan']([],[])
     assert scoped['subjects']==[{'name':'needed mechanism'}]
     assert scoped['lines']==result['lines'] and usd==0
+
+
+def test_box_listener_hears_whole_source_once_and_reuses_transcript(tmp_path,monkeypatch):
+    import cinema as C
+    C.worker()
+    import box_hear as B
+    from footage import hear
+    audio=tmp_path/'source.mp4';audio.write_bytes(b'original archive')
+    monkeypatch.setenv('FOOTAGE_TRANSCRIPT_CACHE',str(tmp_path/'transcripts'))
+    seen=[]
+    model=SimpleNamespace(transcribe=lambda p,**kw:seen.append(kw))
+    monkeypatch.setitem(sys.modules,'transcribe',SimpleNamespace(get_model=lambda:model))
+    monkeypatch.setattr(hear,'splits',lambda p,d:[0.,12.,24.])
+    def listen(path,cuts,idx,tmp,model):
+        model.transcribe(path,beam_size=1,vad_filter=True)
+        return {0:'First thought.',1:'Second thought.'}
+    monkeypatch.setattr(hear,'local_hear',listen)
+    expected=[{'t0':0.,'t1':12.,'text':'First thought.'},{'t0':12.,'t1':24.,'text':'Second thought.'}]
+    assert B.transcribe(str(audio),24.)==(expected,0.)
+    assert B.transcribe(str(audio),24.)==(expected,0.)
+    assert len(seen)==1 and seen[0]['beam_size']==5
+    assert not list(tmp_path.glob('local-hear-*'))
