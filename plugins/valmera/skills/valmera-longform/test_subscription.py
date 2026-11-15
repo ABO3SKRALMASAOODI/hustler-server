@@ -181,7 +181,7 @@ def test_cli_keeps_new_media_outside_lane_and_resumes_existing_state(tmp_path,mo
 
 def test_coverage_repair_searches_missing_words_with_context_verification(tmp_path,monkeypatch):
     import cinema as C
-    import archive_script,archive_visual,footage_box
+    import archive_script,archive_visual,footage_box,timeline_repair
     import os
     for key in ('TMPDIR','VALMERA_SKILL','VALMERA_RUN','WF4_SPEND_LOG'):
         monkeypatch.setenv(key,os.environ.get(key,''))
@@ -201,9 +201,12 @@ def test_coverage_repair_searches_missing_words_with_context_verification(tmp_pa
     def uncovered(*a):
         raise C.CoverageError([dict(seg=0,seconds=1.8,heard='Then the wing sprang open.',words=sentence)])
     monkeypatch.setattr(C,'schedule',uncovered)
+    continued=[]
+    monkeypatch.setattr(timeline_repair,'continue_still',lambda *a:continued.append(a[3]) or False)
     class StopAfterRequest(Exception):pass
     seen=[]
     def capture(payload,*a):
+        assert len(continued)==1
         seen.append(payload);raise StopAfterRequest()
     monkeypatch.setattr(footage_box,'fetch',capture)
     with pytest.raises(StopAfterRequest):C.supply(ctx,script)

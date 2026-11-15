@@ -378,6 +378,13 @@ def supply(ctx, script):
     coverage_words=str(clean_words if clean_words.exists() else nd/'words.json')
     wj=read(coverage_words)
     expected={i:s['say'] for i,s in enumerate(sc['segments'])}
+    # Resume a recorded edit before commissioning more source research. A
+    # newly assigned figure may cover an adjacent clause as one checked move.
+    try:schedule(sc,coverage_words,ft)
+    except CoverageError as partial:
+        from timeline_repair import continue_still
+        if continue_still(ctx,script,ft,partial,coverage_words):
+            save(Path(ctx.supply)/'footage'/'footage.json',ft)
     for attempt in range(2):
         try:
             schedule(sc,coverage_words,ft)
