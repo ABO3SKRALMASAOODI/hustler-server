@@ -103,6 +103,18 @@ def test_archive_revision_preserves_prior_read_and_resumes_without_erasing_new_a
     assert (supply/'narration/new.wav').read_bytes()==b'revised-read'
 
 
+def test_script_reorder_keeps_unchanged_sentence_take_budget(tmp_path):
+    from archive_script import preserve_takes
+    old=tmp_path/'old';new=tmp_path/'new';old.mkdir();new.mkdir();(old/'_takes').mkdir()
+    C.save(old/'_generations.json',dict(segments=[dict(text='Keep this sentence.'),dict(text='Rewrite this one.')]))
+    for i in range(30):(old/'_takes'/f's00_t{i:02d}.wav').write_bytes(str(i).encode())
+    groups=dict(segments=[dict(text='A new sentence.'),dict(text='Keep this sentence.')])
+    kept=preserve_takes(old,new,groups)
+    assert kept==[dict(before=0,after=1,takes=30)]
+    assert len(list((new/'_takes').glob('s01_t*.wav')))==30
+    assert not list((new/'_takes').glob('s00_t*.wav'))
+
+
 def test_checked_picture_follows_its_word_when_narration_timing_changes():
     import timeline_repair as R
     sc={'segments':[{'say':'Alpha beta.','chapter':'c'}]}

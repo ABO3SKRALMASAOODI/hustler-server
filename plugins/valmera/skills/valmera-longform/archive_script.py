@@ -4,7 +4,29 @@ Models interpret the story and evidence. String checks only validate citations,
 word anchors and catalogue identifiers; the encoded-film gates stay unchanged.
 """
 from pathlib import Path
-import copy,json
+import copy,json,shutil
+
+
+def preserve_takes(prior,current,new_groups):
+    """Reindex unchanged spoken groups without resetting their take budget."""
+    import cinema as C
+    prior,current=Path(prior),Path(current)
+    generations=prior/'_generations.json'
+    if not generations.exists():return []
+    old=C.read(generations);kept=[]
+    for j,after in enumerate(new_groups['segments']):
+        matches=[i for i,before in enumerate(old['segments']) if before['text']==after['text']]
+        if not matches:continue
+        # If the previous draft repeated this group, retain its fullest budget.
+        i=max(matches,key=lambda i:len(list((prior/'_takes').glob(f's{i:02d}_t*.wav'))))
+        files=list((prior/'_takes').glob(f's{i:02d}_t*.wav'))
+        if not files:continue
+        dest=current/'_takes';dest.mkdir(exist_ok=True)
+        for src in files:
+            target=dest/(f's{j:02d}_'+src.name.split('_',1)[1])
+            if not target.exists():shutil.copy2(src,target)
+        kept.append(dict(before=i,after=j,takes=len(files)))
+    return kept
 
 
 def propose(ctx,script,catalogue):
@@ -139,6 +161,11 @@ def apply(ctx,script,ft,proposal,catalogue):
     old_voice=root/'narration-before';nd=Path(ctx.supply)/'narration'
     if nd.exists() and not old_voice.exists():nd.rename(old_voice)
     nd.mkdir(exist_ok=True)
+    if not (root/'reused-takes.json').exists():
+        import voice
+        ns=story.narration_script(C.read(after_script)['script'])
+        groups=voice.group_script(ns,voice.groups_of(ns['segments']))
+        C.save(root/'reused-takes.json',preserve_takes(old_voice,nd,groups))
     for name in ('structure.json','hook_measured.json'):
         src=Path(ctx.run_dir)/name
         if src.exists():src.rename(root/('before-'+name))
