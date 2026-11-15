@@ -201,3 +201,23 @@ def test_perception_cannot_relabel_a_neighbouring_shots_face_as_local():
     # retain their existing nearest-sample behavior.
     assert face_at(rows, 6.6, []) is None
     assert face_at(rows, 6.6) == rows[0]["faces"][0]
+
+
+def test_source_review_does_not_seek_into_the_audio_only_tail(monkeypatch, tmp_path):
+    # Actual p5533: audio/container24.803333,743 video frames at30fps.
+    import media
+    from PIL import Image
+    from score import boards
+    monkeypatch.setattr(media, 'probe', lambda _: {'duration': 24.803,
+        'video_duration': 24.767, 'fps': 30.})
+    sampled = []
+    def grab(path, t, **kwargs):
+        sampled.append(t)
+        return Image.new('RGB', (40, 60)) if t <= 742 / 30 else None
+    monkeypatch.setattr(boards, 'grab', grab)
+    monkeypatch.setattr(source_screen.llm, 'ask_vision', lambda *a, **k:
+        '{"reviewed_all_frames":true,"branding_screen_present":false}')
+    result = source_screen.build('proxy.mp4', 24.803, 30., [], 'sha', str(tmp_path))
+    assert max(sampled) == 24.733
+    assert result['safe_end_s'] == 24.803  # real audio is not silently cut away
+    assert result['source_duration_s'] == 24.803

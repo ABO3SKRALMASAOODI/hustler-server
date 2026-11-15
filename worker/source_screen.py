@@ -58,9 +58,16 @@ def interpret(answer, times, duration, fps):
 
 def build(src, duration, fps, shots, sha, workdir, recorder=None):
     from score import boards
+    import media
     if recorder is not None:
         llm.set_recorder(recorder)
-    times = sample_times(duration, fps, shots)
+    # The inspected proxy's picture clock can end before the container's
+    # audio clock (p5533 has 743 frames but a longer AAC tail). Review actual
+    # picture frames; retain the source/audio duration in the verdict below.
+    picture = media.probe(src)
+    picture_duration = min(float(duration), float(picture.get("video_duration") or picture["duration"]))
+    picture_fps = float(picture.get("fps") or fps)
+    times = sample_times(picture_duration, picture_fps, shots)
     folder = os.path.join(workdir, "source-screen")
     os.makedirs(folder, exist_ok=True)
     paths = []
