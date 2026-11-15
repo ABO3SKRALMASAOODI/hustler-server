@@ -494,13 +494,84 @@ def test_the_picture_gate_draws_again_once_then_stops_before_delivery(tmp_path, 
     seen = []
     monkeypatch.setattr(W3, "check_once", lambda ctx, rd, sc: (dict(checks=dict(ok=False)), _fc(1.2)))
     monkeypatch.setattr(W3, "score", lambda ctx, s: seen.append(("score", W3.render_drop(ctx))) or {})
-    monkeypatch.setattr(W3, "render", lambda ctx, s, sc: seen.append("render") or {})
+    film = tmp_path / "repaired.mp4"
+    def render(ctx, s, sc):
+        seen.append("render")
+        film.write_bytes(b"rendered")
+        return dict(film=str(film))
+    monkeypatch.setattr(W3, "render", render)
     with pytest.raises(RuntimeError, match="picture gate"):
         W3.check(ctx, {}, {})
     assert seen == [("score", ["bad.jpg@1"]), "render"]                    # dropped, scored and drawn again once
     with pytest.raises(RuntimeError):                                      # a resumed check never loops: it stops again
         W3.check(ctx, {}, {})
     assert len(seen) == 2
+    evidence = json.loads((tmp_path / "run" / "check_attempt.json").read_text())
+    assert evidence["checks"]["stories"]["picture_gate"]["after"] == 1.2
+
+
+def test_picture_repair_resumes_after_score_refusal_without_checking_deleted_film(tmp_path, monkeypatch):
+    import pytest
+    import wf3 as W3
+    ctx = _ctx(tmp_path)
+    (tmp_path / "run" / "script.json").write_text(json.dumps(dict(script={})))
+    original = tmp_path / "film_engine.mp4"
+    original.write_bytes(b"old")
+    calls = []
+    def check_once(ctx, rd, sc):
+        assert os.path.exists(rd["film"])
+        calls.append(("check", sc["version"]))
+        return dict(checks=dict(ok=sc["version"] == "repair")), _fc(0 if sc["version"] == "repair" else 1.2)
+    def score(ctx, script):
+        calls.append("score")
+        if calls.count("score") == 1:
+            raise RuntimeError("the plan breaks a taste rule")
+        return dict(version="repair")
+    def render(ctx, script, sc):
+        calls.append("render")
+        original.write_bytes(b"repaired")
+        return dict(film=str(original))
+    monkeypatch.setattr(W3, "clear_render", lambda ctx: original.unlink(missing_ok=True))
+    monkeypatch.setattr(W3, "check_once", check_once)
+    monkeypatch.setattr(W3, "score", score)
+    monkeypatch.setattr(W3, "render", render)
+    stale_rd, stale_sc = dict(film=str(original)), dict(version="original")
+    with pytest.raises(RuntimeError, match="taste rule"):
+        W3.check(ctx, stale_rd, stale_sc)
+    assert not original.exists()
+    result = W3.check(ctx, stale_rd, stale_sc)
+    assert result["checks"]["stories"]["picture_gate"]["after"] == 0
+    assert calls == [("check", "original"), "score", "score", "render", ("check", "repair")]
+
+
+def test_picture_repair_resumes_render_with_its_checkpointed_score(tmp_path, monkeypatch):
+    import pytest
+    import wf3 as W3
+    ctx = _ctx(tmp_path)
+    (tmp_path / "run" / "script.json").write_text(json.dumps(dict(script={})))
+    (tmp_path / "sup" / "render_repair.json").write_text(json.dumps(dict(fail_s=1.2, dropped=[])))
+    calls = []
+    film = tmp_path / "repaired.mp4"
+    monkeypatch.setattr(W3, "score", lambda *a: calls.append("score") or dict(version="repair"))
+    def render(ctx, script, sc):
+        assert sc == dict(version="repair")
+        calls.append("render")
+        if calls.count("render") == 1:
+            raise RuntimeError("render interrupted")
+        film.write_bytes(b"repaired")
+        return dict(film=str(film))
+    def check_once(ctx, rd, sc):
+        assert rd["film"] == str(film) and sc == dict(version="repair")
+        return dict(checks=dict(ok=False)), _fc(0.4)
+    monkeypatch.setattr(W3, "render", render)
+    monkeypatch.setattr(W3, "check_once", check_once)
+    with pytest.raises(RuntimeError, match="render interrupted"):
+        W3.check(ctx, {}, {"version": "stale"})
+    with pytest.raises(RuntimeError, match="0.4 s of pictures still fail"):
+        W3.check(ctx, {}, {"version": "stale"})
+    with pytest.raises(RuntimeError, match="0.4 s of pictures still fail"):
+        W3.check(ctx, {}, {"version": "stale"})
+    assert calls == ["score", "render", "render"]
 
 
 def test_a_film_whose_only_defect_is_a_fill_overflow_is_delivered(tmp_path, monkeypatch):

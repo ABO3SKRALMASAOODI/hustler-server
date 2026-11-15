@@ -2077,27 +2077,58 @@ def clear_render(ctx):
             os.remove(p)
 
 
+def _check_record(ctx, name, value=None):
+    """Check-stage checkpoints survive a refusal without replacing the shell's original plan."""
+    path = os.path.join(ctx.run_dir, name + ".json")
+    if value is None:
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+    with open(path + ".part", "w") as f:
+        json.dump(value, f, ensure_ascii=False, indent=1)
+    os.replace(path + ".part", path)
+    return value
+
+
+def _check_repair(ctx):
+    script_rec = json.load(open(os.path.join(ctx.run_dir, "script.json")))
+    sc = _check_record(ctx, "repair_score")
+    if sc is None:
+        clear_render(ctx)
+        sc = _check_record(ctx, "repair_score", score(ctx, script_rec))
+    rd = _check_record(ctx, "repair_render")
+    if rd is None or not os.path.exists(rd.get("film") or ""):
+        clear_render(ctx)
+        rd = _check_record(ctx, "repair_render", render(ctx, script_rec, sc))
+    return check_once(ctx, rd, sc)
+
+
 def check(ctx, rd, sc):
     """The shell's finish and checks, then the story reel's own (check_once). The picture gate (wf3 only): a render
     whose pictures fail their words (picture_fit.fail_s > 0) has its failing pictures written to supply/render_drop.json
     (file@line), the score built again with them dropped (score() merges the file), drawn again and checked once more;
     still failing, the run stops before deliver (resumable), so no film with a wrong picture is delivered. A fill
     overflow is a recorded defect, not a stop: a designed card is not a wrong picture."""
-    r, fc = check_once(ctx, rd, sc)
-    if ctx.workflow != "wf3" or fc is None or not fc["picture_fit"]["fail_s"] > 0 or ctx.args.get("picture_gate") is False:
-        return r
     marker = os.path.join(ctx.supply, "render_repair.json")
-    if not os.path.exists(marker):
+    repairing = ctx.workflow == "wf3" and os.path.exists(marker)
+    if repairing:
+        # The shell's score/render checkpoints predate the repair. Its original
+        # film may have been deleted, or replaced by a film with different beats.
+        r, fc = _check_repair(ctx)
+    else:
+        r, fc = check_once(ctx, rd, sc)
+        _check_record(ctx, "check_attempt", r)
+        if ctx.workflow != "wf3" or fc is None or not fc["picture_fit"]["fail_s"] > 0 or ctx.args.get("picture_gate") is False:
+            return r
         bad = [x["drop"] for x in fc["picture_fit"]["shots"] if not x.get("fit") and x.get("drop")]
         json.dump(dict(drop=sorted(set(render_drop(ctx)) | set(bad))), open(os.path.join(ctx.supply, RENDER_DROP), "w"), indent=1)
         json.dump(dict(fail_s=fc["picture_fit"]["fail_s"], dropped=bad), open(marker, "w"), indent=1)
         ctx.log(f"picture gate: {fc['picture_fit']['fail_s']} s of pictures fail their words; dropping {len(bad)} and drawing again")
-        script_rec = json.load(open(os.path.join(ctx.run_dir, "script.json")))
-        clear_render(ctx)
-        sc = score(ctx, script_rec)
-        rd = render(ctx, script_rec, sc)
-        r, fc = check_once(ctx, rd, sc)
-        r["checks"].setdefault("stories", {})["picture_gate"] = dict(repaired=True, first=json.load(open(marker)), after=fc["picture_fit"]["fail_s"])
+        r, fc = _check_repair(ctx)
+    r["checks"].setdefault("stories", {})["picture_gate"] = dict(repaired=True, first=json.load(open(marker)), after=fc["picture_fit"]["fail_s"])
+    _check_record(ctx, "check_attempt", r)
     if fc["picture_fit"]["fail_s"] > 0:
         raise RuntimeError(f"picture gate: {fc['picture_fit']['fail_s']} s of pictures still fail their words after the repair: "
                            + json.dumps([dict(line=x["line"], why=x.get("why")) for x in fc["picture_fit"]["shots"] if not x.get("fit")])[:400])
