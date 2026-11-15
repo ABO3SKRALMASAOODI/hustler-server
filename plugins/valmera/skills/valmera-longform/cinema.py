@@ -898,6 +898,8 @@ def source_review(ctx,shots,required=True):
         verdict=result['evidence'].get(str(i),result['evidence'].get(i))
         if verdict is not None and not (cache/(signature+'.json')).exists():
             save(cache/(signature+'.json'),dict(verdict=verdict,evidence_report=str(report)))
+    from encoded_repair import enforce
+    result=enforce(ctx,shots,result)
     if required and not result['ok']:raise ValueError('source pictures require repair: '+str(report))
     return result
 
@@ -962,7 +964,10 @@ def check(ctx,rd,sc):
     from picture_check import check as pictures_check, motion, duplicate_check
     pr=Path(ctx.supply)/'picture_check.json'
     stamp=Path(ctx.supply)/'picture-input.json'
-    inputs=dict(film=digest(final),shots=digest(Path(ctx.supply)/'shots.json'),checker=digest(HERE/'picture_check.py'))
+    from encoded_repair import review_shots
+    review=review_shots(read(Path(ctx.supply)/'shots.json'),base,brand.probe(rd['film']),pack['words'])
+    inputs=dict(film=digest(final),shots=digest(Path(ctx.supply)/'shots.json'),checker=digest(HERE/'picture_check.py'),
+                presentation=hashlib.sha256(json.dumps(review,sort_keys=True).encode()).hexdigest())
     if not stamp.exists() or read(stamp)!=inputs:
         for name in ('picture_check.json','motion.json'):(Path(ctx.supply)/name).unlink(missing_ok=True)
         folder=Path(ctx.supply)/'picture-evidence'
@@ -972,7 +977,7 @@ def check(ctx,rd,sc):
             if rejected.exists():shutil.rmtree(rejected)
             folder.rename(rejected)
         save(stamp,inputs)
-    if not pr.exists(): save(pr,pictures_check(str(final),read(Path(ctx.supply)/'shots.json'),Path(ctx.supply)/'picture-evidence',PX.FF))
+    if not pr.exists(): save(pr,pictures_check(str(final),review,Path(ctx.supply)/'picture-evidence',PX.FF))
     pics=read(pr)
     mp=Path(ctx.supply)/'motion.json'
     if not mp.exists(): save(mp,motion(str(final),read(Path(ctx.supply)/'shots.json'),PX.FF))
@@ -1028,6 +1033,8 @@ def check(ctx,rd,sc):
     for calibration in Path(ctx.supply).glob('picture-calibration-*'):
         shutil.copytree(calibration,evidence/calibration.name,dirs_exist_ok=True)
     shutil.copytree(metrics,evidence/'voice-metrics',dirs_exist_ok=True)
+    from encoded_repair import retain_evidence
+    retain_evidence(ctx,evidence)
     shutil.copytree(stems,evidence/'audio-stems',dirs_exist_ok=True)
     subprocess.run([PX.FF,'-v','error','-y','-i',str(bed),'-c:a','flac',str(evidence/'audio-stems/music.flac')],check=True)
     subprocess.run([PX.FF,'-v','error','-y','-i',rd['clean'],'-vn','-c:a','flac',str(evidence/'clean-audio.flac')],check=True)

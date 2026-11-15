@@ -139,5 +139,5 @@ def render(ctx, script, sc):
 
 
 def check(ctx, rd, sc):
-    import cinema
-    return cinema.check(ctx, rd, sc)
+    import encoded_repair
+    return encoded_repair.check(ctx, rd, sc)
