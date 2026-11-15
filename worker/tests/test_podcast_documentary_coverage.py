@@ -88,6 +88,31 @@ def test_picture_starts_at_its_word_window_not_sentence_start():
     assert len({r[4]['path'] for r in rows})==len(rows)
 
 
+def test_source_rejection_is_confined_to_the_contradictory_passage():
+    import json
+    class LLM:
+        ask=staticmethod(lambda *a,**k:(json.dumps(dict(updates=[],blocked_sources=[dict(window=0,source='later-interview',why='The entire source is a later event.')])),{}))
+        json_block=staticmethod(json.loads)
+    words=[dict(w='earlier',start=0.,end=1.),dict(w='today',start=2.,end=3.)]
+    cov=dict(words=words,windows=[dict(name='Institution',must_show='The institution in its stated context',first=i,last=i,t0=w['start'],t1=w['end']) for i,w in enumerate(words)])
+    rejected=[dict(f=[3,33],source='later-interview',reason='Later event under an earlier offer')]
+    assert C.repair_boundaries(cov,rejected,LLM())
+    footage={i:[dict(path=f'clip-{i}',seconds=1.,source=dict(url='later-interview'))] for i in range(2)}
+    rows=C.proposals(cov,footage,{})
+    assert len(rows)==1 and rows[0][4]['window']==1
+    assert cov['windows'][0]['first']==0
+
+
+def test_source_rejection_cannot_invent_evidence():
+    import json
+    class LLM:
+        ask=staticmethod(lambda *a,**k:(json.dumps(dict(updates=[],blocked_sources=[dict(window=0,source='unseen',why='unsupported')])),{}))
+        json_block=staticmethod(json.loads)
+    cov=dict(words=[dict(w='place',start=0.,end=1.)],windows=[dict(name='Place',first=0,last=0,t0=0.,t1=1.)])
+    with pytest.raises(RuntimeError,match='matching rejected placement'):
+        C.repair_boundaries(cov,[dict(f=[3,33],source='actual',reason='Local face crop')],LLM())
+
+
 def test_speaker_camera_moves_only_at_directed_words():
     shots = [dict(id='s',f=[0,300],pic='main',pw=1920,ph=1080,src=[0,10],faces=[[.4,.2,.12,.35]])]
     stress = [(i,.9) for i in range(10,300,10)]
