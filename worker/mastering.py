@@ -23,6 +23,8 @@ def guard(path, workdir, bitrate='192k'):
     if not math.isfinite(current['i']):
         return {'silent': True, 'passes': 0, 'held': True}
     report = {'i_in': current['i'], 'passes': 0}
+    limit_dbfs = -2.0
+    gain_response = 1.0
     for n in range(3):
         if abs(current['i']-TARGET) <= TOLERANCE and current['tp'] <= -1.0:
             return dict(report, **current, held=True)
@@ -30,8 +32,10 @@ def guard(path, workdir, bitrate='192k'):
         try:
             # A measured constant gain corrects loudnorm's short-programme
             # error. A limiter catches only peaks; picture packets are copied.
-            gain = TARGET-current['i']
-            chain = f'volume={gain:.5f}dB,' + true_peak.limiter_chain(-2.0)
+            error = TARGET-current['i']
+            gain = min(12.0, error / gain_response) if error > 0 else error
+            previous_limit = limit_dbfs
+            chain = f'volume={gain:.5f}dB,' + true_peak.limiter_chain(limit_dbfs)
             subprocess.run(['ffmpeg', '-y', '-v', 'error', '-nostdin', '-i', path,
                 '-map', '0:v?', '-map', '0:a:0', '-c:v', 'copy', '-af', chain,
                 '-c:a', 'aac', '-b:a', bitrate, '-movflags', '+faststart', tmp],
@@ -42,12 +46,28 @@ def guard(path, workdir, bitrate='192k'):
             # do not relax the delivery ceiling or retry an unchanged mix.
             peak_report = true_peak.guard(tmp, bitrate=bitrate, workdir=workdir,
                                           meter=lambda p: (measure(p) or {}).get('tp'))
+            # Keep the codec headroom the encoded bytes actually required.
+            # Resetting to -2 dBFS on each loudness pass recreates the AAC
+            # overshoot; the peak guard then removes the gain just added.
+            # p5574 oscillated between -14 LUFS/+3 dBTP and -15.6/-2.
+            if peak_report and peak_report.get('limit_dbfs') is not None:
+                limit_dbfs = min(limit_dbfs, float(peak_report['limit_dbfs']))
+                report['limit_dbfs'] = limit_dbfs
             checked = measure(tmp)
             if checked is None or not math.isfinite(checked['i']):
                 raise ValueError('mastered sound could not be measured')
             if checked['tp'] > -1.0:
                 raise ValueError(f"mastered sound exceeds the true-peak ceiling: "
                                  f"{checked['tp']} dBTP; correction={peak_report}")
+            # Once the codec ceiling holds, limiting can absorb much of a
+            # requested boost. Use its measured response for the remaining
+            # error instead of asymptotically adding ever smaller gains.
+            # Re-estimate only at the same ceiling; lowering it changes the
+            # transfer curve. The next pass still verifies both constraints.
+            achieved = checked['i'] - current['i']
+            if gain > .1 and achieved > .1 and limit_dbfs == previous_limit:
+                gain_response = max(.25, min(1.0, achieved / gain))
+                report['gain_response'] = gain_response
             os.replace(tmp, path)
             current = checked
             report['passes'] += 1
