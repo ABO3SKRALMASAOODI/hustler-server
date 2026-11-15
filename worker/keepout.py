@@ -1681,7 +1681,7 @@ def candidates(template, spec, params, box, variants, zones, W, H,
                captions=(), predict=True, mouths=(), clear_penalty=CLEAR_PENALTY,
                near_captions=(), room=None,
                require_clear=False, scene=(), chins=(), mark=None,
-               pin_size=False):
+               pin_size=False, obstacles=()):
     """Ranked placements [(cost, patch, predicted box)] off every face (no real
     share of a zone or mouth band, on_face; grazing a zone's CLEARANCE costs
     CLEAR_PENALTY) and inside the safe area. ``variants`` are measured alternatives at the
@@ -1700,7 +1700,8 @@ def candidates(template, spec, params, box, variants, zones, W, H,
     clear of it and the face — the captions would stay on it or go mute — so
     a smaller graphic that leaves them a band wins (the Thiel counter under
     the chin, Oct 2026). ``scene``: scene-text boxes (a soft keep-out: up to
-    SCENE_PENALTY by the share of the spot they cover)."""
+    SCENE_PENALTY by the share of the spot they cover). ``obstacles`` are
+    visible reading regions that must remain clear, not a soft preference."""
     pspec = (spec or {}).get("params") or {}
     port = portrait(W, H)
     y_lo, y_hi = (SAFE_Y0, SAFE_Y1) if port else (0.02, 0.98)
@@ -1761,6 +1762,8 @@ def candidates(template, spec, params, box, variants, zones, W, H,
                     or nb[2] > 1 + EDGE_TOL:
                 continue
             if safe_issues(nb, W, H) or on_face(nb, zones, mouths, chins):
+                continue
+            if any(inter(nb, z) > 1e-6 for z in obstacles):
                 continue
             if mark is not None and on_mark(nb, mark):
                 continue
