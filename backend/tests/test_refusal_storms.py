@@ -427,11 +427,11 @@ def test_the_daily_email_limit_cannot_swallow_it(world, monkeypatch):
     assert "ran out of credits" in sent[0][1]
 
 
-def test_over_the_limit_only_not_handled_goes_and_the_rest_waits(world,
-                                                                  monkeypatch):
-    """NOT HANDLED is the one to act on (owner, 7 Nov 2026): it goes past the
-    daily cap; a P0 a Fixer holds waits unclaimed for room."""
-    t = open_p0(world)
+def test_over_the_limit_provider_block_goes_and_the_rest_waits(world,
+                                                             monkeypatch):
+    """8 Nov: only a provider top-up is a per-ticket owner action; a silent
+    watch has one agent alert, not a Blocked email for every ticket."""
+    t = open_p0(world, detail="insufficient_quota")
     other = open_p0(world, key="auto-job-final-oom")
     store.set_fixing(world.c, other["id"], "on it")
     world.c.execute("INSERT INTO app_kv (key, value) VALUES (%s, %s)",
@@ -441,8 +441,9 @@ def test_over_the_limit_only_not_handled_goes_and_the_rest_waits(world,
     sent = []
     alert_tick(world, monkeypatch, sent)
     assert [s for s, _ in sent] and len(sent) == 1
-    assert sent[0][0].startswith("Blocked: ")      # no P0 watch heartbeat
+    assert sent[0][0].startswith("Blocked: ")
     assert sent[0][0].endswith(f"(P0 #{t['id']})")
+    assert "top up OpenAI" in sent[0][1]
     world.c.execute("SELECT count(*) AS n FROM app_kv WHERE key LIKE %s",
                     (f"cockpit_alert:p0:{other['id']}:%",))
     assert world.c.fetchone()["n"] == 0
@@ -463,11 +464,11 @@ def test_a_failed_send_comes_back_on_the_next_tick(world, monkeypatch):
 
 # ── The backend agrees with the watch ────────────────────────────────────
 
-def open_p0(world, key="auto-job-index-oom"):
+def open_p0(world, key="auto-job-index-oom", detail="y"):
     t, _ = store.record_failure(world.c, {
         "ref": f"job:{world.clock.now.timestamp()}", "at": world.clock.now,
         "source": "job", "user_id": USER, "project_id": PROJECT, "severity": "P0",
-        "cause_key": key, "title": "x", "detail": "y"})
+        "cause_key": key, "title": "x", "detail": detail})
     return t
 
 
@@ -571,19 +572,19 @@ def test_a_silent_watch_is_late_after_three_runs_missed(world):
                           intake.silent_agents(world.c, world.clock.now)]
 
 
-def test_the_email_says_why_nobody_took_it(world):
+def test_a_silent_watch_has_one_agent_alert_not_a_ticket_block(world):
     open_p0(world)
     world.clock.now += 11 * MIN
     store.put_state(world.c, "ops_heartbeat_p0_watch",
                     {"at": (world.clock.now - 3 * MIN).isoformat()})
-    lines = [i[2] for i in cockpit.event_alerts(world.c, world.clock.now,
-                                                world.clock.now)]
-    assert any("Fixers are all busy" in x for x in lines)
+    alerts = cockpit.event_alerts(world.c, world.clock.now, world.clock.now)
+    assert any(subject.startswith("Issue: ") for _, subject, _ in alerts)
+    assert not any(subject.startswith("Blocked: ") for _, subject, _ in alerts)
     store.put_state(world.c, "ops_heartbeat_p0_watch",
                     {"at": (world.clock.now - 40 * MIN).isoformat()})
-    lines = [i[2] for i in cockpit.event_alerts(world.c, world.clock.now,
-                                                world.clock.now)]
-    assert any("Mac may be asleep" in x for x in lines)
+    alerts = cockpit.event_alerts(world.c, world.clock.now, world.clock.now)
+    assert [subject for _, subject, _ in alerts] == ["An automatic agent stopped"]
+    assert "p0_watch" in alerts[0][2] and "40 min" in alerts[0][2]
 
 
 # ── Time to claim and time to live ───────────────────────────────────────
