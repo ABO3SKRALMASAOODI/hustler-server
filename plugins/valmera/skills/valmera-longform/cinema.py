@@ -653,6 +653,22 @@ def chapter_clock(sc, clock, end):
     return out
 
 
+def witness_crop(row):
+    """One continuous interview push across a complete longer recollection.
+
+    Internal source slices do not restart the move or pretend to be new shots.
+    The final rater still measures the actual encoded cuts and camera motion.
+    """
+    duration=row['clip']['seconds']
+    if not row.get('real_voice') or duration<=8:return [0,0,1,1]
+    crops=[]
+    for q in range(row['f'][1]-row['f'][0]):
+        t=min(1.,(row['src'][0]+q/FPS)/duration)
+        width=1/(1+.055*t)
+        crops.append([.5-width/2,.5-width/2,.5+width/2,.5+width/2])
+    return crops
+
+
 def build(sc,pack):
     worker()
     from film_long import Plan
@@ -683,7 +699,7 @@ def build(sc,pack):
                        s=[1+.035*q/max(n-1,1) for q in range(n)])
         else:
             key=P.video(f'archive-{j}',c)
-            P.shot(row['f'],key,[0,0,1,1],src=row['src'])
+            P.shot(row['f'],key,witness_crop(row),src=row['src'])
         if c.get('editorial_label') and not c.get('document'):
             P.word(row['f'],c['editorial_label'],'source',.055,.78,note=False)
     # Subtitles remain legible and subordinate to the archive. No held number pages.

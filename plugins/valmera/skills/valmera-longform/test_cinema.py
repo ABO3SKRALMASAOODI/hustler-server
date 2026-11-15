@@ -70,6 +70,18 @@ def test_renamed_download_cannot_replay_source_seconds():
     assert C.reserve(used,clip('c',0,8),1) is None
 
 
+def test_long_interview_camera_continues_across_internal_source_slices():
+    c=clip('interview',0,19)
+    a=dict(f=[0,234],src=[0,7.8],clip=c,real_voice='Speaker')
+    b=dict(f=[234,468],src=[7.8,15.6],clip=c,real_voice='Speaker')
+    whole=dict(f=[0,570],src=[0,19],clip=c,real_voice='Speaker')
+    full=C.witness_crop(whole)
+    assert C.witness_crop(a)==full[:234]
+    import numpy as np
+    assert np.allclose(C.witness_crop(b),full[234:468])
+    assert full[0]==[0,0,1,1] and full[-1][0]<.03
+
+
 def test_partly_used_clip_can_supply_only_its_unseen_remainder():
     sc={'segments':[{'say':'First.','chapter':'c'},{'say':'Second.','chapter':'c'}]}
     words={'duration':10,'words':[dict(w='First.',start=.1,end=2.5,seg=0),dict(w='Second.',start=3,end=9.8,seg=1)]}
