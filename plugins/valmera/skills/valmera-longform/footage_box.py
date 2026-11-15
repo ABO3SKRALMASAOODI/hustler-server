@@ -86,7 +86,21 @@ def proxy(url,out_dir,duration=None,max_s=None):
         cached=list((media/'whole'/hashlib.sha256(url.encode()).hexdigest()[:16]).glob('whole.*'))
         cached=[p for p in cached if p.suffix in ('.mp4','.mkv','.webm')]
         if cached and not j.get('_voices'):return str(max(cached,key=lambda p:p.stat().st_size)),'cached original picture'
-        return original_proxy(url,str(media/'proxy'/key),duration,max_s)
+        folder=media/'proxy'/key
+        # The shared downloader clears proxy.* before fetching. Reuse a
+        # completed, decodable scan WITH audio before calling it; a later
+        # network wall must not destroy this film's only interview recording.
+        import subprocess
+        for p in folder.glob('proxy.*'):
+            if p.suffix not in ('.mp4','.mkv','.webm'):continue
+            try:
+                info=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_entries',
+                    'stream=codec_type:format=duration','-of','json',str(p)],stderr=subprocess.DEVNULL))
+                kinds={s['codec_type'] for s in info['streams']}
+                if {'video','audio'}<=kinds and float(info['format']['duration'])>0:
+                    return str(p),'cached original audiovisual scan'
+            except (subprocess.CalledProcessError,ValueError,KeyError):pass
+        return original_proxy(url,str(folder),duration,max_s)
 fetch.proxy=proxy
 whole={};locks={};guard=threading.Lock();original_grab=cut.grab
 def grab(stream,url,t0,t1,out):
