@@ -1966,7 +1966,7 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
     sounds, report = plan_sounds(events, ctx)
     if (index or {}).get("first_film"):
         import first_film_sound
-        sounds, proof = first_film_sound.level(sounds, voice, fps, shift)
+        sounds, proof = first_film_sound.level(sounds, voice, fps, shift, speaks=bool(speaks))
         report["foreground"] = proof
     report["speaks"] = bool(speaks)
     return sounds, report

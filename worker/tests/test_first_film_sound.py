@@ -91,3 +91,39 @@ def test_a_cue_in_a_breath_keeps_nearby_dialogue_reference(monkeypatch):
     on_voice, _=level([cue],voice,30)
     in_breath, _=level([cue],gap,30)
     assert in_breath[0]['db'] == on_voice[0]['db']
+
+
+def test_music_only_source_and_separate_bed_do_not_bury_picture_cues(monkeypatch):
+    from score import sound
+    from first_film_sound import level
+    t = np.arange(3*sound.AR)/sound.AR
+    source = .07*np.sin(2*np.pi*700*t)
+    raw = .15*np.sin(2*np.pi*1300*t[:sound.AR])
+    monkeypatch.setattr(sound, 'library', lambda: {'cue': {}})
+    monkeypatch.setattr(sound, 'sample_pcm', lambda sid: raw)
+    cues = [{'id': tier, 's': 'cue', 'tier': tier, 'event_f': 45, 'db': -30}
+            for tier in ('hero', 'body', 'tick')]
+    music, proof = level(cues, source, 30, speaks=False)
+    separate, _ = level(cues, None, 30, bed=source)
+    assert [x['db'] for x in music] == [x['db'] for x in separate]
+    assert [x['peak50_over_background_db'] for x in proof] == [10., 7., 5.]
+    assert music[0]['db']-music[-1]['db'] == 5
+    # The ordinary dialogue-relative path retains its softer body cue.
+    dialogue, _ = level(cues, source, 30)
+    assert dialogue[1]['db'] < music[1]['db']-8
+
+
+def test_opening_impact_keeps_its_attack_and_tail(monkeypatch):
+    from score import sound
+    from first_film_sound import level
+    t = np.arange(sound.AR)/sound.AR
+    raw = .3*np.sin(2*np.pi*1000*t)*np.exp(-((t-.5)/.012)**2)
+    monkeypatch.setattr(sound, 'library', lambda: {'hit': {'hit_s': .5}})
+    monkeypatch.setattr(sound, 'sample_pcm', lambda sid: raw)
+    cue = {'id': 'open', 's': 'hit', 'tier': 'hero', 'event_f': 0,
+           'start_s': 0., 'peak_s': .513, 'trim_s': .513, 'dur_s': .3, 'db': -20}
+    out, _ = level([cue], None, 30)
+    assert out[0]['trim_s'] == .475
+    assert abs(out[0]['dur_s']+out[0]['trim_s']-.813)<1e-6
+    assert out[0]['start_s'] == 0
+    assert cue['trim_s'] == .513

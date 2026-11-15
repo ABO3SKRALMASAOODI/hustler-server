@@ -430,8 +430,11 @@ def one_mix(work, l1, index=None):
         sounds = MU.sounds_on_the_drop(l1["sound"], {"drop_at": arr.get("drop_at"), "turn_s": doc.get("turn_s")}, fps)
         if (index or {}).get("first_film"):
             import first_film_sound
-            sounds, foreground = first_film_sound.level(sounds, voice, fps, shift)
             song = first_film_sound.bed_space(song, sounds, fps, AU.SR)
+            words = SD.words_in_programme(l1, index)
+            speaks = sum(b-a for a,b in words) >= 1.0 if words is not None else True
+            sounds, foreground = first_film_sound.level(
+                sounds, voice, fps, shift, speaks=speaks, bed=MU.to_ar(song)[:n_ar])
         else:
             sounds = SD.present_over(sounds, voice, MU.to_ar(song)[:n_ar], fps, voice_shift_db=shift)
         _v, fx, _ = AU.split_audio(MU._Plan(dict(l1, sound=sounds), src))

@@ -10,6 +10,7 @@ import numpy as np
 # Reference-led hierarchy, measured over the ear's transient integration
 # window. A counter still sits below an accent; all retain their own timbre.
 RELATIVE_DB = {'hero': 0.0, 'accent': -2.0, 'body': -3.0, 'tick': -6.0}
+BACKGROUND_DB = {'hero': 10.0, 'accent': 8.0, 'body': 7.0, 'tick': 5.0}
 
 
 def peak_power(signal, rate, window_s=.2):
@@ -28,7 +29,17 @@ def peak_power(signal, rate, window_s=.2):
     return float(np.max((sums[n:] - sums[:-n]) / n))
 
 
-def level(sounds, voice, fps, shift_db=0.0):
+def background_power(signal, rate):
+    """Typical 50 ms background energy, excluding sparse source transients."""
+    x = np.asarray(signal, np.float32).reshape(-1)
+    n = max(1, round(.05 * rate))
+    count = len(x) // n
+    if not count:
+        return 0.0
+    return float(np.median(np.mean(x[:count*n].reshape(count, n)**2, axis=1)))
+
+
+def level(sounds, voice, fps, shift_db=0.0, *, speaks=True, bed=None):
     from score import sound
     out, evidence = [], []
     v = (np.asarray(voice, np.float32).reshape(-1) if voice is not None else np.zeros(0, np.float32)) * 10 ** (shift_db / 20)
@@ -38,6 +49,16 @@ def level(sounds, voice, fps, shift_db=0.0):
             out.append(it)
             continue
         raw = sound.sample_pcm(it['s'])
+        # A cue at frame zero cannot lead the picture. The former negative
+        # start trim cut past its attack, leaving only the impact's tail.
+        if int(it.get('event_f') or 0) == 0 and it.get('trim_s'):
+            meta = sound.library()[it['s']]
+            attack = float(meta.get('hit_s') or meta.get('peak_s') or 0)
+            trim = max(0.0, attack - .025)
+            if trim < float(it['trim_s']):
+                if it.get('dur_s') is not None:
+                    it['dur_s'] += float(it['trim_s']) - trim
+                it['trim_s'] = round(trim, 4)
         raw = raw[int(round(float(it.get('trim_s') or 0) * sound.AR)):]
         if it.get('dur_s') is not None:
             raw = raw[:max(0, int(round(float(it['dur_s']) * sound.AR)))]
@@ -55,6 +76,18 @@ def level(sounds, voice, fps, shift_db=0.0):
         voice_db = (-20.0 if vp <= 1e-8 else
                     max(-26.0, min(-12.0, 10 * math.log10(vp))))
         target = voice_db + RELATIVE_DB.get(it.get('tier'), -3.0)
+        # A music-only upload is a background, not a dialogue reference.
+        # Matching a body cue below that source makes it disappear. Likewise
+        # account for a separately arranged bed on talking films. Keep the
+        # hero/body/tick hierarchy; this is component gain, never a count.
+        background = 0.0
+        if not speaks:
+            background += background_power(v[a:b], sound.AR)
+        if bed is not None:
+            background += background_power(np.asarray(bed)[a:max(a, int((hit+1.5)*sound.AR))], sound.AR)
+        background_db = 10 * math.log10(background) if background > 1e-8 else None
+        if background_db is not None:
+            target = max(target, background_db + BACKGROUND_DB.get(it.get('tier'), 7.0))
         wanted = target - 10 * math.log10(sp)
         peak = float(np.abs(raw).max()) if len(raw) else 0
         # A blanket -6 dB sample-peak ceiling left short, high-crest real
@@ -71,6 +104,8 @@ def level(sounds, voice, fps, shift_db=0.0):
                          'peak50_over_voice400_db': round(10 * math.log10(sp) + float(it['db']) - voice_db, 1),
                          'target_over_voice_db': RELATIVE_DB.get(it.get('tier'), -3.0),
                          'headroom_limited': wanted > headroom,
+                         'background_db': background_db,
+                         'peak50_over_background_db': (round(10 * math.log10(sp) + float(it['db']) - background_db, 1) if background_db is not None else None),
                          'method': '50ms phone-band cue peak / nearby 400ms voice; pre-master, not a final-mix audible count'})
         out.append(it)
     return out, evidence
