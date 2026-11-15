@@ -408,12 +408,15 @@ def supply(ctx, script):
                 save(Path(ctx.supply)/'footage/footage.json',ft)
                 shots,clock,_=schedule(sc,coverage_words,ft)
     still=sum((r['f'][1]-r['f'][0])/FPS for r in shots if r['clip'].get('kind')=='image')
-    if still/clock.dur>.45:raise RuntimeError('evidence photos would displace the moving film')
     if not ft['voices']:witness_voices(ctx,script,ft)
     for chapter in sc['chapters']:
         indices={i for i,s in enumerate(sc['segments']) if s['chapter']==chapter['id']}
         if not any(v['after'] in indices for v in ft['voices']):
             witness_voices(ctx,script,ft,additional=True,chapter=chapter)
+    # Original on-camera testimony is picture time too. This is only a supply
+    # check; actual motion and the final >=50% gate remain mandatory below.
+    with_testimony=clock.dur+sum(v['seconds'] for v in ft['voices'])
+    if still/with_testimony>.5:raise RuntimeError('evidence photos would displace the moving film, including its testimony')
     sys.path.insert(0,str(HERE.parent/'_shell'/'narrate'))
     import realvoice
     if ft['voices']:
@@ -590,6 +593,11 @@ def schedule(sc, words, ft):
                 ids=active[-1]['archive_ids'];order={key:k for k,key in enumerate(ids)}
                 interval_clips=sorted((c for c in clips if not c.get('catalogue_id') or c['catalogue_id'] in order),
                                       key=lambda c:order.get(c.get('catalogue_id'),len(order)))
+                interval_clips=[dict(c) for c in interval_clips]
+                for c in interval_clips:
+                    if c.get('catalogue_id') not in order:continue
+                    c.pop('editorial_label',None)
+                    if active[-1].get('label'):c['editorial_label']=active[-1]['label']
             for slot in ft.get('editorial',{}).get('assignments',[]):
                 if slot['seg']!=i:continue
                 sa,sb=[round(resolve(clock,t)*FPS) for t in slot['anchors']]

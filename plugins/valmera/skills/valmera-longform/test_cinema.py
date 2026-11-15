@@ -403,7 +403,7 @@ def test_sentence_repair_invalidates_only_changed_takes(tmp_path):
     assert (nd/'_takes/s01_t0.wav').read_bytes()==b'unchanged second take'
 
 
-def test_visual_preflight_hands_empty_candidates_to_actual_clock_research(tmp_path,monkeypatch):
+def test_unresolved_preflight_does_not_erase_existing_source_candidates(tmp_path,monkeypatch):
     import archive_visual as A
     from types import SimpleNamespace
     proposal=dict(script=dict(segments=[dict(say='A scarce event.',visual_beats=[dict(word_start=0,archive_ids=['a'])])]))
@@ -415,7 +415,7 @@ def test_visual_preflight_hands_empty_candidates_to_actual_clock_research(tmp_pa
     monkeypatch.setattr(C,'source_review',lambda *a,**k:dict(ok=True,rejected=[],moving_share=0,evidence={}))
     result=A.refine(ctx,proposal,catalogue)
     assert result['script']['segments'][0]['say']=='A scarce event.'
-    assert result['script']['segments'][0]['visual_beats'][0]['archive_ids']==[]
+    assert result['script']['segments'][0]['visual_beats'][0]['archive_ids']==['a']
     assert result['preflight']['complete'] is False
     assert result['preflight']['gaps']==[dict(seg=0,seconds=2)]
 

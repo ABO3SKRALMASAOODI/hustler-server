@@ -87,10 +87,14 @@ def refine(ctx,proposal,catalogue,rounds=1):
             if not starts or starts[0]!=0 or starts!=sorted(set(starts)) or starts[-1]>=len(sc['segments'][i]['say'].split()):
                 raise ValueError('invalid visual repair word anchor')
             if any(any(k not in ids for k in b['archive_ids']) for b in beats):raise ValueError('invalid archive ID')
+            # A reviewer may be unable to propose an alternative. That is a
+            # research note, not grounds to erase existing candidate material
+            # (including independently checked shots) before the real clock.
+            if any(not b['archive_ids'] for b in beats):continue
             sc['segments'][i]['visual_beats']=beats;seen.add(i)
     # Estimated-clock preflight is an editorial input, not a delivery gate.
-    # Empty candidate lists explicitly request fresh research on the recorded
-    # clock. The supply stage and final encoded-film gates still require every
+    # Unresolved alternatives request fresh research on the recorded clock.
+    # The supply stage and final encoded-film gates still require every
     # interval to be covered truthfully and all delivered targets to pass.
     result=dict(proposal,script=sc,preflight=dict(planning_only=True,complete=False,
                 gaps=gaps,rejected=report['rejected'],moving_share=report['moving_share']))
@@ -123,7 +127,8 @@ def prepare(ctx,script,ft):
     import cinema as C
     catalogue=C.read(Path(ctx.supply)/'archive-catalogue/catalogue.json')
     proposal=C.read(Path(ctx.supply)/'archive-script/proposal.json')
-    proposal['script']=copy.deepcopy(script['script'])
+    if [s['say'] for s in proposal['script']['segments']]!=[s['say'] for s in script['script']['segments']]:
+        raise ValueError('audited words changed before visual preflight')
     root=work_dir(ctx,proposal,catalogue);marker=root/'applied.json'
     if marker.exists():return
     revised=refine(ctx,proposal,catalogue)
