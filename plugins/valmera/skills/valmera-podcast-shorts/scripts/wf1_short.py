@@ -413,16 +413,38 @@ def refill(ctx, script, pack, shortage):
     # evidence, but spend this recovery pass on moving originals first.
     motion_ready = (shortage.get('real_seconds',0)>0 and
                     shortage.get('moving_seconds',0)>=shortage.get('required_moving_seconds',.6*shortage['real_seconds']))
-    if motion_ready:
+    if (not motion_ready and pack.get('coverage_repairs',0)>=1
+            and not pack.get('coverage_context_checked')):
+        import wf1_coverage
+        available=[dict(i=row['i'],clips=[dict(shows=c.get('shows'),source=c.get('source'),
+                       motion_p90=c.get('motion_p90')) for c in row['clips'][:12]])
+                   for row in pack['footage']]
+        changed,use=wf1_coverage.expand_context(coverage,available,ctx.supply,_llm())
+        pack['coverage_context_checked']=True
+        if changed:pack['coverage_context_rescout_pending']=True
+        pack.setdefault('research_spend',[]).append(use)
+        stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
+        with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
+        if changed:
+            ctx.log('director extended related story context; recheck existing pictures on the actual words')
+            return
+    missing_documents=(not motion_ready and pack.get('coverage_repairs',0)>=1
+                       and shortage.get('missing_windows')
+                       and not pack.get('missing_document_attempted'))
+    if motion_ready or missing_documents:
         import wf1_documents
         context=dict(identity=coverage.get('context'),primary_research=coverage.get('research_context'),prior_errors=[e for r in pack.get('document_research',[]) for e in r.get('errors',[])][-12:])
         cached_path=os.path.join(ctx.supply,'document-sources','manifest.json')
         originals=json.load(open(cached_path)) if os.path.exists(cached_path) else []
-        documents=wf1_documents.acquire([dict(windows[i],i=i,context=context) for i in wanted],os.path.join(ctx.supply,'primary-documents'),_llm(),sources=originals)
+        document_windows=shortage['missing_windows'] if missing_documents else wanted
+        documents=wf1_documents.acquire([dict(windows[i],i=i,context=context) for i in document_windows],os.path.join(ctx.supply,'primary-documents'),_llm(),sources=originals)
+        if missing_documents:pack['missing_document_attempted']=True
         for subject,records in documents['pictures'].items():
             dest=pack['pictures'].setdefault(subject,[]);have={r['path'] for r in dest}
             fresh=[r for r in records if r['path'] not in have];dest.extend(fresh);added+=len(fresh)
         if documents not in pack.setdefault('document_research',[]):pack['document_research'].append(documents)
+        stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
+        with open(os.path.join(ctx.supply,'pack.json'),'w') as f:json.dump(stored,f,indent=1)
         if added:
             pack['credits']+=documents['credits']
             stored=json.load(open(os.path.join(ctx.supply,'pack.json')));stored['pack']=pack
@@ -434,14 +456,35 @@ def refill(ctx, script, pack, shortage):
     signature=source_signature(ctx.supply)
     previous = pack.get('coverage_repairs',0) if pack.get('research_contract')==RESEARCH_CONTRACT and pack.get('research_sources')==signature else 0
     count = max(4,int(previous)+1) if pack.get('platform_walled') else int(previous)+1
+    rescout=bool(pack.get('coverage_context_rescout_pending'))
+    last=pack.get('coverage_last_search_report')
+    if last and not rescout and count<4:
+        improved=any(shortage.get(k,0)>last.get(k,0)+.01
+                     for k in ('real_seconds','moving_seconds','new_pictures'))
+        improved=improved or len(shortage.get('missing_windows',[]))<len(last.get('missing_windows',[]))
+        if not improved:
+            ctx.log('platform recovery added no measured coverage; change to original-publisher research')
+            count=4
     primary={}
     manifest_path=os.path.join(ctx.supply,'sources','manifest.json')
     retained=json.load(open(manifest_path)) if os.path.exists(manifest_path) else []
+    # A changed spoken window can use a different part of a verified original.
+    # Source-only rescanning needs its retained identity, not another web search.
+    by_url={row['url']:row for row in retained if os.path.isfile(row.get('path',''))}
+    for line in pack['footage']:
+        subject=windows[int(line['i'])]['name']
+        for clip in line['clips']:
+            source=clip.get('source') or {};url=source.get('url')
+            if url not in by_url or not source.get('title') or not source.get('channel'):continue
+            dest=primary.setdefault(subject,[])
+            if not any(row['url']==url for row in dest):
+                dest.append(dict(by_url[url],**{k:v for k,v in source.items() if k not in ('url','id','where')},
+                                 where=source.get('where','youtube'),id=hashlib.sha256(url.encode()).hexdigest()))
     for row in retained:
         if not row.get('title') or not row.get('channel') or not os.path.isfile(row.get('path','')):continue
         for subject in row.get('subjects',[]):
             primary.setdefault(subject,[]).append(dict(row,id=row.get('id') or hashlib.sha256(row['url'].encode()).hexdigest(),where=row.get('where','youtube')))
-    if count == 4:
+    if count == 4 and not rescout:
         import wf1_primary_sources
         original=wf1_primary_sources.acquire([dict(windows[i],i=i,context=coverage.get('context')) for i in wanted],os.path.join(ctx.supply,'primary-videos'),_llm())
         pack.setdefault('research_spend',[]).extend(original['spend'])
@@ -453,12 +496,13 @@ def refill(ctx, script, pack, shortage):
             if not any(r['url']==rec['url'] for r in manifest):manifest.append(rec)
         with open(manifest_path,'w') as f:json.dump(manifest,f,indent=1)
         if not primary:raise RuntimeError('no verified public publisher video found after platform research exhausted')
-    if count > 4 and added:
+    if count > 4 and added and not rescout:
         # Score the newly acquired original once even when video research is exhausted.
         return
-    if count > 4:
+    if count > 4 and not rescout:
         raise RuntimeError('documentary coverage still incomplete after platform and original-publisher research')
     name = f"footage-v{coverage['contract']}-context{RESEARCH_CONTRACT}-{signature}-repair{count}"
+    if rescout:name+='-expanded-context'
     prior = [os.path.join(ctx.supply,n,'footage.json') for n in os.listdir(ctx.supply)
              if n.startswith('footage') and os.path.isfile(os.path.join(ctx.supply,n,'footage.json'))]
     subjects = {windows[i]['name']:windows[i]['must_show'] for i in wanted}
@@ -470,7 +514,7 @@ def refill(ctx, script, pack, shortage):
     foot = chain.footage(ctx,dict(script=fscript),[w['t1']-w['t0'] for w in windows],W=fw,H=fh,
                          preserve_source=True,shot_s=1.15,line_max=20,per=4,lines=wanted,avoid=prior,
                          strict_lines=True,motion_first=True,scout_motion=True,alloc='round',reassign_lost=True,
-                         verify=False,whole_first=True,keep_sources=True,hear_s=0,source_only=bool(pack.get('platform_walled')),out_name=name)
+                         verify=False,whole_first=True,keep_sources=True,hear_s=0,source_only=rescout or count==4 or bool(pack.get('platform_walled')),out_name=name)
     if not foot:
         raise RuntimeError('supplementary documentary research returned no record')
     by = {int(row['i']):row for row in pack['footage']}
@@ -481,7 +525,9 @@ def refill(ctx, script, pack, shortage):
     pack['footage'] = list(by.values())
     pack['credits'] += [dict(kind='footage',name=c['title'],title=c['title'],licence="footage, not licensed (the owner's decision)",
                             credit=c['channel'],page=c['url'],time_range=c['time_range'],line=c['line']) for c in foot['credits']]
-    pack['coverage_repairs'] = count
+    pack['coverage_repairs'] = int(previous) if rescout else count
+    pack['coverage_last_search_report']=shortage
+    if rescout:pack['coverage_context_rescout_pending']=False
     pack['research_contract'] = RESEARCH_CONTRACT
     pack['research_sources'] = source_signature(ctx.supply)
     path = os.path.join(ctx.supply,'pack.json')

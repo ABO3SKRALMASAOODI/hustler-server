@@ -149,7 +149,7 @@ def test_changed_plan_invalidates_old_render_before_frame_check(tmp_path,monkeyp
 
 
 def test_document_recovery_does_not_starve_moving_footage_research(tmp_path,monkeypatch):
-    import wf1_documents
+    import wf1_documents,wf1_coverage,wf1_primary_sources
     ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
     pack=dict(coverage=dict(contract=3,windows=[dict(name='Company',must_show='Original product footage',say='Company',t0=0,t1=5)]),
               referent_research={'sources':[]},research_revision=7,footage=[],pictures={},credits=[])
@@ -163,8 +163,20 @@ def test_document_recovery_does_not_starve_moving_footage_research(tmp_path,monk
     wf.refill(ctx,dict(title='Company',style={'id':'window'}),pack,
               dict(weak_windows=[0],real_seconds=12,moving_seconds=2))
     assert len(calls)==1 and calls[0]['motion_first']
-    assert pack['pictures']['Company'][0]['path']=='new-original.jpg'
+    assert pack['pictures']=={}
     assert pack['coverage_repairs']==1
+    monkeypatch.setattr(wf1_coverage,'expand_context',lambda *a:(False,{}))
+    shortage=dict(weak_windows=[0],missing_windows=[0],real_seconds=12,moving_seconds=2)
+    wf.refill(ctx,dict(title='Company',style={'id':'window'}),pack,shortage)
+    assert len(calls)==1  # One factual-document attempt, then moving research continues.
+    assert pack['pictures']['Company'][0]['path']=='new-original.jpg'
+    def publisher(*args):
+        path=tmp_path/'primary-videos';path.mkdir();(path/'manifest.json').write_text('[]')
+        return dict(sources={'Company':[dict(url='https://publisher.example/demo')]},spend=[])
+    monkeypatch.setattr(wf1_primary_sources,'acquire',publisher)
+    wf.refill(ctx,dict(title='Company',style={'id':'window'}),pack,shortage)
+    assert len(calls)==2 and calls[-1]['motion_first'] and calls[-1]['source_only']
+    assert pack['coverage_repairs']==4  # No coverage gain: change approach, not another identical search.
 
 
 def test_cached_primary_document_requires_exact_url_and_original_hash(tmp_path):
