@@ -2581,6 +2581,29 @@ def resume_upload(user_id, project_id):
     return jsonify(out)
 
 
+def _landed_upload_asset(cur, project_id, key):
+    """The id of the asset this upload already became, or None.
+
+    A deferred original (upload_state 'pending') has its row before its
+    bytes, so it has not landed: its transfer is still the real one."""
+    cur.execute("""SELECT id, meta FROM assets
+                   WHERE project_id = %s AND storage_key = %s
+                   ORDER BY id DESC LIMIT 1""", (project_id, key))
+    row = cur.fetchone()
+    if not row or (row.get("meta") or {}).get("upload_state") == "pending":
+        return None
+    return row["id"]
+
+
+def _relay_part_landed(user_id, project_id, part_number, asset_id, when):
+    record_client_event(user_id, project_id, "upload_relay_landed", detail={
+        "asset_id": asset_id, "part_number": part_number, "when": when},
+        origin="server")
+    return jsonify({"ok": True, "part_number": part_number,
+                    "etag": '"landed"', "assembled": True,
+                    "asset_id": asset_id})
+
+
 @video_bp.route("/projects/<int:project_id>/uploads/relay-part",
                 methods=["POST"])
 def relay_upload_part_route(project_id):
@@ -2641,14 +2664,35 @@ def relay_upload_part(user_id, project_id):
         return jsonify({"error": "storage_key does not belong to this "
                                  "project"}), 400
     with vdb() as conn:
-        if not _project_for_user(conn.cursor(), project_id, user_id):
+        cur = conn.cursor()
+        if not _project_for_user(cur, project_id, user_id):
             return jsonify({"error": "Project not found"}), 404
+        landed = _landed_upload_asset(cur, project_id, key)
+    if landed:
+        return _relay_part_landed(user_id, project_id, part_number, landed,
+                                  "before")
     try:
         etag = storage.relay_part(key, upload_id, part_number, request.stream,
                                   declared_bytes=request.content_length)
     except storage.RelayTooLarge as e:
         return jsonify({"error": str(e)}), 413
     except Exception as e:
+        # P0 #1263 (15 Nov 2026): a phone hid the page, the background
+        # handoff sent the part and the server assembled the upload (the
+        # asset landed at 16:03); the page came back and relayed the same
+        # part to the finished upload at 16:05. Storage refused it (B2 cut
+        # the socket mid-body: "SSL validation failed"), and the 502 showed
+        # "Upload failed" over a video that had arrived. Whatever storage
+        # says, an upload whose asset already landed has nothing left to
+        # send: answer so, and the completion (deduped by key) returns it.
+        try:
+            with vdb() as conn:
+                landed = _landed_upload_asset(conn.cursor(), project_id, key)
+        except Exception:
+            landed = None
+        if landed:
+            return _relay_part_landed(user_id, project_id, part_number,
+                                      landed, "after_error")
         code = storage.error_code(e)
         if code == "NoSuchUpload":
             return jsonify({"error": "That upload can no longer be resumed; "
@@ -8158,7 +8202,7 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe", "player_composition_
                       # A symptom, not a feature: if this starts carrying real
                       # traffic the direct path is broken for a population, and
                       # this count is how that becomes visible.
-                      "upload_relayed",
+                      "upload_relayed", "upload_relay_landed",
                       # A multipart complete whose parts list carried a
                       # mistyped ETag, completed from storage's own ETags
                       # (storage.finish_multipart) instead of aborted.

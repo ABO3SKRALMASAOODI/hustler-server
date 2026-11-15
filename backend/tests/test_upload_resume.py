@@ -380,3 +380,84 @@ def test_a_different_file_is_not_attached_to_the_pending_original(
         json={"storage_key": key, "filename": "other.mov",
               "bytes": 90 * MIB})
     assert status == 409 and body["code"] == "different_file"
+
+
+# ── P0 #1263: a part relayed to an upload that already landed ──────────────
+
+class _LandedCur(_Cur):
+    """The project already holds the asset this upload became."""
+
+    def __init__(self, meta=None):
+        super().__init__()
+        self.meta = meta or {}
+
+    def execute(self, sql, params=()):
+        s = " ".join(sql.split())
+        if s.startswith("SELECT id, meta FROM assets"):
+            self._all = [{"id": 41506, "meta": self.meta}]
+        else:
+            super().execute(sql, params)
+
+
+class _BrokenStore(_S3):
+    """B2 cutting the socket on a part for a finished large file."""
+
+    def upload_part(self, **_k):
+        raise Exception("SSL validation failed for https://b2.test/x "
+                        "EOF occurred in violation of protocol")
+
+
+def test_a_part_for_a_landed_upload_answers_landed_not_502(monkeypatch, s3):
+    fake = s3(_S3(1, 1, stored=[]))
+    status, body, events = _route(
+        monkeypatch, video._relay_upload_part_signed_in, _LandedCur(),
+        query="?key=originals/7/a.mp4&upload_id=u1&part_number=1",
+        data=b"y" * 1000)
+    assert status == 200, body
+    assert body["assembled"] is True and body["etag"]
+    assert body["asset_id"] == 41506
+    assert fake.uploaded == []          # nothing sent to the finished upload
+    assert events[0][0][2] == "upload_relay_landed"
+
+
+def test_a_storage_error_after_the_upload_landed_is_no_failure(monkeypatch, s3):
+    """The upload lands WHILE the part is relayed: storage refuses the part
+    (any error, here B2's TLS cut), and the route answers landed."""
+    s3(_BrokenStore(1, 1, stored=[]))
+    calls = {"n": 0}
+
+    class _LandsDuring(_LandedCur):
+        def execute(self, sql, params=()):
+            if " ".join(sql.split()).startswith("SELECT id, meta FROM assets"):
+                calls["n"] += 1
+                if calls["n"] == 1:          # not yet landed before the send
+                    self._all = []
+                    return
+            super().execute(sql, params)
+
+    status, body, _ = _route(
+        monkeypatch, video._relay_upload_part_signed_in, _LandsDuring(),
+        query="?key=originals/7/a.mp4&upload_id=u1&part_number=1",
+        data=b"y" * 1000)
+    assert status == 200, body
+    assert body["assembled"] is True
+
+
+def test_a_storage_error_on_an_unlanded_upload_is_still_reported(monkeypatch, s3):
+    s3(_BrokenStore(1, 1, stored=[]))
+    status, body, _ = _route(
+        monkeypatch, video._relay_upload_part_signed_in, _Cur(),
+        query="?key=originals/7/a.mp4&upload_id=u1&part_number=1",
+        data=b"y" * 1000)
+    assert status == 502 and "SSL validation failed" in body["error"]
+
+
+def test_a_pending_deferred_original_is_not_taken_as_landed(monkeypatch, s3):
+    fake = s3(_S3(1, 1, stored=[]))
+    status, body, _ = _route(
+        monkeypatch, video._relay_upload_part_signed_in,
+        _LandedCur(meta={"upload_state": "pending"}),
+        query="?key=originals/7/a.mp4&upload_id=u1&part_number=2",
+        data=b"y" * 10)
+    assert status == 200 and body["etag"] == '"relayed2"'
+    assert fake.uploaded == [(2, 10)]
