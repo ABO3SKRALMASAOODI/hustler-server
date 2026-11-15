@@ -105,6 +105,26 @@ def test_no_openai_key_refuses(monkeypatch):
         call.stream("gpt-6-sol", "s", "c", max_tokens=5, effort="low", purpose="p", deadline=time.monotonic() + 10)
 
 
+def test_director_uses_configured_local_responses_endpoint(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        assert request.headers["authorization"] == "Bearer local-codex-only"
+        return httpx.Response(200, content=_sse(
+            {"type": "response.output_text.delta", "delta": "local score"},
+            {"type": "response.completed", "response": {
+                "status": "completed", "usage": {"input_tokens": 4, "output_tokens": 2}}}))
+
+    _client_with(monkeypatch, handler)
+    monkeypatch.setattr(call_openai.config, "OPENAI_BASE_URL", "http://127.0.0.1:8787/v1/")
+    monkeypatch.setattr(call_openai.config, "OPENAI_API_KEY", "local-codex-only")
+    result = call.stream("gpt-6-sol", "s", "c", max_tokens=10, effort="low",
+                         purpose="director_scout", deadline=time.monotonic() + 5)
+    assert result.text == "local score"
+    assert seen == ["http://127.0.0.1:8787/v1/responses"]
+
+
 def test_director_tier_is_explicit_and_keeps_model_reasoning_and_budget(monkeypatch):
     monkeypatch.setattr(call_openai.config, 'OPENAI_SERVICE_TIER', '')
     monkeypatch.setattr(call_openai.config, 'DIRECTOR_SERVICE_TIER', '')

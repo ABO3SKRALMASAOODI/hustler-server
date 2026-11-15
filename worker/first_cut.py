@@ -484,8 +484,8 @@ def scout_range(ctx, worker_db, spend):
                          _with_broll(SCOUT_SYSTEM, talk) if q1
                          else SCOUT_SYSTEM},
                         {"role": "user", "content":
-                         "Transcript (sentence id, source seconds):\n"
-                         + "\n".join(lines) + first_cut_spelling.context(ctx.index)}]
+                         first_cut_spelling.content(ctx, "Transcript (sentence id, source seconds):\n"
+                         + "\n".join(lines))}]
             # thinking is on by default on the lane's models: a small
             # max_tokens can be spent before any answer (C1: an empty pick)
             with _timed(ctx, "scout"):
@@ -761,8 +761,8 @@ def trim_range(ctx, worker_db, spend):
                              _with_broll(TRIM_SYSTEM, _talk_source(ctx)) if q1
                              else TRIM_SYSTEM},
                             {"role": "user", "content":
-                             "Transcript (sentence id, source seconds):\n"
-                             + "\n".join(lines) + first_cut_spelling.context(ctx.index)}],
+                             first_cut_spelling.content(ctx, "Transcript (sentence id, source seconds):\n"
+                             + "\n".join(lines))}],
                     max_tokens=4000, effort="low")
             text = resp.choices[0].message.content or ""
             spend["usd"] += float(getattr(resp.usage, "provider_cost_usd", 0)

@@ -14,9 +14,9 @@ def inscriptions(index):
     return out
 
 
-def context(index):
+def context(index, frames=False):
     printed = inscriptions(index)
-    if not printed:
+    if not printed and not frames:
         return ''
     words = [{'w': i, 'text': w.get('w'), 'at': w.get('t0')}
              for i, w in enumerate(index.get('words') or [])][:6000]
@@ -24,9 +24,44 @@ def context(index):
             + json.dumps({'inscriptions': printed[:60], 'word_ids': words}, ensure_ascii=False)
             + '\nIf an inscription establishes the spelling of the SAME person or thing being spoken about, '
             'use it in titles and return fixes:[{w:word_id,t:exact_corrected_word,evidence:"screen",'
-            'read:exact_inscription}]. Match the speech context, never faces. Do not replace one person '
+            'read:exact_inscription}]. Read the attached source frames as well, including small name cards and labels; '
+            'the earlier frame summary may omit them. Match the speech context, never faces. Do not replace one person '
             'with another whose name merely appears elsewhere. Omit uncertain fixes. This optional fixes '
             'array belongs beside start_id, end_id, hook and beats in the JSON answer.\n')
+
+
+def content(ctx, transcript):
+    """Let the existing scout read source text that the index summary omitted.
+
+    At most three original frames, with no extra model call or persistent cache.
+    Claims from this call may cite the attached pixels as well as index text.
+    """
+    import base64
+    import io
+    from score import boards
+    images = []
+    ctx.first_cut_spelling_frames = False
+    try:
+        shots = ctx.index.get('shots') or [{'start': 0, 'end': ctx.duration}]
+        selected = shots if len(shots) <= 3 else [shots[0], shots[len(shots)//2], shots[-1]]
+        source = ctx.proxy_path()
+        for shot in selected:
+            at = (float(shot.get('start', 0)) + float(shot.get('end', ctx.duration))) / 2
+            frame = boards.grab(source, at, width=1280)
+            if frame is None:
+                continue
+            buf = io.BytesIO()
+            frame.save(buf, format='JPEG', quality=90)
+            images.extend([{'type': 'text', 'text': f'Original upload frame at {at:.2f}s. Read its small printed names.'},
+                           {'type': 'image_url', 'image_url': {
+                               'url': 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode(),
+                               'detail': 'high'}}])
+    except (AttributeError, OSError, ValueError, TimeoutError):
+        # Text evidence remains available when the source cannot be decoded.
+        pass
+    ctx.first_cut_spelling_frames = bool(images)
+    text = transcript + context(ctx.index, frames=bool(images))
+    return [{'type': 'text', 'text': text}, *images] if images else text
 
 
 def apply(ctx, answer):
@@ -37,7 +72,8 @@ def apply(ctx, answer):
         if not isinstance(fix, dict):
             continue
         read = str(fix.get('read') or '').strip()
-        if read and any(read.casefold() in text.casefold() for text in printed):
+        if read and (getattr(ctx, 'first_cut_spelling_frames', False)
+                     or any(read.casefold() in text.casefold() for text in printed)):
             backed.append(fix)
     if backed:
         ctx.index = printed_spellings(ctx.index, {'fixes': backed})

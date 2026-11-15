@@ -55,3 +55,36 @@ def test_model_cannot_invent_an_inscription():
     apply(ctx, {'fixes': [{'w': 0, 't': 'Jakoet', 'read': 'Fatima Jakoet', 'evidence': 'screen'}]})
     assert ctx.index['words'][0]['w'] == 'jadot'
     assert context({'words': []}) == ''
+
+
+def test_scout_reads_small_card_missing_from_summary(monkeypatch):
+    from PIL import Image
+    from first_cut_spelling import content
+    from score import boards
+    ctx = SimpleNamespace(index={'words': [{'w': 'Jadot', 't0': 1}],
+                                  'shots': [{'start': 0, 'end': 8}]},
+                          duration=8, proxy_path=lambda: '/source.mp4')
+    seen = []
+    def grab(path, at, width):
+        seen.append((path, at, width))
+        return Image.new('RGB', (1280, 720))
+    monkeypatch.setattr(boards, 'grab', grab)
+    parts = content(ctx, 'Transcript')
+    assert seen == [('/source.mp4', 4., 1280)]
+    assert 'word_ids' in parts[0]['text']
+    assert parts[-1]['image_url']['url'].startswith('data:image/jpeg;base64,')
+    apply(ctx, {'fixes': [{'w': 0, 't': 'Jakoet', 'read': 'Fatima Jakoet', 'evidence': 'screen'}]})
+    assert ctx.index['words'][0]['w'] == 'Jakoet'
+    assert ctx.index['caption_evidence']['0']['read'] == 'Fatima Jakoet'
+
+
+def test_missing_frame_does_not_authorize_unseen_spelling(monkeypatch):
+    from first_cut_spelling import content
+    from score import boards
+    ctx = SimpleNamespace(index={'words': [{'w': 'Jadot'}]}, duration=8,
+                          proxy_path=lambda: '/source.mp4', first_cut_spelling_frames=True)
+    monkeypatch.setattr(boards, 'grab', lambda *a, **kw: None)
+    assert content(ctx, 'Transcript') == 'Transcript'
+    assert not ctx.first_cut_spelling_frames
+    apply(ctx, {'fixes': [{'w': 0, 't': 'Jakoet', 'read': 'Fatima Jakoet', 'evidence': 'screen'}]})
+    assert ctx.index['words'][0]['w'] == 'Jadot'

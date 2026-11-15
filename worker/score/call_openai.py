@@ -19,7 +19,6 @@ import llm
 import openai_cache
 
 OUT_TOKENS_PER_S = 130.0
-URL = "https://api.openai.com/v1/responses"
 # Claude effort words to the reasoning efforts every OpenAI model here accepts (gpt-5.5 has no "max").
 EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "xhigh"}
 
@@ -114,8 +113,10 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
     import httpx
     from . import call
     key = config.OPENAI_API_KEY
-    if not key or "api.openai.com" not in str(config.OPENAI_BASE_URL):
+    base = str(config.OPENAI_BASE_URL or "").rstrip("/")
+    if not key or not base:
         raise call.Refused("the OpenAI rung has no OpenAI key")
+    url = base + "/responses"
     import openai_credit
     if not openai_credit.available():
         # Out of credit (worker/openai_credit.py): nothing is sent, the caller's fallback answers.
@@ -128,7 +129,7 @@ def stream(model, system, content, *, max_tokens, effort, purpose, deadline, on_
     def read():
         try:
             with httpx.Client(timeout=httpx.Timeout(max(5.0, deadline - t0 + 5.0), connect=10.0)) as client:
-                with client.stream("POST", URL, json=req, headers={"Authorization": f"Bearer {key}"}) as r:
+                with client.stream("POST", url, json=req, headers={"Authorization": f"Bearer {key}"}) as r:
                     box["resp"] = r
                     if r.status_code != 200:
                         text = r.read().decode(errors='replace')[:300]
