@@ -332,3 +332,16 @@ def test_podcast_build_does_not_stack_designed_hole_on_a_silent_source_bar():
     assert ordinary['ok'] and any(bars[b['bar']]['k']<-20 for b in ordinary['bars_played'] if b['role']=='build')
     safe=music.arrange(song,marks,profile=music.profile_for('podcast'))
     assert safe['ok'] and all(bars[b['bar']]['k']>=-20 for b in safe['bars_played'] if b['role']=='build')
+
+
+def test_generic_approved_click_can_replace_a_thin_type_click(monkeypatch):
+    from score import audibility,sound
+    class Library:
+        def row(self,sid,*args):
+            return dict(id=sid,role='click',family='type' if sid=='thin' else None,file=sid+'.flac',peak_s=.1)
+        def ranking(self,*args):return [(0.1,'generic')]
+    monkeypatch.setattr(sound,'SF',lambda:Library())
+    item=dict(s='thin',start_s=2.,trim_s=0.,peak_s=.1,db=-10.,event_f=63)
+    choices=audibility.recording_alternatives(item)
+    assert len(choices)==1 and choices[0]['s']=='generic'
+    assert choices[0]['start_s']+choices[0]['peak_s']==2.1 and choices[0]['event_f']==63

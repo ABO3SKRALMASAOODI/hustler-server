@@ -60,7 +60,7 @@ def recording_alternatives(item):
     result = []
     for _distance, sid in sf.ranking(item['s'], sound.SOUNDS):
         new = sf.row(sid, sound.SOUNDS)
-        if new.get('role') != old.get('role') or new.get('family') != old.get('family'):
+        if new.get('role') != old.get('role') or (new.get('family') and new.get('family') != old.get('family')):
             continue
         peak = float(item.get('peak_s') or 0.)
         hit = float(item['start_s'])-float(item.get('trim_s') or 0.)+peak
@@ -111,8 +111,10 @@ def present_hits(sounds, voice, bed, render, alternatives=None):
         # following a whoosh never becomes a distinct audible onset.
         prior = levels(surroundings-b)
         pre = 10*np.log10(np.mean(10**(prior[max(0,i-30):max(1,i-2)]/10))+1e-12)
-        hierarchy = {'hero':6.,'accent':3.}.get(it.get('tier'),0.)
-        target = max(med+9.+hierarchy,lvb[i]-3.,pre+8.)
+        # Broad body gestures need less lift than tiny clicks; forcing both to
+        # one floor erased the recording hierarchy. Accents keep their contrast.
+        presence = {'body':8.,'tick':9.,'accent':12.,'hero':15.}.get(it.get('tier'),9.)
+        target = max(med+presence,lvb[i]-3.,pre+8.)
         # A short attack may rise above speech, but never become a sustained competing voice.
         # A pause has no local speech peak: it must not force the effect below
         # a still-playing bed. Bound attacks against the film's spoken level.
