@@ -14,14 +14,20 @@ def work_dir(ctx,proposal,catalogue):
     return Path(ctx.supply)/'archive-visual'/key
 
 
-def preview(sc,catalogue,wps=3.3):
-    import cinema as C
-    available={r['id']:r['clip'] for r in catalogue if r['usable']}
-    words=[];t=0.;ft=dict(lines=[],voices=[])
+def provisional_words(sc,wps=3.3):
+    words=[];t=0.
     for i,s in enumerate(sc['segments']):
         for w in s['say'].split():
             words.append(dict(w=w,start=t,end=t+.9/wps,seg=i));t+=1/wps
         t+=s.get('pause_after',.22)
+    return dict(duration=t,words=words)
+
+
+def preview(sc,catalogue,wps=3.3,pins=None):
+    import cinema as C
+    available={r['id']:r['clip'] for r in catalogue if r['usable']}
+    words=provisional_words(sc,wps);ft=dict(lines=[],voices=[],editorial=dict(pins=pins or []))
+    for i,s in enumerate(sc['segments']):
         clips=[]
         for beat in s['visual_beats']:
             for key in beat['archive_ids']:
@@ -29,9 +35,26 @@ def preview(sc,catalogue,wps=3.3):
                 if beat.get('label'):c['editorial_label']=beat['label']
                 clips.append(c)
         ft['lines'].append(dict(i=i,clips=clips))
-    try:shots,_,_=C.schedule(sc,dict(duration=t,words=words),ft);gaps=[]
+    try:shots,_,_=C.schedule(sc,words,ft);gaps=[]
     except C.CoverageError as e:shots=e.shots;gaps=e.gaps
-    return shots,gaps,t
+    return shots,gaps,words['duration']
+
+
+def checked_pins(sc,shots,report):
+    """Retain accepted intervals, not whole paragraphs' candidate lists.
+
+    Word anchors translate the rough edit to the recorded clock. Its new
+    durations and picture/word pairings still face the actual-clock review.
+    """
+    import cinema as C
+    from timeline_repair import anchor
+    clock=C.F.Clock(provisional_words(sc),sc);pins=[]
+    for i,row in enumerate(shots):
+        verdict=report['evidence'].get(str(i),report['evidence'].get(i,{}))
+        if verdict.get('matches') is True:
+            pins.append(dict(seg=row['seg'],clip=row['clip'],src=row['src'],
+                             anchors=[anchor(clock,f/30) for f in row['f']]))
+    return pins
 
 
 def refine(ctx,proposal,catalogue,rounds=1):
@@ -43,16 +66,18 @@ def refine(ctx,proposal,catalogue,rounds=1):
     sc=copy.deepcopy(proposal['script'])
     material=[dict(id=r['id'],visible=r['visible'],form=r['form'],moving=r['real_moving_footage'],
                    seconds=r['clip']['seconds'],source=r['clip']['source'],limitations=r['limitations']) for r in catalogue if r['usable']]
+    pins=[]
     for attempt in range(rounds+1):
         if (root/f'script-{attempt}.json').exists():sc=C.read(root/f'script-{attempt}.json')
         else:C.save(root/f'script-{attempt}.json',sc)
-        shots,gaps,duration=preview(sc,catalogue)
+        shots,gaps,duration=preview(sc,catalogue,3.3,pins)
         report=C.source_review(ctx,shots,required=False)
         C.save(root/f'preview-{attempt}.json',dict(planning_only=True,estimated_seconds=duration,gaps=gaps,shots=shots,report=report))
         ctx.log(f"archive preflight {attempt}: {len(shots)} pictures, {len(report['rejected'])} mismatches, {sum(g['seconds'] for g in gaps):.1f}s short, {report['moving_share']:.1%} moving in covered preview")
         if report['ok'] and not gaps and report['moving_share']>=.55:
-            result=dict(proposal,script=sc);C.save(done,result);return result
+            result=dict(proposal,script=sc,checked_pins=checked_pins(sc,shots,report));C.save(done,result);return result
         if attempt==rounds:break
+        pins=checked_pins(sc,shots,report)
         edits=root/f'edit-{attempt}.json'
         if edits.exists():repair=C.read(edits)
         else:
@@ -96,7 +121,7 @@ def refine(ctx,proposal,catalogue,rounds=1):
     # Unresolved alternatives request fresh research on the recorded clock.
     # The supply stage and final encoded-film gates still require every
     # interval to be covered truthfully and all delivered targets to pass.
-    result=dict(proposal,script=sc,preflight=dict(planning_only=True,complete=False,
+    result=dict(proposal,script=sc,checked_pins=checked_pins(sc,shots,report),preflight=dict(planning_only=True,complete=False,
                 gaps=gaps,rejected=report['rejected'],moving_share=report['moving_share']))
     C.save(done,result);return result
 
@@ -120,7 +145,7 @@ def apply_choices(script,ft,revised,catalogue):
         credits.extend(dict(line=i,**c['source']) for c in extra_by.get(i,[]))
         lines.append(dict(i=i,clips=clips))
     credits.extend(dict(voice=v['person'],**v['source']) for v in ft.get('voices',[]))
-    ft.update(lines=lines,credits=credits,editorial=dict(pins=[],rejected=[],bank=list(available.values())))
+    ft.update(lines=lines,credits=credits,editorial=dict(pins=copy.deepcopy(revised.get('checked_pins',[])),rejected=[],bank=list(available.values())))
 
 
 def prepare(ctx,script,ft):

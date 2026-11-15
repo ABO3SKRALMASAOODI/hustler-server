@@ -444,6 +444,25 @@ def test_visual_repreflight_preserves_newly_researched_sources():
     assert [c['path'] for c in ft['lines'][0]['clips']]==['catalogued','newly-researched']
 
 
+def test_visual_repair_retains_checked_interval_when_paragraph_choices_change():
+    import archive_visual as A
+    import copy
+    sc=dict(segments=[dict(say='one two three four five six seven eight nine ten eleven twelve',chapter='c',
+                          visual_beats=[dict(word_start=0,archive_ids=['good']),dict(word_start=6,archive_ids=['bad'])])])
+    cat=[dict(id=k,usable=True,clip=dict(clip(k,a,a+4),catalogue_id=k))
+         for k,a in [('good',0),('bad',10),('replacement',20)]]
+    shots,_,_=A.preview(sc,cat)
+    report=dict(evidence={str(i):dict(matches=r['clip']['path']=='good') for i,r in enumerate(shots)})
+    pins=A.checked_pins(sc,shots,report)
+    changed=copy.deepcopy(sc)
+    changed['segments'][0]['visual_beats']=[dict(word_start=0,archive_ids=['replacement'])]
+    revised,gaps,_=A.preview(changed,cat,3.3,pins)
+    assert not gaps
+    assert [r['clip']['path'] for r in revised]==['good','replacement']
+    assert revised[0]['f']==shots[0]['f']
+    assert not C.duplicate_ranges(revised)
+
+
 def test_hold_gate_uses_detected_shots_even_if_plan_would_split_them(tmp_path,monkeypatch):
     import measure_picture as M
     import numpy as np
