@@ -64,7 +64,8 @@ def record(ctx, ledger, request):
     authorized, _ = asks._call(ctx, 'identify_picture_subjects', subject_schema,
         "Read ONLY this customer request. List every explicitly requested illustrative picture "
         "subject separately. For each give its subject name, concise archive query, and minimum "
-        "recognizable visible requirement; do not invent extra actions or settings. A product "
+        "recognizable visible requirement; do not invent extra actions or settings. Allow ordinary "
+        "recognizable forms of a topic; illustrating it need not show an activity in progress. A product "
         "does not also request its maker or related companies. 'As named' means place pictures "
         "of the requested subjects at their spoken mentions. spoken_categories is empty unless "
         "the customer asks to illustrate a generic category of unnamed spoken examples; then "
@@ -311,6 +312,7 @@ def check(ctx, ledger, edl, preview):
                 out[p['id']] = row
                 continue
             content = [{'type': 'text', 'text': json.dumps({
+                'customer_request': getattr(ctx, 'verification_request', None) or getattr(ctx, 'user_message', ''),
                 'subject': p['subject'], 'must_show': p['must_show'],
                 'spoken_words': p['source_words'], 'language': ledger.get('lang'),
                 'program_times': times, 'spoken_anchor_check': spoken}, ensure_ascii=False)}]
@@ -325,6 +327,11 @@ def check(ctx, ledger, edl, preview):
                 'visually but never spoken: at least one frame must clearly illustrate it. '
                 'A speaker saying the name, subtitles, a related industry or another brand do '
                 'not count as the requested picture. Judge pixels, never trust metadata. '
+                'Apply the actual customer_request: must_show is a model-proposed identification '
+                'aid, not permission to invent a stricter request. Its illustrative examples are '
+                'not additional mandatory requirements. Ordinary recognizable forms of the '
+                'requested topic qualify unless the customer asks for a specific activity or '
+                'form. Keep explicit named subjects and brands exact. '
                 'Do not identify faces. Missing or uncertain evidence is shown=false. Explain '
                 'what is visible in seen. Give an honest customer-facing line in their language '
                 'that names this specific subject and says whether it was delivered.',
