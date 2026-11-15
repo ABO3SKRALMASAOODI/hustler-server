@@ -21,6 +21,7 @@ from PIL import Image, ImageDraw, ImageFilter
 
 import score.compiler as score
 import score.shape as shape
+from scene.spine import source_at
 
 OV_MIN_S, TX_MIN_S = 0.2, 0.3      # today's minimums: schemas.validate_edl
 RUN_FIT = 0.86                     # a running line keeps the whole words that fit this share of the frame
@@ -263,6 +264,8 @@ def lower_spine(l1, bake, rep):
     W, H = l1["frame"]
     spine = sorted(l1.get("spine") or [], key=lambda s: s["f"][0])
     keep, inserts = [], []
+    precise = any("at_s" in s for s in spine)
+    source_round = (lambda t: round(t, 6)) if precise else r2
     prog, pre = 0, 0.0
     last_src = -1.0
     black = None
@@ -299,12 +302,12 @@ def lower_spine(l1, bake, rep):
         if k in base and t0 >= last_src - 0.04:       # a beat written in seconds can start a frame before the last one ended: that is continuity, not a jump
             d = max(0.0, last_src - t0)         # the same length, or the programme ends short of the film
             t0, t1 = t0 + d, t1 + d
-            keep.append([r2(t0), r2(t1)])
+            keep.append([source_round(t0), source_round(t1)])
             pre += t1 - t0
             last_src = t1
         else:
             bake.locals["main"] = os.path.join(bake.work, "source.mp4")
-            inserts.append({"id": f"spine{a}", "asset_key": "main", "kind": "video", "at_output_s": r2(pre), "duration_s": r2(t1 - t0), "source_start_s": r2(t0)})
+            inserts.append({"id": f"spine{a}", "asset_key": "main", "kind": "video", "at_output_s": source_round(pre), "duration_s": source_round(t1 - t0), "source_start_s": source_round(t0)})
             rep["out_of_order_spans"] = rep.get("out_of_order_spans", 0) + 1
             rep.setdefault("_off_base", []).append((a, b))        # programme frames whose words can't carry a source-time caption
         prog = b
@@ -318,7 +321,7 @@ def on_spine(l1, it, fps):
     a = it["f"][0]
     for s in l1.get("spine") or []:
         if s["f"][0] <= a < s["f"][1]:
-            want = s["src"][0] + (a - s["f"][0]) / fps
+            want = source_at(s, a, fps)
             return abs(want - it["src"][0]) < 0.06
     return False
 
@@ -713,7 +716,7 @@ def src_at(l1, f, fps):
     best = None
     for s in l1.get("spine") or []:
         if s["f"][0] <= f <= s["f"][1]:
-            best = s["src"][0] + (f - s["f"][0]) / fps
+            best = source_at(s, f, fps)
             if f < s["f"][1]:
                 return best
     return best
@@ -1158,7 +1161,7 @@ def lower(l1, work):
     # validate_edl refuses the whole film for a caption 0.02 s over it.
     src_dur = float(((l1.get("assets") or {}).get("main") or {}).get("dur") or 0)
     if src_dur:
-        keep = [[a, r2(min(b, src_dur))] for a, b in keep if min(b, src_dur) - a > 0.04]
+        keep = [[a, round(min(b, src_dur), 6)] for a, b in keep if min(b, src_dur) - a > 0.04]
     prog = sum(k[1] - k[0] for k in keep) + sum(float(i.get("duration_s") or 0) for i in inserts)
     # Every overlay lane, joined-script type included: a Persian word on the last frame, held to today's
     # 0.2 s minimum, outran the programme by 0.01 s and validate_edl refused the whole film (p5374).

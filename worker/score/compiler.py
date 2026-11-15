@@ -28,6 +28,8 @@ import sys
 import time
 import unicodedata
 
+from scene.spine import source_at, start_s
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORKER = os.path.dirname(HERE)
 FONTS = os.environ.get("VALMERA_FONTS", WORKER + "/fonts")
@@ -562,7 +564,7 @@ def frame_src(ctx, t):
     """Source seconds to the first programme frame showing them, through the spine."""
     for s in ctx.spine:
         if s["src"][0] - 1e-6 <= t < s["src"][1]:
-            return s["f"][0] + int(round((t - s["src"][0]) * ctx.fps))
+            return int(round((start_s(s, ctx.fps) + t - s["src"][0]) * ctx.fps))
     return None
 
 
@@ -572,7 +574,7 @@ def frame_near(ctx, t):
     for s in ctx.spine:
         q = clamp(t, s["src"][0], s["src"][1] - 1 / ctx.fps)
         if abs(q - t) < gap:
-            best, gap = s["f"][0] + int(round((q - s["src"][0]) * ctx.fps)), abs(q - t)
+            best, gap = int(round((start_s(s, ctx.fps) + q - s["src"][0]) * ctx.fps)), abs(q - t)
     return best
 
 
@@ -1094,7 +1096,8 @@ def fill_coverage(ctx, beats):
 
 def build_spine(ctx):
     """The programme is the beats in order. Voice runs are split on the film's gap and joined
-    where the source is continuous, then quantised to whole frames."""
+    where the source is continuous. First-film audio keeps exact source edges;
+    its picture clock is quantised cumulatively to whole frames."""
     runs = []
     for b in ctx.beats:
         if b.ws:
@@ -1135,38 +1138,66 @@ def build_spine(ctx):
                 n["s0"] = t0(ctx, n["ws"][0]) - keep
     if runs and runs[-1]["ws"]:
         runs[-1]["s1"] = min(ctx.src_dur, t1(ctx, runs[-1]["ws"][-1]) + float(ctx.film.get("tail", 0.3) or 0.0))
-    prog, prev_end = 0, None
+    # First films must pass the same whole-word guard as a requested edit.
+    # Padding is air, never a fragment of an omitted neighbouring word. Keep
+    # source seconds exact: rounding each source end to a video frame both
+    # clips consonants and accumulates drift across a reordered programme.
+    exact = bool(ctx.index.get("first_film")) and any(r["ws"] for r in runs)
+    if exact:
+        import word_edges
+        for r in runs:
+            if not r["ws"]:
+                continue
+            first, last = r["ws"][0], r["ws"][-1]
+            left, right = t0(ctx, first), t1(ctx, last)
+            previous = max((w["t1"] for w in ctx.words[:first] if w["t1"] <= left), default=0.)
+            following = min((w["t0"] for w in ctx.words[last + 1:] if w["t0"] >= right), default=ctx.src_dur)
+            r["s0"] = max(r["s0"], previous)
+            r["s1"] = min(r["s1"], following)
+            whole, _ = word_edges.whole([[r["s0"], r["s1"]]], ctx.words, ctx.src_dur)
+            r["s0"], r["s1"] = whole[0]
+    prog, prev_end, seconds = 0, None, 0.0
     for r in runs:
         if r.get("silent"):
             r["a"], r["b_"] = prog, prog + int(r["silent"])
             prog = r["b_"]
+            seconds += int(r["silent"]) / ctx.fps
             prev_end = None
             continue
         s0 = clamp(r["s0"], 0.0, ctx.src_dur)
         if r.get("joined") and prev_end is not None:
             s0 = prev_end
-        elif prev_end is not None and 0 < prev_end - s0 <= 0.2:
+        elif not exact and prev_end is not None and 0 < prev_end - s0 <= 0.2:
             # The air before a first word reaches back into the span before it (a beat written in seconds, then a
             # beat of words: p5571, 4.41 after 4.46). That is one continuous take. Lowered as a jump it became an
             # insert of the upload, framed differently from the upload itself.
             s0 = prev_end
-        s1 = clamp(r["s1"], s0 + 1.0 / ctx.fps, max(ctx.src_dur, s0 + 1.0 / ctx.fps))
-        n = max(1, int(round((s1 - s0) * ctx.fps)))
-        s1 = s0 + n / ctx.fps
+        minimum = 1e-6 if exact else 1.0 / ctx.fps
+        s1 = clamp(r["s1"], s0 + minimum, max(ctx.src_dur, s0 + minimum))
+        if exact:
+            end_f = int(round((seconds + s1 - s0) * ctx.fps))
+            if r is runs[-1]:
+                end_f = int(math.ceil((seconds + s1 - s0) * ctx.fps - 1e-8))
+            n = max(1, end_f - prog)
+        else:
+            n = max(1, int(round((s1 - s0) * ctx.fps)))
+            s1 = s0 + n / ctx.fps
         r["a"], r["b_"], r["s0"], r["s1"] = prog, prog + n, s0, s1
         last = ctx.spine[-1] if ctx.spine else None
         if last and r.get("joined") and last["f"][1] == prog and abs(last["src"][1] - s0) < 1e-6:
             last["f"][1] = prog + n
             last["src"][1] = s1
         else:
-            ctx.spine.append({"f": [prog, prog + n], "src": [s0, s1]})
+            ctx.spine.append({"f": [prog, prog + n], "src": [s0, s1], **({"at_s": seconds} if exact else {})})
             ctx.spine_talk.append(bool(r["ws"]))        # a stretch of the voice, or of picture written in seconds
+        offset_f = seconds * ctx.fps if exact else r["a"]
+        seconds += s1 - s0
         prog += n
         prev_end = s1
         b = r["b"]
         for w in r["ws"]:
-            f = clamp(r["a"] + int(round((t0(ctx, w) - s0) * ctx.fps)), r["a"], r["b_"] - 1)
-            e = clamp(r["a"] + int(round((t1(ctx, w) - s0) * ctx.fps)), f + 1, r["b_"])
+            f = clamp(int(round(offset_f + (t0(ctx, w) - s0) * ctx.fps)), r["a"], r["b_"] - 1)
+            e = clamp(int(round(offset_f + (t1(ctx, w) - s0) * ctx.fps)), f + 1, r["b_"])
             b.wf[w], b.wfe[w] = f, e
             ctx.wf_any.setdefault(w, f)
             ctx.wfe_any.setdefault(w, e)
@@ -1194,7 +1225,7 @@ def follow_spine(ctx, a, z):
             out.append((f, s["f"][0], t, t))
             f = s["f"][0]
         b = min(z, s["f"][1])
-        s0 = s["src"][0] + (f - s["f"][0]) / ctx.fps
+        s0 = source_at(s, f, ctx.fps)
         out.append((f, b, s0, s0 + (b - f) / ctx.fps))
         last_t = s0 + (b - f - 1) / ctx.fps
         f = b
@@ -5282,7 +5313,7 @@ def track_level(ctx, f):
         return None
     for s in ctx.spine:
         if s["f"][0] <= f < s["f"][1]:
-            t = s["src"][0] + (f - s["f"][0]) / ctx.fps
+            t = source_at(s, f, ctx.fps)
             return float(bins[min(int(t / step), len(bins) - 1)])
     return None
 
@@ -5794,6 +5825,10 @@ def to_l1(ctx):
     out = {"l1": 1, "sid": ctx.sid, "seed": ctx.seed, "fps": ctx.fps, "frame": [ctx.W, ctx.H], "dur_f": ctx.dur_f,
            "assets": rf(ctx.assets), "spine": rf(ctx.spine), "voices": rf(ctx.voices), "film": rf(ctx.film_out),
            "items": items, "sound": rf(ctx.sound)}
+    for saved, span in zip(out["spine"], ctx.spine):
+        if "at_s" in span:
+            saved["at_s"] = round(span["at_s"], 6)
+            saved["src"] = [round(t, 6) for t in span["src"]]
     if getattr(ctx, "alien", None):
         out["alien"] = rf(ctx.alien)          # asks for scene.alien.apply, by the alien gesture; no item of the scene depends on them
     return out

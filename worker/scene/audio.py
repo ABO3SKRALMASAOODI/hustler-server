@@ -12,6 +12,7 @@ import re
 import subprocess
 
 import numpy as np
+from scene.spine import samples
 
 from .faults import SceneFault
 
@@ -162,10 +163,8 @@ def split_audio(plan):
         ends = {}
         for e in spine:
             a, b = e["f"]
-            at = int(round(a / plan.fps * SR))
-            to = min(int(round(b / plan.fps * SR)), n)
-            s0 = int(round(e["src"][0] * SR))
-            seg = src[s0:s0 + (to - at)].copy()
+            at, s0, count = samples(e, plan.fps, SR, n)
+            seg = src[s0:s0 + count].copy()
             if len(seg) == 0:
                 continue
             joined_before = ends.get(a) == round(e["src"][0], 3)

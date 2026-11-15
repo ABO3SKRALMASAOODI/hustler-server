@@ -9,6 +9,7 @@ import os
 import subprocess
 
 import numpy as np
+from scene.spine import samples
 
 import score.compiler as compiler
 
@@ -172,10 +173,8 @@ def dry_spine(l1, src):
     mix = np.zeros((n, 2), np.float32)
     pc = pcm(src)
     for e in l1.get("spine") or []:
-        at = int(round(e["f"][0] / fps * SR))
-        to = min(int(round(e["f"][1] / fps * SR)), n)
-        s0 = int(round(e["src"][0] * SR))
-        seg = pc[s0:s0 + (to - at)]
+        at, s0, count = samples(e, fps, SR, n)
+        seg = pc[s0:s0 + count]
         mix[at:at + len(seg)] += seg
     return mix
 
