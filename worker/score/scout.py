@@ -114,7 +114,9 @@ def content(work, idx, sess, per):
     b = os.path.join(work, "brief", "board_1.jpg")
     if os.path.exists(b):
         out.append(brief.image_block(b))
-    detail = os.path.join(work, "brief", "board_4.jpg")
+    detail = os.path.join(work, "brief", "printed_text.jpg")
+    if not os.path.exists(detail):
+        detail = os.path.join(work, "brief", "board_4.jpg")
     if os.path.exists(detail):
         out.append(brief.image_block(detail))
     return out
