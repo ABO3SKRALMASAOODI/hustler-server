@@ -23,6 +23,32 @@ def test_newly_available_source_invalidates_exhausted_research_without_path_chur
     assert wf.source_signature(str(tmp_path))==present
 
 
+def test_recovered_original_rescans_frames_without_repeating_exhausted_searches(tmp_path,monkeypatch):
+    import wf1_primary_sources
+    sources=tmp_path/'sources';sources.mkdir();movie=sources/'original.mp4';movie.write_bytes(b'original')
+    (sources/'manifest.json').write_text(json.dumps([dict(url='https://publisher.example/film',path=str(movie),
+        title='Company tour',channel='Company',subjects=['Company'])]))
+    pack=dict(coverage=dict(contract=3,windows=[dict(name='Company',must_show='Actual company',say='Company',t0=0,t1=4)]),
+              referent_research={},research_revision=7,coverage_context_checked=True,missing_document_attempted=True,
+              coverage_repairs=4,research_contract=wf.RESEARCH_CONTRACT,research_sources='before recovery',
+              footage=[],pictures={},credits=[])
+    pack['referent_research']={'sources':[]}
+    (tmp_path/'pack.json').write_text(json.dumps({'pack':pack}))
+    monkeypatch.setattr(wf,'_llm',lambda:None)
+    monkeypatch.setattr(wf1_primary_sources,'acquire',lambda *a:pytest.fail('already exhausted research must not repeat'))
+    calls=[]
+    monkeypatch.setattr(wf.chain,'footage',lambda *a,**kw:calls.append(kw) or dict(lines=[],credits=[]))
+    ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
+    script=dict(title='Company',style={'id':'window'})
+    shortage=dict(weak_windows=[0],missing_windows=[],real_seconds=4,moving_seconds=0)
+    wf.refill(ctx,script,pack,shortage)
+    assert len(calls)==1 and calls[0]['source_only'] is True
+    assert pack['coverage_repairs']==4 and pack['research_sources']==wf.source_signature(str(tmp_path))
+    with pytest.raises(RuntimeError,match='coverage still incomplete'):
+        wf.refill(ctx,script,pack,shortage)
+    assert len(calls)==1
+
+
 def test_composed_rejection_rebuilds_product_plan_and_invalidates_render(tmp_path, monkeypatch):
     ctx = SimpleNamespace(supply=str(tmp_path), run_dir=str(tmp_path), log=lambda x: None)
     sc = dict(beats=dict(pictures=[dict(path='/supply/bad.jpg')]), spend=[])

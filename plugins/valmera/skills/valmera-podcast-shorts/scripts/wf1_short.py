@@ -460,9 +460,12 @@ def refill(ctx, script, pack, shortage):
     else:
         ctx.log('moving coverage is short; prioritize original video over additional still documents')
     signature=source_signature(ctx.supply)
-    previous = pack.get('coverage_repairs',0) if pack.get('research_contract')==RESEARCH_CONTRACT and pack.get('research_sources')==signature else 0
+    previous = pack.get('coverage_repairs',0) if pack.get('research_contract')==RESEARCH_CONTRACT else 0
+    recovered_sources = bool(previous and pack.get('research_sources')!=signature)
     count = max(4,int(previous)+1) if pack.get('platform_walled') else int(previous)+1
-    rescout=bool(pack.get('coverage_context_rescout_pending'))
+    # New original bytes merit fresh frame checks, not another cycle of the same
+    # exhausted platform searches. Preserve the search budget after this rescan.
+    rescout=bool(pack.get('coverage_context_rescout_pending') or recovered_sources)
     last=pack.get('coverage_last_search_report')
     if last and not rescout and count<4:
         improved=any(shortage.get(k,0)>last.get(k,0)+.01
@@ -508,7 +511,7 @@ def refill(ctx, script, pack, shortage):
     if count > 4 and not rescout:
         raise RuntimeError('documentary coverage still incomplete after platform and original-publisher research')
     name = f"footage-v{coverage['contract']}-context{RESEARCH_CONTRACT}-{signature}-repair{count}"
-    if rescout:name+='-expanded-context'
+    if rescout:name+='-recovered-sources' if recovered_sources else '-expanded-context'
     prior = [os.path.join(ctx.supply,n,'footage.json') for n in os.listdir(ctx.supply)
              if n.startswith('footage') and os.path.isfile(os.path.join(ctx.supply,n,'footage.json'))]
     subjects = {windows[i]['name']:windows[i]['must_show'] for i in wanted}
