@@ -76,6 +76,30 @@ def test_authored_type_behind_subject_keeps_its_composition():
     assert l1==before
 
 
+def test_late_type_and_blank_picture_findings_both_reach_repair(monkeypatch):
+    import json
+    from score import picture_cuts
+    from tests.test_score_compiler import talk_index
+    monkeypatch.setattr(S, 'GOVERN', False)
+    monkeypatch.setattr(S, 'thumbs', lambda *args: None)
+    monkeypatch.setattr(S, 'final_type_clearance',
+                        lambda *args: {'moved': [], 'unresolved': ['opening']})
+    monkeypatch.setattr(picture_cuts, 'selected_blanks', lambda *args: [
+        {'id': 'shot', 'source': [0., 1.], 'programme': [0., 1.]}])
+    text = '\n'.join(json.dumps(r) for r in [
+        {'k': 'film', 'v': 1, 'fps': 30, 'frame': '9:16', 'spine': 'main',
+         'band': 'own', 'own': {'med': 2, 'p10': 1, 'p90': 4}, 'seed': 3},
+        {'k': 'dna', 'plate': '#101014', 'ink': '#FFFFFF',
+         'pair': {'a': 'grotesk-bold@.03', 'b': 'serif-italic@.034'}, 'seat': [.5, .62]},
+        {'k': 'b', 'id': 'b01', 'w': '0-3', 'job': 'speech',
+         'pic': [{'src': 'main'}], 'type': '0-3'}])
+    result = S.compile_score(text, index=talk_index(5, faces=True))
+    assert any('type opening: final crop' in s for s in result.meter['findings'])
+    assert any('blank source: shot' in s for s in result.meter['findings'])
+    assert 'type opening: final crop' in result.meter_text
+    assert 'blank source: shot' in result.meter_text
+
+
 def test_compile_checks_type_against_late_crop_not_authored_picture(monkeypatch):
     import json
     from score import source_guard
