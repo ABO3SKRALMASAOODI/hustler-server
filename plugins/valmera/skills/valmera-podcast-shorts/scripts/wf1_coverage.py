@@ -48,6 +48,13 @@ into fragments such as 'There are scale' and 'effects, like Google'. Give it the
 The windows list must NEVER contain the original speaker or original interview take. Omit speaker
 passages from windows entirely; external=true means a separately acquired documentary asset.
 Use the canonical entity name in each window, without subtitles or editorial explanations in the name.
+must_show is a concise identity test for ANY ONE faithful shot, with alternatives (OR), not a
+montage that every one-second clip must contain. Keep shot counts, durations and sequencing out
+of must_show: those are measured separately. Do not require a specific workflow, software project,
+company, paper or interface action that the speaker never names. Authentic premises, products,
+interfaces or original records may illustrate a named company without proving its economic moat.
+For an unnamed category, allow any genuine example of that category with clear provenance;
+never invent a specific company, employer or person. Distinguish illustration from archival evidence.
 Do not ask for the speaker as a proxy for what he discusses. Do not seek an unidentified professor.
 For unnamed historical participants use the actual setting/document, never an invented identity.
 Extend a subject through the clause explaining it, but never across a contradictory next subject.
