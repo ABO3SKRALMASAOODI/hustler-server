@@ -853,6 +853,15 @@ def lens_type(report):
     qc = (report or {}).get("picture_qc") or (report or {}).get("qc") or {}
     caps = ((qc.get("type") or {}).get("caps")) or {}
     measure = {}
+    for row in (qc.get("type") or {}).get("small_html") or []:
+        out.append(_f("fix", "type", "html_type_too_small",
+                      f"graphic '{row['id']}' has visible secondary type at "
+                      f"{100 * row['cap']:.1f}% of frame height (<2.2%): "
+                      + "; ".join(row.get("text") or []),
+                      fix="Use set_motion_graphic to enlarge and reflow these labels "
+                          "with MG.minType / MG.fitSecondary. Preserve their words; "
+                          "do not hide text to pass. Inspect the corrected composition.",
+                      id=row["id"], t=row["t"]))
     if caps.get("captions") is not None:
         measure["captions_cap"] = caps["captions"]
         # judged at the reading size: a stack cue's small lines, not its
