@@ -1207,6 +1207,20 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
 
     rec["at"] = "write"
     result = ctx.apply_score(edl, "the Director's First cut")
+    recover_write = (getattr(ctx, "director_recover_write", None)
+                     if getattr(ctx, "director_typed", False) is True else None)
+    if not str(result).startswith("EDL v") and callable(recover_write):
+        repaired = recover_write(work=work, cfg=cfg, index=index, sc=sc,
+            bin_doc=bin_doc, original_key=original["storage_key"], worker_db=worker_db,
+            comp=comp, text=text, refusal=result, rec=rec)
+        if repaired is not None:
+            comp, text, edl, rep, result = repaired
+            m = comp.meter
+            rec["meter"] = {k: m.get(k) for k in ("dur_s", "beats", "cuts10", "new_pictures10", "type_events10", "captions", "cards", "flashes", "sounds10", "ceiling", "source_guard")}
+            rec["meter"].update(design_items10=(m.get("facts") or {}).get("design_items10"), gestures=len(m.get("gestures") or {}),
+                                rejects=len(m.get("rejects") or []), findings=len(m.get("findings") or []))
+            rec["lower"] = {k: rep.get(k) for k in ("counts", "burns_as_light", "burns_as_glow", "missing_pictures", "fonts_replaced", "bed", "bed_error")}
+            usage["taste"] = direct.taste_record(comp)
     if not str(result).startswith("EDL v"):
         raise Fall("write", str(result)[:300])
     ctx.director_version = (ctx.versions_written or [None])[-1]
