@@ -68,8 +68,9 @@ FORM = dict(words=(55, 85), segments=(7, 12), seconds=(24, 38))
 PLAN = "pro_2026"
 STACK = {"be": "main", "fe": "main", "plan_models": {}, "planner_model": "off", "env": {"OPENAI_EDITS": "1"},
          "kv": {"studio_for_all_plans": {"on": False}}, "openai_key": True, "trial_per_account_usd": 3.0, "spend_cap_usd": 3,
-         "transcriber": "deepgram", "stock": True, "slots": {"agent": 2, "index": 1, "media": 2}}
-STACK_V = 2           # a recording made on other stack settings is never reused
+         "transcriber": "deepgram", "stock": True, "allow_free_stock": True,
+         "slots": {"agent": 2, "index": 1, "media": 2}}
+STACK_V = 3           # a recording made on other stack settings is never reused
 
 
 def jload(p, default=None):
@@ -926,9 +927,9 @@ def instruction_panel(l1, clock, sc, typed):
         line.append(word)
     if line:
         lines.append(" ".join(line))
-    top = 0.19
+    top = 0.53
     bottom = top + (90 + len(lines) * 78) / F.H
-    if bottom > 0.62:
+    if bottom > 0.80:
         raise RuntimeError("typed instruction cannot fit readably in the receipt panel")
     panel.block([start, end], [0.08, top, 0.92, bottom], "#121A27", z=20, op=0.96)
     panel.word([start, end], "TYPED IN VALMERA", "receipt_label", 0.12, top + 35 / F.H,
@@ -938,6 +939,9 @@ def instruction_panel(l1, clock, sc, typed):
     for it in panel.items:
         it["id"] = "receipt." + it["id"]
     l1["voices"] = voices
+    # The exact sentence takes the caption seat; never stack both versions.
+    l1["items"] = [it for it in l1["items"] if not (
+        it.get("k") == "word" and it["f"][0] < end and it["f"][1] > start)]
     l1["items"].extend(panel.items)
     return dict(typed=typed, frames=[start, end], lines=lines, minimum_px=40)
 
@@ -951,6 +955,7 @@ def score(ctx, script):
     knobs.setdefault("aim_s", aim)
     knobs.setdefault("bed", chain.wants_music(ctx))
     knobs.setdefault("require_fit", True)
+    knobs.setdefault("layout", "bleed")
     sys.path[:0] = [p for p in W3.env_path().split(os.pathsep) if p not in sys.path]
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     build = R.builder(script["style"]["id"])

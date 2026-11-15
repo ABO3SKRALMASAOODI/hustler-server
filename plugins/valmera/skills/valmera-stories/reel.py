@@ -1851,7 +1851,7 @@ def build(script, sup, style_id, direction=None):
                     window(f0, f1, kind, name, rec, keys[rec["path"]])
             elif kind == "clip" and rec["path"] in talk and not rec.get("voice") and not fit_on:
                 prints(run, paper=bool(st.get("paper")))       # a speaking face is never full frame under the narrator
-            elif st["layout"] == "window" and not rec.get("voice"):
+            elif d.get("layout", st["layout"]) == "window" and not rec.get("voice"):
                 window(f0, f1, kind, name, rec, keys[rec["path"]])
             else:
                 bleed(f0, f1, kind, name, rec, keys[rec["path"]])
@@ -1993,7 +1993,7 @@ def build(script, sup, style_id, direction=None):
     beats = dict(dur_f=f_end, voice_f=[LEAD_F, f_voice_end], cuts=sorted(set(cut_pts)), changes=changes,
                  events=sorted(set(P.events) | set(cut_pts) | set(changes)),
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, display=[dict(f=[a, b], text=t) for a, b, t in shown],
-                 turn_f=turn_f, pace=l1.get("pace"), style=style_id, layout=st["layout"],
+                 turn_f=turn_f, pace=l1.get("pace"), style=style_id, layout=d.get("layout", st["layout"]),
                  measured={**dict(new_pictures_10s=round(new_pics / max(secs, 1) * 10, 2), base_shots=len(timeline),
                                median_shot_s=round(sorted(r[1] - r[0] for r in timeline)[len(timeline) // 2] / FPS, 2) if timeline else None,
                                photo_most_uses=max(photo_uses.values()) if photo_uses else 0,
