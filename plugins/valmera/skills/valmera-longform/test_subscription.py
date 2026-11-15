@@ -165,3 +165,15 @@ def test_failed_picture_checks_cannot_count_as_completed_research(tmp_path):
     C.save(tmp_path/'checked/footage.json',valid)
     assert C.video_search_counts(tmp_path,{21:'A repair.'})=={21:1}
     assert not C.photo_research_ready(tmp_path,[dict(seg=21,seconds=5)],100,{21:'A repair.'})
+
+
+def test_cli_keeps_new_media_outside_lane_and_resumes_existing_state(tmp_path,monkeypatch):
+    import importlib.util
+    spec=importlib.util.spec_from_file_location('wf4_entry',Path(__file__).with_name('run.py'))
+    entry=importlib.util.module_from_spec(spec);spec.loader.exec_module(entry)
+    monkeypatch.setattr(entry,'Path',lambda p:tmp_path)
+    assert entry.state_root(['run'])==str(tmp_path/'workflow/longform')
+    legacy=tmp_path/'week-1112/lanes/WF4-LONGFORM/state'
+    folder=legacy/'work/existing';folder.mkdir(parents=True);(folder/'run.json').write_text('{}')
+    assert entry.state_root(['run','--resume','existing'])==str(legacy)
+    assert entry.state_root(['run','--resume','new'])==str(tmp_path/'workflow/longform')

@@ -16,6 +16,8 @@ zsh /Users/masaoodi/Documents/Valmera/.valmera/tools/codex-proxy/run.sh /Users/m
 
 Optional: `--topic "a subject"`, `--out <folder>`. Existing `run --resume <id>` and `status` commands remain available. The default destination is `.valmera/week-1112/lanes/WF4-LONGFORM/`, never a publishing folder. The wrapper installs the local subscription adapter and paid-host guard. Use it before every local run while API credit is exhausted; no paid host may be called. The same wrapper supports resumes.
 
+Working media lives under `.valmera/workflow/longform/work/`, outside the lane's evidence and delivery folder, and is deleted after measurement and delivery. Existing run IDs retain their saved state location on resume. Use the shared corpus directly for any supplied replay inputs; never duplicate them into a lane.
+
 Read [REFERENCES.md](REFERENCES.md) for the long-form pacing and music bar. This is a documentary, not a stretched short. The story determines its structure and treatment. Do not copy a reference's story skeleton or prescribe a fixed ledger, turn position or chapter duration. A hook must work in the first ten seconds; each chapter must change what the viewer expects.
 
 ## Engines and proof

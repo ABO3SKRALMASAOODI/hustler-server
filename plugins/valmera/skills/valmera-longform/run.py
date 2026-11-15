@@ -23,6 +23,15 @@ import shell  # noqa: E402
 _load = shell.load_workflow
 
 
+def state_root(argv):
+    base=Path('/Users/masaoodi/Documents/Valmera/.valmera')
+    legacy=base/'week-1112/lanes/WF4-LONGFORM/state'
+    if '--resume' in argv:
+        run_id=argv[argv.index('--resume')+1]
+        if (legacy/'work'/run_id/'run.json').is_file():return str(legacy)
+    return str(base/'workflow/longform')
+
+
 def load(name):
     return _load(os.path.join(HERE, "wf4.py") if name == "wf4" else name)
 
@@ -52,7 +61,7 @@ def main():
         if "--out" not in argv and "--resume" not in argv:
             argv += ["--out", "/Users/masaoodi/Documents/Valmera/.valmera/week-1112/lanes/WF4-LONGFORM"]
     if "--state-root" not in argv:
-        argv += ["--state-root", "/Users/masaoodi/Documents/Valmera/.valmera/week-1112/lanes/WF4-LONGFORM/state"]
+        argv += ["--state-root", state_root(argv)]
     env_file = Path("/Users/masaoodi/Documents/Valmera/hustler-server/backend/.env")
     if not os.environ.get("OPENAI_API_KEY") and env_file.exists():
         key = next((line.partition("=")[2].strip().strip("\"'")
