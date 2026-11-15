@@ -791,10 +791,11 @@ def build(sc,pack):
             key=P.image(f'evidence-photo-{j}',c)
             if c.get('document'):
                 P.page(row['f'],'#14161A',grain=.005)
-                ratio=c['w']/c['h'];height=min(.66,.84*W/H/ratio);width=height*ratio/(W/H)
                 n=row['f'][1]-row['f'][0]
+                growth=.12 if n>240 else .025
+                ratio=c['w']/c['h'];height=min(.66,.70/(1+growth),.84*W/H/ratio);width=height*ratio/(W/H)
                 P.card(row['f'],key,[.5-width/2,.45-height/2,.5+width/2,.45+height/2],
-                       s=[1+(.065 if n>240 else .025)*q/max(n-1,1) for q in range(n)])
+                       s=[1+growth*q/max(n-1,1) for q in range(n)])
                 P.word(row['f'],archive_label(c,lambda t:P.R.width('source',t)),'source',.055,.84,note=False,z=3)
             else:
                 # Archive portraits and machinery must survive landscape
@@ -802,10 +803,11 @@ def build(sc,pack):
                 P.page(row['f'],'#14161A',grain=.005)
                 # Reserve independent chapter, source and caption seats even
                 # at the end of the largest card move. Text renders above cards.
-                ratio=c['w']/c['h'];height=min(.66,.88*W/H/ratio);width=height*ratio/(W/H)
                 n=row['f'][1]-row['f'][0]
+                growth=.12 if n>240 else .035
+                ratio=c['w']/c['h'];height=min(.66,.70/(1+growth),.88*W/H/ratio);width=height*ratio/(W/H)
                 P.card(row['f'],key,[.5-width/2,.45-height/2,.5+width/2,.45+height/2],
-                       s=[1+(.065 if n>240 else .035)*q/max(n-1,1) for q in range(n)])
+                       s=[1+growth*q/max(n-1,1) for q in range(n)])
         else:
             key=P.video(f'archive-{j}',c)
             P.shot(row['f'],key,witness_crop(row),src=row['src'])
