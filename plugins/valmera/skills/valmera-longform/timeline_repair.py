@@ -147,13 +147,17 @@ def smooth(ctx,script,ft,words):
         changed=False
         for i,short in enumerate(shots):
             if short.get('real_voice') or short['f'][1]-short['f'][0]>=15:continue
-            for j in (i-1,i+1):
-                if not 0<=j<len(shots):continue
+            neighbors=[j for j in (i-1,i+1) if 0<=j<len(shots)]
+            # Prefer continuing a neighbor, then try the blink's own source.
+            # An original still used for one frame may be the only picture
+            # that correctly covers the combined words; it need not be lost.
+            for j,base in [(j,j) for j in neighbors]+[(j,i) for j in neighbors]:
                 neighbor=shots[j]
                 if neighbor.get('real_voice'):continue
+                source=shots[base]
                 lo=min(short['f'][0],neighbor['f'][0]);hi=max(short['f'][1],neighbor['f'][1])
                 if hi-lo!=sum(r['f'][1]-r['f'][0] for r in (short,neighbor)):continue
-                seconds=(hi-lo)/30;clip=copy.deepcopy(neighbor['clip']);offset=neighbor['src'][0]
+                seconds=(hi-lo)/30;clip=copy.deepcopy(source['clip']);offset=source['src'][0]
                 if clip.get('kind')=='image':
                     if seconds>12:continue
                     offset=0;clip.update(seconds=seconds,time_range=[0,seconds],editorial_hold_move=seconds>8)
@@ -165,7 +169,7 @@ def smooth(ctx,script,ft,words):
                            for k,r in enumerate(shots) if k not in (i,j)):continue
                 spoken=[w for w in clock.words if w['t0']<hi/30 and w['t1']>lo/30]
                 context=' '.join(script['script']['segments'][k]['say'] for k in dict.fromkeys(w['seg'] for w in spoken))
-                replacement=dict(f=[lo,hi],seg=neighbor['seg'],clip=clip,src=[offset,offset+seconds],
+                replacement=dict(f=[lo,hi],seg=source['seg'],clip=clip,src=[offset,offset+seconds],
                                  say=' '.join(w['w'] for w in spoken),context=context)
                 if not C.source_review(ctx,[replacement],required=False)['ok']:continue
                 keep=[r for k,r in enumerate(shots) if k not in (i,j) and not r.get('real_voice')]+[replacement]

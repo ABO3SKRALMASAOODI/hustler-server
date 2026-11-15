@@ -506,6 +506,38 @@ def test_download_duration_cannot_reserve_frames_beyond_encoded_end(tmp_path,mon
     assert C.unused_seconds({},c)==pytest.approx(4.7)
 
 
+def test_blink_can_keep_its_own_correct_archive_image(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    from PIL import Image
+    import numpy as np
+    import timeline_repair as R
+    sc=dict(segments=[dict(say='Alpha beta.',chapter='c')])
+    words=dict(duration=6.1,words=[dict(w='Alpha',start=.1,end=2.9,seg=0),dict(w='beta.',start=2.95,end=6,seg=0)])
+    clock=C.F.Clock(words,sc)
+    images=[]
+    for name in ('correct','other'):
+        p=tmp_path/(name+'.jpg')
+        im=Image.new('RGB',(80,50),'gray') if name=='correct' else Image.fromarray(np.random.default_rng(42).integers(0,256,(50,80,3),dtype=np.uint8))
+        im.save(p)
+        c=dict(clip(str(p),0,7.8),kind='image',content_hash=name)
+        c['source']={'url':'https://archive.test/'+name};images.append(c)
+    shots=[dict(f=f,seg=0,clip=c,src=[0,(f[1]-f[0])/30]) for f,c in zip(([0,1],[1,186]),images)]
+    ft=dict(lines=[dict(i=0,clips=images)],editorial=dict(pins=[dict(seg=0,clip=r['clip'],src=r['src'],
+        anchors=[R.anchor(clock,f/30) for f in r['f']]) for r in shots],rejected=[],bank=[]))
+    ctx=SimpleNamespace(supply=str(tmp_path));script=dict(script=sc)
+    monkeypatch.setattr(C,'source_review',lambda *a,**kw:dict(ok=False))
+    assert len(R.smooth(ctx,script,ft,words)[0])==2
+    checked=[]
+    def review(ctx,rows,**kw):
+        checked.extend(rows)
+        return dict(ok=rows[0]['clip']['content_hash']=='correct')
+    monkeypatch.setattr(C,'source_review',review)
+    result,_=R.smooth(ctx,script,ft,words)
+    assert len(result)==1 and result[0]['f']==[0,186]
+    assert result[0]['clip']['content_hash']=='correct'
+    assert checked[-1]['say']=='Alpha beta.' and not C.duplicate_ranges(result)
+
+
 def test_a_broad_line_releases_the_only_image_needed_by_a_scarce_line():
     import timeline_repair as R
     image=dict(kind='image',content_hash='same',path='one')
