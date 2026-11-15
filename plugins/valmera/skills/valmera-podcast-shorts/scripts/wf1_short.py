@@ -165,10 +165,13 @@ def supply(ctx, script):
     research = {}
     for window in windows:
         research.setdefault(window['name'],[]).append(window['must_show'])
+    import wf1_primary_sources
+    originals=wf1_primary_sources.retained(sup_dir)
     fscript = dict(title=f"{script.get('title')}. A podcast clip; the speaker is on camera already, so show what he talks about, as it was then, "
                          f"never him as he looks today. Who is in it: {who}",
                    segments=[dict(say=s['say'], pictures=[s['name']], visual=s['must_show']) for s in windows],
                    named=[dict(name=name,must_show=' '.join(requirements),
+                               video_sources=originals.get(name,[]),
                                video_searches=list(dict.fromkeys(q for w in windows if w['name']==name for q in w.get('video_searches',[]))),
                                **{'is':'thing'}) for name,requirements in research.items()])
     direction_key=hashlib.sha256(json.dumps(fscript,sort_keys=True).encode()).hexdigest()[:16]
@@ -489,10 +492,10 @@ def refill(ctx, script, pack, shortage):
             if not any(row['url']==url for row in dest):
                 dest.append(dict(by_url[url],**{k:v for k,v in source.items() if k not in ('url','id','where')},
                                  where=source.get('where','youtube'),id=hashlib.sha256(url.encode()).hexdigest()))
-    for row in retained:
-        if not row.get('title') or not row.get('channel') or not os.path.isfile(row.get('path','')):continue
-        for subject in row.get('subjects',[]):
-            primary.setdefault(subject,[]).append(dict(row,id=row.get('id') or hashlib.sha256(row['url'].encode()).hexdigest(),where=row.get('where','youtube')))
+    import wf1_primary_sources
+    for subject,rows in wf1_primary_sources.retained(ctx.supply).items():
+        dest=primary.setdefault(subject,[])
+        dest.extend(row for row in rows if not any(old['url']==row['url'] for old in dest))
     if count == 4 and not rescout:
         import wf1_primary_sources
         original=wf1_primary_sources.acquire([dict(windows[i],i=i,context=coverage.get('context')) for i in wanted],os.path.join(ctx.supply,'primary-videos'),_llm())

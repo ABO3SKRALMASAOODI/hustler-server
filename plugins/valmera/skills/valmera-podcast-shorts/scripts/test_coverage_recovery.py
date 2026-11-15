@@ -21,6 +21,22 @@ def story():
                          dict(name='B',first=6,last=7,t0=6,t1=7.8,say='6 7')])
 
 
+def test_retained_originals_need_bytes_and_attribution_and_keep_exact_subjects(tmp_path):
+    sources=tmp_path/'sources';sources.mkdir()
+    original=sources/'original.mp4';original.write_bytes(b'original')
+    good=dict(url='https://publisher.example/film',path=str(original),title='Original demo',
+              channel='Researcher',subjects=['Deep learning'],where='primary')
+    rows=[good,good,dict(good,url='https://publisher.example/missing',path=str(sources/'missing')),
+          dict(good,url='https://publisher.example/unattributed',channel='')]
+    (sources/'manifest.json').write_text(json.dumps(rows))
+    result=primary.retained(str(tmp_path))
+    assert list(result)==['Deep learning'] and len(result['Deep learning'])==1
+    candidate=result['Deep learning'][0]
+    assert candidate['path']==str(original) and candidate['where']=='primary' and candidate['id']
+    assert not candidate.get('verified_motion') and not candidate.get('ok')
+    assert original.read_bytes()==b'original' and len(list(sources.iterdir()))==2
+
+
 def test_primary_referent_direction_precedes_acquisition_and_is_cached(tmp_path,monkeypatch):
     import wf1_context
     calls=[]

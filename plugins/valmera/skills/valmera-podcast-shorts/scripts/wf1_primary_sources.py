@@ -13,6 +13,23 @@ from urllib.parse import urlparse
 MAX_SOURCE_BYTES = 256 << 20  # Bounded original; official short HD films can exceed 128 MB.
 
 
+def retained(supply):
+    """Offer attributed existing originals on the first pass, without approving or copying them."""
+    manifest=os.path.join(supply,'sources','manifest.json')
+    rows=json.load(open(manifest)) if os.path.isfile(manifest) else []
+    out={}
+    for row in rows:
+        if not (row.get('url') and row.get('title') and row.get('channel')
+                and os.path.isfile(row.get('path',''))):continue
+        for subject in row.get('subjects',[]):
+            if not isinstance(subject,str) or not subject:continue
+            dest=out.setdefault(subject,[])
+            if any(r['url']==row['url'] for r in dest):continue
+            dest.append(dict(row,id=row.get('id') or hashlib.sha256(row['url'].encode()).hexdigest(),
+                             where=row.get('where','youtube')))
+    return out
+
+
 def acquire(windows, work, llm):
     import net_fetch
     import writer

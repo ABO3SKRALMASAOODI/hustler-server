@@ -179,6 +179,8 @@ New documentary stills do not consume a recovery attempt when moving coverage is
 Moving footage needs both the residual-motion measurement and visible subject action across the checked
 frames. Card transforms, pans over documents, and cursor-only changes on a static interface remain stills.
 Their failed motion verdict lowers their acquisition priority; it does not falsely reject a faithful picture.
+Retained publisher originals enter the first acquisition pass as attributed candidates for their exact
+subjects, as well as later recovery. Reusing their bytes never bypasses motion or placement checks.
 The composed and branded films must also reach 60% moving picture time. A still discovered there stays
 eligible as a still, while the product returns to footage research; it cannot regain moving credit from an earlier source check.
 Research is split into small referent groups with retained answers. A source replay can reuse verified word
