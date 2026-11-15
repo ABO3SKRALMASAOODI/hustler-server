@@ -379,6 +379,56 @@ def test_page_changes_are_whole_screen_changes_only():
     assert fcv.page_changes([k * 0.25 for k in range(6)], f) == [0.5]
 
 
+def test_screen_follow_aims_at_the_picture_inside_the_portrait_canvas(monkeypatch):
+    edl = {'keep': [[0.0, 12.0]], 'frame': {'ratio': '9:16', 'mode': 'pad_blur'}}
+    ctx = NS(index={'video': {'width': 1920, 'height': 1080},
+                    'sentences': [{'t0': 0, 't1': 4, 'text': 'the lower control'}]},
+             latest_edl=lambda: {'json': edl}, proxy_path=lambda: 'unused')
+    monkeypatch.setattr(fcv, '_gray_frames', lambda path: None)
+    monkeypatch.setattr(fcv, '_vision_boxes', lambda *a: {1: [.45, .70, .60, .80]})
+    calls = []
+    def run(ctx, steps, name, args, started):
+        calls.append((name, args))
+        return 'EDL v2'
+    assert fcv.screen_follow(ctx, [], 0, run, {'usd': 0}, 2) == 'EDL v2'
+    keys = calls[0][1]['keyframes']
+    # The lower source control is just below the canvas centre, not at
+    # the bottom of its blurred padding. Keep the timing/zoom unchanged.
+    original, z = fcv.window_for([.45, .70, .60, .80], 1920/1080)
+    before = fcv.screen_keyframes([(0.0, original, z)], 12, 2)
+    assert [(k['t'], k['strength']) for k in keys] == [(k['t'], k['strength']) for k in before]
+    for key, source in zip(keys, before):
+        x0, y0, x1, y1 = key['rect']
+        sx0, sy0, sx1, sy1 = source['rect']
+        assert abs(x0-sx0) < .0002 and abs(x1-sx1) < .0002
+        picture_h = (9/16)/(16/9)
+        assert abs(y0 - ((1-picture_h)/2 + sy0*picture_h)) < .0002
+        assert abs(y1 - ((1-picture_h)/2 + sy1*picture_h)) < .0002
+    key = keys[2]
+    err, strength, cx, cy, rect = agent_tools._solve_zoom_rect(key['rect'], key['strength'])
+    assert not err and .5 < cy < .8
+    # The selected region centre actually lands at the output centre.
+    target_y = (key['rect'][1] + key['rect'][3])/2
+    assert abs(target_y*(1+strength) - cy*strength - .5) < .001
+
+
+def test_screen_follow_keeps_source_canvas_coordinates(monkeypatch):
+    edl = {'keep': [[0.0, 12.0]]}
+    ctx = NS(index={'video': {'width': 1920, 'height': 1080},
+                    'sentences': [{'t0': 0, 't1': 4, 'text': 'the control'}]},
+             latest_edl=lambda: {'json': edl}, proxy_path=lambda: 'unused')
+    box = [.45, .70, .60, .80]
+    monkeypatch.setattr(fcv, '_gray_frames', lambda path: None)
+    monkeypatch.setattr(fcv, '_vision_boxes', lambda *a: {1: box})
+    captured = {}
+    def run(ctx, steps, name, args, started):
+        captured.update(args)
+        return 'EDL v2'
+    fcv.screen_follow(ctx, [], 0, run, {'usd': 0}, 2)
+    win, z = fcv.window_for(box, 1920/1080)
+    assert captured['keyframes'] == fcv.screen_keyframes([(0.0, win, z)], 12, 2)
+
+
 def test_the_text_column_skips_the_sidebar():
     samples = [{"text": [[0.01, 0.1 + k * 0.05, 0.12, 0.13 + k * 0.05]
                          for k in range(8)]
