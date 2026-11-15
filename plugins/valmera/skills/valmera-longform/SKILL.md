@@ -11,7 +11,7 @@ Run the same command from Codex or Claude Code. No questionnaire or topic is req
 
 
 ```sh
-zsh /Users/masaoodi/Documents/Valmera/.valmera/tools/codex-proxy/run.sh /Users/masaoodi/Documents/Valmera/.valmera/venv-worker/bin/python <this-skill-folder>/run.py
+zsh /Users/masaoodi/Documents/Valmera/.valmera/tools/codex-proxy/run.sh /Users/masaoodi/Documents/Valmera/.valmera/venv-worker/bin/python /Users/masaoodi/Documents/Valmera/hustler-server/plugins/valmera/skills/valmera-longform/run.py
 ```
 
 Optional: `--topic "a subject"`, `--out <folder>`. Existing `run --resume <id>` and `status` commands remain available. The default destination is `.valmera/week-1112/lanes/WF4-LONGFORM/`, never a publishing folder. The wrapper installs the local subscription adapter and paid-host guard. Use it before every local run while API credit is exhausted; no paid host may be called. The same wrapper supports resumes.
