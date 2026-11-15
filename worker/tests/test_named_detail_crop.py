@@ -54,6 +54,24 @@ def test_named_screen_detail_is_not_replaced_by_desktop_saliency():
     assert report[0]["reason"] == "named_detail_crop"
 
 
+@pytest.mark.parametrize("verified_view", [True, False])
+def test_static_desktop_header_does_not_replace_a_verified_detail(verified_view):
+    film, index, views = scene()
+    crop = copy.deepcopy(film["items"][0]["crop"])
+    perception = {"shots": [{"t": [0, 8], "change": 0., "faces_seen": 0}],
+                  "text": [{"t": [0, 8], "seen": 6,
+                            "box": [.03, .01, .97, .08]}]}
+    report = source_guard.apply(film, index, perception,
+                                views=views if verified_view else {})
+    if verified_view:
+        assert film["items"][0]["crop"] == crop
+        assert report[0]["reason"] == "named_detail_crop"
+    else:
+        assert report[0]["reason"] == "static_source_text_fit"
+        c = film["items"][0]["crop"]
+        assert c[0] <= .03 < .97 <= c[2]
+
+
 @pytest.mark.parametrize("fault", ["unknown", "time", "cut", "missing_detail", "outside", "aspect", "face"])
 def test_invalid_detail_evidence_still_uses_local_safe_framing(fault):
     film, index, views = scene()
