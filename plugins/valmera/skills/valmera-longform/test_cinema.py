@@ -82,6 +82,30 @@ def test_long_interview_camera_continues_across_internal_source_slices():
     assert full[0]==[0,0,1,1] and full[-1][0]<.03
 
 
+def test_partial_picture_edit_research_includes_rejected_coverage(tmp_path,monkeypatch):
+    import timeline_repair as R
+    import evidence_allocate as A
+    from types import SimpleNamespace
+    bad=clip('wrong-picture',0,3)
+    sc=dict(script=dict(segments=[dict(say='The right subject.',chapter='c')]))
+    words=dict(duration=2,words=[dict(w='subject',start=.1,end=1.9,seg=0)])
+    shot=dict(f=[0,57],seg=0,clip=bad,src=[0,1.9],say='The right subject.')
+    ft=dict(lines=[dict(i=0,clips=[bad])],editorial=dict(pins=[],rejected=[],bank=[]))
+    def schedule(*args):
+        seconds=2 if ft['editorial']['rejected'] else .1
+        raise C.CoverageError([dict(seg=0,seconds=seconds)],[] if seconds==2 else [shot])
+    monkeypatch.setattr(C,'schedule',schedule)
+    monkeypatch.setattr(C,'source_review',lambda *a,**kw:dict(ok=False,rejected=[0],evidence={'0':dict(matches=False,reason='Wrong subject.')}))
+    observed=[]
+    def allocate(ctx,script,ft,failure,words):
+        observed.append(sum(g['seconds'] for g in failure.gaps))
+        raise RuntimeError('stop after observing research scope')
+    monkeypatch.setattr(A,'allocate',allocate)
+    with pytest.raises(RuntimeError,match='observing research scope'):
+        R.repair(SimpleNamespace(supply=str(tmp_path),log=lambda *a:None),sc,ft,words)
+    assert observed==[2]
+
+
 def test_partly_used_clip_can_supply_only_its_unseen_remainder():
     sc={'segments':[{'say':'First.','chapter':'c'},{'say':'Second.','chapter':'c'}]}
     words={'duration':10,'words':[dict(w='First.',start=.1,end=2.5,seg=0),dict(w='Second.',start=3,end=9.8,seg=1)]}

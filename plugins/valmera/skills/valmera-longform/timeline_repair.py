@@ -100,6 +100,19 @@ def repair(ctx,script,ft,words,rounds=3):
     from evidence_allocate import allocate
     path=Path(ctx.supply)/'footage/footage.json'
     for attempt in range(rounds):
+        # A nearly covered edit can still contain wrong pictures. Review those
+        # now, so research sees every unsupported interval, not just a few
+        # fractional gaps that would otherwise block the first visual review.
+        incomplete=False
+        try:initial,initial_clock,_=C.schedule(script['script'],words,ft)
+        except C.CoverageError as partial:
+            initial=partial.shots;initial_clock=C.F.Clock(str(words) if isinstance(words,Path) else words,script['script'])
+            incomplete=True
+        if initial:
+            initial_report=C.source_review(ctx,initial,required=False)
+            if initial_report['ok'] and not incomplete:return initial,initial_clock
+            retain(ft,initial,initial_clock,initial_report);C.save(path,ft)
+            ctx.log(f"partial edit review: {len(initial_report['rejected'])} mismatches; retaining {len(ft['editorial']['pins'])} checked intervals before research")
         try:shots,clock,_=C.schedule(script['script'],words,ft)
         except C.CoverageError as failure:
             if release_borrowed_images(ft,failure):
