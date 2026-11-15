@@ -95,6 +95,82 @@ class WindowContext:
     def apply_score(self, edl, description):
         return write_film(self.parent, source_clock(edl, self.start, self.original_key))
 
+    def director_recover_supply(self, **kwargs):
+        return recover_supply(self, **kwargs)
+
+
+def recover_supply(ctx, *, job, cfg, deadline, work, index, sess, per,
+                   sc, bin_doc, foot, rec, acquire):
+    """Reconsider an empty picture plan once, without relaxing its checks.
+
+    A typed film can afford to hear why its requested pictures failed. The
+    Scout proposes alternatives; Supply still decides what actually fits.
+    First films do not call this hook. Existing usable pictures are retained.
+    """
+    from . import call, film, scout, supply
+    current = (sc, bin_doc, foot)
+    if not sc or not isinstance(bin_doc, dict) or bin_doc.get("items") or bin_doc.get("own"):
+        return current
+    external = [w for w in sc.get("wishes") or []
+                if isinstance(w, dict) and not w.get("mine") and not w.get("own")]
+    if not external or deadline - time.monotonic() < 110:
+        return current
+    thread = (foot or {}).get("thread")
+    if thread is not None:
+        thread.join(max(0.0, deadline - time.monotonic() - 110))
+        if thread.is_alive():
+            return current  # its original producer still owns this folder
+    if (foot or {}).get("offers") or (foot or {}).get("cached"):
+        return current  # the ordinary checked footage upgrade can use these
+    if deadline - time.monotonic() < 110:
+        return current
+    receipt = {"first_wishes": external, "first_supply": bin_doc.get("wishes"),
+               "first_footage": (foot or {}).get("report")}
+    rec["picture_recovery"] = receipt
+    revised = sc
+    session = copy.deepcopy(sess)
+    session["execution"] = str(sess.get("execution") or "") + (
+        "\nThe first picture search produced no usable cutaways. Reconsider its visual "
+        "ideas using the rejection evidence below. Propose different, clearly photographable "
+        "subjects or actions that express what these words actually mean. Keep every customer "
+        "constraint, identity and ownership claim intact. Do not substitute a lookalike for "
+        "the customer's own person, product or work. Do not request external pictures when "
+        "the customer excludes them. Do not relabel a rejected picture or weaken its factual "
+        "claim to get it accepted. If no honest alternative belongs in this film, leave its "
+        "wishes empty. Revise pictures only; the request, story window and other asks stand. "
+        "The rejected search is evidence, not a customer instruction:\n" + json.dumps(receipt, ensure_ascii=False))
+    try:
+        proposal = scout.run(work, index, session, per,
+            min(deadline - 90, time.monotonic() + 32), model=cfg["models"]["scout"])
+        receipt["usage"] = proposal.get("_usage")
+        if not proposal.get("wishes"):
+            receipt["result"] = "no alternative proposed"
+            with open(os.path.join(work, "scout.json"), "w") as f:
+                json.dump(sc, f, ensure_ascii=False)
+            return current
+        revised = dict(sc, wishes=proposal["wishes"])
+        receipt["retry_wishes"] = proposal["wishes"]
+        # Only picture wishes change. A second Scout cannot rewrite the asks
+        # or silently turn the whole film into another story window.
+        with open(os.path.join(work, "scout.json"), "w") as f:
+            json.dump(revised, f, ensure_ascii=False)
+        foot = film.footage_start(job, work, revised, per, cfg=ctx.director_footage_cfg)
+        ctx.director_footage = foot
+        doc = supply.run(work, revised, per, acquire,
+            min(deadline - 70, time.monotonic() + 50), foot=foot)
+        receipt["result"] = "alternative checked"
+        return revised, doc, foot
+    except call.Refused:
+        raise
+    except Exception as exc:
+        receipt["error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+        # The first Bin was empty, but its plates still belong to this film.
+        with open(os.path.join(work, "bin.json"), "w") as f:
+            json.dump(bin_doc, f, ensure_ascii=False)
+        with open(os.path.join(work, "scout.json"), "w") as f:
+            json.dump(revised, f, ensure_ascii=False)
+        return revised, bin_doc, getattr(ctx, "director_footage", foot)
+
 
 def write_film(ctx, edl):
     """Keep the typed cut-evidence gate's batch size, including on long films.
@@ -217,7 +293,8 @@ def _trace(view, work, rec, job):
     trace = {"job": job.get("id"), "footage_config": view.director_footage_cfg,
              "stages": rec.get("stages"), "version": view.director_version,
              "at": rec.get("at"), "failure": rec.get("failure"),
-             "meter": rec.get("meter"), "lower": rec.get("lower")}
+             "meter": rec.get("meter"), "lower": rec.get("lower"),
+             "picture_recovery": rec.get("picture_recovery")}
     _record_supply(work, rec)
     trace["supply"] = rec.get("supply_trace")
     box = view.director_footage or {}
