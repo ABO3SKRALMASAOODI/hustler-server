@@ -30,7 +30,7 @@ def _ask(system, content, purpose, budget_s=120.0, max_tokens=6000, model=None):
     local = os.environ.get('CODEX_PROXY_LOCAL') == '1'
     tries = 1 if local else 2
     if local:
-        budget_s = max(budget_s, 185.0)  # buffered subscription response, queue included
+        budget_s = max(budget_s, 1205.0)  # adapter allows 1200s including its shared queue
     deadline = time.monotonic() + budget_s
     for k in range(tries):
         if time.monotonic() >= deadline:

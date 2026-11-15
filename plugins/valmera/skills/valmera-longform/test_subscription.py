@@ -23,7 +23,7 @@ def test_footage_proxy_failure_is_one_attempt_with_buffered_deadline(monkeypatch
     with pytest.raises(TimeoutError):
         ask.ask('Review the picture', [], 'test', budget_s=120)
     assert len(seen) == 1
-    assert seen[0]['deadline'] == 285.
+    assert seen[0]['deadline'] == 1305.
 
 
 def test_cached_box_media_does_not_open_network(tmp_path, monkeypatch):
