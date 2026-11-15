@@ -315,7 +315,9 @@ OPENAI_CREDIT_LATCH_S = float(os.getenv("OPENAI_CREDIT_LATCH_S", "900"))
 # helper returns None and its caller's plain fallback answers.
 OPENAI_OUT_HAIKU_PURPOSES = tuple(p.strip() for p in os.getenv(
     "OPENAI_OUT_HAIKU_PURPOSES",
-    "first_film_source_screen,visual_index_semantics,visual_index_semantics_fallback,vision_index",
+    "first_film_source_screen,visual_index_semantics,visual_index_semantics_fallback,vision_index,"
+    # The pixels behind MCP search_stock results: without them a search places nothing (#1108).
+    "search_descriptions",
 ).split(",") if p.strip())
 
 # ── The Claude-funded trial lane (owner decision D2, 25 Oct 2026) ────────────

@@ -163,7 +163,16 @@ def test_the_greeting_falls_to_its_plain_reply_with_no_openai_call(gate, monkeyp
 def test_haiku_purposes_are_the_films_needs_only():
     assert set(config.OPENAI_OUT_HAIKU_PURPOSES) == {
         "first_film_source_screen", "visual_index_semantics", "visual_index_semantics_fallback",
-        "vision_index"}
+        "vision_index", "search_descriptions"}
+
+
+def test_stock_search_descriptions_look_with_haiku_while_openai_is_out(eyes, gate):
+    """#1108: OpenAI out of credit left every MCP search_stock result undescribed, so nothing
+    was placeable and the customer's search failed four times in a row."""
+    eyes.openai.error = QUOTA
+    answer = llm.ask_vision("describe", [eyes.picture], purpose="search_descriptions")
+    assert answer == '{"reviewed_all_frames": true}'
+    assert eyes.openai.calls == ["gpt-6-luna"] and eyes.haiku == ["claude-haiku-5-5"]
 
 
 # ------------------------------------------------------------------ the Director's OpenAI rung
