@@ -2868,6 +2868,20 @@ def delete_assets(conn, asset_ids):
         return cur.rowcount
 
 
+def publish_first_film_comparison(conn, project_id, asset_id, version):
+    """Only the chosen, checked comparison becomes a browser preview."""
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE assets SET meta = meta || '{"variant":"preview"}'::jsonb
+            WHERE id=%s AND project_id=%s AND kind='render'
+              AND meta->>'variant'='comparison'
+              AND (meta->>'edl_version')::int=%s
+              AND jsonb_typeof(meta->'picture_qc')='object'
+              AND jsonb_typeof(meta->'audio_qc')='object'
+              AND %s=(SELECT max(version) FROM edls WHERE project_id=%s)
+            RETURNING id""", (asset_id, project_id, version, version, project_id))
+        return bool(cur.fetchone())
+
+
 def update_asset_meta(conn, asset_id, patch):
     """Shallow-merge patch into assets.meta."""
     with conn.cursor() as cur:

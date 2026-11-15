@@ -9878,6 +9878,8 @@ def _run_render_job(worker_db, job):
     variant = "preview" if job["type"] in ("preview", "preview_check") \
         else "final"
     asset_variant = "preview_check" if proof_only else variant
+    if job["payload"].get("first_film_comparison") and variant == "preview" and not proof_only:
+        asset_variant = "comparison"
     proof_set_id = (str(job["payload"].get("proof_set_id") or
                         f"job:{job_id}") if proof_only else None)
     version = int(job["payload"].get("edl_version"))
@@ -9936,7 +9938,7 @@ def _run_render_job(worker_db, job):
     # burned TEXT also depends on the mutable index, so a caption fingerprint
     # must match too (see _caption_index_fp) — otherwise a caption-less render
     # is served forever after the transcript gains words.
-    cached = (None if force or proof_only else
+    cached = (None if force or proof_only or asset_variant == "comparison" else
               _stored_render(worker_db, project_id, variant, version, job_id))
     if first_film and cached and (
             not isinstance((cached.get("meta") or {}).get("picture_qc"), dict) or
@@ -10459,6 +10461,12 @@ def _run_render_job(worker_db, job):
                       f"{tp_guard['tp']} dBTP (limiter "
                       f"{tp_guard['limit_dbfs']} dBFS, "
                       f"{tp_guard['passes']} pass(es))", flush=True)
+        if not proof_only and master_loudness(edl_row["json"], *src_shape):
+            import mastering
+            master_guard = mastering.guard(out_local, workdir,
+                bitrate="128k" if variant == "preview" else "192k")
+            if master_guard and tp_guard:
+                tp_guard["mastering"] = master_guard
         _mark("true_peak_s")
         # No more frame/audio writes follow the peak guard. Send these exact
         # bytes while the evidence sheets read them; all sheets and all checks

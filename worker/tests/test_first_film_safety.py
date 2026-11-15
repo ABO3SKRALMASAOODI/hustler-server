@@ -126,7 +126,7 @@ def _scene():
     return ({"frame": [720, 1280], "items": [{"id": "quay", "pic": "main",
              "src": [6.6, 8.], "crop": [.15, 0, .65, 1]}]},
             {"_first_film_source_guard": True, "video": {"width": 1920,
-             "height": 1080, "duration": 20}, "shots": [{"start": 0, "end": 6.52},
+             "height": 1080, "duration": 20}, "spatial": {"samples": [{"t": 7., "focus": [.65, .5]}, {"t": 9., "focus": [.65, .5]}]}, "shots": [{"start": 0, "end": 6.52},
              {"start": 6.52, "end": 12.85}]})
 
 
@@ -148,29 +148,26 @@ def test_neighbouring_shot_face_does_not_authorize_quay_crop():
     film, index = _scene()
     rows = source_guard.apply(film, index, {"samples": [{"t": 6.5, "face": [.3, .2, .5, .4]}]})
     c = film["items"][0]["crop"]
-    assert c[0] <= 0 and c[1] <= 0 and c[2] >= 1 and c[3] >= 1
-    assert rows[0]["reason"] == "full_frame_missing_subject_boxes"
+    assert 0 <= c[0] < c[2] <= 1 and c[1] == 0 and c[3] == 1
+    assert (c[0]+c[2])/2 == pytest.approx(.65)
+    assert rows[0]["reason"] == "local_saliency_crop"
 
 
-def test_fallback_reframer_holds_whole_source_until_every_kept_shot_has_boxes(monkeypatch):
+def test_first_film_fallback_reframer_requests_local_crop(monkeypatch):
     import agent_tools
     from types import SimpleNamespace
     _, index = _scene()
-    index["spatial"] = {"samples": [{"t": 6.5, "faces": [[.3, .2, .5, .4]]}]}
-    ctx = SimpleNamespace(index=index, duration=20,
-                          latest_edl=lambda: {"json": {"keep": [[6.6, 8.]]}})
-    monkeypatch.setattr(agent_tools, "set_frame", lambda ctx, ratio, mode, **kw: (ratio, mode))
-    assert agent_tools._auto_reframe(ctx) == ("9:16", "pad_blur")
-    index["spatial"]["samples"].append({"t": 7., "faces": [[.3, .2, .5, .4]]})
-    assert not source_guard.missing_shot_boxes(index, [[6.6, 8.]])
+    ctx = SimpleNamespace(index=index, duration=20)
+    monkeypatch.setattr(agent_tools, "_layout_reframe", lambda ctx, ratio, mode: (ratio, mode))
+    assert agent_tools._auto_reframe(ctx) == ("9:16", "crop")
 
 
 def test_subject_fully_outside_crop_still_counts_and_all_camera_frames_are_safe():
     film, index = _scene()
     film["items"][0]["crop"] = [[.15, 0, .65, 1], [.2, 0, .7, 1]]
     rows = source_guard.apply(film, index, {"samples": [{"t": 7.5, "person": [.8, .1, .95, .9]}]})
-    assert all(c[0] <= 0 and c[2] >= 1 for c in film["items"][0]["crop"])
-    assert rows[0]["reason"] == "full_frame_subject_outside_crop"
+    assert all(0 <= c[0] <= .8 and .95 <= c[2] <= 1 for c in film["items"][0]["crop"])
+    assert rows[0]["reason"] == "local_subject_crop"
 
 
 def test_existing_edits_outside_first_film_unchanged():
@@ -180,27 +177,17 @@ def test_existing_edits_outside_first_film_unchanged():
     assert source_guard.apply(film, index, {}) == [] and film == before
 
 
-def test_safe_source_cutaway_is_contained_not_recropped_by_overlay_cover(tmp_path):
+def test_source_crop_does_not_create_a_black_backing(tmp_path):
     from score import lower
     from types import SimpleNamespace
     film, index = _scene()
-    film.update(fps=30, spine=[], assets={"main": {"kind": "video", "path": "source.mp4",
-                                               "w": 1920, "h": 1080}})
+    film.update(fps=30, spine=[], assets={"main": {"kind": "video", "path": "source.mp4", "w": 1920, "h": 1080}})
     film["items"][0].update(k="shot", f=[0, 42])
     source_guard.apply(film, index, {})
     bake = SimpleNamespace(locals={}, plate=lambda *a: "backing.png")
     overlays, *_ = lower.lower_pictures(film, str(tmp_path), bake, {})
-    foreground = next(o for o in overlays if o["asset_key"] == "main")
-    assert not foreground.get("fit") and not foreground.get("source_crop")
-    assert foreground["scale"] == 1 and foreground["x"] == foreground["y"] == .5
-    assert overlays[0]["asset_key"] == "backing.png"
-    # Publication normalizes by (z_index, start, id), not insertion order.
-    # The backing must still sit below the source after that real boundary.
-    from schemas import default_edl, validate_edl
-    edl = default_edl(14.2)
-    edl["overlays"] = overlays
-    normalized = validate_edl(edl, 14.2).model_dump()
-    assert [o["asset_key"] for o in normalized["overlays"]] == ["backing.png", "main"]
+    assert all(o["asset_key"] != "backing.png" for o in overlays)
+    assert not film["items"][0].get("source_full_frame")
 
 
 def test_fractional_eof_spine_rounding_matches_the_publication_gate():

@@ -27,8 +27,12 @@ def apply(l1, index, perception):
         return []
     v = index["video"]
     ratio = (l1["frame"][0] / l1["frame"][1]) * (v["height"] / v["width"])
-    w, h = max(1., ratio), max(1., 1 / ratio)
-    full = [(1 - w) / 2, (1 - h) / 2, (1 + w) / 2, (1 + h) / 2]
+    w, h = min(1., ratio), min(1., 1 / ratio)
+    def centered(point):
+        x = min(1. - w / 2, max(w / 2, point[0]))
+        y = min(1. - h / 2, max(h / 2, point[1]))
+        return [x - w / 2, y - h / 2, x + w / 2, y + h / 2]
+    full = centered((.5, .5))
     samples = list((index.get("spatial") or {}).get("samples") or [])
     samples += (perception or {}).get("samples") or []
     shots = index.get("shots") or [{"start": 0, "end": v["duration"]}]
@@ -59,19 +63,40 @@ def apply(l1, index, perception):
         crop = item.get("crop") or full
         track = isinstance(crop[0], (list, tuple))
         rects = crop if track else [crop]
-        if missing:
-            item["crop"] = [list(full) for _ in rects] if track else list(full)
-            item["source_full_frame"] = True
-            reason = "full_frame_missing_subject_boxes"
-        else:
-            # A subject wholly outside a proposed crop must count too.
-            # Keep the authored move only if every observed subject fits.
-            safe = all(c[0] <= b[0] and c[1] <= b[1] and c[2] >= b[2]
-                       and c[3] >= b[3] for c in rects for b in boxes)
-            if not safe:
-                item["crop"] = [list(full) for _ in rects] if track else list(full)
-                item["source_full_frame"] = True
-            reason = "subject_boxes_contained" if safe else "full_frame_subject_outside_crop"
+        # The output stays full-bleed. A missing indexed box is not permission
+        # to shrink the entire source onto black. Perception measures faces,
+        # people and saliency on the actual decoded frames, without a model.
+        safe = (not missing and all(0 <= c[0] < c[2] <= 1 and
+                0 <= c[1] < c[3] <= 1 and abs((c[2]-c[0])/(c[3]-c[1])-ratio) < .005 and all(c[0] <= b[0] and c[1] <= b[1]
+                and c[2] >= b[2] and c[3] >= b[3] for b in boxes) for c in rects))
+        reason = "subject_boxes_contained"
+        if not safe:
+            local = [s for s in samples if any(sh["start"] <= s["t"] < sh["end"] for sh in overlaps)]
+            known = [s for s in samples if _boxes(s) and s["t"] <= start]
+            points = []
+            for n in range(len(rects)):
+                t = start + (end-start) * (n / max(1, len(rects)-1) if track else .5)
+                nearby = sorted(local, key=lambda s: abs(s["t"]-t))
+                row = next((s for s in nearby if _boxes(s)), None)
+                if row is not None:
+                    box = max(_boxes(row), key=lambda b: (b[2]-b[0])*(b[3]-b[1]))
+                    point = [(box[0]+box[2])/2, (box[1]+box[3])/2]
+                    reason = "local_subject_crop"
+                elif nearby and nearby[0].get("focus"):
+                    point = nearby[0]["focus"]
+                    reason = "local_saliency_crop"
+                elif known:
+                    box = max(_boxes(max(known, key=lambda s:s["t"])),
+                              key=lambda b:(b[2]-b[0])*(b[3]-b[1]))
+                    point = [(box[0]+box[2])/2, (box[1]+box[3])/2]
+                    reason = "last_known_subject_crop"
+                else:
+                    # A decoder with no observations cannot justify a crop.
+                    # Production perception always records a local focus.
+                    raise ValueError("first-film crop awaits local subject or saliency evidence")
+                points.append(centered(point))
+            item["crop"] = points if track else points[0]
+        item.pop("source_full_frame", None)
         report.append({"id": item["id"], "source": [start, end], "reason": reason,
                        "subject_boxes": len(boxes), "crop": item.get("crop")})
     return report

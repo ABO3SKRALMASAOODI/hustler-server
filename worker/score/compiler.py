@@ -4385,7 +4385,7 @@ def counter_text(fmt, v, whole, sep=False):
     out, k = _FMT_FIELD.subn(field, fmt)
     if k and "%" in fmt:
         out = out.replace("%%", "%")
-    return out if k else f"{fmt} {num}".strip() if fmt else num
+    return out if fmt else num  # A literal format is complete; only fields insert digits.
 
 
 @gesture("counter", 'from to at step fmt("DIA {n}", "{n:02d}") size seat font. Digits step hard, slowing at the end', lower="text")

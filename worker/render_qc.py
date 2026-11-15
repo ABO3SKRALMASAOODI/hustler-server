@@ -73,7 +73,7 @@ import time
 
 import http_inputs
 
-QC_VERSION = 8              # v8: authored reading cards are not frozen footage
+QC_VERSION = 9              # v8: authored reading cards are not frozen footage
                             # v7: graphics on the eyes or mouth, measured ink
                             # v5: the stall before the end card
                             # v4: card faces read on the source, type and picture measures
@@ -610,6 +610,7 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
             "card_samples": card_samples,
             "picture": _safe(picture_measures, edl, index, tl, int(W), int(H),
                              float(program_s), others),
+            "reading": _safe(reading_plan, edl, tl),
             "type": _safe(_type_plan, edl, index, tl, int(W), int(H), fps,
                           float(program_s)),
             # the programme's last frame cuts to the end card (or the loop)
@@ -1053,7 +1054,57 @@ def _tiny_h(W, H, w):
     return max(2, int(round(w * float(H) / float(W) / 2.0)) * 2)
 
 
-def frame_changes(path, program_s, W, H, deadline, lumas=None):
+def reading_plan(edl, tl=None):
+    """Literal caption/title geometry and ink; never interprets their words."""
+    rows = []
+    caps = edl.get("captions")
+    for kind, items in (("caption", caps if isinstance(caps, list) else []),
+                        ("text", edl.get("texts") or [])):
+        for n, item in enumerate(items):
+            a, b = float(item.get("start") or 0), float(item.get("end") or 0)
+            if b-a < .12:
+                continue
+            style = item.get("style") or item
+            ink = style.get("color") or "#FFFFFF"
+            if len(ink) != 7 or not ink.startswith("#"):
+                continue
+            y = style.get("anchor_y") if kind == "caption" else item.get("y")
+            y = float(y if y is not None else .8)
+            x = float(style.get("anchor_x") or item.get("x") or .5)
+            inks = [ink]
+            if float(style.get("outline_width") or 0) >= 2 and style.get("outline_color"):
+                inks.append(style["outline_color"])
+            spans = tl.span_to_out(a, b) if kind == "caption" and tl is not None else [(a,b)]
+            for left, right in spans:
+                rows.append({"id": item.get("id") or f"{kind}.{n}", "time": left+(right-left)*.6,
+                             "x": x, "y": y, "inks": inks})
+    return rows
+
+
+def reading_contrast(gray, cue):
+    import numpy as np
+    h, w = gray.shape
+    x, y = cue["x"]*w, cue["y"]*h
+    region = gray[max(0, int(y-.04*h)):min(h, int(y+.04*h)+1),
+                  max(0, int(x-.22*w)):min(w, int(x+.22*w)+1)]
+    if not region.size:
+        return 1.
+    def linear(c):
+        c = c/255.
+        return c/12.92 if c <= .04045 else ((c+.055)/1.055)**2.4
+    bg = linear(float(np.median(region)))
+    values = []
+    for ink in cue["inks"]:
+        try:
+            rgb = [linear(int(ink[i:i+2],16)) for i in (1,3,5)]
+        except (ValueError, TypeError):
+            continue
+        lum = sum(a*b for a,b in zip(rgb,(.2126,.7152,.0722)))
+        values.append((max(lum,bg)+.05)/(min(lum,bg)+.05))
+    return max(values or [1.])
+
+
+def frame_changes(path, program_s, W, H, deadline, lumas=None, screen=None, reading=()):
     """[(level, share)] per programme frame k >= 1: the mean |change| from
     frame k-1 (0-255) and the share of the tiny frame that changed.
     ``lumas`` (a list) receives every frame's mean luma (frame 0 on)."""
@@ -1065,7 +1116,16 @@ def frame_changes(path, program_s, W, H, deadline, lumas=None):
            "-vf", f"scale={w}:{h}:flags=area,format=gray",
            "-f", "rawvideo", "-pix_fmt", "gray", "-"]
     out, prev = [], None
-    for f in _stream(cmd, w, h, deadline):
+    for number, f in enumerate(_stream(cmd, w, h, deadline)):
+        if screen is not None:
+            screen["frames"] = screen.get("frames", 0) + 1
+            rows = float(((f < 16).mean(axis=1) >= .95).mean())
+            screen["letterbox_frames"] = screen.get("letterbox_frames", 0) + int(rows >= .35)
+            at = number / float(screen.get("fps") or 30)
+            for cue in reading or ():
+                if abs(at - cue["time"]) <= .5 / float(screen.get("fps") or 30):
+                    contrast = reading_contrast(f, cue)
+                    screen.setdefault("reading", []).append(dict(cue, contrast=round(contrast, 2)))
         if lumas is not None:
             lumas.append(float(f.mean()))
         f = f.astype(np.int16)
@@ -3175,7 +3235,13 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
         if prog <= MAX_FULL_PASS_S:
             try:
                 lumas = []
-                changes = frame_changes(path, prog, W, H, deadline, lumas=lumas)
+                screen = {"fps": fps}
+                changes = frame_changes(path, prog, W, H, deadline, lumas=lumas,
+                                        screen=screen, reading=plan_.get("reading") or [])
+                res["letterbox"] = {"frames": screen.get("frames", 0),
+                    "letterbox_frames": screen.get("letterbox_frames", 0),
+                    "share": screen.get("letterbox_frames", 0) / max(1, screen.get("frames", 0))}
+                res["reading_contrast"] = screen.get("reading", [])
                 res["jumps"] = [list(j) for j in jumps(changes, plan_)]
                 res["orphans"] = [list(o) for o in orphans(changes, plan_)]
                 if res["jumps"] or res["orphans"]:
@@ -3260,6 +3326,12 @@ def findings(res, plan_):
     """Plain-language findings from a check result, worst first."""
     fps = plan_.get("fps") or 30.0
     out = []
+    bars = res.get("letterbox") or {}
+    if plan_.get("H", 0) > plan_.get("W", 0) and bars.get("share", 0) > .1:
+        out.append(f"LETTERBOX: {bars['share']:.0%} of programme frames have at least 35% black rows; fill the vertical frame with a subject-guided crop")
+    for cue in res.get("reading_contrast") or []:
+        if cue["contrast"] < 3:
+            out.append(f"UNREADABLE CAPTION/TEXT at {cue['time']:.2f}s ({cue['id']}): measured ink/background contrast {cue['contrast']:.2f}:1; choose contrasting ink or an opaque backing")
     if plan_.get("endcard") and res.get("endcard") is not None and \
             res["endcard"] < ENDCARD_MIN_NCC:
         out.append(

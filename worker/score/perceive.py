@@ -290,6 +290,10 @@ def _run(index, src, work, audio):
         samples.append(dict(t=t, face=[round(float(v), 4) for v in face] if face else None, body=None, diff=diff, persons=1 if face or person else 0, **st))
         if person:
             samples[-1]["person"] = [round(float(v), 4) for v in person]
+        if not face and not person:
+            import subject
+            samples[-1]["focus"] = list(subject._energy_point(np, gray))
+            samples[-1]["focus_method"] = "local_saliency"
         keep.append((t, f))
     if not samples:
         raise ValueError("no frames could be read from the footage")
