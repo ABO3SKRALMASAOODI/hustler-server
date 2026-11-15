@@ -197,7 +197,8 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None):
     for i, window in enumerate(coverage['windows']):
         a, b = round(window['t0']*fps)+lead, round(window['t1']*fps)+lead
         candidates = [('clip', c.get('subject', window['name']), c) for c in sorted(footage.get(i, []),
-            key=lambda c:(c.get('subject_motion') is False, -c.get('motion_p90',0)))]
+            key=lambda c:(0 if c.get('subject_motion') is True else 2 if c.get('subject_motion') is False else 1,
+                          -c.get('motion_p90',0)))]
         names=list(dict.fromkeys([window['name'],*window.get('subjects',[])]))
         candidates += [('photo', name, p) for name in names for p in pictures.get(name, [])]
         blocked={r['source'] for r in coverage.get('blocked_sources',[]) if r['window']==i}
@@ -228,6 +229,32 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None):
             out.append([pos,end,kind,name,dict(rec, window=i, illustration=window['must_show'])])
             used.append(rec); pos=end
     return out
+
+
+def checked_proposals(coverage, footage, pictures, duration, checker, composed_stills=()):
+    """Check local alternatives before acquisition; prior motion never approves a new placement."""
+    attempts=[];rejected=set();seen=set();ins=proposals(coverage,footage,pictures)
+    bound=1+len(coverage['windows'])*(sum(map(len,footage.values()))+sum(map(len,pictures.values())))
+    for _ in range(bound):
+        signature=tuple((r[0],r[1],r[4]['window'],r[4]['path'],tuple(r[4].get('src',()))) for r in ins)
+        if signature in seen:break
+        seen.add(signature)
+        accepted,report=checker(ins)
+        for row,decision in zip(ins,report['placements']):
+            if row[4]['path'] in composed_stills:
+                decision['motion_ok']=False;row[4]['verified_motion']=False
+            for candidate in footage.get(row[4]['window'],[]):
+                if candidate['path']==row[4]['path']:
+                    candidate['subject_motion']=decision.get('motion_ok') is True
+        attempts.append(report)
+        if not report['rejected']:
+            try:require_coverage(accepted,coverage,duration)
+            except CoverageError as error:
+                if error.report['moving_seconds']>=error.report['required_moving_seconds']:break
+            else:break
+        rejected.update((r[4]['window'],r[4]['path']) for r,d in zip(ins,report['placements']) if not d['ok'])
+        ins=proposals(coverage,footage,pictures,rejected=rejected)
+    return accepted,dict(report,attempts=attempts,spend=[s for a in attempts for s in a['spend']])
 
 
 def repair_requirements(coverage, wanted, evidence, llm):

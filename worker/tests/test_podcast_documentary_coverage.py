@@ -427,3 +427,38 @@ def test_source_fetch_failure_keeps_its_stage(monkeypatch,tmp_path):
     monkeypatch.setattr(run.fetch,'whole_av',lambda *a:(_ for _ in ()).throw(run.fetch.FetchError('provider refused')))
     out=run._open(dict(key='s0',url='https://video.example/source',duration=3,title='Source'),str(tmp_path),lambda _:None,whole_first=True)
     assert out['error_stage']=='fetch' and out['error_type']=='FetchError'
+def test_verified_motion_outranks_unknown_high_pixel_motion():
+    coverage=dict(windows=[dict(name='Company',must_show='Actual company',t0=0,t1=1)])
+    clips=[dict(path='cursor.mp4',seconds=2,motion_p90=100),
+           dict(path='actual-action.mp4',seconds=2,motion_p90=2,subject_motion=True)]
+    rows=C.proposals(coverage,{0:clips},{})
+    assert rows[0][4]['path']=='actual-action.mp4'
+
+
+def test_local_motion_alternatives_are_checked_before_research():
+    coverage=dict(windows=[dict(name='Company',must_show='Actual company',t0=0,t1=4)])
+    stills=[dict(path=f'cursor-{i}.mp4',seconds=2,motion_p90=100-i) for i in range(4)]
+    moving=[dict(path=f'action-{i}.mp4',seconds=2,motion_p90=10-i) for i in range(4)]
+    moving_paths={r['path'] for r in moving};calls=[]
+    def check(rows):
+        calls.append([r[4]['path'] for r in rows]);decisions=[]
+        for row in rows:
+            motion=row[4]['path'] in moving_paths
+            row[4].update(verified_motion=motion,placed_motion_p90=2)
+            decisions.append(dict(ok=True,motion_ok=motion))
+        return rows,dict(placements=decisions,rejected=0,spend=[])
+    rows,report=C.checked_proposals(coverage,{0:stills+moving},{},5,check)
+    assert len(calls)==2 and set(calls[1])==moving_paths
+    assert C.require_coverage(rows,coverage,5)['moving_seconds']==4
+    assert len(report['attempts'])==2
+
+
+def test_exhausted_local_stills_do_not_loop_or_gain_motion_credit():
+    coverage=dict(windows=[dict(name='Company',must_show='Actual company',t0=0,t1=1)])
+    calls=[]
+    def check(rows):
+        calls.append(rows)
+        return rows,dict(placements=[dict(ok=True,motion_ok=False)],rejected=0,spend=[])
+    rows,_=C.checked_proposals(coverage,{0:[dict(path='still.mp4',seconds=2,motion_p90=100)]},{},2,check)
+    assert len(calls)==1
+    with pytest.raises(C.CoverageError):C.require_coverage(rows,coverage,2)

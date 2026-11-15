@@ -293,30 +293,9 @@ def build(script, sup, style_id, direction=None):
     # the payoff is his face, but never more than its last four seconds: a long close on one framing is a held picture
     f_last = max(turn_f - 6, f_voice_end - int(4.0 * FPS)) if turn_f is not None else f_voice_end - 45
     from placement_check import propose, check
-    from wf1_coverage import proposals, require_coverage
-    ins = proposals(coverage, footage, pics)
-    attempts = []; rejected_placements=set()
-    for _ in range(1+len(coverage['windows'])*(sum(len(rows) for rows in footage.values())+sum(len(rows) for rows in pics.values()))):
-        accepted, placement_report = check(ins, script, clock, sup["work"], sup["ffmpeg"])
-        # Retain the actual action verdict for acquisition ranking. It is never
-        # an approval at another time: each new placement is checked again.
-        for row, decision in zip(ins, placement_report['placements']):
-            if row[4]['path'] in composed_stills:
-                decision['motion_ok']=False
-                row[4]['verified_motion']=False
-            for candidate in footage.get(row[4]['window'], []):
-                if candidate['path'] == row[4]['path']:
-                    candidate['subject_motion'] = decision.get('motion_ok') is True
-        attempts.append(placement_report)
-        if not placement_report['rejected']:
-            break
-        # A truthful artifact can fail one clause and belong under a later one.
-        # Reject its placement, not all future uses of the original source.
-        rejected_placements.update((r[4]['window'],r[4]['path']) for r,decision in zip(ins,placement_report['placements']) if not decision['ok'])
-        ins = proposals(coverage,footage,pics,rejected=rejected_placements)
-    ins = accepted
-    placement_report = dict(placement_report, attempts=attempts,
-                            spend=[s for attempt in attempts for s in attempt['spend']])
+    from wf1_coverage import checked_proposals, require_coverage
+    ins,placement_report=checked_proposals(coverage,footage,pics,f_end/FPS,
+        lambda rows:check(rows,script,clock,sup['work'],sup['ffmpeg']),composed_stills)
     coverage_report = require_coverage(ins, coverage, f_end/FPS)
     past = {int(i) for i in d.get("past_segs") or [] if isinstance(i, int)}
     cut_pts, drive_ids, look_pics, mono_spans, bright = [], set(), [], [], []
