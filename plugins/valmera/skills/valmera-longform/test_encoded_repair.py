@@ -81,3 +81,22 @@ def test_repair_budget_persists_across_processes(tmp_path):
     (tmp_path/'final.mp4').write_bytes(b'third failed candidate')
     with pytest.raises(RuntimeError,match='two-film budget'):
         E.begin(SimpleNamespace(run_dir=str(tmp_path)))
+
+
+def test_resume_uses_failed_measurement_only_for_its_exact_film(tmp_path,monkeypatch):
+    import cinema as C
+    supply=tmp_path/'supply';supply.mkdir()
+    (tmp_path/'final.mp4').write_bytes(b'failed film')
+    C.save(supply/'shots.json',[shot()])
+    C.save(supply/'picture-input.json',dict(film=C.digest(tmp_path/'final.mp4'),shots=C.digest(supply/'shots.json')))
+    C.save(tmp_path/'measured.json',dict(targets=dict(pictures=False,unique=True)))
+    calls=[]
+    monkeypatch.setattr(E,'begin',lambda ctx:calls.append('begin') or tmp_path/'repair')
+    monkeypatch.setattr(E,'repair',lambda *args:calls.append('repair'))
+    monkeypatch.setattr(C,'check',lambda *args:calls.append('check') or {'checks':{'ok':True}})
+    ctx=SimpleNamespace(run_dir=str(tmp_path),supply=str(supply))
+    assert E.check(ctx,{}, {})['checks']['ok']
+    assert calls==['begin','repair','check']
+    calls.clear();(tmp_path/'final.mp4').write_bytes(b'changed film')
+    E.check(ctx,{}, {})
+    assert calls==['check']
