@@ -2320,7 +2320,7 @@ def taste_check(l1, beats):
         if not events or min(abs(s["event_f"] - e) for e in events) > 3:
             bad.append(f"sound {s['id']} at frame {s['event_f']} has nothing landing with it")
     secs = l1["dur_f"] / FPS
-    hits = sorted({int(s["event_f"]) for s in l1.get("sound") or []})
+    hits = sorted({int(s["event_f"]) for s in l1.get("sound") or [] if s.get("tier") != "tick"})
     gest = [f for i, f in enumerate(hits) if i == 0 or f - hits[i - 1] > FPS]      # sounds within a second are one gesture
     n_s = len(gest)
     np10 = len([p for p in beats.get("pictures") or [] if p.get("kind") in ("photo", "designed", "window", "clip")]) / secs * 10
@@ -2329,6 +2329,10 @@ def taste_check(l1, beats):
     eng = (l1.get("sound_design") or {}).get("allow")       # the sound engine's own governor counted the film's picture changes
     if eng:                                                 # (a take cut to a picture and back is two): its allowance stands
         allow = max(allow, int(eng))
+    tick_hits = sorted({int(s["event_f"]) for s in l1.get("sound") or [] if s.get("tier") == "tick"})
+    tick_allow = int((l1.get("sound_design") or {}).get("allow_ticks") or 0)
+    if len(tick_hits) > tick_allow:
+        bad.append(f"{len(tick_hits)} tick events exceed their separate allowance {tick_allow}")
     if n_s > allow:
         bad.append(f"{n_s} sounds where the supply ({np10:.1f} new pictures a 10 s) allows {allow}")
     bad_words = sorted(bad_ids)

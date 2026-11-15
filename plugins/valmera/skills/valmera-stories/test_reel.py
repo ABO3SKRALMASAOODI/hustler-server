@@ -418,6 +418,9 @@ def test_the_designed_card_off_a_device_line_is_colourful_and_driven(tmp_path):
         assert 0.3 * ((r_ - g_) ** 2 + (0.5 * (r_ + g_) - b_) ** 2) ** 0.5 >= 20          # a colourful plate, not a void
         w = [it for it in l1["items"] if it["k"] == "word" and it.get("role") == "big" and it["f"][0] == p["f"][0]]
         assert w and isinstance(w[0].get("s"), list) and (w[0]["s"][-1] - w[0]["s"][0]) / w[0]["s"][0] >= 0.08
+    F._type()
+    taste = F.taste_check(l1, beats)
+    assert not taste["bad_words"], taste["problems"]
     assert all(p.get("tier") for p in beats["pictures"] if p["kind"] in ("clip", "photo", "designed"))     # every base shot has a tier
 
 
@@ -676,3 +679,15 @@ def test_a_minute_long_plan_places_a_negative_inside_a_shot(tmp_path, monkeypatc
     negs = [it for it in l1["items"] if it.get("k") == "flash" and it.get("mode") == "neg"]
     cuts = set(beats["cuts"])
     assert any(not any(abs(it["f"][0] - c) <= 1 for c in cuts) for it in negs)        # one lands inside a shot, off every cut
+
+
+def test_taste_checks_tick_budget_separately_from_audible_layer():
+    sounds = [dict(id=f"s{i}", event_f=i*60, tier="tick" if i==3 else "body", layer="hit") for i in range(4)]
+    l1 = dict(voices={}, items=[], dur_f=300, sound=sounds, sound_design=dict(allow=3, allow_ticks=1))
+    beats = dict(events=[s["event_f"] for s in sounds], pictures=[])
+    check = F.taste_check(l1, beats)
+    assert check["ok"], check["problems"]
+    l1["sound_design"]["allow_ticks"] = 0
+    assert any("tick events" in p for p in F.taste_check(l1, beats)["problems"])
+    sounds[-1]["tier"] = "body"
+    assert F.taste_check(l1, beats)["too_many_sounds"]

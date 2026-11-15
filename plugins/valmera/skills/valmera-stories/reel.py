@@ -1753,7 +1753,9 @@ def build(script, sup, style_id, direction=None):
         text = text.upper() if st["upper"] else text
         vk = f"dsp_card{f0}"
         P.voices[vk] = dict(P.voices["dsp"])
-        P.voices[vk]["px"] = P.R.fit_px(vk, text, 0.80 * W, float(st["dsp"]["px"]) * 1.6)
+        # Fit the largest animated frame, with room for glyph bearings and
+        # the platform rail. The old 80% static width overflowed as it grew.
+        P.voices[vk]["px"] = P.R.fit_px(vk, text, 0.70 * W / (1.0 + DESIGNED_SCALE), float(st["dsp"]["px"]) * 1.6)
         n = f1 - f0
         try:
             _, _, bake_ = F._engines()
