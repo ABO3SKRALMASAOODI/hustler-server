@@ -9,6 +9,33 @@ from . import boards, supply, taste
 
 
 def check(work, comp, text, deadline):
+    """Keep approvals attached to the actual compiled pictures, through cuts.
+
+    Removing an earlier use of a video rewinds the compiler's source cursor.
+    Recheck only placements whose picture interval or spoken passage changed.
+    """
+    approved = set()
+    rec = {"checked": 0, "usd": 0., "removed": [], "placements": [], "passes": 0}
+    # Each changing pass removes at least one occurrence. An unchanged rejected
+    # occurrence is a compiler failure, never permission to show it unchecked.
+    limit = len(comp.l1.get("items") or []) + 1
+    for _ in range(limit):
+        comp, text, part = _check_once(work, comp, text, deadline, approved)
+        rec["passes"] += 1
+        rec["checked"] += part["checked"]
+        rec["usd"] += part.get("usd", 0.)
+        rec["placements"].extend(part.get("placements") or [])
+        if set(part["removed"]) & set(rec["removed"]):
+            raise ValueError("Rejected picture persisted after recompilation")
+        rec["removed"].extend(part["removed"])
+        if not part["removed"]:
+            with open(os.path.join(work, "placement-check.json"), "w", encoding="utf-8") as f:
+                json.dump(rec, f, ensure_ascii=False)
+            return comp, text, rec
+    raise ValueError("Picture placement checking did not settle")
+
+
+def _check_once(work, comp, text, deadline, approved):
     """Check every used Bin picture, including each reused occurrence.
 
     Supply approved its search moment, not every passage the Director might
@@ -24,7 +51,7 @@ def check(work, comp, text, deadline):
     except (OSError, ValueError):
         return comp, text, {"checked": 0, "removed": []}
     source = {f"bin:{r['id']}": r for r in doc.get("items") or []}
-    l1, candidates, wishes, owners = comp.l1, [], [], {}
+    l1, candidates, wishes, owners, signatures = comp.l1, [], [], {}, {}
     try:
         with open(os.path.join(work, "index.json"), encoding="utf-8") as f:
             words = json.load(f).get("words") or []
@@ -57,6 +84,10 @@ def check(work, comp, text, deadline):
                 wish["want"] = original.get("want") or row.get("what") or wish["want"]
             if original.get("how") == "like":
                 wish["how"] = "like"
+            signature = json.dumps([item, wish], sort_keys=True)
+            if signature in approved:
+                continue
+            signatures[item["id"]] = signature
             asset = l1.get("assets", {}).get(item["pic"], {})
             image_path = os.path.join(work, asset.get("path") or row["path"])
             frames = [(None, image_path)]
@@ -83,10 +114,9 @@ def check(work, comp, text, deadline):
                                            min(deadline, time.monotonic()+supply.CHECK_S)) if candidates else ([], 0., [])
         accepted = {r["id"] for r in kept}
         removed = missing | {owner["id"] for n, owner in owners.items() if n not in accepted}
+        approved.update(signature for key, signature in signatures.items() if key not in removed)
         rec = {"checked": len(candidates), "usd": usd, "removed": sorted(removed),
                "placements": [{**owners[r["id"]], "check": r} for r in report if r.get("id") in owners]}
-        with open(os.path.join(work, "placement-check.json"), "w", encoding="utf-8") as f:
-            json.dump(rec, f, ensure_ascii=False)
         if not removed:
             return comp, text, rec
         revised = taste.cut_text(text, sorted(removed), "picture does not match the words at this placement")
