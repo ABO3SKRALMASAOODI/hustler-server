@@ -14,10 +14,21 @@ original sound 100%, the added song 25% (half of 50%, so the words stay clear). 
 platform_music.json and never stops a delivery; the publisher then keeps its own standing music rule.
 """
 import datetime as dt
+import importlib.util
 import json
 import os
+import sys
 
-import llm
+# The worker has its own llm.py. Publishing this helper as plain `llm`
+# breaks the worker's photo checks (fence/spend_lane/record are absent),
+# and importing after the worker would bind the song chooser to that client.
+_LLM_NAME = "_valmera_shell_llm"
+if _LLM_NAME not in sys.modules:
+    _spec = importlib.util.spec_from_file_location(_LLM_NAME, os.path.join(os.path.dirname(__file__), "llm.py"))
+    _client = importlib.util.module_from_spec(_spec)
+    sys.modules[_LLM_NAME] = _client
+    _spec.loader.exec_module(_client)
+llm = sys.modules[_LLM_NAME]
 
 PALETTE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "platform_songs.json")
 USED = "platform_songs_used.jsonl"          # this workflow's recent picks, in its state folder, so a wave is not one song

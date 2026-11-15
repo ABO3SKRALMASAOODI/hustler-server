@@ -4,8 +4,26 @@
 """
 import json
 import os
+import subprocess
+import sys
 
 import platform_song as P
+
+
+def test_song_client_does_not_shadow_the_worker_llm():
+    code = """
+import sys, types
+import platform_song
+assert 'llm' not in sys.modules
+worker_client = types.ModuleType('llm')
+sys.modules['llm'] = worker_client
+import importlib
+importlib.reload(platform_song)
+assert sys.modules['llm'] is worker_client
+assert platform_song.llm is not worker_client
+assert callable(platform_song.llm.ask)
+"""
+    subprocess.run([sys.executable, "-c", code], cwd=os.path.dirname(__file__), check=True)
 
 
 def fake_ask(answer, seen=None):
