@@ -776,7 +776,9 @@ def supply(ctx, script):
     fscript = json.loads(json.dumps(script))         # the footage engine searches the web; the recording's own names are ours
     for seg in fscript["script"]["segments"]:
         seg["pictures"] = [n for n in seg.get("pictures") or [] if n not in own]
-    reel_kw = dict(preserve_source=True, shot_s=0.55, line_max=12, per=4)
+    # Illustrative footage is silent. The two real-voice passages come only
+    # from our verified Studio recording, so source transcripts are unused.
+    reel_kw = dict(preserve_source=True, shot_s=0.55, line_max=12, per=4, hear_s=0.0)
     foot = chain.footage(ctx, fscript, durs, anchors=anchors, **W3.footage_kw(reel_kw))
     if foot and foot["counts"]["lines_with_footage"] < len(sc["segments"]) / 2:
         # too little passed: once more with each subject as a plain thing to see (the writer's must_show can be too narrow)
