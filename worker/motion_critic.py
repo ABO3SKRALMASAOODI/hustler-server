@@ -853,6 +853,14 @@ def lens_type(report):
     qc = (report or {}).get("picture_qc") or (report or {}).get("qc") or {}
     caps = ((qc.get("type") or {}).get("caps")) or {}
     measure = {}
+    for row in qc.get("ordinary_text_contrast") or []:
+        out.append(_f("fix", "type", "title_low_contrast",
+                      f"title '{row['id']}' measures APCA Lc {row['lc']:.1f} "
+                      "(<60) on the final picture: " + "; ".join(row.get("text") or []),
+                      fix="Preserve the words and requested ink colour. Move "
+                          "to a clear seat or strengthen local shadow/backing; "
+                          "inspect the corrected render. Never remove the title "
+                          "to pass.", id=row['id'], t=row['t']))
     for row in (qc.get("type") or {}).get("low_contrast_html") or []:
         out.append(_f("fix", "type", "html_type_low_contrast",
                       f"graphic '{row['id']}' measures APCA Lc {row['lc']:.1f} "
