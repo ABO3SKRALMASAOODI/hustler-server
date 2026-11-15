@@ -17264,7 +17264,6 @@ def _matte_source(ctx, edl=None):
             if getattr(ctx, "db", None) else None
         proxy = ctx.db.run(dbx.latest_asset, ctx.project_id, "proxy") \
             if getattr(ctx, "db", None) else None
-        proxy = matte_track.analysis_asset(edl, orig, proxy)
         sha = (orig or {}).get("sha256") or getattr(ctx, "_orig_sha", "")
         src = matte_track.launch_source(sha, proxy, ctx.index,
                                         ctx.project_id)
