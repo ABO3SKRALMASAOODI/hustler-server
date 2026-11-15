@@ -33,6 +33,10 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
+import importlib.util
+_inventory_spec = importlib.util.spec_from_file_location("_wf2_visual_inventory", os.path.join(HERE, "visual_inventory.py"))
+VI = importlib.util.module_from_spec(_inventory_spec)
+_inventory_spec.loader.exec_module(VI)
 SKILLS = os.path.dirname(HERE)
 STORIES = os.path.join(SKILLS, "valmera-stories")
 # this folder's own film.py (the three built styles) must not shadow the stories' film.py that reel.py and wf3.py import
@@ -551,7 +555,7 @@ def audit(sc, rc):
     return bad, use
 
 
-def write(ctx, idea, card, rc, notes=None):
+def write(ctx, idea, card, rc, notes=None, inventory=None):
     pace = ref_pace()
     system = ("You are the writer and voice director of Valmera's marketing films for video editors. A synthetic narrator (Phonon Easton, "
               "a calm documentary voice) reads your lines over real footage of what they name, cut fast; between two of your lines the "
@@ -615,6 +619,18 @@ def write(ctx, idea, card, rc, notes=None):
                "\"proof\": {\"before_after\": index of the segment the before plays after, \"after_after\": index of the segment the after "
                "plays after (the one that says the typed sentence)}}. Mark one \"low\" (the pain at its worst), one \"turn\", and the "
                "\"payoff\" right after the after.")
+    if inventory:
+        system += (" The inspected visual inventory supersedes hypothetical subject suggestions above. "
+                   "Use its exact subject names for every external picture. Spread the argument across several "
+                   "available subjects, with explicitly spoken comparisons where useful. Do not repeatedly "
+                   "name the same picture for different claims. Let the actual images determine the examples; "
+                   "keep the editor's problem and authenticated product result as the argument. "
+                   "Budget the visible story for at least eleven genuinely different pictures per ten seconds, "
+                   "including the slower before/after passages. Re-crops and text changes do not count. "
+                   "A narrow line that can show only one picture for several seconds cannot carry that pace. "
+                   "Use the available inventory to write concrete, fast visual examples that progress the "
+                   "editing lesson; do not insert unrelated images or prolong the film to fit inventory.")
+        content = [dict(type="text", text=content)] + VI.writer_content(inventory, still)
     got, use = ask(system, content, what="write", effort="high", max_tokens=16000)
     return (got if isinstance(got, dict) else {}), use
 
@@ -648,11 +664,14 @@ def script(ctx, ideas_out):
     idea, ask_text, rec, chk, tag = chosen
     card = able.get(idea["style"]) or next(iter(able.values()))
     rc = receipts(rec, chk, ask_text)
+    inventory = VI.prepare(ctx, idea, rc, ask, PX.pictures, still)
+    spend += inventory["spend"]
+    ctx.log(f"visual inventory: {sum(map(len, inventory['pictures'].values()))} distinct inspected pictures before writing")
     notes, sc, bad = ctx.args.get("notes"), None, []
     for attempt in range(4):
-        sc, use = write(ctx, idea, card, rc, notes)
+        sc, use = write(ctx, idea, card, rc, notes, inventory)
         spend.append(use)
-        probs = script_problems(sc, ask_text, rc)
+        probs = script_problems(sc, ask_text, rc) + VI.script_problems(sc, inventory)
         if not probs:
             bad, u2 = audit(sc, rc)
             spend.append(u2)
@@ -854,9 +873,14 @@ def supply(ctx, script):
     used = {n for s in sc["segments"] for n in s.get("pictures") or []}
     named = [n for n in sc.get("named") or [] if n.get("name") in used]
     if named:                    # free photographs are the fallback; the film is cut from footage, so too few is no stop
-        photo_named, photo_spend = photo_briefs(ctx, named)
-        spend += photo_spend
-        got, reports, usd = PX.pictures(photo_named, os.path.join(sup_dir, "pics"), per=4)
+        inventory = jload(os.path.join(sup_dir, "visual_inventory", "inventory.json"))
+        if inventory:
+            got = {n: rows for n, rows in inventory["pictures"].items() if n in used}
+            reports, usd = inventory["reports"], 0.0
+        else:  # a resumable script written before inventory-first acquisition
+            photo_named, photo_spend = photo_briefs(ctx, named)
+            spend += photo_spend
+            got, reports, usd = PX.pictures(photo_named, os.path.join(sup_dir, "pics"), per=4)
         jsave(os.path.join(sup_dir, "photo_reports.json"), reports)
         ctx.log(f"photographs: {sum(len(v) for v in got.values())} across {len(named)} subjects")
         spend.append(dict(stage="supply", provider="openai", model="picture check", what="photographs", usd=usd))
@@ -1042,7 +1066,7 @@ def words_under(clock, f0, f1):
 
 
 def picture_key(p, words):
-    return json.dumps([4, p["path"], p.get("src"), words], ensure_ascii=False)
+    return json.dumps([5, p["path"], p.get("src"), words], ensure_ascii=False)
 
 
 def picture_check(ctx, beats, clock, product_paths, cache, recording=None):
@@ -1077,8 +1101,12 @@ def picture_check(ctx, beats, clock, product_paths, cache, recording=None):
                 cache[key] = dict(fits=False, why="source window could not be inspected")
                 continue
             readable.add(n)
+            a, b = p["f"][0] / F.FPS, p["f"][1] / F.FPS
+            segs = {w.get("seg") for w in clock.words if w["t1"] > a and w["t0"] < b}
+            context = " ".join(w["w"] for w in clock.words if w.get("seg") in segs)
             content.append(dict(type="text", text=f"Picture {n}; words: {ws!r}; source role: {p.get('name')!r}; "
-                                f"real product recording: {p['path'] in product_paths}"))
+                                f"real product recording: {p['path'] in product_paths}; full line for resolving "
+                                f"phrase fragments only: {context!r}"))
             if recording and p["path"] in product_paths:
                 content.append(dict(type="text", text="Authenticated recording receipts: " + json.dumps(recording, ensure_ascii=False)))
             content.extend(img(b) for b in samples)

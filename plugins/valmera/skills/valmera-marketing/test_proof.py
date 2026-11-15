@@ -103,7 +103,8 @@ def test_missing_and_loose_verdicts_fail_including_product(monkeypatch):
     monkeypatch.setattr(P, "ask", lambda *args, **kwargs: (
         {"pictures": [{"n": 1, "fit": "loose", "why": "only the same speaker"}]}, {}))
     pictures = [dict(path=f"/x/{i}.mp4", name="after", f=[i * 30, (i + 1) * 30], src=[0, 1]) for i in range(2)]
-    bad, _ = P.picture_check(None, {"pictures": pictures}, None, {p["path"] for p in pictures}, {})
+    from types import SimpleNamespace
+    bad, _ = P.picture_check(None, {"pictures": pictures}, SimpleNamespace(words=[]), {p["path"] for p in pictures}, {})
     assert len(bad) == 2
     assert bad[1][2] == "missing picture verdict"
 

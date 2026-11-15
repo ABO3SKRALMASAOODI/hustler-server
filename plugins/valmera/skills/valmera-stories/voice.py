@@ -228,8 +228,9 @@ def lra(x, sr):
 
 
 def envelope(n, sr, spans, ramp):
-    """dB per sample: each (a, b, db) span with raised-cosine ramps of `ramp` seconds, the larger where two meet."""
+    """Raised-cosine dB rides, continuously blended where neighbouring spans overlap."""
     g = np.zeros(n, np.float32)
+    weight = np.zeros(n, np.float32)
     r = max(int(ramp * sr), 1)
     for a, b, db in spans:
         if not db:
@@ -243,9 +244,9 @@ def envelope(n, sr, spans, ramp):
             ramp_up = 0.5 - 0.5 * np.cos(np.linspace(0, np.pi, k))
             env[:k] = ramp_up
             env[-k:] = ramp_up[::-1]
-        seg = env * db
-        g[i:j] = np.where(np.abs(seg) > np.abs(g[i:j]), seg, g[i:j])
-    return g
+        g[i:j] += env * db
+        weight[i:j] += env
+    return g / np.maximum(weight, 1.0)
 
 
 def remap(t, cuts):
