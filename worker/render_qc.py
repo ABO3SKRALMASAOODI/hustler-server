@@ -73,7 +73,7 @@ import time
 
 import http_inputs
 
-QC_VERSION = 9              # v8: authored reading cards are not frozen footage
+QC_VERSION = 10             # ordinary titles measured on final-picture glyphs
                             # v7: graphics on the eyes or mouth, measured ink
                             # v5: the stall before the end card
                             # v4: card faces read on the source, type and picture measures
@@ -611,6 +611,7 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
             "picture": _safe(picture_measures, edl, index, tl, int(W), int(H),
                              float(program_s), others),
             "reading": _safe(reading_plan, edl, tl),
+            "ordinary_text": [dict(t) for t in edl.get("texts") or []],
             "type": _safe(_type_plan, edl, index, tl, int(W), int(H), fps,
                           float(program_s)),
             # the programme's last frame cuts to the end card (or the loop)
@@ -3183,6 +3184,15 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
     def type_pass_local():
         res = {"skipped": [], "band": []}
         started = time.monotonic()
+        if plan_.get("ordinary_text"):
+            try:
+                import rendered_ass_type
+                rows, skipped = rendered_ass_type.measure(
+                    path, plan_["ordinary_text"], W, H, prog, deadline)
+                res["ordinary_text_contrast"] = rows
+                res["skipped"].extend(skipped)
+            except Exception as exc:
+                res["skipped"].append(f"ordinary title contrast: {str(exc)[:80]}")
         if plan_.get("picture"):
             res["picture"] = plan_["picture"]
         if plan_.get("wm_slot"):
@@ -3615,6 +3625,14 @@ def measured_findings(res):
     crossing a picture card's edge (what reviewers judged by eye on the
     Oct 10 podcast run)."""
     out = []
+    for row in (res.get("ordinary_text_contrast") or [])[:3]:
+        out.append(
+            f"LOW-CONTRAST TITLE at {row['t']:.1f}s: '{row['id']}' measures "
+            f"APCA Lc {row['lc']:.1f} (<60) on its rendered glyphs and their "
+            "surrounding picture: " + "; ".join(row.get("text") or [])
+            + " — preserve the requested words and ink colour. Move the title "
+              "to a clear seat or strengthen its local shadow/backing, then "
+              "inspect the corrected render; do not remove it to pass")
     tq = res.get("type") or {}
     for row in (tq.get("low_contrast_html") or [])[:3]:
         out.append(
