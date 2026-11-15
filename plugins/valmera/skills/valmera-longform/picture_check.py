@@ -22,7 +22,8 @@ def check(film, shots, out, ffmpeg, source=False):
                 with Image.open(r['clip']['path']) as im:
                     if r['clip'].get('document'):
                         cell=Image.new('RGB',(480,270),'#14161A');im=ImageOps.contain(im.convert('RGB'),(450,230));cell.paste(im,((480-im.width)//2,(270-im.height)//2))
-                    else:cell=ImageOps.fit(im.convert('RGB'),(480,270))
+                    else:
+                        cell=Image.new('RGB',(480,270),'#14161A');im=ImageOps.contain(im.convert('RGB'),(450,230));cell.paste(im,((480-im.width)//2,(270-im.height)//2))
                 cells=[cell]*3
             else:
                 lo,hi=r['src'] if source else (a,b)
@@ -34,9 +35,13 @@ def check(film, shots, out, ffmpeg, source=False):
                     cells.append(Image.open(io.BytesIO(p.stdout)).convert('RGB'))
             board=Image.new('RGB',(1440,300),'black')
             for j,im in enumerate(cells): board.paste(im,(j*480,30))
-            ImageDraw.Draw(board).text((10,8),f'Shot {i} | {a:.2f}-{b:.2f}',fill='white'); board.save(path)
+            ImageDraw.Draw(board).text((10,8),f'Shot {i} | {a:.2f}-{b:.2f}',fill='white')
+            if source and r['clip'].get('editorial_label'):
+                ImageDraw.Draw(board).text((520,8),r['clip']['editorial_label'],fill='white')
+            board.save(path)
         metadata=dict(r['clip']['source'])
         if r['clip'].get('document'):metadata['presentation']='Original technical figure, displayed with an archive-record label'
+        if r['clip'].get('editorial_label'):metadata['on_screen_source_label']=r['clip']['editorial_label']
         rows.append(dict(i=i,path=str(path),start=a,end=b,say=r['say'],context=r.get('context',r['say']),source=metadata))
     def one(group):
         rp=out/f"check-{group[0]['i']:04d}.json"

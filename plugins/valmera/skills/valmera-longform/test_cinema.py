@@ -61,6 +61,48 @@ def test_scarce_evidence_is_reserved_before_a_flexible_earlier_line():
     assert not C.duplicate_ranges(shots)
 
 
+def test_visual_subject_changes_follow_spoken_word_anchors():
+    sc={'segments':[{'say':'Station. Rehearsal.','chapter':'c','visual_beats':[
+        dict(word_start=0,archive_ids=['station']),dict(word_start=1,archive_ids=['pool'])]}]}
+    words={'duration':7.9,'words':[dict(w='Station.',start=.1,end=3.5,seg=0),dict(w='Rehearsal.',start=4,end=7.8,seg=0)]}
+    a=dict(clip('station',0,6),catalogue_id='station');b=dict(clip('pool',10,16),catalogue_id='pool')
+    shots,clock,_=C.schedule(sc,words,dict(lines=[dict(i=0,clips=[b,a])]))
+    assert [r['clip']['path'] for r in shots]==['station','pool']
+    assert shots[0]['f'][1]==round(clock.seg_words(0)[1]['t0']*30)
+    assert not C.duplicate_ranges(shots)
+
+
+def test_exact_gap_assignment_does_not_replace_its_neighbour():
+    import timeline_repair as R
+    sc={'segments':[{'say':'Station. Rehearsal.','chapter':'c','visual_beats':[
+        dict(word_start=0,archive_ids=['station']),dict(word_start=1,archive_ids=['missing'])]}]}
+    words={'duration':7.9,'words':[dict(w='Station.',start=.1,end=3.5,seg=0),dict(w='Rehearsal.',start=4,end=7.8,seg=0)]}
+    a=dict(clip('station',0,6),catalogue_id='station');b=clip('repaired-pool',10,16)
+    clock=C.F.Clock(words,sc);cut=round(clock.seg_words(0)[1]['t0']*30)/30
+    ft=dict(lines=[dict(i=0,clips=[a])],editorial=dict(assignments=[dict(seg=0,anchors=[R.anchor(clock,cut),R.anchor(clock,8)],candidates=[b])]))
+    shots,_,_=C.schedule(sc,words,ft)
+    assert [r['clip']['path'] for r in shots]==['station','repaired-pool']
+
+
+def test_archive_revision_preserves_prior_read_and_resumes_without_erasing_new_audio(tmp_path):
+    from types import SimpleNamespace
+    import archive_script as A
+    supply=tmp_path/'supply';supply.mkdir();(supply/'narration').mkdir()
+    (supply/'narration'/'old.wav').write_bytes(b'prior-read')
+    ctx=SimpleNamespace(run_dir=tmp_path,supply=supply)
+    script=dict(title='Old',script={},dossier={});ft=dict(lines=[],voices=[],spend=[])
+    segment=dict(say='True words.',facts=['f'],visual_beats=[dict(word_start=0,archive_ids=['a'],label='Ground rehearsal')])
+    proposal=dict(script=dict(title='Revised',segments=[segment]),dossier=dict(facts=[dict(id='f')]),check=dict(words=2))
+    catalogue=[dict(id='a',usable=True,clip=clip('archive',0,8))]
+    A.apply(ctx,script,ft,proposal,catalogue)
+    assert (supply/'archive-script/narration-before/old.wav').read_bytes()==b'prior-read'
+    assert ft['lines'][0]['clips'][0]['editorial_label']=='Ground rehearsal'
+    assert script['title']=='Revised'
+    (supply/'narration/new.wav').write_bytes(b'revised-read')
+    A.apply(ctx,script,ft,proposal,catalogue)
+    assert (supply/'narration/new.wav').read_bytes()==b'revised-read'
+
+
 def test_checked_picture_follows_its_word_when_narration_timing_changes():
     import timeline_repair as R
     sc={'segments':[{'say':'Alpha beta.','chapter':'c'}]}

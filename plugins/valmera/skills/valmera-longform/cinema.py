@@ -313,19 +313,17 @@ def supply(ctx, script):
     pk=Path(ctx.supply)/'pack.json'
     if pk.exists(): return read(pk)['record']
     Path(ctx.supply).mkdir(parents=True,exist_ok=True)
-    sc=script['script']
+    # The researched draft finds sources. The final spoken script is committed
+    # only after the actual archive has been inspected, avoiding blind claims
+    # that no surviving picture can illustrate.
+    ft=footage(ctx,script)
+    from archive_script import conform
+    conform(ctx,script,ft)
     sc=verify_structure(ctx,script)
     ns=wf4.story.narration_script(sc)
     reader=str(HERE/'longform_voice.py')
     nd=Path(ctx.supply)/'narration'
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        nj=pool.submit(narrated,ctx,ns,nd,reader)
-        # Independent network work overlaps the serialized local narrator.
-        try:ft=footage(ctx,script)
-        except Exception as e:
-            ctx.log('footage stopped; the independent narrator will finish its checkpoint: '+str(e)[:500])
-            raise
-        nar=nj.result()
+    nar=narrated(ctx,ns,nd,reader)
     if nar['gate'].get('wer') is None or nar['gate']['wer']>=0.01:
         raise RuntimeError(f"narration WER must be <1%: {nar['gate']}")
     # Coverage is solved on the narrator-only clock. Inserted testimony brings
@@ -373,7 +371,7 @@ def supply(ctx, script):
             try:shots,clock,_=schedule(sc,coverage_words,ft)
             except CoverageError as tail:
                 from evidence_allocate import allocate
-                allocate(ctx,script,ft,tail)
+                allocate(ctx,script,ft,tail,coverage_words)
                 save(Path(ctx.supply)/'footage/footage.json',ft)
                 shots,clock,_=schedule(sc,coverage_words,ft)
     still=sum((r['f'][1]-r['f'][0])/FPS for r in shots if r['clip'].get('kind')=='image')
@@ -506,7 +504,8 @@ def schedule(sc, words, ft):
         if not v.get('file'): raise ValueError('original voice lacks its on-camera footage')
         a=round((v['start']+F.LEAD_F/FPS)*FPS); b=round((v['end']+F.LEAD_F/FPS)*FPS)
         voice_spans.append((a,b))
-        c=dict(path=v['file'],source=v['source'],time_range=v['time_range'],seconds=(b-a)/FPS,w=W,h=H)
+        c=dict(path=v['file'],source=v['source'],time_range=v['time_range'],seconds=(b-a)/FPS,w=W,h=H,
+               editorial_label=v['person']+' • interview')
         used.setdefault(c['source']['url'],[]).append(tuple(c['time_range']))
         pos=a
         while pos<b:
@@ -532,7 +531,14 @@ def schedule(sc, words, ft):
     tasks=[]
     for i,s in enumerate(sc['segments']):
         a,b=starts[i:i+2]
-        intervals=[(a,b)]
+        beats=s.get('visual_beats',[]);beat_frames=[]
+        spoken=clock.seg_words(i)
+        for beat in beats:
+            index=beat['word_start']
+            if index>=len(spoken):raise ValueError(f'visual beat is beyond spoken segment {i}')
+            beat_frames.append((a if index==0 else round(spoken[index]['t0']*FPS),beat))
+        edges=[a]+[f for f,_ in beat_frames if a<f<b]+[b]
+        intervals=list(zip(edges,edges[1:]))
         for va,vb in voice_spans:
             cut=[]
             for lo,hi in intervals:
@@ -542,14 +548,24 @@ def schedule(sc, words, ft):
             intervals=cut
         clips=[c for c in by.get(i,{}).get('clips',[]) if (i,identity(c)) not in rejected]
         for a,b in intervals:
+            interval_clips=clips
+            active=[beat for f,beat in beat_frames if f<=a]
+            if active:
+                ids=active[-1]['archive_ids'];order={key:k for k,key in enumerate(ids)}
+                interval_clips=sorted((c for c in clips if c.get('catalogue_id') in order),key=lambda c:order[c['catalogue_id']])
+            for slot in ft.get('editorial',{}).get('assignments',[]):
+                if slot['seg']!=i:continue
+                sa,sb=[round(resolve(clock,t)*FPS) for t in slot['anchors']]
+                if abs(sa-a)<=1 and abs(sb-b)<=1:
+                    interval_clips=slot['candidates'];break
             # Allocate scarce evidence first. Chronological greed can spend a
             # unique image on a well-covered line and starve the only other
             # line it illustrates. Output chronology is restored below.
             unique={('image:'+c['content_hash'] if c.get('kind')=='image' else
-                     c['source']['url']+':'+str(c['time_range'])):c for c in clips}
-            clips=list(unique.values())
-            spare=sum(min(7.8,unused_seconds(used,c)) for c in clips)-(b-a)/FPS
-            tasks.append((spare,i,s,a,b,clips))
+                     c['source']['url']+':'+str(c['time_range'])):c for c in interval_clips}
+            choices=list(unique.values())
+            spare=sum(min(7.8,unused_seconds(used,c)) for c in choices)-(b-a)/FPS
+            tasks.append((spare,i,s,a,b,choices))
     for _,i,s,a,b,clips in sorted(tasks,key=lambda t:t[0]):
         pos=a
         for ci,c in enumerate(clips):
@@ -596,7 +612,8 @@ def build(sc,pack):
     shots,clock,end=schedule(sc,pack['words'],pack['footage'])
     chapters=chapter_clock(sc,clock,end)
     voices={'cap':dict(font='InterDisplay-Bold.ttf',px=40,track=0,shadow={'a':0.9}),
-            'chapter':dict(font='InterDisplay-Bold.ttf',px=48,track=0)}
+            'chapter':dict(font='InterDisplay-Bold.ttf',px=48,track=0),
+            'source':dict(font='InterDisplay-Bold.ttf',px=28,track=0,shadow={'a':0.9})}
     P=Plan(voices,{})
     for j,row in enumerate(shots):
         c=row['clip']
@@ -608,13 +625,20 @@ def build(sc,pack):
                 n=row['f'][1]-row['f'][0]
                 P.card(row['f'],key,[.5-width/2,.46-height/2,.5+width/2,.46+height/2],
                        s=[1+.025*q/max(n-1,1) for q in range(n)])
-                P.word(row['f'],c['source']['credit']+' • archive record','cap',.055,.82,note=False)
+                P.word(row['f'],c.get('editorial_label') or c['source']['credit']+' • archive record','source',.055,.82,note=False)
             else:
-                crop=F.cover_crop(c['w'],c['h'],W/H,(.5,.5),(.5,.5))
-                P.shot(row['f'],key,F.push(crop,row['f'][1]-row['f'][0],.035,(.5,.5)))
+                # Archive portraits and machinery must survive landscape
+                # presentation whole; a centre crop can erase the evidence.
+                P.page(row['f'],'#14161A',grain=.005)
+                ratio=c['w']/c['h'];height=min(.82,.94*W/H/ratio);width=height*ratio/(W/H)
+                n=row['f'][1]-row['f'][0]
+                P.card(row['f'],key,[.5-width/2,.46-height/2,.5+width/2,.46+height/2],
+                       s=[1+.035*q/max(n-1,1) for q in range(n)])
         else:
             key=P.video(f'archive-{j}',c)
             P.shot(row['f'],key,[0,0,1,1],src=row['src'])
+        if c.get('editorial_label') and not c.get('document'):
+            P.word(row['f'],c['editorial_label'],'source',.055,.78,note=False)
     # Subtitles remain legible and subordinate to the archive. No held number pages.
     for si in range(len(sc['segments'])):
         ws=clock.seg_words(si)

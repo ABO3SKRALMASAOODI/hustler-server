@@ -110,7 +110,7 @@ def repair(ctx,script,ft,words,rounds=3):
                     if report['ok']:return shots,clock
                     retain(ft,shots,clock,report);C.save(path,ft)
                     continue
-            allocate(ctx,script,ft,failure);C.save(path,ft)
+            allocate(ctx,script,ft,failure,words);C.save(path,ft)
             try:shots,clock,_=C.schedule(script['script'],words,ft)
             except C.CoverageError as uncovered:
                 research(ctx,script,ft,uncovered);C.save(path,ft)
