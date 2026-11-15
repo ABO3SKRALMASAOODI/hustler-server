@@ -244,5 +244,8 @@ def test_source_review_does_not_seek_into_the_audio_only_tail(monkeypatch, tmp_p
         '{"reviewed_all_frames":true,"branding_screen_present":false}')
     result = source_screen.build('proxy.mp4', 24.803, 30., [], 'sha', str(tmp_path))
     assert max(sampled) == 24.733
-    assert result['safe_end_s'] == 24.803  # real audio is not silently cut away
+    # Screening certifies only the inspected picture interval. Preserve the
+    # full source/audio clock separately; normal word-edge checks govern cuts.
+    assert result['safe_end_s'] == 24.767
+    assert result['sample_video_duration_s'] == 24.767
     assert result['source_duration_s'] == 24.803
