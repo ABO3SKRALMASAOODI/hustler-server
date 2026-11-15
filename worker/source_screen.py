@@ -15,7 +15,7 @@ VERSION = 1
 
 def sample_times(duration, fps, shots):
     frame = 1.0 / max(1.0, float(fps))
-    last = max(0.0, math.floor((duration - frame) / frame) * frame)
+    last = max(0.0, math.floor((duration - frame) / frame + 1e-7) * frame)
     times = {0.0, last}
     tail = list(shots or [{"start": 0.0, "end": duration}])[-4:]
     for sh in tail:
@@ -28,7 +28,7 @@ def sample_times(duration, fps, shots):
     times.update(max(0.0, duration - 12) + i * 2 for i in range(7))
     # boards.grab seeks to milliseconds. Rounding a final frame's timestamp
     # up (35.366667 -> 35.367) seeks beyond that last frame and yields EOF.
-    return sorted({math.floor(min(last, max(0.0, math.floor(t / frame) * frame)) * 1000 + 1e-7) / 1000
+    return sorted({math.floor(min(last, max(0.0, math.floor(t / frame + 1e-7) * frame)) * 1000 + 1e-7) / 1000
                    for t in times})
 
 
@@ -58,9 +58,17 @@ def interpret(answer, times, duration, fps):
 
 def build(src, duration, fps, shots, sha, workdir, recorder=None):
     from score import boards
+    import media
     if recorder is not None:
         llm.set_recorder(recorder)
-    times = sample_times(duration, fps, shots)
+    # Review the picture track actually being decoded, not the container's
+    # audio tail. A player holds its last picture there; seeking beyond that
+    # picture yields no frame. Keep the original programme duration for the
+    # verdict below so successful clearance does not trim the audio.
+    picture = media.probe(src)
+    picture_duration = min(float(duration), float(picture.get("video_duration")
+                                                  or picture["duration"]))
+    times = sample_times(picture_duration, picture.get("fps") or fps, shots)
     folder = os.path.join(workdir, "source-screen")
     os.makedirs(folder, exist_ok=True)
     paths = []
