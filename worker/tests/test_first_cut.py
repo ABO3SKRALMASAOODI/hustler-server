@@ -1,6 +1,7 @@
 """First cut (PLAN.md P2 + C2.4, owner decision D2): a fixed tool chain, no
 agent loop, one approval render, nothing charged."""
 from types import SimpleNamespace as NS
+import pytest
 
 import agent_tools
 import claude_lane
@@ -481,6 +482,42 @@ def test_static_bands_are_found_only_around_a_live_picture():
     assert first_cut.static_bands(_frames(top=14)) is None        # one bar only
     assert first_cut.static_bands(_frames(top=14, bottom=16, still=True)) is None
     assert first_cut.static_bands(_frames(top=45, bottom=45)) is None  # a strip
+
+
+@pytest.mark.parametrize("marked", [False, True])
+def test_unzoomed_portrait_crop_removes_only_empty_source_borders(monkeypatch, marked):
+    from types import SimpleNamespace
+    frames = _frames(top=14, bottom=16)
+    for frame in frames:
+        frame[:14] = 0
+        frame[84:] = 0
+        if marked:
+            frame[7, 20:35] = 220  # a source label must survive
+    monkeypatch.setattr(first_cut, "_band_frames", lambda ctx: frames)
+    calls = []
+    monkeypatch.setattr(first_cut, "_run", lambda ctx, steps, name, args, started:
+                        calls.append((name, args)) or "EDL v2")
+    edl = {"keep": [[0, 12]], "frame": {"ratio": "9:16", "mode": "crop"}}
+    ctx = SimpleNamespace(index={"video": {"width": 1920, "height": 1080}},
+                          latest_edl=lambda: {"json": edl})
+    first_cut._clear_empty_source_bands(ctx, [])
+    assert bool(calls) is not marked
+    if not marked:
+        name, zoom = calls[0]
+        assert name == "add_zoom" and zoom["start"] == 0 and zoom["end"] == 12
+        assert zoom["ramp_s"] == 0 and abs(zoom["strength"] - (1/.7-1)) < .001
+
+
+@pytest.mark.parametrize("frame,effects", [
+    ({"ratio":"9:16","mode":"pad_blur"}, {}),
+    ({"ratio":"9:16","mode":"crop","picture":[0,.2,1,.8]}, {}),
+    ({"ratio":"9:16","mode":"crop"}, {"zooms":[{"start":0,"end":2}]}),
+])
+def test_empty_border_pass_does_not_replace_existing_composition(monkeypatch, frame, effects):
+    from types import SimpleNamespace
+    monkeypatch.setattr(first_cut, "_band_frames", lambda ctx: pytest.fail("no extra source decode"))
+    ctx = SimpleNamespace(latest_edl=lambda: {"json":{"frame":frame,"effects":effects}})
+    first_cut._clear_empty_source_bands(ctx, [])
 
 
 def test_captions_and_hook_sit_under_the_face():
