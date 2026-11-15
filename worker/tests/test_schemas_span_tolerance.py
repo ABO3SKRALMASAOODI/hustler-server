@@ -14,6 +14,25 @@ def test_real_overrun_still_raises():
         schemas._check_span("texts[0]", 1.0, 7.50, 7.47, min_len=0.3)
 
 
+@pytest.mark.parametrize("duration,start,length", [(1.22, 1.0, 0.23), (7.47, 0.0, 7.48)])
+def test_overlay_centisecond_boundary_survives_float_drift(duration, start, length):
+    edl = {"keep": [[0, duration]], "overlays": [{
+        "id": "edge", "asset_key": "originals/proof.mp4", "kind": "video",
+        "start": start, "duration_s": length, "x": 0.5, "y": 0.5, "scale": 1,
+    }]}
+    result = schemas.validate_edl(edl, duration)
+    assert result.overlays[0].duration_s == length
+
+
+def test_overlay_real_overrun_still_raises():
+    edl = {"keep": [[0, 1.22]], "overlays": [{
+        "id": "edge", "asset_key": "originals/proof.mp4", "kind": "video",
+        "start": 1, "duration_s": 0.24, "x": 0.5, "y": 0.5, "scale": 1,
+    }]}
+    with pytest.raises(schemas.EDLValidationError, match="duration_s"):
+        schemas.validate_edl(edl, 1.22)
+
+
 def test_preview_check_has_room_for_many_windows():
     # A 150 s program checked in ~25 windows needs more than 300 s on 2 vCPU.
     assert config.executor_timeout_for("preview_check") >= 900

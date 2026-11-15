@@ -3599,7 +3599,11 @@ def validate_edl(data, duration=None, *, render_fragment=False):
             raise EDLValidationError(
                 f"overlays[{i}].start {ov.start} outside the program "
                 f"(0 to {round(prog_dur, 2)}s).")
-        if not (0.2 <= ov.duration_s <= max(0.2, prog_dur - ov.start + 0.01)):
+        # Preserve the existing centisecond tolerance across float subtraction:
+        # 1.22 - 1.0 + 0.01 is just below 0.23. A valid proof boundary must
+        # not fail because its duration rounded to the other side of that bit.
+        overlay_limit = max(0.2, prog_dur - ov.start + 0.01)
+        if not (0.2 <= ov.duration_s <= overlay_limit + 1e-9):
             raise EDLValidationError(
                 f"overlays[{i}].duration_s {ov.duration_s} must be 0.2s to "
                 f"the end of the program ({round(prog_dur - ov.start, 2)}s).")
