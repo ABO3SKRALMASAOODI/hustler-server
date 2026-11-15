@@ -625,8 +625,11 @@ def test_video_checker_sees_only_played_interval_and_requires_explicit_approval(
     monkeypatch.setattr(config, 'OPENAI_API_KEY', 'sk-test', raising=False)
     monkeypatch.setattr(fcv.first_cut_models, 'available', lambda model: True)
     monkeypatch.setattr(media_cache, 'lease', lambda *a: 'clip.mp4')
-    monkeypatch.setattr(claude_lane, 'create',
-                        lambda *a, **k: pytest.fail('the OpenAI check reached the Claude lane'))
+    fallbacks = []
+    def fallback(parts, spend, pictures):
+        fallbacks.append(pictures)
+        return '{"keep":[]}'
+    monkeypatch.setattr(fcv, '_broll_check_claude', fallback)
     seeks = []
     def grab(argv, **kw):
         seeks.append(float(argv[argv.index('-ss')+1]))
@@ -645,10 +648,14 @@ def test_video_checker_sees_only_played_interval_and_requires_explicit_approval(
         monkeypatch.setattr(call, 'stream', stream)
         assert fcv.verify_broll(ctx, [], 0, run, {'usd':0}) == expected
     assert len(seeks) == 15 and min(seeks) >= 9 and max(seeks) < 9.5
+    # ece248df: only verdict-less OpenAI answers use the fallback. Valid
+    # explicit rejections are final; they must not ask another model.
+    assert fallbacks == [1, 1]
     def unavailable(*a, **kw):
         raise RuntimeError('quota unavailable')
     monkeypatch.setattr(call, 'stream', unavailable)
     monkeypatch.setattr(claude_lane, 'create', unavailable)
+    monkeypatch.setattr(fcv, '_broll_check_claude', unavailable)
     ctx.edl['fx'] = [dict(item)]
     assert fcv.verify_broll(ctx, [], 0, run, {'usd':0}) == []
     monkeypatch.setattr(fcv.subprocess, 'run', lambda *a, **kw: NS(stdout=b''))

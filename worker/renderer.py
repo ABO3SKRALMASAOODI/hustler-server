@@ -6059,6 +6059,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                                fps)
     # ---- overlays (round 35): PIP / b-roll / logo layer -----------------
     for j, (idx, item) in enumerate(overlay_inputs):
+        if item.get('_cover_windows') is not None:
+            # This internal input already contains the authored per-shot
+            # crop and look. Gaps expose the original picture, never black.
+            enabled = '+'.join(f'gte(t,{a:.9f})*lt(t,{b:.9f})'
+                               for a, b in item['_cover_windows']) or '0'
+            parts.append(f'[{idx}:v]setpts=PTS-STARTPTS[ovp{j}]')
+            parts.append(f"[{vlabel}][ovp{j}]overlay=0:0:eof_action=pass"
+                         f":enable='{enabled}'[vov{j}]")
+            vlabel = f'vov{j}'
+            continue
         o_start = float(item["start"])
         o_dur = float(item["duration_s"])
         scale_value = item.get("scale", 0.4)
@@ -7900,7 +7910,21 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         next_idx += 1
 
     overlay_inputs = []
-    for item in edl.get("overlays") or []:
+    overlay_folder = None
+    overlay_items = edl.get("overlays") or []
+    if not audio_only:
+        import overlay_stream
+        prepared = overlay_stream.prepare(
+            overlay_items, edl, W, H, fps, workdir,
+            lambda key: _fetch(key, 'overlay_stream', next_idx),
+            _overlay_input, cutaway_look_chain, cancelled_cb)
+        if prepared:
+            local, item, count, overlay_folder = prepared
+            extra_inputs += ['-i', local]
+            overlay_inputs.append((next_idx, item))
+            next_idx += 1
+            overlay_items = overlay_items[count:]
+    for item in overlay_items:
         local = _fetch(item["asset_key"], "overlay", next_idx)
         input_args, graph_item = _overlay_input(
             item, local, fps, copy_timestamps=seek_main_source)
@@ -8345,7 +8369,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # frames even though only a few windows are visible at once (p5716).
     video_reads = 1 + sum(item.get("kind") == "video" for _, item in overlay_inputs)
     video_reads += sum(item.get("kind") != "image" for _, item, _ in insert_inputs)
-    bounded_threads = _many_video_threads(info["width"], info["height"], video_reads)
+    bounded_threads = (2 if overlay_folder else
+                       _many_video_threads(info["width"], info["height"], video_reads))
 
     def _video_cmd(g):
         return ["ffmpeg", "-y", *_filter_thread_args(g),
@@ -8358,11 +8383,15 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # Progress is percent-of-expected, so it must be the RENDERED length. Left
     # at the programme duration the bar hits 99.9% at programme end and then
     # flatlines through the whole end card.
-    _fx_run(_video_cmd(graph), fx_box,
-            lambda: _video_cmd(_graph(dialogue_gain=dialogue_gain)),
-            cancelled_cb,
-            timeout=_render_ffmpeg_timeout(preview, expected_out_s),
-            progress_cb=progress_cb, expected_out_s=expected_out_s)
+    try:
+        _fx_run(_video_cmd(graph), fx_box,
+                lambda: _video_cmd(_graph(dialogue_gain=dialogue_gain)),
+                cancelled_cb,
+                timeout=_render_ffmpeg_timeout(preview, expected_out_s),
+                progress_cb=progress_cb, expected_out_s=expected_out_s)
+    finally:
+        if overlay_folder:
+            shutil.rmtree(overlay_folder)
     _require_whole_picture(out_path, expected_out_s)
     return media.duration_of(out_path)
 
