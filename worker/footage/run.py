@@ -147,7 +147,7 @@ def line_shots(dur, shot_s=None, line_max=None):
 
 def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MAX_SOURCES, keep_work=False, anchors=None, avoid=None,
          hear_s=None, read_s=None, per=None, want_voices=None, preserve_source=False, downloaded_only=False, shot_s=None, line_max=None,
-         strict_lines=False, motion_first=False, alloc=None, reassign_lost=False, whole_first=False, scout_motion=False):
+         strict_lines=False, motion_first=False, alloc=None, reassign_lost=False, whole_first=False, scout_motion=False, source_only=False):
     """downloaded_only: cut the scanned rendition without reopening remote streams.
     avoid: [{"url", "time_range"}] already cut for this film by an earlier run: those seconds of a source are not cut again.
     hear_s, read_s, per: a caller with a deadline (a first film, score.film) hears less or nothing of each source, reads
@@ -189,7 +189,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         # Cached originals are candidates, not a closed source whitelist. A cache
         # may contain only unsuitable footage; continue discovering alternatives.
         flat = [(si, q) for si, s in enumerate(subjects) for q in s["searches"]]
-        found = search.run([q for _, q in flat])
+        found = {} if source_only else search.run([q for _, q in flat])
         hits = dict(primary)
         for k, (si, _) in enumerate(flat):
             have = {h["id"] for h in hits.get(si, [])}
@@ -236,7 +236,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         #     of whose sources opened, that subject's own searches among archive.org's moving images
         more = []
         failed = [s for s in sources if s.get("error") and s.get("where") == "youtube"]
-        if failed:
+        if failed and not source_only:
             tw = search.run([dict(where="archive", q=_title_q(s["title"])) for s in failed])
             for k, s in enumerate(failed):
                 h = next((h for h in tw.get(k) or [] if _twin(h["title"], s["title"]) and h["id"] not in by_id), None)
@@ -246,7 +246,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                     more.append(src)
         dead = [si for si in range(len(subjects)) if not any(si in s["subjects"] and not s.get("error") and s.get("shots") for s in sources)
                 and not any(si in s["subjects"] for s in more)]
-        if dead:
+        if dead and not source_only:
             # Archive metadata often names the subject without the interview,
             # date and channel terms in a YouTube query. Keep the model's exact
             # canonical subject within the five-query budget; rank and visual
@@ -709,6 +709,7 @@ def main():
     ap.add_argument("--alloc", default=None, choices=["round"], help="round: one pick a line a round, the scarcest line first")
     ap.add_argument("--reassign-lost", action="store_true", help="lines whose cuts failed are assigned again and cut")
     ap.add_argument("--whole-first", action="store_true", help="short sources fetched once, whole with sound: scan, transcript and every cut")
+    ap.add_argument("--source-only",action="store_true",help="use supplied original candidates without repeating platform searches")
     ap.add_argument("--hear-seconds",type=float,default=None,help="source audio seconds to transcribe; zero for visual-only documentary acquisition")
     ap.add_argument("--want-voices", action="store_true", help="look for real voices even when nothing would otherwise be heard")
     a = ap.parse_args()
@@ -730,7 +731,7 @@ def main():
                          anchors=anchors, avoid=avoid, preserve_source=a.preserve_source, **hearing,
                          **{k: v for k, v in dict(shot_s=a.shot_s, line_max=a.line_max, per=a.per, strict_lines=a.strict_lines,
                                                   motion_first=a.motion_first, scout_motion=a.scout_motion, alloc=a.alloc, reassign_lost=a.reassign_lost,
-                                                  whole_first=a.whole_first, want_voices=a.want_voices).items() if v})
+                                                  whole_first=a.whole_first, want_voices=a.want_voices, source_only=a.source_only).items() if v})
     if res is None:
         print(json.dumps(dict(off="VALMERA_FOOTAGE=0")))
         return

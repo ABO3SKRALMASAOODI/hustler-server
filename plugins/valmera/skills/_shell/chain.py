@@ -248,7 +248,7 @@ def seg_durs(words, n):
 
 def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None, preserve_source=False, shot_s=None, line_max=None, per=None,
             out_name="footage", lines=None, avoid=None, strict_lines=False, motion_first=False, alloc=None, reassign_lost=False,
-            verify=None, whole_first=False, keep_sources=False, want_voices=False, scout_motion=False, hear_s=None):
+            verify=None, whole_first=False, keep_sources=False, want_voices=False, scout_motion=False, hear_s=None, source_only=False):
     """Real footage per line (worker/footage, through footage.seam's workflow scope): supply/footage/ with
     footage.json (clips per line, each with its source URL, channel and time range for the credits) and
     clips/*.mp4. None when VALMERA_FOOTAGE=0 or when the engine could not run (logged, never a stop).
@@ -290,6 +290,8 @@ def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None, preserve_sourc
         cmd += ["--motion-first"]
     if scout_motion:
         cmd += ["--scout-motion"]
+    if source_only:
+        cmd += ["--source-only"]
     if alloc:
         cmd += ["--alloc", str(alloc)]
     if reassign_lost:

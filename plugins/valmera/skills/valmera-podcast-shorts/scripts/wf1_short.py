@@ -132,7 +132,7 @@ def supply(ctx, script):
         prior = json.load(open(pk))
         if ((prior['pack'].get('coverage') or {}).get('contract') == wf1_coverage.CONTRACT
                 and prior['pack'].get('alignment_contract')==wf1_alignment.CONTRACT
-                and any(row.get('clips') for row in prior['pack'].get('footage',[]))):
+                and (prior['pack'].get('platform_walled') or any(row.get('clips') for row in prior['pack'].get('footage',[])))):
             return prior['record']
         os.replace(pk,os.path.join(sup_dir,'previous-pack.json'))
     rec0 = chain.pack(ctx, script)                              # source.mp4 (the window), hearing.json, index.json
@@ -182,14 +182,10 @@ def supply(ctx, script):
         n_yt, n_bad = refused(foot)
         ctx.log(f"footage sources: {n_yt} on YouTube, {n_bad} refused or archive-only; {foot['counts'].get('clips')} clips on "
                 f"{foot['counts'].get('lines_with_footage')} of {foot['counts'].get('lines')} sentences")
-    if walled(foot) and not int(foot['counts'].get('clips') or 0):
-        import shutil
-        shutil.rmtree(os.path.join(sup_dir, footage_name), ignore_errors=True)
-        raise RuntimeError(f"{wf1_film.WALL}: {n_bad} of {n_yt} footage sources would not open ({foot['counts'].get('clips')} clips on "
-                           f"{foot['counts'].get('lines_with_footage')} of {foot['counts'].get('lines')} sentences). It lifts by itself; run the same link again later")
-    if walled(foot):
-        ctx.log('Some sources refused access; retaining acquired clips for the contextual coverage gate and targeted recovery')
-    pack = dict(sid=ctx.sid, words=wj, narration=src, ffmpeg=PX.FF, sounds={}, pictures={}, credits=[], footage=[], title=script.get("title"), coverage=coverage)
+    platform_walled=walled(foot)
+    if platform_walled:
+        ctx.log('Platform footage unavailable; retain its evidence and seek public original-publisher video before stopping')
+    pack = dict(platform_walled=platform_walled,sid=ctx.sid, words=wj, narration=src, ffmpeg=PX.FF, sounds={}, pictures={}, credits=[], footage=[], title=script.get("title"), coverage=coverage)
     subjects, by_line = [], {}
     if foot:
         fdir = os.path.join(sup_dir, footage_name)
@@ -433,7 +429,7 @@ def refill(ctx, script, pack, shortage):
             return
     signature=source_signature(ctx.supply)
     previous = pack.get('coverage_repairs',0) if pack.get('research_contract')==RESEARCH_CONTRACT and pack.get('research_sources')==signature else 0
-    count = int(previous)+1
+    count = max(4,int(previous)+1) if pack.get('platform_walled') else int(previous)+1
     primary={}
     manifest_path=os.path.join(ctx.supply,'sources','manifest.json')
     retained=json.load(open(manifest_path)) if os.path.exists(manifest_path) else []
@@ -470,7 +466,7 @@ def refill(ctx, script, pack, shortage):
     foot = chain.footage(ctx,dict(script=fscript),[w['t1']-w['t0'] for w in windows],W=fw,H=fh,
                          preserve_source=True,shot_s=1.15,line_max=20,per=4,lines=wanted,avoid=prior,
                          strict_lines=True,motion_first=True,scout_motion=True,alloc='round',reassign_lost=True,
-                         verify=False,whole_first=True,keep_sources=True,hear_s=0,out_name=name)
+                         verify=False,whole_first=True,keep_sources=True,hear_s=0,source_only=bool(pack.get('platform_walled')),out_name=name)
     if not foot:
         raise RuntimeError('supplementary documentary research returned no record')
     by = {int(row['i']):row for row in pack['footage']}
@@ -494,7 +490,7 @@ def score(ctx, script):
     pack = wf3.load_pack(ctx)
     if ((pack.get('coverage') or {}).get('contract') != wf1_coverage.CONTRACT
             or pack.get('alignment_contract')!=wf1_alignment.CONTRACT
-            or not any(row.get('clips') for row in pack.get('footage',[]))):
+            or (not pack.get('platform_walled') and not any(row.get('clips') for row in pack.get('footage',[])))):
         supply(ctx,script)
         pack = wf3.load_pack(ctx)
     pack["work"] = ctx.supply

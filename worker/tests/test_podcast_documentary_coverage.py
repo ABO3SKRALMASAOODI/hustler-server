@@ -389,3 +389,24 @@ def test_generic_approved_click_can_replace_a_thin_type_click(monkeypatch):
     choices=audibility.recording_alternatives(item)
     assert len(choices)==1 and choices[0]['s']=='generic'
     assert choices[0]['start_s']+choices[0]['peak_s']==2.1 and choices[0]['event_f']==63
+
+
+def test_workflow_seam_keeps_zero_hearing_and_motion_scout(monkeypatch,tmp_path):
+    from footage import seam,run
+    monkeypatch.setattr(seam.switch,'allowed',lambda _:True)
+    calls=[]
+    monkeypatch.setattr(run,'find',lambda *a,**kw:calls.append(kw) or {})
+    seam.for_lines([],[],'test',str(tmp_path),hear_s=0,scout_motion=True,source_only=True)
+    assert calls[0]['hear_s']==0
+    assert calls[0]['scout_motion'] is True and calls[0]['source_only'] is True
+
+
+def test_originals_only_recovery_does_not_repeat_platform_search(monkeypatch,tmp_path):
+    from footage import run
+    monkeypatch.setenv('SPEND_LANE','customer')
+    monkeypatch.setattr(run.plan,'plan',lambda *a,**kw:({'subjects':[{'name':'Campus','searches':[{'where':'youtube','q':'Campus tour'}]}],'lines':[]},0))
+    monkeypatch.setattr(run.plan,'rank',lambda *a,**kw:([],0))
+    monkeypatch.setattr(run.search,'run',lambda *a,**kw:pytest.fail('repeated blocked platform search'))
+    result=run.find([],[],'test',str(tmp_path),source_only=True,hear_s=0)
+    assert result['counts']['clips']==0
+    assert result['counts']['sources_tried']==0

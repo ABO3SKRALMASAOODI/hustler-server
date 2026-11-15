@@ -277,3 +277,23 @@ def test_external_hearing_is_bound_to_source_and_valid_times(tmp_path,monkeypatc
         assert json.load(open(tmp_path/'hearing.json'))['transport']['source_sha256']==digest
         monkeypatch.setattr(chain.subprocess,'run',lambda *a,**kw:pytest.fail('same aligned source must not transcribe again'))
         assert chain.external_hearing(ctx,str(source),1.)
+
+
+def test_platform_wall_goes_directly_to_original_publishers(tmp_path,monkeypatch):
+    import wf1_documents,wf1_primary_sources
+    pack=dict(platform_walled=True,coverage=dict(contract=3,windows=[dict(name='Campus',must_show='Actual campus',say='Campus',t0=0,t1=4)]),
+              referent_research={'sources':[]},research_revision=7,footage=[],pictures={},credits=[])
+    (tmp_path/'pack.json').write_text(json.dumps({'pack':pack}))
+    monkeypatch.setattr(wf,'_llm',lambda:None)
+    monkeypatch.setattr(wf1_documents,'acquire',lambda *a,**kw:dict(pictures={},credits=[],spend=[]))
+    def acquire(windows,work,llm):
+        from pathlib import Path
+        p=Path(work);p.mkdir();(p/'manifest.json').write_text('[]')
+        return dict(sources={'Campus':[dict(url='https://university.example/tour.mp4')]},spend=[])
+    monkeypatch.setattr(wf1_primary_sources,'acquire',acquire)
+    calls=[]
+    monkeypatch.setattr(wf.chain,'footage',lambda *a,**kw:calls.append(kw) or dict(lines=[],credits=[]))
+    wf.refill(SimpleNamespace(supply=str(tmp_path),log=lambda _:None),dict(title='Campus',style={'id':'window'}),pack,
+              dict(weak_windows=[0],real_seconds=0,moving_seconds=0))
+    assert calls[0]['source_only'] is True and calls[0]['hear_s']==0
+    assert pack['coverage_repairs']==4
