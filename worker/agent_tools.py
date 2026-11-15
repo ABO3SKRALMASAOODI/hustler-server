@@ -1583,8 +1583,12 @@ def _deliver_frames(ctx, frames, labels, question, subject_line, provenance=None
         "fractions read from it.\n"
         "Answer concisely and concretely.",
         gridded, purpose="vision_look", image_names=labels)
-    return _cap(answer or "The vision model did not return an answer; "
-                          "proceed using the transcript and shot captions.")
+    # No answer is never a pass (#1278): say plainly that nothing looked.
+    return _cap(answer or "NOT CHECKED: no vision model answered, so nothing "
+                          "has looked at these frames. This is not a pass "
+                          "and says nothing about what they show; proceed "
+                          "from the transcript and shot captions, and do not "
+                          "describe these pictures to the user as seen.")
 
 
 def _patched_frame(ctx, edl, src_t, fp):
@@ -2382,13 +2386,16 @@ def find_visual_moments(ctx, query, start=0.0, end=None, max_results=12):
                 prompt, [row[4] for row in batch], max_tokens=1100,
                 reasoning_effort="low", purpose="vision_visual_search",
                 image_names=[row[1] for row in batch])
-            rows = llm.extract_json_array(answer) or []
+            # None = no model looked (no answer, or none it could read):
+            # never the same thing as an answered [] (#1278).
+            rows = llm.extract_json_array(answer)
             return batch, rows
         finally:
             if recorder is not None:
                 llm.set_recorder(None)
 
     found = []
+    looked = 0              # tiles a model really answered for
     with ThreadPoolExecutor(max_workers=min(3, len(batches))) as pool:
         futures = [pool.submit(_scan, batch) for batch in batches]
         for future in as_completed(futures):
@@ -2398,6 +2405,9 @@ def find_visual_moments(ctx, query, start=0.0, end=None, max_results=12):
                 print(f"[visual-search] batch failed: {str(exc)[:140]}",
                       flush=True)
                 continue
+            if rows is None:
+                continue
+            looked += len(batch)
             batch_lo = min(row[2] for row in batch) - step * 0.6
             batch_hi = max(row[3] for row in batch) + step * 0.6
             for row in rows[:4]:
@@ -2418,6 +2428,23 @@ def find_visual_moments(ctx, query, start=0.0, end=None, max_results=12):
     _touch_job_heartbeat(ctx, progress=24)
     _metric(ctx, "visual_moment_search_tiles", len(local_rows))
     _metric(ctx, "visual_moment_search_calls", len(batches))
+    if not looked:
+        # Ticket #1278: with OpenAI out and no other model answering, this
+        # said "No coarse sampled match ... all N indexed tiles scanned" when
+        # nothing had looked at one tile. Not cached: the next call may see.
+        _metric(ctx, "visual_moment_search_unlooked", len(local_rows))
+        return (
+            f"TRANSIENT_FAILURE: visual moment search could not run for "
+            f"'{q}': no vision model answered, so none of the "
+            f"{len(local_rows)} indexed tiles in {lo:.1f}-{hi:.1f}s was looked "
+            "at. This says nothing about whether the event is there. Retry "
+            "find_visual_moments shortly, or use transcript, audio peaks, "
+            "find_activity or look_at on chosen times; do not tell the user "
+            "it is absent.")
+    unlooked = len(local_rows) - looked
+    gap = (f"\n{unlooked} of the {len(local_rows)} tiles could NOT be looked "
+           "at (no model answered for them): they were not searched."
+           if unlooked else "")
 
     ranks = {"high": 3, "medium": 2, "low": 1}
     found.sort(key=lambda row: (-ranks[row["confidence"]], row["time"]))
@@ -2431,12 +2458,14 @@ def find_visual_moments(ctx, query, start=0.0, end=None, max_results=12):
             break
     deduped.sort(key=lambda row: row["time"])
     if not deduped:
+        scanned = (f"all {looked} indexed tiles scanned" if not unlooked else
+                   f"{looked} of {len(local_rows)} indexed tiles scanned")
         result = (
             f"No coarse sampled match for '{q}' in {lo:.1f}-{hi:.1f}s "
-            f"(all {len(local_rows)} indexed tiles scanned; frame spacing "
+            f"({scanned}; frame spacing "
             f"{step:.2f}s). A brief event may fall between samples: narrow "
             "the query/range using transcript, audio peaks or shot evidence; "
-            "do not claim the event is absent.")
+            "do not claim the event is absent." + gap)
     else:
         lines = [
             f"@{row['time']:.2f}s [{row['confidence']}] — "
@@ -2444,12 +2473,14 @@ def find_visual_moments(ctx, query, start=0.0, end=None, max_results=12):
             for row in deduped]
         result = (
             f"VISUAL SEARCH '{q}' — {len(deduped)} coarse SOURCE candidate(s) "
-            f"from {len(local_rows)} indexed tiles, frame spacing {step:.2f}s:\n"
+            f"from {looked} indexed tiles, frame spacing {step:.2f}s:\n"
             + "\n".join(lines)
             + "\nBefore a precise cut/effect, verify all useful candidates in "
               "ONE batched look_at(times=[candidate and nearby seconds], "
-              "question=...). Do not restart a manual whole-video scan.")
-    cache[cache_key] = result
+              "question=...). Do not restart a manual whole-video scan."
+            + gap)
+    if not unlooked:
+        cache[cache_key] = result      # a partial look is asked again next time
     return result
 
 
@@ -22245,12 +22276,12 @@ def search_stock(ctx, query, kind="video", orientation=None, count=6):
                 "results; tell the user it did not work.")
 
     import mcp_search
+    # Every real candidate comes back (#1278): one whose picture no model
+    # could describe keeps only the library's own metadata, marked
+    # undescribed and unverified; nothing is invented and nothing is dropped.
     hits, undescribed = mcp_search.describe_missing(ctx, hits)
 
     if not hits:
-        if undescribed:
-            return ("Search found candidates, but their pictures could not be described. "
-                    "No placeable results yet; retry search_stock. Nothing was placed.")
         return (f"No stock {kind}s matched \"{q}\" ({orientation}). Try a "
                 "simpler or more visual phrase (\"city traffic\" rather than "
                 "\"the hustle of modern life\"), or ask the user for a clip. "
@@ -22277,8 +22308,21 @@ def search_stock(ctx, query, kind="video", orientation=None, count=6):
             not _can_receive_images(ctx):
         eye += ("\nFallback visual review of those candidate pixels: "
                 + str(ctx._last_candidate_review_text)[:1200])
+    unverified = sum(1 for h in hits if h.get("unverified"))
+    honest = ""
+    if unverified:
+        honest = (
+            f"\n\nNOTE: {unverified} of these {len(hits)} candidate(s) are "
+            "UNVERIFIED"
+            + (f" ({undescribed} UNDESCRIBED: no model could look at their "
+               "pictures right now, so only the library's own title, tags, "
+               "duration and page/thumbnail links are listed)"
+               if undescribed else "")
+            + ". Nothing has checked what they show. Look at a candidate's "
+              "thumbnail before choosing it, and never tell the user one "
+              "shows something nobody has seen; if you cannot look, say so.")
     return (f"{len(hits)} stock {kind}(s) for \"{q}\" ({orientation}):\n"
-            + stock.summarize(hits) + eye
+            + stock.summarize(hits) + eye + honest
             + "\n\nNothing is downloaded or in the video yet. Pick the ONE "
               "that best matches what the user asked for and call "
               "place_search_result(id=..., at_output_s=..., duration_s=...) "

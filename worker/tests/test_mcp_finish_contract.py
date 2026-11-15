@@ -52,12 +52,42 @@ def test_missing_descriptions_use_pixels_and_remove_scratch(tmp_path, monkeypatc
 
 
 def test_failed_vision_never_invents_description(tmp_path, monkeypatch):
+    """#1278: no model can look. Nothing is invented, and the real candidate is still returned,
+    marked undescribed and unverified, with the library's own metadata intact."""
     monkeypatch.setattr(net_fetch, 'download', lambda *a, **kw: None)
     monkeypatch.setattr(llm, 'ask_vision', lambda *a, **kw: None)
-    rows, missing = mcp_search.describe_missing(SimpleNamespace(workdir=str(tmp_path)),
-                                               [{'id': '1', '_thumb': 'https://provider/thumb'}])
-    assert rows == [] and missing == 1
+    hit = {'id': '1', '_thumb': 'https://provider/thumb', 'page_url': 'https://provider/page',
+           'duration_s': 12}
+    rows, missing = mcp_search.describe_missing(SimpleNamespace(workdir=str(tmp_path)), [hit])
+    assert missing == 1 and [r['id'] for r in rows] == ['1']          # candidates returned
+    assert rows[0]['description'] is None                               # no invented description
+    assert rows[0]['undescribed'] is True and rows[0]['unverified'] is True
+    assert rows[0]['page_url'] == 'https://provider/page' and rows[0]['duration_s'] == 12
     assert not list(tmp_path.iterdir())
+
+
+def test_search_stock_offers_undescribed_candidates_with_an_honest_note(tmp_path, monkeypatch):
+    import stock
+    monkeypatch.setattr(stock, 'available', lambda: True)
+    monkeypatch.setattr(stock, 'search', lambda q, **kw: [
+        {'id': 'pexels:video:7', 'provider': 'pexels', 'kind': 'video', 'duration_s': 9,
+         'width': 1920, 'height': 1080, 'page_url': 'https://www.pexels.com/video/lab-7/',
+         '_thumb': 'https://images.pexels.com/7.jpg'},
+        {'id': 'pixabay:video:8', 'provider': 'pixabay', 'kind': 'video', 'duration_s': 5,
+         'description': 'lab, microscope'}])
+    monkeypatch.setattr(net_fetch, 'download', lambda *a, **kw: None)
+    monkeypatch.setattr(llm, 'ask_vision', lambda *a, **kw: None)
+    monkeypatch.setattr(llm, 'vision_available', lambda plan=None: False)
+    ctx = SimpleNamespace(workdir=str(tmp_path), stock_results={}, db=None)
+    answer = agent_tools.search_stock(ctx, 'medical laboratory', kind='video',
+                                      orientation='landscape')
+    assert answer.startswith('2 stock video(s)')
+    assert 'pexels:video:7' in answer and 'pixabay:video:8' in answer
+    assert 'could not be described' not in answer
+    assert '1 of these 2 candidate(s) are UNVERIFIED' in answer
+    assert 'page https://www.pexels.com/video/lab-7/' in answer
+    assert 'thumbnail https://images.pexels.com/7.jpg' in answer
+    assert ctx.stock_results['pexels:video:7']['description'] is None
 
 
 def test_description_provider_outage_keeps_known_evidence(tmp_path, monkeypatch):
@@ -68,7 +98,9 @@ def test_description_provider_outage_keeps_known_evidence(tmp_path, monkeypatch)
     known = {'id': 'known', 'description': 'A train at a platform.'}
     rows, missing = mcp_search.describe_missing(SimpleNamespace(workdir=str(tmp_path)),
         [known, {'id': 'unknown', '_thumb': 'https://provider/thumb'}])
-    assert rows == [known] and missing == 1
+    assert [r['id'] for r in rows] == ['known', 'unknown'] and missing == 1
+    assert rows[0] == known and 'undescribed' not in rows[0]
+    assert rows[1]['description'] is None and rows[1]['unverified'] is True
     assert not list(tmp_path.iterdir())
 
 

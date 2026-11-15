@@ -146,7 +146,7 @@ def test_the_refusal_itself_is_answered_by_haiku_in_the_same_call(eyes, gate):
 
 def test_an_optional_look_is_skipped_with_no_call(eyes, gate):
     gate.trip("test", QUOTA)
-    assert llm.ask_vision("look", [eyes.picture], purpose="vision_look") is None
+    assert llm.ask_vision("look", [eyes.picture], purpose="vision_reframe") is None
     assert eyes.openai.calls == [] and eyes.haiku == []
 
 
@@ -163,7 +163,10 @@ def test_the_greeting_falls_to_its_plain_reply_with_no_openai_call(gate, monkeyp
 def test_haiku_purposes_are_the_films_needs_only():
     assert set(config.OPENAI_OUT_HAIKU_PURPOSES) == {
         "first_film_source_screen", "visual_index_semantics", "visual_index_semantics_fallback",
-        "vision_index", "search_descriptions"}
+        "vision_index", "search_descriptions",
+        # #1278: the looks a customer's search or edit reads
+        "vision_visual_search", "commons_ai_items", "broll_rendition_review", "vision_look",
+        "vision_screen"}
 
 
 def test_stock_search_descriptions_look_with_haiku_while_openai_is_out(eyes, gate):

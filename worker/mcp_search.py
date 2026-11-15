@@ -4,7 +4,14 @@ import os
 import tempfile
 
 
+UNDESCRIBED_BASIS = ('UNDESCRIBED and UNVERIFIED: no model could look at its picture; only the '
+                     "library's own metadata is known")
+
+
 def describe_missing(ctx, hits):
+    """(hits, how many stay undescribed). Every real candidate is returned (#1278): one whose
+    picture no model could describe keeps the library's own metadata, is marked
+    ``undescribed`` and ``unverified``, and never gets an invented description."""
     import llm
     import net_fetch
     missing = [h for h in hits if not str(h.get('description') or '').strip()]
@@ -38,11 +45,19 @@ def describe_missing(ctx, hits):
             descriptions = {r.get('id'): r.get('description') for r in rows
                             if isinstance(r, dict) and isinstance(r.get('description'), str)}
             for h in missing:
-                if descriptions.get(h['id'], '').strip():
+                if (descriptions.get(h['id']) or '').strip():
                     h['description'] = descriptions[h['id']].strip()
                     h['description_basis'] = 'thumbnail pixels; inspect downloaded clip before delivery'
-    kept = [h for h in hits if str(h.get('description') or '').strip()]
-    return kept, len(hits) - len(kept)
+    undescribed = 0
+    for h in hits:
+        if str(h.get('description') or '').strip():
+            continue
+        undescribed += 1
+        h['description'] = None          # never invented
+        h['undescribed'] = True
+        h['unverified'] = True
+        h['description_basis'] = UNDESCRIBED_BASIS
+    return hits, undescribed
 
 
 def place(ctx, id, at_output_s, duration_s, mode='overlay', source_start_s=0):

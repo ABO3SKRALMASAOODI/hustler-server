@@ -591,25 +591,47 @@ def _read_ai_made(cands):
     return {c["id"]: n in picked for n, c in enumerate(cands, 1)}
 
 
-def drop_ai_made(cands):
+AI_CHECK_NOT_RUN = ("UNVERIFIED: not checked for AI-made pictures (no model could read its "
+                    "Commons metadata); inspect it before using it as a real photograph")
+
+
+def drop_ai_made(cands, keep_unread=False):
     """(candidates without Commons' AI items, a note or None). Nothing from
-    Commons passes unread: with no model to read it those items are left out
-    and the note says so, and the other libraries carry the search."""
+    Commons passes as checked unread. With no model to read it: an automated
+    board (``keep_unread`` False) leaves those items out and the note says so;
+    a photo search the caller picks from (``keep_unread`` True, ticket #1278)
+    keeps them, each marked ``unverified`` with the reason, and the note says
+    that instead. A read verdict always applies: AI-made items always go."""
     todo = {c["id"]: c for c in cands
             if from_commons(c) and c["id"] not in _AI_MADE}
     note = None
+    unread = set()
     if todo:
         batch = list(todo.values())[:AI_CHECK_MAX]
         read = _read_ai_made(batch)
         if read is None:
-            note = ("Wikimedia Commons pictures were left out: their AI check "
+            unread = set(todo)
+            note = ("Wikimedia Commons pictures are listed UNVERIFIED: their AI "
+                    "check could not run (no model answered), so nothing has "
+                    "checked whether an image generator made them"
+                    if keep_unread else
+                    "Wikimedia Commons pictures were left out: their AI check "
                     "did not answer")
         else:
             if len(_AI_MADE) >= 8192:
                 _AI_MADE.clear()
             _AI_MADE.update(read)
-    return [c for c in cands if not from_commons(c)
-            or _AI_MADE.get(c["id"]) is False], note
+            unread = set(todo) - set(read)          # past AI_CHECK_MAX
+    out = []
+    for c in cands:
+        if not from_commons(c) or _AI_MADE.get(c["id"]) is False:
+            out.append(c)
+        elif keep_unread and c["id"] in unread:
+            c["unverified"] = True
+            c["ai_check"] = "not run"
+            c["description_basis"] = AI_CHECK_NOT_RUN
+            out.append(c)
+    return out, note
 
 
 # ── ranking before anything is downloaded ────────────────────────────────

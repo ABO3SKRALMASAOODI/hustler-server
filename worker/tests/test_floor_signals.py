@@ -331,6 +331,28 @@ def test_with_no_reading_commons_stays_out_and_says_so(monkeypatch, reply):
     assert not broll_source._AI_MADE           # the next search asks again
 
 
+@pytest.mark.parametrize("reply", [None, "I cannot tell."])
+def test_a_photo_search_keeps_unread_commons_marked_unverified(monkeypatch, reply):
+    """#1278: in a photo search the caller picks from, a Commons picture no model could read
+    is kept, marked unverified with the reason, never dropped and never passed as checked."""
+    _model_says(monkeypatch, reply)
+    pexels = {"id": "pexels:photo:1", "provider": "pexels"}
+    kept, note = broll_source.drop_ai_made([_commons(1), pexels], keep_unread=True)
+    assert [c["id"] for c in kept] == [_commons(1)["id"], "pexels:photo:1"]
+    assert kept[0]["unverified"] is True and kept[0]["ai_check"] == "not run"
+    assert "UNVERIFIED" in kept[0]["description_basis"]
+    assert "unverified" not in pexels
+    assert "UNVERIFIED" in note
+    assert not broll_source._AI_MADE           # the next search asks again
+
+
+def test_a_photo_search_still_drops_what_the_check_calls_ai_made(monkeypatch):
+    _model_says(monkeypatch, "[1]")
+    kept, note = broll_source.drop_ai_made([_commons(1), _commons(2)], keep_unread=True)
+    assert [c["id"] for c in kept] == [_commons(2)["id"]] and note is None
+    assert "unverified" not in kept[0]
+
+
 def test_a_thread_with_no_turn_reads_on_the_claude_lane(monkeypatch):
     import claude_lane
     import llm
@@ -384,6 +406,8 @@ def test_stock_search_reads_openverse_commons_files(monkeypatch):
 
 
 def test_stock_search_says_why_when_only_commons_had_an_answer(monkeypatch):
+    """#1278: the only library answer is a Commons picture whose AI check could not run. It is
+    offered, marked unverified and saying why, instead of a failed search."""
     monkeypatch.setattr(stock, "PEXELS_KEY", "")
     monkeypatch.setattr(stock, "PIXABAY_KEY", "")
     page = _openverse_page("by")
@@ -391,8 +415,9 @@ def test_stock_search_says_why_when_only_commons_had_an_answer(monkeypatch):
     monkeypatch.setattr(music_search, "_openverse_get_json",
                         lambda *a, **k: page)
     _model_says(monkeypatch, None)
-    with pytest.raises(stock.StockError, match="AI check"):
-        stock.search("harbour", kind=stock.KIND_PHOTO)
+    hits = stock.search("harbour", kind=stock.KIND_PHOTO)
+    assert hits and all(h["unverified"] and h["ai_check"] == "not run" for h in hits)
+    assert "UNVERIFIED: not checked for AI-made pictures" in stock.summarize(hits)
 
 
 def test_source_broll_reads_one_board_in_one_call(monkeypatch):

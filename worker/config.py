@@ -311,13 +311,20 @@ EDIT_RUNG_LATCH_S = float(os.getenv("EDIT_RUNG_LATCH_S", "1800"))
 # OpenAI role runs its fallback for this long, then one real call re-probes.
 OPENAI_CREDIT_LATCH_S = float(os.getenv("OPENAI_CREDIT_LATCH_S", "900"))
 # Out-of-turn model calls whose answer a customer's film needs (the first film's source screen,
-# the index's picture captions): on Haiku while OpenAI is out of credit. Every other OpenAI
-# helper returns None and its caller's plain fallback answers.
+# the index's picture captions, the looks a customer's search or edit reads): on Haiku while
+# OpenAI is out of credit. Every other OpenAI helper returns None and its caller's plain
+# fallback answers; a caller that cannot look then says so, never "nothing found".
 OPENAI_OUT_HAIKU_PURPOSES = tuple(p.strip() for p in os.getenv(
     "OPENAI_OUT_HAIKU_PURPOSES",
     "first_film_source_screen,visual_index_semantics,visual_index_semantics_fallback,vision_index,"
     # The pixels behind MCP search_stock results: without them a search places nothing (#1108).
-    "search_descriptions",
+    "search_descriptions,"
+    # Ticket #1278: the customer-facing looks that otherwise answered a false "no match" or
+    # dropped real candidates while OpenAI was out. find_visual_moments' tile scan, the
+    # Wikimedia Commons AI-made check in a photo search, the downloaded-clip review, the
+    # fallback looks (look_at's vision provider, the candidate thumbnails' review) and the
+    # screen-corner read.
+    "vision_visual_search,commons_ai_items,broll_rendition_review,vision_look,vision_screen",
 ).split(",") if p.strip())
 
 # ── The Claude-funded trial lane (owner decision D2, 25 Oct 2026) ────────────

@@ -398,7 +398,11 @@ def search(query, kind=KIND_VIDEO, orientation=None, count=MAX_RESULTS):
             return made
     if got.get("openverse"):
         import broll_source
-        got["openverse"], note = broll_source.drop_ai_made(got["openverse"])
+        # A photo search the caller picks from: an unread Commons picture is
+        # kept, marked unverified, never dropped as if the library had none
+        # (ticket #1278); an AI-made verdict still removes it.
+        got["openverse"], note = broll_source.drop_ai_made(got["openverse"],
+                                                           keep_unread=True)
         if note:
             errors.append(f"openverse: {note}")
     provider_hits = [(name, got.get(name) or []) for name, _fn in lanes]
@@ -576,6 +580,14 @@ def summarize(items):
             bits.append(f"original source window {i['time_range']}")
         if i.get("description_basis"):
             bits.append(i["description_basis"])
+        if i.get("undescribed"):
+            # Ticket #1278: no model could look at it. The library's own words and links are
+            # all that is known: given as theirs, never as a description of the picture.
+            own = [f"title {str(i['title'])[:90]!r}" if i.get("title") else "",
+                   f"library tags {str(i['tags'])[:90]!r}" if i.get("tags") else "",
+                   f"page {i['page_url']}" if i.get("page_url") else "",
+                   f"thumbnail {i['_thumb']}" if i.get("_thumb") else ""]
+            bits.extend(b for b in own if b)
         desc = i.get("description") or "Visual evidence unavailable; inspect before placement"
         lines.append(f"  {i['id']} — {desc[:90]} ({', '.join(bits)})")
     return "\n".join(lines)
