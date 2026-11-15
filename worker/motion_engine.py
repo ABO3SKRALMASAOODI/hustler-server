@@ -1237,7 +1237,8 @@ def render_jobs(jobs, out_dir, pages=None, budget_s=900.0):
 # fonts, scale a whole card, or hide an element. Opaque picture backgrounds
 # make the alpha/connected-component type pass see a rectangle, not its labels.
 _DOM_TYPE = """() => {
-  const c = document.createElement('canvas').getContext('2d'), out = [];
+  const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
+  const c = canvas.getContext('2d', {willReadFrequently: true}), out = [];
   const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   let n;
   while ((n = walk.nextNode())) {
@@ -1245,18 +1246,30 @@ _DOM_TYPE = """() => {
     if (!text || !el || !(el instanceof HTMLElement)) continue;
     if (['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(el.tagName)) continue;
     let opacity = 1, matrix = new DOMMatrix(), hidden = false;
+    const clip = [0, 0, innerWidth, innerHeight];
     for (let p = el; p; p = p.parentElement) {
       const s = getComputedStyle(p);
       opacity *= Number(s.opacity);
       if (s.display === 'none' || s.visibility !== 'visible') hidden = true;
       if (s.transform !== 'none') matrix = new DOMMatrix(s.transform).multiply(matrix);
+      const b = p.getBoundingClientRect();
+      if (s.overflowX !== 'visible') {
+        clip[0] = Math.max(clip[0], b.left); clip[2] = Math.min(clip[2], b.right);
+      }
+      if (s.overflowY !== 'visible') {
+        clip[1] = Math.max(clip[1], b.top); clip[3] = Math.min(clip[3], b.bottom);
+      }
     }
     if (hidden || opacity < .8) continue;
     const r = document.createRange(); r.selectNodeContents(n);
     const boxes = Array.from(r.getClientRects());
-    if (!boxes.some(b => b.width > 0 && b.height > 0 && b.right > 0 &&
-        b.bottom > 0 && b.left < innerWidth && b.top < innerHeight)) continue;
+    if (clip[2] <= clip[0] || clip[3] <= clip[1] ||
+        !boxes.some(b => b.width > 0 && b.height > 0 && b.right > clip[0] &&
+        b.bottom > clip[1] && b.left < clip[2] && b.top < clip[3])) continue;
     const s = getComputedStyle(el);
+    c.clearRect(0, 0, 1, 1); c.fillStyle = s.webkitTextFillColor || s.color;
+    c.fillRect(0, 0, 1, 1);
+    if (c.getImageData(0, 0, 1, 1).data[3] * opacity < 204) continue;
     // Canvas text metrics use the browser's loaded font, including fallback.
     c.font = `${s.fontStyle} ${s.fontWeight} ${s.fontSize} ${s.fontFamily}`;
     const cap = c.measureText('H').actualBoundingBoxAscent *
