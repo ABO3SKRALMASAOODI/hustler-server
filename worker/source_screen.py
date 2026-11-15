@@ -140,12 +140,18 @@ def check_render(edl, evidence, source_key, source_sha):
         end += .01
     if any(float(b) > end + 1e-6 for a, b in edl.get("keep") or []):
         raise ValueError("first-film keep crosses the cleared source boundary")
-    for item in list(edl.get("overlays") or []) + list(edl.get("inserts") or []):
-        if item.get("asset_key") not in (source_key, "main"):
-            continue
-        last = float(item.get("source_start_s") or 0) + float(item.get("duration_s") or 0)
-        if last > end + 1e-6:
-            raise ValueError("first-film picture crosses the cleared source boundary")
+    for bucket in ("overlays", "inserts"):
+        for item in edl.get(bucket) or []:
+            if item.get("asset_key") not in (source_key, "main"):
+                continue
+            # Insert duration is OUTPUT time; match the renderer's source
+            # trim before setpts. Overlays do not support playback rates.
+            rate = (float(item.get("rate") or 1.)
+                    if bucket == "inserts" and item.get("kind") != "image" else 1.)
+            last = (float(item.get("source_start_s") or 0)
+                    + float(item.get("duration_s") or 0) * rate)
+            if last > end + 1e-6:
+                raise ValueError("first-film picture crosses the cleared source boundary")
 
 
 def clear_start_state(ctx):

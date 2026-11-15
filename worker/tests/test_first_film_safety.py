@@ -79,6 +79,24 @@ def test_private_view_does_not_edit_original_index_and_render_blocks_fallback_ta
             "source_start_s": 9.5, "duration_s": .5}]}, evidence, "original", "sha")
 
 
+@pytest.mark.parametrize("rate,duration,admitted", [
+    (None, .4, True), (1., .4, True), (.5, .8, True), (2., .4, False),
+])
+def test_source_insert_clearance_uses_consumed_source_clock(rate, duration, admitted):
+    evidence = {"status": "verified", "version": 1, "safe_end_s": 9.9,
+                "source_sha256": "sha"}
+    edl = {"inserts": [{"asset_key": "original", "kind": "video",
+                       "source_start_s": 9.5, "duration_s": duration, "rate": rate}]}
+    # InsertItem.duration_s is output time. The renderer consumes duration*rate
+    # of source: speeding up must not admit the unverified tail, while a slow
+    # insert may occupy more output time using only the cleared source window.
+    if admitted:
+        source_screen.check_render(edl, evidence, "original", "sha")
+    else:
+        with pytest.raises(ValueError, match="cleared source boundary"):
+            source_screen.check_render(edl, evidence, "original", "sha")
+
+
 def _scene():
     return ({"frame": [720, 1280], "items": [{"id": "quay", "pic": "main",
              "src": [6.6, 8.], "crop": [.15, 0, .65, 1]}]},
