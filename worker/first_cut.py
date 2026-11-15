@@ -3925,8 +3925,6 @@ def _director_film(ctx, worker_db, job, started, spend, trial_scope, subscribed)
     """(steps, applied, picked) from the Director, or None for the chain. Never raises."""
     try:
         _await_first_cut_storyboard(ctx, worker_db)
-        import source_typography
-        source_typography.prepare(ctx)
         from score import film
         return film.attempt(ctx, worker_db, job, started, spend, trial_scope,
                             subscribed)
