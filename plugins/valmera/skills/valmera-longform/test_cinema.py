@@ -178,6 +178,26 @@ def test_scarce_image_moves_only_with_a_complete_replacement_for_its_old_use(tmp
     assert not C.duplicate_ranges(shots)
 
 
+def test_evidence_context_label_changes_presentation_but_never_approves_picture(tmp_path,monkeypatch):
+    import evidence_allocate as A
+    import timeline_repair as R
+    import wf4
+    from types import SimpleNamespace
+    original=dict(clip('rehearsal',0,5),shows='Underwater rehearsal of the repair')
+    script=dict(title='Repair',script=dict(segments=[dict(say='They positioned the cutter.',chapter='c')]))
+    words=dict(duration=3.9,words=[dict(w='Cutter.',start=.1,end=3.8,seg=0)])
+    ft=dict(lines=[dict(i=0,clips=[])],editorial=dict(pins=[],bank=[original],rejected=[dict(seg=0,clip=R.identity(original),why='Rehearsal presented as flight',words='Cutter.')]))
+    failure=C.CoverageError([dict(seg=0,seconds=4,heard='Cutter.',words='Cutter.',start=0,end=4)])
+    answer=dict(allocations=[dict(gap=0,candidates=[0])],context_labels=[dict(candidate=0,label='Ground rehearsal • repair method',why='Visible rehearsal')])
+    monkeypatch.setattr(wf4.story.writer,'ask',lambda *a,**k:(json.dumps(answer),{}))
+    A.allocate(SimpleNamespace(supply=str(tmp_path)),script,ft,failure,words)
+    shots,clock,_=C.schedule(script['script'],words,ft)
+    assert shots[0]['clip']['editorial_label']=='Ground rehearsal • repair method'
+    assert 'editorial_label' not in original and not ft['editorial']['pins']
+    R.retain(ft,shots,clock,dict(evidence={'0':dict(matches=False,reason='Still the wrong mechanism')}))
+    assert not ft['editorial']['pins']
+
+
 def test_moving_replacement_preserves_still_when_new_view_fails(tmp_path,monkeypatch):
     import moving_picture as M
     from timeline_repair import anchor
