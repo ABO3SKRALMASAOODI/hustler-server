@@ -8693,6 +8693,7 @@ def _prune_source_cache(cache_dir, protect=None):
     """
     now = time.time()
     entries = []
+    inflight_size = 0
     for fn in os.listdir(cache_dir):
         fp = os.path.join(cache_dir, fn)
         if fp == protect:
@@ -8701,9 +8702,15 @@ def _prune_source_cache(cache_dir, protect=None):
             st = os.stat(fp)
         except OSError:
             continue
-        # Interrupted downloads have no reuse value.  The remaining rules
-        # are inclusive limits: an exactly-4-GiB source is still cacheable.
-        if ".part" in fn or now - st.st_mtime > 6 * 3600 \
+        # A concurrent preview/check can be downloading this .part file.
+        # Do not mistake every unfinished transfer for an abandoned one.
+        # Recent transfers count as protected bytes; completed cache entries
+        # give way first. Failed writers clean up their own partials below.
+        if ".part" in fn and now - st.st_mtime <= 6 * 3600:
+            inflight_size += st.st_size
+            continue
+        # Inclusive limits: an exactly-4-GiB source is still cacheable.
+        if now - st.st_mtime > 6 * 3600 \
                 or st.st_size > config.SOURCE_CACHE_MAX_ITEM_BYTES:
             try:
                 os.remove(fp)
@@ -8718,7 +8725,7 @@ def _prune_source_cache(cache_dir, protect=None):
             protected_size = os.path.getsize(protect)
         except OSError:
             protected_size = 0
-    total = protected_size + sum(size for _mtime, size, _fp in entries)
+    total = inflight_size + protected_size + sum(size for _mtime, size, _fp in entries)
     for _mtime, size, fp in sorted(entries):
         if total <= config.SOURCE_CACHE_MAX_BYTES:
             break
@@ -8786,8 +8793,12 @@ def _cached_source(storage_key):
         if not object_size or object_size > config.SOURCE_CACHE_MAX_ITEM_BYTES:
             return None
         tmp = local + f".part{uuid.uuid4().hex[:6]}"
-        storage.download_to(storage_key, tmp)
-        os.replace(tmp, local)
+        try:
+            storage.download_to(storage_key, tmp)
+            os.replace(tmp, local)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
         _prune_source_cache(cache_dir, protect=local)
         return local
     except Exception as e:

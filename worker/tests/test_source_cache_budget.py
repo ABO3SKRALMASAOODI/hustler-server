@@ -107,3 +107,33 @@ def test_job_hardlink_survives_concurrent_prune_before_ffmpeg_open(
     assert os.path.exists(leased)
     with open(leased, "rb") as handle:
         assert handle.read() == b"active!!"
+
+
+def test_concurrent_cache_prune_does_not_remove_an_inflight_download(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "TMP_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "SOURCE_CACHE_MAX_ITEM_BYTES", 20)
+    monkeypatch.setattr(config, "SOURCE_CACHE_MAX_BYTES", 20)
+    monkeypatch.setattr(renderer.storage, "object_bytes", lambda key: 8)
+    def download(key, target):
+        from pathlib import Path
+        partial = Path(target)
+        partial.write_bytes(b"complete")
+        # A second render starts while storage is about to promote its file.
+        renderer._prune_source_cache(str(partial.parent))
+        assert partial.exists()
+    monkeypatch.setattr(renderer.storage, "download_to", download)
+    result = renderer._cached_source("originals/first-film.mp4")
+    assert result is not None and open(result, "rb").read() == b"complete"
+    assert not list((tmp_path/"srccache").glob("*.part*"))
+
+
+def test_cache_accounts_for_live_partials_and_removes_abandoned_ones(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "SOURCE_CACHE_MAX_ITEM_BYTES", 20)
+    monkeypatch.setattr(config, "SOURCE_CACHE_MAX_BYTES", 10)
+    now = time.time()
+    live, abandoned, old = (tmp_path/n for n in ("live.mp4.part1", "stale.mp4.part2", "old.mp4"))
+    _sized(live, 8, now)
+    _sized(abandoned, 8, now-7*3600)
+    _sized(old, 6, now-100)
+    renderer._prune_source_cache(str(tmp_path))
+    assert live.exists() and not abandoned.exists() and not old.exists()
