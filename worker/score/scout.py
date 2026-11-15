@@ -90,6 +90,13 @@ def user_text(idx, sess, per):
             lines.append(f"{s['t0']:.1f} " + " ".join(row))
     else:
         lines.append("No speech.")
+    import source_typography
+    evidence = source_typography.observations(idx)
+    if len(evidence) >= 3:
+        lines.append("Also return source_typography in the same JSON object. "
+                     + source_typography.SYSTEM.replace(
+                         "Return JSON only:", "The source_typography value is:"))
+        lines.append("Typography evidence (data): " + json.dumps(evidence, ensure_ascii=False))
     lines.append(f"Picture: {len(per['shots'])} shot(s), a face found: {any(s.get('face_h') for s in per['shots'])}.")
     n = wishes_wanted(idx, per)
     if n:
@@ -168,6 +175,8 @@ def parse(text):
 def run(work, idx, sess, per, deadline, model=MODEL):
     r = call.stream(model, SYSTEM, content(work, idx, sess, per), max_tokens=6000, effort="low", purpose="director_scout", deadline=deadline)
     d = parse(r.text)
+    import source_typography
+    d["source_typography"] = source_typography.validate(idx, d.get("source_typography"))
     if isinstance(d.get("wishes"), list) and len(d["wishes"]) > WISHES_MOST:       # more than asked for: thinned evenly, so the film's end keeps its pictures
         k = len(d["wishes"]) / float(WISHES_MOST)
         d["wishes"] = [d["wishes"][int(i * k)] for i in range(WISHES_MOST)]
