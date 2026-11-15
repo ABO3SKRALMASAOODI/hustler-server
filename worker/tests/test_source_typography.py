@@ -64,6 +64,25 @@ def test_pending_evidence_can_be_classified_when_it_arrives(monkeypatch):
     assert st.prepare(ctx)["caption_track"] == "complete"
 
 
+@pytest.mark.parametrize("pending", [True, False])
+def test_director_refresh_reads_once_without_waiting_or_replacing_corrected_words(monkeypatch, pending):
+    import llm
+    ctx = SimpleNamespace(index={"visual_storyboard_pending": True,
+                                 "words": [{"w": "verified spelling"}]})
+    reads = []
+    def read(fn, sha):
+        reads.append(sha)
+        return {"json": {**index(), "visual_storyboard_pending": pending,
+                         "words": [{"w": "old transcript"}]}}
+    answer = dict(caption_track="complete", designed_layout=True, evidence_ids=["e0", "e1", "e2"])
+    monkeypatch.setattr(llm, "ask_text", lambda *a, **k: {"text": json.dumps(answer)})
+    result = st.refresh(ctx, SimpleNamespace(run=read), "source-sha")
+    assert reads == ["source-sha"]
+    assert ctx.index["words"] == [{"w": "verified spelling"}]
+    assert bool(result) is not pending
+    assert ctx.index["visual_storyboard_pending"] is pending
+
+
 def test_first_cut_preserves_existing_type_but_still_builds_the_edit(monkeypatch):
     from test_first_cut_visual import _talking_chain
 
