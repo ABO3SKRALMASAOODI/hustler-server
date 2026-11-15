@@ -58,6 +58,21 @@ def _br(fid, start, end, key, **kw):
 
 # ── licences and the schema ──────────────────────────────────────────────
 
+@pytest.mark.parametrize("phrase", ["dormência", "minha mão", "صباح الخير", "моя рука"])
+def test_spoken_cutaway_anchor_preserves_unicode_and_selects_the_nearest_repeat(phrase):
+    import unicodedata
+    from tools_ext import broll_tools
+    words = []
+    for start in (2., 8.):
+        for n, text in enumerate(phrase.split()):
+            words.append({"w": unicodedata.normalize("NFD", text),
+                          "t0": start + n * .3, "t1": start + n * .3 + .2})
+    index = {"words": words}
+    edl = {"keep": [[0., 12.]]}
+    got = broll_tools._find_word(edl, index, phrase.upper(), near=8.)
+    assert got is not None and got[0] == 8.
+    assert broll_tools._find_word(edl, index, phrase + " missing") is None
+
 @pytest.mark.parametrize("raw,ok", [
     ("CC BY-SA 4.0", True), ("Public domain", True), ("cc0-1.0", True),
     ("by-4.0", True), ("pdm-1.0", True), ("Pexels License", True),

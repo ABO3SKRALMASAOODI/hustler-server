@@ -26,6 +26,7 @@ Nothing here adds music, a sound or a zoom.
 import json
 import os
 import re
+import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -147,13 +148,19 @@ def _find_word(edl, index, word, near=None):
     ``near`` when it repeats; None when absent."""
     import device_planner
     words = device_planner.program_words(edl, index or {})
-    toks = re.findall(r"[a-z0-9']+", str(word).lower())
+    def tokens(text):
+        # Exact lexical alignment, not intent matching. The old query
+        # tokenizer split dormência into two tokens while the transcript
+        # tokenizer collapsed it into one, so real spoken anchors vanished.
+        text = unicodedata.normalize("NFC", str(text or "")).casefold()
+        return re.findall(r"[^\W_]+(?:['’][^\W_]+)*", text.replace("’", "'"))
+    toks = tokens(word)
     if not toks:
         return None
     hits = []
-    for j, w in enumerate(words):
-        run = [re.sub(r"[^a-z0-9']", "", str(x["w"] or "").lower())
-               for x in words[j:j + len(toks)]]
+    aligned = [(token, w) for w in words for token in tokens(w["w"])]
+    for j, (_token, w) in enumerate(aligned):
+        run = [token for token, _word in aligned[j:j + len(toks)]]
         if run == toks:
             hits.append(w)
     if not hits:

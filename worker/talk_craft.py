@@ -240,11 +240,12 @@ ENDING_RULE = (
     "a question, a thank-you or small talk: end EARLIER, on the payoff, "
     "even when the speaker keeps talking. ")
 BROLL_DENSITY_RULE = (
-    "On a talking head name a B-roll moment for about every 3 seconds of "
+    "On a talking head name a B-roll moment for about every 1.5 to 2 seconds of "
     "the span (the references cut away to footage for 30-60% of a talking "
     "head): every concrete noun, place, person, object or action is a "
-    "candidate, and a clear visual metaphor for an abstract line counts "
-    "(\"magnificent\" -> \"a city skyline at night\"). ")
+    "candidate. Use distinct relevant views of a continuing subject when "
+    "the sentence stays on it; no repeated picture, crop or generic mood "
+    "stands in for a new view. Each picture must fit the actual words. ")
 HOOK_RULE = (
     "HOOK TITLE: the 2-5 word poster title is itself a self-contained "
     "claim or topic a stranger gets at a glance (\"AI will *solve* "

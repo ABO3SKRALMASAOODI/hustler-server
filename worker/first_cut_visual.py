@@ -128,7 +128,7 @@ BROLL_RULE = (
     "(\"the sun\", \"a factory\", \"Stanford\", \"a rocket launch\"), never "
     "an abstract idea. Each: the sentence id, \"word\": the 1-2 CONSECUTIVE "
     "words copied EXACTLY as written where the shot starts, and \"query\": "
-    "a 2-5 word stock-footage search describing what the shot SHOWS, as "
+    "a 2-5 word English stock-footage search describing what the shot SHOWS, as "
     "literal as the words (\"the sun\" -> \"the sun in space\"). Spread "
     "them through the WHOLE span, about 1.5-2 seconds apart where the words "
     "support distinct pictures; never invent a thing to fill a quota. The last ones in "
