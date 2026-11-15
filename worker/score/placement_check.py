@@ -3,7 +3,6 @@ import json
 import os
 import shutil
 import tempfile
-import time
 
 from . import boards, supply, taste
 
@@ -15,7 +14,7 @@ def check(work, comp, text, deadline):
     Recheck only placements whose picture interval or spoken passage changed.
     """
     approved = set()
-    rec = {"checked": 0, "usd": 0., "removed": [], "placements": [], "passes": 0}
+    rec = {"checked": 0, "usd": 0., "removed": [], "placements": [], "passes": 0, "errors": []}
     # Each changing pass removes at least one occurrence. An unchanged rejected
     # occurrence is a compiler failure, never permission to show it unchecked.
     limit = len(comp.l1.get("items") or []) + 1
@@ -25,6 +24,7 @@ def check(work, comp, text, deadline):
         rec["checked"] += part["checked"]
         rec["usd"] += part.get("usd", 0.)
         rec["placements"].extend(part.get("placements") or [])
+        rec["errors"].extend(part.get("errors") or [])
         if set(part["removed"]) & set(rec["removed"]):
             raise ValueError("Rejected picture persisted after recompilation")
         rec["removed"].extend(part["removed"])
@@ -110,12 +110,17 @@ def _check_once(work, comp, text, deadline, approved):
                 owners[n] = {"id": item["id"], "pic": item["pic"],
                              "program_s": mid, "source_s": at,
                              "picture_source_s": source_t}
+        # check_fit already limits EACH board's model call to CHECK_S. More
+        # than four boards require another executor wave. Capping the whole
+        # collection at one board's timeout discarded later pictures while
+        # the first film still had time left. Retain the job's hard deadline.
         kept, usd, report = supply.check_fit(work, candidates, wishes,
-                                           min(deadline, time.monotonic()+supply.CHECK_S)) if candidates else ([], 0., [])
+                                           deadline) if candidates else ([], 0., [])
         accepted = {r["id"] for r in kept}
         removed = missing | {owner["id"] for n, owner in owners.items() if n not in accepted}
         approved.update(signature for key, signature in signatures.items() if key not in removed)
         rec = {"checked": len(candidates), "usd": usd, "removed": sorted(removed),
+               "errors": [r["check_error"] for r in report if r.get("check_error")],
                "placements": [{**owners[r["id"]], "check": r} for r in report if r.get("id") in owners]}
         if not removed:
             return comp, text, rec

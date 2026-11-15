@@ -138,3 +138,27 @@ def test_rejected_collage_child_removes_its_device_without_abandoning_the_film(t
     assert any(i.get("pic") == "bin:0" for i in after.l1["items"])
     assert any(i.get("pic") == "main" and i["f"][0] <= child["f"][0]
                and i["f"][1] >= child["f"][1] for i in after.l1["items"])
+
+
+def test_multiple_check_waves_share_the_film_budget_not_one_boards_timeout(tmp_path, monkeypatch):
+    comp = scene(tmp_path)
+    import time
+    monkeypatch.setattr(time, "monotonic", lambda: 100.)
+    def check_fit(work, candidates, wishes, deadline):
+        # Four concurrent boards can finish within18s; the next wave still
+        # has the remaining film budget. Per-call timeouts live in check_fit.
+        assert deadline == 160.
+        return candidates, 0., [{"id": c["id"], "ok": True} for c in candidates]
+    monkeypatch.setattr(pc.supply, "check_fit", check_fit)
+    after, _, report = pc.check(str(tmp_path), comp, '{"k":"film"}', 160.)
+    assert len(after.l1["items"]) == 2 and report["removed"] == []
+
+
+def test_checker_unavailability_is_retained_separately_from_a_picture_mismatch(tmp_path, monkeypatch):
+    comp = scene(tmp_path)
+    monkeypatch.setattr(pc.supply, "check_fit", lambda *args:
+                        ([], 0., [{"check_error": "model deadline"}]))
+    monkeypatch.setattr(compiler, "compile_score", remove_cut_items(comp))
+    after, _, report = pc.check(str(tmp_path), comp, '{"k":"film"}', 1e20)
+    assert report["errors"] == ["model deadline"]
+    assert after.l1["items"] == []  # no missing verdict becomes approval
