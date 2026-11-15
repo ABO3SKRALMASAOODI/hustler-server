@@ -83,3 +83,23 @@ def test_publisher_page_uses_transport_and_preserves_shared_original(tmp_path,mo
     else:
         assert not result['sources'] and result['errors']
         assert not list(work.glob('*.mp4'))
+
+
+@pytest.mark.parametrize('size_mb,accepted',[(153,True),(257,False)])
+def test_short_hd_publisher_video_has_a_bounded_download_budget(tmp_path,monkeypatch,size_mb,accepted):
+    import writer,net_fetch
+    from footage import shots
+    item=dict(window=0,kind='file',url='https://publisher.example/original.mp4',
+              page_url='https://publisher.example/article',title='Original film',publisher='Publisher')
+    monkeypatch.setattr(writer,'ask_openai',lambda *a,**k:(json.dumps({'sources':[item]}),{}))
+    monkeypatch.setattr(net_fetch,'check_url',lambda _:None)
+    def download(url,path,**options):
+        assert options['max_bytes']==256<<20
+        with open(path,'wb') as f:f.write(b'original media')
+    monkeypatch.setattr(net_fetch,'download',download)
+    monkeypatch.setattr(primary.os.path,'getsize',lambda _:size_mb<<20)
+    monkeypatch.setattr(shots,'probe',lambda _:dict(dur=60,w=1920,h=1080))
+    result=primary.acquire([dict(i=0,name='Subject')],str(tmp_path/'sources'),
+                           SimpleNamespace(openai_key=lambda:None,json_block=json.loads))
+    assert bool(result['sources']) is accepted
+    assert bool(result['errors']) is not accepted
