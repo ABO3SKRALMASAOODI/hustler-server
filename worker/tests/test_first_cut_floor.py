@@ -92,3 +92,21 @@ def test_better_real_cut_sequence_can_win_without_new_stock_shots():
     candidate['taste']['raw'] = {'kinds': [[5, 'jump', .5]]}
     baseline['taste']['raw'] = {'kinds': [[t, 'jump', .5] for t in (2, 4, 6, 8)]}
     assert prefer_floor(candidate, baseline)
+
+
+def test_shortening_does_not_buy_a_lost_picture_change():
+    candidate, baseline = reading(), reading('edited')
+    candidate['program_s'] = 7.47
+    candidate['taste']['raw'] = {'kinds': [[3.533, 'new', -.016], [4.4, 'jump', .87], [6.733, 'step', 1.466]]}
+    candidate['taste']['off_edit_steps'] = 1
+    baseline['program_s'] = 3.42
+    baseline['taste']['raw'] = {'kinds': [[1.467, 'jump', .815]]}
+    assert not prefer_floor(candidate, baseline)
+
+
+@pytest.mark.parametrize('department', ['shots', 'sounds'])
+def test_shortening_does_not_buy_lost_added_pictures_or_sounds(department):
+    candidate = reading(**{department: 3})
+    baseline = reading('edited', **{department: 2})
+    baseline['program_s'] = 4
+    assert not prefer_floor(candidate, baseline)
