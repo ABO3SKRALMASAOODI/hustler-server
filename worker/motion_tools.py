@@ -1045,9 +1045,11 @@ def _pinned_size(spec, item, ctx=None):
     render) grazed the mouth; the hook rendered at 6.6% of the frame, under
     the 7% floor, and the short was killed. An explicit size moves (y, x,
     align) or stays where it is with a NOTE; it is never shrunk silently.
-    None when the size is the template's own default."""
-    if (getattr(ctx, "first_cut_auto_title_size", False)
-            and item.get("template") == "hook_title"):
+    None when the size is the template default or the first-film chain
+    selected it automatically. Explicit editor dimensions remain pinned."""
+    if (getattr(ctx, "first_cut_auto_graphic", False) or
+            (getattr(ctx, "first_cut_auto_title_size", False)
+             and item.get("template") == "hook_title")):
         return None
     pspec = (spec or {}).get("params") or {}
     sizer = next((k for k in ("width", "size", "scale")
