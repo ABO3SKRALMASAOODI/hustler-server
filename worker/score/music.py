@@ -94,7 +94,7 @@ def profile_for(kind):
     """The PROFILE for a kind of film (stories | marketing | podcast | longform)."""
     out = dict(PROFILE, under_voice_db=UNDER_VOICE.get(kind, PROFILE["under_voice_db"]))
     if kind == 'podcast':
-        out.update(hole_min_s=1.0, hole_max_s=1.3, broadband_bed_db=5.5)
+        out.update(hole_min_s=1.0, hole_max_s=1.3, broadband_bed_db=5.5, build_floor_db=6.)
     return out
 
 
@@ -490,6 +490,11 @@ def arrange(song, marks, profile=None):
             tgt = 0.15 + 0.3 * (n_build - s["q"]) / max(n_build - 1, 1)
             # the song's own bars before an entrance are its build; else a quiet bar, never one that spends the drop
             c = 1.0 * np.abs(en - tgt) - 0.9 * (pre == s["q"]) + 1.2 * np.maximum(en - 0.6, 0.0) + 0.5 * vp
+            if P.get('build_floor_db') is not None:
+                # The designed hole already removes 18 dB. A near-silent source
+                # bar underneath it turned a controlled payoff into a 42 dB gap.
+                floor = np.percentile(F['k'],90)-float(P['build_floor_db'])
+                c = np.where(F['k'] < floor, INF, c)
         elif role == "drop":                                       # an entrance that stays full: the bar it lands on and the one after
             full2 = 0.5 * en + 0.5 * np.append(en[1:], en[-1])
             c = 4.0 * np.maximum(0.95 - full2, 0.0) - 0.3 * np.clip(F["step"], 0.0, 12.0) / 12.0 - 0.5 * hitn + vp
@@ -1210,12 +1215,13 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
             # Normalize the existing recorded attacks before the spectral pass
             # can discard a quiet sample. This adds no events or recordings.
             l1['sound'] = audibility.present_hits(l1['sound'], lv, music,
-                lambda items: AU.split_audio(_Plan(dict(l1,sound=items),src))[1])
+                lambda items: AU.split_audio(_Plan(dict(l1,sound=items),src))[1], alternatives=audibility.recording_alternatives)
         l1["sound"] = SD.present_over(l1["sound"], to_ar(lv), to_ar(music), float(l1["fps"]))
         if kind == 'podcast':
             l1['sound'] = audibility.present_hits(l1['sound'], lv, music,
-                lambda items: AU.split_audio(_Plan(dict(l1,sound=items),src))[1])
+                lambda items: AU.split_audio(_Plan(dict(l1,sound=items),src))[1], alternatives=audibility.recording_alternatives)
         rep["lifted_for_bed"] = sum(1 for x in l1["sound"] if x.get("lifted_for_bed_db"))
+        rep['final_sounds'] = l1['sound']
         _v, fx, _ = AU.split_audio(_Plan(l1, src))
         if kind == 'podcast':
             # Save the exact post-duck components for verification against the encoded film.

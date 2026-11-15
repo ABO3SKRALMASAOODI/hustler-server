@@ -50,7 +50,34 @@ def calibrate_bed(voice, bed, target=5.5):
     return bed*(10**(delta/20)), delta
 
 
-def present_hits(sounds, voice, bed, render):
+def recording_alternatives(item):
+    """Nearby approved recordings of the same gesture, with the original landing preserved."""
+    from . import sound
+    sf = sound.SF()
+    old = sf.row(item.get('s'), sound.SOUNDS)
+    if not old:
+        return []
+    result = []
+    for _distance, sid in sf.ranking(item['s'], sound.SOUNDS):
+        new = sf.row(sid, sound.SOUNDS)
+        if new.get('role') != old.get('role') or new.get('family') != old.get('family'):
+            continue
+        peak = float(item.get('peak_s') or 0.)
+        hit = float(item['start_s'])-float(item.get('trim_s') or 0.)+peak
+        new_peak = float(new.get('hit_s') or new.get('peak_s') or 0.) + peak-float(old.get('hit_s') or old.get('peak_s') or 0.)
+        start = hit-new_peak
+        candidate = dict(item, s=sid, file=new['file'], start_s=max(0.,start), trim_s=max(0.,-start), peak_s=new_peak,
+                         recording_substitution=dict(original=item['s'], reason='original attack cannot clear the bed within sample headroom'))
+        candidate.pop('dur_s',None)
+        if new.get('max_s'):
+            candidate['dur_s'] = max(.05,float(new['max_s'])-candidate['trim_s'])
+        result.append(candidate)
+        if len(result)==4:
+            break
+    return result
+
+
+def present_hits(sounds, voice, bed, render, alternatives=None):
     """Make already-earned attacks audible; no added events, repeated ticks or quota filling.
 
     render(items) supplies the renderer's actual SFX stem. Broad transient gain
@@ -63,7 +90,7 @@ def present_hits(sounds, voice, bed, render):
     lb,lvb,lv = levels(b),levels(v+b),levels(v)
     speech_ceiling = float(np.percentile(lv,90))+3.5 if len(lv) else -20.
     surroundings = mono(render(out))[:n]+b
-    for it in out:
+    for position,it in enumerate(out):
         if it.get('layer')!='hit' or it.get('start_s') is None: continue
         own = mono(render([it]))[:n]
         lo = max(0,int(float(it['start_s'])*100)-3)
@@ -84,7 +111,8 @@ def present_hits(sounds, voice, bed, render):
         # following a whoosh never becomes a distinct audible onset.
         prior = levels(surroundings-b)
         pre = 10*np.log10(np.mean(10**(prior[max(0,i-30):max(1,i-2)]/10))+1e-12)
-        target = max(med+9.,lvb[i]-3.,pre+8.)
+        hierarchy = {'hero':6.,'accent':3.}.get(it.get('tier'),0.)
+        target = max(med+9.+hierarchy,lvb[i]-3.,pre+8.)
         # A short attack may rise above speech, but never become a sustained competing voice.
         # A pause has no local speech peak: it must not force the effect below
         # a still-playing bed. Bound attacks against the film's spoken level.
@@ -92,7 +120,22 @@ def present_hits(sounds, voice, bed, render):
         peak = np.max(np.abs(own))
         headroom = 20*np.log10(.7/max(peak,1e-9))
         lift = max(0.,min(target-ls[i],ceiling-ls[i],headroom,24.))
+        original = own
+        if alternatives and ls[i]+lift < min(target,ceiling)-.5:
+            # A needle-like click can hit the sample ceiling yet remain inaudible
+            # over a 50 ms window. Choose a fuller recording of that same gesture;
+            # never invent another event or clip the original into audibility.
+            for candidate in alternatives(it):
+                sample = mono(render([candidate]))[:n]
+                measured = levels(sample)
+                peak_i = lo+int(np.argmax(measured[lo:hi]))
+                room = 20*np.log10(.7/max(np.max(np.abs(sample)),1e-9))
+                gain = max(0.,min(target-measured[peak_i],ceiling-measured[peak_i],room,24.))
+                if measured[peak_i]+gain >= min(target,ceiling)-.5:
+                    it,own,lift = candidate,sample,gain
+                    out[position] = it
+                    break
         it['db'] = round(float(it['db'])+lift,2)
         it['broadband_lift_db'] = round(lift,2)
-        surroundings += own*(10**(lift/20)-1)
+        surroundings += own*10**(lift/20)-original
     return out

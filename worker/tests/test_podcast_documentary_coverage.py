@@ -301,3 +301,34 @@ def test_cropped_face_does_not_need_a_semantic_boundary_change():
     llm=SimpleNamespace(ask=lambda *a,**k:(json.dumps(dict(updates=[])),{}),json_block=json.loads)
     assert not C.repair_boundaries(cov,[dict(reason='A face is cropped')],llm)
     assert cov['windows'][0]['first']==cov['windows'][0]['last']==0
+
+
+def test_needle_click_uses_fuller_same_event_recording_without_clipping():
+    from score import audibility
+    sr=48000; t=np.arange(sr*3)/sr
+    voice=.08*np.sin(2*np.pi*220*t); bed=.04*np.sin(2*np.pi*110*t)
+    def render(items):
+        out=np.zeros_like(t)
+        for it in items:
+            at=int(it['start_s']*sr)
+            length=48 if it['s']=='needle' else 2400
+            out[at:at+length]+=.6*np.cos(2*np.pi*800*np.arange(length)/sr)*10**(it['db']/20)
+        return out
+    original=[dict(s='needle',layer='hit',tier='tick',start_s=1.,peak_s=0.,db=-5.)]
+    out=audibility.present_hits(original,voice,bed,render,alternatives=lambda item:[dict(item,s='fuller')])
+    assert len(out)==1 and out[0]['s']=='fuller' and out[0]['start_s']==1.
+    assert np.max(np.abs(render(out)))<.701
+    assert audibility.measure(voice,render(out),bed)['T2']==1
+
+
+def test_podcast_build_does_not_stack_designed_hole_on_a_silent_source_bar():
+    from score import music
+    bars=[dict(t0=i*2.,t1=(i+1)*2.,e=.9,k=-14.,voc=0.,hit=7.,sec_start=i%8==0) for i in range(32)]
+    for i in [6,7,14,15,22,23]:bars[i].update(e=.01,k=-40.)
+    for i in [8,16,24]:bars[i]['drop']=True
+    song=dict(bars=bars,bar_s=2.,sim=np.ones((32,32)).tolist())
+    marks=dict(dur_s=26.,words=[(.2,25.)],cuts=[],payoff_s=18.,turn_s=None,end_hit_s=25.,quiet=[])
+    ordinary=music.arrange(song,marks)
+    assert ordinary['ok'] and any(bars[b['bar']]['k']<-20 for b in ordinary['bars_played'] if b['role']=='build')
+    safe=music.arrange(song,marks,profile=music.profile_for('podcast'))
+    assert safe['ok'] and all(bars[b['bar']]['k']>=-20 for b in safe['bars_played'] if b['role']=='build')
