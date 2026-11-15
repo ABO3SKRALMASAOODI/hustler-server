@@ -856,6 +856,12 @@ def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True, scene=(
     room = bands[2] if len(bands) > 2 else None
     fallback = []
     for rnd in range(3):
+        if rnd == 1 and not pin:
+            # Even when no predicted placement fits, measure smaller
+            # layouts. Otherwise an empty first round skips the ladder
+            # entirely, leaving automatic type on a face without trying
+            # the template's actual reflow at smaller sizes.
+            known += _size_ladder(item, spec, W, H, times)
         if rnd == 2:
             # Spots that leave the captions a band were searched first; when
             # none of them verified, the cheapest spots priced without that
@@ -905,8 +911,6 @@ def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True, scene=(
             dy = float(patch.get("y", ycur)) - ycur if "y" in patch else 0.0
             known.append(({k: v for k, v in patch.items() if k != "y"},
                           keepout.shift(real, 0.0, -dy)))
-        if rnd == 0 and not pin:
-            known += _size_ladder(item, spec, W, H, times)
     return None
 
 

@@ -84,3 +84,43 @@ def test_automatic_hook_real_ink_clears_moving_faces():
     assert not keepout.safe_issues(actual, 720, 1280)
     assert params["text"] == item["params"]["text"]
     assert actual[3] - actual[1] >= .07
+
+
+@pytest.mark.parametrize('pinned', [False, True])
+def test_empty_placement_search_still_measures_smaller_automatic_layout(monkeypatch, pinned):
+    item = dict(id='hook', template='hook_title', start=0., end=3.,
+                params=motion_templates.check_params('hook_title', dict(
+                    text='Keep every word in this title', size=1.3, y=.7)))
+    original = motion_templates.spec('hook_title')
+    # Only the two controls exercised here; align alternatives are covered
+    # by the browser regression above.
+    spec = dict(original, params={k: original['params'][k] for k in ('size', 'y')})
+    track = [(0., [[.25, .3, .75, .95]])]
+    zones = keepout.zones_of(track)
+    large = (.06, .48, .94, .8)
+    small = (.2, .65, .8, .75)
+    assert not keepout.candidates('hook_title', spec, item['params'], large,
+                                 [], zones, 720, 1280, pin_size=pinned)
+    measured = []
+
+    def ladder(*args):
+        measured.append(True)
+        return [({'size': .78}, small)]
+
+    def probe(trials, *args):
+        return [dict(visible_frames=1, box=keepout.shift(
+            small, 0., t['params']['y'] - .7)) for t in trials]
+
+    monkeypatch.setattr(motion_tools, '_size_ladder', ladder)
+    monkeypatch.setattr(motion_tools, '_probe_items', probe)
+    monkeypatch.setattr(keepout, 'settled_ink', lambda rep, times: rep['box'])
+    fixed = motion_tools._relocate(item, spec, large, zones, track,
+                                   720, 1280, ([], []), pin='size' if pinned else None)
+    if pinned:
+        assert fixed is None and not measured
+    else:
+        assert measured and fixed
+        _, ink, params, _ = fixed
+        assert not keepout.assess(ink, track)['hit']
+        assert not keepout.safe_issues(ink, 720, 1280)
+        assert params['text'] == item['params']['text']
