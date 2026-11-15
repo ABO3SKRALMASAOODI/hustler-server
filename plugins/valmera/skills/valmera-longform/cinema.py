@@ -240,7 +240,10 @@ def witness_voices(ctx,script,ft,additional=False,chapter=None):
                 effort='high',max_tokens=3000,what='WF4 witness research')
             research=wf4.story.writer.json_block(text);research['usage']=use;save(job,research)
         if not research['people']:return
-        extra=footage_box.fetch(dict(_voices=True,people=research['people'],lines=lines,avoid=ft['voices'],known_sources=known),dest,ctx.log)
+        rejected=[]
+        for folder in (Path(ctx.supply)/'footage').glob('witnesses*'):
+            for prior in folder.rglob('footage.json'):rejected.extend(read(prior).get('rejected_ranges',[]))
+        extra=footage_box.fetch(dict(_voices=True,people=research['people'],lines=lines,avoid=ft['voices']+rejected,known_sources=known),dest,ctx.log)
         add_footage(ft,extra,dest)
         if len(ft['voices'])>count:return
         history.append(dict(research=research,result=extra))

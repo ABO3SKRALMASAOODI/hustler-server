@@ -126,7 +126,12 @@ if j.get('_voices'):
     voice.PICK_SYSTEM=voice.PICK_SYSTEM.replace('short documentary','long documentary').replace('about 2 to 9 seconds spoken','about 4 to 40 seconds spoken')
     voice.PICK_SYSTEM+='\nA long-form witness can complete a consequential thought. Prefer personal experience, a decision, difficulty or discovery over a generic mission description. Length follows the thought; do not pad or repeat the narrator.'
     voice.PICK_SYSTEM+='\nThe person field must exactly copy one canonical name from The people; never substitute an alias from a video title.'
+    heard_words=voice.heard_words
+    def hear_complete_thought(path,start,end,work,*args,**kwargs):
+        return heard_words(path,start,max(end,start+voice.MAX_S+8),work,*args,**kwargs)
+    voice.heard_words=hear_complete_thought
     original_pick=voice.pick
+    last_picks=[];attempt_id=0
     def logged_pick(lines,persons,sources,*args,**kwargs):
         avoid=j.get('avoid',[])
         lines=[ln for ln in lines if ln['i'] not in {v.get('after') for v in avoid}]
@@ -140,6 +145,12 @@ if j.get('_voices'):
             fresh.append(dict(source,transcript=transcript))
         picks,cost=original_pick(lines,persons,fresh,*args,**kwargs)
         (pathlib.Path(sys.argv[2])/'voice-picks.json').write_text(json.dumps(picks,indent=1))
+        last_picks.clear()
+        for g in picks:
+            source=sources[g['src']]
+            urls={s['url'] for s in live if s['title']==source['title'] and s.get('channel')==source.get('channel')}
+            last_picks.append(dict(g,source_urls=sorted(urls)))
+        (pathlib.Path(sys.argv[2])/('voice-picks-'+str(attempt_id)+'.json')).write_text(json.dumps(last_picks,indent=1))
         return picks,cost
     voice.pick=logged_pick
     subjects=j['people'];flat=[(si,q) for si,s in enumerate(subjects) for q in s['searches']]
@@ -167,10 +178,23 @@ if j.get('_voices'):
     with ThreadPoolExecutor(max_workers=3) as pool:
         sources=list(pool.map(lambda s:run._open(s,work,print,hear_s=3600,read_s=3600),sources))
     live=[s for s in sources if not s.get('error')]
-    voices,cost=voice.find_voices(j['lines'],subjects,live,anchors,sys.argv[2],1920,1080,most=4)
-    usd+=cost+sum(s.get('hear_usd',0) for s in live)
+    trials=[];rejected_ranges=[];voices=[]
+    for attempt_id in range(3):
+        tried=[]
+        voices,cost=voice.find_voices(j['lines'],subjects,live,anchors,sys.argv[2],1920,1080,most=4,tried=tried)
+        usd+=cost;trials.append(dict(attempt=attempt_id,picks=list(last_picks),tried=tried,accepted=len(voices)))
+        if voices or not last_picks:break
+        # The same identity and spoken-word gates remain binding. If a chosen
+        # passage is off-camera, select another passage from the already-open
+        # source, rather than treating that one failure as no witness existing.
+        for g in last_picks:
+            for url in g['source_urls']:
+                rejected_ranges.append(dict(source=dict(url=url),time_range=[max(0,g['piece_t0']-3),g['piece_t0']+53]))
+        j['avoid']=j.get('avoid',[])+rejected_ranges
+    usd+=sum(s.get('hear_usd',0) for s in live)
+    (pathlib.Path(sys.argv[2])/'voice-attempts.json').write_text(json.dumps(trials,indent=1))
     result=dict(lines=[],voices=voices,credits=[dict(v['source'],time_range=v['time_range'],voice=v['person']) for v in voices],spend=dict(usd=usd),
-        sources=[{k:v for k,v in s.items() if k not in ('proxy','shots','transcript')} for s in sources])
+        rejected_ranges=rejected_ranges,sources=[{k:v for k,v in s.items() if k not in ('proxy','shots','transcript')} for s in sources])
     (pathlib.Path(sys.argv[2])/'footage.json').write_text(json.dumps(result,indent=1))
     sys.exit(0)
 find(j['lines'],j['named'],j['about'],sys.argv[2],1920,1080,
