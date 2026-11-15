@@ -643,8 +643,8 @@ def picture_measures(edl, index, tl, W, H, program_s, others=()):
     """The share of the frame the speaker's footage fills, per layout:
     {"windows": [{id, t0, t1, area, upscale}], "area": the smallest, "floor":
     PICTURE_FLOOR}. A picture card's window is its box (a stack: its panels
-    together); outside the cards the main footage fills the frame (or its
-    frame.picture). ``upscale`` is the delivered frame's pixels per source
+    together); outside the cards, measure the actual fitted picture, excluding
+    black or blurred padding. ``upscale`` is the delivered frame's pixels per source
     pixel there (card_geom; a preview's smaller canvas reports the final's
     figure), None without the source's size. Inserts and full-frame
     cutaways are another picture and are left out."""
@@ -662,9 +662,16 @@ def picture_measures(edl, index, tl, W, H, program_s, others=()):
     cards = [c for c in ((edl or {}).get("effects") or {}).get("picture_cards") or []
              if isinstance(c, dict)]
     spans = []                        # (t0, t1, card or None)
-    edges = sorted({0.0, float(program_s)} | {
+    edges = {0.0, float(program_s)} | {
         min(max(float(c[k]), 0.0), float(program_s)) for c in cards
-        for k in ("start", "end")})
+        for k in ("start", "end")}
+    # One output may crop a close-up and fit a wide shot. Measure each
+    # framing span, not only the middle of the entire programme.
+    if tl is not None:
+        for span in ((edl or {}).get("frame") or {}).get("focus_track") or []:
+            for a, b in tl.span_to_out(float(span["t0"]), float(span["t1"])):
+                edges.update(min(max(t, 0.0), float(program_s)) for t in (a, b))
+    edges = sorted(edges)
     for a, b in zip(edges, edges[1:]):
         if b - a < .05:
             continue
@@ -689,6 +696,10 @@ def picture_measures(edl, index, tl, W, H, program_s, others=()):
         src = tl.out_to_src(mid) if tl is not None else None
         if src is not None and sw and sh:
             wins = card_geom.windows(edl, src, W, H, sw, sh, None, mid)
+            if card is None:
+                area = sum(max(0.0, min(1.0, bx[2]) - max(0.0, bx[0])) *
+                           max(0.0, min(1.0, bx[3]) - max(0.0, bx[1]))
+                           for bx, _sr in wins)
             ks = [((bx[2] - bx[0]) * DW) / max(1e-9, (sr[2] - sr[0]) * float(sw))
                   for bx, sr in wins]
             upscale = round(max(ks), 2) if ks else None
@@ -3700,7 +3711,7 @@ def measures_line(res):
         parts = []
         for w in pic["windows"][:3]:
             parts.append(f"{w['area']:.2f}"
-                         + (f" ('{w['id']}'" if w.get("id") else " (full frame")
+                         + (f" ('{w['id']}'" if w.get("id") else " (main picture")
                          + (f", {w['upscale']:.1f}x" if w.get("upscale") else "")
                          + f", {w['t0']:.1f}-{w['t1']:.1f}s)")
         bits.append("picture area " + "; ".join(parts)
