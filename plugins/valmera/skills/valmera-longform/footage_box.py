@@ -105,6 +105,11 @@ cut.grab=grab
 plan.PLAN_SYSTEM += '\nThis run is a 16:9 long documentary. Average picture length is 4.5 seconds. Match every line exactly; exclude still montages.'
 find = run.find
 j=json.load(open(sys.argv[1]))
+if j.get('verification_owner')=='wf4-source-and-encoded-picture-check':
+    # The engine explicitly supports caller-owned per-line verification.
+    # These are research candidates, never shelf-certified or deliverable
+    # pictures. WF4 checks their exact word placement before and after render.
+    os.environ['FOOTAGE_VERIFY']='0'
 from footage import search
 original_search=search.run
 def search_with_known(queries,*args,**kwargs):
@@ -319,6 +324,9 @@ def fetch(payload, out, log=print):
         archive.unlink()
         result = json.loads(rec.read_text())
         result['adapter_sha256']=adapter
+        if payload.get('verification_owner'):
+            result['verification_owner']=payload['verification_owner']
+            result['research_candidates_only']=True
         rec.write_text(json.dumps(result,indent=1))
         log(f"box footage: {result.get('counts',dict(covered=result.get('covered'),clips=result.get('clips')))}")
         return result

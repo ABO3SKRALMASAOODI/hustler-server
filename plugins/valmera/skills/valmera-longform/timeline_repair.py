@@ -70,11 +70,12 @@ def research(ctx,script,ft,failure,merge=True):
         else:combined[row['i']]=row
     avoid=[dict(url=r['clip']['source']['url'],time_range=[r['clip']['time_range'][0]+t for t in r['src']]) for r in failure.shots]
     known=list({c['source']['url']:c['source'] for line in ft['lines'] for c in line['clips'] if c.get('kind')!='image'}.values())
-    key=hashlib.sha256(json.dumps(dict(rows=rows,avoid=avoid),sort_keys=True).encode()).hexdigest()[:12]
+    verifier='wf4-source-and-encoded-picture-check'
+    key=hashlib.sha256(json.dumps(dict(rows=rows,avoid=avoid,verification_owner=verifier),sort_keys=True).encode()).hexdigest()[:12]
     dest=Path(ctx.supply)/'footage'/('timing-research-'+key)
     ctx.log(f'exact picture research: {len(combined)} lines in {dest.name}')
     extra=footage_box.fetch(dict(lines=list(combined.values()),named=script['dossier']['named'],about=script['title'],
-                                 avoid=avoid,known_sources=known,want_voices=False),dest,ctx.log)
+                                 avoid=avoid,known_sources=known,want_voices=False,verification_owner=verifier),dest,ctx.log)
     if merge:C.add_footage(ft,extra,dest)
     return dest
 
