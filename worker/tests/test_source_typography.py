@@ -40,6 +40,117 @@ def test_no_model_call_when_the_index_has_no_printed_text():
     assert st.classify({}, lambda *a, **k: pytest.fail("no evidence to classify")) == {}
 
 
+@pytest.mark.parametrize("ids,accepted", [(["e0", "e1", "e2"], True),
+                                         (["made-up", "e1", "e2"], False)])
+def test_scout_classifies_type_in_its_existing_deadline_bounded_call(tmp_path, monkeypatch, ids, accepted):
+    from score import scout
+    idx = index()
+    calls = []
+    answer = dict(scope="film", wishes=[], fixes=[], source_typography=dict(
+        caption_track="complete", designed_layout=True, evidence_ids=ids))
+
+    def stream(model, system, content, **kwargs):
+        calls.append(kwargs)
+        prompt = content[0]["text"]
+        assert '"id": "e0"' in prompt and "Your moment" in prompt
+        assert "source_typography in the same JSON object" in prompt
+        assert "Return JSON only:" not in prompt
+        return SimpleNamespace(text=json.dumps(answer), usd=0, seconds=.1,
+                               first_s=.1, stop="end")
+
+    monkeypatch.setattr(scout.call, "stream", stream)
+    result = scout.run(str(tmp_path), idx, {},
+                       dict(dur=3, W=720, H=1280, shots=[]), deadline=123)
+    assert len(calls) == 1 and calls[0]["deadline"] == 123
+    assert calls[0]["purpose"] == "director_scout"
+    assert bool(result["source_typography"]) is accepted
+    if accepted:
+        ctx = SimpleNamespace(index={**idx, "source_typography": result["source_typography"]})
+        import llm
+        monkeypatch.setattr(llm, "ask_text", lambda *a, **k: pytest.fail("duplicate model call"))
+        assert st.prepare(ctx)["caption_track"] == "complete"
+
+
+def test_director_entry_does_not_spend_its_deadline_on_a_separate_type_call(monkeypatch):
+    import first_cut
+    from score import film
+    ctx = SimpleNamespace(index=index())
+    monkeypatch.setattr(first_cut, "_await_first_cut_storyboard", lambda *a: None)
+    monkeypatch.setattr(st, "prepare", lambda *a: pytest.fail("unbounded classification before Scout"))
+    expected = object()
+    monkeypatch.setattr(film, "attempt", lambda *a: expected)
+    assert first_cut._director_film(ctx, None, {}, 0, {}, None, False) is expected
+
+
+def test_refreshing_director_evidence_never_calls_a_model(monkeypatch):
+    import llm
+    ctx = SimpleNamespace(index={"visual_storyboard_pending": True,
+                                 "first_film": {"frame": "9:16"}, "shots": [{"id": 9}]})
+    monkeypatch.setattr(llm, "ask_text", lambda *a, **k: pytest.fail("unbounded classification before Direct"))
+    st.refresh_index(ctx, SimpleNamespace(run=lambda *a: {"json": {
+        **index(), "visual_storyboard_pending": False}}), "source-sha")
+    assert len(st.observations(ctx.index)) == 3
+    assert ctx.index["first_film"] == {"frame": "9:16"}
+    assert ctx.index["shots"] == [{"id": 9}]
+
+
+def test_prepared_film_carries_scout_type_evidence_into_direct_without_a_second_call(tmp_path, monkeypatch):
+    import time
+    import db
+    import llm
+    from score import bed, brief, direct, film, preparation, scout, supply
+
+    source = tmp_path / "source.mp4"
+    source.touch()
+    original = {"visual_storyboard_pending": True, "words": []}
+    refined = {**original, "shots": [{"id": 81}]}
+    per = dict(dur=3, W=720, H=1280, shots=[])
+    ctx = SimpleNamespace(index=original, project_id=1, proxy_path=lambda: str(source))
+    monkeypatch.setattr(preparation, "restore", lambda *a: (refined, per))
+    monkeypatch.setattr(brief, "boards_for", lambda *a, **k: (None, []))
+    monkeypatch.setattr(brief, "build", lambda *a: None)
+    monkeypatch.setattr(film, "_asks", lambda *a: [])
+    monkeypatch.setattr(film, "_say", lambda *a: None)
+    monkeypatch.setattr(film, "footage_start", lambda *a: None)
+    monkeypatch.setattr(film, "_acquirer", lambda *a: None)
+    monkeypatch.setattr(supply, "run", lambda *a, **k: None)
+    monkeypatch.setattr(bed, "available", lambda: False)
+    monkeypatch.setattr(llm, "ask_text", lambda *a, **k: pytest.fail("second typography model call"))
+    calls = []
+
+    def read(fn, *args):
+        if fn is db.latest_asset:
+            return dict(storage_key="original", sha256="source-sha")
+        assert fn is db.get_index_by_sha
+        return {"json": {**index(), "visual_storyboard_pending": False}}
+
+    def stream(*args, **kwargs):
+        calls.append(kwargs["purpose"])
+        return SimpleNamespace(text=json.dumps(dict(scope="film", wishes=[], fixes=[],
+            source_typography=dict(caption_track="complete", designed_layout=True,
+                                   evidence_ids=["e0", "e1", "e2"]))),
+            usd=0, seconds=.1, first_s=.1, stop="end")
+
+    class ReachedDirect(Exception):
+        pass
+
+    def generate(work, idx, *args, **kwargs):
+        assert idx["source_typography"]["caption_track"] == "complete"
+        assert idx["first_film"] == {"frame": "9:16"}
+        assert idx["shots"] == [{"id": 81}]
+        assert idx is ctx.index
+        raise ReachedDirect
+
+    monkeypatch.setattr(scout.call, "stream", stream)
+    monkeypatch.setattr(direct, "direct", generate)
+    with pytest.raises(ReachedDirect):
+        film._make(ctx, SimpleNamespace(run=read), {},
+                   {"models": {"scout": "gpt-6-luna", "direct": "gpt-6-sol"},
+                    "effort": {"direct": "low"}, "film_usd": .7},
+                   time.monotonic() + 150, str(tmp_path / "film"), {"stages": {}})
+    assert calls == ["director_scout"]
+
+
 def test_picture_layout_can_be_grounded_without_claiming_burned_captions():
     idx = index()
     for row in idx["visual_storyboard"]["evidence"]:
