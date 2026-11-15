@@ -165,7 +165,7 @@ def test_first_film_fallback_reframer_requests_local_crop(monkeypatch):
 def test_subject_fully_outside_crop_still_counts_and_all_camera_frames_are_safe():
     film, index = _scene()
     film["items"][0]["crop"] = [[.15, 0, .65, 1], [.2, 0, .7, 1]]
-    rows = source_guard.apply(film, index, {"samples": [{"t": 7.5, "person": [.8, .1, .95, .9]}]})
+    rows = source_guard.apply(film, index, {"samples": [{"t": t, "person": [.8, .1, .95, .9]} for t in (7., 7.5)]})
     assert all(0 <= c[0] <= .8 and .95 <= c[2] <= 1 for c in film["items"][0]["crop"])
     assert rows[0]["reason"] == "local_subject_crop"
 

@@ -81,7 +81,11 @@ def apply(l1, index, perception):
                 shot = next((sh for sh in overlaps if sh["start"] <= t < sh["end"]), None)
                 local = [s for s in samples if shot and shot["start"] <= s["t"] < shot["end"]
                          and abs(s["t"]-t) <= .75 and (_boxes(s) or s.get("focus"))]
-                nearby = sorted(local, key=lambda s: abs(s["t"]-t))
+                nearby = sorted(local, key=lambda s: (abs(s["t"]-t), not bool(_boxes(s))))
+                if not nearby:
+                    nearby = sorted((s for s in samples if shot and
+                        shot["start"] <= s["t"] < shot["end"] and s.get("focus")),
+                        key=lambda s: abs(s["t"]-t))
                 row = nearby[0] if nearby and _boxes(nearby[0]) else None
                 if row is not None:
                     box = max(_boxes(row), key=lambda b: (b[2]-b[0])*(b[3]-b[1]))
