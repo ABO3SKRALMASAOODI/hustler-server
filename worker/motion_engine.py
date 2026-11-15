@@ -1383,7 +1383,7 @@ async def _probe_all(jobs, times_list, budget_s, measure=None):
                                 measures.append(measure(base64.b64decode(full["data"])))
                             except Exception as e:  # noqa: BLE001
                                 measures.append({"error": str(e)[:120]})
-                            if job.glyph_exposure:
+                            if getattr(job, "glyph_exposure", False):
                                 await page.evaluate(_GLYPH_EXPOSURE)
                                 try:
                                     mask = await cdp.send("Page.captureScreenshot", {
@@ -1495,7 +1495,8 @@ def _probe_memo_keys(jobs, times_list, measure):
     for job, times in zip(jobs, times_list):
         try:
             keys.append(render_memo.key(
-                "motion_engine.probe", code, tag, job.key(), job.glyph_exposure,
+                "motion_engine.probe", code, tag, job.key(),
+                bool(getattr(job, "glyph_exposure", False)),
                 [float(t) for t in times]))
         except Exception:  # noqa: BLE001
             keys.append(None)
