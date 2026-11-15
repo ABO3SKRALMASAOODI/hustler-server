@@ -2891,9 +2891,13 @@ def video_users():
                 FROM active_users au
                 JOIN projects p ON p.user_id = au.id
                 JOIN assets ast ON ast.project_id = p.id
-                -- the provenance test once per asset, not once per count
+                -- Render metadata carries large QC sheets and never source
+                -- provenance. Do not decompress it just to count uploads.
+                -- Other kinds keep the complete provenance test.
                 CROSS JOIN LATERAL (
-                    SELECT {_machine_made('ast')} AS machine OFFSET 0) mm
+                    SELECT CASE WHEN ast.kind <> 'render'
+                        THEN {_machine_made('ast')} ELSE false END
+                        AS machine OFFSET 0) mm
                 GROUP BY p.user_id
             )
             SELECT u.id, u.email, u.created_at, u.plan,
