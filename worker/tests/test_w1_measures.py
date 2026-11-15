@@ -113,7 +113,7 @@ def test_the_hook_slam_is_measured_before_the_band_headline():
     assert "hook 'hook' 6.7%" in line
     assert "band headline 'headline' 3.5%" in line
     assert "'odds' 9.2%" in line            # every lockup, counters included
-    assert "picture area 1.00 (full frame" in line   # full-bleed reported
+    assert "picture area 1.00 (main picture" in line  # visible source area reported
 
 
 def test_measured_ink_on_the_corner_mark_is_a_finding():
