@@ -98,3 +98,16 @@ def test_master_leaves_compliant_audio_untouched(monkeypatch,tmp_path):
     def forbidden(*a,**k):raise AssertionError('unnecessary re-encode')
     monkeypatch.setattr(mastering.subprocess,'run',forbidden)
     assert mastering.guard('original',str(tmp_path))['passes']==0
+
+
+def test_first_cut_fallback_uses_local_subject_reframe_before_render(monkeypatch):
+    from types import SimpleNamespace
+    import first_cut
+    calls=[]
+    def execute(ctx,name,args):
+        calls.append((name,args));return 'REJECTED: local observations unavailable'
+    monkeypatch.setattr(first_cut.agent_tools,'execute',execute)
+    ctx=SimpleNamespace(versions_written=1,latest_edl=lambda:{'json':{}},index={})
+    result=first_cut._render_cut(ctx,[],{'how':'finished_piece'})
+    assert result.startswith('REJECTED')
+    assert calls==[('auto_reframe',{'ratio':'9:16','mode':'crop'})]

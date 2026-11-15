@@ -3788,7 +3788,7 @@ def _render_cut(ctx, steps, picked):
     frame = (row.get("json") or {}).get("frame") or {}
     ratio = frame.get("ratio", "source")
     if ratio != "9:16" and not (ratio == "source" and _orientation(getattr(ctx, "index", {}) or {}) == "vertical"):
-        result = agent_tools.execute(ctx, "set_frame", {"ratio": "9:16", "mode": "pad_blur"})
+        result = agent_tools.execute(ctx, "auto_reframe", {"ratio": "9:16", "mode": "crop"})
         steps.append({"tool": "first_film_frame", "ok": not _failed(result), "note": str(result)[:160]})
         if _failed(result):
             return result
