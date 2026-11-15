@@ -1143,6 +1143,11 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
     rec["prep_detail"]["remaining_boards_s"] = board_future.result()
     rec["prep_detail"]["boards_wait_s"] = round(time.monotonic() - t, 3)
     _say(ctx, worker_db, "director_direct", "Directing your film")
+    import source_typography
+    source_typography.refresh(ctx, worker_db, original.get("sha256"))
+    index = ctx.index
+    with open(os.path.join(work, "index.json"), "w") as f:
+        json.dump(index, f, ensure_ascii=False)
     brief.build(work, index, sess, per, sc, grid)
     try:
         comp, text, usage = direct.direct(work, index, sc, deadline, model=cfg["models"]["direct"], effort=cfg["effort"]["direct"],
