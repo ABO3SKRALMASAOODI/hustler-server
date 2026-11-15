@@ -67,3 +67,28 @@ def test_an_edited_label_does_not_waive_a_zero_picture_fallback():
     assert needs_floor(reading('edited', motion=4))
     assert not needs_floor(reading('edited', shots=3))
     assert prefer_floor(reading('edited', sounds=0, motion=4), reading('light_touch', sounds=3, motion=1))
+
+
+def test_camera_motion_cannot_buy_lost_real_cuts_or_longer_holds():
+    candidate = reading('edited', motion=0, steps=4)
+    candidate['program_s'] = 15.44
+    candidate['taste']['raw'] = {'kinds': [[t, 'new', .5] for t in (1, 3, 3.93, 5.93, 6.86, 7.6, 8.6, 10.53, 11.73, 13.66)]}
+    fallback = reading('edited', motion=17)
+    fallback['program_s'] = 137.
+    fallback['taste']['raw'] = {'kinds': [[31., 'new', .5], [32.13, 'new', .5]]}
+    assert not prefer_floor(candidate, fallback)
+    # Equal density also cannot hide one long, static stretch.
+    fallback['program_s'] = candidate['program_s']
+    fallback['taste']['raw']['kinds'] = [[t, 'new', .5] for t in range(1, 11)]
+    assert not prefer_floor(candidate, fallback)
+
+
+def test_camera_motion_cannot_buy_lost_audible_effects():
+    assert not prefer_floor(reading('edited', sounds=3), reading('edited', sounds=1, motion=9))
+
+
+def test_better_real_cut_sequence_can_win_without_new_stock_shots():
+    candidate, baseline = reading('edited'), reading('edited')
+    candidate['taste']['raw'] = {'kinds': [[5, 'jump', .5]]}
+    baseline['taste']['raw'] = {'kinds': [[t, 'jump', .5] for t in (2, 4, 6, 8)]}
+    assert prefer_floor(candidate, baseline)

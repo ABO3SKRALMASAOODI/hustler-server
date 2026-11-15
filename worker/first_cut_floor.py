@@ -31,7 +31,25 @@ def prefer_floor(candidate, floor):
     # and a classifier's "edited" label alone cannot waive missing pictures.
     if f[1] + .05 < c[1]:
         return False
-    return any(a > b + .05 for a, b in zip(f, c))
+    if f[2] + .05 < c[2]:
+        return False
+    def pictures(m):
+        raw = (m.get('taste') or {}).get('raw') or {}
+        if 'kinds' not in raw:
+            return None
+        duration = max(float(m.get('program_s') or 1), 1)
+        at = sorted(float(row[0]) for row in raw['kinds']
+                    if row[1] in ('new', 'jump') and 0 < float(row[0]) < duration)
+        return len(at) * 10 / duration, max(b-a for a, b in zip([0.] + at, at + [duration]))
+    cp, fp = pictures(candidate), pictures(floor)
+    # p5755: a 137-second take won over a 15-second cut because its
+    # camera was counted more often. Source reorders are real cuts even
+    # when shots_added is zero; a slower sequence is not a better floor.
+    if cp is not None and (fp is None or fp[0] + .05 < cp[0] or fp[1] > cp[1] + .1):
+        return False
+    return (any(a > b + .05 for a, b in zip(f, c)) or
+            (cp is not None and fp is not None and
+             (fp[0] > cp[0] + .05 or fp[1] < cp[1] - .1)))
 
 
 def needs_floor(measured):
