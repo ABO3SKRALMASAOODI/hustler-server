@@ -25,7 +25,7 @@ class Unavailable(ValueError):
 
 def sample_times(duration, fps, shots):
     frame = 1.0 / max(1.0, float(fps))
-    last = max(0.0, math.floor((duration - frame) / frame) * frame)
+    last = max(0.0, math.floor((duration - frame) / frame + 1e-7) * frame)
     times = {0.0, last}
     tail = list(shots or [{"start": 0.0, "end": duration}])[-4:]
     for sh in tail:
@@ -38,7 +38,7 @@ def sample_times(duration, fps, shots):
     times.update(max(0.0, duration - 12) + i * 2 for i in range(7))
     # boards.grab seeks to milliseconds. Rounding a final frame's timestamp
     # up (35.366667 -> 35.367) seeks beyond that last frame and yields EOF.
-    return sorted({math.floor(min(last, max(0.0, math.floor(t / frame) * frame)) * 1000 + 1e-7) / 1000
+    return sorted({math.floor(min(last, max(0.0, math.floor(t / frame + 1e-7) * frame)) * 1000 + 1e-7) / 1000
                    for t in times})
 
 
