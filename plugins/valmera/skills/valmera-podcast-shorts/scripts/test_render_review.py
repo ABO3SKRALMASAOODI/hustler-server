@@ -275,3 +275,5 @@ def test_external_hearing_is_bound_to_source_and_valid_times(tmp_path,monkeypatc
     else:
         assert chain.external_hearing(ctx,str(source),1.)
         assert json.load(open(tmp_path/'hearing.json'))['transport']['source_sha256']==digest
+        monkeypatch.setattr(chain.subprocess,'run',lambda *a,**kw:pytest.fail('same aligned source must not transcribe again'))
+        assert chain.external_hearing(ctx,str(source),1.)

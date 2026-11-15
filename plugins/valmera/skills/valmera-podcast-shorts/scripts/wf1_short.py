@@ -123,7 +123,7 @@ def script(ctx, ideas_out):
 
 
 def supply(ctx, script):
-    import wf1_coverage
+    import wf1_coverage, wf1_alignment
     sup_dir = ctx.supply
     os.makedirs(sup_dir, exist_ok=True)
     os.environ["TMPDIR"] = ctx.tmp
@@ -131,11 +131,14 @@ def supply(ctx, script):
     if os.path.exists(pk):
         prior = json.load(open(pk))
         if ((prior['pack'].get('coverage') or {}).get('contract') == wf1_coverage.CONTRACT
+                and prior['pack'].get('alignment_contract')==wf1_alignment.CONTRACT
                 and any(row.get('clips') for row in prior['pack'].get('footage',[]))):
             return prior['record']
         os.replace(pk,os.path.join(sup_dir,'previous-pack.json'))
     rec0 = chain.pack(ctx, script)                              # source.mp4 (the window), hearing.json, index.json
     idx = json.load(open(os.path.join(sup_dir, "index.json")))
+    idx,_=wf1_alignment.reconcile(ctx,script,idx,_near(ctx,*script["window"],pad=2),_llm(),chain)
+    rec0.update(window=script["window"],dur=idx["video"]["duration"],words=len(idx["words"]),shots=len(idx["shots"]))
     src = os.path.join(sup_dir, "source.mp4")
     sents = idx.get("sentences") or []
     if not sents:
@@ -147,7 +150,7 @@ def supply(ctx, script):
     dur = float(idx["video"]["duration"])
     wj = os.path.join(sup_dir, "words.json")
     json.dump(dict(voice="the take", duration=round(max(w["end"] for w in words) + 0.05, 3) if words else dur, words=words), open(wj, "w"), ensure_ascii=False)
-    spend = []
+    spend = [dict(stage="supply",what="heard clip alignment",**idx["alignment"]["spend"])]
     style = wf1_film.STYLES[script["style"]["id"]]
     # real video of what each sentence names: the footage engine's own planner reads the sentences (OpenAI)
     who = str((ctx.args or {}).get("identity") or "")[:400].replace("\n", " ")
@@ -229,6 +232,7 @@ def supply(ctx, script):
         faces = PX.faces(still)
     except Exception:  # noqa: BLE001
         faces = []
+    pack["alignment_contract"]=wf1_alignment.CONTRACT
     pack["take"] = dict(path=src, w=int(v["width"]), h=int(v["height"]), fps=float(v["fps"]), dur=dur, faces=faces, still=still, shots=len(idx.get("shots") or []),
                         cuts=take_cuts(src, idx.get("shots") or [], dur, sup_dir))
     pack["lines"] = [dict(i=i, t0=s["t0"], t1=s["t1"], text=s["text"], subjects=by_line.get(i) or []) for i, s in enumerate(sents)]
@@ -486,9 +490,10 @@ def refill(ctx, script, pack, shortage):
 
 
 def score(ctx, script):
-    import wf1_coverage
+    import wf1_coverage, wf1_alignment
     pack = wf3.load_pack(ctx)
     if ((pack.get('coverage') or {}).get('contract') != wf1_coverage.CONTRACT
+            or pack.get('alignment_contract')!=wf1_alignment.CONTRACT
             or not any(row.get('clips') for row in pack.get('footage',[]))):
         supply(ctx,script)
         pack = wf3.load_pack(ctx)

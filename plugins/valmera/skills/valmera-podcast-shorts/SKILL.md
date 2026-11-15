@@ -189,3 +189,5 @@ correction handles changed limiter gain. Test runs retain their
 stems and scene evidence beside the exports before ordinary workflow scratch cleanup.
 
 When local ASR is queued behind shared Mac jobs, `SHELL_HEAR_CMD` may route the exact clip to an isolated local Whisper worker. The transport returns source SHA-256, engine provenance, and ordered word times; the shell rejects another source or out-of-range timings. It never substitutes untimed platform captions for alignment.
+
+After local ASR, a small model reconciliation compares the timed hearing with the source captions and selected hook/close. It corrects clear transcription homophones and chooses heard word edges. The product recuts the original clip and shifts its word times together; it cannot remove interior speech or rewrite the story. Changed timed text invalidates its coverage/direction and line-assigned footage caches while preserving downloaded originals.

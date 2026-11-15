@@ -146,11 +146,16 @@ def external_hearing(ctx, src, duration):
     import shlex
     command=os.environ.get('SHELL_HEAR_CMD')
     if not command:return False
-    digest=hashlib.file_digest(open(src,'rb'),'sha256').hexdigest()
-    request=dict(source=os.path.abspath(src),source_sha256=digest,duration_s=duration)
-    result=subprocess.run(shlex.split(command),input=json.dumps(request),capture_output=True,text=True,timeout=900)
-    if result.returncode:raise RuntimeError('external local transcription failed: '+result.stderr[-400:])
-    response=json.loads(result.stdout)
+    with open(src,'rb') as media:digest=hashlib.file_digest(media,'sha256').hexdigest()
+    saved=os.path.join(ctx.supply,'hearing.json')
+    prior=json.load(open(saved)) if os.path.exists(saved) else {}
+    if (prior.get('transport') or {}).get('source_sha256')==digest:
+        response=dict(source_sha256=digest,hearing=prior,engine=prior['transport'].get('engine'))
+    else:
+        request=dict(source=os.path.abspath(src),source_sha256=digest,duration_s=duration)
+        result=subprocess.run(shlex.split(command),input=json.dumps(request),capture_output=True,text=True,timeout=900)
+        if result.returncode:raise RuntimeError('external local transcription failed: '+result.stderr[-400:])
+        response=json.loads(result.stdout)
     if response.get('source_sha256')!=digest:raise ValueError('transcription source hash mismatch')
     hearing=response.get('hearing') or {}
     previous=-1.
