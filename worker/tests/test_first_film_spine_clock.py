@@ -81,3 +81,13 @@ def test_overlapping_asr_words_are_kept_whole():
     ctx.spine, ctx.spine_talk = [], []
     compiler.build_spine(ctx)
     assert not word_edges.introduced([], [s["src"] for s in ctx.spine], ctx.words, ctx.src_dur)
+
+
+def test_picture_authored_in_seconds_still_keeps_background_words_whole():
+    ctx = make_spine(30, [[2], [7]])
+    beat = compiler.Beat({"id": "picture"}, 0)
+    beat.src = [.5, 1.64]
+    ctx.beats, ctx.spine, ctx.spine_talk = [beat], [], []
+    compiler.build_spine(ctx)
+    assert ctx.spine[0]["src"] == pytest.approx([.474, 1.659])
+    assert not word_edges.introduced([], [s["src"] for s in ctx.spine], ctx.words, ctx.src_dur)

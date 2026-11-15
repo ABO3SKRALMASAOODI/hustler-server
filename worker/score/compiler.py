@@ -1142,18 +1142,19 @@ def build_spine(ctx):
     # Padding is air, never a fragment of an omitted neighbouring word. Keep
     # source seconds exact: rounding each source end to a video frame both
     # clips consonants and accumulates drift across a reordered programme.
-    exact = bool(ctx.index.get("first_film")) and any(r["ws"] for r in runs)
+    exact = bool(ctx.index.get("first_film")) and bool(ctx.words)
     if exact:
         import word_edges
         for r in runs:
-            if not r["ws"]:
+            if "s0" not in r:
                 continue
-            first, last = r["ws"][0], r["ws"][-1]
-            left, right = t0(ctx, first), t1(ctx, last)
-            previous = max((w["t1"] for w in ctx.words[:first] if w["t1"] <= left), default=0.)
-            following = min((w["t0"] for w in ctx.words[last + 1:] if w["t0"] >= right), default=ctx.src_dur)
-            r["s0"] = max(r["s0"], previous)
-            r["s1"] = min(r["s1"], following)
+            if r["ws"]:
+                first, last = r["ws"][0], r["ws"][-1]
+                left, right = t0(ctx, first), t1(ctx, last)
+                previous = max((w["t1"] for w in ctx.words[:first] if w["t1"] <= left), default=0.)
+                following = min((w["t0"] for w in ctx.words[last + 1:] if w["t0"] >= right), default=ctx.src_dur)
+                r["s0"] = max(r["s0"], previous)
+                r["s1"] = min(r["s1"], following)
             whole, _ = word_edges.whole([[r["s0"], r["s1"]]], ctx.words, ctx.src_dur)
             r["s0"], r["s1"] = whole[0]
     prog, prev_end, seconds = 0, None, 0.0
