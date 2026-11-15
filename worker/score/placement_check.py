@@ -71,8 +71,9 @@ def _check_once(work, comp, text, deadline, approved):
             for span in l1.get("spine") or []:
                 a, b = max(item["f"][0], span["f"][0]), min(item["f"][1], span["f"][1])
                 if b > a:
-                    windows.append((span["src"][0]+(a-span["f"][0])/float(l1["fps"]),
-                                    span["src"][0]+(b-span["f"][0])/float(l1["fps"])))
+                    from scene.spine import source_at
+                    windows.append((source_at(span, a, float(l1["fps"])),
+                                    source_at(span, b, float(l1["fps"]))))
             wish["placed_words"] = " ".join(str(w.get("w", "")) for w in words
                 if any(float(w.get("t0", 0)) < b and float(w.get("t1", w.get("t0", 0))) > a
                        for a, b in windows))

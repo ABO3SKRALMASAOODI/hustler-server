@@ -71,6 +71,7 @@ import subprocess
 import zlib
 
 import numpy as np
+from scene.spine import samples, start_s
 
 from . import sound_choice as choice
 try:
@@ -401,11 +402,8 @@ def spine_audio(spine, fps, src, n, rate=AR, ch=1):
     if not len(a):
         return out
     for e in spine or []:
-        f0, f1 = e["f"]
-        at = int(round(f0 / fps * rate))
-        to = min(int(round(f1 / fps * rate)), n)
-        s0 = int(round(float(e["src"][0]) * rate))
-        seg = a[s0:s0 + max(0, to - at)]
+        at, s0, count = samples(e, fps, rate, n)
+        seg = a[s0:s0 + count]
         out[at:at + len(seg)] += seg
     return out
 
@@ -654,7 +652,7 @@ def words_in_programme(l1, index):
     words = index.get("words") or []
     for e in l1.get("spine") or []:
         s0, s1 = float(e["src"][0]), float(e["src"][1])
-        p0 = e["f"][0] / fps
+        p0 = start_s(e, fps)
         for w in words:
             t0, t1 = float(w.get("t0", 0)), float(w.get("t1", 0))
             if t1 > s0 and t0 < s1:

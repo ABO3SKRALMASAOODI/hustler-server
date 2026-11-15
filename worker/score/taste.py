@@ -1149,7 +1149,8 @@ def source_second(l1, t):
     best = None
     for s in l1.get("spine") or []:
         if s["f"][0] <= f < s["f"][1]:
-            return s["src"][0] + (f - s["f"][0]) / fps
+            from scene.spine import source_at
+            return source_at(s, f, fps)
         d = min(abs(f - s["f"][0]), abs(f - s["f"][1]))
         if best is None or d < best[0]:
             best = (d, s["src"][0] if f < s["f"][0] else s["src"][1] - 1 / fps)

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from score import compiler, lower, shape
+from score import compiler, lower, shape, sound
 from scene import audio
 from scene.spine import samples
 import word_edges
@@ -56,6 +56,14 @@ def test_omitted_words_and_reorders_keep_exact_audio_clock(fps, tmp_path, monkey
     monkeypatch.setattr(shape, "pcm", lambda _: src)
     monkeypatch.setattr(audio, "pcm", lambda _: src)
     dry = shape.dry_spine(l1, "source")
+    source_path = tmp_path / "source.pcm"
+    source_path.touch()
+    monkeypatch.setattr(sound, "pcm", lambda *a: src)
+    designed = sound.spine_audio(spans, fps, str(source_path), len(dry), rate=rate, ch=2)
+    np.testing.assert_array_equal(designed, dry)
+    word_times = sound.words_in_programme(l1, {"words": ctx.words})
+    assert min(t[0] for t in word_times) == pytest.approx(0)
+    assert max(t[1] for t in word_times) == pytest.approx(total)
     plan = SimpleNamespace(dur=ctx.dur_f, fps=fps, doc=l1, assets={"main": {"abs": "source"}})
     voice, _, _ = audio.split_audio(plan)
     for span, ws in zip(spans, groups):
