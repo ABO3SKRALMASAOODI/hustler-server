@@ -288,7 +288,7 @@ def require_coverage(ins, coverage, duration, fps=30):
     weak = [i for i,w in enumerate(coverage['windows'])
             if sum(r[1]-r[0] for r in ins if r[4].get('window')==i)/fps < .8*(w['t1']-w['t0'])
             or sum(r[1]-r[0] for r in ins if r[4].get('window')==i and moving_picture(r))/fps < .6*(w['t1']-w['t0'])]
-    report = dict(real_seconds=real,moving_seconds=moving,named_seconds=named,new_per_10s=rate,new_pictures=len(unique),repeated_pictures=len(ins)-len(unique),weak_windows=weak,missing_windows=missing)
+    report = dict(real_seconds=real,moving_seconds=moving,required_real_seconds=.45*duration,required_moving_seconds=.6*max(real,.45*duration),named_seconds=named,new_per_10s=rate,new_pictures=len(unique),repeated_pictures=len(ins)-len(unique),weak_windows=weak,missing_windows=missing)
     if real/max(duration,.01)<.45 or moving/max(real,.01)<.60 or rate<6 or missing:
         raise CoverageError(f'documentary supply incomplete after frame checks: real={real/duration:.3f}, '
                            f'moving={moving/max(real,.01):.3f}, new/10s={rate:.2f}, missing windows={missing}; '

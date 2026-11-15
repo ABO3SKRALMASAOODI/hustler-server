@@ -412,7 +412,7 @@ def refill(ctx, script, pack, shortage):
     # A still cannot repair a motion deficit. Preserve existing documentary
     # evidence, but spend this recovery pass on moving originals first.
     motion_ready = (shortage.get('real_seconds',0)>0 and
-                    shortage.get('moving_seconds',0)>=.6*shortage['real_seconds'])
+                    shortage.get('moving_seconds',0)>=shortage.get('required_moving_seconds',.6*shortage['real_seconds']))
     if motion_ready:
         import wf1_documents
         context=dict(identity=coverage.get('context'),primary_research=coverage.get('research_context'),prior_errors=[e for r in pack.get('document_research',[]) for e in r.get('errors',[])][-12:])

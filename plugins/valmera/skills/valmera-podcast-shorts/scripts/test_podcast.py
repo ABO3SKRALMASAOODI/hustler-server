@@ -411,7 +411,7 @@ def test_each_short_carries_its_platform_song_to_the_podcast_folder(tmp_path, mo
     assert "platform_music.json" in open(os.path.join(folder, "README.md")).read()
 
 
-@pytest.mark.parametrize("real,moving,documents_first", [(0, 0, False), (10, 4, False), (10, 7, True)])
+@pytest.mark.parametrize("real,moving,documents_first", [(0, 0, False), (2, 2, False), (10, 4, False), (10, 7, True)])
 def test_recovery_spends_on_motion_before_more_stills(tmp_path, monkeypatch, real, moving, documents_first):
     from types import SimpleNamespace
     import wf1_short, wf1_documents
@@ -433,6 +433,6 @@ def test_recovery_spends_on_motion_before_more_stills(tmp_path, monkeypatch, rea
     monkeypatch.setattr(wf1_short,"_llm",lambda:object())
     ctx=SimpleNamespace(supply=str(tmp_path),log=lambda text:None)
     wf1_short.refill(ctx,dict(title="Company scale",style=dict(id="prints")),pack,
-                     dict(weak_windows=[0],real_seconds=real,moving_seconds=moving))
+                     dict(weak_windows=[0],real_seconds=real,moving_seconds=moving,required_moving_seconds=6))
     assert calls==(["documents"] if documents_first else ["footage"])
     assert old in pack["pictures"]["Google"]
