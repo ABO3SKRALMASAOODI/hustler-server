@@ -51,7 +51,9 @@ def supply(ctx,script,ft,gaps):
             path.write_bytes(content)
         files[di]=path
         with pdfium.PdfDocument(path) as pdf:
-            for pi in range(min(len(pdf),300)):
+            # Relevant appendices and mission procedures can be beyond page
+            # 300. Omitting them is not evidence that the document lacks a view.
+            for pi in range(len(pdf)):
                 with closing(pdf[pi]) as page:
                     with closing(page.get_textpage()) as text:
                         pages.append(dict(document=di,page=pi,text=text.get_text_range()[:650]))

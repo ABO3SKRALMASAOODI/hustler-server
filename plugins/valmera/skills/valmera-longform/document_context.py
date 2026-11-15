@@ -29,7 +29,7 @@ def enrich(ctx, clips):
             if not pdf_path.exists():pdf_path.write_bytes(download(url))
             pages=[]
             with pdfium.PdfDocument(pdf_path) as pdf:
-                for i in range(min(300,len(pdf))):
+                for i in range(len(pdf)):
                     with closing(pdf[i]) as page,closing(page.get_textpage()) as text:
                         pages.append(dict(page=i,text=text.get_text_range()))
             text,usage=story.writer.ask('Locate primary-report pages whose prose explains the exact figures listed below. '
