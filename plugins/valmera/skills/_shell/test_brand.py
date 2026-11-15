@@ -264,11 +264,11 @@ def test_the_tail_falls_like_the_references_and_nothing_hums_under_the_card(tmp_
     prog = stereo_programme(tmp_path / "prog.mp4", last_word=L)
     final = str(tmp_path / "final.mp4")
     info = brand.finish(prog, final, str(tmp_path), accent=sting, last_word_s=L)
-    assert abs(info["tail"]["fall_from_s"] - (L + brand.TAIL_AFTER_WORD_S)) < 1e-6
+    assert abs(info["tail"]["fall_from_s"] - (L + brand.TAIL_AFTER_WORD_S - brand.TAIL_FALL_S)) < 1e-6
     sh = brand.tail_shape(final, PROG_F / FPS, L, 5.0)
     before = brand.tail_shape(prog, PROG_F / FPS - 1.5, L, 1.5)          # the same bed, as the programme had it
-    assert 0.9 <= sh["ends_after_word_s"] <= 1.45, sh                    # ends about 1.2 s after the last word
-    assert 0.7 <= sh["fall_to_minus20_s"] <= 1.3, sh                     # then down 20 dB in about a second
+    assert 0.9 <= sh["ends_after_word_s"] <= 1.4, sh                     # over (20 dB down) about 1.2 s after the last word
+    assert 0.6 <= sh["fall_to_minus20_s"] <= 1.2, sh                     # its fall takes about a second
     assert sh["at_card_vs_bed_db"] <= -12.0, sh                          # the references' drop: 12 dB or more
     assert sh["card_low_vs_bed_low_db"] <= -40.0, sh                     # no bass hum under the card
     assert sh["side_to_mid_lt150_db"] <= -9.0 < before["side_to_mid_lt150_db"], (sh, before)   # near mono low end
@@ -276,3 +276,10 @@ def test_the_tail_falls_like_the_references_and_nothing_hums_under_the_card(tmp_
         assert info["accent"]["sting"]["id"] and sh["card_peak400_low_share"] <= 0.2, sh
     else:
         assert sh["card_peak400_vs_bed_db"] <= -60.0, sh                 # the plain card: nothing under it at all
+
+
+def test_the_tail_starts_its_fall_so_the_sound_is_over_about_1_2_s_after_the_last_word():
+    assert brand.tail_start(6.0, 3.5) == pytest.approx(3.7)                  # over at 4.7 s
+    assert brand.tail_start(78.0, 77.37) == pytest.approx(77.47)             # the card comes 0.63 s after the word: the fall is cut there (a drop)
+    assert brand.tail_start(10.0, 2.0) == pytest.approx(2.2)                 # a long hold of pictures: the sound is over at 3.2 s
+    assert brand.tail_start(6.0, None) == pytest.approx(5.0)                 # unknown: the programme's last second

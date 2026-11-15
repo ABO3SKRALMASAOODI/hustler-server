@@ -88,11 +88,14 @@ DUCK_RAMP_S = 0.05
 # The tail (owner, 15 Nov: a bass hum sat under the card, the old ring of "Too Cool", 88% under 150 Hz for 4 s). It now
 # follows the 28 references' close (lane STING-REF, ref_profile.json close.music_end): their music ends 1.17 s after the
 # last word (p50; p10 0.32 s), and in 15 of 28 it falls 12 dB or more, from its bed to -20 dB in 1.01 s (p50 of 12);
-# their bed is near mono under 150 Hz (side 9.7 dB under mid, p50). So the film's sound holds TAIL_AFTER_WORD_S past the
-# last word, falls TAIL_FALL_DB over TAIL_FALL_S (linear in dB, the references' fall), keeps falling at that rate, and is
-# gone at the card: nothing rings under it (the sting, when it is on, is the card's only sound).
+# their bed is near mono under 150 Hz (side 9.7 dB under mid, p50); the music ends with the film (0.02 s before it,
+# p50). So the film's sound has ended, fallen TAIL_FALL_DB, by TAIL_AFTER_WORD_S after the last word (or at the card,
+# when the programme closes sooner): it falls TAIL_FALL_DB over TAIL_FALL_S (linear in dB, the references' fall), never
+# before TAIL_BREATH_S after the last word, keeps falling at that rate, and is gone at the card: nothing rings under it
+# (the sting, when it is on, is the card's only sound). A programme that closes under a second after its last word cuts
+# the fall short there: a drop of 12 dB or more, as 15 of 28 references end.
 TAIL_AFTER_WORD_S = 1.2
-TAIL_AFTER_MIN_S = 0.3
+TAIL_BREATH_S = 0.1
 TAIL_FALL_S = 1.0
 TAIL_FALL_DB = 20.0
 TAIL_END_FADE_S = 0.03      # the last samples before the card, to digital zero without a click
@@ -352,13 +355,14 @@ def sting_time(prog_s, fps, j, reveal_k, settle_k, grid):
 
 
 def tail_start(prog_s, last_word_s):
-    """Where the film's sound starts its fall (programme seconds): TAIL_AFTER_WORD_S after the last word, early enough
-    that the fall to -20 dB ends with the programme, never sooner than TAIL_AFTER_MIN_S after the word (the references'
-    p10). Without a last word, the programme's last TAIL_FALL_S."""
+    """Where the film's sound starts its fall (programme seconds): TAIL_FALL_S before it has to be over (TAIL_AFTER_WORD_S
+    after the last word, or the programme's end when that comes sooner), never sooner than TAIL_BREATH_S after the word.
+    Without a last word, the programme's last TAIL_FALL_S."""
     if last_word_s is None or not (0 < float(last_word_s) < prog_s):
         return max(0.0, prog_s - TAIL_FALL_S)
     L = float(last_word_s)
-    return max(min(L + TAIL_AFTER_WORD_S, prog_s - TAIL_FALL_S), min(L + TAIL_AFTER_MIN_S, prog_s))
+    end = min(L + TAIL_AFTER_WORD_S, prog_s)
+    return max(end - TAIL_FALL_S, min(L + TAIL_BREATH_S, prog_s))
 
 
 def tail_gain(tt, t0, prog_s):
@@ -478,9 +482,9 @@ def accent_tail(programme, workdir, prog_s, fps, j, outro_s, used=(), has_audio=
 
 
 def tail_shape(final, prog_s, last_word_s=None, outro_s=None):
-    """The delivered film's close, measured on its file (signals only): the level in 50 ms steps, the bed (the sound
-    between the last word and its fall), when the sound ends after the last word (first under the bed by 3 dB), how
-    long it takes from there to -20 dB, how far it has fallen at the card, the loudest 400 ms under the card and its
+    """The delivered film's close, measured on its file (signals only): the level in 50 ms steps, the bed (the loudest
+    50 ms in the quarter second after the last word), when the sound has ended after the last word (20 dB under the
+    bed), how long its fall takes (from 3 dB under to 20 dB under), how far it has fallen at the card, the loudest 400 ms under the card and its
     share under 150 Hz against the bed's, and the side-to-mid ratio under 150 Hz from the last word to the card (else
     over the last 2 s before it)."""
     import numpy as np
@@ -492,16 +496,14 @@ def tail_shape(final, prog_s, last_word_s=None, outro_s=None):
     lv = np.array([10 * np.log10(max(float((m[i:i + hop] ** 2).mean()), 1e-14)) for i in range(0, len(m) - hop + 1, hop)])
     tl = s0 + np.arange(len(lv)) * 0.05
     L = float(last_word_s) if last_word_s is not None else prog_s - 2.0
-    win = (tl >= L + 0.1) & (tl < min(L + 1.1, prog_s - 1.0))
-    if not win.any():
-        win = (tl >= L) & (tl < prog_s)
-    bed = float(np.median(lv[win])) if win.any() else float(lv.max())
+    win = (tl >= L) & (tl < min(L + 0.25, prog_s))           # the bed as the last word leaves it
+    bed = float(lv[win].max()) if win.any() else float(lv.max())
     after = tl >= L
     sm = np.convolve(lv, np.ones(3) / 3, mode="same")
-    end_i = next((i for i in np.where(after)[0] if sm[i] <= bed - 3.0), None)
-    m20 = next((i for i in np.where(after)[0] if sm[i] <= bed - 20.0 and (end_i is None or i >= end_i)), None)
-    end_s = None if end_i is None else float(tl[end_i])
-    fall_s = None if (end_i is None or m20 is None) else float(tl[m20] - tl[end_i])
+    f3 = next((i for i in np.where(after)[0] if sm[i] <= bed - 3.0), None)
+    m20 = next((i for i in np.where(after)[0] if sm[i] <= bed - 20.0 and (f3 is None or i >= f3)), None)
+    end_s = None if m20 is None else float(tl[m20])          # the sound has ended: 20 dB under its bed
+    fall_s = None if (f3 is None or m20 is None) else float(tl[m20] - tl[f3])
     pre = (tl >= prog_s - 0.5) & (tl < prog_s)
     card = x[int((prog_s - s0) * SR):]
     sec = int(0.4 * SR)
