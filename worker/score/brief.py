@@ -351,6 +351,43 @@ def frame_board(src, per, idx, times, rows, cols, cw, ch):
     return im
 
 
+def printed_text_board(src, per):
+    """Give the Scout every retained inscription, without the quality-patch layout's three-region truncation."""
+    regions = per.get("text") or []
+    im = Image.new("RGB", (BOARD_W, BOARD_H), boards.BG)
+    d = ImageDraw.Draw(im)
+    d.text((6, 4), "Printed words in the upload. Read only what the pixels establish; stamps are source seconds.",
+           fill=boards.FG, font=boards.font(15))
+    if not regions:
+        return im
+    cols = 2 if len(regions) > 3 else 1
+    rows = math.ceil(len(regions) / cols)
+    cw, ch = BOARD_W // cols, (BOARD_H - 30) // rows
+    for i, region in enumerate(regions):
+        b = region["box"]
+        at = sum(region["t"]) / 2
+        fr = boards.grab(src, at, width=per["W"])
+        ox, oy = (i % cols) * cw, 30 + (i // cols) * ch
+        d.text((ox + 6, oy + 2), f"{box_s(b)} @{at:.1f}", fill=YEL, font=boards.font(14))
+        if fr is None:
+            d.text((ox + 6, oy + 24), "Frame unavailable", fill=boards.DIM, font=boards.font(15))
+            continue
+        bw, bh = b[2] - b[0], b[3] - b[1]
+        # Enough context to identify the label, without shrinking small names
+        # under the unrelated faces and background around them.
+        crop = (max(0, math.floor((b[0] - bw * .4) * fr.width)),
+                max(0, math.floor((b[1] - bh * .15) * fr.height)),
+                min(fr.width, math.ceil((b[2] + bw * .4) * fr.width)),
+                min(fr.height, math.ceil((b[3] + bh * .15) * fr.height)))
+        if crop[2] <= crop[0] or crop[3] <= crop[1]:
+            continue
+        c = fr.crop(crop)
+        scale = min((cw - 12) / c.width, (ch - 30) / c.height)
+        c = c.resize((max(1, round(c.width * scale)), max(1, round(c.height * scale))), Image.BICUBIC)
+        im.paste(c, (ox + 6, oy + 24))
+    return im
+
+
 def detail_board(src, per, idx):
     """Board 4: small things in the world, magnified. How soft a crop really is, at 1:1 with the final frame. The palette."""
     im = Image.new("RGB", (BOARD_W, BOARD_H), boards.BG)
@@ -684,6 +721,7 @@ def boards_for(work, idx, per, pages=(1, 2, 3, 4)):
             boards.save(frame_board(src, per, idx, times[i * per_board:(i + 1) * per_board], rows, cols, cw, ch), f"{out}/board_{i + 1}.jpg", quality=86)
     if 4 in pages:
         boards.save(detail_board(src, per, idx), f"{out}/board_4.jpg", quality=86)
+        boards.save(printed_text_board(src, per), f"{out}/printed_text.jpg", quality=86)
     return dict(rows=rows, cols=cols, cell=[cw, ch], per_board=per_board), times
 
 
