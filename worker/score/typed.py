@@ -98,6 +98,74 @@ class WindowContext:
     def director_recover_supply(self, **kwargs):
         return recover_supply(self, **kwargs)
 
+    def director_recover_write(self, **kwargs):
+        return recover_write(self, **kwargs)
+
+
+def recover_write(ctx, *, work, cfg, index, sc, bin_doc, original_key,
+                  worker_db, comp, text, refusal, rec):
+    """One Director revision from the real write rejection, with all guards intact.
+
+    Source checks happen after compilation and can reject an otherwise valid
+    Score. Keep the checked pictures and ask the Director to repair its plan,
+    rather than discarding the entire craft pass at this boundary.
+    """
+    from . import brief, call, compiler, direct, film, lower
+    import db as dbx
+    receipt = {"refusal": str(refusal), "result": "not written"}
+    rec["write_recovery"] = receipt
+    try:
+        system, content = brief.load(work)
+        current = ctx.parent.latest_edl()["json"]
+        prompt = (
+            "The normal typed-edit write guard rejected this Score. Revise the Score "
+            "using that source evidence; keep the original customer request, duration, "
+            "story, picture constraints and all necessary source events. Restore any "
+            "distinct action the guard says you removed. Do not claim evidence you have "
+            "not seen, relabel a rejected deletion, or trade away an ask to pass the guard. "
+            "Some earlier cut batches may already be saved; the current source keep is "
+            "below. Return complete replacement JSONL lines (same IDs replace; del removes), "
+            "using the Score's local source clock. The guard will check the revised film again.\n"
+            f"Source-clock offset: {ctx.start}\nCurrent keep, full-source seconds: "
+            + json.dumps(current.get("keep")) + "\nWrite rejection:\n" + str(refusal))
+        answer = call.stream(cfg["models"]["direct"], system,
+            content + [{"type": "text", "text": "Rejected Score:\n" + text},
+                       {"type": "text", "text": prompt}],
+            max_tokens=direct.REPAIR_TOKENS, effort=cfg["effort"]["direct"],
+            purpose="director_write_repair", deadline=time.monotonic() + 90)
+        receipt["usd"] = answer.usd
+        lines, _ = compiler.parse_score(text)
+        revised, bad = direct.merge(lines, answer.text)
+        revised_text = direct.dump(revised)
+        if bad or revised_text == direct.dump(lines):
+            receipt["result"] = "no valid revision"
+            return None
+        candidate = compiler.compile_score(revised_text, work_dir=work)
+        if film.bare(candidate):
+            receipt["result"] = "revision is bare"
+            return None
+        # A write repair cannot trade away asks or compiler validity for a cut.
+        _, original_open, _ = direct.ask_facts(lines, comp, index, sc)
+        _, revised_open, _ = direct.ask_facts(revised, candidate, index, sc)
+        if not set(revised_open).issubset(original_open) or compiler.validate_l1(candidate.l1):
+            receipt["result"] = "revision loses asks or is invalid"
+            return None
+        film._one_mix(ctx, work, candidate)
+        edl, locals_, rep = lower.lower(candidate.l1, work)
+        edl = film._publish(ctx, worker_db, edl, locals_, bin_doc, original_key)
+        result = ctx.apply_score(edl, "Director: revised from source evidence")
+        receipt["result"] = str(result)
+        if not str(result).startswith("EDL v"):
+            return None
+        with open(os.path.join(work, "score.jsonl"), "w", encoding="utf-8") as f:
+            f.write(revised_text)
+        return candidate, revised_text, edl, rep, result
+    except (call.Refused, dbx.JobLeaseLost):
+        raise
+    except Exception as exc:
+        receipt["error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
+        return None
+
 
 def recover_supply(ctx, *, job, cfg, deadline, work, index, sess, per,
                    sc, bin_doc, foot, rec, acquire):
@@ -294,7 +362,8 @@ def _trace(view, work, rec, job):
              "stages": rec.get("stages"), "version": view.director_version,
              "at": rec.get("at"), "failure": rec.get("failure"),
              "meter": rec.get("meter"), "lower": rec.get("lower"),
-             "picture_recovery": rec.get("picture_recovery")}
+             "picture_recovery": rec.get("picture_recovery"),
+             "write_recovery": rec.get("write_recovery")}
     _record_supply(work, rec)
     trace["supply"] = rec.get("supply_trace")
     box = view.director_footage or {}
