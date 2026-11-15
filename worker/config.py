@@ -2733,7 +2733,7 @@ MUSIC_TAIL_VERSION = 2
 # keyed on EDL version, so without this stamp they would be served forever.
 # Natural (unmastered) EDLs keep their cache. Bump when the leveler or the
 # master chain changes what a mastered mix sounds like.
-MASTER_VERSION = 1
+MASTER_VERSION = 2  # encoded loudness verified after every social render
 
 # The delivered file's true peak (worker/true_peak.guard): every render's
 # encoded sound is measured and re-limited when the AAC encode overshot the

@@ -16,6 +16,8 @@ CLASSES = {'same_upload': 0, 'trim_only': 1, 'light_touch': 2, 'edited': 3}
 
 def prefer_floor(candidate, floor):
     """A department floor: an extra crop or silent SFX item earns nothing."""
+    if floor.get('class') in {'same_upload', 'trim_only'}:
+        return False  # A raw/trim-only comparison is never a publishable first film.
     if candidate.get('class') not in CLASSES or floor.get('class') not in CLASSES:
         return False
     if floor.get('taste', {}).get('off_edit_steps', 0) > candidate.get('taste', {}).get('off_edit_steps', 0):
@@ -119,15 +121,26 @@ def choose(ctx, worker_db, started, start_edl, steps, applied, picked, render, b
             return saved
         # Allow the chain its ordinary generation budget. Never silently
         # skip it because the Director consumed the old chain's time limit.
+        ctx.first_film_comparison = True
         result = ctx.apply_score(start_edl['json'], 'build the before-style first-cut comparison')
         if not str(result).startswith('EDL v'):
             raise RuntimeError('cannot build baseline from upload')
         changed = True
         ctx.director_version = None
-        more, floor_applied, floor_picked, floor_render = build()
+        ctx.first_film_comparison = True
+        try:
+            more, floor_applied, floor_picked, floor_render = build()
+        finally:
+            ctx.first_film_comparison = False
         baseline = measure(ctx, worker_db, 'before_style')
         rec['before_style'] = baseline
         if prefer_floor(candidate, baseline):
+            import db
+            preview = getattr(ctx, 'last_preview', None) or {}
+            if not worker_db.run(db.publish_first_film_comparison, ctx.project_id,
+                                 preview.get('render_asset_id'),
+                                 (ctx.latest_edl() or {}).get('version')):
+                raise RuntimeError('comparison was not eligible for publication')
             rec['decision'] = 'before_style'
             ctx.director_version = None
             # No delayed footage upgrade may overwrite the winning floor.
@@ -142,6 +155,7 @@ def choose(ctx, worker_db, started, start_edl, steps, applied, picked, render, b
     except Exception as exc:
         rec['unavailable'] = f'{type(exc).__name__}: {str(exc)[:120]}'
     finally:
+        ctx.first_film_comparison = False
         phases = dict(getattr(ctx, 'first_cut_phases', None) or {})
         phases['never_below'] = rec
         ctx.first_cut_phases = phases

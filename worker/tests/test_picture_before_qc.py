@@ -232,3 +232,10 @@ def test_a_settled_row_is_never_waited_for(meta):
 def test_no_row_means_no_wait():
     db = SimpleNamespace(run=lambda fn, *a, **k: None)
     assert renderer._stored_render(db, 1, 'preview', 1, 9) is None
+
+
+def test_comparison_render_is_not_a_browser_preview(job):
+    result = job.run(quality='approval', first_film=True, first_film_comparison=True)
+    assert job.assets[0]['meta']['variant'] == 'comparison'
+    assert result['variant'] == 'comparison'
+    assert job.assets[0]['meta']['picture_qc'] and job.assets[0]['meta']['audio_qc']

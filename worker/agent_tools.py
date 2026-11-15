@@ -981,6 +981,10 @@ def _execution_policy(ctx):
 def _child_payload(ctx, payload=None):
     body = dict(payload or {})
     body.setdefault("execution_policy", _execution_policy(ctx))
+    if getattr(ctx, "first_film_comparison", False):
+        body["first_film_comparison"] = True
+        if body.get("render_signature"):
+            body["render_signature"] += ":comparison"
     if (getattr(ctx, "index", None) or {}).get("_first_film_source_guard"):
         body["first_film_source_screen"] = ctx.index["source_screen"]
     job = getattr(ctx, 'job', None) or {}
@@ -10729,9 +10733,8 @@ def _auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
                 "or 'pad_blur' (fit the WHOLE picture into the new frame).")
     from score import source_guard
     index = getattr(ctx, "index", None) or {}
-    if index.get("_first_film_source_guard") and source_guard.missing_shot_boxes(
-            index, ctx.latest_edl()["json"].get("keep") or [[0, ctx.duration]]):
-        return set_frame(ctx, ratio, "pad_blur", _measured=True)
+    if index.get("_first_film_source_guard"):
+        mode = "crop"  # local face/saliency tracking below, never a first-film strip
     # A call composited over a broadcast frame (source_layout.py) is framed
     # from its measured layout, not from a face and the detail around it:
     # that read the Diamandis call as a wide shot and fitted it (Oct 2026).
