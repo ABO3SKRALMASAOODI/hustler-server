@@ -400,9 +400,9 @@ def test_coverage_failure_is_explicit():
 
 def test_photo_fallback_requires_completed_research_and_moving_majority(tmp_path):
     gap=[dict(seg=3,seconds=40)]
-    C.save(tmp_path/'initial/footage.json',dict(lines=[dict(i=3,clips=[])]))
+    C.save(tmp_path/'initial/footage.json',dict(lines=[dict(i=3,clips=[])],counts=dict(frames_checked=20,sources_opened=2)))
     assert not C.photo_research_ready(tmp_path,gap,100)
-    C.save(tmp_path/'second/footage.json',dict(lines=[dict(i=3,clips=[])]))
+    C.save(tmp_path/'second/footage.json',dict(lines=[dict(i=3,clips=[])],counts=dict(frames_checked=20,sources_opened=2)))
     assert C.photo_research_ready(tmp_path,gap,100)
     assert not C.photo_research_ready(tmp_path,[dict(seg=3,seconds=46)],100)
     assert not C.photo_research_ready(tmp_path,[dict(seg=4,seconds=10)],100)
@@ -626,8 +626,8 @@ def test_published_caption_keeps_exact_description_and_excludes_other_rows():
 
 
 def test_prior_draft_searches_do_not_count_for_revised_words(tmp_path):
-    C.save(tmp_path/'old/footage.json',dict(lines=[dict(i=3,say='Previous sentence.',clips=[])]))
-    C.save(tmp_path/'current/footage.json',dict(lines=[dict(i=3,say='Revised sentence.',clips=[])]))
+    C.save(tmp_path/'old/footage.json',dict(lines=[dict(i=3,say='Previous sentence.',clips=[])],counts=dict(frames_checked=20,sources_opened=2)))
+    C.save(tmp_path/'current/footage.json',dict(lines=[dict(i=3,say='Revised sentence.',clips=[])],counts=dict(frames_checked=20,sources_opened=2)))
     assert C.video_search_counts(tmp_path,{3:'Revised sentence.'})=={3:1}
 
 

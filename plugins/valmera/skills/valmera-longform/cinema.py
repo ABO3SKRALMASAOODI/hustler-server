@@ -321,7 +321,9 @@ def video_search_counts(root,expected=None):
     """Count saved engine results, including uncovered lines, not attempts."""
     counts={}
     for path in Path(root).glob('*/footage.json'):
-        for i in {r['i'] for r in read(path).get('lines',[]) if expected is None or r.get('say')==expected.get(r['i'])}:
+        result=read(path)
+        if not footage_box.completed_research(result):continue
+        for i in {r['i'] for r in result.get('lines',[]) if expected is None or r.get('say')==expected.get(r['i'])}:
             counts[i]=counts.get(i,0)+1
     return counts
 

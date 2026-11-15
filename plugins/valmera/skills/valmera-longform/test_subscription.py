@@ -28,10 +28,10 @@ def test_footage_proxy_failure_is_one_attempt_with_buffered_deadline(monkeypatch
 
 def test_cached_box_media_does_not_open_network(tmp_path, monkeypatch):
     import footage_box as F
-    (tmp_path / 'footage.json').write_text('{"lines": [], "voices": []}')
+    (tmp_path / 'footage.json').write_text('{"lines": [], "voices": [], "counts": {"frames_checked": 20, "sources_opened": 2}}')
     monkeypatch.setenv('CODEX_PROXY_LOCAL', '1')
     monkeypatch.setattr(F, 'ssh', lambda *a, **k: pytest.fail('cached media opened SSH'))
-    assert F.fetch({}, tmp_path) == dict(lines=[], voices=[])
+    assert F.fetch({}, tmp_path) == dict(lines=[], voices=[], counts=dict(frames_checked=20,sources_opened=2))
 
 
 def test_private_container_installs_guard_before_worker(tmp_path, monkeypatch):
@@ -139,15 +139,29 @@ def test_box_listener_hears_whole_source_once_and_reuses_transcript(tmp_path,mon
     audio=tmp_path/'source.mp4';audio.write_bytes(b'original archive')
     monkeypatch.setenv('FOOTAGE_TRANSCRIPT_CACHE',str(tmp_path/'transcripts'))
     seen=[]
-    model=SimpleNamespace(transcribe=lambda p,**kw:seen.append(kw))
+    def listen(path,**kw):
+        seen.append(kw)
+        return iter([SimpleNamespace(start=1.25,end=4.8,text='First thought.'),
+                     SimpleNamespace(start=17.6,end=19.2,text='Second thought.')]),None
+    model=SimpleNamespace(transcribe=listen)
     monkeypatch.setitem(sys.modules,'transcribe',SimpleNamespace(get_model=lambda:model))
-    monkeypatch.setattr(hear,'splits',lambda p,d:[0.,12.,24.])
-    def listen(path,cuts,idx,tmp,model):
-        model.transcribe(path,beam_size=1,vad_filter=True)
-        return {0:'First thought.',1:'Second thought.'}
-    monkeypatch.setattr(hear,'local_hear',listen)
-    expected=[{'t0':0.,'t1':12.,'text':'First thought.'},{'t0':12.,'t1':24.,'text':'Second thought.'}]
+    monkeypatch.setattr(B.subprocess,'run',lambda *a,**k:None)
+    expected=[{'t0':1.25,'t1':4.8,'text':'First thought.'},{'t0':17.6,'t1':19.2,'text':'Second thought.'}]
     assert B.transcribe(str(audio),24.)==(expected,0.)
     assert B.transcribe(str(audio),24.)==(expected,0.)
-    assert len(seen)==1 and seen[0]['beam_size']==5
+    assert len(seen)==1 and seen[0]['beam_size']==5 and seen[0]['word_timestamps']
     assert not list(tmp_path.glob('local-hear-*'))
+
+
+def test_failed_picture_checks_cannot_count_as_completed_research(tmp_path):
+    import cinema as C
+    import footage_box as F
+    valid=dict(lines=[dict(i=21,say='A repair.',clips=[])],counts=dict(frames_checked=20,sources_opened=2))
+    failed=dict(valid,research_errors=['HTTP 413'])
+    C.save(tmp_path/'failed/footage.json',failed)
+    C.save(tmp_path/'unseen/footage.json',dict(valid,counts=dict(frames_checked=0,sources_opened=2)))
+    assert not F.completed_research(failed)
+    assert C.video_search_counts(tmp_path,{21:'A repair.'})=={}
+    C.save(tmp_path/'checked/footage.json',valid)
+    assert C.video_search_counts(tmp_path,{21:'A repair.'})=={21:1}
+    assert not C.photo_research_ready(tmp_path,[dict(seg=21,seconds=5)],100,{21:'A repair.'})

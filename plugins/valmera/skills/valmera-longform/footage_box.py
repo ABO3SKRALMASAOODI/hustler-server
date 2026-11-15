@@ -27,6 +27,9 @@ if os.environ.get('CODEX_PROXY_LOCAL')=='1':
     import footage.ask
     patch=pathlib.Path(sys.argv[1]).parent/'footage_ask.py'
     exec(compile(patch.read_text(),str(patch),'exec'),vars(footage.ask))
+    import footage.hear
+    patch=pathlib.Path(sys.argv[1]).parent/'footage_hear.py'
+    exec(compile(patch.read_text(),str(patch),'exec'),vars(footage.hear))
 cost_lock=threading.Lock()
 pathlib.Path(sys.argv[2]).mkdir(parents=True,exist_ok=True)
 def local_charge(purpose,request,response,usage):
@@ -237,9 +240,22 @@ if j.get('_voices'):
         rejected_ranges=rejected_ranges,sources=[{k:v for k,v in s.items() if k not in ('proxy','shots','transcript')} for s in sources])
     (pathlib.Path(sys.argv[2])/'footage.json').write_text(json.dumps(result,indent=1))
     sys.exit(0)
-find(j['lines'],j['named'],j['about'],sys.argv[2],1920,1080,
+review_errors=[]
+original_check=run.look.check
+def checked_research(*args,**kwargs):
+    try:return original_check(*args,**kwargs)
+    except Exception as exc:
+        review_errors.append(str(exc)[:300])
+        raise
+run.look.check=checked_research
+result=find(j['lines'],j['named'],j['about'],sys.argv[2],1920,1080,
      max_sources=10, per=2, avoid=j.get('avoid'), strict_lines=True, motion_first=True, scout_motion=True,
      alloc='round', reassign_lost=True, whole_first=True, want_voices=False, log=lambda s:print(s,flush=True))
+result['research_errors']=review_errors
+result['research_complete']=not review_errors and result['counts']['frames_checked']>0 and result['counts']['sources_opened']>0
+(pathlib.Path(sys.argv[2])/'footage.json').write_text(json.dumps(result,indent=1))
+if not result['research_complete']:
+    raise RuntimeError('Archive picture research incomplete; unavailable model checks cannot establish scarce footage: '+str(review_errors))
 '''
 
 
@@ -323,6 +339,12 @@ def probe(idea):
         finally:cleanup_cache(td)
 
 
+def completed_research(result):
+    counts=result.get('counts',{})
+    return bool(counts.get('frames_checked',0)>0 and counts.get('sources_opened',0)>0
+                and not result.get('research_errors') and result.get('research_complete') is not False)
+
+
 def fetch(payload, out, log=print, _port=None):
     out = Path(out)
     probing=bool(payload.get('_probe'))
@@ -331,7 +353,9 @@ def fetch(payload, out, log=print, _port=None):
                           (b'' if probing else Path(__file__).with_name('witness_evidence.py').read_bytes())).hexdigest()
     if rec.exists():
         cached=json.loads(rec.read_text())
-        if not (payload.get('_voices') and not cached.get('voices') and cached.get('adapter_sha256')!=adapter):return cached
+        stale_voice=payload.get('_voices') and not cached.get('voices') and cached.get('adapter_sha256')!=adapter
+        incomplete=not probing and not payload.get('_voices') and not completed_research(cached)
+        if not stale_voice and not incomplete:return cached
         prior=cached.get('adapter_sha256','unversioned')[:12]
         rec.rename(out/('footage-rejected-'+prior+'.json'))
         if (out/'fetch.log').exists():(out/'fetch.log').rename(out/('fetch-rejected-'+prior+'.log'))
@@ -353,6 +377,7 @@ def fetch(payload, out, log=print, _port=None):
             files=client_files(_port)
             if not probing:files['box_hear.py']=Path(__file__).with_name('box_hear.py').read_bytes()
             files['footage_ask.py']=(Path(__file__).resolve().parents[4]/'worker/footage/ask.py').read_bytes()
+            files['footage_hear.py']=(Path(__file__).resolve().parents[4]/'worker/footage/hear.py').read_bytes()
             for name,data in files.items():
                 t=tarfile.TarInfo(name);t.size=len(data);tf.addfile(t,io.BytesIO(data))
         for name, data in [('input.json', json.dumps(payload).encode()), ('fetch.py', (PROBE if probing else REMOTE).encode()),('runner.py',RUNNER.encode())]:
