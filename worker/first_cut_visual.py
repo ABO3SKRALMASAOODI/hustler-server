@@ -1062,7 +1062,7 @@ def _jpeg_size(data):
 
 
 def screen_follow(ctx, steps, started, run, spend, hook_end):
-    """A travelling 2-3x camera on a screen recording kept in its own shape:
+    """A travelling 2-3x camera on a screen recording:
     one region per sentence (the trial model points at it; the text
     column's top after each page change without the lane), eased between.
     Returns the add_zoom_path result or None."""
@@ -1132,8 +1132,22 @@ def screen_follow(ctx, steps, started, run, spend, hook_end):
     keys = screen_keyframes(targets, prog, hook_end)
     if len(keys) < 3:
         return None
+    # The scout sees source pixels; add_zoom_path frames output pixels.
+    # In portrait fit layouts those are different coordinate systems. A
+    # source target near the bottom otherwise pins the zoom to the bottom
+    # of the blurred canvas and pushes the real screen off the top.
+    from agent_tools import _source_box_to_output
+    mapped = []
+    for key in keys:
+        src_t = tl.out_to_src(min(float(key["t"]), max(0.0, prog - 0.001)))
+        if src_t is None:
+            return None
+        rect = _source_box_to_output(ctx, edl, src_t, key["rect"])
+        if rect is None:
+            return None
+        mapped.append(dict(key, rect=rect))
     return run(ctx, steps, "add_zoom_path", {
-        "keyframes": keys, "ease": "cubic_in_out",
+        "keyframes": mapped, "ease": "cubic_in_out",
         "purpose": "the camera travels to the region each sentence is about "
                    "(2-3x, eased) so the screen text reads"}, started)
 
