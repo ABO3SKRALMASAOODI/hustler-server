@@ -409,6 +409,14 @@ def supply(ctx, script):
                 allocate(ctx,script,ft,tail,coverage_words)
                 save(Path(ctx.supply)/'footage/footage.json',ft)
                 shots,clock,_=schedule(sc,coverage_words,ft)
+    from timeline_repair import repair as repair_timeline,retain
+    shots,clock=repair_timeline(ctx,script,ft,coverage_words)
+    report=source_review(ctx,shots)
+    retain(ft,shots,clock,report)
+    from moving_picture import improve
+    improve(ctx,script,ft,coverage_words,shots)
+    shots,clock,_=schedule(sc,coverage_words,ft)
+    save(Path(ctx.supply)/'footage/footage.json',ft)
     still=sum((r['f'][1]-r['f'][0])/FPS for r in shots if r['clip'].get('kind')=='image')
     if not ft['voices']:witness_voices(ctx,script,ft)
     for chapter in sc['chapters']:
@@ -426,7 +434,6 @@ def supply(ctx, script):
         save(nd/'footage_voices.json',placed)
         subprocess.run([PX.NARRATE_PY,reader,'level-voices',str(nd)],check=True,capture_output=True)
     wj=read(nd/'words.json')
-    from timeline_repair import repair as repair_timeline
     repair_timeline(ctx,script,ft,nar['words'])
     save(Path(ctx.supply)/'footage'/'footage.json',ft)
     record=dict(narration_s=wj['duration'],voice=nar['voice'],gate=nar['gate'],footage_clips=sum(len(l['clips']) for l in ft['lines']),
@@ -762,11 +769,38 @@ def source_review(ctx,shots,required=True):
     enrich(ctx,[r['clip'] for r in shots])
     from caption_context import enrich as captions
     captions(ctx,[r['clip'] for r in shots])
-    key=hashlib.sha256(json.dumps(shots,sort_keys=True).encode()+(HERE/'picture_check.py').read_bytes()).hexdigest()[:16]
+    cache=Path(ctx.supply)/'source-evidence'/'checked-shots'
+    signatures=[];digests={}
+    for row in shots:
+        file=row['clip']['path']
+        if file not in digests:digests[file]=digest(file)
+        # Placement/index changes do not alter the sampled original frames.
+        # Words, context, label, source provenance, bytes or checker changes do.
+        material={k:v for k,v in row.items() if k!='f'}
+        material.update(seconds=(row['f'][1]-row['f'][0])/FPS,bytes_sha256=digests[file])
+        signatures.append(hashlib.sha256(json.dumps(material,sort_keys=True).encode()+(HERE/'picture_check.py').read_bytes()).hexdigest())
+    key=hashlib.sha256(json.dumps(dict(shots=shots,signatures=signatures),sort_keys=True).encode()).hexdigest()[:16]
     folder=Path(ctx.supply)/'source-evidence'/key;report=folder/'report.json'
     if report.exists():result=read(report)
     else:
-        result=check(None,shots,folder,PX.FF,source=True);save(report,result)
+        cached={i:read(cache/(signature+'.json')) for i,signature in enumerate(signatures) if (cache/(signature+'.json')).exists()}
+        missing=[i for i in range(len(shots)) if i not in cached]
+        fresh=check(None,[shots[i] for i in missing],folder/'new',PX.FF,source=True) if missing else dict(evidence={},spend_usd=0)
+        evidence={i:dict(row['verdict'],i=i) for i,row in cached.items()}
+        for j,i in enumerate(missing):
+            verdict=fresh['evidence'].get(str(j),fresh['evidence'].get(j))
+            if verdict is not None:evidence[i]=dict(verdict,i=i)
+        total=sum((r['f'][1]-r['f'][0])/FPS for r in shots)
+        moving=sum((r['f'][1]-r['f'][0])/FPS for i,r in enumerate(shots) if evidence.get(i,{}).get('real_moving_footage') is True)
+        rejected=[i for i,v in evidence.items() if v.get('matches') is not True]
+        absent=[i for i in range(len(shots)) if i not in evidence]
+        result=dict(ok=not rejected and not absent,moving_share=moving/total if total else 0,checked=len(evidence),total=len(shots),
+                    missing=absent,rejected=rejected,evidence=evidence,spend_usd=fresh['spend_usd'],cached_shots=len(cached))
+        save(report,result)
+    for i,signature in enumerate(signatures):
+        verdict=result['evidence'].get(str(i),result['evidence'].get(i))
+        if verdict is not None and not (cache/(signature+'.json')).exists():
+            save(cache/(signature+'.json'),dict(verdict=verdict,evidence_report=str(report)))
     if required and not result['ok']:raise ValueError('source pictures require repair: '+str(report))
     return result
 

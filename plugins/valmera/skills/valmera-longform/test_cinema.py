@@ -178,6 +178,53 @@ def test_scarce_image_moves_only_with_a_complete_replacement_for_its_old_use(tmp
     assert not C.duplicate_ranges(shots)
 
 
+def test_moving_replacement_preserves_still_when_new_view_fails(tmp_path,monkeypatch):
+    import moving_picture as M
+    from timeline_repair import anchor
+    from types import SimpleNamespace
+    from PIL import Image
+    photo=tmp_path/'photo.jpg';Image.new('RGB',(32,32),'blue').save(photo)
+    image=dict(clip(str(photo),0,7.8),kind='image',content_hash='one-photo')
+    image['source']={'url':'https://archive.test/photo.jpg'}
+    sc=dict(script=dict(segments=[dict(say='Workshop.',chapter='c')]))
+    words=tmp_path/'words.json';C.save(words,dict(duration=4.9,words=[dict(w='Workshop.',start=.1,end=4.8,seg=0)]))
+    clock=C.F.Clock(str(words),sc['script'])
+    shot=dict(f=[0,150],seg=0,clip=image,src=[0,5],say='Workshop.')
+    ft=dict(lines=[dict(i=0,clips=[image])],editorial=dict(pins=[dict(seg=0,clip=image,src=[0,5],anchors=[anchor(clock,0),anchor(clock,5)])],rejected=[],bank=[]))
+    original=json.dumps(ft,sort_keys=True)
+    monkeypatch.setattr(C,'source_review',lambda *a,**kw:dict(ok=False,moving_share=1))
+    assert M.replacement(SimpleNamespace(),sc,ft,words,shot,[clip('wrong-flight',20,25)]) is None
+    assert json.dumps(ft,sort_keys=True)==original
+    monkeypatch.setattr(C,'source_review',lambda *a,**kw:dict(ok=True,moving_share=1))
+    trial=M.replacement(SimpleNamespace(),sc,ft,words,shot,[clip('right-interior',20,25)])
+    assert trial is not None and json.dumps(ft,sort_keys=True)==original
+    rows,_,_=C.schedule(sc['script'],words,trial)
+    assert len(rows)==1 and rows[0]['clip']['path']=='right-interior'
+
+
+def test_source_verdict_cache_binds_words_and_original_bytes(tmp_path,monkeypatch):
+    import picture_check,document_context,caption_context
+    from types import SimpleNamespace
+    monkeypatch.setattr(document_context,'enrich',lambda *a:None)
+    monkeypatch.setattr(caption_context,'enrich',lambda *a:None)
+    calls=[]
+    def check(film,shots,*args,**kw):
+        calls.append(len(shots))
+        return dict(evidence={i:dict(i=i,matches=True,real_moving_footage=True) for i in range(len(shots))},spend_usd=0)
+    monkeypatch.setattr(picture_check,'check',check)
+    source=tmp_path/'source';source.write_bytes(b'original')
+    row=dict(f=[0,90],seg=0,clip=clip(str(source),0,3),src=[0,3],say='First words.')
+    ctx=SimpleNamespace(supply=str(tmp_path))
+    assert C.source_review(ctx,[row])['ok']
+    shifted=dict(row,f=[90,180])
+    assert C.source_review(ctx,[shifted])['cached_shots']==1
+    changed=dict(shifted,say='Different words.')
+    C.source_review(ctx,[changed])
+    source.write_bytes(b'replaced original')
+    C.source_review(ctx,[changed])
+    assert calls==[1,1,1]
+
+
 def test_archive_revision_preserves_prior_read_and_resumes_without_erasing_new_audio(tmp_path):
     from types import SimpleNamespace
     import archive_script as A
