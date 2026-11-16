@@ -2571,6 +2571,14 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                 style, placement = first_cut_type.place(
                     ctx.latest_edl()["json"], ctx.index, style, W, H,
                     measure=motion_tools._face_measure(ctx))
+                if placement.get("clear") is False:
+                    # This coordinate was chosen by the first-cut chain,
+                    # not requested by the customer. A failed film-wide
+                    # seat must not lock add_captions out of its measured
+                    # shot-aware placement. Keep the words and treatment.
+                    style = {k: v for k, v in style.items()
+                             if k not in ("anchor_y", "position")}
+                    placement = dict(placement, fallback="adaptive placement")
                 if placement.get("moved") or placement.get("clear") is False:
                     steps.append({"tool": "automatic_caption_placement",
                                   "ok": placement.get("clear", True),
