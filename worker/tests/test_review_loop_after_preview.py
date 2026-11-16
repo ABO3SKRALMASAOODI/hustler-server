@@ -18,8 +18,6 @@ import agent_loop
 import agent_tools
 import claude_lane
 import db as dbx
-import music_offer
-import preview_budget
 import request_contract
 from test_quality_gates_advisory import _loop_ctx
 
@@ -258,11 +256,6 @@ def test_an_unresolved_tool_failure_stays_partial_on_a_delivered_edit(monkeypatc
     assert agent_loop._turn_completion(ctx)[0] == "partial"
 
 
-def test_a_music_choice_waits_on_the_customer_without_a_reviewer():
-    assert music_offer.choice_outcome("fulfilled", "Pick a track.") == "awaiting_user"
-    assert music_offer.choice_outcome("partial", "Pick a track.") == "partial"
-
-
 # ---- a second model's opinion informs, it does not reopen ------------------
 
 OPINION = {"verdict": "repair", "findings": [{
@@ -332,12 +325,6 @@ def test_a_critic_opinion_alone_keeps_the_export_open_with_no_note(monkeypatch):
     assert quality["export_ready"] is True
     assert quality["quality_status"] == "passed"
     assert quality["quality_findings"] == []
-
-
-def test_the_trial_repair_allowance_counts_measured_defects_only(monkeypatch):
-    ctx, _note = _rendered(monkeypatch)
-    ctx.request_contract_required = True
-    assert preview_budget.repair_allowed(ctx) is False
 
 
 # ---- the model-call shape left behind --------------------------------------
@@ -493,22 +480,6 @@ def test_a_question_the_editor_asks_waits_on_the_customer():
     assert outcome == "awaiting_user" and billable is False
 
 
-def test_a_music_offer_on_a_turn_that_wrote_nothing_waits_on_the_customer(monkeypatch):
-    """Production 166495: the assessor marked this turn waiting. Without it an
-    open track choice would end blocked, which files a P0 for a question."""
-    ctx, db, _posted, _checkpoint, calls = _delivered(
-        monkeypatch, "Nothing has changed yet.")
-    ctx.versions_written = []
-    ctx.rendered_versions = set()
-    ctx.last_preview = None
-    monkeypatch.setattr(music_offer, "turn_end_offer",
-                        lambda *_a: "Pick one of these three tracks.")
-    result = _run(ctx, db)
-    assert result["outcome"] == "awaiting_user"
-    assert result["status"] == "awaiting_user"
-    assert result["billable"] is False
-
-
 def test_a_write_that_ended_where_it_began_is_a_request_that_changed_nothing(monkeypatch):
     """The credit rule of 25 Oct: versions that end where they began are not a
     delivery. The assessor was the only thing catching this on a reply that
@@ -621,12 +592,12 @@ def test_the_render_preflight_agrees_with_the_write_guard(monkeypatch):
     assert request_contract.preflight(ctx) is None
 
 
-def test_a_channel_a_change_writes_is_not_forbidden_by_an_old_avoid(monkeypatch):
+def test_a_channel_a_change_writes_gets_no_note_from_an_old_avoid(monkeypatch):
     ctx = _compiled(monkeypatch, [
         {"description": "Add a new track", "action": "change", "source_ref": 0},
         {"description": "No music", "action": "avoid", "source_ref": 1,
          "lanes": ["music"]}], changed=["music"])
-    assert request_contract.forbidden_additions(ctx, {"music": [{}]}) == []
+    assert request_contract.write_note(ctx, {}, {"music": [{}]}, set()) == ""
 
 
 def test_the_brief_records_which_message_asked(monkeypatch):
@@ -667,18 +638,16 @@ def test_a_brief_that_omits_what_it_writes_keeps_its_requirements():
     assert value["requirements"][0]["description"] == "Bolder"
 
 
-def test_every_refusal_label_maps_back_to_its_lane():
+def test_every_measured_label_maps_back_to_its_lane():
     import scope_guard
     assert scope_guard.lanes_of(["designed text overlays"]) == {"texts"}
     assert scope_guard.lanes_of(["the picture timing and duration", "picture cuts"]) \
         == {"timeline_timing", "cuts"}
-    assert scope_guard.lanes_of(["picture timing and duration during an "
-                                 "audio-only revision"]) == set()
 
 
 def _walled(monkeypatch, draft="I need you to confirm an override."):
-    """The state p5339 reached: the model froze texts, an old message is the
-    only protection, and the guard has refused the title writes."""
+    """A turn that wrote nothing under a brief whose earlier message protects
+    the titles (the state p5339 reached, before writes stopped being refused)."""
     ctx, db, posted, checkpoint, calls = _delivered(monkeypatch, draft)
     ctx.versions_written = []
     ctx.rendered_versions = set()
@@ -686,54 +655,12 @@ def _walled(monkeypatch, draft="I need you to confirm an override."):
     ctx.semantic_contract["requirements"].append({
         "id": "r2", "action": "preserve", "lanes": ["texts", "cuts"],
         "quote": EARLIER, "description": "Keep the title", "inherited": True})
-    request_contract.note_refused(ctx, ["texts"])
     return ctx, db, posted, checkpoint, calls
 
 
-def test_a_refused_lane_only_an_earlier_message_protects_opens_at_the_nudge(monkeypatch):
-    ctx, db, _posted, _checkpoint, calls = _walled(monkeypatch)
-    _run(ctx, db)
-    assert "texts" not in request_contract.protected_lanes(ctx)
-    nudge = next(m["content"] for m in calls[1]["messages"]
-                 if "timeline has not changed" in str(m.get("content")))
-    assert "lifted for this request" in nudge and "texts" in nudge
-
-
-def test_a_lane_nobody_tried_to_write_stays_protected(monkeypatch):
-    ctx, db, _posted, _checkpoint, _calls = _walled(monkeypatch)
-    _run(ctx, db)
-    assert "cuts" in request_contract.protected_lanes(ctx)
-
-
-def test_what_the_latest_request_protects_stays_protected(monkeypatch):
-    ctx, db, _posted, _checkpoint, calls = _walled(monkeypatch)
-    ctx.semantic_contract["requirements"].append({
-        "id": "r3", "action": "preserve", "lanes": ["texts"], "quote": ASK,
-        "description": "Leave the titles alone", "inherited": False})
-    _run(ctx, db)
-    assert "texts" in request_contract.protected_lanes(ctx)
-    assert not any("lifted for this request" in str(m.get("content"))
-                   for m in calls[1]["messages"])
-
-
-def test_a_brief_from_the_old_build_has_no_inherited_field_and_keeps_its_freeze(monkeypatch):
-    ctx, db, _posted, _checkpoint, _calls = _walled(monkeypatch)
-    del ctx.semantic_contract["requirements"][-1]["inherited"]
-    _run(ctx, db)
-    assert "texts" in request_contract.protected_lanes(ctx)
-
-
-def test_the_ask_user_hold_opens_the_lane_too(monkeypatch):
-    """p5339 went through this door first: refused, refused, ask_user."""
-    ctx, _db, _posted, _checkpoint, _calls = _walled(monkeypatch)
-    ctx.agent_lanes = [{"name": "claude"}]
-    held = agent_tools.ask_user(ctx, "May I override the lock on the titles?")
-    assert held.startswith("CORRECTION_NEEDED")
-    assert "lifted for this request" in held
-    assert "texts" not in request_contract.protected_lanes(ctx)
-
-
-def test_the_write_guard_records_the_lane_it_refused(monkeypatch):
+def test_a_write_over_a_protected_lane_saves_and_names_the_quote(monkeypatch):
+    """Owner, 16 Nov 2026: the brief's protection is information on the
+    write's result; the editor's write saves."""
     from test_director_blueprint import _tool_ctx
 
     ctx, _fake = _tool_ctx()
@@ -748,5 +675,7 @@ def test_the_write_guard_records_the_lane_it_refused(monkeypatch):
     edl["texts"] = (edl.get("texts") or []) + [dict(
         id="tx9", text="New", start=0.0, end=1.0)]
     result = ctx.write_edl(edl, "add a title")
-    assert result.startswith("REJECTED")
-    assert ctx.semantic_contract["refused_lanes"] == ["texts"]
+    assert result.startswith("EDL v"), result
+    assert "NOTE (saved)" in result and "designed text overlays" in result
+    assert EARLIER in result
+    assert "refused_lanes" not in ctx.semantic_contract

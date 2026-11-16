@@ -7,76 +7,6 @@ import edit_scope
 from score import asks
 
 
-@pytest.mark.parametrize('failure', ['unmet', 'check_unavailable', 'ledger_unavailable', 'harm_restore'])
-def test_unmet_edit_restores_exact_edl_and_existing_preview_atomically(monkeypatch, failure):
-    import db
-    before = {'keep': [[0, 4.566]], 'frame': {'fit': 'cover'}, 'texts': [{'text': 'A PAPER SNOWFLAKE'}]}
-    after = dict(before, frame={'fit': 'pad_blur'}, texts=[])
-    saved = []
-    def insert(conn, pid, edl, by, **kw):
-        assert kw['before_version'] == 9
-        saved.append(('edl', copy.deepcopy(edl)))
-        return 10
-    monkeypatch.setattr(db, 'insert_edl', insert)
-    monkeypatch.setattr(db, 'find_render_asset', lambda *a: {'kind': 'render', 'storage_key': 'original-preview.mp4', 'meta': {'edl_version': 8, 'variant': 'preview'}})
-    monkeypatch.setattr(db, 'insert_asset', lambda *a, **k: saved.append(('preview', a[3], k['meta'])))
-    monkeypatch.setattr(asks, 'stored_preview', lambda *a: {'edl_version': 8, 'screening_pages': ['before.jpg']})
-    ctx = NS(turn_start_edl={'json': before, 'version': 8}, latest_edl=lambda: {'json': after, 'version': 9},
-             project_id=1, versions_written=[9], db=NS(run=lambda fn: fn(object())),
-             ask_check_required=True)
-    ledger = {'asks': [{'id': 'a1', 'kind': 'edit'}]}
-    verdict = {'asks': [{'id': 'a1', 'state': 'not_done'}], 'edl_version': 9}
-    if failure == 'harm_restore':
-        # Actual p5533 check: the curtain partly worked, but a shirt hole
-        # required restoration and could not be assigned a removable item id.
-        verdict['asks'][0].update(state='partly', line='The curtain covers most of the background.')
-        verdict['unasked'] = [{'what': 'The composite damages clothing.',
-                              'evidence': 'A dark hole in the white shirt at 13.2s.',
-                              'items': [], 'fix': 'restore'}]
-    elif failure != 'unmet':
-        verdict = None
-    if failure == 'ledger_unavailable':
-        ledger = None
-    assert edit_scope.restore_unmet(ctx, ledger, verdict)
-    assert saved[0] == ('edl', before)
-    assert saved[1][1] == 'original-preview.mp4'
-    assert saved[1][2]['edl_version'] == 10
-    assert ctx.last_preview['screening_pages'] == ['before.jpg']
-    if failure == 'harm_restore':
-        assert ctx.ask_verdict is None  # the discarded composite proves nothing about the restored film
-        assert ctx.unmet_edit_restored['harm'][0]['fix'] == 'restore'
-
-
-@pytest.mark.parametrize('state', ['done', 'partly'])
-def test_partial_requested_delivery_is_retained(state):
-    ctx = NS(turn_start_edl={'json': {'keep': [[0, 4]]}})
-    assert not edit_scope.restore_unmet(ctx, {'asks': [{'id': 'a1', 'kind': 'edit'}]},
-                                       {'asks': [{'id': 'a1', 'state': state}]})
-
-
-def test_old_restore_finding_cannot_roll_back_a_newer_film():
-    ctx = NS(turn_start_edl={'json': {'fx': []}, 'version': 8},
-             latest_edl=lambda: {'json': {'fx': [{'id': 'repaired'}]}, 'version': 10})
-    verdict = {'edl_version': 9, 'asks': [{'id': 'a1', 'state': 'partly'}],
-               'unasked': [{'fix': 'restore', 'evidence': 'Old shirt hole'}]}
-    assert not edit_scope.restore_unmet(ctx, {'asks': [{'id': 'a1', 'kind': 'edit'}]}, verdict)
-
-
-def test_restored_reply_explains_discarded_damage_without_claiming_success(monkeypatch):
-    harm = [{'fix': 'restore', 'what': 'The attempted composite damaged clothing.',
-             'evidence': 'A hole in the shirt.'}]
-    def check(ctx, name, schema, system, payload, **kw):
-        data = json.loads(payload)
-        assert data['rollback_harm'] == harm
-        assert data['retained_changes'] == {}
-        return {'reply': 'The background attempt damaged the shirt, so I restored your previous film. The background change was not kept.',
-                'covered': [], 'offered_alternative': None}, {}
-    monkeypatch.setattr(asks, '_call', check)
-    ctx = NS(turn_start_edl={'json': {'fx': []}}, latest_edl=lambda: {'json': {'fx': []}},
-             unmet_edit_restored={'harm': harm})
-    assert 'was not kept' in edit_scope.disclose(ctx, 'Could not verify.')
-
-
 def test_reply_discloses_actual_delta_even_when_main_ask_failed(monkeypatch):
     def check(ctx, name, schema, system, payload, **kw):
         data = json.loads(payload)
@@ -156,8 +86,12 @@ def test_unsupported_reply_can_offer_a_real_upload_without_failed_tool_call(monk
 
 
 def test_no_second_model_authorizes_the_editors_writes():
-    """Owner, 16 Nov: the editing model decides; edit_scope keeps recovery and disclosure only."""
+    """Owner, 16 Nov: the editing model decides; edit_scope keeps disclosure only,
+    and nothing the editor saved is rolled back after the turn."""
     import agent_tools
+    import agent_loop
     import inspect
     assert not hasattr(edit_scope, "write_refusal") and not hasattr(edit_scope, "SYSTEM")
+    assert not hasattr(edit_scope, "restore_unmet")
     assert "edit_scope.write_refusal" not in inspect.getsource(agent_tools)
+    assert "restore_unmet" not in inspect.getsource(agent_loop)

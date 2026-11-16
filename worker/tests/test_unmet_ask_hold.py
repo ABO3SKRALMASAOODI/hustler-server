@@ -1,8 +1,7 @@
 """Ticket #77, second recurrence (1 Nov 2026, user 2710, job 132664): a
 trial request asking for "speed ramping, slow motion" was rendered without
-any speed change, the follow-up edits were refused (the trial's one
-preview was spent) and the request ended partial. The editor now gets one
-look at the request's undelivered asks before its render."""
+any speed change. The render hold that followed is gone (owner, 16 Nov 2026:
+no holds on the editing path); the ledger's reading stays."""
 import pathlib
 from types import SimpleNamespace
 
@@ -40,26 +39,3 @@ def test_2710_ledger_reads_speed_and_music_as_asked():
     assert "music" in led
 
 
-def test_2710_the_hold_names_speed_once_before_the_render():
-    ctx = _ctx(V8)
-    # the report-only call renders nothing and does not spend the hold
-    assert agent_loop._unmet_ask_hold(
-        ctx, "render_preview", {"report": True, "complete": False}, U2710) is None
-    hold = agent_loop._unmet_ask_hold(
-        ctx, "render_preview", {"report": True, "complete": True}, U2710)
-    assert hold and hold.startswith("NOT RENDERED YET")
-    assert "set_speed" in hold and "slow motion" in hold
-    # music is never held for: Valmera offers tracks instead of picking one
-    assert "music" not in hold.lower()
-    assert agent_loop._unmet_ask_hold(
-        ctx, "render_preview", {"complete": True}, U2710) is None
-
-
-def test_the_hold_stays_out_of_the_way():
-    with_speed = dict(V8, speed=[{"start": 40.5, "end": 44.0, "factor": 0.5}])
-    for ctx, name, text in (
-            (_ctx(with_speed), "render_preview", U2710),          # delivered
-            (_ctx(V8), "set_speed", U2710),                      # not a render
-            (_ctx(V8), "render_preview", "add some music please"),  # music only
-            (_ctx(V8, claude_trial=None), "render_preview", U2710)):  # old lane
-        assert agent_loop._unmet_ask_hold(ctx, name, {"complete": True}, text) is None

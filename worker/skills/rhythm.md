@@ -2,10 +2,10 @@
 
 ## Editorial decision principles
 
-The user's track is the clock; never choose a track. With no track the user
-supplied, uploaded, named or picked, the SPEECH is the clock: its stresses,
-phrase ends and pauses (the prosody grid every punctuation verb binds to).
-Never invent a beat over speech.
+The edit's track is the clock (the user's own, or one Valmera chose for the
+film: owner rule, 13 Nov 2026). With no track in the edit, the SPEECH is the
+clock: its stresses, phrase ends and pauses (the prosody grid every
+punctuation verb binds to). Never invent a beat over speech.
 
 - `analyze_music` reads the user's track once (cached by its sound):
   tempo, beats, bars, sections (intro / build / drop / break / outro),

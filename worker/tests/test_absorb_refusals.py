@@ -1039,10 +1039,3 @@ def test_a_grade_given_in_percent_is_read_as_percent(zoom_ctx):
     assert zoom_ctx.edl["effects"]["grade_custom"]["contrast"] == 0.96
 
 
-def test_the_reread_sees_the_stored_change_not_the_calls_dialect():
-    before = {"keep": [[0.0, 9.0]], "effects": {"grade_custom": None, "fade_out_s": 3.0}}
-    after = {"keep": [[0.0, 9.0]], "effects": {
-        "grade_custom": {"contrast": 1.04, "highlights": -0.08, "tint": None},
-        "fade_out_s": 3.0}}
-    assert agent_tools._what_changed(before, after) == {
-        "effects.grade_custom": {"contrast": 1.04, "highlights": -0.08}}

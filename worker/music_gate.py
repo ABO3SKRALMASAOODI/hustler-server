@@ -1,38 +1,33 @@
-"""Owner rule 1 in code: agents never choose music (track 0C).
+"""Music provenance: who chose each track in the edit, stamped as information.
 
-Music reaches an edit only when the user supplies it (an upload, or the
-sound of a clip they sent), names it (a song they asked for, fetched through
-find_song / fetch_url) or picks it (a library track they chose). Every NEW
-music item carries that provenance (``MusicItem.provenance``,
-INTERFACES.md §4.3); an item written before the field existed reads as
-``legacy`` and still renders — no migration rewrites a stored EDL, because
-that would change its signature and bust its cached renders.
+The owner's rule (13 Nov 2026) replaces "agents never choose music": "Valmera
+may choose music itself, guided by the references (the kind of music creators
+use for each kind of video); optimise for the highest quality; the customer
+decides whether to keep it." Nothing here refuses a track for who chose it
+(owner, 16 Nov 2026: no refusals on the editing path). Every NEW music item
+carries its provenance (``MusicItem.provenance``, INTERFACES.md §4.3), read
+from the PROJECT ASSET, never from what a write claims:
 
-Where the gate holds:
-  * ``check_write`` runs inside every agent EDL write (ToolContext.write_edl),
-    so add_music, add_library_music, apply_look(music=), swap_music and
-    apply_edit_batch writes to the music layer all pass through it. A track
-    already in the edit (or anywhere in its history) keeps its provenance:
-    gain, fit, mute and split edits never need a new pick. An MCP edit batch
-    is written by the backend (routes/video.apply_edit_batch_core), which
-    loads this file by path and runs the same pure core (``decide``,
-    ``gate_items``) — so nothing here imports worker-only modules at load.
-  * ``provenance_for`` derives provenance from the PROJECT ASSET, never from
-    what a write claims: an uploaded file is ``user_upload``; a link fetched
-    with fetch_url is ``user_named``; a library copy is
-    ``user_picked_library`` only with a pick (below); a track an agent found
-    by searching the web, or a sound effect, is refused as music.
-  * A library pick: ``ask_user`` opens an OFFER when its question lists
-    library tracks; the user's reply picks one (by slug, title or position
-    in the offer). In the in-app agent the reply is the turn's own user
-    message; over MCP the caller passes ``user_pick`` — the pick token
-    ask_user returned plus the user's own words. A user who names a library
-    track outright ("use Warm Tape") has picked it too. "Some background
-    music", a mood or "you choose" never picks: the agent offers the list
-    and the user chooses.
+  * an uploaded file is ``user_upload``; a link the user named (find_song,
+    fetch_url) is ``user_named``;
+  * a library track the user picked (from an offer, or by naming it) is
+    ``user_picked_library``;
+  * any track Valmera chose itself (a library track nobody picked, music_choose's
+    pick, web-found music, the sound of a clip Valmera found) is
+    ``valmera_chosen``: the customer sees it and can remove it.
 
-Offers and picks live in app_kv (no migration); every read and write is
-best effort and never raises into a tool.
+An item written before the field existed reads as ``legacy`` and still
+renders. A track already in the edit (or anywhere in its history) keeps its
+provenance. The only refusal left is a technical one: a key that is not audio
+of this project cannot be placed. An MCP edit batch is written by the backend
+(routes/video.apply_edit_batch_core), which loads this file by path and runs
+the same pure core (``decide``, ``gate_items``), so nothing here imports
+worker-only modules at load.
+
+Owner rule 2 (sound effects come only from the approved library while web
+sounds are off) is a repair, never a refusal: a sound search_sfx once fetched
+is placed as the closest recording of the approved library and the result
+says so (``repair_web_sounds``).
 """
 
 import json
@@ -52,29 +47,11 @@ _LIB_KEY_RE = re.compile(r"^music/\d+/library-([a-z0-9][a-z0-9-]{0,80})\.mp3$")
 _LEGACY_KEY_RE = re.compile(r"^legacy-music/([a-z0-9][a-z0-9-]{0,80})\.mp3$")
 _TOKEN_RE = re.compile(r"\bpk_[0-9a-f]{12}\b")
 
-REFUSE_PICK = (
-    "REJECTED: agents never choose music (owner rule). Nothing was placed. "
-    "Offer library tracks to the user with ask_user (2-4 exact titles from "
-    "list_music_library, in the moods that fit) and place the one they pick; "
-    "or use their own upload or a song they name. 'Some background music', a "
-    "mood or 'you choose' is not a pick.")
-
-
-WEB_SEARCH_REFUSAL = (
-    "REJECTED: that track was found by an agent web search, and agents never "
-    "choose music. Use the user's own upload, a song they named (find_song, "
-    "fetch_url) or a library track they pick.")
-SFX_REFUSAL = ("REJECTED: that file is a sound effect, not music — place it "
-               "with add_sfx.")
-AGENT_CLIP_REFUSAL = (
-    "REJECTED: that sound was taken from a clip an agent found or generated "
-    "(stock, AI video), and agents never choose music. Use the user's own "
-    "upload or clip, a song they named (find_song, fetch_url) or a library "
-    "track they pick.")
+NOT_MUSIC = "REJECTED: '{key}' is not an audio asset in this project."
 
 
 class MusicGateError(ValueError):
-    """A new music item without an allowed provenance."""
+    """A new music item without a provenance stamp."""
 
 
 # ── helpers ─────────────────────────────────────────────────────────────
@@ -257,7 +234,7 @@ def offer_note(offer):
     sees it: their reply itself is checked)."""
     return (f" [Valmera pick token {offer['token']}: after the user picks, "
             f"call add_library_music(slug, user_pick='{offer['token']} "
-            "<their own words>'). Never choose for them.]")
+            "<their own words>') so the track is stamped as their pick.]")
 
 
 def latest_offer(ctx):
@@ -352,8 +329,7 @@ def choice_note(ctx, text, previous_reply=None, previous_reply_id=None):
     if not choice:
         return ''
     return ("The customer's current answer selects library track "
-            + choice['slug'] + " from the previously displayed offer. This is "
-            "an explicit user pick, not permission for you to choose. Load the "
+            + choice['slug'] + " from the previously displayed offer. Load the "
             "audio tools, place that exact track with add_library_music, and "
             "verify it. Do not offer a replacement list or ask them to pick again.")
 
@@ -446,30 +422,37 @@ def identify(text, offer_slugs=()):
 
 
 def resolve_pick(ctx, slug, user_pick=None):
-    """(record, error) for placing library track ``slug``.
+    """(record, None) for placing library track ``slug``: never an error.
 
-    A track the user picked before in this project stays picked. Otherwise
-    the pick comes from the user: the in-app turn's own message, or over
-    MCP ``user_pick`` (the token ask_user returned plus the user's words).
-    A position ("the second one") needs the offer ask_user opened; a slug
-    or title names the track outright."""
+    A track the user picked before in this project stays picked. Otherwise the
+    user's own words are read for a pick: the in-app turn's own message, or
+    over MCP ``user_pick`` (the token ask_user returned plus the user's
+    words). When they picked this track the record is their pick
+    (``via`` chat / chat_read / mcp, remembered for the project); when they
+    did not, Valmera is choosing it (``via`` "valmera", owner rule of
+    13 Nov 2026), and ``customer_named`` says which track they did name, if
+    any, so the editor can be told."""
     prior = picked(ctx, slug)
     if prior:
         return prior, None
     offer = latest_offer(ctx)
     mcp = is_mcp(ctx)
     evidence = (user_pick if mcp else getattr(ctx, "user_message", "")) or ""
-    if mcp and offer and offer.get("token") and offer["token"] not in str(
-            evidence) and identify(evidence, ()) != slug:
-        return None, (REFUSE_PICK + " Over MCP pass user_pick: the pick "
-                      "token ask_user returned plus the user's own words.")
     slugs = (offer or {}).get("slugs") or ()
     same_turn = (offer and not mcp and offer.get("job_id") is not None and
                  offer.get("job_id") == (getattr(ctx, "job", None)
                                          or {}).get("id"))
-    who = identify(evidence, () if same_turn else slugs)
+    if mcp and offer and offer.get("token") and offer["token"] not in str(evidence):
+        # Over MCP a position ("the third one") answers the offer only with
+        # the pick token ask_user returned; without it only a named track
+        # is the user's pick.
+        slugs = ()
+    try:
+        who = identify(evidence, () if same_turn else slugs)
+    except Exception:  # noqa: BLE001 — an unreadable catalog is no pick
+        who = None
     via = "mcp" if mcp else "chat"
-    if who is None and not mcp:
+    if who is None and not mcp and str(evidence).strip():
         # Ticket #1088: the exact rules did not see a pick ("Calm current"
         # for "Calm Currents"); a model reads the user's own message against
         # the offer they answered (or the catalog, before any offer).
@@ -478,17 +461,20 @@ def resolve_pick(ctx, slug, user_pick=None):
                              "" if same_turn else (offer or {}).get("question"))
         if verdict:
             who, via = verdict["slug"], "chat_read"
-    if who != slug:
-        if who:
-            return None, (f"REJECTED: the user picked '{who}', not '{slug}'. "
-                          "Place the track they chose.")
-        return None, REFUSE_PICK
-    record = {"slug": slug, "at": time.time(),
-              "via": via,
-              "offer": (offer or {}).get("token"),
-              "evidence": " ".join(str(evidence).split())[:200]}
-    _remember_pick(ctx, record)
-    return record, None
+    if who == slug:
+        record = {"slug": slug, "at": time.time(), "via": via,
+                  "offer": (offer or {}).get("token"),
+                  "evidence": " ".join(str(evidence).split())[:200]}
+        _remember_pick(ctx, record)
+        return record, None
+    return {"slug": slug, "at": time.time(), "via": "valmera",
+            "customer_named": who}, None
+
+
+def pick_provenance(record):
+    """The provenance a resolve_pick record stamps."""
+    return ("valmera_chosen" if (record or {}).get("via") == "valmera"
+            else "user_picked_library")
 
 
 # ── named songs ─────────────────────────────────────────────────────────
@@ -578,21 +564,23 @@ def _existing(edl, key):
 def decide(key, asset, *, is_picked, seen_before, pick=None, source=None):
     """(provenance, error) for a track new to the edit, from its project
     ``asset`` row (never from what a write claims). Pure: the worker's write
-    gate and the backend's MCP batch gate (routes/video.py) share it.
+    path and the backend's MCP batch path (routes/video.py) share it.
 
-    ``is_picked(slug)``: the user picked that library track before in this
-    project. ``seen_before(key)``: the track played in an earlier version, so
-    re-adding it is not a new choice (provenance stays legacy). ``pick(slug)``
-    resolves a pick from the user's own words now; without it an unpicked
-    library track is refused. ``source``: the asset row of the video an
-    extracted soundtrack came from (``extracted_from``), when known — the
-    sound of a clip an agent found is not the user's."""
+    Never refuses for who chose a track: what the user supplied, named or
+    picked is stamped so, and anything else is ``valmera_chosen`` (owner,
+    13 Nov 2026: Valmera may choose the music; the customer decides whether
+    to keep it). provenance None means the track played in an earlier version
+    (``seen_before``), so it inherits legacy. ``is_picked(slug)``: the user
+    picked that library track before in this project. ``pick(slug)`` reads a
+    pick from the user's own words now -> (provenance, None). ``source``: the
+    asset row of the video an extracted soundtrack came from. The only error
+    is technical: a key that is no audio asset of this project."""
     kind = classify_asset(asset, key)
+    if kind == "not_music":
+        return None, NOT_MUSIC.format(key=key)
     if kind in ("user_upload", "user_named"):
         if source is not None and agent_acquired(source):
-            if seen_before(key):
-                return None, None
-            return None, AGENT_CLIP_REFUSAL
+            return (None, None) if seen_before(key) else ("valmera_chosen", None)
         return kind, None
     if kind == "library":
         slug = library_slug(key, (asset or {}).get("meta"))
@@ -604,14 +592,10 @@ def decide(key, asset, *, is_picked, seen_before, pick=None, source=None):
             return None, None
         if slug and pick is not None:
             return pick(slug)
-        return None, REFUSE_PICK
-    if kind == "web_search":
-        if seen_before(key):
-            return None, None
-        return None, WEB_SEARCH_REFUSAL
-    if kind == "sfx":
-        return None, SFX_REFUSAL
-    return None, (f"REJECTED: '{key}' is not a music asset in this project.")
+        return "valmera_chosen", None
+    if seen_before(key):
+        return None, None
+    return "valmera_chosen", None
 
 
 def provenance_for(ctx, storage_key, edl=None, user_pick=None,
@@ -645,8 +629,8 @@ def provenance_for(ctx, storage_key, edl=None, user_pick=None,
             source = None
 
     def _pick(slug):
-        _rec, err = resolve_pick(ctx, slug, user_pick=user_pick)
-        return (None, err) if err else ("user_picked_library", None)
+        rec, _err = resolve_pick(ctx, slug, user_pick=user_pick)
+        return pick_provenance(rec), None
 
     return decide(key, asset, is_picked=lambda slug: bool(picked(ctx, slug)),
                   seen_before=lambda k: _seen_in_history(ctx, k), pick=_pick,
@@ -654,14 +638,14 @@ def provenance_for(ctx, storage_key, edl=None, user_pick=None,
 
 
 def gate_items(prev_edl, new_edl, decide_key):
-    """Gate one EDL write against its previous version (pure core of
-    ``check_write``; the backend's MCP batch gate uses it too). Every music
+    """Stamp one EDL write's music against its previous version (pure core
+    of ``check_write``; the backend's MCP batch path uses it too). Every music
     item whose track is new to the edit gets the provenance
     ``decide_key(storage_key) -> (provenance, error)`` returns, stamped in
     place on ``new_edl``; a track already there keeps its provenance whatever
-    the write claims. Returns an error string, or None when the write may
-    proceed. A decision that raises refuses that track (fail closed) instead
-    of failing the write with a traceback."""
+    the write claims. Returns an error string only for a key that is no audio
+    of this project, else None. A decision that raises stamps the track as
+    Valmera's choice: provenance is information, never a reason to fail."""
     items = (new_edl or {}).get("music") or []
     if not items:
         return None
@@ -685,39 +669,30 @@ def gate_items(prev_edl, new_edl, decide_key):
         if key not in decided:
             try:
                 prov, err = decide_key(key)
-            except Exception:  # noqa: BLE001 — never a traceback, never a pass
-                prov, err = None, ("REJECTED: who chose this track could not "
-                                   "be verified, so nothing was placed; try "
-                                   "again.")
+            except Exception:  # noqa: BLE001 — never a traceback, never a refusal
+                prov, err = "valmera_chosen", None
             if err:
-                return "music gate: " + err.replace("REJECTED: ", "", 1)
+                return "music: " + err.replace("REJECTED: ", "", 1)
             decided[key] = prov
         m["provenance"] = decided[key]
     return None
 
 
 def check_write(ctx, prev_edl, new_edl):
-    """Gate one agent EDL write. Stamps provenance on every music item whose
-    track is new to the edit (in place on ``new_edl``) and keeps the
-    provenance of tracks already there; returns an error string, or None
-    when the write may proceed."""
+    """Stamp one agent EDL write's music: provenance on every music item
+    whose track is new to the edit (in place on ``new_edl``), the provenance
+    of tracks already there kept. Returns an error only for a key that is no
+    audio of this project (it cannot play), else None."""
     return gate_items(prev_edl, new_edl,
                       lambda key: provenance_for(ctx, key))
 
 
-# ── owner rule 2 on the write path (web sounds) ─────────────────────────
+# ── owner rule 2 on the write path (web sounds): a repair ───────────────
 # Sound effects come only from the owner-approved library. With the web-SFX
-# chain off, add_sfx refuses a sound an earlier search_sfx fetched into the
-# project; an edit batch (the agent's apply_edit_batch, or the backend's MCP
-# batch) could still place that asset by key. These pure helpers let both
-# write paths refuse it the same way. Sounds already in the edit keep
-# playing and may be moved or rewritten with their layer.
-
-WEB_SOUND_REFUSAL = (
-    "REJECTED: that sound was found online by search_sfx, and web sounds are "
-    "off — sound effects come only from the owner-approved library "
-    "(list_sound_library) or a file the user supplied.")
-
+# chain off, a sound an earlier search_sfx fetched into the project is never
+# refused: wherever a write (add_sfx, an edit batch) places it, the closest
+# recording of the approved library of real recordings plays instead, and
+# the result says so. Sounds already in the edit keep playing.
 
 def web_found_sound(asset):
     """A sound search_sfx / add_web_sfx fetched from the web (the fetch
@@ -736,25 +711,23 @@ def new_sfx_keys(prev_edl, new_edl):
                    and s.get("storage_key") not in before})
 
 
-def gate_web_sounds(prev_edl, new_edl, asset_of):
-    """Error string when the write adds a web-found sound new to the edit,
-    else None. ``asset_of(key)`` returns the project asset row (or None).
-    The caller runs this only while web sounds are off. A lookup that raises
-    refuses (fail closed) instead of failing the write with a traceback."""
+def web_sound_keys(prev_edl, new_edl, asset_of):
+    """The keys new to the edit that a web search fetched (pure; the
+    caller asks only while web sounds are off). A lookup that raises reads
+    as not web-found: the sound plays as written."""
+    out = []
     for key in new_sfx_keys(prev_edl, new_edl):
         try:
             asset = asset_of(key)
         except Exception:  # noqa: BLE001
-            return ("REJECTED: where this sound came from could not be "
-                    "verified, so nothing was placed; try again.")
+            continue
         if web_found_sound(asset):
-            return WEB_SOUND_REFUSAL
-    return None
+            out.append(key)
+    return out
 
 
 def grant_sfx(ctx, storage_key):
-    """add_sfx verified this key in this call (_resolve_sfx refuses a
-    web-found sound while web sounds are off): the write gate skips it."""
+    """add_sfx resolved this key in this call: the write repair skips it."""
     root = _root(ctx)
     try:
         grants = getattr(root, "_sfx_grants", None) or set()
@@ -765,7 +738,7 @@ def grant_sfx(ctx, storage_key):
 
 
 def _sfx_cleared(ctx, key):
-    """No lookup needed: add_sfx verified it, or it is an approved library
+    """No lookup needed: add_sfx resolved it, or it is an approved library
     recording (never web-found)."""
     if key in (getattr(_root(ctx), "_sfx_grants", None) or ()):
         return True
@@ -776,21 +749,122 @@ def _sfx_cleared(ctx, key):
         return False
 
 
-def check_sfx_write(ctx, prev_edl, new_edl):
-    """Owner rule 2 inside every agent EDL write (ToolContext.write_edl)."""
+def _web_sounds_on():
     try:
         import sfx_search
-        if sfx_search.available():
-            return None
+        return bool(sfx_search.available())
     except Exception:  # noqa: BLE001 — the flag unreadable reads as off
-        pass
-    keys = [k for k in new_sfx_keys(prev_edl, new_edl)
-            if not _sfx_cleared(ctx, k)]
-    if not keys:
+        return False
+
+
+def _signal_nearest(path):
+    """The approved recording nearest a sound file on the sound engine's
+    signal ruler (score.sound_signal.distance over the library's measured
+    shapes), or None when the file cannot be read."""
+    from score import sound as SD
+    from score import sound_choice as CH
+    from score import sound_signal as SS
+    import sound_library
+    samples = SD.pcm(path, SS.SR, 2)
+    if not len(samples):
         return None
-    return gate_web_sounds(
-        prev_edl, {"sfx": [{"storage_key": k} for k in keys]},
-        lambda key: ctx.db.run(_dbx().asset_by_key, ctx.project_id, key))
+    shape = SS.describe(samples.mean(axis=1))
+    if not shape:
+        return None
+    playable = {r["id"] for r in sound_library.playable()}
+    rows = [(SS.distance(shape, d), sid) for sid, d in
+            CH.describe_library(SD.library(), SD.SOUNDS, SD.pcm).items()
+            if sid in playable]
+    return min(rows)[1] if rows else None
+
+
+def library_stand_in(ctx, asset):
+    """(sound_id, how) of the approved recording closest to a web-found
+    sound: measured on its signal when its file can be read, else the
+    library recording its own title describes, else the library's general
+    pick for a one-shot. Never raises; (None, "") with no library."""
+    try:
+        import sound_library
+    except Exception:  # noqa: BLE001
+        return None, ""
+    try:
+        import agent_tools
+        sid = _signal_nearest(agent_tools._asset_local_path(ctx, asset))
+        if sid:
+            return sid, "nearest by its measured sound"
+    except Exception as exc:  # noqa: BLE001 — the title still describes it
+        print(f"[web sound] not measured: {str(exc)[:160]}", flush=True)
+    meta = (asset or {}).get("meta") or {}
+    title = " ".join(str(meta.get(k) or "") for k in ("title", "filename"))
+    try:
+        hits = sound_library.search(title, 1)
+        if hits:
+            return hits[0]["id"], "the library recording its title describes"
+        for role in ("whoosh", "hit", "click", "pop"):
+            row = sound_library.pick(role, title)
+            if row:
+                return row["id"], "the library's general one-shot"
+    except Exception:  # noqa: BLE001
+        pass
+    return None, ""
+
+
+def repair_web_sounds(ctx, prev_edl, new_edl):
+    """Owner rule 2 inside every agent EDL write (ToolContext.write_edl), as
+    a repair: each sound-effect item new to the edit whose sound a web search
+    fetched plays the closest approved library recording instead (in place
+    on ``new_edl``, its hit on the same moment). Returns the note that says
+    so, or "". Never raises; a sound with no stand-in plays as written."""
+    if _web_sounds_on():
+        return ""
+    keys = [k for k in new_sfx_keys(prev_edl, new_edl) if not _sfx_cleared(ctx, k)]
+    if not keys:
+        return ""
+    assets = {}
+
+    def asset_of(key):
+        assets[key] = ctx.db.run(_dbx().asset_by_key, ctx.project_id, key)
+        return assets[key]
+    lines = []
+    try:
+        import motion_tools
+        import sound_library
+        web = web_sound_keys(prev_edl, {"sfx": [{"storage_key": k} for k in keys]},
+                             asset_of)
+    except Exception as exc:  # noqa: BLE001 — the sounds play as written
+        print(f"[web sound] repair skipped: {str(exc)[:160]}", flush=True)
+        return ""
+    for key in web:
+        try:
+            sid, how = library_stand_in(ctx, assets.get(key))
+            if not sid:
+                continue
+            lib_key = motion_tools.ensure_library_asset(ctx, sid)
+            row = sound_library.get(sid) or {}
+        except Exception as exc:  # noqa: BLE001 — this sound plays as written
+            print(f"[web sound] {key}: not replaced: {str(exc)[:160]}", flush=True)
+            continue
+        for item in (new_edl or {}).get("sfx") or []:
+            if not isinstance(item, dict) or item.get("storage_key") != key:
+                continue
+            hit = float(item.get("at") or 0.0)
+            item["storage_key"] = lib_key
+            for k in ("offset_s", "dur_s"):
+                item.pop(k, None)
+            pl = sound_library.place(sid, hit)
+            item["at"] = pl["at"]
+            for k in ("offset_s", "dur_s"):
+                if pl[k]:
+                    item[k] = pl[k]
+            if row.get("gain_db") is not None:
+                item["gain_db"] = float(row["gain_db"])
+        name = str(((assets.get(key) or {}).get("meta") or {}).get("filename") or key)
+        lines.append(f"'{name[:60]}' -> {sid} ({how})")
+    if not lines:
+        return ""
+    return ("SOUND REPLACED (saved): web sounds are off, so the closest recording of the "
+            "approved library plays instead: " + "; ".join(lines)
+            + ". Tell the user which sound plays; remove_sfx takes it out.")
 
 
 def validate_new_items(prev_edl, new_edl):
@@ -806,5 +880,5 @@ def validate_new_items(prev_edl, new_edl):
         if m.get("provenance") not in PROVENANCES:
             raise MusicGateError(
                 f"music[{i}] ({m.get('id') or m.get('storage_key')}) has no "
-                "provenance: new music must be user_upload, user_named or "
-                "user_picked_library — agents never choose music.")
+                "provenance stamp: new music is user_upload, user_named, "
+                "user_picked_library or valmera_chosen.")

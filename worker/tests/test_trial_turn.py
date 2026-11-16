@@ -294,44 +294,13 @@ def test_the_trial_lane_gets_the_head_start(monkeypatch):
     assert ctx.editing_metrics["trial_head_start"]["intent"] == "generic"
 
 
-@pytest.mark.parametrize("kind", ["grandfathered", "new_subscriber"])
-def test_render_cap_unchanged_outside_the_trial_lane(kind):
-    # main (25 Oct): a Studio request has no render cap; the trial's cap
-    # never reaches another lane
-    ctx = _lane_ctx(kind)
-    assert agent_loop._trial_preview_cap(ctx, None) is None
-    assert not agent_loop._trial_lane(ctx)
-    ctx.trial_preview_cap = agent_loop._trial_preview_cap(ctx, None)
-    ctx.trial_previews = 99
-    assert agent_loop._trial_render_refusal(ctx, "render_preview") is None
-    assert agent_loop._trial_render_refusal(ctx, "keep_segments") is None
-
-
 def test_a_count_of_previews_never_stops_a_trial_request():
     # p5518: the second attempt at the customer's one request was refused.
-    # The trial's dollar cap bounds it, as credits bound a subscriber.
-    ctx = _lane_ctx("trial")
-    assert config.CLAUDE_TRIAL_MAX_PREVIEWS == 0
-    assert agent_loop._trial_preview_cap(ctx, None) is None
-    ctx.trial_preview_cap = agent_loop._trial_preview_cap(ctx, None)
-    ctx.trial_previews = 99
-    assert agent_loop._trial_render_refusal(ctx, "render_preview") is None
-    assert agent_loop._trial_render_refusal(ctx, "keep_segments") is None
-
-
-def test_a_cap_set_by_hand_still_leaves_reads_open(monkeypatch):
-    monkeypatch.setattr(config, "CLAUDE_TRIAL_MAX_PREVIEWS", 2)
-    ctx = _lane_ctx("trial")
-    assert agent_loop._trial_preview_cap(ctx, None) == 2
-    assert agent_loop._trial_lane(ctx)
-    ctx.trial_preview_cap = 2
-    ctx.trial_previews = 1
-    assert agent_loop._trial_render_refusal(ctx, "render_preview") is None
-    ctx.trial_previews = 2
-    assert "REJECTED" in agent_loop._trial_render_refusal(ctx, "render_preview")
-    assert "REJECTED" in agent_loop._trial_render_refusal(ctx, "keep_segments")
-    # reads stay open after the last preview
-    assert agent_loop._trial_render_refusal(ctx, "get_edl") is None
+    # The trial's dollar cap bounds it, as credits bound a subscriber; the
+    # preview cap and its refusal are gone (16 Nov 2026).
+    assert not hasattr(config, "CLAUDE_TRIAL_MAX_PREVIEWS")
+    assert not hasattr(agent_loop, "_trial_render_refusal")
+    assert not hasattr(agent_loop, "_trial_preview_cap")
 
 
 @pytest.mark.parametrize("model", ["gpt-6-luna", "gpt-6.1-sol", "gpt-5.4-mini",
@@ -468,32 +437,6 @@ def test_the_head_start_switches_the_second_opinions_off(monkeypatch):
     assert agent_tools._review_program_story(ctx, {"version": 13}) is None
 
 
-def test_a_prepared_trial_turn_cannot_undo_the_first_cuts_craft():
-    ctx = _lane_ctx("trial")
-    ctx.trial_prep = {"intent": "generic"}
-    ctx.trial_kept_ids = {"motion": {"mg1", "mg2"}, "zoom": {"zm5"},
-                          "vector": {"vec1"}}
-    for name, args in (("set_motion_graphic", {"id": "mg1", "params": {"y": 0.2}}),
-                       ("remove_motion_graphic", {"id": "mg2"}),
-                       ("remove_zoom", {"id": "zm5"}),
-                       ("remove_vector_graphic", {"id": "vec1"})):
-        out = agent_loop._kept_craft_refusal(ctx, name, args)
-        assert out and out.startswith("REJECTED: KEPT")
-    # what the editor added itself this turn stays editable
-    assert agent_loop._kept_craft_refusal(
-        ctx, "remove_zoom", {"id": "zm9"}) is None
-    assert agent_loop._kept_craft_refusal(
-        ctx, "cut_range", {"start": 1, "end": 2}) is None
-
-
-@pytest.mark.parametrize("kind", ["grandfathered", "new_subscriber", "trial"])
-def test_the_craft_guard_is_off_without_a_head_start(kind):
-    ctx = _lane_ctx(kind)              # no trial_turn.prepare on this turn
-    ctx.trial_kept_ids = {"motion": {"mg1"}}
-    assert agent_loop._kept_craft_refusal(
-        ctx, "set_motion_graphic", {"id": "mg1"}) is None
-
-
 def test_a_punch_never_lands_on_another_move(fake_tools, monkeypatch):
     monkeypatch.setattr(agent_tools, "_zoom_room",
                         lambda ctx, edl, s, e: (0.3, 1.2, 0.0))
@@ -521,22 +464,6 @@ def test_a_slam_without_a_first_cut_slam_sits_on_the_caption_band(fake_tools,
     assert slams and all(a["params"]["y"] == 0.64 for a in slams)
 
 
-def test_the_guard_keeps_only_the_first_cuts_own_pieces(monkeypatch):
-    ctx = _lane_ctx("trial")
-    ctx.latest_edl = lambda: {"version": 12, "json": FC_EDL}
-
-    def prep(c, *a, **k):        # the head start adds zoom z99
-        return {"intent": "generic", "whole": False, "applied": ["x"],
-                "s": 0.0, "note": "\n[system: TRIAL TURN PREPARED.]",
-                "steps": []}
-    monkeypatch.setattr(trial_turn, "prepare", prep)
-    agent_loop._trial_head_start(ctx, None, 1, {"content": "a short"})
-    assert "zm2" in ctx.trial_kept_ids["zoom"]
-    assert agent_loop._kept_craft_refusal(ctx, "remove_zoom", {"id": "zm2"})
-    assert agent_loop._kept_craft_refusal(ctx, "remove_zoom",
-                                          {"id": "z99"}) is None
-
-
 def test_the_talking_head_lift_is_off_by_default(fake_tools, monkeypatch):
     """Measured: it never raised a talking head over its First cut."""
     assert config.CLAUDE_TRIAL_LIFT_TALKING is False
@@ -553,30 +480,13 @@ def test_the_talking_head_lift_is_off_by_default(fake_tools, monkeypatch):
 
 
 @pytest.mark.parametrize("kind", ["grandfathered", "new_subscriber", "trial"])
-def test_the_long_form_cut_is_final_only_on_its_own_trial_turn(kind):
-    """Q5 (30 Oct): after the long-form chain the model trimmed a phrase and
-    re-rendered a 3-minute program (11 minutes); the cut is final on that
-    turn. A generic prepared turn, and every other lane, can still cut."""
-    ctx = _lane_ctx(kind)
-    ctx.trial_prep = {"intent": "tighten"}
-    out = agent_loop._kept_craft_refusal(ctx, "cut_range", {"start": 1, "end": 2})
-    if kind == "trial":
-        assert out and out.startswith("REJECTED: KEPT")
-        assert agent_loop._kept_craft_refusal(ctx, "keep_segments", {}) is not None
-        ctx.trial_prep = {"intent": "generic"}
-        assert agent_loop._kept_craft_refusal(ctx, "cut_range", {}) is None
-    else:
-        assert out is None
-
-
-@pytest.mark.parametrize("kind", ["grandfathered", "new_subscriber", "trial"])
-def test_the_long_form_cut_stays_final_on_the_requests_next_slice(kind):
+def test_the_long_form_note_travels_to_the_requests_next_slice(kind):
     """Q5: the second slice of a long-form trial request (no head start)
-    trimmed and re-rendered the program; the state now travels with it."""
+    re-rendered the program as a draft; its prepared note travels with it.
+    Its edits are the editor's call (owner, 16 Nov 2026: no KEPT refusal)."""
     ctx = _lane_ctx(kind)
     ctx.trial_prep = {"intent": "tighten",
                       "note": "\n[system: TRIAL TURN PREPARED. landscape 16:9]"}
-    ctx.trial_kept_ids = {"motion": {"mg1"}}
     cp = agent_loop._tighten_checkpoint(ctx)
     nxt = _lane_ctx(kind)
     restored = agent_loop._restore_tighten(nxt, cp)
@@ -584,11 +494,9 @@ def test_the_long_form_cut_stays_final_on_the_requests_next_slice(kind):
         assert cp["trial_prep_intent"] == "tighten" and restored
         # the next slice reads the same note: what the video now is
         assert "landscape 16:9" in agent_loop._tighten_continue_note(cp)
-        assert agent_loop._kept_craft_refusal(nxt, "cut_range", {}).startswith("REJECTED: KEPT")
-        assert agent_loop._kept_craft_refusal(nxt, "set_motion_graphic", {"id": "mg1"})
+        assert "trial_kept_ids" not in cp
     else:
         assert cp == {} and not restored
-        assert agent_loop._kept_craft_refusal(nxt, "cut_range", {}) is None
         assert agent_loop._tighten_continue_note(cp) == ""
     # a generic prepared turn carries nothing
     g = _lane_ctx(kind)

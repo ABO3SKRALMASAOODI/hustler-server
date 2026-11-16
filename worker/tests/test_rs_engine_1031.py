@@ -19,7 +19,6 @@ import pytest
 import agent_tools
 import first_cut
 import look_guard
-import music_offer
 import quality_verifier
 
 ASK_2670A = ("Can you cut the video so for the first 8.2 seconds, it is a "
@@ -29,10 +28,6 @@ ASK_2670B = ("just have the first 8.2 seconds of the person standing still, it "
              "doesn't have to be a literal 8.2 second clip from the video, you "
              "can take a specific part and copy it till it makes 8.2 seconds, "
              "and then just one clip of a first touch")
-ASK_2665 = ("Cut out the audio and play something else relating to nature and "
-            "outdoors and active but chilly vibes. Give colour gradings "
-            "cinematic vibes . Correct the angle (if possible) make it looj "
-            "mire dramatic but not to lose the actual original outlines .")
 ASK_2672 = ("Enhance this Dead by Daylight gaming video with professional "
             "cinematic colors. Make the colors vibrant and rich, improve "
             "contrast, add sharp details, create dramatic lighting and deep "
@@ -205,45 +200,6 @@ def test_the_hook_is_never_the_first_words_of_a_longer_sentence():
         == "*Python* is easy"
 
 
-# ---- user 2665: music on request --------------------------------------------
-
-CAT = [{"slug": f"{m}-{i}", "title": f"{m.title()} Song {i}", "mood": m}
-       for m in ("chill", "ambient", "upbeat", "cinematic") for i in (1, 2)]
-
-
-def test_a_music_ask_is_recognised_and_matched_to_moods():
-    assert music_offer.wants_music(ASK_2665)
-    assert not music_offer.wants_music("remove the music and add captions")
-    assert not music_offer.wants_music("make the captions bigger")
-    picks = music_offer.offer_tracks(ASK_2665, CAT)
-    assert 2 <= len(picks) <= 4
-    assert {t["mood"] for t in picks} <= {"chill", "ambient", "upbeat"}
-
-
-def test_the_turn_ends_on_a_choice_not_on_silence(monkeypatch):
-    import music_gate
-    import music_library
-    monkeypatch.setattr(music_library, "catalog", lambda: CAT)
-    monkeypatch.setattr(music_library, "used_by_user", lambda ctx: set())
-    opened = {}
-    monkeypatch.setattr(music_gate, "open_offer",
-                        lambda ctx, q: opened.setdefault("q", q) or {"slugs": ["x"]})
-
-    class C:
-        def latest_edl(self):
-            return {"json": {"music": [{"storage_key": "k", "mute": True}]}}
-
-    text = music_offer.turn_end_offer(C(), ASK_2665)
-    assert text.startswith("For the music, pick one") and opened["q"] == text
-    assert "Chill Song 1" in text
-
-    class WithMusic:
-        def latest_edl(self):
-            return {"json": {"music": [{"storage_key": "k"}]}}
-
-    assert music_offer.turn_end_offer(WithMusic(), ASK_2665) == ""
-
-
 # ---- #56 stacked looks on dark footage --------------------------------------
 
 def _dark_hud_frame(tmp_path):
@@ -257,7 +213,7 @@ def _dark_hud_frame(tmp_path):
     return out
 
 
-def test_the_2672_stack_is_measured_too_dark_and_tempered_until_it_reads(tmp_path):
+def test_the_2672_stack_is_measured_too_dark(tmp_path):
     import renderer
     raw = _dark_hud_frame(tmp_path)
     edl = {"keep": [[0, 10]], "effects": {
@@ -271,21 +227,8 @@ def test_the_2672_stack_is_measured_too_dark_and_tempered_until_it_reads(tmp_pat
         return look_guard.compare(src, [look_guard.frame_stats(
             raw, ",".join(renderer.cutaway_look_chain(e, 1.0, 0.04)))])
 
-    natural = look_guard.wants_natural(ASK_2672)
-    assert natural
-    r = measure(edl)
-    assert look_guard.verdict(r, natural)          # the shipped look fails
-    cur = edl
-    for step in (0, 1, 3, 2, 2, 2, 2, 3, 2):
-        nxt, _note = look_guard.temper_step(cur, step, r, natural)
-        if nxt is None:
-            continue
-        cur, r = nxt, measure(nxt)
-        if not look_guard.verdict(r, natural):
-            break
-    assert not look_guard.verdict(r, natural)
-    assert cur["effects"]["grade"] == "cinematic"   # the look is kept, eased
-    assert cur["effects"]["stylize"][0]["intensity"] <= 0.12
+    bad = look_guard.verdict(measure(edl))
+    assert bad and "darker than the source" in " ".join(bad)
 
 
 def test_a_light_grade_passes_untouched(tmp_path):
@@ -294,24 +237,7 @@ def test_a_light_grade_passes_untouched(tmp_path):
     edl = {"keep": [[0, 10]], "effects": {"grade_custom": {"saturation": 1.1}}}
     r = look_guard.compare([look_guard.frame_stats(raw)], [look_guard.frame_stats(
         raw, ",".join(renderer.cutaway_look_chain(edl, 1.0, 0.04)))])
-    assert not look_guard.verdict(r, True)
-
-
-def test_the_offer_is_the_replys_one_closing_question():
-    out = music_offer.append_offer(
-        "The grade is on and the audio muted. Want a title over the opening next?",
-        "For the music, pick one ...")
-    assert out == ("The grade is on and the audio muted.\n\n"
-                   "For the music, pick one ...")
-    assert not music_offer.wants_music("cut every shot on the beat")
-
-
-def test_an_asked_for_dark_look_is_judged_by_its_own_limits():
-    assert look_guard.wants_dark("make it dark and moody")
-    assert not look_guard.wants_dark(ASK_2672)        # 'natural and clear' wins
-    r = {"luma": 0.65, "bright": 0.8, "crush": 0.12, "sat": 1.0}
-    assert look_guard.verdict(r, False)               # unasked: too dark
-    assert not look_guard.verdict(r, False, dark=True)
+    assert not look_guard.verdict(r)
 
 
 def test_a_replay_follows_the_programs_follow_path_and_never_repeats_speech(monkeypatch):
@@ -348,21 +274,6 @@ def test_repeats_land_when_the_keep_list_itself_is_unchanged(monkeypatch):
     assert len(ctx.latest_edl()["json"]["inserts"]) == 1
     again = agent_tools.keep_segments(ctx, [STAND, STAND, TOUCH])
     assert again.startswith("NO CHANGE") and "WARNING" not in again
-
-
-def test_the_offer_replaces_a_no_music_line():
-    reply = ("I muted the original audio, so the clip now plays silently. A "
-             "cinematic grade gives it a cooler look. I didn't add music this "
-             "time; upload a track you like and I'll put it in. I didn't change "
-             "the angle this time. It's playing in the player.")
-    out = music_offer.append_offer(reply, "For the music, pick one ...")
-    assert "didn't add music" not in out and "didn't change the angle" in out
-    assert "look. I didn't change the angle this time. It's" in out
-    tight = music_offer.append_offer(
-        "The picture stays readable. I didn't add music this time; upload a "
-        "track you like and I'll put it in. I didn't change the angle.", "Pick:")
-    assert "readable. I didn't change the angle." in tight
-    assert out.endswith("For the music, pick one ...")
 
 
 def test_a_loop_never_crosses_a_camera_cut(monkeypatch):
@@ -420,12 +331,9 @@ def test_a_repeat_is_told_as_a_repeat_never_as_b_roll():
     assert "repeated a part to fill its length" in items
 
 
-def test_vibrant_and_natural_asks_are_both_read():
-    assert look_guard.wants_vibrant(ASK_2672) and look_guard.wants_natural(ASK_2672)
-    assert not look_guard.wants_vibrant("make it black and white")
-
-
-def test_after_write_tempers_the_2672_stack_end_to_end(tmp_path):
+def test_after_write_reports_the_2672_stack_and_keeps_the_models_look(tmp_path):
+    """Owner, 16 Nov 2026: the measurement informs the editor; the look it
+    wrote stands (no tempered EDL is written after it)."""
     src = str(tmp_path / "dark.mp4")
     subprocess.run(
         ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
@@ -454,24 +362,11 @@ def test_after_write_tempers_the_2672_stack_end_to_end(tmp_path):
             return f"EDL v{self.v[-1]['version']}: {desc}"
 
     ctx = C()
-    out = look_guard.after_write(ctx, look_guard.signature({}), ASK_2672)
-    assert out.startswith("\nLEGIBILITY GUARD (EDL v4)"), out
-    fx = ctx.latest_edl()["json"]["effects"]
-    assert fx["grade"] == "cinematic" and fx["stylize"][0]["intensity"] == 0.12
-    assert "never claim deeper" in out
-    # a second look at the tempered edit finds nothing to change
-    assert look_guard.after_write(ctx, look_guard.signature({}), ASK_2672) == ""
-
-
-def test_deep_shadows_keep_some_depth_while_the_hud_reads():
-    assert look_guard.wants_deep(ASK_2672)
-    r = {"luma": 0.9, "bright": 0.95, "crush": 0.15, "sat": 1.1}
-    assert look_guard.verdict(r, True)                # unasked: too crushed
-    assert not look_guard.verdict(r, True, deep=True)
-    edl = {"effects": {"grade_custom": {"shadows": -0.1, "contrast": 1.12},
-                       "grade": "cinematic"}}
-    out, note = look_guard.temper_step(edl, 1, r, True, deep=True)
-    assert out["effects"]["grade_custom"]["shadows"] == -0.06 and "-0.06" in note
+    out = look_guard.after_write(ctx, look_guard.signature({}))
+    assert out.startswith("\nLOOK MEASURED"), out
+    assert "darker than the source" in out and "saved as written" in out
+    assert len(ctx.v) == 1                                  # nothing rewritten
+    assert ctx.latest_edl()["json"]["effects"]["stylize"][0]["intensity"] == 0.3
 
 
 def test_a_repeat_never_counts_as_b_roll_for_the_ask_ledger():

@@ -195,15 +195,15 @@ def test_the_owners_track_meets_2c_1():
 
 # ── 2C-5: no track, no beat ──────────────────────────────────────────────
 
-def test_without_a_user_track_the_rhythm_plan_is_refused():
+def test_without_a_track_the_rhythm_tools_say_so_and_never_send_to_ask_user():
     from tools_ext import rhythm_tools as rt
     from w2_support import Ctx, edl
     out = rt.analyze_music(Ctx(edl()))
-    assert out.startswith("REJECTED") and "prosody grid" in out
-    assert "never chosen" in out
+    assert not out.startswith("REJECTED") and "prosody grid" in out
+    assert "ask_user" not in out and "add_library_music" in out
     legacy = edl(music=[{"id": "m1", "storage_key": "media/p/x.mp3",
                          "start": 0.0, "end": 10.0}])
-    assert rt.analyze_music(Ctx(legacy)).startswith("REJECTED")
+    assert "no music in this edit" in rt.analyze_music(Ctx(legacy))
 
 
 # ── syllables and lyrics ─────────────────────────────────────────────────

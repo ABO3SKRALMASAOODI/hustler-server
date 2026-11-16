@@ -30,7 +30,6 @@ def _question_judged(monkeypatch):
     monkeypatch.setattr(question_need, "needed", lambda *a: False)
 
 
-
 def _msgs(calls):
     return [str(m.get("content")) for call in calls for m in call["messages"]]
 
@@ -102,23 +101,7 @@ def test_a_restart_that_landed_nothing_still_changed_nothing(monkeypatch):
     assert agent_loop._turn_completion(ctx, "replied")[1] is False
 
 
-# ---- the wall opens in any order -----------------------------------------------
-
-def test_a_refusal_after_the_nudge_was_spent_still_opens_the_lane(monkeypatch):
-    """Prose first spends the nudge, then the write is refused. p5339's wall
-    with the two steps the other way round."""
-    ctx, db, _posted, _checkpoint, calls = _walled(monkeypatch)
-    ctx.semantic_contract.pop("refused_lanes", None)
-
-    def refused():
-        request_contract.note_refused(ctx, ["texts"])
-        return "The title is locked, so I need you to confirm an override."
-    _scripted(ctx, calls, ["Here is my plan for the title.", refused, "Done."])
-    _run(ctx, db)
-    assert "texts" not in request_contract.protected_lanes(ctx)
-    assert len(calls) == 3
-    assert "lifted for this request" in _msgs(calls[2:])[-1]
-
+# ---- a turn that wrote nothing ------------------------------------------------
 
 def test_nothing_new_to_open_keeps_the_nudge_to_once(monkeypatch):
     ctx, db, _posted, _checkpoint, calls = _walled(monkeypatch)
@@ -127,21 +110,8 @@ def test_nothing_new_to_open_keeps_the_nudge_to_once(monkeypatch):
     assert len(calls) == 2
 
 
-def test_a_second_question_after_a_refusal_does_not_reach_the_customer(monkeypatch):
-    """The refusal itself says to ask, and the first hold is already spent."""
-    ctx, _db, _posted, _checkpoint, _calls = _walled(monkeypatch)
-    ctx.semantic_contract.pop("refused_lanes", None)
-    ctx.agent_lanes = [{"name": "claude"}]
-    assert agent_tools.ask_user(ctx, "Which font?").startswith("CORRECTION_NEEDED")
-    request_contract.note_refused(ctx, ["texts"])
-    held = agent_tools.ask_user(ctx, "May I override the lock on the titles?")
-    assert held.startswith("CORRECTION_NEEDED") and "lifted for this request" in held
-    assert "texts" not in request_contract.protected_lanes(ctx)
-
-
 def test_a_real_second_question_still_reaches_the_customer(monkeypatch):
     ctx, _db, _posted, _checkpoint, _calls = _walled(monkeypatch)
-    ctx.semantic_contract.pop("refused_lanes", None)
     ctx.agent_lanes = [{"name": "claude"}]
     agent_tools.ask_user(ctx, "Which font?")
     with pytest.raises(agent_tools.AskUser):
@@ -212,7 +182,7 @@ def _broken(monkeypatch):
 def test_a_protection_still_broken_at_delivery_is_not_fulfilled(monkeypatch):
     ctx, db, _posted, _checkpoint, calls = _broken(monkeypatch)
     result = _run(ctx, db)
-    assert any("Restore the customer's concrete" in m for m in _msgs(calls))
+    assert any("NOTE: the request's brief" in m for m in _msgs(calls))
     assert result["outcome"] == "partial"
 
 
@@ -389,10 +359,9 @@ def test_a_frame_the_customer_typed_is_not_refused_as_not_asked():
     ctx = _followup(P5388, changed=["frame_ratio", "captions", "timeline_timing"])
     assert followup_recipes.classify(P5388) == ["punchier"]
     assert not followup_recipes.active(ctx)
-    assert followup_recipes.refusal(ctx, "set_frame", {"ratio": "16:9"}) is None
     assert followup_recipes.note(ctx, P5388) == ""
-    assert followup_recipes.check_write(
-        ctx, {"frame": {"ratio": "9:16"}}, {"frame": {"ratio": "16:9"}}) is None
+    assert not hasattr(followup_recipes, "refusal")
+    assert not hasattr(followup_recipes, "check_write")
 
 
 def test_the_frame_alone_is_enough_to_stand_the_recipe_down():
@@ -405,12 +374,12 @@ def test_an_interjection_is_not_a_request_to_remove_filler():
         text, changed=["cuts", "timeline_timing", "music", "texts"]))
 
 
-def test_a_reading_that_agrees_keeps_the_recipe_and_its_guard():
-    """The one real firing in 14 days: an unasked zoom on a title request."""
+def test_a_reading_that_agrees_keeps_the_recipe():
+    """The recipe is a note and a REQUEST CHECK on the render; the zoom the
+    old guard refused on a title request (#1065) is the editor's call now."""
     text = "make the opening title a little bigger"
     ctx = _followup(text, changed=["texts"])
     assert followup_recipes.active(ctx)
-    assert "NOT ASKED" in followup_recipes.refusal(ctx, "add_zoom", {})
 
 
 def test_effects_beside_a_cut_keeps_the_recipe():

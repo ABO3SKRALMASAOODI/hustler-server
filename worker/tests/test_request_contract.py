@@ -39,7 +39,7 @@ def test_preservation_is_not_an_instruction_to_add_captions():
     after = deepcopy(before)
     after["captions"] = {"mode": "from_transcript"}
     violations = scope_guard.preservation_violations(before, after,
-        ctx.user_message, protected=rc.protected_lanes(ctx))
+        protected=rc.protected_lanes(ctx))
     assert violations == [scope_guard.LANE_LABELS["captions"]]
     after = deepcopy(before)
     after["effects"]["grade_custom"] = {"temperature": .08}
@@ -55,11 +55,17 @@ def test_focused_grade_cannot_silently_shorten_the_video():
         ctx.latest_edl()["json"], after, protected=rc.protected_lanes(ctx))[0]
 
 
-def test_explicit_channel_exclusion_allows_removal_but_not_recreation():
+def test_explicit_channel_exclusion_is_a_note_on_the_write_never_a_refusal():
     ctx = context()
-    ctx.semantic_contract["requirements"] = [{"id": "no_caps", "action": "avoid", "lanes": ["captions"]}]
-    assert rc.forbidden_additions(ctx, {"captions": None}) == []
-    assert rc.forbidden_additions(ctx, {"captions": {"mode": "from_transcript"}}) == ["captions"]
+    ctx.semantic_contract["requirements"] = [{"id": "no_caps", "action": "avoid", "lanes": ["captions"],
+                                              "quote": "no captions please"}]
+    assert not hasattr(rc, "forbidden_additions")
+    assert rc.write_note(ctx, {"captions": {"mode": "from_transcript"}}, {"captions": None}, set()) == ""
+    note = rc.write_note(ctx, {}, {"captions": {"mode": "from_transcript"}}, set())
+    assert note.startswith("NOTE (saved)") and "captions" in note and "no captions please" in note
+    # a lane the edit already had and this write leaves as it is gets no note
+    same = {"captions": {"mode": "from_transcript"}}
+    assert rc.write_note(ctx, same, dict(same), set()) == ""
 
 
 def test_semantic_multi_asset_review_is_not_rewritten_using_primary_only(monkeypatch):
@@ -185,13 +191,14 @@ def test_caption_render_does_not_require_proof_that_only_rendering_can_create():
     assert rc.preflight(ctx) is None
 
 
-def test_pre_render_still_rejects_concrete_preservation_and_exclusion_violations():
+def test_pre_render_names_concrete_preservation_and_exclusion_changes():
     ctx = context()
     ctx.latest_edl()["json"]["captions"] = {"mode": "from_transcript"}
     ctx.semantic_contract["requirements"].append({"id": "no_music", "action": "avoid", "lanes": ["music"]})
     ctx.latest_edl()["json"]["music"] = [{"asset_key": "not-requested.mp3"}]
     message = rc.preflight(ctx)
     assert "subtitles" in message and "no_music" in message
+    assert message.startswith("NOTE:") and "saved" in message
     ctx.latest_edl()["json"]["captions"] = None
     ctx.latest_edl()["json"]["music"] = []
     assert rc.preflight(ctx) is None
@@ -231,49 +238,6 @@ def test_durable_checkpoint_keeps_the_brief():
     fresh.semantic_contract = None
     agent_loop._restore_preview_checkpoint(fresh, saved)
     assert fresh.semantic_contract == ctx.semantic_contract
-
-
-def _reread_ctx(monkeypatch, answer):
-    ctx = context()
-    ctx.llm_client, ctx.agent_model = object(), "claude-haiku-5-5"
-    ctx.semantic_contract = {
-        "mode": "edit", "timing_policy": "edit", "changed_lanes": ["effects"],
-        "request_digest": rc.digest(ctx), "schema_version": 1, "requirements": [
-            {"id": "r1", "action": "preserve", "lanes": ["grade"], "inherited": False,
-             "quote": "", "description": "Keep the natural colours."}]}
-    calls = []
-
-    def create(client, model, messages, **_k):
-        calls.append(messages)
-        if isinstance(answer, Exception):
-            raise answer
-        fn = NS(name="change_asked", arguments=json.dumps({"asked": answer}))
-        return NS(choices=[NS(message=NS(tool_calls=[NS(function=fn)]))], usage=None)
-    monkeypatch.setattr(rc.llm, "create_with_dialect", create)
-    monkeypatch.setattr(rc.llm, "record", lambda *a, **k: None)
-    return ctx, calls
-
-
-def test_a_refused_lane_the_request_asks_for_opens_after_a_model_reads_it(monkeypatch):
-    ctx, calls = _reread_ctx(monkeypatch, True)
-    assert "grade" in rc.protected_lanes(ctx)
-    opened = rc.reread_refused(ctx, {"grade"}, ["color grade"], "set_grade_custom",
-                               {"highlights": -0.08})
-    assert opened == {"grade"} and "grade" not in rc.protected_lanes(ctx)
-    assert "set_grade_custom" in calls[0][1]["content"]
-
-
-def test_a_lane_the_request_protects_stays_and_is_read_once(monkeypatch):
-    ctx, calls = _reread_ctx(monkeypatch, False)
-    for _ in range(2):
-        assert rc.reread_refused(ctx, {"grade"}, ["color grade"]) == set()
-    assert len(calls) == 1 and "grade" in rc.protected_lanes(ctx)
-
-
-def test_a_failed_reread_leaves_the_protection(monkeypatch):
-    ctx, _calls = _reread_ctx(monkeypatch, RuntimeError("provider down"))
-    assert rc.reread_refused(ctx, {"grade"}, ["color grade"]) == set()
-    assert "grade" in rc.protected_lanes(ctx)
 
 
 def test_the_edit_origin_is_what_the_chat_stored():
@@ -317,14 +281,3 @@ def test_the_brief_is_told_who_made_the_cut(monkeypatch):
     assert contract["timing_policy"] == "edit"
 
 
-def test_the_reread_sees_the_way_back_to_the_upload(monkeypatch):
-    ctx, calls = _reread_ctx(monkeypatch, True)
-    ctx.duration = 265.8
-    ctx.request_edit_origin = {"made_by": "automatic_first_cut",
-                               "customer_requests_since": 0}
-    assert rc.reread_refused(ctx, {"cuts"}, ["picture cuts"], "keep_segments",
-                             {"keep": [[0, 265.8]]}) == {"cuts"}
-    change = json.loads(calls[0][1]["content"])["change"]
-    assert change["upload_seconds"] == 265.8
-    assert change["current_edit_origin"]["made_by"] == "automatic_first_cut"
-    assert change["current_seconds"] == 16.0 and "265.8" in change["after"]

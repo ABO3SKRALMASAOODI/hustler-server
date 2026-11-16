@@ -428,8 +428,9 @@ def test_editorial_sets_a_coherent_system_in_one_version(monkeypatch):
     assert "fade in cleared" in out
     assert "HERO MOMENTS" in out and "hook_title" in out
     assert '"treatment": "serif"' in out and '"accent": "#F2C94C"' in out
-    # Music is the user's pick: the look offers the route, never a bed.
-    assert "offer library tracks with ask_user" in out
+    # No music was asked: the look names the route (Valmera may choose the
+    # bed when the user asks for music), never a question.
+    assert "music='auto'" in out and "ask_user" not in out
     assert not edl.get("music")
 
 
@@ -505,12 +506,14 @@ def test_dense_scene_changes_get_a_time_spaced_subset(kit):
 
 
 def test_a_picked_library_track_lays_a_ducked_bed_in_the_same_version(store):
-    # Owner rule (Wave 0): the look never picks — 'auto' and moods are
-    # refused before anything changes; the user's pick is placed.
+    # Owner, 13 Nov 2026: the look may choose its bed ('auto' takes a track
+    # in the look's moods, stamped as Valmera's choice); the user's pick is
+    # placed as theirs.
+    auto = _Ctx(ratio="9:16")
+    out = agent_tools.apply_look(auto, "editorial", music="auto")
+    assert out.startswith("EDL v1") and len(auto.writes) == 1, out
+    assert auto.latest_edl()["json"]["music"][0]["provenance"] == "valmera_chosen"
     ctx = _Ctx(ratio="9:16")
-    out = agent_tools.apply_look(ctx, "editorial", music="auto")
-    assert out.startswith("REJECTED") and "ask_user" in out
-    assert ctx.writes == [] and store.copies == []
     ctx.user_message = "the Calm Currents one"
     slug = "chill-calm-currents-lofi-relax-calm"
     out = agent_tools.apply_look(ctx, "editorial", music=slug)
@@ -541,7 +544,9 @@ def test_music_choice_by_picked_slug_and_lead_without_speech(store):
     assert m["gain_db"] == -4.0                    # no speech: music leads
     ctx = _Ctx(ratio="9:16")
     out = agent_tools.apply_look(ctx, "clean_minimal", music="cinematic")
-    assert out.startswith("REJECTED") and not ctx.writes   # a mood never picks
+    assert out.startswith("EDL v1"), out                     # a mood picks a bed
+    assert "library-cinematic-" in ctx.latest_edl()["json"]["music"][0]["storage_key"]
+    ctx = _Ctx(ratio="9:16")
     ctx.user_message = "use After midnight"
     agent_tools.apply_look(ctx, "clean_minimal",
                            music="cinematic-after-midnight")
@@ -552,7 +557,7 @@ def test_music_choice_by_picked_slug_and_lead_without_speech(store):
 def test_bad_music_choice_is_rejected_before_anything_changes(store):
     ctx = _Ctx()
     out = agent_tools.apply_look(ctx, "editorial", music="techno")
-    assert out.startswith("REJECTED") and "exact slug" in out
+    assert out.startswith("REJECTED") and "exact" in out
     assert ctx.writes == [] and store.copies == []
     out = agent_tools.apply_look(ctx, "editorial", music="none")
     assert out.startswith("EDL v1") and not ctx.latest_edl()["json"]["music"]

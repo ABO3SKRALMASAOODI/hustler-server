@@ -264,27 +264,21 @@ def test_a_failed_write_reports_the_same_receipt(client, released):
         "text"]
 
 
-def test_owner_music_rule_refuses_the_gateway_like_the_direct_batch(
+def test_music_provenance_stamps_the_gateway_like_the_direct_batch(
         client, released, api):
     """apply_edit_batch is written by the backend itself
-    (apply_edit_batch_core): the owner's music rule must refuse a library
-    track nobody picked whichever door the batch came through."""
-    batch = _batch(_item(LIBRARY, provenance="user_picked_library"))
-    direct = _call(client, "apply_edit_batch",
-                   dict(copy.deepcopy(batch), project_id=2))
+    (apply_edit_batch_core): music provenance is stamped the same whichever
+    door the batch came through, and a track nobody picked places as
+    Valmera's choice (owner, 13 Nov 2026), never refused."""
     gateway = _via_gateway(client, "apply_edit_batch",
-                           dict(copy.deepcopy(batch), project_id=2),
-                           outer=2, _id=1)
-    assert gateway == direct
-    assert direct["result"]["isError"] is True
-    assert "agents never choose music" in direct["result"]["content"][0][
-        "text"]
-    assert list(api.edls) == [1]
-
-    placed = _via_gateway(client, "apply_edit_batch",
-                          dict(_batch(_item(UPLOAD)), project_id=2))
-    assert placed["result"]["isError"] is False
-    assert api.edls[2]["music"][0]["provenance"] == "user_upload"
+                           dict(_batch(_item(LIBRARY, provenance="user_picked_library")),
+                                project_id=2), outer=2, _id=1)
+    assert gateway["result"]["isError"] is False, gateway
+    assert api.edls[2]["music"][0]["provenance"] == "valmera_chosen"
+    direct = _call(client, "apply_edit_batch",
+                   dict(_batch(_item(UPLOAD), base=2, op="m2"), project_id=2))
+    assert direct["result"]["isError"] is False, direct
+    assert api.edls[3]["music"][0]["provenance"] == "user_upload"
 
 
 @pytest.mark.parametrize("status,code", [(409, "repair_required"),

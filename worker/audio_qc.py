@@ -102,9 +102,8 @@ def measure(path, duration_s=None, master=None, silent_by_design=False):
     `silent_by_design`: nothing in this program carries sound (a source with
     no audio track, or a website capture, and no music, effects or voice-over
     authored). A silent mix is then the faithful result, not a fault: the
-    SILENT finding would push the editor to ask for music nobody requested
-    (owner policy: never pick a track) and to report a finished edit as
-    unfinished. The measurement itself is kept.
+    SILENT finding would push the editor to add music nobody requested and
+    to report a finished edit as unfinished. The measurement itself is kept.
     """
     err = _run_ffmpeg(path)
     if err is None:

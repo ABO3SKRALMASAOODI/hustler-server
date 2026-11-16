@@ -482,7 +482,9 @@ def route(asks):
 
 def editor_note(ledger, done_by=None):
     """The ledger for the editor: its checklist, read once at the top of the turn."""
-    rows = [f"{a['id']} [{a['kind']}{', whole film' if a.get('span') == 'whole' else ''}] {a['want']} (check: {a['pass']})"
+    whole_length = ", keeps the upload's whole length"
+    rows = [f"{a['id']} [{a['kind']}{', whole film' if a.get('span') == 'whole' else ''}"
+            f"{whole_length if a.get('length') == 'upload' else ''}] {a['want']} (check: {a['pass']})"
             + (f" If it can't be done: {a['otherwise']}" if a.get("otherwise") else "")
             for a in ledger["asks"]]
     head = ("\n\nASK LEDGER: each thing the customer asked for and how it will be checked on the "
@@ -1177,60 +1179,22 @@ def length_asks(ledger, verdict):
     return ids | {r["id"] for r in (verdict or {}).get("asks") or [] if r.get("full_length") is True}
 
 
-def undo_harm(ctx, verdict, ledger=None):
-    """Takes out what the check named as harm nobody asked for, by the ids it printed: camera moves
-    (move:<id>) and items of the film (digest ids). The model judged; code only removes those ids,
-    never one an ask's own work serves. Returns a line for the editor, or ""."""
-    rows = [r for r in harm(verdict) if r.get("items")]
-    if not rows:
-        return ""
-    try:
-        edl = copy.deepcopy(ctx.latest_edl()["json"])
-    except Exception:  # noqa: BLE001
-        return ""
-    ids = {i for r in rows for i in r["items"]}
-    moves = {i.split(":", 1)[1] for i in ids if i.startswith("move:")}
-    fx = edl.get("effects") if isinstance(edl.get("effects"), dict) else {}
-    gone = []
-    for lane in ("zooms", "zoom_paths"):
-        if not fx.get(lane):
-            continue
-        kept = []
-        for k, z in enumerate(fx[lane]):
-            key = str((z or {}).get("id") or f"{lane}#{k}") if isinstance(z, dict) else ""
-            (gone.append(f"move:{key}") if key in moves else kept.append(z))
-        fx[lane] = kept
-    _text, items = digest(edl)
-    others = [i for i in ids if not i.startswith("move:") and ":" in i and i in items]
-    if others:
-        from . import patch
-        edl, applied, _refused = patch.apply_ops(edl, [{"item": i, "remove": True, "set_json": "{}"} for i in others])
-        gone += [a.split(" ", 1)[-1] for a in applied]
-    if not gone:
-        return ""
-    result = str(ctx.write_edl(edl, f"took out {len(gone)} item(s) nobody asked for"))
-    if not result.startswith("EDL v"):
-        print(f"[asks] harm not taken out: {result[:160]}", flush=True)
-        return ""
-    if ledger is not None:
-        ledger.setdefault("undone", []).extend(gone[:40])
-    return (f"Taken out as harm nobody asked for ({result.splitlines()[0][:40]}): " + ", ".join(gone[:30])
-            + ". Don't put them back.")
-
-
-def repair_note(ledger, verdict, undone=""):
+def repair_note(ledger, verdict, extra=""):
+    """The check's reading for the editor's next step: information, never a rollback. The editor's
+    saved work stands; it decides what to change."""
     want = {a["id"]: a for a in ledger["asks"]}
     rows = [f"- {r['id']} ({r['state']}): {want[r['id']]['want']}. On the rendered film: {r['seen']}"
             for r in open_asks(verdict) if r["id"] in want]
-    bad = [f"- at {r['at_s']:.1f} s: {r['what']} ({r['evidence']}); fix: {r['fix']}" for r in harm(verdict)]
+    bad = [f"- at {r['at_s']:.1f} s: {r['what']} ({r['evidence']}); suggested fix: {r['fix']}" for r in harm(verdict)]
     head = ("ASK CHECK on the rendered film: these asks are not done yet.\n" + "\n".join(rows)) if rows else \
         "ASK CHECK on the rendered film: every ask is met."
     if bad:
-        head += ("\nHARM nobody asked for, seen on the rendered film: undo each (reframe a picture so the face is "
-                 "whole, replace a picture of the wrong place or person, respell a name with set_caption_fixes as "
-                 "the customer writes it, restore what was cut from a length they asked to keep).\n" + "\n".join(bad))
-    if undone:
-        head += "\n" + undone
+        head += ("\nThe check also saw changes nobody asked for on the rendered film. Fix each one you agree "
+                 "harms the film (reframe a picture so the face is whole, replace a picture of the wrong place "
+                 "or person, respell a name with set_caption_fixes as the customer writes it) and keep the "
+                 "ones that serve the request.\n" + "\n".join(bad))
+    if extra:
+        head += "\n" + extra
     return (head + "\nDo them now on the current version, render, and reply. This is the one repair pass: "
                    "an ask you cannot do, say so plainly in the reply.")
 
@@ -1431,7 +1395,6 @@ def summary(ledger, verdict=None):
                       "state": states.get(a["id"], "unchecked"), "seen": seen.get(a["id"], "")}
                      for a in ledger["asks"]],
             "unasked": [{k: r.get(k) for k in ("what", "at_s", "fix")} for r in harm(verdict)][:8],
-            "held": ledger.get("held"), "undone": (ledger.get("undone") or [])[:20],
             "reply_fixed": ledger.get("reply_fixed"),
             "open": len(open_asks(verdict)) if verdict else None}
 

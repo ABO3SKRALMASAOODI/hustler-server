@@ -968,9 +968,10 @@ def lens_restraint(edl, index, request_text, intensity, maps=None):
         if isinstance(m, dict) and prov not in (
                 "user_upload", "user_named", "user_picked_library",
                 "valmera_chosen", "legacy", None):
-            out.append(_f("blocking", "restraint", "owner_rule",
-                          f"music {m.get('id')} has provenance {prov!r}: "
-                          "agents never choose music.", id=m.get("id")))
+            out.append(_f("advisory", "restraint", "owner_rule",
+                          f"music {m.get('id')} has an unknown provenance "
+                          f"{prov!r}: say in the reply who chose it.",
+                          id=m.get("id")))
     return out, {"graphics_share": round(share, 3)}
 
 

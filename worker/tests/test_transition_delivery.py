@@ -2,8 +2,6 @@ from copy import deepcopy
 import ask_ledger
 import reply_grounding as rg
 import trial_reply as tr
-from test_unmet_ask_hold import _ctx
-import agent_loop
 
 BASE = {'keep': [[0, 30]], 'effects': {}}
 
@@ -26,12 +24,9 @@ def test_transition_requires_real_scene_junctions():
     assert not rg.has_rendered_transitions(edl)
 
 
-def test_missing_transition_is_held_and_disclosed_before_preview():
+def test_missing_transition_is_disclosed():
     ask = 'Make a fishing film with cinematic transitions and music.'
     assert ask_ledger.ledger(ask, BASE, BASE)['transitions'] == 'not_done'
-    ctx = _ctx(BASE)
-    hold = agent_loop._unmet_ask_hold(ctx, 'render_preview', {'complete': True}, ask)
-    assert hold and 'set_transitions' in hold
     reply, report = tr.finish('Still open from your request: The user explicitly requested transitions, but the latest EDL contains no transition treatment.', tr.Facts(before=BASE, after=BASE, wrote=True, user_text=ask))
     assert "didn't add transitions" in reply
     assert 'transitions' in report['unmet']

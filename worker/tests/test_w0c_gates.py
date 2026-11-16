@@ -79,7 +79,7 @@ def test_a_new_music_item_without_provenance_fails_validation():
                                                      gain_db=-12.0)))
 
 
-def test_the_write_gate_stamps_uploads_and_refuses_unpicked_library():
+def test_the_write_gate_stamps_uploads_and_valmeras_own_library_choice():
     ctx, fake = tool_context(default_edl(20.0))
     upload_asset(fake, "music/7/my-song.mp3", filename="my song.mp3")
     out = ctx.write_edl(_with_music(_music("music/7/my-song.mp3")), "music")
@@ -92,9 +92,9 @@ def test_the_write_gate_stamps_uploads_and_refuses_unpicked_library():
                              provenance="user_upload"),
                       _music(LIB_KEY, mid="mus2", provenance="user_upload"))
     out = ctx.write_edl(edl, "library bed")
-    assert out.startswith("REJECTED (EDL v8 unchanged): music gate"), out
-    assert "agents never choose music" in out.lower()
-    assert len(fake.rows) == 2
+    assert out.startswith("EDL v8 -> v9"), out
+    stamped = {m["storage_key"]: m["provenance"] for m in fake.rows[-1]["json"]["music"]}
+    assert stamped == {"music/7/my-song.mp3": "user_upload", LIB_KEY: "valmera_chosen"}
 
 
 def test_a_track_already_in_the_edit_keeps_its_provenance():
@@ -122,19 +122,19 @@ def test_restoring_a_track_from_the_edit_history_is_not_a_new_choice():
     upload_asset(fake, LIB_KEY, source="valmera-music-library",
                  library_slug="chill-bubbles-lofi-bright-relaxed")
     edl = _with_music(_music(LIB_KEY))
-    assert ctx.write_edl(edl, "re-add").startswith("REJECTED")
     fake.history_keys.add(LIB_KEY)                 # it played in v3
     fake.rows[0]["json"]["music"] = []
     fake.rows.insert(0, {"version": 3, "json": validate_edl(
         edl, 20.0).model_dump()})
     out = ctx.write_edl(edl, "undo the removal")
     assert out.startswith("EDL v7 -> v8"), out
+    assert fake.rows[-1]["json"]["music"][0]["provenance"] is None   # legacy
 
 
-def test_a_gate_that_cannot_decide_refuses_without_a_traceback(monkeypatch):
+def test_a_provenance_that_cannot_be_read_never_refuses(monkeypatch):
     """A failure inside the provenance decision (an unreadable library, a
-    database hiccup the helpers did not absorb) refuses only the new track:
-    the write returns a REJECTED line, never raises, never passes."""
+    database hiccup the helpers did not absorb) stamps the track as Valmera's
+    choice: provenance is information, never a reason to refuse a write."""
     ctx, fake = tool_context(default_edl(20.0))
     upload_asset(fake, "music/7/my-song.mp3")
 
@@ -142,8 +142,8 @@ def test_a_gate_that_cannot_decide_refuses_without_a_traceback(monkeypatch):
         raise RuntimeError("library manifest unreadable")
     monkeypatch.setattr(music_gate, "classify_asset", boom)
     out = ctx.write_edl(_with_music(_music("music/7/my-song.mp3")), "music")
-    assert out.startswith("REJECTED (EDL v7 unchanged): music gate"), out
-    assert "could not be verified" in out and len(fake.rows) == 1
+    assert out.startswith("EDL v7 -> v8"), out
+    assert fake.rows[-1]["json"]["music"][0]["provenance"] == "valmera_chosen"
 
 
 def test_the_shared_gate_core_loads_without_the_worker_db():
@@ -155,7 +155,8 @@ def test_the_shared_gate_core_loads_without_the_worker_db():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     assert mod.decide(LIB_KEY, None, is_picked=lambda s: False,
-                      seen_before=lambda k: False)[1] == mod.REFUSE_PICK
+                      seen_before=lambda k: False) == ("valmera_chosen", None)
+    assert not hasattr(mod, "REFUSE_PICK")
     assert mod.decide("music/7/song.mp3", {"kind": "music", "meta": {}},
                       is_picked=lambda s: False,
                       seen_before=lambda k: False) == ("user_upload", None)
@@ -163,15 +164,20 @@ def test_the_shared_gate_core_loads_without_the_worker_db():
     assert "\nimport db" not in src
 
 
-def test_agent_searched_web_music_and_sound_effects_are_refused():
+def test_web_found_music_and_a_sound_used_as_music_are_valmeras_choice():
     ctx, fake = tool_context(default_edl(20.0))
     upload_asset(fake, "music/7/found.mp3",
                  caption="found online by search_music")
     upload_asset(fake, "sfx/7/boom.mp3", caption="found online by search_sfx")
     out = ctx.write_edl(_with_music(_music("music/7/found.mp3")), "x")
-    assert out.startswith("REJECTED") and "web search" in out
+    assert out.startswith("EDL v7 -> v8"), out
+    assert fake.rows[-1]["json"]["music"][0]["provenance"] == "valmera_chosen"
     out = ctx.write_edl(_with_music(_music("sfx/7/boom.mp3")), "x")
-    assert out.startswith("REJECTED") and "add_sfx" in out
+    assert out.startswith("EDL v8 -> v9"), out
+    assert fake.rows[-1]["json"]["music"][0]["provenance"] == "valmera_chosen"
+    # only a key that is no audio of this project cannot play
+    out = ctx.write_edl(_with_music(_music("music/7/missing.mp3")), "x")
+    assert out.startswith("REJECTED") and "not an audio asset" in out
 
 
 def test_named_songs_and_extracted_clip_audio_are_the_users():
@@ -206,9 +212,10 @@ def test_the_sound_of_a_clip_an_agent_found_is_not_the_users():
     upload_asset(fake, "music/7/bbb.m4a", extracted_from_video=True,
                  from_asset_key="clips/7/mine.mp4")
     out = ctx.write_edl(_with_music(_music("music/7/aaa.m4a")), "bed")
-    assert out.startswith("REJECTED") and "agent found" in out, out
-    out = ctx.write_edl(_with_music(_music("music/7/bbb.m4a")), "bed")
     assert out.startswith("EDL v7 -> v8"), out
+    assert fake.rows[-1]["json"]["music"][0]["provenance"] == "valmera_chosen"
+    out = ctx.write_edl(_with_music(_music("music/7/bbb.m4a")), "bed")
+    assert out.startswith("EDL v8 -> v9"), out
     assert fake.rows[-1]["json"]["music"][0]["provenance"] == "user_upload"
 
 
@@ -242,16 +249,20 @@ def test_find_song_and_fetch_url_record_user_named(monkeypatch, tmp_path):
     assert music_gate.provenance_for(ctx, key)[0] == "user_named"
 
 
-# ── AT-0C-4b: add_library_music without a user pick is refused ──────────
+# ── add_library_music without a user pick is Valmera's choice (13 Nov) ──
 
-def test_add_library_music_without_a_pick_is_refused(store):
+def test_add_library_music_without_a_pick_is_valmeras_choice(store):
+    """p5744 (music refused 5 times) and p5728 (ended asking about music):
+    Valmera may choose the music; the customer decides whether to keep it."""
     for words in ("add some background music", "you choose a track",
                   "something chill please", ""):
         ctx, fake = tool_context(default_edl(20.0), user_message=words)
         out = music_library.add_library_music(
             ctx, "chill-bubbles-lofi-bright-relaxed")
-        assert out.startswith("REJECTED") and "ask_user" in out, (words, out)
-        assert store == [] and len(fake.rows) == 1
+        assert out.startswith("EDL v7 -> v8"), (words, out)
+        assert "Chosen by Valmera" in out
+        assert fake.rows[-1]["json"]["music"][0]["provenance"] == "valmera_chosen"
+        assert "music_picks:7" not in fake.kv          # not remembered as their pick
 
 
 def test_the_users_pick_from_the_ask_user_offer_places_it(store):
@@ -263,23 +274,24 @@ def test_the_users_pick_from_the_ask_user_offer_places_it(store):
     with pytest.raises(agent_tools.AskUser) as asked:
         agent_tools.ask_user(ctx, q)
     assert asked.value.question == q          # the user sees it unchanged
-    # Same turn: the agent cannot pick for them.
-    out = music_library.add_library_music(ctx, "cinematic-after-midnight")
-    assert out.startswith("REJECTED")
-    # Next turn: the user's reply is the pick.
+    # Next turn: the user's reply is the pick. Another track still places,
+    # as Valmera's choice, and the result names the one they picked.
     ctx2, fake2 = tool_context(default_edl(20.0),
                                user_message="the second one", job_id=10)
     fake2.kv = fake.kv                          # same project app_kv
     out = music_library.add_library_music(ctx2, "chill-bubbles-lofi-bright-relaxed")
-    assert out.startswith("REJECTED") and "picked 'cinematic-after-midnight'" \
-        in out
-    out = music_library.add_library_music(ctx2, "cinematic-after-midnight")
     assert out.startswith("EDL v7 -> v8"), out
-    item = fake2.rows[-1]["json"]["music"][0]
+    assert "the customer named 'cinematic-after-midnight'" in out
+    ctx3, fake3 = tool_context(default_edl(20.0),
+                               user_message="the second one", job_id=10)
+    fake3.kv = fake.kv
+    out = music_library.add_library_music(ctx3, "cinematic-after-midnight")
+    assert out.startswith("EDL v7 -> v8"), out
+    item = fake3.rows[-1]["json"]["music"][0]
     assert item["provenance"] == "user_picked_library"
     assert item["storage_key"] == \
         "music/7/library-cinematic-after-midnight.mp3"
-    picks = json.loads(fake2.kv["music_picks:7"])
+    picks = json.loads(fake3.kv["music_picks:7"])
     assert picks["cinematic-after-midnight"]["evidence"] == "the second one"
 
 
@@ -302,36 +314,47 @@ def test_over_mcp_the_pick_token_comes_back_with_the_users_words(store):
     assert token in asked.value.question         # the MCP model is told
     out = music_library.add_library_music(ctx, "hiphop-abducted",
                                           user_pick="the third one")
-    assert out.startswith("REJECTED") and "token" in out
+    assert out.startswith("EDL v7 -> v8"), out          # placed, Valmera's choice
+    assert fake.rows[-1]["json"]["music"][0]["provenance"] == "valmera_chosen"
+    ctx2, fake2 = tool_context(default_edl(20.0), mcp=True)
+    fake2.kv = fake.kv
     out = music_library.add_library_music(
-        ctx, "hiphop-abducted", user_pick=f"{token} the third one")
+        ctx2, "hiphop-abducted", user_pick=f"{token} the third one")
     assert out.startswith("EDL v7 -> v8"), out
-    assert fake.rows[-1]["json"]["music"][0]["provenance"] == \
+    assert fake2.rows[-1]["json"]["music"][0]["provenance"] == \
         "user_picked_library"
 
 
-def test_apply_look_never_picks_music():
-    ctx, fake = tool_context(default_edl(20.0),
-                             user_message="add a look and some music")
-    for value in ("auto", "chill", "cinematic"):
+def test_apply_look_chooses_music_when_asked(store):
+    for value in ("auto", "chill", "chill-bubbles-lofi-bright-relaxed"):
+        ctx, fake = tool_context(default_edl(20.0),
+                                 user_message="add a look and some music")
         out = agent_tools.apply_look(ctx, "editorial", music=value)
-        assert out.startswith("REJECTED") and "never" in out, value
-    assert len(fake.rows) == 1
-    out = agent_tools.apply_look(ctx, "editorial",
-                                 music="chill-bubbles-lofi-bright-relaxed")
-    assert out.startswith("REJECTED")              # nobody picked it
+        assert out.startswith("EDL v7 -> v8"), (value, out)
+        music = fake.rows[-1]["json"]["music"]
+        assert music and music[0]["provenance"] == "valmera_chosen", value
+        if value == "chill":
+            assert "/library-chill-" in music[0]["storage_key"]
+    ctx, fake = tool_context(default_edl(20.0))
+    out = agent_tools.apply_look(ctx, "editorial", music="no-such-track")
+    assert out.startswith("REJECTED") and "mood, 'auto'" in out
 
 
-def test_music_tools_say_the_agent_never_picks():
+def test_music_tools_say_valmera_may_choose():
+    """Owner, 13 Nov 2026: Valmera may choose the music; no tool or prompt
+    sends the agent to ask the customer to pick instead."""
     desc = agent_tools.TOOLS["add_library_music"][1]
-    assert "never choose music" in desc and "ask_user" in desc
+    assert "Valmera may choose the music" in desc and "ask_user" not in desc
     props = agent_tools.TOOLS["add_library_music"][2]
     assert "user_pick" in props
     look = agent_tools.TOOLS["apply_look"][2]["music"]["description"]
-    assert "auto" not in look and "user picked" in look
-    assert "background music always does" in agent_tools.TOOLS["ask_user"][1]
+    assert "'auto'" in look
+    asking = agent_tools.TOOLS["ask_user"][1]
+    assert "background music always does" not in asking and "Valmera may choose" in asking
     state = agent_prompt.project_state_block("v", "i", "e", [], [])
-    assert "never pick for them" in state
+    assert "never pick for them" not in state and "choose the track yourself" in state
+    for text in (state, agent_prompt.CORE_PROMPT):
+        assert "never choose music" not in text
 
 
 # ── AT-0C-4c: web-SFX is refused while the flag is off ──────────────────
@@ -535,12 +558,9 @@ def test_legacy_music_without_provenance_still_renders(tmp_path):
     assert probe.get("has_audio", True)
 
 
-def test_over_mcp_apply_look_points_the_pick_at_add_library_music(store):
+def test_over_mcp_apply_look_places_its_music(store):
     ctx, fake = tool_context(default_edl(20.0), mcp=True)
     out = agent_tools.apply_look(ctx, "editorial",
                                  music="chill-bubbles-lofi-bright-relaxed")
-    assert out.startswith("REJECTED"), out
-    assert "add_library_music(slug='chill-bubbles-lofi-bright-relaxed', " \
-        "user_pick=" in out
-    assert "Over MCP pass user_pick" not in out   # apply_look has none
-    assert len(fake.rows) == 1
+    assert out.startswith("EDL v7 -> v8"), out
+    assert fake.rows[-1]["json"]["music"][0]["provenance"] == "valmera_chosen"

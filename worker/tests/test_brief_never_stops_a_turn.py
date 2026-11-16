@@ -89,7 +89,7 @@ def test_an_open_brief_freezes_nothing(monkeypatch):
     ctx.turn_start_edl = {"version": 3, "json": {}}
     request_contract.ensure(ctx)
     assert request_contract.protected_lanes(ctx) == set()
-    assert request_contract.forbidden_additions(ctx, {"music": [{}]}) == []
+    assert request_contract.write_note(ctx, {}, {"music": [{}]}, set()) == ""
     assert request_contract.preflight(ctx) is None
 
 
@@ -157,11 +157,12 @@ def test_a_finding_the_editor_cannot_clear_does_not_hold_the_reply(monkeypatch):
     assert posted[-1][0]
 
 
-def test_the_render_gate_says_it_once_then_the_render_runs(monkeypatch):
+def test_the_brief_note_is_said_once_and_never_holds_the_render(monkeypatch):
     ctx, _db, _posted, _checkpoint, _calls = _uncleared(monkeypatch)
-    first = agent_loop._unmet_ask_hold(ctx, "render_preview", {}, ASK)
-    assert first.startswith("Restore the customer's")
-    assert agent_loop._unmet_ask_hold(ctx, "render_preview", {}, ASK) is None
+    assert not hasattr(agent_loop, "_unmet_ask_hold")
+    first = request_contract.preflight(ctx)
+    assert first.startswith("NOTE: the request's brief")
+    assert request_contract.preflight(ctx) is None
 
 
 def test_a_new_finding_is_still_said(monkeypatch):

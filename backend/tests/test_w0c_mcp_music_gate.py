@@ -1,10 +1,12 @@
-"""Owner rule 1 on the MCP batch path (Wave 0, track 0C).
+"""Music provenance on the MCP batch path (Wave 0, track 0C; 16 Nov 2026).
 
 An MCP ``apply_edit_batch`` / ``apply_short_edit_batches`` is written by the
 backend (apply_edit_batch_core), not by the worker's ToolContext, so it runs
-the same pure music gate (worker/music_gate.py, loaded by path): a track new
-to the edit takes its provenance from its project asset, never from what the
-batch claims, and a library track the user never picked is refused.
+the same pure provenance core (worker/music_gate.py, loaded by path): a track
+new to the edit takes its provenance from its project asset, never from what
+the batch claims. Valmera may choose the music (owner, 13 Nov 2026): a track
+nobody picked is stamped valmera_chosen, never refused. With web sounds off a
+web-found sound plays the closest approved recording instead (a repair).
 
     cd backend && python -m pytest tests -q
 """
@@ -53,6 +55,7 @@ def api(monkeypatch):
             self.messages, self.queries = [], []
             self.picks = None
             self.history = set()
+            self.assets = {}
 
         def cursor(self):
             return self
@@ -88,6 +91,11 @@ def api(monkeypatch):
                 self.messages.append(copy.deepcopy(args[-1].adapted))
             elif q.startswith("UPDATE video_jobs SET state="):
                 pass
+            elif q.startswith("SELECT 1 FROM assets WHERE project_id=%s AND storage_key=%s"):
+                self.one = {"?column?": 1} if args[1] in self.assets else None
+            elif q.startswith("INSERT INTO assets"):
+                self.assets[args[1]] = {"bytes": args[2], "duration_s": args[3],
+                                        "meta": copy.deepcopy(args[4].adapted)}
             else:
                 raise AssertionError(q)
 
@@ -132,14 +140,12 @@ def test_an_mcp_batch_stamps_the_users_upload(api):
     assert api.edls[2]["music"][0]["provenance"] == "user_upload"
 
 
-def test_an_mcp_batch_cannot_place_a_library_track_nobody_picked(api):
+def test_an_mcp_batch_places_a_library_track_nobody_picked_as_valmeras_choice(api):
     result, status = video.apply_edit_batch_core(
         1, 2, _batch(_item(LIBRARY, provenance="user_picked_library")),
         origin="mcp")
-    assert status == 400
-    assert "agents never choose music" in result["error"]
-    assert "add_library_music" in result["error"]
-    assert list(api.edls) == [1] and not api.messages
+    assert status == 200, result
+    assert api.edls[2]["music"][0]["provenance"] == "valmera_chosen"
 
 
 def test_the_users_recorded_pick_places_it(api):
@@ -159,10 +165,17 @@ def test_a_track_from_the_edit_history_is_not_a_new_choice(api):
     assert api.edls[2]["music"][0].get("provenance") is None   # legacy
 
 
-def test_a_web_sound_is_refused_as_music(api):
+def test_a_web_sound_placed_as_music_is_valmeras_choice(api):
     result, status = video.apply_edit_batch_core(
         1, 2, _batch(_item(SFX, provenance="user_upload")), origin="mcp")
-    assert status == 400 and "sound effect" in result["error"]
+    assert status == 200, result
+    assert api.edls[2]["music"][0]["provenance"] == "valmera_chosen"
+
+
+def test_only_a_key_that_is_no_project_audio_cannot_play(api):
+    result, status = video.apply_edit_batch_core(
+        1, 2, _batch(_item("music/7/nowhere.mp3")), origin="mcp")
+    assert status == 400 and "not attached" in result["error"], result   # technical check
 
 
 def test_existing_tracks_keep_their_provenance_whatever_the_batch_claims(api):
@@ -187,16 +200,18 @@ def test_the_users_own_studio_batches_are_not_gated(api):
                    for q in api.queries)
 
 
-def test_the_sound_of_a_stock_clip_is_not_the_users_music(api):
+def test_the_sound_of_a_stock_clip_is_valmeras_choice(api):
     result, status = video.apply_edit_batch_core(
         1, 2, _batch(_item(STOCK_AUDIO)), origin="mcp")
-    assert status == 400 and "agent found" in result["error"]
+    assert status == 200, result
+    assert api.edls[2]["music"][0]["provenance"] == "valmera_chosen"
 
 
-# ── owner rule 2 on the same path (Wave 0 final review) ─────────────────
-# With web sounds off, an MCP batch may not place a sound an earlier
-# search_sfx fetched into the project (the worker's add_sfx and its own
-# writes refuse it too); a sound already in the edit keeps playing.
+# ── owner rule 2 on the same path, as a repair (16 Nov 2026) ───────────
+# With web sounds off, a sound an earlier search_sfx fetched into the
+# project plays the closest approved recording instead (the worker's add_sfx
+# and its own writes repair it the same way); a sound already in the edit
+# keeps playing.
 
 def _sfx_batch(*items, base=1, op="s1"):
     return dict(base_version=base, operation_id=f"web-sound-{op}-0123456789",
@@ -208,17 +223,26 @@ def _sfx(key, sid="s1", at=2.0):
     return dict(id=sid, storage_key=key, at=at)
 
 
-def test_an_mcp_batch_cannot_place_a_web_sound_while_web_sfx_is_off(
+def test_an_mcp_batch_web_sound_plays_the_closest_library_recording(
         api, monkeypatch):
     monkeypatch.setenv("WEB_SFX_ENABLED", "0")
+    uploaded = []
+    monkeypatch.setattr(video.storage, "put_bytes",
+                        lambda key, data, ctype: uploaded.append((key, len(data), ctype)))
     result, status = video.apply_edit_batch_core(
         1, 2, _sfx_batch(_sfx(SFX)), origin="mcp")
-    assert status == 400 and "found online" in result["error"], result
-    assert list(api.edls) == [1]
-    # the user's own file still places
-    result, status = video.apply_edit_batch_core(
-        1, 2, _sfx_batch(_sfx(UPLOAD), op="s2"), origin="mcp")
     assert status == 200, result
+    item = api.edls[2]["sfx"][0]
+    sid = video.wsound.id_for_key(item["storage_key"])
+    assert sid and uploaded and uploaded[0][0] == item["storage_key"]
+    assert api.assets[item["storage_key"]]["meta"]["library_sound"] == sid
+    assert abs(video.wsound.hit_at(item) - 2.0) <= 0.011
+    assert "closest recording of the approved library" in json.dumps(result)
+    # the user's own file still places as it is
+    result, status = video.apply_edit_batch_core(
+        1, 2, _sfx_batch(_sfx(UPLOAD, sid="s2"), base=2, op="s2"), origin="mcp")
+    assert status == 200, result
+    assert any(s["storage_key"] == UPLOAD for s in api.edls[3]["sfx"])
 
 
 def test_a_web_sound_already_in_the_edit_still_moves(api, monkeypatch):

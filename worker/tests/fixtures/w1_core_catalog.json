@@ -1,5 +1,5 @@
 {
- "bytes": 82066,
- "sha256": "4cb81336d37b72b980be11500994ae9403f250727f74071f67071ad1d64ffa30",
- "_doc": "Core compact catalog with automatic wave growth set aside. enhance_video's resolution enum (+55 B, #861 2K export) and extract_audio's part enum (+85 B, #386 clip music) are paid for by trims that lose no fact: enhance_video gets a compact line naming the export size, extract_audio's line is tightened, and set_picture_card, apply_look and add_zoom drop prose that restated their own property names and enum values. Existing 82,700 B ceiling and the 81,688 + 400 B share unchanged. Previous pin: 82,087 B."
+ "bytes": 82060,
+ "sha256": "ffaef6c054c9e8d89903fc455cf50097c0babc3452f5a3fa4a6ff7e3a7ae5568",
+ "_doc": "Core compact catalog with automatic wave growth set aside. EDIT-CORE (16 Nov 2026): ask_user, add_music and apply_look no longer tell the editor that music belongs to the user to pick (owner, 13 Nov 2026: Valmera may choose the music); their lines are shorter. Existing 82,700 B ceiling and the 81,688 + 400 B share unchanged. Previous pin: 82,066 B."
 }

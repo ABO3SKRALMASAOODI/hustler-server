@@ -10,114 +10,11 @@ import audit
 import edl_read
 import music_gate
 import music_library
-import preview_budget
 import quality_verifier
 import read_tools
 import trial_reply
 from schemas import default_edl
 from w0c_support import tool_context
-
-
-def context(version=30, count=0):
-    row = {'version': version, 'json': default_edl(20)}
-    return SimpleNamespace(latest_edl=lambda: row, trial_preview_cap=2,
-                           trial_previews=count, last_preview=None,
-                           verification_records={}, row=row)
-
-
-def rendered(ctx, version, defects=()):
-    ctx.row['version'] = version
-    ctx.last_preview = {'edl_version': version, 'asset_id': 100 + version}
-    ctx.verification_records[version] = {'unresolved_findings': [
-        {'finding_id': f, 'code': 'review_finding', 'severity': 'error'}
-        for f in defects]}
-    agent_loop._count_trial_preview(ctx, 'Preview rendered')
-
-
-def test_diagnostic_proof_and_full_preview_leave_room_for_repair():
-    ctx = context()
-    for reply in ['Changed-section verification completed', 'REJECTED: preflight',
-                  'PREREQUISITE: waiting for queued preview', 'TRANSIENT_FAILURE']:
-        agent_loop._count_trial_preview(ctx, reply)
-    assert ctx.trial_previews == 0
-    rendered(ctx, 30, ['quiet_audio', 'dead_air'])
-    assert ctx.trial_previews == 1
-    assert agent_loop._trial_render_refusal(ctx, 'set_master_loudness') is None
-    # Re-reading the same completed job cannot consume another allowance.
-    agent_loop._count_trial_preview(ctx, 'Preview rendered')
-    assert ctx.trial_previews == 1
-    rendered(ctx, 31)
-    assert ctx.trial_previews == 2
-    assert agent_loop._trial_render_refusal(ctx, 'add_text').startswith('REJECTED')
-
-
-def test_proven_repair_reservation_survives_checkpoint_and_stops_no_progress():
-    ctx = context()
-    rendered(ctx, 17, ['speech', 'quiet_audio'])
-    rendered(ctx, 21, ['speech'])
-    assert agent_loop._trial_render_refusal(ctx, 'cut_range') is None
-    ctx.row['version'] = 22  # a repair has been written, awaiting verification
-    saved = json.loads(json.dumps(preview_budget.checkpoint(ctx)))
-    next_ctx = context(22, ctx.trial_previews)
-    preview_budget.restore(next_ctx, saved)
-    assert agent_loop._trial_render_refusal(next_ctx, 'render_preview') is None
-    rendered(next_ctx, 22, ['speech'])
-    assert agent_loop._trial_render_refusal(next_ctx, 'cut_range').startswith('REJECTED')
-    assert len(next_ctx.trial_preview_repairs['history']) == 1
-
-
-def test_repair_cycles_require_strict_progress_and_have_a_hard_backstop():
-    ctx = context(count=2)
-    for version, remaining in [(1, 5), (2, 4), (3, 3)]:
-        rendered(ctx, version, range(remaining))
-        assert agent_loop._trial_render_refusal(ctx, 'cut_range') is None
-    rendered(ctx, 4, range(2))
-    assert agent_loop._trial_render_refusal(ctx, 'cut_range').startswith('REJECTED')
-
-
-def test_legacy_checkpoint_uses_render_receipts_not_old_call_count():
-    ctx = context(count=2)
-    preview_budget.restore(ctx, {'trial_previews': 2, 'rendered_versions': [30]})
-    assert ctx.trial_previews == 1
-    assert agent_loop._trial_render_refusal(ctx, 'set_master_loudness') is None
-
-
-def test_render_adopted_at_resume_is_counted_before_another_tool_runs():
-    ctx = context()
-    ctx.rendered_versions = {30, 31}
-    preview_budget.restore(ctx, {'trial_preview_versions': [30], 'trial_previews': 1})
-    assert ctx.trial_previews == 2 and ctx.trial_preview_versions == [30, 31]
-
-
-def test_resume_closes_a_repair_reservation_whose_render_finished():
-    ctx = context(count=2)
-    rendered(ctx, 21, ['speech'])
-    assert agent_loop._trial_render_refusal(ctx, 'cut_range') is None
-    saved = preview_budget.checkpoint(ctx)
-    resumed = context(22)
-    resumed.rendered_versions = {21, 22}
-    rendered(resumed, 22, ['speech'])
-    preview_budget.restore(resumed, saved)
-    assert agent_loop._trial_render_refusal(resumed, 'cut_range').startswith('REJECTED')
-    assert agent_loop._trial_render_refusal(resumed, 'render_preview', {'complete': True}) is None
-
-
-def test_exhausted_allowance_does_not_block_reading_a_stored_review():
-    ctx = context(count=2)
-    assert agent_loop._trial_render_refusal(ctx, 'render_preview', {'report': True}) is None
-
-
-def test_prepared_edit_can_repair_a_proven_defect_but_not_an_advisory():
-    ctx = context(count=2)
-    ctx.claude_trial = object()
-    ctx.trial_prep = {'intent': 'first_cut'}
-    rendered(ctx, 2, ['quiet_audio'])
-    assert agent_loop._trial_render_refusal(ctx, 'set_master_loudness') is None
-    other = context(count=2)
-    rendered(other, 2)
-    other.verification_records[2] = {'unresolved_findings': [
-        {'code': 'taste_advisory', 'severity': 'advisory'}]}
-    assert agent_loop._trial_render_refusal(other, 'add_text').startswith('REJECTED')
 
 
 def words(text, starts=None):

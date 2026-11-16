@@ -56,8 +56,6 @@ import perception
 import preview_critic
 import quality_gate
 import reference_profile
-import scope_guard
-import followup_recipes
 # The takeover's geometry (how far the camera travels, where it aims) is
 # renderer arithmetic, and the tool has to quote the SAME numbers the graph
 # will use — importing the resolver is the only way those two cannot drift.
@@ -698,9 +696,9 @@ class ToolContext:
         self._call_edl_cache = None
 
     def apply_score(self, new_edl_dict, change_desc):
-        """The Director's one write (score.film). validate_edl, counter_facts, music_gate,
-        check_sfx_write and mono_policy run exactly as on every write; the request contract,
-        scope guard and follow-up recipes skip it (write_edl, ``scoring``)."""
+        """The Director's one write (score.film). validate_edl, the cut-edge repair, music
+        provenance, the web-sound repair and mono_policy run exactly as on every write; the
+        request brief's notes skip it (write_edl, ``scoring``)."""
         prev_tool = getattr(self, "_executing_tool", None)
         self._score_write = True
         self._executing_tool = "apply_score"
@@ -752,16 +750,12 @@ class ToolContext:
                         "call reset_edit to start from the full video, then "
                         "rebuild what they asked for.")
             return msg
-        import word_edges
-        word_refusal = word_edges.refusal(self, prev['json'], normalized)
-        if word_refusal:
-            return f"REJECTED (EDL v{prev['version']} unchanged): {word_refusal}"
-        if prev['json'].get('keep') != normalized.get('keep'):
-            onsets = _keep_onset_lines(self, normalized.get('keep'), prev['json'].get('keep'),
-                                      (getattr(self, 'index', None) or {}).get('words') or [])
-            if onsets:
-                return (f"REJECTED (EDL v{prev['version']} unchanged): Cut would clip measured speech: "
-                        + '; '.join(onsets) + '. Move the boundary before saving.')
+        # A new cut edge inside a spoken word, or one that clips a word's
+        # measured onset or release, is moved and the write saves: the result
+        # names every moved edge with the exact seconds (owner, 16 Nov: a tool
+        # repairs what it can and says so; it never refuses).
+        normalized, edge_note = _repair_cut_edges(self, prev["json"], normalized)
+        notes = [edge_note] if edge_note else []
         import required_broll
         picture_refusal = required_broll.write_refusal(self, prev['json'], normalized)
         if picture_refusal:
@@ -770,79 +764,36 @@ class ToolContext:
         integrity_refusal = edit_integrity.write_refusal(self, prev["json"], normalized)
         if integrity_refusal:
             return f"REJECTED (EDL v{prev['version']} unchanged): {integrity_refusal}"
-        import counter_facts
-        if counter_facts.candidates(prev["json"], normalized):
-            clock = timeline_mod.Timeline(normalized.get("keep") or [],
-                normalized.get("inserts") or [], normalized.get("speed"))
-            counter_refusal = counter_facts.check_write(
-                prev["json"], normalized, (self.index or {}).get("words"),
-                clock.src_to_out, self.user_message)
-            if counter_refusal:
-                return f"REJECTED (EDL v{prev['version']} unchanged): {counter_refusal}"
-        held = _length_held_refusal(self, prev, normalized)
-        if held:
-            return f"REJECTED (EDL v{prev['version']} unchanged): {held}"
+        length_note = _length_ask_note(self, prev, normalized)
+        if length_note:
+            notes.append(length_note)
         import request_contract
-        protected = None
         # The Director's film (apply_score) is one whole version made from the upload: the request
-        # contract, scope guard and follow-up recipes judge an editor's tool against a typed request,
-        # so they skip it. Every other check below runs as on any write.
+        # brief's notes are about an editor's tool against a typed request, so they skip it.
         scoring = getattr(self, "_score_write", False) is True
         if not scoring and request_contract.enabled(self):
             try:
                 protected = request_contract.protected_lanes(self)
             except ValueError as exc:
                 return f"REJECTED (EDL v{prev['version']} unchanged): {exc}"
-            forbidden = request_contract.forbidden_additions(self, normalized)
-            if forbidden:
-                request_contract.note_refused(self, forbidden)
-                return (f"REJECTED (EDL v{prev['version']} unchanged): the request "
-                        "excludes these output channels: " + ", ".join(forbidden))
-        preservation_baseline = getattr(self, "request_preservation_baseline", None)
-
-        def _guarded():
-            if protected is not None and preservation_baseline:
-                return scope_guard.recovery_update_violations(
-                    prev["json"], normalized, preservation_baseline, protected,
-                    source_shape=_source_shape(self))
-            return scope_guard.preservation_violations(
-                prev["json"], normalized, self.user_message,
-                source_shape=_source_shape(self), protected=protected)
-        violations = [] if scoring else _guarded()
-        if violations and protected is not None \
-                and request_contract.reread_refused(
-                    self, scope_guard.lanes_of(violations), violations,
-                    getattr(self, "_executing_tool", None),
-                    {"keep": normalized.get("keep"),
-                     **_what_changed(prev["json"], normalized)}):
-            protected = request_contract.protected_lanes(self)
-            violations = _guarded()
-        if violations:
-            request_contract.note_refused(self, scope_guard.lanes_of(violations))
-            return scope_guard.rejection_message(prev["version"], violations)
-        # WAVE_C: on a classified follow-up of the new Claude lanes, a write
-        # outside the request or one moving the length the wrong way
-        # ("cut the boring parts" came back longer) is refused.
-        followup_refusal = None if scoring else followup_recipes.check_write(
-            self, prev["json"], normalized,
-            getattr(self, "_executing_tool", None))
-        if followup_refusal:
-            return followup_refusal
-        # Owner rule (Wave 0, 0C): agents never choose music. Every write —
-        # add_music, a library pick, apply_look, swap_music, apply_edit_batch
-        # — stamps the provenance of a track new to the edit and refuses one
-        # nobody chose (music_gate.check_write; existing tracks keep theirs).
-        music_refusal = music_gate.check_write(self, prev["json"], normalized)
-        if music_refusal:
-            return f"REJECTED (EDL v{prev['version']} unchanged): {music_refusal}"
-        # Owner rule 2: with web sounds off, no write (add_sfx or an edit
-        # batch) places a sound search_sfx fetched earlier; sounds already in
-        # the edit keep playing.
-        sfx_refusal = music_gate.check_sfx_write(self, prev["json"],
-                                                 normalized)
-        if sfx_refusal:
-            return (f"REJECTED (EDL v{prev['version']} unchanged): "
-                    + sfx_refusal.replace("REJECTED: ", "", 1))
+            brief_note = request_contract.write_note(
+                self, prev["json"], normalized, protected, _source_shape(self))
+            if brief_note:
+                notes.append(brief_note)
+        # Music provenance (who chose each track new to the edit) is stamped
+        # on the item as information: Valmera may choose the music itself
+        # (owner, 13 Nov 2026) and the customer decides whether to keep it.
+        # Only a key that is no audio of this project cannot be placed
+        # (music_gate.check_write).
+        music_missing = music_gate.check_write(self, prev["json"], normalized)
+        if music_missing:
+            return f"REJECTED (EDL v{prev['version']} unchanged): {music_missing}"
+        # Owner rule 2 (web sounds off): a sound search_sfx once fetched is
+        # placed as the closest recording of the approved library, and the
+        # result says so (music_gate.repair_web_sounds).
+        sfx_note = music_gate.repair_web_sounds(self, prev["json"], normalized)
+        if sfx_note:
+            notes.append(sfx_note)
         # Owner taste (15 Oct): black and white is a device, never a flat
         # look. A write that makes the whole short B&W is refused unless the
         # user's own words asked for it (mono_policy; with no user words —
@@ -866,6 +817,7 @@ class ToolContext:
             getattr(self, "_executing_tool", None), prev["version"],
             (self.job or {}).get("total_claims"))
         self.versions_written.append(version)
+        self.last_written_keep = normalized.get("keep")
         chg = edl_diff.change_ranges(prev["json"], normalized)
         manifest = quality_verifier.build_change_manifest(
             self.project_id, version, prev["json"], normalized, chg,
@@ -891,6 +843,8 @@ class ToolContext:
                              src_shape=_source_shape(self))
         line = (f"EDL v{prev['version']} -> v{version}: {change_desc}. "
                 f"Now: {after}.")
+        for note in notes:
+            line += "\n" + note
         if advisories:
             line += "\n" + quality_gate.advisory_message(version, advisories)
         if mono_note:
@@ -3416,11 +3370,15 @@ def _audio_safe_keep(ctx, keep, prev_keep, words):
     return ([list(x) for x in new] or keep), notes, quiet
 
 
-def _keep_onset_lines(ctx, keep, prev_keep, words):
-    """Measured onsets and releases, including inaccurate exact ASR edges."""
+def _measured_edge_moves(ctx, keep, prev_keep, words):
+    """New cut edges that clip a word's measured onset (its sound already
+    running at a start) or release (still running at an end), each with the
+    measured quiet point it moves to (cut_audio.clipped_onsets /
+    clipped_releases): [{"side", "from", "to", "word", "db_from", "db_to"}].
+    [] without the source's sound: nothing is guessed. Never raises."""
     import cut_audio
     try:
-        edges = [b for _i, side, b in cut_audio.cut_edges(keep, ctx.duration, prev_keep)]
+        edges = [b for _i, _side, b in cut_audio.cut_edges(keep, ctx.duration, prev_keep)]
     except Exception:  # noqa: BLE001
         return []
     hook = getattr(ctx, "cut_sound_source", None)
@@ -3431,19 +3389,77 @@ def _keep_onset_lines(ctx, keep, prev_keep, words):
         level = cut_audio.source_levels(source, edges, ctx.duration,
                                         timeout=CUT_SOUND_BUDGET_S) \
             if source else None
-        lines = cut_audio.onset_lines(cut_audio.clipped_onsets(
-            keep, words, ctx.duration, level, prev_keep))
-        lines += cut_audio.release_lines(cut_audio.clipped_releases(
-            keep, words, ctx.duration, level, prev_keep))
-    except Exception:  # noqa: BLE001 — an advisory never fails a write
+        found = [("start", f) for f in cut_audio.clipped_onsets(
+            keep, words, ctx.duration, level, prev_keep)]
+        found += [("end", f) for f in cut_audio.clipped_releases(
+            keep, words, ctx.duration, level, prev_keep)]
+    except Exception:  # noqa: BLE001 — a measurement never fails a write
         return []
-    return lines
+    return [{"side": side, "from": float(f["b"]), "to": float(f["t"]),
+             "word": f.get("word"), "db_from": f.get("db_b"),
+             "db_to": f.get("db_t")} for side, f in found]
 
 
-def _exact_keep_onset_notes(ctx, keep, prev_keep, words):
-    """Legacy tool notes; the shared write boundary now enforces this evidence."""
-    return ['ADVISORY (exact times kept as written): ' + ln
-            for ln in _keep_onset_lines(ctx, keep, prev_keep, words)]
+def _repair_cut_edges(ctx, before, after):
+    """The shared write boundary's cut-edge repair: (edl, note).
+
+    Every NEW cut edge that lands inside a transcript word moves to that
+    word's nearest edge (word_edges.nearest), then every edge that still clips
+    a word's measured onset or release moves to the measured quiet point
+    (_measured_edge_moves). Inserts and program-time items follow the moved
+    edges, the result is validated again and saved; the note names each moved
+    edge with the exact seconds. An edit whose keep is unchanged, or whose
+    edges are all clean, comes back as it was with no note. A repair that
+    cannot validate keeps the edges as written and says so: the write still
+    saves (owner, 16 Nov 2026: repair and report, never refuse)."""
+    old_keep = (before or {}).get("keep")
+    new_keep = (after or {}).get("keep")
+    if not new_keep or old_keep == new_keep:
+        return after, ""
+    import word_edges
+    words = (getattr(ctx, "index", None) or {}).get("words") or []
+    try:
+        keep, moves = word_edges.nearest(new_keep, words, ctx.duration, old_keep)
+    except Exception as exc:  # noqa: BLE001 — the edges as written
+        print(f"[cut edges] word repair skipped: {str(exc)[:160]}", flush=True)
+        keep, moves = [[float(x), float(y)] for x, y in new_keep], []
+    lines = word_edges.move_lines(moves)
+    for m in _measured_edge_moves(ctx, keep, old_keep, words):
+        k = 0 if m["side"] == "start" else 1
+        hit = False
+        for span in keep:
+            if abs(span[k] - m["from"]) < 1e-6:
+                span[k], hit = m["to"], True
+        if not hit:
+            continue
+        shift = m["to"] - m["from"]
+        lines.append(
+            f"{m['side']} {m['from']:.3f}s -> {m['to']:.3f}s ({abs(shift):.3f} s "
+            f"{'later' if shift > 0 else 'earlier'}; the sound of "
+            f"'{m['word'] or 'the word'}' was still running there"
+            + (f" at {m['db_from']:.0f} dB" if m.get("db_from") is not None else "")
+            + (f", the measured pause is at {m['db_to']:.0f} dB"
+               if m.get("db_to") is not None else "") + ")")
+    if not lines:
+        return after, ""
+    keep = word_edges.merge_spans([s for s in keep if s[1] - s[0] >= 0.05]) or \
+        [[float(x), float(y)] for x, y in new_keep]
+    repaired = copy.deepcopy(after)
+    repaired["keep"] = keep
+    speed = repaired.get("speed") or []
+    try:
+        if repaired.get("inserts"):
+            repaired["inserts"], _ins = timeline_mod.resnap_inserts(
+                repaired["inserts"], new_keep, keep, speed, speed)
+        _remap_program_items(
+            repaired, Timeline(new_keep, after.get("inserts") or [], speed),
+            Timeline(keep, repaired.get("inserts") or [], speed))
+        repaired = validate_edl(repaired, ctx.duration).model_dump()
+    except Exception as exc:  # noqa: BLE001 — the model's edges stand
+        return after, ("CUT EDGES KEPT AS WRITTEN (saved): moving them to the "
+                       "word edges did not validate (" + str(exc)[:160]
+                       + "); these edges clip speech: " + "; ".join(lines) + ".")
+    return repaired, ("CUT EDGES REPAIRED (saved): " + "; ".join(lines) + ".")
 
 
 def _exact_keep_quiet_edges(ctx, keep, words):
@@ -3542,9 +3558,6 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
         new_keep, audio_notes, quiet_edges = _audio_safe_keep(
             ctx, new_keep, None if place_all else prev_keep, words)
         audio_notes = whole_before + audio_notes
-    else:
-        audio_notes = _exact_keep_onset_notes(
-            ctx, new_keep, None if place_all else prev_keep, words)
     # The typed exact-time choice applies to every automatic placement pass,
     # including shot hygiene. Warnings may explain a rough edge, not move it.
     shot_notes = []
@@ -3583,9 +3596,18 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
     new_tl = Timeline(new_keep, edl.get("inserts") or [], speed)
     region_notes = ins_notes + _remap_program_items(edl, old_tl, new_tl)
 
+    try:
+        ctx.last_written_keep = None
+    except Exception:  # noqa: BLE001 — a context without attributes
+        pass
     result = ctx.write_edl(edl, desc)
     if not result.startswith("EDL v"):
         return result
+    # The write boundary may have moved an edge off a word (its result says
+    # so); the boundary warnings below read the keep that was saved.
+    saved_keep = getattr(ctx, "last_written_keep", None)
+    if isinstance(saved_keep, list) and saved_keep:
+        new_keep = saved_keep
     if region_notes + audio_notes + shot_notes:
         result += "\n" + "\n".join(region_notes + audio_notes + shot_notes)
     warn = audit.boundary_warning_lines(
@@ -8153,10 +8175,10 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=None,
     # sound that plays is the audio extracted from it, never the video object.
     storage_key = track["storage_key"]
     edl = dict(ctx.latest_edl()["json"])
-    # Owner rule (Wave 0, 0C): who chose this track. The user's upload or
-    # clip, a song they named, or a library track they picked; anything else
-    # (a library track nobody picked, agent-searched web music) is refused
-    # before the write (music_gate; the write gate re-checks).
+    # Who chose this track, stamped as information (music_gate): the user's
+    # upload or clip, a song they named, a library track they picked, or
+    # Valmera's own choice (owner, 13 Nov 2026: Valmera may choose the music;
+    # the customer decides whether to keep it).
     provenance, gate_err = music_gate.provenance_for(ctx, storage_key, edl,
                                                      resolved=True)
     if gate_err:
@@ -8380,12 +8402,20 @@ def _resolve_sfx(ctx, storage_key):
             f"REJECTED: '{storage_key}' is not an audio asset in this "
             "project. Use " + _sfx_sources_hint() + ".")
     if _web_found_sound(asset) and not sfx_search.available():
-        # Owner rule 2 (Wave 0): with web sounds off, a sound an earlier
-        # search_sfx fetched into this project is not placed either.
-        return None, (
-            "REJECTED: that sound was found online by search_sfx, and web "
-            "sounds are off — sound effects come only from the owner-approved "
-            "library. Use " + _sfx_sources_hint() + ".")
+        # Owner rule 2 (Wave 0): with web sounds off, sounds come only from
+        # the approved library. A sound an earlier search_sfx fetched is never
+        # refused: the closest approved recording plays instead, and the
+        # result says so (music_gate.library_stand_in).
+        sid, how = music_gate.library_stand_in(ctx, asset)
+        if sid:
+            kit, kit_err = motion_tools.resolve_library_reference(
+                ctx, motion_tools.SOUND_PREFIX + sid)
+            if kit:
+                kit = dict(kit, note=(
+                    f"Web sounds are off, so {sid} from the approved library "
+                    f"plays instead of '{_asset_name(asset)}' ({how}). Tell "
+                    "the user which sound plays."))
+                return kit, None
     return {"name": _asset_name(asset),
             "duration_s": asset.get("duration_s"), "library": False,
             "storage_key": storage_key}, None
@@ -13239,22 +13269,26 @@ def _kept_seconds(edl):
     return total
 
 
-def _length_held_refusal(ctx, prev, proposed):
-    """A typed request whose ask ledger keeps the upload's length (score.asks, the ledger model's
-    `length` field) refuses any write that cuts the upload shorter (p5472, round 3 and the round-4
-    replay: the length was restored to 473 s, then the editor cut its pauses back to 427 s against
-    "do not shorten"). The reason, not a pattern: the model read the ask; this only measures."""
+def _length_ask_note(ctx, prev, proposed):
+    """Information, never a refusal: when the ask ledger's model read an ask as
+    keeping the upload's whole length (score.asks, its `length` field) and this
+    write cuts the upload shorter, the write saves and its result says so, with
+    the measured seconds. The editor decides (it may trim a dead tail the
+    customer did not mean). "" otherwise."""
     ledger = getattr(ctx, "ask_ledger", None)
     if not isinstance(ledger, dict) or not getattr(ctx, "has_main_video", False):
-        return None
-    if not any(isinstance(a, dict) and a.get("length") == "upload" for a in ledger.get("asks") or []):
-        return None
+        return ""
+    asks_ = [a for a in ledger.get("asks") or []
+             if isinstance(a, dict) and a.get("length") == "upload"]
+    if not asks_:
+        return ""
     before, after = _kept_seconds(prev.get("json")), _kept_seconds(proposed)
     if after >= before - 0.25:
-        return None
-    return (f"the customer asked to keep their full length; this write cuts the upload from "
-            f"{before:.1f} s to {after:.1f} s of it. Cut nothing: place pictures over the film "
-            "(overlays) instead of removing any of it, and keep every second of the narration.")
+        return ""
+    said = "; ".join(f"{a.get('id')}: \"{str(a.get('said') or '')[:120]}\"" for a in asks_[:3])
+    return (f"NOTE (saved): the ask ledger reads the request as keeping the upload's whole length "
+            f"({said}); this write keeps {after:.1f} s of the {before:.1f} s it had. Keep it if the "
+            "request wants this cut, or restore_range what it should keep.")
 
 
 def reset_edit(ctx):
@@ -25072,15 +25106,6 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
         return (f"EDL v{version} has no changed-section render to return. "
                 "No full encode was started. Call render_preview(complete=true) "
                 "to create a watchable complete preview.")
-    # An explicitly ordered Studio story must be checked while edits can
-    # still be corrected, before a full preview consumes its allowance.
-    # MCP editors own their judgment; the automatic First cut stays deterministic.
-    if (_claude_lane_turn(ctx) and not getattr(ctx, "sight_out", False)
-            and not getattr(ctx, "second_opinions_off", False)):
-        import sequence_preflight
-        order_note = sequence_preflight.check(ctx, row, quality_verifier.request_text_for(ctx))
-        if order_note:
-            return order_note
     # Adopt the speculative encode of this exact version when one is already
     # queued/running (round 98) — same payload shape, same verify plan,
     # half the wait and none of the double cost.
@@ -25546,22 +25571,6 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                          + quality_verifier.ADVISORY_LABEL + "; they do not "
                          "block completion or export): "
                          + "; ".join(craft_notes[:4]) + ".")
-            if finishing_checkpoint(ctx):
-                if not getattr(ctx, "_finishing_checkpoint_announced", False):
-                    ctx._finishing_checkpoint_announced = True
-                    _metric(ctx, "clean_finishing_checkpoints")
-                state = director.status(getattr(ctx, "edit_plan", None))
-                note += (
-                    " CLEAN FINISHING CHECKPOINT: this complete immutable "
-                    "preview passed the independent visual review and has "
-                    "no unresolved semantic, audio, or deterministic craft "
-                    "finding. Reconcile the creative blueprint now. Mark "
-                    "its steps/checks passed from this evidence and finish; "
-                    "if one criterion genuinely failed, mark that exact "
-                    "criterion failed first, then make only its targeted "
-                    "repair. Do not begin another taste-only variation. "
-                    f"Blueprint state={state['state']}."
-                )
             return note
         if j["state"] == "failed":
             _drain_story_prefetch(ctx)
@@ -26994,23 +27003,15 @@ def ask_user(ctx, question):
     repeat_offer = music_gate.repeat_offer_refusal(ctx, q)
     if repeat_offer:
         return repeat_offer
-    import request_contract
     held = _question_can_wait(ctx, q)
-    # A refused write can come after the first hold was spent, and the refusal
-    # itself says to ask. A question about a lane that just opened is the
-    # "approve what you already asked for" wall, so it goes back too.
-    released = ([] if getattr(ctx, "versions_written", None)
-                or music_gate.offered_slugs(q)
-                else request_contract.release_inherited(ctx))
-    if held or released:
+    if held:
         return ("CORRECTION_NEEDED: not asked yet. Nothing has changed in this "
                 "turn, and the customer is waiting for an edit, not a "
                 "question. Do what the request clearly asks now: choose any "
                 "open detail yourself (a colour, a length, a style) and name "
                 "your choice in the reply, so one line from them changes it. "
                 "Only if you cannot go on without something only they have, "
-                "such as a file or a fact about them, call ask_user again."
-                + request_contract.released_note(released))
+                "such as a file or a fact about them, call ask_user again.")
     # A question is a user decision, not a log excerpt. Truncating it can
     # remove the actual choice, source list or a later music option.
     # Owner rule (Wave 0, 0C): a question that offers library tracks opens
@@ -30009,12 +30010,14 @@ def _look_hero_templates(look, limit=4):
 
 
 def _look_music_choice(look, music, ctx=None):
-    """(request, error). request is None or ('track', row).
+    """(request, error). request is None or ('track', row, provenance).
 
-    Owner rule (Wave 0, 0C): agents never choose music, so a look never
-    picks a bed — 'auto' and a mood (the look choosing a track) are refused;
-    only an exact slug the USER picked is placed (music_gate.resolve_pick,
-    the same gate as add_library_music)."""
+    The look may place a bed (owner, 13 Nov 2026: Valmera may choose the
+    music; the customer decides whether to keep it): 'auto' takes a library
+    track in the look's own moods, a mood takes one in that mood (tracks this
+    user already used elsewhere last), and a slug places that track. The
+    provenance says whether the user picked it (music_gate.resolve_pick) or
+    Valmera chose it. Only an unknown slug or a missing library is an error."""
     if music is None:
         return None, None
     mv = str(music).strip().lower()
@@ -30025,29 +30028,24 @@ def _look_music_choice(look, music, ctx=None):
                       "on this deployment — call apply_look again without "
                       "music, and use the user's own track for music.")
     if mv == "auto" or mv in music_library.MOODS:
-        return None, ("REJECTED: apply_look never picks music — agents never "
-                      "choose music. Call apply_look without music, offer "
-                      "2-4 library tracks in the look's moods ("
-                      + ", ".join(look.get("music") or music_library.MOODS)
-                      + ") with ask_user, then place the user's pick (music="
-                      "<their slug>, or add_library_music).")
+        moods = ([mv] if mv in music_library.MOODS else
+                 [m for m in (look.get("music") or []) if m in music_library.MOODS]
+                 or list(music_library.MOODS))
+        used = music_library.used_by_user(ctx) if ctx is not None else set()
+        track = music_library.pick(moods, getattr(ctx, "project_id", 0), avoid=used)
+        if not track:
+            return None, None
+        return ("track", track, "valmera_chosen"), None
     track, err = music_library.find(mv)
     if err:
         detail = err.split("REJECTED: ", 1)[-1]
-        return None, ("REJECTED: music must be the exact slug of the library "
-                      "track the user picked (list_music_library). " + detail)
+        return None, ("REJECTED: music must be a mood, 'auto' or the exact "
+                      "slug of a library track (list_music_library). " + detail)
+    prov = "valmera_chosen"
     if ctx is not None:
-        _pick, err = music_gate.resolve_pick(ctx, track["slug"])
-        if err:
-            if music_gate.is_mcp(ctx):
-                # apply_look has no user_pick: over MCP the pick travels
-                # with add_library_music.
-                err = err.split(" Over MCP pass user_pick", 1)[0] + (
-                    " Over MCP: apply_look without music, then "
-                    f"add_library_music(slug='{track['slug']}', user_pick="
-                    "'<pick token> <the user's own words>').")
-            return None, err
-    return ("track", track), None
+        record, _none = music_gate.resolve_pick(ctx, track["slug"])
+        prov = music_gate.pick_provenance(record)
+    return ("track", track, prov), None
 
 
 def _look_sounds_flag(v):
@@ -30403,13 +30401,13 @@ def apply_look(ctx, name, music=None, transition_sounds=None):
                          + " already scores this edit (swap_music or "
                            "remove_music to change it).")
         else:
-            # Only the user's pick reaches here (_look_music_choice).
+            # The user's pick or Valmera's own choice (_look_music_choice).
             track = music_req[1]
             key, err = music_library.ensure_project_asset(ctx, track)
             if err:
                 notes.append("music NOT added — " + err)
             else:
-                music_gate.grant(ctx, key, "user_picked_library")
+                music_gate.grant(ctx, key, music_req[2])
                 prog = program_duration(edl)
                 bed = _speech_overlap_s(ctx, edl, 0.0, prog) >= 1.0
                 stage = _RecipeContext(ctx, edl, row["version"])
@@ -30485,9 +30483,10 @@ def apply_look(ctx, name, music=None, transition_sounds=None):
                         "is fine.")
         if system and not music_placed and music_req is None \
                 and not edl.get("music"):
-            res += ("\nMusic: none. Only when the user asks for background "
-                    "music: offer library tracks with ask_user and place "
-                    "the one they pick — never on your own initiative.")
+            res += ("\nMusic: none. When the user asks for background "
+                    "music, place the library track that fits (apply_look "
+                    "music='auto', or add_library_music) and name it in the "
+                    "reply — never on your own initiative.")
     return res
 
 
@@ -31279,20 +31278,6 @@ def _matte_device_notes(ctx, before, after):
         except Exception as e:  # noqa: BLE001 — advice never fails a write
             print(f"[apply_edit_batch] matte note skipped: {str(e)[:160]}", flush=True)
     return notes
-
-
-def _what_changed(before, after):
-    """The fields a write changes, as stored: a reader judges the change, not
-    the dialect of its call (contrast=4 reads as a drastic grade, and is 4%)."""
-    def fields(side):
-        out = {k: v for k, v in (side or {}).items()
-               if k not in ("effects", "keep", "fx") and v not in (None, [], {})}
-        for k, v in ((side or {}).get("effects") or {}).items():
-            out[f"effects.{k}"] = ({a: b for a, b in v.items() if b is not None}
-                                   if isinstance(v, dict) else v)
-        return out
-    old, new = fields(before), fields(after)
-    return {k: new.get(k) for k in set(old) | set(new) if old.get(k) != new.get(k)}
 
 
 def verify_tools_matte_person(ctx, edl):
@@ -32157,8 +32142,7 @@ TOOLS = {
                   "override that. storage_key is an exact key from "
                   "list_assets(kind='music') — the user's own uploads or a "
                   "track fetch_url just downloaded — never invent one. "
-                  "Agents never choose music: a library track is placed "
-                  "only by add_library_music after the user picks it. "
+                  "Library tracks go through add_library_music. "
                   "Choose from the user's direction, metadata, context and "
                   "measured get_audio_analysis evidence. "
                   "start/end are OUTPUT-timeline seconds "
@@ -34297,11 +34281,11 @@ TOOLS = {
                    "warm), 'meme' (impact xl captions, flash cuts, grain); "
                    "their fades apply to landscape only. Transitions fire "
                    "only at real scene changes (B-roll/inserts/new shots), "
-                   "never on jump cuts. music= takes only the exact slug of "
-                   "a library track the USER picked (offer tracks with "
-                   "ask_user; never 'auto' or a mood — agents never choose "
-                   "music) and lays it as a ducked CC0 bed (-18 to -22 dB) "
-                   "when the edit has no music yet; otherwise omit music. "
+                   "never on jump cuts. music= takes 'auto' (a library "
+                   "track in the look's moods), a mood, or the exact slug of "
+                   "a library track (the user's pick or your choice), and "
+                   "lays it as a ducked CC0 bed (-18 to -22 dB) when the edit "
+                   "has no music yet; otherwise omit music. "
                    "Preserves existing "
                    "emphasis_words, else picks them from the transcript. "
                    "Never touches cuts. Every component can be adjusted "
@@ -34309,9 +34293,9 @@ TOOLS = {
                    {"name": {"type": "string",
                              "enum": sorted(LOOKS)},
                     "music": {"type": "string",
-                              "description": "Exact slug of the library "
-                              "track the user picked (ask_user offers "
-                              "them). Omit to leave music unchanged."},
+                              "description": "'auto' (the look's moods), a "
+                              "mood, or a library slug. Omit to leave music "
+                              "unchanged."},
                     "transition_sounds": {
                         "type": "boolean",
                         "description": "Opt in to library sounds on a "
@@ -34388,10 +34372,10 @@ TOOLS = {
          "evidence_ids": {"type": "array",
                           "items": {"type": "string"}}}),
     "ask_user": (ask_user, "Ask the user a specific question and wait for "
-                 "their reply (ends this turn). Use whenever a material "
-                 "choice genuinely belongs to the user — background music "
-                 "always does: list 2-4 exact library track titles and "
-                 "place the one they pick.",
+                 "their reply (ends this turn). Only for what only they have "
+                 "(a file, a fact about them); choose open details yourself, "
+                 "music included (Valmera may choose it), and name them in "
+                 "the reply.",
                  {"question": {"type": "string"}}),
     "wait_for_job": (wait_for_job, "Wait up to 45 seconds for an existing job in this project. "
                      "Use the exact job ID from a pending render/scout receipt. Never creates "
@@ -34478,12 +34462,6 @@ for _retired_tool in (
         "generate_image", "research_music", "search_music",
         "audition_music_candidates", "fetch_music"):
     TOOLS.pop(_retired_tool, None)
-
-# Blueprint close-out used to freeze writes after a clean preview. The editor
-# now edits, then may look at a render if it wants; it is never locked out.
-def finishing_checkpoint(ctx):
-    return False
-
 
 # Schema routing keeps a small orientation/verification core. Every deployed
 # capability remains named in the directory and any department can be loaded
@@ -35582,17 +35560,6 @@ def _execute(ctx, name, args):
     before_edl = None
     outer_write = name in WRITE_TOOLS and not isinstance(ctx, _RecipeContext)
     if outer_write:
-        if finishing_checkpoint(ctx):
-            state = director.status(getattr(ctx, "edit_plan", None))
-            _metric(ctx, "post_pass_variations_prevented")
-            return (
-                "NO CHANGE — the current complete preview already passed all "
-                "available independent finishing evidence. The creative "
-                f"blueprint is {state['state']}; reconcile it with "
-                "complete_edit_plan_steps and finish. If a real acceptance "
-                "criterion failed, mark that exact criterion failed with "
-                "evidence first; its targeted repair will then be available. "
-                "A taste-only variation was not applied.")
         try:
             replay_key = (name, json.dumps(args, sort_keys=True,
                                            separators=(",", ":"),
@@ -35667,10 +35634,9 @@ def _execute(ctx, name, args):
             return outcome.render_text()
     if look_before is not None and isinstance(out, str) \
             and out.startswith("EDL v"):
-        # RS_ENGINE (#56): a stacked look never leaves the picture crushed
-        out += look_guard.after_write(
-            ctx, look_before, quality_verifier.request_text_for(ctx)
-            if hasattr(quality_verifier, "request_text_for") else "")
+        # RS_ENGINE (#56): the look's measured brightness against the source,
+        # as information on the result; the editor's look stands as written.
+        out += look_guard.after_write(ctx, look_before)
     kind = tool_result_kind(out)
     if kind == "refused":
         _count_tool_outcome(ctx, "tool_refused")

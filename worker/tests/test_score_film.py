@@ -323,21 +323,17 @@ def test_printed_text_is_a_region_that_stays_put():
 
 # ------------------------------------------------------------------ the write path
 
-def test_apply_score_runs_the_checks_and_skips_only_the_request_guards(monkeypatch):
+def test_apply_score_runs_the_checks_and_skips_only_the_request_notes(monkeypatch):
     seen = []
-    import counter_facts
-    import followup_recipes
     import mono_policy
     import music_gate
     import request_contract
     import scope_guard
     monkeypatch.setattr(music_gate, "check_write", lambda *a: seen.append("music_gate"))
-    monkeypatch.setattr(music_gate, "check_sfx_write", lambda *a: seen.append("check_sfx_write"))
+    monkeypatch.setattr(music_gate, "repair_web_sounds", lambda *a: seen.append("repair_web_sounds") or "")
     monkeypatch.setattr(mono_policy, "check_write", lambda *a: (seen.append("mono_policy"), (None, None))[1])
-    monkeypatch.setattr(counter_facts, "candidates", lambda *a: seen.append("counter_facts") or False)
     monkeypatch.setattr(request_contract, "enabled", lambda *a: pytest.fail("request contract read on a film"))
     monkeypatch.setattr(scope_guard, "preservation_violations", lambda *a, **k: pytest.fail("scope guard on a film"))
-    monkeypatch.setattr(followup_recipes, "check_write", lambda *a: pytest.fail("follow-up recipe on a film"))
 
     class Stop(Exception):
         pass
@@ -352,7 +348,7 @@ def test_apply_score_runs_the_checks_and_skips_only_the_request_guards(monkeypat
     monkeypatch.setattr(agent_tools.quality_gate, "advisory_findings", stop)
     with pytest.raises(Stop):
         ctx.apply_score({"keep": [[0.0, 5.0]]}, "film")
-    assert seen == ["counter_facts", "music_gate", "check_sfx_write", "mono_policy"]
+    assert seen == ["music_gate", "repair_web_sounds", "mono_policy"]
     assert ctx._score_write is False
     assert ctx.apply_score({"keep": [[0.0, 99.0]]}, "film").startswith("REJECTED")      # validate_edl still refuses
 

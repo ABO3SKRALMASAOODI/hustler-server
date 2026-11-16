@@ -23,8 +23,8 @@ noise; a talking head with two well-placed devices beats one with ten.
   inside drop sections).
 - Flash safety is on: never more than 3 full-frame flashes in any second
   unless the user asked for strobing; the export is then flagged.
-- Never pick music to get a beat grid; devices bind to speech (the prosody
-  grid) unless the user supplied a track.
+- Never add music only to get a beat grid; devices bind to speech (the
+  prosody grid) unless the edit has a track.
 - The Valmera end card and the free-tier watermark are untouchable: every
   device renders before them.
 

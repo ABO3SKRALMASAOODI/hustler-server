@@ -141,10 +141,16 @@ wbatch = _pure_worker_module("edit_batch")
 # above (registered under its unique name, so nothing else resolves it).
 sys.modules.setdefault("worker_timeline", wtimeline)
 wflash = _pure_worker_module("flash_safety")
-# Owner rule 1 (Wave 0, 0C): agents never choose music. The worker gates
-# every agent write it makes (music_gate.check_write); an MCP edit batch is
-# written HERE, so it runs the same pure gate (_mcp_music_gate below).
+# Music provenance (who chose each track) is stamped on every agent write
+# (worker/music_gate.check_write); an MCP edit batch is written HERE, so it
+# runs the same pure core (_mcp_music_gate below). Valmera may choose the
+# music (owner, 13 Nov 2026): nothing is refused for who chose it.
 wmusic = _pure_worker_module("music_gate")
+# The approved sound library, for the web-sound repair of an MCP batch
+# (_mcp_web_sound_repair): sound_library reads its flag list through
+# sfx_filter, both pure (json/os), registered under their own names.
+sys.modules.setdefault("sfx_filter", _pure_worker_module("sfx_filter"))
+wsound = _pure_worker_module("sound_library")
 # Device re-solvers after a keep change (Wave 0; INTERFACES.md §6.4): the
 # Studio keep path runs the same pure hooks the agent's keep writes run.
 whooks = _pure_worker_module("hooks")
@@ -152,7 +158,6 @@ whooks = _pure_worker_module("hooks")
 # MCP batch carries no user words, so a batch that makes the whole short B&W
 # is applied with the advisory the worker's writes give (worker/mono_policy).
 wmono = _pure_worker_module("mono_policy")
-wcounter = _pure_worker_module("counter_facts")
 
 video_bp = Blueprint("video", __name__)
 
@@ -6423,16 +6428,17 @@ def _reanchor_after_op(old_j, new_edl, desc):
 
 
 def _mcp_music_gate(cur, project_id, before, after):
-    """Owner rule 1 on the MCP batch path (worker/devices/INTERFACES.md
-    §4.3: edit_batch writes that add a music item). The same pure gate the
+    """Music provenance on the MCP batch path (worker/devices/INTERFACES.md
+    §4.3: edit_batch writes that add a music item). The same pure core the
     worker's writes run (worker/music_gate.gate_items): a track new to the
     edit gets its provenance from its project asset — an upload or the sound
     of a clip is user_upload, a link the user named is user_named, a library
-    copy is user_picked_library only when the user picked it
-    (add_library_music records the pick) — never from what the batch claims,
-    and a track nobody chose is refused. Tracks already in the edit, or
-    anywhere in its history, keep their provenance. Returns an error string
-    or None; stamps ``after`` in place."""
+    copy is user_picked_library when the user picked it (add_library_music
+    records the pick), and anything else is valmera_chosen — never from what
+    the batch claims, and never refused for who chose it. Tracks already in
+    the edit, or anywhere in its history, keep their provenance. Returns an
+    error string only for a key that is no audio of this project, else None;
+    stamps ``after`` in place."""
     before_keys = {m.get("storage_key") for m in (before or {}).get("music")
                    or [] if isinstance(m, dict)}
     new_keys = sorted({m.get("storage_key") for m in (after or {}).get("music")
@@ -6474,34 +6480,85 @@ def _mcp_music_gate(cur, project_id, before, after):
 
     def decide(key):
         asset = assets.get(key)
-        prov, err = wmusic.decide(
+        return wmusic.decide(
             key, asset, is_picked=lambda slug: slug in picks,
             seen_before=seen_before,
             source=source_rows.get(wmusic.extracted_from(asset)))
-        if err == wmusic.REFUSE_PICK:
-            err += (" Over MCP: ask_user, then add_library_music(slug, "
-                    "user_pick=...) places the track they pick.")
-        return prov, err
 
     return wmusic.gate_items(before, after, decide)
 
 
-def _mcp_web_sound_gate(cur, project_id, before, after):
-    """Owner rule 2 on the MCP batch path: while web sounds are off, a batch
-    may not place a sound an earlier search_sfx fetched into the project
-    (worker/music_gate.gate_web_sounds, the same rule the worker's writes
-    run). Sounds already in the edit keep playing. Error string or None."""
+def _mcp_web_sound_repair(cur, project_id, before, after):
+    """Owner rule 2 on the MCP batch path, as a repair (owner, 16 Nov 2026:
+    never a refusal): while web sounds are off, a sound an earlier search_sfx
+    fetched into the project plays the closest recording of the approved
+    library instead (the library recording its title describes, else the
+    library's general one-shot; worker/music_gate.web_sound_keys reads which
+    sounds are web-found), its hit on the same moment, and the batch result
+    says so. Sounds already in the edit keep playing. Stamps ``after`` in
+    place; returns the note or ""."""
     if _sfx_search_enabled():
-        return None
+        return ""
     keys = wmusic.new_sfx_keys(before, after)
     if not keys:
-        return None
+        return ""
     cur.execute("SELECT storage_key, kind, meta FROM assets "
                 "WHERE project_id=%s AND storage_key = ANY(%s)",
                 (project_id, keys))
     rows = {row["storage_key"]: row for row in cur.fetchall() or ()}
-    err = wmusic.gate_web_sounds(before, after, rows.get)
-    return err.replace("REJECTED: ", "", 1) if err else None
+    lines = []
+    for key in wmusic.web_sound_keys(before, after, rows.get):
+        meta = (rows.get(key) or {}).get("meta") or {}
+        title = " ".join(str(meta.get(k) or "") for k in ("title", "filename"))
+        try:
+            hits = wsound.search(title, 1)
+            row = hits[0] if hits else next(
+                (r for r in (wsound.pick(role, title) for role in
+                             ("whoosh", "hit", "click", "pop")) if r), None)
+            if not row:
+                continue
+            sid = row["id"]
+            lib_key = wsound.asset_key(project_id, sid)
+            cur.execute("SELECT 1 FROM assets WHERE project_id=%s AND storage_key=%s",
+                        (project_id, lib_key))
+            if not cur.fetchone():
+                path = wsound.path(sid)
+                with open(path, "rb") as f:
+                    storage.put_bytes(lib_key, f.read(), "audio/flac")
+                cur.execute("""INSERT INTO assets (project_id, kind, storage_key, bytes,
+                                                   duration_s, meta)
+                               VALUES (%s, 'music', %s, %s, %s, %s)""",
+                            (project_id, lib_key, os.path.getsize(path),
+                             row.get("duration_s"),
+                             Json({"filename": row.get("file"),
+                                   "source": "valmera-sound-library",
+                                   "source_url": row.get("source_url"),
+                                   "author": row.get("author"),
+                                   "license": row.get("license"),
+                                   "caption": row.get("use"),
+                                   "library_sound": sid, "role": row.get("role")})))
+        except Exception as exc:  # noqa: BLE001 — the sound plays as written
+            current_app.logger.warning("web sound repair skipped: %s", str(exc)[:200])
+            continue
+        for item in (after or {}).get("sfx") or []:
+            if not isinstance(item, dict) or item.get("storage_key") != key:
+                continue
+            item["storage_key"] = lib_key
+            for k in ("offset_s", "dur_s"):
+                item.pop(k, None)
+            pl = wsound.place(sid, float(item.get("at") or 0.0))
+            item["at"] = pl["at"]
+            for k in ("offset_s", "dur_s"):
+                if pl[k]:
+                    item[k] = pl[k]
+            if row.get("gain_db") is not None:
+                item["gain_db"] = float(row["gain_db"])
+        lines.append(f"'{str(meta.get('filename') or key)[:60]}' -> {sid}")
+    if not lines:
+        return ""
+    return ("web sounds are off, so the closest recording of the approved "
+            "library plays instead: " + "; ".join(lines)
+            + " (remove_sfx takes it out)")
 
 
 def _busy_jobs_text(cur, user_id, limit=4, types=None):
@@ -6662,23 +6719,17 @@ def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
                               f"changed ({type(exc).__name__}: {str(exc)[:300]}). "
                               "This is a Valmera fault, not your request."),
                     "code": "batch_validation_fault"}, 500
+        sound_note = ""
         if origin == "mcp":
             refusal = _mcp_music_gate(cur, project_id, latest["json"],
-                                      normalized) \
-                or _mcp_web_sound_gate(cur, project_id, latest["json"],
-                                       normalized)
+                                      normalized)
             if refusal:
                 return {"error": refusal[:500]}, 400
-        if origin == "mcp" and original and wcounter.candidates(latest["json"], normalized):
-            cur.execute("SELECT json->'words' AS words FROM indexes WHERE video_sha256=%s",
-                        (original.get("sha256"),))
-            words = (cur.fetchone() or {}).get("words") or []
-            clock = wtimeline.Timeline(normalized.get("keep") or [],
-                normalized.get("inserts") or [], normalized.get("speed"))
-            refusal = wcounter.check_write(latest["json"], normalized, words, clock.src_to_out)
-            if refusal:
-                return {"error": refusal, "code": "invalid_edit_batch"}, 400
+            sound_note = _mcp_web_sound_repair(cur, project_id, latest["json"],
+                                               normalized)
         notes = list(batch_notes)
+        if sound_note:
+            notes.append(sound_note)
         if origin == "mcp":
             try:
                 _none, mono_note = wmono.check_write("", latest["json"],

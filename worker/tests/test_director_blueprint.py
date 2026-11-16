@@ -305,7 +305,7 @@ def test_clean_complete_preview_requires_semantic_closure_before_variation():
     ctx.verification_records[2] = {
         "edl_version": 2, "status": "passed", "unresolved_findings": []}
 
-    assert not agent_tools.finishing_checkpoint(ctx)
+    assert not hasattr(agent_tools, "finishing_checkpoint")
     ctx._loaded_tool_domains = {"motion"}
     names = agent_tools.compact_tool_names(ctx)
     assert "complete_edit_plan_steps" not in names
@@ -324,7 +324,7 @@ def test_clean_complete_preview_requires_semantic_closure_before_variation():
         ctx.edit_plan, completed_steps=[1], failed_criteria=[1],
         evidence="the clean render still uses the wrong aspect")
     assert director.status(ctx.edit_plan)["state"] == "needs_repair"
-    assert not agent_tools.finishing_checkpoint(ctx)
+    assert not hasattr(agent_tools, "finishing_checkpoint")
     repaired = agent_tools.execute(
         ctx, "set_color_grade", {"preset": "cool"})
     assert repaired.startswith("EDL v3 -> v4")
@@ -345,7 +345,7 @@ def test_finish_checkpoint_never_hides_a_proven_quality_defect():
     ctx.last_taste = []
     ctx.last_audio_qc_findings = []
 
-    assert not agent_tools.finishing_checkpoint(ctx)
+    assert not hasattr(agent_tools, "finishing_checkpoint")
 
 
 def test_blueprint_tools_are_retired_from_the_agent_catalog():

@@ -21,8 +21,9 @@ audience, never a scaled copy.
   structure, palette and budgets and its never-rules. Invent inside it for
   THIS story — the pack's structure is the spine, the devices are chosen
   per moment, and nothing is applied to every short the same way.
-- Packs never pick music, a zoom or a sound (owner rules); B&W is only
-  ever a device inside a pack, never its look.
+- Packs never pick a zoom or a sound by themselves (owner rules); music is
+  chosen for the film, not by the pack; B&W is only ever a device inside a
+  pack, never its look.
 
 ## Evidence to inspect
 

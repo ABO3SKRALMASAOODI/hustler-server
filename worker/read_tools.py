@@ -838,10 +838,12 @@ def list_assets(ctx, kind=None):
                     "SoundCloud); for a SPECIFIC song they named, load the "
                     "acquisition department and find_song can locate a link. "
                     "For a generic genre/vibe or a trending platform sound, "
-                    "ask the user to attach the file (paperclip button in "
-                    "chat, mp3/wav/m4a) instead of repeatedly searching, or "
-                    "offer library tracks with ask_user and place their "
-                    "pick. Sound effects come from the approved library "
+                    "place the library track that fits (list_music_library, "
+                    "add_library_music: Valmera may choose it, and the "
+                    "customer decides whether to keep it) and say their own "
+                    "file can replace it (paperclip button in chat, "
+                    "mp3/wav/m4a), instead of repeatedly searching. Sound "
+                    "effects come from the approved library "
                     "(list_sound_library).")
         return f"No {canonical} assets in this project."
     try:

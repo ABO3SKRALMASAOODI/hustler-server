@@ -473,21 +473,31 @@ def test_the_render_audit_and_exact_keeps_name_a_clipped_onset(monkeypatch):
     assert audit.midword_audit([[3931.95, 3963.15]], GALAXY_WORDS, 6034.87) == []
 
 
-def test_an_exact_time_keep_is_written_as_given_with_the_onset_advisory(monkeypatch):
+def test_an_exact_time_keep_that_clips_an_onset_moves_to_the_measured_pause(monkeypatch):
+    """Owner, 16 Nov 2026: the write boundary repairs a clipped onset and
+    reports the exact seconds; it never refuses and never only advises."""
     from types import SimpleNamespace
     import agent_tools
     import cut_audio
     monkeypatch.setattr(cut_audio, "source_levels",
                         lambda *_a, **_k: _level(GALAXY_DB))
-    ctx = SimpleNamespace(duration=6034.87, cut_sound_source=lambda: "/src/part2.mp4")
-    notes = agent_tools._exact_keep_onset_notes(
+    ctx = SimpleNamespace(duration=6034.87, cut_sound_source=lambda: "/src/part2.mp4",
+                          index={"words": GALAXY_WORDS})
+    moves = agent_tools._measured_edge_moves(
         ctx, [[3931.95, 3963.15]], None, GALAXY_WORDS)
-    assert len(notes) == 1 and notes[0].startswith("ADVISORY (exact times kept")
-    assert "start at 3931.84" in notes[0]
-    # no sound to read: nothing guessed
+    assert len(moves) == 1 and moves[0]["word"] == "Galaxy"
+    assert moves[0]["to"] == pytest.approx(3931.84, abs=0.015)
+    edl, note = agent_tools._repair_cut_edges(
+        ctx, {"keep": [[0.0, 6034.87]]}, {"keep": [[3931.95, 3963.15]]})
+    assert edl["keep"][0][0] == pytest.approx(3931.84, abs=0.015)
+    assert note.startswith("CUT EDGES REPAIRED (saved)") and "Galaxy" in note
+    assert "3931.950s ->" in note and "s earlier" in note
+    # no sound to read: nothing guessed, nothing moved
     ctx.cut_sound_source = lambda: None
-    assert agent_tools._exact_keep_onset_notes(
+    assert agent_tools._measured_edge_moves(
         ctx, [[3931.95, 3963.15]], None, GALAXY_WORDS) == []
+    assert agent_tools._repair_cut_edges(
+        ctx, {"keep": [[0.0, 6034.87]]}, {"keep": [[3931.95, 3963.15]]})[1] == ""
 
 
 def test_the_pause_a_start_was_moved_back_to_is_not_called_a_mid_word_cut(monkeypatch):

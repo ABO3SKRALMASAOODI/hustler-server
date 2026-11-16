@@ -294,15 +294,16 @@ def list_music_library(ctx, mood=None):
     used = used_by_user(ctx)
     head = (f"{len(hits)} CC0 track(s)" + (f" for mood '{m}'" if m else "")
             + " — licence-verified, free for commercial use, no credit "
-              "required. Offer 2-4 to the user with ask_user and place the "
-              "one THEY pick with add_library_music(slug=...) — never pick "
-              "for them. "
+              "required. Choose the one that fits this film's kind and pace "
+              "and place it with add_library_music(slug=...): Valmera may "
+              "choose the music, and the customer decides whether to keep it "
+              "(a track they named or picked is theirs). "
               "Under a voice it sits as a ducked bed (about -18 to -22 dB); "
               "with no speech it plays as the lead.\n"
               "These moods are ALL the built-in music (no techno/EDM/rock/"
-              "phonk). If the user asked for a genre outside them, say so, "
-              "offer the closest mood, and offer to use their own track "
-              "(upload or link).\n")
+              "phonk). If the user asked for a genre outside them, place the "
+              "closest mood and say so; their own track (upload or link) can "
+              "replace it.\n")
     lines = []
     for mood_name in MOODS:
         group = [t for t in hits if t["mood"] == mood_name]
@@ -325,19 +326,17 @@ def add_library_music(ctx, slug, start=None, end=None, gain_db=None,
     track, err = find(slug)
     if err:
         return err
-    # Owner rule (Wave 0, 0C): agents never choose music. The USER picks a
-    # library track — from the offer ask_user put to them, or by naming it —
-    # and only that pick places it (music_gate.resolve_pick). Checked before
-    # anything is copied into the project.
+    # Who chose it (music_gate.resolve_pick): the user's pick (from an offer,
+    # or by naming it) stamps user_picked_library; otherwise Valmera chose it
+    # (owner, 13 Nov 2026), stamped valmera_chosen so the customer can see
+    # and remove it. Never a refusal.
     import music_gate
-    _pick, err = music_gate.resolve_pick(ctx, track["slug"],
-                                         user_pick=user_pick)
-    if err:
-        return err
+    record, _none = music_gate.resolve_pick(ctx, track["slug"],
+                                            user_pick=user_pick)
     key, err = ensure_project_asset(ctx, track)
     if err:
         return err
-    music_gate.grant(ctx, key, "user_picked_library")
+    music_gate.grant(ctx, key, music_gate.pick_provenance(record))
     purpose_n = " ".join(str(purpose or "").split()) or (
         f"{track['mood']} bed from the Valmera CC0 library "
         f"(\"{track['title']}\")")
@@ -355,15 +354,19 @@ def add_library_music(ctx, slug, start=None, end=None, gain_db=None,
         res += (f"\nTrack: \"{track['title']}\" by {track.get('author')} "
                 f"({track['mood']}) — {LICENSE_NOTE}. Source: "
                 f"{track.get('source_url')}")
+        if record.get("via") == "valmera":
+            res += ("\nChosen by Valmera (the customer can keep or remove it)"
+                    + (f"; the customer named '{record['customer_named']}'"
+                       if record.get("customer_named") else "") + ".")
     return res
 
 
 TOOL_SPECS = {
     "list_music_library": (
         list_music_library,
-        "READ: the built-in CC0 music library by mood: exact slugs to offer "
-        "the user with ask_user (add_library_music places the one they "
-        "pick). Licence-verified background tracks (upbeat, "
+        "READ: the built-in CC0 music library by mood: exact slugs for "
+        "add_library_music (choose the track that fits the film, or place the "
+        "one the user named). Licence-verified background tracks (upbeat, "
         "chill, cinematic, corporate, dramatic, hiphop, ambient, inspiring), "
         "free for commercial use with no credit required; marks tracks this "
         "user already used in other projects.",
@@ -371,10 +374,10 @@ TOOL_SPECS = {
                   "description": "Optional mood filter."}}),
     "add_library_music": (
         add_library_music,
-        "Place the CC0 library track the USER picked, by exact slug (from "
-        "list_music_library). Agents never choose music: offer 2-4 tracks "
-        "with ask_user and place the one they pick (a mood or 'some music' "
-        "is not a pick). The track is copied into this project once, "
+        "Place a CC0 library track by exact slug (from list_music_library): "
+        "the one the user named or picked, or the one you choose for the film "
+        "(Valmera may choose the music; it is stamped as Valmera's choice and "
+        "the customer can remove it). The track is copied into this project once, "
         "registered with its licence, and placed like add_music — OUTPUT "
         "seconds, whole program by default, ducked under speech, looped to "
         "fill. Under a voice keep the bed around -18 to -22 dB (the default "

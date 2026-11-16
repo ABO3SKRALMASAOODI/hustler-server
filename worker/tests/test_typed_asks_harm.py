@@ -1,6 +1,6 @@
 """Typed requests, round 4 (lane E, 13 Nov 2026): nothing unasked without a reason. Faces stay whole
 (measured heads, the renderer's camera math), a picture's source is read against the place named,
-length asks hold, names are spelled as the customer spells them, a Patch never writes a value the
+length asks are told to the editor (never forced back: owner, 16 Nov 2026), names are spelled as the customer spells them, a Patch never writes a value the
 schema has no name for, and the reply says what the rendered film shows."""
 import json
 from types import SimpleNamespace as NS
@@ -108,27 +108,27 @@ def test_a_found_picture_whose_source_names_another_city_is_kept_off(monkeypatch
     assert patch.named_sources(ctx, {}, []) == {}
 
 
-# ------------------------------------------------------------------ length asks hold
+# ------------------------------------------------------------------ length asks are information
 
-def test_an_ask_to_keep_the_upload_length_brings_back_what_a_cut_took(monkeypatch):
+def test_an_ask_to_keep_the_upload_length_is_told_to_the_editor_never_forced(monkeypatch):
     ledger = asks.settle({"lang": "es", "asks": [{"said": "keep my full narration", "want": "all of it", "kind": "keep",
                                                   "length": "upload", "items": [], "how": "measure", "where": "", "pass": ""}]},
                          {"keep": [[0.0, 20.0]]})
     assert ledger["asks"][0]["length"] == "upload"
+    assert "keeps the upload's whole length" in asks.editor_note(ledger)
+    assert not hasattr(agent_loop, "_typed_hold_length")
+    monkeypatch.setattr(agent_tools, "restore_range", lambda *a: (_ for _ in ()).throw(AssertionError("forced")))
     ctx = _ctx({"keep": [[0.0, 8.0], [9.0, 17.0]]})
-    calls = []
-    monkeypatch.setattr(agent_tools, "restore_range", lambda c, a, b: calls.append((a, b)) or "EDL v5: restored")
-    note = agent_loop._typed_hold_length(ctx, ledger, {"id": 1})
-    assert calls == [(0.0, 20.0)] and ledger["held"] == {"from_s": 16.0, "to_s": 20.0} and "length" in note
-    calls.clear()
-    assert agent_loop._typed_hold_length(_ctx({"keep": [[0.0, 20.0]]}), ledger, {"id": 1}) == "" and not calls
-    ledger["asks"][0]["length"] = "none"
-    assert agent_loop._typed_hold_length(ctx, ledger, {"id": 1}) == "" and not calls
+    reading = agent_loop._length_reading(ctx, ledger, None)
+    assert "16.0 s of the 20.0 s" in reading and ctx.edl["keep"] == [[0.0, 8.0], [9.0, 17.0]]
+    assert agent_loop._length_reading(_ctx({"keep": [[0.0, 20.0]]}), ledger, None) == ""
 
 
 # ------------------------------------------------------------------ harm nobody asked for
 
-def test_the_check_names_harm_and_the_repair_takes_out_only_the_ids_it_printed():
+def test_the_check_names_harm_and_the_editor_decides():
+    """Owner, 16 Nov 2026: the check informs the editor's next step; nothing
+    the editor saved is taken out by code after the turn."""
     edl = _edl(effects={"zooms": [{"id": "zm1", "start": 2.0, "end": 4.0, "strength": 0.5, "mode": "punch"},
                                   {"id": "zm2", "start": 6.0, "end": 8.0, "strength": 0.05, "mode": "push_in"}]},
                sfx=[{"id": "s1", "storage_key": "sound:whoosh", "at": 2.0}])
@@ -137,11 +137,12 @@ def test_the_check_names_harm_and_the_repair_takes_out_only_the_ids_it_printed()
                                           {"what": "brand misspelled", "at_s": 27.6, "evidence": "Piranha", "items": [], "fix": "respell"}])}
     ctx = _ctx(edl)
     ledger = {"asks": [{"id": "a1", "want": "captions", "kind": "edit"}]}
-    note = asks.undo_harm(ctx, verdict, ledger)
-    assert [z["id"] for z in ctx.edl["effects"]["zooms"]] == ["zm2"] and ctx.edl["sfx"] == []
-    assert ctx.edl["captions"] and "move:zm1" in note and ledger["undone"]
-    repair = asks.repair_note(ledger, verdict, note)
+    assert not hasattr(asks, "undo_harm")
+    repair = asks.repair_note(ledger, verdict)
     assert "every ask is met" in repair and "brand misspelled" in repair and "set_caption_fixes" in repair
+    assert "15 punch-ins" in repair and "Fix each one you agree" in repair
+    assert [z["id"] for z in ctx.edl["effects"]["zooms"]] == ["zm1", "zm2"] and ctx.edl["sfx"]
+    assert not ctx.versions_written and "undone" not in ledger
     assert asks.outcome(ledger, verdict, "fulfilled") == "partial"
     assert asks.outcome(ledger, {"asks": verdict["asks"], "unasked": []}, "fulfilled") == "fulfilled"
 
@@ -157,7 +158,8 @@ def test_harm_alone_is_owed_a_repair(monkeypatch):
                                                                      "items": ["move:zm1"], "fix": "remove"}], "usage": {}})
     monkeypatch.setattr(agent_loop, "_turn_change_list", lambda c: "")
     note = agent_loop._asks_check(ctx, "draft")
-    assert note and "punch-ins" in note and ctx.edl["effects"]["zooms"] == [] and ledger["repairs"] == 1
+    assert note and "punch-ins" in note and ledger["repairs"] == 1
+    assert [z["id"] for z in ctx.edl["effects"]["zooms"]] == ["zm1"] and not ctx.versions_written
 
 
 # ------------------------------------------------------------------ the reply says what the film shows
@@ -219,19 +221,19 @@ def test_a_patch_value_the_schema_refuses_is_corrected_then_put_back(monkeypatch
     assert "effect" not in ctx.edl["captions"]["style"] and any("kept as it was" in r for r in got["refused"])
 
 
-def test_a_held_length_refuses_any_write_that_cuts_the_upload_shorter():
-    ledger = {"asks": [{"id": "a1", "length": "upload"}]}
+def test_a_length_ask_is_a_note_on_a_write_that_cuts_the_upload_shorter():
+    ledger = {"asks": [{"id": "a1", "length": "upload", "said": "keep my full narration"}]}
     ctx = NS(ask_ledger=ledger, has_main_video=True)
     prev = {"version": 9, "json": {"keep": [[0.0, 473.3]]}}
-    why = agent_tools._length_held_refusal(ctx, prev, {"keep": [[0.0, 100.0], [102.0, 473.3]]})
-    assert why and "473.3 s to 471.3 s" in why
-    assert agent_tools._length_held_refusal(ctx, prev, {"keep": [[0.0, 473.3]]}) is None
+    note = agent_tools._length_ask_note(ctx, prev, {"keep": [[0.0, 100.0], [102.0, 473.3]]})
+    assert note.startswith("NOTE (saved)") and "471.3 s of the 473.3 s" in note and "keep my full narration" in note
+    assert agent_tools._length_ask_note(ctx, prev, {"keep": [[0.0, 473.3]]}) == ""
     ctx.ask_ledger = {"asks": [{"id": "a1", "length": "none"}]}
-    assert agent_tools._length_held_refusal(ctx, prev, {"keep": [[0.0, 100.0]]}) is None
-    assert agent_tools._length_held_refusal(NS(has_main_video=True), prev, {"keep": [[0.0, 100.0]]}) is None
+    assert agent_tools._length_ask_note(ctx, prev, {"keep": [[0.0, 100.0]]}) == ""
+    assert agent_tools._length_ask_note(NS(has_main_video=True), prev, {"keep": [[0.0, 100.0]]}) == ""
 
 
-def test_a_length_ask_the_ledger_missed_is_held_on_the_checks_reading(monkeypatch):
+def test_a_length_ask_the_ledger_missed_is_told_on_the_checks_reading(monkeypatch):
     ledger = asks.settle({"lang": "en", "asks": [{"said": "keep my full narration and duration", "want": "all of it", "kind": "keep",
                                                   "length": "none", "items": [], "how": "measure", "where": "", "pass": ""}]},
                          {"keep": [[0.0, 20.0]]})
@@ -243,4 +245,5 @@ def test_a_length_ask_the_ledger_missed_is_held_on_the_checks_reading(monkeypatc
     calls = []
     monkeypatch.setattr(agent_tools, "restore_range", lambda c, a, b: calls.append((a, b)) or "EDL v5: restored")
     note = agent_loop._asks_check(ctx, "draft")
-    assert calls == [(0.0, 20.0)] and ledger["asks"][0]["length"] == "upload" and "full length" in note
+    assert not calls and ledger["asks"][0]["length"] == "none"
+    assert "LENGTH: a1" in note and "16.0 s of the 20.0 s" in note

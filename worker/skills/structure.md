@@ -4,7 +4,7 @@
 
 A short is remembered for a SHAPE: a rhyme, a return, a sequence that
 accelerates. These verbs find those shapes in the user's own footage; they
-never invent footage and never pick music.
+never invent footage.
 
 - `find_shots` recalls by example (`like` a program second or
   `key@seconds`: the same framing on another day), by light (night /

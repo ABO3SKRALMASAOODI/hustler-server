@@ -14,11 +14,11 @@ cut (REAL_USER_BRUTE, production first prompts):
 
 This module names the request (classify), gives the model ONE recipe for it
 (note: the exact chain, its tool defaults and its done bar, computed from
-the current edit), refuses writes outside what was asked (refusal before a
-tool runs, check_write on the EDL a write would save), refuses a write that
-moves the length the wrong way, and appends a REQUEST CHECK to every
-preview render: the before/after EDL compared against the request, so the
-model verifies the edit against the ask before it replies.
+the current edit), and appends a REQUEST CHECK to every preview render: the
+before/after EDL compared against the request, so the model verifies the
+edit against the ask before it replies. It never refuses a tool or a write
+(owner, 16 Nov 2026: the editing model decides; the guards that refused
+writes outside the classified ask were removed).
 
 Only a short, single-purpose follow-up classifies (a brief, a URL, a
 timestamp or a long message gets nothing), and only the Claude trial and
@@ -125,54 +125,6 @@ LANE_LABELS = {
     "audio": "music, sound and loudness",
     "transitions": "transitions and fades",
 }
-
-# tools a recipe may run whatever their side effects (their internal remaps
-# move graphics, captions mutes and B-roll with the cut, by design)
-EXEMPT_TOOLS = {
-    "cuts": {"cut_silences", "remove_filler_words", "keep_segments",
-             "cut_range", "cut_output_range", "restore_range"},
-    "broll": {"source_broll", "add_stock_media", "insert_media"},
-    "zooms": {"add_zoom", "add_zoom_path", "punch_in_on_emphasis"},
-    "captions": {"set_caption_style"},
-}
-
-# the lane a tool changes, refused before it runs when not asked for
-TOOL_LANES = {
-    "keep_segments": "cuts", "cut_range": "cuts", "cut_output_range": "cuts",
-    "restore_range": "cuts", "cut_silences": "cuts",
-    "remove_filler_words": "cuts", "set_speed": "cuts", "remove_speed": "cuts",
-    "set_speed_ramp": "cuts",
-    "add_captions": "captions", "set_caption_style": "captions",
-    "set_caption_mutes": "captions",
-    "set_frame": "frame", "auto_reframe": "frame",
-    "add_aspect_shift": "frame", "remove_aspect_shift": "frame",
-    "add_zoom": "zooms", "remove_zoom": "zooms", "add_zoom_path": "zooms",
-    "remove_zoom_path": "zooms", "punch_in_on_emphasis": "zooms",
-    "source_broll": "broll", "remove_broll": "broll",
-    "add_stock_media": "broll", "insert_media": "broll",
-    "remove_insert": "broll", "set_insert_window": "broll",
-    "add_overlay": "broll", "remove_overlay": "broll", "move_overlay": "broll",
-    "set_color_grade": "grade", "apply_look": "grade",
-    "set_grade_custom": "grade", "set_grade_window": "grade",
-    "add_stylize": "grade", "remove_stylize": "grade",
-    "add_music": "audio", "add_library_music": "audio",
-    "remove_music": "audio", "swap_music": "audio", "set_music_fit": "audio",
-    "add_sfx": "audio", "remove_sfx": "audio", "move_sfx": "audio",
-    "set_volume": "audio", "set_audio_gain": "audio",
-    "set_master_loudness": "audio", "add_voiceover": "audio",
-    "remove_voiceover": "audio",
-    "set_transitions": "transitions", "set_fades": "transitions",
-    "add_text": "graphics", "remove_text": "graphics",
-    "add_kinetic_text": "graphics", "add_word_slam": "graphics",
-    "set_picture_card": "graphics", "remove_picture_card": "graphics",
-    "set_editorial_graphic": "graphics", "remove_editorial_graphic": "graphics",
-    "add_vector_graphic": "graphics", "set_vector_graphic": "graphics",
-    "remove_vector_graphic": "graphics",
-}
-_MOTION_TOOLS = {"add_motion_graphic", "set_motion_graphic",
-                 "remove_motion_graphic"}
-_NEVER_TOOLS = {"reset_edit"}
-
 
 def classify(text):
     """The recipes a short follow-up asks for, in a stable order ([] when
@@ -435,7 +387,7 @@ def start(ctx, text):
         return None
     state = {"keys": keys, "label": label(keys), "allowed": allowed(keys),
              "direction": direction(keys), "start_edl": edl,
-             "start_s": round(program_s(edl), 2), "refusals": 0}
+             "start_s": round(program_s(edl), 2)}
     ctx.followup = state
     return state
 
@@ -443,100 +395,6 @@ def start(ctx, text):
 def active(ctx):
     st = getattr(ctx, "followup", None)
     return st if isinstance(st, dict) and st.get("keys") else None
-
-
-# ── guards ────────────────────────────────────────────────────────────────
-
-def _not_asked(st, what):
-    st["refusals"] = int(st.get("refusals") or 0) + 1
-    return ("REJECTED (not run): NOT ASKED — the user asked to "
-            f"{st['label']}; this changes the {what}, which the request did "
-            "not mention, so it stays exactly as it is (a review finding "
-            "about it is not this turn's work). Make only the requested "
-            "change, render once and reply. Do not retry this.")
-
-
-def refusal(ctx, name, args):
-    """A refusal text for a tool call outside the request, before it runs;
-    None when the call may run (the EDL check still applies to its write)."""
-    st = active(ctx)
-    if not st:
-        return None
-    if name in _NEVER_TOOLS:
-        return _not_asked(st, "whole edit (a reset)")
-    lane = TOOL_LANES.get(name)
-    args = args if isinstance(args, dict) else {}
-    if name in _MOTION_TOOLS:
-        try:
-            edl = ctx.latest_edl()["json"]
-        except Exception:  # noqa: BLE001
-            edl = {}
-        tid = _first_title_id(edl)
-        if name == "add_motion_graphic":
-            tpl = str(args.get("template") or "").lower()
-            is_title = ("title" in tpl or "hook" in tpl or "headline" in tpl)
-            if is_title and tid is not None and "title" in st["allowed"]:
-                # one opening title: a second one is a duplicate layer
-                return ("REJECTED (not run): the edit already has its opening "
-                        f"title ({tid}); change it with set_motion_graphic("
-                        f"id='{tid}', params={{...}}) instead of adding a "
-                        "second one.")
-            lane = "title" if is_title else "graphics"
-        else:
-            target = str(args.get("id") or "")
-            lane = "title" if (tid is not None and target == str(tid)) else "graphics"
-    if lane is None or lane in st["allowed"]:
-        if lane == "cuts" and name == "restore_range" \
-                and st.get("direction") in ("shorter", "not_longer"):
-            return ("REJECTED (not run): the user asked to " + st["label"]
-                    + "; restoring footage makes the video longer. Cut "
-                    "instead (cut_output_range on the weakest sentence, "
-                    "cut_silences, remove_filler_words).")
-        return None
-    return _not_asked(st, LANE_LABELS.get(lane, lane))
-
-
-def check_write(ctx, prev, new, tool=None):
-    """A REJECTED text for an EDL write outside the request or moving the
-    length the wrong way; None to let it save."""
-    st = active(ctx)
-    if not st:
-        return None
-    version = None
-    try:
-        version = ctx.latest_edl()["version"]
-    except Exception:  # noqa: BLE001
-        pass
-    head = f"REJECTED (EDL v{version} unchanged): " if version is not None \
-        else "REJECTED: "
-    before_s, after_s = program_s(prev), program_s(new)
-    dirn = st.get("direction")
-    if dirn in ("shorter", "not_longer") and after_s > before_s + 0.05:
-        st["refusals"] = int(st.get("refusals") or 0) + 1
-        return (head + f"this makes the video LONGER ({before_s:.1f} s -> "
-                f"{after_s:.1f} s) and the user asked to {st['label']}. "
-                "Only remove time on this request: cut_output_range on the "
-                "weakest sentence, cut_silences, remove_filler_words.")
-    if dirn == "longer" and after_s < before_s - 0.05:
-        st["refusals"] = int(st.get("refusals") or 0) + 1
-        return (head + f"this makes the video SHORTER ({before_s:.1f} s -> "
-                f"{after_s:.1f} s) and the user asked to make it longer. "
-                "Bring back the sentences next to the kept ones with "
-                "restore_range instead.")
-    exempt = set()
-    for lane in st["allowed"]:
-        exempt |= EXEMPT_TOOLS.get(lane, set())
-    if tool in exempt:
-        return None
-    outside = [ln for ln in changed_lanes(prev, new) if ln not in st["allowed"]]
-    if not outside:
-        return None
-    st["refusals"] = int(st.get("refusals") or 0) + 1
-    return (head + "NOT ASKED — the user asked to " + st["label"]
-            + "; this write also changes the "
-            + ", ".join(LANE_LABELS.get(x, x) for x in outside)
-            + ", which the request did not mention. Make only the requested "
-              "change and leave everything else exactly as it is.")
 
 
 # ── the recipe (one system note per turn) ─────────────────────────────────

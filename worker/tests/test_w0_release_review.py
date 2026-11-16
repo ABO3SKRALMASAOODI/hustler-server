@@ -215,13 +215,25 @@ def _ctx(sfx=()):
     return ctx, fake
 
 
-def test_an_edit_batch_cannot_place_a_web_sound_while_web_sfx_is_off(
-        web_off):
+def test_an_edit_batch_places_the_closest_library_sound_for_a_web_sound(
+        web_off, monkeypatch):
+    """Owner rule 2 is a repair, never a refusal (16 Nov 2026): the write
+    saves with the closest approved recording, its hit on the same moment,
+    and says so."""
+    import motion_tools
+    import sound_library
+    placed = []
+    monkeypatch.setattr(motion_tools, "ensure_library_asset",
+                        lambda c, sid: placed.append(sid) or sound_library.asset_key(7, sid))
     ctx, fake = _ctx()
     edl = dict(ctx.latest_edl()["json"])
     out = ctx.write_edl(dict(edl, sfx=[_sfx(WEB)]), "batch")
-    assert out.startswith("REJECTED") and "found online" in out
-    assert fake.inserts == []
+    assert out.startswith("EDL v"), out
+    assert "SOUND REPLACED (saved)" in out and placed and placed[0] in out
+    item = fake.rows[-1]["json"]["sfx"][0]
+    assert item["storage_key"] == sound_library.asset_key(7, placed[0])
+    assert sound_library.hit_at(item) == pytest.approx(2.0, abs=0.011)
+    edl = dict(ctx.latest_edl()["json"])
     # the user's own sound still places through the same write
     out = ctx.write_edl(dict(edl, sfx=[_sfx(MINE)]), "batch")
     assert out.startswith("EDL v"), out
@@ -247,21 +259,20 @@ def test_with_web_sounds_on_the_write_gate_stands_aside(monkeypatch):
     assert ctx.write_edl(dict(edl, sfx=[_sfx(WEB)]), "b").startswith("EDL v")
 
 
-def test_the_shared_rule_is_pure_and_fails_closed():
+def test_the_shared_rule_is_pure_and_never_refuses():
     import music_gate
     prev = {"sfx": [_sfx("a")]}
     new = {"sfx": [_sfx("a"), _sfx("b", "s2"), _sfx("c", "s3")]}
     assert music_gate.new_sfx_keys(prev, new) == ["b", "c"]
     rows = {"b": {"meta": {"filename": "b.wav"}},
             "c": {"meta": {"caption": "found online by search_sfx"}}}
-    assert "found online" in music_gate.gate_web_sounds(prev, new, rows.get)
-    assert music_gate.gate_web_sounds(prev, {"sfx": [_sfx("b")]},
-                                      rows.get) is None
+    assert music_gate.web_sound_keys(prev, new, rows.get) == ["c"]
+    assert music_gate.web_sound_keys(prev, {"sfx": [_sfx("b")]}, rows.get) == []
+    assert not hasattr(music_gate, "gate_web_sounds")
 
     def boom(_key):
         raise OSError("db down")
-    assert "could not be verified" in music_gate.gate_web_sounds(
-        prev, new, boom)
+    assert music_gate.web_sound_keys(prev, new, boom) == []
 
 
 # ── the backend loads the motion modules by path ────────────────────────

@@ -149,7 +149,8 @@ _CAPABILITY = re.compile(
     r"(?i)(\bcanvas is fixed\b|\b(?:can't|cannot|couldn't|could not) (?:export|make|deliver|render) "
     r"(?:a |the )?(?:16:9|landscape|4:3|square)|\bonly (?:supports?|does|makes) 9:16\b"
     r"|\b(?:can't|cannot) change the (?:frame|aspect))")
-# Valmera never picks music: an offer to choose a track for the user
+# A line about choosing a track for the user (an offer to pick one): the
+# trial reply's music line says what the turn did instead (_MUSIC_OFFER)
 _MUSIC_PICK = re.compile(
     "(?i)(\\b(?:choose|pick|select|escolh\\w*|elig\\w*|escoger)\\b[^.]{0,80}"
     "\\b(?:music|tracks?|songs?|soundtrack|trilhas?|faixas?|m\u00fasicas?|canci\u00f3n)\\b"
@@ -911,10 +912,10 @@ _NOT_DONE_LINE = {
 _PARTLY_LINE = {
     "broll": "I added B-roll over part of the video, not all of it yet.",
 }
-# Valmera never picks music; when the user asked for it, offering the choice
-# is right (owner's rule)
-_MUSIC_OFFER = ("Upload a track you like, or ask me for a few library tracks "
-                "that fit and pick one.")
+# Valmera may choose the music itself (owner, 13 Nov 2026): a music ask the
+# turn left open ends on what Valmera can place, never on a question
+_MUSIC_OFFER = ("I can put a library track that fits under it next, or use a "
+                "track you upload.")
 _NEGATED = re.compile(r"(?i)\b(no|not|never|didn't|did not|couldn't|could not|"
                       r"haven't|have not|without|none|yet to)\b")
 # "Done:", "All done -", "All set." leading a reply whose asks are not all met

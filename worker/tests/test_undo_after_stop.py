@@ -5,103 +5,14 @@ import pytest
 
 import agent_loop
 import agent_tools
-import preview_budget
 import request_contract
 
 
-def stopped(version=17):
-    row = {'version': version, 'json': {}}
-    ctx = SimpleNamespace(latest_edl=lambda: row, trial_preview_cap=2,
-                          trial_previews=3, trial_preview_versions=[6, 10, 13],
-                          last_preview={'edl_version': version, 'asset_id': 1},
-                          verification_records={}, rendered_versions=(),
-                          trial_preview_repairs={'history': [
-                              {'version': 13, 'remaining': 1, 'findings': []}]},
-                          row=row)
-    return ctx
-
-
-def rendered(ctx, version):
-    ctx.row['version'] = version
-    ctx.last_preview = {'edl_version': version, 'asset_id': 2}
-    agent_loop._count_trial_preview(ctx, 'Preview rendered')
-
-
-def test_undo_tools_are_real_write_tools():
-    assert preview_budget.UNDO_TOOLS <= set(agent_tools.WRITE_TOOLS)
-    assert 'reset_edit' not in preview_budget.UNDO_TOOLS
-    assert 'remove_filler_words' not in preview_budget.UNDO_TOOLS
-
-
-def test_every_removal_of_something_added_is_a_way_back():
-    """p5533: the cycle stopped and refused remove_region_effect. A new remove_*
-    tool that is neither here nor named below fails this test."""
-    removals = {n for n in agent_tools.WRITE_TOOLS if n.startswith('remove_')}
-    assert removals - preview_budget.UNDO_TOOLS == {'remove_filler_words'}
-
-
-def test_a_batch_of_removals_is_a_way_back_and_a_mixed_batch_is_not():
-    ctx = stopped()
-    removes = {'operations': [
-        {'action': 'remove', 'layer': 'fx', 'id': 'bg_wall_left'},
-        {'action': 'remove', 'layer': 'fx', 'id': 'bg_curtain_right'}]}
-    mixed = {'operations': removes['operations'] + [
-        {'action': 'upsert', 'layer': 'fx', 'id': 'bg_top', 'value': {}}]}
-    assert agent_loop._trial_render_refusal(ctx, 'apply_edit_batch', mixed).startswith('REJECTED')
-    assert agent_loop._trial_render_refusal(ctx, 'apply_edit_batch', {}).startswith('REJECTED')
-    assert agent_loop._trial_render_refusal(ctx, 'apply_edit_batch', removes) is None
-
-
-def test_new_work_stays_refused_but_the_turn_can_undo_and_show_it():
-    ctx = stopped()
-    assert agent_loop._trial_render_refusal(ctx, 'blur_region').startswith('REJECTED')
-    assert agent_loop._trial_render_refusal(ctx, 'remove_blur') is None
-    # nothing was actually removed yet: no render of the same version
-    assert 'REJECTED' in agent_loop._trial_render_refusal(ctx, 'render_preview')
-    ctx.row['version'] = 18
-    assert agent_loop._trial_render_refusal(ctx, 'render_preview') is None
-    assert agent_loop._trial_render_refusal(ctx, 'add_text').startswith('REJECTED')
-    rendered(ctx, 18)
-    assert ctx.trial_preview_repairs.get('undo_from') is None
-    assert ctx.trial_preview_repairs['undo_renders'] == 1
-    assert 'REJECTED' in agent_loop._trial_render_refusal(ctx, 'render_preview')
-
-
-def test_a_failed_undo_render_can_be_retried():
-    ctx = stopped()
-    agent_loop._trial_render_refusal(ctx, 'remove_blur')
-    ctx.row['version'] = 18
-    assert agent_loop._trial_render_refusal(ctx, 'render_preview') is None
-    # the render failed: last_preview never moved
-    agent_loop._count_trial_preview(ctx, 'TRANSIENT_FAILURE')
-    assert agent_loop._trial_render_refusal(ctx, 'render_preview') is None
-
-
-def test_undo_is_bounded_and_survives_a_checkpoint():
-    ctx = stopped()
-    for version in (18, 19):
-        assert agent_loop._trial_render_refusal(ctx, 'remove_erase') is None
-        ctx.row['version'] = version
-        assert agent_loop._trial_render_refusal(ctx, 'render_preview') is None
-        rendered(ctx, version)
-    assert agent_loop._trial_render_refusal(ctx, 'remove_erase').startswith('REJECTED')
-    resumed = stopped(19)
-    preview_budget.restore(resumed, preview_budget.checkpoint(ctx))
-    assert agent_loop._trial_render_refusal(resumed, 'remove_erase').startswith('REJECTED')
-
-
-def test_an_open_undo_survives_a_checkpoint():
-    ctx = stopped()
-    agent_loop._trial_render_refusal(ctx, 'remove_blur')
-    ctx.row['version'] = 18
-    resumed = stopped(17)
-    resumed.row['version'] = 18
-    preview_budget.restore(resumed, preview_budget.checkpoint(ctx))
-    assert agent_loop._trial_render_refusal(resumed, 'render_preview') is None
-
-
-def test_the_refusal_names_the_way_back():
-    assert 'remove_blur' in agent_loop._trial_render_refusal(stopped(), 'add_text')
+def test_nothing_stops_new_work_after_a_count_of_renders():
+    """p5518/p5533: a stopped cycle refused new work; the stop is gone and
+    every write tool runs (owner, 16 Nov 2026)."""
+    assert not hasattr(agent_loop, '_trial_render_refusal')
+    assert not hasattr(agent_loop, '_count_trial_preview')
 
 
 def _reply_ctx():

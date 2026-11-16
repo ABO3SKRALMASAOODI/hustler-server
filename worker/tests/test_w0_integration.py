@@ -241,18 +241,28 @@ def test_wave0_runtime_data_moves_the_code_fingerprint():
 
 # ── owner rule 2: a web sound fetched before the flag went off ──────────
 
-def test_a_web_sound_fetched_earlier_is_not_placed_while_web_sfx_is_off(
+def test_a_web_sound_fetched_earlier_plays_the_closest_library_sound_while_web_sfx_is_off(
         monkeypatch):
+    """Owner rule 2 as a repair (16 Nov 2026): add_sfx places the closest
+    approved recording and says so; it never refuses."""
     import agent_tools
     import config
+    import motion_tools
+    import sound_library
     from w0c_support import tool_context, upload_asset
     monkeypatch.setattr(config, "WEB_SFX_ENABLED", False)
+    monkeypatch.setattr(motion_tools, "ensure_library_asset",
+                        lambda c, sid: sound_library.asset_key(7, sid))
     ctx, fake = tool_context({"keep": [[0.0, 10.0]]})
     upload_asset(fake, "music/7/whoosh.mp3",
-                 caption="found online by search_sfx", source="freesound")
+                 caption="found online by search_sfx", source="freesound",
+                 filename="whoosh.mp3")
     upload_asset(fake, "music/7/mine.wav", filename="mine.wav")
     out = agent_tools.add_sfx(ctx, "music/7/whoosh.mp3", 2.0)
-    assert out.startswith("REJECTED") and "web sounds are off" in out
+    assert out.startswith("EDL v"), out
+    assert "web sounds are off" in out.lower() and "approved library" in out
+    placed = fake.rows[-1]["json"]["sfx"][0]["storage_key"]
+    assert sound_library.id_for_key(placed)
     # the user's own upload still places
     assert not agent_tools.add_sfx(ctx, "music/7/mine.wav", 2.0).startswith(
         "REJECTED")

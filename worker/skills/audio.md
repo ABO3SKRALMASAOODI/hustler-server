@@ -211,9 +211,10 @@ as work.
   'pictures' (a literal pun).
 - Sounds where nothing meaningful happens on screen, or a sound that fights
   the material (an impact under a tender admission).
-- Music added on the agent's own initiative, or a CC0 library track the
-  agent chose: for generic background music, offer 2-4 tracks with
-  `ask_user` and place the one the user picks.
+- Music added on the agent's own initiative. When the user asks for generic
+  background music, choose the library track that fits the film yourself
+  (owner rule, 13 Nov 2026), place it and name it in the reply; the customer
+  decides whether to keep it. Never stop to ask them to pick.
 - Cues whose peak lands off the visual (a hand pre-roll on top of the
   tool's, a riser `at` set before the payoff instead of on it); a hand-set
   gain the MIX line calls inaudible or too hot.

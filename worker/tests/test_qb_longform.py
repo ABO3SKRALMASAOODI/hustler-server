@@ -200,25 +200,6 @@ def test_the_intent_of_boring_parts_is_still_generic():
     assert trial_turn.intent("cut the boring parts") == "generic"
 
 
-def test_everything_the_long_form_chain_built_is_final_on_that_turn(monkeypatch):
-    """A picture note must not send the model to move a title or a cut-in of
-    the head start's own build (talk10: a 21-minute turn)."""
-    import agent_loop
-    edl = {"motion": [{"id": "mg1"}, {"id": "mg7"}],
-           "effects": {"zooms": [{"id": "z1"}, {"id": "z2"}]},
-           "vectors": [{"id": "v1"}]}
-    monkeypatch.setattr(trial_turn, "prepare", lambda *a, **k: {
-        "intent": "tighten", "whole": False, "applied": ["x"], "s": 1.0,
-        "note": "\n[system: TRIAL TURN PREPARED. x]", "steps": []})
-    ctx = SimpleNamespace(claude_trial=SimpleNamespace(model="claude-haiku-5-5"),
-                          claude_paid=None, editing_metrics={},
-                          latest_edl=lambda: {"version": 12, "json": edl})
-    agent_loop._trial_head_start(ctx, None, 1, {"content": "cut the boring parts"})
-    assert ctx.trial_kept_ids["motion"] == {"mg1", "mg7"}
-    assert ctx.trial_kept_ids["zoom"] == {"z1", "z2"}
-    assert ctx.trial_kept_ids["vector"] == {"v1"}
-
-
 def test_a_run_never_opens_on_a_filler_row_nor_ends_on_the_files_own_cut_off():
     rows = _rows(n=30, step=15.0)
     rows[4]["text"] = "You know, so."                  # a filler sentence

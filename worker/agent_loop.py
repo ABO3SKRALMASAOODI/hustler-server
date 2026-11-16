@@ -2631,58 +2631,14 @@ def _prepared_trial(ctx):
     return _trial_lane(ctx) and bool(getattr(ctx, "trial_prep", None))
 
 
-_KEPT_CUT_TOOLS = frozenset((
-    "cut_range", "cut_output_range", "keep_segments", "restore_range",
-    "cut_silences", "remove_filler_words", "reset_edit"))
-_KEPT_CRAFT_TOOLS = {
-    "set_motion_graphic": "motion", "remove_motion_graphic": "motion",
-    "remove_zoom": "zoom", "remove_zoom_path": "zoom",
-    "remove_vector_graphic": "vector", "set_vector_graphic": "vector",
-}
-
-
-def _kept_craft_refusal(ctx, name, args):
-    """On a prepared trial turn the First cut's hook, slams and cards and
-    the head start's own events are final: a refusal text for a call that
-    would move, restyle or remove one, else None. Q3 (30 Oct), measured:
-    every such edit on the trial lane chased a review note and lowered the
-    judged result (the hook moved behind the speaker ran off both edges,
-    phonehook 7.25 -> 5.75; a slam moved behind the speaker left a blank
-    card, talk10best 6.5 -> 5.0; punch-ins removed as 'pops'). Only the
-    trial lane after trial_turn.prepare: every other turn is unchanged."""
-    if name in _KEPT_CUT_TOOLS and _prepared_trial(ctx) and \
-            str((getattr(ctx, "trial_prep", None) or {}).get("intent")) == "tighten":
-        # Q5 (30 Oct): the long-form cut is the deliverable and final on its
-        # turn; the model trimmed "a repeated phrase near 297 s" after the
-        # chain and re-rendered a 3-minute program (11 minutes, a second
-        # 720p render, an aside in the reply)
-        return ("REJECTED: KEPT — the long-form cut is final on this request "
-                "(the boring parts, pauses and fillers are already cut). Do "
-                "not trim or restore anything, and do not mention this: reply "
-                "with what the video is.")
-    kind = _KEPT_CRAFT_TOOLS.get(name)
-    if kind is None or not _prepared_trial(ctx):
-        return None
-    kept = getattr(ctx, "trial_kept_ids", None) or {}
-    target = str((args or {}).get("id") or "")
-    if target and target in kept.get(kind, ()):
-        return ("REJECTED: KEPT — this is part of the finished First cut "
-                f"({kind} {target}); on this request it stays exactly as it "
-                "is. Do not retry it; reply with what the video is.")
-    return None
-
-
 def _tighten_checkpoint(ctx):
-    """Q5 (30 Oct): a long-form trial request's "the cut is final" state,
-    carried to the request's next slice ({} on every other turn). The guard
-    held on the first slice, and the second slice (no head start) trimmed
-    and re-rendered the 3-minute program: 864 s, a 480p draft delivered."""
+    """Q5 (30 Oct): a long-form trial request's prepared state, carried to
+    the request's next slice ({} on every other turn): a second slice without
+    it re-rendered the 3-minute program as a 480p draft."""
     prep = getattr(ctx, "trial_prep", None) or {}
     if not _trial_lane(ctx) or prep.get("intent") != "tighten":
         return {}
-    kept = getattr(ctx, "trial_kept_ids", None) or {}
     return {"trial_prep_intent": "tighten",
-            "trial_kept_ids": {k: sorted(v) for k, v in kept.items()},
             # the prepared note (what the video now is: landscape 16:9,
             # about N minutes; reply with that, never review notes) goes
             # with it: a second slice without it called the cut "vertical"
@@ -2699,75 +2655,20 @@ def _tighten_continue_note(cont):
 
 
 def _restore_tighten(ctx, cont):
-    """The next slice of a long-form trial request keeps its cut final."""
+    """The next slice of a long-form trial request keeps its prepared note
+    and its 720p approval renders."""
     if not _trial_lane(ctx) or getattr(ctx, "trial_prep", None) or \
             (cont or {}).get("trial_prep_intent") != "tighten":
         return False
     ctx.trial_prep = {"intent": "tighten", "whole": False, "applied": [],
                       "s": 0.0, "restored": True,
                       "note": str((cont or {}).get("trial_prep_note") or "")}
-    ctx.trial_kept_ids = {k: set(v) for k, v in
-                          ((cont or {}).get("trial_kept_ids") or {}).items()}
     ctx.second_opinions_off = True
     # its renders stay the 720p approval render the user watches
     # (longform.tighten sets it on the first slice; a later slice delivered
     # a 480p draft)
     ctx.approval_previews = True
     return True
-
-
-def _trial_preview_cap(ctx, cap):
-    """Trial exploration allowance; proven repairs use a bounded progress
-    policy after it. Money and provider limits remain unchanged."""
-    if not _trial_lane(ctx) or not config.CLAUDE_TRIAL_MAX_PREVIEWS:
-        return cap
-    return min(int(cap or config.CLAUDE_TRIAL_MAX_PREVIEWS),
-               int(config.CLAUDE_TRIAL_MAX_PREVIEWS))
-
-
-def _count_trial_preview(ctx, result):
-    import preview_budget
-    preview_budget.count(ctx)
-
-
-def _trial_render_refusal(ctx, name, args=None):
-    """Stop exploration at the allowance, retaining a complete repair cycle
-    for proven defects. Other lanes keep their existing progress guards."""
-    cap = getattr(ctx, "trial_preview_cap", None)
-    if not cap or (name != "render_preview"
-                   and name not in agent_tools.WRITE_TOOLS):
-        return None
-    if name == 'render_preview':
-        args = args or {}
-        quality = agent_tools._deliverable_quality(
-            ctx, args.get('quality', 'draft'),
-            bool(args.get('complete')) or args.get('quality') == 'approval')
-        if args.get('report') and not args.get('complete') and quality != 'approval':
-            return None  # a stored report is a read, not a new render
-        try:
-            version = ctx.latest_edl()['version']
-        except (AttributeError, KeyError, TypeError):
-            version = None
-        preview = getattr(ctx, 'last_preview', None) or {}
-        if version in (getattr(ctx, 'rendered_versions', None) or ()) \
-                and preview.get('edl_version') == version \
-                and (quality == 'draft' or preview.get('quality') == 'approval'):
-            return None  # the renderer's own idempotent receipt fast path
-    if int(getattr(ctx, "trial_previews", 0) or 0) < int(cap):
-        return None
-    import preview_budget
-    if preview_budget.undo_allowed(ctx, name, args):
-        return None
-    if preview_budget.repair_allowed(ctx):
-        return None
-    return ("REJECTED: the bounded edit/review cycle has stopped because no "
-            "further verified repair progress is available. Preserve the saved "
-            "version and state which requested work remains incomplete. Do not "
-            "claim completion or invent a cause in the original footage. "
-            "Taking back something this request added (remove_blur, "
-            "remove_erase, remove_text, restore_range and the like) is still "
-            "open: if it made the video worse, remove all of it in one go, "
-            "then call render_preview once.")
 
 
 # ------------------------------------------------------------------ the ask ledger (lane E, 12 Nov)
@@ -2818,9 +2719,6 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
         print(f"[asks] picture obligations unavailable: {type(exc).__name__}", flush=True)
     done_by = None
     reset_note = _typed_start_from_upload(ctx, ledger, job)
-    held = _typed_hold_length(ctx, ledger, job)
-    if held:
-        reset_note = (reset_note + "\n" + held) if reset_note else held
     if ledger["route"] == "film" and cfg["director"]:
         got = asks.direct_film(ctx, worker_db, job, session_id, cfg)
         ledger["routed"] = {"to": "director", **{k: got.get(k) for k in ("version", "fell", "applied", "s")}}
@@ -2860,38 +2758,6 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     if supplied:
         done_by = (done_by or "") + supplied
     return asks.editor_note(ledger, done_by)
-
-
-def _typed_hold_length(ctx, ledger, job):
-    """An ask that keeps the upload's length (the ledger model's field) holds the film at the upload's
-    length: what an earlier cut took out comes back, with every item re-anchored (p5472, round 3:
-    "keep my full narration and duration, 7:53" stayed a 427 s film from the first cut's trims, and
-    the check called the keep done because this request had not cut it). Never raises."""
-    if not any(a.get("length") == "upload" for a in ledger.get("asks") or []):
-        return ""
-    try:
-        from score import asks
-        source_s = float(getattr(ctx, "duration", 0) or 0)
-        row = ctx.latest_edl()
-        prog = asks.program_seconds(row["json"]) or 0.0
-        keep = [k for k in row["json"].get("keep") or [] if k and len(k) >= 2]
-        kept = sum(max(0.0, float(b) - float(a)) for a, b in keep)
-        if not getattr(ctx, "has_main_video", False) or source_s <= 0 or kept >= source_s - 0.5:
-            return ""
-        result = str(agent_tools.restore_range(ctx, 0.0, source_s))
-    except dbx.JobLeaseLost:
-        raise
-    except Exception as exc:  # noqa: BLE001 - the film as it was; the check still sees its length
-        print(f"[asks] job {job.get('id')}: length not held: {str(exc)[:160]}", flush=True)
-        return ""
-    if not result.startswith("EDL v"):
-        print(f"[asks] job {job.get('id')}: length not held: {result[:160]}", flush=True)
-        return ""
-    ledger["held"] = {"from_s": round(prog, 1), "to_s": round(source_s, 1)}
-    print(f"[asks] job {job.get('id')}: length held: {prog:.1f} s -> the whole {source_s:.1f} s upload", flush=True)
-    return (f"The customer asked to keep the upload's length: the film was {prog:.1f} s of their {source_s:.1f} s, "
-            "so every part an earlier cut took out is back, with the items re-anchored. Keep all of it; "
-            "say in the reply that the full length is kept.")
 
 
 def _typed_keep_whole(ctx, ledger, job, request):
@@ -3041,28 +2907,35 @@ def _asks_check(ctx, draft, allow_repair=True):
                                                 "open": [r["id"] for r in asks.open_asks(verdict)],
                                                 "harm": len(asks.harm(verdict))})
         ctx.ask_verdict = verdict
-    # The check read an ask as keeping the upload's whole length that the ledger did not mark: the
-    # ask is marked (so the write path holds it) and the film gets its length back before any repair.
-    held = ""
-    longer = asks.length_asks(ledger, verdict) - {a["id"] for a in ledger["asks"] if a.get("length") == "upload"}
-    if longer and allow_repair:
-        for a in ledger["asks"]:
-            if a["id"] in longer:
-                a["length"] = "upload"
-        held = _typed_hold_length(ctx, ledger, {"id": getattr(ctx, "job_id", None)})
     if not allow_repair or not (asks.open_asks(verdict) or asks.harm(verdict)):
         return None
     if int(ledger.get("repairs") or 0) >= int((ledger.get("cfg") or {}).get("repairs", 1)):
         return None
     ledger["repairs"] = int(ledger.get("repairs") or 0) + 1
+    # The check informs the editor's next step; the editor's saved work stands (owner, 16 Nov 2026:
+    # no rollback of the model's edit after the turn).
+    return asks.repair_note(ledger, verdict, _length_reading(ctx, ledger, verdict))
+
+
+def _length_reading(ctx, ledger, verdict):
+    """Information for the repair note: the asks the ledger or the check read as keeping the upload's
+    whole length, when the film is shorter than the upload. Never raises; "" otherwise."""
     try:
-        undone = asks.undo_harm(ctx, verdict, ledger)
+        from score import asks
+        ids = asks.length_asks(ledger, verdict)
+        source_s = float(getattr(ctx, "duration", 0) or 0)
+        if not ids or not getattr(ctx, "has_main_video", False) or source_s <= 0:
+            return ""
+        keep = ctx.latest_edl()["json"].get("keep") or []
+        kept = sum(max(0.0, float(b) - float(a)) for a, b in keep)
     except dbx.JobLeaseLost:
         raise
-    except Exception as exc:  # noqa: BLE001 - the editor is told the harm instead
-        print(f"[asks] harm not taken out: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
-        undone = ""
-    return asks.repair_note(ledger, verdict, "\n".join(x for x in (held, undone) if x))
+    except Exception:  # noqa: BLE001
+        return ""
+    if kept >= source_s - 0.5:
+        return ""
+    return (f"LENGTH: {', '.join(sorted(ids))} read as keeping the upload's whole length; the film keeps "
+            f"{kept:.1f} s of the {source_s:.1f} s upload. restore_range brings back what it should keep.")
 
 
 def _asks_settle(ctx, final, outcome):
@@ -3070,9 +2943,10 @@ def _asks_settle(ctx, final, outcome):
     ledger = getattr(ctx, "ask_ledger", None)
     if not ledger or not ledger.get("asks"):
         if getattr(ctx, "ask_check_required", False):
+            # No ledger to check against: the editor's saved work stands (never rolled back), the
+            # reply says it could not be checked and names what the film keeps.
             from score import asks
             import edit_scope
-            edit_scope.restore_unmet(ctx, ledger, None)
             return edit_scope.disclose(ctx, asks.checked_reply(None, None)), "partial"
         return final, outcome
     from score import asks
@@ -3088,9 +2962,6 @@ def _asks_settle(ctx, final, outcome):
             verdict = None
     except Exception:  # noqa: BLE001
         verdict = None
-    if edit_scope.restore_unmet(ctx, ledger, verdict):
-        verdict = ctx.ask_verdict
-        final = asks.checked_reply(ledger, verdict)
     if not verdict:
         final = asks.checked_reply(ledger, None)
     final = edit_scope.disclose(ctx, final)
@@ -3122,176 +2993,6 @@ def _outcome_after_reply(outcome, report, honesty):
         if dropped is not None:
             honesty["trial_reply_dropped"] = dropped
     return "partial" if outcome == "fulfilled" else outcome
-
-
-_CUT_TOOLS = frozenset((
-    "cut_range", "cut_output_range", "keep_segments", "cut_silences",
-    "remove_filler_words"))
-_LOOK_ONLY_TOPICS = frozenset(("grade", "clarity", "music", "captions", "angle"))
-# words that let a request change the cut ("cut out the audio" does not)
-_CUT_WORDS = re.compile(
-    r"\bcut(?!\s+(?:out\s+)?(?:the\s+|all\s+the\s+)?(?:audio|sound|music|voice|noise))"
-    r"|\btrim|\bshort(?:en|er)\b|\btighten|\bremov(?:e|ing)\b(?!\s+(?:the\s+)?(?:audio|sound|music|noise|grain))"
-    r"|\bdelet|\bboring|\bpauses?\b|\bsilen|\bdead\s+air|\blength|\bseconds?\b|\bminutes?\b"
-    r"|\b\d+(?:\.\d+)?\s*s\b|\bloop|\brepeat|\bparts?\b|\bonly\s+(?:keep|show)|\bkeep\s+only"
-    r"|\bhighlights?\b|\breel\b|\bshorts?\b|\bintro\b|\boutro\b|\bfaster\b|\bpac(?:e|ing)\b"
-    r"|\bbest\s+(?:part|moment|bit)s?|\bget\s+rid\b|\btake\s+out\b", re.I)
-
-
-def _look_only_cut_refusal(ctx, name, user_text):
-    """A refusal for a cut tool on a request that asked only about the
-    look, the clarity, the sound or the captions, else None. The Claude
-    lanes only (the trial, new subscribers).
-
-    TRIAL_QUALITY_BUILD (31 Oct): user 2675's "Make the video clearer and
-    give a cinematic colour grading" came back 10-15 s shorter in both
-    final-code replays ("I trimmed the silent lead-in and the dead tail");
-    the judge marked it unrequested both times (4 of 4 judgements), and the
-    replay before this build did the same (3 of 3). A request that names no
-    cut, length, part or pacing keeps every second of the video."""
-    if getattr(ctx, "request_contract_required", False):
-        return None  # the typed timing policy protects the actual EDL write
-    if name not in _CUT_TOOLS:
-        return None
-    if getattr(ctx, "claude_trial", None) is None \
-            and getattr(ctx, "claude_paid", None) is None:
-        return None
-    try:
-        import ask_ledger
-        topics = set(ask_ledger.asks(user_text))
-    except Exception:  # noqa: BLE001 - the tool runs as asked
-        return None
-    text = " ".join(str(user_text or "").split())
-    if not topics or not topics <= _LOOK_ONLY_TOPICS or _CUT_WORDS.search(text):
-        return None
-    what = ", ".join(sorted(topics))
-    return ("REJECTED (not run): NOT ASKED - the user asked only about the "
-            f"{what}; this changes what is kept and the video's length, which "
-            "the request did not mention, so every second stays exactly as it "
-            "is. Make only the requested change, render once and reply. Do "
-            "not retry this.")
-
-
-def _broll_throughout_hold(ctx, name, user_text):
-    """Once per request, before the editor's own render of a request that
-    asked for b-roll THROUGHOUT the video: the stretches its cutaways still
-    leave bare, with what is said in each, so it covers them at the
-    references' density before the one trial preview, not after it.
-
-    Ticket #51 (30 Oct, user 2666): "add relevant REAL B-roll footage
-    throughout the video" got two clips over 1-7 s of a 15.4 s talk; the
-    agent searched only the one literal place name, and the coverage fact
-    (the daily fixer's B-ROLL COVERAGE line) only arrived in the render's
-    result, when the trial's one preview was spent. The new Claude lanes
-    only (the trial, new subscribers); grandfathered lanes are untouched.
-    None = render as asked."""
-    if getattr(ctx, "request_contract_required", False):
-        return None  # the shared semantic preflight checks coverage
-    if name != "render_preview" or getattr(ctx, "broll_hold_done", False):
-        return None
-    if getattr(ctx, "claude_trial", None) is None \
-            and getattr(ctx, "claude_paid", None) is None:
-        return None
-    try:
-        import ask_ledger
-        if not ask_ledger.broll_throughout(user_text):
-            return None
-        latest = ctx.latest_edl() or {}
-        edl = latest.get("json") or {}
-        gaps = ask_ledger.broll_shortfall(edl)
-        cov = ask_ledger.broll_gaps(edl)
-        # Only once some b-roll is placed: with none (every source failed),
-        # holding the render only ended the turn with no preview at all
-        # (replay of 2666 on the candidate, 31 Oct). A held turn that then
-        # replies without rendering is auto-rendered as before.
-        if not gaps or not cov or cov[0] <= 0 or cov[1] <= 0:
-            return None
-        ctx.broll_hold_done = True
-        total, covered, _all = cov
-        spans = []
-        for a, b in gaps[:3]:
-            said = ask_ledger.spoken_in(edl, getattr(ctx, "index", None), (a, b))
-            spans.append(f"{a:g}-{b:g}s" + (f' (said there: "{said}")' if said else ""))
-    except Exception as exc:  # noqa: BLE001 — the render goes ahead
-        print(f"[broll_hold] skipped: {type(exc).__name__}: {exc}", flush=True)
-        return None
-    return ("NOT RENDERED YET, do this first: the user asked for b-roll throughout the video, "
-            f"and cutaways cover {covered:g}s of the {total:g}s program "
-            f"({covered / total:.0%}). Still bare: {'; '.join(spans)}. Before "
-            "this request's preview, cover those stretches so b-roll fills "
-            "about 30-60% of the talking head: take the concrete nouns and "
-            "topics spoken in each stretch (a place, an object, an action, a "
-            "document) and source real footage for them (search_stock, then "
-            "add_stock_media and add_overlay over that stretch). Never show a "
-            "person, brand, number or event the speech does not name. Then "
-            "call render_preview again. If nothing fitting exists for a "
-            "stretch, call render_preview again and tell the user which part "
-            "has no b-roll.")
-
-
-# what the editor can still do for an asked topic before the one trial
-# preview (music is never picked by Valmera: its ask is answered with an offer)
-_ASK_HOLD_HOW = {
-    "transitions": ("transitions at real scene changes", "set_transitions"),
-    "speed": ("slow motion / speed changes",
-              "set_speed on a SOURCE range of a kept shot (factor below 1 for slow "
-              "motion, e.g. 0.5 on the most striking 2-4 s; above 1 to speed up)"),
-    "grade": ("the colour grade", "set_color_grade (or set_grade_custom)"),
-    "captions": ("captions", "add_captions"),
-    "clarity": ("a clearer picture", "enhance_video"),
-    "angle": ("the angle / framing", "set_frame"),
-    "broll": ("b-roll", "search_stock, then add_stock_media and add_overlay"),
-}
-
-
-def _unmet_ask_hold(ctx, name, args, user_text):
-    """Once per request, before the editor's own render on the new Claude
-    lanes: the asks of the request the timeline does not carry yet, with the
-    tool for each, so they land before the one trial preview, not after it.
-
-    Ticket #77, second recurrence (1 Nov, user 2710, job 132664): "Use smooth
-    transitions, speed ramping, slow motion ..." was rendered with the grade,
-    cuts and dissolves but no speed change; the ask ledger only read the
-    request after the preview was spent, the follow-up edits were refused,
-    and the request ended partial. #51's hold covered only b-roll
-    throughout; every deliverable ask now gets the same look before the
-    render. A report-only call renders nothing and does not spend it. None =
-    render as asked."""
-    import request_contract
-    if request_contract.enabled(ctx):
-        if name == "render_preview" and not (
-                isinstance(args, dict) and args.get("report") and not args.get("complete")):
-            return request_contract.preflight(ctx)
-        return None
-    if name != "render_preview" or getattr(ctx, "ask_hold_done", False):
-        return None
-    if getattr(ctx, "claude_trial", None) is None \
-            and getattr(ctx, "claude_paid", None) is None:
-        return None
-    if isinstance(args, dict) and args.get("report") and not args.get("complete"):
-        return None
-    try:
-        import ask_ledger
-        latest = (ctx.latest_edl() or {}).get("json") or {}
-        start = (getattr(ctx, "turn_start_edl", None) or {}).get("json") or {}
-        contract = getattr(ctx, "verification_request", None)
-        led = ask_ledger.ledger(contract if contract is not None else user_text, start, latest,
-                                bool(getattr(ctx, "versions_written", None)),
-                                index=getattr(ctx, "index", None))
-        missing = [t for t, st in led.items() if st == "not_done" and t in _ASK_HOLD_HOW]
-        if not missing:
-            return None
-        ctx.ask_hold_done = True
-    except Exception as exc:  # noqa: BLE001 — the render goes ahead
-        print(f"[ask_hold] skipped: {type(exc).__name__}: {exc}", flush=True)
-        return None
-    what = "; ".join(f"{_ASK_HOLD_HOW[t][0]} ({_ASK_HOLD_HOW[t][1]})" for t in missing)
-    return ("NOT RENDERED YET, do this first: the user asked for things the "
-            f"timeline does not carry yet: {what}. Add each where it fits the "
-            "footage before this request's preview, then call render_preview "
-            "again. If one cannot be done on this footage, call render_preview "
-            "again and tell the user in one plain sentence which ask is not "
-            "done and why.")
 
 
 def _fresh_turn_yields_to_fleet(model):
@@ -3399,21 +3100,6 @@ def _trial_head_start(ctx, worker_db, session_id, user_message):
         _activity(worker_db, session_id, name, args, result,
                   edl_version=(ctx.versions_written[-1]
                                if ctx.versions_written else before))
-    # the First cut's own pieces, before the head start adds any: those are
-    # final on this turn (_kept_craft_refusal); what the head start adds
-    # stays editable, so a misplaced addition can still be taken out
-    try:
-        cur = ctx.latest_edl()["json"]
-        kept_ids = {
-            "motion": {str(m.get("id")) for m in cur.get("motion") or []
-                       if m.get("id")},
-            "zoom": {str(z.get("id")) for z in
-                     (cur.get("effects") or {}).get("zooms") or [] if z.get("id")},
-            "vector": {str(v.get("id")) for v in cur.get("vectors") or []
-                       if v.get("id")},
-        }
-    except Exception:  # noqa: BLE001 — no guard, the turn runs
-        kept_ids = {}
     try:
         prep = trial_turn.prepare(ctx, worker_db, session_id,
                                   user_message.get("content") or "", post=post)
@@ -3428,27 +3114,8 @@ def _trial_head_start(ctx, worker_db, session_id, user_message):
         # with "the First cut already answers this request" and nothing was
         # cut. Code wrote nothing here, so the follow-up recipe takes it.
         return ""
-    if prep.get("intent") == "tighten":
-        # QB: the long-form cut is the head start's whole build (its hook,
-        # captions and cut-ins): all of it is final on this turn, so a picture
-        # note cannot send the model to move a title or a cut-in (talk10:
-        # a 21-minute turn of renders, waits and a refused reframe)
-        try:
-            cur = ctx.latest_edl()["json"]
-            kept_ids = {
-                "motion": {str(m.get("id")) for m in cur.get("motion") or []
-                           if m.get("id")},
-                "zoom": {str(z.get("id")) for z in
-                         (cur.get("effects") or {}).get("zooms") or []
-                         if z.get("id")},
-                "vector": {str(v.get("id")) for v in cur.get("vectors") or []
-                           if v.get("id")},
-            }
-        except Exception:  # noqa: BLE001 - the First cut's pieces stay kept
-            pass
     ctx.trial_prep = prep
     ctx.prep_start_version = before
-    ctx.trial_kept_ids = kept_ids
     # no paid second-opinion critics on top of a deterministic build: their
     # notes drove repairs that undid the First cut's craft (see
     # _quality_repair_pushback), and each cost 10-20 s per render
@@ -3993,22 +3660,15 @@ def _edit_changed_nothing(ctx):
 
 
 def _edit_without_write_pushback(ctx, messages, already_pushed):
-    """Once per request, so a refusal or an honest "this cannot be done" still
-    delivers. The one exception is a lane that opens: prose first and a refused
-    write after it would otherwise leave the wall standing with the nudge
-    spent. Each lane opens once, so this ends. Never at a spent budget: the
-    loop's stop message would replace the editor's own words."""
-    if not _edit_changed_nothing(ctx) or ctx.over_budget():
-        return False
-    import request_contract
-    released = request_contract.release_inherited(ctx)
-    if already_pushed and not released:
+    """Once per request, so an honest "this cannot be done" still delivers.
+    Never at a spent budget: the loop's stop message would replace the
+    editor's own words."""
+    if already_pushed or not _edit_changed_nothing(ctx) or ctx.over_budget():
         return False
     # This is the "do it before you ask" repair. ask_user's own first hold
     # would make the same point a second time.
     ctx._question_held = True
-    messages.append({"role": "system", "content": (
-        _EDIT_WITHOUT_WRITE_NUDGE + request_contract.released_note(released))})
+    messages.append({"role": "system", "content": _EDIT_WITHOUT_WRITE_NUDGE})
     return True
 
 
@@ -6464,15 +6124,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     _responses_warned = False      # say the lane fell back ONCE, not per step
     unread_tool_images = False
     visual_handoff = False
-    # Trial exploration is bounded; evidence-backed repairs get a separate,
-    # diminishing allowance rather than being rejected halfway through.
-    ctx.trial_preview_cap = _trial_preview_cap(ctx, None)
-    try:
-        ctx.trial_previews = max(0, int(_cont.get("trial_previews") or 0))
-    except (TypeError, ValueError):
-        ctx.trial_previews = 0
-    import preview_budget
-    preview_budget.restore(ctx, _cont)
     _restore_tighten(ctx, _cont)
     def _durable_continuation(reason, blocker_fingerprint=None,
                               blocker_repeats=0, progress_frontier=None,
@@ -6515,8 +6166,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             "honesty": honesty,
             "preview_repair_pushed": preview_repair_pushed,
             "quality_repair_versions": sorted(quality_repair_versions),
-            "trial_previews": int(getattr(ctx, "trial_previews", 0) or 0),
-            **preview_budget.checkpoint(ctx),
             "music_turn_choice": getattr(ctx, '_music_turn_choice', None),
             **_tighten_checkpoint(ctx),
             "plan_write_pushed": plan_write_pushed,
@@ -7455,16 +7104,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     ctx.ask_ledger, getattr(ctx, "ask_verdict", None))
             import fulfillment
             final = fulfillment.disclose(ctx, final)
-            # RS_ENGINE (31 Oct): music the user asked for ends on a choice
-            # of 2-4 library tracks, never on silence told as done (user
-            # 2665: audio muted, the library listed, nothing offered).
-            import music_offer
-            _music_ask = music_offer.turn_end_offer(
-                ctx, quality_verifier.request_text_for(ctx))
-            if _music_ask:
-                final = music_offer.append_offer(final, _music_ask)
-                honesty["music_offer"] = True
-                outcome = music_offer.choice_outcome(outcome, _music_ask)
             if _trial_lane(ctx):
                 # Q8: a trial turn always ends on a version the user can take
                 # to the export paywall: the reviewers' open notes advise
@@ -7525,22 +7164,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             if args is None:
                 result = ("REJECTED: arguments were not valid JSON. "
                           "Send a proper JSON object.")
-            elif _kept_craft_refusal(ctx, name, args):
-                result = _kept_craft_refusal(ctx, name, args)
-            elif (followup_refused := followup_recipes.refusal(
-                    ctx, name, args)):
-                result = followup_refused
-            elif (_preview_refusal := _trial_render_refusal(ctx, name, args)):
-                result = _preview_refusal
-            elif (broll_hold := _broll_throughout_hold(
-                    ctx, name, user_message.get("content") or "")):
-                result = broll_hold
-            elif (ask_hold := _unmet_ask_hold(
-                    ctx, name, args, user_message.get("content") or "")):
-                result = ask_hold
-            elif (cut_refused := _look_only_cut_refusal(
-                    ctx, name, user_message.get("content") or "")):
-                result = cut_refused
             else:
                 t0 = time.monotonic()
                 # the editor's own call (sentence_snap applies to its cuts,
@@ -7646,8 +7269,21 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     check = followup_recipes.request_check(ctx)
                     if check:
                         result = result + "\n" + check
-                if name == "render_preview":
-                    _count_trial_preview(ctx, result)
+                if name == "render_preview" and isinstance(result, str) \
+                        and not (isinstance(args, dict) and args.get("report")
+                                 and not args.get("complete")):
+                    # What the request's brief reads as kept and the timeline
+                    # now changes: information on the render's result, once
+                    # per finding, never a hold (request_contract.preflight).
+                    try:
+                        _brief_note = semantic_request.preflight(ctx)
+                    except dbx.JobLeaseLost:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - a note never fails a render
+                        print(f"[request brief] render note skipped: {str(exc)[:160]}", flush=True)
+                        _brief_note = None
+                    if _brief_note:
+                        result = result + "\n" + _brief_note
                 if name in agent_tools.WRITE_TOOLS and \
                         isinstance(result, str) and result.startswith("EDL v"):
                     ctx.write_calls.append(name)

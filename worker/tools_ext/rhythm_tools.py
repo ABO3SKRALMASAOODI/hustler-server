@@ -1,10 +1,11 @@
 """Department ``rhythm`` (Wave 2 track 2C): the clock, measured.
 
-  analyze_music   the structure of the USER's track (tempo, beats, bars,
+  analyze_music   the structure of the edit's track (tempo, beats, bars,
                   sections, drops, gaps, kicks/snares/hats, 808s, filter
                   openings) as a one-screen map, with where each lands in
-                  the program. No user track: refused, the speech prosody
-                  grid offered (the agent never chooses music).
+                  the program. No track yet: it says so, and that one can be
+                  placed (Valmera may choose the music); the speech prosody
+                  grid is the clock meanwhile.
   get_syllables   syllable onsets of the words said in a program window
                   ("try / ing.") for syllable-timed type and cuts
   check_speech    deterministic listening over a program window: which
@@ -42,12 +43,12 @@ def _user_music(edl):
 
 
 def _no_track():
-    return ("REJECTED: there is no track the user supplied in this edit, and "
-            "the music is never chosen for them. Ask the user (ask_user) to "
-            "upload a track, name a song, or pick one from the library list. "
-            "Until then the clock is the SPEECH: suggest_devices and the "
-            "punctuation verbs bind to the prosody grid (stresses, phrase "
-            "ends, pauses) — say so instead of inventing a beat.")
+    return ("There is no music in this edit to read yet. Place a track that "
+            "fits the film (add_library_music: Valmera may choose it, and the "
+            "customer decides whether to keep it; or the user's own upload) "
+            "and call this again. Without music the clock is the SPEECH: "
+            "suggest_devices and the punctuation verbs bind to the prosody "
+            "grid (stresses, phrase ends, pauses).")
 
 
 def _music_asset(ctx, item):
@@ -447,10 +448,10 @@ def align_lyrics(ctx, lyrics, music_id=None):
 TOOL_SPECS = {
     "analyze_music": (
         analyze_music,
-        "READ: the structure of the user's track — tempo, beats, bars, "
+        "READ: the structure of the edit's track — tempo, beats, bars, "
         "sections, drops, gaps, kicks/snares/hats, 808s, filter openings — "
-        "with program positions. Refuses when the user supplied no track "
-        "(never choose music; the speech prosody grid is the clock then).",
+        "with program positions. With no track yet it says so (place one "
+        "that fits; the speech prosody grid is the clock meanwhile).",
         {"music_id": {"type": "string"}}),
     "get_syllables": (
         get_syllables,

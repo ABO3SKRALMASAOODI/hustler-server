@@ -1,17 +1,13 @@
-"""Mechanical enforcement of explicit per-turn preservation instructions.
+"""Measure which protected lanes of an EDL a change touches.
 
-The creative agent is intentionally free to make broad editorial decisions.
-That freedom stops where the user clearly says that an existing lane must not
-change.  Prompt reminders are not sufficient for that boundary: a long tool
-loop can forget the first sentence of a brief while every individual write
-still looks locally reasonable.
-
-This module is deliberately narrow.  It recognizes only high-confidence
-phrases such as ``do not change the music`` or ``preserve the current text
-overlays``.  Ordinary creative language (``keep it energetic``, ``nice
-captions``) creates no constraint.  When a structural edit changes the program
-clock, timeline coordinates may remap while the protected creative identity
-and settings remain fixed.
+The request's brief (request_contract, a model's reading of the customer's
+words) names the lanes a request keeps. This module only measures: given
+those lanes, which of them differ between two EDLs. It never reads the
+customer's words and never refuses a write: the write path passes what it
+measures to the editor as a note (request_contract.write_note), and the
+render and the reply say it once (request_contract.preflight). When a
+structural edit changes the program clock, timeline coordinates may remap
+while the protected creative identity and settings remain fixed.
 """
 
 from __future__ import annotations
@@ -19,7 +15,6 @@ from __future__ import annotations
 import copy
 import json
 import math
-import re
 from typing import Any, Dict, Iterable, List, Set
 
 import sound_library
@@ -44,73 +39,10 @@ _CONTRACT_LANE_LABELS = {
 
 
 def lanes_of(violations: Iterable[str]) -> Set[str]:
-    """The lanes behind the human labels of a refused write."""
+    """The lanes behind the human labels of a measured change."""
     named = set(violations)
     return {lane for lane, label in {**LANE_LABELS, **_CONTRACT_LANE_LABELS}.items()
             if label in named}
-
-
-# Targets are intentionally concrete EDL concepts.  In particular, generic
-# words such as "style", "look", "everything", and "video" are excluded:
-# interpreting those as immutable would turn a taste request into a hard cap.
-_TARGETS = {
-    "music": r"(?:music|soundtrack|music\s+(?:bed|track|choice)|song)",
-    "sfx": r"(?:sfx|sound\s+effects?|sound\s+design)",
-    "voiceover": r"(?:voice[ -]?over|narration)",
-    "audio_mix": r"(?:audio(?:\s+mix)?|sound\s+mix|mixing)",
-    "captions": r"(?:captions?|subtitles?)",
-    "texts": r"(?:designed\s+text|text\s+overlays?|graphic\s+text)",
-    "effects": r"(?:visual\s+effects?|video\s+effects?|effects)",
-    "grade": r"(?:colou?r\s+grad(?:e|ing)|colou?r\s+treatment)",
-    "cuts": r"(?:picture\s+cuts?|existing\s+cuts?|current\s+cuts?|cuts?)",
-}
-
-_DET = (r"(?:(?:all|any|the|my|our|its|this|that|current|existing|"
-        r"approved|chosen|selected|original|present)\s+)*")
-
-
-def _normalise_message(message: str) -> str:
-    text = str(message or "").lower()
-    text = text.replace("’", "'").replace("‘", "'")
-    text = re.sub(r"\b(?:don't|dont)\b", "do not", text)
-    text = re.sub(r"\b(?:can't|cant)\b", "cannot", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-
-def protected_lanes(message: str) -> Set[str]:
-    """Return lanes the user explicitly said must stay unchanged.
-
-    The grammar favors false negatives over false positives.  ``Do not add
-    or modify text overlays`` is treated as a freeze; ``do not overlay large
-    text on the homepage`` is not, because ``overlay`` is an editing action,
-    not an instruction to preserve the existing text lane.
-    """
-    text = _normalise_message(message)
-    if not text:
-        return set()
-
-    lanes: Set[str] = set()
-    for lane, target in _TARGETS.items():
-        patterns = (
-            # do not change/touch X; do not add or modify X
-            rf"\b(?:do\s+not|never)\s+(?:(?:add|remove)\s+"
-            rf"(?:or|and)\s+)?(?:change|modify|alter|touch)\s+{_DET}"
-            rf"{target}\b",
-            # leave X alone / unchanged / as-is
-            rf"\bleave\s+{_DET}{target}\s+(?:alone|unchanged|as[ -]?is)\b",
-            # preserve/retain X; "keep" requires evidence that this is the
-            # existing choice, rather than a vague request to include X.
-            rf"\b(?:preserve|retain)\s+{_DET}{target}\b",
-            rf"\bkeep\s+(?:(?:all|the|my|our|its)\s+)*"
-            rf"(?:current|existing|approved|chosen|selected|original)\s+"
-            rf"{target}\b",
-            rf"\bkeep\s+{_DET}{target}\s+"
-            rf"(?:exactly|unchanged|as[ -]?is)\b",
-        )
-        if any(re.search(pattern, text) for pattern in patterns):
-            lanes.add(lane)
-    return lanes
 
 
 def _canon(value: Any) -> str:
@@ -278,44 +210,19 @@ def _audio_mix_preserved(previous: Dict[str, Any], proposed: Dict[str, Any],
                for insert_id in set(after_inserts) - set(before_inserts))
 
 
-def audio_revision_only(message):
-    """Conservative audio-only follow-ups, including the audited Czech request.
-
-    Structural instructions always win. Unknown languages remain unrestricted;
-    this is a bounded protection, not a claim to understand every creative brief.
-    """
-    text = _normalise_message(message)
-    if not text or len(text) > 700:
-        return False
-    if not re.search(r"\b(?:music|soundtrack|song|chorus|hudb\w*|refrén\w*|zene\w*)\b", text):
-        return False
-    if re.search(r"\b(?:cut|cuts|trim|shorten|lengthen|extend|rebuild|reorder|montage|pacing|tempo|beat|sync|shots?|captions?|subtitles?|zoom|effects?|transition\w*|b-roll|duration|seconds?|minutes?|zkrať|zkrátit|střih\w*|efekty|titulky|vteřin\w*)\b", text):
-        return False
-    return bool(re.search(r"\b(?:add|replace|change|swap|use|put|set|lower|louder|quieter|remove|adjust|chci|dej|přidej|nahraď)\b", text))
-
-
-def picture_timing(edl):
-    return {"structure": _program_structure(edl), "speed": edl.get("speed") or []}
-
-
 def preservation_violations(previous: Dict[str, Any],
                             proposed: Dict[str, Any],
-                            user_message: str = "",
-                            source_shape=None, protected=None) -> List[str]:
-    """Human labels for explicitly protected lanes changed by a proposal.
+                            protected: Iterable[str] = (),
+                            source_shape=None) -> List[str]:
+    """Human labels for the given protected lanes a proposal changes.
     source_shape: the source's display (width, height), which decides the
     default mastering of a 'source' frame."""
-    # A supplied semantic contract is authoritative, including an empty set.
-    # Legacy standalone callers can still use the old text interface.
-    audio_only = audio_revision_only(user_message) if protected is None else False
-    protected = protected_lanes(user_message) if protected is None else set(protected)
-    if not protected and not audio_only:
+    protected = set(protected or ())
+    if not protected:
         return []
     timeline_changed = _program_structure(previous) != \
         _program_structure(proposed)
     violations = []
-    if audio_only and _canon(picture_timing(previous)) != _canon(picture_timing(proposed)):
-        violations.append("picture timing and duration during an audio-only revision")
     for lane in sorted(protected):
         if lane == "frame_ratio":
             def ratio(edl):
@@ -361,15 +268,3 @@ def recovery_update_violations(previous, proposed, baseline, protected,
         baseline, proposed, protected={lane}, source_shape=source_shape)}
     return preservation_violations(previous, proposed, protected=unrestored,
                                    source_shape=source_shape)
-
-
-def rejection_message(version: int, violations: Iterable[str]) -> str:
-    labels = list(violations)
-    return (
-        f"REJECTED (EDL v{version} unchanged): this proposal changes "
-        + ", ".join(labels)
-        + ", which this request leaves protected. "
-          "Use a narrower edit that leaves those lanes intact. If changing "
-          "one is genuinely necessary, explain the conflict and ask the user "
-          "before doing it."
-    )

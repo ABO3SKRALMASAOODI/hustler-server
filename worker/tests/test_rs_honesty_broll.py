@@ -149,33 +149,6 @@ WORDS = [{"w": w, "t0": 0.6 + i * 0.35, "t1": 0.9 + i * 0.35}
                                 "every application for the permit card").split())]
 
 
-def test_2666_the_hold_fires_once_before_the_trial_preview_with_the_spoken_words():
-    ctx = _Ctx(claude_trial={"model": "claude-haiku-5-5"}, claude_paid=None,
-               edl=A2666, index={"words": WORDS})
-    hold = agent_loop._broll_throughout_hold(ctx, "render_preview", U2666)
-    assert hold and hold.startswith("NOT RENDERED YET")
-    # no b-roll placed at all (every source failed): no hold, the render goes ahead
-    bare = _Ctx(claude_trial={"model": "claude-haiku-5-5"}, claude_paid=None,
-                edl=B2666, index={"words": WORDS})
-    assert agent_loop._broll_throughout_hold(bare, "render_preview", U2666) is None
-    assert "7-15.44s" in hold and "residence" in hold or "permit" in hold
-    assert "Never show a person, brand" in hold
-    assert agent_loop._broll_throughout_hold(ctx, "render_preview", U2666) is None
-
-
-def test_the_hold_stays_out_of_the_way():
-    trial = {"model": "claude-haiku-5-5"}
-    full = dict(A2666, overlays=[_ov(1, 1.0), _ov(2, 4.0), _ov(3, 8.5), _ov(4, 12.0, 2.5)])
-    for ctx, name, text in (
-            (_Ctx(claude_trial=trial, claude_paid=None, edl=full), "render_preview", U2666),
-            (_Ctx(claude_trial=trial, claude_paid=None, edl=A2666), "add_overlay", U2666),
-            (_Ctx(claude_trial=trial, claude_paid=None, edl=A2666), "render_preview",
-             "add some b-roll of the city at the start"),
-            # a grandfathered lane is untouched
-            (_Ctx(claude_trial=None, claude_paid=None, edl=A2666), "render_preview", U2666)):
-        assert agent_loop._broll_throughout_hold(ctx, name, text) is None
-
-
 def test_2668_both_after_dropped_lines_goes_with_them():
     """Job 126681: three internal lines were dropped and the reply read "I
     left both alone because you asked only for the look." """

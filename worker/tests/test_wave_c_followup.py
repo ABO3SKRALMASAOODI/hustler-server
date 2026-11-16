@@ -1,7 +1,8 @@
 """WAVE_C (31 Oct 2026): follow-up recipes on the new Claude lanes.
 
-Request interpretation, the per-request scope and length guards, and the
-REQUEST CHECK that compares the turn's before/after EDL with the request.
+Request interpretation and the REQUEST CHECK that compares the turn's
+before/after EDL with the request. The scope and length guards that refused
+tools and writes were removed (owner, 16 Nov 2026).
 """
 import copy
 
@@ -94,53 +95,20 @@ def test_unasked_changes_are_named_by_lane():
     assert fr.changed_lanes(a, _edl(cap_scale=2.0)) == ["captions"]
 
 
-# ── guards ────────────────────────────────────────────────────────────────
+# ── no guards (owner, 16 Nov 2026) ────────────────────────────────────────
 
-def test_boring_refuses_a_longer_cut_and_an_unasked_reframe():
+def test_a_recipe_never_refuses_a_tool_or_a_write():
+    """#1065: 'add a title' refused add_motion_graphic as NOT ASKED. The
+    recipe is a note and a REQUEST CHECK; the editor decides."""
     ctx = Ctx(_edl())
     assert fr.start(ctx, "cut the boring parts")["direction"] == "shorter"
-    longer = _edl(keep=[[9.0, 20.0], [21.0, 31.0], [32.0, 42.0]])
-    msg = fr.check_write(ctx, ctx.edl, longer, "keep_segments")
-    assert msg and "LONGER" in msg
-    reframe = _edl(focus_x=0.5)
-    msg = fr.check_write(ctx, ctx.edl, reframe, "set_frame")
-    assert msg and "NOT ASKED" in msg and "framing" in msg
-    shorter = _edl(keep=[[10.0, 20.0], [32.0, 42.0]])
-    assert fr.check_write(ctx, ctx.edl, shorter, "cut_output_range") is None
+    assert not hasattr(fr, "refusal") and not hasattr(fr, "check_write")
+    assert "refusals" not in ctx.followup
 
 
-def test_tools_outside_the_request_are_refused_before_they_run():
-    ctx = Ctx(_edl())
-    fr.start(ctx, "make the captions bigger")
-    assert fr.refusal(ctx, "set_caption_style", {"style": {}}) is None
-    assert "NOT ASKED" in fr.refusal(ctx, "set_frame", {"ratio": "9:16"})
-    assert "NOT ASKED" in fr.refusal(ctx, "remove_zoom", {"id": "zm1"})
-    assert "NOT ASKED" in fr.refusal(ctx, "set_motion_graphic",
-                                     {"id": "mg2", "layer": "behind_subject"})
-    assert "NOT ASKED" in fr.refusal(ctx, "cut_silences", {})
-    assert "NOT ASKED" in fr.refusal(ctx, "reset_edit", {})
-    assert fr.refusal(ctx, "get_edl", {}) is None
-    assert fr.refusal(ctx, "render_preview", {}) is None
-
-
-def test_a_title_request_may_touch_only_the_title():
-    ctx = Ctx(_edl())
-    fr.start(ctx, "make the opening title a little bigger")
-    assert fr.refusal(ctx, "set_motion_graphic", {"id": "mg1",
-                                                  "params": {"size": 1.5}}) is None
-    assert "NOT ASKED" in fr.refusal(ctx, "set_motion_graphic", {"id": "mg2"})
-    assert "already has its opening title" in fr.refusal(
-        ctx, "add_motion_graphic", {"template": "hook_title"})
-    assert fr.check_write(ctx, ctx.edl, _edl(title_size=1.56)) is None
-    assert "NOT ASKED" in fr.check_write(
-        ctx, ctx.edl, _edl(title_size=1.56, cap_scale=1.2), "apply_edit_batch")
-
-
-def test_no_recipe_no_guard():
+def test_no_recipe_no_check():
     ctx = Ctx(_edl())
     assert fr.start(ctx, "make it a vertical short with captions") is None
-    assert fr.refusal(ctx, "set_frame", {}) is None
-    assert fr.check_write(ctx, ctx.edl, _edl(focus_x=0.1), "set_frame") is None
     assert fr.request_check(ctx) == ""
     assert fr.note(ctx, "x") == ""
 

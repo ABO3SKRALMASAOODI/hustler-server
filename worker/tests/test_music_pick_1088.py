@@ -83,14 +83,21 @@ def test_a_near_title_answer_to_the_offer_places_that_track(store, model):
     assert shown["tracks"][0]["position_in_offer"] == 1
 
 
-def test_the_model_reading_another_track_still_refuses_this_one(store, model):
+def _provenance(fake):
+    return fake.rows[-1]["json"]["music"][0]["provenance"]
+
+
+def test_the_model_reading_another_track_places_this_one_and_names_theirs(store, model):
+    """Owner, 16 Nov 2026: no refusal; the result tells the editor what the
+    customer picked, and the provenance says who chose this one."""
     model["verdict"] = {"kind": "picked",
                         "slug": "chill-bubbles-lofi-bright-relaxed",
                         "why": "bubbles"}
     ctx, fake = _offer_then_reply("the bubbly sounding track")
     out = music_library.add_library_music(ctx, CALM)
-    assert out.startswith("REJECTED") and "picked 'chill-bubbles" in out, out
-    assert len(fake.rows) == 1
+    assert out.startswith("EDL v7 -> v8"), out
+    assert "the customer named 'chill-bubbles-lofi-bright-relaxed'" in out
+    assert _provenance(fake) == "valmera_chosen"
 
 
 @pytest.mark.parametrize("verdict", [
@@ -98,28 +105,31 @@ def test_the_model_reading_another_track_still_refuses_this_one(store, model):
     {"kind": "mood", "slug": "", "why": "only a mood"},
     {"kind": "picked", "slug": "not-a-real-track", "why": "invented"},
 ])
-def test_delegation_moods_and_invented_slugs_are_no_pick(store, model,
-                                                         verdict):
+def test_delegation_moods_and_invented_slugs_are_valmeras_choice(store, model,
+                                                                verdict):
+    """p5725: 'do what suits the story' was refused twice. Delegation is the
+    customer letting Valmera choose (owner, 13 Nov 2026)."""
     model["verdict"] = verdict
     ctx, fake = _offer_then_reply("do what is suitable for the story")
     out = music_library.add_library_music(ctx, CALM)
-    assert out.startswith("REJECTED") and "ask_user" in out, out
-    assert len(fake.rows) == 1
+    assert out.startswith("EDL v7 -> v8"), out
+    assert _provenance(fake) == "valmera_chosen"
 
 
 def test_a_failed_reading_is_no_pick(store, model):
     model["fail"] = True
     ctx, fake = _offer_then_reply("Calm current")
     out = music_library.add_library_music(ctx, CALM)
-    assert out.startswith("REJECTED"), out
-    assert len(fake.rows) == 1
+    assert out.startswith("EDL v7 -> v8"), out
+    assert _provenance(fake) == "valmera_chosen"
 
 
 def test_no_client_is_no_pick_and_no_call(store, model, monkeypatch):
     monkeypatch.setattr(music_pick.config, "OPENAI_API_KEY", "")
     ctx, fake = tool_context(default_edl(20.0), user_message="Calm current")
     out = music_library.add_library_music(ctx, CALM)
-    assert out.startswith("REJECTED")
+    assert out.startswith("EDL v7 -> v8"), out
+    assert _provenance(fake) == "valmera_chosen"
     assert model["seen"] == []
 
 
@@ -130,7 +140,7 @@ def test_the_turn_binds_a_near_title_answer_before_the_editor_runs(model):
     ctx.llm_client = object()
     note = music_gate.choice_note(ctx, "Calm current", OFFER,
                                   previous_reply_id=41)
-    assert CALM in note and "explicit user pick" in note
+    assert CALM in note and "previously displayed offer" in note
     assert json.loads(fake.kv["music_picks:7"])[CALM]["offer_message_id"] \
         == 41
 

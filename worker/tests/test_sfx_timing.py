@@ -307,7 +307,7 @@ def test_a_preserved_sound_lane_survives_a_cut_that_retimes_library_sounds():
         {"id": "sx1", "storage_key": impact, "at": 10.0, "gain_db": -9.0},
         {"id": "sx2", "storage_key": whoosh, "at": pl["at"], "offset_s": pl["offset_s"],
          "gain_db": -13.0}]), 30.0).model_dump()
-    ask = "add the photo at the start but don't touch the sound effects"
+    ask = {"sfx"}           # the brief's reading of "don't touch the sound effects"
     ins = {"id": "ins1", "asset_key": "img/7/0.png", "kind": "image",
            "at_output_s": 0.0, "duration_s": 2.0}
     new = dict(prev, inserts=[ins], sfx=[dict(s) for s in prev["sfx"]])
@@ -316,13 +316,13 @@ def test_a_preserved_sound_lane_survives_a_cut_that_retimes_library_sounds():
     # the whoosh no longer needs its skip, yet nothing the editor set changed
     whoosh_new = next(s for s in new["sfx"] if s["id"] == "sx2")
     assert not whoosh_new.get("offset_s") and abs(sound_library.hit_at(whoosh_new) - 2.2) <= GRID
-    assert scope_guard.preservation_violations(prev, new, ask) == []
+    assert scope_guard.preservation_violations(prev, new, protected=ask) == []
     louder = json_copy(new)
     louder["sfx"][0]["gain_db"] = -3.0
-    assert scope_guard.preservation_violations(prev, louder, ask) == ["sound effects"]
+    assert scope_guard.preservation_violations(prev, louder, protected=ask) == ["sound effects"]
     longer = json_copy(new)
     next(s for s in longer["sfx"] if s["id"] == "sx1")["dur_s"] = 0.9
-    assert scope_guard.preservation_violations(prev, longer, ask) == ["sound effects"]
+    assert scope_guard.preservation_violations(prev, longer, protected=ask) == ["sound effects"]
 
 
 def json_copy(value):

@@ -129,14 +129,14 @@ def test_empty_library_returns_none(tmp_path, monkeypatch):
     MC._CACHE.clear()
 
 
-def test_gate_admits_a_chosen_library_copy_and_keeps_unpicked_library_refused():
+def test_gate_stamps_a_chosen_library_copy_and_an_unpicked_library_track_as_valmeras():
     key = "music/12/library-near-story.mp3"
     chosen = {"kind": "music", "storage_key": key, "meta": {"library_slug": "near-story", "chosen_by": "valmera"}}
     prov, err = music_gate.decide(key, chosen, is_picked=lambda s: False, seen_before=lambda k: False)
     assert (prov, err) == ("valmera_chosen", None)
     plain = {"kind": "music", "storage_key": key, "meta": {"library_slug": "near-story"}}
     prov, err = music_gate.decide(key, plain, is_picked=lambda s: False, seen_before=lambda k: False)
-    assert prov is None and err
+    assert (prov, err) == ("valmera_chosen", None)          # owner, 13 Nov 2026: no refusal
     assert "valmera_chosen" in music_gate.PROVENANCES
 
 
