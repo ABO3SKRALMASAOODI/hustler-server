@@ -334,3 +334,75 @@ def test_objects_that_changed_size_since_the_inventory_still_copy(env):
     # Small objects cost one GET, no HEAD, on the source.
     heads = [c for c in r2.calls if c == ("head_object", "shrank")]
     assert len(heads) <= 2
+
+
+def _facts(projects=(1, 2, 3), purged=(), live=()):
+    return {"projects": set(projects), "purged": set(purged),
+            "live": set(live)}
+
+
+def test_the_copy_skips_what_the_app_deleted_while_the_source_was_down(env):
+    """12 Nov 2026: deletes reached B2 and failed on R2. The recovery copy
+    must not bring a swept object or a deleted project's files back."""
+    r2, b2, src, dst, state = env
+    for key in ("originals/1/keep.mp4",          # live row
+                "proxies/1/swept.mp4",           # retention sweep purged it
+                "renders/2/shared.mp4",          # purged row, live row too
+                "clientproxies/4/gone.mp4",      # project 4 was deleted
+                "tiles/4/0.jpg",
+                "media/9/new.mp4",               # newer than the DB read
+                "ops/evidence/s/frame.jpg",      # not project-scoped
+                "music-library/track.mp3"):
+        r2.put_object(Bucket="b", Key=key, Body=key.encode())
+    facts = _facts(projects=(1, 2, 3, 5),
+                   purged=("proxies/1/swept.mp4", "renders/2/shared.mp4"),
+                   live=("originals/1/keep.mp4", "renders/2/shared.mp4"))
+    inv = sm.cmd_inventory(_args(), {}, state, src, dst,
+                           deletions=lambda: facts)
+    assert inv["deleted_in_app"]["keys"] == 3, inv["deleted_in_app"]
+    out = sm.cmd_copy(_args(), {}, state, src, dst)
+    assert out["copied"] == {"verified": 5}
+    assert set(b2.objects) == {
+        "originals/1/keep.mp4", "renders/2/shared.mp4", "media/9/new.mp4",
+        "ops/evidence/s/frame.jpg", "music-library/track.mp3"}
+    rows = {r["key"]: r["status"] for r in state.rows()}
+    assert rows["proxies/1/swept.mp4"] == "deleted_in_app"
+    assert rows["clientproxies/4/gone.mp4"] == "deleted_in_app"
+    # Settled: the switch readiness does not wait on deleted objects.
+    assert sm.readiness(state)["blocking"] == {}
+    # A key that comes back into use is copied on the next pass.
+    facts["live"].add("proxies/1/swept.mp4")
+    inv = sm.cmd_inventory(_args(), {}, state, src, dst,
+                           deletions=lambda: facts)
+    assert inv["deleted_in_app"]["back_in_use"] == 1
+    assert sm.cmd_copy(_args(), {}, state, src, dst)["copied"] == {
+        "verified": 1}
+    assert "proxies/1/swept.mp4" in b2.objects
+
+
+def test_without_the_database_the_copy_still_runs(env, monkeypatch):
+    r2, b2, src, dst, state = env
+    monkeypatch.setattr(sm.time, "sleep", lambda s: None)
+    r2.put_object(Bucket="b", Key="proxies/1/a.mp4", Body=b"a")
+
+    def down():
+        raise OSError("connection refused")
+
+    inv = sm.cmd_inventory(_args(), {}, state, src, dst, deletions=down)
+    assert inv["deleted_in_app"]["read"] is False
+    assert "connection refused" in inv["deleted_in_app"]["why"]
+    assert sm.cmd_copy(_args(), {}, state, src, dst)["copied"] == {
+        "verified": 1}
+    # No DATABASE_URL at all: same, and the result says so.
+    assert sm.settle_app_deletions(state, {}, {})["why"] == "no DATABASE_URL"
+
+
+def test_deleted_by_app_keeps_every_key_the_database_does_not_rule_out():
+    f = dict(_facts(projects=(10, 20)), newest_project=20)
+    assert sm.deleted_by_app("originals/15/a.mp4", f) is True
+    assert sm.deleted_by_app("originals/20/a.mp4", f) is False
+    assert sm.deleted_by_app("originals/21/a.mp4", f) is False   # newer
+    assert sm.deleted_by_app("visual-evidence/15/x.jpg", f) is False
+    assert sm.deleted_by_app("originals/abc/a.mp4", f) is False
+    assert sm.deleted_by_app("originals/15/a.mp4",
+                             dict(f, projects=set())) is False

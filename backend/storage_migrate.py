@@ -68,8 +68,10 @@ CORS_ORIGINS = ["https://valmera.io", "https://www.valmera.io",
                 "http://localhost:3000"]
 READY_MAX_AGE_S = 2 * 3600
 STATUSES = ("pending", "copied", "present", "verified", "mismatch",
-            "failed", "conflict", "source_gone")
+            "failed", "conflict", "source_gone", "deleted_in_app")
 DONE = ("verified",)
+# Settled without a copy: the source is gone, or the app deleted the object.
+SETTLED = ("verified", "source_gone", "deleted_in_app")
 
 
 # ── environment and stores ─────────────────────────────────────────────────
@@ -441,7 +443,120 @@ def verify_one(src, dst, row, limiter):
 
 # ── commands ───────────────────────────────────────────────────────────────
 
-def cmd_inventory(args, env, state, src=None, dst=None):
+# ── what the app deleted while a store was unreachable ─────────────────────
+#
+# 12 Nov 2026: R2 answered NotEntitled and production moved to mode 'next'.
+# From then on every delete reached B2 and failed on R2 (storage.delete_key,
+# the retention sweeper and project wipes log a secondary failure and go on),
+# so R2 still holds what the app deleted: 904 retention-swept objects (27.6
+# GB) of the 30 Oct-12 Nov backlog by 16 Nov, plus the files of every project
+# deleted since. A copy of "everything the source has and the destination
+# lacks" would bring all of it back into the live store, account deletions
+# included. The database says what was deleted, so each inventory reads it
+# and settles those keys without a copy.
+
+# Prefixes whose second segment is the project id ({prefix}/{project_id}/...):
+# storage.DELETE_PREFIXES plus the worker's own project-scoped writes.
+PROJECT_PREFIXES = frozenset((
+    "originals", "proxies", "audio", "thumbs", "sheets", "renders", "media",
+    "music", "images", "clips", "generated", "generated_sfx",
+    "generated_video", "fetched", "clientproxies", "tiles", "filmstrip",
+    "patches", "scratch", "sfx", "matte", "cleaned", "scene"))
+DELETION_READ_ATTEMPTS = 3
+
+
+def read_app_deletions(env):
+    """{"projects": live project ids, "purged": storage keys of rows the
+    retention sweep deleted, "live": storage keys of rows still in use},
+    read-only from the app's database."""
+    conn = _db(env)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET TRANSACTION READ ONLY")
+            cur.execute("SELECT id FROM projects")
+            projects = {int(r[0]) for r in cur.fetchall()}
+            cur.execute("SELECT storage_key, meta ? 'r2_purged_at' FROM "
+                        "assets WHERE storage_key IS NOT NULL")
+            purged, live = set(), set()
+            for key, gone in cur.fetchall():
+                (purged if gone else live).add(key)
+        conn.rollback()
+    finally:
+        conn.close()
+    return {"projects": projects, "purged": purged, "live": live}
+
+
+def deleted_by_app(key, facts):
+    """True when the database says the app deleted ``key``: a row the
+    retention sweep purged that no live row shares, or a file of a project
+    that no longer exists. A key the database does not know is kept."""
+    if key in facts["live"]:
+        return False
+    if key in facts["purged"]:
+        return True
+    head, _, rest = key.partition("/")
+    pid = rest.partition("/")[0]
+    projects = facts["projects"]
+    if head in PROJECT_PREFIXES and pid.isdigit() and projects:
+        # An id above the newest project is one the database has not seen
+        # yet, never a deleted one.
+        newest = facts.get("newest_project") or max(projects)
+        return int(pid) <= newest and int(pid) not in projects
+    return False
+
+
+def settle_app_deletions(state, env, listed, reader=None):
+    """Mark the source keys the app deleted ``deleted_in_app`` (never
+    copied) and return a key that came back into use to ``pending``.
+    Without the database (no DATABASE_URL, or it does not answer after a
+    few tries) the copy goes ahead as before and the result says why."""
+    if reader is None:
+        if not env.get("DATABASE_URL"):
+            return {"read": False, "why": "no DATABASE_URL"}
+        reader = lambda: read_app_deletions(env)  # noqa: E731
+    facts, err = None, None
+    for attempt in range(DELETION_READ_ATTEMPTS):
+        try:
+            facts = reader()
+            break
+        except Exception as e:  # noqa: BLE001 — retried, then copy anyway
+            err = f"{type(e).__name__}: {str(e)[:160]}"
+            if attempt + 1 < DELETION_READ_ATTEMPTS:
+                time.sleep(2 * (attempt + 1))
+    if facts is None:
+        print(f"[inventory] the database did not answer ({err}); copying "
+              f"without the deletions pass", flush=True)
+        return {"read": False, "why": err}
+    if facts["projects"]:
+        facts = dict(facts, newest_project=max(facts["projects"]))
+    marked = revived = total = nbytes = 0
+    with state.lock:
+        cur = state.db.cursor()
+        rows = cur.execute(
+            "SELECT key, status, size FROM objects WHERE status IN "
+            "('pending', 'failed', 'mismatch', 'deleted_in_app')").fetchall()
+        for key, status, size in rows:
+            if key not in listed:
+                continue
+            gone = deleted_by_app(key, facts)
+            if gone:
+                total += 1
+                nbytes += int(size or 0)
+            if gone and status != "deleted_in_app":
+                cur.execute("UPDATE objects SET status='deleted_in_app', "
+                            "updated_at=? WHERE key=?", (time.time(), key))
+                marked += 1
+            elif not gone and status == "deleted_in_app":
+                cur.execute("UPDATE objects SET status='pending', "
+                            "attempts=0, error=NULL, updated_at=? "
+                            "WHERE key=?", (time.time(), key))
+                revived += 1
+        state.db.commit()
+    return {"read": True, "keys": total, "gb": round(nbytes / 1e9, 3),
+            "newly_marked": marked, "back_in_use": revived}
+
+
+def cmd_inventory(args, env, state, src=None, dst=None, deletions=None):
     if src is None:
         src, dst = stores(env, args.reverse)
     with state.lock:
@@ -491,6 +606,7 @@ def cmd_inventory(args, env, state, src=None, dst=None):
                 present += n
         state.db.commit()
     orphans = [k for k in dst_listed if k not in listed]
+    deleted = settle_app_deletions(state, env, listed, reader=deletions)
     state.meta("inventory_at", time.time())
     state.meta("inventory_full", "0" if args.prefix else "1")
     state.meta("route", f"{src.name}:{src.host}/{src.bucket} -> "
@@ -501,6 +617,7 @@ def cmd_inventory(args, env, state, src=None, dst=None):
            "destination_keys": len(dst_listed),
            "destination_only": len(orphans),
            "newly_present": present,
+           "deleted_in_app": deleted,
            "by_prefix": _by_prefix(listed),
            "status": state.summary(),
            "seconds": round(time.time() - t0, 1)}
@@ -604,7 +721,7 @@ def readiness(state, now=None):
     now = now or time.time()
     s = state.summary()
     blocking = {k: v for k, v in s.items()
-                if k not in ("verified", "source_gone") and v["keys"]}
+                if k not in SETTLED and v["keys"]}
     inv = float(state.meta("inventory_at") or 0)
     fresh = now - inv <= READY_MAX_AGE_S and \
         state.meta("inventory_full") == "1"
