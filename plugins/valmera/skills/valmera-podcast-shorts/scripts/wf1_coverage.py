@@ -190,9 +190,24 @@ Never ban a source globally or invent a URL absent from the rejected placements.
     return changed
 
 
+def shared_candidates(coverage, footage):
+    """Reuse bytes for identical director-assigned referents, never their verdicts."""
+    groups={}
+    for i,window in enumerate(coverage['windows']):
+        groups.setdefault(window['name'],[]).extend(footage.get(i,[]))
+    out={}
+    for i,window in enumerate(coverage['windows']):
+        seen=set();out[i]=[]
+        for clip in footage.get(i,[])+groups[window['name']]:
+            if clip['path'] not in seen:
+                seen.add(clip['path']);out[i].append(clip)
+    return out
+
+
 def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None):
     """Only the semantic window can place a picture; a sentence start cannot."""
     rejected=rejected or set()
+    footage=shared_candidates(coverage,footage)
     used, out = [], []
     for i, window in enumerate(coverage['windows']):
         a, b = round(window['t0']*fps)+lead, round(window['t1']*fps)+lead
@@ -233,6 +248,7 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None):
 
 def checked_proposals(coverage, footage, pictures, duration, checker, composed_stills=()):
     """Check local alternatives before acquisition; prior motion never approves a new placement."""
+    footage=shared_candidates(coverage,footage)
     attempts=[];rejected=set();seen=set();ins=proposals(coverage,footage,pictures)
     bound=1+len(coverage['windows'])*(sum(map(len,footage.values()))+sum(map(len,pictures.values())))
     for _ in range(bound):

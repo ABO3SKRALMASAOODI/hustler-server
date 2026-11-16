@@ -93,6 +93,22 @@ UPGRADE_BY_S = 540.0   # seconds from the First cut job's start: footage that is
 UPGRADE_POLL_S = 2.0   # how often the wait asks whether the customer typed something
 
 
+def discard_work(work, box=None):
+    """Release the film's files after its last footage reader has finished.
+
+    The customer deadline ends the wait, not the engine thread. Its source
+    frames and verified clips must survive through checking and shelving.
+    The engine owns deferred cleanup; this never extends the customer's wait.
+    """
+    lock = (box or {}).get("_cleanup_lock")
+    if lock is not None:
+        with lock:
+            if not box.get("_finished"):
+                box["_discard_work"] = work
+                return
+    shutil.rmtree(work, ignore_errors=True)
+
+
 def close(ctx):
     """The film's folder goes when nothing more will read it. A film whose real footage is still being fetched keeps
     it for `upgrade`: the quick film is the customer's now, and the footage joins it when it arrives."""
@@ -105,7 +121,7 @@ def close(ctx):
         ctx.director_upgrade = st
         return
     if st and st.get("work"):
-        shutil.rmtree(st["work"], ignore_errors=True)
+        discard_work(st["work"], box)
 
 
 def _bed_again(ctx, work, comp, text, about=""):
@@ -218,7 +234,7 @@ def upgrade(ctx, worker_db, job, started):
         phases = dict(getattr(ctx, "first_cut_phases", None) or {})
         phases["director"] = dict(phases.get("director") or {}, footage_later=rec)
         ctx.first_cut_phases = phases
-        shutil.rmtree(work, ignore_errors=True)
+        discard_work(work, box)
 
 
 def look_on():
@@ -634,7 +650,8 @@ def footage_start(job, work, sc, per):
             return None
         import threading
         import broll_source
-        box = {"t0": time.monotonic(), "wishes": wishes, "report": [], "cached": [], "ready": threading.Event()}
+        box = {"t0": time.monotonic(), "wishes": wishes, "report": [], "cached": [], "ready": threading.Event(),
+               "_cleanup_lock": threading.Lock(), "_finished": False}
         about = str((sc or {}).get("about") or "")
         W, H = (1080, 1920) if int((per or {}).get("H") or 16) >= int((per or {}).get("W") or 9) else (1920, 1080)
 
@@ -663,7 +680,12 @@ def footage_start(job, work, sc, per):
                 box.setdefault("offers", [])
             finally:
                 box["ready"].set()
-            box["seconds"] = round(time.monotonic() - box["t0"], 1)
+                box["seconds"] = round(time.monotonic() - box["t0"], 1)
+                with box["_cleanup_lock"]:
+                    box["_finished"] = True
+                    discard = box.get("_discard_work")
+                if discard:
+                    shutil.rmtree(discard, ignore_errors=True)
         th = threading.Thread(target=broll_source.carried(run), name="film-footage", daemon=True)
         th.start()
         box["thread"] = th
@@ -1000,6 +1022,7 @@ def _attempt(ctx, worker_db, job, started, spend, trial_scope, cfg, payer=False)
         return None
     deadline = started + cfg["deadline_s"]
     work = os.path.join(ctx.workdir, "film")
+    ctx.director_footage = None
     rec = {"stages": {}}
     if payer:
         rec["payer"] = True
@@ -1032,7 +1055,7 @@ def _attempt(ctx, worker_db, job, started, spend, trial_scope, cfg, payer=False)
             print(f"[director] allowance not settled: {exc}", flush=True)
         ctx.first_cut_phases = dict(getattr(ctx, "first_cut_phases", None) or {}, director=rec)
         if getattr(ctx, "director_state", None) is None:        # a film that landed keeps its folder for the last look
-            shutil.rmtree(work, ignore_errors=True)
+            discard_work(work, getattr(ctx, "director_footage", None))
 
 
 def _keep_scene_plan(ctx, l1, work, rec):
@@ -1126,6 +1149,7 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
     rec["caption_evidence"] = index.get("caption_evidence") or {}
 
     foot = footage_start(job, work, sc, per) if sc is not None else None      # None unless the footage switch opens this account
+    ctx.director_footage = foot
     rec["at"] = "supply"
     t = time.monotonic()
     _say(ctx, worker_db, "director_supply", "Finding pictures for it")

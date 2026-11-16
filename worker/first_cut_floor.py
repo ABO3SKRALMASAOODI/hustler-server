@@ -180,8 +180,8 @@ def choose(ctx, worker_db, started, start_edl, steps, applied, picked, render, b
             for name in ('director_upgrade', 'director_state'):
                 state = getattr(ctx, name, None)
                 if state and state.get('work'):
-                    import shutil
-                    shutil.rmtree(state['work'], ignore_errors=True)
+                    from score.film import discard_work
+                    discard_work(state['work'], state.get('footage'))
                 setattr(ctx, name, None)
             return steps + more, floor_applied, floor_picked, floor_render
         rec['decision'] = 'candidate'

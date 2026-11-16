@@ -9365,13 +9365,20 @@ def _pointed_kinds(ctx):
     return ("click", "hover") if engine_on(ctx) else ("click",)
 
 
-def _picture_qc_split(ctx, findings):
+def _picture_qc_split(ctx, findings, *, measured_type=()):
     """(blocking, persisted) picture-QC findings. Engine accounts move a
     finding unchanged after PQ_PERSIST_RENDERS renders to the advisories;
-    every other account keeps main's behaviour (all blocking)."""
+    every other account keeps main's behaviour (all blocking). Typography
+    measured in the current render remains actionable: repeating the same
+    collision or contrast measurement is not evidence that it was repaired.
+    ``measured_type`` comes from structured pixel measurements, not matching
+    words in the user's request or classifying the finding's prose."""
     if not engine_on(ctx):
         return list(findings or []), []
-    return _persisting_picture_findings(ctx, findings)
+    measured = set(measured_type)
+    keep, persisted = _persisting_picture_findings(
+        ctx, [line for line in findings or [] if line not in measured])
+    return [line for line in findings or [] if line in measured or line in keep], persisted
 
 
 def _talking_head(boxes, coverage):
@@ -25368,12 +25375,16 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
             pq = render_qc.refresh_tail_classification(pq, row["json"])
             result["picture_qc"] = pq
             pqf = pq.get("findings") or []
-            # A finding that survives repair after repair is the footage's
-            # own, or a measurement the edit cannot move: after
+            # Some findings can be the footage's own or measurements the
+            # edit cannot move: after
             # PQ_PERSIST_RENDERS renders it is kept as an advisory, so a
             # request can finish instead of looping on it (bake-off 26 Oct:
             # four add/remove-zoom cycles on one 'stall', a 570 s turn).
-            pqf, persisted = _picture_qc_split(ctx, pqf)
+            # Current measured type failures remain actionable; repeated
+            # previews are not evidence that their ink was repaired.
+            pqf, persisted = _picture_qc_split(
+                ctx, pqf, measured_type=(render_qc.reading_contrast_findings(pq)
+                                        + render_qc.measured_findings(pq)))
             pqf, pq_known = _split_preexisting(ctx, row, pqf, "picture QC: ")
             if pq_known:
                 ctx.last_taste_advisory = list(

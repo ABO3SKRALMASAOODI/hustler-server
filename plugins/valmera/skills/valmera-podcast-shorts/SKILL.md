@@ -215,3 +215,5 @@ ranker and fresh frame checks. A dark background alone is not an empty picture; 
 still need readable final-frame approval and cannot receive motion credit from brightness.
 Caption pages keep their final word visible before the next page opens. The ink delay must
 never delete a short spoken word at a page boundary; resumed older caption plans are rebuilt.
+Windows with the same director-assigned referent can reconsider each other's retained clips.
+Every new placement is checked on its own words; a repeated source interval remains one new picture.

@@ -194,7 +194,8 @@ def test_director_refresh_reads_once_without_waiting_or_replacing_corrected_word
     assert ctx.index["visual_storyboard_pending"] is pending
 
 
-def test_first_cut_preserves_existing_type_but_still_builds_the_edit(monkeypatch):
+@pytest.mark.parametrize("track", ["complete", "partial", "none"])
+def test_first_cut_preserves_existing_type_but_still_builds_the_edit(monkeypatch, track):
     import first_cut
     from test_first_cut_visual import _talking_chain
     frames = []
@@ -206,14 +207,17 @@ def test_first_cut_preserves_existing_type_but_still_builds_the_edit(monkeypatch
     monkeypatch.setattr(first_cut, "_run", record)
 
     def prepare(ctx):
-        value = dict(caption_track="complete", designed_layout=True)
+        value = dict(caption_track=track, designed_layout=True)
         ctx.index = {**ctx.index, "source_typography": value}
         ctx.index["video"] = {**ctx.index["video"], "width": 1280, "height": 720}
         return value
     monkeypatch.setattr(st, "prepare", prepare)
     calls = _talking_chain(monkeypatch, q1=True)
-    assert "add_captions" not in calls
-    assert "add_motion_graphic" not in calls
+    if track == "complete":
+        assert "add_captions" not in calls
+        assert "add_motion_graphic" not in calls
+    else:
+        assert "add_captions" in calls
     assert "auto_reframe" not in calls
     assert "set_frame" in calls
     assert "set_master_loudness" in calls
