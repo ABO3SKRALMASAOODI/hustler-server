@@ -810,7 +810,7 @@ _NO_ARGS = {"type": "object", "properties": {}}
 
 SESSION_TOOLS = [
     {"name": "export_final",
-     "description": "Export a reviewed edit as a full-resolution MP4 when the user asks for the finished video. Pass the explicit project_id and reviewed edl_version. Uses the same ownership, upload, timeline, quality and watermark checks as Studio, and refuses an edit whose last picture before the end card is held (a freeze-frame, a still, a slowed or time-effect tail), naming the fix. Repeated requests reuse an existing current export or its running job. A queued job is NOT a finished video: call wait_for_job, then download_url(kind='final', edl_version=...) to deliver the file. Never claim delivery until a download link is returned.",
+     "description": "Export a reviewed edit as a full-resolution MP4 when the user asks for the finished video. Pass the explicit project_id and reviewed edl_version. Uses the same ownership, upload, timeline, quality and watermark checks as Studio, and refuses an edit whose last picture before the end card is held (a freeze-frame, a still, a slowed or time-effect tail), naming the fix. Repeated requests reuse an existing current export or its running job. A queued job is NOT a finished video: call wait_for_job, then download_url(kind='final', edl_version=...) to deliver the file. Never claim delivery until a download link is returned. A file size or bitrate the user needs (a DVD's 4.7 GB, an upload limit) is set first with set_export_settings(max_size_gb=...), which makes a new edl_version: export that version; the export is measured and re-encoded until it fits, and download_url reports the measured size.",
      "inputSchema": {"type": "object", "properties": {
          "project_id": {"type": "integer", "minimum": 1},
          "edl_version": {"type": "integer", "minimum": 1}},
@@ -3715,7 +3715,7 @@ def _t_download_url(tok, args):
         # Renders are assets of kind 'render'; the variant and the EDL version
         # they were made from live in meta.
         sql = """SELECT id, storage_key, duration_s, sha256, meta, width,
-                        height FROM assets
+                        height, bytes FROM assets
                  WHERE project_id = %s AND kind = 'render'
                    AND meta->>'variant' = %s"""
         params = [project_id, kind]
@@ -3881,8 +3881,20 @@ def _t_download_url(tok, args):
     receipt["asset_key"] = row["storage_key"]
     inspect = (f"\nInspect this exact file: watch_video(project_id={project_id}, "
                f"kind='asset', asset_key={json.dumps(row['storage_key'])})")
+    # The delivered file's measured size, and its size target when the edit
+    # set one (set_export_settings; renderer.fit_export_size measured it).
+    size_line = ""
+    if row.get("bytes"):
+        receipt["bytes"] = int(row["bytes"])
+        size_line = f"\nFILE SIZE: {int(row['bytes']) / 1e9:.2f} GB ({int(row['bytes'])} bytes)"
+        fit = (row.get("meta") or {}).get("export_size")
+        if isinstance(fit, dict) and fit.get("target_bytes"):
+            receipt["export_size"] = fit
+            size_line += (f", target {int(fit['target_bytes']) / 1e9:.2f} GB: "
+                          + ("fits" if int(row["bytes"]) <= int(fit["target_bytes"])
+                             else "over the target"))
     return {"content": [{"type": "text",
-                         "text": f"{kind} of EDL v{ver}:\n{url}{inspect}"
+                         "text": f"{kind} of EDL v{ver}:\n{url}{inspect}{size_line}"
                          + "\nCRAFT REPORT: " + json.dumps(receipt["craft_report"])}],
             "structuredContent": {"download_receipt": receipt}, "isError": False}
 

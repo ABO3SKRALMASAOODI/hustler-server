@@ -31733,7 +31733,7 @@ TOOLS = {
                     "keep", "speed", "inserts", "frame", "captions",
                     "caption_mutes", "texts", "vectors", "music", "sfx",
                     "voiceover", "volume", "master", "effects", "overlays", "canvas",
-                    "motion", "noise_clean"] + (["fx"] if _schemas_mod.FX_AUTHORABLE_TYPES else [])},
+                    "motion", "noise_clean", "export"] + (["fx"] if _schemas_mod.FX_AUTHORABLE_TYPES else [])},
                 "id": {"type": "string", "description": "Existing item id for upsert/remove; omit for whole-layer set."},
                 "value": {"description": "set: complete layer value (array for texts/inserts/music). upsert: one item object merged by id. reorder: all insert ids. Read get_edl for exact shapes."}},
                 "required": ["action", "layer"]}}}),

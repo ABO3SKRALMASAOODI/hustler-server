@@ -407,6 +407,25 @@ def op_frame(stage, value, env, index):
                       "follow": v.get("follow", True)}, env, index)
 
 
+def op_export(stage, value, env, index):
+    """The exported file's size or bitrate target (set_export_settings):
+    {"max_size_gb": 4.5} | {"max_size_mb": 2000} | {"video_kbps": 8000}."""
+    v = value if isinstance(value, dict) else {"max_size_gb": value}
+    args = {k: v[k] for k in ("max_size_gb", "max_size_mb", "video_kbps",
+                              "clear") if v.get(k) is not None}
+    landed = _run_verb(stage, "set_export_settings", args, env, index)
+    if landed:
+        # The measured ceiling v1 and MCP read in set_export_settings' own
+        # reply, so a v2 model can tell the customer the size in numbers.
+        try:
+            from tools_ext.delivery_tools import export_ceiling_line
+            env.finding(export_ceiling_line(stage.edl))
+        except Exception as exc:  # noqa: BLE001 - the line is a report
+            env.finding(f"export: the size ceiling could not be measured "
+                        f"({type(exc).__name__}: {str(exc)[:160]})")
+    return landed
+
+
 def op_grade(stage, value, env, index):
     v = value if isinstance(value, dict) else {"preset": value}
     if v.get("look"):
@@ -692,6 +711,7 @@ HANDLERS = {
     "captions": _verb_op("add_captions"), "place": op_place,
     "scenes": op_scenes, "voiceover": op_voiceover, "music": op_music,
     "sfx": op_sfx, "audio": op_audio, "frame": op_frame, "grade": op_grade,
+    "export": op_export,
     "transition": op_transition, "zoom": _verb_op("add_zoom"),
     "clips": op_clips,
 }

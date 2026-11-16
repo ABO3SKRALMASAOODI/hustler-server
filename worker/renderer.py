@@ -920,10 +920,11 @@ def delivery_upscale(edl, out_path, workdir, cancelled_cb=None):
         return None
     fps = max(1.0, min(float(info.get("fps") or 30.0), 60.0))
     tmp = os.path.join(workdir, f"upscale_{uuid.uuid4().hex[:8]}.mp4")
+    target = export_video_kbps(edl, float(info.get("duration") or 0.0))
     media.run(["ffmpeg", "-y", "-v", "error", "-i", out_path,
                "-map", "0:v:0", "-map", "0:a?",
                "-vf", f"scale={W2}:{H2}:flags=lanczos,setsar=1",
-               *final_video_encode(W2, H2, fps), "-pix_fmt", "yuv420p",
+               *final_video_encode(W2, H2, fps, target), "-pix_fmt", "yuv420p",
                "-c:a", "copy", "-movflags", "+faststart", tmp],
               cancelled_cb=cancelled_cb)
     os.replace(tmp, out_path)
@@ -1240,16 +1241,246 @@ def final_rate_cap_kbps(W, H, fps):
     return int(round(base * k))
 
 
-def final_video_encode(W, H, fps):
+def final_video_encode(W, H, fps, target_kbps=None):
     """x264 settings of a final export: CRF quality under the VBV ceiling
-    (final_rate_cap_kbps), bufsize FINAL_BUFSIZE_S seconds of it."""
+    (final_rate_cap_kbps), bufsize FINAL_BUFSIZE_S seconds of it.
+
+    ``target_kbps`` (export_video_kbps: the EDL's file size or bitrate
+    target) lowers that ceiling: CRF still sets the quality where the picture
+    is cheap, and VBV holds every second at or under the target, so the
+    file's video can never exceed target x length (constrained VBR). Its
+    buffer is one second of the target, so the bound is tight."""
     enc = ["-c:v", "libx264", "-preset", config.FINAL_PRESET,
            "-crf", str(config.FINAL_CRF), "-g", "120"]
     cap = final_rate_cap_kbps(W, H, fps)
-    if cap:
+    if target_kbps and (not cap or int(target_kbps) < cap):
+        cap = max(int(target_kbps), 1)
+        enc += ["-maxrate", f"{cap}k", "-bufsize", f"{cap}k"]
+    elif cap:
         buf = int(round(cap * max(0.5, float(config.FINAL_BUFSIZE_S))))
         enc += ["-maxrate", f"{cap}k", "-bufsize", f"{buf}k"]
     return enc
+
+
+# ── Export size and bitrate targets (16 Nov 2026, p5857: "make the download
+# less than 4.5GB so it can fit onto a DVD"). The EDL's ``export`` names what
+# the FILE must fit; the final's encode is held under the bitrate that fits
+# (final_video_encode), then the delivered file is measured and, when it
+# still lands over, re-encoded in two passes until it fits
+# (fit_export_size). Previews never read it.
+EXPORT_AUDIO_KBPS = 192
+# MP4 headers, sample tables and the moov atom: well under 1% of a film at
+# any real bitrate; 1.5% plus 2 MB is room for a short low-rate one too.
+EXPORT_CONTAINER_HEADROOM = 0.015
+EXPORT_CONTAINER_FIXED_BYTES = 2_000_000
+# The first pass aims a little under the line: VBV holds the peak rate,
+# rounding of the length does the rest.
+EXPORT_TARGET_MARGIN = 0.03
+# When the sound alone would take more than this share of the budget, it is
+# re-encoded smaller so the picture keeps the rest.
+EXPORT_AUDIO_MAX_SHARE = 0.25
+EXPORT_FIT_PASSES = 4
+
+
+def export_target(edl):
+    """The EDL's export target as {"max_bytes", "video_kbps"} (either may be
+    None), or None when the export has no target."""
+    ex = (edl or {}).get("export") if isinstance(edl, dict) else None
+    if not isinstance(ex, dict):
+        return None
+    try:
+        mb = float(ex["max_size_mb"]) if ex.get("max_size_mb") else None
+        kbps = int(ex["video_kbps"]) if ex.get("video_kbps") else None
+    except (TypeError, ValueError):
+        return None
+    if not mb and not kbps:
+        return None
+    return {"max_bytes": int(mb * 1_000_000) if mb else None,
+            "video_kbps": kbps}
+
+
+def size_target_video_kbps(max_bytes, duration_s,
+                           audio_kbps=EXPORT_AUDIO_KBPS,
+                           margin=EXPORT_TARGET_MARGIN):
+    """The video bitrate (kb/s) that puts a ``duration_s`` film with
+    ``audio_kbps`` of sound inside ``max_bytes``, after the container's
+    headroom and ``margin``. Never under the schema's floor: a target too
+    small for any picture still gets the smallest real file."""
+    from schemas import EXPORT_MIN_VIDEO_KBPS
+    dur = max(float(duration_s or 0.0), 0.5)
+    usable = float(max_bytes) * (1.0 - EXPORT_CONTAINER_HEADROOM - margin) \
+        - EXPORT_CONTAINER_FIXED_BYTES
+    video_bits = usable * 8.0 - float(audio_kbps) * 1000.0 * dur
+    return max(int(video_bits / dur / 1000.0), EXPORT_MIN_VIDEO_KBPS)
+
+
+def export_video_kbps(edl, duration_s):
+    """The video ceiling (kb/s) a final of ``edl`` lasting ``duration_s``
+    encodes under, or None when the EDL names no export target."""
+    t = export_target(edl)
+    if not t:
+        return None
+    rates = [t["video_kbps"]] if t.get("video_kbps") else []
+    if t.get("max_bytes"):
+        rates.append(size_target_video_kbps(t["max_bytes"], duration_s))
+    return min(rates) if rates else None
+
+
+def _stream_bytes(path, kind):
+    """Bytes of the first ``kind`` ("v"/"a") stream's packets, measured by
+    ffprobe (0 when absent)."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", f"{kind}:0",
+         "-show_entries", "packet=size", "-of", "csv=p=0", path],
+        capture_output=True, text=True, timeout=600)
+    total = 0
+    for line in (out.stdout or "").splitlines():
+        line = line.strip().rstrip(",")
+        if line.isdigit():
+            total += int(line)
+    return total
+
+
+def fit_export_size(edl, out_path, workdir, cancelled_cb=None):
+    """Make the delivered file fit the EDL's export size target.
+
+    Measures the file. When it is over the target, re-encodes the picture
+    in two passes at the bitrate the measured length and the measured sound
+    leave (the sound is copied, or re-encoded smaller when it alone would
+    take more than EXPORT_AUDIO_MAX_SHARE of the budget), measures again and
+    repeats with the shortfall taken off until it fits. Returns a report
+    (``bytes``, ``target_bytes``, ``fits``, ``passes``, ``video_kbps``) or
+    None when the EDL has no size target."""
+    t = export_target(edl)
+    if not t or not t.get("max_bytes"):
+        return None
+    target = int(t["max_bytes"])
+    size = os.path.getsize(out_path)
+    report = {"target_bytes": target, "bytes": size,
+              "first_bytes": size, "passes": 0, "fits": size <= target,
+              "video_kbps": None, "audio_kbps": None}
+    if size <= target:
+        return report
+    dur = float(media.duration_of(out_path) or 0.0) or 1.0
+    info = media.probe(out_path)
+    W, H = int(info["width"]), int(info["height"])
+    fps = max(1.0, min(float(info.get("fps") or 30.0), 60.0))
+    audio_bytes = _stream_bytes(out_path, "a")
+    audio_args = ["-c:a", "copy"]
+    if audio_bytes > EXPORT_AUDIO_MAX_SHARE * target:
+        akbps = max(32, int(EXPORT_AUDIO_MAX_SHARE * target * 8 / dur
+                            / 1000 * 0.9))
+        audio_args = ["-c:a", "aac", "-b:a", f"{akbps}k"]
+        audio_bytes = int(akbps * 1000 / 8 * dur)
+        report["audio_kbps"] = akbps
+    audio_kbps = audio_bytes * 8 / dur / 1000.0
+    margin = EXPORT_TARGET_MARGIN
+    src = os.path.join(workdir, f"fit_src_{uuid.uuid4().hex[:8]}.mp4")
+    os.replace(out_path, src)
+    tmp = passlog = None
+    try:
+        for attempt in range(EXPORT_FIT_PASSES):
+            if cancelled_cb and cancelled_cb():
+                raise dbx.JobLeaseLost("export size fit: job was cancelled")
+            kbps = size_target_video_kbps(target, dur, audio_kbps, margin)
+            passlog = os.path.join(workdir,
+                                   f"fit_pass_{uuid.uuid4().hex[:8]}")
+            tmp = os.path.join(workdir, f"fit_{uuid.uuid4().hex[:8]}.mp4")
+            common = ["-c:v", "libx264", "-preset", config.FINAL_PRESET,
+                      "-b:v", f"{kbps}k", "-maxrate", f"{int(kbps * 1.5)}k",
+                      "-bufsize", f"{int(kbps * 2)}k", "-g", "120",
+                      "-pix_fmt", "yuv420p", "-passlogfile", passlog]
+            timeout = max(900.0, dur * 4.0)
+            media.run(["ffmpeg", "-y", "-v", "error", "-i", src,
+                       "-map", "0:v:0", *common, "-pass", "1", "-an",
+                       "-f", "mp4", os.devnull],
+                      timeout=timeout, cancelled_cb=cancelled_cb)
+            media.run(["ffmpeg", "-y", "-v", "error", "-i", src,
+                       "-map", "0:v:0", "-map", "0:a?", *common,
+                       "-pass", "2", *audio_args,
+                       "-movflags", "+faststart", tmp],
+                      timeout=timeout, cancelled_cb=cancelled_cb)
+            for leftover in (passlog + "-0.log", passlog + "-0.log.mbtree"):
+                try:
+                    os.remove(leftover)
+                except OSError:
+                    pass
+            size = os.path.getsize(tmp)
+            report.update(bytes=size, passes=attempt + 1, video_kbps=kbps,
+                          width=W, height=H, fps=round(fps, 3))
+            if size <= target:
+                os.replace(tmp, out_path)
+                report["fits"] = True
+                return report
+            # Over again: take the measured shortfall off the next pass.
+            margin += (size - target) / float(target) + 0.01
+            if attempt == EXPORT_FIT_PASSES - 1:
+                os.replace(tmp, out_path)       # the smallest one made
+            else:
+                os.remove(tmp)
+        report["fits"] = os.path.getsize(out_path) <= target
+        return report
+    finally:
+        if os.path.exists(src):
+            if not os.path.exists(out_path):
+                os.replace(src, out_path)
+            else:
+                os.remove(src)
+        # a pass that failed leaves its half-written file and logs behind
+        for leftover in ([tmp] if tmp else []) + (
+                [passlog + "-0.log", passlog + "-0.log.mbtree"]
+                if passlog else []):
+            try:
+                if leftover != out_path and os.path.exists(leftover):
+                    os.remove(leftover)
+            except OSError:
+                pass
+
+
+def _same_export_target(variant, prev_edl, edl):
+    """A final is reused or stitched only from a final made for the same
+    export target: its encode was held under that target's bitrate. Previews
+    never read export, so any two previews share their picture."""
+    if variant != "final":
+        return True
+    return (((prev_edl or {}).get("export") or None)
+            == ((edl or {}).get("export") or None))
+
+
+def export_fit_failed_report(edl, out_path, error):
+    """The measured report for a delivered file whose size fit could not
+    run: the file as it is, its size, and why (never a failed export)."""
+    t = export_target(edl) or {}
+    try:
+        size = os.path.getsize(out_path)
+    except OSError:
+        size = 0
+    target = t.get("max_bytes")
+    return {"target_bytes": target, "bytes": size, "first_bytes": size,
+            "passes": 0, "fits": bool(target) and 0 < size <= target,
+            "video_kbps": None, "audio_kbps": None,
+            "error": f"{type(error).__name__}: {str(error)[:200]}"}
+
+
+def export_size_text(report):
+    """One plain line of what the delivered file measured."""
+    if not report:
+        return ""
+
+    def size(n):
+        n = float(n or 0)
+        return f"{n / 1e9:.2f} GB" if n >= 1e9 else f"{n / 1e6:.1f} MB"
+    how = (f"re-encoded in {report['passes']} two-pass run(s) at "
+           f"{report['video_kbps']} kb/s video" if report.get("passes")
+           else "first encode")
+    if report.get("error"):
+        how += (f"; the size re-encode could not run ({report['error']}), "
+                "so the verified first encode shipped")
+    target = (f"the {size(report['target_bytes'])} target"
+              if report.get("target_bytes") else "no size target")
+    return (f"export measured {size(report['bytes'])} ({report['bytes']} "
+            f"bytes) against {target}: "
+            f"{'fits' if report.get('fits') else 'OVER'} ({how})")
 
 
 def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
@@ -3727,6 +3958,12 @@ def _fx_handle_src(entry, keep, blk_frames, h, fps, side, no_source,
     return {"seg": idx, "start": round(start, 6)}
 
 
+# Junction styles that lay the two pictures over each other: on a cut baked
+# into the upload (no handles) their sides hold the edge frame while fainter
+# instead of playing at half speed (see the junction window above).
+BLEND_JUNCTION_STYLES = ("dissolve", "double_exposure", "fadegrays")
+
+
 def _joined_in_source(a, b, keep):
     """Do these two blocks' spans touch on the source clock?"""
     if a[0] != "seg" or b[0] != "seg":
@@ -5347,18 +5584,29 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             return f"{u}{side}h"
 
         a_own, b_own = _own(ka, "a"), _own(kb, "b")
-        # A cut baked into the source has no footage past it. Its h frames
-        # run at half speed across the 2h of the window rather than stopping
-        # dead on the edge frame: a still is the same either way, and moving
-        # footage never freezes. It ends on the frame the program goes on
-        # from, so the join is continuous.
+        # A cut baked into the source has no footage past it. For a style
+        # that MOVES pictures (a slide, a wipe, a whip) its h frames run at
+        # half speed across the 2h of the window rather than stopping dead
+        # on the edge frame, and end on the frame the program goes on from.
+        # A style that BLENDS the two pictures (a dissolve) does not: both
+        # pictures at half speed, laid over each other for the whole window,
+        # is the ghosted double exposure p5873 got on every join of a
+        # cut-together teaser (16 Nov), and it slides every frame off its
+        # beat. There each side plays its own frames at their own times and
+        # holds its edge frame only while it is the fainter picture: the
+        # outgoing shot runs to the cut and fades on its last frame, the
+        # incoming one starts on the cut over its first frame. No frame
+        # moves in time and the translucent picture never moves.
+        spread_ok = spec.get("spread") and not all(
+            it.get("style") in BLEND_JUNCTION_STYLES
+            for it in spec.get("items") or ())
         spread = (f"setpts=2*(PTS-STARTPTS),fps={f3:.3f},"
                   f"tpad=stop_mode=clone:stop=2,trim=end_frame={2 * h},{tail}")
         if spec.get("a_src"):
             a_h = _handle(spec["a_src"], "a")
             parts.append(f"[{a_own}][{a_h}]concat=n=2:v=1:a=0,{tail}"
                          f"[{u}A]")
-        elif spec.get("spread"):
+        elif spread_ok:
             parts.append(f"[{a_own}]{spread}[{u}A]")
         else:
             parts.append(f"[{a_own}]tpad=stop_mode=clone:stop={h},{tail}"
@@ -5367,7 +5615,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             b_h = _handle(spec["b_src"], "b")
             parts.append(f"[{b_h}][{b_own}]concat=n=2:v=1:a=0,{tail}"
                          f"[{u}B]")
-        elif spec.get("spread"):
+        elif spread_ok:
             parts.append(f"[{b_own}]{spread}[{u}B]")
         else:
             parts.append(f"[{b_own}]tpad=start_mode=clone:start={h},{tail}"
@@ -7155,7 +7403,9 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     elif preview:
         encode = [*preview_video_encode(), "-c:a", "aac", "-b:a", "128k"]
     else:
-        encode = [*final_video_encode(W, H, fps),
+        encode = [*final_video_encode(W, H, fps, export_video_kbps(
+                      edl, program_render_s(tl, fps)
+                      + music_tail_ext(edl, tl.out_duration) + outro_s)),
                   "-c:a", "aac", "-b:a", "192k"]
 
     expected_out_s = (program_render_s(tl, fps)
@@ -8580,7 +8830,10 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         # veryfast keeps export wall time low (the graph, not x264, is the
         # cost); config.FINAL_CRF sets the delivered quality (see config),
         # under the export's rate ceiling (final_video_encode).
-        encode = [*final_video_encode(W, H, fps),
+        # An export size or bitrate target (EDL export) lowers the ceiling.
+        encode = [*final_video_encode(W, H, fps, export_video_kbps(
+                      edl, program_render_s(tl, fps)
+                      + music_tail_ext(edl, tl.out_duration) + outro_s)),
                   "-c:a", "aac", "-b:a", "192k"]
 
     expected_out_s = (program_render_s(tl, fps)
@@ -10584,6 +10837,8 @@ def _run_render_job(worker_db, job):
                                                  lambda: index) \
                             and (variant != "preview" or _same_preview_frame(
                                 prev_asset, edl_row["json"], src_local)) \
+                            and _same_export_target(variant, prev_row["json"],
+                                                    edl_row["json"]) \
                             and (fp_now is None
                                  or pm.get("caption_fp") == fp_now):
                         out_dur = _reuse_picture_with_new_audio(
@@ -10737,6 +10992,26 @@ def _run_render_job(worker_db, job):
                 qc_pass = None
             if master_guard and tp_guard:
                 tp_guard["mastering"] = master_guard
+        # The export's size target (EDL export.max_size_mb): the file that
+        # ships is measured, and re-encoded until it fits (fit_export_size).
+        size_fit = None
+        if variant == "final" and not proof_only:
+            try:
+                size_fit = fit_export_size(edl_row["json"], out_local,
+                                           workdir,
+                                           cancelled_cb=lambda: _abandoned[0])
+            except dbx.JobLeaseLost:
+                raise
+            except Exception as fe:  # noqa: BLE001 — never fails an export
+                # The verified file at out_local ships (fit_export_size puts
+                # it back when a pass fails); its size is measured and
+                # reported honestly, so the customer gets the film and the
+                # true number instead of a failed export.
+                size_fit = export_fit_failed_report(edl_row["json"],
+                                                    out_local, fe)
+            if size_fit:
+                print(f"[render {job_id}] {export_size_text(size_fit)}",
+                      flush=True)
         _mark("true_peak_s")
         # No more frame/audio writes follow the peak guard. Send these exact
         # bytes while the evidence sheets read them; all sheets and all checks
@@ -11101,6 +11376,8 @@ def _run_render_job(worker_db, job):
                   # measurable even if the job result becomes "superseded".
                   "render_stage_timings": dict(timings),
                   "quality": _quality_label(),
+                  # What the export's size target measured (fit_export_size).
+                  **({"export_size": size_fit} if size_fit else {}),
                   # A reused picture keeps the encode it was made with.
                   **({"preview_enc": reused_visual_meta.get(
                       "preview_enc", PREVIEW_ENCODE_BEFORE_STAMPS)
@@ -11222,6 +11499,7 @@ def _run_render_job(worker_db, job):
                   flush=True)
         return {"render_asset_id": asset_id, "sheet_key": sheet_key,
                 **({"render_dependency_key": dependency_key} if dependency_key else {}),
+                **({"export_size": size_fit} if size_fit else {}),
                 "render_job_id": job_id, "quality": _quality_label(),
                 "sha256": render_sha,
                 "verify_sheet_key": verify_sheet_key,

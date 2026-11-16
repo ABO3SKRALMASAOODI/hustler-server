@@ -2574,6 +2574,96 @@ class Master(BaseModel):
     loudness: Optional[Literal["social", "natural"]] = None
 
 
+# Export file targets (16 Nov 2026, p5857): "make the download less than
+# 4.5GB so it can fit onto a DVD". The editor had no export size or bitrate,
+# so a size could never be met and the reply told the customer to check the
+# file themselves. Bounds are what a file can physically be, not policy.
+EXPORT_MIN_SIZE_MB = 1.0
+EXPORT_MIN_VIDEO_KBPS = 50
+
+
+def export_number(value):
+    """A size or rate as written: a number, or a string such as '4.5' or
+    '4.5 GB' (machine syntax: its leading number). None when there is no
+    positive number in it."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        num = float(value)
+    else:
+        text = str(value).strip()
+        end = 0
+        while end < len(text) and (text[end].isdigit() or text[end] == "."):
+            end += 1
+        try:
+            num = float(text[:end]) if end else None
+        except ValueError:
+            num = None
+    if num is None or not math.isfinite(num) or num <= 0:
+        return None
+    return num
+
+
+def export_input(data):
+    """An export target as written, in the schema's own fields. Every surface
+    teaches the size in GB (set_export_settings, harness v2's export op,
+    export_final's MCP description), so a layer written straight through
+    apply_edit_batch carries max_size_gb too: it is read as its megabytes, a
+    string number ('4.5', '4.5 GB') as its number, a bare number as GB, and
+    anything else is dropped. Only the fields it names are returned, so an
+    upsert patches just those."""
+    if not isinstance(data, dict):
+        data = {"max_size_gb": data}
+    gb = export_number(data.get("max_size_gb"))
+    mb = export_number(data.get("max_size_mb"))
+    kbps = export_number(data.get("video_kbps"))
+    sizes = [v for v in ((gb * 1000) if gb else None, mb) if v]
+    out = {}
+    if sizes:
+        out["max_size_mb"] = min(sizes)
+    elif "max_size_mb" in data or "max_size_gb" in data:
+        out["max_size_mb"] = None       # named and emptied: no size target
+    if kbps:
+        out["video_kbps"] = int(round(kbps))
+    elif "video_kbps" in data:
+        out["video_kbps"] = None
+    return out
+
+
+class Export(BaseModel):
+    """What the exported FILE must fit, applied to finals only (previews
+    are unchanged). max_size_mb: the whole MP4's ceiling in megabytes of
+    10^6 bytes (a DVD's 4.7 GB, an upload limit); the render sets the video
+    bitrate from the film's length with room for the sound and the
+    container, encodes under it, measures the file and re-encodes in two
+    passes if it still lands over (renderer.fit_export_size). video_kbps:
+    a video bitrate ceiling in kb/s. None everywhere keeps today's export,
+    and the field is dropped from signatures, so stored EDLs are unchanged."""
+    model_config = {"allow_inf_nan": False}
+    max_size_mb: Optional[float] = Field(default=None, gt=0)
+    video_kbps: Optional[int] = Field(default=None, gt=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _repair_input(cls, data):
+        if data is None or isinstance(data, BaseModel):
+            return data
+        return export_input(data)
+
+    @field_validator("max_size_mb")
+    @classmethod
+    def _size_floor(cls, value):
+        # Under a megabyte holds no film: the smallest real file is meant.
+        return None if value is None else max(float(value),
+                                              EXPORT_MIN_SIZE_MB)
+
+    @field_validator("video_kbps")
+    @classmethod
+    def _rate_floor(cls, value):
+        return None if value is None else max(int(value),
+                                              EXPORT_MIN_VIDEO_KBPS)
+
+
 # Output ratios that are social-feed formats. An EDL that leaves
 # master.loudness unset is mastered ('social') on these: every short used to
 # ship at whatever level the source was recorded (-29 LUFS on a quiet lecture,
@@ -2918,6 +3008,21 @@ class EDL(BaseModel):
     # fxgraph. Empty list, so edl_signature drops it and every earlier EDL
     # keeps its signature and cached renders.
     fx: List[FxItem] = Field(default_factory=list)
+    # 16 Nov 2026 (p5857): the exported file's size or bitrate target (see
+    # Export). None on every earlier EDL, and edl_signature drops None.
+    export: Optional[Export] = None
+
+    @model_serializer(mode="wrap")
+    def _dump_without_unset_export(self, handler):
+        # Every EDL written before the export target existed dumps (and so
+        # stores and compares) byte-identically: an unset export is absent.
+        data = handler(self)
+        ex = data.get("export") if isinstance(data, dict) else None
+        if isinstance(data, dict) and (ex is None or (
+                isinstance(ex, dict) and not any(ex.values()))):
+            # an export that names no target is no export
+            data.pop("export", None)
+        return data
 
 
 def default_edl(duration):

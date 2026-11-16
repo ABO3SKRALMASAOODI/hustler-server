@@ -47,6 +47,9 @@ OPS = [
      "room tone) out of the footage's own sound, 0 restores it"),
     ("frame", '{"frame": {"ratio": "9:16", "follow": true}}',
      "reframe; letterboxed sources are detected"),
+    ("export", '{"export": {"max_size_gb": 4.5}}', "the exported file's "
+     "size (or video_kbps) target: the export encodes under the bitrate that "
+     "fits the film's length and is measured and re-encoded until it fits"),
     ("grade", '{"grade": {"preset": "warm"}}', "a grade preset or "
      "{\"look\": name}"),
     ("transition", '{"transition": {"style": "crossfade", "duration_s": 0.3}}',
