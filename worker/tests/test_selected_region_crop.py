@@ -69,3 +69,25 @@ def test_explicit_card_regions_survive_compilation_and_lowering(tmp_path):
     overlays={x['id']: x for x in edl['overlays']}
     for card in cards:
         assert overlays['cd.'+card['id']]['source_crop'] == card['crop']
+
+
+def test_displaced_full_frame_selection_reaches_existing_repair_round(tmp_path):
+    from score import compiler, direct
+    from tests.test_score_taste import film as score
+    from types import SimpleNamespace
+    _, index = selected_scene()
+    index.update(words=[], sentences=[])
+    index['video'].update(fps=30, has_audio=False)
+    (tmp_path/'index.json').write_text(json.dumps(index))
+    text = score([{'k': 'b', 'id': 'b01', 'at': '@3.0..@4.0',
+                  'job': 'show the preview',
+                  'pic': {'src': 'main@3-4', 'crop': [.7,.08,.9,.65]}}])
+    result=compiler.compile_score(text,index=index,work_dir=str(tmp_path),perception={})
+    findings=[x for x in result.meter['findings'] if x.startswith('source region b01.s0:')]
+    assert len(findings)==1
+    assert 'local_saliency_crop' in findings[0]
+    assert findings[0] in result.meter_text
+    # Existing repair selection sees the geometric failure; no new call path.
+    without=SimpleNamespace(meter={**result.meter,'findings':[
+        x for x in result.meter['findings'] if x not in findings]})
+    assert direct.quality(result,[])[1] == direct.quality(without,[])[1]+1

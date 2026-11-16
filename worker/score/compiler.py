@@ -6831,6 +6831,17 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
             m["move"] = {"fault": f"{type(e).__name__}: {str(e)[:160]}"}
     from . import source_guard
     m["source_guard"] = source_guard.apply(l1, ctx.index, ctx.perc, views=ctx.views)
+    selected = {item["id"]: item["source_region"] for item in l1["items"]
+                if item.get("source_region")}
+    for row in m["source_guard"]:
+        if isinstance(row, dict) and row.get("id") in selected and row.get("reason") in {
+                "local_subject_crop", "local_saliency_crop", "last_known_subject_crop",
+                "static_source_text_fit"}:
+            ctx.find(f"source region {row['id']}: selected {selected[row['id']]} "
+                     f"at source {row['source']} could not be kept by the final framing guard "
+                     f"({row['reason']}). The rendered picture no longer follows that selection. "
+                     "Recompose the selected detail in a window whose aspect fits it, preserving "
+                     "readable source text and whole included subjects; inspect the resulting geometry.")
     m["final_type_clearance"] = final_type_clearance(ctx, l1)
     for key in m["final_type_clearance"]["unresolved"]:
         ctx.find(
