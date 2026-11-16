@@ -128,7 +128,8 @@ def _openverse_get_json(url, *, params=None):
     headers = _openverse_auth_headers()
     try:
         return net_fetch.get_json(
-            url, params=params, headers=headers, timeout_s=API_TIMEOUT_S,
+            url, params=params if headers else _anonymous_params(params),
+            headers=headers, timeout_s=API_TIMEOUT_S,
             allowed_hosts=["api.openverse.org"])
     except net_fetch.FetchError as exc:
         if "HTTP 401" not in str(exc) or not headers:
@@ -146,8 +147,27 @@ def _openverse_get_json(url, *, params=None):
                 if "HTTP 401" not in str(exc):
                     raise
     return net_fetch.get_json(
-        url, params=params, timeout_s=API_TIMEOUT_S,
+        url, params=_anonymous_params(params), timeout_s=API_TIMEOUT_S,
         allowed_hosts=["api.openverse.org"])
+
+
+# Openverse refuses an anonymous page over 20 results with HTTP 401 ("page_size
+# may not exceed 20 for anonymous requests"). With no credentials on the box,
+# sfx_search asked for 24 and every sound search failed as an auth error
+# (#916, 16 Nov 2026); stock photo search asks for up to count*3.
+OPENVERSE_ANON_PAGE_MAX = 20
+
+
+def _anonymous_params(params):
+    if not params or "page_size" not in params:
+        return params
+    try:
+        size = int(params["page_size"])
+    except (TypeError, ValueError):
+        return params
+    if size <= OPENVERSE_ANON_PAGE_MAX:
+        return params
+    return dict(params, page_size=OPENVERSE_ANON_PAGE_MAX)
 
 
 def available():

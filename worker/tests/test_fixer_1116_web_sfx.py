@@ -61,3 +61,30 @@ def test_the_web_sfx_share_of_the_compact_catalog_is_capped():
     cat = agent_tools.openai_tools("any-model", compact=True, names=names)
     assert len(cat) == 4
     assert len(json.dumps(cat, separators=(",", ":"))) <= 1_300
+
+
+def test_an_anonymous_openverse_page_never_exceeds_twenty(monkeypatch):
+    """Live on 16 Nov the box had no Openverse credentials and sfx_search
+    asked for page_size 24: Openverse answered HTTP 401 to every search."""
+    import music_search
+    import net_fetch
+    seen = []
+
+    def fake_get_json(url, params=None, headers=None, **kw):
+        seen.append((dict(params or {}), headers))
+        if not headers and int((params or {}).get("page_size", 0)) > 20:
+            raise net_fetch.FetchError("HTTP 401 from api.openverse.org")
+        return {"results": []}
+
+    monkeypatch.setattr(config, "OPENVERSE_API_TOKEN", "")
+    monkeypatch.setattr(config, "OPENVERSE_CLIENT_ID", "")
+    monkeypatch.setattr(config, "OPENVERSE_CLIENT_SECRET", "")
+    monkeypatch.setattr(net_fetch, "get_json", fake_get_json)
+    sfx_search.search("ocean waves")                 # count 12 -> asks 24
+    assert seen and all(int(p["page_size"]) <= 20 for p, _h in seen)
+    # an authenticated request keeps its own page size
+    monkeypatch.setattr(music_search, "_openverse_auth_headers",
+                        lambda force_refresh=False: {"Authorization": "x"})
+    seen.clear()
+    music_search._openverse_get_json("u", params={"page_size": 24})
+    assert seen[0][0]["page_size"] == 24
