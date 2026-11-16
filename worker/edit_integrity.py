@@ -24,7 +24,19 @@ its existing contract, the exact source intervals being deleted, transcript and 
 Allow only if those intervals meet the customer's actual removal criteria. Non-speaking footage
 is not evidence of a waiting gap: walking, dancing, demonstrations, reactions and natural pauses
 can be the content. Removing dead air or repeated takes is not permission to discard that action.
-A deliberate highlights/shorter-cut request can authorize action cuts. A request for a target
+A deliberate highlights/shorter-cut request can authorize action cuts. A request often holds several
+asks: a removed stretch is authorized when it meets ANY one of them, so judge each stretch against
+the ask it serves, never against all of them at once. A request that names WHAT to remove (a kind
+of footage, a scene, an activity, a subject: "remove the stage shows", "cut the ride footage",
+"take out the long performances") is itself the removal criterion, action included: allow every
+removed stretch whose frames plausibly show that named kind, and do not ask for a target length, a
+highlights request, timestamps, a contract or the customer's confirmation. Refuse such a stretch
+only when its frames clearly show something the request did not name, or when it removes spoken
+words in the middle of a sentence. A request to speed up, tighten, shorten or remove the pauses or
+silences in speech authorizes removing the silent gaps between spoken words and sentences, even
+while the picture keeps moving during the gap: removing a pause between two phrases is not cutting a
+sentence in the middle. Refuse a pause removal only when it deletes spoken words. When only some
+stretches fail, the reason names exactly those stretches and says the rest are fine. A request for a target
 length ("under N minutes", "cut it to N seconds") authorizes removing whatever content is needed to
 reach that length, action included: compare the measured lengths before and after with the target.
 A target length or a highlights request with no named criteria hands the choice of WHICH moments

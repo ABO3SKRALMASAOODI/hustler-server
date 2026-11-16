@@ -326,3 +326,18 @@ def test_length_target_hands_selection_to_editor_and_blank_refusal_is_rechecked(
     assert first == ei._UNCHECKED
     assert ei.cut_refusal(ctx, {"keep": [[0, 4858.22]]}, {"keep": after}) is None
     assert answers == []
+
+
+def test_named_kind_and_pause_asks_are_removal_criteria():
+    """Tickets #1345/#1346/#123 (user 3120, project 5857, 16 Nov): "remove the long stretches of
+    the stage shows, ride and performance footage and speed up the pauses in the speech". The
+    judge saw a stage show, a choir, a swing ride and bumper cars in the removed frames and still
+    refused, for want of a target length or highlights request; it refused every pause removal
+    because the picture moved during the gap. Five refusals, nothing changed. The judge is now
+    told a named kind of footage is itself the criterion, each stretch needs to serve only one
+    of the asks, and a gap between phrases is a pause, not a sentence cut in the middle."""
+    s = ei.CUT_SYSTEM
+    assert "names WHAT to remove" in s and "is itself the removal criterion" in s
+    assert "ANY one of them" in s
+    assert "pauses or\nsilences in speech authorizes" in s and "not cutting a\nsentence" in s
+    assert "do not ask for a target length" in s
