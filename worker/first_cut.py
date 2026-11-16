@@ -2154,8 +2154,13 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         # a finished piece over a song: whole, unchanged in time, no title
         # or captions over its own design; only a non-vertical frame is
         # fitted to 9:16 (crop for footage, never bands around a speaker)
-        applied.append("kept whole (it already plays as a finished piece "
-                       "over its song)")
+        # The reply says "over its song" only when a song was measured in
+        # the upload (p5744, 16 Nov 2026: an 11 s walk with room tone at
+        # -45.7 dB RMS and a 0.37 beat confidence was told it had a song).
+        import edit_provenance
+        applied.append("kept whole (it already plays as a finished piece"
+                       + (" over its song)" if edit_provenance.upload_has_music(ctx.index)
+                          else ", in its own time with its own sound)"))
         if drop_app_cards(ctx, steps, started, duration):
             applied.append("the app's end card left out")
         if not whole and typography.get("designed_layout"):

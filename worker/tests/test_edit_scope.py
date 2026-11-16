@@ -1,88 +1,46 @@
-import copy
-import json
+"""edit_scope records the turn's measured retained change; the editor's reply is never rewritten by a
+second model or padded with boilerplate (EDIT-CORE B1, 16 Nov 2026)."""
 from types import SimpleNamespace as NS
 
-import pytest
 import edit_scope
 from score import asks
 
 
-def test_reply_discloses_actual_delta_even_when_main_ask_failed(monkeypatch):
-    def check(ctx, name, schema, system, payload, **kw):
-        data = json.loads(payload)
-        assert data['retained_changes']['texts']['after'] == []
-        return {'reply': 'The replacement failed. The title was removed.', 'covered': ['texts']}, {}
-    monkeypatch.setattr(asks, '_call', check)
+def _no_model(monkeypatch):
+    monkeypatch.setattr(asks, '_call', lambda *a, **k: (_ for _ in ()).throw(AssertionError('no rewrite model')))
+
+
+def test_the_editors_reply_goes_out_as_written_and_the_change_is_recorded(monkeypatch):
+    _no_model(monkeypatch)
     ctx = NS(turn_start_edl={'json': {'texts': [{'text': 'Title'}]}},
              latest_edl=lambda: {'json': {'texts': []}})
-    assert 'title was removed' in edit_scope.disclose(ctx, 'The replacement failed.')
+    reply = 'I removed the title; the replacement animation could not be made from a still.'
+    assert edit_scope.disclose(ctx, reply) == reply
+    assert ctx.retained_reply_facts['fields'] == ['texts']
+    assert 'removed 1 title' in ctx.retained_reply_facts['description']
 
 
-@pytest.mark.parametrize('check_available', [True, False])
-def test_unchanged_failed_turn_offers_real_still_alternative(monkeypatch, check_available):
-    offer = 'I can show your uploaded reference as a still; it will not animate.'
-    def check(ctx, name, schema, system, payload, **kw):
-        data = json.loads(payload)
-        assert data['retained_changes'] == {}
-        assert data['real_alternatives'][0]['offer'] == offer
-        if not check_available:
-            raise TimeoutError()
-        return {'reply': 'The film is unchanged. ' + offer,
-                'covered': [], 'offered_alternative': 0}, {}
-    monkeypatch.setattr(asks, '_call', check)
-    ctx = NS(turn_start_edl={'json': {'texts': [{'text': 'Title'}]}},
-             latest_edl=lambda: {'json': {'texts': [{'text': 'Title'}]}},
-             edit_alternatives=[{'offer': offer}])
-    reply = edit_scope.disclose(ctx, 'Animation failed.')
-    assert 'unchanged' in reply
-    assert offer in reply
-    assert ctx.retained_reply_facts['fields'] == ['unchanged', 'alternative']
-    assert offer in ctx.retained_reply_facts['description']
-
-
-def test_disclosure_cannot_silently_drop_available_alternative(monkeypatch):
-    monkeypatch.setattr(asks, '_call', lambda *a, **k: (
-        {'reply': 'Animation failed.', 'covered': [], 'offered_alternative': None}, {}))
-    ctx = NS(turn_start_edl={'json': {}}, latest_edl=lambda: {'json': {}},
-             edit_alternatives=[{'offer': 'I can use your still reference.'}])
-    assert 'I can use your still reference.' in edit_scope.disclose(ctx, 'Animation failed.')
-
-
-def test_unchanged_failure_keeps_the_honest_clean_original_question(monkeypatch):
-    reply = 'الفيديو لم يتغير. هل يمكنك رفع النسخة الأصلية من دون العلامة؟'
-    verdict = {'asks': [{'id': 'a1', 'state': 'not_done',
-                        'seen': 'The mark remains across the face.',
-                        'line': 'العلامة ما زالت ظاهرة.'}]}
-    def check(ctx, name, schema, system, payload, **kw):
-        if name == 'disclose_retained_changes':
-            return {'reply': reply, 'covered': [], 'offered_alternative': None}, {}
-        assert name == 'record_true_reply'
-        return {'wrong': [], 'reply': '', 'covered': ['unchanged']}, {}
-    monkeypatch.setattr(asks, '_call', check)
-    ctx = NS(turn_start_edl={'json': {}}, latest_edl=lambda: {'json': {}},
-             ask_verdict=verdict)
+def test_an_unchanged_turn_gets_no_boilerplate(monkeypatch):
+    """p5744 R4 replied 'No changes were kept; your previous film is unchanged.' under every answer."""
+    _no_model(monkeypatch)
+    ctx = NS(turn_start_edl={'json': {'keep': [[0, 2]]}}, latest_edl=lambda: {'json': {'keep': [[0, 2]]}},
+             ask_verdict={'asks': [{'id': 'a1', 'state': 'not_done'}]})
+    reply = 'Calm Currents is on the film now at -18 LUFS under the walk.'
     out = edit_scope.disclose(ctx, reply)
-    assert asks.true_reply(ctx, {'asks': [{'id': 'a1', 'said': 'Remove the mark'}]},
-                           verdict, out) == reply
+    assert out == reply
+    assert 'previous film is unchanged' not in out and 'No changes were kept' not in out
+    assert ctx.retained_reply_facts['fields'] == ['unchanged']
 
 
-@pytest.mark.parametrize('relevant', [True, False])
-def test_unsupported_reply_can_offer_a_real_upload_without_failed_tool_call(monkeypatch, relevant):
-    def check(ctx, name, schema, system, payload, **kw):
-        data = json.loads(payload)
-        assert data['alternatives_optional'] is True
-        assert data['real_alternatives'][0]['assets'][0]['asset_key'] == 'uploaded-reference.png'
-        return {'reply': 'The film is unchanged.' + (' I can show the reference as a still.' if relevant else ''),
-                'covered': [], 'offered_alternative': 0 if relevant else None}, {}
-    monkeypatch.setattr(asks, '_call', check)
+def test_a_tools_real_alternative_is_offered_once(monkeypatch):
+    _no_model(monkeypatch)
+    offer = 'I can show your uploaded reference as a still; it will not animate.'
     ctx = NS(turn_start_edl={'json': {}}, latest_edl=lambda: {'json': {}},
-             available_still_assets=[{'asset_key': 'uploaded-reference.png'}],
-             ask_verdict={'asks': [{'id': 'a1', 'state': 'not_done'}]},
-             user_message='Use the hair-down reference in the animation' if relevant else 'Remove the wind noise')
-    reply = edit_scope.disclose(ctx, 'The requested operation is unavailable.')
-    assert 'unchanged' in reply
-    assert ('as a still' in reply) is relevant
-
+             edit_alternatives=[{'offer': offer}])
+    out = edit_scope.disclose(ctx, 'Animation is not possible from this file.')
+    assert out.count(offer) == 1
+    assert edit_scope.disclose(ctx, out).count(offer) == 1
+    assert ctx.retained_reply_facts['fields'] == ['unchanged', 'alternative']
 
 
 def test_no_second_model_authorizes_the_editors_writes():

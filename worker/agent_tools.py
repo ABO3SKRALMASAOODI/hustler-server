@@ -756,14 +756,14 @@ class ToolContext:
         # repairs what it can and says so; it never refuses).
         normalized, edge_note = _repair_cut_edges(self, prev["json"], normalized)
         notes = [edge_note] if edge_note else []
+        # Measurements the write carries as information; the editor's write saves (owner, 16 Nov
+        # 2026: a splice over narration, a repaint or layer over a face, are the editor's decisions).
         import required_broll
-        picture_refusal = required_broll.write_refusal(self, prev['json'], normalized)
-        if picture_refusal:
-            return f"REJECTED (EDL v{prev['version']} unchanged): {picture_refusal}"
         import edit_integrity
-        integrity_refusal = edit_integrity.write_refusal(self, prev["json"], normalized)
-        if integrity_refusal:
-            return f"REJECTED (EDL v{prev['version']} unchanged): {integrity_refusal}"
+        for measured in (required_broll.write_note(self, prev['json'], normalized),
+                         edit_integrity.write_note(self, prev["json"], normalized)):
+            if measured:
+                notes.append(measured)
         length_note = _length_ask_note(self, prev, normalized)
         if length_note:
             notes.append(length_note)
@@ -772,10 +772,7 @@ class ToolContext:
         # brief's notes are about an editor's tool against a typed request, so they skip it.
         scoring = getattr(self, "_score_write", False) is True
         if not scoring and request_contract.enabled(self):
-            try:
-                protected = request_contract.protected_lanes(self)
-            except ValueError as exc:
-                return f"REJECTED (EDL v{prev['version']} unchanged): {exc}"
+            protected = request_contract.protected_lanes(self)
             brief_note = request_contract.write_note(
                 self, prev["json"], normalized, protected, _source_shape(self))
             if brief_note:
@@ -852,6 +849,15 @@ class ToolContext:
                 f"Now: {after}.")
         for note in notes:
             line += "\n" + note
+        # The turn's whole change so far, measured from the EDL diff (edit_provenance): the reply
+        # is written from this, never from what an earlier step made (EDIT-CORE B1, 16 Nov 2026).
+        start = getattr(self, "turn_start_edl", None) or {}
+        if isinstance(start.get("json"), dict):
+            import edit_provenance
+            so_far = edit_provenance.turn_change(start["json"], normalized,
+                                                 start.get("version"), version)
+            if so_far:
+                line += "\n" + so_far
         if advisories:
             line += "\n" + quality_gate.advisory_message(version, advisories)
         if mono_note:
@@ -12981,10 +12987,8 @@ def _apply_patches(ctx, new_items, what, drop=None):
     all_patches = [dict(p) for p in (edl.get("patches") or [])]
     dropped = {p["id"] for p in (drop or [])}
     existing = [p for p in all_patches if p["id"] not in dropped]
-    import edit_integrity
-    refusal = edit_integrity.patch_face_refusal(ctx, new_items)
-    if refusal:
-        return "REJECTED: " + refusal
+    # A face the repaint meets is measured at the write boundary (edit_integrity.write_note) and
+    # reported with the saved write; the repaint is the editor's decision.
     groups = _patch_groups(new_items, ctx.duration)
     entries, lines = [], []
     for window, members in groups:

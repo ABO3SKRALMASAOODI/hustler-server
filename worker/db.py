@@ -3162,6 +3162,28 @@ def insert_edl(conn, project_id, edl_json, created_by, job_id=None,
         return version
 
 
+def edl_lineage(conn, project_id, limit=24):
+    """The newest ``limit`` EDL versions oldest first ({version, created_by, json}) and the agent
+    turns' mutation receipts that say which job wrote which versions ({id, first_cut, before_version,
+    after_version}): what edit_provenance reads to tell the upload, the automatic first cut, earlier
+    requests and this turn apart."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT version, created_by, json FROM edls
+                       WHERE project_id = %s ORDER BY version DESC LIMIT %s""",
+                    (project_id, limit))
+        rows = list(reversed(cur.fetchall()))
+        cur.execute("""SELECT id,
+                              COALESCE(payload->>'first_cut', '') NOT IN ('', 'false') AS first_cut,
+                              (payload->'mutation_receipt'->>'before_version')::int AS before_version,
+                              (payload->'mutation_receipt'->>'after_version')::int AS after_version
+                       FROM video_jobs
+                       WHERE project_id = %s AND type = 'agent_turn'
+                         AND payload ? 'mutation_receipt'
+                       ORDER BY id""", (project_id,))
+        jobs = cur.fetchall()
+    return rows, jobs
+
+
 def edl_history(conn, project_id, limit=8):
     with conn.cursor() as cur:
         cur.execute("""SELECT version, created_by, created_at FROM edls

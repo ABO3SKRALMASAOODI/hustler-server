@@ -241,7 +241,7 @@ def system_prompt():
 def project_state_block(video, index_summary, edl_line, history_lines,
                         music_assets, keep_line=None, captions_line=None,
                         program_lines=None, media_lines=None,
-                        follow_up=False):
+                        follow_up=False, provenance=None):
     lines = ["CURRENT PROJECT STATE", video, "", index_summary, "",
              f"Current EDL: {edl_line}"]
     if program_lines:
@@ -254,6 +254,8 @@ def project_state_block(video, index_summary, edl_line, history_lines,
         lines.append(f"Current captions config: {captions_line}")
     if history_lines:
         lines.append("EDL history (newest first): " + " | ".join(history_lines))
+    if provenance:
+        lines.append(provenance)
     if media_lines:
         lines.append("MEDIA IN THIS PROJECT (a current project inventory of "
                      "uploaded, fetched and generated files — ON the "

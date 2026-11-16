@@ -1008,6 +1008,9 @@ _SIL_START = re.compile(r"silence_start:\s*([0-9.]+)")
 _SIL_END = re.compile(r"silence_end:\s*([0-9.]+)")
 
 
+BLACK_KEYFRAMES_ONLY_S = 600.0
+
+
 def black_seconds(path, duration=None):
     """Total seconds of (near-)black video via ffmpeg blackdetect on a cheap
     downscaled/low-fps pass (fast even on a full-res final). Best-effort: any
@@ -1021,10 +1024,16 @@ def black_seconds(path, duration=None):
     accepted and silently ignored for a long time — passing it used to be a
     no-op, so a caller that "fixed" the ratio by passing it changed nothing.)
     """
-    cmd = ["ffmpeg", "-i", path]
+    # A long file is read at its keyframes only (B4, 16 Nov 2026): a 59-minute preview decoded
+    # whole spent 55-65 s of every p5857 preview job on this check. Previews carry a keyframe
+    # every 48 frames (renderer.preview_video_encode), so the black share is measured every ~1.6 s;
+    # the check fails only on a mostly-black programme, far coarser than that.
+    sparse = bool(duration and duration >= BLACK_KEYFRAMES_ONLY_S)
+    cmd = ["ffmpeg"] + (["-skip_frame", "nokey"] if sparse else []) + ["-i", path]
     if duration and duration > 0:
         cmd += ["-t", f"{float(duration):.3f}"]
-    cmd += ["-vf", "fps=4,scale=64:-2,blackdetect=d=0.1:pix_th=0.10",
+    cmd += ["-vf", ("scale=64:-2" if sparse else "fps=4,scale=64:-2")
+            + ",blackdetect=d=0.1:pix_th=0.10",
             "-an", "-f", "null", "-"]
     try:
         p = subprocess.run(http_inputs.resilient(cmd), capture_output=True,

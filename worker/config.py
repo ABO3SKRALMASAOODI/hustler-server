@@ -2432,6 +2432,12 @@ SPECULATIVE_PREVIEWS_MAX = min(
 # long-edge cap alone. See preview_geometry for the measurement (25%).
 PREVIEW_MAX_HEIGHT = int(os.getenv("PREVIEW_MAX_HEIGHT", "480"))
 PREVIEW_MAX_FPS = float(os.getenv("PREVIEW_MAX_FPS", "30"))
+# A long programme's draft preview (B4, 16 Nov 2026): p5857's 59-minute cut
+# spent 332-694 s per preview job and one turn spent ~35 min in six of them.
+# From this programme length the draft is drawn at PREVIEW_LONG_MAX_HEIGHT;
+# the approval render and the final export keep their sizes.
+PREVIEW_LONG_PROGRAM_S = float(os.getenv("PREVIEW_LONG_PROGRAM_S", "1200"))
+PREVIEW_LONG_MAX_HEIGHT = int(os.getenv("PREVIEW_LONG_MAX_HEIGHT", "360"))
 # The approval render: what a First cut and a Studio request's complete preview
 # are, read from the original. A trial account only ever sees a preview, because
 # export is the paywall, and previews carry no mark, so for an account that has
@@ -2502,6 +2508,9 @@ KEEP_CLUSTER_THREADS = int(os.getenv("KEEP_CLUSTER_THREADS", "2"))
 # megapixel at 2 threads (1080p ~65 MB, 4K ~230 MB per read), so a 1080p
 # source keeps all 8 reads and a 4K source gets 3 (renderer._cluster_input_cap).
 KEEP_CLUSTER_MEM_MB = float(os.getenv("KEEP_CLUSTER_MEM_MB", "512"))
+# A preview seeks to its kept stretches even when its first keep starts at the
+# head of the source (B4, 16 Nov 2026; renderer.render_edl).
+RENDER_SEEK_DISTANT_KEEPS = os.getenv("RENDER_SEEK_DISTANT_KEEPS", "1") != "0"
 
 SILENCE_NOISE_DB = "-35dB"
 SILENCE_MIN_S = 0.6

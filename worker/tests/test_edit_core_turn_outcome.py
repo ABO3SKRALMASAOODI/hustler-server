@@ -1,0 +1,322 @@
+"""EDIT-CORE lane B (16 Nov 2026): the turn reaches the outcome and says what really changed.
+
+Owner's rule: a fix removes the real error at its source so the product reaches the customer's
+outcome; nothing here asserts a refusal.
+"""
+import json
+import pytest
+from types import SimpleNamespace as NS
+
+import agent_loop
+from score import asks
+
+
+class _Ctx(NS):
+    def latest_edl(self):
+        return {"version": self.version, "json": self.edl}
+
+
+def _ledger():
+    led = asks.settle({"lang": "en", "asks": [{"said": "warm, sun-touched film look", "want": "a warm film look",
+                                               "kind": "edit", "items": [], "how": "look", "where": "",
+                                               "pass": ""}]}, {"keep": [[0.0, 35.0]]})
+    led["cfg"] = {"check": True}
+    return led
+
+
+# ------------------------------------------------------------------ B2: no repair-pass cap
+
+def test_the_turn_keeps_repairing_while_each_pass_changes_the_film(monkeypatch):
+    """p5873 job 138856 replied "I stopped there because the one allowed repair pass has been used".
+    Every pass that changes the film gets the check again, as many times as the job's time allows."""
+    ledger = _ledger()
+    ctx = _Ctx(edl={"keep": [[0.0, 35.0]]}, version=7, ask_ledger=ledger, ask_verdict=None,
+               last_preview={"edl_version": 7, "asset_id": 1}, versions_written=[7])
+    open_verdict = {"asks": [{"id": "a1", "state": "partly", "seen": "grain is missing", "line": "l"}],
+                    "unasked": [], "usage": {}}
+    monkeypatch.setattr(asks, "check", lambda *a, **k: dict(open_verdict))
+    monkeypatch.setattr(agent_loop, "_turn_change_list", lambda c: "")
+    notes = []
+    for version in (7, 8, 9, 10, 11):
+        ctx.version = version
+        ctx.last_preview = {"edl_version": version, "asset_id": version}
+        note = agent_loop._asks_check(ctx, f"draft {version}")
+        assert note, f"pass on v{version} got no repair note"
+        notes.append(note)
+    assert ledger["repairs"] == 5
+    for note in notes:
+        assert "one repair pass" not in note and "check reads the new render again" in note
+
+
+def test_a_pass_that_changed_nothing_is_the_editors_answer_and_the_reply_stands(monkeypatch):
+    ledger = _ledger()
+    ctx = _Ctx(edl={"keep": [[0.0, 35.0]]}, version=7, ask_ledger=ledger, ask_verdict=None,
+               last_preview={"edl_version": 7, "asset_id": 1}, versions_written=[7])
+    monkeypatch.setattr(asks, "check", lambda *a, **k: {
+        "asks": [{"id": "a1", "state": "partly", "seen": "s", "line": "l"}], "unasked": [], "usage": {}})
+    monkeypatch.setattr(agent_loop, "_turn_change_list", lambda c: "")
+    assert agent_loop._asks_check(ctx, "first draft")
+    # same version, same render: the editor replied without changing the film
+    assert agent_loop._asks_check(ctx, "second draft") is None
+    assert ledger["repairs"] == 1
+
+
+def test_no_count_setting_caps_the_repairs():
+    cfg = asks.parse(json.dumps({"mode": "on", "repairs": 0}))
+    assert "repairs" not in cfg
+    assert "repairs" not in asks.DEFAULTS
+
+
+# ------------------------------------------------------------------ B1: provenance and the measured change
+# The EDL versions of the 16 Nov golden replays (ecg-new-pro-1116, journeys p5744 and p5717), as the
+# journeys record them, and the uploads' own sound as perception.analyze_audio measures the corpus
+# media (p5744 walk: bpm_conf 0.37, -45.7 dB RMS; p5717 music video: bpm_conf 0.65).
+
+import edit_provenance
+
+P5744_INDEX = {"video": {"duration": 11.264, "width": 1080, "height": 1920, "has_audio": True},
+               "words": [{"w": "Yeah", "t0": 0.9, "t1": 1.2}],
+               "perception": {"bpm": 70.6, "bpm_conf": 0.37}}
+P5744_V1 = {"keep": [[0.0, 11.264]]}
+P5744_V3 = {"keep": [[0.0, 11.23]],
+            "sfx": [{"id": "s1", "storage_key": "sound:riser_soft", "at": 0.67, "role": "riser"},
+                    {"id": "s2", "storage_key": "sound:impact_low", "at": 1.98, "role": "impact"}]}
+P5744_V6 = {"keep": [[1.0, 2.98]]}
+P5744_ROWS = [{"version": 1, "created_by": "user", "json": P5744_V1},
+              {"version": 2, "created_by": "agent", "json": dict(P5744_V1, sfx=P5744_V3["sfx"])},
+              {"version": 3, "created_by": "agent", "json": P5744_V3},
+              {"version": 4, "created_by": "agent", "json": {"keep": [[1.0, 11.23]], "sfx": P5744_V3["sfx"]}},
+              {"version": 5, "created_by": "agent", "json": {"keep": [[1.0, 2.98]], "sfx": P5744_V3["sfx"]}},
+              {"version": 6, "created_by": "agent", "json": P5744_V6}]
+P5744_JOBS = [{"id": 11, "first_cut": True, "before_version": 1, "after_version": 3},
+              {"id": 14, "first_cut": False, "before_version": 3, "after_version": 6}]
+
+P5717_INDEX = {"video": {"duration": 92.88, "width": 1280, "height": 720, "has_audio": True},
+               "words": [{"w": w, "t0": i, "t1": i + .3} for i, w in enumerate("yeah uh huh go go go now".split())],
+               "perception": {"bpm": 129.4, "bpm_conf": 0.65}}
+P5717_V9 = {"keep": [[3.1 + 5 * i, 3.1 + 5 * i + 0.352] for i in range(18)],
+            "frame": {"ratio": "9:16", "mode": "crop"},
+            "texts": [{"id": "t1", "text": "PARTY NIGHT", "start": 0.0, "end": 1.6}],
+            "sfx": [{"id": f"s{i}", "storage_key": "sound:whoosh", "at": 0.35 * i} for i in range(10)]}
+P5717_ROWS = [{"version": 1, "created_by": "user", "json": {"keep": [[0.0, 92.88]]}}] + [
+    {"version": v, "created_by": "agent", "json": P5717_V9} for v in range(2, 10)]
+P5717_JOBS = [{"id": 5, "first_cut": True, "before_version": 1, "after_version": 9}]
+
+
+def test_the_upload_sound_is_measured_not_assumed():
+    """p5744: the first cut said the walk 'plays over its song'. No song was measured in it."""
+    line, music = edit_provenance.upload_sound(P5744_INDEX)
+    assert music is False and "no music measured in the upload (beat confidence 0.37" in line
+    assert edit_provenance.upload_has_music(P5717_INDEX) is True
+    import first_cut
+    import inspect
+    src = inspect.getsource(first_cut.video_chain)
+    assert "edit_provenance.upload_has_music(ctx.index)" in src
+
+
+def test_p5744_the_first_cuts_sound_effects_are_never_the_uploads():
+    """p5744 R1 said "I removed two sound effects that were in the original": they were the first
+    cut's. The editor now reads who placed every item, and that the rest of the sound is the upload's."""
+    text = edit_provenance.from_lineage(P5744_ROWS[:3], P5744_JOBS[:1], index=P5744_INDEX, source_s=11.264)
+    assert ("v2-v3, the automatic first cut (Valmera, before the customer asked anything): "
+            "re-timed the kept sections; added 2 sound effects") in text
+    assert ("In the film now, placed by the automatic first cut: sound effect s1 'riser' at 0.67 s; "
+            "sound effect s2 'impact' at 1.98 s.") in text
+    assert "never call Valmera's additions part of their upload" in text
+    assert "no music measured in the upload" in text
+
+
+def test_p5744_the_turns_change_is_measured_from_its_own_versions():
+    line = edit_provenance.turn_change(P5744_V3, P5744_V6, 3, 6)
+    assert line.startswith("THIS TURN, MEASURED (v3 -> v6): cut 9.2s (kept 2.0s of the source)")
+    assert "removed 2 sound effects" in line and "the film plays 1.98 s (it played 11.23 s" in line
+    # and the lineage tells the editor whose effects those were
+    text = edit_provenance.from_lineage(P5744_ROWS, P5744_JOBS, index=P5744_INDEX, source_s=11.264,
+                                        turn_versions=[4, 5, 6])
+    assert "v4-v6, this turn: cut 9.2s (kept 2.0s of the source); removed 2 sound effects" in text
+    assert "v2-v3, the automatic first cut" in text
+
+
+def test_p5717_a_turn_that_wrote_nothing_is_told_so_and_the_cut_is_the_first_cuts():
+    """p5717 R1: "Nothing in the edit changed ... I have cut the silences". The cut 92.9 s -> 6.3 s
+    was the automatic first cut's; the turn wrote nothing."""
+    text = edit_provenance.from_lineage(P5717_ROWS, P5717_JOBS, index=P5717_INDEX, source_s=92.88)
+    assert ("v2-v9, the automatic first cut (Valmera, before the customer asked anything): "
+            "cut 86.5s (kept 6.3s of the source)") in text
+    assert "placed by the automatic first cut: sound effect s0 'whoosh' at 0.00 s" in text
+    assert "title t1 'PARTY NIGHT' at 0.00 s." in text
+    assert "a steady beat measured (confidence 0.65)" in text
+    line = edit_provenance.turn_change(P5717_V9, P5717_V9, 9, 9)
+    assert "nothing in the film has changed this turn" in line
+    assert "Whatever the film already shows was made before this turn" in line
+
+
+def test_the_state_block_carries_the_provenance(monkeypatch):
+    import db as dbx
+
+    class DB:
+        def run(self, fn, *a):
+            assert fn is dbx.edl_lineage
+            return P5744_ROWS, P5744_JOBS
+    ctx = NS(project_id=2, index=P5744_INDEX, duration=11.264, versions_written=[])
+    text = agent_loop._provenance_lines(ctx, DB())
+    assert "WHERE THE EDIT CAME FROM" in text and "v2-v3, the automatic first cut" in text
+    assert "v4-v6, an earlier request (job 14): cut 9.2s (kept 2.0s of the source); removed 2 sound effects" in text
+
+
+def test_the_write_result_carries_the_turns_measured_change():
+    from w0c_support import tool_context
+    ctx, fake = tool_context(dict(P5744_V3), duration=11.264)
+    start = ctx.latest_edl()
+    ctx.turn_start_edl = {"version": start["version"], "json": dict(start["json"])}
+    out = ctx.write_edl(dict(start["json"], keep=[[1.0, 2.98]], sfx=[]), "tighten")
+    assert out.startswith("EDL v"), out
+    assert "THIS TURN, MEASURED" in out and "removed 2 sound effects" in out
+
+
+def test_no_reply_is_replaced_by_a_hedge():
+    """The stand-ins that replaced whole replies on p5744 and p5717 are gone from the reply path."""
+    import inspect
+    import edit_scope
+    import reply_truth
+    assert "_call(" not in inspect.getsource(edit_scope.disclose)      # no rewrite model
+    assert asks.checked_reply(None, None) == ""
+    assert reply_truth._unverified({}, "My reply.") == "My reply."
+
+
+# ------------------------------------------------------------------ B4: long-film previews
+# p5857 (81 min source, 59 min cut): preview jobs of 332-694 s on the box (encode 86-426 s, then
+# picture/audio QC 105 s, sheets 70 s, verification 55 s, peak guard 15 s); a turn spent ~35 min in
+# six of them. The final export is untouched by everything below.
+
+import subprocess
+
+import config
+import media
+import renderer
+import sheets
+import audio_qc
+
+
+def test_a_long_programmes_draft_is_drawn_smaller_and_nothing_else_is():
+    long_edl = {"keep": [[0.0, 1800.0], [2000.0, 3765.4]]}
+    assert renderer.long_program(long_edl) and not renderer.long_program({"keep": [[0.0, 600.0]]})
+    q = renderer._PREVIEW_QUALITY.set("draft")
+    try:
+        assert renderer.preview_geometry(960, 540, 29.97)[:2] == (854, 480)
+        t = renderer._PREVIEW_LONG.set(True)
+        try:
+            assert renderer.preview_geometry(960, 540, 29.97)[:2] == (640, 360)
+            assert renderer.preview_geometry(1080, 1920, 30.0)[:2] == (202, 360)
+            a = renderer._PREVIEW_QUALITY.set("approval")
+            try:   # the approval render keeps its frame
+                assert renderer.preview_geometry(960, 540, 29.97)[:2] == (960, 540)
+            finally:
+                renderer._PREVIEW_QUALITY.reset(a)
+        finally:
+            renderer._PREVIEW_LONG.reset(t)
+    finally:
+        renderer._PREVIEW_QUALITY.reset(q)
+
+
+def test_sparse_stills_of_a_long_render_are_read_by_seeking(monkeypatch, tmp_path):
+    monkeypatch.setattr(media, "duration_of", lambda p: 3565.4)
+    monkeypatch.setattr(media, "frames_at", lambda *a, **k: pytest.fail("whole-file decode"))
+    seen = []
+
+    def frame_at(src, t, dst, width=None, **k):
+        seen.append(round(t, 1))
+        open(dst, "wb").write(b"jpg")
+    monkeypatch.setattr(media, "frame_at", frame_at)
+    times = sheets.result_sheet_times(3565.4) + [3565.4 * (i + .5) / 32 for i in range(32)]
+    video = tmp_path / "preview.mp4"
+    video.write_bytes(b"x")
+    assert sheets.prefetch(str(video), times, str(tmp_path / "stills")) == len(times)
+    assert len(seen) == len(times)
+    sheets.release(str(video))
+
+
+def test_a_short_render_keeps_the_one_decode(monkeypatch, tmp_path):
+    monkeypatch.setattr(media, "duration_of", lambda p: 40.0)
+    called = []
+    monkeypatch.setattr(media, "frames_at", lambda src, items, width=None: called.append(len(items)) or set())
+    video = tmp_path / "short.mp4"
+    video.write_bytes(b"x")
+    sheets.prefetch(str(video), [i * 0.9 for i in range(40)], str(tmp_path / "stills"))
+    assert called == [40]
+
+
+def test_the_black_check_of_a_long_render_reads_keyframes(monkeypatch):
+    cmds = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: cmds.append(cmd) or NS(stderr="", returncode=0))
+    media.black_seconds("long.mp4", 3565.4)
+    media.black_seconds("short.mp4", 40.0)
+    assert cmds[0][:3] == ["ffmpeg", "-skip_frame", "nokey"] and "fps=4" not in " ".join(cmds[0])
+    assert "-skip_frame" not in cmds[1] and "fps=4,scale=64:-2" in " ".join(cmds[1])
+
+
+def _ffmpeg_ok():
+    try:
+        return subprocess.run(["ffmpeg", "-version"], capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(not _ffmpeg_ok(), reason="ffmpeg not on PATH")
+def test_one_audio_pass_gives_loudness_peak_and_silences(tmp_path):
+    path = str(tmp_path / "tone.m4a")
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "sine=f=440:d=6",
+                    "-af", "volume=-12dB,apad=pad_dur=3", "-t", "9", "-c:a", "aac", path], check=True)
+    err = audio_qc.analysis(path)
+    rec = audio_qc.measure(path, duration_s=9.0, analysis=err)
+    assert rec["i"] is not None and -45 < rec["i"] < -20     # a -30 dBFS tone, measured
+    assert rec["tp"] is not None and abs(rec["tp"] - audio_qc.true_peak_of(err)) < 1e-6
+    import true_peak
+    assert abs(true_peak.measure(path) - rec["tp"]) < 0.2      # the guard's own meter agrees
+    silent = str(tmp_path / "silent.m4a")
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+                    "-t", "4", "-c:a", "aac", silent], check=True)
+    assert audio_qc.measure(silent, duration_s=4.0)["i"] == -100.0
+
+
+def test_the_render_job_measures_a_previews_sound_once():
+    import inspect
+    src = inspect.getsource(renderer._run_render_job)
+    assert "measured=audio_qc.true_peak_of(qc_pass)" in src
+    assert "analysis=qc_pass" in src
+
+
+@pytest.mark.skipif(not _ffmpeg_ok(), reason="ffmpeg not on PATH")
+def test_a_preview_starting_at_the_head_reads_only_its_kept_stretches(tmp_path, monkeypatch):
+    """p5857: keeps from 0 s with 5-8 minute stretches cut; the preview decoded the whole source."""
+    src = str(tmp_path / "src.mp4")
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=160x90:r=30",
+                    "-f", "lavfi", "-i", "sine=f=330", "-t", "130", "-c:v", "libx264", "-preset",
+                    "ultrafast", "-g", "30", "-c:a", "aac", "-shortest", src], check=True)
+    edl = {"keep": [[0.0, 6.0], [70.0, 76.0], [120.0, 126.0]]}
+    info = media.probe(src)
+    index = {"video": {"duration": info["duration"], "width": 160, "height": 90, "fps": 30,
+                       "has_audio": True}}
+    seen = []
+    real = subprocess.Popen
+
+    class Spy(real):
+        def __init__(self, cmd, *a, **k):
+            if isinstance(cmd, list) and "-filter_complex" in cmd:
+                seen.append(cmd)
+            super().__init__(cmd, *a, **k)
+    monkeypatch.setattr(subprocess, "Popen", Spy)
+    out = str(tmp_path / "preview.mp4")
+    dur = renderer.render_edl(edl, index, src, out, str(tmp_path), preview=True)
+    assert abs(dur - 18.0) < 0.2 and abs(media.duration_of(out) - 18.0) < 0.3
+    cmd = " ".join(seen[-1])
+    assert "-ss 69.000" in cmd and "-ss 119.000" in cmd       # each distant stretch read on its own
+    # the frames are the ones the whole-source read gives
+    monkeypatch.setattr(config, "RENDER_SEEK_DISTANT_KEEPS", False)
+    ref = str(tmp_path / "ref.mp4")
+    renderer.render_edl(edl, index, src, ref, str(tmp_path), preview=True)
+    assert "-ss 69.000" not in " ".join(seen[-1])
+    psnr = subprocess.run(["ffmpeg", "-v", "info", "-i", out, "-i", ref, "-lavfi", "psnr", "-f", "null", "-"],
+                          capture_output=True, text=True).stderr
+    avg = float(psnr.rsplit("average:", 1)[1].split()[0]) if "average:" in psnr else 0.0
+    assert avg == float("inf") or avg > 45, psnr[-300:]
