@@ -799,11 +799,12 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
             fit.append((t0, t1, text, ws))
         ph = fit
     ph = ph or clock.phrases(max_chars=max_chars, max_words=max_words)
-    n_lines = 0
+    n_lines, next_open = 0, 0
     for i, (t0, t1, text, ws) in enumerate(ph):
         a, b = (Clock.f(t0) - 1, Clock.f(t1)) if lag is None else (Clock.f(t0) + lag, Clock.f(t1) + lag)
         if i + 1 < len(ph):
             b = min(b, Clock.f(ph[i + 1][0]) + (lag if lag is not None else 0) - 1)       # one line at a time, never two on the seat
+        a = max(a, next_open)
         if f_end is not None:
             b = min(b, f_end)
         if any(s0 <= a < s1 for s0, s1 in skip):
@@ -814,29 +815,40 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
                 first = max(first, h1)
             elif a < h0 < b:
                 b = h0
-        if b - first < 5:
-            continue
         # A display hold must not replay already-spoken words as a new chunk.
         # Lay out the surviving phrase once, keeping only the word still being
         # spoken at the handoff and the words that follow it.
         toks = text.split()
         pairs = [(w, toks[j] if j < len(toks) else w["w"]) for j, w in enumerate(ws)
                  if first == a or Clock.f(w.get("t1", w["t0"])) > first]
+        if not pairs:
+            continue
+        # Ink delay must never erase a short word at a page boundary. Let the
+        # completed line read for six frames, then open the next line. This is
+        # timing-only pagination: no word is rewritten, repeated or singled out
+        # for its meaning. Display holds still own their explicit intervals.
+        ons = []
+        for j, (w, _) in enumerate(pairs):
+            nominal = Clock.f(w['t0']) + (lag if lag is not None else late)
+            if j == 0 and lag is None:
+                nominal = first
+            ons.append(max(nominal, first, ons[-1] + 1 if ons else 0))
+        ceiling = min([h0 for h0, h1 in hold if h0 > first] +
+                      ([f_end] if f_end is not None else [max(b, ons[-1] + 6)]))
+        b = min(max(b, ons[-1] + 6), ceiling)
+        if b - first < 5:
+            continue
         text = " ".join(t for _, t in pairs)
         x_left = 0.5 - P.R.width(v, text) / W / 2
         toks = [t for _, t in pairs]
-        previous_on = -1
         for j, (w, token) in enumerate(pairs):
-            if lag is not None:
-                on = max(Clock.f(w["t0"]) + lag, first, previous_on + 1, 0)
-            else:
-                on = max(Clock.f(w["t0"]) + late, first, previous_on + 1, 0) if j else max(first, 0)
+            on = ons[j]
             if on >= b - 1:
                 continue
             P.cap_lags.append(on - Clock.f(w["t0"]))
             x = x_left + (P.R.width(v, " ".join(toks[:j]) + " x") - P.R.width(v, "x")) / W if j else x_left
             P.word([on, b], token, v, x, y, ink, 1.0, note=False, z=z, role="cap", stroke=dict(w=1.6, c="#0B0A09"))
-            previous_on = on
+        next_open = b
         n_lines += 1
     return n_lines
 

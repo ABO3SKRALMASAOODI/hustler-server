@@ -744,8 +744,11 @@ def render(ctx, script, sc):
     # A pause can occur after persisting a rejection but before saving its rebuilt
     # score. Resume that repair before rendering the stale, already-rejected plan.
     rejected=set(current_rejections(ctx.supply))
-    if any(p.get('path') in rejected for p in sc.get('beats',{}).get('pictures',[])):
-        if history:
+    rejected_plan=any(p.get('path') in rejected for p in sc.get('beats',{}).get('pictures',[]))
+    stale_captions=('caption_lines' in sc.get('beats',{})
+                    and sc['beats'].get('caption_contract')!=1)
+    if rejected_plan or stale_captions:
+        if history and rejected_plan:
             _repair_window_boundaries(ctx,[r for r in history[-1]['placements'] if not r['ok']])
         previous_spend=sc.get('spend',[])
         rebuilt=score(ctx,script)

@@ -6,6 +6,23 @@ import wf1_film as film
 from wf1_layout import caption_restarts, face_boxes, intersects, seat_display
 
 
+def test_fast_page_tail_preserves_spoken_negation_and_every_other_word():
+    F=film.F
+    tokens=['and','I','just',"didn't",'think','I','was','gonna','like','it.']
+    edges=[35.02,35.26,35.38,35.5,35.58,35.68,35.78,35.86,36.,36.14,36.72]
+    words=dict(duration=37,words=[dict(w=w,start=edges[i],end=edges[i+1],seg=0)
+                                 for i,w in enumerate(tokens)])
+    clock=F.Clock(words,{'segments':[{'say':' '.join(tokens)}]})
+    plan=F.Plan({'cap':dict(font='InterDisplay-Bold.ttf',px=58,track=0)}, {})
+    F.caption_build(plan,clock,'cap',.65)
+    caps=[i for i in plan.items if i['k']=='word']
+    assert [i['t'] for i in caps]==tokens
+    negation=next(i for i in caps if i['t']=="didn't")
+    assert negation['f'][1]-negation['f'][0]>=6
+    assert caption_restarts({'items':caps})==[]
+    assert all(not isinstance(i['x'],list) for i in caps)
+
+
 def test_display_handoff_does_not_replay_the_words_hidden_by_the_title():
     F = film.F
     script = {'segments':[{'say':'one two three four'}]}

@@ -125,6 +125,20 @@ def test_resume_repairs_a_persisted_rejection_before_rendering_stale_score(tmp_p
     assert json.loads((tmp_path/'render_rejected.json').read_text())==['bad.mp4']
 
 
+def test_resume_rebuilds_caption_pagination_before_reusing_render(tmp_path,monkeypatch):
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda _:None)
+    (tmp_path/'film_engine.mp4').write_bytes(b'old caption omission')
+    sc=dict(beats=dict(pictures=[],caption_lines=4),spend=[])
+    monkeypatch.setattr(wf,'score',lambda *a:dict(beats=dict(pictures=[],caption_lines=4,caption_contract=1),spend=[]))
+    def render(ctx,script,score):
+        assert score['beats']['caption_contract']==1
+        assert not (tmp_path/'film_engine.mp4').exists()
+        return dict(film='complete-captions.mp4')
+    monkeypatch.setattr(wf.wf3,'render',render)
+    monkeypatch.setattr(wf,'_render_review',lambda *a:dict(rejected=0,moving_share=1.,placements=[],spend=[]))
+    assert wf.render(ctx,{},sc)['film']=='complete-captions.mp4'
+
+
 def test_later_repairs_keep_the_picture_that_passed_every_review(tmp_path,monkeypatch):
     ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda x:None)
     names=['a.jpg','b.jpg','c.jpg','d.jpg','good.jpg']

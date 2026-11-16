@@ -213,3 +213,5 @@ it never resets the platform budget or approves a formerly static or incorrect p
 Revised depiction briefs can reconsider the attributed retained-source catalog through the model
 ranker and fresh frame checks. A dark background alone is not an empty picture; nonblank diagrams
 still need readable final-frame approval and cannot receive motion credit from brightness.
+Caption pages keep their final word visible before the next page opens. The ink delay must
+never delete a short spoken word at a page boundary; resumed older caption plans are rebuilt.

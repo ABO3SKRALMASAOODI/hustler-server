@@ -571,7 +571,7 @@ def build(script, sup, style_id, direction=None):
                      *([turn_f + 10] if turn_f is not None else []), f_end - 3})
     beats = dict(dur_f=f_end, voice_f=[LEAD_F, f_voice_end], cuts=sorted(set(cut_pts)), changes=changes,
                  events=sorted(set(P.events) | set(cut_pts) | set(changes) | {it["f"][0] for it in l1["items"] if it["k"] == "card"}),
-                 pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, display=[dict(f=[a, b], text=t) for a, b, t in shown],
+                 pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=1, display=[dict(f=[a, b], text=t) for a, b, t in shown],
                  labels=[dict(f=[a, b], text=t) for a, b, t in labels], turn_f=turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
                  style=style_id, layout=st["layout"], placement_check=placement_report, coverage=coverage_report,
                  title_layout=title_layout, caption_restarts=restarts, face_metadata=meta,
