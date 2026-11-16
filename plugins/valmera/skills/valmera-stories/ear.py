@@ -59,6 +59,22 @@ HARD = ("- Hard words: a long or rare compound a speech engine runs together is 
         "(\"retro rockets\"); a word with two readings gets the spelling of the one meant; names stay exactly as spelled.\n")
 SHAPE += HARD
 
+# Long form (16 Nov): the short-film shape above (9-14 word sentences, one idea each, verdicts, every sentence ending low)
+# read on Easton as a full stop every few seconds: 78% of line ends fell more than 2 semitones and 4% rose, against 53-55%
+# and 20-29% for the metromedia narrators, whose sentences run 12-16 words with about one comma each. Phonon hears only the
+# words and punctuation, so the sentence shape is the melody.
+LONG_SHAPE = (
+    "How the best documentary narrators speak (measured on the films that are the bar):\n"
+    "- A thought runs on with commas and 'and', 'but', 'so', 'until', 'which' while it is still moving; a full stop comes "
+    "only where it lands. About one full stop every fourteen words, most sentences with a comma.\n"
+    "- Lengths mix widely: a run of eighteen to twenty-five words that builds, then a short line of three to six words "
+    "that lands it. Never three short sentences in a row.\n"
+    "- The new information comes late in its sentence, where the voice climbs to it; the stressed word carries the news.\n"
+    "- Numbers a listener can hold: one figure a sentence, said in full words.\n"
+    "- Each fact is said plainly once: no sentence corrects a mistake the listener was not making ('not X, but Y'), "
+    "none reminds the listener of what they just heard.\n") + HARD
+SHAPES = {"long-form": LONG_SHAPE}
+
 # the voice a later rewrite keeps (writer.final_support restates an unsupported line in the ear's style)
 KEEP_STYLE = ("The line is spoken by a narrator over pictures and was already rewritten for the ear: keep that voice. Sentences "
               "of nine to fourteen words, one idea a sentence; hinge words (But, So, Then) where the story turns; short verdicts "
@@ -110,7 +126,7 @@ def _segments_view(script):
 def rewrite(script, form="story", effort="medium"):
     """(the model's segments, usage)"""
     chapters = script.get("chapters") or []
-    content = (SHAPE + "\n" + QUESTION.get(form, QUESTION["story"]) + "\n\n"
+    content = (SHAPES.get(form, SHAPE) + "\n" + QUESTION.get(form, QUESTION["story"]) + "\n\n"
                + (f"# Chapters\n{json.dumps(chapters, ensure_ascii=False)}\n\n" if chapters else "")
                + f"# Names the narrator says (keep each one, spelled exactly)\n{json.dumps(script.get('names') or [], ensure_ascii=False)}\n\n"
                + f"# The script, segment by segment\n{json.dumps(_segments_view(script), ensure_ascii=False, indent=0)}\n\n"

@@ -109,3 +109,26 @@ def test_the_ideas_prompt_carries_the_owners_rule_not_a_subject_ban(monkeypatch)
     story.find_ideas(dict(id="the-ledger"), avoid=["Saving Skylab"], delivered="")
     assert "never repeat a subject" not in seen["content"] and "Saving Skylab" in seen["content"]
     assert "never the exact same idea told the same way" in seen["content"] and "new version of the same subject is welcome" in seen["content"]
+
+
+def test_among_ideas_with_enough_footage_the_story_decides(monkeypatch):
+    """16 Nov: up to four points of footage on a ten-point story scale let an archive-rich procedure beat a stronger story."""
+    import wf4
+    ideas = [dict(id="i1", title="Procedure with a big archive", strength=6, sources=[]),
+             dict(id="i2", title="Story with a protagonist", strength=9, sources=[])]
+    monkeypatch.setattr(wf4, "able_cards", lambda ctx: [dict(id="the-ledger")])
+    monkeypatch.setattr(wf4, "ledger_rows", lambda ctx: [])
+    monkeypatch.setattr(wf4.DL, "prompt_block", lambda w: "")
+    monkeypatch.setattr(wf4.story, "find_ideas", lambda *a, **k: ([dict(i) for i in ideas], {}))
+    clips = {"i1": 40, "i2": 12}
+    monkeypatch.setattr(wf4, "probe", lambda i: dict(ok=True, covered=10, subjects=[1] * 10, clips=clips[i["id"]]))
+
+    class Ctx:
+        args, workflow = {}, "wf4"
+        def log(self, *a):
+            pass
+    got = wf4.ideas(Ctx())["ideas"]
+    assert got[0]["id"] == "i2"
+    # footage still breaks a near tie
+    ideas[0]["strength"] = 9
+    assert wf4.ideas(Ctx())["ideas"][0]["id"] == "i1"

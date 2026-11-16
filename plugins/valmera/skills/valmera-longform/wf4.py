@@ -59,7 +59,9 @@ def ideas(ctx):
     for i in got[:3]:
         i["supply"] = probe(i)
         ctx.log(f"probe {i.get('title')}: {i['supply']['covered']}/{len(i['supply']['subjects'])} subjects, {i['supply']['clips']} ranked footage sources")
-    got.sort(key=lambda i: (not (i.get("supply") or {}).get("ok"), -(float(i.get("strength") or 0) + min((i.get("supply") or {}).get("clips", 0), 40) / 10)))
+    # Among the ideas with enough real footage, the story decides; footage only breaks a near tie (16 Nov: up to 4 points
+    # of footage on a 10-point story scale let an archive-rich procedure beat a stronger story).
+    got.sort(key=lambda i: (not (i.get("supply") or {}).get("ok"), -(float(i.get("strength") or 0) + min((i.get("supply") or {}).get("clips", 0), 40) / 80)))
     srcs = sorted({u for i in got for u in i.get("sources") or []})
     return dict(source=dict(kind="web research by the writer model", origin="web_search", sources=srcs[:60], searches=use.get("web_searches")),
                 ideas=got, chosen=None, spend=[dict(stage="ideas", **use)]+[dict(stage='ideas',provider='openai',what='footage discovery',usd=i['supply'].get('usd',0)) for i in got if i.get('supply')])

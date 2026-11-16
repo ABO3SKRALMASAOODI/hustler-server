@@ -32,6 +32,32 @@ FORM = dict(name="long-form voiceover film", seconds=(600, 1200), words=(1850, 2
                   "a consequential turn in every chapter, open questions answered and a satisfying final payoff")
 VOICES = {k: writer.VOICES[k] for k in ("sage", "iris", "atlas")}
 
+# The story a long film tells (16 Nov). The 13 Nov "Saving Skylab" and the 16 Nov test read as procedures: a crew as a
+# group, a promise that gave away the method ("how a sunshade, cutters and rope saved a space station"), the dramatic
+# question never said, one chapter question per chapter read aloud, sixteen percent of sentences correcting a mistake
+# nobody made ("this was not X, it was Y"), five "remember" callbacks, and two minutes of results after the climax.
+STORY_SHAPE = (
+    "the first segment is a cold open on a moment, in its first sentence (a person in danger, a thing that should not "
+    "be true, a clock running), never a summary of the topic and never a greeting. Within twenty seconds the viewer knows "
+    "who we follow, what they want and what they lose if they fail, and hears the one question the film answers last. "
+    "The promise poses that question; it never gives away the answer or the method. The stakes rise chapter by chapter; "
+    "each chapter opens inside an active situation and ends on something that pulls into the next one. Tell it through "
+    "the protagonist's choices and what they cost. The film ends at the payoff: the answer, its price, and one line that "
+    "reframes the first sentence; nothing after it lists further results. State each fact plainly once: never correct a "
+    "mistake the viewer was not making ('this was not X, it was Y'), never remind the viewer what they just heard, never "
+    "explain what a picture is not.")
+
+# How a long film is written for the ear (16 Nov). Measured on the 13 Nov and 16 Nov Skylab scripts against three
+# metromedia narrators: 10.8-13.1 words a sentence with 0.43-0.55 commas each (references 11.9-15.8 words, 0.62-1.35
+# commas, a wider spread of lengths), so the narrator met a full stop every few seconds and fell at 78% of its line ends
+# (references 53-55%, 20-29% rising; our read 4% rising). The engine reads only the words and punctuation: the shape of
+# the sentences is the melody.
+EAR = ("Write the way a storyteller talks, not the way a report reads. Let a thought run on with commas and 'and', "
+       "'but', 'so', 'until', 'which' while it is still moving, and put a full stop only where the thought lands. Mix "
+       "lengths widely: a run of eighteen to twenty-five words that builds, then a short line of three to six words that "
+       "lands it. Average about one full stop every fourteen words, with a comma in most sentences. Put the news late in "
+       "its sentence, where the voice climbs to it. Ask a question aloud only where the viewer is already asking it.")
+
 
 def references():
     try:
@@ -52,21 +78,28 @@ def find_ideas(card, avoid=(), line=None, n=6, effort="high", delivered=""):
               "shows real moving footage of what it names and designed evidence where none exists. Prefer rich public archive video. No "
               "lookalikes, no generated faces.")
     system += "\n\n" + ((f"# Form\n{FORM['name']}, {FORM['seconds'][0] // 60}-{FORM['seconds'][1] // 60} minutes: {FORM['shape']}.\n\n"
-               "Search widely. A long film holds with a promise and open questions, not with pace, so prefer a story with a "
-               "mechanism the viewer can be taught step by step (how a thing was built, crossed, solved, survived), real stakes "
-               "that change, consequential turns throughout each chapter "
-               "(a reversal, a failure, a bet), and an earned payoff. It must be rich in real moving footage and original voices: archive "
+               "Search widely. A long film holds the way the best story reels do, only longer: STORY first. Choose a story "
+               "with ONE protagonist (a named person, or a small named crew led by one person) who wants one concrete thing "
+               "against a clock, an opponent or nature; a price the viewer can feel if they fail (lives, a fortune, a "
+               "company, a country, a life's work); ONE dramatic question the viewer can hold from the first ten seconds to "
+               "the end (will they, can she, why did he); stakes that rise; at least one point where the plan fails or the "
+               "truth turns; and a payoff that answers the question. A mechanism (how a thing was built, crossed, solved, "
+               "survived) is how such a story is told, never the story itself: a procedure without a person who risks "
+               "something is an explainer, not a story. It must be rich in real moving footage and original voices: archive "
                "recordings of its people, places and machines, maps, and documents (patents, letters, telegrams, reports) whose "
                "real words can be quoted. Avoid stories the references already told (Musk's Mars plan, SpaceX's fourth launch, "
                "Airbnb's cereal, Xerox PARC, the traitorous eight, the PayPal mafia).\n\n"
                f"Return JSON only: {{\"ideas\": [{n} items, best first]}}. Each: {{\"id\": \"i1\", \"title\": a plain title, "
                "\"hook\": the first sentence as it would be spoken, \"promise\": what the viewer will know by the end, in one "
-               "sentence, \"story\": the story in plain sentences, with consequences as well as figures, \"chapters\": [chapters arising from the story, "
+               "sentence, \"protagonist\": who the story follows and what they want, \"question\": the one dramatic question "
+               "the film answers last, \"stakes\": what is lost, and for whom, if they fail, \"story\": the story in plain sentences, with consequences as well as figures, \"chapters\": [chapters arising from the story, "
                "{\"title\": two to four words, \"question\": the question the chapter opens}], \"turn\": the turn, \"payoff\": the "
                "payoff with its figure, \"ledger\": [two to four {\"label\": the stake, \"start\": its value at the start, \"end\": "
                "its value at the end}], \"named\": [twelve to twenty {\"name\": usual English name, \"is\": person|place|machine|"
                "building|document|event|thing, \"searches\": one to three archive video and original interview searches, most specific first, "
-               "\"must_show\": what a picture must visibly show to count}], \"sources\": [URLs you read], \"strength\": 1-10}."))
+               "\"must_show\": what a picture must visibly show to count}], \"sources\": [URLs you read], \"strength\": 1-10, how strongly the STORY holds a viewer for ten minutes "
+               "(protagonist, question, stakes, turn, payoff; 9-10 only when all five are strong and true to the sources), "
+               "never how much footage exists}."))
     system += f"\n\n# The bar\n{references()}\n\n"
     content = ((f"# The style\n{json.dumps(card, ensure_ascii=False)}\n\n"
                f"# Already made\n{json.dumps(list(avoid), ensure_ascii=False)}\nThe owner's rule: never the exact same idea told the same "
@@ -131,24 +164,20 @@ def write(idea, dos, card, voices=None, notes=None, effort="high"):
               "spoken by a synthetic narrator over real archive pictures and designed maps, documents and diagrams. Every "
               "statement of fact comes from the dossier's verified facts; you never add a fact, a figure or a date that is not "
               "in them, and you never round or dramatise beyond them. You direct the actor too: pace, energy, melody, emphasis "
-              "and pauses per segment. Write for the ear: short sentences, concrete nouns, numbers a listener can hold, the "
+              "and pauses per segment. Write for the ear: concrete nouns, numbers a listener can hold, the "
               "voice of a storyteller who knows where the story goes and makes the viewer want the next minute.")
     lo, hi = FORM["words"]
     system += "\n\n" + ((f"# Form\n{FORM['name']}: {lo}-{hi} spoken words in {FORM['segments'][0]}-{FORM['segments'][1]} segments (at about "
                f"175 words a minute that is {lo // 175}-{hi // 175} minutes). {FORM['shape']}.\n\n"
-               "How it holds: the first segment is a cold open that works in its first sentence (a stake or something that "
-               "should not be true), never a greeting. By 30 seconds the narrator says the promise in one sentence (what the "
-               "viewer will understand by the end) and names the open question the film will answer last. Each chapter opens "
-               "with an active situation and ends on something that pulls into the next one. Plant curiosity where the actual story earns it and "
-               "resolve it without repetitive callbacks. Every chapter has its own consequential turn, marked beat=turn on the segment where it happens. The last "
-               "segment answers the promise and reframes the first sentence. No call to action, no 'subscribe', no 'like'.\n\n"
+               "How it holds (a story, not an explainer): " + STORY_SHAPE + " Every chapter has its own consequential turn, "
+               "marked beat=turn on the segment where it happens. No call to action, no 'subscribe', no 'like'.\n\n"
                "The spoken form: `say` is exactly what the narrator says, every number, year, date, unit, currency and "
                "abbreviation written in words the way a narrator says it (\"nineteen fourteen\", \"five thousand six hundred "
                "dollars\", \"the eighteen nineties\", \"twenty-five percent\", \"Doctor\"), no digits and no symbols. `names` lists "
                "every proper noun in the narration exactly as spelled.\n\n"
                "Hard words: write difficult compounds in intelligible spoken forms (for example retro rockets) and preserve their meaning. "
-               "Performance: use whole sentences per segment, one or two focus words, varied pitch; ordinary joins 0.22 seconds, "
-               "long pauses only at consequential turns. Do not make every line a rhetorical question. "
+               "Performance (the narrator reads only your words and punctuation, and every full stop is a falling end): " + EAR + " "
+               "One or two focus words a segment; ordinary joins 0.22 seconds, long pauses only at consequential turns. "
                "Pictures: each segment lists the named things it talks about, in order (`pictures`, names from the list), so "
                "the film can show each on the word that names it; a segment may also ask for one designed picture.\n\n"
                "Return JSON only: {\"title\": a plain title, \"voice\": one voice id, \"pace\": slow|steady|brisk, \"energy\": "

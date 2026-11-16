@@ -58,7 +58,7 @@ def propose(ctx,script,catalogue):
     if research.exists():supplement=C.read(research)
     else:
         text,use=story.writer.ask_web('Research at most eight additional primary-source facts that explain the stakes and consequential human work visible in this documentary archive. '
-            'The rescue story needs a reason to care about the recovered laboratory, not more repetitive mechanical summaries. '
+            'The story needs a reason to care: what its protagonist risked and what was lost if they failed, not more mechanical summaries. '
             'Use only claims directly supported by exact quotations on fetchable primary pages. Do not add unrelated history to fill duration. '
             'Return JSON {facts:[{id:"a1",claim,quote,url,year}]}. Keep each quote concise; name the source page accurately. '
             'Existing verified facts need not be repeated.',json.dumps(dict(title=script['title'],facts=script['dossier']['facts'],archive=material)),
@@ -94,16 +94,18 @@ def propose(ctx,script,catalogue):
         else:
             text,use=story.writer.ask('Write the final documentary script from the inspected archive and verified facts. '
                 'The old script is a research draft, not a structure to preserve. Its long repeated explanations and multiple endings must go. '
-                'Tell a compelling true story with concrete stakes, human choices, reversals and a single earned ending. Never add filler or turn the film into an archive inventory. '
+                'Tell it as a story, not an explainer: '+story.STORY_SHAPE+' '
+                'The idea names its protagonist, dramatic question and stakes; keep them at the centre. Never add filler or turn the film into an archive inventory. '
                 'The final film must last 10–20 minutes. Write 1900–2200 spoken words in 55–90 complete-sentence segments, with a hook in the first ten seconds and a real turn in each story chapter. '
                 'Each chapter comes from this story. Do not announce a question mechanically at every chapter or repeatedly explain what the audience will understand. '
                 'Use the actual available moving archive for most of the picture time, with original illustrations and cited records only where they genuinely explain an unfilmed event. '
                 'A picture may supply truthful context without visibly proving an invisible cause or motive; never imply that it depicts the wrong person, action, hardware, era or repair state. '
-                'Do not claim every decisive action was filmed. Clearly identify original drawings and ground rehearsals when used to explain a flight operation. '
+                'Do not claim every decisive action was filmed. When an original drawing or a rehearsal stands in for the real event, its on-screen label says so; the narration does not. '
                 'No fabricated historical views, generic substitutes or reused pictures. Do not turn a claimed source description into a fact when the catalogue marks it uncertain. '
-                'Give the actual scientific and human stakes enough space to matter. Keep the repair climax continuous, and let genuine onboard work earn the ending. '
+                'Give the human stakes enough space to matter. Keep the climax continuous and end at its payoff. '
                 'Preserve excellent complete sentences from the old script when useful, including its hook, but remove repetition. '
                 'All spoken numbers must be written out. Use clear spoken forms for difficult names and compounds; explain technical language simply. '
+                'Write for the ear (the narrator reads only the words and punctuation; every full stop is a falling end): '+story.EAR+' '
                 'Return JSON {script:{title,promise,names:[proper nouns],chapters:[{id,title,question,turn,music_mood,pace}], '
                 'testimony_purpose:string,segments:[{chapter,say,beat:"hook"|"promise"|"setup"|"loop"|"turn"|"low"|"payoff"|"close", '
                 'facts:[verified fact IDs],pictures:[named subjects],design:null,pace:"slow"|"steady"|"brisk",melody:"falling"|"rising"|"level"|"wide", '
@@ -114,7 +116,8 @@ def propose(ctx,script,catalogue):
                 'Use unique actual source intervals, not new crops of one still. Prefer the moving clips when they fit. A label clarifies a verified source, never manufactures its identity. '
                 'Keep archive_ids as literal catalogue IDs. Do not invent them. A segment facts list must support all its factual claims. '
                 'Return the full revised script, not editing notes.',
-                json.dumps(dict(old_script=old_script,facts=dossier['facts'],archive=material,editorial_review=critique,repair_notes=notes)),
+                json.dumps(dict(idea={k:script.get('idea_full',{}).get(k) for k in ('title','protagonist','question','stakes','hook','turn','payoff')},
+                                old_script=old_script,facts=dossier['facts'],archive=material,editorial_review=critique,repair_notes=notes)),
                 effort='high',max_tokens=36000,what='WF4 archive-conformed screenplay')
             C.save(root/f'response-{attempt}.json',dict(text=text,usage=use))
             if use.get('stop')!='completed':raise ValueError('archive screenplay response incomplete; preserved for diagnosis')
@@ -134,7 +137,8 @@ def propose(ctx,script,catalogue):
             text,audit_use=story.writer.ask('Audit this documentary narration against its cited verified source quotes and archive catalogue. '
                 'Every factual claim, identity, chronology, causal statement, quantity and source-context label must be supported. '
                 'Check that visual choices do not represent the wrong event, crew, hardware or repair state. A contextual image need not prove an invisible cause, '
-                'but it must not contradict the words. No quality score. Return JSON {faithful:bool,issues:[specific fixes],why:string}.',
+                'but it must not contradict the words. A fix states the supported fact plainly or moves context to the picture label; '
+                'it never asks the narration to add a disclaimer or a \'this was not X\' clarification. No quality score. Return JSON {faithful:bool,issues:[specific fixes],why:string}.',
                 json.dumps(dict(script=sc,facts=dossier['facts'],archive=material)),effort='high',max_tokens=4000,what='WF4 conformed screenplay fact audit')
             audit=story.writer.json_block(text);C.save(root/f'audit-{attempt}.json',dict(audit,usage=audit_use))
         if audit.get('faithful') is not True:notes=audit['issues'];continue
