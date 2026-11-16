@@ -153,18 +153,26 @@ def record(ctx, ledger, request):
     return pictures
 
 
-def write_refusal(ctx, before, after):
+def write_note(ctx, before, after):
+    """Information for the editor, never a refusal (owner, 16 Nov 2026): when the request's reading
+    is that its pictures illustrate ongoing speech, a splice that adds time moves the named words
+    later. The write saves; the note names each insert and the seconds it adds. "" otherwise."""
     ledger = getattr(ctx, 'ask_ledger', None) or {}
     if not ledger.get('required_pictures') or not ledger.get('pictures_preserve_speech_clock'):
-        return None
+        return ''
     old = {str(it.get('id')): it for it in before.get('inserts') or []}
+    grown = []
     for it in after.get('inserts') or []:
         prev = old.get(str(it.get('id'))) or {}
-        if float(it.get('duration_s') or 0) > float(prev.get('duration_s') or 0) + .001:
-            return ('These pictures illustrate ongoing speech. Splicing them adds unwanted time '
-                    'and displaces the named words. Use add_overlay(fit=cover) at the current '
-                    'program word times so the narration keeps running underneath.')
-    return None
+        added = float(it.get('duration_s') or 0) - float(prev.get('duration_s') or 0)
+        if added > .001:
+            grown.append(f"{it.get('id')} (+{added:.1f} s)")
+    if not grown:
+        return ''
+    return ('NOTE (saved): the request reads its pictures as illustrating ongoing speech; the spliced '
+            'insert(s) ' + ', '.join(grown) + ' add that time and the named words now play later. '
+            'add_overlay(fit=cover) at the program word times keeps the narration running underneath, '
+            'if that is what this film needs.')
 
 
 def supply(ctx, ledger):

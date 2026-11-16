@@ -968,6 +968,23 @@ def _needs_preview_downscale(H):
 
 
 _PREVIEW_QUALITY = ContextVar("preview_quality", default="draft")
+# Whether this preview job's programme is long (config.PREVIEW_LONG_PROGRAM_S):
+# set once per job by run_render_job, read by preview_geometry, so every graph
+# and every stitched piece of the job is drawn on the same frame.
+_PREVIEW_LONG = ContextVar("preview_long", default=False)
+
+
+def long_program(edl):
+    """Is this EDL's programme long enough for the long-programme draft frame?"""
+    try:
+        if is_canvas_program(edl):
+            return False
+        program = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                           edl.get("speed")).out_duration
+    except Exception:  # noqa: BLE001 — the ordinary frame
+        return False
+    return bool(config.PREVIEW_LONG_PROGRAM_S) and \
+        program >= config.PREVIEW_LONG_PROGRAM_S
 # Whether this render's account has paid. Off until the job has read it, so a
 # path that never asks gets the smaller frame, not the paywall's.
 _PREVIEW_PAID = ContextVar("preview_paid", default=False)
@@ -1046,6 +1063,9 @@ def preview_geometry(W, H, fps):
         k = cap / float(max(W, H))
         W, H = _even(W * k), _even(H * k)
     hcap = config.APPROVAL_MAX_LONG_EDGE if approval else config.PREVIEW_MAX_HEIGHT
+    if not approval and _PREVIEW_LONG.get() and config.PREVIEW_LONG_MAX_HEIGHT:
+        hcap = min(hcap or config.PREVIEW_LONG_MAX_HEIGHT,
+                   config.PREVIEW_LONG_MAX_HEIGHT)
     if hcap and H > hcap:
         k = hcap / float(H)
         W, H = _even(W * k), _even(H * k)
@@ -7836,20 +7856,35 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # A late picture (media.picture_lead) is filled from t=0 on the plain
     # input's clock, so it never seeks.
     src_lead = media.picture_lead(info)
-    seek_main_source = source_seek_s >= 5.0 and not src_lead
-    main_input_args = (["-copyts", "-ss", f"{source_seek_s:.3f}",
-                        "-i", src_path]
+    # A preview whose keeps start at the head but leave long stretches of the
+    # source out reads only its kept stretches too (B4, 16 Nov 2026): p5857's
+    # 59-minute cut of an 81-minute film starts at 0 s, so the main input never
+    # seeked, the distant-cluster reads below never ran, and every preview
+    # decoded all 81 minutes, the 21 minutes it cut included. The seeking path
+    # is the one every keep starting 5 s or later already takes.
+    distant_keeps = bool(
+        preview and config.RENDER_SEEK_DISTANT_KEEPS and len(_keep_clusters(
+            edl["keep"], config.KEEP_CLUSTER_GAP_S, 2)) > 1)
+    seek_main_source = (source_seek_s >= 5.0 or distant_keeps) and not src_lead
+    # -start_at_zero puts the seeking path on the plain input's clock: every
+    # input's own start is taken off its timestamps (the seek is not), so a
+    # keep of [70, 76] reads the same frames whether the input seeked or not.
+    # Without it -copyts kept the container clock, and a source whose format
+    # starts at 1.48 s trimmed every keep 1.48 s early on the seeking path,
+    # behind the seek point: 16.5 s of preview for an 18 s cut, its frames
+    # apart from the final export's from 5 s on (16 Nov 2026 review).
+    main_input_args = (["-copyts", "-start_at_zero",
+                        "-ss", f"{source_seek_s:.3f}", "-i", src_path]
                        if seek_main_source else ["-i", src_path])
     # Where the picture's first frame sits on the clock the main trims read:
-    # -copyts keeps the container's own times; a plain input is shifted so the
-    # earliest stream starts at 0. Focus handoffs land on real frames with it
-    # (focus_handoff). A VFR picture has no frame grid to land on.
+    # both paths shift the input so its earliest stream starts at 0. Focus
+    # handoffs land on real frames with it (focus_handoff). A VFR picture has
+    # no frame grid to land on.
     focus_origin = None
     if src_lead:
         focus_origin = 0.0      # the held first frame starts the grid at 0
     elif info.get("video_start") is not None and not info.get("vfr"):
-        focus_origin = float(info["video_start"]) - (
-            0.0 if seek_main_source else float(info.get("format_start") or 0.0))
+        focus_origin = float(info["video_start"]) - float(info.get("format_start") or 0.0)
 
     frame = edl.get("frame") or None
     if frame and (frame.get("ratio") or "source") == "source":
@@ -8137,6 +8172,14 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         if len(clusters) > 1:
             main_video_inputs = []
             threads = max(0, int(config.KEEP_CLUSTER_THREADS))
+            # A small frame (a preview's 540p proxy) decodes on ffmpeg's own
+            # thread count: the reads follow one another in the programme, so
+            # two threads each left the CPU idle (p5857 v16, 59-min preview:
+            # 120 s with 2 threads, 74 s auto, 313 MB peak against 1191 MB
+            # for the whole-source read).
+            mpix = float(info.get("width") or 0) * float(info.get("height") or 0) / 1e6
+            if 0 < mpix <= config.KEEP_CLUSTER_AUTO_THREADS_MAX_MPIX:
+                threads = 0
             for a, b in clusters:
                 seek = max(0.0, a - 1.0)
                 if threads:
@@ -8222,10 +8265,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             if fx_source is None and any(isinstance(i, dict)
                                          for i in edl.get("fx") or []):
                 fx_source = pm_src
-            # -copyts reads the container clock: the sidecars' (proxy-
-            # relative) seconds sit the container's start later on it
-            pm.clock_offset = (float(info.get("format_start") or 0.0)
-                               if seek_main_source else 0.0)
+            # Both paths read the input on a clock that starts at 0
+            # (-copyts runs with -start_at_zero), the sidecars' own clock
+            pm.clock_offset = 0.0
     pm_items = {}               # (layer, id) -> serves on the program matte
 
     def _screen_stage(item):
@@ -8367,9 +8409,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                bool(caption_motion_items)),
             behind_why=_hero_behind_why,
             world=_world_ctx(edl, W, H, fps, tl, index, preview, None,
-                             (float(info.get("format_start") or 0.0)
-                              if seek_main_source else 0.0), workdir,
-                             src_path))
+                             0.0, workdir, src_path))
         if caption_motion_items and not any(
                 str(it.get("id", "")).startswith("__captions_")
                 for _i, it, _c in motion_inputs):
@@ -9912,6 +9952,7 @@ def run_render_job(worker_db, job):
         raise dbx.PermanentJobError("Unknown preview quality")
     token = _PREVIEW_QUALITY.set(quality)
     paid_token = _PREVIEW_PAID.set(False)
+    long_token = _PREVIEW_LONG.set(False)
     job_type_token = _RENDER_JOB_TYPE.set(job.get("type"))
     try:
         try:
@@ -9936,6 +9977,7 @@ def run_render_job(worker_db, job):
     finally:
         _PREVIEW_QUALITY.reset(token)
         _PREVIEW_PAID.reset(paid_token)
+        _PREVIEW_LONG.reset(long_token)
         _RENDER_JOB_TYPE.reset(job_type_token)
 
 
@@ -10115,6 +10157,8 @@ def _run_render_job(worker_db, job):
     edl_row = worker_db.run(dbx.get_edl_version, project_id, version)
     if not edl_row:
         raise dbx.PermanentJobError(f"EDL version {version} not found")
+    if variant == "preview":
+        _PREVIEW_LONG.set(long_program(edl_row["json"]))
     original = worker_db.run(dbx.latest_asset, project_id, "original")
     if variant == "preview" and original \
             and _PREVIEW_QUALITY.get() == "approval" \
@@ -10659,16 +10703,25 @@ def _run_render_job(worker_db, job):
         # overshoot it by several dB, so the encoded file itself is measured
         # and, when over, its sound alone is re-limited (picture copied).
         tp_guard = None
+        # A preview's sound is measured ONCE (B4, 16 Nov 2026): the audio QC
+        # pass (silencedetect + ebur128 peak=true) is the peak guard's first
+        # reading and, when the guard leaves the file as it is, the QC record
+        # below. On p5857's 59-minute preview the two passes cost 30 s + 100 s.
+        qc_pass = None
+        if not proof_only and variant == "preview":
+            qc_pass = audio_qc.analysis(out_local)
         if not proof_only:
             try:
                 tp_guard = true_peak.guard(
                     out_local, bitrate=("128k" if variant == "preview"
-                                        else "192k"), workdir=workdir)
+                                        else "192k"), workdir=workdir,
+                    measured=audio_qc.true_peak_of(qc_pass))
             except Exception as tpe:  # noqa: BLE001 — never fails a render
                 print(f"[render {job_id}] true-peak guard skipped "
                       f"({str(tpe)[:160]})", flush=True)
                 tp_guard = None
             if tp_guard and tp_guard.get("passes"):
+                qc_pass = None          # the sound changed: QC measures the new file
                 print(f"[render {job_id}] true peak {tp_guard['tp_in']} -> "
                       f"{tp_guard['tp']} dBTP (limiter "
                       f"{tp_guard['limit_dbfs']} dBFS, "
@@ -10680,6 +10733,8 @@ def _run_render_job(worker_db, job):
             import mastering
             master_guard = mastering.guard(out_local, workdir,
                 bitrate="128k" if variant == "preview" else "192k")
+            if master_guard and master_guard.get("passes"):
+                qc_pass = None
             if master_guard and tp_guard:
                 tp_guard["mastering"] = master_guard
         _mark("true_peak_s")
@@ -10939,7 +10994,7 @@ def _run_render_job(worker_db, job):
                         _explicit = ((edl_row["json"].get("master") or {})
                                      .get("loudness"))
                         audio_qc_res = audio_qc.measure(
-                            out_local, duration_s=out_dur,
+                            out_local, duration_s=out_dur, analysis=qc_pass,
                             master=(master_loudness(edl_row["json"], *src_shape)
                                     or _explicit),
                             silent_by_design=silent_by_design(

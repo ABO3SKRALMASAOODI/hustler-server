@@ -756,14 +756,14 @@ class ToolContext:
         # repairs what it can and says so; it never refuses).
         normalized, edge_note = _repair_cut_edges(self, prev["json"], normalized)
         notes = [edge_note] if edge_note else []
+        # Measurements the write carries as information; the editor's write saves (owner, 16 Nov
+        # 2026: a splice over narration, a repaint or layer over a face, are the editor's decisions).
         import required_broll
-        picture_refusal = required_broll.write_refusal(self, prev['json'], normalized)
-        if picture_refusal:
-            return f"REJECTED (EDL v{prev['version']} unchanged): {picture_refusal}"
         import edit_integrity
-        integrity_refusal = edit_integrity.write_refusal(self, prev["json"], normalized)
-        if integrity_refusal:
-            return f"REJECTED (EDL v{prev['version']} unchanged): {integrity_refusal}"
+        for measured in (required_broll.write_note(self, prev['json'], normalized),
+                         edit_integrity.write_note(self, prev["json"], normalized)):
+            if measured:
+                notes.append(measured)
         length_note = _length_ask_note(self, prev, normalized)
         if length_note:
             notes.append(length_note)
@@ -772,10 +772,7 @@ class ToolContext:
         # brief's notes are about an editor's tool against a typed request, so they skip it.
         scoring = getattr(self, "_score_write", False) is True
         if not scoring and request_contract.enabled(self):
-            try:
-                protected = request_contract.protected_lanes(self)
-            except ValueError as exc:
-                return f"REJECTED (EDL v{prev['version']} unchanged): {exc}"
+            protected = request_contract.protected_lanes(self)
             brief_note = request_contract.write_note(
                 self, prev["json"], normalized, protected, _source_shape(self))
             if brief_note:
@@ -852,6 +849,15 @@ class ToolContext:
                 f"Now: {after}.")
         for note in notes:
             line += "\n" + note
+        # The turn's whole change so far, measured from the EDL diff (edit_provenance): the reply
+        # is written from this, never from what an earlier step made (EDIT-CORE B1, 16 Nov 2026).
+        start = getattr(self, "turn_start_edl", None) or {}
+        if isinstance(start.get("json"), dict):
+            import edit_provenance
+            so_far = edit_provenance.turn_change(start["json"], normalized,
+                                                 start.get("version"), version)
+            if so_far:
+                line += "\n" + so_far
         if advisories:
             line += "\n" + quality_gate.advisory_message(version, advisories)
         if mono_note:
@@ -1481,9 +1487,29 @@ def find_silences(ctx, min_seconds=0.7, start=None, end=None):
                     "call a silence. Say so plainly; do not guess at pauses "
                     "from the picture.")
         return f"No gaps in the speech of {min_s}s or longer{span}."
+    # Where each gap is in the CURRENT film (EDIT-CORE B1, 16 Nov 2026: p5717's reply offered to
+    # trim "the 11.4 s gap between 13.1 s and 24.5 s" of a 6.3 s film that no longer held it).
+    film = None
+    try:
+        edl_now = ctx.latest_edl()["json"]
+        if edl_now.get("keep"):
+            film = Timeline(edl_now["keep"], edl_now.get("inserts") or [], edl_now.get("speed"))
+    except Exception:  # noqa: BLE001
+        film = None
     lines = []
     for g in gaps[:100]:
         s, e = g["start"], g["end"]
+        where = ""
+        if film is not None:
+            try:
+                spans = [(float(a), float(b)) for a, b in film.span_to_out(s, e) if b - a > 0.05]
+            except Exception:  # noqa: BLE001
+                spans = None
+            if spans == []:
+                where = " [not in the current film: the edit already cut it]"
+            elif spans:
+                where = (" [in the film at output " + ", ".join(
+                    f"{_fmt_t(a)}-{_fmt_t(b)}" for a, b in spans[:3]) + "]")
         before = next((w["w"] for w in reversed(words) if w["t1"] <= s + 0.05),
                       None)
         after = next((w["w"] for w in words if w["t0"] >= e - 0.05), None)
@@ -1506,7 +1532,7 @@ def find_silences(ctx, min_seconds=0.7, start=None, end=None):
                 f" [NOT quiet — {int((1 - q) * 100)}% of this gap has audio "
                 "(music/game/room); cutting it removes that sound too]")
         lines.append(f"{_fmt_t(s)}-{_fmt_t(e)} ({e - s:.2f}s, midpoint "
-                     f"{_fmt_t((s + e) / 2)}){ctxt}{sound}")
+                     f"{_fmt_t((s + e) / 2)}){ctxt}{sound}{where}")
     note = f"\n({len(gaps) - 100} more not shown)" if len(gaps) > 100 else ""
     if not span:
         note += _silence_range_hint(ctx)
@@ -13103,10 +13129,8 @@ def _apply_patches(ctx, new_items, what, drop=None):
     all_patches = [dict(p) for p in (edl.get("patches") or [])]
     dropped = {p["id"] for p in (drop or [])}
     existing = [p for p in all_patches if p["id"] not in dropped]
-    import edit_integrity
-    refusal = edit_integrity.patch_face_refusal(ctx, new_items)
-    if refusal:
-        return "REJECTED: " + refusal
+    # A face the repaint meets is measured at the write boundary (edit_integrity.write_note) and
+    # reported with the saved write; the repaint is the editor's decision.
     groups = _patch_groups(new_items, ctx.duration)
     entries, lines = [], []
     for window, members in groups:
@@ -22150,8 +22174,13 @@ def generate_video(ctx, prompt, from_image_asset_key=None, duration_s=5):
                     'Repeating this call cannot resolve the provider account restriction. '
                     'Leave the existing film unchanged; offer the uploaded reference as a still '
                     'or ask for an animated replacement clip. Do not apply that alternative without the customer choosing it.')
+        # The alternatives reach the editor here, in its tool result: it offers them in its own
+        # words and the customer's language (edit_scope.disclose only records them).
+        also = (" Real alternatives to offer if it still fails: "
+                + " ".join(a["offer"] for a in ctx.edit_alternatives)
+                if from_image_asset_key else "")
         return (f"Video generation FAILED: {err}. Try again or tell the user it "
-                "didn't work — do NOT claim a clip was created.")
+                "didn't work — do NOT claim a clip was created." + also)
     # The provider has billed it, whatever happens to the file from here.
     llm.charge_generation("video_gen", config.VIDEO_GEN_MODEL,
                           videogen.price_for(seconds))

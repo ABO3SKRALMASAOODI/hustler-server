@@ -783,6 +783,23 @@ def _attachment_context(worker_db, ctx, user_message):
     return ("\n\n" + "\n".join(notes)) if notes else ""
 
 
+def _provenance_lines(ctx, worker_db):
+    """Where each part of the edit came from (edit_provenance), for the editor to describe the film
+    truthfully. "" when the lineage cannot be read; never raises."""
+    try:
+        import edit_provenance
+        rows, jobs = worker_db.run(dbx.edl_lineage, ctx.project_id)
+        return edit_provenance.from_lineage(
+            rows, jobs, index=getattr(ctx, "index", None) or {},
+            source_s=getattr(ctx, "duration", None),
+            turn_versions=list(getattr(ctx, "versions_written", None) or ()))
+    except dbx.JobLeaseLost:
+        raise
+    except Exception as exc:  # noqa: BLE001 - information only
+        print(f"[provenance] lineage unavailable: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
+        return ""
+
+
 def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
     """The CURRENT PROJECT STATE message: the footage, its transcript/shots,
     the current EDL and what is available to place.
@@ -844,6 +861,7 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
     captions_line = json.dumps(caps) if caps else "none"
     history = worker_db.run(dbx.edl_history, ctx.project_id)
     history_lines = [f"v{h['version']} ({h['created_by']})" for h in history]
+    provenance = _provenance_lines(ctx, worker_db)
     music = worker_db.run(agent_tools._music_assets, ctx.project_id)
     music_lines = []
     for m in music:
@@ -998,7 +1016,8 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
                                 captions_line=captions_line,
                                 program_lines=program_lines,
                                 media_lines=media_lines,
-                                follow_up=int(edl["version"]) > 1)
+                                follow_up=int(edl["version"]) > 1,
+                                provenance=provenance)
     # A SHORTS project's chat is the board's chat. Without this section the
     # parent agent literally does not know its children exist — on
     # 2026-08-09 "add the interstellar music to all of them" got the track
@@ -2707,7 +2726,7 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
     except Exception as exc:  # noqa: BLE001 - no ledger: today's loop, as before
         print(f"[asks] job {job.get('id')}: no ledger: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
         return ""
-    ledger["cfg"] = {k: cfg.get(k) for k in ("repairs", "check", "model", "check_model")}
+    ledger["cfg"] = {k: cfg.get(k) for k in ("check", "model", "check_model")}
     ctx.ask_ledger = ledger
     if not ledger["asks"]:
         return ""
@@ -2909,8 +2928,15 @@ def _asks_check(ctx, draft, allow_repair=True):
         ctx.ask_verdict = verdict
     if not allow_repair or not (asks.open_asks(verdict) or asks.harm(verdict)):
         return None
-    if int(ledger.get("repairs") or 0) >= int((ledger.get("cfg") or {}).get("repairs", 1)):
+    # No count of repair passes (owner, 16 Nov 2026: a cap that makes the agent give up is a bug; p5873
+    # job 138856 replied "I stopped there because the one allowed repair pass has been used"). The turn
+    # keeps repairing while each pass changes the film; the turn's real time and credit limits bound it
+    # (the caller passes allow_repair=False inside the last 150 s). A pass that changed nothing on the
+    # film is the editor's answer to the note: its reply stands and the same note is not sent again.
+    mark = [row.get("version"), preview_digest]
+    if ledger.get("repair_mark") == mark:
         return None
+    ledger["repair_mark"] = mark
     ledger["repairs"] = int(ledger.get("repairs") or 0) + 1
     # The check informs the editor's next step; the editor's saved work stands (owner, 16 Nov 2026:
     # no rollback of the model's edit after the turn).
@@ -2943,11 +2969,11 @@ def _asks_settle(ctx, final, outcome):
     ledger = getattr(ctx, "ask_ledger", None)
     if not ledger or not ledger.get("asks"):
         if getattr(ctx, "ask_check_required", False):
-            # No ledger to check against: the editor's saved work stands (never rolled back), the
-            # reply says it could not be checked and names what the film keeps.
-            from score import asks
+            # No ledger to check against: the editor's saved work stands (never rolled back) and
+            # its reply, written from the turn's measured change, goes out as written; the request
+            # is recorded as unchecked (partial) for the ops loop, not hedged at the customer.
             import edit_scope
-            return edit_scope.disclose(ctx, asks.checked_reply(None, None)), "partial"
+            return edit_scope.disclose(ctx, final), "partial"
         return final, outcome
     from score import asks
     verdict = getattr(ctx, "ask_verdict", None)
@@ -2962,12 +2988,10 @@ def _asks_settle(ctx, final, outcome):
             verdict = None
     except Exception:  # noqa: BLE001
         verdict = None
-    if not verdict:
-        final = asks.checked_reply(ledger, None)
     final = edit_scope.disclose(ctx, final)
-    # Disclosure is itself a model rewrite. Check its claims last and retain
-    # the checker's unmet-ask lines after every rewrite (brands replay lost
-    # the unfinished ending while the new picture changes were summarized).
+    # The check corrects only what the rendered film contradicts, and the
+    # checker's unmet-ask lines are kept after it (brands replay lost the
+    # unfinished ending while the new picture changes were summarized).
     if verdict:
         final = asks.true_reply(ctx, ledger, verdict, final or "")
         block = asks.reply_block(ledger, verdict)
@@ -7063,7 +7087,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 ctx, draft, allow_repair=turn_deadline - time.monotonic() > 150)
             if ask_repair:
                 print(f"[job {job['id']}] ask check: open asks on "
-                      f"v{latest['version']}, one repair pass", flush=True)
+                      f"v{latest['version']}, repair pass "
+                      f"{ctx.ask_ledger.get('repairs')}", flush=True)
                 if body:
                     messages.append({"role": "assistant", "content": body})
                 messages.append({"role": "system", "content": ask_repair})
@@ -7177,12 +7202,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     if design_note and isinstance(result, str):
                         result += design_note
                 except agent_tools.AskUser as q:
-                    # The question goes to the user VERBATIM, which makes it
-                    # a reply — and until 2026-08-09 it was the one reply
-                    # that skipped the language guard (a Russian ask_user
-                    # reached an English user that morning). Same
-                    # deterministic check, but as a tool REJECTION: the
-                    # model rephrases in-loop, no posted wrong-language text.
+                    # The question goes to the user, which makes it a reply: it
+                    # is put in the customer's language (the language of the
+                    # messages they typed, never the footage's). Map D08,
+                    # owner 16 Nov 2026: a question in the wrong language is
+                    # translated and delivered, never sent back as a refusal
+                    # (ticket #980: three refusals in one turn).
                     _u_text = user_message["content"] or ""
                     _u_texts = _customer_texts(ctx, _u_text)
                     _q_verdict = reply_language.judge(
@@ -7190,69 +7215,57 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         _u_texts, q.question)
                     _q_flip = _language_flip(" ".join(_u_texts), _u_text,
                                              q.question, _q_verdict)
-                    if _q_flip and not getattr(
-                            ctx, "_ask_language_refused", False):
-                        ctx._ask_language_refused = True
-                        result = ("REJECTED: that question is not in the "
-                                  "USER'S language (the language of the "
-                                  "messages they typed — never the "
-                                  "footage's). Ask it again in their "
-                                  "language.")
-                    else:
-                        if _q_flip:
-                            # Ticket #980: the check repairs a question, it
-                            # never blocks one. One refusal per turn; after
-                            # it the question is translated and delivered.
-                            q.question = _translate_question(
-                                ctx, client, q.question, _u_texts, _q_flip)
-                        _cur_v = (ctx.versions_written[-1]
-                                  if ctx.versions_written
-                                  else start_version)
-                        if (getattr(ctx, "ask_ledger", None) or
-                                getattr(ctx, "ask_check_required", False)) and ctx.versions_written:
-                            _auto_render_if_needed(ctx, worker_db, session_id,
-                                                   timings, turn_deadline)
-                        # A question is also a customer-facing reply. It cannot
-                        # bypass rendered evidence by claiming completion in its preamble.
-                        import reply_truth
-                        q.question = reply_truth.enforce(
-                            ctx, client, ctx.agent_model or model,
-                            quality_verifier.request_text_for(ctx), q.question,
-                            honesty, strict=True)
-                        _question_outcome = ("partial" if q.question == reply_truth.UNVERIFIED
-                                             else AWAITING_USER)
-                        # Ending on a question cannot leave an unverified attempt
-                        # behind or bypass disclosure of what actually changed.
-                        _asks_check(ctx, q.question, allow_repair=False)
-                        q.question, _question_outcome = _asks_settle(
-                            ctx, q.question, _question_outcome)
-                        _cur_v = ctx.latest_edl().get("version", _cur_v)
-                        _activity(worker_db, session_id, name, args,
-                                  f"asked: {q.question}",
-                                  edl_version=_cur_v)
-                        # TRIAL_QUALITY_BUILD (31 Oct): a question to the
-                        # user (music choices, which take) is the request
-                        # WAITING on them, not blocked: "blocked" filed a P0
-                        # ticket for every question the editor asked
-                        # (ops_loop.intake files partial / blocked only).
-                        # The ask ledger stays on a question too (12 Nov replay
-                        # of p5345: the turn asked which track and the ledger
-                        # of 14 asks was lost); its asks are open until the
-                        # customer answers.
-                        _asked_ledger = _asks_summary(ctx)
-                        worker_db.run(dbx.add_message, session_id,
-                                      "assistant", q.question,
-                                      {"ask_user": _question_outcome == AWAITING_USER,
-                                       "edl_version": _cur_v,
-                                       "outcome": _question_outcome,
-                                       **({"ask_ledger": _asked_ledger}
-                                          if _asked_ledger else {})})
-                        _complete_adopted_steers(ctx, worker_db, job)
-                        return {"status": ("awaiting_user" if _question_outcome == AWAITING_USER else "replied"),
-                                "steps": total_steps, "timings": timings,
-                                "outcome": _question_outcome, "billable": False,
-                                **({"ask_ledger": _asked_ledger}
-                                   if _asked_ledger else {})}
+                    if _q_flip:
+                        q.question = _translate_question(
+                            ctx, client, q.question, _u_texts, _q_flip)
+                    _cur_v = (ctx.versions_written[-1]
+                              if ctx.versions_written
+                              else start_version)
+                    if (getattr(ctx, "ask_ledger", None) or
+                            getattr(ctx, "ask_check_required", False)) and ctx.versions_written:
+                        _auto_render_if_needed(ctx, worker_db, session_id,
+                                               timings, turn_deadline)
+                    # A question is also a customer-facing reply. It cannot
+                    # bypass rendered evidence by claiming completion in its preamble.
+                    import reply_truth
+                    q.question = reply_truth.enforce(
+                        ctx, client, ctx.agent_model or model,
+                        quality_verifier.request_text_for(ctx), q.question,
+                        honesty, strict=True)
+                    _question_outcome = ("partial" if q.question == reply_truth.UNVERIFIED
+                                         else AWAITING_USER)
+                    # Ending on a question cannot leave an unverified attempt
+                    # behind or bypass disclosure of what actually changed.
+                    _asks_check(ctx, q.question, allow_repair=False)
+                    q.question, _question_outcome = _asks_settle(
+                        ctx, q.question, _question_outcome)
+                    _cur_v = ctx.latest_edl().get("version", _cur_v)
+                    _activity(worker_db, session_id, name, args,
+                              f"asked: {q.question}",
+                              edl_version=_cur_v)
+                    # TRIAL_QUALITY_BUILD (31 Oct): a question to the
+                    # user (music choices, which take) is the request
+                    # WAITING on them, not blocked: "blocked" filed a P0
+                    # ticket for every question the editor asked
+                    # (ops_loop.intake files partial / blocked only).
+                    # The ask ledger stays on a question too (12 Nov replay
+                    # of p5345: the turn asked which track and the ledger
+                    # of 14 asks was lost); its asks are open until the
+                    # customer answers.
+                    _asked_ledger = _asks_summary(ctx)
+                    worker_db.run(dbx.add_message, session_id,
+                                  "assistant", q.question,
+                                  {"ask_user": _question_outcome == AWAITING_USER,
+                                   "edl_version": _cur_v,
+                                   "outcome": _question_outcome,
+                                   **({"ask_ledger": _asked_ledger}
+                                      if _asked_ledger else {})})
+                    _complete_adopted_steers(ctx, worker_db, job)
+                    return {"status": ("awaiting_user" if _question_outcome == AWAITING_USER else "replied"),
+                            "steps": total_steps, "timings": timings,
+                            "outcome": _question_outcome, "billable": False,
+                            **({"ask_ledger": _asked_ledger}
+                               if _asked_ledger else {})}
                 except agent_tools.FeatureUpgrade as gate:
                     # Shorts and Website demos come with Pro and Max (owner,
                     # 30 Oct 2026; feature_gate.py). The tool did not run;

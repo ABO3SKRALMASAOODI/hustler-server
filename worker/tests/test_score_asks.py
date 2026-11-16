@@ -27,7 +27,7 @@ def _ask(kind="edit", items=(), **kw):
 
 def test_no_row_checks_every_account_and_a_bad_row_is_off():
     assert asks.parse(None)["mode"] == "on"
-    for raw in ("", "{", "[]", '{"mode": "maybe"}', '{"mode": "on", "repairs": "x"}'):
+    for raw in ("", "{", "[]", '{"mode": "maybe"}', '{"mode": "on", "film_s": "x"}'):
         assert asks.parse(raw)["mode"] == "off", raw
     assert asks.parse('{"mode": "on", "director": false}')["director"] is False
 
@@ -184,7 +184,8 @@ def test_the_reply_lists_asks_only_when_one_is_open():
     ledger = asks.settle({"lang": "en", "asks": [_ask(), _ask()]}, EDL)
     assert asks.reply_block(ledger, _verdict("done", "done")) == ""
     block = asks.reply_block(ledger, _verdict("done", "not_done"))
-    assert "- line 1" in block and "- line 2" in block
+    # only what is still open: the done ask is in the editor's reply already
+    assert "- line 2" in block and "- line 1" not in block
 
 
 def _loop_ctx(ledger, version=2, preview_version=2):
@@ -192,7 +193,7 @@ def _loop_ctx(ledger, version=2, preview_version=2):
               latest_edl=lambda: {"version": version, "json": EDL}, versions_written=[version], workdir="/tmp")
 
 
-def test_one_repair_then_the_reply_says_what_is_open(monkeypatch):
+def test_a_repair_then_an_unchanged_film_the_reply_says_what_is_open(monkeypatch):
     ledger = _ledger()
     ledger["cfg"] = {"repairs": 1, "check": True}
     monkeypatch.setattr(asks, "check", lambda *a, **k: _verdict("not_done"))
@@ -200,7 +201,8 @@ def test_one_repair_then_the_reply_says_what_is_open(monkeypatch):
     ctx = _loop_ctx(ledger)
     note = agent_loop._asks_check(ctx, "Done!")
     assert note and "not done" in note and ledger["repairs"] == 1
-    assert agent_loop._asks_check(ctx, "Done again!") is None             # the one repair is spent
+    # the same film again: the editor answered the note without changing it, its reply stands
+    assert agent_loop._asks_check(ctx, "Done again!") is None
     final, outcome = agent_loop._asks_settle(ctx, "Done!", "fulfilled")
     assert outcome == "partial" and "line 1" in final
 
@@ -210,7 +212,8 @@ def test_a_stale_verdict_never_vouches_for_a_newer_version(monkeypatch):
     ctx = _loop_ctx(ledger, version=5)
     ctx.ask_verdict = dict(_verdict("done"), edl_version=4)
     final, outcome = agent_loop._asks_settle(ctx, "Done.", "fulfilled")
-    assert outcome == "partial" and "can't confirm" in final
+    # unchecked: recorded partial for the ops loop; the editor's reply is not replaced by a hedge
+    assert outcome == "partial" and final == "Done."
 
 
 def test_final_change_disclosure_cannot_drop_a_checked_unmet_ask(monkeypatch):
@@ -645,21 +648,17 @@ def test_a_check_cut_short_is_asked_again_for_the_asks_it_missed(monkeypatch, tm
     assert [r["state"] for r in v["asks"]] == ["done", "partly", "cannot_tell"] and v["usage"]["usd"] == 0.02
 
 
-def test_open_ask_truth_check_keeps_measured_changes_and_real_alternative(monkeypatch):
+def test_an_open_ask_reply_that_the_check_agrees_with_goes_out_as_written(monkeypatch):
     from types import SimpleNamespace
-    ctx = SimpleNamespace(retained_reply_facts={
-        'fields': ['unchanged', 'alternative'],
-        'description': 'The previous film is unchanged. I can show your reference as a still.'})
     verdict = {'asks': [{'id': 'a1', 'state': 'not_done', 'seen': 'Original character remains.',
                          'line': 'The character was not replaced.'}]}
-    reply = 'The character was not replaced. The previous film is unchanged. I can show your reference as a still.'
+    reply = 'The character was not replaced: the upload is one continuous shot of her.'
     called = []
     def check(ctx, name, schema, system, content, **kwargs):
         called.append(name)
-        assert 'measured retained facts' in content
-        return {'wrong': [], 'reply': '', 'covered': ['unchanged', 'alternative']}, {}
+        return {'wrong': [], 'reply': ''}, {}
     monkeypatch.setattr(asks, '_call', check)
-    assert asks.true_reply(ctx, {}, verdict, reply) == reply
+    assert asks.true_reply(SimpleNamespace(), {}, verdict, reply) == reply
     assert called == ['record_true_reply']
 
 
@@ -671,5 +670,5 @@ def test_truth_rewrite_failure_retains_only_measured_disclosure(monkeypatch):
                          'line': 'Crypto mining was not shown.'}]}
     monkeypatch.setattr(asks, '_call', lambda *a, **kw: (_ for _ in ()).throw(TimeoutError()))
     reply = asks.true_reply(ctx, {}, verdict, 'Everything is done, including the mining picture.')
-    assert 'not shown' in reply and 'frame changed to 9:16' in reply
-    assert 'Everything is done' not in reply
+    assert reply == 'Crypto mining was not shown.'
+    assert 'Everything is done' not in reply and "can't confirm" not in reply
