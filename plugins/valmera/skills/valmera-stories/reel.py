@@ -631,7 +631,7 @@ def plan_lengths(rng, L, k, hi_s, spread=False):
     return [min(x, cap) for x in out]
 
 
-def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer_new=False):
+def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer_new=False, proof_fill=()):
     """[[f0, f1, kind, name, rec]] when every picture carries a verdict for its line and take (sp.fit). Planned before
     it is cut:
       demand    each line's shots are drawn first (shot_demand: the judge's distribution by pace and beat)
@@ -800,6 +800,20 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
     snap_at = sv[int(SNAP_Q * (len(sv) - 1))] if sv else 0.0            # a cut moves onto a stress only when it is a real one
     flash_k = [0]                                                        # glimpse flashes alternate white and negative
 
+    proof_clips = [c for c in (proof_fill or []) if c.get("path") and os.path.exists(str(c["path"]))]
+
+    def proof_fill(n):
+        """A marketing film's line with no picture left plays the real export's next unplayed seconds (the proof is
+        always true of the film), never a type page: (clip, t0, t1) or None. `busy`: seconds already shown whole."""
+        want = min(n, int(SHOT_MAX_S * FPS)) / FPS
+        for c in proof_clips:
+            took = list(sp.played.get(c["path"]) or []) + [tuple(x) for x in c.get("busy") or []]
+            room = [(a, b) for a, b in _free_in(took, (0.0, float(c.get("seconds") or 0))) if b - a >= 0.4]
+            if room:
+                a, b = room[0]
+                return c, a, min(b, a + want)
+        return None
+
     def cut_in(line, n, cutins, planned_n):
         """The shot just played on this line, again as a tighter framing while its time runs on (a punch on the take):
         (rec, t0, t1) or None; at most CUTIN_SHARE of the line's planned cuts, only inside the same take."""
@@ -893,6 +907,7 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
                 fill_n = min(n, int(REFRAME_MAX_S * FPS))
                 ci = cut_in(line, n, cutins, planned_n)
                 rf = reframe(line, fill_n) if ci is None else None
+                pf = proof_fill(n) if ci is None and rf is None else None
                 if ci is not None:
                     prev, t0, t1 = ci
                     end = pos + max(min(n, int(round((t1 - t0) * FPS))), 1)
@@ -911,6 +926,12 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
                     kind, name = "clip", c.get("subject")
                     sp.reframed[line] = sp.reframed.get(line, 0) + (end - pos)
                     sp.shortfall[line] = sp.shortfall.get(line, 0) + (end - pos)
+                elif pf is not None:
+                    c, t0, t1 = pf
+                    end = pos + max(min(n, int(round((t1 - t0) * FPS))), 2)
+                    sp.take_clip(c, t0, t1, pos)
+                    rec = dict(c, src=[round(t0, 3), round(t1, 3)], use=1, tier="proof", pick_line=line)
+                    kind, name = "clip", c.get("subject")
                 else:
                     x, fallback = designed_text(line)
                     hold = FIGURE_CARD_S if (x or {}).get("role") == "figure" else DESIGNED_MIN_S
@@ -924,7 +945,9 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
                     sp.cards_used.add((line, rec["text"]))
                     if fallback:
                         sp.shortfall[line] = sp.shortfall.get(line, 0) + (end - pos)
-                if ci is None:
+                if pf is not None:
+                    static = not moving(rec)
+                elif ci is None:
                     static = True
                     fill_f[0] += end - pos
                     sp.fill_by_line[line] = sp.fill_by_line.get(line, 0) + (end - pos)
@@ -1448,7 +1471,7 @@ def build(script, sup, style_id, direction=None):
     d.update(direction or {})
     clock = Clock(sup["words"], script)
     voices = {
-        "cap": {"font": "InterDisplay-Bold.ttf", "px": 56, "track": 0, "shadow": {"a": 0.85, "blur": 0.006}},
+        "cap": {"font": "InterDisplay-Bold.ttf", "px": int(d.get("cap_px") or 56), "track": 0, "shadow": {"a": 0.85, "blur": 0.006}},
         "dsp": dict(st["dsp"], shadow={"a": 0.85, "blur": 0.010}),
     }
     P = F.Plan(voices, sup.get("sounds") or {})
@@ -1484,6 +1507,9 @@ def build(script, sup, style_id, direction=None):
     for v in sup.get("voices") or []:
         c = v.get("clip") or {}
         if c.get("path") and os.path.exists(c["path"]) and c["path"] not in keys:
+            keys[c["path"]] = P.video(f"v{len(keys):02d}", c)
+    for c in d.get("proof_fill") or []:
+        if c.get("path") and os.path.exists(str(c["path"])) and c["path"] not in keys:
             keys[c["path"]] = P.video(f"v{len(keys):02d}", c)
     f_voice_end = Clock.f(clock.dur)
     f_end = f_voice_end + int(d.get("tail_f", 15))
@@ -1529,7 +1555,8 @@ def build(script, sup, style_id, direction=None):
         talk_fit = {p for p in talk if any(v.get("live_action") is True and v.get("speaking_on_camera") is True for v in _verdict_rows(ver.get(p)))}
         sp = Supply(pics, footage, talk=(), allow=collage, fit=sup.get("fit") or {}, deny=deny, cards=cards, only_ok=d.get("only_ok"),
                     grades=fit_grades(sup.get("fit_verdicts")))
-        timeline = cut_fit(script, clock, sp, f_end, stress, seed=int(d.get("seed", 1114)), device_lines=[i for i, f_ in enumerate(fin) if f_], prefer_new=bool(d.get("prefer_new_pictures")))
+        timeline = cut_fit(script, clock, sp, f_end, stress, seed=int(d.get("seed", 1114)), device_lines=[i for i, f_ in enumerate(fin) if f_], prefer_new=bool(d.get("prefer_new_pictures")),
+                           proof_fill=d.get("proof_fill") or ())
         cutter = dict(name="cut_fit", why="every picture carries a verdict for its line and take")
         # grey footage counts against the black-and-white budget: the devices get what the pictures leave
         intrinsic = intrinsic_grey(timeline, fin, f_voice_end)
@@ -1746,6 +1773,52 @@ def build(script, sup, style_id, direction=None):
             layer_spans.append((f0, f1, 2 + q))
             note(f0, f1, kind, name, rec, "print")
 
+    def reveal_before(f0, f1, rec, key, pw, ph, region):
+        """The upload as uploaded, then the product's own crop of it. The whole wide clip sits on a blurred, darkened
+        copy of itself (never a black void); with `region` (the export's crop of the upload, [x0, y0, x1, y1] in upload
+        fractions, read from the recording's own edit list) the area outside it dims, its edges light, and the
+        picture pushes into it until the product's framing fills the phone: the speaker's face at full size, the same
+        framing the export cuts to. Without a region the upload stays whole."""
+        n = f1 - f0
+        scale = min(W / pw, H / ph)
+        cw, ch = pw * scale / W, ph * scale / H
+        src = list(rec["src"])
+        P.shot([f0, f1], key, F.cover_crop(pw, ph, W / H), src=src, blur=26,
+               grade=dict(lift=0, gamma=1.0, gain=0.42, sat=0.7, contrast=1, temp=0, tint=0))
+        ok = (isinstance(region, (list, tuple)) and len(region) == 4 and 0 <= region[0] < region[2] <= 1
+              and 0 <= region[1] < region[3] <= 1 and (region[2] - region[0]) * (region[3] - region[1]) < 0.9)
+        if not ok or n < int(0.9 * FPS):
+            P.card([f0, f1], key, [.5 - cw / 2, .5 - ch / 2, .5 + cw / 2, .5 + ch / 2], z=1, crop=[0, 0, 1, 1], src=src)
+            return dict(reveal=False)
+        rx0, ry0, rx1, ry1 = [float(v) for v in region]
+        s_end = max(1.0 / ((rx1 - rx0) * cw), 1.0 / ((ry1 - ry0) * ch))
+        u, v = (rx0 + rx1) / 2, (ry0 + ry1) / 2
+        k0 = min(int(0.45 * FPS), int(0.3 * n))                  # whole and wide: the raw as it came in
+        k1 = k0 + max(min(int(0.7 * FPS), int(0.4 * n)), 6)      # the push into the product's crop
+        qs = [smooth(min(max((j - k0) / max(k1 - k0, 1), 0.0), 1.0)) for j in range(n)]
+        ss = [s_end ** q for q in qs]
+        p0x, p0y = 0.5 + (u - 0.5) * cw, 0.5 + (v - 0.5) * ch
+        xs = [(p0x + (0.5 - p0x) * q) - (u - 0.5) * cw * sj for q, sj in zip(qs, ss)]
+        ys = [(p0y + (0.5 - p0y) * q) - (v - 0.5) * ch * sj for q, sj in zip(qs, ss)]
+        P.card([f0, f1], key, [.5 - cw / 2, .5 - ch / 2, .5 + cw / 2, .5 + ch / 2], z=1, crop=[0, 0, 1, 1], src=src,
+               x=[r4(x) for x in xs], y=[r4(y) for y in ys], s=[r4(x) for x in ss])
+        fade_in = max(int(0.15 * FPS), 1)
+        ops = [min(max((j - int(0.12 * FPS)) / fade_in, 0.0), 1.0) * (1.0 - qs[j]) for j in range(n)]
+
+        def follow(bx0, by0, bx1, by1, c, a, z):
+            bu, bv = (bx0 + bx1) / 2, (by0 + by1) / 2
+            P.block([f0, f1], [.5 - (bx1 - bx0) * cw / 2, .5 - (by1 - by0) * ch / 2, .5 + (bx1 - bx0) * cw / 2, .5 + (by1 - by0) * ch / 2],
+                    c, z=z, op=[r4(a * o) for o in ops], x=[r4(x + (bu - 0.5) * cw * sj) for x, sj in zip(xs, ss)],
+                    y=[r4(y + (bv - 0.5) * ch * sj) for y, sj in zip(ys, ss)], s=[r4(x) for x in ss], keep_over_proof=True)
+
+        for box in ((0, 0, rx0, 1), (rx1, 0, 1, 1), (rx0, 0, rx1, ry0), (rx0, ry1, rx1, 1)):
+            if box[2] - box[0] > 0.004 and box[3] - box[1] > 0.004:
+                follow(*box, "#05070A", 0.62, 2)                   # outside the product's crop: dimmed
+        lw, lh = 0.006 / cw, 0.006 / ch
+        for box in ((rx0, ry0, rx0 + lw, ry1), (rx1 - lw, ry0, rx1, ry1), (rx0, ry0, rx1, ry0 + lh), (rx0, ry1 - lh, rx1, ry1)):
+            follow(*box, "#FFFFFF", 0.92, 3)                       # the crop's edges
+        return dict(reveal=True, region=[r4(rx0), r4(ry0), r4(rx1), r4(ry1)], scale_end=r4(s_end), push_f=[f0 + k0, f0 + k1])
+
     def designed(f0, f1, rec):
         """A designed type card from the line's own display item (or its brief): the figure, term or date on a plate in
         the palette's accent (colourfulness 20 and more; near-black only on a device line), the type driven by a scale of
@@ -1860,14 +1933,7 @@ def build(script, sup, style_id, direction=None):
             if kind == "clip" and rec["path"] in full_frame:
                 pw, ph = float(rec.get("w") or W), float(rec.get("h") or H)
                 if rec["path"] in whole_frame:
-                    # The before must retain its uploaded framing. Cropping a
-                    # landscape upload here would silently perform the very
-                    # vertical reframing that the product comparison promises.
-                    scale = min(W / pw, H / ph)
-                    cw, ch = pw * scale / W, ph * scale / H
-                    P.page([f0, f1], "#000000", grain=0)
-                    P.card([f0, f1], keys[rec["path"]], [.5-cw/2, .5-ch/2, .5+cw/2, .5+ch/2],
-                           z=0, crop=[0, 0, 1, 1], src=list(rec["src"]))
+                    reveal_before(f0, f1, rec, keys[rec["path"]], pw, ph, (d.get("whole_frame_crop") or {}).get(rec["path"]))
                 else:
                     focus, _ = F.focus_of(rec)
                     crop = F.cover_crop(pw, ph, W / H, focus, (0.5, 0.42))

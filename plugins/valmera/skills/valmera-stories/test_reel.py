@@ -732,10 +732,91 @@ def test_protected_product_cuts_stay_whole_even_in_window_style(tmp_path):
         assert abs((x1-x0)*w/((y1-y0)*h) - F.W/F.H) < 0.001
     l1, beats = R.build(sc, sup, 'window', dict(require_fit=True, full_frame_paths=paths, whole_frame_paths=paths))
     keys = {k for k,a in l1['assets'].items() if a.get('path') in paths}
-    cards = [it for it in l1['items'] if it.get('pic') in keys]
-    assert cards and all(it['k'] == 'card' and it['crop'] == [0,0,1,1] for it in cards)
+    cards = [it for it in l1['items'] if it.get('pic') in keys and it['k'] == 'card']
+    beds = [it for it in l1['items'] if it.get('pic') in keys and it['k'] == 'shot']
+    assert cards and all(it['crop'] == [0,0,1,1] for it in cards)
+    # the whole upload sits on a blurred copy of itself, never on a black void
+    assert len(beds) == len(cards) and all(it.get('blur') for it in beds)
     for it in cards:
         w,h = dimensions[l1['assets'][it['pic']]['path']]
         assert abs(it['w']*F.W/(it['h']*F.H) - w/h) < .001
         assert it['w'] == 1 or it['h'] == 1
         assert it['rot'] == 0 and it['s'] == 1
+
+
+def test_the_before_pushes_into_the_products_own_crop_until_the_face_fills_the_phone(tmp_path):
+    """16 Nov marketing films: the raw 16:9 before sat letterboxed on black, the speaker's face 2-3 % of the frame.
+    With the export's crop of the upload, the before opens whole, then pushes into that crop: at the end the crop
+    fills the phone exactly (the export's own framing), and the dim mask outside it has left."""
+    sc = _fit_script(n=2, words=12)
+    pics, footage = _fit_supply(n_clips=6)
+    footage = {i: rows for i, rows in footage.items() if i < 2}
+    _files(tmp_path, footage, pics)
+    for rows in footage.values():
+        for c in rows:
+            c.update(w=1920, h=1080)
+    paths = [c['path'] for rows in footage.values() for c in rows]
+    region = [0.478, 0.0, 0.794, 1.0]                      # kids-bold-v: the export's crop, measured by template match
+    sup = dict(sid='product', words=_words(sc), narration=str(tmp_path/'none.wav'), ffmpeg='ffmpeg',
+               pictures={}, sounds={}, footage=[dict(i=i, clips=rows) for i, rows in footage.items()],
+               fit={c['path']: [i] for i, rows in footage.items() for c in rows}, fit_verdicts={},
+               talking={p: dict(talking=True, score=1) for p in paths}, work=str(tmp_path/'fin'))
+    l1, beats = R.build(sc, sup, 'window', dict(require_fit=True, full_frame_paths=paths, whole_frame_paths=paths,
+                                                  whole_frame_crop={p: region for p in paths}))
+    keys = {k for k,a in l1['assets'].items() if a.get('path') in paths}
+    moved = [it for it in l1['items'] if it.get('pic') in keys and it['k'] == 'card' and isinstance(it.get('s'), list)]
+    assert moved
+    for it in moved:
+        s0, s1 = it['s'][0], it['s'][-1]
+        assert s0 == 1 and abs(s1 * it['w'] * (region[2] - region[0]) - 1) < 0.01      # the crop's width is the phone's
+        assert abs(s1 * it['h'] * (region[3] - region[1]) - 1) < 0.01
+        x1 = it['x'][-1] + ((region[0] + region[2]) / 2 - 0.5) * it['w'] * s1
+        assert abs(x1 - 0.5) < 0.01                                                        # centred on the crop
+        assert it['x'][0] == 0.5                                                           # opens whole and wide
+        f0, f1 = it['f']
+        masks = [m for m in l1['items'] if m.get('pic') == 'plate' and m['f'] == [f0, f1]]
+        assert masks and all(m['op'][-1] == 0 for m in masks) and any(max(m['op']) > 0.5 for m in masks)
+
+
+def test_a_line_left_without_pictures_plays_the_real_export_not_a_type_page(tmp_path):
+    """16 Nov marketing films: 35-47 % of the programme were flat type pages where a line ran out of pictures. With
+    the export offered as proof fill, those lines play its unplayed seconds; seconds already shown whole are skipped."""
+    sc = _fit_script(n=3, words=14)
+    pics, footage = _fit_supply(n_clips=4)
+    fit = {c["path"]: ({i} if i != 1 else set()) for i, lst in footage.items() for c in lst}       # nothing fits line 1
+    clock = F.Clock(_words(sc), sc)
+    sp = R.Supply({}, {i: footage[i] for i in range(3)}, fit=fit)
+    tl = R.cut_fit(sc, clock, sp, F.Clock.f(clock.dur) + 15, stress=[])
+    assert any(r[2] == "designed" for r in tl if r[4].get("pick_line") == 1)          # without the export: type pages
+    exp = tmp_path / "export_body.mp4"
+    exp.write_bytes(b"x")
+    fill = dict(path=str(exp), file="product/export_body.mp4", subject="THE EXPORT", seconds=20.0, w=1080, h=1920,
+                busy=[[0.0, 4.0]])
+    sp = R.Supply({}, {i: footage[i] for i in range(3)}, fit=fit)
+    tl = R.cut_fit(sc, clock, sp, F.Clock.f(clock.dur) + 15, stress=[], proof_fill=[fill])
+    on1 = [r for r in tl if r[4].get("pick_line") == 1]
+    assert on1 and not any(r[2] == "designed" for r in tl)
+    proof = [r for r in tl if r[4].get("path") == str(exp)]
+    assert proof and all(r[4]["tier"] == "proof" and r[4]["src"][0] >= 4.0 for r in proof)   # the after is not shown again
+    for a, b in zip(tl, tl[1:]):
+        assert a[1] == b[0]
+
+
+def test_marketing_captions_at_72_px_stay_in_the_safe_area(tmp_path):
+    """Marketing films set the narration's captions at 72 px (56 px read small at phone size); every phrase still fits
+    left of the platform's rail and inside the safe area, so the taste check passes with no type dropped."""
+    sc = _fit_script(n=6, words=14)
+    for s in sc["segments"]:
+        s["phrases"] = [[0, 4], [4, 9], [9, 14]]
+        s["say"] = " ".join(f"captionword{k}" for k in range(14))
+    pics, footage = _fit_supply(n_clips=10)
+    _files(tmp_path, footage, pics)
+    fit = {c["path"]: [i] for i, lst in footage.items() for c in lst}
+    sup = dict(sid="t", words=_words(sc), narration=str(tmp_path / "none.wav"), ffmpeg="ffmpeg", pictures=pics, sounds={},
+               footage=[dict(i=i, clips=v) for i, v in footage.items()], fit=fit, fit_verdicts={}, work=str(tmp_path / "fin"))
+    l1, beats = R.build(sc, sup, "window", dict(cap_px=72))
+    assert l1["voices"]["cap"]["px"] == 72
+    caps = [it for it in l1["items"] if it["k"] == "word" and it["v"] == "cap"]
+    assert caps
+    t = F.taste_check(l1, beats)
+    assert t["ok"], t["problems"]
