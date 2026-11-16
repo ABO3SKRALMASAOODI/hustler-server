@@ -1717,6 +1717,11 @@ def picture_fields(ctx, b, ref, a, z, W=None, H=None, src=None):
                 src = video_src(ctx, ref, asset, n, rng)
             out["src"] = [src[0], src[1]]
         t = out["src"][0] if "src" in out else 0.0
+        if ref["asset"] == "main" and written_rect(ctx, ref):
+            # Preserve the model's explicit spatial selection for the final
+            # source guard. It is a region to stay inside, not a detected face
+            # or a permission to move outside the source.
+            out["source_region"] = named_crop(ctx, ref, asset, t)
         if ref.get("_view") is not None and ref["asset"] == "main":
             vr, cam = view_rect(ctx, ctx.views[ref["_view"]], asset, W, H), calm_cam(ref.get("cam") or "push 1.04")
             if cuts_wide_print(ctx, vr, out.get("src"), asset, W, H):
