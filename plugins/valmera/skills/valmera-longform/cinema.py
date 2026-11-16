@@ -970,6 +970,8 @@ def check(ctx,rd,sc):
     stamp=Path(ctx.supply)/'picture-input.json'
     from encoded_repair import review_shots
     review=review_shots(read(Path(ctx.supply)/'shots.json'),base,brand.probe(rd['film']),pack['words'])
+    from caption_context import enrich
+    enrich(ctx,[r['clip'] for r in review])
     inputs=dict(film=digest(final),shots=digest(Path(ctx.supply)/'shots.json'),checker=digest(HERE/'picture_check.py'),
                 presentation=hashlib.sha256(json.dumps(review,sort_keys=True).encode()).hexdigest())
     if not stamp.exists() or read(stamp)!=inputs:

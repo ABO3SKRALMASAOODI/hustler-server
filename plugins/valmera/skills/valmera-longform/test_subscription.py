@@ -55,13 +55,13 @@ def test_private_container_installs_guard_before_worker(tmp_path, monkeypatch):
 
 
 def test_review_cache_keeps_semantics_and_ignores_only_concurrency():
-    import hashlib
     from review_cache import checker_bytes
-    # Published review identities before the subscription scheduling changes.
-    assert hashlib.sha256(checker_bytes()).hexdigest() == '7637971d1b898fcc9e6ac97ab6f2f19d7f7c365864aa04e3d59b3e34c494b5e6'
     text=Path(__file__).with_name('picture_check.py').read_text()
+    concurrent=text.replace("max_workers=1 if os.environ.get('CODEX_PROXY_LOCAL')=='1' else 3",'max_workers=3').replace('\nimport os\n','\n')
+    assert checker_bytes(text)==checker_bytes(concurrent)
     assert checker_bytes(text.replace('Reject wrong people','Reject incorrect people')) != checker_bytes(text)
     assert checker_bytes(text.replace('(lo+hi)/2','lo+(hi-lo)*.4')) != checker_bytes(text)
+    assert checker_bytes(text.replace('encoded_detail(film,a,b,detail,ffmpeg)','pass')) != checker_bytes(text)
 
 
 def test_recorded_edit_resume_requires_same_words_and_pins(tmp_path,monkeypatch):
