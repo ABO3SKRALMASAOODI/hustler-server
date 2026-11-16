@@ -483,3 +483,33 @@ def test_a_rejecting_verb_is_not_applied_ticketed_and_the_rest_lands(
 def test_refusal_classes_come_from_map_part_2():
     assert tickets.class_of("add_captions") == "technical"
     assert tickets.class_of("no_such_function") == "technical"
+
+
+# -- G26 MCP: the same dispatcher, envelopes and image blocks ---------------
+
+def test_mcp_runs_v2_calls_through_the_same_dispatcher(monkeypatch):
+    import mcp_exec
+    ctx, fake = _ctx()
+    rows = []
+    real = fake.run
+
+    def run(fn, *a, **k):
+        if fn is dbx.add_message:
+            rows.append(a)
+            return 1
+        return real(fn, *a, **k)
+    fake.run = run
+    drained = []
+    monkeypatch.setattr(mcp_exec, "_drain_images", lambda c: (
+        drained.extend(c.pending_images) or [], 0))
+    out = mcp_exec._run_v2(ctx, fake, {"id": 1}, {"chat_session_id": 11},
+                           "edit", {"ops": [{"cut": [[1, 2]]}]})
+    assert out["harness"] == "v2" and out["edl_changed"] is True
+    assert out["text"].startswith("status: done")
+    assert out["v2"]["version"] == 8
+    assert rows and rows[0][3]["source"] == "mcp"
+    src = open(os.path.join(WORKER, "mcp_exec.py")).read()
+    assert "if tool in V2_NAMES and (payload.get(\"harness\") == \"v2\"" in src
+    names = [t["function"]["name"] for t in mcp_exec._v2_tools()]
+    assert names == ["look", "timeline", "edit", "undo", "render", "find",
+                     "wait"]

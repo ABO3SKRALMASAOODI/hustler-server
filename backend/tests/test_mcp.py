@@ -3175,3 +3175,52 @@ def test_a_finished_export_without_a_link_names_the_next_step(client, monkeypatc
     assert got["structuredContent"]["render"]["render_type"] == "final_export"
     assert "download_url(project_id=3, kind='final', edl_version=17)" in \
         got["content"][0]["text"]
+
+
+# ── harness v2 over MCP (off by default; app_kv.harness_v2) ───────────
+
+V2_TOOLS = [{"type": "function", "function": {
+    "name": n, "description": f"v2 {n}",
+    "parameters": {"type": "object", "properties": {}}}}
+    for n in ("look", "timeline", "edit", "undo", "render", "find", "wait")]
+
+
+def test_an_unrouted_account_keeps_todays_catalogue(client, monkeypatch):
+    monkeypatch.setattr(mcpmod, "_catalog",
+                        lambda: dict(CATALOG, v2_tools=V2_TOOLS))
+    monkeypatch.setattr(mcpmod, "_v2_routed", lambda tok: False)
+    names = [t["name"] for t in rpc(client, "tools/list", STATIC_TOKEN)
+             .get_json()["result"]["tools"]]
+    assert "get_transcript" in names and "edit" not in names
+
+
+def test_a_routed_account_gets_the_seven_tools(client, monkeypatch):
+    monkeypatch.setattr(mcpmod, "_catalog",
+                        lambda: dict(CATALOG, v2_tools=V2_TOOLS,
+                                     v2_write_tools=["edit", "undo",
+                                                     "render"]))
+    monkeypatch.setattr(mcpmod, "_v2_routed", lambda tok: True)
+    names = [t["name"] for t in rpc(client, "tools/list", STATIC_TOKEN)
+             .get_json()["result"]["tools"]]
+    for n in ("look", "timeline", "edit", "undo", "render", "find", "wait",
+              "open_project", "export_final", "wait_for_job"):
+        assert n in names, n
+    assert "get_transcript" not in names
+    edit = next(t for t in rpc(client, "tools/list", STATIC_TOKEN)
+                .get_json()["result"]["tools"] if t["name"] == "edit")
+    assert "project_id" in edit["inputSchema"]["required"]
+    rpc(client, "tools/call", STATIC_TOKEN,
+        {"name": "edit", "arguments": {"project_id": 7, "ops": [
+            {"cut": [[1, 2]]}]}})
+    sent = DB["enqueued"][-1]
+    assert sent["tool"] == "edit" and sent["mutation"] is True
+
+
+def test_the_harness_meta_override_rides_to_the_enqueue(client, monkeypatch):
+    monkeypatch.setattr(mcpmod, "_catalog",
+                        lambda: dict(CATALOG, v2_tools=V2_TOOLS))
+    monkeypatch.setattr(mcpmod, "_v2_routed", lambda tok: True)
+    rpc(client, "tools/call", STATIC_TOKEN,
+        {"name": "timeline", "arguments": {"project_id": 7},
+         "_meta": {"harness": "v2"}})
+    assert DB["enqueued"][-1]["harness_request"] == "v2"

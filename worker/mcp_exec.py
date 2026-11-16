@@ -80,6 +80,8 @@ MCP_DENIED_TOOLS = frozenset(MCP_DENIED_MESSAGES)
 # These names have existing project-scoped implementations at the MCP server.
 # The internal agent implementation must never shadow that public session API.
 MCP_SESSION_OVERRIDES = frozenset({"wait_for_job"})
+V2_NAMES = frozenset({"look", "timeline", "edit", "undo", "render", "find",
+                      "wait"})
 
 
 class _Session:
@@ -124,7 +126,50 @@ def catalog():
         # a release asks it for current names by domain.
         "domains": {domain: [n for n in names if n in published]
                     for domain, names in agent_tools.tool_domain_map().items()},
+        # Harness v2's seven tools (HARNESS_V2.md section 8). The backend
+        # lists them only to accounts app_kv.harness_v2 routes to v2.
+        "v2_tools": _v2_tools(),
+        "v2_write_tools": ["edit", "undo", "render"],
     }
+
+
+def _v2_tools():
+    try:
+        from harness2 import tools as v2_tools
+        return v2_tools.openai_tools()
+    except Exception as exc:  # noqa: BLE001 - the v1 catalogue still stands
+        print(f"[mcp] v2 tools not listed: {exc}", flush=True)
+        return []
+
+
+# A v2 call answers inside one MCP HTTP budget (MCP_SYNC_WAIT_S, 110 s at
+# the backend): the render waits at most this long, then answers with a
+# handle the caller settles with wait (or wait_for_job).
+V2_WAIT_S = float(os.getenv("MCP_V2_WAIT_S", "75"))
+
+
+def _run_v2(ctx, worker_db, job, project, tool, args):
+    """One v2 tool call over MCP: the same dispatcher as the app's loop,
+    the envelope's text, and its pictures as image blocks."""
+    from harness2 import tools as v2_tools
+    ctx.harness = "v2"
+    before = ctx.latest_edl()["version"]
+    env = v2_tools.dispatch(ctx, tool, args, wait_s=V2_WAIT_S)
+    after = ctx.latest_edl()["version"]
+    agent_loop._activity(worker_db, project["chat_session_id"], tool, args,
+                         env.text()[:600], source="mcp", edl_version=after)
+    ctx.pending_images = list(env.see) + list(ctx.pending_images or [])
+    out = {"text": env.text(), "edl_version": after,
+           "edl_changed": after != before, "harness": "v2",
+           "v2": env.to_dict()}
+    if env.running:
+        out["running"] = env.running
+    imgs, _attempts = _drain_images(ctx)
+    if imgs:
+        out["images"] = imgs
+    if ctx.pending_images:
+        out["images_remaining"] = len(ctx.pending_images)
+    return out
 
 
 _EVICT_GRACE_S = 5
@@ -635,6 +680,9 @@ def run_mcp_job(worker_db, job):
                             answer.get("images") or []) + imgs)
                 return answer
 
+            if tool in V2_NAMES and (payload.get("harness") == "v2"
+                                     or tool not in agent_tools.TOOLS):
+                return _run_v2(ctx, worker_db, job, project, tool, args)
             if tool not in agent_tools.TOOLS:
                 return {"text": f"Unknown tool '{tool}'.", "is_error": True}
             if agent_tools._tool_disabled(tool):

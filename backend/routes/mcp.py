@@ -391,6 +391,45 @@ def _annotations_for(name):
     }
 
 
+# Harness v2 over MCP (HARNESS_V2.md section 8): an account the
+# app_kv.harness_v2 switch routes to v2 is served the seven tools beside the
+# session tools; expand_toolset keeps the legacy catalogue reachable.
+V2_TOOL_NAMES = frozenset({"look", "timeline", "edit", "undo", "render",
+                           "find", "wait"})
+_V2_ROUTED_TTL_S = 15.0
+_v2_routed_cache = {}
+
+
+def _v2_routed(tok):
+    """Whether this account's MCP calls run on harness v2 (off by default;
+    a failed read is v1)."""
+    try:
+        user_id = int((tok or {}).get("user_id"))
+    except (TypeError, ValueError):
+        return False
+    now = time.time()
+    hit = _v2_routed_cache.get(user_id)
+    if hit and now - hit[0] < _V2_ROUTED_TTL_S:
+        return hit[1]
+    routed = False
+    try:
+        with vdb() as conn:
+            cur = conn.cursor()
+            routed = _harness_route.pick(cur, user_id, None,
+                                         "mcp_tool") == "v2"
+    except Exception:  # noqa: BLE001 - v1 on any doubt
+        routed = False
+    _v2_routed_cache[user_id] = (now, routed)
+    return routed
+
+
+def _v2_editor_tools(catalog):
+    v2 = _editor_tools({"tools": (catalog or {}).get("v2_tools") or []})
+    gateway = [t for t in _editor_tools(catalog)
+               if t.get("name") == GATEWAY_TOOL]
+    return v2 + gateway
+
+
 def _editor_tools(catalog):
     """OpenAI function specs -> MCP tool specs. Mostly a rename of two keys —
     the schema itself is passed through untouched, which is the point — plus
@@ -1939,7 +1978,8 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
                 return _tool_answer(project, project_id, fast, raw, _out)
         if not wait_for_index:
             mutation = name in set(catalog.get("write_tools") or []) or \
-                name in {"reset_edit"}
+                name in {"reset_edit"} or \
+                name in set(catalog.get("v2_write_tools") or [])
             cur.execute("""SELECT MAX(version) AS version FROM edls
                            WHERE project_id = %s""", (int(project_id),))
             version_row = cur.fetchone() or {}
@@ -4294,6 +4334,9 @@ def _handle(tok, msg):
         catalog = _catalog()
         if not catalog:
             return _error(req_id, -32603, CATALOG_MISSING)
+        if _v2_routed(tok) and catalog.get("v2_tools"):
+            return _result(req_id, {"tools": SESSION_TOOLS
+                                    + _v2_editor_tools(catalog)})
         return _result(req_id, {"tools": SESSION_TOOLS
                                 + _editor_tools(catalog)})
 
@@ -4351,6 +4394,8 @@ def _call_tool(req_id, tok, name, args):
                 else _text(str(out), session_error))
         catalog = _catalog()
         known = {t["name"] for t in _editor_tools(catalog)}
+        if name in V2_TOOL_NAMES and _v2_routed(tok):
+            known.add(name)
         if name not in known:
             # Honest and specific: an unknown name here usually means the
             # tool exists but this deployment has it switched off (no key
