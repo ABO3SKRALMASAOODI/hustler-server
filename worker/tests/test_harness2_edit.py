@@ -310,3 +310,25 @@ def test_undo_appends_a_copy_of_an_earlier_version():
     missing = commit.undo(ctx, to=99)
     assert missing.status == envelope.FAILED and "versions 1-11" in \
         missing.not_applied[0]["instead"]
+
+
+def test_fit_length_pays_for_a_restore_elsewhere(monkeypatch):
+    """p5857's step 5: restore the children on stage, fit to 3590 s; the
+    restored stretch stays whole and the quietest ends elsewhere pay."""
+    fps = 4.0
+    duration = 600.0
+    score = [0.05 if 200 <= i / fps < 260 else 0.5 for i in
+             range(int(duration * fps))]
+    track = {"version": 1, "fps": fps, "motion": score, "audio": None}
+    monkeypatch.setattr(ops_mod.Engines, "activity_track",
+                        staticmethod(lambda _ctx: (track, None)))
+    ctx, fake = _ctx(duration=duration,
+                     keep=[[0, 190], [270, 600]])
+    env = commit.edit(ctx, [{"restore": [[200, 260]]},
+                            {"fit_length": {"max_s": 560}}], "restore")
+    keep = fake.rows[-1]["json"]["keep"]
+    kept = sum(max(0.0, min(float(b), 260) - max(float(a), 200))
+               for a, b in keep)
+    assert kept == pytest.approx(60.0, abs=0.01), keep
+    from schemas import program_duration
+    assert float(program_duration(fake.rows[-1]["json"])) <= 560.05

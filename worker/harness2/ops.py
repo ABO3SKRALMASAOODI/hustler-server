@@ -268,6 +268,9 @@ def op_restore(stage, value, env, index):
         return False
     new = agent_tools._merge_touching(current + spans)
     exact = isinstance(value, dict) and value.get("exact") is True
+    # A fit_length later in the same edit pays for these elsewhere.
+    protect = list(getattr(stage, "_v2_protect", None) or []) + spans
+    object.__setattr__(stage, "_v2_protect", protect)
     why = _write_keep(stage, new, f"restored {len(spans)} range(s)", env,
                       exact)
     if why:
@@ -305,9 +308,11 @@ def op_fit_length(stage, value, env, index):
     words = (stage.index or {}).get("words") or []
     sentences = (stage.index or {}).get("sentences")
     lo, hi = value.get("min_s"), value.get("max_s")
+    protect = list(getattr(stage, "_v2_protect", None) or [])
     new_keep, lines, measures = fit_mod.fit(
         keep, list(map(float, score)), fps, words, stage.duration,
-        max_s=hi, min_s=lo, other_s=other, sentences=sentences)
+        max_s=hi, min_s=lo, other_s=other, sentences=sentences,
+        protect=protect)
     for line in lines:
         env.repair(line)
     if new_keep == [list(map(float, k)) for k in keep]:
@@ -323,7 +328,7 @@ def op_fit_length(stage, value, env, index):
             stage.edl.get("keep") or [], list(map(float, score)), fps, words,
             stage.duration, max_s=hi, min_s=lo,
             other_s=after - sum(e - s for s, e in stage.edl.get("keep")),
-            sentences=sentences)
+            sentences=sentences, protect=protect)
         env.repair("second pass: " + "; ".join(lines2))
         _write_keep(stage, keep2, "fit_length (settle)", env)
     env.measures.update({"fit_length": dict(

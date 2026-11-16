@@ -114,8 +114,14 @@ def _length(keep):
     return sum(max(0.0, e - s) for s, e in keep)
 
 
-def trim(keep, sig, blocks, word_spans, remove_s):
-    """Remove about ``remove_s`` seconds from piece edges, quietest first."""
+def _protected(protect, a, b):
+    return any(pa < b - 1e-6 and pb > a + 1e-6 for pa, pb in protect or ())
+
+
+def trim(keep, sig, blocks, word_spans, remove_s, protect=()):
+    """Remove about ``remove_s`` seconds from piece edges, quietest first.
+    Spans in ``protect`` (what the same edit just restored or kept on
+    purpose) are never trimmed: the cost is paid elsewhere."""
     pieces = [[float(s), float(e)] for s, e in keep]
     alive = [True] * len(pieces)
     removed, dropped, touched = 0.0, 0, set()
@@ -127,7 +133,7 @@ def trim(keep, sig, blocks, word_spans, remove_s):
         stamp[i] += 1
         for side in ("start", "end"):
             ca, cb = _trim_chunk(pieces[i], side, blocks, word_spans)
-            if cb - ca <= 1e-6:
+            if cb - ca <= 1e-6 or _protected(protect, ca, cb):
                 continue
             heapq.heappush(heap, (_cost(sig, word_spans, ca, cb), i, side,
                                   stamp[i], ca, cb))
@@ -204,7 +210,7 @@ def extend(keep, sig, blocks, word_spans, add_s, duration):
 
 
 def fit(keep, score, fps, words, duration, max_s=None, min_s=None,
-        other_s=0.0, sentences=None):
+        other_s=0.0, sentences=None, protect=()):
     """(new keep, report lines, measures). ``other_s`` is programme time not
     in the keep (inserts), held constant. The target is the middle of the
     band when both ends are given, else just inside the one given."""
@@ -222,7 +228,7 @@ def fit(keep, score, fps, words, duration, max_s=None, min_s=None,
         target = (lo + hi) / 2.0 if lo is not None else hi - min(
             10.0, 0.01 * hi)
         new_keep, info = trim(keep, sig, blocks, word_spans,
-                              current - target)
+                              current - target, protect=protect)
         measures.update(info)
         lines.append(
             f"fit_length trimmed {info['removed_s']:g} s from the quietest "
