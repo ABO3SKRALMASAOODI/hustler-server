@@ -153,3 +153,17 @@ def test_shortening_does_not_buy_lost_added_pictures_or_sounds(department):
     baseline = reading('edited', **{department: 2})
     baseline['program_s'] = 4
     assert not prefer_floor(candidate, baseline)
+
+
+def test_equal_events_do_not_win_only_by_shortening_the_denominator():
+    # Actual p5571 correction: both meters called one event a jump. The
+    # shorter floor removed the fountain, and won solely on rate/hold.
+    candidate, baseline = reading('edited'), reading('edited')
+    candidate['program_s'] = 7.9
+    candidate['taste']['raw'] = {'kinds': [[5.8, 'jump', .87]]}
+    baseline['program_s'] = 3.42
+    baseline['taste']['raw'] = {'kinds': [[1.467, 'jump', .816]]}
+    assert not prefer_floor(candidate, baseline)
+    # Genuine additional sound still counts as a separate improvement.
+    baseline['taste']['sound_times'] = [.4]
+    assert prefer_floor(candidate, baseline)

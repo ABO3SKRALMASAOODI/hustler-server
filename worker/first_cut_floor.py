@@ -63,6 +63,19 @@ def prefer_floor(candidate, floor):
         return False
     if len((floor.get('taste') or {}).get('sound_times') or []) < len((candidate.get('taste') or {}).get('sound_times') or []):
         return False
+    # Equal events in a shorter programme improve every rate and hold by
+    # arithmetic alone. p5571's two contenders each had one detected jump;
+    # the floor discarded the fountain and won solely by being 3s, not 8s.
+    # Require an actual department improvement before shortening can win.
+    if float(floor.get('program_s') or 0) < float(candidate.get('program_s') or 0) - .1:
+        def absolute(m, pics):
+            return (CLASSES[m['class']], float(m.get('shots_added') or 0),
+                    len((m.get('taste') or {}).get('sound_times') or []),
+                    float(m.get('camera_moves_added') or 0),
+                    pics[2] if pics is not None else 0,
+                    pics[3] if pics is not None else 0)
+        if not any(a > b for a, b in zip(absolute(floor, fp), absolute(candidate, cp))):
+            return False
     return (any(a > b + .05 for a, b in zip(f, c)) or
             (cp is not None and fp is not None and
              (fp[0] > cp[0] + .05 or fp[1] < cp[1] - .1)))
