@@ -46,9 +46,17 @@ stretches fail, the reason names exactly those stretches and says the rest are f
 length ("under N minutes", "cut it to N seconds") authorizes removing whatever content is needed to
 reach that length, action included: compare the measured lengths before and after with the target.
 A target length or a highlights request with no named criteria hands the choice of WHICH moments
-go to the editor. Refuse it only when the measured result lands far from the target (still well
-over it, or far below it), when a removed stretch cuts a sentence or thought in the middle, or when
-it removes something the request or contract names to keep. That a removed stretch is watchable
+go to the editor. Editors reach a length in several writes: a write that moves the measured length
+toward the target and is still over it is a valid step, so never refuse a write for not reaching the
+target on its own; on length, refuse only a result that lands far BELOW the target. Otherwise refuse
+it only when a removed stretch deletes spoken words inside a sentence, or when it removes something
+the request or contract names to keep. A removed stretch that begins after a complete sentence and
+ends before the next spoken word is a clean cut, even when the conversation's topic carries on across
+it. Removing a false start, or the first saying of a phrase that is said again right after it, is
+cleaning, never cutting a sentence in the middle. When a stretch's only defect is an edge that clips
+a word, name the exact second to move that edge to. For a target length, a highlights request or a
+named kind of footage, doubt about which moments matter is the editor's call, not missing evidence:
+refuse only for a defect you can point to in the words or the frames. That a removed stretch is watchable
 content too (an event, a performance, people playing) is never a reason to refuse: when the whole
 source is content, content must go to reach the length, and which moments stay is the editor's
 call, not yours. Do not ask for proof that the removed part is weaker than what stays. Keep complete sentences

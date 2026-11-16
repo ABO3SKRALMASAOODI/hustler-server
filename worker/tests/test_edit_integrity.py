@@ -365,3 +365,23 @@ def test_repair_turn_judges_cuts_against_brief_and_repair_list(monkeypatch, tmp_
     s = ei.CUT_SYSTEM
     assert "first saying" in s and "snaps the named numbers to whole" in s
     assert "serves either" in s
+
+
+def test_length_target_steps_and_clean_sentence_cuts_are_allowed():
+    """Tickets #1358/#1360/#1363/#1364 (user 3120, project 5857, 16 Nov 07:54 UTC, after
+    fd49d844 and 0efbb5ad were live): "use your best judgement to create 60 minutes worth of
+    footage from this video". The judge refused every small cut_range step because that one
+    step left the film far over 60 minutes, refused two whole keep lists that landed at 60.5 and
+    58.5 minutes over a 400 s stretch that ran from a finished sentence to the next spoken word,
+    and refused a false start ("We have [pause] we have other people") as a sentence cut. Twelve
+    and seventeen refusals in a row; the 81-minute film never changed. The judge is now told a
+    write toward a length target is a step, length refuses only a result far below the target, a
+    stretch between sentences is clean, a false start is cleaning, and doubt about which moments
+    matter is the editor's call."""
+    s = ei.CUT_SYSTEM
+    assert "never refuse a write for not reaching the\ntarget on its own" in s
+    assert "far BELOW the target" in s and "still well\nover it" not in s
+    assert "begins after a complete sentence" in s and "topic carries on" in s
+    assert "false start" in s and "is\ncleaning" in s
+    assert "doubt about which moments matter is the editor's call" in s
+    assert "exact second to move that edge to" in s
