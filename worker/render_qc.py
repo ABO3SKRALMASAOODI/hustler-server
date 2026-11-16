@@ -3362,6 +3362,14 @@ def refresh_tail_classification(qc, edl):
             "findings": findings + stall_findings(updated, plan_)}
 
 
+def reading_contrast_findings(res):
+    """Current rendered-ink failures, reusable without parsing finding text."""
+    return [
+        f"UNREADABLE CAPTION/TEXT at {cue['time']:.2f}s ({cue['id']}): measured ink/background contrast {cue['contrast']:.2f}:1; choose contrasting ink or an opaque backing"
+        for cue in res.get("reading_contrast") or [] if cue["contrast"] < 3
+    ]
+
+
 def findings(res, plan_):
     """Plain-language findings from a check result, worst first."""
     fps = plan_.get("fps") or 30.0
@@ -3369,9 +3377,7 @@ def findings(res, plan_):
     bars = res.get("letterbox") or {}
     if plan_.get("H", 0) > plan_.get("W", 0) and bars.get("share", 0) > .1:
         out.append(f"LETTERBOX: {bars['share']:.0%} of programme frames have at least 35% black rows; fill the vertical frame with a subject-guided crop")
-    for cue in res.get("reading_contrast") or []:
-        if cue["contrast"] < 3:
-            out.append(f"UNREADABLE CAPTION/TEXT at {cue['time']:.2f}s ({cue['id']}): measured ink/background contrast {cue['contrast']:.2f}:1; choose contrasting ink or an opaque backing")
+    out += reading_contrast_findings(res)
     if plan_.get("endcard") and res.get("endcard") is not None and \
             res["endcard"] < ENDCARD_MIN_NCC:
         out.append(
