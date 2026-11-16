@@ -284,10 +284,10 @@
   }
 
   function buildLockup(c, blk) {
-    let hero = pickHero(c.w, true);
+    let hero = c.n ? -1 : pickHero(c.w, true);
     // a one-word beat is the hero — unless it is a bare connector ('Yeah',
     // 'and'), which reads as a mid-size row instead of a slammed 'THE'
-    if (hero < 0 && c.w.length === 1 && (!STOP.has(key(c.w[0].t)) || /[?!]/.test(c.w[0].t))) hero = 0;
+    if (!c.n && hero < 0 && c.w.length === 1 && (!STOP.has(key(c.w[0].t)) || /[?!]/.test(c.w[0].t))) hero = 0;
     c.heroK = hero;
     if (hero < 0) {
       // connector-only phrase ("but it could"): one mid-size row, no fake hero
@@ -399,7 +399,7 @@
         c.mid.style.fontSize = (small * k * CFG.mid).toFixed(2) + 'px';
         c.mid.style.maxWidth = cwOf(c) + 'px';
         const r = c.blk.getBoundingClientRect();
-        if (r.height <= zoneH && lineCount(c.words) <= 2 && c.mid.scrollWidth <= cwOf(c) + 1) break;
+        if (r.height <= zoneH && lineCount(c.words) <= (c.n ? 1 : 2) && c.mid.scrollWidth <= cwOf(c) + 1) break;
         if (k <= 0.55) break;
         k *= 0.93;
       }
@@ -539,6 +539,12 @@
       let B;
       if (nom) {
         B = Math.min(c0.yc - nom.one.h / 2 + nom.one.fb, hi0 - nom.tall.h + nom.tall.fb);
+        if (fits.every(c => c.n)) {
+          // A one-row contract reserves its actual row, not the look's
+          // unused second row. Keep one shared baseline for the run.
+          B = Math.min(c0.yc - nom.one.h / 2 + nom.one.fb,
+                       ...fits.map(c => rowRange(c)[1] - c.h + c.fb));
+        }
         B = Math.max(B, lo0 + nom.one.fb);
       } else {
         const one = fits.reduce((a, c) => (c.h < a.h ? c : a), fits[0]);
