@@ -28,7 +28,8 @@ import delivered as DL  # noqa: E402
 
 TASTE = ("Restraint is the design. One device carries the film; everything else is plain. A sound belongs to something landing on "
          "screen. Type has one seat per kind, sits off faces and inside the safe area, and never repeats what is already legible. "
-         "The real export is never drawn over or re-typeset. No music: Valmera never picks music. The end card and the mark are "
+         "The real export is never drawn over or re-typeset. The plan carries no music: the shell lays the film's music bed after "
+         "the render, under the whole film, with or without a voice (a marketing film is never silent). The end card and the mark are "
          "added after the film. Only true claims: every number on screen is a number in the evidence.")
 
 # what the script stage writes for each style: the JSON it is asked for, and the most characters each slot holds

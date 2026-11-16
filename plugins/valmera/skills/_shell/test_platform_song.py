@@ -112,3 +112,15 @@ def test_delivery_writes_platform_music_beside_the_clean_film(tmp_path, monkeypa
     res3 = dict(script=dict(style=dict(id="s3"), title="C film"), ideas={}, render={}, check=dict(final=str(tmp_path / "clean.mp4"), checks={}))
     f3 = sh_mod.deliver(ctx3, {}, str(tmp_path / "out"), res3)["folder"]
     assert json.load(open(os.path.join(f3, "platform_music.json")))["upload"] == "film.mp4"
+
+
+def test_the_song_covers_the_whole_film_and_enters_where_it_is_full(monkeypatch):
+    """16 Nov: on YouTube the song played a few seconds of a 58 s film. The record names the length the song must
+    cover and says how, and the chooser is told to enter where the song is already full, never on a quiet intro."""
+    pal = P.palette()
+    assert "never on a quiet intro" in P.system_prompt(pal)
+    monkeypatch.setattr(P.llm, "ask", lambda *a, **k: (json.dumps(dict(song="Succession (Main Title Theme)", artist="Nicholas Britell",
+                                                                         start="0:16", alternates=[], why="power")), {}))
+    rec, _use = P.choose("wf1", {"title": "x"}, 58.2, "film_clean.mp4")
+    assert rec["length_s"] == 58.2 and rec["cover"] == "whole film" and rec["start"] == "0:16"
+    assert "length_s" in rec["how"] and "whole film" in rec["how"] and "Instagram" in rec["how"]

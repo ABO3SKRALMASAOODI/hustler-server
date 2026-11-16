@@ -9,7 +9,8 @@ never carries a commercial recording: the publisher posts the film without our m
 here, at its entrance point, under the voice.
 
 A model reads the film and chooses (no keyword rule decides what fits); its answer is checked against the palette. The
-platforms attach one sound per post, so one song carries the whole short. The level is the owner's standing one:
+platforms attach one sound per post, so one song carries the whole short, from its first frame to its last (`length_s`,
+`cover`; 16 Nov: on YouTube the song chosen in the camera played a few seconds of a 58 s film), entering where it is full. The level is the owner's standing one:
 original sound 100%, the added song 25% (half of 50%, so the words stay clear). Any failure leaves the folder without
 platform_music.json and never stops a delivery; the publisher then keeps its own standing music rule.
 """
@@ -34,6 +35,14 @@ PALETTE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "platform_son
 USED = "platform_songs_used.jsonl"          # this workflow's recent picks, in its state folder, so a wave is not one song
 ADDED_PCT, ORIGINAL_PCT = 25, 100            # owner's standing level for platform music (publishing-rules.md)
 SKIP_KEYS = ("spend", "source", "named", "styles_banned", "window")
+COVER = "whole film"                         # the song plays from the first frame to the last (owner, 16 Nov 2026)
+HOW = ("Post the upload file. In the app's own sound or music catalog, search the song and artist, choose it, set its "
+       "start to `start`, and make it cover the whole film: its length is the video's (`length_s`), from the first frame to "
+       "the last, checked on the app's own sound timeline before posting (YouTube's camera gives a sound chosen before the "
+       "import only its own short segment: extend it to the video's end in the editor). Keep the original sound at 100% and "
+       "the added song at 25%. Instagram goes through the phones' Instagram app, which has the catalog. If the song is not "
+       "in that platform's catalog, try the alternates in order; if none is there, use the standing music rule. Never post "
+       "a file that carries a commercial recording.")
 
 
 def palette():
@@ -59,8 +68,11 @@ def system_prompt(pal):
         "songs and prestige cues; a science or wonder story to cinematic and electronic cues; a sharp, funny or "
         "confrontational clip to the hip-hop and pop hits. Never pick a song only because it is the most used. Vary from "
         "the songs listed as recently chosen unless one is clearly the right one. The entrance: the point in the song "
-        "where it should start under the film's first frame, as m:ss; most of their uses enter at the top (0:00); enter "
-        "later only where one of their uses shows a better entrance for this film.\n\n"
+        "where it should start under the film's first frame, as m:ss. The song plays at a quarter of the voice's level "
+        "from the first frame to the last, so it must enter where it is already full and moving (its beat or its theme "
+        "playing), never on a quiet intro, a fade-in or a near-silent first bar that would sit unheard under the voice; "
+        "use the entrances their uses show (enters_at_s) when the song's top is quiet, and the top (0:00) only when the "
+        "song is full from its first second.\n\n"
         "Answer with JSON only: {\"song\": exact title from the list, \"artist\": exact artist from the list, "
         "\"start\": \"m:ss\", \"alternates\": [two more {\"song\", \"artist\", \"start\"} from the list, in order, for when "
         "the first is missing from a platform's catalog], \"why\": one sentence on why it fits this film}.\n\n"
@@ -133,11 +145,8 @@ def choose(workflow, script, seconds, upload, state_root=None, ask=None):
     first = ok[0]
     rec = dict(contract=1, upload=upload, song=first["song"], artist=first["artist"], start=first["start"],
                original_sound_pct=ORIGINAL_PCT, added_sound_pct=ADDED_PCT, alternates=ok[1:3],
-               platforms=["tiktok", "youtube", "instagram"],
-               how=("Post the upload file. In the app's own sound or music catalog, search the song and artist, choose it, "
-                    "set its start to `start`, keep the original sound at 100% and the added song at 25%. If the song is "
-                    "not in that platform's catalog, try the alternates in order; if none is there, use the standing "
-                    "music rule. Never post a file that carries a commercial recording."),
+               length_s=round(float(seconds), 2) if seconds else None, cover=COVER,
+               platforms=["tiktok", "youtube", "instagram"], how=HOW,
                why=str(answer.get("why") or "")[:300], chosen_by=dict(model=use.get("model"), provider=use.get("provider")),
                chosen=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
     if state_root:

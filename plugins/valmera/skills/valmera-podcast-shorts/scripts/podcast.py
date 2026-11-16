@@ -698,7 +698,7 @@ def deliver(run, fetched, sel, built, out_root, test=False):
     if songs:   # the song each short is posted with, from the platform's own catalog (owner, 15 Nov 2026; _shell/platform_song.py)
         jsave(os.path.join(part, "platform_music.json"), dict(contract=1, how=songs[0].get("how"), shorts=[
             dict(n=x["n"], upload=x["platform_music"]["upload"], **{k: x["platform_music"].get(k) for k in (
-                "song", "artist", "start", "original_sound_pct", "added_sound_pct", "alternates", "why")})
+                "song", "artist", "start", "original_sound_pct", "added_sound_pct", "length_s", "cover", "alternates", "why")})
             for x in listing if x.get("platform_music")]))
     pod_line = f"- {info.get('title')} | {info.get('channel') or info.get('uploader')} | {link} | published {info.get('upload_date')}"
     with open(os.path.join(part, "SOURCES.md"), "w") as fh:
