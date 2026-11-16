@@ -1,4 +1,5 @@
 from types import SimpleNamespace as NS
+import json
 import pytest
 import edit_integrity as ei
 from score import asks, patch
@@ -341,3 +342,26 @@ def test_named_kind_and_pause_asks_are_removal_criteria():
     assert "ANY one of them" in s
     assert "pauses or\nsilences in speech authorizes" in s and "not cutting a\nsentence" in s
     assert "do not ask for a target length" in s
+
+
+def test_repair_turn_judges_cuts_against_brief_and_repair_list(monkeypatch, tmp_path):
+    """Tickets #1351/#1352 (user 3120, project 5857, 16 Nov): a Repair edit press made the
+    turn's message the product's repeated-word list, so the cut judge never saw the brief
+    ("... speed up the pauses in the speech") and refused every pause removal, and it refused
+    the named first sayings because word snapping moved the boundaries a fraction."""
+    import media, llm
+    monkeypatch.setattr(media, 'frame_at', lambda *a, **k: None)
+    monkeypatch.setattr(llm, 'image_part', lambda p: {'type': 'image_url', 'image_url': {'url': p}})
+    seen = []
+    monkeypatch.setattr(asks, '_call', lambda *a, **k: (seen.append(json.loads(a[4][0]['text'])['request'])
+                                                     or {'allow': True, 'reason': 'ok'}, {}))
+    brief = 'remove the long stretches of the stage shows and speed up the pauses in the speech'
+    repair = 'Fix the remaining quality issues before export: Repeated words: "say hi say hi" at 567.85s'
+    ctx = NS(user_message=repair, verification_request=brief, llm_client=object(), agent_model='any',
+             proxy_path=lambda: 'source.mp4', workdir=str(tmp_path), index={})
+    assert ei.cut_refusal(ctx, {'keep': [[0, 600]]}, {'keep': [[0, 128.3], [129.2, 600]]}) is None
+    assert brief in seen[0] and repair in seen[0]
+    assert ei._cut_request(NS(user_message=brief, verification_request=brief)) == brief
+    s = ei.CUT_SYSTEM
+    assert "first saying" in s and "snaps the named numbers to whole" in s
+    assert "serves either" in s

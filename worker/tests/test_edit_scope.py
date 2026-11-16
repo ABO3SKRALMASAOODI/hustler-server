@@ -211,3 +211,22 @@ def test_picture_repair_and_sentence_end_evidence_reaches_scope_gate(monkeypatch
     ledger['picture_check'] = {'picture2': {'state': 'not_done', 'seen': 'Generic motherboard'}}
     assert edit_scope.write_refusal(ctx, before, after) is None
     assert len(seen) == 2  # new evidence invalidates a cached refusal of the same delta
+
+
+def test_partial_step_and_speed_span_words_reach_the_scope_judge(monkeypatch):
+    """Ticket #1354 (user 3120, 16 Nov): a 2x speed-up of a measured 3.8 s dead-air gap was
+    refused as "not shown to be a speech pause" (no word context around a speed span) and
+    because the rest of the request was "not present in the delta"."""
+    seen = []
+    def check(ctx, name, schema, system, payload, **kwargs):
+        seen.append(json.loads(payload)['evidence']['word_context'])
+        return {'allowed': True, 'reason': 'pause'}, {}
+    monkeypatch.setattr(asks, '_call', check)
+    words = [{'start': 4400.0, 'end': 4404.2, 'word': 'before'}, {'start': 4408.2, 'end': 4409, 'word': 'after'},
+             {'start': 2000, 'end': 2001, 'word': 'far'}]
+    ctx = NS(ask_check_required=True, user_message='speed up the pauses', index={'words': words})
+    before = {'keep': [[0, 4858.22]], 'speed': []}
+    after = {'keep': [[0, 4858.22]], 'speed': [{'id': 'sp1', 'start': 4404.3, 'end': 4408.1, 'factor': 2}]}
+    assert edit_scope.write_refusal(ctx, before, after) is None
+    assert [w['word'] for w in seen[0]] == ['before', 'after']
+    assert 'Never refuse a write because the rest of the request is missing' in edit_scope.SYSTEM

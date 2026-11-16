@@ -21,6 +21,11 @@ are examples of the general rule, not special cases. Broad restyling is allowed
 when actually requested. A failed or unavailable requested operation authorizes
 no substitute edit unless the customer requested that alternative. If any part
 of this delta is unrelated, allowed=false and identify what must stay.
+Judge only what this delta changes: a write that serves one ask of the request is authorized
+even while other asks are still undone, since an editor makes a request's changes in several
+writes. Never refuse a write because the rest of the request is missing from it. A request
+to speed up, tighten or shorten pauses authorizes speeding or cutting a stretch where nobody
+speaks; the word context and the rendered check's measured dead air show where speech is.
 A requested speaker crop authorizes reframing; do not demand rendered proof of
 its success before allowing the write. A requested short authorizes a coherent
 ending supported by the supplied transcript. Picture obligations specify what
@@ -44,6 +49,10 @@ def changes(before, after):
 def evidence(ctx, before, after):
     ledger = getattr(ctx, "ask_ledger", None) or {}
     edges = {float(t) for edl in (before, after) for span in edl.get("keep") or [] for t in span}
+    # Ticket #1354: a speed change had no word context, so a pause speed-up was refused
+    # as "not shown to be a speech pause". Its own edges are evidence like the keep's.
+    edges |= {float(sp[k]) for edl in (before, after) for sp in edl.get("speed") or []
+              if isinstance(sp, dict) for k in ("start", "end") if sp.get(k) is not None}
     words = (getattr(ctx, "index", None) or {}).get("words") or []
     return {
         "obligations": ledger.get("asks"),
