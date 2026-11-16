@@ -503,6 +503,10 @@ def test_web_sfx_removal_frees_the_core_compact_catalog(web_sfx_off):
             drop(tool, depts)
         elif name == "read_skill":
             drop(tool, later["skills"])
+        elif name == "apply_edit_batch":
+            # a later wave's layer joining the batch enum is set aside like
+            # a department joining load_tools' (test_w1_seams does the same)
+            drop(tool, later["batch_layers"])
     w1_size = len(json.dumps(cat, separators=(",", ":")))
     assert w1_size <= 82_941 - 1_200 + w1_pinned_growth + \
         later_waves.core_growth_bytes(), w1_size
