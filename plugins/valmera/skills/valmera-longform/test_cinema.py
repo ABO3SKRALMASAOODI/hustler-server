@@ -866,3 +866,17 @@ def test_hold_gate_uses_detected_shots_even_if_plan_would_split_them(tmp_path,mo
     result=M.measure(film,tmp_path/'result.json')
     assert result['cuts']==0 and result['holds_ok'] is False
     assert result['holds_over_8s_without_camera_move'][0]['seconds']==16
+
+
+def test_a_still_card_sits_on_a_blurred_fill_of_itself_not_a_flat_page(tmp_path):
+    from PIL import Image
+    import numpy as np
+    import cinema as C
+    src = tmp_path / 'portrait.jpg'
+    a = (np.indices((900, 600)).sum(0) % 64 * 4).astype('uint8')
+    Image.fromarray(np.stack([a, a, a], -1)).save(src)
+    fill = C.still_fill(dict(path=str(src), w=600, h=900))
+    out = np.asarray(Image.open(fill['path']).convert('L'), dtype=float)
+    assert fill['h'] == 640 and out.mean() < 0.5 * a.mean()          # darker than the photograph
+    assert np.abs(np.diff(out, axis=1)).mean() < 0.2 * np.abs(np.diff(a.astype(float), axis=1)).mean()   # blurred
+    assert C.still_fill(dict(path=str(tmp_path / 'missing.jpg'), w=1, h=1)) is None

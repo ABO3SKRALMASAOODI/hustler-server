@@ -776,6 +776,25 @@ def archive_label(clip,measure,max_width=.89*W):
     return title[:lo].rstrip()+suffix
 
 
+BLEED_RATIO=1.5
+
+
+def still_fill(c):
+    """A blurred, darkened copy of a still that fills the frame behind its card. None if the picture cannot be read
+    (the card then sits on the plain page)."""
+    try:
+        from PIL import Image, ImageEnhance, ImageFilter
+        src=Path(c['path']);out=src.with_name(src.stem+'-fill.jpg')
+        if not out.exists():
+            im=Image.open(src).convert('RGB');im.thumbnail((640,640))
+            im=im.filter(ImageFilter.GaussianBlur(max(im.size)/24))
+            ImageEnhance.Brightness(im).enhance(.40).save(out,quality=88)
+        w,h=Image.open(out).size
+        return dict(path=str(out),w=w,h=h)
+    except Exception:
+        return None
+
+
 def build(sc,pack):
     worker()
     from film_long import Plan
@@ -798,16 +817,27 @@ def build(sc,pack):
                        s=[1+growth*q/max(n-1,1) for q in range(n)])
                 P.word(row['f'],archive_label(c,lambda t:P.R.width('source',t)),'source',.055,.84,note=False,z=3)
             else:
-                # Archive portraits and machinery must survive landscape
-                # presentation whole; a centre crop can erase the evidence.
-                P.page(row['f'],'#14161A',grain=.005)
-                # Reserve independent chapter, source and caption seats even
-                # at the end of the largest card move. Text renders above cards.
                 n=row['f'][1]-row['f'][0]
-                growth=.12 if n>240 else .035
-                ratio=c['w']/c['h'];height=min(.66,.70/(1+growth),.88*W/H/ratio);width=height*ratio/(W/H)
-                P.card(row['f'],key,[.5-width/2,.45-height/2,.5+width/2,.45+height/2],
-                       s=[1+growth*q/max(n-1,1) for q in range(n)])
+                ratio=c['w']/c['h']
+                if ratio>=BLEED_RATIO and c['w']>=960:
+                    # A landscape photograph fills the frame and the camera
+                    # pushes in; its cover crop keeps at least 84% of it.
+                    P.shot(row['f'],key,F.push(F.cover_crop(c['w'],c['h'],W/H,(.5,.45),(.5,.45)),n,.10 if n>240 else .07,(.5,.45)))
+                else:
+                    # Portraits and machinery stay whole, as a card over a
+                    # blurred, darkened fill of the same photograph (16 Nov:
+                    # 40% of the test film's samples were a small print on a
+                    # flat dark page). Chapter, source and caption seats stay
+                    # free at the end of the card's move.
+                    fill=still_fill(c)
+                    if fill:
+                        P.shot(row['f'],P.image(f'evidence-fill-{j}',fill),F.push(F.cover_crop(fill['w'],fill['h'],W/H),n,.05,(.5,.5)))
+                    else:
+                        P.page(row['f'],'#14161A',grain=.005)
+                    growth=.12 if n>240 else .06
+                    height=min(.70,.80/(1+growth),.88*W/H/ratio);width=height*ratio/(W/H)
+                    P.card(row['f'],key,[.5-width/2,.45-height/2,.5+width/2,.45+height/2],
+                           s=[1+growth*q/max(n-1,1) for q in range(n)])
         else:
             key=P.video(f'archive-{j}',c)
             P.shot(row['f'],key,witness_crop(row),src=row['src'])
