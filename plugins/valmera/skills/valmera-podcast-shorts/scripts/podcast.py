@@ -61,6 +61,9 @@ ATLAS_PY = f"{VV}/week-1106/atlas/venv/bin/python"
 WHISPER = f"{VV}/week-1106/atlas/models/whisper-large-v3-mlx"
 BAR = 7.0                 # a moment is made when the selection grades it this strong or stronger (1-10); there is no count
 LANES = 2                 # shorts made at once on this Mac (the footage search is the long part and waits on the network)
+PART_S = 600.0            # the selection reads the conversation in ten-minute parts, one model reading each (see moments())
+PART_OVERLAP_S = 60.0     # each part reads on a minute past its end, so a moment across the seam is seen whole
+ROUTE_OUT = "the model route is out"   # the model provider stopped answering (usage limit, cap, outage): the run waits
 _LOCK = threading.Lock()
 import delivered as DL  # noqa: E402  the shared delivered ledger (_shell/delivered.py): the same podcast is never delivered twice
 
@@ -113,6 +116,7 @@ class Run:
         self.state = jload(self.state_path, None) or dict(link=link, video_id=video_id(link), started=now(), done=[], seconds={})
         self._log = os.path.join(work, "log.txt")
         self.walled = threading.Event()                  # set when a short finds YouTube refusing this Mac: the rest wait too
+        self.route_out = threading.Event()               # set when the model provider stops answering: the rest wait too
 
     def save(self):
         with _LOCK:
@@ -379,13 +383,37 @@ SELECT_SYSTEM = (
     "of the people, companies, places and events he names, a new picture about every second.")
 
 
-SELECT_CONTRACT = '\n\nWalk the whole transcript in order and return every moment that clears the bar: a stranger stops within two seconds, stays to the end, and leaves with something. Grade each moment on its own. There is no target number, no minimum and no maximum: a weak hour gives few, a strong one many. A moment must stand alone without the episode, open on its hook in its first sentence, end on its payoff, run 18 to 55 seconds, and name at least two real things a camera has filmed (people, companies, products, places, events), because the film shows real footage of what is said. A moment of pure opinion with nothing to show is left out. Moments never overlap.\n\nReturn JSON only: {"podcast": {"speaker": the main guest\'s full name, "host": the host\'s name or "", "show": the show\'s name or "", "year": the year it was recorded, "short_title": the episode in at most eight words}, "moments": [each {"title": a plain title in at most six words, "t0": seconds where the thought starts, "t1": seconds where the payoff ends, "hook": the first line a viewer hears, from the words, "payoff": the line it lands on, "why": why a stranger watches to the end, "speakers": how many people speak in it, "names": the people heard or named, "shows": the real filmed things a picture can show for it, most important first, "styles": [{"id": a style id from the list, "why": what in this moment that style needs}] best fit first, at least two, "hook_score": 1-10, "payoff_score": 1-10, "story_score": 1-10, "strength": 1-10 overall}], "left_out": [the strongest moments you left out, at most eight, each {"t0": seconds, "title": title, "why": the reason}]}'
+SELECT_CONTRACT = '\n\nWalk the whole transcript in order and return every moment that clears the bar: a stranger stops within two seconds, stays to the end, and leaves with something. Grade each moment on its own. There is no target number, no minimum and no maximum: a weak hour gives few, a strong one many. A moment must stand alone without the episode, open on its hook in its first sentence, end on its payoff, run 18 to 55 seconds, and be about at least one real thing a camera has filmed (a person, company, product, place or event, named or plainly meant), because the film shows real footage of what is said. A strong opinion, confession, prediction, number or funny exchange about real things is a moment like a story is. Only talk with nothing real in it at all is left out. Moments never overlap.\n\nReturn JSON only: {"podcast": {"speaker": the main guest\'s full name, "host": the host\'s name or "", "show": the show\'s name or "", "year": the year it was recorded, "short_title": the episode in at most eight words}, "moments": [each {"title": a plain title in at most six words, "t0": seconds where the thought starts, "t1": seconds where the payoff ends, "hook": the first line a viewer hears, from the words, "payoff": the line it lands on, "why": why a stranger watches to the end, "speakers": how many people speak in it, "names": the people heard or named, "shows": the real filmed things a picture can show for it, most important first, "styles": [{"id": a style id from the list, "why": what in this moment that style needs}] best fit first, at least two, "hook_score": 1-10, "payoff_score": 1-10, "story_score": 1-10, "strength": 1-10 overall}], "left_out": [every other candidate you weighed and left out, each {"t0": seconds, "title": title, "why": the reason}]}'
 
 
 def select_prompt(info, styles, lines, part=None):
+    """part: (k, n, t0, t1): this reading returns the moments that start between t0 and t1 s; the lines after t1 are
+    only there so a moment that starts before t1 is read to its payoff."""
     import wf1_film
     menu = "\n".join(f"- {s['id']}: {s['name']}. {s.get('look', '')} Needs: {s.get('needs', '')}." for s in styles if s["id"] in wf1_film.STYLES)
-    return f'# The source\n{identity_text(info)}\n\n# The styles a short can take\n{menu}\n\n' + (f'# This is part {part[0]} of {part[1]} of the transcript\n\n' if part else '') + '# Transcript, one line per ~12 s: [h:mm:ss|seconds] words\n' + '\n'.join(lines)
+    head = ''
+    if part:
+        head = (f'# This is part {part[0]} of {part[1]} of the transcript, {_fmt(part[2])} to {_fmt(part[3])}\n'
+                f'Return every moment that STARTS in this part (t0 from {part[2]:.0f} to {part[3]:.0f} s); the lines after '
+                f'{_fmt(part[3])} are there only to read a moment that starts before it to its payoff.\n\n')
+    return f'# The source\n{identity_text(info)}\n\n# The styles a short can take\n{menu}\n\n' + head + '# Transcript, one line per ~12 s: [h:mm:ss|seconds] words\n' + '\n'.join(lines)
+
+
+def parts_of(words, part_s=PART_S, overlap_s=PART_OVERLAP_S):
+    """The conversation in parts of part_s seconds, each with overlap_s more after its end: [(t0, t1, words)].
+    One reading of a whole hour returns about ten moments whatever the hour holds (Jensen Huang, CBS, 46 min, 15 Nov:
+    10 kept, 7 more named as left out); a reading of ten minutes walks every minute of its part."""
+    if not words:
+        return [(0.0, 0.0, [])]
+    end = float(words[-1][0])
+    out, t = [], float(words[0][0])
+    while t <= end:
+        t1 = t + part_s
+        if end - t1 < part_s / 3:                    # a short tail joins the part before it
+            t1 = end + 1
+        out.append((t, t1, [(a, w) for a, w in words if t <= a < t1 + overlap_s]))
+        t = t1
+    return out
 
 
 def assign_styles(moments, order):
@@ -442,11 +470,10 @@ def moments(run, fetched):
         # A regression run reuses the model's untouched selection, never a
         # hand-authored edit plan. Every short is rebuilt through the product.
         return dict(prior, spend=[], replayed_selection=True)
-    chunk = 45000
-    parts = [words[i:i + chunk + 800] for i in range(0, len(words), chunk)] or [[]]
+    parts = parts_of(words)
     rows, left, pod, spend = [], [], {}, []
-    for k, ws in enumerate(parts):
-        content = select_prompt(info, styles, lines_of(ws), part=(k + 1, len(parts)) if len(parts) > 1 else None)
+    for k, (p0, p1, ws) in enumerate(parts):
+        content = select_prompt(info, styles, lines_of(ws), part=(k + 1, len(parts), p0, p1) if len(parts) > 1 else None)
         got = {}
         for _ in range(2):
             text, use = llm.ask(SELECT_SYSTEM + SELECT_CONTRACT, content, effort="high", max_tokens=48000)
@@ -459,13 +486,13 @@ def moments(run, fetched):
                 break
         else:
             raise RuntimeError("the selection gave no moments")
-        rows += [r for r in got["moments"] if isinstance(r, dict)]
+        rows += [dict(r, part=k + 1) for r in got["moments"] if isinstance(r, dict)]
         left += [r for r in got.get("left_out") or [] if isinstance(r, dict)]
         pod = pod or (got.get("podcast") if isinstance(got.get("podcast"), dict) else {})
     under = [dict(t0=r.get("t0"), title=r.get("title"), why=f"graded {r.get('strength')} of 10, under the bar of {BAR:g}") for r in rows
              if float(r.get("strength") or 0) < BAR]
     kept = assign_styles(rank(rows), list(wf1_film.ORDER))
-    return dict(podcast=pod, found=len(rows), moments=kept, left_out=(under + left)[:40], bar=BAR, spend=spend)
+    return dict(podcast=pod, found=len(rows), parts=len(parts), moments=kept, left_out=under + left, bar=BAR, spend=spend)
 
 
 # ----------------------------------------------------------------- the shorts
@@ -481,10 +508,20 @@ def _last_json(text):
     return {}
 
 
+def route_out(err):
+    """A model call the provider would not answer at all: the usage limit, a cap, a gateway down (HTTP 429/502/503/504
+    from the OpenAI rung or the local adapter). Not this short's fault, and it does not lift in a minute: the short is
+    kept to continue, the shorts not started wait, and the podcast is never delivered short of them (16 Nov: the Codex
+    limit was hit at m05 and m06-m10 were each marked failed within four seconds)."""
+    e = str(err or "")
+    return any(f"openai {c}" in e for c in (429, 502, 503, 504)) or "codex_proxy_error" in e or "local_proxy_error" in e
+
+
 def build_short(run, m, fetched, pod, tries=3):
     """One moment through wf1_short.py. Returns its record: {id, ok, folder | error}."""
     state = run.p("shorts", m["id"])
-    if os.environ.get('CODEX_PROXY_LOCAL') == '1':tries=1
+    if os.environ.get('CODEX_PROXY_LOCAL') == '1':     # on the subscription route a stopped short is resumed once from the stage
+        tries=min(tries,2)                             # where it stopped (16 Nov: m03 failed in render, then was made on its resume)
     os.makedirs(state, exist_ok=True)
     import wf1_film
     done = jload(os.path.join(state, "done.json"))
@@ -492,6 +529,8 @@ def build_short(run, m, fetched, pod, tries=3):
         return done
     if run.walled.is_set():                              # footage cannot be fetched right now: nothing is spent on a short that would stop
         return dict(id=m["id"], ok=False, error=f"{wf1_film.WALL}: not started")
+    if run.route_out.is_set():
+        return dict(id=m["id"], ok=False, error=f"{ROUTE_OUT}: not started")
     info = fetched["info"]
     args = dict(moment=m, words=run.p("words.json"), style=m["style"], music_ledger=run.p("music_used.json"),      # no two shorts of a run play one track
                 delivered_ledger="off",                  # an inner short; podcast.py records the podcast's one folder
@@ -538,6 +577,10 @@ def build_short(run, m, fetched, pod, tries=3):
         if wf1_film.WALL in new:                                 # not this short's fault and not gone in a minute: the run waits for the wall to lift
             run.walled.set()
             err = new
+            break
+        if route_out(new):                                       # the same for the model route: its work folder is resumed next run
+            run.route_out.set()
+            err = f"{ROUTE_OUT}: {new}"
             break
         if new == err:                                           # the same fault twice is not the network: this short cannot be made as planned
             break
@@ -637,6 +680,11 @@ def deliver(run, fetched, sel, built, out_root, test=False):
     if test and built['failed']:
         failed=', '.join(r['id'] for r in built['failed'])
         raise RuntimeError('Incomplete test set remains resumable; fix the recorded failures and resume: '+failed)
+    out = [r for r in built["failed"] if ROUTE_OUT in str(r.get("error"))]
+    if out:                                              # delivered once, complete: never short of the moments the model route left
+        raise RuntimeError(f"{len(out)} of {len(sel['moments'])} shorts are waiting for the model route ({ROUTE_OUT}: usage limit, cap or outage). "
+                           "Run the same link again when it answers: the shorts already made are kept, a stopped short continues "
+                           "where it stopped, and nothing is delivered until the set is whole")
     waiting = [r for r in built["failed"] if wf1_film.WALL in str(r.get("error"))]
     if waiting:                                          # a folder is delivered once, complete: not while shorts wait for their footage
         raise RuntimeError(f"{len(waiting)} of {len(sel['moments'])} shorts are waiting for footage: {wf1_film.WALL} on every player. It lifts by "

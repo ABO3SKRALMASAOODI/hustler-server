@@ -25,15 +25,17 @@ it returns media and provenance, never account credentials. Remote rendering nee
 ## How to run it (Claude Code and Codex alike)
 
 1. Start the command above as a background job (`run_in_background` in Claude Code; a background terminal in
-   Codex). Measured on 14 Nov 2026: a 49-minute talk gave 7 shorts in 24 minutes for $4.77 of OpenAI credit
-   (fetch half a minute, the reading four, each short about five, two shorts at a time). A long podcast with
-   many moments takes proportionally longer.
+   Codex). Measured 15-16 Nov 2026 on the subscription route (Jensen Huang, CBS, 46 min, one lane): fetch 5 min,
+   local hearing 36 min, the reading 6 min, then 30-115 min and 600-1,400 model calls a short. A run of many
+   shorts takes many hours: let it run, it continues where it stopped.
 2. Do not poll it and do not end your turn while it runs. When it exits, read its last line: one JSON object with
    `delivered` (the folder), `shorts`, `not_made`, `spend_usd` and `work_empty`.
 3. Tell the user the folder's path once, how many shorts are in it, and anything in `not_made` with its reason.
    Do not rate the shorts: a builder never rates its own work.
 4. If it stopped (exit 2, a `stopped` object), run the same command with the same link: it continues where it
-   stopped. A short that failed is tried again on that run. Fix a real defect in the product, never by hand in a
+   stopped. A short that failed is tried again on that run. When the model route stops answering (a usage limit,
+   the adapter's cap, an outage: HTTP 429/502/503/504) the short in hand keeps its work, the shorts not started
+   wait, and nothing is delivered until the set is whole: run the same link again when the route answers. Fix a real defect in the product, never by hand in a
    film.
 5. **"YouTube is refusing this Mac as a bot"** in `stopped` is not a defect to fix: a busy address is walled on
    every player for a while (a seven-short run fetches about a hundred sources). The link cannot be read, or the
@@ -48,7 +50,7 @@ it returns media and provenance, never account credentials. Remote rendering nee
 |---|---|---|
 | fetch | The video at 1080p or under and its captions. A download of the same video an earlier run left on this Mac is used in place. YouTube is asked down a ladder of player clients (plain, embedded, mobile web with a PO token, TV, Safari): when it walls this Mac as a bot on one, the next is tried, and the one that worked goes first from then on | `podcast.py fetch`, `ladder` |
 | hear | Every word with its time: the platform's captions, else the whole source heard locally (whisper large-v3 through `heavy.sh`) | `podcast.py hear` |
-| moments | One reading of the whole conversation (OpenAI, high effort) returns every moment that stands alone, hooks in its first sentence, lands its payoff, runs 18 to 55 s and names real things a camera has filmed. Each is graded 1 to 10 on its own; every moment at 7 or over is made, strongest first. There is no count, minimum or maximum | `podcast.py moments`, `rank` |
+| moments | The conversation is read in ten-minute parts (one high-effort reading each, a minute of overlap): each returns every moment that starts in its part, stands alone, hooks in its first sentence, lands its payoff, runs 18 to 55 s and is about at least one real thing a camera has filmed. Strong opinions, confessions, predictions and numbers about real things count like stories. Each is graded 1 to 10 on its own; every moment at 7 or over is made, strongest first; of two that overlap the stronger stays. There is no count, minimum or maximum | `podcast.py moments`, `parts_of`, `rank` |
 | styles | One of the four styles below per short: the moment's own best fit, never the style of either short before it, spread evenly | `podcast.py assign_styles` |
 | shorts | Each moment is one run of the workflow shell: the exact clip on word edges, the footage and photographs, the film in its style, the engines, the render, the brand finish, the checks, the music | `wf1_short.py`, `wf1_film.py`, `../_shell` |
 | deliver | Once, complete, into one folder, then the work folder is deleted and the run fails if anything of it is left | `podcast.py deliver` |
@@ -106,7 +108,7 @@ talking about it, and the placement check rejects pictures merely associated wit
 | The clip | In and out on word edges, the title, the hook and close lines, and the real things it names | `wf1_short.script` (OpenAI) |
 | Real footage | Video of what each sentence names from YouTube and archive.org, every frame checked, a person held to one face, 1 to 3 s clips inside one shot, graded to one look, each with its URL, channel and time range. A clip that is near black or flat is left out. Source aspect and every edge are preserved before the layout; portrait crops are never baked into supply. Pictures never move to a different sentence without a fresh placement check | `worker/footage` through `_shell/chain.footage` |
 | Photographs | Of the same things, after the footage of them and where footage is thin: Commons and Openverse, checked by eye, licence kept |
-| Documentary coverage | A model inventories every concrete named thing and assigns pictures to exact word spans. Actual pictures must cover at least 45% of the short; moving footage must cover at least 60% of picture time, with six new real pictures per ten seconds of named stretches. Every entry, middle, exit and display transition is checked on gpt-6-sol. Rejected assets are replaced from checked supply; insufficient coverage stops the run rather than passing an empty-picture audit | `wf1_coverage.py`, `placement_check.py` |
+| Documentary coverage | A model inventories every concrete named thing and assigns pictures to exact word spans. The targets: actual pictures on at least 45% of the short, moving footage on at least 60% of picture time, six new real pictures per ten seconds of named stretches. Every entry, middle, exit and display transition is checked on gpt-6-sol and a rejected picture never ships. Under target, the short spends at most `RECOVERY_PASSES` (2) research passes, counted across rebuilds, and one more pass for moving footage after the render review; then the film is built from every approved picture, the speaker carries the rest with his own camera cuts and motivated moves, and `coverage.short` in the record says what was short. A target is never a reason to lose a short | `wf1_coverage.py`, `placement_check.py` |
 | Pace and moves | New pictures carry pace. Speaker footage keeps its own camera cuts; only model-justified rhetorical words trigger eased, face-safe moves. Never alternate hard crops to fill a cut quota | `worker/scene/pace.py`, `wf1_film.py` |
 | Look | One look solved on the film's own pictures, skin kept | `worker/scene/looks.py` |
 | Finishes by section | When part of the story is about the past, that part's pictures are black and white (a story that is all past keeps its colour, except in `archive-reel`); one new picture in three opens soft and is sharp by its fourth frame; a white frame on the cut back to his face for the payoff | `wf1_film.build` |
@@ -166,7 +168,7 @@ README.md             the list, what was not made and why
 - `alien/` and `../_shell/wf1.py`: the earlier one-film styles (room-listens, lit-by-voice, receipts, second-camera).
   Not part of this workflow.
 
-Never report plan counts as viewer measurements. Use the independent rater’s final-film scripts and judge3; zero rejected pictures with insufficient real-picture coverage is a failure. A fixer does not independently rate its own work.
+Never report plan counts as viewer measurements. Use the independent rater’s final-film scripts and judge3; a film's measured coverage shortfall (`coverage.short`) is reported with it, never hidden. A fixer does not independently rate its own work.
 
 Research the director's visual subjects, keeping the full spoken-entity inventory for audit. Pass the depiction context all the way to the footage reviewer. A contextual campus illustration is distinct from a claim to record a particular historical conversation; never invent the missing participant. The podcast uses the engine's contextual-check route: every selected source cut, composed placement and branded transition is checked against the actual words. Named people require visible attribution, never face comparison. Preliminary motion scouting is bounded to the source frames being examined; the selected clips still receive exact motion measurements. A failed coverage gate triggers targeted research with retained sources, never silent deletion of the pictures.
 
@@ -196,7 +198,7 @@ subjects, as well as later recovery. Reusing their bytes never bypasses motion o
 Composed-picture failures also return to the acquisition director once per affected window, so a broad
 but unsuitable depiction brief cannot keep asking for the same unrelated activity. Changed briefs
 invalidate source-scan reuse. A paused rejection repair resumes before rendering a stale rejected plan.
-The composed and branded films must also reach 60% moving picture time. A still discovered there stays
+The composed film aims at 60% moving picture time (one more footage pass when it is under, then it stands). A still discovered there stays
 eligible as a still, while the product returns to footage research; it cannot regain moving credit from an earlier source check.
 Research is split into small referent groups with retained answers. A source replay can reuse verified word
 timings while recovering the same original at a resolution that permits real, face-safe eased movement.

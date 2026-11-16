@@ -7,6 +7,7 @@ import os
 import sys
 
 import pytest
+from types import SimpleNamespace
 
 os.environ["PODCAST_NO_REEXEC"] = "1"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -447,3 +448,61 @@ def test_recovery_spends_on_motion_before_more_stills(tmp_path, monkeypatch, rea
                      dict(weak_windows=[0],real_seconds=real,moving_seconds=moving,required_moving_seconds=6))
     assert calls==(["documents"] if documents_first else ["footage"])
     assert old in pack["pictures"]["Google"]
+
+
+def test_the_selection_reads_the_conversation_in_ten_minute_parts(tmp_path, monkeypatch):
+    """15 Nov: one reading of a 46-minute interview kept 10 moments. Each part is read on its own (with a minute past
+    its end for a moment across the seam); the moments are pooled, overlaps keep the stronger, and there is no count."""
+    import llm
+    words = [(float(t), f"w{t}") for t in range(0, 2780, 2)]                     # 46 minutes
+    parts = podcast.parts_of(words)
+    assert [round(p[0]) for p in parts] == [0, 600, 1200, 1800, 2400] and parts[-1][1] > 2778
+    assert all(w[0] < p[1] + podcast.PART_OVERLAP_S for p in parts for w in p[2]) and parts[0][2][-1][0] >= 650
+    tail = podcast.parts_of([(float(t), "w") for t in range(0, 1300, 2)])
+    assert [round(p[0]) for p in tail] == [0, 600] and tail[-1][1] > 1298                  # a 100 s tail joins the part before it
+    (tmp_path / "words.json").write_text(json.dumps(words))
+    asked = []
+
+    def ask(system, content, **kw):
+        k = len(asked)
+        asked.append(content)
+        assert "STARTS in this part" in content and f"part {k + 1} of 5" in content
+        base = 600 * k
+        ms = [dict(title=f"p{k}m{i}", t0=base + 120 * i, t1=base + 120 * i + 40, strength=8, shows=["Nvidia"],
+                   styles=[dict(id="window")]) for i in range(5)]
+        if k:
+            ms.append(dict(title="seam twin", t0=base - 10, t1=base + 25, strength=7, shows=["TSMC"]))   # overlaps the part before's last
+        return json.dumps(dict(podcast=dict(speaker="Jensen Huang"), moments=ms, left_out=[dict(t0=base + 5, title="x", why="y")])), {}
+    monkeypatch.setattr(llm, "ask", ask)
+    run = SimpleNamespace(p=lambda *a: str(tmp_path.joinpath(*a)))
+    sel = podcast.moments(run, dict(info=dict(id="xCUala5j7aQ", title="CBS", duration=2778)))
+    assert len(asked) == 5 and sel["parts"] == 5 and sel["found"] == 29
+    assert len(sel["moments"]) == 25 and len(sel["left_out"]) == 5      # every part's moments, none capped; the weaker seam twin dropped
+    assert "Only talk with nothing real in it at all is left out" in podcast.SELECT_CONTRACT and "two real things" not in podcast.SELECT_CONTRACT
+
+
+def test_a_model_route_that_stops_answering_holds_the_delivery_and_the_shorts_not_started(tmp_path, monkeypatch, capsys):
+    """16 Nov: the Codex limit hit at m05; m06-m10 were each marked failed in four seconds, and a real run would then
+    have delivered the podcast short of them for ever. Now the run waits and continues on the same link."""
+    limit = 'check: openai 502: {"error": {"message": "Local model failed: usage limit", "code": "codex_proxy_error"}}'
+    assert podcast.route_out(limit) and podcast.route_out("script: openai 429: slow down") and not podcast.route_out("render: ineligible")
+    monkeypatch.setattr(podcast, "WORK_ROOT", str(tmp_path))
+    run = podcast.Run("https://youtu.be/abcdefghijk", str(tmp_path))
+    started = []
+
+    def proc(cmd, **kw):
+        started.append(cmd)
+        return SimpleNamespace(returncode=2, stdout=json.dumps(dict(stopped=dict(stage="check", error=limit[7:]))))
+    monkeypatch.setattr(podcast.subprocess, "run", proc)
+    monkeypatch.setenv("CODEX_PROXY_LOCAL", "1")
+    m = lambda i: dict(id=f"m0{i}", style="window", title="t")                # noqa: E731
+    first = podcast.build_short(run, m(5), dict(info={}, video="x"), {})
+    later = podcast.build_short(run, m(6), dict(info={}, video="x"), {})
+    assert len(started) == 1 and run.route_out.is_set()
+    assert podcast.ROUTE_OUT in first["error"] and podcast.ROUTE_OUT in later["error"]
+    assert not os.path.exists(os.path.join(str(tmp_path), "shorts", "m06", "done.json"))
+    work_root, out = _fake_run(tmp_path / "r", monkeypatch, fail={"m03": f"{podcast.ROUTE_OUT}: {limit}"})
+    monkeypatch.setattr(sys, "argv", ["podcast.py", "https://youtu.be/abcdefghijk", "--out", out])
+    assert podcast.main() == 2
+    rep = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert rep["stopped"]["stage"] == "deliver" and "waiting for the model route" in rep["stopped"]["error"] and not os.path.exists(out)
