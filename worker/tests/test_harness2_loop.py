@@ -291,3 +291,25 @@ def test_run_agent_job_routes_by_the_stamp(monkeypatch):
         agent_loop.run_agent_job(db, {"id": 600, "project_id": 7,
                                       "user_id": 3, "payload": payload})
     assert seen == ["v2", "v1"]
+
+
+# -- F21 a long analysis inside a turn is progress, never a stall ------------
+
+def test_a_long_tool_call_continues_the_turn_instead_of_stalling(
+        monkeypatch):
+    ctx, db, job, msg = _turn()
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(loop.time, "monotonic", lambda: clock["t"])
+    real = tools_mod.dispatch
+
+    def slow(c, name, args, wait_s=None):
+        clock["t"] += 360.0                       # a 6-minute measurement
+        return real(c, name, args, wait_s=wait_s)
+    monkeypatch.setattr(tools_mod, "dispatch", slow)
+    ctx.agent_lanes = [_lane(Script([
+        _resp(calls=[("timeline", {})]),
+        _resp(calls=[("timeline", {})])]))]
+    result = loop.run(ctx, db, job, 11, msg, None)
+    assert result["status"] == "continued"         # not failed, not stalled
+    assert db.continuations[-1]["continuation_state"]["v2"]["step"] == 2
+    assert not [m for m in db.messages if m["role"] == "assistant"]

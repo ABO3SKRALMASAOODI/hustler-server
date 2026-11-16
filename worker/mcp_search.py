@@ -32,18 +32,28 @@ def describe_missing(ctx, hits):
             paths.append(path)
             ids.append(h['id'])
         if paths:
+            prompt = ('Describe only the visible content of each search thumbnail: subject, action, '
+                      'framing and visible text. Do not infer identity or relevance from a query. '
+                      'A thumbnail proves one frame, not the whole clip. Return a JSON array of '
+                      '{"id": exact id, "description": concise factual description}; use null '
+                      'if unreadable. Images in order: ' + json.dumps(ids))
             try:
-                reply = llm.ask_vision(
-                    'Describe only the visible content of each search thumbnail: subject, action, '
-                    'framing and visible text. Do not infer identity or relevance from a query. '
-                    'A thumbnail proves one frame, not the whole clip. Return a JSON array of '
-                    '{"id": exact id, "description": concise factual description}; use null '
-                    'if unreadable. Images in order: ' + json.dumps(ids),
-                    paths, max_tokens=2000, purpose='search_descriptions',
-                    image_names=ids, reasoning_effort='low')
+                reply = llm.ask_vision(prompt, paths, max_tokens=2000,
+                                       purpose='search_descriptions',
+                                       image_names=ids, reasoning_effort='low')
                 rows = llm.extract_json_array(reply or '') or []
-            except Exception:  # A provider outage leaves evidence unknown, not fabricated.
+            except Exception as exc:  # A provider outage leaves evidence unknown, not fabricated.
+                print(f'[search] descriptions failed: {type(exc).__name__}: {str(exc)[:200]}',
+                      flush=True)
                 rows = []
+            if not rows:
+                # F25 (harness v2): the cause is logged, never swallowed, and the turn's own
+                # editing lane (a second, multimodal provider) looks once before anything is
+                # left undescribed.
+                print(f'[search] descriptions: no answer from the vision provider '
+                      f'({str(llm.last_error() or "empty reply")[:200]}); asking the turn lane',
+                      flush=True)
+                rows = _second_look(prompt, paths, ids)
             descriptions = {r.get('id'): r.get('description') for r in rows
                             if isinstance(r, dict) and isinstance(r.get('description'), str)}
             for h in missing:
@@ -69,6 +79,33 @@ def describe_missing(ctx, hits):
         h['unverified'] = True
         h['description_basis'] = UNDESCRIBED_BASIS
     return hits, undescribed
+
+
+def _second_look(prompt, paths, ids):
+    """The same question on the turn's editing lane (a second provider), or []. Recorded like
+    every model call; a failure is logged with its cause."""
+    import llm
+    lane = llm.turn_lane()
+    if not lane or not lane.get('client') or not llm.agent_sees(lane.get('model')):
+        print('[search] descriptions: no second multimodal lane on this turn', flush=True)
+        return []
+    content = [{'type': 'text', 'text': prompt}]
+    try:
+        for name, path in zip(ids, paths):
+            content.append({'type': 'text', 'text': f'[{name}]'})
+            content.append(llm.image_part(path))
+        resp = llm.create_with_dialect(lane['client'], lane['model'],
+                                       [{'role': 'user', 'content': content}],
+                                       max_tokens=2000)
+        answer = (resp.choices[0].message.content or '').strip()
+        llm.record('search_descriptions', {'model': lane['model'], 'images': ids,
+                                           'second_provider': True},
+                   {'answer': answer}, getattr(resp, 'usage', None))
+        return llm.extract_json_array(answer) or []
+    except Exception as exc:  # noqa: BLE001 - logged; the library text or the board stands
+        print(f'[search] descriptions: second lane failed: {type(exc).__name__}: '
+              f'{str(exc)[:200]}', flush=True)
+        return []
 
 
 def place(ctx, id, at_output_s, duration_s, mode='overlay', source_start_s=0):

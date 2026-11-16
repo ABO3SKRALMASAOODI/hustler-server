@@ -513,3 +513,40 @@ def test_mcp_runs_v2_calls_through_the_same_dispatcher(monkeypatch):
     names = [t["function"]["name"] for t in mcp_exec._v2_tools()]
     assert names == ["look", "timeline", "edit", "undo", "render", "find",
                      "wait"]
+
+
+# -- F25 descriptions: the cause logged, a second provider looks -------------
+
+def test_describe_missing_logs_its_cause_and_asks_a_second_lane(
+        monkeypatch, tmp_path, capsys):
+    import llm
+    import mcp_search
+    import net_fetch
+    from types import SimpleNamespace
+    from PIL import Image
+    ctx, _fake = _ctx()
+    ctx.workdir = str(tmp_path)
+    monkeypatch.setattr(net_fetch, "download", lambda url, local, **k:
+                        Image.new("RGB", (32, 18)).save(local))
+    monkeypatch.setattr(llm, "ask_vision", lambda *a, **k: None)
+    monkeypatch.setattr(llm, "last_error",
+                        lambda: "429 insufficient_quota")
+    answer = json.dumps([{"id": "p:1", "description": "a red bus"}])
+
+    class Client:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(
+                create=lambda **k: SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(
+                        content=answer))], usage=None)))
+
+        def with_options(self, **k):
+            return self
+    monkeypatch.setattr(llm, "turn_lane", lambda: {"client": Client(),
+                                                   "model": "claude-haiku-5-5"})
+    monkeypatch.setattr(llm, "agent_sees", lambda m: True)
+    hits, missing = mcp_search.describe_missing(
+        ctx, [{"id": "p:1", "_thumb": "http://t/1.jpg"}])
+    assert hits[0]["description"] == "a red bus" and missing == 0
+    out = capsys.readouterr().out
+    assert "429 insufficient_quota" in out and "asking the turn lane" in out
