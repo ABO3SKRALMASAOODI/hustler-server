@@ -509,12 +509,14 @@ def _last_json(text):
 
 
 def route_out(err):
-    """A model call the provider would not answer at all: the usage limit, a cap, a gateway down (HTTP 429/502/503/504
-    from the OpenAI rung or the local adapter). Not this short's fault, and it does not lift in a minute: the short is
-    kept to continue, the shorts not started wait, and the podcast is never delivered short of them (16 Nov: the Codex
-    limit was hit at m05 and m06-m10 were each marked failed within four seconds)."""
+    """A model call the provider would not answer at all: rate or usage limited (HTTP 429), unavailable (503: the local
+    adapter's cap or its latch after the subscription's usage limit), or the subscription's own "usage limit" answer
+    passed through as a 502 on the first call that meets it. Not this short's fault, and it does not lift in a minute:
+    the short is kept to continue, the shorts not started wait, and the podcast is never delivered short of them
+    (16 Nov: the Codex limit was hit at m05 and m06-m10 were each marked failed within four seconds). Any other model
+    error stays with its short, which is resumed once."""
     e = str(err or "")
-    return any(f"openai {c}" in e for c in (429, 502, 503, 504)) or "codex_proxy_error" in e or "local_proxy_error" in e
+    return "openai 429" in e or "openai 503" in e or ("openai 502" in e and "usage limit" in e)
 
 
 def build_short(run, m, fetched, pod, tries=3):

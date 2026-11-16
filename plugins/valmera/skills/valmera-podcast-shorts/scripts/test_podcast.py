@@ -486,6 +486,8 @@ def test_a_model_route_that_stops_answering_holds_the_delivery_and_the_shorts_no
     have delivered the podcast short of them for ever. Now the run waits and continues on the same link."""
     limit = 'check: openai 502: {"error": {"message": "Local model failed: usage limit", "code": "codex_proxy_error"}}'
     assert podcast.route_out(limit) and podcast.route_out("script: openai 429: slow down") and not podcast.route_out("render: ineligible")
+    assert podcast.route_out("script: openai 503: Claude backend daily call cap reached (1500/1500)")
+    assert not podcast.route_out('check: openai 502: {"error": {"message": "Local model failed: Reading prompt from stdin"}}')
     monkeypatch.setattr(podcast, "WORK_ROOT", str(tmp_path))
     run = podcast.Run("https://youtu.be/abcdefghijk", str(tmp_path))
     started = []
