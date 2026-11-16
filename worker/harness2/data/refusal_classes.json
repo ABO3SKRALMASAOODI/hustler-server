@@ -1,0 +1,1511 @@
+{
+"functions": {
+"_apply_patches": {
+"class": "overrule",
+"counts": {
+"overrule": 1
+}
+},
+"_asset_audio_analysis": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"_attach_subject_matte": {
+"class": "overrule",
+"counts": {
+"overrule": 2,
+"technical": 3
+}
+},
+"_audio_from_clip": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"_authored_kinetic_phrases": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"_auto_reframe": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"_capture_precheck": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"_clock": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"_compose": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"_dissolve_at_cuts": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"_editorial_source_index": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"_erase_rect_item": {
+"class": "technical",
+"counts": {
+"technical": 6
+}
+},
+"_executor_refusal": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"_flash_refusal": {
+"class": "owner_policy",
+"counts": {
+"owner_policy": 1
+}
+},
+"_gate": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"_gen_budget_reject": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"_headline_type": {
+"class": "overrule",
+"counts": {
+"overrule": 2
+}
+},
+"_hero_fallback": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"_hold_frame": {
+"class": "overrule",
+"counts": {
+"overrule": 1,
+"technical": 1
+}
+},
+"_layout_rejection": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"_look_at_output": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"_look_music_choice": {
+"class": "owner_policy",
+"counts": {
+"owner_policy": 2,
+"technical": 1
+}
+},
+"_matte_clip": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"_measure_subject_matte": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"_measure_subject_matte_v2": {
+"class": "overrule",
+"counts": {
+"overrule": 1,
+"technical": 2
+}
+},
+"_music_program_beats": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"_no_original_refusal": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"_no_track": {
+"class": "owner_policy",
+"counts": {
+"owner_policy": 1
+}
+},
+"_normalize_panel_columns": {
+"class": "technical",
+"counts": {
+"technical": 6
+}
+},
+"_parse_anim_float": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"_parse_screen_corners": {
+"class": "technical",
+"counts": {
+"technical": 5
+}
+},
+"_parse_text_motion": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"_parse_zoom_path": {
+"class": "technical",
+"counts": {
+"technical": 5
+}
+},
+"_payoff_time": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"_pending_visual_review": {
+"class": "overrule",
+"counts": {
+"overrule": 1
+}
+},
+"_persistent_contract": {
+"class": "overrule",
+"counts": {
+"overrule": 6
+}
+},
+"_preflight_recipe": {
+"class": "technical",
+"counts": {
+"technical": 8
+}
+},
+"_probe_full": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"_ramp_insert": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"_rect_arg": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"_resolve_media_asset": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"_resolve_music": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"_resolve_panel": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"_resolve_sfx": {
+"class": "owner_policy",
+"counts": {
+"owner_policy": 1,
+"technical": 3
+}
+},
+"_set_frame": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"_set_picture_card": {
+"class": "technical",
+"counts": {
+"technical": 13
+}
+},
+"_size_direction_refusal": {
+"class": "regex_intent",
+"counts": {
+"regex_intent": 1
+}
+},
+"_solve_match_ev": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"_solve_zoom_rect": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"_source_broll": {
+"class": "technical",
+"counts": {
+"technical": 6
+}
+},
+"_speaker_panel": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"_stock_hit_by_provider_id": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"_supported": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"_undo": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"_web_sfx_refusal": {
+"class": "owner_policy",
+"counts": {
+"owner_policy": 1
+}
+},
+"_write_keep": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"_zoom_camera_args": {
+"class": "technical",
+"counts": {
+"technical": 7
+}
+},
+"add_accent": {
+"class": "owner_policy",
+"counts": {
+"owner_policy": 1,
+"technical": 15
+}
+},
+"add_aspect_shift": {
+"class": "technical",
+"counts": {
+"technical": 6
+}
+},
+"add_captions": {
+"class": "technical",
+"counts": {
+"technical": 13
+}
+},
+"add_collage": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"add_color_screen": {
+"class": "technical",
+"counts": {
+"technical": 6
+}
+},
+"add_corrupt_screen": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"add_custom_filter": {
+"class": "technical",
+"counts": {
+"technical": 6
+}
+},
+"add_depth_effect": {
+"class": "regex_intent",
+"counts": {
+"overrule": 1,
+"regex_intent": 1,
+"technical": 7
+}
+},
+"add_device_stage": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"add_element": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"add_filmstrip": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"add_finish": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"add_freeze_frame": {
+"class": "technical",
+"counts": {
+"technical": 7
+}
+},
+"add_kinetic_text": {
+"class": "technical",
+"counts": {
+"technical": 11
+}
+},
+"add_motion_graphic": {
+"class": "technical",
+"counts": {
+"technical": 7
+}
+},
+"add_music": {
+"class": "technical",
+"counts": {
+"technical": 5
+}
+},
+"add_overlay": {
+"class": "technical",
+"counts": {
+"technical": 12
+}
+},
+"add_region_effect": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"add_screen_takeover": {
+"class": "overrule",
+"counts": {
+"overrule": 2,
+"technical": 17
+}
+},
+"add_sfx": {
+"class": "technical",
+"counts": {
+"technical": 9
+}
+},
+"add_stock_media": {
+"class": "overrule",
+"counts": {
+"overrule": 1,
+"technical": 2
+}
+},
+"add_strobe": {
+"class": "owner_policy",
+"counts": {
+"owner_policy": 1,
+"technical": 9
+}
+},
+"add_stylize": {
+"class": "technical",
+"counts": {
+"technical": 6
+}
+},
+"add_subject_effect": {
+"class": "owner_policy",
+"counts": {
+"owner_policy": 1,
+"technical": 7
+}
+},
+"add_text": {
+"class": "technical",
+"counts": {
+"technical": 14
+}
+},
+"add_text_behind": {
+"class": "overrule",
+"counts": {
+"overrule": 1,
+"technical": 8
+}
+},
+"add_time_effect": {
+"class": "overrule",
+"counts": {
+"overrule": 1,
+"technical": 7
+}
+},
+"add_title_card": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"add_type_window": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"add_typeset": {
+"class": "overrule",
+"counts": {
+"overrule": 1,
+"technical": 7
+}
+},
+"add_ui_scene": {
+"class": "technical",
+"counts": {
+"technical": 11
+}
+},
+"add_vector_graphic": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"add_voiceover": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"add_web_sfx": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"add_zoom": {
+"class": "technical",
+"counts": {
+"technical": 7
+}
+},
+"add_zoom_path": {
+"class": "technical",
+"counts": {
+"technical": 10
+}
+},
+"animate_still": {
+"class": "technical",
+"counts": {
+"technical": 7
+}
+},
+"apply_edit_batch": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"apply_edit_recipe": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"apply_format_pack": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"apply_look": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"apply_recipe": {
+"class": "overrule",
+"counts": {
+"overrule": 1,
+"owner_policy": 1,
+"technical": 5
+}
+},
+"ask_user": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"attach": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"audit_captions": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"audition_music_candidates": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"audition_sfx_candidates": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"beat_align_cuts": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"bind_motion_motif": {
+"class": "technical",
+"counts": {
+"technical": 10
+}
+},
+"blur_region": {
+"class": "technical",
+"counts": {
+"technical": 6
+}
+},
+"check_speech": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"commit": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"compare_uploaded_media": {
+"class": "technical",
+"counts": {
+"technical": 5
+}
+},
+"complete_edit_plan_steps": {
+"class": "overrule",
+"counts": {
+"overrule": 1,
+"technical": 1
+}
+},
+"compose_panels": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"critique_short": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"cut_output_range": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"cut_range": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"cut_silences": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"deliver_aspects": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"edit_shorts": {
+"class": "technical",
+"counts": {
+"technical": 6
+}
+},
+"enhance_cursor": {
+"class": "technical",
+"counts": {
+"technical": 5
+}
+},
+"enhance_video": {
+"class": "technical",
+"counts": {
+"technical": 5
+}
+},
+"erase_burned_text": {
+"class": "overrule",
+"counts": {
+"overrule": 1,
+"technical": 3
+}
+},
+"erase_region": {
+"class": "overrule",
+"counts": {
+"overrule": 1,
+"technical": 5
+}
+},
+"extract_audio": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"fetch_music": {
+"class": "owner_policy",
+"counts": {
+"owner_policy": 1,
+"technical": 4
+}
+},
+"fetch_sfx": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"fetch_url": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"find_activity": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"find_burned_text": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"find_footage": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"find_shots": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"find_silences": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"find_song": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"find_visual_moments": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"generate_image": {
+"class": "technical",
+"counts": {
+"technical": 5
+}
+},
+"generate_video": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"get_audio_analysis": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"get_editorial_map": {
+"class": "technical",
+"counts": {
+"technical": 5
+}
+},
+"get_syllables": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"get_transcript": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"get_words": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"import_font": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"import_lut": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"insert_media": {
+"class": "technical",
+"counts": {
+"technical": 6
+}
+},
+"isolate_colour": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"keep_segments": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"list_assets": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"look_at": {
+"class": "technical",
+"counts": {
+"technical": 7
+}
+},
+"look_at_asset": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"make_shorts": {
+"class": "overrule",
+"counts": {
+"overrule": 2,
+"technical": 3
+}
+},
+"make_variant_set": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"match_grade": {
+"class": "technical",
+"counts": {
+"technical": 5
+}
+},
+"move_insert": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"move_overlay": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"move_sfx": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"pick_still": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"pin_to_plane": {
+"class": "technical",
+"counts": {
+"technical": 6
+}
+},
+"place_in_world": {
+"class": "regex_intent",
+"counts": {
+"regex_intent": 1,
+"technical": 5
+}
+},
+"plan": {
+"class": "technical",
+"counts": {
+"technical": 7
+}
+},
+"plan_to_music": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"proof_device": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"punch_in_on_emphasis": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"recolour_object": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"record_website": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_aspect_shift": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_blur": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"remove_broll": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"remove_custom_filter": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_depth_time": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"remove_editorial_graphic": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_erase": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_filler_words": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"remove_filmstrip": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_finish": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"remove_insert": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_motion_graphic": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_music": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_overlay": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"remove_punctuation": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_region_effect": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_screen_frame": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_screen_takeover": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_sfx": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_speed": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_stylize": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_subject_effect": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"remove_text": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_typeset": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_typography_scene": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_ui_scene": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"remove_vector_graphic": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_voiceover": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_world": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_zoom": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"remove_zoom_path": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"render_preview": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"render_variants": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"research_broll": {
+"class": "technical",
+"counts": {
+"technical": 5
+}
+},
+"reset_edit": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"resolve_library_reference": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"restore_range": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"retypeset_language": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"review_audio": {
+"class": "technical",
+"counts": {
+"technical": 7
+}
+},
+"search_music": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"search_sfx": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"search_stock": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"search_transcript": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"select_object": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"set_audio_gain": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"set_background": {
+"class": "owner_policy",
+"counts": {
+"overrule": 1,
+"owner_policy": 1,
+"technical": 2
+}
+},
+"set_brand_kit": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"set_caption_fixes": {
+"class": "regex_intent",
+"counts": {
+"regex_intent": 1,
+"technical": 5
+}
+},
+"set_caption_mutes": {
+"class": "technical",
+"counts": {
+"technical": 6
+}
+},
+"set_caption_style": {
+"class": "technical",
+"counts": {
+"technical": 6
+}
+},
+"set_color_grade": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"set_composite": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"set_edit_plan": {
+"class": "overrule",
+"counts": {
+"overrule": 2,
+"technical": 9
+}
+},
+"set_fades": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"set_grade_custom": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"set_grade_window": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"set_insert_window": {
+"class": "technical",
+"counts": {
+"technical": 18
+}
+},
+"set_intensity": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"set_junction": {
+"class": "owner_policy",
+"counts": {
+"overrule": 1,
+"owner_policy": 1,
+"technical": 8
+}
+},
+"set_motion_graphic": {
+"class": "technical",
+"counts": {
+"technical": 6
+}
+},
+"set_music_fit": {
+"class": "technical",
+"counts": {
+"technical": 5
+}
+},
+"set_overlay_motion": {
+"class": "technical",
+"counts": {
+"technical": 5
+}
+},
+"set_photo_fill": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"set_screen_frame": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"set_speed": {
+"class": "technical",
+"counts": {
+"technical": 5
+}
+},
+"set_speed_ramp": {
+"class": "overrule",
+"counts": {
+"overrule": 2,
+"technical": 8
+}
+},
+"set_stack": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"set_text_motion": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"set_transitions": {
+"class": "technical",
+"counts": {
+"technical": 7
+}
+},
+"set_typeset": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"set_vector_graphic": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"set_volume": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"shape_music": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"showcase_demo": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"suggest_devices": {
+"class": "technical",
+"counts": {
+"technical": 4
+}
+},
+"suggest_emphasis": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"suggest_match_cuts": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"suggest_recipes": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"suggest_story": {
+"class": "technical",
+"counts": {
+"technical": 2
+}
+},
+"swap_music": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"track_point": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+},
+"windows": {
+"class": "technical",
+"counts": {
+"technical": 3
+}
+},
+"write_edl": {
+"class": "technical",
+"counts": {
+"technical": 1
+}
+}
+},
+"source": "EDIT-CORE map-part2.json (16 Nov 2026), tool_sites by function"
+}

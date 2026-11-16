@@ -18,6 +18,12 @@ numpy<2
 # passes. The model file itself is baked by the Dockerfile, not pip.
 onnxruntime==1.19.2
 pillow==13.0.0
+# Harness v2 slides (render(output="slides"): a PowerPoint deck of
+# timestamped notes with their frames). Without it the same slides are
+# written as a PDF with Pillow. lxml and XlsxWriter are its own needs.
+python-pptx==1.0.2
+lxml==5.3.0
+XlsxWriter==3.2.0
 requests==2.34.2
 # Durable scale-to-zero executor client. Only the Render dispatcher calls the
 # SDK; executor containers receive ordinary Python dicts from Modal Functions.

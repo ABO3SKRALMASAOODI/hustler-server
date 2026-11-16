@@ -2290,6 +2290,17 @@ def run_agent_job(worker_db, job):
     if ctx.claude_trial is not None:
         claude_trial.activate(ctx.claude_trial, recorder=_llm_recorder)
     try:
+        if payload.get("harness") == "v2":
+            # Harness v2 (HARNESS_V2.md): a request stamped at enqueue runs
+            # the seven-tool loop; the stamp rides every continuation, so a
+            # request never changes harness mid-turn. Routing is off by
+            # default (app_kv.harness_v2), so unstamped jobs never get here.
+            from harness2 import loop as harness2_loop
+            result = harness2_loop.run(ctx, worker_db, job, session_id,
+                                       user_message, continuation_state)
+            if ctx.claude_trial is not None:
+                _claude_trial_settle(ctx, result)
+            return result
         attachment_note = _attachment_context(worker_db, ctx, user_message)
         import request_contract as semantic_request
         prior_chat = worker_db.run(dbx.recent_chat, ctx.session_id, 24, user_message["id"])
