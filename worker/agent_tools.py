@@ -21974,8 +21974,13 @@ def generate_video(ctx, prompt, from_image_asset_key=None, duration_s=5):
                     'Repeating this call cannot resolve the provider account restriction. '
                     'Leave the existing film unchanged; offer the uploaded reference as a still '
                     'or ask for an animated replacement clip. Do not apply that alternative without the customer choosing it.')
+        # The alternatives reach the editor here, in its tool result: it offers them in its own
+        # words and the customer's language (edit_scope.disclose only records them).
+        also = (" Real alternatives to offer if it still fails: "
+                + " ".join(a["offer"] for a in ctx.edit_alternatives)
+                if from_image_asset_key else "")
         return (f"Video generation FAILED: {err}. Try again or tell the user it "
-                "didn't work — do NOT claim a clip was created.")
+                "didn't work — do NOT claim a clip was created." + also)
     # The provider has billed it, whatever happens to the file from here.
     llm.charge_generation("video_gen", config.VIDEO_GEN_MODEL,
                           videogen.price_for(seconds))

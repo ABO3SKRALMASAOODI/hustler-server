@@ -2157,10 +2157,13 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         # The reply says "over its song" only when a song was measured in
         # the upload (p5744, 16 Nov 2026: an 11 s walk with room tone at
         # -45.7 dB RMS and a 0.37 beat confidence was told it had a song).
+        # It never says the film plays only its own sound: _render_cut lays
+        # the first film's sound design, and the reply names what it placed
+        # (edit_provenance.sounds_added, measured from the delivered version).
         import edit_provenance
         applied.append("kept whole (it already plays as a finished piece"
                        + (" over its song)" if edit_provenance.upload_has_music(ctx.index)
-                          else ", in its own time with its own sound)"))
+                          else ", in its own time)"))
         if drop_app_cards(ctx, steps, started, duration):
             applied.append("the app's end card left out")
         if not whole and typography.get("designed_layout"):
@@ -3808,6 +3811,15 @@ def run(worker_db, job, project, index_row):
             print(f"[first_cut] brief follow-up not queued: {exc}", flush=True)
     if delivered:
         duration = float(preview.get("duration_s") or 0)
+        if not url:
+            # What the first cut laid over the upload's sound, measured from
+            # the delivered version (p5744: a riser and an impact the reply
+            # never named were later taken for the upload's own).
+            import edit_provenance
+            added = edit_provenance.sounds_added(
+                (start_edl or {}).get("json"), (latest or {}).get("json"))
+            if added:
+                applied = list(applied) + [added]
         summary = _summary(applied, duration, url)
         admission = project_admission_safe(worker_db, project["id"])
         trial = bool(admission and admission.get("kind") == "trial")

@@ -23,7 +23,8 @@ def _remember_disclosure(ctx, delta, measured, offer=None):
 
 def disclose(ctx, reply):
     """Records the measured retained change of the turn (ctx.retained_reply_facts, for the message
-    meta and the checks) and offers a real alternative when nothing changed and an ask is open.
+    meta and the checks), and the real alternative a tool named when it met a request it could not
+    do. The reply is returned as the editor wrote it.
 
     The reply itself is the editor's, written from the measured change its write results carry
     (edit_provenance.turn_change) and from where each part of the film came from. No second model
@@ -37,13 +38,13 @@ def disclose(ctx, reply):
         return reply
     current = ctx.latest_edl()['json']
     delta = changes(baseline, current)
-    # A tool that met a request it could not do names a real alternative (edit_alternatives); it is
-    # offered once, in the tool's own words. The editor's reply carries everything else.
+    # A tool that met a request it could not do names a real alternative (edit_alternatives). Its
+    # result already gives that alternative to the editor, who offers it in its own words and in
+    # the customer's language; it is recorded here, never appended (an English copy of it landed
+    # under Hindi, Spanish and Portuguese replies that had already made the offer).
     alternatives = getattr(ctx, 'edit_alternatives', None) or []
     import reply_grounding
     measured = reply_grounding.change_list_text(reply_grounding.edl_changes(baseline, current))
     offer = alternatives[0].get('offer') if alternatives and isinstance(alternatives[0], dict) else None
     _remember_disclosure(ctx, delta, measured, offer)
-    if offer and offer not in (reply or ''):
-        return (reply or '').rstrip() + '\n\n' + offer
     return reply

@@ -7729,19 +7729,25 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         preview and config.RENDER_SEEK_DISTANT_KEEPS and len(_keep_clusters(
             edl["keep"], config.KEEP_CLUSTER_GAP_S, 2)) > 1)
     seek_main_source = (source_seek_s >= 5.0 or distant_keeps) and not src_lead
-    main_input_args = (["-copyts", "-ss", f"{source_seek_s:.3f}",
-                        "-i", src_path]
+    # -start_at_zero puts the seeking path on the plain input's clock: every
+    # input's own start is taken off its timestamps (the seek is not), so a
+    # keep of [70, 76] reads the same frames whether the input seeked or not.
+    # Without it -copyts kept the container clock, and a source whose format
+    # starts at 1.48 s trimmed every keep 1.48 s early on the seeking path,
+    # behind the seek point: 16.5 s of preview for an 18 s cut, its frames
+    # apart from the final export's from 5 s on (16 Nov 2026 review).
+    main_input_args = (["-copyts", "-start_at_zero",
+                        "-ss", f"{source_seek_s:.3f}", "-i", src_path]
                        if seek_main_source else ["-i", src_path])
     # Where the picture's first frame sits on the clock the main trims read:
-    # -copyts keeps the container's own times; a plain input is shifted so the
-    # earliest stream starts at 0. Focus handoffs land on real frames with it
-    # (focus_handoff). A VFR picture has no frame grid to land on.
+    # both paths shift the input so its earliest stream starts at 0. Focus
+    # handoffs land on real frames with it (focus_handoff). A VFR picture has
+    # no frame grid to land on.
     focus_origin = None
     if src_lead:
         focus_origin = 0.0      # the held first frame starts the grid at 0
     elif info.get("video_start") is not None and not info.get("vfr"):
-        focus_origin = float(info["video_start"]) - (
-            0.0 if seek_main_source else float(info.get("format_start") or 0.0))
+        focus_origin = float(info["video_start"]) - float(info.get("format_start") or 0.0)
 
     frame = edl.get("frame") or None
     if frame and (frame.get("ratio") or "source") == "source":
@@ -8103,10 +8109,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             if fx_source is None and any(isinstance(i, dict)
                                          for i in edl.get("fx") or []):
                 fx_source = pm_src
-            # -copyts reads the container clock: the sidecars' (proxy-
-            # relative) seconds sit the container's start later on it
-            pm.clock_offset = (float(info.get("format_start") or 0.0)
-                               if seek_main_source else 0.0)
+            # Both paths read the input on a clock that starts at 0
+            # (-copyts runs with -start_at_zero), the sidecars' own clock
+            pm.clock_offset = 0.0
     pm_items = {}               # (layer, id) -> serves on the program matte
 
     def _screen_stage(item):
@@ -8248,9 +8253,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                bool(caption_motion_items)),
             behind_why=_hero_behind_why,
             world=_world_ctx(edl, W, H, fps, tl, index, preview, None,
-                             (float(info.get("format_start") or 0.0)
-                              if seek_main_source else 0.0), workdir,
-                             src_path))
+                             0.0, workdir, src_path))
         if caption_motion_items and not any(
                 str(it.get("id", "")).startswith("__captions_")
                 for _i, it, _c in motion_inputs):

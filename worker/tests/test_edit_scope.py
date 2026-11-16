@@ -32,15 +32,18 @@ def test_an_unchanged_turn_gets_no_boilerplate(monkeypatch):
     assert ctx.retained_reply_facts['fields'] == ['unchanged']
 
 
-def test_a_tools_real_alternative_is_offered_once(monkeypatch):
+def test_a_tools_real_alternative_is_recorded_and_the_editors_own_offer_stands(monkeypatch):
+    """The tool result gives the editor the alternative; the editor offers it in the customer's
+    language. Nothing appends the tool's English text under a Hindi, Spanish or Portuguese reply."""
     _no_model(monkeypatch)
     offer = 'I can show your uploaded reference as a still; it will not animate.'
     ctx = NS(turn_start_edl={'json': {}}, latest_edl=lambda: {'json': {}},
              edit_alternatives=[{'offer': offer}])
-    out = edit_scope.disclose(ctx, 'Animation is not possible from this file.')
-    assert out.count(offer) == 1
-    assert edit_scope.disclose(ctx, out).count(offer) == 1
+    reply = ('No pude animar este archivo. Puedo usar tu referencia como imagen fija, '
+             'o colocar un clip animado si lo subes.')
+    assert edit_scope.disclose(ctx, reply) == reply
     assert ctx.retained_reply_facts['fields'] == ['unchanged', 'alternative']
+    assert offer in ctx.retained_reply_facts['description']
 
 
 def test_no_second_model_authorizes_the_editors_writes():
