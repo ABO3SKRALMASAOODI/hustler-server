@@ -22,6 +22,15 @@ def test_explicit_selected_region_survives_unrelated_desktop_saliency():
     assert report[0]['reason'] == 'selected_region_crop'
 
 
+@pytest.mark.parametrize('intersects', [True, False])
+def test_selected_region_cannot_slice_printed_source_words(intersects):
+    film, index = selected_scene()
+    perception = {'text': [{'t': [3, 4], 'seen': 1,
+                           'box': [.85,.2,.95,.3] if intersects else [.02,.01,.98,.04]}]}
+    report = source_guard.apply(film, index, perception)
+    assert (report[0]['reason'] == 'selected_region_crop') is not intersects
+
+
 @pytest.mark.parametrize('fault', ['missing', 'full', 'outside', 'narrow', 'aspect', 'cut', 'face', 'invalid'])
 def test_bad_selected_region_cannot_bypass_source_guard(fault):
     film, index = selected_scene()

@@ -88,7 +88,7 @@ def _selected_region(item, rects, ratio, shots, boxes):
 
     Like a supplied named detail, it can omit unrelated subjects. Every
     rendered window must remain inside that selection and contain any subject
-    it intersects. Reject absent/malformed provenance, source-cut crossings,
+    or printed line it intersects. Reject absent/malformed provenance, source-cut crossings,
     out-of-bounds geometry and aspect mismatches rather than blessing them.
     """
     region = item.get("source_region")
@@ -174,7 +174,10 @@ def apply(l1, index, perception, *, views=None):
                 0 <= c[1] < c[3] <= 1 and abs((c[2]-c[0])/(c[3]-c[1])-ratio) < .005 and all(c[0] <= b[0] and c[1] <= b[1]
                 and c[2] >= b[2] and c[3] >= b[3] for b in boxes) for c in rects))
         detail = _named_detail(item, views, rects, ratio, shots, boxes)
-        selected = _selected_region(item, rects, ratio, shots, boxes)
+        printed = [row["box"] for row in (perception or {}).get("text") or []
+                   if row.get("t") and _overlaps(start, end, *row["t"]) and
+                   row.get("seen", 0) >= 1 and len(row.get("box") or []) == 4]
+        selected = _selected_region(item, rects, ratio, shots, boxes + printed)
         safe = safe or detail or selected
         reason = ("named_detail_crop" if detail else "selected_region_crop" if selected
                   else "subject_boxes_contained")
