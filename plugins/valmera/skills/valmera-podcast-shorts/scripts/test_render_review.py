@@ -58,9 +58,10 @@ def test_recovered_original_rescans_frames_without_repeating_exhausted_searches(
     wf.refill(ctx,script,pack,shortage)
     assert len(calls)==1 and calls[0]['source_only'] is True
     assert pack['coverage_repairs']==4 and pack['research_sources']==wf.source_signature(str(tmp_path))
-    with pytest.raises(RuntimeError,match='coverage still incomplete'):
-        wf.refill(ctx,script,pack,shortage)
-    assert len(calls)==1
+    # exhausted research ends research, not the short: the film is built from every approved picture
+    wf.refill(ctx,script,pack,shortage)
+    assert len(calls)==1 and 'still short' in pack['coverage_exhausted'] and wf.coverage_final(pack)
+    assert json.load(open(tmp_path/'pack.json'))['pack']['coverage_exhausted']==pack['coverage_exhausted']
 
 
 def test_composed_rejection_rebuilds_product_plan_and_invalidates_render(tmp_path, monkeypatch):
@@ -159,30 +160,19 @@ def test_later_repairs_keep_the_picture_that_passed_every_review(tmp_path,monkey
     assert '/supply/good.jpg' not in json.load(open(tmp_path/'render_rejected.json'))
 
 
-def test_delivery_only_rejection_invalidates_brand_and_music_and_rebuilds(tmp_path,monkeypatch):
+def test_the_delivered_film_is_not_reviewed_again_on_the_frames_the_render_review_checked(tmp_path,monkeypatch):
+    """16 Nov: the brand finish and the music change no programme frame; the second review cost 50-350 model calls a
+    short. The delivered record carries the render review."""
     ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),args={},log=lambda x:None)
-    (tmp_path/'script.json').write_text('{}')
-    sc=dict(frames=90,beats=dict(pictures=[dict(path='/supply/bad.jpg')]),spend=[])
-    rd=dict(film='engine.mp4');checks=[]
-    def finish(ctx,rd,sc):
-        if checks:
-            assert not (tmp_path/'final_music.mp4').exists()
-            assert not (tmp_path/'music.json').exists()
-        for name in ('final.mp4','final_music.mp4','music.json'):(tmp_path/name).write_text('old')
-        checks.append(1)
-        return dict(final='clean.mp4',final_music='branded.mp4',checks=dict(ok=True))
-    def review(ctx,rd,sc):
-        assert rd['film']=='branded.mp4'
-        bad=len(checks)==1
-        return dict(moving_share=1.,rejected=int(bad),placements=[dict(id=0,ok=not bad)] if bad else [],spend=[])
-    monkeypatch.setattr(wf.wf3,'check',finish)
-    monkeypatch.setattr(wf,'_render_review',review)
-    monkeypatch.setattr(wf,'score',lambda *a:dict(frames=90,beats=dict(pictures=[]),spend=[]))
-    monkeypatch.setattr(wf,'render',lambda *a:dict(film='new-engine.mp4'))
-    result=wf.check(ctx,rd,sc)
-    assert len(checks)==2 and result['checks']['ok']
-    assert result['checks']['podcast']['delivered_check']['rejected']==0
-    assert json.load(open(tmp_path/'render_rejected.json'))==['/supply/bad.jpg']
+    rendered=dict(moving_share=.8,rejected=0,placements=[dict(id=0,ok=True)],spend=[])
+    sc=dict(frames=90,beats=dict(pictures=[dict(path='/supply/good.mp4')],rendered_check=rendered),spend=[])
+    checks=[]
+    monkeypatch.setattr(wf.wf3,'check',lambda ctx,rd,sc:checks.append(1) or dict(final='clean.mp4',final_music='branded.mp4',checks=dict(ok=True)))
+    monkeypatch.setattr(wf,'_render_review',lambda *a:pytest.fail('the delivered film was reviewed again'))
+    result=wf.check(ctx,dict(film='engine.mp4'),sc)
+    assert checks==[1] and result['checks']['ok']
+    podcast=result['checks']['podcast']
+    assert podcast['delivered_check']['rejected']==0 and podcast['delivered_check']['placements']==rendered['placements']
 
 
 def test_rejection_identifies_asset_when_research_passes_reuse_filenames(tmp_path,monkeypatch):
@@ -332,13 +322,26 @@ def test_composed_still_is_retained_but_cannot_certify_moving_coverage(tmp_path,
     assert sc['beats']['rendered_check']['moving_share']==.7
 
 
-def test_unchanged_final_motion_failure_stops_without_retry(tmp_path,monkeypatch):
+def test_unchanged_final_motion_shortfall_keeps_the_film_without_retry(tmp_path,monkeypatch):
     pack=dict(composed_stills=['still.mp4'])
     monkeypatch.setattr(wf.wf3,'load_pack',lambda _:pack)
-    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path))
+    monkeypatch.setattr(wf,'score',lambda *a:pytest.fail('nothing new to research: no rebuild'))
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda x:None)
     sc=dict(beats=dict(pictures=[dict(path='still.mp4')]))
-    with pytest.raises(RuntimeError,match='lack verified moving footage'):
-        wf._rebuild_motion(ctx,{},sc,dict(placements=[dict(id=0,ok=True,motion_ok=False)]))
+    assert wf._rebuild_motion(ctx,{},sc,dict(moving_share=.3,placements=[dict(id=0,ok=True,motion_ok=False)])) is False
+
+
+def test_motion_is_researched_once_a_short_then_the_film_stands_on_its_faithful_stills(tmp_path,monkeypatch):
+    pack=dict(composed_stills=[])
+    (tmp_path/'pack.json').write_text(json.dumps(dict(pack=pack)))
+    monkeypatch.setattr(wf.wf3,'load_pack',lambda _:pack)
+    rebuilt=[]
+    monkeypatch.setattr(wf,'score',lambda *a:rebuilt.append(1) or dict(beats=dict(pictures=[dict(path='new.jpg')]),spend=[]))
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda x:None)
+    report=dict(moving_share=.3,placements=[dict(id=0,ok=True,motion_ok=False)])
+    assert wf._rebuild_motion(ctx,{},dict(beats=dict(pictures=[dict(path='a.jpg')])),report) is True
+    assert wf._rebuild_motion(ctx,{},dict(beats=dict(pictures=[dict(path='b.jpg')])),report) is False
+    assert rebuilt==[1] and pack['motion_recovered'] is True
 
 
 @pytest.mark.parametrize('wrong_hash,bad_time',[(True,False),(False,True),(False,False)])
@@ -383,3 +386,33 @@ def test_platform_wall_goes_directly_to_original_publishers(tmp_path,monkeypatch
               dict(weak_windows=[0],real_seconds=0,moving_seconds=0))
     assert calls[0]['source_only'] is True and calls[0]['hear_s']==0
     assert pack['coverage_repairs']==4
+
+
+def test_a_short_spends_at_most_its_recovery_passes_then_is_built_from_every_approved_picture(tmp_path,monkeypatch):
+    """15-16 Nov: up to seven research passes a short, and a short lost when they ran out. Now RECOVERY_PASSES, counted
+    across rebuilds, then the final build."""
+    import wf1_coverage,wf1_alignment
+    pack=dict(coverage=dict(contract=wf1_coverage.CONTRACT,windows=[]),alignment_contract=wf1_alignment.CONTRACT,
+              platform_walled=True,footage=[],lines=[],blank_frame_contract=1,ffmpeg='/usr/bin/ffmpeg')
+    (tmp_path/'pack.json').write_text(json.dumps(dict(pack=pack)))
+    monkeypatch.setattr(wf.wf3,'load_pack',lambda _:pack)
+    monkeypatch.setattr(wf.wf3,'env_path',lambda:'')
+    monkeypatch.setattr(wf,'direction_of',lambda *a:dict())
+    monkeypatch.setattr(wf.chain,'wants_music',lambda _:True)
+    monkeypatch.setattr(wf.F,'taste_check',lambda *a:dict(ok=True,problems=[]))
+    monkeypatch.setattr(wf.F,'audio_scene',lambda *a:{})
+    refills,finals=[],[]
+    monkeypatch.setattr(wf,'refill',lambda ctx,script,pack,report:refills.append(1))
+    def build(sc,pack,style,knobs):
+        finals.append(knobs['coverage_final'])
+        if not knobs['coverage_final']:
+            raise wf1_coverage.CoverageError('short',dict(weak_windows=[0]))
+        return dict(items=[],dur_f=90),dict(pictures=[])
+    monkeypatch.setattr(wf.wf1_film,'build',build)
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),args={},log=lambda x:None)
+    script=dict(title='t',style=dict(id='window'),hook_line='h',close_line='c')
+    wf.score(ctx,script)
+    assert len(refills)==wf.RECOVERY_PASSES and finals==[False]*wf.RECOVERY_PASSES+[True]
+    wf.score(ctx,script)                                      # a rebuild after a composed rejection: no new research
+    assert len(refills)==wf.RECOVERY_PASSES and finals[-1] is True
+    assert json.load(open(tmp_path/'pack.json'))['pack']['coverage_recoveries']==wf.RECOVERY_PASSES

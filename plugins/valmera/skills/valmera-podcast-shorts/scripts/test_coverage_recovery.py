@@ -254,3 +254,31 @@ def test_short_hd_publisher_video_has_a_bounded_download_budget(tmp_path,monkeyp
                            SimpleNamespace(openai_key=lambda:None,json_block=json.loads))
     assert bool(result['sources']) is accepted
     assert bool(result['errors']) is not accepted
+
+
+def test_the_final_build_returns_the_shortfall_instead_of_losing_the_short():
+    """Owner, 16 Nov 2026: a fix reaches the outcome. While recovery passes remain a shortfall goes back to research;
+    the final build is made from every approved picture and the record says what was short."""
+    shots=coverage.proposals(repeated_subject(),{0:[dict(path='/a.mp4',seconds=1.6)],1:[dict(path='/b.mp4',seconds=1.6)]},{})
+    with pytest.raises(coverage.CoverageError):
+        coverage.require_coverage(shots,repeated_subject(),3)
+    report=coverage.require_coverage(shots,repeated_subject(),3,final=True)
+    assert report['short'] is True and report['moving_seconds']==0 and report['new_pictures']==2
+
+
+def test_a_plan_with_a_correction_still_open_after_three_readings_keeps_its_valid_windows(tmp_path):
+    words=[dict(w=w,start=i,end=i+.8) for i,w in enumerate('Nvidia built the chips in Taiwan for years'.split())]
+    plan={'entities':[dict(name='TSMC',word_ids=[5])],
+          'windows':[dict(first=0,last=3,name='Nvidia',external=True,must_show='Nvidia chips'),
+                     dict(first=2,last=4,name='overlap',external=True,must_show='x')]}
+    asked=[]
+    llm=SimpleNamespace(ask=lambda *a,**k:asked.append(1) or (json.dumps(plan),{}),json_block=json.loads)
+    out=coverage.plan(words,'Chips',str(tmp_path),llm)
+    assert len(asked)==3 and [w['name'] for w in out['windows']]==['Nvidia'] and out['plan_problems']
+
+
+def test_speaker_holds_the_director_cannot_break_are_recorded_not_fatal(tmp_path):
+    data=dict(words=[dict(w=str(i),start=i,end=i+.8) for i in range(12)],moves=[])
+    llm=SimpleNamespace(ask=lambda *a,**k:('{"moves":[]}',{}),json_block=json.loads)
+    moves,_=coverage.speaker_moves(data,[],12*30,[],str(tmp_path),llm=llm)
+    assert moves==[] and data['unresolved_holds']==[(0,360)]

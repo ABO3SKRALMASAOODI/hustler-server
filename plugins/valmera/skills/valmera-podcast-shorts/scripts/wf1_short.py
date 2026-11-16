@@ -51,6 +51,10 @@ import wf3  # noqa: E402
 
 FOOTAGE_PIXELS = "native"  # clips keep their source pixels for full-bleed framing (16 Nov); a fitted 1080x608 shelf is not reused
 RESEARCH_CONTRACT = 7  # primary documents can fill a truthful still-picture gap before more video research
+# Research passes a short may spend on missing documentary coverage before its film is built from every approved picture
+# (owner, 16 Nov 2026: many publishable shorts per podcast). Up to 7 passes, each a full footage search plus fresh
+# frame checks, made one short cost 600-1,400 model calls on 15-16 Nov and lost 3 of 10 moments outright.
+RECOVERY_PASSES = 2
 
 
 def _llm():
@@ -572,12 +576,15 @@ def refill(ctx, script, pack, shortage):
         for rec in json.load(open(os.path.join(ctx.supply,'primary-videos','manifest.json'))):
             if not any(r['url']==rec['url'] for r in manifest):manifest.append(rec)
         with open(manifest_path,'w') as f:json.dump(manifest,f,indent=1)
-        if not primary:raise RuntimeError('no verified public publisher video found after platform research exhausted')
+        if not primary:
+            exhausted(ctx,pack,'no verified public publisher video found after platform research')
+            return
     if count > 4 and added and not rescout:
         # Score the newly acquired original once even when video research is exhausted.
         return
     if count > 4 and not rescout:
-        raise RuntimeError('documentary coverage still incomplete after platform and original-publisher research')
+        exhausted(ctx,pack,'documentary coverage still short after platform and original-publisher research')
+        return
     name = f"footage-v{coverage['contract']}-{FOOTAGE_PIXELS}-context{RESEARCH_CONTRACT}-{signature}-repair{count}"
     if rescout:name+='-recovered-sources' if recovered_sources else '-expanded-context'
     prior = [os.path.join(ctx.supply,n,'footage.json') for n in os.listdir(ctx.supply)
@@ -594,7 +601,8 @@ def refill(ctx, script, pack, shortage):
                          strict_lines=True,motion_first=True,scout_motion=True,alloc='round',reassign_lost=True,
                          verify=False,whole_first=True,keep_sources=True,hear_s=0,source_only=rescout or count==4 or bool(pack.get('platform_walled')),out_name=name)
     if not foot:
-        raise RuntimeError('supplementary documentary research returned no record')
+        exhausted(ctx,pack,'supplementary documentary research found nothing new')
+        return
     by = {int(row['i']):row for row in pack['footage']}
     for row in foot['lines']:
         i = int(row['i'])
@@ -612,6 +620,22 @@ def refill(ctx, script, pack, shortage):
     path = os.path.join(ctx.supply,'pack.json')
     stored = json.load(open(path));stored['pack']=pack
     with open(path,'w') as f:json.dump(stored,f,indent=1)
+
+
+def save_pack(ctx, pack):
+    path=os.path.join(ctx.supply,'pack.json');stored=json.load(open(path));stored['pack']=pack
+    with open(path,'w') as f:json.dump(stored,f,indent=1)
+
+
+def exhausted(ctx, pack, why):
+    """Research has nothing more to find: the film is built from every approved picture (wf1_coverage final)."""
+    pack['coverage_exhausted']=why
+    save_pack(ctx,pack)
+    ctx.log(why+'; the film is built from every approved picture and the speaker carries the rest')
+
+
+def coverage_final(pack):
+    return bool(pack.get('coverage_exhausted')) or int(pack.get('coverage_recoveries') or 0)>=RECOVERY_PASSES
 
 
 def score(ctx, script):
@@ -646,14 +670,17 @@ def score(ctx, script):
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     sc = dict(title=script.get("title"), hook_line=script.get("hook_line"), close_line=script.get("close_line"),
               segments=[dict(say=ln["text"], pictures=[n for n in ln.get("subjects") or []]) for ln in pack["lines"]])
-    for attempt in range(8):
+    for attempt in range(RECOVERY_PASSES + 2):
+        knobs["coverage_final"] = coverage_final(pack)
         try:
             l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
             break
         except wf1_coverage.CoverageError as error:
-            if attempt == 7:
-                raise
+            # bounded recovery, counted across resumes and rebuilds: after RECOVERY_PASSES the build is final
+            pack['coverage_recoveries']=int(pack.get('coverage_recoveries') or 0)+1
+            save_pack(ctx,pack)
             refill(ctx,script,pack,error.report)
+            save_pack(ctx,pack)
     taste = F.taste_check(l1, beats)
     dropped = 0
     if not taste["ok"]:
@@ -768,8 +795,7 @@ def render(ctx, script, sc):
         history.append(report)
         json.dump(history, open(history_path, "w"), indent=1)
         sc["beats"]["rendered_check"] = report
-        if not report["rejected"] and report["moving_share"]<.6:
-            _rebuild_motion(ctx,script,sc,report)
+        if not report["rejected"] and report["moving_share"]<.6 and _rebuild_motion(ctx,script,sc,report):
             continue
         if not report["rejected"]:
             json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
@@ -780,13 +806,17 @@ def render(ctx, script, sc):
 
 
 def _rebuild_motion(ctx, script, sc, report):
-    """Keep faithful stills, but never recertify their card motion as footage."""
+    """Keep faithful stills, but never recertify their card motion as footage. One research pass for more moving
+    footage per short; after it (or when nothing new is still), the film stands on its approved pictures and the
+    record keeps its measured moving share. Returns True when the film was rebuilt."""
     pack=wf3.load_pack(ctx)
     pics=sc['beats'].get('pictures') or []
     stills={pics[row['id']]['path'] for row in report['placements'] if row.get('motion_ok') is not True}
     previous=set(pack.get('composed_stills') or [])
-    if not stills-previous:
-        raise RuntimeError('final frames lack verified moving footage; no film may be delivered')
+    if not stills-previous or pack.get('motion_recovered'):
+        ctx.log(f"moving share {report.get('moving_share',0):.2f} after recovery; the film keeps its approved stills")
+        return False
+    pack['motion_recovered']=True
     pack['composed_stills']=sorted(previous|stills)
     path=os.path.join(ctx.supply,'pack.json');stored=json.load(open(path));stored['pack']=pack
     json.dump(stored,open(path,'w'),indent=1)
@@ -797,6 +827,7 @@ def _rebuild_motion(ctx, script, sc, report):
     sc.clear();sc.update(rebuilt)
     json.dump(sc,open(os.path.join(ctx.run_dir,'score.json'),'w'),indent=1)
     invalidate_render(ctx)
+    return True
 
 
 def current_rejections(supply):
@@ -869,30 +900,17 @@ def _rebuild_rejected(ctx, script, sc, report):
 
 
 def check(ctx, rd, sc):
-    while True:
-        r = wf3.check(ctx, rd, sc)
-        final = r.get("final_music") or r["final"]
-        report = _render_review(ctx, dict(film=final), sc)
-        history_path = os.path.join(ctx.supply, "delivery_reviews.json")
-        history = json.load(open(history_path)) if os.path.exists(history_path) else []
-        history.append(report)
-        json.dump(history, open(history_path, "w"), indent=1)
-        if not report["rejected"] and report["moving_share"]<.6:
-            script=json.load(open(os.path.join(ctx.run_dir,"script.json")))
-            _rebuild_motion(ctx,script,sc,report)
-            fresh=render(ctx,script,sc)
-            rd.clear();rd.update(fresh)
-            continue
-        if not report["rejected"]:
-            sc["beats"]["delivered_check"] = report
-            json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
-            break
-        script = json.load(open(os.path.join(ctx.run_dir, "script.json")))
-        _rebuild_rejected(ctx, script, sc, report)
-        fresh = render(ctx, script, sc)
-        rd.clear()
-        rd.update(fresh)
+    # The render stage already checked every placement on the composed phone frames (picture-to-words and the
+    # transition audit) and repaired what failed. The brand finish and the music change no programme frame: they add
+    # the mark, the end card and the sound. A second review of the same frames cost 50-350 model calls a short on
+    # 16 Nov and found nothing the render review had not; the delivered record carries that review.
+    r = wf3.check(ctx, rd, sc)
     b = sc.get("beats") or {}
+    history = [dict(b["rendered_check"], frames="the render review's composed frames; the delivered programme is the same")] \
+        if b.get("rendered_check") else []
+    if history:
+        b["delivered_check"] = history[-1]
+        json.dump(sc, open(os.path.join(ctx.run_dir, "score.json"), "w"), indent=1)
     pics = b.get("pictures") or []
     secs = max(float(sc.get("frames") or 1) / F.FPS, 1.0)
     r["checks"]["podcast"] = dict(
