@@ -722,18 +722,14 @@ def _render_review(ctx, rd, sc):
                     check_times=[f/F.FPS for f in sorted(frames)], composed_fps=F.FPS, display_words=words, caption_words=caption_words,
                     illustration=p.get('illustration'),
                     source=p.get('source_evidence') or dict(url=p.get("source")))])
-    _, report = placement_check(rows, script, clock, os.path.join(ctx.supply, "render-review"), pack["ffmpeg"])
-    if not report["rejected"] and rows:
-        _, audit = placement_check(rows, script, clock, os.path.join(ctx.supply, "render-review"),
-                                   pack["ffmpeg"], review="transition")
-        report["spend"] += audit["spend"]
-        for first, second in zip(report["placements"], audit["placements"]):
-            first["transition_audit"] = dict(ok=second["ok"], reason=second["reason"])
-            first['motion_ok']=first.get('motion_ok') is True and second.get('motion_ok') is True
-            if not second["ok"]:
-                first.update(ok=False, reason=second["reason"])
-        report["accepted"] = sum(r["ok"] for r in report["placements"])
-        report["rejected"] = len(rows) - report["accepted"]
+    # One look at the composed frames carries both the picture-to-words check and the adversarial transition audit
+    # (placement_check.COMPOSED). The second pass over the same frames, after the first had passed them, cost half the
+    # render stage's calls; every picture has still been checked twice before it ships: on its source frames in the
+    # score stage and here, on the phone frames the viewer sees.
+    _, report = placement_check(rows, script, clock, os.path.join(ctx.supply, "render-review"), pack["ffmpeg"],
+                                review="composed")
+    for row in report["placements"]:
+        row["transition_audit"] = dict(ok=row.get("ok") is True, reason=row.get("reason", ""), review="composed")
     real=sum(p['f'][1]-p['f'][0] for p in report['placements'])/F.FPS
     moving=sum(p['f'][1]-p['f'][0] for p in report['placements'] if p.get('motion_ok') is True)/F.FPS
     report.update(real_seconds=real,moving_seconds=moving,moving_share=moving/max(real,.001))

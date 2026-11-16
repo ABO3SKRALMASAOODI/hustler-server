@@ -16,6 +16,16 @@ import sys
 MODEL = "gpt-6-sol"
 CONTRACT = 11       # 16 Nov: the visible full-bleed slice, the words named, other editors' text found and cropped away
 PHONE = 9 / 16
+# One call carries as many placements as fit these bounds. On the codex-proxy a call's cost is its harness prefix
+# (about 13k input tokens); each phone frame adds about 0.6k tokens and no latency (calls.jsonl, 15-16 Nov: 1 image
+# 14.2k tokens / 15 s median, 9 images 19.3k / 15 s, 24 images 23.0k / 14 s). Batches of 3 placements spent most of
+# their tokens on the prefix.
+MAX_IMAGES = 24
+MAX_PLACEMENTS = 8
+COMPOSED = (" These are the composed phone frames of the finished film, including the frames at each display word's "
+            "edges. In the same look, audit every transition adversarially: an image implying the wrong event, era or "
+            "claim, and text left over from the preceding picture. Accept only when all sampled frames, transition frames "
+            "included, and their visible words are supported.")
 
 
 def words_under(clock, a, b, fps=30):
@@ -140,6 +150,22 @@ def accepted(answer, ids):
     return out
 
 
+def batches(pending, max_images=MAX_IMAGES, max_placements=MAX_PLACEMENTS):
+    """[(entry, row, images)] -> calls: whole placements, in order, at most max_placements and max_images a call (a
+    placement with more frames than max_images goes alone, never split from its own frames)."""
+    out, cur, n = [], [], 0
+    for item in pending:
+        k = len(item[2])
+        if cur and (len(cur) >= max_placements or n + k > max_images):
+            out.append(cur)
+            cur, n = [], 0
+        cur.append(item)
+        n += k
+    if cur:
+        out.append(cur)
+    return out
+
+
 def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repair=True):
     here = os.path.dirname(os.path.abspath(__file__))
     spec = importlib.util.spec_from_file_location("wf1_check_llm", os.path.join(here, "../../_shell/llm.py"))
@@ -152,21 +178,14 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
         cache = json.load(open(cache_path))
     except (OSError, ValueError):
         cache = {}
-    hashes, pending, rows, spend = {}, [], [], []
+    pending, rows, spend = [], [], []
     for i, row in enumerate(ins):
         a, b, kind, name, rec = row
         b = max(b, int(rec.get("audit_until", b)))
-        p = rec["path"]
-        if p not in hashes:
-            with open(p, "rb") as f:
-                hashes[p] = hashlib.file_digest(f, "sha256").hexdigest()
         spoken = words_under(clock, a, b)
         context = " ".join(s["say"] for n, s in enumerate(script["segments"])
                            if clock.segs[n][0] < b / 30 + 1 and clock.segs[n][1] > a / 30 - 1)
-        key = hashlib.sha256(json.dumps([CONTRACT, MODEL, review, hashes[p], rec.get("src"), rec.get("check_times"),
-                                        rec.get("composed_fps"), rec.get("display_words"), rec.get("caption_words"), rec.get("illustration"), rec.get('source'), spoken, context, name],
-                                       ensure_ascii=False).encode()).hexdigest()
-        entry = dict(id=i, key=key, f=[a, b], name=name, words=spoken, context=context,
+        entry = dict(id=i, f=[a, b], name=name, words=spoken, context=context,
                      source=(rec.get("source") or {}).get("url") if kind == "clip" else rec.get("page"))
         entry['illustration_intent'] = rec.get('illustration')
         entry['source_evidence'] = rec.get('source') or dict(url=rec.get('page'),title=rec.get('title'),publisher=rec.get('credit'))
@@ -174,10 +193,20 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
             entry["display_words"] = rec["display_words"]
         if rec.get("caption_words"):
             entry["caption_words"] = rec["caption_words"]
+        # The verdict belongs to what the model is shown: the exact frames and everything the prompt says beside them
+        # (the frame numbers excepted). A re-render that leaves a placement's frames and words unchanged, a picture
+        # proposed again in a later attempt, and a resume all reuse it; any changed pixel or word is checked afresh.
+        images = evidence(row, ffmpeg)
+        if isinstance(images, bytes):
+            images = [images]
+        said = {k: v for k, v in entry.items() if k not in ("id", "f")}
+        entry["key"] = key = hashlib.sha256(json.dumps(
+            [CONTRACT, MODEL, review, [hashlib.sha256(x).hexdigest() for x in images], said],
+            ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         if key in cache:
             entry.update(cache[key])
         else:
-            pending.append((entry, row))
+            pending.append((entry, row, images))
         rows.append(entry)
     system = ("Check picture-to-speech fidelity for a documentary podcast short. Judge the supplied frames, not a "
               "filename or a search title. Each ID has separate frames of one proposed picture at its actual spoken words. "
@@ -235,23 +264,21 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
         system += (" This is a separate adversarial transition audit. Look specifically for an image implying "
                    "the wrong event, era or claim, and text left over from the preceding picture. Accept only "
                    "when all sampled transition frames and their visible words are supported.")
-    batch_size=3 if os.environ.get('CODEX_PROXY_LOCAL')=='1' else 6
-    for offset in range(0, len(pending), batch_size):
-        batch = pending[offset:offset + batch_size]
+    elif review == "composed":
+        system += COMPOSED
+    for batch in batches(pending):
         content, sampled = [], {}
-        for entry, row in batch:
+        for entry, row, images in batch:
             content.append(dict(type="text", text=json.dumps(entry, ensure_ascii=False)))
-            images = evidence(row, ffmpeg)
-            if isinstance(images, bytes): images = [images]
             sampled[entry['id']] = images
             for frame_no, pixels in enumerate(images):
                 content.append(dict(type="text", text=f"Placement {entry['id']}, sampled frame {frame_no+1}/{len(images)}"))
                 content.append(dict(type="image", source=dict(type="base64", media_type="image/jpeg",
                                     data=base64.b64encode(pixels).decode())))
-        text, use = call(system, content, model=MODEL, effort="low", max_tokens=5000)
-        decisions = accepted(llm.json_block(text), [e["id"] for e, _ in batch])
+        text, use = call(system, content, model=MODEL, effort="low", max_tokens=8000)
+        decisions = accepted(llm.json_block(text), [e["id"] for e, _, _ in batch])
         spend.append(use)
-        for entry, _ in batch:
+        for entry, _, _ in batch:
             decision = decisions[entry["id"]]
             entry.update(ok=decision["ok"], reason=decision.get("reason", ""), model=MODEL,
                          motion_ok=decision.get("motion_ok") is True, motion_reason=decision.get("motion_reason", ""),

@@ -100,3 +100,88 @@ def test_rejected_frame_evidence_survives_replacing_the_render(tmp_path,monkeypa
     assert (saved/'00.jpg').read_bytes()==b'exact-frame-one'
     assert (saved/'01.jpg').read_bytes()==b'exact-frame-two'
     assert json.loads((saved/'finding.json').read_text())['reason']=='wrong object'
+
+
+# 16 Nov cost lane: the frames per placement of every composed review of the three shorts the Jensen Huang run made
+# (staging-1115/xCUala5j7aQ/evidence/mNN/render_reviews.json; 3 frames, plus 3 round each display word's edges), and
+# the calls those reviews cost then (batches of 3 on the proxy, a second transition pass after a clean first one).
+JENSEN_RENDER = {
+    'm02': [[3, 3, 3, 3, 3, 3, 3, 6, 6, 6]],
+    'm03': [[3, 6, 6, 3, 6, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 6, 6, 3, 6, 6, 3, 3, 3, 3, 3, 3],
+            [3, 6, 6, 3, 6, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 6, 6, 3, 6, 6, 3, 3, 3, 3, 3, 3],
+            [3, 6, 6, 3, 6, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 6, 6, 3, 6, 6, 3, 3, 3, 3, 3, 3]],
+    'm04': [[3, 3, 3, 3, 3, 3, 3, 3, 6, 5, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]],
+}
+JENSEN_RENDER_CALLS = {'m02': 8, 'm03': 10 + 18 + 18, 'm04': 18}
+
+
+def _counting(monkeypatch, frames):
+    """A fake model that approves every placement it is shown, counting calls and images; evidence gives each row its
+    own frames (frames[i] of them, tagged by the row's name and the render it came from)."""
+    import json
+    import placement_check as pc
+    monkeypatch.setattr(pc, 'evidence', lambda row, ffmpeg: [f"{row[4]['tag']}|{row[3]}|{k}".encode() for k in range(row[4]['n'])])
+    calls = []
+
+    def call(system, content, **kwargs):
+        ids = [json.loads(c['text'])['id'] for c in content if c['type'] == 'text' and c['text'].startswith('{')]
+        calls.append(dict(system=system, ids=ids, images=sum(c['type'] == 'image' for c in content)))
+        return json.dumps({'placements': [dict(id=i, ok=True, reason='fits', motion_ok=True) for i in ids]}), {}
+    return pc, calls, call
+
+
+def _rows(path, frames, tag='render-1'):
+    return [[i * 30, i * 30 + 30, 'clip', f'p{i}', dict(path=str(path), src=[i, i + 1], composed_fps=30, n=n, tag=tag)]
+            for i, n in enumerate(frames)]
+
+
+class _Clock:
+    words = [dict(w='word', t0=0, t1=1)]
+    segs = [(0, 1000)]
+
+
+def test_recorded_composed_reviews_cost_under_a_third_of_their_calls(tmp_path, monkeypatch):
+    """Every placement of every recorded review is still shown to the model with all its frames, in one composed
+    pass, packed MAX_PLACEMENTS / MAX_IMAGES a call: 72 calls on the Jensen run's three made shorts become 21."""
+    pc, calls, call = _counting(monkeypatch, None)
+    film = tmp_path / 'film.mp4'
+    film.write_bytes(b'render')
+    got = {}
+    for short, reviews in JENSEN_RENDER.items():
+        before = len(calls)
+        for n, frames in enumerate(reviews):
+            # each recorded review was a fresh render: no frame of it is reused here
+            _, report = pc.check(_rows(film, frames, tag=f'{short}-{n}'), dict(segments=[dict(say='word')]), _Clock(),
+                                 str(tmp_path / short), 'unused', call=call, review='composed')
+            assert report['accepted'] == len(frames)
+        got[short] = len(calls) - before
+    shown = [i for c in calls for i in c['ids']]
+    assert len(shown) == sum(len(f) for r in JENSEN_RENDER.values() for f in r)        # nothing skipped
+    assert all(c['images'] <= pc.MAX_IMAGES and len(c['ids']) <= pc.MAX_PLACEMENTS for c in calls)
+    assert all(pc.COMPOSED in c['system'] for c in calls)
+    assert got == {'m02': 2, 'm03': 15, 'm04': 4}
+    assert sum(got.values()) * 3 <= sum(JENSEN_RENDER_CALLS.values())
+
+
+def test_a_rerender_reuses_the_verdicts_of_unchanged_frames_and_checks_changed_ones(tmp_path, monkeypatch):
+    pc, calls, call = _counting(monkeypatch, None)
+    film = tmp_path / 'film.mp4'
+    film.write_bytes(b'render one')
+    frames = JENSEN_RENDER['m04'][0]
+    args = (dict(segments=[dict(say='word')]), _Clock(), str(tmp_path / 'review'), 'unused')
+    pc.check(_rows(film, frames), *args, call=call, review='composed')
+    first = len(calls)
+    film.write_bytes(b'render two, the same programme')            # a rebuild re-encodes the film
+    pc.check(_rows(film, frames), *args, call=call, review='composed')
+    assert len(calls) == first
+    rows = _rows(film, frames)
+    rows[4][4]['tag'] = 'render-2'                                  # one placement's pixels changed
+    _, report = pc.check(rows, *args, call=call, review='composed')
+    assert len(calls) == first + 1 and calls[-1]['ids'] == [4] and report['accepted'] == len(frames)
+
+
+def test_batches_keep_each_placement_whole_and_in_order():
+    import placement_check as pc
+    items = [(dict(id=i), None, [b'x'] * n) for i, n in enumerate([3, 30, 3, 3, 3, 3, 3, 3, 3, 3, 3])]
+    got = [[e['id'] for e, _, _ in b] for b in pc.batches(items)]
+    assert got == [[0], [1], [2, 3, 4, 5, 6, 7, 8, 9], [10]]

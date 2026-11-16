@@ -416,3 +416,22 @@ def test_a_short_spends_at_most_its_recovery_passes_then_is_built_from_every_app
     wf.score(ctx,script)                                      # a rebuild after a composed rejection: no new research
     assert len(refills)==wf.RECOVERY_PASSES and finals[-1] is True
     assert json.load(open(tmp_path/'pack.json'))['pack']['coverage_recoveries']==wf.RECOVERY_PASSES
+
+
+def test_the_composed_frames_get_one_look_that_also_audits_transitions(tmp_path,monkeypatch):
+    """16 Nov cost lane: the transition audit used to be a second pass over the frames the first pass had just
+    passed. One composed look now carries both; a rejection there still rebuilds the film."""
+    import placement_check
+    l1=tmp_path/'l1.json';l1.write_text(json.dumps(dict(items=[dict(k='word',role='big',f=[10,20],t='SUN')])))
+    monkeypatch.setattr(wf.wf3,'load_pack',lambda ctx:dict(lines=[dict(text='the Sun')],words=[],ffmpeg='ffmpeg'))
+    monkeypatch.setattr(wf.F,'Clock',lambda words,script:None)
+    passes=[]
+    def check(rows,script,clock,work,ffmpeg,review='placement',**kw):
+        passes.append((review,len(rows)))
+        return [],dict(rejected=1,accepted=len(rows)-1,spend=[{}],
+                       placements=[dict(id=i,f=r[:2],ok=i!=1,reason='wrong era' if i==1 else 'fits',motion_ok=True) for i,r in enumerate(rows)])
+    monkeypatch.setattr(placement_check,'check',check)
+    sc=dict(l1=str(l1),beats=dict(pictures=[dict(f=[0,30],name='Sun',source='u'),dict(f=[30,60],name='Sun',source='u')]))
+    report=wf._render_review(SimpleNamespace(supply=str(tmp_path)),dict(film='film.mp4'),sc)
+    assert passes==[('composed',2)]
+    assert [p['transition_audit']['ok'] for p in report['placements']]==[True,False] and report['rejected']==1
