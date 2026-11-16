@@ -1,0 +1,7 @@
+{
+  "wave": "narration-scenes-1116",
+  "doc": "MCP narration path (ticket #208): one call lays a narration's chosen pictures along it.",
+  "verbs": [
+    "place_scenes"
+  ]
+}

@@ -242,6 +242,22 @@ def _pick_video_file(files, want_w, want_h):
 
 # ── Pexels ───────────────────────────────────────────────────────────────
 
+def _page_title(url):
+    """The creator's own title, as Pexels spells it in the page address
+    (https://www.pexels.com/video/a-boy-sitting-in-the-classroom-5897642/ ->
+    "A boy sitting in the classroom"). Pexels videos carry no alt text, so
+    this is the library's only words about the clip (ticket #1278: MCP video
+    results came back "(no description)"). None for a bare id page."""
+    path = str(url or "").split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+    words = [w for w in path.split("-") if w]
+    if words and words[-1].isdigit():
+        words = words[:-1]
+    if len(words) < 2:
+        return None
+    text = " ".join(words)
+    return text[:1].upper() + text[1:]
+
+
 def _pexels_search(query, kind, orientation, count):
     url = PEXELS_VIDEO_API if kind == KIND_VIDEO else PEXELS_PHOTO_API
     params = {"query": query, "per_page": count}
@@ -261,6 +277,7 @@ def _pexels_search(query, kind, orientation, count):
                 "width": v.get("width"), "height": v.get("height"),
                 "duration_s": v.get("duration"),
                 "description": (v.get("alt") or "").strip() or None,
+                "title": _page_title(v.get("url")),
                 "credit": ((v.get("user") or {}).get("name") or "").strip() or None,
                 "page_url": v.get("url"),
                 "_files": v.get("video_files") or [],
@@ -275,6 +292,7 @@ def _pexels_search(query, kind, orientation, count):
                 "width": p.get("width"), "height": p.get("height"),
                 "duration_s": None,
                 "description": (p.get("alt") or "").strip() or None,
+                "title": _page_title(p.get("url")),
                 "credit": (p.get("photographer") or "").strip() or None,
                 "page_url": p.get("url"),
                 "_url": src.get("large2x") or src.get("original") or src.get("large"),

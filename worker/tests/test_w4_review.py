@@ -314,8 +314,8 @@ def test_wave4_department_shares_stay_within_their_pins():
     photo = sorted(photo_tools.WRITE_TOOLS)
     assert size(photo) <= 1_500
     saved_search = sorted(search_place_tools.WRITE_TOOLS)
-    assert saved_search == ["place_search_result"]
-    assert size(saved_search) <= 1_500
+    assert saved_search == ["place_scenes", "place_search_result"]
+    assert size(saved_search) <= 2_600
     assert set(world) | set(photo) | set(saved_search) == set(agent_tools.TOOL_DOMAINS["picture"])
     assert size(critic_tools.VERBS) <= 1_200
     for name in world + photo + saved_search + list(critic_tools.VERBS):

@@ -174,7 +174,7 @@ def test_make_first_cut_never_runs_twice_or_over_an_edit(monkeypatch):
 
 def test_make_first_cut_needs_an_analyzed_video_and_a_plan(monkeypatch):
     monkeypatch.setattr(mcpmod, "_index_job_state", lambda *a: {"active": False})
-    for cur in (_Cur(original=None), _Cur(original=ORIGINAL, indexed=False),
+    for cur in (_Cur(original=ORIGINAL, indexed=False),
                 _Cur(original=ORIGINAL, subscribed=False),
                 _Cur(project=False, original=ORIGINAL)):
         jobs = _wire(monkeypatch, cur)
@@ -182,6 +182,32 @@ def test_make_first_cut_needs_an_analyzed_video_and_a_plan(monkeypatch):
         assert jobs == []
         assert isinstance(out, mcpmod._SessionToolError) or \
             (isinstance(out, dict) and out.get("isError") is True)
+
+
+def test_make_first_cut_on_a_narration_project_answers_its_path(monkeypatch):
+    """Ticket #208: account 2555 uploads only an ElevenLabs narration. The
+    call answered "Upload one" as an error, a dead end. It now answers the
+    narrated-film path with the project's own narration key, as a result."""
+    class NarrationCur(_Cur):
+        def execute(self, sql, params=None):
+            super().execute(sql, params)
+            self._rows = ([{"id": 9, "kind": "music",
+                            "storage_key": "music/5845/nar.mp3",
+                            "sha256": "n1", "duration_s": 1509.4,
+                            "meta": {"filename": "Narration 47.mp3"}}]
+                          if "FROM assets" in " ".join(sql.split()) else [])
+
+        def fetchall(self):
+            return self._rows
+
+    cur = NarrationCur(original=None)
+    jobs = _wire(monkeypatch, cur)
+    out = mcpmod._t_make_first_cut({"user_id": 2555}, {"project_id": 5845})
+    text = out["content"][0]["text"]
+    assert jobs == [] and out["isError"] is False
+    assert out["structuredContent"]["next_tool"] == "place_scenes"
+    assert "place_scenes(project_id=5845, narration_asset_key='music/5845/nar.mp3'" in text
+    assert "done: music/5845/nar.mp3 (Narration 47.mp3, 1509s)" in text
 
 
 def test_make_first_cut_says_why_when_admission_is_refused(monkeypatch):

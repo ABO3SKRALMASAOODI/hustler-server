@@ -98,6 +98,9 @@ POLL_MAX_S = 1.0
 # query, no worker job, no compute) before answering with a retryable
 # PREREQUISITE naming the analysis job. Taken out of the same SYNC budget.
 INDEX_WAIT_S = float(os.getenv("MCP_INDEX_WAIT_S", "90"))
+# A queued call whose worker had to START an upload's analysis is waited on
+# and run again only while at least this much of the budget is left.
+INDEX_RERUN_MIN_S = 10.0
 INDEX_POLL_S = 2.0
 
 # Seconds a reply may spend fetching frame bytes to embed (see _image_blocks).
@@ -772,7 +775,7 @@ SESSION_TOOLS = [
          "edl_version": {"type": "integer", "minimum": 1}},
          "required": ["project_id", "edl_version"]}},
     {"name": "make_first_cut",
-     "description": "Make Valmera's automatic first cut of an explicit project's analyzed main video: a finished vertical film (the strongest stretch, tightened, with a hook title, captions and the picture reframed for phones), made by the same chain the Studio runs after a first upload. Use it when the user wants a finished video and has not asked for anything more specific, or as the first draft you then refine with the editing tools. Needs index_status 'done'. Returns a job: call wait_for_job, then download_url(kind='preview') to watch it and export_final(edl_version) for the MP4. One first cut per project; calling it again returns the existing one.",
+     "description": "Make Valmera's automatic first cut of an explicit project's analyzed main video: a finished vertical film (the strongest stretch, tightened, with a hook title, captions and the picture reframed for phones), made by the same chain the Studio runs after a first upload. Use it when the user wants a finished video and has not asked for anything more specific, or as the first draft you then refine with the editing tools. Needs index_status 'done'. Returns a job: call wait_for_job, then download_url(kind='preview') to watch it and export_final(edl_version) for the MP4. One first cut per project; calling it again returns the existing one. A project with no main video (a narration upload) answers with its narrated-film path: get_transcript, search, then place_scenes builds the picture along the narration in one call.",
      "inputSchema": {"type": "object", "properties": {
          "project_id": {"type": "integer", "minimum": 1}},
          "required": ["project_id"]}},
@@ -1068,6 +1071,14 @@ with the same names, arguments and effects.
    when the user wants a finished video and has not asked for anything more
    specific, or as the draft you refine. wait_for_job, watch it with
    download_url(kind='preview'), then export_final for the MP4.
+   A NARRATED FILM FROM A VOICE-OVER: upload the narration with
+   kind='music'; get_transcript(project_id, asset_key=<its storage_key>)
+   waits for its analysis and returns the timed words. Find a picture for
+   each beat (search_stock, research_broll, find_footage + fetch_url), then
+   ONE place_scenes(project_id, narration_asset_key, scenes=[{id or
+   asset_key, start_s, end_s}, ...]) lays the whole picture along the
+   narration, with the narration under it, in Valmera's timeline. Then
+   render_preview(complete=true) and export_final for the finished MP4.
 
 5. LONG VIDEO TO SHORTS. create_project(title, kind='shorts'), upload the
    long main video and poll index_status. Clip selection does not start
@@ -1749,16 +1760,55 @@ def _index_ready(cur, project_id):
     return False, analysis
 
 
-def _await_index(project_id, budget_s):
-    """Poll, without holding a connection between polls, until the project's
-    video is indexed, its analysis stops running, or ``budget_s`` passes.
+def _asset_index_ready(cur, project_id, asset_key):
+    """(ready, analysis) for the one upload a call names by ``asset_key``.
+
+    A narration-only project has no main video, so the project check above
+    calls it ready while the narration itself is still being analysed. An AI
+    app's first get_transcript(asset_key=...) then reached the worker at
+    once and answered PENDING about a job that finished 17 s later; the app
+    left (p5843, p5731-p5735, p5672: tickets #214, #1103). Ready also when
+    the key names nothing or nothing is analysing it: the worker answers
+    those itself (a rejection, or it starts the missing analysis)."""
+    if not asset_key:
+        return True, None
+    try:
+        cur.execute("""SELECT id, sha256 FROM assets
+                       WHERE project_id = %s AND storage_key = %s
+                       ORDER BY id DESC LIMIT 1""",
+                    (int(project_id), str(asset_key)))
+        asset = cur.fetchone()
+    except Exception:
+        return True, None
+    if not asset or (asset.get("sha256") and _index_row(cur, asset["sha256"])):
+        return True, None
+    analysis = _index_job_state(cur, project_id, asset.get("id"))
+    if not analysis.get("active"):
+        return True, None
+    return False, dict(analysis, asset_key=asset_key)
+
+
+def _call_index_ready(cur, project_id, args=None):
+    """(ready, analysis) for everything this call reads: the project's main
+    video first, then the upload it names by asset_key."""
+    ready, analysis = _index_ready(cur, project_id)
+    key = (args or {}).get("asset_key") if isinstance(args, dict) else None
+    if not ready or not key:
+        return ready, analysis
+    return _asset_index_ready(cur, project_id, key)
+
+
+def _await_index(project_id, budget_s, args=None):
+    """Poll, without holding a connection between polls, until the analysis
+    this call reads is done, stops running, or ``budget_s`` passes.
     Returns the seconds spent."""
     started = time.time()
     deadline = started + max(0.0, budget_s)
     while time.time() < deadline:
         time.sleep(max(0.0, min(INDEX_POLL_S, deadline - time.time())))
         with vdb() as conn:
-            ready, analysis = _index_ready(conn.cursor(), project_id)
+            ready, analysis = _call_index_ready(conn.cursor(), project_id,
+                                                args)
         if ready or not (analysis or {}).get("active"):
             break
     return time.time() - started
@@ -1820,7 +1870,10 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
         # compute slot) so a call made minutes after upload simply proceeds;
         # past the budget, return the analysis job to wait on as a
         # retryable PREREQUISITE. Control calls answer immediately.
-        ready, analysis = _index_ready(cur, project_id)
+        # Only a read of the upload waits on its analysis: placing a clip or
+        # laying a narration never needs its transcript, so a write proceeds.
+        reads = args if _annotations_for(name).get("readOnlyHint") else None
+        ready, analysis = _call_index_ready(cur, project_id, reads)
         # read_skill, and get_edl while the video is still being analyzed,
         # answer from metadata at once. Once it is analyzed get_edl is a fast
         # read below: the executor's own code and answer, without a queue.
@@ -1845,7 +1898,9 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
                         if waiting else
                         "Call index_status to inspect the analysis failure or "
                         "missing upload, then resolve it before editing.")
-            text = (f"PROJECT {project_id} — video analysis is not "
+            what = (f"the analysis of upload {analysis['asset_key']}"
+                    if (analysis or {}).get("asset_key") else "video analysis")
+            text = (f"PROJECT {project_id} — {what} is not "
                     f"ready. No editing job was started. {guidance}")
             result = {"text": text,
                       "is_error": not waiting, "code": "index_not_ready",
@@ -1897,7 +1952,7 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
             job_id = _enqueue(cur, project_id, tok["user_id"], "mcp_tool",
                               job_payload)
     if wait_for_index:
-        waited = _await_index(project_id, wait_budget)
+        waited = _await_index(project_id, wait_budget, reads)
         return _run_tool_job(tok, name, args, raw=raw, project_id=project_id,
                              _index_waited_s=_index_waited_s + waited)
     # The control calls are plumbing the model never asked for by name, so a
@@ -1906,9 +1961,25 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
              "__media__": "Fetching the video"}.get(name, name)
     # One HTTP budget: time already spent waiting for analysis comes out of
     # the job wait, keeping a call near MCP_SYNC_WAIT_S overall.
+    settle_started = time.time()
     row = _settle(job_id, tok["user_id"],
                   max(15.0, SYNC_WAIT_S - _index_waited_s)
                   if _index_waited_s else None)
+    spent = _index_waited_s + (time.time() - settle_started)
+    pending = (row or {}).get("result") or {}
+    if (row or {}).get("state") == "done" and isinstance(pending, dict) and \
+            pending.get("code") == "index_not_ready" and \
+            pending.get("status") == "pending" and \
+            pending.get("index_job_id") and not name.startswith("__") and \
+            min(INDEX_WAIT_S, SYNC_WAIT_S) - spent > INDEX_RERUN_MIN_S:
+        # The worker found the upload unanalysed and started its analysis.
+        # That analysis takes seconds to a minute; wait for it here, inside
+        # this call's budget, and answer the call itself rather than hand the
+        # app a PENDING it may never come back from (ticket #214).
+        waited = _await_index(project_id,
+                              min(INDEX_WAIT_S, SYNC_WAIT_S) - spent, args)
+        return _run_tool_job(tok, name, args, raw=raw, project_id=project_id,
+                             _index_waited_s=spent + waited)
     if not row:
         return _out(_session_error(
             f"Tool call {name} vanished from the queue — try it again."))
@@ -2432,12 +2503,14 @@ def _t_upload_finish(tok, args):
                 "storage computed when that part was PUT; the parts list "
                 "named exactly the parts storage holds, so the upload was "
                 "assembled from storage's own ETags (the bytes you sent).\n")
-        answer = _t_upload_finish_answer(payload, role)
+        answer = _t_upload_finish_answer(payload, role, args.get("storage_key"),
+                                         project_id)
         return note + answer if isinstance(answer, str) else answer
-    return _t_upload_finish_answer(payload, role)
+    return _t_upload_finish_answer(payload, role, args.get("storage_key"),
+                                   project_id)
 
 
-def _t_upload_finish_answer(payload, role):
+def _t_upload_finish_answer(payload, role, storage_key=None, project_id=None):
     if payload.get("index_job_state") == "failed":
         return _session_error(
             f"Upload is saved (asset {payload['asset_id']}), but analysis "
@@ -2466,6 +2539,32 @@ def _t_upload_finish_answer(payload, role):
                 f"{payload['asset_id']}).{analysis} This asset is "
                 "reference-only analysis input: it is not added to the "
                 "timeline or offered as placeable media.")
+    if payload.get("index_job_id") and payload.get("kind") in ("music",
+                                                              "video_clip"):
+        action = "restarted" if payload.get("index_restarted") else "queued"
+        if payload.get("index_job_state") == "running":
+            action = "already running"
+        key = storage_key or "<its storage_key>"
+        pid = project_id if project_id else "<project_id>"
+        text = (f"Uploaded (asset {payload['asset_id']}, {payload['kind']}, "
+                f"storage_key {key}). Its analysis (transcript and sound) is "
+                f"{action} as job {payload['index_job_id']}; it takes seconds "
+                "to a few minutes. get_transcript(project_id="
+                f"{pid}, asset_key='{key}') waits for it and answers with the "
+                "timed transcript; index_status shows its progress.")
+        if payload["kind"] == "music":
+            text += (" For a narrated film: read the transcript, find a "
+                     "picture for each beat (search_stock, research_broll, "
+                     f"find_footage), then place_scenes(project_id={pid}, "
+                     f"narration_asset_key='{key}', scenes=[{{id, start_s, "
+                     "end_s}, ...]) lays the whole picture along the narration "
+                     "and the narration under it in one call; "
+                     "render_preview(complete=true), then export_final for "
+                     "the MP4.")
+        else:
+            text += (" It can be placed now with insert_media, add_overlay or "
+                     "place_scenes.")
+        return text
     if payload.get("index_job_id"):
         action = "restarted" if payload.get("index_restarted") else "queued"
         if payload.get("index_job_state") == "running":
@@ -2491,8 +2590,7 @@ def _t_index_status(tok, args):
                 f"Project {project_id} does not exist on this account.")
         original = _active_original(cur, project_id)
         if not original:
-            return ("No main video in this project — it is a canvas program. "
-                    "Nothing to analyze.")
+            return _uploads_analysis_status(cur, project_id)
         if original["sha256"] and _index_row(cur, original["sha256"]):
             return "done — the video is analyzed and ready to edit."
         cur.execute("""SELECT id, state, progress, error, result,
@@ -2541,6 +2639,65 @@ def _t_index_status(tok, args):
             f"{_index_stage(job)}). "
             "Transcript, shots and silences are unavailable until this "
             "reaches done.")
+
+
+def _uploads_analysis_status(cur, project_id):
+    """index_status for a project with no main video: each audio and clip
+    upload's own analysis. It answered "Nothing to analyze" while a
+    narration's transcript was being made, and the app read that as a dead
+    end (account 2555's narration projects, tickets #214/#1103)."""
+    cur.execute("""SELECT id, kind, storage_key, sha256, duration_s, meta
+                     FROM assets
+                    WHERE project_id = %s AND kind IN ('music', 'video_clip')
+                      AND COALESCE(meta->>'source', '') <> 'valmera-music-library'
+                    ORDER BY id DESC LIMIT 12""", (project_id,))
+    rows = cur.fetchall() or []
+    if not rows:
+        return ("No main video in this project: it is a canvas program built "
+                "from uploads, and nothing is being analyzed. Upload a "
+                "narration or clips with upload_start (kind='music' for audio, "
+                "'clip' for video), or place search results directly.")
+    lines, pending, narration = [], False, None
+    for a in rows:
+        name = ((a.get("meta") or {}).get("filename")
+                or str(a["storage_key"]).rsplit("/", 1)[-1])
+        label = f"{a['storage_key']} ({name}"
+        if a.get("duration_s"):
+            label += f", {float(a['duration_s']):.0f}s"
+        label += ")"
+        if a.get("sha256") and _index_row(cur, a["sha256"]):
+            lines.append(f"  done: {label}")
+            if a["kind"] == "music" and narration is None:
+                narration = a["storage_key"]
+            continue
+        job = _index_job_state(cur, project_id, a.get("id"))
+        if job.get("active"):
+            pending = True
+            lines.append(f"  {job['state']} {job.get('progress') or 0}% "
+                         f"(job {job['id']}): {label}")
+        elif job.get("state") == "failed":
+            lines.append(f"  failed (job {job['id']}): {label}: "
+                         f"{str(job.get('error') or '')[:160]}")
+        else:
+            lines.append(f"  not analyzed: {label}; get_transcript or "
+                         "look_at_asset with its asset_key starts it")
+    head = ("No main video in this project: it is a canvas program built "
+            "from these uploads. Their analysis:\n")
+    tail = []
+    if pending:
+        tail.append("get_transcript(project_id=%s, asset_key=<key>) waits for "
+                    "a running analysis and answers with the timed transcript; "
+                    "wait_for_job(job_id) follows one." % project_id)
+    if narration:
+        tail.append(
+            f"To make the narrated film: read get_transcript(project_id="
+            f"{project_id}, asset_key='{narration}'), find a picture for each "
+            "beat (search_stock, research_broll, find_footage), then "
+            f"place_scenes(project_id={project_id}, narration_asset_key="
+            f"'{narration}', scenes=[{{id, start_s, end_s}}, ...]) builds the "
+            "whole picture along it in one call; render_preview(complete=true) "
+            "and export_final finish it.")
+    return head + "\n".join(lines) + ("\n" + "\n".join(tail) if tail else "")
 
 
 def _index_stage(job):
@@ -3127,10 +3284,28 @@ def _t_make_first_cut(tok, args):
                 f"Project {project_id} does not exist on this account.")
         original = _active_original(cur, project_id)
         if not original:
-            return _session_error(
-                f"PROJECT {project_id} has no main video. Upload one "
-                "(upload_start with kind='original', then upload_finish), "
-                "wait for index_status 'done', then call make_first_cut.")
+            # No main video: a narration project (account 2555's documentaries,
+            # ticket #208). Its first cut is the picture the caller chooses for
+            # the words, laid in one call; the answer is that path, with the
+            # project's own keys, not a dead end.
+            status = _uploads_analysis_status(cur, project_id)
+            return {"content": [{"type": "text", "text": (
+                        f"PROJECT {project_id} has no main video, so the "
+                        "automatic first cut (which cuts a filmed video) has "
+                        "nothing to cut. A narrated film is made here this way: "
+                        "get_transcript(asset_key=<the narration>) for the timed "
+                        "words; a picture for each beat with search_stock, "
+                        "research_broll or find_footage + fetch_url; then ONE "
+                        "place_scenes(project_id, narration_asset_key, scenes="
+                        "[{id or asset_key, start_s, end_s}, ...]) call builds "
+                        "the whole picture along the narration with the "
+                        "narration under it; render_preview(complete=true), "
+                        "then export_final. To cut a filmed video instead, "
+                        "upload it with kind='original'.\n\n" + status)}],
+                    "isError": False,
+                    "structuredContent": {"project_id": project_id,
+                                          "status": "no_main_video",
+                                          "next_tool": "place_scenes"}}
         if not (original.get("sha256") and _index_row(cur, original["sha256"])):
             analysis = _index_job_state(cur, project_id, original.get("id"))
             if not analysis.get("active"):

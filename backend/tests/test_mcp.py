@@ -654,6 +654,48 @@ def test_upload_finish_passes_reference_metadata_and_says_it_is_not_media(
     assert "or offered as placeable media" in body
 
 
+def test_upload_finish_of_a_narration_names_the_next_calls(client, monkeypatch):
+    """Ticket #214: a narration upload's answer said to poll index_status,
+    which answered "Nothing to analyze" for a project with no main video.
+    It now names the transcript call that waits, and the film path."""
+    monkeypatch.setattr(
+        mcpmod, "complete_upload_core",
+        lambda *a: ({"asset_id": 51, "index_job_id": 52,
+                     "kind": "music"}, 200))
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "upload_finish",
+        "arguments": {"project_id": 3, "storage_key": "music/3/nar.mp3",
+                      "filename": "nar.mp3", "kind": "music"},
+    }))
+    assert "analysis (transcript and sound) is queued as job 52" in body
+    assert "get_transcript(project_id=3, asset_key='music/3/nar.mp3')" in body
+    assert "place_scenes(project_id=3, narration_asset_key='music/3/nar.mp3'" in body
+
+
+def test_index_status_without_a_main_video_reports_the_uploads(monkeypatch):
+    class Cur:
+        def execute(self, sql, params=()):
+            self.sql = " ".join(sql.split())
+
+        def fetchall(self):
+            return [{"id": 9, "kind": "music", "storage_key": "music/3/a.mp3",
+                     "sha256": None, "duration_s": 1500.0,
+                     "meta": {"filename": "a.mp3"}},
+                    {"id": 8, "kind": "music", "storage_key": "music/3/b.mp3",
+                     "sha256": "done", "duration_s": 60.0, "meta": {}}]
+
+    monkeypatch.setattr(mcpmod, "_index_row",
+                        lambda cur, sha: {"id": 1} if sha == "done" else None)
+    monkeypatch.setattr(mcpmod, "_index_job_state", lambda cur, pid, aid: {
+        "id": 70, "state": "running", "progress": 35, "active": True})
+    text = mcpmod._uploads_analysis_status(Cur(), 3)
+    assert "Nothing to analyze" not in text
+    assert "running 35% (job 70): music/3/a.mp3 (a.mp3, 1500s)" in text
+    assert "done: music/3/b.mp3 (b.mp3, 60s)" in text
+    assert "get_transcript(project_id=3, asset_key=<key>) waits" in text
+    assert "narration_asset_key='music/3/b.mp3'" in text
+
+
 def test_upload_finish_names_the_parts_whose_etag_slipped(client, monkeypatch):
     # CHM 2013 run (23 Oct 2026): one mistyped ETag destroyed a 437 MB
     # upload; storage.finish_multipart now completes from storage's ETags
@@ -2322,6 +2364,134 @@ def test_analysis_past_the_budget_reports_progress_and_retry(client,
     assert raw["retryable"] is True and raw["index_progress"] == 30
     assert raw["tool_outcome"]["status"] == "prerequisite"
     assert raw["tool_outcome"]["prerequisite_tool"] == "wait_for_job"
+
+
+def _narration_analysis(progress=40):
+    return dict(_analysis(progress=progress),
+                asset_key="music/3/narration.mp3")
+
+
+def test_transcript_of_a_narration_waits_for_its_running_analysis(
+        client, monkeypatch):
+    """Tickets #214/#1103: a narration-only project has no main video, so
+    get_transcript(asset_key) reached the worker while the narration was
+    still being analysed and answered PENDING; the AI app left. The call now
+    waits for that upload's analysis and answers with the transcript."""
+    monkeypatch.setattr(mcpmod, "_index_ready", lambda cur, pid: (True, None))
+    answers = [(False, _narration_analysis()),
+               (False, _narration_analysis(90)), (True, None), (True, None)]
+    seen = []
+
+    def asset_ready(cur, pid, key):
+        seen.append(key)
+        return answers.pop(0) if answers else (True, None)
+
+    monkeypatch.setattr(mcpmod, "_asset_index_ready", asset_ready)
+    monkeypatch.setattr(mcpmod, "INDEX_POLL_S", 0.01)
+    result = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "get_transcript",
+        "arguments": {"project_id": 3, "asset_key": "music/3/narration.mp3"},
+    }).get_json()["result"]
+    assert result.get("isError") is not True
+    assert "12 sentences." in str(result)
+    assert "PENDING" not in str(result)
+    assert len(DB["enqueued"]) == 1
+    assert set(seen) == {"music/3/narration.mp3"}
+
+
+def test_narration_analysis_past_the_budget_names_the_upload(monkeypatch):
+    monkeypatch.setattr(mcpmod, "_index_ready", lambda cur, pid: (True, None))
+    monkeypatch.setattr(mcpmod, "_asset_index_ready",
+                        lambda cur, pid, key: (False, _narration_analysis()))
+    monkeypatch.setattr(mcpmod, "INDEX_WAIT_S", 0.05)
+    monkeypatch.setattr(mcpmod, "INDEX_POLL_S", 0.01)
+    raw = mcpmod._run_tool_job(
+        {"user_id": 60}, "get_transcript",
+        {"asset_key": "music/3/narration.mp3"}, raw=True, project_id=3)
+    assert raw["status"] == "pending" and raw["retryable"] is True
+    assert "analysis of upload music/3/narration.mp3" in raw["text"]
+    assert "wait_for_job(job_id=44)" in raw["text"]
+    assert DB["enqueued"] == []
+
+
+def test_calls_without_an_asset_key_never_wait_on_uploads(monkeypatch):
+    monkeypatch.setattr(mcpmod, "_index_ready", lambda cur, pid: (True, None))
+
+    def never(*_a):
+        raise AssertionError("no asset named, nothing to wait for")
+
+    monkeypatch.setattr(mcpmod, "_asset_index_ready", never)
+    raw = mcpmod._run_tool_job({"user_id": 60}, "get_transcript", {},
+                               raw=True, project_id=3)
+    assert "12 sentences." in raw["text"]
+
+
+def test_placing_an_upload_never_waits_for_its_analysis(monkeypatch):
+    """A write that names an upload (insert_media, place_scenes) needs no
+    transcript: it goes straight to the editor while the upload analyses."""
+    monkeypatch.setattr(mcpmod, "_index_ready", lambda cur, pid: (True, None))
+
+    def never(*_a):
+        raise AssertionError("a write does not wait on an upload's analysis")
+
+    monkeypatch.setattr(mcpmod, "_asset_index_ready", never)
+    mcpmod._run_tool_job({"user_id": 60}, "insert_media",
+                         {"asset_key": "clips/3/a.mp4", "at_output_s": 0},
+                         raw=True, project_id=3)
+    assert len(DB["enqueued"]) == 1
+
+
+def test_an_analysis_the_worker_had_to_start_is_waited_for_and_rerun(
+        monkeypatch):
+    """The worker starts an upload's missing analysis and answers pending;
+    the call waits for it inside its budget and runs once more."""
+    monkeypatch.setattr(mcpmod, "_index_ready", lambda cur, pid: (True, None))
+    monkeypatch.setattr(mcpmod, "INDEX_POLL_S", 0.01)
+    states = [(True, None), (False, _narration_analysis()), (True, None),
+              (True, None)]
+    monkeypatch.setattr(mcpmod, "_asset_index_ready", lambda cur, pid, key:
+                        states.pop(0) if states else (True, None))
+    rows = [{"id": 5, "state": "done", "result": {
+                "text": "PENDING: that clip's analysis is running as job 77.",
+                "code": "index_not_ready", "status": "pending",
+                "retryable": True, "index_job_id": 77}},
+            {"id": 6, "state": "done", "result": {"text": "Transcript ok."}}]
+    monkeypatch.setattr(mcpmod, "_settle",
+                        lambda job_id, uid, seconds=None, slow=None:
+                        rows.pop(0))
+    raw = mcpmod._run_tool_job(
+        {"user_id": 60}, "get_transcript",
+        {"asset_key": "music/3/narration.mp3"}, raw=True, project_id=3)
+    assert raw["text"].endswith("Transcript ok.")
+    assert len(DB["enqueued"]) == 2
+    assert rows == []
+
+
+def test_asset_index_ready_reads_the_named_upload(monkeypatch):
+    class Cur:
+        def __init__(self, asset):
+            self.asset = asset
+
+        def execute(self, sql, params=()):
+            self.sql = sql
+
+        def fetchone(self):
+            return self.asset
+
+    monkeypatch.setattr(mcpmod, "_index_row",
+                        lambda cur, sha: {"id": 1} if sha == "done" else None)
+    monkeypatch.setattr(mcpmod, "_index_job_state", lambda cur, pid, aid: {
+        "id": 44, "state": "running", "progress": 10, "active": aid == 9})
+    assert mcpmod._asset_index_ready(Cur(None), 3, "x") == (True, None)
+    assert mcpmod._asset_index_ready(Cur({"id": 9, "sha256": "done"}), 3,
+                                     "x") == (True, None)
+    ready, analysis = mcpmod._asset_index_ready(
+        Cur({"id": 9, "sha256": None}), 3, "music/3/n.mp3")
+    assert ready is False and analysis["id"] == 44
+    assert analysis["asset_key"] == "music/3/n.mp3"
+    assert mcpmod._asset_index_ready(Cur({"id": 8, "sha256": None}), 3,
+                                     "x") == (True, None)
+    assert mcpmod._asset_index_ready(Cur(None), 3, None) == (True, None)
 
 
 def test_control_calls_and_failed_analysis_answer_immediately(monkeypatch):
