@@ -34,28 +34,6 @@ def test_eye_patch_rejected_on_source_even_if_render_lost_face():
     assert ei.patch_face_refusal(ctx, [{"x": .3, "y": .2, "w": .2, "h": .1, "start": 3, "end": 4}]) is None
 
 
-def test_cut_checks_walk_pixels_not_just_silence(monkeypatch, tmp_path):
-    import media, llm
-    seen = []
-    monkeypatch.setattr(media, "frame_at", lambda *a, **k: seen.append(a[1]))
-    monkeypatch.setattr(llm, "image_part", lambda p: {"type": "image_url", "image_url": {"url": p}})
-    def call(ctx, name, schema, system, parts, **kw):
-        import json
-        assert name == "check_cut_evidence"
-        assert len([p for p in parts if p['type'] == 'image_url']) == 3
-        assert json.loads(parts[0]['text'])['source_words'] == [{'w':'still','t0':5,'t1':5.5}]
-        assert json.loads(parts[0]['text'])['retained_context_words'][0]['w'] == 'outside'
-        assert json.loads(parts[0]['text'])['after_keep'] == [[0, 3.6]]
-        return {"allow": False, "reason": "continuous walking, not a wait"}, {}
-    monkeypatch.setattr(asks, "_call", call)
-    ctx = NS(user_message="Remove waiting gaps, preserve natural pauses", llm_client=object(), agent_model="any",
-             workdir=str(tmp_path), proxy_path=lambda: "source.mp4",
-             index={'words':[{'w':'outside','t0':0,'t1':.5},{'w':'still','t0':5,'t1':5.5}]})
-    assert "continuous walking" in ei.cut_refusal(ctx, {"keep": [[0,11.264]]}, {"keep": [[0,3.6]]})
-    assert len(seen) == 3
-    assert ei.cut_refusal(ctx, {"keep": [[0,3.6]]}, {"keep": [[0,11.264]]}) is None
-
-
 def test_failed_truth_rewrite_never_sends_done(monkeypatch):
     monkeypatch.setattr(asks, "_call", lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
     verdict = {"asks": [{"id": "a1", "state": "not_done", "seen": "dancers darkened", "line": "The background change is unfinished."}]}
@@ -209,19 +187,6 @@ def test_missing_ledger_cannot_lose_required_check_on_resume():
     assert outcome=='partial' and "can't confirm" in reply
 
 
-def test_authorized_shorter_cut_is_allowed_and_evidence_is_cached(monkeypatch,tmp_path):
-    import media,llm
-    monkeypatch.setattr(media,'frame_at',lambda *a,**k:None)
-    monkeypatch.setattr(llm,'image_part',lambda p:{'type':'image_url','image_url':{'url':p}})
-    calls=[]
-    monkeypatch.setattr(asks,'_call',lambda *a,**k: (calls.append(a[1]) or {'allow':True,'reason':'The customer explicitly requested the last five seconds.'},{}))
-    ctx=NS(user_message='Keep only the last five seconds',llm_client=object(),agent_model='any',
-           proxy_path=lambda:'source.mp4',workdir=str(tmp_path),index={})
-    for _ in range(2):
-        assert ei.cut_refusal(ctx,{'keep':[[0,11]]},{'keep':[[6,11]]}) is None
-    assert calls==['check_cut_evidence']
-
-
 def test_default_check_does_not_change_existing_route_opt_in():
     assert asks.parse(None)['mode']=='on'
     assert not asks.parse(None)['director'] and not asks.parse(None)['patch']
@@ -272,116 +237,19 @@ def test_check_schema_can_record_numbers_and_pixels_together():
     assert {"numbers", "frames"} <= set(proof["items"]["enum"])
 
 
-def test_length_target_cut_with_many_stretches_is_checked_not_refused(monkeypatch, tmp_path):
-    """Ticket #1301 (user 3120, 15 Nov): "reduce the footage to just under 60 minutes" on an
-    81-minute source needed ~40 removed stretches; the guard refused anything above 12 without
-    looking, three times in a row. Every stretch is now checked on its own frames, in groups,
-    and the judge is given the measured lengths so a length target can authorize the cut."""
-    import json, media, llm
-    monkeypatch.setattr(media, "frame_at", lambda *a, **k: None)
-    monkeypatch.setattr(llm, "image_part", lambda p: {"type": "image_url", "image_url": {"url": p}})
-    groups = []
-    def call(ctx, name, schema, system, parts, **kw):
-        assert "target" in system and "length" in system
-        body = json.loads(parts[0]["text"])
-        groups.append(body)
-        assert len([p for p in parts if p["type"] == "image_url"]) == 3 * len(body["removed_source_intervals"])
-        assert body["measured_length_before_s"] == 4858.0
-        return {"allow": True, "reason": "the target length needs these idle stretches gone"}, {}
-    monkeypatch.setattr(asks, "_call", call)
-    after = [[i * 120.0, i * 120.0 + 88.0] for i in range(40)] + [[4800.0, 4858.0]]
-    ctx = NS(user_message="help me reduce the footage to just under 60 minutes", llm_client=object(),
-             agent_model="any", workdir=str(tmp_path), proxy_path=lambda: "source.mp4", index={})
-    assert ei.cut_refusal(ctx, {"keep": [[0, 4858.0]]}, {"keep": after}) is None
-    removed = sum(len(g["removed_source_intervals"]) for g in groups)
-    assert removed == 40 and len(groups) == 4
-    assert all(len(g["removed_source_intervals"]) <= ei.CUT_GROUP for g in groups)
-    assert groups[0]["measured_length_after_s"] == 40 * 88.0 + 58.0
-    # A refusal in any group refuses the whole write, and a cached verdict is reused.
-    groups.clear()
-    monkeypatch.setattr(asks, "_call", lambda *a, **k: (groups.append(1) or {"allow": False, "reason": "keeps the payoff"}, {}))
-    ctx2 = NS(**{**vars(ctx), "_cut_evidence": {}})
-    assert "keeps the payoff" in ei.cut_refusal(ctx2, {"keep": [[0, 4858.0]]}, {"keep": after})
-    assert groups == [1]
 
-
-def test_length_target_hands_selection_to_editor_and_blank_refusal_is_rechecked(monkeypatch, tmp_path):
-    """Ticket #1318 (user 3120, project 5857, 15 Nov): after #1301 the judge accepted a
-    58.5-minute cut of an 81-minute family video as on target, then refused it because the
-    removed events were "not clearly weaker than what stays"; on footage that is all content no
-    selection could pass, three requests in a row. The judge is now told that a length or
-    highlights request hands the choice of moments to the editor, and a refusal with no
-    reason is a malformed check (retried, never cached), not a final verdict."""
-    import media, llm
-    assert "weaker, idler or more" not in ei.CUT_SYSTEM
-    assert "editor's" in ei.CUT_SYSTEM and "never a reason to refuse" in ei.CUT_SYSTEM
-    monkeypatch.setattr(media, "frame_at", lambda *a, **k: None)
-    monkeypatch.setattr(llm, "image_part", lambda p: {"type": "image_url", "image_url": {"url": p}})
-    answers = [{"allow": False, "reason": ""}, {"allow": True, "reason": "58.5 min, on target"}]
-    monkeypatch.setattr(asks, "_call", lambda *a, **k: (answers.pop(0), {}))
-    after = [[0, 780], [1285, 1849], [2251, 2751], [3192, 4858.22]]
-    ctx = NS(user_message="compile highlights from this video and make it last close to 60 mins",
-             llm_client=object(), agent_model="any", workdir=str(tmp_path),
-             proxy_path=lambda: "source.mp4", index={})
-    first = ei.cut_refusal(ctx, {"keep": [[0, 4858.22]]}, {"keep": after})
-    assert first == ei._UNCHECKED
-    assert ei.cut_refusal(ctx, {"keep": [[0, 4858.22]]}, {"keep": after}) is None
-    assert answers == []
-
-
-def test_named_kind_and_pause_asks_are_removal_criteria():
-    """Tickets #1345/#1346/#123 (user 3120, project 5857, 16 Nov): "remove the long stretches of
-    the stage shows, ride and performance footage and speed up the pauses in the speech". The
-    judge saw a stage show, a choir, a swing ride and bumper cars in the removed frames and still
-    refused, for want of a target length or highlights request; it refused every pause removal
-    because the picture moved during the gap. Five refusals, nothing changed. The judge is now
-    told a named kind of footage is itself the criterion, each stretch needs to serve only one
-    of the asks, and a gap between phrases is a pause, not a sentence cut in the middle."""
-    s = ei.CUT_SYSTEM
-    assert "names WHAT to remove" in s and "is itself the removal criterion" in s
-    assert "ANY one of them" in s
-    assert "pauses or\nsilences in speech authorizes" in s and "not cutting a\nsentence" in s
-    assert "do not ask for a target length" in s
-
-
-def test_repair_turn_judges_cuts_against_brief_and_repair_list(monkeypatch, tmp_path):
-    """Tickets #1351/#1352 (user 3120, project 5857, 16 Nov): a Repair edit press made the
-    turn's message the product's repeated-word list, so the cut judge never saw the brief
-    ("... speed up the pauses in the speech") and refused every pause removal, and it refused
-    the named first sayings because word snapping moved the boundaries a fraction."""
-    import media, llm
-    monkeypatch.setattr(media, 'frame_at', lambda *a, **k: None)
-    monkeypatch.setattr(llm, 'image_part', lambda p: {'type': 'image_url', 'image_url': {'url': p}})
-    seen = []
-    monkeypatch.setattr(asks, '_call', lambda *a, **k: (seen.append(json.loads(a[4][0]['text'])['request'])
-                                                     or {'allow': True, 'reason': 'ok'}, {}))
-    brief = 'remove the long stretches of the stage shows and speed up the pauses in the speech'
-    repair = 'Fix the remaining quality issues before export: Repeated words: "say hi say hi" at 567.85s'
-    ctx = NS(user_message=repair, verification_request=brief, llm_client=object(), agent_model='any',
-             proxy_path=lambda: 'source.mp4', workdir=str(tmp_path), index={})
-    assert ei.cut_refusal(ctx, {'keep': [[0, 600]]}, {'keep': [[0, 128.3], [129.2, 600]]}) is None
-    assert brief in seen[0] and repair in seen[0]
-    assert ei._cut_request(NS(user_message=brief, verification_request=brief)) == brief
-    s = ei.CUT_SYSTEM
-    assert "first saying" in s and "snaps the named numbers to whole" in s
-    assert "serves either" in s
-
-
-def test_length_target_steps_and_clean_sentence_cuts_are_allowed():
-    """Tickets #1358/#1360/#1363/#1364 (user 3120, project 5857, 16 Nov 07:54 UTC, after
-    fd49d844 and 0efbb5ad were live): "use your best judgement to create 60 minutes worth of
-    footage from this video". The judge refused every small cut_range step because that one
-    step left the film far over 60 minutes, refused two whole keep lists that landed at 60.5 and
-    58.5 minutes over a 400 s stretch that ran from a finished sentence to the next spoken word,
-    and refused a false start ("We have [pause] we have other people") as a sentence cut. Twelve
-    and seventeen refusals in a row; the 81-minute film never changed. The judge is now told a
-    write toward a length target is a step, length refuses only a result far below the target, a
-    stretch between sentences is clean, a false start is cleaning, and doubt about which moments
-    matter is the editor's call."""
-    s = ei.CUT_SYSTEM
-    assert "never refuse a write for not reaching the\ntarget on its own" in s
-    assert "far BELOW the target" in s and "still well\nover it" not in s
-    assert "begins after a complete sentence" in s and "topic carries on" in s
-    assert "false start" in s and "is\ncleaning" in s
-    assert "doubt about which moments matter is the editor's call" in s
-    assert "exact second to move that edge to" in s
+def test_editor_cuts_are_never_vetoed_by_a_second_model(monkeypatch, tmp_path):
+    """Owner, 16 Nov: smart tools and a smart model decide; no judge overrules the editor.
+    p5857 (16 Nov): 'use your best judgement to create 60 minutes worth of footage from this
+    video' on an 81-minute upload was refused 17 times by the cut-evidence judge."""
+    calls = []
+    monkeypatch.setattr(asks, "_call", lambda *a, **k: calls.append(a[1]) or ({"allow": False, "reason": "no"}, {}))
+    ctx = NS(user_message="use your best judgement to create 60 minutes worth of footage from this video",
+             verification_request="remove the long stretches of the stage shows and compile highlights close to 60 mins",
+             llm_client=object(), agent_model="claude-haiku-5-5", workdir=str(tmp_path), index={},
+             ask_ledger={"asks": [{"id": "a1", "kind": "film"}]})
+    before = {"keep": [[0, 4858.2]]}
+    after = {"keep": [[0, 780], [1285, 1849], [2251, 2751], [3192, 4858.2]]}
+    assert ei.write_refusal(ctx, before, after) is None
+    assert calls == []
+    assert not hasattr(ei, "cut_refusal") and not hasattr(ei, "CUT_SYSTEM")
