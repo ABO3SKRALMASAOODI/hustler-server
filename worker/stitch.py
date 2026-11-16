@@ -1210,7 +1210,8 @@ def shift_ass(src_path, dst_path, w0, w1):
 
 # Fields the audio rebuild owns outright — a difference here never blocks a
 # timeline stitch and never opens a video window.
-AUDIO_FIELDS = ("music", "sfx", "volume", "voiceover", "master", "stem_mix")
+AUDIO_FIELDS = ("music", "sfx", "volume", "voiceover", "master", "stem_mix",
+                "noise_clean")
 
 _MIN_COPY_S = 0.75          # a copy shorter than this joins its neighbours
 _SEAM_EPS = 1e-6

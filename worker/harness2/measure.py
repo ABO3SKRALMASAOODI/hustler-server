@@ -134,7 +134,8 @@ def change_line(prev, new, prev_version, new_version):
             bits.append(f"~{changed}")
         if bits:
             parts.append(f"{layer} {' '.join(bits)}")
-    for key in ("captions", "frame", "effects", "master", "stem_mix"):
+    for key in ("captions", "frame", "effects", "master", "stem_mix",
+                "noise_clean"):
         if prev.get(key) != new.get(key):
             parts.append(f"{key} changed")
     try:

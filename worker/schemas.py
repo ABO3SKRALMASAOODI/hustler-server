@@ -2646,6 +2646,60 @@ class StemMix(BaseModel):
         return v
 
 
+class NoiseClean(BaseModel):
+    """EDIT-CORE A3 (16 Nov 2026): the ORIGINAL footage's sound with its
+    background noise taken out ("mute the background noise", "remove the
+    hum/wind/fan"). noise_clean.py measures the noise floor where nobody
+    speaks, lowers every time-frequency cell that does not rise over it by
+    reduction_db, and stores the cleaned track (keyed by source sha and
+    strength, so a video is cleaned once per strength). The renderer plays
+    it wherever the graph would have read the original track (or, with a
+    stem_mix, the cleaned voice stem). Removing the node restores the
+    untouched original."""
+    audio_key: Optional[str] = None
+    strength: float = 0.8
+    applies_to: Literal["source", "vocals"] = "source"
+    floor_db: Optional[float] = None
+    reduction_db: Optional[float] = None
+
+    # Every writer is repaired here, never refused: a strength outside 0..1
+    # is clamped (an unreadable one is the default), and an audio_key that
+    # is not a stored cleaned track is dropped, so the renderer measures and
+    # cleans the footage's own sound itself.
+    @field_validator("strength", mode="before")
+    @classmethod
+    def _strength(cls, v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return 0.8
+        if f != f:                      # NaN
+            return 0.8
+        return min(1.0, max(0.0, f))
+
+    @field_validator("audio_key", mode="before")
+    @classmethod
+    def _key(cls, v):
+        if v is None or not isinstance(v, str) or \
+                not v.startswith("analysis/noise_clean/"):
+            return None
+        return v
+
+    @field_validator("applies_to", mode="before")
+    @classmethod
+    def _target(cls, v):
+        return v if v in ("source", "vocals") else "source"
+
+    @field_validator("floor_db", "reduction_db", mode="before")
+    @classmethod
+    def _measured(cls, v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return None if f != f else f
+
+
 CLEAN_FILLS = ("text", "box")
 
 
@@ -2836,6 +2890,9 @@ class EDL(BaseModel):
     # Round 97: music/voice rebalance of the original audio via separated
     # stems — see StemMix. Audio-only: a change here never re-encodes video.
     stem_mix: Optional[StemMix] = None
+    # EDIT-CORE A3: the original sound with its background noise cleaned
+    # (NoiseClean). Audio-only, like stem_mix.
+    noise_clean: Optional[NoiseClean] = None
     # round 37 — PROGRAM-time windows where burned captions are suppressed.
     # Captions were all-or-nothing before this: a full-frame effect or a title
     # treatment that covers the frame still had the spoken-word captions burned

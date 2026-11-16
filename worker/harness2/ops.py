@@ -376,13 +376,22 @@ def op_audio(stage, value, env, index):
     v = dict(value or {})
     if isinstance(v.get("separate"), dict):
         return _run_verb(stage, "separate_music", v["separate"], env, index)
+    if "clean" in v:
+        # EDIT-CORE A3: background noise out of the footage's own sound
+        c = v["clean"]
+        args = (dict(c) if isinstance(c, dict)
+                else {"strength": 0} if c is False or c == 0
+                else {} if c is True or c is None
+                else {"strength": c})
+        return _run_verb(stage, "clean_noise", args, env, index)
     rng = v.get("range") or [v.get("start"), v.get("end")]
     try:
         args = {"start": float(rng[0]), "end": float(rng[1]),
                 "gain_db": float(v.get("gain_db"))}
     except (TypeError, ValueError, IndexError):
-        env.skip(index, "audio takes {range: [start, end], gain_db} or "
-                        "{separate: {voice_gain_db, music_gain_db}}")
+        env.skip(index, "audio takes {range: [start, end], gain_db}, "
+                        "{separate: {voice_gain_db, music_gain_db}} or "
+                        "{clean: strength 0..1} (background noise out)")
         return False
     return _run_verb(stage, "set_volume", args, env, index)
 

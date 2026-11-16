@@ -25,7 +25,7 @@ except ImportError:
 # FX_AUTHORABLE_TYPES), because until then validation rejects any item.
 LAYERS = frozenset(("keep", "speed", "inserts", "frame", "captions",
     "caption_mutes", "texts", "vectors", "music", "sfx", "voiceover", "volume", "master",
-    "effects", "overlays", "canvas", "motion", "fx"))
+    "effects", "overlays", "canvas", "motion", "fx", "noise_clean"))
 ITEM_LAYERS = frozenset(("inserts", "texts", "vectors", "music", "sfx", "voiceover", "overlays",
     "motion", "fx"))
 
@@ -70,6 +70,45 @@ def _flag_on(name):
     if config is not None and hasattr(config, name):
         return bool(getattr(config, name))
     return os.getenv(name, "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _noise_clean_node(edl, before, notes=None):
+    """EDIT-CORE A3: the noise_clean layer as a writer sends it. A number is
+    the strength, true is the default strength, false/0 clears it; a node
+    whose strength changed drops the stored track made for the old one (the
+    render measures and cleans the sound itself)."""
+    if "noise_clean" not in edl:
+        return
+    v = edl.get("noise_clean")
+    if v is True:
+        v = {"strength": 0.8}
+    elif v is False or v == 0:
+        v = None
+    elif isinstance(v, (int, float)):
+        v = {"strength": min(1.0, max(0.0, float(v)))}
+    if isinstance(v, dict):
+        v = dict(v)
+        try:
+            s = float(v.get("strength", 0.8))
+        except (TypeError, ValueError):
+            s = 0.8
+        v["strength"] = min(1.0, max(0.0, s))
+        if v["strength"] <= 0.0:
+            v = None
+        else:
+            old = (before or {}).get("noise_clean") or {}
+            if v.get("audio_key") and (
+                    not isinstance(old, dict)
+                    or abs(float(old.get("strength") or -1) - v["strength"]) > 1e-6
+                    or old.get("audio_key") != v.get("audio_key")):
+                for k in ("audio_key", "floor_db", "reduction_db"):
+                    v.pop(k, None)
+            if notes is not None and v != old:
+                notes.append(
+                    f"noise_clean: background noise is cleaned from the "
+                    f"footage's sound at strength {v['strength']:g}; the "
+                    "render measures the floor where nobody speaks.")
+    edl["noise_clean"] = v
 
 
 def check_fx_devices(before, after):
@@ -998,6 +1037,7 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
     # A graphic behind the subject needs a subject mask: a measured clip
     # (add_motion_graphic builds one) or, from Wave 1, the program matte.
     _behind_through_program_matte(edl, before)
+    _noise_clean_node(edl, before, notes)
     try:
         normalized = validate_edl(edl, duration).model_dump()
     except ValueError as exc:

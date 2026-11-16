@@ -42,7 +42,8 @@ _SUBKEYS = {
     "broll": [("inserts", None), ("overlays", None), ("patches", None)],
     "speed": [("speed", None)],
     "frame": [("frame", None), ("canvas", None)],
-    "loudness": [("master", None), ("volume", None), ("music", None), ("stem_mix", None)],
+    "loudness": [("master", None), ("volume", None), ("music", None), ("stem_mix", None),
+                 ("noise_clean", None)],
     "cuts": [("keep", None), ("split_keep_boundaries", None), ("inserts", None), ("speed", None)],
 }
 
@@ -183,6 +184,8 @@ def edl_changes(before, after):
         add("loudness", "changed the loudness or volume")
     if not _same(before.get("stem_mix"), after.get("stem_mix")):
         add("loudness", "changed the voice/music balance")
+    if not _same(before.get("noise_clean"), after.get("noise_clean")):
+        add("loudness", "cleaned the background noise from the footage's sound")
     if not _same(before.get("source_clean"), after.get("source_clean")):
         add("broll", "changed the cleaned-up regions of the picture")
     return out

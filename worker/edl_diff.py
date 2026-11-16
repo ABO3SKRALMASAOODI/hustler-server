@@ -269,7 +269,7 @@ def _change_ranges(prev, new):
     def _fx_rest(fx):
         return {k: v for k, v in fx.items() if k not in ("zooms", "custom")}
     for field in ("captions", "frame", "master", "canvas", "caption_mutes",
-                  "source_clean", "voiceover"):
+                  "source_clean", "voiceover", "noise_clean"):
         if (prev.get(field) or None) != (new.get(field) or None):
             glob = True
     if _fx_rest(fx_p) != _fx_rest(fx_n):
