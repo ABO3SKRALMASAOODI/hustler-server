@@ -163,6 +163,13 @@ def finish(out, script):
     # 20-29%) and gave the voice an overlap-add sheen. Range comes from the performance: the sentence shape the writer
     # gives Phonon and the takes chosen for range and restart. Pitch is measured against the long-form narrators' band.
     gain=1.0
+    # Pace (16 Nov): Easton reads long-form text at 224-241 words a minute while speaking (pyin/whisper, lane
+    # longform-lane), above the metromedia narrators' 183-213 and the long-form narrators' median 213, and the pause
+    # correction below used to speed it up further (x1.08) to pull the pause rate into its band. A read over 216 is
+    # brought to 208, and no correction takes it past 214.
+    artic0=shared.artic(json.loads(origin_words.read_text()).get('words') or [])
+    factor=round(max(.90,208/artic0),5) if artic0 and artic0>216 else 1.0
+    fastest=max(1.0,214/artic0) if artic0 else 1.08
     join_aim=14.0
     for attempt in range(3):
         x,sr=sf.read(origin,dtype='float32')
@@ -202,9 +209,12 @@ def finish(out, script):
         after=measure(audio,expected,out/'longform-metrics')
         result=dict(before=before,after=after,tempo=factor,contour_gain=gain,join_edits=joins,method='Easton performance as read (no pitch resynthesis); short joins paced with WSOLA, phonemes retained')
         last=attempt==2
+        nxt=factor
+        if not after['ok'] and after['pauses_per_min']<=17.4:
+            try:nxt=min(factor*tempo_factor(after['pauses_per_min'],after['median_pause_s']),fastest)
+            except ValueError:nxt=0
         if not after['ok'] and after['wer']<.01:
-            nxt=factor*tempo_factor(after['pauses_per_min'],after['median_pause_s']) if after['pauses_per_min']<=17.4 else factor
-            if last or not .92<=nxt<=1.08:
+            if last or not .88<=nxt<=1.08 or (nxt==factor and after['pauses_per_min']<=17.4):
                 # Every word is right and the read is the performance itself: deliver it and record which pause or
                 # range measure sits outside its band (16 Nov: a 0.29 s median pause against 0.28 stopped the film).
                 result.update(accepted=True,outside=sorted(k for k,v in after['targets'].items() if not v))
@@ -220,11 +230,8 @@ def finish(out, script):
             (out/'check.json').unlink(missing_ok=True)
             return result
         if after['wer']>=.01: break
-        if after['pauses_per_min']<=17.4:
-            factor*=tempo_factor(after['pauses_per_min'],after['median_pause_s'])
-        else:
-            join_aim=max(10.,join_aim-max(1.,(after['pauses_per_min']-16.5)*1.6))
-        if not .92<=factor<=1.08: break
+        if after['pauses_per_min']<=17.4:factor=nxt
+        else:join_aim=max(10.,join_aim-max(1.,(after['pauses_per_min']-16.5)*1.6))
     # Only a word the listener does not hear stops here; read_repair.py rewrites that line and the run resumes.
     raise ValueError('Easton read has word errors after its corrections: '+json.dumps(after))
 
