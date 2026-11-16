@@ -125,3 +125,30 @@ def test_text_free_excerpt_measures_faces_before_accepting_anchor():
         dict(edl, captions={'mode': 'from_transcript', 'style': fixed}), 720, 1280)
     lo, hi = caption_place.natural_block(fixed['anchor_y'], one, tall, motion)
     assert not caption_place.hits(lo, hi, [[.25, .30, .70, .65]], (.15, .85))
+
+
+def test_failed_automatic_seat_leaves_shot_placement_open(monkeypatch):
+    import first_cut
+    from test_first_cut_visual import _talking_chain
+    calls, treatments = [], []
+    original = first_cut._run
+
+    def crowded(edl, index, style, W, H, measure=None):
+        treatments.append(dict(style))
+        return dict(style, anchor_y=.7), {
+            'moved': False, 'clear': False,
+            'reason': 'no band fits unchanged captions'}
+
+    def run(ctx, steps, name, args, started):
+        if name == 'add_captions':
+            calls.append(args)
+        return original(ctx, steps, name, args, started)
+
+    monkeypatch.setattr(first_cut_type, 'place', crowded)
+    monkeypatch.setattr(first_cut, '_run', run)
+    _talking_chain(monkeypatch, True)
+    assert len(calls) == 1
+    assert calls[0]['mode'] == 'from_transcript'
+    assert calls[0]['style'] == {
+        k: v for k, v in treatments[0].items()
+        if k not in ('anchor_y', 'position')}
