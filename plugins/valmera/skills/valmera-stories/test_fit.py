@@ -486,7 +486,7 @@ def _fc(fail_s, defects=()):
                 defects=list(defects), gates_ok=not defects)
 
 
-def test_the_picture_gate_draws_again_once_then_stops_before_delivery(tmp_path, monkeypatch):
+def test_the_picture_gate_draws_again_while_it_improves_then_delivers_with_the_record(tmp_path, monkeypatch):
     import pytest
     import wf3 as W3
     ctx = _ctx(tmp_path)
@@ -500,12 +500,12 @@ def test_the_picture_gate_draws_again_once_then_stops_before_delivery(tmp_path, 
         film.write_bytes(b"rendered")
         return dict(film=str(film))
     monkeypatch.setattr(W3, "render", render)
-    with pytest.raises(RuntimeError, match="picture gate"):
-        W3.check(ctx, {}, {})
-    assert seen == [("score", ["bad.jpg@1"]), "render"]                    # dropped, scored and drawn again once
-    with pytest.raises(RuntimeError):                                      # a resumed check never loops: it stops again
-        W3.check(ctx, {}, {})
-    assert len(seen) == 2
+    r = W3.check(ctx, {}, {})                                              # owner 16 Nov: repaired, recorded, delivered
+    assert seen == [("score", ["bad.jpg@1"]), "render", ("score", ["bad.jpg@1"]), "render"]   # a second round; no third
+    assert any("picture gate" in d for d in r["checks"]["stories"]["defects"])   # nothing gained: stop repairing, record
+    assert len(r["checks"]["stories"]["picture_gate"]["rounds"]) == 2
+    W3.check(ctx, {}, {})                                                  # a resumed check does not start the rounds again
+    assert len(seen) == 4
     evidence = json.loads((tmp_path / "run" / "check_attempt.json").read_text())
     assert evidence["checks"]["stories"]["picture_gate"]["after"] == 1.2
 
@@ -567,11 +567,11 @@ def test_picture_repair_resumes_render_with_its_checkpointed_score(tmp_path, mon
     monkeypatch.setattr(W3, "check_once", check_once)
     with pytest.raises(RuntimeError, match="render interrupted"):
         W3.check(ctx, {}, {"version": "stale"})
-    with pytest.raises(RuntimeError, match="0.4 s of pictures still fail"):
-        W3.check(ctx, {}, {"version": "stale"})
-    with pytest.raises(RuntimeError, match="0.4 s of pictures still fail"):
-        W3.check(ctx, {}, {"version": "stale"})
-    assert calls == ["score", "render", "render"]
+    r = W3.check(ctx, {}, {"version": "stale"})                            # resumed: two more rounds, then recorded
+    assert r["checks"]["stories"]["picture_gate"]["after"] == 0.4
+    assert any("0.4 s of pictures still fail" in d for d in r["checks"]["stories"]["defects"])
+    W3.check(ctx, {}, {"version": "stale"})
+    assert calls == ["score", "render", "render", "score", "render", "score", "render"]
 
 
 def test_a_film_whose_only_defect_is_a_fill_overflow_is_delivered(tmp_path, monkeypatch):

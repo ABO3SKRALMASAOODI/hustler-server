@@ -1515,8 +1515,7 @@ def score(ctx, script):
     look = os.path.join(ctx.run_dir, "look")
     if ctx.args.get("look", True) is False:
         # one command, no stop: the look is the engines' and the checks'; nothing is drawn for a director who is not there
-        if not taste["ok"]:
-            raise RuntimeError("the plan breaks a taste rule: " + "; ".join(taste["problems"][:6]))
+        taste_carry_on(ctx, beats, taste)
         turn_s = round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None
         return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
                     frames=l1["dur_f"], items=len(l1["items"]), direction=d, spend=[])
@@ -1530,8 +1529,7 @@ def score(ctx, script):
     cols = 8
     subprocess.run([pack["ffmpeg"], "-v", "error", "-y", "-pattern_type", "glob", "-i", os.path.join(look, "f*.png"), "-vf",
                     f"scale=270:-2,tile={cols}x{-(-len(frames) // cols)}:padding=4", "-frames:v", "1", "-q:v", "3", os.path.join(look, "sheet.jpg")], check=True)
-    if not taste["ok"]:
-        raise RuntimeError("the plan breaks a taste rule: " + "; ".join(taste["problems"][:6]))
+    taste_carry_on(ctx, beats, taste)
     if ctx.args.get("look", True) and not os.path.exists(os.path.join(ctx.run_dir, "look.ok")):
         raise RuntimeError(f"the director's look: open {look}/sheet.jpg, put changes in {ctx.run_dir}/direction.json, "
                            f"then touch {ctx.run_dir}/look.ok and resume")
@@ -1700,6 +1698,19 @@ def pace_of(beats):
     short = {k: v for k, v in (m.get("shortfall_s") or {}).items() if v}
     return dict(cuts_10s=round(len(lens) / secs * 10, 2), long_share=round(sum(1 for n in lens if n >= 2 * F.FPS) / max(len(lens), 1), 3),
                 median_s=round(sorted(lens)[len(lens) // 2] / F.FPS, 3) if lens else None, shortfall=short)
+
+
+def taste_carry_on(ctx, beats, taste):
+    """A plan whose taste check still names problems after the gates' repairs (stories_gates: audit rounds, colour,
+    layout, density, pace top-up, repeat rebuild) is drawn and delivered with the problems recorded (beats.measured
+    .taste_problems; the film's checks.ok is false through sc.taste), never stopped (owner, 16 Nov). The 15 Nov Hoover
+    run stopped here after 11.8 hours: "31% of shots repeat a take; 1 static shot (0.07 s)", and an hour earlier on
+    "27 sounds where the supply allows 26"."""
+    if taste.get("ok"):
+        return
+    m = beats.setdefault("measured", {})
+    m["taste_problems"] = list(taste.get("problems") or [])
+    ctx.log("taste: recorded, the plan goes on: " + "; ".join(m["taste_problems"][:6]))
 
 
 def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None):
@@ -2105,12 +2116,17 @@ def _check_repair(ctx):
     return check_once(ctx, rd, sc)
 
 
+PICTURE_REPAIRS = 3       # picture-gate repair rounds while the failing seconds fall
+
+
 def check(ctx, rd, sc):
     """The shell's finish and checks, then the story reel's own (check_once). The picture gate (wf3 only): a render
     whose pictures fail their words (picture_fit.fail_s > 0) has its failing pictures written to supply/render_drop.json
-    (file@line), the score built again with them dropped (score() merges the file), drawn again and checked once more;
-    still failing, the run stops before deliver (resumable), so no film with a wrong picture is delivered. A fill
-    overflow is a recorded defect, not a stop: a designed card is not a wrong picture."""
+    (file@line), the score built again with them dropped (score() merges the file), drawn again and checked again, up
+    to PICTURE_REPAIRS rounds while the failing seconds fall (a dropped picture's line takes its next fitting take, then
+    its own designed card). 17 Nov (owner, 16 Nov: a fix makes the product reach the outcome, never a refusal): what
+    still fails after the rounds is recorded on the film (checks.stories.picture_gate, defects) and the film is
+    delivered, instead of stopping the run before deliver. A fill overflow is a recorded defect too."""
     marker = os.path.join(ctx.supply, "render_repair.json")
     repairing = ctx.workflow == "wf3" and os.path.exists(marker)
     if repairing:
@@ -2122,16 +2138,33 @@ def check(ctx, rd, sc):
         _check_record(ctx, "check_attempt", r)
         if ctx.workflow != "wf3" or fc is None or not fc["picture_fit"]["fail_s"] > 0 or ctx.args.get("picture_gate") is False:
             return r
+    rounds = list((_check_record(ctx, "picture_rounds") or {}).get("rounds") or [])
+    while fc["picture_fit"]["fail_s"] > 0 and len(rounds) < PICTURE_REPAIRS and \
+            (len(rounds) < 2 or rounds[-1]["fail_s"] < rounds[-2]["fail_s"]):
         bad = [x["drop"] for x in fc["picture_fit"]["shots"] if not x.get("fit") and x.get("drop")]
+        if not bad and rounds:
+            break
+        rounds.append(dict(fail_s=fc["picture_fit"]["fail_s"], dropped=bad))
+        _check_record(ctx, "picture_rounds", dict(rounds=rounds))
         json.dump(dict(drop=sorted(set(render_drop(ctx)) | set(bad))), open(os.path.join(ctx.supply, RENDER_DROP), "w"), indent=1)
-        json.dump(dict(fail_s=fc["picture_fit"]["fail_s"], dropped=bad), open(marker, "w"), indent=1)
-        ctx.log(f"picture gate: {fc['picture_fit']['fail_s']} s of pictures fail their words; dropping {len(bad)} and drawing again")
+        json.dump(dict(fail_s=rounds[0]["fail_s"], dropped=rounds[0]["dropped"], rounds=len(rounds)), open(marker, "w"), indent=1)
+        ctx.log(f"picture gate round {len(rounds)}: {fc['picture_fit']['fail_s']} s of pictures fail their words; dropping {len(bad)} and drawing again")
+        for name in ("repair_score", "repair_render"):          # each round builds and draws the plan again
+            q = os.path.join(ctx.run_dir, name + ".json")
+            if os.path.exists(q):
+                os.remove(q)
         r, fc = _check_repair(ctx)
-    r["checks"].setdefault("stories", {})["picture_gate"] = dict(repaired=True, first=json.load(open(marker)), after=fc["picture_fit"]["fail_s"])
-    _check_record(ctx, "check_attempt", r)
+        rounds[-1]["after_s"] = fc["picture_fit"]["fail_s"]
+        _check_record(ctx, "picture_rounds", dict(rounds=rounds))
+    first = json.load(open(marker)) if os.path.exists(marker) else None
+    st = r["checks"].setdefault("stories", {})
+    st["picture_gate"] = dict(repaired=bool(rounds), first=first, rounds=rounds, after=fc["picture_fit"]["fail_s"])
     if fc["picture_fit"]["fail_s"] > 0:
-        raise RuntimeError(f"picture gate: {fc['picture_fit']['fail_s']} s of pictures still fail their words after the repair: "
-                           + json.dumps([dict(line=x["line"], why=x.get("why")) for x in fc["picture_fit"]["shots"] if not x.get("fit")])[:400])
+        left = [dict(line=x["line"], why=x.get("why")) for x in fc["picture_fit"]["shots"] if not x.get("fit")]
+        st.setdefault("defects", []).append(f"picture gate: {fc['picture_fit']['fail_s']} s of pictures still fail their words after "
+                                            f"{len(rounds)} repair rounds: " + json.dumps(left, ensure_ascii=False)[:400])
+        ctx.log(f"picture gate: {fc['picture_fit']['fail_s']} s still fail after {len(rounds)} rounds; recorded on the film and delivered")
+    _check_record(ctx, "check_attempt", r)
     return r
 
 
