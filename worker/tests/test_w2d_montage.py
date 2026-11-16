@@ -272,9 +272,15 @@ def test_arrange_refuses_a_track_the_user_did_not_choose():
         schemas.validate_edl(e, S.DUR)
 
 
-def test_shape_music_refuses_without_a_user_track():
+def test_shape_music_without_a_track_says_to_place_one():
+    # Owner, 13 Nov / 16 Nov 2026: Valmera may choose the track; with none in
+    # the edit the tool says how to place one, never asks the user to pick.
     ctx = S.Ctx(S.edl())
-    assert MT.shape_music(ctx, payoff=5.0).startswith("REJECTED")
+    n = len(getattr(ctx, "writes", []) or [])
+    out = MT.shape_music(ctx, payoff=5.0)
+    assert not out.startswith("EDL v"), out
+    assert "add_library_music" in out and "ask_user" not in out
+    assert len(getattr(ctx, "writes", []) or []) == n
 
 
 def test_shape_music_writes_fields_hold_and_filter(monkeypatch):

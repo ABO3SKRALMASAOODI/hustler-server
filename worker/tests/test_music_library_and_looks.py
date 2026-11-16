@@ -57,8 +57,12 @@ class _Db:
 
 class _Storage:
     def __init__(self, missing=()):
+        import music_choose
         self.objects = {m["storage_key"] for m in music_library.entries()
                         if m["storage_key"] not in set(missing)}
+        # Valmera's own choice comes from the licensed library (music_choose)
+        self.objects |= {t["storage_key"] for t in music_choose.tracks()
+                         if t["storage_key"] not in set(missing)}
         self.copies = []
 
     def exists(self, key):
@@ -545,7 +549,14 @@ def test_music_choice_by_picked_slug_and_lead_without_speech(store):
     ctx = _Ctx(ratio="9:16")
     out = agent_tools.apply_look(ctx, "clean_minimal", music="cinematic")
     assert out.startswith("EDL v1"), out                     # a mood picks a bed
-    assert "library-cinematic-" in ctx.latest_edl()["json"]["music"][0]["storage_key"]
+    m = ctx.latest_edl()["json"]["music"][0]
+    assert m["provenance"] == "valmera_chosen"
+    # chosen against the references from the licensed library, never by hash
+    import music_choose
+    import music_gate
+    cid = music_gate.library_slug(m["storage_key"])
+    assert cid in {t["cid"] for t in music_choose.choosable()}
+    assert "chosen by Valmera against the references" in out
     ctx = _Ctx(ratio="9:16")
     ctx.user_message = "use After midnight"
     agent_tools.apply_look(ctx, "clean_minimal",

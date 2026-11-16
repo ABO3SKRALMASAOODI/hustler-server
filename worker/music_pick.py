@@ -1,7 +1,8 @@
 """Did the user pick a library track? A model reads their reply and says.
 
-Owner rule 1 stands: agents never choose music. The user picks. What this
-module replaces is how a pick was RECOGNISED: exact slugs, exact titles and
+Valmera may choose the music (owner rule, 13 Nov 2026); this module only
+records whether a track was the USER's own pick (provenance). What it
+replaces is how a pick was RECOGNISED: exact slugs, exact titles and
 word lists (music_gate._mentions / _positions). On 13 Nov 2026 (ticket #1088)
 a Hindi-speaking customer was offered "1) Calm Currents ..." and answered
 "Calm current": no exact title, so add_library_music was refused five times
@@ -10,9 +11,8 @@ the debt the owner forbids ("no regex on intent"); a model reads it here.
 
 The model only ever returns a track the user themselves chose, and never one
 they left to the editor: "you choose", "whatever suits the story", a mood or
-"some music" is not a pick, so delegation still ends in an offer. Any doubt,
-error or missing client returns None, which means "no pick": the gate then
-refuses as before and nothing is placed on a guess.
+"some music" is not a pick. Any doubt, error or missing client returns None,
+which means "no pick": the track is then stamped valmera_chosen.
 """
 import json
 

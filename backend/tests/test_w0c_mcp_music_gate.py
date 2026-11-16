@@ -64,7 +64,7 @@ def api(monkeypatch):
             self.one, self.many = None, []
             q = " ".join(sql.split())
             self.queries.append(q)
-            if "pg_advisory_xact_lock" in q:
+            if "pg_advisory_xact_lock" in q or "SAVEPOINT" in q:
                 return
             if q.startswith("SELECT id FROM video_jobs"):
                 self.one = None
@@ -243,6 +243,25 @@ def test_an_mcp_batch_web_sound_plays_the_closest_library_recording(
         1, 2, _sfx_batch(_sfx(UPLOAD, sid="s2"), base=2, op="s2"), origin="mcp")
     assert status == 200, result
     assert any(s["storage_key"] == UPLOAD for s in api.edls[3]["sfx"])
+
+
+def test_an_mcp_web_sound_whose_stand_in_cannot_be_prepared_is_left_out(
+        api, monkeypatch):
+    monkeypatch.setenv("WEB_SFX_ENABLED", "0")
+    calls = []
+
+    def down(key, data, ctype):
+        calls.append(key)
+        raise OSError("storage unavailable")
+    monkeypatch.setattr(video.storage, "put_bytes", down)
+    result, status = video.apply_edit_batch_core(
+        1, 2, _sfx_batch(_sfx(SFX), _sfx(UPLOAD, sid="s2")), origin="mcp")
+    assert status == 200, result
+    assert len(calls) == 2                      # tried once more
+    keys = [s["storage_key"] for s in api.edls[2]["sfx"]]
+    assert SFX not in keys and UPLOAD in keys   # never the web file; the rest saves
+    text = json.dumps(result)
+    assert "was not placed" in text and "storage unavailable" in text
 
 
 def test_a_web_sound_already_in_the_edit_still_moves(api, monkeypatch):

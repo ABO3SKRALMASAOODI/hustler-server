@@ -16,8 +16,9 @@
                   moving still (Ken Burns push / pull / pan / rise / drift
                   toward a face it finds), an image insert gets a camera move
 
-Agents never choose music: every verb that reads a track refuses when the
-user supplied none (plan_to_music falls back to the speech clock).
+The edit's track is the user's own or one Valmera chose (owner rule, 13 Nov
+2026). With no track in the edit, plan_to_music falls back to the speech
+clock.
 """
 
 import json
@@ -1048,11 +1049,12 @@ TOOL_SPECS = {
          "dry_run": {"type": "boolean"}}),
     "shape_music": (
         shape_music,
-        "WRITE: bend the user's track to the story: payoff (program seconds "
+        "WRITE: bend the edit's track to the story: payoff (program seconds "
         "or the words) solves the music item's offset/start/end/fades so "
         "the DROP lands on it and the bed ends on a bar line; hold_s holds "
         "silence before it; intro_filter lowpass|highpass opens exactly on "
-        "the drop; stutter_at slices a hit. User tracks only.",
+        "the drop; stutter_at slices a hit. Works on the user's track or one "
+        "Valmera chose.",
         {"payoff": {"type": "string"}, "music_id": {"type": "string"},
          "hold_s": {"type": "number", "minimum": 0, "maximum": 2},
          "intro_filter": {"type": "string", "enum": ["lowpass",

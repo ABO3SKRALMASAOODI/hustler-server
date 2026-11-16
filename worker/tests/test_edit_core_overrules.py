@@ -63,6 +63,20 @@ def test_an_edit_batch_that_clips_a_word_also_saves_repaired():
     assert "kept 'story' whole" in out and "kept 'began' whole" in out
 
 
+def test_a_cut_inside_one_word_that_closes_names_the_word_and_its_span():
+    ctx, fake = _ctx(words=WORDS)
+    n = len(fake.rows)
+    edl = default_edl(20.0)
+    edl["keep"] = [[0.0, 4.30], [4.36, 20.0]]   # both edges inside 'story'
+    out = ctx.write_edl(edl, "trim inside a word")
+    assert out.startswith("NO CHANGE"), out
+    assert len(fake.rows) == n
+    assert "may not be supported" not in out
+    assert "CUT EDGES REPAIRED" in out
+    assert "inside the word 'story' (4.200-4.900s)" in out
+    assert "cut 4.200-4.900s whole" in out
+
+
 def test_clean_edges_get_no_note_and_an_unchanged_keep_is_not_measured(monkeypatch):
     ctx, fake = _ctx(words=WORDS)
     edl = default_edl(20.0)
@@ -220,10 +234,26 @@ def test_no_agent_facing_text_sends_the_editor_to_ask_about_music():
                 music_library.TOOL_SPECS["list_music_library"][1],
                 rhythm_tools._no_track(), claude_trial.FIRST_RESULT_NOTE,
                 agent_prompt.project_state_block("v", "i", "e", [], [])]
-    for name in ("music", "audio", "rhythm", "generate-fetch", "first-requests"):
-        surfaces.append(agent_prompt.read_skill_text(name))
+    for name in agent_prompt.skill_names():
+        surfaces.append(agent_prompt.read_skill_text(name) or "")
+    from tools_ext import montage_tools
+    surfaces.append(montage_tools.TOOL_SPECS["shape_music"][1])
+    surfaces.append(_mcp_instructions_text())
     for text in surfaces:
-        low = text.lower()
+        low = " ".join(text.lower().split())
         for phrase in ("never choose music", "never pick for them", "agents never choose",
-                       "offer 2-4", "never choose a track", "music is never chosen"):
+                       "offer 2-4", "never choose a track", "music is never chosen",
+                       "never yours", "never choose one yourself", "the user makes the choice",
+                       "the agent never chooses", "user tracks only",
+                       "never music the user did not", "user picks the track"):
             assert phrase not in low, (phrase, text[:120])
+
+
+def _mcp_instructions_text():
+    import os
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(os.path.dirname(here), "backend", "routes", "mcp.py")
+    with open(path, encoding="utf-8") as fh:
+        src = fh.read()
+    start = src.index("g. MUSIC:")
+    return src[start:start + 900]

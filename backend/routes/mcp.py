@@ -1227,10 +1227,11 @@ with the same names, arguments and effects.
    g. MUSIC: music is added only when the user asks for it or supplies a
       track: their upload or link (add_music), a song they name (find_song
       identifies it; it is not a usage licence), or, when they ask for
-      generic background music, a track they choose from the CC0 library
-      (list_music_library, then add_library_music with user_pick).
-      Suggesting a track is fine; the user makes the choice. Duck music
-      13-20 dB under the voice.
+      music without naming a track, the CC0 library track that fits the
+      film (list_music_library, then add_library_music): choose it
+      yourself, name it in the reply, and the customer decides whether to
+      keep it. user_pick only records a track the user actually picked.
+      Duck music 13-20 dB under the voice.
    h. ENDING: let the payoff land on moving source: keep 0.8-1.5 s of the
       natural tail after the last word, with a payoff number ~2 s on screen
       while the picture still moves. export_final refuses a last picture

@@ -31,7 +31,8 @@ of the standard, not a recipe to repeat: the next short earns its own.
   short unless the user asks for black and white (a write that turns
   the whole short flat B&W is refused without that ask; `mono_noir` is a
   noir COLOUR look, not a grey one).
-- Never music the user did not supply, name or pick; zooms and sounds are
+- Music is the edit's track: the user's own, or one Valmera chose and
+  names in the reply (owner rule, 13 Nov 2026); zooms and sounds are
   optional, never defaults; the end card and the watermark are untouched.
 
 ## Evidence to inspect

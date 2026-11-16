@@ -813,8 +813,11 @@ def repair_web_sounds(ctx, prev_edl, new_edl):
     """Owner rule 2 inside every agent EDL write (ToolContext.write_edl), as
     a repair: each sound-effect item new to the edit whose sound a web search
     fetched plays the closest approved library recording instead (in place
-    on ``new_edl``, its hit on the same moment). Returns the note that says
-    so, or "". Never raises; a sound with no stand-in plays as written."""
+    on ``new_edl``, its hit on the same moment). A stand-in that cannot be
+    prepared is tried once more; if it still cannot, that one sound is left
+    out of the saved write (the web file never plays) and the note says so,
+    while the rest of the write saves. Returns the note, or "". Never
+    raises."""
     if _web_sounds_on():
         return ""
     keys = [k for k in new_sfx_keys(prev_edl, new_edl) if not _sfx_cleared(ctx, k)]
@@ -825,24 +828,44 @@ def repair_web_sounds(ctx, prev_edl, new_edl):
     def asset_of(key):
         assets[key] = ctx.db.run(_dbx().asset_by_key, ctx.project_id, key)
         return assets[key]
-    lines = []
-    try:
-        import motion_tools
-        import sound_library
-        web = web_sound_keys(prev_edl, {"sfx": [{"storage_key": k} for k in keys]},
-                             asset_of)
-    except Exception as exc:  # noqa: BLE001 — the sounds play as written
-        print(f"[web sound] repair skipped: {str(exc)[:160]}", flush=True)
-        return ""
-    for key in web:
+    web = None
+    for _attempt in range(2):
         try:
-            sid, how = library_stand_in(ctx, assets.get(key))
-            if not sid:
-                continue
-            lib_key = motion_tools.ensure_library_asset(ctx, sid)
-            row = sound_library.get(sid) or {}
-        except Exception as exc:  # noqa: BLE001 — this sound plays as written
-            print(f"[web sound] {key}: not replaced: {str(exc)[:160]}", flush=True)
+            web = web_sound_keys(prev_edl, {"sfx": [{"storage_key": k} for k in keys]},
+                                 asset_of)
+            break
+        except Exception as exc:  # noqa: BLE001 — read once more
+            print(f"[web sound] lookup failed: {str(exc)[:160]}", flush=True)
+    if web is None:
+        # Which of the new sounds came from the web could not be read; a
+        # project sound that is no web find (an upload, a library copy) is
+        # the usual case, so they stay as written.
+        return ""
+    lines, dropped = [], []
+    for key in web:
+        name = str(((assets.get(key) or {}).get("meta") or {}).get("filename") or key)
+        sid = lib_key = None
+        how, why, row = "", "no approved recording was found for it", {}
+        for _attempt in range(2):
+            try:
+                import motion_tools
+                import sound_library
+                sid, how = library_stand_in(ctx, assets.get(key))
+                if not sid:
+                    continue
+                lib_key = motion_tools.ensure_library_asset(ctx, sid)
+                row = sound_library.get(sid) or {}
+                break
+            except Exception as exc:  # noqa: BLE001 — tried once more
+                lib_key, why = None, str(exc)[:160]
+                print(f"[web sound] {key}: stand-in not prepared: {why}", flush=True)
+        if not (sid and lib_key):
+            items = (new_edl or {}).get("sfx") or []
+            new_edl["sfx"] = [it for it in items
+                              if not (isinstance(it, dict) and it.get("storage_key") == key)]
+            dropped.append(f"'{name[:60]}' was not placed: web sounds are off and the "
+                           f"approved recording that plays in its place could not be "
+                           f"prepared ({why}); add_sfx again")
             continue
         for item in (new_edl or {}).get("sfx") or []:
             if not isinstance(item, dict) or item.get("storage_key") != key:
@@ -858,13 +881,16 @@ def repair_web_sounds(ctx, prev_edl, new_edl):
                     item[k] = pl[k]
             if row.get("gain_db") is not None:
                 item["gain_db"] = float(row["gain_db"])
-        name = str(((assets.get(key) or {}).get("meta") or {}).get("filename") or key)
         lines.append(f"'{name[:60]}' -> {sid} ({how})")
-    if not lines:
-        return ""
-    return ("SOUND REPLACED (saved): web sounds are off, so the closest recording of the "
-            "approved library plays instead: " + "; ".join(lines)
-            + ". Tell the user which sound plays; remove_sfx takes it out.")
+    out = []
+    if lines:
+        out.append("SOUND REPLACED (saved): web sounds are off, so the closest recording "
+                   "of the approved library plays instead: " + "; ".join(lines)
+                   + ". Tell the user which sound plays; remove_sfx takes it out.")
+    if dropped:
+        out.append("SOUND NOT PLACED (the rest of the write saved): " + "; ".join(dropped)
+                   + ". Do NOT tell the user that sound was added.")
+    return " ".join(out)
 
 
 def validate_new_items(prev_edl, new_edl):

@@ -806,6 +806,13 @@ class ToolContext:
         advisories = quality_gate.advisory_findings(
             prev["json"], normalized, self.user_message)
         if edl_signature(normalized) == edl_signature(prev["json"]):
+            if notes:
+                # A repair (a cut closed inside one word, a sound that could
+                # not be placed) left the edit as it was: say what and where,
+                # so the model can act on it.
+                return (f"NO CHANGE — after the repairs below the EDL is "
+                        f"identical to v{prev['version']}. " + " ".join(notes)
+                        + " Do NOT tell the user you changed anything.")
             return (f"NO CHANGE — the EDL is identical to v{prev['version']}; "
                     "the requested change may need a different tool or may "
                     "not be supported. Do NOT tell the user you changed "
@@ -3444,6 +3451,7 @@ def _repair_cut_edges(ctx, before, after):
         return after, ""
     keep = word_edges.merge_spans([s for s in keep if s[1] - s[0] >= 0.05]) or \
         [[float(x), float(y)] for x, y in new_keep]
+    lines.extend(_closed_inside_word_lines(new_keep, keep, words))
     repaired = copy.deepcopy(after)
     repaired["keep"] = keep
     speed = repaired.get("speed") or []
@@ -3460,6 +3468,29 @@ def _repair_cut_edges(ctx, before, after):
                        "word edges did not validate (" + str(exc)[:160]
                        + "); these edges clip speech: " + "; ".join(lines) + ".")
     return repaired, ("CUT EDGES REPAIRED (saved): " + "; ".join(lines) + ".")
+
+
+def _closed_inside_word_lines(written, repaired, words):
+    """A removed stretch whose two edges both sat inside ONE spoken word
+    closes when both edges move to that word's edge: the result then names
+    the word and its span, so the model can cut the whole word or keep it
+    (a bare NO CHANGE named neither)."""
+    out = []
+    spans = sorted([float(a), float(b)] for a, b in written or [])
+    for (_s0, a), (b, _e1) in zip(spans, spans[1:]):
+        if b - a <= 0:
+            continue
+        if not any(s <= a + 1e-6 and e >= b - 1e-6 for s, e in repaired):
+            continue
+        for w in words or []:
+            t0, t1 = float(w["t0"]), float(w["t1"])
+            if t0 - 1e-6 <= a and b <= t1 + 1e-6:
+                out.append(f"the cut {a:.3f}-{b:.3f}s lay inside the word "
+                           f"'{w.get('w', '')}' ({t0:.3f}-{t1:.3f}s), so it "
+                           f"closed: to take the word out, cut {t0:.3f}-"
+                           f"{t1:.3f}s whole; otherwise it stays")
+                break
+    return out
 
 
 def _exact_keep_quiet_edges(ctx, keep, words):
@@ -8406,8 +8437,13 @@ def _resolve_sfx(ctx, storage_key):
         # the approved library. A sound an earlier search_sfx fetched is never
         # refused: the closest approved recording plays instead, and the
         # result says so (music_gate.library_stand_in).
-        sid, how = music_gate.library_stand_in(ctx, asset)
-        if sid:
+        # A stand-in that cannot be prepared (a storage hiccup) is tried once
+        # more; the web file itself never plays (owner rule 2).
+        why = "no approved recording was found for it"
+        for _attempt in range(2):
+            sid, how = music_gate.library_stand_in(ctx, asset)
+            if not sid:
+                continue
             kit, kit_err = motion_tools.resolve_library_reference(
                 ctx, motion_tools.SOUND_PREFIX + sid)
             if kit:
@@ -8416,6 +8452,13 @@ def _resolve_sfx(ctx, storage_key):
                     f"plays instead of '{_asset_name(asset)}' ({how}). Tell "
                     "the user which sound plays."))
                 return kit, None
+            why = (kit_err or "it could not be prepared")[:200]
+        return None, (
+            f"NOT PLACED: '{_asset_name(asset)}' was not placed. Web sounds "
+            "are off, so an approved library recording plays in its place, "
+            f"and that recording could not be prepared ({why}). Call add_sfx "
+            "again, or with a library sound from list_sound_library. Nothing "
+            "else changed; do NOT tell the user this sound was added.")
     return {"name": _asset_name(asset),
             "duration_s": asset.get("duration_s"), "library": False,
             "storage_key": storage_key}, None
@@ -8470,8 +8513,9 @@ def add_sfx(ctx, storage_key, at, gain_db=None, purpose=None, offset_s=None,
     if err:
         return err
     storage_key = sound["storage_key"]      # a video resolves to its audio
-    # _resolve_sfx already refused a web-found sound while web sounds are
-    # off (owner rule 2): the write gate need not look this key up again.
+    # _resolve_sfx already put the library stand-in in place of a web-found
+    # sound while web sounds are off (owner rule 2): the write's repair need
+    # not look this key up again.
     music_gate.grant_sfx(ctx, storage_key)
     lib_id = sound.get("sound_id") or sound_library.id_for_key(storage_key)
     try:
@@ -30009,33 +30053,31 @@ def _look_hero_templates(look, limit=4):
     return out
 
 
-def _look_music_choice(look, music, ctx=None):
-    """(request, error). request is None or ('track', row, provenance).
+def _look_music_choice(look, music, ctx=None, name=""):
+    """(request, error). request is None, ('track', row, provenance) for a
+    named slug, ('choice', choice, 'valmera_chosen') for Valmera's own
+    choice, or ('none', reason, None) when nothing could be chosen.
 
     The look may place a bed (owner, 13 Nov 2026: Valmera may choose the
-    music; the customer decides whether to keep it): 'auto' takes a library
-    track in the look's own moods, a mood takes one in that mood (tracks this
-    user already used elsewhere last), and a slug places that track. The
-    provenance says whether the user picked it (music_gate.resolve_pick) or
-    Valmera chose it. Only an unknown slug or a missing library is an error."""
+    music, guided by the references; the customer decides whether to keep
+    it): 'auto' or a mood is chosen by music_choose against the references
+    of this kind of film (only tracks the quality gate did not fail, the
+    film's length and pace, a model picking from the signal's shortlist),
+    and a slug places that track. The provenance says whether the user
+    picked a slug (music_gate.resolve_pick) or Valmera chose it. Only an
+    unknown slug is an error."""
     if music is None:
         return None, None
     mv = str(music).strip().lower()
     if mv in ("", "none", "off", "no", "false"):
         return None, None
+    if mv == "auto" or mv in music_library.MOODS:
+        return _look_music_chosen(look, ctx, name, None if mv == "auto" else mv), None
     if not music_library.available():
         return None, ("REJECTED: the built-in music library is not available "
-                      "on this deployment — call apply_look again without "
-                      "music, and use the user's own track for music.")
-    if mv == "auto" or mv in music_library.MOODS:
-        moods = ([mv] if mv in music_library.MOODS else
-                 [m for m in (look.get("music") or []) if m in music_library.MOODS]
-                 or list(music_library.MOODS))
-        used = music_library.used_by_user(ctx) if ctx is not None else set()
-        track = music_library.pick(moods, getattr(ctx, "project_id", 0), avoid=used)
-        if not track:
-            return None, None
-        return ("track", track, "valmera_chosen"), None
+                      "on this deployment — call apply_look again with "
+                      "music='auto' (Valmera chooses from its licensed "
+                      "library) or without music.")
     track, err = music_library.find(mv)
     if err:
         detail = err.split("REJECTED: ", 1)[-1]
@@ -30046,6 +30088,84 @@ def _look_music_choice(look, music, ctx=None):
         record, _none = music_gate.resolve_pick(ctx, track["slug"])
         prov = music_gate.pick_provenance(record)
     return ("track", track, prov), None
+
+
+def _look_music_chosen(look, ctx, name, mood):
+    """Valmera's own bed for a look: music_choose.choose on what the edit is
+    (its kind by how much is spoken, its program length, its cut pace) with
+    the look and the mood as the brief the chooser's model reads. Never
+    raises."""
+    try:
+        import music_choose
+        edl = ctx.latest_edl()["json"] if ctx is not None else {}
+        dur = float(program_duration(edl) or 0.0) if edl else 0.0
+        try:
+            share = (_speech_overlap_s(ctx, edl, 0.0, dur) / dur) if dur > 0 else 0.0
+        except Exception:  # noqa: BLE001 — unknown speech: a spoken film
+            share = 0.5
+        cuts = len(edl.get("keep") or []) + len(edl.get("inserts") or [])
+        film = {"kind": "marketing" if share < 0.15 else "podcast",
+                "duration_s": round(max(dur, 6.0), 1), "turns": [],
+                "pace": {"cuts10": round(10.0 * max(cuts, 1) / max(dur, 1.0), 2)},
+                "speech_share": round(share, 3),
+                "brief": (f"An edit in the '{name}' look ({look.get('summary') or ''})"
+                          + (f"; the editor wants a {mood} bed" if mood else ""))[:600]}
+        used = set(music_library.used_by_user(ctx)) if ctx is not None else set()
+        used |= {music_gate.library_slug(m.get("storage_key"))
+                 for m in (edl.get("music") or []) if isinstance(m, dict)} - {None}
+        client = getattr(ctx, "llm_client", None)
+        call = (music_choose._product_call(ctx) if client is not None else
+                (lambda *_a: {"option": 1, "why": "the closest match to the "
+                              "references by signal"}))
+        choice = music_choose.choose(film, used=sorted(used), call=call, ctx=ctx, n=6)
+    except Exception as exc:  # noqa: BLE001 — the look still applies
+        return ("none", f"the music chooser failed ({str(exc)[:160]})", None)
+    if not choice:
+        return ("none", "the licensed library offered no track", None)
+    return ("choice", choice, "valmera_chosen")
+
+
+def _look_place_choice(ctx, edl, row, look, name, choice):
+    """(placed, text, edl): music_choose's choice placed as the look's bed in
+    the same version, stamped valmera_chosen, at the stretch the chooser
+    found and the level of the references (normalised by its measured
+    loudness)."""
+    import music_choose
+    key, err = music_choose.ensure_project_asset(ctx, choice)
+    if err:
+        return False, err, edl
+    music_gate.grant(ctx, key, music_choose.PROVENANCE)
+    prog = program_duration(edl)
+    bed = _speech_overlap_s(ctx, edl, 0.0, prog) >= 1.0
+    gain = look.get("music_db", music_library.DEFAULT_BED_DB) if bed else -4.0
+    t = music_choose.find(choice["cid"]) or {}
+    if t.get("lufs") is not None:
+        gain += music_choose.TARGET_LUFS - float(t["lufs"])
+    stage = _RecipeContext(ctx, edl, row["version"])
+    credit = "; ".join(x for x in music_choose.credit_lines(choice) if x)
+    res = add_music(
+        stage, key, gain_db=round(gain, 1), duck=True if bed else None,
+        offset_s=choice.get("start_s") or None,
+        fade_in_s=look.get("music_fade_in_s", 0.6),
+        fade_out_s=2.0 if choice.get("ending") == "fade" else 0.6,
+        loop=bool(choice.get("loop")),
+        purpose=(f"Valmera's choice for the '{name}' look: \"{choice.get('title')}\" "
+                 f"by {choice.get('author')} ({choice.get('license')}). "
+                 f"{choice.get('why') or ''}")[:400])
+    if not str(res).startswith("EDL v"):
+        return False, str(res)[:240], edl
+    edl = stage._edl
+    item = (edl.get("music") or [{}])[-1]
+    text = (f"music \"{choice.get('title')}\" by {choice.get('author')} "
+            f"({choice.get('license')}), chosen by Valmera against the "
+            f"references: {str(choice.get('why') or '')[:160]}; "
+            f"{item.get('gain_db')}dB"
+            + (f" from {item['offset_s']:g}s in" if item.get("offset_s") else "")
+            + (", ducked under speech" if bed else " as the lead audio")
+            + (f"; credit: {credit}" if credit else "")
+            + f" [{item.get('id')}] (name it in the reply; the customer "
+              "decides whether to keep it)")
+    return True, text, edl
 
 
 def _look_sounds_flag(v):
@@ -30074,7 +30194,7 @@ def apply_look(ctx, name, music=None, transition_sounds=None):
                 + ", ".join(sorted(LOOKS))
                 + ". Each composes captions, grade, texture, transitions "
                   "and fades in one version.")
-    music_req, music_err = _look_music_choice(look, music, ctx)
+    music_req, music_err = _look_music_choice(look, music, ctx, n)
     if music_err:
         return music_err
     sounds_req = _look_sounds_flag(transition_sounds)
@@ -30400,8 +30520,20 @@ def apply_look(ctx, name, music=None, transition_sounds=None):
             notes.append("music left as is — " + ", ".join(existing)
                          + " already scores this edit (swap_music or "
                            "remove_music to change it).")
+        elif music_req[0] == "none":
+            notes.append("music NOT added — " + music_req[1] + "; "
+                         "list_music_library and add_library_music place "
+                         "the track that fits.")
+        elif music_req[0] == "choice":
+            ok, placed_bit, edl = _look_place_choice(ctx, edl, row, look, n,
+                                                     music_req[1])
+            if ok:
+                music_placed = True
+                set_bits.append(placed_bit)
+            else:
+                notes.append("music NOT added — " + placed_bit)
         else:
-            # The user's pick or Valmera's own choice (_look_music_choice).
+            # The user's pick of a library slug (_look_music_choice).
             track = music_req[1]
             key, err = music_library.ensure_project_asset(ctx, track)
             if err:
@@ -34281,11 +34413,11 @@ TOOLS = {
                    "warm), 'meme' (impact xl captions, flash cuts, grain); "
                    "their fades apply to landscape only. Transitions fire "
                    "only at real scene changes (B-roll/inserts/new shots), "
-                   "never on jump cuts. music= takes 'auto' (a library "
-                   "track in the look's moods), a mood, or the exact slug of "
-                   "a library track (the user's pick or your choice), and "
-                   "lays it as a ducked CC0 bed (-18 to -22 dB) when the edit "
-                   "has no music yet; otherwise omit music. "
+                   "never on jump cuts. music= takes 'auto' or a mood "
+                   "(Valmera chooses the track that fits, against the "
+                   "references) or the exact slug of a library track (the "
+                   "user's pick or your choice), and lays it as a ducked bed "
+                   "when the edit has no music yet; otherwise omit music. "
                    "Preserves existing "
                    "emphasis_words, else picks them from the transcript. "
                    "Never touches cuts. Every component can be adjusted "
@@ -34293,9 +34425,9 @@ TOOLS = {
                    {"name": {"type": "string",
                              "enum": sorted(LOOKS)},
                     "music": {"type": "string",
-                              "description": "'auto' (the look's moods), a "
-                              "mood, or a library slug. Omit to leave music "
-                              "unchanged."},
+                              "description": "'auto' or a mood (Valmera "
+                              "chooses), or a library slug. Omit to leave "
+                              "music unchanged."},
                     "transition_sounds": {
                         "type": "boolean",
                         "description": "Opt in to library sounds on a "
@@ -35062,8 +35194,8 @@ _COMPACT_CONTRACTS = {
         "mono_noir, clean_minimal; others legacy. "
         "Places no sound unless transition_sounds=true (sounds are optional, "
         "never rules); read the receipt before adding junction cues. Its music "
-        "option, only when the user asked for background music, takes the "
-        "library track they picked. One look "
+        "option, only when the user asked for background music, takes 'auto' "
+        "or a mood (Valmera chooses) or a library slug. One look "
         "per edit; refine components with their own tools; no fade-in on "
         "vertical reels (set_fades)."),
     "punch_in_on_emphasis": (

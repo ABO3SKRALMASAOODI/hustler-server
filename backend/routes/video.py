@@ -6495,8 +6495,11 @@ def _mcp_web_sound_repair(cur, project_id, before, after):
     library instead (the library recording its title describes, else the
     library's general one-shot; worker/music_gate.web_sound_keys reads which
     sounds are web-found), its hit on the same moment, and the batch result
-    says so. Sounds already in the edit keep playing. Stamps ``after`` in
-    place; returns the note or ""."""
+    says so. A stand-in that cannot be prepared (storage or database) is
+    tried once more; if it still cannot, that one sound is left out of the
+    batch (the web file never plays) and the note says so, while the rest of
+    the batch saves. Sounds already in the edit keep playing. Stamps
+    ``after`` in place; returns the note or ""."""
     if _sfx_search_enabled():
         return ""
     keys = wmusic.new_sfx_keys(before, after)
@@ -6506,39 +6509,35 @@ def _mcp_web_sound_repair(cur, project_id, before, after):
                 "WHERE project_id=%s AND storage_key = ANY(%s)",
                 (project_id, keys))
     rows = {row["storage_key"]: row for row in cur.fetchall() or ()}
-    lines = []
+    lines, dropped = [], []
     for key in wmusic.web_sound_keys(before, after, rows.get):
         meta = (rows.get(key) or {}).get("meta") or {}
+        name = str(meta.get("filename") or key)[:60]
         title = " ".join(str(meta.get(k) or "") for k in ("title", "filename"))
-        try:
-            hits = wsound.search(title, 1)
-            row = hits[0] if hits else next(
-                (r for r in (wsound.pick(role, title) for role in
-                             ("whoosh", "hit", "click", "pop")) if r), None)
-            if not row:
-                continue
-            sid = row["id"]
-            lib_key = wsound.asset_key(project_id, sid)
-            cur.execute("SELECT 1 FROM assets WHERE project_id=%s AND storage_key=%s",
-                        (project_id, lib_key))
-            if not cur.fetchone():
-                path = wsound.path(sid)
-                with open(path, "rb") as f:
-                    storage.put_bytes(lib_key, f.read(), "audio/flac")
-                cur.execute("""INSERT INTO assets (project_id, kind, storage_key, bytes,
-                                                   duration_s, meta)
-                               VALUES (%s, 'music', %s, %s, %s, %s)""",
-                            (project_id, lib_key, os.path.getsize(path),
-                             row.get("duration_s"),
-                             Json({"filename": row.get("file"),
-                                   "source": "valmera-sound-library",
-                                   "source_url": row.get("source_url"),
-                                   "author": row.get("author"),
-                                   "license": row.get("license"),
-                                   "caption": row.get("use"),
-                                   "library_sound": sid, "role": row.get("role")})))
-        except Exception as exc:  # noqa: BLE001 — the sound plays as written
-            current_app.logger.warning("web sound repair skipped: %s", str(exc)[:200])
+        sid = row = None
+        why = "no approved recording was found for it"
+        for _attempt in range(2):
+            try:
+                hits = wsound.search(title, 1)
+                row = hits[0] if hits else next(
+                    (r for r in (wsound.pick(role, title) for role in
+                                 ("whoosh", "hit", "click", "pop")) if r), None)
+                if not row:
+                    sid = None
+                    break
+                sid = row["id"]
+                lib_key = wsound.asset_key(project_id, sid)
+                _mcp_place_library_sound(cur, project_id, sid, row, lib_key)
+                break
+            except Exception as exc:  # noqa: BLE001 — tried once more
+                sid, why = None, f"{type(exc).__name__}: {str(exc)[:160]}"
+                print(f"[web sound] stand-in not prepared: {why}", flush=True)
+        if not sid:
+            after["sfx"] = [it for it in (after or {}).get("sfx") or []
+                            if not (isinstance(it, dict) and it.get("storage_key") == key)]
+            dropped.append(f"'{name}' was not placed: the approved recording that "
+                           f"plays in its place could not be prepared ({why}); "
+                           "add it again")
             continue
         for item in (after or {}).get("sfx") or []:
             if not isinstance(item, dict) or item.get("storage_key") != key:
@@ -6553,12 +6552,47 @@ def _mcp_web_sound_repair(cur, project_id, before, after):
                     item[k] = pl[k]
             if row.get("gain_db") is not None:
                 item["gain_db"] = float(row["gain_db"])
-        lines.append(f"'{str(meta.get('filename') or key)[:60]}' -> {sid}")
-    if not lines:
-        return ""
-    return ("web sounds are off, so the closest recording of the approved "
-            "library plays instead: " + "; ".join(lines)
-            + " (remove_sfx takes it out)")
+        lines.append(f"'{name}' -> {sid}")
+    out = []
+    if lines:
+        out.append("web sounds are off, so the closest recording of the approved "
+                   "library plays instead: " + "; ".join(lines)
+                   + " (remove_sfx takes it out)")
+    if dropped:
+        out.append("web sounds are off and a sound was left out (the rest of the "
+                   "batch saved): " + "; ".join(dropped)
+                   + "; do not tell the user that sound was added")
+    return "; ".join(out)
+
+
+def _mcp_place_library_sound(cur, project_id, sid, row, lib_key):
+    """Upload an approved library recording into the project once, inside a
+    savepoint so a failed insert does not abort the batch's transaction."""
+    cur.execute("SELECT 1 FROM assets WHERE project_id=%s AND storage_key=%s",
+                (project_id, lib_key))
+    if cur.fetchone():
+        return
+    path = wsound.path(sid)
+    with open(path, "rb") as f:
+        storage.put_bytes(lib_key, f.read(), "audio/flac")
+    cur.execute("SAVEPOINT web_sound_stand_in")
+    try:
+        cur.execute("""INSERT INTO assets (project_id, kind, storage_key, bytes,
+                                           duration_s, meta)
+                       VALUES (%s, 'music', %s, %s, %s, %s)""",
+                    (project_id, lib_key, os.path.getsize(path),
+                     row.get("duration_s"),
+                     Json({"filename": row.get("file"),
+                           "source": "valmera-sound-library",
+                           "source_url": row.get("source_url"),
+                           "author": row.get("author"),
+                           "license": row.get("license"),
+                           "caption": row.get("use"),
+                           "library_sound": sid, "role": row.get("role")})))
+    except Exception:
+        cur.execute("ROLLBACK TO SAVEPOINT web_sound_stand_in")
+        raise
+    cur.execute("RELEASE SAVEPOINT web_sound_stand_in")
 
 
 def _busy_jobs_text(cur, user_id, limit=4, types=None):

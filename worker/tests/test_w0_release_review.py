@@ -239,6 +239,46 @@ def test_an_edit_batch_places_the_closest_library_sound_for_a_web_sound(
     assert out.startswith("EDL v"), out
 
 
+def test_a_web_sound_whose_stand_in_cannot_be_prepared_is_left_out(
+        web_off, monkeypatch):
+    """A storage hiccup never puts the web file in the film: the stand-in is
+    tried once more, then that one sound is left out, the rest of the write
+    saves, and the result says so."""
+    import motion_tools
+    calls = []
+
+    def down(c, sid):
+        calls.append(sid)
+        raise OSError("storage unavailable")
+    monkeypatch.setattr(motion_tools, "ensure_library_asset", down)
+    ctx, fake = _ctx()
+    edl = dict(ctx.latest_edl()["json"])
+    out = ctx.write_edl(dict(edl, sfx=[_sfx(WEB), _sfx(MINE, sid="s2", at=5.0)]),
+                        "batch")
+    assert out.startswith("EDL v"), out
+    assert len(calls) == 2
+    keys = [s["storage_key"] for s in fake.rows[-1]["json"]["sfx"]]
+    assert keys == [MINE]
+    assert "SOUND NOT PLACED" in out and "storage unavailable" in out
+
+
+def test_add_sfx_never_places_the_web_file_when_its_stand_in_fails(
+        web_off, monkeypatch):
+    import agent_tools
+    import motion_tools
+    import sfx_search
+    monkeypatch.setattr(sfx_search, "available", lambda: False)
+    monkeypatch.setattr(motion_tools, "resolve_library_reference",
+                        lambda c, key: ((None, "storage unavailable")
+                                        if str(key).startswith(motion_tools.SOUND_PREFIX)
+                                        else (None, None)))
+    ctx, fake = _ctx()
+    n = len(fake.rows)
+    out = agent_tools.add_sfx(ctx, WEB, 2.0)
+    assert out.startswith("NOT PLACED"), out
+    assert "storage unavailable" in out and len(fake.rows) == n
+
+
 def test_a_web_sound_already_in_the_edit_keeps_playing_and_moves(web_off):
     ctx, fake = _ctx(sfx=[_sfx(WEB)])
     edl = dict(ctx.latest_edl()["json"])

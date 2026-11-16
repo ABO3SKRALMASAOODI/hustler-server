@@ -1,5 +1,5 @@
 {
- "bytes": 82060,
- "sha256": "ffaef6c054c9e8d89903fc455cf50097c0babc3452f5a3fa4a6ff7e3a7ae5568",
- "_doc": "Core compact catalog with automatic wave growth set aside. EDIT-CORE (16 Nov 2026): ask_user, add_music and apply_look no longer tell the editor that music belongs to the user to pick (owner, 13 Nov 2026: Valmera may choose the music); their lines are shorter. Existing 82,700 B ceiling and the 81,688 + 400 B share unchanged. Previous pin: 82,066 B."
+ "bytes": 82084,
+ "sha256": "70a385eb864d24d5b85d456ad85cc8b38b21b992da8d5b158197e500c9e76d66",
+ "_doc": "Core compact catalog with automatic wave growth set aside. EDIT-CORE (16 Nov 2026): ask_user, add_music and apply_look no longer tell the editor that music belongs to the user to pick (owner, 13 Nov 2026: Valmera may choose the music); their lines are shorter. Existing 82,700 B ceiling and the 81,688 + 400 B share unchanged. apply_look's music option now says Valmera chooses the track against the references (+24 B). Previous pins: 82,060 B, 82,066 B."
 }

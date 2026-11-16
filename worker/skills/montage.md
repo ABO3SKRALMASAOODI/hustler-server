@@ -1,11 +1,11 @@
-# montage — shots cut to the user's track: beat-slot montages, call-and-response with type, the track bent to the story (drop on the payoff, held breath, intro that opens on the drop), eased slow-motion swings, and archive stills that move
+# montage — shots cut to the edit's track: beat-slot montages, call-and-response with type, the track bent to the story (drop on the payoff, held breath, intro that opens on the drop), eased slow-motion swings, and archive stills that move
 
 ## Editorial decision principles
 
-The user's track is the clock and the agent never chooses one. With no
-track the user supplied, uploaded, named or picked, `plan_to_music` cuts on
-the SPEECH stresses (clock 'speech'). `shape_music` refuses outright: there
-is nothing of the user's to shape.
+The edit's track is the clock (the user's own, or one Valmera chose for
+the film and names in the reply: owner rule, 13 Nov 2026). With no track in
+the edit, `plan_to_music` cuts on the SPEECH stresses (clock 'speech'), and
+`shape_music` has nothing to shape until a track is placed.
 
 - A montage is a SENTENCE of pictures. Choose the pool for what the words
   mean (find_footage, research_broll), then let `plan_to_music` do the

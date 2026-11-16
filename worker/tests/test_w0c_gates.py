@@ -49,7 +49,9 @@ def _with_music(*items):
 
 @pytest.fixture
 def store(monkeypatch):
+    import music_choose
     objects = {r["storage_key"] for r in music_library.entries()}
+    objects |= {t["storage_key"] for t in music_choose.tracks()}
     copies = []
 
     def copy_object(src, dst):
@@ -333,8 +335,10 @@ def test_apply_look_chooses_music_when_asked(store):
         assert out.startswith("EDL v7 -> v8"), (value, out)
         music = fake.rows[-1]["json"]["music"]
         assert music and music[0]["provenance"] == "valmera_chosen", value
-        if value == "chill":
-            assert "/library-chill-" in music[0]["storage_key"]
+        if value in ("auto", "chill"):
+            import music_choose
+            cid = music_gate.library_slug(music[0]["storage_key"])
+            assert cid in {t["cid"] for t in music_choose.choosable()}, value
     ctx, fake = tool_context(default_edl(20.0))
     out = agent_tools.apply_look(ctx, "editorial", music="no-such-track")
     assert out.startswith("REJECTED") and "mood, 'auto'" in out

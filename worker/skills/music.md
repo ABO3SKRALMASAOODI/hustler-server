@@ -1,22 +1,25 @@
-# music — music only when the user asks: their track or named song first, generic background music only on request, levels, placing the drop, fitting the ends, beat culture
+# music — music when the user asks: their track or named song first, otherwise a track Valmera chooses and names, levels, placing the drop, fitting the ends, beat culture
 
 ## Editorial decision principles
 
-Music is the user's choice, never yours. Never add music on your own
-initiative: a speech-led reel without music is a complete edit, carried by
-the voice, the source's natural sound and sparse sound design. Music goes in
-only when the user asks for it or supplies a track, and the strongest answer
-is the song they actually want — their own upload or link, or a song they
-name — not a stock bed. When music is placed, it sits 13–20 dB under the
+Never add music on your own initiative: a speech-led reel without music is
+a complete edit, carried by the voice, the source's natural sound and sparse
+sound design. Music goes in only when the user asks for it or supplies a
+track, and the strongest answer is the song they actually want — their own
+upload or link, or a song they name. When they ask for music without naming
+a track, Valmera chooses it (owner rule, 13 Nov 2026): pick the track that
+fits the film the way the references score it, name it in the reply, and
+the customer decides whether to keep it. When music is placed, it sits 13–20 dB under the
 voice, ducks, and its structure is edited to the story: a lift into the
 payoff, room before a reveal, a button on the ending.
 
 - Suggesting is fine: when a montage or a no-dialogue passage would clearly
   play better with a song, say so in one clause of the reply and let the user
   send or name one.
-- Generic background music from the CC0 library only when the user explicitly
-  asks for generic background music — and the user picks the track: offer
-  2-4 with `ask_user`, never choose one yourself.
+- Generic background music from the library only when the user explicitly
+  asks for generic background music: choose the track yourself and place
+  it; name it in the reply so the customer can keep it or ask for another.
+  Never end the turn asking which track they want.
 - A missing bed is never a defect to repair on your own; digital silence is
   (fix it with the source's natural sound, not invented music).
 
@@ -57,7 +60,7 @@ source's speech and a strong picture rhythm and say music was not available
 
 CHOOSE WITHIN WHAT THE USER GAVE: with their track, choose the section, not
 the song — the part whose energy matches the story. With a generic request,
-choose which tracks to OFFER by content: insight → cinematic, ambient or
+choose the track by content: insight → cinematic, ambient or
 inspiring beds that stay out of the words; business, product and education →
 corporate or chill; hype → hiphop or upbeat; stakes → dramatic; tender
 stories → sparse ambient that can drop out.
@@ -134,5 +137,5 @@ dialogue, the payoff and the ending.
 
 Remove music the user did not ask for → refit the offset to the payoff →
 adjust duck/gain/fades → use a different section of the user's track →
-offer another version or ask for their file → dry the specific passage
+choose another version or track → dry the specific passage
 that needs it → render and review again.
