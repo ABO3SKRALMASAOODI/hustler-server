@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 
@@ -2136,6 +2137,22 @@ def _region_parts(parts, in_label, out_label, regions, sw, sh,
         cur = last
 
 
+def _program_speech(index, tl):
+    """The transcript's speech on the program clock ([(a, b)]), [] for a
+    transcribed source with no speech, None when no transcript is known."""
+    index = index or {}
+    rows = index.get("sentences") or index.get("words")
+    if rows is None:
+        return None
+    try:
+        spans = []
+        for r in rows or []:
+            spans.extend(tl.span_to_out(float(r["t0"]), float(r["t1"])))
+        return merge_spans(spans, 0.3)
+    except Exception:  # noqa: BLE001 - read without the transcript
+        return None
+
+
 def _speech_spans_out(index, tl):
     spans = []
     for sent in index.get("sentences", []):
@@ -3715,7 +3732,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       insert_inputs=None, vo_inputs=None, silence_idx=None,
                       src_w=None, src_h=None, src_pad=0.0, src_lead=0.0,
                       sfx_inputs=None, outro_s=0.0, card_idx=None,
-                      stem_inputs=None,
+                      stem_inputs=None, clean_input=None,
                       src_sar=1.0, src_fps=None, src_color_space=None,
                       overlay_inputs=None, gfx_ass_path=None,
                       motion_inputs=None,
@@ -3726,7 +3743,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       picture_card_inputs=None, main_video_inputs=None,
                       loudness="auto", dialogue_gain=None,
                       dialogue_probe=False, focus_origin=None,
-                      program_edges=None, fx_plan=None):
+                      program_edges=None, fx_plan=None, ambient_bed=False):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -3756,6 +3773,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     pass None, because mastering belongs to the final composition.
     dialogue_gain: dialogue_level knots that level the program bed [ac] before
     anything is mixed onto it (_dialogue_gain measures them).
+    ambient_bed: the measured bed holds no speech or music, only the room's
+    own sound (dialogue_level.read_bed). With no music or voiceover mixed
+    onto it either, the program is not lifted to the social target: its
+    room tone stays at the level it was recorded (EDIT-CORE A2).
     dialogue_probe: build the graph the leveler MEASURES — identical except
     that the source volume automation is left out, so a deliberate "quieter
     here" is not counted as quiet speech to undo.
@@ -3960,6 +3981,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             parts.append("[stv][stm]amix=inputs=2:duration=longest:"
                          "normalize=0[stemsrc]")
             asrc = "stemsrc"
+        elif clean_input is not None and has_audio:
+            # EDIT-CORE A3: the source's own sound, its noise cleaned
+            asrc = f"{clean_input}:a"
         else:
             asrc = "0:a" if has_audio else f"{silence_idx}:a"
         # Source-time volume automation runs before trimming, so between(t,a,b)
@@ -6608,6 +6632,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
 
     outro_on = outro_here          # one predicate, so the video and audio
     loud = master == "social"
+    if loud and ambient_bed and not music_inputs and not vo_inputs:
+        # Nothing to master: the program's sound is its room tone (and any
+        # sound effects placed on it). loudnorm would raise that floor to
+        # -14 LUFS (p5744: +28 dB of room tone over the upload).
+        loud = False
     a_prog = "aprog"
     # De-click edges (edge_fades): the programme's own sound, measured on
     # its own clock — on the block clock that is the blocks' exact length.
@@ -7064,12 +7093,16 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                                  program_edges=program_edges,
                                  fx_plan=fx_box[0], **extra)
 
-    dialogue_gain = None
+    dialogue_gain, ambient_bed = None, False
     if master == "social" and not discard_audio:
-        dialogue_gain = _dialogue_gain(
+        reading = _dialogue_reading(
             _graph, extra_inputs, workdir, tl.out_duration, preview,
             cancelled_cb=cancelled_cb)
-    graph = _graph(dialogue_gain=dialogue_gain)
+        dialogue_gain = reading["knots"]
+        ambient_bed = reading["content"] is False
+        _note_ambient(edl, out_path, ambient_bed and not music_inputs
+                      and not vo_inputs)
+    graph = _graph(dialogue_gain=dialogue_gain, ambient_bed=ambient_bed)
 
     if audio_only:
         graph = _prune_graph_to_audio(graph)
@@ -7083,7 +7116,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                     "-progress", "pipe:1", "-nostats", out_path]
         _fx_run(_audio_cmd(graph), fx_box,
                 lambda: _audio_cmd(_prune_graph_to_audio(
-                    _graph(dialogue_gain=dialogue_gain))),
+                    _graph(dialogue_gain=dialogue_gain, ambient_bed=ambient_bed))),
                 cancelled_cb,
                 timeout=_render_ffmpeg_timeout(preview, expected_out_s),
                 progress_cb=progress_cb, expected_out_s=expected_out_s)
@@ -7123,7 +7156,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                 *([] if _base_stage else ["-movflags", "+faststart"]),
                 "-progress", "pipe:1", "-nostats", out_path]
     _fx_run(_video_cmd(graph), fx_box,
-            lambda: _video_cmd(_graph(dialogue_gain=dialogue_gain)),
+            lambda: _video_cmd(_graph(dialogue_gain=dialogue_gain, ambient_bed=ambient_bed)),
             cancelled_cb,
             timeout=_render_ffmpeg_timeout(preview, expected_out_s),
             progress_cb=progress_cb, expected_out_s=expected_out_s)
@@ -7242,12 +7275,60 @@ def _bounded_canvas_program(edl, workdir, preview, asset_locals,
     return composed, {**(asset_locals or {}), key: program}
 
 
+# Renders whose program was left unmastered because its bed is only room
+# tone (EDIT-CORE A2): the post-encode loudness guard must not lift them to
+# -14 LUFS either. Keyed by output path and by EDL signature (a stitched
+# preview's loudness guard runs on another file than the measured track).
+_AMBIENT_RENDERS = {}
+_AMBIENT_LOCK = threading.Lock()
+
+
+def _ambient_keys(edl, out_path):
+    keys = []
+    if out_path:
+        keys.append("path:" + os.path.abspath(str(out_path)))
+    try:
+        from schemas import edl_signature
+        keys.append("edl:" + str(edl_signature(edl)))
+    except Exception:  # noqa: BLE001 — the path key still serves
+        pass
+    return keys
+
+
+def _note_ambient(edl, out_path, ambient):
+    with _AMBIENT_LOCK:
+        for k in _ambient_keys(edl, out_path):
+            if ambient:
+                _AMBIENT_RENDERS[k] = True
+            else:
+                _AMBIENT_RENDERS.pop(k, None)
+        while len(_AMBIENT_RENDERS) > 512:
+            _AMBIENT_RENDERS.pop(next(iter(_AMBIENT_RENDERS)))
+
+
+def ambient_program(edl, out_path):
+    """Was this render's program left at its natural level because its sound
+    is only room tone (no speech, music or voiceover)?"""
+    with _AMBIENT_LOCK:
+        return any(_AMBIENT_RENDERS.get(k)
+                   for k in _ambient_keys(edl, out_path))
+
+
 def _dialogue_gain(build, input_args, workdir, expected_s, preview,
                    cancelled_cb=None):
-    """Measure the program's dialogue bed and return the dialogue_level
-    knots that level it, or None — nothing to level (silence, too little
-    speech), or the measurement failed, in which case the master still runs,
-    just without leveling.
+    """The leveling knots alone (see _dialogue_reading)."""
+    return _dialogue_reading(build, input_args, workdir, expected_s, preview,
+                             cancelled_cb=cancelled_cb)["knots"]
+
+
+def _dialogue_reading(build, input_args, workdir, expected_s, preview,
+                      cancelled_cb=None, speech=None):
+    """Measure the program's dialogue bed: {"knots", "content"}. knots are
+    the dialogue_level knots that level it, or None — nothing to level
+    (silence, too little speech, only room tone), or the measurement failed,
+    in which case the master still runs, just without leveling. content is
+    False when the bed holds no speech or music (dialogue_level.read_bed),
+    None when it could not be measured.
 
     `build(**kw)` builds this render's own filtergraph. The probe is that
     graph with the source volume automation left out (dialogue_probe),
@@ -7260,7 +7341,7 @@ def _dialogue_gain(build, input_args, workdir, expected_s, preview,
     except media.MediaError as e:
         print(f"[render] dialogue leveling skipped (probe graph: "
               f"{str(e)[:160]})", flush=True)
-        return None
+        return {"knots": None, "content": None}
     path = os.path.join(workdir, f"dialogue-{uuid.uuid4().hex[:12]}.txt")
     graph += f";[ac]{dialogue_level.probe_chain(path)}[adlg]"
     cmd = ["ffmpeg", "-y", "-hide_banner", "-nostats", *input_args,
@@ -7276,13 +7357,19 @@ def _dialogue_gain(build, input_args, workdir, expected_s, preview,
             raise
         print(f"[render] dialogue leveling skipped (measurement: "
               f"{str(e)[:160]})", flush=True)
-        return None
+        return {"knots": None, "content": None}
     finally:
         try:
             os.remove(path)
         except OSError:
             pass
-    return dialogue_level.gain_knots(blocks)
+    bed = dialogue_level.read_bed(blocks, speech=speech)
+    if not bed["content"]:
+        print(f"[render] the bed is room tone only (level {bed['level']} "
+              f"LUFS, floor {bed['floor']}, top {bed['top']}): not leveled "
+              "or lifted by the master", flush=True)
+    return {"knots": dialogue_level.gain_knots(blocks, speech=speech),
+            "content": bool(bed["content"])}
 
 
 def _prune_graph_to_audio(graph, target="aout"):
@@ -7417,6 +7504,56 @@ def _overlay_input(item, local, fps, *, copy_timestamps=False):
     # window; insert_input's one-second tail covers both
     return render_plan.insert_input(item, local, fps,
                                     copy_timestamps=copy_timestamps)
+
+
+_NOISE_CLEAN_LOCK = threading.Lock()
+
+
+def _noise_clean_local(nc, audio_path, index, workdir, fetch, applies_to):
+    """A local file of ``audio_path``'s sound with its noise cleaned, or None
+    (the render then plays the original sound and says so in its log).
+    The tool's stored track serves when it was made for the same target;
+    otherwise the track is computed from ``audio_path`` itself and kept in
+    the box's source cache, so any writer of the node (the editing model,
+    an MCP batch, the Studio) gets the cleaned sound."""
+    import noise_clean
+    try:
+        strength = float(nc.get("strength") if nc.get("strength") is not None
+                         else 0.8)
+    except (TypeError, ValueError):
+        strength = 0.8
+    key = nc.get("audio_key")
+    if key and (nc.get("applies_to") or "source") == applies_to:
+        try:
+            return fetch(key, "noiseclean", 0)
+        except Exception as exc:  # noqa: BLE001 - computed below instead
+            print(f"[render] stored noise-clean track unavailable "
+                  f"({str(exc)[:120]}): cleaning from the source", flush=True)
+    try:
+        st = os.stat(audio_path)
+        tag = hashlib.sha1(
+            f"{os.path.abspath(audio_path)}|{st.st_size}|{int(st.st_mtime)}|"
+            f"{strength:.2f}|v{noise_clean.NOISE_CLEAN_VERSION}".encode()
+        ).hexdigest()[:24]
+        cache_dir = os.path.join(config.TMP_DIR, "srccache")
+        os.makedirs(cache_dir, exist_ok=True)
+        out = os.path.join(cache_dir, f"noiseclean_{tag}.m4a")
+        with _NOISE_CLEAN_LOCK:
+            if not (os.path.isfile(out) and os.path.getsize(out) > 0):
+                spans = [[float(w["t0"]), float(w["t1"])]
+                         for w in (index or {}).get("words") or []
+                         if applies_to == "source"]
+                tmp = out + f".{uuid.uuid4().hex[:6]}.m4a"
+                rep = noise_clean.clean(audio_path, tmp, spans, strength)
+                os.replace(tmp, out)
+                print(f"[render] background noise cleaned ({applies_to}): "
+                      f"floor {rep['floor_db']} dBFS lowered "
+                      f"{rep['reduction_db']} dB", flush=True)
+        return out
+    except Exception as exc:  # noqa: BLE001 - the original sound still plays
+        print(f"[render] noise clean failed ({type(exc).__name__}: "
+              f"{str(exc)[:160]}): the original sound plays", flush=True)
+        return None
 
 
 def _render_asset_source(key, tag, idx, workdir, asset_locals=None):
@@ -7815,11 +7952,17 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # original audio with a log line — a missing stem object must never
     # fail a render the untouched track can honestly serve.
     stem_inputs = None
+    clean_input = None
     sm = edl.get("stem_mix") or None
+    nc = edl.get("noise_clean") or None
     if sm:
         try:
             v_local = _fetch(sm["vocals_key"], "stemv", next_idx)
             a_local = _fetch(sm["accomp_key"], "stema", next_idx + 1)
+            if nc:
+                # the cleaned voice stem: the background is the other stem
+                v_local = _noise_clean_local(nc, v_local, index, workdir,
+                                             _fetch, "vocals") or v_local
             stem_seek = (["-ss", f"{source_seek_s:.3f}"]
                          if seek_main_source else [])
             extra_inputs += [*stem_seek, "-i", v_local,
@@ -7833,6 +7976,19 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                   f"({str(e)[:120]}) — rendering the original audio",
                   flush=True)
             stem_inputs = None
+    if nc and stem_inputs is None and info["has_audio"]:
+        # EDIT-CORE A3: the footage's sound with its background noise
+        # cleaned (noise_clean.py) plays wherever the graph would read the
+        # original track. Measured and stored once per source and strength;
+        # computed here from the source itself when no stored track serves.
+        c_local = _noise_clean_local(nc, src_path, index, workdir, _fetch,
+                                     "source")
+        if c_local:
+            c_seek = (["-ss", f"{source_seek_s:.3f}"]
+                      if seek_main_source else [])
+            extra_inputs += [*c_seek, "-i", c_local]
+            clean_input = next_idx
+            next_idx += 1
 
     # one shared anullsrc covers a silent main track AND silent insert blocks
     needs_silence = (not info["has_audio"]) or any(
@@ -8316,6 +8472,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                  sfx_inputs=sfx_inputs,
                                  outro_s=outro_s, card_idx=card_idx,
                                  stem_inputs=stem_inputs,
+                                 clean_input=clean_input,
                                  src_sar=info.get("sar") or 1.0,
                                  src_fps=float(info["fps"]) or fps,
                                  src_color_space=info.get("color_space"),
@@ -8340,13 +8497,19 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # the same graph's audio. Previews, finals and the audio-only rebuilds
     # (picture reuse, timeline stitches) all come through here, so what the
     # user approves and what ships carry the same curve.
-    dialogue_gain = None
+    dialogue_gain, ambient_bed = None, False
     if not discard_audio \
             and master_loudness(edl, info["width"], info["height"]) == "social":
-        dialogue_gain = _dialogue_gain(
+        spoken = _program_speech(index, tl)
+        reading = _dialogue_reading(
             _graph, main_input_args + extra_inputs, workdir,
-            tl.out_duration, preview, cancelled_cb=cancelled_cb)
-    graph = _graph(dialogue_gain=dialogue_gain)
+            tl.out_duration, preview, cancelled_cb=cancelled_cb,
+            speech=spoken)
+        dialogue_gain = reading["knots"]
+        ambient_bed = reading["content"] is False
+        _note_ambient(edl, out_path, ambient_bed and not music_inputs
+                      and not vo_inputs)
+    graph = _graph(dialogue_gain=dialogue_gain, ambient_bed=ambient_bed)
 
     if audio_only:
         # The same graph the full render would run, minus every chain the
@@ -8365,7 +8528,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                     "-progress", "pipe:1", "-nostats", out_path]
         _fx_run(_audio_cmd(graph), fx_box,
                 lambda: _audio_cmd(_prune_graph_to_audio(
-                    _graph(dialogue_gain=dialogue_gain))),
+                    _graph(dialogue_gain=dialogue_gain, ambient_bed=ambient_bed))),
                 cancelled_cb,
                 timeout=_render_ffmpeg_timeout(preview, expected_out_s),
                 progress_cb=progress_cb, expected_out_s=expected_out_s)
@@ -8405,7 +8568,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # flatlines through the whole end card.
     try:
         _fx_run(_video_cmd(graph), fx_box,
-                lambda: _video_cmd(_graph(dialogue_gain=dialogue_gain)),
+                lambda: _video_cmd(_graph(dialogue_gain=dialogue_gain, ambient_bed=ambient_bed)),
                 cancelled_cb,
                 timeout=_render_ffmpeg_timeout(preview, expected_out_s),
                 progress_cb=progress_cb, expected_out_s=expected_out_s)
@@ -10510,7 +10673,10 @@ def _run_render_job(worker_db, job):
                       f"{tp_guard['tp']} dBTP (limiter "
                       f"{tp_guard['limit_dbfs']} dBFS, "
                       f"{tp_guard['passes']} pass(es))", flush=True)
-        if not proof_only and master_loudness(edl_row["json"], *src_shape):
+        if not proof_only and master_loudness(edl_row["json"], *src_shape) \
+                and not ambient_program(edl_row["json"], out_local):
+            # (a program whose sound is only room tone stays at its recorded
+            # level: render_edl measured its bed and left it unmastered)
             import mastering
             master_guard = mastering.guard(out_local, workdir,
                 bitrate="128k" if variant == "preview" else "192k")

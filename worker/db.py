@@ -2518,6 +2518,19 @@ def get_asset(conn, asset_id):
         return cur.fetchone()
 
 
+def library_music_copies(conn, slug, limit=5):
+    """Storage keys of earlier project copies of one CC0 library track
+    (worker/music_library.py registers each with meta.library_slug), newest
+    first: the fallback source when the library object itself is missing."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT storage_key FROM assets
+             WHERE kind = 'music' AND meta->>'library_slug' = %s
+             ORDER BY id DESC LIMIT %s""", (slug, int(limit)))
+        rows = cur.fetchall()
+    return [(r["storage_key"] if isinstance(r, dict) else r[0]) for r in rows]
+
+
 def library_music_used_by_user(conn, user_id, exclude_project_id=None,
                                limit=24):
     """CC0 library slugs that score this user's OTHER projects, newest

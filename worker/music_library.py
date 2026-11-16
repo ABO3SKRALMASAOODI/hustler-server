@@ -224,6 +224,66 @@ def _missing_object(exc):
         or "NoSuchKey" in text
 
 
+COPY_ATTEMPTS = 3
+COPY_BACKOFF_S = (0.5, 2.0)
+
+
+def _copy_sources(ctx, track):
+    """Where a track's bytes can be copied from, best first: the library
+    object, then byte-identical copies earlier placements made in other
+    projects (music/<pid>/library-<slug>.mp3)."""
+    out = [track["storage_key"]]
+    try:
+        rows = ctx.db.run(dbx.library_music_copies, track["slug"]) or []
+    except Exception:  # noqa: BLE001 - the library object is still tried
+        rows = []
+    for k in rows:
+        if k and k not in out and str(k).endswith(
+                f"/library-{track['slug']}.mp3"):
+            out.append(k)
+    return out
+
+
+def _copy_track(ctx, track, key):
+    """Copy the track's audio into the project (EDIT-CORE A4, 16 Nov 2026).
+    Every track the editor can see is placeable: a transient storage error
+    is retried, and a library object missing from this deployment's store
+    is taken from a copy another project already holds. Returns None, or the
+    error when no source answers after the retries."""
+    import time
+    last = None
+    sources = None
+    for attempt in range(COPY_ATTEMPTS):
+        if attempt:
+            time.sleep(COPY_BACKOFF_S[min(attempt - 1, len(COPY_BACKOFF_S) - 1)])
+        try:
+            storage.copy_object(track["storage_key"], key)
+            return None
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if not _missing_object(e):
+                continue        # transient: the same object again
+        sources = sources if sources is not None else _copy_sources(ctx, track)
+        for src in sources[1:]:
+            try:
+                storage.copy_object(src, key)
+                print(f"[music_library] {track['slug']}: placed from {src} "
+                      "(the library object is missing here)", flush=True)
+                return None
+            except Exception as e:  # noqa: BLE001
+                last = e
+        if _missing_object(last):
+            break
+    if _missing_object(last):
+        return (f"UNAVAILABLE: the audio for library track '{track['slug']}' "
+                "is missing from storage on this deployment, so nothing was "
+                "placed. Place another track from list_music_library, or the "
+                "user's own music. Do NOT claim music was added.")
+    return (f"Could not prepare library track '{track['slug']}' after "
+            f"{COPY_ATTEMPTS} attempts ({str(last)[:160]}). Nothing was "
+            "placed; do NOT claim music was added.")
+
+
 def ensure_project_asset(ctx, track):
     """(storage_key, error): the track as a project music asset, copied once."""
     key = project_key(ctx.project_id, track)
@@ -238,20 +298,9 @@ def ensure_project_asset(ctx, track):
     except Exception:
         present = False
     if not present:
-        try:
-            storage.copy_object(track["storage_key"], key)
-        except Exception as e:  # noqa: BLE001
-            if _missing_object(e):
-                return None, (
-                    f"UNAVAILABLE: the audio for library track "
-                    f"'{track['slug']}' is missing from storage on this "
-                    "deployment, so nothing was placed. Pick another "
-                    "track from list_music_library, or use the user's own "
-                    "music. Do NOT claim music was added.")
-            return None, (
-                f"Could not prepare library track '{track['slug']}' "
-                f"({str(e)[:160]}). Nothing was placed — try again once; "
-                "do NOT claim music was added.")
+        err = _copy_track(ctx, track, key)
+        if err:
+            return None, err
     try:
         ctx.db.run(
             dbx.insert_asset, ctx.project_id, "music", key,

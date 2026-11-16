@@ -2021,6 +2021,46 @@ def _music_piece(index, duration, robust=False):
         len(words) / max(1.0, float(duration or 0)) < 1.2
 
 
+# EDIT-CORE A1 (16 Nov 2026): p5717, a 93 s official music video (66 shots,
+# the song throughout, 7 words of its lyric transcribed), was over
+# FINISHED_PIECE_MAX_S, so it was read as raw footage and cut to a 6.3 s
+# teaser of 18 clips of 0.35 s; the customer then asked to "keep the pacing
+# natural". A length is not what tells a finished piece from raw footage
+# (ticket #63's 104 s concert take): an edit is. Measured: shots change at
+# least every EDITED_SHOT_S on average and sound plays over the room's floor
+# through SONG_SHARE of it.
+EDITED_SHOT_S = 3.0
+SONG_SHARE = 0.8
+
+
+def _edited_song_piece(ctx, duration):
+    """Is this upload an already-edited piece over continuous sound (a music
+    video, a montage over its song)? Measured on the shots and on the
+    activity track (liveness); False when it cannot be measured."""
+    import liveness
+    try:
+        duration = float(duration or 0)
+    except (TypeError, ValueError):
+        return False
+    shots = liveness.shot_starts(ctx.index)
+    if duration <= 0 or (len(shots) + 1) * EDITED_SHOT_S < duration:
+        return False
+    try:
+        track, why = agent_tools._liveness_track(ctx, 0.0, duration)
+    except Exception as exc:  # noqa: BLE001 - unmeasured reads as raw footage
+        track, why = None, f"{type(exc).__name__}: {str(exc)[:120]}"
+    if not track:
+        print(f"[first_cut] edit rhythm not measured ({why})", flush=True)
+        return False
+    reading = liveness.read_span(track, 0.0, duration, shots)
+    ok = bool(reading and (reading.get("sound") or 0.0) >= SONG_SHARE)
+    print(f"[first_cut] {len(shots) + 1} shots in {duration:.1f}s, sound over "
+          f"the floor {((reading or {}).get('sound') or 0):.0%}: "
+          + ("an edited piece over its song" if ok else "raw footage"),
+          flush=True)
+    return ok
+
+
 def _faceless_reframe_args(speech, faces, picked):
     """auto_reframe's arguments for footage that is not a screen and not a
     vertical talking head. Silent footage with no face fills the frame
@@ -2150,7 +2190,10 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             res, early_bands = deband(ctx, steps, started)
             if not _ok(res):
                 early_bands = None
-    if _music_piece(ctx.index, duration, robust=q1) and duration <= 120:
+    finished = _music_piece(ctx.index, duration, robust=q1)
+    if not finished and not cut_speech and duration <= 120:
+        finished = _edited_song_piece(ctx, duration)
+    if finished and duration <= 120:
         # a finished piece over a song: whole, unchanged in time, no title
         # or captions over its own design; only a non-vertical frame is
         # fitted to 9:16 (crop for footage, never bands around a speaker)
