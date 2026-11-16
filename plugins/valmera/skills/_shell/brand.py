@@ -541,6 +541,24 @@ def tail_shape(final, prog_s, last_word_s=None, outro_s=None):
                 level_50ms=[[round(float(a), 2), round(float(b), 1)] for a, b in zip(tl, lv) if a >= L - 0.5])
 
 
+def _brandmark():
+    _renderer()                       # puts the worker on the path
+    import brandmark
+    return brandmark
+
+
+def ink_spans_of(programme, W, H, fps, geo, workdir, prog_s):
+    """(dark spans, dark mark image or None): where the picture under the mark is bright enough for its dark ink
+    (brandmark.ink_spans: hysteresis, a minimum hold, a cross-fade). The ink is measured on the programme itself, before
+    the mark. Unmeasurable: the white ink as always."""
+    BM = _brandmark()
+    try:
+        spans = BM.ink_spans(BM.ink_levels(programme, W, H, fps, ff=FF, until_s=prog_s, geometry=geo), fps)
+    except (OSError, ValueError, subprocess.SubprocessError, RuntimeError):
+        return [], None
+    return spans, (BM.image_path(H, workdir, dark=True) if spans else None)
+
+
 def finish(programme, out, workdir, used=(), accent=True, last_word_s=None):
     """programme (the engine's film) -> out, with the mark on every programme frame and the end card joined.
     The film's sound holds a little past its last word (`last_word_s`, programme seconds; brand.last_word reads it from
@@ -557,12 +575,13 @@ def finish(programme, out, workdir, used=(), accent=True, last_word_s=None):
     mark = R.watermark_image(workdir, W, H)
     if not card or not mark:
         raise RuntimeError("brand asset missing: the end card and the mark are not optional here")
-    x, y = R.watermark_geometry(W, H)["image"][:2]
+    geo = R.watermark_geometry(W, H)
+    x, y = geo["image"][:2]
     parts, j = R.outro_card_parts(2, W, H, fps, outro_s, "", motion=not card.lower().endswith(R.IMAGE_EXTS), program_s=prog_s)
     n_prog = p["frames"] or math.ceil(prog_s * fps - 1e-6)
     t_join = max(0.0, (n_prog - j - 0.25) / fps)
-    g = [f"[0:v]setsar=1,format=yuv420p[pv]",
-         f"[pv][1:v]overlay={x}:{y}:format=auto:shortest=1[vm]"] + parts + [
+    spans, dark = ink_spans_of(programme, W, H, fps, geo, workdir, prog_s)
+    g = [f"[0:v]setsar=1,format=yuv420p[pv]"] + _brandmark().ink_parts("pv", "vm", 1, 4 if dark else None, x, y, spans) + parts + [
         "[ohead]format=yuva420p[oheadp]",
         f"[oheadp]settb=AVTB,setpts=PTS-STARTPTS+{t_join:.6f}/TB[oheadt]",
         "[vm][oheadt]overlay=0:0:format=auto:eof_action=repeat[vjoin]"]
@@ -572,6 +591,8 @@ def finish(programme, out, workdir, used=(), accent=True, last_word_s=None):
                                  last_word_s=last_word_s, sting=accent)
     total = int(round(n_prog / fps * SR))
     cmd += ["-i", wav]
+    if dark:
+        cmd += ["-loop", "1", "-r", str(fps), "-i", dark]          # input 4: the mark's dark twin
     if p["audio"]:
         g.append(f"[0:a]aresample={SR},aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_len={total},"
                  f"atrim=start_sample=0:end_sample={cut},asetpts=N/SR/TB[ahead]")
@@ -584,7 +605,8 @@ def finish(programme, out, workdir, used=(), accent=True, last_word_s=None):
             "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", "-r", str(fps),
             "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out]
     subprocess.run(cmd, check=True, capture_output=True, text=True)
-    res = dict(programme_s=round(prog_s, 3), outro_s=outro_s, join_frames=j, mark_xy=[x, y], card=os.path.basename(card))
+    res = dict(programme_s=round(prog_s, 3), outro_s=outro_s, join_frames=j, mark_xy=[x, y], card=os.path.basename(card),
+               mark_ink=dict(dark_spans=spans))
     res["tail"] = {k: v for k, v in info.items() if k in ("last_word_s", "fall_from_s")}
     if accent:
         res["accent"] = info

@@ -70,6 +70,10 @@ SHADOW_AMBIENT = (0.0, 2.0, 26.0, 0.34, 7.0)
 SHADOW_WIDE = (0.0, 3.0, 11.0, 0.42, 0.0)
 SHADOW_TIGHT = (0.0, 1.6, 2.2, 0.62, 0.0)
 SHADES = (SHADOW_AMBIENT, SHADOW_WIDE, SHADOW_TIGHT)
+# The dark twin (16 Nov 2026): the same drawing in a near-black ink over light
+# shades, for a bright picture under the mark (ink_spans).
+DARK_INK = (17, 17, 20)
+DARK_SHADES = ((0.0, 2.0, 26.0, 0.30, 7.0), (0.0, 3.0, 11.0, 0.36, 0.0), (0.0, 1.6, 2.2, 0.55, 0.0))
 
 try:
     import config as _config
@@ -272,31 +276,50 @@ def layout(W, H, right=None, top=None):
 
 # ── drawing ─────────────────────────────────────────────────────────────
 
-def _shaded(type_alpha, robot_layer, size, k):
+def _shaded(type_alpha, robot_layer, size, k, dark=False):
     """The final RGBA: the soft shades of everything (SHADES), then the
-    white type and the robot over them."""
+    white type and the robot over them. ``dark``: the same drawing in DARK_INK
+    over light shades (DARK_SHADES), for a bright picture under the mark."""
     from PIL import Image, ImageChops, ImageFilter
     w, h = size
     ink = ImageChops.lighter(type_alpha, robot_layer.getchannel("A"))
     out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    for dx, dy, blur, alpha, spread in SHADES:
+    shade_rgb = (255, 255, 255) if dark else (0, 0, 0)
+    for dx, dy, blur, alpha, spread in (DARK_SHADES if dark else SHADES):
         m = ink
         if spread > 0:
             m = m.filter(ImageFilter.MaxFilter(2 * max(1, int(round(spread * k))) + 1))
         m = m.filter(ImageFilter.GaussianBlur(max(0.1, blur * k)))
         m = m.point(lambda v, a=alpha: int(round(v * a)))
-        layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        layer = Image.new("RGBA", (w, h), shade_rgb + (0,))
         layer.putalpha(ImageChops.offset(m, int(round(dx * k)), int(round(dy * k))))
         out = Image.alpha_composite(out, layer)
-    white = Image.new("RGBA", (w, h), (255, 255, 255, 0))
+    white = Image.new("RGBA", (w, h), (DARK_INK if dark else (255, 255, 255)) + (0,))
     white.putalpha(type_alpha)
     out = Image.alpha_composite(out, white)
-    return Image.alpha_composite(out, robot_layer)
+    return Image.alpha_composite(out, _inked_robot(robot_layer) if dark else robot_layer)
 
 
-def render(W, H):
+def _inked_robot(layer):
+    """The robot for the dark ink: its white body and stalk in DARK_INK, its
+    coloured parts (the red ball) and its own dark details as drawn."""
+    import numpy as np
+    from PIL import Image
+    a = np.asarray(layer).astype(np.float32)
+    rgb = a[..., :3]
+    lum = rgb.mean(axis=2)
+    sat = rgb.max(axis=2) - rgb.min(axis=2)
+    white = np.clip((lum - 150.0) / 80.0, 0, 1) * np.clip(1.0 - sat / 60.0, 0, 1)
+    dark = np.asarray(DARK_INK, np.float32)
+    detail = (lum < 110) & (sat < 60)              # the face's dark details turn light so it stays a face
+    out = rgb * (1 - white[..., None]) + dark * white[..., None]
+    out[detail] = 255.0 - rgb[detail]
+    return Image.fromarray(np.dstack([out, a[..., 3]]).clip(0, 255).astype(np.uint8), "RGBA")
+
+
+def render(W, H, dark=False):
     """The mark as an RGBA image the size of layout()['image'] (shadow pad
-    included), for an output of height H."""
+    included), for an output of height H; ``dark``: in the dark ink."""
     from PIL import Image
     p = _parts(int(H))
     pad = shadow_pad(H)
@@ -315,15 +338,171 @@ def render(W, H):
     robot_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     robot_layer.alpha_composite(robot_rgba(rw, rh),
                                 (pad + int(round(rx)), pad + int(round(ry))))
-    return _shaded(type_alpha, robot_layer, (w, h), p["k"])
+    return _shaded(type_alpha, robot_layer, (w, h), p["k"], dark=dark)
 
 
-def image_path(H, workdir):
-    """The mark image for output height H, written once into ``workdir``."""
-    path = os.path.join(workdir, f"valmera_mark_v{DESIGN}_{int(H)}.png")
+def image_path(H, workdir, dark=False):
+    """The mark image for output height H, written once into ``workdir``;
+    ``dark``: the dark-ink twin (same drawing, same geometry)."""
+    path = os.path.join(workdir, f"valmera_mark_v{DESIGN}{'_dark' if dark else ''}_{int(H)}.png")
     with _LOCK:
         if not os.path.exists(path):
             tmp = path + ".tmp.png"
-            render(0, H).save(tmp, optimize=False)
+            render(0, H, dark=dark).save(tmp, optimize=False)
             os.replace(tmp, path)
     return path
+
+
+# ── the ink follows the picture (owner, 16 Nov 2026) ─────────────────────
+# "When the video is white it appears in black." The mark keeps its place, its
+# drawing and its end card; only its ink changes: white over most footage, the
+# dark twin while the picture under the mark is bright. Never a flicker: the
+# brightness under the ink is smoothed over INK_SMOOTH_S, the ink turns dark at
+# INK_DARK_AT and back only under INK_LIGHT_AT (hysteresis), each ink holds at
+# least INK_HOLD_S (a shorter bright or dark stretch keeps the ink it has), and a
+# change is a INK_FADE_S cross-fade.
+INK_DARK_AT = 0.70        # mean luma (0-1) under the ink that turns it dark
+INK_LIGHT_AT = 0.56       # and that turns it back
+INK_HOLD_S = 1.5
+INK_SMOOTH_S = 0.4
+INK_FADE_S = 0.25
+
+
+def ink_spans(levels, fps):
+    """[(t0, t1)]: the programme seconds the mark is in its dark ink, from the
+    picture's brightness under the ink, one value (0-1) a frame."""
+    import numpy as np
+    x = np.asarray(levels, np.float64)
+    if not len(x):
+        return []
+    n = max(1, int(round(INK_SMOOTH_S * fps)))
+    if n > 1 and len(x) > n:
+        pad = np.concatenate([np.full(n // 2, x[0]), x, np.full(n - 1 - n // 2, x[-1])])
+        x = np.convolve(pad, np.ones(n) / n, mode="valid")
+    hold = max(1, int(round(INK_HOLD_S * fps)))
+    state = np.zeros(len(x), bool)
+    dark = bool(x[0] >= INK_DARK_AT)
+    for i, v in enumerate(x):
+        if not dark and v >= INK_DARK_AT:
+            dark = True
+        elif dark and v <= INK_LIGHT_AT:
+            dark = False
+        state[i] = dark
+    # a stretch shorter than the hold keeps the ink around it (the opening and the last stretch included)
+    changed = True
+    while changed:
+        changed = False
+        runs, a = [], 0
+        for i in range(1, len(state) + 1):
+            if i == len(state) or state[i] != state[a]:
+                runs.append((a, i))
+                a = i
+        if len(runs) < 2:
+            break
+        k = min(range(len(runs)), key=lambda j: runs[j][1] - runs[j][0])
+        a, b = runs[k]
+        if b - a < hold:
+            state[a:b] = not state[a]
+            changed = True
+    out, a = [], None
+    for i, d in enumerate(list(state) + [False]):
+        if d and a is None:
+            a = i
+        elif not d and a is not None:
+            out.append((round(a / fps, 3), round(i / fps, 3)))
+            a = None
+    return out
+
+
+def ink_levels(video, W, H, fps, ff="ffmpeg", anchor_y=None, until_s=None, geometry=None, under=None):
+    """The picture's mean brightness (0-1, Rec.709 luma) under the mark's ink,
+    one value a frame of ``video`` (W x H). ``geometry``: watermark_geometry's
+    dict when the caller has it. ``under``: the RGBA mark (render()) the video
+    already carries at geometry['image']: it is taken out of each frame
+    (picture = (frame - a*mark) / (1 - a), where the mark leaves a fifth or more
+    of the picture showing), so a marked export reads the picture under it."""
+    if under is not None:
+        return _levels_under(video, W, H, ff, until_s, geometry, under)
+    import subprocess
+    import numpy as np
+    g = geometry
+    if g is None:
+        import renderer
+        g = renderer.watermark_geometry(W, H, anchor_y)
+    x0, y0, x1, y1 = g["ink"]
+    w, h = max(2, x1 - x0) // 2 * 2, max(2, y1 - y0) // 2 * 2
+    cmd = [ff, "-v", "error"] + (["-t", f"{float(until_s):.3f}"] if until_s else []) + [
+        "-i", video, "-vf", f"crop={w}:{h}:{x0}:{y0},scale=32:12:flags=area,format=gray",
+        "-f", "rawvideo", "-"]
+    raw = subprocess.run(cmd, capture_output=True, check=True, timeout=900).stdout
+    a = np.frombuffer(raw, np.uint8)
+    n = len(a) // (32 * 12)
+    return (a[:n * 32 * 12].reshape(n, -1).astype(np.float32).mean(axis=1) / 255.0).tolist()
+
+
+def _levels_under(video, W, H, ff, until_s, g, under):
+    import subprocess
+    import numpy as np
+    x0, y0, x1, y1 = g["ink"]
+    ix, iy = g["image"][0], g["image"][1]
+    w, h = max(2, x1 - x0) // 2 * 2, max(2, y1 - y0) // 2 * 2
+    m = np.asarray(under, np.float32)[y0 - iy:y0 - iy + h, x0 - ix:x0 - ix + w]
+    a = m[..., 3] / 255.0
+    yc = 0.2126 * m[..., 0] + 0.7152 * m[..., 1] + 0.0722 * m[..., 2]
+    keep = a < 0.8
+    if keep.sum() < 50:
+        keep = a < 0.95
+    cmd = [ff, "-v", "error"] + (["-t", f"{float(until_s):.3f}"] if until_s else []) + [
+        "-i", video, "-vf", f"crop={w}:{h}:{x0}:{y0},format=gray", "-f", "rawvideo", "-"]
+    raw = subprocess.run(cmd, capture_output=True, check=True, timeout=900).stdout
+    fr = np.frombuffer(raw, np.uint8)
+    n = len(fr) // (w * h)
+    fr = fr[:n * w * h].reshape(n, h, w).astype(np.float32)
+    bg = (fr - (a * yc)[None]) / np.maximum(1.0 - a, 0.05)[None]
+    return (np.clip(bg[:, keep], 0, 255).mean(axis=1) / 255.0).tolist()
+
+
+def ink_parts(base, out, light_idx, dark_idx, x, y, spans, end_s=None):
+    """The filtergraph that lays the mark at (x, y) on stream ``base``: the
+    white mark from input ``light_idx``, cross-faded into the dark twin from
+    input ``dark_idx`` over ``spans`` (ink_spans). Without spans it is the
+    one overlay the mark always was. ``light_idx`` None: the white mark is
+    already in the picture (a finished export) and only the dark twin is laid,
+    over it, on the spans."""
+    if light_idx is None and not spans:
+        return [f"[{base}]null[{out}]"]
+    if not spans or dark_idx is None:
+        return [f"[{light_idx}:v]format=rgba[wmbot]",
+                f"[{base}][wmbot]overlay={x}:{y}:format=auto:shortest=1[{out}]"]
+    f = INK_FADE_S
+    light, a = [], 0.0
+    for t0, t1 in spans:
+        if t0 > a + 1e-6 or a == 0.0:
+            light.append((a, t0))
+        a = t1
+    light.append((a, None))
+    light = [(p, q) for p, q in light if q is None or q > p + 1e-6] if light_idx is not None else []
+    parts = ([f"[{light_idx}:v]format=rgba,split={len(light)}" + "".join(f"[wl{i}]" for i in range(len(light)))] if light else []) + \
+        [f"[{dark_idx}:v]format=rgba,split={len(spans)}" + "".join(f"[wd{i}]" for i in range(len(spans)))]
+    layers = []
+    for i, (p, q) in enumerate(light):
+        fx = []
+        if p > 0:
+            fx.append(f"fade=t=in:st={p:.3f}:d={f:.3f}:alpha=1")
+        if q is not None:
+            fx.append(f"fade=t=out:st={q:.3f}:d={f:.3f}:alpha=1")
+        en = f"between(t,{p:.3f},{q + f:.3f})" if q is not None else f"gte(t,{p:.3f})"
+        layers.append((f"wl{i}", fx, en))
+    for i, (p, q) in enumerate(spans):
+        fx = [f"fade=t=in:st={p:.3f}:d={f:.3f}:alpha=1", f"fade=t=out:st={q:.3f}:d={f:.3f}:alpha=1"]
+        layers.append((f"wd{i}", fx, f"between(t,{p:.3f},{q + f:.3f})"))
+    cur = base
+    for j, (lab, fx, en) in enumerate(layers):
+        src = lab
+        if fx:
+            parts.append(f"[{lab}]" + ",".join(fx) + f"[{lab}f]")
+            src = lab + "f"
+        nxt = out if j == len(layers) - 1 else f"wm{j}"
+        parts.append(f"[{cur}][{src}]overlay={x}:{y}:format=auto:shortest=1:enable='{en}'[{nxt}]")
+        cur = nxt
+    return parts

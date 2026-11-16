@@ -2746,7 +2746,9 @@ def robot_match(path, plan_, deadline):
                       "select='eq(n,0)',"), deadline=deadline)[:1]
     if not got:
         return 0.0
-    scores = sorted(_ncc(g, luma, alpha) for g in got)
+    # the mark is two-tone (brandmark.ink_spans): over a bright picture its
+    # robot is the dark twin, the same drawing with its tones inverted
+    scores = sorted(abs(_ncc(g, luma, alpha)) for g in got)
     return scores[len(scores) // 2]
 
 

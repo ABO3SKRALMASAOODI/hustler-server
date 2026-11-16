@@ -301,3 +301,30 @@ def test_the_tail_starts_its_fall_so_the_sound_is_over_about_1_2_s_after_the_las
     assert brand.tail_start(78.0, 77.37) == pytest.approx(77.47)             # the card comes 0.63 s after the word: the fall is cut there (a drop)
     assert brand.tail_start(10.0, 2.0) == pytest.approx(2.2)                 # a long hold of pictures: the sound is over at 3.2 s
     assert brand.tail_start(6.0, None) == pytest.approx(5.0)                 # unknown: the programme's last second
+
+
+def test_the_mark_turns_dark_on_a_white_picture_and_stays_white_on_a_dark_one(tmp_path):
+    """Owner, 16 Nov: "when the video is white it appears in black". The same mark in the same place, its ink measured
+    against the programme under it (brandmark.ink_spans: hysteresis, a minimum hold, a cross-fade)."""
+    W, H = 360, 640
+    prog = str(tmp_path / "prog.mp4")
+    subprocess.run([brand.FF, "-v", "error", "-y", "-f", "lavfi", "-i", f"color=c=0x141414:s={W}x{H}:r={FPS}:d=3",
+                    "-f", "lavfi", "-i", f"color=c=0xf5f5f5:s={W}x{H}:r={FPS}:d=3", "-f", "lavfi", "-i", f"sine=f=220:r={SR}:d=6",
+                    "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0,format=yuv420p[v]", "-map", "[v]", "-map", "2:a",
+                    "-c:v", "libx264", "-crf", "12", "-c:a", "aac", prog], check=True)
+    final = str(tmp_path / "final.mp4")
+    info = brand.finish(prog, final, str(tmp_path), accent=False)
+    sp = info["mark_ink"]["dark_spans"]
+    assert len(sp) == 1 and abs(sp[0][0] - 3.0) < 0.3 and sp[0][1] >= 5.9, sp
+    R = brand._renderer()
+    import brandmark
+    g = R.watermark_geometry(W, H)
+    light = np.asarray(brandmark.render(W, H))
+    ys, xs = np.nonzero((light[..., 3] == 255) & (light[..., :3].min(axis=2) > 240))
+
+    def cores(t):
+        r = subprocess.run([brand.FF, "-v", "error", "-ss", f"{t:.3f}", "-i", final, "-frames:v", "1", "-f", "rawvideo",
+                            "-pix_fmt", "gray", "-"], capture_output=True, check=True)
+        fr = np.frombuffer(r.stdout, np.uint8)[:W * H].reshape(H, W)
+        return float(fr[ys + g["image"][1], xs + g["image"][0]].mean())
+    assert cores(1.5) > 200 and cores(4.8) < 60

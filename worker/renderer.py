@@ -3121,6 +3121,47 @@ def watermark_image(workdir, W, H):
         return None
 
 
+def adaptive_ink_pass(out_path, workdir, W, H, fps, program_s, anchor_y=None):
+    """The mark's dark ink where the picture under it is bright (owner, 16 Nov
+    2026: "when the video is white it appears in black"): the finished export's
+    brightness under the mark is read back through the white mark it carries
+    (brandmark.ink_levels with the drawn image taken out), and only when some
+    stretch is bright (brandmark.ink_spans: hysteresis, a minimum hold) is the
+    programme laid again with the dark twin cross-faded over those stretches;
+    the sound is copied, the end card untouched. Returns the dark spans. A
+    fault keeps the export exactly as it was."""
+    try:
+        import numpy as np
+        import brandmark
+        g = watermark_geometry(W, H, anchor_y)
+        under = np.asarray(brandmark.render(int(W), int(H)))
+        spans = brandmark.ink_spans(brandmark.ink_levels(
+            out_path, int(W), int(H), fps, ff="ffmpeg", until_s=program_s,
+            geometry=g, under=under), fps)
+        spans = [(a, min(b, float(program_s))) for a, b in spans if a < float(program_s) - 0.05]
+        if not spans:
+            return []
+        dark = brandmark.image_path(int(H), workdir, dark=True)
+        x, y = g["image"][0], g["image"][1]
+        parts = brandmark.ink_parts("0:v", "vout", None, 1, x, y, spans)
+        tmp = out_path + ".ink.mp4"
+        cmd = ["ffmpeg", "-v", "error", "-y", "-i", out_path, "-loop", "1",
+               "-t", f"{float(program_s) + 5.0:.3f}", "-r", f"{fps:.3f}",
+               "-i", dark, "-filter_complex", ";".join(parts),
+               "-map", "[vout]", "-map", "0:a?", *final_video_encode(W, H, fps),
+               "-c:a", "copy", "-movflags", "+faststart", tmp]
+        subprocess.run(cmd, check=True, capture_output=True, timeout=3600)
+        os.replace(tmp, out_path)
+        return spans
+    except Exception as e:  # noqa: BLE001 — the white mark stands
+        print(f"[render] adaptive mark ink skipped ({str(e)[:160]})", flush=True)
+        try:
+            os.remove(out_path + ".ink.mp4")
+        except OSError:
+            pass
+        return []
+
+
 def watermark_opaque_mask(W, H, anchor_y=None):
     """A W x H bool mask of the pixels the mark covers FULLY (its image's
     alpha 255: the type's and the robot's cores). Whatever any stage drew
@@ -7127,6 +7168,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
             cancelled_cb,
             timeout=_render_ffmpeg_timeout(preview, expected_out_s),
             progress_cb=progress_cb, expected_out_s=expected_out_s)
+    if mark_img and not preview and not _base_stage and _batch_window is None:
+        adaptive_ink_pass(out_path, workdir, W, H, fps, tl.out_duration, wm_anchor_y)
     return media.duration_of(out_path)
 
 
@@ -8413,6 +8456,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         if overlay_folder:
             shutil.rmtree(overlay_folder)
     _require_whole_picture(out_path, expected_out_s)
+    if mark_img and not preview:
+        adaptive_ink_pass(out_path, workdir, W, H, fps, tl.out_duration, wm_anchor_y)
     return media.duration_of(out_path)
 
 
