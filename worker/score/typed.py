@@ -93,7 +93,8 @@ class WindowContext:
         return self.proxy
 
     def apply_score(self, edl, description):
-        return write_film(self.parent, source_clock(edl, self.start, self.original_key))
+        return write_film(self.parent, source_clock(edl, self.start, self.original_key),
+                          original_key=self.original_key)
 
     def director_recover_supply(self, **kwargs):
         return recover_supply(self, **kwargs)
@@ -256,7 +257,61 @@ def recover_supply(ctx, *, job, cfg, deadline, work, index, sess, per,
         return revised, bin_doc, getattr(ctx, "director_footage", foot)
 
 
-def write_film(ctx, edl):
+def cut_program(edl, original_key):
+    """Measured program clocks and authored picture geometry, not authorization.
+
+    A wordless montage can carry every picture outside the source-audio keep
+    spine. Preserve that distinction for the ordinary deletion evidence check.
+    """
+    from timeline import Timeline, insert_windows
+    tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [], edl.get("speed") or [])
+    windows = insert_windows(edl.get("inserts") or [], tl)
+    pictures = []
+    for lane in ("inserts", "overlays"):
+        for item in edl.get(lane) or []:
+            start = (windows[item["id"]][0] if lane == "inserts" else float(item["start"]))
+            duration = float(item["duration_s"])
+            rate = float(item.get("rate") or 1) if lane == "inserts" else 1.
+            source = float(item.get("source_start_s") or 0)
+            pictures.append({"lane": lane, "program": [start, start + duration],
+                "source": [source, source + duration * rate] if item.get("kind") == "video" else None,
+                "verified_main_original": bool(original_key and item.get("asset_key") == original_key),
+                "audio": "silent" if lane == "overlays" or item.get("mute") or item.get("kind") == "image" else "asset audio",
+                "item": item})
+    return {"program_seconds": round(tl.out_duration, 2),
+            "source_audio_keep": edl.get("keep") or [], "canvas": edl.get("canvas"),
+            "pictures": pictures}
+
+
+def cut_picture_frames(ctx, program, root, sig):
+    """Bounded source-frame evidence for the proposed original-video pictures.
+
+    These are explicitly source frames, not proof of the final composition.
+    The complete timing, crop, opacity and layer geometry stays in the payload.
+    """
+    import llm
+    import media
+    pictures = [p for p in program["pictures"] if p["verified_main_original"] and p["source"]]
+    if not pictures:
+        return []
+    positions = sorted({round(i * (len(pictures) - 1) / 11) for i in range(12)})
+    source = ctx.proxy_path()
+    parts = []
+    for n in positions:
+        picture = pictures[n]
+        t = sum(picture["source"]) / 2
+        if not 0 <= t < ctx.duration:
+            continue  # out-of-bounds proposals are never backed by a substituted frame
+        path = os.path.join(root, f"{sig[:12]}_proposed_{n}.jpg")
+        media.frame_at(source, t, path, width=480)
+        parts += [{"type": "text", "text": (
+            f"Proposed picture {picture['item']['id']}, program {picture['program']}, "
+            f"verified main original at {t:.2f}s. Source frame only; inspect the supplied "
+            "crop/opacity/layer geometry and audio separately.")}, llm.image_part(path)]
+    return parts
+
+
+def write_film(ctx, edl, original_key=None):
     """Write the complete film through the ordinary typed evidence guards.
 
     The source guard checks long cuts in bounded groups before saving. Keep
@@ -287,7 +342,16 @@ def write_film(ctx, edl):
                 edl.get("inserts") or [], old_keep, keep, speed, speed)
             new_tl = timeline.Timeline(keep, edl["inserts"], speed)
             agent_tools._remap_program_items(edl, old_tl, new_tl)
-    return ctx.write_edl(edl, "Director: typed film")
+    sentinel = object()
+    previous = getattr(ctx, "_typed_cut_source", sentinel)
+    ctx._typed_cut_source = original_key
+    try:
+        return ctx.write_edl(edl, "Director: typed film")
+    finally:
+        if previous is sentinel:
+            del ctx._typed_cut_source
+        else:
+            ctx._typed_cut_source = previous
 
 
 def _selection(ctx):

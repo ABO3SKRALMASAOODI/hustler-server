@@ -228,7 +228,7 @@ def test_long_director_write_checks_complete_film_before_saving(monkeypatch, tmp
         body = json.loads(parts[0]["text"])
         assert body["before_keep"] == original["keep"]
         assert body["after_keep"] == target["keep"]
-        assert body["measured_length_after_s"] == (0 if canvas else 25)
+        assert body["measured_length_after_s"] == (3 if canvas else 25)
         groups.append(body["removed_source_intervals"])
         assert len([p for p in parts if p["type"] == "image_url"]) == 3 * len(groups[-1])
         return {"allow": len(groups) != refuse_group, "reason": "keep the payoff"}, {}
@@ -286,6 +286,62 @@ def test_typed_score_word_edges_move_pictures_with_their_source():
     assert got["overlays"][0]["asset_key"] == "checked-footage"
     assert got["overlays"][0]["source_start_s"] == 7
     assert got["captions"] == target["captions"]
+
+
+def test_canvas_cut_check_sees_real_program_and_source_pictures_not_zero_seconds(monkeypatch, tmp_path):
+    import json
+    import edit_integrity
+    import llm
+    import media
+    before = {"keep": [[60, 79.74]]}
+    after = {"keep": [], "canvas": {"width": 720, "height": 1280, "fps": 30},
+        "inserts": [{"id": "base", "kind": "image", "asset_key": "plate",
+                     "at_output_s": 0, "duration_s": 42}],
+        "overlays": [{"id": f"shot{i}", "kind": "video", "asset_key": "original",
+                      "start": i * 14, "duration_s": 14, "source_start_s": s,
+                      "fit": "cover", "opacity": 1} for i, s in enumerate([20, 50, 90])]}
+    after["overlays"].append({"id": "different-asset", "kind": "video", "asset_key": "other",
+        "start": 0, "duration_s": 1, "source_start_s": 150, "scale": .2, "opacity": 0})
+    frames, payloads, saved = [], [], []
+    ctx = NS(user_message="Make a 40–45 second montage using only this upload",
+        duration=171.645, index={}, llm_client=object(), agent_model="any",
+        workdir=str(tmp_path), proxy_path=lambda: "original-proxy.mp4",
+        latest_edl=lambda: {"json": before})
+    monkeypatch.setattr(media, "frame_at", lambda path, t, *a, **kw: frames.append((path, t)))
+    monkeypatch.setattr(llm, "image_part", lambda p: {"type": "image_url", "image_url": {"url": p}})
+    def check(ctx, name, schema, system, parts, **kw):
+        body = json.loads(parts[0]["text"])
+        payloads.append(body)
+        assert body["measured_length_before_s"] == 19.74
+        assert body["measured_length_after_s"] == 42
+        program = body["typed_picture_program"]["after"]
+        assert program["source_audio_keep"] == []
+        assert len(program["pictures"]) == 5
+        assert program["pictures"][-1]["verified_main_original"] is False
+        assert program["pictures"][-1]["item"]["opacity"] == 0
+        assert program["pictures"][1]["audio"] == "silent"
+        assert "original-proxy.mp4" == frames[-1][0]
+        return {"allow": len(payloads) == 2, "reason": "first selection loses the needed action"}, {}
+    monkeypatch.setattr(asks, "_call", check)
+    def write(edl, note):
+        refusal = edit_integrity.cut_refusal(ctx, before, edl)
+        if refusal:
+            return "REJECTED: " + refusal
+        saved.append(edl)
+        return "EDL v2"
+    ctx.write_edl = write
+    assert typed.write_film(ctx, after, original_key="original").startswith("REJECTED")
+    assert saved == [] and not hasattr(ctx, "_typed_cut_source")
+    assert [t for _, t in frames[-3:]] == [27, 57, 97]
+    # Same keep and duration, different picture source: the old refusal must
+    # not be cached across a changed montage. Unknown assets never use the
+    # main proxy as fabricated evidence of their own pictures.
+    revised = copy.deepcopy(after)
+    revised["overlays"][0]["source_start_s"] = 30
+    assert typed.write_film(ctx, revised, original_key="original") == "EDL v2"
+    assert len(payloads) == 2 and saved == [revised]
+    assert [t for _, t in frames[-3:]] == [37, 57, 97]
+    assert not hasattr(ctx, "_typed_cut_source")
 
 
 @pytest.mark.parametrize("test_rung", [False, True])
