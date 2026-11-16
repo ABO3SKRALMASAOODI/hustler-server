@@ -21,6 +21,39 @@ def story():
                          dict(name='B',first=6,last=7,t0=6,t1=7.8,say='6 7')])
 
 
+def repeated_subject():
+    return dict(windows=[dict(name=n,t0=i,t1=i+1,must_show='Actual '+n)
+                         for i,n in enumerate(['A','B','A'])])
+
+
+def test_repeated_director_referent_reuses_candidates_not_other_subjects():
+    a=dict(path='/a.mp4',seconds=1.6);b=dict(path='/b.mp4',seconds=1.6)
+    pool=coverage.shared_candidates(repeated_subject(),{0:[a,a],1:[b]})
+    assert pool=={0:[a],1:[b],2:[a]}
+    assert pool[2][0] is a  # references, no copied media or invented attribution
+
+
+def test_repeated_candidate_is_checked_under_its_new_words_and_can_fail():
+    a=dict(path='/a.mp4',seconds=1.6);b=dict(path='/b.mp4',seconds=1.6)
+    seen=[]
+    def check(rows):
+        seen.extend(r[4]['window'] for r in rows)
+        for r in rows:r[4].update(verified_motion=True,placed_motion_p90=2.)
+        decisions=[dict(ok=r[4]['window']!=2,motion_ok=True) for r in rows]
+        return [r for r,d in zip(rows,decisions) if d['ok']],dict(placements=decisions,rejected=sum(not d['ok'] for d in decisions),spend=[])
+    accepted,_=coverage.checked_proposals(repeated_subject(),{0:[a],1:[b]}, {},3,check)
+    assert 2 in seen and all(r[4]['window']!=2 for r in accepted)
+
+
+def test_repeated_candidate_does_not_inflate_new_picture_density():
+    shots=coverage.proposals(repeated_subject(),{0:[dict(path='/a.mp4',seconds=1.6)],1:[dict(path='/b.mp4',seconds=1.6)]},{})
+    with pytest.raises(coverage.CoverageError) as error:
+        coverage.require_coverage(shots,repeated_subject(),3)
+    assert error.value.report['new_pictures']==2
+    assert error.value.report['repeated_pictures']==1
+    assert error.value.report['moving_seconds']==0
+
+
 def test_retained_originals_need_bytes_and_attribution_and_keep_exact_subjects(tmp_path):
     sources=tmp_path/'sources';sources.mkdir()
     original=sources/'original.mp4';original.write_bytes(b'original')
