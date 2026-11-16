@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import sys
+import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent))
 from workflow_scratch_guard import disposition
@@ -45,3 +46,21 @@ def test_shared_media_links_do_not_keep_inactive_scratch_forever(tmp_path):
     os.utime(work / 'source', (1, 1), follow_symlinks=False)
     os.utime(work, (1, 1))
     assert disposition(work, []) == 'stale'
+
+
+def test_cli_detects_live_alias_process_and_does_not_count_itself(tmp_path):
+    work = tmp_path / 'physical'
+    work.mkdir()
+    alias = tmp_path / 'alias'
+    alias.symlink_to(work, target_is_directory=True)
+    os.utime(work, (1, 1))
+    worker = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)', str(alias / 'run')])
+    guard = str(Path(__file__).with_name('workflow_scratch_guard.py'))
+    try:
+        checked = subprocess.run([sys.executable, guard, str(work)], capture_output=True, text=True)
+        assert checked.returncode == 1 and 'live-process' in checked.stdout
+    finally:
+        worker.terminate()
+        worker.wait(timeout=5)
+    checked = subprocess.run([sys.executable, guard, str(work)], capture_output=True, text=True)
+    assert checked.returncode == 0 and 'stale' in checked.stdout
