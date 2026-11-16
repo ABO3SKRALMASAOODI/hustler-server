@@ -47,6 +47,47 @@ count `set_transitions` reports, and rendered junction frames with sound.
 
 ## Strong treatment patterns
 
+ELEVATED / PREMIUM / CINEMATIC TRANSITIONS ("make the transitions more
+elevated", "more premium", "smoother", "more professional"). What makes an
+edit read as elevated is the CUT, chosen well, far more than an effect on
+every join. The choices, with what each measurably does:
+
+- Motivated hard cut — the default. 0 frames of overlap: each picture is
+  whole on every frame. Cut ON the beat (`get_audio_analysis` beats) or ON
+  an action (a hand lands, a head turns, a door closes) and it reads as
+  designed. On a montage, re-timing cuts to the music is the biggest lift.
+- Match cut — a hard cut between two shots that share a shape, a colour, a
+  direction of motion or a framing (a circle to a circle, a pan left into a
+  pan left). Find the pairs with `get_shots` and `look_at` on both sides;
+  move the cut a few frames so the motion continues across it. No effect at
+  all; it is the most "elevated" junction there is.
+- Whip / speed ramp — energy across a real turn: `whip_left|right`
+  (`set_transitions`, 0.15-0.3 s), or a speed ramp into the cut
+  (`set_speed` 1.5-2x over the last 0.3-0.5 s of the outgoing shot, then
+  normal on the incoming). Motion carries the eye through; nothing overlaps.
+- Dip to black / white — a breath between sections (`fade_black` or
+  `dip_black` 0.3-0.6 s; `dip_white` for bright, airy pieces). The two
+  pictures never share a frame: no ghosting, ever, even on cuts baked into
+  the upload.
+- Light leak / flash — warmth or a pop at a section turn: the `light_leak`
+  motion graphic (warm wash, 0.6-1 s) or `hit_flash` / `flash`
+  (2-6 frames). Pairs with a warm, filmic look; one or two per minute.
+- Cross-dissolve — the ONE style that shows both pictures at once for its
+  whole length. 0.2-0.5 s on moving footage reads as a soft cut; 0.8-1.5 s
+  only for photographs, time passing or a deliberate dreamy turn. Measured
+  on p5873 (16 Nov): ten 1 s dissolves on a 35 s, 11-shot teaser kept two
+  pictures on screen for 10 s (28% of the film) and the customer's own
+  burned-in numerals floated translucent over the next shot: "ghosted".
+  On a cut-together upload (cuts baked in, no footage past them) the
+  fainter side holds its edge frame, so keep those dissolves short.
+
+A good elevated pass on a montage: hard cuts re-timed to the beat, match
+cuts where two shots rhyme, one dip or light leak at each real section turn,
+at most one or two short dissolves where the mood softens. Read the
+MEASURED line `set_junction` / `set_transitions` return (how much of the
+film the windows cover, the shortest shot one sits in) and look at the
+rendered frames ON each join before replying.
+
 GLOBAL JUNCTION STYLES (`set_transitions`, duration-preserving, footage
 never overlaps): dip_black (calm), dip_white (soft, bright), whip_left /
 whip_right (fast directional smear with motion blur), zoom_punch (an

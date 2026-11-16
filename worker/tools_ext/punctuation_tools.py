@@ -963,9 +963,72 @@ def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
         return out
     shown = [it["id"] for it in items[:12]]
     more = f" and {len(items) - len(shown)} more" if len(items) > 12 else ""
+    measured = _junction_measure(edl, tl, items, style, d)
     return (f"{out}\nids: {', '.join(shown)}{more}{note}\nTotal length and "
             "sound are unchanged. A render shows these; the Studio's live "
-            "draft cannot draw them.")
+            "draft cannot draw them."
+            + (f"\n{measured}" if measured else ""))
+
+
+# Styles that lay the outgoing and incoming pictures over each other for the
+# whole window (renderer.BLEND_JUNCTION_STYLES).
+_BLEND_STYLES = ("dissolve", "double_exposure", "fadegrays")
+
+
+def _junction_measure(edl, tl, items, style, d):
+    """MEASURED: what the placed junctions do to this film, in numbers the
+    editor decides with (never a refusal): how much of the film shows two
+    pictures at once, the shortest shot a window sits in, and how many cuts
+    are baked into the upload (no handles)."""
+    if not items:
+        return ""
+    try:
+        import timeline as _tl
+        blocks = _tl.program_blocks(edl)
+        total = float(tl.out_duration) or 0.0
+    except Exception:  # noqa: BLE001 - a measurement is optional
+        return ""
+    if total <= 0:
+        return ""
+    def shot_len(t, side):
+        for b in blocks:
+            if side == "out" and abs(float(b["out_end"]) - t) < 0.06:
+                return float(b["out_end"]) - float(b["out_start"])
+            if side == "in" and abs(float(b["out_start"]) - t) < 0.06:
+                return float(b["out_end"]) - float(b["out_start"])
+        return None
+    lens = [x for it in items for x in (shot_len(float(it["at"]), "out"),
+                                        shot_len(float(it["at"]), "in"))
+            if x]
+    covered = min(total, d * len(items))
+    held = sum(1 for it in items if it.get("hold"))
+    parts = []
+    if style in _BLEND_STYLES:
+        parts.append(f"{len(items)} x {d:g} s {style} put two pictures on "
+                     f"screen at once for {covered:.1f} s of the "
+                     f"{total:.1f} s film ({100 * covered / total:.0f}%)")
+    else:
+        parts.append(f"{len(items)} x {d:g} s {style} windows cover "
+                     f"{covered:.1f} s of the {total:.1f} s film "
+                     f"({100 * covered / total:.0f}%)")
+    if lens:
+        short = min(lens)
+        parts.append(f"the shortest shot beside one is {short:.1f} s, and "
+                     f"its window takes {min(100, 100 * d / 2 / short):.0f}% "
+                     "of it")
+    if held:
+        parts.append(
+            f"{held} of these cuts are baked into the upload (no footage "
+            "past them): "
+            + ("each side plays its own frames on time and holds its edge "
+               "frame only while it is the fainter picture"
+               if style in _BLEND_STYLES else
+               "each side's frames are spread across the window"))
+    if style in _BLEND_STYLES and len(items) > 2 and d > 0.5:
+        parts.append("a hard cut, a 0.2-0.4 s dissolve, a dip or a flash at "
+                     "the turns reads cleaner than a long dissolve on every "
+                     "join (read_skill transitions, ELEVATED)")
+    return "MEASURED: " + "; ".join(parts) + "."
 
 
 def _past_a_baked_cut(tl, t, d, baked):
@@ -1095,10 +1158,10 @@ TOOL_SPECS = {
          "as_insert": {"type": "boolean"}}),
     "set_junction": (
         set_junction,
-        "Transitions at real cuts in ONE call, including every change of "
-        "picture baked into an uploaded slideshow or montage: never call it "
-        "per cut. Total length and sound never move. dissolve (a true cross-"
-        "dissolve, 0.3-2 s), slide (direction left|right|up|down), film_strip "
+        "Transitions at real cuts in ONE call, every change of picture "
+        "baked into an upload included: never per cut. Length and sound "
+        "never move. dissolve (both pictures "
+        "at once; 0.2-0.5 s on moving footage), slide (direction left|right|up|down), film_strip "
         "(both pictures travel as one), fade_black (through black), fadegrays, "
         "pixelize, radial, slices, "
         "wipe_left/right/up/down, iris, columns, staircase, box_steps, bands, "
@@ -1106,10 +1169,10 @@ TOOL_SPECS = {
         "double_exposure, pixel_stretch, hit_flash, whip_up/down, zoom_blur, "
         "radial_blur, datamosh; 'none' removes. Whole film by default; "
         "start/end (program seconds) for a range; at= one cut; cuts='scene' "
-        "(default: real picture changes; jump cuts stay bare)|'every'|"
-        "[seconds]. Calling again on those cuts replaces them; "
+        "(default: real picture changes; jump cuts bare)|'every'|"
+        "[seconds]. Again on those cuts replaces them; "
         "style='none' with a range or only=<style> takes some off. origin: "
-        "centre|face|point:x,y|<motion id>.",
+        "centre|face|point:x,y|<motion id>. Craft: read_skill transitions.",
         {"style": {"type": "string"},
          "at": {"type": ["number", "array"], "items": {"type": "number"}},
          "cuts": {"type": ["string", "array"], "items": {"type": "number"}},

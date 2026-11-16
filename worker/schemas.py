@@ -2574,6 +2574,41 @@ class Master(BaseModel):
     loudness: Optional[Literal["social", "natural"]] = None
 
 
+# Export file targets (16 Nov 2026, p5857): "make the download less than
+# 4.5GB so it can fit onto a DVD". The editor had no export size or bitrate,
+# so a size could never be met and the reply told the customer to check the
+# file themselves. Bounds are what a file can physically be, not policy.
+EXPORT_MIN_SIZE_MB = 1.0
+EXPORT_MIN_VIDEO_KBPS = 50
+
+
+class Export(BaseModel):
+    """What the exported FILE must fit, applied to finals only (previews
+    are unchanged). max_size_mb: the whole MP4's ceiling in megabytes of
+    10^6 bytes (a DVD's 4.7 GB, an upload limit); the render sets the video
+    bitrate from the film's length with room for the sound and the
+    container, encodes under it, measures the file and re-encodes in two
+    passes if it still lands over (renderer.fit_export_size). video_kbps:
+    a video bitrate ceiling in kb/s. None everywhere keeps today's export,
+    and the field is dropped from signatures, so stored EDLs are unchanged."""
+    model_config = {"extra": "forbid", "allow_inf_nan": False}
+    max_size_mb: Optional[float] = Field(default=None, gt=0)
+    video_kbps: Optional[int] = Field(default=None, gt=0)
+
+    @field_validator("max_size_mb")
+    @classmethod
+    def _size_floor(cls, value):
+        # Under a megabyte holds no film: the smallest real file is meant.
+        return None if value is None else max(float(value),
+                                              EXPORT_MIN_SIZE_MB)
+
+    @field_validator("video_kbps")
+    @classmethod
+    def _rate_floor(cls, value):
+        return None if value is None else max(int(value),
+                                              EXPORT_MIN_VIDEO_KBPS)
+
+
 # Output ratios that are social-feed formats. An EDL that leaves
 # master.loudness unset is mastered ('social') on these: every short used to
 # ship at whatever level the source was recorded (-29 LUFS on a quiet lecture,
@@ -2861,6 +2896,18 @@ class EDL(BaseModel):
     # fxgraph. Empty list, so edl_signature drops it and every earlier EDL
     # keeps its signature and cached renders.
     fx: List[FxItem] = Field(default_factory=list)
+    # 16 Nov 2026 (p5857): the exported file's size or bitrate target (see
+    # Export). None on every earlier EDL, and edl_signature drops None.
+    export: Optional[Export] = None
+
+    @model_serializer(mode="wrap")
+    def _dump_without_unset_export(self, handler):
+        # Every EDL written before the export target existed dumps (and so
+        # stores and compares) byte-identically: an unset export is absent.
+        data = handler(self)
+        if isinstance(data, dict) and data.get("export") is None:
+            data.pop("export", None)
+        return data
 
 
 def default_edl(duration):

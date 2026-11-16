@@ -25,7 +25,9 @@ except ImportError:
 # FX_AUTHORABLE_TYPES), because until then validation rejects any item.
 LAYERS = frozenset(("keep", "speed", "inserts", "frame", "captions",
     "caption_mutes", "texts", "vectors", "music", "sfx", "voiceover", "volume", "master",
-    "effects", "overlays", "canvas", "motion", "fx"))
+    "effects", "overlays", "canvas", "motion", "fx",
+    # the exported file's size/bitrate target: {"max_size_mb", "video_kbps"}
+    "export"))
 ITEM_LAYERS = frozenset(("inserts", "texts", "vectors", "music", "sfx", "voiceover", "overlays",
     "motion", "fx"))
 

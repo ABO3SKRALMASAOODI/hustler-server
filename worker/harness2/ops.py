@@ -398,6 +398,15 @@ def op_frame(stage, value, env, index):
                       "follow": v.get("follow", True)}, env, index)
 
 
+def op_export(stage, value, env, index):
+    """The exported file's size or bitrate target (set_export_settings):
+    {"max_size_gb": 4.5} | {"max_size_mb": 2000} | {"video_kbps": 8000}."""
+    v = value if isinstance(value, dict) else {"max_size_gb": value}
+    args = {k: v[k] for k in ("max_size_gb", "max_size_mb", "video_kbps",
+                              "clear") if v.get(k) is not None}
+    return _run_verb(stage, "set_export_settings", args, env, index)
+
+
 def op_grade(stage, value, env, index):
     v = value if isinstance(value, dict) else {"preset": value}
     if v.get("look"):
@@ -683,6 +692,7 @@ HANDLERS = {
     "captions": _verb_op("add_captions"), "place": op_place,
     "scenes": op_scenes, "voiceover": op_voiceover, "music": op_music,
     "sfx": op_sfx, "audio": op_audio, "frame": op_frame, "grade": op_grade,
+    "export": op_export,
     "transition": op_transition, "zoom": _verb_op("add_zoom"),
     "clips": op_clips,
 }
