@@ -140,7 +140,8 @@ def _runs_by_room(words, chars, canvas, edl, index):
     worker/caption_carry.py) — there pages are cut to what one line of
     that column holds (caption_place.line_chars), so they read at full size
     instead of shrinking two lines into it."""
-    if not any((w.get("place") or {}).get("l") for w in words):
+    single = bool(((edl.get("captions") or {}).get("style") or {}).get("single_line"))
+    if not single and not any((w.get("place") or {}).get("l") for w in words):
         return [(words, chars)]
     W, H = caption_carry.frame_wh(edl, index, canvas)
     tc = caption_place.template_column(W, H)
@@ -148,7 +149,7 @@ def _runs_by_room(words, chars, canvas, edl, index):
     for w in words:
         pl = w.get("place") or {}
         budget = chars
-        if pl.get("l"):
+        if single or pl.get("l"):
             col = tuple(pl.get("x") or tc)
             if col not in fits:            # (a measured face: once per column)
                 fits[col] = caption_place.line_chars(edl, W, H, col)
@@ -339,6 +340,8 @@ def cues(edl, index, tl, canvas=None):
         cue = {"s": round(s, 3), "e": round(e, 3), "y": round(y, 4), "b": band,
                "k": 1 if on_cut or (nxt is not None and nxt - e < CONTIGUOUS_S) else 0,
                "w": ws}
+        if style.get("single_line"):
+            cue["n"] = 1
         if place:
             cue["z"] = list(place["z"])
             if place.get("h"):
