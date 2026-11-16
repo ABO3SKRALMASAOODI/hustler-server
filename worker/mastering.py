@@ -7,6 +7,7 @@ import true_peak
 
 TARGET = -14.0
 TOLERANCE = .75
+MAX_PASSES = 5
 
 
 def measure(path):
@@ -25,7 +26,11 @@ def guard(path, workdir, bitrate='192k'):
     report = {'i_in': current['i'], 'passes': 0}
     limit_dbfs = -2.0
     gain_response = 1.0
-    for n in range(3):
+    # AAC may establish a lower safe ceiling on more than one pass. Leave
+    # bounded room to use the measured gain response after that settles.
+    # The same p5574 approval mix needs three passes with FFmpeg 9, four
+    # with FFmpeg 8; three stopped at -15.01 LUFS despite useful progress.
+    for n in range(MAX_PASSES):
         if abs(current['i']-TARGET) <= TOLERANCE and current['tp'] <= -1.0:
             return dict(report, **current, held=True)
         tmp = os.path.join(workdir, f'master_guard_{n}.mp4')

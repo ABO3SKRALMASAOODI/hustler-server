@@ -57,3 +57,42 @@ def test_limited_mix_converges_within_the_existing_pass_budget(monkeypatch, tmp_
     assert abs(report['i'] - mastering.TARGET) <= mastering.TOLERANCE
     assert report['tp'] <= -1
     assert 5 < gains[-1] <= 12
+
+
+def test_codec_headroom_can_settle_twice_before_loudness_converges(monkeypatch, tmp_path):
+    path = tmp_path / 'film.mp4'
+    path.write_bytes(b'film')
+    # Actual unchanged p5574 approval EDL and FFmpeg 8 encoder. The two
+    # initial peak corrections leave the third pass at -15.01 LUFS.
+    levels = iter([{'i': -15.88, 'tp': -1.26},
+                   {'i': -15.91, 'tp': -1.08},
+                   {'i': -15.55, 'tp': -2.41},
+                   {'i': -15.01, 'tp': -2.49},
+                   {'i': -14.31, 'tp': -2.44}])
+    monkeypatch.setattr(mastering, 'measure', lambda _: next(levels))
+    peaks = iter([{'limit_dbfs': -6.52}, {'limit_dbfs': -7.18}, {}, {}])
+    monkeypatch.setattr(mastering.true_peak, 'guard', lambda *a, **k: next(peaks))
+    monkeypatch.setattr(mastering.subprocess, 'run',
+                        lambda cmd, **kw: Path(cmd[-1]).write_bytes(b'corrected'))
+    report = mastering.guard(str(path), str(tmp_path), bitrate='128k')
+    assert report['passes'] == 4 and report['held']
+    assert abs(report['i'] - mastering.TARGET) <= mastering.TOLERANCE
+    assert report['tp'] <= -1
+    assert not list(tmp_path.glob('master_guard_*'))
+
+
+def test_nonconverging_mix_is_still_bounded_and_rejected(monkeypatch, tmp_path):
+    import pytest
+    path = tmp_path / 'film.mp4'
+    path.write_bytes(b'film')
+    monkeypatch.setattr(mastering, 'measure', lambda _: {'i': -20., 'tp': -2.})
+    monkeypatch.setattr(mastering.true_peak, 'guard', lambda *a, **k: {})
+    encodes = []
+    def encode(cmd, **kw):
+        encodes.append(cmd)
+        Path(cmd[-1]).write_bytes(b'corrected')
+    monkeypatch.setattr(mastering.subprocess, 'run', encode)
+    with pytest.raises(ValueError, match='social master did not hold'):
+        mastering.guard(str(path), str(tmp_path))
+    assert len(encodes) == mastering.MAX_PASSES == 5
+    assert not list(tmp_path.glob('master_guard_*'))
