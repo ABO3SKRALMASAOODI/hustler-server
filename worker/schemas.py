@@ -2582,6 +2582,54 @@ EXPORT_MIN_SIZE_MB = 1.0
 EXPORT_MIN_VIDEO_KBPS = 50
 
 
+def export_number(value):
+    """A size or rate as written: a number, or a string such as '4.5' or
+    '4.5 GB' (machine syntax: its leading number). None when there is no
+    positive number in it."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        num = float(value)
+    else:
+        text = str(value).strip()
+        end = 0
+        while end < len(text) and (text[end].isdigit() or text[end] == "."):
+            end += 1
+        try:
+            num = float(text[:end]) if end else None
+        except ValueError:
+            num = None
+    if num is None or not math.isfinite(num) or num <= 0:
+        return None
+    return num
+
+
+def export_input(data):
+    """An export target as written, in the schema's own fields. Every surface
+    teaches the size in GB (set_export_settings, harness v2's export op,
+    export_final's MCP description), so a layer written straight through
+    apply_edit_batch carries max_size_gb too: it is read as its megabytes, a
+    string number ('4.5', '4.5 GB') as its number, a bare number as GB, and
+    anything else is dropped. Only the fields it names are returned, so an
+    upsert patches just those."""
+    if not isinstance(data, dict):
+        data = {"max_size_gb": data}
+    gb = export_number(data.get("max_size_gb"))
+    mb = export_number(data.get("max_size_mb"))
+    kbps = export_number(data.get("video_kbps"))
+    sizes = [v for v in ((gb * 1000) if gb else None, mb) if v]
+    out = {}
+    if sizes:
+        out["max_size_mb"] = min(sizes)
+    elif "max_size_mb" in data or "max_size_gb" in data:
+        out["max_size_mb"] = None       # named and emptied: no size target
+    if kbps:
+        out["video_kbps"] = int(round(kbps))
+    elif "video_kbps" in data:
+        out["video_kbps"] = None
+    return out
+
+
 class Export(BaseModel):
     """What the exported FILE must fit, applied to finals only (previews
     are unchanged). max_size_mb: the whole MP4's ceiling in megabytes of
@@ -2591,9 +2639,16 @@ class Export(BaseModel):
     passes if it still lands over (renderer.fit_export_size). video_kbps:
     a video bitrate ceiling in kb/s. None everywhere keeps today's export,
     and the field is dropped from signatures, so stored EDLs are unchanged."""
-    model_config = {"extra": "forbid", "allow_inf_nan": False}
+    model_config = {"allow_inf_nan": False}
     max_size_mb: Optional[float] = Field(default=None, gt=0)
     video_kbps: Optional[int] = Field(default=None, gt=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _repair_input(cls, data):
+        if data is None or isinstance(data, BaseModel):
+            return data
+        return export_input(data)
 
     @field_validator("max_size_mb")
     @classmethod
@@ -2905,7 +2960,10 @@ class EDL(BaseModel):
         # Every EDL written before the export target existed dumps (and so
         # stores and compares) byte-identically: an unset export is absent.
         data = handler(self)
-        if isinstance(data, dict) and data.get("export") is None:
+        ex = data.get("export") if isinstance(data, dict) else None
+        if isinstance(data, dict) and (ex is None or (
+                isinstance(ex, dict) and not any(ex.values()))):
+            # an export that names no target is no export
             data.pop("export", None)
         return data
 

@@ -1,0 +1,10 @@
+{
+  "wave": "export-size-1116",
+  "doc": "p5857 (ticket 77): the exported file's size or bitrate target, set from every editing surface.",
+  "verbs": [
+    "set_export_settings"
+  ],
+  "batch_layers": [
+    "export"
+  ]
+}

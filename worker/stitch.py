@@ -103,6 +103,10 @@ def _fx_window(item):
 def _strip(edl):
     """(structural-dump, changeable-dump) for comparison."""
     e = json.loads(json.dumps(edl or {}))
+    # The export's size/bitrate target is not picture: previews never read
+    # it, and finals across two targets are never stitched (the renderer
+    # compares export before it stitches a final).
+    e.pop("export", None)
     fx = e.get("effects") or {}
     fx_items = e.pop("fx", None) or []
     bus = [i for i in fx_items if i not in _fx_video(fx_items)]

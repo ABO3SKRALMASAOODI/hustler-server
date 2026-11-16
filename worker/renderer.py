@@ -1356,6 +1356,7 @@ def fit_export_size(edl, out_path, workdir, cancelled_cb=None):
     margin = EXPORT_TARGET_MARGIN
     src = os.path.join(workdir, f"fit_src_{uuid.uuid4().hex[:8]}.mp4")
     os.replace(out_path, src)
+    tmp = passlog = None
     try:
         for attempt in range(EXPORT_FIT_PASSES):
             if cancelled_cb and cancelled_cb():
@@ -1404,6 +1405,40 @@ def fit_export_size(edl, out_path, workdir, cancelled_cb=None):
                 os.replace(src, out_path)
             else:
                 os.remove(src)
+        # a pass that failed leaves its half-written file and logs behind
+        for leftover in ([tmp] if tmp else []) + (
+                [passlog + "-0.log", passlog + "-0.log.mbtree"]
+                if passlog else []):
+            try:
+                if leftover != out_path and os.path.exists(leftover):
+                    os.remove(leftover)
+            except OSError:
+                pass
+
+
+def _same_export_target(variant, prev_edl, edl):
+    """A final is reused or stitched only from a final made for the same
+    export target: its encode was held under that target's bitrate. Previews
+    never read export, so any two previews share their picture."""
+    if variant != "final":
+        return True
+    return (((prev_edl or {}).get("export") or None)
+            == ((edl or {}).get("export") or None))
+
+
+def export_fit_failed_report(edl, out_path, error):
+    """The measured report for a delivered file whose size fit could not
+    run: the file as it is, its size, and why (never a failed export)."""
+    t = export_target(edl) or {}
+    try:
+        size = os.path.getsize(out_path)
+    except OSError:
+        size = 0
+    target = t.get("max_bytes")
+    return {"target_bytes": target, "bytes": size, "first_bytes": size,
+            "passes": 0, "fits": bool(target) and 0 < size <= target,
+            "video_kbps": None, "audio_kbps": None,
+            "error": f"{type(error).__name__}: {str(error)[:200]}"}
 
 
 def export_size_text(report):
@@ -1412,12 +1447,18 @@ def export_size_text(report):
         return ""
 
     def size(n):
+        n = float(n or 0)
         return f"{n / 1e9:.2f} GB" if n >= 1e9 else f"{n / 1e6:.1f} MB"
     how = (f"re-encoded in {report['passes']} two-pass run(s) at "
            f"{report['video_kbps']} kb/s video" if report.get("passes")
            else "first encode")
+    if report.get("error"):
+        how += (f"; the size re-encode could not run ({report['error']}), "
+                "so the verified first encode shipped")
+    target = (f"the {size(report['target_bytes'])} target"
+              if report.get("target_bytes") else "no size target")
     return (f"export measured {size(report['bytes'])} ({report['bytes']} "
-            f"bytes) against the {size(report['target_bytes'])} target: "
+            f"bytes) against {target}: "
             f"{'fits' if report.get('fits') else 'OVER'} ({how})")
 
 
@@ -10589,6 +10630,8 @@ def _run_render_job(worker_db, job):
                                                  lambda: index) \
                             and (variant != "preview" or _same_preview_frame(
                                 prev_asset, edl_row["json"], src_local)) \
+                            and _same_export_target(variant, prev_row["json"],
+                                                    edl_row["json"]) \
                             and (fp_now is None
                                  or pm.get("caption_fp") == fp_now):
                         out_dur = _reuse_picture_with_new_audio(
@@ -10732,8 +10775,19 @@ def _run_render_job(worker_db, job):
         # ships is measured, and re-encoded until it fits (fit_export_size).
         size_fit = None
         if variant == "final" and not proof_only:
-            size_fit = fit_export_size(edl_row["json"], out_local, workdir,
-                                       cancelled_cb=lambda: _abandoned[0])
+            try:
+                size_fit = fit_export_size(edl_row["json"], out_local,
+                                           workdir,
+                                           cancelled_cb=lambda: _abandoned[0])
+            except dbx.JobLeaseLost:
+                raise
+            except Exception as fe:  # noqa: BLE001 — never fails an export
+                # The verified file at out_local ships (fit_export_size puts
+                # it back when a pass fails); its size is measured and
+                # reported honestly, so the customer gets the film and the
+                # true number instead of a failed export.
+                size_fit = export_fit_failed_report(edl_row["json"],
+                                                    out_local, fe)
             if size_fit:
                 print(f"[render {job_id}] {export_size_text(size_fit)}",
                       flush=True)

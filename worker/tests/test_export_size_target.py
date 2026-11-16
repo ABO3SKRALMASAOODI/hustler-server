@@ -163,9 +163,148 @@ def test_the_target_is_reachable_from_every_editing_surface():
         return True
     orig = ops._run_verb
     ops._run_verb = run_verb
+    from harness2.envelope import Envelope
+
+    class _Stage:
+        edl = {"keep": [[0.0, 20.0]], "export": {"max_size_mb": 4500.0}}
     try:
-        assert ops.op_export(None, {"max_size_gb": 4.5}, None, 0)
+        assert ops.op_export(_Stage(), {"max_size_gb": 4.5},
+                             Envelope(tool="edit"), 0)
     finally:
         ops._run_verb = orig
     assert seen == {"name": "set_export_settings",
                     "args": {"max_size_gb": 4.5}}
+
+
+# -- review fixes (16 Nov 2026) ---------------------------------------------
+
+def test_a_new_export_target_reuses_the_preview_picture_but_never_a_final():
+    """p5857's own case: setting the size on a 59 min film changed nothing a
+    preview shows, yet forced a full preview re-render (332-694 s)."""
+    import render_plan
+    import stitch
+    from timeline import Timeline
+    plain = schemas.validate_edl({"keep": [[0.0, 10.0]]}, 20.0).model_dump()
+    sized = schemas.validate_edl({"keep": [[0.0, 10.0]],
+                                  "export": {"max_size_mb": 4500}},
+                                 20.0).model_dump()
+    assert render_plan.can_reuse_picture(plain, sized)
+    tl = Timeline(plain["keep"], [], None)
+    windows, reason = stitch.plan(plain, sized, tl, tl, 20.0,
+                                  tl.out_duration)
+    assert reason is None or "structural" not in reason, reason
+    assert stitch.plan_timeline(plain, sized, tl, tl, tl.out_duration,
+                                [], [])[2] != \
+        "non-timeline structural change"
+    # a final made for another target (or none) is never reused or stitched
+    assert renderer._same_export_target("preview", plain, sized)
+    assert not renderer._same_export_target("final", plain, sized)
+    other = dict(sized, export={"max_size_mb": 2000.0, "video_kbps": None})
+    assert not renderer._same_export_target("final", sized, other)
+    assert renderer._same_export_target("final", sized, copy.deepcopy(sized))
+    assert renderer._same_export_target("final", plain, dict(plain))
+
+
+def test_the_batch_layer_takes_the_size_in_gb_as_every_surface_teaches():
+    before = schemas.validate_edl({"keep": [[0.0, 20.0]]}, 20.0).model_dump()
+    for value, mb in (({"max_size_gb": 4.5}, 4500.0),
+                      ({"max_size_gb": "4.5 GB"}, 4500.0),
+                      ({"max_size_mb": "2000"}, 2000.0),
+                      ({"max_size_gb": 4.5, "max_size_mb": 4000}, 4000.0),
+                      ({"max_size_gb": 4.5, "note": "dvd"}, 4500.0),
+                      (4.5, 4500.0)):
+        after = edit_batch.apply_batch(
+            copy.deepcopy(before),
+            [{"action": "set", "layer": "export", "value": value}], 20.0, [])
+        edl = after if isinstance(after, dict) and "keep" in after \
+            else after[0]
+        ex = schemas.validate_edl(edl, 20.0).export
+        assert ex.max_size_mb == mb, (value, ex)
+    # an upsert in GB patches the size: raised from 2000 MB to 4.5 GB, the
+    # bitrate kept (never read as 4.5 MB by the near-spelling repair)
+    held = schemas.validate_edl({"keep": [[0.0, 20.0]],
+                                 "export": {"max_size_mb": 2000,
+                                            "video_kbps": 9000}},
+                                20.0).model_dump()
+    after = edit_batch.apply_batch(
+        copy.deepcopy(held),
+        [{"action": "upsert", "layer": "export",
+          "value": {"max_size_gb": 4.5}}], 20.0, [])
+    edl = after if isinstance(after, dict) and "keep" in after else after[0]
+    assert edl["export"] == {"max_size_mb": 4500.0, "video_kbps": 9000}
+    rate = schemas.validate_edl({"keep": [[0.0, 20.0]],
+                                 "export": {"video_kbps": "8000"}}, 20.0)
+    assert rate.export.video_kbps == 8000
+    # an export that names nothing is no export: the EDL dumps unchanged
+    empty = schemas.validate_edl({"keep": [[0.0, 20.0]],
+                                  "export": {"foo": 1}}, 20.0).model_dump()
+    assert "export" not in empty
+
+
+def test_a_failed_size_fit_ships_the_verified_file_and_reports_it(
+        tmp_path, monkeypatch):
+    path = str(tmp_path / "final.mp4")
+    with open(path, "wb") as f:
+        f.write(b"\0" * 3_000_000)
+    sha = hashlib.sha256(open(path, "rb").read()).hexdigest()
+    monkeypatch.setattr(renderer.media, "duration_of", lambda p: 4.0)
+    monkeypatch.setattr(renderer.media, "probe",
+                        lambda p: {"width": 640, "height": 360, "fps": 25})
+    monkeypatch.setattr(renderer, "_stream_bytes", lambda p, k: 96_000)
+
+    def boom(*a, **k):
+        raise renderer.media.MediaError("No space left on device") \
+            if hasattr(renderer.media, "MediaError") else OSError("disk")
+    monkeypatch.setattr(renderer.media, "run", boom)
+    edl = {"export": {"max_size_mb": 1.0}}
+    with pytest.raises(Exception):
+        renderer.fit_export_size(edl, path, str(tmp_path))
+    # the delivered file is back, byte for byte, and nothing is left over
+    assert hashlib.sha256(open(path, "rb").read()).hexdigest() == sha
+    assert sorted(os.listdir(tmp_path)) == ["final.mp4"]
+    # what the render job ships and reports instead of failing the export
+    rep = renderer.export_fit_failed_report(edl, path, OSError("disk full"))
+    assert rep["fits"] is False and rep["bytes"] == 3_000_000
+    assert rep["target_bytes"] == 1_000_000 and "disk full" in rep["error"]
+    text = renderer.export_size_text(rep)
+    assert "OVER" in text and "3.0 MB" in text and "shipped" in text
+
+
+def test_the_job_keeps_the_export_when_the_size_fit_fails():
+    """The render job's call site recovers: JobLeaseLost still stops it,
+    any other failure ships the file with the measured report."""
+    import inspect
+    src = inspect.getsource(renderer)
+    at = src.index("size_fit = fit_export_size(")
+    block = src[at - 200:at + 900]
+    assert "except dbx.JobLeaseLost" in block
+    assert "export_fit_failed_report(" in block
+
+
+def test_harness_v2_reports_the_measured_ceiling_as_v1_does():
+    from harness2 import ops
+    from harness2.envelope import Envelope
+    edl = schemas.validate_edl({"keep": [[0.0, 3565.4]]}, 3600.0).model_dump()
+
+    class _Stage:
+        def __init__(self):
+            self.edl = edl
+
+    stage = _Stage()
+
+    def run_verb(st, name, args, env, index):
+        st.edl = dict(st.edl, export={"max_size_mb": 4500.0,
+                                      "video_kbps": None})
+        return True
+    orig = ops._run_verb
+    ops._run_verb = run_verb
+    try:
+        env = Envelope(tool="edit")
+        assert ops.op_export(stage, {"max_size_gb": 4.5}, env, 0)
+    finally:
+        ops._run_verb = orig
+    text = env.text()
+    assert "at most" in text and "kb/s" in text and "GB" in text, text
+    assert "59 min" in text and "(the target is 4.5 GB)" in text
+    # the same line v1's reply carries
+    assert D.export_ceiling_line(stage.edl) in text

@@ -12,12 +12,12 @@ import sys
 
 try:
     from schemas import (FX_AUTHORABLE_TYPES, FX_TYPES, CaptionStyle,
-                         Effects, keep_boundaries, program_duration,
-                         sped_len, validate_edl)
+                         Effects, export_input, keep_boundaries,
+                         program_duration, sped_len, validate_edl)
 except ImportError:
     from worker_schemas import (FX_AUTHORABLE_TYPES, FX_TYPES, CaptionStyle,
-                                Effects, keep_boundaries, program_duration,
-                                sped_len, validate_edl)
+                                Effects, export_input, keep_boundaries,
+                                program_duration, sped_len, validate_edl)
 
 # "fx" (Wave 0 seam, worker/devices/INTERFACES.md §4): registered effect
 # items by id. Accepted here always; advertised in apply_edit_batch's layer
@@ -877,6 +877,13 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
             raise ValueError(f"Unsupported batch layer: {layer}. "
                              "Use get_edl for exact layer shapes; transitions "
                              "are inside effects, or call set_transitions.")
+        if layer == "export" and action in ("set", "upsert") \
+                and op.get("value") is not None:
+            # The size as every surface teaches it (max_size_gb, '4.5 GB') in
+            # the schema's own fields BEFORE it is written or merged: read
+            # later, max_size_gb was "renamed" to its near spelling
+            # max_size_mb and a 4.5 GB DVD target became 4.5 MB.
+            op["value"] = export_input(op["value"])
         if action == "set":
             if "value" not in op:
                 raise ValueError("A set operation requires value.")

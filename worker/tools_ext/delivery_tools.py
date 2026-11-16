@@ -159,18 +159,37 @@ def retypeset_language(ctx, lang, translation=None, srt=None, mapping=None,
 def _export_number(value):
     """A size or rate the model wrote: a number, or a string such as '4.5'
     or '4.5 GB' (machine syntax: the leading number)."""
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip()
-    end = 0
-    while end < len(text) and (text[end].isdigit() or text[end] == "."):
-        end += 1
-    try:
-        return float(text[:end]) if end else None
-    except ValueError:
-        return None
+    import schemas as _schemas_mod
+    return _schemas_mod.export_number(value)
+
+
+def export_ceiling_line(edl):
+    """The measured ceiling of an EDL's export, in one plain line: the film's
+    length with the end card, the video bitrate the export is held under and
+    the largest file that makes. "" when the EDL names no export target.
+    One source for every surface (v1 set_export_settings, harness v2's
+    export op, MCP), so each reply can report the size in numbers."""
+    import renderer as _r
+    import schemas as _schemas_mod
+    target = (edl or {}).get("export") if isinstance(edl, dict) else None
+    if not isinstance(target, dict) or not _r.export_target(edl):
+        return ""
+    dur = (float(_schemas_mod.program_duration(edl))
+           + _r.outro_seconds(False))
+    if dur <= 0:
+        return ""
+    vk = _r.export_video_kbps(edl, dur)
+    ceiling = ((vk + _r.EXPORT_AUDIO_KBPS) * 1000 / 8 * dur
+               * (1 + _r.EXPORT_CONTAINER_HEADROOM)
+               + _r.EXPORT_CONTAINER_FIXED_BYTES)
+    mins = int(dur // 60)
+    return (
+        f"Measured for this film ({mins} min {dur - mins * 60:.0f} s with "
+        f"the end card): the export's picture is held at or under {vk} "
+        f"kb/s with {_r.EXPORT_AUDIO_KBPS} kb/s sound, so the file is at "
+        f"most {ceiling / 1e9:.2f} GB"
+        + (f" (the target is {float(target['max_size_mb']) / 1000:g} GB)"
+           if target.get("max_size_mb") else "") + ".")
 
 
 def set_export_settings(ctx, max_size_gb=None, max_size_mb=None,
@@ -185,7 +204,6 @@ def set_export_settings(ctx, max_size_gb=None, max_size_mb=None,
     measures the delivered file and re-encodes it in two passes until it
     fits (renderer.fit_export_size). Previews are unchanged."""
     import read_tools
-    import renderer as _r
     import schemas as _schemas_mod
     edl = dict(ctx.latest_edl()["json"])
     if clear:
@@ -236,24 +254,11 @@ def set_export_settings(ctx, max_size_gb=None, max_size_mb=None,
     lines = [res]
     lines.extend(f"NOTE: {n}" for n in notes)
     try:
-        written = dict(ctx.latest_edl()["json"])
-        dur = (float(_schemas_mod.program_duration(written))
-               + _r.outro_seconds(False))
+        ceiling_line = export_ceiling_line(dict(ctx.latest_edl()["json"]))
     except Exception:  # noqa: BLE001 - the measured line is optional
-        dur = None
-    if dur:
-        vk = _r.export_video_kbps({"export": target}, dur)
-        ceiling = ((vk + _r.EXPORT_AUDIO_KBPS) * 1000 / 8 * dur
-                   * (1 + _r.EXPORT_CONTAINER_HEADROOM)
-                   + _r.EXPORT_CONTAINER_FIXED_BYTES)
-        mins = int(dur // 60)
-        lines.append(
-            f"Measured for this film ({mins} min {dur - mins * 60:.0f} s with "
-            f"the end card): the export's picture is held at or under {vk} "
-            f"kb/s with {_r.EXPORT_AUDIO_KBPS} kb/s sound, so the file is at "
-            f"most {ceiling / 1e9:.2f} GB"
-            + (f" (the target is {target['max_size_mb'] / 1000:g} GB)"
-               if target.get("max_size_mb") else "") + ".")
+        ceiling_line = ""
+    if ceiling_line:
+        lines.append(ceiling_line)
     try:
         last = ctx.db.run(read_tools.latest_final_asset, ctx.project_id)
     except Exception:  # noqa: BLE001
