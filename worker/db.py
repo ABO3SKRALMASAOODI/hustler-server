@@ -19,6 +19,7 @@ import psycopg2.sql
 from psycopg2.extras import RealDictCursor, Json
 
 import config
+import harness_route
 # Plain reads shared with the backend's MCP fast path (read_tools.py):
 # one definition, re-exported here under the names every caller uses.
 from read_tools import (  # noqa: E402,F401
@@ -1752,6 +1753,12 @@ def enqueue_job(conn, project_id, user_id, jtype, payload):
     payload = dict(payload or {})
     payload.setdefault("execution_policy", config.EXECUTION_POLICY_MODE)
     with conn.cursor() as cur:
+        # Harness v2 routing: the backend's jobs.enqueue rule, one shared
+        # implementation (harness_route.stamp). A request the worker queues
+        # itself (the brief typed while the upload was analysed, resumed when
+        # the index ends; a request a lifted gate runs; a short's
+        # instruction) gets the harness it would have got from the backend.
+        harness_route.stamp(cur, user_id, project_id, jtype, payload)
         cur.execute("""INSERT INTO video_jobs (project_id, user_id, type, payload)
                        VALUES (%s, %s, %s, %s) RETURNING id""",
                     (project_id, user_id, jtype, Json(payload)))

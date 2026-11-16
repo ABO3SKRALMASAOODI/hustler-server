@@ -1,8 +1,17 @@
 """Which editing harness a request runs on (harness v2, 16 Nov 2026).
 
+THIS FILE EXISTS TWICE, byte for byte: backend/video_services/harness_route.py
+and worker/harness_route.py (the web service and the executors are separate
+images). backend/tests/test_harness_route.py and
+worker/tests/test_harness_route_enqueue.py fail when they differ.
+
 Each request carries its own stamp on its job payload, decided once when the
-job is queued (``jobs.enqueue``). The switch is the ``app_kv`` row
-``harness_v2``::
+job is queued, by ``stamp`` below: the backend's ``jobs.enqueue`` (a chat
+message, an MCP call) and the worker's ``db.enqueue_job`` (a request typed
+while the upload was analysed and resumed when the index ends, a request a
+lifted gate runs, a short's instruction) apply the same rule, so a request
+gets the same harness whichever process queues it. The switch is the
+``app_kv`` row ``harness_v2``::
 
     {"mode": "off" | "list" | "on", "user_ids": [], "project_ids": [],
      "surfaces": ["studio", "mcp"], "override": false}
@@ -73,13 +82,32 @@ def parse(raw):
             "override": value.get("override") is True}
 
 
+def _savepoint(cur, sql):
+    try:
+        cur.execute(sql)
+        return True
+    except Exception:  # noqa: BLE001 - autocommit: no transaction to guard
+        return False
+
+
 def read(cur):
-    """The stored switch, parsed. A read that fails is mode off."""
+    """The stored switch, parsed. A read that fails is mode off.
+
+    The read runs inside the caller's transaction (the worker's resume holds
+    the account and message locks while it queues), so it sits under a
+    savepoint: a failed read rolls back to it and the caller's queueing
+    carries on, instead of meeting an aborted transaction."""
+    guarded = _savepoint(cur, "SAVEPOINT harness_route_read")
     try:
         cur.execute("SELECT value FROM app_kv WHERE key = %s", (KEY,))
-        return parse(_v(cur.fetchone(), "value", 0))
+        row = cur.fetchone()
     except Exception:  # noqa: BLE001 - routing must never stop a request
+        if guarded:
+            _savepoint(cur, "ROLLBACK TO SAVEPOINT harness_route_read")
         return parse(None)
+    if guarded:
+        _savepoint(cur, "RELEASE SAVEPOINT harness_route_read")
+    return parse(_v(row, "value", 0))
 
 
 def surface_of(job_type, payload=None):
@@ -123,6 +151,21 @@ def pick(cur, user_id, project_id, job_type, requested=None, payload=None):
     if uid in cfg["user_ids"] or pid in cfg["project_ids"]:
         return V2
     return None
+
+
+def stamp(cur, user_id, project_id, job_type, payload):
+    """Stamp one job payload about to be queued, in place, and return it.
+
+    A chat turn or MCP call the switch routes to v2 gets ``harness: "v2"``.
+    A payload that already carries a stamp keeps it (``setdefault``), so a
+    continuation never changes harness mid-turn. A one-request override rides
+    in as ``harness_request`` and is never stored."""
+    requested = payload.pop("harness_request", None)
+    if job_type in HARNESS_JOB_TYPES and "harness" not in payload:
+        if pick(cur, user_id, project_id, job_type,
+                requested, payload) == V2:
+            payload.setdefault("harness", V2)
+    return payload
 
 
 def requested_from(data):
