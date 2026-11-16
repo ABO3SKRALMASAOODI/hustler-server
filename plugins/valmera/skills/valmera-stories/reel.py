@@ -640,7 +640,7 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
                 alternatives; what no line's demand reserves is a spare any line it fits may take
       cut       per line: its reserved moving takes, then spare moving takes, then photographs (PHOTO_SHARE of its
                 shots, lifted when it has no moving take left), then still takes; colour takes before grey ones on lines
-                without a device. A line short of takes spreads what it has (shots redrawn from the judge's p50-p90).
+                without a device. A line short of distinct pictures spreads what it has (shots redrawn from the judge's p50-p90, sp.spread).
       fill      a gap is filled only from the line itself: a reframe of a different own-line take (at most REFRAME_MAX_S,
                 its window inside its take), then a designed card of the line's own display item or brief, never
                 another line's picture and never a stretched hold. sp.shortfall logs each line's fill frames.
@@ -653,6 +653,7 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
     nseg = len(segs)
     bounds = line_bounds(script, clock, f_end)
     sp.shortfall, sp.reframed, sp.overflow, sp.fill_by_line = {}, {}, 0, {}
+    sp.spread = {}
     voice_f = max(bounds[-1][1] - bounds[0][0], 1) if bounds else 1
     planned = shot_plan(script, clock, f_end, seed)
     demand = {ln: len(v) for ln, v in planned.items()}
@@ -833,13 +834,21 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
             continue
         k, hi_s = seg_k(s)
         still_only = bool(s.get("see")) and all(isinstance(x, dict) and x.get("still_only") is True for x in s.get("see") or [])
-        # a line short of takes keeps the judge's lengths (no spread to longer shots): its gaps take same-take cut-ins first,
-        # then reframes, then its own designed cards
+        # a line short of distinct pictures spreads what it has (17 Nov): its shots are drawn again from the judge's upper
+        # half (p50-p90), so it cuts fewer times instead of filling with reframes of takes already played. The 15 Nov
+        # Hoover run kept the judge's lengths on short lines: 21.4 cuts a 10 s, 20 s of reframes and 14 s of cards, 31% of
+        # its shots repeating a take. What stays short after the spread takes same-take cut-ins, reframes, then its own
+        # designed cards.
         burst_at = None
         if s.get("list") is True and bursts[0] < BURSTS_MAX and sum(1 for u in free if line in units[u]["lines"]) >= 3:
             burst_at, bursts[0] = a + int(0.25 * (b - a)), bursts[0] + 1
         burst_left = rng.randint(4, 8) if burst_at is not None else 0
         lens = list(planned.get(line) or [])
+        if lens and not still_only:
+            have = len({group_of(u) for u in reserved[line] + [v for v in free if line in units[v]["lines"]]}) + len(photos_for(line))
+            if have < len(lens):
+                lens = plan_lengths(random.Random(seed ^ (line + 1) * 7919), b - a, k, hi_s, spread=True)
+                sp.spread[str(line)] = dict(have=have, planned=len(planned.get(line) or []), spread=len(lens))
         planned_n = max(len(lens), 1)
         pos, photos_on, shots_on, cutins = a, 0, 0, 0
         while pos < b:
@@ -1264,7 +1273,7 @@ def fit_measures(pictures, timeline, sp, takes, secs, fin, seg_len, device_share
                    and p["line"] != p["spoken_line"])
     fill_f = sum(p["f"][1] - p["f"][0] for p in pictures if p.get("tier") in ("designed", "reframe"))
     return dict(tier_s=tiers, shortfall_s={str(k): round(v / FPS, 2) for k, v in sorted(sp.shortfall.items())},
-                reframed_s={str(k): round(v / FPS, 2) for k, v in sorted(sp.reframed.items())},
+                reframed_s={str(k): round(v / FPS, 2) for k, v in sorted(sp.reframed.items())}, spread_lines=dict(getattr(sp, "spread", None) or {}),
                 new_pictures_10s=round(takes["new_pictures_10s_n"] / max(secs, 1) * 10, 2), repeat_share=takes["repeat_share"],
                 consecutive_repeats=takes["consecutive_repeats"],
                 shots_under_0_5s=round(sum(1 for x in lens if x < 0.5 * FPS) / n, 3), shots_1_2f=round(sum(1 for x in lens if x <= 2) / n, 3),

@@ -820,3 +820,21 @@ def test_marketing_captions_at_72_px_stay_in_the_safe_area(tmp_path):
     assert caps
     t = F.taste_check(l1, beats)
     assert t["ok"], t["problems"]
+
+
+def test_a_line_short_of_pictures_spreads_them_instead_of_reframing_played_takes():
+    """17 Nov: the 15 Nov Hoover plan kept the judge's lengths on lines short of pictures and filled the rest with
+    reframes of takes already played (31% of its shots repeated a take). A line short of distinct pictures now draws
+    its shots from the judge's upper half: on a supply of 0.8x the planned shots the repeated shots fall from about 10%
+    to under 4%, and no shot reaches 2 s."""
+    rows = []
+    for seed in (1114, 5, 99):
+        sc, clock, f_end, footage, fit, stress = _df043a_like(ratio=0.8)
+        sp = R.Supply({}, footage, fit=fit)
+        tl = R.cut_fit(sc, clock, sp, f_end, stress, seed=seed)
+        again = sum(1 for r in tl if r[4].get("tier") in ("reframe", "cutin")) / len(tl)
+        rows.append(again)
+        assert sp.spread and max(r[1] - r[0] for r in tl) < 2 * F.FPS
+        for a, b in zip(tl, tl[1:]):
+            assert a[1] == b[0]
+    assert sum(rows) / len(rows) < 0.04, rows
