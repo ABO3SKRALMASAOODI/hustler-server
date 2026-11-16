@@ -67,13 +67,14 @@ _MAX_SPAN_KNOTS = 60      # a kept knot at least every 30 s bounds the scan
 # about 28 dB louder than the upload. Speech and music move against a
 # floor: a bed whose blocks stay within CONTRAST_LU of each other AND sit
 # under AMBIENT_MAX_LUFS is the room's own sound, not content to level or
-# master. A bed with contrast counts as speech only what rises
-# FLOOR_MARGIN_LU over its own floor (FLOOR_PCT of its blocks).
+# master. With a transcript, speech is content when enough of it rises
+# SPEECH_OVER_FLOOR_LU over the room's floor, read from the blocks between
+# the words when the program has them (a tight program's floor is otherwise
+# its quieter speech).
 FLOOR_PCT = 10.0
 CONTRAST_PCT = 90.0
 CONTRAST_LU = 8.0
 AMBIENT_MAX_LUFS = -38.0
-FLOOR_MARGIN_LU = 10.0
 SPEECH_OVER_FLOOR_LU = 6.0
 
 _PTS = re.compile(r"pts_time:\s*(-?[0-9.]+)")
@@ -175,9 +176,12 @@ def read_bed(blocks, speech=None, step=STEP_S):
     if level >= AMBIENT_MAX_LUFS:
         content = True
     elif speech is not None:
-        gate = max(ABS_GATE_LUFS, floor + SPEECH_OVER_FLOOR_LU)
-        spoken = sum(1 for t, m in pairs if m > gate and any(
-            a <= t <= b for a, b in speech))
+        inside = [any(a <= t <= b for a, b in speech) for t, _m in pairs]
+        room = [m for (_t, m), i in zip(pairs, inside) if not i]
+        room_floor = (_pct(room, FLOOR_PCT)
+                      if len(room) * step >= MIN_SPEECH_S else floor)
+        gate = max(ABS_GATE_LUFS, room_floor + SPEECH_OVER_FLOOR_LU)
+        spoken = sum(1 for (_t, m), i in zip(pairs, inside) if i and m > gate)
         content = spoken * step >= MIN_SPEECH_S
     else:
         content = top - floor >= CONTRAST_LU
@@ -200,10 +204,10 @@ def gain_knots(blocks, step=STEP_S, speech=None):
     bed = read_bed(blocks, speech=speech, step=step)
     if not bed["content"]:
         return None
+    # The bed is content (read_bed); its quieter speech is leveled like any
+    # speech. A floor gate here read a quieter speaker in a tight program
+    # (pauses already cut) as room tone and stopped lifting him.
     gate = max(ABS_GATE_LUFS, _lufs(audible) - REL_GATE_LU)
-    if bed["top"] - bed["floor"] >= CONTRAST_LU:
-        # speech rises over the room: blocks near the floor are the room
-        gate = max(gate, bed["floor"] + FLOOR_MARGIN_LU)
     speech = [m > gate for m in lv]
     if sum(speech) * step < MIN_SPEECH_S:
         return None

@@ -115,6 +115,42 @@ def test_a_real_dead_pause_in_a_talking_head_is_still_cut(measured):
     assert not any(a < 3.7 < b for a, b in ctx.edl["keep"])
 
 
+def test_word_adjacent_pauses_on_a_still_talking_head_are_cut(measured):
+    # p5574: 0.5-0.6 s pauses between words on a still talking head. A
+    # level sample spans 0.25 s, so the samples at a pause's edges also hold
+    # the next word's onset; those must not make the pause read as sound.
+    fps, dur = 4.0, 12.0
+    words, t, pauses = [], 0.3, []
+    for i in range(6):
+        words.append(_w(f"w{i}", t, t + 1.37))
+        t += 1.37
+        if i < 5:
+            pauses.append((t, t + 0.6))
+            t += 0.6
+    tr = _track(dur, fps=fps, floor=-80.0)
+    for i in range(len(tr["level"])):
+        a, b = i / fps, (i + 1) / fps          # the sample's span
+        if any(a < w["t1"] and b > w["t0"] for w in words):
+            tr["level"][i] = -24.0             # holds some of a word
+    ctx = _Ctx(words, dur, tr)
+    out = agent_tools.cut_silences(ctx, min_silence_s=0.4, padding_s=0.12)
+    assert out.startswith("EDL v"), out
+    for a, b in pauses:                        # every dead pause went
+        mid = (a + b) / 2
+        assert not any(x < mid < y for x, y in ctx.edl["keep"]), (a, b)
+    assert "footage, not dead air" not in out
+
+
+def test_a_pause_that_really_sounds_is_still_kept(measured):
+    # p5574 46.5-47.7 s: a -28 dBFS sound between words on a still picture
+    words = [_w("a", 0.2, 3.0), _w("b", 4.4, 8.0)]
+    tr = _track(8.0, loud=[(0.2, 3.0), (3.0, 4.4), (4.4, 8.0)], floor=-80.0)
+    ctx = _Ctx(words, 8.0, tr)
+    out = agent_tools.cut_silences(ctx, min_silence_s=0.7, padding_s=0.12)
+    assert ctx.edl["keep"] == [[0.0, 8.0]]
+    assert "sound plays" in out
+
+
 def test_liveness_reads_moving_picture_song_and_still_room_tone():
     tr = _track(12.0, moving=[(0.0, 4.0)], loud=[(4.0, 8.0)])
     assert liveness.read_span(tr, 0.0, 4.0)["live"]
@@ -166,6 +202,39 @@ def test_speech_and_music_are_still_content():
     assert dialogue_level.read_bed(_blocks(song), speech=[])["content"]
 
 
+def _gain_at(knots, t):
+    for (t0, g0), (t1, g1) in zip(knots, knots[1:]):
+        if t0 <= t <= t1:
+            return g0 + (g1 - g0) * (t - t0) / max(t1 - t0, 1e-9)
+    return knots[-1][1] if t > knots[-1][0] else knots[0][1]
+
+
+@pytest.mark.parametrize("down", [16.0, 10.0])
+def test_a_quiet_speaker_in_a_tight_program_is_still_lifted(down):
+    # After the first cut's cut_silences there are no pauses left: the
+    # quieter speaker IS the program's floor, and must still be leveled up
+    # to the louder one, with or without a transcript.
+    loud, quiet = -22.0, -22.0 - down
+    blocks = _blocks([loud] * 100 + [quiet] * 100 + [loud] * 100)
+    for speech in (None, [(0.0, 30.0)]):
+        bed = dialogue_level.read_bed(blocks, speech=speech)
+        assert bed["content"], (speech, bed)
+        knots = dialogue_level.gain_knots(blocks, speech=speech)
+        lifted = _gain_at(knots, 15.0) - _gain_at(knots, 5.0)
+        assert lifted >= 0.6 * down, (down, speech, lifted)
+        assert _gain_at(knots, 15.0) > 5.0, knots
+
+
+def test_a_quiet_take_with_short_pauses_is_speech_not_room_tone():
+    # a quiet recording (-40 LUFS speech) with pauses under 10% of it: the
+    # room floor is read between the words, not from the quiet speech
+    take = ([-40.0] * 45 + [-62.0] * 4) * 6
+    speech = [(i * 4.9, i * 4.9 + 4.5) for i in range(6)]
+    assert dialogue_level.read_bed(_blocks(take), speech=speech)["content"]
+    knots = dialogue_level.gain_knots(_blocks(take), speech=speech)
+    assert knots and _gain_at(knots, 10.0) > 15.0, knots
+
+
 def _graph(edl, **kw):
     tl = Timeline(edl["keep"], [])
     return renderer.build_filtergraph(
@@ -191,7 +260,7 @@ def _ff(args):
 def _room(path, seconds=8.0, tone=False):
     """A portrait clip of steady pink noise at about -45 dBFS (a room), with
     a voiced tone from 2 to 5 s when tone."""
-    a = f"anoisesrc=c=pink:a=0.006:r=48000:d={seconds}"
+    a = f"anoisesrc=c=pink:a=0.006:r=48000:d={seconds}:seed=1"
     graph = "[1:a]anull[a]"
     if tone:
         graph = ("aevalsrc='0.25*sin(2*PI*220*t)*between(t,2,5)':s=48000:"
@@ -235,6 +304,23 @@ def test_clean_lowers_the_noise_and_keeps_the_voice(tmp_path):
     voice_after = noise_clean.level_db(str(out), 2.5, 4.5)
     assert noise_before - noise_after >= 15, (noise_before, noise_after)
     assert abs(voice_before - voice_after) <= 2.0, (voice_before, voice_after)
+
+
+def test_any_writer_s_noise_clean_node_is_repaired_not_refused():
+    # a direct ctx.write_edl (not through edit_batch) with a strength out of
+    # range and a foreign key: the EDL validates, the strength is clamped and
+    # the key dropped, so the render cleans the footage's own sound
+    edl = default_edl(10.0)
+    edl["noise_clean"] = {"strength": 1.7, "audio_key": "music/1/x.mp3",
+                          "applies_to": "speech", "floor_db": "n/a"}
+    nc = validate_edl(edl, 10.0).model_dump()["noise_clean"]
+    assert nc["strength"] == 1.0 and nc["audio_key"] is None
+    assert nc["applies_to"] == "source" and nc["floor_db"] is None
+    edl["noise_clean"] = {"strength": -0.4,
+                          "audio_key": "analysis/noise_clean/ab/0.80.m4a"}
+    nc = validate_edl(edl, 10.0).model_dump()["noise_clean"]
+    assert nc["strength"] == 0.0
+    assert nc["audio_key"] == "analysis/noise_clean/ab/0.80.m4a"
 
 
 def test_the_batch_layer_and_the_edl_carry_the_node():

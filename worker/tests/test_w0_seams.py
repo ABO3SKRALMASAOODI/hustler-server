@@ -63,6 +63,10 @@ def _without_inert(dump):
     """The dump with exactly the Wave 0 fields removed, each asserted empty."""
     d = copy.deepcopy(dump)
     assert d.pop("fx") == []
+    # EDIT-CORE A3 (16 Nov 2026): the top-level noise_clean node (the
+    # footage's sound cleaned of background noise). Inert on every stored
+    # EDL: None until the editor cleans the noise.
+    assert d.pop("noise_clean", None) is None
     for m in d.get("music") or []:
         assert m.pop("provenance") is None and m.pop("automation") is None
     for m in d.get("motion") or []:

@@ -35,6 +35,12 @@ SOUND_OVER_FLOOR_DB = 10.0
 LOUD_DBFS = -38.0          # over 300 Hz: a song or a crowd, never room tone
 SOUND_SHARE = 0.5          # share of the stretch's samples that sound
 EDGE_S = 0.15              # word tails and onsets at a stretch's edges
+# Sound is read only from level samples that lie wholly inside the gap
+# trimmed by SOUND_EDGE_S. A level sample spans 1/fps (0.25 s); a sample
+# that straddles the next word, plus whisper's timing slop, made a 0.5 s
+# dead pause on a still talking head (p5574, -87 dB between words) read as
+# "sound plays". With no such sample the picture decides alone.
+SOUND_EDGE_S = 0.25
 FLOOR_PCT = 10.0
 
 
@@ -89,9 +95,12 @@ def read_span(track, start, end, shots=(), floor=None):
     pic = float(np.median(motion[a:b]))
     cuts = sum(1 for t in shots or () if a_s < float(t) < b_s)
     sound = level_db = None
-    if level is not None and level.size >= b:
+    t0 = _arrays(track)[1]
+    sa = max(0, int(math.ceil((start + SOUND_EDGE_S - t0) * fps - 1e-6)))
+    sb = int(math.floor((end - SOUND_EDGE_S - t0) * fps + 1e-6))
+    if level is not None and sb > sa and level.size >= sb:
         floor = floor_db(track) if floor is None else floor
-        seg = level[a:b]
+        seg = level[sa:sb]
         thr = min(floor + SOUND_OVER_FLOOR_DB, LOUD_DBFS) \
             if floor is not None else LOUD_DBFS
         sound = float(np.mean(seg >= thr))

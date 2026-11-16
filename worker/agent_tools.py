@@ -31480,8 +31480,10 @@ _OVERLAY_MOTION_PROP = {
 }
 _MOTION_MOTIF_PROP = {
     "type": "string",
-    "description": ("Active Blueprint motion motif id this event executes; "
-                    "never 'hold'."),
+    # "motif", not "motion motif": the property is already motion_motif, and
+    # this line sits on 21 core tools (EDIT-CORE A3, 16 Nov: 147 bytes back
+    # under the 82,700 core ceiling for clean_noise).
+    "description": "Active Blueprint motif id this event executes; never 'hold'.",
 }
 
 # Stable provider-facing department names. Keep the schema enums and the
@@ -32276,13 +32278,13 @@ TOOLS = {
                      "(default 0.12s) of breathing room around speech and "
                      "snapping to word edges so no word is clipped. Do this "
                      "in one call instead of many cut_range calls; then "
-                     "get_kept_transcript to verify. If at least half of the "
-                     "gaps contain audible material and the pass would remove "
-                     "25%+ of the program, it cuts only the truly quiet gaps "
-                     "and KEEPS the ones that carry sound, listing them. Set "
-                     "allow_nonquiet=true ONLY when the user explicitly "
-                     "permits discarding those non-speaking "
-                     "music/game/room-performance moments too.",
+                     "get_kept_transcript to verify. It measures each gap's "
+                     "picture and sound: it cuts the dead-air gaps and KEEPS "
+                     "the gaps where the picture moves, the shot changes or "
+                     "sound plays over the room, naming each and why. "
+                     "allow_nonquiet=true cuts every gap, kept ones too: "
+                     "right for a talking-head or vlog request to tighten "
+                     "the pauses even when the camera moves.",
                      {"min_silence_s": {"type": "number"},
                       "padding_s": {"type": "number"},
                       "allow_nonquiet": {"type": "boolean"}}),

@@ -2662,20 +2662,42 @@ class NoiseClean(BaseModel):
     floor_db: Optional[float] = None
     reduction_db: Optional[float] = None
 
-    @field_validator("strength")
+    # Every writer is repaired here, never refused: a strength outside 0..1
+    # is clamped (an unreadable one is the default), and an audio_key that
+    # is not a stored cleaned track is dropped, so the renderer measures and
+    # cleans the footage's own sound itself.
+    @field_validator("strength", mode="before")
     @classmethod
     def _strength(cls, v):
-        if not (0.0 <= float(v) <= 1.0):
-            raise ValueError("noise_clean.strength is 0..1")
-        return float(v)
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return 0.8
+        if f != f:                      # NaN
+            return 0.8
+        return min(1.0, max(0.0, f))
 
-    @field_validator("audio_key")
+    @field_validator("audio_key", mode="before")
     @classmethod
     def _key(cls, v):
-        if v is not None and not str(v).startswith("analysis/noise_clean/"):
-            raise ValueError("noise_clean.audio_key is written by the "
-                             "clean_noise tool (analysis/noise_clean/...)")
+        if v is None or not isinstance(v, str) or \
+                not v.startswith("analysis/noise_clean/"):
+            return None
         return v
+
+    @field_validator("applies_to", mode="before")
+    @classmethod
+    def _target(cls, v):
+        return v if v in ("source", "vocals") else "source"
+
+    @field_validator("floor_db", "reduction_db", mode="before")
+    @classmethod
+    def _measured(cls, v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return None if f != f else f
 
 
 CLEAN_FILLS = ("text", "box")

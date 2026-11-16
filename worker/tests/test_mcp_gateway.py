@@ -163,15 +163,13 @@ def test_catalog_description_names_describe_and_call():
 def test_core_compact_catalog_is_unchanged_and_under_the_ceiling(monkeypatch):
     # The web-SFX chain's bytes are their own share since the owner's 13 Nov
     # rule turned it on (#916, tests/test_fixer_1116_web_sfx.py caps it);
-    # this budget is measured without it. EDIT-CORE A3 (16 Nov) added
-    # clean_noise (223 bytes) and the noise_clean batch layer: noise cleaning
-    # is a capability the model must see in its core catalog.
+    # this budget is measured without it.
     import config as _cfg
     monkeypatch.setattr(_cfg, "WEB_SFX_ENABLED", False)
     core = tools_ext.core_names(agent_tools.TOOLS)
     cat = agent_tools.openai_tools("any-model", compact=True, names=core)
     size = len(json.dumps(cat, separators=(",", ":")))
-    assert size <= 82_800 < 83_000, size
+    assert size <= 82_700 < 83_000, size
     row = next(t["function"] for t in cat
                if t["function"]["name"] == "expand_toolset")
     # The in-house agent never sees expand_toolset; its compact line keeps

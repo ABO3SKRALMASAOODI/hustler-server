@@ -1,5 +1,5 @@
 {
- "bytes": 82084,
- "sha256": "70a385eb864d24d5b85d456ad85cc8b38b21b992da8d5b158197e500c9e76d66",
- "_doc": "Core compact catalog with automatic wave growth set aside. EDIT-CORE (16 Nov 2026): ask_user, add_music and apply_look no longer tell the editor that music belongs to the user to pick (owner, 13 Nov 2026: Valmera may choose the music); their lines are shorter. Existing 82,700 B ceiling and the 81,688 + 400 B share unchanged. apply_look's music option now says Valmera chooses the track against the references (+24 B). Previous pins: 82,060 B, 82,066 B."
+ "bytes": 82174,
+ "sha256": "d12cfbcb65693ee1e258945e69dbe1f6ade3d265d6e3f2cf7cc73496fcd94110",
+ "_doc": "Core compact catalog with automatic wave growth set aside. EDIT-CORE (16 Nov 2026): ask_user, add_music and apply_look no longer tell the editor that music belongs to the user to pick (owner, 13 Nov 2026: Valmera may choose the music); their lines are shorter. Existing 82,700 B ceiling and the 81,688 + 400 B share unchanged. apply_look's music option now says Valmera chooses the track against the references (+24 B). Previous pins: 82,060 B, 82,066 B. EDIT-CORE A3 (16 Nov 2026): clean_noise (+223 B) and the noise_clean layer in apply_edit_batch's enum (+14 B) make noise cleaning reachable; the motion_motif line on 21 tools says 'motif' once (-147 B). Net +90 B, the whole catalog 82,648 B under the unchanged 82,700 B ceiling. Previous pin: 82,084 B."
 }

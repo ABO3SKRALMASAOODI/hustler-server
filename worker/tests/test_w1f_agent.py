@@ -86,7 +86,11 @@ def test_core_catalog_growth_is_within_1fs_share(monkeypatch):
     from w2_support import W2_CORE_GROWTH_MAX
     stripped = len(json.dumps(seams._strip_w1_growth(agent_tools.openai_tools(
         "any-model", compact=True, names=core)), separators=(",", ":")))
-    assert stripped - 81688 <= 250 + W2_CORE_GROWTH_MAX, stripped
+    # Later waves pin their growth in tests/fixtures/waves (Wave 2's is
+    # W2_CORE_GROWTH_MAX; EDIT-CORE A3's noise cleaning +90 B).
+    import later_waves
+    assert W2_CORE_GROWTH_MAX <= later_waves.core_growth_bytes()
+    assert stripped - 81688 <= 250 + later_waves.core_growth_bytes(), stripped
     assert size <= seams.W1_CORE_CEILING < 83_000, size
     look = agent_tools.TOOLS["look_at"][2]["overlay"]
     assert look["enum"] == ["none", "matte", "free_space", "beats"]
