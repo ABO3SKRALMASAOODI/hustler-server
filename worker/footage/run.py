@@ -441,7 +441,8 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             name = f"l{r['i']:02d}_{len([q for q in r['picks'] if q.get('file')]):d}_{p['source']}_{int(p['t0'] * 100)}.mp4"
             out = os.path.join(out_dir, "clips", name)
             try:
-                cut.finish(p["raw"], out, W, H, p.get("x", 0.5), p["eq"], trim=p.get("trim") or (0.0, 0.0), preserve_source=preserve_source)
+                cut.finish(p["raw"], out, W, H, p.get("x", 0.5), p["eq"], trim=p.get("trim") or (0.0, 0.0), preserve_source=preserve_source,
+                           **({"native": True} if os.environ.get("FOOTAGE_NATIVE_PIXELS") == "1" else {}))
                 p["file"] = os.path.relpath(out, out_dir)
             except Exception as e:  # noqa: BLE001
                 p["error"] = str(e)[:200]

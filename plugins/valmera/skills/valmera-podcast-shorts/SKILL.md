@@ -83,9 +83,21 @@ word so the end card follows directly. What differs is how a found picture is sh
 | Style | A found picture | Type and colour |
 |---|---|---|
 | `footage-cut` | fills the phone, in colour | heavy grotesk capitals, yellow accent |
-| `window` | plays in a four by three window the width of the phone over itself out of focus (three layers); footage that is wide or small in the archive is never blown up | condensed capitals, cyan accent |
+| `window` | a photograph or document plays in a four by three window the width of the phone over itself out of focus (three layers) | condensed capitals, cyan accent |
 | `archive-reel` | fills the phone in black and white with heavy grain, a projector flash into each run; he stays in colour | cream serif italic |
-| `prints` | lands as a readable, nearly full-width tilted print on its own dark out-of-focus ground; the previous print clears so document and interface detail stays visible | high-contrast serif, orange accent |
+| `prints` | a photograph or document lands as a readable, nearly full-width tilted print on its own dark out-of-focus ground; the previous print clears so document and interface detail stays visible | high-contrast serif, orange accent |
+
+Moving footage fills the phone in every style (owner's rating, 16 Nov 2026: cutaways as small windows over a blurred
+fill were the defect). Clips keep their source's own pixels (`chain.footage(native_pixels=True)`), a wide clip is
+cover-cropped round the subject the look placed and its people, and only a clip that cannot fill the phone within 3x
+stays in a window. The placement check sees exactly that phone-shaped slice.
+
+Other editors' text (subtitles, burned-in captions, promo labels, date stamps) is found by the placement check's model
+look on the visible frames, never by a word list. Its box is grown to the text lines measured on the clip
+(`worker/footage/overlay.py`: seated stroke lines, signal only), the clip is cut down to the largest band clear of it
+that still fills the phone, and that new clip is checked again. A clip with no such band is replaced from supply. The
+footage look itself (`look_itself=True`) passes only frames of the subject or the line's own action, never a studio
+talking about it, and the placement check rejects pictures merely associated with the topic.
 
 ## What every short is built from
 

@@ -45,6 +45,11 @@ The film's lines carry the writer's brief: for each line, the things it names ("
 A line belongs in "lines" only when all three are true."""
 
 
+LOOK_ITSELF = """
+
+This film cuts to pictures of what is said (a caller's opt-in, FOOTAGE_LOOK_ITSELF=1). "ok" also needs the frame to show the subject itself or the very action a line tells: a news anchor, presenter, panel or commentator in a studio talking about the subject is not the subject (unless a line is about that broadcast), and neither is a loosely related object or scene a viewer would not connect with the line at once. A frame of the real thing at a distance, in use or in its place beats a close one of something merely about it."""
+
+
 def _brief_text(ln):
     """A line's brief items after its words: (thing, as of, moment), plain text."""
     out = []
@@ -192,6 +197,8 @@ def check(subject, lines, cands, sources, work, budget_s=120.0):
     ls = _listing(lines)
     per = BRIEF_PER_SHEET if brief or contextual else PER_SHEET
     system = LOOK_SYSTEM + LOOK_BRIEF if brief else LOOK_SYSTEM
+    if os.environ.get("FOOTAGE_LOOK_ITSELF") == "1":
+        system += LOOK_ITSELF
     groups = [cands[i:i + per] for i in range(0, len(cands), per)]
 
     def one(gi):

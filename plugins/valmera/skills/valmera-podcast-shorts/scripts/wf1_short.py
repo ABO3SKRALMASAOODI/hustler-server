@@ -49,6 +49,7 @@ import shell  # noqa: E402
 import wf1_film  # noqa: E402
 import wf3  # noqa: E402
 
+FOOTAGE_PIXELS = "native"  # clips keep their source pixels for full-bleed framing (16 Nov); a fitted 1080x608 shelf is not reused
 RESEARCH_CONTRACT = 7  # primary documents can fill a truthful still-picture gap before more video research
 
 
@@ -175,7 +176,7 @@ def supply(ctx, script):
                                video_searches=list(dict.fromkeys(q for w in windows if w['name']==name for q in w.get('video_searches',[]))),
                                **{'is':'thing'}) for name,requirements in research.items()])
     direction_key=hashlib.sha256(json.dumps(fscript,sort_keys=True).encode()).hexdigest()[:16]
-    footage_name = f'footage-v{wf1_coverage.CONTRACT}-{direction_key}'
+    footage_name = f'footage-v{wf1_coverage.CONTRACT}-{FOOTAGE_PIXELS}-{direction_key}'
     wf3.given_footage(ctx, os.path.join(sup_dir, footage_name))
     fw, fh = style["footage"]
     # This workflow uses the engine's contextual-check route, as WF3 does. Every SELECTED
@@ -183,7 +184,7 @@ def supply(ctx, script):
     # and branded transition checks. The generic shelf verifier has no placement context
     # and incorrectly requires a montage's entire brief inside each individual 1 s shot.
     foot = chain.footage(ctx, dict(script=fscript), [round(float(s["t1"]) - float(s["t0"]), 2) for s in windows],
-                         W=fw, H=fh, preserve_source=True, shot_s=1.15, line_max=20, per=5,
+                         W=fw, H=fh, preserve_source=True, native_pixels=True, look_itself=True, shot_s=1.15, line_max=20, per=5,
                          strict_lines=True, motion_first=True, scout_motion=True, alloc="round", reassign_lost=True,
                          verify=False, whole_first=True, keep_sources=True, hear_s=0, out_name=footage_name)
     if foot:
@@ -577,7 +578,7 @@ def refill(ctx, script, pack, shortage):
         return
     if count > 4 and not rescout:
         raise RuntimeError('documentary coverage still incomplete after platform and original-publisher research')
-    name = f"footage-v{coverage['contract']}-context{RESEARCH_CONTRACT}-{signature}-repair{count}"
+    name = f"footage-v{coverage['contract']}-{FOOTAGE_PIXELS}-context{RESEARCH_CONTRACT}-{signature}-repair{count}"
     if rescout:name+='-recovered-sources' if recovered_sources else '-expanded-context'
     prior = [os.path.join(ctx.supply,n,'footage.json') for n in os.listdir(ctx.supply)
              if n.startswith('footage') and os.path.isfile(os.path.join(ctx.supply,n,'footage.json'))]
@@ -589,7 +590,7 @@ def refill(ctx, script, pack, shortage):
     fw,fh = wf1_film.STYLES[script['style']['id']]['footage']
     ctx.log(f"research missing documentary windows {wanted}; pass {count}")
     foot = chain.footage(ctx,dict(script=fscript),[w['t1']-w['t0'] for w in windows],W=fw,H=fh,
-                         preserve_source=True,shot_s=1.15,line_max=20,per=4,lines=wanted,avoid=prior,
+                         preserve_source=True,native_pixels=True,look_itself=True,shot_s=1.15,line_max=20,per=4,lines=wanted,avoid=prior,
                          strict_lines=True,motion_first=True,scout_motion=True,alloc='round',reassign_lost=True,
                          verify=False,whole_first=True,keep_sources=True,hear_s=0,source_only=rescout or count==4 or bool(pack.get('platform_walled')),out_name=name)
     if not foot:

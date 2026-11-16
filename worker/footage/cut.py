@@ -160,9 +160,12 @@ def borders(path):
     return f"{w}:{h}:{x}:{y}"
 
 
-def finish(src, out_path, W, H, x=0.5, eq=None, fps=30, trim=(0.0, 0.0), preserve_source=False):
+def finish(src, out_path, W, H, x=0.5, eq=None, fps=30, trim=(0.0, 0.0), preserve_source=False, native=False):
     """Reframe to W x H (cover, centred across on x), grade, encode for the film. trim: the fractions of
-    height cut from the top and bottom first (a library's timecode band), so the cover crop zooms past it."""
+    height cut from the top and bottom first (a library's timecode band), so the cover crop zooms past it.
+    native (with preserve_source; a caller that frames the clip itself full bleed, FOOTAGE_NATIVE_PIXELS=1): the
+    source's own pixels are kept, only brought down when its longer side passes the frame's longer side; fitting a
+    wide clip inside the portrait frame would throw away two thirds of the rows a full-bleed crop needs."""
     eq = eq or {}
     top, bottom = (min(max(float(t or 0.0), 0.0), 0.3) for t in (list(trim or (0.0, 0.0)) + [0.0, 0.0])[:2])
     band = f"crop=iw:ih*{1 - top - bottom:.4f}:0:ih*{top:.4f}," if top or bottom else ""
@@ -174,7 +177,10 @@ def finish(src, out_path, W, H, x=0.5, eq=None, fps=30, trim=(0.0, 0.0), preserv
     if preserve_source:
         # Keep every source pixel. Framing belongs to the layout after the
         # placement check; a portrait supply crop cannot be undone there.
-        vf = (f"scale=w={W}:h={H}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,"
+        n = max(int(W), int(H))
+        fit = (f"scale=w='if(gt(iw,ih),trunc(min(iw,{n})/2)*2,-2)':h='if(gt(iw,ih),-2,trunc(min(ih,{n})/2)*2)':flags=lanczos," if native else
+               f"scale=w={W}:h={H}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,")
+        vf = (fit +
               f"setsar=1,eq=contrast={eq.get('contrast', 1.0)}:brightness={eq.get('brightness', 0.0)}:saturation={eq.get('saturation', 1.0)},"
               f"fps={fps},format=yuv420p")
     r = subprocess.run([fetch.ffmpeg(), "-hide_banner", "-loglevel", "error", "-i", src, "-vf", vf, "-an", "-c:v", "libx264", "-crf", "18",

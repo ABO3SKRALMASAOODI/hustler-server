@@ -248,7 +248,8 @@ def seg_durs(words, n):
 
 def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None, preserve_source=False, shot_s=None, line_max=None, per=None,
             out_name="footage", lines=None, avoid=None, strict_lines=False, motion_first=False, alloc=None, reassign_lost=False,
-            verify=None, whole_first=False, keep_sources=False, want_voices=False, scout_motion=False, hear_s=None, source_only=False):
+            verify=None, whole_first=False, keep_sources=False, want_voices=False, scout_motion=False, hear_s=None, source_only=False,
+            native_pixels=False, look_itself=False):
     """Real footage per line (worker/footage, through footage.seam's workflow scope): supply/footage/ with
     footage.json (clips per line, each with its source URL, channel and time range for the credits) and
     clips/*.mp4. None when VALMERA_FOOTAGE=0 or when the engine could not run (logged, never a stop).
@@ -261,7 +262,11 @@ def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None, preserve_sourc
     per-line verdicts). whole_first: short sources fetched once, whole with sound (--whole-first). keep_sources: each
     whole source is kept in <supply>/sources with a manifest (FOOTAGE_KEEP_SOURCES), and the manifest's rows are handed
     back as FOOTAGE_LOCAL_SOURCES, so a top-up or a resumed remake never fetches a kept source again; the folder lives in
-    the run's supply, which the shell deletes with the run. want_voices: real voices looked for (--want-voices)."""
+    the run's supply, which the shell deletes with the run. want_voices: real voices looked for (--want-voices).
+    native_pixels (with preserve_source; a caller that frames clips full bleed itself, the podcast shorts): each clip
+    keeps its source's own pixels (FOOTAGE_NATIVE_PIXELS=1) instead of being fitted inside the portrait frame.
+    look_itself: the engine's look passes only frames of the subject itself or the line's own action, never a studio
+    talking about it (FOOTAGE_LOOK_ITSELF=1)."""
     if os.environ.get("VALMERA_FOOTAGE", "1") == "0":
         return None
     out = os.path.join(ctx.supply, out_name)
@@ -319,6 +324,10 @@ def footage(ctx, script, durs=None, W=1080, H=1920, anchors=None, preserve_sourc
     if os.path.isdir(FOOTAGE_POT):                # PO tokens, the product's first rung against YouTube's bot wall (worker/ytaccess.pot_args)
         env.setdefault("YTDLP_POT_SERVER_HOME", FOOTAGE_POT)
     env.update(footage_env(ctx, verify=verify, keep_sources=keep_sources))
+    if native_pixels and preserve_source:
+        env["FOOTAGE_NATIVE_PIXELS"] = "1"
+    if look_itself:
+        env["FOOTAGE_LOOK_ITSELF"] = "1"
     if not env.get("OPENAI_API_KEY") and os.path.exists(ENV_FILE):
         for line in open(ENV_FILE):
             if line.startswith("OPENAI_API_KEY="):

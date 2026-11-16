@@ -13,10 +13,14 @@ What differs between the styles is how a found picture is shown and the film's t
   footage-cut    the picture fills the phone, in colour; yellow accent, heavy grotesk display words
   archive-reel   the picture fills the phone in black and white with heavy grain, a projector flash into each run;
                  cream serif italic display words
-  window         the picture plays in a framed window over itself out of focus (three layers); cyan accent,
-                 condensed capitals
-  prints         pictures land as tilted prints that stack beside and over each other on the picture's own dark,
-                 out-of-focus ground (four layers and more by the third); orange accent, high-contrast serif
+  window         a photograph or document plays in a framed window over itself out of focus (three layers); cyan
+                 accent, condensed capitals
+  prints         photographs and documents land as tilted prints on the picture's own dark, out-of-focus ground;
+                 orange accent, high-contrast serif
+
+Moving footage fills the phone in every style (owner's rating, 16 Nov 2026: cutaways as small windows over a blurred
+fill are the defect; the references cut real footage full bleed). A wide clip is cover-cropped round the subject the
+look placed (its x) and its people; only a clip too small to fill the phone within 3x stays in a window.
 
 No model is read here. Which words are displayed, which sentences speak of the past and which years the story
 speaks from are handed in by the caller (wf1_short.py: a model that read the sentences).
@@ -202,6 +206,29 @@ def fill_gaps(ins, footage, pics, script, seg_f, f_first, f_last, stress, gap_s=
     return sorted(out, key=lambda x: x[0])
 
 
+def clip_cover_up(rec):
+    """The upscale a clip needs to fill the phone (cover): its height or its width onto the frame's, whichever binds."""
+    pw, ph = float(rec.get("w") or W), float(rec.get("h") or H)
+    return max(W / max(pw, 1.0), H / max(ph, 1.0))
+
+
+def clip_meta(rec):
+    """What the pacing driver needs to frame a clip full bleed: its size, its faces, where the look placed its subject
+    (x, the vertical crop centred there) and how far it may be pushed in. A clip already at the frame's shape keeps
+    the earlier limits (no push into a face at the references' size); a wide clip may come in 12% past its cover."""
+    fm = F.face_meta(rec)
+    up = clip_cover_up(rec)
+    big_face = any(f[3] >= 0.24 for f in fm)
+    m = dict(pw=int(rec.get("w") or W), ph=int(rec.get("h") or H), faces=fm,
+             max_up=round(max(1.0, up) * (1.0 if big_face else 1.12), 3))
+    if rec.get("x") is not None and not fm:
+        try:
+            m["focus"] = (min(max(float(rec["x"]), 0.0), 1.0), 0.45)
+        except (TypeError, ValueError):
+            pass
+    return m
+
+
 def _runs(ins):
     """Cutaways that follow each other without the take between them, as lists of indexes."""
     out = []
@@ -265,7 +292,7 @@ def build(script, sup, style_id, direction=None):
         for c in lst:
             if c["path"] not in keys:
                 keys[c["path"]] = P.video(f"v{len(keys):02d}", c)
-    if st["layout"] == "bleed":
+    if True:                                     # every style's footage fills the phone: a portrait face under the seat is left out
         seat = float(st["cap_y"]) - 0.045
 
         def under_seat(c):
@@ -296,6 +323,9 @@ def build(script, sup, style_id, direction=None):
     from wf1_coverage import checked_proposals, require_coverage
     ins,placement_report=checked_proposals(coverage,footage,pics,f_end/FPS,
         lambda rows:check(rows,script,clock,sup['work'],sup['ffmpeg']),composed_stills)
+    for row in ins:                                      # a clip the check cut clear of another editor's text is a new file
+        if row[4]["path"] not in keys:
+            keys[row[4]["path"]] = (P.video if row[2] == "clip" else P.image)(f"{'v' if row[2] == 'clip' else 'p'}{len(keys):02d}", row[4])
     coverage_report = require_coverage(ins, coverage, f_end/FPS)
     past = {int(i) for i in d.get("past_segs") or [] if isinstance(i, int)}
     cut_pts, drive_ids, look_pics, mono_spans, bright = [], set(), [], [], []
@@ -388,13 +418,12 @@ def build(script, sup, style_id, direction=None):
     def bleed(f0, f1, kind, name, rec, key):
         if rec.get('provider')=='primary-document':
             return window(f0,f1,kind,name,rec,key)             # the approved document crop is already the editorial rectangle
-        if kind == "clip" and int(rec.get("w") or W) > int(rec.get("h") or H):
-            return window(f0, f1, kind, name, rec, key)          # footage kept wide is never blown up to fill the phone
+        if kind == "clip" and clip_cover_up(rec) > F.MAX_UP:
+            return window(f0, f1, kind, name, rec, key)          # only a clip too small to fill the phone within 3x
         if kind == "clip":
             it = P.shot([f0, f1], key, None, src=list(rec["src"]))
             it.pop("crop")
-            fm = F.face_meta(rec)
-            meta[key] = dict(pw=int(rec.get("w") or W), ph=int(rec.get("h") or H), faces=fm, max_up=1.0 if any(f[3] >= 0.24 for f in fm) else 1.12)
+            meta[key] = clip_meta(rec)
         else:
             (fx, fy), _ = F.focus_of(rec)
             it = P.shot([f0, f1], key, F.cover_crop(rec["w"], rec["h"], W / H, (fx, fy), (0.5, 0.40)))
@@ -421,6 +450,8 @@ def build(script, sup, style_id, direction=None):
         """One readable print at a time; prior UI/document detail cannot occlude it."""
         for q, k in enumerate(run):
             f0, f1, kind, name, rec = ins[k]
+            if kind == "clip":
+                continue                                     # moving footage fills the phone (bleed)
             key = keys[rec["path"]]
             bed_of(f0, f1, key, kind, rec, is_mono(f0))
             aspect = float(rec.get("w") or W)/float(rec.get("h") or H)
@@ -446,7 +477,7 @@ def build(script, sup, style_id, direction=None):
             prints(run)
         for k in run:
             f0, f1, kind, name, rec = ins[k]
-            if st["layout"] == "bleed":
+            if st["layout"] == "bleed" or kind == "clip":
                 bleed(f0, f1, kind, name, rec, keys[rec["path"]])
             elif st["layout"] == "window":
                 window(f0, f1, kind, name, rec, keys[rec["path"]])
