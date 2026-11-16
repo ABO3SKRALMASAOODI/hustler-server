@@ -125,25 +125,6 @@ def test_a_checkout_that_loaded_is_silent(world):    # noqa: F811
     assert fired(world, gaps._checkout) == []
 
 
-def test_leaving_before_a_normal_load_is_silent(world):    # noqa: F811
-    """#403, 3123 on 15 Nov: opened, back to the Studio 3 s later."""
-    world.event("checkout_stage", user=2846, project=None, stage="opened")
-    world.event("checkout_stage", user=2846, project=None, after=3,
-                stage="left_before_load", ms=3000, how="navigate")
-    at_deadline(world, gaps.CHECKOUT_WAIT)
-    assert fired(world, gaps._checkout) == []
-
-
-def test_leaving_a_slow_checkout_fires(world):    # noqa: F811
-    world.event("checkout_stage", user=2846, project=None, stage="opened")
-    eid = world.event("checkout_stage", user=2846, project=None, after=20,
-                      stage="left_before_load", ms=20000, how="pagehide")
-    at_deadline(world, gaps.CHECKOUT_WAIT)
-    got = fired(world, gaps._checkout)
-    assert [(f["ref"], f["cause_key"], f["severity"]) for f in got] == \
-        [(f"gap:checkout:{eid}", "auto-gap-checkout-slow-load-left", "P0")]
-
-
 def turn(world, outcome="fulfilled", payload=None, **result):    # noqa: F811
     return world.job("agent_turn", project=5600, user=2846,
                      result=dict(result, outcome=outcome),

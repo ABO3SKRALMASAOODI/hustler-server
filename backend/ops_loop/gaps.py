@@ -35,11 +35,6 @@ CANCEL_WITHIN = timedelta(hours=24)
 BAR = 10
 LOOKBACK = timedelta(days=3)
 CHECKOUT_FAILED = ("setup_failed", "error", "load_timeout", "payment_failed")
-# The page records `left_before_load` with how long the customer waited (#403).
-# Production loads in 2.5 s at p50 and 10.6 s at worst (87 opens, 30 days to
-# 16 Nov); leaving before that is the customer's choice, waiting past it on a
-# form that never came is ours.
-CHECKOUT_SLOW_MS = 12000
 # An export refusal that is not a failure: the paywall, a second click, and the
 # two holds whose cause has its own check (the turn, the upload). Any other
 # code, today's or tomorrow's, stopped a customer pressing Export.
@@ -165,8 +160,7 @@ def _export_never_arrived(cur, since, now, p):
 def _checkout(cur, since, now, p):
     """Five never-paid accounts, all Pro or Max, lost at checkout: 2821 and 2824
     at setup_failed, three with a checkout that never loaded. 0 tickets."""
-    q = dict(p, stages=list(CHECKOUT_FAILED) + ["left_before_load"],
-             slow_ms=CHECKOUT_SLOW_MS, lo=since - CHECKOUT_WAIT,
+    q = dict(p, stages=list(CHECKOUT_FAILED), lo=since - CHECKOUT_WAIT,
              hi=now - CHECKOUT_WAIT)
     cur.execute(f"""
         SELECT ce.id, ce.user_id, ce.project_id, ce.created_at AS at, ce.detail
@@ -174,9 +168,6 @@ def _checkout(cur, since, now, p):
          WHERE ce.kind = 'checkout_stage' AND ce.created_at > %(since)s
            AND ce.created_at <= %(now)s
            AND ce.detail->>'stage' = ANY(%(stages)s) AND {_customers()}
-           AND (ce.detail->>'stage' <> 'left_before_load'
-                OR (jsonb_typeof(ce.detail->'ms') = 'number'
-                    AND (ce.detail->>'ms')::numeric >= %(slow_ms)s))
          ORDER BY ce.created_at LIMIT %(limit)s""", q)
     out = []
     for r in cur.fetchall():
@@ -184,14 +175,6 @@ def _checkout(cur, since, now, p):
         stage = d.get("stage")
         # A declined card is the customer's to retry; everything else stopped
         # someone who was trying to pay.
-        if stage == "left_before_load":
-            out.append(_item(
-                f"gap:checkout:{r['id']}", "checkout", r["at"], r, "P0",
-                ("gap", "checkout", "slow-load-left"),
-                "Checkout took too long to load and the customer left",
-                f"{d.get('plan')} · {d.get('billing')} · left after "
-                f"{int(d.get('ms') or 0) / 1000:.1f} s with no form"))
-            continue
         out.append(_item(
             f"gap:checkout:{r['id']}", "checkout", r["at"], r,
             "P1" if stage == "payment_failed" else "P0",
