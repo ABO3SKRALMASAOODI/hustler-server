@@ -37,6 +37,36 @@ def test_retained_originals_need_bytes_and_attribution_and_keep_exact_subjects(t
     assert original.read_bytes()==b'original' and len(list(sources.iterdir()))==2
 
 
+def test_revised_brief_can_reconsider_other_retained_subjects_without_approval(tmp_path):
+    import wf1_short as wf
+    sources=tmp_path/'sources';sources.mkdir();original=sources/'original.mp4';original.write_bytes(b'original')
+    row=dict(url='https://publisher.example/orbits',path=str(original),title='Solar system animation',
+             channel='Research institute',subjects=['Solar system'],where='primary')
+    (sources/'manifest.json').write_text(json.dumps([row]))
+    ordinary=wf.retained_candidates(str(tmp_path),{},['Scientific history'])
+    assert 'Scientific history' not in ordinary
+    revised=wf.retained_candidates(str(tmp_path),{},['Scientific history'],revised=True)
+    candidate=revised['Scientific history'][0]
+    assert candidate['url']==row['url'] and candidate['subjects']==['Solar system']
+    assert candidate['path']==str(original) and not candidate.get('ok') and not candidate.get('verified_motion')
+    again=wf.retained_candidates(str(tmp_path),revised,['Scientific history'],revised=True)
+    assert len(again['Scientific history'])==1 and original.read_bytes()==b'original'
+
+
+@pytest.mark.parametrize('content,expected',[(False,True),(True,False)])
+def test_dark_visible_content_is_checked_instead_of_discarded_as_blank(tmp_path,content,expected):
+    from PIL import Image,ImageDraw
+    import wf1_short as wf
+    im=Image.new('RGB',(320,200),(4,4,4))
+    if content:
+        draw=ImageDraw.Draw(im);draw.ellipse((30,30,290,170),outline='white',width=2)
+        draw.text((150,140),'Earth',fill='white');draw.ellipse((150,90,170,110),fill='white')
+    path=tmp_path/'frame.png';im.save(path)
+    result=wf.dull(dict(still=str(path)))
+    assert result['luma'][0]<.11 and result['dull'] is expected
+    assert not result.get('verified_motion') and not result.get('ok')
+
+
 def test_composed_feedback_revises_a_window_brief_once_without_editing_media(tmp_path,monkeypatch):
     import wf1_short as wf
     window=dict(name='Research',first=0,last=3,t0=0,t1=4,say='the history of science',must_show='People')

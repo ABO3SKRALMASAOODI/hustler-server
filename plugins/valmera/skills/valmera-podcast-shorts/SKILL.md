@@ -210,3 +210,6 @@ movement or an editorial card transform does not. The final-film residual-motion
 When all referents have faithful pictures but motion remains short, pass the actual failed motion
 verdicts back to acquisition once. A changed brief may research different original footage once;
 it never resets the platform budget or approves a formerly static or incorrect placement.
+Revised depiction briefs can reconsider the attributed retained-source catalog through the model
+ranker and fresh frame checks. A dark background alone is not an empty picture; nonblank diagrams
+still need readable final-frame approval and cannot receive motion credit from brightness.

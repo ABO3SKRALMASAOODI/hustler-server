@@ -267,18 +267,36 @@ def walled(foot):
 
 
 def dull(c):
-    """A clip whose middle frame is near black or flat (no light, nothing in focus) is marked: it is no picture, and
-    the film builder leaves it out. Measured on the frame, never guessed."""
+    """Discard technically blank frames; a dark subject still needs the model's readability check."""
     try:
         import numpy as np
         from PIL import Image
         with Image.open(c["still"]) as im:
             g = np.asarray(im.convert("L").resize((160, 160)), dtype=np.float32) / 255.0
         c["luma"] = [round(float(g.mean()), 3), round(float(g.std()), 3)]
-        c["dull"] = bool(g.mean() < 0.11 or g.std() < 0.05)
+        # A dark background is normal in astronomy and some genuine interfaces.
+        # Global brightness cannot establish that their visible content is absent.
+        contrast=float(np.percentile(g,99.5)-np.percentile(g,.5))
+        c['luma_range']=round(contrast,3)
+        c["dull"] = contrast < .04
     except Exception:  # noqa: BLE001 - a clip nobody could measure plays
         c["dull"] = False
     return c
+
+
+def retained_candidates(supply, primary, subjects, revised=False):
+    """The ranker may reconsider a retained original for a revised semantic brief."""
+    import wf1_primary_sources
+    known=wf1_primary_sources.retained(supply)
+    for subject,rows in known.items():
+        dest=primary.setdefault(subject,[])
+        dest.extend(row for row in rows if not any(old['url']==row['url'] for old in dest))
+    if revised:
+        catalog={row['url']:row for rows in known.values() for row in rows}
+        for subject in subjects:
+            dest=primary.setdefault(subject,[])
+            dest.extend(row for url,row in catalog.items() if not any(old['url']==url for old in dest))
+    return primary
 
 
 def take_cuts(src, shots, dur, sup_dir):
@@ -540,10 +558,8 @@ def refill(ctx, script, pack, shortage):
             if not any(row['url']==url for row in dest):
                 dest.append(dict(by_url[url],**{k:v for k,v in source.items() if k not in ('url','id','where')},
                                  where=source.get('where','youtube'),id=hashlib.sha256(url.encode()).hexdigest()))
-    import wf1_primary_sources
-    for subject,rows in wf1_primary_sources.retained(ctx.supply).items():
-        dest=primary.setdefault(subject,[])
-        dest.extend(row for row in rows if not any(old['url']==row['url'] for old in dest))
+    primary=retained_candidates(ctx.supply,primary,[windows[i]['name'] for i in wanted],
+                                revised=bool(pack.get('coverage_context_rescout_pending')))
     if count == 4 and not rescout:
         import wf1_primary_sources
         original=wf1_primary_sources.acquire([dict(windows[i],i=i,context=coverage.get('context')) for i in wanted],os.path.join(ctx.supply,'primary-videos'),_llm())
@@ -589,6 +605,7 @@ def refill(ctx, script, pack, shortage):
     pack['coverage_repairs'] = int(previous) if rescout else count
     pack['coverage_last_search_report']=shortage
     if rescout:pack['coverage_context_rescout_pending']=False
+    pack['coverage_catalog_revision']=1
     pack['research_contract'] = RESEARCH_CONTRACT
     pack['research_sources'] = source_signature(ctx.supply)
     path = os.path.join(ctx.supply,'pack.json')
@@ -605,6 +622,16 @@ def score(ctx, script):
         supply(ctx,script)
         pack = wf3.load_pack(ctx)
     pack["work"] = ctx.supply
+    refresh=False
+    if pack.get('blank_frame_contract')!=1:
+        for row in pack.get('footage',[]):
+            for clip in row['clips']:dull(clip)
+        pack['blank_frame_contract']=1;refresh=True
+    if pack.get('composed_requirement_windows') and pack.get('coverage_catalog_revision')!=1:
+        pack['coverage_context_rescout_pending']=True;refresh=True
+    if refresh:
+        path=os.path.join(ctx.supply,'pack.json');stored=json.load(open(path));stored['pack']=pack
+        with open(path,'w') as f:json.dump(stored,f,indent=1)
     if (ctx.args or {}).get('identity'):
         pack['coverage']['context']=ctx.args['identity']
     d = direction_of(ctx, script, pack)
