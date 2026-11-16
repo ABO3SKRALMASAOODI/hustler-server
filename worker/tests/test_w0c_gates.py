@@ -335,8 +335,19 @@ def test_music_tools_say_the_agent_never_picks():
 
 
 # ── AT-0C-4c: web-SFX is refused while the flag is off ──────────────────
+# Web sounds are ON by default since the owner's 13 Nov 2026 rule (#916);
+# these tests pin the kill switch, WEB_SFX_ENABLED=0.
 
-def test_web_sfx_is_off_and_out_of_the_live_catalog():
+@pytest.fixture
+def web_sfx_off(monkeypatch):
+    monkeypatch.setattr(config, "WEB_SFX_ENABLED", False)
+
+
+def test_web_sfx_is_on_by_default():
+    assert config.WEB_SFX_ENABLED is True
+
+
+def test_web_sfx_is_off_and_out_of_the_live_catalog(web_sfx_off):
     assert config.WEB_SFX_ENABLED is False
     assert sfx_search.available() is False
     names = [t["function"]["name"] for t in agent_tools.openai_tools()]
@@ -347,7 +358,7 @@ def test_web_sfx_is_off_and_out_of_the_live_catalog():
     assert "search_sfx" not in agent_tools.capability_directory()
 
 
-def test_web_sfx_calls_refuse_and_file_a_sound_request():
+def test_web_sfx_calls_refuse_and_file_a_sound_request(web_sfx_off):
     ctx, fake = tool_context(default_edl(20.0))
     out = agent_tools.add_web_sfx(ctx, "crowd cheer", at=3.0)
     assert out.startswith("REJECTED") and "approved library" in out
@@ -366,7 +377,7 @@ def test_web_sfx_calls_refuse_and_file_a_sound_request():
     assert next(iter(rows.values()))["count"] == 2     # the same request
 
 
-def test_a_missing_sound_becomes_a_sound_request_not_a_web_sound():
+def test_a_missing_sound_becomes_a_sound_request_not_a_web_sound(web_sfx_off):
     import motion_tools
     ctx, fake = tool_context(default_edl(20.0))
     out = motion_tools.list_sound_library(ctx, role="crowd cheer")
@@ -384,7 +395,7 @@ def test_a_missing_sound_becomes_a_sound_request_not_a_web_sound():
     assert sound_requests.list_requests(fake, status="approved")
 
 
-def test_no_live_guidance_offers_a_web_sound():
+def test_no_live_guidance_offers_a_web_sound(web_sfx_off):
     surfaces = {"core prompt": agent_prompt.CORE_PROMPT,
                 "state block": agent_prompt.project_state_block(
                     "v", "i", "e", [], [])}
@@ -424,10 +435,10 @@ def test_the_concierge_mirror_follows_the_owner_flag():
         src = f.read()
     body = src[src.index("def _sfx_search_enabled"):]
     body = body[:body.index("\ndef ")]
-    assert 'os.getenv("WEB_SFX_ENABLED", "0") == "1"' in body
+    assert 'os.getenv("WEB_SFX_ENABLED", "1") == "1"' in body
 
 
-def test_web_sfx_removal_frees_the_core_compact_catalog():
+def test_web_sfx_removal_frees_the_core_compact_catalog(web_sfx_off):
     core = tools_ext.core_names(agent_tools.TOOLS)
     size = len(json.dumps(agent_tools.openai_tools(
         "any-model", compact=True, names=core), separators=(",", ":")))

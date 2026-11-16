@@ -158,6 +158,13 @@ def resolve_library_reference(ctx, storage_key):
     return out, None
 
 
+# The way to a sound the library lacks while web sounds are on (#916).
+WEB_SOUND_ROUTE = (
+    "search_sfx(query='{query}') finds a real recording online (commercial-use "
+    "licence, terms per hit); fetch_sfx downloads the pick and add_sfx places it. "
+    "Never tell the user a sound they asked for does not exist before searching.")
+
+
 SOUND_POLICY = (
     "Sound effects are optional, never rules: restraint is the default and zero is a fine "
     "answer — a podcast or talking short carries zero by default and at most 1-2. Use one "
@@ -185,11 +192,17 @@ def list_sound_library(ctx, role=None):
         rows = [sound_library.get(a) for a in sorted(alts) if sound_library.get(a)]
     if not rows and role:
         # A described sound ("crowd cheer") is matched against the library's
-        # uses; one it lacks is filed for the owner to audition by ear
-        # (owner rule, Wave 0: sounds come only from the approved library;
-        # nothing is fetched from the web).
+        # uses. One it lacks is found as a real recording online while web
+        # sounds are on (owner, 13 Nov 2026: no owner audition, real
+        # recordings only; #916: "the sound library has none" refused a
+        # laughter track, ocean waves and birds). With web sounds switched
+        # off it is filed for the owner instead.
         rows = sound_library.search(role)
         if not rows:
+            import sfx_search
+            if sfx_search.available():
+                return (f"No library recording matches '{role}'. "
+                        + WEB_SOUND_ROUTE.format(query=role))
             import sound_requests
             rid = sound_requests.file(ctx, role, purpose="no approved sound matched")
             return (f"No approved sound matches '{role}'. Place none and tell the user in "
@@ -206,6 +219,10 @@ def list_sound_library(ctx, role=None):
         rows = [r for r in rows if not r.get("reference")]
         more = ("\nMore recordings by role (list_sound_library(role='<role>') lists them): "
                 + ", ".join(f"{k} +{n}" for k, n in sorted(counts.items())) + ".")
+    import sfx_search
+    if sfx_search.available():
+        more += ("\nA sound the user asks for that is not listed here (an ambience, a "
+                 "laugh, a crowd, an animal): " + WEB_SOUND_ROUTE.format(query="<its physical name>"))
     return ("Valmera sound library — real recordings, approved by ear or by match to the reference films "
             "(royalty-free, no attribution). "
             "Place with add_sfx(storage_key='sound:<id>', at=<program second it should HIT>) "

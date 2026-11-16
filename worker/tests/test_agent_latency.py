@@ -267,7 +267,12 @@ def test_first_call_is_allowed_to_cut():
         assert phrase in p
 
 
-def test_post_plan_tool_catalog_keeps_capability_but_drops_repeated_handbook():
+def test_post_plan_tool_catalog_keeps_capability_but_drops_repeated_handbook(monkeypatch):
+    # The web-SFX chain's bytes are their own share since the owner's 13 Nov
+    # rule turned it on (#916, tests/test_fixer_1116_web_sfx.py caps it);
+    # this budget is measured without it.
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "WEB_SFX_ENABLED", False)
     # The CORE catalog: department tools (worker/tools_ext) page in through
     # load_tools and carry their own per-department budget
     # (tests/test_w0_seams.py), so they never count against this one.

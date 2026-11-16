@@ -68,7 +68,12 @@ def test_mcp_classifies_the_read_verbs_read_only():
     assert '"set_intensity"' not in block
 
 
-def test_core_catalog_growth_is_within_1fs_share():
+def test_core_catalog_growth_is_within_1fs_share(monkeypatch):
+    # The web-SFX chain's bytes are their own share since the owner's 13 Nov
+    # rule turned it on (#916, tests/test_fixer_1116_web_sfx.py caps it);
+    # this budget is measured without it.
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "WEB_SFX_ENABLED", False)
     core = tools_ext.core_names(agent_tools.TOOLS)
     size = len(json.dumps(agent_tools.openai_tools(
         "any-model", compact=True, names=core), separators=(",", ":")))

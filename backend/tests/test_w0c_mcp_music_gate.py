@@ -210,7 +210,7 @@ def _sfx(key, sid="s1", at=2.0):
 
 def test_an_mcp_batch_cannot_place_a_web_sound_while_web_sfx_is_off(
         api, monkeypatch):
-    monkeypatch.delenv("WEB_SFX_ENABLED", raising=False)
+    monkeypatch.setenv("WEB_SFX_ENABLED", "0")
     result, status = video.apply_edit_batch_core(
         1, 2, _sfx_batch(_sfx(SFX)), origin="mcp")
     assert status == 400 and "found online" in result["error"], result
@@ -222,7 +222,7 @@ def test_an_mcp_batch_cannot_place_a_web_sound_while_web_sfx_is_off(
 
 
 def test_a_web_sound_already_in_the_edit_still_moves(api, monkeypatch):
-    monkeypatch.delenv("WEB_SFX_ENABLED", raising=False)
+    monkeypatch.setenv("WEB_SFX_ENABLED", "0")
     edl = copy.deepcopy(api.edls[1])
     edl["sfx"] = [_sfx(SFX)]
     api.edls[1] = video.wschemas.validate_edl(edl, 20).model_dump()

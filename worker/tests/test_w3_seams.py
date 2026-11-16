@@ -117,7 +117,12 @@ def test_the_world_department_fits_its_budget_and_mcp_prose():
     assert W3_DEPARTMENTS <= set(agent_tools.TOOL_DOMAINS)
 
 
-def test_the_core_catalog_stays_under_the_ceiling():
+def test_the_core_catalog_stays_under_the_ceiling(monkeypatch):
+    # The web-SFX chain's bytes are their own share since the owner's 13 Nov
+    # rule turned it on (#916, tests/test_fixer_1116_web_sfx.py caps it);
+    # this budget is measured without it.
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "WEB_SFX_ENABLED", False)
     core = tools_ext.core_names(agent_tools.TOOLS)
     size = len(json.dumps(agent_tools.openai_tools(
         "any-model", compact=True, names=core), separators=(",", ":")))

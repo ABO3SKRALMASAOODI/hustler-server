@@ -714,12 +714,16 @@ FIND_SONG_USER_IDS = os.getenv("FIND_SONG_USER_IDS", "").strip()
 # deleted bundled pack and AI sound generation.
 SFX_SEARCH_ENABLED = os.getenv("SFX_SEARCH_ENABLED", "1") == "1"
 SFX_FETCH_MAX_MB = int(os.getenv("SFX_FETCH_MAX_MB", "20"))
-# Wave 0 owner rules in code (track 0C; worker/devices/INTERFACES.md §6.1).
-# Sound effects come only from the owner-approved library: the web-SFX chain
-# (search_sfx, audition_sfx_candidates, fetch_sfx, add_web_sfx) is OFF and
-# out of the live catalog unless the owner sets WEB_SFX_ENABLED=1. A sound
-# the library lacks becomes a sound_requests row the owner auditions by ear.
-WEB_SFX_ENABLED = os.getenv("WEB_SFX_ENABLED", "0") == "1"
+# The web-SFX chain (search_sfx, audition_sfx_candidates, fetch_sfx,
+# add_web_sfx). Wave 0 kept it off so every sound waited for an owner
+# audition; the owner replaced that rule on 13 Nov 2026 (week-1112/TASTE.md:
+# "SFX: the references are the judge ... No owner audition is needed. Still
+# use real recordings only"). Off, every sound outside the 21-recording
+# library was refused: #916, a laughter track, ocean waves and coastal birds
+# answered "the sound library has none" for four customers. It is on by
+# default; WEB_SFX_ENABLED=0 remains the kill switch. Only real recordings
+# under commercial-use licences pass (sfx_search, music_rights).
+WEB_SFX_ENABLED = os.getenv("WEB_SFX_ENABLED", "1") == "1"
 # Flash safety (owner decision, roadmap default): automatic proposals keep
 # at most this many full-frame flashes in any one second; an export the
 # user opted into past it is flagged contains_flashing (flash_safety.py).

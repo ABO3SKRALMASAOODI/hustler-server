@@ -674,7 +674,12 @@ def test_remove_broll_and_the_batch_path(project):
         i for i in ctx._edl.get("fx") or [] if i.get("type") == "broll"]
 
 
-def test_registration_and_budgets():
+def test_registration_and_budgets(monkeypatch):
+    # The web-SFX chain's bytes are their own share since the owner's 13 Nov
+    # rule turned it on (#916, tests/test_fixer_1116_web_sfx.py caps it);
+    # this budget is measured without it.
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "WEB_SFX_ENABLED", False)
     import agent_tools
     import tools_ext
     from tools_ext import broll_tools

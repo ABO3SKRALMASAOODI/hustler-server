@@ -425,13 +425,13 @@ def _image_edit_enabled():
 
 def _sfx_search_enabled():
     """Mirrors the worker's search_sfx availability (worker/sfx_search) —
-    keyless web search for real recorded sounds. Owner rule (Wave 0): sound
-    effects come only from the approved library, so web sounds are off
-    unless the owner sets WEB_SFX_ENABLED=1 (worker/config.py). AI sound
-    generation is gone (2026-08-08): synthesized one-shots read as uncanny
-    under real footage."""
+    keyless web search for real recorded sounds. On by default since the
+    owner's 13 Nov 2026 rule (no owner audition; real recordings only, #916);
+    WEB_SFX_ENABLED=0 turns it off (worker/config.py). AI sound generation
+    is gone (2026-08-08): synthesized one-shots read as uncanny under real
+    footage."""
     return (os.getenv("SFX_SEARCH_ENABLED", "1") == "1"
-            and os.getenv("WEB_SFX_ENABLED", "0") == "1")
+            and os.getenv("WEB_SFX_ENABLED", "1") == "1")
 
 
 def _web_record_enabled():

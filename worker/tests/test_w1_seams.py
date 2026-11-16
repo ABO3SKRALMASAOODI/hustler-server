@@ -244,9 +244,14 @@ def _strip_w1_growth(catalog):
     return cat
 
 
-def test_core_catalog_is_wave0_byte_identical_apart_from_w1_growth():
+def test_core_catalog_is_wave0_byte_identical_apart_from_w1_growth(monkeypatch):
     """Pinned at the base commit. Only 1F may re-pin the fixture (its
     look_at overlay parameter, INTERFACES_W1.md §4.3), reporting the delta."""
+    # The web-SFX chain's bytes are their own share since the owner's 13 Nov
+    # rule turned it on (#916, tests/test_fixer_1116_web_sfx.py caps it);
+    # this budget is measured without it.
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "WEB_SFX_ENABLED", False)
     with open(os.path.join(FIX, "w1_core_catalog.json")) as f:
         pin = json.load(f)
     text = json.dumps(_strip_w1_growth(_core_catalog()),
@@ -255,7 +260,12 @@ def test_core_catalog_is_wave0_byte_identical_apart_from_w1_growth():
     assert hashlib.sha256(text.encode()).hexdigest() == pin["sha256"]
 
 
-def test_core_catalog_stays_under_the_wave1_ceiling():
+def test_core_catalog_stays_under_the_wave1_ceiling(monkeypatch):
+    # The web-SFX chain's bytes are their own share since the owner's 13 Nov
+    # rule turned it on (#916, tests/test_fixer_1116_web_sfx.py caps it);
+    # this budget is measured without it.
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "WEB_SFX_ENABLED", False)
     size = len(json.dumps(_core_catalog(), separators=(",", ":")))
     assert size <= W1_CORE_CEILING < 83_000
 

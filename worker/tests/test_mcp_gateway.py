@@ -160,7 +160,12 @@ def test_catalog_description_names_describe_and_call():
     assert "call={name, arguments}" in row["description"]
 
 
-def test_core_compact_catalog_is_unchanged_and_under_the_ceiling():
+def test_core_compact_catalog_is_unchanged_and_under_the_ceiling(monkeypatch):
+    # The web-SFX chain's bytes are their own share since the owner's 13 Nov
+    # rule turned it on (#916, tests/test_fixer_1116_web_sfx.py caps it);
+    # this budget is measured without it.
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "WEB_SFX_ENABLED", False)
     core = tools_ext.core_names(agent_tools.TOOLS)
     cat = agent_tools.openai_tools("any-model", compact=True, names=core)
     size = len(json.dumps(cat, separators=(",", ":")))

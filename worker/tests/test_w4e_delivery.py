@@ -239,7 +239,12 @@ def test_retypeset_language_verb(ctx):
         "REJECTED")
 
 
-def test_registration():
+def test_registration(monkeypatch):
+    # The web-SFX chain's bytes are their own share since the owner's 13 Nov
+    # rule turned it on (#916, tests/test_fixer_1116_web_sfx.py caps it);
+    # this budget is measured without it.
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "WEB_SFX_ENABLED", False)
     import agent_tools
     import tools_ext
     from tools_ext import delivery_tools as format_tools

@@ -201,7 +201,10 @@ def test_sfx_pack_and_generation_modules_are_gone():
         "sfx"))
 
 
-def test_stale_sfx_scheme_gets_the_honest_web_first_rejection():
+def test_stale_sfx_scheme_gets_the_honest_web_first_rejection(monkeypatch):
+    import config
+    monkeypatch.setattr(config, "WEB_SFX_ENABLED", False)
+
     class _Db:
         def run(self, *a, **k):
             return None
@@ -223,24 +226,25 @@ def test_unreliable_music_chain_is_retired_but_sfx_search_is_advertised():
         assert gone not in agent_tools.TOOLS
     assert "search_sfx" in agent_tools.TOOLS
     assert "fetch_sfx" in agent_tools.TOOLS
-    # Owner rule (Wave 0): web sounds are off and out of the live catalog
-    # unless the owner sets WEB_SFX_ENABLED.
-    assert agent_tools._tool_disabled("search_sfx")
-    state = agent_prompt.project_state_block(
+    # Web sounds are on by default (owner, 13 Nov 2026, #916) and leave the
+    # live catalog only when WEB_SFX_ENABLED=0.
+    import config
+    assert config.WEB_SFX_ENABLED is True
+    assert not agent_tools._tool_disabled("search_sfx")
+    assert "search_sfx" in agent_prompt.project_state_block(
         "v", "idx", "edl", [], [])
+    saved = config.WEB_SFX_ENABLED
+    config.WEB_SFX_ENABLED = False
+    try:
+        assert agent_tools._tool_disabled("search_sfx")
+        state = agent_prompt.project_state_block(
+            "v", "idx", "edl", [], [])
+        assert "search_sfx" not in state
+    finally:
+        config.WEB_SFX_ENABLED = saved
     assert "sound-effects pack" not in state
     assert "no generic catalog search" in state
     assert "search_music" not in state
-    assert "search_sfx" not in state
-    import config
-    saved = config.WEB_SFX_ENABLED
-    config.WEB_SFX_ENABLED = True
-    try:
-        assert not agent_tools._tool_disabled("search_sfx")
-        assert "search_sfx" in agent_prompt.project_state_block(
-            "v", "idx", "edl", [], [])        # advertised when the owner opts in
-    finally:
-        config.WEB_SFX_ENABLED = saved
     # The restored CC0 catalogue is advertised (its manifest ships).
     assert "list_music_library" in state and "add_library_music" in state
 

@@ -125,7 +125,12 @@ def test_the_verbs_are_registered_in_compositing():
     assert "make_variant_set" not in ft.WRITE_TOOLS
 
 
-def test_catalog_budgets():
+def test_catalog_budgets(monkeypatch):
+    # The web-SFX chain's bytes are their own share since the owner's 13 Nov
+    # rule turned it on (#916, tests/test_fixer_1116_web_sfx.py caps it);
+    # this budget is measured without it.
+    import config as _cfg
+    monkeypatch.setattr(_cfg, "WEB_SFX_ENABLED", False)
     names = list(ft.TOOL_SPECS)
     compact = agent_tools.openai_tools("x", compact=True, names=names)
     size = len(json.dumps(compact, separators=(",", ":")))
