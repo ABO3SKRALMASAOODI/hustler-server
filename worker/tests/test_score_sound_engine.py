@@ -168,7 +168,7 @@ def test_a_film_of_new_pictures_carries_the_judges_amount_and_no_more():
     assert SD.allowance("T", 0.5, 30.0, False)[0] == 10 and SD.allowance("L", 6.0, 600.0, True)[0] == 48
     fps, dur = 30, 60.0
     D = int(dur * fps)
-    ev = [{"f": 45, "kind": "display"}] + [{"f": f, "kind": "picture", "size": 0.4 + 0.5 * ((f // 21) % 2)} for f in range(90, D - 60, 21)]
+    ev = [{"f": 45, "kind": "display"}] + [{"f": f, "kind": "picture", "moving": True, "size": 0.4 + 0.5 * ((f // 21) % 2)} for f in range(90, D - 60, 21)]
     ctx = {"fps": fps, "dur_f": D, "existing": [], "speech": None, "voice": None, "words": [], "bed": True, "np10": 14.0, "turn_f": 1200}
     sounds, rep = SD.plan_sounds(ev, ctx)
     aud = rep["placed"] + rep["body"]                                     # SND3: the audible layer is the heroes, accents and body
@@ -236,7 +236,7 @@ def test_a_recording_that_joins_the_library_is_read_from_its_samples(tmp_path):
 def test_the_plan_names_the_class_of_every_gesture_and_keeps_the_library(tmp_path):
     fps, dur = 30, 30.0
     D = int(dur * fps)
-    ev = [{"f": 60, "kind": "display"}] + [{"f": f, "kind": "picture", "size": 0.9} for f in range(150, D - 60, 75)]
+    ev = [{"f": 60, "kind": "display"}] + [{"f": f, "kind": "picture", "moving": True, "size": 0.9} for f in range(150, D - 60, 75)]
     ctx = {"fps": fps, "dur_f": D, "existing": [], "speech": None, "voice": None, "words": [], "bed": True, "np10": 8.0, "turn_f": 600}
     sounds, rep = SD.plan_sounds(ev, ctx)
     lib = SD.library()
@@ -427,7 +427,7 @@ def test_a_sound_the_voice_would_hide_comes_up_or_gives_its_place(tmp_path):
     voice = (np.fft.irfft(sp, len(n)) * 0.2).astype(np.float32)
     speech, _ = SD.speech_frames(voice, [(0.0, dur)])
     D = int(dur * fps)
-    ev = [{"f": f, "kind": "picture", "size": 0.5} for f in range(90, D - 60, 60)]
+    ev = [{"f": f, "kind": "picture", "moving": True, "size": 0.5} for f in range(90, D - 60, 60)]
     ctx = {"fps": fps, "dur_f": D, "existing": [], "speech": speech, "voice": voice, "voice_shift_db": SD.voice_shift(voice, speech),
            "words": [(0.0, dur)], "bed": True, "np10": 8.0}
     sounds, rep = SD.plan_sounds(ev, ctx)

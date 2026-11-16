@@ -23,15 +23,15 @@ needs_ffmpeg = pytest.mark.skipif(shutil.which(FF) is None, reason="needs ffmpeg
 
 
 def _film(dur=50.0, fps=30, seed=0):
-    """A story film's events: picture cuts every ~0.9 s of mixed size, display type, cards, a counter and camera moves."""
+    """A story film's events: picture cuts every ~0.9 s of mixed size (every other one travels: a whip or a slide), display type, cards, a counter and camera moves."""
     rng = np.random.default_rng(seed)
     ev, f = [], 20
     while f < dur * fps - 40:
-        ev.append({"f": f, "kind": "picture", "size": float(rng.choice([0.25, 0.45, 0.7, 0.95]))})
+        ev.append({"f": f, "kind": "picture", "size": float(rng.choice([0.25, 0.45, 0.7, 0.95])), "moving": len(ev) % 2 == 0})
         f += int(rng.integers(20, 36))
     for t in (0.4, 2.2, 9.5, 14.2, 21.0, 26.4, 33.3, 38.8, 44.1):
         ev.append({"f": int(t * fps) + 7, "kind": "display", "size": float(rng.choice([0.4, 0.7, 1.0]))})
-    for t in (12.0, 30.2):
+    for t in (12.0, 30.6):                                                # the second lands on the story's turn (31.0 s)
         ev.append({"f": int(t * fps) + 11, "kind": "card", "photo": True, "area": 0.3})
     ev.append({"f": int(18.0 * fps) + 5, "kind": "counter", "steps": [int(18.0 * fps) + 5 + 4 * k for k in range(6)]})
     for t in (6.4, 17.1, 24.6, 41.7):
@@ -84,8 +84,8 @@ def test_the_opening_is_dense_the_middle_breathes_and_the_turn_is_built_into():
             first[g] = min(first.get(g, 1e9), s["event_f"] / 30.0)
     t = sorted(first.values())
     rate = lambda a, b: sum(1 for x in t if a <= x < b) / (b - a)
-    assert sh["first_5s"] >= 5, sh                                        # the owner's 8 reels: a median of 6 in the first 5 s
-    assert rate(0, sh["open_s"]) > 1.3 * rate(sh["open_s"], 20.0), (t, sh)
+    assert sh["first_5s"] >= 3, sh                                        # the opening's own landings and whips, no filler
+    assert rate(0, sh["open_s"]) > rate(sh["open_s"], 20.0), (t, sh)                # where the film lands most, it sounds most
     build0 = sh["turn_s"] - min(SD.BUILD_S, 0.2 * 50.0)
     assert rate(build0, sh["turn_s"] + 0.05) >= rate(sh["open_s"], build0), (t, sh)
     hook = [s for s in sounds if s["part"] == "hook"]
@@ -99,16 +99,16 @@ def test_type_graphics_and_moves_are_sounded_before_cuts():
     sounds, rep = _plan()
     sh = rep["shape"]
     assert sh["on_cut_share"] <= 0.5, sh                                  # the references 15-43%; SND2 64-83%
-    later = [s for s in sounds if s["event_f"] / 30 >= sh["open_s"] and s.get("tier") != "hero"]
-    cut_later = sum(1 for s in later if s["for"] in ("picture", "cut", "burst", "page")) / max(1, len(later))
-    assert cut_later <= SD.CUT_SHARE + 0.06, (cut_later, sh)                # past the opening's cluster, the budget holds
+    moving = {e["f"] for e in _film() if e.get("moving")}
+    on_cuts = [s for s in sounds if s["for"] in ("picture", "cut")]
+    assert on_cuts and all(s["event_f"] in moving for s in on_cuts), on_cuts   # a cut sounds only when it travels
     fors = {s["for"] for s in sounds}
     assert {"display", "move"} <= fors and ("card" in fors or "counter" in fors), fors
-    # a film with nothing but cuts still carries its amount: the cuts fill what the graphics cannot
+    # a film with nothing but plain cuts carries no sound effect at all (owner, 16 Nov: nothing on screen triggers one)
     fps, D = 30, 1500
     ev = [{"f": f, "kind": "picture", "size": 0.4 + 0.5 * ((f // 27) % 2)} for f in range(20, D - 40, 27)]
     s2, r2 = SD.plan_sounds(ev, {"fps": fps, "dur_f": D, "existing": [], "speech": None, "voice": None, "words": [], "bed": True, "np10": 11.0})
-    assert len(r2["placed"]) + len(r2["body"]) >= 0.8 * r2["allow"], r2["shape"]
+    assert s2 == [] and r2["unmotivated"] == len(ev), r2
 
 
 @needs_ffmpeg

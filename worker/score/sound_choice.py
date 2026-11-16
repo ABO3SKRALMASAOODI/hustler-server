@@ -139,6 +139,8 @@ def moment_of(ev, part):
     k = ev.get("kind")
     if k in ("picture", "cut"):
         return "moving_cut" if ev.get("moving") else "cut"
+    if k == "move":
+        return "moving_cut"                         # a fast camera move travels: a sweep, never a click
     if k == "flash":
         return "flash"
     if k in ("card", "page"):

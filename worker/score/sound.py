@@ -22,16 +22,18 @@ The shape (SND3, 14 Nov; the independent check of SND2 found every sound within 
            (counter steps, train clicks, the lightest type) far under; the film's own ladder decides who is which;
   density  by section (PROFILE): a dense, designed opening (a sweep flies into the hook's hit, clicks on each hook cut
            and word), breathing in the middle, a build into the turn, the rest after it, nothing after the close;
-  motive   new type, cards, counters and camera moves are tried before cuts; after the opening (a cluster on the
-           hook's cuts and words) cuts hold at most CUT_SHARE of the film's sounds unless the film has too little else
-           (CUT_FILL);
+  motive   (owner, 16 Nov: "When there is an SFX there should be something that triggered it") only what visibly
+           moves or lands sounds (motivated): a card, page, photo or line of type landing, a counter, a flash frame, a
+           run of quick cuts, a fast camera move, a cut that travels; a plain cut, the upload's own cut and a reframe
+           never do, the hook, turn and close are heroes only where something lands, and no stretch is ever filled;
   variety  no recording twice in a film; each film's seed turns the library its own way (ROTATE); the class comes from
            the moment (sound_choice) and the tier (an accent is never a tick's click, the body never an impact);
   one mix  the turn's hit is the song's drop (music.sounds_on_the_drop), the song dips under each hero hit and its own
            landing is eased when it would cover the hit (scene.audio.duck_curve), the close is the song's last hit
            (close_time), a riser or a quiet hit the song still covers is taken out (present_over).
 
-How many (SND2, 14 Nov): the references' amount for the film's supply. A film of new pictures carries the judge's
+How many (SND2, 14 Nov; a ceiling since 16 Nov, never a target: a film with few landings carries few sounds):
+the references' amount for the film's supply. A film of new pictures carries the judge's
 3.6 clearly audible sounds per 10 s (judge/metromedia/TEARDOWN.md section 9, median of the 8), a film of some
 pictures and a talking take what the governor allows them (taste.allow), a long-form film 0.8 (the study's 20
 long films), never more than the picture supply earns (taste.allow) and never more in any 10 s than the rate and
@@ -162,11 +164,10 @@ BIN_S = 2.5                 # the stretches a section's share is spread over
 # clearly audible over the bed: the rest are quiet ticks and sweeps under the voice.
 TICK_10S = {"P": 2.4, "M": 1.0, "T": 0.0, "L": 0.0}
 TICK_BURST = 2.5            # in any 10 s at most this many times the tick rate
-GAP_S = 8.0                 # no stretch longer than this goes without a sound (the references' longest rests)
+GAP_S = 8.0                 # _give_place keeps no gap over this when it thins a crowd (never a filler: 16 Nov)
 TICK_SPACE_S = 0.2          # any two sounds at least this far apart (the references' tenth percentile gap is 0.19 s)
 OPEN_SPACE_S = 0.4          # inside the opening two audible sounds may sit this close (a click on each hook word and cut)
 CUT_SHARE = 0.3             # after the opening at most this share sits on cuts (the references: 15-43%; SND2 64-83%),
-CUT_FILL = 2.0              # unless the film has too little else: then the cuts fill what twice its type, graphics and moves cannot
 HOOK_LEAD_S = 0.5           # the hook's first hit lands this late or later: a sweep flies into it (a designed opening, not one hit)
 SNAP_S = 0.3                # the turn takes the landing this near the story's mark, as the music's drop does (music.SNAP_S)
 ROTATE_HERO = 1.1           # the hero hits and risers (three a film, from a class of a dozen) turn wider: two films rarely land alike
@@ -851,6 +852,16 @@ def on_cut(e):
     return e["kind"] in ("picture", "cut", "burst", "page")
 
 
+def motivated(e):
+    """Whether something on screen makes this sound: a card, a page, a photo or a line of type landing, a counter
+    stepping, a flash frame, a run of quick cuts, a fast camera move, or a cut that travels (a whip, a slide). A plain
+    cut to the next picture, the upload's own cut and a reframe of the same take show nothing that sounds."""
+    k = e.get("kind")
+    if k in ("picture", "cut"):
+        return bool(e.get("moving"))
+    return k in ("card", "page", "display", "counter", "flash", "burst", "move")
+
+
 def gain_tier(sid, ref, tier, w, under=None, lead=False):
     """The gain that puts this recording's hit (K-weighted loudest 200 ms, manifest hit_lufs) where its tier sits against
     the voice: TIER_DB, moved inside the tier by the moment's weight (TIER_SPREAD), a lead (a riser into a hero hit)
@@ -970,7 +981,13 @@ def plan_sounds(events, ctx):
                        "end_f": run[-1]["f"]})
         inside = {id(e) for e in run}
         cands = [e for e in cands if id(e) not in inside]
-    cands = sorted(cands + trains, key=lambda e: e["f"])
+    # Owner, 16 Nov: "When there is an SFX there should be something that triggered it." A plain cut to the next picture
+    # (or the upload's own cut, or a reframe of one take) shows nothing that makes a sound: sounded, it is a button pressed
+    # in the background. Only what visibly moves or lands asks for one (motivated); everything else is the music's.
+    report["unmotivated"] = sum(1 for e in cands if not motivated(e))
+    cands = sorted([e for e in cands if motivated(e)] + trains, key=lambda e: e["f"])
+    total = min(total, max(1, sum(1 for e in cands if e["kind"] not in ("counter", "burst"))))
+    report["allow"] = al["sounds"] = total
 
     # ---- the three hero landings: the hook, the turn, the close
     lands = [e for e in cands if e["kind"] in ("picture", "cut", "card", "page", "display", "counter", "flash")]
@@ -982,30 +999,24 @@ def plan_sounds(events, ctx):
     if close_s is not None:
         near = [e for e in cands if abs(e["f"] / fps - close_s) <= 2.5 / fps and e is not hook]
         close = min(near, key=lambda e: abs(e["f"] / fps - close_s)) if near else None
-        if close is None and close_s * fps < end_f - int(END_GUARD_S * fps):
-            close = {"f": int(round(close_s * fps)), "kind": "close"}
-            cands.append(close)
-    if close is None:                                      # no word to close after: the last designed landing of the film
+    if close is None and close_s is None:                                      # no word to close after: the last designed landing of the film
         late = [e for e in cands if e["f"] >= PAYOFF_FROM * end_f and e["kind"] in ("display", "card", "page", "picture", "counter")]
         close = max(late, key=lambda e: e["f"]) if late else None
         close_by = "the last landing" if close is not None else None
-    close_t = close["f"] / fps if close is not None else None
+    # with nothing landing at the close the song's last hit closes the film (music.end_hit_time); after it nothing sounds
+    close_t = close["f"] / fps if close is not None else (float(close_s) if close_s is not None else None)
     turn = None
     if ctx.get("turn_f") is not None:
         tf = int(ctx["turn_f"])
         near = [e for e in lands if abs(e["f"] - tf) <= SNAP_S * fps and e is not hook]      # the music's own snap: the drop lands there
-        turn = min(near, key=lambda e: abs(e["f"] - tf)) if near else None
-        if turn is None and 0 < tf < end_f - int(END_GUARD_S * fps):
-            turn = {"f": tf, "kind": "turn"}
-            cands.append(turn)
+        turn = min(near, key=lambda e: abs(e["f"] - tf)) if near else None      # nothing lands there: the song's drop is the turn
     elif close is not None and cls in ("P", "M"):          # nobody named the turn: the heaviest landing of the second half is it
         late = [e for e in lands if 0.5 * close["f"] <= e["f"] <= close["f"] - 2.0 * fps and e is not hook]
         if late:
             turn = max(late, key=lambda e: (_weight(e), e["f"]))
     if turn is not None and close is not None and abs(turn["f"] - close["f"]) / fps < 1.5:
-        if turn["kind"] != "turn" or close["kind"] == "close":
-            close = turn                                   # the turn is the close: one landing, not two
-            close_t = close["f"] / fps
+        close = turn                                       # the turn is the close: one landing, not two
+        close_t = close["f"] / fps
         turn = None
     turn_t = turn["f"] / fps if turn is not None else None
     cands = sorted(cands, key=lambda e: e["f"])
@@ -1041,7 +1052,7 @@ def plan_sounds(events, ctx):
     in_bin = [0] * nb
     in_sec = {}
     n_else = sum(1 for e in cands if not on_cut(e) and not any(e is x for x in structural))
-    cut_budget = max(int(math.ceil(CUT_SHARE * want)), want - int(CUT_FILL * n_else))
+    cut_budget = max(int(math.ceil(CUT_SHARE * want)), want - n_else)       # what lands on a cut moves (a whip, a page turn)
     report["cut_budget"] = cut_budget
     state = {"aud": [], "tick": [], "all": [], "busy": [], "cut_items": 0, "items": 0, "own_cut": 0, "own_t": []}
     placed = []
@@ -1246,31 +1257,7 @@ def plan_sounds(events, ctx):
             refuse(e, "the film's amount was spent where its shape asked for it")
             continue
         attempt(e, "plain")
-    # No stretch of the film goes without sound for longer than GAP_S (the references breathe, they do not stop): an
-    # event in the middle of such a gap is sounded, and the plain sound in the film's densest stretch gives it its place.
-    left = [e for e in spare + [x for rows in pool.values() for x in rows] if id(e) not in done]
-    end_s = close_t if close_t is not None else dur_s - END_GUARD_S
-    for _ in range(8):
-        edges = [0.0] + sorted(state["all"]) + [end_s]
-        gaps = sorted(((b - a, a, b) for a, b in zip(edges, edges[1:]) if b - a > GAP_S), reverse=True)
-        fixed = False
-        for _g, a, b in gaps:
-            mid = (a + b) / 2
-            for e in sorted((x for x in left if a + 1.0 < x["f"] / fps < b - 1.0), key=lambda x: abs(x["f"] / fps - mid)):
-                cap["aud"] = total + 1
-                ok = attempt(e, "plain")
-                cap["aud"] = total
-                if not ok:
-                    continue
-                left = [x for x in left if x is not e]
-                if len(state["aud"]) > total:
-                    _give_place(placed, state, tally, st, fps, exclude=e["f"] / fps)
-                fixed = True
-                break
-            if fixed:
-                break
-        if not fixed:
-            break
+    # A stretch with nothing landing on screen stays without sound effects: the music carries it (owner, 16 Nov: no filler).
     sounds, report = _signal_check(placed, ctx, report)
     sounds += [s for s in existing if s.get("s") not in lib]          # the Director's voice layers (echo, swell) as written
     sounds.sort(key=lambda s: (s["event_f"], s["id"]))
