@@ -101,3 +101,16 @@ def test_resume_uses_failed_measurement_only_for_its_exact_film(tmp_path,monkeyp
     calls.clear();(tmp_path/'final.mp4').write_bytes(b'changed film')
     E.check(ctx,{}, {})
     assert calls==['worker','check']
+
+
+def test_a_film_whose_repair_budget_is_spent_is_delivered_with_its_record(tmp_path,monkeypatch):
+    """17 Nov (owner, 16 Nov): cinema.check records missed targets; the encoded repair runs while it can, then the
+    measured film is returned with them recorded instead of stopping the run."""
+    import cinema as C
+    C.save(tmp_path/'measured.json',dict(targets=dict(pictures=False,unique=True)))
+    calls=[]
+    monkeypatch.setattr(C,'check',lambda *a:calls.append('check') or dict(final='film',checks=dict(ok=False)))
+    monkeypatch.setattr(E,'begin',lambda ctx:(_ for _ in ()).throw(RuntimeError('encoded picture repair exhausted its two-film budget')))
+    logs=[]
+    r=E.check(SimpleNamespace(run_dir=str(tmp_path),supply=str(tmp_path/'supply'),log=logs.append),{},{})
+    assert r['final']=='film' and calls==['check'] and 'two-film budget' in logs[0]

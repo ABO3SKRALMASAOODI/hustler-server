@@ -149,6 +149,9 @@ def retain_evidence(ctx,evidence):
             if source.exists():shutil.copy2(source,target/source.name)
 
 
+REPAIRS=3
+
+
 def check(ctx,rd,sc):
     import cinema as C
     C.worker()
@@ -163,11 +166,14 @@ def check(ctx,rd,sc):
                 # Reuse a completed failed measurement only for diagnosis,
                 # never as the verdict on the repaired film.
                 repair(ctx,begin(ctx),rd,sc)
-    while True:
-        try:return C.check(ctx,rd,sc)
-        except RuntimeError as error:
-            if not str(error).startswith('delivered-file gates failed:'):raise
-            measured=C.read(Path(ctx.run_dir)/'measured.json')
-            if measured['targets']['pictures'] and measured['targets']['unique']:raise
-            folder=begin(ctx)
-            repair(ctx,folder,rd,sc)
+    # 17 Nov: cinema.check records missed targets instead of stopping; a film whose pictures or uniqueness missed is
+    # repaired here (at most REPAIRS rounds) and checked again, then delivered with whatever is still recorded.
+    log=getattr(ctx,'log',print)
+    for attempt in range(REPAIRS+1):
+        result=C.check(ctx,rd,sc)
+        if ((result or {}).get('checks') or {}).get('ok') or attempt==REPAIRS:return result
+        targets=(C.read(Path(ctx.run_dir)/'measured.json').get('targets') or {})
+        if targets.get('pictures',True) and targets.get('unique',True):return result
+        try:repair(ctx,begin(ctx),rd,sc)
+        except Exception as error:  # noqa: BLE001 - nothing left to repair: the measured film stands, recorded
+            log('encoded picture repair: '+str(error)[:300]);return result
