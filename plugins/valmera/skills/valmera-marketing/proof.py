@@ -67,6 +67,7 @@ ATLAS = f"{VV}/week-1106/atlas/numbers.json"
 FOOTAGE_MORE = 2.6        # clips asked a line: the marketing references cut every 0.58 s, and a wrong picture leaves the film
 CHECK_MODEL = "gpt-6-sol"           # the picture checks: every picture against its words, the export against the sentence
 FORM = dict(words=(55, 85), segments=(7, 12), seconds=(24, 38))
+CAP_PX = 72               # the narration's captions: 56 px read small on a phone beside the references' (owner, 16 Nov: "very not clear")
 # the recording's stack: this week's main on a synthetic Pro account. Anthropic spend is $0 for this lane, so the Studio
 # runs on Pro's own OpenAI lane (gpt-6.1-sol, llm.py) with the Claude switch for new subscribers off (studio_for_all_plans),
 # as production runs it for every subscriber the switch does not cover; OPENAI_EDITS lets that lane edit on a stack.
@@ -585,7 +586,17 @@ def write(ctx, idea, card, rc, notes=None, inventory=None):
                "The final fallback_text names Valmera as the action to take. Choose a brief section finish for "
                "the editing pain when it helps the story: bw, gate or crt, then colour for the result. "
                "Set finish to null, bw, gate or crt on each segment, with finish_rank one for the most useful device. "
-               "The real uploaded clip and export remain untouched by those effects.")
+               "The real uploaded clip and export remain untouched by those effects. "
+               "Clarity before everything (owner, 16 Nov: the last films were 'very not clear'): a viewer scrolling "
+               "on a phone must know within two seconds what the film is about from the picture and the words together, "
+               "so the hook names one editing pain in plain words while the picture shows it or its solved result. "
+               "The recording is the hero and carries the film: THE UPLOAD on the lines about the raw clip, THE EXPORT "
+               "on the hook when it shows the result, on every line after the after and under the call to action. "
+               "Every external picture shows literally what its words name, something an editor or creator meets in "
+               "their work (a phone playing a short, a creator at a camera, an editing timeline, a podcast set); never a "
+               "metaphor or analogy (no cups, road signs, shop shelves, landscapes or coffee standing for an editing idea). "
+               "Fewer subjects said clearly beat many subjects said loosely; the cut keeps its pace by cutting inside the "
+               "real recording and the fitting footage.")
     content = (f"# The idea\n{json.dumps(idea, ensure_ascii=False)}\n\n# The recording's receipts (the only facts about Valmera you may state)\n"
                f"{json.dumps(rc, ensure_ascii=False)}\n\n# The style\n{json.dumps(card, ensure_ascii=False)}\n\n# The references' pace (medians)\n"
                f"{json.dumps(pace)}\n\n"
@@ -621,15 +632,11 @@ def write(ctx, idea, card, rc, notes=None, inventory=None):
                "\"payoff\" right after the after.")
     if inventory:
         system += (" The inspected visual inventory supersedes hypothetical subject suggestions above. "
-                   "Use its exact subject names for every external picture. Spread the argument across several "
-                   "available subjects, with explicitly spoken comparisons where useful. Do not repeatedly "
-                   "name the same picture for different claims. Let the actual images determine the examples; "
-                   "keep the editor's problem and authenticated product result as the argument. "
-                   "Budget the visible story for at least eleven genuinely different pictures per ten seconds, "
-                   "including the slower before/after passages. Re-crops and text changes do not count. "
-                   "A narrow line that can show only one picture for several seconds cannot carry that pace. "
-                   "Use the available inventory to write concrete, fast visual examples that progress the "
-                   "editing lesson; do not insert unrelated images or prolong the film to fit inventory.")
+                   "Use its exact subject names for every external picture. Use only the subjects that literally "
+                   "show what a line says; leave out the rest of the inventory rather than bending a line to fit a "
+                   "picture. Do not repeatedly name the same picture for different claims. "
+                   "Keep the editor's problem and the authenticated product result as the argument; never write a "
+                   "line whose only job is to justify an available image, and do not prolong the film to fit inventory.")
         content = [dict(type="text", text=content)] + VI.writer_content(inventory, still)
     got, use = ask(system, content, what="write", effort="high", max_tokens=16000)
     return (got if isinstance(got, dict) else {}), use
@@ -730,6 +737,33 @@ def endcard_s():
         return 5.6
 
 
+def product_crop(record_path, rec, t):
+    """The export's crop of the upload at upload second t, [x0, y0, x1, y1] in upload fractions, read from the final
+    export's own edit list (frame mode crop: the ratio's largest window, centred on the focus, the focus track
+    overriding it in its seconds). None when the product did not crop (a fit, a canvas) or the list is missing."""
+    ex = next((e for e in rec.get("exports") or [] if e.get("tag") == "final"), (rec.get("exports") or [{}])[-1])
+    try:
+        edl = json.load(open(os.path.join(os.path.dirname(record_path), "edl", f"v{int(ex['edl_version']):03d}.json")))
+        fr = edl.get("frame") or {}
+        if fr.get("mode") != "crop":
+            return None
+        a_w, a_h = [float(x) for x in str(fr.get("ratio") or "9:16").split(":")]
+        pw, ph = float(rec["upload"]["w"]), float(rec["upload"]["h"])
+    except (OSError, ValueError, KeyError, TypeError, ZeroDivisionError):
+        return None
+    aspect, pa = a_w / a_h, pw / ph
+    cw, ch = (aspect / pa, 1.0) if pa > aspect else (1.0, pa / aspect)
+    fx = float(fr.get("focus_x") if fr.get("focus_x") is not None else 0.5)
+    fy = float(fr.get("focus_y") if fr.get("focus_y") is not None else 0.5)
+    for k in fr.get("focus_track") or []:
+        if float(k.get("t0", 0)) <= t < float(k.get("t1", 0)) and (k.get("mode") or "crop") == "crop":
+            fx = float(k.get("x", fx))
+            fy = float(k.get("y", fy))
+    x0 = min(max(fx - cw / 2, 0.0), 1.0 - cw)
+    y0 = min(max(fy - ch / 2, 0.0), 1.0 - ch)
+    return [round(x0, 4), round(y0, 4), round(x0 + cw, 4), round(y0 + ch, 4)]
+
+
 def product_clips(script, out):
     """The before and the after as clips with their own sound, and a frame of the after for the hook."""
     rec = json.load(open(script["record"]))
@@ -751,8 +785,11 @@ def product_clips(script, out):
     ts = float(chk.get("tease_s") or (a + b) / 2)
     ts = min(max(ts - 0.6, 0.0), body - 1.4)
     cut(ex["file"], ts, ts + 1.3, os.path.join(out, "tease.mp4"), audio=False)
-    return dict(before=dict(src=up["file"], t=[ba, bb], sha256=up["sha256"]), after=dict(src=ex["file"], t=[a, b], sha256=ex["sha256"]),
-                tease=dict(src=ex["file"], t=[ts, ts + 1.3]))
+    # the whole export, silent: a line the cut has no picture for plays the real result, never a type page
+    cut(ex["file"], 0.0, body, os.path.join(out, "export_body.mp4"), audio=False)
+    return dict(before=dict(src=up["file"], t=[ba, bb], sha256=up["sha256"], crop=product_crop(script["record"], rec, (ba + bb) / 2)),
+                after=dict(src=ex["file"], t=[a, b], sha256=ex["sha256"]), tease=dict(src=ex["file"], t=[ts, ts + 1.3]),
+                body=dict(src=ex["file"], t=[0.0, round(body, 3)]))
 
 
 def splice(ctx, narr_dir, foot_dir, voices):
@@ -805,6 +842,27 @@ def recording_source(script, role):
                             f"Exact submitted request: {receipts['typed']}")
 
 
+def owed_windows(lines, candidates, out, used, segments):
+    """A line that names THE UPLOAD or THE EXPORT shows it. The frame choice above may leave such a line with none
+    (it took zero to three a line); the line then gets the unused frames of its named source that lie farthest from
+    those already shown, about one a second of the line, so the proof on screen is the recording, not a type page."""
+    added = []
+    for ln in lines:
+        have = sum(1 for o in out + added if o["line"] == ln["i"])
+        want = max(1, min(3, int(round(float(segments[ln["i"]].get("duration_s") or 1.0)))))
+        for name in ln["sources"]:
+            while have < want:
+                free = [c for c in candidates if c["source"] == name and c["id"] not in used]
+                if not free:
+                    break
+                shown = [o["center"] for o in out + added if o["source"] == name]
+                c = max(free, key=lambda c: (min((abs(c["center"] - t) for t in shown), default=1e9), -c["center"]))
+                added.append(dict(c, line=ln["i"], why="the line names this recording; frame owed to it"))
+                used.add(c["id"])
+                have += 1
+    return added
+
+
 def product_windows(ctx, script, sources):
     """Choose source moments from frames for the words, not an arithmetic walk through the export."""
     plan_path = os.path.join(ctx.supply, "product_windows.json")
@@ -850,6 +908,7 @@ def product_windows(ctx, script, sources):
             continue
         out.append(dict(c, line=i, why=row.get("why")))
         used.add(k)
+    out += owed_windows(lines, candidates, out, used, script["script"]["segments"])
     jsave(plan_path, dict(windows=out, spend=[use]))
     return out, [use]
 
@@ -959,12 +1018,15 @@ def supply(ctx, script):
             "THE EXPORT": (ex_["file"], ex_["dur"] - endcard_s(), [pc["after"]["t"], pc["tease"]["t"]])}
     chosen, uses = product_windows(ctx, script, srcs)
     spend += uses
+    crops = {os.path.join(fdir, "product", "before.mp4"): pc["before"].get("crop")}
     for k, window in enumerate(chosen):
         name, i = window["source"], window["line"]
         path, _, _ = srcs[name]
         t, end = window["start"], window["end"]
         fn = f"product/{'upload' if name == 'THE UPLOAD' else 'export'}_{k}.mp4"
         cut(path, t, end, os.path.join(fdir, fn), audio=False)
+        if name == "THE UPLOAD":
+            crops[os.path.join(fdir, fn)] = product_crop(script["record"], rec_, (t + end) / 2)
         c = W3.clip_facts(dict(path=os.path.join(fdir, fn), file=fn, subject=name, seconds=end-t,
                                source=recording_source(script, "upload" if name == "THE UPLOAD" else "export"),
                                time_range=[t, end]))
@@ -999,7 +1061,11 @@ def supply(ctx, script):
     # the hook's meaning. The verified cutter chooses its fitting picture;
     # the full-frame, real-voice payoff remains mandatory above.
     product_dir = os.path.join(fdir, "product")
-    pack["product"] = dict(pc, paths=[os.path.join(product_dir, n) for n in sorted(os.listdir(product_dir)) if n.endswith(".mp4")])
+    pack["product"] = dict(pc, paths=[os.path.join(product_dir, n) for n in sorted(os.listdir(product_dir)) if n.endswith(".mp4")],
+                           crops={k: v for k, v in crops.items() if v})
+    body = W3.clip_facts(dict(path=os.path.join(product_dir, "export_body.mp4"), file="product/export_body.mp4", subject="THE EXPORT",
+                              seconds=pc["body"]["t"][1], source=recording_source(script, "export"), time_range=pc["body"]["t"]))
+    pack["proof_fill"] = [dict(body, busy=[pc["after"]["t"]])]          # the after plays whole on its own voice
     wj = json.load(open(nar["words"]))
     rec = dict(narration_s=wj["duration"], voice=nar.get("voice"), gate=nar["gate"], pictures=sum(len(v) for v in pack["pictures"].values()),
                subjects=len(pack["pictures"]), missing=pack.get("missing"), spend=spend, product=pc,
@@ -1030,8 +1096,8 @@ def as_delivered(l1, product_paths):
     out = []
     for it in l1["items"]:
         over = [s for s in spans if it["f"][0] < s[1] and it["f"][1] > s[0]]
-        if not over or it.get("pic") in keys:
-            out.append(it)
+        if not over or it.get("pic") in keys or it.get("keep_over_proof"):
+            out.append(it)                                 # the product's crop drawn on its own upload stays with it
             continue
         if it["k"] == "word":
             continue                                       # neither caption the raw upload nor double-caption its export
@@ -1186,6 +1252,9 @@ def score(ctx, script):
     knobs["full_frame_paths"] = list(pack["product"]["paths"])
     knobs["whole_frame_paths"] = [p for p in pack["product"]["paths"]
                                    if os.path.basename(p) == "before.mp4" or os.path.basename(p).startswith("upload_")]
+    knobs["whole_frame_crop"] = dict(pack["product"].get("crops") or {})   # the before pushes into the export's own crop
+    knobs["proof_fill"] = list(pack.get("proof_fill") or [])               # a line short of pictures plays the export
+    knobs.setdefault("cap_px", CAP_PX)
     sys.path[:0] = [p for p in W3.env_path().split(os.pathsep) if p not in sys.path]
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     build = R.builder(script["style"]["id"])
@@ -1194,7 +1263,9 @@ def score(ctx, script):
     cache_p = os.path.join(ctx.run_dir, "picture_check.json")
     cache = jload(cache_p, {}) or {}
     drop, spend, rounds = list(knobs.get("drop") or []), [], []
-    for rnd in range(4):
+    # One cut. The picture check below is a record of what plays under which words; it never drops a picture and
+    # rebuilds (16 Nov: four rounds of drops turned 35-47% of two films into flat type pages and still left 25 misfits).
+    for rnd in range(1):
         l1, beats = build(sc, pack, dict(knobs, drop=drop))
         taste = F.taste_check(l1, beats)
         if not taste["ok"]:
@@ -1217,10 +1288,7 @@ def score(ctx, script):
                               words=words, **verdict))
         rounds.append(dict(round=rnd, pictures=len(shown), shown=shown,
                            misfits=[dict(file=b, words=w, why=y) for b, w, y in bad]))
-        ctx.log(f"picture check round {rnd}: {len(bad)} of {len(beats.get('pictures') or [])} do not fit their words")
-        if not bad or rnd == 3:
-            break
-        drop += [b for b, _, _ in bad if b not in drop]
+        ctx.log(f"picture check: {len(bad)} of {len(beats.get('pictures') or [])} judged loose against their words (recorded)")
     if not taste["ok"]:
         raise RuntimeError("the plan breaks a taste rule: " + "; ".join(taste["problems"][:6]))
     out = os.path.join(ctx.supply, "l1.json")

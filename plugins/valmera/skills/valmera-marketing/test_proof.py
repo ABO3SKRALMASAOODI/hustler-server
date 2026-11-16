@@ -85,6 +85,19 @@ def test_recording_is_shown_as_delivered():
     assert gates == [([50, 100], 50), ([300, 350], 50)]
 
 
+def test_the_products_crop_frame_stays_on_the_upload_it_is_drawn_on():
+    """The before's dim mask and crop edges are drawn over the real upload on purpose; the as-delivered pass keeps them
+    while it still clears finishes and captions off the recording."""
+    l1 = dict(assets={"v1": dict(path="/x/before.mp4")},
+              items=[dict(id="s1", k="shot", f=[0, 75], pic="v1", blur=26),
+                     dict(id="c1", k="card", f=[0, 75], z=1, pic="v1"),
+                     dict(id="m1", k="card", f=[0, 75], z=2, pic="plate", keep_over_proof=True),
+                     dict(id="gt", k="card", f=[0, 75], z=40, pic="gate")])
+    P.as_delivered(l1, {"/x/before.mp4"})
+    ids = {it["id"] for it in l1["items"]}
+    assert {"s1", "c1", "m1"} <= ids and "gt" not in ids
+
+
 def test_recording_does_not_acquire_new_captions_even_on_short_cuts():
     scene = dict(assets={"raw": dict(path="/product/upload.mp4")}, items=[
         dict(id="upload", k="shot", f=[20, 35], pic="raw", z=0),
@@ -155,7 +168,41 @@ def test_proof_holds_stay_bounded_after_audio_snap(tmp_path, monkeypatch):
     product = P.product_clips(script, str(tmp_path / "product"))
     assert product["before"]["t"][1] - product["before"]["t"][0] <= 3
     assert product["after"]["t"][1] - product["after"]["t"][0] <= 4
-    assert len(cuts) == 3
+    assert len(cuts) == 4
+    assert cuts[-1][1:] == (0.0, 30, str(tmp_path / "product" / "export_body.mp4"))   # the whole export, for lines short of pictures
+    assert product["body"]["t"] == [0.0, 30]
+
+
+def test_the_before_knows_the_exports_own_crop_of_the_upload(tmp_path):
+    """The export's crop of a 16:9 upload, from the recording's own edit list: the ratio's largest window around the
+    focus, the focus track overriding it in its seconds (kids-bold-v, measured by template match: x 0.478-0.794)."""
+    import json
+    os.makedirs(tmp_path / "edl")
+    frame = dict(mode="crop", ratio="9:16", focus_x=0.636, focus_y=0.2, focus_track=[dict(x=0.9, y=0.2, t0=4.5, t1=6.5, mode="crop")])
+    (tmp_path / "edl" / "v005.json").write_text(json.dumps(dict(frame=frame)))
+    rec = dict(upload=dict(w=1920, h=1080), exports=[dict(tag="final", edl_version=5)])
+    path = str(tmp_path / "record.json")
+    x0, y0, x1, y1 = P.product_crop(path, rec, 2.0)
+    assert abs(x0 - 0.4778) < 1e-3 and abs(x1 - 0.7942) < 1e-3 and (y0, y1) == (0.0, 1.0)
+    assert P.product_crop(path, rec, 5.0)[2] == 1.0                # the track's seconds: pushed to the right edge
+    (tmp_path / "edl" / "v005.json").write_text(json.dumps(dict(frame=dict(mode="fit", ratio="9:16"))))
+    assert P.product_crop(path, rec, 2.0) is None                  # a fitted export has no crop to push into
+
+
+def test_a_line_that_names_the_export_always_shows_it(tmp_path, monkeypatch):
+    """16 Nov: the frame choice gave the payoff and call-to-action lines no export frame, and they played as type
+    pages. Every line naming the recording now gets its frames, spread across the export."""
+    from types import SimpleNamespace
+    monkeypatch.setattr(P, 'still', lambda path, t, w: 'aW1hZ2U=')
+    monkeypatch.setattr(P, 'ask', lambda system, content, **kw: ({'windows': [dict(line=0, candidate=0)]}, {'usd': 0}))
+    sc = dict(receipts={}, script=dict(segments=[dict(say='The result', pictures=['THE EXPORT'], duration_s=1.0),
+                                                dict(say='Bold captions below the face', pictures=['THE EXPORT'], duration_s=2.2),
+                                                dict(say='Try Valmera', pictures=['THE EXPORT'], duration_s=1.2)]))
+    rows, _ = P.product_windows(SimpleNamespace(supply=str(tmp_path)), sc, {'THE EXPORT': ('/fixture.mp4', 12, [(4, 7)])})
+    per = {i: [r for r in rows if r['line'] == i] for i in range(3)}
+    assert len(per[0]) == 1 and len(per[1]) == 2 and len(per[2]) == 1
+    assert len({r['id'] for r in rows}) == len(rows)
+    assert all(not (r['end'] > 4 and r['start'] < 7) for r in rows)        # never the after's seconds
 
 
 def test_instruction_panel_preserves_submitted_sentence():

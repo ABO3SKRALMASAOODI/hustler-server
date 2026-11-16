@@ -46,8 +46,10 @@ def prepare(ctx, idea, receipts, ask, pictures, still):
         plan, use = ask(
             "Plan a retrievable visual vocabulary for a film about an EDITOR'S PROBLEM. The film markets Valmera "
             "with its authenticated upload, typed sentence and export; those product assets already exist. "
-            "Choose six to eight concrete physical subjects useful for explaining this editing technique or pain. "
-            "They may illustrate explicit comparisons or examples, but must never become a celebrity story. "
+            "Choose four to six concrete subjects from an editor's or creator's own world that literally show this "
+            "editing pain or technique (a phone playing a vertical short, a creator filming themselves, an editor at a "
+            "timeline, a podcast set with microphones, a feed being scrolled). Never metaphors or analogies (no cups, "
+            "road signs, shop shelves, landscapes or food standing for an editing idea), and never a celebrity story. "
             "Free photo libraries contain objects, places and ordinary activities. They seldom contain a particular "
             "captioned video playing in a particular application's preview or an exact UI operation. Do not ask "
             "for those bespoke combinations. Do not invent product screens. Give each subject two short image "
@@ -116,8 +118,8 @@ def prepare(ctx, idea, receipts, ask, pictures, still):
 def writer_content(inventory, still):
     """The writer sees the actual pictures and their verified descriptions."""
     content = [dict(type="text", text="AVAILABLE EXTERNAL PICTURES. Use these exact subject names in named/pictures. "
-                    "Write the editing argument around what these frames show. Treat them as examples or explicit "
-                    "metaphors, never as footage of the recorded Valmera session. Do not require unseen interfaces "
+                    "Use a picture only on a line whose words it literally shows; never as a metaphor, and never "
+                    "as footage of the recorded Valmera session. Do not require unseen interfaces "
                     "or claim an action that a still cannot establish. Product proof remains THE UPLOAD / THE EXPORT.")]
     for name, rows in inventory["pictures"].items():
         for row in rows:
