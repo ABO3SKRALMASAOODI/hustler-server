@@ -14,8 +14,11 @@ engine, using the tool's own parts:
   whole sentences   each generation is one to three whole sentences of the script (never a sentence cut between two
                     generations), so the model's own prosody joins them and there are a third as many joins
   takes             six takes a generation: three at the runtime's own temperature as the owner heard it, three a little
-                    freer; every word heard first, then the tool's prosody score plus the line's pitch range and how high
-                    it restarts over the last kept line's end (signal only)
+                    freer; every word heard first, then the tool's prosody score plus the line's pitch range, how high
+                    it restarts over the last kept line's end, and its cadence (17 Nov): a comma the voice holds up or
+                    lifts over instead of closing on, and a full stop that does not fall the same way as the last ones
+                    (signal only; Easton ended 69-78% of lines falling and 0-12% rising against 53-55% / 20-29% for the
+                    metromedia narrators, every ending alike: cadence sameness 2.6-2.9 st against 3.4-4.7)
   joins             0.22 s between generations, 0.40 s where the story turns (the writer's beats), room tone in every pause
   focus words       the writer's one or two stressed words per line ridden to +4.3 dB over their line, measured per word
   loudness range    each line set by its beat and energy (the hook and the payoff forward, the low point back), scaled until
@@ -49,6 +52,12 @@ LRA_AIM = (3.0, 3.6)      # LU (references 3.33 [2.57-4.32])
 ROOM_DB = -46.0           # room tone under the speech level (instead of digital silence)
 BEAT_DB = {"hook": 1.0, "setup": 0.0, "turn": 0.6, "low": -2.4, "payoff": 1.4, "close": -0.8}
 ENERGY_DB = {"high": 0.8, "mid": 0.0, "low": -1.0}
+COMMA_HELD_ST = -1.0      # a comma end at or over this (against its phrase) holds the voice up: the thought goes on
+COMMA_RISE_ST = 0.5       # and over this it lifts (the references' continuation rise)
+COMMA_W = (6.0, 4.0)      # points for the share of a take's commas held, and lifted
+STOP_VARY_W = 1.5         # points a semitone a full stop's fall differs from the last kept ones (at most 3 st)
+STOP_DEEP_ST = -6.0       # a full stop falling deeper than this loses STOP_DEEP_W a semitone (references -2.4 to -4.9)
+STOP_DEEP_W = 1.5
 
 
 def norm(w):
@@ -96,12 +105,64 @@ def group_script(script, groups):
 
 # ----------------------------------------------------------------- the engine, with this read's takes and joins
 
+def cadence(x, sr, words, text, prosody):
+    """How a take ends its phrases, measured (signal only): [("comma"|"stop", semitones)], the median pitch of the
+    last 0.3 s of each script word that carries a comma or a full stop, against the median of its own phrase (since the
+    last mark). The heard words are aligned to the script's words, so the marks are the writer's, not the listener's."""
+    import difflib
+    toks = str(text).split()
+    if len(words) < 3 or not toks:
+        return []
+    f0 = np.asarray(prosody.pitch_track(x, sr), np.float64)
+    t = np.arange(len(f0)) * 0.01
+    v = np.isfinite(f0) & (f0 > 0)
+    if v.sum() < 30:
+        return []
+    st = np.full(len(f0), np.nan)
+    st[v] = 12 * np.log2(f0[v])
+    sm = difflib.SequenceMatcher(a=[norm(w) for w in toks], b=[norm(w.get("w")) for w in words], autojunk=False)
+    at = {}
+    for blk in sm.get_matching_blocks():
+        for k in range(blk.size):
+            at[blk.a + k] = blk.b + k
+    out, start = [], float(words[0]["start"])
+    for i, tok in enumerate(toks):
+        mark = tok.rstrip("\"'”’)")[-1:]
+        if mark not in ",;:.?!" or i not in at:
+            continue
+        j = at[i]
+        e = float(words[j]["end"])
+        tail = v & (t >= max(start, e - 0.30)) & (t <= e)
+        body = v & (t >= start) & (t <= e)
+        if tail.sum() >= 4 and body.sum() >= 15:
+            out.append(("comma" if mark in ",;:" else "stop", round(float(np.median(st[tail][-5:]) - np.median(st[body])), 2)))
+        start = float(words[min(j + 1, len(words) - 1)]["start"])
+    return out
+
+
+def cadence_bonus(cad, stops_kept):
+    """Points for a take's cadence: its commas held up or lifted, its full stops' falls not all alike and not too deep."""
+    if not cad:
+        return 0.0
+    com = [d for k, d in cad if k == "comma"]
+    stops = [d for k, d in cad if k == "stop"]
+    b = 0.0
+    if com:
+        b += COMMA_W[0] * float(np.mean([d >= COMMA_HELD_ST for d in com])) + COMMA_W[1] * float(np.mean([d >= COMMA_RISE_ST for d in com]))
+    if stops:
+        if stops_kept:
+            b += STOP_VARY_W * min(abs(stops[-1] - float(np.median(stops_kept[-4:]))), 3.0)
+        b -= STOP_DEEP_W * sum(max(STOP_DEEP_ST - d, 0.0) for d in stops) / len(stops)
+    return round(b, 2)
+
+
 class Read:
     def __init__(self, N, LN, PF, prosody):
         self.N, self.LN, self.PF, self.prosody = N, LN, PF, prosody
         self.last_end = None          # semitones of the last kept generation's end, against the read's running median
         self.f0s = []
         self.picks = []
+        self.stops = []               # the kept takes' full-stop falls (semitones against their phrase), in order
 
     def generate_phonon(self, job, out, log, seed0=7):
         """The tool's own generator, with a freer temperature on the second half of the takes."""
@@ -155,6 +216,8 @@ class Read:
                 # the references restart 5.4 st [2.9-6.6] over the last line's end; past 6 st a join reads as a seam
                 bonus += 2.5 * min(max(reset, -2.0), 5.0) - 4.0 * max(reset - 6.0, 0.0)
                 t["restart_st"] = round(reset, 2)
+            t["cadence_bonus"] = cadence_bonus(t.get("cadence"), self.stops)
+            bonus += t["cadence_bonus"]
             t["bonus"] = round(bonus, 1)
             t["net"] = round(t["score"] - t["drift"] + bonus, 1)
         best = min(takes, key=lambda t: (t["errs"], -t["net"]))
@@ -163,8 +226,10 @@ class Read:
             self.f0s += [s0, s1]
             ref = float(np.median(self.f0s))
             self.last_end = 12 * math.log2(s1 / ref)
+        self.stops += [d for k, d in best.get("cadence") or [] if k == "stop"]
         self.picks.append(dict(file=best.get("file"), net=best["net"], bonus=best.get("bonus"), restart_st=best.get("restart_st"),
-                               range_st=(best.get("feat") or {}).get("range_st")))
+                               range_st=(best.get("feat") or {}).get("range_st"), cadence=best.get("cadence"),
+                               cadence_bonus=best.get("cadence_bonus")))
         return best
 
     def join_lines(self, kept, segments, sr):
@@ -200,6 +265,16 @@ def render(a):
     LN.generate_phonon = rd.generate_phonon
     LN.join_lines = rd.join_lines
     PF.choose = rd.choose
+    judge0 = PF.judge
+
+    def judge(x, sr, words, seg, band, want_wpm=None):
+        j = judge0(x, sr, words, seg, band, want_wpm)
+        try:
+            j["cadence"] = cadence(x, sr, words, seg.get("text") or "", prosody)
+        except Exception as e:  # noqa: BLE001 - a take whose cadence cannot be measured is chosen on the rest
+            j["cadence"], j["cadence_error"] = [], repr(e)[:120]
+        return j
+    PF.judge = judge
     args = argparse.Namespace(script=str(gp), out=str(out), voice=None, takes=TAKES, steps=10, cfg=2.0, seed=1, pace_tol=0.10,
                               tempo_anchor=True, lufs=None, engine=None, chunk_words=None, no_master=False, band=a.band)
     N.render(args)

@@ -23,3 +23,12 @@ def test_single_gain_ride_keeps_its_cosine_ramps():
     ramp = 2 - 2 * np.cos(np.linspace(0, np.pi, 100))
     expected[900:1000], expected[2000:2100] = ramp, ramp[::-1]
     np.testing.assert_allclose(g, expected, atol=1e-6)
+
+
+def test_a_take_that_holds_its_commas_up_and_varies_its_falls_scores_higher():
+    pass
+    held = [("comma", 0.8), ("stop", -3.0)]
+    closed = [("comma", -4.0), ("stop", -3.0)]
+    assert V.cadence_bonus(held, []) > V.cadence_bonus(closed, [])                  # a comma lifted, not closed
+    assert V.cadence_bonus([("stop", -1.0)], [-4.0, -4.2]) > V.cadence_bonus([("stop", -4.1)], [-4.0, -4.2])  # not the same fall again
+    assert V.cadence_bonus([("stop", -9.0)], []) < 0 and V.cadence_bonus([], []) == 0.0
