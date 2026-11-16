@@ -6841,6 +6841,15 @@ def compile_score(text, index=None, work_dir=None, bin_items=None, tray=None, fa
                  f"black at programme {t0:.3f}-{t1:.3f}s. Choose a clear source interval "
                  "or a relevant checked picture while preserving whole speech. This is "
                  "not a new picture; keep a fade only when the story earns it.")
+    from . import speech_edges
+    try:
+        m["speech_boundaries"] = speech_edges.in_film(ctx.work, ctx.index, l1["spine"])
+    except (OSError, ValueError):
+        # Missing source evidence cannot certify a boundary; the write guard
+        # continues to read and enforce the original sound independently.
+        m["speech_boundaries"] = []
+    for finding in speech_edges.findings(m["speech_boundaries"]):
+        ctx.find(finding)
     m["findings"] = list(ctx.findings)
     txt = meter_text(ctx, m)
     return Compiled(l1, m, txt, (time.perf_counter() - t0_) * 1000)

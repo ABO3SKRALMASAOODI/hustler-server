@@ -668,7 +668,7 @@ def bin_part(work):
     return out, os.path.join(work, "bin_board.jpg")
 
 
-def film_text(work, idx, sess, per, x, scout, styles, cards, bin_items=None):
+def film_text(work, idx, sess, per, x, scout, styles, cards, bin_items=None, speech_facts=()):
     prompts = sess.get("prompts") or []
     out = ["# This film", "## The ask"]
     names = [u.get("filename") for u in sess.get("uploads") or [] if u.get("filename")]
@@ -691,6 +691,8 @@ def film_text(work, idx, sess, per, x, scout, styles, cards, bin_items=None):
                    "Preserve its printed words and the relationships between its pictures. "
                    "Do not place the whole design as a tiny strip between blurred bars or punch through its typography.")
     out += words_part(work, idx, per, x, scout)
+    from . import speech_edges
+    out += speech_edges.brief_lines(speech_facts)
     out += footage_part(per, idx)
     out += seats_part(work, idx, per)
     out += colour_part(work, styles)
@@ -735,6 +737,8 @@ def build(work, idx, sess, per, scout, grid=None):
     src = os.path.join(work, "source.mp4")
     from . import source_audio
     x = source_audio.decode(src, work) if idx.get("words") else np.zeros(0)
+    from . import speech_edges
+    speech_facts = speech_edges.at_words(idx, x) if idx.get("first_film") else []
     with open(STYLES, encoding="utf-8") as f:
         cards = json.load(f)
     bin_items = (jload(os.path.join(work, "bin.json")) or {}).get("items") or []
@@ -744,7 +748,7 @@ def build(work, idx, sess, per, scout, grid=None):
     # text, under the cap: a third card goes first, then a second, each recorded
     dropped = []
     while True:
-        txt = film_text(work, idx, sess, per, x, scout, styles, cards, bin_items)
+        txt = film_text(work, idx, sess, per, x, scout, styles, cards, bin_items, speech_facts)
         est = estimate(work, txt, styles)
         if est <= FILM_CAP or len(styles) <= 1:
             break
