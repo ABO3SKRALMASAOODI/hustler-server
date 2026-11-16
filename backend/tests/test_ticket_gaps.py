@@ -685,6 +685,19 @@ def test_842_the_turns_render_moving_is_the_turn_speaking(world):    # noqa: F81
     assert not fired(world, gaps._turn_went_silent, minutes=2)
 
 
+def test_842_the_turns_changed_section_render_is_the_turn_speaking(world):    # noqa: F811
+    """Ticket #842 (17 Nov): render_preview waits 2-6 min on a preview_check
+    proof batch (p5857 job 138907, 5 min); the working bubble shows it live,
+    so its heartbeat is the turn speaking."""
+    world.job("agent_turn", state="running", project=5600, user=2846)
+    pj = world.job("preview_check", state="running", project=5600, user=2846)
+    world.clock.now += timedelta(seconds=110)
+    world.c.execute("UPDATE video_jobs SET heartbeat_at = %s WHERE id = %s",
+                    (world.clock.now, pj))
+    world.clock.now += timedelta(seconds=15)
+    assert not fired(world, gaps._turn_went_silent, minutes=2)
+
+
 def test_842_a_render_of_another_project_does_not_hide_a_silence(world):    # noqa: F811
     world.job("agent_turn", state="running", project=5600, user=2846)
     pj = world.job("preview", state="running", project=5601, user=2846)

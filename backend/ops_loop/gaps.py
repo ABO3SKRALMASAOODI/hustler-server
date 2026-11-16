@@ -438,7 +438,10 @@ def _turn_went_silent(cur, since, now, p):
     its next slice. The product speaks in its replies, in the step rows the
     Studio shows as they land ('activity'), and in the progress of the turn's
     own preview render, which the working bubble shows live (ticket #842: 17
-    of 20 "silences" were steps the check did not read, or a 1-3 min render). Judged only while the turn is open, so a past window is not
+    of 20 "silences" were steps the check did not read, or a 1-3 min render). The
+    changed-section proof render (`preview_check`, 2-6 min on a long film) is
+    shown live the same way since 17 Nov (frontend turnRender; 5 of 8
+    silences on 13-16 Nov were that render). Judged only while the turn is open, so a past window is not
     replayed by this one."""
     q = dict(p, silence=TURN_SILENCE, lookback=now - timedelta(days=1))
     cur.execute(f"""
@@ -451,7 +454,7 @@ def _turn_went_silent(cur, since, now, p):
                        ) AT TIME ZONE 'UTC', (
                        SELECT max(pj.heartbeat_at) FROM video_jobs pj
                         WHERE pj.project_id = j.project_id
-                          AND pj.type = 'preview'
+                          AND pj.type IN ('preview', 'preview_check')
                           AND pj.created_at >= COALESCE(root.created_at,
                                                         j.created_at)
                        )) AS heard
