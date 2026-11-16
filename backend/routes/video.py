@@ -40,6 +40,7 @@ from video_services.jobs import (
     running_started_jobs as _started_jobs_count,
     STARTED_JOB_TYPES as _STARTED_JOB_TYPES,
 )
+from video_services import harness_route as _harness_route
 from video_services.project_state import (
     PERMANENT_INDEX_FAILURES,
     active_original as _active_original,
@@ -4841,6 +4842,9 @@ def post_message(user_id, project_id, data=None):
     # path (send_as_user); a browser send reads the request body.
     data = data if data is not None else (request.get_json() or {})
     text = (data.get("text") or "").strip()
+    # One-request harness override (internal accounts only, when the
+    # harness_v2 switch allows it; video_services.harness_route decides).
+    harness_request = _harness_route.requested_from(data)
     client_msg_id = (str(data.get("client_msg_id") or "")[:64]) or None
     defer_until_index = bool(data.get("defer_until_index"))
     # The EDL version the user was LOOKING AT when they typed (the studio
@@ -5333,7 +5337,9 @@ def post_message(user_id, project_id, data=None):
                 job_id = _enqueue(cur, project_id, user_id, "agent_turn",
                                   {"message_id": message_id,
                                    **({"trial_lane": True}
-                                      if trial_lane else {})})
+                                      if trial_lane else {}),
+                                   **({"harness_request": harness_request}
+                                      if harness_request else {})})
                 _queue_depth_notice(cur, p["chat_session_id"], user_id,
                                     job_id)
 

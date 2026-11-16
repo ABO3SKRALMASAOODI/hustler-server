@@ -4,6 +4,8 @@ import os
 
 from psycopg2.extras import Json
 
+from video_services import harness_route
+
 
 def execution_policy():
     mode = os.getenv("EXECUTION_POLICY_MODE", "legacy").strip().lower()
@@ -13,6 +15,15 @@ def execution_policy():
 def enqueue(cur, project_id, user_id, job_type, payload):
     stamped = dict(payload or {})
     stamped.setdefault("execution_policy", execution_policy())
+    # Harness v2 routing (off by default): a chat turn or MCP call is stamped
+    # once here; a payload that already carries a stamp keeps it, so a
+    # continuation never changes harness mid-turn. A one-request override
+    # rides in as ``harness_request`` and is never stored.
+    requested = stamped.pop("harness_request", None)
+    if job_type in harness_route.HARNESS_JOB_TYPES and "harness" not in stamped:
+        if harness_route.pick(cur, user_id, project_id, job_type,
+                              requested, stamped) == harness_route.V2:
+            stamped.setdefault("harness", harness_route.V2)
     if job_type == "preview" and stamped.get("source") == "user_edit" \
             and not stamped.get("force") and stamped.get("edl_version"):
         # The player needs a watchable file, not its own lower-resolution

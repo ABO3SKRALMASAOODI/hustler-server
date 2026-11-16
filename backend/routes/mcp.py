@@ -57,7 +57,8 @@ import time
 from datetime import datetime, timezone
 
 import psycopg2
-from flask import Blueprint, request, jsonify, current_app, Response, g
+from flask import (Blueprint, request, jsonify, current_app, Response, g,
+                   has_request_context)
 
 import storage
 from mcp_directory_metadata import directory_tool_metadata
@@ -71,6 +72,7 @@ from video_services import mcp_fast_reads
 from video_services import tail_gate
 from video_services.mcp_reads import read_metadata
 from video_services.jobs import enqueue as _enqueue
+from video_services import harness_route as _harness_route
 from video_services.project_state import (
     active_original as _active_original,
     index_job_state as _index_job_state,
@@ -1949,6 +1951,10 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
                            "mcp_call_id": call_ref}
             if _parks_render(name, args):
                 job_payload["render_park_s"] = RENDER_PARK_S
+            harness_request = getattr(g, "harness_request", None) \
+                if has_request_context() else None
+            if harness_request:
+                job_payload["harness_request"] = harness_request
             job_id = _enqueue(cur, project_id, tok["user_id"], "mcp_tool",
                               job_payload)
     if wait_for_index:
@@ -4294,6 +4300,15 @@ def _handle(tok, msg):
     if method == "tools/call":
         name = params.get("name") or ""
         args = params.get("arguments") or {}
+        # One-request harness override from tools/call meta; honoured only
+        # for internal accounts while harness_v2.override is on (jobs.enqueue
+        # asks video_services.harness_route).
+        try:
+            g.harness_request = _harness_route.requested_from(
+                params.get("_meta") if isinstance(params.get("_meta"), dict)
+                else {})
+        except RuntimeError:
+            pass
         if name == GATEWAY_TOOL and isinstance(args, dict):
             return _gateway(req_id, tok, args)
         return _call_tool(req_id, tok, name, args)
