@@ -413,6 +413,13 @@ def test_ask_user_records_awaiting_user_not_blocked(monkeypatch, verified):
         assert name == "ask_user"
         raise agent_tools.AskUser(args["question"])
 
+    render_checks = []
+
+    def auto_render(_ctx, _db, _session_id, _timings, turn_deadline=None):
+        render_checks.append(turn_deadline)
+        return _ctx.latest_edl(), None
+
+    monkeypatch.setattr(agent_loop, "_auto_render_if_needed", auto_render)
     monkeypatch.setattr(agent_tools, "execute", ask)
     monkeypatch.setattr(agent_loop.reply_language, "judge", lambda *a, **k: {})
     monkeypatch.setattr(agent_loop, "_language_flip", lambda *a, **k: None)
@@ -425,6 +432,7 @@ def test_ask_user_records_awaiting_user_not_blocked(monkeypatch, verified):
         return text, outcome
     monkeypatch.setattr(agent_loop, "_asks_settle", settle)
     result = _run(ctx, db)
+    assert len(render_checks) == 1 and render_checks[0] is not None
     expected = "awaiting_user" if verified else "partial"
     assert result["outcome"] == expected
     assert result["status"] == ("awaiting_user" if verified else "replied")

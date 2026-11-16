@@ -30,6 +30,16 @@ FINAL_W, FINAL_H = 1080, 1920
 BOARD_W, BOARD_H = 1568, 880
 PREFIX_CAP, FILM_CAP = 13600, 18000
 
+TYPED_EXECUTION = (
+    "This is an authorized typed edit, not an automatic first film. The customer's "
+    "requested duration, aspect ratio and retained content take precedence over "
+    "the first-film defaults above, including the 25-to-45-second shortening rule. "
+    "Interpret the request and its ask ledger: a whole-film polish or removal of "
+    "downtime stays a whole film; a requested excerpt is its selected complete story. "
+    "Build the craft across that deliverable, preserving its setup, turns and payoff. "
+    "Do not silently replace a requested long film with a highlight reel."
+)
+
 GREEN, CYAN, YEL = (70, 240, 120), (90, 210, 255), (255, 225, 60)
 
 def jload(path, default=None):
@@ -671,6 +681,8 @@ def bin_part(work):
 def film_text(work, idx, sess, per, x, scout, styles, cards, bin_items=None, speech_facts=()):
     prompts = sess.get("prompts") or []
     out = ["# This film", "## The ask"]
+    if sess.get("execution"):
+        out.append("Library execution context: " + sess["execution"])
     names = [u.get("filename") for u in sess.get("uploads") or [] if u.get("filename")]
     if names:
         out.append("File name: " + ", ".join(names))
@@ -757,6 +769,8 @@ def build(work, idx, sess, per, scout, grid=None):
     with open(f"{out}/film.txt", "w", encoding="utf-8") as f:
         f.write(txt)
     man = dict(built=time.strftime("%Y-%m-%d %H:%M:%S"), styles=styles, grid=grid, dropped=dropped, estimate=est)
+    if sess.get("typed_execution"):
+        man["typed_execution"] = True
     with open(f"{out}/manifest.json", "w") as f:
         json.dump(man, f, indent=1)
     return man
@@ -791,6 +805,8 @@ def load(work):
     with open(f"{out}/manifest.json") as f:
         man = json.load(f)
     system = [{"type": "text", "text": prefix_text(), "cache_control": {"type": "ephemeral"}}]
+    if man.get("typed_execution"):
+        system.append({"type": "text", "text": TYPED_EXECUTION})
     with open(f"{out}/film.txt", encoding="utf-8") as f:
         content = [{"type": "text", "text": f.read()}]
     for i in range(1, 5):

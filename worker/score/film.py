@@ -632,7 +632,7 @@ def _applied(rep, l1, bin_doc):
 
 # ------------------------------------------------------------------ real footage: the quick film, then the full one
 
-def footage_start(job, work, sc, per):
+def footage_start(job, work, sc, per, cfg=None):
     """Real footage of the people, places and events the film names (lane FOOT's engine, worker/footage), found on
     a thread beside Supply, Direct and the first render. The engine takes minutes and the first film has a deadline,
     so the film is written without waiting for it (the quick film). When its clips are there by the time the last
@@ -643,7 +643,7 @@ def footage_start(job, work, sc, per):
         import footage.seam as seam
         import footage.switch as switch
         uid = job.get("user_id")
-        if not switch.allowed("customer", uid, seam.customer_cfg()):
+        if not switch.allowed("customer", uid, cfg if cfg is not None else seam.customer_cfg()):
             return None
         wishes = [dict(w) for w in (sc or {}).get("wishes") or [] if isinstance(w, dict) and not w.get("mine")]
         if not wishes:
@@ -671,7 +671,7 @@ def footage_start(job, work, sc, per):
                 finally:
                     box["ready"].set()
                 if any(s and s[0]["name"] not in have for s in subjects):
-                    box["offers"] = seam.bin_offers(work, wishes, subjects, time.monotonic() + 3600.0, box["report"], about, uid, W, H, skip=have)
+                    box["offers"] = seam.bin_offers(work, wishes, subjects, time.monotonic() + 3600.0, box["report"], about, uid, W, H, skip=have, cfg=cfg)
                     box["shelved"] = seam.shelve(box["offers"], W, H)
                 else:
                     box["offers"] = []
@@ -1103,6 +1103,10 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
         raise Fall("prep", "no original asset")
     name = ((original.get("meta") or {}).get("filename")) or ""
     sess = {"prompts": _asks(worker_db, getattr(ctx, "first_cut_session", None)), "uploads": [{"filename": name}] if name else []}
+    if getattr(ctx, "director_typed", False):
+        sess["typed_execution"] = True
+    if getattr(ctx, "director_execution", None):
+        sess["execution"] = ctx.director_execution
     ledger = getattr(ctx, "ask_ledger", None)
     if ledger and ledger.get("asks"):
         sess["ledger"] = [{"said": a["said"], "want": a["want"]} for a in ledger["asks"]]
@@ -1148,8 +1152,8 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
     ctx.index = index
     rec["caption_evidence"] = index.get("caption_evidence") or {}
 
-    foot = footage_start(job, work, sc, per) if sc is not None else None      # None unless the footage switch opens this account
-    ctx.director_footage = foot
+    foot = footage_start(job, work, sc, per, cfg=getattr(ctx, "director_footage_cfg", None)) if sc is not None else None
+    ctx.director_footage = foot  # library callers own cleanup even when a later stage fails
     rec["at"] = "supply"
     t = time.monotonic()
     _say(ctx, worker_db, "director_supply", "Finding pictures for it")
@@ -1159,6 +1163,7 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
         ctx.director_bed = {"work": work}
         if bed.available():
             bed_th = bed.start(work, sc, per, index, min(deadline - 80.0, time.monotonic() + 12.0), cfg["models"]["scout"], fetch=bed.fetch_library)
+            ctx.director_bed_thread = bed_th
     except Exception as exc:  # noqa: BLE001 - no bed, the film is written dry
         rec["bed_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
     bin_doc = None
@@ -1170,6 +1175,16 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
         except Exception as exc:  # noqa: BLE001 - DESIGN 3.5: the upload and plates
             rec["supply_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
     _stage(rec, "supply", t)
+
+    recover_supply = (getattr(ctx, "director_recover_supply", None)
+                      if getattr(ctx, "director_typed", False) is True else None)
+    if callable(recover_supply):
+        t = time.monotonic()
+        sc, bin_doc, foot = recover_supply(job=job, cfg=cfg, deadline=deadline,
+            work=work, index=index, sess=sess, per=per, sc=sc, bin_doc=bin_doc,
+            foot=foot, rec=rec, acquire=_acquirer(ctx, worker_db, job, work))
+        ctx.director_footage = foot
+        _stage(rec, "picture_recovery", t)
 
     if bed_th is not None:
         bed_th.join(max(0.0, min(3.0, deadline - 75.0 - time.monotonic())))      # long done by now; a late pick only means this film is dry
@@ -1236,7 +1251,25 @@ def _make_prepared(ctx, worker_db, job, cfg, deadline, work, rec, pool):
     _stage(rec, "lower", t)
 
     rec["at"] = "write"
+    prepare_edl = (getattr(ctx, "director_prepare_edl", None)
+                   if getattr(ctx, "director_typed", False) is True else None)
+    if callable(prepare_edl):
+        edl = prepare_edl(edl, comp.l1)
     result = ctx.apply_score(edl, "the Director's First cut")
+    recover_write = (getattr(ctx, "director_recover_write", None)
+                     if getattr(ctx, "director_typed", False) is True else None)
+    if not str(result).startswith("EDL v") and callable(recover_write):
+        repaired = recover_write(work=work, cfg=cfg, index=index, sc=sc,
+            bin_doc=bin_doc, original_key=original["storage_key"], worker_db=worker_db,
+            comp=comp, text=text, refusal=result, rec=rec)
+        if repaired is not None:
+            comp, text, edl, rep, result = repaired
+            m = comp.meter
+            rec["meter"] = {k: m.get(k) for k in ("dur_s", "beats", "cuts10", "new_pictures10", "type_events10", "captions", "cards", "flashes", "sounds10", "ceiling", "source_guard")}
+            rec["meter"].update(design_items10=(m.get("facts") or {}).get("design_items10"), gestures=len(m.get("gestures") or {}),
+                                rejects=len(m.get("rejects") or []), findings=len(m.get("findings") or []))
+            rec["lower"] = {k: rep.get(k) for k in ("counts", "burns_as_light", "burns_as_glow", "missing_pictures", "fonts_replaced", "bed", "bed_error")}
+            usage["taste"] = direct.taste_record(comp)
     if not str(result).startswith("EDL v"):
         raise Fall("write", str(result)[:300])
     ctx.director_version = (ctx.versions_written or [None])[-1]

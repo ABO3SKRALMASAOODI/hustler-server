@@ -50,8 +50,13 @@ def cut_refusal(ctx, before, after):
     if getattr(ctx, "llm_client", None) is None or not getattr(ctx, "agent_model", None):
         return None
     story_end = (getattr(ctx, 'ask_ledger', None) or {}).get('picture_story_end')
+    typed_program = None
+    if hasattr(ctx, "_typed_cut_source"):
+        from score.typed import cut_program
+        typed_program = {"before": cut_program(before, ctx._typed_cut_source),
+                         "after": cut_program(after, ctx._typed_cut_source)}
     sig = hashlib.sha256(json.dumps([request, spans, before.get('keep'), after.get('keep'),
-                                    story_end, getattr(ctx, "request_contract", None)],
+                                    story_end, getattr(ctx, "request_contract", None), typed_program],
                                    sort_keys=True, default=str).encode()).hexdigest()
     cache = getattr(ctx, "_cut_evidence", {})
     if sig in cache:
@@ -62,7 +67,7 @@ def cut_refusal(ctx, before, after):
     refusal = None
     for g in range(0, len(spans), CUT_GROUP):
         refusal = _check_group(ctx, request, spans, spans[g:g + CUT_GROUP], g, before, after,
-                               story_end, sig)
+                               story_end, sig, typed_program)
         if refusal:
             break
     if refusal == _UNCHECKED:
@@ -80,7 +85,7 @@ def _keep_length(keep):
     return round(sum(max(0.0, float(b) - float(a)) for a, b in keep or []), 2)
 
 
-def _check_group(ctx, request, all_spans, spans, first, before, after, story_end, sig):
+def _check_group(ctx, request, all_spans, spans, first, before, after, story_end, sig, typed_program=None):
     from score import asks
     import llm
     import media
@@ -90,8 +95,11 @@ def _check_group(ctx, request, all_spans, spans, first, before, after, story_end
         "request": request, "removed_source_intervals": spans,
         "removed_stretches_in_this_cut": len(all_spans),
         "this_check_covers": f"removed stretches {first + 1}-{first + len(spans)} of {len(all_spans)}",
-        "measured_length_before_s": _keep_length(before.get('keep')),
-        "measured_length_after_s": _keep_length(after.get('keep')),
+        "measured_length_before_s": (typed_program["before"]["program_seconds"]
+                                     if typed_program else _keep_length(before.get('keep'))),
+        "measured_length_after_s": (typed_program["after"]["program_seconds"]
+                                    if typed_program else _keep_length(after.get('keep'))),
+        "typed_picture_program": typed_program,
         "contract": getattr(ctx, "request_contract", None),
         "before_keep": before.get('keep'), "after_keep": after.get('keep'),
         "proposed_story_end": story_end,
@@ -112,6 +120,9 @@ def _check_group(ctx, request, all_spans, spans, first, before, after, story_end
                 media.frame_at(source, t, path, width=480)
                 parts += [{"type": "text", "text": f"Deleted interval {a:.2f}-{b:.2f}, source {t:.2f}s"},
                           llm.image_part(path)]
+        if typed_program:
+            from score.typed import cut_picture_frames
+            parts += cut_picture_frames(ctx, typed_program["after"], root, sig)
         value, _usage = asks._call(ctx, "check_cut_evidence", CUT_SCHEMA, CUT_SYSTEM, parts, max_tokens=1000)
         reason = str(value.get("reason") or "").strip()
         if value.get("allow") is not True and not reason:

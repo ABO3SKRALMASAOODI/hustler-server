@@ -2812,11 +2812,24 @@ def _typed_asks_start(ctx, worker_db, job, session_id, user_message, cont):
         reset_note = (reset_note + "\n" + held) if reset_note else held
     if ledger["route"] == "film" and cfg["director"]:
         got = asks.direct_film(ctx, worker_db, job, session_id, cfg)
-        ledger["routed"] = {"to": "director", **{k: got.get(k) for k in ("version", "fell", "applied", "s")}}
-        if got.get("version"):
+        ledger["routed"] = {"to": "director", **{k: got.get(k) for k in (
+            "version", "fell", "applied", "s", "path", "source_window", "selection_usage", "remaining_clips", "job_id")}}
+        if got.get("path") == "podcast_shorts_engine":
+            done_by = (f"The typed clip request is running through the podcast-shorts engine as job {got['job_id']}. "
+                       "Its selected stories get their own child editors automatically under this request. "
+                       "Keep the parent source intact. This job waits for the child attempts and returns their actual render receipts. "
+                       "Read those receipts before the final reply. Raw story cards are not finished films.")
+        elif got.get("path") == "segmented_whole_film":
+            from score import patch
+            done_by = patch.pass_note(got)
+        elif got.get("version"):
             done_by = (f"The Director already made the whole film from the full upload as EDL "
                        f"v{got['version']} ({', '.join(got.get('applied') or [])}). Build on it: do any ask it "
                        "left, render, look, and reply. Don't rebuild it.")
+            if got.get("remaining_clips"):
+                done_by += (" This is the first requested option. The other selected stories still "
+                            "need their own finished, captioned vertical renders before this request "
+                            "is complete: " + json.dumps(got["remaining_clips"], ensure_ascii=False))
         else:
             done_by = ("Asks of kind film are about the customer's whole upload: work from the full "
                        "upload, not from an automatic first cut.")
@@ -3943,6 +3956,26 @@ def _rendered_this_turn(ctx):
     preview = getattr(ctx, "last_preview", None) or {}
     return bool(getattr(ctx, "rendered_versions", None)) \
         and not bool(isinstance(preview, dict) and preview.get("cached"))
+
+
+def _typed_question_hold(ctx, name, args):
+    """Optional choices cannot terminate a doable typed edit before its render.
+
+    The existing question model decides whether an essential input is missing.
+    A second optional question is still optional; the one-shot tool nudge must
+    not turn it into a terminal reply on the next iteration.
+    """
+    if name != "ask_user" or _rendered_this_turn(ctx):
+        return None
+    ledger = getattr(ctx, "ask_ledger", None) or {}
+    if not any(a.get("kind") in {"film", "edit", "change"} for a in ledger.get("asks") or []):
+        return None
+    if agent_tools._question_needs_customer(ctx, (args or {}).get("question")):
+        return None
+    return ("CORRECTION_NEEDED: the request can be attempted with the information already "
+            "available. Make the requested edit, choose the optional details, and render_preview "
+            "before ending this turn. If only one part needs an essential customer input, "
+            "complete and render the independent part first.")
 
 
 def _note_unread_brief(ctx, honesty):
@@ -5239,6 +5272,11 @@ def _resume_serial_background(ctx, continuation):
         return ""
     result = agent_tools.wait_for_job(ctx, job_id)
     _record_outer_tool_outcome(ctx, "wait_for_job", result)
+    job = ctx.db.run(dbx.get_job, job_id) or {}
+    if (job.get("project_id") == ctx.project_id and job.get("user_id") == ctx.job.get("user_id")
+            and (job.get("payload") or {}).get("typed_craft_request")
+            and (job.get("result") or {}).get("typed_films") is not None):
+        result = "Typed shorts engine settled. Child render receipts: " + json.dumps(job["result"]["typed_films"])
     return "\nBackground work from this same request: " + result
 
 
@@ -6595,6 +6633,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # "dead air: #-#s is silent for #s" between 21 Sep and 22 Oct 2026).
         return fingerprint, _blocker_display_rows(plan, verification)
 
+    # A typed clip route can enqueue the serial planner before the first tool
+    # batch. Release this parent's writer so that planner can materialize it.
+    if _serial_background_handoff(ctx):
+        return _durable_continuation("awaiting serial background job")
+
     # TPM admission: the provider's tokens-per-minute ceiling is org-wide,
     # and a fresh turn's first call is the biggest single request we make
     # (~50K tokens of state + filmstrips). Starting it into a burst that is
@@ -7527,6 +7570,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             elif (ask_hold := _unmet_ask_hold(
                     ctx, name, args, user_message.get("content") or "")):
                 result = ask_hold
+            elif (typed_question := _typed_question_hold(ctx, name, args)):
+                result = typed_question
             elif (cut_refused := _look_only_cut_refusal(
                     ctx, name, user_message.get("content") or "")):
                 result = cut_refused
@@ -7571,6 +7616,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                             # it the question is translated and delivered.
                             q.question = _translate_question(
                                 ctx, client, q.question, _u_texts, _q_flip)
+                        # A question must not strand the portion of an edit
+                        # already completed. Use the same render/recovery
+                        # path as a normal reply before checking its claims.
+                        _auto_render_if_needed(ctx, worker_db, session_id,
+                                               timings, turn_deadline=turn_deadline)
                         _cur_v = (ctx.versions_written[-1]
                                   if ctx.versions_written
                                   else start_version)

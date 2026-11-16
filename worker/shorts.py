@@ -1193,6 +1193,113 @@ def _source_layout_for(worker_db, job, project, idx_row, index, workdir):
 
 
 # ------------------------------------------------------------------ the job
+def start_typed_craft(ctx, clips, request):
+    """A typed request authorizes finished clips, not a second Edit click.
+
+    Use the same story validation, materialization and plan gates as the
+    shorts engine. This entry is internal to Studio; MCP tools stay unchanged.
+    """
+    planned, problems, _moves = agent_tools._direct_short_clips(ctx, clips, snap="none")
+    if problems:
+        return {"fell": "story bounds: " + "; ".join(problems)}
+    payload = agent_tools._child_payload(ctx, {"source": "agent_direct",
+        "clips": planned, "count": len(planned), "style_note": request,
+        "typed_craft_request": request, "parent_agent_job_id": ctx.job["id"]})
+    def queue(conn):
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (int(ctx.job["id"]),))
+            cur.execute("""SELECT id FROM video_jobs WHERE project_id=%s AND user_id=%s
+                AND type='shorts_plan' AND payload->>'parent_agent_job_id'=%s
+                ORDER BY id LIMIT 1""", (ctx.project_id, ctx.job["user_id"], str(ctx.job["id"])))
+            old = cur.fetchone()
+        return old["id"] if old else dbx.enqueue_job(conn, ctx.project_id, ctx.job["user_id"], "shorts_plan", payload)
+    ctx.serial_job_id = ctx.db.run(queue)
+    return {"path": "podcast_shorts_engine", "job_id": ctx.serial_job_id}
+
+
+def _boot_typed_child(conn, job, clip, request):
+    """One fresh child editor per authorized arc, atomically across retries."""
+    child_id = clip["child_project_id"]
+    key = clip["materialization_key"] + ":typed-craft"
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (key,))
+        cur.execute("""SELECT id FROM video_jobs WHERE project_id=%s AND user_id=%s
+            AND type='agent_turn' AND payload->>'typed_craft_key'=%s ORDER BY id LIMIT 1""",
+            (child_id, job["user_id"], key))
+        old = cur.fetchone()
+        if old:
+            return old["id"]
+        cur.execute("SELECT chat_session_id FROM projects WHERE id=%s AND user_id=%s",
+                    (child_id, job["user_id"]))
+        child = cur.fetchone()
+        if not child:
+            raise RuntimeError("typed story child ownership changed")
+        prompt = (f"Finish this selected story ({clip['start']:g}-{clip['end']:g} source seconds) "
+                  f"as its own short. Hook candidate: {clip.get('hook') or clip['title']}. "
+                  "Read short-form-direction, cutting, hooks-retention and the relevant craft skills. "
+                  "Use the selected complete story, with a 9:16 frame, speech captions and an opening hook, "
+                  "unless the user's preserved direction excludes them. Make real editorial decisions from "
+                  "the footage, render a complete attempt, inspect it and repair defects. "
+                  "The parent's typed request already authorizes this child edit.\nUser's direction:\n" + request)
+        message_id = dbx.add_message(conn, child["chat_session_id"], "user", prompt,
+            {"shorts_boot": True, "from_parent": job["project_id"],
+             "customer_request": "Finish this selected story as one of the requested shorts.\n" + request,
+             "edl_version": clip["seed_edl_version"]})
+        editor_job = dbx.enqueue_job(conn, child_id, job["user_id"], "agent_turn",
+            {"message_id": message_id, "shorts_boot": True, "parent_project_id": job["project_id"],
+             "typed_craft_key": key, "execution_policy": (job.get("payload") or {}).get("execution_policy", config.EXECUTION_POLICY_MODE)})
+        cur.execute("""UPDATE projects SET meta=jsonb_set(COALESCE(meta,'{}'::jsonb),
+            '{shorts_editor}', COALESCE(meta->'shorts_editor','{}'::jsonb) || %s::jsonb)
+            WHERE id=%s""", (Json({"status": "editing", "job_id": editor_job}), child_id))
+    return editor_job
+
+
+def _wait_typed_children(worker_db, job, clips):
+    """The typed planner finishes only after its child attempts settle.
+
+    Children have separate project writers. The parent agent relinquishes
+    its writer through the existing serial continuation before this runs.
+    Retrying this wait adopts the same children and editor jobs.
+    """
+    deadline = time.monotonic() + config.PREVIEW_WAIT_TIMEOUT_S
+    pending = {c["editor_job_id"]: c for c in clips}
+    finished = []
+    while pending:
+        if job.get("total_claims") is not None and not worker_db.run(
+                dbx.lease_is_current, job["id"], job["total_claims"]):
+            raise dbx.JobLeaseLost("Typed shorts planner lease changed")
+        for jid, clip in list(pending.items()):
+            child = worker_db.run(dbx.get_project, clip["child_project_id"])
+            row = worker_db.run(dbx.get_job, jid)
+            if (not child or child.get("parent_project_id") != job["project_id"]
+                    or child.get("user_id") != job["user_id"] or not row
+                    or row.get("project_id") != child["id"] or row.get("user_id") != job["user_id"]):
+                raise RuntimeError("Typed story editor ownership changed")
+            if row.get("state") not in {"done", "failed", "cancelled"}:
+                continue
+            # A continued editor is still this attempt. Follow its actual
+            # durable receipt instead of declaring its first slice finished.
+            next_job = (row.get("result") or {}).get("continued_job_id")
+            if next_job:
+                del pending[jid]
+                pending[int(next_job)] = clip
+                continue
+            render = worker_db.run(dbx.latest_asset, child["id"], "render") or {}
+            latest = worker_db.run(dbx.latest_edl, child["id"]) or {}
+            current = bool(render and (render.get("meta") or {}).get("edl_version") == latest.get("version"))
+            finished.append({"child_project_id": child["id"], "editor_job_id": jid,
+                "state": row.get("state"), "render_asset_id": render.get("id") if current else None,
+                "edl_version": latest.get("version"), "width": render.get("width") if current else None,
+                "height": render.get("height") if current else None,
+                "duration_s": render.get("duration_s") if current else None})
+            del pending[jid]
+        if pending:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Typed story editors are still running; resume their existing jobs")
+            time.sleep(2)
+    return finished
+
+
 def run_shorts_plan(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     payload = job.get("payload") or {}
@@ -1206,6 +1313,8 @@ def run_shorts_plan(worker_db, job):
             shorts_meta.get("plan_job_id") == job_id:
         # A reclaimed job whose first run finished — nothing to redo.
         return {"clips": len(shorts_meta.get("clips") or []),
+                "editor_jobs": [c["editor_job_id"] for c in shorts_meta.get("clips") or [] if c.get("editor_job_id")],
+                "typed_films": shorts_meta.get("typed_films"),
                 "resumed": True, "billable": False}
 
     original = worker_db.run(dbx.latest_asset, project_id, "original")
@@ -1490,10 +1599,17 @@ def run_shorts_plan(worker_db, job):
             if line:
                 clip["source_layout"] = line
             clip["edit_status"] = "locked"
+            if payload.get("typed_craft_request") and payload.get("parent_agent_job_id"):
+                clip["editor_job_id"] = worker_db.run(_boot_typed_child, job, clip, payload["typed_craft_request"])
+                clip["edit_status"] = "editing"
             worker_db.run(_save_shorts_meta, project_id, shorts_meta)
             worker_db.run(dbx.set_progress, job_id,
                           35 + int(58 * position / n))
 
+        typed_films = None
+        if payload.get("typed_craft_request") and payload.get("parent_agent_job_id"):
+            typed_films = _wait_typed_children(worker_db, job, clips)
+            shorts_meta["typed_films"] = typed_films
         shorts_meta["status"] = "ready"
         shorts_meta["finished_at"] = _now_iso()
         worker_db.run(_save_shorts_meta, project_id, shorts_meta)
@@ -1506,13 +1622,16 @@ def run_shorts_plan(worker_db, job):
                 f"I reviewed all {mins:.0f} minutes and found {n} stor"
                 f"{'ies' if n != 1 else 'y'} genuinely worth developing "
                 f"({min(lens):.0f}-{max(lens):.0f}s). These are raw story "
-                "cuts, not template edits. Choose Edit on any card to boot "
-                "a fresh short-form editor for that reel.",
+                "cuts. " + (f"The child editors rendered {sum(bool(f.get('render_asset_id')) for f in typed_films or [])} of {n} attempts on their cards."
+                            if payload.get("typed_craft_request") else
+                            "Choose Edit on any card to boot a fresh short-form editor for that reel."),
                 {"kind": "shorts_candidates", "clips": n,
                  "parent_project_id": project_id})
 
         worker_db.run(dbx.set_progress, job_id, 97)
-        return {"clips": n, "rendered_clips": 0, "billable": True,
+        return {"clips": n, "rendered_clips": sum(bool(f.get("render_asset_id")) for f in typed_films or []), "billable": True,
+                "typed_films": typed_films,
+                "editor_jobs": [c["editor_job_id"] for c in clips if c.get("editor_job_id")],
                 "reference": bool(ref),
                 "children": [c.get("child_project_id") for c in clips]}
     except Exception:

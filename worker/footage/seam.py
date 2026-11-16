@@ -154,12 +154,12 @@ def shelve(offers, W=1080, H=1920):
     return {name: cache.put(name, rows, W, H) for name, rows in by.items()}
 
 
-def bin_offers(work, wishes, subjects, deadline, report=None, about="", user_id=None, W=1080, H=1920, skip=()):
+def bin_offers(work, wishes, subjects, deadline, report=None, about="", user_id=None, W=1080, H=1920, skip=(), cfg=None):
     """Footage candidates for score/supply.run's named route: [] while the switch is off for this account
     (no call, no cost) or when the budget is shorter than the engine needs (said in the report). Never
     raises: a customer's supply is never lost to this engine. skip: subjects that came off the shelf."""
     try:
-        if not switch.allowed("customer", user_id, customer_cfg()):
+        if not switch.allowed("customer", user_id, cfg if cfg is not None else customer_cfg()):
             return []
         return _offers(work, wishes, subjects, deadline, report, about, W, H, skip=skip)
     except Exception as e:  # noqa: BLE001 the Bin stands without footage, and says why
