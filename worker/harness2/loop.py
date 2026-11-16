@@ -320,7 +320,7 @@ def _outcome(ctx, start_version, envs):
 
 
 def finalize(ctx, worker_db, job, session_id, text, start_version, step,
-             counts, envs, timings):
+             counts, envs, timings, extra_meta=None):
     outcome, billable, latest, changed = _outcome(ctx, start_version, envs)
     if changed and (getattr(ctx, "last_preview", None) or {}).get(
             "edl_version") != latest["version"]:
@@ -334,7 +334,7 @@ def finalize(ctx, worker_db, job, session_id, text, start_version, step,
             "preview": shown if str(shown.get("edl_version")) == str(
                 latest["version"]) else None,
             "v2": {"steps": step, "tools": counts,
-                   "start_version": start_version}}
+                   "start_version": start_version}, **(extra_meta or {})}
     reply = str(text or "").strip() or (
         f"The film is now v{latest['version']}." if changed else
         "Done.")
@@ -346,6 +346,45 @@ def finalize(ctx, worker_db, job, session_id, text, start_version, step,
 
 
 # --------------------------------------------------------------------------
+# what the customer can pay for (a business rule, kept as it is in v1)
+
+def _over_budget(ctx):
+    try:
+        return bool(ctx.over_budget())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _budget_stop(ctx, worker_db, job, session_id, start_version, step,
+                 counts, envs, timings):
+    """The turn's spend reached what the account can pay (credits plus the
+    grace, or the trial's allowance): finish on what is saved, with v1's
+    own words and the upgrade metadata the Studio reads."""
+    subscribed = bool(getattr(ctx, "subscribed", False))
+    trialing = bool(getattr(ctx, "trialing", False))
+    if getattr(ctx, "claude_trial", None) is not None:
+        import claude_trial
+        text = claude_trial.EXHAUSTED_TEXT
+        extra = claude_trial.stop_meta(claude_trial.Decision.EXHAUSTED,
+                                       (job.get("payload") or {}).get(
+                                           "message_id"))
+    else:
+        refill = ("That's the credits included with your free trial. Keep "
+                  "your plan and the full monthly pool unlocks straight "
+                  "away." if trialing else
+                  "Your credits refresh on your plan's cycle, or upgrade for "
+                  "a bigger monthly pool to keep editing now." if subscribed
+                  else "Subscribe to keep editing.")
+        text = ("That used up your available credits. Everything I finished "
+                "is saved. " + refill)
+        extra = {"credits_exhausted": True,
+                 "free_trial_exhausted": not subscribed,
+                 "trial_cap_reached": trialing}
+    result = finalize(ctx, worker_db, job, session_id, text, start_version,
+                      step, counts, envs, timings, extra_meta=extra)
+    result["outcome"] = "budget"
+    return result
+
 
 def _record(model, messages, msg, usage):
     try:
@@ -393,6 +432,9 @@ def run(ctx, worker_db, job, session_id, user_message,
         agent_loop._sleep_keeping_lease(worker_db, job["id"], seconds)
 
     while True:
+        if _over_budget(ctx):
+            return _budget_stop(ctx, worker_db, job, session_id, start_version,
+                                step, counts, envs, timings)
         if seconds_left() <= 5 or slice_steps >= MAX_STEPS_PER_SLICE:
             body = _checkpoint(worker_db, job, messages, step, start_version,
                                {"counts": counts})

@@ -313,3 +313,22 @@ def test_a_long_tool_call_continues_the_turn_instead_of_stalling(
     assert result["status"] == "continued"         # not failed, not stalled
     assert db.continuations[-1]["continuation_state"]["v2"]["step"] == 2
     assert not [m for m in db.messages if m["role"] == "assistant"]
+
+
+def test_a_turn_stops_on_what_the_account_can_pay(monkeypatch):
+    ctx, db, job, msg = _turn()
+    script = Script([_resp(calls=[("edit", {"ops": [{"cut": [[10, 20]]}]})]),
+                     _resp(content="never reached")])
+    ctx.agent_lanes = [_lane(script)]
+    ctx.subscribed, ctx.trialing, ctx.claude_trial = True, False, None
+    spent = {"n": 0}
+
+    def over():
+        spent["n"] += 1
+        return spent["n"] > 1                      # after the first step
+    ctx.over_budget = over
+    result = loop.run(ctx, db, job, 11, msg, None)
+    assert result["outcome"] == "budget" and db.inserts == [8]
+    reply = db.messages[-1]
+    assert reply["meta"]["credits_exhausted"] is True
+    assert "saved" in reply["content"] and len(script.replies) == 1
