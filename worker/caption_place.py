@@ -101,6 +101,9 @@ def line_height(edl, W, H):
     W, H = float(W), float(H)
     if look:
         fs, lh = LOOK_LINE.get(look, LOOK_LINE["editorial"])
+        if style.get("single_line") and look in HERO_LOOKS:
+            fs *= {"lockup": 1.6, "stack": 1.7}[look]
+            lh = 1.05  # browser .sm row with CFG.mid, no hero ladder
         try:
             size = float(style.get("size_scale") or _SIZE_OF.get(style.get("size") or "m", 1.0))
         except (TypeError, ValueError):
@@ -275,13 +278,13 @@ def block_metrics(edl, W, H):
     libass block is centred on its anchor."""
     one = line_height(edl, W, H)
     look = look_of(edl)
+    caps = (edl or {}).get("captions") or {}
+    style = caps.get("style") if isinstance(caps.get("style"), dict) else {}
     if not look:
-        caps = (edl or {}).get("captions") or {}
-        style = caps.get("style") if isinstance(caps.get("style"), dict) else {}
         lines = 1 if style.get("single_line") else 2
         return one, lines * one, False
     fs = one / LOOK_LINE.get(look, LOOK_LINE["editorial"])[1]     # the font size
-    if look == "pop":
+    if look == "pop" or style.get("single_line"):
         tall = one
     elif look == "editorial":
         tall = max(2 * one, fs * (1.08 + 1.8 * 0.86))     # a sans row over its serif hero
@@ -303,6 +306,8 @@ def line_chars(edl, W, H, col):
     caps = (edl or {}).get("captions") or {}
     style = caps.get("style") if isinstance(caps.get("style"), dict) else {}
     fs = one / (LOOK_LINE.get(look, LOOK_LINE["editorial"])[1] if look else 1.2)
+    if style.get("single_line") and look in HERO_LOOKS:
+        fs = one / 1.05
     upper = bool(style.get("uppercase")) or look in ("pop", "lockup")
     em, pad = _measured_em(edl, look, upper) or (CAPS_EM if upper else CHAR_EM, 0.0)
     width = (float(col[1]) - float(col[0])) * float(W) - pad * fs * float(H)
