@@ -30755,7 +30755,12 @@ def make_shorts(ctx, count=None, style_note=None, clips=None, snap=None):
     'none' for the in-house agent."""
     if count is not None and (isinstance(count, bool) or not isinstance(count, int) or count < 1):
         return "CORRECTION_NEEDED: count must be a positive integer."
-    if getattr(ctx, "project", {}).get("parent_project_id"):
+    # Harness v2 (H32, map part 2 overrule sites): clips the caller chose are
+    # their own evidence, from any footage of any length, so the planner's
+    # checks below do not stand between the caller and its clips.
+    authored_v2 = getattr(ctx, "harness", None) == "v2" and bool(clips)
+    if getattr(ctx, "project", {}).get("parent_project_id") and \
+            not authored_v2:
         return (f"REJECTED: this project IS a generated short (from the "
                 f"board of project {ctx.project['parent_project_id']}) — do "
                 "not cut shorts from a short. Edit THIS clip with the "
@@ -30765,7 +30770,7 @@ def make_shorts(ctx, count=None, style_note=None, clips=None, snap=None):
         return ("REJECTED: shorts are cut from the MAIN video and this "
                 "project has none yet — ask the user to upload their long "
                 "video first.")
-    if ctx.duration < 60.0:
+    if ctx.duration < 60.0 and not authored_v2:
         if count is not None and int(count) > 1:
             return ("UNAVAILABLE: make_shorts extracts ranges from the main "
                     "source only; it cannot create multiple separate edits "
@@ -30783,7 +30788,7 @@ def make_shorts(ctx, count=None, style_note=None, clips=None, snap=None):
     has_speech = bool(ctx.index.get("words") or [])
     has_visual_plan = bool(ctx.index.get("tile_keys") or []) \
         and llm.vision_available()
-    if not has_speech and not has_visual_plan:
+    if not has_speech and not has_visual_plan and not authored_v2:
         return ("REJECTED: this video has neither usable speech nor a "
                 "visual filmstrip reviewer available, so there is no honest "
                 "evidence for choosing highlight windows. The user can edit "

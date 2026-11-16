@@ -435,7 +435,7 @@ def test_clips_create_child_projects(monkeypatch):
 
     def fake_shorts(base, clips, style_note=None):
         asked.append(clips)
-        base.shorts_job_id = 4512
+        base.serial_job_id = 4512
         return f"Started {len(clips)} clip project(s)."
     monkeypatch.setattr(ops_mod.Engines, "make_shorts",
                         staticmethod(fake_shorts))
@@ -550,3 +550,31 @@ def test_describe_missing_logs_its_cause_and_asks_a_second_lane(
     assert hits[0]["description"] == "a red bus" and missing == 0
     out = capsys.readouterr().out
     assert "429 insufficient_quota" in out and "asking the turn lane" in out
+
+
+def test_v2_clips_pass_the_planner_checks_a_caller_does_not_need(
+        monkeypatch):
+    """H32: clips the caller chose are their own evidence (a short's own
+    footage, a short source, no speech): make_shorts takes them under v2."""
+    ctx, fake = _ctx(duration=40.0)
+    ctx.project = dict(ctx.project, parent_project_id=5800)
+    ctx.index["words"] = []
+    seen = []
+    monkeypatch.setattr(agent_tools, "_direct_short_clips",
+                        lambda c, clips, snap=None: (
+                            seen.append(clips) or clips, [], []))
+    real = fake.run
+
+    def run(fn, *a, **k):
+        if fn is dbx.has_active_job:
+            return False
+        if fn is dbx.enqueue_job:
+            return 4512
+        return real(fn, *a, **k)
+    fake.run = run
+    clips = [{"start": 1.0, "end": 12.0, "title": "one"}]
+    v1 = agent_tools.make_shorts(ctx, clips=clips)
+    assert v1.startswith("REJECTED: this project IS a generated short")
+    ctx.harness = "v2"
+    v2 = agent_tools.make_shorts(ctx, clips=clips)
+    assert not v2.startswith("REJECTED") and seen

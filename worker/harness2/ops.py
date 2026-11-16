@@ -584,7 +584,7 @@ def op_clips(stage, value, env, index):
         env.skip(index, first_line(result))
         return False
     env.finding(first_line(result, 600))
-    job_id = getattr(stage._base, "shorts_job_id", None)
+    job_id = getattr(stage._base, "serial_job_id", None)
     if job_id:
         env.running = {"handle": f"job:{job_id}",
                        "what": f"{len(clips)} clip project(s)"}
