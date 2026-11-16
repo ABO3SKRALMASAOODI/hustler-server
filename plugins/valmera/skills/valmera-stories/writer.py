@@ -430,7 +430,7 @@ def write(idea, card, form, voices=None, notes=None, effort="high"):
     system = ("You are the writer and voice director of Valmera's story workflow. You write narration that is spoken by a synthetic "
               "narrator over real footage and photographs of what it names, for a " + F["name"] + ". Every sentence is true and checked on the web now; nothing "
               "is invented, rounded or dramatised beyond the sources. You also direct the actor: pace, energy, melody, emphasis and "
-              "pauses per segment. Write for the ear: short sentences, concrete nouns, numbers a listener can hold.")
+              "pauses per segment. Write for the ear: a thought runs on with commas and 'and', 'but', 'so' until it lands, a full stop only where it lands, lengths mixed (never three short sentences in a row, never a verbless fragment as a sentence), concrete nouns, numbers a listener can hold.")
     system += f"\n\n# The bar\n{references()}\n\n"
     system += "\n\n" + (("Read the sources again with the web tools and check every fact. The first segment is the hook: it must work in the "
                "first second (a known name and something that should not be true, or a stake), never a greeting or a question to the "
@@ -2189,7 +2189,7 @@ def write_from_bank(idea, card, form, bank, voices=None, notes=None, effort="hig
               "over real footage and photographs of what it names, for a " + F["name"] + ". You write ONLY from the bank of verified "
               "facts you are given: each is a sentence found word for word on its page, with whose statement it is and when. "
               "Nothing is invented, rounded or dramatised beyond them. You also direct the actor: pace, energy, melody, emphasis "
-              "and pauses per segment. Write for the ear: short sentences, concrete nouns, numbers a listener can hold.")
+              "and pauses per segment. Write for the ear: a thought runs on with commas and 'and', 'but', 'so' until it lands, a full stop only where it lands, lengths mixed (never three short sentences in a row, never a verbless fragment as a sentence), concrete nouns, numbers a listener can hold.")
     system += f"\n\n# The bar\n{references()}\n\n" + BANK_WRITE_RULES
     system += ("Return JSON only: {\"title\": a plain title, \"voice\": one voice id, \"pace\": slow|steady|brisk|fast, \"energy\": "
                "low|mid|high, \"hook_line\": the first segment's words, \"close_line\": the last segment's words, \"names\": [every "

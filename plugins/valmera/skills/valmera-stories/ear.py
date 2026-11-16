@@ -3,10 +3,16 @@
     script2, report = for_ear(script, form="story" | "long-form")
 
 The writer's script is true and checked; it is often written for the eye: long sentences, the key word buried in the
-middle, figures stacked in one breath. The references' narrators (judge teardown section 12, the 8 metromedia reels)
-speak in sentences of 9 to 14 words, open one sentence in three on a hinge (But, So, Then, And, Because), turn every
-three or four sentences, drop 1-4 word verdicts ("Rejected.", "Then, 2008 hit."), land a name alone in a short
-sentence, and end each sentence low and falling (voice_ref.json: 1.2-2.9 semitones under the phrase).
+middle, figures stacked in one breath. The references' narrators (judge teardown section 12, the metromedia reels) carry
+a thought on with commas and hinges until it lands (11-13 words a line, about one comma a sentence), open one sentence
+in three on a hinge, turn every three or four sentences and land the news late in the sentence.
+
+17 Nov (stories lane): the earlier shape here, "sentences of 9 to 14 words, one idea a sentence, verdicts, the name
+alone in a short sentence, every sentence ends low", read on Phonon Easton as a full stop every few seconds: the three
+Easton story films of 14 Nov measured 7.3-7.9 words a line against 11.1-12.6 for the metromedia narrators, 69-73% of
+line ends falling more than 2 st and 0-12% rising (references 53-55% and 20-29%), cadence sameness 2.6-2.9 st against
+3.4-4.7. Phonon takes no direction: it hears only the words and the punctuation, so the sentence shape is the melody.
+The short-film shape is now the long-form lane's ear shape at a reel's length (SHAPE).
 
 One model call rewrites every segment's `say` and its delivery (`emphasis`, `pause_after`, `melody`, `pace`,
 `direction`) to that shape; a second call, blind to the first one's reasons, compares old and new segment by segment
@@ -37,18 +43,25 @@ EAR_MODEL = "gpt-6.1-sol"   # pinned to OpenAI: writer.ask would turn to Anthrop
 FIELDS = ("say", "emphasis", "pause_after", "melody", "pace", "direction")
 
 SHAPE = (
-    "How the best narrators of short documentary films speak (measured on the films that are the bar):\n"
-    "- Sentences of 9 to 14 words; one idea a sentence; a long sentence is split where a speaker would breathe.\n"
+    "How the best narrators of short documentary films speak (measured on the films that are the bar; the narrator's "
+    "engine hears only the words and the punctuation, so the sentence shape IS the melody):\n"
+    "- A thought runs on with a comma and 'and', 'but', 'so', 'until', 'which', 'when' while it is still moving; a full "
+    "stop comes only where it lands. About one full stop every twelve words, most sentences with a comma: a comma keeps "
+    "the voice up and carries the listener into the next half, a full stop brings it down.\n"
+    "- Lengths mix: a run of twelve to twenty words that builds, then a short line of three to six words that lands it. "
+    "Never three short sentences in a row. A fragment without its verb (\"Sony engineer Ken Kutaragi.\") is never a "
+    "sentence of its own: the name rides at the end of the clause that needs it (\"and the engineer who would not let "
+    "it go was Ken Kutaragi.\").\n"
     "- About one sentence in three opens on a hinge: But, So, Then, And, Because. A real turn every three or four "
-    "sentences, said as a turn (\"But the bank said no.\").\n"
-    "- Short verdicts of one to four words where the story lands (\"Rejected.\", \"Then, 2008 hit.\", \"That was it.\").\n"
-    "- A person's name lands alone in a short sentence the first time it matters (\"His name was Fred Smith.\").\n"
-    "- The new information comes late in its sentence, where English puts the main stress, so the voice can climb to "
-    "it and fall; never bury it mid-sentence behind a list. The stressed word is the word that carries the news (often "
-    "the figure: TWENTY-SEVEN thousand dollars, not dollars), never a unit, an article or a pronoun.\n"
+    "sentences, said as a turn (\"But the bank said no.\"); a short verdict of two to five words only where the story "
+    "truly lands, at most one in four sentences.\n"
+    "- The new information comes late in its sentence, where English puts the main stress, so the voice climbs to it; "
+    "never bury it mid-sentence behind a list. The stressed word is the word that carries the news (often the figure: "
+    "TWENTY-SEVEN thousand dollars, not dollars), never a unit, an article or a pronoun.\n"
     "- Numbers a listener can hold: one figure a sentence, said in full words the way a narrator says them "
     "(\"twenty-seven thousand dollars\", \"nineteen seventy-three\"), never two figures racing in one breath.\n"
-    "- Every sentence ends low and settled except a real question; questions are rare and earn their place.\n")
+    "- Each fact is said plainly once: no sentence corrects a mistake the listener was not making ('not X, but Y'). "
+    "Questions are rare and earn their place.\n")
 
 # the reference narrators' joins (VO2 check, 14 Nov: 0.25 s [0.18-0.26], about four real pauses a minute)
 PAUSES = {
@@ -59,7 +72,7 @@ HARD = ("- Hard words: a long or rare compound a speech engine runs together is 
         "(\"retro rockets\"); a word with two readings gets the spelling of the one meant; names stay exactly as spelled.\n")
 SHAPE += HARD
 
-# Long form (16 Nov): the short-film shape above (9-14 word sentences, one idea each, verdicts, every sentence ending low)
+# Long form (16 Nov): the old short-film shape (9-14 word sentences, one idea each, verdicts, every sentence ending low)
 # read on Easton as a full stop every few seconds: 78% of line ends fell more than 2 semitones and 4% rose, against 53-55%
 # and 20-29% for the metromedia narrators, whose sentences run 12-16 words with about one comma each. Phonon hears only the
 # words and punctuation, so the sentence shape is the melody.
@@ -76,10 +89,12 @@ LONG_SHAPE = (
 SHAPES = {"long-form": LONG_SHAPE}
 
 # the voice a later rewrite keeps (writer.final_support restates an unsupported line in the ear's style)
-KEEP_STYLE = ("The line is spoken by a narrator over pictures and was already rewritten for the ear: keep that voice. Sentences "
-              "of nine to fourteen words, one idea a sentence; hinge words (But, So, Then) where the story turns; short verdicts "
-              "of one to four words made only of what the line states; the news late in its sentence; numbers and years in "
-              "words; commas and full stops only (no dashes, colons, semicolons or brackets); about the same length as now.")
+KEEP_STYLE = ("The line is spoken by a narrator over pictures and was already rewritten for the ear: keep that voice. A "
+              "thought runs on with commas and 'and', 'but', 'so' until it lands, a full stop only where it lands (about one "
+              "every twelve words, most sentences with a comma); lengths mixed, never three short sentences in a row, never a "
+              "verbless fragment as a sentence; hinge words (But, So, Then) where the story turns; the news late in its "
+              "sentence; numbers and years in words; commas and full stops only (no dashes, colons, semicolons or "
+              "brackets); about the same length as now.")
 
 QUESTION = {
     "story": "Exactly one segment in the setup asks the question the film will answer (the viewer's own question, said by "
