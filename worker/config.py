@@ -2511,6 +2511,9 @@ KEEP_CLUSTER_MEM_MB = float(os.getenv("KEEP_CLUSTER_MEM_MB", "512"))
 # A preview seeks to its kept stretches even when its first keep starts at the
 # head of the source (B4, 16 Nov 2026; renderer.render_edl).
 RENDER_SEEK_DISTANT_KEEPS = os.getenv("RENDER_SEEK_DISTANT_KEEPS", "1") != "0"
+# Cluster reads of a frame this small (megapixels) use ffmpeg's own decoder
+# thread count; larger frames keep KEEP_CLUSTER_THREADS for memory.
+KEEP_CLUSTER_AUTO_THREADS_MAX_MPIX = float(os.getenv("KEEP_CLUSTER_AUTO_THREADS_MAX_MPIX", "1.0"))
 
 SILENCE_NOISE_DB = "-35dB"
 SILENCE_MIN_S = 0.6

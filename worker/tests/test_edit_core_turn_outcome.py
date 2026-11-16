@@ -311,6 +311,7 @@ def test_a_preview_starting_at_the_head_reads_only_its_kept_stretches(tmp_path, 
     assert abs(dur - 18.0) < 0.2 and abs(media.duration_of(out) - 18.0) < 0.3
     cmd = " ".join(seen[-1])
     assert "-ss 69.000" in cmd and "-ss 119.000" in cmd       # each distant stretch read on its own
+    assert "-threads:v 2" not in cmd                          # a small frame decodes on ffmpeg's own count
     # the frames are the ones the whole-source read gives
     monkeypatch.setattr(config, "RENDER_SEEK_DISTANT_KEEPS", False)
     ref = str(tmp_path / "ref.mp4")
@@ -320,3 +321,18 @@ def test_a_preview_starting_at_the_head_reads_only_its_kept_stretches(tmp_path, 
                           capture_output=True, text=True).stderr
     avg = float(psnr.rsplit("average:", 1)[1].split()[0]) if "average:" in psnr else 0.0
     assert avg == float("inf") or avg > 45, psnr[-300:]
+
+
+def test_silence_gaps_say_whether_the_current_film_still_holds_them(monkeypatch):
+    """p5717 R1 offered to trim "the 11.4 s gap between 13.1 s and 24.5 s" of a film the first cut
+    had already reduced to 6.3 s. Each gap now says where it is in the film, or that it was cut."""
+    import agent_tools
+    edl = {"keep": [[3.0, 6.0], [30.0, 33.0]]}
+    ctx = NS(index={"words": [{"w": "go", "t0": 2.0, "t1": 2.5}, {"w": "now", "t0": 40.0, "t1": 40.4}]},
+             latest_edl=lambda: {"version": 9, "json": edl}, duration=92.88)
+    monkeypatch.setattr(agent_tools, "_dead_air", lambda c, m: (
+        [{"start": 13.1, "end": 24.5, "quiet_frac": 1.0}, {"start": 31.0, "end": 32.0, "quiet_frac": 1.0}], "speech"))
+    out = agent_tools.find_silences(ctx, 0.7)
+    lines = out.splitlines()
+    assert "not in the current film: the edit already cut it" in next(l for l in lines if l.startswith("13.10"))
+    assert next(l for l in lines if l.startswith("31.00")).endswith("[in the film at output 4.00-5.00]")

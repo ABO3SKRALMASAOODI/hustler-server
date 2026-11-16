@@ -1416,9 +1416,29 @@ def find_silences(ctx, min_seconds=0.7, start=None, end=None):
                     "call a silence. Say so plainly; do not guess at pauses "
                     "from the picture.")
         return f"No gaps in the speech of {min_s}s or longer{span}."
+    # Where each gap is in the CURRENT film (EDIT-CORE B1, 16 Nov 2026: p5717's reply offered to
+    # trim "the 11.4 s gap between 13.1 s and 24.5 s" of a 6.3 s film that no longer held it).
+    film = None
+    try:
+        edl_now = ctx.latest_edl()["json"]
+        if edl_now.get("keep"):
+            film = Timeline(edl_now["keep"], edl_now.get("inserts") or [], edl_now.get("speed"))
+    except Exception:  # noqa: BLE001
+        film = None
     lines = []
     for g in gaps[:100]:
         s, e = g["start"], g["end"]
+        where = ""
+        if film is not None:
+            try:
+                spans = [(float(a), float(b)) for a, b in film.span_to_out(s, e) if b - a > 0.05]
+            except Exception:  # noqa: BLE001
+                spans = None
+            if spans == []:
+                where = " [not in the current film: the edit already cut it]"
+            elif spans:
+                where = (" [in the film at output " + ", ".join(
+                    f"{_fmt_t(a)}-{_fmt_t(b)}" for a, b in spans[:3]) + "]")
         before = next((w["w"] for w in reversed(words) if w["t1"] <= s + 0.05),
                       None)
         after = next((w["w"] for w in words if w["t0"] >= e - 0.05), None)
@@ -1432,7 +1452,7 @@ def find_silences(ctx, min_seconds=0.7, start=None, end=None):
             f" [NOT quiet — {int((1 - q) * 100)}% of this gap has audio "
             "(music/game/room); cutting it removes that sound too]")
         lines.append(f"{_fmt_t(s)}-{_fmt_t(e)} ({e - s:.2f}s, midpoint "
-                     f"{_fmt_t((s + e) / 2)}){ctxt}{sound}")
+                     f"{_fmt_t((s + e) / 2)}){ctxt}{sound}{where}")
     note = f"\n({len(gaps) - 100} more not shown)" if len(gaps) > 100 else ""
     if not span:
         note += _silence_range_hint(ctx)

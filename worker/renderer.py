@@ -8010,6 +8010,14 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         if len(clusters) > 1:
             main_video_inputs = []
             threads = max(0, int(config.KEEP_CLUSTER_THREADS))
+            # A small frame (a preview's 540p proxy) decodes on ffmpeg's own
+            # thread count: the reads follow one another in the programme, so
+            # two threads each left the CPU idle (p5857 v16, 59-min preview:
+            # 120 s with 2 threads, 74 s auto, 313 MB peak against 1191 MB
+            # for the whole-source read).
+            mpix = float(info.get("width") or 0) * float(info.get("height") or 0) / 1e6
+            if 0 < mpix <= config.KEEP_CLUSTER_AUTO_THREADS_MAX_MPIX:
+                threads = 0
             for a, b in clusters:
                 seek = max(0.0, a - 1.0)
                 if threads:
