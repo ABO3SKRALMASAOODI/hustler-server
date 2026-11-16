@@ -8,6 +8,11 @@ import numpy as np
 
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent/'_shell'/'narrate'))
 
+# Voiced p95-p5 pitch range of the long-form narrators (ref_band.json band 04, p10..p90 of 20 long-form reference films).
+# Until 16 Nov this was the metromedia reels' 13.79-15.33 st, which Easton reaches only by resynthesising its contour.
+PITCH_BAND=tuple(json.loads((Path(__file__).resolve().parent.parent/'_shell'/'narrate'/'ref_band.json').read_text())
+                 ['band']['04']['f0_range_st'][k] for k in ('p10','p90'))
+
 
 def measure(path, expected, cache):
     import librosa
@@ -52,7 +57,7 @@ def measure(path, expected, cache):
            method='unprompted whisper large-v3; gaps >=0.15s; pyin 60..400Hz, 10ms, voiced p95-p5; VO2 independent-check method')
     r['targets']=dict(wer=r['wer']<0.01,pause_rate=11.7<=r['pauses_per_min']<=17.4,
                       pause_median=r['median_pause_s'] is not None and 0.22<=r['median_pause_s']<=0.28,
-                      pitch=13.79<=r['pitch_range_st']<=15.33)
+                      pitch=PITCH_BAND[0]<=r['pitch_range_st']<=PITCH_BAND[1])
     r['ok']=all(r['targets'].values())
     (cache/'metrics.json').write_text(json.dumps(r,indent=1))
     return r

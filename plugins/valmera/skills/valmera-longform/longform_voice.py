@@ -158,8 +158,11 @@ def finish(out, script):
     before=measure(origin,expected,out/'performance-metrics')
     if before['wer']>=.01: raise ValueError('Easton performance must pass word error before contour processing')
     factor=1.0
-    gain=1.0 if before['targets']['pitch'] else 14.5/before['pitch_range_st']
-    if not .85<=gain<=1.3: raise ValueError('pitch correction would exceed the natural performance limit; regenerate')
+    # No pitch resynthesis (16 Nov). Expanding the whole contour toward the short reels' 14.5 st (gain 1.24 on the 16 Nov
+    # Skylab read) made every sentence end fall deeper (78% of line ends over 2 st, 4% rising; metromedia 53-55% and
+    # 20-29%) and gave the voice an overlap-add sheen. Range comes from the performance: the sentence shape the writer
+    # gives Phonon and the takes chosen for range and restart. Pitch is measured against the long-form narrators' band.
+    gain=1.0
     join_aim=14.0
     for attempt in range(3):
         x,sr=sf.read(origin,dtype='float32')
@@ -197,7 +200,7 @@ def finish(out, script):
             wj,joins=shorten_joins(audio,wj,heard,script,out,ff,aim=join_aim)
             words.write_text(json.dumps(wj,indent=1))
         after=measure(audio,expected,out/'longform-metrics')
-        result=dict(before=before,after=after,tempo=factor,contour_gain=gain,join_edits=joins,method='Easton + Praat overlap-add, existing pitch contour; short joins paced with WSOLA, phonemes retained')
+        result=dict(before=before,after=after,tempo=factor,contour_gain=gain,join_edits=joins,method='Easton performance as read (no pitch resynthesis); short joins paced with WSOLA, phonemes retained')
         done.write_text(json.dumps(result,indent=1))
         if after['ok']:
             if origin_render.exists():
@@ -210,8 +213,6 @@ def finish(out, script):
             (out/'check.json').unlink(missing_ok=True)
             return result
         if after['wer']>=.01: break
-        gain*=14.5/after['pitch_range_st']
-        if not .85<=gain<=1.3: break
         if after['pauses_per_min']<=17.4:
             factor*=tempo_factor(after['pauses_per_min'],after['median_pause_s'])
         else:
