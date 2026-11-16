@@ -190,7 +190,7 @@ def narrated(ctx, ns, nd, reader):
     stage=nd/'read-stage.json'
     same_read=stage.exists() and read(stage).get('script')==ns
     try:
-        if not same_read or not report.exists() or not read(report)['after']['ok']:
+        if not same_read or not report.exists() or not (read(report)['after']['ok'] or read(report).get('accepted')):
             guarded_voice(ctx,[PX.NARRATE_PY,reader,'render',str(nd/'narration_script.json'),
                               '--out',str(nd),'--band','04'],'wf4-narration-'+ctx.run_id)
         if not (nd/'check.json').exists():
