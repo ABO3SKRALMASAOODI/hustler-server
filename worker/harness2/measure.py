@@ -67,6 +67,9 @@ def edl_measure(edl, source_s=None, preview=None):
            "sfx": len(edl.get("sfx") or []),
            "frame": (edl.get("frame") or {}).get("ratio")
            if isinstance(edl.get("frame"), dict) else None}
+    speed = speed_measure(edl)
+    if speed:
+        out["speed"] = speed
     if preview:
         qc = preview.get("audio_qc") if isinstance(
             preview.get("audio_qc"), dict) else {}
@@ -75,6 +78,31 @@ def edl_measure(edl, source_s=None, preview=None):
             "duration_s": preview.get("duration_s"),
             "lufs": qc.get("integrated_lufs"),
             "true_peak": qc.get("true_peak_dbtp") or qc.get("true_peak")}
+    return out
+
+
+def speed_measure(edl):
+    """Where each speed span plays on the film: [{id, factor, film_s,
+    source_s}], measured from the EDL's own clock."""
+    spans = [sp for sp in (edl or {}).get("speed") or []
+             if isinstance(sp, dict)]
+    if not spans:
+        return []
+    try:
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [], spans)
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for sp in spans:
+        try:
+            s, e = float(sp["start"]), float(sp["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        film = tl.span_to_out(s, e)
+        out.append({"id": sp.get("id"), "factor": sp.get("factor"),
+                    "film_s": ([round(film[0][0], 2), round(film[-1][1], 2)]
+                               if film else None),
+                    "source_s": [round(s, 2), round(e, 2)]})
     return out
 
 
