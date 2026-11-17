@@ -12157,7 +12157,12 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
         eligible_count = hit
 
     prog = program_duration(edl)
+    # Harness v2 places what the model asked for and shows it the pixels;
+    # the spacing taste is the model's call (p5873: "make the transitions
+    # more elevated" on 11 shots in 35 s was refused here, reported as
+    # "already so", and the film went back to hard cuts).
     if sc == "scene" and limit is None and window is None and hit >= 3 \
+            and getattr(ctx, "harness", None) != "v2" \
             and prog > 0 and prog / hit < TRANSITION_MIN_SPACING_S:
         safe_max = max(1, int(prog / TRANSITION_MIN_SPACING_S))
         return (f"NOT APPLIED: {hit} eligible scene changes across {prog:.0f}s "

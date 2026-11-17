@@ -155,6 +155,28 @@ def _start_render(ctx):
         return {"error": str(exc)[:200]}
 
 
+RENDER_WAIT_S = 45.0
+
+
+def _await_render(ctx, version):
+    """The rendered preview of ``version``: started if needed and waited on
+    for up to RENDER_WAIT_S (a preview takes seconds). (row, None) once it
+    exists; (None, running) when it is still going."""
+    from harness2 import render_tool
+    started = _start_render(ctx)
+    if started.get("asset"):
+        return started["asset"], None
+    job_id = started.get("job_id")
+    if job_id is None or int(started.get("version") or -1) != int(version):
+        return None, ({"handle": started.get("handle"),
+                       "what": f"preview v{started.get('version', '?')}"}
+                      if started.get("handle") else None)
+    env = render_tool.settle(ctx, job_id, version, RENDER_WAIT_S)
+    if env.running:
+        return None, env.running
+    return _render_row(ctx, version), None
+
+
 def _env(body_parts, ctx, coverage, notes, findings=None, running=None,
          measured=None):
     body = "\n".join(p for p in body_parts if p)
@@ -240,16 +262,21 @@ def _frames_at(ctx, kind, key, wanted, notes, version=None, label=""):
     elif kind == "render":
         vctx, row = _version_ctx(ctx, version)
         rendered = _render_row(ctx, row["version"]) if row else None
+        if not rendered and row:
+            rendered, running = _await_render(ctx, int(row["version"]))
         if rendered:
             texts = _frames_asset(ctx, rendered["storage_key"], wanted)
             coverage = (f"rendered v{row['version']}: {len(wanted)} "
                         "frame(s)")
         else:
-            started = _start_render(ctx)
-            running = {"handle": started.get("handle"),
-                       "what": f"preview v{row['version'] if row else '?'}"}
+            running = running or {
+                "what": f"preview v{row['version'] if row else '?'}"}
             texts = _frames_program(ctx, wanted, vctx)
-            coverage = ("assembled from source; render running "
+            # p5873: these frames were read as the render and a dip that
+            # rendered fine was called missing. Say what they lack.
+            coverage = ("NOT the render: the cut assembled from source "
+                        "frames, without transitions, grades, captions, "
+                        "texts or overlays; the render is still running "
                         f"({len(wanted)} frame(s))")
     else:
         vctx, row = _version_ctx(ctx, version)
