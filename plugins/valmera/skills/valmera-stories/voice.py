@@ -19,6 +19,9 @@ engine, using the tool's own parts:
                     lifts over instead of closing on, and a full stop that does not fall the same way as the last ones
                     (signal only; Easton ended 69-78% of lines falling and 0-12% rising against 53-55% / 20-29% for the
                     metromedia narrators, every ending alike: cadence sameness 2.6-2.9 st against 3.4-4.7)
+  continuation      (17 Nov) a comma the finished read holds up keeps the references' clause pause (CONT_S), lengthened
+                    in the take's own quiet where it ran on; a comma that falls keeps a short one (0.08 s), so it never
+                    sounds like a stop
   joins             0.22 s between generations, 0.40 s where the story turns (the writer's beats), room tone in every pause
   focus words       the writer's one or two stressed words per line ridden to +4.3 dB over their line, measured per word
   loudness range    each line set by its beat and energy (the hook and the payoff forward, the low point back), scaled until
@@ -47,6 +50,7 @@ TURNS = ("turn", "low", "payoff")
 MAX_WORDS = 34            # a generation: one to three whole sentences
 TAKES = 6
 FREE_TEMP = 0.55          # takes 3..5: a little freer than the runtime's own 0.3
+CONT_S = 0.22             # the pause after a comma the voice holds up: the references' clause pause (0.16-0.26 s)
 FOCUS_DB = 4.3            # the stressed word over its line (references 4.25 [3.5-4.9])
 LRA_AIM = (3.0, 3.6)      # LU (references 3.33 [2.57-4.32])
 ROOM_DB = -46.0           # room tone under the speech level (instead of digital silence)
@@ -62,6 +66,57 @@ STOP_DEEP_W = 1.5
 
 def norm(w):
     return "".join(c for c in str(w).lower() if c.isalnum() or c == "'")
+
+
+END_REACH_S = 0.12        # a listener's word end may fall short of the voice: follow its voicing this far, at most
+
+
+def mark_ends(st, v, t, ends):
+    """[(mark, semitones)]: for each (mark, phrase start s, word end s[, next word start s]) the median pitch of the
+    word's last voiced 0.3 s (its last 5 voiced frames) against the median of its phrase (st: semitone track, v: voiced,
+    t: frame times). The end follows the word's own voicing past the listener's end, up to END_REACH_S and never into
+    the next word, so two listeners timing the same take differently measure the same ending."""
+    out = []
+    for item in ends:
+        mark, a, e = item[:3]
+        lim = min(e + END_REACH_S, item[3]) if len(item) > 3 and item[3] is not None else e + END_REACH_S
+        j = int(np.searchsorted(t, e, side="right"))
+        while j < len(t) and t[j] <= lim and v[j]:
+            e = float(t[j])
+            j += 1
+        tail = v & (t >= max(a, e - 0.30)) & (t <= e)
+        body = v & (t >= a) & (t <= e)
+        out.append((mark, round(float(np.median(st[tail][-5:]) - np.median(st[body])), 2)) if tail.sum() >= 4 and body.sum() >= 15 else (mark, None))
+    return out
+
+
+def semitones(x, sr, prosody):
+    f0 = np.asarray(prosody.pitch_track(x, sr), np.float64)
+    t = np.arange(len(f0)) * 0.01
+    v = np.isfinite(f0) & (f0 > 0)
+    st = np.full(len(f0), np.nan)
+    st[v] = 12 * np.log2(f0[v])
+    return st, v, t
+
+
+def held_commas(x, sr, words, prosody):
+    """Indexes of the read's words that end on a comma (the script's own marks, carried in words.json) where the voice
+    holds up: at or over COMMA_HELD_ST against its phrase. Signal only."""
+    if len(words) < 3:
+        return set()
+    st, v, t = semitones(x, sr, prosody)
+    if v.sum() < 30:
+        return set()
+    ends, idx, start = [], [], float(words[0]["start"])
+    for i, w in enumerate(words):
+        mark = str(w.get("w", "")).rstrip("\"'”’)")[-1:]
+        if mark not in ",;:.?!":
+            continue
+        if mark in ",;:" and i < len(words) - 1:
+            ends.append(("comma", start, float(w["end"]), float(words[i + 1]["start"])))
+            idx.append(i)
+        start = float(words[min(i + 1, len(words) - 1)]["start"])
+    return {i for i, (_, d) in zip(idx, mark_ends(st, v, t, ends)) if d is not None and d >= COMMA_HELD_ST}
 
 
 def groups_of(segments):
@@ -105,47 +160,56 @@ def group_script(script, groups):
 
 # ----------------------------------------------------------------- the engine, with this read's takes and joins
 
-def cadence(x, sr, words, text, prosody):
-    """How a take ends its phrases, measured (signal only): [("comma"|"stop", semitones)], the median pitch of the
-    last 0.3 s of each script word that carries a comma or a full stop, against the median of its own phrase (since the
-    last mark). The heard words are aligned to the script's words, so the marks are the writer's, not the listener's."""
+def marks(x, sr, words, text, prosody):
+    """Every comma and full stop of a take, measured (signal only): [{kind, phrase (its start s), end, next (the next
+    word's start s), gap (s), d (semitones: the word's last voiced 0.3 s against its phrase since the last mark)}].
+    The heard words are aligned to the script's words, so the marks are the writer's, not the listener's; a mark on a
+    word the listener spells differently ("ninety one," heard as "1991,") ends on the heard word just before the next
+    aligned one."""
     import difflib
     toks = str(text).split()
     if len(words) < 3 or not toks:
         return []
-    f0 = np.asarray(prosody.pitch_track(x, sr), np.float64)
-    t = np.arange(len(f0)) * 0.01
-    v = np.isfinite(f0) & (f0 > 0)
+    st, v, t = semitones(x, sr, prosody)
     if v.sum() < 30:
         return []
-    st = np.full(len(f0), np.nan)
-    st[v] = 12 * np.log2(f0[v])
     sm = difflib.SequenceMatcher(a=[norm(w) for w in toks], b=[norm(w.get("w")) for w in words], autojunk=False)
     at = {}
     for blk in sm.get_matching_blocks():
         for k in range(blk.size):
             at[blk.a + k] = blk.b + k
-    out, start = [], float(words[0]["start"])
+    out, start, last_j = [], float(words[0]["start"]), -1
     for i, tok in enumerate(toks):
         mark = tok.rstrip("\"'”’)")[-1:]
-        if mark not in ",;:.?!" or i not in at:
+        if mark not in ",;:.?!":
             continue
-        j = at[i]
-        e = float(words[j]["end"])
-        tail = v & (t >= max(start, e - 0.30)) & (t <= e)
-        body = v & (t >= start) & (t <= e)
-        if tail.sum() >= 4 and body.sum() >= 15:
-            out.append(("comma" if mark in ",;:" else "stop", round(float(np.median(st[tail][-5:]) - np.median(st[body])), 2)))
+        j = at.get(i)
+        if j is None and i + 1 in at and at[i + 1] - 1 > last_j:
+            j = at[i + 1] - 1
+        if j is None:
+            continue
+        last_j = j
+        nxt = float(words[j + 1]["start"]) if j + 1 < len(words) else None
+        out.append(dict(kind="comma" if mark in ",;:" else "stop", phrase=start, end=float(words[j]["end"]),
+                        next=nxt, gap=None if nxt is None else round(nxt - float(words[j]["end"]), 3)))
         start = float(words[min(j + 1, len(words) - 1)]["start"])
+    for m, (_, d) in zip(out, mark_ends(st, v, t, [(m["kind"], m["phrase"], m["end"], m["next"]) for m in out])):
+        m["d"] = d
     return out
 
 
+def cadence(x, sr, words, text, prosody):
+    """How a take ends its phrases: [("comma"|"stop", semitones, pause after it s)] (see marks)."""
+    return [(m["kind"], m["d"], m["gap"]) for m in marks(x, sr, words, text, prosody) if m["d"] is not None]
+
+
 def cadence_bonus(cad, stops_kept):
-    """Points for a take's cadence: its commas held up or lifted, its full stops' falls not all alike and not too deep."""
+    """Points for a take's cadence: its commas held up or lifted, its full stops' falls not all alike and not too deep.
+    cad: [(kind, semitones[, pause after s])]."""
     if not cad:
         return 0.0
-    com = [d for k, d in cad if k == "comma"]
-    stops = [d for k, d in cad if k == "stop"]
+    com = [c[1] for c in cad if c[0] == "comma"]
+    stops = [c[1] for c in cad if c[0] == "stop"]
     b = 0.0
     if com:
         b += COMMA_W[0] * float(np.mean([d >= COMMA_HELD_ST for d in com])) + COMMA_W[1] * float(np.mean([d >= COMMA_RISE_ST for d in com]))
@@ -226,7 +290,7 @@ class Read:
             self.f0s += [s0, s1]
             ref = float(np.median(self.f0s))
             self.last_end = 12 * math.log2(s1 / ref)
-        self.stops += [d for k, d in best.get("cadence") or [] if k == "stop"]
+        self.stops += [c[1] for c in best.get("cadence") or [] if c[0] == "stop"]
         self.picks.append(dict(file=best.get("file"), net=best["net"], bonus=best.get("bonus"), restart_st=best.get("restart_st"),
                                range_st=(best.get("feat") or {}).get("range_st"), cadence=best.get("cadence"),
                                cadence_bonus=best.get("cadence_bonus")))
@@ -329,66 +393,97 @@ def remap(t, cuts):
     return t - sum(r for at, r in cuts if at < t)
 
 
-def tighten(x, sr, words, segs):
+def quiet_run(quiet, i0, i1):
+    """(start, end) frames of the longest quiet run in quiet[i0:i1], relative to i0."""
+    best, run_a = (0, 0), None
+    for j, v in enumerate(list(quiet[i0:i1]) + [False]):
+        if v and run_a is None:
+            run_a = j
+        elif not v and run_a is not None:
+            if j - run_a > best[1] - best[0]:
+                best = (run_a, j)
+            run_a = None
+    return best
+
+
+def tighten(x, sr, words, segs, held=None):
     """Every pause between two words set by what ends there (as the listener times words, the way the check measures):
-    a sentence 0.20 s, a turn of the story 0.40 s (the writer's beats), a comma or nothing 0.08 s; only ever shorter,
-    and only inside the silence itself (40 ms kept against each word). Returns (x, words, cuts)."""
+    a sentence 0.20 s, a turn of the story 0.40 s (the writer's beats), a comma the voice holds up CONT_S (the
+    references' clause pause: the thought goes on), any other comma or nothing 0.08 s, so a comma that falls never
+    reads as a full stop. Pauses are shortened inside the silence itself (40 ms kept against each word); a held comma
+    that ran on is lengthened inside the take's own quiet between the words (its quiet samples, never a hole), and only
+    where there is quiet to grow. held: indexes of the words ending on a held comma (held_commas).
+    Returns (x, words, cuts); a lengthening is a cut of negative length."""
+    held = held or set()
     fr = int(0.01 * sr)
     k = len(x) // fr
     db = 10 * np.log10((x[:k * fr].reshape(k, fr).astype(np.float64) ** 2).mean(1) + 1e-14)
     quiet = db < np.percentile(db, 90) - 32
     turns = {i for i in range(1, len(segs)) if segs[i].get("beat") in TURNS and segs[i].get("beat") != segs[i - 1].get("beat")}
-    keep, cuts = [], []
-    pos = 0
-    for a, b in zip(words, words[1:]):
+    edits, cuts = [], []          # edits: (a, b, filler samples or None) in sample order, b > a for a cut, b == a to insert
+    for wi, (a, b) in enumerate(zip(words, words[1:])):
         g = b["start"] - a["end"]
-        if g < 0.12:
-            continue
         if b.get("seg") != a.get("seg") and b.get("seg") in turns:
             want = BEAT_S
         elif str(a["w"]).rstrip().endswith((".", "?", "!")):
             want = 0.20
+        elif wi in held:
+            want = CONT_S
         else:
             want = 0.08
-        if g <= want + 0.02:
-            continue
-        i0, i1 = int((a["end"] + 0.04) * 100), int((b["start"] - 0.04) * 100)
-        if i1 - i0 < 3:
-            continue
-        q = quiet[i0:i1]
-        # the longest quiet run inside the gap: the silence itself
-        best, run_a = (0, 0), None
-        for j, v in enumerate(list(q) + [False]):
-            if v and run_a is None:
-                run_a = j
-            elif not v and run_a is not None:
-                if j - run_a > best[1] - best[0]:
-                    best = (run_a, j)
-                run_a = None
-        n_q = (best[1] - best[0]) / 100
-        rem = min(g - want, n_q - 0.02)
-        if rem < 0.03:
-            continue
-        mid = (i0 + (best[0] + best[1]) / 2) / 100
-        ca, cb = int((mid - rem / 2) * sr), int((mid + rem / 2) * sr)
-        keep.append((pos, ca))
-        pos = cb
-        cuts.append((mid, round((cb - ca) / sr, 4)))
-    keep.append((pos, len(x)))
+        if g > want + 0.02 and g >= 0.12:
+            i0, i1 = int((a["end"] + 0.04) * 100), int((b["start"] - 0.04) * 100)
+            if i1 - i0 < 3:
+                continue
+            best = quiet_run(quiet, i0, i1)
+            rem = min(g - want, (best[1] - best[0]) / 100 - 0.02)
+            if rem < 0.03:
+                continue
+            mid = (i0 + (best[0] + best[1]) / 2) / 100
+            ca, cb = int((mid - rem / 2) * sr), int((mid + rem / 2) * sr)
+            edits.append((ca, cb, None))
+            cuts.append((mid, round((cb - ca) / sr, 4)))
+        elif wi in held and g < want - 0.03:
+            # the held comma ran on: open the clause pause in the quiet the take already has between the two words
+            i0, i1 = int((a["end"] + 0.005) * 100), int((b["start"] - 0.005) * 100) + 1
+            if i1 - i0 < 2:
+                i0, i1 = int(a["end"] * 100) - 2, int(b["start"] * 100) + 3
+            best = quiet_run(quiet, max(i0, 0), min(i1, k))
+            if best[1] - best[0] < 2:
+                continue              # no quiet between them: the words run on held, as read
+            q0, q1 = (max(i0, 0) + best[0]) * fr, (max(i0, 0) + best[1]) * fr
+            add = want - max(g, 0.0)
+            at = (q0 + q1) // 2
+            q = x[q0:q1].astype(np.float32)
+            n = int(add * sr) + 2 * int(0.008 * sr)           # the two crossfades take back 2 x 8 ms
+            edits.append((at, at, np.resize(np.concatenate([q, q[::-1]]), n).astype(np.float32)))
+            cuts.append((at / sr, -n / sr))
+    # 8 ms crossfades at every splice, inside the silence; each overlap takes xf samples, carried into the clock
     xf = int(0.008 * sr)
-    parts = []
-    for j, (a, b) in enumerate(keep):
-        seg = x[a:b].astype(np.float32).copy()
-        if j and len(seg) > xf and len(parts[-1]) > xf:          # an 8 ms crossfade inside the silence
-            r = np.linspace(0, 1, xf, dtype=np.float32)
-            parts[-1][-xf:] = parts[-1][-xf:] * (1 - r) + seg[:xf] * r
+    r = np.linspace(0, 1, xf, dtype=np.float32)
+    out = []
+
+    def app(seg, j):
+        seg = np.asarray(seg, np.float32).copy()
+        if out and j is not None and len(seg) > xf and len(out[-1]) > xf:
+            out[-1] = out[-1].copy()
+            out[-1][-xf:] = out[-1][-xf:] * (1 - r) + seg[:xf] * r
             seg = seg[xf:]
-            # The overlap removes samples too. Carry that removal into every
-            # word, caption and chapter time after this splice.
-            at, removed = cuts[j - 1]
-            cuts[j - 1] = (at, removed + xf / sr)
-        parts.append(seg)
-    y = np.concatenate(parts) if parts else x
+            at, v = cuts[j]
+            cuts[j] = (at, round(v + xf / sr, 4))
+        out.append(seg)
+
+    pos, last = 0, None
+    for j, (ca, cb, fill) in enumerate(edits):
+        app(x[pos:ca], last)
+        if fill is not None:
+            app(fill, j)
+            pos = ca
+        else:
+            pos = cb
+        last = j
+    app(x[pos:], last)
+    y = np.concatenate(out) if out else x
     for w in words:
         w["start"], w["end"] = round(remap(w["start"], cuts), 3), round(remap(w["end"], cuts), 3)
     return y.astype(np.float32), words, cuts
@@ -489,13 +584,20 @@ def finish(out, script, groups, picks=None, tone_fn=None):
         for p in wj.get("phrases") or []:
             p["seg"] = next((w["seg"] for w in words if abs(w["start"] - p["start"]) < 1e-3), p.get("seg"))
     rep = dict(generations=[dict(segments=g, text_words=sum(len(segs[i]["text"].split()) for i in g)) for g in groups], picks=picks or [])
-    # pauses: a sentence 0.20 s, a turn 0.40 s, a comma nothing a listener counts; the times of everything after move with them
-    x, words, cuts = tighten(x, sr, words, segs)
+    # pauses: a sentence 0.20 s, a turn 0.40 s, a comma the voice holds up CONT_S, any other comma nothing a listener
+    # counts; the times of everything after move with them
+    try:
+        import prosody
+        hc = held_commas(x, sr, words, prosody)
+    except Exception as e:  # noqa: BLE001 - a read whose pitch cannot be tracked keeps every comma short
+        hc, rep["held_commas_error"] = set(), repr(e)[:120]
+    x, words, cuts = tighten(x, sr, words, segs, hc)
+    rep["held_commas"] = dict(held=len(hc), commas=sum(1 for w in words[:-1] if str(w.get("w", "")).rstrip("\"'”’)")[-1:] in ",;:"))
     for p in wj.get("phrases") or []:
         p["start"], p["end"] = round(remap(p["start"], cuts), 3), round(remap(p["end"], cuts), 3)
     wj["cut_points"] = [round(remap(t, cuts), 3) for t in wj.get("cut_points") or []]
     wj["duration"] = round(len(x) / sr, 2)
-    rep["pauses"] = dict(cut=len(cuts), removed_s=round(sum(r for _, r in cuts), 2))
+    rep["pauses"] = dict(cut=sum(1 for _, r in cuts if r > 0), opened=sum(1 for _, r in cuts if r < 0), removed_s=round(sum(r for _, r in cuts), 2))
     rj = out / "render.json"
     r = json.loads(rj.read_text()) if rj.exists() else {}
     for b in r.get("boundaries") or []:            # the joins the VOICE gate measures move with the cuts

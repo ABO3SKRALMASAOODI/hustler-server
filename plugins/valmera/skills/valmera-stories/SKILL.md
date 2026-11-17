@@ -87,7 +87,10 @@ independent voice check's gaps (`lanes/RATINGS/2026-11-13-VO2.json`):
 - whole sentences a generation (one to three, never a sentence cut between two), so there are a third as many joins;
 - six takes a generation, three at the runtime's temperature as the owner heard it and three freer; every word heard
   first, then the tool's prosody score plus the line's pitch range, how high it restarts over the last line's end, and
-  its cadence (`voice.cadence`: commas held up or lifted, full stops that do not all fall alike or too deep);
+  its cadence (`voice.cadence`: commas held up or lifted, full stops that do not all fall alike or too deep; each ending
+  measured on the word's own voicing, not where a listener ends the word);
+- a comma the finished read holds up keeps a clause pause (`CONT_S`, 0.22 s), any other comma a short one (0.08 s), so
+  a falling comma never sounds like a full stop (`voice.held_commas`, `tighten`);
 - joins of 0.22 s, 0.40 s only where the story turns; room tone (-46 dB under the speech) in every pause;
 - the writer's one or two focus words per line ridden to +4.3 dB over their line, measured per word;
 - each line set by its beat and energy, scaled until the read measures about 3.3 LU (EBU R128); -14 LUFS, under -1 dBTP;
