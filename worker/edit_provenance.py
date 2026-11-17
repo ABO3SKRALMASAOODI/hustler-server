@@ -274,13 +274,31 @@ def describe(rows, index=None, source_s=None, first_cut_versions=(), turn_versio
 
 
 def _sound_name(item):
+    base = ""
     for key in ("label", "name", "role"):
         value = item.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()[:40]
-    key = str(item.get("storage_key") or item.get("asset_key") or "")
-    base = key.split("/")[-1].split(":")[-1].rsplit(".", 1)[0]
-    return base.replace("_", " ").replace("-", " ").strip()[:40] or "sound"
+            base = value.strip()
+            break
+    if not base:
+        key = str(item.get("storage_key") or item.get("asset_key") or "")
+        base = key.split("/")[-1].split(":")[-1].rsplit(".", 1)[0]
+    # A library file is named like "lib-whoosh_6-5b0c8ef2f7": the customer reads the sound's kind
+    # ("a whoosh"), never the library prefix, its number or its content hash (17 Nov: the first
+    # cut's reply read "a lib whoosh 6 5b0c8ef2f7 at 1.48 s").
+    words = [w for w in base.replace("_", " ").replace("-", " ").split() if not _id_word(w)]
+    return " ".join(words).strip()[:40] or "sound effect"
+
+
+def _id_word(word):
+    """A file-name token that carries no meaning for a customer: the library prefix, a number or a
+    hex content hash."""
+    w = word.lower()
+    if w in ("lib", "sfx", "library"):
+        return True
+    if w.isdigit():
+        return True
+    return len(w) >= 6 and all(c in "0123456789abcdef" for c in w) and any(c.isdigit() for c in w)
 
 
 def sounds_added(before_edl, after_edl):
