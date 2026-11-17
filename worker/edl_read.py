@@ -57,7 +57,7 @@ _EDL_SECTION_ALIASES = {
     "fades": ("effects",),
     "look": ("effects", "master"), "frames": ("frame",),
     "audio": ("music", "volume", "voiceover", "sfx", "stem_mix",
-              "master"),
+              "noise_clean", "master"),
     "media": ("inserts", "overlays", "music", "voiceover", "sfx"),
     "timeline": ("keep", "inserts", "overlays", "texts", "vectors",
                  "effects"),

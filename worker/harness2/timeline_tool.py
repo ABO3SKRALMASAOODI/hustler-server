@@ -155,6 +155,20 @@ def timeline(ctx, version=None, range=None, versions=False, schema=None):
             default=str)[:1500])
     except Exception:  # noqa: BLE001
         pass
+    if version is None or int(row["version"]) == int(ctx.latest_edl()["version"]):
+        # Who made each part of the film (the upload, the automatic first cut, earlier requests,
+        # this turn), measured from the saved versions: the same reading v1's state block gives.
+        try:
+            import edit_provenance
+            lineage_rows, jobs = ctx.db.run(dbx.edl_lineage, ctx.project_id)
+            origin = edit_provenance.from_lineage(
+                lineage_rows, jobs, index=getattr(ctx, "index", None) or {},
+                source_s=source_s,
+                turn_versions=list(getattr(ctx, "versions_written", None) or ()))
+        except Exception:  # noqa: BLE001
+            origin = ""
+        if origin:
+            body.append(origin)
     if versions:
         body.append("versions (newest first):")
         body.extend("  " + ln for ln in _versions(ctx))

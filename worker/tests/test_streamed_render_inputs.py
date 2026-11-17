@@ -191,7 +191,7 @@ def test_streamed_render_survives_dropped_connections(
         assert encode[at - 1 - len(opts):at - 1] == opts
     if seek:
         at = encode.index("-copyts")
-        assert encode[at:at + 3] == ["-copyts", "-ss", seek]
+        assert encode[at:at + 4] == ["-copyts", "-start_at_zero", "-ss", seek]
     # The local render's commands carry no option they did not have before.
     assert not any("-reconnect" in c for c in launched if url not in c)
 

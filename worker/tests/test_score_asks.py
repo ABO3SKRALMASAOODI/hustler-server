@@ -27,7 +27,7 @@ def _ask(kind="edit", items=(), **kw):
 
 def test_no_row_checks_every_account_and_a_bad_row_is_off():
     assert asks.parse(None)["mode"] == "on"
-    for raw in ("", "{", "[]", '{"mode": "maybe"}', '{"mode": "on", "repairs": "x"}'):
+    for raw in ("", "{", "[]", '{"mode": "maybe"}', '{"mode": "on", "film_s": "x"}'):
         assert asks.parse(raw)["mode"] == "off", raw
     assert asks.parse('{"mode": "on", "director": false}')["director"] is False
 
@@ -184,7 +184,8 @@ def test_the_reply_lists_asks_only_when_one_is_open():
     ledger = asks.settle({"lang": "en", "asks": [_ask(), _ask()]}, EDL)
     assert asks.reply_block(ledger, _verdict("done", "done")) == ""
     block = asks.reply_block(ledger, _verdict("done", "not_done"))
-    assert "- line 1" in block and "- line 2" in block
+    # only what is still open: the done ask is in the editor's reply already
+    assert "- line 2" in block and "- line 1" not in block
 
 
 def _loop_ctx(ledger, version=2, preview_version=2):
@@ -192,7 +193,7 @@ def _loop_ctx(ledger, version=2, preview_version=2):
               latest_edl=lambda: {"version": version, "json": EDL}, versions_written=[version], workdir="/tmp")
 
 
-def test_one_repair_then_the_reply_says_what_is_open(monkeypatch):
+def test_a_repair_then_an_unchanged_film_the_reply_says_what_is_open(monkeypatch):
     ledger = _ledger()
     ledger["cfg"] = {"repairs": 1, "check": True}
     monkeypatch.setattr(asks, "check", lambda *a, **k: _verdict("not_done"))
@@ -200,7 +201,8 @@ def test_one_repair_then_the_reply_says_what_is_open(monkeypatch):
     ctx = _loop_ctx(ledger)
     note = agent_loop._asks_check(ctx, "Done!")
     assert note and "not done" in note and ledger["repairs"] == 1
-    assert agent_loop._asks_check(ctx, "Done again!") is None             # the one repair is spent
+    # the same film again: the editor answered the note without changing it, its reply stands
+    assert agent_loop._asks_check(ctx, "Done again!") is None
     final, outcome = agent_loop._asks_settle(ctx, "Done!", "fulfilled")
     assert outcome == "partial" and "line 1" in final
 
@@ -210,7 +212,8 @@ def test_a_stale_verdict_never_vouches_for_a_newer_version(monkeypatch):
     ctx = _loop_ctx(ledger, version=5)
     ctx.ask_verdict = dict(_verdict("done"), edl_version=4)
     final, outcome = agent_loop._asks_settle(ctx, "Done.", "fulfilled")
-    assert outcome == "partial" and "can't confirm" in final
+    # unchecked: recorded partial for the ops loop; the editor's reply is not replaced by a hedge
+    assert outcome == "partial" and final == "Done."
 
 
 def test_final_change_disclosure_cannot_drop_a_checked_unmet_ask(monkeypatch):
@@ -523,23 +526,51 @@ def test_a_request_about_the_upload_starts_from_it_over_an_untouched_first_cut(m
     assert asks.settle({"lang": "es", "start": "upload", "asks": [_ask("edit")]}, EDL)["start"] == "upload"
     assert asks.settle({"lang": "es", "start": "elsewhere", "asks": [_ask("edit")]}, EDL)["start"] == "current"
     calls = []
-
-    def reset(ctx):
-        calls.append(1)
-        ctx.versions_written.append(28)
-        return "EDL v27 -> v28: reset the edit"
-    monkeypatch.setattr(agent_tools, "reset_edit", reset)
+    teaser = dict(EDL, keep=[[30.0, 33.0], [61.0, 64.0]], frame={"mode": "crop", "ratio": "9:16"},
+                  sfx=[{"id": "s1", "storage_key": "sound:whoosh", "at": 2.0}])
 
     def ctx_for(since=0, start="upload", made_by="automatic_first_cut", main=True):
         c = NS(request_edit_origin={"made_by": made_by, "customer_requests_since": since}, has_main_video=main,
-               versions_written=[], latest_edl=lambda: {"version": 27, "json": EDL})
+               versions_written=[], duration=120.0, latest_edl=lambda: {"version": 27, "json": teaser})
+
+        def write(edl, what):
+            calls.append((edl, what))
+            c.versions_written.append(28)
+            return "EDL v27 -> v28: " + what
+        c.write_edl = write
         return c, {"lang": "es", "start": start, "asks": [_ask("edit")]}
     c, led = ctx_for()
     note = agent_loop._typed_start_from_upload(c, led, {"id": 1})
-    assert calls == [1] and led["reset"] == {"from": 27, "to": 28} and "starts from the full upload as EDL v28" in note
+    assert len(calls) == 1 and led["reset"] == {"from": 27, "to": 28} and "starts from the full upload as EDL v28" in note
+    fresh = calls[0][0]
+    # the frame (source clock) and the sound effect (moved to the source moment it sat on) carry over
+    assert fresh["keep"] == [[0.0, 120.0]] and fresh["frame"]["ratio"] == "9:16"
+    assert fresh["sfx"][0]["at"] == 32.0 and fresh["captions"] == EDL["captions"]
+    assert "title t1" in note and "9:16 frame" in note
     for kw in ({"since": 1}, {"start": "current"}, {"made_by": None}, {"main": False}):
         c, led = ctx_for(**kw)
-        assert agent_loop._typed_start_from_upload(c, led, {"id": 1}) == "" and calls == [1], kw
+        assert agent_loop._typed_start_from_upload(c, led, {"id": 1}) == "" and len(calls) == 1, kw
+
+
+def test_a_first_cut_that_already_plays_the_whole_upload_is_not_reset(monkeypatch):
+    # EDIT-CORE gate, 17 Nov 2026 (p5717): the first cut kept the 92.9 s music video whole (only the black
+    # end trimmed at 90.75 s), reframed it to 9:16 and placed 7 sound effects. "Cut the silences" was read
+    # as about the upload, the edit was reset to the bare upload, and the frame and the effects were lost.
+    first = {"keep": [[0.0, 90.75]], "frame": {"mode": "crop", "ratio": "9:16"},
+             "sfx": [{"id": "snd.j2.0", "storage_key": "sfx/1/whoosh.flac", "at": 1.48}]}
+    writes = []
+    c = NS(request_edit_origin={"made_by": "automatic_first_cut", "customer_requests_since": 0},
+           has_main_video=True, versions_written=[], duration=92.88,
+           latest_edl=lambda: {"version": 5, "json": first}, write_edl=lambda *a: writes.append(a))
+    led = {"lang": "en", "start": "upload", "asks": [_ask("edit")]}
+    note = agent_loop._typed_start_from_upload(c, led, {"id": 6})
+    assert writes == [] and led["reset"]["held"] is True
+    assert "already plays the whole upload (90.8 s of 92.9 s)" in note
+    assert "set the frame to 9:16" in note and "added 1 sound effect" in note
+    # a cut inside the upload, or a reorder, is a selection: that one starts again from the upload
+    assert not agent_loop._first_cut_holds_upload({"keep": [[0.0, 40.0], [45.0, 92.0]]}, 92.88)
+    assert not agent_loop._first_cut_holds_upload({"keep": [[50.0, 92.0], [0.0, 49.9]]}, 92.88)
+    assert agent_loop._first_cut_holds_upload({"keep": [[0.0, 40.0], [40.3, 92.0]]}, 92.88)
 
 
 def test_the_ledger_is_told_how_much_of_the_upload_the_current_film_is(monkeypatch):
@@ -645,21 +676,17 @@ def test_a_check_cut_short_is_asked_again_for_the_asks_it_missed(monkeypatch, tm
     assert [r["state"] for r in v["asks"]] == ["done", "partly", "cannot_tell"] and v["usage"]["usd"] == 0.02
 
 
-def test_open_ask_truth_check_keeps_measured_changes_and_real_alternative(monkeypatch):
+def test_an_open_ask_reply_that_the_check_agrees_with_goes_out_as_written(monkeypatch):
     from types import SimpleNamespace
-    ctx = SimpleNamespace(retained_reply_facts={
-        'fields': ['unchanged', 'alternative'],
-        'description': 'The previous film is unchanged. I can show your reference as a still.'})
     verdict = {'asks': [{'id': 'a1', 'state': 'not_done', 'seen': 'Original character remains.',
                          'line': 'The character was not replaced.'}]}
-    reply = 'The character was not replaced. The previous film is unchanged. I can show your reference as a still.'
+    reply = 'The character was not replaced: the upload is one continuous shot of her.'
     called = []
     def check(ctx, name, schema, system, content, **kwargs):
         called.append(name)
-        assert 'measured retained facts' in content
-        return {'wrong': [], 'reply': '', 'covered': ['unchanged', 'alternative']}, {}
+        return {'wrong': [], 'reply': ''}, {}
     monkeypatch.setattr(asks, '_call', check)
-    assert asks.true_reply(ctx, {}, verdict, reply) == reply
+    assert asks.true_reply(SimpleNamespace(), {}, verdict, reply) == reply
     assert called == ['record_true_reply']
 
 
@@ -671,5 +698,51 @@ def test_truth_rewrite_failure_retains_only_measured_disclosure(monkeypatch):
                          'line': 'Crypto mining was not shown.'}]}
     monkeypatch.setattr(asks, '_call', lambda *a, **kw: (_ for _ in ()).throw(TimeoutError()))
     reply = asks.true_reply(ctx, {}, verdict, 'Everything is done, including the mining picture.')
-    assert 'not shown' in reply and 'frame changed to 9:16' in reply
-    assert 'Everything is done' not in reply
+    assert reply == 'Crypto mining was not shown.'
+    assert 'Everything is done' not in reply and "can't confirm" not in reply
+
+
+def test_the_reply_names_every_change_the_turn_measurably_made(monkeypatch):
+    # EDIT-CORE gate, 17 Nov 2026 (p5717): the turn dropped the first cut's 9:16 frame and its 7 sound
+    # effects; the reply named neither. The correction now gets the measured change and adds what is missing.
+    ctx = NS(retained_reply_facts={
+        "fields": ["effects", "frame", "keep", "sfx"],
+        "description": "Changes kept in the film: cut 12.7s (kept 78.1s of the source); removed 1 zoom; "
+                       "removed 7 sound effects; changed the frame."})
+    seen = {}
+
+    def fake(c, name, schema, system, content, **kw):
+        seen["content"], seen["schema"], seen["system"] = content, schema, system
+        return {"wrong": [], "missing": ["removed 7 sound effects", "changed the frame"],
+                "reply": "I trimmed the gaps. The 9:16 frame and the 7 sound effects of the first cut are gone."}, {}
+    monkeypatch.setattr(asks, "_call", fake)
+    led = {"asks": [dict(_ask("edit"), id="a1")]}
+    out = asks.true_reply(ctx, led, {"asks": []}, "I trimmed the gaps.")
+    assert "removed 7 sound effects; changed the frame" in seen["content"]
+    assert "missing" in seen["schema"]["required"] and "missing" in seen["system"]
+    assert out.endswith("the 7 sound effects of the first cut are gone.")
+    assert led["reply_named"] == ["removed 7 sound effects", "changed the frame"]
+    # nothing measured and nothing checked: the reply goes out as written, no model call
+    monkeypatch.setattr(asks, "_call", lambda *a, **k: pytest.fail("called"))
+    assert asks.true_reply(NS(retained_reply_facts={"fields": ["unchanged"], "description": "x"}),
+                           led, {"asks": []}, "As is.") == "As is."
+
+
+def test_the_check_sees_which_pauses_are_the_film_playing(monkeypatch):
+    # EDIT-CORE gate, 17 Nov 2026 (p5717): the check judged "cut the silences" on a music video from the
+    # film's length alone, called it partly done, and the repair pass cut 11 s of the song's montage.
+    index = {"words": [{"w": "AJ,", "t0": 8.5, "t1": 8.8}, {"w": "yeah,", "t0": 24.5, "t1": 24.9},
+                       {"w": "up", "t0": 40.0, "t1": 40.3}],
+             "silences": [], "video": {"duration": 60.0}}
+    ctx = NS(index=index, duration=60.0)
+
+    def live(c, gaps, measure=True, within=None):
+        for g in gaps:
+            g["live"] = g["start"] < 30
+            g["why"] = "the picture moves (40% of the frame changes each quarter second)"
+    monkeypatch.setattr(agent_tools, "_read_liveness", live)
+    text = asks.pauses(ctx, {"keep": [[0.0, 60.0]]})
+    assert "dead air 19.7 s, footage 39.3 s" in text
+    assert "[8.8-24.5] 15.7 s, footage, not dead air" in text
+    assert asks.pauses(NS(index={"words": [], "silences": [], "video": {"duration": 9.0}}, duration=9.0),
+                       {"keep": [[0.0, 9.0]]}) == ""

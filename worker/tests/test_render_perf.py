@@ -536,6 +536,9 @@ def test_cluster_reads_keep_peak_memory_bounded(tmp_path, monkeypatch):
 
     monkeypatch.setattr(renderer, "_render_media_run", capture)
     monkeypatch.setattr(renderer.config, "KEEP_CLUSTER_THREADS", 2)
+    # the two-thread rule for frames above the auto-thread size (B4 lets a 540p
+    # proxy's reads use ffmpeg's own count; test_edit_core_turn_outcome measures it)
+    monkeypatch.setattr(renderer.config, "KEEP_CLUSTER_AUTO_THREADS_MAX_MPIX", 0.0)
     probe = ("import json,resource,subprocess,sys;"
              "p=subprocess.run(json.loads(sys.argv[1]));"
              "r=resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss;"

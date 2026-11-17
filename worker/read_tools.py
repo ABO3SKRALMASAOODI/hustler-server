@@ -1138,3 +1138,13 @@ def activity_row(name, args, result, source=None, edl_version=None,
         # from ours.
         meta["source"] = source
     return f"{label} → {res_str}", meta
+
+
+def latest_final_asset(conn, project_id):
+    """The newest exported (final) render of a project, or None."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT * FROM assets
+                       WHERE project_id = %s AND kind = 'render'
+                         AND meta->>'variant' = 'final'
+                       ORDER BY id DESC LIMIT 1""", (project_id,))
+        return cur.fetchone()

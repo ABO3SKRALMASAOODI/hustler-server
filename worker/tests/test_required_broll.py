@@ -124,10 +124,11 @@ def test_illustration_does_not_extend_the_narration_clock():
                         'pictures_preserve_speech_clock': True})
     before = {'inserts': []}
     after = {'inserts': [{'id': 'image1', 'duration_s': 3}]}
-    assert 'add_overlay' in required_broll.write_refusal(ctx, before, after)
-    assert required_broll.write_refusal(ctx, before, {'overlays': [{'duration_s': 3}]}) is None
+    note = required_broll.write_note(ctx, before, after)
+    assert note.startswith('NOTE (saved)') and 'image1 (+3.0 s)' in note and 'add_overlay' in note
+    assert required_broll.write_note(ctx, before, {'overlays': [{'duration_s': 3}]}) == ''
     ctx.ask_ledger['pictures_preserve_speech_clock'] = False
-    assert required_broll.write_refusal(ctx, before, after) is None
+    assert required_broll.write_note(ctx, before, after) == ''
 
 
 def test_subject_enumeration_outage_cannot_be_certified_by_a_generic_check(monkeypatch):

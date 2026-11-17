@@ -79,8 +79,7 @@ def test_inspection_criteria_never_become_editing_work(monkeypatch):
     contract = rc.ensure(ctx)
     assert contract["requirements"][0]["action"] == "inspect"
     assert contract["requirements"][0]["lanes"] == []
-    with pytest.raises(ValueError, match="analysis"):
-        rc.protected_lanes(ctx)
+    assert rc.protected_lanes(ctx) == set()
 
 
 def test_large_customer_briefs_do_not_expand_schema_enumerations():

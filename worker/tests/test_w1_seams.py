@@ -236,7 +236,7 @@ def _strip_w1_growth(catalog):
     for tool in cat:
         name = tool["function"]["name"]
         if name == "apply_edit_batch":
-            walk(tool, {"fx"})
+            walk(tool, {"fx"} | LATER["batch_layers"])
         elif name in ("load_tools", "expand_toolset"):
             walk(tool, live)
         elif name == "read_skill":

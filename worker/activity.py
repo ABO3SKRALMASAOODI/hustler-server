@@ -26,7 +26,11 @@ import time
 
 import numpy as np
 
-ACTIVITY_VERSION = 1
+# v2 (16 Nov 2026, EDIT-CORE A1): the track also carries ``level``, each
+# sample's absolute sound level (dBFS RMS over 300 Hz), so a stretch with no
+# words can be read as dead (still picture, room-floor sound) or as content
+# (a moving picture, a song, ambience with events): liveness.py.
+ACTIVITY_VERSION = 2
 ACTIVITY_FPS = 4.0          # samples per source second
 FRAME_W, FRAME_H = 96, 54   # analysis raster (grey); fine for whole-body motion
 PIXEL_DELTA = 10            # a pixel "changed" when it moved this many levels
@@ -43,9 +47,23 @@ def _ffmpeg():
     return os.environ.get("FFMPEG_BIN") or "ffmpeg"
 
 
-def _motion(path, fps, budget_s, cancel=None, progress=None):
+def _span_args(start, length):
+    """Input seek args for a window of the file ([] = the whole file)."""
+    if start is None and length is None:
+        return []
+    out = []
+    if start:
+        out += ["-ss", f"{max(0.0, float(start)):.3f}"]
+    if length:
+        out += ["-t", f"{max(0.05, float(length)):.3f}"]
+    return out
+
+
+def _motion(path, fps, budget_s, cancel=None, progress=None, start=None,
+            length=None):
     """Per-sample share of changed pixels (index i = time i/fps)."""
-    cmd = [_ffmpeg(), "-v", "error", "-nostdin", "-threads", "0", "-i", path,
+    cmd = [_ffmpeg(), "-v", "error", "-nostdin", "-threads", "0",
+           *_span_args(start, length), "-i", path,
            "-map", "0:v:0", "-an", "-sn", "-dn",
            "-vf", (f"fps={fps:g},scale={FRAME_W}:{FRAME_H}:flags=area,"
                    "format=gray"),
@@ -91,8 +109,19 @@ def _motion(path, fps, budget_s, cancel=None, progress=None):
 def _audio(path, fps, budget_s):
     """Per-sample onset strength: how far the loudest 10 ms frame in the
     sample rises over the median energy of the surrounding 2 s, in dB.
-    None when the file has no audio stream."""
-    cmd = [_ffmpeg(), "-v", "error", "-nostdin", "-i", path, "-map", "0:a:0",
+    None when the file has no audio stream. (_audio_track also returns the
+    per-sample level.)"""
+    out = _audio_track(path, fps, budget_s)
+    return None if out is None else out[0]
+
+
+def _audio_track(path, fps, budget_s, start=None, length=None):
+    """(onsets, level) per sample, or None when the file has no audio
+    stream. level is the sample's RMS in dBFS (over 300 Hz, so mains hum and
+    handling rumble do not count as sound); onsets as _audio describes, or
+    None for a flat/silent track."""
+    cmd = [_ffmpeg(), "-v", "error", "-nostdin", *_span_args(start, length),
+           "-i", path, "-map", "0:a:0",
            "-vn", "-sn", "-dn", "-ac", "1", "-ar", str(AUDIO_RATE),
            "-af", "highpass=f=300", "-f", "s16le", "pipe:1"]
     try:
@@ -105,10 +134,20 @@ def _audio(path, fps, budget_s):
         return None
     n = raw.size // AUDIO_HOP
     frames = raw[:n * AUDIO_HOP].astype(np.float32).reshape(n, AUDIO_HOP)
-    energy = 10.0 * np.log10(np.mean(frames * frames, axis=1) + 1.0)
-    if float(np.max(energy) - np.min(energy)) < 3.0:
-        return None  # a flat or silent track carries no events
+    power = np.mean(frames * frames, axis=1)
+    energy = 10.0 * np.log10(power + 1.0)
     per_s = AUDIO_RATE / AUDIO_HOP           # 100 energy frames a second
+    hop = per_s / fps
+    m = int(math.floor(n / hop))
+    level = np.full(m, -120.0, dtype=np.float32)
+    for i in range(m):
+        a, b = int(i * hop), int((i + 1) * hop)
+        if b > a:
+            level[i] = 10.0 * math.log10(
+                float(np.mean(power[a:b])) / (32768.0 ** 2) + 1e-12)
+    level = np.maximum(level, -120.0)
+    if float(np.max(energy) - np.min(energy)) < 3.0:
+        return None, level  # a flat or silent track carries no events
     # the room's floor: a running median over 2 s, from a strided sample
     win = int(per_s * 2)
     stride = 10
@@ -118,45 +157,56 @@ def _audio(path, fps, budget_s):
     windows = np.lib.stride_tricks.sliding_window_view(pad, k)
     floor = np.repeat(np.median(windows, axis=1), stride)[:n]
     rise = np.clip(energy - floor, 0.0, None)
-    hop = per_s / fps
-    m = int(math.floor(n / hop))
     out = np.zeros(m, dtype=np.float32)
     for i in range(m):
         a, b = int(i * hop), int((i + 1) * hop)
         if b > a:
             out[i] = float(np.max(rise[a:b]))
-    return out
+    return out, level
 
 
 def measure(path, fps=ACTIVITY_FPS, budget_s=MEASURE_BUDGET_S, cancel=None,
-            progress=None):
+            progress=None, start=None, length=None):
     """The raw track of one file: {"version", "fps", "motion", "audio",
-    "duration", "elapsed_s"}; motion and audio are lists of floats (audio
-    None when there is no usable sound)."""
+    "level", "duration", "elapsed_s"}; motion, audio and level are lists of
+    floats (audio/level None when there is no usable sound). start/length
+    measure one window of the file; the track then carries "t0" = start and
+    sample i is at t0 + i/fps."""
     started = time.monotonic()
     holder = {}
 
     def _aud():
         try:
-            holder["audio"] = _audio(path, fps, budget_s)
+            got = _audio_track(path, fps, budget_s, start, length)
+            holder["audio"], holder["level"] = got if got else (None, None)
         except Exception as exc:  # noqa: BLE001
-            holder["audio"] = None
+            holder["audio"] = holder["level"] = None
             holder["audio_error"] = f"{type(exc).__name__}: {exc}"[:160]
 
     th = threading.Thread(target=_aud, daemon=True, name="activity-audio")
     th.start()
-    motion = _motion(path, fps, budget_s, cancel=cancel, progress=progress)
+    motion = _motion(path, fps, budget_s, cancel=cancel, progress=progress,
+                     start=start, length=length)
     th.join(max(1.0, budget_s - (time.monotonic() - started)))
     audio = holder.get("audio")
     if audio is not None:
         if audio.size < motion.size:
             audio = np.pad(audio, (0, motion.size - audio.size))
         audio = audio[:motion.size]
+    level = holder.get("level")
+    if level is not None:
+        if level.size < motion.size:
+            level = np.pad(level, (0, motion.size - level.size),
+                           constant_values=-120.0)
+        level = level[:motion.size]
     return {"version": ACTIVITY_VERSION, "fps": float(fps),
             "motion": [round(float(v), 5) for v in motion],
             "audio": (None if audio is None
                       else [round(float(v), 2) for v in audio]),
+            "level": (None if level is None
+                      else [round(float(v), 1) for v in level]),
             "duration": round(motion.size / float(fps), 2),
+            "t0": round(float(start or 0.0), 3),
             "elapsed_s": round(time.monotonic() - started, 2)}
 
 

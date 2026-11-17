@@ -79,12 +79,14 @@ def test_the_turn_ends_after_claim_check_without_another_editor_call(monkeypatch
     assert not any("tool_choice" in call for call in calls)
 
 
-def test_unavailable_claim_check_is_partial_and_never_posts_the_done_draft(monkeypatch):
+def test_unavailable_claim_check_is_partial_and_posts_the_editors_reply(monkeypatch):
+    """EDIT-CORE B1 (16 Nov 2026): a check that cannot read the film records the request partial for
+    the ops loop; the customer reads the editor's reply, never the UNVERIFIED stand-in."""
     import reply_truth
     ctx, db, posted, checkpoint, calls = _delivered(monkeypatch)
     monkeypatch.setattr(reply_truth, 'check', lambda *a, **k: None)
     result = _run(ctx, db)
-    assert posted[-1][0] == reply_truth.UNVERIFIED
+    assert posted[-1][0] != reply_truth.UNVERIFIED and posted[-1][0].strip()
     assert result['outcome'] == 'partial'
     assert posted[-1][1]['outcome'] == 'partial'
     assert checkpoint == {} and len(calls) == 1

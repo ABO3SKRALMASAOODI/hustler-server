@@ -18,7 +18,7 @@ import os
 _DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures",
                     "waves")
 KEYS = ("fx_tags", "verbs", "skills", "departments", "card_prefixes",
-        "sidecar_kinds", "templates", "models", "slots")
+        "sidecar_kinds", "templates", "models", "slots", "batch_layers")
 
 
 def growth():
