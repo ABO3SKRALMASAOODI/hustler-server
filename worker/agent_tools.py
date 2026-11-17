@@ -3780,7 +3780,10 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
     if snap_to_words:
         warn = []   # snapping guarantees word-clean boundaries
     if check_regression:
-        warn += audit.regression_warnings(prev_keep, new_keep, ctx.index)
+        warn += audit.regression_warnings(
+            prev_keep, new_keep, ctx.index,
+            turn_keep=((getattr(ctx, "turn_start_edl", None) or {}).get("json")
+                       or {}).get("keep"))
     # A write that silently drops most of the kept footage is almost always
     # the model chasing something the user never asked for — make the scale
     # of the loss impossible to miss (keep_segments AND cut_range alike).
@@ -4435,21 +4438,26 @@ def cut_silences(ctx, min_silence_s=0.5, padding_s=0.12,
         str(allow_nonquiet).strip().casefold() in {"true", "1", "yes", "on"})
     cur = ctx.latest_edl()["json"]["keep"]
     measured = False
-    if not allow_nonquiet_n and cur:
+    if cur:
         # EDIT-CORE A1 (16 Nov 2026): a gap in the words is dead air only
         # when the picture and the sound show nothing happening. A walk, a
         # song or a dance with no words is footage: measured, kept, and
-        # named in the result (liveness.py).
+        # named in the result (liveness.py). With allow_nonquiet the
+        # footage is cut as asked, and the result says what it carried
+        # (EDIT-CORE gate, 17 Nov 2026, p5717: "cut 5 gap(s) in the speech
+        # (87.5s removed)" was 87.5 s of a music video's picture and song).
         lo = min(float(a) for a, _b in cur)
         hi = max(float(b) for _a, b in cur)
         measured = _read_liveness(ctx, gaps, within=(lo, hi)) is None
-    cuts, noisy, quiet_cuts, sounded, live_kept = [], 0, [], [], []
+    cuts, noisy, quiet_cuts, sounded, live_kept, live_cut = [], 0, [], [], [], []
     for g in gaps:
         cs, ce = round(g["start"] + pad, 2), round(g["end"] - pad, 2)
         if ce - cs >= 0.1:
             if g.get("live") is True and not allow_nonquiet_n:
                 live_kept.append(g)
                 continue
+            if g.get("live") is True:
+                live_cut.append(g)
             cuts.append([cs, ce])
             if g["quiet_frac"] < 0.8:
                 noisy += 1
@@ -4519,7 +4527,7 @@ def cut_silences(ctx, min_silence_s=0.5, padding_s=0.12,
         return ("NO CHANGE — every speech gap long enough to cut carries "
                 "sound, so nothing was cut. " + keep_note)
     what = "gap(s) in the speech" if basis == "speech" else "quiet span(s)"
-    if measured:
+    if measured and not live_cut:
         what = "dead-air " + what
     res = _write_keep(
         ctx, new,
@@ -4528,6 +4536,16 @@ def cut_silences(ctx, min_silence_s=0.5, padding_s=0.12,
         snap_to_words=True, never_grow=True)
     if live_note and res.startswith("EDL v"):
         res += "\n" + live_note
+    if live_cut and res.startswith("EDL v"):
+        gone = sum(g["end"] - g["start"] for g in live_cut)
+        where = "; ".join(f"{g['start']:.2f}-{g['end']:.2f}s ({g.get('why')})"
+                          for g in live_cut[:8])
+        if len(live_cut) > 8:
+            where += f" (+{len(live_cut) - 8} more)"
+        res += (f"\nMEASURED: {len(live_cut)} of the {len(cuts)} cut gap(s) "
+                f"(~{gone:.1f}s) were footage, not dead air: {where}. That "
+                "picture and its sound are no longer in the film; say so in "
+                "the reply, and restore_range brings any of it back.")
     if noisy and not measured and res.startswith("EDL v"):
         # Never let this land as "I removed the silences" when the user is
         # about to notice their game audio / music jumping at those cuts.

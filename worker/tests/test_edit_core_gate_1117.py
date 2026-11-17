@@ -113,3 +113,51 @@ def test_a_value_just_past_the_axis_is_its_end_not_a_hundredth():
     gc = saved["edl"]["effects"]["grade_custom"]
     assert gc["temperature"] == 1.0 and gc["tint"] == -0.06
     assert any("axis end" in n for n in ctx._call_notes)
+
+
+# ---- follow-up of the 17 Nov p5717 replay (egf-fixes-1117) -------------------------------------
+
+def test_the_pushback_carries_what_the_tools_measured_when_they_changed_nothing():
+    import agent_loop
+    ctx = NS(turn_tool_outcomes=[], versions_written=[], last_tool_result=None, write_attempts=0)
+    agent_loop._record_outer_tool_outcome(ctx, "load_tools", "Capabilities loaded")
+    agent_loop._record_outer_tool_outcome(
+        ctx, "cut_silences", "NO CHANGE — measured picture and sound: nothing here is dead air. KEPT 5 stretch(es)")
+    agent_loop._record_outer_tool_outcome(
+        ctx, "remove_filler_words", "No filler words ['um'] were found in the transcript, so nothing was removed.")
+    note = agent_loop._edit_without_write_note(ctx)
+    assert "nothing here is dead air" in note and "No filler words" in note
+    assert "changing nothing is the result" in note and "Do the work now" not in note
+    # nothing measured: the note is as it was
+    assert agent_loop._edit_without_write_note(NS(turn_tool_outcomes=[])) == agent_loop._EDIT_WITHOUT_WRITE_NUDGE
+
+
+def test_cutting_footage_on_request_says_what_the_cut_carried(monkeypatch):
+    sys.path.insert(0, os.path.dirname(__file__))
+    from test_edit_core_signal import _Ctx, _track, _w
+    monkeypatch.setattr(agent_tools, "_liveness_track", lambda ctx, lo, hi, measure=True: (ctx._track, None))
+    ctx = _Ctx([_w("AJ", 8.8, 9.3), _w("yeah", 24.5, 24.9)], 40.0, _track(40.0, loud=[(0.0, 40.0)]))
+    out = agent_tools.cut_silences(ctx, min_silence_s=0.5, padding_s=0.12, allow_nonquiet=True)
+    assert out.startswith("EDL v") and "MEASURED: 3 of the 3 cut gap(s)" in out
+    assert "were footage, not dead air" in out and "sound plays over the room's floor" in out
+    assert "dead-air gap" not in out
+
+
+def test_restoring_what_the_same_request_cut_is_not_a_regression():
+    import audit
+    turn = [[0.0, 90.75]]
+    after_cut = [[8.72, 9.36], [12.6, 13.2], [24.37, 25.51]]
+    assert audit.regression_warnings(after_cut, [[0.0, 90.45]], {}, turn_keep=turn) == []
+    # bringing back what the film had before the request is still named
+    warned = audit.regression_warnings(after_cut, [[0.0, 92.0]], {}, turn_keep=turn)
+    assert warned and "re-includes 90.75-92.00" in warned[0]
+
+
+def test_a_song_after_the_last_word_is_not_a_dead_tail():
+    import edit_review
+    from timeline import Timeline
+    prog = NS(duration=90.45, tl=Timeline([[0.0, 90.45]], [], None))
+    song = {"silences": [], "shots": [{"start": float(t)} for t in range(0, 90, 2)]}
+    assert edit_review._tail_plays(song, prog, 25.3)
+    still = {"silences": [[25.0, 90.45]], "shots": [{"start": 0.0}]}
+    assert not edit_review._tail_plays(still, prog, 25.3)

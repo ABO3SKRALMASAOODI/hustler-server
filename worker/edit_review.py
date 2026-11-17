@@ -1593,6 +1593,40 @@ def _tail_filled(ms, prog, t0):
     return _coverage(spans, dur) >= 0.5 * (dur - t0)
 
 
+def _tail_plays(index, prog, t0, step=0.25):
+    """Does the footage itself carry the program after ``t0`` (the last word)?
+    Measured from the index, the way liveness reads a stretch: the sound plays
+    (most of it lies outside the index's measured silences) or the picture is
+    edited (shot changes at liveness.CUTS_PER_S or more). A song or a montage
+    after the last sung word is the film playing, not a dead tail (EDIT-CORE
+    gate, 17 Nov 2026, p5717: "65.1s run on after the last word ('up') ...
+    a dead tail after the payoff. Trim the tail" on a music video). False
+    when the index cannot say."""
+    try:
+        import liveness
+        dur = float(prog.duration)
+        if dur - t0 <= 0:
+            return False
+        times = [prog.tl.out_to_src(t0 + k * step)
+                 for k in range(int((dur - t0) / step) + 1)]
+        times = [float(t) for t in times if t is not None]
+        if not times:
+            return False
+        silences = index.get("silences")
+        sounding = None
+        if isinstance(silences, list):
+            quiet = sum(1 for t in times
+                        if any(float(a) <= t <= float(b) for a, b in silences))
+            sounding = 1.0 - quiet / len(times)
+        shots = liveness.shot_starts(index)
+        cuts = sum(1 for c in shots
+                   if any(abs(c - t) <= step / 2 for t in times))
+        edited = cuts / max(dur - t0, 1e-6) >= liveness.CUTS_PER_S
+        return bool(edited or (sounding is not None and sounding >= liveness.SOUND_SHARE))
+    except Exception:  # noqa: BLE001 - unmeasured: the note stands as before
+        return False
+
+
 def _reaction_shot(edl, index, prog):
     a, prev_end = prog.keep[-1][0], prog.keep[-2][1]
     if abs(a - prev_end) >= 0.02:
@@ -1695,7 +1729,8 @@ def _payoff_notes(prog, payoff, ms=(), index=None, edl=None):
                 (f"The payoff gets {max(0.0, hold):.2f}s after '{last['w']}' "
                  "before the end card — the punchline has no air."),
                 fix, {"hold_s": round(hold, 2), "last_word": last["w"]}))
-        elif hold > DEAD_TAIL_S and not _tail_filled(ms, prog, _f(last["t1"])):
+        elif hold > DEAD_TAIL_S and not _tail_filled(ms, prog, _f(last["t1"])) \
+                and not _tail_plays(index or {}, prog, _f(last["t1"])):
             notes.append(_note(
                 "payoff_hold", _f(last["t1"]),
                 (f"{hold:.1f}s run on after the last word ('{last['w']}') "

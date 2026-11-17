@@ -3805,8 +3805,35 @@ def _edit_without_write_pushback(ctx, messages, already_pushed):
     # This is the "do it before you ask" repair. ask_user's own first hold
     # would make the same point a second time.
     ctx._question_held = True
-    messages.append({"role": "system", "content": _EDIT_WITHOUT_WRITE_NUDGE})
+    messages.append({"role": "system", "content": _edit_without_write_note(ctx)})
     return True
+
+
+_MEASURED_NOTHING_TO_CHANGE = (
+    "Measured: this request asks for a change and the timeline has not "
+    "changed. Your tools measured the film for it:\n{said}\n"
+    "When these measurements show the film holds nothing of what was asked "
+    "(no dead air, no filler words, nothing of the kind), the film as it is "
+    "already answers the request: changing nothing is the result. Reply with "
+    "the measurement in plain words; do not cut footage, sound or picture "
+    "only to make a change. When something asked for remains, do it now, then "
+    "render_preview. Choose any open detail yourself and name it in your "
+    "reply. If you cannot go on without something only the customer has, "
+    "call ask_user with that one question.")
+
+
+def _edit_without_write_note(ctx):
+    """The pushback, carrying what this turn's own tools measured when they
+    changed nothing (EDIT-CORE gate, 17 Nov 2026, p5717: "cut the silences"
+    on a music video; cut_silences measured no dead air, and "Do the work
+    now" made the editor cut 87.5 s of footage anyway, then 2.5 s of the
+    song). Without a measurement, the note is as before."""
+    said = [f"- {r['tool']}: {r['said']}"
+            for r in getattr(ctx, "turn_tool_outcomes", None) or []
+            if isinstance(r, dict) and r.get("said")]
+    if not said:
+        return _EDIT_WITHOUT_WRITE_NUDGE
+    return _MEASURED_NOTHING_TO_CHANGE.format(said="\n".join(said[-6:]))
 
 
 def _reply_after_auto_render(ctx, client, messages, tools, draft, honesty):
@@ -5424,6 +5451,14 @@ def _record_outer_tool_outcome(ctx, name, result):
     ctx.last_tool_result = first
     receipt = {"tool": name, "kind": kind, "fingerprint": fingerprint,
                "writes": len(ctx.versions_written)}
+    before = (ctx.turn_tool_outcomes[-1].get("writes")
+              if getattr(ctx, "turn_tool_outcomes", None) else None)
+    if name in agent_tools.WRITE_TOOLS and kind in ("no_change", "success") \
+            and before is not None and before == receipt["writes"] \
+            or kind == "no_change":
+        # A write tool that measured and changed nothing: what it measured is
+        # the answer to "the timeline has not changed" (_edit_without_write_pushback).
+        receipt["said"] = str(result or "").strip()[:500]
     if kind == "prerequisite" and name in {"render_preview", "wait_for_job"}:
         pending = re.search(r"\bjob(?:_id=| )(\d+)\b", str(result))
         if pending:

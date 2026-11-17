@@ -449,11 +449,16 @@ def _norm_text(t):
     return " ".join((t or "").lower().split())
 
 
-def regression_warnings(prev_keep, new_keep, index):
+def regression_warnings(prev_keep, new_keep, index, turn_keep=None):
     """Mechanical warning when a full keep replacement re-includes ranges the
     previous version had cut, annotated from the index (silence / duplicate
-    sentences). No LLM involved."""
+    sentences). No LLM involved. ``turn_keep`` (the keep the request started
+    from): bringing back what this same request cut restores the film as it
+    was, never a regression (EDIT-CORE gate, 17 Nov 2026, p5717: a restore
+    of the whole video after a 87.5 s cut read "WARNING (regression)")."""
     readded = subtract_spans(new_keep, prev_keep)
+    if turn_keep:
+        readded = subtract_spans(readded, turn_keep)
     silences = index.get("silences") or []
     sentences = index.get("sentences") or []
     by_text = {}
