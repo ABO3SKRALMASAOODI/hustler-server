@@ -1,0 +1,99 @@
+{
+ "made": "2026-11-17",
+ "gate": "lane MUSIC-SET tools/gate.py (the reference-grade bed gate music_library/gate.json uses), run on the 24 publisher files",
+ "pass": [
+  "dramatic-urban-warrior-10",
+  "dramatic-urban-warrior-11",
+  "hiphop-dance-of-the-dead",
+  "inspiring-cute-melodies-1"
+ ],
+ "fail": {
+  "ambient-at-the-last-minute": [
+   "band-limited: 77.6 dB wall at 15375 Hz",
+   "LRA 1.7 LU outside (3.0, 15.0)",
+   "sits on the voice: 87% of energy at 150 Hz-4 kHz",
+   "energy shape: short-term sd 0.67 dB, p10-p90 range 1.73 dB"
+  ],
+  "ambient-calm-before-the-storm": [
+   "wide low end: side/mid under 150 Hz -4.6 dB"
+  ],
+  "ambient-tiny-plastic-video-games-for-long-anxi": [
+   "energy shape: short-term sd 1.56 dB, p10-p90 range 2.98 dB"
+  ],
+  "chill-bubbles-lofi-bright-relaxed": [
+   "spectral tilt -0.09 dB/oct outside (-6.0, -1.2)"
+  ],
+  "chill-calm-currents-lofi-relax-calm": [
+   "band-limited: 52.2 dB wall at 15698 Hz"
+  ],
+  "chill-canon-event-lofi-sad-reflection": [
+   "band-limited: 76.7 dB wall at 14621 Hz",
+   "spectral tilt -0.91 dB/oct outside (-6.0, -1.2)"
+  ],
+  "cinematic-across-the-border": [
+   "stereo width: side/mid -2.1 dB outside (-24.0, -3.0)",
+   "stereo phase: L/R correlation 0.237"
+  ],
+  "cinematic-adventures-with-paddy": [
+   "spectral tilt 1.6 dB/oct outside (-6.0, -1.2)",
+   "sits on the voice: 92% of energy at 150 Hz-4 kHz",
+   "stereo width: side/mid -0.9 dB outside (-24.0, -3.0)",
+   "stereo phase: L/R correlation 0.104"
+  ],
+  "cinematic-after-midnight": [
+   "band-limited: 93.4 dB wall at 14390 Hz",
+   "sits on the voice: 89% of energy at 150 Hz-4 kHz",
+   "stereo width: side/mid 2.4 dB outside (-24.0, -3.0)",
+   "stereo phase: L/R correlation -0.264",
+   "wide low end: side/mid under 150 Hz 2.8 dB",
+   "energy shape: short-term sd 0.74 dB, p10-p90 range 1.94 dB"
+  ],
+  "corporate-a-small-town-on-pluto-composed": [
+   "band-limited: 80.4 dB wall at 14309 Hz",
+   "spectral tilt -0.84 dB/oct outside (-6.0, -1.2)"
+  ],
+  "corporate-a-small-town-on-pluto-music-box": [
+   "band-limited: 45.4 dB wall at 8839 Hz",
+   "spectral tilt 7.44 dB/oct outside (-6.0, -1.2)",
+   "sits on the voice: 100% of energy at 150 Hz-4 kHz"
+  ],
+  "corporate-cabin-fever": [
+   "sits on the voice: 85% of energy at 150 Hz-4 kHz",
+   "energy shape: short-term sd 1.42 dB, p10-p90 range 3.67 dB"
+  ],
+  "dramatic-urban-warrior-12": [
+   "band-limited: 81.0 dB wall at 15752 Hz"
+  ],
+  "hiphop-abducted": [
+   "LRA 2.0 LU outside (3.0, 15.0)",
+   "energy shape: short-term sd 1.63 dB, p10-p90 range 1.79 dB"
+  ],
+  "hiphop-carnival-of-souls": [
+   "band-limited: 81.3 dB wall at 13884 Hz",
+   "mud: 92% of energy under 150 Hz"
+  ],
+  "inspiring-cute-melodies-10": [
+   "band-limited: 95.8 dB wall at 14373 Hz",
+   "LRA 15.1 LU outside (3.0, 15.0)"
+  ],
+  "inspiring-cute-melodies-11": [
+   "LRA 2.6 LU outside (3.0, 15.0)",
+   "energy shape: short-term sd 1.19 dB, p10-p90 range 2.71 dB"
+  ],
+  "upbeat-50-over-the-speed-limit": [
+   "band-limited: 92.9 dB wall at 15590 Hz",
+   "LRA 2.9 LU outside (3.0, 15.0)",
+   "spectral tilt -1.02 dB/oct outside (-6.0, -1.2)",
+   "energy shape: short-term sd 2.66 dB, p10-p90 range 2.8 dB"
+  ],
+  "upbeat-a-small-town-on-pluto": [
+   "band-limited: 83.9 dB wall at 15811 Hz",
+   "LRA 2.9 LU outside (3.0, 15.0)",
+   "energy shape: short-term sd 1.71 dB, p10-p90 range 2.51 dB"
+  ],
+  "upbeat-back-in-the-80s": [
+   "band-limited: 94.9 dB wall at 14341 Hz",
+   "energy shape: short-term sd 3.55 dB, p10-p90 range 3.22 dB"
+  ]
+ }
+}

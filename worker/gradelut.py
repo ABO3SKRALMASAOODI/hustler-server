@@ -51,6 +51,18 @@ _YUV_FILTERS = ("eq", "hue")
 _RGB_FILTERS = ("colorbalance", "curves")
 
 _BAKE_TIMEOUT_S = 15
+
+# The baked tables are 256-entry maps over 8-bit values, but lutyuv/lutrgb
+# also accept 10/12/16-bit frames and then read `val` on that wider scale:
+# every value above 255 hit the table's last entry. A final decodes the
+# ORIGINAL (previews read the 8-bit proxy), so a 10-bit HEVC phone upload
+# (p5873, Main 10) rendered its graded final near black (luma max 23 of
+# 255 with grain and vignette on top) while every preview looked right.
+# Each table filter is therefore handed 8-bit frames it was baked for:
+# 8-bit inputs negotiate straight through the list, deeper ones are
+# converted once.
+YUV8 = "format=yuv420p|yuvj420p|yuv422p|yuvj422p|yuv444p|yuvj444p"
+RGB8 = "format=gbrp|rgb24|bgr24|rgba|bgra|argb|abgr"
 _cache = {}
 _cache_lock = threading.Lock()
 
@@ -159,7 +171,7 @@ def _yuv_filter(subchain):
         bits.append(f"u='{_tree_expr(fu)}'")
     if fv != ident:
         bits.append(f"v='{_tree_expr(fv)}'")
-    return "lutyuv=" + ":".join(bits) if bits else None
+    return f"{YUV8},lutyuv=" + ":".join(bits) if bits else None
 
 
 def _rgb_filter(subchain):
@@ -188,7 +200,7 @@ def _rgb_filter(subchain):
         bits.append(f"g='{_tree_expr(fg)}'")
     if fb != ident:
         bits.append(f"b='{_tree_expr(fb)}'")
-    return "lutrgb=" + ":".join(bits) if bits else None
+    return f"{RGB8},lutrgb=" + ":".join(bits) if bits else None
 
 
 def _fast_run(kind, subchain):

@@ -196,7 +196,11 @@ def _run_verb(stage, name, args, env, index):
             if line.upper().startswith("WARNING"):
                 env.finding(f"{name}: {line}")
         return True
-    if result_refused(text):
+    # A verb that set nothing aside in its own words ("NOT APPLIED: ...")
+    # did not land: saying "already so" sent p5873's model hunting for a
+    # transition that was never placed.
+    if result_refused(text) or text.lstrip().upper().startswith(
+            "NOT APPLIED"):
         env.skip(index, f"{name}: {first_line(text)}",
                  _instead_for(name))
         env.refusals.append({"op": index, "tool": name,
@@ -279,16 +283,66 @@ def op_restore(stage, value, env, index):
     return True
 
 
+def film_to_source_spans(edl, a, b):
+    """Source spans that play over film seconds [a, b] of ``edl`` (a span
+    crossing a cut or an insert splits; existing speed is honoured)."""
+    tl = _clock(edl)
+    out = []
+    for (s, e), pcs, off, length in zip(tl.segs, tl.pieces, tl.offsets,
+                                        tl.seg_out_len):
+        lo, hi = max(a, off), min(b, off + length)
+        if hi - lo <= 1e-3:
+            continue
+
+        def at(t, pcs=pcs, off=off, e=e):
+            rem = t - off
+            for ps, pe, f in pcs:
+                plen = (pe - ps) / f
+                if rem <= plen + 1e-9:
+                    return ps + max(0.0, rem) * f
+                rem -= plen
+            return e
+        src_a, src_b = round(at(lo), 3), round(at(hi), 3)
+        if src_b - src_a > 1e-3:
+            out.append((src_a, src_b))
+    return out
+
+
 def op_speed(stage, value, env, index):
+    """Speed rows are FILM seconds, like everything placed on the film
+    (p5744: "slow motion after 6 s" is 6 s of the film the customer
+    watches); ``"at_source": true`` on a row takes source seconds."""
     rows = value if isinstance(value, list) else [value]
     ok = False
     for row in rows:
         if not isinstance(row, dict):
             env.skip(index, "a speed row is {start, end, factor}")
             continue
-        args = {"start": row.get("start"), "end": row.get("end"),
-                "factor": row.get("factor")}
-        ok = _run_verb(stage, "set_speed", args, env, index) or ok
+        try:
+            a, b = float(row.get("start")), float(row.get("end"))
+        except (TypeError, ValueError):
+            env.skip(index, "a speed row needs numeric start and end",
+                     '{"start": 6, "end": 7.3, "factor": 0.6} (film s)')
+            continue
+        a, b = min(a, b), max(a, b)
+        if row.get("at_source"):
+            spans = [(a, b)]
+        else:
+            program = float(program_duration(stage.edl) or 0.0)
+            if program and b > program:
+                env.repair(f"speed end {b:g} s is past the film's end "
+                           f"({program:.2f} s): held to the end")
+                b = program
+            spans = film_to_source_spans(stage.edl, a, b)
+            if not spans:
+                env.skip(index, f"film {a:g}-{b:g} s holds no footage of "
+                                "the upload (an insert or past the end)",
+                         f"film seconds between 0 and {program:.2f}")
+                continue
+        for src_a, src_b in spans:
+            args = {"start": src_a, "end": src_b,
+                    "factor": row.get("factor")}
+            ok = _run_verb(stage, "set_speed", args, env, index) or ok
     return ok
 
 
@@ -522,6 +576,17 @@ def _place_one(stage, v, env, index):
         env.skip(index, "place takes numeric at, dur and source_start")
         return False
     key = v.get("key") or v.get("asset_key")
+    link = str(v.get("id") or "").strip()
+    if not key and link.lower().startswith(("http://", "https://")):
+        # A find(kind='footage') answer is links. p5744 asked for bubbles,
+        # got links, and the place op had no way to use one: "no tool".
+        # Download it as a project clip, then place it like an upload.
+        key, why = _fetch_link(stage, link)
+        if not key:
+            env.skip(index, f"place {link}: {why}",
+                     "another link from the same find() answer")
+            return False
+        env.repair(f"downloaded {link} as {key}")
     if key:
         name = "add_overlay" if mode == "overlay" else "insert_media"
         args = ({"asset_key": key, "start": at, "duration_s": dur,
@@ -529,6 +594,10 @@ def _place_one(stage, v, env, index):
                 if mode == "overlay" else
                 {"asset_key": key, "at_output_s": at, "duration_s": dur,
                  "clip_start_s": offset})
+        if mode == "overlay":
+            for opt in ("opacity", "scale", "x", "y"):
+                if v.get(opt) is not None:
+                    args[opt] = v[opt]
         return _run_verb(stage, name, args, env, index)
     from harness2 import find_tool
     tried = []
@@ -551,6 +620,26 @@ def _place_one(stage, v, env, index):
     env.skip(index, f"place {v.get('id')}: {why}",
              "another id from the same find() board")
     return False
+
+
+def _fetch_link(stage, link):
+    """(storage key, None) for a link downloaded as a project clip, or
+    (None, why) in the downloader's own words."""
+    fetched = getattr(stage, "urls_fetched", None)
+    count = len(fetched) if fetched is not None else 0
+    try:
+        result = agent_tools.fetch_url(stage, link, as_kind="clip")
+    except Exception as exc:  # noqa: BLE001 - the next link
+        return None, f"download failed: {type(exc).__name__}: {str(exc)[:160]}"
+    fetched = getattr(stage, "urls_fetched", None) or []
+    if len(fetched) <= count:
+        return None, first_line(result, 240)
+    key = fetched[-1].get("storage_key")
+    # v2 shows the pixels after the edit; it never holds a placement.
+    pending = getattr(stage, "_pending_visual_review_assets", None)
+    if isinstance(pending, set):
+        pending.discard(str(key))
+    return key, None
 
 
 def op_scenes(stage, value, env, index):
