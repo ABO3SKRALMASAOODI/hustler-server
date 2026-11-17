@@ -1223,6 +1223,7 @@ class SourceChanges:
 
     EDGE_F = 3              # frames from an insert edge still the edit's join
     REACH_S = 0.09          # source seconds either side of the mapped frame
+    MERGE_GAP_S = 8.0       # source spans closer than this are read as one
     SHARE = 0.5             # of GLOBAL_SHARE / GLOBAL_LEVEL: the source's
                             # change is read on the WHOLE source frame, the
                             # render's on a crop of it
@@ -1231,6 +1232,56 @@ class SourceChanges:
         self.plan, self.src, self.deadline = plan_, src_path, deadline
         self.fps = float(plan_.get("fps") or 30.0)
         self.cache = {}
+        # [(a, b, [source second of each global change])]: source spans read
+        # in one pass (prefetch), so every row is measured, not the first few.
+        self.read = []
+
+    def _readable(self):
+        src = str(self.src or "")
+        return bool(src) and (src.startswith(("http://", "https://"))
+                              or os.path.exists(src))
+
+    def prefetch(self, times):
+        """Read the source once over every span the given source seconds
+        need (REACH_S either side, nearby spans merged) and remember where
+        it changes globally. A music video's own flash edits number in the
+        dozens (EDIT-CORE gate, 17 Nov 2026: p5717 had 23 rows; only the
+        first 12 were probed one by one, and the rest went to the editor as
+        "framing pops" it then cut). Out of budget, the unread rows keep the
+        per-row probe."""
+        if not self._readable():
+            return
+        import numpy as np
+        sw, sh = self.plan.get("src_wh") or [None, None]
+        w = DIFF_W
+        h = _tiny_h(int(sw or 16), int(sh or 9), w)
+        spans = []
+        for t in sorted(float(x) for x in times if x is not None):
+            a, b = max(0.0, t - self.REACH_S - 0.05), t + self.REACH_S + 0.05
+            # one decode through a gap is cheaper than a seek per span
+            # (720p: ~15 ms a source second against ~0.3 s a seek)
+            if spans and a <= spans[-1][1] + self.MERGE_GAP_S:
+                spans[-1][1] = max(spans[-1][1], b)
+            else:
+                spans.append([a, b])
+        for a, b in spans:
+            if time.monotonic() > self.deadline - 2.0:
+                break
+            try:
+                frames = _frames_with_times(self.src, a, b, w, h, self.deadline)
+            except Exception:  # noqa: BLE001 - the per-row probe reads it
+                continue
+            hits, prev = [], None
+            for t, f in frames:
+                g = f.astype(np.int16)
+                if prev is not None:
+                    d = np.abs(g - prev)
+                    if float(d.mean()) >= GLOBAL_LEVEL * self.SHARE and \
+                            float((d > PIXEL_STEP).mean()) >= GLOBAL_SHARE * self.SHARE:
+                        hits.append(float(t))
+                prev = g
+            if frames:
+                self.read.append((float(frames[0][0]), float(frames[-1][0]), hits))
 
     def _inside_other(self, t):
         pad = self.EDGE_F / self.fps
@@ -1241,9 +1292,14 @@ class SourceChanges:
         key = round(src_t, 2)
         if key in self.cache:
             return self.cache[key]
+        for a, b, hits in self.read:
+            if a <= src_t - self.REACH_S and src_t + self.REACH_S <= b:
+                hit = any(src_t - self.REACH_S < t <= src_t + self.REACH_S + 0.011
+                          for t in hits)
+                self.cache[key] = hit
+                return hit
         hit = False
-        if self.src and os.path.exists(self.src) and \
-                time.monotonic() < self.deadline - 2.0:
+        if self._readable() and time.monotonic() < self.deadline - 2.0:
             import numpy as np
             sw, sh = self.plan.get("src_wh") or [None, None]
             w = DIFF_W
@@ -1282,12 +1338,24 @@ class SourceChanges:
                 return False
         return True
 
-    def split(self, rows, frames_of, most=12):
-        """(the edit's rows, the source's own rows); at most ``most`` rows
-        are probed, the rest stay the edit's."""
+    def split(self, rows, frames_of, most=None):
+        """(the edit's rows, the source's own rows). Every row is measured
+        (``most`` bounds it when given); the source is read in one pass over
+        the spans the rows map to. A row the budget left unread stays the
+        edit's."""
+        rows = list(rows or [])
+        src_of = self.plan.get("src_of")
+        if callable(src_of) and len(rows) > 2:
+            need = []
+            for row in rows[:most]:
+                for fr in frames_of(row):
+                    t = float(fr) / self.fps
+                    if not self._inside_other(t):
+                        need.append(src_of(t))
+            self.prefetch(need)
         mine, theirs = [], []
-        for k, row in enumerate(rows or []):
-            if k < most and self.owned(frames_of(row)):
+        for k, row in enumerate(rows):
+            if (most is None or k < most) and self.owned(frames_of(row)):
                 theirs.append(row)
             else:
                 mine.append(row)
@@ -3029,8 +3097,13 @@ def black_tail(path, plan_, deadline, stall_rows=None):
     w, h = DIFF_W, _tiny_h(W, H, DIFF_W)
     # boundary_stall's window opens on frame k0: a run that starts after it
     # is already whole; one that starts on it may run on further back.
+    # A run that starts within a few frames of the window's first frame is
+    # traced too: the render's own clock can put the first black frame a
+    # frame or two after the window opens (EDIT-CORE gate, 17 Nov 2026:
+    # p5717's preview read "1.38s of black 91.42-92.80" on a programme black
+    # from 90.67, the editor cut from 91.42, and 0.96 s of black shipped).
     window = math.ceil((prog - STALL_TAIL_S) * fps - 1e-6) / fps
-    if run_from > window + .5 / fps or run_from <= .5 / fps:
+    if run_from > window + 2.5 / fps or run_from <= .5 / fps:
         return [round(run_from, 3), round(prog, 3), True]
     lo = max(0.0, prog - BLACK_TAIL_MAX_S)
     keys = [(t, f) for t, f in _frames_with_times(

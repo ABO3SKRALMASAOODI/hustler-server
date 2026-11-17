@@ -3443,6 +3443,20 @@ CUT_SOUND_BUDGET_S = 15.0
 CUT_SOUND_URL_TTL_S = 1500.0
 
 
+def _content_end(ctx):
+    """The upload's measured last picture (index.source_screen.safe_end_s:
+    the screen review's end of content, before a black end or a slate), in
+    source seconds, or None when the picture runs to the end."""
+    try:
+        screen = ((getattr(ctx, "index", None) or {}).get("source_screen")
+                  or {})
+        end = float(screen.get("safe_end_s"))
+        dur = float(ctx.duration or 0)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return end if 0 < end < dur - 0.05 else None
+
+
 def _audio_safe_keep(ctx, keep, prev_keep, words):
     """(keep, notes, quiet_edges): every NEW cut edge of ``keep`` (one
     ``prev_keep`` did not have; every cut edge when it is None) placed by
@@ -3475,7 +3489,8 @@ def _audio_safe_keep(ctx, keep, prev_keep, words):
         # an end may really cut up to a frame either side (the block clock)
         new, moves, checked = cut_audio.refine_keep(
             keep, words, ctx.duration, prev_keep, level,
-            end_slack=1.0 / _index_fps(getattr(ctx, "index", None)))
+            end_slack=1.0 / _index_fps(getattr(ctx, "index", None)),
+            content_end=_content_end(ctx))
     except Exception:  # noqa: BLE001 — a placement never fails a write
         return keep, [], set()
     quiet = {round(m["old"], 2) for m in moves if m["why"] == "quiet_word"}
@@ -21605,7 +21620,16 @@ def set_grade_custom(ctx, exposure=None, contrast=None, saturation=None,
                 # A percentage: contrast=4 is 4%, never 4x (p5520's replay).
                 call_note(ctx, f"{axis} {requested:g} read as {requested:+g}%")
                 requested = requested / 100.0
-        elif 1.0 < abs(requested) <= 100.0:
+        elif 1.0 < abs(requested) <= 2.0:
+            # Just past the -1..1 axis is a request for its end, never a
+            # hundredth of it (EDIT-CORE gate, 17 Nov 2026, p5873:
+            # temperature=1.2 for "warm, sun-touched" was read as 1.2% and
+            # stored as +0.012 — no visible warmth).
+            clamped = 1.0 if requested > 0 else -1.0
+            call_note(ctx, f"{axis} {requested:g} read as the axis end, "
+                           f"{clamped:+g}")
+            requested = clamped
+        elif 2.0 < abs(requested) <= 100.0:
             call_note(ctx, f"{axis} {requested:g} read as {requested:g}%")
             requested = requested / 100.0
         if axis in ("contrast", "saturation") and requested < 0.5:
