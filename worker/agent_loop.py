@@ -2818,8 +2818,25 @@ def _typed_start_from_upload(ctx, ledger, job):
     if int(origin.get("customer_requests_since") or 0) > 0 or not getattr(ctx, "has_main_video", False):
         return ""
     try:
-        before = ctx.latest_edl()["version"]
-        result = str(agent_tools.reset_edit(ctx))
+        row = ctx.latest_edl()
+        before, current = row["version"], row["json"] or {}
+        duration = float(getattr(ctx, "duration", 0) or 0)
+        added = _first_cut_additions(current, duration)
+        if _first_cut_holds_upload(current, duration):
+            # EDIT-CORE 17 Nov (p5717 gate): a first cut that already plays the whole upload (a music
+            # video kept whole, reframed to 9:16, 7 sound effects) was reset to the bare upload, and the
+            # frame and the sound effects were lost with nothing gained. The request runs on it as it is.
+            kept = sum(max(0.0, float(b) - float(a)) for a, b in current.get("keep") or [])
+            ledger["reset"] = {"from": before, "to": None, "held": True}
+            print(f"[asks] job {job.get('id')}: the first cut v{before} already plays the full upload; "
+                  "the request runs on it", flush=True)
+            return (f"The current film is the automatic first cut (v{before}), and it already plays the whole "
+                    f"upload ({kept:.1f} s of {duration:.1f} s)" + (f", with {added}" if added else "")
+                    + ". This request is about the upload, so it runs on this film: keep what the first cut "
+                    "added unless the request changes it, and say in the reply that you edited their full video.")
+        fresh, carried, dropped = _upload_carrying_first_cut(current, duration)
+        result = str(ctx.write_edl(fresh, "start again from the full upload" + (
+            ", carrying the first cut's " + "; ".join(carried) if carried else "")))
     except dbx.JobLeaseLost:
         raise
     except Exception as exc:  # noqa: BLE001 - the routes run on the current film, as before
@@ -2830,8 +2847,104 @@ def _typed_start_from_upload(ctx, ledger, job):
     ledger["reset"] = {"from": before, "to": (getattr(ctx, "versions_written", None) or [None])[-1]}
     print(f"[asks] job {job.get('id')}: started from the full upload (v{before} was the automatic first cut)", flush=True)
     return (f"The current film was the automatic first cut (v{before}), and this request is about the upload: "
-            f"the edit now starts from the full upload as EDL v{ledger['reset']['to']}. Work on that; say in "
-            "the reply that you edited their full video.")
+            f"the edit now starts from the full upload as EDL v{ledger['reset']['to']}"
+            + (f", carrying the first cut's {'; '.join(carried)}" if carried else "")
+            + (f". Not carried (they belonged to the first cut's selection): {'; '.join(dropped)}" if dropped else "")
+            + ". Work on that; say in the reply that you edited their full video and name what the first "
+            "cut had that this film no longer has.")
+
+
+# The first cut "holds the upload" when what it leaves out is at most a breath inside and a measured
+# head or tail (the screen review's black end, a slate): 2.5 s, or 5% of a long upload.
+UPLOAD_HELD_INSIDE_S = 0.5
+UPLOAD_HELD_ENDS_S = 2.5
+UPLOAD_HELD_ENDS_SHARE = 0.05
+
+
+def _first_cut_holds_upload(edl, duration):
+    """True when the keep plays the upload's content in source order with nothing but a breath cut
+    inside it and a short head or tail left out. Measured on the keep; never raises."""
+    try:
+        spans = [(float(a), float(b)) for a, b in (edl or {}).get("keep") or []]
+        if not spans or duration <= 0:
+            return False
+        if any(spans[i][0] < spans[i - 1][1] - 1e-3 for i in range(1, len(spans))):
+            return False                     # reordered: a montage, not the upload
+        inside = sum(max(0.0, spans[i][0] - spans[i - 1][1]) for i in range(1, len(spans)))
+        ends = spans[0][0] + max(0.0, duration - spans[-1][1])
+        return inside <= UPLOAD_HELD_INSIDE_S and \
+            ends <= max(UPLOAD_HELD_ENDS_S, UPLOAD_HELD_ENDS_SHARE * duration)
+    except (TypeError, ValueError, IndexError):
+        return False
+
+
+def _first_cut_additions(edl, duration):
+    """What the first cut put on the upload, measured from the EDL diff, in plain words ("" when none)."""
+    try:
+        import schemas
+        changes = [c for c in reply_grounding.edl_changes(schemas.default_edl(duration), edl or {})
+                   if c.get("layer") != "cuts"] if duration > 0 else []
+        return reply_grounding.change_list_text(changes) if changes else ""
+    except Exception:  # noqa: BLE001 - information only
+        return ""
+
+
+def _upload_carrying_first_cut(edl, duration):
+    """(fresh EDL of the full upload, carried, dropped): the frame (its follow keys are on the source
+    clock), the caption style and the mastering carry as they are; a sound effect moves to the source
+    moment it sat on, so it lands on the same picture in the full upload; a zoom that spanned the whole
+    first cut spans the whole upload. What belonged to the first cut's own selection (titles on its
+    first seconds, a zoom inside one of its moments) is named in ``dropped``."""
+    import copy
+    import schemas
+    from timeline import Timeline
+    edl = edl or {}
+    fresh = schemas.default_edl(duration)
+    carried, dropped = [], []
+    if edl.get("frame"):
+        fresh["frame"] = copy.deepcopy(edl["frame"])
+        carried.append(f"{(edl['frame'] or {}).get('ratio') or 'output'} frame")
+    if isinstance(edl.get("captions"), dict):
+        fresh["captions"] = copy.deepcopy(edl["captions"])
+        carried.append("caption style")
+    if edl.get("master"):
+        fresh["master"] = copy.deepcopy(edl["master"])
+    try:
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [], edl.get("speed"))
+        program = float(tl.out_duration)
+    except Exception:  # noqa: BLE001
+        tl, program = None, 0.0
+    moved = []
+    for item in edl.get("sfx") or []:
+        try:
+            src = tl.out_to_src(float(item["at"])) if tl is not None else None
+        except (KeyError, TypeError, ValueError):
+            src = None
+        if src is None:
+            dropped.append(f"sound effect {item.get('id')}")
+            continue
+        moved.append(dict(copy.deepcopy(item), at=round(float(src), 2)))
+    if moved:
+        fresh["sfx"] = moved
+        carried.append(f"{len(moved)} sound effect{'s' if len(moved) != 1 else ''} on the same picture moments")
+    zooms = []
+    for z in ((edl.get("effects") or {}).get("zooms") or []):
+        try:
+            whole = float(z.get("start") or 0.0) <= 0.05 and float(z.get("end")) >= program - 0.05
+        except (TypeError, ValueError):
+            whole = False
+        if whole and program > 0:
+            zooms.append(dict(copy.deepcopy(z), start=0.0, end=round(float(duration), 2)))
+        else:
+            dropped.append(f"zoom {z.get('id')}")
+    if zooms:
+        fresh["effects"] = dict(fresh.get("effects") or {}, zooms=zooms)
+        carried.append(f"{len(zooms)} whole-film zoom{'s' if len(zooms) != 1 else ''}")
+    for layer, word in (("texts", "title"), ("vectors", "graphic"), ("motion", "motion graphic"),
+                        ("overlays", "overlay"), ("inserts", "insert"), ("music", "music track")):
+        for item in edl.get(layer) or []:
+            dropped.append(f"{word} {item.get('id') if isinstance(item, dict) else ''}".strip())
+    return fresh, carried, dropped
 
 
 def _typed_pass(ctx, ledger, cfg, job):
