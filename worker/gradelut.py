@@ -51,6 +51,22 @@ _YUV_FILTERS = ("eq", "hue")
 _RGB_FILTERS = ("colorbalance", "curves")
 
 _BAKE_TIMEOUT_S = 15
+
+# The baked tables are 256-entry maps over 8-bit values, but lutyuv/lutrgb
+# also accept 10/12/16-bit frames and then read `val` on that wider scale:
+# every value above 255 hit the table's last entry. A final decodes the
+# ORIGINAL (previews read the 8-bit proxy), so a 10-bit HEVC phone upload
+# (p5873, Main 10) rendered its graded final near black (luma max 23 of
+# 255 with grain and vignette on top) while every preview looked right.
+# Each table therefore reads its value on the 8-bit scale it was baked on,
+# whatever the frame's depth (`_tree_expr`: the step is 2^(depth-8), found
+# from the filter's own `maxval`, 1 on 8-bit frames). No format filter is
+# added, so an 8-bit graph negotiates exactly as before (bit-identical to the
+# real filters) and a deep frame keeps its depth. YUV8 stays for the few
+# graphs that convert anyway (the halation threshold).
+YUV8 = "format=yuv420p|yuvj420p|yuv422p|yuvj422p|yuv444p|yuvj444p"
+# 2^(depth-8) from maxval: 235/240/255 -> 1, 940/960/1023 -> 4, 4095 -> 16.
+_STEP = "pow(2,round(log(maxval/200)/log(2)))"
 _cache = {}
 _cache_lock = threading.Lock()
 
@@ -139,14 +155,18 @@ def _bake(subchain, pix_fmt, planes, check=True):
 
 
 def _tree_expr(table):
-    """Balanced if(lt(val,m),lo,hi) tree over a 256-entry table. Evaluated by
-    the lut filter once per value at init — never per pixel."""
+    """Balanced if(lt(v,m),lo,hi) tree over a 256-entry table. Evaluated by
+    the lut filter once per value at init — never per pixel. The value is
+    read on the 8-bit scale the table was baked on and the answer put back
+    on the frame's own scale, so a 10-bit frame is graded like its 8-bit
+    proxy (p5873) and an 8-bit frame is the plain table (step 1)."""
     def build(lo, hi):
         if hi - lo == 1:
             return str(table[lo])
         mid = (lo + hi) // 2
-        return f"if(lt(val,{mid}),{build(lo, mid)},{build(mid, hi)})"
-    return build(0, 256)
+        return f"if(lt(ld(0),{mid}),{build(lo, mid)},{build(mid, hi)})"
+    return (f"st(1,{_STEP});st(0,min(255,floor(val/ld(1))));"
+            f"ld(1)*{build(0, 256)}")
 
 
 def _yuv_filter(subchain):

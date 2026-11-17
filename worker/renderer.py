@@ -5954,7 +5954,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # grey at intensity 0.3 (CI on ffmpeg 8.1, 18 Nov 2026).
             down, blur, up = _reduced_gblur(W, H, 8 + 24 * i_)
             parts.append(
-                f"[halB{si}]lutyuv=y='if(gte(val,{threshold}),val,16)'"
+                f"[halB{si}]{gradelut.YUV8},"
+                f"lutyuv=y='if(gte(val,{threshold}),val,16)'"
                 f":u=128:v=128,{down}{blur},format=gbrp,"
                 f"colorchannelmixer=rr=1:gg={0.78 - 0.22 * i_:.2f}:"
                 f"bb={0.55 - 0.25 * i_:.2f}"
