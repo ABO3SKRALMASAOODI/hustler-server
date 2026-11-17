@@ -35,26 +35,49 @@ What the run does (`proof.py` on the workflow shell, `market.py` the launcher):
 about how did he do this edit." The ideas call chooses the film's `format` (`direction.json` `"format"` overrides; the
 narrated tutorial when none is named):
 
-- **showcase**: no narrator. Valmera's own export is the film. The raw upload opens it, whole on its blurred copy, at the
-  seconds just before the export's first frame, with the typed sentence landing under "TYPED AT VALMERA.IO"; a leaning
-  seam reveals the export at that same instant and it plays as delivered on its own sound (one continuous stretch from
-  its opening to the speaker's longest pause between 9 and 16 s, measured on its sound, never inside one of the
-  export's pictures or titles); then the call to action, said by Easton and shown. The raw intro is one shot of the
-  speaker: it starts after the upload's last camera cut (measured), never on another camera. No writer, no footage search, no picture check (every picture is the recording's own).
+- **showcase** (rebuilt 17 Nov after the owner's "How is this marketing the product? ... Where's the editing
+  capability? Look at the references."; the references' answer is `.valmera/week-1112/films-1116/marketing-rebuild/SPEC.md`):
+  no narrator, four beats (`devices.showcase`, frames in `devices.showcase_marks`):
+  1. **split** (0-2.8 s): the raw clip as uploaded (small, left, "RAW CLIP") and Valmera's export (big, right, "1 SENTENCE
+     IN VALMERA") at the same instant, both whole from frame 0, on the export's own sound. The seconds are the export's
+     most visible change, its longest picture or title, entered a breath before it lands (`proof.showcase_hook`).
+  2. **studio** (~3.5 s): the real Valmera Studio on a phone: the recording's own photographs, one per typed word
+     (`studio.py`, phone view), so the sentence lands in the composer while the frame pushes in on it (44-48 px); Send
+     puts it in its bubble while the Studio's player plays the clip; the export grows out of the screen to full frame
+     under the recording's own time to the result ("3 MIN LATER"). Keys, Send and the push are its only sounds.
+  3. **export**: the export as delivered, full frame, on its own sound, from its first frame to the end of a spoken
+     thought (`showcase_window`, the longest pause between 12 and 20 s outside its pictures; `direction.json`
+     `"export_window"` / `"hook_window"` override).
+  4. **site** (3.6 s): the call to action is the website itself: the recording's photograph of valmera.io's front page
+     as a phone shows it, under **valmera.io** as the film's largest line. It lands 1 s before the export's voice ends,
+     so the speaker's last line is said over it (`SITE_OVER_S`). Then the brand's end card.
+  No writer, no footage search, no picture check (every picture is the recording's own). A recording without Studio
+  photographs (made before 17 Nov, or in the desktop view) cannot make a showcase: record it again (`STACK_V` 4).
 - **tutorial**: the narrated proof reel below, with its device, then the same call to action on its last line.
 
 Every film, either format: a stranger follows it from its first two seconds. One continuous thought of the speaker (the
 before is the same moment of the clip as the after: `product_clips` maps the after's seconds through the final edit
 list), a picture inside the export set up by the words said before it, Valmera named on screen in the first second
-("TYPED AT VALMERA.IO") and, in a tutorial, aloud in the first two lines with what it is.
+(the showcase's "1 SENTENCE IN VALMERA" over the edit; the tutorial's "TYPED AT VALMERA.IO") and, in a tutorial, aloud
+in the first two lines with what it is.
 
-**The call to action** (`devices.cta`, both formats): over the export's own picture, blurred and darkened, held to the
-end of the programme and at least 3.4 s: "The AI video editor", "Type what you want.", "It edits your video." and the
-website, **valmera.io**, as its largest line (fitted to the frame, 150 px and up; the brand's end card shows VALMERA.IO
-only small). True claims only: never "free" (the trial is off), never a price or a plan. The showcase also says it
-(`devices.CTA_SAY`), so its sound, its music and the brand finish's tail run to the end. The brand finish (the mark
+**The call to action**: the website itself (`devices.site`: the recording's photograph of valmera.io under **valmera.io**,
+fitted to the frame, 140 px and up), in both formats when the recording has the photograph; otherwise `devices.cta`
+("The AI video editor", "Type what you want.", "It edits your video.", valmera.io). Held to the end of the programme,
+at least 3.4 s. True claims only: never "free" (the trial is off), never a price or a plan. The brand finish (the mark
 with its adaptive ink on every programme frame, the end card) is the shell's and always follows; it is never changed
 here.
+
+**Music** (owner, 17 Nov: "what does Mark Cuban talking have to do with a music type that's in Turkish series"): under a
+speaker and a product screen the references play a steady beat, hip-hop or electronic, low under the voice and forward
+where nobody speaks, and the talking-head before/afters are speech-led (music in 9-33% of the reel); never an epic or
+drama cue (SPEC.md section 4). The library's gated tracks are an epic cue (Future Gladiator, the signal's first pick for
+every marketing film) and 125 BPM funk grooves (the 16 Nov marketing films carried Werq; the owner on their music:
+"either no music or ... very cringe"), so a **showcase bakes
+no library bed** (`proof.check`): its sound is the speaker's own, the export's, and the Studio's keys, Send and push.
+Its song is the platform's catalog hit, chosen at delivery from what the judge plays under marketing talk
+(`platform_music.json`, the whole film at a quarter of the voice; the brief is `proof.SHOWCASE_DIRECTION`). The
+tutorial keeps the shell's music step.
 
 ### The editing devices (`devices.py`, since 17 Nov 2026)
 
@@ -124,7 +147,10 @@ $PY studio.py ledger                      # every recording: its sentences and e
 ```
 
 `spec.json` names a source the owner already works from, the seconds to cut, the account's plan
-and the sentences (`studio.py`'s docstring has the shape). `"phase": "before_first_result"` types
+and the sentences (`studio.py`'s docstring has the shape). `"view": "phone"` records the Studio as a phone shows it and
+keeps its photographs in `ui/`: one per typed word (`type_00_NN.png`, the empty composer first), the sent screen, the
+result, the site's front page (`site.png`, at three times the device scale) and the session's video; the showcase is
+built from them. `"phase": "before_first_result"` types
 the sentence before the first cut, so the film can say "one sentence, this film";
 `"export_before": true` on a sentence typed after the first cut also downloads the project as it
 stood before it. A session takes 2 to 7 minutes and a few cents of the replay lane. Kept under

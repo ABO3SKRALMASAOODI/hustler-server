@@ -84,11 +84,12 @@ def write_session(row):
     for a in row["asks"]:
         steps.append(dict(type="prompt", text=a["text"], typed_phase=a.get("phase", "after_result"), export_before=bool(a.get("export_before"))))
     plan = row.get("plan", "plus_2026")
+    view = "phone" if row.get("view") == "phone" else "desktop"
     doc = dict(sid=sid, project_id=0, kind="edit", mode="edit", surface="studio",
-               account={"class": row.get("class", "plus"), "plan": plan, "device_type": "desktop", "device_browser": "chrome"},
+               account={"class": row.get("class", "plus"), "plan": plan, "device_type": view, "device_browser": "chrome"},
                uploads=[dict(asset_id=1, project_id=0, kind="original", filename=name, bytes=os.path.getsize(clip), duration_s=p["dur"],
                              width=p["w"], height=p["h"], fps=p["fps"])],
-               steps=steps, studio=dict(source=row["source"], t0=row["t0"], t1=row["t1"], note=row.get("note")))
+               steps=steps, studio=dict(source=row["source"], t0=row["t0"], t1=row["t1"], note=row.get("note"), view=view))
     with open(os.path.join(d, "session.json"), "w") as f:
         json.dump(doc, f, indent=1, ensure_ascii=False)
     return clip
@@ -103,6 +104,50 @@ def drive(run, sid, browser="chrome"):
     import drive as D
 
     class Recording(D.Replay):
+        def send(self, text):
+            """The sentence typed the way a person types it, the real Studio photographed at every word (a film shows the
+            product's own screen, never a drawing of it): ui/type_<step>_<k>.png, at the view's device scale."""
+            p = self.page
+            if not os.path.exists(os.path.join(self.out, "shots", "site.png")):
+                self.site_shot()
+            ta = p.locator("textarea").first
+            ta.click(timeout=15000)
+            n = len([x for x in os.listdir(os.path.join(self.out, "shots")) if x.startswith("type_")]) if os.path.isdir(os.path.join(self.out, "shots")) else 0
+            tag = f"type_{n // 100:02d}"
+            self.shot(f"{tag}_00")
+            words = text.split()
+            for k, w in enumerate(words):
+                ta.press_sequentially(w + (" " if k < len(words) - 1 else ""), delay=18)
+                self.shot(f"{tag}_{k + 1:02d}")
+            if ta.input_value() != text:          # the composer is the person's: whatever it made of the keys, it sends the sentence
+                ta.fill(text)
+                self.shot(f"{tag}_{len(words):02d}")
+            p.wait_for_timeout(250)
+            if self.view == "phone":
+                p.get_by_role("button", name="Send").click(timeout=10000)
+            else:
+                ta.press("Enter")
+            p.wait_for_timeout(700)
+            self.shot(f"{tag}_sent")
+
+        def site_shot(self):
+            """The website's own front page as this view shows it (the stack serves the same frontend as valmera.io), at
+            three times the device scale: a film's call to action shows the site itself (owner, 17 Nov: "something that
+            shows the website directly")."""
+            try:
+                ctx = self.page.context.browser.new_context(**dict(D.VIEWS[self.view], device_scale_factor=3))
+                pg = ctx.new_page()
+                pg.goto(self.stack.st["fe_url"] + "/", wait_until="networkidle", timeout=60000)
+                pg.wait_for_timeout(2500)
+                pg.screenshot(path=os.path.join(self.out, "shots", "site.png"))
+                ctx.close()
+            except Exception as e:  # noqa: BLE001   a recording never fails on its site photograph
+                self.log.doc["site_shot_error"] = str(e)[:200]
+
+        def watch(self, tag):
+            super().watch(tag)
+            self.shot(f"result_{tag}")            # the Studio with its result in the player
+
         def do_prompt(self, i, step, pending):
             if step.get("export_before") and self.pid and self.log.doc.get("renders"):
                 self.keep_export(f"before_ask_{i}")
@@ -142,7 +187,11 @@ def drive(run, sid, browser="chrome"):
                     with open(os.path.join(self.out, "edl_error.txt"), "w") as f:
                         f.write(str(e)[:400])
 
-    a = argparse.Namespace(run=run, sid=sid, browser=browser, view="desktop", max_prompts=None, no_record=False, stop_after=None)
+    try:
+        view = (json.load(open(os.path.join(CORPUS, sid, "session.json"))).get("studio") or {}).get("view") or "desktop"
+    except (OSError, ValueError):
+        view = "desktop"
+    a = argparse.Namespace(run=run, sid=sid, browser=browser, view=view, max_prompts=None, no_record=False, stop_after=None)
     Recording(a).run()
 
 
@@ -260,6 +309,19 @@ def collect_one(run, sid):
         dst = os.path.join(tmp, "exports", f"{e['tag']}.mp4")
         shutil.copy2(e["src"], dst)
         kept.append(dict(tag=e["tag"], file=os.path.join(out, "exports", f"{e['tag']}.mp4"), edl_version=e.get("edl_version"), sha256=sha256(dst), **probe(dst)))
+    ui = []                                  # the Studio's own screen: the typing, word by word, and the result (send, watch)
+    shots = os.path.join(sdir, "shots")
+    for n in sorted(os.listdir(shots)) if os.path.isdir(shots) else []:
+        if n.endswith(".png") and (n.startswith("type_") or n.startswith("result_") or n.startswith("01_uploaded") or n == "site.png"):
+            os.makedirs(os.path.join(tmp, "ui"), exist_ok=True)
+            shutil.copy2(os.path.join(shots, n), os.path.join(tmp, "ui", n))
+            ui.append(n)
+    vids = os.path.join(sdir, "ui")
+    for n in sorted(os.listdir(vids)) if os.path.isdir(vids) else []:
+        if n.endswith(".webm"):
+            os.makedirs(os.path.join(tmp, "ui"), exist_ok=True)
+            shutil.copy2(os.path.join(vids, n), os.path.join(tmp, "ui", "session.webm"))
+            ui.append("session.webm")
     previews = []
     for r in j.get("renders") or []:
         if r.get("file") and os.path.exists(os.path.join(sdir, r["file"])):
@@ -278,6 +340,7 @@ def collect_one(run, sid):
                upload=dict(file=os.path.join(out, "upload.mp4"), sha256=sha256(os.path.join(tmp, "upload.mp4")), **probe(os.path.join(tmp, "upload.mp4"))),
                first_result_s=j.get("first_result_s"), seconds=j.get("seconds"), cost_usd=j.get("cost_usd"), asks=asks, exports=kept, previews=previews,
                edl_versions={str(k): v for k, v in sorted(edls.items())}, journey=os.path.join(out, "journey.json"),
+               ui=dict(view=j.get("view") or (sess.get("studio") or {}).get("view"), dir=os.path.join(out, "ui"), files=ui) if ui else None,
                journey_sha256=sha256(os.path.join(tmp, "journey.json")))
     with open(os.path.join(tmp, "record.json"), "w") as f:
         json.dump(rec, f, indent=1, ensure_ascii=False, default=str)

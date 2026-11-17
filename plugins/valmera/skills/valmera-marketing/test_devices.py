@@ -251,26 +251,93 @@ def test_the_call_to_action_names_valmera_says_what_it_does_and_what_to_do():
     assert not [it for it in l1["items"] if not it["id"].startswith("ct.") and it["f"][1] > 110]   # the reel gives way under it
 
 
-def test_the_showcase_is_one_moment_raw_then_revealed_then_the_call_to_action():
-    l1, beats = D.showcase(upload=UPLOAD, export=EXPORT, edl_b=EDL_B, typed=TYPED, window=[0.0, 12.0], lib=LIB, intro_s=2.0, lead_f=3)
-    assert beats["intro"] == [0, 63] and beats["export"] == [63, 63 + 360] and beats["cta"][1] == l1["dur_f"]
-    shot = next(it for it in l1["items"] if it["id"].startswith("export") and it["k"] == "shot")
-    assert abs(shot["src"][0] - (shot["f"][0] - 63) / FPS) < 1e-3                  # the export's picture in step with its voice
-    assert l1["dur_f"] / FPS <= 35 - 5                                              # with the end card, a 20-35 s film
-    seam = next(it for it in l1["items"] if it["id"] == "wp.seam")
-    assert seam["f"][0] < 63 < seam["f"][1]                                         # the seam crosses as the voice turns to the export
-    assert abs(beats["upload_window"][1] - D.src_at(D.program(EDL_B)[0], 0.0)) < 1e-3     # the raw leads into the export's first second
-    label = next(it for it in l1["items"] if it["id"] == "wp.lab")
-    assert label["t"] == "TYPED AT VALMERA.IO" and label["f"][0] <= 15             # the site named in the first half second
-    words = [it for it in l1["items"] if it["id"].startswith("wp.w")]
-    assert len(words) == len(TYPED.split()) and max(it["f"][0] for it in words) < seam["f"][0]
-    ex = [it for it in l1["items"] if it["id"].startswith("export")]
-    assert ex and min(it["f"][0] for it in ex) == seam["f"][1] and max(it["f"][1] for it in ex) == beats["cta"][0]
-    assert {s["s"] for s in l1["sound"]} >= {"typing_2", "whoosh_soft_1", "click_1"}
-    wipe_rec = beats["devices"][0]
-    assert l1["voices"]["dv_s.wp"]["px"] == wipe_rec["typed_px"] and l1["voices"]["dv_s.ct"]["px"] == 70   # the call never resizes the sentence
-    assert all(any(abs(s["event_f"] - f) <= 20 for f in (beats["intro"][0] + 15, seam["f"][0] + 8, beats["cta"][0] + 1, beats["cta"][0] + 18))
-               for s in l1["sound"])
+UI = dict(dir="/x/ui", w=780, h=1688, typing=[f"type_00_{k:02d}.png" for k in range(len(TYPED.split()) + 1)], sent="type_00_sent.png",
+          view="phone", player=[0.0588, 0.3187], site=dict(path="/x/ui/site.png", w=1170, h=2532))
+
+
+def test_the_showcase_is_split_then_the_real_studio_then_the_edit_then_the_website():
+    """Owner, 17 Nov: "How is this marketing the product? ... Where's the editing capability?" The references put both
+    versions side by side from frame 0, show the tool's own screen being typed into, and close on the product itself."""
+    hook, window = [13.65, 16.45], [0.0, 18.58]
+    l1, beats = D.showcase(upload=UPLOAD, export=EXPORT, edl_b=EDL_B, typed=TYPED, window=window, hook=hook, ui=UI, page=UI["site"], lib=LIB,
+                           lead_f=3, later="3 MIN")
+    mk = beats["marks"]
+    assert mk["split"] == [0, 84] and mk["studio"][0] == 84 and mk["site"][1] == l1["dur_f"]
+    assert 24 <= l1["dur_f"] / FPS <= 35 - 5                                       # with the end card a 29-35 s film, like the references' 27-33 s
+    # frame 0: both versions of the same instant, whole, under their labels
+    up = [it for it in l1["items"] if it["id"].startswith("sp.up.")]
+    ex = next(it for it in l1["items"] if it["id"] == "sp.ex")
+    assert up[0]["f"][0] == 0 and ex["f"][0] == 0 and ex.get("op", 1) == 1 and ex["src"][0] == hook[0]
+    assert abs(up[0]["src"][0] - D.src_at(D.program(EDL_B)[0], hook[0])) < 1e-3       # the raw at the export's instant
+    assert ex["w"] * ex["h"] > 2 * up[0]["w"] * up[0]["h"] and ex["z"] > up[0]["z"]       # the edit is the larger card, in front
+    labels = {it["t"]: it for it in l1["items"] if it["id"] in ("sp.lab_up", "sp.lab_ex")}
+    assert set(labels) == set(D.SPLIT_LABELS) and all(it["f"][0] == 0 for it in labels.values())
+    assert "VALMERA" in D.SPLIT_LABELS[1]
+    # the Studio: the recording's own photograph for every typed word, the empty composer first, then Send
+    shots = sorted((it for it in l1["items"] if it["id"].startswith("st.ui") and it["id"] != "st.ui_sent"), key=lambda it: it["f"][0])
+    assert [l1["assets"][it["pic"]]["path"] for it in shots] == [f"/x/ui/{n}" for n in UI["typing"]]
+    assert shots[0]["f"][0] == mk["studio"][0] and shots[-1]["f"][1] == mk["send"]
+    assert all(b["f"][0] - a["f"][0] == D.WORD_F for a, b in zip(shots[1:], shots[2:]))
+    sent = next(it for it in l1["items"] if it["id"] == "st.ui_sent")
+    assert sent["f"][0] == mk["send"]
+    player = next(it for it in l1["items"] if it["id"] == "st.player")
+    assert player["pic"] == "dv_up" and player["f"] == [mk["studio"][0], mk["push"][1]]          # the clip in the Studio is the clip of the split
+    rec_u = beats["devices"][1]
+    assert rec_u["typed_px"] >= 44                                                   # the sentence reads on a phone
+    # the edit: grows out of the Studio on its own voice, then full frame, in step
+    res = next(it for it in l1["items"] if it["id"] == "st.result")
+    shot = next(it for it in l1["items"] if it["id"] == "export")
+    assert res["f"][0] == mk["push"][0] and res["src"][0] == window[0] and shot["f"][0] == mk["push"][1]
+    assert abs(shot["src"][0] - (window[0] + (shot["f"][0] - mk["push"][0]) / FPS)) < 1e-3
+    assert shot["f"][1] == mk["site"][0] and abs(shot["src"][1] - (window[0] + (mk["site"][0] - mk["push"][0]) / FPS)) < 1e-3
+    assert mk["export_voice"] == [mk["push"][0], mk["push"][0] + 557] and mk["site"][0] == mk["export_voice"][1] - 60   # his last line over the site
+    # the website: the real front page under its name, the largest line
+    page = next(it for it in l1["items"] if it["id"] == "ct.page")
+    assert l1["assets"][page["pic"]]["path"] == "/x/ui/site.png"
+    url = next(t for t in beats["devices"][2]["texts"] if t["t"] == "valmera.io")
+    assert url["px"] >= 140 and url["px"] == max(t["px"] for d in beats["devices"] for t in d["texts"])
+    text = " ".join(it.get("t", "") for it in l1["items"] if it["k"] == "word").lower()
+    assert "free" not in text and "$" not in text and "plan" not in text
+    for d in beats["devices"]:
+        for t in d["texts"]:
+            assert D.MARK[3] < t["y"] - t["cap_px"] / 1920 and t["y"] < 0.8
+    # every frame has one base picture; every sound lands on something that moves
+    for f in range(l1["dur_f"]):
+        assert sum(1 for it in l1["items"] if it["k"] == "shot" and it["f"][0] <= f < it["f"][1]) == 1, f
+    events = {"split": 2, "studio": mk["studio"][0] + 1, "typing": mk["typing"][0] + round(LIB["typing_2"]["peak_s"] * FPS), "send": mk["send"] + 1,
+              "push": mk["push"][0] + D.PUSH_F // 2, "site": mk["site"][0] + 1, "url": mk["site"][0] + 5}
+    assert sorted(s["event_f"] for s in l1["sound"]) == sorted(events.values())
+
+
+def test_the_hook_is_the_exports_longest_picture_entered_a_breath_before_it_lands(monkeypatch):
+    monkeypatch.setattr(P, "quiet_snap", lambda path, t, span=0.45: round(t, 3))
+    assert P.showcase_hook(dict(file="/x/e.mp4"), 24.2, [(6.31, 2.2), (13.9, 2.6)]) == [13.6, 16.4]
+    assert P.showcase_hook(dict(file="/x/e.mp4"), 24.2, []) == [8.28, 11.08]          # no picture: two fifths of the way in
+    assert P.showcase_hook(dict(file="/x/e.mp4"), 24.2, [(23.9, 3.0), (2.0, 1.0)]) == [1.7, 4.5]   # one past the body is passed over
+
+
+def test_the_studio_photographs_are_read_from_the_recording(tmp_path):
+    from PIL import Image
+    import numpy as np
+    d = tmp_path / "ui"
+    d.mkdir()
+    a = np.full((1688, 780, 3), 11, np.uint8)
+    a[100:539] = (np.arange(780) % 200)[None, :, None]                               # the player's picture, then flat ground
+    for n in ["type_00_00.png", "type_00_01.png", "type_00_sent.png", "site.png", "01_uploaded_2.png"]:
+        Image.fromarray(a).save(d / n)
+    rec = dict(ui=dict(dir=str(d), files=sorted(os.listdir(d)), view="phone"), upload=dict(file=str(tmp_path / "upload.mp4"), w=1920, h=1080))
+    ui = P.ui_shots(rec)
+    assert ui["typing"] == ["type_00_00.png", "type_00_01.png"] and ui["sent"] == "type_00_sent.png" and ui["site"]["w"] == 780
+    assert abs(ui["player"][1] - 539 / 1688) < 2e-3 and abs(ui["player"][0] - (539 - 780 * 1080 / 1920) / 1688) < 2e-3
+    assert P.ui_shots(dict(ui=None, upload=dict(file=str(tmp_path / "none" / "upload.mp4"), w=1920, h=1080))) is None
+    assert P.later_label(dict(first_result_s=198.2)) == "3 MIN" and P.later_label(dict(first_result_s=31)) == "31 SEC"
+
+
+def test_the_tutorial_closes_on_the_website_too_when_the_recording_has_it():
+    l1 = reel()
+    rec = D.site(l1, f0=110, f1=l1["dur_f"], page=UI["site"], export=EXPORT, lib=LIB, src0=20.0)
+    assert rec["device"] == "cta" and rec["lines"] == ["valmera.io"] and rec["seconds"] >= 3.0
+    assert not [it for it in l1["items"] if not it["id"].startswith("ct.") and it["f"][1] > 110]
 
 
 def test_the_film_chooses_its_format_and_the_tutorial_stays_the_default():
@@ -285,7 +352,7 @@ def test_the_film_chooses_its_format_and_the_tutorial_stays_the_default():
 def test_the_showcase_window_ends_in_the_speakers_longest_pause_never_inside_a_picture(monkeypatch):
     monkeypatch.setattr(P, "pauses", lambda path, lo, hi, **k: [(8.1, 8.36), (10.22, 10.68), (14.08, 14.66), (15.7, 16.16), (19.26, 19.8)])
     w = P.showcase_window(dict(file="/x/e.mp4"), body=30.0, lo=9.0, hi=16.0)
-    assert w == [P.SEAM_LEAD_S, 14.33]                                              # after "or whatever", before "and I'm like"
+    assert w == [0.0, 14.33]                                              # after "or whatever", before "and I'm like"
     w2 = P.showcase_window(dict(file="/x/e.mp4"), body=30.0, pics=[(13.5, 3.0)], lo=9.0, hi=16.0)
     assert w2[1] == 10.45                                                            # the pause inside the picture is passed over
     w3 = P.showcase_window(dict(file="/x/e.mp4"), body=30.0, pics=[(9.5, 7.0)], lo=9.0, hi=16.0)
@@ -293,15 +360,3 @@ def test_the_showcase_window_ends_in_the_speakers_longest_pause_never_inside_a_p
     monkeypatch.setattr(P, "pauses", lambda path, lo, hi, **k: [])
     monkeypatch.setattr(P, "quiet_snap", lambda path, t, span=0.45: t - 0.1)
     assert P.showcase_window(dict(file="/x/e.mp4"), body=12.0, lo=9.0, hi=16.0)[1] == 11.7
-
-
-def test_the_showcase_intro_is_one_shot_of_the_speaker(monkeypatch, tmp_path):
-    """The raw intro starts after the upload's last camera cut before the export (the host's 0.3 s shot is not shown)."""
-    import numpy as np
-    frames = np.zeros((78, 36, 64), np.uint8)
-    frames[8:] = 200                                                                 # a cut on frame 8 (0.27 s)
-
-    class R:
-        stdout = frames.tobytes()
-    monkeypatch.setattr(P.subprocess, "run", lambda *a, **k: R())
-    assert P.camera_cuts("/x/up.mp4", 0.0, 2.6) == [0.267]

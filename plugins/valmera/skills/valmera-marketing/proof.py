@@ -81,7 +81,8 @@ STACK = {"be": "main", "fe": "main", "plan_models": {}, "planner_model": "off", 
          "kv": {"studio_for_all_plans": {"on": False}}, "openai_key": True, "trial_per_account_usd": 3.0, "spend_cap_usd": 3,
          "transcriber": "deepgram", "stock": True, "allow_free_stock": True,
          "slots": {"agent": 2, "index": 1, "media": 2}}
-STACK_V = 3           # a recording made on other stack settings is never reused
+STACK_V = 4           # a recording made on other stack settings is never reused (4, 17 Nov: the phone view, the Studio photographed)
+VIEW = "phone"        # the Studio as a phone shows it: the film shows the product's own screen at phone size (studio.py ui/)
 
 
 def jload(p, default=None):
@@ -269,9 +270,10 @@ def reuse_record(path, destination):
 # ----------------------------------------------------------------- ideas
 
 FORMAT_MENU = ("showcase (no narrator: Valmera's own export is the film, a striking edit that makes a viewer ask how it was "
-               "made; the raw clip with the typed sentence opens it, a wipe reveals the export at the same instant, the export "
-               "plays as delivered on its own sound and the bed, then the call to action: choose it when the export itself "
-               "is striking, with pictures or titles landing on the speaker's words) or tutorial (narrated: the editor's "
+               "made; the raw clip and the export side by side at the same instant open it, then the real Valmera Studio on a "
+               "phone with the sentence being typed, the export growing out of it and playing as delivered on its own sound, "
+               "then the valmera.io website: choose it when the export itself is striking, with pictures or titles landing on "
+               "the speaker's words) or tutorial (narrated: the editor's "
                "problem, the typed sentence and how it made the edit, then the call to action)")
 DEVICE_MENU = ("timeline (on the line that says the typed sentence, the frame pulls back onto the project's own Valmera "
                "timeline drawn from the recording's edit list, the sentence is typed as it is said, and on send the cut "
@@ -402,7 +404,7 @@ def record(ctx, idea, k, ask_text):
         return reuse_record(idea["recording"], destination)
     words = json3_words(next(s["captions"] for s in sources() if s["file"] == idea["file"]))
     t0, t1 = snap_window([w for w in words if idea["t0"] - 20 <= w[0] <= idea["t1"] + 20], float(idea["t0"]), float(idea["t1"]))
-    spec = dict(settings=STACK, sessions=[dict(sid=sid, source=idea["file"], t0=t0, t1=t1, plan=PLAN,
+    spec = dict(settings=STACK, sessions=[dict(sid=sid, source=idea["file"], t0=t0, t1=t1, plan=PLAN, view=VIEW,
                                                 asks=[dict(text=ask_text, phase="before_first_result")], note=idea.get("title"))])
     sp = os.path.join(ctx.run_dir, f"studio_spec_{k}.json")
     jsave(sp, spec)
@@ -811,19 +813,27 @@ def siblings(ctx, idea, rec, tag, stt, keep):
     return have[:2]
 
 
+# The music step's brief for a showcase (chain.music_version hands it to the chooser, a model when one is available).
+# The references under a speaker and a product screen (marketing-rebuild/SPEC.md section 4): a steady beat low under the
+# voice and forward where nobody speaks; the 16 Nov showcase got an epic orchestral cue under a podcast ("Turkish series").
+SHOWCASE_DIRECTION = ("showcase: a podcast speaker's own words carry the film (Valmera's edit of his clip): the raw clip and the edit side "
+                      "by side, then the Valmera Studio on a phone being typed into, the edit full frame on his voice, then the website. "
+                      "The music sits like the references' under a speaker and a product screen: a steady modern beat (hip-hop or "
+                      "electronic) low under his voice, filling the screen's stretch and the website; never an epic, orchestral or drama cue.")
+
+
 def showcase_script(idea, card, rec, rc, chk, stt, tag, spend):
-    """A showcase has no narrator: its words are the typed sentence and the call to action, both on screen."""
-    cta_text = " ".join(t for t, _, _ in D.CTA_LINES)
-    sc = dict(title=idea.get("title"), format="showcase", segments=[], named=[], hook_line=None, close_line=cta_text,
+    """A showcase has no narrator: its words are the typed sentence (on the Studio's own screen) and the website."""
+    sc = dict(title=idea.get("title"), format="showcase", segments=[], named=[], hook_line=None, close_line="valmera.io",
               proof=dict(before_after=None, after_after=None))
     return dict(title=idea.get("title"), style=registry_row(card), window=[rec["source"]["t0"], rec["source"]["t1"]], hook_line=None,
-                close_line=cta_text, direction="showcase: the raw clip and the typed sentence, the export revealed and played as delivered, "
-                                               "the call to action", idea=idea.get("title"), idea_full=idea, script=sc, receipts=rc,
+                close_line="valmera.io", direction=SHOWCASE_DIRECTION, idea=idea.get("title"), idea_full=idea, script=sc, receipts=rc,
                 export_check={k: v for k, v in chk.items() if k not in ("export", "upload")}, record=stt[tag]["record"], siblings=[],
-                cta=dict(say=None, show=cta_text, needs_fulfilment=False), words=0, spend=spend)
+                cta=dict(say=None, show="valmera.io", needs_fulfilment=False), words=0, spend=spend)
 
 
-SHOWCASE_S = (9.0, 16.0)       # the export's own stretch in a showcase: one complete thought, ended where he pauses
+SHOWCASE_S = (12.0, 20.0)      # the export's own stretch in a showcase: one complete thought, ended where he pauses (17 Nov: the
+                               # film no longer spends 2.4 s on a raw intro, so the edit gets the seconds of a whole thought)
 
 
 def pauses(path, lo, hi, min_s=0.15, below_db=28.0):
@@ -850,26 +860,9 @@ def pauses(path, lo, hi, min_s=0.15, below_db=28.0):
     return out
 
 
-def camera_cuts(path, lo, hi, jump=20.0):
-    """The camera's own cuts in a file between lo and hi seconds, measured: the frames whose mean luma change from the
-    frame before (64x36, 0-255) is `jump` or more. [seconds]."""
-    import numpy as np
-    r = subprocess.run([PX.FF, "-v", "error", "-ss", f"{max(lo, 0.0):.3f}", "-t", f"{max(hi - lo, 0.1):.3f}", "-i", path, "-vf", "fps=30,scale=64:36",
-                        "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, timeout=120)
-    x = np.frombuffer(r.stdout, np.uint8)
-    if len(x) < 2 * 64 * 36:
-        return []
-    x = x[: len(x) // (64 * 36) * 64 * 36].reshape(-1, 36, 64).astype(np.float32)
-    d = np.abs(np.diff(x, axis=0)).mean(axis=(1, 2))
-    return [round(max(lo, 0.0) + (k + 1) / 30.0, 3) for k in np.nonzero(d >= jump)[0]]
-
-
-SEAM_LEAD_S = 0.5              # the export's seconds the seam shows before its own voice comes in
-
-
 def showcase_window(ex, body, pics=(), lo=SHOWCASE_S[0], hi=SHOWCASE_S[1], reach=4.0):
-    """[start, end] export seconds: from just after the export's first frame (the product's own opening; the seam shows
-    the first SEAM_LEAD_S) to the end of a spoken thought between lo and hi seconds: the longest pause the speaker
+    """[start, end] export seconds: from the export's first frame (the product's own opening, growing out of the Studio)
+    to the end of a spoken thought between lo and hi seconds: the longest pause the speaker
     makes there, measured on the export's own sound (the captions' clock is not the voice's). `pics`: the export's
     pictures and titles, (start, seconds) from its edit list; the film never ends inside one (17 Nov: a chair cut 0.4 s
     in), so a pause inside a picture is passed over and the search reaches up to `reach` s past hi for one after it."""
@@ -882,12 +875,81 @@ def showcase_window(ex, body, pics=(), lo=SHOWCASE_S[0], hi=SHOWCASE_S[1], reach
         end = a + min(0.25, (b - a) / 2)
     else:
         end = quiet_snap(ex["file"], hi, span=0.25)
-    return [SEAM_LEAD_S, round(end, 3)]
+    return [0.0, round(end, 3)]
+
+
+def showcase_hook(ex, body, pics, span=None):
+    """[start, end] export seconds of the split hook: the export's most visible change, its longest picture or title
+    (read from its edit list, `pics` (start, seconds)), entered a breath before it lands, SPLIT_S long; without one, the
+    stretch of the same length at two fifths of the body. Snapped to the quietest point near each end (between words)."""
+    span = float(span or D.SPLIT_S)
+    fit = [(a, d) for a, d in pics if a + min(d, span) <= body - 0.2]
+    if fit:
+        a, d = max(fit, key=lambda p: (p[1], p[0]))
+        t0 = quiet_snap(ex["file"], max(a - 0.3, 0.0), span=0.25)
+    else:
+        t0 = quiet_snap(ex["file"], max(0.4 * body - span / 2, 0.0), span=0.3)
+    t0 = min(max(t0, 0.0), max(body - span - 0.1, 0.0))
+    return [round(t0, 3), round(t0 + span, 3)]
+
+
+def ui_shots(rec):
+    """The recording's photographs of the Studio (phone view): the typing, a photograph per word with the empty
+    composer first, the sent screen, and the site's front page. None when the recording has none (made before 17 Nov,
+    or in the desktop view)."""
+    u = rec.get("ui") or {}
+    d = u.get("dir") or os.path.join(os.path.dirname(rec["upload"]["file"]), "ui")
+    files = sorted(u.get("files") or (os.listdir(d) if os.path.isdir(d) else []))
+    typing = [f for f in files if f.startswith("type_00_") and f[8:10].isdigit()]
+    sent = next((f for f in files if f == "type_00_sent.png"), None)
+    if not typing or not sent:
+        return None
+    from PIL import Image
+    with Image.open(os.path.join(d, typing[0])) as im:
+        w, h = im.size
+    out = dict(dir=d, w=w, h=h, typing=typing, sent=sent, view=u.get("view"), player=player_rect(os.path.join(d, typing[0]), rec["upload"]))
+    if "site.png" in files:
+        with Image.open(os.path.join(d, "site.png")) as im:
+            out["site"] = dict(path=os.path.join(d, "site.png"), w=im.size[0], h=im.size[1])
+    return out
+
+
+def player_rect(png, upload):
+    """[top, bottom] of the Studio player's picture on a photograph of the screen, as fractions of its height: the
+    first flat band (the controls' ground) below the top quarter is the picture's bottom, and the upload's own shape
+    over the screen's width gives its top. None when no flat band is found."""
+    import numpy as np
+    from PIL import Image
+    try:
+        with Image.open(png) as im:
+            g = np.asarray(im.convert("L"), np.float32)
+        h, w = g.shape
+        std = g[:, int(0.13 * w):int(0.87 * w)].std(1)
+        flat = [r for r in range(int(0.22 * h), int(0.5 * h)) if std[r] < 1.0]
+        if not flat:
+            return None
+        bottom = flat[0]
+        top = bottom - w * float(upload["h"]) / float(upload["w"])
+        return [round(max(top, 0) / h, 4), round(bottom / h, 4)] if top > 0 else None
+    except (OSError, ValueError, KeyError, ZeroDivisionError):
+        return None
+
+
+def later_label(rec):
+    """The recording's own time from the upload to its first result, as the push's label ("3 MIN"), or None."""
+    s = rec.get("first_result_s")
+    try:
+        s = float(s)
+    except (TypeError, ValueError):
+        return None
+    return f"{max(int(round(s / 60.0)), 1)} MIN" if s >= 45 else f"{int(round(s))} SEC"
 
 
 def showcase_supply(ctx, script, sup_dir, pk):
-    """The showcase's pack: the upload's own sound for the intro, then the export's, as the film's voice track; no
-    narrator, no footage search."""
+    """The showcase's pack (devices.showcase): the export's seconds for the split hook and for its own stretch, and the
+    film's voice track cut to the showcase's frames: the export's own sound under the split, the Studio's stretch
+    without a voice (its keys and its Send are the device's sounds, the film's bed carries it), the export's own sound
+    from where it grows out of the Studio, then the site. No narrator, no footage search."""
     rec = json.load(open(script["record"]))
     ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
     edl = json.load(open(os.path.join(os.path.dirname(script["record"]), "edl", f"v{int(ex['edl_version']):03d}.json")))
@@ -896,57 +958,47 @@ def showcase_supply(ctx, script, sup_dir, pk):
     body = ex["dur"] - endcard_s()
     cut(ex["file"], 0.0, body, os.path.join(prod, "export_body.mp4"))
     pics = [(float(o["start"]), float(o["duration_s"])) for o in D.MF.pictures_of(edl) + D.MF.titles_of(edl)]
-    win = showcase_window(ex, body, pics)
-    tl = D.program(edl)[0]
-    s_at = D.src_at(tl, win[0])
-    intro = SHOWCASE_INTRO_S
-    if s_at < intro:              # the export opens where the upload does: the raw plays its first seconds, the export enters after them
-        win[0] = round(float(tl.src_to_out(intro)), 3)
-        s_at = D.src_at(tl, win[0])
-    # one shot of one speaker: the intro starts after the raw's last camera cut before the export (17 Nov: a 0.3 s shot
-    # of the host opened a film about the guest)
-    cut_at = [t for t in camera_cuts(rec["upload"]["file"], s_at - intro, s_at) if t < s_at - 0.8]
-    if cut_at:                    # the picture leads the voice by LEAD_F frames: the intro's first frame is after the cut too
-        intro = round(s_at - max(cut_at) - 0.04 - F.LEAD_F / F.FPS, 3)
+    d = W3.direction_of(ctx) if hasattr(ctx, "run_dir") else {}
+    win = [float(x) for x in d.get("export_window") or showcase_window(ex, body, pics)]
+    hook = [float(x) for x in d.get("hook_window") or showcase_hook(ex, body, pics)]
+    ui = ui_shots(rec)
+    typed = script["receipts"]["typed"]
+    mk = D.showcase_marks(hook, win, len(typed.split()), lead_f=F.LEAD_F)
     voice = os.path.join(sup_dir, "voice.wav")
+    lead = F.LEAD_F / F.FPS
     parts = []
-    for i, (src, a, b) in enumerate(((rec["upload"]["file"], max(s_at - intro, 0.0), s_at),
-                                     (ex["file"], win[0], win[1]))):
-        p = os.path.join(sup_dir, f"voice_{i}.wav")
-        subprocess.run([PX.FF, "-v", "error", "-y", "-ss", f"{a:.3f}", "-i", src, "-t", f"{b - a:.3f}", "-vn", "-ac", "1", "-ar", "48000",
-                        "-af", "afade=t=in:d=0.03", p], check=True, timeout=120)
+
+    def piece(name, src, a, n_f):
+        p = os.path.join(sup_dir, f"voice_{name}.wav")
+        n = n_f / F.FPS
+        if src:
+            subprocess.run([PX.FF, "-v", "error", "-y", "-ss", f"{a:.3f}", "-i", src, "-t", f"{n:.3f}", "-vn", "-ac", "1", "-ar", "48000",
+                            "-af", f"afade=t=in:d=0.03,afade=t=out:st={max(n - 0.06, 0):.3f}:d=0.06,apad=whole_dur={n:.3f}", p],
+                           check=True, timeout=120)
+        else:
+            subprocess.run([PX.FF, "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono", "-t", f"{n:.3f}", p], check=True, timeout=60)
         parts.append(p)
-    # the call to action is said as well as shown (Easton): the film's sound, its music and its finish run to its end
-    cta_s, said = D.CTA_S, None
-    try:
-        nar = PX.narrate(writer.narration_script(dict(title="call to action", segments=[dict(say=D.CTA_SAY, pause_after=0.0)]), "03"),
-                         os.path.join(sup_dir, "cta_voice"), band="03", label=f"wf2-cta-{ctx.run_id}", reader=os.path.join(STORIES, "voice.py"))
-        gap = os.path.join(sup_dir, "voice_gap.wav")
-        subprocess.run([PX.FF, "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono", "-t", f"{CTA_GAP_S:.3f}", gap], check=True, timeout=60)
-        p = os.path.join(sup_dir, "voice_cta.wav")
-        subprocess.run([PX.FF, "-v", "error", "-y", "-i", nar["wav"], "-ac", "1", "-ar", "48000", p], check=True, timeout=60)
-        parts += [gap, p]
-        said = dict(text=D.CTA_SAY, seconds=nar["duration"], gate=nar.get("gate"))
-        cta_s = max(D.CTA_S, CTA_GAP_S + float(nar["duration"]) + 0.5)
-    except (RuntimeError, OSError, subprocess.SubprocessError, KeyError, ValueError) as e:
-        ctx.log(f"the call to action is shown, not said: {repr(e)[:200]}")
+
+    # the voice starts on frame LEAD_F: the split's picture at frame f shows hook[0] + f / FPS, so its sound starts there too
+    piece("split", ex["file"], hook[0] + lead, mk["split"][1] - mk["lead_f"])
+    piece("studio", None, 0.0, mk["export"][0] - mk["split"][1])
+    piece("export", ex["file"], win[0], mk["export_voice"][1] - mk["export_voice"][0])     # under the website's arrival too
+    piece("site", None, 0.0, mk["dur_f"] - mk["export_voice"][1])
     lst = os.path.join(sup_dir, "voice.txt")
     open(lst, "w").write("".join(f"file '{p}'\n" for p in parts))
     subprocess.run([PX.FF, "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-ac", "1", "-ar", "48000", voice], check=True, timeout=120)
     words = os.path.join(sup_dir, "words.json")
-    jsave(words, dict(voice="the recording", duration=round(intro + win[1] - win[0] + (cta_s if said else 0.0), 3), words=[]))
+    jsave(words, dict(voice="the recording", duration=round((mk["dur_f"] - mk["lead_f"]) / F.FPS, 3), words=[]))
     pack = dict(sid=ctx.sid, words=words, narration=voice, ffmpeg=PX.FF, sounds=PX.sound_facts(), pictures={}, credits=[], footage=[],
                 voices=[], work=os.path.join(sup_dir, "finish"), fit=[],
-                product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, intro_s=intro, upload_at=round(s_at, 3), cta_s=round(cta_s, 3),
-                             cta_said=said))
+                product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, hook=hook, marks=mk, ui=ui, later=later_label(rec),
+                             upload_at=round(D.src_at(D.program(edl)[0], hook[0]), 3), cta_s=D.SITE_S, cta_said=None))
     rec_ = dict(narration_s=None, voice=None, gate=None, pictures=0, subjects=0, missing=[], spend=[], product=pack["product"], footage=None,
-                format="showcase")
+                format="showcase", studio_ui=bool(ui), site=bool(ui and ui.get("site")))
     jsave(pk, dict(pack=pack, record=rec_))
     return rec_
 
 
-SHOWCASE_INTRO_S = 2.4        # the raw and the typed sentence, read, before the seam
-CTA_GAP_S = 0.25               # the breath between the export's last word and the spoken call to action
 
 
 # ----------------------------------------------------------------- supply
@@ -1620,7 +1672,7 @@ def lay_devices(ctx, l1, sc, pack, clock, script, knobs):
 
 def showcase_score(ctx, script, pack):
     """The showcase's plan: devices.showcase over the recording (no narrator, no picture check: every picture is the
-    product's own export or upload)."""
+    product's own export, upload, Studio screen or site)."""
     rec = json.load(open(script["record"]))
     ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
     edl = json.load(open(os.path.join(os.path.dirname(script["record"]), "edl", f"v{int(ex['edl_version']):03d}.json")))
@@ -1630,25 +1682,30 @@ def showcase_score(ctx, script, pack):
     lib = dict(pack.get("sounds") or {})
     lib.update(PX.sound_facts(("typing_2", "click_1", "tick_1", "whoosh_soft_1")))
     work = os.path.join(ctx.supply, "devices")
-    focus = face_focus(pack["ffmpeg"], upload["path"], max(pack["product"]["upload_at"] - pack["product"]["intro_s"], 0.0), work, (0.5, 0.42))
-    l1, beats = D.showcase(upload=upload, export=body, edl_b=edl, typed=script["receipts"]["typed"], window=pack["product"]["window"], lib=lib,
-                           sid=ctx.sid, focus=focus, lead_f=F.LEAD_F, intro_s=pack["product"]["intro_s"],
-                           cta_s=float(pack["product"].get("cta_s") or D.CTA_S))
+    prod = pack["product"]
+    focus = face_focus(pack["ffmpeg"], upload["path"], prod["upload_at"], work, (0.5, 0.42))
+    ui = prod.get("ui") or ui_shots(rec)
+    if not ui:
+        raise RuntimeError("the showcase needs the recording's Studio photographs (studio.py, phone view): record it again")
+    page = ui.get("site") or dict(path=os.path.join(ui["dir"], ui["typing"][0]), w=ui["w"], h=ui["h"])
+    l1, beats = D.showcase(upload=upload, export=body, edl_b=edl, typed=script["receipts"]["typed"], window=prod["window"], hook=prod["hook"],
+                           ui=ui, page=page, lib=lib, sid=ctx.sid, focus=focus, lead_f=F.LEAD_F, later=prod.get("later"))
     out = os.path.join(ctx.supply, "l1.json")
     jsave(out, l1)
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")
     jsave(l1_audio, F.audio_scene(l1, pack))
     jsave(os.path.join(ctx.supply, "beats.json"), beats)
-    taste = dict(ok=True, problems=[], min_text_px=min(d["min_text_px"] for d in beats["devices"]), sounds=len(l1["sound"]))
-    devices = dict(device="wipe", format="showcase", laid=beats["devices"], faults=[], typed_line="wipe")
+    taste = dict(ok=True, problems=[], min_text_px=min(d["min_text_px"] for d in beats["devices"] if d.get("min_text_px")), sounds=len(l1["sound"]))
+    devices = dict(device="studio", format="showcase", laid=beats["devices"], faults=[], typed_line="studio")
     return dict(l1=out, l1_audio=l1_audio, turn_s=round(beats["reveal"][1] / F.FPS, 3), beats={k: v for k, v in beats.items() if k != "look"},
                 taste=taste, frames=l1["dur_f"], items=len(l1["items"]), direction=dict(format="showcase"), pace=beats["pace"],
-                recording_spans=[beats["export"]], instruction_panel=dict(typed=script["receipts"]["typed"], device="wipe"), devices=devices,
+                recording_spans=[beats["export"]], instruction_panel=dict(typed=script["receipts"]["typed"], device="studio"), devices=devices,
                 picture_check=dict(model=None, rounds=[], misfits_left=[], note="showcase: every picture is the recording's own"), spend=[])
 
 
 def lay_cta(ctx, l1, sc, pack, clock, script):
-    """The call to action on the film's last line, held CTA_S or to the end of the programme (devices.cta)."""
+    """The call to action on the film's last line, held CTA_S or to the end of the programme: the website itself
+    (devices.site, the recording's photograph of valmera.io) when the recording has it, else devices.cta."""
     try:
         words = clock.seg_words(len(sc["segments"]) - 1)
         f0 = max(F.Clock.f(words[0]["t0"]) - 2, 0) if words else max(l1["dur_f"] - int(D.CTA_S * F.FPS), 0)
@@ -1656,7 +1713,11 @@ def lay_cta(ctx, l1, sc, pack, clock, script):
         m = D.media(pack["ffmpeg"], body)
         lib = dict(pack.get("sounds") or {})
         lib.update(PX.sound_facts(("click_1", "whoosh_soft_1")))
-        return D.cta(l1, f0=f0, f1=int(l1["dur_f"]), export=m, lib=lib, src0=max(m["dur"] - (l1["dur_f"] - f0) / F.FPS - 0.2, 0.0))
+        src0 = max(m["dur"] - (l1["dur_f"] - f0) / F.FPS - 0.2, 0.0)
+        ui = ui_shots(json.load(open(script["record"]))) if script.get("record") else None
+        if ui and ui.get("site"):
+            return D.site(l1, f0=f0, f1=int(l1["dur_f"]), page=ui["site"], export=m, lib=lib, src0=src0)
+        return D.cta(l1, f0=f0, f1=int(l1["dur_f"]), export=m, lib=lib, src0=src0)
     except Exception as e:  # noqa: BLE001 - the film keeps its spoken call to action
         ctx.log(f"call to action not laid: {repr(e)[:300]}")
         return dict(device="cta", fault=repr(e)[:300])
@@ -1750,6 +1811,12 @@ def render(ctx, script, sc):
 
 
 def check(ctx, rd, sc):
+    if (sc.get("devices") or {}).get("format") == "showcase":
+        # The showcase's sound is the speaker's own and the Studio's (owner, 17 Nov: "what does Mark Cuban talking have to do
+        # with a music type that's in Turkish series"). The references under a talking edit are speech-led (DUQzZ_kE3O7 music
+        # in 9% of the reel, DJrjetsKPHW 33%): no library bed is baked in; the song is the platform's own catalog hit chosen at
+        # delivery (platform_music.json, the whole film at a quarter of the voice), as the judge plays under marketing talk.
+        ctx.args = dict(ctx.args or {}, music=False)
     r = W3.check(ctx, rd, sc)
     c = r["checks"]
     c["marketing"] = dict(receipts=json.load(open(os.path.join(ctx.run_dir, "script.json"))).get("receipts"),
