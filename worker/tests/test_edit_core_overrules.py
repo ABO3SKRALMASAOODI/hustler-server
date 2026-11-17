@@ -170,15 +170,15 @@ def test_an_unmet_ask_keeps_the_editors_edit(monkeypatch):
 
 
 def test_a_missing_ledger_keeps_the_edit_and_says_what_the_film_keeps(monkeypatch):
-    """The check could not run: the reply says so and names the retained
-    change (edit_scope.disclose); the edit itself is never rolled back."""
+    """The check could not run: the editor's reply goes out as written (no
+    hedge), the request is recorded partial, and the edit is never rolled back."""
     import edit_scope
     monkeypatch.setattr(edit_scope, "disclose", lambda ctx, text: text + " [kept: keep]")
     db = NS(run=lambda *a, **k: pytest.fail("rolled back"))
     ctx = _Settle(edl={"keep": [[0.0, 5.0]]}, db=db, ask_ledger=None,
                   ask_check_required=True, versions_written=[9])
     final, outcome = agent_loop._asks_settle(ctx, "I cut it to five seconds.", "fulfilled")
-    assert "can't confirm" in final and final.endswith("[kept: keep]")
+    assert final == "I cut it to five seconds. [kept: keep]"
     assert outcome == "partial" and ctx.versions_written == [9]
     assert ctx.latest_edl()["json"] == {"keep": [[0.0, 5.0]]}
 

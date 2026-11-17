@@ -32,7 +32,7 @@ Mistakes are cheap: every edit is a new version and `undo` brings any earlier ve
 - `{"card": {"text", "at" or "at_source", "dur", "bg"}}`, `{"text": {"text", "start", "end", "template"}}`, `{"captions": {"style": {...}}}`.
 - `{"place": {"id", "at", "dur", "mode": "overlay"|"insert"}}` puts a `find` result (or `"key"` of an upload) on the film. A download that fails takes the next result of the same search, and says so.
 - `{"scenes": {"narration": key, "items": [{"id", "from", "to"}]}}` lays pictures along a narration in one call.
-- `{"voiceover": {"key", "at"}}`, `{"music": {"id" or "key", "gain_db", "duck"}}`, `{"sfx": [{"key", "at"}]}`, `{"audio": {"range", "gain_db"}}` or `{"audio": {"separate": {...}}}`.
+- `{"voiceover": {"key", "at"}}`, `{"music": {"id" or "key", "gain_db", "duck"}}`, `{"sfx": [{"key", "at"}]}`, `{"audio": {"range", "gain_db"}}`, `{"audio": {"separate": {...}}}` or `{"audio": {"clean": 0.8}}` (background noise out of the footage's own sound).
 - `{"frame": {"ratio", "follow"}}`, `{"grade": {"preset" or "look"}}`, `{"transition": {"style", "duration_s"}}`, `{"zoom": {"start", "end", "mode"}}`.
 - `{"clips": {"items": [{"range": [a, b], "title"}], "frame"}}` makes new child projects, one per clip.
 - Layer ops change any EDL layer by id: `{"upsert": "texts", "id": "tx1", "value": {...}}`, `{"set": layer, "value": ...}`, `{"remove": layer, "id": ...}`.

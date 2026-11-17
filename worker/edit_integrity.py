@@ -1,6 +1,8 @@
 """Measurements at the write boundary, shared by every editor and batch tool.
 
-The editing model interprets the request and decides what to cut. Face intersection is a measurement.
+The editing model interprets the request and decides what to cut. Face intersection is a measurement:
+it is returned with the saved write as information, never a refusal (owner, 16 Nov 2026). A face blur
+or a sticker over a face is a legitimate request; the editor reads where the face is and decides.
 """
 import os
 
@@ -17,11 +19,12 @@ def _intersects(rect, face):
     return min(rect[2], face[2]) > max(rect[0], face[0]) and min(rect[3], face[3]) > max(rect[1], face[1])
 
 
-def patch_face_refusal(ctx, regions):
-    """Repainting cannot reconstruct an eye. Detect on the untouched source,
-    not on a patched render where the damaged face may no longer be detectable."""
+def patch_face_note(ctx, regions):
+    """Where a repaint meets a measured face, as information for the editor (a repaint smears an
+    eye it was not meant for; a face blur is meant for it). Detected on the untouched source, not on
+    a patched render where the damaged face may no longer be detectable. "" when no face is met."""
     if not regions:
-        return None
+        return ""
     import media
     import spatial
     samples = list(((getattr(ctx, "index", None) or {}).get("spatial") or {}).get("samples") or [])
@@ -41,7 +44,7 @@ def patch_face_refusal(ctx, regions):
                     samples.append(dict(spatial.analyze_frame(path) or {}, t=t))
         except Exception as exc:
             print(f"[edit-integrity] face measurement unavailable: {type(exc).__name__}", flush=True)
-            return "Cannot measure the face under this repaint; leave the source intact."
+            # The repaint saves; the faces already in the index are still checked below.
     for reg in regions:
         a, b = float(reg.get("start") or 0), float(reg.get("end") if reg.get("end") is not None else duration)
         rect = (float(reg["x"]), float(reg["y"]), float(reg["x"])+float(reg["w"]), float(reg["y"])+float(reg["h"]))
@@ -49,12 +52,17 @@ def patch_face_refusal(ctx, regions):
             if a <= float(sample.get("t", -1)) <= b:
                 for face in sample.get("faces") or []:
                     if len(face) == 4 and _intersects(rect, face):
-                        return (f"Repaint intersects a measured face at source {sample['t']:.2f}s. "
-                                "It would smear facial features. Leave the face intact; this removal is not done.")
-    return None
+                        return (f"FACE MEASURED (information; the repaint is saved): the repaint at "
+                                f"x {rect[0]:.2f}-{rect[2]:.2f}, y {rect[1]:.2f}-{rect[3]:.2f} meets a face at "
+                                f"x {face[0]:.2f}-{face[2]:.2f}, y {face[1]:.2f}-{face[3]:.2f} (source "
+                                f"{sample['t']:.2f}s). A repaint smears features it covers: when the face is "
+                                "not what should go, move the region off that box.")
+    return ""
 
 
-def write_refusal(ctx, before, after):
+def write_note(ctx, before, after):
+    """Measured facts about faces the write's new repaints and local layers meet: information the
+    saved write carries ("" when none)."""
     old = {str(p.get("id")): p for p in before.get("patches") or []}
     regions = []
     for patch in after.get("patches") or []:
@@ -63,21 +71,20 @@ def write_refusal(ctx, before, after):
                         for r in patch.get("regions") or []]
     old_clean = (before.get("source_clean") or {}).get("regions") or []
     regions += [r for r in (after.get("source_clean") or {}).get("regions") or [] if r not in old_clean]
-    refusal = patch_face_refusal(ctx, regions)
-    # 16 Nov (owner): no second model vetoes the editor's cuts. The editing model decides what to
-    # remove; the cut-evidence judge that refused customers' explicit cuts is gone.
-    return refusal or face_cover_refusal(ctx, before, after)
+    notes = [patch_face_note(ctx, regions), face_cover_note(ctx, before, after)]
+    # 16 Nov (owner): no second model vetoes the editor's cuts and no measurement refuses a write.
+    return "\n".join(n for n in notes if n)
 
 
-def face_cover_refusal(ctx, before, after):
-    """Local compositing must not hide a measured face. Full-frame cutaways
+def face_cover_note(ctx, before, after):
+    """Where a local layer covers a measured face, as information ("" when none). Full-frame cutaways
     replace a shot intentionally; local patches/rectangles cannot pretend to be
     a background-only operation. Geometry is checked on the output clock."""
     from score import asks
     index = getattr(ctx, "index", None) or {}
     samples = _output_faces(after, index)
     if not samples:
-        return None
+        return ""
     candidates = []
     prior = {str(it.get("id")): it for it in before.get("fx") or []}
     for it in after.get("fx") or []:
@@ -139,9 +146,11 @@ def face_cover_refusal(ctx, before, after):
             if a <= t < b:
                 for head in heads:
                     if _intersects(rect, head):
-                        return (f"Local layer {ident} covers a measured face at {t:.2f}s. "
-                                "Place it away from the face or use a measured subject mask for background work.")
-    return None
+                        return (f"FACE MEASURED (information; the layer is saved): local layer {ident} covers "
+                                f"a face at {t:.2f}s on the film (face x {head[0]:.2f}-{head[2]:.2f}, y "
+                                f"{head[1]:.2f}-{head[3]:.2f}). When the face should stay visible, move the "
+                                "layer off that box or use a measured subject mask for background work.")
+    return ""
 
 
 def _output_faces(edl, index):

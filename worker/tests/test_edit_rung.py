@@ -223,3 +223,53 @@ def test_the_row_names_the_model_that_ran_and_prices_credits_at_haikus_card(rung
 def test_the_claude_lane_never_takes_the_responses_shortcut(rung):
     assert llm.responses_available("gpt-6.1-sol", claude_lane.BASE_URL) is False
     assert llm.responses_available("gpt-6.1-sol", "https://api.openai.com/v1") is True
+
+
+def test_an_unreachable_fallback_sends_the_call_back_to_the_rung(rung):
+    # EDIT-CORE gate, 17 Nov 2026 (p5873 job 56): a 502 on the rung moved the turn to Haiku, Haiku
+    # could not be reached (APIConnectionError) and the turn failed. The rung is the lane that works.
+    class APIConnectionError(Exception):
+        pass
+
+    class _Down:
+        bodies = []
+        messages = None
+
+        def __init__(self):
+            self.messages = self
+
+        def with_options(self, **kw):
+            return self
+
+        def stream(self, **body):
+            self.bodies.append(body)
+            raise APIConnectionError("Connection error.")
+    rung.replies.extend([_Resp(502, "schema"), _Resp(502, "schema"), _ok("rung answered")])
+    rung.use(_Down())
+    resp = claude_lane.create("gpt-6.1-sol", MSGS, tools=TOOLS)
+    assert resp.choices[0].message.content == "rung answered"
+    assert resp.usage.answered_model == "gpt-6.1-sol"
+    assert len(rung.posts) == 3
+    # the turn is not left marked on the lane that cannot be reached
+    assert not edit_rung.turn_fell_back()
+    rung.replies.append(_ok("next call on the rung"))
+    assert claude_lane.create("gpt-6.1-sol", MSGS, tools=TOOLS).choices[0].message.content == \
+        "next call on the rung"
+
+
+def test_a_fallback_refusal_that_is_not_a_lost_connection_stands(rung):
+    rung.replies.extend([_Resp(500, "x"), _Resp(500, "x")])
+
+    class _Bad:
+        def __init__(self):
+            self.messages = self
+
+        def with_options(self, **kw):
+            return self
+
+        def stream(self, **body):
+            raise ValueError("bad request shape")
+    rung.use(_Bad())
+    with pytest.raises(ValueError):
+        claude_lane.create("gpt-6.1-sol", MSGS, tools=TOOLS)
+    assert len(rung.posts) == 2

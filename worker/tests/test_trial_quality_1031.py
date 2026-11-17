@@ -425,14 +425,16 @@ def test_ask_user_records_awaiting_user_not_blocked(monkeypatch, verified):
         return text, outcome
     monkeypatch.setattr(agent_loop, "_asks_settle", settle)
     result = _run(ctx, db)
-    expected = "awaiting_user" if verified else "partial"
+    # EDIT-CORE B1 (16 Nov 2026): a question reaches the customer as asked, whether or not the
+    # claim check could read the film; it never becomes the UNVERIFIED stand-in.
+    expected = "awaiting_user"
     assert result["outcome"] == expected
-    assert result["status"] == ("awaiting_user" if verified else "replied")
+    assert result["status"] == "awaiting_user"
     assert result["billable"] is False
     text, meta = posted[-1]
-    assert meta["ask_user"] is verified
+    assert meta["ask_user"] is True
     assert meta["outcome"] == expected
-    assert text == (question if verified else reply_truth.UNVERIFIED)
+    assert text == question
     assert settled == [('check', text, False), ('settle', text, expected)]
     assert checkpoint == {}
 

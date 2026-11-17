@@ -1,0 +1,5 @@
+{
+  "wave": "edit-core-a3-1116",
+  "doc": "EDIT-CORE A3 (16 Nov 2026): noise cleaning is a capability the editor reaches. clean_noise (+223 B) and the noise_clean layer in apply_edit_batch's enum (+14 B); the motion_motif line on 21 core tools says 'motif' once (-147 B). Net core growth +90 B; the 82,700 B ceiling is unchanged.",
+  "core_growth_bytes": 90
+}

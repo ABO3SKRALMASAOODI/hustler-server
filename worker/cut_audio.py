@@ -418,14 +418,18 @@ def _robust(level, slack):
 
 
 def refine_keep(keep, words, duration=None, prev_keep=None, level=None,
-                end_slack=0.0):
+                end_slack=0.0, content_end=None):
     """(new keep, moves, checked): every cut edge this write introduces
     (cut_edges) placed by place_edge. moves: [{side, old, new, why, word,
     db_was, db}]; checked: how many edges were read against the sound.
     ``end_slack`` (seconds, a frame): an END is placed where the sound is
     quiet that far either side too (_robust). Spans stay sorted and never
     cross their neighbours; a span the moves would leave shorter than
-    0.05 s keeps its edges."""
+    0.05 s keeps its edges. ``content_end`` (source seconds, the upload's
+    measured last picture: index.source_screen.safe_end_s) bounds an END
+    written at or before it: the quiet point is never looked for in the
+    black or the slate after the picture ends (EDIT-CORE gate, 17 Nov 2026:
+    p5717's end at 91.42 moved to 91.63 into the music video's black end)."""
     spans = [[float(s), float(e)] for s, e in keep or []]
     if not spans:
         return spans, [], 0
@@ -441,6 +445,9 @@ def refine_keep(keep, words, duration=None, prev_keep=None, level=None,
             hi_limit = spans[i][1] - 0.05
         else:
             lo_limit = spans[i][0] + 0.05
+            if content_end is not None and b <= float(content_end) + 1e-6:
+                hi_limit = (float(content_end) if hi_limit is None
+                            else min(hi_limit, float(content_end)))
         got = place_edge(side, b, ws, end_level if side == "end" else level,
                          lo_limit, hi_limit)
         if got.get("db_was") is not None:

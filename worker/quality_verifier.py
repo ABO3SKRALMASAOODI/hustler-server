@@ -70,6 +70,7 @@ _DEPARTMENTS = {
     "texts": "graphics", "vectors": "graphics", "motion": "graphics",
     "music": "music",
     "sfx": "sfx", "voiceover": "audio", "volume": "audio",
+    "noise_clean": "audio",
     "frame": "reframe", "effects": "motion_color", "source_clean": "cleanup",
     "patches": "cleanup",
 }
@@ -1276,7 +1277,7 @@ def _audio_window_identity(edl, index, start, end):
         "source_index": hashlib.sha256(_canon(index or {}).encode()).hexdigest(),
         "clock": scope_guard._lane_state(edl, "timeline_timing", False),
         "global_audio": {k: edl.get(k) for k in
-                         ("volume", "master", "stem_mix", "source_clean", "canvas", "frame")},
+                         ("volume", "master", "stem_mix", "noise_clean", "source_clean", "canvas", "frame")},
         "insert_sources": edl.get("inserts") or [],
         "audio_effects": {k: (edl.get("effects") or {}).get(k) for k in
                           ("transition", "fade_in_s", "fade_out_s")},

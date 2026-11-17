@@ -449,11 +449,26 @@ def _unfreeze_written_lanes(contract):
 
 
 def protected_lanes(ctx):
+    """The lanes the request's brief reads as kept, for write_note. Never raises and never stops a
+    write (owner, 16 Nov 2026; map W10/W11). A brief missing or written for an earlier message is
+    read now (ensure; a reading that cannot be made is the open brief, nothing frozen). A brief that
+    reads the message as a question (mode inspect) freezes nothing: the editor decided to edit, and
+    write_note says how the brief read it."""
     contract = getattr(ctx, "semantic_contract", None)
     if not contract or contract.get("request_digest") != digest(ctx):
-        raise ValueError("The current request must be interpreted before editing")
-    if contract["mode"] == "inspect":
-        raise ValueError("This request asks for analysis; inspect and answer without changing the edit")
+        try:
+            contract = ensure(ctx)
+        except Exception as exc:  # noqa: BLE001 - a reading that cannot be made freezes nothing
+            import db as dbx
+            if isinstance(exc, dbx.JobLeaseLost):
+                raise
+            contract = None
+        if not contract or contract.get("request_digest") != digest(ctx):
+            contract = _open_brief(ctx, getattr(ctx, "verification_request", None)
+                                   or getattr(ctx, "user_message", ""), digest(ctx),
+                                   "the brief was not read before this write")
+    if contract.get("mode") == "inspect":
+        return set()
     # What the customer asks to change this turn cannot also be frozen by a
     # broader preservation in the same brief: both readings are the model's,
     # and the specific ask wins.
@@ -501,6 +516,9 @@ def write_note(ctx, before, after, protected, source_shape=None):
                          + (" (\"" + "\"; \"".join(q[:160] for q in said[:3] if q) + "\")"
                             if any(said) else "")
                          + ", and this write adds or changes it")
+        if contract.get("mode") == "inspect" and before != after:
+            lines.append("the brief read this message as a question to answer, and this write "
+                         "changes the edit; say in the reply what changed and why")
     except Exception as exc:  # noqa: BLE001 — a note never fails a write
         print(f"[request brief] write note skipped: {str(exc)[:160]}", flush=True)
         return ""
