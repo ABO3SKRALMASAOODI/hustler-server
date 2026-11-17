@@ -15,7 +15,9 @@ supply  the narrator (Phonon Easton, the stories read), real footage per line (w
         names, and the recording cut in with its own sound between two narrator lines: the clip as uploaded (the before)
         and the export (the after); a frame of the export can open the film
 score   the story reel builder (valmera-stories/reel.py) at a pace set from this film's own narration against the marketing
-        references' medians; the recording is shown as delivered (no section finish, flash or caption pool over it); then
+        references' medians; the recording is shown as delivered (no section finish, flash or caption pool over it); the
+        film's editing device (devices.py: the timeline pull-back, the wipe and its count-up grid, or the triptych) is laid
+        on its own beats; then
         every picture is checked against the exact words it sits under (gpt-6-sol, low) and a picture that does not fit
         is dropped and the plan built again
 render  Valmera's engine, then the shell's brand finish and the music it chooses (wf3.render, wf3.check)
@@ -37,6 +39,9 @@ import importlib.util
 _inventory_spec = importlib.util.spec_from_file_location("_wf2_visual_inventory", os.path.join(HERE, "visual_inventory.py"))
 VI = importlib.util.module_from_spec(_inventory_spec)
 _inventory_spec.loader.exec_module(VI)
+_devices_spec = importlib.util.spec_from_file_location("_wf2_devices", os.path.join(HERE, "devices.py"))
+D = importlib.util.module_from_spec(_devices_spec)
+_devices_spec.loader.exec_module(D)
 SKILLS = os.path.dirname(HERE)
 STORIES = os.path.join(SKILLS, "valmera-stories")
 # this folder's own film.py (the three built styles) must not shadow the stories' film.py that reel.py and wf3.py import
@@ -263,6 +268,25 @@ def reuse_record(path, destination):
 
 # ----------------------------------------------------------------- ideas
 
+DEVICE_MENU = ("timeline (on the line that says the typed sentence, the frame pulls back onto the project's own Valmera "
+               "timeline drawn from the recording's edit list, the sentence is typed as it is said, and on send the cut "
+               "blocks leave, the pictures and captions land, the receipt prints and the frame pushes into the export: "
+               "best when the edit cuts, adds pictures or adds captions), wipe (on that line the raw clip plays whole "
+               "while the sentence appears, then a leaning wipe line crosses the frame and the export is behind it, "
+               "with a count-up grid of the films the product made from this clip afterwards: best when the change "
+               "reads in one frame, such as a reframe, a look or captions), triptych (the film opens on three exports "
+               "of the same instant of this clip made from three different typed sentences, side by side, and the "
+               "typed line still gets the timeline: then give three asks, three different looks of one clip)")
+
+
+def device_of(script, knobs=None):
+    """The device the film lays on its typed line (and the hook, for the triptych): the direction's, else the idea's,
+    else the timeline (the owner's favourite of the nine, 13 Nov)."""
+    d = (knobs or {}).get("device") or (script.get("idea_full") or {}).get("device")
+    return d if d in D.DEVICES else "timeline"
+
+
+
 def ideas(ctx):
     able = able_cards(ctx)
     srcs = sources()
@@ -304,7 +328,8 @@ def ideas(ctx):
                "editor would get), \"asks\": [two different sentences to type, each under 80 characters, plain words as an editor types "
                "them, each asking for a vertical short], \"must_see\": [for each ask, the list of things that must be visible in the "
                "export for the film to show it honestly], \"hook\": the first spoken line, under 12 words, a pain or a stake, never a "
-               "greeting, \"style\": one style id, \"why\": one line}.")
+               "greeting, \"style\": one style id, \"device\": the editing device that shows Valmera's real edit happening, one "
+               "of " + DEVICE_MENU + ", \"why\": one line}.")
     if recordings:
         content += ("\n# Existing REAL synthetic Studio recordings\n" + json.dumps(recordings, ensure_ascii=False)
                     + "\nFor each idea select recording_id from this menu. Build a NEW editing-pain argument around "
@@ -556,6 +581,21 @@ def audit(sc, rc):
     return bad, use
 
 
+DEVICE_BRIEF = {
+    "timeline": "On the segment that says the typed sentence the picture is Valmera's own project, drawn from this "
+                "recording's edit list: the frame pulls back onto its timeline, the sentence is typed as it is said, and "
+                "as it is sent the timeline changes and the frame pushes into the export. Say the sentence plainly, with "
+                "at most three words of your own before it; never describe the interface in words.",
+    "wipe": "On the segment that says the typed sentence the raw clip plays whole while the sentence appears a word as it "
+            "is said; a leaning wipe line then crosses the frame and the export is behind it. Say the sentence plainly, "
+            "with at most three words of your own before it. The line after the after may name how many films the "
+            "product made from this clip only if the receipts carry that number.",
+    "triptych": "The film opens on three exports of the same instant of this clip, made from three typed sentences "
+                "(the receipts' siblings), side by side: the hook is spoken over them and can ask which one an editor "
+                "would post. The segment that says the typed sentence then shows Valmera's own timeline as it is typed.",
+}
+
+
 def write(ctx, idea, card, rc, notes=None, inventory=None):
     pace = ref_pace()
     system = ("You are the writer and voice director of Valmera's marketing films for video editors. A synthetic narrator (Phonon Easton, "
@@ -597,7 +637,8 @@ def write(ctx, idea, card, rc, notes=None, inventory=None):
                "metaphor or analogy (no cups, road signs, shop shelves, landscapes or coffee standing for an editing idea). "
                "Fewer subjects said clearly beat many subjects said loosely; the cut keeps its pace by cutting inside the "
                "real recording and the fitting footage.")
-    content = (f"# The idea\n{json.dumps(idea, ensure_ascii=False)}\n\n# The recording's receipts (the only facts about Valmera you may state)\n"
+    content = (f"# The editing device on screen\n{DEVICE_BRIEF[device_of(dict(idea_full=idea), ctx.args)]}\n\n"
+               f"# The idea\n{json.dumps(idea, ensure_ascii=False)}\n\n# The recording's receipts (the only facts about Valmera you may state)\n"
                f"{json.dumps(rc, ensure_ascii=False)}\n\n# The style\n{json.dumps(card, ensure_ascii=False)}\n\n# The references' pace (medians)\n"
                f"{json.dumps(pace)}\n\n"
                f"# Form\n{FORM['words'][0]}-{FORM['words'][1]} spoken words in {FORM['segments'][0]}-{FORM['segments'][1]} segments; with the "
@@ -671,6 +712,12 @@ def script(ctx, ideas_out):
     idea, ask_text, rec, chk, tag = chosen
     card = able.get(idea["style"]) or next(iter(able.values()))
     rc = receipts(rec, chk, ask_text)
+    sibs = []
+    if device_of(dict(idea_full=idea), ctx.args) == "triptych":
+        sibs = siblings(ctx, idea, rec, tag, stt, keep)
+        rc["siblings"] = [dict(typed=s["typed"], export=s["export_sha256"]) for s in sibs]
+        if len(sibs) < 2:
+            ctx.log(f"triptych: {len(sibs)} other export of this upload; the film opens on its own export and keeps the timeline")
     inventory = VI.prepare(ctx, idea, rc, ask, PX.pictures, still)
     spend += inventory["spend"]
     ctx.log(f"visual inventory: {sum(map(len, inventory['pictures'].values()))} distinct inspected pictures before writing")
@@ -696,9 +743,51 @@ def script(ctx, ideas_out):
     return dict(title=sc.get("title") or idea.get("title"), style=registry_row(card), window=window, hook_line=sc.get("hook_line"),
                 close_line=sc.get("close_line"), direction=f"{card['name']}: {card['look']}", idea=idea.get("title"), idea_full=idea,
                 script=sc, receipts=rc, export_check={k: v for k, v in chk.items() if k not in ("export", "upload")},
-                record=stt[tag]["record"],
+                record=stt[tag]["record"], siblings=sibs,
                 cta=dict(say=sc["segments"][-1]["say"], show=sc["segments"][-1].get("show"), needs_fulfilment=False),
                 words=writer.words_of(sc), spend=spend)
+
+
+def same_upload(rec, roots):
+    """Real exports the product made from this exact upload (same sha256) in other synthetic Studio sessions under
+    `roots`: [{sid, record, typed, export, export_sha256, edl}], vertical, finished, never this one."""
+    sha, out, seen = rec["upload"]["sha256"], [], {rec.get("sid")}
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        for sid in sorted(os.listdir(root)):
+            path = os.path.join(root, sid, "record.json")
+            r = jload(path, {}) or {}
+            if r.get("sid") in seen or (r.get("upload") or {}).get("sha256") != sha or r.get("state") != "done" or r.get("failures"):
+                continue
+            ex = next((e for e in r.get("exports") or [] if e.get("tag") == "final"), None)
+            edl = os.path.join(root, sid, "edl", f"v{int((ex or {}).get('edl_version') or 0):03d}.json")
+            if not ex or ex.get("h", 0) <= ex.get("w", 0) or not os.path.isfile(ex.get("file", "")) or not os.path.isfile(edl):
+                continue
+            seen.add(r.get("sid"))
+            out.append(dict(sid=r.get("sid"), record=path, typed=" / ".join(a.get("text", "") for a in r.get("asks") or []),
+                            export=ex["file"], export_sha256=ex.get("sha256"), edl=edl, dur=ex.get("dur")))
+    return out
+
+
+def siblings(ctx, idea, rec, tag, stt, keep):
+    """Two more real exports of the same upload for the triptych: the run's own Studio sessions of the idea's other
+    sentences (recorded on the same seconds), or, when the run reuses recordings, the reused folder's other films of
+    the same upload. Each is a finished vertical export; the vision check is the film's own recording's."""
+    roots = [os.path.join(ctx.tmp, "studio", "records"), os.environ.get("WF2_REUSE_RECORDINGS")]
+    have = same_upload(rec, roots)
+    if len(have) < 2 and not idea.get("recording"):
+        for j, ask_text in enumerate((idea.get("asks") or [])[1:4]):
+            if len(have) >= 2:
+                break
+            try:
+                record(ctx, idea, f"{tag}t{j}", ask_text)
+            except RuntimeError as e:          # a session that kept nothing: the next sentence, then the film without it
+                ctx.log(f"triptych sentence {j + 1}: {str(e)[:200]}")
+            have = same_upload(rec, roots)
+    stt.setdefault(tag, {})["siblings"] = [h["record"] for h in have[:2]]
+    jsave(keep, stt)
+    return have[:2]
 
 
 # ----------------------------------------------------------------- supply
@@ -1238,6 +1327,129 @@ def instruction_panel(l1, clock, sc, typed):
     return dict(typed=typed, frames=[start, end], lines=lines, minimum_px=56)
 
 
+def caption_spans(rec, edl, per=3):
+    """The export's caption groups on its own clock: the source's caption words inside each kept range, in the
+    export's order, `per` words a group. [(start, end)] programme seconds; [] when the source has no captions."""
+    src = next((s for s in sources() if s["file"] == (rec.get("source") or {}).get("file")), None)
+    if not src:
+        return []
+    t0, t1 = float(rec["source"]["t0"]), float(rec["source"]["t1"])
+    words = [t - t0 for t, _ in json3_words(src["captions"]) if t0 <= t <= t1]
+    out, at = [], 0.0
+    for k in edl.get("keep") or []:
+        a, b = float(k[0]), float(k[1])
+        ts = [at + t - a for t in words if a <= t < b]
+        for j in range(0, len(ts), per):
+            g = ts[j:j + per]
+            out.append((round(g[0], 3), round(min(g[-1] + 0.35, at + b - a), 3)))
+        at += b - a
+    return out
+
+
+def face_focus(ff, path, t, work, fallback):
+    """The centre of the largest face in a video at second t, in picture fractions (YuNet on one frame); fallback
+    when no face is found."""
+    try:
+        st = D.stills(ff, path, [t], work, h=720)
+        fs = PX.faces(st[0]["path"]) if st else []
+    except Exception:  # noqa: BLE001 - a frame that cannot be read keeps the product's own crop centre
+        fs = []
+    if not fs:
+        return fallback
+    b = max(fs, key=lambda q: (q["box"][2] - q["box"][0]) * (q["box"][3] - q["box"][1]))["box"]
+    return round((b[0] + b[2]) / 2, 4), round((b[1] + b[3]) / 2, 4)
+
+
+def exports_of_upload(rec, roots):
+    return [dict(sid=s["sid"], export=s["export"], dur=s.get("dur")) for s in same_upload(rec, roots)]
+
+
+def lay_devices(ctx, l1, sc, pack, clock, script, knobs):
+    """The film's editing devices on its own beats (devices.py): the typed line as the timeline pull-back or the wipe,
+    the triptych on the hook, the count-up grid after the export. A device that cannot be laid leaves the reel as it
+    was and the run goes on (the typed line then gets the plain instruction panel); the reason is recorded."""
+    out = dict(device=device_of(script, knobs), laid=[], faults=[])
+    try:
+        rec = json.load(open(script["record"]))
+        ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
+        edl_b = json.load(open(os.path.join(os.path.dirname(script["record"]), "edl", f"v{int(ex['edl_version']):03d}.json")))
+        up = rec["upload"]
+        upload = dict(path=up["file"], w=int(up["w"]), h=int(up["h"]), fps=float(up.get("fps") or 30.0), dur=float(up["dur"]))
+        edl_a = dict(keep=[[0.0, round(float(up["dur"]), 3)]])        # the upload as it came in: the sentence was typed before any cut
+        product_dir = os.path.dirname(pack["product"]["paths"][0])
+        body = D.media(pack["ffmpeg"], os.path.join(product_dir, "export_body.mp4"))
+        lib = dict(pack.get("sounds") or {})
+        lib.update(PX.sound_facts(("typing_2", "click_1", "tick_1", "whoosh_soft_1")))
+        crop = (pack["product"].get("before") or {}).get("crop")
+        focus = ((crop[0] + crop[2]) / 2, (crop[1] + crop[3]) / 2) if crop else (0.5, 0.42)
+        after_keys = {k for k, a in (l1.get("assets") or {}).items() if os.path.basename(str(a.get("path"))) == "after.mp4"}
+        after_items = sorted((it for it in l1["items"] if it.get("pic") in after_keys and it.get("k") in ("shot", "card")),
+                             key=lambda it: it["f"][0])
+        if after_items:                     # the reel's own after: its first frame and the export second it shows there
+            f_after = int(after_items[0]["f"][0])
+            after_end = int(max(it["f"][1] for it in after_items))
+            export_at = float(pack["product"]["after"]["t"][0]) + float((after_items[0].get("src") or [0.0])[0])
+        else:
+            payoff = next(v for v in pack.get("voices") or [] if v.get("person") == "after")
+            f_after = F.Clock.f(float(payoff["start"]) + F.LEAD_F / F.FPS)
+            after_end = F.Clock.f(float(payoff["end"]) + F.LEAD_F / F.FPS)
+            export_at = float(pack["product"]["after"]["t"][0])
+        i = int(sc["proof"]["after_after"])
+        words = clock.seg_words(i)
+        typed = script["receipts"]["typed"]
+        wf = D.word_frames(words, typed, F.norm_word)
+        f_send = min(max(b for _, b in wf), f_after) if wf else f_after
+        f0 = max(F.Clock.f(words[0]["t0"]) - 6, 0) if words else max(f_after - 90, 0)
+        work = os.path.join(ctx.supply, "devices")
+        # the pull starts on the speaker: the largest face in the upload at the device's first second, measured (YuNet)
+        t_first = max(D.src_at(D.program(edl_b)[0], export_at) - (f_after - f0) / F.FPS, 0.0)
+        focus = face_focus(pack["ffmpeg"], upload["path"], t_first, work, focus)
+        kind = out["device"]
+        if kind == "wipe":
+            rec_d, f_end = D.wipe(l1, f0=f0, f_send=f_send, f_after=f_after, upload=upload, export=body, edl_b=edl_b, typed=typed,
+                                  word_f=wf, export_at=export_at, lib=lib, focus=focus)
+        else:
+            rec_d, f_end = D.timeline(l1, f0=f0, f_send=f_send, f_after=f_after, upload=upload, export=body, edl_a=edl_a, edl_b=edl_b,
+                                      typed=typed, word_f=wf, export_at=export_at, lib=lib, ff=pack["ffmpeg"], work=work, focus=focus,
+                                      caption_spans=caption_spans(rec, edl_b), versions=(1, ex.get("edl_version")))
+        out["typed_line"] = rec_d["device"]
+        out["laid"].append(rec_d)
+        ctx.log(f"device {rec_d['device']}: frames {rec_d['frames']}, typed at {rec_d.get('typed_px')} px, {len(rec_d['sounds'])} sounds")
+        pw = clock.seg_words(i + 1) if i + 1 < len(sc["segments"]) - 1 else []
+        if kind == "wipe" and pw:          # the count-up of the films made from this clip, on the line after the export
+            roots = [os.path.dirname(os.path.dirname(script["record"])), os.environ.get("WF2_REUSE_RECORDINGS"),
+                     os.path.join(V, ".tmp", "valmera-studio", "records")]
+            films = [dict(sid=rec.get("sid"), export=ex["file"], dur=ex["dur"])] + exports_of_upload(rec, roots)
+            g0 = max(F.Clock.f(pw[0]["t0"]) - 2, after_end, f_end)
+            g1 = min(F.Clock.f(pw[-1]["t1"]) + 4, g0 + 66)
+            if len(films) >= 4 and g1 - g0 >= 36:
+                tiles = []
+                for fm in films[:12]:
+                    st = D.stills(pack["ffmpeg"], fm["export"], [max(float(fm.get("dur") or 6.0) - endcard_s(), 1.0) * 0.4], work, h=480)
+                    if st:
+                        tiles.append(dict(st[0], sid=fm["sid"]))
+                g = D.grid(l1, f0=g0, f1=g1, tiles=tiles, lib=lib, upload=upload)
+                g["films"] = [dict(sid=fm["sid"], export=os.path.basename(fm["export"])) for fm in films]
+                out["laid"].append(g)
+        if kind == "triptych" and len(script.get("siblings") or []) >= 2:
+            sibs = script["siblings"][:2]
+            exs = [dict(media=D.media(pack["ffmpeg"], ex["file"]), edl=edl_b)] + [
+                dict(media=D.media(pack["ffmpeg"], s["export"]), edl=json.load(open(s["edl"]))) for s in sibs]
+            hw = clock.seg_words(0)
+            t1 = max(min((F.Clock.f(hw[-1]["t1"]) + 3) if hw else 75, 90), 45)
+            s_at = D.common_second([e["edl"] for e in exs], t1 / F.FPS + 0.2, prefer=D.src_at(D.program(edl_b)[0], export_at), dur=upload["dur"])
+            if s_at is not None:
+                tr = D.triptych(l1, f0=0, f1=t1, exports=exs, upload=upload, lib=lib, src_s=s_at)
+                tr["sentences"] = [typed] + [s["typed"] for s in sibs]
+                out["laid"].append(tr)
+            else:
+                out["faults"].append("triptych: the three exports share no uncut stretch of the upload; the hook stays the reel's")
+    except Exception as e:  # noqa: BLE001 - a device never costs the film: the reel stays as built
+        out["faults"].append(repr(e)[:400])
+        ctx.log(f"device not laid: {repr(e)[:300]}")
+    return out
+
+
 def score(ctx, script):
     pack = W3.load_pack(ctx)
     d = W3.direction_of(ctx)
@@ -1276,19 +1488,24 @@ def score(ctx, script):
                 if taste["ok"]:
                     break
         spans = as_delivered(l1, product)
-        receipt_panel = instruction_panel(l1, clock, sc, script["receipts"]["typed"])
-        bad, sp = picture_check(ctx, beats, clock, product, cache, script.get("receipts"))
+        devices = lay_devices(ctx, l1, sc, pack, clock, script, knobs)
+        receipt_panel = (instruction_panel(l1, clock, sc, script["receipts"]["typed"]) if not devices.get("typed_line")
+                         else dict(typed=script["receipts"]["typed"], device=devices["typed_line"]))
+        spans_dev = [d["frames"] for d in devices.get("laid") or []]
+        seen = dict(beats, pictures=[p for p in beats.get("pictures") or []          # a picture a device covers is not seen
+                                     if not any(a <= p["f"][0] and p["f"][1] <= z for a, z in spans_dev)])
+        bad, sp = picture_check(ctx, seen, clock, product, cache, script.get("receipts"))
         spend += sp
         jsave(cache_p, cache)
         shown = []
-        for picture in beats.get("pictures") or []:
+        for picture in seen.get("pictures") or []:
             words = words_under(clock, *picture["f"])
             verdict = cache.get(picture_key(picture, words)) or dict(fits=False, why="missing picture verdict")
             shown.append(dict(file=os.path.basename(picture["path"]), frames=picture["f"], source=picture.get("src"),
                               words=words, **verdict))
         rounds.append(dict(round=rnd, pictures=len(shown), shown=shown,
                            misfits=[dict(file=b, words=w, why=y) for b, w, y in bad]))
-        ctx.log(f"picture check: {len(bad)} of {len(beats.get('pictures') or [])} judged loose against their words (recorded)")
+        ctx.log(f"picture check: {len(bad)} of {len(seen.get('pictures') or [])} judged loose against their words (recorded)")
     if not taste["ok"]:
         raise RuntimeError("the plan breaks a taste rule: " + "; ".join(taste["problems"][:6]))
     out = os.path.join(ctx.supply, "l1.json")
@@ -1300,7 +1517,7 @@ def score(ctx, script):
     turn_s = round(float(payoff["start"]) + F.LEAD_F / F.FPS, 3) if payoff else (round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None)
     return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, beats={k: v for k, v in beats.items() if k != "look"}, taste=taste,
                 frames=l1["dur_f"], items=len(l1["items"]), direction=dict(knobs, drop=drop), pace=pace_rec, recording_spans=spans,
-                instruction_panel=receipt_panel,
+                instruction_panel=receipt_panel, devices=devices,
                 picture_check=dict(model=CHECK_MODEL, effort="low", rounds=rounds, misfits_left=rounds[-1]["misfits"]), spend=spend)
 
 
@@ -1313,7 +1530,7 @@ def check(ctx, rd, sc):
     c = r["checks"]
     c["marketing"] = dict(receipts=json.load(open(os.path.join(ctx.run_dir, "script.json"))).get("receipts"),
                           picture_check=sc.get("picture_check"), pace=sc.get("pace"), recording_spans=sc.get("recording_spans"),
-                          instruction_panel=sc.get("instruction_panel"))
+                          instruction_panel=sc.get("instruction_panel"), devices=sc.get("devices"))
     left = (sc.get("picture_check") or {}).get("misfits_left") or []
     c["marketing"]["pictures_fit"] = not left
     c["ok"] = bool(c["ok"] and not left)
