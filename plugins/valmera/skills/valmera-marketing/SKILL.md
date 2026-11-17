@@ -29,6 +29,33 @@ What the run does (`proof.py` on the workflow shell, `market.py` the launcher):
 | score | The story reel builder (`valmera-stories/reel.py`) at a shot length set from this film's own narration speed against the marketing references' medians; the recording shown as delivered (no section finish, flash or caption pool over it); the before opens whole and wide on a blurred copy of itself, then pushes into the export's own crop of the upload (read from the recording's edit list) until the speaker fills the phone; every line that names THE UPLOAD or THE EXPORT shows it, and a line that runs out of pictures plays the export's unplayed seconds, never a type page; captions at 72 px; the film's editing device shows the typed sentence and Valmera's real edit (below); verified per-line takes feed the story cutter, with bounded footage top-ups. One cut: every played picture window is checked against its exact words and the verdicts are recorded in `film.json`; a verdict never drops a picture or rebuilds the cut (16 Nov: four rounds of drops made 35-47% of two films flat type pages) |
 | render, check, deliver | Valmera's engine, the shell's brand finish (watermark, end card), the music it chooses (MUSIC2), the sound design (score.sound); `film.mp4`, `film_clean.mp4`, `film.json` (receipts, picture check, pace, credits) and `SOURCES.md`, once. The run folder, the recording, the stack's database and its folder are deleted |
 
+### Two formats, one story, one call to action (owner, 17 Nov 2026)
+
+"The main thing is that there is a CTA and there is an extremely powerful edit, such that the user really gets curious
+about how did he do this edit." The ideas call chooses the film's `format` (`direction.json` `"format"` overrides; the
+narrated tutorial when none is named):
+
+- **showcase**: no narrator. Valmera's own export is the film. The raw upload opens it, whole on its blurred copy, at the
+  seconds just before the export's first frame, with the typed sentence landing under "TYPED AT VALMERA.IO"; a leaning
+  seam reveals the export at that same instant and it plays as delivered on its own sound (one continuous stretch from
+  its opening to the speaker's longest pause between 9 and 16 s, measured on its sound, never inside one of the
+  export's pictures or titles); then the call to action, said by Easton and shown. The raw intro is one shot of the
+  speaker: it starts after the upload's last camera cut (measured), never on another camera. No writer, no footage search, no picture check (every picture is the recording's own).
+- **tutorial**: the narrated proof reel below, with its device, then the same call to action on its last line.
+
+Every film, either format: a stranger follows it from its first two seconds. One continuous thought of the speaker (the
+before is the same moment of the clip as the after: `product_clips` maps the after's seconds through the final edit
+list), a picture inside the export set up by the words said before it, Valmera named on screen in the first second
+("TYPED AT VALMERA.IO") and, in a tutorial, aloud in the first two lines with what it is.
+
+**The call to action** (`devices.cta`, both formats): over the export's own picture, blurred and darkened, held to the
+end of the programme and at least 3.4 s: "The AI video editor", "Type what you want.", "It edits your video." and the
+website, **valmera.io**, as its largest line (fitted to the frame, 150 px and up; the brand's end card shows VALMERA.IO
+only small). True claims only: never "free" (the trial is off), never a price or a plan. The showcase also says it
+(`devices.CTA_SAY`), so its sound, its music and the brand finish's tail run to the end. The brand finish (the mark
+with its adaptive ink on every programme frame, the end card) is the shell's and always follows; it is never changed
+here.
+
 ### The editing devices (`devices.py`, since 17 Nov 2026)
 
 The owner liked the 12-13 Nov films' tricks ("a good direction that needs to be followed"); they are beats of the proof
@@ -39,7 +66,7 @@ reel now, laid in `score` over the reel's own frames (`proof.lay_devices`). The 
 |---|---|---|
 | timeline | the line that says the typed sentence | the frame pulls back from the speaker (the largest face, YuNet) onto the project's own timeline: the upload as one block at its true length with its frames, the playhead at the true second, the version and length labels; the sentence is typed in the prompt word by word as the narrator says it; on send the blocks the edit removed are marked and leave, the rest close up to the final edit list, its pictures land on their track (a frame of the export showing each), the captions track fills, the labels flip, and the prompt prints the receipt's rows (read from the two edit lists: seconds cut, pictures, captions, titles, reframe); the export lands in the viewer as its own voice starts and pushes to full frame |
 | wipe | the same line | the upload plays whole on its blurred copy, the sentence rises a word as it is said, then a leaning seam crosses the frame and everything it passed is the export at the same instant; after the export, when the product made four or more films of this upload (same sha256, synthetic Studio records), a grid of them lands while a counter counts them up |
-| triptych | the hook (frame 0) | three exports of the same upload made from three typed sentences, side by side at one source instant (each export's own edit list maps it), the narration's captions under them; the typed line gets the timeline. The two other exports come from the run's own sessions of the idea's other sentences, or from the reused folder's films of the same upload |
+| triptych (by direction only since 17 Nov: a cold viewer read three edits as three moments) | the hook (frame 0) | three exports of the same upload made from three typed sentences, side by side at one source instant (each export's own edit list maps it), the narration's captions under them; the typed line gets the timeline. The two other exports come from the run's own sessions of the idea's other sentences, or from the reused folder's films of the same upload |
 
 Fixed against the old films and kept that way by `test_devices.py`: every device stands on real picture (the clip's
 blurred copy, the viewer, the export), never plain black or static; type at 44 px and up (typed sentence 52-72 px,
@@ -249,7 +276,8 @@ Proofs beside the judge: `.valmera/week-1112/side-by-side/S/`. Full asks: `.valm
 
 ## The call to action
 
-Inside the film, before the end card. `film.json` carries `script.cta`: the keyword when there is
+The one-command path: see "Two formats, one story, one call to action" above. The older hand-directed path: inside
+the film, before the end card. `film.json` carries `script.cta`: the keyword when there is
 one, what the rows promise, and `needs_fulfilment`; the words as shown are
 `checks.marketing.on_screen`. A keyword in static must not be spelled by any row. A promise is
 the publisher's to keep: say so when you hand the film over. A person must also confirm on a

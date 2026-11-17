@@ -115,7 +115,7 @@ def test_timeline_pulls_back_types_as_said_lands_the_edit_and_pushes_into_the_ex
     for t in rec["texts"]:
         assert t["y"] - t["cap_px"] / 1920 > D.MARK[3]
         assert t["y"] <= D.BOTTOM_Y
-        if t["y"] > 0.55 and t["v"] != "dv_l":
+        if t["y"] > 0.55 and not t["v"].startswith("dv_l"):
             assert t["x"] + t["w"] <= D.RAIL_X + 1e-3
     # the reel gave way: none of its pictures or captions inside the span, its after continues from the push
     assert not [it for it in l1["items"] if not it["id"].startswith("tl.") and it["f"][0] < f_end and it["f"][1] > 27]
@@ -149,6 +149,8 @@ def test_wipe_shows_the_sentence_as_said_then_reveals_the_export_at_the_same_ins
     assert seam["x"][0] < 0 and seam["x"][-1] > 1 and seam["f"] == rec["sweep"] and f_end == rec["sweep"][1]
     assert abs(seam["src"][0] - (6.8 - (96 - rec["sweep"][0]) / FPS)) < 1e-3          # the export at the same instant as the after
     assert rec["typed_px"] >= 56 and rec["min_text_px"] >= 44
+    sizes = {k: v["px"] for k, v in l1["voices"].items() if k.startswith("dv_s")}
+    assert sizes == {"dv_s.wp": rec["typed_px"]}                                    # its own voice: no other device resizes its words
     words = [it for it in l1["items"] if it["id"].startswith("wp.w")]
     assert len(words) == len(TYPED.split()) and words[0]["f"][0] == wf[0][0]
     assert [s["s"] for s in l1["sound"] if s.get("device") == "wp"] == ["whoosh_soft_1"]
@@ -195,7 +197,7 @@ def test_the_device_is_the_films_choice_and_the_timeline_by_default():
     assert P.device_of(dict(idea_full=dict(device="wipe"))) == "wipe"
     assert P.device_of(dict(idea_full=dict(device="spin"))) == "timeline"
     assert P.device_of(dict(idea_full=dict(device="wipe")), {"device": "triptych"}) == "triptych"
-    assert "triptych" in P.DEVICE_MENU and set(P.DEVICE_BRIEF) == set(D.DEVICES)
+    assert "triptych" not in P.DEVICE_MENU and set(D.DEVICES) <= set(P.DEVICE_BRIEF)       # the triptych: by direction only (17 Nov)
 
 
 def test_a_device_that_cannot_be_laid_leaves_the_film_as_built(tmp_path):
@@ -231,3 +233,75 @@ def test_same_upload_finds_the_other_films_of_this_clip(tmp_path):
     rec("failed", "A", state="failed")
     got = P.same_upload(me, [str(tmp_path), None, str(tmp_path)])
     assert [g["sid"] for g in got] == ["b", "c"] and os.path.basename(got[0]["edl"]) == "v003.json"
+
+
+def test_the_call_to_action_names_valmera_says_what_it_does_and_what_to_do():
+    l1 = reel()
+    rec = D.cta(l1, f0=110, f1=l1["dur_f"], export=EXPORT, lib=LIB, src0=20.0)
+    lines = [it["t"] for it in sorted((it for it in l1["items"] if it["id"].startswith("ct.l")), key=lambda it: it["f"][0])]
+    assert lines[-1] == "valmera.io" and "The AI video editor" in lines and "Type what you want." in lines
+    url = next(t for t in rec["texts"] if t["t"] == "valmera.io")
+    assert url["px"] >= 150 and url["cap_px"] >= 100                              # the website, large (the end card shows it small)
+    text = " ".join(lines).lower()
+    assert "free" not in text and "$" not in text and "plan" not in text            # only true claims: the trial is off
+    assert rec["seconds"] >= 3.0 and rec["min_text_px"] >= 44 and rec["lands"][-1] < 110 + 30
+    for t in rec["texts"]:
+        assert D.MARK[3] < t["y"] - t["cap_px"] / 1920 and t["y"] < 0.8 and t["x"] + t["w"] <= 0.95
+        assert t["y"] <= 0.55 or t["x"] + t["w"] <= D.RAIL_X + 1e-3
+    assert not [it for it in l1["items"] if not it["id"].startswith("ct.") and it["f"][1] > 110]   # the reel gives way under it
+
+
+def test_the_showcase_is_one_moment_raw_then_revealed_then_the_call_to_action():
+    l1, beats = D.showcase(upload=UPLOAD, export=EXPORT, edl_b=EDL_B, typed=TYPED, window=[0.0, 12.0], lib=LIB, intro_s=2.0, lead_f=3)
+    assert beats["intro"] == [0, 63] and beats["export"] == [63, 63 + 360] and beats["cta"][1] == l1["dur_f"]
+    shot = next(it for it in l1["items"] if it["id"].startswith("export") and it["k"] == "shot")
+    assert abs(shot["src"][0] - (shot["f"][0] - 63) / FPS) < 1e-3                  # the export's picture in step with its voice
+    assert l1["dur_f"] / FPS <= 35 - 5                                              # with the end card, a 20-35 s film
+    seam = next(it for it in l1["items"] if it["id"] == "wp.seam")
+    assert seam["f"][0] < 63 < seam["f"][1]                                         # the seam crosses as the voice turns to the export
+    assert abs(beats["upload_window"][1] - D.src_at(D.program(EDL_B)[0], 0.0)) < 1e-3     # the raw leads into the export's first second
+    label = next(it for it in l1["items"] if it["id"] == "wp.lab")
+    assert label["t"] == "TYPED AT VALMERA.IO" and label["f"][0] <= 15             # the site named in the first half second
+    words = [it for it in l1["items"] if it["id"].startswith("wp.w")]
+    assert len(words) == len(TYPED.split()) and max(it["f"][0] for it in words) < seam["f"][0]
+    ex = [it for it in l1["items"] if it["id"].startswith("export")]
+    assert ex and min(it["f"][0] for it in ex) == seam["f"][1] and max(it["f"][1] for it in ex) == beats["cta"][0]
+    assert {s["s"] for s in l1["sound"]} >= {"typing_2", "whoosh_soft_1", "click_1"}
+    wipe_rec = beats["devices"][0]
+    assert l1["voices"]["dv_s.wp"]["px"] == wipe_rec["typed_px"] and l1["voices"]["dv_s.ct"]["px"] == 70   # the call never resizes the sentence
+    assert all(any(abs(s["event_f"] - f) <= 20 for f in (beats["intro"][0] + 15, seam["f"][0] + 8, beats["cta"][0] + 1, beats["cta"][0] + 18))
+               for s in l1["sound"])
+
+
+def test_the_film_chooses_its_format_and_the_tutorial_stays_the_default():
+    assert P.format_of({}) == "tutorial"
+    assert P.format_of(dict(idea_full=dict(format="showcase"))) == "showcase"
+    assert P.format_of(dict(idea_full=dict(format="reel"))) == "tutorial"
+    assert P.format_of({}, {"format": "showcase"}) == "showcase"
+    assert "showcase" in P.FORMAT_MENU and "triptych" not in P.DEVICE_MENU
+    assert "AI video editor" in P.DEVICE_BRIEF["_all"] and "free" in P.DEVICE_BRIEF["_all"]
+
+
+def test_the_showcase_window_ends_in_the_speakers_longest_pause_never_inside_a_picture(monkeypatch):
+    monkeypatch.setattr(P, "pauses", lambda path, lo, hi, **k: [(8.1, 8.36), (10.22, 10.68), (14.08, 14.66), (15.7, 16.16), (19.26, 19.8)])
+    w = P.showcase_window(dict(file="/x/e.mp4"), body=30.0, lo=9.0, hi=16.0)
+    assert w == [P.SEAM_LEAD_S, 14.33]                                              # after "or whatever", before "and I'm like"
+    w2 = P.showcase_window(dict(file="/x/e.mp4"), body=30.0, pics=[(13.5, 3.0)], lo=9.0, hi=16.0)
+    assert w2[1] == 10.45                                                            # the pause inside the picture is passed over
+    w3 = P.showcase_window(dict(file="/x/e.mp4"), body=30.0, pics=[(9.5, 7.0)], lo=9.0, hi=16.0)
+    assert w3[1] == 19.51                                                            # the picture plays out; the next pause ends it
+    monkeypatch.setattr(P, "pauses", lambda path, lo, hi, **k: [])
+    monkeypatch.setattr(P, "quiet_snap", lambda path, t, span=0.45: t - 0.1)
+    assert P.showcase_window(dict(file="/x/e.mp4"), body=12.0, lo=9.0, hi=16.0)[1] == 11.7
+
+
+def test_the_showcase_intro_is_one_shot_of_the_speaker(monkeypatch, tmp_path):
+    """The raw intro starts after the upload's last camera cut before the export (the host's 0.3 s shot is not shown)."""
+    import numpy as np
+    frames = np.zeros((78, 36, 64), np.uint8)
+    frames[8:] = 200                                                                 # a cut on frame 8 (0.27 s)
+
+    class R:
+        stdout = frames.tobytes()
+    monkeypatch.setattr(P.subprocess, "run", lambda *a, **k: R())
+    assert P.camera_cuts("/x/up.mp4", 0.0, 2.6) == [0.267]

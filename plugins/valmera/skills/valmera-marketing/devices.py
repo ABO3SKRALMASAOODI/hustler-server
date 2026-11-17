@@ -48,6 +48,16 @@ TOP_Y = 0.205                  # under the watermark's place (MARK y1 0.1923)
 BOTTOM_Y = 0.795               # over the platform's caption and button band
 r4 = MF.r4
 DEVICES = ("timeline", "wipe", "triptych")
+FORMATS = ("showcase", "tutorial")
+# The call to action (owner, 17 Nov: "there is a CTA ... when you tell the user the CTA, he will immediately convert").
+# Every line is true of the product; never "free" (the trial is off), never a price or a plan.
+# The website itself is the call's largest line (owner, 17 Nov: "Something that could show the website directly"); the
+# brand's end card carries VALMERA.IO only small, so the film carries it large.
+CTA_LINES = (("The AI video editor", "dv_l", "#C9C6BF"), ("Type what you want.", "dv_s", "#FFFFFF"),
+             ("It edits your video.", "dv_s", "#FFFFFF"), ("valmera.io", "dv_w", "#FF5B35"))
+TYPED_LABEL = "TYPED AT VALMERA.IO"     # the site, beside the moment that makes a viewer ask how
+CTA_S = 3.4                    # 14 words at a phone reader's pace, with the landing
+CTA_SAY = "Valmera. Type what you want, and it edits your video. Try it at valmera dot io."   # the showcase's spoken call
 ACCENT = "#FF5B35"
 CYAN = "#7FE3FF"
 INK = "#F4F1EB"
@@ -55,10 +65,12 @@ DIM = "#9A9893"
 DESK_GRADE = dict(lift=0, gamma=1.0, gain=0.40, sat=0.7, contrast=1, temp=0, tint=0)
 VOICES = {
     "dv_s": {"font": "InterDisplay-Bold.ttf", "px": 64, "track": 0},          # the typed sentence
-    "dv_l": {"font": "InterDisplay-Bold.ttf", "px": 44, "track": 4},          # labels: TYPED IN VALMERA, the version, the length
+    "dv_l": {"font": "InterDisplay-Bold.ttf", "px": 44, "track": 4},          # labels: TYPED AT VALMERA.IO, the version, the length
     "dv_r": {"font": "InterDisplay-ExtraBold.ttf", "px": 54, "track": 0},     # the receipt's rows
     "dv_n": {"font": "InterDisplay-Black.ttf", "px": 56, "track": 2},         # the triptych's numbers
     "dv_c": {"font": "InterDisplay-Black.ttf", "px": 150, "track": 0},        # the grid's counter
+    "dv_w": {"font": "InterDisplay-Black.ttf", "px": 168, "track": 6},        # the product's name in the call to action
+    "dv_u": {"font": "InterDisplay-ExtraBold.ttf", "px": 68, "track": 0},     # what to do next
 }
 PER_FRAME = {"x", "y", "s", "rot", "op", "blur", "a", "th", "t", "dim", "grow"}
 RECTS = {"crop", "rect"}
@@ -247,11 +259,16 @@ class Layer:
     def __init__(self, l1, lib, prefix):
         self.l1, self.prefix = l1, prefix
         voices = l1.setdefault("voices", {})
-        for k, v in VOICES.items():
-            voices.setdefault(k, dict(v))
         self.P = MF.Plan(voices, lib or {})
         self.R = self.P.R
         self.texts = []
+
+    def k(self, name):
+        """This device's own copy of a type voice: a size one device sets never resizes another's words (the L1's
+        voices are shared by every item that names them)."""
+        key = f"{name}.{self.prefix}"
+        self.l1["voices"].setdefault(key, dict(VOICES[name]))
+        return key
 
     def text(self, iid, f, t, v, x, y, ink=INK, op=1.0, rise=False, **kw):
         it = (self.P.rise if rise else self.P.word)(iid, f, t, v, x, y, ink, op, **kw)
@@ -431,14 +448,14 @@ def timeline(l1, *, f0, f_send, f_after, upload, export, edl_a, edl_b, typed, wo
         y += h + gap
     tracks_top = seats["v"][0]
     label_base = tracks_top - 0.014
-    L.l1["voices"]["dv_l"]["px"] = 46
-    px, lines = fit_lines(R, "dv_s", typed, (RAIL_X - 0.09) * W, 64, 52, max_lines=2)
+    L.l1["voices"][L.k("dv_l")]["px"] = 46
+    px, lines = fit_lines(R, L.k("dv_s"), typed, (RAIL_X - 0.09) * W, 64, 52, max_lines=2)
     pitch = px * 1.2 / H
-    lab_cap = R.cap("dv_l") / H
-    s_cap = R.cap("dv_s") / H
+    lab_cap = R.cap(L.k("dv_l")) / H
+    s_cap = R.cap(L.k("dv_s")) / H
     rows = receipt_rows(edl_a, edl_b, dur_a, dur_b)
-    R.voices["dv_r"]["px"] = 54
-    r_cap = R.cap("dv_r") / H
+    R.voices[L.k("dv_r")]["px"] = 54
+    r_cap = R.cap(L.k("dv_r")) / H
     row_h = max(r_cap * 1.75, 0.034)
     body_h = max(s_cap + (len(lines) - 1) * pitch, r_cap + (len(rows) - 1) * row_h)   # the typed lines, then the receipt in their place
     prompt_bot = label_base - lab_cap - 0.022
@@ -584,29 +601,29 @@ def timeline(l1, *, f0, f_send, f_after, upload, export, edl_a, edl_b, typed, wo
     # the version and the length, as the product numbered them; they flip as the edit lands
     f_flip = f_send + 8
     va, vb = versions
-    L.text("lab.va", [f_tl0 + 4, f_flip], f"v{va}", "dv_l", X0, label_base, DIM, 0.95, rise=True)
-    L.text("lab.da", [f_tl0 + 4, f_flip], MF.clock(dur_a), "dv_l", X1, label_base, DIM, 0.95, rise=True, align="r")
+    L.text("lab.va", [f_tl0 + 4, f_flip], f"v{va}", L.k("dv_l"), X0, label_base, DIM, 0.95, rise=True)
+    L.text("lab.da", [f_tl0 + 4, f_flip], MF.clock(dur_a), L.k("dv_l"), X1, label_base, DIM, 0.95, rise=True, align="r")
     if vb is not None:
-        L.text("lab.vb", [f_flip, f_push1], f"v{vb}", "dv_l", X0, label_base, INK, 1.0, rise=True)
-    L.text("lab.db", [f_flip, f_push1], MF.clock(dur_b), "dv_l", X1, label_base, INK, 1.0, rise=True, align="r")
+        L.text("lab.vb", [f_flip, f_push1], f"v{vb}", L.k("dv_l"), X0, label_base, INK, 1.0, rise=True)
+    L.text("lab.db", [f_flip, f_push1], MF.clock(dur_b), L.k("dv_l"), X1, label_base, INK, 1.0, rise=True, align="r")
 
     # ---- the prompt: the sentence typed as it is said; on send it prints the receipt's rows
     P.block("prompt", [f_pull1 - 4, f_push1], [0.05, prompt_top, 0.95, prompt_bot], "#121419", z=4, radius=0.014,
             border=dict(w=0.0012, c="#2E3038"), op=[r4(min(1.0, (q + 1) / 5.0) * 0.96) for q in range(f_push1 - f_pull1 + 4)])
     lab_y = prompt_top + 0.024 + lab_cap
-    L.text("lab.typed", [f_pull1 - 2, f_push1], "TYPED IN VALMERA", "dv_l", 0.09, lab_y, CYAN, 1.0, rise=True)
+    L.text("lab.typed", [f_pull1 - 2, f_push1], TYPED_LABEL, L.k("dv_l"), 0.09, lab_y, CYAN, 1.0, rise=True)
     y_s = lab_y + 0.022 + s_cap
     wf = list(word_f) or [(f_pull1 + 2 + 3 * i, f_pull1 + 5 + 3 * i) for i in range(len(typed.split()))]
     wf = [(max(a, f_pull1 + 1), max(b, max(a, f_pull1 + 1) + 1)) for a, b in wf]
-    caret = typed_text(L, "say", f_push1, lines, "dv_s", 0.09, y_s, pitch, wf, fade_from=f_send + 4)
-    caret_card(L, "caret", wf[0][0], f_send + 2, caret, "dv_s", 0.09, y_s)
+    caret = typed_text(L, "say", f_push1, lines, L.k("dv_s"), 0.09, y_s, pitch, wf, fade_from=f_send + 4)
+    caret_card(L, "caret", wf[0][0], f_send + 2, caret, L.k("dv_s"), 0.09, y_s)
     P.items.append(dict(id="sent", k="flash", f=[f_send, f_send + 8], mode="fill", c=ACCENT, a=[r4(0.9 * (1 - q / 8.0)) for q in range(8)],
                         rect=[0.05, r4(prompt_bot - 0.005), 0.95, r4(prompt_bot)], z=7))
     first = y_s - s_cap + r_cap
     for j, row in enumerate(rows):
         fa = f_send + 10 + 6 * j
         if fa < f_push1 and first + j * row_h <= prompt_bot - 0.01:
-            L.text(f"row{j}", [fa, f_push1], row["text"], "dv_r", 0.09, first + j * row_h, ACCENT if j == 0 else INK, 1.0, rise=True)
+            L.text(f"row{j}", [fa, f_push1], row["text"], L.k("dv_r"), 0.09, first + j * row_h, ACCENT if j == 0 else INK, 1.0, rise=True)
             row["f"] = fa
 
     # ---- sound: a few, each on what lands
@@ -625,7 +642,7 @@ def timeline(l1, *, f0, f_send, f_after, upload, export, edl_a, edl_b, typed, wo
 
 # ----------------------------------------------------------------- wipe: a leaning seam reveals the edit
 
-def wipe(l1, *, f0, f_send, f_after, upload, export, edl_b, typed, word_f, export_at, lib, focus=(0.5, 0.42), lean=7.0):
+def wipe(l1, *, f0, f_send, f_after, upload, export, edl_b, typed, word_f, export_at, lib, focus=(0.5, 0.42), lean=7.0, typing=False):
     """The typed line as the upload, whole on its blurred copy, with the sentence appearing as it is said; then a
     leaning seam sweeps across and everything it has passed is the export at the same instant. Returns (record, the
     frame the reel's after takes over)."""
@@ -641,10 +658,10 @@ def wipe(l1, *, f0, f_send, f_after, upload, export, edl_b, typed, word_f, expor
     desk(L, [f0, f_s1], up_key, upload, focus=focus, src0=up_t(f0))
     vw = 0.92
     vh = vw * W * upload["h"] / upload["w"] / H
-    px, lines = fit_lines(R, "dv_s", typed, (0.95 - 0.08) * W, 72, 56, max_lines=2)
+    px, lines = fit_lines(R, L.k("dv_s"), typed, (0.95 - 0.08) * W, 72, 56, max_lines=2)
     pitch = px * 1.2 / H
-    L.l1["voices"]["dv_l"]["px"] = 44
-    lab_cap, s_cap = R.cap("dv_l") / H, R.cap("dv_s") / H
+    L.l1["voices"][L.k("dv_l")]["px"] = 44
+    lab_cap, s_cap = R.cap(L.k("dv_l")) / H, R.cap(L.k("dv_s")) / H
     block_h = lab_cap + 0.024 + s_cap + (len(lines) - 1) * pitch
     gap = 0.045
     top = max(TOP_Y + 0.01, 0.5 - (block_h + gap + vh) / 2)
@@ -655,7 +672,7 @@ def wipe(l1, *, f0, f_send, f_after, upload, export, edl_b, typed, word_f, expor
     xs, ys, ss = pull_from_cover(vbox, 10, focus)
     P.card("up.pull", [f0, f0 + 10], up_key, vbox, t0=up_t(f0), z=3, x=xs, y=ys, s=ss)
     P.card("up", [f0 + 10, f_s1], up_key, vbox, t0=up_t(f0 + 10), z=3, radius=0.01, shadow=dict(a=0.34, blur=0.03, dx=0, dy=0.012))
-    L.text("lab", [f0 + 8, f_s1], "TYPED IN VALMERA", "dv_l", 0.08, lab_y, CYAN, 1.0, rise=True)
+    L.text("lab", [f0 + 8, f_s1], TYPED_LABEL, L.k("dv_l"), 0.08, lab_y, CYAN, 1.0, rise=True)
     wf = list(word_f) or [(f0 + 12 + 3 * i, f0 + 15 + 3 * i) for i in range(len(typed.split()))]
     k = 0
     for li, line in enumerate(lines):
@@ -663,12 +680,12 @@ def wipe(l1, *, f0, f_send, f_after, upload, export, edl_b, typed, word_f, expor
             pre = " ".join(line.split()[:wi]) + (" " if wi else "")
             a = max(wf[min(k, len(wf) - 1)][0], f0 + 10)
             if a < f_s1:
-                it = P.rise(f"w{k:02d}", [a, f_s1], wd, "dv_s", 0.08 + R.width("dv_s", pre) / W, y_s + li * pitch, INK, 1.0, n=6, dy=0.01, note=False)
+                it = P.rise(f"w{k:02d}", [a, f_s1], wd, L.k("dv_s"), 0.08 + R.width(L.k("dv_s"), pre) / W, y_s + li * pitch, INK, 1.0, n=6, dy=0.01, note=False)
                 it["role"] = "device"
             k += 1
     P.shown.append(typed)
-    L.texts.append(dict(t=typed, v="dv_s", f=[int(wf[-1][0]), int(f_s1)], px=float(px), cap_px=round(R.cap("dv_s"), 1), x=0.08, y=r4(y_s),
-                        w=r4(max(R.width("dv_s", ln) for ln in lines) / W), lines=len(lines)))
+    L.texts.append(dict(t=typed, v=L.k("dv_s"), f=[int(wf[-1][0]), int(f_s1)], px=float(px), cap_px=round(R.cap(L.k("dv_s")), 1), x=0.08, y=r4(y_s),
+                        w=r4(max(R.width(L.k("dv_s"), ln) for ln in lines) / W), lines=len(lines)))
     # the seam: off the left edge, then across in one decisive sweep; behind it the export at the true instant
     tan = math.tan(math.radians(lean))
     reach = abs(0.5 * H * tan / W) + 0.03
@@ -679,6 +696,8 @@ def wipe(l1, *, f0, f_send, f_after, upload, export, edl_b, typed, word_f, expor
     xs_seam = [r4(-reach + (1.0 + 2 * reach) * c) for c in curve]
     P.items.append(dict(id="seam", k="join", f=[f_s0, f_s1], mode="seam", stage="top", pic=ex_key, src=[r4(ex_t0), r4(ex_t0 + sweep_n / FPS)],
                         x=xs_seam, lean=lean, edge=dict(w=2.0, a=0.95), dim=1.0, a=1.0))
+    if typing:                                        # no narrator: the keys are heard as the sentence lands
+        L.hit("typing_2", max(wf[0][0], f0 + 10) + 1, "typing")
     L.hit("whoosh_soft_1", f_s0 + sweep_n // 2 - 2, "whoosh")
     rec = L.lay([f0, f_s1])
     rec.update(device="wipe", frames=[f0, f_s1], sweep=[f_s0, f_s1], send_f=f_send, after_f=f_after, upload_box=vbox, typed_px=px,
@@ -720,17 +739,17 @@ def grid(l1, *, f0, f1, tiles, lib, label="exports of one clip", upload=None):
                s=[r4(v) for v in MF.settle(8, 0.8)] + [1.0] * max(m - 8, 0), op=[r4(min(1.0, (q + 1) / 3.0)) for q in range(m)])
         lands.append(fa)
     cy = y0 + rows_n * (th + gy) + 0.012
-    R.voices["dv_c"]["px"] = 150
-    c_cap = R.cap("dv_c") / H
+    R.voices[L.k("dv_c")]["px"] = 150
+    c_cap = R.cap(L.k("dv_c")) / H
     base = min(cy + c_cap, BOTTOM_Y - 0.01)
     for j, fa in enumerate(lands):                 # the counter steps as each lands; ids end .counterNN for the sound engine
         fb = lands[j + 1] if j + 1 < len(lands) else f1
-        it = P.word(f"n.counter{j:02d}", [fa, fb], str(j + 1 if j + 1 < len(lands) else n), "dv_c", 0.08, base, INK, 1.0, note=False)
+        it = P.word(f"n.counter{j:02d}", [fa, fb], str(j + 1 if j + 1 < len(lands) else n), L.k("dv_c"), 0.08, base, INK, 1.0, note=False)
         it["role"] = "device"
-    L.texts.append(dict(t=str(n), v="dv_c", f=[int(lands[-1]) if lands else f0, int(f1)], px=150.0, cap_px=round(R.cap("dv_c"), 1), x=0.08, y=r4(base),
-                        w=r4(R.width("dv_c", str(n)) / W)))
-    R.voices["dv_l"]["px"] = 48
-    L.text("lab", [lands[-1] if lands else f0, f1], label, "dv_l", 0.08 + R.width("dv_c", str(n)) / W + 0.03, base, INK, 0.92, rise=True)
+    L.texts.append(dict(t=str(n), v=L.k("dv_c"), f=[int(lands[-1]) if lands else f0, int(f1)], px=150.0, cap_px=round(R.cap(L.k("dv_c")), 1), x=0.08, y=r4(base),
+                        w=r4(R.width(L.k("dv_c"), str(n)) / W)))
+    R.voices[L.k("dv_l")]["px"] = 48
+    L.text("lab", [lands[-1] if lands else f0, f1], label, L.k("dv_l"), 0.08 + R.width(L.k("dv_c"), str(n)) / W + 0.03, base, INK, 0.92, rise=True)
     for j, fa in enumerate(lands[::max(1, len(lands) // 4)][:4]):
         L.hit("tick_1", fa + 1, "tick")
     rec = L.lay([f0, f1])
@@ -764,7 +783,7 @@ def triptych(l1, *, f0, f1, exports, upload, lib, src_s):
         P.card(f"c{i}", [fa, f1], key, [r4(v) for v in boxes[i]], t0=t_in + (fa - f0) / FPS, z=2, radius=0.008, border=dict(w=0.0012, c="#2A2A2A"),
                s=land[:n], op=[1.0] * n if i == 0 else [r4(min(1.0, (q + 1) / 3.0)) for q in range(n)],
                crop=cover(e["media"]["w"] / e["media"]["h"], 9 / 16))
-        L.text(f"n{i}", [fa, f1], f"0{i + 1}", "dv_n", boxes[i][0], y0 - 0.014, DIM if i else INK, 1.0)
+        L.text(f"n{i}", [fa, f1], f"0{i + 1}", L.k("dv_n"), boxes[i][0], y0 - 0.014, DIM if i else INK, 1.0)
     L.hit("whoosh_soft_1", f0 + 4, "whoosh")
     rec = L.lay([f0, f1], keep=is_caption)
     rec.update(device="triptych", frames=[f0, f1], boxes=[[r4(v) for v in b] for b in boxes], src_s=round(src_s, 3), starts=starts)
@@ -793,3 +812,75 @@ def common_second(edls, span_s, prefer=None, dur=None):
             best = t
         t += 0.25
     return best
+
+
+# ----------------------------------------------------------------- the call to action
+
+def cta(l1, *, f0, f1, export, lib, src0=0.0):
+    """The payoff: over the export's own picture (blurred, darkened), the product's name, what it is, what it does and
+    what to do next, each line landing in turn; held to the end of the programme (the brand's end card follows).
+    Readable at phone size (44 px and up, the website fitted to the frame, 150 px and up) and on screen at least CTA_S
+    when the film gives it room."""
+    L = Layer(l1, lib, "ct")
+    P, R = L.P, L.R
+    key = P.video("dv_cx", export)
+    desk(L, [f0, f1], key, export, src0=src0)
+    P.block("veil", [f0, f1], [0.0, 0.0, 1.0, 1.0], "#07080B", z=1, op=[r4(min(0.55, 0.55 * (q + 1) / 6.0)) for q in range(f1 - f0)])
+    R.voices[L.k("dv_l")]["px"], R.voices[L.k("dv_s")]["px"] = 52, 70
+    url = next((t for t, v, _ in CTA_LINES if v == "dv_w"), "valmera.io")
+    R.voices[L.k("dv_w")]["px"] = R.fit_px(L.k("dv_w"), url, 0.82 * W, 190)              # the website as large as the frame allows
+    gaps = {"dv_w": 0.060, "dv_l": 0.030, "dv_s": 0.030, "dv_u": 0.052}
+    y, rows = 0.0, []
+    for k, (t, v, ink) in enumerate(CTA_LINES):
+        y += (gaps[v] if k else 0.0) + R.cap(L.k(v)) / H
+        rows.append((t, L.k(v), ink, y))
+    top = max(min(0.47 - y / 2, 0.55 - y), TOP_Y + 0.04)                     # mid-frame, the wide website above the platform's rail
+    rows = [(t, v, ink, yy + top) for t, v, ink, yy in rows]
+    lands = []
+    for k, (t, v, ink, yy) in enumerate(rows):
+        fa = f0 + [0, 5, 9, 12, 17][min(k, 4)]
+        if fa < f1:
+            L.text(f"l{k}", [fa, f1], t, v, 0.09, yy, ink, 1.0, rise=True)
+            lands.append(fa)
+    L.hit("whoosh_soft_1", f0 + 1, "whoosh")
+    if len(lands) == len(rows):
+        L.hit("click_1", lands[-1] + 1, "click")
+    rec = L.lay([f0, f1])
+    rec.update(device="cta", frames=[f0, f1], seconds=round((f1 - f0) / FPS, 2), lines=[t for t, _, _, _ in rows], lands=lands)
+    return rec
+
+
+# ----------------------------------------------------------------- the showcase: Valmera's edit is the film
+
+def showcase(*, upload, export, edl_b, typed, window, lib, sid="wf2", focus=(0.5, 0.42), lead_f=3, intro_s=2.0, cta_s=CTA_S):
+    """The whole programme of a film with no narrator (owner, 17 Nov: "an extremely powerful edit ... then the CTA"):
+    the raw upload, whole on its blurred copy, at the seconds just before the export's first frame, with the typed
+    sentence landing word by word; a leaning seam reveals the export at that same instant, and the export plays as
+    delivered on its own sound (one continuous stretch, `window` export seconds); then the call to action. The sound
+    is the voice track the caller builds to match (the upload's own sound for intro_s, then the export's) from frame
+    lead_f, the device sounds and the film's bed. Returns (l1, beats)."""
+    tlb, _ = program(edl_b)
+    e0, e1 = float(window[0]), float(window[1])
+    n_i = int(round(intro_s * FPS))
+    f_x = lead_f + n_i                                  # the export's first frame on the film's clock: the voice turns here
+    f_e1 = f_x + int(round((e1 - e0) * FPS))
+    f_end = f_e1 + int(round(cta_s * FPS))
+    l1 = dict(l1=1, sid=sid, seed=1117, fps=FPS, frame=[W, H], dur_f=f_end, spine=[], voices={}, assets={}, items=[], sound=[],
+              film=dict(grain=0.0, vignette=0.0, over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0)))
+    l1["assets"]["dv_ex"] = dict(kind="video", path=export["path"], w=export["w"], h=export["h"], fps=export["fps"], dur=export["dur"])
+    l1["items"].append(dict(id="export", k="shot", f=[f_x, f_e1], pic="dv_ex", src=[r4(e0), r4(e1)]))   # in step with its own voice
+    words = typed.split()
+    a = 12                                              # typed fast (a word every 3 frames), then held to be read before the seam
+    step = max(min(3.0, (f_x - 24 - a) / max(len(words), 1)), 1.5)
+    wf = [(int(a + k * step), int(a + (k + 1) * step)) for k in range(len(words))]
+    rec_w, f_s1 = wipe(l1, f0=0, f_send=f_x - 10, f_after=f_x, upload=upload, export=export, edl_b=edl_b, typed=typed, word_f=wf,
+                       export_at=e0, lib=lib, focus=focus, typing=True)
+    rec_c = cta(l1, f0=f_e1, f1=f_end, export=export, lib=lib, src0=max(e1 - 0.5, 0.0))
+    pictures = [dict(path=export["path"], f=[f_s1, f_e1], src=[r4(e0 + (f_s1 - f_x) / FPS), r4(e1)], name="THE EXPORT")]
+    beats = dict(format="showcase", intro=[0, f_x], reveal=rec_w["sweep"], export=[f_x, f_e1], cta=[f_e1, f_end], pictures=pictures,
+                 events=sorted({s["event_f"] for s in l1["sound"]}), look=[0, 8, f_x - 12, rec_w["sweep"][0] + 8, f_x + 30, (f_x + f_e1) // 2,
+                                                                       f_e1 + 20, f_end - 2],
+                 pace=dict(intro_s=round(f_x / FPS, 2), export_s=round((f_e1 - f_x) / FPS, 2), cta_s=round((f_end - f_e1) / FPS, 2)),
+                 style="showcase", devices=[rec_w, rec_c], export_window=[r4(e0), r4(e1)],
+                 upload_window=[r4(rec_w["upload_at_after"] - (f_x - lead_f) / FPS), r4(rec_w["upload_at_after"])])
+    return l1, beats

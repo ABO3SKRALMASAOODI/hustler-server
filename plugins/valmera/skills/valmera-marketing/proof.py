@@ -268,15 +268,24 @@ def reuse_record(path, destination):
 
 # ----------------------------------------------------------------- ideas
 
+FORMAT_MENU = ("showcase (no narrator: Valmera's own export is the film, a striking edit that makes a viewer ask how it was "
+               "made; the raw clip with the typed sentence opens it, a wipe reveals the export at the same instant, the export "
+               "plays as delivered on its own sound and the bed, then the call to action: choose it when the export itself "
+               "is striking, with pictures or titles landing on the speaker's words) or tutorial (narrated: the editor's "
+               "problem, the typed sentence and how it made the edit, then the call to action)")
 DEVICE_MENU = ("timeline (on the line that says the typed sentence, the frame pulls back onto the project's own Valmera "
                "timeline drawn from the recording's edit list, the sentence is typed as it is said, and on send the cut "
                "blocks leave, the pictures and captions land, the receipt prints and the frame pushes into the export: "
                "best when the edit cuts, adds pictures or adds captions), wipe (on that line the raw clip plays whole "
                "while the sentence appears, then a leaning wipe line crosses the frame and the export is behind it, "
                "with a count-up grid of the films the product made from this clip afterwards: best when the change "
-               "reads in one frame, such as a reframe, a look or captions), triptych (the film opens on three exports "
-               "of the same instant of this clip made from three different typed sentences, side by side, and the "
-               "typed line still gets the timeline: then give three asks, three different looks of one clip)")
+               "reads in one frame, such as a reframe, a look or captions)")
+
+
+def format_of(script, knobs=None):
+    """showcase or tutorial: the direction's, else the idea's, else the tutorial (the narrated path)."""
+    f = (knobs or {}).get("format") or (script.get("idea_full") or {}).get("format")
+    return f if f in D.FORMATS else "tutorial"
 
 
 def device_of(script, knobs=None):
@@ -328,8 +337,11 @@ def ideas(ctx):
                "editor would get), \"asks\": [two different sentences to type, each under 80 characters, plain words as an editor types "
                "them, each asking for a vertical short], \"must_see\": [for each ask, the list of things that must be visible in the "
                "export for the film to show it honestly], \"hook\": the first spoken line, under 12 words, a pain or a stake, never a "
-               "greeting, \"style\": one style id, \"device\": the editing device that shows Valmera's real edit happening, one "
-               "of " + DEVICE_MENU + ", \"why\": one line}.")
+               "greeting, \"style\": one style id, \"format\": one of " + FORMAT_MENU + ", \"device\": for a tutorial, the editing device that shows "
+               "Valmera's real edit happening, one of " + DEVICE_MENU + ", \"why\": one line}. Whatever the format, "
+               "the film tells ONE story a stranger follows from its first two seconds: one continuous thought of the "
+               "speaker (the before and the after are the same moment of the clip), every picture inside the export set "
+               "up by the words he says just before it, and Valmera named on screen early.")
     if recordings:
         content += ("\n# Existing REAL synthetic Studio recordings\n" + json.dumps(recordings, ensure_ascii=False)
                     + "\nFor each idea select recording_id from this menu. Build a NEW editing-pain argument around "
@@ -590,6 +602,13 @@ DEVICE_BRIEF = {
             "is said; a leaning wipe line then crosses the frame and the export is behind it. Say the sentence plainly, "
             "with at most three words of your own before it. The line after the after may name how many films the "
             "product made from this clip only if the receipts carry that number.",
+    "_all": "A stranger must follow this film from its first two seconds. Say in the first or second segment, plainly, "
+            "what Valmera is: an AI video editor, you type what you want and it edits your video. The speaker's clip is "
+            "one continuous thought: the before and the after are the same moment of the clip, never two topics. When "
+            "the export shows a picture, the line before it names what the speaker says there, so the picture is "
+            "expected (he says 'that light', Valmera puts the light on screen), never dropped in cold. The last "
+            "segment is the call to action: say Valmera and valmera.io, what it does in a few words, and what to do; "
+            "never 'free', never a price or a plan. The film prints its own call to action on screen.",
     "triptych": "The film opens on three exports of the same instant of this clip, made from three typed sentences "
                 "(the receipts' siblings), side by side: the hook is spoken over them and can ask which one an editor "
                 "would post. The segment that says the typed sentence then shows Valmera's own timeline as it is typed.",
@@ -637,7 +656,7 @@ def write(ctx, idea, card, rc, notes=None, inventory=None):
                "metaphor or analogy (no cups, road signs, shop shelves, landscapes or coffee standing for an editing idea). "
                "Fewer subjects said clearly beat many subjects said loosely; the cut keeps its pace by cutting inside the "
                "real recording and the fitting footage.")
-    content = (f"# The editing device on screen\n{DEVICE_BRIEF[device_of(dict(idea_full=idea), ctx.args)]}\n\n"
+    content = (f"# The editing device on screen\n{DEVICE_BRIEF[device_of(dict(idea_full=idea), ctx.args)]}\n{DEVICE_BRIEF['_all']}\n\n"
                f"# The idea\n{json.dumps(idea, ensure_ascii=False)}\n\n# The recording's receipts (the only facts about Valmera you may state)\n"
                f"{json.dumps(rc, ensure_ascii=False)}\n\n# The style\n{json.dumps(card, ensure_ascii=False)}\n\n# The references' pace (medians)\n"
                f"{json.dumps(pace)}\n\n"
@@ -718,6 +737,8 @@ def script(ctx, ideas_out):
         rc["siblings"] = [dict(typed=s["typed"], export=s["export_sha256"]) for s in sibs]
         if len(sibs) < 2:
             ctx.log(f"triptych: {len(sibs)} other export of this upload; the film opens on its own export and keeps the timeline")
+    if format_of(dict(idea_full=idea), ctx.args) == "showcase":
+        return showcase_script(idea, card, rec, rc, chk, stt, tag, spend)
     inventory = VI.prepare(ctx, idea, rc, ask, PX.pictures, still)
     spend += inventory["spend"]
     ctx.log(f"visual inventory: {sum(map(len, inventory['pictures'].values()))} distinct inspected pictures before writing")
@@ -788,6 +809,144 @@ def siblings(ctx, idea, rec, tag, stt, keep):
     stt.setdefault(tag, {})["siblings"] = [h["record"] for h in have[:2]]
     jsave(keep, stt)
     return have[:2]
+
+
+def showcase_script(idea, card, rec, rc, chk, stt, tag, spend):
+    """A showcase has no narrator: its words are the typed sentence and the call to action, both on screen."""
+    cta_text = " ".join(t for t, _, _ in D.CTA_LINES)
+    sc = dict(title=idea.get("title"), format="showcase", segments=[], named=[], hook_line=None, close_line=cta_text,
+              proof=dict(before_after=None, after_after=None))
+    return dict(title=idea.get("title"), style=registry_row(card), window=[rec["source"]["t0"], rec["source"]["t1"]], hook_line=None,
+                close_line=cta_text, direction="showcase: the raw clip and the typed sentence, the export revealed and played as delivered, "
+                                               "the call to action", idea=idea.get("title"), idea_full=idea, script=sc, receipts=rc,
+                export_check={k: v for k, v in chk.items() if k not in ("export", "upload")}, record=stt[tag]["record"], siblings=[],
+                cta=dict(say=None, show=cta_text, needs_fulfilment=False), words=0, spend=spend)
+
+
+SHOWCASE_S = (9.0, 16.0)       # the export's own stretch in a showcase: one complete thought, ended where he pauses
+
+
+def pauses(path, lo, hi, min_s=0.15, below_db=28.0):
+    """The speaker's pauses in a file's sound between lo and hi seconds, measured: [(start, end)] where the 20 ms
+    energy stays below_db under the stretch's loud level (its 95th percentile) for min_s or longer."""
+    import numpy as np
+    r = subprocess.run([PX.FF, "-v", "error", "-ss", f"{lo:.3f}", "-t", f"{max(hi - lo, 0.1):.3f}", "-i", path, "-vn", "-ac", "1", "-ar", "16000",
+                        "-f", "f32le", "-"], capture_output=True, timeout=120)
+    x = np.frombuffer(r.stdout, np.float32)
+    n = 320
+    if len(x) < 10 * n:
+        return []
+    e = 10 * np.log10(np.maximum((x[: len(x) // n * n].reshape(-1, n) ** 2).mean(1), 1e-12))
+    quiet = e < np.percentile(e, 95) - below_db
+    out, k = [], 0
+    while k < len(quiet):
+        if quiet[k]:
+            a = k
+            while k < len(quiet) and quiet[k]:
+                k += 1
+            if (k - a) * 0.02 >= min_s:
+                out.append((round(lo + a * 0.02, 3), round(lo + k * 0.02, 3)))
+        k += 1
+    return out
+
+
+def camera_cuts(path, lo, hi, jump=20.0):
+    """The camera's own cuts in a file between lo and hi seconds, measured: the frames whose mean luma change from the
+    frame before (64x36, 0-255) is `jump` or more. [seconds]."""
+    import numpy as np
+    r = subprocess.run([PX.FF, "-v", "error", "-ss", f"{max(lo, 0.0):.3f}", "-t", f"{max(hi - lo, 0.1):.3f}", "-i", path, "-vf", "fps=30,scale=64:36",
+                        "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, timeout=120)
+    x = np.frombuffer(r.stdout, np.uint8)
+    if len(x) < 2 * 64 * 36:
+        return []
+    x = x[: len(x) // (64 * 36) * 64 * 36].reshape(-1, 36, 64).astype(np.float32)
+    d = np.abs(np.diff(x, axis=0)).mean(axis=(1, 2))
+    return [round(max(lo, 0.0) + (k + 1) / 30.0, 3) for k in np.nonzero(d >= jump)[0]]
+
+
+SEAM_LEAD_S = 0.5              # the export's seconds the seam shows before its own voice comes in
+
+
+def showcase_window(ex, body, pics=(), lo=SHOWCASE_S[0], hi=SHOWCASE_S[1], reach=4.0):
+    """[start, end] export seconds: from just after the export's first frame (the product's own opening; the seam shows
+    the first SEAM_LEAD_S) to the end of a spoken thought between lo and hi seconds: the longest pause the speaker
+    makes there, measured on the export's own sound (the captions' clock is not the voice's). `pics`: the export's
+    pictures and titles, (start, seconds) from its edit list; the film never ends inside one (17 Nov: a chair cut 0.4 s
+    in), so a pause inside a picture is passed over and the search reaches up to `reach` s past hi for one after it."""
+    hi = min(hi, body - 0.2)
+    inside = lambda t: any(a - 0.2 <= t <= a + d + 0.1 for a, d in pics)  # noqa: E731
+    ps = [p for p in pauses(ex["file"], lo, min(hi + reach, body - 0.2) + 0.5) if not inside(p[0])]
+    ps = [p for p in ps if lo <= p[0] <= hi] or [p for p in ps if hi < p[0] <= min(hi + reach, body - 0.2)][:1]
+    if ps:
+        a, b = max(ps, key=lambda p: (p[1] - p[0], p[0]))
+        end = a + min(0.25, (b - a) / 2)
+    else:
+        end = quiet_snap(ex["file"], hi, span=0.25)
+    return [SEAM_LEAD_S, round(end, 3)]
+
+
+def showcase_supply(ctx, script, sup_dir, pk):
+    """The showcase's pack: the upload's own sound for the intro, then the export's, as the film's voice track; no
+    narrator, no footage search."""
+    rec = json.load(open(script["record"]))
+    ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
+    edl = json.load(open(os.path.join(os.path.dirname(script["record"]), "edl", f"v{int(ex['edl_version']):03d}.json")))
+    prod = os.path.join(sup_dir, "footage", "product")
+    os.makedirs(prod, exist_ok=True)
+    body = ex["dur"] - endcard_s()
+    cut(ex["file"], 0.0, body, os.path.join(prod, "export_body.mp4"))
+    pics = [(float(o["start"]), float(o["duration_s"])) for o in D.MF.pictures_of(edl) + D.MF.titles_of(edl)]
+    win = showcase_window(ex, body, pics)
+    tl = D.program(edl)[0]
+    s_at = D.src_at(tl, win[0])
+    intro = SHOWCASE_INTRO_S
+    if s_at < intro:              # the export opens where the upload does: the raw plays its first seconds, the export enters after them
+        win[0] = round(float(tl.src_to_out(intro)), 3)
+        s_at = D.src_at(tl, win[0])
+    # one shot of one speaker: the intro starts after the raw's last camera cut before the export (17 Nov: a 0.3 s shot
+    # of the host opened a film about the guest)
+    cut_at = [t for t in camera_cuts(rec["upload"]["file"], s_at - intro, s_at) if t < s_at - 0.8]
+    if cut_at:                    # the picture leads the voice by LEAD_F frames: the intro's first frame is after the cut too
+        intro = round(s_at - max(cut_at) - 0.04 - F.LEAD_F / F.FPS, 3)
+    voice = os.path.join(sup_dir, "voice.wav")
+    parts = []
+    for i, (src, a, b) in enumerate(((rec["upload"]["file"], max(s_at - intro, 0.0), s_at),
+                                     (ex["file"], win[0], win[1]))):
+        p = os.path.join(sup_dir, f"voice_{i}.wav")
+        subprocess.run([PX.FF, "-v", "error", "-y", "-ss", f"{a:.3f}", "-i", src, "-t", f"{b - a:.3f}", "-vn", "-ac", "1", "-ar", "48000",
+                        "-af", "afade=t=in:d=0.03", p], check=True, timeout=120)
+        parts.append(p)
+    # the call to action is said as well as shown (Easton): the film's sound, its music and its finish run to its end
+    cta_s, said = D.CTA_S, None
+    try:
+        nar = PX.narrate(writer.narration_script(dict(title="call to action", segments=[dict(say=D.CTA_SAY, pause_after=0.0)]), "03"),
+                         os.path.join(sup_dir, "cta_voice"), band="03", label=f"wf2-cta-{ctx.run_id}", reader=os.path.join(STORIES, "voice.py"))
+        gap = os.path.join(sup_dir, "voice_gap.wav")
+        subprocess.run([PX.FF, "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono", "-t", f"{CTA_GAP_S:.3f}", gap], check=True, timeout=60)
+        p = os.path.join(sup_dir, "voice_cta.wav")
+        subprocess.run([PX.FF, "-v", "error", "-y", "-i", nar["wav"], "-ac", "1", "-ar", "48000", p], check=True, timeout=60)
+        parts += [gap, p]
+        said = dict(text=D.CTA_SAY, seconds=nar["duration"], gate=nar.get("gate"))
+        cta_s = max(D.CTA_S, CTA_GAP_S + float(nar["duration"]) + 0.5)
+    except (RuntimeError, OSError, subprocess.SubprocessError, KeyError, ValueError) as e:
+        ctx.log(f"the call to action is shown, not said: {repr(e)[:200]}")
+    lst = os.path.join(sup_dir, "voice.txt")
+    open(lst, "w").write("".join(f"file '{p}'\n" for p in parts))
+    subprocess.run([PX.FF, "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-ac", "1", "-ar", "48000", voice], check=True, timeout=120)
+    words = os.path.join(sup_dir, "words.json")
+    jsave(words, dict(voice="the recording", duration=round(intro + win[1] - win[0] + (cta_s if said else 0.0), 3), words=[]))
+    pack = dict(sid=ctx.sid, words=words, narration=voice, ffmpeg=PX.FF, sounds=PX.sound_facts(), pictures={}, credits=[], footage=[],
+                voices=[], work=os.path.join(sup_dir, "finish"), fit=[],
+                product=dict(paths=[os.path.join(prod, "export_body.mp4")], window=win, intro_s=intro, upload_at=round(s_at, 3), cta_s=round(cta_s, 3),
+                             cta_said=said))
+    rec_ = dict(narration_s=None, voice=None, gate=None, pictures=0, subjects=0, missing=[], spend=[], product=pack["product"], footage=None,
+                format="showcase")
+    jsave(pk, dict(pack=pack, record=rec_))
+    return rec_
+
+
+SHOWCASE_INTRO_S = 2.4        # the raw and the typed sentence, read, before the seam
+CTA_GAP_S = 0.25               # the breath between the export's last word and the spoken call to action
 
 
 # ----------------------------------------------------------------- supply
@@ -867,6 +1026,13 @@ def product_clips(script, out):
     a = quiet_snap(ex["file"], a)
     b = min(quiet_snap(ex["file"], b), a + 4.0, body)
     ba, bb = [float(x) for x in (chk.get("before") or [1.0, 4.0])]
+    try:          # the before is the same moment as the after (owner, 17 Nov: one continuous thought, never a topic jump)
+        edl = json.load(open(os.path.join(os.path.dirname(script["record"]), "edl", f"v{int(ex['edl_version']):03d}.json")))
+        tl = D.program(edl)[0]
+        ba = D.src_at(tl, a)
+        bb = min(ba + min(b - a, 3.0), up["dur"] - 0.1)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
     ba, bb = quiet_snap(up["file"], max(ba, 0.0)), quiet_snap(up["file"], min(max(bb, ba + 2.0), up["dur"] - 0.1))
     bb = min(bb, ba + 3.0)
     cut(up["file"], ba, bb, os.path.join(out, "before.mp4"))
@@ -1010,6 +1176,8 @@ def supply(ctx, script):
     pk = os.path.join(sup_dir, "pack.json")
     if os.path.exists(pk):
         return json.load(open(pk))["record"]
+    if sc.get("format") == "showcase":
+        return showcase_supply(ctx, script, sup_dir, pk)
     spend = []
     env = dict(os.environ, TMPDIR=ctx.tmp)
     narr_dir = os.path.join(sup_dir, "narration")
@@ -1313,7 +1481,7 @@ def instruction_panel(l1, clock, sc, typed):
     if bottom > 0.80:
         raise RuntimeError("typed instruction cannot fit readably in the receipt panel")
     panel.block([start, end], [0.08, top, 0.92, bottom], "#121A27", z=20, op=0.96)
-    panel.word([start, end], "TYPED IN VALMERA", "receipt_label", 0.12, top + 54 / F.H,
+    panel.word([start, end], D.TYPED_LABEL, "receipt_label", 0.12, top + 54 / F.H,
                ink="#7FE3FF", z=21)
     for k, line in enumerate(lines):
         panel.word([start, end], line, "receipt", 0.12, top + (126 + k * 78) / F.H, z=21)
@@ -1450,8 +1618,54 @@ def lay_devices(ctx, l1, sc, pack, clock, script, knobs):
     return out
 
 
+def showcase_score(ctx, script, pack):
+    """The showcase's plan: devices.showcase over the recording (no narrator, no picture check: every picture is the
+    product's own export or upload)."""
+    rec = json.load(open(script["record"]))
+    ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
+    edl = json.load(open(os.path.join(os.path.dirname(script["record"]), "edl", f"v{int(ex['edl_version']):03d}.json")))
+    up = rec["upload"]
+    upload = dict(path=up["file"], w=int(up["w"]), h=int(up["h"]), fps=float(up.get("fps") or 30.0), dur=float(up["dur"]))
+    body = D.media(pack["ffmpeg"], pack["product"]["paths"][0])
+    lib = dict(pack.get("sounds") or {})
+    lib.update(PX.sound_facts(("typing_2", "click_1", "tick_1", "whoosh_soft_1")))
+    work = os.path.join(ctx.supply, "devices")
+    focus = face_focus(pack["ffmpeg"], upload["path"], max(pack["product"]["upload_at"] - pack["product"]["intro_s"], 0.0), work, (0.5, 0.42))
+    l1, beats = D.showcase(upload=upload, export=body, edl_b=edl, typed=script["receipts"]["typed"], window=pack["product"]["window"], lib=lib,
+                           sid=ctx.sid, focus=focus, lead_f=F.LEAD_F, intro_s=pack["product"]["intro_s"],
+                           cta_s=float(pack["product"].get("cta_s") or D.CTA_S))
+    out = os.path.join(ctx.supply, "l1.json")
+    jsave(out, l1)
+    l1_audio = os.path.join(ctx.supply, "l1_audio.json")
+    jsave(l1_audio, F.audio_scene(l1, pack))
+    jsave(os.path.join(ctx.supply, "beats.json"), beats)
+    taste = dict(ok=True, problems=[], min_text_px=min(d["min_text_px"] for d in beats["devices"]), sounds=len(l1["sound"]))
+    devices = dict(device="wipe", format="showcase", laid=beats["devices"], faults=[], typed_line="wipe")
+    return dict(l1=out, l1_audio=l1_audio, turn_s=round(beats["reveal"][1] / F.FPS, 3), beats={k: v for k, v in beats.items() if k != "look"},
+                taste=taste, frames=l1["dur_f"], items=len(l1["items"]), direction=dict(format="showcase"), pace=beats["pace"],
+                recording_spans=[beats["export"]], instruction_panel=dict(typed=script["receipts"]["typed"], device="wipe"), devices=devices,
+                picture_check=dict(model=None, rounds=[], misfits_left=[], note="showcase: every picture is the recording's own"), spend=[])
+
+
+def lay_cta(ctx, l1, sc, pack, clock, script):
+    """The call to action on the film's last line, held CTA_S or to the end of the programme (devices.cta)."""
+    try:
+        words = clock.seg_words(len(sc["segments"]) - 1)
+        f0 = max(F.Clock.f(words[0]["t0"]) - 2, 0) if words else max(l1["dur_f"] - int(D.CTA_S * F.FPS), 0)
+        body = os.path.join(os.path.dirname(pack["product"]["paths"][0]), "export_body.mp4")
+        m = D.media(pack["ffmpeg"], body)
+        lib = dict(pack.get("sounds") or {})
+        lib.update(PX.sound_facts(("click_1", "whoosh_soft_1")))
+        return D.cta(l1, f0=f0, f1=int(l1["dur_f"]), export=m, lib=lib, src0=max(m["dur"] - (l1["dur_f"] - f0) / F.FPS - 0.2, 0.0))
+    except Exception as e:  # noqa: BLE001 - the film keeps its spoken call to action
+        ctx.log(f"call to action not laid: {repr(e)[:300]}")
+        return dict(device="cta", fault=repr(e)[:300])
+
+
 def score(ctx, script):
     pack = W3.load_pack(ctx)
+    if script["script"].get("format") == "showcase":
+        return showcase_score(ctx, script, pack)
     d = W3.direction_of(ctx)
     sc = json.loads(json.dumps(script["script"]))
     aim, pace_rec = content_pace(pack, sc)
@@ -1467,6 +1681,13 @@ def score(ctx, script):
     knobs["whole_frame_crop"] = dict(pack["product"].get("crops") or {})   # the before pushes into the export's own crop
     knobs["proof_fill"] = list(pack.get("proof_fill") or [])               # a line short of pictures plays the export
     knobs.setdefault("cap_px", CAP_PX)
+    try:          # the call to action holds CTA_S on screen: the programme runs on past the last word for it
+        ck = F.Clock(pack["words"], sc)
+        last = ck.seg_words(len(sc["segments"]) - 1)
+        if last:
+            knobs.setdefault("tail_f", max(15, int(D.CTA_S * F.FPS) - (F.Clock.f(ck.dur) - F.Clock.f(last[0]["t0"]))))
+    except (OSError, ValueError, KeyError, IndexError):
+        pass
     sys.path[:0] = [p for p in W3.env_path().split(os.pathsep) if p not in sys.path]
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     build = R.builder(script["style"]["id"])
@@ -1489,6 +1710,9 @@ def score(ctx, script):
                     break
         spans = as_delivered(l1, product)
         devices = lay_devices(ctx, l1, sc, pack, clock, script, knobs)
+        devices["cta"] = lay_cta(ctx, l1, sc, pack, clock, script)
+        if devices["cta"].get("frames"):
+            devices.setdefault("laid", []).append(devices["cta"])
         receipt_panel = (instruction_panel(l1, clock, sc, script["receipts"]["typed"]) if not devices.get("typed_line")
                          else dict(typed=script["receipts"]["typed"], device=devices["typed_line"]))
         spans_dev = [d["frames"] for d in devices.get("laid") or []]
