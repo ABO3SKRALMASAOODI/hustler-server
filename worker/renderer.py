@@ -5646,7 +5646,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # reduced resolution — colorbalance's RGB round trip included.
             down, blur, up = _reduced_gblur(W, H, 8 + 24 * i_)
             parts.append(
-                f"[halB{si}]lutyuv=y='if(gte(val,{threshold}),val,16)'"
+                f"[halB{si}]{gradelut.YUV8},"
+                f"lutyuv=y='if(gte(val,{threshold}),val,16)'"
                 f":u=128:v=128,{down}{blur},"
                 f"colorbalance=rs={0.18 + 0.24 * i_:.2f}:"
                 f"gs={0.01 + 0.05 * i_:.2f}:bs=-{0.08 + 0.12 * i_:.2f}"

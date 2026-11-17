@@ -477,7 +477,9 @@ def grade_graph(parts, src, u, item, W, H, *, lut_path=None,
         s = 1.0 if item.get("saturation") is None else \
             float(item["saturation"])
         ct = finish.table_expr(sat_table(s))
-        parts.append(f"[{src}]lutyuv=y='{yt}':u='{ct}':v='{ct}'[{u}g]")
+        import gradelut       # 8-bit tables want 8-bit frames (10-bit finals)
+        parts.append(f"[{src}]{gradelut.YUV8},"
+                     f"lutyuv=y='{yt}':u='{ct}':v='{ct}'[{u}g]")
         return f"{u}g"
     cw, ch = (int(W) + 1) // 2, (int(H) + 1) // 2
     key = None
