@@ -2749,8 +2749,13 @@ def extracted_audio_asset(conn, project_id, source_key, source_sha=None,
 
 def any_asset_by_sha(conn, kind, sha256):
     with conn.cursor() as cur:
+        # A proxy row marked playable_copy is the full-size stream copy of
+        # a TS/FLV/AVI/MKV source (indexer._ensure_playable_copy, #1590),
+        # never a 540p proxy to hand to another project.
         cur.execute("""SELECT * FROM assets
                        WHERE kind = %s AND sha256 = %s
+                         AND NOT (COALESCE(meta, '{}'::jsonb)
+                                  ? 'playable_copy')
                        ORDER BY id DESC LIMIT 1""", (kind, sha256))
         return cur.fetchone()
 

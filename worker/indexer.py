@@ -1432,6 +1432,10 @@ def run_proxy_only_job(worker_db, job, asset):
                       info["width"], info["height"], info["fps"], sha)
         _set_progress(worker_db, job_id, 20)
         proxy_key = f"proxies/{project_id}/{sha}.mp4"
+        tc = time.monotonic()
+        if _ensure_playable_copy(worker_db, project_id, sha, proxy_key, src,
+                                 info, workdir, asset.get("bytes")):
+            timings["playable_copy_s"] = round(time.monotonic() - tc, 2)
         t1 = time.monotonic()
         _ensure_proxy(worker_db, project_id, sha, proxy_key, src, info,
                       workdir, **proxy_kwargs)
@@ -1444,6 +1448,60 @@ def run_proxy_only_job(worker_db, job, asset):
                 "duration_s": info["duration"], "timings": timings}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+PLAYABLE_COPY_META = "playable_copy"
+
+
+def playable_copy_key(proxy_key):
+    return proxy_key[:-len(".mp4")] + ".play.mp4"
+
+
+def _ensure_playable_copy(worker_db, project_id, sha, proxy_key, src, info,
+                          workdir, source_bytes):
+    """Ticket #1590: a source whose streams every browser decodes but whose
+    container none opens (H.264/AAC in MPEG-TS, FLV, AVI, MKV) is playable
+    after a stream copy into MP4, which takes I/O time, not encode time.
+    Store that copy as a proxy row (the original's sha256, so the Studio
+    plays it at once) marked `playable_copy`, before the 540p encode; the
+    540p proxy that follows is newer and replaces it in the Studio. Never
+    a donor for another project's 540p proxy (db.any_asset_by_sha).
+
+    Returns True when a copy was stored. Any problem only skips the copy:
+    the 540p proxy still comes, exactly as before."""
+    if worker_db.run(lambda conn: dbx.asset_by_key(conn, project_id,
+                                                    proxy_key)):
+        return False
+    copy_key = playable_copy_key(proxy_key)
+    try:
+        if worker_db.run(lambda conn: dbx.asset_by_key(conn, project_id,
+                                                        copy_key)):
+            return False
+        if not media.playable_by_remux(src):
+            return False
+        need = int(source_bytes or 0) * 1.1 + 512 * 1024 ** 2
+        if shutil.disk_usage(workdir).free < need:
+            print(f"[index] playable copy skipped for project {project_id}: "
+                  f"scratch below {need / 1024 ** 3:.1f} GB", flush=True)
+            return False
+        local = os.path.join(workdir, "playable.mp4")
+        media.remux_playable(src, local, duration=info.get("duration"))
+        storage.upload_file(local, copy_key, "video/mp4")
+        p = media.probe(local)
+        worker_db.run(dbx.insert_asset, project_id, "proxy", copy_key,
+                      bytes_=os.path.getsize(local), duration_s=p["duration"],
+                      width=p["width"], height=p["height"], fps=p["fps"],
+                      sha256=sha, meta={PLAYABLE_COPY_META: True})
+        os.remove(local)
+        print(f"[index] playable copy for project {project_id}: {copy_key}",
+              flush=True)
+        return True
+    except Exception as exc:  # noqa: BLE001 - the 540p proxy still comes
+        print(f"[index] playable copy skipped for project {project_id}: "
+              f"{str(exc)[:160]}", flush=True)
+        with contextlib.suppress(OSError):
+            os.remove(os.path.join(workdir, "playable.mp4"))
+        return False
 
 
 def _ensure_proxy(worker_db, project_id, sha, proxy_key, src_local, info,

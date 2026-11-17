@@ -144,7 +144,9 @@ def decide(cur, user_id, project_id, asset_id, detail, gated):
     sha = _v(original, "sha256", 3)
     if sha:
         cur.execute("""SELECT 1 FROM assets WHERE project_id = %s
-                         AND kind = 'proxy' AND sha256 = %s LIMIT 1""",
+                         AND kind = 'proxy' AND sha256 = %s
+                         AND NOT (COALESCE(meta, '{}'::jsonb)
+                                  ? 'playable_copy') LIMIT 1""",
                     (int(project_id), sha))
         if cur.fetchone():
             return "proxy_exists"

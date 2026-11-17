@@ -604,6 +604,60 @@ def probe(path):
     }
 
 
+# Containers no browser's <video> opens even when the streams inside are the
+# ordinary H.264 + AAC every browser decodes (ticket #1590: a 2.64 GB
+# MPEG-TS game recording named .mp4 failed with media error 4 for the ~13 min
+# its 540p proxy took to encode). Matroska plays in Chrome but not Safari.
+_UNPLAYABLE_CONTAINERS = ("mpegts", "flv", "avi", "matroska", "mpeg")
+_PLAYABLE_AUDIO = ("aac", "mp3")
+
+
+def playable_by_remux(path):
+    """True when `path` holds browser-decodable streams (H.264 8-bit 4:2:0
+    video; AAC or MP3 sound, or none) in a container browsers will not open,
+    so a stream copy into MP4 plays at once. False otherwise, or when it
+    cannot tell (the 540p proxy is the path for everything else)."""
+    try:
+        data = json.loads(run(["ffprobe", "-v", "error", "-print_format",
+                               "json", "-show_format", "-show_streams",
+                               str(path)], timeout=120))
+    except Exception:  # noqa: BLE001 - unknown means "use the proxy"
+        return False
+    names = str((data.get("format") or {}).get("format_name") or "").split(",")
+    if not any(n.strip() in _UNPLAYABLE_CONTAINERS for n in names):
+        return False
+    streams = data.get("streams") or []
+    v = next((s for s in streams if s.get("codec_type") == "video"), None)
+    if not v or v.get("codec_name") != "h264" or \
+            v.get("pix_fmt") not in ("yuv420p", "yuvj420p"):
+        return False
+    audio = [s for s in streams if s.get("codec_type") == "audio"]
+    return all(s.get("codec_name") in _PLAYABLE_AUDIO for s in audio[:1])
+
+
+def remux_playable(src, dst, duration=None):
+    """Stream-copy the first picture and sound tracks into a +faststart MP4
+    (no re-encode: minutes of I/O, not of decoding). Data and subtitle
+    tracks (timed ID3 in a TS) are dropped; MP4 cannot carry them."""
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+           *input_args(src), "-map", "0:v:0", "-map", "0:a:0?",
+           "-dn", "-sn", "-c", "copy"]
+    names = ""
+    try:
+        names = str(json.loads(run(["ffprobe", "-v", "error", "-print_format",
+                                    "json", "-show_format",
+                                    str(src)], timeout=120))
+                    .get("format", {}).get("format_name") or "")
+    except Exception:  # noqa: BLE001 - the filter is only needed for TS
+        pass
+    if "mpegts" in names:
+        # ADTS AAC in a TS needs its headers rewritten for MP4.
+        cmd += ["-bsf:a", "aac_adtstoasc"]
+    cmd += ["-movflags", "+faststart", "-f", "mp4", dst]
+    run(cmd, timeout=max(600, int(float(duration or 0) * 0.5)))
+    return dst
+
+
 # Below this average rate a VFR stream is a frames-on-change recording, not
 # footage shot at that rate (probe() normalizes it to its nominal rate).
 VFR_MIN_FPS = 23.5

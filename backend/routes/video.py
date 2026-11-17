@@ -4420,7 +4420,9 @@ def project_state(user_id, project_id):
             # finishes the per-project setup.
             cur.execute("""SELECT 1 FROM assets
                            WHERE project_id = %s AND kind = 'proxy'
-                             AND sha256 = %s LIMIT 1""",
+                             AND sha256 = %s
+                             AND NOT (COALESCE(meta, '{}'::jsonb)
+                                      ? 'playable_copy') LIMIT 1""",
                         (project_id, original["sha256"]))
             if not cur.fetchone():
                 heal_reason = "index cache-hit setup incomplete (no proxy)"
