@@ -360,3 +360,26 @@ def test_the_showcase_window_ends_in_the_speakers_longest_pause_never_inside_a_p
     monkeypatch.setattr(P, "pauses", lambda path, lo, hi, **k: [])
     monkeypatch.setattr(P, "quiet_snap", lambda path, t, span=0.45: t - 0.1)
     assert P.showcase_window(dict(file="/x/e.mp4"), body=12.0, lo=9.0, hi=16.0)[1] == 11.7
+
+
+def test_the_scale_film_opens_on_every_short_counted_then_the_studio_board_then_one_short_then_the_site():
+    """Coordinator, 17 Nov: scale reads as "how did they do that" at a glance: one sentence, a board of finished shorts."""
+    tiles = [dict(path=f"/x/short_{k}.mp4", w=1080, h=1920, fps=30.0, dur=40.0, t0=5.0) for k in range(10)]
+    ui = dict(UI, board=dict(path="/x/ui/board_01.png", w=780, h=1688))
+    typed = "Find the 10 best moments in this podcast and make each one a short."
+    l1, beats = D.scale_showcase(upload=UPLOAD, hero=dict(tiles[0]), tiles=tiles, typed=typed, window=[4.0, 13.5], ui=ui, page=UI["site"], lib=LIB,
+                                 lead_f=3, later="9 MIN", sub="from a 15-min podcast")
+    mk = beats["marks"]
+    cards = sorted((it for it in l1["items"] if it["id"].startswith("gl.t") and it["k"] == "card"), key=lambda it: it["f"][0])
+    assert len(cards) == 10 and cards[0]["f"][0] == 0 and cards[-1]["f"][0] < 30       # all ten land inside two seconds
+    assert len({l1["assets"][it["pic"]]["path"] for it in cards}) == 10                    # ten different films, each playing
+    counters = sorted((it for it in l1["items"] if ".counter" in it["id"]), key=lambda it: it["f"][0])
+    assert [it["t"] for it in counters] == [str(k) for k in range(1, 11)] and counters[-1]["f"][1] == mk["split"][1]
+    assert mk["board"] and mk["board"][1] == mk["push"][0] and next(it for it in l1["items"] if it["id"] == "st.board")
+    shot = next(it for it in l1["items"] if it["id"] == "export")
+    assert l1["assets"][shot["pic"]]["path"] == "/x/short_0.mp4" and shot["f"] == [mk["push"][1], mk["site"][0]]
+    assert 15 <= l1["dur_f"] / FPS <= 30                                             # with the end card a 20-35 s film
+    for f in range(l1["dur_f"]):
+        assert sum(1 for it in l1["items"] if it["k"] == "shot" and it["f"][0] <= f < it["f"][1]) == 1, f
+    texts = [t for d in beats["devices"] for t in d["texts"]]
+    assert min(t["px"] for t in texts) >= 44 and max(t["px"] for t in texts if t["t"] == "valmera.io") >= 140

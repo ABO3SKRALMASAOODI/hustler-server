@@ -908,6 +908,10 @@ def ui_shots(rec):
     with Image.open(os.path.join(d, typing[0])) as im:
         w, h = im.size
     out = dict(dir=d, w=w, h=h, typing=typing, sent=sent, view=u.get("view"), player=player_rect(os.path.join(d, typing[0]), rec["upload"]))
+    board = next((f for f in ("board_01.png", "board_00.png") if f in files), None)
+    if board:
+        with Image.open(os.path.join(d, board)) as im:
+            out["board"] = dict(path=os.path.join(d, board), w=im.size[0], h=im.size[1])
     if "site.png" in files:
         with Image.open(os.path.join(d, "site.png")) as im:
             out["site"] = dict(path=os.path.join(d, "site.png"), w=im.size[0], h=im.size[1])
@@ -945,12 +949,104 @@ def later_label(rec):
     return f"{max(int(round(s / 60.0)), 1)} MIN" if s >= 45 else f"{int(round(s))} SEC"
 
 
+def cut_times(path, lo=0.0, hi=None, jump=18.0, fps=8):
+    """The picture's own cuts in a file (seconds): frames whose mean luma change from the frame before (64x36, 0-255)
+    is `jump` or more, sampled at fps."""
+    import numpy as np
+    cmd = [PX.FF, "-v", "error", "-ss", f"{max(lo, 0.0):.3f}", "-i", path] + (["-t", f"{hi - lo:.3f}"] if hi else []) + \
+        ["-vf", f"fps={fps},scale=64:36", "-f", "rawvideo", "-pix_fmt", "gray", "-"]
+    x = np.frombuffer(subprocess.run(cmd, capture_output=True, timeout=300).stdout, np.uint8)
+    if len(x) < 2 * 64 * 36:
+        return []
+    x = x[: len(x) // (64 * 36) * 64 * 36].reshape(-1, 36, 64).astype(np.float32)
+    d = np.abs(np.diff(x, axis=0)).mean(axis=(1, 2))
+    return [round(max(lo, 0.0) + (k + 1) / fps, 3) for k in np.nonzero(d >= jump)[0]]
+
+
+HERO_S = (8.0, 11.0)           # the hero short's own stretch in the scale film: a short that plays whole in it, else the busiest
+                               # stretch of the most-cut one (17 Nov: the board's ten reels had almost no cuts; the whole one won)
+
+
+def scale_plan(rec):
+    """The scale film's facts from a recording whose Shorts board was carried to films (studio.py finish_shorts): the
+    vertical films with their bodies (end card off), the hero (the film whose picture changes most often: the most
+    visible editing, measured) and its window (the busiest HERO_S stretch, entered and ended between words). None when
+    the board gave fewer than four films."""
+    films = []
+    for f in ((rec.get("shorts") or {}).get("films") or []):
+        if f.get("file") and os.path.exists(f["file"]) and f.get("h", 0) > f.get("w", 1):
+            body = max(float(f["dur"]) - endcard_s(), 3.0)
+            cuts = cut_times(f["file"], 0.0, body)
+            films.append(dict(f, body=round(body, 3), cuts=cuts, rate=len(cuts) / body))
+    if len(films) < 4:
+        return None
+    films.sort(key=lambda f: -f["rate"])
+    lo, hi = HERO_S
+    whole = [f for f in films if lo <= f["body"] <= hi + 1.0]
+    if whole:                     # a film that plays complete in the hero's seconds: its title, its whole thought, its end
+        hero = max(whole, key=lambda f: (f["rate"], f["body"]))
+        t0, t1 = 0.0, hero["body"]
+        films.remove(hero)
+        films.insert(0, hero)
+        return dict(films=films, hero=hero, window=[0.0, round(t1, 3)])
+    hero = films[0]
+    return dict(films=films, hero=hero, window=[round(t0, 3), round(t1, 3)])
+
+
+def scale_supply(ctx, script, sup_dir, pk, rec, plan):
+    """The scale film's pack: its grid's films, the hero and the voice track cut to devices.showcase_marks (the grid and
+    the Studio carry their own sounds; the hero's own sound from where it grows out of the board)."""
+    ui = ui_shots(rec)
+    typed = script["receipts"]["typed"]
+    win = [float(x) for x in (W3.direction_of(ctx).get("export_window") or plan["window"])]
+    mk = D.showcase_marks([0.0, D.SCALE_HOOK_S], win, len(typed.split()), lead_f=F.LEAD_F, board_f=D.BOARD_F if ui and ui.get("board") else 0)
+    parts = []
+    # the grid is heard as its outlined film (the hero, playing from its start in the grid): one voice under ten films
+    for name, src, a, n_f in (("grid", plan["hero"]["file"], win[0] + mk["lead_f"] / F.FPS, mk["studio"][0] - mk["lead_f"]),
+                              ("studio", None, 0.0, mk["export"][0] - mk["studio"][0]),
+                              ("export", plan["hero"]["file"], win[0], mk["export_voice"][1] - mk["export_voice"][0]),
+                              ("site", None, 0.0, mk["dur_f"] - mk["export_voice"][1])):
+        p_ = os.path.join(sup_dir, f"voice_{name}.wav")
+        n = n_f / F.FPS
+        if src:
+            subprocess.run([PX.FF, "-v", "error", "-y", "-ss", f"{a:.3f}", "-i", src, "-t", f"{n:.3f}", "-vn", "-ac", "1", "-ar", "48000", "-af",
+                            f"afade=t=in:d=0.03,afade=t=out:st={max(n - 0.06, 0):.3f}:d=0.06,apad=whole_dur={n:.3f}", p_], check=True, timeout=120)
+        else:
+            subprocess.run([PX.FF, "-v", "error", "-y", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono", "-t", f"{n:.3f}", p_], check=True, timeout=60)
+        parts.append(p_)
+    voice = os.path.join(sup_dir, "voice.wav")
+    lst = os.path.join(sup_dir, "voice.txt")
+    open(lst, "w").write("".join(f"file '{q}'\n" for q in parts))
+    subprocess.run([PX.FF, "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-ac", "1", "-ar", "48000", voice], check=True, timeout=120)
+    words = os.path.join(sup_dir, "words.json")
+    jsave(words, dict(voice="the recording", duration=round((mk["dur_f"] - mk["lead_f"]) / F.FPS, 3), words=[]))
+    tiles = [dict(path=f["file"], w=int(f["w"]), h=int(f["h"]), fps=float(f.get("fps") or 30.0), dur=float(f["dur"]),
+                  t0=(win[0] if f is plan["hero"] else 0.3), project_id=f.get("project_id"), title=f.get("title"))
+             for f in plan["films"]]
+    mins = int(round(float(rec["upload"]["dur"]) / 60.0))
+    pack = dict(sid=ctx.sid, words=words, narration=voice, ffmpeg=PX.FF, sounds=PX.sound_facts(), pictures={}, credits=[], footage=[], voices=[],
+                work=os.path.join(sup_dir, "finish"), fit=[],
+                # the label over the push is the recording's own time from Send to the finished films (the board's turn and the editors)
+                product=dict(paths=[plan["hero"]["file"]], window=win, marks=mk, ui=ui, variant="scale", tiles=tiles,
+                             later=later_label(dict(first_result_s=float((rec.get("asks") or [{}])[0].get("seconds") or 0)
+                                                    + float((rec.get("shorts") or {}).get("seconds") or 0))),
+                             hero=tiles[0], sub=f"from a {mins}-min podcast", upload_at=0.0, cta_s=D.SITE_S, cta_said=None))
+    rec_ = dict(narration_s=None, voice=None, gate=None, pictures=0, subjects=0, missing=[], spend=[], product=pack["product"], footage=None,
+                format="showcase", variant="scale", shorts=len(tiles), hero=dict(project_id=plan["hero"].get("project_id"),
+                                                                                  cuts_per_10s=round(plan["hero"]["rate"] * 10, 1)))
+    jsave(pk, dict(pack=pack, record=rec_))
+    return rec_
+
+
 def showcase_supply(ctx, script, sup_dir, pk):
     """The showcase's pack (devices.showcase): the export's seconds for the split hook and for its own stretch, and the
     film's voice track cut to the showcase's frames: the export's own sound under the split, the Studio's stretch
     without a voice (its keys and its Send are the device's sounds, the film's bed carries it), the export's own sound
     from where it grows out of the Studio, then the site. No narrator, no footage search."""
     rec = json.load(open(script["record"]))
+    plan = scale_plan(rec)
+    if plan:                      # a Shorts board carried to films: the scale film
+        return scale_supply(ctx, script, sup_dir, pk, rec, plan)
     ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
     edl = json.load(open(os.path.join(os.path.dirname(script["record"]), "edl", f"v{int(ex['edl_version']):03d}.json")))
     prod = os.path.join(sup_dir, "footage", "product")
@@ -1674,10 +1770,12 @@ def showcase_score(ctx, script, pack):
     """The showcase's plan: devices.showcase over the recording (no narrator, no picture check: every picture is the
     product's own export, upload, Studio screen or site)."""
     rec = json.load(open(script["record"]))
-    ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
-    edl = json.load(open(os.path.join(os.path.dirname(script["record"]), "edl", f"v{int(ex['edl_version']):03d}.json")))
     up = rec["upload"]
     upload = dict(path=up["file"], w=int(up["w"]), h=int(up["h"]), fps=float(up.get("fps") or 30.0), dur=float(up["dur"]))
+    if pack["product"].get("variant") == "scale":
+        return scale_score(ctx, script, pack, upload)
+    ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
+    edl = json.load(open(os.path.join(os.path.dirname(script["record"]), "edl", f"v{int(ex['edl_version']):03d}.json")))
     body = D.media(pack["ffmpeg"], pack["product"]["paths"][0])
     lib = dict(pack.get("sounds") or {})
     lib.update(PX.sound_facts(("typing_2", "click_1", "tick_1", "whoosh_soft_1")))
@@ -1700,6 +1798,31 @@ def showcase_score(ctx, script, pack):
     return dict(l1=out, l1_audio=l1_audio, turn_s=round(beats["reveal"][1] / F.FPS, 3), beats={k: v for k, v in beats.items() if k != "look"},
                 taste=taste, frames=l1["dur_f"], items=len(l1["items"]), direction=dict(format="showcase"), pace=beats["pace"],
                 recording_spans=[beats["export"]], instruction_panel=dict(typed=script["receipts"]["typed"], device="studio"), devices=devices,
+                picture_check=dict(model=None, rounds=[], misfits_left=[], note="showcase: every picture is the recording's own"), spend=[])
+
+
+def scale_score(ctx, script, pack, upload):
+    """The scale film's plan (devices.scale_showcase): every picture is the recording's own (its films, its Studio, its
+    site)."""
+    prod = pack["product"]
+    lib = dict(pack.get("sounds") or {})
+    lib.update(PX.sound_facts(("typing_2", "click_1", "tick_1", "whoosh_soft_1")))
+    ui = prod["ui"]
+    page = ui.get("site") or dict(path=os.path.join(ui["dir"], ui["typing"][0]), w=ui["w"], h=ui["h"])
+    tiles = [dict(t, path=t["path"]) for t in prod["tiles"]]
+    hero = dict(path=tiles[0]["path"], w=tiles[0]["w"], h=tiles[0]["h"], fps=tiles[0]["fps"], dur=tiles[0]["dur"])
+    l1, beats = D.scale_showcase(upload=upload, hero=hero, tiles=tiles, typed=script["receipts"]["typed"], window=prod["window"], ui=ui, page=page,
+                                 lib=lib, sid=ctx.sid, lead_f=F.LEAD_F, later=prod.get("later"), sub=prod.get("sub"))
+    out = os.path.join(ctx.supply, "l1.json")
+    jsave(out, l1)
+    l1_audio = os.path.join(ctx.supply, "l1_audio.json")
+    jsave(l1_audio, F.audio_scene(l1, pack))
+    jsave(os.path.join(ctx.supply, "beats.json"), beats)
+    taste = dict(ok=True, problems=[], min_text_px=min(d["min_text_px"] for d in beats["devices"] if d.get("min_text_px")), sounds=len(l1["sound"]))
+    return dict(l1=out, l1_audio=l1_audio, turn_s=round(beats["reveal"][1] / F.FPS, 3), beats={k: v for k, v in beats.items() if k != "look"},
+                taste=taste, frames=l1["dur_f"], items=len(l1["items"]), direction=dict(format="showcase", variant="scale"), pace=beats["pace"],
+                recording_spans=[beats["export"]], instruction_panel=dict(typed=script["receipts"]["typed"], device="studio"),
+                devices=dict(device="studio", format="showcase", variant="scale", laid=beats["devices"], faults=[], typed_line="studio"),
                 picture_check=dict(model=None, rounds=[], misfits_left=[], note="showcase: every picture is the recording's own"), spend=[])
 
 

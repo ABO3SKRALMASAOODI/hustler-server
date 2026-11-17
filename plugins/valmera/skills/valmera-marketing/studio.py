@@ -14,6 +14,9 @@ spec.json:
                    "t0": 7916.7, "t1": 7944.2, "plan": "plus_2026",
                    "asks": [{"text": "Make it punchy.", "phase": "before_first_result"},
                             {"text": "Open on his last line.", "phase": "after_result", "export_before": true}]}]}
+    An ask may carry "shorts": {"plan_s": 1800, "edit_s": 4200, "final_s": 2400}: the Shorts board it makes is carried to
+    finished films (Edit on every card, every reel exported and downloaded to shorts/). "view": "phone" on a session
+    photographs the Studio as a phone shows it (ui/).
 
 What happens, per session, on a local stack of the product at that commit (the Gauntlet's runner:
 its own database, storage and worker; nothing of production is written, no customer is involved):
@@ -82,7 +85,8 @@ def write_session(row):
     p = probe(clip)
     steps = [dict(type="upload", asset_ids=[1], first=True)]
     for a in row["asks"]:
-        steps.append(dict(type="prompt", text=a["text"], typed_phase=a.get("phase", "after_result"), export_before=bool(a.get("export_before"))))
+        steps.append(dict(type="prompt", text=a["text"], typed_phase=a.get("phase", "after_result"), export_before=bool(a.get("export_before")),
+                          shorts=a.get("shorts")))
     plan = row.get("plan", "plus_2026")
     view = "phone" if row.get("view") == "phone" else "desktop"
     doc = dict(sid=sid, project_id=0, kind="edit", mode="edit", surface="studio",
@@ -151,7 +155,103 @@ def drive(run, sid, browser="chrome"):
         def do_prompt(self, i, step, pending):
             if step.get("export_before") and self.pid and self.log.doc.get("renders"):
                 self.keep_export(f"before_ask_{i}")
-            return super().do_prompt(i, step, pending)
+            ok = super().do_prompt(i, step, pending)
+            if step.get("shorts") and self.pid:
+                try:
+                    self.finish_shorts(dict(step["shorts"]) if isinstance(step["shorts"], dict) else {})
+                except Exception as e:  # noqa: BLE001   what was kept stays kept; the record says where it stopped
+                    self.log.doc.setdefault("shorts", {})["error"] = str(e)[:400]
+                    self.log.save()
+            return ok
+
+        def api(self, method, path, body=None):
+            """The product's own API from the signed-in page, as the Studio's buttons call it (the session's token)."""
+            return self.page.evaluate("""async ([m, p, b]) => {
+              const r = await fetch('/api-backend' + p, {method: m, headers: {'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + localStorage.getItem('token')}, body: m === 'GET' ? undefined : JSON.stringify(b || {})});
+              let j = null; try { j = await r.json(); } catch (e) {}
+              return {status: r.status, body: j}; }""", [method, path, body])
+
+        def wait_jobs(self, ids, kind, limit_s):
+            """Until every project in ids has a settled job of this type (or the time is up): {project: state}."""
+            t = time.time()
+            while True:
+                rows = self.stack.q("""SELECT DISTINCT ON (project_id) project_id, state FROM video_jobs
+                                       WHERE project_id = ANY(%s) AND type = %s ORDER BY project_id, id DESC""", (list(ids), kind))
+                st = {r["project_id"]: r["state"] for r in rows}
+                if (len(st) == len(ids) and all(v not in ("queued", "running") for v in st.values())) or time.time() - t > limit_s:
+                    return st
+                self.page.wait_for_timeout(5000)
+
+        def finish_shorts(self, opts):
+            """The Studio's Shorts board, carried to finished films the way a person does it: the scout's board lands
+            from the one typed sentence, Edit is pressed on every card (the product's own autonomous editor finishes each
+            reel), every reel is exported, and every export is downloaded. Photographs of the board are kept (ui/)."""
+            t0 = time.time()
+            rec = self.log.doc.setdefault("shorts", {})
+            st = self.wait_jobs([self.pid], "shorts_plan", float(opts.get("plan_s") or 1800))
+            kids = [r["id"] for r in self.stack.q("SELECT id FROM projects WHERE parent_project_id=%s ORDER BY id", (self.pid,))]
+            meta = (self.stack.q("SELECT meta FROM projects WHERE id=%s", (self.pid,), one=True) or {}).get("meta") or {}
+            clips = {c.get("child_project_id"): c for c in (meta.get("shorts") or {}).get("clips") or []}
+            rec.update(plan=st.get(self.pid), plan_s=round(time.time() - t0, 1), children=kids,
+                       clips=[{k: v for k, v in (clips.get(k) or {}).items() if k in ("title", "hook", "start", "end", "child_project_id")} for k in kids])
+            self.log.save()
+            try:
+                self.page.reload(wait_until="domcontentloaded", timeout=60000)
+                self.page.wait_for_timeout(4000)
+            except Exception:  # noqa: BLE001
+                pass
+            self.shot("board_00")
+            if not kids:
+                return
+            # Edit on every card. The Studio runs a few editors at once and answers the rest "busy" (429): pressed again as
+            # each one finishes, the way a person does (17 Nov: 7 of 10 first presses met busy_capacity).
+            rec["edit"], t_e = {}, time.time()
+            while time.time() - t_e < float(opts.get("edit_s") or 4200):
+                have = {r["project_id"] for r in self.stack.q("""SELECT DISTINCT project_id FROM video_jobs
+                                                                 WHERE project_id = ANY(%s) AND type = 'agent_turn'""", (kids,))}
+                for k in [k for k in kids if k not in have]:
+                    code = self.api("POST", f"/projects/{self.pid}/shorts/{k}/edit", {}).get("status")
+                    rec["edit"][str(k)] = code
+                    if code == 429:
+                        break
+                if len(have) == len(kids):
+                    break
+                self.page.wait_for_timeout(20000)
+            self.log.save()
+            rec["edited"] = {str(k): v for k, v in self.wait_jobs(kids, "agent_turn", float(opts.get("edit_s") or 4200)).items()}
+            rec["edit_s"] = round(time.time() - t0, 1)
+            self.log.save()
+            try:
+                self.page.reload(wait_until="domcontentloaded", timeout=60000)
+                self.page.wait_for_timeout(4000)
+            except Exception:  # noqa: BLE001
+                pass
+            self.shot("board_01")
+            versions = {}
+            for k in kids:
+                v = self.stack.q("SELECT max(version) AS v FROM edls WHERE project_id=%s", (k,), one=True)
+                if v and v["v"]:
+                    versions[k] = int(v["v"])
+                    rec.setdefault("export", {})[str(k)] = self.api("POST", f"/projects/{k}/render/final", {"edl_version": versions[k]}).get("status")
+            self.log.save()
+            rec["finals"] = {str(k): v for k, v in self.wait_jobs(list(versions), "final", float(opts.get("final_s") or 2400)).items()}
+            out = os.path.join(self.out, "shorts")
+            os.makedirs(out, exist_ok=True)
+            got = []
+            for k in versions:
+                r = self.stack.q("""SELECT id, storage_key, meta FROM assets WHERE project_id=%s AND kind='render'
+                                    ORDER BY (meta->>'variant' = 'final') DESC NULLS LAST, id DESC LIMIT 1""", (k,), one=True)
+                if not r:
+                    continue
+                dest = os.path.join(out, f"short_{k}.mp4")
+                try:
+                    self.stack.s3.download_file(self.stack.st["bucket"], r["storage_key"], dest)
+                    got.append(dict(project_id=k, file=f"shorts/short_{k}.mp4", edl_version=versions[k], variant=(r["meta"] or {}).get("variant")))
+                except Exception as e:  # noqa: BLE001
+                    got.append(dict(project_id=k, error=str(e)[:200]))
+            rec.update(files=got, seconds=round(time.time() - t0, 1))
+            self.log.save()
 
         def keep_export(self, tag):
             v = self.edl()
@@ -312,7 +412,8 @@ def collect_one(run, sid):
     ui = []                                  # the Studio's own screen: the typing, word by word, and the result (send, watch)
     shots = os.path.join(sdir, "shots")
     for n in sorted(os.listdir(shots)) if os.path.isdir(shots) else []:
-        if n.endswith(".png") and (n.startswith("type_") or n.startswith("result_") or n.startswith("01_uploaded") or n == "site.png"):
+        if n.endswith(".png") and (n.startswith("type_") or n.startswith("result_") or n.startswith("01_uploaded") or n == "site.png"
+                                  or n.startswith("board_")):
             os.makedirs(os.path.join(tmp, "ui"), exist_ok=True)
             shutil.copy2(os.path.join(shots, n), os.path.join(tmp, "ui", n))
             ui.append(n)
@@ -322,6 +423,17 @@ def collect_one(run, sid):
             os.makedirs(os.path.join(tmp, "ui"), exist_ok=True)
             shutil.copy2(os.path.join(vids, n), os.path.join(tmp, "ui", "session.webm"))
             ui.append("session.webm")
+    shorts = []                              # the Shorts board carried to films (finish_shorts): one export per reel
+    sh = j.get("shorts") or {}
+    for f in sh.get("files") or []:
+        src = os.path.join(sdir, f.get("file") or "")
+        if f.get("file") and os.path.exists(src):
+            os.makedirs(os.path.join(tmp, "shorts"), exist_ok=True)
+            dst = os.path.join(tmp, "shorts", os.path.basename(src))
+            shutil.copy2(src, dst)
+            clip = next((c for c in sh.get("clips") or [] if c.get("child_project_id") == f["project_id"]), {})
+            shorts.append(dict(project_id=f["project_id"], file=os.path.join(out, "shorts", os.path.basename(src)), edl_version=f.get("edl_version"),
+                               title=clip.get("title"), source_window=[clip.get("start"), clip.get("end")], sha256=sha256(dst), **probe(dst)))
     previews = []
     for r in j.get("renders") or []:
         if r.get("file") and os.path.exists(os.path.join(sdir, r["file"])):
@@ -340,6 +452,8 @@ def collect_one(run, sid):
                upload=dict(file=os.path.join(out, "upload.mp4"), sha256=sha256(os.path.join(tmp, "upload.mp4")), **probe(os.path.join(tmp, "upload.mp4"))),
                first_result_s=j.get("first_result_s"), seconds=j.get("seconds"), cost_usd=j.get("cost_usd"), asks=asks, exports=kept, previews=previews,
                edl_versions={str(k): v for k, v in sorted(edls.items())}, journey=os.path.join(out, "journey.json"),
+               shorts=dict(plan=sh.get("plan"), children=sh.get("children"), edited=sh.get("edited"), finals=sh.get("finals"),
+                           seconds=sh.get("seconds"), error=sh.get("error"), films=shorts) if sh else None,
                ui=dict(view=j.get("view") or (sess.get("studio") or {}).get("view"), dir=os.path.join(out, "ui"), files=ui) if ui else None,
                journey_sha256=sha256(os.path.join(tmp, "journey.json")))
     with open(os.path.join(tmp, "record.json"), "w") as f:

@@ -51,6 +51,13 @@ narrated tutorial when none is named):
   4. **site** (3.6 s): the call to action is the website itself: the recording's photograph of valmera.io's front page
      as a phone shows it, under **valmera.io** as the film's largest line. It lands 1 s before the export's voice ends,
      so the speaker's last line is said over it (`SITE_OVER_S`). Then the brand's end card.
+  **Scale variant** (17 Nov, "a capability that reads as how-did-they-do-that in one glance"): when the recording carried
+  a Shorts board to films (`studio.py` `"shorts"` on the ask: the scout's board from one typed sentence, Edit pressed
+  on every card so the product's own editor finishes each reel, every reel exported), the film opens on every finished
+  short playing at once in a grid while a counter counts them ("1 SENTENCE IN VALMERA", "N SHORTS from a M-min
+  podcast"), then the Studio (the sentence typed, Send, the board), then the hero short (the one whose picture changes
+  most often, measured) grows out of the board and plays its busiest 8-11 s on its own sound, then the website
+  (`proof.scale_plan`, `devices.scale_showcase`). Four films or more; otherwise the four-beat showcase above.
   No writer, no footage search, no picture check (every picture is the recording's own). A recording without Studio
   photographs (made before 17 Nov, or in the desktop view) cannot make a showcase: record it again (`STACK_V` 4).
 - **tutorial**: the narrated proof reel below, with its device, then the same call to action on its last line.
@@ -150,7 +157,11 @@ $PY studio.py ledger                      # every recording: its sentences and e
 and the sentences (`studio.py`'s docstring has the shape). `"view": "phone"` records the Studio as a phone shows it and
 keeps its photographs in `ui/`: one per typed word (`type_00_NN.png`, the empty composer first), the sent screen, the
 result, the site's front page (`site.png`, at three times the device scale) and the session's video; the showcase is
-built from them. `"phase": "before_first_result"` types
+built from them. `"shorts": {"plan_s", "edit_s", "final_s"}` on an ask carries the Shorts board that sentence makes to
+finished films (`finish_shorts`): it waits for the scout, presses Edit on every card through the product's own API,
+waits for every editor, exports every reel and downloads it (`shorts/`, `record.json` `shorts.films`); a photograph of
+the board before and after (`ui/board_00.png`, `board_01.png`). Type it with `"phase": "after_result"`, so the Studio is
+photographed after its analysis, never on "Waiting in line". `"phase": "before_first_result"` types
 the sentence before the first cut, so the film can say "one sentence, this film";
 `"export_before": true` on a sentence typed after the first cut also downloads the project as it
 stood before it. A session takes 2 to 7 minutes and a few cents of the replay lane. Kept under

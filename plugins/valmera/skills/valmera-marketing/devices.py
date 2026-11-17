@@ -876,19 +876,21 @@ SITE_OVER_S = 2.0              # the website lands under the speaker's last line
 LATER_LABEL = "{} LATER"       # the recording's own time to the result, as a label over the push
 
 
-def showcase_marks(hook, window, n_words, lead_f=3, site_s=SITE_S, over_s=SITE_OVER_S):
+def showcase_marks(hook, window, n_words, lead_f=3, site_s=SITE_S, over_s=SITE_OVER_S, board_f=0):
     """The showcase's frames, shared by the sound (proof.showcase_supply cuts the voice to them) and the picture
     (showcase). hook / window: export seconds of the split and of the export's own stretch. The export's voice runs to
     the window's end; its picture gives way to the website `over_s` before, so the speaker's last line is said over it."""
     f_h = int(round((float(hook[1]) - float(hook[0])) * FPS))
     f_t = f_h + STUDIO_IN_F
     f_send = f_t + WORD_F * max(int(n_words), 1) + READ_F
-    f_p = f_send + SENT_F                       # the export starts here, as a card, on its own voice
+    f_b = f_send + (8 if board_f else SENT_F)   # a Shorts board: the sent screen gives way to the board
+    f_p = f_b + int(board_f)                    # the export starts here, as a card, on its own voice
     f_x = f_p + PUSH_F                          # full frame
     f_v = f_p + int(round((float(window[1]) - float(window[0])) * FPS))     # the export's voice ends
     f_s = max(f_v - int(round(over_s * FPS)), f_x + int(FPS))
     f_end = f_s + int(round(site_s * FPS))
-    return dict(split=[0, f_h], studio=[f_h, f_p], typing=[f_t, f_send], send=f_send, push=[f_p, f_x], export=[f_p, f_s],
+    return dict(split=[0, f_h], studio=[f_h, f_p], typing=[f_t, f_send], send=f_send, board=[f_b, f_p] if board_f else None,
+                push=[f_p, f_x], export=[f_p, f_s],
                 export_voice=[f_p, f_v], site=[f_s, f_end], dur_f=max(f_end, f_v), lead_f=lead_f)
 
 
@@ -924,7 +926,7 @@ def split(l1, *, f0, f1, upload, export, edl_b, export_at, lib, focus=(0.5, 0.42
     return rec
 
 
-def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None, upload_t0=0.0):
+def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None, upload_t0=0.0, board=None):
     """The real Valmera Studio on a phone (the recording's own photographs, `ui`: {dir, w, h, typing: [png per word,
     the empty composer first], sent: png}): the screen arrives, the sentence lands in the composer a word at a time
     while the frame pushes in on it, Send puts it in its bubble, and the result grows out of the screen to full frame.
@@ -957,11 +959,11 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
             ys.append(r4(0.5 + (seat(1.0, 0.74) - 0.5) * q))
         elif f < f_send:                            # pushing in on the composer while the sentence lands
             q = (f - f_t) / max(f_send - f_t, 1)
-            s = 1.0 + 0.10 * (0.5 - 0.5 * math.cos(math.pi * q))
+            s = 1.0 + 0.15 * (0.5 - 0.5 * math.cos(math.pi * q))     # to 1.15: the sentence at ~51 px, its lines still whole
             ys.append(seat(s, 0.74))
         else:                                       # sent: the frame rises to the bubble
             q = MF.ease_io(8)[min(f - f_send, 7)]
-            s = 1.10
+            s = 1.15
             ys.append(r4(seat(s, 0.74) + q * 0.30))
         ss.append(r4(s))
     keys = []
@@ -971,9 +973,23 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
         k = P.image(f"dv_ui{j:02d}", os.path.join(ui["dir"], shots[j]), int(iw), int(ih))
         keys.append(k)
         P.card(f"ui{j:02d}", [a, b], k, box, z=2, x=0.5, y=ys[a - f0:b - f0], s=ss[a - f0:b - f0])
+    # while the sentence lands, the screen above the composer steps back (a dark veil, the product's screen untouched
+    # under it): the eye goes to the typed line, not to the chat above it (17 Nov: a first cut's reply filled the frame)
+    v0, v1 = f_t + 4, f_send + 6
+    P.block("focus", [v0, v1], [0.0, 0.0, 1.0, 0.655], "#050608", z=4,
+            op=[r4(0.72 * min(1.0, (f - v0 + 1) / 8.0, (v1 - f) / 6.0)) for f in range(v0, v1)])
     k = P.image("dv_uis", os.path.join(ui["dir"], ui["sent"]), int(iw), int(ih))
     y_all, s_all = ys + [ys[-1]] * PUSH_F, ss + [ss[-1]] * PUSH_F
-    P.card("ui_sent", [f_send, f_p + PUSH_F], k, box, z=2, x=0.5, y=y_all[f_send - f0:], s=s_all[f_send - f0:])
+    f_sent_end = marks["board"][0] if board and marks.get("board") else f_p + PUSH_F
+    P.card("ui_sent", [f_send, f_sent_end], k, box, z=2, x=0.5, y=y_all[f_send - f0:f_sent_end - f0], s=s_all[f_send - f0:f_sent_end - f0])
+    if board and marks.get("board"):            # the Shorts board the sentence made: the whole screen, a slow push in
+        bw, bh = float(board["w"]), float(board["h"])
+        bch = W / bw * bh / H
+        n_b = f_p + PUSH_F - f_sent_end
+        bk = P.image("dv_board", board["path"], int(bw), int(bh))
+        P.card("board", [f_sent_end, f_p + PUSH_F], bk, [0.0, r4(0.5 - bch / 2), 1.0, r4(0.5 + bch / 2)], z=2, x=0.5, y=0.5,
+               s=[r4(min(1.0, 1.0 / bch) * (1.0 + 0.06 * q)) for q in MF.ease_io(n_b)])
+        L.hit("whoosh_soft_1", f_sent_end + 1, "whoosh")      # the screen turns to the board
     if upload and ui.get("player"):
         p0, p1 = [float(v) for v in ui["player"]]
         pc = (p0 + p1) / 2
@@ -1001,8 +1017,8 @@ def studio_screen(l1, *, marks, ui, typed, export, lib, later=None, upload=None,
     L.hit("click_1", f_send + 1, "click")
     L.hit("whoosh_soft_1", f_p + PUSH_F // 2, "whoosh")
     rec = L.lay([f0, f_p + PUSH_F])
-    rec.update(device="studio", frames=[f0, f_p + PUSH_F], typing=[f_t, f_send], send_f=f_send, push=[f_p, f_p + PUSH_F], shots=len(keys) + 1,
-               typed=typed, typed_px=round(32.0 * W / iw * 1.10, 1) if iw <= 800 else round(16.0 * 3 * W / iw * 1.10, 1),
+    rec.update(device="studio", frames=[f0, f_p + PUSH_F], board=bool(board), typing=[f_t, f_send], send_f=f_send, push=[f_p, f_p + PUSH_F], shots=len(keys) + 1,
+               typed=typed, typed_px=round(32.0 * W / iw * 1.15, 1) if iw <= 800 else round(16.0 * 3 * W / iw * 1.15, 1),
                screen=dict(w=int(iw), h=int(ih), view=ui.get("view")), later=later)
     return rec
 
@@ -1063,4 +1079,106 @@ def showcase(*, upload, export, edl_b, typed, window, hook, ui, page, lib, sid="
                  pace=dict(split_s=round(mk["split"][1] / FPS, 2), studio_s=round((f_p - mk["split"][1]) / FPS, 2),
                            export_s=round((f_e - f_p) / FPS, 2), cta_s=round((mk["dur_f"] - f_e) / FPS, 2)),
                  style="showcase", devices=[rec_s, rec_u, rec_c], export_window=[r4(e0), r4(e1)], hook_window=[r4(hook[0]), r4(hook[1])])
+    return l1, beats
+
+
+# ----------------------------------------------------------------- scale: one sentence, a board of finished shorts
+#
+# Coordinator, 17 Nov: "a capability that reads as 'how did they do that' in one glance: scale". The Studio's Shorts
+# board turns one typed sentence on a long podcast into a board of stories; Edit on each card has the product's own
+# editor finish the reel; each is exported. The film opens on every finished short playing at once, counted up, then
+# the Studio (the sentence, the board), then one of them full frame on its own sound, then the website.
+
+SCALE_HOOK_S = 3.0             # the grid lands and counts up in two seconds, then holds whole for one
+BOARD_F = 36                   # the Studio's board, read for a little over a second
+
+
+def grid_live(l1, *, f0, f1, tiles, lib, upload=None, top="1 SENTENCE IN VALMERA", unit="SHORTS", sub=None, hero=0):
+    """Every short the sentence made, playing at once in a grid (tiles: [{path, w, h, fps, dur, t0}], each a real
+    export), landing one after another while a counter counts them; `hero` is the one the film opens up later,
+    outlined. Returns the record."""
+    n = len(tiles)
+    L = Layer(l1, lib, "gl")
+    P, R = L.P, L.R
+    cols = 5 if n > 8 else 4 if n > 4 else max(n, 1)
+    rows_n = int(math.ceil(n / cols))
+    gx = 0.012
+    tw = (0.92 - (cols - 1) * gx) / cols
+    th = tw * W * 16 / 9 / H
+    gy = gx * W / H
+    R.voices[L.k("dv_u")]["px"] = R.fit_px(L.k("dv_u"), top, 0.84 * W, 50)
+    top_cap = R.cap(L.k("dv_u")) / H
+    y_top = TOP_Y + 0.03 + top_cap
+    y0 = y_top + 0.03
+    if upload:
+        desk(L, [f0, f1], P.video("dv_up", upload), upload, src0=0.0)
+    else:
+        P.page("ground", [f0, f1], "#0B0C10", "#121419", grain=0.02)
+    P.block("veil", [f0, f1], [0.0, 0.0, 1.0, 1.0], "#07080B", z=1, op=0.45)
+    step = 2                                    # frame 0 already holds a film; all of them land inside the first 0.7 s
+    lands = []
+    for j, t in enumerate(tiles):
+        r_, c_ = divmod(j, cols)
+        x0 = 0.5 - (cols * tw + (cols - 1) * gx) / 2
+        box = [r4(x0 + c_ * (tw + gx)), r4(y0 + r_ * (th + gy)), r4(x0 + c_ * (tw + gx) + tw), r4(y0 + r_ * (th + gy) + th)]
+        fa = f0 + j * step
+        if fa >= f1:
+            break
+        key = P.video(f"dv_s{j}", t)
+        m = f1 - fa
+        P.card(f"t{j:02d}", [fa, f1], key, box, t0=float(t.get("t0") or 0.0), z=3 if j == hero else 2, radius=0.008,
+               crop=cover(t["w"] / t["h"], (box[2] - box[0]) * W / ((box[3] - box[1]) * H)),
+               s=[r4(v) for v in MF.settle(8, 0.8)] + [1.0] * max(m - 8, 0), op=[r4(min(1.0, (q + 1) / 3.0)) for q in range(m)])
+        if j == hero:
+            P.block("hero.ring", [fa, f1], [box[0] - 0.006, box[1] - 0.006 * W / H, box[2] + 0.006, box[3] + 0.006 * W / H], ACCENT, z=2,
+                    radius=0.011, op=[r4(min(1.0, (q + 1) / 3.0)) for q in range(m)])
+        lands.append(fa)
+    grid_bottom = y0 + rows_n * (th + gy) - gy
+    R.voices[L.k("dv_c")]["px"] = 150
+    c_cap = R.cap(L.k("dv_c")) / H
+    base = min(grid_bottom + 0.035 + c_cap, BOTTOM_Y - 0.01)
+    for j, fa in enumerate(lands):               # the counter steps as each lands
+        fb = lands[j + 1] if j + 1 < len(lands) else f1
+        it = P.word(f"n.counter{j:02d}", [fa, fb], str(j + 1), L.k("dv_c"), 0.08, base, INK, 1.0, note=False)
+        it["role"] = "device"
+    L.texts.append(dict(t=str(len(lands)), v=L.k("dv_c"), f=[int(lands[-1]) if lands else f0, int(f1)], px=150.0, cap_px=round(R.cap(L.k("dv_c")), 1),
+                        x=0.08, y=r4(base), w=r4(R.width(L.k("dv_c"), str(len(lands))) / W)))
+    x_unit = 0.08 + R.width(L.k("dv_c"), str(len(lands))) / W + 0.03
+    R.voices[L.k("dv_r")]["px"] = 58
+    L.text("unit", [lands[1] if len(lands) > 1 else f0, f1], unit, L.k("dv_r"), x_unit, base - (c_cap - R.cap(L.k("dv_r")) / H) if sub else base, INK, 1.0)
+    if sub:
+        R.voices[L.k("dv_l")]["px"] = 44
+        L.text("sub", [lands[1] if len(lands) > 1 else f0, f1], sub, L.k("dv_l"), x_unit, base, DIM, 1.0)
+    L.text("top", [f0, f1], top, L.k("dv_u"), 0.5 - R.width(L.k("dv_u"), top) / W / 2, y_top, INK, 1.0)
+    L.hit("whoosh_soft_1", f0 + 1, "whoosh")
+    for fa in lands[::max(1, len(lands) // 4)][:4]:
+        L.hit("tick_1", fa + 1, "tick")
+    rec = L.lay([f0, f1])
+    rec.update(device="grid", frames=[f0, f1], count=len(lands), lands=lands, cols=cols, tile_w=r4(tw), hero=hero,
+               tiles=[os.path.basename(t["path"]) for t in tiles])
+    return rec
+
+
+def scale_showcase(*, upload, hero, tiles, typed, window, ui, page, lib, sid="wf2", lead_f=3, later=None, site_s=SITE_S, sub=None):
+    """The scale film: the grid of every finished short (counted), the Studio (the sentence typed, Send, the board),
+    the hero short growing out of the board and playing full frame on its own sound (`window`, its seconds), then the
+    website under its last line. `hero`: {path, w, h, fps, dur} of the hero's export, which is tiles[0]."""
+    mk = showcase_marks([0.0, SCALE_HOOK_S], window, len(typed.split()), lead_f=lead_f, site_s=site_s, board_f=BOARD_F if ui.get("board") else 0)
+    e0, e1 = float(window[0]), float(window[1])
+    l1 = dict(l1=1, sid=sid, seed=1118, fps=FPS, frame=[W, H], dur_f=mk["dur_f"], spine=[], voices={}, assets={}, items=[], sound=[],
+              film=dict(grain=0.0, vignette=0.0, over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0)))
+    l1["assets"]["dv_ex"] = dict(kind="video", path=hero["path"], w=hero["w"], h=hero["h"], fps=hero["fps"], dur=hero["dur"])
+    f_p, f_x = mk["push"]
+    f_e = mk["export"][1]
+    l1["items"].append(dict(id="export", k="shot", f=[f_x, f_e], pic="dv_ex", src=[r4(e0 + (f_x - f_p) / FPS), r4(e0 + (f_e - f_p) / FPS)]))
+    rec_g = grid_live(l1, f0=0, f1=mk["split"][1], tiles=tiles, lib=lib, upload=upload, sub=sub, hero=0)
+    rec_u = studio_screen(l1, marks=dict(mk, export_t0=e0), ui=ui, typed=typed, export=hero, lib=lib, later=later, board=ui.get("board"))
+    rec_c = site(l1, f0=f_e, f1=mk["dur_f"], page=page, export=hero, lib=lib, src0=e0 + (f_e - f_p) / FPS)
+    beats = dict(format="showcase", variant="scale", marks=mk, grid=mk["split"], studio=mk["studio"], reveal=mk["push"], export=[f_p, f_e],
+                 cta=mk["site"], pictures=[dict(path=hero["path"], f=[f_x, f_e], name="THE EXPORT")],
+                 events=sorted({s["event_f"] for s in l1["sound"]}), look=[0, mk["split"][1] - 6, mk["typing"][0] + 30, (mk["board"] or [f_p])[0] + 10,
+                                                                            f_x + 20, (f_x + f_e) // 2, f_e + 20, mk["dur_f"] - 2],
+                 pace=dict(grid_s=round(mk["split"][1] / FPS, 2), studio_s=round((f_p - mk["split"][1]) / FPS, 2),
+                           export_s=round((f_e - f_p) / FPS, 2), cta_s=round((mk["dur_f"] - f_e) / FPS, 2)),
+                 style="showcase", devices=[rec_g, rec_u, rec_c], export_window=[r4(e0), r4(e1)], shorts=len(tiles))
     return l1, beats
