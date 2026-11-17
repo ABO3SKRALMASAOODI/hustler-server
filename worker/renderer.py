@@ -5879,18 +5879,27 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # exactly the off state a windowed glow needs.
             # The bloom is computed at reduced resolution (_reduced_gblur):
             # a sigma-20 blur has nothing left at full resolution to keep.
+            # The screen blend runs in RGB (gbrp): screen on YUV's chroma
+            # planes lifts U and V both above neutral, a magenta-blue cast
+            # over the WHOLE picture (EDIT-CORE gate, 17 Nov 2026, p5873).
             down, blur, up = _reduced_gblur(W, H, 10 + 25 * i_)
-            parts.append(f"[{vlabel}]split[glA{si}][glB{si}]")
+            parts.append(f"[{vlabel}]format=gbrp,split[glA{si}][glB{si}]")
             parts.append(f"[glB{si}]{down}{blur}{up}[glG{si}]")
             parts.append(f"[glA{si}][glG{si}]blend=all_mode=screen"
-                         f":all_opacity={0.25 + 0.4 * i_:.2f}{en}"
-                         f"[{out_lab}]")
+                         f":all_opacity={0.25 + 0.4 * i_:.2f}{en},"
+                         f"format=yuv420p[{out_lab}]")
         elif kind == "halation":
             # Film halation is not generic white glow: only highlights bleed,
             # and the bloom is warm/red because light reflects through the
             # emulsion. Isolate high luma, neutralize its chroma, tint it,
             # diffuse it, then screen it back over the untouched base.
             threshold = int(205 - 45 * i_)
+            # The bloom is screened back in RGB (gbrp): a screen blend of
+            # YUV planes lifts both chroma planes above neutral and casts the
+            # WHOLE picture magenta-blue, not only its highlights (EDIT-CORE
+            # gate, 17 Nov 2026, p5873: whites a* -0.9 -> +17, b* +6.8 ->
+            # -6.6 at intensity 0.08; "warm, creamy neutrals" came out
+            # pink-mauve however the grade was turned).
             parts.append(f"[{vlabel}]split[halA{si}][halB{si}]")
             # Threshold at full resolution (a highlight must not be averaged
             # away before it is selected), then diffuse and tint the bloom at
@@ -5901,10 +5910,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 f":u=128:v=128,{down}{blur},"
                 f"colorbalance=rs={0.18 + 0.24 * i_:.2f}:"
                 f"gs={0.01 + 0.05 * i_:.2f}:bs=-{0.08 + 0.12 * i_:.2f}"
-                f"{up}[halG{si}]")
+                f"{up},format=gbrp[halG{si}]")
+            parts.append(f"[halA{si}]format=gbrp[halR{si}]")
             parts.append(
-                f"[halA{si}][halG{si}]blend=all_mode=screen:"
-                f"all_opacity={0.16 + 0.28 * i_:.2f}{en}[{out_lab}]")
+                f"[halR{si}][halG{si}]blend=all_mode=screen:"
+                f"all_opacity={0.16 + 0.28 * i_:.2f}{en},"
+                f"format=yuv420p[{out_lab}]")
         elif kind == "sharpen":
             # unsharp with a 5x5 kernel: the honest answer to "make it
             # clearer". It recovers apparent detail a phone's encoder smeared;

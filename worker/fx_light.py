@@ -47,7 +47,8 @@ class _LightEmit(subject_fx._Emit):
         a, b, bl, out = (self.lab("ha"), self.lab("hb"), self.lab("hl"),
                          self.lab("ho"))
         inten = max(0.0, min(1.0, float(self.it.get("intensity") or 0.8)))
-        self.p.append(f"[{pw}]split[{a}][{b}]")
+        # screened in RGB: a YUV screen lifts both chroma planes (magenta)
+        self.p.append(f"[{pw}]format=gbrp,split[{a}][{b}]")
         self.p.append(f"[{b}]gblur=sigma={max(2.0, 0.02 * self.H):.2f}[{bl}]")
         self.p.append(f"[{a}][{bl}]blend=all_mode=screen:"
                       f"all_opacity={0.33 * inten:.3f}[{out}]")
