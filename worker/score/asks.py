@@ -275,7 +275,12 @@ def pauses(ctx, edl, limit=12):
         gaps, basis = agent_tools._dead_air(ctx, 0.5)
         if basis != "speech" or not gaps:
             return ""
-        agent_tools._read_liveness(ctx, gaps, measure=False)
+        # Measured, not only read from a cache: a pause the check cannot read is a pause it judges
+        # blind (p5717 R1, 18 Nov 2026: "88.6 s of pauses were not measured" sent the repair pass to
+        # cut the song). A window this turn already measured is reused; a long take reads only what
+        # is cached, since measuring all of it belongs to the tools.
+        dur = float(getattr(ctx, "duration", 0) or 0)
+        agent_tools._read_liveness(ctx, gaps, measure=0 < dur <= agent_tools.LIVENESS_WINDOW_MAX_S)
         tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [], edl.get("speed") or [])
         rows, dead_s, live_s, unread_s = [], 0.0, 0.0, 0.0
         for g in gaps:

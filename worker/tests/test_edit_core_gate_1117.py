@@ -161,3 +161,34 @@ def test_a_song_after_the_last_word_is_not_a_dead_tail():
     assert edit_review._tail_plays(song, prog, 25.3)
     still = {"silences": [[25.0, 90.45]], "shots": [{"start": 0.0}]}
     assert not edit_review._tail_plays(still, prog, 25.3)
+
+
+def test_the_ask_check_reads_the_pauses_cut_silences_measured(monkeypatch):
+    # EDIT-CORE gate, 18 Nov 2026 (p5717 R1): cut_silences measured the music video's wordless
+    # stretches as footage (NO CHANGE) and the editor said so, but the ask check's cheap read skipped
+    # the turn's measured window: "88.6 s of pauses were not measured", the ask went back as not done
+    # and the repair pass cut 2.9 s out of the song. The check now reads the same measurement.
+    sys.path.insert(0, os.path.dirname(__file__))
+    import activity
+    from score import asks
+    from test_edit_core_signal import _Ctx, _track, _w
+    track = _track(93.0, moving=[(0.0, 93.0)], loud=[(0.0, 93.0)])
+    calls = []
+
+    def measure(proxy, budget_s=None, start=0.0, length=None, progress=None):
+        calls.append((start, length))
+        return dict(track)
+    monkeypatch.setattr(activity, "measure", measure)
+    monkeypatch.setattr(agent_tools, "_activity_track", lambda ctx, cached_only=False: (None, "not measured yet"))
+    ctx = _Ctx([_w("AJ", 8.8, 9.3), _w("yeah", 10.2, 10.7), _w("yeah", 24.5, 24.9)], 92.88, track)
+    ctx.proxy_path = lambda: "proxy.mp4"
+    out = agent_tools.cut_silences(ctx, min_silence_s=0.35, padding_s=0.1)
+    assert "NO CHANGE" in out and len(calls) == 1
+    text = asks.pauses(ctx, ctx.edl)
+    assert "dead air 0.0 s" in text and "not measured" not in text
+    assert len(calls) == 1                      # the turn's window, not a second measurement
+    # nothing measured yet this turn: the check measures the short take itself
+    fresh = _Ctx([_w("AJ", 8.8, 9.3), _w("yeah", 24.5, 24.9)], 92.88, track)
+    fresh.proxy_path = lambda: "proxy.mp4"
+    text = asks.pauses(fresh, fresh.edl)
+    assert "dead air 0.0 s" in text and "not measured" not in text and len(calls) == 2

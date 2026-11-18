@@ -1378,8 +1378,11 @@ def _liveness_track(ctx, lo, hi, measure=True):
     if track and track.get("level") is not None and \
             liveness.covers(track, lo, hi):
         return track, None
-    if not measure:
-        return None, why
+    # The windows this turn already measured are read before anything else, also by a cheap read
+    # (measure=False). EDIT-CORE gate, 18 Nov 2026 (p5717 R1): cut_silences measured the music
+    # video's wordless stretches as footage, then the ask check's cheap read skipped that measurement,
+    # reported "88.6 s of pauses were not measured", judged "cut the silences" not done, and the
+    # repair pass cut 2.9 s of the song.
     cache = getattr(ctx, "_liveness_windows", None)
     if cache is None:
         cache = {}
@@ -1390,6 +1393,8 @@ def _liveness_track(ctx, lo, hi, measure=True):
     for t in cache.values():
         if liveness.covers(t, lo, hi):
             return t, None
+    if not measure:
+        return None, why
     dur = float(ctx.duration or 0)
     if hi - lo <= LIVENESS_WINDOW_MAX_S or dur <= LIVENESS_WINDOW_MAX_S:
         try:
