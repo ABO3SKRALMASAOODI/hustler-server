@@ -138,6 +138,10 @@ def check(ctx, client, model, request_text, draft, limit=3, strict=False):
         edl = {}
     content = [{"type": "text", "text": "\n".join([
         "The customer's request:\n" + json.dumps(str(request_text or "")[:3000], ensure_ascii=False),
+        # The honest lines are read by the customer: written in the language they typed, which the
+        # ask ledger measured (18 Nov 2026, p5717: an English customer's reply gained a Ukrainian line).
+        "Write every honest line in this language (the customer's, ISO code): "
+        + str(((getattr(ctx, "ask_ledger", None) or {}).get("lang")) or "the drafted reply's language"),
         "The drafted reply:\n" + json.dumps(str(draft or "")[:3000], ensure_ascii=False),
         "What the edit holds, on the film's clock:\n" + items(ctx, edl)])}]
     for local, label in pages:
