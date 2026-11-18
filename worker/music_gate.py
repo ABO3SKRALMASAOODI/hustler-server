@@ -310,11 +310,13 @@ def bind_turn_choice(ctx, text, previous_reply=None, previous_reply_id=None):
         if not verdict:
             return None
         slug, via = verdict['slug'], 'chat_read'
-        slugs = offered
+        # a track named outright from the library is their pick, not an answer to that offer
+        slugs = offered if slug in offered else ()
     record = {'slug': slug, 'at': time.time(), 'via': via,
               'offer': ((offer or {}).get('token')
                         if list(slugs) == (offer or {}).get('slugs') else None),
               'offer_message_id': previous_reply_id,
+              'named': bool(via == 'chat_read' and not slugs),
               'evidence': str(text)[:200]}
     _remember_pick(ctx, record)
     root._music_turn_choice = record
@@ -328,8 +330,10 @@ def choice_note(ctx, text, previous_reply=None, previous_reply_id=None):
         return ''
     if not choice:
         return ''
+    where = (" by its name in the music library" if choice.get('named')
+             else " from the previously displayed offer")
     return ("The customer's current answer selects library track "
-            + choice['slug'] + " from the previously displayed offer. Load the "
+            + choice['slug'] + where + ". Load the "
             "audio tools, place that exact track with add_library_music, and "
             "verify it. Do not offer a replacement list or ask them to pick again.")
 

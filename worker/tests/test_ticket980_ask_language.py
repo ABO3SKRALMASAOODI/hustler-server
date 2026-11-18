@@ -67,8 +67,11 @@ def test_a_failed_translation_still_asks_the_question(monkeypatch):
     assert out == FRENCH_Q
 
 
-def test_ask_user_language_refusal_happens_once_per_turn():
+def test_a_question_in_the_wrong_language_is_translated_and_delivered_at_once():
+    """Map D08 (owner, 16 Nov 2026): the question reaches the customer in their language on the
+    first ask; the editor is never sent a refusal to rephrase it."""
     import inspect
     src = inspect.getsource(agent_loop._run_loop)
-    assert "_ask_language_refused" in src
+    assert "_ask_language_refused" not in src
+    assert "not in the \"\n" not in src and "USER'S language (the language of the" not in src
     assert "_translate_question(" in src

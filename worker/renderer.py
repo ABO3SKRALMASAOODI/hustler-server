@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 
@@ -919,10 +920,11 @@ def delivery_upscale(edl, out_path, workdir, cancelled_cb=None):
         return None
     fps = max(1.0, min(float(info.get("fps") or 30.0), 60.0))
     tmp = os.path.join(workdir, f"upscale_{uuid.uuid4().hex[:8]}.mp4")
+    target = export_video_kbps(edl, float(info.get("duration") or 0.0))
     media.run(["ffmpeg", "-y", "-v", "error", "-i", out_path,
                "-map", "0:v:0", "-map", "0:a?",
                "-vf", f"scale={W2}:{H2}:flags=lanczos,setsar=1",
-               *final_video_encode(W2, H2, fps), "-pix_fmt", "yuv420p",
+               *final_video_encode(W2, H2, fps, target), "-pix_fmt", "yuv420p",
                "-c:a", "copy", "-movflags", "+faststart", tmp],
               cancelled_cb=cancelled_cb)
     os.replace(tmp, out_path)
@@ -967,6 +969,23 @@ def _needs_preview_downscale(H):
 
 
 _PREVIEW_QUALITY = ContextVar("preview_quality", default="draft")
+# Whether this preview job's programme is long (config.PREVIEW_LONG_PROGRAM_S):
+# set once per job by run_render_job, read by preview_geometry, so every graph
+# and every stitched piece of the job is drawn on the same frame.
+_PREVIEW_LONG = ContextVar("preview_long", default=False)
+
+
+def long_program(edl):
+    """Is this EDL's programme long enough for the long-programme draft frame?"""
+    try:
+        if is_canvas_program(edl):
+            return False
+        program = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                           edl.get("speed")).out_duration
+    except Exception:  # noqa: BLE001 — the ordinary frame
+        return False
+    return bool(config.PREVIEW_LONG_PROGRAM_S) and \
+        program >= config.PREVIEW_LONG_PROGRAM_S
 # Whether this render's account has paid. Off until the job has read it, so a
 # path that never asks gets the smaller frame, not the paywall's.
 _PREVIEW_PAID = ContextVar("preview_paid", default=False)
@@ -1045,6 +1064,9 @@ def preview_geometry(W, H, fps):
         k = cap / float(max(W, H))
         W, H = _even(W * k), _even(H * k)
     hcap = config.APPROVAL_MAX_LONG_EDGE if approval else config.PREVIEW_MAX_HEIGHT
+    if not approval and _PREVIEW_LONG.get() and config.PREVIEW_LONG_MAX_HEIGHT:
+        hcap = min(hcap or config.PREVIEW_LONG_MAX_HEIGHT,
+                   config.PREVIEW_LONG_MAX_HEIGHT)
     if hcap and H > hcap:
         k = hcap / float(H)
         W, H = _even(W * k), _even(H * k)
@@ -1219,16 +1241,246 @@ def final_rate_cap_kbps(W, H, fps):
     return int(round(base * k))
 
 
-def final_video_encode(W, H, fps):
+def final_video_encode(W, H, fps, target_kbps=None):
     """x264 settings of a final export: CRF quality under the VBV ceiling
-    (final_rate_cap_kbps), bufsize FINAL_BUFSIZE_S seconds of it."""
+    (final_rate_cap_kbps), bufsize FINAL_BUFSIZE_S seconds of it.
+
+    ``target_kbps`` (export_video_kbps: the EDL's file size or bitrate
+    target) lowers that ceiling: CRF still sets the quality where the picture
+    is cheap, and VBV holds every second at or under the target, so the
+    file's video can never exceed target x length (constrained VBR). Its
+    buffer is one second of the target, so the bound is tight."""
     enc = ["-c:v", "libx264", "-preset", config.FINAL_PRESET,
            "-crf", str(config.FINAL_CRF), "-g", "120"]
     cap = final_rate_cap_kbps(W, H, fps)
-    if cap:
+    if target_kbps and (not cap or int(target_kbps) < cap):
+        cap = max(int(target_kbps), 1)
+        enc += ["-maxrate", f"{cap}k", "-bufsize", f"{cap}k"]
+    elif cap:
         buf = int(round(cap * max(0.5, float(config.FINAL_BUFSIZE_S))))
         enc += ["-maxrate", f"{cap}k", "-bufsize", f"{buf}k"]
     return enc
+
+
+# ── Export size and bitrate targets (16 Nov 2026, p5857: "make the download
+# less than 4.5GB so it can fit onto a DVD"). The EDL's ``export`` names what
+# the FILE must fit; the final's encode is held under the bitrate that fits
+# (final_video_encode), then the delivered file is measured and, when it
+# still lands over, re-encoded in two passes until it fits
+# (fit_export_size). Previews never read it.
+EXPORT_AUDIO_KBPS = 192
+# MP4 headers, sample tables and the moov atom: well under 1% of a film at
+# any real bitrate; 1.5% plus 2 MB is room for a short low-rate one too.
+EXPORT_CONTAINER_HEADROOM = 0.015
+EXPORT_CONTAINER_FIXED_BYTES = 2_000_000
+# The first pass aims a little under the line: VBV holds the peak rate,
+# rounding of the length does the rest.
+EXPORT_TARGET_MARGIN = 0.03
+# When the sound alone would take more than this share of the budget, it is
+# re-encoded smaller so the picture keeps the rest.
+EXPORT_AUDIO_MAX_SHARE = 0.25
+EXPORT_FIT_PASSES = 4
+
+
+def export_target(edl):
+    """The EDL's export target as {"max_bytes", "video_kbps"} (either may be
+    None), or None when the export has no target."""
+    ex = (edl or {}).get("export") if isinstance(edl, dict) else None
+    if not isinstance(ex, dict):
+        return None
+    try:
+        mb = float(ex["max_size_mb"]) if ex.get("max_size_mb") else None
+        kbps = int(ex["video_kbps"]) if ex.get("video_kbps") else None
+    except (TypeError, ValueError):
+        return None
+    if not mb and not kbps:
+        return None
+    return {"max_bytes": int(mb * 1_000_000) if mb else None,
+            "video_kbps": kbps}
+
+
+def size_target_video_kbps(max_bytes, duration_s,
+                           audio_kbps=EXPORT_AUDIO_KBPS,
+                           margin=EXPORT_TARGET_MARGIN):
+    """The video bitrate (kb/s) that puts a ``duration_s`` film with
+    ``audio_kbps`` of sound inside ``max_bytes``, after the container's
+    headroom and ``margin``. Never under the schema's floor: a target too
+    small for any picture still gets the smallest real file."""
+    from schemas import EXPORT_MIN_VIDEO_KBPS
+    dur = max(float(duration_s or 0.0), 0.5)
+    usable = float(max_bytes) * (1.0 - EXPORT_CONTAINER_HEADROOM - margin) \
+        - EXPORT_CONTAINER_FIXED_BYTES
+    video_bits = usable * 8.0 - float(audio_kbps) * 1000.0 * dur
+    return max(int(video_bits / dur / 1000.0), EXPORT_MIN_VIDEO_KBPS)
+
+
+def export_video_kbps(edl, duration_s):
+    """The video ceiling (kb/s) a final of ``edl`` lasting ``duration_s``
+    encodes under, or None when the EDL names no export target."""
+    t = export_target(edl)
+    if not t:
+        return None
+    rates = [t["video_kbps"]] if t.get("video_kbps") else []
+    if t.get("max_bytes"):
+        rates.append(size_target_video_kbps(t["max_bytes"], duration_s))
+    return min(rates) if rates else None
+
+
+def _stream_bytes(path, kind):
+    """Bytes of the first ``kind`` ("v"/"a") stream's packets, measured by
+    ffprobe (0 when absent)."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", f"{kind}:0",
+         "-show_entries", "packet=size", "-of", "csv=p=0", path],
+        capture_output=True, text=True, timeout=600)
+    total = 0
+    for line in (out.stdout or "").splitlines():
+        line = line.strip().rstrip(",")
+        if line.isdigit():
+            total += int(line)
+    return total
+
+
+def fit_export_size(edl, out_path, workdir, cancelled_cb=None):
+    """Make the delivered file fit the EDL's export size target.
+
+    Measures the file. When it is over the target, re-encodes the picture
+    in two passes at the bitrate the measured length and the measured sound
+    leave (the sound is copied, or re-encoded smaller when it alone would
+    take more than EXPORT_AUDIO_MAX_SHARE of the budget), measures again and
+    repeats with the shortfall taken off until it fits. Returns a report
+    (``bytes``, ``target_bytes``, ``fits``, ``passes``, ``video_kbps``) or
+    None when the EDL has no size target."""
+    t = export_target(edl)
+    if not t or not t.get("max_bytes"):
+        return None
+    target = int(t["max_bytes"])
+    size = os.path.getsize(out_path)
+    report = {"target_bytes": target, "bytes": size,
+              "first_bytes": size, "passes": 0, "fits": size <= target,
+              "video_kbps": None, "audio_kbps": None}
+    if size <= target:
+        return report
+    dur = float(media.duration_of(out_path) or 0.0) or 1.0
+    info = media.probe(out_path)
+    W, H = int(info["width"]), int(info["height"])
+    fps = max(1.0, min(float(info.get("fps") or 30.0), 60.0))
+    audio_bytes = _stream_bytes(out_path, "a")
+    audio_args = ["-c:a", "copy"]
+    if audio_bytes > EXPORT_AUDIO_MAX_SHARE * target:
+        akbps = max(32, int(EXPORT_AUDIO_MAX_SHARE * target * 8 / dur
+                            / 1000 * 0.9))
+        audio_args = ["-c:a", "aac", "-b:a", f"{akbps}k"]
+        audio_bytes = int(akbps * 1000 / 8 * dur)
+        report["audio_kbps"] = akbps
+    audio_kbps = audio_bytes * 8 / dur / 1000.0
+    margin = EXPORT_TARGET_MARGIN
+    src = os.path.join(workdir, f"fit_src_{uuid.uuid4().hex[:8]}.mp4")
+    os.replace(out_path, src)
+    tmp = passlog = None
+    try:
+        for attempt in range(EXPORT_FIT_PASSES):
+            if cancelled_cb and cancelled_cb():
+                raise dbx.JobLeaseLost("export size fit: job was cancelled")
+            kbps = size_target_video_kbps(target, dur, audio_kbps, margin)
+            passlog = os.path.join(workdir,
+                                   f"fit_pass_{uuid.uuid4().hex[:8]}")
+            tmp = os.path.join(workdir, f"fit_{uuid.uuid4().hex[:8]}.mp4")
+            common = ["-c:v", "libx264", "-preset", config.FINAL_PRESET,
+                      "-b:v", f"{kbps}k", "-maxrate", f"{int(kbps * 1.5)}k",
+                      "-bufsize", f"{int(kbps * 2)}k", "-g", "120",
+                      "-pix_fmt", "yuv420p", "-passlogfile", passlog]
+            timeout = max(900.0, dur * 4.0)
+            media.run(["ffmpeg", "-y", "-v", "error", "-i", src,
+                       "-map", "0:v:0", *common, "-pass", "1", "-an",
+                       "-f", "mp4", os.devnull],
+                      timeout=timeout, cancelled_cb=cancelled_cb)
+            media.run(["ffmpeg", "-y", "-v", "error", "-i", src,
+                       "-map", "0:v:0", "-map", "0:a?", *common,
+                       "-pass", "2", *audio_args,
+                       "-movflags", "+faststart", tmp],
+                      timeout=timeout, cancelled_cb=cancelled_cb)
+            for leftover in (passlog + "-0.log", passlog + "-0.log.mbtree"):
+                try:
+                    os.remove(leftover)
+                except OSError:
+                    pass
+            size = os.path.getsize(tmp)
+            report.update(bytes=size, passes=attempt + 1, video_kbps=kbps,
+                          width=W, height=H, fps=round(fps, 3))
+            if size <= target:
+                os.replace(tmp, out_path)
+                report["fits"] = True
+                return report
+            # Over again: take the measured shortfall off the next pass.
+            margin += (size - target) / float(target) + 0.01
+            if attempt == EXPORT_FIT_PASSES - 1:
+                os.replace(tmp, out_path)       # the smallest one made
+            else:
+                os.remove(tmp)
+        report["fits"] = os.path.getsize(out_path) <= target
+        return report
+    finally:
+        if os.path.exists(src):
+            if not os.path.exists(out_path):
+                os.replace(src, out_path)
+            else:
+                os.remove(src)
+        # a pass that failed leaves its half-written file and logs behind
+        for leftover in ([tmp] if tmp else []) + (
+                [passlog + "-0.log", passlog + "-0.log.mbtree"]
+                if passlog else []):
+            try:
+                if leftover != out_path and os.path.exists(leftover):
+                    os.remove(leftover)
+            except OSError:
+                pass
+
+
+def _same_export_target(variant, prev_edl, edl):
+    """A final is reused or stitched only from a final made for the same
+    export target: its encode was held under that target's bitrate. Previews
+    never read export, so any two previews share their picture."""
+    if variant != "final":
+        return True
+    return (((prev_edl or {}).get("export") or None)
+            == ((edl or {}).get("export") or None))
+
+
+def export_fit_failed_report(edl, out_path, error):
+    """The measured report for a delivered file whose size fit could not
+    run: the file as it is, its size, and why (never a failed export)."""
+    t = export_target(edl) or {}
+    try:
+        size = os.path.getsize(out_path)
+    except OSError:
+        size = 0
+    target = t.get("max_bytes")
+    return {"target_bytes": target, "bytes": size, "first_bytes": size,
+            "passes": 0, "fits": bool(target) and 0 < size <= target,
+            "video_kbps": None, "audio_kbps": None,
+            "error": f"{type(error).__name__}: {str(error)[:200]}"}
+
+
+def export_size_text(report):
+    """One plain line of what the delivered file measured."""
+    if not report:
+        return ""
+
+    def size(n):
+        n = float(n or 0)
+        return f"{n / 1e9:.2f} GB" if n >= 1e9 else f"{n / 1e6:.1f} MB"
+    how = (f"re-encoded in {report['passes']} two-pass run(s) at "
+           f"{report['video_kbps']} kb/s video" if report.get("passes")
+           else "first encode")
+    if report.get("error"):
+        how += (f"; the size re-encode could not run ({report['error']}), "
+                "so the verified first encode shipped")
+    target = (f"the {size(report['target_bytes'])} target"
+              if report.get("target_bytes") else "no size target")
+    return (f"export measured {size(report['bytes'])} ({report['bytes']} "
+            f"bytes) against {target}: "
+            f"{'fits' if report.get('fits') else 'OVER'} ({how})")
 
 
 def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
@@ -2134,6 +2386,22 @@ def _region_parts(parts, in_label, out_label, regions, sw, sh,
             parts.append(f"[rgB{uid}_{k}][rgF{uid}_{k}]overlay={rx}:{ry}"
                          f"{enable}[{last}]")
         cur = last
+
+
+def _program_speech(index, tl):
+    """The transcript's speech on the program clock ([(a, b)]), [] for a
+    transcribed source with no speech, None when no transcript is known."""
+    index = index or {}
+    rows = index.get("sentences") or index.get("words")
+    if rows is None:
+        return None
+    try:
+        spans = []
+        for r in rows or []:
+            spans.extend(tl.span_to_out(float(r["t0"]), float(r["t1"])))
+        return merge_spans(spans, 0.3)
+    except Exception:  # noqa: BLE001 - read without the transcript
+        return None
 
 
 def _speech_spans_out(index, tl):
@@ -3731,6 +3999,12 @@ def _fx_handle_src(entry, keep, blk_frames, h, fps, side, no_source,
     return {"seg": idx, "start": round(start, 6)}
 
 
+# Junction styles that lay the two pictures over each other: on a cut baked
+# into the upload (no handles) their sides hold the edge frame while fainter
+# instead of playing at half speed (see the junction window above).
+BLEND_JUNCTION_STYLES = ("dissolve", "double_exposure", "fadegrays")
+
+
 def _joined_in_source(a, b, keep):
     """Do these two blocks' spans touch on the source clock?"""
     if a[0] != "seg" or b[0] != "seg":
@@ -3756,7 +4030,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       insert_inputs=None, vo_inputs=None, silence_idx=None,
                       src_w=None, src_h=None, src_pad=0.0, src_lead=0.0,
                       sfx_inputs=None, outro_s=0.0, card_idx=None,
-                      stem_inputs=None,
+                      stem_inputs=None, clean_input=None,
                       src_sar=1.0, src_fps=None, src_color_space=None,
                       overlay_inputs=None, gfx_ass_path=None,
                       motion_inputs=None,
@@ -3767,7 +4041,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       picture_card_inputs=None, main_video_inputs=None,
                       loudness="auto", dialogue_gain=None,
                       dialogue_probe=False, focus_origin=None,
-                      program_edges=None, fx_plan=None):
+                      program_edges=None, fx_plan=None, ambient_bed=False):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -3797,6 +4071,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     pass None, because mastering belongs to the final composition.
     dialogue_gain: dialogue_level knots that level the program bed [ac] before
     anything is mixed onto it (_dialogue_gain measures them).
+    ambient_bed: the measured bed holds no speech or music, only the room's
+    own sound (dialogue_level.read_bed). With no music or voiceover mixed
+    onto it either, the program is not lifted to the social target: its
+    room tone stays at the level it was recorded (EDIT-CORE A2).
     dialogue_probe: build the graph the leveler MEASURES — identical except
     that the source volume automation is left out, so a deliberate "quieter
     here" is not counted as quiet speech to undo.
@@ -4001,6 +4279,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             parts.append("[stv][stm]amix=inputs=2:duration=longest:"
                          "normalize=0[stemsrc]")
             asrc = "stemsrc"
+        elif clean_input is not None and has_audio:
+            # EDIT-CORE A3: the source's own sound, its noise cleaned
+            asrc = f"{clean_input}:a"
         else:
             asrc = "0:a" if has_audio else f"{silence_idx}:a"
         # Source-time volume automation runs before trimming, so between(t,a,b)
@@ -5344,18 +5625,29 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             return f"{u}{side}h"
 
         a_own, b_own = _own(ka, "a"), _own(kb, "b")
-        # A cut baked into the source has no footage past it. Its h frames
-        # run at half speed across the 2h of the window rather than stopping
-        # dead on the edge frame: a still is the same either way, and moving
-        # footage never freezes. It ends on the frame the program goes on
-        # from, so the join is continuous.
+        # A cut baked into the source has no footage past it. For a style
+        # that MOVES pictures (a slide, a wipe, a whip) its h frames run at
+        # half speed across the 2h of the window rather than stopping dead
+        # on the edge frame, and end on the frame the program goes on from.
+        # A style that BLENDS the two pictures (a dissolve) does not: both
+        # pictures at half speed, laid over each other for the whole window,
+        # is the ghosted double exposure p5873 got on every join of a
+        # cut-together teaser (16 Nov), and it slides every frame off its
+        # beat. There each side plays its own frames at their own times and
+        # holds its edge frame only while it is the fainter picture: the
+        # outgoing shot runs to the cut and fades on its last frame, the
+        # incoming one starts on the cut over its first frame. No frame
+        # moves in time and the translucent picture never moves.
+        spread_ok = spec.get("spread") and not all(
+            it.get("style") in BLEND_JUNCTION_STYLES
+            for it in spec.get("items") or ())
         spread = (f"setpts=2*(PTS-STARTPTS),fps={f3:.3f},"
                   f"tpad=stop_mode=clone:stop=2,trim=end_frame={2 * h},{tail}")
         if spec.get("a_src"):
             a_h = _handle(spec["a_src"], "a")
             parts.append(f"[{a_own}][{a_h}]concat=n=2:v=1:a=0,{tail}"
                          f"[{u}A]")
-        elif spec.get("spread"):
+        elif spread_ok:
             parts.append(f"[{a_own}]{spread}[{u}A]")
         else:
             parts.append(f"[{a_own}]tpad=stop_mode=clone:stop={h},{tail}"
@@ -5364,7 +5656,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             b_h = _handle(spec["b_src"], "b")
             parts.append(f"[{b_h}][{b_own}]concat=n=2:v=1:a=0,{tail}"
                          f"[{u}B]")
-        elif spec.get("spread"):
+        elif spread_ok:
             parts.append(f"[{b_own}]{spread}[{u}B]")
         else:
             parts.append(f"[{b_own}]tpad=start_mode=clone:start={h},{tail}"
@@ -5628,18 +5920,27 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # exactly the off state a windowed glow needs.
             # The bloom is computed at reduced resolution (_reduced_gblur):
             # a sigma-20 blur has nothing left at full resolution to keep.
+            # The screen blend runs in RGB (gbrp): screen on YUV's chroma
+            # planes lifts U and V both above neutral, a magenta-blue cast
+            # over the WHOLE picture (EDIT-CORE gate, 17 Nov 2026, p5873).
             down, blur, up = _reduced_gblur(W, H, 10 + 25 * i_)
-            parts.append(f"[{vlabel}]split[glA{si}][glB{si}]")
+            parts.append(f"[{vlabel}]format=gbrp,split[glA{si}][glB{si}]")
             parts.append(f"[glB{si}]{down}{blur}{up}[glG{si}]")
             parts.append(f"[glA{si}][glG{si}]blend=all_mode=screen"
-                         f":all_opacity={0.25 + 0.4 * i_:.2f}{en}"
-                         f"[{out_lab}]")
+                         f":all_opacity={0.25 + 0.4 * i_:.2f}{en},"
+                         f"format=yuv420p[{out_lab}]")
         elif kind == "halation":
             # Film halation is not generic white glow: only highlights bleed,
             # and the bloom is warm/red because light reflects through the
             # emulsion. Isolate high luma, neutralize its chroma, tint it,
             # diffuse it, then screen it back over the untouched base.
             threshold = int(205 - 45 * i_)
+            # The bloom is screened back in RGB (gbrp): a screen blend of
+            # YUV planes lifts both chroma planes above neutral and casts the
+            # WHOLE picture magenta-blue, not only its highlights (EDIT-CORE
+            # gate, 17 Nov 2026, p5873: whites a* -0.9 -> +17, b* +6.8 ->
+            # -6.6 at intensity 0.08; "warm, creamy neutrals" came out
+            # pink-mauve however the grade was turned).
             parts.append(f"[{vlabel}]split[halA{si}][halB{si}]")
             # Threshold at full resolution (a highlight must not be averaged
             # away before it is selected), then diffuse and tint the bloom at
@@ -5650,10 +5951,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 f":u=128:v=128,{down}{blur},"
                 f"colorbalance=rs={0.18 + 0.24 * i_:.2f}:"
                 f"gs={0.01 + 0.05 * i_:.2f}:bs=-{0.08 + 0.12 * i_:.2f}"
-                f"{up}[halG{si}]")
+                f"{up},format=gbrp[halG{si}]")
+            parts.append(f"[halA{si}]format=gbrp[halR{si}]")
             parts.append(
-                f"[halA{si}][halG{si}]blend=all_mode=screen:"
-                f"all_opacity={0.16 + 0.28 * i_:.2f}{en}[{out_lab}]")
+                f"[halR{si}][halG{si}]blend=all_mode=screen:"
+                f"all_opacity={0.16 + 0.28 * i_:.2f}{en},"
+                f"format=yuv420p[{out_lab}]")
         elif kind == "sharpen":
             # unsharp with a 5x5 kernel: the honest answer to "make it
             # clearer". It recovers apparent detail a phone's encoder smeared;
@@ -6649,6 +6952,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
 
     outro_on = outro_here          # one predicate, so the video and audio
     loud = master == "social"
+    if loud and ambient_bed and not music_inputs and not vo_inputs:
+        # Nothing to master: the program's sound is its room tone (and any
+        # sound effects placed on it). loudnorm would raise that floor to
+        # -14 LUFS (p5744: +28 dB of room tone over the upload).
+        loud = False
     a_prog = "aprog"
     # De-click edges (edge_fades): the programme's own sound, measured on
     # its own clock — on the block clock that is the blocks' exact length.
@@ -7105,12 +7413,16 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                                  program_edges=program_edges,
                                  fx_plan=fx_box[0], **extra)
 
-    dialogue_gain = None
+    dialogue_gain, ambient_bed = None, False
     if master == "social" and not discard_audio:
-        dialogue_gain = _dialogue_gain(
+        reading = _dialogue_reading(
             _graph, extra_inputs, workdir, tl.out_duration, preview,
             cancelled_cb=cancelled_cb)
-    graph = _graph(dialogue_gain=dialogue_gain)
+        dialogue_gain = reading["knots"]
+        ambient_bed = reading["content"] is False
+        _note_ambient(edl, out_path, ambient_bed and not music_inputs
+                      and not vo_inputs)
+    graph = _graph(dialogue_gain=dialogue_gain, ambient_bed=ambient_bed)
 
     if audio_only:
         graph = _prune_graph_to_audio(graph)
@@ -7124,7 +7436,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                     "-progress", "pipe:1", "-nostats", out_path]
         _fx_run(_audio_cmd(graph), fx_box,
                 lambda: _audio_cmd(_prune_graph_to_audio(
-                    _graph(dialogue_gain=dialogue_gain))),
+                    _graph(dialogue_gain=dialogue_gain, ambient_bed=ambient_bed))),
                 cancelled_cb,
                 timeout=_render_ffmpeg_timeout(preview, expected_out_s),
                 progress_cb=progress_cb, expected_out_s=expected_out_s)
@@ -7143,7 +7455,9 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     elif preview:
         encode = [*preview_video_encode(), "-c:a", "aac", "-b:a", "128k"]
     else:
-        encode = [*final_video_encode(W, H, fps),
+        encode = [*final_video_encode(W, H, fps, export_video_kbps(
+                      edl, program_render_s(tl, fps)
+                      + music_tail_ext(edl, tl.out_duration) + outro_s)),
                   "-c:a", "aac", "-b:a", "192k"]
 
     expected_out_s = (program_render_s(tl, fps)
@@ -7164,7 +7478,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                 *([] if _base_stage else ["-movflags", "+faststart"]),
                 "-progress", "pipe:1", "-nostats", out_path]
     _fx_run(_video_cmd(graph), fx_box,
-            lambda: _video_cmd(_graph(dialogue_gain=dialogue_gain)),
+            lambda: _video_cmd(_graph(dialogue_gain=dialogue_gain, ambient_bed=ambient_bed)),
             cancelled_cb,
             timeout=_render_ffmpeg_timeout(preview, expected_out_s),
             progress_cb=progress_cb, expected_out_s=expected_out_s)
@@ -7285,12 +7599,60 @@ def _bounded_canvas_program(edl, workdir, preview, asset_locals,
     return composed, {**(asset_locals or {}), key: program}
 
 
+# Renders whose program was left unmastered because its bed is only room
+# tone (EDIT-CORE A2): the post-encode loudness guard must not lift them to
+# -14 LUFS either. Keyed by output path and by EDL signature (a stitched
+# preview's loudness guard runs on another file than the measured track).
+_AMBIENT_RENDERS = {}
+_AMBIENT_LOCK = threading.Lock()
+
+
+def _ambient_keys(edl, out_path):
+    keys = []
+    if out_path:
+        keys.append("path:" + os.path.abspath(str(out_path)))
+    try:
+        from schemas import edl_signature
+        keys.append("edl:" + str(edl_signature(edl)))
+    except Exception:  # noqa: BLE001 — the path key still serves
+        pass
+    return keys
+
+
+def _note_ambient(edl, out_path, ambient):
+    with _AMBIENT_LOCK:
+        for k in _ambient_keys(edl, out_path):
+            if ambient:
+                _AMBIENT_RENDERS[k] = True
+            else:
+                _AMBIENT_RENDERS.pop(k, None)
+        while len(_AMBIENT_RENDERS) > 512:
+            _AMBIENT_RENDERS.pop(next(iter(_AMBIENT_RENDERS)))
+
+
+def ambient_program(edl, out_path):
+    """Was this render's program left at its natural level because its sound
+    is only room tone (no speech, music or voiceover)?"""
+    with _AMBIENT_LOCK:
+        return any(_AMBIENT_RENDERS.get(k)
+                   for k in _ambient_keys(edl, out_path))
+
+
 def _dialogue_gain(build, input_args, workdir, expected_s, preview,
                    cancelled_cb=None):
-    """Measure the program's dialogue bed and return the dialogue_level
-    knots that level it, or None — nothing to level (silence, too little
-    speech), or the measurement failed, in which case the master still runs,
-    just without leveling.
+    """The leveling knots alone (see _dialogue_reading)."""
+    return _dialogue_reading(build, input_args, workdir, expected_s, preview,
+                             cancelled_cb=cancelled_cb)["knots"]
+
+
+def _dialogue_reading(build, input_args, workdir, expected_s, preview,
+                      cancelled_cb=None, speech=None):
+    """Measure the program's dialogue bed: {"knots", "content"}. knots are
+    the dialogue_level knots that level it, or None — nothing to level
+    (silence, too little speech, only room tone), or the measurement failed,
+    in which case the master still runs, just without leveling. content is
+    False when the bed holds no speech or music (dialogue_level.read_bed),
+    None when it could not be measured.
 
     `build(**kw)` builds this render's own filtergraph. The probe is that
     graph with the source volume automation left out (dialogue_probe),
@@ -7303,7 +7665,7 @@ def _dialogue_gain(build, input_args, workdir, expected_s, preview,
     except media.MediaError as e:
         print(f"[render] dialogue leveling skipped (probe graph: "
               f"{str(e)[:160]})", flush=True)
-        return None
+        return {"knots": None, "content": None}
     path = os.path.join(workdir, f"dialogue-{uuid.uuid4().hex[:12]}.txt")
     graph += f";[ac]{dialogue_level.probe_chain(path)}[adlg]"
     cmd = ["ffmpeg", "-y", "-hide_banner", "-nostats", *input_args,
@@ -7319,13 +7681,19 @@ def _dialogue_gain(build, input_args, workdir, expected_s, preview,
             raise
         print(f"[render] dialogue leveling skipped (measurement: "
               f"{str(e)[:160]})", flush=True)
-        return None
+        return {"knots": None, "content": None}
     finally:
         try:
             os.remove(path)
         except OSError:
             pass
-    return dialogue_level.gain_knots(blocks)
+    bed = dialogue_level.read_bed(blocks, speech=speech)
+    if not bed["content"]:
+        print(f"[render] the bed is room tone only (level {bed['level']} "
+              f"LUFS, floor {bed['floor']}, top {bed['top']}): not leveled "
+              "or lifted by the master", flush=True)
+    return {"knots": dialogue_level.gain_knots(blocks, speech=speech),
+            "content": bool(bed["content"])}
 
 
 def _prune_graph_to_audio(graph, target="aout"):
@@ -7460,6 +7828,56 @@ def _overlay_input(item, local, fps, *, copy_timestamps=False):
     # window; insert_input's one-second tail covers both
     return render_plan.insert_input(item, local, fps,
                                     copy_timestamps=copy_timestamps)
+
+
+_NOISE_CLEAN_LOCK = threading.Lock()
+
+
+def _noise_clean_local(nc, audio_path, index, workdir, fetch, applies_to):
+    """A local file of ``audio_path``'s sound with its noise cleaned, or None
+    (the render then plays the original sound and says so in its log).
+    The tool's stored track serves when it was made for the same target;
+    otherwise the track is computed from ``audio_path`` itself and kept in
+    the box's source cache, so any writer of the node (the editing model,
+    an MCP batch, the Studio) gets the cleaned sound."""
+    import noise_clean
+    try:
+        strength = float(nc.get("strength") if nc.get("strength") is not None
+                         else 0.8)
+    except (TypeError, ValueError):
+        strength = 0.8
+    key = nc.get("audio_key")
+    if key and (nc.get("applies_to") or "source") == applies_to:
+        try:
+            return fetch(key, "noiseclean", 0)
+        except Exception as exc:  # noqa: BLE001 - computed below instead
+            print(f"[render] stored noise-clean track unavailable "
+                  f"({str(exc)[:120]}): cleaning from the source", flush=True)
+    try:
+        st = os.stat(audio_path)
+        tag = hashlib.sha1(
+            f"{os.path.abspath(audio_path)}|{st.st_size}|{int(st.st_mtime)}|"
+            f"{strength:.2f}|v{noise_clean.NOISE_CLEAN_VERSION}".encode()
+        ).hexdigest()[:24]
+        cache_dir = os.path.join(config.TMP_DIR, "srccache")
+        os.makedirs(cache_dir, exist_ok=True)
+        out = os.path.join(cache_dir, f"noiseclean_{tag}.m4a")
+        with _NOISE_CLEAN_LOCK:
+            if not (os.path.isfile(out) and os.path.getsize(out) > 0):
+                spans = [[float(w["t0"]), float(w["t1"])]
+                         for w in (index or {}).get("words") or []
+                         if applies_to == "source"]
+                tmp = out + f".{uuid.uuid4().hex[:6]}.m4a"
+                rep = noise_clean.clean(audio_path, tmp, spans, strength)
+                os.replace(tmp, out)
+                print(f"[render] background noise cleaned ({applies_to}): "
+                      f"floor {rep['floor_db']} dBFS lowered "
+                      f"{rep['reduction_db']} dB", flush=True)
+        return out
+    except Exception as exc:  # noqa: BLE001 - the original sound still plays
+        print(f"[render] noise clean failed ({type(exc).__name__}: "
+              f"{str(exc)[:160]}): the original sound plays", flush=True)
+        return None
 
 
 def _render_asset_source(key, tag, idx, workdir, asset_locals=None):
@@ -7742,20 +8160,35 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # A late picture (media.picture_lead) is filled from t=0 on the plain
     # input's clock, so it never seeks.
     src_lead = media.picture_lead(info)
-    seek_main_source = source_seek_s >= 5.0 and not src_lead
-    main_input_args = (["-copyts", "-ss", f"{source_seek_s:.3f}",
-                        "-i", src_path]
+    # A preview whose keeps start at the head but leave long stretches of the
+    # source out reads only its kept stretches too (B4, 16 Nov 2026): p5857's
+    # 59-minute cut of an 81-minute film starts at 0 s, so the main input never
+    # seeked, the distant-cluster reads below never ran, and every preview
+    # decoded all 81 minutes, the 21 minutes it cut included. The seeking path
+    # is the one every keep starting 5 s or later already takes.
+    distant_keeps = bool(
+        preview and config.RENDER_SEEK_DISTANT_KEEPS and len(_keep_clusters(
+            edl["keep"], config.KEEP_CLUSTER_GAP_S, 2)) > 1)
+    seek_main_source = (source_seek_s >= 5.0 or distant_keeps) and not src_lead
+    # -start_at_zero puts the seeking path on the plain input's clock: every
+    # input's own start is taken off its timestamps (the seek is not), so a
+    # keep of [70, 76] reads the same frames whether the input seeked or not.
+    # Without it -copyts kept the container clock, and a source whose format
+    # starts at 1.48 s trimmed every keep 1.48 s early on the seeking path,
+    # behind the seek point: 16.5 s of preview for an 18 s cut, its frames
+    # apart from the final export's from 5 s on (16 Nov 2026 review).
+    main_input_args = (["-copyts", "-start_at_zero",
+                        "-ss", f"{source_seek_s:.3f}", "-i", src_path]
                        if seek_main_source else ["-i", src_path])
     # Where the picture's first frame sits on the clock the main trims read:
-    # -copyts keeps the container's own times; a plain input is shifted so the
-    # earliest stream starts at 0. Focus handoffs land on real frames with it
-    # (focus_handoff). A VFR picture has no frame grid to land on.
+    # both paths shift the input so its earliest stream starts at 0. Focus
+    # handoffs land on real frames with it (focus_handoff). A VFR picture has
+    # no frame grid to land on.
     focus_origin = None
     if src_lead:
         focus_origin = 0.0      # the held first frame starts the grid at 0
     elif info.get("video_start") is not None and not info.get("vfr"):
-        focus_origin = float(info["video_start"]) - (
-            0.0 if seek_main_source else float(info.get("format_start") or 0.0))
+        focus_origin = float(info["video_start"]) - float(info.get("format_start") or 0.0)
 
     frame = edl.get("frame") or None
     if frame and (frame.get("ratio") or "source") == "source":
@@ -7858,11 +8291,17 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # original audio with a log line — a missing stem object must never
     # fail a render the untouched track can honestly serve.
     stem_inputs = None
+    clean_input = None
     sm = edl.get("stem_mix") or None
+    nc = edl.get("noise_clean") or None
     if sm:
         try:
             v_local = _fetch(sm["vocals_key"], "stemv", next_idx)
             a_local = _fetch(sm["accomp_key"], "stema", next_idx + 1)
+            if nc:
+                # the cleaned voice stem: the background is the other stem
+                v_local = _noise_clean_local(nc, v_local, index, workdir,
+                                             _fetch, "vocals") or v_local
             stem_seek = (["-ss", f"{source_seek_s:.3f}"]
                          if seek_main_source else [])
             extra_inputs += [*stem_seek, "-i", v_local,
@@ -7876,6 +8315,19 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                   f"({str(e)[:120]}) — rendering the original audio",
                   flush=True)
             stem_inputs = None
+    if nc and stem_inputs is None and info["has_audio"]:
+        # EDIT-CORE A3: the footage's sound with its background noise
+        # cleaned (noise_clean.py) plays wherever the graph would read the
+        # original track. Measured and stored once per source and strength;
+        # computed here from the source itself when no stored track serves.
+        c_local = _noise_clean_local(nc, src_path, index, workdir, _fetch,
+                                     "source")
+        if c_local:
+            c_seek = (["-ss", f"{source_seek_s:.3f}"]
+                      if seek_main_source else [])
+            extra_inputs += [*c_seek, "-i", c_local]
+            clean_input = next_idx
+            next_idx += 1
 
     # one shared anullsrc covers a silent main track AND silent insert blocks
     needs_silence = (not info["has_audio"]) or any(
@@ -8024,6 +8476,14 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         if len(clusters) > 1:
             main_video_inputs = []
             threads = max(0, int(config.KEEP_CLUSTER_THREADS))
+            # A small frame (a preview's 540p proxy) decodes on ffmpeg's own
+            # thread count: the reads follow one another in the programme, so
+            # two threads each left the CPU idle (p5857 v16, 59-min preview:
+            # 120 s with 2 threads, 74 s auto, 313 MB peak against 1191 MB
+            # for the whole-source read).
+            mpix = float(info.get("width") or 0) * float(info.get("height") or 0) / 1e6
+            if 0 < mpix <= config.KEEP_CLUSTER_AUTO_THREADS_MAX_MPIX:
+                threads = 0
             for a, b in clusters:
                 seek = max(0.0, a - 1.0)
                 if threads:
@@ -8109,10 +8569,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             if fx_source is None and any(isinstance(i, dict)
                                          for i in edl.get("fx") or []):
                 fx_source = pm_src
-            # -copyts reads the container clock: the sidecars' (proxy-
-            # relative) seconds sit the container's start later on it
-            pm.clock_offset = (float(info.get("format_start") or 0.0)
-                               if seek_main_source else 0.0)
+            # Both paths read the input on a clock that starts at 0
+            # (-copyts runs with -start_at_zero), the sidecars' own clock
+            pm.clock_offset = 0.0
     pm_items = {}               # (layer, id) -> serves on the program matte
 
     def _screen_stage(item):
@@ -8254,9 +8713,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                bool(caption_motion_items)),
             behind_why=_hero_behind_why,
             world=_world_ctx(edl, W, H, fps, tl, index, preview, None,
-                             (float(info.get("format_start") or 0.0)
-                              if seek_main_source else 0.0), workdir,
-                             src_path))
+                             0.0, workdir, src_path))
         if caption_motion_items and not any(
                 str(it.get("id", "")).startswith("__captions_")
                 for _i, it, _c in motion_inputs):
@@ -8359,6 +8816,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                  sfx_inputs=sfx_inputs,
                                  outro_s=outro_s, card_idx=card_idx,
                                  stem_inputs=stem_inputs,
+                                 clean_input=clean_input,
                                  src_sar=info.get("sar") or 1.0,
                                  src_fps=float(info["fps"]) or fps,
                                  src_color_space=info.get("color_space"),
@@ -8383,13 +8841,19 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # the same graph's audio. Previews, finals and the audio-only rebuilds
     # (picture reuse, timeline stitches) all come through here, so what the
     # user approves and what ships carry the same curve.
-    dialogue_gain = None
+    dialogue_gain, ambient_bed = None, False
     if not discard_audio \
             and master_loudness(edl, info["width"], info["height"]) == "social":
-        dialogue_gain = _dialogue_gain(
+        spoken = _program_speech(index, tl)
+        reading = _dialogue_reading(
             _graph, main_input_args + extra_inputs, workdir,
-            tl.out_duration, preview, cancelled_cb=cancelled_cb)
-    graph = _graph(dialogue_gain=dialogue_gain)
+            tl.out_duration, preview, cancelled_cb=cancelled_cb,
+            speech=spoken)
+        dialogue_gain = reading["knots"]
+        ambient_bed = reading["content"] is False
+        _note_ambient(edl, out_path, ambient_bed and not music_inputs
+                      and not vo_inputs)
+    graph = _graph(dialogue_gain=dialogue_gain, ambient_bed=ambient_bed)
 
     if audio_only:
         # The same graph the full render would run, minus every chain the
@@ -8408,7 +8872,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                     "-progress", "pipe:1", "-nostats", out_path]
         _fx_run(_audio_cmd(graph), fx_box,
                 lambda: _audio_cmd(_prune_graph_to_audio(
-                    _graph(dialogue_gain=dialogue_gain))),
+                    _graph(dialogue_gain=dialogue_gain, ambient_bed=ambient_bed))),
                 cancelled_cb,
                 timeout=_render_ffmpeg_timeout(preview, expected_out_s),
                 progress_cb=progress_cb, expected_out_s=expected_out_s)
@@ -8420,7 +8884,10 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         # veryfast keeps export wall time low (the graph, not x264, is the
         # cost); config.FINAL_CRF sets the delivered quality (see config),
         # under the export's rate ceiling (final_video_encode).
-        encode = [*final_video_encode(W, H, fps),
+        # An export size or bitrate target (EDL export) lowers the ceiling.
+        encode = [*final_video_encode(W, H, fps, export_video_kbps(
+                      edl, program_render_s(tl, fps)
+                      + music_tail_ext(edl, tl.out_duration) + outro_s)),
                   "-c:a", "aac", "-b:a", "192k"]
 
     expected_out_s = (program_render_s(tl, fps)
@@ -8448,7 +8915,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # flatlines through the whole end card.
     try:
         _fx_run(_video_cmd(graph), fx_box,
-                lambda: _video_cmd(_graph(dialogue_gain=dialogue_gain)),
+                lambda: _video_cmd(_graph(dialogue_gain=dialogue_gain, ambient_bed=ambient_bed)),
                 cancelled_cb,
                 timeout=_render_ffmpeg_timeout(preview, expected_out_s),
                 progress_cb=progress_cb, expected_out_s=expected_out_s)
@@ -9794,6 +10261,7 @@ def run_render_job(worker_db, job):
         raise dbx.PermanentJobError("Unknown preview quality")
     token = _PREVIEW_QUALITY.set(quality)
     paid_token = _PREVIEW_PAID.set(False)
+    long_token = _PREVIEW_LONG.set(False)
     job_type_token = _RENDER_JOB_TYPE.set(job.get("type"))
     try:
         try:
@@ -9818,6 +10286,7 @@ def run_render_job(worker_db, job):
     finally:
         _PREVIEW_QUALITY.reset(token)
         _PREVIEW_PAID.reset(paid_token)
+        _PREVIEW_LONG.reset(long_token)
         _RENDER_JOB_TYPE.reset(job_type_token)
 
 
@@ -9997,6 +10466,8 @@ def _run_render_job(worker_db, job):
     edl_row = worker_db.run(dbx.get_edl_version, project_id, version)
     if not edl_row:
         raise dbx.PermanentJobError(f"EDL version {version} not found")
+    if variant == "preview":
+        _PREVIEW_LONG.set(long_program(edl_row["json"]))
     original = worker_db.run(dbx.latest_asset, project_id, "original")
     if variant == "preview" and original \
             and _PREVIEW_QUALITY.get() == "approval" \
@@ -10422,6 +10893,8 @@ def _run_render_job(worker_db, job):
                                                  lambda: index) \
                             and (variant != "preview" or _same_preview_frame(
                                 prev_asset, edl_row["json"], src_local)) \
+                            and _same_export_target(variant, prev_row["json"],
+                                                    edl_row["json"]) \
                             and (fp_now is None
                                  or pm.get("caption_fp") == fp_now):
                         out_dur = _reuse_picture_with_new_audio(
@@ -10541,26 +11014,60 @@ def _run_render_job(worker_db, job):
         # overshoot it by several dB, so the encoded file itself is measured
         # and, when over, its sound alone is re-limited (picture copied).
         tp_guard = None
+        # A preview's sound is measured ONCE (B4, 16 Nov 2026): the audio QC
+        # pass (silencedetect + ebur128 peak=true) is the peak guard's first
+        # reading and, when the guard leaves the file as it is, the QC record
+        # below. On p5857's 59-minute preview the two passes cost 30 s + 100 s.
+        qc_pass = None
+        if not proof_only and variant == "preview":
+            qc_pass = audio_qc.analysis(out_local)
         if not proof_only:
             try:
                 tp_guard = true_peak.guard(
                     out_local, bitrate=("128k" if variant == "preview"
-                                        else "192k"), workdir=workdir)
+                                        else "192k"), workdir=workdir,
+                    measured=audio_qc.true_peak_of(qc_pass))
             except Exception as tpe:  # noqa: BLE001 — never fails a render
                 print(f"[render {job_id}] true-peak guard skipped "
                       f"({str(tpe)[:160]})", flush=True)
                 tp_guard = None
             if tp_guard and tp_guard.get("passes"):
+                qc_pass = None          # the sound changed: QC measures the new file
                 print(f"[render {job_id}] true peak {tp_guard['tp_in']} -> "
                       f"{tp_guard['tp']} dBTP (limiter "
                       f"{tp_guard['limit_dbfs']} dBFS, "
                       f"{tp_guard['passes']} pass(es))", flush=True)
-        if not proof_only and master_loudness(edl_row["json"], *src_shape):
+        if not proof_only and master_loudness(edl_row["json"], *src_shape) \
+                and not ambient_program(edl_row["json"], out_local):
+            # (a program whose sound is only room tone stays at its recorded
+            # level: render_edl measured its bed and left it unmastered)
             import mastering
             master_guard = mastering.guard(out_local, workdir,
                 bitrate="128k" if variant == "preview" else "192k")
+            if master_guard and master_guard.get("passes"):
+                qc_pass = None
             if master_guard and tp_guard:
                 tp_guard["mastering"] = master_guard
+        # The export's size target (EDL export.max_size_mb): the file that
+        # ships is measured, and re-encoded until it fits (fit_export_size).
+        size_fit = None
+        if variant == "final" and not proof_only:
+            try:
+                size_fit = fit_export_size(edl_row["json"], out_local,
+                                           workdir,
+                                           cancelled_cb=lambda: _abandoned[0])
+            except dbx.JobLeaseLost:
+                raise
+            except Exception as fe:  # noqa: BLE001 — never fails an export
+                # The verified file at out_local ships (fit_export_size puts
+                # it back when a pass fails); its size is measured and
+                # reported honestly, so the customer gets the film and the
+                # true number instead of a failed export.
+                size_fit = export_fit_failed_report(edl_row["json"],
+                                                    out_local, fe)
+            if size_fit:
+                print(f"[render {job_id}] {export_size_text(size_fit)}",
+                      flush=True)
         _mark("true_peak_s")
         # No more frame/audio writes follow the peak guard. Send these exact
         # bytes while the evidence sheets read them; all sheets and all checks
@@ -10818,7 +11325,7 @@ def _run_render_job(worker_db, job):
                         _explicit = ((edl_row["json"].get("master") or {})
                                      .get("loudness"))
                         audio_qc_res = audio_qc.measure(
-                            out_local, duration_s=out_dur,
+                            out_local, duration_s=out_dur, analysis=qc_pass,
                             master=(master_loudness(edl_row["json"], *src_shape)
                                     or _explicit),
                             silent_by_design=silent_by_design(
@@ -10925,6 +11432,8 @@ def _run_render_job(worker_db, job):
                   # measurable even if the job result becomes "superseded".
                   "render_stage_timings": dict(timings),
                   "quality": _quality_label(),
+                  # What the export's size target measured (fit_export_size).
+                  **({"export_size": size_fit} if size_fit else {}),
                   # A reused picture keeps the encode it was made with.
                   **({"preview_enc": reused_visual_meta.get(
                       "preview_enc", PREVIEW_ENCODE_BEFORE_STAMPS)
@@ -11046,6 +11555,7 @@ def _run_render_job(worker_db, job):
                   flush=True)
         return {"render_asset_id": asset_id, "sheet_key": sheet_key,
                 **({"render_dependency_key": dependency_key} if dependency_key else {}),
+                **({"export_size": size_fit} if size_fit else {}),
                 "render_job_id": job_id, "quality": _quality_label(),
                 "sha256": render_sha,
                 "verify_sheet_key": verify_sheet_key,

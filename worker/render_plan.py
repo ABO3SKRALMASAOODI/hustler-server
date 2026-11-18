@@ -136,7 +136,12 @@ def picture_signature(edl):
     key. Audio tail length is checked separately by the artifact planner.
     """
     visual = canonical_program(edl)
-    for key in ("music", "sfx", "volume", "voiceover", "master", "stem_mix"):
+    # export (16 Nov 2026): the exported FILE's size/bitrate target. Previews
+    # never read it, and a final across two targets is never reused or
+    # stitched (renderer._run_render_job compares export for finals), so it
+    # is not part of the picture.
+    for key in ("music", "sfx", "volume", "voiceover", "master", "stem_mix",
+                "noise_clean", "export"):
         visual.pop(key, None)
     for item in visual.get("inserts") or []:
         item.pop("mute", None)

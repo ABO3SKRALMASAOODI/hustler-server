@@ -81,5 +81,4 @@ def test_inspect_still_answers_without_writing():
                 "timing_policy": "preserve", "output_count": 1,
                 "changed_lanes": [], "requirements": [],
                 "request_digest": _digest(), "schema_version": 1}
-    with pytest.raises(ValueError):
-        request_contract.protected_lanes(_ctx(contract))
+    assert request_contract.protected_lanes(_ctx(contract)) == set()

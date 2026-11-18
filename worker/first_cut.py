@@ -1638,8 +1638,48 @@ def clip_keeps(keep, start, end, least_s=0.3):
     return out
 
 
+def _sound_db(path, start, length):
+    """Mean level (dBFS) of the source's sound over [start, start + length], or None."""
+    try:
+        out = subprocess.run(
+            ["ffmpeg", "-v", "info", "-nostdin", "-ss", f"{max(0.0, start):.3f}", "-t", f"{max(0.05, length):.3f}",
+             "-i", path, "-vn", "-af", "volumedetect", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=60).stderr
+    except Exception:
+        return None
+    for line in out.splitlines():
+        if "mean_volume:" in line:
+            try:
+                return float(line.split("mean_volume:")[1].split("dB")[0])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+def _edge_carries_the_piece(path, a, b, side, duration):
+    """True when a dark edge [a, b] still plays the piece's own sound: its level is a song's or a voice's
+    (over -40 dBFS) and within 12 dB of the seconds next to it. An app's card is a silent or separate
+    sting; a music video's closing credit under its song's last bars is the piece itself (18 Nov 2026,
+    p5717: the first film ended 2.1 s before the song did)."""
+    if b - a < 0.2:
+        return False
+    edge = _sound_db(path, a, b - a)
+    near = _sound_db(path, max(0.0, a - 5.0), min(5.0, a)) if side == "tail" else \
+        _sound_db(path, b, min(5.0, max(0.0, float(duration) - b)))
+    return edge is not None and near is not None and edge > -40.0 and edge >= near - 12.0
+
+
 def drop_app_cards(ctx, steps, started, duration):
     start, end = app_card_edges(ctx, duration)
+    try:
+        path = ctx.proxy_path()
+    except Exception:
+        path = None
+    if path is not None:
+        if end < float(duration or 0) - 1e-3 and _edge_carries_the_piece(path, end, float(duration), "tail", duration):
+            end = float(duration)
+        if start > 0.0 and _edge_carries_the_piece(path, 0.0, start, "head", duration):
+            start = 0.0
     if start <= 0.0 and end >= float(duration or 0) - 1e-3:
         return False
     keep = _keep(ctx)
@@ -2021,6 +2061,46 @@ def _music_piece(index, duration, robust=False):
         len(words) / max(1.0, float(duration or 0)) < 1.2
 
 
+# EDIT-CORE A1 (16 Nov 2026): p5717, a 93 s official music video (66 shots,
+# the song throughout, 7 words of its lyric transcribed), was over
+# FINISHED_PIECE_MAX_S, so it was read as raw footage and cut to a 6.3 s
+# teaser of 18 clips of 0.35 s; the customer then asked to "keep the pacing
+# natural". A length is not what tells a finished piece from raw footage
+# (ticket #63's 104 s concert take): an edit is. Measured: shots change at
+# least every EDITED_SHOT_S on average and sound plays over the room's floor
+# through SONG_SHARE of it.
+EDITED_SHOT_S = 3.0
+SONG_SHARE = 0.8
+
+
+def _edited_song_piece(ctx, duration):
+    """Is this upload an already-edited piece over continuous sound (a music
+    video, a montage over its song)? Measured on the shots and on the
+    activity track (liveness); False when it cannot be measured."""
+    import liveness
+    try:
+        duration = float(duration or 0)
+    except (TypeError, ValueError):
+        return False
+    shots = liveness.shot_starts(ctx.index)
+    if duration <= 0 or (len(shots) + 1) * EDITED_SHOT_S < duration:
+        return False
+    try:
+        track, why = agent_tools._liveness_track(ctx, 0.0, duration)
+    except Exception as exc:  # noqa: BLE001 - unmeasured reads as raw footage
+        track, why = None, f"{type(exc).__name__}: {str(exc)[:120]}"
+    if not track:
+        print(f"[first_cut] edit rhythm not measured ({why})", flush=True)
+        return False
+    reading = liveness.read_span(track, 0.0, duration, shots)
+    ok = bool(reading and (reading.get("sound") or 0.0) >= SONG_SHARE)
+    print(f"[first_cut] {len(shots) + 1} shots in {duration:.1f}s, sound over "
+          f"the floor {((reading or {}).get('sound') or 0):.0%}: "
+          + ("an edited piece over its song" if ok else "raw footage"),
+          flush=True)
+    return ok
+
+
 def _faceless_reframe_args(speech, faces, picked):
     """auto_reframe's arguments for footage that is not a screen and not a
     vertical talking head. Silent footage with no face fills the frame
@@ -2150,12 +2230,23 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             res, early_bands = deband(ctx, steps, started)
             if not _ok(res):
                 early_bands = None
-    if _music_piece(ctx.index, duration, robust=q1) and duration <= 120:
+    finished = _music_piece(ctx.index, duration, robust=q1)
+    if not finished and not cut_speech and duration <= 120:
+        finished = _edited_song_piece(ctx, duration)
+    if finished and duration <= 120:
         # a finished piece over a song: whole, unchanged in time, no title
         # or captions over its own design; only a non-vertical frame is
         # fitted to 9:16 (crop for footage, never bands around a speaker)
-        applied.append("kept whole (it already plays as a finished piece "
-                       "over its song)")
+        # The reply says "over its song" only when a song was measured in
+        # the upload (p5744, 16 Nov 2026: an 11 s walk with room tone at
+        # -45.7 dB RMS and a 0.37 beat confidence was told it had a song).
+        # It never says the film plays only its own sound: _render_cut lays
+        # the first film's sound design, and the reply names what it placed
+        # (edit_provenance.sounds_added, measured from the delivered version).
+        import edit_provenance
+        applied.append("kept whole (it already plays as a finished piece"
+                       + (" over its song)" if edit_provenance.upload_has_music(ctx.index)
+                          else ", in its own time)"))
         if drop_app_cards(ctx, steps, started, duration):
             applied.append("the app's end card left out")
         if not whole and typography.get("designed_layout"):
@@ -3803,6 +3894,15 @@ def run(worker_db, job, project, index_row):
             print(f"[first_cut] brief follow-up not queued: {exc}", flush=True)
     if delivered:
         duration = float(preview.get("duration_s") or 0)
+        if not url:
+            # What the first cut laid over the upload's sound, measured from
+            # the delivered version (p5744: a riser and an impact the reply
+            # never named were later taken for the upload's own).
+            import edit_provenance
+            added = edit_provenance.sounds_added(
+                (start_edl or {}).get("json"), (latest or {}).get("json"))
+            if added:
+                applied = list(applied) + [added]
         summary = _summary(applied, duration, url)
         admission = project_admission_safe(worker_db, project["id"])
         trial = bool(admission and admission.get("kind") == "trial")

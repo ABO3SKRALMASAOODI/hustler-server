@@ -13,8 +13,13 @@ deliberately and says why. Runs on the EXECUTOR (renderer.py) where the
 rendered file is local; the dispatcher only ever reads the numbers.
 
 One decode serves everything: silencedetect logs gaps to stderr while
-loudnorm (print_format=json) logs integrated loudness / true peak / LRA.
-Failure returns None — a render never fails over its own review.
+ebur128 (peak=true) logs integrated loudness / true peak / LRA. The same pass
+is the true-peak guard's first reading (renderer: true_peak.guard(measured=)),
+so a render measures its sound once. ebur128 replaced loudnorm here on 16 Nov
+2026 (B4): loudnorm resamples to 192 kHz for its peak, 99.9 s against 29.5 s on
+a 59-minute preview, the same BS.1770 numbers (I -18.0 LUFS, TP -2.6 dBTP on
+p5857 v16). Old loudnorm text still parses. Failure returns None — a render
+never fails over its own review.
 """
 
 import json
@@ -47,18 +52,63 @@ _SIL_START = re.compile(r"silence_start:\s*([0-9.]+)")
 _SIL_END = re.compile(r"silence_end:\s*([0-9.]+)")
 
 
-def _run_ffmpeg(path):
-    """stderr of the single analysis pass, or None."""
+def _run_ffmpeg(path, timeout=None):
+    """stderr of the single analysis pass, or None. The timeout grows with the file (a 59-minute
+    preview on the box's 2 vCPU must not run out of a fixed 180 s)."""
+    if timeout is None:
+        timeout = 180.0
+        try:
+            import media
+            timeout = max(180.0, 0.25 * float(media.duration_of(path) or 0))
+        except Exception:  # noqa: BLE001
+            pass
     cmd = ["ffmpeg", "-hide_banner", "-nostats", "-i", path,
            "-map", "0:a:0", "-af",
-           "silencedetect=n=-50dB:d=1.0,"
-           "loudnorm=I=-14:TP=-2.0:LRA=11:print_format=json",
+           "silencedetect=n=-50dB:d=1.0,ebur128=peak=true:framelog=quiet",
            "-f", "null", "-"]
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=180)
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
     except Exception:
         return None
     return (proc.stderr or b"").decode("utf-8", "replace")
+
+
+def analysis(path):
+    """The one analysis pass (stderr) for measure(analysis=) and true_peak_of(); None on failure."""
+    return _run_ffmpeg(path)
+
+
+_EBU_I = re.compile(r"Integrated loudness:\s*\n\s*I:\s*(-?[0-9.]+|-inf)\s*LUFS")
+_EBU_LRA = re.compile(r"Loudness range:\s*\n\s*LRA:\s*(-?[0-9.]+|-inf)\s*LU")
+_EBU_TP = re.compile(r"True peak:\s*\n\s*Peak:\s*(-?[0-9.]+|-inf)\s*dBFS")
+# ebur128 floors a silent programme's integrated loudness at its absolute gate.
+_EBU_SILENT_LUFS = -70.0
+
+
+def _ebur128(stderr_text):
+    """loudnorm-shaped {"input_i", "input_tp", "input_lra"} from ebur128's summary, or None."""
+    text = stderr_text or ""
+    if "Summary:" not in text:
+        return None
+    text = text[text.rindex("Summary:"):]
+    i, lra, tp = _EBU_I.search(text), _EBU_LRA.search(text), _EBU_TP.search(text)
+    if not i:
+        return None
+    value = i.group(1)
+    if value != "-inf" and float(value) <= _EBU_SILENT_LUFS:
+        value = "-inf"
+    return {"input_i": value, "input_tp": tp.group(1) if tp else None,
+            "input_lra": lra.group(1) if lra else None}
+
+
+def true_peak_of(stderr_text):
+    """The pass's true peak in dBTP (float), or None when unmeasured or silent."""
+    loud, _sil = _parse(stderr_text or "")
+    try:
+        tp = float((loud or {}).get("input_tp"))
+    except (TypeError, ValueError):
+        return None
+    return tp if math.isfinite(tp) else None
 
 
 def _parse(stderr_text):
@@ -73,6 +123,8 @@ def _parse(stderr_text):
                 break
             except Exception:
                 pass
+    if loud is None:
+        loud = _ebur128(stderr_text)
     silences, start = [], None
     for line in stderr_text.splitlines():
         m = _SIL_START.search(line)
@@ -86,7 +138,7 @@ def _parse(stderr_text):
     return loud, silences
 
 
-def measure(path, duration_s=None, master=None, silent_by_design=False):
+def measure(path, duration_s=None, master=None, silent_by_design=False, analysis=None):
     """The QC record for one rendered file, or None when analysis failed.
 
     {"i": integrated LUFS, "tp": true peak dBTP, "lra": loudness range,
@@ -105,7 +157,7 @@ def measure(path, duration_s=None, master=None, silent_by_design=False):
     SILENT finding would push the editor to add music nobody requested and
     to report a finished edit as unfinished. The measurement itself is kept.
     """
-    err = _run_ffmpeg(path)
+    err = analysis if analysis is not None else _run_ffmpeg(path)
     if err is None:
         return None
     if "Stream map '0:a:0' matches no streams" in err \

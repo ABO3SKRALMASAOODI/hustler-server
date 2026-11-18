@@ -216,19 +216,25 @@ def test_an_answer_is_the_deliverable_even_with_nothing_on_the_timeline():
     assert agent_loop._turn_completion(ctx)[0] == "fulfilled"
 
 
-def test_analysis_requests_forbid_writes():
+def test_an_analysis_reading_never_stops_a_write():
+    """Map W11 (owner, 16 Nov 2026): the editor decided to edit; nothing is frozen and the write
+    note says how the brief read the message."""
     ctx = context()
     ctx.semantic_contract["mode"] = "inspect"
-    with pytest.raises(ValueError, match="analysis"):
-        rc.protected_lanes(ctx)
+    assert rc.protected_lanes(ctx) == set()
+    before = ctx.latest_edl()["json"]
+    after = dict(before, keep=[[0.0, 1.0]])
+    assert "read this message as a question" in rc.write_note(ctx, before, after, set())
 
 
-def test_a_new_instruction_needs_its_own_brief_before_any_write():
+def test_a_new_instruction_is_read_when_a_write_needs_its_brief(monkeypatch):
+    """Map W10: a stale brief is compiled on demand instead of refusing the write."""
     ctx = context()
     assert rc.protected_lanes(ctx)
     ctx.verification_request = "Now replace the soundtrack."
-    with pytest.raises(ValueError, match="current request"):
-        rc.protected_lanes(ctx)
+    monkeypatch.setattr(rc, "_call", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("provider down")))
+    assert rc.protected_lanes(ctx) == set()
+    assert ctx.semantic_contract["request_digest"] == rc.digest(ctx)
 
 
 def test_durable_checkpoint_keeps_the_brief():

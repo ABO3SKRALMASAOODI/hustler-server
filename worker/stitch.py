@@ -103,6 +103,10 @@ def _fx_window(item):
 def _strip(edl):
     """(structural-dump, changeable-dump) for comparison."""
     e = json.loads(json.dumps(edl or {}))
+    # The export's size/bitrate target is not picture: previews never read
+    # it, and finals across two targets are never stitched (the renderer
+    # compares export before it stitches a final).
+    e.pop("export", None)
     fx = e.get("effects") or {}
     fx_items = e.pop("fx", None) or []
     bus = [i for i in fx_items if i not in _fx_video(fx_items)]
@@ -1210,7 +1214,8 @@ def shift_ass(src_path, dst_path, w0, w1):
 
 # Fields the audio rebuild owns outright — a difference here never blocks a
 # timeline stitch and never opens a video window.
-AUDIO_FIELDS = ("music", "sfx", "volume", "voiceover", "master", "stem_mix")
+AUDIO_FIELDS = ("music", "sfx", "volume", "voiceover", "master", "stem_mix",
+                "noise_clean")
 
 _MIN_COPY_S = 0.75          # a copy shorter than this joins its neighbours
 _SEAM_EPS = 1e-6

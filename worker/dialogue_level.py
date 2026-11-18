@@ -59,6 +59,24 @@ MIN_SPEECH_S = 1.0        # less measured speech than this: no curve at all
 _MIN_WINDOW_BLOCKS = 3
 _MAX_SPAN_KNOTS = 60      # a kept knot at least every 30 s bounds the scan
 
+# A bed with no speech or music in it (EDIT-CORE A2, 16 Nov 2026). p5744, an
+# 11 s walk with one faint word, measured -42.9 LUFS of steady room tone and
+# footsteps. Every block cleared the -50 LUFS gate, so the room tone was
+# read as speech and leveled +23 dB to TARGET_LUFS, and the master's loudnorm
+# and its guard then took it to -14: the program played its noise floor
+# about 28 dB louder than the upload. Speech and music move against a
+# floor: a bed whose blocks stay within CONTRAST_LU of each other AND sit
+# under AMBIENT_MAX_LUFS is the room's own sound, not content to level or
+# master. With a transcript, speech is content when enough of it rises
+# SPEECH_OVER_FLOOR_LU over the room's floor, read from the blocks between
+# the words when the program has them (a tight program's floor is otherwise
+# its quieter speech).
+FLOOR_PCT = 10.0
+CONTRAST_PCT = 90.0
+CONTRAST_LU = 8.0
+AMBIENT_MAX_LUFS = -38.0
+SPEECH_OVER_FLOOR_LU = 6.0
+
 _PTS = re.compile(r"pts_time:\s*(-?[0-9.]+)")
 _MOMENTARY = re.compile(r"lavfi\.r128\.M=(\S+)")
 
@@ -123,10 +141,59 @@ def _decimate(knots, tol):
     return kept
 
 
-def gain_knots(blocks, step=STEP_S):
+def _pct(values, pct):
+    vals = sorted(values)
+    if not vals:
+        return None
+    k = (len(vals) - 1) * pct / 100.0
+    lo = int(math.floor(k))
+    hi = min(len(vals) - 1, lo + 1)
+    return vals[lo] + (vals[hi] - vals[lo]) * (k - lo)
+
+
+def read_bed(blocks, speech=None, step=STEP_S):
+    """What the measured bed holds: {"floor", "top", "level", "content"}.
+
+    floor/top are the FLOOR_PCT/CONTRAST_PCT block levels (LUFS), level the
+    energy mean of the audible blocks. content is False when nothing in the
+    bed is speech or music, so nothing in it may be leveled or mastered up:
+
+    - speech: the program's transcribed speech windows ([(a, b)] program
+      seconds; None when no transcript is known). With them, speech is
+      content when MIN_SPEECH_S of its blocks rise SPEECH_OVER_FLOOR_LU over
+      the floor; a footstep or a cleaned room's residue is not speech.
+    - a bed at AMBIENT_MAX_LUFS or louder is content (a song, a crowd).
+    - with no transcript, a bed with contrast (a block CONTRAST_LU over the
+      floor) is content, as before.
+    """
+    pairs = [(float(t), max(-120.0, float(m))) for t, m in (blocks or [])]
+    lv = [m for _t, m in pairs]
+    audible = [m for m in lv if m > ABS_GATE_LUFS]
+    if not lv or not audible:
+        return {"floor": None, "top": None, "level": None, "content": False}
+    floor, top = _pct(lv, FLOOR_PCT), _pct(lv, CONTRAST_PCT)
+    level = _lufs(audible)
+    if level >= AMBIENT_MAX_LUFS:
+        content = True
+    elif speech is not None:
+        inside = [any(a <= t <= b for a, b in speech) for t, _m in pairs]
+        room = [m for (_t, m), i in zip(pairs, inside) if not i]
+        room_floor = (_pct(room, FLOOR_PCT)
+                      if len(room) * step >= MIN_SPEECH_S else floor)
+        gate = max(ABS_GATE_LUFS, room_floor + SPEECH_OVER_FLOOR_LU)
+        spoken = sum(1 for (_t, m), i in zip(pairs, inside) if i and m > gate)
+        content = spoken * step >= MIN_SPEECH_S
+    else:
+        content = top - floor >= CONTRAST_LU
+    return {"floor": round(floor, 2), "top": round(top, 2),
+            "level": round(level, 2), "content": content}
+
+
+def gain_knots(blocks, step=STEP_S, speech=None):
     """[(program_s, gain_db)] knots that level the measured dialogue, or None
     when there is too little speech to measure (a silent or music-free bed
-    is left alone). `blocks` is parse_probe's output."""
+    is left alone, and so is a bed of room tone: read_bed). `blocks` is
+    parse_probe's output."""
     if not blocks:
         return None
     ts = [t for t, _m in blocks]
@@ -134,6 +201,12 @@ def gain_knots(blocks, step=STEP_S):
     audible = [m for m in lv if m > ABS_GATE_LUFS]
     if len(audible) * step < MIN_SPEECH_S:
         return None
+    bed = read_bed(blocks, speech=speech, step=step)
+    if not bed["content"]:
+        return None
+    # The bed is content (read_bed); its quieter speech is leveled like any
+    # speech. A floor gate here read a quieter speaker in a tight program
+    # (pauses already cut) as room tone and stopped lifting him.
     gate = max(ABS_GATE_LUFS, _lufs(audible) - REL_GATE_LU)
     speech = [m > gate for m in lv]
     if sum(speech) * step < MIN_SPEECH_S:

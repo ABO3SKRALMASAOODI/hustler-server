@@ -125,20 +125,24 @@ def test_strict_question_preserves_question_but_rewrites_unproved_preamble(monke
     assert out=='The wall is still visible. Which music would you like?'
 
 
-def test_strict_question_fails_closed_on_provider_error_and_quote_drift(monkeypatch,tmp_path):
+def test_a_check_that_cannot_run_records_unverified_and_keeps_the_editors_reply(monkeypatch,tmp_path):
+    """EDIT-CORE B1 (16 Nov 2026): never the UNVERIFIED stand-in for the customer's reply."""
     _wire(monkeypatch,tmp_path)
     monkeypatch.setattr(reply_truth,'check',lambda *a,**k:None)
-    assert reply_truth.enforce(_Ctx(),_Client([]),'m','req',P5533_DRAFT,strict=True)==reply_truth.UNVERIFIED
+    honesty = {}
+    assert reply_truth.enforce(_Ctx(),_Client([]),'m','req',P5533_DRAFT,honesty,strict=True)==P5533_DRAFT
+    assert honesty["reply_truth_unverified"] is True
     out,_ = reply_truth.corrected(P5533_DRAFT,[{'quote':'wrong quoted words',
         'status':'contradicted','honest':'The dancers were dimmed.'}],strict=True)
-    assert out==reply_truth.UNVERIFIED
+    assert out.startswith(P5533_DRAFT) and 'The dancers were dimmed.' in out
 
 
-def test_strict_question_without_frames_does_not_accept_a_claim_as_shown(monkeypatch,tmp_path):
+def test_without_frames_a_claim_is_recorded_unverified_not_hedged(monkeypatch,tmp_path):
     _wire(monkeypatch,tmp_path)
     client = _Client([{'quote':'Done.', 'status':'shown','honest':'','seen':''}])
-    out = reply_truth.enforce(_Ctx(False),client,'m','req','Done. Which music?',strict=True)
-    assert 'Done.' not in out and 'Which music?' in out
+    honesty = {}
+    out = reply_truth.enforce(_Ctx(False),client,'m','req','Done. Which music?',honesty,strict=True)
+    assert out == 'Done. Which music?' and honesty["reply_truth_unverified"] is True
     question='Can you upload the original without the mark?'
     assert reply_truth.enforce(_Ctx(False),_Client([]),'m','req',question,strict=True)==question
 

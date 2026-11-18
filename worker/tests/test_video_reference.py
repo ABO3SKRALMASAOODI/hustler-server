@@ -66,3 +66,21 @@ def test_account_restriction_is_not_retryable_and_preserves_real_alternative(mon
     assert 'unchanged' in reply
     assert ctx.edit_alternatives[0]['asset_key'] == 'own-reference'
     assert ctx.videos_generated == []
+
+
+def test_a_failed_animation_tells_the_editor_its_real_alternatives(monkeypatch, tmp_path):
+    """edit_scope no longer appends the alternative under the reply: the tool result carries it,
+    so the editor offers it itself, in the customer's language."""
+    import agent_tools
+    monkeypatch.setattr(videogen, 'video_gen_available', lambda: True)
+    monkeypatch.setattr(agent_tools, '_gen_budget_reject', lambda *a: None)
+    monkeypatch.setattr(agent_tools, '_resolve_media_asset', lambda *a: ({}, None))
+    monkeypatch.setattr(agent_tools, '_asset_local_path', lambda *a: 'reference.png')
+    monkeypatch.setattr(videogen, 'reference_image', lambda *a: 'data:image/png;base64,test')
+    monkeypatch.setattr(videogen, 'generate_video', lambda *a, **k: (
+        False, videogen.ProviderFailure('timed out', 504), 0))
+    ctx = NS(workdir=str(tmp_path), videos_generated=[])
+    reply = agent_tools.generate_video(ctx, 'Animate my reference', 'own-reference')
+    assert reply.startswith('Video generation FAILED')
+    for alt in ctx.edit_alternatives:
+        assert alt['offer'] in reply

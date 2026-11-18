@@ -756,14 +756,14 @@ class ToolContext:
         # repairs what it can and says so; it never refuses).
         normalized, edge_note = _repair_cut_edges(self, prev["json"], normalized)
         notes = [edge_note] if edge_note else []
+        # Measurements the write carries as information; the editor's write saves (owner, 16 Nov
+        # 2026: a splice over narration, a repaint or layer over a face, are the editor's decisions).
         import required_broll
-        picture_refusal = required_broll.write_refusal(self, prev['json'], normalized)
-        if picture_refusal:
-            return f"REJECTED (EDL v{prev['version']} unchanged): {picture_refusal}"
         import edit_integrity
-        integrity_refusal = edit_integrity.write_refusal(self, prev["json"], normalized)
-        if integrity_refusal:
-            return f"REJECTED (EDL v{prev['version']} unchanged): {integrity_refusal}"
+        for measured in (required_broll.write_note(self, prev['json'], normalized),
+                         edit_integrity.write_note(self, prev["json"], normalized)):
+            if measured:
+                notes.append(measured)
         length_note = _length_ask_note(self, prev, normalized)
         if length_note:
             notes.append(length_note)
@@ -772,10 +772,7 @@ class ToolContext:
         # brief's notes are about an editor's tool against a typed request, so they skip it.
         scoring = getattr(self, "_score_write", False) is True
         if not scoring and request_contract.enabled(self):
-            try:
-                protected = request_contract.protected_lanes(self)
-            except ValueError as exc:
-                return f"REJECTED (EDL v{prev['version']} unchanged): {exc}"
+            protected = request_contract.protected_lanes(self)
             brief_note = request_contract.write_note(
                 self, prev["json"], normalized, protected, _source_shape(self))
             if brief_note:
@@ -852,6 +849,15 @@ class ToolContext:
                 f"Now: {after}.")
         for note in notes:
             line += "\n" + note
+        # The turn's whole change so far, measured from the EDL diff (edit_provenance): the reply
+        # is written from this, never from what an earlier step made (EDIT-CORE B1, 16 Nov 2026).
+        start = getattr(self, "turn_start_edl", None) or {}
+        if isinstance(start.get("json"), dict):
+            import edit_provenance
+            so_far = edit_provenance.turn_change(start["json"], normalized,
+                                                 start.get("version"), version)
+            if so_far:
+                line += "\n" + so_far
         if advisories:
             line += "\n" + quality_gate.advisory_message(version, advisories)
         if mono_note:
@@ -1359,6 +1365,78 @@ def get_editorial_map(ctx, start=0, end=None, focus="all", limit=None,
     return _cap(header + "\n" + body + tail)
 
 
+# A window this long (or a whole source this short) is measured on its own
+# for the dead-air reading; a longer one measures (and caches) the whole take.
+LIVENESS_WINDOW_MAX_S = 600.0
+
+
+def _liveness_track(ctx, lo, hi, measure=True):
+    """(activity track covering [lo, hi], None) or (None, why)."""
+    import activity
+    import liveness
+    track, why = _activity_track(ctx, cached_only=True)
+    if track and track.get("level") is not None and \
+            liveness.covers(track, lo, hi):
+        return track, None
+    # The windows this turn already measured are read before anything else, also by a cheap read
+    # (measure=False). EDIT-CORE gate, 18 Nov 2026 (p5717 R1): cut_silences measured the music
+    # video's wordless stretches as footage, then the ask check's cheap read skipped that measurement,
+    # reported "88.6 s of pauses were not measured", judged "cut the silences" not done, and the
+    # repair pass cut 2.9 s of the song.
+    cache = getattr(ctx, "_liveness_windows", None)
+    if cache is None:
+        cache = {}
+        try:
+            ctx._liveness_windows = cache
+        except Exception:  # noqa: BLE001
+            pass
+    for t in cache.values():
+        if liveness.covers(t, lo, hi):
+            return t, None
+    if not measure:
+        return None, why
+    dur = float(ctx.duration or 0)
+    if hi - lo <= LIVENESS_WINDOW_MAX_S or dur <= LIVENESS_WINDOW_MAX_S:
+        try:
+            proxy = ctx.proxy_path()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"the video's proxy is not available ({str(exc)[:120]})"
+        a = max(0.0, lo - 0.5)
+        b = hi + 0.5 if dur <= 0 else min(dur, hi + 0.5)
+        try:
+            _touch_job_heartbeat(ctx)
+            t = activity.measure(proxy, budget_s=ACTIVITY_TOOL_BUDGET_S,
+                                 start=a, length=max(0.5, b - a))
+        except Exception as exc:  # noqa: BLE001
+            return None, (f"measuring failed ({type(exc).__name__}: "
+                          f"{str(exc)[:140]})")
+        if len(t.get("motion") or []) < 2:
+            return None, "too few frames to measure"
+        cache[(round(a, 2), round(b, 2))] = t
+        return t, None
+    track, why = _activity_track(ctx)
+    if track and liveness.covers(track, lo, hi):
+        return track, None
+    return None, why or "the measured track does not cover these seconds"
+
+
+def _read_liveness(ctx, gaps, measure=True, within=None):
+    """Annotate speech gaps with what the picture and the sound do in them
+    (liveness.read_span: "live" + "why"). within: (lo, hi) source seconds;
+    only gaps that touch it are read. Returns why it could not, or None."""
+    import liveness
+    todo = [g for g in gaps if within is None or
+            (g["end"] > within[0] and g["start"] < within[1])]
+    if not todo:
+        return None
+    lo, hi = min(g["start"] for g in todo), max(g["end"] for g in todo)
+    track, why = _liveness_track(ctx, lo, hi, measure=measure)
+    if not track:
+        return why or "not measured"
+    liveness.annotate(todo, track, liveness.shot_starts(ctx.index))
+    return None
+
+
 def _dead_air(ctx, min_s):
     """Spans worth cutting when the user says "cut the silences", and which
     signal they came from: (gaps, basis).
@@ -1395,6 +1473,10 @@ def find_silences(ctx, min_seconds=0.7, start=None, end=None):
         return "REJECTED: end must be greater than start."
     words = ctx.index.get("words", [])
     gaps, basis = _dead_air(ctx, min_s)
+    if gaps:
+        _read_liveness(ctx, gaps, within=(
+            lo if lo is not None else 0.0,
+            hi if hi is not None else float("inf")))
     span = ""
     if lo is not None or hi is not None:
         # a range (Oct 2026: a short's editor got the first 100 of 331 gaps
@@ -1410,9 +1492,29 @@ def find_silences(ctx, min_seconds=0.7, start=None, end=None):
                     "call a silence. Say so plainly; do not guess at pauses "
                     "from the picture.")
         return f"No gaps in the speech of {min_s}s or longer{span}."
+    # Where each gap is in the CURRENT film (EDIT-CORE B1, 16 Nov 2026: p5717's reply offered to
+    # trim "the 11.4 s gap between 13.1 s and 24.5 s" of a 6.3 s film that no longer held it).
+    film = None
+    try:
+        edl_now = ctx.latest_edl()["json"]
+        if edl_now.get("keep"):
+            film = Timeline(edl_now["keep"], edl_now.get("inserts") or [], edl_now.get("speed"))
+    except Exception:  # noqa: BLE001
+        film = None
     lines = []
     for g in gaps[:100]:
         s, e = g["start"], g["end"]
+        where = ""
+        if film is not None:
+            try:
+                spans = [(float(a), float(b)) for a, b in film.span_to_out(s, e) if b - a > 0.05]
+            except Exception:  # noqa: BLE001
+                spans = None
+            if spans == []:
+                where = " [not in the current film: the edit already cut it]"
+            elif spans:
+                where = (" [in the film at output " + ", ".join(
+                    f"{_fmt_t(a)}-{_fmt_t(b)}" for a, b in spans[:3]) + "]")
         before = next((w["w"] for w in reversed(words) if w["t1"] <= s + 0.05),
                       None)
         after = next((w["w"] for w in words if w["t0"] >= e - 0.05), None)
@@ -1422,11 +1524,20 @@ def find_silences(ctx, min_seconds=0.7, start=None, end=None):
         # An unquiet gap is nobody-talking-over-sound: cuttable, but the user
         # loses that sound, so it is never presented as though it were quiet.
         q = g["quiet_frac"]
-        sound = "" if q >= 0.8 else (
-            f" [NOT quiet — {int((1 - q) * 100)}% of this gap has audio "
-            "(music/game/room); cutting it removes that sound too]")
+        if g.get("live") is True:
+            # EDIT-CORE A1: no words, but the footage plays (a walk, a song,
+            # a dance). Measured, never assumed from the transcript.
+            sound = (f" [ACTION, NOT DEAD AIR: {g.get('why')}; cutting it "
+                     "removes footage and its sound]")
+        elif g.get("live") is False:
+            sound = (" [DEAD AIR: still picture, sound at the room's floor]"
+                     if q < 0.8 else " [DEAD AIR]")
+        else:
+            sound = "" if q >= 0.8 else (
+                f" [NOT quiet — {int((1 - q) * 100)}% of this gap has audio "
+                "(music/game/room); cutting it removes that sound too]")
         lines.append(f"{_fmt_t(s)}-{_fmt_t(e)} ({e - s:.2f}s, midpoint "
-                     f"{_fmt_t((s + e) / 2)}){ctxt}{sound}")
+                     f"{_fmt_t((s + e) / 2)}){ctxt}{sound}{where}")
     note = f"\n({len(gaps) - 100} more not shown)" if len(gaps) > 100 else ""
     if not span:
         note += _silence_range_hint(ctx)
@@ -1435,6 +1546,15 @@ def find_silences(ctx, min_seconds=0.7, start=None, end=None):
             "not just a quiet waveform)") if basis == "speech" else \
         (f"No speech was transcribed in this video, so these are the "
          f"{len(gaps)} quiet-WAVEFORM span(s) >= {min_s}s{span}")
+    read = [g for g in gaps if g.get("live") is not None]
+    if read:
+        live = [g for g in read if g["live"]]
+        live_s = sum(g["end"] - g["start"] for g in live)
+        dead_s = sum(g["end"] - g["start"] for g in read if not g["live"])
+        head += (f". Measured picture and sound: {len(read) - len(live)} are "
+                 f"DEAD AIR ({dead_s:.1f}s; cut_silences removes these), "
+                 f"{len(live)} carry ACTION ({live_s:.1f}s: the picture moves "
+                 "or sound plays; they are footage, not pauses)")
     return _cap(head + ":\n" + "\n".join(lines) + note)
 
 
@@ -2454,9 +2574,10 @@ _ACTIVITY_TRACKS = {}
 _ACTIVITY_LOCK = threading.Lock()
 
 
-def _activity_track(ctx):
+def _activity_track(ctx, cached_only=False):
     """(track, None) or (None, why). Cached per proxy in this process and as
-    a JSON sidecar in storage, so it is measured once per footage."""
+    a JSON sidecar in storage, so it is measured once per footage.
+    cached_only: never measure here (a cheap read for the project state)."""
     import activity
     key = _proxy_key(ctx)
     skey = None
@@ -2481,6 +2602,8 @@ def _activity_track(ctx):
         except Exception as exc:  # noqa: BLE001
             print(f"[activity] cached track unreadable: {str(exc)[:120]}",
                   flush=True)
+    if cached_only:
+        return None, "not measured yet"
     try:
         proxy = ctx.proxy_path()
     except Exception as exc:  # noqa: BLE001
@@ -3325,6 +3448,20 @@ CUT_SOUND_BUDGET_S = 15.0
 CUT_SOUND_URL_TTL_S = 1500.0
 
 
+def _content_end(ctx):
+    """The upload's measured last picture (index.source_screen.safe_end_s:
+    the screen review's end of content, before a black end or a slate), in
+    source seconds, or None when the picture runs to the end."""
+    try:
+        screen = ((getattr(ctx, "index", None) or {}).get("source_screen")
+                  or {})
+        end = float(screen.get("safe_end_s"))
+        dur = float(ctx.duration or 0)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return end if 0 < end < dur - 0.05 else None
+
+
 def _audio_safe_keep(ctx, keep, prev_keep, words):
     """(keep, notes, quiet_edges): every NEW cut edge of ``keep`` (one
     ``prev_keep`` did not have; every cut edge when it is None) placed by
@@ -3357,7 +3494,8 @@ def _audio_safe_keep(ctx, keep, prev_keep, words):
         # an end may really cut up to a frame either side (the block clock)
         new, moves, checked = cut_audio.refine_keep(
             keep, words, ctx.duration, prev_keep, level,
-            end_slack=1.0 / _index_fps(getattr(ctx, "index", None)))
+            end_slack=1.0 / _index_fps(getattr(ctx, "index", None)),
+            content_end=_content_end(ctx))
     except Exception:  # noqa: BLE001 — a placement never fails a write
         return keep, [], set()
     quiet = {round(m["old"], 2) for m in moves if m["why"] == "quiet_word"}
@@ -3647,7 +3785,10 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
     if snap_to_words:
         warn = []   # snapping guarantees word-clean boundaries
     if check_regression:
-        warn += audit.regression_warnings(prev_keep, new_keep, ctx.index)
+        warn += audit.regression_warnings(
+            prev_keep, new_keep, ctx.index,
+            turn_keep=((getattr(ctx, "turn_start_edl", None) or {}).get("json")
+                       or {}).get("keep"))
     # A write that silently drops most of the kept footage is almost always
     # the model chasing something the user never asked for — make the scale
     # of the loss impossible to miss (keep_segments AND cut_range alike).
@@ -4297,21 +4438,55 @@ def cut_silences(ctx, min_silence_s=0.5, padding_s=0.12,
                     "find_shots / look_at.")
         return (f"No gaps in the speech of {min_s}s or longer — the talking "
                 "is already tight, so nothing was cut.")
-    cuts, noisy, quiet_cuts, sounded = [], 0, [], []
+    allow_nonquiet_n = (
+        allow_nonquiet is True or
+        str(allow_nonquiet).strip().casefold() in {"true", "1", "yes", "on"})
+    cur = ctx.latest_edl()["json"]["keep"]
+    measured = False
+    if cur:
+        # EDIT-CORE A1 (16 Nov 2026): a gap in the words is dead air only
+        # when the picture and the sound show nothing happening. A walk, a
+        # song or a dance with no words is footage: measured, kept, and
+        # named in the result (liveness.py). With allow_nonquiet the
+        # footage is cut as asked, and the result says what it carried
+        # (EDIT-CORE gate, 17 Nov 2026, p5717: "cut 5 gap(s) in the speech
+        # (87.5s removed)" was 87.5 s of a music video's picture and song).
+        lo = min(float(a) for a, _b in cur)
+        hi = max(float(b) for _a, b in cur)
+        measured = _read_liveness(ctx, gaps, within=(lo, hi)) is None
+    cuts, noisy, quiet_cuts, sounded, live_kept, live_cut = [], 0, [], [], [], []
     for g in gaps:
         cs, ce = round(g["start"] + pad, 2), round(g["end"] - pad, 2)
         if ce - cs >= 0.1:
+            if g.get("live") is True and not allow_nonquiet_n:
+                live_kept.append(g)
+                continue
+            if g.get("live") is True:
+                live_cut.append(g)
             cuts.append([cs, ce])
             if g["quiet_frac"] < 0.8:
                 noisy += 1
                 sounded.append([cs, ce])
             else:
                 quiet_cuts.append([cs, ce])
+    live_note = ""
+    if live_kept:
+        held = sum(g["end"] - g["start"] for g in live_kept)
+        where = "; ".join(f"{g['start']:.2f}-{g['end']:.2f}s ({g.get('why')})"
+                          for g in live_kept[:8])
+        if len(live_kept) > 8:
+            where += f" (+{len(live_kept) - 8} more)"
+        live_note = (
+            f"KEPT {len(live_kept)} stretch(es) without words (~{held:.1f}s) "
+            f"because they are footage, not dead air: {where}. To drop them "
+            "anyway, cut_silences(allow_nonquiet=true) or cut_range.")
     if not cuts:
+        if live_kept:
+            return ("NO CHANGE — measured picture and sound: nothing here is "
+                    "dead air. " + live_note)
         return (f"Found {len(gaps)} speech gap(s), but each is too short to "
                 f"trim once {pad}s of padding is kept around speech. Nothing "
                 "was cut (lower padding_s to trim more aggressively).")
-    cur = ctx.latest_edl()["json"]["keep"]
     new = [list(x) for x in audit.subtract_spans(cur, cuts)]
     if not new:
         return ("REJECTED: cutting every speech gap would remove the whole "
@@ -4319,11 +4494,8 @@ def cut_silences(ctx, min_silence_s=0.5, padding_s=0.12,
     removed = output_duration(cur) - output_duration(new)
     before_duration = max(0.001, output_duration(cur))
     destructive_nonquiet = (
-        basis == "speech" and noisy >= max(1, len(cuts) / 2)
+        not measured and basis == "speech" and noisy >= max(1, len(cuts) / 2)
         and removed / before_duration >= 0.25)
-    allow_nonquiet_n = (
-        allow_nonquiet is True or
-        str(allow_nonquiet).strip().casefold() in {"true", "1", "yes", "on"})
     if destructive_nonquiet and not allow_nonquiet_n:
         # Ticket #1078 (13 Nov 2026): this used to refuse the WHOLE call, so a
         # request met "REJECTED" three times in a row while the model tried
@@ -4360,12 +4532,26 @@ def cut_silences(ctx, min_silence_s=0.5, padding_s=0.12,
         return ("NO CHANGE — every speech gap long enough to cut carries "
                 "sound, so nothing was cut. " + keep_note)
     what = "gap(s) in the speech" if basis == "speech" else "quiet span(s)"
+    if measured and not live_cut:
+        what = "dead-air " + what
     res = _write_keep(
         ctx, new,
         f"cut {len(cuts)} {what} >= {min_s}s ({removed:.1f}s "
         f"removed, {pad}s kept around speech)",
         snap_to_words=True, never_grow=True)
-    if noisy and res.startswith("EDL v"):
+    if live_note and res.startswith("EDL v"):
+        res += "\n" + live_note
+    if live_cut and res.startswith("EDL v"):
+        gone = sum(g["end"] - g["start"] for g in live_cut)
+        where = "; ".join(f"{g['start']:.2f}-{g['end']:.2f}s ({g.get('why')})"
+                          for g in live_cut[:8])
+        if len(live_cut) > 8:
+            where += f" (+{len(live_cut) - 8} more)"
+        res += (f"\nMEASURED: {len(live_cut)} of the {len(cuts)} cut gap(s) "
+                f"(~{gone:.1f}s) were footage, not dead air: {where}. That "
+                "picture and its sound are no longer in the film; say so in "
+                "the reply, and restore_range brings any of it back.")
+    if noisy and not measured and res.startswith("EDL v"):
         # Never let this land as "I removed the silences" when the user is
         # about to notice their game audio / music jumping at those cuts.
         res += (f"\nHONESTY: {noisy} of those {len(cuts)} gaps were NOT "
@@ -12981,10 +13167,8 @@ def _apply_patches(ctx, new_items, what, drop=None):
     all_patches = [dict(p) for p in (edl.get("patches") or [])]
     dropped = {p["id"] for p in (drop or [])}
     existing = [p for p in all_patches if p["id"] not in dropped]
-    import edit_integrity
-    refusal = edit_integrity.patch_face_refusal(ctx, new_items)
-    if refusal:
-        return "REJECTED: " + refusal
+    # A face the repaint meets is measured at the write boundary (edit_integrity.write_note) and
+    # reported with the saved write; the repaint is the editor's decision.
     groups = _patch_groups(new_items, ctx.duration)
     entries, lines = [], []
     for window, members in groups:
@@ -21459,7 +21643,16 @@ def set_grade_custom(ctx, exposure=None, contrast=None, saturation=None,
                 # A percentage: contrast=4 is 4%, never 4x (p5520's replay).
                 call_note(ctx, f"{axis} {requested:g} read as {requested:+g}%")
                 requested = requested / 100.0
-        elif 1.0 < abs(requested) <= 100.0:
+        elif 1.0 < abs(requested) <= 2.0:
+            # Just past the -1..1 axis is a request for its end, never a
+            # hundredth of it (EDIT-CORE gate, 17 Nov 2026, p5873:
+            # temperature=1.2 for "warm, sun-touched" was read as 1.2% and
+            # stored as +0.012 — no visible warmth).
+            clamped = 1.0 if requested > 0 else -1.0
+            call_note(ctx, f"{axis} {requested:g} read as the axis end, "
+                           f"{clamped:+g}")
+            requested = clamped
+        elif 2.0 < abs(requested) <= 100.0:
             call_note(ctx, f"{axis} {requested:g} read as {requested:g}%")
             requested = requested / 100.0
         if axis in ("contrast", "saturation") and requested < 0.5:
@@ -21629,6 +21822,84 @@ def separate_music(ctx, music_gain_db=None, voice_gain_db=None):
                 "Separation is strong but not surgical: on dense mixes a "
                 "trace of the muted side can remain — listen to the "
                 "preview before promising silence.")
+    return res
+
+
+def clean_noise(ctx, strength=0.8, off=False):
+    """EDIT-CORE A3 (16 Nov 2026): take the background noise out of the
+    footage's own sound ("mute the background noise", "remove the hum / the
+    wind / the fan / the traffic"). noise_clean.py measures the noise floor
+    where nobody speaks and lowers everything that does not rise over it;
+    speech, music and real sound events stay. The cleaned track is measured
+    and stored once per source and strength, and the render plays it. off
+    (or strength 0) restores the original sound."""
+    import noise_clean
+    edl = dict(ctx.latest_edl()["json"])
+    if off is True or str(off).strip().lower() in ("true", "1", "yes"):
+        strength = 0.0
+    try:
+        strength = min(1.0, max(0.0, float(0.8 if strength is None
+                                           else strength)))
+    except (TypeError, ValueError):
+        strength = 0.8
+    if strength <= 0.0:
+        if not edl.get("noise_clean"):
+            return ("The footage's original sound already plays (no noise "
+                    "cleaning is set).")
+        edl["noise_clean"] = None
+        return ctx.write_edl(edl, "noise cleaning removed: the original "
+                                  "sound plays")
+    if not getattr(ctx, "has_main_video", True):
+        return ("This project has no main video: noise cleaning works on the "
+                "original footage's own sound. Uploaded clips keep theirs.")
+    strength = round(strength, 2)
+    sm = edl.get("stem_mix") or None
+    applies_to = "vocals" if sm else "source"
+    node = {"strength": strength, "applies_to": applies_to}
+    report, measured = None, ""
+    try:
+        if sm:
+            src_local = os.path.join(ctx.workdir, f"nc_vocals_"
+                                                  f"{uuid.uuid4().hex[:6]}.m4a")
+            storage.download_to(sm["vocals_key"], src_local)
+            sha = hashlib.sha1(sm["vocals_key"].encode()).hexdigest()[:16]
+            spans = []
+        else:
+            src_local = ctx.proxy_path()
+            row = _original_row(ctx)
+            sha = row.get("sha256") or hashlib.sha1(
+                str(row.get("storage_key")).encode()).hexdigest()
+            spans = [[float(w["t0"]), float(w["t1"])]
+                     for w in ctx.index.get("words") or []]
+        key = noise_clean.key_for(sha, strength)
+        out = os.path.join(ctx.workdir, f"noise_clean_{uuid.uuid4().hex[:8]}.m4a")
+        _touch_job_heartbeat(ctx)
+        report = noise_clean.clean(src_local, out, spans, strength)
+        before = noise_clean.level_db(src_local)
+        after = noise_clean.level_db(out)
+        storage.upload_file(out, key, "audio/mp4")
+        node.update(audio_key=key, floor_db=report["floor_db"],
+                    reduction_db=report["reduction_db"])
+        measured = (f"Measured on the footage: background floor "
+                    f"{report['floor_db']} dBFS, lowered {report['reduction_db']}"
+                    f" dB where nothing rises over it; the whole sound "
+                    f"{before} -> {after} dBFS.")
+    except Exception as exc:  # noqa: BLE001 - the render cleans it instead
+        print(f"[clean_noise] measured track not stored ({type(exc).__name__}:"
+              f" {str(exc)[:160]}); the render cleans the sound itself",
+              flush=True)
+        measured = ("The render measures and cleans the sound itself "
+                    "(the track could not be prepared ahead).")
+    edl["noise_clean"] = node
+    res = ctx.write_edl(
+        edl, f"background noise cleaned from the "
+             f"{'voice stem' if sm else 'original sound'} "
+             f"(strength {strength:g})")
+    if str(res).startswith("EDL v"):
+        res += ("\n" + measured + " Speech, music and real sound events stay; "
+                "hiss, hum, fan, wind and room tone are taken down. This is an "
+                "AUDIO-only change. clean_noise(strength=0) restores the "
+                "original sound; a higher strength (up to 1) removes more.")
     return res
 
 
@@ -21950,8 +22221,13 @@ def generate_video(ctx, prompt, from_image_asset_key=None, duration_s=5):
                     'Repeating this call cannot resolve the provider account restriction. '
                     'Leave the existing film unchanged; offer the uploaded reference as a still '
                     'or ask for an animated replacement clip. Do not apply that alternative without the customer choosing it.')
+        # The alternatives reach the editor here, in its tool result: it offers them in its own
+        # words and the customer's language (edit_scope.disclose only records them).
+        also = (" Real alternatives to offer if it still fails: "
+                + " ".join(a["offer"] for a in ctx.edit_alternatives)
+                if from_image_asset_key else "")
         return (f"Video generation FAILED: {err}. Try again or tell the user it "
-                "didn't work — do NOT claim a clip was created.")
+                "didn't work — do NOT claim a clip was created." + also)
     # The provider has billed it, whatever happens to the file from here.
     llm.charge_generation("video_gen", config.VIDEO_GEN_MODEL,
                           videogen.price_for(seconds))
@@ -24105,7 +24381,7 @@ _EDL_SECTION_ALIASES = {
     "stylize": ("effects",), "effects": ("effects",),
     "fades": ("effects",),
     "audio": ("music", "volume", "voiceover", "sfx", "stem_mix",
-              "master"),
+              "noise_clean", "master"),
     "media": ("inserts", "overlays", "music", "voiceover", "sfx"),
     "timeline": ("keep", "inserts", "overlays", "texts", "vectors",
                  "effects"),
@@ -26745,7 +27021,7 @@ def _independent_preview_review(ctx, result, plan=None,
 
 _AUDIO_EDL_FIELDS = {
     "keep", "inserts", "speed", "volume", "music", "sfx", "voiceover",
-    "master", "stem_mix",
+    "master", "stem_mix", "noise_clean",
 }
 _AUDIO_DIRECTION_FIELDS = {
     "treatment", "format", "objective", "music_direction", "sfx_direction",
@@ -26773,7 +27049,7 @@ def _modality_signature(ctx, edl, modality):
     else:
         subset = {key: value for key, value in edl.items()
                   if key not in {"volume", "music", "sfx", "voiceover",
-                                 "master", "stem_mix"}}
+                                 "master", "stem_mix", "noise_clean"}}
         direction_fields = _VISUAL_DIRECTION_FIELDS
     direction = {key: plan.get(key) for key in direction_fields
                  if plan.get(key) not in (None, "", [])}
@@ -26796,7 +27072,7 @@ def _visual_change_summary(previous, current):
     changed = []
     for key in sorted(set(previous) | set(current)):
         if key in {"volume", "music", "sfx", "voiceover", "master",
-                   "stem_mix"}:
+                   "stem_mix", "noise_clean"}:
             continue
         if previous.get(key) == current.get(key):
             continue
@@ -31280,8 +31556,10 @@ _OVERLAY_MOTION_PROP = {
 }
 _MOTION_MOTIF_PROP = {
     "type": "string",
-    "description": ("Active Blueprint motion motif id this event executes; "
-                    "never 'hold'."),
+    # "motif", not "motion motif": the property is already motion_motif, and
+    # this line sits on 21 core tools (EDIT-CORE A3, 16 Nov: 147 bytes back
+    # under the 82,700 core ceiling for clean_noise).
+    "description": "Active Blueprint motif id this event executes; never 'hold'.",
 }
 
 # Stable provider-facing department names. Keep the schema enums and the
@@ -31484,7 +31762,8 @@ TOOLS = {
         "Each operation is {action,layer,value?,id?}. set replaces one complete layer; "
         "upsert patches or adds a named item; remove deletes a named item; reorder accepts "
         "all insert ids for a canvas sequence. Layers: keep,speed,inserts,frame,captions,"
-        "caption_mutes,texts,vectors,music,sfx,voiceover,volume,master,effects,overlays,canvas,motion "
+        "caption_mutes,texts,vectors,music,sfx,voiceover,volume,master,effects,overlays,canvas,motion,"
+        "noise_clean ({strength:0-1}: the footage's background noise out) "
         "(motion graphics by id: {id,template,start,end,params}; graphics placed this way are "
         "silent and cannot sit behind the subject — use add_motion_graphic for those). Use existing EDL "
         "field shapes and project media keys. All times describe the RESULTING timeline: "
@@ -31501,7 +31780,7 @@ TOOLS = {
                     "keep", "speed", "inserts", "frame", "captions",
                     "caption_mutes", "texts", "vectors", "music", "sfx",
                     "voiceover", "volume", "master", "effects", "overlays", "canvas",
-                    "motion"] + (["fx"] if _schemas_mod.FX_AUTHORABLE_TYPES else [])},
+                    "motion", "noise_clean", "export"] + (["fx"] if _schemas_mod.FX_AUTHORABLE_TYPES else [])},
                 "id": {"type": "string", "description": "Existing item id for upsert/remove; omit for whole-layer set."},
                 "value": {"description": "set: complete layer value (array for texts/inserts/music). upsert: one item object merged by id. reorder: all insert ids. Read get_edl for exact shapes."}},
                 "required": ["action", "layer"]}}}),
@@ -32075,13 +32354,13 @@ TOOLS = {
                      "(default 0.12s) of breathing room around speech and "
                      "snapping to word edges so no word is clipped. Do this "
                      "in one call instead of many cut_range calls; then "
-                     "get_kept_transcript to verify. If at least half of the "
-                     "gaps contain audible material and the pass would remove "
-                     "25%+ of the program, it cuts only the truly quiet gaps "
-                     "and KEEPS the ones that carry sound, listing them. Set "
-                     "allow_nonquiet=true ONLY when the user explicitly "
-                     "permits discarding those non-speaking "
-                     "music/game/room-performance moments too.",
+                     "get_kept_transcript to verify. It measures each gap's "
+                     "picture and sound: it cuts the dead-air gaps and KEEPS "
+                     "the gaps where the picture moves, the shot changes or "
+                     "sound plays over the room, naming each and why. "
+                     "allow_nonquiet=true cuts every gap, kept ones too: "
+                     "right for a talking-head or vlog request to tighten "
+                     "the pauses even when the camera moves.",
                      {"min_silence_s": {"type": "number"},
                       "padding_s": {"type": "number"},
                       "allow_nonquiet": {"type": "boolean"}}),
@@ -34264,6 +34543,9 @@ TOOLS = {
                        "before promising total silence.",
                        {"music_gain_db": {"type": "number"},
                         "voice_gain_db": {"type": "number"}}),
+    "clean_noise": (clean_noise, "Take background noise out of the "
+                    "footage's sound; speech stays. strength 0-1, 0 restores.",
+                    {"strength": {"type": "number"}}),
     "remove_stem_mix": (remove_stem_mix, "Restore the original mixed "
                         "soundtrack (undo separate_music).", {}),
     "set_master_loudness": (set_master_loudness, "Social mastering: the "
@@ -34666,6 +34948,7 @@ TOOL_DOMAINS = {
         "swap_music", "set_music_fit", "set_audio_gain", "set_volume",
         "add_voiceover", "remove_voiceover", "beat_align_cuts",
         "separate_music", "remove_stem_mix", "set_master_loudness",
+        "clean_noise",
     },
     "sfx": {
         "list_sound_library",
@@ -34944,7 +35227,7 @@ WRITE_TOOLS = {"apply_edit_batch", "keep_segments", "cut_range", "cut_output_ran
                "remove_stylize",
                "bind_motion_motif",
                "set_grade_custom", "set_master_loudness",
-               "separate_music", "remove_stem_mix",
+               "separate_music", "remove_stem_mix", "clean_noise",
                "punch_in_on_emphasis", "conceal_jump_cuts", "fetch_sfx",
                "beat_align_cuts", "apply_look", "fetch_url"}
 

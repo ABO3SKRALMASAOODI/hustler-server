@@ -138,6 +138,10 @@ def check(ctx, client, model, request_text, draft, limit=3, strict=False):
         edl = {}
     content = [{"type": "text", "text": "\n".join([
         "The customer's request:\n" + json.dumps(str(request_text or "")[:3000], ensure_ascii=False),
+        # The honest lines are read by the customer: written in the language they typed, which the
+        # ask ledger measured (18 Nov 2026, p5717: an English customer's reply gained a Ukrainian line).
+        "Write every honest line in this language (the customer's, ISO code): "
+        + str(((getattr(ctx, "ask_ledger", None) or {}).get("lang")) or "the drafted reply's language"),
         "The drafted reply:\n" + json.dumps(str(draft or "")[:3000], ensure_ascii=False),
         "What the edit holds, on the film's clock:\n" + items(ctx, edl)])}]
     for local, label in pages:
@@ -176,33 +180,35 @@ def check(ctx, client, model, request_text, draft, limit=3, strict=False):
     rows = [r for r in rows if isinstance(r, dict) and r.get("status") in
             ("shown", "contradicted", "cannot_tell")]
     if strict and not pages:
-        rows = [dict(r, status="cannot_tell", honest=r.get("honest") or UNVERIFIED)
-                if r.get("status") == "shown" else r for r in rows]
+        rows = [dict(r, status="cannot_tell") if r.get("status") == "shown" else r for r in rows]
     return rows
 
 
 UNVERIFIED = "I couldn't verify the requested changes in the preview, so I can't confirm they're complete."
 
 
-def _unverified(honesty):
+def _unverified(honesty, draft):
+    """The check could not read the film: the request is recorded unverified for the ops loop and
+    the editor's reply goes out as written. It is never replaced by a hedge (EDIT-CORE B1, 16 Nov
+    2026: UNVERIFIED stood in for whole replies)."""
     if isinstance(honesty, dict):
         honesty["reply_truth_unverified"] = True
-    return UNVERIFIED
+    return draft
 
 
 def corrected(draft, rows, strict=False):
-    """(reply, swapped): every contradicted claim's quoted words replaced by its honest line; an
-    honest line whose quote is not verbatim in the draft is added after the first paragraph."""
+    """(reply, swapped): every claim the film CONTRADICTS has its sentence replaced by the honest
+    line (what the frames show); an honest line whose quote is not verbatim in the draft is added
+    after the first paragraph. A claim the frames cannot settle (cannot_tell) is not rewritten into
+    an uncertainty line: it is recorded (swapped lists nothing for it) and the reply keeps it."""
     import reply_grounding
     text = str(draft or "")
     swapped, added = [], []
     for r in rows or []:
-        if r.get("status") not in (("contradicted", "cannot_tell") if strict else ("contradicted",)):
+        if r.get("status") != "contradicted":
             continue
         quote = str(r.get("quote") or "").strip()
         honest = str(r.get("honest") or "").strip()
-        if strict and (not honest or not quote or quote not in text):
-            return UNVERIFIED, [quote or "unverified claim"]
         if not honest:
             continue
         # the whole sentence that holds the quoted words, so a clause never leaves half a sentence
@@ -211,7 +217,7 @@ def corrected(draft, rows, strict=False):
         if whole:
             text = text.replace(whole, honest, 1)
             swapped.append(whole)
-        elif strict:
+        elif quote and quote in text:
             text = text.replace(quote, honest, 1)
             swapped.append(quote)
         elif honest not in text:
@@ -226,18 +232,18 @@ def corrected(draft, rows, strict=False):
 def enforce(ctx, client, model, request_text, draft, honesty=None, strict=False):
     """The draft with its contradicted claims told truthfully. Never raises."""
     if not draft or not str(draft).strip() or client is None or not model:
-        return _unverified(honesty) if strict else draft
+        return _unverified(honesty, draft) if strict else draft
     try:
         rows = check(ctx, client, model, request_text, draft, **({"strict": True} if strict else {}))
     except Exception as exc:  # noqa: BLE001 - an unchecked reply goes out as drafted
         print(f"[reply-truth] check skipped: {type(exc).__name__}: {str(exc)[:160]}", flush=True)
-        return _unverified(honesty) if strict else draft
+        return _unverified(honesty, draft) if strict else draft
     if rows is None and strict:
-        return _unverified(honesty)
+        return _unverified(honesty, draft)
     if not rows:
         return draft
     text, swapped = corrected(draft, rows, strict=strict)
-    if strict and swapped and isinstance(honesty, dict):
+    if strict and isinstance(honesty, dict) and any(r.get("status") == "cannot_tell" for r in rows):
         honesty["reply_truth_unverified"] = True
     if isinstance(honesty, dict):
         honesty["reply_truth"] = {

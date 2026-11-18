@@ -425,8 +425,8 @@ class ProgramMatte:
         self.mw = self.mh = None   # chunk geometry
         self.fm = None
         # seconds from the sidecar clock (the proxy's own, -ss relative to
-        # its start) to the clock the render's trims read: the container's
-        # start when the main input is read with -copyts, else 0
+        # its start) to the clock the render's trims read: 0 on both of the
+        # renderer's paths (-copyts runs with -start_at_zero)
         self.clock_offset = 0.0
 
     # -- requests ----------------------------------------------------------

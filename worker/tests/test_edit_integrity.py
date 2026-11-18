@@ -14,10 +14,10 @@ def test_contained_original_cutaway_is_not_a_local_face_patch(monkeypatch):
     monkeypatch.setattr(asks, "output_size", lambda *a: (720, 1280))
     shot = {"id": "ov.shot", "asset_key": "original", "kind": "video",
             "start": 0, "duration_s": 4, "x": .5, "y": .5, "scale": 1.}
-    assert ei.face_cover_refusal(ctx, {}, {"overlays": [shot]}) is None
-    assert "covers a measured face" in ei.face_cover_refusal(
+    assert ei.face_cover_note(ctx, {}, {"overlays": [shot]}) == ""
+    assert "covers a face" in ei.face_cover_note(
         ctx, {}, {"overlays": [dict(shot, scale=.6)]})
-    assert "covers a measured face" in ei.face_cover_refusal(
+    assert "covers a face" in ei.face_cover_note(
         ctx, {}, {"overlays": [dict(shot, source_crop=[0, 0, .8, 1])]})
 
 
@@ -27,11 +27,11 @@ def test_removed_spans_measures_exact_source_coverage():
     assert ei.removed_spans([[0, 10]], [[1, 3], [5, 8]]) == [(0, 1), (3, 5), (8, 10)]
 
 
-def test_eye_patch_rejected_on_source_even_if_render_lost_face():
+def test_eye_patch_is_measured_on_source_even_if_render_lost_face():
     ctx = NS(duration=5.6, index={"spatial": {"samples": [{"t": 2., "faces": [[.3, .1, .7, .4]]}]}})
-    assert "face" in ei.patch_face_refusal(ctx, [{"x": .3, "y": .2, "w": .2, "h": .1}])
-    assert ei.patch_face_refusal(ctx, [{"x": .3, "y": .6, "w": .2, "h": .1}]) is None
-    assert ei.patch_face_refusal(ctx, [{"x": .3, "y": .2, "w": .2, "h": .1, "start": 3, "end": 4}]) is None
+    assert "face" in ei.patch_face_note(ctx, [{"x": .3, "y": .2, "w": .2, "h": .1}])
+    assert ei.patch_face_note(ctx, [{"x": .3, "y": .6, "w": .2, "h": .1}]) == ""
+    assert ei.patch_face_note(ctx, [{"x": .3, "y": .2, "w": .2, "h": .1, "start": 3, "end": 4}]) == ""
 
 
 def test_failed_truth_rewrite_never_sends_done(monkeypatch):
@@ -45,7 +45,8 @@ def test_stale_check_cannot_back_completion():
              ask_verdict={"edl_version":1, "asks": [{"id":"a1","state":"done"}]},
              latest_edl=lambda: {"version":2})
     reply, outcome = agent_loop._asks_settle(ctx, "Done!", "fulfilled")
-    assert "can't confirm" in reply and outcome == "partial"
+    # a verdict on another version is no evidence: recorded partial, the reply is not hedged
+    assert reply == "Done!" and outcome == "partial"
 
 
 def test_unused_image_pixels_reach_ledger(monkeypatch):
@@ -67,9 +68,9 @@ def test_background_rectangle_cannot_dim_face():
     before={"keep":[[0,11]]}
     after=dict(before,fx=[{"id":"rg1","type":"region","start":0,"end":11,
                           "effect":"exposure","ev":-2,"region":{"shape":"rect","box":[0,0,1,.7]}}])
-    assert "covers a measured face" in ei.face_cover_refusal(ctx,before,after)
+    assert "covers a face" in ei.face_cover_note(ctx,before,after)
     after['fx'][0]['region']['box']=[0,0,.15,.7]
-    assert ei.face_cover_refusal(ctx,before,after) is None
+    assert ei.face_cover_note(ctx,before,after) == ""
 
 
 @pytest.mark.parametrize('opaque,opacity,entrance,at,allowed', [
@@ -92,10 +93,10 @@ def test_split_backdrop_hides_source_only_with_pixel_evidence(monkeypatch, opaqu
          'opacity':opacity,'entrance':entrance},
         {'id':'window','asset_key':'card.mp4','fit':'contain','x':.5,'y':.3,'scale':.4,'start':0.,'duration_s':10.},
     ])
-    assert (ei.face_cover_refusal(ctx,before,after) is None) is allowed
+    assert (ei.face_cover_note(ctx,before,after) == "") is allowed
     if allowed:
         after['overlays'][0]['screen'] = {'rect':[0,0,.2,.2]}
-        assert ei.face_cover_refusal(ctx,before,after) is not None
+        assert ei.face_cover_note(ctx,before,after) != ""
 
 
 def test_generated_backdrop_opacity_is_measured_from_pixels(tmp_path):
@@ -123,17 +124,25 @@ def test_reframed_face_uses_output_not_source_coordinates():
     before={"keep":[[0,11]],"frame":{"ratio":"9:16","mode":"crop"}}
     after=dict(before,fx=[{"id":"rg1","type":"region","start":0,"end":11,
                           "effect":"exposure","region":{"shape":"rect","box":[.35,.2,.65,.3]}}])
-    assert "face" in ei.face_cover_refusal(ctx,before,after)
+    assert "face" in ei.face_cover_note(ctx,before,after)
 
 
-def test_batch_write_cannot_bypass_eye_guard():
-    import agent_tools
-    ctx = NS(_states_seen={}, duration=5.6, latest_edl=lambda:{"version":1,"json":{"keep":[[0,5.6]]}},
-             index={"spatial":{"samples":[{"t":2,"faces":[[.3,.1,.7,.4]]}]}})
-    proposed={"keep":[[0,5.6]],"patches":[{"id":"pa1","asset_key":"patches/1/p.mp4","fp":"x",
-                  "src_start":0,"src_end":5.6,"regions":[{"id":"er1","x":.3,"y":.2,"w":.2,"h":.1}]}]}
-    result=agent_tools.ToolContext.write_edl(ctx,proposed,"remove mark")
-    assert result.startswith("REJECTED") and "face" in result
+def test_a_repaint_over_a_face_saves_and_names_where_the_face_is():
+    """Owner, 16 Nov 2026: a face blur is a legitimate repaint over a face. The write saves and
+    carries the measured face box; the editor decides."""
+    from w0c_support import tool_context
+    from schemas import default_edl
+    ctx, fake = tool_context(default_edl(5.6), duration=5.6)
+    ctx.index["spatial"] = {"samples": [{"t": 2, "faces": [[.3, .1, .7, .4]]}]}
+    proposed = default_edl(5.6)
+    proposed["patches"] = [{"id": "pa1", "asset_key": "patches/1/p.mp4", "fp": "x",
+                            "src_start": 0, "src_end": 5.6,
+                            "regions": [{"id": "er1", "x": .3, "y": .2, "w": .2, "h": .1}]}]
+    result = ctx.write_edl(proposed, "blur the face")
+    assert result.startswith("EDL v"), result
+    assert fake.rows[-1]["json"]["patches"][0]["id"] == "pa1"
+    assert "FACE MEASURED (information; the repaint is saved)" in result
+    assert "x 0.30-0.70, y 0.10-0.40" in result
 
 
 def test_same_edl_new_mask_render_is_checked_again(monkeypatch):
@@ -184,7 +193,7 @@ def test_missing_ledger_cannot_lose_required_check_on_resume():
     resumed=NS()
     agent_loop._typed_asks_start(resumed,None,{},None,{},saved)
     reply,outcome=agent_loop._asks_settle(resumed,'Done','fulfilled')
-    assert outcome=='partial' and "can't confirm" in reply
+    assert outcome=='partial' and reply=='Done' 
 
 
 def test_default_check_does_not_change_existing_route_opt_in():
@@ -209,7 +218,7 @@ def test_budget_stop_cannot_claim_completion_after_ledger_failure(monkeypatch):
     db = NS(run=lambda fn,*a:posted.append(a))
     result = agent_loop._finalize(ctx,db,1,'Completed and saved.','budget',3,{})
     assert result['outcome']=='partial'
-    assert "can't confirm" in posted[-1][2]
+    assert posted[-1][2] == 'Completed and saved.' and "can't confirm" not in posted[-1][2]
 
 
 @pytest.mark.parametrize("proofs,with_frames,state", [
@@ -250,6 +259,6 @@ def test_editor_cuts_are_never_vetoed_by_a_second_model(monkeypatch, tmp_path):
              ask_ledger={"asks": [{"id": "a1", "kind": "film"}]})
     before = {"keep": [[0, 4858.2]]}
     after = {"keep": [[0, 780], [1285, 1849], [2251, 2751], [3192, 4858.2]]}
-    assert ei.write_refusal(ctx, before, after) is None
+    assert ei.write_note(ctx, before, after) == ""
     assert calls == []
     assert not hasattr(ei, "cut_refusal") and not hasattr(ei, "CUT_SYSTEM")

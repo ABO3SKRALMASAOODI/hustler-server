@@ -2525,6 +2525,19 @@ def get_asset(conn, asset_id):
         return cur.fetchone()
 
 
+def library_music_copies(conn, slug, limit=5):
+    """Storage keys of earlier project copies of one CC0 library track
+    (worker/music_library.py registers each with meta.library_slug), newest
+    first: the fallback source when the library object itself is missing."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT storage_key FROM assets
+             WHERE kind = 'music' AND meta->>'library_slug' = %s
+             ORDER BY id DESC LIMIT %s""", (slug, int(limit)))
+        rows = cur.fetchall()
+    return [(r["storage_key"] if isinstance(r, dict) else r[0]) for r in rows]
+
+
 def library_music_used_by_user(conn, user_id, exclude_project_id=None,
                                limit=24):
     """CC0 library slugs that score this user's OTHER projects, newest
@@ -3172,6 +3185,63 @@ def insert_edl(conn, project_id, edl_json, created_by, job_id=None,
                            WHERE id = %s""",
                         (Json(receipt), int(job_id)))
         return version
+
+
+def edl_lineage(conn, project_id, limit=24):
+    """The EDL versions edit_provenance needs, oldest first ({version, created_by, json}), and the
+    agent turns' mutation receipts that say which job wrote which versions ({id, first_cut,
+    before_version, after_version}): what edit_provenance reads to tell the upload, the automatic
+    first cut, earlier requests and this turn apart.
+
+    The versions are the newest ``limit`` together with the boundaries every attribution diffs
+    against: the lowest version (the upload), the automatic first cut's before and after versions,
+    and the before version of the request the newest window starts inside. A long project's first
+    cut (p5711: 44 versions, first cut v2-v20) is then read as the first cut's, never diffed against
+    the whole upload and credited to a later request; whatever lies between those rows is a
+    contiguous span edit_provenance names from the receipts."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT id,
+                              COALESCE(payload->>'first_cut', '') NOT IN ('', 'false') AS first_cut,
+                              (payload->'mutation_receipt'->>'before_version')::int AS before_version,
+                              (payload->'mutation_receipt'->>'after_version')::int AS after_version
+                       FROM video_jobs
+                       WHERE project_id = %s AND type = 'agent_turn'
+                         AND payload ? 'mutation_receipt'
+                       ORDER BY id""", (project_id,))
+        jobs = cur.fetchall()
+        cur.execute("""SELECT MIN(version) AS low, MAX(version) AS high FROM edls
+                       WHERE project_id = %s""", (project_id,))
+        bounds = cur.fetchone() or {}
+        low = bounds.get("low") if isinstance(bounds, dict) else (bounds[0] if bounds else None)
+        high = bounds.get("high") if isinstance(bounds, dict) else (bounds[1] if bounds else None)
+        if low is None or high is None:
+            return [], jobs
+        window_from = max(int(low), int(high) - int(limit) + 1)
+        wanted = lineage_boundaries(jobs, int(low), window_from)
+        cur.execute("""SELECT version, created_by, json FROM edls
+                       WHERE project_id = %s AND (version >= %s OR version = ANY(%s))
+                       ORDER BY version""", (project_id, window_from, sorted(wanted)))
+        rows = cur.fetchall()
+    return rows, jobs
+
+
+def lineage_boundaries(jobs, low, window_from):
+    """The versions older than the newest window that edl_lineage loads: the lowest version, the
+    automatic first cut's before and after versions, and the before version of each request that
+    the window starts inside."""
+    wanted = {int(low)}
+    for job in jobs or []:
+        try:
+            lo = int((job.get("before_version") if isinstance(job, dict) else job[2]) or 0)
+            hi = int((job.get("after_version") if isinstance(job, dict) else job[3]) or 0)
+            first = bool(job.get("first_cut") if isinstance(job, dict) else job[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if first:
+            wanted.update(v for v in (lo, hi) if v >= low)
+        elif lo < window_from <= hi and lo >= low:
+            wanted.add(lo)
+    return {v for v in wanted if v < window_from}
 
 
 def edl_history(conn, project_id, limit=8):

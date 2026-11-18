@@ -287,6 +287,12 @@ def build_caption_comparison_pages(frames, out_prefix, per_page=4):
 _POOL = {}
 _POOL_LOCK = threading.Lock()
 PREFETCH_MIN = 12          # fewer stills: per-frame seeks are cheaper
+# A long render with sparse stills (a 59-minute preview's 9-tile sheet and 32 screening frames: one
+# still per ~70 s) is read by seeking to each still, several at a time, instead of one single-threaded
+# decode of the whole file (B4, 16 Nov 2026: 70-78 s of every p5857 preview job on the box's 2 vCPU,
+# 43.7 s on the Mac). Each still is frame_at's own file, so the sheets are the same.
+SPARSE_SEEK_S = 20.0       # seconds of film per wanted still beyond which seeking wins
+SEEK_WORKERS = 4
 
 
 def _pool_key(video_path, t, width):
@@ -319,7 +325,10 @@ def prefetch(video_path, times, workdir, width=426):
         here = tempfile.mkdtemp(prefix="pool_", dir=workdir)
         items = [(t, os.path.join(here, f"s{i}.jpg"))
                  for i, t in enumerate(want.values())]
-        done = media.frames_at(video_path, items, width=width)
+        if _sparse(video_path, len(items)):
+            done = _seek_each(video_path, items, width)
+        else:
+            done = media.frames_at(video_path, items, width=width)
     except Exception:  # noqa: BLE001 — frame_at reads them instead
         return 0
     with _POOL_LOCK:
@@ -327,6 +336,33 @@ def prefetch(video_path, times, workdir, width=426):
             if path in done:
                 _POOL[k] = path
     return len(done)
+
+
+def _sparse(video_path, n):
+    """Is reading ``n`` stills by seeking cheaper than one whole decode of this file?"""
+    import media
+    try:
+        duration = float(media.duration_of(video_path) or 0)
+    except Exception:  # noqa: BLE001
+        return False
+    return n > 0 and duration / n >= SPARSE_SEEK_S
+
+
+def _seek_each(video_path, items, width):
+    """frame_at for every (t, dst), SEEK_WORKERS at a time; the set of dsts written."""
+    import media
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(item):
+        t, dst = item
+        try:
+            media.frame_at(video_path, t, dst, width=width)
+            return dst
+        except Exception:  # noqa: BLE001 — that still is read by frame_at later
+            return None
+
+    with ThreadPoolExecutor(max_workers=SEEK_WORKERS) as pool:
+        return {d for d in pool.map(one, items) if d}
 
 
 def release(video_path):

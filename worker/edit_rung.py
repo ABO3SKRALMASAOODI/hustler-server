@@ -128,6 +128,29 @@ def clear_turn():
     _tls.edit_rung_fallback = None
 
 
+def _unmark_turn():
+    """The fallback could not be reached: the turn goes back to the rung."""
+    holder = _turn_holder()
+    try:
+        holder.edit_rung_fallback = None
+    except Exception:  # pragma: no cover
+        _tls.edit_rung_fallback = None
+
+
+_UNREACHABLE = ("APIConnectionError", "APITimeoutError", "ConnectError", "ConnectTimeout",
+                "ReadTimeout", "ClaudeLaneUnavailable")
+
+
+def _unreachable(exc):
+    """The fallback lane could not answer at all: a connection or a timeout, or the lane closed (no
+    key, a billing refusal). A trial account's own budget stop is not a lane to fail over from."""
+    import claude_lane
+    if isinstance(exc, claude_lane.TrialBudgetSpent):
+        return False
+    return any(type(exc).__name__ == n or any(c.__name__ == n for c in type(exc).__mro__)
+               for n in _UNREACHABLE)
+
+
 def _cache_key():
     """One prompt-cache key per turn, so every step of a turn lands on the same cached prefix."""
     try:
@@ -438,7 +461,37 @@ def create(model, messages, tools=None, max_tokens=None, effort=None, tool_choic
               f"{why[:240]}", flush=True)
     if fallback is None:
         raise RungFailed(why or "no fallback")
-    return fallback(fallback_model())
+    try:
+        return fallback(fallback_model())
+    except Exception as exc:  # noqa: BLE001 - classified below
+        # EDIT-CORE gate, 17 Nov 2026 (p5873 job 56): one 502 on the rung put the turn on Haiku, the
+        # Anthropic lane could not be reached (APIConnectionError) and the whole turn failed. When
+        # the fallback cannot be reached, the rung is the lane that works: the turn goes back to it
+        # and this call is asked there again. A wallet or key latch on the rung still stands.
+        if not _unreachable(exc) or not configured() or not available():
+            raise
+        import openai_credit
+        if not openai_credit.available():
+            raise
+        _unmark_turn()
+        print(f"[edit-rung] {fallback_model()} unreachable ({type(exc).__name__}: "
+              f"{str(exc)[:160]}); asking {model} again", flush=True)
+        claude_trial.guard_call(model)
+        body = request_body(model, messages, tools, max_tokens, effort, tool_choice)
+        t0 = time.monotonic()
+        try:
+            data = _post(body, min(float(timeout or config.EDIT_RUNG_TIMEOUT_S),
+                                   float(config.EDIT_RUNG_TIMEOUT_S)))
+            result = _completion(model, data)
+        except Exception as again:  # noqa: BLE001 - both lanes failed: the turn's recovery owns it
+            print(f"[edit-rung] {model} failed again: {str(again)[:200]}", flush=True)
+            raise exc from again
+        import openai_cache
+        result.usage.prompt_cache = openai_cache.describe(body)
+        result.usage.latency_s = round(time.monotonic() - t0, 2)
+        result.usage.answered_model = model
+        _meter(model, result)
+        return result
 
 
 def status():

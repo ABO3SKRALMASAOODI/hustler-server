@@ -146,7 +146,8 @@ def _lane_state(edl: Dict[str, Any], lane: str,
     if lane == "frame_ratio":
         return (edl.get("frame") or {}).get("ratio", "source")
     if lane == "source_audio":
-        return {key: copy.deepcopy(edl.get(key)) for key in ("volume", "master", "stem_mix")}
+        return {key: copy.deepcopy(edl.get(key))
+                for key in ("volume", "master", "stem_mix", "noise_clean")}
     if lane == "timeline_timing":
         return {"keep": _joined_keep(edl), "speed": edl.get("speed") or [],
                 "inserts": [{key: item.get(key) for key in ("at_output_s", "duration_s")}
@@ -162,6 +163,7 @@ def _lane_state(edl: Dict[str, Any], lane: str,
             "volume": copy.deepcopy(edl.get("volume") or []),
             "master": copy.deepcopy(edl.get("master")),
             "stem_mix": copy.deepcopy(edl.get("stem_mix")),
+            "noise_clean": copy.deepcopy(edl.get("noise_clean")),
             "insert_audio": insert_audio,
         }
     raise KeyError(lane)
