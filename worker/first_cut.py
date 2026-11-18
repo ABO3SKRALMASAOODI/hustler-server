@@ -1638,8 +1638,48 @@ def clip_keeps(keep, start, end, least_s=0.3):
     return out
 
 
+def _sound_db(path, start, length):
+    """Mean level (dBFS) of the source's sound over [start, start + length], or None."""
+    try:
+        out = subprocess.run(
+            ["ffmpeg", "-v", "info", "-nostdin", "-ss", f"{max(0.0, start):.3f}", "-t", f"{max(0.05, length):.3f}",
+             "-i", path, "-vn", "-af", "volumedetect", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=60).stderr
+    except Exception:
+        return None
+    for line in out.splitlines():
+        if "mean_volume:" in line:
+            try:
+                return float(line.split("mean_volume:")[1].split("dB")[0])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+def _edge_carries_the_piece(path, a, b, side, duration):
+    """True when a dark edge [a, b] still plays the piece's own sound: its level is a song's or a voice's
+    (over -40 dBFS) and within 12 dB of the seconds next to it. An app's card is a silent or separate
+    sting; a music video's closing credit under its song's last bars is the piece itself (18 Nov 2026,
+    p5717: the first film ended 2.1 s before the song did)."""
+    if b - a < 0.2:
+        return False
+    edge = _sound_db(path, a, b - a)
+    near = _sound_db(path, max(0.0, a - 5.0), min(5.0, a)) if side == "tail" else \
+        _sound_db(path, b, min(5.0, max(0.0, float(duration) - b)))
+    return edge is not None and near is not None and edge > -40.0 and edge >= near - 12.0
+
+
 def drop_app_cards(ctx, steps, started, duration):
     start, end = app_card_edges(ctx, duration)
+    try:
+        path = ctx.proxy_path()
+    except Exception:
+        path = None
+    if path is not None:
+        if end < float(duration or 0) - 1e-3 and _edge_carries_the_piece(path, end, float(duration), "tail", duration):
+            end = float(duration)
+        if start > 0.0 and _edge_carries_the_piece(path, 0.0, start, "head", duration):
+            start = 0.0
     if start <= 0.0 and end >= float(duration or 0) - 1e-3:
         return False
     keep = _keep(ctx)
