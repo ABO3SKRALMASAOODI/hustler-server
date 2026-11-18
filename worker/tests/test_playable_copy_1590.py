@@ -104,3 +104,35 @@ def test_a_playable_copy_is_never_a_proxy_donor():
     import inspect
     sql = inspect.getsource(dbx.any_asset_by_sha)
     assert "playable_copy" in sql
+
+
+def test_full_index_path_makes_the_copy_before_its_lanes():
+    """Verify of 2e86004e failed: a paying or trial upload takes the full
+    index (run_index_job), which made no copy, so a TS stayed unplayable
+    for the whole 540p encode. The copy is made on the job thread before
+    the cache lookup and the lanes (the 540p proxy row is inserted later,
+    so it is newer and replaces the copy)."""
+    import inspect
+    body = inspect.getsource(indexer.run_index_job)
+    at = body.find("_ensure_playable_copy(")
+    assert at != -1
+    assert at < body.find("dbx.get_index_by_sha")
+    assert at < body.find("def _picture_lane")
+
+
+def test_streamed_scratch_reserve_is_counted(monkeypatch, tmp_path):
+    src = tmp_path / "upload.mp4"
+    _make(src, "mpegts", extra=("-preset", "ultrafast"))
+    made = []
+    monkeypatch.setattr(media, "remux_playable",
+                        lambda *a, **k: made.append(a))
+
+    class Db:
+        def run(self, fn, *a, **k):
+            return None
+
+    free = shutil.disk_usage(tmp_path).free
+    stored = indexer._ensure_playable_copy(
+        Db(), 7, "s" * 64, "proxies/7/x.mp4", str(src), {"duration": 2},
+        str(tmp_path), os.path.getsize(src), reserve_bytes=free)
+    assert stored is False and made == []

@@ -688,6 +688,24 @@ def run_index_job(worker_db, job):
 
         proxy_key = f"proxies/{project_id}/{sha}.mp4"
 
+        # Ticket #1590 (verify of 2e86004e): the full index path is where a
+        # paying or trial customer's upload goes, and it made no playable
+        # copy, so H.264/AAC in a TS/FLV/AVI/MKV container stayed unplayable
+        # in the Studio for the whole 540p encode. Make the stream copy here,
+        # on this thread (the DB stays on it), before the lanes start: the
+        # 540p proxy is inserted later by the picture lane, so it is always
+        # the newer row and replaces the copy. A browser-built proxy is
+        # already playable, so it needs none.
+        if not from_client_proxy:
+            tc = time.monotonic()
+            reserve = (config.index_stream_scratch_bytes(
+                info["duration"], info.get("has_audio", True),
+                proxy_kwargs.get("maxrate_kbps")) if streamed_source else 0)
+            if _ensure_playable_copy(worker_db, project_id, sha, proxy_key,
+                                     src, info, workdir, asset.get("bytes"),
+                                     reserve_bytes=reserve):
+                timings["playable_copy_s"] = round(time.monotonic() - tc, 2)
+
         # Cache hit: this exact file was indexed before (any project) BY THE
         # CURRENT PIPELINE, and its filmstrip is still readable in storage.
         cached = worker_db.run(dbx.get_index_by_sha, sha)
@@ -1458,7 +1476,7 @@ def playable_copy_key(proxy_key):
 
 
 def _ensure_playable_copy(worker_db, project_id, sha, proxy_key, src, info,
-                          workdir, source_bytes):
+                          workdir, source_bytes, reserve_bytes=0):
     """Ticket #1590: a source whose streams every browser decodes but whose
     container none opens (H.264/AAC in MPEG-TS, FLV, AVI, MKV) is playable
     after a stream copy into MP4, which takes I/O time, not encode time.
@@ -1479,7 +1497,10 @@ def _ensure_playable_copy(worker_db, project_id, sha, proxy_key, src, info,
             return False
         if not media.playable_by_remux(src):
             return False
-        need = int(source_bytes or 0) * 1.1 + 512 * 1024 ** 2
+        # reserve_bytes: scratch a streamed index's own outputs (proxy,
+        # wav, frames) still need while the copy sits on the disk.
+        need = int(source_bytes or 0) * 1.1 + 512 * 1024 ** 2 + \
+            int(reserve_bytes or 0)
         if shutil.disk_usage(workdir).free < need:
             print(f"[index] playable copy skipped for project {project_id}: "
                   f"scratch below {need / 1024 ** 3:.1f} GB", flush=True)
