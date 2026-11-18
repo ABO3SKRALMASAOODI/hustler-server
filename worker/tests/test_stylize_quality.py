@@ -63,7 +63,8 @@ def test_halation_is_highlight_only_warm_bloom_and_can_be_windowed():
     graph = _graph([{"id": "st1", "kind": "halation",
                      "start": 0.5, "end": 2.5, "intensity": 0.75}])
     assert "lutyuv=y='if(gte(val," in graph
-    assert "colorbalance=rs=" in graph and ":bs=-" in graph
+    # the tint multiplies the bloom: red kept, green and blue cut, black stays black
+    assert "colorchannelmixer=rr=1:gg=" in graph and "colorbalance" not in graph
     assert "blend=all_mode=screen" in graph
     assert "enable='between(t,0.500,2.500)'" in graph
 
@@ -74,7 +75,14 @@ def test_a_bloom_never_casts_the_picture_magenta(kind):
     planes, where screening lifts both chroma planes above neutral. A neutral
     grey came out magenta-blue over the whole frame (whites a* -0.9 -> +17 at
     intensity 0.08), and "warm, creamy neutrals" shipped pink-mauve. A bloom
-    over a picture with no highlights must leave its colour where it was."""
+    over a picture with no highlights must leave its colour where it was.
+
+    18 Nov 2026: the bound was the spread of the result's own channels (< 6),
+    and halation passed it on ffmpeg 8.0 at (131, 127, 126) while still adding
+    red to every pixel: its colorbalance shadows tint lifted the bloom layer's
+    black to RGB (45, 5, 0). On 8.1 the same graph gave (132, 127, 126) and
+    failed. Each channel is now measured against the same picture without
+    the bloom, so a cast of any size shows."""
     import numpy as np
     ffmpeg = shutil.which(os.environ.get("FFMPEG_BIN", "ffmpeg"))
     if not ffmpeg:
@@ -84,13 +92,29 @@ def test_a_bloom_never_casts_the_picture_magenta(kind):
     start = next(i for i, p in enumerate(parts) if p.startswith("[vc]"))
     end = next(i for i, p in enumerate(parts) if p.endswith("[vsty0]"))
     chain = ";".join(["[0:v]format=yuv420p[vc]"] + parts[start:end + 1])
-    out = subprocess.run(
-        [ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i",
-         "color=c=0x808080:size=320x180:rate=30:duration=0.1",
-         "-filter_complex", chain, "-map", "[vsty0]", "-frames:v", "1",
-         "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-        capture_output=True, timeout=30)
-    assert out.returncode == 0, out.stderr.decode(errors="replace")
-    rgb = np.frombuffer(out.stdout, np.uint8).reshape(-1, 3).astype(float).mean(0)
-    # neutral grey stays grey: no channel pulled away from the others
-    assert rgb.max() - rgb.min() < 6, rgb
+    base = "[0:v]format=yuv420p[vsty0]"
+
+    def mean_rgb(colour, graph_):
+        out = subprocess.run(
+            [ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+             f"color=c={colour}:size=320x180:rate=30:duration=0.1",
+             "-filter_complex", graph_, "-map", "[vsty0]", "-frames:v", "1",
+             "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+            capture_output=True, timeout=30)
+        assert out.returncode == 0, out.stderr.decode(errors="replace")
+        return np.frombuffer(out.stdout, np.uint8).reshape(-1, 3).astype(
+            float).mean(0)
+
+    for grey in ("0x808080", "0x303030"):
+        before, after = mean_rgb(grey, base), mean_rgb(grey, chain)
+        delta = after - before
+        # a neutral picture stays neutral: every channel moves alike (glow
+        # brightens it, by design), no channel pulled away from the others
+        assert delta.max() - delta.min() <= 1.5, (grey, before, after)
+        if kind == "halation":
+            # no highlights, nothing bleeds: the picture is left as it was
+            assert np.abs(delta).max() <= 1.5, (grey, before, after)
+    if kind == "halation":
+        # the light that does bleed is warm: red over blue
+        white = mean_rgb("0xf0f0f0", chain) - mean_rgb("0xf0f0f0", base)
+        assert white[0] >= white[2], white
