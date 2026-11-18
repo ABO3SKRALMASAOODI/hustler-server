@@ -174,7 +174,10 @@ def test_one_loader_lists_every_genre_in_one_schema():
 def test_the_pack_verb_is_one_verb():
     from tools_ext import delivery_tools
     assert "apply_format" not in delivery_tools.TOOL_SPECS
-    assert delivery_tools.VERBS == ("deliver_aspects", "retypeset_language")
+    # set_export_settings (e50c28fd, 16 Nov: the exported file's size or
+    # bitrate) is a delivery verb of its own, not a second pack verb
+    assert delivery_tools.VERBS == ("deliver_aspects", "retypeset_language",
+                                    "set_export_settings")
     spec = format_tools.TOOL_SPECS["apply_format_pack"][2]
     assert spec["aspect"] == {"type": "boolean"}
     assert spec["pack"]["enum"] == ["auto", *formats.IDS, "none"]
