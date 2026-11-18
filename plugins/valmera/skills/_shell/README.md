@@ -111,8 +111,10 @@ written beside it as `*.alien.json` with `supply/alien_bank.json` saying what st
 
 **Every film gets music** (owner, 13 Nov 2026; `chain.music_version`, after the render, on a copy of the
 engine's film). `worker/music_film.py` reads the story's turn and payoff from the film's own lines (a model;
-a workflow may name the landing as `score.turn_s`), chooses a track from the licensed library the way the
-references do (`worker/music_choose.py`: signal shortlist, a model's ranking, then the engine tries the first
+a workflow may name the landing as `score.turn_s`), chooses a track the way the references do, first from the
+reference music set (`.valmera/models/music_ref/index.json`, this Mac only, never committed; `chain.use_music_set`
+points every music route at it through `VALMERA_MUSIC_SET`, the adapter and the long form's chapters included),
+else from the library tracks that passed the signal gate (`worker/music_choose.py`: signal shortlist, a model's ranking, then the engine tries the first
 three against the film and keeps the one whose bars carry it), and `worker/score/music.py` cuts it: the film
 opens on a full part of the song, a build of two to four bars where the story turns, the drop on the payoff,
 under every word and up in the pauses, a hit before the end card. The shell delivers that film as `film.mp4`,

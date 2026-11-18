@@ -226,6 +226,21 @@ FOOTAGE_DENO = f"{VV}/tools/deno"                          # the JS runtime yt-d
 FOOTAGE_POT = f"{VV}/tools/bgutil-pot/server"              # the PO-token script yt-dlp's bgutil plugin runs
 ENV_FILE = f"{V}/hustler-server/backend/.env"
 MUSIC_SET = f"{VV}/models/music_ref"                      # the reference music set's folder (index.json + audio), this Mac only
+SET_ENV = "VALMERA_MUSIC_SET"                              # worker/music_choose reads the set from this folder
+
+
+def use_music_set():
+    """Point every music chooser this run starts at the reference music set (VALMERA_MUSIC_SET), so the set is chosen
+    first on every route: the shell's own command, the SHELL_MUSIC_CMD adapter and the long form's chapter music,
+    which inherit this process's environment. An explicit setting wins; without the set's index nothing changes and
+    the choosers fall back to the library tracks that passed the gate. Returns the folder in use, or None."""
+    cur = os.environ.get(SET_ENV)
+    if cur:
+        return cur
+    if os.path.isfile(os.path.join(MUSIC_SET, "index.json")):
+        os.environ[SET_ENV] = MUSIC_SET
+        return MUSIC_SET
+    return None
 
 
 def seg_durs(words, n):
@@ -467,6 +482,7 @@ def music_version(ctx, rd, sc):
         song = None
     if not sc.get("l1") or not (song or wants_music(ctx)):
         return None
+    use_music_set()
     tag = "song" if song else "music"
     out = os.path.join(ctx.supply, f"film_engine_{tag}.mp4")
     report = os.path.join(ctx.supply, f"{tag}.json")

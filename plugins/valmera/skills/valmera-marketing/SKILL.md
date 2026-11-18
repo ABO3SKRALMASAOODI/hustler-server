@@ -78,9 +78,11 @@ here.
 **Music** (owner, 17 Nov: "what does Mark Cuban talking have to do with a music type that's in Turkish series"): under a
 speaker and a product screen the references play a steady beat, hip-hop or electronic, low under the voice and forward
 where nobody speaks, and the talking-head before/afters are speech-led (music in 9-33% of the reel); never an epic or
-drama cue (SPEC.md section 4). The library's gated tracks are an epic cue (Future Gladiator, the signal's first pick for
+drama cue (SPEC.md section 4). The library's gated tracks were an epic cue (Future Gladiator, the signal's first pick for
 every marketing film) and 125 BPM funk grooves (the 16 Nov marketing films carried Werq; the owner on their music:
-"either no music or ... very cringe"), so a **showcase bakes
+"either no music or ... very cringe"). Since 18 Nov the music step chooses first from the reference music set
+(`.valmera/models/music_ref`, `chain.use_music_set`), whose rows for marketing are steady beats only (hip-hop, lofi,
+electronic, pop; no cinematic cue). A **showcase still bakes
 no library bed** (`proof.check`): its sound is the speaker's own, the export's, and the Studio's keys, Send and push.
 Its song is the platform's catalog hit, chosen at delivery from what the judge plays under marketing talk
 (`platform_music.json`, the whole film at a quarter of the voice; the brief is `proof.SHOWCASE_DIRECTION`). The

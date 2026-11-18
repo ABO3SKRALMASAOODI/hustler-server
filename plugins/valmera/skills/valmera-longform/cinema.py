@@ -970,6 +970,7 @@ def render(ctx,script,sc):
     if not out.exists():
         args=dict(l1=read(sc['l1']),pack=read(Path(ctx.supply)/'pack.json')['pack'],film=result['film'],out=str(out),cache=str(Path(ctx.supply)/'music-cache'))
         job=Path(ctx.supply)/'score_music.json'; save(job,args)
+        chain.use_music_set()   # the chapter music chooses from the reference music set first (it inherits this environment)
         chain.sh(ctx,[chain.PY,str(HERE/'music_chapters.py'),str(job)],label='wf4-music-'+ctx.run_id,heavy=True,timeout=7200)
     result['clean']=str(Path(ctx.supply)/'clean-final.flac'); result['film']=str(out)
     result['music']=read(str(out)+'.json')
