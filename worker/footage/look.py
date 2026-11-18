@@ -35,6 +35,10 @@ Answer with one JSON object only: {"cells":[{"n":1,"ok":true,"clean":true,"grade
 
 BRIEF_CELL_W, BRIEF_CELL_H = 768, 432
 BRIEF_PER_SHEET = 8        # with a writer's brief a sheet carries fewer, larger cells: the version and the moment must read
+# Sheets of one subject that go to the model in one call, each at its own full size and numbered on from the last.
+# 16 Nov (codex-proxy calls.jsonl): a call's cost is its harness prefix, about 13k input tokens, and an image adds
+# about 1k and no latency; a WF1 short sent 60-90 one-sheet calls (4-18 sheets a subject).
+SHEETS_PER_CALL = max(1, int(os.environ.get("FOOTAGE_SHEETS_PER_CALL", "4")))
 
 LOOK_BRIEF = """
 
@@ -199,25 +203,35 @@ def check(subject, lines, cands, sources, work, budget_s=120.0):
     system = LOOK_SYSTEM + LOOK_BRIEF if brief else LOOK_SYSTEM
     if os.environ.get("FOOTAGE_LOOK_ITSELF") == "1":
         system += LOOK_ITSELF
-    groups = [cands[i:i + per] for i in range(0, len(cands), per)]
+    sheets = [cands[i:i + per] for i in range(0, len(cands), per)]
+    # several sheets a call, every cell numbered once across them: the model sees each sheet exactly as before
+    groups = [sheets[i:i + SHEETS_PER_CALL] for i in range(0, len(sheets), SHEETS_PER_CALL)]
 
     def one(gi):
-        g = groups[gi]
-        sp = sheet([(j + 1, c["jpg"]) for j, c in enumerate(g)], os.path.join(work, f"sheet_{_slug(subject['name'])}_{gi}.jpg"),
-                   **({"cell": (BRIEF_CELL_W, BRIEF_CELL_H)} if brief or contextual else {}))
+        g, images, first = [], [], 0
+        for k, cells in enumerate(groups[gi]):
+            si = gi * SHEETS_PER_CALL + k
+            sp = sheet([(first + j + 1, c["jpg"]) for j, c in enumerate(cells)],
+                       os.path.join(work, f"sheet_{_slug(subject['name'])}_{si}.jpg"),
+                       **({"cell": (BRIEF_CELL_W, BRIEF_CELL_H)} if brief or contextual else {}))
+            g += [dict(c, _sheet=sp) for c in cells]
+            images += [{"type": "text", "text": f"Sheet {k + 1}: cells {first + 1} to {first + len(cells)}"}, ask.image_block(sp)]
+            first += len(cells)
         listing = "\n".join(f"cell {j + 1}: video {c['src']} \"{sources[c['src']]['title'][:90]}\" ({sources[c['src']].get('channel') or '?'}), "
                             f"at {c['t']:.1f} s" + (f"; said there: \"{c['said'][:140]}\"" if c.get("said") else "") for j, c in enumerate(g))
+        if len(groups[gi]) > 1:
+            listing += f"\n\nThe {len(g)} cells are on {len(groups[gi])} sheets, numbered on across them: answer for every cell."
         content = [{"type": "text", "text": f"Subject: {subject['name']}\nA frame must show: {subject['must_show']}\n\nLines:\n{ls}\n\n",
                     "cache_control": {"type": "ephemeral"}},
-                   {"type": "text", "text": listing},
-                   ask.image_block(sp)]
-        txt, usd = ask.ask(system, content, "footage_look", budget_s=budget_s, max_tokens=4000)
+                   {"type": "text", "text": listing}] + images
+        txt, usd = ask.ask(system, content, "footage_look", budget_s=budget_s, max_tokens=4000 * len(groups[gi]))
         got = {}
         for c in ask.json_obj(txt).get("cells") or []:
             if isinstance(c, dict) and isinstance(c.get("n"), int):
                 got[c["n"]] = c
         out = []
         for j, c in enumerate(g):
+            sp = c.pop("_sheet")
             v = got.get(j + 1) or {}
             try:
                 x = min(max(float(v.get("x", 0.5)), 0.0), 1.0)

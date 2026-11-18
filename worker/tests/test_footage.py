@@ -592,6 +592,35 @@ def test_the_look_keeps_only_lines_whose_three_brief_checks_pass(monkeypatch, tm
     assert "[see:" not in seen["texts"][1]
 
 
+def test_a_subjects_sheets_go_to_the_model_four_a_call_and_every_cell_keeps_its_own_verdict(monkeypatch, tmp_path):
+    """16 Nov cost lane: a WF1 short sent 60-90 one-sheet look calls (4-18 sheets a subject). Each sheet is still drawn
+    and shown at its own size; cells are numbered on across the sheets of a call, and each cell gets its own answer."""
+    from PIL import Image
+    jpg = str(tmp_path / "f.jpg")
+    Image.new("RGB", (64, 36), (90, 90, 90)).save(jpg)
+    calls = []
+
+    def ask_(system, content, what, budget_s=0, max_tokens=0):
+        images = sum(1 for c in content if c.get("type") == "image")
+        n = sum(1 for line in content[1]["text"].splitlines() if line.startswith("cell "))
+        calls.append((images, n, max_tokens))
+        # every even cell fits
+        return json.dumps(dict(cells=[dict(n=k, ok=k % 2 == 0, clean=True, grade=4, lines=[0], shows="x", x=0.5) for k in range(1, n + 1)])), 0.0
+    monkeypatch.setattr(look.ask, "ask", ask_)
+    sub = dict(name="Nvidia", must_show="the company")
+    cands = [dict(src=0, t=float(i), jpg=jpg, said="") for i in range(9 * look.BRIEF_PER_SHEET + 3)]      # 10 sheets
+    lines = [dict(i=0, say="a", visual="the chips")]
+    out, _ = look.check(sub, lines, cands, [dict(title="T", channel="c")], str(tmp_path))
+    assert sorted(c[:2] for c in calls) == [(2, 11), (4, 32), (4, 32)] and calls[0][2] == 16000
+    assert [c["t"] for c in out] == [c["t"] for c in cands]                         # every cell, in order
+    assert [c["ok"] for c in out] == [(i % 32 + 1) % 2 == 0 for i in range(len(cands))]
+    assert len({c["sheet"] for c in out}) == 10 and len(list(tmp_path.glob("sheet_*.jpg"))) == 10
+    monkeypatch.setattr(look, "SHEETS_PER_CALL", 1)
+    calls.clear()
+    look.check(sub, lines, cands, [dict(title="T", channel="c")], str(tmp_path))
+    assert len(calls) == 10                                                          # one sheet a call: as before
+
+
 def test_research_document_links_are_model_context_not_video_searches(monkeypatch):
     seen=[]
     def ask(system,content,*args,**kwargs):
