@@ -131,13 +131,22 @@ def read(ctx, reply, tracks, offer_text=""):
 
 
 def candidates(slugs=None):
-    """Track dicts for ``read``: the offered slugs in order, or with none
-    offered the whole catalog (a user may name a track outright)."""
+    """Track dicts for ``read``: the offered slugs first, in offer order,
+    then the rest of the catalog (offered None): a user may name any library
+    track outright, offered or not.
+
+    EDIT-CORE gate, 18 Nov 2026 (p5744 R4): the editor's previous reply named
+    the track already playing ("After midnight"), so that one track was the
+    whole list the reader saw; the customer typed "Calm current" and the
+    reader could only answer that it "describes the current calm level". The
+    library track they named was never in front of it. A description still
+    has to fit exactly one OFFERED track (the system prompt), so a mood alone
+    never picks a track nobody offered."""
     import music_library
     rows = {r["slug"]: r for r in music_library.catalog()}
-    if slugs:
-        return [{"slug": s, "title": (rows.get(s) or {}).get("title"),
-                 "mood": (rows.get(s) or {}).get("mood"), "offered": i}
-                for i, s in enumerate(slugs, 1) if s in rows]
-    return [{"slug": s, "title": r.get("title"), "mood": r.get("mood"),
-             "offered": None} for s, r in rows.items()]
+    offered = [s for s in dict.fromkeys(slugs or ()) if s in rows]
+    out = [{"slug": s, "title": rows[s].get("title"),
+            "mood": rows[s].get("mood"), "offered": i}
+           for i, s in enumerate(offered, 1)]
+    return out + [{"slug": s, "title": r.get("title"), "mood": r.get("mood"),
+                   "offered": None} for s, r in rows.items() if s not in offered]

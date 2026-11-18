@@ -151,3 +151,25 @@ def test_an_exact_answer_needs_no_model(store, model):
         ctx, "chill-bubbles-lofi-bright-relaxed")
     assert out.startswith("EDL v7 -> v8"), out
     assert model["seen"] == []
+
+
+def test_a_track_named_outright_is_read_against_the_whole_library(model):
+    # EDIT-CORE gate, 18 Nov 2026 (p5744 R4): the editor's previous reply named only the track already
+    # playing ("After midnight"); the customer typed "Calm current" and the reader, shown that one
+    # track, answered that it "describes the current calm level". The library track named was never
+    # in front of it.
+    shown = music_pick.candidates(["cinematic-after-midnight"])
+    assert shown[0] == {"slug": "cinematic-after-midnight", "title": "After midnight",
+                        "mood": "cinematic", "offered": 1}
+    assert any(t["slug"] == CALM and t["offered"] is None for t in shown)
+    assert len({t["slug"] for t in shown}) == len(shown) == len(music_library.catalog())
+    model["verdict"] = {"kind": "picked", "slug": CALM, "why": "names Calm Currents"}
+    ctx, fake = tool_context(default_edl(20.0), user_message="Calm current", job_id=11)
+    ctx.llm_client = object()
+    previous = ("Maine cool grade laga di hai, aur 6 s se 0.7x slow motion aur ducked "
+                "'After midnight' music waise hi rakhe hain.")
+    note = music_gate.choice_note(ctx, "Calm current", previous, previous_reply_id=52)
+    assert CALM in note and "by its name in the music library" in note
+    assert CALM in {t["slug"] for t in model["seen"][-1]["tracks"]}
+    record = json.loads(fake.kv["music_picks:7"])[CALM]
+    assert record["via"] == "chat_read" and record["named"] is True

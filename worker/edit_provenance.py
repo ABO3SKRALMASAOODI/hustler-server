@@ -157,6 +157,15 @@ _NAMES = {"sfx": "sound effect", "music": "music track", "inserts": "insert", "o
 
 
 def _where(layer, item):
+    if layer == "speed":
+        # The span and the rate, not only where it starts (p5744 R4, 18 Nov 2026: "speed change
+        # sp1 at 6.00 s" left out that the customer's "6 sec ke baad" slowed only 6.0-11.26 s).
+        try:
+            return (f" {float(item['factor']):g}x on source {float(item['start']):.2f}-"
+                    f"{float(item['end']):.2f} s (the rest of the source plays at its own speed "
+                    "unless another speed change covers it)")
+        except (KeyError, TypeError, ValueError):
+            pass
     for key in ("at", "start", "start_output_s", "at_output_s"):
         if item.get(key) is not None:
             try:

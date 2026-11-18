@@ -544,3 +544,12 @@ def test_silence_gaps_say_whether_the_current_film_still_holds_them(monkeypatch)
     lines = out.splitlines()
     assert "not in the current film: the edit already cut it" in next(l for l in lines if l.startswith("13.10"))
     assert next(l for l in lines if l.startswith("31.00")).endswith("[in the film at output 4.00-5.00]")
+
+
+def test_provenance_names_a_speed_changes_span_and_rate():
+    # p5744 R4, 18 Nov 2026: "speed change sp1 at 6.00 s" hid that the customer's "6 sec ke baad"
+    # slowed only 6.0-11.26 s; the next turn slowed the opening too.
+    import edit_provenance
+    sp = {"id": "sp1", "start": 6.0, "end": 11.26, "factor": 0.7}
+    assert edit_provenance._where("speed", sp).startswith(" 0.7x on source 6.00-11.26 s")
+    assert edit_provenance._where("sfx", {"id": "s", "at": 1.5}) == " at 1.50 s"
