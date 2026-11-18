@@ -324,6 +324,17 @@ def test_fixed_needs_a_replay_of_that_request(world):
     assert events_of(t, "fixed")[0]["replay"]["session"] == "p5499"
 
 
+def test_a_corpus_session_id_names_its_project(world):
+    """p<project>-<unix start> is the session id the corpus gives a replay."""
+    tid = failed_ticket(world)
+    with pytest.raises(store.StoreError, match="not a session of this ticket"):
+        close_fixed(world, tid, proof(session="p777-1794813402"))
+    with pytest.raises(store.StoreError, match="not a session of this ticket"):
+        close_fixed(world, tid, proof(session="p54990-1794813402"))
+    t = close_fixed(world, tid, proof(session="p5499-1794813402"))
+    assert events_of(t, "fixed")[0]["replay"]["session"] == "p5499-1794813402"
+
+
 def quality_ticket(world):
     world.c.execute(
         """INSERT INTO session_reviews (session_key, surface, user_id, project_id,

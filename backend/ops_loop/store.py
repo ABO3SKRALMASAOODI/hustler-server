@@ -1180,7 +1180,9 @@ def check_replay(cur, ticket, replay, quality_gap=False):
             "<gauntlet run>/<session> (FIXER.md section 7)")
     session = str(replay["session"])
     projects = ticket_projects(cur, ticket)
-    number = session[1:] if session[:1] == "p" else session
+    # A corpus session is p<project>-<unix start> (p5857-1794813402), the id the
+    # Reviewer and the Gauntlet both use; #123's proof was refused on it.
+    number = (session[1:] if session[:1] == "p" else session).partition("-")[0]
     if projects and not (number.isdigit() and int(number) in projects):
         raise StoreError(f"replay {session} is not a session of this ticket "
                          f"(its projects: "
