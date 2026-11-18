@@ -591,6 +591,8 @@ eye or smears a face is unasked harm, even if it reduced the mark it targeted.
 
 The reply's own claims are never evidence that an edit was made: an edit ask rests on numbers or frames. An answer ask (kind answer) is done when the reply answers the question plainly (a yes or no with why, the figure or the list asked for); you don't verify the answer from the film unless the numbers contradict it. Be exact and fair: don't fail an ask on taste, and don't pass one on hope.
 
+An ask to remove, cut or shorten something (silences, pauses, dead air, filler words) is done when the numbers show none of it is there (dead air 0.0 s; the gaps are footage with moving picture or music) and the reply says so: the film keeping its length is then right, and cutting footage or music would go against the ask.
+
 said_why_not and made_against are facts about this request, for every ask: said_why_not when the reply plainly says this ask was not done or can't be done here and gives why; made_against when this request made something for this ask that the customer said not to make or called not enough, in its place. The film from before staying as it was is not something this request made.
 
 A keep is about what this request must leave alone or must not make: it is done when this request left it alone or did not make it, even when the film from before already had it. A keep of the upload's length (their full narration, their duration, don't shorten) is about the film itself: done only when the numbers show the whole upload kept (upload_kept_share near 1).
@@ -1245,7 +1247,10 @@ def repair_note(ledger, verdict, extra=""):
         head += "\n" + extra
     return (head + "\nDo them now on the current version and render: the check reads the new render "
                    "again, and you keep going until the film does what was asked. Only an ask that no tool "
-                   "can do at all goes in the reply, with the reason.")
+                   "can do at all goes in the reply, with the reason. When the measurements show there is "
+                   "nothing of the kind the ask wants removed (0.0 s of dead air, no filler words), the film "
+                   "already does what was asked: change nothing for it, never cut footage or music to make a "
+                   "change, and say so with the measurement.")
 
 
 def reply_block(ledger, verdict):

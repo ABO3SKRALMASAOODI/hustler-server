@@ -192,3 +192,18 @@ def test_the_ask_check_reads_the_pauses_cut_silences_measured(monkeypatch):
     fresh.proxy_path = lambda: "proxy.mp4"
     text = asks.pauses(fresh, fresh.edl)
     assert "dead air 0.0 s" in text and "not measured" not in text and len(calls) == 2
+
+
+def test_the_check_and_its_repair_note_accept_a_measured_nothing_to_cut():
+    """18 Nov, p5717 R1 (egf-fixes-1118c): the check measured dead air 0.0 s and footage 88.6 s, wrote
+    "the film has no dead air needing a cut", still called the ask not_done because the film kept its
+    length, and the repair note ordered "keep going until the film does what was asked": the editor
+    then cut the song. Both texts now say that a measured nothing-to-remove is the answer."""
+    from score import asks
+    import inspect
+    src = inspect.getsource(asks)
+    assert "dead air 0.0 s; the gaps are footage" in src
+    ledger = {"asks": [{"id": "a1", "want": "pauses shortened", "kind": "edit"}]}
+    verdict = {"asks": [{"id": "a1", "state": "not_done", "seen": "dead air 0.0 s, footage 88.6 s"}]}
+    note = asks.repair_note(ledger, verdict)
+    assert "never cut footage or music to make a change" in note
