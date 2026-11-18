@@ -7,6 +7,10 @@ Admin (admin_required, read-only connections):
                                   failures and auto-fixes, signups and active
                                   customers, queue / box / spend
   GET /admin/video/ops/sessions   reviewed sessions with evidence pictures
+  GET /admin/video/ops/session-list  every session of the last 1-90 days,
+                                  newest first, with its kind (Studio, MCP,
+                                  Shorts, Website demo; edited or not and
+                                  why), filtered and paged; computed live
   GET /admin/video/ops/journeys   the Journeys view: the trial funnel (24 h /
                                   7 d) and one story per edit session (who,
                                   the upload, the exact asks, the delivered
@@ -35,7 +39,8 @@ from psycopg2.extras import RealDictCursor
 from flask import Blueprint, current_app, jsonify, request
 
 import storage
-from ops_loop import EVIDENCE_PREFIX, VERDICTS, journeys, views
+from ops_loop import (EVIDENCE_PREFIX, VERDICTS, journeys,
+                      session_list, views)
 from routes.admin import (admin_required, gzip_large_json,
                           legacy_error_response)
 
@@ -139,6 +144,44 @@ def ops_sessions():
                                       presign=_admin_presign))
     finally:
         conn.close()
+
+
+@admin_ops_bp.route("/admin/video/ops/session-list", methods=["GET"])
+@admin_required
+def ops_session_list():
+    """Every session of the window, newest first, each with its kind (owner,
+    18 Nov 2026). Computed live from a few lean queries and kept 60 s per
+    process, so paging and filtering are instant and a new session shows
+    within a minute."""
+    from admin_metrics import cache as admin_cache
+    surface = request.args.get("surface") or None
+    if surface and surface not in session_list.SURFACES:
+        return jsonify({"error": "surface must be one of "
+                                 + ", ".join(session_list.SURFACES)}), 400
+    edited = {"1": True, "0": False}.get(request.args.get("edited") or "")
+    try:
+        days = max(1, min(int(request.args.get("days", 7)),
+                          session_list.MAX_DAYS))
+        page = int(request.args.get("page", 1))
+        per_page = int(request.args.get("per_page", 50))
+    except ValueError:
+        return jsonify({"error": "days, page and per_page are numbers"}), 400
+
+    def compute():
+        conn = _connect()
+        try:
+            return session_list.compute(conn.cursor(),
+                                        datetime.now(timezone.utc), days)
+        finally:
+            conn.close()
+    report, computed_at, age = admin_cache.get_or_compute(
+        "ops-session-list", {"days": days}, 60, compute,
+        fresh=request.args.get("fresh") == "1")
+    out = session_list.page(report, surface=surface, edited=edited,
+                            page=page, per_page=per_page)
+    out.update(computed_at=computed_at.isoformat(timespec="seconds"),
+               cache_age_s=age)
+    return jsonify(out)
 
 
 def _presign_many(keys):

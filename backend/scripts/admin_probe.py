@@ -542,6 +542,26 @@ def check_ops_sessions(b, t):
     return f"{len(rows)} cards · total {b.get('total')} · mix {b.get('counts')}"
 
 
+def check_ops_session_list(b, t):
+    rows = b.get("sessions")
+    need(isinstance(rows, list) and rows, "no sessions listed")
+    need(b.get("total") == b.get("all_total") and b["total"] >= len(rows),
+         f"total {b.get('total')} vs all {b.get('all_total')}")
+    c = b.get("counts") or {}
+    need(sum(c[k]["total"] for k in c if k != "all") == c["all"]["total"]
+         == b["all_total"], f"kind counts {c}")
+    starts = [r["started_at"] for r in rows]
+    need(starts == sorted(starts, reverse=True), "not newest first")
+    for r in rows:
+        need(r.get("surface") in ("studio", "mcp", "shorts", "website_demo"),
+             f"kind {r.get('surface')}")
+        need(r["edited"] == (r["why_not_edited"] is None),
+             f"{r['key']} edited without a reason")
+    return (f"{len(rows)} of {b['total']} sessions · newest {starts[0][:16]} · "
+            + " · ".join(f"{k} {v['total']} ({v['edited']} edited)"
+                         for k, v in c.items()))
+
+
 def check_ops_journeys(b, t):
     if b.get("pending"):
         return "computing (shared report)"
@@ -627,6 +647,8 @@ ENDPOINTS = [
     ("Overview", "/admin/charts/mrr", check_rows("data", label="days")),
     ("Overview", "/admin/top-users", check_rows("users")),
     ("Overview", "/admin/activity", check_rows("events")),
+    ("Sessions", "/admin/video/ops/session-list?days=7&page=1&per_page=50", check_ops_session_list),
+    ("Sessions", "/admin/video/ops/session-list?days=30&page=1&per_page=50", check_ops_session_list),
     ("Sessions", "/admin/video/ops/sessions?days=30&page=1&per_page=30", check_ops_sessions),
     ("Journeys", "/admin/video/ops/journeys?window=7d", check_ops_journeys),
     ("Tickets", "/admin/video/ops/tickets?status=all", check_ops_tickets),
