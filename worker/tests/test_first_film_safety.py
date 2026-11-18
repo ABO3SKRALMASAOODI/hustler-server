@@ -341,3 +341,15 @@ def test_source_review_does_not_seek_into_the_audio_only_tail(monkeypatch, tmp_p
     assert result['safe_end_s'] == 24.767
     assert result['sample_video_duration_s'] == 24.767
     assert result['source_duration_s'] == 24.803
+
+
+def test_the_source_screen_review_keeps_a_pieces_own_credits():
+    """18 Nov 2026, p5717 (egf-fixes-1118d): a music video's closing director credit, under the song's
+    last 2.3 s, was read as an end slate and cut from the first film with the song's ending. The
+    review now reads the piece's own credits as content; only app, platform or channel screens are
+    flagged."""
+    import inspect
+    import source_screen
+    src = inspect.getsource(source_screen.build)
+    assert "belongs" in src
+    assert "is content, not branding" in src
