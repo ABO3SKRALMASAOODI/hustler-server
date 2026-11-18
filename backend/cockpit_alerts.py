@@ -324,6 +324,17 @@ def p0_fixed_mail(s, now):
     return subject, body
 
 
+def p0_fixed_batch_mail(items):
+    """One email for several FIXED notices due at once: [(key, subject, body)]."""
+    subjects = [i[1] for i in items]
+    tids = [sub.rsplit("(P0 #", 1)[-1].rstrip(")") for sub in subjects]
+    subject = f"Fixed: {len(items)} P0s (" + ", ".join("#" + t for t in tids[:12]) + \
+        (", ..." if len(tids) > 12 else "") + ")"
+    body = _shell(f"Fixed: {len(items)} P0s", [("Fixed and proven", [_e(sub) for sub in subjects])],
+                  "Sent to the admin inbox only, never to a customer. Each ticket's proof is in the admin Tickets tab.")
+    return subject, body
+
+
 def p0_blocked_mail(s, now, cause, reason, step):
     title, tid = _one(s["title"], 80), s["id"]
     subject = f"Blocked: {title} (P0 #{tid})"
@@ -834,10 +845,16 @@ def run_tick(now=None, send=_send, rconn=None, wconn=None):
                 items = event_alerts(r, since - timedelta(minutes=2), now)
                 count = _kv(r, _count_key(now)) or {"n": 0}
                 n = int(count.get("n", 0))
-                # Each P0 state is its own email (its subject is its state);
-                # everything else shares one email, as before.
+                # Each P0 ISSUE or BLOCKED is its own email (its subject is its
+                # state). FIXED notices that come due together share ONE email
+                # (owner, 18 Nov 2026: "why am I being spammed by fixed": ten
+                # tickets closed by one fix sent ten emails in a minute).
+                # Everything else shares one email, as before.
                 rest = [i for i in items if not i[0].startswith(P0_PREFIX)]
-                batches = [[i] for i in items if i[0].startswith(P0_PREFIX)]
+                p0 = [i for i in items if i[0].startswith(P0_PREFIX)]
+                fixed = [i for i in p0 if i[0].endswith("fixed")]
+                batches = [[i] for i in p0 if not i[0].endswith("fixed")]
+                batches += [fixed] if fixed else []
                 batches += [rest] if rest else []
                 for batch in batches:
                     room = n < MAX_ALERT_EMAILS_PER_DAY
@@ -847,9 +864,12 @@ def run_tick(now=None, send=_send, rconn=None, wconn=None):
                     if not claimed:
                         continue
                     out["alerts"] += len(claimed)
-                    subject, body = (claimed[0][1:] if claimed[0][0]
-                                     .startswith(P0_PREFIX)
-                                     else alert_email(claimed))
+                    if len(claimed) > 1 and claimed[0][0].startswith(P0_PREFIX):
+                        subject, body = p0_fixed_batch_mail(claimed)
+                    else:
+                        subject, body = (claimed[0][1:] if claimed[0][0]
+                                         .startswith(P0_PREFIX)
+                                         else alert_email(claimed))
                     if send(subject, body):
                         out["sent"] = True
                         n += 1

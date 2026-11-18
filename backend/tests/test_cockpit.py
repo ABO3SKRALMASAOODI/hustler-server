@@ -649,3 +649,12 @@ def test_the_tail_in_force_follows_each_release():
         newest = infra_cost.TAIL_SCHEDULE[-1][1]
         assert f'MODEL_GAP_SLEEP_AFTER = "{newest["mcp"]}s"' in text
         assert f'RENDER_SLEEP_AFTER = "{newest["interactive"]}s"' in text
+
+
+def test_fixed_notices_due_together_share_one_email():
+    # Owner, 18 Nov 2026: ten P0s closed by one fix sent ten "Fixed" emails in a minute.
+    import cockpit_alerts as ca
+    items = [(f"p0:{n}:1:fixed", f"Fixed: refusal {n} (P0 #{n})", "<p>x</p>") for n in (1345, 1346, 1351)]
+    subject, body = ca.p0_fixed_batch_mail(items)
+    assert subject == "Fixed: 3 P0s (#1345, #1346, #1351)"
+    assert "refusal 1346" in body and "never to a customer" in body
