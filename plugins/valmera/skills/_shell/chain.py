@@ -435,9 +435,15 @@ def lay_devices(ctx, l1_path):
         return l1_path
     if not (doc.get("devices") or doc.get("alien")) or engine_kind() != "scene":
         return l1_path
+    import glob
     import hashlib
-    # named by the scene's own bytes: a scene scored again is laid again, never drawn from a stale layout
-    out = os.path.splitext(l1_path)[0] + f".devices.{hashlib.sha256(open(l1_path, 'rb').read()).hexdigest()[:10]}.json"
+    # named by the scene's own bytes and the palette's code: a scene scored again, or a palette that changed, is laid
+    # again, never drawn from a stale layout
+    h = hashlib.sha256(open(l1_path, "rb").read())
+    for src in sorted(glob.glob(os.path.join(brand.worker_dir(), "scene", "palette", "*.py")) +
+                      glob.glob(os.path.join(brand.worker_dir(), "scene", "alien", "*.py"))):
+        h.update(open(src, "rb").read())
+    out = os.path.splitext(l1_path)[0] + f".devices.{h.hexdigest()[:10]}.json"
     if not os.path.exists(out):
         wk = brand.worker_dir()
         log = os.path.join(ctx.supply, "devices_log.json")

@@ -1753,6 +1753,9 @@ def director_devices(ctx, script, sc, pack, l1, beats, around=()):
     asks = DR.around(asks, around, l1["dur_f"])         # a reel's own hero device keeps its frames: the Director's land beside it
     if asks:
         l1["devices"] = list(l1.get("devices") or []) + asks
+        ev = DR.device_events(asks)                      # landings the music and sound workflow may answer (no device sounds)
+        beats["device_events"] = ev
+        beats["events"] = sorted(set(beats.get("events") or []) | {e["f"] for e in ev})
     return dict(by=d.get("by"), asked=[a["dev"] for a in asks], notes=notes, sections=d.get("sections"), why=d.get("why"))
 
 

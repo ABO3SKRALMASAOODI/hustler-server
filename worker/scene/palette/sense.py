@@ -201,17 +201,27 @@ class Sense:
         self._cache[k] = out
         return out
 
-    def depth(self, aid):
-        """A still's depth, near = 1, when a depth model can run here; else None (a device that wants it falls back)."""
-        k = ("depth", aid)
+    def depth(self, aid, t=0.0):
+        """A picture's relative depth (near = 1), HxW float32, from Depth Anything V2 Small (worker/depth_track.py) run by
+        the Python named in VALMERA_DEPTH_PY (one with torch and the weights: the batch lane's); cached in the work. None
+        where no such Python is set up: a device that wants depth runs its fallback."""
+        k = ("depth", aid, round(float(t), 2))
         if k in self._cache:
             return self._cache[k]
         self._cache[k] = None
-        try:
-            import torch  # noqa: F401
-        except Exception:      # noqa: BLE001 - no torch in this environment: depth is not available
+        py, p = os.environ.get("VALMERA_DEPTH_PY"), self.path_of(aid)
+        if not py or not p or not os.path.exists(p):
             return None
-        return None
+        out = os.path.join(self._dir(), f"depth_{self._key(p, round(float(t), 2))}.npy")
+        if not os.path.exists(out):
+            wk = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            code = ("import sys, numpy as np, depth_track as D; c = D.local_clip(sys.argv[1], float(sys.argv[2]), float(sys.argv[2]) + 0.04); "
+                    "np.save(sys.argv[3], c.depth[0] if c is not None else np.zeros((1, 1), np.float32))")
+            r = subprocess.run([py, "-c", code, p, str(float(t)), out], cwd=wk, capture_output=True, timeout=600)
+            if r.returncode != 0 or not os.path.exists(out):
+                return None
+        self._cache[k] = np.load(out)
+        return self._cache[k]
 
     def seat_luma(self, f, y0=0.55, y1=0.70):
         """The base picture's light (0..1) under a band of the frame on frame f, read from its source."""

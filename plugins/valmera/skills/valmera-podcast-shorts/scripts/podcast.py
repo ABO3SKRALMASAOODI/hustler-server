@@ -487,7 +487,9 @@ def parts_of(words, part_s=PART_S, overlap_s=PART_OVERLAP_S):
 
 def assign_styles(moments, order):
     """A style per short, in rank order: never the style of either short before it, the least-used style first, and
-    among equals the moment's own best fit. Returns the moments with `style` set."""
+    among equals the moment's own best fit. Returns the moments with `style` set. A style is the short's type and colour
+    identity (its display font, accent, grain), a starting palette: the devices, layouts, surfaces and pace of every
+    moment are the short's Director's (wf1_short.direction_of), so no style fixes a device set."""
     used = {s: 0 for s in order}
     recent = []
     for m in moments:

@@ -75,6 +75,11 @@ GROUND_BLUR, GROUND_BLUR_FIT = 30, 12
 COLLAGE_FIT = 0.08         # with verdicts: collages only on the writer's lines, at most this share of the voice (reel, archive, window)
 PRINT_W_FIT = (0.78, 0.86)
 PRINT_MOVE = 0.20          # a print lands 20% large and settles over its own shot, decelerating (8%+ in its first third)
+# a product recording on a narrated line (a direction's board_paths, marketing): the export whole at its own shape on the
+# style's board, from PROOF_TOP down to PROOF_CLEAR above the caption seat (the caption and its pool sit on the board, never
+# on the export's pixels), landing PROOF_MOVE large and PROOF_SLIDE to one side, then drifting PROOF_DRIFT on
+PROOF_TOP, PROOF_CLEAR, PROOF_W_MAX = 0.055, 0.115, 0.88
+PROOF_MOVE, PROOF_SLIDE, PROOF_DRIFT, PROOF_LAND_F = 0.12, 0.045, 0.03, 12
 WINDOW_SHARE = 0.15        # windows of landscape footage: a budget the build sets (the rest bleeds on a cover crop the driver moves)
 FLAT_TEXTURE = 5.0         # a take whose middle frame's mean gradient is under this (a logo on a plain ground) is flat
 FILM_VIGNETTE_FIT = 0.12   # with verdicts the film-wide vignette is light: colour is the base, the heavy finish is a device
@@ -226,11 +231,44 @@ class Supply:
         self.shortfall, self.reframed = {}, {}
         self.uses = {}             # photo path -> [frame shown]
         self.played = {}           # clip path -> [(t0, t1)] seconds of the clip already on screen
+        # clip path -> (recording key, offset): a clip cut from a recording (c["origin"]: its sha256 and the recording's
+        # second the clip starts on) shares that recording's played seconds with every other file cut from it. 20 Nov:
+        # one export was supplied as nine files and the same seconds played under four names (30 of 46 shots repeats).
+        # A clip without an origin is keyed by its path alone, as before.
+        self.origin = {}
+        self.origin_played = {}    # recording key -> [(t0, t1)] its seconds on screen, under any file
         self.shown_at = {}         # clip path -> [frame] each time it was cut in
         self.subject = {}
         for ln in footage.values():
             for c in ln:
                 self.subject[c["path"]] = c.get("subject")
+                self.note_origin(c)
+
+    def note_origin(self, c):
+        o = c.get("origin")
+        if isinstance(o, dict) and o.get("key"):
+            self.origin[c["path"]] = (str(o["key"]), float(o.get("t0") or 0.0))
+
+    def took(self, c):
+        """A clip's seconds already on screen, on its own clock: under its own path and, for a clip of a recording
+        (origin), the recording's seconds shown under any other file."""
+        out = list(self.played.get(c["path"]) or [])
+        o = self.origin.get(c["path"])
+        if o:
+            dur = float(c.get("seconds") or 0.0)
+            for a, b in self.origin_played.get(o[0]) or []:
+                lo, hi = a - o[1], b - o[1]
+                if hi > 0 and (dur <= 0 or lo < dur):
+                    out.append((max(lo, 0.0), min(hi, dur) if dur > 0 else hi))
+        return sorted(out)
+
+    def fresh_room(self, c, take, min_s=0.3):
+        """The longest stretch of a take that no file of its recording has shown, (a, b), or None. A clip without a
+        recording origin: the take whole (a played take of it is already spent by its take group)."""
+        if c["path"] not in self.origin:
+            return tuple(take)
+        room = [(a, b) for a, b in _free_in(self.took(c), take) if b - a >= min_s]
+        return max(room, key=lambda q: q[1] - q[0]) if room else None
 
     def photo(self, name, f, last_path=None):
         """An unused photograph of `name`, else one shown once at least REUSE_AFTER_S ago (on another part of it)."""
@@ -250,7 +288,7 @@ class Supply:
     def clip_room(self, c, n_s):
         """The part of a clip a shot of n_s seconds may play: never seconds already played. (t0, t1) or None."""
         dur = float(c["seconds"])
-        took = sorted(self.played.get(c["path"]) or [])
+        took = self.took(c)
         if not took:
             if n_s >= dur:
                 return 0.0, dur
@@ -272,6 +310,9 @@ class Supply:
 
     def take_clip(self, c, t0, t1, f=None):
         self.played.setdefault(c["path"], []).append((t0, t1))
+        o = self.origin.get(c["path"])
+        if o:
+            self.origin_played.setdefault(o[0], []).append((t0 + o[1], t1 + o[1]))
         if f is not None:
             self.shown_at.setdefault(c["path"], []).append(f)
 
@@ -574,6 +615,32 @@ def span_motion(c, t0, t1):
     return float(seg[len(seg) // 2]) if seg else 0.0
 
 
+def cut_landings(c):
+    """A clip's own measured inner cuts (clip_motion's c["cuts"], seconds) as landings on its asset, beside any landings
+    it already names (a recorded export's EDL pictures and titles): the next take arriving inside a played window is a
+    cut on screen (score.sound.landing_events), `moving` when that take's first half second moves by content
+    (span_motion >= MOTION_FLOOR, the podcast's verified-motion bar), so the sound design sounds the footage's own
+    landings, not only the film's cuts between files (round1 sound-events-missing). Signal only."""
+    dur = float(c.get("seconds") or 0.0)
+    have = [dict(x) for x in c.get("landings") or []]
+    cuts = sorted(float(t) for t in (c.get("cuts") or []) if 0.15 < float(t) < dur - 0.15)
+    out = list(have)
+    for t in cuts:
+        if any(abs(float(x["t"]) - t) < 0.1 for x in have):
+            continue                                       # the export's own picture landing is that cut
+        row = dict(t=round(t, 3), kind="cut")
+        if span_motion(c, t, min(t + 0.5, dur)) >= MOTION_FLOOR:
+            row["moving"] = True
+        out.append(row)
+    return sorted(out, key=lambda x: (float(x["t"]), str(x.get("kind"))))
+
+
+def with_landings(c):
+    """The clip as its asset is registered: its landings, its measured inner cuts among them."""
+    lands = cut_landings(c)
+    return dict(c, landings=lands) if lands else c
+
+
 def take_motion(c, take):
     """How much a take moves where it moves most: the motion of its most moving window (Takes.best) of half a second."""
     a, b = take
@@ -737,8 +804,11 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
         """The next picture for this line: (kind, name, rec, tier, take) or None. lead: the line's first shot on the hook,
         the payoff or the close, its best-graded fitting take (moving first among equals)."""
         last_still = bool(out) and out[-1][2] == "clip" and not moving(out[-1][4])
-        mine = [u for u in reserved[line] if units[u]["c"]["path"] != last]
-        spare = sorted((u for u in free if line in units[u]["lines"] and units[u]["c"]["path"] != last), key=lambda u: rank(u, line))
+
+        def fresh(u):              # a take of a recording another file already showed whole is not a new picture
+            return sp.fresh_room(units[u]["c"], units[u]["take"]) is not None
+        mine = [u for u in reserved[line] if units[u]["c"]["path"] != last and fresh(u)]
+        spare = sorted((u for u in free if line in units[u]["lines"] and units[u]["c"]["path"] != last and fresh(u)), key=lambda u: rank(u, line))
         if lead and (mine or spare):
             u = min(mine + spare, key=lambda u: (-units[u]["grades"].get(line, 3), not units[u]["moving"], rank(u, line)))
             return take_unit(u, line, "line" if units[u]["found"] == line else "other_line")
@@ -777,7 +847,7 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
             if moving_only and take_motion(c, take) < MOTION_FLOOR:
                 continue
             want = min(n, int(REFRAME_MAX_S * FPS)) / FPS
-            room = [(a, b) for a, b in _free_in(sp.played.get(c["path"]) or [], take) if b - a >= 0.2]
+            room = [(a, b) for a, b in _free_in(sp.took(c), take) if b - a >= 0.2]
             if room:
                 a, b = max(room, key=lambda q: q[1] - q[0])
                 t0, t1 = a, min(b, a + want)
@@ -821,7 +891,7 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
                     best = (k, c, ti, tk)
         if best is not None:
             _, c, ti, tk = best
-            room = [(a_, b_) for a_, b_ in _free_in(sp.played.get(c["path"]) or [], tk) if b_ - a_ >= 0.2]
+            room = [(a_, b_) for a_, b_ in _free_in(sp.took(c), tk) if b_ - a_ >= 0.2]
             if room:
                 a_, b_ = max(room, key=lambda q: q[1] - q[0])
                 t0, t1 = a_, min(b_, a_ + want)
@@ -850,7 +920,7 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
         c, ti, take = cands[0]
         same = prev.get("path") == c["path"] and prev.get("take_i") == ti
         want = min(n, int(REFRAME_MAX_S * FPS)) / FPS
-        room = [(a_, b_) for a_, b_ in _free_in(sp.played.get(c["path"]) or [], take) if b_ - a_ >= 0.2]
+        room = [(a_, b_) for a_, b_ in _free_in(sp.took(c), take) if b_ - a_ >= 0.2]
         if room:
             a_, b_ = max(room, key=lambda q: q[1] - q[0])
             t0, t1 = a_, min(b_, a_ + want)
@@ -864,17 +934,47 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
     flash_k = [0]                                                        # glimpse flashes alternate white and negative
 
     proof_clips = [c for c in (proof_fill or []) if c.get("path") and os.path.exists(str(c["path"]))]
+    for c in proof_clips:
+        sp.note_origin(c)
 
-    def proof_fill(n):
-        """A marketing film's line with no picture left plays the real export's next unplayed seconds (the proof is
-        always true of the film), never a type page: (clip, t0, t1) or None. `busy`: seconds already shown whole."""
+    def proof_fill(n, line):
+        """A marketing film's line with no picture left plays the real export (the proof is always true of the film),
+        never a type page: (clip, t0, t1, shot) or None. `busy`: seconds already shown whole. A clip with a ranking
+        (`ranked`: {line: [[t0, t1, shot id], ...]}, the export's own shots a model ranked for each line's words, best
+        first) plays the line's best-ranked shot no file of the recording has shown any part of yet. A line the model
+        ranked nothing for, or whose ranked shots are all shown, then plays a whole export shot (`shots`: the export's
+        own shots, [[t0, t1, shot id], ...]) no file has shown yet, first those no later line was ranked and no line took
+        as its own file (`owed`), before the cut falls to replaying the line's own pictures (20 Nov: an unanswered
+        ranking left the fill empty, and every recording line looped its one owed shot). Never the export's next seconds in time order (20 Nov: that put
+        'Trash can' under the speaker after the picture had gone). A clip with neither (an older pack): the export's
+        next unplayed seconds."""
         want = min(n, int(SHOT_MAX_S * FPS)) / FPS
         for c in proof_clips:
-            took = list(sp.played.get(c["path"]) or []) + [tuple(x) for x in c.get("busy") or []]
+            took = sp.took(c) + [tuple(x) for x in c.get("busy") or []]
+
+            def fresh(row):
+                a0, b0 = float(row[0]), float(row[1])
+                return b0 - a0 >= 0.4 and not any(a < b0 and b > a0 for a, b in took)
+
+            def play(row):
+                a0, b0 = float(row[0]), float(row[1])
+                return c, a0, min(b0, a0 + want), (row[2] if len(row) > 2 else None, (a0, b0))
+            ranked = c.get("ranked")
+            if isinstance(ranked, dict):
+                for row in ranked.get(line, ranked.get(str(line))) or []:
+                    if fresh(row):
+                        return play(row)
+            own = [r for r in c.get("shots") or [] if isinstance(r, (list, tuple)) and len(r) >= 2 and fresh(r)]
+            if own:
+                later = {r[2] for k_, rows in (ranked or {}).items() if str(k_).lstrip("-").isdigit() and int(k_) > line
+                         for r in rows or [] if len(r) > 2} | set(c.get("owed") or [])
+                return play(min(own, key=lambda r: (len(r) > 2 and r[2] in later, float(r[0]))))
+            if isinstance(ranked, dict) or c.get("shots"):
+                continue
             room = [(a, b) for a, b in _free_in(took, (0.0, float(c.get("seconds") or 0))) if b - a >= 0.4]
             if room:
                 a, b = room[0]
-                return c, a, min(b, a + want)
+                return c, a, min(b, a + want), None
         return None
 
     def cut_in(line, n, cutins, planned_n):
@@ -961,7 +1061,7 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
                 kind, name, rec, tier, take = got
                 if kind == "clip":
                     ti, tk = take
-                    t0, t1 = Takes.best(rec, tk, n / FPS)
+                    t0, t1 = Takes.best(rec, sp.fresh_room(rec, tk) or tk, n / FPS)
                     if t1 - t0 < n / FPS * 0.8 - 1e-3:
                         end = pos + max(int((t1 - t0) * FPS / 0.8), 2)
                     sp.use_take(rec["path"], ti)
@@ -978,7 +1078,7 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
                 fill_n = min(n, int(REFRAME_MAX_S * FPS))
                 ci = cut_in(line, n, cutins, planned_n)
                 rf = reframe(line, fill_n) if ci is None else None
-                pf = proof_fill(n) if ci is None and rf is None else None
+                pf = proof_fill(n, line) if ci is None and rf is None else None
                 if ci is not None:
                     prev, t0, t1 = ci
                     end = pos + max(min(n, int(round((t1 - t0) * FPS))), 1)
@@ -998,10 +1098,12 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
                     sp.reframed[line] = sp.reframed.get(line, 0) + (end - pos)
                     sp.shortfall[line] = sp.shortfall.get(line, 0) + (end - pos)
                 elif pf is not None:
-                    c, t0, t1 = pf
+                    c, t0, t1, shot = pf
                     end = pos + max(min(n, int(round((t1 - t0) * FPS))), 2)
                     sp.take_clip(c, t0, t1, pos)
                     rec = dict(c, src=[round(t0, 3), round(t1, 3)], use=1, tier="proof", pick_line=line)
+                    if shot is not None:          # the export's own shot: one picture, counted by its id; a cut-in may run on in it
+                        rec.update(take_i=shot[0], take=[round(shot[1][0], 3), round(shot[1][1], 3)])
                     kind, name = "clip", c.get("subject")
                 # 20 Nov: the line's own supply before any card, each card text once, and never a copy of a card: on
                 # 19 Nov the fill cut a pictureless line into its planned slots and put the brief's name on every one
@@ -1788,14 +1890,14 @@ def build(script, sup, style_id, direction=None):
     for lst in footage.values():
         for c in lst:
             if c["path"] not in keys:
-                keys[c["path"]] = P.video(f"v{len(keys):02d}", c)
+                keys[c["path"]] = P.video(f"v{len(keys):02d}", with_landings(c))
     for v in sup.get("voices") or []:
         c = v.get("clip") or {}
         if c.get("path") and os.path.exists(c["path"]) and c["path"] not in keys:
-            keys[c["path"]] = P.video(f"v{len(keys):02d}", c)
+            keys[c["path"]] = P.video(f"v{len(keys):02d}", with_landings(c))
     for c in d.get("proof_fill") or []:
         if c.get("path") and os.path.exists(str(c["path"])) and c["path"] not in keys:
-            keys[c["path"]] = P.video(f"v{len(keys):02d}", c)
+            keys[c["path"]] = P.video(f"v{len(keys):02d}", with_landings(c))
     f_voice_end = Clock.f(clock.dur)
     f_end = f_voice_end + int(d.get("tail_f", 15))
     stress = F.voice_stress(sup)
@@ -1815,7 +1917,9 @@ def build(script, sup, style_id, direction=None):
     seg_len = [(Clock.f(clock.segs[i + 1][0]) if i + 1 < nseg else f_voice_end) - seg_f[i] for i in range(nseg)]
     shots_in = [seg_len[i] / (float(d["aim_s"]) * FPS) for i in range(nseg)]
     want = [i for i, s in enumerate(script["segments"]) if s.get("collage")]
-    if not fit_on:
+    # collage_any_line (a direction's knob; marketing): the style's own collage budget may take lines the writer did not
+    # mark, as without verdicts (20 Nov: the writer marked none and the Pinboard film never showed a board)
+    if not fit_on or d.get("collage_any_line"):
         want += sorted((i for i, s in enumerate(script["segments"]) if i not in want and len(s.get("pictures") or []) >= 2), key=lambda i: -shots_in[i])
         want += sorted((i for i in range(nseg) if i not in want), key=lambda i: -shots_in[i])
     collage, used_f = set(), 0
@@ -2193,17 +2297,62 @@ def build(script, sup, style_id, direction=None):
             layer_spans.append((f0, f1, 2 + q))
             note(f0, f1, kind, name, rec, "print")
 
+    board_k = [0]
+
+    def proof_print(f0, f1, kind, name, rec, key):
+        """A product recording on a narrated line (board_paths): the export whole, at its own shape, as a print on the
+        style's board (the dark board of a paper style, else its own picture blurred and dimmed under it), landing
+        PROOF_MOVE large from one side (the sides alternate print to print) and drifting on, never held. It ends
+        PROOF_CLEAR above the caption seat, so the narration's captions and their pool sit on the board, never on the
+        export's pixels; nothing crops, grades or draws over the print (20 Nov: every recording clip was a sealed static
+        full-frame plate, its captions deleted, the export's burned words under the narrator's)."""
+        n = max(f1 - f0, 1)
+        pw_, ph_ = float(rec.get("w") or W), float(rec.get("h") or H)
+        top, bottom = PROOF_TOP, max(cap_y - PROOF_CLEAR, PROOF_TOP + 0.25)
+        h_ = bottom - top
+        w_ = h_ * (pw_ / ph_) * H / W
+        if w_ > PROOF_W_MAX:
+            w_ = PROOF_W_MAX
+            h_ = w_ * (ph_ / pw_) * W / H
+        cx, cy = 0.5, bottom - h_ / 2
+        side = 1 if board_k[0] % 2 == 0 else -1
+        board_k[0] += 1
+        if st.get("paper"):
+            P.page([f0, f1], "#2E2822", "#191512", grain=0.07, proof_board=True)
+        else:
+            P.shot([f0, f1], key, F.cover_crop(pw_, ph_, W / H, (0.5, 0.45), (0.5, 0.40)), src=list(rec["src"]), blur=GROUND_BLUR * 1.5,
+                   grade=dict(BED), proof_board=True)
+        land = max(min(PROOF_LAND_F, n - 1), 1)
+
+        def ease(j):
+            u = min(j / land, 1.0)
+            return 1.0 - (1.0 - u) ** 3
+        s_ = [r4(1.0 + PROOF_MOVE * (1.0 - ease(j)) + PROOF_DRIFT * max(j - land, 0) / max(n - land, 1)) for j in range(n)]
+        xs = [r4(cx + side * PROOF_SLIDE * (1.0 - ease(j))) for j in range(n)]
+        kw = dict(z=1, crop=[0.0, 0.0, 1.0, 1.0], src=list(rec["src"]), s=s_, x=xs, radius=0.008,
+                  shadow=dict(a=0.62, blur=0.03, dx=0.004, dy=0.014), op=[min(1.0, 0.45 + 0.3 * j) for j in range(n)], proof_board=True)
+        if st.get("paper"):
+            kw["rot"] = [round(side * (2.2 - 1.2 * ease(j)), 3) for j in range(n)]
+        P.card([f0, f1], key, [cx - w_ / 2, cy - h_ / 2, cx + w_ / 2, cy + h_ / 2], **kw)
+        layer_spans.append((f0, f1, 2))
+        note(f0, f1, kind, name, rec, "proof_print")
+        if st.get("paper"):
+            grounds[-1] = (f0, f1, _hex_tone("#2E2822"))       # the caption seat is on the board, not on the print
+
     flashes = []
     full_frame = set(d.get("full_frame_paths") or [])
     whole_frame = set(d.get("whole_frame_paths") or [])
+    board = set(d.get("board_paths") or []) - full_frame
+    sealed = full_frame | board                 # never a print of a collage run (a product clip has its own layout)
+    board_on, revealed = bool(d.get("board_paths")), set()     # marketing's board: a whole-frame file reveals once
     runs, k = [], 0
     while k < len(timeline):
         i = seg_at(timeline[k][0])
-        if i in collage and not timeline[k][4].get("voice") and timeline[k][2] != "designed" and timeline[k][4]["path"] not in full_frame:
+        if i in collage and not timeline[k][4].get("voice") and timeline[k][2] != "designed" and timeline[k][4]["path"] not in sealed:
             # a run of prints: consecutive pictures of the collage line, five at most (a pinned voice breaks it)
             run, j = [k], k + 1
             while j < len(timeline) and len(run) < len(PRINT_AT) and seg_at(timeline[j][0]) == i and not timeline[j][4].get("voice") \
-                    and timeline[j][2] != "designed" and timeline[j][4]["path"] not in full_frame:
+                    and timeline[j][2] != "designed" and timeline[j][4]["path"] not in sealed:
                 run.append(j)
                 j += 1
             if len(run) >= 3:
@@ -2220,18 +2369,28 @@ def build(script, sup, style_id, direction=None):
                 flashes.append((f0, "fill"))
         else:
             f0, f1, kind, name, rec = timeline[run[0]]
-            if kind == "clip" and rec["path"] in full_frame:
+            if kind == "clip" and rec["path"] in whole_frame and rec["path"] in revealed and board_on and not rec.get("voice"):
+                # a revealed upload shown again (a cut-in, a reframe, a replay) is a print on the board under the
+                # captions, never the same wide-then-push reveal again (20 Nov review: one upload file revealed three
+                # times running on one line, its captions trimmed away)
+                proof_print(f0, f1, kind, name, rec, keys[rec["path"]])
+            elif kind == "clip" and rec["path"] in full_frame:
                 pw, ph = float(rec.get("w") or W), float(rec.get("h") or H)
                 if rec["path"] in whole_frame:
                     reveal_before(f0, f1, rec, keys[rec["path"]], pw, ph, (d.get("whole_frame_crop") or {}).get(rec["path"]))
+                    revealed.add(rec["path"])
                 else:
                     focus, _ = F.focus_of(rec)
                     crop = F.cover_crop(pw, ph, W / H, focus, (0.5, 0.42))
                     P.shot([f0, f1], keys[rec["path"]], crop, src=list(rec["src"]))
                 note(f0, f1, kind, name, rec, "product")
+            elif kind == "clip" and rec["path"] in board and not rec.get("voice"):
+                proof_print(f0, f1, kind, name, rec, keys[rec["path"]])
             elif kind == "designed":
                 designed(f0, f1, rec)
-            elif fit_on and kind == "clip" and rec["path"] in talk_fit and not rec.get("voice") and seg_at(f0) not in collage:
+            elif fit_on and kind == "clip" and rec["path"] in talk_fit and not rec.get("voice") and \
+                    (seg_at(f0) not in collage or d.get("collage_any_line")):
+                # with collage_any_line a collage line's speaking clip that no print run took keeps the talking rule
                 # a person speaking on camera (live action, by the verdict): full frame only on a stretch where the lips are
                 # still (measured), else in a window, never as a print outside a collage line
                 still = [w for w in ((sup.get("talking") or {}).get(rec["path"]) or {}).get("still") or [] if w[1] - w[0] >= (f1 - f0) / FPS]
@@ -2363,13 +2522,24 @@ def build(script, sup, style_id, direction=None):
     caption_pool(P, f_end, cap_y, float(d.get("pool", 0.70)), holes=white if fit_on else (), tone_at=tone_at)
     pay = next((i for i, s in enumerate(script["segments"]) if s.get("beat") == "payoff"), None)
     turn_f = min((c for c in cut_pts if c >= seg_f[pay] - 4), default=seg_f[pay]) if pay is not None else None
+    turn_by = "payoff" if turn_f is not None else None
     film = dict(grain=float(st["grain"]), vignette=float(st["vignette"]), over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0))
     l1 = P.done(sup.get("sid", "wf3"), f_end, int(d.get("seed", 1114)), film)
     secs = f_voice_end / FPS
     np10 = len({picture_key(p) for p in P.pictures}) / max(secs, 1) * 10     # prints and windows count; a card by its text
     takes = take_stats(P.pictures, footage)            # a measure on every cut, cut_story's too (WF2)
+    lands = F.landings_shown(l1)                       # a recorded export's own pictures and titles landing inside its shots
+    if lands:
+        takes["landings_shown"] = sum(1 for e in lands if e["kind"] == "card")
+    span = d.get("turn_span_s")                        # the caller's payoff on the film's clock (marketing: the after)
+    if span:
+        a_f, b_f = int(round(float(span[0]) * FPS)), int(round(float(span[1]) * FPS))
+        hit = sorted(e["f"] for e in lands if e["kind"] == "card" and a_f - 2 <= e["f"] < b_f)
+        # the drop lands on the payoff's first picture landing; without one, on the payoff's arrival
+        turn_f, turn_by = (hit[0], "landing") if hit else (min((c for c in cut_pts if c >= a_f - 4), default=a_f), "span")
     if fit_on:
-        np10 = takes["new_pictures_10s_n"] / max(secs, 1) * 10        # a picture is new only by distinct take
+        # a picture is new only by distinct take; a picture the played export lands over its speaker is a new picture
+        np10 = (takes["new_pictures_10s_n"] + takes.get("landings_shown", 0)) / max(secs, 1) * 10
         d = dict(d, band=dict(d.get("band") or {}, punch_first=True, ease_min_s=0.4, moves_per_10s=MOVES_PER_10S),
                  film_vignette=d.get("film_vignette", FILM_VIGNETTE_FIT))
     l1 = F.engines_finish(l1, sup, stress, drive_ids, meta, dict(d, look_pictures=look_pics), turn_f=turn_f, mono=mono_spans,
@@ -2392,7 +2562,7 @@ def build(script, sup, style_id, direction=None):
     beats = dict(dur_f=f_end, voice_f=[LEAD_F, f_voice_end], cuts=sorted(set(cut_pts)), changes=changes,
                  events=sorted(set(P.events) | set(cut_pts) | set(changes)),
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, display=[dict(f=[a, b], text=t) for a, b, t in shown],
-                 turn_f=turn_f, pace=l1.get("pace"), style=style_id, layout=d.get("layout", st["layout"]),
+                 turn_f=turn_f, turn_by=turn_by, pace=l1.get("pace"), style=style_id, layout=d.get("layout", st["layout"]),
                  measured={**dict(new_pictures_10s=round(new_pics / max(secs, 1) * 10, 2), base_shots=len(timeline),
                                median_shot_s=round(sorted(r[1] - r[0] for r in timeline)[len(timeline) // 2] / FPS, 2) if timeline else None,
                                photo_most_uses=max(photo_uses.values()) if photo_uses else 0,

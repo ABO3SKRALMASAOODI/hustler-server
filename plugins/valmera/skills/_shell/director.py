@@ -599,16 +599,21 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
         pics = [p for p in ([pic_key(p) for p in a.get("pics") or []] if pic_key else []) if p]
         if pics:
             row.setdefault("pool", pics)
+        # the alien bank's asks hold their span as "at": [a, z] (programme frames)
         if dev in ("diecut", "lamp"):
-            row.setdefault("at", f)
+            row["at"] = row["f"] if isinstance(row["f"], list) else [f, min(f + 36, dur_f)]
             row.setdefault("t", args.get("t") or args.get("text") or a["at"]["word"])
         elif dev == "answer":
-            row.setdefault("at", f)
             if pics and "picks" not in row:
                 row["picks"] = [dict(f=f + 8 * q, pic=p, word=a["at"]["word"]) for q, p in enumerate(pics[:3])]
+            last = max([int(m["f"]) for m in row.get("picks") or [] if isinstance(m, dict) and isinstance(m.get("f"), int)] + [f])
+            row["at"] = [f, min(max(row["f"][1] if isinstance(row["f"], list) else f, last + 30), dur_f)]
         elif dev == "rhyme":
-            row.setdefault("at", f)
-            row.setdefault("n", int(args.get("n") or 4))
+            cuts = [c for c in row.get("cuts") or [] if isinstance(c, int)]
+            end = max(cuts + [row["f"][1] if isinstance(row["f"], list) else f + 60]) + 8
+            row["at"] = [f, min(end, dur_f)]
+            if not cuts:
+                row.setdefault("n", int(args.get("n") or 4))
         out.append(row)
     for s_ in d.get("sections") or []:
         surf = str(s_.get("surface") or "colour").lower()
@@ -629,6 +634,23 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
     if marks:
         out.append(dict(dev="arc", id="darc", marks=sorted(marks, key=lambda m: m["f"]), bars=0.085, develop=6))
     return out, notes
+
+
+STRENGTH = {"white": 0.9, "neg": 0.8, "black": 0.6, "neg_hold": 0.7, "neg_world": 0.7, "rhyme": 0.7, "answer": 0.7, "lamp": 0.6,
+            "diecut": 0.6, "tint": 0.5, "variant": 0.5, "finish": 0.4, "arc": 0.3, "spotlight": 0.3, "word_blend": 0.4,
+            "blur_in": 0.25, "neg_split": 0.5}
+
+
+def device_events(asks):
+    """The landings the Director asked for, as events the separate music and sound workflow may answer (no device makes
+    a sound): [{"f", "kind", "strength"}], in film order."""
+    out = []
+    for a in asks or []:
+        f = a.get("f")
+        f = f[0] if isinstance(f, list) else f
+        if isinstance(f, int):
+            out.append(dict(f=int(f), kind=str(a.get("dev")), strength=STRENGTH.get(str(a.get("dev")), 0.5)))
+    return sorted(out, key=lambda e: e["f"])
 
 
 def section_frames(sec, frame_of, seg_span=None, dur_f=None):

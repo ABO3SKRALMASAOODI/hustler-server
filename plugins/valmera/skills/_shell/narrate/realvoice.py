@@ -9,7 +9,8 @@ all four critic reels (judge TEARDOWN W2), up to 22% of a film.
 narr_dir holds narration.wav and words.json (narrate.py render). The narrator-only files are kept as
 narration_narrator.wav and words_narrator.json; narration.wav and words.json are rewritten with the person's words in
 them (each word carries "voice": the person, and the segment of the line it follows, so a film's clock gives that line
-the extra seconds); voices.json lists where each cut-in sits for the film to pin its picture.
+the extra seconds); voices.json lists where each cut-in sits for the film to pin its picture. A voice with after = -1
+opens the film: it starts at second 0, a breath before the narrator's first line.
 
 Level: the person's speech is set to the narrator's speech level (the loud half of 50 ms frames, RMS) minus 1 dB, under
 -1 dBFS peak, high-passed at 80 Hz; 12 ms fades. Nothing else is done to it: it should sound like the room it was
@@ -87,14 +88,23 @@ def splice(narr_dir, voices, foot_dir):
     placed = []
     for v in sorted(voices, key=lambda v: int(v["after"]), reverse=True):     # the latest first: earlier times stay put
         after = int(v["after"])
-        if not 0 <= after < nseg - 1:
-            continue                              # a cut-in sits between two of the narrator's lines
-        mine = [w for w in words if int(w.get("seg", -1)) == after and not w.get("voice")]
-        nxt = [w for w in words if int(w.get("seg", -1)) > after and not w.get("voice")]
-        if not mine or not nxt:
+        if after == -1:
+            # before the narrator's first line: the film opens on this voice (a marketing film's built hook, 20 Nov), a
+            # breath, then the narrator. Only a caller that asks for -1 gets it.
+            nxt = [w for w in words if not w.get("voice")]
+            if not nxt:
+                continue
+            te = m = 0.0
+            tn = float(nxt[0]["start"])
+        elif 0 <= after < nseg - 1:               # a cut-in sits between two of the narrator's lines
+            mine = [w for w in words if int(w.get("seg", -1)) == after and not w.get("voice")]
+            nxt = [w for w in words if int(w.get("seg", -1)) > after and not w.get("voice")]
+            if not mine or not nxt:
+                continue
+            te, tn = float(mine[-1]["end"]), float(nxt[0]["start"])
+            m = (te + tn) / 2
+        else:
             continue
-        te, tn = float(mine[-1]["end"]), float(nxt[0]["start"])
-        m = (te + tn) / 2
         y = _load(fd / v["wav"], sr)
         y = _hp(y, sr)
         y *= level / _speech_rms(y, sr)
@@ -105,7 +115,7 @@ def splice(narr_dir, voices, foot_dir):
         if len(y) > 4 * f:
             y[:f] *= np.linspace(0, 1, f, dtype=np.float32)
             y[-f:] *= np.linspace(1, 0, f, dtype=np.float32)
-        pa = max(GAP_BEFORE - (m - te), 0.0)
+        pa = max(GAP_BEFORE - (m - te), 0.0) if after >= 0 else 0.0      # the opening voice starts on the film's first frame
         pb = max(GAP_AFTER - (tn - m), 0.0)
         ins = np.concatenate([np.zeros(int(pa * sr), np.float32), y, np.zeros(int(pb * sr), np.float32)])
         c = int(round(m * sr))
@@ -116,7 +126,7 @@ def splice(narr_dir, voices, foot_dir):
                 w["start"] = round(float(w["start"]) + shift, 3)
                 w["end"] = round(float(w["end"]) + shift, 3)
         t0 = m + pa
-        new = [dict(w=w["w"], start=round(t0 + float(w["start"]), 3), end=round(t0 + float(w["end"]), 3), seg=after, voice=v["person"])
+        new = [dict(w=w["w"], start=round(t0 + float(w["start"]), 3), end=round(t0 + float(w["end"]), 3), seg=max(after, 0), voice=v["person"])
                for w in v.get("words") or []]
         k = next((i for i, w in enumerate(words) if float(w["start"]) >= m), len(words))
         words[k:k] = new

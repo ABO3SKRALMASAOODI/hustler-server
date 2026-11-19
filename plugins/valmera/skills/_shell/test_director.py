@@ -93,7 +93,7 @@ def test_palette_asks_spans_sections_and_the_arc():
     by.update({a["dev"]: a for a in asks if a["dev"] != "finish"})
     by["finish"] = asks[0]
     assert by["finish"]["f"] == [20, 90] and by["finish"]["pool"] == ["p01"]
-    assert by["diecut"]["at"] == 30 and by["diecut"]["t"] == "smart."
+    assert by["diecut"]["at"] == [30, 90] and by["diecut"]["t"] == "smart."
     assert any(a["dev"] == "finish" and a.get("surface") == "crt" and a["f"] == [100, 190] for a in asks)
     assert not any(a.get("surface") == "mono" for a in asks)                      # mono is the builder's own black and white
     assert by["arc"]["marks"] == [dict(f=50, stakes=-0.4, year=1999)]

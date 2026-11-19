@@ -178,3 +178,13 @@ def test_the_measure_reads_flips_whites_and_cuts_from_pixels():
     assert M.edit_distance(["neg", "white"], ["neg", "tint", "white"]) == 1
     side = M.log_side([dict(done=True, landed="neg", f=[3, 4]), dict(done=True, landed="white", f=[0, 1], fallback=True), dict(done=False)])
     assert side["sequence"] == ["white", "neg"] and side["fell_back"] == 1 and side["first_device_f"] == 0
+
+
+def test_a_models_field_shapes_are_read_not_refused(film):
+    from scene.palette import clean
+    got, notes = clean({"dev": "lamp", "seat": "center", "room": "warm", "width": "0.7", "lift": True, "ink": "gold", "n": "3"})
+    assert got["seat"] == [0.5, 0.45] and got["room"] == 0.55 and got["width"] == 0.7 and got["n"] == 3
+    assert "lift" not in got and "ink" not in got and notes
+    l1, work = film
+    out, log = palette.apply(dict(l1, devices=[{"dev": "diecut", "at": [40, 70], "t": "BILLION", "seat": "center", "width": "wide"}]), work)
+    assert log[0]["done"] and ok(out)
