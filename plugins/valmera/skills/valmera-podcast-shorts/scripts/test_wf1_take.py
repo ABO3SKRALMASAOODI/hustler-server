@@ -166,3 +166,28 @@ def test_a_rebuild_with_no_open_holds_adds_no_stress_moves(tmp_path, quiet_engin
     sup["coverage"]["moves"] = [dict(word=4, why="the turn of the claim"), dict(word=15, why="the hard part")]
     _, second = film.build(script, sup, "footage-cut", dict(turn_seg=1, coverage_final=True))
     assert sup["coverage"]["unresolved_holds"] == [] and second["coverage"]["stress_moves"] == []
+
+
+@pytest.mark.parametrize("story_word,flashed", [(7, True), (3, False)])
+def test_the_story_turn_flash_snaps_to_a_real_cut_or_stays_off(tmp_path, quiet_engines, monkeypatch, story_word, flashed):
+    """Integration of the craft and take lanes (20 Nov): the story turn's flash lands on the film's real cut nearest it
+    (here the speaker change inside the two-shot), never on a join of its own inside a continuous shot; with no real
+    cut within a second there is no story flash, and the take is never split at the story turn."""
+    words = _sup(tmp_path, cuts_two_shot())
+    for i, w in enumerate(words["words"]["words"]):
+        w["seg"] = 0 if i < story_word else 1 if i < 15 else 2
+    script = dict(title="Coach", segments=[dict(say=" ".join(w["w"] for w in words["words"]["words"] if w["seg"] == i), pictures=[])
+                                           for i in (0, 1, 2)])
+    import wf1_coverage
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda coverage, *a, **k: (list(coverage.get("moves", [])), []))
+    l1, beats = film.build(script, words, "footage-cut", dict(turn_seg=2, story_turn_seg=1, coverage_final=True))
+    starts = {it["f"][0] for it in l1["items"] if it["k"] == "shot"}
+    story_f = beats["story_turn_f"]
+    assert story_f is not None and story_f not in starts
+    flashes = _flash_frames(l1)
+    assert set(flashes) <= starts
+    real = sorted(f for f in starts if 0 < f and abs(f - story_f) <= 30)
+    if flashed:
+        assert real and min(real, key=lambda f: (abs(f - story_f), f)) in flashes
+    else:
+        assert not real and len(flashes) == 1                              # the payoff's flash alone

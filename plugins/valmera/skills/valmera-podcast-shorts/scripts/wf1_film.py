@@ -173,6 +173,162 @@ def ink_by_ground(items, voices, bright):
     return out
 
 
+def _lin(v):
+    """sRGB channel (0..1) to linear light."""
+    return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+
+def rel_lum(hex_or_luma):
+    """Relative luminance (WCAG) of a hex colour, or of a measured grey level 0..1 (seat_luma's median)."""
+    if isinstance(hex_or_luma, (int, float)):
+        return _lin(min(max(float(hex_or_luma), 0.0), 1.0))
+    h = str(hex_or_luma).lstrip("#")
+    r, g, b = (int(h[k:k + 2], 16) / 255.0 for k in (0, 2, 4))
+    return 0.2126 * _lin(r) + 0.7152 * _lin(g) + 0.0722 * _lin(b)
+
+
+def contrast(a, b):
+    la, lb = rel_lum(a), rel_lum(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
+DARK_INK = "#0B0A09"
+INK_MIN = 3.0                 # the contrast a display word's ink keeps with the ground measured under it (large type)
+
+
+def contrast_ink(ground, prefer, others):
+    """The ink a display word takes on the ground measured under it: the designed ink while it holds INK_MIN against
+    that ground, else whichever of the style's inks and dark ink reads best there. (ink, stroke colour)."""
+    if contrast(prefer, ground) >= INK_MIN:
+        ink = prefer
+    else:
+        ink = max([prefer, *others, DARK_INK], key=lambda c: contrast(c, ground))
+    return ink, ("#F6F1E7" if rel_lum(ink) < 0.18 else DARK_INK)
+
+
+CAP_PX = 58                   # the caption voice's size: a display word is set at least DISPLAY_MIN times it
+DISPLAY_MIN = 1.6
+DISPLAY_W = 2 * (F.RAIL_X - 0.5) - 0.004   # the widest a centred display line stands: clear of the platform's right rail
+DISPLAY_MOST = 4              # display words a film sets at most: the first that fit, from the direction's ranked list
+ROLE_SCALE = {"figure": 1.45, "payoff": 1.35, "contrast": 1.3, "turn": 1.25, "hook": 1.25, "name": 1.2}
+
+
+def display_rows(ruler, voice, text, key=None, role="hook"):
+    """How a display word is typeset by its role: [(text, px)], top line first. One line when the whole string stands
+    at DISPLAY_MIN times the caption or more inside DISPLAY_W of the width (up to the role's size); else a two-size
+    stack: the key word (the one the direction named, else the longest) large on its own line, the words said
+    before it above and after it below at about half its size. Measured on the renderer's shaped glyphs."""
+    ruler.voices["_fit"] = dict(voice)
+    try:
+        return _rows(ruler, voice, text, key, role)
+    finally:
+        ruler.voices.pop("_fit", None)                 # a measuring voice, never one of the scene's
+
+
+def _rows(ruler, voice, text, key, role):
+    floor = DISPLAY_MIN * CAP_PX
+    top = float(voice["px"]) * ROLE_SCALE.get(role, 1.25)
+
+    def fit(t, cap):
+        return min(cap, ruler.fit_px("_fit", t, DISPLAY_W * W, cap))
+    words = text.split()
+    whole = fit(text, top)
+    if whole >= floor or len(words) == 1:
+        return [(text, max(whole, min(floor, fit(text, 10 ** 4))))]
+    k = next((i for i, w in enumerate(words) if key and w.strip(",.!?;:").casefold() == str(key).strip(",.!?;:").casefold()), None)
+    if k is None:
+        k = max(range(len(words)), key=lambda i: len(words[i]))
+    big = fit(words[k], top)
+    small = max(CAP_PX * 1.05, 0.5 * big)
+    rows = []
+    if k:
+        before = " ".join(words[:k])
+        rows.append((before, fit(before, small)))
+    rows.append((words[k], big))
+    if k + 1 < len(words):
+        after = " ".join(words[k + 1:])
+        rows.append((after, fit(after, small)))
+    return rows
+
+
+def frame_stats(path, side=160):
+    """(L50, chroma, red-blue, green-magenta) of a picture's mid-tones, gamma-encoded 0..1; None when unreadable."""
+    try:
+        import numpy as np
+        from PIL import Image
+        with Image.open(path) as im:
+            a = np.asarray(im.convert("RGB").resize((side, max(int(side * im.size[1] / im.size[0]), 2))), dtype=np.float32) / 255.0
+    except Exception:  # noqa: BLE001
+        return None
+    px = a.reshape(-1, 3)
+    y = px @ np.array([0.2126, 0.7152, 0.0722], np.float32)
+    mid = px[(y > 0.12) & (y < 0.9)]
+    if len(mid) < 50:
+        mid = px
+    return (float(np.median(y)), float(np.mean(mid.max(axis=1) - mid.min(axis=1))),
+            float(np.mean(mid[:, 0] - mid[:, 2])), float(np.mean(mid[:, 1] - 0.5 * (mid[:, 0] + mid[:, 2]))))
+
+
+def clip_balance(take_still, path, amount=0.6):
+    """The grade that brings a cut-in picture part of the way (`amount`) to the take it cuts against, measured on the
+    two pictures (exposure by the median, saturation by the mid-tones' chroma, white balance by their red-blue and
+    green-magenta means): the engine's grade (gain multiplies, temp adds to red and takes from blue, tint adds green).
+    None when either cannot be read."""
+    a, b = frame_stats(take_still) if take_still else None, frame_stats(path) if path else None
+    if not a or not b:
+        return None
+
+    def clamp(v, lo, hi):
+        return round(min(max(v, lo), hi), 4)
+    # exposure only a little (a cutaway may be brighter than a dim room; the film's look solves exposure for all of it),
+    # colour more: white balance and saturation are what make a cool clip jump against a warm take
+    gain = clamp((max(a[0], 0.02) / max(b[0], 0.02)) ** (0.5 * amount), 0.85, 1.15)
+    sat = clamp((max(a[1], 0.01) / max(b[1], 0.01)) ** amount, 0.75, 1.25)
+    temp = clamp(amount * (a[2] - b[2]) / 2.0, -0.03, 0.03)
+    tint = clamp(amount * (a[3] - b[3]), -0.03, 0.03)
+    return dict(lift=0, gamma=1.0, gain=gain, sat=sat, contrast=1, temp=temp, tint=tint)
+
+
+TAKE_PAST = dict(lift=0, gamma=1.0, gain=0.97, sat=0.32, contrast=1.08, temp=0, tint=0)     # the take while he tells of the past
+
+
+def section_spans(segs, seg_f, f_stop, min_f=36):
+    """The frames of runs of consecutive sentences in `segs`: [(f0, f1)], each at least min_f long."""
+    out = []
+    for i in sorted(segs):
+        if not (0 <= i < len(seg_f)):
+            continue
+        a = max(seg_f[i] - 1, 0)
+        b = (seg_f[i + 1] - 1) if i + 1 < len(seg_f) else f_stop
+        if out and abs(out[-1][1] - a) <= 2:
+            out[-1][1] = b
+        else:
+            out.append([a, b])
+    return [(a, b) for a, b in out if b - a >= min_f]
+
+
+def caption_pools(l1, ruler, bright, a=0.42, pad=(0.05, 0.045, 0.04)):
+    """The shade under the captions, one pool a caption page, centred on and sized to that page's own shaped words
+    where they finally sit (after the seat moved them), never where the ink is dark (bright ground)."""
+    from wf1_layout import caption_pages, _bounds
+    caps = [i for i in l1["items"] if i["k"] == "word" and i.get("role") == "cap"]
+    out = []
+    for fa, fb, words in caption_pages(caps):
+        bs = [b for _, b in _bounds(l1, words, ruler)]
+        if not bs:
+            continue
+        x0, y0 = min(b[0] for b in bs), min(b[1] for b in bs)
+        x1, y1 = max(b[2] for b in bs), max(b[3] for b in bs)
+        rect = [r4(max(x0 - pad[0], 0.02)), r4(y0 - pad[1]), r4(min(x1 + pad[0], 0.98)), r4(y1 + pad[2])]
+        cuts = sorted({fa, fb, *[f for s0, s1 in bright for f in (s0, s1) if fa < f < fb]})
+        for ca, cb in zip(cuts, cuts[1:]):
+            if cb > ca and not any(s0 <= ca < s1 for s0, s1 in bright):
+                out.append(dict(k="flash", f=[ca, cb], mode="pool", c="#FFFFFF", a=a, rect=rect, z=-1))
+    for n, it in enumerate(out):
+        it["id"] = f"pool{n:03d}"
+    return out
+
+
 def inside(items, f_end):
     """Nothing outlives the film: an item that would run past the last frame ends on it (its per-frame values cut
     with it), and one that would start on or after it is left out. A clip cut close to its last word has no tail."""
@@ -503,9 +659,11 @@ def build(script, sup, style_id, direction=None):
     """(l1, beats) for one short. script: {"title", "segments": [{"say", "pictures": [names]}]}; sup: the pack
     (wf1_short.supply); direction: {"display": [{"seg", "text"}], "past_segs": [i], "turn_seg": i, "arc": [...]}."""
     st = STYLES[style_id]
-    d = dict(aim_s=st["aim_s"], look=st["look"], family="podcast", share=st["share"], bed=True, title=False,
+    d = dict(aim_s=st["aim_s"], look=st["look"], family="podcast", share=st["share"], bed=True, title=False, tick_10s=1.5,
              band=dict(hold=(0.9, 2.6), never=3.0, ease_takes=True, motivated_frames=[], ease=0.85, shutter=0.5,
                        take_ease=TAKE_EASE, take_drift=TAKE_DRIFT))      # whips: the podcast band's own (into and out of picture runs)
+    # tick_10s: a talking film (sound class T) carries the small tick layer on its display landings too (round1 thin-sound:
+    # the references sound about 3 audible and 3-4 quiet events every 10 s; these films placed 1-4 sounds in 50 s)
     d.update(direction or {})
     coverage = sup.get("coverage")
     if not coverage:
@@ -585,6 +743,9 @@ def build(script, sup, style_id, direction=None):
     if turn_f is not None and f_voice_end - turn_f > 9 * FPS and nseg > 1:      # a payoff longer than nine seconds would leave the close bare
         ts = nseg - 1
         turn_f = max(seg_f[ts] - 1, 0)
+    # the story's own turn, before the payoff (the direction names it apart): the sound's turn hit and the music's drop
+    sts = d.get("story_turn_seg")
+    story_turn_f = max(seg_f[sts] - 1, 0) if isinstance(sts, int) and 0 < sts < nseg and (turn_f is None or seg_f[sts] - 1 < turn_f - FPS) else None
     # the payoff is his face, but never more than its last four seconds: a long close on one framing is a held picture
     # (the gap fill's last frame, fill_holes)
     f_last = max(turn_f - 6, f_voice_end - int(4.0 * FPS)) if turn_f is not None else f_voice_end - 45
@@ -637,17 +798,26 @@ def build(script, sup, style_id, direction=None):
         speaker changes; the moves inside a framing are the driver's (motivated words, the voice's stress)."""
         if b-a < 2:
             return
-        edges = sorted({a, b, *[c for c in tcuts if a+3 <= c <= b-3]})
+        # a section of the past is graded apart, so its edges are real cuts in the take; the payoff and the story turn
+        # are not joins of their own (a flash there would land inside a continuous shot: it snaps to a real cut)
+        joins = [f for sp in take_past for f in sp]
+        edges = sorted({a, b, *[c for c in tcuts + joins if a+3 <= c <= b-3]})
         for fa, fb in zip(edges, edges[1:]):
             k = sum(1 for c in tcuts if c <= (fa+fb)/2)
             t0, t1 = max(fa-LEAD_F,0)/FPS, min(max(fb-LEAD_F,1)/FPS,float(take["dur"]))
-            it = P.shot([fa,fb], pieces[k]["key"], None, src=[round(t0,4),round(max(t1,t0+1/FPS),4)])
+            kw = dict(grade=dict(TAKE_PAST)) if any(s0 <= fa < s1 for s0, s1 in take_past) else {}
+            it = P.shot([fa,fb], pieces[k]["key"], None, src=[round(t0,4),round(max(t1,t0+1/FPS),4)], **kw)
             it.pop("crop")
             drive_ids.add(it["id"])
             cut_pts.append(fa)
 
-    past_share = sum(x[1] - x[0] for x in ins if seg_at(x[0]) in past) / max(sum(x[1] - x[0] for x in ins), 1)
-    by_section = 0.0 < past_share <= 0.6                 # a finish for a section of the story: a story that is all past keeps its colour
+    # a finish for a section of the story, measured on what is said (spoken time), not on how many pictures it found:
+    # a story that is all past keeps its colour (round1 default-design: 11 of 12 films had no section finish)
+    spoken_s = [max(clock.segs[i][1] - clock.segs[i][0], 0.0) for i in range(nseg)]
+    past_share = sum(spoken_s[i] for i in past if 0 <= i < nseg) / max(sum(spoken_s), 1e-6)
+    by_section = 0.0 < past_share <= 0.6
+    # the take itself takes the section's finish too (low saturation while he tells of the past), cut at the joins
+    take_past = section_spans(past, seg_f, f_voice_end) if st["mono"] == "past" and by_section else []
 
     def is_mono(f0):
         return st["mono"] == "all" or (st["mono"] == "past" and by_section and seg_at(f0) in past)
@@ -722,13 +892,17 @@ def build(script, sup, style_id, direction=None):
     def bleed(f0, f1, kind, name, rec, key):
         if rec.get('provider')=='primary-document':
             return window(f0,f1,kind,name,rec,key)             # the approved document crop is already the editorial rectangle
+        bal = None if is_mono(f0) else clip_balance(take.get("still"), rec.get("still") if kind == "clip" else rec.get("path"))
+        gk = dict(grade=bal) if bal else {}               # matched to the take it cuts against, part of the way (round1 colour)
         if kind == "clip":                                   # moving footage fills the phone, whatever its size (fill_size)
-            it = P.shot([f0, f1], key, None, src=list(rec["src"]))
+            it = P.shot([f0, f1], key, None, src=list(rec["src"]), **gk)
             it.pop("crop")
             meta[key] = clip_meta(rec)
+            if rec.get("verified_motion") is True and float(rec.get("placed_motion_p90") or 0) >= 1.0:
+                it["moving"] = True                          # it arrives moving: a landing the sound design sounds
         else:
             (fx, fy), _ = F.focus_of(rec)
-            it = P.shot([f0, f1], key, F.cover_crop(rec["w"], rec["h"], W / H, (fx, fy), (0.5, 0.40)))
+            it = P.shot([f0, f1], key, F.cover_crop(rec["w"], rec["h"], W / H, (fx, fy), (0.5, 0.40)), **gk)
             if key not in meta:
                 m = dict(pw=int(rec["w"]), ph=int(rec["h"]), faces=[f for f in F.face_meta(rec) if f[3] * rec["h"] >= 60],
                          max_up=1.0 if rec.get("reframe") else F.MAX_UP)      # framed again: no push into the face it cut
@@ -812,6 +986,21 @@ def build(script, sup, style_id, direction=None):
         cuts_near = [f for f in set(cut_pts) if abs(f - turn_f) <= FPS and 0 < f < f_end]
         if cuts_near:
             flashes.append(min(cuts_near, key=lambda f: (abs(f - turn_f), f)))
+    real_cuts = sorted({f for f in cut_pts if 0 < f < f_end})
+
+    def on_cut(f):
+        """The real cut nearest f within a second (a flash never lands inside a continuous shot), else None."""
+        near = [c for c in real_cuts if abs(c - f) <= FPS]
+        return min(near, key=lambda c: (abs(c - f), c)) if near else None
+    if st["flash"] == "turn" and story_turn_f is not None:
+        sf = on_cut(story_turn_f)                            # where the story turns: a landing the sound's turn hit and the drop answer
+        if sf is not None and all(abs(sf - f) >= 2 * FPS for f in flashes):
+            flashes.append(sf)
+    for a_, _b in take_past[:2]:                             # into a section of the past, on the take's join
+        pf = on_cut(a_)
+        if pf is not None and pf > FPS and all(abs(pf - f) >= 2 * FPS for f in flashes):
+            flashes.append(pf)
+    flashes = sorted(set(flashes))
     for f in flashes:
         if 0 < f < f_end - 3:
             P.flash([f, f + 2], mode="fill", c="#FFFFFF", a=[0.62, 0.22])
@@ -823,28 +1012,45 @@ def build(script, sup, style_id, direction=None):
     def cased(t):
         return t.upper() if st["upper"] else t
 
-    def land(a, b, text, vk, y, ink, delay=0):
+    def land(a, b, text, vk, y, ink, delay=0, stroke="#0B0A09", on=None):
         n = b - a
         kk = min(int(bake.BOUNCE["n"]), n)
         ys = [r4(y + float(q)) for q in bake.bounce(kk, rest=0.0)] + [r4(y)] * (n - kk)
         bl = [round(float(q), 3) for q in bake.bounce_blur(kk)] + [0.0] * (n - kk)
         P.word([a + delay, b], text, vk, 0.5, ys[delay:] if delay else ys, ink, [min(1.0, (q + 1) / 2) for q in range(n - delay)],
-               align="c", z=8, blur=bl[delay:] if delay else bl, role="big", stroke=dict(w=3.0, c="#0B0A09"))
+               align="c", z=8, blur=bl[delay:] if delay else bl, role="big", stroke=dict(w=3.0, c=stroke), on=a if on is None else on)
 
-    # ---- the words that carry the story, large, each on the word that says it; never two inside two seconds
-    last = shown[-1][1] + 6 if shown else -10 ** 6
-    for row in d.get("display") or []:
+    def ground_at(f, y0, y1):
+        """The tone (0..1) of the picture up at frame f, under the band y0-y1 of the frame."""
+        for f0, f1, kind, _n, rec in ins:
+            if f0 <= f < f1:
+                g = seat_luma(rec, kind, y0, y1)
+                return g if st["layout"] == "bleed" or kind == "clip" else g * DIM["gain"]
+        return seat_luma(dict(still=take.get("still")), "clip", y0, y1) if take.get("still") else 0.0
+
+    # ---- the words that carry the story, large, each on the word that says it; never two inside two seconds. Typeset by
+    # the job each does (display_rows): at least 1.6x the caption, on a seat of their own above the caption's, a long
+    # phrase as a two-size stack round its key word, a contrast on a bar; ink chosen by the contrast measured on the
+    # ground under the block (round1 default-design)
+    # The direction ranks its proposals best first, with alternates: the film lands the first DISPLAY_MOST that fit its
+    # timing (a word too early, too close to another or too short to hold gives its place to the next), so a film
+    # never loses its display words to timing. A long phrase is stacked (display_rows), never skipped for its length.
+    omit = []
+    proposed = d.get("display") or []
+    for row in proposed:
+        if len(shown) >= DISPLAY_MOST:
+            break
         try:
             seg, text = int(row["seg"]), " ".join(str(row["text"]).split())
         except (KeyError, TypeError, ValueError):
             continue
-        if not (0 <= seg < nseg) or not text or len(text) > 22 or any(text.lower() in t.lower() or t.lower() in text.lower() for _, _, t in shown):
+        if not (0 <= seg < nseg) or not text or any(text.lower() in t.lower() or t.lower() in text.lower() for _, _, t in shown):
             continue
         hit = F.said_at(clock, seg, text)
         if hit is None:
             continue
         a = max(Clock.f(hit[0]) - 1, 1)
-        if a < 2*FPS or a - last < 2.0 * FPS or a >= f_voice_end - 12:
+        if a < 2*FPS or any(abs(a - x) < 2.0 * FPS for x, _, _ in shown) or a >= f_voice_end - 12:
             continue
         b = int(min(a + 1.15 * FPS, f_end, Clock.f(clock.segs[seg][1]) + 10))
         # A display word cannot label the next documentary subject. If the
@@ -854,13 +1060,31 @@ def build(script, sup, style_id, direction=None):
             b = min(b,min(next_subject))
         if b - a < 14:
             continue
-        vk = f"dsp{a}"
-        P.voices[vk] = dict(P.voices["dsp"])
-        P.voices[vk]["px"] = P.R.fit_px(vk, cased(text), 0.70 * W, float(st["dsp"]["px"]) * 1.45)
-        land(a, b, cased(text), vk, cap_y + 0.012, pal["accent"] if any(ch.isdigit() for ch in text) or row.get("accent") else pal["ink"])
+        role = row.get("role") or "hook"
+        rows = display_rows(P.R, P.voices["dsp"], cased(text), cased(str(row.get("key") or "")), role)
+        base_y = cap_y - 0.062                           # the lowest baseline of the block, clear above the caption seat
+        ys = [base_y]
+        for k in range(len(rows) - 2, -1, -1):           # upward: the line below's cap height and a gap
+            ys.insert(0, ys[0] - (0.74 * rows[k + 1][1] + 0.16 * min(rows[k][1], rows[k + 1][1])) / H)
+        top = ys[0] - 0.74 * rows[0][1] / H
+        prefer = pal["accent"] if any(ch.isdigit() for ch in text) or row.get("accent") else pal["ink"]
+        ground = ground_at(a + 4, max(top, 0.0), base_y + 0.01)
+        ink, edge = contrast_ink(ground, prefer, [pal["ink"], pal["accent"]])
+        big = max(range(len(rows)), key=lambda k: rows[k][1])
+        for k, (line, px) in enumerate(rows):
+            P.voices[f"dsp{a}_{k}"] = dict(P.voices["dsp"], px=float(px))
+        if role == "contrast":                           # the contrast on a bar: dark ink on the accent
+            wd = P.R.width(f"dsp{a}_{big}", rows[big][0]) / W
+            P.block([a, b], [0.5 - wd / 2 - 0.02, ys[big] - P.R.cap(f"dsp{a}_{big}") / H - 0.014, 0.5 + wd / 2 + 0.02, ys[big] + 0.016],
+                    pal["accent"], z=7, op=0.96, radius=0.006, bar_on=a)     # part of the block: seat_display moves and shrinks it with its lines
+        for k, (line, px) in enumerate(rows):
+            vk = f"dsp{a}_{k}"
+            line_ink, line_edge = (DARK_INK, pal["accent"]) if role == "contrast" and k == big else (ink, edge)
+            land(a, b, line, vk, ys[k], line_ink, delay=0 if k == big else min(2, b - a - 1), stroke=line_edge, on=a)
+        omit += F.said_span(clock, seg, text)
         P.events.append(a)
         shown.append((a, b, text))
-        last = a
+    shown.sort()
     for a, b, text in labels:
         if b - a < 14:
             continue
@@ -878,16 +1102,14 @@ def build(script, sup, style_id, direction=None):
         P.block([a, b], [0.5 - wd / 2 - 0.022, y - 0.030, 0.5 + wd / 2 + 0.022, y_last + 0.013], pal["plate"], z=6, op=0.78, radius=0.008)
         for n, r_ in enumerate(rows):
             P.word([a, b], r_, "lab", 0.5, y + 0.036 * n, pal["ink"], 0.95, align="c", z=7, role="stat")
-    lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), hold=[(a - 1, b) for a, b, _ in shown], z=5)
+    lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), hold=[(a - 1, b) for a, b, _ in shown], z=5,
+                            omit=omit)
     P.items = inside(P.items, f_end)
     P.items = ink_by_ground(P.items, P.voices, bright)
-    edges = sorted({0, f_end, *[f for s0, s1 in bright for f in (s0, s1) if 0 < f < f_end]})
-    for fa, fb in zip(edges, edges[1:]):                 # the pool of shade under the seat, except where the ink is dark
-        if fb - fa >= 1 and not any(s0 <= fa < s1 for s0, s1 in bright):
-            P.flash([fa, fb], mode="pool", a=float(d.get("pool", 0.42)), rect=[0.06, cap_y - 0.105, 0.94, cap_y + 0.075], z=-1)
     film = dict(grain=float(st["grain"]), vignette=float(st["vignette"]), over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0))
     l1 = P.done(sup.get("sid", "wf1"), f_end, int(d.get("seed", 1114)), film)
-    l1 = F.engines_finish(l1, sup, stress, drive_ids, meta, dict(d, look_pictures=look_pics), turn_f=turn_f, mono=mono_spans,
+    l1 = F.engines_finish(l1, sup, stress, drive_ids, meta, dict(d, look_pictures=look_pics),
+                          turn_f=story_turn_f if story_turn_f is not None else turn_f, mono=mono_spans,
                           clear=[0.10, cap_y - 0.085, 0.90, cap_y + 0.02],
                           spoken=[(w["t0"] - LEAD_F / FPS, w["t1"] - LEAD_F / FPS) for w in clock.words])
 
@@ -900,11 +1122,11 @@ def build(script, sup, style_id, direction=None):
     title_layout = seat_display(l1, meta, P.R)
     caps = [i for i in l1["items"] if i["k"] == "word" and i.get("role") == "cap"]
     if caps:
-        # The shade under the captions follows their seat, page by page when the pages sit at different heights.
-        shifts = [(a, float(words[0]["y"]) - cap_y) for a, _, words in caption_pages(caps)]
-        l1["items"] = [piece for i in l1["items"] for piece in
-                       (follow_seat(i, shifts) if i["k"] == "flash" and i.get("mode") == "pool" and i.get("rect") else [i])]
-        cap_y += shifts[0][1]
+        # The shade under the captions: one pool a page, on that page's own words where the seat finally put them
+        # (round1: one fixed 0.06-0.94 shape showed as a dark blob beside a one-word caption)
+        l1["items"] += caption_pools(l1, P.R, bright, a=float(d.get("pool", 0.42)))
+        first_word = caption_pages(caps)[0][2][0]
+        cap_y = float(first_word["y"][-1] if isinstance(first_word["y"], list) else first_word["y"])
     restarts = caption_restarts(l1)
     if restarts:
         raise RuntimeError(f"caption track restarts in chunks: {restarts}")
@@ -926,11 +1148,14 @@ def build(script, sup, style_id, direction=None):
     beats = dict(dur_f=f_end, voice_f=[LEAD_F, f_voice_end], cuts=sorted(set(cut_pts)), changes=changes,
                  events=sorted(set(P.events) | set(cut_pts) | set(changes) | {it["f"][0] for it in l1["items"] if it["k"] == "card"}),
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=1, display=[dict(f=[a, b], text=t) for a, b, t in shown],
-                 labels=[dict(f=[a, b], text=t) for a, b, t in labels], turn_f=turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
+                 display_count=dict(proposed=len(proposed), landed=len(shown)),
+                 labels=[dict(f=[a, b], text=t) for a, b, t in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
                  style=style_id, layout=st["layout"], placement_check=placement_report, coverage=coverage_report,
                  title_layout=title_layout, caption_restarts=restarts, face_metadata=meta,
-                 finishes=dict(black_and_white=len([p for p in P.pictures if p.get("finish")]), flashes=len(flashes), dark_ink_spans=len(bright)),
+                 finishes=dict(black_and_white=len([p for p in P.pictures if p.get("finish")]), flashes=len(flashes), dark_ink_spans=len(bright),
+                               take_past=[list(sp) for sp in take_past], past_share=round(past_share, 3),
+                               balanced=sum(1 for it in l1["items"] if it.get("k") == "shot" and it.get("grade") and it.get("pic") not in tkeys)),
                  alien=dict(asked=[a["dev"] for a in l1.get("alien") or []], why=why, never=list(ALIEN_NEVER)),
-                 sound_design={k: v for k, v in (l1.get("sound_design") or {}).items() if k != "dropped"},
+                 sound_design=dict(l1.get("sound_design") or {}),       # with its dropped list: a refusal is measured, never guessed
                  look=[f for f in look_f if 0 <= f < f_end])
     return l1, beats

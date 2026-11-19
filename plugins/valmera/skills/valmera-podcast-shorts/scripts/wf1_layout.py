@@ -110,19 +110,27 @@ def seat_display(l1, meta, ruler, _retry=0):
     visuals=[i for i in l1['items'] if i['k'] in ('shot','card') and i.get('pic') in meta
              and not (isinstance(i.get('blur'),(int,float)) and i['blur'] >= 20)]
     groups=collections.defaultdict(list)
+    # a display word's bar (a contrast on the accent) is part of its block: it is seated, moved and shrunk with the
+    # block's lines, found by the block's `on` (bar_on), never by a voice name a later pass may change
+    bars=collections.defaultdict(list)
+    for i in l1['items']:
+        if i['k']=='card' and i.get('bar_on') is not None:
+            bars[('display',int(i['bar_on']))].append(i)
     for i in l1['items']:
         if i['k']=='word' and i.get('role')=='cap':
             groups['captions'].append(i)
         elif i['k']=='word' and i.get('role')=='big':
-            groups['title' if i['v'].startswith('dsp_t') else ('display',i.get('on',i['f'][0]),i['t'])].append(i)
+            # a display block is every line landed together (a two-size stack shares its `on`): seated as one unit
+            groups['title' if i['v'].startswith('dsp_t') else ('display',i.get('on',i['f'][0]))].append(i)
     logs=[]
     work=list(groups.items())
     while work:
         key, items = work.pop(0)
-        frames=range(min(i['f'][0] for i in items),max(i['f'][1] for i in items))
+        frames=range(min(i['f'][0] for i in items+bars.get(key,[])),max(i['f'][1] for i in items+bars.get(key,[])))
         faces={f:[b for v in visuals if v['f'][0]<=f<v['f'][1] for b in face_boxes(v,meta[v['pic']],f)] for f in frames}
         offset=0.0
-        bounds=_bounds(l1,items,ruler)
+        bounds=_bounds(l1,items,ruler)+[(f,[b['x']-b['w']*b.get('s',1)/2,b['y']-b['h']*b.get('s',1)/2,b['x']+b['w']*b.get('s',1)/2,
+                                            b['y']+b['h']*b.get('s',1)/2]) for b in bars.get(key,[]) for f in range(*b['f'])]
         for _ in range(16):
             needed=offset
             for f,b in bounds:
@@ -163,8 +171,19 @@ def seat_display(l1, meta, ruler, _retry=0):
                     i['x']=[x+delta for x in i['x']] if isinstance(i['x'],list) else i['x']+delta
                     i['y']=[center+(y-center)*.9 for y in i['y']] if isinstance(i['y'],list) else center+(i['y']-center)*.9
                     i['v']=names[old]
-                return seat_display(l1,meta,ruler,_retry+1)
-        for i in items:
+                for b in bars.get(key,[]):            # the bar shrinks with its lines, about the same centre
+                    b['y']=round(center+(b['y']-center)*.9,5); b['w']=round(b['w']*.9,5); b['h']=round(b['h']*.9,5)
+                out=seat_display(l1,meta,ruler,_retry+1)
+                if not _retry: _bar_keys_off(l1)
+                return out
+        for i in items+bars.get(key,[]):
             i['y']=[round(y+offset,5) for y in i['y']] if isinstance(i['y'],list) else round(i['y']+offset,5)
         logs.append(dict(group=str(key),shift_y=round(offset,5),face_boxes_checked=sum(map(len,faces.values())),overlaps=covered))
+    if not _retry: _bar_keys_off(l1)
     return dict(groups=logs,overlaps=sum(g['overlaps'] for g in logs))
+
+
+def _bar_keys_off(l1):
+    """The seat's helper key leaves the scene once the blocks are seated."""
+    for i in l1['items']:
+        i.pop('bar_on',None)

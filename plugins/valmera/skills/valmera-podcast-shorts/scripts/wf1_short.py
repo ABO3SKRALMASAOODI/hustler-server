@@ -173,7 +173,12 @@ def supply(ctx, script):
         os.replace(pk,os.path.join(sup_dir,'previous-pack.json'))
     rec0 = chain.pack(ctx, script)                              # source.mp4 (the window), hearing.json, index.json
     idx = json.load(open(os.path.join(sup_dir, "index.json")))
-    idx,_=wf1_alignment.reconcile(ctx,script,idx,_near(ctx,*script["window"],pad=2),_llm(),chain)
+    heard_run=_near(ctx,*script["window"],pad=2)
+    idx,_=wf1_alignment.reconcile(ctx,script,idx,heard_run,_llm(),chain)
+    # the run transcript's own token boundaries ('49%', 'self-critical.'), so no caption starts on '-critical'
+    idx,joined=wf1_alignment.run_tokens(idx,heard_run,float(script["window"][0]))
+    if joined:
+        with open(os.path.join(sup_dir,"index.json"),"w") as f:json.dump(idx,f,indent=1)
     rec0.update(window=script["window"],dur=idx["video"]["duration"],words=len(idx["words"]),shots=len(idx["shots"]))
     src = os.path.join(sup_dir, "source.mp4")
     sents = idx.get("sentences") or []
@@ -587,41 +592,69 @@ def take_cuts(src, shots, dur, sup_dir, turns=None):
     return out
 
 
+DIRECTION_CONTRACT = 3           # 20 Nov 2026 (round1): display words by story role, ranked with alternates; the story turn apart from the payoff
+ROLES = ("hook", "turn", "payoff", "figure", "name", "contrast")
+
+
 def direction_of(ctx, script, pack):
-    """What a model reads off the heard sentences for the film builder: the words to set large, the sentences that
-    speak of the past, the sentence the payoff starts on, and the years the story speaks from. Cached in the supply."""
+    """What a model reads off the heard sentences for the film builder: the words to set large, ranked best first with
+    alternates (up to six; the film sets the first two to four whose timing fits), each with
+    the job it does in the story (hook, turn, payoff, figure, name, contrast) and the one word of it set largest; the
+    sentences that speak of the past; the sentence the payoff starts on (``turn_seg``, where the film cuts to his face);
+    the sentence where the story turns (``story_turn_seg``, before the payoff: the music's drop and the sound's turn hit
+    when the payoff has no room after it); and the years the story speaks from. Cached in the supply, per contract."""
     p = os.path.join(ctx.supply, "direction.json")
     if os.path.exists(p):
-        return json.load(open(p))
+        got = json.load(open(p))
+        if got.get("contract") == DIRECTION_CONTRACT:
+            return got
     lines = pack["lines"]
-    system = ("You direct the type and the finish of a vertical short cut from a podcast. You read its sentences, numbered, "
-              "and answer in JSON only. You never add a word he does not say.")
-    system += "\n\n" + (("\n\n"
-               "Return JSON only: {"
-               "\"display\": [four to eight strings to set large on screen, each on the word that says it: the figures, the "
-               "names and the two or three words that carry the story; each {\"seg\": the sentence number, \"text\": one to three "
-               "consecutive words exactly as he says them (a figure as digits, e.g. $5,000 or 1999), \"accent\": true for the one "
-               "or two that matter most}; spread over the film, in order, never two from one sentence unless it is long], "
+    system = ("You direct the type and the finish of a vertical short cut from a podcast, the way the best story reels set "
+              "their words: few, large, each doing a job in the story. You read its sentences, numbered, and answer in JSON "
+              "only. You never add a word he does not say.")
+    system += "\n\n" + ("Return JSON only: {"
+               "\"display\": [up to six words or short phrases to set large on screen, RANKED BEST FIRST: the film sets the first "
+               "two to four whose timing fits (a word too close to the start or to another gives its place to the next), so "
+               "give alternates after your best. Each is set on the word that says it and does one job in the story: the hook "
+               "that stops a stranger, the turn where it changes direction, the payoff, a figure that carries the stakes, a "
+               "name the story hangs on, or the two sides of a contrast. Never a filler, a function word, a generic noun or a "
+               "phrase that only restates the topic. Each {\"seg\": "
+               "the sentence number, \"text\": one to three consecutive words exactly as he says them (a figure as digits, e.g. "
+               "$5,000, 49% or 1999), \"role\": one of hook|turn|payoff|figure|name|contrast, \"key\": the one word of text "
+               "that carries it (set largest)}; spread over the film, never two from one sentence], "
                "\"past_segs\": [the numbers of the sentences that tell of the past: a year gone by, how something began, what "
                "someone once did; not his opinions about today], "
-               "\"turn_seg\": the number of the sentence where the payoff begins (usually the last or the one before it), "
+               "\"payoff_seg\": the number of the sentence where the payoff begins (usually the last or the one before it), "
+               "\"turn_seg\": the number of the sentence where the story turns, changes direction or opens its tension (a "
+               "setback, a 'but', a decision, the question the payoff answers), before the payoff sentence; null when the "
+               "story has no turn before its payoff, "
                "\"arc\": [only when he says a calendar year aloud: {\"seg\": sentence number, \"word\": the year as he says it in "
                "digits, \"year\": the year as a number, \"stakes\": how things stand for the story's hero at that point, -1 (worst) "
-               "to 1 (best)}; an empty list when no year is said]}"))
+               "to 1 (best)}; an empty list when no year is said]}")
     content = ((f"# The film\n{script.get('title')}\nHook: {script.get('hook_line')}\nPayoff: {script.get('close_line')}\n\n# Sentences\n") +
                ("\n".join(f"{ln['i']}: {ln['text']}" for ln in lines)))
     llm = _llm()
-    text, use = llm.ask(system, content, effort="low", max_tokens=8000)
+    text, use = llm.ask(system, content, effort="medium", max_tokens=12000)
     try:
         d = llm.json_block(text)
     except ValueError:
         d = {}
     d = d if isinstance(d, dict) else {}
-    out = dict(display=[r for r in d.get("display") or [] if isinstance(r, dict)][:8],
+    display = []
+    for r in d.get("display") or []:
+        if isinstance(r, dict):
+            r = dict(r, role=r.get("role") if r.get("role") in ROLES else "hook")
+            r.setdefault("accent", r["role"] in ("figure", "payoff"))
+            display.append(r)
+    payoff = d.get("payoff_seg") if isinstance(d.get("payoff_seg"), int) else None
+    turn = d.get("turn_seg") if isinstance(d.get("turn_seg"), int) else None
+    if payoff is not None and turn is not None and turn >= payoff:
+        turn = None                                    # a turn on or after the payoff is the payoff itself
+    out = dict(contract=DIRECTION_CONTRACT, display=display[:6],
                past_segs=[int(i) for i in d.get("past_segs") or [] if isinstance(i, int)],
-               turn_seg=d.get("turn_seg") if isinstance(d.get("turn_seg"), int) else None,
+               turn_seg=payoff, story_turn_seg=turn,
                arc=[r for r in d.get("arc") or [] if isinstance(r, dict)][:6],
-               spend=dict(stage="score", what="display words, past sections, turn", **use))
+               spend=dict(stage="score", what="display words by role, past sections, turn and payoff", **use))
     json.dump(out, open(p, "w"), ensure_ascii=False, indent=1)
     return out
 
@@ -998,7 +1031,7 @@ def score(ctx, script):
     if (ctx.args or {}).get('identity'):
         pack['coverage']['context']=ctx.args['identity']
     d = direction_of(ctx, script, pack)
-    knobs = {k: d.get(k) for k in ("display", "past_segs", "turn_seg", "arc")}
+    knobs = {k: d.get(k) for k in ("display", "past_segs", "turn_seg", "story_turn_seg", "arc")}
     knobs.update({k: v for k, v in ((ctx.args or {}).get("direction") or {}).items()})
     # The composed review's findings, each local to its window: a contradiction gives that window's slot to its next
     # candidate, a crop through a face is framed again (never a global, permanent drop: round 1, 19 Nov).
@@ -1052,7 +1085,12 @@ def score(ctx, script):
     turn_s = round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None
     # the last word by the words' own times (programme seconds): the brand finish falls the take's breath after it
     last_word_s = round(beats["voice_f"][1] / F.FPS, 3) if beats.get("voice_f") else None
-    return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, last_word_s=last_word_s, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
+    # the story's own turn, before the payoff: music_film --turn (the drop when the payoff has no room after it).
+    # turn_drop is this workflow's opt-in, sent with every payoff: a short's payoff is often its last sentence, and
+    # the drop then lands on the turn (this one, else the one music_film reads from the lines) or the last hit moves
+    # into the film's tail, so no short keeps a flat bed (round1 thin-sound)
+    story_turn_s = round(beats["story_turn_f"] / F.FPS, 3) if beats.get("story_turn_f") is not None else None
+    return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, last_word_s=last_word_s, story_turn_s=story_turn_s, turn_drop=turn_s is not None, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
                 frames=l1["dur_f"], items=len(l1["items"]), direction={k: v for k, v in d.items() if k != "spend"}, spend=([d["spend"]] if d.get("spend") else []) +
                 [dict(u,stage='supply',what='primary documents') for research in pack.get('document_research',[]) for u in research.get('spend',[])] +
                 [dict(u,stage='supply',what='documentary research revision') for u in pack.get('research_spend',[])] +

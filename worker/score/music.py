@@ -392,6 +392,31 @@ def arrange(song, marks, profile=None):
             drop_t = near
     if drop_t is not None and not (2.0 * B <= drop_t <= t_end - 2.0 * B):
         drop_t = None                                              # no room for a build before it or a phrase after it
+    drop_on = ("payoff" if payoff is not None else "turn") if drop_t is not None else None
+    if drop_t is None and marks.get("turn_drop") and turn is not None and payoff is not None and turn < payoff:
+        # A short's payoff is often its last sentence, too close to the last hit for a phrase after it. When the
+        # caller handed the story's own turn (opt-in: the podcast workflow), the drop lands there and the payoff
+        # keeps the last hit, so the film still has its build and drop instead of a flat bed (round1 thin-sound).
+        t2 = turn
+        if lands and marks.get("snap", True):
+            near = min(lands, key=lambda c: abs(c - t2))
+            if abs(near - t2) <= SNAP_S:
+                t2 = near
+        if 2.0 * B <= t2 <= t_end - 2.0 * B:
+            drop_t, build_from, drop_on = t2, None, "turn"
+    if drop_t is None and marks.get("turn_drop") and payoff is not None:
+        # No turn the drop can stand on (none named or read, or too close to the start): the payoff takes the drop and
+        # the last hit moves into the tail the film already has, up to the end card's gap, so a bar or two plays after
+        # it. The hit moves only later, never before the last word's breath.
+        p2 = payoff
+        if lands and marks.get("snap", True):
+            near = min(lands, key=lambda c: abs(c - p2))
+            if abs(near - p2) <= SNAP_S:
+                p2 = near
+        n_after = int(math.floor((dur - P["end_gap_s"] - tail - p2) / beat + 1e-6))
+        if p2 >= 2.0 * B and n_after >= 4:
+            drop_t, drop_on = p2, "payoff"
+            t_end = max(t_end, p2 + min(n_after, 8) * beat)
     has_entry = bool(entry.any())
     # ---- the film's beats: one stretch to the drop, one from it to the last hit
     spans = []
@@ -611,7 +636,7 @@ def arrange(song, marks, profile=None):
     bs_last = spans[-1]["beat_s"]
     room = max(0.0, dur - P["end_gap_s"] - t_end - 0.02)           # the ring is cut 20 ms after its length: both fit before the end card
     tail_s = max(min(P["end_tail_beats_max"] * bs_last, room), min(bs_last, room))
-    mark = payoff if payoff is not None else turn
+    mark = turn if drop_on == "turn" else (payoff if payoff is not None else turn)
     tempos = [beat / sp["beat_s"] for sp in spans]
     return {"ok": True, "segments": segs, "tempo": round(float(np.median(tempos)), 5), "bar_s": round(4.0 * float(np.median([sp["beat_s"] for sp in spans])), 5),
             "beat_s": round(float(np.median([sp["beat_s"] for sp in spans])), 5),
@@ -619,6 +644,7 @@ def arrange(song, marks, profile=None):
             "end_hit_s": round(t_end, 4), "end_hit_bar": int(hit_bar), "end_tail_s": round(tail_s, 4),
             "drop_at": round(drop_t, 4) if kd is not None else None, "drop_is": ("entrance" if has_entry else "step") if kd is not None else None,
             "build_at": round(slots[kd - n_build]["t0"], 4) if kd is not None and n_build else None, "build_bars": n_build,
+            "drop_on": drop_on if kd is not None else None,
             "turn_s": turn, "payoff_s": payoff, "turn_miss_s": round(drop_t - mark, 3) if kd is not None and mark is not None else None,
             "slots": N, "jumps": len(segs) - 1, "grid": grid,
             "cuts": {"n": len([c for c in cuts if c < t_end]), "on_beat": len(on), "on_down": len(on_down)},
@@ -862,6 +888,16 @@ def flow(nf, hop_s, marks, plan, P, base, open_gain):
             fast -= P["hole_db"] * np.clip(np.minimum((t - h0) / P["hole_in_s"], (d - JOIN_S - 0.004 - t) / P["hole_out_s"]), 0.0, 1.0)
             notes["holes"].append({"t": round(h0, 3), "len_s": round(hole, 3), "db": P["hole_db"], "before": "drop"})
         notes["hits"].append({"t": round(d, 3), "db": P["hit_db"], "what": "drop"})
+        pay = marks.get("payoff_s")
+        if plan.get("drop_on") == "turn" and pay is not None and d + 2 * bs <= float(pay) <= e - 0.15 and not joints:
+            # the drop went on the turn (the payoff had no phrase after it): the payoff keeps its own breath and hit
+            pay = float(pay)
+            ph = min(hole, 0.5 * (pay - d - bs))
+            fast -= P["hole_db"] * np.clip(np.minimum((t - (pay - ph)) / P["hole_in_s"], (pay - JOIN_S - 0.004 - t) / P["hole_out_s"]), 0.0, 1.0)
+            fast += np.where((t >= pay) & (t < pay + bs), P["hit_db"] - P["after_drop_db"], 0.0)
+            notes["holes"].append({"t": round(pay - ph, 3), "len_s": round(ph, 3), "db": P["hole_db"], "before": "payoff"})
+            notes["hits"].append({"t": round(pay, 3), "db": P["hit_db"], "what": "payoff"})
+            notes["payoff_flow_s"] = pay
     bs = (plan.get("spans") or [{"beat_s": plan["beat_s"]}])[-1]["beat_s"]
     hole = float(np.clip(bs, P["hole_min_s"], P["hole_max_s"]))
     if joints:
@@ -1069,6 +1105,8 @@ def sounds_on_the_drop(sounds, plan, fps):
     far enough to put the drop on the turn): one hit to the ear, not two. Only for the mix with the song."""
     d = plan.get("drop_at")
     t = plan.get("payoff_s") if plan.get("payoff_s") is not None else plan.get("turn_s")
+    if plan.get("drop_on") == "turn":
+        t = plan.get("turn_s")
     if d is None or t is None or abs(d - t) < 0.5 / fps or abs(d - t) > 0.35:
         return list(sounds)
     tf, out = int(round(t * fps)), []
@@ -1179,7 +1217,7 @@ def voice_spans_of(l1, work):
 
 
 def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind="stories", index=None, prog_end_f=None, payoff_s=None, supplied=True,
-        sung=None, open_s=None):
+        sung=None, open_s=None, turn_drop=False):
     """A compiled film's sound with a song under it: the voice and the designed sounds as the engine mixes them
     (scene.audio), the song arranged and levelled here, one master at -14 LUFS. With `film` and `out` the picture is
     copied and the new sound laid on it. The film without the song is the engine's own render: nothing here touches
@@ -1193,6 +1231,8 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
     marks = marks_from_l1(l1, index, turn_s=turn_s, prog_end_f=prog_end_f, payoff_s=payoff_s)
     if open_s is not None:
         marks["open_s"] = float(open_s)               # the chooser's entry point into the song (a drop, a re-entry, its top)
+    if turn_drop:
+        marks["turn_drop"] = True                     # the caller named the story's turn: a payoff with no room drops there (arrange)
     voice, _fx0, _ = AU.split_audio(_Plan(dict(l1, sound=[]), src))
     if not marks["words"]:                            # no word times came with the film: its voice says where it speaks
         marks["words"] = [(a, b) for a, b in voice_spans(voice) if a < marks["dur_s"]]
