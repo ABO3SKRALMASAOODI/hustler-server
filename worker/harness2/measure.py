@@ -198,6 +198,31 @@ def _span_text(spans):
     return f"{spans[0][0]:.1f}-{spans[-1][1]:.1f} s"
 
 
+def _device_span(item):
+    """(start, end) of an fx item on the film clock: its window, or a
+    junction's moment ("at", its duration either side of the cut)."""
+    a, b = _f(item.get("start")), _f(item.get("end"))
+    if a is not None and b is not None:
+        return (a, b)
+    at = _f(item.get("at"))
+    if at is None:
+        return None
+    half = (_f(item.get("duration_s")) or 0.0) / 2.0
+    return (max(0.0, at - half), at + half)
+
+
+def _device_where(items):
+    """Where a kind of device plays: junctions by their cuts (p5873 v2c read
+    "junction x9 (0.0-0.0 s)" and told the person its dips may not have
+    landed), windows by their span."""
+    if all(_f(x.get("at")) is not None and _f(x.get("start")) is None
+           for x in items):
+        ats = sorted(_f(x.get("at")) for x in items)
+        shown = ", ".join(f"{t:.1f}" for t in ats[:12])
+        return "at the cuts " + shown + (" ..." if len(ats) > 12 else "") + " s"
+    return _span_text([s for s in (_device_span(x) for x in items) if s])
+
+
 def on_screen(edl):
     """What the film shows and plays now, on the film clock, one line per
     layer: captions, every text with its window, pictures over the cut,
@@ -284,8 +309,7 @@ def on_screen(edl):
         for f in fx:
             kinds.setdefault(str(f.get("type")), []).append(f)
         lines.append("devices: " + "; ".join(
-            f"{k} x{len(v)} ({_span_text([(_f(x.get('start')) or 0.0, _f(x.get('end')) or 0.0) for x in v])})"
-            for k, v in kinds.items()))
+            f"{k} x{len(v)} ({_device_where(v)})" for k, v in kinds.items()))
     eff = edl.get("effects") or {}
     zooms = [z for z in list(eff.get("zooms") or []) + list(edl.get("zooms")
                                                            or [])

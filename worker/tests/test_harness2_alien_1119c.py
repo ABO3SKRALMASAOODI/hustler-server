@@ -211,3 +211,16 @@ def test_the_joined_clips_are_framed_and_captioned(monkeypatch):
     caps = [a for n, a in calls if n == "add_captions"]
     assert caps and caps[0]["mode"] == "from_transcript"
     assert any("framed 9:16" in f for f in env.findings)
+
+
+def test_junctions_are_listed_at_their_cuts():
+    """p5873 v2c: nine fade_black junctions read "junction x9 (0.0-0.0 s)"
+    and the model told the person the dips may not have applied."""
+    from harness2 import measure
+    edl = {"keep": [[0.0, 35.27]], "fx": [
+        {"type": "junction", "at": 3.2, "duration_s": 0.4,
+         "style": "fade_black"},
+        {"type": "junction", "at": 6.2, "duration_s": 0.4,
+         "style": "fade_black"}]}
+    line = next(x for x in measure.on_screen(edl) if x.startswith("devices"))
+    assert "at the cuts 3.2, 6.2 s" in line and "0.0-0.0" not in line
