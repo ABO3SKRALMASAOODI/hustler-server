@@ -143,6 +143,10 @@ def write_version(ctx, prev, new_edl, env, note, operation_id=None,
                                           prev["version"], version)
     env.measured = measure_mod.edl_measure(new_edl, _source_s(ctx))
     try:
+        env.on_screen = measure_mod.on_screen(new_edl)
+    except Exception as exc:  # noqa: BLE001 - a report, never the write
+        print(f"[harness2] on-screen list skipped: {exc}", flush=True)
+    try:
         manifest = quality_verifier.build_change_manifest(
             ctx.project_id, version, prev["json"], new_edl, chg,
             description=str(note or env.changed)[:300], tool=tool)
@@ -279,6 +283,7 @@ def _direct_only(ctx, env, before, after, operation_id):
             before["json"], after["json"], before["version"],
             after["version"])
         env.check = _checks(env, before["json"], after["json"])
+        env.on_screen = measure_mod.on_screen(after["json"])
         _look_measure(ctx, before["json"], after["json"], env)
     elif not env.not_applied:
         env.changed = f"already so: v{before['version']} unchanged"

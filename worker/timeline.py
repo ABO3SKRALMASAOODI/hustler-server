@@ -917,6 +917,26 @@ RUNS_TO_END_S = 0.05
 # left p25's hook word_slam 0.77 s long, an earlier start moved it to
 # 0.88-2.25 s and opened the short bare; p14's collapsed to 0.61 s).
 OPENING_HOLD_MIN_S = 1.2
+# How far an opening item's own footage may move down the programme and still
+# be read as a head trim. Further than this, the re-cut put other footage in
+# front of it: the item still opens the programme, at its own length, instead
+# of stretching from 0 to wherever its footage now ends (p5728, 19 Nov: a
+# 1.47 s "ДЖЕБ" title over the opening became 0-29.44 s and covered the
+# fighters for 29 s after a re-cut moved its footage to 28.8 s).
+OPENING_DRIFT_S = 1.0
+
+
+def opening_window(moved, s0, e0, prog, hold_min=0.0):
+    """(0, end) for an item that opened the programme. Its footage moved by a
+    head trim: it ends where that footage now ends (never under
+    ``hold_min``). Its footage moved far: it keeps its own length."""
+    own = max(0.0, float(e0) - float(s0))
+    if moved is None or float(moved[0]) > OPENING_DRIFT_S:
+        return (0.0, round(min(prog, own), 2))
+    end = float(moved[1])
+    if hold_min:
+        end = max(end, min(own, hold_min))
+    return (0.0, round(min(prog, end), 2))
 
 
 def remap_program_items(edl, old_tl, new_tl):
@@ -1079,7 +1099,8 @@ def remap_program_items(edl, old_tl, new_tl):
             if e0 >= old_prog - RUNS_TO_END_S:
                 moved = (moved[0], prog)
             if s0 <= RUNS_TO_END_S:
-                moved = (0.0, moved[1])
+                moved = (0.0, prog) if e0 >= old_prog - RUNS_TO_END_S \
+                    else opening_window(moved, s0, e0m, prog)
             return moved
         d = _insert_shift(s0, e0)
         if d:
@@ -1516,8 +1537,11 @@ def remap_program_items(edl, old_tl, new_tl):
                         f"note: picture card {card['id']} was removed — the "
                         "footage it was framed on is no longer in the edit.")
                     continue
-                if moved is not None and s0 <= RUNS_TO_END_S \
-                        and moved[0] > 0.0:
+                if moved is not None and moved != "gone" \
+                        and s0 <= RUNS_TO_END_S and moved[0] > OPENING_DRIFT_S:
+                    moved = opening_window(moved, s0, e0, prog)
+                if moved is not None and moved != "gone" \
+                        and s0 <= RUNS_TO_END_S and moved[0] > 0.0:
                     # A card that opened the programme still opens it, like
                     # a motion graphic or a cutaway that did: restoring
                     # 0.05-0.34 s at the head moved the card to start there
@@ -2171,8 +2195,11 @@ def remap_program_items(edl, old_tl, new_tl):
                 opening = False
                 if s0 <= RUNS_TO_END_S:
                     # the hook still opens the programme, and stays readable
-                    held = (0.0, round(min(prog, max(
-                        moved[1], min(e0 - s0, OPENING_HOLD_MIN_S))), 2))
+                    if e0 >= old_prog - RUNS_TO_END_S:
+                        held = (0.0, prog)
+                    else:
+                        held = opening_window(moved, s0, e0, prog,
+                                              OPENING_HOLD_MIN_S)
                     opening = held != tuple(moved)
                     moved = held
                 if (moved[0], moved[1]) != (s0, e0):

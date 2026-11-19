@@ -84,7 +84,10 @@ def test_a_speed_ramp_row_runs_the_ramp_verb(monkeypatch):
     commit.edit(ctx, [{"speed": {"start": 2, "end": 4, "factor": 0.4,
                                  "ramp": True}}], "ramp")
     assert seen and seen[0]["low"] == 0.4 and seen[0]["hold"] == 0.5
-    assert (seen[0]["start"], seen[0]["end"]) == (2.0, 4.0)
+    assert seen[0]["start"] == pytest.approx(2.0, abs=0.01)
+    assert seen[0]["end"] == pytest.approx(4.0, abs=0.01)
+    # the ramp could not land here: the constant factor plays instead
+    assert ctx.latest_edl()["json"]["speed"][0]["factor"] == 0.4
 
 
 def test_the_schema_example_no_longer_hands_a_window():
@@ -300,7 +303,7 @@ def test_finish_runs_the_departments_the_cut_lacks(monkeypatch):
     assert names[-1] == "set_master_loudness"
     assert "add_music" in names and "add_sfx" in names
     zooms = [a for n, a in calls if n == "add_zoom"]
-    assert {z["mode"] for z in zooms} == {"landing", "push_in"}
+    assert {z["mode"] for z in zooms} == {"punch", "push_in"}
 
 
 def test_finish_pictures_go_to_the_broll_director():
@@ -378,3 +381,279 @@ def test_the_kernel_teaches_striking_by_default_and_narrow_asks_exactly():
     assert "An open request" in text and "A narrow request" in text
     assert "`finish`" in text and "`direct`" in text
     assert "no `end` runs to the film's end" in text
+
+
+# ==============================================================================
+# Round two (rater run v2a-1119)
+# ==============================================================================
+
+def test_an_opening_title_keeps_its_length_when_its_footage_moves_far():
+    """p5728: the 1.47 s opening title became 0-29.44 s after a re-cut moved
+    its footage to 28.8 s, and covered the fighters for 29 s."""
+    import timeline
+    old_keep = [[88.42, 89.795], [90.355, 91.205], [91.355, 92.205]]
+    new_keep = [[26.44, 30.71], [32.23, 39.29], [54.0, 61.5], [63.27, 68.08],
+                [83.27, 89.07], [101.04, 107.64]]
+    edl = {"keep": new_keep, "texts": [
+        {"id": "t1", "text": "ДЖЕБ", "start": 0.0, "end": 1.47,
+         "template": "title"}]}
+    timeline.remap_program_items(edl, timeline.Timeline(old_keep),
+                                 timeline.Timeline(new_keep))
+    t = edl["texts"][0]
+    assert (t["start"], t["end"]) == (0.0, 1.47)
+    # a head trim still ends with its footage
+    trimmed = [[88.72, 89.795], [90.355, 91.205]]
+    edl2 = {"keep": trimmed, "texts": [dict(t)]}
+    timeline.remap_program_items(edl2, timeline.Timeline(old_keep),
+                                 timeline.Timeline(trimmed))
+    assert edl2["texts"][0]["start"] == 0.0
+    assert edl2["texts"][0]["end"] < 1.47
+
+
+def test_the_envelope_lists_what_is_on_screen_with_its_remove_op():
+    from harness2 import measure
+    edl = {"keep": [[0.0, 20.0], [30.0, 40.0]],
+           "captions": [{"text": "УКЛОН", "start": 32.0, "end": 33.0},
+                        {"text": "СБОКУ", "start": 33.0, "end": 34.0}],
+           "texts": [{"id": "tx1", "text": "ДЖЕБ", "start": 0.0, "end": 25.0,
+                      "template": "title", "y": 0.62}],
+           "effects": {"grade_custom": {"temperature": -1.0, "tint": -0.46}}}
+    lines = measure.on_screen(edl)
+    text = "\n".join(lines)
+    assert "captions: 2 item(s) on film 22.0-24.0 s" in text
+    assert "'mode': 'off'" in text
+    assert "held 25.0 s of the 30.0 s film" in text
+    assert "'remove': 'texts', 'id': 'tx1'" in text
+    assert "camera moves: none" in text
+    assert "temperature -1.00" in text
+
+
+def test_an_edit_envelope_carries_the_on_screen_list():
+    ctx, _fake = _ctx(20.0, [[0.0, 20.0]])
+    env = commit.edit(ctx, [{"cut": [[2.0, 4.0]]}], "cut")
+    assert env.on_screen and "on screen now" in env.text()
+
+
+def test_speed_rows_are_read_on_one_clock():
+    """p5744 v2a: the second row was read on the clock the first had
+    slowed and landed on 0.2 s."""
+    ctx, _fake = _ctx(11.26, P5744_KEEP)
+    commit.edit(ctx, [{"speed": [{"start": 3.0, "end": 4.75, "factor": 0.5},
+                                 {"start": 4.75, "end": 6.76,
+                                  "factor": 0.5}]}], "s")
+    spans = sorted((round(s["start"], 2), round(s["end"], 2))
+                   for s in ctx.latest_edl()["json"]["speed"])
+    assert spans == [(3.0, 4.75), (9.25, 11.26)]
+
+
+def test_a_ramp_that_cannot_slow_a_30p_take_plays_its_slow_motion(
+        monkeypatch):
+    """p5728 v2a: "NO CHANGE — that curve stays at 1.0x" came back as
+    "already so" four times; the ramp now shows its slow motion with
+    repeated frames, or the constant factor plays."""
+    ctx, _fake = _ctx(11.26, P5744_KEEP)
+    real = agent_tools.execute
+    seen = []
+
+    def execute(c, name, args):
+        if name == "set_speed_ramp":
+            seen.append(args)
+            return "NO CHANGE — that curve stays at 1.0x."
+        return real(c, name, args)
+    monkeypatch.setattr(agent_tools, "execute", execute)
+    env = commit.edit(ctx, [{"speed": {"start": 6.0, "factor": 0.5,
+                                       "ramp": True}}], "slow after 6")
+    assert seen and seen[0]["allow_duplicates"] is True
+    sp = ctx.latest_edl()["json"]["speed"]
+    assert sp and all(s["factor"] == 0.5 for s in sp)
+    assert "already so" not in env.text()
+
+
+def test_no_change_with_a_reason_is_never_already_so(monkeypatch):
+    ctx, _fake = _ctx(20.0, [[0.0, 20.0]])
+    monkeypatch.setattr(agent_tools, "execute",
+                        lambda c, n, a: "NO CHANGE — that curve stays at 1.0x.")
+    env = commit.edit(ctx, [{"tool": "add_zoom", "args": {"start": 1,
+                                                          "end": 2}}], "z")
+    assert env.not_applied and "stays at 1.0x" in env.text()
+    assert "already so" not in env.text()
+
+
+def test_loose_layer_ops_are_read_as_what_they_say():
+    edl = {"music": [{"id": "bed"}], "texts": [{"id": "tx1"}]}
+    assert ops_mod.normalize({"layer": "music", "remove": True,
+                              "id": "bed"}, edl) == {"id": "bed",
+                                                     "remove": "music"}
+    assert ops_mod.normalize({"layer": "remove", "id": "tx1"}, edl) == {
+        "id": "tx1", "remove": "texts"}
+
+
+def test_removing_a_bed_moves_its_bound_devices(monkeypatch):
+    ctx, _fake = _ctx(20.0, [[0.0, 20.0]])
+    from harness2.stage import Stage
+    head = ctx.latest_edl()
+    edl = dict(head["json"], music=[{"id": "bed"}, {"id": "mus1"}],
+               fx=[{"id": "drop", "music_id": "bed"}, {"id": "g"}])
+    stage = Stage(ctx, edl, head["version"])
+    stage._edl = edl
+    env = commit.EditEnv()
+    seen = []
+    monkeypatch.setattr(stage, "replace", lambda e: seen.append(e))
+    ops_mod._release_music_binds(stage, [(0, {"remove": "music",
+                                              "id": "bed"})], env)
+    assert seen and seen[0]["fx"][0]["music_id"] == "mus1"
+    assert any("moved to mus1" in r for r in env.repairs)
+
+
+def test_a_new_track_replaces_the_bed_in_place(monkeypatch):
+    ctx, _fake = _ctx(20.0, [[0.0, 20.0]])
+    calls = []
+    real = agent_tools.execute
+
+    def execute(c, name, args):
+        calls.append((name, args))
+        if name == "swap_music":
+            edl = dict(c.latest_edl()["json"])
+            edl["music"] = [dict(m, storage_key=args["storage_key"])
+                            if m["id"] == args["id"] else m
+                            for m in edl["music"]]
+            return c.write_edl(edl, "swap")
+        return real(c, name, args)
+    monkeypatch.setattr(agent_tools, "execute", execute)
+    monkeypatch.setattr(ops_mod, "_music_key",
+                        lambda s, rid: ("music/1/library-x.mp3", ""))
+    head = ctx.latest_edl()
+    edl = dict(head["json"], music=[{"id": "bed", "storage_key": "a.mp3",
+                                     "start": 0, "end": 20}])
+    real_latest = ctx.latest_edl
+    monkeypatch.setattr(ctx, "latest_edl", lambda: dict(real_latest(),
+                                                        json=edl))
+    env = commit.edit(ctx, [{"music": {"id": "lib:x", "gain_db": -6}}], "m")
+    monkeypatch.setattr(ctx, "latest_edl", real_latest)
+    music = ctx.latest_edl()["json"]["music"]
+    assert [n for n, _a in calls if n in ("swap_music", "add_music")] == [
+        "swap_music"]
+    assert len(music) == 1 and music[0]["storage_key"].endswith("library-x.mp3")
+    assert music[0]["gain_db"] == -6
+    assert any("in place of the old bed" in r for r in env.repairs)
+
+
+def test_a_named_cc0_track_is_offered_as_the_persons_pick():
+    ctx, _fake = _ctx(11.26, P5744_KEEP)
+    body = find_tool.find(ctx, kind="music", query=["Calm current"]).text()
+    assert "cc0:chill-calm-currents-lofi-relax-calm" in body
+    assert "A track the person names is theirs" in body
+    assert find_tool._named_cc0("chill") == []
+
+
+def test_grade_takes_continuous_controls(monkeypatch):
+    ctx, _fake = _ctx(20.0, [[0.0, 20.0]])
+    seen = []
+    real = agent_tools.execute
+
+    def execute(c, name, args):
+        seen.append((name, args))
+        return real(c, name, args)
+    monkeypatch.setattr(agent_tools, "execute", execute)
+    commit.edit(ctx, [{"grade": {"grade_custom": {"exposure": 0.2,
+                                                  "temperature": 0.3}}}], "g")
+    assert ("set_grade_custom", {"exposure": 0.2, "temperature": 0.3}) in seen
+    assert not any(n == "set_color_grade" for n, _a in seen)
+
+
+def test_the_look_readout_says_how_light_the_picture_is():
+    import numpy as np
+    import look_guard
+    L = np.linspace(20, 90, 400)
+    src = (L, np.zeros(400), np.zeros(400))
+    darker = (L - 9, np.zeros(400), np.full(400, 8.0))
+    line = look_guard.colour_line(look_guard.colour([src], [darker]))
+    assert "darker by 9" in line and "sun-touched" in line
+
+
+def test_sport_finish_alternates_the_camera_and_moves_speed_and_beats(
+        monkeypatch):
+    ctx, _fake = _ctx(60.0, [[0.0, 10.0], [12.0, 22.0], [30.0, 40.0]])
+    from harness2.stage import Stage
+    head = ctx.latest_edl()
+    stage = Stage(ctx, dict(head["json"], music=[{"id": "bed"}]),
+                  head["version"])
+    env = commit.EditEnv()
+    calls = []
+    track = {"fps": 4.0, "motion": [((i % 17) / 17.0) for i in range(240)]}
+    monkeypatch.setattr(ops_mod.Engines, "activity_track",
+                        staticmethod(lambda c: (track, None)))
+    monkeypatch.setattr(ops_mod, "_ramp_on_source",
+                        lambda *a, **k: False)
+    monkeypatch.setattr(finish_mod, "_sound", lambda *a: False)
+    finish_mod.op_finish(stage, {"sport": True}, env, 0,
+                         _recording_run_verb(calls))
+    names = [n for n, _a in calls]
+    assert "apply_look" not in names and "add_captions" not in names
+    zooms = [a for n, a in calls if n == "add_zoom"]
+    assert {z["mode"] for z in zooms} == {"push_in", "punch"}
+    factors = sorted(a["factor"] for n, a in calls if n == "set_speed")
+    assert factors and factors[0] < 1.0 < factors[-1]
+    assert "beat_align_cuts" in names
+
+
+def test_finish_with_captions_false_leaves_no_captions():
+    ctx, _fake = _ctx(30.0, [[0.0, 30.0]])
+    from harness2.stage import Stage
+    head = ctx.latest_edl()
+    stage = Stage(ctx, dict(head["json"], captions={"mode": "from_transcript"}),
+                  head["version"])
+    env = commit.EditEnv()
+    calls = []
+    finish_mod.op_finish(stage, {"departments": ["look"], "captions": False},
+                         env, 0, _recording_run_verb(calls))
+    assert ("add_captions", {"mode": "off"}) in calls
+
+
+def test_clips_make_the_film_the_clips_in_order(monkeypatch):
+    """p5760 v2a: ten clips rendered, and the film the customer exported was
+    still the untouched 37-min broadcast."""
+    ctx, _fake = _ctx(600.0, [[0.0, 600.0]])
+    monkeypatch.setattr(ops_mod.Engines, "make_shorts",
+                        staticmethod(lambda c, clips, style_note=None,
+                                     deliver=None: "Started job 9."))
+    titles = []
+    real = agent_tools.execute
+
+    def execute(c, name, args):
+        if name == "add_text":
+            titles.append((args["text"], args["start"]))
+            return "NO CHANGE while staging"
+        return real(c, name, args)
+    monkeypatch.setattr(agent_tools, "execute", execute)
+    env = commit.edit(ctx, [{"clips": {"items": [
+        {"range": [100, 140], "title": "Two"},
+        {"range": [10, 50], "title": "One"}]}}], "clips")
+    keep = ctx.latest_edl()["json"]["keep"]
+    assert len(keep) == 2 and keep[0][0] == pytest.approx(10, abs=1)
+    assert keep[1][0] == pytest.approx(100, abs=1)
+    assert [t for t, _s in sorted(titles, key=lambda x: x[1])] == ["One",
+                                                                  "Two"]
+    assert ctx.latest_edl()["json"]["frame"]["ratio"] == "9:16"
+    assert any("now the 2 clips in order" in f for f in env.findings)
+
+
+def test_a_misjoined_proof_reel_is_joined_again_exactly(tmp_path):
+    import shutil
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        pytest.skip("needs ffmpeg")
+    import media
+    import renderer
+    pieces = []
+    for i, audio_s in enumerate((1.0, 4.0, 1.0)):
+        p = str(tmp_path / f"p{i}.mp4")
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                        "testsrc2=s=160x284:r=30:d=1", "-f", "lavfi", "-i",
+                        f"sine=d={audio_s}", "-c:v", "libx264", "-c:a", "aac",
+                        "-t", str(audio_s), p], check=True)
+        pieces.append(p)
+    out = str(tmp_path / "out.mp4")
+    renderer._concat_check_pieces_exact(pieces, out, str(tmp_path),
+                                        [1.0, 1.0, 1.0])
+    assert media.duration_of(out) == pytest.approx(3.0, abs=0.1)

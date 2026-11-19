@@ -103,6 +103,14 @@ def state_text(ctx):
                  + (f", {100 * (measured['kept_share'] or 0):.1f}% of the "
                     "source kept" if measured.get("kept_share") else "")
                  + ". timeline() gives the whole of it.")
+    try:
+        shown = measure_mod.on_screen(edl)
+    except Exception:  # noqa: BLE001
+        shown = []
+    if shown:
+        lines.append("On screen now (film seconds; every edit's envelope "
+                     "repeats this):")
+        lines.extend(f"- {line}" for line in shown)
     assets = _assets(ctx)
     if assets:
         lines.append("Uploads:")

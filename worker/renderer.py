@@ -10012,6 +10012,34 @@ def _concat_check_pieces(pieces, out_path, workdir, durations=None):
                "+faststart", out_path], timeout=180)
 
 
+def _concat_check_pieces_exact(pieces, out_path, workdir, durations):
+    """The proof pieces joined by re-encoding, each cut to its own measured
+    length with its timestamps from zero. The stream-copy join can carry a
+    piece's stray packets past its length (p5744 v2a, job 14: six windows
+    that each measured right joined into 20.04 s against 8.00 s and the
+    first film's proof failed); this join cannot."""
+    n = len(pieces)
+    with_audio = all(media.has_audio_stream(p) for p in pieces)
+    args = ["ffmpeg", "-y", "-v", "error"]
+    for p in pieces:
+        args += ["-i", p]
+    parts, labels = [], ""
+    for i, d in enumerate(durations):
+        parts.append(f"[{i}:v]trim=0:{d:.6f},setpts=PTS-STARTPTS[v{i}]")
+        labels += f"[v{i}]"
+        if with_audio:
+            parts.append(f"[{i}:a]atrim=0:{d:.6f},asetpts=PTS-STARTPTS[a{i}]")
+            labels += f"[a{i}]"
+    parts.append(f"{labels}concat=n={n}:v=1:a={1 if with_audio else 0}"
+                 + ("[v][a]" if with_audio else "[v]"))
+    args += ["-filter_complex", ";".join(parts), "-map", "[v]"]
+    if with_audio:
+        args += ["-map", "[a]", "-c:a", "aac", "-b:a", "160k"]
+    args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+             "-pix_fmt", "yuv420p", "-movflags", "+faststart", out_path]
+    media.run(args, timeout=300)
+
+
 def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
                              patch_locals, out_path, raw_ranges,
                              verify_times, progress_cb=None, raw_pages=None, proof_segments=None,
@@ -10128,6 +10156,12 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
         proof_segments.extend(dict(start=a, end=b, reel_start=offset)
                               for a,b,offset in offsets)
     out_dur = media.duration_of(out_path)
+    if abs(out_dur - elapsed) > max(0.25, elapsed * 0.03) and len(pieces) > 1:
+        print(f"[render] proof reel joined at {out_dur:.2f}s against "
+              f"{elapsed:.2f}s: joined again piece by piece", flush=True)
+        _concat_check_pieces_exact(pieces, out_path, workdir,
+                                   [b - a for a, b, _o in offsets])
+        out_dur = media.duration_of(out_path)
     if abs(out_dur - elapsed) > max(0.25, elapsed * 0.03):
         raise RenderVerificationError(
             f"changed-section reel rendered {out_dur:.2f}s, expected "

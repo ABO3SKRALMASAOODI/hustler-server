@@ -4,6 +4,7 @@
     {"finish": {"departments"?: [...], "look"?: name, "intensity"?: "calm" |
                 "designed" | "charged", "music"?: "auto" | "<find id>" |
                 "none", "pictures"?: [{"word", "query", "depicts"?}],
+                "sport"?: true, "moves"?: "alternate", "captions"?: false,
                 "brief"?: str}}
 
 The rubric scores of the golden replays sat at 1.5-2.5 with every ask done:
@@ -16,12 +17,15 @@ one version:
             and its transitions (a look the cut already has stays)
   captions  add_captions in a motion look, when the look did not set them
   moves     punch-ins on the stressed words of speech; on a cut without
-            speech, a camera that alternates: a landing on one cut, a slow
-            push across the next piece
+            speech (or "moves": "alternate"), a camera that alternates: a
+            landing on one cut, a slow push across the next piece
+  speed     slow motion on the measured peaks of action, speed-ups on the
+            quiet stretches (activity: picture motion and sound hits)
   pictures  source_broll on the words the caller names (B-roll on the exact
             word; the caller says what each shot shows)
   music     a track of reference grade (music_choose over the reference
             pool), its best stretch, under the voice at the references' level
+  beats     the cuts slid onto the song's beats (beat_align_cuts)
   sound     the designed sound (score.sound.plan_sounds) on what lands on
             screen: pictures, cards, type, camera moves, designed cuts
   master    social mastering (-14 LUFS, true peak under -1 dBTP)
@@ -31,8 +35,8 @@ lands or says why not; none stops the others. Knowledge, never a gate.
 """
 import json
 
-DEPARTMENTS = ("look", "captions", "moves", "pictures", "music", "sound",
-               "master")
+DEPARTMENTS = ("look", "captions", "moves", "speed", "pictures", "music",
+               "beats", "sound", "master")
 LOOK_FOR = {"calm": "cinematic_doc", "designed": "editorial",
             "charged": "creator_punch"}
 
@@ -94,6 +98,14 @@ def pieces(edl):
     return out
 
 
+def zooms_of(edl):
+    """Every camera move of the cut: the effects' zooms (where the EDL keeps
+    them) and any top-level ones."""
+    eff = edl.get("effects") or {}
+    return [z for z in list(eff.get("zooms") or []) + list(
+        edl.get("zooms") or []) if isinstance(z, dict)]
+
+
 def lacks(edl, stage):
     """The departments this cut does not have yet."""
     fx = edl.get("effects") or {}
@@ -102,7 +114,7 @@ def lacks(edl, stage):
         out.append("look")
     if not edl.get("captions") and program_words(stage):
         out.append("captions")
-    if not edl.get("zooms") and not edl.get("zoom_paths"):
+    if not zooms_of(edl):
         out.append("moves")
     if not edl.get("music"):
         out.append("music")
@@ -138,26 +150,112 @@ def _moves(stage, v, env, index, run_verb):
     program = _program(stage.edl)
     if program <= 0:
         return False
-    if speech_share(stage) >= 0.25:
+    if v.get("moves") != "alternate" and speech_share(stage) >= 0.25:
         count = max(2, min(8, int(round(program / 10.0))))
         return run_verb(stage, "punch_in_on_emphasis", {"count": count},
                         env, index)
-    # No speech (sport, a montage, a product): a camera that alternates
-    # wide and close, a landing on one cut and a slow push across the next.
+    # No speech, or "moves": "alternate" (sport, a montage, a product): a
+    # camera that alternates wide and close, a landing on one cut and a slow
+    # push across the next (p5728 asked for exactly this and got one push).
     ok = False
+    busy = [(float(z.get("start") or 0), float(z.get("end") or 0))
+            for z in zooms_of(stage.edl)]
     for k, (a, b) in enumerate(pieces(stage.edl)):
-        if b - a < 1.2:
+        if b - a < 1.2 or any(b > x and a < y for x, y in busy):
             continue
-        if k % 2 == 0:
-            args = {"start": a, "end": round(min(b, a + 0.45), 3),
-                    "mode": "landing", "strength": 0.14,
-                    "purpose": "the new shot arrives with momentum"}
+        if k % 2 == 1:
+            # the digital close-up: in on the cut, held, out on the next cut
+            args = {"start": a, "end": b, "mode": "punch", "strength": 0.3,
+                    "purpose": "a second, closer camera on this piece"}
         else:
-            args = {"start": round(a + 0.1, 3), "end": round(b - 0.05, 3),
-                    "mode": "push_in", "strength": 0.08,
-                    "purpose": "a slow push holds the eye across the shot"}
+            # the wide, alive: a slow push across the piece
+            args = {"start": round(a + 0.05, 3), "end": round(b - 0.05, 3),
+                    "mode": "push_in", "strength": 0.06,
+                    "purpose": "the wide holds the eye with a slow push"}
         ok = run_verb(stage, "add_zoom", args, env, index) or ok
     return ok
+
+
+def _speed(stage, v, env, index, run_verb):
+    """Slow motion on the measured peaks and speed-ups on the measured
+    lulls, from the footage's own activity (picture motion and sound hits,
+    signal only): the expressive moment of the busiest pieces eases down to
+    0.5x for about a second, and the quietest stretch of the others runs at
+    1.6x. p5728 asked for both and got one 0.8 s slow-motion."""
+    import activity
+    from harness2 import ops as ops_mod
+    track, why = ops_mod.ENGINES.activity_track(stage)
+    if not track:
+        env.finding(f"finish speed: no activity measure ({why}); speed "
+                    "rows on the moments you see work the same way")
+        return False
+    sc, fps, _used = activity.score(track)
+    sc = [float(x) for x in sc]
+    keep = [list(map(float, k)) for k in stage.edl.get("keep") or []]
+    taken = [(float(sp["start"]), float(sp["end"]))
+             for sp in stage.edl.get("speed") or [] if isinstance(sp, dict)]
+
+    def window(a, b):
+        i0, i1 = max(0, int(a * fps)), min(len(sc), int(b * fps) + 1)
+        return [(i / fps, sc[i]) for i in range(i0, i1)]
+
+    peaks, lulls = [], []
+    for a, b in keep:
+        if b - a < 2.0:
+            continue
+        w = window(a + 0.3, b - 0.3)
+        if not w:
+            continue
+        t_peak, v_peak = max(w, key=lambda x: x[1])
+        peaks.append((v_peak, max(a, t_peak - 0.45), min(b, t_peak + 0.45)))
+        # the quietest 1.5 s inside the piece
+        span = int(1.5 * fps)
+        if len(w) > span + 2:
+            best = min(range(len(w) - span),
+                       key=lambda k: sum(x[1] for x in w[k:k + span]))
+            lulls.append((sum(x[1] for x in w[best:best + span]) / span,
+                          w[best][0], w[best][0] + 1.5))
+    program = _program(stage.edl)
+    n = max(1, int(round(program / 12.0)))
+    slow = sorted(peaks, reverse=True)[:n]
+    fast = sorted(lulls)[:n]
+
+    def free(a, b):
+        return not any(b > x + 0.05 and a < y - 0.05 for x, y in taken)
+    ok = 0
+    for _v, a, b in slow:
+        if b - a < 0.6 or not free(a, b):
+            continue
+        row = {"ramp": True, "hold": 0.5}
+        landed = ops_mod._ramp_on_source(stage, row, 0.5, a, b, env, index) \
+            or run_verb(stage, "set_speed", {"start": a, "end": b,
+                                             "factor": 0.6}, env, index)
+        if landed:
+            taken.append((a, b))
+            ok += 1
+    for _v, a, b in fast:
+        if not free(a, b):
+            continue
+        if run_verb(stage, "set_speed", {"start": round(a, 3),
+                                         "end": round(b, 3), "factor": 1.6},
+                    env, index):
+            taken.append((a, b))
+            ok += 1
+    env.finding(f"finish speed: {ok} speed change(s): slow motion on the "
+                "busiest moments, speed-ups on the quietest stretches "
+                "(measured activity)")
+    return ok > 0
+
+
+def _beats(stage, v, env, index, run_verb):
+    """The cuts slide onto the beats of the song the viewer hears
+    (beat_align_cuts on the music, never the footage's own rhythm)."""
+    if not stage.edl.get("music"):
+        env.finding("finish beats: no music yet; the music department "
+                    "runs first")
+        return False
+    return run_verb(stage, "beat_align_cuts", {"source": "music"}, env,
+                    index)
 
 
 def _pictures(stage, v, env, index, run_verb):
@@ -287,7 +385,7 @@ def events(edl, fps=30.0):
     for m in edl.get("motion") or []:
         if isinstance(m, dict):
             at(m.get("start"), "card", area=0.2, id=m.get("id"))
-    for z in edl.get("zooms") or []:
+    for z in zooms_of(edl):
         if z.get("mode") in ("punch", "landing", "pulse", "shake"):
             at(z.get("start"), "move", id=z.get("id"))
     tr = ((edl.get("effects") or {}).get("transition") or {})
@@ -370,9 +468,20 @@ def op_finish(stage, value, env, index, run_verb):
         todo = lacks(stage.edl, stage)
         if v.get("pictures"):
             todo.append("pictures")
+        if v.get("moves") == "alternate" or v.get("sport"):
+            # action and sport: the camera alternates, speed follows the
+            # action, the cuts land on the song's beats; the type and the
+            # look stay as the person set them (p5728 asked for no
+            # subtitles, and a look system draws captions)
+            todo = [d for d in todo if d not in ("look", "captions")]
+            todo += ["moves", "speed", "beats"]
         todo = [d for d in DEPARTMENTS if d in todo]
+    if v.get("captions") is False:
+        todo = [d for d in todo if d != "captions"]
     landed = []
     for dept in todo:
+        if dept == "captions" and v.get("captions") is False:
+            continue
         try:
             if globals()[RUN[dept]](stage, v, env, index, run_verb):
                 landed.append(dept)
@@ -380,6 +489,10 @@ def op_finish(stage, value, env, index, run_verb):
             env.skip(index, f"finish {dept} raised {type(exc).__name__}: "
                             f"{str(exc)[:200]}",
                      "the other departments landed")
+    if v.get("captions") is False and stage.edl.get("captions"):
+        # the person excluded captions: none stay, a look's included
+        if run_verb(stage, "add_captions", {"mode": "off"}, env, index):
+            landed.append("captions off")
     env.finding("finish: " + (", ".join(landed) or "nothing")
                 + " landed" + (f" (of {', '.join(todo)})" if todo else ""))
     env.measures["finish"] = {"asked": todo, "landed": landed,

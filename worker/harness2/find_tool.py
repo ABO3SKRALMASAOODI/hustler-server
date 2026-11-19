@@ -298,6 +298,15 @@ def _music(ctx, queries, count):
     # times and got the same film-fit list each time, its words unread).
     lines, matched, hits = [], {}, []
     for q in queries:
+        for row in _named_cc0(q):
+            fails = _cc0_gate().get(row["slug"]) or []
+            lines.append(
+                f"[{q}] names the track \"{row['title']}\" "
+                f"(cc0:{row['slug']}, {row.get('mood')}, CC0 library"
+                + (f"; under the music bar: {'; '.join(fails[:2])}" if fails
+                   else "")
+                + "). A track the person names is theirs: place it with "
+                f"{{'music': {{'id': 'cc0:{row['slug']}'}}}}")
         found = _matching(ranked, q)
         matched[q] = len(found)
         hits.extend(t for t in found if t not in hits)
@@ -339,6 +348,42 @@ def _music(ctx, queries, count):
     if matched:
         env.measured["matched"] = matched
     return env
+
+
+def _norm_title(text):
+    text = "".join(c if c.isalnum() else " " for c in str(text or "").lower())
+    return " ".join(text.split())
+
+
+def _stems(text):
+    return {w[:-1] if len(w) > 3 and w.endswith("s") else w
+            for w in _norm_title(text).split()}
+
+
+def _named_cc0(query):
+    """CC0 library tracks whose title the query names (p5744: "Calm
+    current" is "Calm Currents"): the title read closely, or every word of
+    a title of up to four words in the query. Catalogue search over the
+    model's own query."""
+    import difflib
+    try:
+        import music_library
+        rows = music_library.catalog()
+    except Exception:  # noqa: BLE001
+        return []
+    q = _norm_title(query)
+    if not q:
+        return []
+    qs = _stems(q)
+    out = []
+    for r in rows:
+        t = _norm_title(r.get("title"))
+        ts = _stems(t)
+        close = difflib.SequenceMatcher(None, q, t).ratio() >= 0.85
+        whole = bool(ts) and len(ts) <= 4 and ts <= qs
+        if close or whole:
+            out.append(r)
+    return out[:3]
 
 
 def _words(text):

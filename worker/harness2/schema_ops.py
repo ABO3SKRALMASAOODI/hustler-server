@@ -40,8 +40,10 @@ OPS = [
     ("voiceover", '{"voiceover": {"key": "<asset key>", "at": 0}}',
      "an uploaded voice under the film"),
     ("music", '{"music": {"id": "<find(kind=music) id>", "gain_db": -18, '
-     '"duck": true}}', "a track from find(kind='music') or the user's own "
-     "'key'; provenance is stamped"),
+     '"duck": true}}', "a track from find(kind='music') (lib:<id>, or "
+     "cc0:<slug> for a track the person named) or the user's own 'key'; it "
+     "REPLACES the film's bed in place ('add': true lays a second track); "
+     "provenance is stamped"),
     ("sfx", '{"sfx": [{"id": "<find(kind=sfx) id>", "at": 3.2}]}',
      "one-shot sounds at film seconds"),
     ("audio", '{"audio": {"range": [0, 11.3], "gain_db": -60}}',
@@ -54,8 +56,11 @@ OPS = [
     ("export", '{"export": {"max_size_gb": 4.5}}', "the exported file's "
      "size (or video_kbps) target: the export encodes under the bitrate that "
      "fits the film's length and is measured and re-encoded until it fits"),
-    ("grade", '{"grade": {"preset": "warm"}}', "a grade preset or "
-     "{\"look\": name}"),
+    ("grade", '{"grade": {"preset": "warm", "custom": {"exposure": 0.1, '
+     '"temperature": 0.2, "shadows": 0.1}}}', "a grade preset, a {\"look\": "
+     "name}, and/or the continuous controls (exposure, contrast, saturation, "
+     "temperature, tint, shadows, highlights; -1..1, contrast and saturation "
+     "around 1); the envelope measures the result's lightness and colour"),
     ("transition", '{"transition": {"style": "crossfade", "duration_s": 0.3}}',
      "transitions at cuts; {\"at\": t} sets one junction"),
     ("zoom", '{"zoom": [{"start": 4, "end": 4.4, "mode": "landing"}, '
@@ -77,7 +82,12 @@ OPS = [
      "(B-roll cut in on the word: 'pictures': [{word, query, depicts?}]), "
      "music (a reference-grade track; 'music': 'auto' | id | 'none'), sound "
      "(designed sound on what lands on screen), master (-14 LUFS); "
-     "'departments': [...] runs only those"),
+     "'departments': [...] runs only those; 'sport': true (or 'moves': "
+     "'alternate') adds the action devices: wide and digital close-up "
+     "alternating piece by piece, speed (slow motion on the measured peaks, "
+     "speed-ups on the quiet stretches) and beats (cuts slid onto the "
+     "song's beats), leaving type and look as they are; 'captions': false "
+     "keeps the film without captions whatever a look would draw"),
     ("direct", '{"direct": {"brief": "a 30 s reel that opens on the save"}}',
      "the Director's whole film from the full upload (Scout, real pictures, "
      "bed, type, sound) written as its own version before the other ops of "

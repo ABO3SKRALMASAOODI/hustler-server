@@ -62,6 +62,28 @@ class Engines:
 ENGINES = Engines()
 
 
+def normalize(op, edl=None):
+    """A layer op in a shape a model writes by mistake, read as what it
+    says (a transport repair, never a reading of intent):
+    {"layer": "music", "remove": true, "id": "bed"} and
+    {"layer": "remove", "id": "bed"} are {"remove": "music", "id": "bed"}."""
+    if not isinstance(op, dict) or not isinstance(op.get("layer"), str):
+        return op
+    layer = op["layer"]
+    rest = {k: v for k, v in op.items() if k != "layer"}
+    for action in LAYER_ACTIONS:
+        if rest.get(action) is True:
+            rest.pop(action)
+            return dict(rest, **{action: layer})
+    if layer in LAYER_ACTIONS and rest.get("id") is not None and edl:
+        for name, items in edl.items():
+            if isinstance(items, list) and any(
+                    isinstance(i, dict) and i.get("id") == rest["id"]
+                    for i in items):
+                return dict(rest, **{layer: name})
+    return op
+
+
 def op_name(op):
     if not isinstance(op, dict):
         return None
@@ -201,12 +223,19 @@ def _run_verb(stage, name, args, env, index):
     # A verb that set nothing aside in its own words ("NOT APPLIED: ...")
     # did not land: saying "already so" sent p5873's model hunting for a
     # transition that was never placed.
-    if result_refused(text) or text.lstrip().upper().startswith(
-            "NOT APPLIED"):
+    head = text.lstrip().upper()
+    if result_refused(text) or head.startswith("NOT APPLIED"):
         env.skip(index, f"{name}: {first_line(text)}",
                  _instead_for(name))
         env.refusals.append({"op": index, "tool": name,
                              "text": text[:2000]})
+        return False
+    if head.startswith("NO CHANGE") and "ALREADY" not in head \
+            and "STAGING" not in head:
+        # "NO CHANGE — that curve stays at 1.0x" changed nothing for a
+        # reason: said in the verb's words, never "already so" (p5728 sent
+        # the same slow motion four times on that answer).
+        env.skip(index, f"{name}: {first_line(text)}", _instead_for(name))
         return False
     env.already.append(f"op {index} ({name}): already so")
     return True
@@ -329,21 +358,31 @@ def op_speed(stage, value, env, index):
     watches); ``"at_source": true`` on a row takes source seconds. A row
     with no end (or ``"end": "end"``) runs to the film's end: "after 6 s"
     is the rest of the film, not a guessed window (p5744 R2 got 6-8.6 s of a
-    13 s film). ``"ramp": true`` eases in and out of the factor
-    (set_speed_ramp) instead of a hard change."""
+    13 s film). ``"ramp": true`` eases in and out of the factor.
+
+    Every row is read on the film's clock as it was before any row of this
+    op landed (p5744 v2a: the second row of "6-6.75, 6.75-7.51" was read on
+    the clock the first had already slowed, and landed on 0.2 s). A window
+    that crosses cuts is laid piece by piece (a ramp stays inside one shot);
+    a ramp the footage's frame rate cannot slow (a 30p take in a 30p film
+    stayed "at 1.0x" and came back as "already so" four times on p5728)
+    shows its slow motion with repeated frames, since slow motion is what
+    was asked; any piece a ramp cannot take gets the constant factor."""
     rows = value if isinstance(value, list) else [value]
-    ok = False
+    clock_edl = copy.deepcopy(stage.edl)
+    program = float(program_duration(clock_edl) or 0.0)
+    plan = []
     for row in rows:
         if not isinstance(row, dict):
             env.skip(index, "a speed row is {start, end, factor}")
             continue
-        program = float(program_duration(stage.edl) or 0.0)
         to_end = _film_end_word(row.get("end")) and not row.get("at_source")
         try:
             a = float(row.get("start") or 0.0)
             b = program if to_end else float(row.get("end"))
+            factor = float(row.get("factor"))
         except (TypeError, ValueError):
-            env.skip(index, "a speed row needs numeric start and end",
+            env.skip(index, "a speed row needs numeric start, end and factor",
                      '{"start": 6, "factor": 0.5} (film s; no end = to '
                      'the film\'s end)')
             continue
@@ -351,17 +390,6 @@ def op_speed(stage, value, env, index):
             env.repair(f"speed from {a:g} s has no end: it runs to the "
                        f"film's end ({program:.2f} s)")
         a, b = min(a, b), max(a, b)
-        if row.get("ramp") and not row.get("at_source"):
-            args = {"start": a, "end": b,
-                    "low": max(0.25, min(0.95, float(row.get("factor")
-                                                     or 0.5)))}
-            for name in ("hold", "curve", "allow_speech",
-                         "allow_duplicates"):
-                if row.get(name) is not None:
-                    args[name] = row[name]
-            args.setdefault("hold", 0.5)
-            ok = _run_verb(stage, "set_speed_ramp", args, env, index) or ok
-            continue
         if row.get("at_source"):
             spans = [(a, b)]
         else:
@@ -369,19 +397,65 @@ def op_speed(stage, value, env, index):
                 env.repair(f"speed end {b:g} s is past the film's end "
                            f"({program:.2f} s): held to the end")
                 b = program
-            spans = film_to_source_spans(stage.edl, a, b)
+            spans = film_to_source_spans(clock_edl, a, b)
             if not spans:
                 env.skip(index, f"film {a:g}-{b:g} s holds no footage of "
                                 "the upload (an insert or past the end)",
                          f"film seconds between 0 and {program:.2f}")
                 continue
         for src_a, src_b in spans:
-            args = {"start": src_a, "end": src_b,
-                    "factor": row.get("factor")}
-            ok = _run_verb(stage, "set_speed", args, env, index) or ok
+            if src_b - src_a < 0.2:
+                env.repair(f"source {src_a:g}-{src_b:g} s is under 0.2 s of "
+                           "footage: it plays at its own speed")
+                continue
+            plan.append((row, factor, src_a, src_b))
+    ok = False
+    for row, factor, src_a, src_b in plan:
+        landed = False
+        if row.get("ramp") and not row.get("at_source"):
+            landed = _ramp_on_source(stage, row, factor, src_a, src_b, env,
+                                     index)
+        if not landed:
+            landed = _run_verb(stage, "set_speed", {
+                "start": src_a, "end": src_b, "factor": factor}, env, index)
+        ok = landed or ok
     if ok:
         _speed_coverage(stage, env)
     return ok
+
+
+def _ramp_on_source(stage, row, factor, src_a, src_b, env, index):
+    """One eased swing over the footage of source [src_a, src_b], placed on
+    the film where that footage plays now. True when it landed."""
+    try:
+        film = _clock(stage.edl).span_to_out(src_a, src_b) or []
+    except Exception:  # noqa: BLE001
+        film = []
+    if not film:
+        return False
+    fa, fb = film[0][0], film[-1][1]
+    if fb - fa < 0.4:
+        return False
+    args = {"start": round(fa, 3), "end": round(fb - 1e-3, 3),
+            "low": max(0.25, min(0.95, factor)),
+            "hold": row.get("hold", 0.5),
+            "allow_duplicates": row.get("allow_duplicates", True),
+            "allow_speech": row.get("allow_speech", True)}
+    if row.get("curve"):
+        args["curve"] = row["curve"]
+    before = edl_signature(stage.edl)
+    try:
+        result = agent_tools.execute(stage, "set_speed_ramp", args)
+    except (agent_tools.AskUser, agent_tools.FeatureUpgrade):
+        raise
+    except Exception as exc:  # noqa: BLE001 - the constant factor instead
+        result = f"{type(exc).__name__}: {exc}"
+    if edl_signature(stage.edl) != before:
+        return True
+    env.repair(f"ramp over film {fa:.2f}-{fb:.2f} s: "
+               f"{first_line(result, 160)}; a constant {factor:g}x plays "
+               "there instead")
+    return False
 
 
 def _speed_coverage(stage, env):
@@ -398,6 +472,25 @@ def _speed_coverage(stage, env):
     if parts:
         env.finding("speed now: " + "; ".join(parts)
                     + f"; the film is {program:.2f} s long")
+    # A picture laid over the slowed footage plays at its own speed and
+    # hides the slow motion (p5744 v2a: the first cut's cutaways of the
+    # upload covered most of "after 6 s").
+    cover = []
+    for o in stage.edl.get("overlays") or []:
+        try:
+            a = float(o.get("start"))
+            b = a + float(o.get("duration_s") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        for r in rows:
+            fs = r.get("film_s")
+            if fs and b > fs[0] + 0.05 and a < fs[1] - 0.05:
+                cover.append(f"{o.get('id')} {a:.2f}-{b:.2f} s")
+                break
+    if cover:
+        env.finding("pictures over the slowed footage play at their own "
+                    "speed and hide it: " + "; ".join(cover[:6])
+                    + " (remove: {'remove': 'overlays', 'id': ...})")
 
 
 def op_fit_length(stage, value, env, index):
@@ -534,12 +627,35 @@ def op_export(stage, value, env, index):
     return landed
 
 
+GRADE_CUSTOM_KEYS = ("exposure", "contrast", "saturation", "temperature",
+                     "tint", "shadows", "highlights")
+
+
 def op_grade(stage, value, env, index):
+    """A preset, a look, and/or the continuous controls, in one op:
+    {"grade": {"preset"?, "look"?, "custom"?: {exposure, contrast,
+    saturation, temperature, tint, shadows, highlights}}}; the controls may
+    also sit at the top level. p5873 v2a sent {"grade": {"grade_custom":
+    {...}}} and it set preset "none" and answered "already so"."""
     v = value if isinstance(value, dict) else {"preset": value}
+    custom = v.get("custom") or v.get("grade_custom")
+    if not isinstance(custom, dict):
+        custom = {k: v[k] for k in GRADE_CUSTOM_KEYS if v.get(k) is not None}
+    custom = {k: custom[k] for k in GRADE_CUSTOM_KEYS
+              if custom.get(k) is not None}
+    ok = False
     if v.get("look"):
-        return _run_verb(stage, "apply_look", {"name": v["look"]}, env, index)
-    return _run_verb(stage, "set_color_grade",
-                     {"preset": v.get("preset") or "none"}, env, index)
+        ok = _run_verb(stage, "apply_look", {"name": v["look"]}, env,
+                       index) or ok
+    if v.get("preset"):
+        ok = _run_verb(stage, "set_color_grade", {"preset": v["preset"]},
+                       env, index) or ok
+    if custom:
+        ok = _run_verb(stage, "set_grade_custom", custom, env, index) or ok
+    if not (v.get("look") or v.get("preset") or custom):
+        ok = _run_verb(stage, "set_color_grade", {"preset": "none"}, env,
+                       index)
+    return ok
 
 
 def op_transition(stage, value, env, index):
@@ -549,11 +665,65 @@ def op_transition(stage, value, env, index):
     return _run_verb(stage, "set_transitions", v, env, index)
 
 
+CC0_PREFIX = "cc0:"
+
+
+def _cc0_key(stage, slug):
+    """(storage key, note) for a CC0 library track the person named
+    (find(kind='music') answers 'cc0:<slug>' for it): placed as their pick."""
+    import music_gate
+    import music_library
+    track, err = music_library.find(slug)
+    if err or not track:
+        return None, str(err or f"no CC0 track {slug!r}")
+    record, _none = music_gate.resolve_pick(stage, track["slug"])
+    key, err = music_library.ensure_project_asset(stage, track)
+    if err or not key:
+        return None, str(err or "the track could not be copied")
+    music_gate.grant(stage, key, music_gate.pick_provenance(record))
+    return key, f"\"{track['title']}\" (CC0 library), the track the person named"
+
+
+def _swap_bed(stage, key, v, env, index):
+    """A new track replaces the film's bed in place (its window, level, fit
+    and every device bound to it), so two beds never play at once (p5744 v2a
+    stacked three tracks and spent eight calls removing them). True when it
+    landed."""
+    items = [m for m in stage.edl.get("music") or [] if isinstance(m, dict)]
+    target = next((m for m in items if not m.get("mute")), items[0])
+    if not _run_verb(stage, "swap_music", {"id": target["id"],
+                                           "storage_key": key}, env, index):
+        return False
+    edl = copy.deepcopy(stage.edl)
+    for m in edl.get("music") or []:
+        if m.get("id") == target["id"]:
+            m["mute"] = None
+            for name in ("gain_db", "offset_s", "fade_in_s", "fade_out_s",
+                         "loop", "duck"):
+                if v.get(name) is not None:
+                    m[name] = v[name]
+        elif not m.get("mute") and not v.get("keep_others"):
+            # another bed playing at once over the same film is muted, kept
+            # for any device bound to it
+            m["mute"] = True
+    stage.replace(edl)
+    env.repair(f"music: {target['id']} now plays the new track in place of "
+               "the old bed ('add': true lays a second track instead)")
+    return True
+
+
 def op_music(stage, value, env, index):
     v = dict(value or {})
     key = v.get("key") or v.get("storage_key") or v.get("asset_key")
     rid = v.get("id")
-    if rid and not key:
+    if rid and not key and str(rid).startswith(CC0_PREFIX):
+        key, note = _cc0_key(stage, str(rid)[len(CC0_PREFIX):])
+        if not key:
+            env.skip(index, note, "find(kind='music') and use an id it "
+                                  "returned")
+            return False
+        env.repair(f"music: {note}")
+    elif rid and not key:
         key, note = _music_key(stage, rid)
         if not key:
             env.skip(index, note, "find(kind='music') and use an id it "
@@ -561,6 +731,9 @@ def op_music(stage, value, env, index):
             return False
         if note:
             env.repair(note)
+    if stage.edl.get("music") and not v.get("add"):
+        if _swap_bed(stage, key, v, env, index):
+            return True
     args = {"storage_key": key}
     for name in ("start", "end", "gain_db", "duck", "offset_s", "fade_in_s",
                  "fade_out_s", "loop", "purpose"):
@@ -766,12 +939,69 @@ def op_clips(stage, value, env, index):
         env.skip(index, first_line(result))
         return False
     env.finding(first_line(result, 600))
+    if v.get("compile", True) is not False:
+        _compile_clips(stage, clips, v, env, index)
     job_id = getattr(stage._base, "serial_job_id", None)
     if job_id:
         env.running = {"handle": f"job:{job_id}",
                        "what": f"{len(clips)} clip project(s), each with "
                                "its title and captions, rendered"}
     return True
+
+
+def _compile_clips(stage, clips, v, env, index):
+    """This film becomes what the request made: the clips in order, framed
+    like them, each opening on its title (p5760 v2a: ten clips rendered as
+    their own projects, and the film the customer exports was still the
+    untouched 37-min broadcast). ``"compile": false`` leaves it as it was."""
+    spans = sorted([[float(c["start"]), float(c["end"])] for c in clips])
+    why = _write_keep(stage, spans, f"the {len(clips)} clips, in order", env)
+    if why:
+        env.skip(index, f"clips: this film could not become the clips "
+                        f"({why})", "a keep op over the clip ranges")
+        return
+    ratio = str(v.get("frame") or "9:16")
+    if ratio != "source":
+        try:
+            import source_layout
+            from schemas import Frame
+            video = (stage.index or {}).get("video") or {}
+            frame, note = source_layout.frame_for(
+                (stage.index or {}).get("source_layout"),
+                stage.edl.get("keep") or [], ratio, video.get("width"),
+                video.get("height"))
+            edl = copy.deepcopy(stage.edl)
+            edl["frame"] = Frame.model_validate(frame).model_dump()
+            stage.replace(edl)
+            env.repair(f"clips: the film is framed {ratio} like the clips "
+                       f"({note})")
+        except Exception as exc:  # noqa: BLE001 - the frame op instead
+            env.repair(f"clips: frame by layout unavailable ({exc}); "
+                       f"{ratio} fitted")
+            _run_verb(stage, "set_frame", {"ratio": ratio,
+                                           "mode": "pad_blur"}, env, index)
+    tl = _clock(stage.edl)
+    placed = 0
+    for c in clips:
+        title = str(c.get("title") or "").strip()
+        if not title:
+            continue
+        best, at = 0.0, None
+        for (s0, e0), off in zip(tl.segs, tl.offsets):
+            ov = min(e0, c["end"]) - max(s0, c["start"])
+            if ov > best:
+                best, at = ov, off + max(0.0, c["start"] - s0)
+        if at is None:
+            continue
+        if _run_verb(stage, "add_text", {
+                "text": title[:90], "start": round(at, 2),
+                "end": round(at + 3.0, 2), "template": "title",
+                "entrance": "pop", "exit": "fade"}, env, index):
+            placed += 1
+    env.finding(f"clips: this film is now the {len(clips)} clips in order "
+                f"({float(program_duration(stage.edl) or 0):.1f} s), "
+                f"{placed} opening on their titles; each clip is also its "
+                "own project ('compile': false keeps this film as it was)")
 
 
 def op_tool(stage, op, env, index):
@@ -789,10 +1019,41 @@ def op_tool(stage, op, env, index):
     return _run_verb(stage, name, args, env, index)
 
 
+def _release_music_binds(stage, ops_with_index, env):
+    """A music item about to be removed takes its bound devices along: each
+    one bound to it (music_id) moves to a bed that stays, or goes with the
+    track. p5744 v2a could not remove a muted bed in four calls because a
+    "bed drop" device named it."""
+    gone = {str(op.get("id")) for _i, op in ops_with_index
+            if op.get("remove") == "music" and op.get("id") is not None}
+    if not gone:
+        return
+    edl = copy.deepcopy(stage.edl)
+    stays = [m.get("id") for m in edl.get("music") or []
+             if isinstance(m, dict) and str(m.get("id")) not in gone]
+    out, moved, dropped = [], 0, 0
+    for f in edl.get("fx") or []:
+        if isinstance(f, dict) and str(f.get("music_id")) in gone:
+            if stays:
+                f = dict(f, music_id=stays[0])
+                moved += 1
+            else:
+                dropped += 1
+                continue
+        out.append(f)
+    if moved or dropped:
+        edl["fx"] = out
+        stage.replace(edl)
+        env.repair(f"music devices bound to {', '.join(sorted(gone))}: "
+                   f"{moved} moved to {stays[0] if stays else '-'}, "
+                   f"{dropped} removed with the track")
+
+
 def op_layers(stage, ops_with_index, env):
     """Layer ops through edit_batch.apply_batch, in chunks (no 64-op or
     256 KB cap). A chunk that fails is retried op by op, so one bad op
     is set aside and the rest land."""
+    _release_music_binds(stage, ops_with_index, env)
     chunks, chunk, size = [], [], 0
     for index, op in ops_with_index:
         body = _layer_op(op)
@@ -885,6 +1146,13 @@ def apply(stage, ops, env):
     """Run every op on the stage; returns how many landed."""
     landed = 0
     layer_batch = []
+    fixed = []
+    for i, op in enumerate(ops):
+        n = normalize(op, stage.edl)
+        if n is not op:
+            env.repair(f"op {i} read as {json.dumps(n)[:120]}")
+        fixed.append(n)
+    ops = fixed
     for index, op in order(ops):
         name = op_name(op)
         if name == "layer":
