@@ -300,3 +300,76 @@ def test_frame_source_gives_the_uploads_frame_back():
     commit.edit(ctx, [{"frame": {"ratio": "source"}}], "src")
     fr = ctx.latest_edl()["json"].get("frame") or {}
     assert fr.get("ratio") in (None, "source")
+
+
+# -- round five (v2d-1119) ---------------------------------------------------------
+
+def test_a_measured_duck_dips_smoothly_over_the_words():
+    vf = renderer.measured_duck([(1.3, 2.0), (5.0, 6.0)], -27.0)
+    assert vf.startswith("volume=volume='pow(10,(-27.00*(max(")
+    assert vf.endswith(":eval=frame")
+
+
+def test_the_bed_is_seated_under_the_uploads_words(monkeypatch, tmp_path):
+    """p5744 v2d: the bed sat 25-27 dB over the upload's one "Yeah"."""
+    import noise_clean
+    import storage
+    ctx, _fake = _ctx(11.26, [[0.0, 11.26]])
+    ctx.index["words"] = [{"w": "Yeah", "t0": 1.3, "t1": 2.0}]
+    ctx.proxy_path = lambda: str(tmp_path / "proxy.mp4")
+    ctx.workdir = str(tmp_path)
+    monkeypatch.setattr(storage, "download_to",
+                        lambda key, local: open(local, "w").close())
+    monkeypatch.setattr(noise_clean, "level_db",
+                        lambda path, a=None, b=None:
+                        -40.0 if "proxy" in path else -14.0)
+    from harness2 import stage as stage_mod
+    st = stage_mod.Stage(ctx, {"keep": [[0.0, 11.26]], "music": [
+        {"id": "mus1", "storage_key": "music/2/library-bubbles.mp3",
+         "start": 0.0, "end": 11.26, "gain_db": -16.0, "duck": True,
+         "duck_mode": "smooth"}]}, 1)
+    from harness2 import envelope
+    env = envelope.Envelope(tool="edit")
+    ops_mod._seat_bed(st, env)
+    m = st.edl["music"][0]
+    # bed -30 against words at -40: dip 25 so the words sit 15 dB over it
+    assert m["duck_db"] == pytest.approx(-25.0) and m["duck_mode"] is None
+    assert any("seated under the upload's own words" in f
+               for f in env.findings)
+
+
+def test_a_grade_look_is_colour_only(monkeypatch):
+    ctx, _fake = _ctx(20.0, [[0.0, 20.0]])
+    seen = []
+    real = agent_tools.execute
+
+    def execute(c, name, args):
+        seen.append(name)
+        return real(c, name, args)
+    monkeypatch.setattr(agent_tools, "execute", execute)
+    commit.edit(ctx, [{"grade": {"look": "cinematic_doc"}}], "chill")
+    assert "apply_look" not in seen and "set_color_grade" in seen
+    edl = ctx.latest_edl()["json"]
+    assert not edl.get("captions")
+    assert (edl.get("effects") or {}).get("grade") == "cinematic"
+
+
+def test_slow_motion_to_the_end_eases_in_and_holds():
+    import ramps
+    shape = ramps.curve_fn([(0.0, 1.0), (0.15, 0.5), (1.0, 0.5)])
+    assert shape(1.0) == pytest.approx(0.5) and shape(0.0) == pytest.approx(1.0)
+    import inspect
+    from tools_ext import montage_tools
+    assert "ease_out" in inspect.signature(montage_tools.set_speed_ramp).parameters
+
+
+def test_request_reading_has_the_sound_layers():
+    from score.asks import sound_layers
+    lines = sound_layers({"music": [{"id": "mus1", "storage_key":
+                                     "music/2/library-bubbles.mp3",
+                                     "gain_db": -6,
+                                     "provenance": "user_picked_library"}]},
+                         {"words": [{"w": "Yeah", "t0": 1.3, "t1": 2.0}]})
+    assert "room tone and background noise" in lines[0]
+    assert "the person picked this track" in lines[1]
+    assert "not the recording's background noise" in lines[1]

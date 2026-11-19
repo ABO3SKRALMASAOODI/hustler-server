@@ -573,6 +573,26 @@ def grade_custom_chain(gc):
     return ",".join(chain)
 
 
+def measured_duck(spans, depth_db, origin=0.0, ramp=0.15):
+    """The volume filter that dips a music item by ``depth_db`` over each
+    spoken span (program seconds), easing in and out over ``ramp`` seconds.
+    It runs after adelay, where t is the program clock (``origin`` 0), like
+    the step duck's enable windows: a bed seated for the words it plays
+    under (MusicItem.duck_db)."""
+    terms = []
+    for a, b in spans[:60]:
+        a, b = float(a) - origin, float(b) - origin
+        terms.append(f"clip((t-({a - ramp:.3f}))/{ramp:.3f},0,1)*"
+                     f"clip(({b + ramp:.3f}-t)/{ramp:.3f},0,1)")
+    if not terms:
+        return "anull"
+    env = terms[0]
+    for t in terms[1:]:
+        env = f"max({env},{t})"
+    return (f"volume=volume='pow(10,({float(depth_db):.2f}*({env}))/20)'"
+            ":eval=frame")
+
+
 def _enable_expr(spans):
     return "+".join(f"between(t,{s:.2f},{e:.2f})" for s, e in spans)
 
@@ -7006,7 +7026,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             if item.get("duck", True) and not smooth and speech:
                 win = [(max(s, m_start), min(e, m_end)) for s, e in speech
                        if min(e, m_end) - max(s, m_start) > 0.05]
-                if win:
+                if win and item.get("duck_db") is not None:
+                    duck = "," + measured_duck(win, float(item["duck_db"]))
+                elif win:
                     duck = f",volume={DUCK_DB}dB:enable='{_enable_expr(win)}'"
             # Fades are the music item's OWN, and must land before adelay
             # while t=0 still means "the music's first sample". Clamped to

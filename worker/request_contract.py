@@ -325,6 +325,15 @@ def ensure(ctx):
                 "customer_sources": sources,
                 "source": (getattr(ctx, "index", None) or {}).get("video"),
                 "current_edl": ctx.latest_edl()["json"]}
+    try:
+        # the upload's own sound apart from the tracks laid over it, so "the
+        # background noise" and "the music the person picked" are two
+        # measured layers, not one word (p5744 R9)
+        from score.asks import sound_layers
+        evidence["sound_layers"] = sound_layers(evidence["current_edl"],
+                                                getattr(ctx, "index", None))
+    except Exception:  # noqa: BLE001 - the EDL alone still reads
+        pass
     if getattr(ctx, "request_edit_origin", None):
         evidence["current_edit_origin"] = ctx.request_edit_origin
     if getattr(ctx, "operator_instruction", None):

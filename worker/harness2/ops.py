@@ -10,6 +10,8 @@ cannot land is set aside under not_applied in its engine's own words, with
 what works instead, and the later ops still run.
 """
 import copy
+import math
+import os
 import json
 
 import agent_tools
@@ -397,6 +399,8 @@ def op_speed(stage, value, env, index):
                 env.repair(f"speed end {b:g} s is past the film's end "
                            f"({program:.2f} s): held to the end")
                 b = program
+            if to_end or (program and b >= program - 0.05):
+                row = dict(row, _to_end=True)
             spans = film_to_source_spans(clock_edl, a, b)
             if not spans:
                 env.skip(index, f"film {a:g}-{b:g} s holds no footage of "
@@ -443,6 +447,9 @@ def _ramp_on_source(stage, row, factor, src_a, src_b, env, index):
             "allow_speech": row.get("allow_speech", True)}
     if row.get("curve"):
         args["curve"] = row["curve"]
+    if row.get("_to_end"):
+        # slow motion "after X s" eases in and holds to the film's end
+        args["ease_out"] = False
     before = edl_signature(stage.edl)
     try:
         result = agent_tools.execute(stage, "set_speed_ramp", args)
@@ -680,8 +687,7 @@ def op_grade(stage, value, env, index):
                        "(stops; black stays black)")
     ok = False
     if look:
-        ok = _run_verb(stage, "apply_look", {"name": str(look)}, env,
-                       index) or ok
+        ok = _look_colour(stage, str(look), env, index) or ok
     if v.get("preset"):
         ok = _run_verb(stage, "set_color_grade", {"preset": v["preset"]},
                        env, index) or ok
@@ -690,6 +696,39 @@ def op_grade(stage, value, env, index):
     if not (look or v.get("preset") or custom):
         ok = _run_verb(stage, "set_color_grade", {"preset": "none"}, env,
                        index)
+    return ok
+
+
+def _look_colour(stage, name, env, index):
+    """A named look in the grade op is its colour: its preset, its continuous
+    controls and its texture (grain, vignette, halation), and nothing else.
+    apply_look lays the whole system (captions, transitions, fades, music):
+    p5744 v2d's "Chill" became cinematic_doc and put a "Yeah" caption on a
+    film whose person had asked for none. The whole system is the finish
+    op's ({'finish': {'look': name}})."""
+    spec = (getattr(agent_tools, "LOOKS", {}) or {}).get(name)
+    if not isinstance(spec, dict):
+        return _run_verb(stage, "apply_look", {"name": name}, env, index)
+    ok = _run_verb(stage, "set_color_grade",
+                   {"preset": spec.get("grade") or "none"}, env, index)
+    gc = {k: v for k, v in (spec.get("grade_custom") or {}).items()
+          if v is not None}
+    if gc:
+        ok = _run_verb(stage, "set_grade_custom", gc, env, index) or ok
+    sty = spec.get("stylize") or ()
+    if sty and not isinstance(sty[0], (tuple, list)):
+        sty = (sty,)
+    have = {str(x.get("kind")) for x in (stage.edl.get("effects") or {})
+            .get("stylize") or [] if isinstance(x, dict)}
+    for kind, amount in sty:
+        if kind in have:
+            continue
+        ok = _run_verb(stage, "add_stylize", {"kind": kind,
+                                              "intensity": amount},
+                       env, index) or ok
+    env.repair(f"grade look {name}: its colour and texture only (captions, "
+               "transitions and music stay as they are; {'finish': "
+               f"{{'look': '{name}'}}}} lays the whole system)")
     return ok
 
 
@@ -748,6 +787,98 @@ def _swap_bed(stage, key, v, env, index):
 
 
 def op_music(stage, value, env, index):
+    landed = _place_music(stage, value, env, index)
+    if landed:
+        try:
+            _seat_bed(stage, env)
+        except Exception as exc:  # noqa: BLE001 - the bed plays as placed
+            env.finding(f"music: the bed's seat under the words was not "
+                        f"measured ({type(exc).__name__}: {str(exc)[:120]})")
+    return landed
+
+
+SPEECH_OVER_BED_DB = 15.0   # the references' voice over bed: 13-20 dB
+
+
+def _seat_bed(stage, env):
+    """Seat each playing bed under the upload's own spoken words, measured:
+    the words' level on the upload and the track's level where it plays
+    give how far the bed must dip under them for the words to sit
+    SPEECH_OVER_BED_DB over it (MusicItem.duck_db, a smooth dip over the
+    spoken spans). p5744 v2d: the bed sat 25-27 dB over the upload's own
+    sound and buried its one "Yeah"; the sidechain duck listens for speech
+    over -30 dBFS and never heard it."""
+    import noise_clean
+    import storage
+    words = [w for w in (stage.index or {}).get("words") or []
+             if isinstance(w, dict) and w.get("t0") is not None]
+    if not words:
+        return
+    tl = _clock(stage.edl)
+    heard = [w for w in words
+             if tl.span_to_out(float(w["t0"]), float(w["t1"]))]
+    if not heard:
+        return
+    proxy = stage.proxy_path()
+    if not proxy:
+        return
+    cache = getattr(stage._base, "_bed_levels", None)
+    if cache is None:
+        cache = {}
+        try:
+            stage._base._bed_levels = cache
+        except Exception:  # noqa: BLE001
+            pass
+    if "speech" not in cache:
+        energy, total = 0.0, 0.0
+        for w in heard[:40]:
+            a, b = float(w["t0"]), float(w["t1"])
+            if b - a < 0.05:
+                continue
+            db = noise_clean.level_db(proxy, a, b)
+            if db is None:
+                continue
+            energy += (b - a) * 10 ** (db / 10.0)
+            total += b - a
+        cache["speech"] = (10.0 * math.log10(energy / total)
+                           if total and energy > 0 else None)
+    speech = cache["speech"]
+    if speech is None:
+        return
+    edl = copy.deepcopy(stage.edl)
+    notes = []
+    for m in edl.get("music") or []:
+        if not isinstance(m, dict) or m.get("mute") or not m.get("storage_key"):
+            continue
+        key = str(m["storage_key"])
+        off = float(m.get("offset_s") or 0.0)
+        ck = f"track:{key}:{off:.1f}"
+        if ck not in cache:
+            local = os.path.join(stage.workdir,
+                                 "bed_" + key.rsplit("/", 1)[-1])
+            if not os.path.exists(local):
+                storage.download_to(key, local)
+            cache[ck] = noise_clean.level_db(local, off, off + 20.0)
+        track = cache[ck]
+        if track is None:
+            continue
+        bed = track + float(m.get("gain_db") if m.get("gain_db") is not None
+                            else -18.0)
+        depth = max(6.0, min(40.0, bed - speech + SPEECH_OVER_BED_DB))
+        m["duck"] = True
+        m["duck_mode"] = None
+        m["duck_db"] = round(-depth, 1)
+        notes.append(f"{m.get('id')} plays at about {bed:.0f} dB against the "
+                     f"upload's words at {speech:.0f} dB; under the words it "
+                     f"dips {depth:.0f} dB so they sit "
+                     f"{SPEECH_OVER_BED_DB:.0f} dB over it")
+    if notes:
+        stage.replace(edl)
+        env.finding("music seated under the upload's own words (measured): "
+                    + "; ".join(notes))
+
+
+def _place_music(stage, value, env, index):
     v = dict(value or {})
     key = v.get("key") or v.get("storage_key") or v.get("asset_key")
     rid = v.get("id")

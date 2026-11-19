@@ -792,6 +792,12 @@ class MusicItem(BaseModel):
     # -12dB step). Opt-in per item by add_music so every music item written
     # before this field renders exactly as it always did.
     duck_mode: Optional[Literal["smooth"]] = None
+    # How far the bed dips under the upload's spoken words, measured for this
+    # bed and this voice (harness v2 _seat_bed): a quiet word under a loud
+    # bed needs more than the fixed -12 dB, and the sidechain's -30 dBFS
+    # threshold never hears it (p5744: "Yeah" buried 25 dB under the bed).
+    # None keeps the item as it always rendered.
+    duck_db: Optional[float] = Field(default=None, ge=-48.0, le=0.0)
     # Editorial intent for later turns and the independent final mix review.
     # None preserves old EDL signatures and render cache identity.
     purpose: Optional[str] = None
