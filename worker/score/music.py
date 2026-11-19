@@ -352,7 +352,132 @@ def _span_beats(L, beat, cuts, t0, from_end, prefer=None):
     return (best[1], best[2]) if best else None
 
 
-def arrange(song, marks, profile=None):
+ARC_RISE_DB = 9.0                  # the payoff's bars over the film's opening bars, on the song's own level, that an arc run aims for
+ARC_PEAK_DB = 1.5                  # a bar this near the payoff's level is the song's peak material
+
+
+def arc_measures(song, seq, slots, kd, turn=None):
+    """How a played bar sequence carries the story's arc, measured on the song's own bar levels (dB): the opening
+    (its first bars), the payoff (the drop and the bar after it; the last bars when the film has no drop), the rise
+    between them, bars played twice, bars of peak material spent before the turn, and the true joins (a bar that is
+    not the one the song plays next)."""
+    k = np.array([float(b["k"]) for b in song["bars"]], np.float64)
+    n = len(seq)
+    if not n:
+        return {}
+    first = [i for i, s in enumerate(slots) if s["part"] != "pickup"][:4] or [0]
+    open_db = float(np.mean([k[seq[i]] for i in first]))
+    if kd is not None:
+        pay = [seq[i] for i in range(kd, min(n, kd + 2))]
+        before = [i for i, s in enumerate(slots) if i < kd and s["role"] not in ("build",)]
+    else:
+        pay = [seq[i] for i in range(max(0, n - 4), n)]
+        before = list(range(0, n // 2))
+    if turn is not None and kd is None:
+        before = [i for i in before if slots[i]["t0"] < float(turn)]
+    pay_db = float(np.mean([k[b] for b in pay]))
+    peak_before = sum(1 for i in before if k[seq[i]] >= pay_db - ARC_PEAK_DB)
+    repeats = len(seq) - len(set(seq))
+    joins = sum(1 for i in range(1, n) if seq[i] != seq[i - 1] + 1)
+    return {"open_db": round(open_db, 1), "payoff_db": round(pay_db, 1), "rise_db": round(pay_db - open_db, 1),
+            "peak_before_turn": int(peak_before), "repeats": int(repeats), "joins": int(joins)}
+
+
+def _arc_run(song, F, slots, kd, n_build, J, P, has_free):
+    """The story path's arrangement (arrange(arc=True)): the song played by its own measured arc, as one run where it
+    can be and never a bar twice. Its quieter part sits under the setup, the bars the song itself plays before its
+    peak sit under the build from the turn, and the peak lands on the payoff and plays on to the last hit. The setup
+    run may be taken from earlier in the song than the build (one join, forward or around the build) when the song's
+    own lead-in is too long or too loud for the film. Returns (bar per slot, cost, measures), or None when the song
+    is too short for any run (the caller arranges it the general way)."""
+    bars = song["bars"]
+    nb = len(bars)
+    N = len(slots)
+    k = np.array([float(b["k"]) for b in bars], np.float64)
+    en, voc, entry, intro, hitn = F["en"], F["voc"], F["entry"], F["intro"], F["hit"]
+    k_top = float(np.percentile(k, 95))
+    sp = np.array([s["sp"] for s in slots], np.float64)
+    vcost = 6.0 * voc if has_free else np.zeros(nb)
+    floor = (float(np.percentile(k, 90)) - float(P["build_floor_db"])) if P.get("build_floor_db") is not None else None
+    full2 = 0.5 * en + 0.5 * np.append(en[1:], en[-1])
+    has_entry = bool(entry.any())
+
+    def lay_cost(idx, seq_part):
+        """voice under voice and near-silent bars under the setup, for slots idx played as seq_part"""
+        c = 0.0
+        for i, b in zip(idx, seq_part):
+            c += vcost[b] * sp[i]
+            if k[b] < k_top - 26.0:
+                c += 1.0                                    # a hole of the song itself under the words, not a quiet part
+        return c
+
+    best = None
+    if kd is None:
+        for a in range(0, nb - N + 1):
+            seq = list(range(a, a + N))
+            m = len(seq)
+            head = float(np.mean(k[seq[:min(4, m)]]))
+            tail = float(np.mean(k[seq[max(0, m - 4):]]))
+            c = 0.6 * max(0.0, 6.0 - (tail - head))
+            c += 1.0 * sum(1 for b in seq[:m // 2] if k[b] >= tail - ARC_PEAK_DB)
+            c += 0.75 * sum(1 for b in seq[m // 2:] if en[b] < 0.3)
+            c += lay_cost(range(N), seq)
+            if best is None or c < best[1]:
+                best = (seq, c)
+    else:
+        ks = kd - n_build                                   # setup slots 0..ks-1, build ks..kd-1, payoff and after kd..N-1
+        n_post = N - kd
+        for d in range(n_build, nb - n_post + 1):
+            post = list(range(d, d + n_post))
+            build = list(range(d - n_build, d))
+            pay_db = float(np.mean(k[post[:2]]))
+            c0 = 0.0
+            # the peak lands on the payoff: an entrance that stays full, at the song's own top
+            c0 += 4.0 * max(0.95 - full2[d], 0.0) - 0.5 * hitn[d]
+            c0 += (0.0 if entry[d] else 2.0) if has_entry else 1.5 * max(0.8 - en[d], 0.0)
+            c0 += 0.5 * max(0.0, k_top - 1.0 - pay_db)
+            c0 += 0.75 * sum(1 for b in post if en[b] < 0.3)
+            for q, b in enumerate(build):                   # the build climbs under the payoff
+                c0 += 0.3 * max(0.0, k[b] - (pay_db - 2.0))
+                if floor is not None and k[b] < floor:
+                    c0 += 3.0
+                if q and k[b] < k[build[q - 1]] - 3.0:
+                    c0 += 0.5
+            c0 += lay_cost(range(ks, N), build + post)
+            if ks == 0:
+                seq = build + post
+                m = arc_measures(song, seq, slots, kd)
+                c = c0 + 0.6 * max(0.0, ARC_RISE_DB - m["rise_db"])
+                if best is None or c < best[1]:
+                    best = (seq, c)
+                continue
+            taken = set(build + post)
+            for a in range(0, nb - ks + 1):
+                setup = list(range(a, a + ks))
+                if taken.intersection(setup):
+                    continue
+                c = c0
+                nxt = build[0] if build else d
+                if setup[-1] + 1 != nxt:                    # one join into the build (or straight into the drop)
+                    c += float(J[setup[-1], nxt]) if build else min(float(J[setup[-1], nxt]), 0.45)
+                    if setup[0] > nxt:
+                        c += 0.5                            # the setup taken from after the payoff's bars: a jump back
+                head = float(np.mean(k[setup[:min(4, ks)]]))
+                c += 0.6 * max(0.0, ARC_RISE_DB - (pay_db - head))
+                c += 1.0 * sum(1 for b in setup if k[b] >= pay_db - ARC_PEAK_DB)
+                half = ks // 2
+                if half >= 2:                               # the setup itself leans forward, never louder at its start
+                    c += 0.3 * max(0.0, float(np.mean(k[setup[:half]])) - float(np.mean(k[setup[half:]])) - 1.0)
+                c += lay_cost(range(ks), setup)
+                if best is None or c < best[1]:
+                    best = (setup + build + post, c)
+    if best is None:
+        return None
+    seq, c = best
+    return seq, float(c), arc_measures(song, seq, slots, kd)
+
+
+def arrange(song, marks, profile=None, arc=None):
     """Which bars of the song play where in the film, chosen by energy and novelty.
 
     The film opens on a strong bar (a drop or a section's first bar, never the song's intro) and keeps a full part of
@@ -362,7 +487,14 @@ def arrange(song, marks, profile=None):
     landing. Bars a voice sings in are kept from under the film's voice while the song has others. A jump goes to a
     bar that sounds like the one that would have come next, at a phrase end, on a picture cut when one is there; the
     drop covers its own join. The tempo bends at most STRETCH_MAX, chosen per stretch so the song's beats fall on the
-    picture's cuts; where whole bars do not fit, the film opens on a pickup and a short bar closes into the hit."""
+    picture's cuts; where whole bars do not fit, the film opens on a pickup and a short bar closes into the hit.
+
+    arc=True (opt-in; or marks["arc"]; the workflows' story path, music_film): the song is played by its own measured
+    arc instead (_arc_run): a mostly contiguous run whose quieter part sits under the setup, whose own build sits under
+    the turn and whose peak lands on the payoff, never a bar twice. The default (the customer Director's bed) is
+    unchanged."""
+    if arc is None:
+        arc = bool(marks.get("arc"))
     bars = song.get("bars") or []
     if len(bars) < 4 or not song.get("bar_s"):
         return {"ok": False, "why": "no bar grid in this song"}
@@ -594,15 +726,19 @@ def arrange(song, marks, profile=None):
             fin[j] -= 0.3
         if run[N - 1, j] < MIN_SEG_BARS and N > 1:
             fin[j] += 1.0
-    j = int(np.argmin(fin))
-    if fin[j] >= INF / 2:
-        return {"ok": False, "why": "no arrangement lands the drop"}
-    total = float(fin[j])
-    seq = [j]
-    for kk in range(N - 1, 0, -1):
-        j = int(back[kk, j])
-        seq.append(j)
-    seq.reverse()
+    got = _arc_run(song, F, slots, kd, n_build, J, P, has_free) if arc else None
+    if got is not None:
+        seq, total, _m = got                                       # the story path: the song's own arc, one run, never a bar twice
+    else:
+        j = int(np.argmin(fin))
+        if fin[j] >= INF / 2:
+            return {"ok": False, "why": "no arrangement lands the drop"}
+        total = float(fin[j])
+        seq = [j]
+        for kk in range(N - 1, 0, -1):
+            j = int(back[kk, j])
+            seq.append(j)
+        seq.reverse()
     segs = []
     for kk, bi in enumerate(seq):
         s, b = slots[kk], bars[bi]
@@ -637,6 +773,10 @@ def arrange(song, marks, profile=None):
     room = max(0.0, dur - P["end_gap_s"] - t_end - 0.02)           # the ring is cut 20 ms after its length: both fit before the end card
     tail_s = max(min(P["end_tail_beats_max"] * bs_last, room), min(bs_last, room))
     mark = turn if drop_on == "turn" else (payoff if payoff is not None else turn)
+    on_arc = got is not None
+
+    def _setup(k):                                                 # on the story's arc a quiet setup is the arc, not a flat stretch
+        return (k < kd - n_build) if kd is not None else (k < N // 2)
     tempos = [beat / sp["beat_s"] for sp in spans]
     return {"ok": True, "segments": segs, "tempo": round(float(np.median(tempos)), 5), "bar_s": round(4.0 * float(np.median([sp["beat_s"] for sp in spans])), 5),
             "beat_s": round(float(np.median([sp["beat_s"] for sp in spans])), 5),
@@ -649,8 +789,9 @@ def arrange(song, marks, profile=None):
             "slots": N, "jumps": len(segs) - 1, "grid": grid,
             "cuts": {"n": len([c for c in cuts if c < t_end]), "on_beat": len(on), "on_down": len(on_down)},
             "bars_played": [{"bar": int(b), "role": slots[k]["role"], "e": float(en[b]), "t": round(slots[k]["t0"], 2)} for k, b in enumerate(seq)],
-            "intro_bars": int(sum(1 for k, b in enumerate(seq) if intro[b] and slots[k]["role"] != "build")),
-            "low_bars": int(sum(1 for k, b in enumerate(seq) if en[b] < 0.3 and slots[k]["role"] != "build" and not slots[k]["quiet"])),
+            "intro_bars": int(sum(1 for k, b in enumerate(seq) if intro[b] and slots[k]["role"] != "build" and not (on_arc and _setup(k)))),
+            "low_bars": int(sum(1 for k, b in enumerate(seq) if en[b] < 0.3 and slots[k]["role"] != "build" and not slots[k]["quiet"] and not (on_arc and _setup(k)))),
+            "arc": dict(arc_measures(song, seq, slots, kd, turn), on=on_arc),
             "voiced_under_voice": round(float(np.mean([voc[b] >= VOICED and slots[k]["sp"] > 0.3 for k, b in enumerate(seq)])), 3),
             "cost": round(total, 3)}
 
@@ -1217,7 +1358,7 @@ def voice_spans_of(l1, work):
 
 
 def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind="stories", index=None, prog_end_f=None, payoff_s=None, supplied=True,
-        sung=None, open_s=None, turn_drop=False):
+        sung=None, open_s=None, turn_drop=False, arc=False):
     """A compiled film's sound with a song under it: the voice and the designed sounds as the engine mixes them
     (scene.audio), the song arranged and levelled here, one master at -14 LUFS. With `film` and `out` the picture is
     copied and the new sound laid on it. The film without the song is the engine's own render: nothing here touches
@@ -1233,6 +1374,8 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
         marks["open_s"] = float(open_s)               # the chooser's entry point into the song (a drop, a re-entry, its top)
     if turn_drop:
         marks["turn_drop"] = True                     # the caller named the story's turn: a payoff with no room drops there (arrange)
+    if arc:
+        marks["arc"] = True                           # opt-in (the workflows' story path): the song played by its own arc (arrange)
     voice, _fx0, _ = AU.split_audio(_Plan(dict(l1, sound=[]), src))
     if not marks["words"]:                            # no word times came with the film: its voice says where it speaks
         marks["words"] = [(a, b) for a, b in voice_spans(voice) if a < marks["dur_s"]]

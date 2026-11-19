@@ -230,7 +230,10 @@ def _set_row(raw, root):
         lufs = _num((raw.get("ebur128") or g.get("ebur128") or {}).get("I"))
     z = raw.get("z") if isinstance(raw.get("z"), list) and len(raw.get("z")) >= 8 else None
     kinds = [k for k in raw.get("kinds") or [] if k in KINDS] or list(KINDS)
-    return {"cid": cid, "title": str(raw.get("title") or cid), "author": str(raw.get("author") or ""), "set": True, "path": path,
+    # a described palette row (owner, 20 Nov: "the music should really give you some sort of goosebumps"): what a model
+    # wrote of the track from its page and its measures, and the measured arc, for the model that chooses by the story
+    said = {k: str(raw[k])[:600] for k in ("about", "arc", "palette", "use_for") if isinstance(raw.get(k), str) and raw[k].strip()}
+    return {**said, "cid": cid, "title": str(raw.get("title") or cid), "author": str(raw.get("author") or ""), "set": True, "path": path,
             "license": raw.get("license"), "credit": raw.get("credit"), "license_url": raw.get("license_url"),
             "page_url": raw.get("page_url"), "storage_key": None, "source_url": None, "source_sha256": raw.get("sha256"),
             "duration_s": dur, "lufs": lufs, "bpm": _num(pick("tempo_bpm")) or _num(raw.get("bpm")), "mode": raw.get("mode"),

@@ -6,6 +6,27 @@ import sys
 import numpy as np
 
 
+def chapter_lines(words, a, b, lead=0.0):
+    """The chapter's narration as lines on its own clock [(second, text)], for the model that chooses its music by the
+    story: a line ends at a sentence's end or after 16 words."""
+    out, cur, t0 = [], [], None
+    for w in words:
+        t = float(w['start']) + lead
+        if not a <= t < b:
+            continue
+        text = str(w.get('w') or w.get('word') or w.get('text') or '').strip()
+        if not text:
+            continue
+        t0 = t - a if t0 is None else t0
+        cur.append(text)
+        if text[-1:] in '.?!' or len(cur) >= 16:
+            out.append((round(t0, 2), ' '.join(cur)))
+            cur, t0 = [], None
+    if cur:
+        out.append((round(t0, 2), ' '.join(cur)))
+    return out
+
+
 def score(l1, pack, film, out, cache):
     import music_film as MF
     from score import music as MU
@@ -25,11 +46,11 @@ def score(l1, pack, film, out, cache):
         marks=dict(dur_s=d,words=[(max(0,w['start']+lead-a),min(d,w['end']+lead-a)) for w in wd['words'] if a<=w['start']+lead<b],
                    cuts=[it['f'][0]/30-a for it in l1['items'] if it['k']=='shot' and a<it['f'][0]/30<b],
                    landings=[],accents=[],turn_s=ch['turn_s']-a,payoff_s=ch['payoff_s']-a,end_hit_s=d-0.5,quiet=[])
-        fact=MF.facts('longform',marks,brief=ch['title']+': '+ch['turn'],mood=ch.get('music_mood',''))
+        fact=MF.facts('longform',marks,brief=ch['title']+': '+ch['turn'],mood=ch.get('music_mood',''),lines=chapter_lines(wd['words'],a,b,lead))
         choice,path,tried=MF.choose(fact,marks,cache,used=used,call=call,profile=prof)
         if not choice: raise RuntimeError('MUSIC2 found no track for '+ch['id'])
         song=MU.analyse(path,sung=choice.get('sung'))
-        plan=MU.arrange(song,marks,profile=prof)
+        plan=MU.arrange(song,MF.arranged(marks,choice),profile=prof)
         if not plan.get('ok'): raise RuntimeError('MUSIC2 arrangement failed for '+ch['id'])
         ia,ib=round(a*MU.SR),round(b*MU.SR)
         bed,rep=MU.track(path,song,plan,marks,voice=voice[ia:ib],profile=prof)
