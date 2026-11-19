@@ -164,3 +164,17 @@ def test_overlays_are_drawn_once(tmp_path):
     p = FIN.overlay(str(tmp_path), "gate", 108, 192)
     m = os.path.getmtime(p)
     assert FIN.overlay(str(tmp_path), "gate", 108, 192) == p and os.path.getmtime(p) == m
+
+
+def test_the_measure_reads_flips_whites_and_cuts_from_pixels():
+    from scene.palette import measure as M
+    rng = np.random.RandomState(3)
+    a = (rng.rand(128, 72, 3) * 120 + 40).astype(np.uint8)
+    b = (rng.rand(128, 72, 3) * 120 + 60).astype(np.uint8)
+    seq = [a] * 20 + [255 - a] + [a] * 9 + [np.full_like(a, 250)] + [b] * 29 + [np.zeros_like(a)] + [b] * 30
+    s = M.signal(np.stack(seq), 30.0)
+    assert s["flips_f"] == [20] and s["white_f"] == [30] and s["black_f"] == [60]
+    assert s["cuts_10s"] > 0 and s["contour_3s"][2] >= s["contour_3s"][0]
+    assert M.edit_distance(["neg", "white"], ["neg", "tint", "white"]) == 1
+    side = M.log_side([dict(done=True, landed="neg", f=[3, 4]), dict(done=True, landed="white", f=[0, 1], fallback=True), dict(done=False)])
+    assert side["sequence"] == ["white", "neg"] and side["fell_back"] == 1 and side["first_device_f"] == 0

@@ -1760,7 +1760,7 @@ def with_director(ctx, script, sc):
     """The scene a marketing proof reel draws: its own hero devices (proof.lay_devices, laid in score) with the Director's
     devices for every other moment around them. Stories and podcast shorts carry their Director's asks from score; any
     other film is drawn as scored. Returns the path of the scene."""
-    if ctx.workflow != "wf2" or ctx.args.get("director", True) is False:
+    if getattr(ctx, "workflow", None) != "wf2" or (getattr(ctx, "args", None) or {}).get("director", True) is False:
         return sc["l1"]
     out = os.path.join(ctx.supply, "l1_director.json")
     try:
@@ -2407,6 +2407,7 @@ def render(ctx, script, sc):
             except ValueError:
                 j = {}
         os.replace(out + ".part.mp4", out)
+        chain.measure_devices(ctx, out, scene)          # what the film did, by signal, beside the bar (a record only)
         json.dump(dict(j, mix=mix), open(out + ".log.json", "w"))
     j = json.load(open(out + ".log.json")) if os.path.exists(out + ".log.json") else {}
     return dict(engine="scene", film=out, engine_check=dict(frames=j.get("frames"), seconds=j.get("seconds"), audio=j.get("mix"),

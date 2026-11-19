@@ -63,10 +63,23 @@ def _alien_entries():
               "lamp": ("spotlight", "white"), "answer": ("diecut", "white"), "arc": ("arc_stakes", "finish")}
     layer = {"rhyme": "rhythm", "answer": "rhythm", "diecut": "alien", "lamp": "alien", "arc": "look"}
     out = {}
+
+    def wrap(name, fn):
+        def plan(l1, work, ask, sense):
+            # a lamp throws the speaker's shadow, and any device asked to stand behind him needs his matte: made here
+            got = {}
+            if (name == "lamp" or ask.get("behind")) and "matte" not in (l1.get("assets") or {}):
+                got = sense.matte()
+                if got:
+                    l1 = dict(l1, assets=dict(l1.get("assets") or {}, **got))
+            patch = fn(l1, work, ask)
+            if got and isinstance(patch, dict) and not patch.get("skip"):
+                patch = dict(patch, assets=dict(patch.get("assets") or {}, **got))
+            return patch
+        return plan
     for name, d in alien.DEVICES.items():
         out[name] = {"card": d["card"], "layer": layer.get(name, "alien"), "needs": tuple(d.get("needs") or ()),
-                     "plan": (lambda fn: (lambda l1, work, ask, sense: fn(l1, work, ask)))(d["plan"]),
-                     "fallback": chains.get(name, ("white",)), "family": "alien"}
+                     "plan": wrap(name, d["plan"]), "fallback": chains.get(name, ("white",)), "family": "alien"}
 
     def arc_stakes(l1, work, ask, sense):
         """arc on the stakes only: the light and the frame follow the story's height, the finish keeps the film's

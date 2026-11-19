@@ -463,6 +463,20 @@ def lay_devices(ctx, l1_path):
 alien_bank = lay_devices          # the older name: every caller now lays the whole palette
 
 
+def measure_devices(ctx, film, scene_path):
+    """What the drawn film did, by signal, beside the bar (worker/scene/palette/measure.py): cuts, flips, white and
+    black frames, the 3 s contour, layers, the device sequence's distance to the recent films. Written to
+    ``devices_measure.json`` (film.json carries it). A record only: never a veto, never a stop."""
+    try:
+        import devices_ledger
+        wk = brand.worker_dir()
+        sh(ctx, ["zsh", "-c", f"cd '{wk}' && PYTHONPATH=.. FFMPEG_BIN='{brand.FF}' '{PY}' -m scene.palette.measure --film '{film}' "
+                              f"--l1 '{scene_path}' --log '{os.path.join(ctx.supply, 'devices_log.json')}' "
+                              f"--ledger '{devices_ledger.path()}' --out '{os.path.join(ctx.supply, 'devices_measure.json')}'"], timeout=900)
+    except Exception as e:  # noqa: BLE001 - a measure is never the reason a film is not delivered
+        getattr(ctx, "log", print)(f"devices measure not written: {str(e)[:200]}")
+
+
 def render(ctx, script, sc):
     """The engine draws the L1 film. Always through heavy.sh."""
     out = os.path.join(ctx.supply, "film_engine.mp4")
@@ -470,12 +484,15 @@ def render(ctx, script, sc):
     if not os.path.exists(out):
         if kind == "scene":
             wk = brand.worker_dir()
-            sh(ctx, ["zsh", "-c", f"cd {wk} && PYTHONPATH=.. {PY} -m scene.run --local --l1 {lay_devices(ctx, sc['l1'])} --work {ctx.supply} --out {out}.part.mp4"],
+            scene = lay_devices(ctx, sc['l1'])
+            sh(ctx, ["zsh", "-c", f"cd {wk} && PYTHONPATH=.. {PY} -m scene.run --local --l1 {scene} --work {ctx.supply} --out {out}.part.mp4"],
                label=f"wf-render-{ctx.run_id}", heavy=True, timeout=7200)
+            os.replace(out + ".part.mp4", out)
+            measure_devices(ctx, out, scene)
         else:
             sh(ctx, [PY, "engine.py", "render", "--l1", sc["l1"], "--work", ctx.supply, "--out", out + ".part.mp4"],
                label=f"wf-render-{ctx.run_id}", heavy=True, timeout=7200)
-        os.replace(out + ".part.mp4", out)
+            os.replace(out + ".part.mp4", out)
     chk = {}
     if kind == "slice":
         try:

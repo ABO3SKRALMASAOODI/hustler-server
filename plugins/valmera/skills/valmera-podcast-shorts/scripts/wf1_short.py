@@ -610,6 +610,17 @@ def _word_rows(pack, sc):
         return rows, t
 
 
+def _num(x):
+    """A measured number, whatever shape the record keeps it in (a value, or a list of values: their mean); None if none."""
+    try:
+        if isinstance(x, (list, tuple)):
+            xs = [float(v) for v in x if isinstance(v, (int, float))]
+            return round(sum(xs) / len(xs), 2) if xs else None
+        return round(float(x), 2) if x is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def director_pictures(pack, most=36):
     """The supply's pictures for the Director's contact sheet: [{"id", "path", "label", "kind", ...}] with what signal
     measured of each (motion, faces, luma), and {id: path}."""
@@ -621,8 +632,8 @@ def director_pictures(pack, most=36):
                 continue
             seen.add(p)
             out.append(dict(id=f"P{len(out)}", path=c.get("still") or p, src=p, kind="clip", seg=int(ln.get("i", 0)),
-                            label=str(c.get("shows") or c.get("subject") or "")[:60], motion=round(float(c.get("motion_p90") or 0), 2),
-                            faces=len(c.get("faces") or []), luma=round(float(c.get("luma") or 0), 2) if c.get("luma") is not None else None))
+                            label=str(c.get("shows") or c.get("subject") or "")[:60], motion=_num(c.get("motion_p90")),
+                            faces=len(c.get("faces") or []), luma=_num(c.get("luma"))))
     for name, recs in (pack.get("pictures") or {}).items():
         for r in recs:
             p = r.get("path")

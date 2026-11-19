@@ -296,8 +296,10 @@ row looks like in `evidence.rows()`.
 
 Five devices the engine lays into a scene before it draws it, each bound to this film's own frames, words and voice.
 A film asks for one by carrying it under `alien` in its scene: put `"alien": [asks]` in `direction.json`.
-The shell lays them in at the render (`_shell/chain.py alien_bank`, log in `supply/alien_bank.json`). A device that
-cannot stand on the film leaves it as it was and says why; it never fails a render. Frames are programme frames.
+The shell lays them in at the render with the rest of the palette (`_shell/chain.py lay_devices`, log in
+`supply/devices_log.json`). A device that cannot stand on the film runs its fallback chain and the log says what landed;
+it never fails a render. Frames are programme frames. A proof reel also gets the Director's devices for every moment
+round its own hero device (`valmera-stories/wf3.with_director`, `_shell/director.py`).
 
 - `rhyme` `{"dev":"rhyme","at":[a,z],"cuts":[f,f],"pool":[assets],"hints":{asset:{"t":s,"at":[x,y]}}}`: a chain of
   pictures cut on one round shape, registered and growing through every cut. For a line that names like things.

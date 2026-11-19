@@ -775,11 +775,30 @@ def build(script, sup, style_id, direction=None):
     def seg_at(f):
         return max([i for i in range(nseg) if seg_f[i] <= f + 1] or [0])
     dr = d.get("director") or {}
-    sec_of = {int(i): s_ for s_ in dr.get("sections") or [] for i in s_.get("segs") or [] if isinstance(i, int)}
+
+    def word_frame(w):
+        """The programme frame a spoken word (numbered in order) starts on; the first word's is the film's first frame."""
+        if not (0 <= int(w) < len(clock.words)):
+            return None
+        return 0 if int(w) == 0 else max(Clock.f(clock.words[int(w)]["t0"]) - 1, 0)
+
+    def seg_span(i):
+        return (seg_f[i], min(Clock.f(clock.segs[i][1]) + 6, f_end)) if 0 <= i < nseg else (None, None)
+    secs = []                                            # the Director's sections as frame ranges: (f0, f1, section)
+    if dr:
+        for s_ in dr.get("sections") or []:
+            a_, b_ = _director().section_frames(s_, word_frame, seg_span, f_end)
+            if a_ is not None and b_ is not None and b_ > a_:
+                secs.append((int(a_), int(b_), s_))
+        if secs:
+            secs[-1] = (secs[-1][0], max(secs[-1][1], f_end), secs[-1][2])
+
+    def section_at(f):
+        return next((s_ for a_, b_, s_ in secs if a_ <= f < b_), None)
 
     def layout_at(f):
         """The layout of the Director's section at frame f (the style's own when there is no director)."""
-        s_ = sec_of.get(seg_at(f))
+        s_ = section_at(f)
         return LAYOUT_AS.get((s_ or {}).get("layout"), st["layout"]) if s_ else st["layout"]
     # ---- the payoff is his face: the film's turn lands on the first word of the sentence the caller named (else the last)
     ts = d.get("turn_seg")
@@ -862,14 +881,15 @@ def build(script, sup, style_id, direction=None):
     past_share = sum(spoken_s[i] for i in past if 0 <= i < nseg) / max(sum(spoken_s), 1e-6)
     by_section = 0.0 < past_share <= 0.6
     # with a director the sections it prints in black and white are the mono ones, whatever the style; else the style's rule
-    mono_segs = {i for i, s_ in sec_of.items() if str(s_.get("surface")).lower() in ("mono", "gate")} if sec_of else None
+    mono_dir = [(a_, min(b_, f_voice_end)) for a_, b_, s_ in secs if str(s_.get("surface")).lower() in ("mono", "gate") and
+                min(b_, f_voice_end) - a_ >= 12] if secs else None
     # the take itself takes the section's finish too (low saturation while he tells of the past), cut at the joins
-    take_past = (section_spans(mono_segs, seg_f, f_voice_end) if mono_segs is not None else
+    take_past = (mono_dir if mono_dir is not None else
                  section_spans(past, seg_f, f_voice_end) if st["mono"] == "past" and by_section else [])
 
     def is_mono(f0):
-        if mono_segs is not None:
-            return seg_at(f0) in mono_segs
+        if mono_dir is not None:
+            return any(a_ <= f0 < b_ for a_, b_ in mono_dir)
         return st["mono"] == "all" or (st["mono"] == "past" and by_section and seg_at(f0) in past)
 
     def note(f0, f1, kind, name, rec, mode):
@@ -1164,25 +1184,28 @@ def build(script, sup, style_id, direction=None):
     # The pace of each section is its energy (the Director's): a strobe section's pictures and framings are cut down to
     # two frames, a hold section's held up to about four seconds; brisk sections take the film's own band below.
     bands = []
-    if sec_of:
+    if secs:
         DR = _director()
         pace_, _, _ = F._engines()
         groups = {}
+        take_keys = {pc["key"] for pc in pieces}
         for it in l1["items"]:
             if it["k"] == "shot" and it["id"] in drive_ids:
-                en = (sec_of.get(seg_at(it["f"][0])) or {}).get("energy") or "brisk"
+                en = (section_at(it["f"][0]) or {}).get("energy") or "brisk"
                 if en in ("strobe", "hold"):
-                    groups.setdefault(en, set()).add(it["id"])
+                    groups.setdefault((en, it.get("pic") in take_keys), set()).add(it["id"])
                     if any(a_ <= it["f"][0] < b_ for a_, b_ in mono_spans):
                         it["look"] = "mono_silver"           # the section's black and white, before its framings are cut
-        for en in sorted(groups):
+        for en, is_take in sorted(groups):
+            ids = groups[(en, is_take)]
             try:
                 l1 = pace_.drive_l1(l1, sup.get("work") or "/", stress, meta=meta, family=d.get("family") or "podcast",
-                                    only=groups[en], band=DR.energy_band(en, d["band"]))
-                bands.append(dict(energy=en, shots=len(groups[en]), **{k: v for k, v in (l1.get("pace") or {}).items() if k != "holds"}))
-                drive_ids -= groups[en]
+                                    only=ids, band=DR.energy_band(en, d["band"], take=is_take))
+                bands.append(dict(energy=en, take=is_take, shots=len(ids),
+                                  **{k: v for k, v in (l1.get("pace") or {}).items() if k in ("hold_median", "hold_max", "eased", "punches", "whips")}))
+                drive_ids -= ids
             except Exception as e:  # noqa: BLE001 - a section the driver cannot cut keeps the film's own band
-                bands.append(dict(energy=en, fault=repr(e)[:200]))
+                bands.append(dict(energy=en, take=is_take, fault=repr(e)[:200]))
     l1 = F.engines_finish(l1, sup, stress, drive_ids, meta, dict(d, look_pictures=look_pics),
                           turn_f=story_turn_f if story_turn_f is not None else turn_f, mono=mono_spans,
                           clear=[0.10, cap_y - 0.085, 0.90, cap_y + 0.02],
@@ -1216,14 +1239,6 @@ def build(script, sup, style_id, direction=None):
     notes, asks = [], []
     if dr:
         DR = _director()
-
-        def word_frame(w):
-            if not (0 <= int(w) < len(clock.words)):
-                return None
-            return 0 if int(w) == 0 else max(Clock.f(clock.words[int(w)]["t0"]) - 1, 0)
-
-        def seg_span(i):
-            return (seg_f[i], min(Clock.f(clock.segs[i][1]) + 6, f_end)) if 0 <= i < nseg else (None, None)
         by_id = {pid: keys.get(path) for pid, path in (dr.get("pictures") or {}).items()}
         asks, notes = DR.palette_asks(dr, word_frame, seg_span, by_id.get, f_end)
         if asks:
@@ -1246,8 +1261,8 @@ def build(script, sup, style_id, direction=None):
                                take_past=[list(sp) for sp in take_past], past_share=round(past_share, 3),
                                balanced=sum(1 for it in l1["items"] if it.get("k") == "shot" and it.get("grade") and it.get("pic") not in {pc["key"] for pc in pieces})),
                  devices=dict(by=dr.get("by"), asked=[a["dev"] for a in asks], notes=why, layouts=sorted(set(layouts_used)),
-                              sections=[dict(segs=s_.get("segs"), surface=s_.get("surface"), layout=s_.get("layout"), energy=s_.get("energy"))
-                                        for s_ in dr.get("sections") or []], bands=bands),
+                              sections=[dict(f=[a_, b_], words=[s_.get("start"), s_.get("end")], surface=s_.get("surface"),
+                                             layout=s_.get("layout"), energy=s_.get("energy")) for a_, b_, s_ in secs], bands=bands),
                  alien=dict(asked=[a["dev"] for a in asks if a["dev"] in ("rhyme", "diecut", "lamp", "arc", "answer")]),
                  sound_design=dict(l1.get("sound_design") or {}),       # with its dropped list: a refusal is measured, never guessed
                  look=[f for f in look_f if 0 <= f < f_end])

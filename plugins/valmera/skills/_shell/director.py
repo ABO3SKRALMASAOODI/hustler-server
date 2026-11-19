@@ -4,8 +4,8 @@ stress, the pictures on one contact sheet with what signal measured of them, the
 the device sequences of the films delivered lately) and the palette's menu, and answers DIRECTOR_CONTRACT 4:
 
     beats     [{role: hook|name|figure|list|turn|past|quote|contrast|payoff|close, w, seg, word, energy: strobe|brisk|hold}]
-    sections  [{segs: [i..], surface: colour|mono|gate|crt|bloom|thermal|..., layout: bleed|window|prints|collage|grid|split|type,
-                energy: strobe|brisk|hold}]
+    sections  [{start: word, end: word, segs: [sentences it touches], surface: colour|mono|gate|crt|bloom|thermal|...,
+                layout: bleed|window|prints|collage|grid|split|type, energy: strobe|brisk|hold}]   (they tile the film)
     asks      [{dev, beat, at: {w, seg, word}, until?: {w, seg, word}, args: {...}, pics: [ids]}]      (overlap and stack)
     and the older fields every builder reads: display, past_segs, payoff_seg, turn_seg, story_turn_seg, arc
 
@@ -61,13 +61,17 @@ SYSTEM = ("You are the Director of a vertical short film. You choose, moment by 
           "the films delivered lately did (do something else). You answer in JSON only.\n\n" + PRINCIPLES + "\n\n"
           "Return JSON only: {\"beats\": [{\"role\": one of hook|name|figure|list|turn|past|quote|contrast|payoff|close, "
           "\"w\": the word number it lands on, \"word\": that word as said, \"energy\": strobe|brisk|hold}], "
-          "\"sections\": [{\"segs\": [sentence numbers, contiguous, every sentence in exactly one section], \"surface\": "
+          "\"sections\": [{\"from\": first word number, \"to\": last word number (runs of words in order, covering the film "
+          "from word 0 to the last word, no gaps; a section is often a few seconds: surfaces switch, colour is the base they "
+          "cut away from), \"surface\": "
           "colour|mono|gate|crt|bloom|thermal|threshold|halftone|xray|blueprint|night_vision|posterise|solarise|line|neg, "
           "\"layout\": bleed|window|prints|collage|grid|split|type, \"energy\": strobe|brisk|hold}], "
           "\"asks\": [{\"dev\": a device name from the palette, \"beat\": index into beats or null, \"at\": {\"w\": word "
           "number, \"word\": the word}, \"until\": {\"w\": word number, \"word\": the word} (spans only), \"args\": {the "
-          "device's own fields from its card, e.g. \"mode\", \"surface\", \"run\", \"n\", \"c\", \"part\"}, \"pics\": [picture "
-          "ids it uses]}; 10 to 30 asks for a minute, stacked where a moment deserves it], "
+          "device's own fields from its card, e.g. \"mode\", \"surface\", \"run\", \"n\", \"c\", \"part\"; any time field of a card "
+          "(f, at, cuts, marks[].f, picks[].f) is a WORD NUMBER and any picture field (pic, pool) a picture id: the engine "
+          "turns them into frames and assets}, \"pics\": [picture ids it uses]}; 10 to 30 asks for a minute, stacked where a "
+          "moment deserves it], "
           "\"display\": [up to six words or short phrases to set large, ranked best first: {\"seg\": sentence number, \"text\": "
           "one to three consecutive words exactly as said, \"role\": hook|turn|payoff|figure|name|contrast, \"key\": the "
           "one word set largest}], \"past_segs\": [sentence numbers that tell of the past], \"payoff_seg\": the sentence "
@@ -224,28 +228,46 @@ def repair(d, sentences, words, names=(), seed=0):
             rep.append(f"beat: {why}")
         role = b.get("role") if b.get("role") in ROLES else "quote"
         beats.append(dict(role=role, energy=b.get("energy") if b.get("energy") in ENERGIES else "brisk", **a))
-    sections, seen = [], set()
-    for s in d.get("sections") or []:
-        if not isinstance(s, dict):
+    sections = []
+    last = len(words) - 1
+    for s_ in d.get("sections") or []:
+        if not isinstance(s_, dict):
             continue
-        segs = sorted({int(i) for i in s.get("segs") or [] if isinstance(i, int) and 0 <= i < nseg} - seen)
-        if not segs:
+        if s_.get("from") is not None or s_.get("to") is not None:
+            fa, _ = snap(s_.get("from") if isinstance(s_.get("from"), dict) else dict(w=s_.get("from")), sentences, words)
+            ta, _ = snap(s_.get("to") if isinstance(s_.get("to"), dict) else dict(w=s_.get("to")), sentences, words)
+            if fa is None or ta is None:
+                continue
+            w0, w1 = min(fa["w"], ta["w"]), max(fa["w"], ta["w"])
+        else:                              # sentences named: their words
+            segs = [int(i) for i in s_.get("segs") or [] if isinstance(i, int) and 0 <= i < nseg]
+            ws = [w["n"] for w in words if w["seg"] in segs]
+            if not ws:
+                continue
+            w0, w1 = min(ws), max(ws)
+        lay = s_.get("layout") if s_.get("layout") in LAYOUTS else "bleed"
+        if s_.get("layout") not in LAYOUTS:
+            rep.append(f"section {w0}-{w1}: layout {s_.get('layout')!r} read as bleed")
+        sections.append(dict(start=w0, end=w1, surface=str(s_.get("surface") or "colour").lower(), layout=lay,
+                             energy=s_.get("energy") if s_.get("energy") in ENERGIES else "brisk"))
+    sections.sort(key=lambda x: (x["start"], x["end"]))
+    tiled, at = [], 0                      # the sections tile the film: an overlap is cut, a gap is colour
+    for x in sections:
+        if x["end"] < at:
+            rep.append(f"section {x['start']}-{x['end']} lay inside an earlier one")
             continue
-        seen |= set(segs)
-        surf = str(s.get("surface") or "colour").lower()
-        lay = s.get("layout") if s.get("layout") in LAYOUTS else "bleed"
-        if s.get("layout") not in LAYOUTS:
-            rep.append(f"section {segs}: layout {s.get('layout')!r} read as bleed")
-        sections.append(dict(segs=segs, surface=surf, layout=lay, energy=s.get("energy") if s.get("energy") in ENERGIES else "brisk"))
-    for i in range(nseg):                    # every sentence in a section: one left out joins its neighbour's
-        if i not in seen:
-            near = min(sections, key=lambda s: min(abs(i - j) for j in s["segs"])) if sections else None
-            if near is None:
-                sections.append(dict(segs=[i], surface="colour", layout="bleed", energy="brisk"))
-            else:
-                near["segs"] = sorted(near["segs"] + [i])
-            rep.append(f"sentence {i} had no section")
-    sections.sort(key=lambda s: s["segs"][0])
+        if x["start"] > at:
+            tiled.append(dict(start=at, end=x["start"] - 1, surface="colour", layout="bleed", energy="brisk"))
+            rep.append(f"words {at}-{x['start'] - 1} had no section: colour")
+        tiled.append(dict(x, start=max(x["start"], at)))
+        at = x["end"] + 1
+    if words and at <= last:
+        tiled.append(dict(start=at, end=last, surface="colour", layout="bleed", energy="brisk"))
+        if sections:
+            rep.append(f"words {at}-{last} had no section: colour")
+    for x in tiled:
+        x["segs"] = sorted({words[w]["seg"] for w in range(x["start"], x["end"] + 1)})
+    sections = tiled
     asks = []
     known = set(names or ())
     for k, a in enumerate(d.get("asks") or []):
@@ -364,10 +386,19 @@ def signal_director(sentences, words, stress_w, pictures=(), seed=0, recent=(), 
     # sections: the hook's sentence strobes, the payoff holds; one middle stretch gets a surface of its own
     sections = []
     fin = _least_used(FINISHES, recent, rng)[0]
-    for i in range(nseg):
-        en = "strobe" if i == 0 else "hold" if i == payoff else "brisk"
-        surf = fin if (0 < i < payoff and i == max(1, payoff // 2)) else "colour"
-        sections.append(dict(segs=[i], surface=surf, layout="bleed", energy=en))
+    hook_end = max(first[0], min(len(words) - 1, next((x["n"] for x in words if x["t0"] >= words[0]["t0"] + 3.5), first[0])))
+    sections.append(dict(start=0, end=hook_end, surface="colour", layout="bleed", energy="strobe"))
+    tw = next(b["w"] for b in beats if b["role"] in ("turn", "payoff"))
+    if tw > hook_end + 1:
+        t_end = next((x["n"] for x in words if x["n"] > tw and x["t0"] >= words[tw]["t0"] + 4.0), tw)
+        sections.append(dict(start=hook_end + 1, end=tw - 1, surface="colour", layout="bleed", energy="brisk"))
+        if t_end < pay_w:
+            sections.append(dict(start=tw, end=t_end, surface=fin, layout="bleed", energy="hold"))
+            sections.append(dict(start=t_end + 1, end=pay_w - 1, surface="colour", layout="bleed", energy="brisk")) if t_end + 1 <= pay_w - 1 else None
+        else:
+            sections[-1]["end"] = pay_w - 1
+    sections.append(dict(start=pay_w, end=len(words) - 1, surface="colour", layout="bleed", energy="hold"))
+    sections = [x for x in sections if x["end"] >= x["start"]]
     display = [dict(seg=b["seg"], text=b["word"], role="hook" if b["role"] == "hook" else "payoff" if b["role"] == "payoff" else
                     "turn" if b["role"] == "turn" else "hook", key=b["word"]) for b in beats if len(_norm(b["word"])) >= 4][:6]
     return dict(contract=CONTRACT, beats=beats, sections=sections, asks=asks, display=display, past_segs=[], payoff_seg=payoff,
@@ -551,6 +582,20 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
         else:
             g = None
         row["f"] = [f, min(max(int(g), f + 2), dur_f)] if g is not None else f
+        for key in ("marks", "picks"):                 # time fields inside a card's lists are word numbers: frames now
+            if isinstance(row.get(key), list):
+                conv = []
+                for m in row[key]:
+                    if isinstance(m, dict) and isinstance(m.get("f"), int):
+                        m = dict(m, f=frame_of(m["f"]) if frame_of(m["f"]) is not None else f)
+                    if isinstance(m, dict) and m.get("pic") is not None and pic_key:
+                        m = dict(m, pic=pic_key(str(m["pic"])) or m["pic"])
+                    conv.append(m)
+                row[key] = conv
+        if isinstance(row.get("cuts"), list):
+            row["cuts"] = [frame_of(c) for c in row["cuts"] if isinstance(c, int) and frame_of(c) is not None]
+        if isinstance(row.get("pool"), list) and pic_key:
+            row["pool"] = [pic_key(str(p)) or p for p in row["pool"]]
         pics = [p for p in ([pic_key(p) for p in a.get("pics") or []] if pic_key else []) if p]
         if pics:
             row.setdefault("pool", pics)
@@ -565,14 +610,14 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
             row.setdefault("at", f)
             row.setdefault("n", int(args.get("n") or 4))
         out.append(row)
-    for s in d.get("sections") or []:
-        surf = str(s.get("surface") or "colour").lower()
-        if surf in ("colour", "color", "none", "mono") or not seg_span:
+    for s_ in d.get("sections") or []:
+        surf = str(s_.get("surface") or "colour").lower()
+        if surf in ("colour", "color", "none", "mono"):
             continue
-        f0, f1 = seg_span(min(s["segs"]))[0], seg_span(max(s["segs"]))[1]
+        f0, f1 = section_frames(s_, frame_of, seg_span, dur_f)
         if f0 is None or f1 is None or f1 - f0 < 8:
             continue
-        out.append(dict(dev="finish", id=f"ds{min(s['segs'])}", surface=surf, f=[int(f0), int(min(f1, dur_f))]))
+        out.append(dict(dev="finish", id=f"ds{s_.get('start', min(s_.get('segs') or [0]))}", surface=surf, f=[int(f0), int(min(f1, dur_f))]))
     marks = []
     for m in d.get("arc") or []:
         f = frame_of(m["w"]) if isinstance(m.get("w"), int) else None
@@ -584,6 +629,20 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
     if marks:
         out.append(dict(dev="arc", id="darc", marks=sorted(marks, key=lambda m: m["f"]), bars=0.085, develop=6))
     return out, notes
+
+
+def section_frames(sec, frame_of, seg_span=None, dur_f=None):
+    """(first frame, end frame) of a section: its words' (the frame after its last word is the next word's start, or the
+    end of its sentence), else its sentences'."""
+    if sec.get("start") is not None and sec.get("end") is not None:
+        f0 = frame_of(int(sec["start"]))
+        f1 = frame_of(int(sec["end"]) + 1)
+        if f1 is None:
+            f1 = seg_span(max(sec.get("segs") or [0]))[1] if seg_span else dur_f
+        return f0, f1
+    if seg_span and sec.get("segs"):
+        return seg_span(min(sec["segs"]))[0], seg_span(max(sec["segs"]))[1]
+    return None, None
 
 
 def around(asks, spans, dur_f=None):
@@ -612,10 +671,17 @@ def around(asks, spans, dur_f=None):
     return out
 
 
-def energy_band(energy, base=None):
-    """The pace band of a section's energy (scene.pace's hold, seconds)."""
+def energy_band(energy, base=None, take=False):
+    """The pace band of a section's energy (scene.pace's hold, seconds). A strobe section cuts its pictures into framings
+    down to two frames and its moving footage into new framings too (not one eased move); the speaker's own take is cut
+    into punch-in framings no shorter than a third of a second, so his words stay readable. A hold section keeps a
+    framing up to about four seconds."""
     lo, hi = BAND_OF.get(energy, BAND_OF["brisk"])
     b = dict(base or {})
+    if energy == "strobe":
+        b["ease_takes"] = False
+        if take:
+            lo, hi = 0.33, 1.0
     b["hold"] = (lo, hi)
     b["never"] = max(hi + 0.6, float(b.get("never") or 0))
     return b
