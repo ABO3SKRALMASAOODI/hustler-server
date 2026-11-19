@@ -60,7 +60,11 @@ def caption_pages(caps):
     return [tuple(p) for p in pages]
 
 
+SAFE_TOP, SAFE_BASE = .14, .80     # the brand seat above; the taste rule's safe area below (a baseline under .80 is outside)
+
+
 def _bounds(l1, items, ruler):
+    """(frame, box, baseline) for every frame of every word: the box for faces, the baseline for the safe area."""
     W,H=l1['frame']
     out=[]
     for i in items:
@@ -73,24 +77,24 @@ def _bounds(l1, items, ruler):
             x,y=value(i,'x',f,0),value(i,'y',f,0)
             # Stroke and the three sharp landing frames' remaining blur.
             margin=.006
-            out.append((f,[x+x0-margin,y+y0-margin,x+x1+margin,y+y1+margin]))
+            out.append((f,[x+x0-margin,y+y0-margin,x+x1+margin,y+y1+margin],y))
     return out
 
 
 def _covered(bounds, faces, offset):
     """Frames on which the block, moved by offset, covers a face."""
-    return {f for f,b in bounds if any(intersects([b[0],b[1]+offset,b[2],b[3]+offset],face) for face in faces[f])}
+    return {f for f,b,_ in bounds if any(intersects([b[0],b[1]+offset,b[2],b[3]+offset],face) for face in faces[f])}
 
 
 def _clear(bounds, faces, offset):
-    return not any(b[1]+offset<.14 or b[3]+offset>.86 for _,b in bounds) and not _covered(bounds,faces,offset)
+    return not any(b[1]+offset<SAFE_TOP or base+offset>SAFE_BASE for _,b,base in bounds) and not _covered(bounds,faces,offset)
 
 
 def _least_cover(bounds, faces):
     """No seat inside the safe band clears every face: the seat in the band that covers a face on the fewest
     frames, nearest the designed seat."""
     if not bounds: return 0.0
-    lo=.14-min(b[1] for _,b in bounds); hi=.86-max(b[3] for _,b in bounds)
+    lo=SAFE_TOP-min(b[1] for _,b,_ in bounds); hi=SAFE_BASE-max(base for _,_,base in bounds)
     if hi < lo: return 0.0
     steps=max(1,int(round((hi-lo)/.005)))
     cands=sorted({round(lo+k*(hi-lo)/steps,5) for k in range(steps+1)} | ({0.0} if lo <= 0 <= hi else set()))
@@ -130,18 +134,18 @@ def seat_display(l1, meta, ruler, _retry=0):
         faces={f:[b for v in visuals if v['f'][0]<=f<v['f'][1] for b in face_boxes(v,meta[v['pic']],f)] for f in frames}
         offset=0.0
         bounds=_bounds(l1,items,ruler)+[(f,[b['x']-b['w']*b.get('s',1)/2,b['y']-b['h']*b.get('s',1)/2,b['x']+b['w']*b.get('s',1)/2,
-                                            b['y']+b['h']*b.get('s',1)/2]) for b in bars.get(key,[]) for f in range(*b['f'])]
+                                            b['y']+b['h']*b.get('s',1)/2],b['y']+b['h']*b.get('s',1)/2) for b in bars.get(key,[]) for f in range(*b['f'])]
         for _ in range(16):
             needed=offset
-            for f,b in bounds:
+            for f,b,_ in bounds:
                 shifted=[b[0],b[1]+offset,b[2],b[3]+offset]
                 for face in faces[f]:
                     if intersects(shifted,face): needed=max(needed,face[3]+.019-b[1])
             if needed <= offset+1e-6: break
             offset=needed
-        if any(b[3]+offset>.86 for _,b in bounds):
+        if any(base+offset>SAFE_BASE for _,_,base in bounds):
             # Try the clear band above all faces, keeping below the brand seat.
-            offset=min((face[1]-.019-b[3] for f,b in bounds for face in faces[f]),default=0)
+            offset=min((face[1]-.019-b[3] for f,b,_ in bounds for face in faces[f]),default=0)
         covered=0
         if not _clear(bounds,faces,offset):
             pages=caption_pages(items) if key=='captions' else []

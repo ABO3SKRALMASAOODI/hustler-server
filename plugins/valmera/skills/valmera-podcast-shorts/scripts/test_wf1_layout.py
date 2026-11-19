@@ -169,3 +169,15 @@ def test_every_frame_gets_exactly_one_base_picture():
     assert any(it['k']=='word' for it in l1['items'])
     assert {c['id'] for c in changed}>={'a','b','c'}
     assert film.heal_base(l1)==[]
+
+
+def test_captions_seat_inside_the_taste_rules_safe_area():
+    """20 Nov m06 stopped twice: the seat pushed captions below faces to a baseline of 0.825, under the taste rule's
+    0.80 floor. The seat's band is now the safe area itself."""
+    F=film.F
+    plan=F.Plan({'cap':dict(font='InterDisplay-Bold.ttf',px=58,track=0)}, {})
+    plan.word([0,20],'below','cap',.3,.62,'#fff',1,role='cap')
+    shot=dict(k='shot',pic='main',f=[0,20],crop=[0,0,1,1])
+    l1=dict(frame=[1080,1920],voices=plan.voices,items=[shot]+plan.items)
+    seat_display(l1,{'main':dict(faces=[[.2,.35,.6,.4,.4]])},plan.R)
+    assert plan.items[0]['y'] <= .80 + 1e-6

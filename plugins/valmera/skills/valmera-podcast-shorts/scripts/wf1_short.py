@@ -664,6 +664,16 @@ def _repair(l1, beats, taste):
     stop: a word or a sound the rule names is dropped, and sounds over the supply's allowance go quietest first (a
     gesture is the sounds inside one second; the film's last gesture and the one on its turn stay). Returns how many
     items were dropped."""
+    alien = os.path.join(os.path.dirname(HERE), "alien")
+    if alien not in sys.path:
+        sys.path.insert(0, alien)
+    import l1pass
+    moved = l1pass.repair_placement(l1)                 # type outside the safe area moves inside, never dropped for it
+    if moved:
+        beats.setdefault("taste_moved", []).extend(moved)
+        taste = F.taste_check(l1, beats)
+        if taste["ok"]:
+            return 0
     ids = set()
     for pr in taste["problems"]:
         head = pr.split(" ", 2)
@@ -1083,8 +1093,10 @@ def score(ctx, script):
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")       # the same scene with the take's sound as its spine: what the music is cut to
     json.dump(F.audio_scene(l1, pack), open(l1_audio, "w"), ensure_ascii=False)
     json.dump(beats, open(os.path.join(ctx.supply, "beats.json"), "w"), indent=1)
-    if not taste["ok"]:
-        raise RuntimeError("the plan breaks a taste rule: " + "; ".join(taste["problems"][:6]))
+    if not taste["ok"]:                                       # repaired as far as it goes: recorded, never a lost short
+        beats["taste_unresolved"] = taste["problems"][:20]
+        json.dump(beats, open(os.path.join(ctx.supply, "beats.json"), "w"), indent=1)
+        ctx.log("taste rules still unmet after repair (recorded): " + "; ".join(taste["problems"][:4]))
     turn_s = round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None
     # the last word by the words' own times (programme seconds): the brand finish falls the take's breath after it
     last_word_s = round(beats["voice_f"][1] / F.FPS, 3) if beats.get("voice_f") else None

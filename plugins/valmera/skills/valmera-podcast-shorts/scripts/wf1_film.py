@@ -314,7 +314,7 @@ def caption_pools(l1, ruler, bright, a=0.42, pad=(0.05, 0.045, 0.04)):
     caps = [i for i in l1["items"] if i["k"] == "word" and i.get("role") == "cap"]
     out = []
     for fa, fb, words in caption_pages(caps):
-        bs = [b for _, b in _bounds(l1, words, ruler)]
+        bs = [b for _, b, _ in _bounds(l1, words, ruler)]
         if not bs:
             continue
         x0, y0 = min(b[0] for b in bs), min(b[1] for b in bs)
@@ -1205,7 +1205,7 @@ def build(script, sup, style_id, direction=None):
                  title_layout=title_layout, caption_restarts=restarts, face_metadata=meta,
                  finishes=dict(black_and_white=len([p for p in P.pictures if p.get("finish")]), flashes=len(flashes), dark_ink_spans=len(bright),
                                take_past=[list(sp) for sp in take_past], past_share=round(past_share, 3),
-                               balanced=sum(1 for it in l1["items"] if it.get("k") == "shot" and it.get("grade") and it.get("pic") not in tkeys)),
+                               balanced=sum(1 for it in l1["items"] if it.get("k") == "shot" and it.get("grade") and it.get("pic") not in {pc["key"] for pc in pieces})),
                  alien=dict(asked=[a["dev"] for a in l1.get("alien") or []], why=why, never=list(ALIEN_NEVER)),
                  sound_design=dict(l1.get("sound_design") or {}),       # with its dropped list: a refusal is measured, never guessed
                  look=[f for f in look_f if 0 <= f < f_end])
