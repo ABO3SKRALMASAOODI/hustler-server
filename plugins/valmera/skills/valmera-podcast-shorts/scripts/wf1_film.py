@@ -171,16 +171,22 @@ def inside(items, f_end):
     return out
 
 
-def fill_gaps(ins, footage, pics, script, seg_f, f_first, f_last, stress, gap_s=5.0, hold_s=1.2, rest_s=2.0):
+def fill_gaps(ins, footage, pics, script, seg_f, f_first, f_last, stress, gap_s=5.0, hold_s=1.2, rest_s=2.0, key_f=None):
     """A stretch of the take longer than gap_s with no picture over it is a held framing. It takes the pictures the
     film found and has not shown (clips first, those found for the nearest sentence first), one about every three
     seconds, each landing on the voice's stress, with the take between them. Nothing is shown twice: when the film
-    has no picture to spare the take stays, eased by the pacing driver. Returns the cutaways, in order."""
+    has no picture to spare the take stays, eased by the pacing driver. Returns the cutaways, in order.
+    key_f ({footage key: frame}): footage keyed by coverage window, not sentence; spares are then ordered by how near
+    their window's frame is to the stretch."""
     shown = {x[4]["path"] for x in ins}
-    spare = [(i, "clip", c.get("subject"), c) for i, lst in footage.items() for c in lst if c["path"] not in shown]
+    if key_f is None:
+        spare = [(i, "clip", c.get("subject"), c) for i, lst in footage.items() for c in lst if c["path"] not in shown]
+    else:
+        spare = [(key_f.get(i, 0), "clip", c.get("subject"), c) for i, lst in footage.items() for c in lst if c["path"] not in shown]
     for n, lst in pics.items():
         lines = [i for i, s in enumerate(script["segments"]) if n in (s.get("pictures") or [])] or [0]
-        spare += [(lines[0], "photo", n, r) for r in lst if r["path"] not in shown]
+        at = lines[0] if key_f is None else seg_f[min(lines[0], len(seg_f) - 1)] if seg_f else 0
+        spare += [(at, "photo", n, r) for r in lst if r["path"] not in shown]
     if not spare:
         return ins
     hold, rest, out = int(hold_s * FPS), int(rest_s * FPS), list(ins)
@@ -188,11 +194,13 @@ def fill_gaps(ins, footage, pics, script, seg_f, f_first, f_last, stress, gap_s=
     for a, b in zip(edges[0::2], edges[1::2]):
         if b - a <= gap_s * FPS:
             continue
-        seg = max([i for i in range(len(seg_f)) if seg_f[i] <= (a + b) // 2] or [0])
+        seg = max([i for i in range(len(seg_f)) if seg_f[i] <= (a + b) // 2] or [0]) if key_f is None else (a + b) // 2
         pos = a + rest
         while spare and b - pos >= hold + rest:
             spare.sort(key=lambda r: (abs(r[0] - seg), r[1] != "clip"))
             i, kind, name, rec = spare.pop(0)
+            if rec["path"] in shown:                     # one picture pooled under two windows is still one picture
+                continue
             near = [(st, -f) for f, st in stress if pos - 5 <= f <= pos + 8]
             f0 = -max(near)[1] if near else pos
             n = min(hold, int(float(rec["seconds"]) * FPS) - 1) if kind == "clip" else hold
@@ -202,8 +210,98 @@ def fill_gaps(ins, footage, pics, script, seg_f, f_first, f_last, stress, gap_s=
                 t0 = max((float(rec["seconds"]) - n / FPS) / 2, 0.0)
                 rec = dict(rec, src=[round(t0, 3), round(t0 + n / FPS, 3)])
             out.append([f0, f0 + n, kind, name, rec])
+            shown.add(rec["path"])
             pos = f0 + n + rest + hold // 2
     return sorted(out, key=lambda x: x[0])
+
+
+FILL_GAP_S = 3.0          # no stretch of the take over about this long without a picture, when the film has one to spare
+
+
+def fill_holes(ins, coverage, footage, pics, script, seg_f, f_first, f_last, stress, checker, rejected=(), composed_stills=(), rounds=3,
+               originals=None, cut_dir=None, ffmpeg=None):
+    """The final build's gap fill (19 Nov: m03 held the speaker 34 s once its windows' pictures were turned down, m10
+    22 s, and fill_gaps had no caller). Any stretch of the take over FILL_GAP_S between f_first and f_last (the hook's
+    first second and the payoff are his face) takes the approved pictures the film found and has not shown (fill_gaps:
+    clips first, those of the nearest window first, about one every 2.6 s on the voice's stress). Each filler is
+    checked on its own words by the same placement check as every picture; one turned down gives its place to the next
+    spare. When the found pictures run out, fresh intervals of the kept originals (beside each interval the look
+    verified, never one already shown: wf1_coverage.fresh_interval) are the spares. Returns (ins, report)."""
+    from wf1_coverage import shared_candidates, same_picture, fresh_interval
+    windows = coverage.get("windows") or []
+    span = [(round(w["t0"] * FPS) + LEAD_F, round(w["t1"] * FPS) + LEAD_F) for w in windows]
+    key_f = {i: (a + b) // 2 for i, (a, b) in enumerate(span)}
+    skip = set(rejected)
+    pool = shared_candidates(coverage, footage)
+    report = dict(proposed=0, accepted=0, rejected=0, fresh=0, spend=[], placements=[])
+    hold, rest = int(1.2 * FPS), int(0.8 * FPS)
+    taken = {}
+    for clips in list(pool.values()) + [[x[4] for x in ins]]:
+        for c in clips:
+            url = (c.get("source") or {}).get("url")
+            if url and c.get("time_range") and len(c["time_range"]) == 2:
+                taken.setdefault(url, []).append(tuple(c["time_range"]))
+    fresh = {}
+    for _ in range(rounds):
+        placed = [x[4] for x in ins]
+        spare_footage = {i: [c for c in lst + fresh.get(i, []) if c["path"] not in skip and not any(same_picture(c, p) for p in placed)]
+                         for i, lst in pool.items()}
+        edges = [f_first] + [f for x in sorted(ins) for f in (x[0], x[1])] + [f_last]
+        stride = hold + rest + hold // 2                     # fill_gaps' pace: a picture, then the take, about every 2.6 s
+        slots = sum((b - a - 2 * rest - hold) // stride + 1 for a, b in zip(edges[0::2], edges[1::2])
+                    if b - a > FILL_GAP_S * FPS and b - a - rest >= hold + rest)
+        short = slots - sum(map(len, spare_footage.values())) - sum(len(v) for v in pics.values())
+        if short > 0 and originals and cut_dir and ffmpeg:
+            # the same verified sources, intervals not yet shown: round-robin over the kept originals
+            sources = {}
+            for i, lst in pool.items():
+                for c in lst:
+                    url = (c.get("source") or {}).get("url")
+                    if url in originals and c.get("time_range") and c["path"] not in skip:
+                        sources.setdefault(url, (i, c))
+            progress = True
+            while short > 0 and progress:
+                progress = False
+                for i, c in list(sources.values()):
+                    got = fresh_interval([("clip", c.get("subject"), c)], taken, originals, cut_dir, 1.2 + 2 / FPS, ffmpeg, skip=skip)
+                    if got:
+                        rec = dict(got[0][2], subject=c.get("subject"))
+                        fresh.setdefault(i, []).append(rec)
+                        spare_footage.setdefault(i, []).append(rec)
+                        report["fresh"] += 1
+                        short -= 1
+                        progress = True
+                        if short <= 0:
+                            break
+        spare_pics = {n: [r for r in lst if r["path"] not in skip and not any(same_picture(r, p) for p in placed)]
+                      for n, lst in pics.items()}
+        have = {(x[0], x[1], x[4]["path"]) for x in ins}
+        out = fill_gaps([list(x) for x in ins], spare_footage, spare_pics, script, seg_f, f_first, f_last, stress,
+                        gap_s=FILL_GAP_S, hold_s=1.2, rest_s=0.8, key_f=key_f)
+        new = [x for x in out if (x[0], x[1], x[4]["path"]) not in have]
+        if not new:
+            break
+        for x in new:
+            mid = (x[0] + x[1]) // 2
+            inside = next((i for i, (a, b) in enumerate(span) if a <= mid < b), None)
+            near = inside if inside is not None else min(key_f, key=lambda i: abs(key_f[i] - mid)) if key_f else None
+            x[4] = dict(x[4], window=inside, gap_fill=True,
+                        illustration=windows[near]["must_show"] if near is not None else x[4].get("illustration"))
+        accepted, rep = checker(new)
+        for row in accepted:
+            if row[4]["path"] in composed_stills:
+                row[4]["verified_motion"] = False
+        report["proposed"] += len(new)
+        report["accepted"] += len(accepted)
+        report["rejected"] += len(new) - len(accepted)
+        report["spend"] += rep.get("spend") or []
+        report["placements"] += rep.get("placements") or []
+        ok = {id(r) for r in accepted}
+        skip.update(x[4]["path"] for x in new if id(x) not in ok)
+        ins = sorted(list(ins) + list(accepted), key=lambda x: x[0])
+        if len(accepted) == len(new):
+            break
+    return ins, report
 
 
 def clip_cover_up(rec):
@@ -348,9 +446,17 @@ def build(script, sup, style_id, direction=None):
     # the payoff is his face, but never more than its last four seconds: a long close on one framing is a held picture
     f_last = max(turn_f - 6, f_voice_end - int(4.0 * FPS)) if turn_f is not None else f_voice_end - 45
     from placement_check import propose, check
-    from wf1_coverage import checked_proposals, require_coverage
-    ins,placement_report=checked_proposals(coverage,footage,pics,f_end/FPS,
-        lambda rows:check(rows,script,clock,sup['work'],sup['ffmpeg']),composed_stills)
+    from wf1_coverage import checked_proposals, require_coverage, originals_of
+    checker=lambda rows:check(rows,script,clock,sup['work'],sup['ffmpeg'])
+    ins,placement_report=checked_proposals(coverage,footage,pics,f_end/FPS,checker,composed_stills,
+        originals=originals_of(sup['work']),cut_dir=os.path.join(sup['work'],'fresh-intervals'),ffmpeg=sup['ffmpeg'])
+    # what is still bare after the windows (a window whose pictures were all turned down, speech no window covered)
+    # takes the approved pictures the film has to spare, each checked on its own words
+    ins,fill_report=fill_holes(ins,coverage,footage,pics,script,seg_f,LEAD_F+FPS,f_last,stress,checker,
+                               placement_report.get('rejected_paths') or [],composed_stills,
+                               originals=originals_of(sup['work']),cut_dir=os.path.join(sup['work'],'fresh-intervals'),ffmpeg=sup['ffmpeg'])
+    placement_report['gap_fill']={k:v for k,v in fill_report.items() if k!='spend'}
+    placement_report['spend']=list(placement_report.get('spend') or [])+fill_report['spend']
     for row in ins:                                      # a clip the check cut clear of another editor's text is a new file
         if row[4]["path"] not in keys:
             keys[row[4]["path"]] = (P.video if row[2] == "clip" else P.image)(f"{'v' if row[2] == 'clip' else 'p'}{len(keys):02d}", row[4])
