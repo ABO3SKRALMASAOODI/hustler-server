@@ -421,13 +421,15 @@ def score_chapters(film, marks, kind, cache, call=None, used=(), fetch=None, voi
 # ----------------------------------------------------------------- the workflow shell's music stage
 
 def score(l1, work, film=None, out=None, kind="stories", song=None, vocals=None, turn_s=None, payoff_s=None, cache=None, brief="",
-          call=None, used=(), index=None):
-    # A caller that names both the story's turn and its payoff (the podcast workflow's direction, --turn with --payoff)
-    # opts in to the drop on the turn when the payoff sits too close to the last hit for a phrase after it.
+          call=None, used=(), index=None, turn_drop=False):
     """One compiled film with music: the song the run was handed (`song`), else a track chosen for it from the
-    library. The story's marks come from the caller, else from a model's reading of the film's own lines. Returns
-    the report (the choice with its licence and credit, the marks, the engine's plan and levels); `out` is written
-    only when the mix stands, and the clean film is never touched."""
+    library. The story's marks come from the caller, else from a model's reading of the film's own lines (the
+    reading also gives the film's mood, which the track choice is told, so it is made whenever a model is at hand).
+    `turn_drop` (opt-in, the podcast workflow): a payoff with no room after it for a phrase still gets a drop, on
+    the story's turn (the caller's, else the one read from the lines), else on the payoff with the last hit moved
+    into the film's own tail (score.music.arrange). Returns the report (the choice with its licence and credit, the
+    marks, the engine's plan and levels); `out` is written only when the mix stands, and the clean film is never
+    touched."""
     from score import music as MU
     rep = {"picked_by_valmera": song is None, "kind": kind}
     if index is None and work and os.path.exists(os.path.join(work, "index.json")):
@@ -439,13 +441,15 @@ def score(l1, work, film=None, out=None, kind="stories", song=None, vocals=None,
     lines = lines_of(l1, index)
     dur = float(l1["dur_f"]) / float(l1["fps"])
     marks_in = {"turn_s": turn_s, "payoff_s": payoff_s}
-    turn_drop = turn_s is not None and payoff_s is not None and float(turn_s) < float(payoff_s)
+    turn_drop = bool(turn_drop)
     mood = ""
-    if (turn_s is None or payoff_s is None) and call is not None:
+    if call is not None:
         got = story_marks(lines, dur, call)
         if got:
             mood = got.get("mood") or ""
-            if payoff_s is None and turn_s is None:
+            if turn_s is not None and payoff_s is not None:
+                pass                                           # the caller named both: they stand, the reading gives the mood
+            elif payoff_s is None and turn_s is None:
                 turn_s, payoff_s = got["turn_s"], got["payoff_s"]
             elif payoff_s is not None and got["turn_s"] is not None and got["turn_s"] < payoff_s - 1.0:
                 turn_s = got["turn_s"]                         # the caller named the landing; the model adds where the tension opens
@@ -457,7 +461,7 @@ def score(l1, work, film=None, out=None, kind="stories", song=None, vocals=None,
     choice = None
     marks = MU.marks_from_l1(l1, index, turn_s=turn_s, payoff_s=payoff_s)
     if turn_drop:
-        marks["turn_drop"] = True
+        marks["turn_drop"] = True                              # after the reading: a turn the model read is the turn the drop falls back on
     whole = False                                              # the scene gives no voice apart: the film's own sound is read instead
     if not marks["words"]:
         marks["words"] = MU.voice_spans_of(l1, work)
@@ -583,7 +587,7 @@ def ensure_arranged_asset(ctx, doc, path):
 
 def main(argv=None):
     """python -m music_film score --l1 L1 --work DIR --film film.mp4 --out film_music.mp4 --kind stories
-                                  [--song SONG [--vocals STEM]] [--turn S] [--payoff S] [--brief TEXT] [--cache DIR] [--report JSON]"""
+                                  [--song SONG [--vocals STEM]] [--turn S] [--payoff S] [--turn-drop] [--brief TEXT] [--cache DIR] [--report JSON]"""
     import argparse
     ap = argparse.ArgumentParser(prog="music_film")
     ap.add_argument("cmd", choices=["score"])
@@ -596,6 +600,7 @@ def main(argv=None):
     ap.add_argument("--vocals")
     ap.add_argument("--turn", type=float)
     ap.add_argument("--payoff", type=float)
+    ap.add_argument("--turn-drop", action="store_true", help="a payoff with no room after it drops on the turn, else into the tail")
     ap.add_argument("--brief", default="")
     ap.add_argument("--cache")
     ap.add_argument("--report")
@@ -604,7 +609,7 @@ def main(argv=None):
     work = a.work or os.path.dirname(os.path.abspath(a.l1))
     try:
         rep = score(l1, work, film=a.film, out=a.out, kind=a.kind, song=a.song, vocals=a.vocals, turn_s=a.turn, payoff_s=a.payoff, cache=a.cache,
-                    brief=a.brief, call=openai_call())
+                    brief=a.brief, call=openai_call(), turn_drop=a.turn_drop)
     except Exception as ex:  # noqa: BLE001 - the clean film is delivered either way; the reason is on file
         rep = {"ok": False, "why": f"{type(ex).__name__}: {str(ex)[:300]}"}
     if a.report:

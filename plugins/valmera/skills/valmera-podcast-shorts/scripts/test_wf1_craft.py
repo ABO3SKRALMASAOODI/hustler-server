@@ -96,21 +96,35 @@ def test_one_shade_a_caption_page_sized_to_its_own_words():
     assert {tuple(p["f"]) for p in pools} == {(0, 20), (30, 40), (45, 50)}
 
 
-def test_a_contrast_bar_moves_with_its_line_and_a_stack_is_seated_as_one_block():
-    voices = {"d0": dict(font="InterDisplay-Black.ttf", px=70, track=0), "d1": dict(font="InterDisplay-Black.ttf", px=140, track=0)}
+def _bar_scene(face, bright=None):
+    voices = {"d0": dict(font="InterDisplay-Black.ttf", px=70, track=0), "d1": dict(font="InterDisplay-Black.ttf", px=140, track=0),
+              "cap": dict(font="InterDisplay-Black.ttf", px=58, track=0)}
     plan = F.Plan(voices, {})
     plan.word([0, 30], "INSECURE", "d0", .5, .40, align="c", on=0)
     plan.word([2, 30], "OVERACHIEVERS", "d1", .5, .47, align="c", on=0)
-    plan.block([0, 30], [.1, .41, .9, .48], "#F2C14E", z=7, bar_for="d1", bar_y=.47)
-    l1 = dict(frame=[1080, 1920], voices=voices, items=plan.items, fps=30)
-    face = [.3, .38, .7, .5]
+    plan.block([0, 30], [.1, .41, .9, .48], "#F2C14E", z=7, bar_on=0)          # the bar: centre .445, its line's baseline .47
+    items = film.ink_by_ground(plan.items, voices, bright) if bright else plan.items
+    l1 = dict(frame=[1080, 1920], voices=voices, items=items, fps=30)
     l1["items"].insert(0, dict(id="s", k="shot", pic="main", f=[0, 30], crop=[0, 0, 1, 1]))
     seat_display(l1, {"main": dict(faces=[[face[0], face[1], face[2] - face[0], face[3] - face[1]]])}, plan.R)
-    ys = [i["y"][-1] if isinstance(i["y"], list) else i["y"] for i in l1["items"] if i["k"] == "word"]
-    assert abs((ys[1] - ys[0]) - .07) < 1e-6                                      # the stack moved as one
-    film.bars_follow(l1)
+    words = [i for i in l1["items"] if i["k"] == "word"]
+    ys = [i["y"][-1] if isinstance(i["y"], list) else i["y"] for i in words]
     bar = next(i for i in l1["items"] if i.get("pic") == "plate")
-    assert "bar_for" not in bar and abs(bar["y"] - (0.445 + ys[1] - .47)) < 1e-4
+    return words, ys, bar
+
+
+def test_a_contrast_bar_moves_with_its_line_and_a_stack_is_seated_as_one_block():
+    words, ys, bar = _bar_scene([.3, .38, .7, .5])
+    assert ys[1] != .47 and abs((ys[1] - ys[0]) - .07) < 1e-6                     # the stack moved as one
+    assert "bar_on" not in bar and abs(bar["y"] - (ys[1] - .025)) < 1e-4 and abs(bar["w"] - .8) < 1e-6
+    # on a bright picture the display takes dark ink and its voice a new name (ink_by_ground): the bar still follows
+    words, ys, bar = _bar_scene([.3, .38, .7, .5], bright=[(0, 30)])
+    assert words[1]["v"] == "d1d" and ys[1] != .47 and abs(bar["y"] - (ys[1] - .025)) < 1e-4
+    # a face no seat clears: the block shrinks about its centre (voices renamed _seatN) and the bar shrinks with it
+    words, ys, bar = _bar_scene([.02, .14, .98, .86])
+    n = words[1]["v"].count("_seat")
+    assert n >= 1 and abs(bar["w"] - .8 * .9 ** n) < 1e-4 and abs(bar["h"] - .07 * .9 ** n) < 1e-4
+    assert abs(bar["y"] - (ys[1] - .025 * .9 ** n)) < 1e-4 and "bar_on" not in bar
 
 
 def test_section_spans_and_cutaway_balance(tmp_path):
@@ -140,7 +154,8 @@ class _LLM:
 
 def test_the_direction_names_roles_the_turn_and_the_payoff_apart(tmp_path, monkeypatch):
     llm = _LLM(dict(display=[dict(seg=1, text="insecure overachievers", role="hook", key="overachievers"),
-                             dict(seg=3, text="49%", role="figure", key="49%"), dict(seg=4, text="x", role="filler")],
+                             dict(seg=3, text="49%", role="figure", key="49%"), dict(seg=4, text="x", role="filler")] +
+                            [dict(seg=k, text=f"alt {k}", role="name") for k in range(5)],
                     past_segs=[0, 1], payoff_seg=5, turn_seg=3, arc=[]))
     monkeypatch.setattr(wf, "_llm", lambda: llm)
     ctx = SimpleNamespace(supply=str(tmp_path))
@@ -148,7 +163,8 @@ def test_the_direction_names_roles_the_turn_and_the_payoff_apart(tmp_path, monke
     d = wf.direction_of(ctx, dict(title="t"), pack)
     assert llm.calls[0]["effort"] == "medium"
     assert d["turn_seg"] == 5 and d["story_turn_seg"] == 3 and d["contract"] == wf.DIRECTION_CONTRACT
-    assert [r["role"] for r in d["display"]] == ["hook", "figure", "hook"] and d["display"][1]["accent"] is True
+    # ranked best first with alternates: up to six are kept, the film lands the first that fit its timing
+    assert len(d["display"]) == 6 and [r["role"] for r in d["display"][:3]] == ["hook", "figure", "hook"] and d["display"][1]["accent"] is True
     assert wf.direction_of(ctx, {}, pack) == json.load(open(tmp_path / "direction.json")) and len(llm.calls) == 1
     # an older cache is read again under the new contract; a turn after the payoff is no turn
     json.dump(dict(display=[], turn_seg=2), open(tmp_path / "direction.json", "w"))
@@ -167,9 +183,29 @@ def test_the_music_stage_hands_the_story_turn_with_the_payoff(tmp_path, monkeypa
         raise RuntimeError("test dispatch boundary")
     monkeypatch.setattr(wf.chain, "sh", run)
     monkeypatch.delenv("SHELL_MUSIC_CMD", raising=False)
-    wf.chain.music_version(ctx, dict(film="f.mp4"), dict(l1="s.json", turn_s=31.2, story_turn_s=19.6))
-    assert "--payoff 31.200" in seen[0] and "--turn 19.600" in seen[0]
-    wf.chain.music_version(ctx, dict(film="f.mp4"), dict(l1="s.json", turn_s=31.2, story_turn_s=30.9))
-    assert "--turn" not in seen[1]                                            # a turn on the payoff is the payoff
+    wf.chain.music_version(ctx, dict(film="f.mp4"), dict(l1="s.json", turn_s=31.2, story_turn_s=19.6, turn_drop=True))
+    assert "--payoff 31.200" in seen[0] and "--turn 19.600" in seen[0] and "--turn-drop" in seen[0]
+    wf.chain.music_version(ctx, dict(film="f.mp4"), dict(l1="s.json", turn_s=31.2, story_turn_s=30.9, turn_drop=True))
+    assert "--turn " not in seen[1] and "--turn-drop" in seen[1]             # a turn on the payoff is the payoff; music_film reads one
     wf.chain.music_version(ctx, dict(film="f.mp4"), dict(l1="s.json", turn_s=31.2))
-    assert "--turn" not in seen[2]
+    assert "--turn" not in seen[2]                                            # another workflow: no opt-in, today's arrangement
+    # the shared-ledger route hands the same opt-in in its args file
+    ledger = tmp_path / "used.json"
+    json.dump(["t-old"], open(ledger, "w"))
+    ctx.args = {"music": True, "music_ledger": str(ledger)}
+    wf.chain.music_version(ctx, dict(film="f.mp4"), dict(l1="s.json", turn_s=31.2, turn_drop=True))
+    a = json.load(open(tmp_path / "music_args.json"))
+    assert a["turn_drop"] is True and a["payoff"] == 31.2 and a["turn"] is None and "turn_drop=bool(a.get(\"turn_drop\"))" in wf.chain.MUSIC_USED
+
+
+def test_a_display_word_is_found_where_the_transcript_writes_digits_or_an_apostrophe():
+    """m12 (round1): '44 minutes' was heard as '44' and "don't" as one word; spoken_forms spelled the figure out only
+    and split the apostrophe, so said_at found neither and both display words were lost to timing."""
+    assert ["44", "minutes"] in F.spoken_forms("44 minutes") and ["fortyfour", "minutes"] in F.spoken_forms("44 minutes")
+    assert F.spoken_forms("don\u2019t need a lot of people") == [["dont", "need", "a", "lot", "of", "people"]]
+    assert ["5000"] in F.spoken_forms("$5,000") and ["49"] in F.spoken_forms("49%")
+    words = [dict(w=w, start=0.3 * k, end=0.3 * k + 0.25, seg=0 if k < 7 else 1)
+             for k, w in enumerate(["we", "talked", "for", "44", "minutes", "or", "whatever.", "you", "don't", "need", "a", "lot", "of", "people,"])]
+    clock = F.Clock(dict(duration=5.0, words=words), dict(segments=[dict(say="a"), dict(say="b")]))
+    assert F.said_at(clock, 0, "44 minutes")[1] == 2 and F.said_at(clock, 1, "don't need a lot of people")[1] == 6
+    assert [w["w"] for w in F.said_span(clock, 1, "don't need a lot of people")][0] == "don't"

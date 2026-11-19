@@ -524,10 +524,14 @@ def _spell(n):
 
 def spoken_forms(text):
     """The ways a printed string can be said, each a list of normalised words: its words with every figure spelled out,
-    and a four-digit figure also as a year (nineteen seventy-three). Arithmetic on the film's own printed strings."""
+    as the transcript wrote its digits (a hearing writes '44 minutes' as often as 'forty-four'), and a four-digit
+    figure also as a year (nineteen seventy-three). A word's apostrophe stays inside it ("don't" is one word, as
+    norm_word reads the transcript's). Arithmetic on the film's own printed strings."""
     toks, alts = [], [[]]
     cur = ""
     for ch in str(text) + " ":
+        if ch in "'’" and cur[-1:].isalpha():
+            continue
         if ch.isalnum() or (ch in ",." and cur[-1:].isdigit()):
             cur += ch
         else:
@@ -538,7 +542,7 @@ def spoken_forms(text):
         body = t.replace(",", "")
         if body.replace(".", "", 1).isdigit():
             whole = body.split(".")[0]
-            forms = [[norm_word(w) for w in _spell(int(whole))]]
+            forms = [[norm_word(w) for w in _spell(int(whole))], [norm_word(body)]]
             if len(whole) == 4 and 1100 <= int(whole) <= 2099 and "." not in body:
                 a, b = int(whole[:2]), int(whole[2:])
                 forms.append([norm_word(w) for w in _spell(a) + (_spell(b) if b >= 10 else (["hundred"] if b == 0 else ["oh"] + _spell(b)))])

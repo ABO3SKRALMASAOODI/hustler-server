@@ -189,6 +189,7 @@ def contrast_ink(ground, prefer, others):
 CAP_PX = 58                   # the caption voice's size: a display word is set at least DISPLAY_MIN times it
 DISPLAY_MIN = 1.6
 DISPLAY_W = 2 * (F.RAIL_X - 0.5) - 0.004   # the widest a centred display line stands: clear of the platform's right rail
+DISPLAY_MOST = 4              # display words a film sets at most: the first that fit, from the direction's ranked list
 ROLE_SCALE = {"figure": 1.45, "payoff": 1.35, "contrast": 1.3, "turn": 1.25, "hook": 1.25, "name": 1.2}
 
 
@@ -306,22 +307,6 @@ def caption_pools(l1, ruler, bright, a=0.42, pad=(0.05, 0.045, 0.04)):
     for n, it in enumerate(out):
         it["id"] = f"pool{n:03d}"
     return out
-
-
-def bars_follow(l1):
-    """A contrast's bar moves with the line it stands behind wherever the seat put that line (seat_display moves words
-    only). The bar's helper keys are removed from the scene."""
-    final = {}
-    for it in l1["items"]:
-        if it.get("k") == "word" and it.get("role") == "big":
-            y = it["y"]
-            final.setdefault(it["v"], float(y[-1] if isinstance(y, list) else y))
-    for it in l1["items"]:
-        if "bar_for" in it:
-            v, y0 = it.pop("bar_for"), float(it.pop("bar_y"))
-            dy = final.get(v, y0) - y0
-            it["y"] = [r4(y + dy) for y in it["y"]] if isinstance(it["y"], list) else r4(float(it["y"]) + dy)
-    return l1
 
 
 def inside(items, f_end):
@@ -749,20 +734,25 @@ def build(script, sup, style_id, direction=None):
     # the job each does (display_rows): at least 1.6x the caption, on a seat of their own above the caption's, a long
     # phrase as a two-size stack round its key word, a contrast on a bar; ink chosen by the contrast measured on the
     # ground under the block (round1 default-design)
-    last = shown[-1][1] + 6 if shown else -10 ** 6
+    # The direction ranks its proposals best first, with alternates: the film lands the first DISPLAY_MOST that fit its
+    # timing (a word too early, too close to another or too short to hold gives its place to the next), so a film
+    # never loses its display words to timing. A long phrase is stacked (display_rows), never skipped for its length.
     omit = []
-    for row in d.get("display") or []:
+    proposed = d.get("display") or []
+    for row in proposed:
+        if len(shown) >= DISPLAY_MOST:
+            break
         try:
             seg, text = int(row["seg"]), " ".join(str(row["text"]).split())
         except (KeyError, TypeError, ValueError):
             continue
-        if not (0 <= seg < nseg) or not text or len(text) > 22 or any(text.lower() in t.lower() or t.lower() in text.lower() for _, _, t in shown):
+        if not (0 <= seg < nseg) or not text or any(text.lower() in t.lower() or t.lower() in text.lower() for _, _, t in shown):
             continue
         hit = F.said_at(clock, seg, text)
         if hit is None:
             continue
         a = max(Clock.f(hit[0]) - 1, 1)
-        if a < 2*FPS or a - last < 2.0 * FPS or a >= f_voice_end - 12:
+        if a < 2*FPS or any(abs(a - x) < 2.0 * FPS for x, _, _ in shown) or a >= f_voice_end - 12:
             continue
         b = int(min(a + 1.15 * FPS, f_end, Clock.f(clock.segs[seg][1]) + 10))
         # A display word cannot label the next documentary subject. If the
@@ -788,7 +778,7 @@ def build(script, sup, style_id, direction=None):
         if role == "contrast":                           # the contrast on a bar: dark ink on the accent
             wd = P.R.width(f"dsp{a}_{big}", rows[big][0]) / W
             P.block([a, b], [0.5 - wd / 2 - 0.02, ys[big] - P.R.cap(f"dsp{a}_{big}") / H - 0.014, 0.5 + wd / 2 + 0.02, ys[big] + 0.016],
-                    pal["accent"], z=7, op=0.96, radius=0.006, bar_for=f"dsp{a}_{big}", bar_y=ys[big])     # moves with its line (bars_follow)
+                    pal["accent"], z=7, op=0.96, radius=0.006, bar_on=a)     # part of the block: seat_display moves and shrinks it with its lines
         for k, (line, px) in enumerate(rows):
             vk = f"dsp{a}_{k}"
             line_ink, line_edge = (DARK_INK, pal["accent"]) if role == "contrast" and k == big else (ink, edge)
@@ -796,7 +786,7 @@ def build(script, sup, style_id, direction=None):
         omit += F.said_span(clock, seg, text)
         P.events.append(a)
         shown.append((a, b, text))
-        last = a
+    shown.sort()
     for a, b, text in labels:
         if b - a < 14:
             continue
@@ -825,7 +815,6 @@ def build(script, sup, style_id, direction=None):
             rec = next((r for rows in list(pics.values()) + list(footage.values()) for r in rows if r["path"] == path), {})
             meta[key] = dict(faces=F.face_meta(rec))
     title_layout = seat_display(l1, meta, P.R)
-    bars_follow(l1)
     caps = [i for i in l1["items"] if i["k"] == "word" and i.get("role") == "cap"]
     if caps:
         # The shade under the captions: one pool a page, on that page's own words where the seat finally put them
@@ -854,6 +843,7 @@ def build(script, sup, style_id, direction=None):
     beats = dict(dur_f=f_end, voice_f=[LEAD_F, f_voice_end], cuts=sorted(set(cut_pts)), changes=changes,
                  events=sorted(set(P.events) | set(cut_pts) | set(changes) | {it["f"][0] for it in l1["items"] if it["k"] == "card"}),
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=1, display=[dict(f=[a, b], text=t) for a, b, t in shown],
+                 display_count=dict(proposed=len(proposed), landed=len(shown)),
                  labels=[dict(f=[a, b], text=t) for a, b, t in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
                  style=style_id, layout=st["layout"], placement_check=placement_report, coverage=coverage_report,
                  title_layout=title_layout, caption_restarts=restarts, face_metadata=meta,

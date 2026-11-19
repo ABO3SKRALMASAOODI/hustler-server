@@ -142,7 +142,24 @@ def run_tokens(index, source_words, offset, tol=0.5, most=3):
         return index, 0
     out = copy.deepcopy(index)
     out['words'] = new
-    for s in out.get('sentences') or []:
-        s['wi0'], s['wi1'] = old_to_new[s['wi0']], old_to_new[s['wi1']]
+    # A token whose pieces sat in two sentences belongs to the first (it is captioned once): the next sentence starts
+    # on the word after it, and a sentence left with no word of its own is folded into the one before it.
+    sents, last = [], -1
+    for s in sorted(out.get('sentences') or [], key=lambda s: s['wi0']):
+        a, b = max(old_to_new[s['wi0']], last + 1), old_to_new[s['wi1']]
+        if b < a:
+            if sents:
+                sents[-1]['t1'] = max(float(sents[-1].get('t1', 0)), float(s.get('t1', 0)))
+            continue
+        if a != old_to_new[s['wi0']] and 't0' in s:
+            s['t0'] = new[a]['t0']
+        s['wi0'], s['wi1'] = a, b
+        sents.append(s)
+        last = b
+    for s in sents:
+        if 't1' in s:                                          # a merged last word may end later than the sentence did
+            s['t1'] = max(float(s['t1']), float(new[s['wi1']]['t1']))
         s['text'] = ' '.join(w['w'] for w in new[s['wi0']:s['wi1'] + 1])
+    if 'sentences' in out:
+        out['sentences'] = sents
     return out, merged

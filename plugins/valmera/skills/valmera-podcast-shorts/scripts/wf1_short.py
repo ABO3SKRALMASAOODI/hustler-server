@@ -340,12 +340,13 @@ def take_cuts(src, shots, dur, sup_dir):
     return out
 
 
-DIRECTION_CONTRACT = 2           # 19 Nov 2026 (round1): display words by story role, the story's turn apart from the payoff
+DIRECTION_CONTRACT = 3           # 20 Nov 2026 (round1): display words by story role, ranked with alternates; the story turn apart from the payoff
 ROLES = ("hook", "turn", "payoff", "figure", "name", "contrast")
 
 
 def direction_of(ctx, script, pack):
-    """What a model reads off the heard sentences for the film builder: the two to four words to set large, each with
+    """What a model reads off the heard sentences for the film builder: the words to set large, ranked best first with
+    alternates (up to six; the film sets the first two to four whose timing fits), each with
     the job it does in the story (hook, turn, payoff, figure, name, contrast) and the one word of it set largest; the
     sentences that speak of the past; the sentence the payoff starts on (``turn_seg``, where the film cuts to his face);
     the sentence where the story turns (``story_turn_seg``, before the payoff: the music's drop and the sound's turn hit
@@ -360,13 +361,15 @@ def direction_of(ctx, script, pack):
               "their words: few, large, each doing a job in the story. You read its sentences, numbered, and answer in JSON "
               "only. You never add a word he does not say.")
     system += "\n\n" + ("Return JSON only: {"
-               "\"display\": [two to four words or short phrases to set large on screen, each on the word that says it, each doing "
-               "one job in the story: the hook that stops a stranger, the turn where it changes direction, the payoff, a figure "
-               "that carries the stakes, a name the story hangs on, or the two sides of a contrast. Never a filler, a function "
-               "word, a generic noun or a phrase that only restates the topic; fewer is better than a weak one. Each {\"seg\": "
+               "\"display\": [up to six words or short phrases to set large on screen, RANKED BEST FIRST: the film sets the first "
+               "two to four whose timing fits (a word too close to the start or to another gives its place to the next), so "
+               "give alternates after your best. Each is set on the word that says it and does one job in the story: the hook "
+               "that stops a stranger, the turn where it changes direction, the payoff, a figure that carries the stakes, a "
+               "name the story hangs on, or the two sides of a contrast. Never a filler, a function word, a generic noun or a "
+               "phrase that only restates the topic. Each {\"seg\": "
                "the sentence number, \"text\": one to three consecutive words exactly as he says them (a figure as digits, e.g. "
                "$5,000, 49% or 1999), \"role\": one of hook|turn|payoff|figure|name|contrast, \"key\": the one word of text "
-               "that carries it (set largest)}; spread over the film, in order, never two from one sentence], "
+               "that carries it (set largest)}; spread over the film, never two from one sentence], "
                "\"past_segs\": [the numbers of the sentences that tell of the past: a year gone by, how something began, what "
                "someone once did; not his opinions about today], "
                "\"payoff_seg\": the number of the sentence where the payoff begins (usually the last or the one before it), "
@@ -395,7 +398,7 @@ def direction_of(ctx, script, pack):
     turn = d.get("turn_seg") if isinstance(d.get("turn_seg"), int) else None
     if payoff is not None and turn is not None and turn >= payoff:
         turn = None                                    # a turn on or after the payoff is the payoff itself
-    out = dict(contract=DIRECTION_CONTRACT, display=display[:4],
+    out = dict(contract=DIRECTION_CONTRACT, display=display[:6],
                past_segs=[int(i) for i in d.get("past_segs") or [] if isinstance(i, int)],
                turn_seg=payoff, story_turn_seg=turn,
                arc=[r for r in d.get("arc") or [] if isinstance(r, dict)][:6],
@@ -724,9 +727,12 @@ def score(ctx, script):
     if not taste["ok"]:
         raise RuntimeError("the plan breaks a taste rule: " + "; ".join(taste["problems"][:6]))
     turn_s = round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None
-    # the story's own turn, before the payoff: music_film --turn (the drop when the payoff has no room after it)
+    # the story's own turn, before the payoff: music_film --turn (the drop when the payoff has no room after it).
+    # turn_drop is this workflow's opt-in, sent with every payoff: a short's payoff is often its last sentence, and
+    # the drop then lands on the turn (this one, else the one music_film reads from the lines) or the last hit moves
+    # into the film's tail, so no short keeps a flat bed (round1 thin-sound)
     story_turn_s = round(beats["story_turn_f"] / F.FPS, 3) if beats.get("story_turn_f") is not None else None
-    return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, story_turn_s=story_turn_s, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
+    return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, story_turn_s=story_turn_s, turn_drop=turn_s is not None, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
                 frames=l1["dur_f"], items=len(l1["items"]), direction={k: v for k, v in d.items() if k != "spend"}, spend=([d["spend"]] if d.get("spend") else []) +
                 [dict(u,stage='supply',what='primary documents') for research in pack.get('document_research',[]) for u in research.get('spend',[])] +
                 [dict(u,stage='supply',what='documentary research revision') for u in pack.get('research_spend',[])] +

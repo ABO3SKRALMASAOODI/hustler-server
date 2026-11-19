@@ -404,6 +404,19 @@ def arrange(song, marks, profile=None):
                 t2 = near
         if 2.0 * B <= t2 <= t_end - 2.0 * B:
             drop_t, build_from, drop_on = t2, None, "turn"
+    if drop_t is None and marks.get("turn_drop") and payoff is not None:
+        # No turn the drop can stand on (none named or read, or too close to the start): the payoff takes the drop and
+        # the last hit moves into the tail the film already has, up to the end card's gap, so a bar or two plays after
+        # it. The hit moves only later, never before the last word's breath.
+        p2 = payoff
+        if lands and marks.get("snap", True):
+            near = min(lands, key=lambda c: abs(c - p2))
+            if abs(near - p2) <= SNAP_S:
+                p2 = near
+        n_after = int(math.floor((dur - P["end_gap_s"] - tail - p2) / beat + 1e-6))
+        if p2 >= 2.0 * B and n_after >= 4:
+            drop_t, drop_on = p2, "payoff"
+            t_end = max(t_end, p2 + min(n_after, 8) * beat)
     has_entry = bool(entry.any())
     # ---- the film's beats: one stretch to the drop, one from it to the last hit
     spans = []

@@ -71,3 +71,17 @@ def test_run_tokens_join_a_split_token_on_the_run_transcripts_boundary():
     # words the run transcript keeps apart stay apart; a token far in time is not this one
     same,n0=A.run_tokens(idx,[(100.32,'49'),(100.5,'%'),(105.0,'self-critical.')],100.0)
     assert n0==0 and same is idx
+    # a token split across two sentences ('self' ends one, '-critical.' opens the next) is captioned once, in the first
+    words2=[dict(w=w,t0=a,t1=b) for w,a,b in [('very',0.0,.2),('self',.3,.5),('-critical.',.5,.9),('Then',1.0,1.2)]]
+    idx2=dict(video=dict(duration=2),words=words2,sentences=[dict(id='s1',wi0=0,wi1=1,t0=0,t1=.5,text='very self'),
+                                                             dict(id='s2',wi0=2,wi1=3,t0=.5,t1=1.2,text='-critical. Then')])
+    out2,n2=A.run_tokens(idx2,[(100.0,'very'),(100.3,'self-critical.'),(101.0,'Then')],100.0)
+    assert n2==1 and [(s['wi0'],s['wi1'],s['text']) for s in out2['sentences']]==[(0,1,'very self-critical.'),(2,2,'Then')]
+    assert out2['sentences'][0]['t1']==.9 and out2['sentences'][1]['t0']==1.0
+    flat=[out2['words'][q]['w'] for s in out2['sentences'] for q in range(s['wi0'],s['wi1']+1)]
+    assert flat==['very','self-critical.','Then']                              # each word once (supply's words.json)
+    # a sentence that was only the tail of the token is folded into the one before it
+    idx3=dict(video=dict(duration=2),words=words2,sentences=[dict(id='s1',wi0=0,wi1=1,t0=0,t1=.5,text='a'),dict(id='s2',wi0=2,wi1=2,t0=.5,t1=.9,text='b'),
+                                                             dict(id='s3',wi0=3,wi1=3,t0=1.0,t1=1.2,text='c')])
+    out3,_=A.run_tokens(idx3,[(100.0,'very'),(100.3,'self-critical.'),(101.0,'Then')],100.0)
+    assert [(s['id'],s['wi0'],s['wi1']) for s in out3['sentences']]==[('s1',0,1),('s3',2,2)] and out3['sentences'][0]['t1']==.9
