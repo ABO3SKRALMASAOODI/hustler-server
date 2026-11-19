@@ -704,6 +704,27 @@ def write(ctx, idea, card, rc, notes=None, inventory=None):
     return (got if isinstance(got, dict) else {}), use
 
 
+RERECORD = 2          # a recording the product itself failed is made again this many times before its idea gives way
+
+
+def product_failed(rec):
+    """The product produced no export and its own run recorded a failure (a failed job, an error reply): the stack
+    failed, not the idea. Machine fields of the record only."""
+    return bool(rec) and not rec.get("exports") and bool(rec.get("failures"))
+
+
+def set_aside(ctx, rec, n):
+    """A failed recording's folder is moved aside so the next one is made fresh (record() reuses a kept record.json)."""
+    sid = rec.get("sid")
+    if not sid:
+        return
+    src = os.path.join(ctx.tmp, "studio", "records", sid)
+    if os.path.isdir(src):
+        dst = f"{src}.failed{n}"
+        shutil.rmtree(dst, ignore_errors=True)
+        os.rename(src, dst)
+
+
 def script(ctx, ideas_out):
     keep = os.path.join(ctx.run_dir, "script_state.json")
     stt = jload(keep, {}) or {}
@@ -717,11 +738,24 @@ def script(ctx, ideas_out):
         tag = k = f"i{ii}"
         old = stt.get(tag, {}).get("check") or {}
         if old.get("v") == CHECK_V and old.get("stack_v") == STACK_V and stt[tag].get("ok") is False:
-            continue                     # checked by this check and not shown: never shown
+            prior = jload(stt[tag].get("record") or "", {}) or {}
+            if product_failed(prior) and int(stt[tag].get("product_failures") or 0) < RERECORD:
+                # the product's own job failed (no export, a failure on record): an outage of the local stack, not the
+                # idea's verdict. The recording is set aside and made again (20 Nov: every index of the stack failed on
+                # a Whisper model missing offline; the run then refused the three ideas for good)
+                n = int(stt[tag].get("product_failures") or 0) + 1
+                ctx.log(f"recording {tag}: the product failed ({', '.join(map(str, prior.get('failures') or []))}); recording it again ({n})")
+                set_aside(ctx, prior, n)
+                stt[tag] = dict(product_failures=n)
+                jsave(keep, stt)
+                old = {}
+            else:
+                continue                 # checked by this check and not shown: never shown
         rec = record(ctx, idea, k, ask_text)
         chk = old if old.get("v") == CHECK_V and old.get("stack_v") == STACK_V else dict(export_check(ctx, rec, ask_text, must), stack_v=STACK_V)
         spend += chk.pop("spend", []) if "spend" in chk else []
-        stt[tag] = dict(ok=chk["ok"], check=chk, record=os.path.join(ctx.tmp, "studio", "records", rec["sid"], "record.json"))
+        stt[tag] = dict(ok=chk["ok"], check=chk, record=os.path.join(ctx.tmp, "studio", "records", rec["sid"], "record.json"),
+                        product_failures=int(stt.get(tag, {}).get("product_failures") or 0))
         jsave(keep, stt)
         ctx.log(f"recording {tag}: {'shown' if chk['ok'] else 'not shown'}: {chk.get('why') or chk.get('looks')}")
         if chk["ok"]:

@@ -293,3 +293,35 @@ def test_picture_words_do_not_include_an_adjacent_unplayed_claim():
     clock = SimpleNamespace(words=[dict(w='monitor', t0=0, t1=1), dict(w='phone', t0=1, t1=2)])
     assert P.words_under(clock, 0, 30) == 'monitor'
     assert P.words_under(clock, 30, 60) == 'phone'
+
+
+def test_a_recording_the_product_failed_is_made_again_not_refused(tmp_path, monkeypatch):
+    """20 Nov: every index of the recording stack failed (a Whisper model missing offline); the three ideas were cached
+    as 'no export' and the resumed run refused them for good."""
+    import json, os
+    import proof as P
+    run = tmp_path / "run"; (run / "tmp" / "studio" / "records" / "s0").mkdir(parents=True)
+    rec_p = run / "tmp" / "studio" / "records" / "s0" / "record.json"
+    rec_p.write_text(json.dumps(dict(sid="s0", exports=[], failures=["error_reply", "job_failed"])))
+    (run / "script_state.json").write_text(json.dumps(dict(i0=dict(ok=False, record=str(rec_p),
+        check=dict(ok=False, v=P.CHECK_V, why="no export", stack_v=P.STACK_V)))))
+
+    class Ctx:
+        run_dir = str(run); tmp = str(run / "tmp"); run_id = "x-000000"
+        def log(self, m): pass
+    made = []
+
+    def fake_record(ctx, idea, k, ask_text):
+        made.append(k)
+        raise RuntimeError("stop after the re-record decision")
+    monkeypatch.setattr(P, "record", fake_record)
+    monkeypatch.setattr(P, "able_cards", lambda ctx: [dict(id="showcase")])
+    try:
+        P.script(Ctx(), dict(ideas=[dict(asks=["Make it vertical"], must_see=[[]], style="showcase")]))
+    except RuntimeError:
+        pass
+    assert made == ["i0"]
+    assert os.path.isdir(str(run / "tmp" / "studio" / "records" / "s0.failed1"))
+    assert P.product_failed(dict(exports=[], failures=["job_failed"]))
+    assert not P.product_failed(dict(exports=["e.mp4"], failures=[]))
+    assert not P.product_failed(dict(exports=[], failures=[]))
