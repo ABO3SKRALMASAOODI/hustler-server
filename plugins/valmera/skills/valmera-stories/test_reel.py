@@ -105,14 +105,14 @@ def test_talking_without_a_file_is_false():
 _CAP_VOICES = {"cap": {"font": "InterDisplay-Bold.ttf", "px": 56, "track": 0}, "dsp": {"font": "InterDisplay-Black.ttf", "px": 170, "track": -2}}
 
 
-def _cap_line(P, words, end, y=0.615):
+def _cap_line(P, words, end, y=0.615, ink="#FFFFFF"):
     """A caption line inked word by word in place from its left, the way film.caption_build sets one."""
     text = " ".join(t for _, t in words)
     x_left = 0.5 - P.R.width("cap", text) / F.W / 2
     toks = [t for _, t in words]
     for j, (on, t) in enumerate(words):
         x = x_left + (P.R.width("cap", " ".join(toks[:j]) + " x") - P.R.width("cap", "x")) / F.W if j else x_left
-        P.word([on, end], t, "cap", x, y, "#FFFFFF", 1.0, note=False, z=5, role="cap")
+        P.word([on, end], t, "cap", x, y, ink, 1.0, note=False, z=5, role="cap")
 
 
 def test_caption_seat_stays_dark_over_white_archive_and_flash(tmp_path):
@@ -323,10 +323,41 @@ def test_a_name_on_a_card_is_not_set_again_as_a_super(monkeypatch):
     dropped = []
     out = R.name_supers(P, clock, script, [], st, pal, 400, [], dropped, cards=cards)
     assert [t for _, _, t in out] == ["BILL GATES"]
-    assert dropped == [dict(seg=0, text="STEVE JOBS", role="name", why="printed elsewhere")]
+    assert dropped == [dict(seg=0, text="STEVE JOBS", role="name", why="printed elsewhere", card="STEVE JOBS")]
     sup = next(it for it in P.items if it["k"] == "word" and it["t"] == "BILL GATES")
     y = sup["y"][-1] if isinstance(sup["y"], list) else sup["y"]
     assert y == 0.76                                                                      # off the MICROSOFT card's type
+
+
+def test_a_black_caption_ink_gets_no_pool():
+    """Pure black ink has tone 0.0: `(tone or 1.0) > 0.5` read it as white and laid a dark pool under black words."""
+    assert R._ink_light("#FFFFFF") and not R._ink_light("#000000") and R._ink_light("not a colour")
+    P = F.Plan(dict(_CAP_VOICES), {})
+    _cap_line(P, [(10, "told"), (16, "a")], 50, ink="#000000")
+    R.caption_pool(P, 120, 0.615, tone_at=lambda f: 0.9)
+    assert not [it for it in P.items if it["k"] == "flash"]
+    P2 = F.Plan(dict(_CAP_VOICES), {})
+    _cap_line(P2, [(10, "told"), (16, "a")], 50)
+    R.caption_pool(P2, 120, 0.615, tone_at=lambda f: 0.9)
+    assert [it for it in P2.items if it["k"] == "flash"]                                  # white ink on a bright picture still pools
+
+
+def test_a_part_of_a_cards_name_is_recorded_as_set_by_the_card():
+    """name_supers drops 'JOBS' under the 'STEVE JOBS' card (_same_name); the record split must say the card set it,
+    not list it among the dropped items."""
+    script = dict(segments=[dict(say="Jobs walked out on stage.", show=[dict(text="Jobs", role="name", word_i=0)])])
+    words = [dict(w=w, start=round(0.3 + 0.3 * k, 3), end=round(0.5 + 0.3 * k, 3), seg=0) for k, w in enumerate(script["segments"][0]["say"].split())]
+    clock = F.Clock(dict(words=words, duration=3.0), script)
+    P = F.Plan(dict(_CAP_VOICES), {})
+    a = F.Clock.f(clock.seg_words(0)[0]["t0"])
+    dropped = []
+    out = R.name_supers(P, clock, script, [], dict(upper=True, dsp=dict(px=170)), dict(ink="#FFFFFF", accent="#F2C14E"), 400, [],
+                        dropped, cards=[(a - 5, a + 30, "STEVE JOBS", [0.2, 0.33, 0.8, 0.5])])
+    assert out == [] and dropped == [dict(seg=0, text="JOBS", role="name", why="printed elsewhere", card="STEVE JOBS")]
+    cards_shown = ["STEVE JOBS"]
+    other = dict(seg=1, text="APPLE", role="key", why="no room")
+    assert [x["text"] for x in dropped + [other] if R._as_card(x, cards_shown)] == ["JOBS"]
+    assert [x for x in dropped + [other] if not R._as_card(x, cards_shown)] == [other]
 
 
 def test_the_figure_hold_is_one_number_for_the_card_and_the_check():

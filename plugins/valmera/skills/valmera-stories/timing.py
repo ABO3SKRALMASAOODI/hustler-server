@@ -18,6 +18,7 @@ import time
 HOOK_LAND_S = 3.7          # the hook's collision lands by this many seconds of speech (the judge's median hook end)
 CLOSE_S = 5.0              # the close is one landing line of at most this many seconds (the judge's upper quartile)
 TIMING_ROUNDS = 3          # reads measured: the written script's and up to two rewrites
+TIMING_ASKS = 4            # rewrite asks: one the fact check refuses, or that changes no word, is asked again without a read
 RETRIES = 3                # an unanswered rewrite call is an outage: tried again with backoff
 BACKOFF_S = 4.0
 

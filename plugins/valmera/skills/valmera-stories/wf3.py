@@ -526,77 +526,106 @@ def narrate_script(ctx, sc, out):
     return PX.narrate(ns, out, band=band, label=f"wf3-narrate-{ctx.run_id}", env=env, reader=os.path.join(HERE, "voice.py"))
 
 
+def _words_of(sc):
+    """The words a read speaks: each segment's line, in order."""
+    return [str(s_.get("say") or "") for s_ in sc.get("segments") or []]
+
+
 def timed(ctx, sc, rep, spend, narrate=None, rewrite=None, final=None):
     """(script, verify report): the hook's collision and the close's length measured on the narration's own word times
     (timing.measure: the judge's 3.7 s to the hook's landing word, a close of at most 5 s). A beat over its budget goes
     back to the writer with the measured seconds (timing.rewrite, from the same verified facts), the script is judged on
-    its quotes again (final_gate) and read again, up to timing.TIMING_ROUNDS reads; the read nearest the budgets is kept,
-    and its narration is the one supply uses (supply/narration). A rewrite the final pass cannot stand keeps the script
-    it came from and tells the writer why on the next round. --args '{"timing": false}' or a given narration skips it."""
+    its quotes again (final_gate, its report in script_timing_final<ask>.json) and read again, up to timing.TIMING_ROUNDS
+    reads; the read nearest the budgets is kept, and its narration is the one supply uses (supply/narration). Only words
+    that changed are read again: a rewrite the final pass cannot stand, or one that changes no word, keeps the last read
+    and its measure and goes back to the writer with the reason (up to timing.TIMING_ASKS asks). script_final.json is
+    written last from the kept script and its own final report. --args '{"timing": false}' or a given narration skips it."""
     if ctx.args.get("timing") is False or ctx.args.get("narration"):
         return sc, rep
     import shutil
+    asks = 0
     narrate = narrate or (lambda sc_, out: narrate_script(ctx, sc_, out))
     rewrite = rewrite or (lambda sc_, m, notes: timing.rewrite(sc_, m, notes=notes, log=ctx.log))
-    final = final or (lambda sc_, rep_: final_gate(ctx, sc_, rep_, spend))
+    final = final or (lambda sc_, rep_: final_gate(ctx, sc_, rep_, spend, record=f"script_timing_final{asks}.json"))
     os.makedirs(ctx.supply, exist_ok=True)
-    rounds, best, notes = [], None, None
-    cur, cur_rep = sc, rep
-    for k in range(timing.TIMING_ROUNDS):
-        out = os.path.join(ctx.supply, f"narration_t{k}")
-        try:
-            nar = narrate(cur, out)
-            m = timing.measure(nar["words"], cur)
-        except Exception as e:  # noqa: BLE001 - a read that failed is read again by supply itself
-            ctx.log(f"timing: read {k} failed: {e!r}"[:300])
+    rounds, tries, best, notes, m = [], [], None, None, None
+    cur, cur_rep, cur_rec = sc, rep, "script_final.json"
+    fresh = True                                       # cur's words have not been read yet
+    while True:
+        if fresh:
+            k = len(rounds)
+            out = os.path.join(ctx.supply, f"narration_t{k}")
+            try:
+                nar = narrate(cur, out)
+                m = timing.measure(nar["words"], cur)
+            except Exception as e:  # noqa: BLE001 - a read that failed is read again by supply itself
+                ctx.log(f"timing: read {k} failed: {e!r}"[:300])
+                break
+            fresh = False
+            rounds.append(dict(round=k, ask=asks, hook_land_s=m.get("hook_land_s"), hook_word=m.get("hook_word"),
+                               close_s=m.get("close_s"), wps=m.get("wps"), over=m.get("over"), overage_s=timing.overage(m),
+                               hook=cur["segments"][0].get("say"), close=cur["segments"][-1].get("say")))
+            ctx.log(f"timing {k}: hook lands at {m.get('hook_land_s')} s on {m.get('hook_word')!r}, close {m.get('close_s')} s, "
+                    f"over by {timing.overage(m)} s")
+            if best is None or timing.overage(m) <= best[0]:
+                best = (timing.overage(m), k, cur, cur_rep, out, cur_rec)
+        if not m.get("over") or len(rounds) >= timing.TIMING_ROUNDS or asks >= timing.TIMING_ASKS:
             break
-        rounds.append(dict(round=k, hook_land_s=m.get("hook_land_s"), hook_word=m.get("hook_word"), close_s=m.get("close_s"),
-                           wps=m.get("wps"), over=m.get("over"), overage_s=timing.overage(m),
-                           hook=cur["segments"][0].get("say"), close=cur["segments"][-1].get("say")))
-        ctx.log(f"timing {k}: hook lands at {m.get('hook_land_s')} s on {m.get('hook_word')!r}, close {m.get('close_s')} s, "
-                f"over by {timing.overage(m)} s")
-        if best is None or timing.overage(m) <= best[0]:
-            best = (timing.overage(m), k, cur, cur_rep, out)
-        if not m.get("over") or k + 1 >= timing.TIMING_ROUNDS:
-            break
-        new, uses, changed = rewrite(cur, m, notes)
+        asks += 1
+        new, uses, changed = rewrite(cur, m, notes)    # the last read's measure stands until the words change
         spend += [dict(stage="timing", **u) for u in uses if u]
-        if not changed:
-            notes = "your last answer rewrote none of the beats asked for"
+        if not changed or _words_of(new) == _words_of(cur):
+            notes = "your last answer changed none of the words of the beats asked for"
+            tries.append(dict(ask=asks, read=False, why="no word changed"))
             continue
         try:
             new, new_rep = final(new, cur_rep)
         except Exception as e:  # noqa: BLE001 - the rewrite does not stand on its quotes: the script it came from stays
             notes = f"the fact check could not stand your rewrite: {str(e)[:400]}"
             ctx.log(f"timing: {notes}"[:300])
+            tries.append(dict(ask=asks, read=False, why=notes[:300]))
             continue
-        cur, cur_rep, notes = new, new_rep, None
+        if _words_of(new) == _words_of(cur):           # the fact check restored the words that were read
+            notes = "the fact check put back the words you rewrote; land the beat inside its quotes"
+            tries.append(dict(ask=asks, read=False, why="the fact check restored the read words"))
+            continue
+        tries.append(dict(ask=asks, read=True))
+        cur, cur_rep, cur_rec, notes, fresh = new, new_rep, f"script_timing_final{asks}.json", None, True
     if best is None:
         return sc, rep
-    _, k, sc2, rep2, out = best
+    _, k, sc2, rep2, out, rec = best
     final_dir = os.path.join(ctx.supply, "narration")
     if os.path.isdir(out):
         shutil.rmtree(final_dir, ignore_errors=True)
         os.replace(out, final_dir)
-    for j in range(timing.TIMING_ROUNDS):
+    for j in range(len(rounds)):
         if os.path.join(ctx.supply, f"narration_t{j}") != out:
             shutil.rmtree(os.path.join(ctx.supply, f"narration_t{j}"), ignore_errors=True)
-    sc2 = dict(sc2, timing=dict(kept=k, rounds=rounds, budgets=dict(hook_land_s=timing.HOOK_LAND_S, close_s=timing.CLOSE_S)))
-    json.dump(dict(script=sc2, report=dict(kept=k, rounds=rounds)), open(os.path.join(ctx.run_dir, "script_timing.json"), "w"),
+    sc2 = dict(sc2, timing=dict(kept=k, rounds=rounds, asks=tries, budgets=dict(hook_land_s=timing.HOOK_LAND_S, close_s=timing.CLOSE_S)))
+    json.dump(dict(script=sc2, report=dict(kept=k, rounds=rounds, asks=tries)), open(os.path.join(ctx.run_dir, "script_timing.json"), "w"),
+              ensure_ascii=False, indent=1)
+    # the last text gate's record is the delivered script's: the kept read's script with the final report it passed on
+    try:
+        fr = json.load(open(os.path.join(ctx.run_dir, rec))).get("report")
+    except (OSError, ValueError):
+        fr = None
+    if fr is None:
+        fr = dict((rep2.get("settle") or {}).get("final") or {}, verify={k_: v for k_, v in rep2.items() if k_ != "settle"})
+    json.dump(dict(script=sc2, report=fr, record=rec), open(os.path.join(ctx.run_dir, "script_final.json"), "w"),
               ensure_ascii=False, indent=1)
     return sc2, rep2
 
 
-def final_gate(ctx, sc, rep, spend, final=None):
+def final_gate(ctx, sc, rep, spend, final=None, record="script_final.json"):
     """(script, verify report): the last text gate before the script is frozen (writer.final_support). Every line,
     after the ear's rewrite, is judged against the verified quotes it cites in one batched call; an unsupported line is
     rewritten on its quotes in the ear's style (ear.KEEP_STYLE) and judged again, at most twice, else dropped; a core
     line is restated or the stage fails; a core line whose rewrite lost its claim or tension is rewritten once more.
-    The report is script_final.json."""
+    The report is `record` in the run folder (script_final.json; timed's rewrites write script_timing_final<ask>.json)."""
     final = final or (lambda sc_: writer.final_support(sc_, log=ctx.log, style=ear.KEEP_STYLE))
     sc2, fr, more = final(sc)
     spend += [dict(stage="final-support", **u) for u in more if u]
-    json.dump(dict(script=sc2, report=fr), open(os.path.join(ctx.run_dir, "script_final.json"), "w"), ensure_ascii=False, indent=1)
+    json.dump(dict(script=sc2, report=fr), open(os.path.join(ctx.run_dir, record), "w"), ensure_ascii=False, indent=1)
     if not fr.get("ok"):
         raise RuntimeError("the final support pass does not stand: " + json.dumps(
             {k: fr.get(k) for k in ("why", "core_unsupported", "support_dropped")}, ensure_ascii=False)[:700])
@@ -1976,9 +2005,9 @@ def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None
     return l1, beats, taste
 
 
-DENSITY_SYSTEM = """You are the picture editor of a narrated vertical story film cut like the best documentary reels. The script is final; you never change a word. The film needs more large display type: a key word, a name or a short chapter title set big over the pictures on about one shot in six.
+DENSITY_SYSTEM = """You are the picture editor of a narrated vertical story film cut like the best documentary reels. The script is final; you never change a word. The film needs more large display type set big over the pictures on about one shot in six, and that weight goes to the words a viewer holds on to: the key word of a line and the names of the people and things it is about.
 
-For the segments you are given (each with its words numbered from 0 and the display items it already has), add up to two display items each, only where the words carry them: {"i": segment, "text": exactly the spoken word or words as printed (a key word, a person's name, a two-to-four-word chapter title on a segment that opens a section), "role": "key"|"name"|"chapter", "word_i": the index of the spoken word it lands on}. Never a number or a figure. Never repeat an item the segment already has.
+For the segments you are given (each with its words numbered from 0, its role in the story and the display items it already has), add up to two display items each, only where the words carry them: {"i": segment, "text": exactly the spoken word or words as printed (a key word or a name), "role": "key"|"name"|"chapter", "word_i": the index of the spoken word it lands on}. Never a number or a figure. Never repeat an item the segment already has. A chapter title is rare: it goes only where the story truly changes subject, never on a turn, a low point or a payoff for being one, and a film of about a minute and a half needs none, at most one in the whole film; when a segment already sits under a chapter or the film already has one, add key words and names instead. A chapter title, when there is one, is the segment's own spoken words or the name of the thing it turns on. Each segment's role in the story is the editor's private note on its structure and never becomes words on the screen.
 
 Answer with one JSON object only: {"items": [...]}"""
 
@@ -2009,7 +2038,9 @@ def density_repair(sc, lines, ask=None, verify_fn=None):
         ws = str(s_.get("say") or "").split()
         rows.append(f"{i}. role in the story: {writer.beat_prose(s_.get('beat'))}; has={json.dumps([x.get('text') for x in s_.get('show') or [] if isinstance(x, dict)], ensure_ascii=False)}\n   words: "
                     + " ".join(f"{j}:{w}" for j, w in enumerate(ws)))
-    text, use = ask(DENSITY_SYSTEM, "# Segments\n" + "\n".join(rows))
+    chapters = [x.get("text") for s_ in sc["segments"] for x in s_.get("show") or [] if isinstance(x, dict) and x.get("role") == "chapter"]
+    text, use = ask(DENSITY_SYSTEM, "# The film's chapter titles so far\n" + json.dumps(chapters, ensure_ascii=False)
+                    + "\n\n# Segments\n" + "\n".join(rows))
     try:
         got = writer.json_block(text).get("items") or []
     except ValueError:

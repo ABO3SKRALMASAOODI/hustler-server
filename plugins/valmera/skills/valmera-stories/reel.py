@@ -1161,6 +1161,13 @@ POOL_TONE = (0.45, 0.65)   # the picture's tone under the caption (Y', 0-1): no 
                            # (wf3.caption_contrast calls white ink on a median over 0.6 unreadable)
 
 
+def _ink_light(c):
+    """A light caption ink (white or near it): its tone over 0.5; an ink whose tone cannot be read counts as white,
+    and pure black (tone 0.0) is dark."""
+    t = _hex_tone(c)
+    return True if t is None else t > 0.5
+
+
 def _hex_tone(c):
     h_ = str(c).lstrip("#")
     try:
@@ -1211,7 +1218,7 @@ def caption_pool(plan, end_frame, y, amount=0.70, holes=(), tone_at=None):
     one pool per inked word, its rect the box of the words inked so far (the line's words ink in place from its left),
     its strength `amount` x pool_need(the tone of the picture under it, tone_at(frame) -> Y' or None). No word inked, no
     pool; a dark or mid plate, no pool. `holes`: white frames the pool leaves whole."""
-    caps = [it for it in plan.items if it.get("k") == "word" and it.get("role") == "cap" and (_hex_tone(it.get("ink", "#FFFFFF")) or 1.0) > 0.5]
+    caps = [it for it in plan.items if it.get("k") == "word" and it.get("role") == "cap" and _ink_light(it.get("ink", "#FFFFFF"))]
     lines = {}
     for it in caps:
         yy = it["y"][-1] if isinstance(it["y"], list) else it["y"]
@@ -1478,6 +1485,12 @@ def motion_of(l1, pictures):
                 content_moving_share=round(con_f / max(tot, 1), 3), camera_moving_share=round(cam_f / max(tot, 1), 3))
 
 
+def _as_card(x, cards_shown):
+    """A dropped display item a designed card printed instead: 'printed elsewhere' and the same name as a card's text
+    (_same_name, the match name_supers drops it by: "JOBS" on the "STEVE JOBS" card)."""
+    return x.get("why") == "printed elsewhere" and any(_same_name(x.get("text"), c) for c in cards_shown)
+
+
 def _same_name(a, b):
     """The same printed name (case and spacing aside), or one printed inside the other ("JOBS" in "STEVE JOBS")."""
     a, b = " ".join(str(a).upper().split()), " ".join(str(b).upper().split())
@@ -1509,8 +1522,9 @@ def name_supers(P, clock, sc, timeline, st, pal, f_end, shown, dropped, cards=()
                 continue
             text = x["text"].upper() if st["upper"] else x["text"]
             up = [c for c in cards if c[0] < b and a < c[1]]
-            if any(_same_name(text, c[2]) for c in up):
-                dropped.append(dict(seg=i, text=text, role="name", why="printed elsewhere"))     # the card sets the name
+            on_card = next((c[2] for c in up if _same_name(text, c[2])), None)
+            if on_card is not None:                                                               # the card sets the name
+                dropped.append(dict(seg=i, text=text, role="name", why="printed elsewhere", card=on_card))
                 continue
             faces_hi = any(((f["box"][1] + f["box"][3]) / 2) < 0.45 for r in timeline if r[0] < b and a < r[1] for f in (r[4].get("faces") or []))
             vk = f"dsp_name{a}"
@@ -2236,8 +2250,8 @@ def build(script, sup, style_id, direction=None):
                                            supers, dropped, turn_ramp, white, flashes, f_voice_end) if fit_on else {}),
                            **(dict(intrinsic_grey_share=intrinsic, caption_lag_f=list(getattr(P, "cap_lags", []) or []),
                                    **motion_of(l1, P.pictures)) if fit_on else {})},
-                 display_dropped=[x for x in dropped if not (x["why"] == "printed elsewhere" and x["text"] in cards_shown)] if fit_on else None,
-                 display_as_card=[x["text"] for x in dropped if x["why"] == "printed elsewhere" and x["text"] in cards_shown] if fit_on else None,
+                 display_dropped=[x for x in dropped if not _as_card(x, cards_shown)] if fit_on else None,
+                 display_as_card=[x["text"] for x in dropped if _as_card(x, cards_shown)] if fit_on else None,
                  sound_design={k: v for k, v in (l1.get("sound_design") or {}).items() if k != "dropped"},
                  look=[f for f in look_f if 0 <= f < f_end])
     return l1, beats

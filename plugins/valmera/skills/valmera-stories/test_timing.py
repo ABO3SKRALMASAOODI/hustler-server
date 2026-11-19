@@ -129,6 +129,71 @@ def test_a_rewrite_the_fact_check_cannot_stand_keeps_the_script_and_tells_the_wr
     sc0 = _sc()
     sc2, _ = wf3.timed(ctx, sc0, dict(ok=True), [], narrate=narrate, rewrite=rewrite, final=final)
     assert sc2["segments"][0]["say"] == DATE_HOOK and notes[0] is None and "could not stand" in notes[1]
+    assert len(notes) == timing.TIMING_ASKS and len(sc2["timing"]["rounds"]) == 1      # every refused ask, one read
+
+
+def _ctx(tmp_path):
+    return types.SimpleNamespace(run_dir=str(tmp_path), supply=str(tmp_path / "supply"), tmp=str(tmp_path), args={}, run_id="t",
+                                 log=lambda *_: None)
+
+
+def _reader(reads):
+    def narrate(sc_, out):
+        os.makedirs(out, exist_ok=True)
+        json.dump(_words(sc_), open(os.path.join(out, "words.json"), "w"))
+        reads.append(tuple(s_["say"] for s_ in sc_["segments"]))
+        return dict(words=os.path.join(out, "words.json"))
+    return narrate
+
+
+def test_unchanged_words_are_never_read_twice(tmp_path):
+    """A refused or empty rewrite narrated the same words into a new narration_t folder: a second full Phonon read of
+    identical text. The last read's measure stands; the writer is asked again with the reason."""
+    import wf3
+    reads, notes, finals = [], [], []
+
+    def rewrite(sc_, m, n):
+        notes.append(n)
+        out = json.loads(json.dumps(sc_))
+        if len(notes) == 2:
+            return out, [], []                                                      # an answer that changes nothing
+        out["segments"][0].update(say=SHARP_HOOK, lands="booed")
+        out["segments"][-1].update(say=SHORT_CLOSE)
+        return out, [], [0, 2]
+
+    def final(sc_, rep_):
+        finals.append(1)
+        if len(finals) == 1:
+            raise RuntimeError("the final support pass does not stand: hook unsupported")
+        return sc_, dict(rep_, judged=True)
+    sc2, rep2 = wf3.timed(_ctx(tmp_path), _sc(), dict(ok=True), [], narrate=_reader(reads), rewrite=rewrite, final=final)
+    assert len(reads) == len(set(reads)) == 2                                       # no words read twice
+    assert reads[0][0] == DATE_HOOK and reads[1][0] == SHARP_HOOK
+    assert notes[0] is None and "could not stand" in notes[1] and "changed none" in notes[2] and len(notes) == 3
+    assert sc2["segments"][0]["say"] == SHARP_HOOK and rep2["judged"] and sc2["timing"]["kept"] == 1
+    assert [a["read"] for a in sc2["timing"]["asks"]] == [False, False, True]
+
+
+def test_script_final_is_the_kept_script(tmp_path, monkeypatch):
+    """timed's rewrites ran final_gate, which overwrote script_final.json with a rewrite later dropped (its read lost
+    to round 0). Each rewrite's gate has its own record; script_final.json is the kept script's."""
+    import wf3
+    ctx = _ctx(tmp_path)
+    monkeypatch.setattr(wf3.writer, "final_support", lambda sc_, **kw: (sc_, dict(ok=True, verify=dict(ok=True), mark=sc_["segments"][0]["say"]), []))
+    sc0, rep0 = wf3.final_gate(ctx, _sc(SHARP_HOOK, LONG_CLOSE), dict(ok=True), [])
+    reads = []
+
+    def rewrite(sc_, m, n):                                                          # a longer close: its read is worse
+        out = json.loads(json.dumps(sc_))
+        out["segments"][0]["say"] = DATE_HOOK
+        out["segments"][-1]["say"] = LONG_CLOSE + " " + LONG_CLOSE
+        return out, [], [0, 2]
+    sc2, _ = wf3.timed(ctx, sc0, rep0, [], narrate=_reader(reads), rewrite=rewrite)
+    assert len(reads) == 2 and sc2["timing"]["kept"] == 0                           # its repeat is the same words: not read again
+    rec = json.load(open(tmp_path / "script_final.json"))
+    assert rec["script"]["segments"] == sc2["segments"] and rec["script"]["segments"][0]["say"] == SHARP_HOOK
+    assert rec["report"]["mark"] == SHARP_HOOK and rec["record"] == "script_final.json"
+    assert json.load(open(tmp_path / "script_timing_final1.json"))["script"]["segments"][0]["say"] == DATE_HOOK
 
 
 def test_the_ear_keeps_a_rewrite_that_cuts_the_close():
@@ -152,6 +217,20 @@ def test_beat_names_are_never_offered_as_chapter_titles():
     assert "beat=" not in content and "role in the story: where the story turns" in content
     assert "(the turn, the low point, the payoff)" not in writer.ANNOTATE_SYSTEM and "a chapter at each turn" not in writer.ANNOTATE_SYSTEM
     assert "private notes" in writer.ANNOTATE_SYSTEM and "never words for the screen" in writer.REEL_DATA
+
+
+def test_the_density_pass_asks_for_chapters_the_way_annotate_does():
+    """The density pass still asked for 'a two-to-four-word chapter title on a segment that opens a section' beside each
+    segment's role: a chapter card on every turn, against ANNOTATE_SYSTEM and FORMS['short'] (no chapters)."""
+    import wf3
+    assert "a two-to-four-word chapter title on a segment that opens a section" not in wf3.DENSITY_SYSTEM
+    assert "truly changes subject" in wf3.DENSITY_SYSTEM and "at most one in the whole film" in wf3.DENSITY_SYSTEM
+    assert "key word" in wf3.DENSITY_SYSTEM and "names" in wf3.DENSITY_SYSTEM and "never becomes words on the screen" in wf3.DENSITY_SYSTEM
+    sc = _sc(SHARP_HOOK, SHORT_CLOSE)
+    sc["segments"][1].update(beat="turn", show=[dict(text="The Edge", role="chapter", word_i=0)])
+    seen = []
+    wf3.density_repair(sc, [1, 2], ask=lambda system, content: (seen.append(content), ('{"items": []}', {}))[1])
+    assert '# The film\'s chapter titles so far\n["The Edge"]' in seen[0] and "role in the story: where the story turns" in seen[0]
 
 
 def test_annotate_keeps_which_prompt_wrote_each_item(monkeypatch):
