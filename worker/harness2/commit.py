@@ -16,6 +16,7 @@ import edl_diff
 import quality_verifier
 from agent_tools import edl_signature
 
+from harness2 import direct_op
 from harness2 import measure as measure_mod
 from harness2 import ops as ops_mod
 from harness2.envelope import Envelope
@@ -142,6 +143,10 @@ def write_version(ctx, prev, new_edl, env, note, operation_id=None,
                                           prev["version"], version)
     env.measured = measure_mod.edl_measure(new_edl, _source_s(ctx))
     try:
+        env.on_screen = measure_mod.on_screen(new_edl)
+    except Exception as exc:  # noqa: BLE001 - a report, never the write
+        print(f"[harness2] on-screen list skipped: {exc}", flush=True)
+    try:
         manifest = quality_verifier.build_change_manifest(
             ctx.project_id, version, prev["json"], new_edl, chg,
             description=str(note or env.changed)[:300], tool=tool)
@@ -193,6 +198,15 @@ def edit(ctx, ops, note="", base_version=None, operation_id=None):
         env.skip(0, "edit takes ops=[{...}, ...]",
                  "timeline(schema='ops') lists every op with an example")
         return env
+    direct_ops, ops = direct_op.split(ops)
+    if direct_ops:
+        before = ctx.latest_edl()
+        for index, value in direct_ops:
+            direct_op.run(ctx, value, env, index)
+        after = ctx.latest_edl()
+        if all(isinstance(op, dict) and op.get(ops_mod.DONE_KEY)
+               for op in ops):
+            return _direct_only(ctx, env, before, after, operation_id)
     for attempt in range(3):
         head = ctx.latest_edl()
         if attempt == 0 and base_version is not None and \
@@ -226,10 +240,55 @@ def edit(ctx, ops, note="", base_version=None, operation_id=None):
             continue
         break
     env.check = _checks(env, head["json"], new_edl)
+    _look_measure(ctx, head["json"], new_edl, env)
     env.measured.update(env.measures)
     env.findings.extend(env.already[:12])
     if env.refusals:
         _ticket_refusals(ctx, env)
+    _remember(ctx, operation_id, env)
+    return env
+
+
+def _look_measure(ctx, prev_edl, new_edl, env):
+    """A version whose look changed (grade, custom grade, stylize, custom
+    filters, grade windows) is measured on program frames against the
+    source, as v1's look writes are (look_guard): brightness, crush and the
+    CIELAB of whites and mid-tones. p5873 R2 came back darker and slightly
+    green while the model could only guess from frames which way the cast
+    moved. Information for the next adjustment, never a gate."""
+    try:
+        import look_guard
+        before = look_guard.signature(prev_edl)
+        if look_guard.signature(new_edl) == before:
+            return
+        line = look_guard.after_write(ctx, before)
+    except Exception as exc:  # noqa: BLE001 - a measure, never the edit
+        print(f"[harness2] look measure skipped: {str(exc)[:160]}",
+              flush=True)
+        return
+    line = " ".join(str(line or "").split())
+    if line:
+        env.finding(line)
+        env.measures["look"] = line[:600]
+
+
+def _direct_only(ctx, env, before, after, operation_id):
+    """The envelope of an edit whose only op was ``direct``: the Director's
+    own version (or the head as it was, with why)."""
+    env.version = after["version"]
+    if int(after["version"]) != int(before["version"]):
+        env.applied = 1
+        env.undo_to = before["version"]
+        env.changed = measure_mod.change_line(
+            before["json"], after["json"], before["version"],
+            after["version"])
+        env.check = _checks(env, before["json"], after["json"])
+        env.on_screen = measure_mod.on_screen(after["json"])
+        _look_measure(ctx, before["json"], after["json"], env)
+    elif not env.not_applied:
+        env.changed = f"already so: v{before['version']} unchanged"
+    env.measured = measure_mod.edl_measure(after["json"], _source_s(ctx))
+    env.measured.update(env.measures)
     _remember(ctx, operation_id, env)
     return env
 

@@ -185,7 +185,7 @@ def test_a_missing_render_starts_one_and_shows_the_program(vid_ctx,
     env = look.look(ctx, target="render", show="frames", times=[1])
     assert env.status == envelope.WORKING
     assert env.running["handle"] == "job:77"
-    assert "assembled from source; render running" in env.body
+    assert "NOT the render" in env.body
 
 
 def test_dense_sheet_over_a_range_is_paged(vid_ctx, monkeypatch):
@@ -433,7 +433,7 @@ def test_clips_create_child_projects(monkeypatch):
     ctx, fake = _ctx()
     asked = []
 
-    def fake_shorts(base, clips, style_note=None):
+    def fake_shorts(base, clips, style_note=None, deliver=None):
         asked.append(clips)
         base.serial_job_id = 4512
         return f"Started {len(clips)} clip project(s)."

@@ -13,7 +13,8 @@
       "dust",
       "confetti",
       "snow",
-      "fireworks"
+      "fireworks",
+      "bubbles"
     ],
     "emit": [
       "edge",

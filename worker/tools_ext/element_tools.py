@@ -3,7 +3,7 @@
   add_element   one family verb, ``kind``:
                   light_trail | light_dissolve | light_rim   (fx ``light`` on
                     the person matte)
-                  embers | sparks | dust | confetti | snow | fireworks
+                  embers | sparks | dust | confetti | snow | fireworks | bubbles
                     (el_particles; emit from the subject's edge, a point, a
                     box or the frame; composited as light)
                   lightning                     (el_lightning, strikes on
@@ -33,7 +33,8 @@ from tools_ext import _write
 DEPARTMENT = "world"
 VERBS = ("add_element",)
 
-PARTICLES = ("embers", "sparks", "dust", "confetti", "snow", "fireworks")
+PARTICLES = ("embers", "sparks", "dust", "confetti", "snow", "fireworks",
+             "bubbles")
 DOODLES = ("arrow", "underline", "circle", "scribble", "burst", "star",
            "check", "cross", "bracket", "spiral")
 LIGHTS = ("light_trail", "light_dissolve", "light_rim")
@@ -123,7 +124,12 @@ def add_element(ctx, kind, start, end=None, text=None, at=None, x=None,
     params, tpl, blend = {}, None, None
     if kind in PARTICLES:
         tpl, blend = "el_particles", "screen" if kind != "snow" else None
-        params = {"kind": kind, "emit": emit or ("box" if bx else "point")}
+        # bubbles drift over the whole picture unless told where to rise
+        params = {"kind": kind, "emit": emit or ("box" if bx else "frame"
+                                                 if kind == "bubbles"
+                                                 else "point")}
+        if kind == "bubbles" and not palette:
+            params["palette"] = "cool"
         if count:
             params["count"] = int(count)
         if palette:
@@ -217,7 +223,7 @@ TOOL_SPECS = {
         add_element,
         "A procedural element or a light device, one family verb. "
         "light_dissolve (the figure turns to light, embers off its edge), "
-        "light_trail, light_rim; embers/sparks/dust/confetti/snow/fireworks "
+        "light_trail, light_rim; embers/sparks/dust/confetti/snow/fireworks/bubbles "
         "(emit edge|point|box|frame; at = burst times); lightning (box = "
         "from x0,y0 to x1,y1; at = strikes); doodles arrow/underline/"
         "circle/scribble/burst/star/check/cross/bracket/spiral; orbit "
