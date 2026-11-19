@@ -14,8 +14,9 @@ OPS = [
     ("cut", '{"cut": [[193, 294]]}', "source seconds removed"),
     ("restore", '{"restore": [[2384.5, 2447.75]]}',
      "source seconds put back"),
-    ("speed", '{"speed": [{"start": 40, "end": 52, "factor": 0.5}]}',
-     "a constant speed over source seconds"),
+    ("speed", '{"speed": [{"start": 6, "end": 7.3, "factor": 0.6}]}',
+     "a constant speed over FILM seconds (add \"at_source\": true to give "
+     "source seconds); the result measures where it plays"),
     ("fit_length", '{"fit_length": {"max_s": 3590, "min_s": 3480}}',
      "trims the least active seconds at piece edges (or restores the most "
      "active), never inside a sentence; pieces under 2 s are dropped"),
@@ -105,9 +106,9 @@ def describe(schema):
     schema = str(schema or "ops").strip()
     if schema != "ops":
         return _layer(schema)
-    lines = ["edit ops (keep/cut/restore/speed/fit_length run first, in "
-             "source seconds; everything placed on the film uses the "
-             "resulting film clock unless it says at_source):"]
+    lines = ["edit ops (keep/cut/restore/fit_length run first, in "
+             "source seconds; speed and everything placed on the film use "
+             "the resulting film clock unless it says at_source):"]
     for name, example, contract in OPS:
         lines.append(f"- {name}: {example}\n    {contract}")
     lines.append("write verbs for {\"tool\": name, \"args\": {...}}:")

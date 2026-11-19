@@ -8,7 +8,10 @@ eyes. Descriptions come from the library's own text, then the vision chain
 is remembered with its query group, so ``place`` takes the exact item seen
 and a failed download takes the next result of the same search. Music comes
 only from the reference-grade set (or the library tracks the signal gate
-passed), so the owner's music policy holds without a refusal.
+passed), so the owner's music policy holds without a refusal. A music query
+ranks the tracks whose catalogue words it names first, and says plainly when
+none of reference grade matches (and which matching tracks the gate held
+back), so the model can tell the customer the truth once.
 """
 import json
 import os
@@ -222,7 +225,17 @@ def find(ctx, kind="stock_video", query="", count=6, orientation=None,
             text = _text_kind(ctx, kind, q, count)
         except Exception as exc:  # noqa: BLE001
             text = f"search failed ({type(exc).__name__}: {str(exc)[:160]})"
-        body.append(f"[{q}]\n{_facts(text)}")
+        text = _facts(text)
+        if kind == "footage":
+            # The links are placeable as they are: edit's place op
+            # downloads, stores and places one (p5744 said "no tool").
+            text = "\n".join(
+                line for line in text.splitlines()
+                if "fetch_url(" not in line)
+            text += ("\nplace a link with edit: {'place': {'id': '<link>', "
+                     "'at': <film s>, 'dur': <s>, 'mode': 'overlay'}}; it "
+                     "is downloaded, stored and placed in one op")
+        body.append(f"[{q}]\n{text}")
     for label, path in list(getattr(ctx, "pending_images", None) or []):
         env.image(label, path)
     ctx.pending_images = []
@@ -273,13 +286,33 @@ def _music(ctx, queries, count):
     film = {"kind": "longform" if program > 120 else "story",
             "duration_s": program}
     try:
-        options, _prof = music_choose.shortlist(film, n=n, pool=pool)
-        tracks = [o["track"] for o in options]
+        options, _prof = music_choose.shortlist(film, n=len(pool), pool=pool)
+        ranked = [o["track"] for o in options]
     except Exception:  # noqa: BLE001 - the pool itself, unranked
-        tracks = pool[:n]
-    lines = [f"{len(tracks)} track(s) from {basis}, ranked by fit to this "
-             f"film's length and pace" + (f" (asked: {', '.join(queries)})"
-                                          if queries else "") + ":"]
+        ranked = list(pool)
+    # The asked genre or title comes first (p5744 asked for lofi three
+    # times and got the same film-fit list each time, its words unread).
+    lines, matched, hits = [], {}, []
+    for q in queries:
+        found = _matching(ranked, q)
+        matched[q] = len(found)
+        hits.extend(t for t in found if t not in hits)
+        if found:
+            lines.append(f"[{q}] {len(found)} match(es) of reference "
+                         "grade: " + ", ".join(
+                             f"{LIB_PREFIX}{t['cid']}" for t in found[:6]))
+            continue
+        lines.append(f"[{q}] no track of reference grade matches; "
+                     "the list below is the closest by film fit")
+        below = _below_bar(q)
+        if below:
+            lines.append("  held back, under the music bar: " + "; ".join(
+                f"{t} (fails: {why})" for t, why in below[:4]))
+    tracks = (hits + [t for t in ranked if t not in hits])[:n]
+    lines.insert(0, f"{len(tracks)} track(s) from {basis}, asked words "
+                    "first, then ranked by fit to this film's length and "
+                    "pace" + (f" (asked: {', '.join(queries)})"
+                              if queries else "") + ":")
     for t in tracks:
         bits = [f"{LIB_PREFIX}{t['cid']}"]
         for key in ("title", "style", "mood", "bpm", "duration_s",
@@ -288,8 +321,78 @@ def _music(ctx, queries, count):
                 bits.append(f"{key}={t[key]}")
         lines.append("  " + " | ".join(str(b) for b in bits)[:300])
     env.body = "\n".join(lines)
-    env.measured = {"tracks": len(tracks)}
+    env.measured = {"tracks": len(tracks), "pool": len(pool)}
+    if matched:
+        env.measured["matched"] = matched
     return env
+
+
+def _words(text):
+    """Search words of a catalogue field or a query: lower-case runs of
+    letters and digits; 'lo-fi' also reads as 'lofi'."""
+    text = str(text or "").lower()
+    out = set()
+    for variant in (text, text.replace("-", "")):
+        word = "".join(c if c.isalnum() else " " for c in variant)
+        out.update(w for w in word.split() if len(w) >= 3)
+    return out
+
+
+def _track_words(t):
+    fields = [t.get("cid"), t.get("title"), t.get("author"), t.get("mood")]
+    if isinstance(t.get("style"), str):
+        fields.append(t["style"])
+    fields.extend(t.get("tags") or [])
+    return _words(" ".join(str(f) for f in fields if f))
+
+
+def _matching(tracks, query):
+    """Tracks whose catalogue words share any of the query's words, most
+    shared first (catalogue search over the model's own query)."""
+    want = _words(query)
+    if not want:
+        return []
+    scored = []
+    for rank, t in enumerate(tracks):
+        n = len(want & _track_words(t))
+        if n:
+            scored.append((-n, rank, t))
+    return [t for _n, _r, t in sorted(scored, key=lambda x: x[:2])]
+
+
+def _below_bar(query):
+    """[(title, why)] of catalogue tracks matching ``query`` that the music
+    gate failed, closest first: they exist, and are never placed (owner,
+    15 Nov)."""
+    rows = []
+    try:
+        import music_choose
+        fails = music_choose.gate()["fail"]
+        rows.extend(dict(t, _label=t["title"], _why=fails[t["cid"]])
+                    for t in music_choose.tracks() if t["cid"] in fails)
+    except Exception:  # noqa: BLE001 - the facts we have
+        pass
+    try:
+        import music_library
+        verdicts = _cc0_gate()
+        rows.extend(dict(r, cid=r["slug"], _label=f"{r['title']} (CC0)",
+                         _why=verdicts[r["slug"]])
+                    for r in music_library.catalog() if r["slug"] in verdicts)
+    except Exception:  # noqa: BLE001
+        pass
+    return [(t["_label"], "; ".join(t["_why"][:2]))
+            for t in _matching(rows, query)]
+
+
+def _cc0_gate():
+    """{slug: [fails]} of the CC0 pack under the same gate (music/gate.json)."""
+    path = os.path.join(os.path.dirname(agent_tools.__file__), "music",
+                        "gate.json")
+    try:
+        with open(path) as fh:
+            return dict(json.load(fh).get("fail") or {})
+    except (OSError, ValueError):
+        return {}
 
 
 def music_asset(stage, rid):
