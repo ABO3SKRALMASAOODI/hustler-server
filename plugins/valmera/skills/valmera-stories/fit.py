@@ -33,6 +33,13 @@ means at this shot (the words under it, else the line's own words, else its era)
 version_ok are one answer; stand-ins are named by kind; the brief is the wish list, not the test; the gate reads only
 the booleans and the grade ranks. On the same frames all four rater spans stay caught (14.77 of 14.8 s), the
 animatronics and other films' characters stay rejected, and the reel under the "rewritten" lines passes.
+
+20 Nov: an unanswered call is an outage, never a verdict. On 19 Nov the local proxy refused every audit call for about 90
+seconds (a daily call cap); each shot without an answer became fit=False "not judged", the gates dropped all 87 planned
+shots and 76 supply-approved pictures left the film for designed cards. Now a batch with no answer is asked again after
+a pause (ask_batches: RETRY_WAITS, the rest of a pass waiting with it so an outage costs one wait), a shot the audit
+still could not judge keeps the supply's own verdict for its take and line (judged=False, never a failure), and a supply
+take no model could judge stays usable on the line it was found for (unjudged, ranked after every judged take).
 """
 import base64
 import hashlib
@@ -40,11 +47,13 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 
 import writer
 
 MODEL = "gpt-6.1-sol"
 BATCH = 8
+RETRY_WAITS = (30.0, 120.0)      # seconds before each further pass over the batches no answer came back for
 PHOTO_PX, FRAME_PX = 1024, 720
 BOOLS = ("fits_line", "exact_thing", "time_ok", "version_ok", "contradicts", "live_action", "speaking_on_camera")
 
@@ -106,6 +115,49 @@ def usable(v):
         return False
     return (v.get("fits_line") is True and v.get("exact_thing") is True and v.get("time_ok") is True and v.get("version_ok") is True
             and v.get("contradicts") is False)
+
+
+def carries(v):
+    """What the cutter may place: a usable verdict, or a take no model could judge kept on the line it was found for
+    (verdicts: {"unjudged": True}); an unanswered call is an outage, not a rejection."""
+    return usable(v) or (isinstance(v, dict) and v.get("unjudged") is True)
+
+
+def ask_batches(batches, ask, log=print, what="fit", waits=None, sleep=None):
+    """({batch index: parsed JSON answer}, usd, [batch indices never answered]). batches: [(system, content)]. Each batch
+    is asked once; a batch with no answer (a provider error, a cap, a timeout, an unreadable answer) is asked again after
+    a pause, in up to len(waits) further passes. When one batch goes unanswered the rest of that pass waits with it for
+    the next pass (an outage costs one wait, not one per batch), and the failed batch is asked last in the next pass, so
+    one unreadable answer never holds the others back."""
+    waits = RETRY_WAITS if waits is None else tuple(waits)
+    sleep = sleep or time.sleep
+    got, usd = {}, 0.0
+    pending = list(range(len(batches)))
+    for rnd in range(len(waits) + 1):
+        if not pending:
+            break
+        if rnd:
+            log(f"{what}: {len(pending)} batches unanswered; asked again in {waits[rnd - 1]:.0f} s (pass {rnd + 1})")
+            sleep(waits[rnd - 1])
+        left = []
+        for j, bi in enumerate(pending):
+            system, content = batches[bi]
+            try:
+                text, use = ask(system, content)
+                usd += float((use or {}).get("usd") or 0)
+                parsed = writer.json_block(text)
+                if not isinstance(parsed, dict):
+                    raise ValueError("the answer is not one JSON object")
+                got[bi] = parsed
+            except Exception as e:  # noqa: BLE001 - an outage or an unreadable answer: this batch and the rest wait a pass
+                __import__("openai_budget").propagate(e)
+                log(f"{what}: a batch was not answered (pass {rnd + 1}): {str(e)[:160]}")
+                left = pending[j + 1:] + [bi]
+                break
+        pending = left
+    if pending:
+        log(f"{what}: {len(pending)} batches stayed unanswered after {len(waits) + 1} passes; their items stay unjudged, never rejected")
+    return got, round(usd, 4), pending
 
 
 def say_hash(say):
@@ -227,13 +279,16 @@ def _clean(v):
     return out
 
 
-def judge(items, lines, ask=None, work=None, log=print, batch=BATCH, detail="high"):
+def judge(items, lines, ask=None, work=None, log=print, batch=BATCH, detail="high", waits=None, sleep=None, unanswered=None):
     """[(item index, line, verdict)] and usd. items: [{"path", "kind", "meta", "lines": [line numbers], "frames"?, "src"?,
-    "crop"?, "seconds"?}]; lines: {line number: {"i", "say", "see", "era", "beat", "words_under"?}}."""
+    "crop"?, "seconds"?}]; lines: {line number: {"i", "say", "see", "era", "beat", "words_under"?}}. A batch with no answer
+    is asked again (ask_batches); what stays unanswered has no verdict here, and its item indices are added to the list
+    `unanswered` when one is given (the callers keep those unjudged; a picture with no frames is not among them)."""
     ask = ask or _ask_default
     work = work or tempfile.mkdtemp(prefix="fit-")
-    out, usd = [], 0.0
+    out = []
     todo = [k for k, it in enumerate(items) if it.get("lines")]
+    batches, parts = [], []
     for b0 in range(0, len(todo), batch):
         part = todo[b0:b0 + batch]
         need = sorted({ln for k in part for ln in items[k]["lines"]})
@@ -254,15 +309,13 @@ def judge(items, lines, ask=None, work=None, log=print, batch=BATCH, detail="hig
             content += [_img(p, detail) for p in fr]
         if not ok_part:
             continue
-        try:
-            text, use = ask(SYSTEM, content)
-            usd += float(use.get("usd") or 0)
-            got = writer.json_block(text)
-        except Exception as e:  # noqa: BLE001 - an unanswered batch leaves its candidates unjudged: not usable
-            __import__("openai_budget").propagate(e)
-            log(f"fit: a batch of {len(ok_part)} was not judged: {str(e)[:160]}")
-            continue
-        by_no = dict(ok_part)
+        batches.append((SYSTEM, content))
+        parts.append(ok_part)
+    answers, usd, left = ask_batches(batches, ask, log=log, what="fit", waits=waits, sleep=sleep)
+    if unanswered is not None:
+        unanswered.extend(k for bi in left for _, k in parts[bi])
+    for bi, got in sorted(answers.items()):
+        by_no = dict(parts[bi])
         for v in got.get("verdicts") or []:
             if not isinstance(v, dict) or not isinstance(v.get("c"), int) or v["c"] not in by_no:
                 continue
@@ -315,7 +368,7 @@ def _clean_id(v):
     return out
 
 
-def identify(cands, cache_path=None, ask=None, work=None, log=print, batch=BATCH, detail="high"):
+def identify(cands, cache_path=None, ask=None, work=None, log=print, batch=BATCH, detail="high", waits=None, sleep=None):
     """({take_key: identity}, usd, calls): every take of every candidate identified ONCE (IDENTITY_SYSTEM: work, version,
     year, depicts, live_action, speaking_on_camera, shows) from three frames inside the take (a photograph once) at high
     detail and the source's own text; cached by take_key(path, take bounds)."""
@@ -330,7 +383,7 @@ def identify(cands, cache_path=None, ask=None, work=None, log=print, batch=BATCH
                 continue
             seen.add(k)
             todo.append((k, c, take))
-    usd, calls = 0.0, 0
+    batches, parts = [], []
     for b0 in range(0, len(todo), batch):
         part = todo[b0:b0 + batch]
         content = [{"type": "text", "text": "# Takes"}]
@@ -348,14 +401,13 @@ def identify(cands, cache_path=None, ask=None, work=None, log=print, batch=BATCH
             content += [_img(q, detail) for q in fr]
         if not ok_part:
             continue
-        calls += 1
-        try:
-            text, use = ask(IDENTITY_SYSTEM, content)
-            usd += float(use.get("usd") or 0)
-            got = writer.json_block(text)
-        except Exception as e:  # noqa: BLE001 - an unanswered batch leaves its takes unidentified: judged without one
-            log(f"identify: a batch of {len(ok_part)} was not answered: {str(e)[:160]}")
-            continue
+        batches.append((IDENTITY_SYSTEM, content))
+        parts.append(ok_part)
+    calls = len(batches)
+    # an unanswered batch is asked again (ask_batches); what stays unanswered is judged without an identity
+    answers, usd, _ = ask_batches(batches, ask, log=log, what="identify", waits=waits, sleep=sleep)
+    for bi, got in sorted(answers.items()):
+        ok_part = parts[bi]
         for v in got.get("takes") or []:
             if isinstance(v, dict) and isinstance(v.get("t"), int) and v["t"] in ok_part:
                 cache[ok_part[v["t"]]] = _clean_id(v)
@@ -369,14 +421,15 @@ def identify(cands, cache_path=None, ask=None, work=None, log=print, batch=BATCH
     return out, round(usd, 4), calls
 
 
-def verdicts(cands, sc, cache_path=None, ask=None, work=None, log=print, id_cache=None):
+def verdicts(cands, sc, cache_path=None, ask=None, work=None, log=print, id_cache=None, waits=None, sleep=None):
     """({path: {take_i: {line: verdict}}}, usd, calls, identities): each take identified once (identify), then judged per
     (take, line) against the lines it may carry, its frozen identity given beside its frames. Verdicts are cached by
-    (path, take bounds, line, hash of the line's words)."""
+    (path, take bounds, line, hash of the line's words). A clip's take no model answered for, after the retries, stays on
+    the line it was found for as {"unjudged": True} (carries; never cached, so the next call asks again)."""
     lines = lines_of(sc)
     if id_cache is None and cache_path:
         id_cache = os.path.join(os.path.dirname(cache_path), "identity.json")
-    ids, usd, calls = identify(cands, cache_path=id_cache, ask=ask, work=work, log=log)
+    ids, usd, calls = identify(cands, cache_path=id_cache, ask=ask, work=work, log=log, waits=waits, sleep=sleep)
     cache = _load(cache_path)
     table, items = {}, []
     for c in cands:
@@ -393,7 +446,8 @@ def verdicts(cands, sc, cache_path=None, ask=None, work=None, log=print, id_cach
             if miss:
                 items.append(dict(c, lines=miss, take_i=ti, take=list(take), src=None if c.get("kind") == "photo" else [take[0], take[1]],
                                   identity=ids.get(take_key(c["path"], take))))
-    got, u2 = judge(items, lines, ask=ask, work=work, log=log) if items else ([], 0.0)
+    left = []
+    got, u2 = judge(items, lines, ask=ask, work=work, log=log, waits=waits, sleep=sleep, unanswered=left) if items else ([], 0.0)
     for k_, ln, v in got:
         it = items[k_]
         idn = it.get("identity") or {}
@@ -402,6 +456,20 @@ def verdicts(cands, sc, cache_path=None, ask=None, work=None, log=print, id_cach
                 v[b] = idn[b]
         table.setdefault(it["path"], {}).setdefault(it["take_i"], {})[ln] = v
         cache[key(it["path"], ln, lines[ln]["say"], it["take"])] = v
+    kept = 0
+    for k_ in sorted(set(left)):
+        # an outage is not a verdict: the footage engine found this clip for its line (its frames checked against the
+        # subject there), so with no answer it stays usable on that line, ranked after every judged take (grade 0)
+        it = items[k_]
+        ln = it.get("line")
+        if it.get("kind") == "clip" and isinstance(ln, int) and ln in it["lines"]:
+            idn = it.get("identity") or {}
+            v = dict(unjudged=True, why="not judged: no model answered after the retries; kept on the line it was found for")
+            v.update({b: idn[b] for b in ("live_action", "speaking_on_camera") if isinstance(idn.get(b), bool)})
+            table.setdefault(it["path"], {}).setdefault(it["take_i"], {})[ln] = v
+            kept += 1
+    if kept:
+        log(f"fit: {kept} takes no model answered for stay on the lines they were found for, unjudged")
     _save(cache_path, cache)
     return table, round(usd + u2, 4), calls + -(-len(items) // BATCH), ids
 
@@ -416,8 +484,23 @@ def _rows(rows):
 
 
 def fits(table):
-    """{path: {take_i: [lines it is usable on]}} from a verdict table: what the cutter reads."""
-    return {p: {ti: sorted(ln for ln, v in lv.items() if usable(v)) for ti, lv in _rows(rows).items()} for p, rows in (table or {}).items()}
+    """{path: {take_i: [lines it is usable on]}} from a verdict table: what the cutter reads (carries: a usable verdict,
+    or a take no model could judge, on the line it was found for)."""
+    return {p: {ti: sorted(ln for ln, v in lv.items() if carries(v)) for ti, lv in _rows(rows).items()} for p, rows in (table or {}).items()}
+
+
+def supply_says(fit_table, path, line, take_i=None):
+    """The supply's own verdict for a picture on a line (a fits() table: {path: {take_i: [lines]}}, or an older plain list
+    of lines): True or False, None when the table has no row for the picture."""
+    if not fit_table or path not in fit_table:
+        return None
+    row = fit_table.get(path)
+    if not isinstance(row, dict):
+        return int(line) in {int(x) for x in row or []}
+    rows = {int(t): {int(x) for x in v} for t, v in row.items()}
+    if take_i is not None and int(take_i) in rows:
+        return int(line) in rows[int(take_i)]
+    return any(int(line) in v for v in rows.values())
 
 
 def lines_fit(fit_row):
@@ -448,24 +531,23 @@ def candidates(pack):
     return out
 
 
-def readable(items, ask=None, work=None, log=print, batch=12):
+def readable(items, ask=None, work=None, log=print, batch=12, waits=None, sleep=None):
     """{key: {"readable", "why"}} and usd: one frame of the rendered film per shot ({"key", "frame": jpg, "identity"}),
-    asked only whether its subject still reads in the film's crop or print (READ_SYSTEM)."""
+    asked only whether its subject still reads in the film's crop or print (READ_SYSTEM). An unanswered batch is asked
+    again (ask_batches); a frame still unread has no entry (readable unknown, never a failure)."""
     ask = ask or _ask_default
-    out, usd = {}, 0.0
+    out, batches, parts = {}, [], []
     for b0 in range(0, len(items), batch):
         part = items[b0:b0 + batch]
         content = [{"type": "text", "text": "# Frames"}]
         for n, it in enumerate(part):
             content.append({"type": "text", "text": f"\nFrame {n}: the picture is {identity_text(it.get('identity')) or json.dumps(it.get('meta') or {})[:300]}"})
             content.append(_img(it["frame"], "low"))
-        try:
-            text, use = ask(READ_SYSTEM, content)
-            usd += float(use.get("usd") or 0)
-            got = writer.json_block(text)
-        except Exception as e:  # noqa: BLE001 - an unanswered batch is not read: its frames count as unreadable
-            log(f"readable: a batch of {len(part)} was not answered: {str(e)[:160]}")
-            continue
+        batches.append((READ_SYSTEM, content))
+        parts.append(part)
+    answers, usd, _ = ask_batches(batches, ask, log=log, what="readable", waits=waits, sleep=sleep)
+    for bi, got in sorted(answers.items()):
+        part = parts[bi]
         for v in got.get("frames") or []:
             if isinstance(v, dict) and isinstance(v.get("n"), int) and 0 <= v["n"] < len(part) and isinstance(v.get("readable"), bool):
                 out[part[v["n"]]["key"]] = dict(readable=v["readable"], why=str(v.get("why") or "")[:160])
@@ -480,9 +562,12 @@ def words_under(clock_words, f0, f1, fps):
     return " ".join(w["w"] for w in clock_words if w["t1"] > a + 0.03 and w["t0"] < b - 0.03)
 
 
-def audit(shots, sc, ask=None, work=None, cache_path=None, log=print, detail="high"):
-    """[{"key", "fit", "why", "shows", "grade"}] and usd: each shot ({"key", "path", "kind", "line", "words", "src"?, "crop"?,
-    "frames"?, "meta"}) judged against its own segment's brief and the exact words under it. fit is usable(verdict)."""
+def audit(shots, sc, ask=None, work=None, cache_path=None, log=print, detail="high", supply=None, waits=None, sleep=None):
+    """[{"key", "fit", "judged", "why", "shows", "grade"}] and usd: each shot ({"key", "path", "kind", "line", "words",
+    "take_i"?, "src"?, "crop"?, "frames"?, "meta"}) judged against its own segment's brief and the exact words under it;
+    fit is usable(verdict). A shot no model answered for, after the retries (judge, ask_batches), is judged=False and
+    keeps the supply's own verdict for its take and line (supply: the pack's fits() table; a picture with no row there
+    stays as placed): an outage is never a rejection, and the callers read failures only from judged rows."""
     lines = lines_of(sc)
     cache = {}
     if cache_path and os.path.exists(cache_path):
@@ -503,7 +588,7 @@ def audit(shots, sc, ask=None, work=None, cache_path=None, log=print, detail="hi
         ln_tab[vid] = dict(lines[ln], i=vid, words_under=sh.get("words") or "")
         items.append(dict(sh, lines=[vid], _ck=ck))
     if items:
-        got, usd = judge(items, ln_tab, ask=ask, work=work, log=log, detail=detail)
+        got, usd = judge(items, ln_tab, ask=ask, work=work, log=log, detail=detail, waits=waits, sleep=sleep)
         for k, _, v in got:
             row = dict(fit=usable(v), why=v.get("why"), shows=v.get("shows"), grade=v.get("grade"),
                        live_action=v.get("live_action"), speaking_on_camera=v.get("speaking_on_camera"),
@@ -513,9 +598,21 @@ def audit(shots, sc, ask=None, work=None, cache_path=None, log=print, detail="hi
     if cache_path:
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         json.dump(cache, open(cache_path, "w"), ensure_ascii=False)
-    out = []
+    out, unjudged = [], 0
     for sh in shots:
         r = res.get(sh["key"])
-        out.append(dict(key=sh["key"], line=sh["line"], f=sh.get("f"), path=sh["path"], judged=r is not None,
-                        **(r or dict(fit=False, why="not judged"))))
+        if r is None:
+            says = supply_says(supply, sh["path"], sh["line"], sh.get("take_i"))
+            r = dict(fit=says is not False, supply_fit=says, unjudged=True,
+                     why="not judged: no model answered after the retries; the supply's verdict for this take and line stands")
+            unjudged += 1
+        out.append(dict(key=sh["key"], line=sh["line"], f=sh.get("f"), path=sh["path"], judged=not r.get("unjudged"), **r))
+    if unjudged:
+        log(f"audit: {unjudged} of {len(shots)} shots unanswered after the retries; kept on the supply's verdicts, never dropped")
     return out, round(usd, 4)
+
+
+def judged_bad(res):
+    """The audit rows a model judged and found unfit: the only failures a caller may drop or count (an unjudged row is an
+    outage, not a verdict)."""
+    return [r for r in res if r.get("judged", True) and not r.get("unjudged") and not r["fit"]]

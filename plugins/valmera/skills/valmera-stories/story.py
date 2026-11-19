@@ -133,7 +133,9 @@ def last_json(text):
 
 
 def sources_md(folder):
-    """SOURCES.md beside the film: every fact's page, every clip and photograph with its source and licence, the music."""
+    """SOURCES.md beside the film: every fact's page, every clip and photograph the film shows and every real voice it
+    plays, with its source, licence and the seconds played (checks.stories.credits, joined to the rendered plan by
+    wf3.screen_credits; what was supplied and never shown is checks.stories.credits_supplied, kept out), the music."""
     rec = jload(os.path.join(folder, "film.json"), {}) or {}
     sc = (rec.get("script") or {}).get("script") or {}
     st = (rec.get("checks") or {}).get("stories") or {}

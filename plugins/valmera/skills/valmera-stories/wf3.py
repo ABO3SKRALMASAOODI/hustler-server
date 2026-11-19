@@ -1663,7 +1663,7 @@ def planned_shots(beats, pack, clock):
         c = meta.get(p["path"]) or {}
         tb = p.get("take_bounds") or ((0.0, 0.0) if p["kind"] == "photo" else None)
         out.append(dict(key=f"{os.path.basename(p['path'])}@{int(p['line'])}", path=p["path"], kind=p["kind"], line=int(p["line"]), f=p["f"],
-                        src=p.get("src"), crop=p.get("crop"), seconds=c.get("seconds"), meta=c.get("meta") or {},
+                        take_i=p.get("take"), src=p.get("src"), crop=p.get("crop"), seconds=c.get("seconds"), meta=c.get("meta") or {},
                         identity=ids.get(FIT.take_key(p["path"], tb)) if tb is not None else None,
                         words=FIT.words_under(clock.words, p["f"][0], p["f"][1], F.FPS)))
     return out
@@ -1690,9 +1690,17 @@ def plan_bw(beats):
 
 
 def pace_of(beats):
-    """The plan's pace: cuts a 10 s, the share of shots of 2 s or more, the median shot, each line's shortfall."""
+    """The plan's pace: cuts a 10 s, the share of shots of 2 s or more, the median shot, each line's shortfall. Measured
+    as the viewer sees it: consecutive designed cards with the same text are one shot (one frozen plate, not cuts)."""
     pics = sorted((p for p in beats.get("pictures") or [] if p.get("kind") in ("clip", "photo", "designed")), key=lambda p: p["f"][0])
-    lens = [p["f"][1] - p["f"][0] for p in pics]
+    lens, last = [], None
+    for p in pics:
+        k = ("designed", str(p.get("shows") or "").strip().upper()) if p["kind"] == "designed" else None
+        if k is not None and k == last and lens:
+            lens[-1] += p["f"][1] - p["f"][0]
+        else:
+            lens.append(p["f"][1] - p["f"][0])
+        last = k
     secs = max((beats.get("voice_f") or [0, 1])[1] / F.FPS, 1e-6)
     m = beats.get("measured") or {}
     short = {k: v for k, v in (m.get("shortfall_s") or {}).items() if v}
@@ -1716,9 +1724,12 @@ def taste_carry_on(ctx, beats, taste):
 def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None):
     """The story reel's own gates on the plan (stories only; WF2 builds on this module without them):
     audit    every planned base shot's SOURCE window judged against the words under it and its segment's brief, with
-             its take's frozen identity (fit.audit, OpenAI vision); a failing shot is dropped on that line only
-             ("file@line") and the plan built again, at most AUDIT_ROUNDS times; a shot still failing after them is
-             replaced by its own line's fill (the cut may then use only what the audit passed there), never kept
+             its take's frozen identity (fit.audit, OpenAI vision); a shot the audit judged unfit is dropped on that line
+             only ("file@line") and the plan built again, so the line takes its next take the supply passes (ranked by
+             grade), at most AUDIT_ROUNDS times; then the failing lines' footage top-up and one more drop and rebuild, so
+             no shot judged unfit is kept. A shot no model answered for (an outage: a cap, a 503, a timeout, after the
+             retries) is never a failure: it keeps the supply's verdict and stays (20 Nov: a 90-second proxy cap turned
+             87 unanswered shots into "fit=False, not judged", and the fill narrowed every line to an empty set)
     colour   black and white by measure (device finishes and grey takes) on BW_SHARE of shots, else the writer's
              devices lowered once
     motion   no static shot on the plan (reel.motion_of): a static shot breaks the plan
@@ -1733,15 +1744,21 @@ def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None
 
     def audit_round():
         shots = planned_shots(beats, pack, clock)
-        res, u = FIT.audit(shots, sc, work=os.path.join(ctx.tmp, "audit"), cache_path=os.path.join(ctx.supply, "audit.json"), log=ctx.log)
+        res, u = FIT.audit(shots, sc, work=os.path.join(ctx.tmp, "audit"), cache_path=os.path.join(ctx.supply, "audit.json"), log=ctx.log,
+                           supply=pack.get("fit"))
         return res, u
+
+    def row(rnd, res, bad, **kw):
+        un = [r for r in res if r.get("unjudged")]
+        return dict(round=rnd, **kw, shots=len(res), failed=len(bad), fail_s=round(sum((r["f"][1] - r["f"][0]) for r in bad) / F.FPS, 2),
+                    unjudged=len(un), unjudged_s=round(sum((r["f"][1] - r["f"][0]) for r in un) / F.FPS, 2))
     if ctx.args.get("audit", True) is not False:
         bad = []
         for rnd in range(AUDIT_ROUNDS):
             res, u = audit_round()
             usd += u
-            bad = [r for r in res if not r["fit"]]
-            rounds.append(dict(round=rnd, shots=len(res), failed=len(bad), fail_s=round(sum((r["f"][1] - r["f"][0]) for r in bad) / F.FPS, 2)))
+            bad = FIT.judged_bad(res)
+            rounds.append(row(rnd, res, bad))
             if not bad:
                 break
             failed += [dict(key=r["key"], why=r.get("why"), shows=r.get("shows")) for r in bad]
@@ -1751,11 +1768,12 @@ def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None
             taste = F.taste_check(l1, beats)
         if bad and rounds[-1]["failed"]:
             # the last round still failed: those lines get the per-moment top-up first (new takes judged for them), the
-            # plan is built again and audited; only then may the cut use on them only what the audit passed there (and
-            # its own fill), so no failing shot is kept
+            # plan is built again and audited; then what the audit still judges unfit is dropped once more, and the line
+            # takes its next supply-passed take (or its own fill). Never narrowed to only what passed the last round: a
+            # line keeps every take the supply passes
             res, u = audit_round()
             usd += u
-            bad = [r for r in res if not r["fit"]]
+            bad = FIT.judged_bad(res)
             if bad and script_rec is not None and ctx.args.get("topup", True) is not False:
                 lines_bad = sorted({int(r["line"]) for r in bad})
                 try:
@@ -1768,9 +1786,8 @@ def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None
                     taste = F.taste_check(l1, beats)
                     res, u = audit_round()
                     usd += u
-                    bad = [r for r in res if not r["fit"]]
-                    rounds.append(dict(round="topup", lines=lines_bad, clips=tp.get("clips"), shots=len(res), failed=len(bad),
-                                       fail_s=round(sum((r["f"][1] - r["f"][0]) for r in bad) / F.FPS, 2)))
+                    bad = FIT.judged_bad(res)
+                    rounds.append(row("topup", res, bad, lines=lines_bad, clips=tp.get("clips")))
                     if bad:
                         failed += [dict(key=r["key"], why=r.get("why"), shows=r.get("shows")) for r in bad]
                         drop += [r["key"] for r in bad]
@@ -1778,21 +1795,23 @@ def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None
                 else:
                     rounds.append(dict(round="topup", lines=lines_bad, clips=0, error=tp.get("error")))
             if bad:
-                only = {}
-                for r in res:
-                    if r["fit"]:
-                        only.setdefault(int(r["line"]), set()).add(os.path.basename(r["path"]))
-                for r in bad:
-                    only.setdefault(int(r["line"]), set())
-                knobs = dict(knobs, drop=drop + [r["key"] for r in bad], only_ok={k: sorted(v) for k, v in only.items()})
+                drop += [r["key"] for r in bad if r["key"] not in drop]
+                knobs = dict(knobs, drop=drop)
                 l1, beats = build(sc, pack, knobs)
                 taste = F.taste_check(l1, beats)
                 res, u = audit_round()
                 usd += u
-                bad = [r for r in res if not r["fit"]]
-                rounds.append(dict(round="fill", shots=len(res), failed=len(bad), fail_s=round(sum((r["f"][1] - r["f"][0]) for r in bad) / F.FPS, 2)))
+                bad = FIT.judged_bad(res)
+                rounds.append(row("fill", res, bad))
                 if bad:
-                    defects.append(f"{len(bad)} shots still fail the audit after their lines' fill")
+                    # what the audit still judges unfit leaves the plan: dropped and built once more, the line taking its
+                    # next supply-passed take or its own fill; the check stage audits the rendered film again
+                    failed += [dict(key=r["key"], why=r.get("why"), shows=r.get("shows")) for r in bad]
+                    drop += [r["key"] for r in bad if r["key"] not in drop]
+                    knobs = dict(knobs, drop=drop)
+                    l1, beats = build(sc, pack, knobs)
+                    taste = F.taste_check(l1, beats)
+                    rounds.append(dict(round="final", dropped=len(bad)))
         whole = json.load(open(os.path.join(ctx.supply, "pack.json")))
         whole["record"].setdefault("spend", []).append(dict(stage="score", provider="openai", model=FIT.MODEL, what="shot audit", usd=round(usd, 4)))
         json.dump(whole, open(os.path.join(ctx.supply, "pack.json"), "w"), ensure_ascii=False, indent=1)
@@ -1962,7 +1981,7 @@ def repeated_keys(beats, pack):
         k = (group.get(p["path"], p["path"]), p.get("take")) if p["kind"] == "clip" else (p["path"], None)
         if p.get("cont") and k == last:
             continue
-        if k in seen and p.get("tier") not in ("reframe",):
+        if k in seen and p.get("tier") not in ("reframe", "replay"):     # the fill's own repeats: denying them leaves only a card
             out.append(f"{os.path.basename(p['path'])}@{int(p['line'])}")
         seen.add(k)
         last = k
@@ -2179,7 +2198,8 @@ def check_once(ctx, rd, sc):
         c["mark_ok"] = True
         c["ok"] = bool(c["length_ok"] and c["endcard_ok"] and c["loud_ok"] and c["music"]["ok"])
     pack = load_pack(ctx)
-    c["stories"] = dict(taste=sc["taste"], credits=pack.get("credits"), narration=dict(voice=None, gate=None),
+    c["stories"] = dict(taste=sc["taste"], credits=screen_credits(pack, sc["beats"].get("pictures")), credits_supplied=pack.get("credits"),
+                        narration=dict(voice=None, gate=None),
                         pictures=sc["beats"].get("pictures"), missing_pictures=pack.get("missing"),
                         # how the film moves and sounds, as the engines measured it, and where it was drawn
                         pace=sc["beats"].get("pace"), sound_design=sc["beats"].get("sound_design"), turn_s=sc.get("turn_s"),
@@ -2206,6 +2226,56 @@ def check_once(ctx, rd, sc):
         c["ok"] = bool(c["ok"] and pack.get("fit") is not None and fc["picture_fit"]["fail_s"] == 0 and fc["gates_ok"])
         return r, fc
     return r, None
+
+
+FOOTAGE_LICENCE = "footage, not licensed (owner's decision)"
+
+
+def screen_credits(pack, pictures):
+    """The credits of what the film shows and says, for the publish caption (story.sources_md prints them): one entry per
+    distinct real picture on the rendered plan (beats.pictures; designed cards are the film's own), joined to its supply
+    credit by its source page (a photograph's page; a clip's source URL and the clip's time range in it), a clip's range
+    narrowed to the seconds the film plays of it (the clip's start in its source plus the played src), then each real
+    voice placed in the narration. What was supplied and never shown stays in checks.stories.credits_supplied, an
+    internal record (19 Nov: SOURCES.md credited 76 clips and 8 photographs the film never showed)."""
+    supplied = [c for c in pack.get("credits") or [] if isinstance(c, dict)]
+    by_page = {}
+    for c in supplied:
+        by_page.setdefault(c.get("page"), []).append(c)
+
+    def same(a, b):
+        return bool(a) and bool(b) and len(a) == 2 and len(b) == 2 and all(abs(float(x) - float(y)) < 0.05 for x, y in zip(a, b))
+    out, at = [], {}
+    for p in sorted(pictures or [], key=lambda q: q["f"][0]):
+        if p.get("kind") not in ("clip", "photo") or not p.get("source"):
+            continue
+        rows = by_page.get(p["source"]) or []
+        cr = next((c for c in rows if same(c.get("time_range"), p.get("time_range"))), None) or (rows[0] if rows else None)
+        base = dict(cr) if cr else dict(name=p.get("name"), title=p.get("shows") or p.get("name"), page=p["source"],
+                                         **({"licence": FOOTAGE_LICENCE} if p["kind"] == "clip" else {}))
+        base.pop("line", None)
+        played = None
+        tr = p.get("time_range")
+        if p["kind"] == "clip" and p.get("src") and tr and len(tr) == 2:
+            played = [round(float(tr[0]) + float(p["src"][0]), 2), round(float(tr[0]) + float(p["src"][1]), 2)]
+        if p["path"] in at:
+            e = at[p["path"]]
+            if played and e.get("time_range"):
+                e["time_range"] = [min(e["time_range"][0], played[0]), max(e["time_range"][1], played[1])]
+            continue
+        if p["kind"] == "clip":
+            base["time_range"] = played or base.get("time_range")
+        else:
+            base.pop("time_range", None)
+        at[p["path"]] = base
+        out.append(base)
+    for v in pack.get("voices") or []:
+        src = (v or {}).get("source") or {}
+        if not src.get("url"):
+            continue
+        out.append(dict(name=v.get("person"), title=src.get("title") or v.get("person"), licence=FOOTAGE_LICENCE, credit=src.get("channel"),
+                        page=src["url"], time_range=v.get("time_range"), voice=v.get("person")))
+    return out
 
 
 def voices_record(ctx, pack):
@@ -2520,11 +2590,12 @@ def film_checks(ctx, film, sc, pack, music=None, clean=None):
         idn = ids.get(FIT.take_key(p["path"], tb)) if tb is not None else None
         m = meta.get(p["path"]) or {}
         shots.append(dict(key=f"s{k}", drop=f"{os.path.basename(p['path'])}@{int(p['line'])}", path=p["path"], kind=p["kind"], line=int(p["line"]),
-                          f=p["f"], src=p.get("src"), seconds=m.get("seconds"),
+                          f=p["f"], take_i=p.get("take"), src=p.get("src"), seconds=m.get("seconds"),
                           meta=m.get("meta") or dict(title=p.get("shows"), source=p.get("source")), identity=idn,
                           words=FIT.words_under(clock.words, f0, f1, F.FPS)))
         reads.append(dict(key=f"s{k}", frame=mid, identity=idn, meta=m.get("meta")))
-    res, usd = FIT.audit(shots, sc_, work=work, cache_path=os.path.join(ctx.supply, "audit.json"), log=ctx.log) if sc_["segments"] else ([], 0.0)
+    res, usd = FIT.audit(shots, sc_, work=work, cache_path=os.path.join(ctx.supply, "audit.json"), log=ctx.log,
+                         supply=pack.get("fit")) if sc_["segments"] else ([], 0.0)
     rd_, u2 = FIT.readable(reads, work=work, log=ctx.log) if reads else ({}, 0.0)
     usd += u2
     for r in res:
@@ -2532,8 +2603,10 @@ def film_checks(ctx, film, sc, pack, music=None, clean=None):
         r["readable"] = None if rr is None else rr["readable"]
         if rr is not None and not rr["readable"]:
             r["fit"] = False
+            r["judged"], r["unjudged"] = True, False          # the reader answered: unreadable is a verdict
             r["why"] = f"not readable in the film: {rr.get('why')}"
-    bad = [r for r in res if not r["fit"]]
+    bad = FIT.judged_bad(res)                 # an unanswered shot keeps the supply's verdict: an outage is not a failure
+    unjudged_s = round(sum(r["f"][1] - r["f"][0] for r in res if r.get("unjudged")) / F.FPS, 2)
     drop_of = {x["key"]: x["drop"] for x in shots}
     fail_s = round(sum(r["f"][1] - r["f"][0] for r in bad) / F.FPS, 2)
     total_s = sum(r["f"][1] - r["f"][0] for r in res) / F.FPS
@@ -2624,8 +2697,9 @@ def film_checks(ctx, film, sc, pack, music=None, clean=None):
             defects.append(f"{sound['drops']['count']} drops in the bed (bar {DROPS[0]}-{DROPS[1]})")
             sound_ok = False
     gates_ok = not defects
-    return dict(picture_fit=dict(fail_s=fail_s, fail_share=round(fail_s / max(total_s, 1e-6), 3), usd=round(usd, 4),
-                                 shots=[dict(key=r["key"], drop=drop_of.get(r["key"]), f=r["f"], line=r["line"], fit=r["fit"], readable=r.get("readable"),
+    return dict(picture_fit=dict(fail_s=fail_s, fail_share=round(fail_s / max(total_s, 1e-6), 3), usd=round(usd, 4), unjudged_s=unjudged_s,
+                                 shots=[dict(key=r["key"], drop=drop_of.get(r["key"]), f=r["f"], line=r["line"],
+                                             fit=r["fit"] or bool(r.get("unjudged")), judged=not r.get("unjudged"), readable=r.get("readable"),
                                              why=r.get("why"), shows=r.get("shows")) for r in res]),
                 colour=colour, motion=motion, punctuation=punct, type=dict(typ, ok=type_ok), sound=dict(sound or {}, ok=sound_ok, measured=bool(sound)),
                 defects=defects, gates_ok=gates_ok)

@@ -838,3 +838,80 @@ def test_a_line_short_of_pictures_spreads_them_instead_of_reframing_played_takes
         for a, b in zip(tl, tl[1:]):
             assert a[1] == b[0]
     assert sum(rows) / len(rows) < 0.04, rows
+
+
+# ----------------------------------------------------------------- 20 Nov: the fill shows the line's own pictures, cards are rare and counted honestly
+
+def test_a_pictureless_line_holds_one_card_of_its_own_text_never_a_copy_or_the_brief():
+    """19 Nov: a line with no picture was cut into its planned slots, each a new card of see[0].thing (STEVE JOBS ten times
+    in a row), each counted as a new picture. Now its own display item is one card, held for the line."""
+    sc = _fit_script(n=2, words=24)
+    sc["segments"][1]["show"] = [dict(text="$5 million", role="figure", word_i=3)]
+    pics, footage = _fit_supply(n_clips=2)
+    fit = {c["path"]: ({i} if i == 0 else set()) for i, lst in footage.items() for c in lst}
+    tl, sp, _ = _cut(sc, {}, {0: footage[0]}, fit, cards={1: [dict(text="$5 million", role="figure")]})
+    on1 = [r for r in tl if r[4].get("pick_line") == 1]
+    assert len(on1) == 1 and on1[0][2] == "designed" and on1[0][4]["text"] == "$5 million"
+    assert on1[0][1] - on1[0][0] > 2 * F.FPS                             # one plate held, measured as one long shot
+    assert not any(r[2] == "designed" and str(r[4]["text"]).upper() in ("ALPHA", "BETA") for r in tl)   # the brief never printed
+    for a, b in zip(tl, tl[1:]):
+        assert a[1] == b[0]
+    assert sp.shortfall.get(1, 0) > 0                                    # the line is still short: the pace top-up asks for footage
+
+
+def test_a_line_short_of_pictures_replays_a_fitting_take_before_any_card_and_never_stacks_cards():
+    sc = _fit_script(n=1, words=20)
+    c = dict(path="/x/r.mp4", seconds=3.0, subject="Alpha", w=1080, h=1920, motion=dict(p90=2.0, curve=[2.0] * 45))
+    sp = R.Supply({}, {0: [c]}, fit={"/x/r.mp4": {0}}, cards={0: [dict(text="FIRST", role="key")]})
+    sp.use_take("/x/r.mp4", 0)
+    sp.take_clip(c, 0.0, 0.5, -int(13 * F.FPS))                         # shown once, thirteen seconds before this line
+    clock = F.Clock(_words(sc), sc)
+    tl = R.cut_fit(sc, clock, sp, F.Clock.f(clock.dur) + 15, stress=[])
+    assert tl[0][2] == "clip" and tl[0][4]["tier"] == "replay"
+    assert [r[4]["text"] for r in tl if r[2] == "designed"] == ["FIRST"]   # each card text once in the film
+    for a, b in zip(tl, tl[1:]):
+        assert not (a[2] == b[2] == "designed")                          # never a copy of a card after a card
+    assert all(r[2] == "clip" for r in tl if r[2] != "designed")          # the rest is the line's own take, reframed
+
+
+def test_designed_cards_count_by_their_text():
+    cards = [dict(kind="designed", path=f"designed:{k}:{k}:Apple", shows="Apple", f=[k * 10, k * 10 + 10]) for k in range(3)]
+    st = R.take_stats(cards, {})
+    assert st["new_pictures_10s_n"] == 1 and st["repeats"] == 2 and st["consecutive_repeats"] == 2
+    assert len({R.picture_key(p) for p in cards}) == 1
+
+
+def test_a_long_name_is_set_on_balanced_lines_never_one_word_stranded():
+    def px_of(s):                                                        # a stand-in measure: the size falls with the length
+        return min(256.0, float(int(1000 / max(len(s), 1))))
+    lines, px = R.card_lines("MACWORLD CONFERENCE & EXPO", px_of)
+    assert len(lines) >= 2 and lines[-1] != "EXPO" and px >= R.CARD_ONE_LINE_PX
+    assert R.card_lines("STEVE JOBS", px_of) == (["STEVE JOBS"], 100.0)
+    assert R.card_lines("", px_of)[0] == []
+
+
+def test_a_card_on_a_device_line_keeps_the_palette_and_the_gate_runs_over_the_real_shots_only(tmp_path):
+    sc = _fit_script(n=5, words=16)
+    for s in sc["segments"]:
+        s["beat"] = "setup"
+        s["phrases"] = [[0, 4], [4, 8], [8, 12], [12, 16]]
+    sc["segments"][1]["finish"] = "gate"
+    sc["segments"][1]["show"] = [dict(text="$5 million", role="figure", word_i=3)]
+    pics, footage = _fit_supply(n_clips=2)
+    footage = {i: v for i, v in footage.items() if i < 5}
+    _files(tmp_path, footage, pics)
+    fit = {c["path"]: [i] for i, lst in footage.items() for c in lst}
+    fit[footage[1][1]["path"]] = [0]                                     # line 1 has one take of its own
+    sup = dict(sid="t", words=_words(sc), narration=str(tmp_path / "none.wav"), ffmpeg="ffmpeg", pictures={}, sounds={},
+               footage=[dict(i=i, clips=v) for i, v in footage.items()], fit=fit, fit_verdicts={}, work=str(tmp_path / "fin"))
+    l1, beats = R.build(sc, sup, "reel", {"require_fit": True})
+    des = [p for p in beats["pictures"] if p["kind"] == "designed" and p["finish"] == "gate"]
+    assert des
+    gates = [it["f"] for it in l1["items"] if it.get("pic") == "finish_gate"]
+    assert gates                                                         # the line's real shots keep their gate
+    for p in des:
+        plate = next(it for it in l1["items"] if it.get("pic") == "plate" and it["f"][0] == p["f"][0])
+        h = plate["plate"]["c0"].lstrip("#")
+        r_, g_, b_ = (int(h[k:k + 2], 16) for k in (0, 2, 4))
+        assert 0.3 * ((r_ - g_) ** 2 + (0.5 * (r_ + g_) - b_) ** 2) ** 0.5 >= 20          # the palette's plate, not near-black
+        assert not any(a < p["f"][1] and p["f"][0] < b for a, b in gates)                 # no gate lines over a blank plate
