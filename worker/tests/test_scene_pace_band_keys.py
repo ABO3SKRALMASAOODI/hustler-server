@@ -82,7 +82,8 @@ def test_resolved_take_retains_actual_eased_motion():
                               band=dict(motivated_frames=[60, 140, 205]))
     assert len({tuple(c) for c in items[0]["crop"]}) > 1
     assert report["eased"] > 0
-    assert report["hold_max"] < 3
+    # 4-7% eases are movement inside one framing, not cuts: the hold is the whole take (19 Nov rating)
+    assert report["hold_max"] == 7.8 and report["holds"] == [[0, 234]]
 
 
 def test_full_hd_recovered_source_supports_the_directed_moves_without_more_upscale():
@@ -92,5 +93,29 @@ def test_full_hd_recovered_source_supports_the_directed_moves_without_more_upsca
                             band=dict(motivated_frames=[60,140,205]))
     from scene.motion import Cam
     cam=Cam(1920,1080,W/H,out_w=W,max_up=2.4)
-    assert report['hold_max']<3 and report['eased']==3
+    assert report['eased']==3
     assert all(cam.whole(c,shot['faces']) and cam.up(c)<=2.4*1.001 for c in items[0]['crop'])
+
+
+def test_take_moves_of_the_judges_size_add_up_to_new_framings_and_drift_between():
+    """19 Nov: one angle stood 17-22 s while the record said hold_max 2.9 s. With the judge's move size (band
+    take_ease) the motivated moves make distinct framings, the holds are measured from those, and the take keeps a
+    slow drift between moves (band take_drift)."""
+    shot = dict(id="take", f=[0, 300], pic="main", pw=3840, ph=2160, src=[0, 10.0], max_up=3.0,
+                faces=[[.50767, .25742, .15596, .36195]])
+    band = dict(motivated_frames=[60, 140, 220], take_ease=(0.12, 0.20), take_drift=0.01)
+    items, report = pace.drive([dict(shot)], [], FPS, (W, H), "podcast", seed=1114, band=band)
+    assert report["eased"] == 3
+    assert report["framings"] == [0, 60, 140, 220] and report["hold_max"] < 3.0
+    assert items[0]["crop"][0] != items[0]["crop"][59]                    # it drifts before the first move
+
+
+def test_take_face_h_sets_the_first_framing():
+    """A punch-in framing (face_h 0.40) starts tighter than the medium (0.30): a distinct framing, a real cut-in."""
+    from scene import motion
+    base = dict(id="take", f=[0, 90], pic="main", pw=3840, ph=2160, src=[0, 3.0], max_up=3.0,
+                faces=[[.45, .25, .08, .15]])
+    a, _ = pace.drive([dict(base, face_h=0.30)], [], FPS, (W, H), "podcast", seed=1, band=dict(motivated_frames=[]))
+    b, _ = pace.drive([dict(base, face_h=0.40)], [], FPS, (W, H), "podcast", seed=1, band=dict(motivated_frames=[]))
+    ca, cb = a[0]["crop"][0], b[0]["crop"][0]
+    assert pace.distinct(ca, cb) and (cb[2] - cb[0]) < (ca[2] - ca[0])

@@ -76,6 +76,18 @@ WINDOW_BOX = (0.04, 0.205, 0.96, 0.593)        # four by three, the width of the
 PRINT_W = 0.62                                 # a square print, 670 px: small enough that the one under it shows
 PRINT_ROT = (-2.6, 1.9, -1.2, 2.4)
 PRINT_AT = ((0.36, 0.392), (0.64, 0.452), (0.385, 0.458), (0.615, 0.388))      # where prints land, in turn (frame fractions)
+# The take moves like an editor (19 Nov rating: 17-22 s on one angle, 4-7% eases counted as cuts, the hook on a
+# listener). Each stretch is framed on the person speaking it; the payoff is a punch-in to a close-up; a motivated
+# move on the take is a new framing of its own (12% or more, pace.distinct; the judge zooms 5.3-12.4% inside a
+# half-second shot, metromedia teardown section 8, and holds a framing far shorter than a take does), with a slow
+# drift between moves.
+TAKE_FACE_H = 0.30       # the speaker's face, a share of the frame's height, on his medium framing (references 0.29-0.38)
+PUNCH_FACE_H = 0.40      # the payoff's punch-in: a close-up, a third tighter than the medium (a distinct framing, >12%)
+TAKE_UP = 3.0            # the take may be pushed to the taste ceiling (TASTE 4.2: never past 3x)
+PUNCH_STEP = 1.3         # the punch-in is at least this much tighter than the medium, inside the take's own pixels
+TAKE_EASE = (0.12, 0.20)  # a motivated move on the take: 12-20% in or out
+TAKE_DRIFT = 0.01        # between moves the take keeps a slow push
+BREATH_F = 27            # the programme holds 0.9 s after the last word (the clip keeps 1 s): the end card joins after it
 BED = dict(lift=0, gamma=1.0, gain=0.34, sat=0.6, contrast=1, temp=0, tint=0)
 DIM = dict(lift=0, gamma=1.0, gain=0.46, sat=0.8, contrast=1, temp=0, tint=0)
 
@@ -409,12 +421,91 @@ def follow_seat(flash, shifts):
     return pieces
 
 
+def take_pieces(cuts, dur, punch=(), fps=FPS, lead=LEAD_F, until=None):
+    """The take as framings, in film frames: [{f: [a, b], faces, who, cut, punch}]. Each of the show's camera shots
+    is split where the person speaking changes, each part framed on the one who speaks it (wf1_speaker: a two-shot
+    is cut between its two people as an editor cuts it), and at each `punch` frame (the payoff's cut-in to a
+    close-up). The punch-in is always on the one speaking: when the payoff's word opens on a listener framing (the
+    show's camera on the host while the guest talks) the close-up lands on the first speaker framing that opens inside
+    the payoff (before `until`, the payoff's last frame), or there is none. A quiet stretch keeps the framing before
+    it; a shot read before speaker spans existed is one piece on its faces."""
+    segs = []
+    for k, c in enumerate(cuts):
+        spans = c.get("spans") or [dict(t0=c["t0"], t1=c["t1"], who="speaker", box=None)]
+        for sp in spans:
+            fa = 0 if (k == 0 and sp is spans[0]) else int(round(float(sp["t0"]) * fps)) + lead
+            fb = int(round(float(sp["t1"]) * fps)) + lead
+            if fb <= fa:
+                continue
+            box = sp.get("box")
+            faces = [dict(box=box["box"], eyes=box["eyes"], score=1.0)] if box and sp.get("who") != "quiet" else None
+            segs.append(dict(f=[fa, fb], faces=faces, who=sp.get("who") or "speaker", cut=k, punch=False))
+    for i, sg in enumerate(segs):                     # a quiet stretch (or a reading with no face) keeps its neighbour's framing
+        if sg["faces"] is None:
+            same = [x for x in segs[:i][::-1] if x["cut"] == sg["cut"] and x["faces"]] or \
+                   [x for x in segs[i + 1:] if x["cut"] == sg["cut"] and x["faces"]]
+            sg["faces"] = same[0]["faces"] if same else list(cuts[sg["cut"]].get("faces") or [])
+    out = []
+    for sg in segs:
+        if out and out[-1]["cut"] == sg["cut"] and out[-1]["faces"] == sg["faces"]:
+            out[-1]["f"][1] = sg["f"][1]
+            if out[-1]["who"] != "speaker":
+                out[-1]["who"] = sg["who"]
+        else:
+            out.append(dict(sg, f=list(sg["f"])))
+    for p in sorted(int(x) for x in punch or ()):
+        i = next((i for i, pc in enumerate(out) if pc["f"][0] <= p < pc["f"][1]), None)
+        if i is None:
+            continue
+        a, b = out[i]["f"]
+        end = out[-1]["f"][1] if until is None else int(until)
+        speaking = out[i]["who"] == "speaker"
+        if speaking and p - a < 9:                    # the payoff opens a framing already: that framing is the punch-in
+            out[i]["punch"] = True
+        elif speaking and b - p >= 9:
+            out[i:i + 1] = [dict(out[i], f=[a, p]), dict(out[i], f=[p, b], punch=True)]
+        else:                                         # the next cut, or a listener's framing: the speaker's first framing in the payoff
+            k = next((k for k in range(i + 1, len(out)) if out[k]["who"] == "speaker" and p <= out[k]["f"][0] < end), None)
+            if k is not None:
+                out[k]["punch"] = True
+    return out
+
+
+def medium_face_h(faces, ph, up=TAKE_UP):
+    """The medium framing's face share for a take whose faces (face_meta rows) sit in a picture ph pixels tall: the
+    references' medium (TAKE_FACE_H), widened when the take's pixels would leave the punch-in less than PUNCH_STEP
+    tighter (a small face in a 1080p two-shot reaches the 3x ceiling before a close-up)."""
+    fh = max((float(f[3]) for f in faces or []), default=0.0)
+    if fh <= 0:
+        return TAKE_FACE_H
+    return round(min(TAKE_FACE_H, up / PUNCH_STEP * fh * float(ph) / H), 4)
+
+
+def stress_moves(holds, stress, edge=FPS, most=3 * FPS):
+    """Moves for the holds the director left unbroken (speaker_moves' unresolved holds, frame bounds): each on the
+    voice's strongest stress peak inside the hold, a second clear of its ends, and again in either part still longer
+    than `most` (the director's own three seconds). The voice's emphasis places every one, by signal, never a clock;
+    a stretch with no stress peak keeps its slow drift."""
+    out, todo = [], [tuple(h) for h in holds or []]
+    while todo:
+        a, b = todo.pop()
+        if b - a <= most:
+            continue
+        inner = [(s_, f) for f, s_ in stress or [] if a + edge <= f <= b - edge]
+        if inner:
+            f = int(max(inner)[1])
+            out.append(f)
+            todo += [(a, f), (f, b)]
+    return sorted(out)
+
+
 def build(script, sup, style_id, direction=None):
     """(l1, beats) for one short. script: {"title", "segments": [{"say", "pictures": [names]}]}; sup: the pack
     (wf1_short.supply); direction: {"display": [{"seg", "text"}], "past_segs": [i], "turn_seg": i, "arc": [...]}."""
     st = STYLES[style_id]
     d = dict(aim_s=st["aim_s"], look=st["look"], family="podcast", share=st["share"], bed=True, title=False,
-             band=dict(hold=(0.9, 2.6), never=3.0, ease_takes=True, motivated_frames=[], whip=0, ease=0.85, shutter=0.5))
+             band=dict(hold=(0.9, 2.6), never=3.0, ease_takes=True, motivated_frames=[], ease=0.85, shutter=0.5,
+                       take_ease=TAKE_EASE, take_drift=TAKE_DRIFT))      # whips: the podcast band's own (into and out of picture runs)
     d.update(direction or {})
     coverage = sup.get("coverage")
     if not coverage:
@@ -459,15 +550,6 @@ def build(script, sup, style_id, direction=None):
     keys, meta = {}, {}
     # the take's own shots (a show cut between cameras): each is framed on its own speaker. One file, one asset a shot
     tshots = [s_ for s_ in take.get("cuts") or [] if float(s_["t1"]) - float(s_["t0"]) > 0.2] or [dict(t0=0.0, t1=float(take["dur"]), faces=take.get("faces") or [])]
-    tkeys = []
-    for k, s_ in enumerate(tshots):
-        key = P.video("main" if k == 0 else f"own:{k}", dict(path=take["path"], w=take["w"], h=take["h"], fps=take.get("fps") or FPS, seconds=take["dur"]))
-        fm = F.face_meta(dict(faces=s_.get("faces") or take.get("faces") or []))
-        if fm:                                           # a speaker's head, not a face-shaped thing on the shelf behind him
-            tall = max(f[3] for f in fm)
-            fm = [f for f in fm if f[3] >= 0.5 * tall]
-        meta[key] = dict(pw=int(take["w"]), ph=int(take["h"]), faces=fm, max_up=float(d.get("take_up", 2.4)))
-        tkeys.append(key)
     for lst in pics.values():
         for rec in lst:
             if rec["path"] not in keys:
@@ -485,8 +567,10 @@ def build(script, sup, style_id, direction=None):
             ok = [c for c in lst if not under_seat(c)]
             if ok:
                 footage[i] = ok
-    f_voice_end = Clock.f(clock.dur)
-    f_end = min(f_voice_end + 8, int((float(take["dur"]) + LEAD_F / FPS) * FPS))      # out on his last word: the end card follows
+    # the voice ends on its last word; the programme holds a breath after it (the clip keeps the source's second
+    # after the word), so the end card joins after the payoff, never over it
+    f_voice_end = Clock.f(max(w["t1"] for w in clock.words)) if clock.words else Clock.f(clock.dur)
+    f_end = max(min(f_voice_end + BREATH_F, int((float(take["dur"]) + LEAD_F / FPS) * FPS)), f_voice_end + 1)
     stress = F.voice_stress(sup)
     nseg = len(script["segments"])
     cap_y = float(st["cap_y"])
@@ -502,7 +586,21 @@ def build(script, sup, style_id, direction=None):
         ts = nseg - 1
         turn_f = max(seg_f[ts] - 1, 0)
     # the payoff is his face, but never more than its last four seconds: a long close on one framing is a held picture
+    # (the gap fill's last frame, fill_holes)
     f_last = max(turn_f - 6, f_voice_end - int(4.0 * FPS)) if turn_f is not None else f_voice_end - 45
+    # the take as framings: each stretch on the one who speaks it, the payoff a punch-in. One file, one asset a framing
+    pieces = take_pieces(tshots, float(take["dur"]), punch=[turn_f] if turn_f is not None and turn_f > 2 * FPS else [],
+                         until=f_voice_end)
+    for k, pc in enumerate(pieces):
+        key = P.video("main" if k == 0 else f"own:{k}", dict(path=take["path"], w=take["w"], h=take["h"], fps=take.get("fps") or FPS, seconds=take["dur"]))
+        fm = F.face_meta(dict(faces=pc["faces"] or take.get("faces") or []))
+        if fm:                                           # a speaker's head, not a face-shaped thing on the shelf behind him
+            tall = max(f[3] for f in fm)
+            fm = [f for f in fm if f[3] >= 0.5 * tall]
+        up = float(d.get("take_up", TAKE_UP))
+        meta[key] = dict(pw=int(take["w"]), ph=int(take["h"]), faces=fm, max_up=up,
+                         face_h=PUNCH_FACE_H if pc["punch"] else medium_face_h(fm, int(take["h"]), up))
+        pc["key"] = key
     from placement_check import propose, check
     from wf1_coverage import checked_proposals, require_coverage, originals_of
     checker=lambda rows:check(rows,script,clock,sup['work'],sup['ffmpeg'])
@@ -523,22 +621,27 @@ def build(script, sup, style_id, direction=None):
     cut_pts, drive_ids, look_pics, mono_spans, bright = [], set(), [], [], []
     if take.get("still"):
         look_pics.append(take["still"])
-    tcuts = [int(round(float(s_["t0"]) * FPS)) + LEAD_F for s_ in tshots[1:]]      # the take's own cuts, in film frames
+    tcuts = [pc["f"][0] for pc in pieces[1:]]          # the take's own cuts and its cuts between speakers, in film frames
     from wf1_coverage import speaker_moves, move_frame
     resolved_moves,move_spend=speaker_moves(coverage,ins,f_end,tcuts,sup['work'])
-    d['band']['motivated_frames']=[move_frame(coverage,m,FPS,LEAD_F) for m in resolved_moves]
+    signal_moves = stress_moves(coverage.get('unresolved_holds'), stress)
+    d['band']['motivated_frames']=sorted({move_frame(coverage,m,FPS,LEAD_F) for m in resolved_moves} | set(signal_moves))
     placement_report['spend']+=move_spend
     coverage_report['speaker_moves']=resolved_moves
+    coverage_report['stress_moves']=signal_moves
+    coverage_report['take_pieces']=[dict(f=pc["f"], who=pc["who"], punch=pc["punch"], cut=pc["cut"]) for pc in pieces]
+    coverage_report['speaker_on_camera']=take.get("on_camera")
 
     def take_shot(a, b):
-        """Preserve the actual camera take; only word-motivated eased moves enter the driver."""
+        """The take between pictures: each framing on the one who speaks it, cut where the show cut and where the
+        speaker changes; the moves inside a framing are the driver's (motivated words, the voice's stress)."""
         if b-a < 2:
             return
         edges = sorted({a, b, *[c for c in tcuts if a+3 <= c <= b-3]})
         for fa, fb in zip(edges, edges[1:]):
             k = sum(1 for c in tcuts if c <= (fa+fb)/2)
             t0, t1 = max(fa-LEAD_F,0)/FPS, min(max(fb-LEAD_F,1)/FPS,float(take["dur"]))
-            it = P.shot([fa,fb], tkeys[k], None, src=[round(t0,4),round(max(t1,t0+1/FPS),4)])
+            it = P.shot([fa,fb], pieces[k]["key"], None, src=[round(t0,4),round(max(t1,t0+1/FPS),4)])
             it.pop("crop")
             drive_ids.add(it["id"])
             cut_pts.append(fa)
@@ -702,8 +805,13 @@ def build(script, sup, style_id, direction=None):
             flashes.append(r0)
         pos = r1
     take_shot(pos, f_end)
-    if st["flash"] == "turn" and turn_f is not None and ins and 0 <= turn_f - ins[-1][1] <= FPS:
-        flashes.append(ins[-1][1])                           # the cut back to his face for the payoff
+    if st["flash"] == "turn" and turn_f is not None:
+        # the payoff's own cut, nearest its first word, among the film's real cuts (every picture's and every take
+        # framing's first frame: the punch-in where it opens, else a picture cut a second either side of it); never a
+        # frame inside a continuous shot
+        cuts_near = [f for f in set(cut_pts) if abs(f - turn_f) <= FPS and 0 < f < f_end]
+        if cuts_near:
+            flashes.append(min(cuts_near, key=lambda f: (abs(f - turn_f), f)))
     for f in flashes:
         if 0 < f < f_end - 3:
             P.flash([f, f + 2], mode="fill", c="#FFFFFF", a=[0.62, 0.22])

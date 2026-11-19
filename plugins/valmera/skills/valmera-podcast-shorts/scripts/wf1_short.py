@@ -111,25 +111,42 @@ def script(ctx, ideas_out):
     system = ("You are the script stage of Valmera's podcast shorts workflow. You turn one chosen moment of a conversation "
               "into the exact clip for a vertical short. You cut on word edges, start on the first word of the thought (no "
               "throat-clearing, no 'and', 'so', 'yeah' when the next word can open), and end on the payoff with a breath "
-              "of tail. The clip must stand alone for a stranger who never saw the episode.")
-    system += '\n\nReturn JSON only: {"in": seconds (0.15-0.3 s before the first word), "out": seconds (0.3-0.8 s after the last word; the clip is 18-55 s), "title": the film\'s title in at most five words, a headline a stranger stops for, taken from what is said, "hook_line": the exact words heard first, "close_line": the exact last words, "speakers": number of people heard, "named": [the real people, companies, places, products and events this clip names or plainly points to, that a camera has filmed; each {"name": its usual English name, "is": person|company|place|product|event|thing, "must_show": one plain sentence on what footage of it must visibly show, as it was at the time he speaks of}; never this conversation itself, which is on screen already; when he tells of something he did himself, that filmed moment of him (a livestream, a keynote, his training, an event he took part in) is an event to name like any other], "brief": two sentences on the story and its mood, for the editor who chooses the music}.'
-    content = f"# The moment\n{json.dumps(idea, ensure_ascii=False)}\n\n# Who is in it\n{str((ctx.args or {}).get('identity') or '')[:1500]}\n\n# Words near the moment: seconds word\n" + ' '.join((f'{t:.2f} {w}' for (t, w) in near))
+              "of tail. The clip must stand alone for a stranger who never saw the episode. The moment's anchors are measured: "
+              "the clip opens on the hook sentence's first content word and closes on the payoff's last word; one continuous "
+              "window, never an interior stretch that loses either.")
+    system += '\n\nReturn JSON only: {"in": seconds (0.15-0.3 s before the first word), "out": seconds (0.3-0.8 s after the last word; the clip is 18-55 s), "title": the film\'s title in at most five words, a headline a stranger stops for, written from the words between your in and out only: it promises nothing the clip does not deliver (a count or a list it names is whole inside the clip), "hook_line": the exact words heard first, "close_line": the exact last words, "speakers": number of people heard, "named": [the real people, companies, places, products and events this clip names or plainly points to, that a camera has filmed; each {"name": its usual English name, "is": person|company|place|product|event|thing, "must_show": one plain sentence on what footage of it must visibly show, as it was at the time he speaks of}; never this conversation itself, which is on screen already; when he tells of something he did himself, that filmed moment of him (a livestream, a keynote, his training, an event he took part in) is an event to name like any other], "brief": two sentences on the story and its mood, for the editor who chooses the music}.'
+    anchors = (f"# The moment's anchors, measured on the words\nThe hook opens at {float(idea['t0']):.2f} s: {idea.get('hook') or ''}\n"
+               f"The payoff closes at {float(idea['t1']):.2f} s: {idea.get('payoff') or ''}\n"
+               f"Measured length: {float(idea['t1']) - float(idea['t0']):.1f} s\n\n")
+    content = f"# The moment\n{json.dumps(idea, ensure_ascii=False)}\n\n{anchors}# Who is in it\n{str((ctx.args or {}).get('identity') or '')[:1500]}\n\n# Words near the moment: seconds word\n" + ' '.join((f'{t:.2f} {w}' for (t, w) in near))
     llm = _llm()
-    spend, s = [], {}
-    for _ in range(1 if os.environ.get('CODEX_PROXY_LOCAL') == '1' else 2):
-        text, use = llm.ask(system, content, effort="medium", max_tokens=16000)
+    spend, s, note = [], {}, ""
+    for _ in range(2 if os.environ.get('CODEX_PROXY_LOCAL') == '1' else 3):
+        text, use = llm.ask(system, content + note, effort="medium", max_tokens=16000)
         spend.append(dict(stage="script", what="clip, title and what it names", **use))
         try:
             s = llm.json_block(text)
         except ValueError:
             s = {}
-        if isinstance(s, dict) and all(s.get(k) not in (None, "") for k in ("in", "out", "title")):
+        if not (isinstance(s, dict) and all(s.get(k) not in (None, "") for k in ("in", "out", "title"))):
+            note = "\n\nYour last answer was not the JSON asked for."
+            continue
+        try:
+            span = float(s["out"]) - float(s["in"])
+        except (TypeError, ValueError):
+            note = "\n\nin and out must be numbers of seconds."
+            continue
+        if 8.0 <= span <= 75.0:
             break
+        # measured, handed back: the same model chooses again with the length it gave (no clamp, no stop)
+        note = (f"\n\nYour clip {s['in']}-{s['out']} runs {span:.1f} s; a short is 18-55 s. Choose one continuous window inside "
+                "the moment that keeps a complete hook and a complete payoff.")
     else:
-        raise RuntimeError("the script stage gave no clip")
+        # the model gave no short window: the moment's own measured anchors are the clip
+        if not (isinstance(s, dict) and s.get("title")):
+            s = dict(title=idea.get("title"), hook_line=idea.get("hook"), close_line=idea.get("payoff"))
+        s.update({"in": round(max(float(idea["t0"]) - 0.2, 0.0), 2), "out": round(float(idea["t1"]) + 0.5, 2)})
     t0, t1 = float(s["in"]), float(s["out"])
-    if not (8.0 <= t1 - t0 <= 75.0):
-        raise RuntimeError(f"script window {t0}-{t1} is not a short")
     named = [r for r in s.get("named") or [] if isinstance(r, dict) and r.get("name")]
     return dict(title=s.get("title") or idea.get("title"), style=reg, window=[round(t0, 2), round(t1, 2)], source=ctx.source,
                 hook_line=s.get("hook_line") or idea.get("hook"), close_line=s.get("close_line") or idea.get("payoff"),
@@ -168,16 +185,21 @@ def supply(ctx, script):
             words.append(dict(w=w["w"], start=round(float(w["t0"]), 3), end=round(float(w["t1"]), 3), seg=si))
     dur = float(idx["video"]["duration"])
     wj = os.path.join(sup_dir, "words.json")
-    json.dump(dict(voice="the take", duration=round(max(w["end"] for w in words) + 0.05, 3) if words else dur, words=words), open(wj, "w"), ensure_ascii=False)
+    # the voice runs the whole take: the breath the clip keeps after its last word is heard, not cut at the word
+    json.dump(dict(voice="the take", duration=round(dur, 3) if words else dur, words=words), open(wj, "w"), ensure_ascii=False)
     spend = [dict(stage="supply",what="heard clip alignment",**idx["alignment"]["spend"])]
     style = wf1_film.STYLES[script["style"]["id"]]
+    # who speaks in each of the show's camera shots, by signal: the take frames the speaker, and the stretches the
+    # show's camera holds a listener are pictures the director plans like any other
+    cuts = take_cuts(src, idx.get("shots") or [], dur, sup_dir, turns=caption_turns(ctx, script["window"], dur))
     # real video of what each sentence names: the footage engine's own planner reads the sentences (OpenAI)
     who = str((ctx.args or {}).get("identity") or "")[:400].replace("\n", " ")
     import wf1_coverage
     # The script stage read the whole moment and resolved what it names, each with the event-level picture it needs
     # (script.named: "Alexandr Wang", "Mark Zuckerberg eating watermelon on a Meta livestream"). They are the
     # director's subjects from the start, for the plan and for the referent research alike.
-    coverage = wf1_coverage.plan(words, script.get('title'), sup_dir, _llm(), named=script.get('named'))
+    coverage = wf1_coverage.plan(words, script.get('title'), sup_dir, _llm(), named=script.get('named'),
+                                 off_camera=off_camera(cuts, words))
     coverage['context']=who
     import wf1_context
     primary_direction=wf1_context.direct(coverage,os.path.join(sup_dir,'referent-research'),_llm())
@@ -262,8 +284,9 @@ def supply(ctx, script):
     except Exception:  # noqa: BLE001
         faces = []
     pack["alignment_contract"]=wf1_alignment.CONTRACT
+    import wf1_speaker
     pack["take"] = dict(path=src, w=int(v["width"]), h=int(v["height"]), fps=float(v["fps"]), dur=dur, faces=faces, still=still, shots=len(idx.get("shots") or []),
-                        cuts=take_cuts(src, idx.get("shots") or [], dur, sup_dir))
+                        cuts=[{k: c[k] for k in c if k != "measures"} for c in cuts], on_camera=wf1_speaker.on_camera(cuts))
     pack["lines"] = [dict(i=i, t0=s["t0"], t1=s["t1"], text=s["text"], subjects=by_line.get(i) or []) for i, s in enumerate(sents)]
     rec = dict(rec0, narration_s=dur, voice="the take", gate=None, pictures=sum(len(x) for x in pack["pictures"].values()), subjects=len(pack["pictures"]),
                footage=(dict(clips=foot["counts"]["clips"], lines=foot["counts"]["lines_with_footage"], credits=foot["credits"]) if foot else None), spend=spend)
@@ -501,11 +524,43 @@ def retained_candidates(supply, primary, subjects, revised=False):
     return primary
 
 
-def take_cuts(src, shots, dur, sup_dir):
-    """The take's own shots with the speaker's place in each: [{t0, t1, faces}]. A speaker moves, so each shot is
-    looked at three times and his head's box is the box round all three; a show that cuts between cameras gets a
-    framing per camera."""
+def caption_turns(ctx, window, dur):
+    """[(t0, t1)] of the take that one person speaks, from the source captions' own speaker changes (a caption line
+    opens with '>>' where the speaker changes); one turn when they mark none."""
+    try:
+        near = _near(ctx, float(window[0]), float(window[1]), pad=0.0)
+    except (KeyError, OSError, ValueError, TypeError):
+        return None
+    marks = sorted({round(t - float(window[0]), 3) for t, w in near if str(w).lstrip().startswith(">>") and 0.0 < t - float(window[0]) < dur})
+    edges = [0.0] + marks + [float(dur) + 1.0]
+    return [(a, b) for a, b in zip(edges, edges[1:]) if b > a]
+
+
+def off_camera(cuts, words, min_s=0.6):
+    """The take's stretches whose voice no face on screen speaks (the show's camera on a listener), as the words
+    they carry: [{first, last, t0, t1}] (word ids of words.json, take seconds)."""
+    import wf1_speaker
+    out = []
+    for a, b in wf1_speaker.listener_spans(cuts, min_s=min_s):
+        ids = [i for i, w in enumerate(words) if a <= (float(w["start"]) + float(w["end"])) / 2 < b]
+        if ids:
+            out.append(dict(first=ids[0], last=ids[-1], t0=round(a, 3), t1=round(b, 3)))
+    return out
+
+
+def take_cuts(src, shots, dur, sup_dir, turns=None):
+    """The take's own shots, each with who speaks in it (wf1_speaker: faces tracked at 10 a second, each mouth's
+    motion against the voice): [{t0, t1, faces, spans, wide}]. faces is the speaker's tracked box, the framing; spans
+    say who carries each stretch (speaker, listener, quiet). The full reading is kept in speaker.json. A take the
+    reader cannot open is framed the old way: three looks a shot, the biggest face."""
     spans = [(float(s["start"]), float(s["end"])) for s in shots if float(s["end"]) - float(s["start"]) > 0.2] or [(0.0, dur)]
+    try:
+        import wf1_speaker
+        cuts = wf1_speaker.read_take(PX.FF, src, spans, dur, turns=turns)
+        json.dump(dict(turns=turns, cuts=cuts), open(os.path.join(sup_dir, "speaker.json"), "w"), indent=1)
+        return cuts
+    except Exception as e:  # noqa: BLE001 - the speaker reading is a framing aid: the take is framed by its faces
+        print(f"speaker reading failed, faces only: {str(e)[:300]}", file=sys.stderr)
     out = []
     for k, (a, b) in enumerate(spans[:40]):
         seen = []
@@ -995,7 +1050,9 @@ def score(ctx, script):
     if not taste["ok"]:
         raise RuntimeError("the plan breaks a taste rule: " + "; ".join(taste["problems"][:6]))
     turn_s = round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None
-    return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
+    # the last word by the words' own times (programme seconds): the brand finish falls the take's breath after it
+    last_word_s = round(beats["voice_f"][1] / F.FPS, 3) if beats.get("voice_f") else None
+    return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, last_word_s=last_word_s, beats={k: v for k, v in beats.items() if k not in ("look",)}, taste=taste,
                 frames=l1["dur_f"], items=len(l1["items"]), direction={k: v for k, v in d.items() if k != "spend"}, spend=([d["spend"]] if d.get("spend") else []) +
                 [dict(u,stage='supply',what='primary documents') for research in pack.get('document_research',[]) for u in research.get('spend',[])] +
                 [dict(u,stage='supply',what='documentary research revision') for u in pack.get('research_spend',[])] +

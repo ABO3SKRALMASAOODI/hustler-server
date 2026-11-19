@@ -217,8 +217,11 @@ def test_exposed_speaker_gap_requires_actual_director_motivation(tmp_path):
     assert moves==[dict(word=1,why='The explicit contrast changes the argument.')]
     empty=SimpleNamespace(ask=lambda *a,**k:('{"moves":[]}',{}),json_block=json.loads)
     other=tmp_path/'unresolved';other.mkdir()
-    with pytest.raises(RuntimeError,match='no automatic recrops'):
-        C.speaker_moves(coverage,[],150,[],str(other),llm=empty)
+    # a hold the director cannot honestly break is recorded, never a stop; the film breaks it on the voice's
+    # strongest stress (wf1_film.stress_moves)
+    cov=dict(coverage,moves=[])
+    moves,_=C.speaker_moves(cov,[],150,[],str(other),llm=empty)
+    assert moves==[] and [list(h) for h in cov['unresolved_holds']]==[[0,150]]
 
 
 def test_new_picture_identity_survives_research_cache_paths():

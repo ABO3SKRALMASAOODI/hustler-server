@@ -303,6 +303,15 @@ def test_the_tail_starts_its_fall_so_the_sound_is_over_about_1_2_s_after_the_las
     assert brand.tail_start(6.0, None) == pytest.approx(5.0)                 # unknown: the programme's last second
 
 
+def test_a_last_word_at_the_programmes_end_is_never_faded_under():
+    """19 Nov (m01 26.3 = 26.3, m04 52.6 = 52.6): a last word read at the programme's end fell 20 dB from a second
+    before it, across the payoff. The fall now starts at the word's end, never before it."""
+    assert brand.tail_start(26.3, 26.3) == pytest.approx(26.3)
+    assert brand.tail_start(52.6, 52.9) == pytest.approx(52.6)
+    for prog, word in ((26.3, 26.3), (52.6, 52.9), (19.1, 19.09), (47.2, 46.3)):
+        assert brand.tail_start(prog, word) >= min(word, prog)
+
+
 def test_the_mark_turns_dark_on_a_white_picture_and_stays_white_on_a_dark_one(tmp_path):
     """Owner, 16 Nov: "when the video is white it appears in black". The same mark in the same place, its ink measured
     against the programme under it (brandmark.ink_spans: hysteresis, a minimum hold, a cross-fade)."""

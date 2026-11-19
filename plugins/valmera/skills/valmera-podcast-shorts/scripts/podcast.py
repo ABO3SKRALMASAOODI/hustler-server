@@ -63,6 +63,7 @@ BAR = 7.0                 # a moment is made when the selection grades it this s
 LANES = 2                 # shorts made at once on this Mac (the footage search is the long part and waits on the network)
 PART_S = 600.0            # the selection reads the conversation in ten-minute parts, one model reading each (see moments())
 PART_OVERLAP_S = 60.0     # each part reads on a minute past its end, so a moment across the seam is seen whole
+MOMENT_MAX_S = 55.0       # a short runs 18-55 s: a moment measured longer is tightened by the same model (tighten())
 ROUTE_OUT = "the model route is out"   # the model provider stopped answering (usage limit, cap, outage): the run waits
 # YouTube's wall on this Mac's address is a temporary outage of one input (19 Nov: from 17:43 it refused nearly every
 # footage source for over an hour). A short that meets it fetches its exact refused sources again with backoff, then
@@ -362,18 +363,77 @@ def _fmt(t):
     return f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}"
 
 
-def lines_of(words, step=12.0):
-    out, cur, t_start = [], [], None
-    for t, w in words:
-        if t_start is None:
-            t_start = t
-        if t - t_start >= step and cur:
-            out.append(f"[{_fmt(t_start)}|{t_start:.0f}] " + " ".join(cur))
-            cur, t_start = [], t
-        cur.append(w)
-    if cur:
-        out.append(f"[{_fmt(t_start)}|{t_start:.0f}] " + " ".join(cur))
+def sentence_lines(words, most_s=20.0, pause_s=1.2):
+    """The transcript a sentence a line, each with its measured start and end: "[h:mm:ss|start-end] words". A line
+    ends on its sentence's own closing mark (the captions' punctuation), before a new speaker's '>>', on a pause of
+    pause_s or at most_s. 19 Nov: read in 12 s lines with no word times, 7 of 19 moments ran 61-129 s and hooks lost
+    their subject; the model now sees where every sentence starts and ends."""
+    out, cur = [], []
+
+    def flush(nxt=None):
+        if not cur:
+            return
+        a, b = cur[0][0], cur[-1][0] + (min(max(nxt - cur[-1][0], 0.15), 0.8) if nxt is not None else 0.6)
+        out.append(f"[{_fmt(a)}|{a:.1f}-{b:.1f}] " + " ".join(w for _, w in cur))
+        cur.clear()
+    for k, (t, w) in enumerate(words):
+        w = str(w)
+        if cur and (w.lstrip().startswith(">>") or t - cur[-1][0] >= pause_s or t - cur[0][0] >= most_s):
+            flush(t)
+        cur.append((t, w))
+        if w.rstrip('"\'\u201d\u2019)]').endswith((".", "?", "!")):
+            flush(words[k + 1][0] if k + 1 < len(words) else None)
+    flush()
     return out
+
+
+TIGHTEN_SYSTEM = (
+    "You are the selection stage of Valmera's podcast shorts workflow, tightening one moment you chose: measured on "
+    "its sentences' own times it runs longer than a short can. Read its sentences and choose ONE continuous window of "
+    "18 to 55 seconds that a stranger understands on its own: it opens on a complete hook whose subject is named in "
+    "it (a stranger can tell who or what 'he', 'it' or 'that' is) and ends on a complete payoff. Keep the moment's own "
+    "hook and payoff when both fit inside 55 seconds; otherwise choose the strongest self-contained arc inside it. A "
+    "list or a count the hook promises is kept whole inside the window, or the hook does not promise it.\n\n"
+    'Return JSON only: {"t0": the start second of the window\'s first sentence (from its line), "t1": the end second of '
+    'its last sentence, "hook": the window\'s first sentence word for word, "payoff": its last sentence word for word, '
+    '"title": a plain title in at most six words, true to what the window says, "why": one sentence}')
+
+
+TIGHTEN_SLACK_S = 2.0       # a tightened window keeps to its moment's own sentences (their measured ends, a word's slack)
+
+
+def tighten(info, m, words, ask=None):
+    """A moment measured over MOMENT_MAX_S, handed back to the selection model with its timed sentences to choose the
+    tightest self-contained window (no clamp, no rejection: the moment keeps its hook and payoff or takes a whole arc
+    inside it). Returns the spend. When no answer fits, the moment stays as chosen and the script stage cuts it."""
+    import llm
+    ask = ask or llm.ask
+    t0, t1 = float(m["t0"]), float(m["t1"])
+    near = [(t, w) for t, w in words if t0 - 10.0 <= t <= t1 + 10.0]
+    moment = {k: m.get(k) for k in ("title", "t0", "t1", "hook", "payoff", "why", "names", "shows")}
+    content = (f"# The source\n{identity_text(info)}\n\n# The moment, measured at {t1 - t0:.0f} s\n{json.dumps(moment, ensure_ascii=False)}\n\n"
+               "# Its sentences: [h:mm:ss|start-end seconds] words ('>>' marks a new speaker)\n" + "\n".join(sentence_lines(near)))
+    spend, note = [], ""
+    for _ in range(2):
+        text, use = ask(TIGHTEN_SYSTEM, content + note, effort="medium", max_tokens=6000)
+        spend.append(dict(stage="moments", what=f"tighten {m.get('id') or m.get('title')}", **use))
+        try:
+            got = llm.json_block(text)
+            a, b = float(got["t0"]), float(got["t1"])
+        except (ValueError, KeyError, TypeError):
+            note = "\n\nYour answer was not the JSON asked for."
+            continue
+        inside = t0 - TIGHTEN_SLACK_S <= a < b <= t1 + TIGHTEN_SLACK_S      # its own sentences: a neighbour's lines are never told twice
+        if 8.0 <= b - a <= MOMENT_MAX_S + 5.0 and inside:
+            m["tightened"] = dict(from_s=[t0, t1], why=got.get("why"))
+            m.update(t0=round(a, 2), t1=round(b, 2), hook=got.get("hook") or m.get("hook"), payoff=got.get("payoff") or m.get("payoff"),
+                     title=got.get("title") or m.get("title"))
+            break
+        where = "inside" if inside else f"reaching outside (by {max(t0 - a, b - t1, 0):.1f} s) a moment that runs"
+        note = (f"\n\nYour window {a:.1f}-{b:.1f} s runs {b - a:.0f} s {where} {t0:.1f}-{t1:.1f} s: choose one of "
+                f"18-55 s inside it, from its own sentences.")
+    m["duration_s"] = round(float(m["t1"]) - float(m["t0"]), 1)
+    return spend
 
 
 def identity_text(info):
@@ -391,7 +451,7 @@ SELECT_SYSTEM = (
     "of the people, companies, places and events he names, a new picture about every second.")
 
 
-SELECT_CONTRACT = '\n\nWalk the whole transcript in order and return every moment that clears the bar: a stranger stops within two seconds, stays to the end, and leaves with something. Grade each moment on its own. There is no target number, no minimum and no maximum: a weak hour gives few, a strong one many. A moment must stand alone without the episode, open on its hook in its first sentence, end on its payoff, run 18 to 55 seconds, and be about at least one real thing a camera has filmed (a person, company, product, place or event, named or plainly meant), because the film shows real footage of what is said. A strong opinion, confession, prediction, number or funny exchange about real things is a moment like a story is. Only talk with nothing real in it at all is left out. Moments never overlap.\n\nReturn JSON only: {"podcast": {"speaker": the main guest\'s full name, "host": the host\'s name or "", "show": the show\'s name or "", "year": the year it was recorded, "short_title": the episode in at most eight words}, "moments": [each {"title": a plain title in at most six words, "t0": seconds where the thought starts, "t1": seconds where the payoff ends, "hook": the first line a viewer hears, from the words, "payoff": the line it lands on, "why": why a stranger watches to the end, "speakers": how many people speak in it, "names": the people heard or named, "shows": the real filmed things a picture can show for it, most important first, "styles": [{"id": a style id from the list, "why": what in this moment that style needs}] best fit first, at least two, "hook_score": 1-10, "payoff_score": 1-10, "story_score": 1-10, "strength": 1-10 overall}], "left_out": [every other candidate you weighed and left out, each {"t0": seconds, "title": title, "why": the reason}]}'
+SELECT_CONTRACT = '\n\nWalk the whole transcript in order and return every moment that clears the bar: a stranger stops within two seconds, stays to the end, and leaves with something. Grade each moment on its own. There is no target number, no minimum and no maximum: a weak hour gives few, a strong one many. A moment must stand alone without the episode, open on its hook in its first sentence, end on its payoff, run 18 to 55 seconds, and be about at least one real thing a camera has filmed (a person, company, product, place or event, named or plainly meant), because the film shows real footage of what is said. A strong opinion, confession, prediction, number or funny exchange about real things is a moment like a story is. Only talk with nothing real in it at all is left out. Moments never overlap.\n\nReturn JSON only: {"podcast": {"speaker": the main guest\'s full name, "host": the host\'s name or "", "show": the show\'s name or "", "year": the year it was recorded, "short_title": the episode in at most eight words}, "moments": [each {"title": a plain title in at most six words, "t0": the start second of the sentence the hook opens (from its line), "t1": the end second of the sentence the payoff closes (from its line), "hook": the first line a viewer hears, from the words, "payoff": the line it lands on, "why": why a stranger watches to the end, "speakers": how many people speak in it, "names": the people heard or named, "shows": the real filmed things a picture can show for it, most important first, "styles": [{"id": a style id from the list, "why": what in this moment that style needs}] best fit first, at least two, "hook_score": 1-10, "payoff_score": 1-10, "story_score": 1-10, "strength": 1-10 overall}], "left_out": [every other candidate you weighed and left out, each {"t0": seconds, "title": title, "why": the reason}]}'
 
 
 def select_prompt(info, styles, lines, part=None):
@@ -404,7 +464,8 @@ def select_prompt(info, styles, lines, part=None):
         head = (f'# This is part {part[0]} of {part[1]} of the transcript, {_fmt(part[2])} to {_fmt(part[3])}\n'
                 f'Return every moment that STARTS in this part (t0 from {part[2]:.0f} to {part[3]:.0f} s); the lines after '
                 f'{_fmt(part[3])} are there only to read a moment that starts before it to its payoff.\n\n')
-    return f'# The source\n{identity_text(info)}\n\n# The styles a short can take\n{menu}\n\n' + head + '# Transcript, one line per ~12 s: [h:mm:ss|seconds] words\n' + '\n'.join(lines)
+    return (f'# The source\n{identity_text(info)}\n\n# The styles a short can take\n{menu}\n\n' + head +
+            "# Transcript, one sentence a line: [h:mm:ss|start-end seconds] words ('>>' marks a new speaker)\n" + '\n'.join(lines))
 
 
 def parts_of(words, part_s=PART_S, overlap_s=PART_OVERLAP_S):
@@ -481,7 +542,7 @@ def moments(run, fetched):
     parts = parts_of(words)
     rows, left, pod, spend = [], [], {}, []
     for k, (p0, p1, ws) in enumerate(parts):
-        content = select_prompt(info, styles, lines_of(ws), part=(k + 1, len(parts), p0, p1) if len(parts) > 1 else None)
+        content = select_prompt(info, styles, sentence_lines(ws), part=(k + 1, len(parts), p0, p1) if len(parts) > 1 else None)
         got = {}
         for _ in range(2):
             text, use = llm.ask(SELECT_SYSTEM + SELECT_CONTRACT, content, effort="high", max_tokens=48000)
@@ -499,7 +560,12 @@ def moments(run, fetched):
         pod = pod or (got.get("podcast") if isinstance(got.get("podcast"), dict) else {})
     under = [dict(t0=r.get("t0"), title=r.get("title"), why=f"graded {r.get('strength')} of 10, under the bar of {BAR:g}") for r in rows
              if float(r.get("strength") or 0) < BAR]
-    kept = assign_styles(rank(rows), list(wf1_film.ORDER))
+    kept = rank(rows)
+    for m in kept:                                   # measured on its sentences' times: a moment longer than a short is tightened
+        if float(m["t1"]) - float(m["t0"]) > MOMENT_MAX_S:
+            spend += tighten(info, m, words)
+        m["duration_s"] = round(float(m["t1"]) - float(m["t0"]), 1)
+    kept = assign_styles(kept, list(wf1_film.ORDER))
     return dict(podcast=pod, found=len(rows), parts=len(parts), moments=kept, left_out=under + left, bar=BAR, spend=spend)
 
 

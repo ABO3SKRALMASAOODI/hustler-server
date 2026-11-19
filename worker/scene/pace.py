@@ -213,21 +213,24 @@ def _face_on_screen(crop, face, eyes=None):
     return ((face[0] + face[2] / 2 - crop[0]) / w, (ey - crop[1]) / h, face[3] / h)
 
 
-def _eased_take(sh, cam, M, faces, stress, a, b, lo, hi, fps, rng, log, motivated=None):
+def _eased_take(sh, cam, M, faces, stress, a, b, lo, hi, fps, rng, log, motivated=None, ease=(0.043, 0.070), drift=0.0):
     """A take, re-framed the way the references re-frame one: no cut. On the stress peaks the camera eases a step
-    in (4 to 7%, the references' eased moves on a take), up to three in a row or as far as the pixels go, then
-    eases back out further than one step; between moves it keeps a slow push. One item, one continuous track."""
+    in (by default 4 to 7%, the talking-head references' eased moves on a take; a caller holding the judge's size
+    passes `ease`), up to three in a row or as far as the pixels go, then eases back out further than one step;
+    between moves it keeps a slow push (`drift` when the moves are the caller's motivated frames). One item, one
+    continuous track. The shot's "face_h" (a share of the frame's height) sets how close its first framing sits."""
     n = b - a
     names = dict(M)
     big = max(faces, key=lambda f: f[2] * f[3]) if faces else None
     eyes = {tuple(f[:4]): f[4] for f in sh.get("faces") or [] if len(f) > 4}
     # a talking head fills a third of the frame's height in the references (WF1 0.34, quartiles 0.29 to 0.38)
-    start = cam.on_face(big, 0.34, eyes=eyes.get(tuple(big))) if big else (names.get("step1") or M[0][1])
+    start = cam.on_face(big, float(sh.get("face_h") or 0.34), eyes=eyes.get(tuple(big))) if big else (names.get("step1") or M[0][1])
     cx, cy, w = motion._cwz(start)
     tos, cur, run_in = [], w, 0
+    seen = start                                  # the framing a viewer last saw as a picture of its own
     points = splits(a, b, stress, lo, hi) if motivated is None else sorted({int(f) for f in motivated if a <= f < b-6})
     for f in points:
-        size = 0.043 + 0.027 * rng.random()
+        size = float(ease[0]) + (float(ease[1]) - float(ease[0])) * rng.random()
         go_in = run_in < 3 and cur / (1 + size) >= cam.w_min * 1.01 and (run_in == 0 or rng.random() < 0.7)
         if go_in:
             cur, run_in = cur / (1 + size), run_in + 1
@@ -249,12 +252,16 @@ def _eased_take(sh, cam, M, faces, stress, a, b, lo, hi, fps, rng, log, motivate
         tos.append(dict(crop=tgt, at=max(f - a - max(fr // 5, 1), 0), frames=fr, kind=kind, over=bake.MOVE_OVER if (kind == "out" and rng.random() < bake.MOVE_OVER_SHARE) else 0.0))
         log["changes"].append(f)
         log["eased"] += 1
+        if distinct(tgt, seen):                   # the moves since the last framing add up to a new one
+            log.setdefault("framings", []).append(f)
+            seen = tgt
     it = {"id": sh["id"], "k": "shot", "f": [a, b], "pic": sh["pic"], "src": list(sh["src"])}
     it.update(sh.get("keep") or {})
-    it["_cam"], it["_kw"], it["_crop"], it["_faces"], it["_name"] = cam, dict(to=tos, drift=dict(rate=0.012 if motivated is None else 0.0, dir=1)), list(start), faces, "take"
+    it["_cam"], it["_kw"], it["_crop"], it["_faces"], it["_name"] = cam, dict(to=tos, drift=dict(rate=0.012 if motivated is None else float(drift), dir=1)), list(start), faces, "take"
     if faces and "window" not in it:
         it["window"] = looks.window_of(max(faces, key=lambda f: f[2] * f[3]), pad=1.25)
     log["changes"].append(a)
+    log.setdefault("framings", []).append(a)
     log["moves"].append(dict(f=[a, b], pic=sh["pic"], framing="take", to=len(tos)))
     return it
 
@@ -293,6 +300,7 @@ def drive(shots, stress, fps=30.0, frame=(1080, 1920), family="story", seed=0, b
             it = sh.get("item") or {"id": sh["id"], "k": "shot", "f": [a, b], "pic": sh.get("pic")}
             items.append(it)
             log["changes"].append(a)
+            log.setdefault("framings", []).append(a)
             prev = None
             continue
         cam = motion.Cam(sh["pw"], sh["ph"], W / H, out_w=W, max_up=float(sh.get("max_up") or motion.MAX_UP))
@@ -300,7 +308,8 @@ def drive(shots, stress, fps=30.0, frame=(1080, 1920), family="story", seed=0, b
         eyes = {tuple(f[:4]): f[4] for f in sh.get("faces") or [] if len(f) > 4}
         M = menu(cam, sh, W)
         if B.get("ease_takes") and sh.get("src"):
-            items.append(_eased_take(sh, cam, M, faces, stress, a, b, lo, hi, fps, rng, log, B.get("motivated_frames")))
+            items.append(_eased_take(sh, cam, M, faces, stress, a, b, lo, hi, fps, rng, log, B.get("motivated_frames"),
+                                     ease=B.get("take_ease") or (0.043, 0.070), drift=float(B.get("take_drift") or 0.0)))
             prev = None
             continue
         pts = splits(a, b, stress, lo, hi) if len(M) >= 2 else []
@@ -400,6 +409,7 @@ def drive(shots, stress, fps=30.0, frame=(1080, 1920), family="story", seed=0, b
                 it["window"] = looks.window_of(face if face is not None else max(faces, key=lambda f: f[2] * f[3]))
             items.append(it)
             log["changes"].append(f0)
+            log.setdefault("framings", []).append(f0)
             log["moves"].append(dict(f=[f0, f1], pic=sh["pic"], framing=name, **{q: True for q in kw}))
             prev = dict(pic=sh.get("pic"), name=name, crop=crop,
                         face_at=_face_on_screen(crop, face, eyes.get(tuple(face))) if face is not None else None)
@@ -448,11 +458,18 @@ def drive(shots, stress, fps=30.0, frame=(1080, 1920), family="story", seed=0, b
     ch = sorted(set(log["changes"]))
     end = max((int(s["f"][1]) for s in shots), default=0)
     start = min((int(s["f"][0]) for s in shots), default=0)
-    holds = [(y - x) / fps for x, y in zip(ch, ch[1:] + [end])]
+    # A hold is the time one picture stays one framing: a cut, a new framing, a whip, or moves that add up to a
+    # distinct framing (12% or a quarter frame, `distinct`) end it; an ease smaller than that is movement inside the
+    # hold, not a change (19 Nov rating: films read hold_max 2.9 s while one angle stood for 17-22 s on screen).
+    fr = sorted(set(log.get("framings") or []))
+    holds = [(y - x) / fps for x, y in zip(fr, fr[1:] + [end])]
     log["changes"] = ch
+    log["framings"] = fr
     log["per10"] = round(len(ch) / max((end - start) / fps, 1e-6) * 10, 2)
+    log["framings_per10"] = round(len(fr) / max((end - start) / fps, 1e-6) * 10, 2)
     log["hold_max"] = round(max(holds), 2) if holds else 0.0
     log["hold_median"] = round(float(np.median(holds)), 2) if holds else 0.0
+    log["holds"] = [[x, y] for x, y in zip(fr, fr[1:] + [end]) if y - x > 3 * fps]
     log["shutter"] = B["shutter"]
     return items, log
 
@@ -506,7 +523,7 @@ def drive_l1(l1, work, stress, meta=None, family="story", seed=None, only=None, 
         m = meta.get(aid) or {}
         keep = {k: v for k, v in it.items() if k not in ("id", "k", "f", "pic", "crop", "src", "blur")}
         shots.append({"id": it["id"], "f": it["f"], "pic": aid, "pw": pw, "ph": ph, "faces": m.get("faces"), "regions": m.get("regions"),
-                      "focus": m.get("focus"), "max_up": m.get("max_up"), "src": it.get("src"), "keep": keep})
+                      "focus": m.get("focus"), "max_up": m.get("max_up"), "face_h": m.get("face_h"), "src": it.get("src"), "keep": keep})
     shots.sort(key=lambda s: s["f"][0])
     sd = int(l1.get("seed") or 0) if seed is None else int(seed)
     items, log = drive(shots, stress, fps, (W, H), family, sd, band)
@@ -514,5 +531,5 @@ def drive_l1(l1, work, stress, meta=None, family="story", seed=None, only=None, 
     film = dict(l1.get("film") or {})
     film.setdefault("shutter", log["shutter"])
     out["film"] = film
-    out["pace"] = {k: log[k] for k in ("per10", "hold_max", "hold_median", "whips", "matches", "eased", "punches")}
+    out["pace"] = {k: log[k] for k in ("per10", "framings_per10", "hold_max", "hold_median", "holds", "whips", "matches", "eased", "punches")}
     return out

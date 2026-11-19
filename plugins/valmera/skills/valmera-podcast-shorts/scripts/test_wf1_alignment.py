@@ -39,14 +39,48 @@ def test_reconcile_recuts_product_source_and_reuses_bound_result(tmp_path):
         calls.append(1)
         return json.dumps(dict(first=1,last=3,corrections=[dict(id=2,text='moat')])),dict(usd=0)
     def cut(ctx,source,a,b,out):
-        assert source=='original.mp4' and (a,b)==pytest.approx((100.24,109.92))
+        assert source=='original.mp4' and (a,b)==pytest.approx((100.24,110.8))
         from pathlib import Path
         Path(out).write_bytes(b'aligned source')
     llm=SimpleNamespace(ask=ask,json_block=json.loads)
     chain=SimpleNamespace(cut=cut,brand=SimpleNamespace(probe=lambda _:dict(dur=9.68)),shots_of=lambda *a:[])
     out,changed=A.reconcile(ctx,script,index(),[],llm,chain)
-    assert changed and script['window']==pytest.approx([100.24,109.92])
+    assert changed and script['window']==pytest.approx([100.24,110.8])
     assert (tmp_path/'coverage.json.before-alignment').exists()
     assert not (tmp_path/'coverage.json').exists()
     again,changed=A.reconcile(ctx,script,out,[],llm,chain)
     assert not changed and again==out and len(calls)==1
+
+
+def test_out_point_keeps_a_breath_after_the_last_word():
+    """19 Nov: the card dissolved over the payoff word in all 12 films; the clip now holds a breath after it."""
+    end,fade=A.out_point(index(),dict(first=1,last=3),[],100)
+    assert end==pytest.approx(100+9.8+A.BREATH_S) and fade is None
+
+
+def test_out_point_fades_out_before_a_word_the_clip_does_not_keep():
+    idx=index();idx['words'].append(dict(w='And',t0=10.1,t1=10.3))
+    end,fade=A.out_point(idx,dict(first=1,last=3),[],100)
+    assert end==pytest.approx(110.8)
+    assert 109.8<fade<110.1-A.FADE_S+1e-6
+    # past the heard window, the source captions say where the next word starts
+    end,fade=A.out_point(index(),dict(first=1,last=3),[(109.0,'last.'),(110.3,'Next')],100)
+    assert end==pytest.approx(110.8) and 109.8<fade<110.3-A.FADE_S+1e-6
+
+
+def test_reconcile_passes_the_fade_to_the_cut(tmp_path):
+    src=tmp_path/'source.mp4';src.write_bytes(b'old source')
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path))
+    script=dict(source='original.mp4',window=[100,110],hook_line='The moat',close_line='last.')
+    seen={}
+    def ask(*args,**kwargs):
+        return json.dumps(dict(first=1,last=3)),dict(usd=0)
+    def cut(ctx,source,a,b,out,fade_at=None):
+        seen.update(a=a,b=b,fade_at=fade_at)
+        from pathlib import Path
+        Path(out).write_bytes(b'aligned source')
+    llm=SimpleNamespace(ask=ask,json_block=json.loads)
+    chain=SimpleNamespace(cut=cut,brand=SimpleNamespace(probe=lambda _:dict(dur=10.56)),shots_of=lambda *a:[])
+    A.reconcile(ctx,script,index(),[(109.0,'last.'),(110.2,'And')],llm,chain)
+    assert seen['b']==pytest.approx(110.8)
+    assert seen['fade_at'] is not None and 0<seen['fade_at']<110.2-100.24

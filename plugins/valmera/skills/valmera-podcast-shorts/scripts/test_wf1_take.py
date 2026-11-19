@@ -1,0 +1,168 @@
+"""The take follows who speaks and moves like an editor; the clip keeps a breath before the end card (19 Nov rating,
+causes static-take and clip-edges)."""
+import os
+
+import pytest
+
+import wf1_film as film
+
+
+def cuts_two_shot():
+    """The show's own edit: one two-shot (the guest on the left speaks, then the host on the right), then a single."""
+    zuck = dict(box=[.28, .19, .36, .38], eyes=[[.30, .26], [.34, .26]], path=[])
+    wang = dict(box=[.65, .17, .74, .40], eyes=[[.67, .25], [.72, .25]], path=[])
+    return [dict(t0=0.0, t1=4.0, faces=[dict(box=wang["box"], eyes=wang["eyes"], score=1.0)],
+                 spans=[dict(t0=0.0, t1=2.5, who="speaker", box=zuck, track=1), dict(t0=2.5, t1=4.0, who="speaker", box=wang, track=0)]),
+            dict(t0=4.0, t1=7.0, faces=[dict(box=zuck["box"], eyes=zuck["eyes"], score=1.0)],
+                 spans=[dict(t0=4.0, t1=4.6, who="quiet", box=None), dict(t0=4.6, t1=7.0, who="speaker", box=zuck, track=0)])]
+
+
+def test_take_pieces_frame_whoever_speaks_and_punch_in_on_the_payoff():
+    pieces = film.take_pieces(cuts_two_shot(), 7.0, punch=[int(5.5 * 30) + 3])
+    assert [p["f"] for p in pieces] == [[0, 78], [78, 123], [123, 168], [168, 213]]
+    assert pieces[0]["faces"][0]["box"][0] == .28            # the guest speaking, not the bigger face beside him
+    assert pieces[1]["faces"][0]["box"][0] == .65            # the host's answer: a cut inside the show's two-shot
+    assert pieces[2]["faces"][0]["box"][0] == .28            # the quiet start of the single keeps the speaker's framing
+    assert [p["punch"] for p in pieces] == [False, False, False, True]
+
+
+def test_old_cuts_without_spans_stay_one_piece_a_shot():
+    cuts = [dict(t0=0.0, t1=3.0, faces=[dict(box=[.4, .2, .5, .4], eyes=[[.42, .27], [.48, .27]], score=1.0)]),
+            dict(t0=3.0, t1=6.0, faces=[])]
+    pieces = film.take_pieces(cuts, 6.0)
+    assert [p["f"] for p in pieces] == [[0, 93], [93, 183]]
+    assert pieces[0]["faces"] and pieces[1]["faces"] == []
+
+
+def test_stress_moves_break_the_holds_the_director_left():
+    holds = [[30, 200], [300, 330]]
+    stress = [(40, 0.9), (100, 0.7), (150, 0.95), (195, 1.0), (310, 0.9)]
+    assert film.stress_moves(holds, stress) == [100, 150]                 # every part left under three seconds
+    long = [[0, 400]]
+    stress = [(f, 0.5) for f in range(0, 400, 20)] + [(200, 1.0), (90, 0.9), (300, 0.9)]
+    got = film.stress_moves(long, stress)
+    assert 200 in got and 90 in got and 300 in got
+    edges = [0] + got + [400]
+    assert max(b - a for a, b in zip(edges, edges[1:])) <= 90
+
+
+def _sup(tmp_path, cuts):
+    words = "My favorite use case is having it coach me between the rounds and that is a hard problem".split()
+    wj = dict(duration=7.0, words=[dict(w=w, start=round(.1 + i * .36, 3), end=round(.38 + i * .36, 3), seg=0 if i < 9 else 1)
+                                   for i, w in enumerate(words)])
+    return dict(words=wj, work=str(tmp_path), ffmpeg="ffmpeg", pictures={}, footage=[], narration="/take.mp4",
+                take=dict(path="/take.mp4", w=1920, h=1080, fps=30, dur=7.0, faces=[], cuts=cuts),
+                coverage=dict(words=wj["words"], moves=[], windows=[]))
+
+
+@pytest.fixture
+def quiet_engines(monkeypatch):
+    monkeypatch.setattr(film.F, "voice_stress", lambda sup: [])
+    monkeypatch.setattr(film.F, "engines_finish", lambda l1, *a, **k: l1)
+    import placement_check
+    monkeypatch.setattr(placement_check, "check", lambda rows, *a, **k: (rows, dict(placements=[], rejected=[], spend=[])))
+
+
+def test_build_frames_the_speaker_ends_after_a_breath_and_flashes_the_turn(tmp_path, quiet_engines):
+    words = _sup(tmp_path, cuts_two_shot())
+    script = dict(title="Coach", segments=[dict(say=" ".join(w["w"] for w in words["words"]["words"] if w["seg"] == i), pictures=[])
+                                           for i in (0, 1)])
+    l1, beats = film.build(script, words, "footage-cut", dict(turn_seg=1, coverage_final=True))
+    last_word_f = round(words["words"]["words"][-1]["end"] * 30) + 3
+    # the programme holds its breath after the last word (the clip kept it); the card joins after it
+    assert beats["dur_f"] == min(last_word_f + film.BREATH_F, round(7.0 * 30) + 3)
+    assert beats["voice_f"][1] == last_word_f
+    # the take is cut where the speaker changes inside the show's two-shot, and punches in on the payoff
+    pieces = beats["coverage"]["take_pieces"]
+    assert any(p["punch"] for p in pieces) and len(pieces) >= 4
+    assert beats["finishes"]["flashes"] == 1
+    assert beats["turn_f"] in [it["f"][0] for it in l1["items"] if it["k"] == "flash" and it.get("mode") == "fill"]
+    metas = beats["face_metadata"]
+    takes = [it for it in l1["items"] if it["k"] == "shot"]
+    assert {metas[it["pic"]]["face_h"] for it in takes if not metas[it["pic"]]["face_h"] == film.PUNCH_FACE_H} == \
+        {film.medium_face_h([[0, 0, 0, .19]], 1080), film.medium_face_h([[0, 0, 0, .23]], 1080)}
+    assert any(metas[it["pic"]]["face_h"] == film.PUNCH_FACE_H for it in takes)
+    assert all(metas[it["pic"]]["max_up"] == film.TAKE_UP for it in takes)
+
+
+def test_the_medium_leaves_room_for_a_real_punch_in():
+    """A face 20% of a 1080p two-shot reaches the 3x ceiling at a 0.3 share: the medium widens so the payoff's
+    close-up is still 1.3x tighter (19 Nov: every 'move' on the take was 4-7%)."""
+    assert film.medium_face_h([[.3, .2, .08, .2]], 1080) == pytest.approx(3.0 / 1.3 * .2 * 1080 / 1920, abs=1e-4)
+    assert film.medium_face_h([[.3, .2, .2, .5]], 2160) == film.TAKE_FACE_H         # a big face in 4K: the references' medium
+    assert film.medium_face_h([], 1080) == film.TAKE_FACE_H
+
+
+def test_a_payoff_near_a_framings_edge_punches_that_framing():
+    cuts = cuts_two_shot()
+    near_start = film.take_pieces(cuts, 7.0, punch=[80])                 # 2 frames into the host's answer
+    assert [p["punch"] for p in near_start] == [False, True, False]
+    near_end = film.take_pieces(cuts, 7.0, punch=[120])                  # 3 frames before the single's cut
+    assert [p["punch"] for p in near_end] == [False, False, True]
+
+
+def test_the_punch_in_is_on_the_one_speaking_never_a_listener():
+    """b7c90a: the payoff over the host laughing must not become a close-up on the host."""
+    cuts = cuts_two_shot()
+    cuts[0]["spans"][1]["who"] = "listener"                                # the show's camera on the host while the guest talks
+    pieces = film.take_pieces(cuts, 7.0, punch=[100], until=200)           # the payoff opens in the listener span
+    assert [p["who"] for p in pieces][:2] == ["speaker", "listener"]
+    assert not pieces[1]["punch"] and [p["punch"] for p in pieces if p["punch"]] == [True]
+    punched = next(p for p in pieces if p["punch"])
+    assert punched["who"] == "speaker" and punched["f"][0] >= 100
+    # a payoff that ends before any speaker framing opens has no punch-in at all
+    assert not any(p["punch"] for p in film.take_pieces(cuts, 7.0, punch=[100], until=110))
+    # a listener framing 3 frames before its cut: still never the listener
+    near_end = film.take_pieces(cuts, 7.0, punch=[120], until=200)
+    assert [p["punch"] for p in near_end] == [False, False, True] and near_end[2]["who"] == "speaker"
+
+
+def _flash_frames(l1):
+    return [it["f"][0] for it in l1["items"] if it["k"] == "flash" and it.get("mode") == "fill"]
+
+
+@pytest.mark.parametrize("lag", [2, -3])
+def test_the_payoff_flash_lands_on_a_real_cut(tmp_path, quiet_engines, monkeypatch, lag):
+    """A payoff 2 frames into a framing (the framing is the punch, cut at its start) or 3 frames before a cut (the
+    next framing is the punch): the white flash sits on that cut, never on the payoff's word inside a shot."""
+    words = _sup(tmp_path, cuts_two_shot())
+    script = dict(title="Coach", segments=[dict(say=" ".join(w["w"] for w in words["words"]["words"] if w["seg"] == i), pictures=[])
+                                           for i in (0, 1)])
+    turn_word = next(w for w in words["words"]["words"] if w["seg"] == 1)
+    turn_f = round(turn_word["start"] * 30) + film.LEAD_F - 1
+    cut_f = turn_f - lag                                                   # where the show's camera cuts, near the payoff
+    import wf1_coverage                                                    # the director is not asked here (no model in tests)
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda coverage, *a, **k: (list(coverage.get("moves", [])), []))
+    cuts = cuts_two_shot()
+    t = (cut_f - film.LEAD_F) / 30
+    cuts[0]["t1"] = cuts[1]["t0"] = cuts[0]["spans"][1]["t1"] = cuts[1]["spans"][0]["t0"] = t
+    cuts[1]["spans"][0]["t1"] = max(cuts[1]["spans"][0]["t1"], t + 0.2)
+    words["take"]["cuts"] = cuts
+    l1, beats = film.build(script, words, "footage-cut", dict(turn_seg=1, coverage_final=True))
+    assert beats["turn_f"] == turn_f
+    starts = {it["f"][0] for it in l1["items"] if it["k"] == "shot"}
+    assert cut_f in starts and turn_f not in starts
+    assert _flash_frames(l1) == [cut_f]
+    assert set(_flash_frames(l1)) <= starts
+
+
+def test_a_rebuild_with_no_open_holds_adds_no_stress_moves(tmp_path, quiet_engines, monkeypatch):
+    """The pack's coverage is reused by retries and resumes: a second build whose holds are all broken (here the
+    director's moves now cover them) must not break the first build's stale holds again."""
+    import functools
+    import json as _json
+    from types import SimpleNamespace
+    import wf1_coverage
+    asked = []
+    director = SimpleNamespace(ask=lambda *a, **k: (asked.append(1) or '{"moves": []}', {}), json_block=_json.loads)
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", functools.partial(wf1_coverage.speaker_moves, llm=director))
+    monkeypatch.setattr(film.F, "voice_stress", lambda sup: [(f, 0.5 + (f % 7) / 10) for f in range(0, 240, 10)])
+    one_shot = [dict(t0=0.0, t1=7.0, faces=[dict(box=[.4, .2, .5, .4], eyes=[[.42, .27], [.48, .27]], score=1.0)])]
+    sup = _sup(tmp_path, one_shot)
+    script = dict(title="Coach", segments=[dict(say=" ".join(w["w"] for w in sup["words"]["words"] if w["seg"] == i), pictures=[])
+                                           for i in (0, 1)])
+    _, first = film.build(script, sup, "footage-cut", dict(turn_seg=1, coverage_final=True))
+    assert asked and sup["coverage"]["unresolved_holds"] and first["coverage"]["stress_moves"]
+    sup["coverage"]["moves"] = [dict(word=4, why="the turn of the claim"), dict(word=15, why="the hard part")]
+    _, second = film.build(script, sup, "footage-cut", dict(turn_seg=1, coverage_final=True))
+    assert sup["coverage"]["unresolved_holds"] == [] and second["coverage"]["stress_moves"] == []
