@@ -20,6 +20,7 @@ import time
 from . import cut, fetch, hear, look, motion, plan, search, shots, voice
 
 MAX_SOURCES = 16
+SMALL_UP = 3.0             # a whole-first file needing more than this to cover the frame is cut from a sharper live stream
 WHOLE_UNDER_S = 600.0      # a caller that reads only a source's head still fetches a source this short whole (no section cut)
 HEAR_MAX_S = 480.0         # a source's first 8 minutes are heard; its shots are read to PROXY_MAX_S
 PER_SUBJECT = 3
@@ -69,6 +70,11 @@ def _open(src, work, log, hear_s=None, read_s=None, whole_first=False):
         if whole_first and _whole_first(src):
             p, rung = fetch.whole_av(src["url"], d)
             src["whole"] = p
+            meta = fetch.info_of(d)                     # the source's own words about itself: provenance for the checks
+            if meta.get("description") and not src.get("description"):
+                src["description"] = meta["description"]
+            if not src.get("channel") and (meta.get("channel") or meta.get("uploader")):
+                src["channel"] = meta.get("channel") or meta.get("uploader")
         else:
             p, rung = fetch.proxy(src["url"], d, src.get("duration"), max_s=WHOLE_UNDER_S if whole else read_max)
         stage="probe"
@@ -371,6 +377,27 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
             stream_of = dict(pool.map(resolve, need_src))
         jobs = [(r, p) for r in plan_rows for p in r["picks"]]
         whole_of, whole_lock = {}, threading.Lock()
+        sharp_of, sharp_lock = {}, threading.Lock()
+
+        def sharp(k):
+            """The live stream at or under fetch.FINAL_H of a whole-first source that arrived too small to fill the frame
+            within SMALL_UP (a 360p file), resolved once; None when the file is big enough or no sharper stream comes. Its
+            cuts are then taken from that stream, the small file staying their fallback (round 1, 19 Nov: clips under
+            640 px tall fell into window cards)."""
+            s = src_of[k]
+            if downloaded_only or not s.get("w") or not s.get("h") or not fetch.is_youtube(s["url"]):
+                return None
+            if max(W / float(s["w"]), H / float(s["h"])) <= SMALL_UP:
+                return None
+            with sharp_lock:
+                if k not in sharp_of:
+                    try:
+                        st = fetch.streams(s["url"], local=False)
+                        sharp_of[k] = st if int(st.get("h") or 0) > int(s["h"]) else None
+                    except Exception as e:  # noqa: BLE001 the small file still cuts
+                        sharp_of[k] = None
+                        log(f"source {k}: no sharper stream than its {s['h']}p file: {str(e)[:120]}")
+            return sharp_of[k]
 
         def grab(job):
             r, p = job
@@ -392,7 +419,11 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                 return None
             try:
                 if whole_first and s.get("whole"):
-                    _, how = cut.local(s["whole"], t0, t1, raw)
+                    live = sharp(p["source"])
+                    if live and cut.seek(live, t0, t1, raw):
+                        how = "stream_sharper"
+                    else:
+                        _, how = cut.local(s["whole"], t0, t1, raw)
                 elif whole_first and s.get("rung") == "wayback":
                     if t1 > float(s.get("dur_read") or 0) + 0.001 or not s.get("proxy"):
                         raise fetch.FetchError("the pick lies outside the archived copy read")
@@ -510,7 +541,9 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                     continue
                 s = src_of[p["source"]]
                 clips.append(dict(verification=p.get("verification"), file=p["file"], seconds=round(p["t1"] - p["t0"], 2), subject=p["subject"], shows=p["shows"], grade=p["grade"],
-                                  source=dict(url=s["url"], title=s["title"], channel=s.get("channel"), where=s["where"]),
+                                  source=dict(url=s["url"], title=s["title"], channel=s.get("channel"), where=s["where"],
+                                              **({"description": s["description"][:600]} if s.get("description") else {})),
+                                  rung=s.get("rung"), source_size=[s.get("w"), s.get("h")],
                                   time_range=[p["t0"], p["t1"]], frame_at=p["t"], x=p.get("x"), eq=p.get("eq"), trim=p.get("trim"),
                                   how=p.get("how"), sheet=p.get("sheet"), **({"motion_p90": p["motion_p90"]} if "motion_p90" in p else {})))
             out_lines.append(dict(i=r["i"], say=r["say"], show=r["show"], dur=r["dur"], want=r["want"], clips=clips,
@@ -593,7 +626,7 @@ def _keep_sources(sources, log=print):
         p = s.get("whole")
         if not p or s.get("error") or not os.path.isfile(p):
             continue
-        metadata={k:s[k] for k in ('id','title','channel','where') if isinstance(s.get(k),str) and s[k]}
+        metadata={k:s[k] for k in ('id','title','channel','where','description') if isinstance(s.get(k),str) and s[k]}
         if isinstance(s.get('duration'),(int,float)) and s['duration']>0:metadata['duration']=s['duration']
         names=[n for n in s.get('subjects',[]) if isinstance(n,str) and n]
         if names:metadata['subjects']=names

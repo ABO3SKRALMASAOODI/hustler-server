@@ -66,7 +66,7 @@ def test_recovered_original_rescans_frames_without_repeating_exhausted_searches(
 
 def test_composed_rejection_rebuilds_product_plan_and_invalidates_render(tmp_path, monkeypatch):
     ctx = SimpleNamespace(supply=str(tmp_path), run_dir=str(tmp_path), log=lambda x: None)
-    sc = dict(beats=dict(pictures=[dict(path='/supply/bad.jpg')]), spend=[])
+    sc = dict(beats=dict(pictures=[dict(path='/supply/bad.jpg', window=2)]), spend=[])
     calls = []
 
     def draw(ctx, script, score):
@@ -80,10 +80,12 @@ def test_composed_rejection_rebuilds_product_plan_and_invalidates_render(tmp_pat
 
     def review(ctx, rd, score):
         bad = len(calls)==1
-        return dict(moving_share=1.,rejected=int(bad), placements=[dict(id=0,ok=not bad)], spend=[])
+        return dict(moving_share=1.,rejected=int(bad), placements=[dict(id=0,ok=not bad,fault='contradiction',reason='wrong era')], spend=[])
 
     def rebuild(ctx, script):
-        assert json.load(open(tmp_path/'render_rejected.json'))==['/supply/bad.jpg']
+        # the finding is local to the window it was found in: the picture stays eligible everywhere else
+        assert json.load(open(tmp_path/'render_rejected.json'))==[dict(window=2,path='/supply/bad.jpg',fault='contradiction',
+                                                                      placed='/supply/bad.jpg',reason='wrong era')]
         return dict(beats=dict(pictures=[]),spend=[])
 
     monkeypatch.setattr(wf.wf3,'render',draw)
@@ -96,14 +98,19 @@ def test_composed_rejection_rebuilds_product_plan_and_invalidates_render(tmp_pat
 
 
 def test_unresolved_composed_rejection_cannot_claim_a_passing_check(tmp_path,monkeypatch):
+    """A finding that comes back after every repair (framed again, given away) is recorded on the film, which is
+    delivered: the record never claims a passing check, and the short is never lost to its repair (20 Nov)."""
     ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda x:None)
     def fresh():return dict(beats=dict(pictures=[dict(path='/supply/bad.jpg')]),spend=[])
     sc=fresh()
-    monkeypatch.setattr(wf.wf3,'render',lambda *a:dict(film='fake.mp4'))
+    renders=[]
+    monkeypatch.setattr(wf.wf3,'render',lambda *a:renders.append(1) or dict(film='fake.mp4'))
     monkeypatch.setattr(wf,'_render_review',lambda *a:dict(moving_share=1.,rejected=1,placements=[dict(id=0,ok=False)],spend=[]))
     monkeypatch.setattr(wf,'score',lambda *a:fresh())
-    with pytest.raises(RuntimeError, match='picture'):
-        wf.render(ctx,{},sc)
+    rd=wf.render(ctx,{},sc)
+    assert rd['film']=='fake.mp4' and len(renders)==3
+    assert sc['beats']['rendered_check']['rejected']==1 and sc['beats']['rendered_check']['unrepaired']==[0]
+    assert [r['fault'] for r in wf.current_rejections(str(tmp_path))]==['reframe','contradiction']
 
 
 def test_resume_repairs_a_persisted_rejection_before_rendering_stale_score(tmp_path,monkeypatch):
@@ -145,19 +152,20 @@ def test_later_repairs_keep_the_picture_that_passed_every_review(tmp_path,monkey
     names=['a.jpg','b.jpg','c.jpg','d.jpg','good.jpg']
     def fresh(*args):
         p=tmp_path/'render_rejected.json'
-        rejected=json.load(open(p)) if p.exists() else []
+        rejected={r['path'] for r in json.load(open(p)) if r['fault']=='contradiction'} if p.exists() else set()
         return dict(beats=dict(pictures=[dict(path='/supply/'+n) for n in names if '/supply/'+n not in rejected]),spend=[])
     def review(ctx,rd,sc):
         pics=sc['beats']['pictures']
         bad=len(pics)>1
-        return dict(moving_share=1.,rejected=int(bad),placements=[dict(id=i,ok=not bad or i!=0) for i in range(len(pics))],spend=[])
+        return dict(moving_share=1.,rejected=int(bad),placements=[dict(id=i,ok=not bad or i!=0,fault='contradiction')
+                                                                  for i in range(len(pics))],spend=[])
     monkeypatch.setattr(wf.wf3,'render',lambda *a:dict(film='fake.mp4'))
     monkeypatch.setattr(wf,'_render_review',review)
     monkeypatch.setattr(wf,'score',fresh)
     sc=fresh();result=wf.render(ctx,{},sc)
     assert len(result['picture_review'])==5
     assert sc['beats']['pictures']==[dict(path='/supply/good.jpg')]
-    assert '/supply/good.jpg' not in json.load(open(tmp_path/'render_rejected.json'))
+    assert '/supply/good.jpg' not in {r['path'] for r in json.load(open(tmp_path/'render_rejected.json'))}
 
 
 def test_the_delivered_film_is_not_reviewed_again_on_the_frames_the_render_review_checked(tmp_path,monkeypatch):
@@ -180,10 +188,10 @@ def test_rejection_identifies_asset_when_research_passes_reuse_filenames(tmp_pat
     paths=['/supply/first/clips/000.mp4','/supply/repair/clips/000.mp4']
     sc=dict(beats=dict(pictures=[dict(path=p) for p in paths]),spend=[])
     def rebuilt(*args):
-        rejected=json.load(open(tmp_path/'render_rejected.json'))
+        rejected={r['path'] for r in json.load(open(tmp_path/'render_rejected.json'))}
         return dict(beats=dict(pictures=[dict(path=p) for p in paths if p not in rejected]),spend=[])
     monkeypatch.setattr(wf,'score',rebuilt)
-    wf._rebuild_rejected(ctx,{},sc,dict(placements=[dict(id=0,ok=False),dict(id=1,ok=True)]))
+    wf._rebuild_rejected(ctx,{},sc,dict(placements=[dict(id=0,ok=False,fault='contradiction'),dict(id=1,ok=True)]))
     assert sc['beats']['pictures']==[dict(path=paths[1])]
 
 
@@ -192,7 +200,7 @@ def test_changed_review_contract_rechecks_previously_rejected_assets(tmp_path):
     (tmp_path/'render_rejected.json').write_text('["old-layout.jpg"]')
     assert wf.current_rejections(str(tmp_path))==[]
     (tmp_path/'render_rejected_contract.json').write_text(str(CONTRACT))
-    assert wf.current_rejections(str(tmp_path))==['old-layout.jpg']
+    assert wf.current_rejections(str(tmp_path))==[dict(window=None,path='old-layout.jpg',fault='contradiction')]
     (tmp_path/'render_rejected_contract.json').write_text(str(CONTRACT-1))
     assert wf.current_rejections(str(tmp_path))==[]
 
@@ -368,24 +376,192 @@ def test_external_hearing_is_bound_to_source_and_valid_times(tmp_path,monkeypatc
         assert chain.external_hearing(ctx,str(source),1.)
 
 
-def test_platform_wall_goes_directly_to_original_publishers(tmp_path,monkeypatch):
+def test_a_walled_pack_searches_the_platform_again_instead_of_freezing(tmp_path,monkeypatch):
+    """19 Nov: a walled pack jumped to pass 4 (source only, no platform search), found no publisher video and was built
+    from no picture at all. Now the wall is an outage: research runs its ordinary passes and searches again."""
     import wf1_documents,wf1_primary_sources
     pack=dict(platform_walled=True,coverage=dict(contract=3,windows=[dict(name='Campus',must_show='Actual campus',say='Campus',t0=0,t1=4)]),
               referent_research={'sources':[]},research_revision=7,footage=[],pictures={},credits=[])
     (tmp_path/'pack.json').write_text(json.dumps({'pack':pack}))
     monkeypatch.setattr(wf,'_llm',lambda:None)
     monkeypatch.setattr(wf1_documents,'acquire',lambda *a,**kw:dict(pictures={},credits=[],spend=[]))
-    def acquire(windows,work,llm):
-        from pathlib import Path
-        p=Path(work);p.mkdir();(p/'manifest.json').write_text('[]')
-        return dict(sources={'Campus':[dict(url='https://university.example/tour.mp4')]},spend=[])
-    monkeypatch.setattr(wf1_primary_sources,'acquire',acquire)
+    monkeypatch.setattr(wf1_primary_sources,'acquire',lambda *a,**kw:pytest.fail('a wall is not a reason to skip the platform search'))
     calls=[]
     monkeypatch.setattr(wf.chain,'footage',lambda *a,**kw:calls.append(kw) or dict(lines=[],credits=[]))
     wf.refill(SimpleNamespace(supply=str(tmp_path),log=lambda _:None),dict(title='Campus',style={'id':'window'}),pack,
               dict(weak_windows=[0],real_seconds=0,moving_seconds=0))
-    assert calls[0]['source_only'] is True and calls[0]['hear_s']==0
-    assert pack['coverage_repairs']==4
+    assert calls[0]['source_only'] is False and calls[0]['hear_s']==0
+    assert pack['coverage_repairs']==1 and 'coverage_exhausted' not in pack
+
+
+def _walled_supply(tmp_path, rows, sources=4):
+    pack=dict(platform_walled=True,coverage=dict(contract=3,context='Speaker: Mark Zuckerberg',
+              windows=[dict(name='Meta Superintelligence Labs',must_show='Its launch',say='we started a lab',t0=0,t1=4)]),
+              footage=[],pictures={},credits=[],wall=dict(sources=sources,refused=rows))
+    (tmp_path/'pack.json').write_text(json.dumps(dict(pack=pack,record=dict(footage=None))))
+    return pack
+
+
+def _refused_row(n):
+    return dict(url=f'https://www.youtube.com/watch?v=video{n:05d}',title=f'Launch {n}',channel='Bloomberg Tech',where='youtube',
+                duration=120,subjects=['Meta Superintelligence Labs'],error='default: Sign in to confirm you are not a bot')
+
+
+def test_the_wall_refetches_the_exact_refused_sources_and_cuts_what_opens(tmp_path,monkeypatch):
+    import wf1_primary_sources
+    rows=[_refused_row(n) for n in range(4)]
+    pack=_walled_supply(tmp_path,rows)
+    fetched=[]
+
+    def opener(url,dest,duration=None):
+        fetched.append(url)
+        if url.endswith('3'):
+            raise RuntimeError('mweb: ERROR: Sign in to confirm you are not a bot')
+        os.makedirs(dest,exist_ok=True);p=os.path.join(dest,'whole.mp4');open(p,'wb').write(b'x'*3000)
+        return p,'tv+proxy'
+    monkeypatch.setattr(wf1_primary_sources,'_open_exact',opener)
+    monkeypatch.setattr(wf1_primary_sources.time,'sleep',lambda s:None)
+    calls=[]
+
+    def footage(ctx,script,durs,**kw):
+        calls.append(kw)
+        named=script['script']['named'][0]
+        assert {r['url'] for r in named['video_sources']}=={r['url'] for r in rows[:3]}     # exactly the reopened sources
+        out=os.path.join(ctx.supply,kw['out_name']);os.makedirs(out,exist_ok=True)
+        return dict(lines=[dict(i=0,clips=[dict(file='c0.mp4',seconds=1.6,source=dict(url=rows[0]['url']))])],
+                    credits=[dict(line=0,url=rows[0]['url'],channel='Bloomberg Tech',title='Launch 0',time_range=[3,4.6])],counts=dict(clips=1))
+    monkeypatch.setattr(wf.chain,'footage',footage)
+    monkeypatch.setattr(wf.wf3,'clip_facts',lambda c:c)
+    ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
+    rec=wf.recover_wall(ctx,dict(title='Lab',style={'id':'window'}),pack,waits=(0,))
+    assert fetched==[r['url'] for r in rows]                                  # the search is not run again: only these
+    assert len(calls)==1 and calls[0]['source_only'] is True and calls[0]['lines']==[0]
+    assert pack['platform_walled'] is False and [r['url'] for r in pack['wall']['refused']]==[rows[3]['url']]
+    assert pack['footage'][0]['clips'][0]['path'].endswith('c0.mp4') and pack['credits'][0]['credit']=='Bloomberg Tech'
+    kept=json.load(open(tmp_path/'sources'/'manifest.json'))
+    assert {r['url'] for r in kept}=={r['url'] for r in rows[:3]} and kept[0]['subjects']==['Meta Superintelligence Labs']
+    assert rec['footage']['clips']==1
+    # the same reopened sources are never cut and merged twice (a resume after the merge)
+    assert wf.reopened_footage(ctx,dict(title='Lab',style={'id':'window'}),pack,[dict(r) for r in rows[:3]])==0
+
+
+def test_a_wall_that_holds_stops_the_short_with_its_work_kept_after_the_backoff(tmp_path,monkeypatch):
+    import wf1_film,wf1_primary_sources
+    rows=[_refused_row(n) for n in range(4)]
+    pack=_walled_supply(tmp_path,rows)
+    tries,slept=[],[]
+
+    def opener(url,dest,duration=None):
+        tries.append(url)
+        raise RuntimeError('tv+proxy: ERROR: [youtube] x: Sign in to confirm you are not a bot')
+    monkeypatch.setattr(wf1_primary_sources,'_open_exact',opener)
+    monkeypatch.setattr(wf1_primary_sources.time,'sleep',lambda s:None)
+    monkeypatch.setattr(wf.chain,'footage',lambda *a,**k:pytest.fail('nothing opened: nothing to cut'))
+    ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
+    with pytest.raises(RuntimeError) as stop:
+        wf.recover_wall(ctx,dict(title='Lab',style={'id':'window'}),pack,waits=(0,120,300),sleep=slept.append)
+    assert wf1_film.WALL in str(stop.value)                                   # podcast.py waits and continues it
+    assert slept==[120,300] and len(tries)==12                                # every refused source, at each try
+    stored=json.load(open(tmp_path/'pack.json'))['pack']
+    assert stored['platform_walled'] is True and len(stored['wall']['refused'])==4 and stored['wall']['refused'][0]['tries']==3
+
+
+def test_a_wall_is_never_declared_lifted_on_sources_sorted_gone_while_nothing_was_cut(tmp_path,monkeypatch):
+    """Words the wall makes that the sort does not know (here a 'Video unavailable' under the wall) send every row to
+    'gone': with nothing opened and no clip in the pack the rows wait with the rest, and the short stops with WALL
+    rather than going on to a film with no footage. Once the short has footage, a gone source is not waited for."""
+    import wf1_film,wf1_primary_sources
+    rows=[_refused_row(n) for n in range(4)]
+    pack=_walled_supply(tmp_path,rows)
+    monkeypatch.setattr(wf1_primary_sources,'_open_exact',lambda *a:(_ for _ in ()).throw(RuntimeError('tv: ERROR: [youtube] x: Video unavailable')))
+    monkeypatch.setattr(wf1_primary_sources.time,'sleep',lambda s:None)
+    monkeypatch.setattr(wf.chain,'footage',lambda *a,**k:pytest.fail('nothing opened: nothing to cut'))
+    ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
+    with pytest.raises(RuntimeError,match=wf1_film.WALL):
+        wf.recover_wall(ctx,dict(title='Lab',style={'id':'window'}),pack,waits=(0,120),sleep=lambda s:None)
+    stored=json.load(open(tmp_path/'pack.json'))['pack']
+    assert stored['platform_walled'] is True and stored['wall']['sources']==4 and len(stored['wall']['refused'])==4
+    assert stored['wall']['refused'][0]['tries']==2 and not stored.get('gone_sources')      # tried again at each wait
+    # the same sort on a short that has footage: the gone sources are not waited for and the short goes on
+    pack=_walled_supply(tmp_path,[_refused_row(n) for n in range(4)])
+    pack['footage']=[dict(i=0,clips=[dict(path='/c0.mp4')])]
+    rec=wf.recover_wall(ctx,dict(title='Lab',style={'id':'window'}),pack,waits=(0,))
+    assert pack['platform_walled'] is False and pack['wall']['sources']==0 and len(pack['gone_sources'])==4 and rec is not None
+
+
+def test_a_walled_pack_is_never_returned_as_final_by_supply(tmp_path,monkeypatch):
+    import wf1_coverage,wf1_alignment
+    pack=_walled_supply(tmp_path,[_refused_row(0),_refused_row(1)],sources=2)
+    pack.update(alignment_contract=wf1_alignment.CONTRACT)
+    (tmp_path/'pack.json').write_text(json.dumps(dict(pack=pack,record=dict(footage=None))))
+    seen=[]
+    monkeypatch.setattr(wf,'recover_wall',lambda ctx,script,p,rec,waits=None:seen.append((p['wall']['sources'],waits)) or dict(rec,recovered=True))
+    monkeypatch.setattr(wf.chain,'pack',lambda *a:pytest.fail('a walled pack keeps its supply: nothing is planned or searched anew'))
+    ctx=SimpleNamespace(supply=str(tmp_path),tmp=str(tmp_path),log=lambda _:None)
+    assert wf.supply(ctx,dict(title='Lab',style={'id':'window'}))['recovered'] and seen==[(2,wf.WALL_RESUME_S)]
+    assert wf.WALL_RESUME_S[0]==0 and wf.WALL_BACKOFF_S[0]>0                  # at once on a resume; after a wait when just met
+
+
+def test_a_wall_met_in_research_does_not_spend_a_recovery_pass(tmp_path,monkeypatch):
+    import wf1_coverage,wf1_alignment,wf1_film
+    pack=dict(coverage=dict(contract=wf1_coverage.CONTRACT,windows=[]),alignment_contract=wf1_alignment.CONTRACT,
+              footage=[dict(i=0,clips=[dict(path='/c.mp4')])],lines=[],blank_frame_contract=1,ffmpeg='/usr/bin/ffmpeg')
+    (tmp_path/'pack.json').write_text(json.dumps(dict(pack=pack)))
+    monkeypatch.setattr(wf.wf3,'load_pack',lambda _:pack)
+    monkeypatch.setattr(wf.wf3,'env_path',lambda:'')
+    monkeypatch.setattr(wf,'direction_of',lambda *a:dict())
+    monkeypatch.setattr(wf.chain,'wants_music',lambda _:True)
+
+    def refill(ctx,script,pack,report):
+        raise RuntimeError(f'{wf1_film.WALL}: 9 of 10 footage sources still refused')
+    monkeypatch.setattr(wf,'refill',refill)
+    monkeypatch.setattr(wf.wf1_film,'build',lambda *a:(_ for _ in ()).throw(wf1_coverage.CoverageError('short',dict(weak_windows=[0]))))
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),args={},log=lambda x:None)
+    with pytest.raises(RuntimeError,match=wf1_film.WALL):
+        wf.score(ctx,dict(title='t',style=dict(id='window'),hook_line='h',close_line='c'))
+    assert json.load(open(tmp_path/'pack.json'))['pack']['coverage_recoveries']==0
+
+
+def test_an_empty_window_takes_its_next_depiction_rung_before_the_final_build(tmp_path,monkeypatch):
+    """19 Nov m03: the watermelon windows' pictures were all turned down and 34 s ran on the speaker. A window research
+    leaves empty goes down its ladder (acquired at once) before the build is final."""
+    import wf1_coverage,wf1_alignment
+    window=dict(name='Mark Zuckerberg eating watermelon on a Meta livestream',must_show='Zuckerberg with watermelon on Facebook Live',
+                say='a watermelon',t0=0,t1=4,rung=0,
+                depictions=[dict(name='Mark Zuckerberg Facebook Live',must_show='Zuckerberg on one of his livestreams',video_searches=['Zuckerberg Facebook Live 2016']),
+                            dict(name='Watermelon',must_show='A watermelon being cut',video_searches=['cutting a watermelon'])])
+    pack=dict(coverage=dict(contract=wf1_coverage.CONTRACT,windows=[window]),alignment_contract=wf1_alignment.CONTRACT,
+              footage=[dict(i=0,clips=[dict(path='/c.mp4')])],lines=[],pictures={'Watermelon':[dict(path='/w.jpg')]},credits=[],
+              blank_frame_contract=1,ffmpeg='/usr/bin/ffmpeg',coverage_recoveries=wf.RECOVERY_PASSES)
+    (tmp_path/'pack.json').write_text(json.dumps(dict(pack=pack)))
+    monkeypatch.setattr(wf.wf3,'load_pack',lambda _:pack)
+    monkeypatch.setattr(wf.wf3,'env_path',lambda:'')
+    monkeypatch.setattr(wf,'direction_of',lambda *a:dict())
+    monkeypatch.setattr(wf.chain,'wants_music',lambda _:True)
+    monkeypatch.setattr(wf.F,'taste_check',lambda *a:dict(ok=True,problems=[]))
+    monkeypatch.setattr(wf.F,'audio_scene',lambda *a:{})
+    monkeypatch.setattr(wf,'refill',lambda *a:pytest.fail('research is spent: the ladder acquires, not another research pass'))
+    monkeypatch.setattr(wf.PX,'pictures',lambda named,*a,**k:({n['name']:[] for n in named},[],0.0))
+    asked=[]
+
+    def footage(ctx,script,durs,**kw):
+        asked.append((kw['lines'],[(n['name'],n['video_searches']) for n in script['script']['named']],kw['source_only']))
+        return dict(lines=[],credits=[],counts=dict(clips=0))
+    monkeypatch.setattr(wf.chain,'footage',footage)
+    finals=[]
+
+    def build(sc,pack,style,knobs):
+        finals.append(knobs['coverage_final'])
+        if not knobs['coverage_final']:
+            raise wf1_coverage.CoverageError('short',dict(weak_windows=[0],missing_windows=[0]))
+        return dict(items=[],dur_f=90),dict(pictures=[])
+    monkeypatch.setattr(wf.wf1_film,'build',build)
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),args={},log=lambda x:None)
+    pack['coverage_missing']=[0]
+    wf.score(ctx,dict(title='t',style=dict(id='window'),hook_line='h',close_line='c'))
+    assert asked==[([0],[('Mark Zuckerberg Facebook Live',['Zuckerberg Facebook Live 2016'])],False),
+                   ([0],[('Watermelon',['cutting a watermelon'])],False)]
+    assert finals==[False,False,True] and window['rung']==2 and window['ladder'][0]['name'].startswith('Mark Zuckerberg eating')
 
 
 def test_a_short_spends_at_most_its_recovery_passes_then_is_built_from_every_approved_picture(tmp_path,monkeypatch):
@@ -393,7 +569,7 @@ def test_a_short_spends_at_most_its_recovery_passes_then_is_built_from_every_app
     across rebuilds, then the final build."""
     import wf1_coverage,wf1_alignment
     pack=dict(coverage=dict(contract=wf1_coverage.CONTRACT,windows=[]),alignment_contract=wf1_alignment.CONTRACT,
-              platform_walled=True,footage=[],lines=[],blank_frame_contract=1,ffmpeg='/usr/bin/ffmpeg')
+              footage=[dict(i=0,clips=[dict(path='/c.mp4')])],lines=[],blank_frame_contract=1,ffmpeg='/usr/bin/ffmpeg')
     (tmp_path/'pack.json').write_text(json.dumps(dict(pack=pack)))
     monkeypatch.setattr(wf.wf3,'load_pack',lambda _:pack)
     monkeypatch.setattr(wf.wf3,'env_path',lambda:'')
@@ -435,3 +611,90 @@ def test_the_composed_frames_get_one_look_that_also_audits_transitions(tmp_path,
     report=wf._render_review(SimpleNamespace(supply=str(tmp_path)),dict(film='film.mp4'),sc)
     assert passes==[('composed',2)]
     assert [p['transition_audit']['ok'] for p in report['placements']]==[True,False] and report['rejected']==1
+
+
+def test_a_composed_fault_is_framed_again_first_then_gives_only_its_window_to_the_next_picture(tmp_path,monkeypatch):
+    """Round 1, 19 Nov: one composed 'no' removed a picture from every window for good. A crop through a face is
+    framed again first; a second finding on the same placement gives that one window's slot away; the picture stays
+    eligible in every other window."""
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda x:None)
+    plans=[]
+    def rebuild(*a):
+        found=wf.current_rejections(str(tmp_path))
+        plans.append(found)
+        return dict(beats=dict(pictures=[dict(path='/supply/clip.mp4',window=1,reframed=True)]),spend=[])
+    monkeypatch.setattr(wf,'score',rebuild)
+    sc=dict(beats=dict(pictures=[dict(path='/supply/clip.mp4',window=1)]),spend=[])
+    face_cut=dict(placements=[dict(id=0,ok=False,fault='reframe',reason='the crop cuts his chin')])
+    wf._rebuild_rejected(ctx,{},sc,face_cut)
+    assert plans[-1]==[dict(window=1,path='/supply/clip.mp4',fault='reframe',placed='/supply/clip.mp4',reason='the crop cuts his chin')]
+    assert not wf.unrepaired(sc['beats']['pictures'][0],plans[-1])          # the rebuilt plan framed it again
+    wf._rebuild_rejected(ctx,{},sc,face_cut)                                # framed again and still cut: next picture
+    assert [r['fault'] for r in plans[-1]]==['reframe','contradiction'] and {r['window'] for r in plans[-1]}=={1}
+    knobs={}
+    found=wf.current_rejections(str(tmp_path))
+    knobs['reject']=[r for r in found if r.get('fault')!='reframe']
+    import wf1_coverage
+    assert wf1_coverage.is_rejected({(r['window'],r['path']) for r in knobs['reject']},1,'/supply/clip.mp4')
+    assert not wf1_coverage.is_rejected({(r['window'],r['path']) for r in knobs['reject']},2,'/supply/clip.mp4')
+
+
+def test_score_hands_the_findings_to_the_build_by_window(tmp_path,monkeypatch):
+    import wf1_coverage,wf1_alignment
+    from placement_check import CONTRACT
+    pack=dict(coverage=dict(contract=wf1_coverage.CONTRACT,windows=[]),alignment_contract=wf1_alignment.CONTRACT,
+              footage=[dict(clips=[dict(path='a.mp4')])],lines=[],blank_frame_contract=1,ffmpeg='/usr/bin/ffmpeg')
+    (tmp_path/'pack.json').write_text(json.dumps(dict(pack=pack)))
+    (tmp_path/'render_rejected_contract.json').write_text(json.dumps(CONTRACT))
+    (tmp_path/'render_rejected.json').write_text(json.dumps([dict(window=3,path='a.mp4',fault='contradiction'),
+                                                             dict(window=1,path='b.mp4',fault='reframe')]))
+    monkeypatch.setattr(wf.wf3,'load_pack',lambda _:pack)
+    monkeypatch.setattr(wf.wf3,'env_path',lambda:'')
+    monkeypatch.setattr(wf,'direction_of',lambda *a:dict())
+    monkeypatch.setattr(wf.chain,'wants_music',lambda _:True)
+    monkeypatch.setattr(wf.F,'taste_check',lambda *a:dict(ok=True,problems=[]))
+    monkeypatch.setattr(wf.F,'audio_scene',lambda *a:{})
+    seen=[]
+    def build(sc,pack,style,knobs):
+        seen.append(knobs);return dict(items=[],dur_f=90),dict(pictures=[])
+    monkeypatch.setattr(wf.wf1_film,'build',build)
+    wf.score(SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),args={},log=lambda x:None),
+             dict(title='t',style=dict(id='window'),hook_line='h',close_line='c'))
+    assert seen[0]['reject']==[dict(window=3,path='a.mp4',fault='contradiction')]
+    assert seen[0]['reframe']==[dict(window=1,path='b.mp4',fault='reframe')]
+    assert 'drop' not in seen[0]
+
+
+def test_the_delivered_record_measures_its_cuts_on_the_pixels(tmp_path):
+    import shutil,subprocess
+    ff=shutil.which('ffmpeg') or next((p for p in ['/Users/masaoodi/Documents/Valmera/.valmera/week-1106/gauntlet/tools/ff/ffmpeg']
+                                       if os.path.exists(p)),None)
+    if not ff:pytest.skip('no ffmpeg')
+    film=tmp_path/'film.mp4'
+    subprocess.run([ff,'-v','error','-f','lavfi','-i','color=c=red:size=160x284:rate=30:d=2','-f','lavfi','-i',
+                    'color=c=blue:size=160x284:rate=30:d=1','-filter_complex','[0][1]concat=n=2:v=1','-y',str(film)],check=True)
+    m=wf.measure_cuts(str(film),ff)
+    assert m['cuts']==1 and m['longest_hold_s']==pytest.approx(2.0,abs=.1) and m['seconds']==pytest.approx(3.0,abs=.1)
+    assert wf.measure_cuts(str(tmp_path/'missing.mp4'),ff) is None
+
+
+def test_every_style_asks_the_footage_engine_for_the_full_phone(tmp_path,monkeypatch):
+    """Round 1, 19 Nov: window and prints asked for their card size (1080x810, 1080x1080), so every 16:9 clip arrived
+    1080x608 and needed 3.16x to fill the phone: each one fell into a window card."""
+    pack=dict(coverage=dict(contract=3,windows=[dict(name='Campus',must_show='Actual campus',say='Campus',t0=0,t1=4)]),
+              referent_research={'sources':[]},research_revision=7,footage=[],pictures={},credits=[],
+              coverage_context_rescout_pending=True)
+    (tmp_path/'pack.json').write_text(json.dumps({'pack':pack}))
+    monkeypatch.setattr(wf,'_llm',lambda:None)
+    import wf1_documents
+    monkeypatch.setattr(wf1_documents,'acquire',lambda *a,**kw:dict(pictures={},credits=[],spend=[]))
+    calls=[]
+    monkeypatch.setattr(wf.chain,'footage',lambda *a,**kw:calls.append(kw) or dict(lines=[],credits=[]))
+    for style in wf.wf1_film.STYLES:
+        wf.refill(SimpleNamespace(supply=str(tmp_path),log=lambda _:None),dict(title='Campus',style={'id':style}),pack,
+                  dict(weak_windows=[0],real_seconds=4,moving_seconds=4,required_moving_seconds=1))
+        pack['coverage_context_rescout_pending']=True
+    assert len(calls)==len(wf.wf1_film.STYLES)
+    assert all((kw['W'],kw['H'])==(1080,1920)==wf.wf1_film.FOOTAGE_FRAME for kw in calls)
+    import inspect
+    assert 'style["footage"]' not in inspect.getsource(wf.supply)

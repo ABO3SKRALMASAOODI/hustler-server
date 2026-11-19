@@ -357,10 +357,12 @@ def sting_time(prog_s, fps, j, reveal_k, settle_k, grid):
 def tail_start(prog_s, last_word_s):
     """Where the film's sound starts its fall (programme seconds): TAIL_FALL_S before it has to be over (TAIL_AFTER_WORD_S
     after the last word, or the programme's end when that comes sooner), never sooner than TAIL_BREATH_S after the word.
+    A last word measured at or past the programme's end is the programme's end: the fall never starts under a word
+    (19 Nov: a word read at the end fell from a second before it, 10-15 dB down across 'really really bad').
     Without a last word, the programme's last TAIL_FALL_S."""
-    if last_word_s is None or not (0 < float(last_word_s) < prog_s):
+    if last_word_s is None or not 0 < float(last_word_s):
         return max(0.0, prog_s - TAIL_FALL_S)
-    L = float(last_word_s)
+    L = min(float(last_word_s), prog_s)
     end = min(L + TAIL_AFTER_WORD_S, prog_s)
     return max(end - TAIL_FALL_S, min(L + TAIL_BREATH_S, prog_s))
 
@@ -608,6 +610,8 @@ def finish(programme, out, workdir, used=(), accent=True, last_word_s=None):
     res = dict(programme_s=round(prog_s, 3), outro_s=outro_s, join_frames=j, mark_xy=[x, y], card=os.path.basename(card),
                mark_ink=dict(dark_spans=spans))
     res["tail"] = {k: v for k, v in info.items() if k in ("last_word_s", "fall_from_s")}
+    if last_word_s is not None:                       # the breath between the last word and the card's first frame
+        res["tail"]["word_to_card_s"] = round(t_join - float(last_word_s), 3)
     if accent:
         res["accent"] = info
     return res

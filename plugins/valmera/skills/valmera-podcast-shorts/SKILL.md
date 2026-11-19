@@ -37,12 +37,21 @@ it returns media and provenance, never account credentials. Remote rendering nee
    the adapter's cap, an outage: HTTP 429/502/503/504) the short in hand keeps its work, the shorts not started
    wait, and nothing is delivered until the set is whole: run the same link again when the route answers. Fix a real defect in the product, never by hand in a
    film.
-5. **"YouTube is refusing this Mac as a bot"** in `stopped` is not a defect to fix: a busy address is walled on
-   every player for a while (a seven-short run fetches about a hundred sources). The link cannot be read, or the
-   shorts cannot get their footage, and a short is never cut from photographs alone. The shorts already made are
-   kept in the work folder, nothing is delivered until the set is whole, and the wall lifts by itself, usually
-   within hours: tell the user that, and run the same command again later. Do not look for a way round it with
-   anyone's account or cookies.
+5. **"YouTube is refusing this Mac as a bot"** is a temporary outage of one input, recovered by the run itself: a
+   busy address is walled on every player for a while (a seven-short run fetches about a hundred sources), so the
+   run paces every YouTube fetch of all its shorts through one shared bucket (`FOOTAGE_PACE_S`, 3 s after a burst
+   of 4; `FOOTAGE_PACE_BURST`). When half
+   or more of a short's footage sources are refused, it fetches exactly those sources again (the search already
+   found them) through every route: the operator's transport (`FOOTAGE_FETCH_CMD`), every player client on every
+   configured proxy (`YTDLP_PROXY`, `YTDLP_PROXY_FALLBACK`, read from the environment or the backend's `.env` into
+   the footage engine's), then the Wayback copy; after 2 and after 5 minutes, and at once each time the run continues the short. A source
+   is waited for when YouTube's own answer (not the Wayback copy's) is the wall; while nothing has opened or been
+   cut, no source is set aside as gone. Still refused, the short keeps all
+   its work and waits; shorts whose footage is already in hand go on; the run waits 10, 20, 40, 60 and 60 minutes
+   and continues the waiting shorts each time (`PODCAST_WALL_WAITS`). A short is never built from no footage and never
+   delivered as the bare take. Only if the wall outlasts that does the run stop with this message: nothing is
+   delivered until the set is whole; tell the user and run the same command again later. Do not look for a way round
+   it with anyone's account or cookies.
 
 ## What the run does
 
@@ -65,7 +74,9 @@ display words on 17% of shots, finishes that change by section, collages of thre
 - **Fast and dynamic, done well.** A picture or framing that holds for long is a defect. A new picture lands about
   every second over what he says, motivated by the words, eased, faces whole, one consistent design.
 - **Real footage of what is said.** Video of the actual people, companies, places and events he names. Photographs
-  are the fallback, generic stock is never used, and the speaker is never shown as he looks today in a cutaway.
+  are the fallback, generic stock is never used, and this conversation's own take is never a cutaway. The speaker's
+  own filmed past (a livestream he hosted, a keynote, his training, an event he took part in) is archive like any
+  other, wanted when he tells of it.
 - **Sound effects are part of the film.** The same kinds and about the same amount as the references, each on
   something that lands, at the references' level under the voice, real recordings only. A short with no designed
   sound is a failure. So is a sound on every caption.
@@ -90,16 +101,40 @@ word so the end card follows directly. What differs is how a found picture is sh
 | `prints` | a photograph or document lands as a readable, nearly full-width tilted print on its own dark out-of-focus ground; the previous print clears so document and interface detail stays visible | high-contrast serif, orange accent |
 
 Moving footage fills the phone in every style (owner's rating, 16 Nov 2026: cutaways as small windows over a blurred
-fill were the defect). Clips keep their source's own pixels (`chain.footage(native_pixels=True)`), a wide clip is
-cover-cropped round the subject the look placed and its people, and only a clip that cannot fill the phone within 3x
-stays in a window. The placement check sees exactly that phone-shaped slice.
+fill were the defect). Every style asks the footage engine for the phone's full size (`wf1_film.FOOTAGE_FRAME`, 1080x1920;
+19 Nov: the window and prints styles asked for their card size and every 16:9 clip arrived 1080x608, in a window card).
+Clips keep their source's own pixels (`chain.footage(native_pixels=True)`); whole-first sources come as separate 1080p
+video and sound streams first (`fetch.whole_av_format`); a rung on which they time out or fail (not walled) is asked at
+once for the earlier 720p ladder (`run_ladder(lighter=...)`), so a slow route still brings the source; and a whole file
+that still arrived small is cut from the live stream at up to 1080p. A wide clip is cover-cropped round the subject the look placed and its people. A clip still too
+small to fill the phone within 3x is brought up once with a detail-keeping scaler (`wf1_film.fill_size`); it is never
+shown as a window. Each picture's size, cut route and fetch rung are in the record (`checks.podcast.sources`).
 
-Other editors' text (subtitles, burned-in captions, promo labels, date stamps) is found by the placement check's model
-look on the visible frames, never by a word list. Its box is grown to the text lines measured on the clip
-(`worker/footage/overlay.py`: seated stroke lines, signal only), the clip is cut down to the largest band clear of it
-that still fills the phone, and that new clip is checked again. A clip with no such band is replaced from supply. The
-footage look itself (`look_itself=True`) passes only frames of the subject or the line's own action, never a studio
-talking about it, and the placement check rejects pictures merely associated with the topic.
+The placement check is a model that chooses (19 Nov: a check that rejected by default emptied six of twelve films). It
+sees each wide clip's full source frame (lower thirds, wordmarks and signs included) and then the phone-shaped slice,
+judges it against the whole clause it sits under, with its provenance (the source's title, channel and description,
+what the footage engine saw), ranks the candidates of a clause (`fit`), says where the subject stands so the slice is
+centred on it (`subject_x`), and says no only for a contradiction a viewer would be misled by (a different person,
+company, place, era or event). Identity comes from that provenance; on-screen attribution is not required, and a lower
+third naming the subject is attribution, not foreign text. The verdict is keyed on the source picture's frames, its
+clause and its provenance, never on the director's search brief, so a re-brief or a moved slice never re-judges it.
+Other editors' text (subtitles, promo labels, date stamps) is found by the same look, never by a word list. Its box is
+grown to the text lines measured on the clip (`worker/footage/overlay.py`: seated stroke lines, signal only), the clip
+is cut down to the largest band clear of it that still fills the phone, and that new clip is checked again. Text no
+band can shed stays on the picture, recorded (`text_kept`); the picture keeps its place. When the evidence names the
+person a picture shows (a lower third the phone slice cuts away, the source's title or channel), the check returns that
+name (`name_super`) and the film draws it in the label type, once, while the picture is up (two lines when long, never
+smaller than the reading floor). A window with fewer chosen pictures than its clause wants has them share the whole
+clause, a clip up to its own seconds (`wf1_coverage.clause_shares`); with enough pictures the picture changes about
+every 1.4 s.
+
+The coverage plan starts from the script's resolved referents (`script.named`, with their event-level `must_show`)
+and gives every window a depiction ladder: the event itself, then the named person's or company's own archive, then
+the place or product, then related moving context. A window research leaves empty takes its next rung, acquired at
+once, before the final build (`wf1_short.descend`). The final build fills any stretch of the take over 3 s with the
+approved pictures the film has not shown, each checked on its own words (`wf1_film.fill_holes`). An interval is never
+shown twice: a window whose candidates were all shown takes a fresh interval of the same kept original beside the
+verified one (`wf1_coverage.fresh_interval`).
 
 ## What every short is built from
 
@@ -108,14 +143,14 @@ talking about it, and the placement check rejects pictures merely associated wit
 | The clip | In and out on word edges, the title, the hook and close lines, and the real things it names | `wf1_short.script` (OpenAI) |
 | Real footage | Video of what each sentence names from YouTube and archive.org, every frame checked, a person held to one face, 1 to 3 s clips inside one shot, graded to one look, each with its URL, channel and time range. A clip that is near black or flat is left out. Source aspect and every edge are preserved before the layout; portrait crops are never baked into supply. Pictures never move to a different sentence without a fresh placement check | `worker/footage` through `_shell/chain.footage` |
 | Photographs | Of the same things, after the footage of them and where footage is thin: Commons and Openverse, checked by eye, licence kept |
-| Documentary coverage | A model inventories every concrete named thing and assigns pictures to exact word spans. The targets: actual pictures on at least 45% of the short, moving footage on at least 60% of picture time, six new real pictures per ten seconds of named stretches. Every entry, middle, exit and display transition is checked on gpt-6-sol and a rejected picture never ships. Under target, the short spends at most `RECOVERY_PASSES` (2) research passes, counted across rebuilds, and one more pass for moving footage after the render review; then the film is built from every approved picture, the speaker carries the rest with his own camera cuts and motivated moves, and `coverage.short` in the record says what was short. A target is never a reason to lose a short | `wf1_coverage.py`, `placement_check.py` |
+| Documentary coverage | A model inventories every concrete named thing and assigns pictures to exact word spans. The targets: actual pictures on at least 45% of the short, moving footage on at least 60% of picture time, six new real pictures per ten seconds of named stretches. Every picture is chosen for its clause on gpt-6-sol and every composed entry, middle, exit and display transition is looked at again; a picture that contradicts its words never ships, and its slot goes to the next-ranked candidate. Under target, the short spends at most `RECOVERY_PASSES` (2) research passes, counted across rebuilds, and one more pass for moving footage after the render review; then the film is built from every approved picture, the speaker carries the rest with his own camera cuts and motivated moves, and `coverage.short` in the record says what was short. A target is never a reason to lose a short | `wf1_coverage.py`, `placement_check.py` |
 | Pace and moves | New pictures carry pace. Speaker footage keeps its own camera cuts; only model-justified rhetorical words trigger eased, face-safe moves. Never alternate hard crops to fill a cut quota | `worker/scene/pace.py`, `wf1_film.py` |
 | Look | One look solved on the film's own pictures, skin kept | `worker/scene/looks.py` |
-| Finishes by section | When part of the story is about the past, that part's pictures are black and white (a story that is all past keeps its colour, except in `archive-reel`); one new picture in three opens soft and is sharp by its fourth frame; a white frame on the cut back to his face for the payoff | `wf1_film.build` |
-| Captions | One face-safe seat for the whole film, measured against every final camera crop; a line is laid as it will stand and each word is inked on its own spoken word. After a display hold, already-spoken words are omitted; only the current and following words resume, never a restarted chunk. On a picture that is bright under the seat the type is dark for as long as that picture is up | `film.caption_build`, `wf1_film.ink_by_ground` |
-| Display words | Four to eight strings, the figures, names and words that carry the story, large on the caption seat on the word that says them; the first two seconds always show the spoken hook word by word; the headline stays in delivery metadata; all display blocks are seated against final face boxes on every frame, shrinking long titles if needed; search-subject labels are omitted so they cannot make unsupported factual claims | `wf1_short.direction_of` (OpenAI), `wf1_film.build` |
-| Sound design | The references' kinds of sound on what lands, on new pictures and meaningful graphic actions, no recording twice. Audibility is measured from 50 ms broadband onsets against the whole mix, with retained stems verified against the encoded export | `worker/score/sound.py` (SND3) |
-| Music | A track chosen from the licensed library, opened on a full part, built where the story turns, shaped on the payoff even when fewer than two bars remain, 5–6 dB below speech on the final broadband ruler, a 0.5–2.3 s payoff drop at 10–24 dB, and the current product brand finish (the owner has held the old end sting pending STING-REF). No two shorts of one run play the same track | `worker/music_film.py`, `worker/score/music.py` (MUSIC2) through `_shell/chain.music_version` |
+| Finishes by section | The past is measured on spoken time over the sentences the direction names as past. When part of the story (not all of it) tells of the past, that part's pictures are black and white and the take itself is desaturated through those sentences, cut at their joins (a story that is all past keeps its colour, except in `archive-reel`). Every cut-in gets a grade that brings it part of the way to the take (exposure lightly, saturation and white balance more, measured on both stills). One new picture in three opens soft and is sharp by its fourth frame. In the styles that flash on the turn, a white flash goes on the payoff join (the cut back to his face), on the story-turn join and on the take's joins into the past; the styles that flash on runs flash into a run of archive | `wf1_film.build`, `wf1_film.section_spans`, `wf1_film.clip_balance` |
+| Captions | One face-safe seat for the whole film, measured against every final camera crop; when faces fill every height somewhere, each caption page takes its own seat. A line is laid as it will stand and each word is inked on its own spoken word. The words a display word has just printed are left out of the captions by position (the clock's own word records from `film.said_span`, never by matching text on the page); after a display hold only the current and following words resume, never a restarted chunk. The shade under the captions is one pool per caption page, sized to that page's shaped words where the seat finally put them. Split window tokens ('49' '%') are joined on the run transcript's own boundaries before captioning, each word captioned once. On a picture that is bright under the seat the type is dark for as long as that picture is up | `film.caption_build` (`omit=`), `wf1_film.caption_pools`, `wf1_alignment.run_tokens`, `wf1_film.ink_by_ground` |
+| Display words | The direction ranks up to six words or short phrases best first, each with its job in the story (hook, turn, payoff, figure, name, contrast) and its key word; the film lands the first two to four whose timing fits (never in the first two seconds, two seconds apart, held at least 14 frames, never over the next documentary subject), so a film never loses its display words to timing, and `beats.display_count` records how many were proposed and landed. Each is set by its role at least 1.6x the caption (or as large as the platform-rail width allows), on a seat of its own above the caption's, on the word that says it (figures are found whether the transcript wrote digits or words). A long phrase is a two-size stack round its key word, seated as one block; a contrast stands on an accent bar that is part of its block (moved and shrunk with it); the ink is chosen by WCAG contrast against the ground measured under the block. The first two seconds always show the spoken hook word by word; the headline stays in delivery metadata; all display blocks are seated against final face boxes on every frame, shrinking long titles if needed; search-subject labels are omitted so they cannot make unsupported factual claims | `wf1_short.direction_of` (OpenAI), `wf1_film.display_rows`, `wf1_film.contrast_ink`, `wf1_layout.seat_display`, `wf1_film.build` |
+| Sound design | The references' kinds of sound on what lands, on new pictures and meaningful graphic actions, no recording twice. The sound's turn hit goes on the story's turn (the direction's `story_turn_seg`), apart from the payoff; a cut-in with verified motion counts as a moving arrival; display landings carry the tick layer at 1.5 per 10 s. Audibility is measured from 50 ms broadband onsets against the whole mix, with retained stems verified against the encoded export | `worker/score/sound.py` (SND3) |
+| Music | A track chosen from the licensed library (the chooser is told the film's mood, read from its lines), opened on a full part, built where the story turns, 5–6 dB below speech on the final broadband ruler, a 0.5–2.3 s payoff drop at 10–24 dB, and the current product brand finish (the owner has held the old end sting pending STING-REF). The workflow hands the payoff (`--payoff`), the story's turn when the direction names one (`--turn`) and its opt-in `--turn-drop`: a payoff too close to the last hit for a phrase after it still gets its drop, on the story's turn (the direction's, else the one read from the lines) with the payoff keeping its own breath and hit, else on the payoff with the last hit moved into the film's own tail before the end card. No two shorts of one run play the same track | `worker/music_film.py`, `worker/score/music.py` (MUSIC2) through `_shell/chain.music_version` |
 | Brand | The product's own watermark on every frame and its end card, measured on the delivered file | `_shell/brand.py` |
 
 ## The alien bank (`worker/scene/alien`): only as the verdict of 14 Nov allows
@@ -170,7 +205,7 @@ README.md             the list, what was not made and why
 
 Never report plan counts as viewer measurements. Use the independent rater’s final-film scripts and judge3; a film's measured coverage shortfall (`coverage.short`) is reported with it, never hidden. A fixer does not independently rate its own work.
 
-Research the director's visual subjects, keeping the full spoken-entity inventory for audit. Pass the depiction context all the way to the footage reviewer. A contextual campus illustration is distinct from a claim to record a particular historical conversation; never invent the missing participant. The podcast uses the engine's contextual-check route: every selected source cut, composed placement and branded transition is checked against the actual words. Named people require visible attribution, never face comparison. Preliminary motion scouting is bounded to the source frames being examined; the selected clips still receive exact motion measurements. A failed coverage gate triggers targeted research with retained sources, never silent deletion of the pictures.
+Research the director's visual subjects, keeping the full spoken-entity inventory for audit. Pass the depiction context all the way to the footage reviewer. A contextual campus illustration is distinct from a claim to record a particular historical conversation; never invent the missing participant. The podcast uses the engine's contextual-check route: every selected source cut, composed placement and branded transition is checked against the actual words. Named people are identified from provenance (the source's title, channel and description, a lower third anywhere in the full source frame), never by face comparison. Preliminary motion scouting is bounded to the source frames being examined; the selected clips still receive exact motion measurements. A failed coverage gate triggers targeted research with retained sources, never silent deletion of the pictures.
 
 For subjects that need primary evidence, the product also researches original institutional PDFs and images,
 renders their actual pixels with PDFium, and checks readable crops against the spoken passage. These remain
@@ -195,9 +230,16 @@ frames. Card transforms, pans over documents, and cursor-only changes on a stati
 Their failed motion verdict lowers their acquisition priority; it does not falsely reject a faithful picture.
 Retained publisher originals enter the first acquisition pass as attributed candidates for their exact
 subjects, as well as later recovery. Reusing their bytes never bypasses motion or placement checks.
-Composed-picture failures also return to the acquisition director once per affected window, so a broad
-but unsuitable depiction brief cannot keep asking for the same unrelated activity. Changed briefs
-invalidate source-scan reuse. A paused rejection repair resumes before rendering a stale rejected plan.
+The composed review judges only what composing changed and repairs it where it was found: a crop through a face or a
+subject outside the frame is framed again first; a contradiction, or a second finding on a picture already framed
+again, gives that one window's slot to its next candidate; a finding that still returns on that window gives it to the
+speaker. The picture stays eligible in every other window (`render_rejected.json` holds window, the candidate's own path
+and fault; a copy cut clear of text answers for its candidate through `origin`). A finding with no step left is recorded
+on the film (`unrepaired`) and the film is delivered. A contradiction may move a window's boundary; no finding and no
+rejection reason ever reaches the acquisition brief. A paused repair resumes before rendering a stale plan. The
+rendered programme's cuts are measured on its pixels (`measure_cuts`: cuts per 10 s, longest hold, every hold over
+6 s); the windows under a long hold, or under fewer than 4 cuts a 10 s, go back to research once a short
+(`_rebuild_holds`), never as a gate, and the delivered record carries the measure (`checks.podcast.measured`).
 The composed film aims at 60% moving picture time (one more footage pass when it is under, then it stands). A still discovered there stays
 eligible as a still, while the product returns to footage research; it cannot regain moving credit from an earlier source check.
 Research is split into small referent groups with retained answers. A source replay can reuse verified word

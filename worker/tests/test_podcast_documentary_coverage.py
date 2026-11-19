@@ -217,8 +217,11 @@ def test_exposed_speaker_gap_requires_actual_director_motivation(tmp_path):
     assert moves==[dict(word=1,why='The explicit contrast changes the argument.')]
     empty=SimpleNamespace(ask=lambda *a,**k:('{"moves":[]}',{}),json_block=json.loads)
     other=tmp_path/'unresolved';other.mkdir()
-    with pytest.raises(RuntimeError,match='no automatic recrops'):
-        C.speaker_moves(coverage,[],150,[],str(other),llm=empty)
+    # a hold the director cannot honestly break is recorded, never a stop; the film breaks it on the voice's
+    # strongest stress (wf1_film.stress_moves)
+    cov=dict(coverage,moves=[])
+    moves,_=C.speaker_moves(cov,[],150,[],str(other),llm=empty)
+    assert moves==[] and [list(h) for h in cov['unresolved_holds']]==[[0,150]]
 
 
 def test_new_picture_identity_survives_research_cache_paths():
@@ -260,7 +263,8 @@ def test_context_rejection_does_not_destroy_a_picture_valid_under_a_later_clause
     cov=dict(windows=[dict(t0=0,t1=2,name='Project',subjects=['Accelerator'],must_show='the project'),dict(t0=3,t1=5,name='Accelerator',must_show='the accelerator')])
     picture=dict(path='original-program-document.jpg')
     first=C.proposals(cov,{},dict(Accelerator=[picture]))
-    assert [r[4]['window'] for r in first]==[0,1]
+    # nothing is placed twice (supply lane, 20 Nov): a photo shown in window 0 leaves window 1 to its ladder and the gap fill
+    assert [r[4]['window'] for r in first]==[0]
     repaired=C.proposals(cov,{},dict(Accelerator=[picture]),rejected={(0,picture['path'])})
     assert [r[4]['window'] for r in repaired]==[1]
 
@@ -280,12 +284,14 @@ def test_research_can_resolve_a_wrong_pronoun_label_without_changing_word_bounds
 def test_repeated_primary_evidence_covers_a_callback_but_is_not_a_new_picture():
     cov=dict(windows=[dict(name='Exact experiment',must_show='Original source',t0=0,t1=1),dict(name='Exact experiment',must_show='Original source',t0=2,t1=3)])
     rows=C.proposals(cov,{}, {'Exact experiment':[dict(path='original-document.jpg')]})
-    assert len(rows)==2 and [r[4]['window'] for r in rows]==[0,1]
+    # the same evidence is never placed twice (19 Nov m10: one clip three times); a still has no fresh interval, so the
+    # callback window is left to its ladder rungs and the gap fill, and the shortage names it
+    assert len(rows)==1 and [r[4]['window'] for r in rows]==[0]
     with pytest.raises(C.CoverageError) as error:C.require_coverage(rows,cov,3)
     assert error.value.report['new_pictures']==1
-    assert error.value.report['repeated_pictures']==1
+    assert error.value.report['repeated_pictures']==0
     assert error.value.report['new_per_10s']==5
-    assert not error.value.report['missing_windows']
+    assert error.value.report['missing_windows']==[1]
 
 
 def test_recorded_attack_after_half_second_is_levelled_at_its_actual_peak():

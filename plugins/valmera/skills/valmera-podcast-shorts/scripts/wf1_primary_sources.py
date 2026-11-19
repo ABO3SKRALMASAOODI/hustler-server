@@ -3,14 +3,148 @@
 These are source candidates, never approved placements. The footage engine still
 examines their frames and motion, and the film checks every selected interval.
 """
+import glob
 import hashlib
 import json
 import os
 import shutil
 import tempfile
+import time
 from urllib.parse import urlparse
 
 MAX_SOURCE_BYTES = 256 << 20  # Bounded original; official short HD films can exceed 128 MB.
+LONG_S = 600.0                # footage.run.WHOLE_UNDER_S: a longer source is re-fetched as its head, not whole
+# What YouTube says when it walls a busy address, beyond the product's own access_blocked (the bot check, the CDN's
+# bare 403): a rate limit, a stalled player, a session YouTube rate-limited ("This content isn't available, try again
+# later"), and a player that serves no format at all (SABR, a missing PO token) for a video its search just listed.
+# yt-dlp's own words, read off the tool's error text. A video that is gone or private says something else and is
+# not waited for. "Sign in to confirm your age" is an age gate, not the wall.
+WALL_SIGNS = ("sign in to confirm", "not a bot", "--cookies", "http error 403", "403 forbidden", "403: forbidden",
+              "http error 429", "too many requests", "timed out", "rate-limit", "rate limit", "try again later",
+              "content isn't available", "content isn\u2019t available", "format is not available")
+WAYBACK_PART = " || wayback:"     # footage.fetch.run_ladder appends the Wayback rung's own failure after this
+
+
+def youtube_part(text):
+    """The YouTube rungs' part of a fetch failure. fetch.run_ladder builds its error as '<last rung>: <yt-dlp stderr>
+    || wayback: <the archive's answer>'; the archive's answer ('not archived', its own time-out) says nothing about
+    the wall and must neither hide it nor stand for it."""
+    return str(text or "").split(WAYBACK_PART)[0]
+
+
+def wall_error(text):
+    """True when a fetch failed on YouTube's wall, which lifts by itself, rather than on the video. The one rule for
+    the whole workflow (wf1_short reads it too): the product's ytaccess.access_blocked plus WALL_SIGNS, read on the
+    YouTube rungs' part of the error only."""
+    head = youtube_part(text)
+    t = head.lower()
+    if "your age" in t:
+        return False
+    try:
+        import ytaccess
+        if ytaccess.access_blocked(head):
+            return True
+    except Exception:  # noqa: BLE001 - outside the worker: WALL_SIGNS carry the same words
+        pass
+    return any(s in t for s in WALL_SIGNS)
+
+
+def _kept(keep):
+    path = os.path.join(keep, "manifest.json")
+    try:
+        rows = json.load(open(path)) if os.path.isfile(path) else []
+    except (OSError, ValueError):
+        rows = []
+    return rows if isinstance(rows, list) else []
+
+
+def _record(keep, row):
+    """Append (or complete) one retained original in <keep>/manifest.json, the rows fetch.local_source and retained()
+    read; serialised with the footage engine's own writer (footage.run.keep_sources)."""
+    import fcntl
+    os.makedirs(keep, exist_ok=True)
+    with open(os.path.join(keep, ".manifest.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        rows = _kept(keep)
+        old = next((r for r in rows if r.get("url") == row["url"]), None)
+        if old is None:
+            rows.append(row)
+        else:
+            old.update({k: v for k, v in row.items() if v not in (None, "", [])})
+        tmp = os.path.join(keep, "manifest.json.part")
+        with open(tmp, "w") as f:
+            json.dump(rows, f, indent=1)
+        os.replace(tmp, os.path.join(keep, "manifest.json"))
+
+
+def _open_exact(url, dest, duration=None):
+    """One refused source fetched again: (path, rung). A source of LONG_S or less comes whole with its sound through
+    fetch.whole_av: the operator's transport (FOOTAGE_FETCH_CMD) when one is set, else every player client of the
+    product's ladder on every configured route (YTDLP_PROXY, then each YTDLP_PROXY_FALLBACK), then the Wayback
+    Machine's copy. When the operator's transport could not bring it, the local ladder is tried as well. A longer
+    source comes as its first fetch.PROXY_MAX_S seconds at fetch.WHOLE_H, down the same ladder."""
+    from footage import fetch
+    os.makedirs(dest, exist_ok=True)
+    long = bool(duration) and float(duration) > LONG_S
+    if not long:
+        try:
+            return fetch.whole_av(url, dest)
+        except fetch.FetchError:
+            if not os.environ.get("FOOTAGE_FETCH_CMD"):
+                raise
+    for p in glob.glob(os.path.join(dest, "whole.*")):
+        os.remove(p)
+    fmt = (f"b[height<={fetch.WHOLE_H}][ext=mp4]/bv*[height<={fetch.WHOLE_H}][vcodec^=avc1]+ba/"
+           f"bv*[height<={fetch.WHOLE_H}]+ba/b[height<={fetch.WHOLE_H}]/b")
+    args = ["-f", fmt, "--merge-output-format", "mp4", "--max-filesize", fetch.WHOLE_AV_MAX,
+            "-o", os.path.join(dest, "whole.%(ext)s")]
+    if long:
+        args += ["--download-sections", f"*0-{int(fetch.PROXY_MAX_S)}"]
+
+    def got(_):
+        return bool([p for p in glob.glob(os.path.join(dest, "whole.*")) if not p.endswith((".part", ".ytdl"))])
+    _, rung = fetch.run_ladder(url, args, done=got)
+    path = max((p for p in glob.glob(os.path.join(dest, "whole.*")) if not p.endswith((".part", ".ytdl"))), key=os.path.getsize)
+    return path, rung + ("+head" if long else "")
+
+
+def reopen(rows, keep, log=print, space_s=4.0, sleep=None, opener=None):
+    """Fetch EXACTLY the sources YouTube refused again (the search already found them; only the fetch failed), one
+    after another a few seconds apart so a walled address is not hammered. Each one that opens is kept in <keep>
+    (the supply's sources folder) with its title, channel and the windows it was found for, so the footage engine's
+    source-only pass scans, checks and cuts it like any other original (retained(), fetch.local_source). Returns
+    (opened, refused, gone): refused still meet the wall and are tried again later; gone failed on the video itself
+    (removed, private, an age gate) and are not waited for."""
+    opener = opener or _open_exact
+    sleep = sleep or time.sleep
+    have = {r.get("url"): r for r in _kept(keep) if os.path.isfile(r.get("path") or "")}
+    opened, refused, gone = [], [], []
+    for k, row in enumerate(rows):
+        url = row.get("url")
+        if not url:
+            continue
+        if url in have:                                          # opened since (another pass or another short's copy)
+            opened.append(dict(row, path=have[url]["path"], rung=have[url].get("rung")))
+            continue
+        if k and space_s:
+            sleep(space_s)
+        dest = os.path.join(keep, "reopened", hashlib.sha256(url.encode()).hexdigest()[:16])
+        try:
+            path, rung = opener(url, dest, row.get("duration"))
+        except Exception as e:  # noqa: BLE001 - every failure is sorted: the wall waits, the video's own fault does not
+            msg = str(e)
+            wall = wall_error(msg)                               # read on the YouTube rungs' part, before any cut
+            why = f"{type(e).__name__}: {msg[:240]}"
+            (refused if wall else gone).append(dict(row, error=why, tries=int(row.get("tries") or 0) + 1))
+            continue
+        with open(path, "rb") as f:
+            digest = hashlib.file_digest(f, "sha256").hexdigest()
+        _record(keep, dict(url=url, path=path, rung=rung, sha256=digest, title=row.get("title"), channel=row.get("channel"),
+                           where=row.get("where") or "youtube", subjects=list(row.get("subjects") or []),
+                           duration=row.get("duration")))
+        log(f"refused source opened on retry ({rung}): {str(row.get('title'))[:60]}")
+        opened.append(dict(row, path=path, rung=rung))
+    return opened, refused, gone
 
 
 def retained(supply):
@@ -50,7 +184,10 @@ Prefer originals with visible motion: a real premises tour, moving product demo,
 simulation or actual place. A scientific simulation must be attributed and depict the exact system;
 never present a hypothetical event as observed. An unnamed activity may use clearly contextual
 documentary footage of that activity without inventing its participants or specific employer.
-Do not return the original podcast speaker. Do not invent footage of an unfilmed private event.
+Never return the current interview itself (this conversation's own recording). The speaker's OWN
+earlier filmed appearances (a livestream he hosted, a keynote, another interview, a clip he posted,
+an event he took part in) are original-publisher video and qualify when the window tells of that
+event or of him at that time. Do not invent footage of an unfilmed private event.
 At most two distinct files per window, eight files total. Prefer 720p/1080p files below 128 MB and
 ten minutes. Empty sources when no exact public video can be verified is correct.
 The independent frame checker will judge the downloaded pixels against the actual words.

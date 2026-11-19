@@ -95,7 +95,7 @@ def fixtures():
     add('director_direct',call_openai.body('gpt-6.1-sol',brief.prefix_text(),data,512,'low','director_direct'))
     add('footage_look',call_openai.body('gpt-6-sol',look.LOOK_SYSTEM,data,512,'low','footage_look'))
     add('named_check',call_openai.body('gpt-6-sol',broll_source.CHECK_NAMED_SYSTEM,data,512,'low','named_check'))
-    placement=literal_prompt(ROOT/'plugins/valmera/skills/valmera-podcast-shorts/scripts/placement_check.py','system')
+    placement=literal_prompt(ROOT/'plugins/valmera/skills/valmera-podcast-shorts/scripts/placement_check.py','SYSTEM')
     add('placement_check:check',shell.openai_body(placement,data,model='gpt-6-sol',effort='low',max_tokens=512,purpose='placement_check:check'))
     picture=literal_prompt(ROOT/'plugins/valmera/skills/valmera-longform/picture_check.py','REVIEW_PROMPT')
     add('wf4_picture_check',call_openai.body('gpt-6-sol',picture,data,512,'low','wf4_picture_check'))

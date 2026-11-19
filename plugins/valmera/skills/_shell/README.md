@@ -131,7 +131,7 @@ If that adapter runs the renderer entirely on another host, set `SHELL_RENDER_RE
 transfer does not reserve a Mac render slot. Local renderers always retain `heavy.sh`; the remote
 adapter must bound resources on its own host and return the actual engine output for all normal checks.
 `SHELL_MUSIC_CMD=<script>` similarly receives one JSON argument file for `music_film.score`, including
-the film, audio scene, payoff, licensed-track exclusions, supplied song and report/output paths.
+the film, audio scene, payoff, the story's turn (`turn`) and the workflow's `turn_drop` opt-in, licensed-track exclusions, supplied song and report/output paths.
 `SHELL_MUSIC_REMOTE=1` declares remote compute. The shared track ledger stays locked until the actual
 mix and report return; branding and export checks remain local product stages.
 
