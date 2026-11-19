@@ -349,6 +349,11 @@ def _guarded(reader, cur, since, now, p):
                  "detail": _short(f"{type(e).__name__}: {e}", 600)}]
 
 
+# A resume call that found the file already whole in storage: no bytes move.
+_WHOLE_IN_STORAGE = ("({a}.kind = 'upload_resumed' "
+                     "AND COALESCE({a}.detail->>'assembled', 'false') = 'true')")
+
+
 def _stopped_uploads(cur, since, now, p):
     """Transfers whose last sign of life fell into this window, and that never
     landed and never said why. An `upload_failed` row was filed on its own; a
@@ -358,7 +363,12 @@ def _stopped_uploads(cur, since, now, p):
     sign of life, and its ref is that row, so a transfer that comes back and
     stops again is a new stop. A landing ends it from the moment the transfer
     began (its last start or resume), so a beat recorded just after the landing
-    does not reopen it. Only a row about this file ends it: another file
+    does not reopen it. A resume that found the object whole in storage
+    (`assembled`) is no transfer: nothing is left to send, so it is neither a
+    sign of life nor a new beginning (#401, 18 Nov: 2.17 GB landed 18:18:55
+    through the hand-off, the page's resume calls at 18:18:55 and 18:19:00 read
+    assembled, and the second was filed as a stop and paged). Only a row about
+    this file ends it: another file
     landing or failing in the project says nothing about this one. A row with no
     size cannot be told apart, so it counts."""
     q = dict(p, kinds=list(UPLOAD_ALIVE_KINDS),
@@ -376,6 +386,7 @@ def _stopped_uploads(cur, since, now, p):
                AND ce.project_id IS NOT NULL
                AND ce.detail->>'bytes' IS NOT NULL
                AND COALESCE(ce.detail->>'kind', 'original') <> 'proxy'
+               AND NOT {_WHOLE_IN_STORAGE.format(a='ce')}
                AND {_customers()}
              ORDER BY ce.user_id, ce.project_id, ce.detail->>'bytes',
                       ce.created_at DESC) last
@@ -394,6 +405,7 @@ def _stopped_uploads(cur, since, now, p):
                            WHERE st.project_id = last.project_id
                              AND st.user_id = last.user_id
                              AND st.kind IN ('upload_started', 'upload_resumed')
+                             AND NOT {_WHOLE_IN_STORAGE.format(a='st')}
                              AND st.detail->>'bytes' = last.detail->>'bytes'
                              AND st.created_at <= last.at
                              AND st.created_at > last.at - interval '2 days'),
