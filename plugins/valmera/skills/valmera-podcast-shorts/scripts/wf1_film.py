@@ -549,6 +549,57 @@ def _runs(ins):
     return out
 
 
+def heal_base(l1):
+    """Every frame of the film shows exactly one base picture, the renderer's own rule (scene.plan.eligible). A gap
+    holds the picture before it (or the one after, at the film's start) and an overlap gives the frame to the later
+    shot, so a frame lost at a boundary or a shot a repair dropped never loses the short (19 Nov m12 stopped in
+    render on "1 frames without exactly one base picture"). Per-frame values keep their own frames. Returns what it
+    changed: [{"id", "f": [old], "to": [new]}]."""
+    dur = int(l1["dur_f"])
+    shots = sorted((it for it in l1["items"] if it.get("k") == "shot"), key=lambda it: (int(it["f"][0]), int(it["f"][1])))
+    if not shots:
+        return []
+    changed = []
+
+    def refit(it, a, b):
+        a0, b0 = int(it["f"][0]), int(it["f"][1])
+        if (a, b) == (a0, b0):
+            return
+        for k, v in list(it.items()):
+            if k != "f" and isinstance(v, list) and len(v) == b0 - a0 and b0 - a0 > 2:
+                head = v[max(a - a0, 0):b - a0] if a >= a0 else [v[0]] * (a0 - a) + v[:b - a0]
+                it[k] = head + [head[-1]] * (b - a - len(head)) if head else v
+        changed.append(dict(id=it.get("id"), f=[a0, b0], to=[a, b]))
+        it["f"] = [a, b]
+
+    out = []
+    for it in shots:                                   # an overlap: the frames go to the later shot
+        a, b = int(it["f"][0]), min(int(it["f"][1]), dur)
+        if out and a < int(out[-1]["f"][1]):
+            prev = out[-1]
+            if a <= int(prev["f"][0]):                 # the later shot covers the earlier one whole: the earlier one keeps
+                a = int(prev["f"][1])                  # its frames and the later one starts after it
+            else:
+                refit(prev, int(prev["f"][0]), a)
+        if b <= a:
+            continue
+        refit(it, a, b)
+        out.append(it)
+    keep = {id(it) for it in out}
+    gone = [it for it in shots if id(it) not in keep]
+    if gone:
+        changed += [dict(id=it.get("id"), f=list(it["f"]), to=None) for it in gone]
+        l1["items"] = [it for it in l1["items"] if not (it.get("k") == "shot" and id(it) not in keep)]
+    if int(out[0]["f"][0]) > 0:                        # the film's start: the first picture is held from frame 0
+        refit(out[0], 0, int(out[0]["f"][1]))
+    for prev, nxt in zip(out, out[1:]):                # a gap: the picture before it is held
+        if int(prev["f"][1]) < int(nxt["f"][0]):
+            refit(prev, int(prev["f"][0]), int(nxt["f"][0]))
+    if int(out[-1]["f"][1]) < dur:
+        refit(out[-1], int(out[-1]["f"][0]), dur)
+    return changed
+
+
 def follow_seat(flash, shifts):
     """A shade flash moved with the caption pages it lies under: [(first frame of a page, its shift)], in order.
     One shift moves it whole; pages at different heights cut it at their first frames."""

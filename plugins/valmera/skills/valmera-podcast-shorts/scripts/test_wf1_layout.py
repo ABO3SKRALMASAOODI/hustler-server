@@ -151,3 +151,21 @@ def test_shade_follows_each_caption_page():
     assert pieces[0]['rect']==[.06,.5,.94,.7] and pieces[1]['rect']==pytest.approx([.06,.6,.94,.8])
     assert [p['id'] for p in pieces]==['fl1','fl1.1']
     assert film.follow_seat(flash,[(0,.05)])[0]['rect']==pytest.approx([.06,.55,.94,.75])
+
+
+def test_every_frame_gets_exactly_one_base_picture():
+    """19 Nov m12: the short stopped in render on '1 frames without exactly one base picture'."""
+    shots=[dict(id='a',k='shot',f=[2,10],crop=[[0,0,1,1]]*8),dict(id='b',k='shot',f=[11,20]),
+           dict(id='c',k='shot',f=[18,25]),dict(id='d',k='shot',f=[20,22]),dict(id='w',k='word',f=[0,30])]
+    l1=dict(dur_f=30,items=shots)
+    changed=film.heal_base(l1)
+    base=sorted((it for it in l1['items'] if it['k']=='shot'),key=lambda it:it['f'][0])
+    cov=[0]*30
+    for it in base:
+        for f in range(*it['f']): cov[f]+=1
+    assert cov==[1]*30
+    a=next(it for it in base if it['id']=='a')
+    assert a['f']==[0,11] and len(a['crop'])==11
+    assert any(it['k']=='word' for it in l1['items'])
+    assert {c['id'] for c in changed}>={'a','b','c'}
+    assert film.heal_base(l1)==[]

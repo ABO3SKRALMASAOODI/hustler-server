@@ -1075,6 +1075,9 @@ def score(ctx, script):
     if not taste["ok"]:
         dropped = _repair(l1, beats, taste)
         taste = dict(F.taste_check(l1, beats), repaired=dropped)
+    healed = wf1_film.heal_base(l1)                          # one base picture on every frame, the renderer's rule
+    if healed:
+        beats["base_healed"] = healed
     out = os.path.join(ctx.supply, "l1.json")
     json.dump(l1, open(out, "w"), ensure_ascii=False)
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")       # the same scene with the take's sound as its spine: what the music is cut to
