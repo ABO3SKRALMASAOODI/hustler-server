@@ -817,7 +817,7 @@ def build(script, sup, style_id, direction=None):
     pieces = take_pieces(tshots, float(take["dur"]), punch=[turn_f] if turn_f is not None and turn_f > 2 * FPS else [],
                          until=f_voice_end)
     for k, pc in enumerate(pieces):
-        key = P.video("main" if k == 0 else f"own:{k}", dict(path=take["path"], w=take["w"], h=take["h"], fps=take.get("fps") or FPS, seconds=take["dur"]))
+        key = P.video("main" if k == 0 else f"own:cut{k}", dict(path=take["path"], w=take["w"], h=take["h"], fps=take.get("fps") or FPS, seconds=take["dur"]))
         fm = F.face_meta(dict(faces=pc["faces"] or take.get("faces") or []))
         if fm:                                           # a speaker's head, not a face-shaped thing on the shelf behind him
             tall = max(f[3] for f in fm)

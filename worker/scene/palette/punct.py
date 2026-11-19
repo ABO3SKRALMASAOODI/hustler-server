@@ -131,7 +131,7 @@ def neg_world(l1, work, ask, sense):
     again through his matte (the runtime's depth sandwich)."""
     a, b = span(ask, l1)
     sh = sense.shot_at(a)
-    if not sh or not sense.is_take(sh) or str(sh.get("pic")) != "main" or not sh.get("src"):
+    if not sh or not sense.is_take(sh) or not sh.get("src") or not (str(sh.get("pic")) == "main" or str(sh.get("pic")).startswith("own:cut")):
         return {"skip": "the base picture here is not the take"}
     got = sense.matte()
     if not got:
