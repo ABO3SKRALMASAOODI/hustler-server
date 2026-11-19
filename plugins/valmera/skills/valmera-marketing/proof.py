@@ -625,29 +625,42 @@ def img(b64):
     return dict(type="image", source=dict(type="base64", media_type="image/jpeg", data=b64))
 
 
-CHECK_V = 6           # the export check reads the spoken words too (EDL keep ranges on the source's captions); the end card is the brand's;
+CHECK_V = 7           # the export check reads the spoken words too (EDL keep ranges on the source's captions); the end card is the brand's;
                       # 6 (20 Nov): its "looks" is read on 720 px frames beside the measured picture (it called a soft 4x VHS upscale
                       # "a clean vertical cut" from 288 px frames). A record, never a reason to refuse the recording
+                      # 7 (20 Nov): the after is the stretch that holds the landings the sentence names (the after held the trash
+                      # can and missed the black hole the payoff then named)
 LOOK_CHECK_FRAMES = 4     # full-size frames of the export the check reads its look from
+
+
+def export_edl(ex):
+    """The export's own edit list (records/<sid>/edl/v<NNN>.json beside its file's folder), or None."""
+    d = os.path.join(os.path.dirname(os.path.dirname(ex["file"])), "edl")
+    if ex.get("edl_version") is not None and os.path.exists(os.path.join(d, f"v{int(ex['edl_version']):03d}.json")):
+        return jload(os.path.join(d, f"v{int(ex['edl_version']):03d}.json"), {})
+    if os.path.isdir(d) and os.listdir(d):
+        return jload(os.path.join(d, sorted(os.listdir(d))[-1]), {})
+    return None
+
+
+def upload_words(rec):
+    """The source's caption words on the upload's own clock: [(upload second, word)], or None without the source."""
+    src = next((s for s in sources() if s["file"] == rec["source"]["file"]), None)
+    if not src:
+        return None
+    t0, t1 = float(rec["source"]["t0"]), float(rec["source"]["t1"])
+    return [(t - t0, w) for t, w in json3_words(src["captions"]) if t0 <= t <= t1]
 
 
 def spoken(rec, ex):
     """What the upload and the export say: the source's caption words on the upload's seconds, and on the seconds the
     export's EDL keeps, in the export's order (each kept range with its export start)."""
-    src = next((s for s in sources() if s["file"] == rec["source"]["file"]), None)
-    if not src:
+    ws = upload_words(rec)
+    if ws is None:
         return None, None
-    t0, t1 = float(rec["source"]["t0"]), float(rec["source"]["t1"])
-    ws = [(t - t0, w) for t, w in json3_words(src["captions"]) if t0 <= t <= t1]
     up = " ".join(w for _, w in ws)
-    edl = None
-    d = os.path.join(os.path.dirname(os.path.dirname(ex["file"])), "edl")
-    if ex.get("edl_version") is not None and os.path.exists(os.path.join(d, f"v{int(ex['edl_version']):03d}.json")):
-        edl = jload(os.path.join(d, f"v{int(ex['edl_version']):03d}.json"), {})
-    elif os.path.isdir(d) and os.listdir(d):
-        edl = jload(os.path.join(d, sorted(os.listdir(d))[-1]), {})
     rows, at = [], 0.0
-    for k in (edl or {}).get("keep") or []:
+    for k in (export_edl(ex) or {}).get("keep") or []:
         try:
             a, b = float(k[0]), float(k[1])
         except (TypeError, ValueError, IndexError):
@@ -655,6 +668,47 @@ def spoken(rec, ex):
         rows.append(f"export {at:.1f}-{at + b - a:.1f} s (upload {a:.1f}-{b:.1f} s): " + " ".join(w for t, w in ws if a <= t < b))
         at += b - a
     return up, rows
+
+
+def export_words(rec, ex, edl=None):
+    """The export's spoken words on its own clock, [(export second, word)]: the source's captions inside each range
+    its EDL keeps (`edl`, else the export's own), in the export's order (the captions' clock is about a third of a
+    second off the voice)."""
+    ws, out, at = upload_words(rec) or [], [], 0.0
+    for k in (edl or export_edl(ex) or {}).get("keep") or []:
+        try:
+            a, b = float(k[0]), float(k[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        out += [(round(at + t - a, 3), w) for t, w in ws if a <= t < b]
+        at += b - a
+    return out
+
+
+def hook_beat(rec, record_path):
+    """The tutorial's opening beat, built from the export's own edit list: its most visible landing (showcase_hook: the
+    longest picture or title, entered a breath before it lands), D.SPLIT_S long on the speaker's own voice, where the
+    film opens on the clip as uploaded and the export side by side (devices.split). 20 Nov: the tutorial opened on a
+    second of the finished export under the narrator's pain line, its burned-in words contradicting his, and no edit an
+    editor would wonder about. {t: [start, end] export seconds, landing: the export second its picture lands or None,
+    says: the speaker's words there or None, upload_at: the upload second the split's raw side shows}; None when the
+    export or its edit list is not on disk."""
+    ex = next((e for e in rec.get("exports") or [] if e.get("tag") == "final"), (rec.get("exports") or [None])[-1])
+    try:
+        edl = json.load(open(os.path.join(os.path.dirname(record_path), "edl", f"v{int(ex['edl_version']):03d}.json")))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not os.path.isfile(str(ex.get("file") or "")):
+        return None
+    body = float(ex["dur"]) - endcard_s()
+    pics = [(float(o["start"]), float(o["duration_s"])) for o in D.MF.pictures_of(edl) + D.MF.titles_of(edl)]
+    t = showcase_hook(ex, body, pics)
+    land = [a for a, _ in pics if t[0] <= a < t[1]]
+    try:
+        says = " ".join(w for at, w in export_words(rec, ex, edl) if t[0] <= at < t[1]) or None
+    except (OSError, ValueError, KeyError, TypeError):
+        says = None
+    return dict(t=t, landing=round(min(land), 3) if land else None, says=says, upload_at=round(D.src_at(D.program(edl)[0], t[0]), 3))
 
 
 def export_check(ctx, rec, ask_text, must_see):
@@ -704,8 +758,10 @@ def export_check(ctx, rec, ask_text, must_see):
               "that is the brand, never a defect, and never part of the after you choose. You also choose the seconds the film will show.")
     content.append(dict(type="text", text=(
         "Return JSON only: {\"elements\": [{\"asked\": a part of the typed sentence, \"visible\": true|false, \"seconds\": [export seconds where "
-        "it shows], \"how\": what is seen}], \"all_visible\": true|false, \"after\": [start, end] export seconds, 2 to 4 s, before the end card, where the "
-        "asked change reads best (a cut, a picture, captions, a title landing), \"tease_s\": the export second of its most striking "
+        "it shows], \"how\": what is seen}], \"all_visible\": true|false, \"after\": [start, end] export seconds, 2 to 4 s, before the end card: "
+        "the stretch that holds the most of the asked change landing (each picture, title, caption or cut the sentence asks for, "
+        "entered a breath before the first one lands and ended once the last is seen; when not all fit in 4 s, the ones that read "
+        "best), so the film's after shows every landing its narration will name, \"tease_s\": the export second of its most striking "
         "frame, \"before\": [start, end] upload seconds, 1.5 to 3 s, where the raw clip looks most like raw footage, \"looks\": one "
         "plain, true line on how the export looks to an editor at full size (sharp or soft, clean or carrying a burned-in timecode "
         "or logo, its colour and light, inserted pictures matching it or not), \"defects\": [anything an editor would call broken: a cut face, wrong "
@@ -738,6 +794,103 @@ def norm_words(s):
     return [x for x in (F.norm_word(w) for w in str(s).split()) if x]
 
 
+SHOW_ROLES = ("figure", "key", "name")       # the display roles of a marketing line (the stories cutter's own names)
+
+
+def show_text(x):
+    return str(x.get("text") if isinstance(x, dict) else x)
+
+
+FOLD_WORDS = 6     # two items of a line fewer words apart than this would land under 1.8 s apart, the reel's display gap
+                   # (reel.py, at a fast narrator's three words a second): the cutter keeps the first and drops the second
+
+
+def _at(toks, words, taken):
+    """The first position in toks, not yet taken, where `words` (normalised) start; None if they are not there."""
+    n = len(words)
+    return next((k for k in range(len(toks) - n + 1) if n and toks[k:k + n] == words and k not in taken), None)
+
+
+def anchor_show(sc):
+    """Every display item as {text, word_i, role, big, small}: anchored to the index of the word of `say` it lands on,
+    the way writer.annotate anchors a story's items. 20 Nov: the marketing writer returned plain strings, and the
+    cutter, which places an item only on its word_i when the film is cut by verdicts, dropped every one (display_words
+    0). Structure only, never a reading of the words, and nothing is dropped:
+      - a string becomes an item; a role outside SHOW_ROLES becomes a key word; a `big` that is not part of the text is
+        left out, and a `big` that is a proper part of it gets the rest of the text as its `small` when it has none
+        (the cutter sets a large part alone and prints the rest only from `small`: '+5 PICTURES' lost 'PICTURES');
+      - an item whose word_i is missing or outside `say` gets a word of its own, in order: where its own words stand
+        in `say`, else the line's next stressed (`emphasis`) word not yet used, else the next free word;
+      - a second item anchored fewer than FOLD_WORDS words after the one before it (and not a figure, which the cutter
+        never holds back) becomes that item's small line, so both reach the screen (20 Nov: 'Trash can. Black hole.'
+        are said a second apart; the cutter kept TRASH CAN and dropped BLACK HOLE as too close).
+    Returns a note per repair, for the log and for the writer's next attempt."""
+    notes = []
+    for i, s in enumerate(sc.get("segments") or []):
+        toks = [F.norm_word(w) for w in str(s.get("say") or "").split()]
+        stress = []
+        for e in s.get("emphasis") or []:
+            k = _at(toks, [w for w in (F.norm_word(x) for x in str(e).split()) if w], set(stress))
+            if k is not None:
+                stress.append(k)
+        items, loose = [], []
+        for x in s.get("show") or []:
+            item = dict(x) if isinstance(x, dict) else dict(text=str(x))
+            item["text"] = str(item.get("text") or "").strip()
+            if not item["text"]:
+                continue
+            if item.get("role") not in SHOW_ROLES:
+                item["role"] = "key"
+            big = item.get("big").strip() if isinstance(item.get("big"), str) else ""
+            if big and big in item["text"]:
+                item["big"] = big
+                small = item.get("small").strip() if isinstance(item.get("small"), str) else ""
+                if not small and big != item["text"]:
+                    small = item["text"].replace(big, " ", 1).strip(" ,;:-\u2013\u2014\u00b7/|")
+                    small = " ".join(small.split())
+                if small:
+                    item["small"] = small
+                else:
+                    item.pop("small", None)
+            else:
+                item.pop("big", None)
+                item.pop("small", None)
+            wi = item.get("word_i")
+            if not (isinstance(wi, int) and not isinstance(wi, bool) and 0 <= wi < len(toks)):
+                loose.append(item)
+            items.append(item)
+        taken = {x["word_i"] for x in items if not any(x is y for y in loose)}
+        last = -1
+        for item in loose:
+            if not toks:
+                continue
+            own = _at(toks, [w for w in (F.norm_word(x) for x in item["text"].split()) if w], taken)
+            wi = own if own is not None else next((k for k in stress if k not in taken and k > last), None)
+            if wi is None:
+                wi = next((k for k in range(last + 1, len(toks)) if k not in taken), None)
+            if wi is None:
+                wi = next((k for k in range(len(toks)) if k not in taken), 0)
+            item["word_i"], last = wi, wi
+            taken.add(wi)
+            notes.append(f"segment {i}: show item {item['text']!r} had no word_i in say; it was set to {wi} "
+                         f"({str(s.get('say')).split()[wi]!r}); give every show item its own word_i")
+        anchored = sorted((x for x in items if isinstance(x.get("word_i"), int)), key=lambda x: x["word_i"])
+        out = [x for x in items if not isinstance(x.get("word_i"), int)]
+        for item in anchored:
+            prev = out[-1] if out and isinstance(out[-1].get("word_i"), int) else None
+            if prev is not None and item["role"] != "figure" and item["word_i"] - prev["word_i"] < FOLD_WORDS:
+                prev["big"] = prev.get("big") or prev["text"]
+                prev["small"] = " ".join(t for t in (prev.get("small"), item["text"]) if t)
+                prev["text"] = f"{prev['text']} {item['text']}"
+                notes.append(f"segment {i}: show items {prev['big']!r} and {item['text']!r} land "
+                             f"{item['word_i'] - prev['word_i']} words apart, under two seconds; they were made one "
+                             "item with big and small")
+                continue
+            out.append(item)
+        s["show"] = out
+    return notes
+
+
 def script_problems(sc, ask_text, rc):
     segs = sc.get("segments") or []
     p = []
@@ -761,7 +914,7 @@ def script_problems(sc, ask_text, rc):
         if not 1 <= len(str(s.get("fallback_text") or "").split()) <= 5:
             p.append("every segment needs viewer-facing fallback_text of one to five words")
         for x in s.get("show") or []:
-            for d in [w for w in str(x).replace(",", "").split() if any(c.isdigit() for c in w)]:
+            for d in [w for w in show_text(x).replace(",", "").split() if any(c.isdigit() for c in w)]:
                 if "".join(c for c in d if c.isdigit() or c == ".").strip(".") not in have:
                     p.append(f"the number {d!r} on screen is not in the receipts")
     if not (segs and (segs[-1].get("show") or [])):
@@ -776,7 +929,8 @@ def audit(sc, rc):
               "is visible or said in the before and the after) and whether the receipts support it: what the upload and the export say "
               "is in upload_says and export_says, what the export shows is in visible and looks. General statements about editing, and "
               "plain descriptions of the before and the after that these receipts bear out, are supported. Return JSON only: {\"claims\": [{\"text\": the words, \"supported\": true|false, \"why\": a few words}]}")
-    copy = [dict(say=s.get("say"), show=s.get("show") or [], fallback_text=s.get("fallback_text")) for s in sc.get("segments") or []]
+    copy = [dict(say=s.get("say"), show=[show_text(x) for x in s.get("show") or []], fallback_text=s.get("fallback_text"))
+            for s in sc.get("segments") or []]
     got, use = ask(system, f"# Receipts\n{json.dumps(rc, ensure_ascii=False)}\n\n# Viewer-facing script\n{json.dumps(copy, ensure_ascii=False)}",
                    what="claims audit", effort="low", model=CHECK_MODEL, max_tokens=4000)
     bad = [c for c in (got.get("claims") if isinstance(got, dict) else []) or [] if isinstance(c, dict) and not c.get("supported")]
@@ -805,7 +959,25 @@ DEVICE_BRIEF = {
 }
 
 
-def write(ctx, idea, card, rc, notes=None, inventory=None):
+def opening_brief(hook):
+    """The writer's words for the film's opening: the built before-and-after beat (hook_beat) when the film has one, fixed
+    before the first line; else a first picture that shows what the hook line names."""
+    if not hook:
+        return ("Open on a striking full-frame picture that shows literally what the hook's words name; never the finished "
+                "export under words about a broken before, never an editing timeline. ")
+    n = round(float(hook["t"][1]) - float(hook["t"][0]), 1)
+    said = f", saying \"{hook['says']}\"" if hook.get("says") else ""
+    land = (f" Valmera's picture lands at export second {hook['landing']}" if hook.get("landing") is not None
+            else " Valmera's edit shows")
+    return (f"The film opens on a built before-and-after that you do not write and nobody narrates: for its first {n} s the "
+            f"clip as uploaded and Valmera's export play side by side, export seconds {hook['t'][0]}-{hook['t'][1]}, on the "
+            f"speaker's own voice{said};{land} there, beside the raw clip that lacks it. Your first segment (the hook) is heard "
+            "right after that beat and agrees with what the viewer just saw and heard: it names the edit that just landed, or "
+            "the editing pain that edit removes, in plain words, so picture and words say one thing; never a line the picture "
+            "just contradicted, never the speaker's own words again. Its pictures show what its own words name. ")
+
+
+def write(ctx, idea, card, rc, notes=None, inventory=None, hook=None):
     pace = ref_pace()
     system = ("You are the writer and voice director of Valmera's marketing films for video editors. A synthetic narrator (Phonon Easton, "
               "a calm documentary voice) reads your lines over real footage of what they name, cut fast; between two of your lines the "
@@ -825,9 +997,8 @@ def write(ctx, idea, card, rc, notes=None, inventory=None):
                "playing on a physical phone, a view of its editing timeline, or a product interface recording. "
                "THE UPLOAD and THE EXPORT play as their actual files. Generic editing footage may illustrate a "
                "general editing problem, but cannot impersonate this recorded session or the Valmera interface. "
-               "Open on a striking full-frame picture that actually fits the hook's words, or the actual export when "
-               "those words describe its visible result; never an editing timeline. Do not describe a finished export "
-               "as if it were the broken before. Under the Valmera call to action, use the authenticated export; "
+               + opening_brief(hook) +
+               "Do not describe a finished export as if it were the broken before. Under the Valmera call to action, use the authenticated export; "
                "never show another editing application's interface as the product being offered. "
                "Each segment also needs fallback_text: a viewer-facing display phrase of one to five words, "
                "drawn from that line's meaning. Never use production directions or a subject label there. "
@@ -838,9 +1009,9 @@ def write(ctx, idea, card, rc, notes=None, inventory=None):
                "The real uploaded clip and export remain untouched by those effects. "
                "Clarity before everything (owner, 16 Nov: the last films were 'very not clear'): a viewer scrolling "
                "on a phone must know within two seconds what the film is about from the picture and the words together, "
-               "so the hook names one editing pain in plain words while the picture shows it or its solved result. "
+               "so the opening and the hook line say one thing together, the picture and the words agreeing. "
                "The recording is the hero and carries the film: THE UPLOAD on the lines about the raw clip, THE EXPORT "
-               "on the hook when it shows the result, on every line after the after and under the call to action. "
+               "on every line after the after and under the call to action. "
                "The recording itself is only a few distinct shots (the speaker, the pictures and captions it laid), never "
                "enough for a whole line at the references' pace: on every line whose words name something a camera can show "
                "(the editor's pain, a thing the speaker names, what changed), name in pictures an external subject that shows "
@@ -856,17 +1027,30 @@ def write(ctx, idea, card, rc, notes=None, inventory=None):
                f"{json.dumps(rc, ensure_ascii=False)}\n\n# The style\n{json.dumps(card, ensure_ascii=False)}\n\n# The references' pace (medians)\n"
                f"{json.dumps(pace)}\n\n"
                f"# Form\n{FORM['words'][0]}-{FORM['words'][1]} spoken words in {FORM['segments'][0]}-{FORM['segments'][1]} segments; with the "
-               f"before (at most 3 s) and the after (at most 4 s) the film runs {FORM['seconds'][0]}-{FORM['seconds'][1]} s. The first segment is "
-               "the hook, heard in the first second: the pain or the stake in under twelve words, never a greeting or 'did you know'. The "
+               f"before (at most 3 s) and the after (at most 4 s) the film runs {FORM['seconds'][0]}-{FORM['seconds'][1]} s"
+               + (f", after the opening beat's {round(float(hook['t'][1]) - float(hook['t'][0]), 1)} s" if hook else "") + ". The first segment is "
+               + ("the hook, heard right after the opening beat: in under twelve words it lands what the beat showed (the edit, or "
+                  "the pain it removes), never a greeting or 'did you know'. The " if hook else
+                  "the hook, heard in the first second: the pain or the stake in under twelve words, never a greeting or 'did you know'. The ") +
                "before comes by the third or fourth segment; one segment, just before the after, says the typed sentence word for word "
                f"(\"{rc['typed']}\") introduced in a few words of your own; after the after, one or two lines name what changed (only what "
                "the receipts show as visible), then the last segment is the call to action inside the film: the viewer tries it at "
                "valmera.io, said plainly, shown as VALMERA.IO.\n\n"
+               + (f"# The opening beat (fixed, before your first segment)\n{json.dumps(hook, ensure_ascii=False)}\n\n" if hook else "")
                + (f"# Fix these from the last attempt\n{notes}\n\n" if notes else "")
                + "Return JSON only: {\"title\": a plain title, \"pace\": steady|brisk|fast, \"energy\": low|mid|high, \"hook_line\": the first "
                "segment's words, \"close_line\": the last segment's words, \"names\": [proper nouns said, as spelled], \"segments\": [{\"say\": "
-               "the words spoken, numbers written as words, no digits, \"show\": at most two short display strings printed large on the "
-               "words that say them (digits allowed only for a number in the receipts) or [], \"beat\": hook|setup|turn|low|payoff|close, "
+               "the words spoken, numbers written as words, no digits, \"show\": the line's display type, printed large and landing on its "
+               "spoken word, at most two items, each {\"text\": as printed, \"word_i\": the index (from 0) in say's space-separated "
+               "words of the word it lands on (a figure: the first word of the spoken figure), \"role\": figure (a number from "
+               "the receipts, digits allowed only for one) | key (a word or short phrase the line stresses) | name (a proper "
+               "noun), \"big\": the part of text set largest, or null, \"small\": the rest of text, set under big at 0.4 of its size "
+               "(when big is set only big and small are printed, so text is big plus small), or null}; two items on one line only when their "
+               "words are about two seconds (six or more words) apart, else one item with big and small (two results said "
+               "a second apart: big \"TRASH CAN\", small \"BLACK HOLE\"), the receipts' figures each role figure; "
+               "the references set type on most lines, so give one item "
+               "to most lines, the payoff carries the receipts' figures and the visible results it names, the last carries "
+               "VALMERA.IO; [] only where type would crowd the picture, \"beat\": hook|setup|turn|low|payoff|close, "
                "\"pace\": slow|steady|brisk|fast, \"see\": [{\"thing\": exact subject from named or THE UPLOAD or THE EXPORT, "
                "\"as_of\": the version or state the words mean, \"must_show\": what visibly carries these exact words, "
                "\"moment\": a specific visual action or null, \"still_only\": boolean}], \"pictures\": names from `named` this segment talks about, in order (two or three a "
@@ -968,22 +1152,36 @@ def script(ctx, ideas_out):
             ctx.log(f"triptych: {len(sibs)} other export of this upload; the film opens on its own export and keeps the timeline")
     if format_of(dict(idea_full=idea), ctx.args) == "showcase":
         return showcase_script(idea, card, rec, rc, chk, stt, tag, spend)
+    # the opening beat: the export's own landing beside the raw clip, on the speaker's voice (a triptych of three exports
+    # is that film's opening instead)
+    try:
+        hook = None if len(sibs) >= 2 else hook_beat(rec, stt[tag]["record"])
+    except Exception as e:     # noqa: BLE001 - an optional opening: the film opens on its first line's pictures
+        ctx.log(f"opening beat not built: {repr(e)[:300]}")
+        hook = None
+    if hook:
+        rc["opening"] = dict(seconds=hook["t"], says=hook.get("says"), landing=hook.get("landing"),
+                             shows="the clip as uploaded and the export side by side, the export's picture landing")
+        ctx.log(f"opening beat: export {hook['t'][0]}-{hook['t'][1]} s, lands at {hook.get('landing')}, says {hook.get('says')!r}")
     inventory = VI.prepare(ctx, idea, rc, ask, PX.pictures, still)
     spend += inventory["spend"]
     ctx.log(f"visual inventory: {sum(map(len, inventory['pictures'].values()))} distinct inspected pictures before writing")
     notes, sc, bad = ctx.args.get("notes"), None, []
     for attempt in range(4):
-        sc, use = write(ctx, idea, card, rc, notes, inventory)
+        sc, use = write(ctx, idea, card, rc, notes, inventory, hook=hook)
         spend.append(use)
+        fixed = anchor_show(sc)
+        if fixed:
+            ctx.log("display items repaired: " + "; ".join(fixed)[:600])
         probs = script_problems(sc, ask_text, rc) + VI.script_problems(sc, inventory)
         if not probs:
             bad, u2 = audit(sc, rc)
             spend.append(u2)
             probs = [f"unsupported claim: {c.get('text')!r} ({c.get('why')})" for c in bad]
-        jsave(os.path.join(ctx.run_dir, f"script_attempt{attempt}.json"), dict(script=sc, problems=probs))
+        jsave(os.path.join(ctx.run_dir, f"script_attempt{attempt}.json"), dict(script=sc, problems=probs, show_repairs=fixed))
         if not probs:
             break
-        notes = "\n".join(probs)
+        notes = "\n".join(probs + fixed)      # a rewrite anchors its display items itself; the repairs alone never cause one
         ctx.log("script repair: " + notes[:400])
     else:
         raise RuntimeError("the script did not pass its checks: " + notes[:600])
@@ -993,8 +1191,8 @@ def script(ctx, ideas_out):
     return dict(title=sc.get("title") or idea.get("title"), style=registry_row(card), window=window, hook_line=sc.get("hook_line"),
                 close_line=sc.get("close_line"), direction=f"{card['name']}: {card['look']}", idea=idea.get("title"), idea_full=idea,
                 script=sc, receipts=rc, export_check={k: v for k, v in chk.items() if k not in ("export", "upload")},
-                record=stt[tag]["record"], siblings=sibs,
-                cta=dict(say=sc["segments"][-1]["say"], show=sc["segments"][-1].get("show"), needs_fulfilment=False),
+                record=stt[tag]["record"], siblings=sibs, hook=hook,
+                cta=dict(say=sc["segments"][-1]["say"], show=[show_text(x) for x in sc["segments"][-1].get("show") or []], needs_fulfilment=False),
                 words=writer.words_of(sc), spend=spend)
 
 
@@ -1388,7 +1586,9 @@ def product_crop(record_path, rec, t):
 
 
 def product_clips(script, out):
-    """The before and the after as clips with their own sound, and a frame of the after for the hook."""
+    """The before and the after as clips with their own sound, and the opening beat's export seconds with theirs
+    (script["hook"], hook_beat): cut from LEAD_F frames in, so the voice that starts on frame LEAD_F is the sound of
+    the picture devices.split shows there."""
     rec = json.load(open(script["record"]))
     chk = script["export_check"]
     ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
@@ -1412,13 +1612,18 @@ def product_clips(script, out):
     bb = min(bb, ba + 3.0)
     cut(up["file"], ba, bb, os.path.join(out, "before.mp4"))
     cut(ex["file"], a, b, os.path.join(out, "after.mp4"))
-    ts = float(chk.get("tease_s") or (a + b) / 2)
-    ts = min(max(ts - 0.6, 0.0), body - 1.4)
-    cut(ex["file"], ts, ts + 1.3, os.path.join(out, "tease.mp4"), audio=False)
+    hook = None
+    if script.get("hook"):
+        h0, h1 = [float(x) for x in script["hook"]["t"]]
+        h1 = min(h1, body)
+        if h1 - h0 > 1.0:
+            hook = [round(h0 + F.LEAD_F / F.FPS, 3), round(h1, 3)]
+            cut(ex["file"], hook[0], hook[1], os.path.join(out, "hook.mp4"))
     # the whole export, silent: a line the cut has no picture for plays the real result, never a type page
     cut(ex["file"], 0.0, body, os.path.join(out, "export_body.mp4"), audio=False)
     return dict(before=dict(src=up["file"], t=[ba, bb], sha256=up["sha256"], crop=product_crop(script["record"], rec, (ba + bb) / 2)),
-                after=dict(src=ex["file"], t=[a, b], sha256=ex["sha256"]), tease=dict(src=ex["file"], t=[ts, ts + 1.3]),
+                after=dict(src=ex["file"], t=[a, b], sha256=ex["sha256"]),
+                hook=dict(src=ex["file"], t=hook, at=float(script["hook"]["t"][0]), landing=script["hook"].get("landing")) if hook else None,
                 body=dict(src=ex["file"], t=[0.0, round(body, 3)]))
 
 
@@ -1834,19 +2039,15 @@ def supply(ctx, script):
                    source=recording_source(script, "upload"), time_range=pc["before"]["t"]),
               dict(after=int(pr["after_after"]), person="after", wav="product/after.wav", file="product/after.mp4", said=None,
                    source=recording_source(script, "export"), time_range=pc["after"]["t"])]
+    if pc.get("hook"):            # the opening beat: the export's landing on the speaker's own voice, before the narrator
+        voices.append(dict(after=-1, person="hook", wav="product/hook.wav", file="product/hook.mp4", said=None,
+                           source=recording_source(script, "export"), time_range=pc["hook"]["t"]))
     placed = splice(ctx, narr_dir, fdir, voices)
-    if len(placed) != 2:
+    if len(placed) != len(voices):
         raise RuntimeError(f"the recording was not cut into the narration: {placed}")
     pack["voices"] = [dict(p, clip=W3.clip_facts(dict(path=p["file"], file=os.path.basename(p["file"]), subject=p["person"],
                                                       seconds=round(p["end"] - p["start"], 3)))) for p in placed]
     ex_sha, up_sha = script["receipts"]["export"]["sha256"], script["receipts"]["upload"]["sha256"]
-    tease = W3.clip_facts(dict(path=os.path.join(fdir, "product", "tease.mp4"), file="product/tease.mp4", subject="valmera export", seconds=1.3,
-                               source=recording_source(script, "export"), time_range=pc["tease"]["t"],
-                               origin=dict(key=ex_sha, t0=pc["tease"]["t"][0])))
-    if pack["footage"]:
-        pack["footage"][0]["clips"].insert(0, tease)
-    else:
-        pack["footage"] = [dict(i=0, clips=[tease])]
     # THE UPLOAD / THE EXPORT: the recording as its own shots (split at its edit list's events and its measured picture
     # changes), ranked for every line's words by a model that sees them; the lines that name it take their best shots as
     # takes, each file carrying the recording's sha256 and its first second, so no second plays twice under two names
@@ -1858,7 +2059,7 @@ def supply(ctx, script):
     ex_hard, ex_soft = export_events(script["record"], rec_, ex_, body_s)
     srcs = {"THE UPLOAD": dict(path=rec_["upload"]["file"], dur=float(rec_["upload"]["dur"]), busy=[pc["before"]["t"]], hard=up_hard, soft=up_soft,
                                sha=up_sha),
-            "THE EXPORT": dict(path=ex_["file"], dur=body_s, busy=[pc["after"]["t"], pc["tease"]["t"]], hard=ex_hard, soft=ex_soft, sha=ex_sha)}
+            "THE EXPORT": dict(path=ex_["file"], dur=body_s, busy=[pc["after"]["t"]] + ([pc["hook"]["t"]] if pc.get("hook") else []), hard=ex_hard, soft=ex_soft, sha=ex_sha)}
     demand = W3.line_demand(dict(words=nar["words"]), sc, durs)
     chosen, ranked, shots, uses = product_windows(ctx, script, srcs, demand)
     spend += uses
@@ -1934,6 +2135,39 @@ def content_pace(pack, sc):
 
 
 CAPTION_PIECE_F = 3        # a caption word trimmed around a full-frame recording keeps a piece this long or longer
+DISPLAY_OVER_RECORDING_Y = 0.40   # a display word over the recording rests here: clear of its own burned-in captions (about
+                                  # 0.70-0.76 of the height) and of the watermark (to 0.19); the reel's high seat for wide type
+NAME_OVER_RECORDING_Y = 0.27      # a name super over the recording: the reel's own high name seat (reel.name_supers), never
+                                  # its low one at 0.76, which sits on the recording's captions
+
+
+def is_display_word(it):
+    """The reel's designed display type, film.display_words' own voices only: its large part (voice dsp<f0>, one copy a
+    landing) and its small line (dsps<f0>). Never a caption, a name super (dsp_name<f0>) or a designed card's type
+    (dsp_card<f0>, dsp_cards<f0>)."""
+    if it.get("k") != "word" or not it.get("f"):
+        return False
+    f0 = int(it["f"][0])
+    return it.get("v") in (f"dsp{f0}", f"dsps{f0}")
+
+
+def is_name_super(it):
+    """reel.name_supers' type (voice dsp_name<f0>): a role=name item set at 0.27 or 0.76."""
+    return it.get("k") == "word" and bool(it.get("f")) and it.get("v") == f"dsp_name{int(it['f'][0])}"
+
+
+def rest_y(it):
+    y = it.get("y")
+    y = y[-1] if isinstance(y, list) and y else y
+    return float(y) if isinstance(y, (int, float)) else None
+
+
+def lift(it, d):
+    """The item moved by d of the height, its landing's per-frame rise kept."""
+    y = it.get("y")
+    if not d or rest_y(it) is None:
+        return it
+    return dict(it, y=[round(float(v) + d, 4) for v in y] if isinstance(y, list) else round(float(y) + d, 4))
 
 
 def as_delivered(l1, product_paths):
@@ -1942,8 +2176,14 @@ def as_delivered(l1, product_paths):
     caption word is trimmed to the frames outside the span, never deleted whole (20 Nov: all 83 narration words the
     reel built were deleted, even over the film's one photograph). Where the reel lays a product clip as a print on its
     board (its items marked proof_board), the narration's captions stay (they sit on the board below the print), and no
-    flash, finish or look touches the print. Returns the sealed spans."""
+    flash, finish or look touches the print. The writer's display words stay on their spoken words over a sealed span
+    (20 Nov: TRASH CAN and BLACK HOLE were said over the recording and printed nowhere), lifted to
+    DISPLAY_OVER_RECORDING_Y, above the recording's own captions; a name super stays too, at NAME_OVER_RECORDING_Y; a
+    designed card's words are left off it. Returns the sealed spans."""
     keys = {k for k, a in (l1.get("assets") or {}).items() if a.get("path") in product_paths}
+    # one move a landing: the large part sets it (voice dsp<f0>), its small line under it (dsps<f0>) moves with it
+    moves = {int(it["f"][0]): DISPLAY_OVER_RECORDING_Y - rest_y(it) for it in l1["items"]
+             if is_display_word(it) and it.get("v") == f"dsp{int(it['f'][0])}" and rest_y(it) is not None}
     mine = [it for it in l1["items"] if it.get("k") in ("shot", "card") and it.get("pic") in keys and it.get("z", 0) <= 1]
     spans = sorted({tuple(it["f"]) for it in mine if not it.get("proof_board")})
     boards = sorted({tuple(it["f"]) for it in mine if it.get("proof_board")})
@@ -1967,6 +2207,12 @@ def as_delivered(l1, product_paths):
         board = [s for s in boards if it["f"][0] < s[1] and it["f"][1] > s[0]]
         if not (over or board) or it.get("pic") in keys or it.get("proof_board") or it.get("keep_over_proof"):
             out.append(it)                                 # the product's crop drawn on its own upload stays with it
+            continue
+        if over and is_display_word(it):
+            out.append(lift(it, moves.get(int(it["f"][0]), 0.0)))
+            continue
+        if over and is_name_super(it) and rest_y(it) is not None:
+            out.append(lift(it, NAME_OVER_RECORDING_Y - rest_y(it)))     # its own seat, high, off the recording's captions
             continue
         if it["k"] == "word":
             if not over:
@@ -2241,6 +2487,39 @@ def lay_devices(ctx, l1, sc, pack, clock, script, knobs):
     return out
 
 
+def lay_hook(ctx, l1, pack, script):
+    """The tutorial's opening beat (script["hook"], hook_beat): devices.split over the seconds the speaker's own voice
+    opens the film (the "hook" voice the supply cut in before the narrator), the clip as uploaded beside Valmera's
+    export at the same instant, a hit where the export's picture lands. The raw clip and the export it became, the
+    words and the picture agreeing, before the narrator says a word. Returns the device's record, None without a hook
+    beat; a split that cannot be laid leaves the export full frame on its voice (the pinned cut-in) and is recorded."""
+    h = (pack.get("product") or {}).get("hook")
+    v = next((v for v in pack.get("voices") or [] if v.get("person") == "hook"), None)
+    if not h or not v:
+        return None
+    try:
+        rec = json.load(open(script["record"]))
+        ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
+        edl_b = json.load(open(os.path.join(os.path.dirname(script["record"]), "edl", f"v{int(ex['edl_version']):03d}.json")))
+        up = rec["upload"]
+        upload = dict(path=up["file"], w=int(up["w"]), h=int(up["h"]), fps=float(up.get("fps") or 30.0), dur=float(up["dur"]))
+        body = D.media(pack["ffmpeg"], os.path.join(os.path.dirname(pack["product"]["paths"][0]), "export_body.mp4"))
+        lib = dict(pack.get("sounds") or {})
+        lib.update(PX.sound_facts(("whoosh_soft_1", "impact_1")))
+        at = float(h["at"])                       # the split's picture at frame f shows at + f / FPS; its voice starts on LEAD_F there
+        f1 = F.Clock.f(float(v["end"]) + F.LEAD_F / F.FPS)
+        land = h.get("landing")
+        land_f = int(round((float(land) - at) * F.FPS)) if land is not None else None
+        work = os.path.join(ctx.supply, "devices")
+        focus = face_focus(pack["ffmpeg"], upload["path"], D.src_at(D.program(edl_b)[0], at), work, (0.5, 0.42))
+        out = D.split(l1, f0=0, f1=f1, upload=upload, export=body, edl_b=edl_b, export_at=at, lib=lib, focus=focus, land_f=land_f)
+        ctx.log(f"opening beat: split frames {out['frames']}, export from {at} s, lands on frame {land_f}")
+        return out
+    except Exception as e:  # noqa: BLE001 - the export still opens the film full frame on the speaker's voice
+        ctx.log(f"opening split not laid: {repr(e)[:300]}")
+        return dict(device="split", fault=repr(e)[:300])
+
+
 def showcase_score(ctx, script, pack):
     """The showcase's plan: devices.showcase over the recording (no narrator, no picture check: every picture is the
     product's own export, upload, Studio screen or site)."""
@@ -2400,6 +2679,9 @@ def score(ctx, script):
                     break
         spans = as_delivered(l1, product)
         devices = lay_devices(ctx, l1, sc, pack, clock, script, knobs)
+        devices["hook"] = lay_hook(ctx, l1, pack, script)
+        if (devices["hook"] or {}).get("frames"):
+            devices.setdefault("laid", []).insert(0, devices["hook"])
         devices["cta"] = lay_cta(ctx, l1, sc, pack, clock, script)
         if devices["cta"].get("frames"):
             devices.setdefault("laid", []).append(devices["cta"])
