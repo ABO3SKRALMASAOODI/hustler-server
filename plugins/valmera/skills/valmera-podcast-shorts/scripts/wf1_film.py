@@ -348,11 +348,15 @@ def build(script, sup, style_id, direction=None):
     # The composed review's findings, each repaired where it was found (wf1_short._rebuild_rejected): a crop through a
     # face or a subject left outside the frame is framed again; a contradiction gives that one window's slot to its
     # next-ranked candidate and leaves the picture to every other window.
-    reframe = {r["path"] if isinstance(r, dict) else r for r in d.get("reframe") or []}
+    # Findings are keyed on the candidate's own path (origin); a copy derived from it (text cleared) inherits the
+    # candidate's reframe, so clip_meta frames it again.
+    reframe = {(r.get("origin") or r.get("path")) if isinstance(r, dict) else r for r in d.get("reframe") or []}
     if reframe:
         footage = {i: [dict(c, reframe=True) if c["path"] in reframe else c for c in lst] for i, lst in footage.items()}
         pics = {k: [dict(r, reframe=True) if r["path"] in reframe else r for r in lst] for k, lst in pics.items()}
-    rejected_pairs = {(r.get("window"), r["path"]) for r in d.get("reject") or [] if isinstance(r, dict) and r.get("path")}
+    # (window, path): that window's slot goes to its next candidate; (window, None): the window rests on the speaker.
+    rejected_pairs = {(r.get("window"), r.get("origin") or r.get("path")) for r in d.get("reject") or []
+                      if isinstance(r, dict) and (r.get("origin") or r.get("path") or (r.get("fault") == "speaker" and r.get("window") is not None))}
     take = sup["take"]
     keys, meta = {}, {}
     # the take's own shots (a show cut between cameras): each is framed on its own speaker. One file, one asset a shot
@@ -440,9 +444,14 @@ def build(script, sup, style_id, direction=None):
         return st["mono"] == "all" or (st["mono"] == "past" and by_section and seg_at(f0) in past)
 
     def note(f0, f1, kind, name, rec, mode):
-        P.pictures.append(dict(f=[f0, f1], visible_f=[f0, rec.get("audit_until", f1)], kind=kind, name=name, path=rec["path"], shows=rec.get("shows"), mode=mode,
+        # origin: the candidate this picture is (a copy the check cut clear of another editor's text is placed under a
+        # new path). The composed review's findings are keyed on it, so its repair reaches the candidate the next build
+        # proposes (adversarial review, 20 Nov: findings keyed on the cleared path never matched and the short was lost).
+        origin = (rec.get("text_cleared") or {}).get("from_path") or rec["path"]
+        P.pictures.append(dict(f=[f0, f1], visible_f=[f0, rec.get("audit_until", f1)], kind=kind, name=name, path=rec["path"], origin=origin,
+                               shows=rec.get("shows"), mode=mode,
                                window=rec.get("window"), clause=rec.get("clause"), clause_t=rec.get("clause_t"), fit=rec.get("fit"),
-                               reframed=bool(rec.get("reframe")), attribution=rec.get("attribution"),
+                               reframed=bool(rec.get("reframe")), attribution=rec.get("attribution"), name_super=rec.get("name_super"),
                                w=rec.get("w"), h=rec.get("h"), upscaled_from=rec.get("upscaled_from"), rung=rec.get("rung"),
                                how=rec.get("how"), source_size=rec.get("source_size"),
                                illustration=rec.get('illustration'), source_evidence=rec.get('source') or dict(url=rec.get('page'),title=rec.get('title'),channel=rec.get('credit')),
@@ -568,7 +577,16 @@ def build(script, sup, style_id, direction=None):
                 window(f0, f1, kind, name, rec, keys[rec["path"]])
             cut_pts.append(f0)
             P.events.append(f0)
-            if d.get("labels", False) and name not in labelled:                         # a named thing is labelled once, small, while its own pictures are up
+            who = rec.get("name_super")
+            if who and who not in labelled:
+                # The person the picture shows, named as its source names them (a lower third the phone slice cuts
+                # away, the source's title or channel: placement_check name_super), in the label type, once.
+                labelled.add(who)
+                b_lab, j = f1, k + 1
+                while j < len(ins) and ins[j][0] == b_lab and ins[j][4].get("name_super") == who:
+                    b_lab, j = ins[j][1], j + 1
+                labels.append((f0 + 2, min(b_lab, f0 + int(2.4 * FPS)), str(who)))
+            elif not who and d.get("labels", False) and name not in labelled:            # a named thing is labelled once, small, while its own pictures are up
                 labelled.add(name)
                 b_lab, j = f1, k + 1
                 while j < len(ins) and ins[j][0] == b_lab and ins[j][3] == name:
@@ -633,12 +651,19 @@ def build(script, sup, style_id, direction=None):
         if b - a < 14:
             continue
         t = text.upper()
-        wd = P.R.width("lab", t) / W
+        rows = [t]
+        words = t.split()
+        if P.R.width("lab", t) / W > 0.66 and len(words) > 1:          # a long name goes on two lines, never smaller
+            n = min(range(1, len(words)), key=lambda n: max(P.R.width("lab", " ".join(words[:n])), P.R.width("lab", " ".join(words[n:]))))
+            rows = [" ".join(words[:n]), " ".join(words[n:])]
+        wd = max(P.R.width("lab", r_) for r_ in rows) / W
         if wd > 0.66:
             continue
         y = 0.752
-        P.block([a, b], [0.5 - wd / 2 - 0.022, y - 0.030, 0.5 + wd / 2 + 0.022, y + 0.013], pal["plate"], z=6, op=0.78, radius=0.008)
-        P.word([a, b], t, "lab", 0.5, y, pal["ink"], 0.95, align="c", z=7, role="stat")
+        y_last = y + 0.036 * (len(rows) - 1)
+        P.block([a, b], [0.5 - wd / 2 - 0.022, y - 0.030, 0.5 + wd / 2 + 0.022, y_last + 0.013], pal["plate"], z=6, op=0.78, radius=0.008)
+        for n, r_ in enumerate(rows):
+            P.word([a, b], r_, "lab", 0.5, y + 0.036 * n, pal["ink"], 0.95, align="c", z=7, role="stat")
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), hold=[(a - 1, b) for a, b, _ in shown], z=5)
     P.items = inside(P.items, f_end)
     P.items = ink_by_ground(P.items, P.voices, bright)

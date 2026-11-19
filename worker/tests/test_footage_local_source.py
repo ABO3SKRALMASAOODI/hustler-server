@@ -167,8 +167,9 @@ def test_the_whole_first_ladder_asks_for_1080p_streams_first_and_writes_the_sour
     monkeypatch.delenv("FOOTAGE_FETCH_CMD", raising=False)
     monkeypatch.setattr(fetch, "local_source", lambda url: None)
 
-    def ladder(url, args, timeout_s=None, done=None):
+    def ladder(url, args, timeout_s=None, done=None, lighter=None):
         seen["args"] = args
+        seen["lighter"] = lighter
         open(os.path.join(tmp_path, "whole.mp4"), "wb").write(b"v" * 3000)
         open(os.path.join(tmp_path, "meta.info.json"), "w").write(json.dumps(dict(title="t", channel="ch", description=" d ")))
         assert done("")
@@ -178,6 +179,62 @@ def test_the_whole_first_ladder_asks_for_1080p_streams_first_and_writes_the_sour
     assert path.endswith("whole.mp4") and rung == "default"            # the info json is never taken for the video
     assert seen["args"][seen["args"].index("-f") + 1] == fmt and "--write-info-json" in seen["args"]
     assert fetch.info_of(str(tmp_path)) == dict(title="t", channel="ch", description="d")
+    assert seen["lighter"][seen["lighter"].index("-f") + 1] == fetch.whole_av_lighter_format()
+
+
+def _fake_ytdlp(tmp_path, slow_marker):
+    """A yt-dlp stand-in: a request whose format names slow_marker never arrives in time (it sleeps); any other request
+    writes its -o target (whole.mp4) and exits 0. Every call is logged."""
+    import os
+    import stat
+    log = tmp_path / "calls.log"
+    script = tmp_path / "fake-ytdlp"
+    script.write_text(f"""#!/bin/sh
+fmt=""; out=""; prev=""
+for a in "$@"; do
+  if [ "$prev" = "-f" ]; then fmt="$a"; fi
+  if [ "$prev" = "-o" ]; then case "$a" in infojson:*) ;; *) out="$a";; esac; fi
+  prev="$a"
+done
+echo "$fmt" >> {log}
+case "$fmt" in *"{slow_marker}"*) sleep 5; exit 0;; esac
+f=$(echo "$out" | sed 's/%(ext)s/mp4/')
+head -c 4000 /dev/zero > "$f"
+exit 0
+""")
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return str(script), log
+
+
+def test_a_1080p_whole_source_that_cannot_arrive_in_time_comes_at_720p_instead(tmp_path, monkeypatch):
+    """Adversarial review, 20 Nov: on a slow or proxied route a 1080p whole-first request timed out on every rung (the
+    ladder only stepped down on an unavailable format) and the source was lost. The rung that timed out is asked for
+    the 720p ladder at once, and the source arrives."""
+    import os
+    script, log = _fake_ytdlp(tmp_path, "height<=1080")
+    monkeypatch.delenv("FOOTAGE_FETCH_CMD", raising=False)
+    monkeypatch.setenv("FOOTAGE_WAYBACK", "0")
+    monkeypatch.setattr(fetch, "local_source", lambda url: None)
+    monkeypatch.setattr(fetch, "ytdlp_cmd", lambda: [script])
+    monkeypatch.setattr(fetch, "_rungs", lambda url: [([], "default"), ([], "tv")])
+    monkeypatch.setattr(fetch, "CALL_S", 1.0)
+    out = tmp_path / "src"
+    path, rung = fetch.whole_av("https://www.youtube.com/watch?v=slow", str(out))
+    assert path == os.path.join(str(out), "whole.mp4") and os.path.getsize(path) == 4000
+    assert rung == "default+lighter"
+    asked = log.read_text().split()
+    assert asked == [fetch.whole_av_format(), fetch.whole_av_lighter_format()]      # one timeout, then 720p at once
+
+
+def test_a_ladder_with_no_lighter_request_keeps_walking_its_rungs_on_a_timeout(tmp_path, monkeypatch):
+    script, log = _fake_ytdlp(tmp_path, "slow")
+    monkeypatch.setenv("FOOTAGE_WAYBACK", "0")
+    monkeypatch.setattr(fetch, "ytdlp_cmd", lambda: [script])
+    monkeypatch.setattr(fetch, "_rungs", lambda url: [([], "default"), ([], "tv")])
+    import pytest
+    with pytest.raises(fetch.FetchError, match="timed out"):
+        fetch.run_ladder("https://www.youtube.com/watch?v=x", ["-f", "slow", "-o", str(tmp_path / "w.%(ext)s")], timeout_s=1.0)
+    assert log.read_text().split() == ["slow", "slow"]
 
 
 def test_kept_sources_keep_their_own_description(tmp_path, monkeypatch):

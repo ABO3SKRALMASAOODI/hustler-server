@@ -324,3 +324,53 @@ def test_the_check_ranks_and_recentres_and_a_contradiction_passes_the_slot_on(tm
     rows = cov.proposals(two, {0: clips[0], 1: [clips[0][0]]}, {}, rejected={(0, "/c/publix.mp4")})
     assert [r[4]["path"] for r in rows if r[4]["window"] == 1] == ["/c/publix.mp4"]
     assert "/c/publix.mp4" not in [r[4]["path"] for r in rows if r[4]["window"] == 0]
+
+
+def test_a_clause_with_few_chosen_pictures_is_covered_by_them_not_handed_back_to_the_speaker():
+    """Round 1, 19 Nov (the watermelon film's 34 s hold, four-moves' 15 s): a window with one or two survivors showed
+    1.4 s of each and then the speaker for the rest of the clause. The chosen pictures now share the whole clause, a clip
+    up to its own seconds; a window with enough pictures still changes about every 1.4 s."""
+    import wf1_coverage as cov
+    window = dict(name="Watermelon", t0=0.0, t1=8.0, say="the watermelon trick", must_show="a watermelon")
+    a, b = 3, 3 + 240
+    one = cov.proposals(dict(windows=[window]), {}, {"Watermelon": [dict(path="/p/melon.jpg")]})
+    assert [(r[0], r[1]) for r in one] == [(a, b)]                                   # one photo: the whole clause
+    short_clip = dict(path="/c/cut.mp4", seconds=2.0)
+    two = cov.proposals(dict(windows=[window]), {0: [short_clip]}, {"Watermelon": [dict(path="/p/melon.jpg")]})
+    assert two[0][4]["path"] == "/c/cut.mp4" and two[0][1] - two[0][0] <= 2.0 * 30 - 1     # a clip within its own seconds
+    assert two[-1][1] == b and two[1][0] == two[0][1]                                  # the photo carries the rest
+    assert two[0][4]["src"][1] <= 2.0
+    many = {0: [dict(path=f"/c/{n}.mp4", seconds=4.0) for n in range(7)]}
+    rows = cov.proposals(dict(windows=[window]), many, {})
+    assert len(rows) == 7 and all(r[1] - r[0] <= 1.4 * 30 + 1 for r in rows)          # enough pictures: the usual pace
+    assert cov.clause_shares(6.0, [1.0, float("inf"), float("inf")]) == [1.0, 2.5, 2.5]
+
+
+def test_the_measured_holds_send_their_windows_back_to_research_once(tmp_path, monkeypatch):
+    """Verdict better_fix #6: the rendered film's measured holds and cuts feed supply, never a gate. Windows under a
+    hold longer than RESEARCH_HOLD_S go back to research once; the rebuilt film then stands whatever it measures."""
+    import json
+    from types import SimpleNamespace
+    import wf1_short as wf
+    coverage = dict(windows=[dict(t0=1.0, t1=4.0), dict(t0=6.0, t1=20.0), dict(t0=22.0, t1=24.0)])
+    pack = dict(coverage=coverage)
+    (tmp_path / "pack.json").write_text(json.dumps(dict(pack=pack)))
+    monkeypatch.setattr(wf.wf3, "load_pack", lambda _: pack)
+    film = tmp_path / "programme.mp4"
+    film.write_bytes(b"x")
+    measured = dict(cuts=3, cuts_per_10s=5.0, longest_hold_s=13.0, seconds=30.0, holds=[[7.0, 20.0]])
+    monkeypatch.setattr(wf, "measure_cuts", lambda *a, **k: measured)
+    asked, rebuilt = [], []
+    monkeypatch.setattr(wf, "refill", lambda ctx, script, pack, shortage: asked.append(shortage))
+    monkeypatch.setattr(wf, "score", lambda *a: rebuilt.append(1) or dict(beats=dict(pictures=[]), spend=[]))
+    ctx = SimpleNamespace(supply=str(tmp_path), run_dir=str(tmp_path), log=lambda _: None)
+    sc = dict(beats=dict(pictures=[dict(window=0), dict(window=1)], coverage=dict(real_seconds=9.0, missing_windows=[2])), spend=[])
+    assert wf._rebuild_holds(ctx, {}, sc, dict(film=str(film))) is True
+    assert asked[0]["weak_windows"] == [1] and asked[0]["real_seconds"] == 9.0 and rebuilt == [1]
+    assert sc["beats"]["measured_before_research"] == measured and pack["holds_researched"] is True
+    assert wf._rebuild_holds(ctx, {}, sc, dict(film=str(film))) is False             # once a short: the film stands
+    assert len(asked) == 1
+    # too few cuts: every window with fewer pictures than its clause wants is researched
+    few = dict(measured, holds=[], cuts_per_10s=1.0)
+    assert wf.hold_windows(few, coverage, [dict(window=0)] * 3 + [dict(window=1)] * 12 + [dict(window=2)]) == [2]
+    assert wf.hold_windows(dict(measured, holds=[], cuts_per_10s=6.0), coverage, []) == []

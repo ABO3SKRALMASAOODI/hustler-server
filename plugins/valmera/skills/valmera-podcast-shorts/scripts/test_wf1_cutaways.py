@@ -212,3 +212,143 @@ def test_every_style_cuts_a_small_clip_full_bleed_with_its_size_on_record(tmp_pa
     assert not [it for it in l1["items"] if it["k"] == "card"]
     assert all((p["w"], p["h"]) == (3414, 1920) and p["upscaled_from"]["h"] == 360 and p["rung"] == "default"
                and p["window"] == 0 and p["clause"] == script["segments"][0]["say"] for p in clips)
+
+
+def _meta_short(tmp_path, clips):
+    words = "Meta rebuilt its whole team from the ground up last year".split()
+    wj = dict(duration=4.6, words=[dict(w=w, start=.1 + i * .4, end=.45 + i * .4, seg=0) for i, w in enumerate(words)])
+    script = dict(title="Meta", segments=[dict(say=" ".join(words), pictures=["Meta"])])
+    sup = dict(words=wj, work=str(tmp_path / "work"), ffmpeg=FF, pictures={}, footage=[dict(i=0, clips=clips)],
+               take=dict(path="/take.mp4", w=1920, h=1080, fps=30, dur=4.8, faces=[]),
+               coverage=dict(words=wj["words"], moves=[], windows=[dict(t0=.1, t1=4.4, name="Meta", say=" ".join(words),
+                                                                        must_show="Meta")]))
+    return script, sup
+
+
+def _offline_build(monkeypatch):
+    monkeypatch.setattr(film.F, "voice_stress", lambda sup: [])
+    monkeypatch.setattr(film.F, "engines_finish", lambda l1, *a, **k: l1)
+    import wf1_coverage
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda *a, **k: ([], []))
+
+
+def _meta_clip(tmp_path, name, **kw):
+    return dict(dict(path=_clip(tmp_path / f"{name}.mp4", 1280, 720, seconds=3.0), w=1280, h=720, seconds=3.0, x=0.5, faces=[],
+                     still=None, subject="Meta", source=dict(url=f"https://example.org/{name}", title=f"Meta {name}", channel="Meta")), **kw)
+
+
+@pytest.mark.skipif(not FF, reason="no ffmpeg")
+def test_a_text_cleared_clip_found_twice_by_the_composed_review_leaves_its_window_and_the_film_is_delivered(tmp_path, monkeypatch):
+    """Adversarial review, 20 Nov: a clip the check cut clear of foreign text is placed under a new path, and the
+    composed review's findings were keyed on that path. Neither the reframe nor the contradiction ever reached the
+    candidate the next build proposed; the third pass raised 'made no progress' and the short was lost. Findings are now
+    keyed on the candidate: framed again, then the window's slot goes to its next picture, and the film is delivered."""
+    import placement_check
+    import wf1_short as wf
+    from types import SimpleNamespace
+    a, b = _meta_clip(tmp_path, "a"), _meta_clip(tmp_path, "b")
+    script, sup = _meta_short(tmp_path, [a, b])
+    _offline_build(monkeypatch)
+    cleared = tmp_path / "work" / "text-cleared" / "a-cleared.mp4"
+    cleared.parent.mkdir(parents=True)
+    shutil.copy(a["path"], cleared)
+
+    def check(rows, *args, **kw):
+        out = []
+        for r in rows:
+            rec = r[4]
+            if rec["path"] == a["path"]:                                  # the check cuts a's subtitles away: a new file
+                rec = dict(rec, path=str(cleared), text_cleared=dict(from_path=a["path"], rect=[0, 0, 1, .8]))
+            rec.update(verified_motion=True, placed_motion_p90=2.0)
+            out.append([r[0], r[1], r[2], r[3], rec])
+        fit = {a["path"]: 9, b["path"]: 6}
+        return out, dict(placements=[dict(id=i, ok=True, fit=fit[r[4]["path"]], motion_ok=True) for i, r in enumerate(rows)],
+                         rejected=0, spend=[])
+    monkeypatch.setattr(placement_check, "check", check)
+    supply = tmp_path / "supply"
+    supply.mkdir()
+    ctx = SimpleNamespace(supply=str(supply), run_dir=str(tmp_path), log=lambda _: None)
+    builds = []
+
+    def score(*_):
+        found = wf.current_rejections(str(supply))
+        knobs = dict(coverage_final=True, reject=[r for r in found if r.get("fault") != "reframe"],
+                     reframe=[r for r in found if r.get("fault") == "reframe"])
+        _, beats = film.build(script, sup, "footage-cut", knobs)
+        builds.append(beats["pictures"])
+        return dict(beats=beats, spend=[])
+
+    def review(ctx_, rd, sc):                               # the composed frames: a's crop cuts through a face, every time
+        pics = sc["beats"]["pictures"]
+        rows = [dict(id=k, ok=p["origin"] != a["path"], fault="reframe", reason="the crop cuts his face", motion_ok=True,
+                     f=p["f"]) for k, p in enumerate(pics)]
+        return dict(rejected=sum(not r["ok"] for r in rows), placements=rows, moving_share=1.0, spend=[])
+    monkeypatch.setattr(wf, "score", score)
+    monkeypatch.setattr(wf, "_render_review", review)
+    monkeypatch.setattr(wf, "_repair_window_boundaries", lambda *args: None)
+    monkeypatch.setattr(wf.wf3, "render", lambda *args: dict(film=str(tmp_path / "programme.mp4")))
+    sc = score()
+    first = [p for p in builds[0] if p["window"] == 0]
+    assert first[0]["path"] == str(cleared) and first[0]["origin"] == a["path"] and not first[0]["reframed"]
+    rd = wf.render(ctx, script, sc)
+    assert rd["film"].endswith("programme.mp4") and sc["beats"]["rendered_check"]["rejected"] == 0
+    assert len(builds) == 3
+    again = [p for p in builds[1] if p["origin"] == a["path"]]
+    assert again and again[0]["path"] == str(cleared) and again[0]["reframed"] is True       # framed again, still cleared
+    assert not [p for p in builds[2] if p["window"] == 0 and p["origin"] == a["path"]]      # then the window gives it away
+    assert [p["origin"] for p in builds[2] if p["window"] == 0] == [b["path"]]
+    rows = wf.current_rejections(str(supply))
+    assert [(r["window"], r["path"], r["fault"]) for r in rows] == [(0, a["path"], "reframe"), (0, a["path"], "contradiction")]
+    assert all(r["placed"] == str(cleared) for r in rows)
+
+
+def test_a_finding_that_survives_every_repair_gives_its_window_to_the_speaker_then_stands_on_record(tmp_path, monkeypatch):
+    import wf1_short as wf
+    import wf1_coverage
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(supply=str(tmp_path), run_dir=str(tmp_path), log=lambda _: None)
+    monkeypatch.setattr(wf, "_repair_window_boundaries", lambda *args: None)
+    monkeypatch.setattr(wf, "score", lambda *a: dict(beats=dict(pictures=[dict(path="/w/c.mp4", origin="/c.mp4", window=2, reframed=True)]), spend=[]))
+    sc = dict(beats=dict(pictures=[dict(path="/w/c.mp4", origin="/c.mp4", window=2)]), spend=[])
+    finding = dict(placements=[dict(id=0, ok=False, fault="reframe")])
+    assert [wf._rebuild_rejected(ctx, {}, sc, finding) for _ in range(4)] == [True, True, True, False]
+    rows = wf.current_rejections(str(tmp_path))
+    assert [(r["window"], r["path"], r["fault"]) for r in rows] == [(2, "/c.mp4", "reframe"), (2, "/c.mp4", "contradiction"),
+                                                                     (2, None, "speaker")]
+    pairs = {(r["window"], r["path"]) for r in rows if r["fault"] != "reframe"}
+    assert wf1_coverage.is_rejected(pairs, 2, dict(path="/other.mp4"))                   # the window rests on the speaker
+    assert not wf1_coverage.is_rejected(pairs, 1, dict(path="/c.mp4"))                    # every other window keeps it
+    assert wf1_coverage.is_rejected({(1, "/c.mp4")}, 1, dict(path="/w/x.mp4", text_cleared=dict(from_path="/c.mp4")))
+    assert wf.unrepaired(dict(path="/w/c.mp4", origin="/c.mp4", window=2, reframed=True), rows)
+
+
+@pytest.mark.skipif(not FF, reason="no ffmpeg")
+def test_a_person_named_by_the_source_is_named_on_screen(tmp_path, monkeypatch):
+    """Verdict better_fix #2 (19 Nov m01): the 'SUSAN LI' lower third is outside the phone slice, so the person must be
+    named on screen. The check returns the name its evidence gives (name_super); the film draws it in the label type
+    while her picture is up, once."""
+    import placement_check
+    clip = _meta_clip(tmp_path, "li")
+    script, sup = _meta_short(tmp_path, [clip])
+    _offline_build(monkeypatch)
+    calls = []
+
+    def call(system, content, **kw):
+        calls.append(system)
+        ids = [json.loads(c["text"])["id"] for c in content if c["type"] == "text" and c["text"].startswith("{")]
+        return json.dumps(dict(placements=[dict(id=i, ok=True, fit=9, reason="she is named", motion_ok=True,
+                                                name_super="Susan Li, Fox Business", attribution_text="SUSAN LI lower third")
+                                           for i in ids])), dict(usd=0)
+    real = placement_check.check
+    monkeypatch.setattr(placement_check, "check", lambda rows, *a, **k: real(rows, *a, call=call, **k))
+    l1, beats = film.build(script, sup, "footage-cut", dict(coverage_final=True))
+    assert calls and "name_super" in calls[0]
+    clips = [p for p in beats["pictures"] if p["kind"] == "clip"]
+    assert clips and clips[0]["attribution"] == "SUSAN LI lower third"
+    assert [x["text"] for x in beats["labels"]] == ["Susan Li, Fox Business"]
+    named = [it for it in l1["items"] if it["k"] == "word" and it.get("role") == "stat"]
+    assert " ".join(it["t"] for it in named) == "SUSAN LI, FOX BUSINESS"
+    lab = beats["labels"][0]["f"]
+    assert clips[0]["f"][0] <= lab[0] and lab[1] <= clips[0]["f"][1] + 1 and lab[1] - lab[0] >= 14
+    taste = film.F.taste_check(l1, beats)
+    assert not [p for p in taste["problems"] if "SUSAN" in p or "FOX" in p], taste["problems"]

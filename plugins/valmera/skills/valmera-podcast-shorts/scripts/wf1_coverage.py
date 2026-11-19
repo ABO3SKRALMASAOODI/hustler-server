@@ -209,8 +209,32 @@ def shared_candidates(coverage, footage):
 
 def is_rejected(rejected, i, path):
     """A 'no' belongs to the window it was given in (window None: a picture placed outside every window, which no
-    window may then reuse). A contradiction in one clause never costs the picture another clause (round 1, 19 Nov)."""
-    return (i, path) in rejected or (None, path) in rejected
+    window may then reuse). A contradiction in one clause never costs the picture another clause (round 1, 19 Nov).
+    (i, None): window i rests on the speaker (the last step of a composed repair with no candidate left to give).
+    path may be a candidate record: a copy derived from a candidate (text cleared) answers for that candidate."""
+    paths = [path]
+    if isinstance(path, dict):
+        paths = [path.get("path"), (path.get("text_cleared") or {}).get("from_path")]
+    return (i, None) in rejected or any(p is not None and ((i, p) in rejected or (None, p) in rejected) for p in paths)
+
+
+def clause_shares(total, caps):
+    """The seconds each picture of a clause holds: equal shares of total, a picture that cannot hold its share (a clip
+    shorter than it) holding what it can and the rest shared among the others (water filling)."""
+    out = [0.0]*len(caps)
+    left, open_ = float(total), list(range(len(caps)))
+    while open_ and left > 1e-9:
+        each = left/len(open_)
+        full = [k for k in open_ if caps[k]-out[k] <= each]
+        if not full:
+            for k in open_:
+                out[k] += each
+            break
+        for k in full:
+            left -= max(caps[k]-out[k], 0.0)
+            out[k] = max(caps[k], 0.0)
+            open_.remove(k)
+    return out
 
 
 def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=None):
@@ -231,22 +255,27 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
         candidates += sorted([('photo', name, p) for name in names for p in pictures.get(name, [])],
                              key=lambda row:-fits.get((i,row[2]['path']),5))
         blocked={r['source'] for r in coverage.get('blocked_sources',[]) if r['window']==i}
-        pool=[row for row in candidates if not is_rejected(rejected,i,row[2]['path'])
+        pool=[row for row in candidates if not is_rejected(rejected,i,row[2])
               and ((row[2].get('source') or {}).get('url') or row[2].get('page')) not in blocked]
         distinct=[]
         for row in pool:
-            if is_rejected(rejected,i,row[2]['path']):continue
+            if is_rejected(rejected,i,row[2]):continue
             if not any(same_picture(row[2],old) for old in used+[r[2] for r in distinct]):distinct.append(row)
         # A later reference may return to the same authentic evidence. It still
         # needs this window's check, and never counts as a new picture below.
         candidates=distinct or pool[:1]
         wanted = max(1, math.ceil((b-a)/fps*.8))
         candidates = candidates[:wanted]
+        # Enough pictures: a new one about every 1.4 s. Fewer: the chosen pictures share the whole clause, a clip up to
+        # its own seconds, so the clause is never handed back to the speaker while a chosen picture can cover it (round
+        # 1, 19 Nov: windows with one or two survivors showed 1.4 s of picture and then 15-34 s of the speaker).
+        lengths = clause_shares((b-a)/fps, [min(1.4 if len(candidates) >= wanted else float('inf'),
+                                                 float(rec['seconds'])-1/fps if kind == 'clip' else float('inf'))
+                                             for kind, _, rec in candidates])
         pos = a
         for j, (kind, name, rec) in enumerate(candidates):
-            length = min(1.4, (b-pos)/fps/max(1,len(candidates)-j))
-            if kind == 'clip': length = min(length, float(rec['seconds'])-1/fps)
-            end = min(b, pos+round(length*fps))
+            end = min(b, a+round(sum(lengths[:j+1])*fps))         # cumulative: no frame lost to rounding
+            if kind == 'clip': end = min(end, pos+int((float(rec['seconds'])-1/fps)*fps))
             if end-pos < 10: continue
             if kind == 'clip':
                 start = max(0., (float(rec['seconds'])-(end-pos)/fps)/2)

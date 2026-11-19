@@ -93,8 +93,9 @@ Moving footage fills the phone in every style (owner's rating, 16 Nov 2026: cuta
 fill were the defect). Every style asks the footage engine for the phone's full size (`wf1_film.FOOTAGE_FRAME`, 1080x1920;
 19 Nov: the window and prints styles asked for their card size and every 16:9 clip arrived 1080x608, in a window card).
 Clips keep their source's own pixels (`chain.footage(native_pixels=True)`); whole-first sources come as separate 1080p
-video and sound streams first (`fetch.whole_av_format`), and a whole file that still arrived small is cut from the live
-stream at up to 1080p. A wide clip is cover-cropped round the subject the look placed and its people. A clip still too
+video and sound streams first (`fetch.whole_av_format`); a rung on which they time out or fail (not walled) is asked at
+once for the earlier 720p ladder (`run_ladder(lighter=...)`), so a slow route still brings the source; and a whole file
+that still arrived small is cut from the live stream at up to 1080p. A wide clip is cover-cropped round the subject the look placed and its people. A clip still too
 small to fill the phone within 3x is brought up once with a detail-keeping scaler (`wf1_film.fill_size`); it is never
 shown as a window. Each picture's size, cut route and fetch rung are in the record (`checks.podcast.sources`).
 
@@ -109,7 +110,12 @@ clause and its provenance, never on the director's search brief, so a re-brief o
 Other editors' text (subtitles, promo labels, date stamps) is found by the same look, never by a word list. Its box is
 grown to the text lines measured on the clip (`worker/footage/overlay.py`: seated stroke lines, signal only), the clip
 is cut down to the largest band clear of it that still fills the phone, and that new clip is checked again. Text no
-band can shed stays on the picture, recorded (`text_kept`); the picture keeps its place.
+band can shed stays on the picture, recorded (`text_kept`); the picture keeps its place. When the evidence names the
+person a picture shows (a lower third the phone slice cuts away, the source's title or channel), the check returns that
+name (`name_super`) and the film draws it in the label type, once, while the picture is up (two lines when long, never
+smaller than the reading floor). A window with fewer chosen pictures than its clause wants has them share the whole
+clause, a clip up to its own seconds (`wf1_coverage.clause_shares`); with enough pictures the picture changes about
+every 1.4 s.
 
 ## What every short is built from
 
@@ -207,10 +213,14 @@ Retained publisher originals enter the first acquisition pass as attributed cand
 subjects, as well as later recovery. Reusing their bytes never bypasses motion or placement checks.
 The composed review judges only what composing changed and repairs it where it was found: a crop through a face or a
 subject outside the frame is framed again first; a contradiction, or a second finding on a picture already framed
-again, gives that one window's slot to its next candidate, and the picture stays eligible in every other window
-(`render_rejected.json` holds window, path and fault). A contradiction may move a window's boundary; no finding and no
+again, gives that one window's slot to its next candidate; a finding that still returns on that window gives it to the
+speaker. The picture stays eligible in every other window (`render_rejected.json` holds window, the candidate's own path
+and fault; a copy cut clear of text answers for its candidate through `origin`). A finding with no step left is recorded
+on the film (`unrepaired`) and the film is delivered. A contradiction may move a window's boundary; no finding and no
 rejection reason ever reaches the acquisition brief. A paused repair resumes before rendering a stale plan. The
-delivered record measures the film's own cuts on its pixels (`checks.podcast.measured`: cuts per 10 s, longest hold).
+rendered programme's cuts are measured on its pixels (`measure_cuts`: cuts per 10 s, longest hold, every hold over
+6 s); the windows under a long hold, or under fewer than 4 cuts a 10 s, go back to research once a short
+(`_rebuild_holds`), never as a gate, and the delivered record carries the measure (`checks.podcast.measured`).
 The composed film aims at 60% moving picture time (one more footage pass when it is under, then it stands). A still discovered there stays
 eligible as a still, while the product returns to footage research; it cannot regain moving credit from an earlier source check.
 Research is split into small referent groups with retained answers. A source replay can reuse verified word

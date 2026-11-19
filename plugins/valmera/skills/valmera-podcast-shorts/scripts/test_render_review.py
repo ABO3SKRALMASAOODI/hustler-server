@@ -84,7 +84,8 @@ def test_composed_rejection_rebuilds_product_plan_and_invalidates_render(tmp_pat
 
     def rebuild(ctx, script):
         # the finding is local to the window it was found in: the picture stays eligible everywhere else
-        assert json.load(open(tmp_path/'render_rejected.json'))==[dict(window=2,path='/supply/bad.jpg',fault='contradiction',reason='wrong era')]
+        assert json.load(open(tmp_path/'render_rejected.json'))==[dict(window=2,path='/supply/bad.jpg',fault='contradiction',
+                                                                      placed='/supply/bad.jpg',reason='wrong era')]
         return dict(beats=dict(pictures=[]),spend=[])
 
     monkeypatch.setattr(wf.wf3,'render',draw)
@@ -97,14 +98,19 @@ def test_composed_rejection_rebuilds_product_plan_and_invalidates_render(tmp_pat
 
 
 def test_unresolved_composed_rejection_cannot_claim_a_passing_check(tmp_path,monkeypatch):
+    """A finding that comes back after every repair (framed again, given away) is recorded on the film, which is
+    delivered: the record never claims a passing check, and the short is never lost to its repair (20 Nov)."""
     ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda x:None)
     def fresh():return dict(beats=dict(pictures=[dict(path='/supply/bad.jpg')]),spend=[])
     sc=fresh()
-    monkeypatch.setattr(wf.wf3,'render',lambda *a:dict(film='fake.mp4'))
+    renders=[]
+    monkeypatch.setattr(wf.wf3,'render',lambda *a:renders.append(1) or dict(film='fake.mp4'))
     monkeypatch.setattr(wf,'_render_review',lambda *a:dict(moving_share=1.,rejected=1,placements=[dict(id=0,ok=False)],spend=[]))
     monkeypatch.setattr(wf,'score',lambda *a:fresh())
-    with pytest.raises(RuntimeError, match='picture'):
-        wf.render(ctx,{},sc)
+    rd=wf.render(ctx,{},sc)
+    assert rd['film']=='fake.mp4' and len(renders)==3
+    assert sc['beats']['rendered_check']['rejected']==1 and sc['beats']['rendered_check']['unrepaired']==[0]
+    assert [r['fault'] for r in wf.current_rejections(str(tmp_path))]==['reframe','contradiction']
 
 
 def test_resume_repairs_a_persisted_rejection_before_rendering_stale_score(tmp_path,monkeypatch):
@@ -453,7 +459,7 @@ def test_a_composed_fault_is_framed_again_first_then_gives_only_its_window_to_th
     sc=dict(beats=dict(pictures=[dict(path='/supply/clip.mp4',window=1)]),spend=[])
     face_cut=dict(placements=[dict(id=0,ok=False,fault='reframe',reason='the crop cuts his chin')])
     wf._rebuild_rejected(ctx,{},sc,face_cut)
-    assert plans[-1]==[dict(window=1,path='/supply/clip.mp4',fault='reframe',reason='the crop cuts his chin')]
+    assert plans[-1]==[dict(window=1,path='/supply/clip.mp4',fault='reframe',placed='/supply/clip.mp4',reason='the crop cuts his chin')]
     assert not wf.unrepaired(sc['beats']['pictures'][0],plans[-1])          # the rebuilt plan framed it again
     wf._rebuild_rejected(ctx,{},sc,face_cut)                                # framed again and still cut: next picture
     assert [r['fault'] for r in plans[-1]]==['reframe','contradiction'] and {r['window'] for r in plans[-1]}=={1}
