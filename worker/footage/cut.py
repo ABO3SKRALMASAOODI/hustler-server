@@ -25,23 +25,30 @@ def window(shot, t, want, peak=None):
     return round(t0, 3), round(t0 + want, 3)
 
 
+def seek(stream, t0, t1, out_path):
+    """The section by an ffmpeg seek on a resolved stream, near-lossless, no sound: out_path, or None when the stream
+    will not seek or has expired."""
+    if not stream or not stream.get("url"):
+        return None
+    hdr = "".join(f"{k}: {v}\r\n" for k, v in (stream.get("headers") or {}).items())
+    cmd = [fetch.ffmpeg(), "-hide_banner", "-loglevel", "error", "-ss", f"{max(t0 - PRE_S, 0):.3f}"]
+    if hdr:
+        cmd += ["-headers", hdr]
+    cmd += ["-i", stream["url"], "-ss", f"{min(PRE_S, t0):.3f}", "-t", f"{t1 - t0:.3f}", "-an", "-c:v", "libx264", "-crf", "12",
+            "-preset", "veryfast", "-pix_fmt", "yuv420p", "-y", out_path]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return None
+    return out_path if r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 2000 else None
+
+
 def grab(stream, url, t0, t1, out_path):
     """The section, near-lossless, no sound: ffmpeg seeks the resolved stream; yt-dlp's own section
     download when the stream will not seek or has expired."""
     dur = t1 - t0
-    if stream and stream.get("url"):
-        hdr = "".join(f"{k}: {v}\r\n" for k, v in (stream.get("headers") or {}).items())
-        cmd = [fetch.ffmpeg(), "-hide_banner", "-loglevel", "error", "-ss", f"{max(t0 - PRE_S, 0):.3f}"]
-        if hdr:
-            cmd += ["-headers", hdr]
-        cmd += ["-i", stream["url"], "-ss", f"{min(PRE_S, t0):.3f}", "-t", f"{dur:.3f}", "-an", "-c:v", "libx264", "-crf", "12",
-                "-preset", "veryfast", "-pix_fmt", "yuv420p", "-y", out_path]
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            if r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 2000:
-                return out_path, "stream"
-        except subprocess.TimeoutExpired:
-            pass
+    if seek(stream, t0, t1, out_path):
+        return out_path, "stream"
     raw = out_path + ".src.mp4"
     fetch.section(url, max(t0 - 0.5, 0), t1 + 0.5, raw)
     try:

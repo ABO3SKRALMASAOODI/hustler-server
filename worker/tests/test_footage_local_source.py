@@ -24,11 +24,13 @@ def test_missing_or_invalid_manifest_does_not_claim_a_cache(tmp_path, monkeypatc
 
 # ----------------------------------------------------------------- round 3 (valmera-stories): open each source once, keep it
 
-def _find_whole_first(tmp_path, monkeypatch, keep=None, verify_env="0"):
-    """One run.find over one short source and one line with four picks, the network replaced: returns (record, calls)."""
+def _find_whole_first(tmp_path, monkeypatch, keep=None, verify_env="0", size=(1280, 720), live=None, meta=None):
+    """One run.find over one short source and one line with four picks, the network replaced: returns (record, calls).
+    size: the whole file's picture size; live: what fetch.streams resolves (None: it must not be called; False: it
+    fails); meta: the source's own info json written beside the whole file."""
     import os
     from footage import cut, run, shots as fshots, verify
-    calls = dict(whole_av=0, proxy=0, streams=0, section=0, verify=0, local=0)
+    calls = dict(whole_av=0, proxy=0, streams=0, section=0, verify=0, local=0, seek=0)
     monkeypatch.setenv("FOOTAGE_VOICES", "0")
     monkeypatch.setenv("FOOTAGE_VERIFY", verify_env)
     if keep:
@@ -46,6 +48,8 @@ def _find_whole_first(tmp_path, monkeypatch, keep=None, verify_env="0"):
         os.makedirs(d, exist_ok=True)
         p = os.path.join(d, "whole.mp4")
         open(p, "wb").write(b"w" * 5000)
+        if meta:
+            open(os.path.join(d, fetch.META + ".info.json"), "w").write(json.dumps(meta))
         return p, "default"
 
     def boom(name):
@@ -55,9 +59,24 @@ def _find_whole_first(tmp_path, monkeypatch, keep=None, verify_env="0"):
         return f
     monkeypatch.setattr(fetch, "whole_av", whole_av)
     monkeypatch.setattr(fetch, "proxy", boom("proxy"))
-    monkeypatch.setattr(fetch, "streams", boom("streams"))
+    if live is None:
+        monkeypatch.setattr(fetch, "streams", boom("streams"))
+    else:
+        def streams(url, local=True):
+            calls["streams"] += 1
+            assert local is False                                   # the live stream, never the small kept copy
+            if live is False:
+                raise fetch.FetchError("walled")
+            return live
+        monkeypatch.setattr(fetch, "streams", streams)
+
+    def seek(stream, t0, t1, raw):
+        calls["seek"] += 1
+        open(raw, "wb").write(b"sharp")
+        return raw
+    monkeypatch.setattr(cut, "seek", seek)
     monkeypatch.setattr(fetch, "section", boom("section"))
-    monkeypatch.setattr(fshots, "probe", lambda p: dict(dur=120.0, w=1280, h=720, fps=30, audio=True))
+    monkeypatch.setattr(fshots, "probe", lambda p: dict(dur=120.0, w=size[0], h=size[1], fps=30, audio=True))
     monkeypatch.setattr(fshots, "cuts", lambda p, upto: [(k * 4.0, k * 4.0 + 4.0) for k in range(30)])
     monkeypatch.setattr(run.hear, "transcribe", lambda p, s: ([], 0.0))
     monkeypatch.setattr(run.look, "moments", lambda sub, need, local: ([], 0.0))
@@ -117,3 +136,58 @@ def test_a_wayback_source_is_never_resolved_live_and_a_pick_past_its_copy_fails(
     src = dict(key="s0", url="https://www.youtube.com/watch?v=x", rung="wayback", proxy=str(tmp_path / "p.mp4"), dur_read=10.0)
     assert run._whole_first(dict(url="u", duration=500.0)) and not run._whole_first(dict(url="u", duration=900.0))
     assert src["rung"] == "wayback"
+
+
+
+# ----------------------------------------------------------------- round 1 of 19 Nov: clips at the size that fills the phone
+
+def test_a_whole_source_that_came_small_is_cut_from_its_sharper_live_stream(tmp_path, monkeypatch):
+    """A 360p whole file (YouTube's only combined mp4 under 720p) needs 5.3x to fill the phone: its picks are cut from
+    the live stream at up to 1080p instead, resolved once; the record says how and from what size."""
+    res, calls = _find_whole_first(tmp_path, monkeypatch, size=(640, 360), live=dict(url="https://cdn/v", h=1080, w=1920),
+                                   meta=dict(title="T0", uploader="Up", description="Susan Li on Meta's spending"))
+    clips = res["lines"][0]["clips"]
+    assert len(clips) == 4 and calls["streams"] == 1 and calls["seek"] == 4 and calls["local"] == 0
+    assert all(c["how"] == "stream_sharper" and c["source_size"] == [640, 360] and c["rung"] == "default" for c in clips)
+    assert clips[0]["source"]["description"] == "Susan Li on Meta's spending"
+
+
+def test_a_small_source_with_no_sharper_stream_still_cuts_from_its_file(tmp_path, monkeypatch):
+    res, calls = _find_whole_first(tmp_path, monkeypatch, size=(640, 360), live=False)
+    assert len(res["lines"][0]["clips"]) == 4 and calls["streams"] == 1 and calls["local"] == 4 and calls["seek"] == 0
+
+
+def test_the_whole_first_ladder_asks_for_1080p_streams_first_and_writes_the_sources_own_metadata(tmp_path, monkeypatch):
+    import os
+    fmt = fetch.whole_av_format()
+    rungs = fmt.split("/")
+    assert rungs[0].startswith("bv*[height<=1080]") and "+ba" in rungs[0] and "[filesize<?" in rungs[0]
+    assert rungs.index("b[height<=720][ext=mp4]") > rungs.index("bv*[height<=720]+ba")       # the 360p combined file last
+    seen = {}
+    monkeypatch.delenv("FOOTAGE_FETCH_CMD", raising=False)
+    monkeypatch.setattr(fetch, "local_source", lambda url: None)
+
+    def ladder(url, args, timeout_s=None, done=None):
+        seen["args"] = args
+        open(os.path.join(tmp_path, "whole.mp4"), "wb").write(b"v" * 3000)
+        open(os.path.join(tmp_path, "meta.info.json"), "w").write(json.dumps(dict(title="t", channel="ch", description=" d ")))
+        assert done("")
+        return "", "default"
+    monkeypatch.setattr(fetch, "run_ladder", ladder)
+    path, rung = fetch.whole_av("https://www.youtube.com/watch?v=abc", str(tmp_path))
+    assert path.endswith("whole.mp4") and rung == "default"            # the info json is never taken for the video
+    assert seen["args"][seen["args"].index("-f") + 1] == fmt and "--write-info-json" in seen["args"]
+    assert fetch.info_of(str(tmp_path)) == dict(title="t", channel="ch", description="d")
+
+
+def test_kept_sources_keep_their_own_description(tmp_path, monkeypatch):
+    import os
+    from footage import run
+    keep = tmp_path / "keep"
+    monkeypatch.setenv("FOOTAGE_KEEP_SOURCES", str(keep))
+    whole = tmp_path / "whole.mp4"
+    whole.write_bytes(b"w" * 3000)
+    run.keep_sources([dict(url="https://www.youtube.com/watch?v=k", whole=str(whole), rung="default", title="T",
+                           channel="C", description="Steve Jobs talks to Apple staff")], log=lambda _: None)
+    rows = json.loads((keep / "manifest.json").read_text())
+    assert rows[0]["description"] == "Steve Jobs talks to Apple staff" and os.path.isfile(rows[0]["path"])

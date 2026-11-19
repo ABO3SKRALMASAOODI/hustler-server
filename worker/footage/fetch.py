@@ -171,10 +171,11 @@ def proxy(url, out_dir, duration=None, max_s=None):
     return path, rung
 
 
-def streams(url):
+def streams(url, local=True):
     """The best video stream at or under FINAL_H: {url, headers, w, h, fps, vcodec}, resolved once per source
-    so every cut is a seek on it rather than another walk down the ladder."""
-    cached = local_source(url)
+    so every cut is a seek on it rather than another walk down the ladder. local=False resolves the live stream even
+    for a source kept on disk (a kept copy that arrived small is cut sharper from the live stream: run.find)."""
+    cached = local_source(url) if local else None
     if cached:
         return dict(url=cached, headers={}, rung="verified-local-source", expires=time.time() + 4 * 3600)
     fmt = f"bv*[height<={FINAL_H}][vcodec^=avc1]/bv*[height<={FINAL_H}]/b[height<={FINAL_H}]/b"
@@ -210,12 +211,38 @@ def whole(url, out_dir):
 
 
 WHOLE_AV_MAX = "400M"
+WHOLE_AV_H = FINAL_H          # a whole-first source is every cut's source: it comes at the film's own size when it can
+WHOLE_AV_PART = "330M"        # the most a 1080p video stream may weigh, so it and its sound stay under WHOLE_AV_MAX
+META = "meta"                 # <out_dir>/meta.info.json: the source's own title, uploader and description (provenance)
+
+
+def whole_av_format():
+    """The whole-first ladder: separate video and sound streams at or under WHOLE_AV_H first (H.264, then any codec),
+    each video stream small enough to arrive under WHOLE_AV_MAX, then the 720p ladder as before. YouTube's only
+    combined mp4 with sound at or under 720p is its 360p stream (round 1, 19 Nov: footage-cut and archive-reel clips
+    arrived under 640 px tall and fell into window cards), so the combined file is no longer asked for first."""
+    return (f"bv*[height<={WHOLE_AV_H}][vcodec^=avc1][filesize<?{WHOLE_AV_PART}]+ba/"
+            f"bv*[height<={WHOLE_AV_H}][filesize<?{WHOLE_AV_PART}]+ba/"
+            f"bv*[height<={WHOLE_H}][vcodec^=avc1]+ba/bv*[height<={WHOLE_H}]+ba/"
+            f"b[height<={WHOLE_H}][ext=mp4]/b[height<={WHOLE_H}]/b")
+
+
+def info_of(out_dir):
+    """{title, uploader, channel, description, upload_date} a fetch wrote beside its file (META), or {}."""
+    try:
+        info = json.load(open(os.path.join(out_dir, META + ".info.json")))
+    except (OSError, ValueError):
+        return {}
+    out = {k: info.get(k) for k in ("title", "uploader", "channel", "upload_date") if isinstance(info.get(k), str) and info.get(k)}
+    if isinstance(info.get("description"), str) and info["description"].strip():
+        out["description"] = info["description"].strip()[:1200]
+    return out
 
 
 def whole_av(url, out_dir):
-    """The source whole, at or under WHOLE_H WITH its sound, in one yt-dlp call: (path, rung). The one file a whole-first
-    open (run.find whole_first) scans, hears and cuts from, so the source is never resolved or fetched again. A source a
-    caller kept (local_source) is that file."""
+    """The source whole, at or under WHOLE_AV_H WITH its sound, in one yt-dlp call: (path, rung). The one file a
+    whole-first open (run.find whole_first) scans, hears and cuts from, so the source is never resolved or fetched again.
+    A source a caller kept (local_source) is that file. The source's own metadata lands beside it (info_of)."""
     cached = local_source(url)
     if cached:
         return cached, "verified-local-source"
@@ -246,9 +273,9 @@ def whole_av(url, out_dir):
             raise FetchError('external source transport failed: ' + type(exc).__name__) from exc
     for p in glob.glob(os.path.join(out_dir, "whole.*")):
         os.remove(p)
-    fmt = (f"b[height<={WHOLE_H}][ext=mp4]/bv*[height<={WHOLE_H}][vcodec^=avc1]+ba/bv*[height<={WHOLE_H}]+ba/"
-           f"b[height<={WHOLE_H}]/b")
-    args = ["-f", fmt, "--merge-output-format", "mp4", "--max-filesize", WHOLE_AV_MAX, "-o", os.path.join(out_dir, "whole.%(ext)s")]
+    args = ["-f", whole_av_format(), "--merge-output-format", "mp4", "--max-filesize", WHOLE_AV_MAX,
+            "--write-info-json", "--no-write-playlist-metafiles", "-o", "infojson:" + os.path.join(out_dir, META),
+            "-o", os.path.join(out_dir, "whole.%(ext)s")]
 
     def got(_):
         return bool([p for p in glob.glob(os.path.join(out_dir, "whole.*")) if not p.endswith((".part", ".ytdl"))])

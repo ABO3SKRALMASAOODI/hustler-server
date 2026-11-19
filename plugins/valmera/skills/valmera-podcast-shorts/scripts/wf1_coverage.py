@@ -207,24 +207,35 @@ def shared_candidates(coverage, footage):
     return out
 
 
-def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None):
-    """Only the semantic window can place a picture; a sentence start cannot."""
+def is_rejected(rejected, i, path):
+    """A 'no' belongs to the window it was given in (window None: a picture placed outside every window, which no
+    window may then reuse). A contradiction in one clause never costs the picture another clause (round 1, 19 Nov)."""
+    return (i, path) in rejected or (None, path) in rejected
+
+
+def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=None):
+    """Only the semantic window can place a picture; a sentence start cannot. The candidates of a window go in the order
+    the picture check ranked them for that clause (fits[(window, path)], best first), then moving footage first; each
+    carries its whole clause, so it is judged on the complete thought and not the second of words under its slice."""
     rejected=rejected or set()
+    fits=fits or {}
     footage=shared_candidates(coverage,footage)
     used, out = [], []
     for i, window in enumerate(coverage['windows']):
         a, b = round(window['t0']*fps)+lead, round(window['t1']*fps)+lead
         candidates = [('clip', c.get('subject', window['name']), c) for c in sorted(footage.get(i, []),
-            key=lambda c:(0 if c.get('subject_motion') is True else 2 if c.get('subject_motion') is False else 1,
+            key=lambda c:(-fits.get((i,c['path']),5),
+                          0 if c.get('subject_motion') is True else 2 if c.get('subject_motion') is False else 1,
                           -c.get('motion_p90',0)))]
         names=list(dict.fromkeys([window['name'],*window.get('subjects',[])]))
-        candidates += [('photo', name, p) for name in names for p in pictures.get(name, [])]
+        candidates += sorted([('photo', name, p) for name in names for p in pictures.get(name, [])],
+                             key=lambda row:-fits.get((i,row[2]['path']),5))
         blocked={r['source'] for r in coverage.get('blocked_sources',[]) if r['window']==i}
-        pool=[row for row in candidates if (i,row[2]['path']) not in rejected
+        pool=[row for row in candidates if not is_rejected(rejected,i,row[2]['path'])
               and ((row[2].get('source') or {}).get('url') or row[2].get('page')) not in blocked]
         distinct=[]
         for row in pool:
-            if (i,row[2]['path']) in rejected:continue
+            if is_rejected(rejected,i,row[2]['path']):continue
             if not any(same_picture(row[2],old) for old in used+[r[2] for r in distinct]):distinct.append(row)
         # A later reference may return to the same authentic evidence. It still
         # needs this window's check, and never counts as a new picture below.
@@ -244,16 +255,22 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None):
                     from footage import motion
                     measured = motion.of_shot(rec['path'],*rec['src'])
                     rec['placed_motion_p90'] = measured['p90']
-            out.append([pos,end,kind,name,dict(rec, window=i, illustration=window['must_show'])])
+            out.append([pos,end,kind,name,dict(rec, window=i, illustration=window['must_show'], clause=window.get('say'),
+                                                    clause_t=[window['t0'],window['t1']])])
             used.append(rec); pos=end
     return out
 
 
-def checked_proposals(coverage, footage, pictures, duration, checker, composed_stills=()):
-    """Check local alternatives before acquisition; prior motion never approves a new placement."""
+def checked_proposals(coverage, footage, pictures, duration, checker, composed_stills=(), rejected=None):
+    """The picture check chooses among the local candidates before any acquisition; prior motion never approves a new
+    placement. Its ranking (fit) orders each window's candidates, its subject_x recentres a clip's phone slice, and a
+    contradiction gives that window's slot to the next-ranked candidate. rejected: (window, path) pairs the composed
+    review found contradicting their words, local to their window."""
     footage=shared_candidates(coverage,footage)
-    attempts=[];rejected=set();seen=set();ins=proposals(coverage,footage,pictures)
+    attempts=[];rejected=set(rejected or ());seen=set();fits={}
+    ins=proposals(coverage,footage,pictures,rejected=rejected)
     bound=1+len(coverage['windows'])*(sum(map(len,footage.values()))+sum(map(len,pictures.values())))
+    accepted,report=[],dict(contract=None,proposed=0,accepted=0,rejected=0,placements=[],spend=[])
     for _ in range(bound):
         signature=tuple((r[0],r[1],r[4]['window'],r[4]['path'],tuple(r[4].get('src',()))) for r in ins)
         if signature in seen:break
@@ -262,17 +279,18 @@ def checked_proposals(coverage, footage, pictures, duration, checker, composed_s
         for row,decision in zip(ins,report['placements']):
             if row[4]['path'] in composed_stills:
                 decision['motion_ok']=False;row[4]['verified_motion']=False
+            if decision.get('fit') is not None:
+                fits[(row[4]['window'],row[4]['path'])]=decision['fit']
             for candidate in footage.get(row[4]['window'],[]):
                 if candidate['path']==row[4]['path']:
                     candidate['subject_motion']=decision.get('motion_ok') is True
+                    if decision.get('ok') is True and decision.get('subject_x') is not None:
+                        candidate['x']=row[4].get('x',candidate.get('x'))
         attempts.append(report)
-        if not report['rejected']:
-            try:require_coverage(accepted,coverage,duration)
-            except CoverageError as error:
-                if error.report['moving_seconds']>=error.report['required_moving_seconds']:break
-            else:break
         rejected.update((r[4]['window'],r[4]['path']) for r,d in zip(ins,report['placements']) if not d['ok'])
-        ins=proposals(coverage,footage,pictures,rejected=rejected)
+        # The next proposal follows the check's ranking; when it is the one just checked (nothing rejected, the order
+        # already the ranking) the choice is made. A re-proposal reuses every verdict it already has.
+        ins=proposals(coverage,footage,pictures,rejected=rejected,fits=fits)
     return accepted,dict(report,attempts=attempts,spend=[s for a in attempts for s in a['spend']])
 
 

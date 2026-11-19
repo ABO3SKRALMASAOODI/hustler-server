@@ -66,7 +66,7 @@ def test_recovered_original_rescans_frames_without_repeating_exhausted_searches(
 
 def test_composed_rejection_rebuilds_product_plan_and_invalidates_render(tmp_path, monkeypatch):
     ctx = SimpleNamespace(supply=str(tmp_path), run_dir=str(tmp_path), log=lambda x: None)
-    sc = dict(beats=dict(pictures=[dict(path='/supply/bad.jpg')]), spend=[])
+    sc = dict(beats=dict(pictures=[dict(path='/supply/bad.jpg', window=2)]), spend=[])
     calls = []
 
     def draw(ctx, script, score):
@@ -80,10 +80,11 @@ def test_composed_rejection_rebuilds_product_plan_and_invalidates_render(tmp_pat
 
     def review(ctx, rd, score):
         bad = len(calls)==1
-        return dict(moving_share=1.,rejected=int(bad), placements=[dict(id=0,ok=not bad)], spend=[])
+        return dict(moving_share=1.,rejected=int(bad), placements=[dict(id=0,ok=not bad,fault='contradiction',reason='wrong era')], spend=[])
 
     def rebuild(ctx, script):
-        assert json.load(open(tmp_path/'render_rejected.json'))==['/supply/bad.jpg']
+        # the finding is local to the window it was found in: the picture stays eligible everywhere else
+        assert json.load(open(tmp_path/'render_rejected.json'))==[dict(window=2,path='/supply/bad.jpg',fault='contradiction',reason='wrong era')]
         return dict(beats=dict(pictures=[]),spend=[])
 
     monkeypatch.setattr(wf.wf3,'render',draw)
@@ -145,19 +146,20 @@ def test_later_repairs_keep_the_picture_that_passed_every_review(tmp_path,monkey
     names=['a.jpg','b.jpg','c.jpg','d.jpg','good.jpg']
     def fresh(*args):
         p=tmp_path/'render_rejected.json'
-        rejected=json.load(open(p)) if p.exists() else []
+        rejected={r['path'] for r in json.load(open(p)) if r['fault']=='contradiction'} if p.exists() else set()
         return dict(beats=dict(pictures=[dict(path='/supply/'+n) for n in names if '/supply/'+n not in rejected]),spend=[])
     def review(ctx,rd,sc):
         pics=sc['beats']['pictures']
         bad=len(pics)>1
-        return dict(moving_share=1.,rejected=int(bad),placements=[dict(id=i,ok=not bad or i!=0) for i in range(len(pics))],spend=[])
+        return dict(moving_share=1.,rejected=int(bad),placements=[dict(id=i,ok=not bad or i!=0,fault='contradiction')
+                                                                  for i in range(len(pics))],spend=[])
     monkeypatch.setattr(wf.wf3,'render',lambda *a:dict(film='fake.mp4'))
     monkeypatch.setattr(wf,'_render_review',review)
     monkeypatch.setattr(wf,'score',fresh)
     sc=fresh();result=wf.render(ctx,{},sc)
     assert len(result['picture_review'])==5
     assert sc['beats']['pictures']==[dict(path='/supply/good.jpg')]
-    assert '/supply/good.jpg' not in json.load(open(tmp_path/'render_rejected.json'))
+    assert '/supply/good.jpg' not in {r['path'] for r in json.load(open(tmp_path/'render_rejected.json'))}
 
 
 def test_the_delivered_film_is_not_reviewed_again_on_the_frames_the_render_review_checked(tmp_path,monkeypatch):
@@ -180,10 +182,10 @@ def test_rejection_identifies_asset_when_research_passes_reuse_filenames(tmp_pat
     paths=['/supply/first/clips/000.mp4','/supply/repair/clips/000.mp4']
     sc=dict(beats=dict(pictures=[dict(path=p) for p in paths]),spend=[])
     def rebuilt(*args):
-        rejected=json.load(open(tmp_path/'render_rejected.json'))
+        rejected={r['path'] for r in json.load(open(tmp_path/'render_rejected.json'))}
         return dict(beats=dict(pictures=[dict(path=p) for p in paths if p not in rejected]),spend=[])
     monkeypatch.setattr(wf,'score',rebuilt)
-    wf._rebuild_rejected(ctx,{},sc,dict(placements=[dict(id=0,ok=False),dict(id=1,ok=True)]))
+    wf._rebuild_rejected(ctx,{},sc,dict(placements=[dict(id=0,ok=False,fault='contradiction'),dict(id=1,ok=True)]))
     assert sc['beats']['pictures']==[dict(path=paths[1])]
 
 
@@ -192,7 +194,7 @@ def test_changed_review_contract_rechecks_previously_rejected_assets(tmp_path):
     (tmp_path/'render_rejected.json').write_text('["old-layout.jpg"]')
     assert wf.current_rejections(str(tmp_path))==[]
     (tmp_path/'render_rejected_contract.json').write_text(str(CONTRACT))
-    assert wf.current_rejections(str(tmp_path))==['old-layout.jpg']
+    assert wf.current_rejections(str(tmp_path))==[dict(window=None,path='old-layout.jpg',fault='contradiction')]
     (tmp_path/'render_rejected_contract.json').write_text(str(CONTRACT-1))
     assert wf.current_rejections(str(tmp_path))==[]
 
@@ -435,3 +437,90 @@ def test_the_composed_frames_get_one_look_that_also_audits_transitions(tmp_path,
     report=wf._render_review(SimpleNamespace(supply=str(tmp_path)),dict(film='film.mp4'),sc)
     assert passes==[('composed',2)]
     assert [p['transition_audit']['ok'] for p in report['placements']]==[True,False] and report['rejected']==1
+
+
+def test_a_composed_fault_is_framed_again_first_then_gives_only_its_window_to_the_next_picture(tmp_path,monkeypatch):
+    """Round 1, 19 Nov: one composed 'no' removed a picture from every window for good. A crop through a face is
+    framed again first; a second finding on the same placement gives that one window's slot away; the picture stays
+    eligible in every other window."""
+    ctx=SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),log=lambda x:None)
+    plans=[]
+    def rebuild(*a):
+        found=wf.current_rejections(str(tmp_path))
+        plans.append(found)
+        return dict(beats=dict(pictures=[dict(path='/supply/clip.mp4',window=1,reframed=True)]),spend=[])
+    monkeypatch.setattr(wf,'score',rebuild)
+    sc=dict(beats=dict(pictures=[dict(path='/supply/clip.mp4',window=1)]),spend=[])
+    face_cut=dict(placements=[dict(id=0,ok=False,fault='reframe',reason='the crop cuts his chin')])
+    wf._rebuild_rejected(ctx,{},sc,face_cut)
+    assert plans[-1]==[dict(window=1,path='/supply/clip.mp4',fault='reframe',reason='the crop cuts his chin')]
+    assert not wf.unrepaired(sc['beats']['pictures'][0],plans[-1])          # the rebuilt plan framed it again
+    wf._rebuild_rejected(ctx,{},sc,face_cut)                                # framed again and still cut: next picture
+    assert [r['fault'] for r in plans[-1]]==['reframe','contradiction'] and {r['window'] for r in plans[-1]}=={1}
+    knobs={}
+    found=wf.current_rejections(str(tmp_path))
+    knobs['reject']=[r for r in found if r.get('fault')!='reframe']
+    import wf1_coverage
+    assert wf1_coverage.is_rejected({(r['window'],r['path']) for r in knobs['reject']},1,'/supply/clip.mp4')
+    assert not wf1_coverage.is_rejected({(r['window'],r['path']) for r in knobs['reject']},2,'/supply/clip.mp4')
+
+
+def test_score_hands_the_findings_to_the_build_by_window(tmp_path,monkeypatch):
+    import wf1_coverage,wf1_alignment
+    from placement_check import CONTRACT
+    pack=dict(coverage=dict(contract=wf1_coverage.CONTRACT,windows=[]),alignment_contract=wf1_alignment.CONTRACT,
+              platform_walled=True,footage=[],lines=[],blank_frame_contract=1,ffmpeg='/usr/bin/ffmpeg')
+    (tmp_path/'pack.json').write_text(json.dumps(dict(pack=pack)))
+    (tmp_path/'render_rejected_contract.json').write_text(json.dumps(CONTRACT))
+    (tmp_path/'render_rejected.json').write_text(json.dumps([dict(window=3,path='a.mp4',fault='contradiction'),
+                                                             dict(window=1,path='b.mp4',fault='reframe')]))
+    monkeypatch.setattr(wf.wf3,'load_pack',lambda _:pack)
+    monkeypatch.setattr(wf.wf3,'env_path',lambda:'')
+    monkeypatch.setattr(wf,'direction_of',lambda *a:dict())
+    monkeypatch.setattr(wf.chain,'wants_music',lambda _:True)
+    monkeypatch.setattr(wf.F,'taste_check',lambda *a:dict(ok=True,problems=[]))
+    monkeypatch.setattr(wf.F,'audio_scene',lambda *a:{})
+    seen=[]
+    def build(sc,pack,style,knobs):
+        seen.append(knobs);return dict(items=[],dur_f=90),dict(pictures=[])
+    monkeypatch.setattr(wf.wf1_film,'build',build)
+    wf.score(SimpleNamespace(supply=str(tmp_path),run_dir=str(tmp_path),args={},log=lambda x:None),
+             dict(title='t',style=dict(id='window'),hook_line='h',close_line='c'))
+    assert seen[0]['reject']==[dict(window=3,path='a.mp4',fault='contradiction')]
+    assert seen[0]['reframe']==[dict(window=1,path='b.mp4',fault='reframe')]
+    assert 'drop' not in seen[0]
+
+
+def test_the_delivered_record_measures_its_cuts_on_the_pixels(tmp_path):
+    import shutil,subprocess
+    ff=shutil.which('ffmpeg') or next((p for p in ['/Users/masaoodi/Documents/Valmera/.valmera/week-1106/gauntlet/tools/ff/ffmpeg']
+                                       if os.path.exists(p)),None)
+    if not ff:pytest.skip('no ffmpeg')
+    film=tmp_path/'film.mp4'
+    subprocess.run([ff,'-v','error','-f','lavfi','-i','color=c=red:size=160x284:rate=30:d=2','-f','lavfi','-i',
+                    'color=c=blue:size=160x284:rate=30:d=1','-filter_complex','[0][1]concat=n=2:v=1','-y',str(film)],check=True)
+    m=wf.measure_cuts(str(film),ff)
+    assert m['cuts']==1 and m['longest_hold_s']==pytest.approx(2.0,abs=.1) and m['seconds']==pytest.approx(3.0,abs=.1)
+    assert wf.measure_cuts(str(tmp_path/'missing.mp4'),ff) is None
+
+
+def test_every_style_asks_the_footage_engine_for_the_full_phone(tmp_path,monkeypatch):
+    """Round 1, 19 Nov: window and prints asked for their card size (1080x810, 1080x1080), so every 16:9 clip arrived
+    1080x608 and needed 3.16x to fill the phone: each one fell into a window card."""
+    pack=dict(coverage=dict(contract=3,windows=[dict(name='Campus',must_show='Actual campus',say='Campus',t0=0,t1=4)]),
+              referent_research={'sources':[]},research_revision=7,footage=[],pictures={},credits=[],
+              coverage_context_rescout_pending=True)
+    (tmp_path/'pack.json').write_text(json.dumps({'pack':pack}))
+    monkeypatch.setattr(wf,'_llm',lambda:None)
+    import wf1_documents
+    monkeypatch.setattr(wf1_documents,'acquire',lambda *a,**kw:dict(pictures={},credits=[],spend=[]))
+    calls=[]
+    monkeypatch.setattr(wf.chain,'footage',lambda *a,**kw:calls.append(kw) or dict(lines=[],credits=[]))
+    for style in wf.wf1_film.STYLES:
+        wf.refill(SimpleNamespace(supply=str(tmp_path),log=lambda _:None),dict(title='Campus',style={'id':style}),pack,
+                  dict(weak_windows=[0],real_seconds=4,moving_seconds=4,required_moving_seconds=1))
+        pack['coverage_context_rescout_pending']=True
+    assert len(calls)==len(wf.wf1_film.STYLES)
+    assert all((kw['W'],kw['H'])==(1080,1920)==wf.wf1_film.FOOTAGE_FRAME for kw in calls)
+    import inspect
+    assert 'style["footage"]' not in inspect.getsource(wf.supply)
