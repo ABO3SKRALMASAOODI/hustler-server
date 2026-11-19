@@ -399,6 +399,44 @@ def cutaway_look_chain(edl, o_start, o_dur):
     return out
 
 
+# warmth (grade_custom), per unit: the red and blue curves' mid-grey and white
+# points, as a white balance. temperature/tint above lean the shadows only:
+# ffmpeg's colorbalance weighs by max + min of the pixel, so its shadow and
+# midtone ranges end near a code value of 0.4 and mid-grey and whites never
+# move (measured on p5873's frames: temperature 1.0 left whites and mid-tones
+# at the same a*/b*; the Director's shadow hue relies on exactly that).
+# Warmth moves the whole picture, blacks fixed: on p5873 +0.4 raised whites
+# and mid-tones b* by about 3, +1.0 by about 8, a* near 0, lightness kept.
+WARMTH_WARM = {"r_mid": 0.044, "g_white": 0.031, "b_mid": 0.075,
+               "b_white": 0.088}
+WARMTH_COOL = {"r_mid": 0.044, "r_white": 0.062, "g_mid": 0.019,
+               "g_white": 0.037, "b_mid": 0.075}
+
+
+def warmth_curves(warmth):
+    """The curves filter for grade_custom.warmth (-1 cool .. 1 warm): the
+    picture's white balance, black kept black. '' when neutral."""
+    try:
+        w = max(-1.0, min(1.0, float(warmth or 0.0)))
+    except (TypeError, ValueError):
+        return ""
+    if abs(w) < 1e-4:
+        return ""
+    if w > 0:
+        k = WARMTH_WARM
+        r = (0.5 + k["r_mid"] * w, 1.0)
+        g = (0.5, 1.0 - k["g_white"] * w)
+        b = (0.5 - k["b_mid"] * w, 1.0 - k["b_white"] * w)
+    else:
+        c, k = -w, WARMTH_COOL
+        r = (0.5 - k["r_mid"] * c, 1.0 - k["r_white"] * c)
+        g = (0.5 - k["g_mid"] * c, 1.0 - k["g_white"] * c)
+        b = (0.5 + k["b_mid"] * c, 1.0)
+    return ("curves=" + ":".join(
+        f"{n}='0/0 0.5/{p[0]:.3f} 1/{p[1]:.3f}'"
+        for n, p in (("r", r), ("g", g), ("b", b))))
+
+
 def grade_custom_chain(gc):
     """The grade_custom filter chain, as build_filtergraph emits it — shared
     with the agent's grade contact strip (round 91), which must show EXACTLY
@@ -434,6 +472,9 @@ def grade_custom_chain(gc):
         chain.append("eq=" + ":".join(eq_bits))
     if cb_bits:
         chain.append("colorbalance=" + ":".join(cb_bits))
+    warm = warmth_curves(gc.get("warmth"))
+    if warm:
+        chain.append(warm)
     # shadows/highlights are TONAL-REGION controls, so they are a master
     # curve, not eq: a fixed midpoint (0.5) and a moved quarter-point is
     # what makes "lift the shadows" brighten the dark corners without

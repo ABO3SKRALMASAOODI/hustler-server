@@ -307,6 +307,7 @@ def _music(ctx, queries, count):
                    else "")
                 + "). A track the person names is theirs: place it with "
                 f"{{'music': {{'id': 'cc0:{row['slug']}'}}}}")
+        names_track = any(f"[{q}] names the track" in ln for ln in lines)
         found = _matching(ranked, q)
         matched[q] = len(found)
         hits.extend(t for t in found if t not in hits)
@@ -317,20 +318,21 @@ def _music(ctx, queries, count):
             continue
         lines.append(f"[{q}] no track of reference grade matches; "
                      "the list below is the closest by film fit")
-        below = _below_bar(q)
+        below = [] if names_track else _below_bar(q)
         if below:
             lines.append("  held back, under the music bar: " + "; ".join(
                 f"{t} (fails: {why})" for t, why in below[:4])
                 + "; the reference-grade track of the same mood plays in "
                   "its place")
         # p5744 said "Bubbles" among its music asks: a word that names no
-        # track of reference grade may name what the person wants to SEE.
-        lines.append(f"  if '{q}' is something to see rather than hear, "
-                     "the same words find it as a picture: find(kind="
-                     "'stock_video') placed as an overlay, or a drawn "
-                     "element ({'tool': 'add_element', 'args': {'kind': ...}}"
-                     "; particles: embers, sparks, dust, confetti, snow, "
-                     "fireworks, bubbles)")
+        # track may name what the person wants to SEE.
+        if not names_track:
+            lines.append(f"  if '{q}' is something to see rather than hear, "
+                         "the same words find it as a picture: find(kind="
+                         "'stock_video') placed as an overlay, or a drawn "
+                         "element ({'tool': 'add_element', 'args': {'kind': ...}}"
+                         "; particles: embers, sparks, dust, confetti, snow, "
+                         "fireworks, bubbles)")
     tracks = (hits + [t for t in ranked if t not in hits])[:n]
     lines.insert(0, f"{len(tracks)} track(s) from {basis}, asked words "
                     "first, then ranked by fit to this film's length and "
@@ -384,6 +386,59 @@ def _named_cc0(query):
         if close or whole:
             out.append(r)
     return out[:3]
+
+
+def named_tracks(text):
+    """Library tracks whose title ``text`` names, by the catalogue's own
+    title search: [{"id", "title", "mood", "library"}]. The CC0 library by
+    _named_cc0; the reference-grade library when the text reads as the
+    title or holds every word of a title of two words or more (its one-word
+    titles, "You" and "Alone", are words of any sentence). p5744 v2b: the
+    person said "Calm current" and "Bubbles", the library's own titles, and
+    v2 heard a calmer look and floating bubbles while v1 had listed the
+    chill tracks by title the turn before."""
+    out = []
+    for row in _named_cc0(text):
+        out.append({"id": f"cc0:{row['slug']}", "title": row.get("title"),
+                    "mood": row.get("mood"), "library": "CC0 library"})
+    q = _norm_title(text)
+    if not q:
+        return out
+    try:
+        pool, _basis = _music_pool()
+    except Exception:  # noqa: BLE001
+        pool = []
+    import difflib
+    qs = _stems(q)
+    seen = {_norm_title(r["title"]) for r in out}
+    for t in pool or []:
+        title = _norm_title(t.get("title"))
+        if not title or title in seen:
+            continue
+        ts = _stems(title)
+        close = difflib.SequenceMatcher(None, q, title).ratio() >= 0.85
+        whole = 2 <= len(ts) <= 4 and ts <= qs
+        if close or whole:
+            seen.add(title)
+            out.append({"id": f"{LIB_PREFIX}{t['cid']}",
+                        "title": t.get("title"),
+                        "mood": t.get("mood") or t.get("style"),
+                        "library": "reference-grade library"})
+    return out[:4]
+
+
+def named_lines(text):
+    """The project-state lines for library tracks the request names ('' when
+    none): information, the model decides whether the person means them."""
+    rows = named_tracks(text)
+    if not rows:
+        return []
+    return ["The request's words are the title of a library track: "
+            + "; ".join(f"\"{r['title']}\" ({r['id']}, {r['mood']}, "
+                        f"{r['library']})" for r in rows)
+            + ". When the person means the track, it is their pick: "
+              "{'music': {'id': '<that id>'}} places it in place of the "
+              "bed (find(kind='music', query=[their words]) shows it too)."]
 
 
 def _words(text):

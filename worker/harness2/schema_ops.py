@@ -60,7 +60,9 @@ OPS = [
      '"temperature": 0.2, "shadows": 0.1}}}', "a grade preset, a {\"look\": "
      "name}, and/or the continuous controls (exposure, contrast, saturation, "
      "temperature, tint, shadows, highlights; -1..1, contrast and saturation "
-     "around 1); the envelope measures the result's lightness and colour"),
+     "around 1; temperature warms (+) or cools (-) the whole picture's white "
+     "balance, whites and mid-tones, blacks kept); the envelope measures "
+     "the result's lightness and colour"),
     ("transition", '{"transition": {"style": "crossfade", "duration_s": 0.3}}',
      "transitions at cuts; {\"at\": t} sets one junction"),
     ("zoom", '{"zoom": [{"start": 4, "end": 4.4, "mode": "landing"}, '

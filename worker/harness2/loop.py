@@ -142,8 +142,16 @@ def initial_messages(ctx, worker_db, session_id, user_message):
         if text and row.get("role") in ("user", "assistant"):
             messages.append({"role": row["role"], "content": text[:4000]})
     request = str(user_message.get("content") or "").strip()
+    state = state_text(ctx)
+    try:
+        from harness2 import find_tool
+        named = find_tool.named_lines(request)
+    except Exception:  # noqa: BLE001 - the library search is information
+        named = []
+    if named:
+        state += "\n" + "\n".join(named)
     messages.append({"role": "user", "content": (
-        state_text(ctx) + "\n\n# The request\n" + request)})
+        state + "\n\n# The request\n" + request)})
     return messages
 
 

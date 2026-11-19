@@ -628,7 +628,7 @@ def op_export(stage, value, env, index):
 
 
 GRADE_CUSTOM_KEYS = ("exposure", "contrast", "saturation", "temperature",
-                     "tint", "shadows", "highlights")
+                     "tint", "shadows", "highlights", "warmth")
 
 
 def op_grade(stage, value, env, index):
@@ -636,23 +636,43 @@ def op_grade(stage, value, env, index):
     {"grade": {"preset"?, "look"?, "custom"?: {exposure, contrast,
     saturation, temperature, tint, shadows, highlights}}}; the controls may
     also sit at the top level. p5873 v2a sent {"grade": {"grade_custom":
-    {...}}} and it set preset "none" and answered "already so"."""
+    {...}}} and it set preset "none" and answered "already so".
+
+    temperature here is the picture's warmth, as the op says and as every
+    model writes it: it lands as grade_custom.warmth, the white balance of
+    the whole picture. grade_custom.temperature leans only the darkest
+    third (ffmpeg's colorbalance ranges), so p5873 v2b's "warm,
+    sun-touched" at temperature 0.4 measured whites and mid-tones unmoved
+    and the film came out less warm than its upload. A look given as
+    controls ({"look": {"contrast": ...}}) is those controls (p5744 v2b:
+    apply_look raised on the dict)."""
     v = value if isinstance(value, dict) else {"preset": value}
+    look = v.get("look")
     custom = v.get("custom") or v.get("grade_custom")
     if not isinstance(custom, dict):
         custom = {k: v[k] for k in GRADE_CUSTOM_KEYS if v.get(k) is not None}
+    if isinstance(look, dict):
+        custom = dict({k: look[k] for k in GRADE_CUSTOM_KEYS
+                       if look.get(k) is not None}, **custom)
+        look = look.get("name")
     custom = {k: custom[k] for k in GRADE_CUSTOM_KEYS
               if custom.get(k) is not None}
+    if "temperature" in custom:
+        t = custom.pop("temperature")
+        if "warmth" not in custom:
+            custom["warmth"] = t
+            env.repair(f"grade: temperature {t} is the whole picture's "
+                       "white balance, written as warmth")
     ok = False
-    if v.get("look"):
-        ok = _run_verb(stage, "apply_look", {"name": v["look"]}, env,
+    if look:
+        ok = _run_verb(stage, "apply_look", {"name": str(look)}, env,
                        index) or ok
     if v.get("preset"):
         ok = _run_verb(stage, "set_color_grade", {"preset": v["preset"]},
                        env, index) or ok
     if custom:
         ok = _run_verb(stage, "set_grade_custom", custom, env, index) or ok
-    if not (v.get("look") or v.get("preset") or custom):
+    if not (look or v.get("preset") or custom):
         ok = _run_verb(stage, "set_color_grade", {"preset": "none"}, env,
                        index)
     return ok
@@ -940,7 +960,7 @@ def op_clips(stage, value, env, index):
         return False
     env.finding(first_line(result, 600))
     if v.get("compile", True) is not False:
-        _compile_clips(stage, clips, v, env, index)
+        _compile_clips(stage, clips, v, env, index, deliver)
     job_id = getattr(stage._base, "serial_job_id", None)
     if job_id:
         env.running = {"handle": f"job:{job_id}",
@@ -949,18 +969,31 @@ def op_clips(stage, value, env, index):
     return True
 
 
-def _compile_clips(stage, clips, v, env, index):
+def _clip_ratio(frame):
+    """The ratio a clips op's "frame" names: "9:16", {"ratio": "9:16"} or
+    nothing (9:16). p5760 v2b sent {"ratio": "9:16"}; its text form went to
+    set_frame as the ratio and the joined film stayed 16:9."""
+    if isinstance(frame, dict):
+        frame = frame.get("ratio")
+    ratio = str(frame or "9:16").strip()
+    return ratio if ratio in ("source", "16:9", "9:16", "1:1", "4:5",
+                              "4:3") else "9:16"
+
+
+def _compile_clips(stage, clips, v, env, index, deliver=None):
     """This film becomes what the request made: the clips in order, framed
-    like them, each opening on its title (p5760 v2a: ten clips rendered as
-    their own projects, and the film the customer exports was still the
-    untouched 37-min broadcast). ``"compile": false`` leaves it as it was."""
+    like them, each opening on its title, captioned like them (p5760 v2a:
+    ten clips rendered as their own projects, and the film the customer
+    exports was still the untouched 37-min broadcast; v2b: the joined film
+    stayed 16:9 with no captions). ``"compile": false`` leaves it as it
+    was."""
     spans = sorted([[float(c["start"]), float(c["end"])] for c in clips])
     why = _write_keep(stage, spans, f"the {len(clips)} clips, in order", env)
     if why:
         env.skip(index, f"clips: this film could not become the clips "
                         f"({why})", "a keep op over the clip ranges")
         return
-    ratio = str(v.get("frame") or "9:16")
+    ratio = _clip_ratio(v.get("frame"))
     if ratio != "source":
         try:
             import source_layout
@@ -976,10 +1009,11 @@ def _compile_clips(stage, clips, v, env, index):
             env.repair(f"clips: the film is framed {ratio} like the clips "
                        f"({note})")
         except Exception as exc:  # noqa: BLE001 - the frame op instead
-            env.repair(f"clips: frame by layout unavailable ({exc}); "
-                       f"{ratio} fitted")
-            _run_verb(stage, "set_frame", {"ratio": ratio,
-                                           "mode": "pad_blur"}, env, index)
+            env.repair(f"clips: frame by layout unavailable "
+                       f"({type(exc).__name__}: {str(exc)[:120]}); {ratio} "
+                       "reframed to follow the subject")
+            _run_verb(stage, "auto_reframe", {"ratio": ratio, "mode": "auto",
+                                              "follow": True}, env, index)
     tl = _clock(stage.edl)
     placed = 0
     for c in clips:
@@ -998,10 +1032,20 @@ def _compile_clips(stage, clips, v, env, index):
                 "end": round(at + 3.0, 2), "template": "title",
                 "entrance": "pop", "exit": "fade"}, env, index):
             placed += 1
+    captioned = False
+    deliver = deliver or {}
+    if deliver.get("captions", True) and (stage.index or {}).get("words"):
+        style = deliver.get("caption_style") \
+            if isinstance(deliver.get("caption_style"), dict) \
+            else {"motion_look": "editorial"}
+        captioned = _run_verb(stage, "add_captions", {
+            "mode": "from_transcript", "style": style}, env, index)
     env.finding(f"clips: this film is now the {len(clips)} clips in order "
                 f"({float(program_duration(stage.edl) or 0):.1f} s), "
-                f"{placed} opening on their titles; each clip is also its "
-                "own project ('compile': false keeps this film as it was)")
+                f"{placed} opening on their titles"
+                + (", captioned like them" if captioned else "")
+                + f", framed {ratio}; each clip is also its own project "
+                "('compile': false keeps this film as it was)")
 
 
 def op_tool(stage, op, env, index):
@@ -1016,6 +1060,11 @@ def op_tool(stage, op, env, index):
     if not isinstance(args, dict):
         env.skip(index, "tool args must be an object")
         return False
+    if name == "set_grade_custom" and any(
+            args.get(k) is not None for k in GRADE_CUSTOM_KEYS):
+        # the same controls whichever door they come through: temperature
+        # is the picture's warmth (op_grade)
+        return op_grade(stage, {"custom": args}, env, index)
     return _run_verb(stage, name, args, env, index)
 
 

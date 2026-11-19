@@ -138,12 +138,21 @@ def test_music_find_answers_chill_lofi_with_reference_grade_tracks(
     assert "match(es) of reference grade" in body
 
 
-def test_a_held_back_named_track_says_what_plays_and_what_to_see():
+def test_a_named_track_is_the_persons_pick_not_something_to_see():
+    """p5744 v2b: "Bubbles" is the library's track; the find answer offers
+    the track and no longer sends the model to a bubbles element."""
     ctx, _fake = _ctx(11.26, P5744_KEEP)
     body = find_tool.find(ctx, kind="music", query=["Bubbles"]).text()
-    assert "Bubbles (CC0)" in body
-    assert "reference-grade track of the same mood plays" in body
-    assert "add_element" in body and "bubbles" in body
+    assert "cc0:chill-bubbles-lofi-bright-relaxed" in body
+    assert "A track the person names is theirs" in body
+    assert "add_element" not in body
+    assert "plays in its place" not in body
+
+
+def test_words_that_name_no_track_may_still_name_something_to_see():
+    ctx, _fake = _ctx(11.26, P5744_KEEP)
+    body = find_tool.find(ctx, kind="music", query=["confetti"]).text()
+    assert "add_element" in body
 
 
 def test_choose_defaults_to_the_reference_pool(monkeypatch):
@@ -557,7 +566,7 @@ def test_grade_takes_continuous_controls(monkeypatch):
     monkeypatch.setattr(agent_tools, "execute", execute)
     commit.edit(ctx, [{"grade": {"grade_custom": {"exposure": 0.2,
                                                   "temperature": 0.3}}}], "g")
-    assert ("set_grade_custom", {"exposure": 0.2, "temperature": 0.3}) in seen
+    assert ("set_grade_custom", {"exposure": 0.2, "warmth": 0.3}) in seen
     assert not any(n == "set_color_grade" for n, _a in seen)
 
 
