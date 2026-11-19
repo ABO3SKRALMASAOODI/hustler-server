@@ -497,8 +497,9 @@ DRAW_U_LO = 0.0            # a line's shots are drawn from the judge's whole dis
 GLIMPSE_F = 3              # a planned shot this short is a glimpse of the INCOMING take (its first 1-2 frames, a flash, then it plays on)
 CUTIN_SHARE = 0.15         # same-take cut-ins (a tighter framing of the take just played, time running on): at most this share of a line's cuts
 CUTIN_K = 0.80             # a cut-in's crop: this share of the cover framing (a 1.25x punch)
-DESIGNED_MIN_S = 0.5       # a designed card holds its planned length, at least this; a figure card at least FIGURE_CARD_S
-FIGURE_CARD_S = 1.2
+DESIGNED_MIN_S = 0.5       # a designed card holds its planned length, at least this; a figure card at least FIGURE_HOLD_S
+FIGURE_HOLD_S = 1.6        # a figure holds at least this long: the card's hold AND wf3's type check read this one number
+FIGURE_CARD_S = FIGURE_HOLD_S
 SNAP_Q = 0.6               # stresses above this quantile pull a cut onto them (every word would quantise the shots short)
 GLIMPSE_Q = 0.85           # cuts on the voice's stresses above this quantile get a 1-2 frame glimpse (about 8% of cuts)
 FILL_SHARE = 0.08           # designed cards plus reframes: at most this share of the voice (the overflow is logged)
@@ -1303,15 +1304,104 @@ def finish_budget(fin, seg_len, script, top=0.25, grey=()):
 
 # ----------------------------------------------------------------- the film
 
-def caption_pool(plan, end_frame, y, amount=0.70, holes=()):
-    """Keep caption contrast over bright footage and section flashes; `holes`: white frames the pool leaves whole."""
-    at = 0
-    for h0, h1 in sorted(holes):
-        if h0 > at:
-            plan.flash([at, h0], mode="pool", a=amount, rect=[0.06, y - 0.105, 0.94, y + 0.075], z=9)
-        at = max(at, h1)
-    if end_frame > at:
-        plan.flash([at, end_frame], mode="pool", a=amount, rect=[0.06, y - 0.105, 0.94, y + 0.075], z=9)
+POOL_EDGE_Q = 0.4          # the inked words' outer edges sit at this share of the pool's half-width (the Gaussian still
+                           # darkens 58% there), and the pool reaches at least POOL_PAD_X past them
+POOL_PAD_X = 0.06
+POOL_TONE = (0.45, 0.65)   # the picture's tone under the caption (Y', 0-1): no pool at or under the first, the full pool from the second
+                           # (wf3.caption_contrast calls white ink on a median over 0.6 unreadable)
+
+
+def _ink_light(c):
+    """A light caption ink (white or near it): its tone over 0.5; an ink whose tone cannot be read counts as white,
+    and pure black (tone 0.0) is dark."""
+    t = _hex_tone(c)
+    return True if t is None else t > 0.5
+
+
+def _hex_tone(c):
+    h_ = str(c).lstrip("#")
+    try:
+        r, g, b = (int(h_[k:k + 2], 16) / 255.0 for k in (0, 2, 4))
+    except ValueError:
+        return None
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
+
+_TONES = {}
+
+
+def picture_tone(path):
+    """The tone (Y', 0-1, BT.601 like ffmpeg's grey) of a still where a caption sits: the median of its band 55-80% down
+    and the middle 60% across. None when it cannot be read (a video file, a missing path)."""
+    if not path:
+        return None
+    if path in _TONES:
+        return _TONES[path]
+    out = None
+    try:
+        import numpy as np
+        from PIL import Image
+        with Image.open(path) as im:
+            im = im.convert("L")
+            im = im.resize((64, max(int(64 * im.height / max(im.width, 1)), 4)))
+            a = np.asarray(im, np.float32) / 255.0
+        h, w = a.shape
+        band = a[int(0.55 * h):max(int(0.80 * h), int(0.55 * h) + 1), int(0.2 * w):max(int(0.8 * w), int(0.2 * w) + 1)]
+        out = float(np.median(band)) if band.size else None
+    except Exception:  # noqa: BLE001 - an unreadable picture keeps the full pool
+        out = None
+    _TONES[path] = out
+    return out
+
+
+def pool_need(tone):
+    """How much of the pool a caption needs over a picture of this tone: 0 on a dark or mid plate, 1 on a bright one,
+    1 when the tone is unknown."""
+    if tone is None:
+        return 1.0
+    lo, hi = POOL_TONE
+    return min(max((float(tone) - lo) / (hi - lo), 0.0), 1.0)
+
+
+def caption_pool(plan, end_frame, y, amount=0.70, holes=(), tone_at=None):
+    """Caption contrast where it is needed, the pool laid with the captions: for each caption line (white ink, role cap),
+    one pool per inked word, its rect the box of the words inked so far (the line's words ink in place from its left),
+    its strength `amount` x pool_need(the tone of the picture under it, tone_at(frame) -> Y' or None). No word inked, no
+    pool; a dark or mid plate, no pool. `holes`: white frames the pool leaves whole."""
+    caps = [it for it in plan.items if it.get("k") == "word" and it.get("role") == "cap" and _ink_light(it.get("ink", "#FFFFFF"))]
+    lines = {}
+    for it in caps:
+        yy = it["y"][-1] if isinstance(it["y"], list) else it["y"]
+        lines.setdefault((int(it["f"][1]), round(float(yy), 4)), []).append(it)
+    holes = sorted((int(a), int(b)) for a, b in holes)
+    for (b, yy), ws in sorted(lines.items()):
+        ws = sorted(ws, key=lambda it: (it["f"][0], it["x"] if not isinstance(it["x"], list) else it["x"][0]))
+        x0, x1 = 1.0, 0.0
+        for j, it in enumerate(ws):
+            xl = float(it["x"][0] if isinstance(it["x"], list) else it["x"])
+            x0, x1 = min(x0, xl), max(x1, xl + plan.R.width(it["v"], it["t"]) / F.W)
+            f0 = int(it["f"][0])
+            f1 = min(int(ws[j + 1]["f"][0]) if j + 1 < len(ws) else b, b, int(end_frame))
+            if f1 <= f0:
+                continue
+            cx, half = (x0 + x1) / 2, (x1 - x0) / 2
+            hw = max(half / POOL_EDGE_Q, half + POOL_PAD_X)
+            rect = [cx - hw, yy - 0.105, cx + hw, yy + 0.075]
+            parts, at = [], f0
+            for h0, h1 in holes:
+                if h1 <= at or h0 >= f1:
+                    continue
+                if h0 > at:
+                    parts.append((at, h0))
+                at = max(at, h1)
+            if f1 > at:
+                parts.append((at, f1))
+            for a_, b_ in parts:
+                need = [pool_need(tone_at(f) if tone_at else None) for f in range(a_, b_)]
+                if max(need) <= 0.0:
+                    continue
+                a_val = round(amount * need[0], 4) if len(set(need)) == 1 else [round(amount * q, 4) for q in need]
+                plan.flash([a_, b_], mode="pool", a=a_val, rect=rect, z=9)
 
 
 def _sig_frames(c, ffmpeg=None, n=3):
@@ -1556,10 +1646,25 @@ def motion_of(l1, pictures):
                 content_moving_share=round(con_f / max(tot, 1), 3), camera_moving_share=round(cam_f / max(tot, 1), 3))
 
 
-def name_supers(P, clock, sc, timeline, st, pal, f_end, shown, dropped):
+def _as_card(x, cards_shown):
+    """A dropped display item a designed card printed instead: 'printed elsewhere' and the same name as a card's text
+    (_same_name, the match name_supers drops it by: "JOBS" on the "STEVE JOBS" card)."""
+    return x.get("why") == "printed elsewhere" and any(_same_name(x.get("text"), c) for c in cards_shown)
+
+
+def _same_name(a, b):
+    """The same printed name (case and spacing aside), or one printed inside the other ("JOBS" in "STEVE JOBS")."""
+    a, b = " ".join(str(a).upper().split()), " ".join(str(b).upper().split())
+    return bool(a and b) and (a == b or f" {a} " in f" {b} " or f" {b} " in f" {a} ")
+
+
+def name_supers(P, clock, sc, timeline, st, pal, f_end, shown, dropped, cards=()):
     """Each person's name, large and left-aligned, landing on the first word of their name at their first mention
     (writer.annotate's name items, word_i), held 1.5 s; set above or below the middle where the picture under it has no
-    face, never at once with a display word. Returns [(f0, f1, text)]."""
+    face and no designed card's type, never at once with a display word. `cards`: the designed cards on screen
+    [(f0, f1, text, box)]: a card already printing the name during the super's window carries it (the name is set
+    once: recorded as printed elsewhere), and a card printing other type moves the super to the other height.
+    Returns [(f0, f1, text)]."""
     _, _, bake = F._engines()
     out = []
     for i, s in enumerate(sc["segments"]):
@@ -1576,12 +1681,22 @@ def name_supers(P, clock, sc, timeline, st, pal, f_end, shown, dropped):
             if b - a < 14 or any(a < d1 and d0 < b for d0, d1, _ in shown + out):
                 dropped.append(dict(seg=i, text=x["text"], role="name", why="no room"))
                 continue
-            faces_hi = any(((f["box"][1] + f["box"][3]) / 2) < 0.45 for r in timeline if r[0] < b and a < r[1] for f in (r[4].get("faces") or []))
-            y = 0.76 if faces_hi else 0.27
             text = x["text"].upper() if st["upper"] else x["text"]
+            up = [c for c in cards if c[0] < b and a < c[1]]
+            on_card = next((c[2] for c in up if _same_name(text, c[2])), None)
+            if on_card is not None:                                                               # the card sets the name
+                dropped.append(dict(seg=i, text=text, role="name", why="printed elsewhere", card=on_card))
+                continue
+            faces_hi = any(((f["box"][1] + f["box"][3]) / 2) < 0.45 for r in timeline if r[0] < b and a < r[1] for f in (r[4].get("faces") or []))
             vk = f"dsp_name{a}"
             P.voices[vk] = dict(P.voices["dsp"])
             P.voices[vk]["px"] = P.R.fit_px(vk, text, 0.66 * W, float(st["dsp"]["px"]) * 0.8)
+            hgt = float(P.voices[vk]["px"]) * 1.1 / H
+
+            def card_overlap(y_):
+                return sum(max(0.0, min(y_ + 0.25 * hgt, c[3][3]) - max(y_ - hgt, c[3][1])) for c in up if c[3])
+            order = (0.76, 0.27) if faces_hi else (0.27, 0.76)
+            y = min(order, key=lambda y_: (card_overlap(y_) > 0, order.index(y_)))
             n = b - a
             k = min(int(bake.BOUNCE["n"]), n)
             ys = [r4(y + float(q)) for q in bake.bounce(k, rest=0.0)] + [r4(y)] * (n - k)
@@ -1753,6 +1868,8 @@ def build(script, sup, style_id, direction=None):
         return fin[seg_at(f0)] in ("mono", "gate")
 
     cards_shown = []
+    card_type = []             # [(f0, f1, text, box)]: every designed card's type, read by the name supers
+    grounds = []               # [(f0, f1, tone or None)]: what each picture puts under the caption seat (caption_pool)
 
     def note(f0, f1, kind, name, rec, mode):
         played = span_motion(rec, rec["src"][0], rec["src"][1]) if kind == "clip" and rec.get("src") and (rec.get("motion") or {}).get("curve") \
@@ -1767,6 +1884,9 @@ def build(script, sup, style_id, direction=None):
                                **{k_: rec[k_] for k_ in ("glimpse", "cont", "cutin", "glimpse_flash") if rec.get(k_)}))
         if rec.get("still") or kind == "photo":
             look_pics.append(rec.get("still") or rec["path"])
+        still_ = rec.get("still") or ((rec.get("stills3") or [None, None])[len(rec.get("stills3") or [None, None]) // 2]) or \
+            (rec["path"] if kind == "photo" else None)
+        grounds.append((f0, f1, picture_tone(still_)))
 
     def settle_push(n, land=0.035, push_=0.085):
         return [r4(1.0 + land - land * smooth(q / 7.0)) if q < 8 else r4(1.0 + push_ * (q - 8) / max(n - 9, 1)) for q in range(n)]
@@ -2029,6 +2149,12 @@ def build(script, sup, style_id, direction=None):
             P.word([f0, f1], small, vs, 0.5, [r4(float(y) + 0.075) for y in (ys if isinstance(ys, list) else [ys] * n)], ink_, 1.0, align="c", z=3,
                    blur=bl, role="big", stroke=dict(w=2.0, c="#0B0A09"), s=sc_)
         cards_shown.append((str(rec.get("text") or "").upper() if st["upper"] else str(rec.get("text") or "")))
+        # the card's type on the shared type timeline: its frames, its words and the box they fill at full scale
+        wide = max((P.R.width(vk, q) for q in text_lines), default=0.0) / W * (1.0 + DESIGNED_SCALE)
+        half = ((len(text_lines) - 1) / 2) * line_step + float(P.voices[vk]["px"]) * (1.0 + DESIGNED_SCALE) / H
+        card_type.append((f0, f1, " ".join([text] + ([small] if rec.get("small") and rec.get("big") else [])),
+                          [r4(0.5 - wide / 2), r4(0.44 - half), r4(0.5 + wide / 2), r4(0.44 + half * 0.5 + (0.09 if rec.get("small") and rec.get("big") else 0.0))]))
+        grounds.append((f0, f1, _hex_tone(c0)))
         P.pictures.append(dict(f=[f0, f1], kind="designed", name=rec.get("role"), path=rec["path"], shows=str(rec.get("text") or text), mode="designed",
                                finish=fin[seg_at(f0)], use=1, source=None, time_range=None, src=None, tier=rec.get("tier") or "designed",
                                line=rec.get("pick_line", seg_at(f0)), spoken_line=seg_at(f0), fallback=rec.get("fallback"), burst=rec.get("burst")))
@@ -2223,12 +2349,18 @@ def build(script, sup, style_id, direction=None):
                             roles_skip=("name",) if fit_on else (), anchored_only=fit_on, cap_floor_px=CAP_FLOOR_PX if fit_on else None) \
         if d.get("display", True) else []
     if fit_on and d.get("display", True):
-        supers = name_supers(P, clock, sc, timeline, st, pal, f_voice_end, shown, dropped)
+        supers = name_supers(P, clock, sc, timeline, st, pal, f_voice_end, shown, dropped, cards=card_type)
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=f_voice_end + 8, hold=[(a - 1, b) for a, b, _ in shown], z=5,
                             script=sc if fit_on else None, ink_lag_s=CAPTION_LAG_S if fit_on else None)
     # Bright archive drawings and white transition flashes need the caption
     # seat protected after the flashes, just before the screen-plane type.
-    caption_pool(P, f_end, cap_y, float(d.get("pool", 0.70)), holes=white if fit_on else ())
+    def tone_at(f):
+        # the brightest picture under the caption at frame f (a layered print counts); unknown counts as bright
+        ts = [t for a, b, t in grounds if a <= f < b]
+        if not ts or any(t is None for t in ts):
+            return None
+        return max(ts)
+    caption_pool(P, f_end, cap_y, float(d.get("pool", 0.70)), holes=white if fit_on else (), tone_at=tone_at)
     pay = next((i for i, s in enumerate(script["segments"]) if s.get("beat") == "payoff"), None)
     turn_f = min((c for c in cut_pts if c >= seg_f[pay] - 4), default=seg_f[pay]) if pay is not None else None
     film = dict(grain=float(st["grain"]), vignette=float(st["vignette"]), over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0))
@@ -2273,8 +2405,8 @@ def build(script, sup, style_id, direction=None):
                                            supers, dropped, turn_ramp, white, flashes, f_voice_end) if fit_on else {}),
                            **(dict(intrinsic_grey_share=intrinsic, caption_lag_f=list(getattr(P, "cap_lags", []) or []),
                                    **motion_of(l1, P.pictures)) if fit_on else {})},
-                 display_dropped=[x for x in dropped if not (x["why"] == "printed elsewhere" and x["text"] in cards_shown)] if fit_on else None,
-                 display_as_card=[x["text"] for x in dropped if x["why"] == "printed elsewhere" and x["text"] in cards_shown] if fit_on else None,
+                 display_dropped=[x for x in dropped if not _as_card(x, cards_shown)] if fit_on else None,
+                 display_as_card=[x["text"] for x in dropped if _as_card(x, cards_shown)] if fit_on else None,
                  sound_design={k: v for k, v in (l1.get("sound_design") or {}).items() if k != "dropped"},
                  look=[f for f in look_f if 0 <= f < f_end])
     return l1, beats

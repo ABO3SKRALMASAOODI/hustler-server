@@ -384,7 +384,8 @@ def test_joints_open_their_hole_at_the_last_phrase_and_swell_into_type_pages():
     js = W3.joints_of(sc, pack, beats)
     holes = [j for j in js if j["kind"] in ("turn", "close")]
     assert all(0.8 - 1e-6 <= j["next_first_word_t"] - j["last_word_t"] <= 2.3 + 1e-6 for j in holes)
-    assert next(j for j in js if j["kind"] == "close")["bed_db"] >= 20
+    # the close keeps the bed at the references' depth (FLOW.json last_line step -0.49 dB): never a 20 dB dry close
+    assert 0 < next(j for j in js if j["kind"] == "close")["bed_db"] <= 4
     # round 3: a swell rises only in a narrator gap, never into a hole's re-entry or the dry close
     assert all(not any(0 <= h["next_first_word_t"] - j["t"] < 1.0 for h in holes) for j in js if j["kind"] == "swell")
 
@@ -408,6 +409,28 @@ def test_sound_measures_read_drops_and_the_bed_from_two_mixes(tmp_path):
     m = W3.sound_measures(paths[1], paths[0], FIT._ffmpeg(), dict(sound=[]), [dict(next_first_word_t=5.95)])
     assert m["drops"]["count"] == 1 and abs(m["drops"]["list"][0]["t"] - 5.45) <= 0.15 and m["drops"]["reentry_on_word"], m
     assert 0.5 <= m["music_runtime_share"] <= 1.0
+
+
+def test_sound_measures_do_not_count_voice_left_in_the_bed_or_the_end_card(monkeypatch):
+    """C7 (19 Nov): under a low close the fixed 0.845 voice gain left the narrator's words in the 'bed', so each gap
+    between words read as a drop, and the music-free end card pulled the music share under the bar. The bed is now
+    the residual at each frame's least-squares gain, over the music's span."""
+    import numpy as np
+    import wf3 as W3
+    sr = 16000
+    t = np.arange(int(sr * 30)) / sr
+    rng = np.random.default_rng(3)
+    talk = (t < 24.0) & ((t % 0.5) < 0.32)                             # words of 0.32 s, gaps of 0.18 s, then 6 s of end card
+    voice = 0.3 * np.sin(2 * np.pi * 180 * t) * talk
+    bed = 0.03 * rng.standard_normal(len(t)) * (t < 25.0)              # the bed, level to the last word and its ring, none on the card
+    bed[(t >= 12.0) & (t < 12.8)] *= 0.02                               # one designed drop at a joint
+    mixed = 0.7 * voice + bed                                          # the mix's voice gain is not 0.845
+    arrays = {"music": mixed.astype(np.float32), "clean": voice.astype(np.float32)}
+    monkeypatch.setattr(W3, "_audio", lambda path, ffmpeg, sr=16000: arrays[path])
+    m = W3.sound_measures("music", "clean", "ffmpeg", dict(sound=[]), [dict(next_first_word_t=12.8)])
+    assert m["drops"]["count"] == 1 and abs(m["drops"]["list"][0]["t"] - 12.0) <= 0.15, m
+    assert m["music_runtime_share"] >= 0.95 and m["music_span_s"][1] <= 25.5, m
+    assert W3.MUSIC_SHARE[0] <= m["music_runtime_share"] <= 1.0
 
 
 # ----------------------------------------------------------------- round 3

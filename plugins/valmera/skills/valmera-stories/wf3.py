@@ -31,6 +31,7 @@ import film as F  # noqa: E402
 import fit as FIT  # noqa: E402
 import pictures as PX  # noqa: E402
 import reel as R  # noqa: E402
+import timing  # noqa: E402
 import writer  # noqa: E402
 import delivered as DL  # noqa: E402
 
@@ -228,6 +229,7 @@ def script(ctx, ideas_out):
     sc, rep, bank = got["script"], got["verify"], got["bank"]
     sc, rep = for_the_ear(ctx, sc, rep, spend)
     sc, rep = final_gate(ctx, sc, rep, spend)          # the last text gate: the narration's words are frozen after it
+    sc, rep = timed(ctx, sc, rep, spend)               # the hook's lead and the close's length, measured on the read itself
     frozen = [s_.get("say") for s_ in sc["segments"]]
     ann = None
     if card["id"] in R.STYLES:
@@ -506,16 +508,124 @@ def for_the_ear(ctx, sc, rep, spend):
     return sc2, (dict(rep2, settle=rep["settle"]) if rep.get("settle") else rep2)
 
 
-def final_gate(ctx, sc, rep, spend, final=None):
+def narrate_script(ctx, sc, out):
+    """The stories read of this script (voice.py: Phonon Easton) into `out` (narration.wav, words.json); a folder whose
+    read is of other words is cleared first, so a read is only ever reused for its own script."""
+    import shutil
+    band = writer.FORMS[FORM]["band"]
+    ns = writer.narration_script(sc, band)
+    sp = os.path.join(out, "narration_script.json")
+    if os.path.exists(os.path.join(out, "words.json")) and os.path.exists(sp):     # (a given narration carries no script)
+        try:
+            old = json.load(open(sp))
+        except (OSError, ValueError):
+            old = {}
+        if [x.get("text") for x in old.get("segments") or []] != [x["text"] for x in ns["segments"]]:
+            shutil.rmtree(out, ignore_errors=True)
+    env = dict(os.environ, TMPDIR=ctx.tmp)
+    return PX.narrate(ns, out, band=band, label=f"wf3-narrate-{ctx.run_id}", env=env, reader=os.path.join(HERE, "voice.py"))
+
+
+def _words_of(sc):
+    """The words a read speaks: each segment's line, in order."""
+    return [str(s_.get("say") or "") for s_ in sc.get("segments") or []]
+
+
+def timed(ctx, sc, rep, spend, narrate=None, rewrite=None, final=None):
+    """(script, verify report): the hook's collision and the close's length measured on the narration's own word times
+    (timing.measure: the judge's 3.7 s to the hook's landing word, a close of at most 5 s). A beat over its budget goes
+    back to the writer with the measured seconds (timing.rewrite, from the same verified facts), the script is judged on
+    its quotes again (final_gate, its report in script_timing_final<ask>.json) and read again, up to timing.TIMING_ROUNDS
+    reads; the read nearest the budgets is kept, and its narration is the one supply uses (supply/narration). Only words
+    that changed are read again: a rewrite the final pass cannot stand, or one that changes no word, keeps the last read
+    and its measure and goes back to the writer with the reason (up to timing.TIMING_ASKS asks). script_final.json is
+    written last from the kept script and its own final report. --args '{"timing": false}' or a given narration skips it."""
+    if ctx.args.get("timing") is False or ctx.args.get("narration"):
+        return sc, rep
+    import shutil
+    asks = 0
+    narrate = narrate or (lambda sc_, out: narrate_script(ctx, sc_, out))
+    rewrite = rewrite or (lambda sc_, m, notes: timing.rewrite(sc_, m, notes=notes, log=ctx.log))
+    final = final or (lambda sc_, rep_: final_gate(ctx, sc_, rep_, spend, record=f"script_timing_final{asks}.json"))
+    os.makedirs(ctx.supply, exist_ok=True)
+    rounds, tries, best, notes, m = [], [], None, None, None
+    cur, cur_rep, cur_rec = sc, rep, "script_final.json"
+    fresh = True                                       # cur's words have not been read yet
+    while True:
+        if fresh:
+            k = len(rounds)
+            out = os.path.join(ctx.supply, f"narration_t{k}")
+            try:
+                nar = narrate(cur, out)
+                m = timing.measure(nar["words"], cur)
+            except Exception as e:  # noqa: BLE001 - a read that failed is read again by supply itself
+                ctx.log(f"timing: read {k} failed: {e!r}"[:300])
+                break
+            fresh = False
+            rounds.append(dict(round=k, ask=asks, hook_land_s=m.get("hook_land_s"), hook_word=m.get("hook_word"),
+                               close_s=m.get("close_s"), wps=m.get("wps"), over=m.get("over"), overage_s=timing.overage(m),
+                               hook=cur["segments"][0].get("say"), close=cur["segments"][-1].get("say")))
+            ctx.log(f"timing {k}: hook lands at {m.get('hook_land_s')} s on {m.get('hook_word')!r}, close {m.get('close_s')} s, "
+                    f"over by {timing.overage(m)} s")
+            if best is None or timing.overage(m) <= best[0]:
+                best = (timing.overage(m), k, cur, cur_rep, out, cur_rec)
+        if not m.get("over") or len(rounds) >= timing.TIMING_ROUNDS or asks >= timing.TIMING_ASKS:
+            break
+        asks += 1
+        new, uses, changed = rewrite(cur, m, notes)    # the last read's measure stands until the words change
+        spend += [dict(stage="timing", **u) for u in uses if u]
+        if not changed or _words_of(new) == _words_of(cur):
+            notes = "your last answer changed none of the words of the beats asked for"
+            tries.append(dict(ask=asks, read=False, why="no word changed"))
+            continue
+        try:
+            new, new_rep = final(new, cur_rep)
+        except Exception as e:  # noqa: BLE001 - the rewrite does not stand on its quotes: the script it came from stays
+            notes = f"the fact check could not stand your rewrite: {str(e)[:400]}"
+            ctx.log(f"timing: {notes}"[:300])
+            tries.append(dict(ask=asks, read=False, why=notes[:300]))
+            continue
+        if _words_of(new) == _words_of(cur):           # the fact check restored the words that were read
+            notes = "the fact check put back the words you rewrote; land the beat inside its quotes"
+            tries.append(dict(ask=asks, read=False, why="the fact check restored the read words"))
+            continue
+        tries.append(dict(ask=asks, read=True))
+        cur, cur_rep, cur_rec, notes, fresh = new, new_rep, f"script_timing_final{asks}.json", None, True
+    if best is None:
+        return sc, rep
+    _, k, sc2, rep2, out, rec = best
+    final_dir = os.path.join(ctx.supply, "narration")
+    if os.path.isdir(out):
+        shutil.rmtree(final_dir, ignore_errors=True)
+        os.replace(out, final_dir)
+    for j in range(len(rounds)):
+        if os.path.join(ctx.supply, f"narration_t{j}") != out:
+            shutil.rmtree(os.path.join(ctx.supply, f"narration_t{j}"), ignore_errors=True)
+    sc2 = dict(sc2, timing=dict(kept=k, rounds=rounds, asks=tries, budgets=dict(hook_land_s=timing.HOOK_LAND_S, close_s=timing.CLOSE_S)))
+    json.dump(dict(script=sc2, report=dict(kept=k, rounds=rounds, asks=tries)), open(os.path.join(ctx.run_dir, "script_timing.json"), "w"),
+              ensure_ascii=False, indent=1)
+    # the last text gate's record is the delivered script's: the kept read's script with the final report it passed on
+    try:
+        fr = json.load(open(os.path.join(ctx.run_dir, rec))).get("report")
+    except (OSError, ValueError):
+        fr = None
+    if fr is None:
+        fr = dict((rep2.get("settle") or {}).get("final") or {}, verify={k_: v for k_, v in rep2.items() if k_ != "settle"})
+    json.dump(dict(script=sc2, report=fr, record=rec), open(os.path.join(ctx.run_dir, "script_final.json"), "w"),
+              ensure_ascii=False, indent=1)
+    return sc2, rep2
+
+
+def final_gate(ctx, sc, rep, spend, final=None, record="script_final.json"):
     """(script, verify report): the last text gate before the script is frozen (writer.final_support). Every line,
     after the ear's rewrite, is judged against the verified quotes it cites in one batched call; an unsupported line is
     rewritten on its quotes in the ear's style (ear.KEEP_STYLE) and judged again, at most twice, else dropped; a core
     line is restated or the stage fails; a core line whose rewrite lost its claim or tension is rewritten once more.
-    The report is script_final.json."""
+    The report is `record` in the run folder (script_final.json; timed's rewrites write script_timing_final<ask>.json)."""
     final = final or (lambda sc_: writer.final_support(sc_, log=ctx.log, style=ear.KEEP_STYLE))
     sc2, fr, more = final(sc)
     spend += [dict(stage="final-support", **u) for u in more if u]
-    json.dump(dict(script=sc2, report=fr), open(os.path.join(ctx.run_dir, "script_final.json"), "w"), ensure_ascii=False, indent=1)
+    json.dump(dict(script=sc2, report=fr), open(os.path.join(ctx.run_dir, record), "w"), ensure_ascii=False, indent=1)
     if not fr.get("ok"):
         raise RuntimeError("the final support pass does not stand: " + json.dumps(
             {k: fr.get(k) for k in ("why", "core_unsupported", "support_dropped")}, ensure_ascii=False)[:700])
@@ -776,13 +886,11 @@ def supply(ctx, script):
     if os.path.exists(pk):
         return json.load(open(pk))["record"]
     spend = []
-    band = writer.FORMS[FORM]["band"]
     env = dict(os.environ, TMPDIR=ctx.tmp)
     given_narration(ctx, sc, os.path.join(sup_dir, "narration"))
     # the stories read (voice.py): Phonon Easton, whole sentences a generation, takes chosen for range and restarts,
     # tight joins, focus words forward, a loudness range like the references'
-    nar = PX.narrate(writer.narration_script(sc, band), os.path.join(sup_dir, "narration"), band=band, label=f"wf3-narrate-{ctx.run_id}", env=env,
-                     reader=os.path.join(HERE, "voice.py"))
+    nar = narrate_script(ctx, sc, os.path.join(sup_dir, "narration"))     # the timed read (timed()) when it is this script's
     ctx.log(f"narration {nar['duration']} s, gate {nar['gate']}")
     pack = dict(sid=ctx.sid, words=nar["words"], narration=nar["wav"], ffmpeg=PX.FF, sounds=PX.sound_facts(), pictures={}, credits=[],
                 work=os.path.join(sup_dir, "finish"))
@@ -1568,7 +1676,11 @@ def drop_offenders(ctx, l1, beats, taste):
 
 JOINT_HOLE_DB = 22.0      # a joint's hole and a short real voice's dip (the judge's drops: 10-24 dB)
 VOICE_LONG_S, VOICE_LONG_DB = 2.3, 12.0     # a real voice longer than this keeps the bed about 12 dB under it, not out
-CLOSE_BED_DB = 20.0       # a dry close: the bed 20 dB down from the close's first word
+# The close keeps the bed at the references' depth. Measured on the judge's stems (lanes/MUSIC2/refs/FLOW.json, all28,
+# turn "last_line", n 12): the music level 0.2-2.2 s into the last line against 3-1 s before it steps -0.49 dB at the
+# median (-3.92 at the lower quartile). A 20 dB "dry close" was a hole of 14 s the judge never makes (round 1, 19 Nov:
+# 13 of the film's 16 drops, music under 80% of the runtime). music.py reads 0 as its own default, so it is never 0.
+CLOSE_BED_DB = 0.5
 SWELL_DB, SWELL_RISE_S = 10.0, 2.5
 SWELLS_MAX = 4
 HOLES_MAX = 3             # the judge's drops a reel: one to three
@@ -1912,9 +2024,9 @@ def stories_gates(ctx, sc, pack, build, knobs, l1, beats, taste, script_rec=None
     return l1, beats, taste
 
 
-DENSITY_SYSTEM = """You are the picture editor of a narrated vertical story film cut like the best documentary reels. The script is final; you never change a word. The film needs more large display type: a key word, a name or a short chapter title set big over the pictures on about one shot in six.
+DENSITY_SYSTEM = """You are the picture editor of a narrated vertical story film cut like the best documentary reels. The script is final; you never change a word. The film needs more large display type set big over the pictures on about one shot in six, and that weight goes to the words a viewer holds on to: the key word of a line and the names of the people and things it is about.
 
-For the segments you are given (each with its words numbered from 0 and the display items it already has), add up to two display items each, only where the words carry them: {"i": segment, "text": exactly the spoken word or words as printed (a key word, a person's name, a two-to-four-word chapter title on a segment that opens a section), "role": "key"|"name"|"chapter", "word_i": the index of the spoken word it lands on}. Never a number or a figure. Never repeat an item the segment already has.
+For the segments you are given (each with its words numbered from 0, its role in the story and the display items it already has), add up to two display items each, only where the words carry them: {"i": segment, "text": exactly the spoken word or words as printed (a key word or a name), "role": "key"|"name"|"chapter", "word_i": the index of the spoken word it lands on}. Never a number or a figure. Never repeat an item the segment already has. A chapter title is rare: it goes only where the story truly changes subject, never on a turn, a low point or a payoff for being one, and a film of about a minute and a half needs none, at most one in the whole film; when a segment already sits under a chapter or the film already has one, add key words and names instead. A chapter title, when there is one, is the segment's own spoken words or the name of the thing it turns on. Each segment's role in the story is the editor's private note on its structure and never becomes words on the screen.
 
 Answer with one JSON object only: {"items": [...]}"""
 
@@ -1943,9 +2055,11 @@ def density_repair(sc, lines, ask=None, verify_fn=None):
     for i in lines:
         s_ = sc["segments"][i]
         ws = str(s_.get("say") or "").split()
-        rows.append(f"{i}. beat={s_.get('beat')} has={json.dumps([x.get('text') for x in s_.get('show') or [] if isinstance(x, dict)], ensure_ascii=False)}\n   words: "
+        rows.append(f"{i}. role in the story: {writer.beat_prose(s_.get('beat'))}; has={json.dumps([x.get('text') for x in s_.get('show') or [] if isinstance(x, dict)], ensure_ascii=False)}\n   words: "
                     + " ".join(f"{j}:{w}" for j, w in enumerate(ws)))
-    text, use = ask(DENSITY_SYSTEM, "# Segments\n" + "\n".join(rows))
+    chapters = [x.get("text") for s_ in sc["segments"] for x in s_.get("show") or [] if isinstance(x, dict) and x.get("role") == "chapter"]
+    text, use = ask(DENSITY_SYSTEM, "# The film's chapter titles so far\n" + json.dumps(chapters, ensure_ascii=False)
+                    + "\n\n# Segments\n" + "\n".join(rows))
     try:
         got = writer.json_block(text).get("items") or []
     except ValueError:
@@ -1963,7 +2077,7 @@ def density_repair(sc, lines, ask=None, verify_fn=None):
                 t_ in [str(y.get("text")) for y in seg.get("show") or [] if isinstance(y, dict)] or len(seg.get("show") or []) >= 3:
             continue
         trial = json.loads(json.dumps(out))
-        trial["segments"][x["i"]].setdefault("show", []).append(dict(text=t_, role=x["role"], word_i=wi))
+        trial["segments"][x["i"]].setdefault("show", []).append(dict(text=t_, role=x["role"], word_i=wi, **{"from": "density"}))
         if verify_fn(trial).get("ok"):
             out = trial
             added.append(dict(i=x["i"], text=t_, role=x["role"]))
@@ -2069,13 +2183,24 @@ def caption_contrast(film, l1, ffmpeg):
     import numpy as np
     caps = [i for i in l1["items"] if i["k"] == "word" and i["v"] in ("cap", "capd") and i["t"].strip() not in (".",)]
     bad, rows = 0, 0
+    try:
+        Rl = F.Ruler(l1["voices"])
+    except Exception:  # noqa: BLE001 - no font metrics: the seat's middle band, as before
+        Rl = None
     for it in caps[::2]:
         f = (it["f"][0] + it["f"][1]) // 2
         r = subprocess.run([ffmpeg, "-v", "error", "-ss", f"{(f + 0.5) / F.FPS:.3f}", "-i", film, "-frames:v", "1", "-vf", "scale=270:480",
                             "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True)
         g = np.frombuffer(r.stdout, np.uint8)[:270 * 480].reshape(480, 270) / 255.0
         y = float(it["y"][-1] if isinstance(it["y"], list) else it["y"])
-        band = g[max(int((y - 0.045) * 480), 0):int((y + 0.012) * 480), 54:216]
+        # under the word itself (its own box: the pool is laid on the inked words, reel.caption_pool), else the seat's middle
+        try:
+            x0 = float(it["x"][-1] if isinstance(it["x"], list) else it["x"])
+            x1 = x0 + Rl.width(it["v"], it["t"]) / F.W
+            c0, c1 = max(int(x0 * 270), 0), min(max(int(x1 * 270), int(x0 * 270) + 2), 270)
+        except Exception:  # noqa: BLE001
+            c0, c1 = 54, 216
+        band = g[max(int((y - 0.045) * 480), 0):int((y + 0.012) * 480), c0:c1]
         if band.size == 0:
             continue
         med = float(np.median(band))
@@ -2319,7 +2444,8 @@ VOID_MAX = 0.2                   # near-black share on print frames
 DISPLAY_SHARE = (0.15, 0.25)     # shots with display type over them
 CAP_MIN_PX = 108                 # a figure's cap height
 CAPTION_LAG = (0.11, 0.20)       # caption ink after the voice, median seconds
-MUSIC_SHARE = (0.81, 0.95)       # the bed within 10 dB of its speaking-time median
+MUSIC_SHARE = (0.81, 1.0)        # the bed within 10 dB of its speaking-time median, over the music's span (the judge's stems:
+                                 # music under 100% of all 28 reels, FLOW.json all28.music_share; the 1-3 drops are DROPS' bar)
 DROPS = (1, 3)
 
 
@@ -2494,8 +2620,25 @@ def _audio(path, ffmpeg, sr=16000):
     return np.frombuffer(out, np.float32)
 
 
+MUSIC_RING_S = 1.2          # the music's span runs this long past the last word (the judge: the last word 0.8-1.2 s before the end)
+
+
+def bed_frames(a, b, hop):
+    """The bed's energy in each frame of `hop` samples: the film with music (a) less the voice-and-sound mix (b) at the
+    gain that best explains this frame (least squares, 0-2), so no voice is left in it whatever the mix's gain or limiter
+    did to the voice there. Returns (bed energy per frame, the voice mix's energy per frame)."""
+    import numpy as np
+    k = min(len(a), len(b)) // hop
+    A, B = a[:k * hop].reshape(k, hop).astype(np.float64), b[:k * hop].reshape(k, hop).astype(np.float64)
+    ab, bb, aa = (A * B).sum(axis=1), (B * B).sum(axis=1), (A * A).sum(axis=1)
+    g = np.clip(np.where(bb > 1e-12, ab / np.maximum(bb, 1e-12), 0.0), 0.0, 2.0)
+    res = aa - 2 * g * ab + g * g * bb
+    return np.maximum(res, 0.0) / hop, bb / hop
+
+
 def sound_measures(music, clean, ffmpeg, l1, joints=(), sr=16000):
-    """The bed as the rater estimates it (the film with music less 0.845 x the film without), in 100 ms frames:
+    """The bed (the film with music less the film without, at each 100 ms frame's least-squares gain: bed_frames) over the
+    music's span (the first word to MUSIC_RING_S past the last; the end card carries no music by design):
     music_runtime_share (the bed within 10 dB of its median while the voice speaks), the drops (bed 10 dB and more under
     that median for 0.3-3 s: count, length, depth, and whether one comes back within 0.1 s of a section's first word),
     the swells (rises of 6 dB and more within 3 s), the bed against the voice, and for each placed sound its 50 ms peak
@@ -2505,20 +2648,19 @@ def sound_measures(music, clean, ffmpeg, l1, joints=(), sr=16000):
     n = min(len(a), len(b))
     if n < sr:
         return None
-    bed, voice = a[:n] - 0.845 * b[:n], b[:n]
+    voice = b[:n]
     hop = sr // 10
-
-    def db(x):
-        k = len(x) // hop
-        r = np.sqrt(np.mean(x[:k * hop].reshape(k, hop) ** 2, axis=1) + 1e-12)
-        return 20 * np.log10(r + 1e-9)
-    bd, vd = db(bed), db(voice)
+    be, ve = bed_frames(a[:n], voice, hop)
+    bd, vd = 10 * np.log10(be + 1e-18), 10 * np.log10(ve + 1e-18)
     speak = vd > np.percentile(vd, 60) - 6
     if not speak.any():
         return None
+    on = np.flatnonzero(speak)
+    s0, s1 = int(on[0]), min(int(on[-1]) + 1 + int(round(MUSIC_RING_S * 10)), len(bd))
     med = float(np.median(bd[speak]))
-    share = float(np.mean(np.abs(bd - med) <= 10))
-    low = bd < med - 10
+    share = float(np.mean(np.abs(bd[s0:s1] - med) <= 10))
+    low = np.zeros(len(bd), bool)
+    low[s0:s1] = bd[s0:s1] < med - 10
     drops, k = [], 0
     while k < len(low):
         if low[k]:
@@ -2534,7 +2676,7 @@ def sound_measures(music, clean, ffmpeg, l1, joints=(), sr=16000):
     firsts = [float(j.get("next_first_word_t")) for j in joints or [] if j.get("next_first_word_t") is not None]
     reentry = any(any(abs(d["t"] + d["len_s"] - x) <= 0.1 for x in firsts) for d in drops)
     swells, last = [], -10
-    for k in range(30, len(bd)):
+    for k in range(max(30, s0), s1):
         rise = float(bd[k] - np.min(bd[k - 30:k]))
         if rise >= 6 and k - last > 30:
             swells.append(dict(t=round(k / 10, 2), db=round(rise, 1)))
@@ -2547,9 +2689,10 @@ def sound_measures(music, clean, ffmpeg, l1, joints=(), sr=16000):
         if i1 >= n or j1 - j0 < hop:
             continue
         pk = 20 * np.log10(float(np.max(np.abs(voice[i0:i1]))) + 1e-9)
-        bl = 20 * np.log10(float(np.sqrt(np.mean(bed[j0:j1] ** 2))) + 1e-9)
+        bl = 10 * np.log10(float(np.mean(be[j0 // hop:max(j1 // hop, j0 // hop + 1)])) + 1e-18)
         hits.append(round(pk - bl, 1))
-    return dict(music_runtime_share=round(share, 3), bed_median_db=round(med, 1), bed_under_voice_db=round(float(np.median(vd[speak])) - med, 1),
+    return dict(music_runtime_share=round(share, 3), music_span_s=[round(s0 / 10, 1), round(s1 / 10, 1)],
+                bed_median_db=round(med, 1), bed_under_voice_db=round(float(np.median(vd[speak])) - med, 1),
                 drops=dict(count=len(drops), list=drops[:8], reentry_on_word=reentry), swells=dict(count=len(swells), median_db=round(float(np.median([x["db"] for x in swells])), 1) if swells else None),
                 sfx_over_bed_db=dict(n=len(hits), median=sorted(hits)[len(hits) // 2] if hits else None))
 
@@ -2681,8 +2824,8 @@ def film_checks(ctx, film, sc, pack, music=None, clean=None):
             defects.append(f"display type on {typ['display_shot_share']:.0%} of shots (bar {DISPLAY_SHARE[0]:.0%}-{DISPLAY_SHARE[1]:.0%})")
             type_ok = False
         for f_ in typ["figures"]:
-            if not f_["cap_px"] or f_["cap_px"] < CAP_MIN_PX or f_["held_s"] < 1.5:
-                defects.append(f"figure {f_['text']!r}: cap {f_['cap_px']} px, held {f_['held_s']} s (at least {CAP_MIN_PX} px, 1.5 s)")
+            if not f_["cap_px"] or f_["cap_px"] < CAP_MIN_PX or f_["held_s"] < R.FIGURE_HOLD_S - 0.5 / F.FPS:
+                defects.append(f"figure {f_['text']!r}: cap {f_['cap_px']} px, held {f_['held_s']} s (at least {CAP_MIN_PX} px, {R.FIGURE_HOLD_S} s)")
                 type_ok = False
         lag = typ.get("caption_lag_median_s")
         if lag is not None and not (CAPTION_LAG[0] <= lag <= CAPTION_LAG[1]):

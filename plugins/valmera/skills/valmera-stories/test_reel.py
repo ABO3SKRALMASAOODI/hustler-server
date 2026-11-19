@@ -102,6 +102,19 @@ def test_talking_without_a_file_is_false():
     assert R.talking(dict(path="/nonexistent.mp4")) == (False, 0.0)
 
 
+_CAP_VOICES = {"cap": {"font": "InterDisplay-Bold.ttf", "px": 56, "track": 0}, "dsp": {"font": "InterDisplay-Black.ttf", "px": 170, "track": -2}}
+
+
+def _cap_line(P, words, end, y=0.615, ink="#FFFFFF"):
+    """A caption line inked word by word in place from its left, the way film.caption_build sets one."""
+    text = " ".join(t for _, t in words)
+    x_left = 0.5 - P.R.width("cap", text) / F.W / 2
+    toks = [t for _, t in words]
+    for j, (on, t) in enumerate(words):
+        x = x_left + (P.R.width("cap", " ".join(toks[:j]) + " x") - P.R.width("cap", "x")) / F.W if j else x_left
+        P.word([on, end], t, "cap", x, y, ink, 1.0, note=False, z=5, role="cap")
+
+
 def test_caption_seat_stays_dark_over_white_archive_and_flash(tmp_path):
     import numpy as np
     import pytest
@@ -110,11 +123,12 @@ def test_caption_seat_stays_dark_over_white_archive_and_flash(tmp_path):
     from scene.run import Engine
 
     for transition in (False, True):
-        plan = F.Plan({}, {})
+        plan = F.Plan(dict(_CAP_VOICES), {})
         plan.page([0, 30], "#FFFFFF", "#FFFFFF", grain=0)
         if transition:
             plan.flash([0, 30], mode="fill", c="#FFFFFF", a=0.8, z=8)
-        R.caption_pool(plan, 30, 0.615)
+        _cap_line(plan, [(0, "Then"), (4, "the"), (8, "board")], 30)
+        R.caption_pool(plan, 30, 0.615, tone_at=lambda f: 1.0)
         l1 = plan.done("caption-contrast", 30, 1,
                        dict(grain=0, vignette=0, over_type=False))
         engine = Engine(compile_scene.compile(l1, str(tmp_path), segment=False))
@@ -123,8 +137,11 @@ def test_caption_seat_stays_dark_over_white_archive_and_flash(tmp_path):
         finally:
             engine.close()
         h, w = frame.shape[:2]
-        band = frame[int((0.615 - 0.045) * h):int((0.615 + 0.012) * h),
-                     int(0.2 * w):int(0.8 * w), :3]
+        caps = [it for it in plan.items if it["k"] == "word"]
+        x0 = min(it["x"] for it in caps)
+        x1 = max(it["x"] + plan.R.width("cap", it["t"]) / F.W for it in caps)
+        band = frame[int((0.615 - 0.045) * h):int((0.615 + 0.012) * h),     # under the inked words (wf3.caption_contrast)
+                     int(x0 * w):int(x1 * w), :3]
         assert float(np.median(band)) / 255 < 0.6
 
 
@@ -261,12 +278,92 @@ def test_the_same_take_counts_as_a_repeat():
 
 
 def test_no_pool_item_covers_a_white_frame():
-    P = F.Plan({}, {})
+    P = F.Plan(dict(_CAP_VOICES), {})
+    _cap_line(P, [(0, "Then"), (40, "the"), (60, "board")], 100)
     R.caption_pool(P, 100, 0.615, holes=[(20, 22), (50, 51)])
     pools = [it for it in P.items if it["k"] == "flash" and it["mode"] == "pool"]
     for f in (20, 21, 50):
         assert not any(p["f"][0] <= f < p["f"][1] for p in pools)
     assert sum(p["f"][1] - p["f"][0] for p in pools) == 97
+
+
+def test_the_pool_sits_on_the_inked_words_and_only_where_the_picture_is_bright():
+    """C3 (19 Nov): one film-long pool drew a dark blob to the right of the first inked word and on frames with no
+    caption. The pool now grows with the words inked so far, and is measured off on a dark or mid plate."""
+    P = F.Plan(dict(_CAP_VOICES), {})
+    _cap_line(P, [(10, "told"), (16, "a"), (22, "packed"), (30, "hall")], 50)
+    R.caption_pool(P, 120, 0.615, tone_at=lambda f: 0.9 if f < 30 else 0.30)
+    pools = sorted((it for it in P.items if it["k"] == "flash" and it["mode"] == "pool"), key=lambda it: it["f"][0])
+    words = sorted((it for it in P.items if it["k"] == "word"), key=lambda it: it["f"][0])
+    assert pools and pools[0]["f"][0] == 10 and max(p["f"][1] for p in pools) <= 30     # nothing before the first word, nothing on the dark plate
+    first = pools[0]["rect"]
+    w0 = words[0]
+    centre = (first[0] + first[2]) / 2
+    assert abs(centre - (w0["x"] + P.R.width("cap", "told") / F.W / 2)) < 0.005         # centred on the inked word, not on the line
+    assert pools[-1]["rect"][2] > first[2]                                                # it grows as the words ink
+    P2 = F.Plan(dict(_CAP_VOICES), {})
+    _cap_line(P2, [(10, "told")], 50)
+    R.caption_pool(P2, 120, 0.615, tone_at=lambda f: R._hex_tone(R.plate_colours("#2BB3B3")[0]))
+    assert not [it for it in P2.items if it["k"] == "flash"]                              # the teal plate needs no pool
+
+
+def test_a_name_on_a_card_is_not_set_again_as_a_super(monkeypatch):
+    """C3 (19 Nov): 'STEVE JOBS' was set as a super over a card printing 'STEVE JOBS'. The supers read the cards."""
+    script = dict(segments=[dict(say="Steve Jobs walked out on stage and Bill Gates appeared on the screen.",
+                                 show=[dict(text="Steve Jobs", role="name", word_i=0), dict(text="Bill Gates", role="name", word_i=7)])])
+    words = [dict(w=w, start=round(0.3 + 0.3 * k, 3), end=round(0.5 + 0.3 * k, 3), seg=0) for k, w in enumerate(script["segments"][0]["say"].split())]
+    clock = F.Clock(dict(words=words, duration=5.0), script)
+    P = F.Plan(dict(_CAP_VOICES), {})
+    st = dict(upper=True, dsp=dict(px=170))
+    pal = dict(ink="#FFFFFF", accent="#F2C14E")
+    a = F.Clock.f(clock.seg_words(0)[0]["t0"])
+    gates_f = F.Clock.f(clock.seg_words(0)[7]["t0"])
+    cards = [(a - 5, a + 30, "STEVE JOBS", [0.2, 0.33, 0.8, 0.5]),
+             (gates_f - 3, gates_f + 30, "MICROSOFT", [0.1, 0.18, 0.9, 0.56])]
+    dropped = []
+    out = R.name_supers(P, clock, script, [], st, pal, 400, [], dropped, cards=cards)
+    assert [t for _, _, t in out] == ["BILL GATES"]
+    assert dropped == [dict(seg=0, text="STEVE JOBS", role="name", why="printed elsewhere", card="STEVE JOBS")]
+    sup = next(it for it in P.items if it["k"] == "word" and it["t"] == "BILL GATES")
+    y = sup["y"][-1] if isinstance(sup["y"], list) else sup["y"]
+    assert y == 0.76                                                                      # off the MICROSOFT card's type
+
+
+def test_a_black_caption_ink_gets_no_pool():
+    """Pure black ink has tone 0.0: `(tone or 1.0) > 0.5` read it as white and laid a dark pool under black words."""
+    assert R._ink_light("#FFFFFF") and not R._ink_light("#000000") and R._ink_light("not a colour")
+    P = F.Plan(dict(_CAP_VOICES), {})
+    _cap_line(P, [(10, "told"), (16, "a")], 50, ink="#000000")
+    R.caption_pool(P, 120, 0.615, tone_at=lambda f: 0.9)
+    assert not [it for it in P.items if it["k"] == "flash"]
+    P2 = F.Plan(dict(_CAP_VOICES), {})
+    _cap_line(P2, [(10, "told"), (16, "a")], 50)
+    R.caption_pool(P2, 120, 0.615, tone_at=lambda f: 0.9)
+    assert [it for it in P2.items if it["k"] == "flash"]                                  # white ink on a bright picture still pools
+
+
+def test_a_part_of_a_cards_name_is_recorded_as_set_by_the_card():
+    """name_supers drops 'JOBS' under the 'STEVE JOBS' card (_same_name); the record split must say the card set it,
+    not list it among the dropped items."""
+    script = dict(segments=[dict(say="Jobs walked out on stage.", show=[dict(text="Jobs", role="name", word_i=0)])])
+    words = [dict(w=w, start=round(0.3 + 0.3 * k, 3), end=round(0.5 + 0.3 * k, 3), seg=0) for k, w in enumerate(script["segments"][0]["say"].split())]
+    clock = F.Clock(dict(words=words, duration=3.0), script)
+    P = F.Plan(dict(_CAP_VOICES), {})
+    a = F.Clock.f(clock.seg_words(0)[0]["t0"])
+    dropped = []
+    out = R.name_supers(P, clock, script, [], dict(upper=True, dsp=dict(px=170)), dict(ink="#FFFFFF", accent="#F2C14E"), 400, [],
+                        dropped, cards=[(a - 5, a + 30, "STEVE JOBS", [0.2, 0.33, 0.8, 0.5])])
+    assert out == [] and dropped == [dict(seg=0, text="JOBS", role="name", why="printed elsewhere", card="STEVE JOBS")]
+    cards_shown = ["STEVE JOBS"]
+    other = dict(seg=1, text="APPLE", role="key", why="no room")
+    assert [x["text"] for x in dropped + [other] if R._as_card(x, cards_shown)] == ["JOBS"]
+    assert [x for x in dropped + [other] if not R._as_card(x, cards_shown)] == [other]
+
+
+def test_the_figure_hold_is_one_number_for_the_card_and_the_check():
+    import wf3 as W3
+    assert R.FIGURE_CARD_S == R.FIGURE_HOLD_S >= 1.5
+    assert "R.FIGURE_HOLD_S" in open(W3.__file__).read()
 
 
 def _files(tmp_path, footage, pics):
