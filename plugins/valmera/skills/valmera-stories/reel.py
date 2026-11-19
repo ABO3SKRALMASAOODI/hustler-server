@@ -646,9 +646,11 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
                 REUSE_AFTER_S ago (replay), then a designed card of the line's own display item (each text once in the
                 film), then its played takes again (a repeat, counted as one; the take just shown only on the other
                 framing); a line with nothing new left holds its card or photograph on as one shot, never a copy, and a
-                line with no picture and no card text at all gets one card of the name it is about. Never another
-                line's picture, never the brief's words on card after card. sp.shortfall logs each line's fill frames.
-    Shots are never SHOT_MAX_S or longer. A list line (writer.annotate's "list") may burst through spare pictures, at
+                line with no picture and no new card text gets one card of its own fallback_text (even if shown
+                before), or of the name it is about only when it has no fallback_text. Never another line's picture,
+                never the brief's words on card after card. sp.shortfall logs each line's fill frames.
+    Shots are shorter than SHOT_MAX_S, except on a line with nothing new: its card or photograph held on as one shot may
+    run past SHOT_MAX_S, measured honestly as one long shot (pace_of, long_share) that the pace top-up answers. A list line (writer.annotate's "list") may burst through spare pictures, at
     most BURSTS_MAX a film. rec["tier"] says which rung each shot came from, rec["pick_line"] the line it was picked for."""
     import random
     rng = random.Random(seed)
@@ -1055,9 +1057,13 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
                     pos = end
                     continue
                 else:
-                    # a line with no picture, no card text and no shot of its own yet: one card with the name it is about,
-                    # held for the line (the slots after it hold on with it); the pace top-up asks footage for the line
-                    x = dict(text=str(((segs[line].get("see") or [{}])[0] or {}).get("thing") or ""), role="key")
+                    # a line with no picture and no new card text: one card, held for the line (the slots after it hold
+                    # on with it); the pace top-up asks footage for the line. Its own viewer-facing fallback_text when it
+                    # has one, even if already shown (a workflow's copy, such as marketing's call to action); the name it
+                    # is about only when it has none, since see.thing is a production label in some workflows (marketing's
+                    # THE EXPORT) that proof.py keeps off the screen
+                    fb_ = str(segs[line].get("fallback_text") or "").strip()
+                    x = dict(text=fb_ or str(((segs[line].get("see") or [{}])[0] or {}).get("thing") or ""), role="key")
                     end = pos + min(max(n, int(round(DESIGNED_MIN_S * FPS))), left)
                     if left - (end - pos) < 3:
                         end = b

@@ -707,6 +707,21 @@ def test_fallback_copy_never_prints_a_production_brief():
     assert sp.shortfall  # readable fallback still does not satisfy the picture supply
 
 
+def test_a_repeated_fallback_copy_never_falls_through_to_the_production_label():
+    # marketing: two lines share the call to action and see.thing is a production subject label (THE EXPORT) that
+    # proof.py keeps off the screen; with an empty supply the second line holds its own fallback copy, never the label
+    sc = _fit_script(n=2, words=16)
+    for s in sc['segments']:
+        s['fallback_text'] = 'TRY VALMERA'
+        s['see'] = [dict(thing='THE EXPORT', as_of='x', must_show='x')]
+    clock = F.Clock(_words(sc), sc)
+    sp = R.Supply({}, {}, fit={})
+    tl = R.cut_fit(sc, clock, sp, F.Clock.f(clock.dur) + 15, stress=[])
+    assert tl and {r[4]['pick_line'] for r in tl} == {0, 1}
+    assert all(r[2] == 'designed' and r[4]['text'] == 'TRY VALMERA' for r in tl)
+    assert not any('EXPORT' in str(r[4].get('text')).upper() for r in tl)
+
+
 def test_protected_product_cuts_stay_whole_even_in_window_style(tmp_path):
     sc = _fit_script(n=2, words=12)
     pics, footage = _fit_supply(n_clips=6)

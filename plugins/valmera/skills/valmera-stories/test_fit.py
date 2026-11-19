@@ -851,6 +851,8 @@ def _proxy(monkeypatch, answers):
         def stream(self, method, url, headers=None, json=None):
             status, hdr = answers[len(posts)]
             posts.append(url)
+            if isinstance(status, BaseException):
+                raise status
             if status == 200:
                 return _Stream(200, lines=["data: " + done, "data: [DONE]"])
             return _Stream(status, hdr, b'{"error": {"message": "Claude backend daily call cap reached"}}')
@@ -886,3 +888,22 @@ def test_a_proxy_outage_longer_than_the_waits_raises_to_the_judge(monkeypatch):
     with pytest.raises(RuntimeError, match="openai 503"):
         writer.ask_openai("s", "c", what="picture check", model="gpt-6.1-sol")
     assert len(posts) == len(writer.PROXY_WAITS) + 1 and sleeps == list(writer.PROXY_WAITS)
+
+
+def test_a_read_timeout_on_the_proxy_is_asked_again_at_most_once(monkeypatch):
+    """The proxy may still be running a request that timed out: each further attempt could start another backend call on
+    the shared daily cap and block for another full timeout. It is asked once more (the proxy's cache answers a completed
+    duplicate); a connection that never opened ran nothing and is waited out like a refusal."""
+    import httpx
+    import pytest
+    rt = lambda: httpx.ReadTimeout("read timed out")
+    writer, sleeps, posts = _proxy(monkeypatch, [(rt(), {}), (rt(), {}), (200, {}), (200, {})])
+    with pytest.raises(httpx.ReadTimeout):
+        writer.ask_openai("s", "c", what="picture check", model="gpt-6.1-sol")
+    assert len(posts) == 2 and sleeps == [writer.PROXY_WAITS[0]]
+    writer, sleeps, posts = _proxy(monkeypatch, [(rt(), {}), (200, {})])
+    assert writer.ask_openai("s", "c", what="picture check", model="gpt-6.1-sol")[0] == '{"ok": true}' and len(posts) == 2
+    ce = lambda: httpx.ConnectError("connection refused")
+    writer, sleeps, posts = _proxy(monkeypatch, [(ce(), {}), (httpx.ConnectTimeout("connect"), {}), (rt(), {}), (ce(), {}), (200, {})])
+    assert writer.ask_openai("s", "c", what="picture check", model="gpt-6.1-sol")[0] == '{"ok": true}'
+    assert len(posts) == 5 and sleeps == list(writer.PROXY_WAITS)
