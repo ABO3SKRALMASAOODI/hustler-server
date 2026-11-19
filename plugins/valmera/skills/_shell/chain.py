@@ -494,7 +494,10 @@ def music_version(ctx, rd, sc):
         brief = ""
         try:
             sj = json.load(open(os.path.join(ctx.run_dir, "script.json")))
-            brief = " ".join(str(sj.get(k) or "") for k in ("title", "hook_line", "direction"))[:500]
+            brief = " ".join(str(sj.get(k) or "") for k in ("title", "hook_line", "direction"))[:700]
+            names = [str(n.get("name") if isinstance(n, dict) else n) for n in (sj.get("names") or [])][:6]
+            if names:                                   # who the film is about: the music is chosen for the person too
+                brief = f"About: {', '.join(names)}. {brief}"
         except (OSError, ValueError):
             pass
         bf = os.path.join(ctx.supply, f"{tag}_brief.txt")
