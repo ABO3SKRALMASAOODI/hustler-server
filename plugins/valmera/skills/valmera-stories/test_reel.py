@@ -1027,3 +1027,139 @@ def test_a_card_on_a_device_line_keeps_the_palette_and_the_gate_runs_over_the_re
         r_, g_, b_ = (int(h[k:k + 2], 16) for k in (0, 2, 4))
         assert 0.3 * ((r_ - g_) ** 2 + (0.5 * (r_ + g_) - b_) ** 2) ** 0.5 >= 20          # the palette's plate, not near-black
         assert not any(a < p["f"][1] and p["f"][0] < b for a, b in gates)                 # no gate lines over a blank plate
+
+
+# ----------------------------------------------------------------- 20 Nov: the export is its own shots, each second shown once
+
+def _export_lines(tmp_path):
+    """Two lines: line 0 has one export shot as its own file (export seconds 2-4); line 1 has nothing that fits, so it
+    plays the export through the proof fill, whose ranking for line 1 starts with that same shot."""
+    sc = _fit_script(n=2, words=14)
+    clock = F.Clock(_words(sc), sc)
+    shot = dict(path=str(tmp_path / "export_3.mp4"), seconds=2.0, subject="THE EXPORT", w=1080, h=1920,
+                motion=dict(p90=2.0, curve=[2.0] * 30), origin=dict(key="exp-sha", t0=2.0))
+    body = tmp_path / "export_body.mp4"
+    body.write_bytes(b"x")
+    fill = dict(path=str(body), file="product/export_body.mp4", subject="THE EXPORT", seconds=20.0, w=1080, h=1920, busy=[[14.0, 17.0]],
+                origin=dict(key="exp-sha", t0=0.0), ranked={"1": [[2.0, 4.0, 3], [8.0, 9.5, 5], [11.0, 12.0, 6]]})
+    footage = {0: [shot], 1: []}
+    return sc, clock, footage, fill
+
+
+def test_an_export_second_shown_under_one_file_never_plays_again_under_another(tmp_path):
+    """20 Nov: export_1 (export 2.1-3.1 s) played three times on line 1 and export_body 2.67-3.1 s played it again on
+    line 2; played seconds were keyed by file path. Now a clip cut from a recording carries its origin (sha256 and first
+    second): the proof fill skips the ranked shot export_3 already showed and plays the line's next-ranked shot."""
+    sc, clock, footage, fill = _export_lines(tmp_path)
+    sp = R.Supply({}, footage, fit={footage[0][0]["path"]: {0: [0]}})
+    tl = R.cut_fit(sc, clock, sp, F.Clock.f(clock.dur) + 15, stress=[], proof_fill=[fill])
+    shown = [(r[4]["src"][0] + 2.0, r[4]["src"][1] + 2.0) for r in tl if r[4].get("path") == footage[0][0]["path"]]
+    proof = [r for r in tl if r[4].get("tier") == "proof"]
+    assert shown and proof
+    for r in proof:
+        a, b = r[4]["src"]
+        assert not any(a < y and b > x for x, y in shown)                    # never the seconds export_3 showed
+        assert 8.0 <= a and b <= 12.0                                        # the line's ranked shots, best first
+    assert proof[0][4]["src"][0] == 8.0 and proof[0][4]["take_i"] == 5
+    assert all(r[4]["src"][0] >= 2.0 for r in proof)
+    assert sp.origin_played["exp-sha"]                                       # the recording's seconds, under every file
+
+
+def test_the_proof_fill_follows_the_lines_ranking_not_the_exports_clock(tmp_path):
+    """20 Nov: the fill took room[0], the first unplayed seconds of the whole export, so 'Trash can' and 'Black hole'
+    played over the speaker after the picture had gone. A ranked line plays only its ranked shots; one with none left
+    goes on to its own pictures, never the export's next seconds in time order."""
+    sc, clock, footage, fill = _export_lines(tmp_path)
+    fill["ranked"] = {"1": [[11.0, 12.0, 6]]}
+    sp = R.Supply({}, footage, fit={footage[0][0]["path"]: {0: [0]}})
+    tl = R.cut_fit(sc, clock, sp, F.Clock.f(clock.dur) + 15, stress=[], proof_fill=[fill])
+    proof = [r for r in tl if r[4].get("tier") == "proof"]
+    assert proof and all(11.0 <= r[4]["src"][0] and r[4]["src"][1] <= 12.0 for r in proof)
+    for a, b in zip(tl, tl[1:]):
+        assert a[1] == b[0]
+
+
+def test_a_take_of_a_recording_another_file_showed_whole_is_not_a_new_picture(tmp_path):
+    """Two files of the same export seconds (a shot cut twice): once one has played its take, the other is spent too."""
+    sc = _fit_script(n=1, words=20)
+    clock = F.Clock(_words(sc), sc)
+    a = dict(path="/x/export_0.mp4", seconds=0.5, subject="THE EXPORT", w=1080, h=1920, motion=dict(p90=2.0, curve=[2.0] * 8),
+             origin=dict(key="k", t0=5.0))
+    b = dict(a, path="/x/export_1.mp4")
+    sp = R.Supply({}, {0: [a, b]}, fit={a["path"]: {0: [0]}, b["path"]: {0: [0]}})
+    tl = R.cut_fit(sc, clock, sp, F.Clock.f(clock.dur) + 15, stress=[])
+    firsts = [r for r in tl if r[4].get("tier") in ("line", "other_line")]
+    assert len(firsts) == 1                                                  # the second file is the same picture
+    assert sp.fresh_room(b, (0.0, 0.5)) is None and sp.fresh_room(dict(path="/x/other.mp4"), (0.0, 0.5)) == (0.0, 0.5)
+
+
+def _board_supply(tmp_path, style):
+    sc = _fit_script(n=3, words=14)
+    for s_ in sc["segments"]:
+        s_["phrases"] = [[0, 4], [4, 9], [9, 14]]
+    pics, footage = _fit_supply(n_clips=4)
+    footage = {i: rows for i, rows in footage.items() if i < 3}
+    _files(tmp_path, footage, pics)
+    paths = [c['path'] for rows in footage.values() for c in rows]
+    sup = dict(sid='board', words=_words(sc), narration=str(tmp_path / 'none.wav'), ffmpeg='ffmpeg', pictures={}, sounds={},
+               footage=[dict(i=i, clips=rows) for i, rows in footage.items()],
+               fit={c['path']: [i] for i, rows in footage.items() for c in rows}, fit_verdicts={},
+               talking={p: dict(talking=True, score=1) for p in paths}, work=str(tmp_path / 'fin'))
+    return sc, sup, paths
+
+
+def test_the_export_on_a_narrated_line_is_a_moving_print_on_the_board_under_the_captions(tmp_path):
+    """20 Nov: every recording clip was a sealed static full-frame plate (static_plan_share 1.0) and the film had no
+    captions, board or move of its own. A product clip on a narrated line (board_paths) is now the export whole at its own
+    shape on the style's board, landing with an eased move, ending above the caption seat; the captions stay."""
+    for style in ("pinboard", "reel"):
+        os.makedirs(tmp_path / style)
+        sc, sup, paths = _board_supply(tmp_path / style, style)
+        l1, beats = R.build(sc, sup, style, dict(require_fit=True, board_paths=paths, cap_px=72))
+        keys = {k for k, a in l1['assets'].items() if a.get('path') in paths}
+        prints = [it for it in l1['items'] if it.get('pic') in keys and it['k'] == 'card']
+        assert prints and all(it.get('proof_board') and it['crop'] == [0.0, 0.0, 1.0, 1.0] for it in prints)
+        for it in prints:
+            assert abs(it['w'] * F.W / (it['h'] * F.H) - 1080 / 1920) < 0.01              # whole, at its own shape
+            assert it['y'] + it['h'] / 2 <= R.STYLES[style]['cap_y'] - R.PROOF_CLEAR + 1e-6  # above the caption seat
+            land = max(min(R.PROOF_LAND_F, len(it['s']) - 1), 1)
+            assert it['s'][0] - it['s'][land] >= 0.02 and it['s'][-1] >= it['s'][land]          # lands, then drifts on
+            assert abs(it['x'][0] - it['x'][-1]) > 0.02                                         # slides in from a side
+        grounds = [it for it in l1['items'] if it.get('proof_board') and it['k'] == 'shot']
+        if R.STYLES[style].get('paper'):
+            assert grounds and all(it['pic'] == 'plate' for it in grounds)                  # the dark board
+        else:
+            assert grounds and all(it['pic'] in keys and it.get('blur') for it in grounds)  # its own picture, blurred
+        assert all(p['mode'] == 'proof_print' for p in beats['pictures'] if p['path'] in paths)
+        caps = [it for it in l1['items'] if it['k'] == 'word' and it.get('role') == 'cap']
+        assert any(any(c['f'][0] < it['f'][1] and c['f'][1] > it['f'][0] for c in caps) for it in prints)
+        assert beats['measured']['static_shots'] == 0 or all(s['mode'] != 'proof_print' for s in beats['measured']['static_list'])
+        import scene
+        F._type()
+        ok, why = scene.eligible(l1)
+        assert ok, why
+        t = F.taste_check(l1, beats)
+        assert t['ok'], t['problems']
+
+
+def test_collage_any_line_lets_the_styles_budget_take_unmarked_lines(tmp_path):
+    """20 Nov: with verdicts only writer-marked lines became collages; the marketing writer marked none and the Pinboard
+    film never showed a board. The direction's collage_any_line gives the style's own budget unmarked lines."""
+    sc = _fit_script(n=4, words=24)
+    pics, footage = _fit_supply(n_clips=6)
+    footage = {i: rows for i, rows in footage.items() if i < 4}
+    _files(tmp_path, footage, pics)
+    sup = dict(sid='c', words=_words(sc), narration=str(tmp_path / 'none.wav'), ffmpeg='ffmpeg', pictures={}, sounds={},
+               footage=[dict(i=i, clips=rows) for i, rows in footage.items()],
+               fit={c['path']: [i] for i, rows in footage.items() for c in rows}, fit_verdicts={}, work=str(tmp_path / 'fin'))
+    _, beats = R.build(sc, sup, 'pinboard', dict(require_fit=True))
+    assert beats['measured']['collage_lines'] == []
+    _, beats = R.build(sc, sup, 'pinboard', dict(require_fit=True, collage_any_line=True))
+    assert beats['measured']['collage_lines'] and 0 not in beats['measured']['collage_lines']
+    # a speaking clip on such a line that no print run took keeps the talking rule (a window, never full frame)
+    talking = [c['path'] for i, rows in footage.items() for c in rows][::2]
+    sup = dict(sup, talking={p: dict(talking=True, score=1) for p in talking},
+               fit_verdicts={p: {0: {i: dict(fits_line=True, live_action=True, speaking_on_camera=True, grade=3) for i in range(4)}}
+                             for p in talking})
+    _, beats = R.build(sc, sup, 'pinboard', dict(require_fit=True, collage_any_line=True))
+    assert all(p['mode'] in ('print', 'window') for p in beats['pictures'] if p['path'] in talking)

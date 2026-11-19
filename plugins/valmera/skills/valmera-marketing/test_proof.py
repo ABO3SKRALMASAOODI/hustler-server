@@ -105,7 +105,9 @@ def test_recording_does_not_acquire_new_captions_even_on_short_cuts():
         dict(id="outside", k="word", f=[40, 60], text="VALMERA.IO"),
     ])
     assert P.as_delivered(scene, {"/product/upload.mp4"}) == [(20, 35)]
-    assert {item["id"] for item in scene["items"]} == {"upload", "outside"}
+    words = [it for it in scene["items"] if it["k"] == "word"]
+    assert not any(w["f"][0] < 35 and w["f"][1] > 20 for w in words)          # nothing captions the recording
+    assert sorted(w["f"] for w in words) == [[15, 20], [40, 60]]              # trimmed at its edge, never deleted whole
 
 
 def test_unreadable_product_picture_cannot_pass(monkeypatch):
@@ -191,16 +193,17 @@ def test_the_before_knows_the_exports_own_crop_of_the_upload(tmp_path):
 
 def test_a_line_that_names_the_export_always_shows_it(tmp_path, monkeypatch):
     """16 Nov: the frame choice gave the payoff and call-to-action lines no export frame, and they played as type
-    pages. Every line naming the recording now gets its frames, spread across the export."""
+    pages. Every line naming the recording still gets one of its shots, even one the model ranked nothing for."""
     from types import SimpleNamespace
     monkeypatch.setattr(P, 'still', lambda path, t, w: 'aW1hZ2U=')
-    monkeypatch.setattr(P, 'ask', lambda system, content, **kw: ({'windows': [dict(line=0, candidate=0)]}, {'usd': 0}))
-    sc = dict(receipts={}, script=dict(segments=[dict(say='The result', pictures=['THE EXPORT'], duration_s=1.0),
-                                                dict(say='Bold captions below the face', pictures=['THE EXPORT'], duration_s=2.2),
-                                                dict(say='Try Valmera', pictures=['THE EXPORT'], duration_s=1.2)]))
-    rows, _ = P.product_windows(SimpleNamespace(supply=str(tmp_path)), sc, {'THE EXPORT': ('/fixture.mp4', 12, [(4, 7)])})
+    monkeypatch.setattr(P, 'ask', lambda system, content, **kw: ({'lines': [dict(line=0, shots=[0])]}, {'usd': 0}))
+    sc = dict(receipts={}, script=dict(segments=[dict(say='The result', pictures=['THE EXPORT']),
+                                                dict(say='Bold captions below the face', pictures=['THE EXPORT']),
+                                                dict(say='Try Valmera', pictures=['THE EXPORT'])]))
+    src = {'THE EXPORT': dict(path='/fixture.mp4', dur=12, busy=[(4, 7)], hard=[2.0, 9.5], soft=[])}
+    rows, ranked, shots, _ = P.product_windows(SimpleNamespace(supply=str(tmp_path)), sc, src, {0: 1, 1: 2, 2: 1})
     per = {i: [r for r in rows if r['line'] == i] for i in range(3)}
-    assert len(per[0]) == 1 and len(per[1]) == 2 and len(per[2]) == 1
+    assert all(per[i] for i in range(3)) and ranked == {0: [0]}
     assert len({r['id'] for r in rows}) == len(rows)
     assert all(not (r['end'] > 4 and r['start'] < 7) for r in rows)        # never the after's seconds
 
@@ -270,22 +273,31 @@ def test_photo_plan_preserves_visual_requirement_and_resumes(tmp_path, monkeypat
     assert len(calls) == 1
 
 
-def test_product_windows_use_grounded_candidates_once_and_reserve_cutins(tmp_path, monkeypatch):
+def test_product_windows_rank_the_recordings_own_shots_for_every_line(tmp_path, monkeypatch):
+    """20 Nov: the export was offered as 1 s candidates on a 1 s grid, at most three a line, and each recording line got
+    one slice. Now it is offered as its own shots (cut at its edit list's events), the model ranks them for every line's
+    words, and a line takes its ranked shots up to its demand, each shot to one line; bad ids are ignored."""
     from types import SimpleNamespace
     seen = []
     monkeypatch.setattr(P, 'still', lambda path, t, w: 'aW1hZ2U=')
+
     def response(system, content, **kwargs):
         seen.extend(x.get('text', '') for x in content)
-        return {'windows': [dict(line=0, candidate=0), dict(line=1, candidate=0),
-                            dict(line=1, candidate=1), dict(line=0, candidate=999)]}, {'usd': 0}
+        return {'lines': [dict(line=0, shots=[1, 0, 1, 999]), dict(line=1, shots=[1, 2]), dict(line=2, shots=[3])]}, {'usd': 0}
     monkeypatch.setattr(P, 'ask', response)
-    sc = dict(receipts={}, script=dict(segments=[dict(say='Lamp shown', pictures=['THE EXPORT']),
-                                                dict(say='Chairs shown', pictures=['THE EXPORT'])]))
-    rows, _ = P.product_windows(SimpleNamespace(supply=str(tmp_path)), sc,
-                                {'THE EXPORT': ('/fixture.mp4', 6, [(1, 3)])})
-    assert len(rows) == 2 and len({r['id'] for r in rows}) == 2
-    assert all(not (r['end'] > 1 and r['start'] < 3) for r in rows)
-    assert 'Lamp shown' in seen[0] and any('Candidate 0' in x for x in seen)
+    sc = dict(receipts={}, script=dict(segments=[dict(say='Trash can lands on his words', pictures=['THE EXPORT']),
+                                                dict(say='Black hole too', pictures=['THE EXPORT']),
+                                                dict(say='Editors lose hours', pictures=['A timeline'])]))
+    src = {'THE EXPORT': dict(path='/fixture.mp4', dur=10, busy=[(1, 3)], hard=[4.0, 6.0, 8.3], soft=[3.4, 6.2, 9.0])}
+    rows, ranked, shots, _ = P.product_windows(SimpleNamespace(supply=str(tmp_path)), sc, src, {0: 3, 1: 3, 2: 2})
+    # cut at the hard events; a soft one (a caption group, a picture change) only 0.45 s or more from every edge
+    assert [(c['start'], c['end']) for c in shots] == [(0.0, 1.0), (3.0, 4.0), (4.0, 6.0), (6.0, 8.3), (8.3, 9.0), (9.0, 10.0)]
+    assert ranked == {0: [1, 0], 1: [1, 2], 2: [3]}
+    assert len([r['id'] for r in rows]) == len({r['id'] for r in rows})              # each shot to one line
+    assert {r['id'] for r in rows if r['line'] == 0} == {0, 1} and {r['id'] for r in rows if r['line'] == 1} == {2}
+    assert not [r for r in rows if r['line'] == 2]                                 # a line that does not name the recording takes none
+    assert 'Trash can lands on his words' in seen[0] and any('Shot 4: THE EXPORT 8.30-9.00 s' in x for x in seen)
+    assert P.product_windows(SimpleNamespace(supply=str(tmp_path)), sc, src, {})[1] == ranked     # cached
 
 
 def test_picture_words_do_not_include_an_adjacent_unplayed_claim():
@@ -325,3 +337,213 @@ def test_a_recording_the_product_failed_is_made_again_not_refused(tmp_path, monk
     assert P.product_failed(dict(exports=[], failures=["job_failed"]))
     assert not P.product_failed(dict(exports=["e.mp4"], failures=[]))
     assert not P.product_failed(dict(exports=[], failures=[]))
+
+
+# ----------------------------------------------------------------- 20 Nov round 1: the proof carries the film
+
+def test_shot_list_cuts_at_the_recordings_events_outside_its_busy_seconds():
+    shots = P.shot_list(12.5, hard=[2.0, 2.2, 9.0], soft=[0.3, 5.0, 8.8], busy=[(6.0, 7.0)], min_s=0.45, max_s=3.0)
+    # 2.0-2.2 is too short and joins the shot before it; 0.3 and 8.8 lie too near an edge; 9.0-12.5 is split in two
+    assert shots == [(0.0, 2.2), (2.2, 5.0), (5.0, 6.0), (7.0, 9.0), (9.0, 10.75), (10.75, 12.5)]
+    assert all(b - a >= 0.45 and b - a <= 3.0 for a, b in shots)
+    assert not any(a < 7.0 and b > 6.0 for a, b in shots)                    # never the seconds shown whole elsewhere
+
+
+def test_owed_windows_share_ranked_shots_round_by_round_and_owe_a_shot_to_a_line_ranked_nothing():
+    cands = [dict(id=k, source="THE EXPORT", center=k + 0.5, start=k, end=k + 1.0) for k in range(6)]
+    lines = [dict(i=0, sources=["THE EXPORT"]), dict(i=1, sources=["THE EXPORT"]), dict(i=2, sources=["THE EXPORT"])]
+    out = P.owed_windows(lines, cands, {0: [0, 1, 2, 3], 1: [1, 4]}, set(), {0: 3, 1: 3, 2: 1})
+    by = {i: [o["id"] for o in out if o["line"] == i] for i in range(3)}
+    assert by[1] == [1, 4] and by[0] == [0, 2, 3]                            # the scarcer line first, each shot once
+    assert len(by[2]) == 1 and by[2][0] == 5                                 # ranked nothing: the farthest free shot
+
+
+def test_product_windows_recover_from_an_unanswered_ranking(tmp_path, monkeypatch):
+    """An outage after the retries is recovered: every recording line still gets its own shot, and nothing is cached,
+    so a resumed run asks again."""
+    from types import SimpleNamespace
+    monkeypatch.setattr(P, 'still', lambda path, t, w: 'aW1hZ2U=')
+    monkeypatch.setattr(P, 'ask', lambda *a, **k: (_ for _ in ()).throw(RuntimeError("503 from the proxy")))
+    sc = dict(receipts={}, script=dict(segments=[dict(say='a', pictures=['THE EXPORT']), dict(say='b', pictures=['THE EXPORT'])]))
+    logs = []
+    rows, ranked, shots, spend = P.product_windows(SimpleNamespace(supply=str(tmp_path), log=logs.append), sc,
+                                                   {'THE EXPORT': dict(path='/f.mp4', dur=8, busy=[], hard=[3.0], soft=[])}, {0: 2, 1: 2})
+    assert {r['line'] for r in rows} == {0, 1} and ranked == {} and not spend and logs
+    assert not os.path.exists(tmp_path / 'product_windows.json')
+
+
+def test_board_prints_keep_the_narrations_captions_and_nothing_touches_the_print():
+    """20 Nov: as_delivered deleted all 83 caption words of the narration (every recording span sealed). A recording laid
+    as a print on the board keeps the captions (they sit below it) and gets no flash or finish; a full-frame recording
+    still gets none of the three, its caption words trimmed at its edges."""
+    l1 = dict(assets={"v1": dict(path="/x/export_3.mp4"), "v2": dict(path="/x/after.mp4")},
+              items=[dict(id="pg", k="shot", f=[0, 60], pic="plate", proof_board=True),
+                     dict(id="pr", k="card", f=[0, 60], z=1, pic="v1", proof_board=True, look="story_low"),
+                     dict(id="af", k="shot", f=[60, 120], pic="v2"),
+                     dict(id="w1", k="word", f=[10, 40], role="cap", v="cap", t="Valmera", x=0.3, y=0.67),
+                     dict(id="w2", k="word", f=[50, 80], role="cap", v="cap", t="edits", x=0.5, y=0.67),
+                     dict(id="pool", k="flash", f=[10, 40], mode="pool", a=0.5, rect=[0.1, 0.57, 0.9, 0.75]),
+                     dict(id="neg", k="flash", f=[30, 32], mode="neg"),
+                     dict(id="gt", k="card", f=[0, 150], z=40, pic="finish_gate", op=[0.9] * 150)])
+    spans = P.as_delivered(l1, {"/x/export_3.mp4", "/x/after.mp4"})
+    ids = {it["id"]: it for it in l1["items"]}
+    assert spans == [(60, 120)]                                              # only the full-frame after is sealed
+    assert "w1" in ids and "pool" in ids                                     # the caption on the board stays, with its pool
+    assert "neg" not in ids and "look" not in ids["pr"]                      # no flash or look on the print
+    assert [it["f"] for it in l1["items"] if it["id"].startswith("w2")] == [[50, 60]]
+    assert sorted(it["f"] for it in l1["items"] if it.get("pic") == "finish_gate") == [[120, 150]]
+
+
+def test_product_layout_keeps_full_frame_for_the_voices_and_the_hook_only():
+    paths = [f"/p/{n}" for n in ("after.mp4", "before.mp4", "export_0.mp4", "export_body.mp4", "tease.mp4", "upload_1.mp4")]
+    whole, board = P.product_layout(paths)
+    assert {os.path.basename(p) for p in whole} == {"after.mp4", "before.mp4", "tease.mp4", "upload_1.mp4"}
+    assert {os.path.basename(p) for p in board} == {"export_0.mp4", "export_body.mp4"}
+
+
+def _frames(kind, n=6, w=640, h=480):
+    import numpy as np
+    rng = np.random.default_rng(3)
+    out = []
+    for k in range(n):
+        if kind == "sharp":                                                            # crisp detail everywhere
+            g = rng.integers(0, 255, (h, w)).astype(np.float32)
+        elif kind == "soft":                                                           # a blurred picture that changes
+            g = rng.integers(0, 255, (h, w)).astype(np.float32)
+            for axis in (0, 1):
+                g = np.apply_along_axis(lambda v: np.convolve(v, np.ones(4) / 4, mode="same"), axis, g)
+            g = (g - g.mean()) * 4 + 110
+        else:                                                                          # a dark stage, a speaker moving
+            g = np.full((h, w), 20.0, np.float32)
+            yy, xx = np.mgrid[0:h, 0:w]
+            g[(xx - 100 - 80 * k) ** 2 + (yy - 200) ** 2 < 70 ** 2] = 180.0
+            g[int(0.84 * h):int(0.95 * h), int(0.3 * w):int(0.7 * w)] = 30.0
+            for x in range(int(0.3 * w), int(0.7 * w), 12):                           # bright digits that stay put
+                g[int(0.86 * h):int(0.93 * h), x:x + 5] = 235.0
+        out.append(np.clip(g, 0, 255))
+    return out
+
+
+def test_look_measures_see_an_upscaled_soft_clip_and_a_burned_in_timecode():
+    """20 Nov: the ideas call chose 640x480 VHS with a burned-in timecode over the 1920x1080 source, knowing only words.
+    The look is measured: the crop's upscale, edge acuity at phone size, and a static text band (on the owner's real
+    sources: 1920x1080 acuity 1.04, no band; the 640x480 VHS 0.61 with its timecode found at y 0.875-0.958)."""
+    sd = P.look_measures(_frames("soft"), 640, 480)
+    assert sd["crop_px"] == 270 and sd["upscale"] == 4.0 and sd["overlay"] is None
+    tc = P.look_measures(_frames("timecode"), 640, 480)
+    assert tc["overlay"] and tc["overlay"][1] >= 0.75 and tc["overlay"][0] <= 0.35 and tc["overlay"][2] >= 0.65
+    hd = P.look_measures(_frames("sharp", w=1920, h=1080), 1920, 1080)
+    assert hd["upscale"] == round(1080 / 607.5, 2) and hd["acuity"] > sd["acuity"] * 1.5
+    assert "burned-in band" in P.look_line(tc) and "no burned-in band" in P.look_line(sd)
+
+
+def test_the_ideas_call_sees_each_clips_picture(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(P, "able_cards", lambda ctx: [dict(id="reel", look="l", hook="h")])
+    monkeypatch.setattr(P, "sources", lambda: [dict(id="hd", file="/x/hd.mp4"), dict(id="vhs", file="/x/vhs.mp4")])
+    monkeypatch.setattr(P, "ledger_rows", lambda ctx: [])
+    monkeypatch.setattr(P, "transcript_windows", lambda s, used: [dict(t0=10.0 * k, t1=10.0 * k + 9, text="w") for k in range(9)])
+    monkeypatch.setattr(P, "references", lambda: [])
+    monkeypatch.setattr(P, "ref_pace", lambda: {})
+    monkeypatch.setattr(P, "source_look", lambda path, *a, **k: dict(w=640, h=480, crop_px=270, upscale=4.0, acuity=0.61, overlay=[0.3, 0.8, 0.7, 0.95])
+                        if "vhs" in path else dict(w=1920, h=1080, crop_px=608, upscale=1.78, acuity=1.04, overlay=None))
+    asked = []
+    monkeypatch.setattr(P, "frames", lambda path, times, w=288: asked.append((path, w)) or ["aW1n"] * len(times))
+
+    def ask(system, content, **kw):
+        seen.update(system=system, content=content)
+        return dict(ideas=[dict(title="t", source="hd", asks=["a"], style="reel")]), dict(usd=0)
+    monkeypatch.setattr(P, "ask", ask)
+
+    class Ctx:
+        workflow = "wf2"
+        args = {}
+    P.ideas(Ctx())
+    text = seen["content"][0]["text"]
+    assert "burned-in band" in text and "shown 4.0x at 1080" in text and "edge acuity at phone size 1.04" in text
+    images = [x for x in seen["content"] if x.get("type") == "image"]
+    assert len(images) == 2 * P.IDEA_FRAMES and {p for p, _ in asked} == {"/x/hd.mp4", "/x/vhs.mp4"}
+    assert "look premium" in seen["system"] and "raw footage an editor would get" not in text
+
+
+def test_the_export_check_reads_its_look_at_full_size_as_a_record_not_a_gate(tmp_path, monkeypatch):
+    """The check called a soft 4x VHS upscale 'a clean vertical cut' from 288 px frames. It now reads four 720 px frames
+    and the measured look; the look is recorded and never refuses the recording."""
+    sizes = []
+    monkeypatch.setattr(P, "frames", lambda path, times, w=288: sizes.append(w) or ["aW1n"] * len(times))
+    monkeypatch.setattr(P, "spoken", lambda rec, ex: (None, None))
+    monkeypatch.setattr(P, "endcard_s", lambda: 5.6)
+    monkeypatch.setattr(P, "source_look", lambda path, *a, **k: dict(w=640, h=480, crop_px=270, upscale=4.0, acuity=0.6, overlay=[0.3, 0.8, 0.7, 0.95]))
+    texts = []
+
+    def ask(system, content, **kw):
+        texts.extend(x.get("text", "") for x in content)
+        return dict(elements=[dict(asked="captions", visible=True)], all_visible=True, defects=[], looks="soft, timecode in frame"), {}
+    monkeypatch.setattr(P, "ask", ask)
+    rec = dict(state="done", upload=dict(file="/u.mp4", w=640, h=480, dur=30.0),
+               exports=[dict(tag="final", file="/e.mp4", w=1080, h=1920, dur=30.0)])
+    chk = P.export_check(None, rec, "Add captions", [])
+    assert chk["ok"] and chk["v"] == P.CHECK_V and chk["look_measured"]["export"]["upscale"] == 4.0
+    assert sizes.count(720) == 1 and any("full size" in t for t in texts) and any("burned-in band" in t for t in texts)
+
+
+def test_recording_lines_get_footage_subjects_from_their_own_words(tmp_path, monkeypatch):
+    """20 Nov: the footage search stripped THE EXPORT and searched one line of nine. A line whose only picture is the
+    recording gets subjects a model chose for its words (a named one by name, or a new one with its searches)."""
+    from types import SimpleNamespace
+    sc = dict(segments=[dict(say="Editors lose hours to this", pictures=[]), dict(say="Trash can. Black hole.", pictures=[])],
+              named=[dict(name="Editor at a timeline", **{"is": "thing"}, must_show="An editor at a timeline")])
+    monkeypatch.setattr(P, "ask", lambda *a, **k: (dict(lines=[
+        dict(line=0, subjects=["Editor at a timeline", "Unknown name"]),
+        dict(line=1, subjects=[dict(name="Black hole image", video_searches=["black hole first image"], must_show="the black hole")]),
+        dict(line=7, subjects=["Editor at a timeline"])]), {"usd": 0}))
+    ctx = SimpleNamespace(supply=str(tmp_path), log=lambda m: None)
+    subs, spend = P.footage_subjects(ctx, sc, [0, 1])
+    assert [n["name"] for n in subs[0]] == ["Editor at a timeline"] and subs[1][0]["video_searches"] == ["black hole first image"]
+    P.lend_subjects(sc, subs)
+    assert sc["segments"][0]["pictures"] == ["Editor at a timeline"] and sc["segments"][1]["pictures"] == ["Black hole image"]
+    assert [n["name"] for n in sc["named"]] == ["Editor at a timeline", "Black hole image"]
+    monkeypatch.setattr(P, "ask", lambda *a, **k: (_ for _ in ()).throw(AssertionError("cached")))
+    assert P.footage_subjects(ctx, sc, [0, 1])[0] == subs
+    monkeypatch.setattr(P, "ask", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("503")))
+    assert P.footage_subjects(SimpleNamespace(supply=str(tmp_path / "x"), log=lambda m: None), sc, [0]) == ({}, [])
+
+
+def test_the_narrations_captions_survive_on_the_board_and_stay_off_the_full_frame_recording(tmp_path):
+    """The reel lays the export's shots as prints on the board and the after full frame; as_delivered then keeps the
+    narration's captions over the prints and none over the after (20 Nov: captions_sampled 0)."""
+    from PIL import Image
+    segs = []
+    for i in range(3):
+        segs.append(dict(say=" ".join(f"w{i}x{k}" for k in range(12)), pictures=["THE EXPORT"], beat=["hook", "setup", "payoff"][i],
+                         see=[dict(thing="THE EXPORT", as_of="x", must_show="x")], phrases=[[0, 4], [4, 8], [8, 12]]))
+    sc = dict(title="t", segments=segs)
+    words, t = [], 0.0
+    for i, s_ in enumerate(segs):
+        for w in s_["say"].split():
+            words.append(dict(w=w, start=round(t, 3), end=round(t + 0.25, 3), seg=i))
+            t += 1 / 3.2
+        t += 0.22
+    footage = {}
+    for i in range(3):
+        footage[i] = []
+        for k in range(3):
+            p = str(tmp_path / (("after" if (i, k) == (2, 0) else f"export_{i}{k}") + ".jpg"))
+            Image.new("RGB", (1080, 1920), (90, 100, 110)).save(p)
+            footage[i].append(dict(path=p, seconds=1.6, subject="THE EXPORT", w=1080, h=1920, motion=dict(p90=2.0, curve=[2.0] * 24),
+                                   origin=dict(key="sha", t0=2.0 * (3 * i + k))))
+    paths = [c["path"] for v in footage.values() for c in v]
+    whole = [p for p in paths if os.path.basename(p) == "after.jpg"]          # the stand-in files are stills named by role
+    board = [p for p in paths if p not in whole]
+    sup = dict(sid="m", words=dict(words=words, duration=round(t, 2)), narration=str(tmp_path / "none.wav"), ffmpeg="ffmpeg", pictures={},
+               sounds={}, footage=[dict(i=i, clips=v) for i, v in footage.items()], fit={c["path"]: [i] for i, v in footage.items() for c in v},
+               fit_verdicts={}, work=str(tmp_path / "fin"))
+    l1, beats = P.R.build(sc, sup, "pinboard", dict(require_fit=True, full_frame_paths=whole, board_paths=board, cap_px=72))
+    caps_before = [it for it in l1["items"] if it["k"] == "word" and it.get("role") == "cap"]
+    spans = P.as_delivered(l1, set(paths))
+    caps = [it for it in l1["items"] if it["k"] == "word" and it.get("role") == "cap"]
+    keys = {k for k, a in l1["assets"].items() if a.get("path") in board}
+    on_board = [it["f"] for it in l1["items"] if it.get("pic") in keys and it["k"] == "card"]
+    assert on_board and caps and len(caps) >= len(caps_before) // 2
+    assert any(any(c["f"][0] < b and c["f"][1] > a for c in caps) for a, b in on_board)       # captions under the prints
+    assert all(not (c["f"][0] < s1 and c["f"][1] > s0) for c in caps for s0, s1 in spans)    # none over the full-frame after
