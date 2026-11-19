@@ -85,3 +85,58 @@ def test_the_stories_top_ups_hear_voices_with_the_engines_repair_and_marketing_i
     assert W3.topup_once(ctx, script, {}, [1.0], [0], [], "footage2", {}, dict(x=1), want_voices=True) == 0
     assert W3.topup_once(ctx, script, {}, [1.0], [0], [], "footage3", {}, dict(x=1)) == 0
     assert seen == [("1", True), (None, None)] and "FOOTAGE_VOICE_REPAIR" not in os.environ
+
+
+def test_a_carried_pick_is_asked_again_before_the_splice_in_the_stories_environment(tmp_path, monkeypatch):
+    """The first call's pick met the proxy's daily cap (voices_pending.json): splice_voices asks it again through the
+    footage engine, with the voice repair on and no Anthropic key (story.environment()), and places what it finds."""
+    import wf3 as W3
+    _record(tmp_path, "footage", [])
+    (tmp_path / "footage" / "voices_pending.json").write_text("{}")
+    narr = tmp_path / "narration"
+    narr.mkdir()
+    (narr / "words.json").write_text(json.dumps(dict(duration=80.0, words=[dict(w="a", start=0.0, end=0.5, seg=0)])))
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ANTHROPIC_")}
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append((cmd, kw.get("env") or {}))
+        if "resume" in cmd:
+            assert kw["env"]["FOOTAGE_VOICE_REPAIR"] == "1" and "ANTHROPIC_API_KEY" not in kw["env"]
+            assert kw["env"]["FOOTAGE_KEEP_SOURCES"] == str(tmp_path / "sources")
+            d = cmd[-1]
+            (tmp_path / "footage" / "voices" / "v.wav").write_bytes(b"RIFF")
+            json.dump(dict(voices=[_v(5, "we have to let go", "v.wav", t=(441.24, 449.56))]), open(os.path.join(d, "footage.json"), "w"))
+            os.remove(os.path.join(d, "voices_pending.json"))
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(dict(resumed=True, voices=1, pending=False)), "")
+        if "splice" in cmd:
+            rec = json.load(open(os.path.join(cmd[-1], "footage.json")))
+            placed = [dict(v, start=30.0, end=38.3) for v in rec["voices"]]
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(dict(voices=placed)), "")
+        return subprocess.CompletedProcess(cmd, 0, "levelled", "")
+    monkeypatch.setattr(subprocess, "run", run)
+    pack = dict(credits=[])
+    ctx = SimpleNamespace(supply=str(tmp_path), tmp=str(tmp_path / "tmp"), log=lambda m: None, workflow="wf3", run_id="t")
+    assert W3.splice_voices(ctx, SC, pack, str(narr), env)
+    assert [c[0][1:4] for c in calls][:1] == [["-m", "footage.voice", "resume"]]
+    assert pack["voices"][0]["after"] == 5 and [c["voice"] for c in pack["credits"]] == ["Steve Jobs"]
+
+
+def test_the_score_stage_top_up_cuts_pictures_only_and_credits_no_unplaced_voice(tmp_path, monkeypatch):
+    import wf3 as W3
+    placed = dict(after=5, person="Steve Jobs", source=dict(url="u"), time_range=[441.24, 449.56])
+    pack = dict(words=dict(words=[dict(w="a", start=0.0, end=1.0, seg=0)], duration=1.0), pictures={}, voices=[placed],
+                credits=[dict(page="u", time_range=[441.24, 449.56], voice="Steve Jobs")])
+    (tmp_path / "pack.json").write_text(json.dumps(dict(pack=pack, record={})))
+    seen = []
+
+    def topup(ctx, script, pack_, durs, lines, spend, name, anchors, reel_kw, **kw):
+        seen.append(os.environ.get("FOOTAGE_VOICES"))
+        pack_["credits"] += [dict(page="w", time_range=[1, 9], voice="Steve Jobs"), dict(page="w", time_range=[20, 22], line=1)]
+        return 1
+    monkeypatch.setattr(W3, "topup_once", topup)
+    monkeypatch.delenv("FOOTAGE_VOICES", raising=False)
+    ctx = SimpleNamespace(supply=str(tmp_path))
+    got = W3.topup_from_score(ctx, dict(script=dict(segments=[dict(say="a")])), pack, [0])
+    assert got["clips"] == 1 and seen == ["0"] and "FOOTAGE_VOICES" not in os.environ
+    assert [(c["page"], c.get("voice")) for c in pack["credits"]] == [("u", "Steve Jobs"), ("w", None)]

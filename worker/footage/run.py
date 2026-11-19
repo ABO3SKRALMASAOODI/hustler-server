@@ -177,9 +177,10 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                    source opened through the Wayback Machine is never resolved live: a pick outside what was read of it
                    fails, so reassign_lost replaces it
     voice_repair   real voices are repaired, never refused (voice.find_voices repair: a long choice trimmed on word
-                   edges to the references' band, the person's face anchored on this source's own passed frames, an
-                   unseen speaker kept over the person's own frames, an unanswered pick asked on the next route); None
-                   reads FOOTAGE_VOICE_REPAIR=1 (the stories workflow's footage calls)
+                   edges to the references' band, the person's face anchored on this source's own passed frames, a
+                   speaker not on camera kept over the person's own frames, an unanswered pick carried to a later call
+                   in voices_pending.json, `python -m footage.voice resume <out>`); None reads FOOTAGE_VOICE_REPAIR=1
+                   (the stories workflow's footage calls)
     Environment (any caller): FOOTAGE_VERIFY=0 skips the per-clip verify pass (a caller that gates every take by its own
     per-line verdicts, the stories skill's fit); FOOTAGE_KEEP_SOURCES=<dir> keeps each whole source opened in <dir> with a
     manifest.json of {url, path, rung} rows that fetch.local_source reads (FOOTAGE_LOCAL_SOURCES), so a later call for the
@@ -521,6 +522,7 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                    sources=[{k: s.get(k) for k in ("key", "url", "title", "channel", "where", "duration", "subjects", "why", "rung", "dur_read", "error", "error_stage", "error_type")}
                             | dict(shots=len(s.get("shots") or []), heard=len(s.get("transcript") or [])) for s in sources],
                    **({"voices_tried": voices_tried} if voices_tried is not None else {}),
+                   **({"voices_pending": voice.PENDING} if os.path.exists(os.path.join(out_dir, voice.PENDING)) else {}),
                    counts=dict(lines=len(out_lines), lines_with_footage=sum(1 for r in out_lines if r["clips"]),
                                clips=sum(len(r["clips"]) for r in out_lines), frames_checked=len(pool_frames), frames_passed=len(good),
                                sources_opened=len(live), sources_tried=len(sources)),
@@ -743,7 +745,7 @@ def main():
     ap.add_argument("--source-only",action="store_true",help="use supplied original candidates without repeating platform searches")
     ap.add_argument("--hear-seconds",type=float,default=None,help="source audio seconds to transcribe; zero for visual-only documentary acquisition")
     ap.add_argument("--want-voices", action="store_true", help="look for real voices even when nothing would otherwise be heard")
-    ap.add_argument("--voice-repair", action="store_true", help="real voices trimmed, re-anchored and re-routed instead of refused")
+    ap.add_argument("--voice-repair", action="store_true", help="real voices trimmed, re-anchored and kept, and an unanswered pick carried, instead of refused")
     a = ap.parse_args()
     if a.hear_seconds is not None and a.hear_seconds<0:ap.error("--hear-seconds must be nonnegative")
     hearing={} if a.hear_seconds is None else dict(hear_s=a.hear_seconds)

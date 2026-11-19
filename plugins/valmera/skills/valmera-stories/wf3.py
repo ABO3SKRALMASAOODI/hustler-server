@@ -910,8 +910,8 @@ VOICE_SHARE_MAX = 0.30     # of the narration's seconds (the references reach 22
 def footage_voiced(ctx, *a, repair=True, **kw):
     """chain.footage with the engine's voice repair on (run.find voice_repair, read from FOOTAGE_VOICE_REPAIR=1 in the
     engine's environment): a chosen voice longer than the band is trimmed on word edges, the person's face is anchored on
-    the source's own frames and an unseen speaker is kept, an unanswered pick goes to the next route. The variable is set
-    for this one call and put back."""
+    the source's own frames and a speaker not on camera is kept, an unanswered pick is carried (resume_voice_picks asks
+    it again before the splice). The variable is set for this one call and put back."""
     if not repair:
         return chain.footage(ctx, *a, **kw)
     old = os.environ.get("FOOTAGE_VOICE_REPAIR")
@@ -971,13 +971,59 @@ def voice_choice(ctx, sc, narration_s):
     return out
 
 
+def voice_engine_env(ctx, env):
+    """The footage engine's environment for a call wf3 makes itself (resume_voice_picks), as chain.footage builds it:
+    the worker on the path, the engine's ffmpeg and yt-dlp, the run's kept sources, the voice repair on, and the OpenAI
+    key read from the backend .env into this one process when the environment lacks it (never printed)."""
+    brand = chain.brand
+    e = dict(env, VALMERA_SKILL=getattr(ctx, "workflow", "wf3"), VALMERA_RUN=getattr(ctx, "run_id", ""), TMPDIR=ctx.tmp, FOOTAGE_WORK=ctx.tmp,
+             PYTHONPATH=brand.worker_dir(), PYTHONDONTWRITEBYTECODE="1", FOOTAGE_FFMPEG=brand.FF, FOOTAGE_VOICE_REPAIR="1",
+             PATH=os.path.dirname(brand.FF) + ":" + env.get("PATH", "/usr/bin:/bin"))
+    for k, path, isdir in (("FOOTAGE_YTDLP", getattr(chain, "FOOTAGE_YTDLP", ""), False), ("FOOTAGE_PATH", getattr(chain, "FOOTAGE_DENO", ""), True)):
+        if path and (os.path.isdir(path) if isdir else os.path.exists(path)):
+            e[k] = path
+    e.update(chain.footage_env(ctx, keep_sources=True))
+    ef = getattr(chain, "ENV_FILE", "")
+    if not e.get("OPENAI_API_KEY") and ef and os.path.exists(ef):
+        for line in open(ef):
+            if line.startswith("OPENAI_API_KEY="):
+                e["OPENAI_API_KEY"] = line.split("=", 1)[1].strip().strip('"').strip("'")
+    return e
+
+
+def resume_voice_picks(ctx, env):
+    """Every footage record whose voice pick the provider did not answer (footage voice.carry: voices_pending.json, the
+    sources' scanning copies and transcripts kept) asked again now that all the footage is in and more of the provider's
+    cap has come back (`python -m footage.voice resume <record>`): the voices it finds join that record, as the first
+    call would have written them. Still unanswered, the record stays carried and the film keeps the voices it has.
+    Returns {record: result}."""
+    import subprocess
+    out = {}
+    for name in footage_records(ctx):
+        d = os.path.join(ctx.supply, name)
+        if not os.path.exists(os.path.join(d, "voices_pending.json")):
+            continue
+        try:
+            e = voice_engine_env(ctx, env)
+            r = subprocess.run([chain.PY, "-m", "footage.voice", "resume", d], cwd=e["PYTHONPATH"], env=e, capture_output=True,
+                               text=True, timeout=1800)
+            got = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 and r.stdout.strip() else dict(error=(r.stderr or "")[-300:])
+        except Exception as ex:  # noqa: BLE001 the voices already cut, as before
+            got = dict(error=repr(ex)[:300])
+        out[name] = got
+        ctx.log(f"real voices: carried pick of {name} asked again: {json.dumps(got)[:300]}")
+    return out
+
+
 def splice_voices(ctx, sc, pack, narr_dir, env):
-    """The real voices into the narration in one pass, after all the footage is in: voice_choice's voices copied into
-    <supply>/voices_cut (its footage.json carries them), narrate's splice (realvoice.py) puts each after its line, each
-    is levelled to the narrator, pack["voices"] pins its picture, and the credits name the voices placed (a voice cut
-    but not placed is no longer credited). Returns (words, duration) of the spliced narration, or None."""
+    """The real voices into the narration in one pass, after all the footage is in: a pick the provider did not answer
+    is asked again first (resume_voice_picks), voice_choice's voices are copied into <supply>/voices_cut (its
+    footage.json carries them), narrate's splice (realvoice.py) puts each after its line, each is levelled to the
+    narrator, pack["voices"] pins its picture, and the credits name the voices placed (a voice cut but not placed is no
+    longer credited). Returns (words, duration) of the spliced narration, or None."""
     import shutil
     import subprocess
+    resume_voice_picks(ctx, env)
     try:
         wj = json.load(open(os.path.join(narr_dir, "words_narrator.json" if os.path.exists(os.path.join(narr_dir, "words_narrator.json")) else "words.json")))
         chosen = voice_choice(ctx, sc, wj.get("duration") or max([float(w.get("end") or 0.0) for w in wj.get("words") or []] + [0.0]))
@@ -2088,6 +2134,13 @@ def repeated_keys(beats, pack):
     return list(dict.fromkeys(out))
 
 
+def placed_credits_only(pack):
+    """pack["credits"] with a voice credit kept only when that voice is placed (pack["voices"], by source URL and time
+    range); picture credits as they are."""
+    placed = {((p.get("source") or {}).get("url"), tuple(p.get("time_range") or ())) for p in pack.get("voices") or [] if p}
+    return [c for c in pack.get("credits") or [] if not c.get("voice") or (c.get("page"), tuple(c.get("time_range") or ())) in placed]
+
+
 def topup_from_score(ctx, script_rec, pack, lines):
     """The pace gate's repair: the short lines' footage top-up (topup_once) run from the score stage, the pack saved."""
     words = pack["words"] if isinstance(pack["words"], dict) else json.load(open(pack["words"]))
@@ -2095,8 +2148,19 @@ def topup_from_score(ctx, script_rec, pack, lines):
     anchors = {k: [r["path"] for r in v if r.get("path")] for k, v in (pack.get("pictures") or {}).items()}
     k = 2 + sum(1 for n in os.listdir(ctx.supply) if n.startswith("footage") and os.path.isdir(os.path.join(ctx.supply, n)))
     spend = []
-    added = topup_once(ctx, script_rec, pack, durs, lines, spend, f"footage{k}", anchors,
-                       dict(preserve_source=True, shot_s=REEL_SHOT_S, line_max=REEL_LINE_MAX, per=REEL_PER))
+    # the voices were spliced once (splice_voices) before the score: this pace top-up cuts pictures only, so it spends no
+    # pick on the provider's cap and leaves no voice cut but never placed (FOOTAGE_VOICES=0 for this one call)
+    old = os.environ.get("FOOTAGE_VOICES")
+    os.environ["FOOTAGE_VOICES"] = "0"
+    try:
+        added = topup_once(ctx, script_rec, pack, durs, lines, spend, f"footage{k}", anchors,
+                           dict(preserve_source=True, shot_s=REEL_SHOT_S, line_max=REEL_LINE_MAX, per=REEL_PER))
+    finally:
+        if old is None:
+            os.environ.pop("FOOTAGE_VOICES", None)
+        else:
+            os.environ["FOOTAGE_VOICES"] = old
+    pack["credits"] = placed_credits_only(pack)
     whole = json.load(open(os.path.join(ctx.supply, "pack.json")))
     whole["pack"] = pack
     whole["record"].setdefault("spend", []).extend(spend)

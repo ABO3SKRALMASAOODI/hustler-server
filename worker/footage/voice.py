@@ -44,13 +44,18 @@ PAD_IN, PAD_OUT = 0.06, 0.14
 #           stretch where the person is not matched but plausible (a wide stage, the screen, the crowd, a face near the
 #           threshold) is looked at again on more frames, and when still unseen the voice is kept and plays over the
 #           source's own frames of the person
-#   route   a pick the provider does not answer (a daily cap, a 5xx) is asked again on the next route (ROUTES)
+#   route   a pick the provider does not answer (a daily cap, a 5xx) is an outage, never a verdict: it is asked again on
+#           each route FOOTAGE_VOICE_ROUTES names (none by default: a route the caller's environment cannot reach only
+#           adds waits), and when still unanswered it is carried (carry): its sources' scanning copies and transcripts
+#           are kept beside the record (voices_pending.json) and a later call asks again (resume, `python -m
+#           footage.voice resume <record>`), once more of the cap or a route is there
 REPAIR_MAX_S = 12.0       # the references' cut-ins: Palmer Luckey's opening 11.7 s
 OWN_MAX_S = 25.0          # a line that is the person's own sentence: Musk's own interview ran 25 s
 OWN_SHARE = 0.6           # the line's words found in the person's words: the line is the person's own sentence
 PLAUSIBLE = 0.20          # SFace cosine under MATCH but above this: maybe the person (era, light, resolution)
 MORE_FRAMES = 6           # frames looked at again inside a stretch where the person was not yet seen
-ROUTES = [m.strip() for m in os.environ.get("FOOTAGE_VOICE_ROUTES", "claude-sonnet-5-5").split(",") if m.strip()]
+ROUTES = [m.strip() for m in os.environ.get("FOOTAGE_VOICE_ROUTES", "").split(",") if m.strip()]
+PENDING = "voices_pending.json"   # an unanswered pick carried to a later call (carry, resume)
 SPAN_DEFAULT = "about 2 to 9 seconds spoken"
 SPAN_REPAIR = (f"about 2 to {REPAIR_MAX_S:.0f} seconds spoken (up to {OWN_MAX_S:.0f} when the film's line is the person's own "
                f"sentence, which the person then says in their own voice)")
@@ -71,20 +76,21 @@ def _tok(w):
 
 def _ask_routes(system, content, budget_s, routes):
     """ask.ask on the engine's own model, then on each next route when the provider does not answer (an outage, never a
-    verdict: a daily call cap does not lift on a retry of the same route). (text, usd); raises the last failure."""
-    last = None
-    for k, model in enumerate([None] + [r for r in routes if r]):
+    verdict: a daily call cap does not lift on a retry of the same route). (text, usd); raises the last failure, which
+    find_voices carries to a later call (carry)."""
+    models = [None] + [r for r in routes if r]
+    for k, model in enumerate(models):
         try:
             return ask.ask(system, content, "footage_voice_pick", budget_s=budget_s, max_tokens=4000, model=model)
-        except Exception as e:  # noqa: BLE001 the next route
-            last = e
+        except Exception:  # noqa: BLE001 the next route, else carried
+            if k == len(models) - 1:
+                raise
             time.sleep(min(2.0 * (k + 1), 6.0))
-    raise last
 
 
 def pick(lines, persons, sources, most=MOST, budget_s=120.0, repair=False):
     """([{src, piece_t0, after, person, said}], usd). sources: [{title, channel, transcript}] (index = src).
-    repair: the references' span in the prompt, and an unanswered call asked again on the next route (ROUTES)."""
+    repair: the references' span in the prompt, and an unanswered call asked again on any route named (ROUTES)."""
     blocks = []
     for k, s in enumerate(sources):
         tr = [f"[{p['t0']:.0f}-{p['t1']:.0f}] {p['text']}" for p in s.get("transcript") or [] if p.get("text")]
@@ -262,10 +268,12 @@ def face_check(proxy, t0, t1, anchors, own_frames, work):
     resolution as the stretch). Each anchor face is compared on its own, never through one averaged face. FACE_FRAMES
     frames first; a stretch with no match yet is looked at again on MORE_FRAMES more. verdict:
       "seen"   the person matched on two frames, or on one with nothing that contradicts it
-      "other"  only when the source's own frames anchor the person: faces on most frames and none of them even
-               plausibly the person (an interviewer or a host is on camera, speaking)
-      "unseen" otherwise (no face model, a wide stage, the screen, the crowd, a face near the threshold): the voice is
-               kept and its picture is the source's own frames of the person"""
+      "other"  the source's own frames anchor the person, faces show on most frames and none of them even plausibly
+               the person (an audience shot, a guest on the big screen, an interviewer on camera)
+      "unseen" otherwise (no face model, a wide stage, the screen, the crowd, a face near the threshold)
+    A verdict is a fact about the picture, never about who speaks (the pick attributed the words from the transcript):
+    on "other" and "unseen" find_voices keeps the voice and plays it over the source's own frames of the person, or,
+    with none, under the film's own planned picture of them."""
     m = identity.models()
     if not m:
         return dict(verdict="unseen", matched=0, frames=0, why="no face model")
@@ -317,9 +325,11 @@ def face_check(proxy, t0, t1, anchors, own_frames, work):
 def _picture_at(s, t0, t1, own_t):
     """The seconds of the source to show under a voice whose speaker is not on camera: the same length of the source's
     own frames of the person, around the frame the look passed nearest the stretch (their own lips are not at those
-    seconds, so it plays as the source's picture of the person, like the references' broadcast sound over pictures)."""
+    seconds, so it plays as the source's picture of the person, like the references' broadcast sound over pictures).
+    None when the look passed no frame of the person in this source: the stretch's own seconds may show an interviewer,
+    a host or a crowd, so the voice carries no picture and the film shows its own planned picture of the person."""
     if not own_t:
-        return t0, t1
+        return None
     c = min(own_t, key=lambda t: abs(t - (t0 + t1) / 2))
     d = t1 - t0
     a = max(0.0, c - d / 2)
@@ -336,7 +346,7 @@ def find_voices(lines, subjects, sources, anchors, out_dir, W, H, stream_of=None
     tried (a list, opt-in): every candidate considered is appended with its outcome ({person, after, source, said,
     reason}; reason None when it was cut in), and a run that had no candidate at all appends why.
     repair (a workflow opts in; see REPAIR_MAX_S): a choice is trimmed or run on to the band instead of refused, the face
-    step is face_check, and the pick is asked again on the next route. own: {source key: [(subject name, t)]} the frames
+    step is face_check, and an unanswered pick is carried to a later call (carry, resume). own: {source key: [(subject name, t)]} the frames
     of each source the look passed, per subject (run.find), the person's own anchors for face_check."""
     tried = tried if tried is not None else []
 
@@ -355,8 +365,16 @@ def find_voices(lines, subjects, sources, anchors, out_dir, W, H, stream_of=None
     work = os.path.join(out_dir, "voices_work")
     os.makedirs(work, exist_ok=True)
     os.makedirs(os.path.join(out_dir, "voices"), exist_ok=True)
-    picks, usd = pick(lines, [p["name"] for p in people], [dict(title=s["title"], channel=s.get("channel"), transcript=s["transcript"]) for s in mine], most,
-                      **({"repair": True} if repair else {}))
+    try:
+        picks, usd = pick(lines, [p["name"] for p in people], [dict(title=s["title"], channel=s.get("channel"), transcript=s["transcript"]) for s in mine], most,
+                          **({"repair": True} if repair else {}))
+    except Exception as e:  # noqa: BLE001 repair: an unanswered pick is an outage, carried to a later call
+        if not repair:
+            raise
+        where = carry(out_dir, lines, subjects, mine, anchors, own, W, H, most, e, log=log)
+        note(None, None, f"the pick was not answered ({str(e)[:100]}); carried to a later call ({where})")
+        subprocess.run(["rm", "-rf", work])
+        return [], 0.0
     say_of = {int(ln.get("i", k)): ln.get("say") for k, ln in enumerate(lines)}
     log(f"voices: {len(picks)} moments chosen from {len(mine)} sources")
     if not picks:
@@ -408,14 +426,13 @@ def find_voices(lines, subjects, sources, anchors, out_dir, W, H, stream_of=None
                 own_jpgs = [identity.full_frame(s["proxy"], t, os.path.join(work, f"vown_{s['key']}_{int(t * 1000)}.jpg")) for t in mine_t[:8]]
                 face = face_check(s["proxy"], t0, t1, (anchors or {}).get(g["person"]) or (), [p for p in own_jpgs if p], work)
                 seen = face.get("matched")
-                if face["verdict"] == "other":
-                    log(f"voices: {s['key']} {t0:.1f}-{t1:.1f}s: another person is on camera ({face['other']} of {face['frames']} frames)")
-                    note(g, s, f"another person is on camera on {face['other']} of {face['frames']} frames")
-                    continue
-                if face["verdict"] == "unseen":
+                if face["verdict"] != "seen":
+                    # the pick attributed the words to the person from the transcript; a face on camera that is not
+                    # theirs (an audience shot, a guest on the big screen, an interviewer) is not who speaks: the voice
+                    # is kept and plays over the source's own frames of the person, or under the film's own picture
                     pic_t = _picture_at(s, t0, t1, mine_t)
-                    log(f"voices: {s['key']} {t0:.1f}-{t1:.1f}s: the person is not on camera ({face}); the voice plays over "
-                        f"{'their own frames of this source' if mine_t else 'the source at those seconds'}")
+                    over = "their own frames of this source" if pic_t else "the film's own picture of them"
+                    log(f"voices: {s['key']} {t0:.1f}-{t1:.1f}s: the person is not on camera ({face}); the voice plays over {over}")
             else:
                 seen = face_shows(s["proxy"], t0, t1, (anchors or {}).get(g["person"]) or (), work)
                 if seen is None or seen < 2:
@@ -425,14 +442,15 @@ def find_voices(lines, subjects, sources, anchors, out_dir, W, H, stream_of=None
             base = f"voice_{len(out)}_{s['key']}_{int(t0 * 100)}"
             wav = os.path.join(out_dir, "voices", base + ".wav")
             audio(s["proxy"], t0, t1, wav, sr=48000)
-            pic = os.path.join(out_dir, "voices", base + ".mp4")
+            pic = os.path.join(out_dir, "voices", base + ".mp4") if pic_t else None
             try:
-                raw = os.path.join(work, base + "_raw.mp4")
-                if s.get("whole"):          # a source opened whole (run.find whole_first): cut from that file, never fetched again
-                    cut.local(s["whole"], pic_t[0], pic_t[1], raw)
-                else:
-                    cut.grab((stream_of or {}).get(s["key"]), s["url"], pic_t[0], pic_t[1], raw)
-                cut.finish(raw, pic, W, H, 0.5)
+                if pic:
+                    raw = os.path.join(work, base + "_raw.mp4")
+                    if s.get("whole"):          # a source opened whole (run.find whole_first): cut from that file, never fetched again
+                        cut.local(s["whole"], pic_t[0], pic_t[1], raw)
+                    else:
+                        cut.grab((stream_of or {}).get(s["key"]), s["url"], pic_t[0], pic_t[1], raw)
+                    cut.finish(raw, pic, W, H, 0.5)
             except Exception as e:  # noqa: BLE001 the sound alone still carries the person; the film shows its own picture
                 log(f"voices: picture for {base} failed: {str(e)[:120]}")
                 pic = None
@@ -444,10 +462,120 @@ def find_voices(lines, subjects, sources, anchors, out_dir, W, H, stream_of=None
                             time_range=[round(t0, 3), round(t1, 3)],
                             **({"repaired": fixed} if fixed else {}),
                             **({"face": face} if face else {}),
-                            **({"picture_range": [round(pic_t[0], 3), round(pic_t[1], 3)]} if pic_t != (t0, t1) else {})))
+                            **({"picture_range": [round(pic_t[0], 3), round(pic_t[1], 3)]} if pic_t and pic_t != (t0, t1) else {}),
+                            **({} if pic_t else {"picture": "the film's own picture of the person"})))
             used_lines.add(g["after"])
             note(g, s, None)
             log(f"voices: {g['person']} after line {g['after']}: {t1 - t0:.1f}s from {s['title'][:50]!r}")
     finally:
         subprocess.run(["rm", "-rf", work])
     return out, usd
+
+
+def _keep_file(src, dst):
+    """src kept at dst (hard link, else a copy); dst when it is already that file."""
+    if not src or not os.path.isfile(src):
+        return None
+    if os.path.exists(dst) and os.path.samefile(src, dst):
+        return dst
+    try:
+        os.link(src, dst)
+    except OSError:
+        import shutil
+        shutil.copyfile(src, dst)
+    return dst
+
+
+def carry(out_dir, lines, subjects, mine, anchors, own, W, H, most, err, log=print):
+    """An unanswered pick (repair) carried to a later call: each heard source's scanning copy (and whole file) kept
+    beside the run's kept sources (FOOTAGE_KEEP_SOURCES, else the record's own folder), its transcript and every input of
+    the pick written to <out_dir>/voices_pending.json, which resume reads. Returns that path."""
+    keep = os.environ.get("FOOTAGE_KEEP_SOURCES")
+    kdir = os.path.join(keep, "voices_pending", os.path.basename(os.path.normpath(out_dir))) if keep else os.path.join(out_dir, "voices_pending")
+    os.makedirs(kdir, exist_ok=True)
+    pf = os.path.join(out_dir, PENDING)
+    try:
+        tries = int((json.load(open(pf)) or {}).get("tries") or 0) if os.path.exists(pf) else 0
+    except (OSError, ValueError):
+        tries = 0
+    srcs = []
+    for s in mine:
+        ext = os.path.splitext(s["proxy"])[1] or ".mp4"
+        proxy = _keep_file(s["proxy"], os.path.join(kdir, f"{s['key']}_proxy{ext}"))
+        whole = None
+        if s.get("whole"):
+            whole = proxy if os.path.realpath(s["whole"]) == os.path.realpath(s["proxy"]) else \
+                _keep_file(s["whole"], os.path.join(kdir, f"{s['key']}_whole{os.path.splitext(s['whole'])[1] or '.mp4'}"))
+        if not proxy:
+            continue
+        srcs.append({**{k: s.get(k) for k in ("key", "url", "title", "channel", "where", "duration", "dur_read", "rung", "subjects", "transcript")},
+                     "proxy": proxy, **({"whole": whole} if whole else {})})
+    rec = dict(lines=lines, subjects=subjects, sources=srcs, anchors=anchors or {},
+               own={k: [list(x) for x in v] for k, v in (own or {}).items()}, W=W, H=H, most=most,
+               error=str(err)[:300], tries=tries + 1, kept=kdir, at=time.strftime("%Y-%m-%dT%H:%M:%S"))
+    tmp = pf + ".part"
+    with open(tmp, "w") as f:
+        json.dump(rec, f, ensure_ascii=False)
+    os.replace(tmp, pf)
+    log(f"voices: the pick was not answered ({str(err)[:120]}); {len(srcs)} sources kept for a later call ({pf})")
+    return pf
+
+
+def resume(out_dir, log=print):
+    """A carried pick asked again (carry): the voices it finds are added to <out_dir>/footage.json (voices, voices_tried,
+    credits, spend) exactly as the first call would have written them. Still unanswered, it stays carried. Returns
+    {resumed, voices, pending}."""
+    pf = os.path.join(out_dir, PENDING)
+    if not os.path.exists(pf):
+        return dict(resumed=False, voices=0, pending=False)
+    pend = json.load(open(pf))
+    sources = []
+    for s in pend.get("sources") or []:
+        if s.get("proxy") and os.path.isfile(s["proxy"]):
+            sources.append(dict(s) if s.get("whole") and os.path.isfile(s["whole"]) else {k: v for k, v in s.items() if k != "whole"})
+    own = {k: [tuple(x) for x in v] for k, v in (pend.get("own") or {}).items()}
+    tried = []
+    os.replace(pf, pf + ".asking")         # carry writes it again when the pick is still unanswered
+    try:
+        voices, usd = find_voices(pend.get("lines") or [], pend.get("subjects") or [], sources, pend.get("anchors") or {}, out_dir,
+                                  pend.get("W") or 1080, pend.get("H") or 1920, log=log, most=pend.get("most") or MOST, tried=tried,
+                                  repair=True, own=own)
+    except Exception:
+        if not os.path.exists(pf):
+            os.replace(pf + ".asking", pf)
+        raise
+    if os.path.exists(pf + ".asking"):
+        os.remove(pf + ".asking")
+    still = os.path.exists(pf)
+    rp = os.path.join(out_dir, "footage.json")
+    rec = json.load(open(rp)) if os.path.exists(rp) else {}
+    rec["voices"] = (rec.get("voices") or []) + voices
+    rec["voices_tried"] = (rec.get("voices_tried") or []) + tried
+    rec["credits"] = (rec.get("credits") or []) + [dict(line=v["after"], url=v["source"]["url"], channel=v["source"]["channel"],
+                                                        title=v["source"]["title"], time_range=v["time_range"], voice=v["person"]) for v in voices]
+    sp = dict(rec.get("spend") or {})
+    sp["voices"] = round(float(sp.get("voices") or 0.0) + usd, 5)
+    sp["usd"] = round(float(sp.get("usd") or 0.0) + usd, 4)
+    rec["spend"] = sp
+    if still:
+        rec["voices_pending"] = PENDING
+    else:
+        rec.pop("voices_pending", None)
+        if pend.get("kept"):            # the kept copies are links: the run's own kept sources stay
+            import shutil
+            shutil.rmtree(pend["kept"], ignore_errors=True)
+    tmp = rp + ".part"
+    with open(tmp, "w") as f:
+        json.dump(rec, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, rp)
+    log(f"voices: carried pick asked again: {len(voices)} voices{', still carried' if still else ''}")
+    return dict(resumed=True, voices=len(voices), pending=still)
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) == 3 and sys.argv[1] == "resume":
+        print(json.dumps(resume(sys.argv[2], log=lambda m: print(m, file=sys.stderr))))
+    else:
+        print("usage: python -m footage.voice resume <footage record folder>", file=sys.stderr)
+        sys.exit(2)
