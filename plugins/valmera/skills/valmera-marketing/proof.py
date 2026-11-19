@@ -613,36 +613,94 @@ def show_text(x):
     return str(x.get("text") if isinstance(x, dict) else x)
 
 
+FOLD_WORDS = 6     # two items of a line fewer words apart than this would land under 1.8 s apart, the reel's display gap
+                   # (reel.py, at a fast narrator's three words a second): the cutter keeps the first and drops the second
+
+
+def _at(toks, words, taken):
+    """The first position in toks, not yet taken, where `words` (normalised) start; None if they are not there."""
+    n = len(words)
+    return next((k for k in range(len(toks) - n + 1) if n and toks[k:k + n] == words and k not in taken), None)
+
+
 def anchor_show(sc):
-    """Every display item as {text, word_i, role, big}: anchored to the index of the word of `say` it lands on, the way
-    writer.annotate anchors a story's items. 20 Nov: the marketing writer returned plain strings, and the cutter, which
-    places an item only on its word_i when the film is cut by verdicts, dropped every one (display_words 0). Structure
-    only, never a reading of the words: a string becomes an item; a word_i missing or outside `say` is set to the
-    position of the line's own first `emphasis` word, else its first word; a role outside SHOW_ROLES becomes a key word;
-    a `big` that is not part of the text is left out. Nothing is dropped. Returns how many items were repaired."""
-    fixed = 0
-    for s in sc.get("segments") or []:
+    """Every display item as {text, word_i, role, big, small}: anchored to the index of the word of `say` it lands on,
+    the way writer.annotate anchors a story's items. 20 Nov: the marketing writer returned plain strings, and the
+    cutter, which places an item only on its word_i when the film is cut by verdicts, dropped every one (display_words
+    0). Structure only, never a reading of the words, and nothing is dropped:
+      - a string becomes an item; a role outside SHOW_ROLES becomes a key word; a `big` that is not part of the text is
+        left out, and a `big` that is a proper part of it gets the rest of the text as its `small` when it has none
+        (the cutter sets a large part alone and prints the rest only from `small`: '+5 PICTURES' lost 'PICTURES');
+      - an item whose word_i is missing or outside `say` gets a word of its own, in order: where its own words stand
+        in `say`, else the line's next stressed (`emphasis`) word not yet used, else the next free word;
+      - a second item anchored fewer than FOLD_WORDS words after the one before it (and not a figure, which the cutter
+        never holds back) becomes that item's small line, so both reach the screen (20 Nov: 'Trash can. Black hole.'
+        are said a second apart; the cutter kept TRASH CAN and dropped BLACK HOLE as too close).
+    Returns a note per repair, for the log and for the writer's next attempt."""
+    notes = []
+    for i, s in enumerate(sc.get("segments") or []):
         toks = [F.norm_word(w) for w in str(s.get("say") or "").split()]
-        emph = [F.norm_word(w) for e in s.get("emphasis") or [] for w in str(e).split()]
-        at = next((k for k, t in enumerate(toks) if t and t in emph), 0)
-        out = []
+        stress = []
+        for e in s.get("emphasis") or []:
+            k = _at(toks, [w for w in (F.norm_word(x) for x in str(e).split()) if w], set(stress))
+            if k is not None:
+                stress.append(k)
+        items, loose = [], []
         for x in s.get("show") or []:
             item = dict(x) if isinstance(x, dict) else dict(text=str(x))
             item["text"] = str(item.get("text") or "").strip()
             if not item["text"]:
                 continue
-            wi = item.get("word_i")
-            ok = isinstance(wi, int) and not isinstance(wi, bool) and 0 <= wi < len(toks)
-            if not ok and toks:
-                item["word_i"] = at
             if item.get("role") not in SHOW_ROLES:
                 item["role"] = "key"
-            if not (isinstance(item.get("big"), str) and item["big"].strip() and item["big"].strip() in item["text"]):
+            big = item.get("big").strip() if isinstance(item.get("big"), str) else ""
+            if big and big in item["text"]:
+                item["big"] = big
+                small = item.get("small").strip() if isinstance(item.get("small"), str) else ""
+                if not small and big != item["text"]:
+                    small = item["text"].replace(big, " ", 1).strip(" ,;:-\u2013\u2014\u00b7/|")
+                    small = " ".join(small.split())
+                if small:
+                    item["small"] = small
+                else:
+                    item.pop("small", None)
+            else:
                 item.pop("big", None)
-            fixed += int(not isinstance(x, dict) or not ok)
+                item.pop("small", None)
+            wi = item.get("word_i")
+            if not (isinstance(wi, int) and not isinstance(wi, bool) and 0 <= wi < len(toks)):
+                loose.append(item)
+            items.append(item)
+        taken = {x["word_i"] for x in items if not any(x is y for y in loose)}
+        last = -1
+        for item in loose:
+            if not toks:
+                continue
+            own = _at(toks, [w for w in (F.norm_word(x) for x in item["text"].split()) if w], taken)
+            wi = own if own is not None else next((k for k in stress if k not in taken and k > last), None)
+            if wi is None:
+                wi = next((k for k in range(last + 1, len(toks)) if k not in taken), None)
+            if wi is None:
+                wi = next((k for k in range(len(toks)) if k not in taken), 0)
+            item["word_i"], last = wi, wi
+            taken.add(wi)
+            notes.append(f"segment {i}: show item {item['text']!r} had no word_i in say; it was set to {wi} "
+                         f"({str(s.get('say')).split()[wi]!r}); give every show item its own word_i")
+        anchored = sorted((x for x in items if isinstance(x.get("word_i"), int)), key=lambda x: x["word_i"])
+        out = [x for x in items if not isinstance(x.get("word_i"), int)]
+        for item in anchored:
+            prev = out[-1] if out and isinstance(out[-1].get("word_i"), int) else None
+            if prev is not None and item["role"] != "figure" and item["word_i"] - prev["word_i"] < FOLD_WORDS:
+                prev["big"] = prev.get("big") or prev["text"]
+                prev["small"] = " ".join(t for t in (prev.get("small"), item["text"]) if t)
+                prev["text"] = f"{prev['text']} {item['text']}"
+                notes.append(f"segment {i}: show items {prev['big']!r} and {item['text']!r} land "
+                             f"{item['word_i'] - prev['word_i']} words apart, under two seconds; they were made one "
+                             "item with big and small")
+                continue
             out.append(item)
         s["show"] = out
-    return fixed
+    return notes
 
 
 def script_problems(sc, ask_text, rc):
@@ -793,7 +851,11 @@ def write(ctx, idea, card, rc, notes=None, inventory=None, hook=None):
                "spoken word, at most two items, each {\"text\": as printed, \"word_i\": the index (from 0) in say's space-separated "
                "words of the word it lands on (a figure: the first word of the spoken figure), \"role\": figure (a number from "
                "the receipts, digits allowed only for one) | key (a word or short phrase the line stresses) | name (a proper "
-               "noun), \"big\": the part of text set largest, or null}; the references set type on most lines, so give one item "
+               "noun), \"big\": the part of text set largest, or null, \"small\": the rest of text, set under big at 0.4 of its size "
+               "(when big is set only big and small are printed, so text is big plus small), or null}; two items on one line only when their "
+               "words are about two seconds (six or more words) apart, else one item with big and small (two results said "
+               "a second apart: big \"TRASH CAN\", small \"BLACK HOLE\"), the receipts' figures each role figure; "
+               "the references set type on most lines, so give one item "
                "to most lines, the payoff carries the receipts' figures and the visible results it names, the last carries "
                "VALMERA.IO; [] only where type would crowd the picture, \"beat\": hook|setup|turn|low|payoff|close, "
                "\"pace\": slow|steady|brisk|fast, \"see\": [{\"thing\": exact subject from named or THE UPLOAD or THE EXPORT, "
@@ -901,7 +963,7 @@ def script(ctx, ideas_out):
     # is that film's opening instead)
     try:
         hook = None if len(sibs) >= 2 else hook_beat(rec, stt[tag]["record"])
-    except (OSError, ValueError, subprocess.SubprocessError) as e:     # the film opens on its first line's pictures
+    except Exception as e:     # noqa: BLE001 - an optional opening: the film opens on its first line's pictures
         ctx.log(f"opening beat not built: {repr(e)[:300]}")
         hook = None
     if hook:
@@ -915,17 +977,18 @@ def script(ctx, ideas_out):
     for attempt in range(4):
         sc, use = write(ctx, idea, card, rc, notes, inventory, hook=hook)
         spend.append(use)
-        if anchor_show(sc):
-            ctx.log("display items anchored to their words (word_i) where the writer left them unanchored")
+        fixed = anchor_show(sc)
+        if fixed:
+            ctx.log("display items repaired: " + "; ".join(fixed)[:600])
         probs = script_problems(sc, ask_text, rc) + VI.script_problems(sc, inventory)
         if not probs:
             bad, u2 = audit(sc, rc)
             spend.append(u2)
             probs = [f"unsupported claim: {c.get('text')!r} ({c.get('why')})" for c in bad]
-        jsave(os.path.join(ctx.run_dir, f"script_attempt{attempt}.json"), dict(script=sc, problems=probs))
+        jsave(os.path.join(ctx.run_dir, f"script_attempt{attempt}.json"), dict(script=sc, problems=probs, show_repairs=fixed))
         if not probs:
             break
-        notes = "\n".join(probs)
+        notes = "\n".join(probs + fixed)      # a rewrite anchors its display items itself; the repairs alone never cause one
         ctx.log("script repair: " + notes[:400])
     else:
         raise RuntimeError("the script did not pass its checks: " + notes[:600])
@@ -1689,12 +1752,23 @@ def content_pace(pack, sc):
 
 DISPLAY_OVER_RECORDING_Y = 0.40   # a display word over the recording rests here: clear of its own burned-in captions (about
                                   # 0.70-0.76 of the height) and of the watermark (to 0.19); the reel's high seat for wide type
+NAME_OVER_RECORDING_Y = 0.27      # a name super over the recording: the reel's own high name seat (reel.name_supers), never
+                                  # its low one at 0.76, which sits on the recording's captions
 
 
 def is_display_word(it):
-    """The reel's designed display type (film.display_words: its voice is the style's "dsp", one copy per landing),
-    never a caption."""
-    return it.get("k") == "word" and str(it.get("v") or "").startswith("dsp")
+    """The reel's designed display type, film.display_words' own voices only: its large part (voice dsp<f0>, one copy a
+    landing) and its small line (dsps<f0>). Never a caption, a name super (dsp_name<f0>) or a designed card's type
+    (dsp_card<f0>, dsp_cards<f0>)."""
+    if it.get("k") != "word" or not it.get("f"):
+        return False
+    f0 = int(it["f"][0])
+    return it.get("v") in (f"dsp{f0}", f"dsps{f0}")
+
+
+def is_name_super(it):
+    """reel.name_supers' type (voice dsp_name<f0>): a role=name item set at 0.27 or 0.76."""
+    return it.get("k") == "word" and bool(it.get("f")) and it.get("v") == f"dsp_name{int(it['f'][0])}"
 
 
 def rest_y(it):
@@ -1714,7 +1788,8 @@ def lift(it, d):
 def as_delivered(l1, product_paths):
     """Preserve the upload/export comparison: no new captions, section finish or flash over the actual recording.
     The writer's display words stay on their spoken words over it (20 Nov: TRASH CAN and BLACK HOLE were said over the
-    recording and printed nowhere), lifted to DISPLAY_OVER_RECORDING_Y, above the recording's own captions."""
+    recording and printed nowhere), lifted to DISPLAY_OVER_RECORDING_Y, above the recording's own captions; a name super
+    stays too, at NAME_OVER_RECORDING_Y. Any other type (a caption, a designed card's words) is left off the recording."""
     keys = {k for k, a in (l1.get("assets") or {}).items() if a.get("path") in product_paths}
     # one move a landing: the large part sets it (voice dsp<f0>), its small line under it (dsps<f0>) moves with it
     moves = {int(it["f"][0]): DISPLAY_OVER_RECORDING_Y - rest_y(it) for it in l1["items"]
@@ -1731,6 +1806,9 @@ def as_delivered(l1, product_paths):
             continue
         if is_display_word(it):
             out.append(lift(it, moves.get(int(it["f"][0]), 0.0)))
+            continue
+        if is_name_super(it) and rest_y(it) is not None:
+            out.append(lift(it, NAME_OVER_RECORDING_Y - rest_y(it)))     # its own seat, high, off the recording's captions
             continue
         if it["k"] == "word":
             continue                                       # neither caption the raw upload nor double-caption its export

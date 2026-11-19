@@ -23,20 +23,58 @@ class Ctx:
 
 # ----------------------------------------------------------------- display items reach the screen on their words
 
-def test_plain_display_strings_are_anchored_to_their_lines_own_stressed_word():
+def test_plain_display_strings_each_get_a_word_of_their_own_and_close_ones_become_one_item():
     sc = dict(segments=[
         dict(say="Trash can. Black hole. Both on screen.", emphasis=["Black"], show=["TRASH CAN", "BLACK HOLE"]),
         dict(say="Try it at valmera dot io", show=[dict(text="VALMERA.IO", word_i=4, role="key")]),
         dict(say="Five pictures landed", show=[dict(text="+5 PICTURES", word_i=99, role="number", big="+5")]),
         dict(say="Nothing here", show=[]),
+        dict(say="Pain first then a long wait for the cut and only later the result arrives",
+             emphasis=["wait", "result"], show=["ALWAYS LATE", "THE RESULT"]),
+        dict(say="Cuts and titles", emphasis=["Cuts", "titles"], show=["STEP ONE", "STEP TWO"]),
     ])
-    assert P.anchor_show(sc) == 3
-    s0, s1, s2 = (s["show"] for s in sc["segments"][:3])
-    assert [x["word_i"] for x in s0] == [2, 2] and all(x["role"] == "key" for x in s0)    # "Black" is word 2 of say
-    assert s1 == [dict(text="VALMERA.IO", word_i=4, role="key")]                          # a valid item is kept as written
-    assert s2[0]["word_i"] == 0 and s2[0]["role"] == "key" and s2[0]["big"] == "+5"       # out of range: the line's first word
-    assert sc["segments"][3]["show"] == []
-    assert P.anchor_show(sc) == 0                                                          # anchored items stay anchored
+    notes = P.anchor_show(sc)
+    assert len(notes) == 9 and all("word_i" in n or "one item" in n for n in notes)
+    s0, s1, s2, s3, s4, s5 = (s["show"] for s in sc["segments"])
+    # each found on its own words (0 and 2), then one item: 1 s apart the cutter would drop the second
+    assert s0 == [dict(text="TRASH CAN BLACK HOLE", word_i=0, role="key", big="TRASH CAN", small="BLACK HOLE")]
+    assert s1 == [dict(text="VALMERA.IO", word_i=4, role="key")]                         # a valid item is kept as written
+    assert s2 == [dict(text="+5 PICTURES", word_i=0, role="key", big="+5", small="PICTURES")]   # the rest is its small line
+    assert s3 == []
+    # its own words in say (THE RESULT at 12), else the line's next stressed word (wait, 5); far apart: both kept
+    assert [(x["text"], x["word_i"]) for x in s4] == [("ALWAYS LATE", 5), ("THE RESULT", 12)]
+    assert s5[0]["word_i"] == 0 and s5[0]["small"] == "STEP TWO"                         # distinct anchors, then folded
+    assert P.anchor_show(sc) == []                                                        # repaired items stay as they are
+
+
+def test_a_split_item_prints_both_its_parts():
+    say = "Five pictures landed on the cut"
+    script = dict(segments=[dict(say=say, show=[dict(text="+5 PICTURES", word_i=0, role="figure", big="+5")])])
+    P.anchor_show(script)
+    voices = {"cap": {"font": "InterDisplay-Bold.ttf", "px": 56, "track": 0}, "dsp": {"font": "InterDisplay-Black.ttf", "px": 150, "track": -2}}
+    plan = F.Plan(voices, {})
+    clock = F.Clock(dict(words=[dict(w=w, start=0.2 + 0.4 * k, end=0.5 + 0.4 * k, seg=0) for k, w in enumerate(say.split())],
+                         duration=3.5), script)
+    F.display_words(plan, clock, script, "dsp", 0.627, F.Clock.f(clock.dur), anchored_only=True, cap_floor_px=108, gap_s=1.8)
+    printed = [it["t"] for it in plan.items if it.get("k") == "word"]
+    assert printed == ["+5", "PICTURES"]
+
+
+def test_two_results_said_a_second_apart_both_reach_the_screen_at_the_reels_gap():
+    """20 Nov: 'Trash can.' and 'Black hole.' were said 1.0 s apart (12.4 s, 13.4 s); the reel cuts display words 1.8 s
+    apart, so a second item there was dropped as 'too close to the last'."""
+    say = "Trash can. Black hole. Both on screen."
+    script = dict(segments=[dict(say=say, emphasis=["Trash"], show=["TRASH CAN", "BLACK HOLE"])])
+    clock = F.Clock(dict(words=[dict(w=w, start=0.2 + 0.5 * k, end=0.6 + 0.5 * k, seg=0) for k, w in enumerate(say.split())],
+                         duration=4.5), script)
+    voices = {"cap": {"font": "InterDisplay-Bold.ttf", "px": 56, "track": 0}, "dsp": {"font": "InterDisplay-Black.ttf", "px": 150, "track": -2}}
+    P.anchor_show(script)
+    plan, dropped = F.Plan(voices, {}), []
+    shown = F.display_words(plan, clock, script, "dsp", 0.627, F.Clock.f(clock.dur), anchored_only=True, gap_s=1.8, cap_floor_px=108,
+                            dropped=dropped)
+    printed = [it["t"] for it in plan.items if it.get("k") == "word"]
+    assert len(shown) == 1 and not dropped
+    assert printed == ["TRASH CAN", "BLACK HOLE"]
 
 
 def test_an_anchored_marketing_item_lands_where_the_cutters_anchored_only_rule_dropped_it():
@@ -208,3 +246,56 @@ def test_display_words_stay_on_their_words_over_the_recording_above_its_own_capt
     assert abs(ids["big"]["y"][0] - ids["big"]["y"][-1] - 0.023) < 1e-6        # its landing's rise kept
     assert abs(ids["sml"]["y"][-1] - ids["big"]["y"][-1] - 0.05) < 1e-6        # its small line moves with it
     assert ids["out"]["y"] == 0.687                                            # off the recording: on its seat
+
+
+def test_a_name_super_over_the_recording_takes_the_high_seat_and_card_type_stays_off_it():
+    """Only film.display_words' own voices (dsp<f0>, dsps<f0>) are lifted; a name super (dsp_name<f0>) at its low seat
+    0.76 sat on the export's burned-in captions."""
+    l1 = dict(assets={"v1": dict(path="/x/after.mp4")},
+              items=[dict(id="s2", k="shot", f=[100, 300], pic="v1"),
+                     dict(id="nm", k="word", f=[140, 185], v="dsp_name140", t="JOE ROGAN", y=[0.783, 0.77, 0.76], role="big"),
+                     dict(id="cd", k="word", f=[200, 240], v="dsp_card200", t="CARD WORDS", y=0.5, role="big"),
+                     dict(id="cds", k="word", f=[200, 240], v="dsp_cards200", t="card line", y=0.55, role="big"),
+                     dict(id="nm2", k="word", f=[10, 50], v="dsp_name10", t="ELSEWHERE", y=0.76, role="big")])
+    P.as_delivered(l1, {"/x/after.mp4"})
+    ids = {it["id"]: it for it in l1["items"]}
+    assert ids["nm"]["y"][-1] == P.NAME_OVER_RECORDING_Y and abs(ids["nm"]["y"][0] - ids["nm"]["y"][-1] - 0.023) < 1e-6
+    assert "cd" not in ids and "cds" not in ids
+    assert ids["nm2"]["y"] == 0.76                                             # off the recording: its own seat
+    assert not P.is_display_word(dict(k="word", f=[140, 185], v="dsp_name140"))
+    assert P.is_display_word(dict(k="word", f=[140, 185], v="dsps140"))
+
+
+def test_an_opening_beat_that_fails_to_build_never_stops_the_script(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+
+    class C:
+        run_dir, tmp, args, logs = str(run), str(run / "tmp"), {}, []
+
+        def log(self, m):
+            self.logs.append(m)
+    ctx = C()
+    monkeypatch.setattr(P, "able_cards", lambda ctx: [dict(id="reel")])
+    monkeypatch.setattr(P, "record", lambda ctx, idea, k, ask_text: dict(sid="s1", source=dict(t0=0, t1=10)))
+    monkeypatch.setattr(P, "export_check", lambda ctx, rec, ask_text, must: dict(ok=True, v=P.CHECK_V, export={}))
+    monkeypatch.setattr(P, "receipts", lambda rec, chk, ask_text: dict(typed=ask_text))
+
+    def boom(rec, path):
+        raise KeyError("dur")
+    monkeypatch.setattr(P, "hook_beat", boom)
+    seen = {}
+
+    class Reached(Exception):
+        pass
+
+    def prepare(ctx, idea, rc, *a):
+        seen["rc"] = dict(rc)
+        raise Reached
+    monkeypatch.setattr(P.VI, "prepare", prepare)
+    try:
+        P.script(ctx, dict(ideas=[dict(asks=["Make it vertical"], must_see=[[]], style="reel")]))
+    except Reached:
+        pass
+    assert "rc" in seen and "opening" not in seen["rc"]
+    assert any(m.startswith("opening beat not built") and "KeyError" in m for m in ctx.logs)
