@@ -1079,6 +1079,67 @@ def env_path():
     return os.pathsep.join(dict.fromkeys(p for p in paths if p))
 
 
+def _director():
+    """_shell/director.py under a name of its own: the worker has a director.py too (the customer's Director)."""
+    import importlib.util
+    name = "valmera_shell_director"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, os.path.join(os.path.dirname(chain.__file__), "director.py"))
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+    return sys.modules[name]
+
+
+def director_chapters(ctx, sc, pack, l1, beats):
+    """The Director once a chapter (a long film is too long for one sheet): each call reads that chapter's words,
+    stress and placed pictures and the recent films, and its asks ride the scene under ``devices`` for the palette to
+    lay at the render. Returns what each chapter chose."""
+    DR = _director()
+    clock = F.Clock(pack["words"], sc)
+    words = clock.words
+    try:
+        stress = [(f / F.FPS, s_) for f, s_ in F.voice_stress(pack)]
+    except Exception:  # noqa: BLE001 - the words alone
+        stress = []
+    segs = sc["segments"]
+    order = []
+    for i, s_ in enumerate(segs):
+        ch = s_.get("chapter")
+        if not order or order[-1][0] != ch:
+            order.append((ch, []))
+        order[-1][1].append(i)
+    rec, asks_all = [], []
+    for n, (ch, idx) in enumerate(order):
+        ws = [k for k, w in enumerate(words) if w["seg"] in idx]
+        if not ws:
+            continue
+        f0, f1 = F.Clock.f(words[ws[0]]["t0"]) - 1, min(F.Clock.f(words[ws[-1]]["t1"]) + 6, l1["dur_f"])
+        placed = [p for p in beats.get("pictures") or [] if p.get("path") and f0 <= (p.get("f") or [0])[0] < f1]
+        pics, ids = DR.film_pictures(l1, placed, os.path.join(ctx.supply, "director_stills"), pack.get("ffmpeg") or "ffmpeg", F.FPS)
+        local = {k: j for j, k in enumerate(idx)}        # the chapter's sentences, numbered from 0 for its sheet
+        rows = [dict(w=words[k]["w"], t0=words[k]["t0"], t1=words[k]["t1"], seg=local[words[k]["seg"]]) for k in ws]
+        d = DR.direct(ctx.supply, [dict(i=local[i], text=str(segs[i].get("say") or "")) for i in idx], rows,
+                      [(t, v) for t, v in stress if words[ws[0]]["t0"] - 0.2 <= t <= words[ws[-1]]["t1"] + 0.2], pics,
+                      workflow=f"long-form film, chapter {n + 1} of {len(order)}", dur_s=(f1 - f0) / F.FPS,
+                      title=f"{sc.get('title') or ''}: chapter {n + 1}", cache_name=f"director_ch{n:02d}.json", log=ctx.log)
+
+        def word_frame(w, ws=ws):
+            return max(F.Clock.f(words[ws[int(w)]]["t0"]) - 1, 0) if 0 <= int(w) < len(ws) else None
+
+        def seg_span(i, idx=idx):
+            k = [j for j in ws if words[j]["seg"] == idx[i]] if 0 <= i < len(idx) else []
+            return (F.Clock.f(words[k[0]]["t0"]) - 1, min(F.Clock.f(words[k[-1]]["t1"]) + 6, l1["dur_f"])) if k else (None, None)
+        asks, notes = DR.palette_asks(d, word_frame, seg_span, ids.get, l1["dur_f"])
+        asks = [dict(a, id=f"c{n}{a['id']}") for a in asks]
+        asks_all += asks
+        rec.append(dict(chapter=ch, by=d.get("by"), asked=[a["dev"] for a in asks], notes=notes))
+    if asks_all:
+        l1["devices"] = list(l1.get("devices") or []) + asks_all
+        beats["device_events"] = DR.device_events(asks_all)
+    return rec
+
+
 def direction_of(ctx):
     d = dict(ctx.args.get("direction") or {})
     p = os.path.join(ctx.run_dir, "direction.json")
@@ -1093,6 +1154,11 @@ def score(ctx, script):
     d = direction_of(ctx)
     sys.path[:0] = [p for p in env_path().split(os.pathsep) if p not in sys.path]
     l1, beats = build(sc, pack, d)
+    if (ctx.args or {}).get("director", True) is not False:
+        try:
+            beats["devices"] = director_chapters(ctx, sc, pack, l1, beats)
+        except Exception as e:  # noqa: BLE001 - the film keeps what its builder laid
+            ctx.log(f"director: the film keeps its builder's devices: {e!r}"[:300])
     out = os.path.join(ctx.supply, "l1.json")
     json.dump(l1, open(out, "w"), ensure_ascii=False)
     json.dump(beats, open(os.path.join(ctx.supply, "beats.json"), "w"), indent=1)
