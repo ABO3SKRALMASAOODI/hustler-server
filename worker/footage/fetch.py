@@ -119,23 +119,38 @@ def _walled(text):
 WAYBACK = "https://web.archive.org/web/2/"      # the Wayback Machine's newest capture of a page; yt-dlp reads its archived YouTube videos
 
 
-def run_ladder(url, args, timeout_s=CALL_S, done=None):
+def run_ladder(url, args, timeout_s=CALL_S, done=None, lighter=None):
     """Run yt-dlp with args on url down the ladder. Returns (stdout, rung label). done(stdout) says a
     rung delivered (default: it exited 0). Raises FetchError with yt-dlp's own last words.
     A YouTube video no rung could open (walled as a bot, removed, private) is asked of the Wayback Machine last: its
-    archived copy is small (360p as a rule) and free of the wall, and for old footage it is often all there is."""
+    archived copy is small (360p as a rule) and free of the wall, and for old footage it is often all there is.
+    lighter: the args of a smaller request. A rung on which args time out or fail for a reason other than the wall is
+    asked again at once for lighter, and the rest of the ladder (and the Wayback Machine) asks for lighter: a big
+    request that cannot arrive in time on a slow or proxied route never costs the source (round 1, 20 Nov: the 1080p
+    whole-first request against a 240 s call)."""
     last = "no rung ran"
-    for extra, label in _rungs(url):
+
+    def attempt(extra, use, label):
         try:
-            r = subprocess.run(ytdlp_cmd() + extra + args + ["--", url], capture_output=True, text=True, timeout=timeout_s, env=env())
+            r = subprocess.run(ytdlp_cmd() + extra + use + ["--", url], capture_output=True, text=True, timeout=timeout_s, env=env())
         except subprocess.TimeoutExpired:
-            last = f"{label}: timed out"
-            continue
-        ok = r.returncode == 0 and (done(r.stdout) if done else True)
-        if ok:
-            return r.stdout, label
-        last = f"{label}: " + " | ".join(ln for ln in (r.stderr or "").strip().splitlines()[-2:])[:300]
-        if not _walled(r.stderr or "") and is_youtube(url):
+            return None, "timeout", f"{label}: timed out"
+        if r.returncode == 0 and (done(r.stdout) if done else True):
+            return r.stdout, "ok", label
+        why = f"{label}: " + " | ".join(ln for ln in (r.stderr or "").strip().splitlines()[-2:])[:300]
+        return None, ("walled" if _walled(r.stderr or "") else "failed"), why
+
+    for extra, label in _rungs(url):
+        out, status, last = attempt(extra, args, label)
+        if status == "ok":
+            return out, label
+        if lighter is not None and args is not lighter and status in ("timeout", "failed"):
+            args = lighter
+            out, status, why = attempt(extra, args, label + "+lighter")
+            if status == "ok":
+                return out, label + "+lighter"
+            last += " || " + why
+        if status == "failed" and is_youtube(url):
             break
     if is_youtube(url) and os.environ.get("FOOTAGE_WAYBACK", "1") != "0":
         try:
@@ -171,10 +186,11 @@ def proxy(url, out_dir, duration=None, max_s=None):
     return path, rung
 
 
-def streams(url):
+def streams(url, local=True):
     """The best video stream at or under FINAL_H: {url, headers, w, h, fps, vcodec}, resolved once per source
-    so every cut is a seek on it rather than another walk down the ladder."""
-    cached = local_source(url)
+    so every cut is a seek on it rather than another walk down the ladder. local=False resolves the live stream even
+    for a source kept on disk (a kept copy that arrived small is cut sharper from the live stream: run.find)."""
+    cached = local_source(url) if local else None
     if cached:
         return dict(url=cached, headers={}, rung="verified-local-source", expires=time.time() + 4 * 3600)
     fmt = f"bv*[height<={FINAL_H}][vcodec^=avc1]/bv*[height<={FINAL_H}]/b[height<={FINAL_H}]/b"
@@ -210,12 +226,45 @@ def whole(url, out_dir):
 
 
 WHOLE_AV_MAX = "400M"
+WHOLE_AV_H = FINAL_H          # a whole-first source is every cut's source: it comes at the film's own size when it can
+WHOLE_AV_PART = "330M"        # the most a 1080p video stream may weigh, so it and its sound stay under WHOLE_AV_MAX
+META = "meta"                 # <out_dir>/meta.info.json: the source's own title, uploader and description (provenance)
+
+
+def whole_av_format():
+    """The whole-first ladder: separate video and sound streams at or under WHOLE_AV_H first (H.264, then any codec),
+    each video stream small enough to arrive under WHOLE_AV_MAX, then the 720p ladder as before. YouTube's only
+    combined mp4 with sound at or under 720p is its 360p stream (round 1, 19 Nov: footage-cut and archive-reel clips
+    arrived under 640 px tall and fell into window cards), so the combined file is no longer asked for first."""
+    return (f"bv*[height<={WHOLE_AV_H}][vcodec^=avc1][filesize<?{WHOLE_AV_PART}]+ba/"
+            f"bv*[height<={WHOLE_AV_H}][filesize<?{WHOLE_AV_PART}]+ba/"
+            f"bv*[height<={WHOLE_H}][vcodec^=avc1]+ba/bv*[height<={WHOLE_H}]+ba/"
+            f"b[height<={WHOLE_H}][ext=mp4]/b[height<={WHOLE_H}]/b")
+
+
+def whole_av_lighter_format():
+    """The whole-first ladder before 1080p (the combined mp4 at or under WHOLE_H first): what a rung asks for when the
+    1080p streams time out or fail on it (run_ladder lighter)."""
+    return (f"b[height<={WHOLE_H}][ext=mp4]/bv*[height<={WHOLE_H}][vcodec^=avc1]+ba/bv*[height<={WHOLE_H}]+ba/"
+            f"b[height<={WHOLE_H}]/b")
+
+
+def info_of(out_dir):
+    """{title, uploader, channel, description, upload_date} a fetch wrote beside its file (META), or {}."""
+    try:
+        info = json.load(open(os.path.join(out_dir, META + ".info.json")))
+    except (OSError, ValueError):
+        return {}
+    out = {k: info.get(k) for k in ("title", "uploader", "channel", "upload_date") if isinstance(info.get(k), str) and info.get(k)}
+    if isinstance(info.get("description"), str) and info["description"].strip():
+        out["description"] = info["description"].strip()[:1200]
+    return out
 
 
 def whole_av(url, out_dir):
-    """The source whole, at or under WHOLE_H WITH its sound, in one yt-dlp call: (path, rung). The one file a whole-first
-    open (run.find whole_first) scans, hears and cuts from, so the source is never resolved or fetched again. A source a
-    caller kept (local_source) is that file."""
+    """The source whole, at or under WHOLE_AV_H WITH its sound, in one yt-dlp call: (path, rung). The one file a
+    whole-first open (run.find whole_first) scans, hears and cuts from, so the source is never resolved or fetched again.
+    A source a caller kept (local_source) is that file. The source's own metadata lands beside it (info_of)."""
     cached = local_source(url)
     if cached:
         return cached, "verified-local-source"
@@ -246,14 +295,20 @@ def whole_av(url, out_dir):
             raise FetchError('external source transport failed: ' + type(exc).__name__) from exc
     for p in glob.glob(os.path.join(out_dir, "whole.*")):
         os.remove(p)
-    fmt = (f"b[height<={WHOLE_H}][ext=mp4]/bv*[height<={WHOLE_H}][vcodec^=avc1]+ba/bv*[height<={WHOLE_H}]+ba/"
-           f"b[height<={WHOLE_H}]/b")
-    args = ["-f", fmt, "--merge-output-format", "mp4", "--max-filesize", WHOLE_AV_MAX, "-o", os.path.join(out_dir, "whole.%(ext)s")]
+    def args_for(fmt):
+        return ["-f", fmt, "--merge-output-format", "mp4", "--max-filesize", WHOLE_AV_MAX,
+                "--write-info-json", "--no-write-playlist-metafiles", "-o", "infojson:" + os.path.join(out_dir, META),
+                "-o", os.path.join(out_dir, "whole.%(ext)s")]
 
     def got(_):
         return bool([p for p in glob.glob(os.path.join(out_dir, "whole.*")) if not p.endswith((".part", ".ytdl"))])
-    _, rung = run_ladder(url, args, done=got)
-    path = max((p for p in glob.glob(os.path.join(out_dir, "whole.*")) if not p.endswith((".part", ".ytdl"))), key=os.path.getsize)
+    # 1080p streams first; a rung on which they time out or fail (not walled) is asked at once for the 720p ladder,
+    # so a slow route still brings the source (any .part of either request is continued by yt-dlp on a later call).
+    _, rung = run_ladder(url, args_for(whole_av_format()), timeout_s=CALL_S, done=got, lighter=args_for(whole_av_lighter_format()))
+    # The merged file (with its sound) over a lone video stream a timed-out 1080p request left behind.
+    merged = os.path.join(out_dir, "whole.mp4")
+    path = merged if os.path.isfile(merged) else max(
+        (p for p in glob.glob(os.path.join(out_dir, "whole.*")) if not p.endswith((".part", ".ytdl"))), key=os.path.getsize)
     return path, rung
 
 

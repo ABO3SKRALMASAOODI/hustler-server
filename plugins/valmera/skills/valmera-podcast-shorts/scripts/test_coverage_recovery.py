@@ -100,28 +100,59 @@ def test_dark_visible_content_is_checked_instead_of_discarded_as_blank(tmp_path,
     assert not result.get('verified_motion') and not result.get('ok')
 
 
-def test_composed_feedback_revises_a_window_brief_once_without_editing_media(tmp_path,monkeypatch):
+def test_composed_findings_repair_boundaries_but_never_rewrite_the_brief(tmp_path,monkeypatch):
+    """Round 1, 19 Nov (m04, m05): composed rejections handed to repair_requirements came back as exclusions in
+    must_show ('Not a weather instrument...'), and the narrower brief re-judged approved pictures. A composed finding
+    may move a boundary; it never reaches the brief, and the media is never edited."""
     import wf1_short as wf
     window=dict(name='Research',first=0,last=3,t0=0,t1=4,say='the history of science',must_show='People')
     pack=dict(coverage=dict(words=[],windows=[window]),footage=[dict(i=0,clips=[dict(path='unchanged.mp4')])])
     path=tmp_path/'pack.json';path.write_text(json.dumps(dict(pack=pack,record={})))
     monkeypatch.setattr(wf.wf3,'load_pack',lambda _:json.loads(path.read_text())['pack'])
     monkeypatch.setattr(wf,'_llm',lambda:None)
-    monkeypatch.setattr(coverage,'repair_boundaries',lambda *a:False)
-    calls=[]
-    def revise(data,wanted,evidence,llm):
-        assert wanted==[0] and evidence['stage']=='composed-frame rejection'
-        calls.append(evidence);data['windows'][0]['must_show']='Actual scientific work'
-        return {}
-    monkeypatch.setattr(coverage,'repair_requirements',revise)
+    boundaries=[]
+    monkeypatch.setattr(coverage,'repair_boundaries',lambda data,rejected,llm:boundaries.append(rejected) or False)
+    monkeypatch.setattr(coverage,'repair_requirements',lambda *a:pytest.fail('a composed finding reached the brief'))
     ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
     rejection=[dict(f=[3,33],reason='Unrelated activity',source='https://publisher.example/film')]
-    wf._repair_window_boundaries(ctx,rejection);wf._repair_window_boundaries(ctx,rejection)
+    wf._repair_window_boundaries(ctx,rejection)
     saved=json.loads(path.read_text())['pack']
-    assert len(calls)==1 and saved['coverage_context_rescout_pending'] is True
+    assert boundaries==[rejection]
     assert saved['footage']==pack['footage']
-    assert saved['coverage']['windows'][0]['say']==window['say']
-    assert saved['composed_requirement_windows']==[0]
+    assert saved['coverage']['windows'][0]['must_show']=='People' and 'composed_requirement_windows' not in saved
+
+
+def test_a_boundary_answer_that_cannot_be_applied_leaves_the_film_going(tmp_path,monkeypatch):
+    import wf1_short as wf
+    pack=dict(coverage=dict(words=[],windows=[dict(name='A',t0=0,t1=1,say='a',must_show='a')]),footage=[])
+    path=tmp_path/'pack.json';path.write_text(json.dumps(dict(pack=pack,record={})))
+    monkeypatch.setattr(wf.wf3,'load_pack',lambda _:json.loads(path.read_text())['pack'])
+    monkeypatch.setattr(wf,'_llm',lambda:None)
+    def invalid(*a):raise RuntimeError('invalid documentary boundary repair')
+    monkeypatch.setattr(coverage,'repair_boundaries',invalid)
+    logged=[]
+    wf._repair_window_boundaries(SimpleNamespace(supply=str(tmp_path),log=logged.append),[dict(f=[0,30],reason='x')])
+    assert logged and 'not applied' in logged[0]
+
+
+def test_the_refill_brief_never_carries_rejection_reasons(tmp_path,monkeypatch):
+    """19 Nov: the last 60 rejection reasons went to the director as 'research', and its brief excluded what the
+    checker had objected to. The refill sends what was found, never why a check said no."""
+    import wf1_short as wf
+    (tmp_path/'placement_checks.json').write_text(json.dumps({'k':dict(ok=False,reason='no readable attribution')}))
+    pack=dict(coverage=dict(contract=3,windows=[dict(name='A',must_show='A',say='a',t0=0,t1=2)]),
+              referent_research={'sources':[]},footage=[dict(i=0,clips=[dict(subject='A',shows='a stage',source={'url':'u'})])],
+              pictures={},credits=[])
+    (tmp_path/'pack.json').write_text(json.dumps({'pack':pack}))
+    monkeypatch.setattr(wf,'_llm',lambda:None)
+    seen=[]
+    def revise(data,wanted,evidence,llm):
+        seen.append(evidence);return {}
+    monkeypatch.setattr(coverage,'repair_requirements',revise)
+    monkeypatch.setattr(wf,'motion_research',lambda *a:True)
+    wf.refill(SimpleNamespace(supply=str(tmp_path),log=lambda _:None),dict(title='A',style={'id':'window'}),pack,
+              dict(weak_windows=[0],real_seconds=2,moving_seconds=0))
+    assert seen and 'rejected' not in seen[0] and 'no readable attribution' not in json.dumps(seen[0])
 
 
 @pytest.mark.parametrize('changed,missing',[(True,False),(False,False),(True,True)])

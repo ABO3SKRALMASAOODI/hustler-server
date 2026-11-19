@@ -20,11 +20,15 @@ What differs between the styles is how a found picture is shown and the film's t
 
 Moving footage fills the phone in every style (owner's rating, 16 Nov 2026: cutaways as small windows over a blurred
 fill are the defect; the references cut real footage full bleed). A wide clip is cover-cropped round the subject the
-look placed (its x) and its people; only a clip too small to fill the phone within 3x stays in a window.
+look placed (its x) and its people. Footage is fetched and cut at the phone's full size in every style (FOOTAGE_FRAME;
+19 Nov: the window and prints styles asked for their card size, so every 16:9 clip arrived 1080x608 and fell into a
+window card), and a clip still too small to fill the phone within 3x is brought up first with a detail-keeping scaler
+(fill_size), never shown as a window.
 
 No model is read here. Which words are displayed, which sentences speak of the past and which years the story
 speaks from are handed in by the caller (wf1_short.py: a model that read the sentences).
 """
+import json
 import os
 import sys
 
@@ -63,6 +67,10 @@ STYLES = {
         mono="past", flash="turn", aim_s=0.95, share=0.76, cap_y=0.675),
 }
 ORDER = ["footage-cut", "window", "archive-reel", "prints"]
+# The size every style asks the footage engine for: moving footage fills the phone in every style, so a clip keeps its
+# source's own pixels up to the phone's long side (a 1280x720 source stays 1280x720 and fills the phone at 2.67x). A
+# style's own `footage` size was its card's: asked of the engine it capped a 16:9 source at 1080x608 (3.16x, a window).
+FOOTAGE_FRAME = (W, H)
 
 WINDOW_BOX = (0.04, 0.205, 0.96, 0.593)        # four by three, the width of the phone, between the mark and the caption seat
 PRINT_W = 0.62                                 # a square print, 670 px: small enough that the one under it shows
@@ -212,16 +220,51 @@ def clip_cover_up(rec):
     return max(W / max(pw, 1.0), H / max(ph, 1.0))
 
 
+def fill_size(rec, work, ffmpeg):
+    """A clip too small to fill the phone within F.MAX_UP (a 360p or 480p source) is brought up once to fill it at 1x
+    with a detail-keeping scaler (lanczos and a light unsharp mask, into <work>/filled) instead of being shown as a
+    window card over its own blur (round 1, 19 Nov: every clip of four films sat in that card). Returns the filled copy's
+    record (its faces and x are fractions and stand), or the record as it is when it already fills within MAX_UP,
+    cannot be read, or the scale fails: then the driver fills the phone past 3x for that clip (clip_meta)."""
+    import hashlib
+    import math
+    import subprocess
+    up = clip_cover_up(rec)
+    path = str(rec.get("path") or "")
+    if up <= F.MAX_UP or not work or not ffmpeg or not rec.get("w") or not rec.get("h") or not os.path.isfile(path):
+        return rec
+    w2 = int(math.ceil(float(rec["w"]) * up / 2) * 2)
+    h2 = int(math.ceil(float(rec["h"]) * up / 2) * 2)
+    out_dir = os.path.join(work, "filled")
+    dst = os.path.join(out_dir, hashlib.sha256(json.dumps([os.path.realpath(path), w2, h2]).encode()).hexdigest()[:16] + ".mp4")
+    if not os.path.exists(dst):
+        os.makedirs(out_dir, exist_ok=True)
+        r = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-i", path, "-vf",
+                            f"scale={w2}:{h2}:flags=lanczos,unsharp=5:5:0.6:5:5:0.0,setsar=1,format=yuv420p", "-an",
+                            "-c:v", "libx264", "-crf", "16", "-preset", "fast", "-movflags", "+faststart", "-y",
+                            dst + ".part.mp4"], capture_output=True, text=True, timeout=600)
+        if r.returncode != 0 or not os.path.exists(dst + ".part.mp4"):
+            return rec
+        os.replace(dst + ".part.mp4", dst)
+    return dict(rec, path=dst, w=w2, h=h2, upscaled_from=dict(path=path, w=int(rec["w"]), h=int(rec["h"]), up=round(up, 3)))
+
+
 def clip_meta(rec):
     """What the pacing driver needs to frame a clip full bleed: its size, its faces, where the look placed its subject
     (x, the vertical crop centred there) and how far it may be pushed in. A clip already at the frame's shape keeps
-    the earlier limits (no push into a face at the references' size); a wide clip may come in 12% past its cover."""
+    the earlier limits (no push into a face at the references' size); a wide clip may come in 12% past its cover. A
+    clip the composed review found cut through a face or missing its subject (rec['reframe']) is framed again: on its
+    biggest face, else on its subject, never pushed past its cover."""
     fm = F.face_meta(rec)
     up = clip_cover_up(rec)
     big_face = any(f[3] >= 0.24 for f in fm)
+    reframe = bool(rec.get("reframe"))
     m = dict(pw=int(rec.get("w") or W), ph=int(rec.get("h") or H), faces=fm,
-             max_up=round(max(1.0, up) * (1.0 if big_face else 1.12), 3))
-    if rec.get("x") is not None and not fm:
+             max_up=round(max(1.0, up) * (1.0 if big_face or reframe else 1.12), 3))
+    if reframe and fm:
+        big = max(fm, key=lambda f: f[2] * f[3])
+        m["focus"] = (min(max(big[0] + big[2] / 2, 0.0), 1.0), min(max(big[4], 0.0), 1.0))      # its eyes
+    elif rec.get("x") is not None and not fm:
         try:
             m["focus"] = (min(max(float(rec["x"]), 0.0), 1.0), 0.45)
         except (TypeError, ValueError):
@@ -299,6 +342,21 @@ def build(script, sup, style_id, direction=None):
     for candidates in footage.values():
         for candidate in candidates:
             if candidate["path"] in composed_stills:candidate["subject_motion"]=False
+    # Clips fill the phone in every style: one too small to fill it within 3x is brought up first with a detail-keeping
+    # scaler (fill_size), never put in a window card.
+    footage = {i: [fill_size(c, sup.get("work"), sup.get("ffmpeg")) for c in lst] for i, lst in footage.items()}
+    # The composed review's findings, each repaired where it was found (wf1_short._rebuild_rejected): a crop through a
+    # face or a subject left outside the frame is framed again; a contradiction gives that one window's slot to its
+    # next-ranked candidate and leaves the picture to every other window.
+    # Findings are keyed on the candidate's own path (origin); a copy derived from it (text cleared) inherits the
+    # candidate's reframe, so clip_meta frames it again.
+    reframe = {(r.get("origin") or r.get("path")) if isinstance(r, dict) else r for r in d.get("reframe") or []}
+    if reframe:
+        footage = {i: [dict(c, reframe=True) if c["path"] in reframe else c for c in lst] for i, lst in footage.items()}
+        pics = {k: [dict(r, reframe=True) if r["path"] in reframe else r for r in lst] for k, lst in pics.items()}
+    # (window, path): that window's slot goes to its next candidate; (window, None): the window rests on the speaker.
+    rejected_pairs = {(r.get("window"), r.get("origin") or r.get("path")) for r in d.get("reject") or []
+                      if isinstance(r, dict) and (r.get("origin") or r.get("path") or (r.get("fault") == "speaker" and r.get("window") is not None))}
     take = sup["take"]
     keys, meta = {}, {}
     # the take's own shots (a show cut between cameras): each is framed on its own speaker. One file, one asset a shot
@@ -350,7 +408,7 @@ def build(script, sup, style_id, direction=None):
     from placement_check import propose, check
     from wf1_coverage import checked_proposals, require_coverage
     ins,placement_report=checked_proposals(coverage,footage,pics,f_end/FPS,
-        lambda rows:check(rows,script,clock,sup['work'],sup['ffmpeg']),composed_stills)
+        lambda rows:check(rows,script,clock,sup['work'],sup['ffmpeg']),composed_stills,rejected=rejected_pairs)
     for row in ins:                                      # a clip the check cut clear of another editor's text is a new file
         if row[4]["path"] not in keys:
             keys[row[4]["path"]] = (P.video if row[2] == "clip" else P.image)(f"{'v' if row[2] == 'clip' else 'p'}{len(keys):02d}", row[4])
@@ -386,7 +444,16 @@ def build(script, sup, style_id, direction=None):
         return st["mono"] == "all" or (st["mono"] == "past" and by_section and seg_at(f0) in past)
 
     def note(f0, f1, kind, name, rec, mode):
-        P.pictures.append(dict(f=[f0, f1], visible_f=[f0, rec.get("audit_until", f1)], kind=kind, name=name, path=rec["path"], shows=rec.get("shows"), mode=mode,
+        # origin: the candidate this picture is (a copy the check cut clear of another editor's text is placed under a
+        # new path). The composed review's findings are keyed on it, so its repair reaches the candidate the next build
+        # proposes (adversarial review, 20 Nov: findings keyed on the cleared path never matched and the short was lost).
+        origin = (rec.get("text_cleared") or {}).get("from_path") or rec["path"]
+        P.pictures.append(dict(f=[f0, f1], visible_f=[f0, rec.get("audit_until", f1)], kind=kind, name=name, path=rec["path"], origin=origin,
+                               shows=rec.get("shows"), mode=mode,
+                               window=rec.get("window"), clause=rec.get("clause"), clause_t=rec.get("clause_t"), fit=rec.get("fit"),
+                               reframed=bool(rec.get("reframe")), attribution=rec.get("attribution"), name_super=rec.get("name_super"),
+                               w=rec.get("w"), h=rec.get("h"), upscaled_from=rec.get("upscaled_from"), rung=rec.get("rung"),
+                               how=rec.get("how"), source_size=rec.get("source_size"),
                                illustration=rec.get('illustration'), source_evidence=rec.get('source') or dict(url=rec.get('page'),title=rec.get('title'),channel=rec.get('credit')),
                                finish="black and white" if is_mono(f0) else None, motion_p90=rec.get('placed_motion_p90'),
                                verified_motion=rec.get('verified_motion') is True,
@@ -446,9 +513,7 @@ def build(script, sup, style_id, direction=None):
     def bleed(f0, f1, kind, name, rec, key):
         if rec.get('provider')=='primary-document':
             return window(f0,f1,kind,name,rec,key)             # the approved document crop is already the editorial rectangle
-        if kind == "clip" and clip_cover_up(rec) > F.MAX_UP:
-            return window(f0, f1, kind, name, rec, key)          # only a clip too small to fill the phone within 3x
-        if kind == "clip":
+        if kind == "clip":                                   # moving footage fills the phone, whatever its size (fill_size)
             it = P.shot([f0, f1], key, None, src=list(rec["src"]))
             it.pop("crop")
             meta[key] = clip_meta(rec)
@@ -456,7 +521,8 @@ def build(script, sup, style_id, direction=None):
             (fx, fy), _ = F.focus_of(rec)
             it = P.shot([f0, f1], key, F.cover_crop(rec["w"], rec["h"], W / H, (fx, fy), (0.5, 0.40)))
             if key not in meta:
-                m = dict(pw=int(rec["w"]), ph=int(rec["h"]), faces=[f for f in F.face_meta(rec) if f[3] * rec["h"] >= 60], max_up=F.MAX_UP)
+                m = dict(pw=int(rec["w"]), ph=int(rec["h"]), faces=[f for f in F.face_meta(rec) if f[3] * rec["h"] >= 60],
+                         max_up=1.0 if rec.get("reframe") else F.MAX_UP)      # framed again: no push into the face it cut
                 if not m["faces"]:
                     try:
                         import numpy as np
@@ -511,7 +577,16 @@ def build(script, sup, style_id, direction=None):
                 window(f0, f1, kind, name, rec, keys[rec["path"]])
             cut_pts.append(f0)
             P.events.append(f0)
-            if d.get("labels", False) and name not in labelled:                         # a named thing is labelled once, small, while its own pictures are up
+            who = rec.get("name_super")
+            if who and who not in labelled:
+                # The person the picture shows, named as its source names them (a lower third the phone slice cuts
+                # away, the source's title or channel: placement_check name_super), in the label type, once.
+                labelled.add(who)
+                b_lab, j = f1, k + 1
+                while j < len(ins) and ins[j][0] == b_lab and ins[j][4].get("name_super") == who:
+                    b_lab, j = ins[j][1], j + 1
+                labels.append((f0 + 2, min(b_lab, f0 + int(2.4 * FPS)), str(who)))
+            elif not who and d.get("labels", False) and name not in labelled:            # a named thing is labelled once, small, while its own pictures are up
                 labelled.add(name)
                 b_lab, j = f1, k + 1
                 while j < len(ins) and ins[j][0] == b_lab and ins[j][3] == name:
@@ -576,12 +651,19 @@ def build(script, sup, style_id, direction=None):
         if b - a < 14:
             continue
         t = text.upper()
-        wd = P.R.width("lab", t) / W
+        rows = [t]
+        words = t.split()
+        if P.R.width("lab", t) / W > 0.66 and len(words) > 1:          # a long name goes on two lines, never smaller
+            n = min(range(1, len(words)), key=lambda n: max(P.R.width("lab", " ".join(words[:n])), P.R.width("lab", " ".join(words[n:]))))
+            rows = [" ".join(words[:n]), " ".join(words[n:])]
+        wd = max(P.R.width("lab", r_) for r_ in rows) / W
         if wd > 0.66:
             continue
         y = 0.752
-        P.block([a, b], [0.5 - wd / 2 - 0.022, y - 0.030, 0.5 + wd / 2 + 0.022, y + 0.013], pal["plate"], z=6, op=0.78, radius=0.008)
-        P.word([a, b], t, "lab", 0.5, y, pal["ink"], 0.95, align="c", z=7, role="stat")
+        y_last = y + 0.036 * (len(rows) - 1)
+        P.block([a, b], [0.5 - wd / 2 - 0.022, y - 0.030, 0.5 + wd / 2 + 0.022, y_last + 0.013], pal["plate"], z=6, op=0.78, radius=0.008)
+        for n, r_ in enumerate(rows):
+            P.word([a, b], r_, "lab", 0.5, y + 0.036 * n, pal["ink"], 0.95, align="c", z=7, role="stat")
     lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), hold=[(a - 1, b) for a, b, _ in shown], z=5)
     P.items = inside(P.items, f_end)
     P.items = ink_by_ground(P.items, P.voices, bright)
