@@ -37,7 +37,13 @@ def test_old_cuts_without_spans_stay_one_piece_a_shot():
 def test_stress_moves_break_the_holds_the_director_left():
     holds = [[30, 200], [300, 330]]
     stress = [(40, 0.9), (100, 0.7), (150, 0.95), (195, 1.0), (310, 0.9)]
-    assert film.stress_moves(holds, stress) == [150]
+    assert film.stress_moves(holds, stress) == [100, 150]                 # every part left under three seconds
+    long = [[0, 400]]
+    stress = [(f, 0.5) for f in range(0, 400, 20)] + [(200, 1.0), (90, 0.9), (300, 0.9)]
+    got = film.stress_moves(long, stress)
+    assert 200 in got and 90 in got and 300 in got
+    edges = [0] + got + [400]
+    assert max(b - a for a, b in zip(edges, edges[1:])) <= 90
 
 
 def _sup(tmp_path, cuts):

@@ -335,15 +335,21 @@ def medium_face_h(faces, ph, up=TAKE_UP):
     return round(min(TAKE_FACE_H, up / PUNCH_STEP * fh * float(ph) / H), 4)
 
 
-def stress_moves(holds, stress, edge=FPS):
-    """One move for each hold the director left unbroken (speaker_moves' unresolved holds, frame bounds): on the
-    voice's strongest stress peak inside it, a second clear of its ends. The voice's own emphasis motivates it, by
-    signal; a hold with no stress peak keeps its slow drift."""
-    out = []
-    for a, b in holds or []:
+def stress_moves(holds, stress, edge=FPS, most=3 * FPS):
+    """Moves for the holds the director left unbroken (speaker_moves' unresolved holds, frame bounds): each on the
+    voice's strongest stress peak inside the hold, a second clear of its ends, and again in either part still longer
+    than `most` (the director's own three seconds). The voice's emphasis places every one, by signal, never a clock;
+    a stretch with no stress peak keeps its slow drift."""
+    out, todo = [], [tuple(h) for h in holds or []]
+    while todo:
+        a, b = todo.pop()
+        if b - a <= most:
+            continue
         inner = [(s_, f) for f, s_ in stress or [] if a + edge <= f <= b - edge]
         if inner:
-            out.append(int(max(inner)[1]))
+            f = int(max(inner)[1])
+            out.append(f)
+            todo += [(a, f), (f, b)]
     return sorted(out)
 
 
