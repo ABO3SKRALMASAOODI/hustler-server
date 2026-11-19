@@ -2310,7 +2310,7 @@ def render(ctx, script, sc):
     mix = F.audio_master(pack["ffmpeg"], l1, pack["narration"], sound, ctx.tmp) if not os.path.exists(sound) else {}
     settle = os.environ.get("SHELL_RENDER_CMD")       # a renderer in place of the Mac engine: the box image's, where a film is settled
     if not os.path.exists(out):
-        scene = chain.alien_bank(ctx, sc["l1"])          # the scene to draw: the alien bank's asks laid out first, when it carries any
+        scene = chain.lay_devices(ctx, sc["l1"])          # the scene to draw: the alien bank's asks laid out first, when it carries any
         if settle:
             log = chain.sh(ctx, ["zsh", settle, scene, ctx.supply, sound, out + ".part.mp4"], label=f"wf3-render-{ctx.run_id}", heavy=os.environ.get("SHELL_RENDER_REMOTE") != "1", timeout=7200)
             j = {}

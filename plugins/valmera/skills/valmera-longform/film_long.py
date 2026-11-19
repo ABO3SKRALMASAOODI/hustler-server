@@ -1101,7 +1101,7 @@ def score(ctx, script):
     ctx.log(f"plan: {l1['dur_f'] / FPS:.1f} s, {len(l1['items'])} items, density {json.dumps(dens)}, taste {taste['ok']} {taste['problems'][:3]}")
     look = os.path.join(ctx.run_dir, "look")
     frames = sorted({int(f) for f in beats["look"] if 0 <= int(f) < l1["dur_f"]})
-    chain.sh(ctx, ["env", f"PYTHONPATH={env_path()}", chain.PY, "-m", "scene.run", "still", "--l1", out, "--work", ctx.supply,
+    chain.sh(ctx, ["env", f"PYTHONPATH={env_path()}", chain.PY, "-m", "scene.run", "still", "--l1", chain.lay_devices(ctx, out), "--work", ctx.supply,
                    "--frames", ",".join(str(f) for f in frames), "--dir", look], label=f"wf4-look-{ctx.run_id}", heavy=True, timeout=3600)
     cols = 6
     subprocess.run([pack["ffmpeg"], "-v", "error", "-y", "-pattern_type", "glob", "-i", os.path.join(look, "f*.png"), "-vf",
@@ -1219,7 +1219,7 @@ def render(ctx, script, sc):
     if not os.path.exists(sound):
         sound, mix = audio_master(ctx, l1, pack["narration"])
     if not os.path.exists(out):
-        log = chain.sh(ctx, ["env", f"PYTHONPATH={env_path()}", f"VALMERA_SCENE_CACHE={cache}", chain.PY, "-m", "scene.run", "render", "--l1", sc["l1"],
+        log = chain.sh(ctx, ["env", f"PYTHONPATH={env_path()}", f"VALMERA_SCENE_CACHE={cache}", chain.PY, "-m", "scene.run", "render", "--l1", chain.lay_devices(ctx, sc["l1"]),
                              "--work", ctx.supply, "--out", out + ".part.mp4", "--tier", ctx.args.get("tier", "master"), "--strict", "--cache", cache,
                              "--audio", sound], label=f"wf4-render-{ctx.run_id}", heavy=True, timeout=6 * 3600)
         os.replace(out + ".part.mp4", out)
