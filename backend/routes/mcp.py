@@ -966,11 +966,12 @@ SESSION_TOOLS = [
     {"name": "download_url",
      "description": "A temporary URL for watching or downloading a render of "
                     "an explicit project, with a durable receipt. asset_id recovers a historical render. "
-                    "Without kind it returns the finished export when one exists, else the draft. "
+                    "Without kind it returns the finished export when one exists. "
                     "kind 'preview' (complete draft/approval: LOW-RESOLUTION, for checking the edit, "
                     "never the user's finished video), 'preview_check' (changed sections), or "
-                    "'final' (a completed full-quality export). This tool cannot create a final "
-                    "export: for the video the user keeps, call export_final first.",
+                    "'final' (a completed full-quality export). Without kind and asset_id it is "
+                    "the user's video: when no full-quality export of the edit exists it starts "
+                    "that full-quality export (as export_final does) and answers with the job to wait for.",
      "inputSchema": {"type": "object", "properties": {
          "project_id": {"type": "integer"},
          "kind": {"type": "string", "enum": ["preview", "preview_check", "final"]},
@@ -3652,6 +3653,83 @@ def _preview_missing(cur, project, project_id, kind, version, asset_id):
                              asset_id=asset_id)
 
 
+def _export_for_download(tok, project_id, args):
+    """download_url with no kind and no asset asks for THE video. When no
+    downloadable final exists, make it: start (or join) the full-quality
+    export of the edit and answer with its job, so the caller ends with the
+    deliverable instead of a draft.
+
+    Ticket #4 recurred three times (27 Oct - 16 Nov 2026: p4880, p5217,
+    p5218, p5251, p2842, p5909): paying MCP users' apps called download_url
+    and handed the 270x480 / 854x480 draft to the user as their video. A
+    draft label and a 'call export_final' sentence did not reach the
+    outcome; the tool now does the export itself.
+
+    Returns (result, note): result is the tool answer when the export was
+    started, joined or is already done; otherwise None and note says why the
+    export could not start (the draft answer carries it)."""
+    try:
+        with vdb() as conn:
+            cur = conn.cursor()
+            if not _project_for_user(cur, project_id, tok["user_id"]):
+                return None, None
+            version = args.get("edl_version")
+            if version is not None:
+                try:
+                    version = int(version)
+                except (TypeError, ValueError):
+                    return None, None
+            sql = """SELECT id, meta FROM assets
+                      WHERE project_id = %s AND kind = 'render'
+                        AND meta->>'variant' = %s"""
+            params = [project_id, "final"]
+            if version is not None:
+                sql += " AND (meta->>'edl_version')::int = %s"
+                params.append(version)
+            cur.execute(sql + " ORDER BY id DESC LIMIT 1", params)
+            frow = cur.fetchone()
+            pinned = version is not None
+            if version is None:
+                version = _latest_edl_version(cur, project_id)
+            if frow:
+                meta = frow.get("meta") or {}
+                try:
+                    current = (pinned or version is None or
+                               int(meta.get("edl_version")) >= int(version))
+                except (TypeError, ValueError):
+                    current = True
+                gate = _final_gate(cur, project_id, tok["user_id"])
+                if current and gate(frow["id"], meta, meta.get("edl_version")):
+                    return None, None       # the finished export is served
+    except Exception as e:  # noqa: BLE001 — the plain download still answers
+        return None, f"the export could not be checked ({str(e)[:160]})"
+    if not version:
+        return None, None
+    try:
+        got = _t_export_final(tok, {"project_id": project_id,
+                                    "edl_version": int(version)})
+    except Exception as e:  # noqa: BLE001 — the draft answer still holds
+        print(f"[mcp] download_url could not start the export of p"
+              f"{project_id} v{version}: {str(e)[:200]}", flush=True)
+        return None, "the export could not start; call export_final"
+    if not got.get("isError"):
+        if (got.get("structuredContent") or {}).get("export"):
+            content = list(got.get("content") or [])
+            if content and content[0].get("type") == "text":
+                content[0] = dict(content[0], text=(
+                    "No full-quality export of this edit existed, so "
+                    "download_url started it (a preview is only a "
+                    "low-resolution draft, never the user's video).\n"
+                    + content[0]["text"]))
+            got = dict(got, content=content)
+            got["structuredContent"] = dict(
+                got["structuredContent"], started_by="download_url")
+        return got, None
+    text = " ".join(c.get("text", "") for c in got.get("content") or []
+                    if c.get("type") == "text")
+    return None, text[:600] or "the export could not start"
+
+
 def _t_download_url(tok, args):
     project_id, error = _required_project_id(args)
     if error:
@@ -3664,6 +3742,11 @@ def _t_download_url(tok, args):
         asset_id = int(args["asset_id"]) if args.get("asset_id") is not None else None
     except (TypeError, ValueError):
         return _session_error("asset_id must be an integer.")
+    export_note = None
+    if not explicit_kind and asset_id is None:
+        exported, export_note = _export_for_download(tok, project_id, args)
+        if exported is not None:
+            return exported
     with vdb() as conn:
         cur = conn.cursor()
         project = _project_for_user(cur, project_id, tok["user_id"])
@@ -3861,8 +3944,14 @@ def _t_download_url(tok, args):
                 receipt["current_edl_version"] = int(current)
         except (TypeError, ValueError):
             stale = ""
+        export_line = ""
+        if export_note:
+            export_line = ("\nThe full-quality export could not start yet: "
+                           + export_note)
+            receipt["export_blocked"] = export_note
         text = (f"{identity}\n{kind} of EDL v{ver} (link valid a few "
-                f"hours):\n{url}{stale}\n\n" + _draft_notice(row, project_id, ver)
+                f"hours):\n{url}{stale}{export_line}\n\n"
+                + _draft_notice(row, project_id, ver)
                 + "\n\nPREVIEW RECEIPT: "
                 + json.dumps(receipt, sort_keys=True)
                 + _preview_policy_line(receipt))

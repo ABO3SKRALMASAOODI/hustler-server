@@ -2,7 +2,8 @@
 really did with one clip and one typed sentence (the one-command path; market.py starts it).
 
 ideas   one model call reads what editors answer to (the 02-editing-tutorials references' own captions and counts), the
-        clips the owner already works from (podcast sources with their transcripts) and the owner's few words, if any,
+        clips the owner already works from (podcast sources with their transcripts, their measured picture and frames of
+        them, so the clip whose export will look premium is chosen) and the owner's few words, if any,
         and returns ranked ideas: the editor's pain or technique, the true claim, the clip and the seconds, two sentences
         to type into Valmera and what each must visibly do, the style
 script  records the real output first: the clip is uploaded to a local stack of the product (the Gauntlet's runner, its
@@ -11,11 +12,16 @@ script  records the real output first: the clip is uploaded to a local stack of 
         element; a sentence whose result is not visible is not shown: the second sentence is recorded, and if that fails
         too the run stops. Then the narration is written around the recording, every claim audited against its receipts
         by a second call, and the typed sentence is spoken word for word
-supply  the narrator (Phonon Easton, the stories read), real footage per line (worker/footage), free photographs of what it
-        names, and the recording cut in with its own sound between two narrator lines: the clip as uploaded (the before)
-        and the export (the after); a frame of the export can open the film
+supply  the narrator (Phonon Easton, the stories read), real footage per line (worker/footage; a line whose only picture
+        is the recording gets footage of what its words name too), free photographs of what it names, and the recording
+        cut in with its own sound between two narrator lines: the clip as uploaded (the before) and the export (the after);
+        a frame of the export can open the film. The recording is supplied as its own shots (cut at its edit list's events
+        and its measured picture changes), ranked for every line's words by a model that sees them, each file carrying
+        the recording's sha256 and first second so no second plays twice under two names
 score   the story reel builder (valmera-stories/reel.py) at a pace set from this film's own narration against the marketing
-        references' medians; the recording is shown as delivered (no section finish, flash or caption pool over it); the
+        references' medians; the recording is shown as delivered (no section finish, flash or look over it), full frame
+        for the real-voice before and after and the hook's landing, and a moving print on the style's board under the
+        narration's captions on the narrated lines; the
         film's editing device (devices.py: the timeline pull-back, the wipe and its count-up grid, or the triptych) is laid
         on its own beats; then
         every picture is checked against the exact words it sits under (gpt-6-sol, low) and a picture that does not fit
@@ -27,6 +33,7 @@ Model calls run on OpenAI; nothing is spent on Anthropic. Nothing is published.
 import base64
 import hashlib
 import json
+import math
 import os
 import shutil
 import statistics
@@ -161,6 +168,143 @@ def sources():
             yt = next((x for x in d.split("-") if len(x) == 11), d.split("-")[0])
             out.append(dict(id=yt, file=vid, captions=cap))
     return out
+
+
+LOOK_V = 1                # the measures below; a cached look of another version is measured again
+LOOK_CACHE = os.environ.get("WF2_LOOK_CACHE", f"{VV}/workflow/marketing/source_look.json")
+LOOK_FRAMES = 12          # frames a look is measured on, spread over the file
+IDEA_FRAMES = 6           # frames of each source the ideas call sees (at the windows it is offered, spread over them)
+
+
+def probe_wh(path):
+    """(width, height) of a video's first picture stream, or None."""
+    try:
+        r = subprocess.run([PX.FP, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height:format=duration",
+                            "-of", "json", path], capture_output=True, text=True, timeout=60)
+        j = json.loads(r.stdout)
+        st = j["streams"][0]
+        return int(st["width"]), int(st["height"]), float((j.get("format") or {}).get("duration") or 0.0)
+    except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError):
+        return None
+
+
+def grey_frame(path, t, w, h):
+    """One frame of a video at second t as a grey numpy array (h, w) at its native size, or None."""
+    import numpy as np
+    try:
+        r = subprocess.run([PX.FF, "-v", "error", "-ss", f"{max(t, 0):.3f}", "-i", path, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                           capture_output=True, timeout=60)
+    except (subprocess.SubprocessError, OSError):
+        return None                       # a slow or broken frame is a frame not measured, never a stopped run
+    if r.returncode != 0 or len(r.stdout) < w * h:
+        return None
+    return np.frombuffer(r.stdout[:w * h], np.uint8).reshape(h, w).astype(np.float32)
+
+
+def look_measures(frames, w, h):
+    """How a clip will look as a vertical film, measured on its frames (grey, native size), no model:
+      crop_px     the width of its 9:16 crop in source pixels (the product's reframe takes the full height of a wider
+                  picture); upscale is 1080 over it: 640x480 VHS crops 270 px wide and is blown up 4x
+      acuity      how crisp its edges are on that centre crop shown at phone size (540x960): the 99.5th percentile of
+                  the Laplacian over that of the gradient, which does not depend on contrast or on how busy the picture
+                  is (20 Nov, the owner's three sources: the 1920x1080 podcast 1.04, the 654x480 and the 640x480 VHS
+                  clips 0.57 and 0.61)
+      overlay     a burned-in band (a timecode, a logo, captions) in the top fifth or the bottom quarter: three or more
+                  neighbouring grid cells whose edges stay dense in every frame (frames spread over the whole source,
+                  so the picture under them changes) while the frame's middle does not, [x0, y0, x1, y1] in frame
+                  fractions, or None (the VHS clip's 'R12:23:28:18' measured at y 0.875-0.958; the HD and the other SD
+                  source: none)"""
+    import numpy as np
+    from PIL import Image
+    crop_w = min(float(w), h * 9.0 / 16.0)
+    acu = []
+    for g in frames:
+        x0 = int((w - crop_w) / 2)
+        a = np.asarray(Image.fromarray(g[:, x0:x0 + int(crop_w)].astype(np.uint8)).resize((540, 960), Image.BICUBIC), np.float32)
+        lap = np.abs(a[1:-1, 1:-1] * -4 + a[:-2, 1:-1] + a[2:, 1:-1] + a[1:-1, :-2] + a[1:-1, 2:])
+        grad = np.hypot(a[1:-1, 2:] - a[1:-1, :-2], a[2:, 1:-1] - a[:-2, 1:-1]) / 2
+        top = float(np.percentile(grad, 99.5))
+        if top >= 2.0:                                    # a black or flat frame says nothing about edges
+            acu.append(float(np.percentile(lap, 99.5)) / top)
+    overlay = None
+    if len(frames) >= 4:
+        cols, rows = 16, 24
+        dens = []
+        for g in frames:
+            a = np.asarray(Image.fromarray(g.astype(np.uint8)).resize((cols * 20, rows * 12), Image.BILINEAR), np.float32)
+            e = (np.abs(np.diff(a, axis=1))[:-1, :] + np.abs(np.diff(a, axis=0))[:, :-1]) > 48
+            dens.append(np.pad(e.astype(np.float32), ((0, 1), (0, 1))).reshape(rows, 12, cols, 20).mean(axis=(1, 3)))
+        steady = np.percentile(np.stack(dens), 20, axis=0) >= 0.12
+        if steady[int(rows * 0.2):int(rows * 0.75)].mean() > 0.25:
+            steady[:] = False             # texture everywhere in every frame is the picture itself, not a band laid over it
+        cells = []
+        for r in list(range(int(rows * 0.2))) + list(range(int(rows * 0.75), rows)):
+            run = []
+            for c in range(cols + 1):
+                if c < cols and steady[r, c]:
+                    run.append(c)
+                    continue
+                if len(run) >= 3:
+                    cells += [(r, q) for q in run]
+                run = []
+        if cells:
+            rs, cs = [r for r, _ in cells], [c for _, c in cells]
+            overlay = [round(min(cs) / cols, 3), round(min(rs) / rows, 3), round((max(cs) + 1) / cols, 3), round((max(rs) + 1) / rows, 3)]
+    return dict(w=int(w), h=int(h), crop_px=int(round(crop_w)), upscale=round(1080.0 / max(crop_w, 1.0), 2),
+                acuity=round(float(np.median(acu)), 3) if acu else None, overlay=overlay)
+
+
+def source_look(path, t0=None, t1=None, keep=True):
+    """look_measures of a video file (or of its seconds t0-t1), measured once and, with keep (the owner's sources),
+    kept in LOOK_CACHE by the file's path, size and time; a run's own files (keep=False) are measured and not kept.
+    None when the file cannot be read or measured: the look only informs a model, so a failed measure (a timeout, a
+    broken frame, a bad cache) is 'not measured' and the ideas stage and the export check go on."""
+    try:
+        return _source_look(path, t0, t1, keep)
+    except Exception:  # noqa: BLE001 - a measure that informs a model never stops the run
+        return None
+
+
+def _source_look(path, t0, t1, keep):
+    try:
+        stt = os.stat(path)
+    except OSError:
+        return None
+    key = f"{LOOK_V}|{path}|{stt.st_size}|{int(stt.st_mtime)}|{t0}|{t1}"
+    cache = (jload(LOOK_CACHE, {}) or {}) if keep else {}
+    if key in cache:
+        return cache[key]
+    wh = probe_wh(path)
+    if not wh:
+        return None
+    w, h, dur = wh
+    a, b = (float(t0), float(t1)) if t0 is not None and t1 is not None else (0.0, dur)
+    times = [a + (b - a) * (k + 0.5) / LOOK_FRAMES for k in range(LOOK_FRAMES)]
+    frames = [g for g in (grey_frame(path, t, w, h) for t in times) if g is not None]
+    if not frames:
+        return None
+    out = look_measures(frames, w, h)
+    if not keep:
+        return out
+    try:
+        cache = jload(LOOK_CACHE, {}) or {}
+        cache[key] = out
+        os.makedirs(os.path.dirname(LOOK_CACHE), exist_ok=True)
+        jsave(LOOK_CACHE, cache)
+    except OSError:
+        pass
+    return out
+
+
+def look_line(look):
+    """A look as one plain line a model reads beside the frames."""
+    if not look:
+        return "not measured"
+    ov = look.get("overlay")
+    return (f"{look['w']}x{look['h']}; its vertical crop is {look['crop_px']} px wide, shown {look['upscale']}x at 1080; "
+            f"edge acuity at phone size {look.get('acuity')} (a sharp HD picture measures about 1.0, a soft 4x upscale about 0.6); "
+            + (f"a burned-in band (timecode, logo or text) stays in every frame at x {ov[0]}-{ov[2]}, y {ov[1]}-{ov[3]} of the frame"
+               if ov else "no burned-in band measured"))
 
 
 def transcript_windows(src, used=(), win_s=24.0, max_words=7000):
@@ -298,6 +442,23 @@ def device_of(script, knobs=None):
 
 
 
+def idea_frames(menu, files, per=IDEA_FRAMES, w=384):
+    """What the ideas call sees of each clip: up to `per` frames at the middles of the windows it is offered, spread over
+    them, each labelled with its clip and second. [] when no frame can be read."""
+    out = []
+    for m in menu:
+        wins = m.get("windows") or []
+        if not wins or not files.get(m["id"]):
+            continue
+        pick = [wins[round(k * (len(wins) - 1) / max(per - 1, 1))] for k in range(min(per, len(wins)))]
+        for win in pick:
+            t = (float(win["t0"]) + float(win["t1"])) / 2
+            b = frames(files[m["id"]], [t], w)[0]
+            if b:
+                out += [dict(type="text", text=f"clip {m['id']} at {t:.0f} s (window {win['t0']}-{win['t1']} s)"), img(b)]
+    return out
+
+
 def ideas(ctx):
     able = able_cards(ctx)
     srcs = sources()
@@ -309,7 +470,13 @@ def ideas(ctx):
     for r in rows:
         if r.get("source") and r.get("window"):
             used.setdefault(r["source"], []).append(r["window"])
-    menu_src = [dict(id=s["id"], windows=transcript_windows(s, used.get(s["file"], []))) for s in srcs]
+    # the clip is chosen with its picture in view (20 Nov: all three ideas took the 640x480 VHS clips, transcripts alone;
+    # the 1920x1080 source went unused and the film showed a soft 4x upscale with a timecode in every frame)
+    menu_src = []
+    for s in srcs:
+        look = source_look(s["file"])
+        menu_src.append(dict(id=s["id"], picture=look_line(look), windows=transcript_windows(s, used.get(s["file"], []))))
+    seen = idea_frames(menu_src, {s["id"]: s["file"] for s in srcs})
     pace = ref_pace()
     line = ctx.args.get("line")
     system = ("You are the ideas stage of Valmera's marketing workflow. Valmera (valmera.io) is an AI video editor: an editor uploads a "
@@ -320,7 +487,11 @@ def ideas(ctx):
               "reframe, a tighter cut that opens on the strongest line, captions in a stated style, pictures over what is said, a "
               "colour treatment, a title) and say exactly what must be visible for the film to be honest. Prefer a change an editor sees "
               "in one frame (pictures over what is said, captions in a stated style, a look) over one that rests on the exact syllable a "
-              "cut starts on, and ask for the vertical frame to be filled (cropped to the speaker), never the wide picture boxed in it.")
+              "cut starts on, and ask for the vertical frame to be filled (cropped to the speaker), never the wide picture boxed in it. "
+              "The export is the film's proof and must look premium, something a viewer wants to ask about: choose the clip with "
+              "its picture in view. You see frames of every clip and its measured picture: prefer a sharp picture at phone size "
+              "(a high-resolution source, shown near 1x in its vertical crop), with no burned-in timecode, logo or text band "
+              "(the vertical crop keeps it in every frame), and a well-lit speaker worth showing off.")
     content = (f"# What editors answered to (the reference films, most comments first)\n{json.dumps(references()[:25], ensure_ascii=False)}\n\n"
                f"# The references' pace (medians)\n{json.dumps(pace)}\n\n"
                f"# Styles this film can take\n" + "\n".join(f"- {s['id']}: {s['look']} Hook: {s['hook']}" for s in able) + "\n\n"
@@ -331,12 +502,14 @@ def ideas(ctx):
                + DL.prompt_block(ctx.workflow)
                + (f"# What the owner asked for\n{line}\nEvery idea must serve this.\n\n" if line else
                   "# No subject given\nChoose the pain or technique yourself: the one these clips can prove best today.\n\n")
-               + f"# The clips the owner works from (transcripts in windows with their seconds)\n{json.dumps(menu_src, ensure_ascii=False)}\n\n"
+               + f"# The clips the owner works from (each clip's measured picture, its transcript in windows with their seconds; "
+               f"frames of each clip follow)\n{json.dumps(menu_src, ensure_ascii=False)}\n\n"
                "Return JSON only: {\"ideas\": [three items, best first]}. Each: {\"title\": a plain title, \"kind\": before-after|technique, "
                "\"pain\": the editor's pain in their own words, \"technique\": what a great editor does about it, \"claim\": what Valmera "
                "does about it, one sentence a viewer can check in the film, \"source\": a clip id, \"t0\": seconds, \"t1\": seconds (25 to 45 s "
-               "of one speaker making one complete point, starting and ending on a sentence; the before must look like raw footage an "
-               "editor would get), \"asks\": [two different sentences to type, each under 80 characters, plain words as an editor types "
+               "of one speaker making one complete point, starting and ending on a sentence; the before is that clip as the camera "
+               "recorded it, unedited, and its picture is clean and sharp so the export looks premium), \"asks\": [two different "
+               "sentences to type, each under 80 characters, plain words as an editor types "
                "them, each asking for a vertical short], \"must_see\": [for each ask, the list of things that must be visible in the "
                "export for the film to show it honestly], \"hook\": the first spoken line, under 12 words, a pain or a stake, never a "
                "greeting, \"style\": one style id, \"format\": one of " + FORMAT_MENU + ", \"device\": for a tutorial, the editing device that shows "
@@ -350,6 +523,8 @@ def ideas(ctx):
                     "that actual result, not a story about the speaker. Use its typed sentence verbatim as the first "
                     "ask and its source window unchanged. Its export will still undergo the full visual check. "
                     "Choose different recordings across the ranked ideas. Do not claim it was recorded today.")
+    if seen:
+        content = [dict(type="text", text=content)] + seen
     got, use = ask(system, content, what="find ideas", effort="medium", max_tokens=12000)
     ids = {s["id"] for s in able}
     by = {s["id"]: s for s in srcs}
@@ -450,26 +625,42 @@ def img(b64):
     return dict(type="image", source=dict(type="base64", media_type="image/jpeg", data=b64))
 
 
-CHECK_V = 5           # the export check reads the spoken words too (EDL keep ranges on the source's captions); the end card is the brand's
+CHECK_V = 7           # the export check reads the spoken words too (EDL keep ranges on the source's captions); the end card is the brand's;
+                      # 6 (20 Nov): its "looks" is read on 720 px frames beside the measured picture (it called a soft 4x VHS upscale
+                      # "a clean vertical cut" from 288 px frames). A record, never a reason to refuse the recording
+                      # 7 (20 Nov): the after is the stretch that holds the landings the sentence names (the after held the trash
+                      # can and missed the black hole the payoff then named)
+LOOK_CHECK_FRAMES = 4     # full-size frames of the export the check reads its look from
+
+
+def export_edl(ex):
+    """The export's own edit list (records/<sid>/edl/v<NNN>.json beside its file's folder), or None."""
+    d = os.path.join(os.path.dirname(os.path.dirname(ex["file"])), "edl")
+    if ex.get("edl_version") is not None and os.path.exists(os.path.join(d, f"v{int(ex['edl_version']):03d}.json")):
+        return jload(os.path.join(d, f"v{int(ex['edl_version']):03d}.json"), {})
+    if os.path.isdir(d) and os.listdir(d):
+        return jload(os.path.join(d, sorted(os.listdir(d))[-1]), {})
+    return None
+
+
+def upload_words(rec):
+    """The source's caption words on the upload's own clock: [(upload second, word)], or None without the source."""
+    src = next((s for s in sources() if s["file"] == rec["source"]["file"]), None)
+    if not src:
+        return None
+    t0, t1 = float(rec["source"]["t0"]), float(rec["source"]["t1"])
+    return [(t - t0, w) for t, w in json3_words(src["captions"]) if t0 <= t <= t1]
 
 
 def spoken(rec, ex):
     """What the upload and the export say: the source's caption words on the upload's seconds, and on the seconds the
     export's EDL keeps, in the export's order (each kept range with its export start)."""
-    src = next((s for s in sources() if s["file"] == rec["source"]["file"]), None)
-    if not src:
+    ws = upload_words(rec)
+    if ws is None:
         return None, None
-    t0, t1 = float(rec["source"]["t0"]), float(rec["source"]["t1"])
-    ws = [(t - t0, w) for t, w in json3_words(src["captions"]) if t0 <= t <= t1]
     up = " ".join(w for _, w in ws)
-    edl = None
-    d = os.path.join(os.path.dirname(os.path.dirname(ex["file"])), "edl")
-    if ex.get("edl_version") is not None and os.path.exists(os.path.join(d, f"v{int(ex['edl_version']):03d}.json")):
-        edl = jload(os.path.join(d, f"v{int(ex['edl_version']):03d}.json"), {})
-    elif os.path.isdir(d) and os.listdir(d):
-        edl = jload(os.path.join(d, sorted(os.listdir(d))[-1]), {})
     rows, at = [], 0.0
-    for k in (edl or {}).get("keep") or []:
+    for k in (export_edl(ex) or {}).get("keep") or []:
         try:
             a, b = float(k[0]), float(k[1])
         except (TypeError, ValueError, IndexError):
@@ -477,6 +668,47 @@ def spoken(rec, ex):
         rows.append(f"export {at:.1f}-{at + b - a:.1f} s (upload {a:.1f}-{b:.1f} s): " + " ".join(w for t, w in ws if a <= t < b))
         at += b - a
     return up, rows
+
+
+def export_words(rec, ex, edl=None):
+    """The export's spoken words on its own clock, [(export second, word)]: the source's captions inside each range
+    its EDL keeps (`edl`, else the export's own), in the export's order (the captions' clock is about a third of a
+    second off the voice)."""
+    ws, out, at = upload_words(rec) or [], [], 0.0
+    for k in (edl or export_edl(ex) or {}).get("keep") or []:
+        try:
+            a, b = float(k[0]), float(k[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        out += [(round(at + t - a, 3), w) for t, w in ws if a <= t < b]
+        at += b - a
+    return out
+
+
+def hook_beat(rec, record_path):
+    """The tutorial's opening beat, built from the export's own edit list: its most visible landing (showcase_hook: the
+    longest picture or title, entered a breath before it lands), D.SPLIT_S long on the speaker's own voice, where the
+    film opens on the clip as uploaded and the export side by side (devices.split). 20 Nov: the tutorial opened on a
+    second of the finished export under the narrator's pain line, its burned-in words contradicting his, and no edit an
+    editor would wonder about. {t: [start, end] export seconds, landing: the export second its picture lands or None,
+    says: the speaker's words there or None, upload_at: the upload second the split's raw side shows}; None when the
+    export or its edit list is not on disk."""
+    ex = next((e for e in rec.get("exports") or [] if e.get("tag") == "final"), (rec.get("exports") or [None])[-1])
+    try:
+        edl = json.load(open(os.path.join(os.path.dirname(record_path), "edl", f"v{int(ex['edl_version']):03d}.json")))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not os.path.isfile(str(ex.get("file") or "")):
+        return None
+    body = float(ex["dur"]) - endcard_s()
+    pics = [(float(o["start"]), float(o["duration_s"])) for o in D.MF.pictures_of(edl) + D.MF.titles_of(edl)]
+    t = showcase_hook(ex, body, pics)
+    land = [a for a, _ in pics if t[0] <= a < t[1]]
+    try:
+        says = " ".join(w for at, w in export_words(rec, ex, edl) if t[0] <= at < t[1]) or None
+    except (OSError, ValueError, KeyError, TypeError):
+        says = None
+    return dict(t=t, landing=round(min(land), 3) if land else None, says=says, upload_at=round(D.src_at(D.program(edl)[0], t[0]), 3))
 
 
 def export_check(ctx, rec, ask_text, must_see):
@@ -509,6 +741,15 @@ def export_check(ctx, rec, ask_text, must_see):
     for t, b in zip(et, frames(ex["file"], et)):
         if b:
             content += [dict(type="text", text=f"export at {t} s"), img(b)]
+    body_s = max(float(ex["dur"]) - endcard_s(), 1.0)
+    measured = dict(upload=source_look(up["file"], keep=False), export=source_look(ex["file"], 0.0, body_s, keep=False))
+    lt = [round(body_s * (k + 0.5) / LOOK_CHECK_FRAMES, 2) for k in range(LOOK_CHECK_FRAMES)]
+    content.append(dict(type="text", text="How the export looks, for the looks line: the upload measured " + look_line(measured["upload"])
+                                          + "; the export measured " + look_line(measured["export"])
+                                          + ". The export at full phone size (720 px wide):"))
+    for t, b in zip(lt, frames(ex["file"], lt, w=720)):
+        if b:
+            content += [dict(type="text", text=f"export at {t} s, full size"), img(b)]
     system = ("You check a product's real output before a marketing film shows it. Be strict and literal: a thing asked for counts as "
               "delivered only if it is plainly visible in the export's frames, or, for what is said and where the cut starts or ends, "
               "plainly in the export's spoken words as given. The spoken words come from automatic captions whose times are "
@@ -517,10 +758,13 @@ def export_check(ctx, rec, ask_text, must_see):
               "that is the brand, never a defect, and never part of the after you choose. You also choose the seconds the film will show.")
     content.append(dict(type="text", text=(
         "Return JSON only: {\"elements\": [{\"asked\": a part of the typed sentence, \"visible\": true|false, \"seconds\": [export seconds where "
-        "it shows], \"how\": what is seen}], \"all_visible\": true|false, \"after\": [start, end] export seconds, 2 to 4 s, before the end card, where the "
-        "asked change reads best (a cut, a picture, captions, a title landing), \"tease_s\": the export second of its most striking "
+        "it shows], \"how\": what is seen}], \"all_visible\": true|false, \"after\": [start, end] export seconds, 2 to 4 s, before the end card: "
+        "the stretch that holds the most of the asked change landing (each picture, title, caption or cut the sentence asks for, "
+        "entered a breath before the first one lands and ended once the last is seen; when not all fit in 4 s, the ones that read "
+        "best), so the film's after shows every landing its narration will name, \"tease_s\": the export second of its most striking "
         "frame, \"before\": [start, end] upload seconds, 1.5 to 3 s, where the raw clip looks most like raw footage, \"looks\": one "
-        "plain line on how the export looks to an editor, \"defects\": [anything an editor would call broken: a cut face, wrong "
+        "plain, true line on how the export looks to an editor at full size (sharp or soft, clean or carrying a burned-in timecode "
+        "or logo, its colour and light, inserted pictures matching it or not), \"defects\": [anything an editor would call broken: a cut face, wrong "
         "framing, unreadable or misspelled captions, a black frame; never the end card, never a planner's note]}")))
     got, use = ask(system, content, what="export check", effort="low", model=CHECK_MODEL, max_tokens=6000)
     got = got if isinstance(got, dict) else {}
@@ -528,7 +772,7 @@ def export_check(ctx, rec, ask_text, must_see):
     ok = bool(vis) and all(e.get("visible") for e in vis) and bool(got.get("all_visible")) and not got.get("defects")
     return dict(ok=ok, v=CHECK_V, why=None if ok else ("not visible: " + "; ".join(str(e.get("asked")) for e in vis if not e.get("visible"))
                                              + ("; defects: " + "; ".join(map(str, got.get("defects") or [])) if got.get("defects") else "")),
-                export=ex, upload=up, **got, spend=[use])
+                export=ex, upload=up, **got, look_measured=measured, spend=[use])
 
 
 # ----------------------------------------------------------------- the script
@@ -548,6 +792,103 @@ def receipts(rec, chk, ask_text):
 
 def norm_words(s):
     return [x for x in (F.norm_word(w) for w in str(s).split()) if x]
+
+
+SHOW_ROLES = ("figure", "key", "name")       # the display roles of a marketing line (the stories cutter's own names)
+
+
+def show_text(x):
+    return str(x.get("text") if isinstance(x, dict) else x)
+
+
+FOLD_WORDS = 6     # two items of a line fewer words apart than this would land under 1.8 s apart, the reel's display gap
+                   # (reel.py, at a fast narrator's three words a second): the cutter keeps the first and drops the second
+
+
+def _at(toks, words, taken):
+    """The first position in toks, not yet taken, where `words` (normalised) start; None if they are not there."""
+    n = len(words)
+    return next((k for k in range(len(toks) - n + 1) if n and toks[k:k + n] == words and k not in taken), None)
+
+
+def anchor_show(sc):
+    """Every display item as {text, word_i, role, big, small}: anchored to the index of the word of `say` it lands on,
+    the way writer.annotate anchors a story's items. 20 Nov: the marketing writer returned plain strings, and the
+    cutter, which places an item only on its word_i when the film is cut by verdicts, dropped every one (display_words
+    0). Structure only, never a reading of the words, and nothing is dropped:
+      - a string becomes an item; a role outside SHOW_ROLES becomes a key word; a `big` that is not part of the text is
+        left out, and a `big` that is a proper part of it gets the rest of the text as its `small` when it has none
+        (the cutter sets a large part alone and prints the rest only from `small`: '+5 PICTURES' lost 'PICTURES');
+      - an item whose word_i is missing or outside `say` gets a word of its own, in order: where its own words stand
+        in `say`, else the line's next stressed (`emphasis`) word not yet used, else the next free word;
+      - a second item anchored fewer than FOLD_WORDS words after the one before it (and not a figure, which the cutter
+        never holds back) becomes that item's small line, so both reach the screen (20 Nov: 'Trash can. Black hole.'
+        are said a second apart; the cutter kept TRASH CAN and dropped BLACK HOLE as too close).
+    Returns a note per repair, for the log and for the writer's next attempt."""
+    notes = []
+    for i, s in enumerate(sc.get("segments") or []):
+        toks = [F.norm_word(w) for w in str(s.get("say") or "").split()]
+        stress = []
+        for e in s.get("emphasis") or []:
+            k = _at(toks, [w for w in (F.norm_word(x) for x in str(e).split()) if w], set(stress))
+            if k is not None:
+                stress.append(k)
+        items, loose = [], []
+        for x in s.get("show") or []:
+            item = dict(x) if isinstance(x, dict) else dict(text=str(x))
+            item["text"] = str(item.get("text") or "").strip()
+            if not item["text"]:
+                continue
+            if item.get("role") not in SHOW_ROLES:
+                item["role"] = "key"
+            big = item.get("big").strip() if isinstance(item.get("big"), str) else ""
+            if big and big in item["text"]:
+                item["big"] = big
+                small = item.get("small").strip() if isinstance(item.get("small"), str) else ""
+                if not small and big != item["text"]:
+                    small = item["text"].replace(big, " ", 1).strip(" ,;:-\u2013\u2014\u00b7/|")
+                    small = " ".join(small.split())
+                if small:
+                    item["small"] = small
+                else:
+                    item.pop("small", None)
+            else:
+                item.pop("big", None)
+                item.pop("small", None)
+            wi = item.get("word_i")
+            if not (isinstance(wi, int) and not isinstance(wi, bool) and 0 <= wi < len(toks)):
+                loose.append(item)
+            items.append(item)
+        taken = {x["word_i"] for x in items if not any(x is y for y in loose)}
+        last = -1
+        for item in loose:
+            if not toks:
+                continue
+            own = _at(toks, [w for w in (F.norm_word(x) for x in item["text"].split()) if w], taken)
+            wi = own if own is not None else next((k for k in stress if k not in taken and k > last), None)
+            if wi is None:
+                wi = next((k for k in range(last + 1, len(toks)) if k not in taken), None)
+            if wi is None:
+                wi = next((k for k in range(len(toks)) if k not in taken), 0)
+            item["word_i"], last = wi, wi
+            taken.add(wi)
+            notes.append(f"segment {i}: show item {item['text']!r} had no word_i in say; it was set to {wi} "
+                         f"({str(s.get('say')).split()[wi]!r}); give every show item its own word_i")
+        anchored = sorted((x for x in items if isinstance(x.get("word_i"), int)), key=lambda x: x["word_i"])
+        out = [x for x in items if not isinstance(x.get("word_i"), int)]
+        for item in anchored:
+            prev = out[-1] if out and isinstance(out[-1].get("word_i"), int) else None
+            if prev is not None and item["role"] != "figure" and item["word_i"] - prev["word_i"] < FOLD_WORDS:
+                prev["big"] = prev.get("big") or prev["text"]
+                prev["small"] = " ".join(t for t in (prev.get("small"), item["text"]) if t)
+                prev["text"] = f"{prev['text']} {item['text']}"
+                notes.append(f"segment {i}: show items {prev['big']!r} and {item['text']!r} land "
+                             f"{item['word_i'] - prev['word_i']} words apart, under two seconds; they were made one "
+                             "item with big and small")
+                continue
+            out.append(item)
+        s["show"] = out
+    return notes
 
 
 def script_problems(sc, ask_text, rc):
@@ -573,7 +914,7 @@ def script_problems(sc, ask_text, rc):
         if not 1 <= len(str(s.get("fallback_text") or "").split()) <= 5:
             p.append("every segment needs viewer-facing fallback_text of one to five words")
         for x in s.get("show") or []:
-            for d in [w for w in str(x).replace(",", "").split() if any(c.isdigit() for c in w)]:
+            for d in [w for w in show_text(x).replace(",", "").split() if any(c.isdigit() for c in w)]:
                 if "".join(c for c in d if c.isdigit() or c == ".").strip(".") not in have:
                     p.append(f"the number {d!r} on screen is not in the receipts")
     if not (segs and (segs[-1].get("show") or [])):
@@ -588,7 +929,8 @@ def audit(sc, rc):
               "is visible or said in the before and the after) and whether the receipts support it: what the upload and the export say "
               "is in upload_says and export_says, what the export shows is in visible and looks. General statements about editing, and "
               "plain descriptions of the before and the after that these receipts bear out, are supported. Return JSON only: {\"claims\": [{\"text\": the words, \"supported\": true|false, \"why\": a few words}]}")
-    copy = [dict(say=s.get("say"), show=s.get("show") or [], fallback_text=s.get("fallback_text")) for s in sc.get("segments") or []]
+    copy = [dict(say=s.get("say"), show=[show_text(x) for x in s.get("show") or []], fallback_text=s.get("fallback_text"))
+            for s in sc.get("segments") or []]
     got, use = ask(system, f"# Receipts\n{json.dumps(rc, ensure_ascii=False)}\n\n# Viewer-facing script\n{json.dumps(copy, ensure_ascii=False)}",
                    what="claims audit", effort="low", model=CHECK_MODEL, max_tokens=4000)
     bad = [c for c in (got.get("claims") if isinstance(got, dict) else []) or [] if isinstance(c, dict) and not c.get("supported")]
@@ -617,7 +959,25 @@ DEVICE_BRIEF = {
 }
 
 
-def write(ctx, idea, card, rc, notes=None, inventory=None):
+def opening_brief(hook):
+    """The writer's words for the film's opening: the built before-and-after beat (hook_beat) when the film has one, fixed
+    before the first line; else a first picture that shows what the hook line names."""
+    if not hook:
+        return ("Open on a striking full-frame picture that shows literally what the hook's words name; never the finished "
+                "export under words about a broken before, never an editing timeline. ")
+    n = round(float(hook["t"][1]) - float(hook["t"][0]), 1)
+    said = f", saying \"{hook['says']}\"" if hook.get("says") else ""
+    land = (f" Valmera's picture lands at export second {hook['landing']}" if hook.get("landing") is not None
+            else " Valmera's edit shows")
+    return (f"The film opens on a built before-and-after that you do not write and nobody narrates: for its first {n} s the "
+            f"clip as uploaded and Valmera's export play side by side, export seconds {hook['t'][0]}-{hook['t'][1]}, on the "
+            f"speaker's own voice{said};{land} there, beside the raw clip that lacks it. Your first segment (the hook) is heard "
+            "right after that beat and agrees with what the viewer just saw and heard: it names the edit that just landed, or "
+            "the editing pain that edit removes, in plain words, so picture and words say one thing; never a line the picture "
+            "just contradicted, never the speaker's own words again. Its pictures show what its own words name. ")
+
+
+def write(ctx, idea, card, rc, notes=None, inventory=None, hook=None):
     pace = ref_pace()
     system = ("You are the writer and voice director of Valmera's marketing films for video editors. A synthetic narrator (Phonon Easton, "
               "a calm documentary voice) reads your lines over real footage of what they name, cut fast; between two of your lines the "
@@ -637,9 +997,8 @@ def write(ctx, idea, card, rc, notes=None, inventory=None):
                "playing on a physical phone, a view of its editing timeline, or a product interface recording. "
                "THE UPLOAD and THE EXPORT play as their actual files. Generic editing footage may illustrate a "
                "general editing problem, but cannot impersonate this recorded session or the Valmera interface. "
-               "Open on a striking full-frame picture that actually fits the hook's words, or the actual export when "
-               "those words describe its visible result; never an editing timeline. Do not describe a finished export "
-               "as if it were the broken before. Under the Valmera call to action, use the authenticated export; "
+               + opening_brief(hook) +
+               "Do not describe a finished export as if it were the broken before. Under the Valmera call to action, use the authenticated export; "
                "never show another editing application's interface as the product being offered. "
                "Each segment also needs fallback_text: a viewer-facing display phrase of one to five words, "
                "drawn from that line's meaning. Never use production directions or a subject label there. "
@@ -650,9 +1009,15 @@ def write(ctx, idea, card, rc, notes=None, inventory=None):
                "The real uploaded clip and export remain untouched by those effects. "
                "Clarity before everything (owner, 16 Nov: the last films were 'very not clear'): a viewer scrolling "
                "on a phone must know within two seconds what the film is about from the picture and the words together, "
-               "so the hook names one editing pain in plain words while the picture shows it or its solved result. "
-               "The recording is the hero and carries the film: THE UPLOAD on the lines about the raw clip, THE EXPORT "
-               "on the hook when it shows the result, on every line after the after and under the call to action. "
+               "so the opening and the hook line say one thing together, the picture and the words agreeing. "
+               "The recording is the hero and carries the film: THE UPLOAD on the lines about the raw clip and on the pain "
+               "lines, where the raw clip at the moment the words name is the pain itself (the speaker says the "
+               "thing and nothing shows it), THE EXPORT on every line after the after and under the call to action. "
+               "The recording itself is only a few distinct shots (the speaker, the pictures and captions it laid), never "
+               "enough for a whole line at the references' pace: on every line whose words name something a camera can show "
+               "(the editor's pain, a thing the speaker names, what changed), name in pictures an external subject that shows "
+               "those words beside THE EXPORT or THE UPLOAD; the recording stands alone only on the line just before the "
+               "before, the line that says the typed sentence and the call to action. "
                "Every external picture shows literally what its words name, something an editor or creator meets in "
                "their work (a phone playing a short, a creator at a camera, an editing timeline, a podcast set); never a "
                "metaphor or analogy (no cups, road signs, shop shelves, landscapes or coffee standing for an editing idea). "
@@ -663,17 +1028,30 @@ def write(ctx, idea, card, rc, notes=None, inventory=None):
                f"{json.dumps(rc, ensure_ascii=False)}\n\n# The style\n{json.dumps(card, ensure_ascii=False)}\n\n# The references' pace (medians)\n"
                f"{json.dumps(pace)}\n\n"
                f"# Form\n{FORM['words'][0]}-{FORM['words'][1]} spoken words in {FORM['segments'][0]}-{FORM['segments'][1]} segments; with the "
-               f"before (at most 3 s) and the after (at most 4 s) the film runs {FORM['seconds'][0]}-{FORM['seconds'][1]} s. The first segment is "
-               "the hook, heard in the first second: the pain or the stake in under twelve words, never a greeting or 'did you know'. The "
+               f"before (at most 3 s) and the after (at most 4 s) the film runs {FORM['seconds'][0]}-{FORM['seconds'][1]} s"
+               + (f", after the opening beat's {round(float(hook['t'][1]) - float(hook['t'][0]), 1)} s" if hook else "") + ". The first segment is "
+               + ("the hook, heard right after the opening beat: in under twelve words it lands what the beat showed (the edit, or "
+                  "the pain it removes), never a greeting or 'did you know'. The " if hook else
+                  "the hook, heard in the first second: the pain or the stake in under twelve words, never a greeting or 'did you know'. The ") +
                "before comes by the third or fourth segment; one segment, just before the after, says the typed sentence word for word "
                f"(\"{rc['typed']}\") introduced in a few words of your own; after the after, one or two lines name what changed (only what "
                "the receipts show as visible), then the last segment is the call to action inside the film: the viewer tries it at "
                "valmera.io, said plainly, shown as VALMERA.IO.\n\n"
+               + (f"# The opening beat (fixed, before your first segment)\n{json.dumps(hook, ensure_ascii=False)}\n\n" if hook else "")
                + (f"# Fix these from the last attempt\n{notes}\n\n" if notes else "")
                + "Return JSON only: {\"title\": a plain title, \"pace\": steady|brisk|fast, \"energy\": low|mid|high, \"hook_line\": the first "
                "segment's words, \"close_line\": the last segment's words, \"names\": [proper nouns said, as spelled], \"segments\": [{\"say\": "
-               "the words spoken, numbers written as words, no digits, \"show\": at most two short display strings printed large on the "
-               "words that say them (digits allowed only for a number in the receipts) or [], \"beat\": hook|setup|turn|low|payoff|close, "
+               "the words spoken, numbers written as words, no digits, \"show\": the line's display type, printed large and landing on its "
+               "spoken word, at most two items, each {\"text\": as printed, \"word_i\": the index (from 0) in say's space-separated "
+               "words of the word it lands on (a figure: the first word of the spoken figure), \"role\": figure (a number from "
+               "the receipts, digits allowed only for one) | key (a word or short phrase the line stresses) | name (a proper "
+               "noun), \"big\": the part of text set largest, or null, \"small\": the rest of text, set under big at 0.4 of its size "
+               "(when big is set only big and small are printed, so text is big plus small), or null}; two items on one line only when their "
+               "words are about two seconds (six or more words) apart, else one item with big and small (two results said "
+               "a second apart: big \"TRASH CAN\", small \"BLACK HOLE\"), the receipts' figures each role figure; "
+               "the references set type on most lines, so give one item "
+               "to most lines, the payoff carries the receipts' figures and the visible results it names, the last carries "
+               "VALMERA.IO; [] only where type would crowd the picture, \"beat\": hook|setup|turn|low|payoff|close, "
                "\"pace\": slow|steady|brisk|fast, \"see\": [{\"thing\": exact subject from named or THE UPLOAD or THE EXPORT, "
                "\"as_of\": the version or state the words mean, \"must_show\": what visibly carries these exact words, "
                "\"moment\": a specific visual action or null, \"still_only\": boolean}], \"pictures\": names from `named` this segment talks about, in order (two or three a "
@@ -775,22 +1153,36 @@ def script(ctx, ideas_out):
             ctx.log(f"triptych: {len(sibs)} other export of this upload; the film opens on its own export and keeps the timeline")
     if format_of(dict(idea_full=idea), ctx.args) == "showcase":
         return showcase_script(idea, card, rec, rc, chk, stt, tag, spend)
+    # the opening beat: the export's own landing beside the raw clip, on the speaker's voice (a triptych of three exports
+    # is that film's opening instead)
+    try:
+        hook = None if len(sibs) >= 2 else hook_beat(rec, stt[tag]["record"])
+    except Exception as e:     # noqa: BLE001 - an optional opening: the film opens on its first line's pictures
+        ctx.log(f"opening beat not built: {repr(e)[:300]}")
+        hook = None
+    if hook:
+        rc["opening"] = dict(seconds=hook["t"], says=hook.get("says"), landing=hook.get("landing"),
+                             shows="the clip as uploaded and the export side by side, the export's picture landing")
+        ctx.log(f"opening beat: export {hook['t'][0]}-{hook['t'][1]} s, lands at {hook.get('landing')}, says {hook.get('says')!r}")
     inventory = VI.prepare(ctx, idea, rc, ask, PX.pictures, still)
     spend += inventory["spend"]
     ctx.log(f"visual inventory: {sum(map(len, inventory['pictures'].values()))} distinct inspected pictures before writing")
     notes, sc, bad = ctx.args.get("notes"), None, []
     for attempt in range(4):
-        sc, use = write(ctx, idea, card, rc, notes, inventory)
+        sc, use = write(ctx, idea, card, rc, notes, inventory, hook=hook)
         spend.append(use)
+        fixed = anchor_show(sc)
+        if fixed:
+            ctx.log("display items repaired: " + "; ".join(fixed)[:600])
         probs = script_problems(sc, ask_text, rc) + VI.script_problems(sc, inventory)
         if not probs:
             bad, u2 = audit(sc, rc)
             spend.append(u2)
             probs = [f"unsupported claim: {c.get('text')!r} ({c.get('why')})" for c in bad]
-        jsave(os.path.join(ctx.run_dir, f"script_attempt{attempt}.json"), dict(script=sc, problems=probs))
+        jsave(os.path.join(ctx.run_dir, f"script_attempt{attempt}.json"), dict(script=sc, problems=probs, show_repairs=fixed))
         if not probs:
             break
-        notes = "\n".join(probs)
+        notes = "\n".join(probs + fixed)      # a rewrite anchors its display items itself; the repairs alone never cause one
         ctx.log("script repair: " + notes[:400])
     else:
         raise RuntimeError("the script did not pass its checks: " + notes[:600])
@@ -800,8 +1192,8 @@ def script(ctx, ideas_out):
     return dict(title=sc.get("title") or idea.get("title"), style=registry_row(card), window=window, hook_line=sc.get("hook_line"),
                 close_line=sc.get("close_line"), direction=f"{card['name']}: {card['look']}", idea=idea.get("title"), idea_full=idea,
                 script=sc, receipts=rc, export_check={k: v for k, v in chk.items() if k not in ("export", "upload")},
-                record=stt[tag]["record"], siblings=sibs,
-                cta=dict(say=sc["segments"][-1]["say"], show=sc["segments"][-1].get("show"), needs_fulfilment=False),
+                record=stt[tag]["record"], siblings=sibs, hook=hook,
+                cta=dict(say=sc["segments"][-1]["say"], show=[show_text(x) for x in sc["segments"][-1].get("show") or []], needs_fulfilment=False),
                 words=writer.words_of(sc), spend=spend)
 
 
@@ -1195,7 +1587,9 @@ def product_crop(record_path, rec, t):
 
 
 def product_clips(script, out):
-    """The before and the after as clips with their own sound, and a frame of the after for the hook."""
+    """The before and the after as clips with their own sound, and the opening beat's export seconds with theirs
+    (script["hook"], hook_beat): cut from LEAD_F frames in, so the voice that starts on frame LEAD_F is the sound of
+    the picture devices.split shows there."""
     rec = json.load(open(script["record"]))
     chk = script["export_check"]
     ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
@@ -1219,14 +1613,38 @@ def product_clips(script, out):
     bb = min(bb, ba + 3.0)
     cut(up["file"], ba, bb, os.path.join(out, "before.mp4"))
     cut(ex["file"], a, b, os.path.join(out, "after.mp4"))
-    ts = float(chk.get("tease_s") or (a + b) / 2)
-    ts = min(max(ts - 0.6, 0.0), body - 1.4)
-    cut(ex["file"], ts, ts + 1.3, os.path.join(out, "tease.mp4"), audio=False)
+    hook = None
+    if script.get("hook"):
+        h0, h1 = [float(x) for x in script["hook"]["t"]]
+        h1 = min(h1, body)
+        if h1 - h0 > 1.0:
+            hook = [round(h0 + F.LEAD_F / F.FPS, 3), round(h1, 3)]
+            cut(ex["file"], hook[0], hook[1], os.path.join(out, "hook.mp4"))
     # the whole export, silent: a line the cut has no picture for plays the real result, never a type page
     cut(ex["file"], 0.0, body, os.path.join(out, "export_body.mp4"), audio=False)
     return dict(before=dict(src=up["file"], t=[ba, bb], sha256=up["sha256"], crop=product_crop(script["record"], rec, (ba + bb) / 2)),
-                after=dict(src=ex["file"], t=[a, b], sha256=ex["sha256"]), tease=dict(src=ex["file"], t=[ts, ts + 1.3]),
+                after=dict(src=ex["file"], t=[a, b], sha256=ex["sha256"]),
+                hook=dict(src=ex["file"], t=hook, at=float(script["hook"]["t"][0]), landing=script["hook"].get("landing")) if hook else None,
                 body=dict(src=ex["file"], t=[0.0, round(body, 3)]))
+
+
+def export_landings(script):
+    """What the final export's own edit lands over its speaker, on the export's seconds: every picture (overlays and
+    b-roll) and every designed title of its EDL, [{t, kind: picture|title}]. [] when the edit list cannot be read."""
+    try:
+        rec = json.load(open(script["record"]))
+        ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
+        edl = json.load(open(os.path.join(os.path.dirname(script["record"]), "edl", f"v{int(ex['edl_version']):03d}.json")))
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
+        return []
+    rows = [dict(t=round(float(o["start"]), 3), kind="picture") for o in D.MF.pictures_of(edl)]
+    rows += [dict(t=round(float(o["start"]), 3), kind="title") for o in D.MF.titles_of(edl)]
+    return sorted(rows, key=lambda r: (r["t"], r["kind"]))
+
+
+def landings_in(lands, t0, t1):
+    """The export's landings inside one cut of it [t0, t1) on that cut's own seconds (the sound design's events)."""
+    return [dict(r, t=round(float(r["t"]) - float(t0), 3)) for r in lands or [] if float(t0) <= float(r["t"]) < float(t1)]
 
 
 def splice(ctx, narr_dir, foot_dir, voices):
@@ -1279,75 +1697,269 @@ def recording_source(script, role):
                             f"Exact submitted request: {receipts['typed']}")
 
 
-def owed_windows(lines, candidates, out, used, segments):
-    """A line that names THE UPLOAD or THE EXPORT shows it. The frame choice above may leave such a line with none
-    (it took zero to three a line); the line then gets the unused frames of its named source that lie farthest from
-    those already shown, about one a second of the line, so the proof on screen is the recording, not a type page."""
-    added = []
-    for ln in lines:
-        have = sum(1 for o in out + added if o["line"] == ln["i"])
-        want = max(1, min(3, int(round(float(segments[ln["i"]].get("duration_s") or 1.0)))))
-        for name in ln["sources"]:
-            while have < want:
-                free = [c for c in candidates if c["source"] == name and c["id"] not in used]
-                if not free:
-                    break
-                shown = [o["center"] for o in out + added if o["source"] == name]
-                c = max(free, key=lambda c: (min((abs(c["center"] - t) for t in shown), default=1e9), -c["center"]))
-                added.append(dict(c, line=ln["i"], why="the line names this recording; frame owed to it"))
-                used.add(c["id"])
-                have += 1
-    return added
+SHOT_MIN_S, SHOT_MAX_S = 0.45, 3.0     # the recording's own shots: never shorter (a flicker), never longer (one picture a line)
+PRODUCT_WINDOWS_V = 2                  # 20 Nov: the recording as its own shots, ranked per line (v1: 1 s slices on a grid)
 
 
-def product_windows(ctx, script, sources):
-    """Choose source moments from frames for the words, not an arithmetic walk through the export."""
+def shot_list(dur, hard=(), soft=(), busy=(), min_s=SHOT_MIN_S, max_s=SHOT_MAX_S):
+    """[(a, b)] a recording's shots on its own clock: [0, dur] outside `busy` (seconds shown whole elsewhere: the after,
+    the opening beat, the before), split at its `hard` events (an edit-list join, a picture or a title landing or leaving) and
+    at its `soft` ones (a caption group starting, a measured picture change) that lie min_s or more from every edge
+    already there; a piece still shorter than min_s joins its neighbour, one longer than max_s is split evenly."""
+    free, at = [], 0.0
+    for a, b in sorted((max(float(a), 0.0), min(float(b), dur)) for a, b in busy):
+        if a > at:
+            free.append((at, a))
+        at = max(at, b)
+    if dur > at:
+        free.append((at, dur))
+    out = []
+    for a0, b0 in free:
+        if b0 - a0 < min_s:
+            continue
+        edges = sorted({a0, b0} | {round(float(t), 3) for t in hard if a0 + 1e-3 < float(t) < b0 - 1e-3})
+        for t in sorted(round(float(t), 3) for t in soft):
+            if a0 < t < b0 and all(abs(t - e) >= min_s for e in edges):
+                edges = sorted(edges + [t])
+        pieces = []
+        for a, b in zip(edges, edges[1:]):
+            if pieces and (b - a < min_s or pieces[-1][1] - pieces[-1][0] < min_s):
+                pieces[-1] = (pieces[-1][0], b)          # a piece too short joins the one before it
+            else:
+                pieces.append((a, b))
+        for a, b in pieces:
+            if b - a < min_s:
+                continue
+            k = max(1, int(math.ceil((b - a) / max_s - 1e-9)))
+            step = (b - a) / k
+            out += [(round(a + j * step, 3), round(a + (j + 1) * step, 3)) for j in range(k)]
+    return out
+
+
+def export_events(record_path, rec, ex, body):
+    """The export's own events on its clock, (hard, soft) seconds. Hard: where its kept ranges join (the edit list's
+    programme), where its pictures and titles land and leave. Soft: where its caption groups start (caption_spans) and
+    where its picture measurably changes (cut_times). Read from the recording's files; what cannot be read is left out."""
+    hard, soft = [], []
+    try:
+        edl = json.load(open(os.path.join(os.path.dirname(record_path), "edl", f"v{int(ex['edl_version']):03d}.json")))
+        tl, _ = D.program(edl)
+        hard += [float(x) for x in list(tl.offsets)[1:]]
+        for o in D.MF.pictures_of(edl) + D.MF.titles_of(edl):
+            hard += [float(o["start"]), float(o["start"]) + float(o["duration_s"])]
+        soft += [a for a, _ in caption_spans(rec, edl)]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, ImportError):
+        pass
+    soft += cut_times(ex["file"], 0.0, body)
+    return hard, soft
+
+
+def upload_events(rec):
+    """The upload's own events on its clock, (hard, soft): its measured picture changes and where each group of three
+    of its caption words starts (the source's captions on the upload's seconds)."""
+    soft = list(cut_times(rec["upload"]["file"], 0.0, float(rec["upload"]["dur"])))
+    src = next((s for s in sources() if s["file"] == (rec.get("source") or {}).get("file")), None)
+    if src:
+        t0, t1 = float(rec["source"]["t0"]), float(rec["source"]["t1"])
+        ws = [t - t0 for t, _ in json3_words(src["captions"]) if t0 <= t <= t1]
+        soft += ws[::3]
+    return [], soft
+
+
+def rank_shots(lines, candidates, result):
+    """{line: [candidate ids, best first]} from the model's ranking: known lines and candidates only, each id once a line."""
+    by_line = {ln["i"] for ln in lines}
+    out = {}
+    for row in (result.get("lines") if isinstance(result, dict) else None) or []:
+        try:
+            i = int(row.get("line"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if i not in by_line:
+            continue
+        ids = []
+        for k in row.get("shots") or []:
+            try:
+                k = int(k)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= k < len(candidates) and k not in ids:
+                ids.append(k)
+        out[i] = ids
+    return out
+
+
+def owed_windows(lines, candidates, ranked, used, demand):
+    """Each line that names THE UPLOAD or THE EXPORT takes the recording's shots the model ranked best for its words, as
+    its own takes, each shot to one line only: round by round one shot a line, the lines with the fewest ranked shots
+    left first, up to the line's demand. A line left with none still shows its recording: the unused shot of its named
+    source farthest from those already given (20 Nov: this rule, alone and on a 1 s grid, gave each line one slice and
+    the cut looped it)."""
+    out, by_i = [], {ln["i"]: ln for ln in lines}
+    want = {i: max(1, int(demand.get(i, demand.get(str(i), 1)) or 1)) for i in by_i}
+
+    def left(i):
+        return [k for k in ranked.get(i) or [] if k not in used and candidates[k]["source"] in by_i[i]["sources"]]
+    more = True
+    while more:
+        more = False
+        for i in sorted(by_i, key=lambda i: (len(left(i)), i)):
+            if sum(1 for o in out if o["line"] == i) >= want[i]:
+                continue
+            ks = left(i)
+            if ks:
+                used.add(ks[0])
+                out.append(dict(candidates[ks[0]], line=i, why="ranked for this line's words"))
+                more = True
+    for i, ln in by_i.items():
+        if any(o["line"] == i for o in out):
+            continue
+        free = [c for c in candidates if c["source"] in ln["sources"] and c["id"] not in used]
+        if free:
+            shown = [o["center"] for o in out if o["source"] in ln["sources"]]
+            c = max(free, key=lambda c: (min((abs(c["center"] - t) for t in shown), default=1e9), -c["center"]))
+            used.add(c["id"])
+            out.append(dict(c, line=i, why="the line names this recording; its shot owed to it"))
+    return out
+
+
+def product_windows(ctx, script, sources, demand=None):
+    """The recording's own shots chosen for the words by a model that sees them. Each source (THE UPLOAD, THE EXPORT:
+    {name: dict(path, dur, busy, hard, soft)}) is offered as its shots (shot_list: split at its edit list's events and
+    its measured picture changes, never a 1 s grid), one frame each; the model ranks, for every line, the shots whose
+    picture carries that line's words, best first, as many as the line's shot demand ({line: shots}), with no cap. The
+    lines that name the recording take their best-ranked shots (owed_windows); every line's ranking is returned for the
+    cut's proof fill. ([windows], {line: [shot ids]}, [candidates], spend); the ranking is None when the call went
+    unanswered."""
     plan_path = os.path.join(ctx.supply, "product_windows.json")
     old = jload(plan_path)
-    if old:
-        return old["windows"], old.get("spend", [])
-    lines = [dict(i=i, say=seg["say"], see=seg.get("see"), sources=[n for n in seg.get("pictures", []) if n in sources])
-             for i, seg in enumerate(script["script"]["segments"]) if any(n in sources for n in seg.get("pictures", []))]
-    if not lines:
-        return [], []
-    content = [dict(type="text", text=json.dumps(dict(lines=lines, receipts=script["receipts"]), ensure_ascii=False))]
+    if old and old.get("v") == PRODUCT_WINDOWS_V:
+        return old["windows"], {int(k): v for k, v in (old.get("ranked") or {}).items()}, old.get("candidates") or [], old.get("spend", [])
+    segs = script["script"]["segments"]
+    demand = demand or {}
+    lines = [dict(i=i, say=seg["say"], sources=[n for n in seg.get("pictures", []) if n in sources],
+                  demand=max(1, int(demand.get(i, demand.get(str(i), 1)) or 1)))
+             for i, seg in enumerate(segs)]
     candidates = []
-    for name, (path, duration, busy) in sources.items():
-        times = [0.6 + i for i in range(max(0, int(duration - 1.1) + 1))]
-        for t in times:
-            if any(t + .5 > a and t - .5 < b for a, b in busy):
-                continue
-            frame = still(path, t, w=540)
+    frames_ = []
+    for name, src in sources.items():
+        for a, b in shot_list(float(src["dur"]), src.get("hard") or (), src.get("soft") or (), src.get("busy") or ()):
+            t = round((a + b) / 2, 3)
+            frame = still(src["path"], t, w=540)
             if not frame:
                 continue
-            candidate = dict(id=len(candidates), source=name, center=t, start=round(t-.5, 3), end=round(t+.5, 3))
-            candidates.append(candidate)
-            content.append(dict(type="text", text=f"Candidate {candidate['id']}: {name} at {t:.2f}s"))
-            content.append(img(frame))
-    content.append(dict(type="text", text='Return JSON {"windows":[{"line": index, "candidate": id, "why": visible match}]}.'))
-    result, use = ask(
-        "Select real upload/export pictures for each marketing narration line from the labelled frames. "
-        "Use zero to three candidates per line, only when the exact stated operation or result is visible. "
-        "Show lamps for lamp claims and captions for caption claims; a speaker alone is not proof of B-roll. "
-        "These files are authenticated Studio recordings, but their provenance does not make every moment fit. "
-        "Never assign one candidate or one visual shot to different words. Adjacent frames of the same "
-        "lamp, chair or speaker shot are one picture, not separate choices. Preserve distinct moments and do not invent an interface. "
-        "The mandatory before/after real-voice passages are already reserved; candidates exclude them.",
-        content, what="product source windows", model=CHECK_MODEL, effort="low", max_tokens=3000)
-    out, used = [], set()
-    by_line = {ln["i"]: ln for ln in lines}
-    for row in result.get("windows", []):
-        i, k = row.get("line"), row.get("candidate")
-        if i not in by_line or not isinstance(k, int) or not 0 <= k < len(candidates) or k in used:
+            c = dict(id=len(candidates), source=name, center=t, start=a, end=b)
+            candidates.append(c)
+            frames_ += [dict(type="text", text=f"Shot {c['id']}: {name} {a:.2f}-{b:.2f} s"), img(frame)]
+    if not candidates:
+        return [], {}, [], []
+    content = [dict(type="text", text=json.dumps(dict(lines=lines, receipts=script["receipts"]), ensure_ascii=False))] + frames_
+    content.append(dict(type="text", text='Return JSON {"lines": [{"line": index, "shots": [shot ids, best first]}]} with every line.'))
+    try:
+        result, use = ask_shots(content)
+    except Exception as e:  # noqa: BLE001 - an outage after the retries: each recording line still gets its own shot, unranked
+        log = getattr(ctx, "log", None)
+        if log:
+            log(f"product shots not ranked ({repr(e)[:200]}); each recording line gets its farthest unused shot")
+        out = owed_windows([ln for ln in lines if ln["sources"]], candidates, {}, set(), {ln["i"]: ln["demand"] for ln in lines})
+        return out, None, candidates, []          # None: not ranked (the fill plays unshown shots), not 'ranked nothing
+    ranked = rank_shots(lines, candidates, result)
+    out = owed_windows([ln for ln in lines if ln["sources"]], candidates, ranked, set(), {ln["i"]: ln["demand"] for ln in lines})
+    jsave(plan_path, dict(v=PRODUCT_WINDOWS_V, windows=out, ranked={str(k): v for k, v in ranked.items()}, candidates=candidates, spend=[use]))
+    return out, ranked, candidates, [use]
+
+
+def ask_shots(content):
+    return ask(
+        "You choose the real product recording's pictures for a marketing film's narration. You see the recording (the "
+        "clip as uploaded, THE UPLOAD, and the export Valmera returned, THE EXPORT) cut at its own events into shots, one "
+        "labelled frame each, and the film's lines with their words and how many shots each line's cut draws (demand). "
+        "For EVERY line, rank the shots whose visible picture carries that line's words, best first, up to its demand: "
+        "the picture the export laid over what the speaker names for the line that names it, its captions for a line about "
+        "captions, the speaker for a line about him or his clip, the raw upload for a line about the raw clip. Leave out a "
+        "shot whose picture does not carry the words; a line the recording cannot carry gets an empty list. Shots that "
+        "look the same (the same framing, no new picture or caption) are one picture: rank the one that fits best. Prefer "
+        "a different shot for each line where one fits. These are the product's real files; never an interface. The "
+        "real-voice before and after are reserved already and not offered.",
+        content, what="product source windows", model=CHECK_MODEL, effort="low", max_tokens=4000)
+
+
+def footage_subjects(ctx, sc, lines):
+    """Footage for the lines whose only picture is the recording (20 Nov: seven of nine lines named only THE UPLOAD or THE
+    EXPORT, the footage search took one line and the cut looped the export's first seconds): a model reads each such
+    line's words beside the film's named subjects and gives the line up to two subjects a camera filmed that show what its
+    words name, a named one or a new one with its video searches; none where its words name nothing visible. Cached in
+    the supply folder. An unanswered call leaves the lines to the recording and the run goes on. ({line: [named rows]},
+    spend)."""
+    path = os.path.join(ctx.supply, "footage_subjects.json")
+    old = jload(path, {}) or {}
+    if old.get("lines") == list(lines):
+        return {int(k): v for k, v in (old.get("subjects") or {}).items()}, []
+    have = {n.get("name"): n for n in sc.get("named") or [] if n.get("name")}
+    content = json.dumps(dict(lines=[dict(line=i, say=sc["segments"][i].get("say")) for i in lines],
+                              named=[dict(name=n.get("name"), is_a=n.get("is"), must_show=n.get("must_show")) for n in have.values()]),
+                         ensure_ascii=False)
+    try:
+        got, use = ask(
+            "A marketing film for video editors cuts real footage under each narrated line. These lines show the real "
+            "product recording, which is only a few distinct shots, so each also needs footage of what its own words name. "
+            "For each line give at most two subjects a camera filmed and anyone can find on YouTube that literally show what "
+            "the words name (the editor's pain as it happens at a desk or a timeline, a thing the speaker names, a phone "
+            "playing a short): a subject from `named` by its exact name when one shows it, else a new one. Never a metaphor, "
+            "never a celebrity's story, never Valmera's own interface. A line whose words name nothing a camera can show gets []. "
+            'Return JSON {"lines": [{"line": index, "subjects": [a named name, or {"name", "is": thing|place|person, '
+            '"must_show": one plain sentence of what a frame shows, "video_searches": [one to three YouTube searches]}]}]}.',
+            content, what="footage subjects", effort="low", max_tokens=3000)
+    except Exception as e:  # noqa: BLE001 - an outage after the retries: the lines keep the recording, the film goes on
+        ctx.log(f"footage subjects not chosen ({repr(e)[:200]}); the recording lines keep the recording")
+        return {}, []
+    out = {}
+    for row in (got.get("lines") if isinstance(got, dict) else None) or []:
+        if not isinstance(row, dict) or row.get("line") not in lines:
             continue
-        c = candidates[k]
-        if c["source"] not in by_line[i]["sources"]:
-            continue
-        out.append(dict(c, line=i, why=row.get("why")))
-        used.add(k)
-    out += owed_windows(lines, candidates, out, used, script["script"]["segments"])
-    jsave(plan_path, dict(windows=out, spend=[use]))
+        subs = []
+        for x in row.get("subjects") or []:
+            name = x if isinstance(x, str) else (x.get("name") if isinstance(x, dict) else None)
+            if not name or any(n["name"] == name for n in subs):
+                continue
+            if name in have:
+                subs.append(have[name])
+            elif isinstance(x, dict) and [q for q in x.get("video_searches") or [] if isinstance(q, str) and q.strip()]:
+                subs.append(dict(name=str(name), **{"is": x.get("is") if x.get("is") in ("thing", "place", "person") else "thing"},
+                                 must_show=str(x.get("must_show") or name),
+                                 video_searches=[str(q) for q in x["video_searches"] if isinstance(q, str) and q.strip()][:3]))
+        out[int(row["line"])] = subs[:2]
+    jsave(path, dict(lines=list(lines), subjects={str(k): v for k, v in out.items()}, spend=[use]))
     return out, [use]
+
+
+def lend_subjects(fsc, subjects):
+    """The footage script's lines take their subjects (footage_subjects): each named in the line's pictures, a new one
+    added to the named list."""
+    have = {n.get("name") for n in fsc.get("named") or []}
+    for i, subs in subjects.items():
+        seg = fsc["segments"][int(i)]
+        seg["pictures"] = list(seg.get("pictures") or []) + [n["name"] for n in subs if n["name"] not in (seg.get("pictures") or [])]
+        for n in subs:
+            if n["name"] not in have:
+                fsc.setdefault("named", []).append(dict(n))
+                have.add(n["name"])
+
+
+def proof_fill_clip(body, after_t, sha, shots, ranked, owed=()):
+    """The export as the cut's proof fill: the whole body (its after seconds busy, keyed by the recording's sha256), its
+    own shots (`shots`, [[t0, t1, id]]: a line short of pictures plays one no file has shown yet) and, only when the
+    ranking call answered, each line's ranked export shots (`ranked`), best first. An unanswered call leaves `ranked`
+    out, so the fill still plays the export's unshown shots instead of nothing (20 Nov: ranked={} turned the fill off
+    for the whole film and every recording line looped its one shot). `owed`: the shot ids a line already takes as its
+    own file, played last by another line's fill."""
+    fill = dict(body, busy=[list(after_t)], origin=dict(key=sha, t0=0.0), owed=sorted({int(k) for k in owed}),
+                shots=[[c["start"], c["end"], c["id"]] for c in shots if c["source"] == "THE EXPORT"])
+    if ranked is not None:
+        by_id = {c["id"]: c for c in shots}
+        fill["ranked"] = {str(i): [[by_id[k]["start"], by_id[k]["end"], k] for k in ks if k in by_id and by_id[k]["source"] == "THE EXPORT"]
+                          for i, ks in ranked.items()}
+    return fill
 
 
 def supply(ctx, script):
@@ -1401,6 +2013,16 @@ def supply(ctx, script):
     for seg in fscript["script"]["segments"]:
         seg["pictures"] = [n for n in seg.get("pictures") or [] if n not in own]
         seg["see"] = [v for v in seg.get("see") or [] if v.get("thing") not in own]
+    # a line whose only picture is the recording gets footage of what its words name too (the recording is a few shots,
+    # never a whole line); the typed line and the call to action carry the film's devices
+    pr = sc["proof"]
+    bare = [i for i, seg in enumerate(fscript["script"]["segments"]) if not seg.get("pictures")
+            and i not in (int(pr["after_after"]), len(sc["segments"]) - 1)]
+    if bare:
+        subjects, uses = footage_subjects(ctx, fscript["script"], bare)
+        spend += uses
+        lend_subjects(fscript["script"], subjects)
+        ctx.log(f"footage subjects for recording lines: {json.dumps({i: [n['name'] for n in v] for i, v in subjects.items()}, ensure_ascii=False)[:300]}")
     search_lines = [i for i, seg in enumerate(fscript["script"]["segments"]) if seg.get("pictures")]
     # Illustrative footage is silent. The two real-voice passages come only
     # from our verified Studio recording, so source transcripts are unused.
@@ -1433,34 +2055,41 @@ def supply(ctx, script):
         ctx.log(f"footage: {foot['counts']['clips']} clips on {foot['counts']['lines_with_footage']} of {foot['counts']['lines']} lines")
     # the recording: the before and the after cut in with their own sound; a frame of the after may open the film
     pc = product_clips(script, os.path.join(fdir, "product"))
-    pr = sc["proof"]
     voices = [dict(after=int(pr["before_after"]), person="before", wav="product/before.wav", file="product/before.mp4", said=None,
                    source=recording_source(script, "upload"), time_range=pc["before"]["t"]),
               dict(after=int(pr["after_after"]), person="after", wav="product/after.wav", file="product/after.mp4", said=None,
                    source=recording_source(script, "export"), time_range=pc["after"]["t"])]
+    if pc.get("hook"):            # the opening beat: the export's landing on the speaker's own voice, before the narrator
+        voices.append(dict(after=-1, person="hook", wav="product/hook.wav", file="product/hook.mp4", said=None,
+                           source=recording_source(script, "export"), time_range=pc["hook"]["t"]))
     placed = splice(ctx, narr_dir, fdir, voices)
-    if len(placed) != 2:
+    if len(placed) != len(voices):
         raise RuntimeError(f"the recording was not cut into the narration: {placed}")
+    lands = export_landings(script)               # the export's own pictures and titles: sound events where a cut of it shows them
     pack["voices"] = [dict(p, clip=W3.clip_facts(dict(path=p["file"], file=os.path.basename(p["file"]), subject=p["person"],
-                                                      seconds=round(p["end"] - p["start"], 3)))) for p in placed]
-    tease = W3.clip_facts(dict(path=os.path.join(fdir, "product", "tease.mp4"), file="product/tease.mp4", subject="valmera export", seconds=1.3,
-                               source=recording_source(script, "export"), time_range=pc["tease"]["t"]))
-    if pack["footage"]:
-        pack["footage"][0]["clips"].insert(0, tease)
-    else:
-        pack["footage"] = [dict(i=0, clips=[tease])]
-    # THE UPLOAD / THE EXPORT in a segment's pictures: silent seconds of the real clip and export, outside the cut-ins
+                                                      seconds=round(p["end"] - p["start"], 3),
+                                                      **({"landings": landings_in(lands, *pc["after"]["t"])} if p["person"] == "after" else {}))))
+                      for p in placed]
+    ex_sha, up_sha = script["receipts"]["export"]["sha256"], script["receipts"]["upload"]["sha256"]
+    # THE UPLOAD / THE EXPORT: the recording as its own shots (split at its edit list's events and its measured picture
+    # changes), ranked for every line's words by a model that sees them; the lines that name it take their best shots as
+    # takes, each file carrying the recording's sha256 and its first second, so no second plays twice under two names
     lines = {int(ln["i"]): ln for ln in pack["footage"]}
     rec_ = json.load(open(script["record"]))
     ex_ = next((e for e in rec_["exports"] if e["tag"] == "final"), rec_["exports"][-1])
-    srcs = {"THE UPLOAD": (rec_["upload"]["file"], rec_["upload"]["dur"], [pc["before"]["t"]]),
-            "THE EXPORT": (ex_["file"], ex_["dur"] - endcard_s(), [pc["after"]["t"], pc["tease"]["t"]])}
-    chosen, uses = product_windows(ctx, script, srcs)
+    body_s = float(pc["body"]["t"][1])
+    up_hard, up_soft = upload_events(rec_)
+    ex_hard, ex_soft = export_events(script["record"], rec_, ex_, body_s)
+    srcs = {"THE UPLOAD": dict(path=rec_["upload"]["file"], dur=float(rec_["upload"]["dur"]), busy=[pc["before"]["t"]], hard=up_hard, soft=up_soft,
+                               sha=up_sha),
+            "THE EXPORT": dict(path=ex_["file"], dur=body_s, busy=[pc["after"]["t"]] + ([pc["hook"]["t"]] if pc.get("hook") else []), hard=ex_hard, soft=ex_soft, sha=ex_sha)}
+    demand = W3.line_demand(dict(words=nar["words"]), sc, durs)
+    chosen, ranked, shots, uses = product_windows(ctx, script, srcs, demand)
     spend += uses
     crops = {os.path.join(fdir, "product", "before.mp4"): pc["before"].get("crop")}
     for k, window in enumerate(chosen):
         name, i = window["source"], window["line"]
-        path, _, _ = srcs[name]
+        path = srcs[name]["path"]
         t, end = window["start"], window["end"]
         fn = f"product/{'upload' if name == 'THE UPLOAD' else 'export'}_{k}.mp4"
         cut(path, t, end, os.path.join(fdir, fn), audio=False)
@@ -1468,7 +2097,8 @@ def supply(ctx, script):
             crops[os.path.join(fdir, fn)] = product_crop(script["record"], rec_, (t + end) / 2)
         c = W3.clip_facts(dict(path=os.path.join(fdir, fn), file=fn, subject=name, seconds=end-t,
                                source=recording_source(script, "upload" if name == "THE UPLOAD" else "export"),
-                               time_range=[t, end]))
+                               time_range=[t, end], origin=dict(key=srcs[name]["sha"], t0=t), shot=window["id"],
+                               **({"landings": landings_in(lands, t, end)} if name == "THE EXPORT" else {})))
         lines.setdefault(i, dict(i=i, clips=[]))["clips"].append(c)
     pack["footage"] = [lines[k] for k in sorted(lines)]
     talk = {}
@@ -1503,8 +2133,14 @@ def supply(ctx, script):
     pack["product"] = dict(pc, paths=[os.path.join(product_dir, n) for n in sorted(os.listdir(product_dir)) if n.endswith(".mp4")],
                            crops={k: v for k, v in crops.items() if v})
     body = W3.clip_facts(dict(path=os.path.join(product_dir, "export_body.mp4"), file="product/export_body.mp4", subject="THE EXPORT",
-                              seconds=pc["body"]["t"][1], source=recording_source(script, "export"), time_range=pc["body"]["t"]))
-    pack["proof_fill"] = [dict(body, busy=[pc["after"]["t"]])]          # the after plays whole on its own voice
+                              seconds=pc["body"]["t"][1], source=recording_source(script, "export"), time_range=pc["body"]["t"],
+                              landings=landings_in(export_landings(script), *pc["body"]["t"])))
+    # the after plays whole on its own voice; a line short of pictures plays the export's shots ranked for its words
+    pack["proof_fill"] = [proof_fill_clip(body, pc["after"]["t"], ex_sha, shots, ranked, [w["id"] for w in chosen])]
+    if pc.get("hook"):
+        pack["proof_fill"][0]["busy"].append(list(pc["hook"]["t"]))     # the opening beat plays whole on its own voice
+    pack["product_shots"] = dict(shots=len(shots), taken=len(chosen),
+                                 ranked=None if ranked is None else {str(i): len(v) for i, v in ranked.items()})
     wj = json.load(open(nar["words"]))
     rec = dict(narration_s=wj["duration"], voice=nar.get("voice"), gate=nar["gate"], pictures=sum(len(v) for v in pack["pictures"].values()),
                subjects=len(pack["pictures"]), missing=pack.get("missing"), spend=spend, product=pc,
@@ -1525,32 +2161,115 @@ def content_pace(pack, sc):
     return round(aim, 3), dict(ref=ref, narrator_wps=round(wps, 2), aim_s=round(aim, 3))
 
 
-def as_delivered(l1, product_paths):
-    """Preserve the upload/export comparison: no new captions, section finish or flash over the actual recording."""
+CAPTION_PIECE_F = 3        # a caption word trimmed around a full-frame recording keeps a piece this long or longer
+DISPLAY_OVER_RECORDING_Y = 0.40   # a display word over the recording rests here: clear of its own burned-in captions (about
+                                  # 0.70-0.76 of the height) and of the watermark (to 0.19); the reel's high seat for wide type
+NAME_OVER_RECORDING_Y = 0.27      # a name super over the recording: the reel's own high name seat (reel.name_supers), never
+                                  # its low one at 0.76, which sits on the recording's captions
+
+
+def is_display_word(it):
+    """The reel's designed display type, film.display_words' own voices only: its large part (voice dsp<f0>, one copy a
+    landing) and its small line (dsps<f0>). Never a caption, a name super (dsp_name<f0>) or a designed card's type
+    (dsp_card<f0>, dsp_cards<f0>)."""
+    if it.get("k") != "word" or not it.get("f"):
+        return False
+    f0 = int(it["f"][0])
+    return it.get("v") in (f"dsp{f0}", f"dsps{f0}")
+
+
+def is_name_super(it):
+    """reel.name_supers' type (voice dsp_name<f0>): a role=name item set at 0.27 or 0.76."""
+    return it.get("k") == "word" and bool(it.get("f")) and it.get("v") == f"dsp_name{int(it['f'][0])}"
+
+
+def rest_y(it):
+    y = it.get("y")
+    y = y[-1] if isinstance(y, list) and y else y
+    return float(y) if isinstance(y, (int, float)) else None
+
+
+def lift(it, d):
+    """The item moved by d of the height, its landing's per-frame rise kept."""
+    y = it.get("y")
+    if not d or rest_y(it) is None:
+        return it
+    return dict(it, y=[round(float(v) + d, 4) for v in y] if isinstance(y, list) else round(float(y) + d, 4))
+
+
+def as_delivered(l1, product_paths, spans=None):
+    """The recording as the product made it. Where a product picture fills the frame (the real-voice before and after,
+    the hook's landing, the whole upload: sealed spans) nothing is drawn over it: no flash, no finish, no look, and a
+    caption word is trimmed to the frames outside the span, never deleted whole (20 Nov: all 83 narration words the
+    reel built were deleted, even over the film's one photograph). Where the reel lays a product clip as a print on its
+    board (its items marked proof_board), the narration's captions stay (they sit on the board below the print), and no
+    flash, finish or look touches the print. The writer's display words stay on their spoken words over a sealed span
+    (20 Nov: TRASH CAN and BLACK HOLE were said over the recording and printed nowhere), lifted to
+    DISPLAY_OVER_RECORDING_Y, above the recording's own captions; a name super stays too, at NAME_OVER_RECORDING_Y; a
+    designed card's words are left off it.
+    spans: only these frame spans, sealed (a repaired window that now plays the recording), else every span the recording
+    plays. Returns the sealed spans."""
     keys = {k for k, a in (l1.get("assets") or {}).items() if a.get("path") in product_paths}
-    spans = sorted(tuple(it["f"]) for it in l1["items"] if it.get("k") in ("shot", "card") and it.get("pic") in keys and it.get("z", 0) <= 1)
+    # one move a landing: the large part sets it (voice dsp<f0>), its small line under it (dsps<f0>) moves with it
+    moves = {int(it["f"][0]): DISPLAY_OVER_RECORDING_Y - rest_y(it) for it in l1["items"]
+             if is_display_word(it) and it.get("v") == f"dsp{int(it['f'][0])}" and rest_y(it) is not None}
+    mine = [it for it in l1["items"] if it.get("k") in ("shot", "card") and it.get("pic") in keys and it.get("z", 0) <= 1]
+    if spans is not None:
+        spans, boards = sorted(tuple(s) for s in spans), []
+    else:
+        spans = sorted({tuple(it["f"]) for it in mine if not it.get("proof_board")})
+        boards = sorted({tuple(it["f"]) for it in mine if it.get("proof_board")})
     for it in l1["items"]:
         if it.get("pic") in keys:
             it.pop("look", None)
+
+    def outside(it, cover):
+        """The item's pieces outside the spans `cover`: [(a, b)]."""
+        at, out = it["f"][0], []
+        for s0, s1 in sorted(cover):
+            if s0 > at:
+                out.append((at, min(s0, it["f"][1])))
+            at = max(at, s1)
+        if it["f"][1] > at:
+            out.append((at, it["f"][1]))
+        return [(a, b) for a, b in out if b > a]
     out = []
     for it in l1["items"]:
         over = [s for s in spans if it["f"][0] < s[1] and it["f"][1] > s[0]]
-        if not over or it.get("pic") in keys or it.get("keep_over_proof"):
+        board = [s for s in boards if it["f"][0] < s[1] and it["f"][1] > s[0]]
+        if not (over or board) or it.get("pic") in keys or it.get("proof_board") or it.get("keep_over_proof"):
             out.append(it)                                 # the product's crop drawn on its own upload stays with it
             continue
+        if over and is_display_word(it):
+            out.append(lift(it, moves.get(int(it["f"][0]), 0.0)))
+            continue
+        if over and is_name_super(it) and rest_y(it) is not None:
+            out.append(lift(it, NAME_OVER_RECORDING_Y - rest_y(it)))     # its own seat, high, off the recording's captions
+            continue
         if it["k"] == "word":
-            continue                                       # neither caption the raw upload nor double-caption its export
+            if not over:
+                out.append(it)                             # on the board, under the print: the narration's own seat
+                continue
+            for a, b in outside(it, over):                 # neither caption the raw upload nor double-caption its export
+                if b - a >= CAPTION_PIECE_F:
+                    piece = D.slice_item(it, a, b)
+                    if piece:
+                        piece["id"] = f"{it['id']}t{a}"
+                        out.append(piece)
+            continue
         if it["k"] == "flash" and it.get("mode") != "pool":
-            continue                                       # a flash frame inside the recording
+            continue                                       # a flash frame inside the recording, full frame or on its print
         if it["k"] == "flash" or (it["k"] == "card" and it.get("z", 0) >= 1):
-            a = it["f"][0]
-            for s0, s1 in over:                            # the pool and the finish stop at the recording and start after it
-                if s0 - a >= 2:
-                    out.append(dict(it, id=f"{it['id']}a{a}", f=[a, s0], **({"op": it["op"][:s0 - a]} if isinstance(it.get("op"), list) else {})))
-                a = max(a, s1)
-            if it["f"][1] - a >= 2:
-                out.append(dict(it, id=f"{it['id']}b{a}", f=[a, it["f"][1]],
-                                **({"op": it["op"][a - it["f"][0]:]} if isinstance(it.get("op"), list) else {})))
+            cover = over if it["k"] == "flash" else over + (board if float(it.get("z", 0)) >= 40 else [])
+            if not cover:
+                out.append(it)                             # a pool on the board's caption seat; a card beside the print
+                continue
+            for a, b in outside(it, cover):                # the pool and the finish stop at the recording and start after it
+                if b - a >= 2:
+                    piece = D.slice_item(it, a, b)
+                    if piece:
+                        piece["id"] = f"{it['id']}{'a' if a == it['f'][0] else 'b'}{a}"
+                        out.append(piece)
             continue
         out.append(it)
     l1["items"] = out
@@ -1571,11 +2290,12 @@ def words_under(clock, f0, f1):
 
 
 def picture_key(p, words):
-    return json.dumps([5, p["path"], p.get("src"), words], ensure_ascii=False)
+    return json.dumps([6, p["path"], p.get("src"), words], ensure_ascii=False)
 
 
-def picture_check(ctx, beats, clock, product_paths, cache, recording=None):
-    """Every played source window checked; absent frames/verdicts never pass."""
+def picture_check(ctx, beats, clock, product_paths, cache, recording=None, roles=None):
+    """Every played source window checked; absent frames/verdicts never pass. roles: {line: beat} (hook, setup, low,
+    turn, payoff, close), so the check reads a pain line's real recording as the pain it is."""
     todo = []
     for p in beats.get("pictures") or []:
         ws = words_under(clock, *p["f"])
@@ -1594,6 +2314,10 @@ def picture_check(ctx, beats, clock, product_paths, cache, recording=None):
               "blank narrator words in those passages are not evidence of a blank or mismatched picture. "
               "Use the recording receipts to identify the state and the adjacent narration only to resolve "
               "pronouns or incomplete phrase boundaries. The shown picture must still carry the exact words. "
+              "Each picture names its line's role in the story: hook, setup and low are the editor's pain, turn is the "
+              "typed request, payoff and close are the result. On a pain line the real recording that shows the problem "
+              "itself (the raw upload, or the export where nothing on screen yet illustrates the words) carries those "
+              "words: what is missing from the screen is the pain the line names. "
               "Only yes passes; loose and wrong both need another picture.")
     for k in range(0, len(todo), 8):
         batch = todo[k:k + 8]
@@ -1609,7 +2333,9 @@ def picture_check(ctx, beats, clock, product_paths, cache, recording=None):
             a, b = p["f"][0] / F.FPS, p["f"][1] / F.FPS
             segs = {w.get("seg") for w in clock.words if w["t1"] > a and w["t0"] < b}
             context = " ".join(w["w"] for w in clock.words if w.get("seg") in segs)
+            role = (roles or {}).get(p.get("spoken_line", p.get("line")))   # the line whose words sit under it
             content.append(dict(type="text", text=f"Picture {n}; words: {ws!r}; source role: {p.get('name')!r}; "
+                                + (f"line role: {role}; " if role else "") +
                                 f"real product recording: {p['path'] in product_paths}; full line for resolving "
                                 f"phrase fragments only: {context!r}"))
             if recording and p["path"] in product_paths:
@@ -1637,6 +2363,486 @@ def picture_check(ctx, beats, clock, product_paths, cache, recording=None):
         if not v["fits"]:
             bad.append((os.path.basename(p["path"]), ws, v.get("why")))
     return bad, spend
+
+
+# ----------------------------------------------------------------- a window the check judged loose or wrong is repaired
+
+REPAIR_TRIES = 3          # ranked replacements a misfit window tries in turn, each checked on its own frames only
+REPAIR_CANDIDATES = 48    # the film's own pictures offered for the misfits in one look
+REPAIR_STEP_S = 0.25      # the free export seconds are searched at this step for windows no shown second overlaps
+
+
+def roles_of(sc):
+    return {i: s.get("beat") for i, s in enumerate(sc.get("segments") or [])}
+
+
+def words_line(p):
+    """The line whose words sit under a picture (reel.note's spoken_line), else the line it was picked for."""
+    return p.get("spoken_line", p.get("line"))
+
+
+def checked(ctx, beats, clock, product_paths, cache, recording=None, roles=None):
+    """picture_check, asked again once when it gets no answer (an outage, not a verdict); after that the windows it could
+    not read stay unverified and the film carries on. (bad, spend, fault or None)."""
+    spend, fault = [], None
+    for _ in range(2):
+        try:
+            bad, sp = picture_check(ctx, beats, clock, product_paths, cache, recording, roles=roles)
+            return bad, spend + sp, None
+        except Exception as e:  # noqa: BLE001 - an unanswered look is an outage: asked again, then recovered
+            fault = repr(e)[:300]
+            spend.append(dict(stage="picture check", fault=fault))
+    bad = []
+    for p in beats.get("pictures") or []:
+        ws = words_under(clock, *p["f"])
+        v = cache.get(picture_key(p, ws)) or dict(fits=False, why="missing picture verdict")
+        if not v.get("fits"):
+            bad.append((os.path.basename(p["path"]), ws, v.get("why")))
+    return bad, spend, fault
+
+
+def recording_timelines(pack):
+    """{path: (recording, offset)}: each cut of the recording the pack holds, on the recording's own seconds (the
+    export's or the upload's): a cut's src second s is the recording's offset + s."""
+    pc = pack.get("product") or {}
+    out = {}
+
+    def role_of(c):
+        title = str((c.get("source") or {}).get("title") or "")
+        name = str(c.get("subject") or "")
+        if title.startswith("THE EXPORT") or name == "THE EXPORT":
+            return "export"
+        if title.startswith("THE UPLOAD") or name == "THE UPLOAD":
+            return "upload"
+        return None
+    for ln in pack.get("footage") or []:
+        for c in ln.get("clips") or []:
+            r, tr = role_of(c), c.get("time_range")
+            if r and isinstance(tr, (list, tuple)) and tr:
+                out[str(c.get("path"))] = (r, float(tr[0]))
+    for c in pack.get("proof_fill") or []:              # the proof fill is the export by construction
+        out[str(c.get("path"))] = ("export", float((c.get("time_range") or [0.0])[0]))
+    by_name = dict(before=("upload", "before"), after=("export", "after"), hook=("export", "hook"), export_body=("export", "body"))
+    for p in pc.get("paths") or []:
+        stem = os.path.splitext(os.path.basename(str(p)))[0]
+        if stem in by_name and str(p) not in out:
+            r, k = by_name[stem]
+            out[str(p)] = (r, float(((pc.get(k) or {}).get("t") or [0.0])[0]))
+    for v in pack.get("voices") or []:
+        c, k = v.get("clip") or {}, v.get("person")
+        if c.get("path") and k in ("before", "after", "hook") and str(c["path"]) not in out:
+            out[str(c["path"])] = ("upload" if k == "before" else "export", float(((pc.get(k) or {}).get("t") or [0.0])[0]))
+    return out
+
+
+def played_seconds(l1, timelines):
+    """Every recording second the film already shows: {recording: [(a, b)]}, each played item's src mapped through its
+    cut's offset (an item with no src: its whole asset)."""
+    out = {"export": [], "upload": []}
+    if not l1:
+        return out
+    assets = l1.get("assets") or {}
+    for it in l1.get("items") or []:
+        if it.get("k") not in ("shot", "card"):
+            continue
+        a = assets.get(str(it.get("pic"))) or {}
+        tl = timelines.get(str(a.get("path")))
+        if not tl:
+            continue
+        src = it.get("src")
+        r, off = tl
+        if isinstance(src, (list, tuple)) and len(src) >= 2:
+            out[r].append((off + float(src[0]), off + float(src[-1])))
+        else:
+            out[r].append((off, off + float(a.get("dur") or 0.0)))
+    return out
+
+
+def recording_words(script):
+    """What the recording says on its own seconds: {upload: [(t, word)], export: [(t, word)]}, the source's caption words
+    on the upload's seconds and, through the export's EDL keep ranges, on the export's. {} when they cannot be read."""
+    try:
+        rec = json.load(open(script["record"]))
+        src = next((s for s in sources() if s["file"] == rec["source"]["file"]), None)
+        if not src:
+            return {}
+        t0, t1 = float(rec["source"]["t0"]), float(rec["source"]["t1"])
+        up = [(round(t - t0, 3), w) for t, w in json3_words(src["captions"]) if t0 <= t <= t1]
+        ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
+        edl = json.load(open(os.path.join(os.path.dirname(script["record"]), "edl", f"v{int(ex['edl_version']):03d}.json")))
+    except (OSError, ValueError, KeyError, TypeError, IndexError, StopIteration):
+        return {}
+    out, at = [], 0.0
+    for k in edl.get("keep") or []:
+        try:
+            a, b = float(k[0]), float(k[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        out += [(round(at + t - a, 3), w) for t, w in up if a <= t < b]
+        at += b - a
+    return dict(upload=up, export=out)
+
+
+def said_in(said, tl, t, win):
+    """The words the recording speaks over [t, t + win] of one cut of it ('' when not known)."""
+    if not tl or not said:
+        return ""
+    r, off = tl
+    a, b = off + float(t), off + float(t) + float(win)
+    return " ".join(w for s, w in said.get(r) or [] if a - 0.15 <= s < b)
+
+
+def repair_candidates(pack, sc, lines, cap=REPAIR_CANDIDATES, l1=None, said=None, win_s=1.0):
+    """The pack's own pictures a misfit window may take: the footage and photographs of the misfits' lines first, then
+    the real export's free seconds (its timeline minus every export second the film already plays, and the after and
+    opening beat spans), then the recording's other cuts at seconds not yet shown. A recording candidate names the words the
+    recording speaks there, so the ranking can find the instant a line names.
+    [{id, path, kind (clip|photo), name, t (window start in the file), seconds, w, h, fps, faces, landings, line, said}]."""
+    out, seen = [], set()
+    tls = recording_timelines(pack)
+    played = played_seconds(l1, tls)
+    win_s = max(float(win_s or 1.0), 0.2)
+
+    def shown(path, t):
+        tl = tls.get(str(path))
+        if not tl:
+            return False
+        a, b = tl[1] + float(t), tl[1] + float(t) + win_s
+        return any(b > x + 1e-3 and a < y - 1e-3 for x, y in played[tl[0]])
+
+    def add(c, kind, name, t, line=None):
+        path = str(c.get("path"))
+        k = (path, round(float(t), 2))
+        if k in seen or not os.path.exists(path) or (kind == "clip" and shown(path, t)):
+            return
+        seen.add(k)
+        out.append(dict(path=path, kind=kind, name=name, t=round(float(t), 3), seconds=float(c.get("seconds") or 0.0),
+                        w=int(c.get("w") or F.W), h=int(c.get("h") or F.H), fps=float(c.get("fps") or F.FPS), faces=c.get("faces") or [],
+                        landings=c.get("landings"), line=line, product=name in ("THE UPLOAD", "THE EXPORT"),
+                        said=said_in(said, tls.get(path), t, win_s) if kind == "clip" else ""))
+    segs = sc.get("segments") or []
+    near, rest = [], []
+    for ln in pack.get("footage") or []:
+        for c in ln.get("clips") or []:
+            sec = float(c.get("seconds") or 0.0)
+            row = (c, "clip", c.get("subject") or c.get("title") or os.path.basename(str(c.get("path"))),
+                   max(0.0, sec / 2 - 0.5) if sec > 1.5 else 0.0, int(ln["i"]))
+            (near if int(ln["i"]) in lines else rest).append(row)
+    for name, recs in (pack.get("pictures") or {}).items():
+        on = [i for i, s in enumerate(segs) if name in (s.get("pictures") or [])]
+        for r in recs:
+            (near if set(on) & set(lines) else rest).append((r, "photo", name, 0.0, on[0] if on else None))
+    for row in near:
+        add(*row)
+    for body in pack.get("proof_fill") or []:
+        busy = [tuple(b) for b in body.get("busy") or []] + [tuple(((pack.get("product") or {}).get("hook") or {}).get("t") or (0, 0))]
+        tl = tls.get(str(body.get("path")))
+        off = tl[1] if tl else 0.0
+        busy += [(x - off, y - off) for x, y in played["export"]]          # every export second the film already plays
+        sec = float(body.get("seconds") or 0.0)
+        t = 0.0
+        while t + win_s <= sec + 1e-6:
+            if not any(t + win_s > a + 1e-3 and t < b - 1e-3 for a, b in busy):
+                add(dict(body), "clip", "THE EXPORT", t)
+                busy.append((t, t + win_s))                               # the next candidate is another instant
+                t += win_s
+            else:
+                t += REPAIR_STEP_S
+    for row in rest:
+        if row[2] in ("THE UPLOAD", "THE EXPORT"):
+            add(*row)
+    out = out[:cap]
+    for i, c in enumerate(out):
+        c["id"] = i
+    return out
+
+
+def choose_replacements(misfits, cands, clock, roles, cache):
+    """One look at the misfit windows and the film's own pictures: for each window the candidates that show its exact
+    words, best first (up to REPAIR_TRIES). {window index: [candidate ids]}. An unanswered look is asked again once."""
+    system = ("Some windows of a marketing film for video editors show a picture that does not carry the exact words under it. "
+              "For each window, rank up to three of the film's own candidate pictures that show what those words say, best first. "
+              "On a line about the editor's pain (role hook, setup or low) the real recording showing the problem itself "
+              "(the raw upload, or the export where nothing on screen yet illustrates the words) carries the words. The real "
+              "Valmera export carries every line about the result. A recording candidate names what its speaker says at that "
+              "instant: the instant whose words the line names is the one to show. A candidate that shows something unrelated "
+              "to the words is left out; an empty list is right when none carries them.")
+    content = [dict(type="text", text="The candidates (the film's own footage, photographs and its real recording):")]
+    for c in cands:
+        b = still(c["path"], c["t"] + min(0.5, max(c["seconds"] - c["t"], 0.0) / 2), w=360)
+        if b:
+            content += [dict(type="text", text=f"Candidate {c['id']}: {c['name']}" + (" (the real Valmera recording)" if c["product"] else "")
+                             + (f" at {c['t']:.1f} s" if c["kind"] == "clip" else "")
+                             + (f"; the speaker says there: {c['said']!r}" if c.get("said") else "")), img(b)]
+    for n, p in enumerate(misfits):
+        ws = words_under(clock, *p["f"])
+        v = cache.get(picture_key(p, ws)) or {}
+        src = p.get("src") or [0.0, 0.0]
+        b = still(p["path"], (src[0] + src[-1]) / 2, w=360)
+        content.append(dict(type="text", text=f"Window {n}: words {ws!r}; line role: {roles.get(words_line(p))}; it shows "
+                                              f"{p.get('name')!r}, judged {v.get('fit')}: {v.get('why')}"))
+        if b:
+            content.append(img(b))
+    content.append(dict(type="text", text='Return JSON: {"windows": [{"n": window, "ranked": [candidate ids, best first]}]}'))
+    got, spend = {}, []
+    for _ in range(2):
+        try:
+            got, use = ask(system, content, what="picture repair", effort="low", model=CHECK_MODEL, max_tokens=3000)
+            spend.append(use)
+            break
+        except Exception as e:  # noqa: BLE001 - an unanswered look is asked again; then the windows keep their pictures
+            spend.append(dict(stage="picture repair", fault=repr(e)[:200]))
+    ok_ids = {c["id"] for c in cands}
+    out = {}
+
+    def same_window(c, p):
+        """The candidate plays the very seconds the misfit already shows (same file, overlapping source window)."""
+        if c["path"] != p["path"]:
+            return False
+        if c["kind"] != "clip" or not p.get("src"):
+            return True
+        n = (p["f"][1] - p["f"][0]) / F.FPS
+        return c["t"] < float(p["src"][-1]) - 1e-3 and c["t"] + n > float(p["src"][0]) + 1e-3
+    for row in (got.get("windows") if isinstance(got, dict) else []) or []:
+        try:
+            n = int(row["n"])
+            ids = [int(x) for x in row.get("ranked") or [] if int(x) in ok_ids]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if 0 <= n < len(misfits):
+            out[n] = [i for i in ids if not same_window(cands[i], misfits[n])][:REPAIR_TRIES]
+    return out, spend
+
+
+def _asset_key(l1, c):
+    """The L1 asset that plays candidate c: the one already on its file, else a new one."""
+    assets = l1.setdefault("assets", {})
+    for k, a in assets.items():
+        if a.get("path") == c["path"]:
+            return k
+    k = f"rp{len(assets):02d}"
+    if c["kind"] == "photo":
+        assets[k] = dict(kind="image", path=c["path"], w=c["w"], h=c["h"])
+    else:
+        assets[k] = dict(kind="video", path=c["path"], w=c["w"], h=c["h"], fps=c["fps"], dur=c["seconds"])
+        if c.get("landings"):
+            assets[k]["landings"] = [dict(x) for x in c["landings"]]
+    return k
+
+
+def swap_in(l1, p, items, c, looks=None):
+    """The window's own items (`items`: the originals as built) playing candidate c over the same frames: same frames,
+    same layer and finish, the new picture covering the item's box (its framing moving when the original's moved).
+    looks: {item id: the section look it had before the recording was shown as delivered}, given back to a picture that
+    is not the recording. Returns the src span the swapped items really play ([first src start, last src end]) or None."""
+    key = _asset_key(l1, c)
+    f0 = int(p["f"][0])
+    (fx, fy), _ = F.focus_of(c)
+    out = []
+    for o in items:
+        it = json.loads(json.dumps(o))
+        it["pic"], it["repair"] = key, True
+        a, b = int(it["f"][0]), int(it["f"][1])
+        if c["kind"] == "clip":
+            t0 = c["t"] + (a - f0) / F.FPS
+            t1 = c["t"] + (b - f0) / F.FPS
+            if c["seconds"] and t1 > c["seconds"]:
+                t0, t1 = max(0.0, t0 - (t1 - c["seconds"])), c["seconds"]
+            it["src"] = [round(t0, 4), round(t1, 4)]
+        else:
+            it.pop("src", None)
+        if it["k"] == "card":
+            w, h = it.get("w"), it.get("h")
+            w = w[-1] if isinstance(w, list) else w
+            h = h[-1] if isinstance(h, list) else h
+            asp = float(w or 1.0) * F.W / max(float(h or 1.0) * F.H, 1e-6)
+        else:
+            asp = F.W / F.H
+        base = [F.r4(v) for v in F.cover_crop(float(c["w"]), float(c["h"]), asp, (fx, fy), (0.5, 0.42))]
+        crop = it.get("crop")
+        it["crop"] = F.push(base, b - a, 0.05, (fx, fy)) if isinstance(crop, list) and crop and isinstance(crop[0], (list, tuple)) else base
+        if looks is not None and not c.get("product"):
+            if looks.get(o["id"]):
+                it["look"] = looks[o["id"]]
+            else:
+                it.pop("look", None)
+        out.append(it)
+    ids = {o["id"] for o in items}
+    l1["items"] = [it for it in l1["items"] if it.get("id") not in ids] + out
+    order_k = {"shot": 0, "join": 1, "card": 2, "flash": 3, "word": 4}
+    l1["items"].sort(key=lambda it: (it["f"][0], order_k.get(it["k"], 5), it.get("z", 0), str(it["id"])))
+    srcs = [it["src"] for it in sorted(out, key=lambda it: it["f"][0]) if it.get("src")]
+    return [srcs[0][0], srcs[-1][1]] if srcs else None
+
+
+def _minus(lo, hi, spans):
+    """[lo, hi) without the given spans: [(a, b)]."""
+    parts = [(lo, hi)]
+    for s0, s1 in sorted(spans):
+        nxt = []
+        for a, b in parts:
+            if s1 <= a or s0 >= b:
+                nxt.append((a, b))
+                continue
+            if s0 > a:
+                nxt.append((a, s0))
+            if s1 < b:
+                nxt.append((s1, b))
+        parts = nxt
+    return [(a, b) for a, b in parts if b > a]
+
+
+def shown_off_recording(l1, pre, windows, product_paths, hold=()):
+    """A window the repair moved off the real recording gets back what as_delivered took off it while the recording
+    played there: the narration's captions and flash frames (whole, when no recording or device still plays under
+    them) and the caption pool and the section finish over that window's frames. pre: the items as built, before
+    as_delivered. Returns the ids given back."""
+    if not windows or not pre:
+        return []
+    keys = {k for k, a in (l1.get("assets") or {}).items() if a.get("path") in product_paths}
+    prod_now = [tuple(it["f"]) for it in l1["items"] if it.get("k") in ("shot", "card") and it.get("pic") in keys and it.get("z", 0) <= 1]
+    blocked = prod_now + [tuple(s) for s in hold or ()]
+    have = {str(it.get("id")) for it in l1["items"]}
+    back = []
+    for it in pre:
+        k, iid = it.get("k"), str(it.get("id"))
+        if iid in have or it.get("pic") in keys:
+            continue
+        over = [w for w in windows if it["f"][0] < w[1] and it["f"][1] > w[0]]
+        if not over:
+            continue
+        a, b = int(it["f"][0]), int(it["f"][1])
+        if k == "word" or (k == "flash" and it.get("mode") != "pool"):
+            if not any(a < s1 and b > s0 for s0, s1 in blocked):
+                l1["items"].append(json.loads(json.dumps(it)))
+                back.append(iid)
+            continue
+        if k == "flash" or (k == "card" and it.get("z", 0) >= 1):
+            for w0, w1 in over:
+                for lo, hi in _minus(max(a, int(w0)), min(b, int(w1)), blocked):
+                    piece = D.slice_item(json.loads(json.dumps(it)), lo, hi)
+                    if piece:
+                        piece["id"] = f"{iid}r{lo}"
+                        if piece["id"] not in have:
+                            l1["items"].append(piece)
+                            have.add(piece["id"])
+                            back.append(piece["id"])
+    order_k = {"shot": 0, "join": 1, "card": 2, "flash": 3, "word": 4}
+    l1["items"].sort(key=lambda it: (it["f"][0], order_k.get(it["k"], 5), it.get("z", 0), str(it["id"])))
+    return back
+
+
+def repair_misfits(ctx, l1, seen, clock, product_paths, cache, recording, pack, sc, pre=None, hold=(), said=None):
+    """Every window the check judged loose or wrong takes the best of the film's own pictures that shows its words, in
+    place over the same frames (never dropped, never a type page): the candidates ranked by one look, each tried in
+    turn and checked on its own frames only, the first that fits kept. A window none of them fits keeps the best it
+    had. An unanswered check is asked again once; then the trial windows go back to their best verified picture (or
+    their own) and the film carries on. What the recording shows is shown as delivered after the swaps, both ways:
+    pre (the items as built) gives captions, flashes, pool and finish back to a window moved off the recording.
+    Returns (record, spend)."""
+    roles = roles_of(sc)
+
+    def verdict(p):
+        return cache.get(picture_key(p, words_under(clock, *p["f"]))) or {}
+    misfits = [p for p in seen.get("pictures") or [] if verdict(p).get("fit") in ("wrong", "loose")]
+    if not misfits:
+        return dict(misfits=0, repaired=[]), []
+    win_s = max((p["f"][1] - p["f"][0]) / F.FPS for p in misfits)
+    cands = repair_candidates(pack, sc, {words_line(p) for p in misfits}, l1=l1, said=said, win_s=win_s)
+    ranked, spend = choose_replacements(misfits, cands, clock, roles, cache) if cands else ({}, [])
+    rank = {"yes": 2, "loose": 1, "wrong": 0}
+    pre_by = {str(it.get("id")): it for it in pre or []}
+    state = []
+    for p in misfits:
+        keys = {k for k, a in (l1.get("assets") or {}).items() if a.get("path") == p["path"]}
+        items = [json.loads(json.dumps(it)) for it in l1["items"] if it.get("k") in ("shot", "card") and it.get("pic") in keys
+                 and p["f"][0] <= it["f"][0] < p["f"][1]]
+        looks = {o["id"]: (pre_by.get(str(o["id"])) or o).get("look") for o in items}
+        state.append(dict(orig=dict(p), items=items, looks=looks, best=(rank.get(verdict(p).get("fit"), 0), None, None), tried=[], now=None))
+    faults = []
+    for attempt in range(REPAIR_TRIES):
+        trial = []
+        taken = {st["best"][1]["id"] for st in state if st["best"][1] is not None}     # one candidate fills one window
+        for n, p in enumerate(misfits):
+            st, ids = state[n], ranked.get(n) or []
+            if verdict(p).get("fits") or attempt >= len(ids) or not st["items"] or ids[attempt] in taken:
+                continue
+            c = cands[ids[attempt]]
+            taken.add(c["id"])
+            src = swap_in(l1, p, st["items"], c, st["looks"])     # over the window's original items, never over the last try
+            p.update(path=c["path"], name=c["name"], kind="clip" if c["kind"] == "clip" else "photo", tier="repair",
+                     src=src if c["kind"] == "clip" else None)
+            st["tried"].append(c["id"])
+            st["now"] = c["id"]
+            trial.append((n, c, src))
+        if not trial:
+            break
+        _bad, sp, fault = checked(ctx, dict(pictures=[misfits[n] for n, _, _ in trial]), clock, product_paths, cache, recording, roles=roles)
+        spend += sp
+        for n, c, src in trial:
+            r = rank.get(verdict(misfits[n]).get("fit"), 0)
+            if r > state[n]["best"][0]:
+                state[n]["best"] = (r, c, src)
+        if fault:                          # no answer twice: the trial windows go back below, and the film carries on
+            faults.append(dict(attempt=attempt, windows=[list(misfits[n]["f"]) for n, _, _ in trial], fault=fault))
+            break
+    repaired, product_spans, off_spans = [], [], []
+    for n, p in enumerate(misfits):
+        st = state[n]
+        r, c, src = st["best"]
+        ids = {o["id"] for o in st["items"]}
+        if c is None:                      # nothing the film has carried these words better: the window keeps its picture
+            if st["tried"]:
+                l1["items"] = [it for it in l1["items"] if it.get("id") not in ids] + [json.loads(json.dumps(o)) for o in st["items"]]
+                p.clear()
+                p.update(st["orig"])
+            continue
+        if st["now"] != c["id"]:           # the best try was not the last one
+            src = swap_in(l1, p, st["items"], c, st["looks"])
+            p.update(path=c["path"], name=c["name"], kind="clip" if c["kind"] == "clip" else "photo", tier="repair",
+                     src=src if c["kind"] == "clip" else None)
+        repaired.append(dict(frames=list(p["f"]), was=os.path.basename(st["orig"]["path"]), now=os.path.basename(c["path"]),
+                             src=p.get("src"), fit={2: "yes", 1: "loose", 0: "wrong"}[r], words=words_under(clock, *p["f"])))
+        now_rec = c["path"] in product_paths or c.get("product")
+        if now_rec:
+            product_spans.append(tuple(p["f"]))
+        elif st["orig"]["path"] in product_paths:
+            off_spans.append(tuple(p["f"]))
+    order_k = {"shot": 0, "join": 1, "card": 2, "flash": 3, "word": 4}
+    l1["items"].sort(key=lambda it: (it["f"][0], order_k.get(it["k"], 5), it.get("z", 0), str(it["id"])))
+    rec_paths = set(product_paths) | {c["path"] for c in cands if c.get("product")}
+    given = shown_off_recording(l1, pre, off_spans, rec_paths, hold) if off_spans else []
+    if product_spans:                      # the real recording now plays there: shown as delivered, as everywhere else
+        as_delivered(l1, rec_paths, spans=product_spans)
+    out = dict(misfits=len(misfits), candidates=len(cands), repaired=repaired)
+    if off_spans:
+        out["off_recording"] = dict(windows=[list(s) for s in off_spans], given_back=len(given))
+    if faults:
+        out["faults"] = faults
+    return out, spend
+
+
+def resound(l1, pack, knobs, turn_f, clock, windows):
+    """The sound design follows the repaired pictures: a sound planned for what a repaired window showed before goes,
+    and the sound the design plans for what it shows now comes in (the same score.sound.design pass, same turn and
+    supply, run on the final plan; only the repaired windows take from it). Device sounds stay. Returns a record."""
+    if not windows:
+        return dict(windows=0)
+    rep0 = l1.get("sound_design") or {}
+
+    def inside(s):
+        f = int(s.get("event_f", -1))
+        return any(a <= f < b for a, b in windows)
+    spoken = [(w["t0"] - F.LEAD_F / F.FPS, w["t1"] - F.LEAD_F / F.FPS) for w in clock.words] if clock is not None else None
+    fresh, rep = F.design_sound(l1, pack, knobs, turn_f=turn_f, spoken=spoken, np10=rep0.get("np10"))
+    if rep.get("fault"):
+        return dict(windows=len(windows), fault=rep["fault"])        # the film keeps the sounds it has
+    old = l1.get("sound") or []
+    gone = [s for s in old if inside(s) and not s.get("device")]
+    new = [dict(s, repair=True) for s in fresh if inside(s)]
+    l1["sound"] = [s for s in old if not (inside(s) and not s.get("device"))] + new
+    l1["sound"].sort(key=lambda s: int(s.get("event_f", 0)))
+    return dict(windows=len(windows), dropped=len(gone), added=len(new))
 
 
 def instruction_panel(l1, clock, sc, typed):
@@ -1800,6 +3006,39 @@ def lay_devices(ctx, l1, sc, pack, clock, script, knobs):
     return out
 
 
+def lay_hook(ctx, l1, pack, script):
+    """The tutorial's opening beat (script["hook"], hook_beat): devices.split over the seconds the speaker's own voice
+    opens the film (the "hook" voice the supply cut in before the narrator), the clip as uploaded beside Valmera's
+    export at the same instant, a hit where the export's picture lands. The raw clip and the export it became, the
+    words and the picture agreeing, before the narrator says a word. Returns the device's record, None without a hook
+    beat; a split that cannot be laid leaves the export full frame on its voice (the pinned cut-in) and is recorded."""
+    h = (pack.get("product") or {}).get("hook")
+    v = next((v for v in pack.get("voices") or [] if v.get("person") == "hook"), None)
+    if not h or not v:
+        return None
+    try:
+        rec = json.load(open(script["record"]))
+        ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
+        edl_b = json.load(open(os.path.join(os.path.dirname(script["record"]), "edl", f"v{int(ex['edl_version']):03d}.json")))
+        up = rec["upload"]
+        upload = dict(path=up["file"], w=int(up["w"]), h=int(up["h"]), fps=float(up.get("fps") or 30.0), dur=float(up["dur"]))
+        body = D.media(pack["ffmpeg"], os.path.join(os.path.dirname(pack["product"]["paths"][0]), "export_body.mp4"))
+        lib = dict(pack.get("sounds") or {})
+        lib.update(PX.sound_facts(("whoosh_soft_1", "impact_1")))
+        at = float(h["at"])                       # the split's picture at frame f shows at + f / FPS; its voice starts on LEAD_F there
+        f1 = F.Clock.f(float(v["end"]) + F.LEAD_F / F.FPS)
+        land = h.get("landing")
+        land_f = int(round((float(land) - at) * F.FPS)) if land is not None else None
+        work = os.path.join(ctx.supply, "devices")
+        focus = face_focus(pack["ffmpeg"], upload["path"], D.src_at(D.program(edl_b)[0], at), work, (0.5, 0.42))
+        out = D.split(l1, f0=0, f1=f1, upload=upload, export=body, edl_b=edl_b, export_at=at, lib=lib, focus=focus, land_f=land_f)
+        ctx.log(f"opening beat: split frames {out['frames']}, export from {at} s, lands on frame {land_f}")
+        return out
+    except Exception as e:  # noqa: BLE001 - the export still opens the film full frame on the speaker's voice
+        ctx.log(f"opening split not laid: {repr(e)[:300]}")
+        return dict(device="split", fault=repr(e)[:300])
+
+
 def showcase_score(ctx, script, pack):
     """The showcase's plan: devices.showcase over the recording (no narrator, no picture check: every picture is the
     product's own export, upload, Studio screen or site)."""
@@ -1869,7 +3108,7 @@ def lay_cta(ctx, l1, sc, pack, clock, script):
         body = os.path.join(os.path.dirname(pack["product"]["paths"][0]), "export_body.mp4")
         m = D.media(pack["ffmpeg"], body)
         lib = dict(pack.get("sounds") or {})
-        lib.update(PX.sound_facts(("click_1", "whoosh_soft_1")))
+        lib.update(PX.sound_facts(("click_1", "whoosh_soft_1", D.CTA_RISER)))
         src0 = max(m["dur"] - (l1["dur_f"] - f0) / F.FPS - 0.2, 0.0)
         ui = ui_shots(json.load(open(script["record"]))) if script.get("record") else None
         if ui and ui.get("site"):
@@ -1878,6 +3117,32 @@ def lay_cta(ctx, l1, sc, pack, clock, script):
     except Exception as e:  # noqa: BLE001 - the film keeps its spoken call to action
         ctx.log(f"call to action not laid: {repr(e)[:300]}")
         return dict(device="cta", fault=repr(e)[:300])
+
+
+def upload_reveals(paths, footage=()):
+    """The upload files that get the whole-upload reveal (the wide clip on its blur, then the push into the export's
+    crop): one per line that takes the upload, its best-ranked shot (the line's first upload file); with no lines known,
+    the film's first. The line's other upload shots lie on the board under its narration (20 Nov review: a line with
+    demand 6 took five upload shots and would have played the same wide-then-push reveal five times running, every
+    caption on it trimmed away)."""
+    have = {p for p in paths if os.path.basename(p).startswith("upload_")}
+    out = []
+    for ln in footage or ():
+        first = next((c["path"] for c in ln.get("clips") or [] if c.get("path") in have), None)
+        if first and first not in out:
+            out.append(first)
+    if not out and have:
+        out = [min(have, key=lambda p: (len(os.path.basename(p)), os.path.basename(p)))]
+    return out
+
+
+def product_layout(paths, footage=()):
+    """(full frame, on the board): the recording's files the reel shows full frame (the before and the after on their
+    own voices, the hook's landing, one whole-upload reveal per upload line: upload_reveals) and those it lays as a
+    print on the style's board under the narration (the export's shots, its proof fill, a line's other upload shots)."""
+    reveal = set(upload_reveals(paths, footage))
+    whole = [p for p in paths if os.path.basename(p) in ("before.mp4", "after.mp4", "hook.mp4") or p in reveal]
+    return whole, [p for p in paths if p not in whole]
 
 
 def score(ctx, script):
@@ -1893,12 +3158,20 @@ def score(ctx, script):
     knobs.setdefault("require_fit", True)
     knobs["prefer_new_pictures"] = True
     knobs.setdefault("layout", "bleed")
-    knobs["full_frame_paths"] = list(pack["product"]["paths"])
-    knobs["whole_frame_paths"] = [p for p in pack["product"]["paths"]
-                                   if os.path.basename(p) == "before.mp4" or os.path.basename(p).startswith("upload_")]
+    # full frame only where the recording speaks for itself (the before and the after on their own voices), the hook's
+    # opening beat (hook.mp4) and the whole upload pushing into the export's crop; on the narrated lines the export plays as
+    # a print on the style's board under the narration's own captions (20 Nov: every recording clip was a sealed static
+    # full-frame plate, 90% of the film, its captions deleted)
+    knobs["full_frame_paths"], knobs["board_paths"] = product_layout(pack["product"]["paths"], pack.get("footage") or ())
+    knobs.setdefault("collage_any_line", True)          # the style's collage budget takes lines the writer did not mark
+    knobs["whole_frame_paths"] = [p for p in pack["product"]["paths"] if os.path.basename(p) == "before.mp4"] + \
+        upload_reveals(pack["product"]["paths"], pack.get("footage") or ())
     knobs["whole_frame_crop"] = dict(pack["product"].get("crops") or {})   # the before pushes into the export's own crop
     knobs["proof_fill"] = list(pack.get("proof_fill") or [])               # a line short of pictures plays the export
     knobs.setdefault("cap_px", CAP_PX)
+    after_v = next((v for v in pack.get("voices") or [] if v.get("person") == "after"), None)
+    if after_v:   # the payoff is the after: the drop lands on its first picture landing (the export's own), else on its arrival
+        knobs["turn_span_s"] = [round(float(after_v["start"]) + F.LEAD_F / F.FPS, 3), round(float(after_v["end"]) + F.LEAD_F / F.FPS, 3)]
     try:          # the call to action holds CTA_S on screen: the programme runs on past the last word for it
         ck = F.Clock(pack["words"], sc)
         last = ck.seg_words(len(sc["segments"]) - 1)
@@ -1914,8 +3187,9 @@ def score(ctx, script):
     cache_p = os.path.join(ctx.run_dir, "picture_check.json")
     cache = jload(cache_p, {}) or {}
     drop, spend, rounds = list(knobs.get("drop") or []), [], []
-    # One cut. The picture check below is a record of what plays under which words; it never drops a picture and
-    # rebuilds (16 Nov: four rounds of drops turned 35-47% of two films into flat type pages and still left 25 misfits).
+    # One cut. The picture check below reads what plays under which words; a window judged loose or wrong is filled in
+    # place with the film's own picture that shows them (repair_misfits). It never drops a picture and rebuilds (16 Nov:
+    # four rounds of drops turned 35-47% of two films into flat type pages and still left 25 misfits).
     for rnd in range(1):
         l1, beats = build(sc, pack, dict(knobs, drop=drop))
         taste = F.taste_check(l1, beats)
@@ -1926,8 +3200,12 @@ def score(ctx, script):
                 taste = F.taste_check(l1, beats)
                 if taste["ok"]:
                     break
+        pre = json.loads(json.dumps(l1["items"]))          # as built: what a window the repair moves off the recording gets back
         spans = as_delivered(l1, product)
         devices = lay_devices(ctx, l1, sc, pack, clock, script, knobs)
+        devices["hook"] = lay_hook(ctx, l1, pack, script)
+        if (devices["hook"] or {}).get("frames"):
+            devices.setdefault("laid", []).insert(0, devices["hook"])
         devices["cta"] = lay_cta(ctx, l1, sc, pack, clock, script)
         if devices["cta"].get("frames"):
             devices.setdefault("laid", []).append(devices["cta"])
@@ -1936,8 +3214,25 @@ def score(ctx, script):
         spans_dev = [d["frames"] for d in devices.get("laid") or []]
         seen = dict(beats, pictures=[p for p in beats.get("pictures") or []          # a picture a device covers is not seen
                                      if not any(a <= p["f"][0] and p["f"][1] <= z for a, z in spans_dev)])
-        bad, sp = picture_check(ctx, seen, clock, product, cache, script.get("receipts"))
+        bad, sp, fault = checked(ctx, seen, clock, product, cache, script.get("receipts"), roles=roles_of(sc))
         spend += sp
+        if fault:
+            ctx.log(f"picture check: no answer twice ({fault[:120]}); the unread windows stay unverified and the film carries on")
+        # a window judged loose or wrong is filled in place with the film's own picture that shows its words (round1
+        # stock-inventory-wrong-picture-kept: a Marine at a laptop shipped under "my edit is still his face", recorded only)
+        repair, sp = repair_misfits(ctx, l1, seen, clock, product, cache, script.get("receipts"), pack, sc,
+                                    pre=pre, hold=spans_dev + ([receipt_panel["frames"]] if receipt_panel.get("frames") else []),
+                                    said=recording_words(script))
+        spend += sp
+        if fault:
+            repair.setdefault("faults", []).insert(0, dict(stage="picture check", fault=fault))
+        if repair["repaired"]:
+            ctx.log(f"picture repair: {len(repair['repaired'])} of {repair['misfits']} loose or wrong windows took another of the film's pictures")
+            # the sound design follows the new pictures (a stale shutter goes, the new picture's landings sound)
+            repair["sound"] = resound(l1, pack, dict(knobs, drop=drop), beats.get("turn_f"), clock, [tuple(r["frames"]) for r in repair["repaired"]])
+            bad = [(os.path.basename(p["path"]), words_under(clock, *p["f"]), (cache.get(picture_key(p, words_under(clock, *p["f"]))) or
+                    dict(why="missing picture verdict")).get("why")) for p in seen.get("pictures") or []
+                   if not (cache.get(picture_key(p, words_under(clock, *p["f"]))) or {}).get("fits")]
         jsave(cache_p, cache)
         shown = []
         for picture in seen.get("pictures") or []:
@@ -1945,7 +3240,7 @@ def score(ctx, script):
             verdict = cache.get(picture_key(picture, words)) or dict(fits=False, why="missing picture verdict")
             shown.append(dict(file=os.path.basename(picture["path"]), frames=picture["f"], source=picture.get("src"),
                               words=words, **verdict))
-        rounds.append(dict(round=rnd, pictures=len(shown), shown=shown,
+        rounds.append(dict(round=rnd, pictures=len(shown), shown=shown, repair=repair,
                            misfits=[dict(file=b, words=w, why=y) for b, w, y in bad]))
         ctx.log(f"picture check: {len(bad)} of {len(seen.get('pictures') or [])} judged loose against their words (recorded)")
     if not taste["ok"]:
@@ -1957,6 +3252,8 @@ def score(ctx, script):
     jsave(os.path.join(ctx.supply, "beats.json"), beats)
     payoff = next((v for v in pack.get("voices") or [] if v.get("person") == "after"), None)
     turn_s = round(float(payoff["start"]) + F.LEAD_F / F.FPS, 3) if payoff else (round(beats["turn_f"] / F.FPS, 3) if beats.get("turn_f") is not None else None)
+    if beats.get("turn_by") == "landing" and beats.get("turn_f") is not None:
+        turn_s = round(beats["turn_f"] / F.FPS, 3)         # the music's drop and the sound's turn on the same landing
     return dict(l1=out, l1_audio=l1_audio, turn_s=turn_s, beats={k: v for k, v in beats.items() if k != "look"}, taste=taste,
                 frames=l1["dur_f"], items=len(l1["items"]), direction=dict(knobs, drop=drop), pace=pace_rec, recording_spans=spans,
                 instruction_panel=receipt_panel, devices=devices,
