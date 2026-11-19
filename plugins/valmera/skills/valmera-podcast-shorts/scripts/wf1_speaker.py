@@ -269,11 +269,16 @@ def runs_of(labels, short):
 
 
 def track_box(track, a=None, b=None):
-    """A track's face over samples [a, b): its median box (a smoothed track, not one look), its eyes, and where its
-    centre goes (a dozen points), in frame fractions."""
+    """A track's face over samples [a, b), in frame fractions: the box its head moves within (the 10th to 90th
+    percentile of its edges, so the crop keeps a head that turns or leans whole; its median box when it moves
+    further than 2.2 face widths), its eyes, and where its centre goes (a dozen points)."""
     import numpy as np
     fs = [f for k, f in track if (a is None or a <= k) and (b is None or k < b)] or [f for _, f in track]
-    box = [round(float(np.median([f["box"][i] for f in fs])), 5) for i in range(4)]
+    med = [float(np.median([f["box"][i] for f in fs])) for i in range(4)]
+    box = [float(np.percentile([f["box"][i] for f in fs], q)) for i, q in ((0, 10), (1, 10), (2, 90), (3, 90))]
+    if box[2] - box[0] > 2.2 * (med[2] - med[0]):
+        box = med
+    box = [round(v, 5) for v in box]
     eyes = [[round(float(np.median([f["eyes"][e][c] for f in fs])), 5) for c in (0, 1)] for e in (0, 1)]
     path = [[round((f["box"][0] + f["box"][2]) / 2, 4), round((f["box"][1] + f["box"][3]) / 2, 4)] for f in fs]
     return dict(box=box, eyes=eyes, path=path[::max(1, len(path) // 12)])
@@ -365,7 +370,7 @@ def turn_speakers(windows, turns, long_run=3):
     (a question the captions did not mark). Windows of a turn whose speaker is not on screen get None."""
     out = {}
     for t0, t1 in turns:
-        cur = [i for i, w in enumerate(windows) if t0 <= w["t"] + WINDOW_S / 2 < t1 and w.get("voiced")]
+        cur = [i for i, w in enumerate(windows) if t0 <= w.get("tc", w["t"] + WINDOW_S / 2) < t1 and w.get("voiced")]
         if not cur:
             continue
         # runs of one winner, to find a long run won by another person
@@ -433,14 +438,21 @@ def read_take(ff, src, shots, dur, turns=None, det=None):
         tracks = shot_tracks[si]
         voiced, env = voice_mask(db[a:b])
         acts = [np.array([tr["act"].get(k, np.nan) for k in range(a, b)], np.float32) for tr in tracks]
-        for w0 in range(0, m, win):
-            w1 = min(m, w0 + win)
-            if w1 - w0 < win // 2 and windows and windows[-1]["shot"] == si:
-                windows[-1]["w1"] = w1                  # a short last window reads with the one before it
-                continue
+        # windows tile each stretch between the shot's edges and the captions' speaker changes, so a cut to the
+        # person who answers lands on his first word
+        edges = sorted({0, m, *[int(round((tt - t0) * RATE)) for tt, _ in (turns or []) if 0 < (tt - t0) * RATE < m]})
+        spans_w = []
+        for e0, e1 in zip(edges, edges[1:]):
+            for w0 in range(e0, e1, win):
+                w1 = min(e1, w0 + win)
+                if w1 - w0 < win // 2 and spans_w and spans_w[-1][1] == w0 and spans_w[-1][0] >= e0:
+                    spans_w[-1] = (spans_w[-1][0], w1)      # a short last window reads with the one before it
+                else:
+                    spans_w.append((w0, w1))
+        for w0, w1 in spans_w:
             v = voiced[w0:w1]
-            row = dict(shot=si, w0=w0, w1=w1, t=round(t0 + w0 / RATE, 2), voiced=bool(len(v) and v.mean() >= 0.25), who=None, on={},
-                       tracks={})
+            row = dict(shot=si, w0=w0, w1=w1, t=round(t0 + w0 / RATE, 2), tc=round(t0 + (w0 + w1) / 2 / RATE, 2),
+                       voiced=bool(len(v) and v.mean() >= 0.25), who=None, on={}, tracks={})
             if row["voiced"]:
                 ti, rows = who_speaks([x[w0:w1] for x in acts], v, env[w0:w1])
                 row["faces"] = rows

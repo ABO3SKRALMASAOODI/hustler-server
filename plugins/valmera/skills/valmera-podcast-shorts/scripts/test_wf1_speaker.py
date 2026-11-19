@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 import wf1_speaker as S
 
@@ -122,3 +123,14 @@ def test_the_coverage_director_is_told_which_words_play_on_a_listener(tmp_path):
     seen.clear()
     wf1_coverage.plan(words, "t", str(tmp_path), llm)
     assert "off_camera" not in seen["content"]
+
+
+def test_the_framing_box_holds_a_head_that_moves():
+    """A head that leans inside a long shot stays inside the crop: the box covers where it moves."""
+    def face(x):
+        return dict(box=[x, .2, x + .08, .4], eyes=[[x + .02, .27], [x + .06, .27]])
+    track = [(k, face(.30 + .002 * k)) for k in range(50)]
+    b = S.track_box(track)["box"]
+    assert b[0] <= .32 and b[2] >= .46 and b[2] - b[0] < 2.2 * .08
+    far = [(k, face(.1 + .02 * k)) for k in range(40)]                     # a walk across the frame: the median look
+    assert S.track_box(far)["box"][2] - S.track_box(far)["box"][0] == pytest.approx(.08, abs=1e-4)
