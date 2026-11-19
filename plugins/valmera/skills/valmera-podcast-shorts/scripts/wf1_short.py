@@ -592,71 +592,77 @@ def take_cuts(src, shots, dur, sup_dir, turns=None):
     return out
 
 
-DIRECTION_CONTRACT = 3           # 20 Nov 2026 (round1): display words by story role, ranked with alternates; the story turn apart from the payoff
+DIRECTION_CONTRACT = 4           # 20 Nov 2026: the Director (_shell/director.py) chooses devices for every moment; the older fields kept
 ROLES = ("hook", "turn", "payoff", "figure", "name", "contrast")
 
 
-def direction_of(ctx, script, pack):
-    """What a model reads off the heard sentences for the film builder: the words to set large, ranked best first with
-    alternates (up to six; the film sets the first two to four whose timing fits), each with
-    the job it does in the story (hook, turn, payoff, figure, name, contrast) and the one word of it set largest; the
-    sentences that speak of the past; the sentence the payoff starts on (``turn_seg``, where the film cuts to his face);
-    the sentence where the story turns (``story_turn_seg``, before the payoff: the music's drop and the sound's turn hit
-    when the payoff has no room after it); and the years the story speaks from. Cached in the supply, per contract."""
-    p = os.path.join(ctx.supply, "direction.json")
-    if os.path.exists(p):
-        got = json.load(open(p))
-        if got.get("contract") == DIRECTION_CONTRACT:
-            return got
-    lines = pack["lines"]
-    system = ("You direct the type and the finish of a vertical short cut from a podcast, the way the best story reels set "
-              "their words: few, large, each doing a job in the story. You read its sentences, numbered, and answer in JSON "
-              "only. You never add a word he does not say.")
-    system += "\n\n" + ("Return JSON only: {"
-               "\"display\": [up to six words or short phrases to set large on screen, RANKED BEST FIRST: the film sets the first "
-               "two to four whose timing fits (a word too close to the start or to another gives its place to the next), so "
-               "give alternates after your best. Each is set on the word that says it and does one job in the story: the hook "
-               "that stops a stranger, the turn where it changes direction, the payoff, a figure that carries the stakes, a "
-               "name the story hangs on, or the two sides of a contrast. Never a filler, a function word, a generic noun or a "
-               "phrase that only restates the topic. Each {\"seg\": "
-               "the sentence number, \"text\": one to three consecutive words exactly as he says them (a figure as digits, e.g. "
-               "$5,000, 49% or 1999), \"role\": one of hook|turn|payoff|figure|name|contrast, \"key\": the one word of text "
-               "that carries it (set largest)}; spread over the film, never two from one sentence], "
-               "\"past_segs\": [the numbers of the sentences that tell of the past: a year gone by, how something began, what "
-               "someone once did; not his opinions about today], "
-               "\"payoff_seg\": the number of the sentence where the payoff begins (usually the last or the one before it), "
-               "\"turn_seg\": the number of the sentence where the story turns, changes direction or opens its tension (a "
-               "setback, a 'but', a decision, the question the payoff answers), before the payoff sentence; null when the "
-               "story has no turn before its payoff, "
-               "\"arc\": [only when he says a calendar year aloud: {\"seg\": sentence number, \"word\": the year as he says it in "
-               "digits, \"year\": the year as a number, \"stakes\": how things stand for the story's hero at that point, -1 (worst) "
-               "to 1 (best)}; an empty list when no year is said]}")
-    content = ((f"# The film\n{script.get('title')}\nHook: {script.get('hook_line')}\nPayoff: {script.get('close_line')}\n\n# Sentences\n") +
-               ("\n".join(f"{ln['i']}: {ln['text']}" for ln in lines)))
-    llm = _llm()
-    text, use = llm.ask(system, content, effort="medium", max_tokens=12000)
+def _word_rows(pack, sc):
+    """The film's spoken words in order on its own clock (seconds), each with its sentence: the Director's addresses."""
     try:
-        d = llm.json_block(text)
-    except ValueError:
-        d = {}
-    d = d if isinstance(d, dict) else {}
-    display = []
-    for r in d.get("display") or []:
-        if isinstance(r, dict):
-            r = dict(r, role=r.get("role") if r.get("role") in ROLES else "hook")
-            r.setdefault("accent", r["role"] in ("figure", "payoff"))
-            display.append(r)
-    payoff = d.get("payoff_seg") if isinstance(d.get("payoff_seg"), int) else None
-    turn = d.get("turn_seg") if isinstance(d.get("turn_seg"), int) else None
-    if payoff is not None and turn is not None and turn >= payoff:
-        turn = None                                    # a turn on or after the payoff is the payoff itself
-    out = dict(contract=DIRECTION_CONTRACT, display=display[:6],
-               past_segs=[int(i) for i in d.get("past_segs") or [] if isinstance(i, int)],
-               turn_seg=payoff, story_turn_seg=turn,
-               arc=[r for r in d.get("arc") or [] if isinstance(r, dict)][:6],
-               spend=dict(stage="score", what="display words by role, past sections, turn and payoff", **use))
-    json.dump(out, open(p, "w"), ensure_ascii=False, indent=1)
-    return out
+        clock = F.Clock(pack["words"], sc)
+        return [dict(w=w["w"], t0=w["t0"], t1=w["t1"], seg=w["seg"]) for w in clock.words], clock.dur
+    except (KeyError, OSError, ValueError, TypeError):
+        rows, t = [], 0.0                    # no aligned words: the sentences' own words, evenly in time
+        for ln in pack.get("lines") or []:
+            for w in str(ln.get("text") or "").split():
+                rows.append(dict(w=w, t0=t, t1=t + 0.3, seg=int(ln["i"])))
+                t += 0.32
+        return rows, t
+
+
+def director_pictures(pack, most=36):
+    """The supply's pictures for the Director's contact sheet: [{"id", "path", "label", "kind", ...}] with what signal
+    measured of each (motion, faces, luma), and {id: path}."""
+    out, seen = [], set()
+    for ln in pack.get("footage") or []:
+        for c in ln.get("clips") or []:
+            p = c.get("path")
+            if not p or p in seen or c.get("dull"):
+                continue
+            seen.add(p)
+            out.append(dict(id=f"P{len(out)}", path=c.get("still") or p, src=p, kind="clip", seg=int(ln.get("i", 0)),
+                            label=str(c.get("shows") or c.get("subject") or "")[:60], motion=round(float(c.get("motion_p90") or 0), 2),
+                            faces=len(c.get("faces") or []), luma=round(float(c.get("luma") or 0), 2) if c.get("luma") is not None else None))
+    for name, recs in (pack.get("pictures") or {}).items():
+        for r in recs:
+            p = r.get("path")
+            if not p or p in seen:
+                continue
+            seen.add(p)
+            out.append(dict(id=f"P{len(out)}", path=p, src=p, kind="document" if r.get("provider") == "primary-document" else "photo",
+                            label=str(r.get("shows") or r.get("title") or name)[:60], faces=len(r.get("faces") or [])))
+    out = out[:most]
+    return out, {p["id"]: p["src"] for p in out}
+
+
+def direction_of(ctx, script, pack):
+    """The film's Director (DIRECTOR_CONTRACT 4, _shell/director.py): one model call that reads the heard words with the
+    voice's stress, the supply's pictures on one contact sheet, the take and the style, and the device sequences of the
+    films delivered lately, and chooses for every moment which devices of the engine's palette land on which word:
+    beats, sections (surface, layout, energy) and stacked asks. It also gives the older fields the builder reads: the
+    display words by role, ranked with alternates; the sentences that tell of the past; the payoff sentence (``turn_seg``,
+    where the film cuts to his face); the story's own turn (``story_turn_seg``); and the years the story speaks from.
+    A provider that fails gives the signal director's devices. Cached in the supply (director.json)."""
+    DR = wf1_film._director()
+    sc = dict(segments=[dict(say=ln["text"]) for ln in pack.get("lines") or []])
+    rows, dur = _word_rows(pack, sc)
+    try:
+        stress = [(f / F.FPS, s) for f, s in F.voice_stress(pack)] if pack.get("narration") else []
+    except Exception:  # noqa: BLE001 - no stress read: the Director reads the words alone
+        stress = []
+    pics, ids = director_pictures(pack)
+    st = wf1_film.STYLES.get(((script or {}).get("style") or {}).get("id") or "", {})
+    take = pack.get("take") or {}
+    llm = _llm()
+    d = DR.direct(ctx.supply, [dict(i=int(ln["i"]), text=ln["text"]) for ln in pack.get("lines") or []], rows, stress, pics,
+                  take=dict(on_camera=take.get("on_camera"), shots=take.get("shots"), faces=len(take.get("faces") or []),
+                            matte="made on demand for devices that need it (neg_world, words behind him)") if take else None,
+                  style=dict(name=st.get("name"), accent=st.get("accent"), font=(st.get("dsp") or {}).get("font"),
+                             upper=st.get("upper")) if st else None,
+                  workflow="podcast short", dur_s=dur, title=(script or {}).get("title"), hook=(script or {}).get("hook_line"),
+                  payoff=(script or {}).get("close_line"), ask=llm.ask, log=getattr(ctx, "log", None))
+    d["pictures"] = ids
+    return d
 
 
 def _repair(l1, beats, taste):
@@ -1042,6 +1048,8 @@ def score(ctx, script):
         pack['coverage']['context']=ctx.args['identity']
     d = direction_of(ctx, script, pack)
     knobs = {k: d.get(k) for k in ("display", "past_segs", "turn_seg", "story_turn_seg", "arc")}
+    if d.get("contract") == DIRECTION_CONTRACT:
+        knobs["director"] = {k: d.get(k) for k in ("beats", "sections", "asks", "arc", "pictures", "by", "seed")}
     knobs.update({k: v for k, v in ((ctx.args or {}).get("direction") or {}).items()})
     # The composed review's findings, each local to its window: a contradiction gives that window's slot to its next
     # candidate, a crop through a face is framed again (never a global, permanent drop: round 1, 19 Nov).

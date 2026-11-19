@@ -42,11 +42,12 @@ import film as F  # noqa: E402
 FPS, W, H, LEAD_F = F.FPS, F.W, F.H, F.LEAD_F
 Clock, r4, smooth = F.Clock, F.r4, F.smooth
 
-# The alien bank (worker/scene/alien), by the independent verdict of 14 Nov 2026 (week-1112/notes/S.md):
-# diecut and answer are gimmicks, never used; lamp is not ready; rhyme and arc are for workflow films only, gated.
 WALL = "YouTube is refusing this Mac as a bot"       # the words a short stops with when its footage could not be fetched for that reason
-ALIEN_NEVER = ("diecut", "answer", "lamp")
-ALIEN_GATED = ("arc", "rhyme")
+# The film's Director (_shell/director.py) chooses its devices moment by moment from the whole palette (worker/scene/palette,
+# the alien bank included): no device is banned or gated here (owner, 20 Nov 2026: maximum creativity in the edits).
+# A style is a starting palette (type and colour identity); the Director's sections choose layout, surface and pace.
+LAYOUT_AS = {"bleed": "bleed", "window": "window", "prints": "prints", "collage": "prints", "grid": "window", "split": "bleed",
+             "type": "bleed"}      # a layout another lane has not built yet is drawn on its nearest built one
 
 STYLES = {
     "footage-cut": dict(
@@ -92,32 +93,16 @@ BED = dict(lift=0, gamma=1.0, gain=0.34, sat=0.6, contrast=1, temp=0, tint=0)
 DIM = dict(lift=0, gamma=1.0, gain=0.46, sat=0.8, contrast=1, temp=0, tint=0)
 
 
-def alien_asks(direction, style_id, frame_of):
-    """The asks this film may hand the engine's alien bank. Never diecut, answer or lamp. `arc` only for a moment
-    that speaks from two or more different years (each said aloud, so the year reads on its display word), and only
-    in the style that keeps its pictures in colour. `rhyme` needs four to six moving round links, which a podcast
-    moment does not supply: it is not asked for here. Returns (asks, why)."""
-    st = STYLES[style_id]
-    marks = []
-    for m in (direction or {}).get("arc") or []:
-        try:
-            f, year = frame_of(int(m["seg"]), str(m.get("word") or m["year"])), int(m["year"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if f is None or not (1000 <= year <= 2100):
-            continue
-        marks.append(dict(f=int(f), year=year, stakes=round(min(max(float(m.get("stakes") or 0), -1.0), 1.0), 2)))
-    years = {m["year"] for m in marks}
-    if st["layout"] != "bleed" or st["mono"] == "all":
-        return [], "arc: this style has its own finish"
-    if len(years) < 2:
-        return [], f"arc: the moment speaks from {len(years)} year(s), the gate needs two"
-    return [dict(dev="arc", marks=sorted(marks, key=lambda m: m["f"]), bars=0.085, develop=6)], "arc: gate passed"
-
-
-def clean_asks(asks):
-    """Whatever a caller hands in, only the gated devices pass."""
-    return [a for a in asks or [] if isinstance(a, dict) and a.get("dev") in ALIEN_GATED and a.get("dev") not in ALIEN_NEVER]
+def _director():
+    """_shell/director.py under a name of its own: the worker has a director.py too (the customer's Director)."""
+    import importlib.util
+    name = "valmera_shell_director"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, os.path.join(SKILLS, "_shell", "director.py"))
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+    return sys.modules[name]
 
 
 def seat_luma(rec, kind, y0, y1):
@@ -708,7 +693,9 @@ def stress_moves(holds, stress, edge=FPS, most=3 * FPS):
 
 def build(script, sup, style_id, direction=None):
     """(l1, beats) for one short. script: {"title", "segments": [{"say", "pictures": [names]}]}; sup: the pack
-    (wf1_short.supply); direction: {"display": [{"seg", "text"}], "past_segs": [i], "turn_seg": i, "arc": [...]}."""
+    (wf1_short.supply); direction: {"display": [{"seg", "text"}], "past_segs": [i], "turn_seg": i, "arc": [...],
+    "director": DIRECTOR_CONTRACT 4's beats, sections and asks}. With a director, each section takes its own layout,
+    surface and pace, and the scene carries the Director's asks under ``devices`` for the palette to lay at the render."""
     st = STYLES[style_id]
     d = dict(aim_s=st["aim_s"], look=st["look"], family="podcast", share=st["share"], bed=True, title=False, tick_10s=1.5,
              band=dict(hold=(0.9, 2.6), never=3.0, ease_takes=True, motivated_frames=[], ease=0.85, shutter=0.5,
@@ -787,6 +774,13 @@ def build(script, sup, style_id, direction=None):
 
     def seg_at(f):
         return max([i for i in range(nseg) if seg_f[i] <= f + 1] or [0])
+    dr = d.get("director") or {}
+    sec_of = {int(i): s_ for s_ in dr.get("sections") or [] for i in s_.get("segs") or [] if isinstance(i, int)}
+
+    def layout_at(f):
+        """The layout of the Director's section at frame f (the style's own when there is no director)."""
+        s_ = sec_of.get(seg_at(f))
+        return LAYOUT_AS.get((s_ or {}).get("layout"), st["layout"]) if s_ else st["layout"]
     # ---- the payoff is his face: the film's turn lands on the first word of the sentence the caller named (else the last)
     ts = d.get("turn_seg")
     ts = int(ts) if isinstance(ts, int) and 0 < ts < nseg else (nseg - 1 if nseg > 1 else None)
@@ -867,10 +861,15 @@ def build(script, sup, style_id, direction=None):
     spoken_s = [max(clock.segs[i][1] - clock.segs[i][0], 0.0) for i in range(nseg)]
     past_share = sum(spoken_s[i] for i in past if 0 <= i < nseg) / max(sum(spoken_s), 1e-6)
     by_section = 0.0 < past_share <= 0.6
+    # with a director the sections it prints in black and white are the mono ones, whatever the style; else the style's rule
+    mono_segs = {i for i, s_ in sec_of.items() if str(s_.get("surface")).lower() in ("mono", "gate")} if sec_of else None
     # the take itself takes the section's finish too (low saturation while he tells of the past), cut at the joins
-    take_past = section_spans(past, seg_f, f_voice_end) if st["mono"] == "past" and by_section else []
+    take_past = (section_spans(mono_segs, seg_f, f_voice_end) if mono_segs is not None else
+                 section_spans(past, seg_f, f_voice_end) if st["mono"] == "past" and by_section else [])
 
     def is_mono(f0):
+        if mono_segs is not None:
+            return seg_at(f0) in mono_segs
         return st["mono"] == "all" or (st["mono"] == "past" and by_section and seg_at(f0) in past)
 
     def note(f0, f1, kind, name, rec, mode):
@@ -998,16 +997,19 @@ def build(script, sup, style_id, direction=None):
 
     pos, labelled, labels, flashes = 0, set(), [], []
     runs = _runs(ins)
+    layouts_used = []
     for run in runs:
         r0, r1 = ins[run[0]][0], ins[run[-1]][1]
         take_shot(pos, r0)
-        if st["layout"] == "prints":
+        lay = layout_at(r0)
+        layouts_used.append(lay)
+        if lay == "prints":
             prints(run)
         for k in run:
             f0, f1, kind, name, rec = ins[k]
-            if st["layout"] == "bleed" or kind == "clip":
+            if lay == "bleed" or kind == "clip":
                 bleed(f0, f1, kind, name, rec, keys[rec["path"]])
-            elif st["layout"] == "window":
+            elif lay == "window":
                 window(f0, f1, kind, name, rec, keys[rec["path"]])
             cut_pts.append(f0)
             P.events.append(f0)
@@ -1026,11 +1028,11 @@ def build(script, sup, style_id, direction=None):
                 while j < len(ins) and ins[j][0] == b_lab and ins[j][3] == name:
                     b_lab, j = ins[j][1], j + 1
                 labels.append((f0 + 2, min(b_lab, f0 + int(2.4 * FPS)), str(name)))
-        if st["flash"] == "runs" and (not flashes or r0 - flashes[-1] >= 4 * FPS):      # the projector catches: into a run of archive
+        if st["flash"] == "runs" and not dr and (not flashes or r0 - flashes[-1] >= 4 * FPS):      # the projector catches: into a run of archive
             flashes.append(r0)
         pos = r1
     take_shot(pos, f_end)
-    if st["flash"] == "turn" and turn_f is not None:
+    if st["flash"] == "turn" and turn_f is not None and not dr:        # with a director its asks place every flash
         # the payoff's own cut, nearest its first word, among the film's real cuts (every picture's and every take
         # framing's first frame: the punch-in where it opens, else a picture cut a second either side of it); never a
         # frame inside a continuous shot
@@ -1043,11 +1045,11 @@ def build(script, sup, style_id, direction=None):
         """The real cut nearest f within a second (a flash never lands inside a continuous shot), else None."""
         near = [c for c in real_cuts if abs(c - f) <= FPS]
         return min(near, key=lambda c: (abs(c - f), c)) if near else None
-    if st["flash"] == "turn" and story_turn_f is not None:
+    if st["flash"] == "turn" and story_turn_f is not None and not dr:
         sf = on_cut(story_turn_f)                            # where the story turns: a landing the sound's turn hit and the drop answer
         if sf is not None and all(abs(sf - f) >= 2 * FPS for f in flashes):
             flashes.append(sf)
-    for a_, _b in take_past[:2]:                             # into a section of the past, on the take's join
+    for a_, _b in (take_past[:2] if not dr else []):        # into a section of the past, on the take's join
         pf = on_cut(a_)
         if pf is not None and pf > FPS and all(abs(pf - f) >= 2 * FPS for f in flashes):
             flashes.append(pf)
@@ -1076,7 +1078,7 @@ def build(script, sup, style_id, direction=None):
         for f0, f1, kind, _n, rec in ins:
             if f0 <= f < f1:
                 g = seat_luma(rec, kind, y0, y1)
-                return g if st["layout"] == "bleed" or kind == "clip" else g * DIM["gain"]
+                return g if layout_at(f0) == "bleed" or kind == "clip" else g * DIM["gain"]
         return seat_luma(dict(still=take.get("still")), "clip", y0, y1) if take.get("still") else 0.0
 
     # ---- the words that carry the story, large, each on the word that says it; never two inside two seconds. Typeset by
@@ -1159,6 +1161,28 @@ def build(script, sup, style_id, direction=None):
     P.items = ink_by_ground(P.items, P.voices, bright)
     film = dict(grain=float(st["grain"]), vignette=float(st["vignette"]), over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0))
     l1 = P.done(sup.get("sid", "wf1"), f_end, int(d.get("seed", 1114)), film)
+    # The pace of each section is its energy (the Director's): a strobe section's pictures and framings are cut down to
+    # two frames, a hold section's held up to about four seconds; brisk sections take the film's own band below.
+    bands = []
+    if sec_of:
+        DR = _director()
+        pace_, _, _ = F._engines()
+        groups = {}
+        for it in l1["items"]:
+            if it["k"] == "shot" and it["id"] in drive_ids:
+                en = (sec_of.get(seg_at(it["f"][0])) or {}).get("energy") or "brisk"
+                if en in ("strobe", "hold"):
+                    groups.setdefault(en, set()).add(it["id"])
+                    if any(a_ <= it["f"][0] < b_ for a_, b_ in mono_spans):
+                        it["look"] = "mono_silver"           # the section's black and white, before its framings are cut
+        for en in sorted(groups):
+            try:
+                l1 = pace_.drive_l1(l1, sup.get("work") or "/", stress, meta=meta, family=d.get("family") or "podcast",
+                                    only=groups[en], band=DR.energy_band(en, d["band"]))
+                bands.append(dict(energy=en, shots=len(groups[en]), **{k: v for k, v in (l1.get("pace") or {}).items() if k != "holds"}))
+                drive_ids -= groups[en]
+            except Exception as e:  # noqa: BLE001 - a section the driver cannot cut keeps the film's own band
+                bands.append(dict(energy=en, fault=repr(e)[:200]))
     l1 = F.engines_finish(l1, sup, stress, drive_ids, meta, dict(d, look_pictures=look_pics),
                           turn_f=story_turn_f if story_turn_f is not None else turn_f, mono=mono_spans,
                           clear=[0.10, cap_y - 0.085, 0.90, cap_y + 0.02],
@@ -1187,9 +1211,24 @@ def build(script, sup, style_id, direction=None):
             return None
         hit = F.said_at(clock, seg, word)
         return Clock.f(hit[0]) - 1 if hit else None
-    asks, why = alien_asks(d, style_id, frame_of)
-    if asks:
-        l1["alien"] = clean_asks(asks)
+    # The Director's asks, in programme frames, for the palette to lay at the render (chain.lay_devices): every device
+    # the engine can draw, the alien bank's included, each landing or falling back to its next device
+    notes, asks = [], []
+    if dr:
+        DR = _director()
+
+        def word_frame(w):
+            if not (0 <= int(w) < len(clock.words)):
+                return None
+            return 0 if int(w) == 0 else max(Clock.f(clock.words[int(w)]["t0"]) - 1, 0)
+
+        def seg_span(i):
+            return (seg_f[i], min(Clock.f(clock.segs[i][1]) + 6, f_end)) if 0 <= i < nseg else (None, None)
+        by_id = {pid: keys.get(path) for pid, path in (dr.get("pictures") or {}).items()}
+        asks, notes = DR.palette_asks(dr, word_frame, seg_span, by_id.get, f_end)
+        if asks:
+            l1["devices"] = asks
+    why = notes
     changes = sorted({it["f"][0] for it in l1["items"] if it["k"] == "shot"})
     for s_ in l1.get("sound") or []:
         P.events.append(int(s_["event_f"]))
@@ -1201,12 +1240,15 @@ def build(script, sup, style_id, direction=None):
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=1, display=[dict(f=[a, b], text=t) for a, b, t in shown],
                  display_count=dict(proposed=len(proposed), landed=len(shown)),
                  labels=[dict(f=[a, b], text=t) for a, b, t in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),
-                 style=style_id, layout=st["layout"], placement_check=placement_report, coverage=coverage_report,
+                 style=style_id, layout=(sorted(set(layouts_used)) if dr and len(set(layouts_used)) > 1 else (layouts_used[0] if dr and layouts_used else st["layout"])), placement_check=placement_report, coverage=coverage_report,
                  title_layout=title_layout, caption_restarts=restarts, face_metadata=meta,
                  finishes=dict(black_and_white=len([p for p in P.pictures if p.get("finish")]), flashes=len(flashes), dark_ink_spans=len(bright),
                                take_past=[list(sp) for sp in take_past], past_share=round(past_share, 3),
                                balanced=sum(1 for it in l1["items"] if it.get("k") == "shot" and it.get("grade") and it.get("pic") not in {pc["key"] for pc in pieces})),
-                 alien=dict(asked=[a["dev"] for a in l1.get("alien") or []], why=why, never=list(ALIEN_NEVER)),
+                 devices=dict(by=dr.get("by"), asked=[a["dev"] for a in asks], notes=why, layouts=sorted(set(layouts_used)),
+                              sections=[dict(segs=s_.get("segs"), surface=s_.get("surface"), layout=s_.get("layout"), energy=s_.get("energy"))
+                                        for s_ in dr.get("sections") or []], bands=bands),
+                 alien=dict(asked=[a["dev"] for a in asks if a["dev"] in ("rhyme", "diecut", "lamp", "arc", "answer")]),
                  sound_design=dict(l1.get("sound_design") or {}),       # with its dropped list: a refusal is measured, never guessed
                  look=[f for f in look_f if 0 <= f < f_end])
     return l1, beats

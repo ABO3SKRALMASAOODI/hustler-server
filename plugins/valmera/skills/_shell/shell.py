@@ -264,6 +264,13 @@ def deliver(ctx, state, out_root, results):
             rec["platform_music"] = pm
             rec["spend"] = spend + pspend
             rec["spend_usd"] = round(sum(float(s.get("usd") or 0) for s in rec["spend"]), 4)
+    dlog, ddir = jload(os.path.join(ctx.supply, "devices_log.json"), None), jload(os.path.join(ctx.supply, "director.json"), None)
+    if dlog or ddir:                             # what the Director chose and what landed, with the signal it measured
+        rec["devices"] = dict(by=(ddir or {}).get("by"), why=(ddir or {}).get("why"), repairs=len((ddir or {}).get("repairs") or []),
+                              asked=len(dlog or []), landed=sum(1 for r in dlog or [] if r.get("done")),
+                              fell_back=sum(1 for r in dlog or [] if r.get("fallback")),
+                              sections=(ddir or {}).get("sections"), log=dlog,
+                              measure=jload(os.path.join(ctx.supply, "devices_measure.json"), None))
     jsave(os.path.join(part, "film.json"), rec)
     if row:                                      # the rename and the ledger row together, under the ledger's lock
         DL.deliver_once(row, commit=lambda: os.rename(part, final_dir))
@@ -271,6 +278,12 @@ def deliver(ctx, state, out_root, results):
         os.rename(part, final_dir)
     ledger_add(ctx.state_root, ctx.workflow, dict(run_id=ctx.run_id, style=script["style"]["id"], idea=script.get("title"),
                                                   source=ctx.source, window=script.get("window"), delivered=final_dir, at=now()))
+    if ctx.workflow != "selftest":
+        try:                                     # the devices it laid, for the next films' Director (variety, never a refusal)
+            import devices_ledger
+            devices_ledger.record(ctx.workflow, ctx.run_id, final_dir, ctx.supply)
+        except Exception as e:  # noqa: BLE001 - a film is delivered whatever the variety ledger says
+            ctx.log(f"devices ledger not written: {str(e)[:200]}")
     return dict(folder=final_dir, bytes=du(final_dir), spend_usd=rec["spend_usd"])
 
 
