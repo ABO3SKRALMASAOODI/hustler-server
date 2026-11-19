@@ -272,13 +272,16 @@ def make_matte(src, out, t0=0.0, t1=None, side=MATTE_SIDE, fps=MATTE_FPS):
         blank = np.zeros((mh, mw), np.uint8).tobytes()
         for _ in range(lead):
             enc.stdin.write(blank)
+        first = True
         while True:
             b = dec.stdout.read(n)
             if len(b) < n:
                 break
             x = np.frombuffer(b, np.uint8).reshape(mh, mw, 3).astype(np.float32).transpose(2, 0, 1)[None] / 255.0
-            fgr, pha, *rec = sess.run(None, {"src": x, "r1i": rec[0], "r2i": rec[1], "r3i": rec[2], "r4i": rec[3],
-                                             "downsample_ratio": ratio})
+            for _ in range(8 if first else 1):       # the recurrent state settles on the first frame before it is written
+                fgr, pha, *rec = sess.run(None, {"src": x, "r1i": rec[0], "r2i": rec[1], "r3i": rec[2], "r4i": rec[3],
+                                                 "downsample_ratio": ratio})
+            first = False
             enc.stdin.write((np.clip(pha[0, 0], 0, 1) * 255).astype(np.uint8).tobytes())
     finally:
         dec.stdout.close()
