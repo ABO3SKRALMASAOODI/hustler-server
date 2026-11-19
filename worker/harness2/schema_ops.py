@@ -14,9 +14,12 @@ OPS = [
     ("cut", '{"cut": [[193, 294]]}', "source seconds removed"),
     ("restore", '{"restore": [[2384.5, 2447.75]]}',
      "source seconds put back"),
-    ("speed", '{"speed": [{"start": 6, "end": 7.3, "factor": 0.6}]}',
-     "a constant speed over FILM seconds (add \"at_source\": true to give "
-     "source seconds); the result measures where it plays"),
+    ("speed", '{"speed": [{"start": 6, "factor": 0.5}]}',
+     "a constant speed over FILM seconds from start to end; no end (or "
+     "\"end\": \"end\") = to the film's end, so 'after 6 s' is the rest of "
+     "the film; \"ramp\": true eases in and out of the factor (a speed ramp); "
+     "add \"at_source\": true to give source seconds; the result measures "
+     "where it plays against the film's length"),
     ("fit_length", '{"fit_length": {"max_s": 3590, "min_s": 3480}}',
      "trims the least active seconds at piece edges (or restores the most "
      "active), never inside a sentence; pieces under 2 s are dropped"),
@@ -55,13 +58,40 @@ OPS = [
      "{\"look\": name}"),
     ("transition", '{"transition": {"style": "crossfade", "duration_s": 0.3}}',
      "transitions at cuts; {\"at\": t} sets one junction"),
-    ("zoom", '{"zoom": {"start": 4, "end": 6, "mode": "push_in"}}',
-     "a camera move, film seconds"),
+    ("zoom", '{"zoom": [{"start": 4, "end": 4.4, "mode": "landing"}, '
+     '{"start": 6, "end": 9, "mode": "push_in", "strength": 0.08}]}',
+     "camera moves, film seconds, one row or many: punch (snap in on a "
+     "word), landing (arrive pushed in on a cut), push_in / pull_out "
+     "(slow, across a hold), ease, pulse, shake"),
+    ("element", '{"element": {"kind": "bubbles", "start": 2, "end": 8}}',
+     "a drawn element over the picture: particles (embers, sparks, dust, "
+     "confetti, snow, fireworks, bubbles; emit edge|point|box|frame), light "
+     "(light_dissolve, light_trail, light_rim), doodles (arrow, underline, "
+     "circle, scribble, burst, star ...), lightning, orbit"),
+    ("finish", '{"finish": {"intensity": "designed"}}',
+     "the craft departments over the current cut in one op, each one the "
+     "cut lacks: look (designed caption system, grade, texture, "
+     "transitions; 'look': editorial | creator_punch | cinematic_doc | "
+     "mono_noir | clean_minimal ...), captions, moves (punch-ins on stressed "
+     "words, or an alternating camera on footage without speech), pictures "
+     "(B-roll cut in on the word: 'pictures': [{word, query, depicts?}]), "
+     "music (a reference-grade track; 'music': 'auto' | id | 'none'), sound "
+     "(designed sound on what lands on screen), master (-14 LUFS); "
+     "'departments': [...] runs only those"),
+    ("direct", '{"direct": {"brief": "a 30 s reel that opens on the save"}}',
+     "the Director's whole film from the full upload (Scout, real pictures, "
+     "bed, type, sound) written as its own version before the other ops of "
+     "the same call; where it cannot run, the envelope says why and the "
+     "same film is reached with finish + place/scenes"),
     ("layer set/upsert/remove", '{"upsert": "texts", "id": "tx1", "value": '
      '{"end": 5}}', "any EDL layer by id (no size cap); set replaces a "
      "layer, remove deletes an item"),
     ("clips", '{"clips": {"items": [{"range": [612, 655], "title": "..."}], '
-     '"frame": "9:16"}}', "new child projects, one per clip"),
+     '"frame": "9:16"}}', "new child projects, one per clip, each with its "
+     "title on screen over the opening and captions, rendered so it plays "
+     "on its card ('title_on_screen': false, 'captions': false or a caption "
+     "style, 'render': false change that); the handle settles when the "
+     "clips exist"),
     ("tool", '{"tool": "add_typeset", "args": {...}}',
      "any write verb below, on the same staged edit"),
 ]

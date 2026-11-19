@@ -7,7 +7,7 @@ verb: add_element
 stage: motion
 params:
   template: [el_particles]
-  kind: [embers, sparks, dust, confetti, snow, fireworks]
+  kind: [embers, sparks, dust, confetti, snow, fireworks, bubbles]
   emit: [edge, point, box, frame]
 needs:
   sidecars: []

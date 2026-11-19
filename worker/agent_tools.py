@@ -31154,7 +31154,8 @@ def _direct_short_clips(ctx, clips, snap="none"):
     return planned, [], moves
 
 
-def make_shorts(ctx, count=None, style_note=None, clips=None, snap=None):
+def make_shorts(ctx, count=None, style_note=None, clips=None, snap=None,
+                deliver=None):
     """Kick off the shorts pipeline for THIS project — the chat-path twin of
     the studio's Make shorts button. The heavy work runs as its own
     shorts_plan job so this turn can answer immediately; the board on the
@@ -31250,6 +31251,14 @@ def make_shorts(ctx, count=None, style_note=None, clips=None, snap=None):
     if planned:
         payload["clips"] = planned
         payload["count"] = len(planned)
+        if authored_v2 and isinstance(deliver, dict):
+            # Harness v2 carries the ask to rendered clips (p5760: ten titled
+            # vertical clips came back as locked raw cards): each child gets
+            # what its caller wrote (title on screen, captions) and a preview
+            # render, so the board shows clips that play.
+            payload["deliver"] = {k: deliver[k] for k in (
+                "title", "captions", "caption_style", "render")
+                if k in deliver}
     if ctx.job.get("type") == "agent_turn" and ctx.job.get("id"):
         payload["parent_agent_job_id"] = ctx.job["id"]
     job_id = ctx.db.run(dbx.enqueue_job, ctx.project_id,

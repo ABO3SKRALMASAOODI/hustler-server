@@ -19,6 +19,7 @@ from agent_tools import edl_signature
 from schemas import program_duration
 from timeline import Timeline
 
+from harness2 import finish as finish_mod
 from harness2 import fit_length as fit_mod
 from harness2.stage import first_line, result_refused
 
@@ -52,9 +53,10 @@ class Engines:
                                        narration_asset_key=narration)
 
     @staticmethod
-    def make_shorts(ctx, clips, style_note=None):
+    def make_shorts(ctx, clips, style_note=None, deliver=None):
         return agent_tools.make_shorts(ctx, clips=clips,
-                                       style_note=style_note)
+                                       style_note=style_note,
+                                       deliver=deliver)
 
 
 ENGINES = Engines()
@@ -308,27 +310,61 @@ def film_to_source_spans(edl, a, b):
     return out
 
 
+def _film_end_word(value):
+    """True when a speed row's end says 'to the end of the film': omitted,
+    null, or a word such as "end" in place of a number."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        try:
+            float(value)
+        except ValueError:
+            return True
+    return False
+
+
 def op_speed(stage, value, env, index):
     """Speed rows are FILM seconds, like everything placed on the film
     (p5744: "slow motion after 6 s" is 6 s of the film the customer
-    watches); ``"at_source": true`` on a row takes source seconds."""
+    watches); ``"at_source": true`` on a row takes source seconds. A row
+    with no end (or ``"end": "end"``) runs to the film's end: "after 6 s"
+    is the rest of the film, not a guessed window (p5744 R2 got 6-8.6 s of a
+    13 s film). ``"ramp": true`` eases in and out of the factor
+    (set_speed_ramp) instead of a hard change."""
     rows = value if isinstance(value, list) else [value]
     ok = False
     for row in rows:
         if not isinstance(row, dict):
             env.skip(index, "a speed row is {start, end, factor}")
             continue
+        program = float(program_duration(stage.edl) or 0.0)
+        to_end = _film_end_word(row.get("end")) and not row.get("at_source")
         try:
-            a, b = float(row.get("start")), float(row.get("end"))
+            a = float(row.get("start") or 0.0)
+            b = program if to_end else float(row.get("end"))
         except (TypeError, ValueError):
             env.skip(index, "a speed row needs numeric start and end",
-                     '{"start": 6, "end": 7.3, "factor": 0.6} (film s)')
+                     '{"start": 6, "factor": 0.5} (film s; no end = to '
+                     'the film\'s end)')
             continue
+        if to_end:
+            env.repair(f"speed from {a:g} s has no end: it runs to the "
+                       f"film's end ({program:.2f} s)")
         a, b = min(a, b), max(a, b)
+        if row.get("ramp") and not row.get("at_source"):
+            args = {"start": a, "end": b,
+                    "low": max(0.25, min(0.95, float(row.get("factor")
+                                                     or 0.5)))}
+            for name in ("hold", "curve", "allow_speech",
+                         "allow_duplicates"):
+                if row.get(name) is not None:
+                    args[name] = row[name]
+            args.setdefault("hold", 0.5)
+            ok = _run_verb(stage, "set_speed_ramp", args, env, index) or ok
+            continue
         if row.get("at_source"):
             spans = [(a, b)]
         else:
-            program = float(program_duration(stage.edl) or 0.0)
             if program and b > program:
                 env.repair(f"speed end {b:g} s is past the film's end "
                            f"({program:.2f} s): held to the end")
@@ -343,7 +379,25 @@ def op_speed(stage, value, env, index):
             args = {"start": src_a, "end": src_b,
                     "factor": row.get("factor")}
             ok = _run_verb(stage, "set_speed", args, env, index) or ok
+    if ok:
+        _speed_coverage(stage, env)
     return ok
+
+
+def _speed_coverage(stage, env):
+    """One line: where the changed speed plays against the whole film, so
+    a span that stops short of what was asked is seen at once."""
+    try:
+        from harness2 import measure as measure_mod
+        rows = measure_mod.speed_measure(stage.edl)
+        program = float(program_duration(stage.edl) or 0.0)
+    except Exception:  # noqa: BLE001 - a report, never the edit
+        return
+    parts = [f"{r['factor']}x on film {r['film_s'][0]:.2f}-"
+             f"{r['film_s'][1]:.2f} s" for r in rows if r.get("film_s")]
+    if parts:
+        env.finding("speed now: " + "; ".join(parts)
+                    + f"; the film is {program:.2f} s long")
 
 
 def op_fit_length(stage, value, env, index):
@@ -690,9 +744,20 @@ def op_clips(stage, value, env, index):
     if not clips:
         env.skip(index, "clips takes items=[{range: [start, end], title}]")
         return False
+    # The clips are delivered as clips: each child carries its title on
+    # screen and captions, and is rendered (p5760: "10 vertical clips with
+    # titles" came back as ten locked raw cards and nothing that played).
+    # The caller turns any of it off with false.
+    deliver = {"title": v.get("title_on_screen", True) is not False,
+               "captions": v.get("captions", True),
+               "render": v.get("render", True) is not False}
+    if isinstance(v.get("captions"), dict):
+        deliver["caption_style"] = v["captions"]
+        deliver["captions"] = True
     try:
         result = ENGINES.make_shorts(stage._base, clips,
-                                     style_note=v.get("brief"))
+                                     style_note=v.get("brief"),
+                                     deliver=deliver)
     except Exception as exc:  # noqa: BLE001
         env.skip(index, f"clips raised {type(exc).__name__}: "
                         f"{str(exc)[:200]}")
@@ -704,7 +769,8 @@ def op_clips(stage, value, env, index):
     job_id = getattr(stage._base, "serial_job_id", None)
     if job_id:
         env.running = {"handle": f"job:{job_id}",
-                       "what": f"{len(clips)} clip project(s)"}
+                       "what": f"{len(clips)} clip project(s), each with "
+                               "its title and captions, rendered"}
     return True
 
 
@@ -803,17 +869,16 @@ HANDLERS = {
     "export": op_export,
     "transition": op_transition, "zoom": _verb_op("add_zoom"),
     "clips": op_clips,
+    "element": _verb_op("add_element"),
+    "finish": lambda stage, value, env, index: finish_mod.op_finish(
+        stage, value, env, index, _run_verb),
 }
 
-# The engine ops (H28-H30) are named here so an op naming them is read as
-# what it is; until they land, the same result is reached with the ops above.
-ENGINE_OPS = {
-    "direct": "the film is built with ops here: keep + place/scenes + "
-              "music + captions + card (the Director's op is being "
-              "connected)",
-    "finish": "the same departments as ops: captions, music, sfx, grade, "
-              "transition, zoom, card (the finish op is being connected)",
-}
+# ``direct`` writes its own version before the staged ops run
+# (harness2.direct_op, called by commit.edit); an op left here after that
+# pass was already handled.
+ENGINE_OPS = {}
+DONE_KEY = "_v2_done"
 
 
 def apply(stage, ops, env):
@@ -828,6 +893,8 @@ def apply(stage, ops, env):
         if layer_batch:
             landed += op_layers(stage, layer_batch, env)
             layer_batch = []
+        if isinstance(op, dict) and op.get(DONE_KEY):
+            continue
         if name is None:
             key = next(iter(op), None) if isinstance(op, dict) else None
             if key in ENGINE_OPS:

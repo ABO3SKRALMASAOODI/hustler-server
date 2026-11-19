@@ -1,8 +1,8 @@
 <!--MG-SPEC {"title": "Particles", "category": "element", "also": ["fx"],
- "description": "Light made of particles: embers rising off a figure, sparks, drifting dust, confetti, snow or firework bursts. emit='edge' throws them off the speaker's own outline (the figure turning to embers, paired with a light dissolve); 'point' / 'box' from a place; 'frame' over the whole picture. Burst times in 'at' (item seconds) land them on a beat or a word. Composite it as light (blend screen). Earns its place on a transformation or a release, once; never as wallpaper.",
+ "description": "Light made of particles: embers rising off a figure, sparks, drifting dust, confetti, snow, firework bursts or soap bubbles (glassy rings with a rim highlight and a thin-film sheen, rising and wobbling; emit frame fills the picture). emit='edge' throws them off the speaker's own outline (the figure turning to embers, paired with a light dissolve); 'point' / 'box' from a place; 'frame' over the whole picture. Burst times in 'at' (item seconds) land them on a beat or a word. Composite it as light (blend screen). Earns its place on a transformation or a release, once; never as wallpaper.",
  "duration": 3.0, "layer": "above_captions", "mutes_captions": false,
  "params": {
-  "kind": {"type": "enum", "values": ["embers", "sparks", "dust", "confetti", "snow", "fireworks"], "default": "embers"},
+  "kind": {"type": "enum", "values": ["embers", "sparks", "dust", "confetti", "snow", "fireworks", "bubbles"], "default": "embers"},
   "emit": {"type": "enum", "values": ["edge", "point", "box", "frame"], "default": "point", "hint": "edge = the subject's outline (needs the person matte); point = x, y; box = box; frame = everywhere"},
   "x": {"type": "float", "min": 0, "max": 1, "default": 0.5},
   "y": {"type": "float", "min": 0, "max": 1, "default": 0.5},
@@ -55,23 +55,61 @@
   }
   const F = MG.particles.field({
     seed, count: n,
-    gravity: kind === 'sparks' ? [0, 900 * scale] : kind === 'confetti' ? [0, 260 * scale] : kind === 'snow' ? [0, 40 * scale] : kind === 'fireworks' ? [0, 120 * scale] : [0, -60 * rise * scale],
-    drag: kind === 'fireworks' ? 1.6 : kind === 'sparks' ? 0.8 : 0.4,
-    swirl: kind === 'embers' ? 70 * scale : kind === 'dust' ? 40 * scale : kind === 'confetti' ? 60 * scale : 20 * scale,
+    gravity: kind === 'sparks' ? [0, 900 * scale] : kind === 'confetti' ? [0, 260 * scale] : kind === 'snow' ? [0, 40 * scale] : kind === 'fireworks' ? [0, 120 * scale] : kind === 'bubbles' ? [0, -34 * Math.max(0.2, rise) * scale] : [0, -60 * rise * scale],
+    drag: kind === 'fireworks' ? 1.6 : kind === 'sparks' ? 0.8 : kind === 'bubbles' ? 0.9 : 0.4,
+    swirl: kind === 'embers' ? 70 * scale : kind === 'dust' ? 40 * scale : kind === 'confetti' ? 60 * scale : kind === 'bubbles' ? 46 * scale : 20 * scale,
     emit: (i, r) => {
       const b = bursts.length ? bursts[i % bursts.length] : null;
       const t0 = b != null ? b + r() * 0.06 : r() * Math.max(0.05, D * 0.85);
       const o = origin(i, r, t0);
       const ang = (b != null || kind === 'sparks' || kind === 'fireworks') ? r() * Math.PI * 2 : Math.atan2(o.ny, o.nx) + (r() - 0.5) * Math.PI * spread;
-      const sp = (kind === 'fireworks' ? 520 : kind === 'sparks' ? 700 : kind === 'embers' ? 70 : kind === 'confetti' ? 180 : 25) * scale * (0.4 + r());
-      const life = kind === 'dust' || kind === 'snow' ? 2 + r() * 2 : kind === 'embers' ? 0.9 + r() * 1.6 : kind === 'confetti' ? 1.6 + r() : 0.5 + r() * 0.8;
-      return { x: o.x, y: o.y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp - (kind === 'embers' ? 60 * rise * scale : 0),
-        t0, life, size: (kind === 'confetti' ? 9 : kind === 'dust' ? 2.2 : kind === 'snow' ? 4 : kind === 'sparks' ? 2.4 : 4.4) * scale * (0.5 + r()),
+      const sp = (kind === 'fireworks' ? 520 : kind === 'sparks' ? 700 : kind === 'embers' ? 70 : kind === 'confetti' ? 180 : kind === 'bubbles' ? 40 : 25) * scale * (0.4 + r());
+      const life = kind === 'dust' || kind === 'snow' ? 2 + r() * 2 : kind === 'bubbles' ? 2.4 + r() * 2.2 : kind === 'embers' ? 0.9 + r() * 1.6 : kind === 'confetti' ? 1.6 + r() : 0.5 + r() * 0.8;
+      return { x: o.x, y: o.y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp - (kind === 'embers' ? 60 * rise * scale : kind === 'bubbles' ? 30 * scale : 0),
+        t0, life, size: (kind === 'confetti' ? 9 : kind === 'dust' ? 2.2 : kind === 'snow' ? 4 : kind === 'sparks' ? 2.4 : kind === 'bubbles' ? 34 : 4.4) * scale * (0.5 + r()),
         col: pal[Math.floor(r() * pal.length) % pal.length], alpha: I * (0.55 + 0.45 * r()), rot: r() * 6.28 };
     }
   });
+  // Soap bubbles (p5744 asked for "Bubbles"): a glassy disc, almost clear in
+  // the middle and denser at the rim, a thin-film sheen sliding round it, a
+  // window highlight up-left and a small one down-right; they wobble as they
+  // rise and swell a touch, then thin out and are gone.
+  function bubble(p, s) {
+    const fadeIn = Math.min(1, s.a / 0.25), fadeOut = Math.pow(1 - s.life, 1.2);
+    const a = p.alpha * fadeIn * fadeOut;
+    if (a <= 0.004) return;
+    const R = Math.max(2, p.size * (0.85 + 0.25 * s.life) / 2);
+    const wob = 1 + 0.05 * Math.sin(s.a * 7 + p.r1 * 20);
+    ctx.save(); ctx.translate(s.x, s.y); ctx.scale(wob, 2 - wob);
+    const body = ctx.createRadialGradient(0, 0, R * 0.2, 0, 0, R);
+    body.addColorStop(0, `rgba(255,255,255,${(a * 0.02).toFixed(3)})`);
+    body.addColorStop(0.72, `rgba(${p.col},${(a * 0.10).toFixed(3)})`);
+    body.addColorStop(0.94, `rgba(255,255,255,${(a * 0.55).toFixed(3)})`);
+    body.addColorStop(1, `rgba(255,255,255,0)`);
+    ctx.fillStyle = body; ctx.beginPath(); ctx.arc(0, 0, R, 0, TAU); ctx.fill();
+    const film = ['255,120,200', '120,220,255', '255,230,120', '160,140,255'];
+    const turn = s.a * 0.8 + p.r2 * 6.28;
+    for (let k = 0; k < 2; k++) {
+      ctx.strokeStyle = `rgba(${film[(p.k + k) % film.length]},${(a * 0.55).toFixed(3)})`;
+      ctx.lineWidth = Math.max(0.8, R * 0.06);
+      ctx.beginPath(); ctx.arc(0, 0, R * 0.93, turn + k * 2.6, turn + k * 2.6 + 1.5); ctx.stroke();
+    }
+    ctx.fillStyle = `rgba(255,255,255,${(a * 0.85).toFixed(3)})`;
+    ctx.beginPath(); ctx.ellipse(-R * 0.38, -R * 0.42, R * 0.2, R * 0.11, -0.7, 0, TAU); ctx.fill();
+    ctx.fillStyle = `rgba(255,255,255,${(a * 0.45).toFixed(3)})`;
+    ctx.beginPath(); ctx.arc(R * 0.42, R * 0.4, R * 0.07, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+  const TAU = Math.PI * 2;
   MG.frame(t => {
     ctx.clearRect(0, 0, W, H);
+    if (kind === 'bubbles') {
+      for (const p of F.parts) {
+        const s = F.state(p, t);
+        if (s) bubble(p, s);
+      }
+      return;
+    }
     if (kind === 'confetti') {
       for (const p of F.parts) {
         const s = F.state(p, t);

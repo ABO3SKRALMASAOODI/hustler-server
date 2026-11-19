@@ -433,7 +433,7 @@ def test_clips_create_child_projects(monkeypatch):
     ctx, fake = _ctx()
     asked = []
 
-    def fake_shorts(base, clips, style_note=None):
+    def fake_shorts(base, clips, style_note=None, deliver=None):
         asked.append(clips)
         base.serial_job_id = 4512
         return f"Started {len(clips)} clip project(s)."
