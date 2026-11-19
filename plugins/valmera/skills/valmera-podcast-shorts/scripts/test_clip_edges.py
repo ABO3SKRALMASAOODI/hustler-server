@@ -1,12 +1,28 @@
 """Clip edges serve the story (19 Nov rating, cause clip-edges): the selection reads timed sentences and a moment
 measured longer than a short is tightened by the same model; the script stage gets the hook and payoff as measured
 anchors and a window it gave too long is handed back, never a stop."""
+import importlib.util
 import json
+import os
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 import podcast
+
+SHELL_LLM = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "_shell", "llm.py")
+
+
+@pytest.fixture(autouse=True)
+def shell_llm(monkeypatch):
+    """The selection stage's own model module (_shell/llm.py), whatever 'llm' an earlier test file imported (the
+    worker's llm has no ask): the stage's `import llm` resolves to it as podcast.py's path puts it first in a run."""
+    spec = importlib.util.spec_from_file_location("valmera_shell_llm", SHELL_LLM)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setitem(sys.modules, "llm", mod)
+    return mod
 
 
 WORDS = [(0.0, "So"), (0.3, "we"), (0.6, "wrote"), (0.9, "the"), (1.2, "check."), (3.0, ">> Was"), (3.3, "it"), (3.6, "scary?"),
@@ -40,10 +56,24 @@ def test_a_long_moment_is_tightened_by_the_same_model_on_its_timed_sentences():
     m2 = dict(t0=100.0, t1=200.0, hook="h", payoff="p")
     podcast.tighten({}, m2, words, ask=lambda *a, **k: ("no json", {}))
     assert (m2["t0"], m2["t1"]) == (100.0, 200.0) and "tightened" not in m2
+    # a window reaching into the neighbouring moment's lines is handed back with its measured bounds
+    m3 = dict(id="m03", t0=3183.0, t1=3307.0, hook="h", payoff="p")
+    seen3 = []
+
+    def ask3(system, content, **kw):
+        seen3.append(content)
+        out = (3150.0, 3195.0) if len(seen3) == 1 else (3184.0, 3222.0)
+        return json.dumps(dict(t0=out[0], t1=out[1], hook="h2", payoff="p2", title="T")), {}
+    podcast.tighten({}, m3, words, ask=ask3)
+    assert len(seen3) == 2 and "reaching outside (by 33.0 s)" in seen3[1] and "3183.0-3307.0 s" in seen3[1]
+    assert (m3["t0"], m3["t1"]) == (3184.0, 3222.0)
+    m4 = dict(t0=3183.0, t1=3307.0, hook="h", payoff="p")                  # never in bounds: the moment stays as chosen
+    podcast.tighten({}, m4, words, ask=lambda *a, **k: (json.dumps(dict(t0=3290.0, t1=3330.0)), {}))
+    assert (m4["t0"], m4["t1"]) == (3183.0, 3307.0) and "tightened" not in m4
 
 
-def test_only_moments_longer_than_a_short_are_handed_back(tmp_path, monkeypatch):
-    import llm
+def test_only_moments_longer_than_a_short_are_handed_back(tmp_path, monkeypatch, shell_llm):
+    llm = shell_llm
     words = [(float(t), "word.") for t in range(0, 300)]
     (tmp_path / "words.json").write_text(json.dumps(words))
     calls = []

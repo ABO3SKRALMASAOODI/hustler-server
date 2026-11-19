@@ -280,12 +280,14 @@ def follow_seat(flash, shifts):
     return pieces
 
 
-def take_pieces(cuts, dur, punch=(), fps=FPS, lead=LEAD_F):
+def take_pieces(cuts, dur, punch=(), fps=FPS, lead=LEAD_F, until=None):
     """The take as framings, in film frames: [{f: [a, b], faces, who, cut, punch}]. Each of the show's camera shots
     is split where the person speaking changes, each part framed on the one who speaks it (wf1_speaker: a two-shot
     is cut between its two people as an editor cuts it), and at each `punch` frame (the payoff's cut-in to a
-    close-up). A quiet stretch keeps the framing before it; a shot read before speaker spans existed is one piece on
-    its faces."""
+    close-up). The punch-in is always on the one speaking: when the payoff's word opens on a listener framing (the
+    show's camera on the host while the guest talks) the close-up lands on the first speaker framing that opens inside
+    the payoff (before `until`, the payoff's last frame), or there is none. A quiet stretch keeps the framing before
+    it; a shot read before speaker spans existed is one piece on its faces."""
     segs = []
     for k, c in enumerate(cuts):
         spans = c.get("spans") or [dict(t0=c["t0"], t1=c["t1"], who="speaker", box=None)]
@@ -315,13 +317,16 @@ def take_pieces(cuts, dur, punch=(), fps=FPS, lead=LEAD_F):
         if i is None:
             continue
         a, b = out[i]["f"]
-        if p - a < 9:                                 # the payoff opens a framing already: that framing is the punch-in
+        end = out[-1]["f"][1] if until is None else int(until)
+        speaking = out[i]["who"] == "speaker"
+        if speaking and p - a < 9:                    # the payoff opens a framing already: that framing is the punch-in
             out[i]["punch"] = True
-        elif b - p < 9:                               # it lands on the next framing's cut
-            if i + 1 < len(out):
-                out[i + 1]["punch"] = True
-        else:
+        elif speaking and b - p >= 9:
             out[i:i + 1] = [dict(out[i], f=[a, p]), dict(out[i], f=[p, b], punch=True)]
+        else:                                         # the next cut, or a listener's framing: the speaker's first framing in the payoff
+            k = next((k for k in range(i + 1, len(out)) if out[k]["who"] == "speaker" and p <= out[k]["f"][0] < end), None)
+            if k is not None:
+                out[k]["punch"] = True
     return out
 
 
@@ -425,7 +430,8 @@ def build(script, sup, style_id, direction=None):
         ts = nseg - 1
         turn_f = max(seg_f[ts] - 1, 0)
     # the take as framings: each stretch on the one who speaks it, the payoff a punch-in. One file, one asset a framing
-    pieces = take_pieces(tshots, float(take["dur"]), punch=[turn_f] if turn_f is not None and turn_f > 2 * FPS else [])
+    pieces = take_pieces(tshots, float(take["dur"]), punch=[turn_f] if turn_f is not None and turn_f > 2 * FPS else [],
+                         until=f_voice_end)
     for k, pc in enumerate(pieces):
         key = P.video("main" if k == 0 else f"own:{k}", dict(path=take["path"], w=take["w"], h=take["h"], fps=take.get("fps") or FPS, seconds=take["dur"]))
         fm = F.face_meta(dict(faces=pc["faces"] or take.get("faces") or []))
@@ -616,11 +622,10 @@ def build(script, sup, style_id, direction=None):
         pos = r1
     take_shot(pos, f_end)
     if st["flash"] == "turn" and turn_f is not None:
-        # the payoff's own cut, nearest its first word: the punch-in when the take is up there, else the picture
-        # cut a second either side of it
-        cuts_near = [f for x in ins for f in (x[0], x[1]) if abs(f - turn_f) <= FPS and 0 < f < f_end]
-        if not any(x[0] <= turn_f < x[1] for x in ins):
-            cuts_near.append(turn_f)
+        # the payoff's own cut, nearest its first word, among the film's real cuts (every picture's and every take
+        # framing's first frame: the punch-in where it opens, else a picture cut a second either side of it); never a
+        # frame inside a continuous shot
+        cuts_near = [f for f in set(cut_pts) if abs(f - turn_f) <= FPS and 0 < f < f_end]
         if cuts_near:
             flashes.append(min(cuts_near, key=lambda f: (abs(f - turn_f), f)))
     for f in flashes:

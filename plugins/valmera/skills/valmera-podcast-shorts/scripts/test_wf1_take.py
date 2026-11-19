@@ -99,3 +99,70 @@ def test_a_payoff_near_a_framings_edge_punches_that_framing():
     assert [p["punch"] for p in near_start] == [False, True, False]
     near_end = film.take_pieces(cuts, 7.0, punch=[120])                  # 3 frames before the single's cut
     assert [p["punch"] for p in near_end] == [False, False, True]
+
+
+def test_the_punch_in_is_on_the_one_speaking_never_a_listener():
+    """b7c90a: the payoff over the host laughing must not become a close-up on the host."""
+    cuts = cuts_two_shot()
+    cuts[0]["spans"][1]["who"] = "listener"                                # the show's camera on the host while the guest talks
+    pieces = film.take_pieces(cuts, 7.0, punch=[100], until=200)           # the payoff opens in the listener span
+    assert [p["who"] for p in pieces][:2] == ["speaker", "listener"]
+    assert not pieces[1]["punch"] and [p["punch"] for p in pieces if p["punch"]] == [True]
+    punched = next(p for p in pieces if p["punch"])
+    assert punched["who"] == "speaker" and punched["f"][0] >= 100
+    # a payoff that ends before any speaker framing opens has no punch-in at all
+    assert not any(p["punch"] for p in film.take_pieces(cuts, 7.0, punch=[100], until=110))
+    # a listener framing 3 frames before its cut: still never the listener
+    near_end = film.take_pieces(cuts, 7.0, punch=[120], until=200)
+    assert [p["punch"] for p in near_end] == [False, False, True] and near_end[2]["who"] == "speaker"
+
+
+def _flash_frames(l1):
+    return [it["f"][0] for it in l1["items"] if it["k"] == "flash" and it.get("mode") == "fill"]
+
+
+@pytest.mark.parametrize("lag", [2, -3])
+def test_the_payoff_flash_lands_on_a_real_cut(tmp_path, quiet_engines, monkeypatch, lag):
+    """A payoff 2 frames into a framing (the framing is the punch, cut at its start) or 3 frames before a cut (the
+    next framing is the punch): the white flash sits on that cut, never on the payoff's word inside a shot."""
+    words = _sup(tmp_path, cuts_two_shot())
+    script = dict(title="Coach", segments=[dict(say=" ".join(w["w"] for w in words["words"]["words"] if w["seg"] == i), pictures=[])
+                                           for i in (0, 1)])
+    turn_word = next(w for w in words["words"]["words"] if w["seg"] == 1)
+    turn_f = round(turn_word["start"] * 30) + film.LEAD_F - 1
+    cut_f = turn_f - lag                                                   # where the show's camera cuts, near the payoff
+    import wf1_coverage                                                    # the director is not asked here (no model in tests)
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", lambda coverage, *a, **k: (list(coverage.get("moves", [])), []))
+    cuts = cuts_two_shot()
+    t = (cut_f - film.LEAD_F) / 30
+    cuts[0]["t1"] = cuts[1]["t0"] = cuts[0]["spans"][1]["t1"] = cuts[1]["spans"][0]["t0"] = t
+    cuts[1]["spans"][0]["t1"] = max(cuts[1]["spans"][0]["t1"], t + 0.2)
+    words["take"]["cuts"] = cuts
+    l1, beats = film.build(script, words, "footage-cut", dict(turn_seg=1, coverage_final=True))
+    assert beats["turn_f"] == turn_f
+    starts = {it["f"][0] for it in l1["items"] if it["k"] == "shot"}
+    assert cut_f in starts and turn_f not in starts
+    assert _flash_frames(l1) == [cut_f]
+    assert set(_flash_frames(l1)) <= starts
+
+
+def test_a_rebuild_with_no_open_holds_adds_no_stress_moves(tmp_path, quiet_engines, monkeypatch):
+    """The pack's coverage is reused by retries and resumes: a second build whose holds are all broken (here the
+    director's moves now cover them) must not break the first build's stale holds again."""
+    import functools
+    import json as _json
+    from types import SimpleNamespace
+    import wf1_coverage
+    asked = []
+    director = SimpleNamespace(ask=lambda *a, **k: (asked.append(1) or '{"moves": []}', {}), json_block=_json.loads)
+    monkeypatch.setattr(wf1_coverage, "speaker_moves", functools.partial(wf1_coverage.speaker_moves, llm=director))
+    monkeypatch.setattr(film.F, "voice_stress", lambda sup: [(f, 0.5 + (f % 7) / 10) for f in range(0, 240, 10)])
+    one_shot = [dict(t0=0.0, t1=7.0, faces=[dict(box=[.4, .2, .5, .4], eyes=[[.42, .27], [.48, .27]], score=1.0)])]
+    sup = _sup(tmp_path, one_shot)
+    script = dict(title="Coach", segments=[dict(say=" ".join(w["w"] for w in sup["words"]["words"] if w["seg"] == i), pictures=[])
+                                           for i in (0, 1)])
+    _, first = film.build(script, sup, "footage-cut", dict(turn_seg=1, coverage_final=True))
+    assert asked and sup["coverage"]["unresolved_holds"] and first["coverage"]["stress_moves"]
+    sup["coverage"]["moves"] = [dict(word=4, why="the turn of the claim"), dict(word=15, why="the hard part")]
+    _, second = film.build(script, sup, "footage-cut", dict(turn_seg=1, coverage_final=True))
+    assert sup["coverage"]["unresolved_holds"] == [] and second["coverage"]["stress_moves"] == []

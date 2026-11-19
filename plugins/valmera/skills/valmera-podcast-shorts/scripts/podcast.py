@@ -391,6 +391,9 @@ TIGHTEN_SYSTEM = (
     '"title": a plain title in at most six words, true to what the window says, "why": one sentence}')
 
 
+TIGHTEN_SLACK_S = 2.0       # a tightened window keeps to its moment's own sentences (their measured ends, a word's slack)
+
+
 def tighten(info, m, words, ask=None):
     """A moment measured over MOMENT_MAX_S, handed back to the selection model with its timed sentences to choose the
     tightest self-contained window (no clamp, no rejection: the moment keeps its hook and payoff or takes a whole arc
@@ -412,13 +415,15 @@ def tighten(info, m, words, ask=None):
         except (ValueError, KeyError, TypeError):
             note = "\n\nYour answer was not the JSON asked for."
             continue
-        if 8.0 <= b - a <= MOMENT_MAX_S + 5.0 and t0 - 15.0 <= a < b <= t1 + 15.0:
+        inside = t0 - TIGHTEN_SLACK_S <= a < b <= t1 + TIGHTEN_SLACK_S      # its own sentences: a neighbour's lines are never told twice
+        if 8.0 <= b - a <= MOMENT_MAX_S + 5.0 and inside:
             m["tightened"] = dict(from_s=[t0, t1], why=got.get("why"))
             m.update(t0=round(a, 2), t1=round(b, 2), hook=got.get("hook") or m.get("hook"), payoff=got.get("payoff") or m.get("payoff"),
                      title=got.get("title") or m.get("title"))
             break
-        note = (f"\n\nYour window {a:.1f}-{b:.1f} s runs {b - a:.0f} s inside a moment of {t0:.0f}-{t1:.0f} s: choose one of "
-                f"18-55 s inside it.")
+        where = "inside" if inside else f"reaching outside (by {max(t0 - a, b - t1, 0):.1f} s) a moment that runs"
+        note = (f"\n\nYour window {a:.1f}-{b:.1f} s runs {b - a:.0f} s {where} {t0:.1f}-{t1:.1f} s: choose one of "
+                f"18-55 s inside it, from its own sentences.")
     m["duration_s"] = round(float(m["t1"]) - float(m["t0"]), 1)
     return spend
 

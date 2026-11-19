@@ -451,7 +451,9 @@ def speaker_moves(coverage, ins, end, camera_cuts, work, fps=30, lead=3, llm=Non
             out.extend((x,y) for x,y in zip(edges,edges[1:]) if y-x>3*fps)
         return out
     missing=gaps(moves)
-    if not missing:return moves,[]
+    if not missing:
+        coverage['unresolved_holds']=[]          # this build's holds: a reused pack never carries an earlier build's
+        return moves,[]
     all_spend=[]
     for attempt in range(3):
         if not gaps(moves):break
