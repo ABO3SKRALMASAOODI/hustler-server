@@ -216,7 +216,7 @@ def main(argv=None):
         raise SystemExit(rep["why"])
     rep["choice"] = choice
     part = os.path.join(dst, "film.part.mp4")
-    mk = dict(marks, open_s=MF.entry_s(choice)) if MF.entry_s(choice) is not None else marks
+    mk = MF.arranged(marks, choice)                       # the chooser's entry point, and the story path's arc
     mix = MU.mix_film(clean, song, mk, out=part, kind=kind, sung=choice.get("sung"), supplied=False)
     rep["mix"] = {k: v for k, v in mix.items() if k not in ("music",)}
     rep["mix"]["music"] = {k: v for k, v in (mix.get("music") or {}).items() if k in ("under_voice_db", "silent_from_s", "holes", "hits", "payoff_flow_s")}

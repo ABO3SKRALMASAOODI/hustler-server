@@ -86,13 +86,14 @@ class _Engine:
     """The music engine's analyse/arrange, stubbed: every song carries the film, and what it was asked is kept."""
 
     def __init__(self, bad=()):
-        self.bad, self.asked = set(bad), []
+        self.bad, self.asked, self.arcs = set(bad), [], []
 
     def analyse(self, path, sung=None, vocals=None):
         return {"path": path}
 
     def arrange(self, song, marks, profile=None):
         self.asked.append((os.path.basename(song["path"]), marks.get("open_s")))
+        self.arcs.append(bool(marks.get("arc")))
         if any(b in song["path"] for b in self.bad):
             return {"ok": False, "why": "no arrangement lands the drop"}
         return {"ok": True, "drop_at": marks.get("payoff_s"), "drop_is": "entrance", "intro_bars": 0, "low_bars": 0, "jumps": 1, "tempo": 1.0}

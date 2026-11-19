@@ -50,7 +50,7 @@ def score(l1, pack, film, out, cache):
         choice,path,tried=MF.choose(fact,marks,cache,used=used,call=call,profile=prof)
         if not choice: raise RuntimeError('MUSIC2 found no track for '+ch['id'])
         song=MU.analyse(path,sung=choice.get('sung'))
-        plan=MU.arrange(song,marks,profile=prof)
+        plan=MU.arrange(song,MF.arranged(marks,choice),profile=prof)
         if not plan.get('ok'): raise RuntimeError('MUSIC2 arrangement failed for '+ch['id'])
         ia,ib=round(a*MU.SR),round(b*MU.SR)
         bed,rep=MU.track(path,song,plan,marks,voice=voice[ia:ib],profile=prof)

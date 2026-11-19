@@ -72,8 +72,9 @@ def test_the_model_ranks_the_palette_by_the_story_and_its_first_pick_plays(lib, 
     assert "A four-on-the-floor house groove." in user and "builds 0:30-0:58 (+12 dB)" in user
     assert ch["cid"] == "piano-rise" and ch["chosen_by"] == "model (story)" and "triumphant reveal" in ch["why"]
     assert [r["cid"] for r in tried] == ["piano-rise"] and path.endswith("piano-rise.m4a")
-    # the engine still lands the story pick's stretch on the film
-    assert ch["entry"]["start_s"] is not None and eng.asked[0][0] == "piano-rise.m4a"
+    # the engine plays the story pick by its own measured arc (no reference-matched section), and wherever it is laid
+    assert eng.asked[0] == ("piano-rise.m4a", None) and eng.arcs == [True] and ch["arc"] is True
+    assert MF.arranged(_marks(), ch)["arc"] is True and "arc" not in MF.arranged(_marks(), {"cid": "x"})
 
 
 def test_the_story_pick_stands_unless_the_engine_cannot_arrange_it(lib, monkeypatch):
@@ -87,20 +88,44 @@ def test_the_story_pick_stands_unless_the_engine_cannot_arrange_it(lib, monkeypa
     assert [r["cid"] for r in tried] == ["first", "second"] and tried[0]["carries"] >= MF.NO_ARRANGEMENT
     assert ch["cid"] == "second" and "kept pick 2" in ch["why"]
 
-    # a merely imperfect arrangement of the story's pick (an intro bar it must play) does not hand the film to the next
+    # a merely imperfect arrangement of the story's pick (one intro bar it must play) keeps the film, and no later pick
+    # is fetched or arranged once none could overcome it
     class Imperfect(_Engine):
+        def __init__(self, arc):
+            super().__init__()
+            self.arc = arc
+
         def arrange(self, song, marks, profile=None):
             plan = super().arrange(song, marks, profile)
+            plan["arc"] = {"repeats": 0, "peak_before_turn": 0, "rise_db": 9.0, "joins": 0}
             if "first" in song["path"]:
-                plan.update(intro_bars=2)
+                plan.update(intro_bars=1)
+                plan["arc"].update(self.arc)
             return plan
-    eng2 = Imperfect()
-    monkeypatch.setattr(MU, "arrange", eng2.arrange)
+    monkeypatch.setattr(MU, "arrange", Imperfect({}).arrange)
     ch2, _p, tried2 = MF.choose(_film(), _marks(), "/nonexistent", call=model)
-    assert ch2["cid"] == "first" and tried2[0]["carries"] == 3.25
+    assert ch2["cid"] == "first" and tried2[0]["carries"] == 1.5 and len(tried2) == 1
+    # one that plays clearly worse on the story's arc (bars played twice, its peak spent before the turn, no rise into
+    # the payoff) hands the film to a later pick that plays it cleanly
+    monkeypatch.setattr(MU, "arrange", Imperfect({"repeats": 4, "peak_before_turn": 3, "rise_db": 1.0, "joins": 6}).arrange)
+    ch3, _p, tried3 = MF.choose(_film(), _marks(), "/nonexistent", call=model)
+    assert tried3[0]["carries"] > 10 and ch3["cid"] == "second" and "kept pick 2" in ch3["why"]
 
 
-def test_tracks_an_earlier_film_of_the_run_plays_are_left_out_while_others_remain(lib, monkeypatch):
+def test_tracks_an_earlier_film_of_the_run_plays_go_behind_the_others(lib, monkeypatch):
+    rows = [_described(f"cue-{i}", f"Cue {i}.", "builds.") for i in range(8)]
+    _palette(lib, monkeypatch, rows)
+    seen = []
+
+    def model(system, user, schema):
+        seen.append(user)
+        return {"order": [1, 4], "why": "x"}
+    ch, _p, _t = MF.choose(_film(), _marks(), "/nonexistent", used=["cue-0", "cue-1"], call=model)
+    assert "Already under an earlier film of this run (choose another unless nothing else fits): 1, 2" in seen[0]
+    assert ch["cid"] == "cue-3" and "already plays under an earlier film" in ch["why"]
+
+
+def test_the_story_prompt_shares_one_cacheable_prefix_across_films(lib, monkeypatch):
     rows = [_described(f"cue-{i}", f"Cue {i}.", "builds.") for i in range(8)]
     _palette(lib, monkeypatch, rows)
     seen = []
@@ -108,9 +133,13 @@ def test_tracks_an_earlier_film_of_the_run_plays_are_left_out_while_others_remai
     def model(system, user, schema):
         seen.append(user)
         return {"order": [1], "why": "x"}
-    ch, _p, _t = MF.choose(_film(), _marks(), "/nonexistent", used=["cue-0", "cue-1"], call=model)
-    opts = seen[0].split("Candidates:")[1]
-    assert '"Cue-0"' not in opts and '"Cue-1"' not in opts and ch["cid"] not in {"cue-0", "cue-1"}
+    other = dict(_film(), lines=[(0.0, "a different film"), (9.0, "with its own lines")], brief="About: someone else.")
+    MF.choose(_film(), _marks(), "/nonexistent", call=model)
+    MF.choose(other, _marks(), "/nonexistent", used=["cue-5"], call=model)
+    a, b = seen
+    stable = a[:a.index("\n\nFilm:")]
+    assert stable.startswith("Candidates:\n1. ") and b.startswith(stable) and "Mark Cuban" not in stable
+    assert a.index("Mark Cuban") > a.index('"Cue-7"') and b.index("a different film") > b.index("Already under")
 
 
 def test_without_a_story_ranking_the_path_is_todays(lib, monkeypatch):
