@@ -153,9 +153,15 @@ def _span(ask, l1):
         a, b = int(f[0]), int(f[1])
     elif isinstance(f, (int, float)):
         a, b = int(f), int(f) + int(ask.get("n") or 2)
+    elif isinstance(ask.get("at"), (list, tuple)) and len(ask["at"]) >= 2:      # the alien bank's [a, z]
+        a, b = int(ask["at"][0]), int(ask["at"][1])
     else:
-        a = int(ask.get("at") if ask.get("at") is not None else 0)
-        b = int(ask.get("until") if ask.get("until") is not None else a + int(ask.get("n") or 2))
+        at = ask.get("at")
+        a = int(at) if isinstance(at, (int, float)) else 0
+        if a == 0 and isinstance(ask.get("marks"), list) and ask["marks"]:       # the arc: from its first mark
+            a = int(min(int(m.get("f", 0)) for m in ask["marks"] if isinstance(m, dict)) if any(isinstance(m, dict) for m in ask["marks"]) else 0)
+        u = ask.get("until")
+        b = int(u) if isinstance(u, (int, float)) else a + int(ask.get("n") or 2)
     a = min(max(a, 0), dur - 1)
     b = min(max(b, a + 1), dur)
     return a, b
@@ -267,7 +273,8 @@ def apply(l1, work, asks=None, pool=None):
         sense.lum += [int(f) for f in patch.get("lum") or []]
         for e in patch.get("events") or []:
             events.append(dict(e, dev=dev, id=ask["id"]))
-        log.append(dict(row, done=True, landed=dev, fallback=bool(tried), tried=tried, log=patch.get("log")))
+        log.append(dict(row, done=True, landed=dev, fallback=bool(tried), tried=tried, log=patch.get("log"),
+                        marks=patch.get("marks") or [], seat=patch.get("seat")))
     cur["device_events"] = sorted(events, key=lambda e: (int(e.get("f", 0)), str(e.get("id"))))
     cur["device_log"] = log
     return cur, log
