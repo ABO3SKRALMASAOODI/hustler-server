@@ -76,6 +76,7 @@ import numpy as np
 from scene.spine import samples, start_s
 
 from . import sound_choice as choice
+from . import sound_screen as SCR
 try:
     from . import sound_profiles as SP
 except Exception:  # noqa: BLE001 - without the study's numbers the fixed table answers
@@ -910,7 +911,7 @@ def motivated(e):
     cut to the next picture, the upload's own cut and a reframe of the same take show nothing that sounds."""
     k = e.get("kind")
     if k in ("picture", "cut"):
-        return bool(e.get("moving"))
+        return bool(e.get("moving") or e.get("flash_cut"))      # flash_cut: a flash frame on it (sound_screen.annotate)
     return k in ("card", "page", "display", "counter", "flash", "burst", "move")
 
 
@@ -1009,8 +1010,11 @@ def plan_sounds(events, ctx):
         i0, i1 = max(0, int((t + a) * AR / FRAME)), min(len(speech), int((t + b) * AR / FRAME) + 1)
         return bool(speech[i0:i1].any())
 
+    screen = bool(ctx.get("screen"))
     try:
-        desc = measured(choice.describe_library(lib, SOUNDS, pcm))
+        # screen placement (sound_screen, the workflow films): the class a model gave each recording of the workflow's
+        # set stands; the ruler's re-classing is what put a camera shutter in a sweep's slot
+        desc = choice.describe_library(lib, SOUNDS, pcm) if screen else measured(choice.describe_library(lib, SOUNDS, pcm))
     except Exception:  # noqa: BLE001 - without the ruler the fixed table still answers
         desc = {}
     desc = {k: d for k, d in desc.items() if k not in excluded()}     # every ruler pick draws from these
@@ -1159,7 +1163,8 @@ def plan_sounds(events, ctx):
         state["all"].append(t)
     own_cap = max(1, want)
     own_spacing = max(SPACE_S, 10.0 / max(RATE_10S.get(cls, 3.6), 0.1))
-    st = {"desc": desc, "seed": seed, "tally": tally, "used": used, "spoken": spoken, "cls_at": [], "open_s": open_s}
+    st = {"desc": desc, "seed": seed, "tally": tally, "used": used, "spoken": spoken, "cls_at": [], "open_s": open_s,
+          "screen": screen, "bed": bed}
 
     def refuse(e, why):
         report["dropped"].append({"f": e["f"], "kind": e["kind"], "why": why})
@@ -1170,7 +1175,7 @@ def plan_sounds(events, ctx):
         e0 = e
         t = e["f"] / fps
         tier = tier_of(e, part, ladder)
-        if tier in ("accent", "body") and not on_cut(e) and len(state["tick"]) < n_tick and (
+        if tier in ("accent", "body") and not on_cut(e) and len(state["tick"]) < n_tick and (not screen or e["kind"] in ("display", "counter")) and (
                 len(state["aud"]) >= cap["aud"] or any(sum(1 for g in state["aud"] + [t] if w0 <= g < w0 + 10.0) > win
                                                        for w0 in [g for g in state["aud"] + [t] if t - 10.0 < g <= t])):
             tier = "tick"                             # type, a card or a move past the audible amount still lands, as a quiet tick
@@ -1385,6 +1390,8 @@ def _layers_for(e, part, tier, t, st, avoid=()):
     film's own tally against their shares, sound_choice.class_for). The recording is of that class as the ruler hears
     it, unused in this film, the nearest the class's reference shape at the moment's weight, rotated per film."""
     desc = st["desc"]
+    if desc and st.get("screen"):                     # the workflow films: what the picture does names the sound
+        return SCR.layers(dict(e, _w=_weight(e)), part, tier, t, st, library(), preroll, avoid)
     if not desc:
         layers, cls = _choose(e, part if part != "close" else "payoff", t, [], st["spoken"](t), st["tally"], {}, avoid)
         return [(s, w) for s, w in layers if s not in st["used"]], cls
@@ -1606,14 +1613,17 @@ def _item(iid, sid, f, fps, db, ev, part, what):
     peak_s) lands LEAD_S before frame f; `peak_s` carries that offset so validate_l1's start = event - peak holds.
     dur_s is the measured audible tail (max_s) from the trim point: the renderer and the scene mix stop there."""
     x = library()[sid]
-    peak = float(x.get("hit_s") or x.get("peak_s") or 0.0) + LEAD_S
+    bed = x.get("align") == "start" and ev.get("typed")       # keys under typed text (screen placement): from its frame
+    peak = 0.0 if bed else float(x.get("hit_s") or x.get("peak_s") or 0.0) + LEAD_S
     start = f / fps - peak
     trim = 0.0
     if start < 0:
         trim, start = -start, 0.0
     it = {"id": iid, "s": sid, "file": x["file"], "event_f": int(f), "start_s": round(start, 4), "trim_s": round(trim, 4),
           "db": db, "peak_s": round(peak, 4), "for": ev["kind"], "part": part, "layer": what, "by": "sound.py"}
-    if x.get("max_s") and float(x["max_s"]) - trim >= 0.05:
+    if bed:                                                   # as long as the typing, and its own length at most
+        it["dur_s"] = round(min(float(x.get("duration_s") or 3.0), float(ev.get("type_s") or 1.0) + 0.15), 3)
+    elif x.get("max_s") and float(x["max_s"]) - trim >= 0.05:
         it["dur_s"] = round(float(x["max_s"]) - trim, 3)
     return it
 
@@ -1849,7 +1859,15 @@ def present_over(sounds, voice, bed, fps, voice_shift_db=0.0):
             continue                                 # the song and the voice cover it even lifted: a sound nobody hears is clutter
         it["over_bed_db"] = round(min(p, 60.0), 1)
         out.append(it)
-    return out
+    return screen_restrain(out, voice, voice_shift_db)
+
+
+def screen_restrain(sounds, voice, voice_shift_db=0.0):
+    """Screen placement (the workflow films): the 2-8 kHz restraint once more after a lift, so the band limit is the
+    final level over the song too (sound_screen.restrain). Anything else comes back as it was."""
+    if not SCR.on() or voice is None or not len(voice):
+        return sounds
+    return SCR.restrain(sounds, voice, AR, voice_shift_db, library())
 
 
 def _signal_check(placed, ctx, report):
@@ -2003,6 +2021,9 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
         lv = 20 * math.log10(float(np.sqrt((seg ** 2).mean())) + 1e-9) + 3.0 - 0.691 + shift
         return max(min(lv + NO_VOICE_LIFT, VOICE_LUFS + 6), VOICE_LUFS - 10)
     events = l1_events(l1, _kshots(perc, index))
+    screen = SCR.on(supply)
+    if screen:                               # how each picture arrives: its travel, speed, slam, a photograph, a page
+        events = SCR.annotate(events, l1)
     # where the film closes, read exactly as the music engine reads its last hit (music.marks_from_l1: the first landing
     # of l1_events after the last word, 0.7 s before the end at the latest), so the two land on one frame
     # (with a song under the film, a film with nothing landing after its last word closes a breath after it, where
@@ -2012,10 +2033,13 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
            "words": words or [], "bed": bed, "ref_at": ref_at, "np10": (supply or {}).get("np10"), "own_tiers": bool(own_tiers),
            "turn_f": int(round(float(turn_s) * fps)) if turn_s is not None else None, "close_s": close_s,
            "delivery_tail_s": float((supply or {}).get("delivery_tail_s", 0.0)),
-           "tick_10s": (supply or {}).get("tick_10s"),
+           "tick_10s": (supply or {}).get("tick_10s"), "screen": screen,
            "seed": film_seed(l1.get("sid"), l1.get("seed"), D, [e.get("src") for e in (l1.get("spine") or [])][:64],
                              sorted(str((a or {}).get("path")) for a in (l1.get("assets") or {}).values())[:64])}
     sounds, report = plan_sounds(events, ctx)
+    if screen:                               # held under the voice in the band the voice leaves bare (2-8 kHz)
+        sounds = SCR.restrain(sounds, voice, AR, shift, library(), report)
+        report.setdefault("screen", {})["placement"] = "screen"
     if (index or {}).get("first_film"):
         import first_film_sound
         sounds, proof = first_film_sound.level(sounds, voice, fps, shift, speaks=bool(speaks))

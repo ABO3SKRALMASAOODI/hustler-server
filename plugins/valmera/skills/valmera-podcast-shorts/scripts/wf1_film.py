@@ -949,8 +949,9 @@ def build(script, sup, style_id, direction=None):
             it = P.shot([f0, f1], key, None, src=list(rec["src"]), **gk)
             it.pop("crop")
             meta[key] = clip_meta(rec)
-            if rec.get("verified_motion") is True and float(rec.get("placed_motion_p90") or 0) >= 1.0:
-                it["moving"] = True                          # it arrives moving: a landing the sound design sounds
+            # A clip's own subject motion (a gesturing speaker, a basketball game) is not a cut that travels: marked
+            # `moving`, every plain cut between clips took a sound (owner, 20 Nov: "the SFX is really not related at
+            # all"). A cut sounds when the picture itself travels (a whip's blur, a camera move, a flash frame).
         else:
             (fx, fy), _ = F.focus_of(rec)
             it = P.shot([f0, f1], key, F.cover_crop(rec["w"], rec["h"], W / H, (fx, fy), (0.5, 0.40)), **gk)

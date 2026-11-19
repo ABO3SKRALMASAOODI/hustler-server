@@ -1404,10 +1404,12 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
             # can discard a quiet sample. This adds no events or recordings.
             l1['sound'] = audibility.present_hits(l1['sound'], lv, music,
                 lambda items: AU.split_audio(_Plan(dict(l1,sound=items),src))[1], alternatives=audibility.recording_alternatives)
-        l1["sound"] = SD.present_over(l1["sound"], to_ar(lv), to_ar(music), float(l1["fps"]))
+        lv_ar = to_ar(lv)
+        l1["sound"] = SD.present_over(l1["sound"], lv_ar, to_ar(music), float(l1["fps"]))
         if kind == 'podcast':
             l1['sound'] = audibility.present_hits(l1['sound'], lv, music,
                 lambda items: AU.split_audio(_Plan(dict(l1,sound=items),src))[1], alternatives=audibility.recording_alternatives)
+            l1['sound'] = SD.screen_restrain(l1['sound'], lv_ar)     # the workflow films: the band limit is the final level
         rep["lifted_for_bed"] = sum(1 for x in l1["sound"] if x.get("lifted_for_bed_db"))
         rep['final_sounds'] = l1['sound']
         _v, fx, _ = AU.split_audio(_Plan(l1, src))
