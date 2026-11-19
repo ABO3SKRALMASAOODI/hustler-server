@@ -47,7 +47,7 @@ def for_lines(lines, named, about, out_dir, W=1080, H=1920, scope="workflow", lo
     # opt: run.find's opt-in keys (strict_lines, motion_first, alloc, reassign_lost, whole_first, want_voices), passed only when given
     return run.find(lines, named, about, out_dir, W, H, log=log, anchors=anchors, avoid=avoid, preserve_source=preserve_source,
                     shot_s=shot_s, line_max=line_max, per=per,
-                    **{k: v for k, v in opt.items() if k in ("strict_lines", "motion_first", "alloc", "reassign_lost", "whole_first", "want_voices", "scout_motion", "source_only", "hear_s") and v is not None})
+                    **{k: v for k, v in opt.items() if k in ("strict_lines", "motion_first", "alloc", "reassign_lost", "whole_first", "want_voices", "scout_motion", "source_only", "hear_s", "voice_repair") and v is not None})
 
 
 def _read_cfg():
