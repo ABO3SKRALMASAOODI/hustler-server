@@ -1641,7 +1641,7 @@ def picture_check(ctx, beats, clock, product_paths, cache, recording=None, roles
             a, b = p["f"][0] / F.FPS, p["f"][1] / F.FPS
             segs = {w.get("seg") for w in clock.words if w["t1"] > a and w["t0"] < b}
             context = " ".join(w["w"] for w in clock.words if w.get("seg") in segs)
-            role = (roles or {}).get(p.get("line"))
+            role = (roles or {}).get(p.get("spoken_line", p.get("line")))   # the line whose words sit under it
             content.append(dict(type="text", text=f"Picture {n}; words: {ws!r}; source role: {p.get('name')!r}; "
                                 + (f"line role: {role}; " if role else "") +
                                 f"real product recording: {p['path'] in product_paths}; full line for resolving "
@@ -1677,27 +1677,157 @@ def picture_check(ctx, beats, clock, product_paths, cache, recording=None, roles
 
 REPAIR_TRIES = 3          # ranked replacements a misfit window tries in turn, each checked on its own frames only
 REPAIR_CANDIDATES = 48    # the film's own pictures offered for the misfits in one look
+REPAIR_STEP_S = 0.25      # the free export seconds are searched at this step for windows no shown second overlaps
 
 
 def roles_of(sc):
     return {i: s.get("beat") for i, s in enumerate(sc.get("segments") or [])}
 
 
-def repair_candidates(pack, sc, lines, cap=REPAIR_CANDIDATES):
+def words_line(p):
+    """The line whose words sit under a picture (reel.note's spoken_line), else the line it was picked for."""
+    return p.get("spoken_line", p.get("line"))
+
+
+def checked(ctx, beats, clock, product_paths, cache, recording=None, roles=None):
+    """picture_check, asked again once when it gets no answer (an outage, not a verdict); after that the windows it could
+    not read stay unverified and the film carries on. (bad, spend, fault or None)."""
+    spend, fault = [], None
+    for _ in range(2):
+        try:
+            bad, sp = picture_check(ctx, beats, clock, product_paths, cache, recording, roles=roles)
+            return bad, spend + sp, None
+        except Exception as e:  # noqa: BLE001 - an unanswered look is an outage: asked again, then recovered
+            fault = repr(e)[:300]
+            spend.append(dict(stage="picture check", fault=fault))
+    bad = []
+    for p in beats.get("pictures") or []:
+        ws = words_under(clock, *p["f"])
+        v = cache.get(picture_key(p, ws)) or dict(fits=False, why="missing picture verdict")
+        if not v.get("fits"):
+            bad.append((os.path.basename(p["path"]), ws, v.get("why")))
+    return bad, spend, fault
+
+
+def recording_timelines(pack):
+    """{path: (recording, offset)}: each cut of the recording the pack holds, on the recording's own seconds (the
+    export's or the upload's): a cut's src second s is the recording's offset + s."""
+    pc = pack.get("product") or {}
+    out = {}
+
+    def role_of(c):
+        title = str((c.get("source") or {}).get("title") or "")
+        name = str(c.get("subject") or "")
+        if title.startswith("THE EXPORT") or name == "THE EXPORT":
+            return "export"
+        if title.startswith("THE UPLOAD") or name == "THE UPLOAD":
+            return "upload"
+        return None
+    for ln in pack.get("footage") or []:
+        for c in ln.get("clips") or []:
+            r, tr = role_of(c), c.get("time_range")
+            if r and isinstance(tr, (list, tuple)) and tr:
+                out[str(c.get("path"))] = (r, float(tr[0]))
+    for c in pack.get("proof_fill") or []:              # the proof fill is the export by construction
+        out[str(c.get("path"))] = ("export", float((c.get("time_range") or [0.0])[0]))
+    by_name = dict(before=("upload", "before"), after=("export", "after"), tease=("export", "tease"), export_body=("export", "body"))
+    for p in pc.get("paths") or []:
+        stem = os.path.splitext(os.path.basename(str(p)))[0]
+        if stem in by_name and str(p) not in out:
+            r, k = by_name[stem]
+            out[str(p)] = (r, float(((pc.get(k) or {}).get("t") or [0.0])[0]))
+    for v in pack.get("voices") or []:
+        c, k = v.get("clip") or {}, v.get("person")
+        if c.get("path") and k in ("before", "after") and str(c["path"]) not in out:
+            out[str(c["path"])] = ("upload" if k == "before" else "export", float(((pc.get(k) or {}).get("t") or [0.0])[0]))
+    return out
+
+
+def played_seconds(l1, timelines):
+    """Every recording second the film already shows: {recording: [(a, b)]}, each played item's src mapped through its
+    cut's offset (an item with no src: its whole asset)."""
+    out = {"export": [], "upload": []}
+    if not l1:
+        return out
+    assets = l1.get("assets") or {}
+    for it in l1.get("items") or []:
+        if it.get("k") not in ("shot", "card"):
+            continue
+        a = assets.get(str(it.get("pic"))) or {}
+        tl = timelines.get(str(a.get("path")))
+        if not tl:
+            continue
+        src = it.get("src")
+        r, off = tl
+        if isinstance(src, (list, tuple)) and len(src) >= 2:
+            out[r].append((off + float(src[0]), off + float(src[-1])))
+        else:
+            out[r].append((off, off + float(a.get("dur") or 0.0)))
+    return out
+
+
+def recording_words(script):
+    """What the recording says on its own seconds: {upload: [(t, word)], export: [(t, word)]}, the source's caption words
+    on the upload's seconds and, through the export's EDL keep ranges, on the export's. {} when they cannot be read."""
+    try:
+        rec = json.load(open(script["record"]))
+        src = next((s for s in sources() if s["file"] == rec["source"]["file"]), None)
+        if not src:
+            return {}
+        t0, t1 = float(rec["source"]["t0"]), float(rec["source"]["t1"])
+        up = [(round(t - t0, 3), w) for t, w in json3_words(src["captions"]) if t0 <= t <= t1]
+        ex = next((e for e in rec["exports"] if e["tag"] == "final"), rec["exports"][-1])
+        edl = json.load(open(os.path.join(os.path.dirname(script["record"]), "edl", f"v{int(ex['edl_version']):03d}.json")))
+    except (OSError, ValueError, KeyError, TypeError, IndexError, StopIteration):
+        return {}
+    out, at = [], 0.0
+    for k in edl.get("keep") or []:
+        try:
+            a, b = float(k[0]), float(k[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        out += [(round(at + t - a, 3), w) for t, w in up if a <= t < b]
+        at += b - a
+    return dict(upload=up, export=out)
+
+
+def said_in(said, tl, t, win):
+    """The words the recording speaks over [t, t + win] of one cut of it ('' when not known)."""
+    if not tl or not said:
+        return ""
+    r, off = tl
+    a, b = off + float(t), off + float(t) + float(win)
+    return " ".join(w for s, w in said.get(r) or [] if a - 0.15 <= s < b)
+
+
+def repair_candidates(pack, sc, lines, cap=REPAIR_CANDIDATES, l1=None, said=None, win_s=1.0):
     """The pack's own pictures a misfit window may take: the footage and photographs of the misfits' lines first, then
-    the real export at a second each (outside the after and the tease it already plays), then the recording's other
-    cuts. [{id, path, kind (clip|photo), name, t (window start in the file), seconds, w, h, fps, faces, landings, lines}]."""
+    the real export's free seconds (its timeline minus every export second the film already plays, and the after and
+    tease spans), then the recording's other cuts at seconds not yet shown. A recording candidate names the words the
+    recording speaks there, so the ranking can find the instant a line names.
+    [{id, path, kind (clip|photo), name, t (window start in the file), seconds, w, h, fps, faces, landings, line, said}]."""
     out, seen = [], set()
+    tls = recording_timelines(pack)
+    played = played_seconds(l1, tls)
+    win_s = max(float(win_s or 1.0), 0.2)
+
+    def shown(path, t):
+        tl = tls.get(str(path))
+        if not tl:
+            return False
+        a, b = tl[1] + float(t), tl[1] + float(t) + win_s
+        return any(b > x + 1e-3 and a < y - 1e-3 for x, y in played[tl[0]])
 
     def add(c, kind, name, t, line=None):
         path = str(c.get("path"))
-        k = (path, round(float(t), 1))
-        if k in seen or not os.path.exists(path):
+        k = (path, round(float(t), 2))
+        if k in seen or not os.path.exists(path) or (kind == "clip" and shown(path, t)):
             return
         seen.add(k)
         out.append(dict(path=path, kind=kind, name=name, t=round(float(t), 3), seconds=float(c.get("seconds") or 0.0),
                         w=int(c.get("w") or F.W), h=int(c.get("h") or F.H), fps=float(c.get("fps") or F.FPS), faces=c.get("faces") or [],
-                        landings=c.get("landings"), line=line, product=name in ("THE UPLOAD", "THE EXPORT")))
+                        landings=c.get("landings"), line=line, product=name in ("THE UPLOAD", "THE EXPORT"),
+                        said=said_in(said, tls.get(path), t, win_s) if kind == "clip" else ""))
     segs = sc.get("segments") or []
     near, rest = [], []
     for ln in pack.get("footage") or []:
@@ -1714,18 +1844,25 @@ def repair_candidates(pack, sc, lines, cap=REPAIR_CANDIDATES):
         add(*row)
     for body in pack.get("proof_fill") or []:
         busy = [tuple(b) for b in body.get("busy") or []] + [tuple((pack.get("product") or {}).get("tease", {}).get("t") or (0, 0))]
+        tl = tls.get(str(body.get("path")))
+        off = tl[1] if tl else 0.0
+        busy += [(x - off, y - off) for x, y in played["export"]]          # every export second the film already plays
         sec = float(body.get("seconds") or 0.0)
-        t = 0.3
-        while t + 1.0 <= sec:
-            if not any(t + 1.0 > a and t < b for a, b in busy):
+        t = 0.0
+        while t + win_s <= sec + 1e-6:
+            if not any(t + win_s > a + 1e-3 and t < b - 1e-3 for a, b in busy):
                 add(dict(body), "clip", "THE EXPORT", t)
-            t += 1.0
+                busy.append((t, t + win_s))                               # the next candidate is another instant
+                t += win_s
+            else:
+                t += REPAIR_STEP_S
     for row in rest:
         if row[2] in ("THE UPLOAD", "THE EXPORT"):
             add(*row)
+    out = out[:cap]
     for i, c in enumerate(out):
         c["id"] = i
-    return out[:cap]
+    return out
 
 
 def choose_replacements(misfits, cands, clock, roles, cache):
@@ -1735,20 +1872,22 @@ def choose_replacements(misfits, cands, clock, roles, cache):
               "For each window, rank up to three of the film's own candidate pictures that show what those words say, best first. "
               "On a line about the editor's pain (role hook, setup or low) the real recording showing the problem itself "
               "(the raw upload, or the export where nothing on screen yet illustrates the words) carries the words. The real "
-              "Valmera export carries every line about the result. A candidate that shows something unrelated to the words "
-              "is left out; an empty list is right when none carries them.")
+              "Valmera export carries every line about the result. A recording candidate names what its speaker says at that "
+              "instant: the instant whose words the line names is the one to show. A candidate that shows something unrelated "
+              "to the words is left out; an empty list is right when none carries them.")
     content = [dict(type="text", text="The candidates (the film's own footage, photographs and its real recording):")]
     for c in cands:
         b = still(c["path"], c["t"] + min(0.5, max(c["seconds"] - c["t"], 0.0) / 2), w=360)
         if b:
             content += [dict(type="text", text=f"Candidate {c['id']}: {c['name']}" + (" (the real Valmera recording)" if c["product"] else "")
-                             + (f" at {c['t']:.1f} s" if c["kind"] == "clip" else "")), img(b)]
+                             + (f" at {c['t']:.1f} s" if c["kind"] == "clip" else "")
+                             + (f"; the speaker says there: {c['said']!r}" if c.get("said") else "")), img(b)]
     for n, p in enumerate(misfits):
         ws = words_under(clock, *p["f"])
         v = cache.get(picture_key(p, ws)) or {}
         src = p.get("src") or [0.0, 0.0]
         b = still(p["path"], (src[0] + src[-1]) / 2, w=360)
-        content.append(dict(type="text", text=f"Window {n}: words {ws!r}; line role: {roles.get(p.get('line'))}; it shows "
+        content.append(dict(type="text", text=f"Window {n}: words {ws!r}; line role: {roles.get(words_line(p))}; it shows "
                                               f"{p.get('name')!r}, judged {v.get('fit')}: {v.get('why')}"))
         if b:
             content.append(img(b))
@@ -1763,6 +1902,15 @@ def choose_replacements(misfits, cands, clock, roles, cache):
             spend.append(dict(stage="picture repair", fault=repr(e)[:200]))
     ok_ids = {c["id"] for c in cands}
     out = {}
+
+    def same_window(c, p):
+        """The candidate plays the very seconds the misfit already shows (same file, overlapping source window)."""
+        if c["path"] != p["path"]:
+            return False
+        if c["kind"] != "clip" or not p.get("src"):
+            return True
+        n = (p["f"][1] - p["f"][0]) / F.FPS
+        return c["t"] < float(p["src"][-1]) - 1e-3 and c["t"] + n > float(p["src"][0]) + 1e-3
     for row in (got.get("windows") if isinstance(got, dict) else []) or []:
         try:
             n = int(row["n"])
@@ -1770,7 +1918,7 @@ def choose_replacements(misfits, cands, clock, roles, cache):
         except (KeyError, TypeError, ValueError):
             continue
         if 0 <= n < len(misfits):
-            out[n] = [i for i in ids if cands[i]["path"] != misfits[n]["path"]][:REPAIR_TRIES]
+            out[n] = [i for i in ids if not same_window(cands[i], misfits[n])][:REPAIR_TRIES]
     return out, spend
 
 
@@ -1790,9 +1938,11 @@ def _asset_key(l1, c):
     return k
 
 
-def swap_in(l1, p, items, c):
+def swap_in(l1, p, items, c, looks=None):
     """The window's own items (`items`: the originals as built) playing candidate c over the same frames: same frames,
-    same layer and finish, the new picture covering the item's box (its framing moving when the original's moved)."""
+    same layer and finish, the new picture covering the item's box (its framing moving when the original's moved).
+    looks: {item id: the section look it had before the recording was shown as delivered}, given back to a picture that
+    is not the recording. Returns the src span the swapped items really play ([first src start, last src end]) or None."""
     key = _asset_key(l1, c)
     f0 = int(p["f"][0])
     (fx, fy), _ = F.focus_of(c)
@@ -1819,18 +1969,85 @@ def swap_in(l1, p, items, c):
         base = [F.r4(v) for v in F.cover_crop(float(c["w"]), float(c["h"]), asp, (fx, fy), (0.5, 0.42))]
         crop = it.get("crop")
         it["crop"] = F.push(base, b - a, 0.05, (fx, fy)) if isinstance(crop, list) and crop and isinstance(crop[0], (list, tuple)) else base
+        if looks is not None and not c.get("product"):
+            if looks.get(o["id"]):
+                it["look"] = looks[o["id"]]
+            else:
+                it.pop("look", None)
         out.append(it)
     ids = {o["id"] for o in items}
     l1["items"] = [it for it in l1["items"] if it.get("id") not in ids] + out
     order_k = {"shot": 0, "join": 1, "card": 2, "flash": 3, "word": 4}
     l1["items"].sort(key=lambda it: (it["f"][0], order_k.get(it["k"], 5), it.get("z", 0), str(it["id"])))
+    srcs = [it["src"] for it in sorted(out, key=lambda it: it["f"][0]) if it.get("src")]
+    return [srcs[0][0], srcs[-1][1]] if srcs else None
 
 
-def repair_misfits(ctx, l1, seen, clock, product_paths, cache, recording, pack, sc):
+def _minus(lo, hi, spans):
+    """[lo, hi) without the given spans: [(a, b)]."""
+    parts = [(lo, hi)]
+    for s0, s1 in sorted(spans):
+        nxt = []
+        for a, b in parts:
+            if s1 <= a or s0 >= b:
+                nxt.append((a, b))
+                continue
+            if s0 > a:
+                nxt.append((a, s0))
+            if s1 < b:
+                nxt.append((s1, b))
+        parts = nxt
+    return [(a, b) for a, b in parts if b > a]
+
+
+def shown_off_recording(l1, pre, windows, product_paths, hold=()):
+    """A window the repair moved off the real recording gets back what as_delivered took off it while the recording
+    played there: the narration's captions and flash frames (whole, when no recording or device still plays under
+    them) and the caption pool and the section finish over that window's frames. pre: the items as built, before
+    as_delivered. Returns the ids given back."""
+    if not windows or not pre:
+        return []
+    keys = {k for k, a in (l1.get("assets") or {}).items() if a.get("path") in product_paths}
+    prod_now = [tuple(it["f"]) for it in l1["items"] if it.get("k") in ("shot", "card") and it.get("pic") in keys and it.get("z", 0) <= 1]
+    blocked = prod_now + [tuple(s) for s in hold or ()]
+    have = {str(it.get("id")) for it in l1["items"]}
+    back = []
+    for it in pre:
+        k, iid = it.get("k"), str(it.get("id"))
+        if iid in have or it.get("pic") in keys:
+            continue
+        over = [w for w in windows if it["f"][0] < w[1] and it["f"][1] > w[0]]
+        if not over:
+            continue
+        a, b = int(it["f"][0]), int(it["f"][1])
+        if k == "word" or (k == "flash" and it.get("mode") != "pool"):
+            if not any(a < s1 and b > s0 for s0, s1 in blocked):
+                l1["items"].append(json.loads(json.dumps(it)))
+                back.append(iid)
+            continue
+        if k == "flash" or (k == "card" and it.get("z", 0) >= 1):
+            for w0, w1 in over:
+                for lo, hi in _minus(max(a, int(w0)), min(b, int(w1)), blocked):
+                    piece = D.slice_item(json.loads(json.dumps(it)), lo, hi)
+                    if piece:
+                        piece["id"] = f"{iid}r{lo}"
+                        if piece["id"] not in have:
+                            l1["items"].append(piece)
+                            have.add(piece["id"])
+                            back.append(piece["id"])
+    order_k = {"shot": 0, "join": 1, "card": 2, "flash": 3, "word": 4}
+    l1["items"].sort(key=lambda it: (it["f"][0], order_k.get(it["k"], 5), it.get("z", 0), str(it["id"])))
+    return back
+
+
+def repair_misfits(ctx, l1, seen, clock, product_paths, cache, recording, pack, sc, pre=None, hold=(), said=None):
     """Every window the check judged loose or wrong takes the best of the film's own pictures that shows its words, in
     place over the same frames (never dropped, never a type page): the candidates ranked by one look, each tried in
     turn and checked on its own frames only, the first that fits kept. A window none of them fits keeps the best it
-    had. Returns (record, spend)."""
+    had. An unanswered check is asked again once; then the trial windows go back to their best verified picture (or
+    their own) and the film carries on. What the recording shows is shown as delivered after the swaps, both ways:
+    pre (the items as built) gives captions, flashes, pool and finish back to a window moved off the recording.
+    Returns (record, spend)."""
     roles = roles_of(sc)
 
     def verdict(p):
@@ -1838,15 +2055,19 @@ def repair_misfits(ctx, l1, seen, clock, product_paths, cache, recording, pack, 
     misfits = [p for p in seen.get("pictures") or [] if verdict(p).get("fit") in ("wrong", "loose")]
     if not misfits:
         return dict(misfits=0, repaired=[]), []
-    cands = repair_candidates(pack, sc, {p.get("line") for p in misfits})
+    win_s = max((p["f"][1] - p["f"][0]) / F.FPS for p in misfits)
+    cands = repair_candidates(pack, sc, {words_line(p) for p in misfits}, l1=l1, said=said, win_s=win_s)
     ranked, spend = choose_replacements(misfits, cands, clock, roles, cache) if cands else ({}, [])
     rank = {"yes": 2, "loose": 1, "wrong": 0}
+    pre_by = {str(it.get("id")): it for it in pre or []}
     state = []
     for p in misfits:
         keys = {k for k, a in (l1.get("assets") or {}).items() if a.get("path") == p["path"]}
         items = [json.loads(json.dumps(it)) for it in l1["items"] if it.get("k") in ("shot", "card") and it.get("pic") in keys
                  and p["f"][0] <= it["f"][0] < p["f"][1]]
-        state.append(dict(orig=dict(p), items=items, best=(rank.get(verdict(p).get("fit"), 0), None), tried=[]))
+        looks = {o["id"]: (pre_by.get(str(o["id"])) or o).get("look") for o in items}
+        state.append(dict(orig=dict(p), items=items, looks=looks, best=(rank.get(verdict(p).get("fit"), 0), None, None), tried=[], now=None))
+    faults = []
     for attempt in range(REPAIR_TRIES):
         trial = []
         taken = {st["best"][1]["id"] for st in state if st["best"][1] is not None}     # one candidate fills one window
@@ -1856,23 +2077,27 @@ def repair_misfits(ctx, l1, seen, clock, product_paths, cache, recording, pack, 
                 continue
             c = cands[ids[attempt]]
             taken.add(c["id"])
-            swap_in(l1, p, st["items"], c)            # over the window's original items, never over the last try
+            src = swap_in(l1, p, st["items"], c, st["looks"])     # over the window's original items, never over the last try
             p.update(path=c["path"], name=c["name"], kind="clip" if c["kind"] == "clip" else "photo", tier="repair",
-                     src=[c["t"], round(c["t"] + (p["f"][1] - p["f"][0]) / F.FPS, 4)] if c["kind"] == "clip" else None)
+                     src=src if c["kind"] == "clip" else None)
             st["tried"].append(c["id"])
-            trial.append((n, c))
+            st["now"] = c["id"]
+            trial.append((n, c, src))
         if not trial:
             break
-        _bad, sp = picture_check(ctx, dict(pictures=[misfits[n] for n, _ in trial]), clock, product_paths, cache, recording, roles=roles)
+        _bad, sp, fault = checked(ctx, dict(pictures=[misfits[n] for n, _, _ in trial]), clock, product_paths, cache, recording, roles=roles)
         spend += sp
-        for n, c in trial:
+        for n, c, src in trial:
             r = rank.get(verdict(misfits[n]).get("fit"), 0)
             if r > state[n]["best"][0]:
-                state[n]["best"] = (r, c)
-    repaired, product_spans = [], []
+                state[n]["best"] = (r, c, src)
+        if fault:                          # no answer twice: the trial windows go back below, and the film carries on
+            faults.append(dict(attempt=attempt, windows=[list(misfits[n]["f"]) for n, _, _ in trial], fault=fault))
+            break
+    repaired, product_spans, off_spans = [], [], []
     for n, p in enumerate(misfits):
         st = state[n]
-        r, c = st["best"]
+        r, c, src = st["best"]
         ids = {o["id"] for o in st["items"]}
         if c is None:                      # nothing the film has carried these words better: the window keeps its picture
             if st["tried"]:
@@ -1880,19 +2105,52 @@ def repair_misfits(ctx, l1, seen, clock, product_paths, cache, recording, pack, 
                 p.clear()
                 p.update(st["orig"])
             continue
-        if not (p["path"] == c["path"] and (p.get("src") or [None])[0] == (c["t"] if c["kind"] == "clip" else None)):
-            swap_in(l1, p, st["items"], c)            # the best try was not the last one
+        if st["now"] != c["id"]:           # the best try was not the last one
+            src = swap_in(l1, p, st["items"], c, st["looks"])
             p.update(path=c["path"], name=c["name"], kind="clip" if c["kind"] == "clip" else "photo", tier="repair",
-                     src=[c["t"], round(c["t"] + (p["f"][1] - p["f"][0]) / F.FPS, 4)] if c["kind"] == "clip" else None)
+                     src=src if c["kind"] == "clip" else None)
         repaired.append(dict(frames=list(p["f"]), was=os.path.basename(st["orig"]["path"]), now=os.path.basename(c["path"]),
                              src=p.get("src"), fit={2: "yes", 1: "loose", 0: "wrong"}[r], words=words_under(clock, *p["f"])))
-        if c["path"] in product_paths or c.get("product"):
+        now_rec = c["path"] in product_paths or c.get("product")
+        if now_rec:
             product_spans.append(tuple(p["f"]))
+        elif st["orig"]["path"] in product_paths:
+            off_spans.append(tuple(p["f"]))
     order_k = {"shot": 0, "join": 1, "card": 2, "flash": 3, "word": 4}
     l1["items"].sort(key=lambda it: (it["f"][0], order_k.get(it["k"], 5), it.get("z", 0), str(it["id"])))
+    rec_paths = set(product_paths) | {c["path"] for c in cands if c.get("product")}
+    given = shown_off_recording(l1, pre, off_spans, rec_paths, hold) if off_spans else []
     if product_spans:                      # the real recording now plays there: shown as delivered, as everywhere else
-        as_delivered(l1, set(product_paths) | {c["path"] for c in cands if c.get("product")}, spans=product_spans)
-    return dict(misfits=len(misfits), candidates=len(cands), repaired=repaired), spend
+        as_delivered(l1, rec_paths, spans=product_spans)
+    out = dict(misfits=len(misfits), candidates=len(cands), repaired=repaired)
+    if off_spans:
+        out["off_recording"] = dict(windows=[list(s) for s in off_spans], given_back=len(given))
+    if faults:
+        out["faults"] = faults
+    return out, spend
+
+
+def resound(l1, pack, knobs, turn_f, clock, windows):
+    """The sound design follows the repaired pictures: a sound planned for what a repaired window showed before goes,
+    and the sound the design plans for what it shows now comes in (the same score.sound.design pass, same turn and
+    supply, run on the final plan; only the repaired windows take from it). Device sounds stay. Returns a record."""
+    if not windows:
+        return dict(windows=0)
+    rep0 = l1.get("sound_design") or {}
+
+    def inside(s):
+        f = int(s.get("event_f", -1))
+        return any(a <= f < b for a, b in windows)
+    spoken = [(w["t0"] - F.LEAD_F / F.FPS, w["t1"] - F.LEAD_F / F.FPS) for w in clock.words] if clock is not None else None
+    fresh, rep = F.design_sound(l1, pack, knobs, turn_f=turn_f, spoken=spoken, np10=rep0.get("np10"))
+    if rep.get("fault"):
+        return dict(windows=len(windows), fault=rep["fault"])        # the film keeps the sounds it has
+    old = l1.get("sound") or []
+    gone = [s for s in old if inside(s) and not s.get("device")]
+    new = [dict(s, repair=True) for s in fresh if inside(s)]
+    l1["sound"] = [s for s in old if not (inside(s) and not s.get("device"))] + new
+    l1["sound"].sort(key=lambda s: int(s.get("event_f", 0)))
+    return dict(windows=len(windows), dropped=len(gone), added=len(new))
 
 
 def instruction_panel(l1, clock, sc, typed):
@@ -2186,6 +2444,7 @@ def score(ctx, script):
                 taste = F.taste_check(l1, beats)
                 if taste["ok"]:
                     break
+        pre = json.loads(json.dumps(l1["items"]))          # as built: what a window the repair moves off the recording gets back
         spans = as_delivered(l1, product)
         devices = lay_devices(ctx, l1, sc, pack, clock, script, knobs)
         devices["cta"] = lay_cta(ctx, l1, sc, pack, clock, script)
@@ -2196,14 +2455,22 @@ def score(ctx, script):
         spans_dev = [d["frames"] for d in devices.get("laid") or []]
         seen = dict(beats, pictures=[p for p in beats.get("pictures") or []          # a picture a device covers is not seen
                                      if not any(a <= p["f"][0] and p["f"][1] <= z for a, z in spans_dev)])
-        bad, sp = picture_check(ctx, seen, clock, product, cache, script.get("receipts"), roles=roles_of(sc))
+        bad, sp, fault = checked(ctx, seen, clock, product, cache, script.get("receipts"), roles=roles_of(sc))
         spend += sp
+        if fault:
+            ctx.log(f"picture check: no answer twice ({fault[:120]}); the unread windows stay unverified and the film carries on")
         # a window judged loose or wrong is filled in place with the film's own picture that shows its words (round1
         # stock-inventory-wrong-picture-kept: a Marine at a laptop shipped under "my edit is still his face", recorded only)
-        repair, sp = repair_misfits(ctx, l1, seen, clock, product, cache, script.get("receipts"), pack, sc)
+        repair, sp = repair_misfits(ctx, l1, seen, clock, product, cache, script.get("receipts"), pack, sc,
+                                    pre=pre, hold=spans_dev + ([receipt_panel["frames"]] if receipt_panel.get("frames") else []),
+                                    said=recording_words(script))
         spend += sp
+        if fault:
+            repair.setdefault("faults", []).insert(0, dict(stage="picture check", fault=fault))
         if repair["repaired"]:
             ctx.log(f"picture repair: {len(repair['repaired'])} of {repair['misfits']} loose or wrong windows took another of the film's pictures")
+            # the sound design follows the new pictures (a stale shutter goes, the new picture's landings sound)
+            repair["sound"] = resound(l1, pack, dict(knobs, drop=drop), beats.get("turn_f"), clock, [tuple(r["frames"]) for r in repair["repaired"]])
             bad = [(os.path.basename(p["path"]), words_under(clock, *p["f"]), (cache.get(picture_key(p, words_under(clock, *p["f"]))) or
                     dict(why="missing picture verdict")).get("why")) for p in seen.get("pictures") or []
                    if not (cache.get(picture_key(p, words_under(clock, *p["f"]))) or {}).get("fits")]

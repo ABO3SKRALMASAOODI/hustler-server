@@ -536,7 +536,10 @@ def landing_events(l1):
     An asset may carry ``landings``: [{t: source second, kind: picture|title}] (a recorded export's b-roll and titles
     from its EDL). Every shot or card that plays that asset over a source window [a, z] shows the landings inside it,
     at the frame its window reaches them (the same linear map as the upload's own cuts). A picture arriving is a
-    card landing (it covers the frame); a title is a display landing. One per asset second, the first item showing it."""
+    card landing (it covers the frame); a title is a display landing; a ``cut`` (a clip's own measured inner cut,
+    the next take arriving) is a cut event inside the window, ``moving`` only when the caller measured the arriving take
+    moving by content (motivated() then accepts it, as it does the podcast's verified motion). One per asset second, the
+    first item showing it."""
     assets = l1.get("assets") or {}
     fps = float(l1.get("fps") or 30.0)
     out, seen = [], set()
@@ -555,8 +558,13 @@ def landing_events(l1):
             key = (str(a.get("path") or it.get("pic")), round(t, 2))
             if key in seen or not (a0 - 0.5 / fps <= t < z0 - 0.05):
                 continue
-            seen.add(key)
             f = f0 + int(round(max(t - a0, 0.0) / max(z0 - a0, 1e-6) * n))
+            if str(r.get("kind")) == "cut":
+                if f0 + 2 < f < f0 + n - 2:            # inside the window (its edges are the film's own cuts)
+                    seen.add(key)
+                    out.append({"f": f, "kind": "cut", "id": str(it.get("id")), "landing": True, "moving": bool(r.get("moving"))})
+                continue
+            seen.add(key)
             title = str(r.get("kind")) == "title"
             out.append({"f": f, "kind": "display" if title else "card", "id": str(it.get("id")), "landing": True,
                         **({} if title else {"photo": True, "area": 1.0})})
@@ -609,7 +617,7 @@ def l1_events(l1, kshots=()):
     # without ``landings`` (every customer film) add nothing here.
     lands = landing_events(l1)
     if lands:
-        at = [e["f"] for e in lands]
+        at = [e["f"] for e in lands if e["kind"] != "cut"]       # a picture or title landing takes the plain switch's place
         ev = [e for e in ev if not (e["kind"] in ("picture", "cut") and any(abs(e["f"] - f) <= 2 for f in at))] + lands
     cuts = {s["f"][0] for s in shots}
     seen_on, counters = set(), {}

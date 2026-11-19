@@ -61,3 +61,19 @@ def test_landings_raise_the_motivated_allowance():
     _s0, r0 = SD.plan_sounds(plain, ctx)
     s1, r1 = SD.plan_sounds(sorted(plain + lands, key=lambda e: e["f"]), ctx)
     assert r1["allow"] > r0["allow"] and len(s1) > len(_s0)
+
+
+def test_a_clips_own_measured_cut_is_a_cut_inside_the_window_sounded_only_when_the_take_arrives_moving():
+    def l1(rows):
+        l = _l1()
+        l["assets"]["v01"]["landings"] = rows
+        return l
+    ev = SD.l1_events(l1([{"t": 11.0, "kind": "cut", "moving": True}, {"t": 13.0, "kind": "cut"}]))
+    moving = next(e for e in ev if e["f"] == 90)                 # 11.0 s inside b's 10-12 window
+    still = next(e for e in ev if e["f"] == 150)                 # 13.0 s inside c's 12-14 window
+    assert moving["kind"] == "cut" and SD.motivated(moving)
+    assert still["kind"] == "cut" and not SD.motivated(still)    # a plain inner cut is the music's, as any plain cut
+    edge = SD.landing_events(l1([{"t": 12.0, "kind": "cut", "moving": True}]))
+    assert not edge                                              # on the window's edge it is the film's own cut, not a landing
+    near = SD.l1_events(l1([{"t": 10.03, "kind": "cut", "moving": True}]))
+    assert [e["kind"] for e in near if 58 <= e["f"] <= 64] == ["picture"]   # beside a switch, the switch stays the one event

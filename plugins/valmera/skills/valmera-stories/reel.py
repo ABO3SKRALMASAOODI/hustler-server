@@ -574,6 +574,32 @@ def span_motion(c, t0, t1):
     return float(seg[len(seg) // 2]) if seg else 0.0
 
 
+def cut_landings(c):
+    """A clip's own measured inner cuts (clip_motion's c["cuts"], seconds) as landings on its asset, beside any landings
+    it already names (a recorded export's EDL pictures and titles): the next take arriving inside a played window is a
+    cut on screen (score.sound.landing_events), `moving` when that take's first half second moves by content
+    (span_motion >= MOTION_FLOOR, the podcast's verified-motion bar), so the sound design sounds the footage's own
+    landings, not only the film's cuts between files (round1 sound-events-missing). Signal only."""
+    dur = float(c.get("seconds") or 0.0)
+    have = [dict(x) for x in c.get("landings") or []]
+    cuts = sorted(float(t) for t in (c.get("cuts") or []) if 0.15 < float(t) < dur - 0.15)
+    out = list(have)
+    for t in cuts:
+        if any(abs(float(x["t"]) - t) < 0.1 for x in have):
+            continue                                       # the export's own picture landing is that cut
+        row = dict(t=round(t, 3), kind="cut")
+        if span_motion(c, t, min(t + 0.5, dur)) >= MOTION_FLOOR:
+            row["moving"] = True
+        out.append(row)
+    return sorted(out, key=lambda x: (float(x["t"]), str(x.get("kind"))))
+
+
+def with_landings(c):
+    """The clip as its asset is registered: its landings, its measured inner cuts among them."""
+    lands = cut_landings(c)
+    return dict(c, landings=lands) if lands else c
+
+
 def take_motion(c, take):
     """How much a take moves where it moves most: the motion of its most moving window (Takes.best) of half a second."""
     a, b = take
@@ -1788,14 +1814,14 @@ def build(script, sup, style_id, direction=None):
     for lst in footage.values():
         for c in lst:
             if c["path"] not in keys:
-                keys[c["path"]] = P.video(f"v{len(keys):02d}", c)
+                keys[c["path"]] = P.video(f"v{len(keys):02d}", with_landings(c))
     for v in sup.get("voices") or []:
         c = v.get("clip") or {}
         if c.get("path") and os.path.exists(c["path"]) and c["path"] not in keys:
-            keys[c["path"]] = P.video(f"v{len(keys):02d}", c)
+            keys[c["path"]] = P.video(f"v{len(keys):02d}", with_landings(c))
     for c in d.get("proof_fill") or []:
         if c.get("path") and os.path.exists(str(c["path"])) and c["path"] not in keys:
-            keys[c["path"]] = P.video(f"v{len(keys):02d}", c)
+            keys[c["path"]] = P.video(f"v{len(keys):02d}", with_landings(c))
     f_voice_end = Clock.f(clock.dur)
     f_end = f_voice_end + int(d.get("tail_f", 15))
     stress = F.voice_stress(sup)

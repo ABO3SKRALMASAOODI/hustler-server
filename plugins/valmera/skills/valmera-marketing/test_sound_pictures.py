@@ -102,14 +102,17 @@ def test_a_window_judged_wrong_takes_the_films_own_picture_that_fits_in_place(tm
     bad, _ = P.picture_check(None, {"pictures": pictures}, clock, product, cache, roles=P.roles_of(sc))
     assert [b[0] for b in bad] == ["marine.jpg"]
     assert "line role: setup" in seen[0][1]                                          # the check knows the line is a pain line
-    cands = P.repair_candidates(pack, sc, {2})
-    body_ids = [c["id"] for c in cands if c["path"].endswith("export_body.mp4")]
-    assert all(not (4.0 < c["t"] + 1.0 and c["t"] < 6.0) for c in cands if c["path"].endswith("export_body.mp4"))   # never the after
-    _wire(monkeypatch, lambda row: "yes", ranked=[body_ids[1]])
+    cands = P.repair_candidates(pack, sc, {2}, l1=l1, win_s=0.5)
+    body = [c for c in cands if c["path"].endswith("export_body.mp4")]
+    shown = [(0.0, 2.0), (3.0, 4.5), (4.0, 6.0)]                 # sh1, sh3 and the after: export seconds already on screen
+    assert [c["t"] for c in body] == [2.0, 2.5]                  # only the export's free seconds, each a distinct instant
+    assert all(not (c["t"] + 0.5 > a and c["t"] < b) for c in body for a, b in shown)
+    _wire(monkeypatch, lambda row: "yes", ranked=[body[1]["id"]])
     rec, _ = P.repair_misfits(None, l1, {"pictures": pictures}, clock, product, cache, None, pack, sc)
     assert rec["repaired"] and rec["repaired"][0]["was"] == "marine.jpg" and rec["repaired"][0]["now"] == "export_body.mp4"
     shot = next(it for it in l1["items"] if it["id"] == "sh2")
-    assert shot["pic"] == "v00" and shot["f"] == [60, 75] and shot["src"] == [1.3, 1.8]
+    assert shot["pic"] == "v00" and shot["f"] == [60, 75] and shot["src"] == [2.5, 3.0]
+    assert not any(shot["src"][1] > a and shot["src"][0] < b for a, b in shown)  # the repair never plays a shown second again
     assert isinstance(shot["crop"][0], list) and len(shot["crop"]) == 15 and "look" not in shot     # moving, shown as delivered
     assert pictures[1]["path"].endswith("export_body.mp4") and pictures[1]["tier"] == "repair"
     assert not [it for it in l1["items"] if it["id"] == "cap1"]                     # no narration caption over the real export
@@ -123,7 +126,7 @@ def test_a_window_nothing_fits_better_keeps_what_it_had(tmp_path, monkeypatch):
     _wire(monkeypatch, lambda row: "loose" if "timeline" in row else "yes", ranked=[])
     cache = {}
     P.picture_check(None, {"pictures": pictures}, clock, product, cache)
-    cands = P.repair_candidates(pack, sc, {2})
+    cands = P.repair_candidates(pack, sc, {2}, l1=l1, win_s=0.5)
     _wire(monkeypatch, lambda row: "wrong", ranked=[c["id"] for c in cands if c["path"].endswith("export_body.mp4")][:3])
     rec, _ = P.repair_misfits(None, l1, {"pictures": pictures}, clock, product, cache, None, pack, sc)
     assert rec["misfits"] == 1 and not rec["repaired"]
@@ -138,3 +141,136 @@ def test_no_misfit_no_look(tmp_path, monkeypatch):
     cache = {P.picture_key(p, "w"): dict(fits=True, fit="yes") for p in pictures}
     rec, spend = P.repair_misfits(None, l1, {"pictures": pictures}, None, product, cache, None, pack, sc)
     assert rec == dict(misfits=0, repaired=[]) and spend == []
+
+
+# ----------------------------------------------------------------- the repair's second round (20 Nov review)
+
+def test_an_unanswered_recheck_keeps_the_films_own_pictures_and_carries_on(tmp_path, monkeypatch):
+    l1, pictures, pack, sc, product = _film(tmp_path)
+    clock = SimpleNamespace(words=[])
+    before = json.loads(json.dumps(l1))
+    _wire(monkeypatch, lambda row: "wrong" if "timeline" in row else "yes", ranked=[])
+    cache = {}
+    P.picture_check(None, {"pictures": pictures}, clock, product, cache)
+    cands = P.repair_candidates(pack, sc, {2}, l1=l1, win_s=0.5)
+    calls = []
+
+    def ask(system, content, **kw):
+        calls.append(kw.get("what"))
+        if kw.get("what") == "picture repair":
+            return {"windows": [{"n": 0, "ranked": [next(c["id"] for c in cands if c["path"].endswith("export_body.mp4"))]}]}, {}
+        raise RuntimeError("openai 503: no response")              # the re-check gets no answer, twice
+    monkeypatch.setattr(P, "ask", ask)
+    rec, spend = P.repair_misfits(None, l1, {"pictures": pictures}, clock, product, cache, None, pack, sc)
+    assert calls == ["picture repair", "picture check", "picture check"]          # asked again once, then recovered
+    assert rec["misfits"] == 1 and not rec["repaired"] and rec["faults"] and "503" in rec["faults"][0]["fault"]
+    assert sorted(json.dumps(i, sort_keys=True) for i in l1["items"]) == sorted(json.dumps(i, sort_keys=True) for i in before["items"])
+    assert pictures[1]["path"].endswith("marine.jpg") and pictures[1].get("tier") != "repair"
+    assert any(s.get("fault") for s in spend)
+
+
+def test_an_unanswered_first_check_is_asked_again_then_the_film_carries_on(tmp_path, monkeypatch):
+    _l1, pictures, _pack, _sc, product = _film(tmp_path)
+    monkeypatch.setattr(P, "still", lambda *a, **k: "jpeg")
+    monkeypatch.setattr(P, "words_under", lambda clock, f0, f1: f"words {f0}")
+    n = []
+
+    def ask(*a, **k):
+        n.append(1)
+        raise RuntimeError("stream ended with no response")
+    monkeypatch.setattr(P, "ask", ask)
+    bad, spend, fault = P.checked(None, {"pictures": pictures}, SimpleNamespace(words=[]), product, {})
+    assert len(n) == 2 and "no response" in fault and len(bad) == 3
+    assert all(w == "missing picture verdict" for _, _, w in bad)
+
+
+def test_the_role_is_the_line_whose_words_sit_under_the_picture(tmp_path, monkeypatch):
+    _l1, pictures, _pack, sc, product = _film(tmp_path)
+    seen = _wire(monkeypatch, lambda row: "yes", ranked=[])
+    sc["segments"].append(dict(beat="payoff", pictures=["Editor at a video timeline"]))
+    p = dict(pictures[1], line=4, spoken_line=2)                     # picked for the payoff, spoken over a pain line
+    P.picture_check(None, {"pictures": [p]}, SimpleNamespace(words=[]), product, {}, roles=P.roles_of(sc))
+    assert "line role: setup" in seen[0][1] and "line role: payoff" not in seen[0][1]
+
+
+def test_a_clip_shorter_than_the_window_records_the_seconds_it_really_plays(tmp_path, monkeypatch):
+    l1, pictures, pack, sc, product = _film(tmp_path)
+    (tmp_path / "laugh.mp4").write_bytes(b"x")
+    pack["footage"].append(dict(i=2, clips=[dict(path=str(tmp_path / "laugh.mp4"), subject="a crowd laughing", seconds=0.4, w=1920, h=1080)]))
+    clock = SimpleNamespace(words=[])
+    _wire(monkeypatch, lambda row: "wrong" if "timeline" in row else "yes", ranked=[])
+    cache = {}
+    P.picture_check(None, {"pictures": pictures}, clock, product, cache)
+    cands = P.repair_candidates(pack, sc, {2}, l1=l1, win_s=0.5)
+    laugh = next(c for c in cands if c["path"].endswith("laugh.mp4"))
+    _wire(monkeypatch, lambda row: "yes", ranked=[laugh["id"]])
+    rec, _ = P.repair_misfits(None, l1, {"pictures": pictures}, clock, product, cache, None, pack, sc)
+    shot = next(it for it in l1["items"] if it["id"] == "sh2")
+    assert shot["src"] == [0.0, 0.4] and pictures[1]["src"] == [0.0, 0.4] and rec["repaired"][0]["src"] == [0.0, 0.4]
+    assert cache[P.picture_key(pictures[1], P.words_under(clock, *pictures[1]["f"]))]["fits"]
+
+
+def test_an_export_window_repaired_to_footage_keeps_its_narration_caption_pool_and_finish(tmp_path, monkeypatch):
+    l1, pictures, pack, sc, product = _film(tmp_path)
+    (tmp_path / "crowd.mp4").write_bytes(b"x")
+    pack["footage"].append(dict(i=1, clips=[dict(path=str(tmp_path / "crowd.mp4"), subject="a crowd laughing", seconds=3.0, w=1920, h=1080)]))
+    l1["items"][0]["look"] = "mono_silver"                                        # sh1 plays the export at frames 0-60
+    l1["items"] += [dict(id="cap0", k="word", f=[10, 20], t="black", v="cap", role="cap"),
+                    dict(id="pool", k="card", f=[0, 120], z=1, pic="plate", op=[0.7] * 120)]
+    pre = json.loads(json.dumps(l1["items"]))
+    P.as_delivered(l1, product)                                                   # the recording shown as delivered
+    assert not [it for it in l1["items"] if it["id"] == "cap0"] and "look" not in l1["items"][0]
+    clock = SimpleNamespace(words=[])
+    _wire(monkeypatch, lambda row: "wrong" if "'words 0'" in row else "yes", ranked=[])
+    cache = {}
+    P.picture_check(None, {"pictures": pictures}, clock, product, cache)
+    cands = P.repair_candidates(pack, sc, {1}, l1=l1, win_s=2.0)
+    crowd = next(c for c in cands if c["path"].endswith("crowd.mp4"))
+    _wire(monkeypatch, lambda row: "yes", ranked=[crowd["id"]])
+    rec, _ = P.repair_misfits(None, l1, {"pictures": [pictures[0]]}, clock, product, cache, None, pack, sc, pre=pre)
+    assert rec["repaired"][0]["now"] == "crowd.mp4" and rec["off_recording"]["windows"] == [[0, 60]]
+    assert [it for it in l1["items"] if it["id"] == "cap0"]                       # the narration caption is back on the footage
+    sh1 = next(it for it in l1["items"] if it["id"] == "sh1")
+    assert sh1["look"] == "mono_silver"                                           # its section finish too
+    pool = sorted(tuple(it["f"]) for it in l1["items"] if str(it["id"]).startswith("pool"))
+    assert (0, 60) in pool and not any(a < 120 and b > 75 for a, b in pool)       # the pool covers the footage, not the export
+
+
+def test_a_repaired_windows_sounds_follow_its_new_picture(tmp_path, monkeypatch):
+    l1, pictures, pack, sc, product = _film(tmp_path)
+    l1["assets"]["v00"]["landings"] = [dict(t=2.7, kind="picture")]            # the export lands a picture at 2.7 s
+    l1["sound"] = [dict(s="shutter_1", event_f=62), dict(s="click_1", event_f=10), dict(s="tick_1", event_f=70, device="dv")]
+    clock = SimpleNamespace(words=[])
+    _wire(monkeypatch, lambda row: "wrong" if "timeline" in row else "yes", ranked=[])
+    cache = {}
+    P.picture_check(None, {"pictures": pictures}, clock, product, cache)
+    cands = P.repair_candidates(pack, sc, {2}, l1=l1, win_s=0.5)
+    late = next(c for c in cands if c["path"].endswith("export_body.mp4") and c["t"] == 2.5)
+    _wire(monkeypatch, lambda row: "yes", ranked=[late["id"]])
+    rec, _ = P.repair_misfits(None, l1, {"pictures": pictures}, clock, product, cache, None, pack, sc)
+    assert rec["repaired"]
+    planned = []
+
+    def design(l1_, sup, d, turn_f=None, spoken=None, np10=None):            # the engine, offline: a sound on each landing
+        planned.append(turn_f)
+        return [dict(s="paper_1", event_f=e["f"]) for e in F.landings_shown(l1_)] + [dict(s="click_1", event_f=10)], {}
+    monkeypatch.setattr(F, "design_sound", design)
+    got = P.resound(l1, pack, dict(bed=True), 300, clock, [tuple(r["frames"]) for r in rec["repaired"]])
+    by = sorted((s["event_f"], s["s"]) for s in l1["sound"])
+    assert by == [(10, "click_1"), (66, "paper_1"), (70, "tick_1")]               # the stale shutter went; the landing sounds
+    assert got == dict(windows=1, dropped=1, added=1) and planned == [300]
+
+
+def test_recording_candidates_name_the_words_said_there(tmp_path, monkeypatch):
+    (tmp_path / "edl").mkdir()
+    (tmp_path / "edl" / "v002.json").write_text(json.dumps(dict(keep=[[1.0, 3.0], [5.0, 8.0]])))
+    (tmp_path / "record.json").write_text(json.dumps(dict(source=dict(file="pod.mp4", t0=100.0, t1=110.0),
+                                                          exports=[dict(tag="final", edl_version=2, file="e.mp4")])))
+    monkeypatch.setattr(P, "sources", lambda: [dict(file="pod.mp4", captions="c.json3")])
+    monkeypatch.setattr(P, "json3_words", lambda p: [(101.2, "trash"), (102.5, "can"), (105.4, "black"), (105.9, "hole"), (109.0, "end")])
+    said = P.recording_words(dict(record=str(tmp_path / "record.json")))
+    assert said["export"] == [(0.2, "trash"), (1.5, "can"), (2.4, "black"), (2.9, "hole")]
+    l1, pictures, pack, sc, product = _film(tmp_path)
+    cands = P.repair_candidates(pack, sc, {2}, l1=l1, said=said, win_s=0.5)
+    assert next(c for c in cands if c["path"].endswith("export_body.mp4") and c["t"] == 2.5)["said"] == "black hole"
+    assert P.recording_words(dict(record=str(tmp_path / "none.json"))) == {}
