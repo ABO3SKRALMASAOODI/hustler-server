@@ -142,6 +142,31 @@ def test_a_resumed_transfer_is_judged_by_its_last_sign_of_life(cur):
     assert "3825205248" in out[0]["detail"]
 
 
+def test_a_resume_that_found_the_file_whole_is_not_a_transfer(cur):
+    """#401, 18 Nov, project 5989: landed through the hand-off, then the page
+    asked to resume twice and was told the object is assembled. Filed as a stop
+    and paged; the customer had their video."""
+    size = 2_168_464_736
+    event(cur, "upload_started", GONE + timedelta(seconds=270), bytes_=size)
+    event(cur, "upload_progress", GONE + timedelta(seconds=45), bytes_=size,
+          via="handoff", sent_bytes=1_476_395_008)
+    event(cur, "upload_landed", GONE + timedelta(seconds=38), bytes_=size)
+    event(cur, "upload_resumed", GONE + timedelta(seconds=37), bytes_=size,
+          assembled=True, parts_done=0, n_parts=0)
+    event(cur, "upload_resumed", GONE + JUST, bytes_=size, assembled=True,
+          parts_done=0, n_parts=0)
+    assert stopped(cur) == []
+
+
+def test_a_file_whole_in_storage_that_never_landed_is_still_a_stop(cur):
+    """Assembled is not landed: with no landing row the transfer's last real
+    sign of life is still judged."""
+    eid = event(cur, "upload_progress", GONE + timedelta(seconds=45),
+                sent_bytes=100)
+    event(cur, "upload_resumed", GONE + JUST, assembled=True)
+    assert [f["ref"] for f in stopped(cur)] == [f"stopped:{eid}"]
+
+
 def test_a_link_import_has_no_transfer_to_lose(cur):
     """routes/video.py records upload_started with no bytes for a pasted link.
     It never lands by size: its index job reports it, and it is not a stop."""

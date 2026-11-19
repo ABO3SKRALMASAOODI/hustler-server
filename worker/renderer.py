@@ -5944,13 +5944,20 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             parts.append(f"[{vlabel}]split[halA{si}][halB{si}]")
             # Threshold at full resolution (a highlight must not be averaged
             # away before it is selected), then diffuse and tint the bloom at
-            # reduced resolution — colorbalance's RGB round trip included.
+            # reduced resolution — the tint's RGB round trip included.
+            # The tint MULTIPLIES the bloom (red kept, green and blue cut),
+            # so black stays black and only the light that bleeds turns warm.
+            # It was colorbalance's shadows range, which tints nothing above
+            # about a quarter grey and lifts pure black to RGB (45, 5, 0): the
+            # highlights bloomed white and the screen laid that dim red over
+            # every pixel outside them, a red cast of +4 to +5 on a neutral
+            # grey at intensity 0.3 (CI on ffmpeg 8.1, 18 Nov 2026).
             down, blur, up = _reduced_gblur(W, H, 8 + 24 * i_)
             parts.append(
                 f"[halB{si}]lutyuv=y='if(gte(val,{threshold}),val,16)'"
-                f":u=128:v=128,{down}{blur},"
-                f"colorbalance=rs={0.18 + 0.24 * i_:.2f}:"
-                f"gs={0.01 + 0.05 * i_:.2f}:bs=-{0.08 + 0.12 * i_:.2f}"
+                f":u=128:v=128,{down}{blur},format=gbrp,"
+                f"colorchannelmixer=rr=1:gg={0.78 - 0.22 * i_:.2f}:"
+                f"bb={0.55 - 0.25 * i_:.2f}"
                 f"{up},format=gbrp[halG{si}]")
             parts.append(f"[halA{si}]format=gbrp[halR{si}]")
             parts.append(

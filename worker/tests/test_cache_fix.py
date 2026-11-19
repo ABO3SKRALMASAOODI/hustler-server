@@ -98,18 +98,23 @@ def test_cache_model_and_content_invalidation(speech,monkeypatch):
 def test_batched_look_warms_first_and_preserves_candidate_mapping(tmp_path,monkeypatch):
     from footage import look
     calls=[]
+    # Since 63a9d708 (16 Nov) a call carries SHEETS_PER_CALL sheets, cells numbered
+    # on across them: 2 cells a sheet, 2 sheets a call, 9 candidates -> 5 sheets -> 3 calls.
     monkeypatch.setattr(look,'PER_SHEET',2)
+    monkeypatch.setattr(look,'SHEETS_PER_CALL',2)
     monkeypatch.setattr(look,'sheet',lambda cells,path,**kw:path)
     monkeypatch.setattr(look.ask,'image_block',lambda p:{'type':'image','source':{'data':p}})
     def ask(system,content,purpose,**kw):
         calls.append(copy.deepcopy(content))
-        return json.dumps({'cells':[{'n':1,'ok':True,'clean':True,'grade':4},
-                                    {'n':2,'ok':True,'clean':True,'grade':4}]}),.01
+        n=sum(1 for ln in content[1]['text'].splitlines() if ln.startswith('cell '))
+        return json.dumps({'cells':[{'n':k,'ok':True,'clean':True,'grade':k} for k in range(1,n+1)]}),.01
     monkeypatch.setattr(look.ask,'ask',ask)
-    cands=[dict(src=0,t=float(i),jpg=f'{i}.jpg') for i in range(5)]
+    cands=[dict(src=0,t=float(i),jpg=f'{i}.jpg') for i in range(9)]
     out,usd=look.check(dict(name='subject',must_show='actual subject'),[dict(i=1,say='words')],
                        cands,[dict(title='source')],str(tmp_path))
-    assert len(calls)==3 and [c['t'] for c in out]==list(range(5))
+    assert len(calls)==3 and [c['t'] for c in out]==list(range(9))
+    # every candidate keeps the verdict of its own cell number within its call
+    assert [c['grade'] for c in out]==[i%4+1 for i in range(9)]
     assert 'at 0.0 s' in calls[0][1]['text']
     assert all(c[0]==calls[0][0] for c in calls)
     assert all(c[-1]['type']=='image' for c in calls)
