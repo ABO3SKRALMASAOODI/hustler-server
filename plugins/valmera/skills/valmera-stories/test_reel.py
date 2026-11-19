@@ -1079,6 +1079,27 @@ def test_the_proof_fill_follows_the_lines_ranking_not_the_exports_clock(tmp_path
         assert a[1] == b[0]
 
 
+def test_a_line_whose_ranked_shots_are_spent_plays_an_unshown_export_shot_before_replaying(tmp_path):
+    """20 Nov review: a line the model ranked nothing for, or whose ranked shots were all shown, got no proof fill and
+    looped its own pictures. With the export's own shots on the fill it plays a whole shot no file has shown, first one
+    no line owns as its file; never a second already shown, never the after."""
+    sc, clock, footage, fill = _export_lines(tmp_path)
+    fill["ranked"] = {"1": [[11.0, 12.0, 6]]}
+    fill["shots"] = [[2.0, 4.0, 3], [4.5, 6.0, 4], [8.0, 9.5, 5], [11.0, 12.0, 6], [14.0, 16.0, 7], [18.0, 19.5, 8]]
+    fill["owed"] = [3, 8]
+    sp = R.Supply({}, footage, fit={footage[0][0]["path"]: {0: [0]}})
+    tl = R.cut_fit(sc, clock, sp, F.Clock.f(clock.dur) + 15, stress=[], proof_fill=[fill])
+    proof = [r[4] for r in tl if r[4].get("tier") == "proof"]
+    on = {ln: [p["take_i"] for p in proof if p["pick_line"] == ln] for ln in (0, 1)}
+    # line 0 (ranked nothing) plays the shots no later line was ranked and no line owns first, in order, and only then
+    # line 1's ranked shot; line 1, its ranked shot spent, plays the owed shot nobody played rather than loop
+    assert on[0] == [4, 5, 6] and on[1] == [8]
+    for p in proof:
+        a, b = p["src"]
+        assert not (a < 4.0 and b > 2.0) and not (a < 17.0 and b > 14.0)       # never export_3's seconds, never the after
+    assert len({p["take_i"] for p in proof}) == len(proof)
+
+
 def test_a_take_of_a_recording_another_file_showed_whole_is_not_a_new_picture(tmp_path):
     """Two files of the same export seconds (a shot cut twice): once one has played its take, the other is spent too."""
     sc = _fit_script(n=1, words=20)

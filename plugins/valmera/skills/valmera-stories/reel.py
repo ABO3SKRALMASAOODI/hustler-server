@@ -915,20 +915,35 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
         """A marketing film's line with no picture left plays the real export (the proof is always true of the film),
         never a type page: (clip, t0, t1, shot) or None. `busy`: seconds already shown whole. A clip with a ranking
         (`ranked`: {line: [[t0, t1, shot id], ...]}, the export's own shots a model ranked for each line's words, best
-        first) plays the line's best-ranked shot no file of the recording has shown any part of yet; a line with none
-        left goes on to its own pictures again (20 Nov: the export's next seconds in time order put 'Trash can' under
-        the speaker after the picture had gone, and 'Now' under 'He comes back each time'). Without a ranking (an
-        older pack): the export's next unplayed seconds."""
+        first) plays the line's best-ranked shot no file of the recording has shown any part of yet. A line the model
+        ranked nothing for, or whose ranked shots are all shown, then plays a whole export shot (`shots`: the export's
+        own shots, [[t0, t1, shot id], ...]) no file has shown yet, first those no later line was ranked and no line took
+        as its own file (`owed`), before the cut falls to replaying the line's own pictures (20 Nov: an unanswered
+        ranking left the fill empty, and every recording line looped its one owed shot). Never the export's next seconds in time order (20 Nov: that put
+        'Trash can' under the speaker after the picture had gone). A clip with neither (an older pack): the export's
+        next unplayed seconds."""
         want = min(n, int(SHOT_MAX_S * FPS)) / FPS
         for c in proof_clips:
             took = sp.took(c) + [tuple(x) for x in c.get("busy") or []]
+
+            def fresh(row):
+                a0, b0 = float(row[0]), float(row[1])
+                return b0 - a0 >= 0.4 and not any(a < b0 and b > a0 for a, b in took)
+
+            def play(row):
+                a0, b0 = float(row[0]), float(row[1])
+                return c, a0, min(b0, a0 + want), (row[2] if len(row) > 2 else None, (a0, b0))
             ranked = c.get("ranked")
             if isinstance(ranked, dict):
                 for row in ranked.get(line, ranked.get(str(line))) or []:
-                    a0, b0 = float(row[0]), float(row[1])
-                    if b0 - a0 < 0.4 or any(a < b0 and b > a0 for a, b in took):
-                        continue
-                    return c, a0, min(b0, a0 + want), (row[2] if len(row) > 2 else None, (a0, b0))
+                    if fresh(row):
+                        return play(row)
+            own = [r for r in c.get("shots") or [] if isinstance(r, (list, tuple)) and len(r) >= 2 and fresh(r)]
+            if own:
+                later = {r[2] for k_, rows in (ranked or {}).items() if str(k_).lstrip("-").isdigit() and int(k_) > line
+                         for r in rows or [] if len(r) > 2} | set(c.get("owed") or [])
+                return play(min(own, key=lambda r: (len(r) > 2 and r[2] in later, float(r[0]))))
+            if isinstance(ranked, dict) or c.get("shots"):
                 continue
             room = [(a, b) for a, b in _free_in(took, (0.0, float(c.get("seconds") or 0))) if b - a >= 0.4]
             if room:
@@ -2303,6 +2318,7 @@ def build(script, sup, style_id, direction=None):
     whole_frame = set(d.get("whole_frame_paths") or [])
     board = set(d.get("board_paths") or []) - full_frame
     sealed = full_frame | board                 # never a print of a collage run (a product clip has its own layout)
+    board_on, revealed = bool(d.get("board_paths")), set()     # marketing's board: a whole-frame file reveals once
     runs, k = [], 0
     while k < len(timeline):
         i = seg_at(timeline[k][0])
@@ -2327,10 +2343,16 @@ def build(script, sup, style_id, direction=None):
                 flashes.append((f0, "fill"))
         else:
             f0, f1, kind, name, rec = timeline[run[0]]
-            if kind == "clip" and rec["path"] in full_frame:
+            if kind == "clip" and rec["path"] in whole_frame and rec["path"] in revealed and board_on and not rec.get("voice"):
+                # a revealed upload shown again (a cut-in, a reframe, a replay) is a print on the board under the
+                # captions, never the same wide-then-push reveal again (20 Nov review: one upload file revealed three
+                # times running on one line, its captions trimmed away)
+                proof_print(f0, f1, kind, name, rec, keys[rec["path"]])
+            elif kind == "clip" and rec["path"] in full_frame:
                 pw, ph = float(rec.get("w") or W), float(rec.get("h") or H)
                 if rec["path"] in whole_frame:
                     reveal_before(f0, f1, rec, keys[rec["path"]], pw, ph, (d.get("whole_frame_crop") or {}).get(rec["path"]))
+                    revealed.add(rec["path"])
                 else:
                     focus, _ = F.focus_of(rec)
                     crop = F.cover_crop(pw, ph, W / H, focus, (0.5, 0.42))

@@ -191,8 +191,11 @@ def probe_wh(path):
 def grey_frame(path, t, w, h):
     """One frame of a video at second t as a grey numpy array (h, w) at its native size, or None."""
     import numpy as np
-    r = subprocess.run([PX.FF, "-v", "error", "-ss", f"{max(t, 0):.3f}", "-i", path, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
-                       capture_output=True, timeout=60)
+    try:
+        r = subprocess.run([PX.FF, "-v", "error", "-ss", f"{max(t, 0):.3f}", "-i", path, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                           capture_output=True, timeout=60)
+    except (subprocess.SubprocessError, OSError):
+        return None                       # a slow or broken frame is a frame not measured, never a stopped run
     if r.returncode != 0 or len(r.stdout) < w * h:
         return None
     return np.frombuffer(r.stdout[:w * h], np.uint8).reshape(h, w).astype(np.float32)
@@ -254,7 +257,15 @@ def look_measures(frames, w, h):
 def source_look(path, t0=None, t1=None, keep=True):
     """look_measures of a video file (or of its seconds t0-t1), measured once and, with keep (the owner's sources),
     kept in LOOK_CACHE by the file's path, size and time; a run's own files (keep=False) are measured and not kept.
-    None when the file cannot be read."""
+    None when the file cannot be read or measured: the look only informs a model, so a failed measure (a timeout, a
+    broken frame, a bad cache) is 'not measured' and the ideas stage and the export check go on."""
+    try:
+        return _source_look(path, t0, t1, keep)
+    except Exception:  # noqa: BLE001 - a measure that informs a model never stops the run
+        return None
+
+
+def _source_look(path, t0, t1, keep):
     try:
         stt = os.stat(path)
     except OSError:
@@ -1593,7 +1604,8 @@ def product_windows(ctx, script, sources, demand=None):
     its measured picture changes, never a 1 s grid), one frame each; the model ranks, for every line, the shots whose
     picture carries that line's words, best first, as many as the line's shot demand ({line: shots}), with no cap. The
     lines that name the recording take their best-ranked shots (owed_windows); every line's ranking is returned for the
-    cut's proof fill. ([windows], {line: [shot ids]}, [candidates], spend)."""
+    cut's proof fill. ([windows], {line: [shot ids]}, [candidates], spend); the ranking is None when the call went
+    unanswered."""
     plan_path = os.path.join(ctx.supply, "product_windows.json")
     old = jload(plan_path)
     if old and old.get("v") == PRODUCT_WINDOWS_V:
@@ -1625,7 +1637,7 @@ def product_windows(ctx, script, sources, demand=None):
         if log:
             log(f"product shots not ranked ({repr(e)[:200]}); each recording line gets its farthest unused shot")
         out = owed_windows([ln for ln in lines if ln["sources"]], candidates, {}, set(), {ln["i"]: ln["demand"] for ln in lines})
-        return out, {}, candidates, []
+        return out, None, candidates, []          # None: not ranked (the fill plays unshown shots), not 'ranked nothing
     ranked = rank_shots(lines, candidates, result)
     out = owed_windows([ln for ln in lines if ln["sources"]], candidates, ranked, set(), {ln["i"]: ln["demand"] for ln in lines})
     jsave(plan_path, dict(v=PRODUCT_WINDOWS_V, windows=out, ranked={str(k): v for k, v in ranked.items()}, candidates=candidates, spend=[use]))
@@ -1707,6 +1719,22 @@ def lend_subjects(fsc, subjects):
             if n["name"] not in have:
                 fsc.setdefault("named", []).append(dict(n))
                 have.add(n["name"])
+
+
+def proof_fill_clip(body, after_t, sha, shots, ranked, owed=()):
+    """The export as the cut's proof fill: the whole body (its after seconds busy, keyed by the recording's sha256), its
+    own shots (`shots`, [[t0, t1, id]]: a line short of pictures plays one no file has shown yet) and, only when the
+    ranking call answered, each line's ranked export shots (`ranked`), best first. An unanswered call leaves `ranked`
+    out, so the fill still plays the export's unshown shots instead of nothing (20 Nov: ranked={} turned the fill off
+    for the whole film and every recording line looped its one shot). `owed`: the shot ids a line already takes as its
+    own file, played last by another line's fill."""
+    fill = dict(body, busy=[list(after_t)], origin=dict(key=sha, t0=0.0), owed=sorted({int(k) for k in owed}),
+                shots=[[c["start"], c["end"], c["id"]] for c in shots if c["source"] == "THE EXPORT"])
+    if ranked is not None:
+        by_id = {c["id"]: c for c in shots}
+        fill["ranked"] = {str(i): [[by_id[k]["start"], by_id[k]["end"], k] for k in ks if k in by_id and by_id[k]["source"] == "THE EXPORT"]
+                          for i, ks in ranked.items()}
+    return fill
 
 
 def supply(ctx, script):
@@ -1882,10 +1910,9 @@ def supply(ctx, script):
     body = W3.clip_facts(dict(path=os.path.join(product_dir, "export_body.mp4"), file="product/export_body.mp4", subject="THE EXPORT",
                               seconds=pc["body"]["t"][1], source=recording_source(script, "export"), time_range=pc["body"]["t"]))
     # the after plays whole on its own voice; a line short of pictures plays the export's shots ranked for its words
-    pack["proof_fill"] = [dict(body, busy=[pc["after"]["t"]], origin=dict(key=ex_sha, t0=0.0),
-                               ranked={str(i): [[shots[k]["start"], shots[k]["end"], k] for k in ks if shots[k]["source"] == "THE EXPORT"]
-                                       for i, ks in ranked.items()})]
-    pack["product_shots"] = dict(shots=len(shots), taken=len(chosen), ranked={str(i): len(v) for i, v in ranked.items()})
+    pack["proof_fill"] = [proof_fill_clip(body, pc["after"]["t"], ex_sha, shots, ranked, [w["id"] for w in chosen])]
+    pack["product_shots"] = dict(shots=len(shots), taken=len(chosen),
+                                 ranked=None if ranked is None else {str(i): len(v) for i, v in ranked.items()})
     wj = json.load(open(nar["words"]))
     rec = dict(narration_s=wj["duration"], voice=nar.get("voice"), gate=nar["gate"], pictures=sum(len(v) for v in pack["pictures"].values()),
                subjects=len(pack["pictures"]), missing=pack.get("missing"), spend=spend, product=pc,
@@ -2294,11 +2321,29 @@ def lay_cta(ctx, l1, sc, pack, clock, script):
         return dict(device="cta", fault=repr(e)[:300])
 
 
-def product_layout(paths):
+def upload_reveals(paths, footage=()):
+    """The upload files that get the whole-upload reveal (the wide clip on its blur, then the push into the export's
+    crop): one per line that takes the upload, its best-ranked shot (the line's first upload file); with no lines known,
+    the film's first. The line's other upload shots lie on the board under its narration (20 Nov review: a line with
+    demand 6 took five upload shots and would have played the same wide-then-push reveal five times running, every
+    caption on it trimmed away)."""
+    have = {p for p in paths if os.path.basename(p).startswith("upload_")}
+    out = []
+    for ln in footage or ():
+        first = next((c["path"] for c in ln.get("clips") or [] if c.get("path") in have), None)
+        if first and first not in out:
+            out.append(first)
+    if not out and have:
+        out = [min(have, key=lambda p: (len(os.path.basename(p)), os.path.basename(p)))]
+    return out
+
+
+def product_layout(paths, footage=()):
     """(full frame, on the board): the recording's files the reel shows full frame (the before and the after on their
-    own voices, the hook's landing, the whole upload pushing into the export's crop) and those it lays as a print on the
-    style's board under the narration (the export's shots and its proof fill)."""
-    whole = [p for p in paths if os.path.basename(p) in ("before.mp4", "after.mp4", "tease.mp4") or os.path.basename(p).startswith("upload_")]
+    own voices, the hook's landing, one whole-upload reveal per upload line: upload_reveals) and those it lays as a
+    print on the style's board under the narration (the export's shots, its proof fill, a line's other upload shots)."""
+    reveal = set(upload_reveals(paths, footage))
+    whole = [p for p in paths if os.path.basename(p) in ("before.mp4", "after.mp4", "tease.mp4") or p in reveal]
     return whole, [p for p in paths if p not in whole]
 
 
@@ -2319,10 +2364,10 @@ def score(ctx, script):
     # landing (the tease) and the whole upload pushing into the export's crop; on the narrated lines the export plays as
     # a print on the style's board under the narration's own captions (20 Nov: every recording clip was a sealed static
     # full-frame plate, 90% of the film, its captions deleted)
-    knobs["full_frame_paths"], knobs["board_paths"] = product_layout(pack["product"]["paths"])
+    knobs["full_frame_paths"], knobs["board_paths"] = product_layout(pack["product"]["paths"], pack.get("footage") or ())
     knobs.setdefault("collage_any_line", True)          # the style's collage budget takes lines the writer did not mark
-    knobs["whole_frame_paths"] = [p for p in pack["product"]["paths"]
-                                   if os.path.basename(p) == "before.mp4" or os.path.basename(p).startswith("upload_")]
+    knobs["whole_frame_paths"] = [p for p in pack["product"]["paths"] if os.path.basename(p) == "before.mp4"] + \
+        upload_reveals(pack["product"]["paths"], pack.get("footage") or ())
     knobs["whole_frame_crop"] = dict(pack["product"].get("crops") or {})   # the before pushes into the export's own crop
     knobs["proof_fill"] = list(pack.get("proof_fill") or [])               # a line short of pictures plays the export
     knobs.setdefault("cap_px", CAP_PX)

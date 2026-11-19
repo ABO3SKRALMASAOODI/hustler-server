@@ -368,7 +368,7 @@ def test_product_windows_recover_from_an_unanswered_ranking(tmp_path, monkeypatc
     logs = []
     rows, ranked, shots, spend = P.product_windows(SimpleNamespace(supply=str(tmp_path), log=logs.append), sc,
                                                    {'THE EXPORT': dict(path='/f.mp4', dur=8, busy=[], hard=[3.0], soft=[])}, {0: 2, 1: 2})
-    assert {r['line'] for r in rows} == {0, 1} and ranked == {} and not spend and logs
+    assert {r['line'] for r in rows} == {0, 1} and ranked is None and not spend and logs     # not ranked, not 'ranked nothing'
     assert not os.path.exists(tmp_path / 'product_windows.json')
 
 
@@ -395,10 +395,62 @@ def test_board_prints_keep_the_narrations_captions_and_nothing_touches_the_print
 
 
 def test_product_layout_keeps_full_frame_for_the_voices_and_the_hook_only():
-    paths = [f"/p/{n}" for n in ("after.mp4", "before.mp4", "export_0.mp4", "export_body.mp4", "tease.mp4", "upload_1.mp4")]
+    paths = [f"/p/{n}" for n in ("after.mp4", "before.mp4", "export_0.mp4", "export_body.mp4", "tease.mp4", "upload_1.mp4", "upload_10.mp4",
+                                 "upload_2.mp4")]
     whole, board = P.product_layout(paths)
-    assert {os.path.basename(p) for p in whole} == {"after.mp4", "before.mp4", "tease.mp4", "upload_1.mp4"}
-    assert {os.path.basename(p) for p in board} == {"export_0.mp4", "export_body.mp4"}
+    assert {os.path.basename(p) for p in whole} == {"after.mp4", "before.mp4", "tease.mp4", "upload_1.mp4"}   # one reveal a film
+    assert {os.path.basename(p) for p in board} == {"export_0.mp4", "export_body.mp4", "upload_10.mp4", "upload_2.mp4"}
+    footage = [dict(i=1, clips=[dict(path="/p/upload_2.mp4"), dict(path="/p/upload_1.mp4")]), dict(i=3, clips=[dict(path="/p/upload_10.mp4")])]
+    whole, board = P.product_layout(paths, footage)                          # one reveal a line: its best-ranked upload shot
+    assert {os.path.basename(p) for p in whole} == {"after.mp4", "before.mp4", "tease.mp4", "upload_2.mp4", "upload_10.mp4"}
+    assert P.upload_reveals(paths, footage) == ["/p/upload_2.mp4", "/p/upload_10.mp4"]
+
+
+def _line_words(segs):
+    words, t = [], 0.0
+    for i, s_ in enumerate(segs):
+        for w in s_["say"].split():
+            words.append(dict(w=w, start=round(t, 3), end=round(t + 0.25, 3), seg=i))
+            t += 1 / 3.2
+        t += 0.22
+    return dict(words=words, duration=round(t, 2))
+
+
+def test_an_unanswered_ranking_still_fills_short_lines_with_unshown_export_shots(tmp_path, monkeypatch):
+    """20 Nov review: on an outage product_windows returned ranked={} and the fill read it as 'every line ranked
+    nothing', so no line got a proof fill and each recording line looped its one owed shot. Now an unanswered call
+    leaves the ranking out and the cut's proof tier plays export shots no file has shown, each second once."""
+    from types import SimpleNamespace
+    monkeypatch.setattr(P, 'still', lambda path, t, w: 'aW1hZ2U=')
+    monkeypatch.setattr(P, 'ask', lambda *a, **k: (_ for _ in ()).throw(RuntimeError("503 from the proxy")))
+    segs = [dict(say=" ".join(f"w{i}x{k}" for k in range(16)), pictures=["THE EXPORT"], beat="setup",
+                 see=[dict(thing="THE EXPORT", as_of="x", must_show="x")]) for i in range(2)]
+    sc = dict(title="t", segments=segs)
+    src = {'THE EXPORT': dict(path='/f.mp4', dur=20.0, busy=[(16.0, 19.0)], hard=[2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0], soft=[])}
+    rows, ranked, shots, _ = P.product_windows(SimpleNamespace(supply=str(tmp_path), log=lambda m: None), dict(receipts={}, script=sc),
+                                               src, {0: 1, 1: 1})
+    assert ranked is None and len(rows) == 2
+    body = tmp_path / "export_body.mp4"
+    body.write_bytes(b"x")
+    fill = P.proof_fill_clip(dict(path=str(body), file="product/export_body.mp4", subject="THE EXPORT", seconds=20.0, w=1080, h=1920,
+                                  motion=dict(p90=2.0, curve=[2.0] * 30)), (16.0, 19.0), "exp-sha", shots, ranked, [r["id"] for r in rows])
+    assert "ranked" not in fill and len(fill["shots"]) == len(shots)
+    footage = {r["line"]: [dict(path=str(tmp_path / f"export_{k}.mp4"), seconds=r["end"] - r["start"], subject="THE EXPORT", w=1080, h=1920,
+                                motion=dict(p90=2.0, curve=[2.0] * 30), origin=dict(key="exp-sha", t0=r["start"]))]
+               for k, r in enumerate(rows)}
+    sp = P.R.Supply({}, footage, fit={c["path"]: {0: [i]} for i, v in footage.items() for c in v})
+    clock = P.F.Clock(_line_words(segs), sc)
+    tl = P.R.cut_fit(sc, clock, sp, P.F.Clock.f(clock.dur) + 15, stress=[], proof_fill=[fill])
+    proof = [r[4] for r in tl if r[4].get("tier") == "proof"]
+    assert proof                                                             # the fill is on, not off for the whole film
+    own = [(r["start"], r["end"]) for r in rows]
+    played = sorted(tuple(p["src"]) for p in proof)
+    for a, b in played:
+        assert any(x <= a and b <= y for x, y, _ in fill["shots"])          # whole export shots, never a 1 s slice
+        assert not (a < 19.0 and b > 16.0)                                  # never the after's seconds
+        assert not any(a < y and b > x for x, y in own)                      # never a second a line's own file plays
+    assert all(p_[1] <= q[0] for p_, q in zip(played, played[1:]))           # each export second once
+    assert len({p["take_i"] for p in proof}) == len(proof)                   # each shot one picture
 
 
 def _frames(kind, n=6, w=640, h=480):
@@ -547,3 +599,57 @@ def test_the_narrations_captions_survive_on_the_board_and_stay_off_the_full_fram
     assert on_board and caps and len(caps) >= len(caps_before) // 2
     assert any(any(c["f"][0] < b and c["f"][1] > a for c in caps) for a, b in on_board)       # captions under the prints
     assert all(not (c["f"][0] < s1 and c["f"][1] > s0) for c in caps for s0, s1 in spans)    # none over the full-frame after
+
+
+def test_a_line_with_many_upload_shots_reveals_the_upload_once_and_keeps_its_captions(tmp_path):
+    """20 Nov review: every upload_* file was full frame and went through reveal_before, so a line that took five upload
+    shots would play the same wide-then-push reveal five times running, all its captions trimmed away. Now the line's
+    best-ranked upload shot is the one reveal and its other upload shots lie on the board under its captions."""
+    from PIL import Image
+    segs = [dict(say=" ".join(f"u{k}" for k in range(22)), pictures=["THE UPLOAD"], beat="setup", phrases=[[0, 6], [6, 12], [12, 18], [18, 22]],
+                 see=[dict(thing="THE UPLOAD", as_of="x", must_show="x")])]
+    sc = dict(title="t", segments=segs)
+    clips = []
+    for k in range(4):
+        p = str(tmp_path / f"upload_{k}.jpg")
+        Image.new("RGB", (1920, 1080), (60 + 30 * k, 90, 110)).save(p)
+        clips.append(dict(path=p, seconds=1.6, subject="THE UPLOAD", w=1920, h=1080, motion=dict(p90=2.0, curve=[2.0] * 24),
+                          origin=dict(key="up-sha", t0=2.0 * k)))
+    paths = [c["path"] for c in clips]
+    footage = [dict(i=0, clips=clips)]
+    whole, board = P.product_layout(paths, footage)
+    reveals = P.upload_reveals(paths, footage)
+    assert whole == reveals == [paths[0]] and board == paths[1:]
+    sup = dict(sid="m", words=_line_words(segs), narration=str(tmp_path / "none.wav"), ffmpeg="ffmpeg", pictures={}, sounds={},
+               footage=footage, fit={p: [0] for p in paths}, fit_verdicts={}, work=str(tmp_path / "fin"))
+    l1, beats = P.R.build(sc, sup, "pinboard", dict(require_fit=True, full_frame_paths=whole, board_paths=board, whole_frame_paths=reveals,
+                                                    whole_frame_crop={paths[0]: [0.3, 0.0, 0.62, 1.0]}, cap_px=72))
+    shown = [p for p in beats["pictures"] if p["path"] in paths]
+    assert [p["path"] for p in shown if p["mode"] == "product"] == [paths[0]]          # exactly one reveal, its cut-ins on the board
+    assert {p["path"] for p in shown if p["mode"] == "proof_print"} and \
+        all(p["mode"] == "proof_print" for p in shown if p["path"] != paths[0])       # the others on the board
+    spans = P.as_delivered(l1, set(paths))
+    caps = [it for it in l1["items"] if it["k"] == "word" and it.get("role") == "cap"]
+    keys = {k for k, a in l1["assets"].items() if a.get("path") in board}
+    prints = [it["f"] for it in l1["items"] if it.get("pic") in keys and it["k"] == "card"]
+    assert len(spans) == 1 and prints                                        # one sealed span, the reveal
+    assert any(any(c["f"][0] < b and c["f"][1] > a for c in caps) for a, b in prints)     # captions over the line's board prints
+    assert all(not (c["f"][0] < s1 and c["f"][1] > s0) for c in caps for s0, s1 in spans)
+
+
+def test_a_slow_or_broken_source_frame_is_a_look_not_measured_never_a_stopped_run(tmp_path, monkeypatch):
+    """20 Nov review: grey_frame let subprocess.TimeoutExpired and OSError out, and source_look runs inside ideas() and
+    export_check, so one slow frame would have crashed the stage. A failed measure is now 'not measured'."""
+    src = tmp_path / "s.mp4"
+    src.write_bytes(b"x")
+
+    def slow(*a, **k):
+        raise P.subprocess.TimeoutExpired(cmd="ffmpeg", timeout=60)
+    monkeypatch.setattr(P.subprocess, "run", slow)
+    assert P.grey_frame(str(src), 1.0, 64, 36) is None
+    monkeypatch.setattr(P.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("ffmpeg gone")))
+    assert P.grey_frame(str(src), 1.0, 64, 36) is None
+    monkeypatch.setattr(P, "probe_wh", lambda path: (64, 36, 10.0))
+    monkeypatch.setattr(P, "grey_frame", lambda *a: (_ for _ in ()).throw(MemoryError("frame too large")))
+    assert P.source_look(str(src), keep=False) is None
+    assert P.look_line(P.source_look(str(src), keep=False)) == "not measured"
