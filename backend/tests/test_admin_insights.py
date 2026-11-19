@@ -339,6 +339,17 @@ def test_exports_page_contract(app, monkeypatch):
 
 
 # ── Country from the edge, never from an IP ──────────────────────────────
+def test_edge_country_reads_the_code_the_site_proxy_carries():
+    # #454: an external Vercel rewrite drops X-Vercel-IP-Country, so the proxy
+    # sends the edge's code on under our own name too.
+    assert wa.edge_country({"X-Valmera-Edge-Country": "tr"}) == "TR"
+    assert wa.edge_country({"X-Valmera-Edge-Country": "XX"}) is None
+    assert wa.edge_country({"X-Vercel-IP-Country": "XX",
+                            "X-Valmera-Edge-Country": "AE"}) == "AE"
+    assert wa.edge_country({"X-Vercel-IP-Country": "US",
+                            "X-Valmera-Edge-Country": "AE"}) == "US"
+
+
 def test_edge_country_reads_only_vercels_header():
     assert wa.edge_country({"X-Vercel-IP-Country": "ae"}) == "AE"
     assert wa.edge_country({"CF-IPCountry": "US"}) is None
