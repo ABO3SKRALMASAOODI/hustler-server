@@ -2368,6 +2368,13 @@ def taste_check(l1, beats):
         x1, y0 = x + R.width(it["v"], it["t"]) * s / W, y - R.cap(it["v"]) * s / H
         if it["f"][1] - it["f"][0] <= 1:
             continue
+        if it.get("role") == "graphic":
+            # type a device draws as picture (a marquee larger than the frame, a lockup behind the head, HUD fine
+            # print): the reading rules measure reading type only. The watermark's keep-out holds for all type.
+            if x < MARK[2] and x1 > MARK[0] and y0 < MARK[3] and y > MARK[1]:
+                bad.append(f"{it['id']} '{it['t'][:20]}': in the watermark's keep-out")
+                bad_ids.add(it['id'])
+            continue
         if x < SAFE[0] - 2e-3 or x1 > SAFE[2] + 2e-3 or y0 < SAFE[1] - 2e-3 or y > SAFE[3] + 2e-3:
             bad.append(f"{it['id']} '{it['t'][:20]}': outside the safe area ({x:.3f},{y0:.3f})-({x1:.3f},{y:.3f})")
             bad_ids.add(it['id'])

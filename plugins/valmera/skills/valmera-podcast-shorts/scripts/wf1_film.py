@@ -1088,6 +1088,7 @@ def build(script, sup, style_id, direction=None):
     # timing (a word too early, too close to another or too short to hold gives its place to the next), so a film
     # never loses its display words to timing. A long phrase is stacked (display_rows), never skipped for its length.
     omit = []
+    devices = []                                         # the palette's asks: rows whose type performs (laid at the render, chain.alien_bank)
     proposed = d.get("display") or []
     for row in proposed:
         if len(shown) >= DISPLAY_MOST:
@@ -1113,6 +1114,17 @@ def build(script, sup, style_id, direction=None):
         if b - a < 14:
             continue
         role = row.get("role") or "hook"
+        perf = row.get("perform") if isinstance(row.get("perform"), dict) else None
+        if perf and perf.get("dev"):
+            # the model chose the device that makes this row's type perform (palette_menu): the palette draws it on the
+            # scene's word clock; a device that draws the words itself takes the row's place and its caption words
+            import palette_menu
+            devices.append(palette_menu.ask_for(row, seg, text, a, b, len(devices)))
+            if perf["dev"] in palette_menu.REPLACES:
+                omit += F.said_span(clock, seg, text)
+                P.events.append(a)
+                shown.append((a, b, text))
+                continue
         rows = display_rows(P.R, P.voices["dsp"], cased(text), cased(str(row.get("key") or "")), role)
         base_y = cap_y - 0.062                           # the lowest baseline of the block, clear above the caption seat
         ys = [base_y]
@@ -1160,6 +1172,10 @@ def build(script, sup, style_id, direction=None):
     P.items = ink_by_ground(P.items, P.voices, bright)
     film = dict(grain=float(st["grain"]), vignette=float(st["vignette"]), over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0))
     l1 = P.done(sup.get("sid", "wf1"), f_end, int(d.get("seed", 1114)), film)
+    # the film's word clock, for the palette's devices: each word on the frame a display word lands on it, and its sentence
+    l1["said"] = [[w["w"], Clock.f(w["t0"]) - 1, Clock.f(w["t1"]), int(w.get("seg", 0))] for w in clock.words]
+    if devices:
+        l1["devices"] = devices
     l1 = F.engines_finish(l1, sup, stress, drive_ids, meta, dict(d, look_pictures=look_pics),
                           turn_f=story_turn_f if story_turn_f is not None else turn_f, mono=mono_spans,
                           clear=[0.10, cap_y - 0.085, 0.90, cap_y + 0.02],
@@ -1208,6 +1224,7 @@ def build(script, sup, style_id, direction=None):
                                take_past=[list(sp) for sp in take_past], past_share=round(past_share, 3),
                                balanced=sum(1 for it in l1["items"] if it.get("k") == "shot" and it.get("grade") and it.get("pic") not in {pc["key"] for pc in pieces})),
                  alien=dict(asked=[a["dev"] for a in l1.get("alien") or []], why=why, never=list(ALIEN_NEVER)),
+                 devices=[dict(dev=x["dev"], beat=x.get("beat"), at=x.get("at")) for x in devices],
                  sound_design=dict(l1.get("sound_design") or {}),       # with its dropped list: a refusal is measured, never guessed
                  look=[f for f in look_f if 0 <= f < f_end])
     return l1, beats

@@ -45,6 +45,7 @@ os.environ.setdefault("WRITER_PROVIDER", "openai")
 
 import chain  # noqa: E402
 import film as F  # noqa: E402
+import palette_menu  # noqa: E402
 import pictures as PX  # noqa: E402
 import shell  # noqa: E402
 import wf1_film  # noqa: E402
@@ -592,7 +593,8 @@ def take_cuts(src, shots, dur, sup_dir, turns=None):
     return out
 
 
-DIRECTION_CONTRACT = 3           # 20 Nov 2026 (round1): display words by story role, ranked with alternates; the story turn apart from the payoff
+DIRECTION_CONTRACT = "3+perform"   # 20 Nov 2026: display words by story role, ranked with alternates; the story turn apart from the payoff;
+                                    # each row may name the palette device that makes its type perform (lane C, owner 20 Nov: maximum creativity)
 ROLES = ("hook", "turn", "payoff", "figure", "name", "contrast")
 
 
@@ -631,6 +633,20 @@ def direction_of(ctx, script, pack):
                "\"arc\": [only when he says a calendar year aloud: {\"seg\": sentence number, \"word\": the year as he says it in "
                "digits, \"year\": the year as a number, \"stakes\": how things stand for the story's hero at that point, -1 (worst) "
                "to 1 (best)}; an empty list when no year is said]}")
+    cards = palette_menu.menu(py=chain.PY)
+    if cards:
+        # the type does something on every moment that carries the story (owner, 20 Nov 2026: "it shouldn't be just a video
+        # with some caption ... maximum creativity with maximum tricks"): the model picks a device for each row, per moment
+        system += ("\n\nEvery display row also carries \"perform\": the device below that makes its type DO something on that "
+                   "moment, with the device's fields, as {\"dev\": name, field: value, ...}. Choose for the moment, not by habit: "
+                   "a figure counts or stacks in two sizes (write from, to and fmt yourself from what he says: \"$285 million to $4.3 "
+                   "billion\" is from 285000000, to 4300000000, unit short, fmt \"${n}\"; a figure with nothing before it counts from "
+                   "a number that makes the jump felt), a name lands in two sizes (title: who they are in two to four words, only what "
+                   "the sentences or common knowledge make certain, else omit it), the hook whispers and shouts or runs word by word, "
+                   "the turn flips or is struck out, the payoff is the biggest device of the film. Anchors you write as {\"seg\": "
+                   "sentence number, \"word\": words exactly as he says them}: at (where it starts; default the row's text), lands "
+                   "(the word a count lands on), until. Never the same device twice in a row, and at least three different devices "
+                   "in the film. Devices:\n" + cards)
     content = ((f"# The film\n{script.get('title')}\nHook: {script.get('hook_line')}\nPayoff: {script.get('close_line')}\n\n# Sentences\n") +
                ("\n".join(f"{ln['i']}: {ln['text']}" for ln in lines)))
     llm = _llm()

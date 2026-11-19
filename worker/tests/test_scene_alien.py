@@ -85,10 +85,23 @@ def test_menu_and_a_device_that_cannot_stand_leaves_the_film():
     assert set(alien.DEVICES) == {"rhyme", "diecut", "lamp", "arc", "answer"}
     assert len(alien.menu().splitlines()) == 5
     base = scene_of([{"id": "s0", "k": "shot", "f": [0, 60], "pic": "plate", "plate": {"c0": "#101010", "c1": "#101010"}}], 60)
-    out, log = alien.apply(base, "/nonexistent", [{"dev": "rhyme", "at": [0, 60], "n": 3}, {"dev": "nothing"}, {"dev": "lamp", "at": [5, 40], "t": "X"},
+    out, log = alien.apply(base, "/nonexistent", [{"dev": "rhyme", "at": [0, 60], "n": 3}, {"dev": "nothing"},
                                                  {"dev": "answer", "at": [0, 60], "picks": [{"f": 3, "pic": "gone"}]}])
-    assert [r["done"] for r in log] == [False] * 4 and all(r["why"] for r in log)
+    assert [r["done"] for r in log] == [False] * 3 and all(r["why"] for r in log)      # true impossibilities: no shape, no device, no word
     assert out["items"] == base["items"] and "alien" not in out
+
+
+@pytest.mark.skipif(not HB, reason="uharfbuzz is not installed")
+def test_a_lamp_with_nothing_to_relight_still_burns():
+    """Owner, 16 Nov: a fix gets the outcome. A lamp over a plate (no take to relight) is the word glowing at the
+    voice's level over a breath of its colour, never a refusal."""
+    base = scene_of([{"id": "s0", "k": "shot", "f": [0, 60], "pic": "plate", "plate": {"c0": "#101010", "c1": "#101010"}}], 60)
+    out, log = alien.apply(base, "/nonexistent", [{"dev": "lamp", "id": "lp", "at": [5, 40], "t": "X", "tail": 6}])
+    assert log[0]["done"] and log[0]["log"]["glow_only"]
+    ok, why = eligible(out)
+    assert ok, why
+    word = next(i for i in out["items"] if i["id"] == "lp.word")
+    assert word["f"] == [5, 46] and word["op"][0] > 0
 
 
 # ------------------------------------------------------------------ rhyme

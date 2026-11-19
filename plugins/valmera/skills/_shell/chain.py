@@ -457,15 +457,20 @@ def alien_bank(ctx, l1_path):
     path when it asks for nothing). A device that cannot stand on this film leaves it as it was and says why in
     ``alien_bank.json``; it is never the reason a film does not render."""
     try:
-        asks = json.load(open(l1_path)).get("alien")
+        doc = json.load(open(l1_path))
     except (OSError, ValueError):
         return l1_path
-    if not asks or engine_kind() != "scene":
+    asks = doc.get("alien")
+    devices = doc.get("devices")             # the palette's asks (worker/scene/palette): type, depth, HUD and the alien bank
+    if not (asks or devices) or engine_kind() != "scene":
         return l1_path
     out = os.path.splitext(l1_path)[0] + ".alien.json"
     if not os.path.exists(out):
         wk = brand.worker_dir()
-        sh(ctx, ["zsh", "-c", f"cd {wk} && PYTHONPATH=..:{SLICE}/pylib {PY} -m scene.alien.run apply --l1 {l1_path} --work {ctx.supply} "
+        # the palette lays its own asks and the alien bank's, by layer, each with its fallback chain; a worker without the
+        # palette lays the alien bank as before
+        mod = "scene.palette.run" if os.path.isdir(os.path.join(wk, "scene", "palette")) else "scene.alien.run"
+        sh(ctx, ["zsh", "-c", f"cd {wk} && PYTHONPATH=..:{SLICE}/pylib {PY} -m {mod} apply --l1 {l1_path} --work {ctx.supply} "
                               f"--out {out}.part --log {os.path.join(ctx.supply, 'alien_bank.json')}"],
            label=f"wf-alien-{ctx.run_id}", heavy=True, timeout=1800)
         os.replace(out + ".part", out)
