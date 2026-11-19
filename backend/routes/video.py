@@ -3066,6 +3066,56 @@ def _register_deferred_original(user_id, project_id, key, filename, declared,
     return result, 200
 
 
+# How long a complete waits for another complete of the SAME key that is
+# still assembling the object. Under the 30 s at which a proxy in front of
+# the API gives up on a request, so the wait itself is never cut.
+UPLOAD_COMPLETE_WAIT_S = float(os.getenv("UPLOAD_COMPLETE_WAIT_S", "20"))
+
+
+@contextmanager
+def _one_complete_per_key(key, wait_s=None, db_url=None):
+    """One multipart completion per storage key at a time (#1602, 18 Nov
+    2026). Assembling 496 parts (8.3 GB) outlasted the proxy in front of the
+    API: the page saw a 500 and retried while the first complete was still
+    running. Storage had already consumed the upload id and the object was
+    not readable yet, so the retry answered "the upload id no longer exists"
+    (a 400 the page never retries) and the upload showed as failed; 37 s
+    later the first call registered the asset.
+
+    The key's completion is a session advisory lock on a connection of its
+    own. A second complete waits for the first, then finds the object (or
+    the asset) and answers what the first did. Yields True when this call
+    holds the completion, False when another call still held it after
+    ``wait_s``, None when the lock could not be asked (the database did not
+    answer): the completion then runs as it did before."""
+    wait_s = UPLOAD_COMPLETE_WAIT_S if wait_s is None else wait_s
+    conn, mine = None, None
+    try:
+        conn = psycopg2.connect(db_url or current_app.config["DATABASE_URL"],
+                                **_VDB_CONNECT_ARGS)
+        conn.autocommit = True
+        cur = conn.cursor()
+        deadline = time.monotonic() + max(0.0, wait_s)
+        while True:
+            cur.execute("SELECT pg_try_advisory_lock("
+                        "hashtextextended(%s, 0))",
+                        (f"upload-complete:{key}",))
+            mine = bool(cur.fetchone()[0])
+            if mine or time.monotonic() >= deadline:
+                break
+            time.sleep(0.25)
+    except Exception:  # noqa: BLE001 — the lock is a help, never a gate
+        mine = None
+    try:
+        yield mine
+    finally:
+        if conn is not None:
+            try:
+                conn.close()        # ends the session: the lock goes with it
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def _finish_multipart(user_id, project_id, key, upload_id, parts, detail,
                       repaired_out=None):
     """Complete a multipart upload through storage.finish_multipart, which
@@ -3073,7 +3123,16 @@ def _finish_multipart(user_id, project_id, key, upload_id, parts, detail,
     earlier complete this call retries); otherwise the (payload, 400) to
     answer, which says how to retry with the same upload_id or, when the
     id is gone, that a new upload_start is needed."""
-    res = storage.finish_multipart(key, upload_id, parts)
+    with _one_complete_per_key(key) as mine:
+        if mine is False:
+            # Another complete of this key is still assembling after the
+            # wait. Nothing failed: the caller's retry (5xx is retried)
+            # meets the finished object, or waits here again.
+            return ({"error": "The upload is still being put together in "
+                              "storage; trying again finishes it.",
+                     "assembling": True, "retry": True,
+                     "upload_kept": True}, 503)
+        res = storage.finish_multipart(key, upload_id, parts)
     if res.get("ok"):
         if res.get("repaired"):
             if repaired_out is not None:
