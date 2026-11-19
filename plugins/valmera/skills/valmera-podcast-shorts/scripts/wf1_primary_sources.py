@@ -14,17 +14,39 @@ from urllib.parse import urlparse
 
 MAX_SOURCE_BYTES = 256 << 20  # Bounded original; official short HD films can exceed 128 MB.
 LONG_S = 600.0                # footage.run.WHOLE_UNDER_S: a longer source is re-fetched as its head, not whole
-# What YouTube says when it walls a busy address (the bot check, the CDN's bare 403, a rate limit, a stalled player):
+# What YouTube says when it walls a busy address, beyond the product's own access_blocked (the bot check, the CDN's
+# bare 403): a rate limit, a stalled player, a session YouTube rate-limited ("This content isn't available, try again
+# later"), and a player that serves no format at all (SABR, a missing PO token) for a video its search just listed.
 # yt-dlp's own words, read off the tool's error text. A video that is gone or private says something else and is
 # not waited for. "Sign in to confirm your age" is an age gate, not the wall.
 WALL_SIGNS = ("sign in to confirm", "not a bot", "--cookies", "http error 403", "403 forbidden", "403: forbidden",
-              "http error 429", "too many requests", "timed out")
+              "http error 429", "too many requests", "timed out", "rate-limit", "rate limit", "try again later",
+              "content isn't available", "content isn\u2019t available", "format is not available")
+WAYBACK_PART = " || wayback:"     # footage.fetch.run_ladder appends the Wayback rung's own failure after this
+
+
+def youtube_part(text):
+    """The YouTube rungs' part of a fetch failure. fetch.run_ladder builds its error as '<last rung>: <yt-dlp stderr>
+    || wayback: <the archive's answer>'; the archive's answer ('not archived', its own time-out) says nothing about
+    the wall and must neither hide it nor stand for it."""
+    return str(text or "").split(WAYBACK_PART)[0]
 
 
 def wall_error(text):
-    """True when a fetch failed on YouTube's wall, which lifts by itself, rather than on the video."""
-    t = (text or "").lower()
-    return "your age" not in t and any(s in t for s in WALL_SIGNS)
+    """True when a fetch failed on YouTube's wall, which lifts by itself, rather than on the video. The one rule for
+    the whole workflow (wf1_short reads it too): the product's ytaccess.access_blocked plus WALL_SIGNS, read on the
+    YouTube rungs' part of the error only."""
+    head = youtube_part(text)
+    t = head.lower()
+    if "your age" in t:
+        return False
+    try:
+        import ytaccess
+        if ytaccess.access_blocked(head):
+            return True
+    except Exception:  # noqa: BLE001 - outside the worker: WALL_SIGNS carry the same words
+        pass
+    return any(s in t for s in WALL_SIGNS)
 
 
 def _kept(keep):
@@ -110,8 +132,10 @@ def reopen(rows, keep, log=print, space_s=4.0, sleep=None, opener=None):
         try:
             path, rung = opener(url, dest, row.get("duration"))
         except Exception as e:  # noqa: BLE001 - every failure is sorted: the wall waits, the video's own fault does not
-            why = f"{type(e).__name__}: {str(e)[-240:]}"
-            (refused if wall_error(why) else gone).append(dict(row, error=why, tries=int(row.get("tries") or 0) + 1))
+            msg = str(e)
+            wall = wall_error(msg)                               # read on the YouTube rungs' part, before any cut
+            why = f"{type(e).__name__}: {msg[:240]}"
+            (refused if wall else gone).append(dict(row, error=why, tries=int(row.get("tries") or 0) + 1))
             continue
         with open(path, "rb") as f:
             digest = hashlib.file_digest(f, "sha256").hexdigest()

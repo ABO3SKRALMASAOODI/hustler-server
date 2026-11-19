@@ -163,6 +163,66 @@ def test_reopen_fetches_exactly_the_refused_sources_and_sorts_the_wall_from_the_
     assert again[0]['url']==rows[0]['url']
 
 
+# yt-dlp's own words for the bot check, as this Mac's footage fetches met it on 19 Nov, and the Wayback rung's answer
+BOT_STDERR=('WARNING: [youtube] o6f0B9oo87w: Some web client https formats have been skipped\n'
+            'ERROR: [youtube] o6f0B9oo87w: Sign in to confirm you\u2019re not a bot. Use --cookies-from-browser or --cookies '
+            'for the authentication. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-youtube-dl  '
+            'for how to manually pass cookies. Also see  https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies  '
+            'for tips on effectively exporting YouTube cookies\n')
+WAYBACK_STDERR='ERROR: [web.archive:youtube] o6f0B9oo87w: The requested video is not archived or indexed\n'
+
+
+def _walled_ladder(monkeypatch):
+    """The real fetch.run_ladder with yt-dlp answering the bot check on every YouTube rung and 'not archived' on the
+    Wayback rung (no transport, no proxy: this Mac's only route)."""
+    from footage import fetch
+    for k in ('FOOTAGE_FETCH_CMD','FOOTAGE_LOCAL_SOURCES','FOOTAGE_PACE_DIR','FOOTAGE_WAYBACK'):
+        monkeypatch.delenv(k,raising=False)
+    calls=[]
+
+    def run(cmd,**kw):
+        calls.append(cmd[-1])
+        err=WAYBACK_STDERR if cmd[-1].startswith(fetch.WAYBACK) else BOT_STDERR
+        return SimpleNamespace(returncode=1,stdout='',stderr=err)
+    monkeypatch.setattr(fetch.subprocess,'run',run)
+    return calls
+
+
+def test_a_source_still_behind_the_wall_is_refused_not_gone_through_the_real_ladder(tmp_path,monkeypatch,worker_path):
+    """The ladder's error ends with the Wayback rung's answer; the wall is read on the YouTube rungs' part."""
+    from footage import fetch
+    calls=_walled_ladder(monkeypatch)
+    url='https://www.youtube.com/watch?v=o6f0B9oo87w'
+    with pytest.raises(fetch.FetchError) as e:
+        fetch.run_ladder(url,[])
+    assert 'not archived' in str(e.value) and 'sign in to confirm' not in str(e.value)[-240:].lower()   # the tail hides it
+    assert primary.wall_error(str(e.value))
+    assert not primary.wall_error('tv: ERROR: [youtube] x: Video unavailable. This video has been removed || wayback: timed out')
+    calls.clear()
+    row=dict(url=url,title='Watermelon',channel='Meta',duration=40,subjects=['Lab'])
+    opened,refused,gone=primary.reopen([row],str(tmp_path/'sources'),log=lambda _:None,space_s=0)
+    assert calls and calls[-1].startswith(fetch.WAYBACK)                         # the default opener walked the real ladder
+    assert opened==[] and gone==[] and [r['url'] for r in refused]==[url]
+    assert len(refused[0]['error'])<=260 and 'Sign in to confirm' in refused[0]['error']
+
+
+def test_a_wall_that_holds_on_the_real_ladder_stops_the_short_instead_of_lifting(tmp_path,monkeypatch,worker_path):
+    import wf1_short as wf,wf1_film
+    _walled_ladder(monkeypatch)
+    rows=[dict(url=f'https://www.youtube.com/watch?v=video{n:05d}',title=f'Launch {n}',channel='Bloomberg Tech',where='youtube',
+               duration=120,subjects=['Lab'],error='default: Sign in to confirm you are not a bot') for n in range(3)]
+    pack=dict(platform_walled=True,coverage=dict(contract=3,windows=[dict(name='Lab',must_show='Its launch',say='a lab',t0=0,t1=4)]),
+              footage=[],pictures={},credits=[],wall=dict(sources=3,refused=rows))
+    (tmp_path/'pack.json').write_text(json.dumps(dict(pack=pack,record=dict(footage=None))))
+    monkeypatch.setattr(primary.time,'sleep',lambda s:None)
+    monkeypatch.setattr(wf.chain,'footage',lambda *a,**k:pytest.fail('nothing opened: nothing to cut'))
+    ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
+    with pytest.raises(RuntimeError,match=wf1_film.WALL):
+        wf.recover_wall(ctx,dict(title='Lab',style={'id':'window'}),pack,waits=(0,))
+    stored=json.load(open(tmp_path/'pack.json'))['pack']
+    assert stored['platform_walled'] is True and stored['wall']['sources']==3 and len(stored['wall']['refused'])==3
+
+
 def test_an_operator_transport_that_fails_falls_through_to_every_local_route(tmp_path,monkeypatch,worker_path):
     from footage import fetch
     monkeypatch.setenv('FOOTAGE_FETCH_CMD','operator-fetch')

@@ -546,6 +546,21 @@ def footage_routes(env_file=None):
     return [k for k in ROUTE_KEYS if os.environ.get(k)]
 
 
+# One pace for every YouTube fetch of a run (footage.fetch.pace): the shorts a run makes at once, their footage engines
+# and the refused-source retries draw from one file-locked bucket under the run folder, at most one request every
+# FOOTAGE_PACE_S seconds after a burst of FOOTAGE_PACE_BURST (19 Nov: two lanes fired about 100 source requests in a
+# few minutes, the burst that brought the wall down on this Mac). A key already in the environment stands.
+FOOTAGE_PACE = (("FOOTAGE_PACE_S", "3"), ("FOOTAGE_PACE_BURST", "4"))
+
+
+def footage_pace(run):
+    """Set the run-wide pace of the run's YouTube fetches; every process the run starts inherits it. Returns its folder."""
+    os.environ.setdefault("FOOTAGE_PACE_DIR", run.p("pace"))
+    for k, v in FOOTAGE_PACE:
+        os.environ.setdefault(k, v)
+    return os.environ["FOOTAGE_PACE_DIR"]
+
+
 def past_supply(state):
     """True when this short's footage is in hand (its run has finished the supply stage): it can go on while a wall
     keeps the shorts that still need footage waiting."""
@@ -637,6 +652,9 @@ def shorts(run, fetched, sel, lanes):
         for url in dict.fromkeys([run.link, fetched["info"].get("webpage_url") or run.link])
     ])
     routes = footage_routes()
+    footage_pace(run)
+    run.log(f"footage fetches paced run-wide: one every {os.environ['FOOTAGE_PACE_S']} s after a burst of "
+            f"{os.environ['FOOTAGE_PACE_BURST']}")
     run.log("footage routes: " + (", ".join(routes) if routes else "this Mac's own address (no proxy or transport configured)"))
     import wf1_film
     ms = sel["moments"]

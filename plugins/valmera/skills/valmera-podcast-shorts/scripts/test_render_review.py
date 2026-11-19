@@ -458,6 +458,29 @@ def test_a_wall_that_holds_stops_the_short_with_its_work_kept_after_the_backoff(
     assert stored['platform_walled'] is True and len(stored['wall']['refused'])==4 and stored['wall']['refused'][0]['tries']==3
 
 
+def test_a_wall_is_never_declared_lifted_on_sources_sorted_gone_while_nothing_was_cut(tmp_path,monkeypatch):
+    """Words the wall makes that the sort does not know (here a 'Video unavailable' under the wall) send every row to
+    'gone': with nothing opened and no clip in the pack the rows wait with the rest, and the short stops with WALL
+    rather than going on to a film with no footage. Once the short has footage, a gone source is not waited for."""
+    import wf1_film,wf1_primary_sources
+    rows=[_refused_row(n) for n in range(4)]
+    pack=_walled_supply(tmp_path,rows)
+    monkeypatch.setattr(wf1_primary_sources,'_open_exact',lambda *a:(_ for _ in ()).throw(RuntimeError('tv: ERROR: [youtube] x: Video unavailable')))
+    monkeypatch.setattr(wf1_primary_sources.time,'sleep',lambda s:None)
+    monkeypatch.setattr(wf.chain,'footage',lambda *a,**k:pytest.fail('nothing opened: nothing to cut'))
+    ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
+    with pytest.raises(RuntimeError,match=wf1_film.WALL):
+        wf.recover_wall(ctx,dict(title='Lab',style={'id':'window'}),pack,waits=(0,120),sleep=lambda s:None)
+    stored=json.load(open(tmp_path/'pack.json'))['pack']
+    assert stored['platform_walled'] is True and stored['wall']['sources']==4 and len(stored['wall']['refused'])==4
+    assert stored['wall']['refused'][0]['tries']==2 and not stored.get('gone_sources')      # tried again at each wait
+    # the same sort on a short that has footage: the gone sources are not waited for and the short goes on
+    pack=_walled_supply(tmp_path,[_refused_row(n) for n in range(4)])
+    pack['footage']=[dict(i=0,clips=[dict(path='/c0.mp4')])]
+    rec=wf.recover_wall(ctx,dict(title='Lab',style={'id':'window'}),pack,waits=(0,))
+    assert pack['platform_walled'] is False and pack['wall']['sources']==0 and len(pack['gone_sources'])==4 and rec is not None
+
+
 def test_a_walled_pack_is_never_returned_as_final_by_supply(tmp_path,monkeypatch):
     import wf1_coverage,wf1_alignment
     pack=_walled_supply(tmp_path,[_refused_row(0),_refused_row(1)],sources=2)

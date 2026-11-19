@@ -327,6 +327,10 @@ def wall_state(ctx, pack):
     return dict(sources=n, refused=rows, since=time.time())
 
 
+def has_footage(pack):
+    return any(row.get('clips') for row in pack.get('footage') or [])
+
+
 def still_walled(wall):
     n, bad = int(wall.get("sources") or 0), len(wall.get("refused") or [])
     return n >= 2 and bad * 2 >= n
@@ -384,8 +388,8 @@ def reopened_footage(ctx, script, pack, opened):
 
 def recover_wall(ctx, script, pack, rec=None, waits=None, sleep=None):
     """Recover a short from YouTube's wall: fetch the exact sources it refused again (wf1_primary_sources.reopen: the
-    operator's transport, every player client on every configured proxy route, the Wayback copy), now and after each
-    of WALL_BACKOFF_S, and cut what opens. When the wall still holds most of them the short stops with wf1_film.WALL:
+    operator's transport, every player client on every configured proxy route, the Wayback copy), after each of WALL_BACKOFF_S
+    when the wall is first met (at once on a resume, WALL_RESUME_S), and cut what opens. When the wall still holds most of them the short stops with wf1_film.WALL:
     its work is kept and podcast.py continues it when the wall lifts. Returns the supply record."""
     import wf1_primary_sources
     wall = wall_state(ctx, pack)
@@ -397,11 +401,17 @@ def recover_wall(ctx, script, pack, rec=None, waits=None, sleep=None):
         if wait:
             ctx.log(f"{len(wall['refused'])} of {wall['sources']} footage sources still refused; trying them again in {wait:.0f} s")
             (sleep or time.sleep)(wait)
-        opened, wall['refused'], lost = wf1_primary_sources.reopen(wall['refused'], keep, log=ctx.log)
-        gone += lost
-        wall['sources'] = max(0, int(wall['sources']) - len(lost))          # a video that is gone is not waited for
+        opened, still, lost = wf1_primary_sources.reopen(wall['refused'], keep, log=ctx.log)
         if opened:
             added += reopened_footage(ctx, script, pack, opened)
+        if lost and not added and not has_footage(pack):
+            # Nothing has opened or been cut for this short: a source sorted as gone does not lift the wall (any yt-dlp
+            # words the wall makes that the sort does not know would otherwise empty it and leave a film with no
+            # footage). Those rows wait and are fetched again with the rest.
+            still, lost = still + lost, []
+        wall['refused'] = still
+        gone += lost
+        wall['sources'] = max(0, int(wall['sources']) - len(lost))          # a video that is gone is not waited for
         pack['wall'] = wall
         save_pack(ctx, pack)
     pack['platform_walled'] = still_walled(wall)
@@ -435,15 +445,11 @@ def refused(foot):
                          or s.get("rung") == "wayback"])
 
 
-WALL_SIGNS = ("sign in to confirm", "not a bot", "--cookies", "http error 403", "403 forbidden", "403: forbidden",
-              "http error 429", "too many requests", "timed out")
-
-
 def wall_error(text):
-    """yt-dlp's words for YouTube's wall, read off the tool's error text (wf1_primary_sources.wall_error is the same
-    rule). "Sign in to confirm your age" is an age gate, not the wall."""
-    t = (text or "").lower()
-    return "your age" not in t and any(s in t for s in WALL_SIGNS)
+    """yt-dlp's words for YouTube's wall, read off the YouTube rungs' part of the tool's error text: the one rule,
+    wf1_primary_sources.wall_error. "Sign in to confirm your age" is an age gate, not the wall."""
+    import wf1_primary_sources
+    return wf1_primary_sources.wall_error(text)
 
 
 def walled(foot):

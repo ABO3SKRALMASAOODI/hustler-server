@@ -38,11 +38,15 @@ it returns media and provenance, never account credentials. Remote rendering nee
    wait, and nothing is delivered until the set is whole: run the same link again when the route answers. Fix a real defect in the product, never by hand in a
    film.
 5. **"YouTube is refusing this Mac as a bot"** is a temporary outage of one input, recovered by the run itself: a
-   busy address is walled on every player for a while (a seven-short run fetches about a hundred sources). When half
+   busy address is walled on every player for a while (a seven-short run fetches about a hundred sources), so the
+   run paces every YouTube fetch of all its shorts through one shared bucket (`FOOTAGE_PACE_S`, 3 s after a burst
+   of 4; `FOOTAGE_PACE_BURST`). When half
    or more of a short's footage sources are refused, it fetches exactly those sources again (the search already
    found them) through every route: the operator's transport (`FOOTAGE_FETCH_CMD`), every player client on every
    configured proxy (`YTDLP_PROXY`, `YTDLP_PROXY_FALLBACK`, read from the environment or the backend's `.env` into
-   the footage engine's), then the Wayback copy; now, after 2 and after 5 minutes. Still refused, the short keeps all
+   the footage engine's), then the Wayback copy; after 2 and after 5 minutes, and at once each time the run continues the short. A source
+   is waited for when YouTube's own answer (not the Wayback copy's) is the wall; while nothing has opened or been
+   cut, no source is set aside as gone. Still refused, the short keeps all
    its work and waits; shorts whose footage is already in hand go on; the run waits 10, 20, 40, 60 and 60 minutes
    and continues the waiting shorts each time (`PODCAST_WALL_WAITS`). A short is never built from no footage and never
    delivered as the bare take. Only if the wall outlasts that does the run stop with this message: nothing is

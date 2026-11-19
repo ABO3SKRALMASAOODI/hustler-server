@@ -344,6 +344,28 @@ def test_footage_routes_reach_the_footage_engine_from_the_operator_config(tmp_pa
     assert podcast.footage_routes(str(env)) == ["FOOTAGE_FETCH_CMD"] and os.environ["YTDLP_PROXY"] == ""
 
 
+def test_the_run_paces_its_youtube_fetches_through_one_bucket_its_processes_share(tmp_path, monkeypatch):
+    for k in ("FOOTAGE_PACE_DIR", "FOOTAGE_PACE_S", "FOOTAGE_PACE_BURST"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(podcast, "WORK_ROOT", str(tmp_path))
+    run = podcast.Run("https://youtu.be/abcdefghijk", str(tmp_path))
+    assert podcast.footage_pace(run) == str(tmp_path / "pace") == os.environ["FOOTAGE_PACE_DIR"]
+    assert float(os.environ["FOOTAGE_PACE_S"]) > 0 and int(os.environ["FOOTAGE_PACE_BURST"]) >= 1
+    sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "..", "..", "..", "..", "worker")))
+    try:
+        from footage import fetch
+    finally:
+        sys.path.pop(0)
+    waits = []
+    monkeypatch.setattr(fetch.time, "sleep", waits.append)
+    n = int(os.environ["FOOTAGE_PACE_BURST"]) + 2
+    for _ in range(n):
+        fetch.pace()                                                                  # what every ladder rung calls
+    assert len(waits) == 2 and min(waits) > 0                                        # past the burst, each waits its turn
+    monkeypatch.setenv("FOOTAGE_PACE_S", "0.5")                                      # a key already set stands
+    assert podcast.footage_pace(run) and os.environ["FOOTAGE_PACE_S"] == "0.5"
+
+
 def test_shorts_past_supply_continue_behind_the_wall_and_the_run_waits_for_the_rest(tmp_path, monkeypatch):
     monkeypatch.setattr(podcast, "WORK_ROOT", str(tmp_path))
     run = podcast.Run("https://youtu.be/abcdefghijk", str(tmp_path))
