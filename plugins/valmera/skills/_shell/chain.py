@@ -98,11 +98,14 @@ def sweep_links(live_dirs):
 
 # ----------------------------------------------------------------- supply: the session pack
 
-def cut(ctx, src, t0, t1, out):
-    """One window of the source, frame-accurate, H.264 at its own size, audio kept."""
+def cut(ctx, src, t0, t1, out, fade_at=None):
+    """One window of the source, frame-accurate, H.264 at its own size, audio kept. fade_at (seconds into the cut):
+    the sound fades out there over 0.08 s and stays silent to the end while the picture runs on (a clip's breath
+    after its last word, when the source's next word would start inside it)."""
+    af = ["-af", f"afade=t=out:st={max(float(fade_at), 0.0):.3f}:d=0.08"] if fade_at is not None else []
     subprocess.run([brand.FF, "-v", "error", "-y", "-ss", f"{t0:.3f}", "-i", src, "-t", f"{t1 - t0:.3f}",
                     "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "fast", "-crf", "16",
-                    "-pix_fmt", "yuv420p", "-r", "30", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", out],
+                    "-pix_fmt", "yuv420p", "-r", "30"] + af + ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", out],
                    check=True, capture_output=True)
 
 
@@ -655,8 +658,12 @@ def end_accent(ctx, sc):
 
 
 def last_word(ctx, sc):
-    """The film's last word (programme seconds), from its own voice track (the narration's spine for a narrated film):
-    the brand finish holds the sound about 1.2 s past it, then lets it fall as the references' music falls."""
+    """The film's last word (programme seconds): the score's own word times when it carries them (a take that runs on
+    past its last word has room tone the voice track would read as speech), else its voice track (the narration's
+    spine for a narrated film). The brand finish holds the sound about 1.2 s past it, then lets it fall as the
+    references' music falls."""
+    if sc.get("last_word_s") is not None:
+        return float(sc["last_word_s"])
     l1 = sc.get("l1_audio") or sc.get("l1")
     if not l1 or not os.path.exists(l1):
         return None
