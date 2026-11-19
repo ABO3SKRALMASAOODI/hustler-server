@@ -347,6 +347,9 @@ def run(a):
         state["out_root"] = os.path.abspath(a.out)
     jsave(os.path.join(run_dir, "run.json"), state)
     ctx = Ctx(run_dir, state, state_root)
+    sounds = chain.use_sound_set()           # the workflow films' own sound-effect set, placed by what the picture does
+    if sounds:
+        ctx.log(f"sound set: {sounds}")
     if swept:
         ctx.log(f"swept stopped runs: {swept}")
     wf = load_workflow(state["workflow"])

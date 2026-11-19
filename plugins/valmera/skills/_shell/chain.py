@@ -246,6 +246,34 @@ def use_music_set():
     return None
 
 
+SOUND_SET = f"{VV}/models/sfx_ref"                        # the workflow films' sound-effect set (sfx_set.py), this Mac only
+SOUND_ENV = "VALMERA_SOUNDS"                               # score.sound and scene.audio read their library from this folder
+PLACEMENT_ENV = "VALMERA_SFX_PLACEMENT"                    # score.sound_screen: every sound answers what the picture does
+
+
+def use_sound_set():
+    """Point the run's sound design and its mixer at the workflow films' sound-effect set (VALMERA_SOUNDS) and place
+    every sound by what the picture does (VALMERA_SFX_PLACEMENT=screen, worker/score/sound_screen.py). The film build,
+    the shell's own sound pass and the render inherit this process's environment. An explicit setting wins; without
+    the set's manifest nothing changes and the product library answers as before. Returns the folder in use, or None.
+    A customer's film never passes here: the editor keeps the product library and its placement."""
+    cur = os.environ.get(SOUND_ENV)
+    if cur:
+        os.environ.setdefault(PLACEMENT_ENV, "screen")
+        return cur
+    if not os.path.isfile(os.path.join(SOUND_SET, "manifest.json")):
+        return None
+    os.environ[SOUND_ENV] = SOUND_SET
+    os.environ.setdefault(PLACEMENT_ENV, "screen")
+    import sys
+    for name in ("score.sound", "scene.audio"):              # a module already loaded read its library folder at import
+        m = sys.modules.get(name)
+        if m is not None and hasattr(m, "SOUNDS"):
+            m.SOUNDS = SOUND_SET
+            getattr(m, "_lib", {}).clear()
+    return SOUND_SET
+
+
 def seg_durs(words, n):
     """Each segment's spoken length, its trailing pause included, from narrate's words.json rows (seg, start, end)."""
     starts, ends = {}, {}
@@ -633,7 +661,11 @@ json.dump(rep, open(a["report"], "w", encoding="utf-8"), default=float, ensure_a
 
 def sound_manifest():
     """The sound library of the worker this run designs and draws with (its sounds are chosen from that library, so a
-    checkout that lags it would call a new recording foreign); the ops checkout only when that worker has none."""
+    checkout that lags it would call a new recording foreign); the ops checkout only when that worker has none. The
+    workflow films' own set (use_sound_set) when the run uses it."""
+    own = os.environ.get(SOUND_ENV)
+    if own and os.path.isfile(os.path.join(own, "manifest.json")):
+        return os.path.join(own, "manifest.json")
     p = os.path.join(brand.worker_dir(), "sound_library", "manifest.json")
     return p if os.path.exists(p) else SOUNDS
 
