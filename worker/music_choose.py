@@ -91,9 +91,15 @@ SET_SIM = 0.75                           # a set track's closeness to the refere
 STORAGE_PREFIX = "music-library/"
 PROVENANCE = "valmera_chosen"
 KINDS = ("podcast", "marketing", "story", "longform")
-LICENSES = ("CC-BY-4.0", "CC-BY-3.0", "CC-BY-2.5", "CC-BY-2.0", "CC0-1.0")
+# Mixkit and Pixabay (19 Nov 2026): the reference-grade music set's licences (lane MUSIC-SET; the owner, 15 Nov: "no
+# licence filtering", metromedia-level music only). Free for commercial video, no attribution; placed synced to picture
+# inside an edit, never offered as a standalone file. Pixabay tracks registered with YouTube Content ID are not listed.
+LICENSES = ("CC-BY-4.0", "CC-BY-3.0", "CC-BY-2.5", "CC-BY-2.0", "CC0-1.0",
+            "Mixkit Stock Music Free License", "Pixabay Content License")
+NO_CREDIT = ("CC0-1.0", "Mixkit Stock Music Free License", "Pixabay Content License")   # no credit line is owed
 # where the publishers serve the files (the audio is fetched from nowhere else)
-SOURCE_HOSTS = ("www.scottbuckley.com.au", "incompetech.com", "prod-1.storage.jamendo.com")
+SOURCE_HOSTS = ("www.scottbuckley.com.au", "incompetech.com", "prod-1.storage.jamendo.com",
+                "assets.mixkit.co", "cdn.pixabay.com")
 FETCH_MAX_MB = 60
 TARGET_LUFS = -16.0
 _CID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,80}$")
@@ -119,7 +125,9 @@ def _valid(row):
         return False
     if row.get("license") not in LICENSES:
         return False
-    if row.get("license") != "CC0-1.0" and not str(row.get("credit") or "").strip():
+    if row.get("license") not in NO_CREDIT and not str(row.get("credit") or "").strip():
+        return False
+    if row.get("youtube_content_id"):
         return False
     z = row.get("z")
     if not (isinstance(z, list) and len(z) >= 8):
@@ -175,6 +183,13 @@ def choosable(strict=False):
     if strict:
         return [t for t in tracks() if t["cid"] in g["pass"] and t["cid"] not in g["fail"]]
     return [t for t in tracks() if t["cid"] not in g["fail"]]
+
+
+def reference_pool():
+    """The tracks of reference grade a customer's edit chooses from: the library tracks that passed the full gate (the
+    reference set's own rows among them since 19 Nov 2026, Content ID tracks left out), the same on every machine;
+    the owner's set folder only where the library has none."""
+    return choosable(strict=True) or set_tracks()
 
 
 # ---------------------------------------------------------------- the reference music set (owner's Mac only)
@@ -294,7 +309,7 @@ def kind_of(name):
 
 def credit_lines(track_or_choice):
     t = track_or_choice.get("track", track_or_choice)
-    if t.get("license") == "CC0-1.0":
+    if t.get("license") in NO_CREDIT:
         return []
     return [str(t.get("credit") or "").strip()]
 
@@ -575,12 +590,13 @@ def _product_call(ctx):
     return call
 
 
-def choose(film, used=(), call=None, ctx=None, n=6):
+def choose(film, used=(), call=None, ctx=None, n=6, pool=None):
     """The music for a film. ``film``: {kind, duration_s, turns:[{t, role}], pace:{cuts10, wps}, speech_share,
     brief}. ``used``: track ids this customer already has (they are marked, then avoided). ``call(system, user,
     schema) -> dict`` is the model; None uses the product's client; no client or any failure keeps the top signal
-    option. Returns None when the library is empty."""
-    opts, prof = shortlist(film, used=used, n=n)
+    option. ``pool``: the tracks to choose from; by default the reference-grade ones (reference_pool), else every
+    track the gate did not fail. Returns None when the library is empty."""
+    opts, prof = shortlist(film, used=used, n=n, pool=pool if pool is not None else (reference_pool() or None))
     if not opts:
         return None
     pick, why, by = 0, "the closest match to the references by signal", "signal"
@@ -717,7 +733,7 @@ def ensure_project_asset(ctx, choice):
                          "caption": "Chosen by Valmera from its licensed library", "library_slug": t["cid"],
                          "library_object": t["storage_key"], "title": t["title"], "author": t.get("author"),
                          "license": t["license"], "license_url": t.get("license_url"), "credit": t.get("credit"),
-                         "license_note": ("Credit required: " + t["credit"]) if t["license"] != "CC0-1.0" else "No credit required",
+                         "license_note": ("Credit required: " + t["credit"]) if t["license"] not in NO_CREDIT else "No credit required",
                          "source_url": t.get("source_url"), "page_url": t.get("page_url"),
                          "source_sha256": t.get("source_sha256"), "lufs": t.get("lufs"),
                          "chosen_by": "valmera", "removable": True})

@@ -329,9 +329,102 @@ def _at():
     return agent_tools
 
 
+# ── the reference-grade tracks (19 Nov 2026) ──────────────────────────────
+# Valmera's licensed library (music_choose: music_library/manifest.json) now
+# carries the reference-grade set (Mixkit and Pixabay tracks that passed the
+# full signal gate against the @metromedia.house beds). They are offered here
+# beside the CC0 pack, placed by "lib:<cid>", so an editor (and an MCP app)
+# asking for a mood gets music of reference grade. The CC0 moods map onto the
+# set's catalogue moods (a fixed mapping of catalogue labels).
+REF_PREFIX = "lib:"
+REF_MOODS = {
+    "upbeat": ("upbeat / pop", "confident / hype"),
+    "chill": ("chill / lofi",),
+    "cinematic": ("tension / cinematic", "emotional / reflective"),
+    "corporate": ("upbeat / pop",),
+    "dramatic": ("tension / cinematic", "dark / mysterious"),
+    "hiphop": ("confident / hype", "dark / mysterious"),
+    "ambient": ("emotional / reflective", "chill / lofi"),
+    "inspiring": ("emotional / reflective", "upbeat / pop"),
+}
+
+
+def reference_tracks(mood=None):
+    """The reference-grade tracks, optionally for one CC0 mood. [] when the
+    library has none (never raises)."""
+    try:
+        import music_choose
+        rows = [t for t in music_choose.reference_pool()
+                if t.get("reference_set")]
+    except Exception:  # noqa: BLE001
+        return []
+    if mood:
+        want = REF_MOODS.get(mood, ())
+        rows = [t for t in rows if t.get("mood") in want]
+    return rows
+
+
+def reference_find(slug):
+    s = _norm_slug(slug)
+    cid = s[len(REF_PREFIX):] if s.startswith(REF_PREFIX) else s
+    return next((t for t in reference_tracks() if t["cid"] == cid), None)
+
+
+def _reference_lines(mood=None):
+    rows = reference_tracks(mood)
+    if not rows:
+        return ""
+    groups = {}
+    for t in rows:
+        groups.setdefault(t.get("mood") or "other", []).append(t)
+    lines = [f"\nREFERENCE GRADE ({len(rows)} track(s), measured against the "
+             "reference reels' music; place with add_library_music(slug="
+             "'lib:<cid>'); Mixkit / Pixabay licences, free for video, no "
+             "credit required). Prefer these:"]
+    for name in sorted(groups):
+        lines.append(f"{name}:")
+        for t in groups[name]:
+            bits = [f"  {REF_PREFIX}{t['cid']} — \"{t['title']}\" by "
+                    f"{t.get('author') or 'unknown'}"]
+            if t.get("bpm"):
+                bits.append(f"{float(t['bpm']):.0f} bpm")
+            if t.get("duration_s"):
+                bits.append(f"{float(t['duration_s']):.0f}s")
+            lines.append(", ".join(bits))
+    return "\n".join(lines)
+
+
+def _add_reference(ctx, track, start=None, end=None, gain_db=None, duck=None,
+                   fade_in_s=None, fade_out_s=None, offset_s=None, loop=None,
+                   purpose=None, user_pick=None):
+    import music_choose
+    import music_gate
+    record, _none = music_gate.resolve_pick(ctx, track["cid"],
+                                            user_pick=user_pick)
+    key, err = music_choose.ensure_project_asset(ctx, {"cid": track["cid"]})
+    if err:
+        return (f"NOT PLACED: {err}. Another reference-grade track of the "
+                "same mood places the same way.")
+    music_gate.grant(ctx, key, music_gate.pick_provenance(record))
+    purpose_n = " ".join(str(purpose or "").split()) or (
+        f"{track.get('mood') or 'reference-grade'} bed from Valmera's "
+        f"library (\"{track['title']}\")")
+    res = _at().add_music(
+        ctx, key, start=start, end=end, gain_db=gain_db, duck=duck,
+        offset_s=offset_s, fade_in_s=fade_in_s, fade_out_s=fade_out_s,
+        loop=True if loop is None else bool(loop), purpose=purpose_n)
+    if str(res).startswith("EDL v"):
+        res += (f"\nTrack: \"{track['title']}\" by {track.get('author')} "
+                f"({track.get('mood')}) — {track.get('license')}, no credit "
+                f"required. Source: {track.get('page_url')}")
+        if record.get("via") == "valmera":
+            res += "\nChosen by Valmera (the customer can keep or remove it)."
+    return res
+
+
 def list_music_library(ctx, mood=None):
     rows = catalog()
-    if not rows:
+    if not rows and not reference_tracks():
         return ("The built-in music library is not available on this "
                 "deployment. Use the user's own music (list_assets "
                 "kind='music') or a link they paste (fetch_url).")
@@ -363,7 +456,7 @@ def list_music_library(ctx, mood=None):
             tag = "  [already used in this user's other projects]" \
                 if t["slug"] in used else ""
             lines.append(f"  {t['slug']} — {describe(t)}{tag}")
-    return head + "\n".join(lines)
+    return head + "\n".join(lines) + _reference_lines(m)
 
 
 def add_library_music(ctx, slug, start=None, end=None, gain_db=None,
@@ -372,6 +465,13 @@ def add_library_music(ctx, slug, start=None, end=None, gain_db=None,
     # duck=None lets add_music decide from the program: a bed ducks under
     # speech, while music that IS the audio (no speech) is never pumped by
     # the sidechain on every loud original sound.
+    ref = reference_find(slug)
+    if ref is not None:
+        return _add_reference(ctx, ref, start=start, end=end,
+                              gain_db=gain_db, duck=duck,
+                              fade_in_s=fade_in_s, fade_out_s=fade_out_s,
+                              offset_s=offset_s, loop=loop, purpose=purpose,
+                              user_pick=user_pick)
     track, err = find(slug)
     if err:
         return err
@@ -413,7 +513,8 @@ def add_library_music(ctx, slug, start=None, end=None, gain_db=None,
 TOOL_SPECS = {
     "list_music_library": (
         list_music_library,
-        "READ: the built-in CC0 music library by mood: exact slugs for "
+        "READ: the built-in music library by mood: the CC0 pack and the "
+        "reference-grade tracks ('lib:<cid>'), exact slugs for "
         "add_library_music (choose the track that fits the film, or place the "
         "one the user named). Licence-verified background tracks (upbeat, "
         "chill, cinematic, corporate, dramatic, hiphop, ambient, inspiring), "
@@ -423,7 +524,8 @@ TOOL_SPECS = {
                   "description": "Optional mood filter."}}),
     "add_library_music": (
         add_library_music,
-        "Place a CC0 library track by exact slug (from list_music_library): "
+        "Place a library track by exact slug (from list_music_library; "
+        "'lib:<cid>' for a reference-grade track): "
         "the one the user named or picked, or the one you choose for the film "
         "(Valmera may choose the music; it is stamped as Valmera's choice and "
         "the customer can remove it). The track is copied into this project once, "

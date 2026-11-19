@@ -257,11 +257,11 @@ def _facts(text):
 # music: the reference-grade set only
 
 def _music_pool():
+    """The reference-grade tracks (music_choose.reference_pool): the library
+    rows that passed the full signal gate, the reference music set's rows
+    among them, identical on every worker."""
     import music_choose
-    pool = music_choose.set_tracks()
-    if pool:
-        return pool, "the reference music set"
-    return music_choose.choosable(strict=True), "library tracks the gate passed"
+    return music_choose.reference_pool(), "the reference-grade music library"
 
 
 def _music(ctx, queries, count):
@@ -290,6 +290,10 @@ def _music(ctx, queries, count):
         ranked = [o["track"] for o in options]
     except Exception:  # noqa: BLE001 - the pool itself, unranked
         ranked = list(pool)
+    # The shortlist keeps at most three tracks of one style; the asked words
+    # search every track (p5744's "chill lofi": 11 lofi tracks, 3 ranked).
+    seen = {t["cid"] for t in ranked}
+    ranked += [t for t in pool if t["cid"] not in seen]
     # The asked genre or title comes first (p5744 asked for lofi three
     # times and got the same film-fit list each time, its words unread).
     lines, matched, hits = [], {}, []
@@ -307,7 +311,17 @@ def _music(ctx, queries, count):
         below = _below_bar(q)
         if below:
             lines.append("  held back, under the music bar: " + "; ".join(
-                f"{t} (fails: {why})" for t, why in below[:4]))
+                f"{t} (fails: {why})" for t, why in below[:4])
+                + "; the reference-grade track of the same mood plays in "
+                  "its place")
+        # p5744 said "Bubbles" among its music asks: a word that names no
+        # track of reference grade may name what the person wants to SEE.
+        lines.append(f"  if '{q}' is something to see rather than hear, "
+                     "the same words find it as a picture: find(kind="
+                     "'stock_video') placed as an overlay, or a drawn "
+                     "element ({'tool': 'add_element', 'args': {'kind': ...}}"
+                     "; particles: embers, sparks, dust, confetti, snow, "
+                     "fireworks, bubbles)")
     tracks = (hits + [t for t in ranked if t not in hits])[:n]
     lines.insert(0, f"{len(tracks)} track(s) from {basis}, asked words "
                     "first, then ranked by fit to this film's length and "

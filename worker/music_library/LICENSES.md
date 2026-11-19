@@ -5,8 +5,10 @@ credit line below wherever the film is published (the video description is fine)
 the delivery note; the customer may keep the music, remove it, or keep the clean export without it.
 
 Not included, and why: Bensound's free tier licenses the downloader's own project only (no platform reuse);
-Pixabay's licence forbids redistributing its music as a library; Epidemic Sound, Artlist, MusicBed and
-AudioJungle (the long-form references' sources) are paid per-account licences.
+Epidemic Sound, Artlist, MusicBed and AudioJungle (the long-form references' sources) are paid per-account
+licences. Mixkit and Pixabay tracks of the reference-grade set are included since 19 Nov 2026 (the owner, 15 Nov:
+metromedia-level music, no licence filtering), synced to picture inside an edit and never offered as a standalone
+file; Pixabay tracks registered with YouTube Content ID are not (the table at the end).
 
 Scott Buckley: "Credits must be provided in the video description"; his orchestral remixes are excluded.
 
@@ -332,3 +334,74 @@ Scott Buckley: "Credits must be provided in the video description"; his orchestr
 | km-maccary-bay | Maccary Bay | Kevin MacLeod | CC-BY-4.0 | "Maccary Bay" Kevin MacLeod (incompetech.com). Licensed under Creative Commons: By Attribution 4.0. http://creativecommons.org/licenses/by/4.0/ | https://incompetech.com/music/royalty-free/index.html?isrc=USUAN1500019 |
 | sb-the-illusionist | The Illusionist | Scott Buckley | CC-BY-4.0 | "The Illusionist" by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au | https://www.scottbuckley.com.au/library/the-illusionist/ |
 | sb-the-great-sea | The Great Sea | Scott Buckley | CC-BY-4.0 | "The Great Sea" by Scott Buckley - released under CC-BY 4.0. www.scottbuckley.com.au | https://www.scottbuckley.com.au/library/the-great-sea/ |
+
+## The reference-grade set (19 Nov 2026)
+
+Mixkit Stock Music Free License (https://mixkit.co/license/#musicFree) and Pixabay Content License (https://pixabay.com/service/license-summary/): free for commercial video, no attribution required. Placed only synced to picture inside an edit, never offered as a standalone download. Pixabay tracks registered with YouTube Content ID are not in the library.
+
+| cid | title | author | licence | credit | source |
+|---|---|---|---|---|---|
+| mk-743 | Holiday 01 | Lily J | Mixkit Stock Music Free License | "Holiday 01" by Lily J (Mixkit) | https://mixkit.co/free-stock-music/mood/mysterious/ |
+| mk-548 | A Voice from The Past | Eugenio Mininni | Mixkit Stock Music Free License | "A Voice from The Past" by Eugenio Mininni (Mixkit) | https://mixkit.co/free-stock-music/electronica/ |
+| mk-678 | Epical Drums 03 | Grigoriy Nuzhny | Mixkit Stock Music Free License | "Epical Drums 03" by Grigoriy Nuzhny (Mixkit) | https://mixkit.co/free-stock-music/orchestral-hybrid/ |
+| mk-552 | Masking the Masters | Eugenio Mininni | Mixkit Stock Music Free License | "Masking the Masters" by Eugenio Mininni (Mixkit) | https://mixkit.co/free-stock-music/electronica/ |
+| mk-572 | Punctus XII | Eugenio Mininni | Mixkit Stock Music Free License | "Punctus XII" by Eugenio Mininni (Mixkit) | https://mixkit.co/free-stock-music/electronica/ |
+| pb-620587 | Cinematic Tension | Kulakovka | Pixabay Content License | "Cinematic Tension" by Kulakovka (Pixabay) | https://pixabay.com/music/action-cinematic-tension-620587/ |
+| pb-620558 | Dark Cinematic | Kulakovka | Pixabay Content License | "Dark Cinematic" by Kulakovka (Pixabay) | https://pixabay.com/music/suspense-dark-cinematic-620558/ |
+| mk-959 | It's Just you | Michael Ramir C. | Mixkit Stock Music Free License | "It's Just you" by Michael Ramir C. (Mixkit) | https://mixkit.co/free-stock-music/pop/ |
+| mk-761 | Percussion 05 | Lily J | Mixkit Stock Music Free License | "Percussion 05" by Lily J (Mixkit) | https://mixkit.co/free-stock-music/rhythmic-underscore/ |
+| mk-846 | I Won't surrender | Michael Ramir C. | Mixkit Stock Music Free License | "I Won't surrender" by Michael Ramir C. (Mixkit) | https://mixkit.co/free-stock-music/trailer-music/ |
+| mk-727 | Pop Track 01 | Lily J | Mixkit Stock Music Free License | "Pop Track 01" by Lily J (Mixkit) | https://mixkit.co/free-stock-music/rhythmic-underscore/ |
+| mk-636 | Knobs | Eugenio Mininni | Mixkit Stock Music Free License | "Knobs" by Eugenio Mininni (Mixkit) | https://mixkit.co/free-stock-music/pop/ |
+| mk-334 | Night Terrors | Arulo | Mixkit Stock Music Free License | "Night Terrors" by Arulo (Mixkit) | https://mixkit.co/free-stock-music/mood/driving/ |
+| mk-469 | Getting Older | Diego Nava | Mixkit Stock Music Free License | "Getting Older" by Diego Nava (Mixkit) | https://mixkit.co/free-stock-music/mood/driving/ |
+| mk-66 | Experimental Fabric | Ahjay Stelino | Mixkit Stock Music Free License | "Experimental Fabric" by Ahjay Stelino (Mixkit) | https://mixkit.co/free-stock-music/hip-hop/ |
+| mk-481 | Alter Ego | Diego Nava | Mixkit Stock Music Free License | "Alter Ego" by Diego Nava (Mixkit) | https://mixkit.co/free-stock-music/hip-hop/ |
+| mk-149 | Trip Hop Vibes | Alejandro Magaña (A. M.) | Mixkit Stock Music Free License | "Trip Hop Vibes" by Alejandro Magaña (A. M.) (Mixkit) | https://mixkit.co/free-stock-music/hip-hop/ |
+| mk-693 | House 01 | Grigoriy Nuzhny | Mixkit Stock Music Free License | "House 01" by Grigoriy Nuzhny (Mixkit) | https://mixkit.co/free-stock-music/mood/powerful/ |
+| pb-628569 | LoFi Upbeat Opener (Clouds) | BombinSound | Pixabay Content License | "LoFi Upbeat Opener (Clouds)" by BombinSound (Pixabay) | https://pixabay.com/music/old-school-hip-hop-lofi-upbeat-opener-clouds-628569/ |
+| pb-176238 | Old School Hip Hop - Boom Bap #1 Weirdo | AspieDuck | Pixabay Content License | "Old School Hip Hop - Boom Bap #1 Weirdo" by AspieDuck (Pixabay) | https://pixabay.com/music/beats-old-school-hip-hop-boom-bap-1-weirdo-176238/ |
+| mk-519 | Motivation Gets in the Way | Diego Nava | Mixkit Stock Music Free License | "Motivation Gets in the Way" by Diego Nava (Mixkit) | https://mixkit.co/free-stock-music/mood/driving/ |
+| pb-614877 | Phonk Reel | Kulakovka | Pixabay Content License | "Phonk Reel" by Kulakovka (Pixabay) | https://pixabay.com/music/phonk-phonk-reel-614877/ |
+| pb-631168 | Hip Hop Beat - Hip Hop Beats | Pumpupthemind | Pixabay Content License | "Hip Hop Beat - Hip Hop Beats" by Pumpupthemind (Pixabay) | https://pixabay.com/music/old-school-hip-hop-hip-hop-beat-hip-hop-beats-631168/ |
+| mk-489 | Golden Beach | Diego Nava | Mixkit Stock Music Free License | "Golden Beach" by Diego Nava (Mixkit) | https://mixkit.co/free-stock-music/hip-hop/ |
+| mk-390 | Bene Gisserit | Arulo | Mixkit Stock Music Free License | "Bene Gisserit" by Arulo (Mixkit) | https://mixkit.co/free-stock-music/hip-hop/ |
+| mk-591 | Kroks | Eugenio Mininni | Mixkit Stock Music Free License | "Kroks" by Eugenio Mininni (Mixkit) | https://mixkit.co/free-stock-music/mood/reflective/ |
+| mk-63 | Classique | Ahjay Stelino | Mixkit Stock Music Free License | "Classique" by Ahjay Stelino (Mixkit) | https://mixkit.co/free-stock-music/mood/melancholic/ |
+| mk-92 | Time Out | Ahjay Stelino | Mixkit Stock Music Free License | "Time Out" by Ahjay Stelino (Mixkit) | https://mixkit.co/free-stock-music/mood/reflective/ |
+| mk-328 | Atop A Mustang | Arulo | Mixkit Stock Music Free License | "Atop A Mustang" by Arulo (Mixkit) | https://mixkit.co/free-stock-music/chillout/ |
+| mk-434 | Sun-Kissed Skin | Arulo | Mixkit Stock Music Free License | "Sun-Kissed Skin" by Arulo (Mixkit) | https://mixkit.co/free-stock-music/hip-hop/ |
+| mk-760 | Relaxation 07 | Lily J | Mixkit Stock Music Free License | "Relaxation 07" by Lily J (Mixkit) | https://mixkit.co/free-stock-music/mood/reflective/ |
+| mk-662 | House One | Francisco Alvear | Mixkit Stock Music Free License | "House One" by Francisco Alvear (Mixkit) | https://mixkit.co/free-stock-music/chillout/ |
+| mk-666 | Hip Hop Two | Francisco Alvear | Mixkit Stock Music Free License | "Hip Hop Two" by Francisco Alvear (Mixkit) | https://mixkit.co/free-stock-music/chillout/ |
+| mk-27 | Serene Moments | Ahjay Stelino | Mixkit Stock Music Free License | "Serene Moments" by Ahjay Stelino (Mixkit) | https://mixkit.co/free-stock-music/chillout/ |
+| mk-893 | Walking Dead | Michael Ramir C. | Mixkit Stock Music Free License | "Walking Dead" by Michael Ramir C. (Mixkit) | https://mixkit.co/free-stock-music/electronica/ |
+| mk-270 | Shark Thank | Arulo | Mixkit Stock Music Free License | "Shark Thank" by Arulo (Mixkit) | https://mixkit.co/free-stock-music/orchestral-hybrid/ |
+| mk-116 | La La Land | Alejandro Magaña (A. M.) | Mixkit Stock Music Free License | "La La Land" by Alejandro Magaña (A. M.) (Mixkit) | https://mixkit.co/free-stock-music/downtempo/ |
+| mk-1009 | Slow Walk | Michael Ramir C. | Mixkit Stock Music Free License | "Slow Walk" by Michael Ramir C. (Mixkit) | https://mixkit.co/free-stock-music/chillout/ |
+| mk-150 | A Blue Day | Alejandro Magaña (A. M.) | Mixkit Stock Music Free License | "A Blue Day" by Alejandro Magaña (A. M.) (Mixkit) | https://mixkit.co/free-stock-music/chillout/ |
+| mk-516 | Jump into Hope | Diego Nava | Mixkit Stock Music Free License | "Jump into Hope" by Diego Nava (Mixkit) | https://mixkit.co/free-stock-music/chillout/ |
+| mk-99 | Hot Love | Ahjay Stelino | Mixkit Stock Music Free License | "Hot Love" by Ahjay Stelino (Mixkit) | https://mixkit.co/free-stock-music/chillout/ |
+| mk-185 | You | Andrew Ev | Mixkit Stock Music Free License | "You" by Andrew Ev (Mixkit) | https://mixkit.co/free-stock-music/chillout/ |
+| pb-620528 | Synthwave Pop | Kulakovka | Pixabay Content License | "Synthwave Pop" by Kulakovka (Pixabay) | https://pixabay.com/music/synthwave-synthwave-pop-620528/ |
+| mk-635 | Adone | Eugenio Mininni | Mixkit Stock Music Free License | "Adone" by Eugenio Mininni (Mixkit) | https://mixkit.co/free-stock-music/funk/ |
+| mk-155 | ET Sightings | Alejandro Magaña (A. M.) | Mixkit Stock Music Free License | "ET Sightings" by Alejandro Magaña (A. M.) (Mixkit) | https://mixkit.co/free-stock-music/electronica/ |
+| mk-115 | Kraft Twerk | Alejandro Magaña (A. M.) | Mixkit Stock Music Free License | "Kraft Twerk" by Alejandro Magaña (A. M.) (Mixkit) | https://mixkit.co/free-stock-music/electronic/ |
+| pb-624644 | Dark Synthwave | Kulakovka | Pixabay Content License | "Dark Synthwave" by Kulakovka (Pixabay) | https://pixabay.com/music/synthwave-dark-synthwave-624644/ |
+| pb-620567 | Gym Phonk | Kulakovka | Pixabay Content License | "Gym Phonk" by Kulakovka (Pixabay) | https://pixabay.com/music/phonk-gym-phonk-620567/ |
+| mk-726 | Uplifting Bass | Lily J | Mixkit Stock Music Free License | "Uplifting Bass" by Lily J (Mixkit) | https://mixkit.co/free-stock-music/electronic/ |
+| mk-298 | Lil Haiti Beat | Arulo | Mixkit Stock Music Free License | "Lil Haiti Beat" by Arulo (Mixkit) | https://mixkit.co/free-stock-music/mood/mysterious/ |
+| pb-564082 | Electronic - Golden | Easy_Eva | Pixabay Content License | "Electronic - Golden" by Easy_Eva (Pixabay) | https://pixabay.com/music/electronic-electronic-golden-564082/ |
+| mk-486 | Alone | Diego Nava | Mixkit Stock Music Free License | "Alone" by Diego Nava (Mixkit) | https://mixkit.co/free-stock-music/electronica/ |
+| pb-516363 | Dark 80s Sci-Fi Atmosphere | Universfield | Pixabay Content License | "Dark 80s Sci-Fi Atmosphere" by Universfield (Pixabay) | https://pixabay.com/music/ambient-dark-80s-sci-fi-atmosphere-516363/ |
+| mk-719 | Drum and Bass Vibes | Lily J | Mixkit Stock Music Free License | "Drum and Bass Vibes" by Lily J (Mixkit) | https://mixkit.co/free-stock-music/electronic/ |
+| mk-1162 | Where's Hope? | Michael Ramir C. | Mixkit Stock Music Free License | "Where's Hope?" by Michael Ramir C. (Mixkit) | https://mixkit.co/free-stock-music/electronica/ |
+| mk-756 | Workout 03 | Lily J | Mixkit Stock Music Free License | "Workout 03" by Lily J (Mixkit) | https://mixkit.co/free-stock-music/electronica/ |
+| mk-629 | Skeeomaver Sound | Eugenio Mininni | Mixkit Stock Music Free License | "Skeeomaver Sound" by Eugenio Mininni (Mixkit) | https://mixkit.co/free-stock-music/mood/driving/ |
+| mk-483 | Soul Damage | Diego Nava | Mixkit Stock Music Free License | "Soul Damage" by Diego Nava (Mixkit) | https://mixkit.co/free-stock-music/chillout/ |
+| mk-125 | Techno Fest Feel | Alejandro Magaña (A. M.) | Mixkit Stock Music Free License | "Techno Fest Feel" by Alejandro Magaña (A. M.) (Mixkit) | https://mixkit.co/free-stock-music/mood/driving/ |
+| mk-73 | Torn Threads | Ahjay Stelino | Mixkit Stock Music Free License | "Torn Threads" by Ahjay Stelino (Mixkit) | https://mixkit.co/free-stock-music/electronica/ |
+| mk-56 | Couture | Ahjay Stelino | Mixkit Stock Music Free License | "Couture" by Ahjay Stelino (Mixkit) | https://mixkit.co/free-stock-music/electronica/ |
+| mk-1075 | Shahada | Michael Ramir C. | Mixkit Stock Music Free License | "Shahada" by Michael Ramir C. (Mixkit) | https://mixkit.co/free-stock-music/electronica/ |
+| mk-429 | State of Mind | Arulo | Mixkit Stock Music Free License | "State of Mind" by Arulo (Mixkit) | https://mixkit.co/free-stock-music/electronica/ |
+| mk-950 | Please Don't Leave Without Me | Michael Ramir C. | Mixkit Stock Music Free License | "Please Don't Leave Without Me" by Michael Ramir C. (Mixkit) | https://mixkit.co/free-stock-music/pop/ |
