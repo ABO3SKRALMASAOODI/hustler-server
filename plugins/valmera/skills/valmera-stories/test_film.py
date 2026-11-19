@@ -376,7 +376,7 @@ def test_annotate_fills_fields_and_keeps_say_byte_identical():
     assert all(s["see"] for s in out["segments"]) and out["colour_turn"] == 2
     assert out["segments"][2]["see"] == [dict(thing="Toy Story", as_of="1995 release", must_show="the film", moment=None, search=None,
                                               still_only=False)]   # not-named dropped
-    assert out["segments"][0]["show"] == [dict(text="nearly", role="key", word_i=1)]
+    assert out["segments"][0]["show"] == [dict(text="nearly", role="key", word_i=1, **{"from": "write"})]
     assert out["segments"][1]["show"][0]["word_i"] == 0 and out["segments"][1]["show"][0]["role"] == "name"     # an added name item
     assert out["segments"][0]["phrases"] == [[0, 3], [3, 5]]
     assert out["segments"][2]["finish"] == "none"            # the payoff is always colour
@@ -410,7 +410,7 @@ def test_annotate_takes_out_added_items_that_do_not_verify():
     out, rep = writer.annotate(sc, ask=ask, verify_fn=vf, log=lambda m: None)
     assert seen == [True, False] and rep["verify"]["ok"]
     assert all(x["text"] != "1999" for g in out["segments"] for x in g["show"])
-    assert out["segments"][2]["show"] == [dict(text="$362 million", role="figure", word_i=2)]   # given items stay
+    assert out["segments"][2]["show"] == [dict(text="$362 million", role="figure", word_i=2, **{"from": "write"})]   # given items stay
 
 
 def test_device_budget_keeps_best_ranked_within_a_quarter():

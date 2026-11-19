@@ -38,7 +38,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import writer  # noqa: E402
 
-KEEP_LEN = 0.10           # the film's spoken words may move this much (its pictures are planned on the old length)
+KEEP_LEN = 0.10           # the setup's segments keep about this much of their length (the hook and the close may land shorter)
 EAR_MODEL = "gpt-6.1-sol"   # pinned to OpenAI: writer.ask would turn to Anthropic when its key is present (Anthropic spend: $0)
 FIELDS = ("say", "emphasis", "pause_after", "melody", "pace", "direction")
 
@@ -148,7 +148,10 @@ def rewrite(script, form="story", effort="medium"):
                "Never say the same sentence twice in the film: when a segment already asks the question, it stays there and no "
                "other segment repeats it.\n"
                "Rewrite every segment, in the same order, one for one (the pictures are planned per segment). Keep each "
-               "segment's length within about ten percent of its original words. Keep `must_keep_words` exactly as written "
+               "middle segment's length within about ten percent of its original words. The hook (the first segment) and "
+               "the close (the last) may come out shorter: the hook opens on its collision, the story's strongest image or "
+               "claim with its known name, never on a date or a setting, and the close is one landing line on the fact that "
+               "resolves the hook (the best reels' last line runs two to five seconds). Keep `must_keep_words` exactly as written "
                "somewhere in that segment's say. The spoken form stays: every number, year, unit and currency in words the way "
                "it is said, no digits, no symbols, no abbreviations; punctuation is commas, full stops and question marks only (no "
                "dashes, colons, semicolons or brackets: a narrator breathes at a comma or a full stop).\n"
@@ -291,9 +294,8 @@ def for_ear(script, form="story", effort="medium", log=print):
         reverted[i] = f"says again what another segment says: {sent}"
     n0 = sum(len(str(s.get("say", "")).split()) for s in segs)
     n1 = sum(len(str(s.get("say", "")).split()) for s in out["segments"])
-    if n0 and abs(n1 - n0) / n0 > KEEP_LEN:
-        log(f"ear: {n1} words against {n0}: outside {KEEP_LEN:.0%}, the script stands")
-        return script, dict(ok=False, error=f"length {n1} against {n0}", spend=[use1, use2])
+    # the length is recorded, never a reason to throw the rewrite out: the narration is read, timed and its pictures
+    # planned after the script is final (wf3.timed, supply), so a close cut to one line stands
     if out["segments"]:
         if "hook_line" in out:
             out["hook_line"] = out["segments"][0]["say"]

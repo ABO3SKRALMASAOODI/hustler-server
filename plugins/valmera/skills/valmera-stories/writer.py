@@ -391,7 +391,9 @@ REEL_DATA = (
     'time, never on the payoff or the close. "colour_turn": the index of the one segment from which the film stays in colour '
     '(the turn or the release). In this style each item of "show" is {"text": as printed, "role": figure|name|key|chapter|ordinal}: the '
     'payoff carries its figure (role figure), each person (is=person) gets a name item at the line that first says them, at '
-    'most one key word on the turn, a chapter word only at a joint of the story; "ordinal" only for the numbers of a list the film '
+    'most one key word on the turn, a chapter title only where the story truly changes subject (a film of about a minute and a half '
+    'needs none, at most one), made of the words that segment itself speaks or the name of the thing it turns on: the beat marks '
+    '(hook, turn, low, payoff, close) are the editor\'s private notes on the structure, never words for the screen; "ordinal" only for the numbers of a list the film '
     'itself counts out ("1.", "2.", "3." on its items, one number each, from 1), never a rank, a date or a quantity: a rank ("#1", '
     '"No. 1") is a figure. "collage": true on the two to four segments '
     'that name or list several things at once: their pictures land as stacked prints. Mark beats truthfully: one "low" where '
@@ -482,10 +484,10 @@ PHRASE_MAX = 5
 ANNOTATE_SYSTEM = """You are the picture editor of a narrated vertical story film cut like the best documentary reels. The script is final and checked: you never change a word of it. You read it and write the data the cut needs.
 
 For each segment:
-- "see": one to four items, in the order the line says them: {"thing": exactly one name from the named list, "as_of": the story time of that thing as THIS line means it, a year plus its version or state (e.g. "the finished 1995 release, not the 1993 test reel"; "Pixar's Point Richmond office in 1993, not the later Emeryville campus"), "must_show": one sentence, only what must be VISIBLE in a picture for it to carry this line (who or what, doing what, in which version); never the film's treatment of it (colour, black and white, muted, grain, composition, framing): treatment belongs to "finish" alone, "moment": the scene or event the line describes when it describes one (e.g. "Woody knocking Buzz out of the window in the finished 1995 film"), else null, "search": one photo search an archivist would type to find a photograph of exactly this thing at this time (e.g. "John Lasseter 1995"; "Pixar Point Richmond 1993"), "still_only": true when the true picture of this line is still by its nature (a storyboard, a document, a drawing, a letter, a printed page), else false}. A line about a scene of a film names that scene as its moment, in the version the line means.
+- "see": one to four items, in the order the line says them: {"thing": exactly one name from the named list, "as_of": the story time of that thing as THIS line means it, a year plus its version or state (e.g. "the finished 1995 release, not the 1993 test reel"; "Pixar's Point Richmond office in 1993, not the later Emeryville campus"), "must_show": one sentence, only what must be VISIBLE in a picture for it to carry this line (who or what, doing what, in which version); never the film's treatment of it (colour, black and white, muted, grain, composition, framing): treatment belongs to "finish" alone, "moment": the scene or event the line describes when it describes one (e.g. "Woody knocking Buzz out of the window in the finished 1995 film"), else null, "search": one photo search an archivist would type to find a photograph of exactly this thing at this time (e.g. "John Lasseter 1995"; "Pixar Point Richmond 1993"), "still_only": true when the true picture of this line is still by its nature (a storyboard, a document, a drawing, a letter, a printed page), else false}. A line about a scene of a film names that scene as its moment, in the version the line means. The hook's first see item is the moment its collision names (the person in the scene, the crowd, the screen), the strongest picture of the film, never the figure the line says (a figure belongs to type).
 - "list": true when the line itself reads as a list of several distinct things or a quick montage of them (the cut may burst through them in a few frames each), else false; "list_items": the things of the list, in order, as see things, when list is true.
 - "finish": bw|gate|crt|none and "finish_rank" (1 = the segment that most needs it). Black and white, a film gate or scanlines are a device for a memory, an early version, the past cut in, a low point; never a look for the whole film. The devices together cover 12 to 25 percent of the spoken words, never the payoff or the close, never a segment at or after the colour turn.
-- "show": the segment's display items, each {"text": as printed, "role": figure|name|key|chapter|ordinal (ordinal only for the numbers of a list the film itself counts out, "1.", "2.", from 1; a rank such as #1 is a figure), "word_i": the index of the spoken word it lands on (a figure: the first word of the spoken figure; a name: the first word of the name; a chapter: the first word of the segment), "big": the part of the text set large (e.g. "$362M"), "small": the rest set small under it (e.g. "box office, 1995"), or null}. Every item needs its word_i. Keep every given item's text exactly. You may add: the payoff's figure if it lacks one (a figure printed with digits only when the same figure stands in a fact's quote), a name item for each person (is=person) at the line that first says them, one key word on the turn, and a short chapter title (two to four words) on the segment that opens each new section (the turn, the low point, the payoff). Display type lands on about one picture in six across the film: a figure card for each verified figure, a name for each person, a chapter at each turn. At most three items a segment.
+- "show": the segment's display items, each {"text": as printed, "role": figure|name|key|chapter|ordinal (ordinal only for the numbers of a list the film itself counts out, "1.", "2.", from 1; a rank such as #1 is a figure), "word_i": the index of the spoken word it lands on (a figure: the first word of the spoken figure; a name: the first word of the name; a chapter: the first word of the segment), "big": the part of the text set large (e.g. "$362M"), "small": the rest set small under it (e.g. "box office, 1995"), or null}. Every item needs its word_i. Keep every given item's text exactly. You may add: the payoff's figure if it lacks one (a figure printed with digits only when the same figure stands in a fact's quote), a name item for each person (is=person) at the line that first says them, one key word where the story turns, and a chapter title only where the story truly changes subject (a film of about a minute and a half needs none, at most one). A chapter title is words a viewer reads as the story itself: exactly the spoken word or words of that segment, or the name of the thing it turns on, the way a key word is. Each segment's role in the story is given in plain words so you know the structure; those roles are the editor's private notes and never become words on the screen. Display type lands on about one picture in six across the film: a figure card for each verified figure, a name for each person, a key word or a spoken phrase where the story needs weight. At most three items a segment.
 - "phrases": the caption lines: lists of word indices, each 1 to 5 consecutive indices, together covering every word of the segment once and in order. Never split a name, a figure, a date or a noun phrase across two lines; a line reads as one unit of sense.
 
 And once for the film: "colour_turn": the index of the one segment from which the film stays in colour (the turn or the release); "true_pictures": for every named thing, where a faithful picture of it can exist: "stills" (a free photo archive holds true photographs of it: a real person, a building, an object), "footage" (it exists faithfully only in the work's own moving pictures: an animated film's characters and scenes, whose photographs are toys, rides, statues and costumes), or "both".
@@ -498,13 +500,29 @@ Answer with one JSON object only: {"see": [one to four items, in the order the l
 TRUE_PICTURES = ("stills", "footage", "both")
 
 
+# A segment's role in the story, said to the picture editor in plain words: a bare label beside the words ("beat=turn")
+# reads as a ready-made title, and the round-1 film printed "THE TURN" on a card (19 Nov).
+BEAT_PROSE = {
+    "hook": "the opening line that must stop a viewer",
+    "setup": "it sets the story up",
+    "turn": "where the story turns",
+    "low": "where the story is at its worst",
+    "payoff": "where the story pays off",
+    "close": "the last line, which answers the opening",
+}
+
+
+def beat_prose(beat):
+    return BEAT_PROSE.get(str(beat or ""), "it carries the story on")
+
+
 def _ann_content(sc, idea_full, problems=None):
     rows = []
     for k, s in enumerate(sc["segments"]):
         ws = str(s.get("say", "")).split()
         given = [dict(text=str(x.get("text") if isinstance(x, dict) else x), role=x.get("role") if isinstance(x, dict) else None)
                  for x in s.get("show") or []]
-        rows.append(f"{k}. beat={s.get('beat')} era={s.get('era')} show={json.dumps(given, ensure_ascii=False)}\n   words: "
+        rows.append(f"{k}. role in the story: {beat_prose(s.get('beat'))}; era={s.get('era')} show={json.dumps(given, ensure_ascii=False)}\n   words: "
                     + " ".join(f"{j}:{w}" for j, w in enumerate(ws)))
     named = [dict(name=n.get("name"), is_=n.get("is"), must_show=n.get("must_show")) for n in sc.get("named") or []]
     facts = [dict(id=f.get("id"), claim=f.get("claim"), quote=f.get("quote")) for f in sc.get("facts") or []]
@@ -741,7 +759,8 @@ def annotate(sc, idea_full=None, ask=None, verify_fn=None, log=print, problems=N
         rep = verify_fn(out)
     for s in out["segments"]:
         for x in s.get("show") or []:
-            x.pop("added", None)
+            # which prompt wrote the item stays on the record (write or annotate; wf3's density pass marks its own)
+            x.setdefault("from", "annotate" if x.pop("added", None) else "write")
     ok = bool(rep.get("ok")) and not problems
     return out, dict(ok=ok, problems=problems or [], device_share_words=share, dropped_unverified=dropped, verify=rep, spend=spend,
                      device_added=device_added)
@@ -1803,7 +1822,7 @@ BANK_MAX = 40
 SKIP_HOSTS = ("commons.wikimedia.org",)  # a picture category holds no sentence of the story (identity of the host only)
 FETCH_THREADS = 6
 
-SPINE_CLAIMS_SYSTEM = """You are the story editor of a narrated documentary film of about a minute and a half. Before a word is written, the story's spine is researched as claims. From the idea below write its spine: for each beat (hook, turn, payoff, close) the one or two facts it cannot do without, each one plain checkable sentence naming who did what to whom, when, and the figure, with no detail the point does not need. The hook's claims are both halves of its collision (a rejection AND what came of it); the turn's claim is the moment the story turns; the payoff's claim names the figure and who paid or got it; the close's claim is the fact that makes the irony true. Use only what the idea says.
+SPINE_CLAIMS_SYSTEM = """You are the story editor of a narrated documentary film of about a minute and a half. Before a word is written, the story's spine is researched as claims. From the idea below write its spine: for each beat (hook, turn, payoff, close) the one or two facts it cannot do without, each one plain checkable sentence naming who did what to whom, when, and the figure, with no detail the point does not need. The hook's claims are both halves of its collision (a rejection AND what came of it), led by the collision itself: the story's strongest image or claim with a known name, never a date or a setting at its head (a date, when it matters, belongs to the setup); the best reels reach it within about three and a half seconds of speech. The turn's claim is the moment the story turns; the payoff's claim names the figure and who paid or got it; the close's claim is ONE fact, the one that resolves the hook's collision and makes the irony true, said in one landing line of two to five seconds: never a bundle of every supporting fact. Use only what the idea says.
 
 Answer with one JSON object only: {"spine": [{"beat": "hook" | "turn" | "payoff" | "close", "claim": the claim}]}"""
 
@@ -2157,15 +2176,25 @@ def spine_again(bank, idea, cids, why, log=print, ask_research=None, ask_extract
 
 BANK_WRITE_MODEL = OA_MODEL
 
+# The judge's beat budgets in words at the narrator's rate (Easton read the round-1 film at 197 words a minute, 3.3 a
+# second): the hook's collision by 3.7 s, the close at most 5 s (timing.py measures both on the read itself and the
+# writer rewrites what is over)
+HOOK_LAND_WORDS = 12
+CLOSE_WORDS = 15
+
 BANK_WRITE_RULES = (
     "# The spine\nThe hook, the turn, the payoff and the close each carry the idea's point (the reversal, the price, the irony) "
     "in words the bank supports. The spine below gives, for each beat, the claim it must carry and the bank facts that state "
     "it: write that beat from those facts, as sharply as they allow. The first segment is the hook: it works in the first "
     "second, a known name and the collision itself (when the idea is 'X rejected Y, then paid for copying him', the hook says "
-    "the rejection AND the price), never a greeting, a question to the viewer, or one flat half of the story. The turn is "
-    "said as a turn. The payoff lands its figure and who paid or got it. The last segment is the close: it reframes the hook "
-    "in one sentence that says the hook's collision again, resolved, in new words, with the facts that carry it (never a "
-    "moral, a lesson or someone's comment on the story, never flatter than the hook). A true line and a "
+    "the rejection AND the price), never a greeting, a question to the viewer, or one flat half of the story. It opens on "
+    "the story's strongest image or claim, never on a date, a place or a setting (a date belongs to the setup), and its "
+    "collision is spoken within about " + str(HOOK_LAND_WORDS) + " words (the best reels' hook lands in about three and a "
+    "half seconds); mark in the hook's \"lands\" the word or two where its collision lands. The turn is "
+    "said as a turn. The payoff lands its figure and who paid or got it. The last segment is the close: ONE landing line of "
+    "at most about " + str(CLOSE_WORDS) + " words (the best reels' last line runs two to five seconds) that says the hook's "
+    "collision again, resolved, in new words, on the one fact that resolves it, not every fact that supports it (never a "
+    "hedge, a moral, a lesson or someone's comment on the story, never flatter than the hook). A true line and a "
     "sharp line are the same line here: the bank holds the words for the point, so never write a flat line where the bank "
     "holds the point. No call to action, no 'follow for more'.\n\n"
     "Mark the beats: segment 0 is the hook, exactly one segment the turn, one the payoff, the last segment the close; the "
@@ -2189,7 +2218,7 @@ def write_from_bank(idea, card, form, bank, voices=None, notes=None, effort="hig
               "over real footage and photographs of what it names, for a " + F["name"] + ". You write ONLY from the bank of verified "
               "facts you are given: each is a sentence found word for word on its page, with whose statement it is and when. "
               "Nothing is invented, rounded or dramatised beyond them. You also direct the actor: pace, energy, melody, emphasis "
-              "and pauses per segment. Write for the ear: a thought runs on with commas and 'and', 'but', 'so' until it lands, a full stop only where it lands, lengths mixed (never three short sentences in a row, never a verbless fragment as a sentence), concrete nouns, numbers a listener can hold.")
+              "and pauses per segment. Write for the ear: a thought runs on with commas and 'and', 'but', 'so' until it lands, a full stop only where it lands (the hook and the close excepted: each lands at once), lengths mixed (never three short sentences in a row, never a verbless fragment as a sentence), concrete nouns, numbers a listener can hold.")
     system += f"\n\n# The bar\n{references()}\n\n" + BANK_WRITE_RULES
     system += ("Return JSON only: {\"title\": a plain title, \"voice\": one voice id, \"pace\": slow|steady|brisk|fast, \"energy\": "
                "low|mid|high, \"hook_line\": the first segment's words, \"close_line\": the last segment's words, \"names\": [every "
@@ -2198,7 +2227,8 @@ def write_from_bank(idea, card, form, bank, voices=None, notes=None, effort="hig
                "abbreviations, no symbols, \"show\": at most two short display strings for this segment as they would be printed, "
                "digits allowed (a year, a figure, a name), or [], \"beat\": hook|setup|turn|low|payoff|close, \"pace\": "
                "slow|steady|brisk|fast, \"pictures\": names from the named list this segment talks about, in order, \"melody\": "
-               "falling|rising|level|wide, \"emphasis\": [one or two words of say], \"pause_after\": seconds of silence after it "
+               "falling|rising|level|wide, \"emphasis\": [one or two words of say], \"lands\": (the hook only) the word or two of say "
+               "where its collision lands, \"pause_after\": seconds of silence after it "
                "(0.18 to 0.26 inside the story; 0.35 to 0.5 only where the story turns, at most three times), \"direction\": a few "
                "words for the actor, \"facts\": ids of the bank facts it states, \"quotes\": every span of say that presents "
                "someone's own words as {\"words\": the span exactly as in say, \"who\": whose words, \"fact\": the id of the bank "
