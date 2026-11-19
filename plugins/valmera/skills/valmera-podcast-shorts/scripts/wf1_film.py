@@ -1250,8 +1250,11 @@ def build(script, sup, style_id, direction=None):
     cover = sum(x[1] - x[0] for x in ins) / max(f_voice_end, 1)
     look_f = sorted({0, 12, 40, *[x[0] + 5 for x in ins], *[x[1] + 8 for x in ins[::2]], *[a + 10 for a, _, _ in shown],
                      *([turn_f + 10] if turn_f is not None else []), f_end - 3})
+    dev_events = _director().device_events(asks) if asks else []
     beats = dict(dur_f=f_end, voice_f=[LEAD_F, f_voice_end], cuts=sorted(set(cut_pts)), changes=changes,
-                 events=sorted(set(P.events) | set(cut_pts) | set(changes) | {it["f"][0] for it in l1["items"] if it["k"] == "card"}),
+                 events=sorted(set(P.events) | set(cut_pts) | set(changes) | {it["f"][0] for it in l1["items"] if it["k"] == "card"}
+                               | {e["f"] for e in dev_events if 0 <= e["f"] < f_end}),
+                 device_events=dev_events,
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, caption_contract=1, display=[dict(f=[a, b], text=t) for a, b, t in shown],
                  display_count=dict(proposed=len(proposed), landed=len(shown)),
                  labels=[dict(f=[a, b], text=t) for a, b, t in labels], turn_f=turn_f, story_turn_f=story_turn_f, pace=l1.get("pace"), cutaway_share=round(cover, 3),

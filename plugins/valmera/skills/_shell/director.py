@@ -636,6 +636,23 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
     return out, notes
 
 
+STRENGTH = {"white": 0.9, "neg": 0.8, "black": 0.6, "neg_hold": 0.7, "neg_world": 0.7, "rhyme": 0.7, "answer": 0.7, "lamp": 0.6,
+            "diecut": 0.6, "tint": 0.5, "variant": 0.5, "finish": 0.4, "arc": 0.3, "spotlight": 0.3, "word_blend": 0.4,
+            "blur_in": 0.25, "neg_split": 0.5}
+
+
+def device_events(asks):
+    """The landings the Director asked for, as events the separate music and sound workflow may answer (no device makes
+    a sound): [{"f", "kind", "strength"}], in film order."""
+    out = []
+    for a in asks or []:
+        f = a.get("f")
+        f = f[0] if isinstance(f, list) else f
+        if isinstance(f, int):
+            out.append(dict(f=int(f), kind=str(a.get("dev")), strength=STRENGTH.get(str(a.get("dev")), 0.5)))
+    return sorted(out, key=lambda e: e["f"])
+
+
 def section_frames(sec, frame_of, seg_span=None, dur_f=None):
     """(first frame, end frame) of a section: its words' (the frame after its last word is the next word's start, or the
     end of its sentence), else its sentences'."""
