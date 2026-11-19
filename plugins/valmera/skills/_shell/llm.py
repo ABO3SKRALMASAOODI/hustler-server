@@ -178,9 +178,48 @@ def ask(system, content, *, model=None, effort="medium", max_tokens=16000):
     return ask_openai(system, content, model=oa, effort=effort, max_tokens=max_tokens)
 
 
+def _top_level_starts(s):
+    """Where each top-level JSON value may start: an opening bracket outside every earlier one (machine syntax only;
+    quotes count only inside brackets, so prose around the answer cannot open a string)."""
+    starts, depth, in_str, esc = [], 0, False, False
+    for k, ch in enumerate(s):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"' and depth:
+            in_str = True
+        elif ch in "{[":
+            if not depth:
+                starts.append(k)
+            depth += 1
+        elif ch in "}]" and depth:
+            depth -= 1
+    return starts
+
+
 def json_block(text):
-    """The model's JSON answer: the outermost object or array in its text (machine syntax only)."""
+    """The model's JSON answer (machine syntax only). A model that corrects itself writes a second complete answer
+    after the first (19 Nov: Sonnet wrote one placements object, "Correction -", then the corrected one): the last
+    complete top-level value of the answer's own kind is the answer."""
     s = text.strip()
+    try:
+        return json.loads(s)
+    except ValueError:
+        pass
+    dec, found = json.JSONDecoder(), []
+    for k in _top_level_starts(s):
+        try:
+            v, end = dec.raw_decode(s, k)
+        except ValueError:
+            continue
+        found.append((end - k, v))
+    if found:
+        kind = type(max(found, key=lambda r: r[0])[1])
+        return [v for _, v in found if type(v) is kind][-1]
     for o, c in (("{", "}"), ("[", "]")):
         i, j = s.find(o), s.rfind(c)
         if i != -1 and j > i:

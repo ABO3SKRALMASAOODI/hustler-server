@@ -104,3 +104,50 @@ def test_all_caption_phrases_share_one_face_safe_seat():
     assert len({i['y'] for i in plan.items})==1
     assert .73<plan.items[0]['y']<.80
     assert caption_restarts(l1)==[]
+
+
+def test_captions_take_a_seat_per_page_when_faces_fill_every_height():
+    """19 Nov m01: faces sat high in some shots and low in others, so no single caption seat cleared them all
+    and the short stopped. Each page now takes its own seat; a page that keeps clear of faces keeps the shared one."""
+    F=film.F
+    plan=F.Plan({'cap':dict(font='InterDisplay-Bold.ttf',px=58,track=0)}, {})
+    plan.word([0,15],'one','cap',.3,.615,'#fff',1,role='cap')
+    plan.word([15,30],'two','cap',.3,.615,'#fff',1,role='cap')
+    plan.word([30,45],'three','cap',.3,.615,'#fff',1,role='cap')
+    low=dict(k='shot',pic='low',f=[0,15],crop=[0,0,1,1])
+    high=dict(k='shot',pic='high',f=[15,30],crop=[0,0,1,1])
+    empty=dict(k='shot',pic='none',f=[30,45],crop=[0,0,1,1])
+    meta={'low':dict(faces=[[.2,.55,.6,.3,.4]]),'high':dict(faces=[[.2,.15,.6,.3,.4]]),'none':dict(faces=[])}
+    l1=dict(frame=[1080,1920],voices=plan.voices,items=[low,high,empty]+plan.items)
+    result=seat_display(l1,meta,plan.R)
+    assert result['overlaps']==0
+    one,two,three=plan.items
+    assert three['y']==.615
+    for word,shot in ((one,low),(two,high)):
+        q=plan.R.T.Face.of(plan.voices[word['v']]).quads(word['t'],58,0)
+        box=[word['x']+min(x[1] for x in q)/1080,word['y']+min(x[2] for x in q)/1920,
+             word['x']+max(x[3] for x in q)/1080,word['y']+max(x[4] for x in q)/1920]
+        assert all(not intersects(box,b) for f in range(*shot['f']) for b in face_boxes(shot,meta[shot['pic']],f))
+    assert caption_restarts(l1)==[]
+
+
+def test_a_block_no_seat_can_clear_takes_the_least_covering_seat_and_says_so():
+    F=film.F
+    plan=F.Plan({'cap':dict(font='InterDisplay-Bold.ttf',px=58,track=0)}, {})
+    plan.word([0,20],'covered','cap',.3,.615,'#fff',1,role='cap')
+    shot=dict(k='shot',pic='full',f=[0,10],crop=[0,0,1,1])
+    shot2=dict(k='shot',pic='half',f=[10,20],crop=[0,0,1,1])
+    meta={'full':dict(faces=[[.0,.0,1,1,.4]]),'half':dict(faces=[[.0,.0,1,.5,.4]])}
+    l1=dict(frame=[1080,1920],voices=plan.voices,items=[shot,shot2]+plan.items)
+    result=seat_display(l1,meta,plan.R)
+    assert result['overlaps']==10                      # the full-frame face is covered; the half-frame one is cleared
+    assert plan.items[0]['y']>.5
+
+
+def test_shade_follows_each_caption_page():
+    flash=dict(id='fl1',k='flash',f=[0,40],mode='pool',a=.42,rect=[.06,.5,.94,.7])
+    pieces=film.follow_seat(flash,[(0,.0),(15,.1),(30,.1)])
+    assert [p['f'] for p in pieces]==[[0,15],[15,40]]
+    assert pieces[0]['rect']==[.06,.5,.94,.7] and pieces[1]['rect']==pytest.approx([.06,.6,.94,.8])
+    assert [p['id'] for p in pieces]==['fl1','fl1.1']
+    assert film.follow_seat(flash,[(0,.05)])[0]['rect']==pytest.approx([.06,.55,.94,.75])

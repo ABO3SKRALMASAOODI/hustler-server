@@ -240,6 +240,34 @@ def _runs(ins):
     return out
 
 
+def follow_seat(flash, shifts):
+    """A shade flash moved with the caption pages it lies under: [(first frame of a page, its shift)], in order.
+    One shift moves it whole; pages at different heights cut it at their first frames."""
+    def shift_at(f):
+        return next((sh for a, sh in reversed(shifts) if a <= f), shifts[0][1])
+    fa, fb = flash["f"]
+    cuts = [fa] + [a for a, _ in shifts if fa < a < fb] + [fb]
+    out = []
+    for a, b in zip(cuts, cuts[1:]):
+        sh = shift_at(a)
+        if out and abs(out[-1][2] - sh) < 1e-9:
+            out[-1][1] = b
+        else:
+            out.append([a, b, sh])
+    pieces = []
+    for n, (a, b, sh) in enumerate(out):
+        piece = dict(flash, f=[a, b], rect=list(flash["rect"]))
+        piece["rect"][1] += sh
+        piece["rect"][3] += sh
+        for k, v in flash.items():                       # a per-frame value keeps its own frames
+            if k not in ("f", "rect") and isinstance(v, list) and len(v) == fb - fa:
+                piece[k] = v[a - fa:b - fa]
+        if n and flash.get("id"):
+            piece["id"] = f'{flash["id"]}.{n}'
+        pieces.append(piece)
+    return pieces
+
+
 def build(script, sup, style_id, direction=None):
     """(l1, beats) for one short. script: {"title", "segments": [{"say", "pictures": [names]}]}; sup: the pack
     (wf1_short.supply); direction: {"display": [{"seg", "text"}], "past_segs": [i], "turn_seg": i, "arc": [...]}."""
@@ -567,7 +595,7 @@ def build(script, sup, style_id, direction=None):
                           clear=[0.10, cap_y - 0.085, 0.90, cap_y + 0.02],
                           spoken=[(w["t0"] - LEAD_F / FPS, w["t1"] - LEAD_F / FPS) for w in clock.words])
 
-    from wf1_layout import seat_display, caption_restarts
+    from wf1_layout import seat_display, caption_restarts, caption_pages
     # Use the final camera crops, not the source face coordinates.
     for path, key in keys.items():
         if key not in meta:
@@ -576,12 +604,11 @@ def build(script, sup, style_id, direction=None):
     title_layout = seat_display(l1, meta, P.R)
     caps = [i for i in l1["items"] if i["k"] == "word" and i.get("role") == "cap"]
     if caps:
-        shift = float(caps[0]["y"]) - cap_y
-        for i in l1["items"]:
-            if i["k"] == "flash" and i.get("mode") == "pool" and i.get("rect"):
-                i["rect"][1] += shift
-                i["rect"][3] += shift
-        cap_y += shift
+        # The shade under the captions follows their seat, page by page when the pages sit at different heights.
+        shifts = [(a, float(words[0]["y"]) - cap_y) for a, _, words in caption_pages(caps)]
+        l1["items"] = [piece for i in l1["items"] for piece in
+                       (follow_seat(i, shifts) if i["k"] == "flash" and i.get("mode") == "pool" and i.get("rect") else [i])]
+        cap_y += shifts[0][1]
     restarts = caption_restarts(l1)
     if restarts:
         raise RuntimeError(f"caption track restarts in chunks: {restarts}")

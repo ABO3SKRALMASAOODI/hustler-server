@@ -271,3 +271,21 @@ def test_chapter_scored_master_keeps_credit_without_fake_clean_export(tmp_path):
     assert rec['rules']['music_picked'] is True
     assert rec['music']['credit']=='Track by Composer'
     assert 'clean_export' not in rec['music'] and not (folder/'film_clean.mp4').exists()
+
+
+def test_json_block_takes_the_corrected_answer_after_a_self_correction():
+    """19 Nov m09: Sonnet answered one placements object, wrote 'Correction -' and a second, corrected object.
+    The outermost-braces read spanned both and the short stopped."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("shell_llm", os.path.join(HERE, "llm.py"))
+    llm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(llm)
+    first = '{"placements":[{"id":7,"ok":true},{"id":8,"ok":true,"reason":"Placeholder removed"}]}'
+    second = '{"placements":[{"id":7,"ok":false,"reason":"wrong era"},{"id":8,"ok":true}]}'
+    text = first + "\n\nCorrection — the entry with id 8 is invalid and id 7 was omitted [see below]. Here is the corrected full list:\n\n" + second
+    assert llm.json_block(text) == json.loads(second)
+    assert llm.json_block("```json\n" + first + "\n```") == json.loads(first)
+    assert llm.json_block('Here it is: {"a": "brace } in a string", "b": [1, 2]} done') == {"a": "brace } in a string", "b": [1, 2]}
+    assert llm.json_block('[{"id": 1}, {"id": 2}]') == [{"id": 1}, {"id": 2}]
+    with pytest.raises(ValueError):
+        llm.json_block('{"placements":[{"id":0,"ok":true},{"id":1,"ok"')      # cut off: never an inner item
