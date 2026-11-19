@@ -205,6 +205,20 @@ def test_a_talking_film_is_asked_for_the_picture_it_opens_on_unless_the_scout_al
     assert supply.hook_wish(str(tmp_path), {}, [], {"dur": 20.0}, 1e12)[0] is None
 
 
+def test_an_association_hook_is_a_workflow_choice_and_the_customer_prompt_is_unchanged(tmp_path, monkeypatch):
+    assert supply.hook_system() == supply.HOOK_SYSTEM and supply.HOOK_NEVER in supply.HOOK_SYSTEM
+    wf = supply.hook_system(True)
+    assert supply.HOOK_NEVER not in wf and "association" in wf and "Never the speaker" in wf
+    json.dump(selfie(20.0), open(tmp_path / "index.json", "w"))
+    sys_seen = []
+    answer = '{"hook":{"w":"0-1","want":"a cheetah at full speed","q":["cheetah running"],"kind":"video","mine":false,"association":true}}'
+    monkeypatch.setattr(supply.call, "stream", lambda *a, **k: (sys_seen.append(a[1]), _R(answer))[1])
+    wish, _ = supply.hook_wish(str(tmp_path), {"about": "no plan B"}, [], {"dur": 20.0}, 1e12)
+    assert sys_seen[-1] == supply.HOOK_SYSTEM and "association" not in wish            # a customer's film: literal only
+    wish, _ = supply.hook_wish(str(tmp_path), {"about": "no plan B"}, [], {"dur": 20.0}, 1e12, allow_association=True)
+    assert sys_seen[-1] == wf and wish["association"] is True
+
+
 def test_a_talking_film_whose_first_picture_comes_late_is_told_and_one_that_opens_on_it_is_not():
     idx = selfie(24.0)
     late = film(beats_over(idx, 4, lambda k, a, z: {"cut": [40, 45, 999], "pic": ["main", "bin:1", "main"]} if k == 2 else {"pic": "main"}))

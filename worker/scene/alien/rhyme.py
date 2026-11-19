@@ -177,6 +177,20 @@ def track(path, t, n, fps, c, pw, ph):
     return out, kept
 
 
+def _fallback(l1, work, ask, why, log):
+    """Too few round links: the chain is cut on the eyes instead (faces registered on one seat), else on each picture's
+    busiest region (palette.match). Only a film with fewer than two readable pictures is left as it was."""
+    from ..palette import match
+    m = dict(ask, pics=list(ask.get("order") or []) + list(ask.get("pool") or []))
+    for by in ("eyes", "position"):
+        p = match.plan(l1, work, m, None, None, by=by)
+        if not p.get("skip"):
+            p["marks"] = [{"f": e["f"], "what": "match cut"} for e in p.get("events") or []]
+            p["log"] = dict(p.get("log") or {}, rhyme=why, fell_back_to=by, **log)
+            return p
+    return {"skip": why, "log": log}
+
+
 def plan(l1, work, ask):
     fps = float(l1.get("fps") or 30)
     W, H = [int(v) for v in (l1.get("frame") or [1080, 1920])]
@@ -233,8 +247,8 @@ def plan(l1, work, ask):
         if pick:
             break
     if not pick:
-        return {"skip": f"no {n} pictures share a round shape on one seat ({len(best)} had one, {looked} frames read)",
-                "log": {"frames_read": looked, "round": len(best)}}
+        return _fallback(l1, work, ask, f"no {n} pictures share a round shape on one seat ({len(best)} had one, {looked} frames read)",
+                         {"frames_read": looked, "round": len(best)})
     R0, seat, ok = pick
     ok.sort(key=lambda c: -c["s"])
     want = [p for p in (ask.get("order") or []) if p in {c["pic"] for c in ok}]
@@ -250,7 +264,7 @@ def plan(l1, work, ask):
         if c not in chain and all(q["pic"] != c["pic"] or abs(q["t"] - c["t"]) >= 1.0 for q in chain):
             chain.append(c)
     if len(chain) < n:
-        return {"skip": f"only {len(chain)} round sightings stand apart", "log": {"frames_read": looked, "round": len(best)}}
+        return _fallback(l1, work, ask, f"only {len(chain)} round sightings stand apart", {"frames_read": looked, "round": len(best)})
     if not want:
         chain = chain[1:] + chain[:1]                      # the strongest shape is the one the chain lands on
     mono = ask.get("mono")

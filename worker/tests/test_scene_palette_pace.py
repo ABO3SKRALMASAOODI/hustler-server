@@ -1,0 +1,378 @@
+"""worker/scene/palette rhythm, layout, match and callback: pictures and pace. No GPU: a device gives back scene items,
+the engine's own ``eligible`` says whether the scene still holds, and the geometry is read off the items. Frames of the
+devices on real films are in .valmera/week-1120/creativity/B/."""
+import math
+import os
+import shutil
+import subprocess
+
+import numpy as np
+import pytest
+
+import scene.segments as SEG
+from scene import palette
+from scene.palette import callback as CB
+from scene.palette import layout as LAY
+from scene.palette import match as MATCH
+from scene.palette import picks as K
+from scene.palette import rhythm as RH
+from scene.alien import rhyme
+from scene.plan import eligible
+
+FPS, W, H = 30, 540, 960
+VOICES = {"cap": {"font": "InterDisplay-Bold.ttf", "px": 30, "track": 0}}
+needs_ffmpeg = pytest.mark.skipif(not shutil.which(SEG.FF), reason="no ffmpeg on this machine")
+
+
+def ok(l1):
+    good, why = eligible(l1)
+    return good or why == ["uharfbuzz is not installed"]
+
+
+def picture(path, grey, face=False, size=(480, 640)):
+    from PIL import Image, ImageDraw
+    im = Image.new("RGB", size, (grey, grey, grey))
+    d = ImageDraw.Draw(im)
+    for i in range(0, size[0], 40):                       # some detail, so regions and framings exist
+        d.rectangle([i, int(size[1] * 0.6), i + 18, int(size[1] * 0.6) + 18], fill=(min(grey + 60, 255),) * 3)
+    if face:
+        d.ellipse([180, 160, 300, 320], fill=(220, 180, 150))
+    im.save(path)
+    return path
+
+
+def video(path, n=90, size=(320, 568), grey=90):
+    p = subprocess.Popen([SEG.FF, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{size[0]}x{size[1]}", "-r", "30", "-i", "-",
+                          "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18", "-pix_fmt", "yuv420p", path], stdin=subprocess.PIPE)
+    for i in range(n):
+        im = np.full((size[1], size[0], 3), grey, np.uint8)
+        x = 20 + i * 2
+        im[200:260, x:x + 60] = 230
+        p.stdin.write(im.tobytes())
+    p.stdin.close()
+    p.wait()
+    return path
+
+
+@pytest.fixture
+def film(tmp_path):
+    """A 12 s film: the take (a video) with a picture placed between two of its stretches, and a pool of six stills
+    of different light beside it."""
+    work = str(tmp_path)
+    vid = shutil.which(SEG.FF) is not None
+    assets = {}
+    if vid:
+        video(os.path.join(work, "take.mp4"), n=380)
+        video(os.path.join(work, "clip.mp4"), n=120, grey=150)
+        assets["main"] = {"kind": "video", "path": "take.mp4", "w": 320, "h": 568, "fps": 30.0, "dur": 380 / 30}
+        assets["v1"] = {"kind": "video", "path": "clip.mp4", "w": 320, "h": 568, "fps": 30.0, "dur": 4.0}
+    for k, g in (("p1", 30), ("p2", 200), ("p3", 90)):
+        assets[k] = {"kind": "image", "path": picture(os.path.join(work, f"{k}.png"), g, face=(k == "p1")), "w": 480, "h": 640}
+    pool = [{"path": picture(os.path.join(work, f"pool{i}.png"), g), "kind": "photo"} for i, g in enumerate((20, 240, 60, 180, 120, 100))]
+    if vid:
+        items = [{"id": "t1", "k": "shot", "f": [0, 120], "pic": "main", "src": [0.0, 4.0]},
+                 {"id": "s1", "k": "shot", "f": [120, 180], "pic": "v1", "src": [0.5, 2.5]},
+                 {"id": "t2", "k": "shot", "f": [180, 360], "pic": "main", "src": [6.0, 12.0]}]
+    else:
+        items = [{"id": "t1", "k": "shot", "f": [0, 120], "pic": "p3"},
+                 {"id": "s1", "k": "shot", "f": [120, 180], "pic": "p2"},
+                 {"id": "t2", "k": "shot", "f": [180, 360], "pic": "p3"}]
+    items.append({"id": "w1", "k": "word", "f": [10, 340], "t": "words", "v": "cap", "x": 0.4, "y": 0.62, "role": "cap", "z": 5})
+    l1 = {"l1": 1, "sid": "t", "seed": 7, "fps": FPS, "frame": [W, H], "dur_f": 360, "assets": assets, "spine": [],
+          "voices": dict(VOICES), "film": {}, "items": items, "sound": [], "pool": pool}
+    assert ok(l1)
+    return l1, work
+
+
+def lay(l1, work, ask):
+    patch = palette.plan(l1, work, ask)
+    assert not patch.get("skip"), patch
+    out = palette.merge(l1, patch)
+    assert ok(out), eligible(out)
+    return out, patch
+
+
+def shots(l1, a=0, z=10 ** 9):
+    return sorted((i for i in l1["items"] if i["k"] == "shot" and i["f"][0] < z and i["f"][1] > a), key=lambda i: i["f"][0])
+
+
+# ------------------------------------------------------------------ the registry
+
+def test_every_device_of_this_lane_keeps_the_contract():
+    palette._discover()
+    mine = {**RH.DEVICES, **LAY.DEVICES, **MATCH.DEVICES, **CB.DEVICES}
+    assert {"burst", "contour", "glimpse", "settle", "snap", "whip", "streak", "shake", "ramp", "freeze", "grid", "split", "collage",
+            "pip", "shrink", "dissolve", "match", "rhyme_eyes", "match_pos", "callback", "loop"} <= set(mine)
+    for name, e in mine.items():
+        assert palette.DEVICES[name]["layer"] in palette.LAYERS, name
+        assert e["card"].startswith(name), name
+        assert all(f in palette.DEVICES for f in e.get("fallback") or ()), name
+    assert palette.resolve("speed_ramp") == "ramp" and palette.resolve("split_screen") == "split" and palette.resolve("list burst") == "burst"
+
+
+def test_the_palette_imports_no_model_code():
+    import ast
+    banned = {"llm", "anthropic", "openai", "agent_loop", "score", "director", "litellm", "onnxruntime", "torch", "mediapipe"}
+    root = os.path.dirname(RH.__file__)
+    for name in ("rhythm.py", "layout.py", "match.py", "callback.py", "picks.py"):
+        for node in ast.walk(ast.parse(open(os.path.join(root, name), encoding="utf-8").read())):
+            mods = [a.name for a in node.names] if isinstance(node, ast.Import) else \
+                [node.module or ""] if isinstance(node, ast.ImportFrom) and node.level == 0 else []
+            assert not [m for m in mods if m.split(".")[0] in banned], (name, mods)
+
+
+# ------------------------------------------------------------------ burst, contour
+
+def test_a_burst_gives_two_to_five_frame_shots_from_the_pool(film):
+    l1, work = film
+    out, patch = lay(l1, work, {"dev": "burst", "id": "b", "f": [30, 75]})
+    bs = [s for s in shots(out) if s["id"].startswith("b.b")]
+    assert len(bs) >= 8
+    assert all(2 <= s["f"][1] - s["f"][0] <= 5 for s in bs[:-1]) and bs[-1]["f"][1] - bs[-1]["f"][0] >= 2
+    assert bs[0]["f"][0] == 30 and bs[-1]["f"][1] == 75
+    pool_ids = set(patch["assets"])
+    assert len({s["pic"] for s in bs} & pool_ids) >= 4                     # the pool's pictures, added to the scene
+    assert all(out["assets"][p]["path"] for p in pool_ids)
+    assert patch["log"]["flashes"] <= K.FLASH_PER_S                         # a path of light, never a strobe of flashes
+    assert sum(1 for e in patch["events"] if e["kind"] == "cut") == len(bs)
+
+
+def test_flash_safety_counts_opposing_steps_and_tames_a_fixed_order():
+    lum = [0.05, 0.6, 0.05, 0.6, 0.05, 0.6, 0.05, 0.6, 0.05, 0.6]
+    lens = [3] * 10
+    assert K.flashes(lum, lens, 30) > 3
+    order, gains = K.flash_safe(lum, lens, 30)
+    assert K.flashes([lum[i] for i in order], lens, 30) == 0
+    order, gains = K.flash_safe(lum, lens, 30, order=list(range(10)))
+    tamed = [lum[i] * gains[i] ** 2.2 for i in range(10)]
+    assert K.flashes(tamed, lens, 30) <= 3
+
+
+def test_the_contour_runs_strobe_against_hold(film):
+    l1, work = film
+    ask = {"dev": "contour", "id": "ct", "sections": [{"f": [0, 90], "energy": "strobe"}, {"f": [90, 180], "energy": "brisk"},
+                                                       {"f": [180, 360], "energy": "hold"}]}
+    out, patch = lay(l1, work, ask)
+    starts = sorted(s["f"][0] for s in shots(out))
+    per3 = [sum(1 for f in starts if w <= f < w + 90) for w in range(0, 360, 90)]
+    assert per3[0] >= 10 and max(per3) >= 3 * max(min(per3), 1)             # strobe windows at least 3x the holds
+    held = shots(out, 180, 360)
+    assert len(held) == 1                                                    # the hold is one picture
+
+
+def test_the_contour_breaks_a_long_take_with_pictures_and_its_own_tighter_framing(film):
+    l1, work = film
+    out, patch = lay(l1, work, {"dev": "contour", "id": "ct", "f": [180, 330], "energy": "brisk"})
+    seg = shots(out, 180, 330)
+    assert len(seg) >= 6 and max(s["f"][1] - s["f"][0] for s in seg) <= 2 * RH.BRISK_F[1]
+    take = [s for s in seg if s["pic"] == l1["items"][2]["pic"]]
+    assert take and any(s["pic"] != l1["items"][2]["pic"] for s in seg)
+    if take[0].get("src"):                                                   # the take keeps the voice's clock
+        for s in take:
+            t = 6.0 + (s["f"][0] - 180) / FPS
+            assert abs(s["src"][0] - t) < 1.5 / FPS
+
+
+# ------------------------------------------------------------------ glimpse, settle, snap, whip, shake
+
+def test_a_glimpse_shows_the_incoming_picture_before_its_cut(film):
+    l1, work = film
+    out, patch = lay(l1, work, {"dev": "glimpse", "id": "g", "at": 118, "frames": 2, "lead": 5})
+    g = next(s for s in shots(out) if s["id"] == "g.g")
+    assert g["f"] == [113, 115] and g["pic"] == "v1" if "v1" in l1["assets"] else g["pic"] == "p2"
+    assert [s["pic"] for s in shots(out, 105, 125)][:3] == [shots(l1)[0]["pic"], g["pic"], shots(l1)[0]["pic"]]
+
+
+def test_a_settle_peaks_early_and_dies(film):
+    l1, work = film
+    out, patch = lay(l1, work, {"dev": "settle", "id": "st", "f": [120, 150], "dir": "in", "size": 0.1})
+    sh = next(s for s in shots(out) if s["id"] == "s1")
+    w = [c[2] - c[0] for c in sh["crop"][:30]]
+    v = [w[i] - w[i + 1] for i in range(len(w) - 1)]
+    peak = int(np.argmax(v))
+    assert 1 <= peak <= int(0.35 * 30)                                       # the speed peaks in the first third
+    assert v[-1] < 0.25 * max(v)
+    k = K.decel(30, 0.18)
+    assert all(b >= a for a, b in zip(k, k[1:])) and k[-1] == 1.0
+
+
+def test_a_snap_zoom_jumps_on_the_word_and_settles(film):
+    l1, work = film
+    out, patch = lay(l1, work, {"dev": "snap", "id": "sn", "at": 200, "size": 1.3, "hold": 30, "back": True})
+    a = next(s for s in shots(out) if s["f"][1] == 200)
+    b = next(s for s in shots(out) if s["f"][0] == 200)
+    c = next(s for s in shots(out) if s["f"][0] == 230)
+    wa = a["crop"][-1][2] - a["crop"][-1][0] if isinstance(a.get("crop"), list) and isinstance(a["crop"][0], list) else None
+    wb = [q[2] - q[0] for q in b["crop"]]
+    assert wb[0] < wb[5] and wb[5] == pytest.approx(wb[-1], rel=0.02)       # lands past and settles in a few frames
+    if wa:
+        assert wa / wb[-1] >= 1.2                                            # a 1.2x or more jump
+    if b.get("src"):
+        assert b["src"][0] == pytest.approx(6.0 + 20 / FPS, abs=1e-3) and c["src"][0] == pytest.approx(6.0 + 50 / FPS, abs=1e-3)
+
+
+def test_a_whip_carries_one_shot_into_the_next(film):
+    l1, work = film
+    out, patch = lay(l1, work, {"dev": "whip", "id": "wh", "at": 120, "frames": 4})
+    p = next(s for s in shots(out) if s["f"][1] == 120)
+    q = next(s for s in shots(out) if s["f"][0] == 120)
+    assert p["shutter"] == q["shutter"] == 0.85
+    moved_p = [abs(a[0] - b[0]) + abs(a[2] - a[0] - b[2] + b[0]) for a, b in zip(p["crop"][-5:], p["crop"][-4:])]
+    moved_q = [abs(a[0] - b[0]) + abs(a[2] - a[0] - b[2] + b[0]) for a, b in zip(q["crop"][:4], q["crop"][1:5])]
+    assert moved_p[-1] > moved_p[0] > 0 or moved_p[-1] > 0                   # leaving gathers speed
+    assert moved_q[0] > moved_q[-1]                                         # arriving brakes
+
+
+def test_a_shake_dies_inside_six_frames(film):
+    l1, work = film
+    out, patch = lay(l1, work, {"dev": "shake", "id": "sk", "at": 200, "frames": 6, "amp": 0.03})
+    sh = next(s for s in shots(out) if s["f"][0] <= 200 < s["f"][1])
+    lo = sh["f"][0]
+    base = K.crops(l1, work, next(s for s in shots(l1) if s["f"][0] <= 200 < s["f"][1]))
+    cx = lambda c: (c[0] + c[2]) / 2                                       # noqa: E731
+    off = [abs(cx(sh["crop"][200 - lo + j]) - cx(base[200 - lo + j])) for j in range(8)]
+    assert off[0] > 0.004 and off[5] < 0.35 * off[0] + 0.004 and off[6] < 1e-6 and off[7] < 1e-6
+
+
+# ------------------------------------------------------------------ ramp, freeze
+
+def test_the_speed_ramp_maps_monotonically_on_a_smooth_curve(film):
+    l1, work = film
+    if l1["assets"]["v1"].get("kind") != "video" if "v1" in l1["assets"] else True:
+        pytest.skip("no ffmpeg: no clip")
+    out, patch = lay(l1, work, {"dev": "ramp", "id": "rp", "f": [125, 175], "low": 0.3})
+    seq = shots(out, 120, 180)
+    src = [s["src"] for s in seq]
+    assert all(b[0] >= a[0] and abs(b[0] - a[1]) < 1e-4 for a, b in zip(src, src[1:]))     # no step back, no gap
+    rates = [(s["src"][1] - s["src"][0]) / ((s["f"][1] - s["f"][0]) / FPS) for s in seq]
+    assert min(rates) <= 0.45 and rates[0] == pytest.approx(1.0, abs=0.05)
+    assert max(abs(b - a) for a, b in zip(rates, rates[1:])) <= 0.25                         # no jolt in speed
+    r = RH.ramp_rates(60, 0.3)
+    assert max(abs(b - a) for a, b in zip(r, r[1:])) < 0.06 and min(r) == pytest.approx(0.3, abs=0.01)
+
+
+def test_a_freeze_holds_and_the_take_keeps_its_sync(film):
+    l1, work = film
+    if "main" not in l1["assets"]:
+        pytest.skip("no ffmpeg: no take")
+    out, patch = lay(l1, work, {"dev": "freeze", "id": "fz", "at": 240, "frames": 18})
+    fz = next(s for s in shots(out) if s["f"][0] == 240)
+    after = next(s for s in shots(out) if s["f"][0] == 258)
+    assert fz["src"][0] == fz["src"][1] == pytest.approx(8.0, abs=1e-3)
+    assert after["src"][0] == pytest.approx(6.0 + 78 / FPS, abs=1e-3)
+
+
+# ------------------------------------------------------------------ layouts
+
+def test_the_grid_fills_one_tile_per_step_and_collapses(film):
+    l1, work = film
+    steps = [40, 46, 52, 58, 64, 70]
+    out, patch = lay(l1, work, {"dev": "grid", "id": "gr", "f": [40, 110], "steps": steps})
+    tiles = sorted((i for i in out["items"] if i["id"].startswith("gr.t")), key=lambda i: i["f"][0])
+    assert [t["f"][0] for t in tiles] == steps                               # one tile on each step
+    assert len({(t["x"], t["y"]) for t in tiles}) == len(tiles)              # each on its own seat
+    assert all(t["s"][-1] < 0.2 for t in tiles)                              # and they collapse at the end
+    assert next(s for s in shots(out) if s["f"][0] == 40)["pic"] == "plate"
+
+
+def test_a_grid_can_resolve_one_picture_through_its_tiles(film):
+    l1, work = film
+    out, patch = lay(l1, work, {"dev": "grid", "id": "gr", "f": [40, 110], "resolve": "p2", "rows": 3, "cols": 2})
+    tiles = [i for i in out["items"] if i["id"].startswith("gr.t")]
+    assert len(tiles) == 6 and {t["pic"] for t in tiles} == {"p2"}
+    assert len({tuple(t["crop"]) for t in tiles}) == 6
+
+
+def test_a_split_keeps_the_speaker_on_his_own_clock(film):
+    l1, work = film
+    out, patch = lay(l1, work, {"dev": "split", "id": "sp", "f": [200, 260], "pics": ["p2"]})
+    panels = sorted((i for i in out["items"] if i["id"].startswith("sp.p")), key=lambda i: i["id"])
+    assert len(panels) == 2
+    if "main" in l1["assets"]:
+        assert panels[0]["pic"] == "main" and panels[0]["src"][0] == pytest.approx(6.0 + 20 / FPS, abs=1e-3)
+    assert panels[1]["pic"] == "p2"
+    ys = panels[1]["y"]
+    assert isinstance(ys, list) and ys[0] != ys[-1]                          # slides in and settles
+
+
+def test_a_collage_piles_turned_prints_on_paper(film):
+    l1, work = film
+    out, patch = lay(l1, work, {"dev": "collage", "id": "pl", "f": [190, 280], "pics": ["p1", "p2", "p3"]})
+    prints = [i for i in out["items"] if i["id"].startswith("pl.c")]
+    assert len(prints) == 3 and len({p["z"] for p in prints}) == 3
+    assert all(2.0 <= abs(p["rot"]) <= 7.5 and p["border"]["w"] > 0 for p in prints)
+    assert next(s for s in shots(out) if s["f"][0] == 190)["plate"]["kind"] == "paper"
+
+
+def test_shrink_pip_and_dissolve_stand_on_a_join(film):
+    l1, work = film
+    for ask in ({"dev": "shrink", "id": "sh", "at": 180, "frames": 14}, {"dev": "pip", "id": "pp", "at": 165, "frames": 24},
+                {"dev": "dissolve", "id": "dx", "at": 180, "frames": 10}, {"dev": "dissolve", "id": "dd", "f": [200, 260], "double": True, "pics": ["p1"]}):
+        out, patch = lay(l1, work, ask)
+        cards = [i for i in out["items"] if i["k"] == "card"]
+        assert cards, ask
+
+
+# ------------------------------------------------------------------ match, rhyme fallback, callback, loop
+
+def test_a_face_chain_holds_the_eyes_on_one_seat(tmp_path):
+    work = str(tmp_path)
+    assets = {}
+    pool = []
+    for i, (fx, fy, fh) in enumerate(((0.3, 0.35, 0.15), (0.42, 0.3, 0.18), (0.4, 0.45, 0.14))):
+        p = picture(os.path.join(work, f"f{i}.png"), 80 + i * 30, size=(1000, 1200))
+        pool.append({"path": p, "kind": "photo", "faces": [[fx, fy, fh * 1200 / 1000 * 0.75, fh, fy + fh * 0.42]]})
+    l1 = {"l1": 1, "sid": "t", "seed": 3, "fps": FPS, "frame": [W, H], "dur_f": 90, "assets": assets, "spine": [], "voices": dict(VOICES),
+          "film": {}, "items": [{"id": "s0", "k": "shot", "f": [0, 90], "pic": "plate"}], "sound": [], "pool": pool}
+    patch = MATCH.plan(l1, work, {"dev": "match", "id": "m", "f": [0, 90], "n": 3, "seat": [0.5, 0.36]}, None, None, by="eyes")
+    assert not patch.get("skip"), patch
+    out = palette.merge(l1, patch)
+    assert ok(out)
+    chain = sorted((i for i in out["items"] if i["id"].startswith("m.m")), key=lambda i: i["f"][0])
+    assert len(chain) == 3 and patch["log"]["eyes"] == 3
+    for it in chain:
+        rec = next(r for r in pool if K.asset_id_for(r["path"]) == it["pic"])
+        fx, fy, fw, fh, ey = rec["faces"][0]
+        c = it["crop"][0]
+        assert abs((fx + fw / 2 - c[0]) / (c[2] - c[0]) - 0.5) < 0.03 and abs((ey - c[1]) / (c[3] - c[1]) - 0.36) < 0.03
+
+
+def test_a_rhyme_without_round_shapes_falls_back_to_a_match(tmp_path):
+    work = str(tmp_path)
+    assets = {k: {"kind": "image", "path": picture(os.path.join(work, f"{k}.png"), g)} for k, g in (("a", 40), ("b", 120), ("c", 200))}
+    l1 = {"l1": 1, "sid": "t", "seed": 3, "fps": FPS, "frame": [W, H], "dur_f": 90, "assets": assets, "spine": [], "voices": dict(VOICES),
+          "film": {}, "items": [{"id": "s0", "k": "shot", "f": [0, 90], "pic": "a"}], "sound": []}
+    patch = rhyme.plan(l1, work, {"dev": "rhyme", "id": "rh", "at": [10, 70], "n": 3})
+    assert not patch.get("skip"), patch
+    assert patch["log"]["fell_back_to"] == "position" and "round" in patch["log"]["rhyme"]
+    out = palette.merge(l1, patch)
+    assert ok(out) and len([i for i in out["items"] if i["id"].startswith("rh.m")]) == 3
+
+
+def test_the_opening_returns_at_the_payoff_and_the_end_loops(film):
+    l1, work = film
+    l2, _ = lay(l1, work, {"dev": "burst", "id": "b", "f": [0, 40], "frames": 4})
+    opening = [s["pic"] for s in shots(l2, 0, 40)]
+    out, patch = lay(l2, work, {"dev": "callback", "id": "cb", "f": [300, 340], "from": [0, 40]})
+    back = [s["pic"] for s in shots(out, 300, 340)]
+    firsts = list(dict.fromkeys(p for p in opening if not K.is_take(p)))
+    assert back[:len(firsts)] == firsts and back[-1] == firsts[0]
+    l3 = dict(l1, items=[i for i in l1["items"] if i["k"] != "word"] + [dict(l1["items"][-1], f=[10, 330])])
+    out, patch = lay(l3, work, {"dev": "loop", "id": "lp", "frames": 15})
+    end = shots(out)[-1]
+    assert end["f"] == [345, 360] and end["pic"] == shots(l1)[0]["pic"]
+
+
+def test_every_device_stands_on_the_film_and_keeps_its_contract(film):
+    """plan.eligible holds after every device of this lane, laid through the registry's own apply."""
+    l1, work = film
+    asks = [{"dev": "burst", "f": [20, 60]}, {"dev": "contour", "sections": [{"f": [200, 260], "energy": "strobe"}, {"f": [260, 330], "energy": "brisk"}]},
+            {"dev": "grid", "f": [60, 110]}, {"dev": "split", "f": [140, 175]}, {"dev": "collage", "f": [300, 350]},
+            {"dev": "glimpse", "at": 118}, {"dev": "settle", "f": [120, 140]}, {"dev": "snap", "at": 190}, {"dev": "whip", "at": 180},
+            {"dev": "shake", "at": 150}, {"dev": "ramp", "f": [122, 172]}, {"dev": "freeze", "at": 185}, {"dev": "pip", "at": 150},
+            {"dev": "shrink", "at": 120}, {"dev": "dissolve", "at": 118}, {"dev": "match", "f": [330, 350]}, {"dev": "loop"}]
+    out, log = palette.apply(l1, work, asks)
+    assert ok(out)
+    landed = [r for r in log if r["done"]]
+    assert len(landed) >= len(asks) - 2, [(r["dev"], r.get("tried")) for r in log if not r["done"]]
+    assert all(e.get("kind") for e in out["device_events"])

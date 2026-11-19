@@ -247,6 +247,11 @@ SYSTEM = (
     "products under the company. Never set ok false for missing attribution, for connective or filler words in the "
     "clause, for a picture that illustrates rather than records the clause, for a crop (the film reframes it), for "
     "text on the picture (reported below) or because a better picture may exist: rank instead. "
+    "An entry with association is a picture of what the words MEAN, chosen on purpose for an abstract claim, verdict "
+    "or feeling (association says what it shows): it never claims to record the event, the place or a person, so it "
+    "is never a contradiction for not showing the thing named; it is ok unless it shows something the words deny or "
+    "presents a stranger as a named person, and its fit is how strongly it carries the meaning (10 at once, 4 "
+    "loosely). "
     "fit ranks the candidates of a clause, an integer 0-10: 10 the very person, thing or event the words name, doing "
     "what they say; 7 the named subject itself; 4 a truthful illustration of the clause's topic; 1 only associated "
     "with it. A contradiction is ok false whatever its fit. "
@@ -335,6 +340,8 @@ def check(ins, script, clock, work, ffmpeg, call=None, review="placement", _repa
         entry = dict(id=i, f=[a, b], name=name, words=spoken, context=context_of(script, clock, rec, a, b),
                      source=(rec.get("source") or {}).get("url") if kind == "clip" else rec.get("page"))
         entry['source_evidence'] = provenance(rec, kind)
+        if rec.get("association"):
+            entry["association"] = rec["association"]      # a picture of what the words mean, chosen as such
         if rec.get("display_words"):
             entry["display_words"] = rec["display_words"]
         if rec.get("caption_words"):
