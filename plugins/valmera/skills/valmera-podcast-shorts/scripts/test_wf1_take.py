@@ -85,3 +85,11 @@ def test_the_medium_leaves_room_for_a_real_punch_in():
     assert film.medium_face_h([[.3, .2, .08, .2]], 1080) == pytest.approx(3.0 / 1.3 * .2 * 1080 / 1920, abs=1e-4)
     assert film.medium_face_h([[.3, .2, .2, .5]], 2160) == film.TAKE_FACE_H         # a big face in 4K: the references' medium
     assert film.medium_face_h([], 1080) == film.TAKE_FACE_H
+
+
+def test_a_payoff_near_a_framings_edge_punches_that_framing():
+    cuts = cuts_two_shot()
+    near_start = film.take_pieces(cuts, 7.0, punch=[80])                 # 2 frames into the host's answer
+    assert [p["punch"] for p in near_start] == [False, True, False]
+    near_end = film.take_pieces(cuts, 7.0, punch=[120])                  # 3 frames before the single's cut
+    assert [p["punch"] for p in near_end] == [False, False, True]

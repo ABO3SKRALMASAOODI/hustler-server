@@ -311,17 +311,17 @@ def take_pieces(cuts, dur, punch=(), fps=FPS, lead=LEAD_F):
         else:
             out.append(dict(sg, f=list(sg["f"])))
     for p in sorted(int(x) for x in punch or ()):
-        for i, pc in enumerate(out):
-            a, b = pc["f"]
-            if a + 9 <= p <= b - 9:
-                out[i:i + 1] = [dict(pc, f=[a, p]), dict(pc, f=[p, b], punch=True)]
-                break
-            if p == a:
-                pc["punch"] = True
-                break
-    for i in range(1, len(out)):                      # a punch holds to the end of its own camera shot and speaker
-        if out[i - 1]["punch"] and out[i]["cut"] == out[i - 1]["cut"] and out[i]["faces"] == out[i - 1]["faces"]:
+        i = next((i for i, pc in enumerate(out) if pc["f"][0] <= p < pc["f"][1]), None)
+        if i is None:
+            continue
+        a, b = out[i]["f"]
+        if p - a < 9:                                 # the payoff opens a framing already: that framing is the punch-in
             out[i]["punch"] = True
+        elif b - p < 9:                               # it lands on the next framing's cut
+            if i + 1 < len(out):
+                out[i + 1]["punch"] = True
+        else:
+            out[i:i + 1] = [dict(out[i], f=[a, p]), dict(out[i], f=[p, b], punch=True)]
     return out
 
 
@@ -610,9 +610,13 @@ def build(script, sup, style_id, direction=None):
         pos = r1
     take_shot(pos, f_end)
     if st["flash"] == "turn" and turn_f is not None:
-        # the payoff's own cut: back to his face when a picture ends just before it, else the punch-in on its word
-        back = [x[1] for x in ins if 0 <= turn_f - x[1] <= FPS]
-        flashes.append(back[-1] if back else turn_f)
+        # the payoff's own cut, nearest its first word: the punch-in when the take is up there, else the picture
+        # cut a second either side of it
+        cuts_near = [f for x in ins for f in (x[0], x[1]) if abs(f - turn_f) <= FPS and 0 < f < f_end]
+        if not any(x[0] <= turn_f < x[1] for x in ins):
+            cuts_near.append(turn_f)
+        if cuts_near:
+            flashes.append(min(cuts_near, key=lambda f: (abs(f - turn_f), f)))
     for f in flashes:
         if 0 < f < f_end - 3:
             P.flash([f, f + 2], mode="fill", c="#FFFFFF", a=[0.62, 0.22])
