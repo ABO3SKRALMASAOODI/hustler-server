@@ -232,6 +232,10 @@ class Plan:
     def video(self, key, rec):
         self.assets[key] = dict(kind="video", path=rec["path"], w=int(rec.get("w") or W), h=int(rec.get("h") or H), fps=float(rec.get("fps") or FPS),
                                 dur=float(rec.get("seconds") or 0))
+        if rec.get("landings"):
+            # what the clip's own edit lands on screen, in its seconds (a recorded export's b-roll and titles): the sound
+            # design reads each landing a played window shows as an event (score.sound.landing_events)
+            self.assets[key]["landings"] = [dict(t=float(x["t"]), kind=str(x.get("kind") or "picture")) for x in rec["landings"]]
         return key
 
     def page(self, f, c0, c1=None, grain=0.03, **kw):
@@ -477,6 +481,19 @@ def _engines():
         sys.path.insert(0, w)
     from scene import bake, looks, pace
     return pace, looks, bake
+
+
+def landings_shown(l1):
+    """The landings a played clip's own edit makes on screen (score.sound.landing_events: a recorded export's b-roll
+    and titles inside the windows that play it), by programme frame. [] for a film whose clips name none."""
+    if not any((a or {}).get("landings") for a in (l1.get("assets") or {}).values()):
+        return []
+    try:
+        _engines()
+        from score import sound as SD
+        return SD.landing_events(l1)
+    except Exception:  # noqa: BLE001 - an older worker without it: the clips' landings are not read
+        return []
 
 
 def voice_stress(sup):

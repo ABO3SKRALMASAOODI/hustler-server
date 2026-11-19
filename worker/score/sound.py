@@ -531,6 +531,38 @@ def reframe_change(before, after):
     return round(1.0-overlap/union, 4)
 
 
+def landing_events(l1):
+    """The landings a source's own edit makes inside the items that play it, by programme frame: [{f, kind, ...}].
+    An asset may carry ``landings``: [{t: source second, kind: picture|title}] (a recorded export's b-roll and titles
+    from its EDL). Every shot or card that plays that asset over a source window [a, z] shows the landings inside it,
+    at the frame its window reaches them (the same linear map as the upload's own cuts). A picture arriving is a
+    card landing (it covers the frame); a title is a display landing. One per asset second, the first item showing it."""
+    assets = l1.get("assets") or {}
+    fps = float(l1.get("fps") or 30.0)
+    out, seen = [], set()
+    for it in sorted((i for i in l1.get("items") or [] if i.get("k") in ("shot", "card")), key=lambda i: (i["f"][0], i.get("z", 0))):
+        a = assets.get(str(it.get("pic"))) or {}
+        rows, src = a.get("landings"), it.get("src")
+        if not rows or not isinstance(src, (list, tuple)) or len(src) < 2:
+            continue
+        a0, z0 = float(src[0]), float(src[1])
+        f0, n = int(it["f"][0]), max(1, int(it["f"][1]) - int(it["f"][0]))
+        for r in rows:
+            try:
+                t = float(r["t"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            key = (str(a.get("path") or it.get("pic")), round(t, 2))
+            if key in seen or not (a0 - 0.5 / fps <= t < z0 - 0.05):
+                continue
+            seen.add(key)
+            f = f0 + int(round(max(t - a0, 0.0) / max(z0 - a0, 1e-6) * n))
+            title = str(r.get("kind")) == "title"
+            out.append({"f": f, "kind": "display" if title else "card", "id": str(it.get("id")), "landing": True,
+                        **({} if title else {"photo": True, "area": 1.0})})
+    return out
+
+
 def l1_events(l1, kshots=()):
     """What lands on screen, by programme frame: [{f, kind, ...}]. Distinct designed reframes are cuts;
     timing-only splits, continuous camera moves and captions are never cut events."""
@@ -571,6 +603,14 @@ def l1_events(l1, kshots=()):
                 if a0 + 0.05 < ka < z0 - 0.05:
                     ev.append({"f": f + int(round((ka - a0) / max(z0 - a0, 1e-6) * n)), "kind": "cut", "id": s["id"]})
                     last = ("take", i)
+    # what lands inside a played clip: a source whose own edit lays pictures and titles over its programme (a workflow's
+    # recorded export) names them on its asset (``landings``, source seconds). Each one shown on screen is a picture
+    # (or a line of type) landing, mapped through the item's source window as the upload's own cuts are above. Assets
+    # without ``landings`` (every customer film) add nothing here.
+    lands = landing_events(l1)
+    if lands:
+        at = [e["f"] for e in lands]
+        ev = [e for e in ev if not (e["kind"] in ("picture", "cut") and any(abs(e["f"] - f) <= 2 for f in at))] + lands
     cuts = {s["f"][0] for s in shots}
     seen_on, counters = set(), {}
     for it in items:
