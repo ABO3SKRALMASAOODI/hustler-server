@@ -97,3 +97,28 @@ def test_the_source_table_names_every_sound_a_workflow_calls_by_name():
         assert sid in rows, sid
     assert all(r["class"] in sfx_set.CUT for r in rows.values())
     assert all(r.get("family") in (None, "paper", "shutter", "type", "glitch") for r in rows.values())
+
+
+def test_a_plan_from_before_the_switch_is_not_foreign(tmp_path, monkeypatch):
+    """Resume: an L1 designed on the product library keeps its sounds after the run switched to the set; the mixer plays
+    them from the product library (scene.audio), so no_music does not call them foreign."""
+    monkeypatch.setenv(chain.SOUND_ENV, _set(tmp_path))
+    l1 = tmp_path / "l1.json"
+    l1.write_text(json.dumps({"sound": [{"s": "mx_whoosh_1", "file": "mx_whoosh_1.flac"}, {"s": "whoosh_9", "file": "whoosh_9.flac"}],
+                              "assets": {}}))
+    got = chain.no_music(str(l1))
+    assert got["ok"] and got["foreign_sounds"] == []
+    l1.write_text(json.dumps({"sound": [{"s": "x", "file": "made_up_99.flac"}], "assets": {}}))
+    assert chain.no_music(str(l1))["foreign_sounds"] == ["made_up_99.flac"]
+
+
+def test_what_a_phone_plays_is_measured(tmp_path):
+    """body_db / trans_db: a sub-bass boom measures far under its full band in 200 Hz-8 kHz; a broadband hit does not."""
+    t = np.arange(int(0.8 * SR)) / SR
+    env = np.exp(-t / 0.2).astype(np.float32)
+    sub = (0.5 * np.sin(2 * np.pi * 50 * t) * env).astype(np.float32)
+    rng = np.random.default_rng(4)
+    broad = (0.3 * rng.standard_normal(len(t)) * env).astype(np.float32)
+    s, b = sfx_set.phone(sub), sfx_set.phone(broad)
+    assert s["body_db"] < -20 and s["trans_db"] < -20
+    assert b["body_db"] > -6 and b["trans_db"] > -6

@@ -675,6 +675,14 @@ def no_music(l1_path):
     nothing foreign, nothing synthesized, and no audio asset outside the library. The plan itself carries no music: the
     film's music is laid on a copy after the render (music_version), so the clean export is exactly this plan."""
     lib = {s["file"] for s in json.load(open(sound_manifest()))}
+    own = os.path.join(brand.worker_dir(), "sound_library", "manifest.json")
+    if os.environ.get(SOUND_ENV) and os.path.exists(own):
+        # a run switched to the workflow set keeps what its plan placed on the product library before the switch: the
+        # mixer plays a recording the set does not carry from the product library (scene.audio), so it is not foreign
+        try:
+            lib |= {s["file"] for s in json.load(open(own))}
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
     l1 = json.load(open(l1_path))
     bad = [s.get("file") for s in l1.get("sound") or [] if s.get("file") and s["file"] not in lib]
     audio_assets = [k for k, a in (l1.get("assets") or {}).items() if a.get("kind") == "audio"]

@@ -1613,14 +1613,17 @@ def _item(iid, sid, f, fps, db, ev, part, what):
     peak_s) lands LEAD_S before frame f; `peak_s` carries that offset so validate_l1's start = event - peak holds.
     dur_s is the measured audible tail (max_s) from the trim point: the renderer and the scene mix stop there."""
     x = library()[sid]
-    peak = float(x.get("hit_s") or x.get("peak_s") or 0.0) + LEAD_S
+    bed = x.get("align") == "start" and ev.get("typed")       # keys under typed text (screen placement): from its frame
+    peak = 0.0 if bed else float(x.get("hit_s") or x.get("peak_s") or 0.0) + LEAD_S
     start = f / fps - peak
     trim = 0.0
     if start < 0:
         trim, start = -start, 0.0
     it = {"id": iid, "s": sid, "file": x["file"], "event_f": int(f), "start_s": round(start, 4), "trim_s": round(trim, 4),
           "db": db, "peak_s": round(peak, 4), "for": ev["kind"], "part": part, "layer": what, "by": "sound.py"}
-    if x.get("max_s") and float(x["max_s"]) - trim >= 0.05:
+    if bed:                                                   # as long as the typing, and its own length at most
+        it["dur_s"] = round(min(float(x.get("duration_s") or 3.0), float(ev.get("type_s") or 1.0) + 0.15), 3)
+    elif x.get("max_s") and float(x["max_s"]) - trim >= 0.05:
         it["dur_s"] = round(float(x["max_s"]) - trim, 3)
     return it
 
@@ -1856,7 +1859,15 @@ def present_over(sounds, voice, bed, fps, voice_shift_db=0.0):
             continue                                 # the song and the voice cover it even lifted: a sound nobody hears is clutter
         it["over_bed_db"] = round(min(p, 60.0), 1)
         out.append(it)
-    return out
+    return screen_restrain(out, voice, voice_shift_db)
+
+
+def screen_restrain(sounds, voice, voice_shift_db=0.0):
+    """Screen placement (the workflow films): the 2-8 kHz restraint once more after a lift, so the band limit is the
+    final level over the song too (sound_screen.restrain). Anything else comes back as it was."""
+    if not SCR.on() or voice is None or not len(voice):
+        return sounds
+    return SCR.restrain(sounds, voice, AR, voice_shift_db, library())
 
 
 def _signal_check(placed, ctx, report):

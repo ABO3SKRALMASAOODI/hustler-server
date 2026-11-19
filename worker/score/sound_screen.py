@@ -25,6 +25,15 @@ sound set, VALMERA_SOUNDS, by the workflow shell; a customer's film never sets i
   restraint  each sound's 2-8 kHz level (the set's measured hf_db plus its gain) stays under the voice's own 2-8 kHz
              level by its tier (HF_OVER), so a click or a shutter is heard as a detail, never as a spike over the voice.
 
+Review round, 20 Nov: a cut is travel only when its travel is measured at its own frame (the stories path flags a
+clip's inner cut `moving` by its subject's motion, which put a whoosh on plain cuts); the palette's voices rotate for
+real (the voice heard nearest in time gives way, and one recording plays at most about twice in 30 s while another
+voice of its class fits); a hero impact is chosen for what a phone plays (its 200 Hz-8 kHz body, the hook by its
+attack's) and weight under 150 Hz is a bonus only on top of that; a glitched flash (a treated patch, a mosaic, an
+on-off-on flicker) and type being typed (single characters revealed left to right) are read from the plan, so the
+glitch and typing recordings can answer them; and the 2-8 kHz restraint is applied again after the song's lift
+(score.sound.present_over, score.music), so it is the final level.
+
 What this reads is measured: the crop path and blur of a shot, a card's position and scale curve, an asset's kind,
 the set's signal measures (manifest `screen`) and the class a model gave each recording when it joined the set
 (manifest `reference.class`). Nothing reads a word anyone wrote.
@@ -109,21 +118,89 @@ def card_motion(it, fps):
     return n / fps, min(1.0, max(path[:n]) / FAST_V), slam
 
 
+GLITCH_MODES = ("neg", "threshold", "posterise", "mosaic", "halftone", "solarise", "complement", "pixel_stretch")
+PATCH_AREA = 0.3            # a treated patch under this share of the frame is a glitch's block, not a full-frame flash
+FLICKER_F = 4               # a treated flash back inside this many frames after one ends: on-off-on, a glitch's stutter
+TYPE_RUN = 4                # characters revealed one after another, at most TYPE_STEP_F frames apart: type being typed
+TYPE_STEP_F = 3
+
+
+def _rect_area(r):
+    r = r[0] if isinstance(r, list) and r and isinstance(r[0], (list, tuple)) else r
+    if not isinstance(r, (list, tuple)) or len(r) != 4:
+        return 1.0
+    return max(0.0, float(r[2]) - float(r[0])) * max(0.0, float(r[3]) - float(r[1]))
+
+
+def glitched(flashes):
+    """The frames whose flash is a glitch, read from the plan's own flash items: a treated flash (GLITCH_MODES) that
+    is a small patch, a mosaic or a pixel stretch, or that flickers (another treated flash back within FLICKER_F frames
+    of its end: on, off, on)."""
+    tr = sorted((int(i["f"][0]), int(i["f"][1]), i) for i in flashes if i.get("mode") in GLITCH_MODES)
+    out = set()
+    for a, b, it in tr:
+        if it.get("mode") in ("mosaic", "pixel_stretch") or _rect_area(it.get("rect")) < PATCH_AREA or \
+                any(a2 != a and (b < a2 <= b + FLICKER_F or b2 < a <= b2 + FLICKER_F) for a2, b2, _i in tr):
+            out.add(a)
+    return out
+
+
+def typed_runs(items, fps):
+    """[(first frame, seconds, id)] of type being typed: TYPE_RUN or more single characters on one line, each revealed
+    at most TYPE_STEP_F frames after the one before, left to right (a typewriter reveal, read from the plan's words)."""
+    rows = {}
+    for it in items:
+        t = str(it.get("t") or "")
+        if it.get("k") != "word" or len(t.strip()) != 1 or isinstance(it.get("y"), list) or isinstance(it.get("x"), list):
+            continue
+        rows.setdefault(round(float(it.get("y") or 0.0), 3), []).append((int(it["f"][0]), float(it.get("x") or 0.0), str(it.get("id"))))
+    out = []
+    for line in rows.values():
+        line.sort()
+        run = [line[0]]
+        for r in line[1:] + [None]:
+            if r is not None and 0 <= r[0] - run[-1][0] <= TYPE_STEP_F and r[1] > run[-1][1]:
+                run.append(r)
+                continue
+            if len(run) >= TYPE_RUN:
+                out.append((run[0][0], (run[-1][0] - run[0][0] + 1) / fps, run[0][2]))
+            if r is not None:
+                run = [r]
+    # one line typed after another is one typing gesture
+    out.sort()
+    merged = []
+    for f0, s, iid in out:
+        if merged and f0 <= merged[-1][0] + int(round(merged[-1][1] * fps)) + 2 * TYPE_STEP_F:
+            a, s0, i0 = merged[-1]
+            merged[-1] = (a, max(s0, (f0 - a) / fps + s), i0)
+        else:
+            merged.append((f0, s, iid))
+    return merged
+
+
 def annotate(events, l1):
     """The events with what their pictures do: travel_s and speed (a camera move, a whip's blur, a card's slide),
-    slam (a card that lands hard), still (a photograph), document (a page). Measured on the plan's own curves."""
+    slam (a card that lands hard), still (a photograph), document (a page), glitch (a glitched flash), typed (a line
+    typed a character at a time). Measured on the plan's own curves. A cut is `moving` only when its travel is
+    measured at its own frame (a whip's blur there, the crop travelling from there, a card's slide): a clip whose own
+    subject moves is not a cut that travels (owner, 20 Nov: "the SFX is really not related at all")."""
     fps = float(l1.get("fps") or 30.0)
-    items = {str(i.get("id")): i for i in l1.get("items") or []}
+    raw = l1.get("items") or []
+    items = {str(i.get("id")): i for i in raw}
     assets = l1.get("assets") or {}
-    flashes = [int(i["f"][0]) for i in items.values() if i.get("k") == "flash" and i.get("mode") not in ("pool", "recolour")
-               and not str(i.get("id")).endswith((".bar", ".pool")) and ".hl" not in str(i.get("id"))]
+    fl_items = [i for i in raw if i.get("k") == "flash" and i.get("mode") not in ("pool", "recolour")
+                and not str(i.get("id")).endswith((".bar", ".pool")) and ".hl" not in str(i.get("id"))]
+    flashes = [int(i["f"][0]) for i in fl_items]
+    glitch_f = glitched(fl_items)
     out = []
     for e in events:
         e = dict(e)
-        if e.get("kind") in ("picture", "cut") and any(abs(int(e["f"]) - f) <= 2 for f in flashes):
-            e["flash_cut"] = True                    # a flash frame on the cut: the cut is a designed, visible transition
-        it = items.get(str(e.get("id"))) or {}
         k = e.get("kind")
+        if k in ("picture", "cut") and any(abs(int(e["f"]) - f) <= 2 for f in flashes):
+            e["flash_cut"] = True                    # a flash frame on the cut: the cut is a designed, visible transition
+        if k in ("flash", "picture", "cut") and any(abs(int(e["f"]) - f) <= 2 for f in glitch_f):
+            e["glitch"] = True
+        it = items.get(str(e.get("id"))) or {}
         a = assets.get(str(it.get("pic"))) or {}
         if a.get("kind") == "document" or a.get("provider") == "primary-document" or a.get("document") is True:
             e["document"] = True
@@ -132,17 +209,19 @@ def annotate(events, l1):
             if s:
                 e.update(travel_s=round(s, 3), speed=round(v, 3))
         elif k in ("picture", "cut") and it.get("k") == "shot":
+            i0 = max(0, int(e["f"]) - int(it["f"][0]))          # the cut's own frame inside its shot (0 at the shot's start)
             blur = it.get("blur")
-            if isinstance(blur, list) and len(blur) > 1:
-                n = sum(1 for b in blur[:30] if float(b or 0) >= 0.5)
-                e.update(travel_s=round(max(n, 2) / fps, 3), speed=round(min(1.0, float(max(blur[:30])) / 12.0), 3), whip=True)
+            bl = [float(b or 0) for b in blur[i0:i0 + 30]] if isinstance(blur, list) else []
+            if len(bl) > 1 and max(bl[:4]) >= 0.5:               # drawn blurred at the cut's own frames: a whip
+                n = sum(1 for b in bl if b >= 0.5)
+                e.update(travel_s=round(max(n, 2) / fps, 3), speed=round(min(1.0, max(bl) / 12.0), 3), whip=True)
             else:
-                s, v = crop_travel(it.get("crop"), 1, fps)
+                s, v = crop_travel(it.get("crop"), max(1, i0), fps)
                 if s and v >= 0.25:
                     e.update(travel_s=round(s, 3), speed=round(v, 3))
             if a.get("kind") == "image":
                 e["still"] = True
-        elif k == "card":
+        elif k in ("card", "picture") and it.get("k") == "card":
             s, v, slam = card_motion(it, fps)
             if s:
                 e.update(travel_s=round(s, 3), speed=round(v, 3))
@@ -150,12 +229,23 @@ def annotate(events, l1):
                 e["slam"] = True
             if a.get("kind") == "image":
                 e["still"] = True
+        if k in ("picture", "cut"):
+            e["moving"] = bool(e.get("whip") or (e.get("travel_s") and not e.get("slam")))
         out.append(e)
+    for f0, s, iid in typed_runs(raw, fps):
+        hit = next((e for e in out if abs(int(e["f"]) - f0) <= 2), None)
+        if hit is None:                              # the typing starts where nothing else lands: it is its own moment
+            out.append({"f": f0, "kind": "display", "id": iid, "typed": True, "type_s": round(s, 3)})
+        elif hit.get("kind") in ("display", "card"):
+            hit.update(typed=True, type_s=round(s, 3))
+    out.sort(key=lambda e: int(e["f"]))
     return out
 
 
 def travels(e):
-    return bool(e.get("kind") == "move" or e.get("moving") or e.get("whip") or (e.get("travel_s") and not e.get("slam")))
+    """A picture that travels, by measure only: a camera move, a whip's blur, a crop or a card travelling. The bare
+    `moving` flag a workflow writes (its clip's own subject moving) is not travel: a plain cut stays a plain cut."""
+    return bool(e.get("kind") == "move" or e.get("whip") or (e.get("travel_s") and not e.get("slam")))
 
 
 def fits(e, part=None):
@@ -188,13 +278,38 @@ def sweep_s(x):
     return float(x.get("max_s") or x.get("duration_s") or 0.5)
 
 
-def pick(cls, st, lib, t, want_s=None, want_c=None, fits_=(), avoid=(), low=False, room=None, clean=False, preroll=None):
-    """The recording of this class (the class the set gave it) that best fits the moment, inside the film's palette."""
+TURN_PEN = 1.5             # the palette voice heard nearest this moment, while another fits within an octave
+TURN_WINDOW_S = 30.0        # one recording at most TURN_MOST times inside this window while the class has another voice
+TURN_MOST = 2
+TURN_FRESH = 2.0            # per use inside the window, weighted by how recent it is
+TURN_CAP = 4.0
+ROTATE = ("whoosh", "hit", "impact", "riser")   # a film's type keeps one click voice, as the references' type does
+PHONE_DB = -6.0             # a hit's 200 Hz-8 kHz body this far under its full level is still a hit a phone plays
+PHONE_W = 0.12              # dist per dB under PHONE_DB: a sub-only boom (99% under 93 Hz) is near silent on a phone
+
+
+def audible(x, transient=False):
+    """dB of a recording's 200 Hz-8 kHz band against its full band (the set's measures): what a phone speaker plays of
+    it. transient: in the 80 ms around its loudest moment (its attack), else its loudest 100 ms. None unmeasured."""
+    s = _scr(x)
+    v = s.get("trans_db" if transient else "body_db")
+    if v is None and transient:
+        v = s.get("body_db")
+    return None if v is None else float(v)
+
+
+def pick(cls, st, lib, t, want_s=None, want_c=None, fits_=(), avoid=(), low=False, room=None, clean=False, preroll=None,
+         transient=False, only=None):
+    """The recording of this class (the class the set gave it) that best fits the moment, inside the film's palette.
+    A hit or an impact is chosen for what a phone plays: its 200 Hz-8 kHz body (transient: its attack's) stands near
+    its full level; weight under 150 Hz (low) is a bonus only on top of that body. Inside the palette the voices take
+    turns: the one heard nearest in time, or one already heard TURN_MOST times within TURN_WINDOW_S of it, gives way
+    whenever another voice of the class fits the moment's length within an octave."""
     desc = st["desc"]
     pal = st.setdefault("palette", {}).setdefault(cls, [])
     heard = st.setdefault("heard", [])
     seed = st.get("seed") or 0
-    best = None
+    cands = []
     for sid, d in desc.items():
         if sid in avoid or d.get("kind") != cls:
             continue
@@ -202,11 +317,28 @@ def pick(cls, st, lib, t, want_s=None, want_c=None, fits_=(), avoid=(), low=Fals
         fam = d.get("family")
         if fam and fam not in fits_:
             continue                                   # an object answers only the picture that shows it
-        if x.get("align") == "start":
+        if only and fam != only:
             continue
+        if x.get("align") == "start" and not (fam == "type" and "type" in fits_):
+            continue                                   # a bed that starts on its frame: only type being typed
         s = _scr(x)
         if room is not None and cls == "riser" and float(s.get("attack_s", 0.0)) > room + 0.25:
             continue                                   # a climb longer than its room swallows what plays before it
+        cands.append((sid, x, s, fam))
+    if not cands:
+        return None
+    full = len(pal) >= PALETTE.get(cls, 2)
+
+    def octave(x):
+        return not want_s or abs(math.log2(max(sweep_s(x), 0.05) / max(want_s, 0.05))) <= 1.0
+
+    def free(sid):                                     # a voice that may take this turn: in the palette, or room for it
+        return (sid in pal or not full) and not any(s2 == sid and abs(t - u) < SAME_GAP_S for u, s2 in heard)
+    # the films are placed out of time order (the hook, the turn and the close first): the voice heard next to this
+    # moment, on either side, is the one that must not play again here
+    near = min(((abs(t - u), s2) for u, s2 in heard if s2 in pal), default=(None, None))[1]
+    best = None
+    for sid, x, s, fam in cands:
         dist = 0.0
         if want_s:
             dist += abs(math.log2(max(sweep_s(x), 0.05) / max(want_s, 0.05)))
@@ -214,7 +346,15 @@ def pick(cls, st, lib, t, want_s=None, want_c=None, fits_=(), avoid=(), low=Fals
             dist += 0.35 * abs(math.log2(max(float(s["centroid_hz"]), 80.0) / want_c))
         if float(s.get("pitch_hz", 0.0)) >= 150.0:
             dist += 1.5 * max(0.0, float(s.get("tonal", 0.0)) - TONAL)       # a pitch that may fight the song's key
-        if low:
+        if cls in ("impact", "hit"):
+            body = audible(x, transient)
+            if body is not None:
+                dist += PHONE_W * max(0.0, PHONE_DB - body)                   # what a phone speaker plays of it
+                if low:                                # weight under 150 Hz on top of an audible body, never instead of it
+                    dist -= 0.4 * min(1.0, float(s.get("low_share", 0.0))) * min(1.0, max(0.0, (body + 15.0) / 9.0))
+            elif low:
+                dist -= 0.4 * min(1.0, float(s.get("low_share", 0.0)))
+        elif low:
             dist -= 0.4 * min(1.0, float(s.get("low_share", 0.0)))
         if clean and preroll is not None and preroll(sid) >= 0.3:
             dist += 1.0                                # a hit with its own whoosh-in leaves no room for the designed lead
@@ -222,11 +362,19 @@ def pick(cls, st, lib, t, want_s=None, want_c=None, fits_=(), avoid=(), low=Fals
             dist -= 0.5
         if sid in pal:
             dist -= 0.25                               # the film's own palette: the same voices again
-        elif len(pal) >= PALETTE.get(cls, 2):
+        elif full:
             dist += 0.9
-        last = next((s2 for u, s2 in reversed(heard) if s2 in pal), None)
-        if sid == last and PALETTE.get(cls, 2) > 1:
-            dist += 0.5                                # inside the palette the voices take turns, as an editor's do
+        if cls in ROTATE and PALETTE.get(cls, 2) > 1:
+            other = any(o != sid and free(o) and octave(ox) for o, ox, _s, _f in cands)
+            ages = [abs(t - u) for u, s2 in heard if s2 == sid and abs(t - u) < TURN_WINDOW_S]
+            if other:
+                if sid == near:
+                    dist += TURN_PEN                   # inside the palette the voices take turns, as an editor's do
+                dist += TURN_FRESH * sum(1.0 - a / TURN_WINDOW_S for a in ages)   # the least lately heard first
+                if len(ages) >= TURN_MOST:
+                    dist += TURN_CAP                   # one whip four times in 25 s reads as a loop, not a cut
+        elif sid == near and PALETTE.get(cls, 2) > 1:
+            dist += 0.5
         if any(s2 == sid and abs(t - u) < SAME_GAP_S for u, s2 in heard):
             dist += 3.0
         dist += 0.25 * _u(seed, sid)
@@ -261,11 +409,14 @@ def layers(e, part, tier, t, st, lib, preroll, avoid=()):
     fit = fits(e, part)
     avoid = set(avoid)
     out = []
-    if avoid:                                         # a try the voice hid at this moment never joins the palette
-        heard = st.setdefault("heard", [])
-        heard[:] = [(u, s2) for u, s2 in heard if not (abs(u - t) < 1e-6 and s2 in avoid)]
+    # every call for this moment is a new try: an earlier try here was hidden by the voice (at this tier or the one
+    # above it), so it never joins the palette and never counts as heard
+    heard = st.setdefault("heard", [])
+    gone = {s2 for u, s2 in heard if abs(u - t) < 1e-6}
+    if gone:
+        heard[:] = [(u, s2) for u, s2 in heard if abs(u - t) >= 1e-6]
         for pal in st.setdefault("palette", {}).values():
-            pal[:] = [s2 for s2 in pal if s2 not in avoid or any(s3 == s2 for _u, s3 in heard)]
+            pal[:] = [s2 for s2 in pal if s2 not in gone or any(s3 == s2 for _u, s3 in heard)]
 
     def take(cls, sid, what="hit"):
         out.append((sid, what))
@@ -274,7 +425,8 @@ def layers(e, part, tier, t, st, lib, preroll, avoid=()):
     if tier == "hero":
         want = {"hook": 0.8, "payoff": 1.0, "close": 1.2}.get(part, 1.0)
         lead_room = room >= (0.4 if part == "hook" else 1.2)
-        hit = pick("impact", st, lib, t, want_s=want, fits_=fit, avoid=avoid, low=part != "hook", clean=lead_room, preroll=preroll)
+        hit = pick("impact", st, lib, t, want_s=want, fits_=fit, avoid=avoid, low=part != "hook", clean=lead_room, preroll=preroll,
+                   transient=part == "hook")               # the hook is heard by its attack: ranked by the attack's audible band
         if hit is None:
             return [], "impact"
         lead = None
@@ -312,6 +464,11 @@ def layers(e, part, tier, t, st, lib, preroll, avoid=()):
             if sid and (lib.get(sid) or {}).get("family") == "paper":
                 take(cls, sid)
                 return out, cls
+    if e.get("typed") and "type" in fit:              # type being typed: the keys under it, from its first character
+        sid = pick("click", st, lib, t, fits_={"type"}, avoid=avoid, only="type")      # trimmed to the typing's length
+        if sid:
+            take("click", sid)
+            return out, "click"
     if k == "display":
         sid = pick("click", st, lib, t, want_s=0.12, want_c=2500.0, fits_=fit, avoid=avoid)    # the film's one type voice
         if sid:

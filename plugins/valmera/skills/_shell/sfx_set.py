@@ -6,6 +6,7 @@ clock-tick loop, a waterphone, a cassette case, a rope whip, cloth), so a whoosh
 This tool builds a separate local set of purpose-made editing effects for the workflow films:
 
     python sfx_set.py build [--out DIR] [--cache DIR]
+    python sfx_set.py measure [--out DIR]      (the built set measured again in place; nothing fetched)
 
 - sfx_set_sources.json names every row: where it comes from (a Mixkit sound effect, free licence, or one of the
   product library's own recordings), the class it answers (whoosh, hit, impact, riser, click), the family of an object
@@ -17,7 +18,8 @@ This tool builds a separate local set of purpose-made editing effects for the wo
   and files stay, so a workflow that names one still plays it).
 - every row is measured by signal on the written file: length, attack, audible tail, end level, noise floor, clipped
   tops, the top of its spectrum and the steepness there (an encoder wall), centroid, low share, tonality (the share of
-  energy in its five strongest partials, and the pitch of the strongest), its 2-8 kHz level and the product's own
+  energy in its five strongest partials, and the pitch of the strongest), its 2-8 kHz level, what a phone speaker plays
+  of it (its 200 Hz-8 kHz band against its full band, over its loudest 100 ms and over its attack) and the product's own
   timing and level fields (peak_s, hit_s, max_s, hit_lufs, the shape on the sound engine's ruler).
 - a row whose measures show a defect a phone would play (a clipped source, an encoder wall under 16 kHz, a noise floor
   under a short sound, a tail that ends abruptly after the cut) is left out of the set and listed with the reason in
@@ -179,6 +181,18 @@ def band_level(m, lo, hi, win=0.1):
     return round(10 * np.log10(float(((c[w:] - c[:-w]) / w).max()) + 1e-18), 1)
 
 
+def phone(m):
+    """What a phone speaker plays of a recording (mono): its 200 Hz-8 kHz band against its full band, dB, over its
+    loudest 100 ms (body_db) and over the 80 ms around its loudest moment, its attack (trans_db). A sub-bass boom
+    whose energy sits under 100 Hz measures -20 dB or lower: near silent on a phone."""
+    full = band_level(m, 20.0, 20000.0)
+    e = env_db(m)
+    a = max(0, int((int(np.argmax(e)) * 0.005 - 0.01) * SR))
+    seg = m[a:a + int(0.08 * SR)]
+    return dict(body_db=round(band_level(m, 200.0, 8000.0) - full, 1),
+                trans_db=round(band_level(seg, 200.0, 8000.0, win=0.08) - full, 1))
+
+
 def signal(path, src_path=None):
     """The signal measures of one recording (and of its source file, when given)."""
     st = pcm(path, 2)
@@ -217,7 +231,7 @@ def signal(path, src_path=None):
                end_db=round(float(e[-1] - top), 1), top_hz=round(top_hz), wall_db=round(wall, 1),
                centroid_hz=round(float((hz * P).sum() / max(P.sum(), 1e-18))), low_share=round(float(P[(hz >= 20) & (hz < 150)].sum()) / tot, 3),
                tonal=round(share / max(float(P[3:].sum()), 1e-18), 3), pitch_hz=round(pitch or 0.0, 1),
-               hf_db=band_level(m, 2000.0, 8000.0), full_db=band_level(m, 20.0, 20000.0))
+               hf_db=band_level(m, 2000.0, 8000.0), full_db=band_level(m, 20.0, 20000.0), **phone(m))
     if src_path:
         s = pcm(src_path, 2)
         pk = float(np.abs(s).max())
@@ -347,13 +361,38 @@ def build(out=OUT, cache=None, sources=SOURCES, worker=None):
     return report
 
 
+def measure(out=OUT):
+    """Measure the built set again in place (the FLACs already written; nothing fetched): every row's screen measures
+    are refreshed from its file, the source-file measures kept. Returns {id: the measures that changed}."""
+    man_p = os.path.join(out, "manifest.json")
+    rows = json.load(open(man_p))
+    changed = {}
+    for r in rows:
+        sig = signal(os.path.join(out, r["file"]))
+        old = r.get("screen") or {}
+        new = dict(old, **sig)
+        if new != old:
+            changed[r["id"]] = {k: new[k] for k in new if old.get(k) != new[k]}
+        r["screen"] = new
+    tmp = man_p + ".part"
+    with open(tmp, "w") as f:
+        json.dump(rows, f, indent=1)
+        f.write("\n")
+    os.replace(tmp, man_p)
+    return changed
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="sfx_set")
-    ap.add_argument("cmd", choices=["build"])
+    ap.add_argument("cmd", choices=["build", "measure"])
     ap.add_argument("--out", default=OUT)
     ap.add_argument("--cache", help="a folder of already-fetched Mixkit WAVs (<n>.wav); kept")
     ap.add_argument("--worker")
     a = ap.parse_args(argv)
+    if a.cmd == "measure":
+        ch = measure(a.out)
+        print(json.dumps({"rows_changed": len(ch)}, indent=1))
+        return
     rep = build(a.out, a.cache, worker=a.worker)
     print(json.dumps({k: rep[k] for k in ("rows", "by_class", "families")}, indent=1))
     for d in rep["dropped"]:
