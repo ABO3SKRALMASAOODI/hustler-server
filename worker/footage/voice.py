@@ -24,6 +24,7 @@ import difflib
 import json
 import os
 import subprocess
+import time
 
 from . import ask, cut, fetch, identity
 
@@ -32,11 +33,33 @@ MIN_S, MAX_S = 1.8, 9.5   # a cut-in's length
 FACE_FRAMES = 3           # frames checked inside the stretch; two must show the person
 PAD_IN, PAD_OUT = 0.06, 0.14
 
+# repair=True (a workflow opts in; the product's defaults above are unchanged). Every step that refused a chosen voice
+# repairs it instead (stories round 1, 19 Nov: Jobs's own Macworld 1997 words were refused twice, once for 11.6 s
+# against a 9.5 s ceiling the references break, once because 1984 and 2010 photographs did not match 1997 stage frames):
+#   length  a choice longer than the band is trimmed on word edges to its best span (sentence edges first, best_span);
+#           the ceiling is the references' (Luckey 11.7 s), up to Musk's 25 s when the film's line is the person's own
+#           sentence; a choice shorter than the band runs on to its sentence's end
+#   face    the person's face is the source's own: frames of this source the look passed for the person are anchors
+#           beside the photographs, each anchor compared on its own (several anchors, never one averaged face); a
+#           stretch where the person is not matched but plausible (a wide stage, the screen, the crowd, a face near the
+#           threshold) is looked at again on more frames, and when still unseen the voice is kept and plays over the
+#           source's own frames of the person
+#   route   a pick the provider does not answer (a daily cap, a 5xx) is asked again on the next route (ROUTES)
+REPAIR_MAX_S = 12.0       # the references' cut-ins: Palmer Luckey's opening 11.7 s
+OWN_MAX_S = 25.0          # a line that is the person's own sentence: Musk's own interview ran 25 s
+OWN_SHARE = 0.6           # the line's words found in the person's words: the line is the person's own sentence
+PLAUSIBLE = 0.20          # SFace cosine under MATCH but above this: maybe the person (era, light, resolution)
+MORE_FRAMES = 6           # frames looked at again inside a stretch where the person was not yet seen
+ROUTES = [m.strip() for m in os.environ.get("FOOTAGE_VOICE_ROUTES", "claude-sonnet-5-5").split(",") if m.strip()]
+SPAN_DEFAULT = "about 2 to 9 seconds spoken"
+SPAN_REPAIR = (f"about 2 to {REPAIR_MAX_S:.0f} seconds spoken (up to {OWN_MAX_S:.0f} when the film's line is the person's own "
+               f"sentence, which the person then says in their own voice)")
+
 PICK_SYSTEM = """You choose where a short documentary's narrator stops and the real person speaks in their own voice, the way the best story channels cut in a founder's own interview. You get the film's numbered lines, the people the film is about, and timed transcripts of real videos of them (pieces of about 12 seconds, [start-end] text), each with its title and channel.
 
 Choose up to {most} moments where one of these people says, in their own voice, one or two sentences that belong right after one of the film's lines: the line's point said by the person who lived it, or the film's turn in their words. Rules:
 - the speaker must be the person, not an interviewer, a host, a reporter or a narrator: judge by the title and channel and by what is said (first person, the person's own story);
-- the words stand alone: whole sentences, about 2 to 9 seconds spoken, no interviewer's question inside;
+- the words stand alone: whole sentences, {span}, no interviewer's question inside;
 - they never contradict a line of the film and never just repeat a line;
 - "said" is copied exactly, word for word, from one transcript piece (or two neighbouring pieces of the same video).
 Answer with one JSON object only: {{"voices":[{{"src": video number, "piece_t0": start seconds of the piece where the words begin, "after": line number, "person": the person's name, "said": the exact words}}]}}, best first, or {{"voices":[]}} when no video has such a moment."""
@@ -46,8 +69,22 @@ def _tok(w):
     return "".join(c for c in str(w).lower() if c.isalnum() or c == "'")
 
 
-def pick(lines, persons, sources, most=MOST, budget_s=120.0):
-    """([{src, piece_t0, after, person, said}], usd). sources: [{title, channel, transcript}] (index = src)."""
+def _ask_routes(system, content, budget_s, routes):
+    """ask.ask on the engine's own model, then on each next route when the provider does not answer (an outage, never a
+    verdict: a daily call cap does not lift on a retry of the same route). (text, usd); raises the last failure."""
+    last = None
+    for k, model in enumerate([None] + [r for r in routes if r]):
+        try:
+            return ask.ask(system, content, "footage_voice_pick", budget_s=budget_s, max_tokens=4000, model=model)
+        except Exception as e:  # noqa: BLE001 the next route
+            last = e
+            time.sleep(min(2.0 * (k + 1), 6.0))
+    raise last
+
+
+def pick(lines, persons, sources, most=MOST, budget_s=120.0, repair=False):
+    """([{src, piece_t0, after, person, said}], usd). sources: [{title, channel, transcript}] (index = src).
+    repair: the references' span in the prompt, and an unanswered call asked again on the next route (ROUTES)."""
     blocks = []
     for k, s in enumerate(sources):
         tr = [f"[{p['t0']:.0f}-{p['t1']:.0f}] {p['text']}" for p in s.get("transcript") or [] if p.get("text")]
@@ -57,7 +94,11 @@ def pick(lines, persons, sources, most=MOST, budget_s=120.0):
         return [], 0.0
     content = (f"# The film's lines\n" + "\n".join(f"{ln['i']}. {ln.get('say') or ''}" for ln in lines)
                + f"\n\n# The people\n{json.dumps(persons, ensure_ascii=False)}\n\n# Transcripts\n" + "\n\n".join(blocks))
-    text, usd = ask.ask(PICK_SYSTEM.format(most=most), content, "footage_voice_pick", budget_s=budget_s, max_tokens=4000)
+    system = PICK_SYSTEM.format(most=most, span=SPAN_REPAIR if repair else SPAN_DEFAULT)
+    if repair:
+        text, usd = _ask_routes(system, content, budget_s, ROUTES)
+    else:
+        text, usd = ask.ask(system, content, "footage_voice_pick", budget_s=budget_s, max_tokens=4000)
     got = (ask.json_obj(text) or {}).get("voices") or []
     out = []
     for g in got:
@@ -129,6 +170,63 @@ def align(words, said):
     return i, j, found / len(b)
 
 
+_STOP = (".", "!", "?")
+_SOFT = (",", ";", ":", "\u2014", "-")
+
+
+def _ends(w, marks):
+    return str(w.get("w") or "").rstrip("\"')\u201d\u2019 ").endswith(marks)
+
+
+def edges(words, i, j):
+    """(t0, t1) of words[i:j] on word edges: the pads, never into the neighbouring words."""
+    t0 = words[i]["start"] - PAD_IN
+    t1 = words[j - 1]["end"] + PAD_OUT
+    if i > 0:
+        t0 = max(t0, (words[i - 1]["end"] + words[i]["start"]) / 2)
+    if j < len(words):
+        t1 = min(t1, (words[j - 1]["end"] + words[j]["start"]) / 2)
+    return t0, t1
+
+
+def best_span(words, i, j, max_s, min_s=MIN_S):
+    """(a, b): the best run words[a:b] inside words[i:j] that lasts at most max_s on its word edges: ending a sentence
+    first (the heard words' own punctuation), then a clause, then starting a sentence, then the longest; a span of at
+    least min_s before any shorter one. The chosen
+    choice's own start is preferred among equals, so the cut opens where the person's sentence opens."""
+    best, key = None, None
+    for a in range(i, j):
+        starts = a == i or _ends(words[a - 1], _STOP)
+        for b in range(a + 1, j + 1):
+            t0, t1 = edges(words, a, b)
+            d = t1 - t0
+            if d > max_s:
+                break
+            k = (d >= min_s, _ends(words[b - 1], _STOP), _ends(words[b - 1], _STOP + _SOFT), starts, round(d, 2), a == i)
+            if key is None or k > key:
+                best, key = (a, b), k
+    return best or (i, i + 1)
+
+
+def run_on(words, i, j, max_s):
+    """(i, j2): a choice shorter than the band runs on, word by word, to its sentence's end when that end is heard
+    within max_s (the person finishing their own sentence); else as it was."""
+    for b in range(j, len(words) + 1):
+        t0, t1 = edges(words, i, b)
+        if t1 - t0 > max_s:
+            break
+        if _ends(words[b - 1], _STOP) and t1 - t0 >= MIN_S:
+            return i, b
+    return i, j
+
+
+def own_line(line_say, heard):
+    """The share of the film's line found, in order, in the person's heard words (align): near 1 when the narrator's
+    line is the person's own sentence."""
+    al = align([dict(w=w) for w in str(heard or "").split()], str(line_say or ""))
+    return al[2] if al else 0.0
+
+
 def face_shows(proxy, t0, t1, anchors, work):
     """How many of FACE_FRAMES frames inside [t0, t1] show the anchored person (SFace, identity.MATCH)."""
     m = identity.models()
@@ -158,11 +256,88 @@ def face_shows(proxy, t0, t1, anchors, work):
     return hits
 
 
-def find_voices(lines, subjects, sources, anchors, out_dir, W, H, stream_of=None, log=print, most=MOST, tried=None):
+def face_check(proxy, t0, t1, anchors, own_frames, work):
+    """repair's face step: {verdict, matched, frames, other, faceless, plausible, best}. anchors: photographs of the
+    person; own_frames: [frame paths] of this same source the look passed for the person (same era, light and
+    resolution as the stretch). Each anchor face is compared on its own, never through one averaged face. FACE_FRAMES
+    frames first; a stretch with no match yet is looked at again on MORE_FRAMES more. verdict:
+      "seen"   the person matched on two frames, or on one with nothing that contradicts it
+      "other"  only when the source's own frames anchor the person: faces on most frames and none of them even
+               plausibly the person (an interviewer or a host is on camera, speaking)
+      "unseen" otherwise (no face model, a wide stage, the screen, the crowd, a face near the threshold): the voice is
+               kept and its picture is the source's own frames of the person"""
+    m = identity.models()
+    if not m:
+        return dict(verdict="unseen", matched=0, frames=0, why="no face model")
+    import cv2
+    import numpy as np
+    det = cv2.FaceDetectorYN.create(m[0], "", (320, 320), 0.7, 0.3, 50)
+    rec = cv2.FaceRecognizerSF.create(m[1], "")
+
+    def unit(v):
+        v = np.asarray(v, dtype=np.float32).ravel()
+        return v / (np.linalg.norm(v) + 1e-9)
+
+    def biggest(path):
+        fs = sorted(identity.faces(path, det, rec), key=lambda f: -f[2])[:1] if path else []
+        return [unit(f[0]) for f in fs]
+    photo = [v for a in anchors or () for v in biggest(a)]
+    own = [v for a in own_frames or () for v in biggest(a)]
+    if len(own) >= 3:            # the person recurs on their own frames; a face that agrees with no other is someone else
+        own = [v for k, v in enumerate(own) if any(float(v @ w) >= identity.MATCH for q, w in enumerate(own) if q != k)
+               or any(float(v @ w) >= identity.MATCH for w in photo)] or own
+    feats = own + photo
+    if not feats:
+        return dict(verdict="unseen", matched=0, frames=0, why="no anchor face")
+    rows = []
+
+    def look_at(ts):
+        for t in ts:
+            p = identity.full_frame(proxy, t, os.path.join(work, f"vface_{int(t * 1000)}.jpg"))
+            fs = identity.faces(p, det, rec) if p else []
+            sims = [max(float(unit(f[0]) @ a) for a in feats) for f in fs]
+            rows.append(dict(t=round(t, 3), faces=len(fs), best=round(max(sims), 3) if sims else None))
+    look_at([t0 + (t1 - t0) * (k + 0.5) / FACE_FRAMES for k in range(FACE_FRAMES)])
+    if sum(1 for r in rows if (r["best"] or 0) >= identity.MATCH) < 2:
+        look_at([t0 + (t1 - t0) * (k + 0.25) / MORE_FRAMES for k in range(MORE_FRAMES)])
+    matched = sum(1 for r in rows if (r["best"] or 0) >= identity.MATCH)
+    faceless = sum(1 for r in rows if not r["faces"])
+    plausible = sum(1 for r in rows if r["faces"] and PLAUSIBLE <= (r["best"] or 0) < identity.MATCH)
+    other = sum(1 for r in rows if r["faces"] and (r["best"] or 0) < PLAUSIBLE)
+    if matched >= 2 or (matched == 1 and other == 0):
+        verdict = "seen"
+    elif own and matched == 0 and plausible == 0 and other * 3 >= 2 * len(rows):
+        verdict = "other"
+    else:
+        verdict = "unseen"
+    return dict(verdict=verdict, matched=matched, frames=len(rows), other=other, faceless=faceless, plausible=plausible,
+                best=max((r["best"] or 0) for r in rows) if rows else None)
+
+
+def _picture_at(s, t0, t1, own_t):
+    """The seconds of the source to show under a voice whose speaker is not on camera: the same length of the source's
+    own frames of the person, around the frame the look passed nearest the stretch (their own lips are not at those
+    seconds, so it plays as the source's picture of the person, like the references' broadcast sound over pictures)."""
+    if not own_t:
+        return t0, t1
+    c = min(own_t, key=lambda t: abs(t - (t0 + t1) / 2))
+    d = t1 - t0
+    a = max(0.0, c - d / 2)
+    dur = float(s.get("duration") or 0)
+    if dur and a + d > dur:
+        a = max(0.0, dur - d)
+    return a, a + d
+
+
+def find_voices(lines, subjects, sources, anchors, out_dir, W, H, stream_of=None, log=print, most=MOST, tried=None,
+                repair=False, own=None):
     """The film's real-voice cut-ins: (records, usd). sources: the run's open sources (proxy, transcript, subjects);
     subjects: the run's planned subjects (kind "person" ones are heard); anchors: {person: [checked photographs]}.
     tried (a list, opt-in): every candidate considered is appended with its outcome ({person, after, source, said,
-    reason}; reason None when it was cut in), and a run that had no candidate at all appends why."""
+    reason}; reason None when it was cut in), and a run that had no candidate at all appends why.
+    repair (a workflow opts in; see REPAIR_MAX_S): a choice is trimmed or run on to the band instead of refused, the face
+    step is face_check, and the pick is asked again on the next route. own: {source key: [(subject name, t)]} the frames
+    of each source the look passed, per subject (run.find), the person's own anchors for face_check."""
     tried = tried if tried is not None else []
 
     def note(g, s, reason):
@@ -180,7 +355,9 @@ def find_voices(lines, subjects, sources, anchors, out_dir, W, H, stream_of=None
     work = os.path.join(out_dir, "voices_work")
     os.makedirs(work, exist_ok=True)
     os.makedirs(os.path.join(out_dir, "voices"), exist_ok=True)
-    picks, usd = pick(lines, [p["name"] for p in people], [dict(title=s["title"], channel=s.get("channel"), transcript=s["transcript"]) for s in mine], most)
+    picks, usd = pick(lines, [p["name"] for p in people], [dict(title=s["title"], channel=s.get("channel"), transcript=s["transcript"]) for s in mine], most,
+                      **({"repair": True} if repair else {}))
+    say_of = {int(ln.get("i", k)): ln.get("say") for k, ln in enumerate(lines)}
     log(f"voices: {len(picks)} moments chosen from {len(mine)} sources")
     if not picks:
         note(None, None, f"the model chose no moment in {len(mine)} heard sources")
@@ -203,21 +380,48 @@ def find_voices(lines, subjects, sources, anchors, out_dir, W, H, stream_of=None
                 note(g, s, f"the chosen words are not heard there (share {al and round(al[2], 2)})")
                 continue
             i, j, share = al
-            t0 = words[i]["start"] - PAD_IN
-            t1 = words[j - 1]["end"] + PAD_OUT
-            if i > 0:
-                t0 = max(t0, (words[i - 1]["end"] + words[i]["start"]) / 2)
-            if j < len(words):
-                t1 = min(t1, (words[j - 1]["end"] + words[j]["start"]) / 2)
-            if not MIN_S <= t1 - t0 <= MAX_S:
+            t0, t1 = edges(words, i, j)
+            fixed, face = None, None
+            if repair:
+                own_s = own_line(say_of.get(g["after"]), " ".join(w["w"] for w in words[i:j]))
+                top = OWN_MAX_S if own_s >= OWN_SHARE else REPAIR_MAX_S
+                if t1 - t0 > top:
+                    was = t1 - t0
+                    i, j = best_span(words, i, j, top)
+                    t0, t1 = edges(words, i, j)
+                    fixed = f"trimmed on word edges from {was:.1f} s to {t1 - t0:.1f} s"
+                elif t1 - t0 < MIN_S:
+                    was = t1 - t0
+                    i, j = run_on(words, i, j, top)
+                    t0, t1 = edges(words, i, j)
+                    if t1 - t0 > was:
+                        fixed = f"ran on to its sentence's end, {was:.1f} s to {t1 - t0:.1f} s"
+                if fixed:
+                    log(f"voices: {s['key']} {fixed}")
+            elif not MIN_S <= t1 - t0 <= MAX_S:
                 log(f"voices: {s['key']} {t1 - t0:.1f}s is outside {MIN_S}-{MAX_S}s")
                 note(g, s, f"{t1 - t0:.1f} s is outside {MIN_S}-{MAX_S} s")
                 continue
-            seen = face_shows(s["proxy"], t0, t1, (anchors or {}).get(g["person"]) or (), work)
-            if seen is None or seen < 2:
-                log(f"voices: {s['key']} {t0:.1f}-{t1:.1f}s: the person is on {seen} of {FACE_FRAMES} frames; not cut in")
-                note(g, s, f"the person is on {seen} of {FACE_FRAMES} frames")
-                continue
+            pic_t = (t0, t1)
+            if repair:
+                mine_t = sorted(t for nm, t in (own or {}).get(s["key"]) or () if str(g["person"]).casefold() in str(nm).casefold())
+                own_jpgs = [identity.full_frame(s["proxy"], t, os.path.join(work, f"vown_{s['key']}_{int(t * 1000)}.jpg")) for t in mine_t[:8]]
+                face = face_check(s["proxy"], t0, t1, (anchors or {}).get(g["person"]) or (), [p for p in own_jpgs if p], work)
+                seen = face.get("matched")
+                if face["verdict"] == "other":
+                    log(f"voices: {s['key']} {t0:.1f}-{t1:.1f}s: another person is on camera ({face['other']} of {face['frames']} frames)")
+                    note(g, s, f"another person is on camera on {face['other']} of {face['frames']} frames")
+                    continue
+                if face["verdict"] == "unseen":
+                    pic_t = _picture_at(s, t0, t1, mine_t)
+                    log(f"voices: {s['key']} {t0:.1f}-{t1:.1f}s: the person is not on camera ({face}); the voice plays over "
+                        f"{'their own frames of this source' if mine_t else 'the source at those seconds'}")
+            else:
+                seen = face_shows(s["proxy"], t0, t1, (anchors or {}).get(g["person"]) or (), work)
+                if seen is None or seen < 2:
+                    log(f"voices: {s['key']} {t0:.1f}-{t1:.1f}s: the person is on {seen} of {FACE_FRAMES} frames; not cut in")
+                    note(g, s, f"the person is on {seen} of {FACE_FRAMES} frames")
+                    continue
             base = f"voice_{len(out)}_{s['key']}_{int(t0 * 100)}"
             wav = os.path.join(out_dir, "voices", base + ".wav")
             audio(s["proxy"], t0, t1, wav, sr=48000)
@@ -225,9 +429,9 @@ def find_voices(lines, subjects, sources, anchors, out_dir, W, H, stream_of=None
             try:
                 raw = os.path.join(work, base + "_raw.mp4")
                 if s.get("whole"):          # a source opened whole (run.find whole_first): cut from that file, never fetched again
-                    cut.local(s["whole"], t0, t1, raw)
+                    cut.local(s["whole"], pic_t[0], pic_t[1], raw)
                 else:
-                    cut.grab((stream_of or {}).get(s["key"]), s["url"], t0, t1, raw)
+                    cut.grab((stream_of or {}).get(s["key"]), s["url"], pic_t[0], pic_t[1], raw)
                 cut.finish(raw, pic, W, H, 0.5)
             except Exception as e:  # noqa: BLE001 the sound alone still carries the person; the film shows its own picture
                 log(f"voices: picture for {base} failed: {str(e)[:120]}")
@@ -237,7 +441,10 @@ def find_voices(lines, subjects, sources, anchors, out_dir, W, H, stream_of=None
                             words=[dict(w=w["w"], start=round(w["start"] - t0, 3), end=round(w["end"] - t0, 3)) for w in words[i:j]],
                             wav=os.path.relpath(wav, out_dir), file=os.path.relpath(pic, out_dir) if pic else None,
                             source=dict(url=s["url"], title=s["title"], channel=s.get("channel"), where=s.get("where")),
-                            time_range=[round(t0, 3), round(t1, 3)]))
+                            time_range=[round(t0, 3), round(t1, 3)],
+                            **({"repaired": fixed} if fixed else {}),
+                            **({"face": face} if face else {}),
+                            **({"picture_range": [round(pic_t[0], 3), round(pic_t[1], 3)]} if pic_t != (t0, t1) else {})))
             used_lines.add(g["after"])
             note(g, s, None)
             log(f"voices: {g['person']} after line {g['after']}: {t1 - t0:.1f}s from {s['title'][:50]!r}")

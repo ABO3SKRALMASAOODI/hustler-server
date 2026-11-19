@@ -156,7 +156,8 @@ def line_shots(dur, shot_s=None, line_max=None):
 
 def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MAX_SOURCES, keep_work=False, anchors=None, avoid=None,
          hear_s=None, read_s=None, per=None, want_voices=None, preserve_source=False, downloaded_only=False, shot_s=None, line_max=None,
-         strict_lines=False, motion_first=False, alloc=None, reassign_lost=False, whole_first=False, scout_motion=False, source_only=False):
+         strict_lines=False, motion_first=False, alloc=None, reassign_lost=False, whole_first=False, scout_motion=False, source_only=False,
+         voice_repair=None):
     """downloaded_only: cut the scanned rendition without reopening remote streams.
     avoid: [{"url", "time_range"}] already cut for this film by an earlier run: those seconds of a source are not cut again.
     hear_s, read_s, per: a caller with a deadline (a first film, score.film) hears less or nothing of each source, reads
@@ -175,6 +176,10 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
                    every cut come from that one file, its stream is never resolved and no section is fetched per cut. A
                    source opened through the Wayback Machine is never resolved live: a pick outside what was read of it
                    fails, so reassign_lost replaces it
+    voice_repair   real voices are repaired, never refused (voice.find_voices repair: a long choice trimmed on word
+                   edges to the references' band, the person's face anchored on this source's own passed frames, an
+                   unseen speaker kept over the person's own frames, an unanswered pick asked on the next route); None
+                   reads FOOTAGE_VOICE_REPAIR=1 (the stories workflow's footage calls)
     Environment (any caller): FOOTAGE_VERIFY=0 skips the per-clip verify pass (a caller that gates every take by its own
     per-line verdicts, the stories skill's fit); FOOTAGE_KEEP_SOURCES=<dir> keeps each whole source opened in <dir> with a
     manifest.json of {url, path, rung} rows that fetch.local_source reads (FOOTAGE_LOCAL_SOURCES), so a later call for the
@@ -476,7 +481,14 @@ def find(lines, named, about, out_dir, W=1080, H=1920, log=print, max_sources=MA
         # a caller that hears nothing (the first film's wishes) has no sentence to cut in: voices only when asked or heard
         if (want_voices if want_voices is not None else hear_s != 0.0) and os.environ.get("FOOTAGE_VOICES", "1") != "0":
             try:
-                if whole_first:
+                if voice_repair if voice_repair is not None else os.environ.get("FOOTAGE_VOICE_REPAIR") == "1":
+                    voices_tried = []
+                    own = {}
+                    for c in good:                     # the frames the look passed, per source: the person's own anchors
+                        own.setdefault(c["source"], []).append((c.get("subject"), float(c["t"])))
+                    voices, spend["voices"] = voice.find_voices(lines, subjects, live, anchors, out_dir, W, H, stream_of=stream_of, log=log,
+                                                                tried=voices_tried, repair=True, own=own)
+                elif whole_first:
                     voices_tried = []
                     voices, spend["voices"] = voice.find_voices(lines, subjects, live, anchors, out_dir, W, H, stream_of=stream_of, log=log,
                                                                 tried=voices_tried)
@@ -731,6 +743,7 @@ def main():
     ap.add_argument("--source-only",action="store_true",help="use supplied original candidates without repeating platform searches")
     ap.add_argument("--hear-seconds",type=float,default=None,help="source audio seconds to transcribe; zero for visual-only documentary acquisition")
     ap.add_argument("--want-voices", action="store_true", help="look for real voices even when nothing would otherwise be heard")
+    ap.add_argument("--voice-repair", action="store_true", help="real voices trimmed, re-anchored and re-routed instead of refused")
     a = ap.parse_args()
     if a.hear_seconds is not None and a.hear_seconds<0:ap.error("--hear-seconds must be nonnegative")
     hearing={} if a.hear_seconds is None else dict(hear_s=a.hear_seconds)
@@ -750,7 +763,8 @@ def main():
                          anchors=anchors, avoid=avoid, preserve_source=a.preserve_source, **hearing,
                          **{k: v for k, v in dict(shot_s=a.shot_s, line_max=a.line_max, per=a.per, strict_lines=a.strict_lines,
                                                   motion_first=a.motion_first, scout_motion=a.scout_motion, alloc=a.alloc, reassign_lost=a.reassign_lost,
-                                                  whole_first=a.whole_first, want_voices=a.want_voices, source_only=a.source_only).items() if v})
+                                                  whole_first=a.whole_first, want_voices=a.want_voices, source_only=a.source_only,
+                                                  voice_repair=a.voice_repair).items() if v})
     if res is None:
         print(json.dumps(dict(off="VALMERA_FOOTAGE=0")))
         return
