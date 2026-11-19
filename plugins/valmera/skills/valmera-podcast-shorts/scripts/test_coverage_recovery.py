@@ -33,16 +33,18 @@ def test_repeated_director_referent_reuses_candidates_not_other_subjects():
     assert pool[2][0] is a  # references, no copied media or invented attribution
 
 
-def test_repeated_candidate_is_checked_under_its_new_words_and_can_fail():
+def test_a_shown_interval_is_never_placed_again():
+    """19 Nov m10: vnGC4YS36gU 139.82-141.42 s was placed three times. A window whose candidates were all shown takes
+    nothing without a kept original to cut a fresh interval from (the ladder and the gap fill take the slot)."""
     a=dict(path='/a.mp4',seconds=1.6);b=dict(path='/b.mp4',seconds=1.6)
     seen=[]
     def check(rows):
         seen.extend(r[4]['window'] for r in rows)
         for r in rows:r[4].update(verified_motion=True,placed_motion_p90=2.)
-        decisions=[dict(ok=r[4]['window']!=2,motion_ok=True) for r in rows]
-        return [r for r,d in zip(rows,decisions) if d['ok']],dict(placements=decisions,rejected=sum(not d['ok'] for d in decisions),spend=[])
-    accepted,_=coverage.checked_proposals(repeated_subject(),{0:[a],1:[b]}, {},3,check)
-    assert 2 in seen and all(r[4]['window']!=2 for r in accepted)
+        decisions=[dict(ok=True,motion_ok=True) for r in rows]
+        return rows,dict(placements=decisions,rejected=0,spend=[])
+    accepted,report=coverage.checked_proposals(repeated_subject(),{0:[a],1:[b]}, {},3,check)
+    assert 2 not in seen and [r[4]['path'] for r in accepted]==['/a.mp4','/b.mp4'] and report['rejected_paths']==[]
 
 
 def test_repeated_candidate_does_not_inflate_new_picture_density():
@@ -50,8 +52,192 @@ def test_repeated_candidate_does_not_inflate_new_picture_density():
     with pytest.raises(coverage.CoverageError) as error:
         coverage.require_coverage(shots,repeated_subject(),3)
     assert error.value.report['new_pictures']==2
-    assert error.value.report['repeated_pictures']==1
+    assert error.value.report['repeated_pictures']==0 and error.value.report['missing_windows']==[2]
     assert error.value.report['moving_seconds']==0
+
+
+FF='/Users/masaoodi/Documents/Valmera/.valmera/week-1106/gauntlet/tools/ff/ffmpeg'
+WORKER=os.path.abspath(os.path.join(os.path.dirname(__file__),'..','..','..','..','..','worker'))
+
+
+@pytest.fixture
+def worker_path(monkeypatch):
+    """The worker beside this plugin on the path (footage.fetch, footage.motion), for the tests that reach it."""
+    monkeypatch.syspath_prepend(WORKER)
+
+
+@pytest.mark.skipif(not os.path.exists(FF),reason='needs the gauntlet ffmpeg')
+def test_a_later_reference_takes_a_fresh_interval_of_the_kept_original(tmp_path,worker_path):
+    import subprocess
+    original=tmp_path/'sources'/'original.mp4';original.parent.mkdir()
+    subprocess.run([FF,'-v','error','-y','-f','lavfi','-i','testsrc2=size=320x180:rate=30:duration=12','-c:v','libx264',
+                    '-pix_fmt','yuv420p',str(original)],check=True)
+    url='https://www.youtube.com/watch?v=vnGC4YS36gU'
+    (tmp_path/'sources'/'manifest.json').write_text(json.dumps([dict(url=url,path=str(original))]))
+    clip=tmp_path/'clip.mp4'
+    subprocess.run([FF,'-v','error','-y','-ss','4','-i',str(original),'-t','1.6','-c:v','libx264','-pix_fmt','yuv420p',str(clip)],check=True)
+    a=dict(path=str(clip),seconds=1.6,source=dict(url=url,title='Servers',channel='Meta'),time_range=[4.0,5.6],w=320,h=180)
+    b=dict(path='/b.mp4',seconds=1.6)
+    originals=coverage.originals_of(str(tmp_path))
+    assert originals=={url:str(original)}
+    shots=coverage.proposals(repeated_subject(),{0:[a],1:[b]},{},originals=originals,cut_dir=str(tmp_path/'fresh'),ffmpeg=FF)
+    later=[s for s in shots if s[4]['window']==2]
+    assert len(later)==1 and later[0][4]['fresh_of']==str(clip) and os.path.isfile(later[0][4]['path'])
+    lo,hi=later[0][4]['time_range']
+    assert lo>=5.6 or hi<=4.0                                                      # never the interval already shown
+    assert abs((hi-lo)-later[0][4]['seconds'])<0.1 and os.path.isfile(later[0][4]['still'])
+    report=coverage.require_coverage([s for s in shots],repeated_subject(),3,final=True)
+    assert report['repeated_pictures']==0 and report['missing_windows']==[] and report['new_pictures']==3
+    # an interval this window's check turned down is not cut again: the next one beside it is
+    again=coverage.proposals(repeated_subject(),{0:[a],1:[b]},{},rejected={(2,later[0][4]['path'])},
+                             originals=originals,cut_dir=str(tmp_path/'fresh'),ffmpeg=FF)
+    other=[s for s in again if s[4]['window']==2]
+    assert other and other[0][4]['path']!=later[0][4]['path']
+
+
+def test_the_plan_starts_from_the_scripts_briefs_and_gives_each_window_a_ladder(tmp_path):
+    words=[dict(w=w,start=i,end=i+.8) for i,w in enumerate('Alex called me and I joined his livestream'.split())]
+    named=[dict(name='Alexandr Wang',**{'is':'person'},must_show='Alexandr Wang of Scale AI at an event'),
+           dict(name='Mark Zuckerberg Facebook Live',**{'is':'event'},must_show='Zuckerberg hosting a Facebook Live stream')]
+    answer={'entities':[dict(name='Alexandr Wang',word_ids=[0])],
+            'windows':[dict(first=0,last=3,name='Alexandr Wang',external=True,must_show='Alexandr Wang at Scale AI',
+                            depictions=[dict(name='Scale AI',must_show='Scale AI offices',video_searches=['Scale AI office tour']),
+                                        dict(name='junk'),dict(name='AI data labelling',must_show='people labelling data'),
+                                        dict(name='a',must_show='b'),dict(name='c',must_show='d')]),
+                       dict(first=5,last=7,name='Mark Zuckerberg Facebook Live',external=True,must_show='Zuckerberg live')]}
+    asked=[]
+    llm=SimpleNamespace(ask=lambda system,content,**k:asked.append((system,json.loads(content))) or (json.dumps(answer),{}),json_block=json.loads)
+    out=coverage.plan(words,'Two-day plan',str(tmp_path),llm,named=named)
+    system,content=asked[0]
+    assert content['named']==[dict(name=n['name'],must_show=n['must_show'],**{'is':n['is']}) for n in named]
+    assert 'current interview take' in system and "speaker's OWN past" in system and 'NEVER contain the original speaker' not in system
+    ladder=out['windows'][0]['depictions']
+    assert [r['name'] for r in ladder]==['Scale AI','AI data labelling','a'] and ladder[0]['video_searches']==['Scale AI office tour']
+    assert out['windows'][0]['rung']==0 and out['windows'][1]['depictions']==[] and out['named']==content['named']
+    assert coverage.plan(words,'Two-day plan',str(tmp_path),llm,named=named) is not None and len(asked)==1     # cached
+    coverage.plan(words,'Two-day plan',str(tmp_path),llm,named=named[:1])                                     # new briefs: read again
+    assert len(asked)==2
+
+
+def test_the_speaker_s_own_filmed_past_is_invited_and_only_this_take_excluded():
+    import wf1_context
+    src=open(os.path.join(os.path.dirname(__file__),'wf1_primary_sources.py')).read()
+    assert 'Do not return the original podcast speaker' not in src and 'Never return the current interview itself' in src
+    assert "speaker's OWN\nearlier filmed appearances" in src
+    import wf1_short
+    title=wf1_short.footage_title('Watermelon','Speaker: Mark Zuckerberg')
+    assert 'never him as he looks today' not in title and 'never show this conversation' in title and 'livestream' in title
+    rr=open(os.path.join(os.path.dirname(__file__),'wf1_coverage.py')).read()
+    assert 'resolved_referents=coverage.get' in rr and 'current interview take (this conversation' in rr
+
+
+def test_referent_research_reads_the_scripts_resolved_referents(tmp_path,monkeypatch):
+    import wf1_context,writer
+    sent=[]
+    monkeypatch.setattr(writer,'ask_openai',lambda system,content,**k:sent.append((system,json.loads(content))) or ('{"references":[],"unresolved":[]}',{}))
+    llm=SimpleNamespace(openai_key=lambda:None,json_block=json.loads)
+    cov=dict(context='Speaker: Mark Zuckerberg',words=[dict(w='Alex',start=0,end=.5)],
+             windows=[dict(name='Alex',say='Alex')],named=[dict(name='Alexandr Wang',must_show='Wang at Scale AI',**{'is':'person'})])
+    wf1_context.research(cov,str(tmp_path),llm)
+    assert sent[0][1]['resolved_referents'][0]['name']=='Alexandr Wang' and 'resolved_referents' in sent[0][0]
+
+
+def test_reopen_fetches_exactly_the_refused_sources_and_sorts_the_wall_from_the_gone(tmp_path):
+    rows=[dict(url=f'https://www.youtube.com/watch?v=v{n}',title=f'T{n}',channel='C',duration=30,subjects=['Lab']) for n in range(4)]
+    asked=[]
+
+    def opener(url,dest,duration=None):
+        asked.append(url)
+        if url.endswith('1'):raise RuntimeError('tv: ERROR: Sign in to confirm you are not a bot')
+        if url.endswith('2'):raise RuntimeError('tv: ERROR: Video unavailable. This video is private')
+        os.makedirs(dest,exist_ok=True);p=os.path.join(dest,'whole.mp4');open(p,'wb').write(b'x'*3000);return p,'mweb+proxy'
+    keep=tmp_path/'sources'
+    opened,refused,gone=primary.reopen(rows,str(keep),log=lambda _:None,space_s=0,opener=opener)
+    assert asked==[r['url'] for r in rows]
+    assert [r['url'] for r in opened]==[rows[0]['url'],rows[3]['url']]
+    assert [r['url'] for r in refused]==[rows[1]['url']] and refused[0]['tries']==1
+    assert [r['url'] for r in gone]==[rows[2]['url']]
+    kept=primary.retained(str(tmp_path))
+    assert sorted(r['url'] for r in kept['Lab'])==sorted([rows[0]['url'],rows[3]['url']]) and kept['Lab'][0]['channel']=='C'
+    again,_,_=primary.reopen([rows[0]],str(keep),opener=lambda *a:pytest.fail('kept: not fetched again'))
+    assert again[0]['url']==rows[0]['url']
+
+
+# yt-dlp's own words for the bot check, as this Mac's footage fetches met it on 19 Nov, and the Wayback rung's answer
+BOT_STDERR=('WARNING: [youtube] o6f0B9oo87w: Some web client https formats have been skipped\n'
+            'ERROR: [youtube] o6f0B9oo87w: Sign in to confirm you\u2019re not a bot. Use --cookies-from-browser or --cookies '
+            'for the authentication. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-youtube-dl  '
+            'for how to manually pass cookies. Also see  https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies  '
+            'for tips on effectively exporting YouTube cookies\n')
+WAYBACK_STDERR='ERROR: [web.archive:youtube] o6f0B9oo87w: The requested video is not archived or indexed\n'
+
+
+def _walled_ladder(monkeypatch):
+    """The real fetch.run_ladder with yt-dlp answering the bot check on every YouTube rung and 'not archived' on the
+    Wayback rung (no transport, no proxy: this Mac's only route)."""
+    from footage import fetch
+    for k in ('FOOTAGE_FETCH_CMD','FOOTAGE_LOCAL_SOURCES','FOOTAGE_PACE_DIR','FOOTAGE_WAYBACK'):
+        monkeypatch.delenv(k,raising=False)
+    calls=[]
+
+    def run(cmd,**kw):
+        calls.append(cmd[-1])
+        err=WAYBACK_STDERR if cmd[-1].startswith(fetch.WAYBACK) else BOT_STDERR
+        return SimpleNamespace(returncode=1,stdout='',stderr=err)
+    monkeypatch.setattr(fetch.subprocess,'run',run)
+    return calls
+
+
+def test_a_source_still_behind_the_wall_is_refused_not_gone_through_the_real_ladder(tmp_path,monkeypatch,worker_path):
+    """The ladder's error ends with the Wayback rung's answer; the wall is read on the YouTube rungs' part."""
+    from footage import fetch
+    calls=_walled_ladder(monkeypatch)
+    url='https://www.youtube.com/watch?v=o6f0B9oo87w'
+    with pytest.raises(fetch.FetchError) as e:
+        fetch.run_ladder(url,[])
+    assert 'not archived' in str(e.value) and 'sign in to confirm' not in str(e.value)[-240:].lower()   # the tail hides it
+    assert primary.wall_error(str(e.value))
+    assert not primary.wall_error('tv: ERROR: [youtube] x: Video unavailable. This video has been removed || wayback: timed out')
+    calls.clear()
+    row=dict(url=url,title='Watermelon',channel='Meta',duration=40,subjects=['Lab'])
+    opened,refused,gone=primary.reopen([row],str(tmp_path/'sources'),log=lambda _:None,space_s=0)
+    assert calls and calls[-1].startswith(fetch.WAYBACK)                         # the default opener walked the real ladder
+    assert opened==[] and gone==[] and [r['url'] for r in refused]==[url]
+    assert len(refused[0]['error'])<=260 and 'Sign in to confirm' in refused[0]['error']
+
+
+def test_a_wall_that_holds_on_the_real_ladder_stops_the_short_instead_of_lifting(tmp_path,monkeypatch,worker_path):
+    import wf1_short as wf,wf1_film
+    _walled_ladder(monkeypatch)
+    rows=[dict(url=f'https://www.youtube.com/watch?v=video{n:05d}',title=f'Launch {n}',channel='Bloomberg Tech',where='youtube',
+               duration=120,subjects=['Lab'],error='default: Sign in to confirm you are not a bot') for n in range(3)]
+    pack=dict(platform_walled=True,coverage=dict(contract=3,windows=[dict(name='Lab',must_show='Its launch',say='a lab',t0=0,t1=4)]),
+              footage=[],pictures={},credits=[],wall=dict(sources=3,refused=rows))
+    (tmp_path/'pack.json').write_text(json.dumps(dict(pack=pack,record=dict(footage=None))))
+    monkeypatch.setattr(primary.time,'sleep',lambda s:None)
+    monkeypatch.setattr(wf.chain,'footage',lambda *a,**k:pytest.fail('nothing opened: nothing to cut'))
+    ctx=SimpleNamespace(supply=str(tmp_path),log=lambda _:None)
+    with pytest.raises(RuntimeError,match=wf1_film.WALL):
+        wf.recover_wall(ctx,dict(title='Lab',style={'id':'window'}),pack,waits=(0,))
+    stored=json.load(open(tmp_path/'pack.json'))['pack']
+    assert stored['platform_walled'] is True and stored['wall']['sources']==3 and len(stored['wall']['refused'])==3
+
+
+def test_an_operator_transport_that_fails_falls_through_to_every_local_route(tmp_path,monkeypatch,worker_path):
+    from footage import fetch
+    monkeypatch.setenv('FOOTAGE_FETCH_CMD','operator-fetch')
+    monkeypatch.setattr(fetch,'whole_av',lambda *a:(_ for _ in ()).throw(fetch.FetchError('external original fetch failed: walled')))
+    seen=[]
+
+    def ladder(url,args,timeout_s=None,done=None):
+        seen.append(args)
+        p=tmp_path/'d'/'whole.mp4';p.write_bytes(b'x'*3000)
+        return '',  'tv+proxy'
+    monkeypatch.setattr(fetch,'run_ladder',ladder)
+    path,rung=primary._open_exact('https://www.youtube.com/watch?v=x',str(tmp_path/'d'),duration=40)
+    assert rung=='tv+proxy' and path.endswith('whole.mp4') and '--download-sections' not in seen[0]
+    path,rung=primary._open_exact('https://www.youtube.com/watch?v=y',str(tmp_path/'d'),duration=2400)
+    assert rung=='tv+proxy+head' and '--download-sections' in seen[1]               # a long source: its head, not 400 MB
 
 
 def test_retained_originals_need_bytes_and_attribution_and_keep_exact_subjects(tmp_path):
@@ -313,3 +499,32 @@ def test_speaker_holds_the_director_cannot_break_are_recorded_not_fatal(tmp_path
     llm=SimpleNamespace(ask=lambda *a,**k:('{"moves":[]}',{}),json_block=json.loads)
     moves,_=coverage.speaker_moves(data,[],12*30,[],str(tmp_path),llm=llm)
     assert moves==[] and data['unresolved_holds']==[(0,360)]
+
+
+@pytest.mark.skipif(not os.path.exists(FF),reason='needs the gauntlet ffmpeg')
+def test_when_found_pictures_run_out_the_gap_fill_cuts_fresh_intervals_of_kept_originals(tmp_path,worker_path):
+    """19 Nov m10: 22 s with no cutaway. The film's spares were used up; the kept original of a verified clip still has
+    seconds never shown beside the verified interval. They fill the hole, each checked on its words."""
+    import subprocess,wf1_film
+    original=tmp_path/'sources'/'servers.mp4';original.parent.mkdir()
+    subprocess.run([FF,'-v','error','-y','-f','lavfi','-i','testsrc2=size=320x180:rate=30:duration=30','-c:v','libx264',
+                    '-pix_fmt','yuv420p',str(original)],check=True)
+    url='https://www.youtube.com/watch?v=vnGC4YS36gU'
+    (tmp_path/'sources'/'manifest.json').write_text(json.dumps([dict(url=url,path=str(original))]))
+    shown=dict(path=str(tmp_path/'clip.mp4'),seconds=1.6,subject='Servers',source=dict(url=url),time_range=[12.0,13.6],w=320,h=180)
+    FPS=wf1_film.FPS
+    cov=dict(windows=[dict(name='Servers',must_show='Meta data-centre servers',t0=1.0,t1=3.0)])
+    ins=[[wf1_film.LEAD_F+FPS,wf1_film.LEAD_F+3*FPS,'clip','Servers',dict(shown,window=0,src=[.1,1.5])]]
+    first,last=wf1_film.LEAD_F+FPS,ins[0][1]+12*FPS
+    checked=[]
+    def checker(rows):
+        checked.extend(rows)
+        return rows,dict(placements=[dict(ok=True) for _ in rows],spend=[])
+    out,rep=wf1_film.fill_holes(ins,cov,{0:[shown]},{},dict(segments=[dict(say='a',pictures=['Servers'])]),[0],first,last,[],
+                                checker,originals=coverage.originals_of(str(tmp_path)),cut_dir=str(tmp_path/'fresh'),ffmpeg=FF)
+    added=[x for x in out if x[4].get('gap_fill')]
+    assert rep['fresh']>=3 and len(added)==len(checked)>=3
+    ranges=[tuple(x[4]['time_range']) for x in out]
+    assert all(min(b,d)-max(a,c)<=0 for i,(a,b) in enumerate(ranges) for (c,d) in ranges[i+1:])   # no interval shown twice
+    edges=[first]+[f for x in out for f in (x[0],x[1])]+[last]
+    assert max(b-a for a,b in zip(edges[0::2],edges[1::2]))<=wf1_film.FILL_GAP_S*FPS

@@ -116,6 +116,48 @@ def _walled(text):
         return "403" in t or "not a bot" in t or "sign in" in t or "format is not available" in t
 
 
+def pace():
+    """Wait for this request's turn in a run-wide pace of YouTube fetches, when the caller asked for one.
+
+    Opt-in: FOOTAGE_PACE_DIR names a folder every process of one run shares (a workflow run sets it; a customer's
+    worker never does, so its fetches are unchanged) and FOOTAGE_PACE_S the seconds between two requests of that run
+    (FOOTAGE_PACE_BURST of them may go at once after a quiet spell). The schedule is a file under flock, so the two
+    shorts a run makes at once, their footage engines and the refused-source retries all draw from the same bucket
+    instead of firing a hundred requests in a few minutes, the burst that trips YouTube's wall. Returns the seconds
+    waited."""
+    folder = os.environ.get("FOOTAGE_PACE_DIR")
+    try:
+        gap = float(os.environ.get("FOOTAGE_PACE_S") or 0)
+        burst = max(1, int(os.environ.get("FOOTAGE_PACE_BURST") or 1))
+    except ValueError:
+        return 0.0
+    if not folder or gap <= 0:
+        return 0.0
+    import fcntl
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "youtube.pace"), "a+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            f.seek(0)
+            try:
+                due = float(f.read().strip() or 0)          # the bucket's theoretical arrival time (GCRA)
+            except ValueError:
+                due = 0.0
+            now = time.time()
+            due = max(due, now)
+            start = max(now, due - (burst - 1) * gap)
+            f.seek(0)
+            f.truncate()
+            f.write(f"{due + gap:.3f}")
+            f.flush()
+    except OSError:
+        return 0.0
+    wait = start - time.time()
+    if wait > 0:
+        time.sleep(wait)
+    return max(0.0, wait)
+
+
 WAYBACK = "https://web.archive.org/web/2/"      # the Wayback Machine's newest capture of a page; yt-dlp reads its archived YouTube videos
 
 
@@ -131,6 +173,8 @@ def run_ladder(url, args, timeout_s=CALL_S, done=None, lighter=None):
     last = "no rung ran"
 
     def attempt(extra, use, label):
+        if is_youtube(url):
+            pace()                                        # one run-wide pace for YouTube rungs (opt-in, FOOTAGE_PACE_*)
         try:
             r = subprocess.run(ytdlp_cmd() + extra + use + ["--", url], capture_output=True, text=True, timeout=timeout_s, env=env())
         except subprocess.TimeoutExpired:

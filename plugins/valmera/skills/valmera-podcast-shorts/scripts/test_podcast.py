@@ -116,6 +116,8 @@ def _film(folder, title, style, music=True):
 def _fake_run(tmp_path, monkeypatch, fail=()):
     work_root, out = str(tmp_path / "work"), str(tmp_path / "out")
     monkeypatch.setattr(podcast, "WORK_ROOT", work_root)
+    monkeypatch.setattr(podcast, "ENV_FILE", str(tmp_path / "no.env"))             # never the real backend .env
+    monkeypatch.setattr(podcast, "WALL_WAITS", ())
     monkeypatch.setenv("VALMERA_DELIVERY_ROOTS", out)          # `out` is this test's Podcast Shorts: a delivery folder
     info = dict(id="abcdefghijk", title="The Episode", channel="Show", upload_date="20240329", duration=3600, webpage_url="https://youtu.be/abcdefghijk")
 
@@ -271,13 +273,20 @@ def test_a_short_whose_footage_would_not_open_is_not_cut_from_photographs():
     assert walled(foot(0, 0, 13, [bad, bad, bad]))
     assert walled(foot(3, 3, 13, [way, way, bad, ok, arch, arch]))                    # a clip or three through the archive: still walled
     assert not walled(foot(24, 13, 13, [ok, ok, bad]))                                # footage came: a film is made
-    assert not walled(foot(9, 5, 13, [way, bad, ok]))                                 # refused, but enough was found to cut on
+    # 19 Nov m07: 14 of 16 refused while 3 of 5 sentences were covered. The refused share alone decides: the refused
+    # sources are fetched again rather than a full new search run under the wall.
+    assert walled(foot(9, 5, 13, [way, bad, ok]))
+    assert walled(foot(7, 3, 5, [bad] * 14 + [ok] * 2))
     assert not walled(foot(0, 0, 13, [ok, ok, ok, bad]))                              # the sources opened and showed nothing: photographs carry it
     assert not walled(None) and not walled(foot(0, 0, 13, [])) and not walled(foot(0, 0, 13, [arch, arch]))
     assert ns["refused"](foot(0, 0, 1, [ok, bad, way, arch])) == (3, 2)
     internal=dict(where="youtube",error="open() got an unexpected keyword argument",error_stage="hear")
     assert not walled(foot(0,0,5,[internal,internal]))
     assert not walled(foot(0,0,5,[dict(where="youtube",error="unclassified old failure")]*2))
+    gone = dict(where="youtube", error="default: ERROR: [youtube] x: Video unavailable. This video has been removed", error_stage="fetch")
+    aged = dict(where="youtube", error="default: ERROR: Sign in to confirm your age", error_stage="fetch")
+    assert not walled(foot(0, 0, 5, [gone, gone, aged]))                              # a video that is gone is not the wall: nothing waits for it
+    assert ns["wall_error"]("anonymous-web_safari: ERROR: [youtube] o6f0B9oo87w: Sign in to confirm you\u2019re not a bot")
 
 
 def test_shorts_waiting_for_footage_hold_the_delivery_and_the_run_continues_later(tmp_path, monkeypatch, capsys):
@@ -288,6 +297,109 @@ def test_shorts_waiting_for_footage_hold_the_delivery_and_the_run_continues_late
     assert rep["stopped"]["stage"] == "deliver" and "waiting for footage" in rep["stopped"]["error"] and not os.path.exists(out)
     work = os.path.join(work_root, os.listdir(work_root)[0])
     assert sorted(os.listdir(os.path.join(work, "films"))) == ["m01", "m02"]           # what was made is kept for the run that completes the set
+
+
+def test_a_long_stretch_of_bare_take_in_the_final_build_takes_checked_spare_pictures():
+    """19 Nov m03/m10: 34 s and 22 s on the speaker once windows were turned down; fill_gaps had no caller. The final
+    build fills every stretch over about 3 s with approved pictures not yet shown, each checked on its own words; one
+    turned down gives its place to the next spare."""
+    FPS = wf1_film.FPS
+    clip = lambda n, url=None, tr=None: dict(path=f"/c/{n}.mp4", seconds=2.0, subject="Servers", **({"source": dict(url=url), "time_range": tr} if url else {}))  # noqa: E731
+    coverage = dict(windows=[dict(name="Servers", must_show="Meta's data-centre servers", t0=1.0, t1=3.0),
+                             dict(name="Servers", must_show="Meta's data-centre servers", t0=30.0, t1=32.0)])
+    shown = clip("shown", "https://y/v", [139.82, 141.42])
+    ins = [[wf1_film.LEAD_F + FPS, wf1_film.LEAD_F + 3 * FPS, "clip", "Servers", dict(shown, window=0, src=[0.3, 1.7])]]
+    footage = {0: [shown, clip("twin", "https://y/v", [139.9, 141.5]), clip("bad"), clip("good")], 1: [clip("good"), clip("later"), clip("extra")]}
+    script = dict(segments=[dict(say="a", pictures=["Servers"])])
+    checked = []
+
+    def checker(rows):
+        checked.extend(r[4]["path"] for r in rows)
+        ok = [r for r in rows if r[4]["path"] != "/c/bad.mp4"]
+        return ok, dict(placements=[dict(ok=r in ok) for r in rows], spend=[dict(usd=0.01)])
+    first, last = wf1_film.LEAD_F + FPS, ins[0][1] + 8 * FPS                        # 8 s of bare take after the one picture
+    out, rep = wf1_film.fill_holes(ins, coverage, footage, {}, script, [0], first, last, [], checker, rejected=["/c/rejected.mp4"])
+    paths = [x[4]["path"] for x in out]
+    assert "/c/bad.mp4" in checked and "/c/bad.mp4" not in paths and "/c/twin.mp4" not in checked     # the same interval is never a filler
+    assert len(paths) == len(set(paths)) and {"/c/good.mp4", "/c/later.mp4", "/c/extra.mp4"} <= set(paths)
+    edges = [first] + [f for x in out for f in (x[0], x[1])] + [last]
+    assert max(b - a for a, b in zip(edges[0::2], edges[1::2])) <= wf1_film.FILL_GAP_S * FPS          # no bare stretch over 3 s
+    added = [x for x in out if x[4].get("gap_fill")]
+    assert all(x[4]["illustration"] == "Meta's data-centre servers" and x[4]["window"] is None for x in added)
+    assert rep["rejected"] == 1 and rep["accepted"] == len(added) == 3 and len(rep["spend"]) == 2
+
+
+def test_footage_routes_reach_the_footage_engine_from_the_operator_config(tmp_path, monkeypatch):
+    env = tmp_path / "backend.env"
+    env.write_text("OPENAI_API_KEY=sk-never-read-here\nYTDLP_PROXY=http://user:pass@proxy.example:12323\n"
+                   "export FOOTAGE_FETCH_CMD='python fetch.py'\nYTDLP_PROXY_FALLBACK=\n")
+    for k in podcast.ROUTE_KEYS:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert podcast.footage_routes(str(env)) == ["YTDLP_PROXY", "FOOTAGE_FETCH_CMD"]
+    assert os.environ["YTDLP_PROXY"] == "http://user:pass@proxy.example:12323" and os.environ["FOOTAGE_FETCH_CMD"] == "python fetch.py"
+    assert "OPENAI_API_KEY" not in os.environ                                        # only the route keys are read
+    monkeypatch.setenv("YTDLP_PROXY", "")                                            # a key the operator set, even empty, stands
+    monkeypatch.delenv("FOOTAGE_FETCH_CMD")
+    assert podcast.footage_routes(str(env)) == ["FOOTAGE_FETCH_CMD"] and os.environ["YTDLP_PROXY"] == ""
+
+
+def test_the_run_paces_its_youtube_fetches_through_one_bucket_its_processes_share(tmp_path, monkeypatch):
+    for k in ("FOOTAGE_PACE_DIR", "FOOTAGE_PACE_S", "FOOTAGE_PACE_BURST"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(podcast, "WORK_ROOT", str(tmp_path))
+    run = podcast.Run("https://youtu.be/abcdefghijk", str(tmp_path))
+    assert podcast.footage_pace(run) == str(tmp_path / "pace") == os.environ["FOOTAGE_PACE_DIR"]
+    assert float(os.environ["FOOTAGE_PACE_S"]) > 0 and int(os.environ["FOOTAGE_PACE_BURST"]) >= 1
+    sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "..", "..", "..", "..", "worker")))
+    try:
+        from footage import fetch
+    finally:
+        sys.path.pop(0)
+    waits = []
+    monkeypatch.setattr(fetch.time, "sleep", waits.append)
+    n = int(os.environ["FOOTAGE_PACE_BURST"]) + 2
+    for _ in range(n):
+        fetch.pace()                                                                  # what every ladder rung calls
+    assert len(waits) == 2 and min(waits) > 0                                        # past the burst, each waits its turn
+    monkeypatch.setenv("FOOTAGE_PACE_S", "0.5")                                      # a key already set stands
+    assert podcast.footage_pace(run) and os.environ["FOOTAGE_PACE_S"] == "0.5"
+
+
+def test_shorts_past_supply_continue_behind_the_wall_and_the_run_waits_for_the_rest(tmp_path, monkeypatch):
+    monkeypatch.setattr(podcast, "WORK_ROOT", str(tmp_path))
+    run = podcast.Run("https://youtu.be/abcdefghijk", str(tmp_path))
+    run.walled.set()
+    st = os.path.join(str(tmp_path), "shorts", "m02", "work", "r1")
+    os.makedirs(st)
+    json.dump(dict(done=["ideas", "script", "supply"], pid=None), open(os.path.join(st, "run.json"), "w"))
+    assert podcast.past_supply(os.path.join(str(tmp_path), "shorts", "m02"))
+    assert not podcast.past_supply(os.path.join(str(tmp_path), "shorts", "m05"))
+    started = []
+
+    def proc(cmd, **kw):
+        started.append(cmd)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(dict(delivered=str(tmp_path / "films" / "m02"))))
+    monkeypatch.setattr(podcast.subprocess, "run", proc)
+    rec = podcast.build_short(run, dict(id="m02", style="window", title="t"), dict(info={}, video="x"), {})
+    assert started and rec["ok"]                                                     # its footage is in hand: it goes on
+    # the run itself waits and continues the walled shorts until the wall lifts
+    monkeypatch.setattr(podcast, "ENV_FILE", str(tmp_path / "no.env"))
+    monkeypatch.setattr(podcast, "WALL_WAITS", (600, 1200, 2400))
+    slept, tries = [], {}
+
+    def build_short(run, m, fetched, pod, tries_=3):
+        tries[m["id"]] = tries.get(m["id"], 0) + 1
+        if m["id"] == "m03" and tries["m03"] < 3:
+            run.walled.set()
+            return dict(id="m03", ok=False, error=f"supply: {wf1_film.WALL}: 9 of 10 footage sources still refused")
+        return dict(id=m["id"], ok=True, folder="f")
+    monkeypatch.setattr(podcast, "build_short", build_short)
+    monkeypatch.setattr(podcast.time, "sleep", slept.append)
+    run.walled.clear()
+    got = podcast.shorts(run, dict(info={}, video=str(tmp_path / "v.mp4")), dict(moments=[dict(id=f"m0{i}") for i in (1, 2, 3)]), 1)
+    assert slept == [600, 1200] and tries == {"m01": 1, "m02": 1, "m03": 3}
+    assert len(got["made"]) == 3 and not got["failed"]
 
 
 def test_once_the_wall_is_seen_the_shorts_not_started_wait_without_spending(tmp_path, monkeypatch):

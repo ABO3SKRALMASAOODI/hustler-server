@@ -37,12 +37,21 @@ it returns media and provenance, never account credentials. Remote rendering nee
    the adapter's cap, an outage: HTTP 429/502/503/504) the short in hand keeps its work, the shorts not started
    wait, and nothing is delivered until the set is whole: run the same link again when the route answers. Fix a real defect in the product, never by hand in a
    film.
-5. **"YouTube is refusing this Mac as a bot"** in `stopped` is not a defect to fix: a busy address is walled on
-   every player for a while (a seven-short run fetches about a hundred sources). The link cannot be read, or the
-   shorts cannot get their footage, and a short is never cut from photographs alone. The shorts already made are
-   kept in the work folder, nothing is delivered until the set is whole, and the wall lifts by itself, usually
-   within hours: tell the user that, and run the same command again later. Do not look for a way round it with
-   anyone's account or cookies.
+5. **"YouTube is refusing this Mac as a bot"** is a temporary outage of one input, recovered by the run itself: a
+   busy address is walled on every player for a while (a seven-short run fetches about a hundred sources), so the
+   run paces every YouTube fetch of all its shorts through one shared bucket (`FOOTAGE_PACE_S`, 3 s after a burst
+   of 4; `FOOTAGE_PACE_BURST`). When half
+   or more of a short's footage sources are refused, it fetches exactly those sources again (the search already
+   found them) through every route: the operator's transport (`FOOTAGE_FETCH_CMD`), every player client on every
+   configured proxy (`YTDLP_PROXY`, `YTDLP_PROXY_FALLBACK`, read from the environment or the backend's `.env` into
+   the footage engine's), then the Wayback copy; after 2 and after 5 minutes, and at once each time the run continues the short. A source
+   is waited for when YouTube's own answer (not the Wayback copy's) is the wall; while nothing has opened or been
+   cut, no source is set aside as gone. Still refused, the short keeps all
+   its work and waits; shorts whose footage is already in hand go on; the run waits 10, 20, 40, 60 and 60 minutes
+   and continues the waiting shorts each time (`PODCAST_WALL_WAITS`). A short is never built from no footage and never
+   delivered as the bare take. Only if the wall outlasts that does the run stop with this message: nothing is
+   delivered until the set is whole; tell the user and run the same command again later. Do not look for a way round
+   it with anyone's account or cookies.
 
 ## What the run does
 
@@ -65,7 +74,9 @@ display words on 17% of shots, finishes that change by section, collages of thre
 - **Fast and dynamic, done well.** A picture or framing that holds for long is a defect. A new picture lands about
   every second over what he says, motivated by the words, eased, faces whole, one consistent design.
 - **Real footage of what is said.** Video of the actual people, companies, places and events he names. Photographs
-  are the fallback, generic stock is never used, and the speaker is never shown as he looks today in a cutaway.
+  are the fallback, generic stock is never used, and this conversation's own take is never a cutaway. The speaker's
+  own filmed past (a livestream he hosted, a keynote, his training, an event he took part in) is archive like any
+  other, wanted when he tells of it.
 - **Sound effects are part of the film.** The same kinds and about the same amount as the references, each on
   something that lands, at the references' level under the voice, real recordings only. A short with no designed
   sound is a failure. So is a sound on every caption.
@@ -116,6 +127,14 @@ name (`name_super`) and the film draws it in the label type, once, while the pic
 smaller than the reading floor). A window with fewer chosen pictures than its clause wants has them share the whole
 clause, a clip up to its own seconds (`wf1_coverage.clause_shares`); with enough pictures the picture changes about
 every 1.4 s.
+
+The coverage plan starts from the script's resolved referents (`script.named`, with their event-level `must_show`)
+and gives every window a depiction ladder: the event itself, then the named person's or company's own archive, then
+the place or product, then related moving context. A window research leaves empty takes its next rung, acquired at
+once, before the final build (`wf1_short.descend`). The final build fills any stretch of the take over 3 s with the
+approved pictures the film has not shown, each checked on its own words (`wf1_film.fill_holes`). An interval is never
+shown twice: a window whose candidates were all shown takes a fresh interval of the same kept original beside the
+verified one (`wf1_coverage.fresh_interval`).
 
 ## What every short is built from
 

@@ -28,6 +28,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.realpath(__file__))        # through the Claude skill link to the plugin itself
 SKILLS = os.path.dirname(os.path.dirname(HERE))
@@ -60,6 +61,10 @@ RECOVERY_PASSES = 2
 # delivered whatever the second measure says). Round 1, 19 Nov: holds of 34 s and 15 s, and a film with no cut at all.
 RESEARCH_HOLD_S = 6.0
 RESEARCH_CUTS_10S = 4.0
+# Below each coverage window's own depiction, up to this many lower rungs the plan names (wf1_coverage.plan): a window
+# research left empty takes the next rung before the final build (19 Nov: m03 ran 34 s on the speaker once its windows'
+# pictures were rejected, m10 22 s with no cutaway).
+LADDER_RUNGS = 3
 
 
 def _llm():
@@ -107,7 +112,7 @@ def script(ctx, ideas_out):
               "into the exact clip for a vertical short. You cut on word edges, start on the first word of the thought (no "
               "throat-clearing, no 'and', 'so', 'yeah' when the next word can open), and end on the payoff with a breath "
               "of tail. The clip must stand alone for a stranger who never saw the episode.")
-    system += '\n\nReturn JSON only: {"in": seconds (0.15-0.3 s before the first word), "out": seconds (0.3-0.8 s after the last word; the clip is 18-55 s), "title": the film\'s title in at most five words, a headline a stranger stops for, taken from what is said, "hook_line": the exact words heard first, "close_line": the exact last words, "speakers": number of people heard, "named": [the real people, companies, places, products and events this clip names or plainly points to, that a camera has filmed; each {"name": its usual English name, "is": person|company|place|product|event|thing, "must_show": one plain sentence on what footage of it must visibly show, as it was at the time he speaks of}; never the speaker himself as he looks today: he is on screen], "brief": two sentences on the story and its mood, for the editor who chooses the music}.'
+    system += '\n\nReturn JSON only: {"in": seconds (0.15-0.3 s before the first word), "out": seconds (0.3-0.8 s after the last word; the clip is 18-55 s), "title": the film\'s title in at most five words, a headline a stranger stops for, taken from what is said, "hook_line": the exact words heard first, "close_line": the exact last words, "speakers": number of people heard, "named": [the real people, companies, places, products and events this clip names or plainly points to, that a camera has filmed; each {"name": its usual English name, "is": person|company|place|product|event|thing, "must_show": one plain sentence on what footage of it must visibly show, as it was at the time he speaks of}; never this conversation itself, which is on screen already; when he tells of something he did himself, that filmed moment of him (a livestream, a keynote, his training, an event he took part in) is an event to name like any other], "brief": two sentences on the story and its mood, for the editor who chooses the music}.'
     content = f"# The moment\n{json.dumps(idea, ensure_ascii=False)}\n\n# Who is in it\n{str((ctx.args or {}).get('identity') or '')[:1500]}\n\n# Words near the moment: seconds word\n" + ' '.join((f'{t:.2f} {w}' for (t, w) in near))
     llm = _llm()
     spend, s = [], {}
@@ -140,9 +145,13 @@ def supply(ctx, script):
     pk = os.path.join(sup_dir, "pack.json")
     if os.path.exists(pk):
         prior = json.load(open(pk))
-        if ((prior['pack'].get('coverage') or {}).get('contract') == wf1_coverage.CONTRACT
-                and prior['pack'].get('alignment_contract')==wf1_alignment.CONTRACT
-                and (prior['pack'].get('platform_walled') or any(row.get('clips') for row in prior['pack'].get('footage',[])))):
+        current = ((prior['pack'].get('coverage') or {}).get('contract') == wf1_coverage.CONTRACT
+                   and prior['pack'].get('alignment_contract')==wf1_alignment.CONTRACT)
+        if current and prior['pack'].get('platform_walled'):
+            # A wall left this short waiting: the exact sources YouTube refused are fetched again (nothing is searched
+            # or asked anew) and cut; a walled pack is never final.
+            return recover_wall(ctx, script, prior['pack'], prior['record'], waits=WALL_RESUME_S)
+        if current and any(row.get('clips') for row in prior['pack'].get('footage',[])):
             return prior['record']
         os.replace(pk,os.path.join(sup_dir,'previous-pack.json'))
     rec0 = chain.pack(ctx, script)                              # source.mp4 (the window), hearing.json, index.json
@@ -165,7 +174,10 @@ def supply(ctx, script):
     # real video of what each sentence names: the footage engine's own planner reads the sentences (OpenAI)
     who = str((ctx.args or {}).get("identity") or "")[:400].replace("\n", " ")
     import wf1_coverage
-    coverage = wf1_coverage.plan(words, script.get('title'), sup_dir, _llm())
+    # The script stage read the whole moment and resolved what it names, each with the event-level picture it needs
+    # (script.named: "Alexandr Wang", "Mark Zuckerberg eating watermelon on a Meta livestream"). They are the
+    # director's subjects from the start, for the plan and for the referent research alike.
+    coverage = wf1_coverage.plan(words, script.get('title'), sup_dir, _llm(), named=script.get('named'))
     coverage['context']=who
     import wf1_context
     primary_direction=wf1_context.direct(coverage,os.path.join(sup_dir,'referent-research'),_llm())
@@ -177,8 +189,7 @@ def supply(ctx, script):
         research.setdefault(window['name'],[]).append(window['must_show'])
     import wf1_primary_sources
     originals=wf1_primary_sources.retained(sup_dir)
-    fscript = dict(title=f"{script.get('title')}. A podcast clip; the speaker is on camera already, so show what he talks about, as it was then, "
-                         f"never him as he looks today. Who is in it: {who}",
+    fscript = dict(title=footage_title(script.get('title'), who),
                    segments=[dict(say=s['say'], pictures=[s['name']], visual=s['must_show']) for s in windows],
                    named=[dict(name=name,must_show=' '.join(requirements),
                                video_sources=originals.get(name,[]),
@@ -202,8 +213,11 @@ def supply(ctx, script):
                 f"{foot['counts'].get('lines_with_footage')} of {foot['counts'].get('lines')} sentences")
     platform_walled=walled(foot)
     if platform_walled:
-        ctx.log('Platform footage unavailable; retain its evidence and seek public original-publisher video before stopping')
+        ctx.log('YouTube refused most footage sources (its wall): the exact refused sources are fetched again, '
+                'with backoff, on every route before the film is built')
     pack = dict(platform_walled=platform_walled,sid=ctx.sid, words=wj, narration=src, ffmpeg=PX.FF, sounds={}, pictures={}, credits=[], footage=[], title=script.get("title"), coverage=coverage)
+    if platform_walled:
+        pack['wall'] = dict(sources=refused(foot)[0], refused=refused_rows(foot), since=time.time())
     pack.update(referent_research=primary_direction['references'],research_spend=primary_direction['spend'])
     subjects, by_line = [], {}
     if foot:
@@ -254,26 +268,204 @@ def supply(ctx, script):
     rec = dict(rec0, narration_s=dur, voice="the take", gate=None, pictures=sum(len(x) for x in pack["pictures"].values()), subjects=len(pack["pictures"]),
                footage=(dict(clips=foot["counts"]["clips"], lines=foot["counts"]["lines_with_footage"], credits=foot["credits"]) if foot else None), spend=spend)
     json.dump(dict(pack=pack, record=rec), open(pk, "w"), ensure_ascii=False, indent=1)
+    if platform_walled:
+        return recover_wall(ctx, script, pack, rec)
+    return rec
+
+
+# The wall (19 Nov: from 17:43 YouTube refused 5 of 5, 16 of 16, 12 of 13, 14 of 16 of this Mac's footage sources) is a
+# temporary outage of one input, recovered like the model route's: the exact refused sources are fetched again after
+# these waits (seconds) in the short's own process (the footage engine has just tried every rung for them); still
+# refused, the short stops with wf1_film.WALL, keeps all its work, and podcast.py waits longer and continues it, when
+# they are tried again at once (WALL_RESUME_S: the run's wait was the backoff). A walled short is never built from no
+# footage.
+WALL_BACKOFF_S = (120, 300)
+WALL_RESUME_S = (0,)
+
+
+def footage_title(title, who):
+    """What the footage engine is told the film is. The current interview take is on screen already, so it is never a
+    cutaway; the speaker's own filmed past (a livestream, a keynote, an event he took part in) is archive like any
+    other and is wanted when the words tell of it."""
+    return (f"{title}. A podcast clip; its own interview take is on screen already, so never show this conversation; "
+            f"show what he talks about as it was then. When he tells of something he did himself (a livestream, a "
+            f"keynote, his training, an event he took part in), that filmed moment of him then is archive and is "
+            f"wanted. Who is in it: {who}")
+
+
+def refused_rows(foot):
+    """The refused YouTube sources of one footage record, exactly as the search found them: url, title, channel,
+    duration and the subjects (window names) they were found for."""
+    names = [s.get("name") for s in (foot or {}).get("subjects") or []]
+    out = []
+    for s in (foot or {}).get("sources") or []:
+        if s.get("where") not in (None, "youtube") or not s.get("url"):
+            continue
+        if not ((s.get("error") and s.get("error_stage") == "fetch" and wall_error(s["error"])) or s.get("rung") == "wayback"):
+            continue
+        subjects = [names[i] for i in s.get("subjects") or [] if isinstance(i, int) and 0 <= i < len(names) and names[i]]
+        out.append(dict(url=s["url"], title=s.get("title"), channel=s.get("channel"), where="youtube",
+                        duration=s.get("duration"), subjects=subjects, error=str(s.get("error") or s.get("rung"))[:240]))
+    return out
+
+
+def wall_state(ctx, pack):
+    """The wall this short waits on: {sources: YouTube sources of the pass that met it, refused: [rows]}. A pack written
+    before the rows were kept has them read back from its footage records."""
+    wall = pack.get("wall")
+    if isinstance(wall, dict) and isinstance(wall.get("refused"), list):
+        return wall
+    import glob
+    n, rows, seen = 0, [], set()
+    for path in sorted(glob.glob(os.path.join(ctx.supply, "footage*", "footage.json"))):
+        try:
+            foot = json.load(open(path))
+        except (OSError, ValueError):
+            continue
+        if not walled(foot):
+            continue
+        n += refused(foot)[0]
+        for row in refused_rows(foot):
+            if row["url"] not in seen:
+                seen.add(row["url"])
+                rows.append(row)
+    return dict(sources=n, refused=rows, since=time.time())
+
+
+def has_footage(pack):
+    return any(row.get('clips') for row in pack.get('footage') or [])
+
+
+def still_walled(wall):
+    n, bad = int(wall.get("sources") or 0), len(wall.get("refused") or [])
+    return n >= 2 and bad * 2 >= n
+
+
+def merge_footage(ctx, pack, foot, name):
+    """A footage record's clips and credits joined to the pack's, line by line (a line is a coverage window)."""
+    by = {int(row['i']): row for row in pack['footage']}
+    for row in foot.get('lines') or []:
+        i = int(row['i'])
+        dest = by.setdefault(i, dict(i=i, clips=[]))
+        dest['clips'] += [dull(wf3.clip_facts(dict(c, path=os.path.join(ctx.supply, name, c['file'])))) for c in row['clips']]
+    pack['footage'] = sorted(by.values(), key=lambda r: int(r['i']))
+    pack['credits'] += [dict(kind='footage', name=c['title'], title=c['title'], licence="footage, not licensed (the owner's decision)",
+                             credit=c['channel'], page=c['url'], time_range=c['time_range'], line=c['line']) for c in foot.get('credits') or []]
+
+
+def reopened_footage(ctx, script, pack, opened):
+    """The reopened originals cut like any other source: the footage engine's source-only pass over exactly them (no
+    new search), with its frame and motion checks, for the windows they were found for. Returns the clips added."""
+    import wf1_primary_sources
+    coverage = pack['coverage']
+    windows = coverage['windows']
+    urls = {r['url'] for r in opened}
+    names = {n for r in opened for n in r.get('subjects') or []}
+    wanted = [i for i, w in enumerate(windows) if w['name'] in names or names & set(w.get('subjects') or [])] or list(range(len(windows)))
+    kept = {n: [r for r in rows if r['url'] in urls] for n, rows in wf1_primary_sources.retained(ctx.supply).items()}
+    every = list({r['url']: r for rows in kept.values() for r in rows}.values())
+    if not every:
+        return 0
+    named = []
+    for n in dict.fromkeys(windows[i]['name'] for i in wanted):
+        named.append(dict(name=n, must_show=' '.join(dict.fromkeys(windows[i]['must_show'] for i in wanted if windows[i]['name'] == n)),
+                          video_sources=kept.get(n) or every, video_searches=[], **{'is': 'thing'}))
+    fscript = dict(title=footage_title(script.get('title'), str(coverage.get('context') or '')[:400]),
+                   segments=[dict(i=i, say=w['say'], pictures=[w['name']], visual=w['must_show']) for i, w in enumerate(windows)],
+                   named=named)
+    name = (f"footage-v{coverage['contract']}-{FOOTAGE_PIXELS}-reopened-"
+            + hashlib.sha256(json.dumps([sorted(urls), wanted], sort_keys=True).encode()).hexdigest()[:12])
+    if name in (pack.get('merged_footage') or []):
+        return 0
+    prior = [os.path.join(ctx.supply, n, 'footage.json') for n in os.listdir(ctx.supply)
+             if n.startswith('footage') and os.path.isfile(os.path.join(ctx.supply, n, 'footage.json'))]
+    fw, fh = wf1_film.STYLES[script['style']['id']]['footage']
+    foot = chain.footage(ctx, dict(script=fscript), [w['t1'] - w['t0'] for w in windows], W=fw, H=fh,
+                         preserve_source=True, native_pixels=True, look_itself=True, shot_s=1.15, line_max=20, per=4, lines=wanted,
+                         avoid=prior, strict_lines=True, motion_first=True, scout_motion=True, alloc='round', reassign_lost=True,
+                         verify=False, whole_first=True, keep_sources=True, hear_s=0, source_only=True, out_name=name)
+    if not foot:
+        return 0
+    merge_footage(ctx, pack, foot, name)
+    pack.setdefault('merged_footage', []).append(name)
+    return int((foot.get('counts') or {}).get('clips') or 0)
+
+
+def recover_wall(ctx, script, pack, rec=None, waits=None, sleep=None):
+    """Recover a short from YouTube's wall: fetch the exact sources it refused again (wf1_primary_sources.reopen: the
+    operator's transport, every player client on every configured proxy route, the Wayback copy), after each of WALL_BACKOFF_S
+    when the wall is first met (at once on a resume, WALL_RESUME_S), and cut what opens. When the wall still holds most of them the short stops with wf1_film.WALL:
+    its work is kept and podcast.py continues it when the wall lifts. Returns the supply record."""
+    import wf1_primary_sources
+    wall = wall_state(ctx, pack)
+    keep = os.path.join(ctx.supply, 'sources')
+    added, gone = 0, []
+    for wait in (WALL_BACKOFF_S if waits is None else waits):
+        if not still_walled(wall):
+            break
+        if wait:
+            ctx.log(f"{len(wall['refused'])} of {wall['sources']} footage sources still refused; trying them again in {wait:.0f} s")
+            (sleep or time.sleep)(wait)
+        opened, still, lost = wf1_primary_sources.reopen(wall['refused'], keep, log=ctx.log)
+        if opened:
+            added += reopened_footage(ctx, script, pack, opened)
+        if lost and not added and not has_footage(pack):
+            # Nothing has opened or been cut for this short: a source sorted as gone does not lift the wall (any yt-dlp
+            # words the wall makes that the sort does not know would otherwise empty it and leave a film with no
+            # footage). Those rows wait and are fetched again with the rest.
+            still, lost = still + lost, []
+        wall['refused'] = still
+        gone += lost
+        wall['sources'] = max(0, int(wall['sources']) - len(lost))          # a video that is gone is not waited for
+        pack['wall'] = wall
+        save_pack(ctx, pack)
+    pack['platform_walled'] = still_walled(wall)
+    pack['wall'] = wall
+    if gone:
+        pack.setdefault('gone_sources', []).extend(gone)
+    save_pack(ctx, pack)
+    if pack['platform_walled']:
+        raise RuntimeError(f"{wf1_film.WALL}: {len(wall['refused'])} of {wall['sources']} footage sources still refused after "
+                           f"trying each again on every route; this short keeps its work and continues when the wall lifts")
+    ctx.log(f"the wall lifted for this short: {added} clips cut from the sources it had refused")
+    path = os.path.join(ctx.supply, 'pack.json')
+    stored = json.load(open(path))
+    rec = dict(rec or stored.get('record') or {})
+    if added:
+        clips = sum(len(r.get('clips') or []) for r in pack['footage'])
+        rec['footage'] = dict(rec.get('footage') or {}, clips=clips, lines=sum(1 for r in pack['footage'] if r.get('clips')))
+        stored['record'] = rec
+        stored['pack'] = pack
+        with open(path, 'w') as f:
+            json.dump(stored, f, indent=1)
     return rec
 
 
 def refused(foot):
-    """(YouTube sources the engine tried, how many of them failed or opened only through the Wayback Machine's copy)."""
+    """(YouTube sources the engine tried, how many of them YouTube refused (its wall: the bot check, a bare 403, a rate
+    limit, a stalled player) or opened only through the Wayback Machine's copy). A video that is gone or private is
+    not refused: it is not waited for."""
     yt = [s for s in (foot or {}).get("sources") or [] if s.get("where") in (None, "youtube")]
-    return len(yt), len([s for s in yt if (s.get("error") and s.get("error_stage")=="fetch") or s.get("rung") == "wayback"])
+    return len(yt), len([s for s in yt if (s.get("error") and s.get("error_stage")=="fetch" and wall_error(s["error"]))
+                         or s.get("rung") == "wayback"])
+
+
+def wall_error(text):
+    """yt-dlp's words for YouTube's wall, read off the YouTube rungs' part of the tool's error text: the one rule,
+    wf1_primary_sources.wall_error. "Sign in to confirm your age" is an age gate, not the wall."""
+    import wf1_primary_sources
+    return wf1_primary_sources.wall_error(text)
 
 
 def walled(foot):
-    """True when the footage engine came back with too little because YouTube would not open its sources (it takes
-    a busy address for a bot, on every player at once): half of the YouTube sources it tried or more were refused,
-    and what it did find covers under a third of the sentences. A film cut then would be photographs with a clip
-    or two, under the bar; it is made when the wall lifts. Thin footage with the sources open is not this: the
-    moment simply names little, and photographs carry it."""
+    """True when YouTube would not open the footage engine's sources (it takes a busy address for a bot, on every player
+    at once): half of the YouTube sources it tried or more were refused. Decided on the refused share alone (19 Nov:
+    m07 had 14 of 16 refused and 3 of 5 sentences covered, ran a full new search under the wall and lost every clip).
+    The refused sources are then fetched again (recover_wall)."""
     if not foot:
         return False
     n, bad = refused(foot)
-    c = foot.get("counts") or {}
-    return n >= 2 and bad * 2 >= n and int(c.get("lines_with_footage") or 0) * 3 < max(int(c.get("lines") or 0), 1)
+    return n >= 2 and bad * 2 >= n
 
 
 def dull(c):
@@ -542,7 +734,7 @@ def refill(ctx, script, pack, shortage):
     signature=source_signature(ctx.supply)
     previous = pack.get('coverage_repairs',0) if pack.get('research_contract')==RESEARCH_CONTRACT else 0
     recovered_sources = bool(previous and pack.get('research_sources')!=signature)
-    count = max(4,int(previous)+1) if pack.get('platform_walled') else int(previous)+1
+    count = int(previous)+1
     # New original bytes merit fresh frame checks, not another cycle of the same
     # exhausted platform searches. Preserve the search budget after this rescan.
     rescout=bool(pack.get('coverage_context_rescout_pending') or recovered_sources)
@@ -605,18 +797,11 @@ def refill(ctx, script, pack, shortage):
     foot = chain.footage(ctx,dict(script=fscript),[w['t1']-w['t0'] for w in windows],W=fw,H=fh,
                          preserve_source=True,native_pixels=True,look_itself=True,shot_s=1.15,line_max=20,per=4,lines=wanted,avoid=prior,
                          strict_lines=True,motion_first=True,scout_motion=True,alloc='round',reassign_lost=True,
-                         verify=False,whole_first=True,keep_sources=True,hear_s=0,source_only=rescout or count==4 or bool(pack.get('platform_walled')),out_name=name)
+                         verify=False,whole_first=True,keep_sources=True,hear_s=0,source_only=rescout or count==4,out_name=name)
     if not foot:
         exhausted(ctx,pack,'supplementary documentary research found nothing new')
         return
-    by = {int(row['i']):row for row in pack['footage']}
-    for row in foot['lines']:
-        i = int(row['i'])
-        dest = by.setdefault(i,dict(i=i,clips=[]))
-        dest['clips'] += [dull(wf3.clip_facts(dict(c,path=os.path.join(ctx.supply,name,c['file'])))) for c in row['clips']]
-    pack['footage'] = list(by.values())
-    pack['credits'] += [dict(kind='footage',name=c['title'],title=c['title'],licence="footage, not licensed (the owner's decision)",
-                            credit=c['channel'],page=c['url'],time_range=c['time_range'],line=c['line']) for c in foot['credits']]
+    merge_footage(ctx,pack,foot,name)
     pack['coverage_repairs'] = int(previous) if rescout else count
     pack['coverage_last_search_report']=shortage
     if rescout:pack['coverage_context_rescout_pending']=False
@@ -626,6 +811,19 @@ def refill(ctx, script, pack, shortage):
     path = os.path.join(ctx.supply,'pack.json')
     stored = json.load(open(path));stored['pack']=pack
     with open(path,'w') as f:json.dump(stored,f,indent=1)
+    meet_wall(ctx,script,pack,foot)
+
+
+def meet_wall(ctx, script, pack, foot):
+    """A research pass that met YouTube's wall recovers like the first one: its refused sources are fetched again with
+    backoff (recover_wall), and the short waits (wf1_film.WALL) rather than being built short of them."""
+    if not walled(foot):
+        return
+    ctx.log('YouTube refused most sources of this research pass (its wall): fetching them again before the film is built')
+    pack['platform_walled'] = True
+    pack['wall'] = dict(sources=refused(foot)[0], refused=refused_rows(foot), since=time.time())
+    save_pack(ctx, pack)
+    recover_wall(ctx, script, pack)
 
 
 def save_pack(ctx, pack):
@@ -640,8 +838,86 @@ def exhausted(ctx, pack, why):
     ctx.log(why+'; the film is built from every approved picture and the speaker carries the rest')
 
 
-def coverage_final(pack):
+def research_spent(pack):
     return bool(pack.get('coverage_exhausted')) or int(pack.get('coverage_recoveries') or 0)>=RECOVERY_PASSES
+
+
+def ladder_open(pack):
+    """A window the last build left empty still has a lower depiction rung to acquire from."""
+    windows = (pack.get('coverage') or {}).get('windows') or []
+    return any(isinstance(i, int) and 0 <= i < len(windows)
+               and int(windows[i].get('rung') or 0) < len(windows[i].get('depictions') or [])
+               for i in pack.get('coverage_missing') or [])
+
+
+def coverage_final(pack):
+    """The build is final (it ships with what it has) once research is spent AND no empty window has a rung left."""
+    return research_spent(pack) and not ladder_open(pack)
+
+
+def descend(ctx, script, pack, missing):
+    """The windows research left empty go one rung down the depiction ladder the plan gave them (the event itself, then
+    the named person's or company's own archive, then the place or product, then related moving context), and footage
+    and photographs are acquired on that rung at once, so the slot is filled before the final build rather than shipped
+    empty. Returns True when a rung was taken."""
+    windows = pack['coverage']['windows']
+    lower = [i for i in missing if isinstance(i, int) and 0 <= i < len(windows)
+             and int(windows[i].get('rung') or 0) < len(windows[i].get('depictions') or [])]
+    if not lower:
+        return False
+    for i in lower:
+        w = windows[i]
+        k = int(w.get('rung') or 0)
+        step = w['depictions'][k]
+        w.setdefault('ladder', []).append(dict(name=w['name'], must_show=w['must_show']))
+        w.update(name=step['name'], must_show=step['must_show'], video_searches=list(step.get('video_searches') or []),
+                 subjects=[step['name']], rung=k + 1)
+    save_pack(ctx, pack)
+    ctx.log('windows left empty go down their depiction ladder: '
+            + '; '.join(f"{i} -> {windows[i]['name']} (rung {windows[i]['rung']})" for i in lower))
+    name = (f"footage-v{pack['coverage']['contract']}-{FOOTAGE_PIXELS}-rung-"
+            + hashlib.sha256(json.dumps([[i, windows[i]['name'], windows[i]['must_show']] for i in lower]).encode()).hexdigest()[:12])
+    prior = [os.path.join(ctx.supply, n, 'footage.json') for n in os.listdir(ctx.supply)
+             if n.startswith('footage') and os.path.isfile(os.path.join(ctx.supply, n, 'footage.json'))]
+    subjects = {}
+    for i in lower:
+        subjects.setdefault(windows[i]['name'], []).append(windows[i]['must_show'])
+    fscript = dict(title=footage_title(script.get('title'), str(pack['coverage'].get('context') or '')[:400]),
+                   segments=[dict(i=i, say=w['say'], pictures=[w['name']], visual=w['must_show']) for i, w in enumerate(windows)],
+                   named=[dict(name=n, must_show=' '.join(dict.fromkeys(shows)), video_sources=[],
+                               video_searches=list(dict.fromkeys(q for i in lower if windows[i]['name'] == n for q in windows[i].get('video_searches', []))),
+                               **{'is': 'thing'}) for n, shows in subjects.items()])
+    fw, fh = wf1_film.STYLES[script['style']['id']]['footage']
+    foot = chain.footage(ctx, dict(script=fscript), [w['t1'] - w['t0'] for w in windows], W=fw, H=fh,
+                         preserve_source=True, native_pixels=True, look_itself=True, shot_s=1.15, line_max=20, per=4, lines=lower,
+                         avoid=prior, strict_lines=True, motion_first=True, scout_motion=True, alloc='round', reassign_lost=True,
+                         verify=False, whole_first=True, keep_sources=True, hear_s=0, source_only=False, out_name=name)
+    if foot and name not in (pack.get('merged_footage') or []):
+        merge_footage(ctx, pack, foot, name)
+        pack.setdefault('merged_footage', []).append(name)
+    want = [dict(name=n, searches=[n], must_show=' '.join(dict.fromkeys(shows)), **{'is': 'thing'})
+            for n, shows in subjects.items() if not pack['pictures'].get(n)]
+    if want:
+        sys.modules.pop("llm", None)                           # the worker's own llm answers its picture check
+        try:
+            got, reports, _ = PX.pictures(want, os.path.join(ctx.supply, "pics"), per=3)
+        except Exception as e:  # noqa: BLE001 - photographs are the fallback: a rung is not lost to them
+            ctx.log(f"photographs for the lower rung skipped: {str(e)[:300]}")
+            got, reports = {}, []
+        for n, recs in got.items():
+            for r in recs:
+                try:
+                    r["faces"] = PX.faces(r["path"])
+                except Exception:  # noqa: BLE001
+                    r["faces"] = []
+            if recs:
+                pack['pictures'][n] = recs
+                pack['credits'] += [dict(kind="photograph", name=r["name"], title=r.get("title"), licence=r.get("licence"),
+                                         credit=r.get("credit"), page=r.get("page")) for r in recs]
+    save_pack(ctx, pack)
+    if foot:
+        meet_wall(ctx, script, pack, foot)
+    return True
 
 
 def score(ctx, script):
@@ -649,7 +925,8 @@ def score(ctx, script):
     pack = wf3.load_pack(ctx)
     if ((pack.get('coverage') or {}).get('contract') != wf1_coverage.CONTRACT
             or pack.get('alignment_contract')!=wf1_alignment.CONTRACT
-            or (not pack.get('platform_walled') and not any(row.get('clips') for row in pack.get('footage',[])))):
+            or pack.get('platform_walled')                       # a walled pack fetches its refused sources again
+            or not any(row.get('clips') for row in pack.get('footage',[]))):
         supply(ctx,script)
         pack = wf3.load_pack(ctx)
     pack["work"] = ctx.supply
@@ -678,17 +955,33 @@ def score(ctx, script):
     os.environ["PATH"] = os.path.dirname(pack["ffmpeg"]) + os.pathsep + os.environ.get("PATH", "")
     sc = dict(title=script.get("title"), hook_line=script.get("hook_line"), close_line=script.get("close_line"),
               segments=[dict(say=ln["text"], pictures=[n for n in ln.get("subjects") or []]) for ln in pack["lines"]])
-    for attempt in range(RECOVERY_PASSES + 2):
+    for attempt in range(RECOVERY_PASSES + 3 + LADDER_RUNGS):
         knobs["coverage_final"] = coverage_final(pack)
         try:
             l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
             break
         except wf1_coverage.CoverageError as error:
-            # bounded recovery, counted across resumes and rebuilds: after RECOVERY_PASSES the build is final
+            pack['coverage_missing']=list(error.report.get('missing_windows') or [])
+            if research_spent(pack):
+                # research is spent: a window still empty takes its next depiction rung (acquired at once); with no
+                # rung left the next build is final and ships what was approved
+                descend(ctx,script,pack,pack['coverage_missing'])
+                save_pack(ctx,pack)
+                continue
+            # bounded recovery, counted across resumes and rebuilds: after RECOVERY_PASSES the ladder, then the final
             pack['coverage_recoveries']=int(pack.get('coverage_recoveries') or 0)+1
             save_pack(ctx,pack)
-            refill(ctx,script,pack,error.report)
+            try:
+                refill(ctx,script,pack,error.report)
+            except RuntimeError as stop:
+                if wf1_film.WALL in str(stop):                 # the wall is not this pass's fault: the pass is not spent
+                    pack['coverage_recoveries']=int(pack.get('coverage_recoveries') or 0)-1
+                    save_pack(ctx,pack)
+                raise
             save_pack(ctx,pack)
+    else:
+        knobs["coverage_final"] = True
+        l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
     taste = F.taste_check(l1, beats)
     dropped = 0
     if not taste["ok"]:

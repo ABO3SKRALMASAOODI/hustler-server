@@ -64,6 +64,14 @@ LANES = 2                 # shorts made at once on this Mac (the footage search 
 PART_S = 600.0            # the selection reads the conversation in ten-minute parts, one model reading each (see moments())
 PART_OVERLAP_S = 60.0     # each part reads on a minute past its end, so a moment across the seam is seen whole
 ROUTE_OUT = "the model route is out"   # the model provider stopped answering (usage limit, cap, outage): the run waits
+# YouTube's wall on this Mac's address is a temporary outage of one input (19 Nov: from 17:43 it refused nearly every
+# footage source for over an hour). A short that meets it fetches its exact refused sources again with backoff, then
+# stops with wf1_film.WALL keeping its work; the run waits these seconds, one after another, and continues the walled
+# shorts each time (their refused sources only: nothing is searched or asked anew), until none waits. Only then, still
+# walled, does the run stop for a later run of the same link. PODCAST_WALL_WAITS="600,1200" sets them.
+WALL_WAITS = tuple(float(x) for x in os.environ.get("PODCAST_WALL_WAITS", "600,1200,2400,3600,3600").split(",") if x.strip())
+ENV_FILE = f"{V}/hustler-server/backend/.env"
+ROUTE_KEYS = ("YTDLP_PROXY", "YTDLP_PROXY_FALLBACK", "FOOTAGE_FETCH_CMD")
 _LOCK = threading.Lock()
 import delivered as DL  # noqa: E402  the shared delivered ledger (_shell/delivered.py): the same podcast is never delivered twice
 
@@ -519,6 +527,49 @@ def route_out(err):
     return "openai 429" in e or "openai 503" in e or ("openai 502" in e and "usage limit" in e)
 
 
+def footage_routes(env_file=None):
+    """The operator's footage egress, put where every footage fetch of the run reads it: wf1_short's process and the
+    footage engine it starts inherit this process's environment (worker config.YTDLP_PROXY and YTDLP_PROXY_FALLBACK, the
+    product's proxy routes down the player ladder; FOOTAGE_FETCH_CMD, the operator's own transport). A key already in
+    the environment stands as it is, even empty (a test round blanks them); a key absent is read from the backend's
+    .env, these keys only. Values are never printed. Returns the keys that carry a route."""
+    path = env_file or ENV_FILE
+    if any(k not in os.environ for k in ROUTE_KEYS) and os.path.isfile(path):
+        try:
+            for line in open(path):
+                k, sep, v = line.strip().partition("=")
+                k = k.strip().removeprefix("export ").strip()
+                if sep and k in ROUTE_KEYS and k not in os.environ:
+                    os.environ[k] = v.strip().strip('"').strip("'")
+        except OSError:
+            pass
+    return [k for k in ROUTE_KEYS if os.environ.get(k)]
+
+
+# One pace for every YouTube fetch of a run (footage.fetch.pace): the shorts a run makes at once, their footage engines
+# and the refused-source retries draw from one file-locked bucket under the run folder, at most one request every
+# FOOTAGE_PACE_S seconds after a burst of FOOTAGE_PACE_BURST (19 Nov: two lanes fired about 100 source requests in a
+# few minutes, the burst that brought the wall down on this Mac). A key already in the environment stands.
+FOOTAGE_PACE = (("FOOTAGE_PACE_S", "3"), ("FOOTAGE_PACE_BURST", "4"))
+
+
+def footage_pace(run):
+    """Set the run-wide pace of the run's YouTube fetches; every process the run starts inherits it. Returns its folder."""
+    os.environ.setdefault("FOOTAGE_PACE_DIR", run.p("pace"))
+    for k, v in FOOTAGE_PACE:
+        os.environ.setdefault(k, v)
+    return os.environ["FOOTAGE_PACE_DIR"]
+
+
+def past_supply(state):
+    """True when this short's footage is in hand (its run has finished the supply stage): it can go on while a wall
+    keeps the shorts that still need footage waiting."""
+    work = os.path.join(state, "work")
+    if not os.path.isdir(work):
+        return False
+    return any("supply" in ((jload(os.path.join(work, n, "run.json"), {}) or {}).get("done") or []) for n in os.listdir(work))
+
+
 def build_short(run, m, fetched, pod, tries=3):
     """One moment through wf1_short.py. Returns its record: {id, ok, folder | error}."""
     state = run.p("shorts", m["id"])
@@ -529,7 +580,7 @@ def build_short(run, m, fetched, pod, tries=3):
     done = jload(os.path.join(state, "done.json"))
     if done and done.get("ok"):                          # a short that was not made is tried again when the link is run again
         return done
-    if run.walled.is_set():                              # footage cannot be fetched right now: nothing is spent on a short that would stop
+    if run.walled.is_set() and not past_supply(state):   # footage cannot be fetched right now: a short that still needs it waits
         return dict(id=m["id"], ok=False, error=f"{wf1_film.WALL}: not started")
     if run.route_out.is_set():
         return dict(id=m["id"], ok=False, error=f"{ROUTE_OUT}: not started")
@@ -600,9 +651,26 @@ def shorts(run, fetched, sel, lanes):
         dict(url=url, path=os.path.realpath(fetched["video"]))
         for url in dict.fromkeys([run.link, fetched["info"].get("webpage_url") or run.link])
     ])
+    routes = footage_routes()
+    footage_pace(run)
+    run.log(f"footage fetches paced run-wide: one every {os.environ['FOOTAGE_PACE_S']} s after a burst of "
+            f"{os.environ['FOOTAGE_PACE_BURST']}")
+    run.log("footage routes: " + (", ".join(routes) if routes else "this Mac's own address (no proxy or transport configured)"))
+    import wf1_film
     ms = sel["moments"]
     with cf.ThreadPoolExecutor(max_workers=max(1, lanes)) as pool:
         recs = list(pool.map(lambda m: build_short(run, m, fetched, sel.get("podcast") or {}), ms))
+    for wait in WALL_WAITS:                                # the wall lifts by itself: wait, then continue the walled shorts
+        waiting = [r["id"] for r in recs if wf1_film.WALL in str(r.get("error"))]
+        if not waiting or run.route_out.is_set():
+            break
+        run.log(f"{len(waiting)} shorts wait for footage ({wf1_film.WALL}): trying their refused sources again in {wait / 60:.0f} min")
+        time.sleep(wait)
+        run.walled.clear()
+        again = [m for m in ms if m["id"] in waiting]
+        with cf.ThreadPoolExecutor(max_workers=max(1, lanes)) as pool:
+            redone = {r["id"]: r for r in pool.map(lambda m: build_short(run, m, fetched, sel.get("podcast") or {}), again)}
+        recs = [redone.get(r["id"], r) for r in recs]
     return dict(made=[r for r in recs if r.get("ok")], failed=[r for r in recs if not r.get("ok")])
 
 
