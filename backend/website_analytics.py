@@ -131,12 +131,19 @@ _COUNTRY = re.compile(r'^[A-Z]{2}$')
 def edge_country(headers):
     """The visitor's country code as Vercel's edge saw it, or None.
 
-    Beacons reach Render through the Vercel rewrite, which adds
-    X-Vercel-IP-Country. No IP is stored and no geo service is called; any
-    other country header (e.g. Cloudflare's in front of Render) would describe
-    Vercel's server, not the visitor, so it is never read."""
-    value = (headers.get('X-Vercel-IP-Country') or '').strip().upper()
-    return value if _COUNTRY.match(value) and value not in ('XX', 'T1') else None
+    Beacons reach Render through the Vercel rewrite. Vercel does not add its
+    geo headers to an external rewrite, so the site's proxy reads
+    X-Vercel-IP-Country at the edge and sends the code on, also as
+    X-Valmera-Edge-Country in case the X-Vercel-* name is dropped on the way
+    (every visit read 'Unknown' until 19 Nov 2026, #454). No IP is stored and
+    no geo service is called; any other country header (e.g. Cloudflare's in
+    front of Render) would describe Vercel's server, not the visitor, so it is
+    never read."""
+    for name in ('X-Vercel-IP-Country', 'X-Valmera-Edge-Country'):
+        value = (headers.get(name) or '').strip().upper()
+        if _COUNTRY.match(value) and value not in ('XX', 'T1'):
+            return value
+    return None
 
 
 def save_visit(data, user_agent, country=None):
