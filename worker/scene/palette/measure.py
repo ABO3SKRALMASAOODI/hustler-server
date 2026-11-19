@@ -50,10 +50,13 @@ def signal(arr, fps):
     g = arr.astype(np.float32).mean(axis=3)
     luma = g.reshape(n, -1).mean(axis=1)
     d = np.abs(g[1:] - g[:-1]).reshape(n - 1, -1).mean(axis=1)
-    inv = np.abs(g[1:] - (255.0 - g[:-1])).reshape(n - 1, -1).mean(axis=1)
-    flips = []
-    for i in range(n - 1):                 # a flip's onset; its way back to positive is the same flip
-        if d[i] > 40 and inv[i] < 0.55 * d[i] and not (flips and i + 1 - flips[-1] <= 3):
+    flips = []                             # a frame whose picture is the inverse of the last one (structure, not light)
+    flat = g.reshape(n, -1)
+    z = flat - flat.mean(axis=1, keepdims=True)
+    sd = np.sqrt((z * z).mean(axis=1)) + 1e-6
+    for i in range(n - 1):
+        corr = float((z[i] * z[i + 1]).mean() / (sd[i] * sd[i + 1]))
+        if corr < -0.45 and sd[i] > 18 and sd[i + 1] > 18 and not (flips and i + 1 - flips[-1] <= 3):
             flips.append(i + 1)
     white = [i for i in range(n) if luma[i] > 232 and g[i].std() < 18]
     black = [i for i in range(n) if luma[i] < 10 and g[i].std() < 6]
