@@ -137,6 +137,15 @@ def test_a_burst_gives_two_to_five_frame_shots_from_the_pool(film):
     assert sum(1 for e in patch["events"] if e["kind"] == "cut") == len(bs)
 
 
+def test_the_directors_pictures_come_first_whichever_field_carries_them(film):
+    l1, work = film
+    for field in ("pics", "pool"):
+        pics = K.pictures(l1, work, {"dev": "burst", "f": [30, 60], field: ["p2", "p1"]})
+        assert [p.aid for p in pics[:2]] == ["p2", "p1"] and len(pics) > 2          # then the pool and the scene
+    near = K.pictures(dict(l1, pool=[dict(r, t=[9.0, 11.0]) if i == 3 else r for i, r in enumerate(l1["pool"])]), work, {"dev": "burst", "f": [290, 320]})
+    assert near[0].path == l1["pool"][3]["path"]                                  # the pool found for these words first
+
+
 def test_flash_safety_counts_opposing_steps_and_tames_a_fixed_order():
     lum = [0.05, 0.6, 0.05, 0.6, 0.05, 0.6, 0.05, 0.6, 0.05, 0.6]
     lens = [3] * 10

@@ -248,7 +248,10 @@ def pictures(l1, work, ask, pool=None, take=False, least=0, sense_=None):
         if pic and (take or not is_take(pic.aid)) and os.path.abspath(pic.path) not in seen:
             seen.add(os.path.abspath(pic.path))
             out.append(pic)
-    for ref in ask.get("pics") or []:
+    # the caller's pictures: ``pics``, and ``pool`` when it lists picture ids (the Director's palette_asks writes the
+    # pictures it chose there, as the scene's asset keys; the alien rhyme reads the same field)
+    chosen = list(ask.get("pics") or []) + [p for p in (ask.get("pool") or []) if isinstance(p, str)]
+    for ref in chosen:
         ref = str(ref)
         if ref in (l1.get("assets") or {}):
             add(pic_of_asset(l1, work, ref, meta.get(ref) or by_path.get(os.path.abspath(_abs(work, l1["assets"][ref].get("path") or "")))
