@@ -168,7 +168,7 @@ def test_proof_holds_stay_bounded_after_audio_snap(tmp_path, monkeypatch):
     product = P.product_clips(script, str(tmp_path / "product"))
     assert product["before"]["t"][1] - product["before"]["t"][0] <= 3
     assert product["after"]["t"][1] - product["after"]["t"][0] <= 4
-    assert len(cuts) == 4
+    assert len(cuts) == 3 and product["hook"] is None             # no opening beat on the script: no opening clip
     assert cuts[-1][1:] == (0.0, 30, str(tmp_path / "product" / "export_body.mp4"))   # the whole export, for lines short of pictures
     assert product["body"]["t"] == [0.0, 30]
 

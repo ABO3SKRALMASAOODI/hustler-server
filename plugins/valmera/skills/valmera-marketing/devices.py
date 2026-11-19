@@ -73,7 +73,7 @@ VOICES = {
 }
 PER_FRAME = {"x", "y", "s", "rot", "op", "blur", "a", "th", "t", "dim", "grow"}
 RECTS = {"crop", "rect"}
-SOUND_DB = dict(typing=-27.0, click=-20.0, whoosh=-23.0, tick=-24.0)     # peaks before the film's loudness pass (film.py's own)
+SOUND_DB = dict(typing=-27.0, click=-20.0, whoosh=-23.0, tick=-24.0, impact=-19.0)     # peaks before the film's loudness pass (film.py's own)
 
 
 # ----------------------------------------------------------------- the reel gives way
@@ -894,9 +894,10 @@ def showcase_marks(hook, window, n_words, lead_f=3, site_s=SITE_S, over_s=SITE_O
                 export_voice=[f_p, f_v], site=[f_s, f_end], dur_f=max(f_end, f_v), lead_f=lead_f)
 
 
-def split(l1, *, f0, f1, upload, export, edl_b, export_at, lib, focus=(0.5, 0.42)):
+def split(l1, *, f0, f1, upload, export, edl_b, export_at, lib, focus=(0.5, 0.42), land_f=None):
     """The hook: the clip as uploaded and Valmera's export of it side by side at the same instant (the export's own
-    edit list maps every frame), each under its label; the export is the larger, in front."""
+    edit list maps every frame), each under its label; the export is the larger, in front. `land_f`: the frame the
+    export's picture lands on, given a hit there (the tutorial's opening beat, proof.lay_hook)."""
     L = Layer(l1, lib, "sp")
     P, R = L.P, L.R
     up_key, ex_key = P.video("dv_up", upload), P.video("dv_ex", export)
@@ -920,8 +921,10 @@ def split(l1, *, f0, f1, upload, export, edl_b, export_at, lib, focus=(0.5, 0.42
     R.voices[L.k("dv_u")]["px"] = R.fit_px(L.k("dv_u"), SPLIT_LABELS[1], (ex_box[2] - ex_box[0]) * W, 46)
     L.text("lab_ex", [f0, f1], SPLIT_LABELS[1], L.k("dv_u"), ex_box[0], ex_box[1] - 0.014, INK, 1.0)
     L.hit("whoosh_soft_1", f0 + 2, "whoosh")
+    if land_f is not None and f0 + 4 <= land_f < f1 - 2:
+        L.hit("impact_1", land_f, "impact")
     rec = L.lay([f0, f1])
-    rec.update(device="split", frames=[f0, f1], upload_box=up_box, export_box=ex_box, export_at=r4(export_at),
+    rec.update(device="split", land_f=land_f, frames=[f0, f1], upload_box=up_box, export_box=ex_box, export_at=r4(export_at),
                upload_at=r4(src_at(tlb, export_at)), labels=list(SPLIT_LABELS), label_cap=r4(lab_cap))
     return rec
 
