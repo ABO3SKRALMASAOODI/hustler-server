@@ -283,16 +283,21 @@ def test_the_topup_script_names_each_short_lines_moments_and_photo_searches_come
 
 
 def test_a_shot_still_failing_after_the_audit_rounds_is_replaced_not_kept(tmp_path, monkeypatch):
+    """Each round's rebuild places the line's next take; the four takes after the rounds all fail, the fifth passes. The
+    shots judged unfit are dropped on their line, the line takes its next supply-passed take, and the line is never
+    narrowed to only what passed the last round (20 Nov: no only_ok)."""
     import wf3 as W3
+    seen_knobs = []
 
     def build(sc, pack, knobs):
-        only = knobs.get("only_ok") or {}
-        bad = 1 not in only                                                  # the cut keeps the bad take until only_ok says otherwise
-        pics = [dict(kind="photo", path="/p/bad.jpg" if bad else "/p/good.jpg", line=1, f=[0, 30], finish=None, tier="photo")]
+        seen_knobs.append(knobs)
+        k = sum(1 for d in knobs.get("drop") or [] if d.endswith("@1"))     # the cut takes the line's next take past the dropped
+        path = f"/p/bad{k}.jpg" if k < 4 else "/p/good.jpg"
+        pics = [dict(kind="photo", path=path, line=1, f=[0, 30], finish=None, tier="photo")]
         return dict(items=[]), dict(pictures=pics, measured=dict(repeat_share=0.0, static_shots=0), voice_f=[0, 30])
 
     def audit(shots, sc, **kw):
-        return [dict(key=s["key"], line=s["line"], f=s["f"], path=s["path"], fit=not s["path"].endswith("bad.jpg"), why="w") for s in shots], 0.0
+        return [dict(key=s["key"], line=s["line"], f=s["f"], path=s["path"], fit="bad" not in s["path"], why="w") for s in shots], 0.0
     monkeypatch.setattr(W3.FIT, "audit", audit)
     monkeypatch.setattr(W3.F, "taste_check", lambda l1, beats: dict(ok=True, problems=[]))
     (tmp_path / "pack.json").write_text(json.dumps(dict(record=dict(spend=[]), pack={})))
@@ -303,6 +308,7 @@ def test_a_shot_still_failing_after_the_audit_rounds_is_replaced_not_kept(tmp_pa
     l1, beats, taste = W3.stories_gates(ctx, sc, pack, build, {}, *build(sc, pack, {}), dict(ok=True, problems=[]))
     assert beats["pictures"][0]["path"] == "/p/good.jpg"
     assert beats["measured"]["audit"]["rounds"][-1]["round"] == "fill" and beats["measured"]["audit"]["rounds"][-1]["failed"] == 0
+    assert not any(k.get("only_ok") for k in seen_knobs)                 # never narrowed to what passed the last round
 
 
 def test_static_shots_on_the_plan_break_it(tmp_path):
@@ -679,3 +685,225 @@ def test_a_thin_display_density_asks_the_writer_once_and_builds_again(tmp_path, 
                                       ask=lambda system, content: (json.dumps(dict(items=[dict(i=0, text="BOX OFFICE", role="key", word_i=1),
                                                                                             dict(i=0, text="$362M", role="key", word_i=2)])), {}))
     assert [a["text"] for a in added] == ["BOX OFFICE"]                       # a number is never added here
+
+
+# ----------------------------------------------------------------- 20 Nov: an unanswered call is an outage, never a verdict
+
+def _cap(*a, **k):
+    raise RuntimeError('openai 503: {"error": {"message": "Claude backend daily call cap reached (1500/1500)"}}')
+
+
+def test_an_unanswered_audit_keeps_the_supply_verdict_and_is_never_a_failure(tmp_path):
+    """19 Nov: a 90-second proxy cap answered every audit batch with 503 and each shot became fit=False 'not judged'."""
+    shots = [dict(key=f"a{k}.jpg@{k % 3}", path=_jpg(tmp_path, f"a{k}"), kind="photo", line=k % 3, f=[k * 10, k * 10 + 10], words="w", meta={},
+                  take_i=0) for k in range(3)]
+    supply = {shots[0]["path"]: {0: [0]}, shots[1]["path"]: {"0": [0]}}          # shot 1 (line 1): the supply never passed it there
+    sleeps = []
+    res, _ = FIT.audit(shots, _sc(), ask=_cap, work=str(tmp_path / "w"), supply=supply, sleep=sleeps.append, log=lambda m: None)
+    assert [r["judged"] for r in res] == [False, False, False] and all(r.get("unjudged") for r in res)
+    assert [r["fit"] for r in res] == [True, False, True]                         # the supply's verdict; no row at all: kept as placed
+    assert FIT.judged_bad(res) == []                                               # nothing to drop, nothing to count
+    assert sleeps == list(FIT.RETRY_WAITS)                                         # asked again after a pause, twice
+    assert not os.path.exists(str(tmp_path / "audit.json"))
+
+
+def test_a_batch_unanswered_in_an_outage_is_asked_again_and_the_rest_wait_with_it(tmp_path):
+    items = [dict(path=_jpg(tmp_path, f"b{k}"), kind="photo", lines=[0], meta={}) for k in range(3)]
+    lines = FIT.lines_of(_sc())
+    calls, sleeps = [], []
+
+    def ask(system, content):
+        calls.append(content)
+        if len(calls) <= 2:                                                         # the provider is out for the first two calls
+            raise RuntimeError("openai 503: cap")
+        return json.dumps(dict(verdicts=[dict(c=0, line=0, **_verdict())])), dict(usd=0.0)
+    left = []
+    got, _ = FIT.judge(items, lines, ask=ask, work=str(tmp_path / "w"), batch=1, sleep=sleeps.append, log=lambda m: None, unanswered=left)
+    assert sorted(k for k, _, _ in got) == [0, 1, 2] and left == []
+    assert len(calls) == 5 and sleeps == list(FIT.RETRY_WAITS)                    # one failure a pass; the rest waited with it
+
+
+def test_one_unreadable_answer_never_holds_the_other_batches_back(tmp_path):
+    items = [dict(path=_jpg(tmp_path, f"u{k}"), kind="photo", lines=[0], meta={"title": f"u{k}"}) for k in range(3)]
+
+    def ask(system, content):
+        txt = " ".join(b.get("text", "") for b in content if b.get("type") == "text")
+        if '"u1"' in txt:
+            return "no json here", dict(usd=0.0)
+        return json.dumps(dict(verdicts=[dict(c=0, line=0, **_verdict())])), dict(usd=0.0)
+    left = []
+    got, _ = FIT.judge(items, FIT.lines_of(_sc()), ask=ask, work=str(tmp_path / "w"), batch=1, sleep=lambda s: None, log=lambda m: None,
+                       unanswered=left)
+    assert sorted(k for k, _, _ in got) == [0, 2] and left == [1]
+
+
+def test_a_supply_take_no_model_answered_for_stays_on_the_line_it_was_found_for(tmp_path):
+    c = _clip(tmp_path, "found", seconds=1.0)
+    c["takes"] = FIT.takes_of(c)
+    ph = dict(path=_jpg(tmp_path, "ph"), kind="photo", subject="Toy Story", line=None, takes=[(0.0, 0.0)], meta=dict(title="ph"))
+
+    def ask(system, content):
+        if system == FIT.IDENTITY_SYSTEM:
+            return json.dumps(dict(takes=[dict(t=k, work="Toy Story", version=None, year=1995, depicts="x", live_action=True,
+                                               speaking_on_camera=True, shows="x") for k in range(2)])), dict(usd=0.0)
+        return _cap()
+    cache = str(tmp_path / "fit.json")
+    table, _, _, _ = FIT.verdicts([c, ph], _sc(), cache_path=cache, ask=ask, work=str(tmp_path / "w"), sleep=lambda s: None, log=lambda m: None)
+    fits = FIT.fits(table)
+    assert fits[c["path"]] == {0: [0]}                                              # its own line only, never line 1
+    assert table[c["path"]][0][0]["unjudged"] is True and table[c["path"]][0][0]["speaking_on_camera"] is True
+    assert fits[ph["path"]] == {0: []}                                             # a photograph has no found line: not placed unjudged
+    assert json.load(open(cache)) == {}                                             # never cached: the next call asks again
+    import reel as R
+    assert R.fit_grades(table)[c["path"]][0][0] == 0                               # ranked after every judged take
+
+
+def test_an_audit_outage_never_empties_the_plan(tmp_path, monkeypatch):
+    import wf3 as W3
+    builds = []
+
+    def build(sc, pack, knobs):
+        builds.append(knobs)
+        pics = [dict(kind="photo", path="/p/a.jpg", line=1, f=[0, 30], finish=None, tier="photo")]
+        return dict(items=[]), dict(pictures=pics, measured=dict(repeat_share=0.0, static_shots=0), voice_f=[0, 30])
+
+    def audit(shots, sc, **kw):
+        assert kw.get("supply") == {"/p/a.jpg": {0: [1]}}
+        return [dict(key=s["key"], line=s["line"], f=s["f"], path=s["path"], judged=False, unjudged=True, fit=True, why="not judged")
+                for s in shots], 0.0
+    monkeypatch.setattr(W3.FIT, "audit", audit)
+    monkeypatch.setattr(W3.F, "taste_check", lambda l1, beats: dict(ok=True, problems=[]))
+    (tmp_path / "pack.json").write_text(json.dumps(dict(record=dict(spend=[]), pack={})))
+    ctx = SimpleNamespace(supply=str(tmp_path), tmp=str(tmp_path), args={}, log=lambda m: None)
+    words = dict(duration=2.0, words=[dict(w="a", start=0.0, end=0.5, seg=0), dict(w="b", start=0.6, end=1.0, seg=1)])
+    pack = dict(words=words, fit={"/p/a.jpg": {0: [1]}}, pictures={}, footage=[])
+    sc = dict(segments=[dict(say="a"), dict(say="b")])
+    l1, beats, taste = W3.stories_gates(ctx, sc, pack, build, {}, *build(sc, pack, {}), dict(ok=True, problems=[]))
+    assert not any(k.get("drop") or k.get("only_ok") for k in builds) and beats["pictures"][0]["path"] == "/p/a.jpg"   # no drop, no narrowing
+    rounds = beats["measured"]["audit"]["rounds"]
+    assert len(rounds) == 1 and rounds[0]["failed"] == 0 and rounds[0]["unjudged"] == 1 and beats["measured"]["audit"]["failed"] == []
+
+
+def test_the_plan_pace_reads_a_held_card_as_one_shot():
+    import wf3 as W3
+    pics = [dict(kind="designed", shows="Apple", f=[k * 10, k * 10 + 10]) for k in range(6)] + [dict(kind="clip", f=[60, 70])]
+    pc = W3.pace_of(dict(pictures=pics, voice_f=[0, 70]))
+    assert pc["cuts_10s"] == round(2 / (70 / W3.F.FPS) * 10, 2) and pc["median_s"] == round(60 / W3.F.FPS, 3)
+
+
+def test_the_credits_are_what_the_film_shows_and_says():
+    """19 Nov: SOURCES.md credited 76 clips and 8 photographs the film never showed."""
+    import wf3 as W3
+    url = "https://www.youtube.com/watch?v=WxOp5mBY9IY"
+    pack = dict(credits=[dict(name="P", title="Photo P", licence="CC BY-SA 3.0", credit="M. Y.", page="https://commons/P"),
+                         dict(name="Q", title="Photo Q", licence="Public domain", credit="B. G.", page="https://commons/Q"),
+                         dict(name="Deal", title="Deal", licence=W3.FOOTAGE_LICENCE, credit="JoshuaG", page=url, time_range=[185.79, 186.79], line=5),
+                         dict(name="Deal", title="Deal", licence=W3.FOOTAGE_LICENCE, credit="JoshuaG", page=url, time_range=[234.27, 235.27], line=5)],
+                voices=[dict(person="Steve Jobs", after=5, source=dict(url="https://cnbc/x", title="CNBC 1997", channel="CNBC"), time_range=[441.2, 449.5])])
+    pictures = [dict(kind="designed", path="designed:0:0:$150 MILLION", f=[0, 30]),
+                dict(kind="photo", path="/s/p.jpg", source="https://commons/P", f=[30, 50]),
+                dict(kind="clip", path="/s/l05_0.mp4", source=url, time_range=[185.79, 186.79], src=[0.2, 0.6], f=[50, 62]),
+                dict(kind="clip", path="/s/l05_0.mp4", source=url, time_range=[185.79, 186.79], src=[0.6, 0.9], f=[62, 70], cont=True)]
+    cr = W3.screen_credits(pack, pictures)
+    assert [c["page"] for c in cr] == ["https://commons/P", url, "https://cnbc/x"]   # Q and the second clip never appear
+    assert cr[0]["credit"] == "M. Y." and "time_range" not in cr[0]
+    assert cr[1]["time_range"] == [185.99, 186.69] and cr[1]["credit"] == "JoshuaG" and "line" not in cr[1]
+    assert cr[2]["voice"] == "Steve Jobs"
+
+
+class _Stream:
+    def __init__(self, status, headers=None, body=b"", lines=()):
+        self.status_code, self.headers, self._body, self._lines = status, headers or {}, body, list(lines)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return self._body
+
+    def iter_lines(self):
+        return iter(self._lines)
+
+
+def _proxy(monkeypatch, answers):
+    """writer.ask_openai against a stand-in local proxy: each POST takes the next of `answers` (status, headers); a 200
+    streams one completed response. Returns the recorded sleeps and the number of posts."""
+    import httpx
+    import writer
+    done = json.dumps(dict(type="response.completed", response=dict(
+        id="r1", status="completed", usage=dict(input_tokens=10, output_tokens=5),
+        output=[dict(type="message", content=[dict(type="output_text", text='{"ok": true}')])])))
+    posts, sleeps = [], []
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def stream(self, method, url, headers=None, json=None):
+            status, hdr = answers[len(posts)]
+            posts.append(url)
+            if isinstance(status, BaseException):
+                raise status
+            if status == 200:
+                return _Stream(200, lines=["data: " + done, "data: [DONE]"])
+            return _Stream(status, hdr, b'{"error": {"message": "Claude backend daily call cap reached"}}')
+    monkeypatch.setattr(httpx, "Client", Client)
+    monkeypatch.setattr(writer.time, "sleep", sleeps.append)
+    monkeypatch.setattr(writer.openai_cache, "record", lambda *a, **k: None)
+    monkeypatch.setenv("CODEX_PROXY_LOCAL", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-only")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8787/v1")
+    return writer, sleeps, posts
+
+
+def test_the_local_proxy_refusing_with_503_is_waited_out_not_asked_once(monkeypatch):
+    """19 Nov: under CODEX_PROXY_LOCAL ask_openai made one attempt, so a 90-second cap answered every audit call."""
+    writer, sleeps, posts = _proxy(monkeypatch, [(503, {}), (503, {"retry-after": "2"}), (429, {}), (200, {})])
+    text, use = writer.ask_openai("s", "c", what="picture check", model="gpt-6.1-sol")
+    assert text == '{"ok": true}' and len(posts) == 4 and posts[0].startswith("http://127.0.0.1:8787/")
+    assert sleeps == [writer.PROXY_WAITS[0], 2.0, writer.PROXY_WAITS[2]]          # its own Retry-After honoured
+    assert use["usd"] == 0.0
+
+
+def test_a_request_the_proxy_refuses_for_itself_is_not_retried(monkeypatch):
+    import pytest
+    writer, sleeps, posts = _proxy(monkeypatch, [(400, {}), (200, {})])
+    with pytest.raises(RuntimeError, match="openai 400"):
+        writer.ask_openai("s", "c", what="picture check", model="gpt-6.1-sol")
+    assert len(posts) == 1 and sleeps == []
+
+
+def test_a_proxy_outage_longer_than_the_waits_raises_to_the_judge(monkeypatch):
+    import pytest
+    writer, sleeps, posts = _proxy(monkeypatch, [(503, {})] * (len(__import__("writer").PROXY_WAITS) + 1))
+    with pytest.raises(RuntimeError, match="openai 503"):
+        writer.ask_openai("s", "c", what="picture check", model="gpt-6.1-sol")
+    assert len(posts) == len(writer.PROXY_WAITS) + 1 and sleeps == list(writer.PROXY_WAITS)
+
+
+def test_a_read_timeout_on_the_proxy_is_asked_again_at_most_once(monkeypatch):
+    """The proxy may still be running a request that timed out: each further attempt could start another backend call on
+    the shared daily cap and block for another full timeout. It is asked once more (the proxy's cache answers a completed
+    duplicate); a connection that never opened ran nothing and is waited out like a refusal."""
+    import httpx
+    import pytest
+    rt = lambda: httpx.ReadTimeout("read timed out")
+    writer, sleeps, posts = _proxy(monkeypatch, [(rt(), {}), (rt(), {}), (200, {}), (200, {})])
+    with pytest.raises(httpx.ReadTimeout):
+        writer.ask_openai("s", "c", what="picture check", model="gpt-6.1-sol")
+    assert len(posts) == 2 and sleeps == [writer.PROXY_WAITS[0]]
+    writer, sleeps, posts = _proxy(monkeypatch, [(rt(), {}), (200, {})])
+    assert writer.ask_openai("s", "c", what="picture check", model="gpt-6.1-sol")[0] == '{"ok": true}' and len(posts) == 2
+    ce = lambda: httpx.ConnectError("connection refused")
+    writer, sleeps, posts = _proxy(monkeypatch, [(ce(), {}), (httpx.ConnectTimeout("connect"), {}), (rt(), {}), (ce(), {}), (200, {})])
+    assert writer.ask_openai("s", "c", what="picture check", model="gpt-6.1-sol")[0] == '{"ok": true}'
+    assert len(posts) == 5 and sleeps == list(writer.PROXY_WAITS)

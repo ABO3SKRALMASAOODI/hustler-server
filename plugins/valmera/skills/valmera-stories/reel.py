@@ -641,10 +641,16 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
       cut       per line: its reserved moving takes, then spare moving takes, then photographs (PHOTO_SHARE of its
                 shots, lifted when it has no moving take left), then still takes; colour takes before grey ones on lines
                 without a device. A line short of distinct pictures spreads what it has (shots redrawn from the judge's p50-p90, sp.spread).
-      fill      a gap is filled only from the line itself: a reframe of a different own-line take (at most REFRAME_MAX_S,
-                its window inside its take), then a designed card of the line's own display item or brief, never
-                another line's picture and never a stretched hold. sp.shortfall logs each line's fill frames.
-    Shots are never SHOT_MAX_S or longer. A list line (writer.annotate's "list") may burst through spare pictures, at
+      fill      a gap is filled only with pictures that carry the line: a same-take cut-in, a reframe of a different
+                own-line take (at most REFRAME_MAX_S, its window inside its take), a fitting picture shown at least
+                REUSE_AFTER_S ago (replay), then a designed card of the line's own display item (each text once in the
+                film), then its played takes again (a repeat, counted as one; the take just shown only on the other
+                framing); a line with nothing new left holds its card or photograph on as one shot, never a copy, and a
+                line with no picture and no new card text gets one card of its own fallback_text (even if shown
+                before), or of the name it is about only when it has no fallback_text. Never another line's picture,
+                never the brief's words on card after card. sp.shortfall logs each line's fill frames.
+    Shots are shorter than SHOT_MAX_S, except on a line with nothing new: its card or photograph held on as one shot may
+    run past SHOT_MAX_S, measured honestly as one long shot (pace_of, long_share) that the pace top-up answers. A list line (writer.annotate's "list") may burst through spare pictures, at
     most BURSTS_MAX a film. rec["tier"] says which rung each shot came from, rec["pick_line"] the line it was picked for."""
     import random
     rng = random.Random(seed)
@@ -652,7 +658,7 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
     segs = script["segments"]
     nseg = len(segs)
     bounds = line_bounds(script, clock, f_end)
-    sp.shortfall, sp.reframed, sp.overflow, sp.fill_by_line = {}, {}, 0, {}
+    sp.shortfall, sp.reframed, sp.overflow, sp.fill_by_line, sp.again = {}, {}, 0, {}, {}
     sp.spread = {}
     voice_f = max(bounds[-1][1] - bounds[0][0], 1) if bounds else 1
     planned = shot_plan(script, clock, f_end, seed)
@@ -781,20 +787,75 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
         return None
 
     def designed_text(line):
-        # A workflow may supply viewer-facing fallback copy. Production briefs
-        # (see.moment / see.thing) must never become the visible sentence.
-        if segs[line].get("fallback_text"):
-            return dict(text=segs[line]["fallback_text"], role="key"), True
+        """(card, fallback) or (None, True): the line's own display items (each text once in the film), or a workflow's
+        viewer-facing fallback copy (once). Production briefs (see.moment / see.thing) never become the card: on 19 Nov
+        see[0].thing, returned for every slot with no used check, put STEVE JOBS on ten cards in a row and APPLE on 16."""
+        shown = {str(t).strip().upper() for _, t in sp.cards_used}
+        fb = segs[line].get("fallback_text")
+        if fb and str(fb).strip().upper() not in shown:
+            return dict(text=fb, role="key"), True
         for x in sp.cards.get(line) or []:
-            if (line, x["text"]) not in sp.cards_used and x["text"] not in {t for _, t in sp.cards_used}:
+            if str(x["text"]).strip().upper() not in shown:
                 return dict(text=x["text"], role=x.get("role"), big=x.get("big"), small=x.get("small")), False
-        for x in segs[line].get("see") or []:
-            m = x.get("moment")
-            t = m if isinstance(m, str) and len(m.split()) <= 6 else x.get("thing")
-            if t and (line, t) not in sp.cards_used:
-                return dict(text=t, role="key"), True
-        x = (segs[line].get("see") or [{}])[0]
-        return (dict(text=x.get("thing"), role="key"), True) if x.get("thing") else (None, True)
+        return None, True
+
+    def replay(line, n, f, last):
+        """A fitting picture shown again (Supply.replay's rule, on the fill path before any card): a clip take or a
+        photograph that carries this line, last shown at least REUSE_AFTER_S ago and fewer than MAX_USES times; the least
+        shown, longest ago first, a clip's unplayed seconds inside its take before its best window again. ("clip", c, ti,
+        take, t0, t1), ("photo", rec), or None."""
+        want = min(n, int(SHOT_MAX_S * FPS)) / FPS
+        best = None
+        for lst in sp.footage.values():
+            for c in lst:
+                shows = sp.shown_at.get(c["path"]) or []
+                if c["path"] == last or not shows or len(shows) >= MAX_USES or f - max(shows) < REUSE_AFTER_S * FPS or not sp.ok(c, line):
+                    continue
+                takes = [(ti, tk) for ti, tk in enumerate(Takes.of(c)) if sp.fits(c["path"], line, ti)]
+                if not takes:
+                    continue
+                ti, tk = max(takes, key=lambda q: (sp.grade(c["path"], q[0], line), take_motion(c, q[1])))
+                k = (len(shows), max(shows))
+                if best is None or k < best[0]:
+                    best = (k, c, ti, tk)
+        if best is not None:
+            _, c, ti, tk = best
+            room = [(a_, b_) for a_, b_ in _free_in(sp.played.get(c["path"]) or [], tk) if b_ - a_ >= 0.2]
+            if room:
+                a_, b_ = max(room, key=lambda q: q[1] - q[0])
+                t0, t1 = a_, min(b_, a_ + want)
+            else:
+                t0, t1 = Takes.best(c, tk, want)
+            return "clip", c, ti, tk, t0, t1
+        ph = [r for lst in sp.pics.values() for r in lst if r["path"] != last and sp.fits(r["path"], line)
+              and 0 < len(sp.uses.get(r["path"]) or []) < MAX_USES and f - max(sp.uses[r["path"]]) >= REUSE_AFTER_S * FPS]
+        if ph:
+            return ("photo", min(ph, key=lambda r: (len(sp.uses[r["path"]]), max(sp.uses[r["path"]]))))
+        return None
+
+    def again(line, n):
+        """A played take of this line once more (after its cards): its unplayed seconds inside the take, else its most
+        moving window; another take before the one just shown, and the one just shown only on the other framing (a punch
+        in, or back out from one). A repeat, counted as one. (c, ti, take, t0, t1, punch) or None."""
+        prev = out[-1][4] if out else {}
+        seen_, cands = set(), []
+        for c, ti, take in played[line]:
+            if (c["path"], ti) not in seen_:
+                seen_.add((c["path"], ti))
+                cands.append((c, ti, take))
+        if not cands:
+            return None
+        cands.sort(key=lambda q: (prev.get("path") == q[0]["path"] and prev.get("take_i") == q[1], -take_motion(q[0], q[2])))
+        c, ti, take = cands[0]
+        same = prev.get("path") == c["path"] and prev.get("take_i") == ti
+        want = min(n, int(REFRAME_MAX_S * FPS)) / FPS
+        room = [(a_, b_) for a_, b_ in _free_in(sp.played.get(c["path"]) or [], take) if b_ - a_ >= 0.2]
+        if room:
+            a_, b_ = max(room, key=lambda q: q[1] - q[0])
+            t0, t1 = a_, min(b_, a_ + want)
+        else:
+            t0, t1 = Takes.best(c, take, want)
+        return c, ti, take, t0, t1, same and not prev.get("cutin")
 
     fill_f = [0]
     sv = sorted(v for _, v in stress)
@@ -941,23 +1002,81 @@ def cut_fit(script, clock, sp, f_end, stress, seed=1114, device_lines=(), prefer
                     sp.take_clip(c, t0, t1, pos)
                     rec = dict(c, src=[round(t0, 3), round(t1, 3)], use=1, tier="proof", pick_line=line)
                     kind, name = "clip", c.get("subject")
-                else:
+                # 20 Nov: the line's own supply before any card, each card text once, and never a copy of a card: on
+                # 19 Nov the fill cut a pictureless line into its planned slots and put the brief's name on every one
+                # (STEVE JOBS ten times, APPLE sixteen), each counted as a new picture
+                rp = replay(line, n, pos, last) if ci is None and rf is None and pf is None else None
+                x = fallback = ra = None
+                if ci is None and rf is None and pf is None and rp is None:
                     x, fallback = designed_text(line)
-                    hold = FIGURE_CARD_S if (x or {}).get("role") == "figure" else DESIGNED_MIN_S
+                    ra = again(line, fill_n) if x is None else None
+                if ci is not None or rf is not None or pf is not None:
+                    pass
+                elif rp is not None and rp[0] == "clip":
+                    _, c, ti, tk, t0, t1 = rp
+                    end = pos + max(min(n, int(round((t1 - t0) * FPS / 0.8))), 2)
+                    sp.take_clip(c, t0, t1, pos)
+                    played[line].append((c, ti, tk))
+                    rec = dict(c, src=[round(t0, 3), round(t1, 3)], take=list(tk), take_i=ti, use=len(sp.shown_at[c["path"]]), tier="replay", pick_line=line)
+                    kind, name = "clip", c.get("subject")
+                    sp.shortfall[line] = sp.shortfall.get(line, 0) + (end - pos)
+                elif rp is not None:
+                    r_ = rp[1]
+                    sp.take_photo(r_, pos)
+                    rec = dict(r_, use=len(sp.uses[r_["path"]]), tier="replay", pick_line=line)
+                    kind, name = "photo", r_.get("name")
+                    sp.shortfall[line] = sp.shortfall.get(line, 0) + (end - pos)
+                elif x is not None:
+                    hold = FIGURE_CARD_S if x.get("role") == "figure" else DESIGNED_MIN_S
                     end = pos + min(max(n, int(round(hold * FPS))), int(SHOT_MAX_S * FPS), left)
                     if left - (end - pos) < 3:
                         end = b
                     kind, name = "designed", None
-                    rec = dict(path=f"designed:{line}:{len(out)}:{x['text'] if x else ''}", text=(x or {}).get("text") or "", role=(x or {}).get("role"),
-                               big=(x or {}).get("big"), small=(x or {}).get("small"), line=line, w=W, h=H, tier="designed", pick_line=line,
+                    rec = dict(path=f"designed:{line}:{len(out)}:{x['text']}", text=x.get("text") or "", role=x.get("role"),
+                               big=x.get("big"), small=x.get("small"), line=line, w=W, h=H, tier="designed", pick_line=line,
                                fallback=fallback)
                     sp.cards_used.add((line, rec["text"]))
                     if fallback:
                         sp.shortfall[line] = sp.shortfall.get(line, 0) + (end - pos)
-                if pf is not None:
+                elif ra is not None:
+                    c, ti, tk, t0, t1, punch = ra
+                    end = pos + max(min(fill_n, int(round((t1 - t0) * FPS / 0.8))), 2)
+                    sp.take_clip(c, t0, t1, pos)
+                    rec = dict(c, src=[round(t0, 3), round(t1, 3)], take=list(tk), take_i=ti, use=2, tier="reframe", pick_line=line, again=True,
+                               **(dict(cutin=True, crop_k=CUTIN_K) if punch else {}))
+                    kind, name = "clip", c.get("subject")
+                    sp.again[line] = sp.again.get(line, 0) + (end - pos)
+                    sp.shortfall[line] = sp.shortfall.get(line, 0) + (end - pos)
+                elif out and out[-1][2] in ("designed", "photo") and out[-1][4].get("pick_line") == line and out[-1][1] == pos:
+                    # nothing new is left on this line: its card (or photograph) holds on, one shot, never a copy
+                    end = b if left - n < 3 else pos + n
+                    out[-1][1] = end
+                    sp.shortfall[line] = sp.shortfall.get(line, 0) + (end - pos)
+                    fill_f[0] += end - pos
+                    sp.fill_by_line[line] = sp.fill_by_line.get(line, 0) + (end - pos)
+                    pos = end
+                    continue
+                else:
+                    # a line with no picture and no new card text: one card, held for the line (the slots after it hold
+                    # on with it); the pace top-up asks footage for the line. Its own viewer-facing fallback_text when it
+                    # has one, even if already shown (a workflow's copy, such as marketing's call to action); the name it
+                    # is about only when it has none, since see.thing is a production label in some workflows (marketing's
+                    # THE EXPORT) that proof.py keeps off the screen
+                    fb_ = str(segs[line].get("fallback_text") or "").strip()
+                    x = dict(text=fb_ or str(((segs[line].get("see") or [{}])[0] or {}).get("thing") or ""), role="key")
+                    end = pos + min(max(n, int(round(DESIGNED_MIN_S * FPS))), left)
+                    if left - (end - pos) < 3:
+                        end = b
+                    kind, name = "designed", None
+                    rec = dict(path=f"designed:{line}:{len(out)}:{x['text']}", text=x["text"], role="key", line=line, w=W, h=H, tier="designed",
+                               pick_line=line, fallback=True)
+                    sp.cards_used.add((line, rec["text"]))
+                    sp.shortfall[line] = sp.shortfall.get(line, 0) + (end - pos)
+                if pf is not None or (rp is not None and rp[0] == "clip") or ra is not None:
                     static = not moving(rec)
                 elif ci is None:
                     static = True
+                if ci is None and pf is None:
                     fill_f[0] += end - pos
                     sp.fill_by_line[line] = sp.fill_by_line.get(line, 0) + (end - pos)
             if in_burst:
@@ -1079,6 +1198,37 @@ def plate_colours(accent):
                 break
         out.append(f"#{rr:02X}{gg:02X}{bb:02X}")
     return out[0], out[1]
+
+
+CARD_PX_MIN = 64            # a designed card's type is never smaller
+CARD_ONE_LINE_PX = 96       # a card's words stay on one line when they fit it at this size or more; else balanced lines
+
+
+def card_lines(text, px_of, px_min=CARD_PX_MIN, one_line_px=CARD_ONE_LINE_PX, max_lines=4):
+    """(lines, px): a designed card's words laid out by measured width. px_of(s) is the largest size at which s fits the
+    card's width (film.R.fit_px). One line when it reads at one_line_px or more; else the fewest lines (2..max_lines)
+    that read at one_line_px, split where the widest line allows the largest size (balanced), or failing that the split
+    with the largest size: a long name is set large on balanced lines and never leaves one word stranded below the rest
+    (19 Nov: MACWORLD CONFERENCE & / EXPO at the 64 px floor)."""
+    import itertools
+    toks = str(text or "").split()
+    one = float(px_of(" ".join(toks)))
+    if len(toks) <= 1 or one >= one_line_px:
+        return ([" ".join(toks)] if toks else []), max(px_min, one)
+    best = ([" ".join(toks)], one)
+    for k in range(2, min(max_lines, len(toks)) + 1):
+        best_k = None
+        for cuts in itertools.combinations(range(1, len(toks)), k - 1):
+            edges = (0,) + cuts + (len(toks),)
+            lines = [" ".join(toks[a:b]) for a, b in zip(edges, edges[1:])]
+            px = min(float(px_of(q)) for q in lines)
+            if best_k is None or px > best_k[1] + 1e-6:
+                best_k = (lines, px)
+        if best_k[1] > best[1] + 1e-6:
+            best = best_k
+        if best[1] >= one_line_px:
+            break
+    return best[0], max(px_min, best[1])
 
 
 def _verdict_rows(row):
@@ -1231,16 +1381,26 @@ def take_groups(clips, ffmpeg=None, corr=0.85):
     return {c["path"]: root(c["path"]) for c in clips}
 
 
+def picture_key(p):
+    """What a viewer sees as one picture: a designed card by its text (two plates with the same words are the same
+    picture: on 19 Nov ten STEVE JOBS cards, each keyed by its own path, measured as ten new pictures), anything else by
+    its path and played window."""
+    if p.get("kind") == "designed":
+        return ("designed", str(p.get("shows") or p.get("text") or "").strip().upper())
+    return (p["path"], tuple(p.get("src") or []))
+
+
 def take_stats(pictures, footage):
-    """Distinct takes among the film's pictures: a photograph or a designed card by its path, a clip by its take group
-    (take_groups) and the take inside it (its measured cuts). Repeats and consecutive repeats by that count."""
+    """Distinct takes among the film's pictures: a photograph by its path, a designed card by its text, a clip by its
+    take group (take_groups) and the take inside it (its measured cuts). Repeats and consecutive repeats by that count."""
     group = {}
     for lst in footage.values():
         for c in lst:
             group[c["path"]] = c.get("take_group") or c["path"]
     seen, rep, consec, last = set(), 0, 0, None
     for p in sorted(pictures, key=lambda q: q["f"][0]):
-        k = (group.get(p["path"], p["path"]), p.get("take")) if p["kind"] == "clip" else (p["path"], None)
+        k = (group.get(p["path"], p["path"]), p.get("take")) if p["kind"] == "clip" else \
+            (picture_key(p) if p["kind"] == "designed" else (p["path"], None))
         if p.get("cont") and k == last:
             continue                # a glimpse's take playing on, or a same-take cut-in: time runs on, not a repeat
         if k in seen:
@@ -1271,9 +1431,10 @@ def fit_measures(pictures, timeline, sp, takes, secs, fin, seg_len, device_share
     moving_f = sum(p["f"][1] - p["f"][0] for p in base if p["kind"] == "clip" and float(p.get("motion") or 0) >= MOTION_FLOOR)
     off_line = sum(p["f"][1] - p["f"][0] for p in pictures if p.get("line") is not None and p.get("spoken_line") is not None
                    and p["line"] != p["spoken_line"])
-    fill_f = sum(p["f"][1] - p["f"][0] for p in pictures if p.get("tier") in ("designed", "reframe"))
+    fill_f = sum(p["f"][1] - p["f"][0] for p in pictures if p.get("tier") in ("designed", "reframe", "replay"))
     return dict(tier_s=tiers, shortfall_s={str(k): round(v / FPS, 2) for k, v in sorted(sp.shortfall.items())},
                 reframed_s={str(k): round(v / FPS, 2) for k, v in sorted(sp.reframed.items())}, spread_lines=dict(getattr(sp, "spread", None) or {}),
+                again_s={str(k): round(v / FPS, 2) for k, v in sorted((getattr(sp, "again", None) or {}).items())},
                 new_pictures_10s=round(takes["new_pictures_10s_n"] / max(secs, 1) * 10, 2), repeat_share=takes["repeat_share"],
                 consecutive_repeats=takes["consecutive_repeats"],
                 shots_under_0_5s=round(sum(1 for x in lens if x < 0.5 * FPS) / n, 3), shots_1_2f=round(sum(1 for x in lens if x <= 2) / n, 3),
@@ -1829,11 +1990,12 @@ def build(script, sup, style_id, direction=None):
         return dict(reveal=True, region=[r4(rx0), r4(ry0), r4(rx1), r4(ry1)], scale_end=r4(s_end), push_f=[f0 + k0, f0 + k1])
 
     def designed(f0, f1, rec):
-        """A designed type card from the line's own display item (or its brief): the figure, term or date on a plate in
-        the palette's accent (colourfulness 20 and more; near-black only on a device line), the type driven by a scale of
-        DESIGNED_SCALE over the shot after the bake bounce; a picture of its own, never another line's photograph."""
-        dev = bool(fin[seg_at(f0)])
-        c0, c1 = ("#141210", "#0B0A09") if dev else plate_colours(pal["accent"])
+        """A designed type card from the line's own display item: the figure, term or date on a plate in the palette's
+        accent (colourfulness 20 and more, on every line: a device finish belongs to the archival pictures, so a card on a
+        device line keeps the palette and the gate runs over the line's real shots only), the type driven by a scale of
+        DESIGNED_SCALE over the shot after the bake bounce, set on balanced lines (card_lines); a picture of its own, never
+        another line's photograph."""
+        c0, c1 = plate_colours(pal["accent"])
         P.page([f0, f1], c0, c1, grain=0.05)
         text = str(rec.get("big") or rec.get("text") or "")
         text = text.upper() if st["upper"] else text
@@ -1842,15 +2004,8 @@ def build(script, sup, style_id, direction=None):
         # Fit the largest animated frame, with room for glyph bearings and
         # the platform rail. The old 80% static width overflowed as it grew.
         max_width = 0.70 * W / (1.0 + DESIGNED_SCALE)
-        P.voices[vk]["px"] = max(64, P.R.fit_px(vk, text, max_width, float(st["dsp"]["px"]) * 1.6))
-        text_lines, current = [], []
-        for token in text.split():
-            if current and P.R.width(vk, " ".join(current + [token])) > max_width:
-                text_lines.append(" ".join(current))
-                current = []
-            current.append(token)
-        if current:
-            text_lines.append(" ".join(current))
+        text_lines, px = card_lines(text, lambda t: P.R.fit_px(vk, t, max_width, float(st["dsp"]["px"]) * 1.6))
+        P.voices[vk]["px"] = px
         line_step = float(P.voices[vk]["px"]) * 1.2 / H
         n = f1 - f0
         try:
@@ -1861,7 +2016,7 @@ def build(script, sup, style_id, direction=None):
         except Exception:  # noqa: BLE001
             ys, bl = [0.44] * n, [0.0] * n
         sc_ = [r4(1.0 + DESIGNED_SCALE * (1.0 - (1.0 - j / max(n - 1, 1)) ** 2)) for j in range(n)]
-        ink_ = pal["ink"] if not dev else (pal["accent"] if rec.get("role") == "figure" else pal["ink"])
+        ink_ = pal["ink"]
         for j, text_line in enumerate(text_lines):
             offset = (j - (len(text_lines) - 1) / 2) * line_step
             P.word([f0, f1], text_line, vk, 0.5, [r4(y + offset) for y in ys], ink_, 1.0, align="c", z=3,
@@ -1972,9 +2127,9 @@ def build(script, sup, style_id, direction=None):
             P.events.append(timeline[j][0])
     # ---- section finishes: the film gate and the scanlines over their sections, under the type
     spans = []
-    for f0, f1, *_ in timeline:
+    for f0, f1, kind_, *_ in timeline:
         fz = fin[seg_at(f0)]
-        if fz in ("gate", "crt"):
+        if fz in ("gate", "crt") and kind_ != "designed":          # a designed card keeps its palette: the finish is the archive's
             if spans and spans[-1][2] == fz and spans[-1][1] >= f0 - 1:
                 spans[-1][1] = f1
             else:
@@ -2079,7 +2234,7 @@ def build(script, sup, style_id, direction=None):
     film = dict(grain=float(st["grain"]), vignette=float(st["vignette"]), over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0))
     l1 = P.done(sup.get("sid", "wf3"), f_end, int(d.get("seed", 1114)), film)
     secs = f_voice_end / FPS
-    np10 = len({(p["path"], tuple(p.get("src") or [])) for p in P.pictures}) / max(secs, 1) * 10     # prints and windows count
+    np10 = len({picture_key(p) for p in P.pictures}) / max(secs, 1) * 10     # prints and windows count; a card by its text
     takes = take_stats(P.pictures, footage)            # a measure on every cut, cut_story's too (WF2)
     if fit_on:
         np10 = takes["new_pictures_10s_n"] / max(secs, 1) * 10        # a picture is new only by distinct take
@@ -2099,7 +2254,7 @@ def build(script, sup, style_id, direction=None):
     for p in P.pictures:
         if p["kind"] == "photo":
             photo_uses[p["path"]] = photo_uses.get(p["path"], 0) + 1
-    new_pics = len({(p["path"], tuple(p.get("src") or [])) for p in P.pictures})
+    new_pics = len({picture_key(p) for p in P.pictures})
     layered = sum(b - a for a, b, n in layer_spans if n >= 3)
     look_f = sorted({0, 12, 40, *[c + 5 for c in cut_pts[::3]], *[a + 10 for a, _, _ in shown], *([turn_f + 10] if turn_f is not None else []), f_end - 3})
     beats = dict(dur_f=f_end, voice_f=[LEAD_F, f_voice_end], cuts=sorted(set(cut_pts)), changes=changes,

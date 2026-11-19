@@ -126,6 +126,20 @@ def openai_body(system, content, *, model, effort, max_tokens, searches, what, m
     return body
 
 
+PROXY_WAITS = (5.0, 15.0, 40.0, 90.0)     # seconds before each further attempt at the local proxy (CODEX_PROXY_LOCAL)
+RETRY_AFTER_MAX = 300.0
+
+
+def retry_after(r, default):
+    """The wait before the next attempt: the response's own Retry-After (seconds, at most RETRY_AFTER_MAX) when it sends
+    one, else `default`."""
+    try:
+        v = float((getattr(r, "headers", None) or {}).get("retry-after"))
+    except (TypeError, ValueError):
+        return default
+    return min(max(v, 1.0), RETRY_AFTER_MAX) if v == v else default
+
+
 def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, what="writer", model=None, timeout=2400,
                max_tool_calls=None):
     """(text, usage): one streamed Responses call; with `searches`, the model may use OpenAI's web search. The key comes
@@ -139,8 +153,28 @@ def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, 
     headers = {"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"], "Content-Type": "application/json"}
     t0 = time.time()
     final = None
-    attempts = 1 if os.environ.get("CODEX_PROXY_LOCAL") == "1" else 4
+    # The local subscription proxy refuses with 429/503 when a backend is capped, latched or queued full ("Nothing was
+    # run"), and those refusals pass: on 19 Nov a 90-second cap answered all 43 shot-audit calls with 503 and, asked once
+    # each, they emptied the film of its pictures. It is retried like any provider, on PROXY_WAITS (or its Retry-After).
+    # A request the proxy may already be running is different: after a read timeout, a dropped stream or a stream that
+    # ended without a response, each further attempt can start another backend call on the shared daily cap (the cap
+    # that ran out on 19 Nov) and, at the default timeout, block for another 40 minutes. Such a request is asked once
+    # more at most; the proxy's response cache answers that one if the first call completed meanwhile. A refusal (HTTP
+    # 429/5xx) or a connection that never opened ran nothing and is waited out on PROXY_WAITS.
+    local = os.environ.get("CODEX_PROXY_LOCAL") == "1"
+    attempts = len(PROXY_WAITS) + 1 if local else 4
+    accepted_retries = [0]
+
+    def once_more_after_accept():
+        """On the local proxy, a request that may have run is asked again at most once."""
+        if not local:
+            return True
+        accepted_retries[0] += 1
+        return accepted_retries[0] <= 1
     endpoint = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/") + "/responses"
+
+    def wait(attempt, r=None):
+        time.sleep(retry_after(r, PROXY_WAITS[attempt]) if local else 10 * (attempt + 1))
     for attempt in range(attempts):
         final = None
         try:
@@ -154,7 +188,7 @@ def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, 
                                         http_status=r.status_code, attempt=attempt + 1, force=True)
                     msg = r.read().decode("utf-8", "replace")[:400]
                     if r.status_code in (429, 500, 502, 503, 504) and attempt + 1 < attempts:
-                        time.sleep(10 * (attempt + 1))
+                        wait(attempt, r)
                         continue
                     raise RuntimeError(f"openai {r.status_code}: {msg}")
                 for line in r.iter_lines():
@@ -174,14 +208,17 @@ def ask_openai(system, content, *, effort="high", max_tokens=32000, searches=0, 
                 break
             openai_cache.record(model, "writer:" + what, status="stream_without_usage", billing_unconfirmed=True,
                                 attempt=attempt + 1, force=True)
-        except (httpx.TransportError, httpx.TimeoutException):
+            if not once_more_after_accept():
+                break
+        except (httpx.TransportError, httpx.TimeoutException) as e:
             if final is not None:  # terminal usage arrived before the connection closed
                 break
             openai_cache.record(model, "writer:" + what, status="transport_error", billing_unconfirmed=True,
                                 attempt=attempt + 1, force=True)
-            if attempt + 1 == attempts:
+            nothing_ran = isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))
+            if attempt + 1 == attempts or not (nothing_ran or once_more_after_accept()):
                 raise
-            time.sleep(10 * (attempt + 1))
+            wait(attempt)
     if final is None:
         raise RuntimeError("openai: the stream ended without a response")
     usage = final.get("usage") or {}
