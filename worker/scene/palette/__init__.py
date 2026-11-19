@@ -202,6 +202,51 @@ def merge(l1, patch):
     return out
 
 
+SEATS = {"center": (0.5, 0.45), "centre": (0.5, 0.45), "middle": (0.5, 0.45), "top": (0.5, 0.28), "upper": (0.5, 0.3),
+         "bottom": (0.5, 0.66), "lower": (0.5, 0.64), "left": (0.32, 0.45), "right": (0.68, 0.45)}
+NAMED = {"room": {"dark": 0.3, "dim": 0.35, "low": 0.35, "warm": 0.55, "bright": 0.7, "lit": 0.65}}
+NUMBERS = ("width", "lift", "dim", "room", "r", "grow", "bars", "develop", "amount", "th", "y", "h", "stakes", "angle")
+INTS = ("n", "run", "flips", "count", "times")
+
+
+def clean(ask):
+    """An ask's fields in the shapes the devices read (a model writes "center" for a seat, "warm" for a room, true for a
+    size): a seat named becomes its place, a number written as a word its number, and a field that cannot be read is left
+    to the device's own default. The ask's meaning is the caller's; this only reads its format. Returns (ask, notes)."""
+    out, notes = dict(ask), []
+    seat = out.get("seat")
+    if seat is not None:
+        if isinstance(seat, str) and seat.strip().lower() in SEATS:
+            out["seat"] = list(SEATS[seat.strip().lower()])
+        elif not (isinstance(seat, (list, tuple)) and len(seat) == 2 and all(isinstance(v, (int, float)) for v in seat)):
+            out.pop("seat")
+            notes.append(f"seat {seat!r} left to the device")
+    for k in NUMBERS:
+        v = out.get(k)
+        if v is None or (isinstance(v, (int, float)) and not isinstance(v, bool)):
+            continue
+        named = NAMED.get(k, {}).get(str(v).strip().lower()) if isinstance(v, str) else None
+        try:
+            out[k] = float(named if named is not None else v) if not isinstance(v, bool) else None
+        except (TypeError, ValueError):
+            out[k] = None
+        if out[k] is None:
+            out.pop(k)
+            notes.append(f"{k} {v!r} left to the device")
+    for k in INTS:
+        if k in out and not isinstance(out[k], int):
+            try:
+                out[k] = int(float(out[k]))
+            except (TypeError, ValueError):
+                out.pop(k)
+    if "ink" in out and not (isinstance(out["ink"], str) and out["ink"].startswith("#") and len(out["ink"]) == 7):
+        out.pop("ink")
+    for k in ("order", "pool"):
+        if k in out and not isinstance(out[k], list):
+            out.pop(k)
+    return out, notes
+
+
 def _try(cur, work, ask, sense):
     """(patch, why): a device's patch that stands on the scene, or why it could not."""
     try:
@@ -247,9 +292,12 @@ def apply(l1, work, asks=None, pool=None):
         ask = dict(ask, dev=name, id=str(ask.get("id") or f"d{n}"))
         if name != asked and asked:
             ask.setdefault("as", str(asked).strip().lower().replace("-", "_").replace(" ", "_"))     # "gate" asked: finish, surface gate
+        ask, cleaned = clean(ask)
         row = {"id": ask["id"], "dev": name, "asked": asked, "beat": ask.get("beat"), "f": list(_span(ask, cur))}
         if name != asked:
             row["mapped"] = f"{asked} -> {name}"
+        if cleaned:
+            row["cleaned"] = cleaned
         chain, tried, landed = [name], [], None
         seen = set()
         while chain:

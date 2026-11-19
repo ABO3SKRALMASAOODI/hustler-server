@@ -127,23 +127,36 @@ def neg_split(l1, work, ask, sense):
 
 
 def neg_world(l1, work, ask, sense):
-    """The world inverts round the speaker, who stays as he is: the take, negative, drawn behind him; he is drawn
-    again through his matte (the runtime's depth sandwich)."""
+    """The world inverts round the speaker, who stays as he is: over the take, the take negative is drawn behind him and
+    he is drawn again through his matte (the runtime's depth sandwich); over any other picture of the span the whole
+    picture is the inverted world."""
     a, b = span(ask, l1)
-    sh = sense.shot_at(a)
-    if not sh or not sense.is_take(sh) or not sh.get("src") or not (str(sh.get("pic")) == "main" or str(sh.get("pic")).startswith("own:cut")):
-        return {"skip": "the base picture here is not the take"}
+    b = max(b, a + 8)
+
+    def take(sh):
+        return sense.is_take(sh) and sh.get("src") and (str(sh.get("pic")) == "main" or str(sh.get("pic")).startswith("own:cut"))
+    shots = [sh for sh in sense.shots() if sh["f"][0] < b and sh["f"][1] > a]
+    if not any(take(sh) for sh in shots):
+        return {"skip": "the speaker is not on screen in this span"}
     got = sense.matte()
     if not got:
         return {"skip": "no matte of the take"}
-    b = min(max(b, a + 8), sh["f"][1])
-    piece = AS.slice_shot(sh, a, b)
-    card = {"id": f"{ask['id']}nw", "k": "card", "f": [a, b], "pic": sh["pic"], "src": piece["src"], "x": 0.5, "y": 0.5,
-            "w": 1.0, "h": 1.0, "s": 1, "rot": 0, "op": 1, "z": 1, "behind": True, "treat": {"mode": "neg"}}
-    if piece.get("crop") is not None:
-        card["crop"] = piece["crop"]
-    return {"items": [card], "assets": {} if "matte" in (l1.get("assets") or {}) else got,
-            "events": [{"f": a, "kind": "neg_world", "strength": 0.7}], "log": {"f": [a, b]}}
+    items = []
+    for k, sh in enumerate(shots):
+        lo, hi = max(a, sh["f"][0]), min(b, sh["f"][1])
+        if hi - lo < 1:
+            continue
+        if take(sh):
+            piece = AS.slice_shot(sh, lo, hi)
+            card = {"id": f"{ask['id']}nw{k}", "k": "card", "f": [lo, hi], "pic": sh["pic"], "src": piece["src"], "x": 0.5, "y": 0.5,
+                    "w": 1.0, "h": 1.0, "s": 1, "rot": 0, "op": 1, "z": 1, "behind": True, "treat": {"mode": "neg"}}
+            if piece.get("crop") is not None:
+                card["crop"] = piece["crop"]
+            items.append(card)
+        else:
+            items.append(flash(f"{ask['id']}nw{k}", lo, hi, "neg", 1.0))
+    return {"items": items, "assets": {} if "matte" in (l1.get("assets") or {}) else got, "lum": [a],
+            "events": [{"f": a, "kind": "neg_world", "strength": 0.7}], "log": {"f": [a, b], "pieces": len(items)}}
 
 
 # --------------------------------------------------------------------- light
