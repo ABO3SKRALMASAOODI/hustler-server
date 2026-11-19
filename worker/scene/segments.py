@@ -99,7 +99,7 @@ def stamp(d):
                 voices.add(it.get("v"))
             if it.get("mask"):
                 masks.add(it["mask"])
-            under = under or bool(it.get("behind"))
+            under = under or bool(it.get("behind")) or bool(it.get("keep"))
             its.append(o)
         if under:
             pics.add("matte")

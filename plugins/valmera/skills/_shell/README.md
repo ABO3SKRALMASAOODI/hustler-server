@@ -105,9 +105,12 @@ script whose style is one of them.
 
 ## The alien bank
 
-`chain.alien_bank(ctx, l1_path)`: a scene that carries asks under `alien` (rhyme, diecut, lamp, arc, answer; the
-engine's `worker/scene/alien`) is laid out before the engine draws it, through heavy.sh, and the scene to draw is
-written beside it as `*.alien.json` with `supply/alien_bank.json` saying what stood. Every render path calls it.
+`chain.alien_bank(ctx, l1_path)`: a scene that carries asks under `devices` (the shared palette,
+`worker/scene/palette`: `python -m scene.palette.run menu` lists every device with its fields and the moment it
+amplifies) or under `alien` (rhyme, diecut, lamp, arc, answer; the engine's `worker/scene/alien`) is laid out before
+the engine draws it, through heavy.sh, and the scene to draw is written beside it as `*.devices.json` (with
+`supply/devices.json` saying which device landed each ask, after any fallback, and the landings for the sound
+workflow) or `*.alien.json` (with `supply/alien_bank.json`). Every render path calls it.
 
 **Every film gets music** (owner, 13 Nov 2026; `chain.music_version`, after the render, on a copy of the
 engine's film). `worker/music_film.py` reads the story's turn and payoff from the film's own lines (a model;

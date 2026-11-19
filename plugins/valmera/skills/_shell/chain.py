@@ -423,22 +423,25 @@ def sound(ctx, l1_path):
 
 
 def alien_bank(ctx, l1_path):
-    """A scene that asks for devices of the engine's alien bank (worker/scene/alien: rhyme, diecut, lamp, arc,
-    answer) is laid out before the engine draws it. The asks ride the scene under ``alien``: a style or a
-    direction writes them, or the Director's ``alien`` gesture. Returns the path of the scene to draw (the same
-    path when it asks for nothing). A device that cannot stand on this film leaves it as it was and says why in
-    ``alien_bank.json``; it is never the reason a film does not render."""
+    """A scene that asks for devices is laid out before the engine draws it. The asks ride the scene under
+    ``devices`` (the shared palette, worker/scene/palette: glitch, light, colour, surfaces, matte graphics, depth
+    parallax, proof objects, and the alien bank) and under ``alien`` (worker/scene/alien: rhyme, diecut, lamp, arc,
+    answer). Returns the path of the scene to draw (the same path when it asks for nothing). A device that cannot
+    stand on this film lands its fallback, and the log (``devices.json``, or ``alien_bank.json`` for an alien-only
+    scene) says what landed where; it is never the reason a film does not render."""
     try:
-        asks = json.load(open(l1_path)).get("alien")
+        doc = json.load(open(l1_path))
     except (OSError, ValueError):
         return l1_path
-    if not asks or engine_kind() != "scene":
+    asks, devs = doc.get("alien"), doc.get("devices")
+    if not (asks or devs) or engine_kind() != "scene":
         return l1_path
-    out = os.path.splitext(l1_path)[0] + ".alien.json"
+    out = os.path.splitext(l1_path)[0] + (".devices.json" if devs else ".alien.json")
     if not os.path.exists(out):
         wk = brand.worker_dir()
-        sh(ctx, ["zsh", "-c", f"cd {wk} && PYTHONPATH=..:{SLICE}/pylib {PY} -m scene.alien.run apply --l1 {l1_path} --work {ctx.supply} "
-                              f"--out {out}.part --log {os.path.join(ctx.supply, 'alien_bank.json')}"],
+        tool, log = ("scene.palette.run", "devices.json") if devs else ("scene.alien.run", "alien_bank.json")
+        sh(ctx, ["zsh", "-c", f"cd {wk} && PYTHONPATH=..:{SLICE}/pylib {PY} -m {tool} apply --l1 {l1_path} --work {ctx.supply} "
+                              f"--out {out}.part --log {os.path.join(ctx.supply, log)}"],
            label=f"wf-alien-{ctx.run_id}", heavy=True, timeout=1800)
         os.replace(out + ".part", out)
     return out

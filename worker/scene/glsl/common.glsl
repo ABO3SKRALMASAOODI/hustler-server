@@ -106,6 +106,78 @@ float static_bit(vec2 px, float cell, float scroll, float seed) {
   return float(hash3(uvec3(uint(int(c.x) + 65536), uint(int(c.y) + 1048576), uint(int(seed)))) >> 31);
 }
 
+// ---- light, colour and glitch maths (opt-in modes 16..19 and 27..41; nothing above reads them)
+float hashf(uvec3 v) { return float(hash3(v) & 0xFFFFFFu) / 16777215.0; }
+// value noise and four octaves of it, on an integer hash: the same on every driver
+float vnoise(vec2 p, uint seed) {
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  uvec2 c = uvec2(ivec2(i) + 32768);
+  float a = hashf(uvec3(c, seed)), b = hashf(uvec3(c + uvec2(1u, 0u), seed));
+  float d = hashf(uvec3(c + uvec2(0u, 1u), seed)), e = hashf(uvec3(c + uvec2(1u, 1u), seed));
+  return mix(mix(a, b, u.x), mix(d, e, u.x), u.y);
+}
+float fbm(vec2 p, uint seed) {
+  float s = 0.0, a = 0.5;
+  for (int i = 0; i < 4; i++) { s += a * vnoise(p, seed + uint(i) * 7919u); p = p * 2.03 + 17.1; a *= 0.5; }
+  return s / 0.9375;
+}
+float hue_of(vec3 c) {
+  float mx = max(c.r, max(c.g, c.b)), mn = min(c.r, min(c.g, c.b)), d = mx - mn;
+  if (d < 1e-5) return 0.0;
+  float h = mx == c.r ? mod((c.g - c.b) / d, 6.0) : mx == c.g ? (c.b - c.r) / d + 2.0 : (c.r - c.g) / d + 4.0;
+  return h / 6.0;
+}
+// one band of hue kept, the rest of the world drained to its light
+vec3 keep_hue(vec3 c, vec3 key, float width) {
+  float d = abs(hue_of(c) - hue_of(key));
+  d = min(d, 1.0 - d);
+  float chroma = max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));
+  float keep = (1.0 - smoothstep(width * 0.6, width, d)) * smoothstep(0.05, 0.14, chroma);
+  return mix(vec3(luma(c)), c, keep);
+}
+// light that leaked in round the gate: two warm blooms sliding along the frame's edges. q is 0..1 of the frame,
+// t the leak's own clock, tint its hottest colour. Returns light to be screened on.
+vec3 light_leak(vec2 q, float aspect, float t, float seed, vec3 tint) {
+  vec3 acc = vec3(0.0);
+  for (int i = 0; i < 2; i++) {
+    float fi = float(i);
+    float side = mod(floor(seed * 3.7 + fi), 2.0);
+    vec2 c = vec2(side, 0.15 + 0.7 * fract(seed * 0.61 + fi * 0.43) + 0.28 * sin(t * (0.9 + 0.35 * fi) + seed * 5.0 + fi));
+    vec2 d = (q - c) * vec2(aspect, 1.0);
+    float r = 0.42 + 0.18 * sin(t * 0.7 + fi * 2.0 + seed);
+    float n = fbm(q * vec2(2.2, 1.4) + vec2(t * 0.15, fi * 3.1), uint(seed * 977.0) + uint(i));
+    float g = exp(-dot(d, d) / (r * r)) * (0.65 + 0.7 * n);
+    vec3 warm = mix(vec3(1.0, 0.18, 0.04), tint, smoothstep(0.25, 0.85, g));
+    acc += warm * g;
+  }
+  return clamp(acc, 0.0, 1.0);
+}
+// a frame burning through from a point: the front eats in with ragged edges, white-hot behind it, orange on it,
+// charred just ahead of it. p runs 0 (nothing) to 1 (the frame gone).
+vec3 film_burn(vec3 c, vec2 q, float aspect, vec2 origin, float p, float seed) {
+  float n = fbm(q * vec2(4.0 * aspect, 4.0), uint(seed * 613.0));
+  float d = length((q - origin) * vec2(aspect, 1.0));
+  float front = d + 0.42 * (n - 0.5) - p * 1.3 + 0.12;
+  float hot = 1.0 - smoothstep(-0.02, 0.10, front);
+  vec3 fire = mix(vec3(0.95, 0.30, 0.04), vec3(1.0, 0.97, 0.88), smoothstep(-0.03, -0.30, front));
+  float char_ = smoothstep(0.24, 0.08, front) * (1.0 - hot);
+  c *= 1.0 - 0.75 * char_;
+  c += vec3(0.6, 0.18, 0.02) * char_ * smoothstep(0.16, 0.10, front);
+  return mix(c, fire, hot);
+}
+// an anamorphic streak and its rainbow ghost, thrown by a light at s (0..1 of the frame)
+vec3 prism(vec2 q, float aspect, vec2 s, float amt) {
+  vec2 d = (q - s) * vec2(aspect, 1.0);
+  float streak = exp(-abs(d.y) * 160.0) * exp(-abs(d.x) * 1.6);
+  float core = exp(-dot(d, d) * 90.0);
+  vec2 g = (q - (1.0 - s)) * vec2(aspect, 1.0);
+  float r = length(g);
+  float ring = exp(-pow((r - 0.11) * 38.0, 2.0));
+  vec3 rainbow = 0.5 + 0.5 * cos(6.2831853 * (r * 7.0 + vec3(0.0, 0.33, 0.67)));
+  return amt * (vec3(0.55, 0.75, 1.0) * streak * 0.9 + vec3(1.0, 0.95, 0.85) * core + rainbow * ring * 0.35);
+}
+
 // Treatments shared by shot.treat and flash, the same maths in both.
 // 0 none, 1 neg, 2 threshold, 3 burn, 4 mono, 5 tint, 6 complement, 7 posterise, 8 halftone, 9 solarise,
 // 14 thermal, 15 night vision (its noise and vignette are added by the caller, which knows the frame)
@@ -136,6 +208,7 @@ vec3 treat(vec3 c, int mode, vec3 tc, bool has_c, float th, vec2 px) {
     c = clamp((sat(c, 1.35) - 0.5) * 1.08 + 0.5, 0.0, 1.0);
   }
   else if (mode == 14) { c = iron(pow(clamp((luma(c) - 0.04) / 0.92, 0.0, 1.0), 0.85)); }
+  else if (mode == 16) { c = keep_hue(c, has_c ? tc : vec3(0.88, 0.12, 0.12), th); }
   else if (mode == 15) {
     float y = min(1.0, 1.15 * pow(max(luma(c), 0.0), 0.62));
     c = ramp4(y, vec3(2.0, 10.0, 4.0) / 255.0, vec3(40.0, 170.0, 60.0) / 255.0, vec3(150.0, 250.0, 140.0) / 255.0,
@@ -143,3 +216,4 @@ vec3 treat(vec3 c, int mode, vec3 tc, bool has_c, float th, vec2 px) {
   }
   return c;
 }
+

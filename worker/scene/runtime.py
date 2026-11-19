@@ -19,7 +19,7 @@ import numpy as np
 
 from .faults import SceneFault
 from . import looks
-from .plan import A, AR, BLENDS, IDENTITY, JOINS, MODES, PLATES, TREATS, held, hex3
+from .plan import A, AR, BLENDS, IDENTITY, JOINS, KEEP_MODES, MODES, PLATES, TREATS, held, hex3
 
 GLSL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "glsl")
 HEADER = {"core": "#version 330 core\n",
@@ -27,14 +27,16 @@ HEADER = {"core": "#version 330 core\n",
 PROGRAMS = {"pic": ("common", "easu", "picture", "pic.frag"), "join": ("common", "easu", "picture", "join.frag"),
             "shadow": ("shadow.frag",), "flash": ("common", "flash.frag"), "film": ("common", "film.frag"),
             "word": ("common", "word.frag"), "out": ("out.frag",), "bright": ("bright.frag",), "hiblur": ("common", "hiblur.frag"),
-            "keep": ("keep.frag",), "wblur": ("common", "wblur.frag")}
+            "keep": ("common", "keep.frag"), "wblur": ("common", "wblur.frag")}
 # Uniforms that gate heavy branches. A software rasteriser runs both sides of every branch on a
 # uniform, so on llvmpipe they are folded to constants: one compiled variant per distinct set of
 # gates, cached (lane D measured the film pass at 75 ms a frame before and 9 ms after).
 #   int      always folded          float0  folded when 0.0
 #   vec2y0   folded when .y is 0    zero    folded when every component is 0
 FOLD = {"pic": {"uPlate": "int", "uEdge": "int", "uAlpha": "int", "uSamp": "int", "uTreat": "int", "uTreatHasC": "int",
-                "uBlur": "float0", "uSharp": "float0", "uBorder": "float0", "uPlateGrain": "float0", "uLook": "int", "uTaps": "int"},
+                "uBlur": "float0", "uSharp": "float0", "uBorder": "float0", "uPlateGrain": "float0", "uLook": "int", "uTaps": "int",
+                "uTilt": "int"},
+        "keep": {"uKMode": "int"},
         "join": {"uJoin": "int", "uEdge": "int", "uAlpha": "int", "uSamp": "int", "uTreat": "int", "uTreatHasC": "int", "uBlur": "float0",
                  "uSharp": "float0", "uLook": "int"},
         "hiblur": {"uStep": "int"}, "bright": {"uStep": "int"},
@@ -45,6 +47,37 @@ FOLD = {"pic": {"uPlate": "int", "uEdge": "int", "uAlpha": "int", "uSamp": "int"
                  "uGlow": "float0", "uFx": "zero"}}
 SOFTWARE = ("llvmpipe", "softpipe", "swiftshader", "swrast")
 STRETCH = {"left": 0, "right": 1, "up": 2, "down": 3}
+CARD_BLEND = {"add": ("ONE", "ONE"), "screen": ("ONE_MINUS_DST_COLOR", "ONE"), "multiply": ("DST_COLOR", "ONE_MINUS_SRC_ALPHA")}
+
+
+def item_seed(it):
+    """A small number of the item's own, the same on every run: where a glitch or a leak starts its pattern."""
+    return int(hashlib.md5(str(it.get("id")).encode()).hexdigest()[:5], 16) % 9973
+
+
+def plane_hom(cx, cy, s, rot, rx, ry, W, H, persp=1.2):
+    """A tilted plane seen through a lens: the 3x3 that takes a point of the plane (pixels about its centre,
+    before scale) to frame pixels, homogeneous. The plane stands at (cx, cy) on the screen, tilted ``rx`` degrees
+    about its horizontal axis (its top goes away for positive), ``ry`` about its vertical axis (its right side
+    goes away for positive), then turned ``rot`` in the frame as a flat card is. The eye looks from the frame's
+    centre at a distance of ``persp`` frame heights."""
+    f = float(persp) * H
+    a, b = math.radians(-float(rx)), math.radians(-float(ry))
+    Rx = np.array([[1, 0, 0], [0, math.cos(a), -math.sin(a)], [0, math.sin(a), math.cos(a)]])
+    Ry = np.array([[math.cos(b), 0, math.sin(b)], [0, 1, 0], [-math.sin(b), 0, math.cos(b)]])
+    c, sn = math.cos(rot), math.sin(rot)
+    Rz = np.array([[c, -sn, 0], [sn, c, 0], [0, 0, 1]])
+    R = Rz @ Ry @ Rx
+    ax, bx = R[:, 0] * s, R[:, 1] * s
+    ex, ey = W / 2.0, H / 2.0
+    return np.array([[f * ax[0] + ex * ax[2], f * bx[0] + ex * bx[2], f * cx],
+                     [f * ax[1] + ey * ax[2], f * bx[1] + ey * bx[2], f * cy],
+                     [ax[2], bx[2], f]], np.float64)
+
+
+def mat3_uniform(m):
+    """A 3x3 as GLSL takes it: column after column."""
+    return tuple(float(v) for v in np.asarray(m, np.float64).T.ravel())
 
 
 def make_context():
@@ -434,7 +467,7 @@ class Runtime:
         win = tuple(float(v) for v in win[:4]) if (isinstance(win, (list, tuple)) and len(win) >= 4) else (0.5, 0.5, 0.0, 0.0)
         self.U(p, uLook=1, uLk0=u["lk0"], uLk1=u["lk1"], uLkSh=u["sh"], uLkHi=u["hi"], uSk=u["sk"], uLkDrop=u["drop"], uLkWin=win)
 
-    def picture_uniforms(self, p, it, f, pic, crop, out_w, blur, geom=None, taps=0):
+    def picture_uniforms(self, p, it, f, pic, crop, out_w, blur, geom=None, taps=0, tilt=False):
         """Crop, sampling, treat and grade for one picture drawn ``out_w`` frame pixels wide."""
         self.look_uniforms(p, it, pic)
         treat = it.get("treat") or {}
@@ -443,9 +476,23 @@ class Runtime:
         tp = (float(treat.get("zoom", 1.0)), 0.0, 0.0, 0.0)
         if mode == 26:
             tp = (float(treat.get("origin", 0.5)), float(STRETCH.get(treat.get("direction", "left"), 0)), 0.0, 0.0)
+        th = float(treat.get("th", 0.07 if mode == 16 else 0.5))
+        if mode in (27, 28):
+            lo = it["f"][0]
+            amt = float(A(it.get("amount", 1.0), f, lo))
+            if mode == 27 and pic is not None and geom is not None:
+                # the offset is asked in frame pixels at 1080 wide; the shader reads it in the picture's 0..1
+                px_ = float(treat.get("px", 14.0)) * amt * self.W / 1080.0
+                ang = math.radians(float(treat.get("angle", 0.0)))
+                ow, oh = 2 * geom[2] * geom[4], 2 * geom[3] * geom[4]
+                tp = (px_ * math.cos(ang) * (crop[2] - crop[0]) / max(ow, 1e-6), px_ * math.sin(ang) * (crop[3] - crop[1]) / max(oh, 1e-6), 0.0, 0.0)
+            elif mode == 28:
+                rate = max(int(treat.get("rate", 2)), 1)
+                tp = (float(treat.get("shift", 0.08)) * amt, float(treat.get("bands", 24)), float((item_seed(it) + (f - lo) // rate) % 65521),
+                      float(treat.get("density", 0.35)))
         self.U(p, uG0=(grade["lift"], grade["gamma"], grade["gain"]), uG1=(grade["sat"], grade["contrast"], grade["temp"]),
                uTint=grade["tint"], uBlur=blur, uTreat=mode, uTreatC=hex3(treat.get("c")), uTreatHasC=1 if treat.get("c") else 0,
-               uTreatTh=float(treat.get("th", 0.5)), uTreatP=tp, uTex=0, uNoise=1)
+               uTreatTh=th, uTreatP=tp, uTex=0, uNoise=1)
         if pic is None:
             self.U(p, uTexSize=(1, 1), uCrop=(0, 0, 1, 1), uSharp=0.0, uAlpha=0, uEdge=0, uSamp=0)
             return
@@ -455,7 +502,7 @@ class Runtime:
         samp = 2 if (blur > 0.01 and not taps) else 1 if tpp > 1.05 else 0
         # Mips are built per decoded frame, so only as deep as this draw reads: a push-in that
         # minifies by a sixth needs one level, not eleven (a level is a pass of its own on llvmpipe).
-        deep = 1000 if (samp == 2 or mode >= 20) else max(int(math.ceil(math.log2(tpp))), 1) if samp == 1 else 0
+        deep = 1000 if (samp == 2 or (mode >= 20 and mode not in (27, 28)) or tilt) else max(int(math.ceil(math.log2(tpp))), 1) if samp == 1 else 0
         if deep > int(pic.get("mips") or 0):
             self.mark("py")
             pic["tex"].build_mipmaps(0, deep)
@@ -499,13 +546,18 @@ class Runtime:
         h = sh / 2
         return tuple(self._mid(n, b, h) for n, b in zip(now, before)), tuple(self._mid(n, a, h) for n, a in zip(now, after))
 
-    def draw_pic(self, it, f, geom, pose_b=None):
+    def draw_pic(self, it, f, geom, pose_b=None, tilt=None):
+        """``tilt``: (inverse homography, depth per plane unit, dof) of a card tilted in depth (``card_tilt``)."""
         p, vao = self.P["pic"]
         lo = it["f"][0]
         cx, cy, hw, hh, s, rot, op, radius = geom
         blur = float(A(it.get("blur", 0) or 0, f, lo)) * self.W / 1080.0
         self.U(p, uCentre=(cx, cy), uHalf=(hw, hh), uScale=s, uRot=(math.cos(rot), math.sin(rot)), uRadius=radius, uOp=op,
                uNoiseAt=self.plan.noise_at(f))
+        if tilt is not None:
+            self.U(p, uTilt=1, uHom=mat3_uniform(tilt[0]), uTiltZ=tilt[1], uDof=tilt[2])
+        else:
+            self.U(p, uTilt=0)
         b = it.get("border") or {}
         self.U(p, uBorder=float(b.get("w", 0)) * self.W, uBorderC=hex3(b.get("c")))
         if it.get("pic") == "plate" or self.plan.assets.get(it.get("pic")) is None:
@@ -517,11 +569,16 @@ class Runtime:
             self.plate_uniforms(p, it["id"], pl, f, lo)
             self.noise_tex.use(0)                  # a plate samples no picture, but unit 0 must hold a texture
             self.noise_tex.use(1)
+            if tilt is not None:
+                self.scissor_box("pic", tilt[3])
+                return
             self.quad_scissored("pic", cx, cy, hw, hh, s, rot)
             return
         pic = self.picture(it, f)
         crop = AR(it.get("crop"), f, lo) or self.cover(pic["w"], pic["h"], hw, hh)
         taps, grow = 0, 0.0
+        if pose_b is not None and TREATS.get((it.get("treat") or {}).get("mode")) in (27, 28):
+            pose_b = None                          # a torn or split frame is one exposure: the shutter path draws no warp
         if pose_b is not None:
             # the exposure runs from pose A to pose B (``shutter_poses``): how far the picture travels decides the samples
             (cxa, cya, sa, cropa), (cxb, cyb, sb, cropb) = pose_b
@@ -538,10 +595,13 @@ class Runtime:
                 self.U(p, uCentre=(cxa, cya), uScale=sa, uCentreB=(cxb, cyb), uScaleB=sb, uCropB=tuple(cb))
                 cx, cy = (cxa + cxb) / 2, (cya + cyb) / 2                 # the scissor's centre: between the two poses
                 self.n["shutter"] += 1
-        self.picture_uniforms(p, it, f, pic, crop, 2 * hw * s, blur, (cx, cy, hw, hh, s, rot), taps=taps)
+        self.picture_uniforms(p, it, f, pic, crop, 2 * hw * s, blur, (cx, cy, hw, hh, s, rot), taps=taps, tilt=tilt is not None)
         self.U(p, uPlate=0, uTaps=taps)
         pic["tex"].use(0)
         self.noise_tex.use(1)
+        if tilt is not None:
+            self.scissor_box("pic", tilt[3])
+            return
         self.quad_scissored("pic", cx, cy, hw, hh, max(s, pose_b[1][2]) if taps else s, rot, grow=grow)
 
     def plate_uniforms(self, p, item_id, pl, f, lo):
@@ -581,6 +641,46 @@ class Runtime:
         self.mark(name + ("_full" if (x1 - x0) * (y1 - y0) > 0.7 * self.W * self.H else "_part") + tag)
         self.ctx.scissor = None
 
+    def scissor_box(self, name, box):
+        """Full-frame quad, scissored to a box of frame pixels (x0, y0, x1, y1): a tilted card's projected corners."""
+        p, vao = self.P[name]
+        x0, y0 = max(int(math.floor(box[0])) - 2, 0), max(int(math.floor(box[1])) - 2, 0)
+        x1, y1 = min(int(math.ceil(box[2])) + 2, self.W), min(int(math.ceil(box[3])) + 2, self.H)
+        if x1 <= x0 or y1 <= y0:
+            return
+        self.rect_uniforms(p)
+        self.ctx.scissor = (x0, y0, x1 - x0, y1 - y0)
+        self.mark("py")
+        vao.render(self.mgl.TRIANGLE_STRIP)
+        self.mark(name + "_tilt")
+        self.ctx.scissor = None
+
+    def card_tilt(self, it, f, cx, cy, hw, hh, s, rot, grow=0.0):
+        """None for a flat card. For a card tilted in depth (rx, ry, in degrees): the inverse homography (frame
+        pixel to the plane), the plane's depth per unit of its x and y, the depth of field (sigma in frame px for
+        100 px of depth at 1080 wide, the depth in focus), and the box of frame pixels it can cover."""
+        lo = it["f"][0]
+        rx, ry = float(A(it.get("rx", 0) or 0, f, lo)), float(A(it.get("ry", 0) or 0, f, lo))
+        if rx == 0.0 and ry == 0.0:
+            return None
+        M = plane_hom(cx, cy, s, rot, rx, ry, self.W, self.H, float(it.get("persp", 1.2)))
+        try:
+            Mi = np.linalg.inv(M)
+        except np.linalg.LinAlgError:
+            return None
+        e = grow / max(s, 1e-6)
+        pts = np.array([[-hw - e, -hh - e, 1], [hw + e, -hh - e, 1], [hw + e, hh + e, 1], [-hw - e, hh + e, 1]], np.float64) @ M.T
+        if (pts[:, 2] <= 1e-6).any():
+            box = (0, 0, self.W, self.H)
+        else:
+            xy = pts[:, :2] / pts[:, 2:3]
+            box = (xy[:, 0].min(), xy[:, 1].min(), xy[:, 0].max(), xy[:, 1].max())
+        dz = (M[2, 0], M[2, 1])
+        dof = it.get("dof") or {}
+        fu, fv = (dof.get("focus") or [0.5, 0.5])[:2]
+        zf = dz[0] * (float(fu) - 0.5) * 2 * hw + dz[1] * (float(fv) - 0.5) * 2 * hh
+        return Mi, (float(dz[0]), float(dz[1])), (float(dof.get("blur", 0.0)) * self.W / 1080.0, float(zf)), box, M
+
     def draw_shot(self, it, f):
         pose_b = None
         sh = self.shutter_of(it)
@@ -599,15 +699,23 @@ class Runtime:
         self.ctx.copy_framebuffer(self.base_fb, self.comp_fb)
         self.mark("keep_base")
 
-    def draw_kept(self, it, f, matte):
+    def draw_kept(self, it, f, matte, kp=None):
         """The person again, through his matte, over what was drawn behind him. The base picture is
-        read back as it was drawn (``keep_base``), not sampled, treated and graded a second time."""
+        read back as it was drawn (``keep_base``), not sampled, treated and graded a second time.
+        ``kp``: one pass of the shot's ``keep`` list (himself offset as a clone, a fill, a glow, an outline,
+        a two-colour poster); None is himself, where he stands."""
         p, vao = self.P["keep"]
         pic = self.picture(it, f)
         crop = AR(it.get("crop"), f, it["f"][0]) or self.cover(pic["w"], pic["h"], self.W / 2, self.H / 2)
+        kp = kp or {}
+        lo = it["f"][0]
+        k = self.W / 1080.0
+        off = (float(round(float(A(kp.get("dx", 0) or 0, f, lo)) * self.W)), float(round(float(A(kp.get("dy", 0) or 0, f, lo)) * self.H)))
         self.base.use(0)
         matte.use(1)
-        self.U(p, uBase=0, uMatte=1, uCrop=tuple(crop))
+        self.U(p, uBase=0, uMatte=1, uCrop=tuple(crop), uKMode=KEEP_MODES.get(kp.get("mode", "person"), 0), uKOff=off,
+               uKA=float(A(kp.get("a", 1.0), f, lo)), uKC=hex3(kp.get("c"), (1.0, 1.0, 1.0)), uKC2=hex3(kp.get("c2"), (1.0, 1.0, 1.0)),
+               uKW=max(float(kp.get("w", 18.0)) * k, 1.0))
         self.rect_uniforms(p)
         vao.render(self.mgl.TRIANGLE_STRIP)
         self.mark("keep")
@@ -623,16 +731,27 @@ class Runtime:
         radius = min(float(it.get("radius", 0) or 0) * W, min(hw, hh))
         if op <= 0 or s <= 0:
             return
+        tilt = self.card_tilt(it, f, cx, cy, hw, hh, s, rot)
         sh = it.get("shadow")
-        if sh and float(sh.get("a", 0)) > 0:
+        if sh and float(sh.get("a", 0)) > 0 and it.get("blend", "normal") == "normal":
             p, vao = self.P["shadow"]
             sigma = max(float(sh.get("blur", 0.01)) * W, 0.5)
             sx, sy = cx + float(sh.get("dx", 0)) * W, cy + float(sh.get("dy", 0)) * W
             self.U(p, uCentre=(sx, sy), uHalf=(hw * s, hh * s), uRadius=max(radius * s, 0.01), uSigma=sigma,
                    uA=float(sh["a"]) * op, uRot=(math.cos(rot), math.sin(rot)))
-            self.quad_scissored("shadow", sx, sy, hw, hh, s, rot, grow=sigma * 3.2)
+            st = self.card_tilt(it, f, sx, sy, hw, hh, s, rot, grow=sigma * 3.2) if tilt is not None else None
+            if st is not None:
+                # the shadow of a tilted card is the tilted plane's: frame pixel to its plane, in frame pixels
+                self.U(p, uTilt=1, uHom=mat3_uniform(np.diag([s, s, 1.0]) @ st[0]))
+                self.scissor_box("shadow", st[3])
+            else:
+                self.U(p, uTilt=0)
+                self.quad_scissored("shadow", sx, sy, hw, hh, s, rot, grow=sigma * 3.2)
         pose_b = None
         shut = self.shutter_of(it)
+        if tilt is not None:
+            self.draw_pic(it, f, (cx, cy, hw, hh, s, rot, op, radius), None, tilt)
+            return
         if shut > 0 and any(isinstance(it.get(k), list) for k in ("x", "y", "s", "crop")):
             def pose(g):
                 c = AR(it.get("crop"), g, lo)
@@ -640,6 +759,17 @@ class Runtime:
                         list(c) if c is not None else None)
             pose_b = self.shutter_poses(it, f, shut, pose)
         self.draw_pic(it, f, (cx, cy, hw, hh, s, rot, op, radius), pose_b)
+
+    def blended_card(self, it, f):
+        """A card laid with its own blend (plan.CARD_BLENDS): added, screened or multiplied onto what is under
+        it, its light only. Normal is over, as every card always was."""
+        bl = CARD_BLEND.get(it.get("blend"))
+        if bl is None:
+            self.draw_card(it, f)
+            return
+        self.ctx.blend_func = getattr(self.mgl, bl[0]), getattr(self.mgl, bl[1])
+        self.draw_card(it, f)
+        self.ctx.blend_func = self.mgl.ONE, self.mgl.ONE_MINUS_SRC_ALPHA
 
     # flash and join: they read the frame ---------------------------
 
@@ -670,15 +800,59 @@ class Runtime:
         self.snapshot(mips=mode in (20, 22))
         self.bg.use(0)
         self.noise_tex.use(1)
+        th = float(A(it.get("th", 0.07 if mode == 16 else 0.5), f, lo))
         self.U(p, uBg=0, uNoise=1, uMode=mode, uC=hex3(it.get("c"), (0.0, 0.0, 0.0) if mode == 11 else (1.0, 1.0, 1.0)),
-               uHasC=1 if it.get("c") else 0, uA=a, uTh=float(A(it.get("th", 0.5), f, lo)),
+               uHasC=1 if it.get("c") else 0, uA=a, uTh=th,
                uCell=max(float(it.get("cell", 16)) * W / 1080.0, 1.0), uBox=(x0, y0, x1, y1), uKey=hex3(it.get("key")),
-               uNoiseAt=self.plan.noise_at(f))
+               uNoiseAt=self.plan.noise_at(f), uP=self.flash_numbers(it, f, mode))
         self.rect_uniforms(p)
         self.ctx.scissor = (x0, y0, x1 - x0, y1 - y0)
         vao.render(self.mgl.TRIANGLE_STRIP)
         self.mark("flash")
         self.ctx.scissor = None
+
+    def flash_numbers(self, it, f, mode):
+        """uP of the light, glitch and surface modes (plan.SURFACES, rgb_split, slice), read off the item: frame
+        lengths are asked at 1080 wide, ``amount`` (one number or a curve) scales each mode's strength, and a
+        pattern that changes (a glitch, a tape's line jitter, dust) changes every ``rate`` frames from the item's
+        own seed, so the same plan always draws the same frames."""
+        lo = it["f"][0]
+        k = self.W / 1080.0
+        amt = float(A(it.get("amount", 1.0), f, lo))
+        sd = item_seed(it)
+        step = (f - lo) // max(int(it.get("rate", 2)), 1)
+        t = (f - lo) / self.plan.fps
+        if mode == 17:
+            return (t * float(it.get("speed", 1.0)) + sd % 97 * 0.37, float(sd % 31) / 7.0, amt, 0.0)
+        if mode == 18:
+            o = it.get("origin") or [0.0, 1.0]
+            return (amt, float(sd % 31) / 7.0, float(o[0]), float(o[1]))
+        if mode == 19:
+            o = it.get("at") or [0.72, 0.3]
+            return (float(o[0]), float(o[1]), amt, 0.0)
+        if mode == 27:
+            ang = math.radians(float(it.get("angle", 0.0)))
+            px_ = float(it.get("px", 14.0)) * amt * k
+            return (px_ * math.cos(ang), px_ * math.sin(ang), 0.0, 0.0)
+        if mode == 28:
+            return (float(it.get("shift", 90.0)) * amt * k, max(float(it.get("band", 64.0)) * k, 1.0), float((sd + step) % 65521),
+                    float(it.get("density", 0.35)))
+        if mode == 36:
+            roll = float(it.get("roll", 0.35))            # how fast the tracking band runs down the frame, frames a second
+            return ((float(it.get("track", 0.8)) + t * roll) % 1.15 - 0.05, float((sd + step) % 65521), amt, k)
+        if mode == 37:
+            return (float(it.get("gap", 0.18)), float(it.get("levels", 7)), 0.0, 0.0)
+        if mode == 38:
+            return (float((sd + step) % 65521), float(it.get("toner", 1.0)) * amt, 0.0, 0.0)
+        if mode == 39:
+            # the lamp breathes a few percent; the gate weaves under two pixels: a projector, never a strobe
+            r = np.random.RandomState((sd * 7919 + step) % (2 ** 31))
+            fl = 1.0 - float(it.get("flicker", 0.05)) * amt * float(r.rand())
+            wv = float(it.get("weave", 1.6)) * amt * k
+            return (fl, float(r.uniform(-wv, wv)), float(r.uniform(-wv, wv) * 0.6), float((sd + step) % 65521))
+        if mode == 40:
+            return (float(it.get("ink", 0.9)) * amt, 0.0, 0.0, 0.0)
+        return (0.0, 0.0, 0.0, 0.0)
 
     def draw_join(self, it, f):
         """Two pictures into one: this item's picture over the frame as drawn, through a mask."""
@@ -848,9 +1022,17 @@ class Runtime:
                uStrokeC=hex3(stroke.get("c"), (0.0, 0.0, 0.0)))
         self.rect_uniforms(p, rx, ry, rw, rh)
         self.U(p, uFade=0, uPre=0, uPreTex=3)
+        tx, ty = float(A(it.get("rx", 0) or 0, f, lo)), float(A(it.get("ry", 0) or 0, f, lo))
+        if tx or ty:
+            # a word in the world: its quad is a plane tilted about the word's own centre, seen through the lens
+            cx, cy = X + spr["cx"], Y + spr["cy"]
+            M = plane_hom(cx, cy, 1.0, 0.0, tx, ty, W, H, float(it.get("persp", 1.2))) @ np.array([[rw, 0, rx - cx], [0, rh, ry - cy], [0, 0, 1.0]])
+            self.U(p, uHomOn=1, uHomV=mat3_uniform(M))
+        else:
+            self.U(p, uHomOn=0)
         self.word_quad(p, vao, spr, bsig, f, blend)
         rf = float(it.get("reflect", 0) or 0)
-        if rf > 0 and not blend:         # the word stands on a wet floor: mirrored below its own baseline, softer and fading away
+        if rf > 0 and not blend and not (tx or ty):         # the word stands on a wet floor: mirrored below its own baseline, softer and fading away
             floor = Y + 0.05 * float(v.get("px", 58))
             self.U(p, uOp=op * rf, uFade=1, uBlur=max(bsig, 2.2 * ss), uShadow=0.0, uGlow=0.0)
             self.rect_uniforms(p, rx, 2 * floor - ry, rw, -rh)
@@ -947,12 +1129,14 @@ class Runtime:
         zid = lambda i: (i.get("z", 0), str(i["id"]))      # noqa: E731
         shots = by["shot"]
         back_c = back_w = ()
+        keep = None
         if shots and self.plan.take_shot(shots[-1]):
             back_c = [i for i in by["card"] if i.get("behind")]
             back_w = [i for i in by["word"] if i.get("behind")]
+            keep = shots[-1].get("keep") or None            # the person drawn again by passes of his own (plan.KEEP_MODES)
         if shots:                                           # stage 0: base
             self.draw_shot(shots[-1], f)
-            if back_c or back_w:
+            if back_c or back_w or keep:
                 self.keep_base()
         t = self.tick("base", t)
         top = [i for i in by["join"] if i.get("stage") == "top"]
@@ -961,15 +1145,19 @@ class Runtime:
                 self.draw_join(it, f)
             self.comp_fb.use()
             t = self.tick("join", t)
-        if back_c or back_w:
+        if back_c or back_w or keep:
             # Stages 4 and 5, the depth sandwich: what stands behind him is drawn, then he is drawn again through his matte.
             ctx.enable(mgl.BLEND)
             ctx.blend_func = mgl.ONE, mgl.ONE_MINUS_SRC_ALPHA
             for it in sorted(back_c, key=zid):
-                self.draw_card(it, f)
+                self.blended_card(it, f)
             for it in sorted(back_w, key=zid):
                 self.draw_word(it, f)
-            self.draw_kept(shots[-1], f, self.matte_tex(shots[-1], f))
+            m = self.matte_tex(shots[-1], f)
+            # the passes whose window holds this frame; where none does, he is drawn as himself
+            on = [kp for kp in (keep or []) if not kp.get("f") or int(kp["f"][0]) <= f < int(kp["f"][1])]
+            for kp in (on or [None]):
+                self.draw_kept(shots[-1], f, m, kp)
             ctx.disable(mgl.BLEND)
             by["card"] = [i for i in by["card"] if not i.get("behind")]
             by["word"] = [i for i in by["word"] if not i.get("behind")]
@@ -978,7 +1166,7 @@ class Runtime:
             ctx.enable(mgl.BLEND)
             ctx.blend_func = mgl.ONE, mgl.ONE_MINUS_SRC_ALPHA
             for it in sorted(by["card"], key=zid):
-                self.draw_card(it, f)
+                self.blended_card(it, f)
             ctx.disable(mgl.BLEND)
             t = self.tick("card", t)
         fl = self.plan.film

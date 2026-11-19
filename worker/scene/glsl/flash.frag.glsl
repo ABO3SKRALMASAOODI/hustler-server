@@ -14,6 +14,7 @@ uniform float uCell;
 uniform vec4 uBox;   // x0,y0,x1,y1 pixels
 uniform vec3 uKey;   // recolour: the colour that moves
 uniform ivec2 uNoiseAt;
+uniform vec4 uP;     // the numbers of the light, glitch and surface modes (runtime.draw_flash names them per mode)
 
 vec3 hsv(vec3 c) {
   vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
@@ -53,6 +54,87 @@ void main() {
   else if (uMode == 12) {                                    // mosaic
     vec2 cc = (floor(px / uCell) + 0.5) * uCell;
     c = texture(uBg, cc / uFrame).rgb;
+  }
+  else if (uMode >= 17 && uMode <= 19) {                    // light on the frame
+    vec2 q = px / uFrame;
+    float aspect = uFrame.x / uFrame.y;
+    if (uMode == 17) c = 1.0 - (1.0 - bg) * (1.0 - light_leak(q, aspect, uP.x, uP.y, uHasC == 1 ? uC : vec3(1.0, 0.78, 0.42)) * uP.z);
+    else if (uMode == 18) c = film_burn(bg, q, aspect, uP.zw, uP.x, uP.y);
+    else c = 1.0 - (1.0 - bg) * (1.0 - clamp(prism(q, aspect, uP.xy, uP.z), 0.0, 1.0));
+  }
+  else if (uMode == 27) {                                    // rgb split: the channels pulled apart along a line
+    c = vec3(texture(uBg, (px + uP.xy) / uFrame).r, bg.g, texture(uBg, (px - uP.xy) / uFrame).b);
+  }
+  else if (uMode == 28) {                                    // slice: bands torn sideways, their channels a little apart
+    float b = floor(px.y / max(uP.y, 1.0));
+    uint h = hash3(uvec3(uint(int(b) + 4096), uint(int(uP.z)), 77u));
+    if (float(h & 0xFFFFu) / 65535.0 < uP.w) {
+      float sh = (float(h >> 16) / 65535.0 - 0.5) * 2.0 * uP.x;
+      float ch = 0.18 * sh;
+      c = vec3(texture(uBg, (px - vec2(sh + ch, 0.0)) / uFrame).r, texture(uBg, (px - vec2(sh, 0.0)) / uFrame).g,
+               texture(uBg, (px - vec2(sh - ch, 0.0)) / uFrame).b);
+    }
+  }
+  else if (uMode == 36) {                                    // vhs: a tape played back. Line jitter, a tracking band, chroma that bleeds
+    float k = uP.w;
+    float line = floor(px.y / (2.0 * k));
+    float band = exp(-pow((px.y / uFrame.y - uP.x) / 0.03, 2.0));
+    float jit = (hashf(uvec3(uint(line) + 7u, uint(uP.y), 3u)) - 0.5) * (1.2 + 26.0 * band) * k;
+    vec2 p2 = px + vec2(jit, 0.0);
+    vec3 y0 = texture(uBg, p2 / uFrame).rgb;
+    vec3 ch = vec3(0.0);
+    for (int i = -3; i <= 3; i++) ch += texture(uBg, (p2 + vec2(float(i) * 3.0 * k + 5.0 * k, 0.0)) / uFrame).rgb;
+    ch /= 7.0;
+    c = vec3(luma(y0)) + (ch - vec3(luma(ch))) * 0.9;
+    c = mix(vec3(luma(c)), c, 0.82) * vec3(1.03, 1.0, 0.94) + 0.035;
+    float snow = hashf(uvec3(uvec2(ivec2(px / (2.0 * k)) + 9999), uint(uP.y)));
+    c += band * (snow - 0.35) * 0.55;
+    c *= 0.93 + 0.07 * cos(px.y * 3.14159265 / k);
+    c = mix(bg, c, uP.z);
+  }
+  else if (uMode == 37) {                                    // led: the frame on a board of lamps
+    vec2 cc = (floor(px / uCell) + 0.5) * uCell;
+    vec3 m = vec3(0.0);
+    for (int i = 0; i < 4; i++) m += texture(uBg, (cc + (vec2(float(i & 1), float(i >> 1)) - 0.5) * 0.5 * uCell) / uFrame).rgb;
+    m /= 4.0;
+    float lv = max(uP.y, 2.0);
+    m = floor(m * lv + 0.5) / lv;
+    float r = 0.5 * uCell * (1.0 - uP.x);
+    float dot_ = 1.0 - smoothstep(r - 1.0, r + 0.5, length(px - cc));
+    m = pow(m, vec3(0.8)) * 1.45;                            // a lamp is brighter than a print of the same light
+    float glow = 1.0 - smoothstep(r, r + 0.35 * uCell, length(px - cc));
+    c = mix(vec3(0.012), m, dot_) + m * 0.22 * glow * (1.0 - dot_);
+  }
+  else if (uMode == 38) {                                    // xerox: a photocopy. Hard tone, toner noise, specks
+    float l = luma(bg);
+    float n = texelFetch(uNoise, (ivec2(px) + uNoiseAt) & ivec2(1023), 0).r;
+    float t = smoothstep(uTh - 0.07, uTh + 0.07, l + n * 0.05 * uP.y);
+    vec3 paper = uHasC == 1 ? uC : vec3(0.93, 0.92, 0.88);
+    c = mix(vec3(0.06, 0.06, 0.07), paper, t);
+    float sp = hashf(uvec3(uvec2(ivec2(px / 2.0)), uint(uP.x)));
+    if (sp > 0.9965) c = vec3(0.08);
+  }
+  else if (uMode == 39) {                                    // projector: the gate weaves, the lamp breathes, dust crosses
+    vec3 w = texture(uBg, (px + uP.yz) / uFrame).rgb;
+    vec2 q = px / uFrame - 0.5;
+    w *= uP.x * (1.0 - 0.55 * smoothstep(0.25, 0.75, length(q * vec2(uFrame.x / uFrame.y, 1.0))));
+    w = mix(vec3(luma(w)), w, 0.85) * vec3(1.05, 1.0, 0.9);
+    float dn = vnoise(px / (6.0 * uFrame.x / 1080.0), uint(uP.w));
+    if (dn > 0.985) w *= 0.25;
+    c = w;
+  }
+  else if (uMode == 40) {                                    // paper: printed on a page, the light becoming ink
+    vec3 paper = uHasC == 1 ? uC : vec3(0.94, 0.91, 0.84);
+    float ink = pow(1.0 - luma(bg), 1.15) * uP.x;
+    float fib = texelFetch(uNoise, (ivec2(px) + uNoiseAt) & ivec2(1023), 0).r;
+    c = paper * (1.0 - ink) * (1.0 + 0.035 * fib);
+    c = mix(c, c * mix(vec3(1.0), bg / max(luma(bg), 0.04), 0.25), 1.0 - ink);
+  }
+  else if (uMode == 41) {                                    // mark: a highlighter drawn across, the light under it multiplied
+    float rag = (vnoise(vec2(px.x / 22.0, 3.0), 11u) - 0.5) * 0.18 * (uBox.w - uBox.y);
+    float ey = min(px.y - uBox.y, uBox.w - px.y) + rag;
+    float m = smoothstep(0.0, 3.0, ey);
+    c = mix(bg, bg * (uHasC == 1 ? uC : vec3(1.0, 0.88, 0.25)), m);
   }
   else if (uMode >= 20) {                                    // a re-render of the frame itself
     vec2 e = 1.6 / uFrame;

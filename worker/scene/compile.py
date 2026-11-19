@@ -219,7 +219,7 @@ def program(plan):
                 c["flash"] += n
             elif k == "join":
                 c["join"] += n
-            if it.get("behind"):
+            if it.get("behind") or it.get("keep"):
                 c["under"] += n
         c["finish"] = (b - a) if (fl.get("grain") or fl.get("vignette") or lens or fl.get("mesh") or fl.get("raster")) else 0
         c["lens"] = (b - a) if lens else 0
@@ -263,6 +263,7 @@ def degrade(doc, step):
     elif step == "under":
         for it in doc["items"]:
             it.pop("behind", None)
+            it.pop("keep", None)
 
 
 # ------------------------------------------------------------------ compile

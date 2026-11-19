@@ -20,16 +20,25 @@ KINDS = ("shot", "card", "flash", "word", "join")
 TREATS = {"neg": 1, "threshold": 2, "burn": 3, "mono": 4, "tint": 5, "complement": 6, "posterise": 7, "halftone": 8,
           "solarise": 9, "thermal": 14, "night_vision": 15,
           # re-renders that read the picture's neighbourhood or move its pixels (ports of variants.py)
-          "line": 20, "blueprint": 21, "xray": 22, "kaleidoscope": 25, "pixel_stretch": 26}
-MODES = dict(TREATS, fill=10, pool=11, mosaic=12, recolour=13)
+          "line": 20, "blueprint": 21, "xray": 22, "kaleidoscope": 25, "pixel_stretch": 26,
+          # one hue kept in a grey world; the channels pulled apart; bands of the picture torn sideways
+          "keep_hue": 16, "rgb_split": 27, "slice": 28}
+# what acts on the frame alone: light thrown on it, and surfaces the whole frame is re-printed as
+SURFACES = {"leak": 17, "filmburn": 18, "prism": 19, "vhs": 36, "led": 37, "xerox": 38, "projector": 39, "paper": 40, "mark": 41}
+MODES = dict(TREATS, fill=10, pool=11, mosaic=12, recolour=13, **SURFACES)
 PICTURE_ONLY = ("kaleidoscope", "pixel_stretch")       # they move pixels, so they need a picture, not a frame
 BLENDS = {"normal": 0, "difference": 1, "multiply": 2}
+# how a card lays its light on what is under it: over (the default), added, screened, multiplied
+CARD_BLENDS = ("normal", "add", "screen", "multiply")
+# how the person is drawn again through his matte, pass by pass (shot.keep): himself (also as an offset clone),
+# a flat silhouette, a halo, an outline sticker, a two-colour poster
+KEEP_MODES = {"person": 0, "fill": 1, "glow": 2, "outline": 3, "duo": 4}
 JOINS = {"seam": 1, "weave": 2, "glyph": 3}
 PLATES = {"paper": 1, "static": 2}
 IDENTITY = {"lift": 0.0, "gamma": 1.0, "gain": 1.0, "sat": 1.0, "contrast": 1.0, "temp": 0.0, "tint": 0.0}
 # per-frame fields by kind: numbers, and rects
-ANIM = {"shot": ("blur",), "card": ("x", "y", "s", "rot", "op", "blur"), "flash": ("a", "th"),
-        "word": ("x", "y", "op", "s", "blur", "grow"), "join": ("t", "x", "s", "a", "dim")}
+ANIM = {"shot": ("blur", "amount"), "card": ("x", "y", "s", "rot", "op", "blur", "rx", "ry", "amount"), "flash": ("a", "th", "amount"),
+        "word": ("x", "y", "op", "s", "blur", "grow", "rx", "ry"), "join": ("t", "x", "s", "a", "dim")}
 ANIM_RECT = {"shot": ("crop",), "card": ("crop",), "flash": ("rect",), "word": (), "join": ("crop",)}
 
 
@@ -140,6 +149,12 @@ def eligible(doc):
             why.append(f"{i}: unknown treat {it['treat'].get('mode')!r}")
         if k in ("shot", "card") and it.get("pic") == "plate" and (it.get("plate") or {}).get("kind", "paper") not in PLATES:
             why.append(f"{i}: unknown plate {(it.get('plate') or {}).get('kind')!r}")
+        if k == "card" and it.get("blend") not in (None, *CARD_BLENDS):
+            why.append(f"{i}: unknown card blend {it.get('blend')!r}")
+        if k == "shot" and it.get("keep") is not None:
+            kp = it["keep"]
+            if not isinstance(kp, list) or any(not isinstance(x, dict) or x.get("mode", "person") not in KEEP_MODES for x in kp):
+                why.append(f"{i}: keep is a list of passes, each one of {sorted(KEEP_MODES)}")
         if k == "word" and it.get("blend") not in (None, *BLENDS):
             why.append(f"{i}: unknown blend {it.get('blend')!r}")
         if k == "word" and (not isinstance(it.get("t"), str) or it.get("v") not in (l1.get("voices") or {})):
@@ -250,6 +265,7 @@ class Plan:
         need = self.pictured()
         behind = [it for it in self.items if it.get("behind")]
         shots = sorted((it for it in self.items if it["k"] == "shot"), key=lambda i: i["f"][0])
+        keepers = [it for it in shots if it.get("keep")]           # a shot that draws its person again by itself
         for f in sorted(frames):
             ks = []
             for it in need:
@@ -259,7 +275,7 @@ class Plan:
                     k = (it["pic"], self.src_frame(it, f))
                     if k not in ks:
                         ks.append(k)
-            if behind and any(b["f"][0] <= f < b["f"][1] for b in behind):
+            if (behind and any(b["f"][0] <= f < b["f"][1] for b in behind)) or (keepers and any(k["f"][0] <= f < k["f"][1] for k in keepers)):
                 sh = next((q for q in shots if q["f"][0] <= f < q["f"][1]), None)
                 if self.take_shot(sh):
                     ks.append(("matte", self.matte_frame(sh, f)))
