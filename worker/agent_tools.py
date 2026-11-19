@@ -21608,20 +21608,22 @@ def remove_custom_filter(ctx, id):
 _GRADE_AXES = {"exposure": (-1.0, 1.0, 0.0), "contrast": (0.5, 1.6, 1.0),
                "shadows": (-1.0, 1.0, 0.0), "highlights": (-1.0, 1.0, 0.0),
                "saturation": (0.0, 2.0, 1.0), "temperature": (-1.0, 1.0, 0.0),
-               "tint": (-1.0, 1.0, 0.0), "warmth": (-1.0, 1.0, 0.0)}
+               "tint": (-1.0, 1.0, 0.0), "warmth": (-1.0, 1.0, 0.0),
+               "gain": (-1.0, 1.0, 0.0)}
 
 
 def set_grade_custom(ctx, exposure=None, contrast=None, saturation=None,
                      temperature=None, tint=None, shadows=None,
-                     highlights=None, warmth=None):
+                     highlights=None, warmth=None, gain=None):
     """Continuous color controls, merged axis-by-axis into
     effects.grade_custom — None leaves an axis alone, its neutral clears it.
     warmth is the whole picture's white balance (-1 cool .. 1 warm);
-    temperature and tint lean the shadows."""
+    temperature and tint lean the shadows. gain is exposure as light (-1 ..
+    1 stops, black kept black); exposure is an offset that lifts black."""
     vals = {"exposure": exposure, "contrast": contrast,
             "saturation": saturation, "temperature": temperature,
             "tint": tint, "shadows": shadows, "highlights": highlights,
-            "warmth": warmth}
+            "warmth": warmth, "gain": gain}
     if all(v is None for v in vals.values()):
         return ("REJECTED: pass at least one axis — exposure -1..1, "
                 "contrast/saturation as a small signed delta (0 clears) "
@@ -28205,7 +28207,7 @@ def _normalize_tool_call(name, args, dialect=True):
         # effects compose and should remain two explicit operations.
         preset = str(args.get("preset") or "").strip().lower()
         axes = {"exposure", "contrast", "saturation", "temperature", "tint",
-                "shadows", "highlights", "warmth"}
+                "shadows", "highlights", "warmth", "gain"}
         if "brightness" in args and "exposure" not in args:
             args["exposure"] = args.pop("brightness")
             notes.append("brightness -> exposure")

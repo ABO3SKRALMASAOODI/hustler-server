@@ -1553,6 +1553,10 @@ class GradeCustom(BaseModel):
     # The whole picture's white balance (renderer.warmth_curves): -1 cool ..
     # 1 warm, blacks kept black. temperature/tint lean the shadows only.
     warmth: Optional[float] = None
+    # Exposure as light (renderer.gain_curves): -1 .. 1 stops, multiplied in
+    # linear light, black kept black, highlights rolled off. exposure above
+    # is an eq brightness offset that lifts black.
+    gain: Optional[float] = None
     # Round 82: "more light and remove shadows" is how a real user asked for
     # a lift — the agent translated it to shadows=0.35 and the tool rejected
     # the axis, so half their request was silently dropped. These are the
@@ -4191,10 +4195,12 @@ def validate_edl(data, duration=None, *, render_fragment=False):
             _GC_BOUNDS = {"exposure": (-1.0, 1.0), "contrast": (0.5, 1.6),
                           "saturation": (0.0, 2.0), "temperature": (-1.0, 1.0),
                           "tint": (-1.0, 1.0), "shadows": (-1.0, 1.0),
-                          "highlights": (-1.0, 1.0), "warmth": (-1.0, 1.0)}
+                          "highlights": (-1.0, 1.0), "warmth": (-1.0, 1.0),
+                          "gain": (-1.0, 1.0)}
             _GC_NEUTRAL = {"exposure": 0.0, "contrast": 1.0,
                            "saturation": 1.0, "temperature": 0.0, "tint": 0.0,
-                           "shadows": 0.0, "highlights": 0.0, "warmth": 0.0}
+                           "shadows": 0.0, "highlights": 0.0, "warmth": 0.0,
+                           "gain": 0.0}
             for fname, (lo, hi) in _GC_BOUNDS.items():
                 fv = getattr(gc, fname)
                 if fv is not None:
@@ -4641,7 +4647,7 @@ def describe_edl(edl_dict, duration=None, src_shape=None):
             gc = fx.grade_custom
             axes = [f"{n[:4]} {getattr(gc, n):+g}" for n in
                     ("exposure", "contrast", "saturation", "temperature",
-                     "tint", "shadows", "highlights", "warmth")
+                     "tint", "shadows", "highlights", "warmth", "gain")
                     if getattr(gc, n) is not None]
             bits.append("custom grade (" + ", ".join(axes) + ")")
         if fx.zooms:

@@ -334,7 +334,42 @@ GRADE_FILTERS = {
 CUTAWAY_TEXTURES = ("grain", "vignette")
 
 
-def cutaway_look_chain(edl, o_start, o_dur):
+def _frame_aspect(edl):
+    """Width / height of the film's frame from its ratio ("9:16" -> 0.5625),
+    or None when the film keeps the source's frame."""
+    ratio = str(((edl or {}).get("frame") or {}).get("ratio") or "")
+    try:
+        w, h = ratio.split(":")
+        return float(w) / float(h)
+    except (TypeError, ValueError):
+        return None
+
+
+def vignette_filter(intensity, aspect=None, en=""):
+    """The vignette at ``intensity`` (0..1): an edge falloff that follows the
+    frame (aspect = width / height) and never darkens the picture's middle.
+
+    It was ``vignette=a=PI/(4.8 - 2.2 i)``, a circle on any frame: at 0.25 a
+    9:16 picture lost 32% of its mean light and the top and bottom thirds
+    went to a third (measured on flat grey: mean 0.68, top edge 0.35); p5744
+    v2c's "softer, lighter" lofi grade came out L 50 -> 31 and p5873 v2b's
+    warm grade 31% darker, from the vignette alone. Now, on 9:16: 0.15 keeps
+    mean 0.96 with corners 0.86, 0.25 mean 0.94 / corners 0.82, 0.5 mean
+    0.89 / corners 0.70, 1.0 mean about 0.80 / corners 0.45."""
+    try:
+        i_ = max(0.0, min(1.0, float(intensity)))
+    except (TypeError, ValueError):
+        i_ = 0.5
+    asp = ""
+    if aspect:
+        try:
+            asp = f":aspect={max(0.2, min(5.0, float(aspect))):.4f}"
+        except (TypeError, ValueError):
+            asp = ""
+    return f"vignette=a={0.30 + 0.55 * i_:.3f}{asp}{en}"
+
+
+def cutaway_look_chain(edl, o_start, o_dur, aspect=None):
     """Filters that give a FULL-FRAME cutaway (an overlay with fit
     'cover' or 'picture': b-roll that replaces the speaker) the Look the
     footage around it has: the grade preset and grade_custom, the Look's
@@ -395,7 +430,7 @@ def cutaway_look_chain(edl, o_start, o_dur):
         if kind == "grain":
             out.append(f"noise=alls={5 + int(25 * i_)}:allf=t+u{en}")
         else:
-            out.append(f"vignette=a=PI/{4.8 - 2.2 * i_:.2f}{en}")
+            out.append(vignette_filter(i_, aspect or _frame_aspect(edl), en))
     return out
 
 
@@ -405,10 +440,12 @@ def cutaway_look_chain(edl, o_start, o_dur):
 # midtone ranges end near a code value of 0.4 and mid-grey and whites never
 # move (measured on p5873's frames: temperature 1.0 left whites and mid-tones
 # at the same a*/b*; the Director's shadow hue relies on exactly that).
-# Warmth moves the whole picture, blacks fixed: on p5873 +0.4 raised whites
-# and mid-tones b* by about 3, +1.0 by about 8, a* near 0, lightness kept.
-WARMTH_WARM = {"r_mid": 0.044, "g_white": 0.031, "b_mid": 0.075,
-               "b_white": 0.088}
+# Warmth moves the whole picture, blacks fixed, toward amber rather than
+# yellow (p5873 v2c read "yellow, not sun-touched": mid-tones a* fell): on
+# p5873 +1.0 raises whites b* by about 10 with a* near +1, and mid-tones a*
+# by about 5 and b* by about 8, lightness kept.
+WARMTH_WARM = {"r_mid": 0.065, "g_white": 0.035, "b_mid": 0.06,
+               "b_white": 0.10}
 WARMTH_COOL = {"r_mid": 0.044, "r_white": 0.062, "g_mid": 0.019,
                "g_white": 0.037, "b_mid": 0.075}
 
@@ -435,6 +472,46 @@ def warmth_curves(warmth):
     return ("curves=" + ":".join(
         f"{n}='0/0 0.5/{p[0]:.3f} 1/{p[1]:.3f}'"
         for n, p in (("r", r), ("g", g), ("b", b))))
+
+
+def gain_curves(gain):
+    """The curves filter for grade_custom.gain (-1 .. 1 stops): exposure as
+    light, multiplied in linear light with a soft shoulder, so black stays
+    black and the brightest detail rolls off instead of clipping. '' when
+    neutral.
+
+    grade_custom.exposure is eq brightness, an offset: p5873 v2c's exposure
+    0.8 put black at Y 53 (the dips to black passed through a muddy olive),
+    lifted p5 L from 20 to 28, pushed the whites into the clip (their own
+    texture and the grain flattened: frame-to-frame noise 3.5 against the
+    source's 5.4) and lowered the contrast it had raised."""
+    try:
+        g = max(-1.0, min(1.0, float(gain or 0.0)))
+    except (TypeError, ValueError):
+        return ""
+    if abs(g) < 1e-3:
+        return ""
+    k = 2.0 ** g
+    knee = 0.75
+
+    def lin(v):
+        return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+    def srgb(v):
+        return 12.92 * v if v <= 0.0031308 else 1.055 * v ** (1 / 2.4) - 0.055
+
+    pts, last = [], -1.0
+    for i in range(17):
+        x = i / 16.0
+        y = lin(x) * k
+        if y > knee:
+            # soft shoulder: approaches 1.0, never past it
+            y = knee + (1 - knee) * (1 - math.exp(-(y - knee) / (1 - knee)))
+        y = min(1.0, srgb(max(0.0, y)))
+        y = max(y, last + 1e-3) if i else 0.0
+        last = y
+        pts.append(f"{x:.4f}/{min(1.0, y):.4f}")
+    return "curves=master='" + " ".join(pts) + "'"
 
 
 def grade_custom_chain(gc):
@@ -475,6 +552,9 @@ def grade_custom_chain(gc):
     warm = warmth_curves(gc.get("warmth"))
     if warm:
         chain.append(warm)
+    lift = gain_curves(gc.get("gain"))
+    if lift:
+        chain.append(lift)
     # shadows/highlights are TONAL-REGION controls, so they are a master
     # curve, not eq: a fixed midpoint (0.5) and a moved quarter-point is
     # what makes "lift the shadows" brighten the dark corners without
@@ -5932,8 +6012,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             parts.append(f"[{vlabel}]noise=alls={5 + int(25 * i_)}"
                          f":allf=t+u{en}[{out_lab}]")
         elif kind == "vignette":
-            parts.append(f"[{vlabel}]vignette=a=PI/{4.8 - 2.2 * i_:.2f}"
-                         f"{en}[{out_lab}]")
+            parts.append(f"[{vlabel}]"
+                         f"{vignette_filter(i_, (W / H) if W and H else None, en)}"
+                         f"[{out_lab}]")
         elif kind == "chromatic":
             r = 2 + int(10 * i_)
             parts.append(f"[{vlabel}]rgbashift=rh={r}:bh=-{r}{en}"

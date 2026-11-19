@@ -198,6 +198,31 @@ def _span_text(spans):
     return f"{spans[0][0]:.1f}-{spans[-1][1]:.1f} s"
 
 
+def _device_span(item):
+    """(start, end) of an fx item on the film clock: its window, or a
+    junction's moment ("at", its duration either side of the cut)."""
+    a, b = _f(item.get("start")), _f(item.get("end"))
+    if a is not None and b is not None:
+        return (a, b)
+    at = _f(item.get("at"))
+    if at is None:
+        return None
+    half = (_f(item.get("duration_s")) or 0.0) / 2.0
+    return (max(0.0, at - half), at + half)
+
+
+def _device_where(items):
+    """Where a kind of device plays: junctions by their cuts (p5873 v2c read
+    "junction x9 (0.0-0.0 s)" and told the person its dips may not have
+    landed), windows by their span."""
+    if all(_f(x.get("at")) is not None and _f(x.get("start")) is None
+           for x in items):
+        ats = sorted(_f(x.get("at")) for x in items)
+        shown = ", ".join(f"{t:.1f}" for t in ats[:12])
+        return "at the cuts " + shown + (" ..." if len(ats) > 12 else "") + " s"
+    return _span_text([s for s in (_device_span(x) for x in items) if s])
+
+
 def on_screen(edl):
     """What the film shows and plays now, on the film clock, one line per
     layer: captions, every text with its window, pictures over the cut,
@@ -284,8 +309,7 @@ def on_screen(edl):
         for f in fx:
             kinds.setdefault(str(f.get("type")), []).append(f)
         lines.append("devices: " + "; ".join(
-            f"{k} x{len(v)} ({_span_text([(_f(x.get('start')) or 0.0, _f(x.get('end')) or 0.0) for x in v])})"
-            for k, v in kinds.items()))
+            f"{k} x{len(v)} ({_device_where(v)})" for k, v in kinds.items()))
     eff = edl.get("effects") or {}
     zooms = [z for z in list(eff.get("zooms") or []) + list(edl.get("zooms")
                                                            or [])
@@ -331,4 +355,50 @@ def on_screen(edl):
     fr = edl.get("frame") or {}
     if isinstance(fr, dict) and fr.get("ratio"):
         lines.append(f"frame: {fr.get('ratio')} {fr.get('mode') or ''}".strip())
+    return lines
+
+
+FIRST_CUT_LAYERS = (("overlays", "pictures over the cut"), ("texts", "texts"),
+                    ("motion", "graphics"), ("inserts", "inserts"),
+                    ("fx", "devices"))
+
+
+def first_cut_left(edl, first):
+    """What the automatic first cut made that is still in the film: items of
+    the first cut's version whose ids are still here, its frame and its
+    captions. Measured from the two EDLs (p5744 v2c: "preserve the original
+    framing" and the first cut's 9:16 crop, its crops of other moments of
+    the walk and its titles stayed, unseen as the first cut's). [] when
+    nothing of it is left or there was none."""
+    if not isinstance(edl, dict) or not isinstance(first, dict):
+        return []
+    lines = []
+    for layer, name in FIRST_CUT_LAYERS:
+        old = {str(i.get("id")) for i in first.get(layer) or []
+               if isinstance(i, dict) and i.get("id")}
+        kept = [str(i.get("id")) for i in edl.get(layer) or []
+                if isinstance(i, dict) and str(i.get("id")) in old]
+        if kept:
+            lines.append(f"{name}: {', '.join(kept[:10])}"
+                         + (f" (+{len(kept) - 10})" if len(kept) > 10 else "")
+                         + f" (remove one: {{'remove': '{layer}', 'id': ...}})")
+    fr, ffr = edl.get("frame") or {}, first.get("frame") or {}
+    if isinstance(fr, dict) and fr.get("ratio") and isinstance(ffr, dict) \
+            and fr.get("ratio") == ffr.get("ratio") \
+            and fr.get("mode") == ffr.get("mode"):
+        lines.append(f"frame: {fr.get('ratio')} {fr.get('mode') or ''}"
+                     .strip() + " (the source's own frame: "
+                     "{'frame': {'ratio': 'source'}})")
+    zf = [z for z in (first.get("effects") or {}).get("zooms") or []
+          if isinstance(z, dict)]
+    zn = [z for z in (edl.get("effects") or {}).get("zooms") or []
+          if isinstance(z, dict)]
+    same = [z for z in zn if any(z.get("start") == o.get("start")
+                                 and z.get("mode") == o.get("mode")
+                                 for o in zf)]
+    if same:
+        lines.append(f"camera moves: {len(same)}")
+    caps = edl.get("captions")
+    if caps and first.get("captions") and caps == first.get("captions"):
+        lines.append("captions (off: {'captions': {'mode': 'off'}})")
     return lines

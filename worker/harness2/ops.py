@@ -600,6 +600,10 @@ def op_audio(stage, value, env, index):
 def op_frame(stage, value, env, index):
     v = dict(value or {})
     ratio = v.get("ratio") or "9:16"
+    if ratio == "source":
+        # the upload's own frame back: no crop, no reframe
+        return _run_verb(stage, "set_frame", {"ratio": "source",
+                                              "mode": "crop"}, env, index)
     if v.get("mode") in ("crop", "pad", "pad_blur") and not v.get("follow"):
         return _run_verb(stage, "set_frame", {"ratio": ratio,
                                               "mode": v["mode"]}, env, index)
@@ -628,7 +632,7 @@ def op_export(stage, value, env, index):
 
 
 GRADE_CUSTOM_KEYS = ("exposure", "contrast", "saturation", "temperature",
-                     "tint", "shadows", "highlights", "warmth")
+                     "tint", "shadows", "highlights", "warmth", "gain")
 
 
 def op_grade(stage, value, env, index):
@@ -638,6 +642,7 @@ def op_grade(stage, value, env, index):
     also sit at the top level. p5873 v2a sent {"grade": {"grade_custom":
     {...}}} and it set preset "none" and answered "already so".
 
+    exposure here is light, a gain in stops (grade_custom.gain); and
     temperature here is the picture's warmth, as the op says and as every
     model writes it: it lands as grade_custom.warmth, the white balance of
     the whole picture. grade_custom.temperature leans only the darkest
@@ -663,6 +668,16 @@ def op_grade(stage, value, env, index):
             custom["warmth"] = t
             env.repair(f"grade: temperature {t} is the whole picture's "
                        "white balance, written as warmth")
+    if "exposure" in custom:
+        # exposure is light: a gain in stops that keeps black black and
+        # rolls the whites off (p5873 v2c: exposure 0.8 as an offset put
+        # black at Y 53, the dips to black went muddy olive and the whites
+        # clipped flat, grain and texture with them)
+        e = custom.pop("exposure")
+        if "gain" not in custom:
+            custom["gain"] = e
+            env.repair(f"grade: exposure {e} is light, written as gain "
+                       "(stops; black stays black)")
     ok = False
     if look:
         ok = _run_verb(stage, "apply_look", {"name": str(look)}, env,

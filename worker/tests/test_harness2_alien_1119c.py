@@ -211,3 +211,92 @@ def test_the_joined_clips_are_framed_and_captioned(monkeypatch):
     caps = [a for n, a in calls if n == "add_captions"]
     assert caps and caps[0]["mode"] == "from_transcript"
     assert any("framed 9:16" in f for f in env.findings)
+
+
+def test_junctions_are_listed_at_their_cuts():
+    """p5873 v2c: nine fade_black junctions read "junction x9 (0.0-0.0 s)"
+    and the model told the person the dips may not have applied."""
+    from harness2 import measure
+    edl = {"keep": [[0.0, 35.27]], "fx": [
+        {"type": "junction", "at": 3.2, "duration_s": 0.4,
+         "style": "fade_black"},
+        {"type": "junction", "at": 6.2, "duration_s": 0.4,
+         "style": "fade_black"}]}
+    line = next(x for x in measure.on_screen(edl) if x.startswith("devices"))
+    assert "at the cuts 3.2, 6.2 s" in line and "0.0-0.0" not in line
+
+
+# -- round four (v2c-1119) --------------------------------------------------------
+
+def test_gain_keeps_black_and_rolls_off_white():
+    chain = renderer.gain_curves(0.8)
+    assert chain.startswith("curves=master='0.0000/0.0000")
+    pts = [tuple(map(float, p.split("/"))) for p in
+           chain.split("'")[1].split()]
+    ys = [y for _x, y in pts]
+    assert ys == sorted(ys) and ys[-1] <= 1.0 and ys[8] > pts[8][0]
+    assert renderer.gain_curves(0) == ""
+
+
+def test_grade_exposure_lands_as_gain():
+    ctx, _fake = _ctx(20.0, [[0.0, 20.0]])
+    env = commit.edit(ctx, [{"grade": {"custom": {"exposure": 0.3}}}], "light")
+    gc = ctx.latest_edl()["json"]["effects"]["grade_custom"]
+    assert gc["gain"] == pytest.approx(0.3) and not gc.get("exposure")
+    assert any("written as gain" in r for r in env.repairs)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg")
+def test_gain_lifts_mid_grey_and_leaves_black():
+    chain = renderer.grade_custom_chain({"gain": 0.8})
+    assert max(_grey(chain, 0)) <= 2
+    assert _grey(chain, 100)[0] > 125
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg")
+def test_a_vignette_darkens_the_edges_not_the_film():
+    """0.25 took a third of a 9:16 picture's light (p5744 v2c L 50 -> 31)."""
+    import numpy as np
+    vf = renderer.vignette_filter(0.25, 1080 / 1920)
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+         "color=c=0xb4b4b4:s=270x480", "-frames:v", "1", "-vf",
+         f"format=yuv420p,{vf},format=gray", "-f", "rawvideo", "-"],
+        capture_output=True, timeout=30).stdout
+    x = np.frombuffer(raw, np.uint8).reshape(480, 270) / 180.0
+    assert x.mean() > 0.9 and x[240, 135] > 0.98 and x[2, 2] < 0.9
+
+
+def test_stills_look_at_the_render(monkeypatch):
+    from harness2 import look, render_tool
+    seen = {}
+
+    def fake_look(ctx, **kw):
+        seen.update(kw)
+        from harness2 import envelope
+        return envelope.Envelope(tool="look")
+    monkeypatch.setattr(look, "look", fake_look)
+    render_tool.render(object(), output="stills", times=[3.1])
+    assert seen["target"] == "render" and seen["times"] == [3.1]
+
+
+def test_the_first_cuts_leftovers_are_named():
+    from harness2 import measure
+    first = {"keep": [[0, 11]], "frame": {"ratio": "9:16", "mode": "crop"},
+             "overlays": [{"id": "ov.b01.s0"}, {"id": "ov.b02.s0"}],
+             "texts": [{"id": "tx.b01.big.0"}]}
+    now = {"keep": [[0, 11]], "frame": {"ratio": "9:16", "mode": "crop"},
+           "overlays": [{"id": "ov.b01.s0"}], "texts": [{"id": "tx9"}]}
+    lines = measure.first_cut_left(now, first)
+    assert any("ov.b01.s0" in x for x in lines)
+    assert not any("tx.b01" in x for x in lines)
+    assert any(x.startswith("frame: 9:16 crop") for x in lines)
+    assert measure.first_cut_left(now, {}) == []
+
+
+def test_frame_source_gives_the_uploads_frame_back():
+    ctx, _fake = _ctx(20.0, [[0.0, 20.0]])
+    commit.edit(ctx, [{"frame": {"ratio": "9:16", "mode": "crop"}}], "v")
+    commit.edit(ctx, [{"frame": {"ratio": "source"}}], "src")
+    fr = ctx.latest_edl()["json"].get("frame") or {}
+    assert fr.get("ratio") in (None, "source")

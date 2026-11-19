@@ -566,7 +566,7 @@ def test_grade_takes_continuous_controls(monkeypatch):
     monkeypatch.setattr(agent_tools, "execute", execute)
     commit.edit(ctx, [{"grade": {"grade_custom": {"exposure": 0.2,
                                                   "temperature": 0.3}}}], "g")
-    assert ("set_grade_custom", {"exposure": 0.2, "warmth": 0.3}) in seen
+    assert ("set_grade_custom", {"gain": 0.2, "warmth": 0.3}) in seen
     assert not any(n == "set_color_grade" for n, _a in seen)
 
 

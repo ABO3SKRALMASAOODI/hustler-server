@@ -61,7 +61,8 @@ OPS = [
      "name}, and/or the continuous controls (exposure, contrast, saturation, "
      "temperature, tint, shadows, highlights; -1..1, contrast and saturation "
      "around 1; temperature warms (+) or cools (-) the whole picture's white "
-     "balance, whites and mid-tones, blacks kept); the envelope measures "
+     "balance, whites and mid-tones, blacks kept; exposure is light in "
+     "stops, black kept black); the envelope measures "
      "the result's lightness and colour"),
     ("transition", '{"transition": {"style": "crossfade", "duration_s": 0.3}}',
      "transitions at cuts; {\"at\": t} sets one junction"),
