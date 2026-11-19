@@ -50,3 +50,24 @@ def test_reconcile_recuts_product_source_and_reuses_bound_result(tmp_path):
     assert not (tmp_path/'coverage.json').exists()
     again,changed=A.reconcile(ctx,script,out,[],llm,chain)
     assert not changed and again==out and len(calls)==1
+
+
+def test_run_tokens_join_a_split_token_on_the_run_transcripts_boundary():
+    """Round1 default-design: the window heard '49' '%' and 'self' '-critical.'; the run transcript has '49%' and
+    'self-critical.'. The caption tokens become the run's, timed from the words they cover; nothing else moves."""
+    words=[dict(w=w,t0=a,t1=b) for w,a,b in [('And',0.0,.2),('49',.3,.5),('%',.5,.7),('are',.8,.9),
+                                              ('very',1.0,1.2),('self',1.3,1.5),('-critical.',1.5,1.9),('in',2.0,2.1),('to',2.1,2.2)]]
+    idx=dict(video=dict(duration=3),words=words,sentences=[dict(id='s1',wi0=0,wi1=4,t0=0,t1=1.2,text='x'),
+                                                           dict(id='s2',wi0=5,wi1=8,t0=1.3,t1=2.2,text='y')])
+    run=[(100.0,'And'),(100.32,'49%'),(100.8,'are'),(101.0,'very'),(101.35,'self-critical.'),(102.0,'in'),(102.1,'to')]
+    out,n=A.run_tokens(idx,run,100.0)
+    assert n==2
+    assert [w['w'] for w in out['words']]==['And','49%','are','very','self-critical.','in','to']
+    assert out['words'][1]['t0']==.3 and out['words'][1]['t1']==.7
+    assert out['words'][4]['t0']==1.3 and out['words'][4]['t1']==1.9
+    assert [(s['wi0'],s['wi1']) for s in out['sentences']]==[(0,3),(4,6)]
+    assert out['sentences'][1]['text']=='self-critical. in to'
+    assert idx['words'][1]['w']=='49'                       # the input is not touched
+    # words the run transcript keeps apart stay apart; a token far in time is not this one
+    same,n0=A.run_tokens(idx,[(100.32,'49'),(100.5,'%'),(105.0,'self-critical.')],100.0)
+    assert n0==0 and same is idx

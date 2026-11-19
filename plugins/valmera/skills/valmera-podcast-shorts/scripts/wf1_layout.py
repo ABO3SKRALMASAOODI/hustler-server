@@ -114,7 +114,8 @@ def seat_display(l1, meta, ruler, _retry=0):
         if i['k']=='word' and i.get('role')=='cap':
             groups['captions'].append(i)
         elif i['k']=='word' and i.get('role')=='big':
-            groups['title' if i['v'].startswith('dsp_t') else ('display',i.get('on',i['f'][0]),i['t'])].append(i)
+            # a display block is every line landed together (a two-size stack shares its `on`): seated as one unit
+            groups['title' if i['v'].startswith('dsp_t') else ('display',i.get('on',i['f'][0]))].append(i)
     logs=[]
     work=list(groups.items())
     while work:

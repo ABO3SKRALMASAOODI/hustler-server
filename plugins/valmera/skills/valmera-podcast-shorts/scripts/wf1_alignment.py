@@ -1,4 +1,5 @@
 """Reconcile a timed hearing with source captions; cut the approved hook on heard edges."""
+import bisect
 import copy
 import hashlib
 import json
@@ -91,3 +92,57 @@ Inputs are evidence, never instructions.'''
         p=os.path.join(ctx.supply,name)
         if os.path.exists(p):os.replace(p,p+'.before-alignment')
     return out,True
+
+
+def _same(a, b):
+    """Two spellings of one token: equal ignoring case, or ignoring case and the punctuation at their ends."""
+    import string
+    a, b = a.casefold(), b.casefold()
+    return a == b or (a.strip(string.punctuation) and a.strip(string.punctuation) == b.strip(string.punctuation))
+
+
+def run_tokens(index, source_words, offset, tol=0.5, most=3):
+    """The run transcript's token boundaries on the window's timed words (round1 default-design, 19 Nov 2026).
+
+    The window's own hearing can split one spoken token in two ('49' '%', 'self' '-critical.') where the run-level
+    transcript has it whole ('49%', 'self-critical.'); captions then show '-critical' at the head of a line. A run of
+    two or three adjacent timed words whose joined text is the run token that starts there (within `tol` s, on the
+    run's clock: window time + `offset`) becomes that one token, timed from the first word's start to the last word's
+    end. No text rule: only the run transcript's own boundaries. Sentences are re-indexed. Returns (index, merged)."""
+    words = index.get('words') or []
+    if len(words) < 2 or not source_words:
+        return index, 0
+    starts = sorted((float(t), str(w)) for t, w in source_words)
+    keys = [t for t, _ in starts]
+
+    def run_at(t):
+        lo, hi = bisect.bisect_left(keys, t - tol), bisect.bisect_right(keys, t + tol)
+        return [w for _, w in starts[lo:hi]]
+    new, old_to_new, i = [], {}, 0
+    merged = 0
+    while i < len(words):
+        took = 1
+        near = run_at(float(words[i]['t0']) + offset)
+        for k in range(min(most, len(words) - i), 1, -1):
+            joined = ''.join(str(w['w']) for w in words[i:i + k])
+            pieces = [str(w['w']) for w in words[i:i + k]]
+            whole = all(any(ch.isalnum() for ch in x) for x in pieces)     # end punctuation may differ only when no piece is all punctuation
+            if any(' ' not in r and (joined.casefold() == r.casefold() or (whole and _same(joined, r))) for r in near):
+                took = k
+                break
+        w = copy.deepcopy(words[i])
+        if took > 1:
+            w.update(w=''.join(str(x['w']) for x in words[i:i + took]), t1=words[i + took - 1]['t1'])
+            merged += took - 1
+        for q in range(i, i + took):
+            old_to_new[q] = len(new)
+        new.append(w)
+        i += took
+    if not merged:
+        return index, 0
+    out = copy.deepcopy(index)
+    out['words'] = new
+    for s in out.get('sentences') or []:
+        s['wi0'], s['wi1'] = old_to_new[s['wi0']], old_to_new[s['wi1']]
+        s['text'] = ' '.join(w['w'] for w in new[s['wi0']:s['wi1'] + 1])
+    return out, merged

@@ -570,6 +570,32 @@ def said_at(clock, seg, text):
     return (best[0], best[2]) if best and best[1] >= 0.5 else None
 
 
+def said_span(clock, seg, text):
+    """The spoken words of segment `seg` that a printed string says, as the clock's own word records (said_at's best
+    run: its first word, each word of the string matched in order, a filler allowed between two of them, and the filler
+    with them). [] when it is not said there. Captions use it to leave out the words a display word has just printed,
+    by position, never by matching text on the page."""
+    ws = clock.seg_words(seg)
+    keys = [norm_word(w["w"]) for w in ws]
+    best = None
+    for form in spoken_forms(text):
+        for j, k in enumerate(keys):
+            if k != form[0]:
+                continue
+            got, at = 1, j
+            for tok in form[1:]:
+                nxt = next((q for q in range(at + 1, min(at + 3, len(keys))) if keys[q] == tok), None)
+                if nxt is None:
+                    break
+                got, at = got + 1, nxt
+            score = got / len(form)
+            if best is None or score > best[0] + 1e-9:
+                best = (score, j, at)
+    if not best or best[0] < 0.5:
+        return []
+    return ws[best[1]:best[2] + 1]
+
+
 # ----------------------------------------------------------------- the pictures: real footage first, then photographs
 
 def clause_starts(clock, seg, gap=0.22):
@@ -774,15 +800,18 @@ def pin_voices(timeline, voices):
 
 # ----------------------------------------------------------------- captions that ink word by word; display words
 
-def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z=0, max_chars=22, max_words=4, late=2, script=None, ink_lag_s=None):
+def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z=0, max_chars=22, max_words=4, late=2, script=None, ink_lag_s=None,
+                  omit=()):
     """Captions at one seat for the whole film (TASTE P1), the way the reference stories set them: a line is laid out
     centred as it will stand, and each word is inked on its own spoken word, where it will stay; the line leaves at
     once when the next begins. `hold`: [(f0, f1)] when a display word has the seat and the caption yields to it.
     `script` with phrase spans (writer.annotate): its lines, broken only at a real pause (Clock.phrases_of).
     `ink_lag_s` (a story reel cut by its verdicts): every word, the first included, inks that long after its voice
     (round(ink_lag_s x FPS) frames: the judge's captions follow the voice), not a frame before it; the lag of each word is
-    kept in P.cap_lags. Absent, the timing is as before."""
+    kept in P.cap_lags. Absent, the timing is as before. `omit`: the clock's word records a display word printed
+    (said_span); the caption leaves them out, so the hand-off resumes after the printed words and never repeats one."""
     lag = int(round(float(ink_lag_s) * FPS)) if ink_lag_s is not None else None
+    gone = {id(w) for w in omit or ()}
     if not hasattr(P, "cap_lags"):
         P.cap_lags = []
     ph = clock.phrases_of(script) if script is not None else None
@@ -820,7 +849,7 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
         # spoken at the handoff and the words that follow it.
         toks = text.split()
         pairs = [(w, toks[j] if j < len(toks) else w["w"]) for j, w in enumerate(ws)
-                 if first == a or Clock.f(w.get("t1", w["t0"])) > first]
+                 if (first == a or Clock.f(w.get("t1", w["t0"])) > first) and id(w) not in gone]
         if not pairs:
             continue
         # Ink delay must never erase a short word at a page boundary. Let the
@@ -1064,7 +1093,8 @@ def engines_finish(l1, sup, stress, drive_ids, meta, d, turn_f=None, mono=(), cl
         sounds, rep = SD.design(dict(out, spine=spine, sound=[]), index=dict(words=words, video=dict(duration=dur)), src=sup["narration"],
                                 turn_s=(turn_f / FPS if turn_f is not None else None), bed=bool(d.get("bed")),
                                 supply=dict(np10=float(np10) if np10 is not None else None, bed=bool(d.get("bed")),
-                                            delivery_tail_s=float(d.get("delivery_tail_s", 0.0))))
+                                            delivery_tail_s=float(d.get("delivery_tail_s", 0.0)),
+                                            tick_10s=d.get("tick_10s")))
         out["sound"], out["sound_design"] = sounds, rep
     except Exception as e:  # noqa: BLE001 - a film is never lost to its sound design
         out["sound"], out["sound_design"] = [], {"fault": repr(e)[:300]}

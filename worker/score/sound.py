@@ -611,7 +611,11 @@ def l1_events(l1, kshots=()):
                 steps.append(f)
             prev = t
         ev.append({"f": rows[0][0], "kind": "counter", "id": g, "steps": steps[:COUNTER_TICKS]})
-    moving = {it["f"][0] for it in items if it.get("k") in ("shot", "card") and isinstance(it.get("blur"), list) and len(it["blur"]) > 1}
+    # a cut travels when its first frames are drawn blurred (a whip, a slide), or when the caller measured the arriving
+    # clip itself moving (``moving``: the podcast workflow's verified subject motion, round1 thin-sound): a picture that
+    # lands already in motion is something on screen that sounds
+    moving = {it["f"][0] for it in items if it.get("k") in ("shot", "card") and
+              ((isinstance(it.get("blur"), list) and len(it["blur"]) > 1) or it.get("moving") is True)}
     for e in ev:
         if e["kind"] in ("picture", "cut") and e["f"] in moving:
             e["moving"] = True                    # the cut travels (a whip, a slide): the picture itself asks for a sweep
@@ -930,8 +934,11 @@ def plan_sounds(events, ctx):
     # The tick layer is its own layer, under the audible one (round seven: capped by what the governor left of the
     # audible allowance, a film of some pictures carried none, and every display line of a Director film went unsounded:
     # "the film carries 0 small ticks" on 4 of 4 lines in p5574 and p5565).
-    n_tick = max(0, int(TICK_10S.get(cls, 0.0) * dur_s / 10.0 + 1e-9))
-    tick_win = max(1, int(math.ceil(TICK_10S.get(cls, 0.0) * TICK_BURST))) if n_tick else 0
+    # A caller may name its own tick rate (``tick_10s``): the podcast workflow's talking films are class T, which carries
+    # no tick layer, so their display landings went unsounded (round1 thin-sound). Without it the class's rate stands.
+    tick_rate = float(ctx["tick_10s"]) if ctx.get("tick_10s") is not None else TICK_10S.get(cls, 0.0)
+    n_tick = max(0, int(tick_rate * dur_s / 10.0 + 1e-9))
+    tick_win = max(1, int(math.ceil(tick_rate * TICK_BURST))) if n_tick else 0
     al["sounds"], al["sounds_10s"] = total, win
     seed = ctx.get("seed")
     if seed is None:
@@ -1957,6 +1964,7 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
            "words": words or [], "bed": bed, "ref_at": ref_at, "np10": (supply or {}).get("np10"), "own_tiers": bool(own_tiers),
            "turn_f": int(round(float(turn_s) * fps)) if turn_s is not None else None, "close_s": close_s,
            "delivery_tail_s": float((supply or {}).get("delivery_tail_s", 0.0)),
+           "tick_10s": (supply or {}).get("tick_10s"),
            "seed": film_seed(l1.get("sid"), l1.get("seed"), D, [e.get("src") for e in (l1.get("spine") or [])][:64],
                              sorted(str((a or {}).get("path")) for a in (l1.get("assets") or {}).values())[:64])}
     sounds, report = plan_sounds(events, ctx)

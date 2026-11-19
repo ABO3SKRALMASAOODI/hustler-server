@@ -422,6 +422,8 @@ def score_chapters(film, marks, kind, cache, call=None, used=(), fetch=None, voi
 
 def score(l1, work, film=None, out=None, kind="stories", song=None, vocals=None, turn_s=None, payoff_s=None, cache=None, brief="",
           call=None, used=(), index=None):
+    # A caller that names both the story's turn and its payoff (the podcast workflow's direction, --turn with --payoff)
+    # opts in to the drop on the turn when the payoff sits too close to the last hit for a phrase after it.
     """One compiled film with music: the song the run was handed (`song`), else a track chosen for it from the
     library. The story's marks come from the caller, else from a model's reading of the film's own lines. Returns
     the report (the choice with its licence and credit, the marks, the engine's plan and levels); `out` is written
@@ -437,6 +439,7 @@ def score(l1, work, film=None, out=None, kind="stories", song=None, vocals=None,
     lines = lines_of(l1, index)
     dur = float(l1["dur_f"]) / float(l1["fps"])
     marks_in = {"turn_s": turn_s, "payoff_s": payoff_s}
+    turn_drop = turn_s is not None and payoff_s is not None and float(turn_s) < float(payoff_s)
     mood = ""
     if (turn_s is None or payoff_s is None) and call is not None:
         got = story_marks(lines, dur, call)
@@ -450,9 +453,11 @@ def score(l1, work, film=None, out=None, kind="stories", song=None, vocals=None,
                 payoff_s, turn_s = turn_s, (got["turn_s"] if got["turn_s"] is not None and got["turn_s"] < turn_s - 1.0 else None)
     elif payoff_s is None and turn_s is not None:
         payoff_s, turn_s = turn_s, None                        # one named moment is the landing: the drop goes on it
-    rep["marks"] = {"given": marks_in, "turn_s": turn_s, "payoff_s": payoff_s, "mood": mood, "lines": len(lines)}
+    rep["marks"] = {"given": marks_in, "turn_s": turn_s, "payoff_s": payoff_s, "mood": mood, "lines": len(lines), "turn_drop": turn_drop}
     choice = None
     marks = MU.marks_from_l1(l1, index, turn_s=turn_s, payoff_s=payoff_s)
+    if turn_drop:
+        marks["turn_drop"] = True
     whole = False                                              # the scene gives no voice apart: the film's own sound is read instead
     if not marks["words"]:
         marks["words"] = MU.voice_spans_of(l1, work)
@@ -495,7 +500,7 @@ def score(l1, work, film=None, out=None, kind="stories", song=None, vocals=None,
                                  vocals=vocals, sung=sung, supplied=choice is None)
     else:
         rep["mix"] = MU.mix(l1, work, song, film=film, out=out, vocals=vocals, turn_s=turn_s, payoff_s=payoff_s, kind=kind, index=index, supplied=choice is None, sung=sung,
-                            **({"open_s": entry_s(choice)} if entry_s(choice) is not None else {}))
+                            turn_drop=turn_drop, **({"open_s": entry_s(choice)} if entry_s(choice) is not None else {}))
     rep["ok"] = bool((rep["mix"].get("plan") or {}).get("ok") and (not out or rep["mix"].get("out")))
     rep["spend_usd"] = spend(call)
     return rep

@@ -510,6 +510,13 @@ def music_version(ctx, rd, sc):
         turn = (ctx.args or {}).get("turn_s", sc.get("turn_s"))       # the run's own word first, else the landing the score named: the drop goes on it
         if turn is not None:
             cmd += f" --payoff {float(turn):.3f}"
+        # the story's own turn before the payoff (a podcast short's direction names it): handed with the payoff, the
+        # music drops on it when the payoff sits too close to the last hit for a phrase after it (score.music.arrange)
+        story_turn = sc.get("story_turn_s") if turn is not None else None
+        if story_turn is not None and float(story_turn) < float(turn) - 1.0:
+            cmd += f" --turn {float(story_turn):.3f}"
+        else:
+            story_turn = None
         # films made together (a podcast's shorts) share a list of the tracks already taken, so no two play the same one:
         # --args '{"music_ledger": "<file>"}'. The choice is made under the file's lock, one film at a time.
         ledger, lock, used = (ctx.args or {}).get("music_ledger") if not song else None, None, []
@@ -526,7 +533,7 @@ def music_version(ctx, rd, sc):
                 aj, hp = os.path.join(ctx.supply, f"{tag}_args.json"), os.path.join(ctx.supply, f"{tag}_used.py")
                 json.dump(dict(l1=sc.get("l1_audio") or sc["l1"], work=ctx.supply, film=rd["film"], out=out + ".part.mp4", kind=SONG_KIND.get(ctx.workflow, "stories"),
                                cache=os.path.join(ctx.state_root, "music_cache"), report=report, brief=brief,
-                               payoff=float(turn) if turn is not None else None, used=used), open(aj, "w"), ensure_ascii=False)
+                               payoff=float(turn) if turn is not None else None, turn=float(story_turn) if story_turn is not None else None, used=used), open(aj, "w"), ensure_ascii=False)
                 open(hp, "w").write(MUSIC_USED)
                 cmd = cmd[:cmd.index(" -m music_film score ")] + f" '{hp}' '{aj}'"
             adapter = os.environ.get("SHELL_MUSIC_CMD")
@@ -534,7 +541,7 @@ def music_version(ctx, rd, sc):
                 aj = os.path.join(ctx.supply, f"{tag}_args.json")
                 json.dump(dict(l1=sc.get("l1_audio") or sc["l1"], work=ctx.supply, film=rd["film"], out=out + ".part.mp4",
                                kind=SONG_KIND.get(ctx.workflow, "stories"), cache=os.path.join(ctx.state_root, "music_cache"), report=report,
-                               brief=brief, payoff=float(turn) if turn is not None else None, used=used,
+                               brief=brief, payoff=float(turn) if turn is not None else None, turn=float(story_turn) if story_turn is not None else None, used=used,
                                song=song, vocals=(ctx.args or {}).get("song_vocals")), open(aj, "w"), ensure_ascii=False)
                 sh(ctx, ["zsh", adapter, aj], label=f"wf-{tag}-{ctx.run_id}",
                    heavy=os.environ.get("SHELL_MUSIC_REMOTE") != "1", timeout=1800)
@@ -606,7 +613,7 @@ import music_film as M
 
 a = json.load(open(sys.argv[1]))
 try:
-    rep = M.score(json.load(open(a["l1"])), a["work"], film=a["film"], out=a["out"], kind=a["kind"], payoff_s=a.get("payoff"), cache=a["cache"],
+    rep = M.score(json.load(open(a["l1"])), a["work"], film=a["film"], out=a["out"], kind=a["kind"], payoff_s=a.get("payoff"), turn_s=a.get("turn"), cache=a["cache"],
                   brief=a["brief"], call=M.openai_call(), used=a["used"])
 except Exception as ex:  # noqa: BLE001 - the clean film is delivered either way; the reason is on file
     rep = {"ok": False, "why": f"{type(ex).__name__}: {str(ex)[:300]}"}
