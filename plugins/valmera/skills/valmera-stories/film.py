@@ -232,6 +232,11 @@ class Plan:
     def video(self, key, rec):
         self.assets[key] = dict(kind="video", path=rec["path"], w=int(rec.get("w") or W), h=int(rec.get("h") or H), fps=float(rec.get("fps") or FPS),
                                 dur=float(rec.get("seconds") or 0))
+        if rec.get("landings"):
+            # what the clip's own edit lands on screen, in its seconds (a recorded export's b-roll and titles): the sound
+            # design reads each landing a played window shows as an event (score.sound.landing_events)
+            self.assets[key]["landings"] = [dict(t=float(x["t"]), kind=str(x.get("kind") or "picture"), **({"moving": True} if x.get("moving") else {}))
+                                            for x in rec["landings"]]
         return key
 
     def page(self, f, c0, c1=None, grain=0.03, **kw):
@@ -477,6 +482,19 @@ def _engines():
         sys.path.insert(0, w)
     from scene import bake, looks, pace
     return pace, looks, bake
+
+
+def landings_shown(l1):
+    """The landings a played clip's own edit makes on screen (score.sound.landing_events: a recorded export's b-roll
+    and titles inside the windows that play it), by programme frame. [] for a film whose clips name none."""
+    if not any((a or {}).get("landings") for a in (l1.get("assets") or {}).values()):
+        return []
+    try:
+        _engines()
+        from score import sound as SD
+        return SD.landing_events(l1)
+    except Exception:  # noqa: BLE001 - an older worker without it: the clips' landings are not read
+        return []
 
 
 def voice_stress(sup):
@@ -1088,21 +1106,28 @@ def engines_finish(l1, sup, stress, drive_ids, meta, d, turn_f=None, mono=(), cl
         # device spans (mono), through their own finish
         out["film"]["vignette"] = float(d["film_vignette"])
     # the sound design, against this film's own voice
-    spine, wd, dur = narration_spine(out, sup)
+    out["sound"], out["sound_design"] = design_sound(out, sup, d, turn_f=turn_f, spoken=spoken, np10=np10)
+    return out
+
+
+def design_sound(l1, sup, d, turn_f=None, spoken=None, np10=None):
+    """The film's sound design against its own narration (score.sound.design), planned fresh on what l1 shows now:
+    (sounds, report). engines_finish lays it; a caller that changes pictures after the finish (marketing's picture
+    repair) plans it again on the final plan with the same turn and supply. Never raises: a fault is the report."""
     try:
+        _engines()
         from score import sound as SD
+        spine, wd, dur = narration_spine(l1, sup)
         # each word's own moment on the narration's clock (the film's clock repairs spans the aligner shared out)
         words = [dict(t0=float(a), t1=float(b)) for a, b in spoken] if spoken else \
             [dict(t0=float(w["start"]), t1=float(max(w["end"], w["start"] + 0.02))) for w in wd["words"]]
-        sounds, rep = SD.design(dict(out, spine=spine, sound=[]), index=dict(words=words, video=dict(duration=dur)), src=sup["narration"],
-                                turn_s=(turn_f / FPS if turn_f is not None else None), bed=bool(d.get("bed")),
-                                supply=dict(np10=float(np10) if np10 is not None else None, bed=bool(d.get("bed")),
-                                            delivery_tail_s=float(d.get("delivery_tail_s", 0.0)),
-                                            tick_10s=d.get("tick_10s")))
-        out["sound"], out["sound_design"] = sounds, rep
+        return SD.design(dict(l1, spine=spine, sound=[]), index=dict(words=words, video=dict(duration=dur)), src=sup["narration"],
+                         turn_s=(turn_f / FPS if turn_f is not None else None), bed=bool(d.get("bed")),
+                         supply=dict(np10=float(np10) if np10 is not None else None, bed=bool(d.get("bed")),
+                                     delivery_tail_s=float(d.get("delivery_tail_s", 0.0)),
+                                     tick_10s=d.get("tick_10s")))
     except Exception as e:  # noqa: BLE001 - a film is never lost to its sound design
-        out["sound"], out["sound_design"] = [], {"fault": repr(e)[:300]}
-    return out
+        return [], {"fault": repr(e)[:300]}
 
 
 def audio_scene(l1, sup):

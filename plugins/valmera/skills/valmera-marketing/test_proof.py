@@ -395,14 +395,14 @@ def test_board_prints_keep_the_narrations_captions_and_nothing_touches_the_print
 
 
 def test_product_layout_keeps_full_frame_for_the_voices_and_the_hook_only():
-    paths = [f"/p/{n}" for n in ("after.mp4", "before.mp4", "export_0.mp4", "export_body.mp4", "tease.mp4", "upload_1.mp4", "upload_10.mp4",
+    paths = [f"/p/{n}" for n in ("after.mp4", "before.mp4", "export_0.mp4", "export_body.mp4", "hook.mp4", "upload_1.mp4", "upload_10.mp4",
                                  "upload_2.mp4")]
     whole, board = P.product_layout(paths)
-    assert {os.path.basename(p) for p in whole} == {"after.mp4", "before.mp4", "tease.mp4", "upload_1.mp4"}   # one reveal a film
+    assert {os.path.basename(p) for p in whole} == {"after.mp4", "before.mp4", "hook.mp4", "upload_1.mp4"}   # one reveal a film
     assert {os.path.basename(p) for p in board} == {"export_0.mp4", "export_body.mp4", "upload_10.mp4", "upload_2.mp4"}
     footage = [dict(i=1, clips=[dict(path="/p/upload_2.mp4"), dict(path="/p/upload_1.mp4")]), dict(i=3, clips=[dict(path="/p/upload_10.mp4")])]
     whole, board = P.product_layout(paths, footage)                          # one reveal a line: its best-ranked upload shot
-    assert {os.path.basename(p) for p in whole} == {"after.mp4", "before.mp4", "tease.mp4", "upload_2.mp4", "upload_10.mp4"}
+    assert {os.path.basename(p) for p in whole} == {"after.mp4", "before.mp4", "hook.mp4", "upload_2.mp4", "upload_10.mp4"}
     assert P.upload_reveals(paths, footage) == ["/p/upload_2.mp4", "/p/upload_10.mp4"]
 
 

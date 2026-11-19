@@ -615,6 +615,32 @@ def span_motion(c, t0, t1):
     return float(seg[len(seg) // 2]) if seg else 0.0
 
 
+def cut_landings(c):
+    """A clip's own measured inner cuts (clip_motion's c["cuts"], seconds) as landings on its asset, beside any landings
+    it already names (a recorded export's EDL pictures and titles): the next take arriving inside a played window is a
+    cut on screen (score.sound.landing_events), `moving` when that take's first half second moves by content
+    (span_motion >= MOTION_FLOOR, the podcast's verified-motion bar), so the sound design sounds the footage's own
+    landings, not only the film's cuts between files (round1 sound-events-missing). Signal only."""
+    dur = float(c.get("seconds") or 0.0)
+    have = [dict(x) for x in c.get("landings") or []]
+    cuts = sorted(float(t) for t in (c.get("cuts") or []) if 0.15 < float(t) < dur - 0.15)
+    out = list(have)
+    for t in cuts:
+        if any(abs(float(x["t"]) - t) < 0.1 for x in have):
+            continue                                       # the export's own picture landing is that cut
+        row = dict(t=round(t, 3), kind="cut")
+        if span_motion(c, t, min(t + 0.5, dur)) >= MOTION_FLOOR:
+            row["moving"] = True
+        out.append(row)
+    return sorted(out, key=lambda x: (float(x["t"]), str(x.get("kind"))))
+
+
+def with_landings(c):
+    """The clip as its asset is registered: its landings, its measured inner cuts among them."""
+    lands = cut_landings(c)
+    return dict(c, landings=lands) if lands else c
+
+
 def take_motion(c, take):
     """How much a take moves where it moves most: the motion of its most moving window (Takes.best) of half a second."""
     a, b = take
@@ -1864,14 +1890,14 @@ def build(script, sup, style_id, direction=None):
     for lst in footage.values():
         for c in lst:
             if c["path"] not in keys:
-                keys[c["path"]] = P.video(f"v{len(keys):02d}", c)
+                keys[c["path"]] = P.video(f"v{len(keys):02d}", with_landings(c))
     for v in sup.get("voices") or []:
         c = v.get("clip") or {}
         if c.get("path") and os.path.exists(c["path"]) and c["path"] not in keys:
-            keys[c["path"]] = P.video(f"v{len(keys):02d}", c)
+            keys[c["path"]] = P.video(f"v{len(keys):02d}", with_landings(c))
     for c in d.get("proof_fill") or []:
         if c.get("path") and os.path.exists(str(c["path"])) and c["path"] not in keys:
-            keys[c["path"]] = P.video(f"v{len(keys):02d}", c)
+            keys[c["path"]] = P.video(f"v{len(keys):02d}", with_landings(c))
     f_voice_end = Clock.f(clock.dur)
     f_end = f_voice_end + int(d.get("tail_f", 15))
     stress = F.voice_stress(sup)
@@ -2496,13 +2522,24 @@ def build(script, sup, style_id, direction=None):
     caption_pool(P, f_end, cap_y, float(d.get("pool", 0.70)), holes=white if fit_on else (), tone_at=tone_at)
     pay = next((i for i, s in enumerate(script["segments"]) if s.get("beat") == "payoff"), None)
     turn_f = min((c for c in cut_pts if c >= seg_f[pay] - 4), default=seg_f[pay]) if pay is not None else None
+    turn_by = "payoff" if turn_f is not None else None
     film = dict(grain=float(st["grain"]), vignette=float(st["vignette"]), over_type=False, grade=dict(lift=0, gamma=1, gain=1, sat=1, contrast=1, temp=0, tint=0))
     l1 = P.done(sup.get("sid", "wf3"), f_end, int(d.get("seed", 1114)), film)
     secs = f_voice_end / FPS
     np10 = len({picture_key(p) for p in P.pictures}) / max(secs, 1) * 10     # prints and windows count; a card by its text
     takes = take_stats(P.pictures, footage)            # a measure on every cut, cut_story's too (WF2)
+    lands = F.landings_shown(l1)                       # a recorded export's own pictures and titles landing inside its shots
+    if lands:
+        takes["landings_shown"] = sum(1 for e in lands if e["kind"] == "card")
+    span = d.get("turn_span_s")                        # the caller's payoff on the film's clock (marketing: the after)
+    if span:
+        a_f, b_f = int(round(float(span[0]) * FPS)), int(round(float(span[1]) * FPS))
+        hit = sorted(e["f"] for e in lands if e["kind"] == "card" and a_f - 2 <= e["f"] < b_f)
+        # the drop lands on the payoff's first picture landing; without one, on the payoff's arrival
+        turn_f, turn_by = (hit[0], "landing") if hit else (min((c for c in cut_pts if c >= a_f - 4), default=a_f), "span")
     if fit_on:
-        np10 = takes["new_pictures_10s_n"] / max(secs, 1) * 10        # a picture is new only by distinct take
+        # a picture is new only by distinct take; a picture the played export lands over its speaker is a new picture
+        np10 = (takes["new_pictures_10s_n"] + takes.get("landings_shown", 0)) / max(secs, 1) * 10
         d = dict(d, band=dict(d.get("band") or {}, punch_first=True, ease_min_s=0.4, moves_per_10s=MOVES_PER_10S),
                  film_vignette=d.get("film_vignette", FILM_VIGNETTE_FIT))
     l1 = F.engines_finish(l1, sup, stress, drive_ids, meta, dict(d, look_pictures=look_pics), turn_f=turn_f, mono=mono_spans,
@@ -2525,7 +2562,7 @@ def build(script, sup, style_id, direction=None):
     beats = dict(dur_f=f_end, voice_f=[LEAD_F, f_voice_end], cuts=sorted(set(cut_pts)), changes=changes,
                  events=sorted(set(P.events) | set(cut_pts) | set(changes)),
                  pictures=P.pictures, on_screen=P.shown, caption_y=cap_y, caption_lines=lines, display=[dict(f=[a, b], text=t) for a, b, t in shown],
-                 turn_f=turn_f, pace=l1.get("pace"), style=style_id, layout=d.get("layout", st["layout"]),
+                 turn_f=turn_f, turn_by=turn_by, pace=l1.get("pace"), style=style_id, layout=d.get("layout", st["layout"]),
                  measured={**dict(new_pictures_10s=round(new_pics / max(secs, 1) * 10, 2), base_shots=len(timeline),
                                median_shot_s=round(sorted(r[1] - r[0] for r in timeline)[len(timeline) // 2] / FPS, 2) if timeline else None,
                                photo_most_uses=max(photo_uses.values()) if photo_uses else 0,

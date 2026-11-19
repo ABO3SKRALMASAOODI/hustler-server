@@ -73,7 +73,8 @@ VOICES = {
 }
 PER_FRAME = {"x", "y", "s", "rot", "op", "blur", "a", "th", "t", "dim", "grow"}
 RECTS = {"crop", "rect"}
-SOUND_DB = dict(typing=-27.0, click=-20.0, whoosh=-23.0, tick=-24.0, impact=-19.0)     # peaks before the film's loudness pass (film.py's own)
+SOUND_DB = dict(typing=-27.0, click=-20.0, whoosh=-23.0, tick=-24.0, impact=-19.0, riser=-26.0)  # peaks before the film's loudness pass (film.py's own)
+CTA_RISER = "riser_2"          # the climb into the call to action: a one-second riser whose top is the website's landing
 
 
 # ----------------------------------------------------------------- the reel gives way
@@ -841,6 +842,7 @@ def cta(l1, *, f0, f1, export, lib, src0=0.0):
         if fa < f1:
             L.text(f"l{k}", [fa, f1], t, v, 0.09, yy, ink, 1.0, rise=True)
             lands.append(fa)
+    L.hit(CTA_RISER, f0 + 1, "riser")             # the film climbs into its call to action, then it lands
     L.hit("whoosh_soft_1", f0 + 1, "whoosh")
     if len(lands) == len(rows):
         L.hit("click_1", lands[-1] + 1, "click")
@@ -1049,6 +1051,7 @@ def site(l1, *, f0, f1, page, export, lib, src0=0.0, url="valmera.io"):
            s=[r4(v) for v in MF.settle(10, 0.9)] + [1.0] * max(n - 10, 0), op=[r4(min(1.0, (q + 1) / 4.0)) for q in range(n)])
     w_url = R.width(L.k("dv_w"), url) / W
     L.text("url", [f0 + 4, f1], url, L.k("dv_w"), 0.5 - w_url / 2, base, "#FFFFFF", 1.0, rise=True)
+    L.hit(CTA_RISER, f0 + 1, "riser")             # the film climbs into the website, then it lands
     L.hit("whoosh_soft_1", f0 + 1, "whoosh")
     L.hit("click_1", f0 + 5, "click")
     rec = L.lay([f0, f1])
