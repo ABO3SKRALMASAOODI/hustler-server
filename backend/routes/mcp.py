@@ -4097,9 +4097,23 @@ def _t_watch_video(tok, args):
                  + ". The download link in this response remains usable, "
                    "but do not "
                    "claim the missing attachment was received.")
+    # A rendered program here is the draft preview (480p on a vertical
+    # source), made to be watched. Labelled "Download:", it was what AI apps
+    # handed their users as the video and export_final never ran (p5909,
+    # 16 Nov: two watch_video links of a 480x480 draft, no final). The same
+    # answer now names it a draft and gives the one call that makes the
+    # user's full-quality video.
+    preview = result.get("preview") if isinstance(
+        result.get("preview"), dict) else None
+    if preview:
+        ver = preview.get("edl_version")
+        link = (f"\n\nWatch (draft preview): {url}\n\n"
+                + _draft_notice(None, project_id, ver))
+    else:
+        link = f"\n\nDownload: {url}"
     # Text FIRST: it is what orients the model — which clock the video runs
     # on, what is in it, what to do next — and it says the pictures follow.
-    content = [{"type": "text", "text": f"{text}\n\nDownload: {url}"}]
+    content = [{"type": "text", "text": f"{text}{link}"}]
     content += image_content
     content += audio_content
     if blob:
@@ -4126,10 +4140,15 @@ def _t_watch_video(tok, args):
             continue
     if frame_urls:
         structured["frame_urls"] = frame_urls
-    if isinstance(result.get("preview"), dict):
+    if preview:
+        next_step = (f"export_final(project_id={project_id}, "
+                     f"edl_version={preview.get('edl_version')})")
+        structured["deliverable"] = False
+        structured["deliverable_next_step"] = next_step
         try:
             structured["download_receipt"] = _record_download_receipt(
-                tok, project_id, result["preview"])
+                tok, project_id, dict(preview, deliverable=False,
+                                      deliverable_next_step=next_step))
             structured["download_receipt"]["url"] = url
         except Exception:
             structured["download_receipt_error"] = "receipt_persistence_failed"

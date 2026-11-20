@@ -1316,12 +1316,36 @@ def test_watch_video_structured_result_carries_the_link_and_the_frames(
     structured = public["structuredContent"]
     assert structured["url"] == url
     assert structured["download_receipt"]["url"] == url
-    assert "Download: " + url in structured["message"]
+    assert "Watch (draft preview): " + url in structured["message"]
     assert structured["attached"] == {"frame_sheets": 1, "audio": False,
                                       "video_inline": False}
     assert structured["frame_urls"] == [
         "https://cdn.example/media/3/look_1.jpg?sig=1"]
     assert [b["type"] for b in public["content"]] == ["text", "text", "image"]
+
+
+def test_watch_video_draft_preview_is_never_labelled_the_download(
+        client, monkeypatch):
+    """p5909 (16 Nov): the AI app took watch_video's "Download:" link of a
+    480x480 draft preview as the user's video, and export_final never ran.
+    The same answer now calls it a draft and names the call that makes the
+    full-quality file, in the text and in the structured result."""
+    _served(monkeypatch)
+    DB["job_result"]["preview"] = {
+        "asset_id": 44, "edl_version": 8, "duration_s": 61.2,
+        "audio_model_review": False}
+
+    public = _call_watch(client, frames=False)
+
+    text = public["content"][0]["text"]
+    assert "Download: " not in text
+    assert "DRAFT PREVIEW" in text
+    assert "export_final(project_id=3, edl_version=8)" in text
+    structured = public["structuredContent"]
+    assert structured["deliverable"] is False
+    assert structured["deliverable_next_step"] == \
+        "export_final(project_id=3, edl_version=8)"
+    assert structured["download_receipt"]["deliverable"] is False
 
 
 def test_version_pinned_preview_download_returns_server_receipt(
