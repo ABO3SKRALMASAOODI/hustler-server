@@ -343,9 +343,6 @@ def add_region_effect(ctx, effect, region, start, end, strength=None,
                  ("scale", scale)):
         if v is not None:
             item[k] = v
-    flash = _flash_refusal(edl, item)
-    if flash:
-        return flash
     box = _region_box(reg) if (reg or {}).get("shape") not in (
         "face", "card", "glyph") else None
     if box is not None and on_face is not True:
@@ -360,25 +357,19 @@ def add_region_effect(ctx, effect, region, start, end, strength=None,
     res = _write.commit(ctx, [_write.upsert_fx(item)],
                         f"region {effect} in {(reg or {}).get('shape')} at "
                         f"{s:g}-{e:g}s [{fid}]")
-    return _done(res, _notes(edl, region=reg))
+    notes = list(_notes(edl, region=reg) or [])
+    flash = _flash_notice(edl, item)
+    return _done(res, notes + ([flash] if flash else []))
 
 
-def _flash_refusal(edl, item):
-    """Flash safety (owner rule): an automatic write never takes the
-    program past 3 full-frame flashes in a second."""
-    try:
-        import flash_safety
-        before = flash_safety.assess(edl)
-        after = flash_safety.assess(dict(edl, fx=list(edl.get("fx") or [])
-                                         + [item]))
-    except Exception:  # noqa: BLE001 — the export gate judges it again
-        return None
-    if after["over_limit"] and not before["over_limit"]:
-        return (f"REJECTED: that would play {after['peak_per_s']} "
-                f"full-frame flashes in one second (the limit is "
-                f"{after['max_per_s']}); use a smaller region, a softer "
-                "effect or a longer window.")
-    return None
+def _flash_notice(edl, item):
+    """How fast the film flashes with this region effect, when that passes
+    the photosensitivity limit (information; the effect is kept). It used to
+    refuse the write (p5968, 19 Nov 2026: flashing the customer asked for
+    was refused or removed)."""
+    import flash_safety
+    return flash_safety.notice(dict(edl, fx=list(edl.get("fx") or [])
+                                    + [item]))
 
 
 def remove_region_effect(ctx, ids):

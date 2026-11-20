@@ -21,11 +21,12 @@ kick in a track the user supplied). It marks structure; it never decorates.
   plain dissolve or wipe is the fallback, never the habit.
 - Junctions only at real scene changes. A jump cut inside one continuous
   take stays bare (set_junction's default cuts='scene' already skips them).
-- Flash safety is on: automatic placements keep at most 3 full-frame
-  flashes a second, counted together with every flash the edit already
-  plays (accents, hit flashes, box steps, matte cuts, strobes). More needs
-  the user's explicit ask (they asked for strobing or flashing), and the
-  export is then flagged contains_flashing.
+- Flash safety informs: what you write is kept. Past 3 full-frame flashes
+  a second, counted with every flash the edit already plays (accents, hit
+  flashes, box steps, matte cuts, strobes), the result says how fast the
+  film flashes and the export is flagged contains_flashing. Flashes or
+  strobes the customer asked for (in any message, in any language) stay;
+  do not go past 3 a second when nobody asked for flashing.
 - No device adds a sound or a zoom. Never add music to get a beat grid:
   beats, downbeats and onsets exist only on a track the user supplied;
   otherwise the clock is the speaker (on='stress').
@@ -54,8 +55,8 @@ kick in a track the user supplied). It marks structure; it never decorates.
 
 - Accelerating negatives into a payoff (ref 04): add_accent kind=negative,
   on=stress, density=accelerate, start/end around the build, count 6-9.
-  Gaps shrink monotonically into the payoff; flash safety thins the tail
-  unless the user asked for strobing.
+  Gaps shrink monotonically into the payoff; past 3 a second the result
+  says so (keep the tail when the customer asked for strobing).
 - Card-clipped white hits (ref 02): add_accent kind=white_hit on stresses
   with region {shape: card}: a 1-frame white peak inside the rounded card
   whose light lingers, then drains to 0 over 3-5 frames (decay_f, default
@@ -90,8 +91,9 @@ kick in a track the user supplied). It marks structure; it never decorates.
 - A hit on the payoff word itself, or inside the payoff hold.
 - Negatives, white hits and boxes mixed in one section (no family).
 - A junction on every jump cut of a talking head.
-- A strobe or a dense accent train without the user's ask (flash safety
-  refuses or thins it; do not work around it with apply_edit_batch).
+- A strobe or a dense accent train nobody asked for.
+- Removing flashes or strobes the customer asked for because the result
+  or a check says the film flashes: that is information, not a defect.
 - A beat-synced accent request with no user track: never add music for a
   clock; offer on='stress'.
 - A card region where no card is on screen: the render omits that accent
@@ -103,8 +105,8 @@ kick in a track the user supplied). It marks structure; it never decorates.
 
 1. Read the write's ledger line: punctuation and transition counts inside
    the budget.
-2. Read the result's thinned note: if flash safety held hits back, say so;
-   do not re-add them.
+2. Read the result's flash note: past 3 a second the export is flagged
+   contains_flashing; keep what the customer asked for.
 3. Render a preview and look at the frames around each landing (look_at at
    the item's start, and one frame either side): the hit lands on the word's
    onset frame, exactly 1-2 frames, and the frames around it are untouched.

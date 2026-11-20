@@ -104,7 +104,7 @@ def test_a_darkening_box_over_people_is_refused_unless_asked(monkeypatch):
     commits = []
     monkeypatch.setattr(composite_tools, "_executor_refusal", lambda: None)
     monkeypatch.setattr(composite_tools, "_latest", lambda c: {"keep": [[0, 24.8]], "fx": []})
-    monkeypatch.setattr(composite_tools, "_flash_refusal", lambda edl, item: None)
+    monkeypatch.setattr(composite_tools, "_flash_notice", lambda edl, item: "")
     monkeypatch.setattr(composite_tools._write, "commit",
                         lambda c, ops, what: commits.append(ops) or f"EDL v1 -> v2: {what}")
     monkeypatch.setattr(composite_tools, "_done", lambda res, notes=None: res)

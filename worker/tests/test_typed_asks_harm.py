@@ -248,3 +248,13 @@ def test_a_length_ask_the_ledger_missed_is_told_on_the_checks_reading(monkeypatc
     note = agent_loop._asks_check(ctx, "draft")
     assert not calls and ledger["asks"][0]["length"] == "none"
     assert "LENGTH: a1" in note and "16.0 s of the 20.0 s" in note
+
+
+def test_what_an_ask_asked_for_is_never_unasked_harm_whatever_the_reply_says():
+    # p5968 (19 Nov 2026): the check listed the strobes a paying user asked for ("black/white flashes")
+    # as unasked harm, "suggested fix: remove", because the editor's reply said they passed a flash budget
+    # and the export was flagged; the editor removed them. The check is told the mark is information.
+    s = asks.CHECK_SYSTEM
+    assert "What an ask asked for is never unasked harm" in s
+    assert "photosensitivity guideline" in s and "marked as containing flashing" in s
+    assert "information for viewers, not harm" in s

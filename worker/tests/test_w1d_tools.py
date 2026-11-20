@@ -133,24 +133,29 @@ def test_accelerate_spacing_shrinks_monotonically_into_the_payoff():
     assert all(g2 < g1 for g1, g2 in zip(gaps, gaps[1:])), gaps
 
 
-def test_flash_safety_thins_automatic_hits_and_reports_it():
+def test_every_hit_the_editor_writes_is_kept_and_the_flashing_is_said():
+    """p5968 (19 Nov 2026): the verb thinned to 3 flashes a second unless a
+    word rule found "strobe" or "flash" in this one message, so strobes a
+    paying user asked for ("add FX ... white flashes and strobe effects",
+    then "maybe black/white flashes") were held back or removed. What the
+    editor writes stays; the result says how fast the film flashes."""
+    import flash_safety
+    hits = [5.0, 5.12, 5.24, 5.36, 5.48, 5.6]
+    for text in ("", "make it strobe on those words",
+                 "ponle destellos blancos en esas palabras"):
+        ctx = Ctx(TALK, user_message=text)
+        out = P.add_accent(ctx, "negative", at=hits)
+        assert out.startswith("EDL"), out
+        assert len(_fx(ctx, "accent")) == 6, text
+        assert "held" not in out and "kept as written" in out
+        assert "6 full-frame flashes in one second" in out
+        assert flash_safety.assess(ctx.edl)["over_limit"] is True
+
+
+def test_a_calm_write_says_nothing_about_flashing():
     ctx = Ctx(TALK)
-    hits = [5.0, 5.12, 5.24, 5.36, 5.48, 5.6]
-    out = P.add_accent(ctx, "negative", at=hits)
-    assert out.startswith("EDL") and "flash safety held 3 back" in out, out
-    assert len(_fx(ctx, "accent")) == 3
-    import flash_safety
-    assert flash_safety.assess(ctx.edl)["over_limit"] is False
-
-
-def test_the_users_ask_for_strobing_keeps_every_hit_and_flags_it():
-    ctx = Ctx(TALK, user_message="make it strobe on those words")
-    hits = [5.0, 5.12, 5.24, 5.36, 5.48, 5.6]
-    out = P.add_accent(ctx, "negative", at=hits)
-    assert len(_fx(ctx, "accent")) == 6 and "flagged" in out
-    import flash_safety
-    got = flash_safety.assess(ctx.edl, request_text=ctx.user_message)
-    assert got["over_limit"] and got["contains_flashing"]
+    out = P.add_accent(ctx, "negative", at=[5.0, 6.5])
+    assert out.startswith("EDL") and "contains_flashing" not in out
 
 
 def test_local_hits_are_not_flashes():
@@ -163,16 +168,14 @@ def test_local_hits_are_not_flashes():
 
 @pytest.mark.parametrize("region", [
     {"shape": "face"}, {"shape": "rect", "box": [0.1, 0.1, 0.9, 0.7]}])
-def test_hits_the_export_counts_as_flashes_are_thinned_like_them(region):
+def test_hits_the_export_counts_as_flashes_are_kept_and_said(region):
     """A face (solved at render) or a large box: the export gate counts
-    those hits as full-frame flashes (AccentFx.flash_times), so the verb
-    thins them by the same reading — never writes what the gate flags."""
+    those hits as full-frame flashes (AccentFx.flash_times); the verb keeps
+    them and reports the same reading."""
     ctx = Ctx(TALK)
     hits = [5.0, 5.12, 5.24, 5.36, 5.48, 5.6]
     out = P.add_accent(ctx, "negative", at=hits, region=region)
-    assert "flash safety held 3 back" in out, out
-    import flash_safety
-    assert flash_safety.assess(ctx.edl)["over_limit"] is False
+    assert len(_fx(ctx, "accent")) == 6 and "contains_flashing" in out, out
 
 
 def test_beats_need_a_track_the_user_supplied():
@@ -208,10 +211,12 @@ def test_colour_hit_card_region_and_bad_arguments():
                         "negative").startswith("REJECTED")
 
 
-def test_strobe_needs_the_users_ask_above_three_changes_a_second():
+def test_a_fast_strobe_is_written_and_its_flashing_said():
     frames = ["media/p1/a.png", "media/p1/b.png", "src:3.0", "program"]
+    # no word in the message names strobing: written all the same, and
+    # the result says how fast it flashes (p5968)
     out = P.add_strobe(Ctx(TALK), 2.0, 2.8, frames=frames, hold=2)
-    assert out.startswith("REJECTED") and "Flash safety" in out
+    assert out.startswith("EDL") and "contains_flashing" in out, out
     ctx = Ctx(TALK, user_message="strobe the product shots")
     out = P.add_strobe(ctx, 2.0, 2.8, frames=frames, hold=2,
                        negate="alternate", fit="register")
@@ -225,8 +230,8 @@ def test_strobe_needs_the_users_ask_above_three_changes_a_second():
     assert st["device"] == "strobe_frames" and st["fit"] == "register"
     # three images held 8 frames in under a second: 3 changes, allowed
     slow = Ctx(TALK)
-    assert P.add_strobe(slow, 2.0, 2.8, frames=frames[:3],
-                        hold=8).startswith("EDL")
+    out = P.add_strobe(slow, 2.0, 2.8, frames=frames[:3], hold=8)
+    assert out.startswith("EDL") and "contains_flashing" not in out
 
 
 def test_strobe_refusals():
@@ -300,38 +305,31 @@ def test_set_junction_origins_and_dark_datamosh():
     assert P.set_junction(ctx, "sparkle", at=5.0).startswith("REJECTED")
 
 
-def test_hit_flash_junctions_pass_flash_safety():
+def test_hit_flash_junctions_are_all_written_and_the_flashing_said():
     edl = {"keep": [[0, 1], [2, 2.3], [3, 3.3], [4, 4.3], [5, 5.3],
                     [6, 9]]}
     ctx = Ctx(edl)
     out = P.set_junction(ctx, "hit_flash", cuts="every")
     assert out.startswith("EDL"), out
+    assert len(_fx(ctx, "junction")) == 5
     import flash_safety
-    assert flash_safety.assess(ctx.edl)["over_limit"] is False
+    assert flash_safety.assess(ctx.edl)["over_limit"] is True
+    assert "contains_flashing" in out
 
 
-def test_a_second_write_is_thinned_against_the_flashes_already_there():
-    """The export gate counts every flash the edit plays; a later write is
-    thinned against the ones already written, not only against itself."""
-    import flash_safety
+def test_a_second_write_is_kept_and_counted_with_the_flashes_already_there():
+    """The export gate counts every flash the edit plays: a later write is
+    reported against the ones already written, and kept."""
     ctx = Ctx(TALK)
-    assert P.add_accent(ctx, "negative", at=[5.0, 5.2, 5.4]).startswith(
-        "EDL")
+    out = P.add_accent(ctx, "negative", at=[5.0, 5.2, 5.4])
+    assert out.startswith("EDL") and "contains_flashing" not in out
     out = P.add_accent(ctx, "white_hit", at=[5.6, 5.8])
-    assert out.startswith("REJECTED") and "flash safety" in out, out
-    out = P.add_accent(ctx, "white_hit", at=[5.6, 6.5])
-    assert "flash safety held 1 back" in out, out
-    assert flash_safety.assess(ctx.edl)["over_limit"] is False
-    # box steps flash on each large step; with a hit trio right at the cut
-    # the junction is held back and says so
+    assert out.startswith("EDL") and "5 full-frame flashes" in out, out
+    assert len(_fx(ctx, "accent")) == 5
     ctx = Ctx(CUTS)
     P.add_accent(ctx, "negative", at=[4.7, 4.85])
     out = P.set_junction(ctx, "box_steps", at=5.0)
-    assert out.startswith("REJECTED") and "flash" in out, out
-    assert flash_safety.assess(ctx.edl)["over_limit"] is False
-    # the user's ask keeps it (the export is flagged)
-    ctx.user_message = "flash it hard on the cut, strobe it"
-    assert P.set_junction(ctx, "box_steps", at=5.0).startswith("EDL")
+    assert out.startswith("EDL") and "contains_flashing" in out, out
 
 
 def test_remove_punctuation():
