@@ -267,7 +267,14 @@ def test_critic_evidence_reads_the_audit_and_failed_proof_metrics():
         "flash_risk": {"value": 1.0, "pass": True}}}]}
     rows = motion_qa.critic_evidence(edl, {}, proof_result=proof)
     metrics = {r["metric"] for r in rows}
-    assert "flash_rate_exceeded" in metrics and "land_err_f" in metrics
+    assert "land_err_f" in metrics
+    # the flash rate informs and never corroborates a blocking flash
+    # complaint (p5968: strobes the customer asked for were removed)
+    assert "flash_rate_exceeded" not in metrics
+    audit = motion_qa.audit(edl, {})
+    flash = [f for f in audit["findings"]
+             if f["code"] == "flash_rate_exceeded"]
+    assert flash and flash[0]["severity"] == "advisory"
     lerr = [r for r in rows if r["metric"] == "land_err_f"][0]
     assert lerr["time_s"] == pytest.approx(2.08)
 

@@ -160,14 +160,19 @@ def test_black_and_white_the_user_asked_for_is_not_a_finding(clips):
     assert res["measures"]["colour"]["bw_share"] < 0.1
 
 
-def test_flashing_render_is_blocking_and_names_the_limit(clips):
-    res = motion_critic.critique(clips["strobe"], _edl(), {}, deep=False)
-    f = [x for x in res["findings"] if x["code"] == "flash_rate"]
-    assert f and f[0]["severity"] == "blocking"
-    assert res["measures"]["flash"]["peak_per_s"] > 3
-    opted = motion_critic.critique(clips["strobe"], _edl(), {}, deep=False,
-                                   request_text="strobe it hard")
-    assert "flash_rate" not in _codes(opted)
+def test_flashing_render_informs_and_never_blocks_or_removes(clips):
+    """p5968 (19 Nov 2026): the flash lens was blocking, with remove ops,
+    unless a word rule found "strobe" in this one request; the editor took
+    out strobes a paying user asked for. It informs now, whatever the
+    request says."""
+    for text in (None, "strobe it hard", "add FX without changing the edit"):
+        res = motion_critic.critique(clips["strobe"], _edl(), {}, deep=False,
+                                     request_text=text)
+        f = [x for x in res["findings"] if x["code"] == "flash_rate"]
+        assert f and f[0]["severity"] == "advisory", text
+        assert not f[0].get("ops") and not f[0].get("op")
+        assert "contains_flashing" in f[0]["message"]
+        assert res["measures"]["flash"]["peak_per_s"] > 3
 
 
 def test_critique_never_raises_and_scores_a_clean_clip_high(clips, tmp_path):
