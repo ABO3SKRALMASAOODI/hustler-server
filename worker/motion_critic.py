@@ -20,6 +20,10 @@ Lenses (each finding: {code, lens, severity, t, id, message, fix, op?}):
   rhythm     visual events (cuts, punctuation, graphic and device
              entrances) per second against the genre's reference band;
              stretches where only captions move
+  craft      what every reference has, measured on the render: a picture
+             that moves or cuts, a sound bed with hits, an opening that
+             moves (rubric v3's motion_design, sound, story_hook); the
+             score is held to rubric v3's aggregate of them
   words      cuts inside a word, an opening mid-sentence, a payoff that
              does not breathe
   type       the type ladder (render_qc's measured cap heights when the
@@ -51,7 +55,7 @@ import time
 
 CRITIC_VERSION = 1
 SEVERITIES = ("blocking", "fix", "advisory")
-LENSES = ("brand", "flash", "colour", "rhythm", "words", "type",
+LENSES = ("brand", "flash", "colour", "rhythm", "craft", "words", "type",
           "restraint", "faces", "motion", "range")
 _WEIGHT = {"blocking": 2.0, "fix": 0.7, "advisory": 0.2}
 
@@ -105,6 +109,23 @@ FLICKER_RATIO = 2.5
 FLICKER_ABS = 0.02
 # Repeated frames inside a slowed window.
 REPEAT_SHARE = 0.3
+# What every reference reel has and a static silent template lacks (rubric
+# v3's motion_design, sound and story_hook), measured on the render's own
+# pixels and samples. Calibrated on the owner's 41 reference reels (20 Nov
+# 2026, mean |dY| of 64-px thumbs between frames): each moves on >= 17% of
+# its frames or cuts >= 0.8/s; each has a sound bed (<= 7% of it below
+# QUIET_DB) with >= 0.3 audible hits a second; each first 1.5 s moves on
+# >= 16% of its frames or cuts. A picture-card template with no sound
+# scored 10/10 here (p5965-p5967, 18 Nov) because only defects cost points.
+MOVE_LEVEL = 0.6         # mean |dY| (0-255) of a frame that changes
+MOVING_REF = 0.15        # moving-frame share the quietest reference clears
+CUTS_REF = 0.8           # cuts/s that carry a picture on their own
+QUIET_DB = -50.0         # a 10 ms frame below this is silence
+HIT_RISE_DB = 10.0       # a hit rises this far over the last 100 ms ...
+HIT_LEVEL_DB = -35.0     # ... to at least this level
+HITS_REF = 0.3           # hits/s the sparsest reference has
+HOOK_S = 1.5
+HOOK_MOVING = 0.1
 
 
 # ── small helpers ────────────────────────────────────────────────────────
@@ -364,6 +385,8 @@ def lens_rhythm(view, edl, index, plan, genre):
     q1, med, q3 = band["events_per_s"]
     measure = {"events": len(ev), "events_per_s": round(rate, 3),
                "cuts": len(cuts), "punctuation": n_punct,
+               "first_cut_s": (round(min(cuts) / view.fps, 2)
+                               if cuts and view.fps else None),
                "asl_s": round(prog / (len(cuts) + 1), 2) if prog else None,
                "genre": genre, "band_events_per_s": [q1, med, q3]}
     if rate < 0.5 * q1 and q1 > 0.3:
@@ -401,6 +424,109 @@ def lens_rhythm(view, edl, index, plan, genre):
                      "or tighten the cut — never a zoom just to fill it"),
                 t=x))
     return out, measure
+
+
+def _sound_measure(path, prog):
+    """(quiet share, hits/s) of the render's first ``prog`` seconds; quiet
+    share 1.0 when it has no audio. A hit is a 10 ms frame that rises
+    HIT_RISE_DB over the quietest of the 100 ms before it, to at least
+    HIT_LEVEL_DB, at most one per 150 ms."""
+    import numpy as np
+    db, frame_s = audio_rms(path)
+    if db is None or not prog:
+        return 1.0, 0.0
+    db = db[:max(1, int(prog / frame_s))]
+    quiet = float((db < QUIET_DB).mean())
+    k = 10
+    hits, last = 0, -10 ** 9
+    for i in range(1, len(db)):
+        if db[i] < HIT_LEVEL_DB or i - last <= 15:
+            continue
+        if db[i] - float(np.min(db[max(0, i - k):i])) >= HIT_RISE_DB:
+            hits, last = hits + 1, i
+    return quiet, hits / float(prog)
+
+
+def lens_craft(view, path, rhythm=None):
+    """What the references never lack, measured on the render: a picture
+    that moves or changes, a sound bed with hits, an opening that moves.
+
+    Returns (findings, measure); measure["dims"] holds rubric v3's
+    motion_design, sound and story_hook as the signal places them (1-10,
+    10 = level with every reference on this measure). It measures only
+    absence; whether what is there has taste is the rater's eye."""
+    import numpy as np
+    out = []
+    prog = view.n / view.fps if view.fps else 0.0
+    g = getattr(view, "gray", None)
+    if g is None or view.n < 2 or prog <= 0:
+        return out, {}
+    d = np.abs(np.diff(np.asarray(g, np.float32), axis=0)).mean(axis=(1, 2))
+    moving = float((d > MOVE_LEVEL).mean())
+    cuts = int((rhythm or {}).get("cuts") or 0)
+    cuts_per_s = cuts / prog
+    picture = min(1.0, max(moving / MOVING_REF, cuts_per_s / CUTS_REF))
+    motion = 1.0 + 9.0 * picture
+    quiet, hits_per_s = _sound_measure(path, prog)
+    bed = min(1.0, (1.0 - quiet) / 0.9)
+    sound = 1.0 + 9.0 * bed * (0.6 + 0.4 * min(1.0, hits_per_s / HITS_REF))
+    h = max(1, int(HOOK_S * view.fps))
+    hook_moving = float((d[:h] > MOVE_LEVEL).mean())
+    first_cut = (rhythm or {}).get("first_cut_s")
+    hook_cut = first_cut is not None and float(first_cut) < HOOK_S
+    hook = 10.0 if hook_cut else \
+        1.0 + 9.0 * min(1.0, hook_moving / HOOK_MOVING)
+    dims = {"motion_design": round(motion, 1), "sound": round(sound, 1),
+            "story_hook": round(hook, 1)}
+    measure = {"moving_share": round(moving, 3),
+               "cuts_per_s": round(cuts_per_s, 3),
+               "quiet_share": round(quiet, 3),
+               "hits_per_s": round(hits_per_s, 3),
+               "hook_moving_share": round(hook_moving, 3),
+               "dims": dims}
+    if motion < 8.0:
+        out.append(_f(
+            "fix", "craft", "static_picture",
+            f"the picture changes on {100 * moving:.0f}% of frames and cuts "
+            f"{cuts_per_s:.2f}/s; every reference moves on at least "
+            f"{100 * MOVING_REF:.0f}% or cuts {CUTS_REF}/s.",
+            fix="add motion that carries meaning: a camera move or "
+                "add_zoom_path on each held picture, set_overlay_motion / "
+                "set_text_motion entrances, new pictures from the footage or "
+                "source_broll / search_stock on each beat, and cuts on the "
+                "action instead of holding one card",
+            measure={k: measure[k] for k in ("moving_share", "cuts_per_s")}))
+    if sound < 8.0:
+        what = ("no sound at all" if quiet >= 0.99 else
+                f"silence under {100 * quiet:.0f}% of it" if bed < 1.0 else
+                f"a bed but only {hits_per_s:.2f} hits/s")
+        out.append(_f(
+            "fix", "craft", "no_sound_design",
+            f"{what}; every reference has a sound bed under all of it and "
+            f"at least {HITS_REF} audible hits a second.",
+            fix="lay music under the whole piece (add_library_music, or "
+                "add_music) and SFX on the cuts and entrances (search_sfx "
+                "then add_sfx: whooshes on transitions, hits on reveals)",
+            measure={k: measure[k] for k in ("quiet_share", "hits_per_s")}))
+    if hook < 8.0:
+        out.append(_f(
+            "fix", "craft", "static_hook",
+            f"the first {HOOK_S:.1f}s barely move ({100 * hook_moving:.0f}% "
+            "of frames) and do not cut: nothing stops a thumb.",
+            fix="open on the strongest moving moment or result, with type "
+                "or a picture that enters in the first second",
+            t=0.0, measure={"hook_moving_share": measure["hook_moving_share"]}))
+    return out, measure
+
+
+def craft_ceiling(dims):
+    """Rubric v3's aggregation over the measured dimensions: the mean,
+    held to the weakest plus 2.5, rounded down to the half point."""
+    vals = [float(v) for v in (dims or {}).values() if v is not None]
+    if not vals:
+        return 10.0
+    cap = min(sum(vals) / len(vals), min(vals) + 2.5)
+    return math.floor(cap * 2.0) / 2.0
 
 
 def _designed_spans(edl, prog):
@@ -1949,6 +2075,10 @@ def critique(path, edl, index=None, *, request_text=None, report=None,
     if got:
         findings += got[0]
         measures["rhythm"] = got[1]
+    got = run("craft", lens_craft, view, path, measures.get("rhythm"))
+    if got:
+        findings += got[0]
+        measures["craft"] = got[1]
     got = run("words", lens_words, edl, index, plan, program_s, path,
               cut_level)
     findings += got or []
@@ -1989,6 +2119,10 @@ def critique(path, edl, index=None, *, request_text=None, report=None,
                                  f.get("t") if f.get("t") is not None
                                  else 1e9))
     score = 10.0 - sum(_WEIGHT.get(f["severity"], 0.2) for f in findings)
+    # Only defects cost points above; what the references have and this
+    # render lacks (motion, sound, an opening) holds the score down too.
+    score = min(score, craft_ceiling(
+        (measures.get("craft") or {}).get("dims")))
     score = round(max(0.0, min(10.0, score)), 1)
     strengths = _strengths(findings, measures)
     out = {"version": CRITIC_VERSION, "score": score, "genre": genre,
@@ -2044,6 +2178,13 @@ def critique_text(res, limit=10):
     if rs:
         bits.append(f"graphics {100 * float(rs.get('graphics_share') or 0):.0f}"
                     "% of runtime")
+    cr = m.get("craft") or {}
+    if cr.get("dims"):
+        bits.append("measured craft " + ", ".join(
+            f"{k} {v}/10" for k, v in cr["dims"].items())
+            + f" (picture moves on {100 * float(cr.get('moving_share') or 0):.0f}% "
+            f"of frames, silence {100 * float(cr.get('quiet_share') or 0):.0f}%, "
+            f"{cr.get('hits_per_s')} sound hits/s)")
     if bits:
         lines.append("MEASURES: " + "; ".join(bits) + ".")
     for f in fs[:limit]:

@@ -182,6 +182,42 @@ def test_critique_never_raises_and_scores_a_clean_clip_high(clips, tmp_path):
     assert bad["findings"][0]["code"] == "unreadable"
 
 
+@pytest.fixture(scope="module")
+def silent_cards(tmp_path_factory):
+    """p5965-p5967 (18 Nov): one still picture card per beat, a hard cut
+    every 5 s, no motion, no sound."""
+    d = tmp_path_factory.mktemp("cards")
+    out = str(d / "cards.mp4")
+    _ff("-f", "lavfi", "-i",
+        "color=c=0x334455:size=270x480:rate=25,"
+        "geq=lum='mod(X+2*Y+70*floor(N/125),220)+16':cb=128:cr=128",
+        "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono",
+        "-t", "20", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset",
+        "ultrafast", "-c:a", "aac", "-shortest", out)
+    return out
+
+
+def test_a_static_silent_card_template_cannot_score_ten(silent_cards):
+    res = motion_critic.critique(silent_cards, _edl(20.0), {}, deep=False)
+    assert res["score"] is not None and res["score"] <= 4.0
+    dims = res["measures"]["craft"]["dims"]
+    assert dims["sound"] <= 2 and dims["motion_design"] <= 5
+    craft = {f["code"]: f for f in res["findings"] if f["lens"] == "craft"}
+    assert {"static_picture", "no_sound_design", "static_hook"} <= set(craft)
+    # the answer names what to add, with the tools that add it
+    assert "add_sfx" in craft["no_sound_design"]["fix"]
+    assert "add_zoom_path" in craft["static_picture"]["fix"]
+    text = motion_critic.critique_text(res)
+    assert "no_sound_design" in text and "sound 1.0/10" in text
+
+
+def test_a_moving_clip_with_sound_keeps_its_craft_dimensions(clips):
+    res = motion_critic.critique(clips["colour"], _edl(), {}, deep=False)
+    dims = res["measures"]["craft"]["dims"]
+    assert dims["motion_design"] == 10.0 and dims["story_hook"] == 10.0
+    assert not {"static_picture", "static_hook"} & _codes(res)
+
+
 # ── words and audio-verified joins ──────────────────────────────────────
 
 @pytest.fixture(scope="module")
