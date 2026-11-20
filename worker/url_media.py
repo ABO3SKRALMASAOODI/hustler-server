@@ -813,6 +813,19 @@ def _fetch_page_image(url, workdir):
         str(last) if last else "that page names no photo to download")
 
 
+def _page_photos_failed(exc):
+    """Keep the page-photo fallback's own failure visible.
+
+    When the fallback fails too, the customer is told the extractor's error,
+    which is about the page itself ('HTTP Error 403'). The fallback's reason
+    (a photo nothing could read, a missing ffprobe) went nowhere, so a broken
+    fallback read as a plain 403 (20 Nov 2026). It is logged here, and the
+    raise sites chain it as the cause."""
+    print(f"[fetch_url] page photos failed: {_safe_detail(str(exc))[:160]}",
+          flush=True)
+    return exc
+
+
 def fetch(url, workdir, prefer=None):
     """Download `url` into `workdir` and say what it is.
 
@@ -852,6 +865,7 @@ def fetch(url, workdir, prefer=None):
     page_html = (not direct and
                  ctype in (None, "text/html", "application/xhtml+xml"))
     page_tried = False
+    page_error = None
     if page_html and prefer == KIND_IMAGE and not ytaccess.is_youtube_url(url):
         # A photo asked of a web page: the page's own photos, before any
         # video extractor (ticket 1015).
@@ -859,7 +873,8 @@ def fetch(url, workdir, prefer=None):
         try:
             path, info = _fetch_page_image(url, workdir)
             extractor = "page_image"
-        except FetchMediaError:
+        except FetchMediaError as exc:
+            page_error = _page_photos_failed(exc)
             path, info = None, {}
     if direct:
         try:
@@ -880,14 +895,15 @@ def fetch(url, workdir, prefer=None):
             try:
                 path, info = _fetch_page_image(url, workdir)
                 extractor = "page_image"
-            except FetchMediaError:
+            except FetchMediaError as exc:
+                page_error = _page_photos_failed(exc)
                 path = None
     if path is None or not os.path.exists(path):
         if not _ytdlp_available():
             raise FetchMediaError(
                 str(direct_error) if direct_error else
                 "that link is a web page rather than a media file, and this "
-                "deployment cannot extract media from pages")
+                "deployment cannot extract media from pages") from page_error
         try:
             path, info = _extract_with_fallback(url, workdir, prefer=prefer)
         except FetchMediaError as extract_error:
@@ -900,8 +916,10 @@ def fetch(url, workdir, prefer=None):
                 _clear_partials(workdir)
                 try:
                     path, info = _fetch_page_image(url, workdir)
-                except FetchMediaError:
-                    raise extract_error
+                except FetchMediaError as exc:
+                    raise extract_error from _page_photos_failed(exc)
+            elif page_error is not None:
+                raise extract_error from page_error
             else:
                 raise
         extractor = (info or {}).get("extractor_key") or "yt-dlp"

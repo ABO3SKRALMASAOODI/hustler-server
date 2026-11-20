@@ -3,6 +3,7 @@
 extractor met a 403 on the page, and the request ended with nothing."""
 
 import os
+import shutil
 import sys
 
 import pytest
@@ -29,6 +30,16 @@ ARTICLE = """<!doctype html><html><head>
 def _jpeg(path):
     from PIL import Image
     Image.new("RGB", (64, 48), (120, 30, 30)).save(path, "JPEG")
+
+
+# The downloaded photo is read by the real url_media.classify, which runs
+# ffprobe, as every executor image and CI do. Without it on PATH the photo
+# cannot be read, the fallback fails and fetch reports the extractor's 403
+# (20 Nov 2026: that read as a regression of the fallback). Run these through
+# .valmera/t.sh, which puts the box's ffprobe on PATH.
+needs_ffprobe = pytest.mark.skipif(
+    shutil.which("ffprobe") is None,
+    reason="url_media.classify reads the photo with ffprobe; not on PATH")
 
 
 def test_page_images_reads_lead_and_article_photos(tmp_path):
@@ -71,6 +82,7 @@ FORBIDDEN = ("[generic] detenidos-536442: Unable to download webpage: "
              "HTTP Error 403: Forbidden")
 
 
+@needs_ffprobe
 def test_photo_asked_of_an_article_downloads_its_lead_photo(monkeypatch,
                                                             tmp_path):
     calls = _wire(monkeypatch, tmp_path, extractor_error=FORBIDDEN)
@@ -84,12 +96,34 @@ def test_photo_asked_of_an_article_downloads_its_lead_photo(monkeypatch,
     assert calls["extract"] == 0
 
 
+@needs_ffprobe
 def test_unhinted_link_to_an_article_falls_back_to_its_photo(monkeypatch,
                                                              tmp_path):
     calls = _wire(monkeypatch, tmp_path, extractor_error=FORBIDDEN)
     got = url_media.fetch(PAGE, str(tmp_path))
     assert calls["extract"] == 1
     assert got["kind"] == url_media.KIND_IMAGE
+
+
+UNREADABLE = "that file is not audio, video or an image we can read (boom)"
+
+
+@pytest.mark.parametrize("prefer", [None, url_media.KIND_IMAGE])
+def test_a_failed_photo_fallback_is_not_hidden_behind_the_403(
+        monkeypatch, tmp_path, capsys, prefer):
+    """The customer still reads the page's 403; the fallback's own reason is
+    in the log and is the raised error's cause, never lost."""
+    _wire(monkeypatch, tmp_path, extractor_error=FORBIDDEN)
+
+    def unreadable(path):
+        raise url_media.FetchMediaError(UNREADABLE)
+
+    monkeypatch.setattr(url_media, "classify", unreadable)
+    with pytest.raises(url_media.FetchMediaError, match="403") as caught:
+        url_media.fetch(PAGE, str(tmp_path), prefer=prefer)
+    assert str(caught.value.__cause__) == UNREADABLE
+    assert "[fetch_url] page photos failed: " + UNREADABLE in \
+        capsys.readouterr().out
 
 
 def test_clip_asked_of_an_article_is_not_answered_with_a_photo(monkeypatch,
