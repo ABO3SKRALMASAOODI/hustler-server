@@ -1422,11 +1422,12 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
     prof = profile_for(kind)
     plan = arrange(song, marks, profile=prof)
     rep = {"song": os.path.basename(song_path), "supplied": bool(supplied), "words": len(marks["words"]),
-           "marks": {k: marks.get(k) for k in ("dur_s", "turn_s", "payoff_s", "end_hit_s", "drop_landing")}, "plan": {k: v for k, v in plan.items() if k != "grid"}}
+           "marks": {k: marks[k] for k in ("dur_s", "turn_s", "payoff_s", "end_hit_s")}, "plan": {k: v for k, v in plan.items() if k != "grid"}}
     if not plan.get("ok"):
         return rep
     from . import sound as SD
     l1 = dict(l1, sound=sounds_on_the_drop(l1.get("sound") or [], plan, float(l1["fps"])))
+    rep["drop_landing"] = marks.get("drop_landing")   # the sound's turn hit the drop was asked to join (screen placement)
     total = len(voice) / float(AU.SR)
     with tempfile.TemporaryDirectory(dir=os.path.dirname(os.path.abspath(out)) if out else None) as tmp:
         lv, _ = AU.level_voice(voice, tmp) if float(np.abs(voice).max()) > 1e-5 else (voice, {})
