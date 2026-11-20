@@ -161,13 +161,15 @@ def test_the_direction_names_roles_the_turn_and_the_payoff_apart(tmp_path, monke
     ctx = SimpleNamespace(supply=str(tmp_path))
     pack = dict(lines=[dict(i=i, text=f"line {i}") for i in range(6)])
     d = wf.direction_of(ctx, dict(title="t"), pack)
-    assert llm.calls[0]["effort"] == "medium"
+    assert llm.calls[0]["effort"] == "high"
     assert d["turn_seg"] == 5 and d["story_turn_seg"] == 3 and d["contract"] == wf.DIRECTION_CONTRACT
     # ranked best first with alternates: up to six are kept, the film lands the first that fit its timing
     assert len(d["display"]) == 6 and [r["role"] for r in d["display"][:3]] == ["hook", "figure", "hook"] and d["display"][1]["accent"] is True
-    assert wf.direction_of(ctx, {}, pack) == json.load(open(tmp_path / "direction.json")) and len(llm.calls) == 1
+    assert wf.direction_of(ctx, {}, pack)["display"] == json.load(open(tmp_path / "director.json"))["display"] and len(llm.calls) == 1
+    # an answer that lays no device still gives the film devices: the signal director's asks
+    assert d["asks"] and "the answer laid no device" in " ".join(d["repairs"])
     # an older cache is read again under the new contract; a turn after the payoff is no turn
-    json.dump(dict(display=[], turn_seg=2), open(tmp_path / "direction.json", "w"))
+    json.dump(dict(display=[], turn_seg=2, contract=3), open(tmp_path / "director.json", "w"))
     llm.answer = dict(display=[], past_segs=[], payoff_seg=4, turn_seg=5, arc=[])
     d2 = wf.direction_of(ctx, {}, pack)
     assert len(llm.calls) == 2 and d2["turn_seg"] == 4 and d2["story_turn_seg"] is None

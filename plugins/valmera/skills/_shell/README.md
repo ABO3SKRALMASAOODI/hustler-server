@@ -103,11 +103,26 @@ close, what the source must have). `<state root>/ledger.json` keeps the last 30 
 workflow. The ideas stage only sees styles outside the last three, and the shell refuses a
 script whose style is one of them.
 
-## The alien bank
+## The Director and the palette (20 Nov 2026)
 
-`chain.alien_bank(ctx, l1_path)`: a scene that carries asks under `alien` (rhyme, diecut, lamp, arc, answer; the
-engine's `worker/scene/alien`) is laid out before the engine draws it, through heavy.sh, and the scene to draw is
-written beside it as `*.alien.json` with `supply/alien_bank.json` saying what stood. Every render path calls it.
+`director.py` (DIRECTOR_CONTRACT 4): one model call a film chooses devices for every moment from the engine's palette
+(beats, word-ranged sections with surface, layout and energy, stacked asks), repaired never refused, with a signal
+director when the provider fails; cached at `supply/director.json`. `devices_ledger.py`: each delivered film's device
+sequence (`.valmera/workflow/devices.jsonl`), shown to the next film's Director.
+
+`chain.lay_devices(ctx, l1_path)` (formerly `alien_bank`): a scene that carries asks under `devices` (the Director's) or
+`alien` is laid out by `worker/scene/palette` before the engine draws it, through heavy.sh; the scene to draw is written
+beside it (`*.devices.<sha>.json`) and `supply/devices_log.json` says what landed for each ask (an ask that cannot stand
+runs its device's fallback chain). Every render path of all four workflows calls it. `chain.measure_devices` records
+what the drawn film did by signal (`supply/devices_measure.json`, carried into film.json), never a veto.
+
+`chain.hear_devices(ctx, l1, beats, replan)`: the sound design hears the Director's devices. Stories (`wf3.score`), podcast
+shorts (`wf1_short.score`) and marketing proof reels (`wf3.with_director`) lay the scene's asks at score time, copy the
+palette's landings (`device_events`: frame, kind, strength) onto the scene and its beats, and plan the sound again on them
+with the film's own turn and words (`film.replan_sound`; `worker/score/sound.py` reads `device_events`: a tear sounds as a
+glitch, a world swapped behind the speaker as a landing, a leak or a halo not at all, and a landing never widens the
+film's allowance). No device makes a sound itself. `chain.model_env()` names this Mac's signal models
+(`VALMERA_MODELS`, `VALMERA_TORCH_PY` for the depth child) to the palette; the worker reads them from its environment only.
 
 **Every film gets music** (owner, 13 Nov 2026; `chain.music_version`, after the render, on a copy of the
 engine's film). `worker/music_film.py` reads the story's turn and payoff from the film's own lines (a model;

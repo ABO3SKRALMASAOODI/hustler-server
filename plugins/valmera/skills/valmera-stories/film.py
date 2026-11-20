@@ -881,8 +881,9 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
         ons = []
         for j, (w, _) in enumerate(pairs):
             nominal = Clock.f(w['t0']) + (lag if lag is not None else late)
-            if j == 0 and lag is None:
-                nominal = first
+            if j == 0 and lag is None and (w is ws[0] or first > a):
+                nominal = first                          # a line inks its first word as it opens; a word whose
+                                                         # leading words a display printed inks on its own word
             ons.append(max(nominal, first, ons[-1] + 1 if ons else 0))
         ceiling = min([h0 for h0, h1 in hold if h0 > first] +
                       ([f_end] if f_end is not None else [max(b, ons[-1] + 6)]))
@@ -1121,13 +1122,29 @@ def design_sound(l1, sup, d, turn_f=None, spoken=None, np10=None):
         # each word's own moment on the narration's clock (the film's clock repairs spans the aligner shared out)
         words = [dict(t0=float(a), t1=float(b)) for a, b in spoken] if spoken else \
             [dict(t0=float(w["start"]), t1=float(max(w["end"], w["start"] + 0.02))) for w in wd["words"]]
-        return SD.design(dict(l1, spine=spine, sound=[]), index=dict(words=words, video=dict(duration=dur)), src=sup["narration"],
-                         turn_s=(turn_f / FPS if turn_f is not None else None), bed=bool(d.get("bed")),
-                         supply=dict(np10=float(np10) if np10 is not None else None, bed=bool(d.get("bed")),
-                                     delivery_tail_s=float(d.get("delivery_tail_s", 0.0)),
-                                     tick_10s=d.get("tick_10s")))
+        sounds, rep = SD.design(dict(l1, spine=spine, sound=[]), index=dict(words=words, video=dict(duration=dur)), src=sup["narration"],
+                                turn_s=(turn_f / FPS if turn_f is not None else None), bed=bool(d.get("bed")),
+                                supply=dict(np10=float(np10) if np10 is not None else None, bed=bool(d.get("bed")),
+                                            delivery_tail_s=float(d.get("delivery_tail_s", 0.0)),
+                                            tick_10s=d.get("tick_10s")))
+        # what this plan was made with, so a later pass plans it again the same way (replan_sound: the Director's
+        # devices laid after the finish)
+        rep["replan"] = dict(turn_f=turn_f, np10=np10, bed=bool(d.get("bed")), delivery_tail_s=float(d.get("delivery_tail_s", 0.0)),
+                             tick_10s=d.get("tick_10s"), spoken=[[round(float(a), 4), round(float(b), 4)] for a, b in spoken] if spoken else None)
+        return sounds, rep
     except Exception as e:  # noqa: BLE001 - a film is never lost to its sound design
         return [], {"fault": repr(e)[:300]}
+
+
+def replan_sound(l1, sup):
+    """The film's sound design planned again on what l1 carries now, with the turn, supply and words its first plan was
+    made with (design_sound's ``replan``): the scene's device landings (``device_events``, worker/scene/palette) are
+    events it answers. (sounds, report); a fault is the report."""
+    a = (l1.get("sound_design") or {}).get("replan")
+    if not a:
+        return [], {"fault": "no first plan to follow"}
+    return design_sound(l1, sup, dict(bed=a.get("bed"), delivery_tail_s=a.get("delivery_tail_s", 0.0), tick_10s=a.get("tick_10s")),
+                        turn_f=a.get("turn_f"), spoken=[tuple(x) for x in a["spoken"]] if a.get("spoken") else None, np10=a.get("np10"))
 
 
 def audio_scene(l1, sup):
@@ -2367,6 +2384,13 @@ def taste_check(l1, beats):
         s = _rest(it.get("s", 1)) or 1
         x1, y0 = x + R.width(it["v"], it["t"]) * s / W, y - R.cap(it["v"]) * s / H
         if it["f"][1] - it["f"][0] <= 1:
+            continue
+        if it.get("role") == "graphic":
+            # type a device draws as picture (a marquee larger than the frame, a lockup behind the head, HUD fine
+            # print): the reading rules measure reading type only. The watermark's keep-out holds for all type.
+            if x < MARK[2] and x1 > MARK[0] and y0 < MARK[3] and y > MARK[1]:
+                bad.append(f"{it['id']} '{it['t'][:20]}': in the watermark's keep-out")
+                bad_ids.add(it['id'])
             continue
         if x < SAFE[0] - 2e-3 or x1 > SAFE[2] + 2e-3 or y0 < SAFE[1] - 2e-3 or y > SAFE[3] + 2e-3:
             bad.append(f"{it['id']} '{it['t'][:20]}': outside the safe area ({x:.3f},{y0:.3f})-({x1:.3f},{y:.3f})")

@@ -270,7 +270,8 @@ def test_remote_render_adapter_does_not_reserve_a_mac_compute_slot(tmp_path,monk
     if remote:monkeypatch.setenv('SHELL_RENDER_REMOTE',remote)
     else:monkeypatch.delenv('SHELL_RENDER_REMOTE',raising=False)
     monkeypatch.setattr(wf.wf3,'load_pack',lambda ctx:{})
-    monkeypatch.setattr(wf.chain,'alien_bank',lambda ctx,path:path)
+    monkeypatch.setattr(wf.chain,'lay_devices',lambda ctx,path:path)
+    monkeypatch.setattr(wf.chain,'measure_devices',lambda ctx,film,scene:None)
     def run(ctx,args,**kw):
         assert kw['heavy'] is expected
         from pathlib import Path

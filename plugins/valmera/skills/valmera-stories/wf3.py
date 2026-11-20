@@ -39,7 +39,7 @@ FORM = "short"
 # every buildable style: the story reels (reel.py, the judge's cut) and the first three (film.py), which a run takes only
 # when asked for by name (--args '{"style": ...}'): they left text-only stretches and one photograph on screen too long
 BUILD = dict(F.STYLES, **{k: R.builder(k) for k in R.STYLES})
-ALIEN_ALLOWED = ("rhyme", "arc")
+ALIEN_ALLOWED = ("rhyme", "arc", "diecut", "lamp", "answer")      # every device of the bank: the Director chooses (20 Nov 2026)
 REEL_SHOT_S, REEL_LINE_MAX, REEL_PER = 0.45, 10, 5     # a story reel asks the footage engine for a clip every 0.45 s of a line
 PICTURE_S = 0.5           # a line wants a distinct fitting picture about every half second (the judge: median shot 0.49 s)
 
@@ -1713,6 +1713,78 @@ def direction_of(ctx):
     return d
 
 
+def _director():
+    """_shell/director.py under a name of its own: the worker has a director.py too (the customer's Director)."""
+    import importlib.util
+    name = "valmera_shell_director"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, os.path.join(os.path.dirname(chain.__file__), "director.py"))
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+    return sys.modules[name]
+
+
+def director_devices(ctx, script, sc, pack, l1, beats, around=()):
+    """The Director's per-moment devices on a built story film: it reads the narration's words and stress, the
+    pictures the film placed (one contact sheet) and the recent films' sequences, and its asks ride the scene under
+    ``devices``. Returns what it chose, for the record."""
+    DR = _director()
+    clock = F.Clock(pack["words"], sc)
+    rows = [dict(w=w["w"], t0=w["t0"], t1=w["t1"], seg=w["seg"]) for w in clock.words]
+    try:
+        stress = [(f / F.FPS, s_) for f, s_ in F.voice_stress(pack)]
+    except Exception:  # noqa: BLE001 - the words alone
+        stress = []
+    pics, ids = DR.film_pictures(l1, beats.get("pictures"), os.path.join(ctx.supply, "director_stills"), pack.get("ffmpeg") or "ffmpeg", F.FPS)
+    st = script.get("style") or {}
+    d = DR.direct(ctx.supply, [dict(i=k, text=str(seg.get("say") or "")) for k, seg in enumerate(sc["segments"])], rows, stress, pics,
+                  style=dict(id=st.get("id"), name=st.get("name")), workflow="story film (narrated)", dur_s=l1["dur_f"] / F.FPS,
+                  title=sc.get("title"), hook=sc.get("hook_line"), payoff=sc.get("close_line"), log=ctx.log)
+    nseg = len(sc["segments"])
+    words = clock.words
+
+    def word_frame(w):
+        return (0 if int(w) == 0 else max(F.Clock.f(words[int(w)]["t0"]) - 1, 0)) if 0 <= int(w) < len(words) else None
+
+    def seg_span(i):
+        return (F.Clock.f(clock.segs[i][0]), min(F.Clock.f(clock.segs[i][1]) + 6, l1["dur_f"])) if 0 <= i < nseg else (None, None)
+    asks, notes = DR.palette_asks(d, word_frame, seg_span, ids.get, l1["dur_f"])
+    asks = DR.around(asks, around, l1["dur_f"])         # a reel's own hero device keeps its frames: the Director's land beside it
+    if asks:
+        l1["devices"] = list(l1.get("devices") or []) + asks
+        ev = DR.device_events(asks)                      # landings the music and sound workflow may answer (no device sounds)
+        beats["device_events"] = ev
+        beats["events"] = sorted(set(beats.get("events") or []) | {e["f"] for e in ev})
+    return dict(by=d.get("by"), asked=[a["dev"] for a in asks], notes=notes, sections=d.get("sections"), why=d.get("why"))
+
+
+def with_director(ctx, script, sc):
+    """The scene a marketing proof reel draws: its own hero devices (proof.lay_devices, laid in score) with the Director's
+    devices for every other moment around them. Stories and podcast shorts carry their Director's asks from score; any
+    other film is drawn as scored. Returns the path of the scene."""
+    if getattr(ctx, "workflow", None) != "wf2" or (getattr(ctx, "args", None) or {}).get("director", True) is False:
+        return sc["l1"]
+    out = os.path.join(ctx.supply, "l1_director.json")
+    try:
+        l1 = json.load(open(sc["l1"]))
+        if l1.get("devices"):
+            return sc["l1"]
+        if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(sc["l1"]):
+            return out
+        beats = sc.get("beats") or json.load(open(os.path.join(ctx.supply, "beats.json")))
+        pack = load_pack(ctx)
+        hero = [list(x["frames"]) for x in ((sc.get("devices") or {}).get("laid") or []) if x.get("frames")]
+        rec = director_devices(ctx, script, script["script"], pack, l1, beats, around=hero)
+        rec["heard"] = chain.hear_devices(ctx, l1, beats, lambda x: F.replan_sound(x, pack))     # the sound hears them
+        json.dump(l1, open(out, "w"), ensure_ascii=False)
+        ctx.log(f"director: {len(rec['asked'])} devices round the hero device ({rec.get('by')})")
+        return out
+    except Exception as e:  # noqa: BLE001 - the reel keeps its own devices
+        ctx.log(f"director: the reel keeps its own devices: {e!r}"[:300])
+        return sc["l1"]
+
+
 def env_path():
     return F.scene_worker() + os.pathsep + os.path.join(chain.SLICE, "pylib")
 
@@ -1771,9 +1843,18 @@ def score(ctx, script):
         rep = writer.verify(sc)
         if not rep["ok"]:
             raise RuntimeError(f"the director's change breaks the facts: {rep['numbers_unbacked']} {rep['facts_unverified']}")
-    if d.get("alien"):                     # the direction's asks for the engine's alien bank (chain.alien_bank lays them in at the render)
-        # the independent verdict of 14 Nov (week-1112/notes/S.md): diecut and answer never, lamp not yet; rhyme and arc only
-        l1["alien"] = [a for a in d["alien"] if isinstance(a, dict) and a.get("dev") in ALIEN_ALLOWED]
+    if d.get("alien"):                     # the direction's asks for the engine's alien bank (chain.lay_devices lays them in at the render)
+        l1["alien"] = [a for a in d["alien"] if isinstance(a, dict) and a.get("dev")]
+    if ctx.args.get("director", True) is not False:
+        # the Director chooses devices for every moment of the built film, from the whole palette (chain.lay_devices
+        # lays them at the render, each landing or falling back to its next device)
+        try:
+            beats["devices"] = director_devices(ctx, script, sc, pack, l1, beats)
+        except Exception as e:  # noqa: BLE001 - the film keeps what its builder laid
+            ctx.log(f"director: the film keeps its builder's devices: {e!r}"[:300])
+    if l1.get("devices") or l1.get("alien"):
+        # the sound design hears the devices: laid now, their landings planned again with the film's own turn and words
+        beats["devices_heard"] = chain.hear_devices(ctx, l1, beats, lambda x: F.replan_sound(x, pack))
     out = os.path.join(ctx.supply, "l1.json")
     json.dump(l1, open(out, "w"), ensure_ascii=False)
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")       # the same scene with the narration as its spine: what the song is cut to
@@ -2304,13 +2385,14 @@ def topup_from_score(ctx, script_rec, pack, lines):
 def render(ctx, script, sc):
     out = os.path.join(ctx.supply, "film_engine.mp4")
     cache = os.path.join(ctx.tmp, "scene-cache")
-    l1 = json.load(open(sc["l1"]))
+    drawn = with_director(ctx, script, sc)            # the scene to draw (a marketing reel's Director laid round its hero device)
+    l1 = json.load(open(drawn))                       # its sound, which heard those devices, is the mix
     pack = load_pack(ctx)
     sound = os.path.join(ctx.supply, "sound.m4a")
     mix = F.audio_master(pack["ffmpeg"], l1, pack["narration"], sound, ctx.tmp) if not os.path.exists(sound) else {}
     settle = os.environ.get("SHELL_RENDER_CMD")       # a renderer in place of the Mac engine: the box image's, where a film is settled
     if not os.path.exists(out):
-        scene = chain.alien_bank(ctx, sc["l1"])          # the scene to draw: the alien bank's asks laid out first, when it carries any
+        scene = chain.lay_devices(ctx, drawn)         # the scene to draw: every device it asks for laid out first
         if settle:
             log = chain.sh(ctx, ["zsh", settle, scene, ctx.supply, sound, out + ".part.mp4"], label=f"wf3-render-{ctx.run_id}", heavy=os.environ.get("SHELL_RENDER_REMOTE") != "1", timeout=7200)
             j = {}
@@ -2333,6 +2415,7 @@ def render(ctx, script, sc):
             except ValueError:
                 j = {}
         os.replace(out + ".part.mp4", out)
+        chain.measure_devices(ctx, out, scene)          # what the film did, by signal, beside the bar (a record only)
         json.dump(dict(j, mix=mix), open(out + ".log.json", "w"))
     j = json.load(open(out + ".log.json")) if os.path.exists(out + ".log.json") else {}
     return dict(engine="scene", film=out, engine_check=dict(frames=j.get("frames"), seconds=j.get("seconds"), audio=j.get("mix"),
