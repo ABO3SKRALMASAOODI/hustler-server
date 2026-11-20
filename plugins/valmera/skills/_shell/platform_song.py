@@ -64,9 +64,13 @@ def system_prompt(pal):
         "(enters_at_s, seconds into the released track), its tempo and its measured character. Their house sequence: "
         f"{pal.get('house_sequence')}\n\n"
         "Choose like their editor would for THIS film: the song whose character carries its story (tension, ambition, "
-        "loss, swagger, wonder, a reveal), its subject and its pace. A money, power or founder story leans to the house "
-        "songs and prestige cues; a science or wonder story to cinematic and electronic cues; a sharp, funny or "
-        "confrontational clip to the hip-hop and pop hits. Never pick a song only because it is the most used. Vary from "
+        "loss, swagger, wonder, a reveal), its subject and its pace. The mood its brief asks for comes first, and the "
+        "film's own music bed (named with the film when it has one) was chosen for that same mood: the posted song "
+        "carries it too. A light, funny or mischievous film gets a light, playful song, never a heavy prestige theme; "
+        "a raw, intimate or reflective one stays gentle; a tense or triumphant one may drive. A money, power or founder "
+        "story leans to the house songs and prestige cues when its mood is tense or ambitious; a science or wonder story "
+        "to cinematic and electronic cues; a sharp, funny or confrontational clip to the hip-hop and pop hits. Never "
+        "pick a song only because it is the most used. Vary from "
         "the songs listed as recently chosen unless one is clearly the right one. The entrance: the point in the song "
         "where it should start under the film's first frame, as m:ss. The song plays at a quarter of the voice's level "
         "from the first frame to the last, so it must enter where it is already full and moving (its beat or its theme "
@@ -131,12 +135,30 @@ def check(answer, pal):
     return ok
 
 
-def choose(workflow, script, seconds, upload, state_root=None, ask=None):
-    """platform_music.json's content for one film, or None (the reason is in the return of choose_safely)."""
+def bed_line(music):
+    """What the film's own music bed is, for the song chooser: its track and the mood it was chosen for (the film's
+    music record: chain.music_version), or "" when the film has none."""
+    m = music or {}
+    if not m.get("title"):
+        return ""
+    does = m.get("does") or {}
+    mood = str((does.get("marks") or {}).get("mood") or does.get("mood") or "").strip()
+    out = f"\n\nTHE FILM'S OWN MUSIC BED (in the film file; the posted song replaces it): \"{m.get('title')}\" by {m.get('author')}"
+    if mood:
+        out += f", chosen for the mood: {mood}"
+    if m.get("why"):
+        out += f". Why: {str(m['why'])[:300]}"
+    return out
+
+
+def choose(workflow, script, seconds, upload, state_root=None, ask=None, film_music=None):
+    """platform_music.json's content for one film, or None (the reason is in the return of choose_safely).
+    film_music: the film's own music record (its track and the mood it was chosen for), so the posted song carries
+    the same mood as the bed it replaces."""
     pal = palette()
     ask = ask or llm.ask
     content = [{"type": "text", "text": "Recently chosen for other films: " + (", ".join(recent(state_root)) or "none")
-                + "\n\nTHE FILM:\n" + film_facts(workflow, script, seconds)}]
+                + "\n\nTHE FILM:\n" + film_facts(workflow, script, seconds) + bed_line(film_music)}]
     text, use = ask(system_prompt(pal), content, effort="low", max_tokens=2000)
     answer = llm.json_block(text)
     ok = check(answer if isinstance(answer, dict) else {}, pal)
@@ -156,10 +178,10 @@ def choose(workflow, script, seconds, upload, state_root=None, ask=None):
     return rec, use
 
 
-def choose_safely(workflow, script, seconds, upload, state_root=None, log=None, ask=None):
+def choose_safely(workflow, script, seconds, upload, state_root=None, log=None, ask=None, film_music=None):
     """(record or None, spend rows). Never raises: a delivery never waits on its song."""
     try:
-        rec, use = choose(workflow, script, seconds, upload, state_root=state_root, ask=ask)
+        rec, use = choose(workflow, script, seconds, upload, state_root=state_root, ask=ask, film_music=film_music)
     except Exception as ex:  # noqa: BLE001 - the film is delivered either way; the publisher keeps its standing rule
         if log:
             log(f"platform song not chosen: {type(ex).__name__}: {str(ex)[:300]}")

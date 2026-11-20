@@ -12,7 +12,9 @@ How the music is chosen: the same path a workflow film takes now (worker/music_f
 .valmera/models/music_ref, a model reading the film's own lines (heard again here from film_clean.mp4 with local
 faster-whisper), its turn and payoff (the ones the delivered film recorded), the person and the mood, ranks every
 described track by the story; the engine (score.music) finds the stretch of each that lands on the payoff and
-auditions them in that order, then arranges and levels the chosen one under the film's own sound. The picture is
+auditions them in that order, then arranges and levels the chosen one under the film's own sound, held on the story's
+own arc (the model's reading of how far under the voice each part sits, and where the close starts), as a workflow
+film's bed is. The picture is
 copied byte for byte (the end card and the watermark are the delivered ones); only the sound is new. Model calls go
 through the local codex-proxy (the workflows' own route, no API spend); no listening model is used anywhere.
 """
@@ -183,21 +185,35 @@ def main(argv=None):
     om = ((old.get("does") or {}).get("marks") or {})
     sj = doc.get("script") or {}
     names = [str(n.get("name") if isinstance(n, dict) else n) for n in (sj.get("names") or [])][:6]
-    brief = " ".join(str(sj.get(k) or "") for k in ("title", "hook_line", "direction"))[:700]
+    brief = " ".join(str(sj.get(k) or "") for k in ("title", "hook_line", "direction"))[:1800]
     if names:
         brief = f"About: {', '.join(names)}. {brief}"
     call = None if a.no_model else MF.openai_call(timeout=1205)
     mood = om.get("mood") or ""
     turn_s, payoff_s = om.get("turn_s"), om.get("payoff_s")
-    if (payoff_s is None or not mood) and call is not None:
-        got = MF.story_marks(lines, dur, call) or {}
+    arc = None
+    if call is not None:
+        # the story's arc (how far under the voice each part sits) and where its close starts are read every time a
+        # model is at hand, as a workflow film's are (music_film.score); the turn, payoff and mood the delivered film
+        # recorded stand, the reading fills what it lacks
+        got = MF.story_marks(lines, dur, call, brief=brief) or {}
         mood = mood or got.get("mood") or ""
         if payoff_s is None:
             turn_s, payoff_s = got.get("turn_s"), got.get("payoff_s")
+        if got.get("arc"):
+            close_s = got.get("close_s")
+            if close_s is not None and payoff_s is not None and float(close_s) <= float(payoff_s):
+                close_s = None                            # a close read against another payoff than the one that stands
+            arc = dict(got["arc"], close_s=close_s)
     marks = {"dur_s": dur, "words": [w for w in words if w[0] < dur], "cuts": picture_cuts(doc, dur), "landings": [], "accents": [],
              "turn_s": turn_s, "payoff_s": payoff_s, "end_hit_s": None, "quiet": []}
     if kind == "podcast" and payoff_s is not None:
         marks["turn_drop"] = True                         # the podcast workflow's own opt-in (chain.music_version)
+    if arc:
+        # the engine holds the bed on the story's own arc (score.music.hold_under_words), as music_film.score hands it
+        marks["story_arc"] = {k: arc[k] for k in MU.ARC_PARTS if k in arc}
+        if arc.get("close_s") is not None:
+            marks["close_s"] = float(arc["close_s"])
     film = MF.facts(kind, marks, brief=brief, mood=mood, lines=lines)
     used = [x for x in a.used.split(",") if x]
     shown = []
@@ -208,7 +224,9 @@ def main(argv=None):
     prof = MU.profile_for(music_choose.ENGINE_KIND.get(film["kind"], kind))
     choice, song, tried = MF.choose(film, marks, os.path.join(dst, ".music_cache"), used=used, call=None if call is None else seen, profile=prof)
     rep = {"from": src, "made": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), "kind": kind, "film": film,
-           "marks": {k: marks.get(k) for k in ("dur_s", "turn_s", "payoff_s", "turn_drop")}, "mood": mood, "tried": tried,
+           "marks": {"given": {k: om.get(k) for k in ("turn_s", "payoff_s", "mood")}, "dur_s": dur, "turn_s": turn_s, "payoff_s": payoff_s,
+                     "mood": mood, "lines": len(lines), "turn_drop": bool(marks.get("turn_drop")), "arc": arc},
+           "mood": mood, "tried": tried,
            "previous": {k: old.get(k) for k in ("title", "author", "cid", "why", "chosen_by")}, "shown": shown, "spend_usd": MF.spend(call)}
     if not choice:
         rep["why"] = "no track could be had"
@@ -219,7 +237,7 @@ def main(argv=None):
     mk = MF.arranged(marks, choice)                       # the chooser's entry point, and the story path's arc
     mix = MU.mix_film(clean, song, mk, out=part, kind=kind, sung=choice.get("sung"), supplied=False)
     rep["mix"] = {k: v for k, v in mix.items() if k not in ("music",)}
-    rep["mix"]["music"] = {k: v for k, v in (mix.get("music") or {}).items() if k in ("under_voice_db", "silent_from_s", "holes", "hits", "payoff_flow_s")}
+    rep["mix"]["music"] = {k: v for k, v in (mix.get("music") or {}).items() if k in ("under_voice_db", "silent_from_s", "holes", "hits", "payoff_flow_s", "hold")}
     if not mix.get("out"):
         json.dump(rep, open(os.path.join(dst, "rescore.json"), "w"), ensure_ascii=False, indent=1, default=float)
         raise SystemExit("the engine could not arrange the chosen track: " + str((mix.get("plan") or {}).get("why")))

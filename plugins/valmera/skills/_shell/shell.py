@@ -258,7 +258,7 @@ def deliver(ctx, state, out_root, results):
     upload = None if music_in_final or chk.get("song") else ("film_clean.mp4" if scored else "film.mp4")
     if upload and wants_platform_song(ctx):
         pm, pspend = platform_song.choose_safely(ctx.workflow, script, (chk.get("checks") or {}).get("final_s"), upload,
-                                                 state_root=ctx.state_root, log=ctx.log)
+                                                 state_root=ctx.state_root, log=ctx.log, film_music=chk.get("music") if scored else None)
         if pm:
             jsave(os.path.join(part, "platform_music.json"), pm)
             rec["platform_music"] = pm

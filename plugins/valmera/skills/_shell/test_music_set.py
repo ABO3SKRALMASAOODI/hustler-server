@@ -135,3 +135,56 @@ def test_a_delivered_films_music_is_chosen_again_into_a_new_folder_only(tmp_path
     new = json.loads((out / "film.json").read_text())
     assert new["music"]["title"] == "Rise" and new["music"]["rescored"]["previous"]["title"] == "Night Terrors"
     assert {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in src.iterdir()} == before      # the delivered folder is untouched
+
+
+def test_a_rescored_film_is_held_on_its_storys_arc(tmp_path, monkeypatch):
+    """A delivered podcast record carries its turn, payoff and mood; the rescore still reads the story's arc and where
+    its close starts, hands both to the mix and records them with the mood where platform_song reads it."""
+    import shutil
+    import brand
+    import platform_song
+    import rescore_music as R
+    sys.path.insert(0, brand.worker_dir())
+    import music_film as MF
+    from score import music as MU
+    src = tmp_path / "delivered"
+    src.mkdir()
+    _tiny_film(src / "film_clean.mp4")
+    doc = {"workflow": "wf1", "script": {"title": "t", "direction": "A wry, comedic story. Light, playful music."},
+           "checks": {"finish": {"programme_s": 2.0}},
+           "music": {"title": "Old", "cid": "mk-1", "does": {"marks": {"turn_s": 0.8, "payoff_s": 1.5, "mood": "wry, comedic"}}}}
+    (src / "film.json").write_text(json.dumps(doc))
+    out = tmp_path / "copy"
+    out.mkdir()
+    (out / "rescore_heard.json").write_text(json.dumps({"words": [[0.1, 0.5], [0.6, 1.0], [1.6, 1.9]], "lines": [[0.1, "we sold it"]]}))
+    seen, read = {}, []
+
+    def call(system, user, schema):
+        raise AssertionError("the model is reached through story_marks and choose here")
+    call.usage = {}
+    monkeypatch.setenv("CODEX_PROXY_LOCAL", "1")
+    monkeypatch.setattr(MF, "openai_call", lambda **kw: call)
+
+    def story_marks(lines, dur, c, brief=""):
+        read.append(brief)
+        return {"turn_s": 0.7, "payoff_s": 1.2, "close_s": 1.6, "mood": "earnest",
+                "arc": {"setup": "low", "build": "mid", "payoff": "high", "close": "low"}}
+    monkeypatch.setattr(MF, "story_marks", story_marks)
+    monkeypatch.setattr(MF, "choose", lambda film, marks, cache, used=(), call=None, profile=None: (
+        {"cid": "pb-2", "title": "Pocket", "author": "A", "chosen_by": "model (story)", "why": "light", "sung": False, "arc": True,
+         "entry": {"point": None}}, str(src / "film_clean.mp4"), []))
+
+    def mix_film(film, song, marks, out=None, **kw):
+        seen.update(marks=marks)
+        shutil.copy2(film, out)
+        return {"out": out, "plan": {"ok": True}, "music": {"under_voice_db": 6.0, "hold": {"arc": marks.get("story_arc")}}}
+    monkeypatch.setattr(MU, "mix_film", mix_film)
+    R.main([str(src), str(out)])
+    assert read and "Light, playful music" in read[0]
+    assert seen["marks"]["story_arc"] == {"setup": "low", "build": "mid", "payoff": "high", "close": "low"}
+    assert seen["marks"]["close_s"] == 1.6 and seen["marks"]["payoff_s"] == 1.5      # the delivered payoff stands
+    new = json.loads((out / "film.json").read_text())
+    marks = new["music"]["does"]["marks"]
+    assert marks["mood"] == "wry, comedic" and marks["arc"]["close"] == "low" and marks["arc"]["close_s"] == 1.6
+    assert "chosen for the mood: wry, comedic" in platform_song.bed_line(new["music"])
+    assert "chosen for the mood: dry" in platform_song.bed_line({"title": "x", "author": "y", "does": {"mood": "dry"}})
