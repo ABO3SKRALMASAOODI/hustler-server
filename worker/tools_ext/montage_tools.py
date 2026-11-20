@@ -841,7 +841,7 @@ def _ramp_insert(ctx, ins_id, low_f, hold, curve, allow_duplicates):
 
 def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
                    curve="ease_in_out", allow_duplicates=False, id=None,
-                   insert=None, allow_speech=False):
+                   insert=None, allow_speech=False, ease_out=True):
     """An eased speed swing over a program window as contiguous spans (or
     over a whole b-roll insert as constant-rate pieces)."""
     import ramps
@@ -889,7 +889,14 @@ def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
     fps_out = _fps(ctx, edl)
     prefix = str(id or "rp")
     try:
-        spans, rep = ramps.plan(a, b, ramps.swing(low_f, float(hold), curve),
+        # ease_out=False: ease into the low and hold it to the window's end
+        # ("slow motion after 6 s" is the rest of the film; p5744 v2d came
+        # back to 1x for the last second before the end card)
+        shape = (ramps.swing(low_f, float(hold), curve) if ease_out
+                 else ramps.curve_fn([(0.0, 1.0), (min(
+                     0.5, 1.2 / max(1.2, e - s)), low_f), (1.0, low_f)],
+                     curve))
+        spans, rep = ramps.plan(a, b, shape,
                                 fps_src=fps_src, fps_out=fps_out,
                                 prefix=prefix + "_",
                                 allow_duplicates=bool(allow_duplicates))

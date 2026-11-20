@@ -289,3 +289,18 @@ def test_json_block_takes_the_corrected_answer_after_a_self_correction():
     assert llm.json_block('[{"id": 1}, {"id": 2}]') == [{"id": 1}, {"id": 2}]
     with pytest.raises(ValueError):
         llm.json_block('{"placements":[{"id":0,"ok":true},{"id":1,"ok"')      # cut off: never an inner item
+
+
+def test_json_block_repairs_a_quote_the_model_left_unescaped():
+    """20 Nov m07: the research answer wrote 'He is 7'6", which matches' inside a JSON string; the short stopped."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("shell_llm2", os.path.join(HERE, "llm.py"))
+    llm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(llm)
+    text = '```json\n{"references": [{"referent": "Shawn Bradley", "finding": "He is 7\'6", which matches \'seven foot six\'.", "sources": [{"url": "https://x.example/a"}]}]}\n```\nSources:\n- [CBS](https://x.example/a)'
+    got = llm.json_block(text)
+    finding = got["references"][0]["finding"]
+    assert "7'6" in finding and "which matches" in finding
+    assert got["references"][0]["sources"][0]["url"] == "https://x.example/a"
+    with pytest.raises(ValueError):
+        llm.json_block('{"placements":[{"id":0,"ok":true},{"id":1,"ok"')

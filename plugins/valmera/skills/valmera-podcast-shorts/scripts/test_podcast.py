@@ -617,3 +617,22 @@ def test_a_model_route_that_stops_answering_holds_the_delivery_and_the_shorts_no
     assert podcast.main() == 2
     rep = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert rep["stopped"]["stage"] == "deliver" and "waiting for the model route" in rep["stopped"]["error"] and not os.path.exists(out)
+
+
+def test_a_short_that_dies_before_its_first_stage_holds_the_delivery(tmp_path, monkeypatch):
+    """20 Nov 05:35 UTC: macOS withdrew the run's access to ~/Documents; 17 shorts each 'stopped (start: )' within a
+    second and the podcast was delivered with 10 of 27. A short that cannot even start is the machine: the run holds."""
+    monkeypatch.setattr(podcast, "WORK_ROOT", str(tmp_path))
+    run = podcast.Run("https://youtu.be/abcdefghijk", str(tmp_path))
+    os.makedirs(os.path.join(str(tmp_path), "shorts", "m11"), exist_ok=True)
+    started = []
+
+    def proc(cmd, **kw):
+        started.append(cmd)
+        kw["stderr"].write("PermissionError: [Errno 1] Operation not permitted: '/Users/x/Documents/run.json'\n")
+        return SimpleNamespace(returncode=1, stdout="")
+    monkeypatch.setattr(podcast.subprocess, "run", proc)
+    monkeypatch.setenv("CODEX_PROXY_LOCAL", "1")
+    rec = podcast.build_short(run, dict(id="m11", style="prints", title="t"), dict(info={}, video="x"), {})
+    assert len(started) == 1 and run.route_out.is_set()
+    assert podcast.ROUTE_OUT in rec["error"] and "Operation not permitted" in rec["error"]

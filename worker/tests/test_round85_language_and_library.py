@@ -164,8 +164,10 @@ def test_music_library_is_a_whitelist_catalogue_not_a_bundled_pack():
     import music_library
     music_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "music")
+    # gate.json (17 Nov 2026): the reference-grade bed gate's verdicts on the
+    # 24 publisher files; text only, never audio.
     assert sorted(os.listdir(music_dir)) == [
-        "LICENSES.md", "SOURCE_NOTES.md", "manifest.json"]
+        "LICENSES.md", "SOURCE_NOTES.md", "gate.json", "manifest.json"]
     rows = music_library.entries()
     assert len(rows) == 24
     assert all(r["storage_key"] == "legacy-music/" + r["file"] for r in rows)

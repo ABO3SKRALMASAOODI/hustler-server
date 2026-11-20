@@ -98,9 +98,12 @@ def colour(src_labs, graded_labs):
     percentile, so the grade is read where it moved the colour."""
     import numpy as np
     regions = {"whites": ([], []), "mids": ([], [])}
+    whole = ([], [])
     for src, gr in zip(src_labs, graded_labs):
         if src is None or gr is None or len(src[0]) != len(gr[0]):
             continue
+        whole[0].append(np.asarray(src[0]))
+        whole[1].append(np.asarray(gr[0]))
         L = src[0]
         hi = L >= max(55.0, float(np.percentile(L, 90)))
         lo, up = np.percentile(L, 30), np.percentile(L, 70)
@@ -114,6 +117,12 @@ def colour(src_labs, graded_labs):
         if a:
             out[name] = (tuple(float(v) for v in np.median(np.concatenate(a), 0)),
                          tuple(float(v) for v in np.median(np.concatenate(b), 0)))
+    if whole[0]:
+        # the whole picture's lightness: its mean and its darkest tenth
+        # (p5873 v2a: "warm, sun-touched" came out mean L 54 -> 45)
+        sl, gl = np.concatenate(whole[0]), np.concatenate(whole[1])
+        out["lightness"] = ((float(sl.mean()), float(np.percentile(sl, 10))),
+                            (float(gl.mean()), float(np.percentile(gl, 10))))
     return out
 
 
@@ -135,6 +144,13 @@ def colour_line(c):
     if not c:
         return ""
     parts = []
+    if "lightness" in c:
+        (sm, s10), (gm, g10) = c["lightness"]
+        d = gm - sm
+        word = (f"darker by {-d:.0f}" if d <= -2 else f"lighter by {d:.0f}"
+                if d >= 2 else "as light as the source")
+        parts.append(f"picture mean L {sm:.0f} -> {gm:.0f} ({word}; darkest "
+                     f"tenth L {s10:.0f} -> {g10:.0f})")
     for name in ("whites", "mids"):
         if name not in c:
             continue
@@ -146,8 +162,9 @@ def colour_line(c):
         return ""
     return ("\nLOOK COLOUR MEASURED (CIELAB, source -> graded, same pixels; the grain is in it, "
             "halation and glows are not): " + "; ".join(parts) + ". a* + is magenta/red, - green; "
-            "b* + is yellow/warm, - blue/cool; a neutral white sits near a* 0, b* 0. Steer the "
-            "next adjustment by these numbers.")
+            "b* + is yellow/warm, - blue/cool; a neutral white sits near a* 0, b* 0. Warm, golden, "
+            "sun-touched or creamy looks keep the picture's mean L at the source's or above (light "
+            "is part of warmth); a lower L reads as dark. Steer the next adjustment by these numbers.")
 
 
 def frame_stats(path, chain=""):

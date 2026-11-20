@@ -67,6 +67,9 @@ def edl_measure(edl, source_s=None, preview=None):
            "sfx": len(edl.get("sfx") or []),
            "frame": (edl.get("frame") or {}).get("ratio")
            if isinstance(edl.get("frame"), dict) else None}
+    speed = speed_measure(edl)
+    if speed:
+        out["speed"] = speed
     if preview:
         qc = preview.get("audio_qc") if isinstance(
             preview.get("audio_qc"), dict) else {}
@@ -75,6 +78,31 @@ def edl_measure(edl, source_s=None, preview=None):
             "duration_s": preview.get("duration_s"),
             "lufs": qc.get("integrated_lufs"),
             "true_peak": qc.get("true_peak_dbtp") or qc.get("true_peak")}
+    return out
+
+
+def speed_measure(edl):
+    """Where each speed span plays on the film: [{id, factor, film_s,
+    source_s}], measured from the EDL's own clock."""
+    spans = [sp for sp in (edl or {}).get("speed") or []
+             if isinstance(sp, dict)]
+    if not spans:
+        return []
+    try:
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [], spans)
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for sp in spans:
+        try:
+            s, e = float(sp["start"]), float(sp["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        film = tl.span_to_out(s, e)
+        out.append({"id": sp.get("id"), "factor": sp.get("factor"),
+                    "film_s": ([round(film[0][0], 2), round(film[-1][1], 2)]
+                               if film else None),
+                    "source_s": [round(s, 2), round(e, 2)]})
     return out
 
 
@@ -154,3 +182,223 @@ def change_line(prev, new, prev_version, new_version):
 def program_clock(edl):
     return Timeline(edl.get("keep") or [], edl.get("inserts") or [],
                     edl.get("speed") or [])
+
+
+def _f(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def _span_text(spans):
+    spans = sorted(s for s in spans if s)
+    if not spans:
+        return ""
+    return f"{spans[0][0]:.1f}-{spans[-1][1]:.1f} s"
+
+
+def _device_span(item):
+    """(start, end) of an fx item on the film clock: its window, or a
+    junction's moment ("at", its duration either side of the cut)."""
+    a, b = _f(item.get("start")), _f(item.get("end"))
+    if a is not None and b is not None:
+        return (a, b)
+    at = _f(item.get("at"))
+    if at is None:
+        return None
+    half = (_f(item.get("duration_s")) or 0.0) / 2.0
+    return (max(0.0, at - half), at + half)
+
+
+def _device_where(items):
+    """Where a kind of device plays: junctions by their cuts (p5873 v2c read
+    "junction x9 (0.0-0.0 s)" and told the person its dips may not have
+    landed), windows by their span."""
+    if all(_f(x.get("at")) is not None and _f(x.get("start")) is None
+           for x in items):
+        ats = sorted(_f(x.get("at")) for x in items)
+        shown = ", ".join(f"{t:.1f}" for t in ats[:12])
+        return "at the cuts " + shown + (" ..." if len(ats) > 12 else "") + " s"
+    return _span_text([s for s in (_device_span(x) for x in items) if s])
+
+
+def on_screen(edl):
+    """What the film shows and plays now, on the film clock, one line per
+    layer: captions, every text with its window, pictures over the cut,
+    drawn elements and graphics, camera moves, speed, the look, music and
+    sounds. Measured from the EDL, never from words: the model reads what
+    is still there (captions a first cut left, a title held over the
+    action) and takes out what the request excludes (p5728: "no subtitles"
+    and the captions ran on at 32-37 s; a title covered the fighters for
+    29 s). Each line names the op that removes it."""
+    edl = edl if isinstance(edl, dict) else {}
+    try:
+        program = float(program_duration(edl) or 0.0)
+        tl = program_clock(edl)
+    except Exception:  # noqa: BLE001
+        return []
+    lines = []
+    caps = edl.get("captions")
+    if isinstance(caps, dict) and caps.get("mode") == "from_transcript":
+        lines.append("captions: from the transcript over every spoken word "
+                     "(off: {'captions': {'mode': 'off'}})")
+    elif isinstance(caps, list) and caps:
+        spans, words = [], []
+        for c in caps:
+            a, b = _f(c.get("start")), _f(c.get("end"))
+            if a is None or b is None:
+                continue
+            for s0, s1 in tl.span_to_out(a, b) or []:
+                spans.append((s0, s1))
+            if len(words) < 5 and c.get("text"):
+                words.append(str(c["text"])[:20])
+        where = _span_text(spans)
+        if where:
+            lines.append(f"captions: {len(caps)} item(s) on film {where} ("
+                         + ", ".join(f"'{w}'" for w in words)
+                         + ") (off: {'captions': {'mode': 'off'}})")
+    texts = [t for t in edl.get("texts") or [] if isinstance(t, dict)]
+    for t in texts[:10]:
+        a, b = _f(t.get("start")), _f(t.get("end"))
+        if a is None or b is None:
+            continue
+        held = ""
+        if program and b - a >= max(6.0, 0.4 * program):
+            held = f", held {b - a:.1f} s of the {program:.1f} s film"
+        y = _f(t.get("y"))
+        lines.append(f"text {t.get('id')} \"{str(t.get('text') or '')[:28]}\" "
+                     f"{t.get('template') or ''} {a:.1f}-{b:.1f} s{held}"
+                     + (f", y {y:.2f}" if y is not None else "")
+                     + f" (remove: {{'remove': 'texts', 'id': "
+                       f"'{t.get('id')}'}})")
+    if len(texts) > 10:
+        lines.append(f"text: {len(texts) - 10} more (timeline() lists them)")
+    ovs = [o for o in edl.get("overlays") or [] if isinstance(o, dict)]
+    if ovs:
+        own = sum(1 for o in ovs if str(o.get("asset_key") or "").startswith(
+            "originals/"))
+        parts = []
+        for o in ovs[:8]:
+            a, d = _f(o.get("start")), _f(o.get("duration_s"))
+            if a is None or d is None:
+                continue
+            src = (f" from upload {float(o['source_start_s']):.1f} s"
+                   if str(o.get("asset_key") or "").startswith("originals/")
+                   and o.get("source_start_s") is not None else "")
+            parts.append(f"{o.get('id')} {a:.1f}-{a + d:.1f} s{src}")
+        lines.append(f"pictures over the cut: {len(ovs)}"
+                     + (f" ({own} of them the upload's own footage from "
+                        "other moments)" if own else "")
+                     + ": " + "; ".join(parts)
+                     + " (remove one: {'remove': 'overlays', 'id': ...})")
+    ins = [i for i in edl.get("inserts") or [] if isinstance(i, dict)]
+    if ins:
+        lines.append(f"inserts spliced into the cut: {len(ins)} ("
+                     + "; ".join(f"{i.get('id')} at {float(i.get('at_output_s') or 0):.1f} s"
+                                 for i in ins[:6]) + ")")
+    for m in [m for m in edl.get("motion") or [] if isinstance(m, dict)][:8]:
+        a, b = _f(m.get("start")), _f(m.get("end"))
+        if a is not None and b is not None:
+            lines.append(f"graphic {m.get('id')} {m.get('template')} "
+                         f"{a:.1f}-{b:.1f} s (remove: {{'remove': 'motion', "
+                         f"'id': '{m.get('id')}'}})")
+    fx = [f for f in edl.get("fx") or [] if isinstance(f, dict)]
+    if fx:
+        kinds = {}
+        for f in fx:
+            kinds.setdefault(str(f.get("type")), []).append(f)
+        lines.append("devices: " + "; ".join(
+            f"{k} x{len(v)} ({_device_where(v)})" for k, v in kinds.items()))
+    eff = edl.get("effects") or {}
+    zooms = [z for z in list(eff.get("zooms") or []) + list(edl.get("zooms")
+                                                           or [])
+             if isinstance(z, dict)]
+    if zooms:
+        lines.append(f"camera moves: {len(zooms)} ("
+                     + "; ".join(f"{z.get('mode')} {float(z.get('start') or 0):.1f}-"
+                                 f"{float(z.get('end') or 0):.1f} s"
+                                 for z in zooms[:8]) + ")")
+    else:
+        lines.append("camera moves: none (the frame holds still throughout)")
+    sp = speed_measure(edl)
+    if sp:
+        lines.append("speed: " + "; ".join(
+            f"{r['factor']}x on film {r['film_s'][0]:.1f}-{r['film_s'][1]:.1f} s"
+            for r in sp if r.get("film_s")))
+    look = []
+    if eff.get("grade"):
+        look.append(f"preset {eff['grade']}")
+    gc = {k: v for k, v in (eff.get("grade_custom") or {}).items()
+          if v not in (None, 0, 0.0)}
+    if gc:
+        look.append("custom " + ", ".join(f"{k} {v:+.2f}" if isinstance(v, (int, float))
+                                          else f"{k} {v}" for k, v in gc.items()))
+    for s in eff.get("stylize") or []:
+        if isinstance(s, dict):
+            look.append(f"{s.get('kind')} {s.get('intensity')}")
+    if look:
+        lines.append("look: " + "; ".join(look))
+    tr = eff.get("transition") or {}
+    if tr.get("style") not in (None, "", "none", "cut"):
+        lines.append(f"transitions: {tr.get('style')} {tr.get('duration_s') or ''}")
+    music = [m for m in edl.get("music") or [] if isinstance(m, dict)]
+    if music:
+        lines.append(f"music: {len(music)} item(s): " + "; ".join(
+            f"{m.get('id')} {str(m.get('storage_key') or '').rsplit('/', 1)[-1][:40]}"
+            f"{' (muted)' if m.get('mute') else ''}" for m in music[:4])
+            + (" (two at once play together: a new track replaces the bed "
+               "unless asked to add)" if len(music) > 1 else ""))
+    sfx = edl.get("sfx") or []
+    if sfx:
+        lines.append(f"sounds: {len(sfx)}")
+    fr = edl.get("frame") or {}
+    if isinstance(fr, dict) and fr.get("ratio"):
+        lines.append(f"frame: {fr.get('ratio')} {fr.get('mode') or ''}".strip())
+    return lines
+
+
+FIRST_CUT_LAYERS = (("overlays", "pictures over the cut"), ("texts", "texts"),
+                    ("motion", "graphics"), ("inserts", "inserts"),
+                    ("fx", "devices"))
+
+
+def first_cut_left(edl, first):
+    """What the automatic first cut made that is still in the film: items of
+    the first cut's version whose ids are still here, its frame and its
+    captions. Measured from the two EDLs (p5744 v2c: "preserve the original
+    framing" and the first cut's 9:16 crop, its crops of other moments of
+    the walk and its titles stayed, unseen as the first cut's). [] when
+    nothing of it is left or there was none."""
+    if not isinstance(edl, dict) or not isinstance(first, dict):
+        return []
+    lines = []
+    for layer, name in FIRST_CUT_LAYERS:
+        old = {str(i.get("id")) for i in first.get(layer) or []
+               if isinstance(i, dict) and i.get("id")}
+        kept = [str(i.get("id")) for i in edl.get(layer) or []
+                if isinstance(i, dict) and str(i.get("id")) in old]
+        if kept:
+            lines.append(f"{name}: {', '.join(kept[:10])}"
+                         + (f" (+{len(kept) - 10})" if len(kept) > 10 else "")
+                         + f" (remove one: {{'remove': '{layer}', 'id': ...}})")
+    fr, ffr = edl.get("frame") or {}, first.get("frame") or {}
+    if isinstance(fr, dict) and fr.get("ratio") and isinstance(ffr, dict) \
+            and fr.get("ratio") == ffr.get("ratio") \
+            and fr.get("mode") == ffr.get("mode"):
+        lines.append(f"frame: {fr.get('ratio')} {fr.get('mode') or ''}"
+                     .strip() + " (the source's own frame: "
+                     "{'frame': {'ratio': 'source'}})")
+    zf = [z for z in (first.get("effects") or {}).get("zooms") or []
+          if isinstance(z, dict)]
+    zn = [z for z in (edl.get("effects") or {}).get("zooms") or []
+          if isinstance(z, dict)]
+    same = [z for z in zn if any(z.get("start") == o.get("start")
+                                 and z.get("mode") == o.get("mode")
+                                 for o in zf)]
+    if same:
+        lines.append(f"camera moves: {len(same)}")
+    caps = edl.get("captions")
+    if caps and first.get("captions") and caps == first.get("captions"):
+        lines.append("captions (off: {'captions': {'mode': 'off'}})")
+    return lines
