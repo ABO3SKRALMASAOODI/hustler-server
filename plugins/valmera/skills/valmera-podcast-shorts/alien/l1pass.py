@@ -72,10 +72,12 @@ def word_box(it, l1):
 
 
 def groups(l1):
-    """Words that are read together move together: a caption chunk, or the words of one display line."""
+    """Words that are read together move together: a caption chunk, or the words of one display line. Type a device
+    draws as picture (role ``graphic``: a marquee larger than the frame, a lockup behind the head) is not reading type:
+    the safe area and the face rule measure reading type only (it is seated off the watermark by its device)."""
     out = {}
     for it in l1["items"]:
-        if it.get("k") != "word":
+        if it.get("k") != "word" or it.get("role") == "graphic":
             continue
         key = it.get("chunk") or it["id"].rsplit(".", 1)[0]
         out.setdefault(key, []).append(it)

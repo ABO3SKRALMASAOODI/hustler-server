@@ -1120,6 +1120,8 @@ def build(script, sup, style_id, direction=None):
     # timing (a word too early, too close to another or too short to hold gives its place to the next), so a film
     # never loses its display words to timing. A long phrase is stacked (display_rows), never skipped for its length.
     omit = []
+    free = set()                                         # rows a device draws only in part: the caption keeps its seat for the rest
+    devices = []                                         # the palette's asks: rows whose type performs (laid at the render, chain.alien_bank)
     proposed = d.get("display") or []
     for row in proposed:
         if len(shown) >= DISPLAY_MOST:
@@ -1145,6 +1147,27 @@ def build(script, sup, style_id, direction=None):
         if b - a < 14:
             continue
         role = row.get("role") or "hook"
+        perf = row.get("perform") if isinstance(row.get("perform"), dict) else None
+        if perf and perf.get("dev"):
+            # the model chose the device that makes this row's type perform (palette_menu): the palette draws it on the
+            # scene's word clock, ending by the row's window (b) or its sentence, never past the next subject
+            import palette_menu
+            limit = min([Clock.f(clock.segs[seg][1]) + 10] + next_subject)
+            ask = palette_menu.ask_for(row, seg, text, a, b, len(devices), limit=limit)
+            devices.append(ask)
+            if perf["dev"] in palette_menu.REPLACES:
+                # a device that draws the words itself takes the row's place and the caption words it draws; a word of
+                # the row it does not draw stays in the caption, which then keeps its seat (the device seats itself off it)
+                mask = palette_menu.drawn(ask, text)
+                span = F.said_span(clock, seg, text)
+                if all(mask):
+                    omit += span
+                else:
+                    omit += palette_menu.omit_of(span, text, mask, F.norm_word)
+                    free.add((a, b, text))
+                P.events.append(a)
+                shown.append((a, b, text))
+                continue
         rows = display_rows(P.R, P.voices["dsp"], cased(text), cased(str(row.get("key") or "")), role)
         base_y = cap_y - 0.062                           # the lowest baseline of the block, clear above the caption seat
         ys = [base_y]
@@ -1186,7 +1209,7 @@ def build(script, sup, style_id, direction=None):
         P.block([a, b], [0.5 - wd / 2 - 0.022, y - 0.030, 0.5 + wd / 2 + 0.022, y_last + 0.013], pal["plate"], z=6, op=0.78, radius=0.008)
         for n, r_ in enumerate(rows):
             P.word([a, b], r_, "lab", 0.5, y + 0.036 * n, pal["ink"], 0.95, align="c", z=7, role="stat")
-    lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), hold=[(a - 1, b) for a, b, _ in shown], z=5,
+    lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), hold=[(a - 1, b) for a, b, t in shown if (a, b, t) not in free], z=5,
                             omit=omit)
     P.items = inside(P.items, f_end)
     P.items = ink_by_ground(P.items, P.voices, bright)
@@ -1217,6 +1240,10 @@ def build(script, sup, style_id, direction=None):
                 drive_ids -= ids
             except Exception as e:  # noqa: BLE001 - a section the driver cannot cut keeps the film's own band
                 bands.append(dict(energy=en, take=is_take, fault=repr(e)[:200]))
+    # the film's word clock, for the palette's devices: each word on the frame a display word lands on it, and its sentence
+    l1["said"] = [[w["w"], Clock.f(w["t0"]) - 1, Clock.f(w["t1"]), int(w.get("seg", 0))] for w in clock.words]
+    if devices:
+        l1["devices"] = devices
     l1 = F.engines_finish(l1, sup, stress, drive_ids, meta, dict(d, look_pictures=look_pics),
                           turn_f=story_turn_f if story_turn_f is not None else turn_f, mono=mono_spans,
                           clear=[0.10, cap_y - 0.085, 0.90, cap_y + 0.02],
@@ -1254,7 +1281,7 @@ def build(script, sup, style_id, direction=None):
         by_id = {pid: keys.get(path) or path for pid, path in (dr.get("pictures") or {}).items()}
         asks, notes = DR.palette_asks(dr, word_frame, seg_span, by_id.get, f_end)
         if asks:
-            l1["devices"] = asks
+            l1["devices"] = list(l1.get("devices") or []) + asks        # after the rows whose type performs (perform)
     why = notes
     changes = sorted({it["f"][0] for it in l1["items"] if it["k"] == "shot"})
     for s_ in l1.get("sound") or []:
@@ -1279,6 +1306,7 @@ def build(script, sup, style_id, direction=None):
                               sections=[dict(f=[a_, b_], words=[s_.get("start"), s_.get("end")], surface=s_.get("surface"),
                                              layout=s_.get("layout"), energy=s_.get("energy")) for a_, b_, s_ in secs], bands=bands),
                  alien=dict(asked=[a["dev"] for a in asks if a["dev"] in ("rhyme", "diecut", "lamp", "arc", "answer")]),
+                 perform=[dict(dev=x["dev"], beat=x.get("beat"), at=x.get("at")) for x in devices],
                  sound_design=dict(l1.get("sound_design") or {}),       # with its dropped list: a refusal is measured, never guessed
                  look=[f for f in look_f if 0 <= f < f_end])
     return l1, beats

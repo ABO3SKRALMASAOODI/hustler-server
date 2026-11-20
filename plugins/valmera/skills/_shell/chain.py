@@ -475,9 +475,15 @@ def lay_devices(ctx, l1_path):
     if not os.path.exists(out):
         wk = brand.worker_dir()
         log = os.path.join(ctx.supply, "devices_log.json")
+        src = l1_path
+        mod = "scene.palette.run"
+        if not os.path.isdir(os.path.join(wk, "scene", "palette")):
+            # a worker that has not shipped the palette yet lays the alien bank (scene.alien, on every worker since 19 Nov):
+            # the Director's asks for the bank's own devices are handed to it, the rest wait for the palette's release
+            src, mod = alien_only(doc, l1_path), "scene.alien.run"
         try:
-            sh(ctx, ["zsh", "-c", f"cd '{wk}' && PYTHONPATH=..:{SLICE}/pylib FFMPEG_BIN='{brand.FF}' '{PY}' -m scene.palette.run apply "
-                                  f"--l1 '{l1_path}' --work '{ctx.supply}' --out '{out}.part' --log '{log}'"],
+            sh(ctx, ["zsh", "-c", f"cd '{wk}' && PYTHONPATH=..:{SLICE}/pylib FFMPEG_BIN='{brand.FF}' '{PY}' -m {mod} apply "
+                                  f"--l1 '{src}' --work '{ctx.supply}' --out '{out}.part' --log '{log}'"],
                label=f"wf-devices-{ctx.run_id}", heavy=True, timeout=3600)
             os.replace(out + ".part", out)
         except (RuntimeError, subprocess.SubprocessError, OSError) as e:
@@ -495,6 +501,35 @@ def lay_devices(ctx, l1_path):
 
 
 alien_bank = lay_devices          # the older name: every caller now lays the whole palette
+
+ALIEN_BANK = ("rhyme", "diecut", "lamp", "arc", "answer")
+
+
+def alien_only(doc, l1_path):
+    """The scene for a worker without the palette: its asks for the alien bank's devices (Director's ``devices`` with
+    their [a, z] span, and the older ``alien`` field), and no ``devices`` field. Written beside the scene."""
+    asks = [dict(a) for a in doc.get("alien") or [] if isinstance(a, dict)]
+    for a in doc.get("devices") or []:
+        if not isinstance(a, dict) or str(a.get("dev")) not in ALIEN_BANK:
+            continue
+        a = dict(a)
+        if not isinstance(a.get("at"), (list, tuple)):
+            f = a.get("f")
+            at = a.get("at")
+            if isinstance(f, (list, tuple)) and len(f) >= 2:
+                a["at"] = [int(f[0]), int(f[1])]
+            elif isinstance(at, (int, float)):
+                u = a.get("until")
+                a["at"] = [int(at), int(u) if isinstance(u, (int, float)) and u > at else int(at) + 30]
+            elif isinstance(f, (int, float)):
+                a["at"] = [int(f), int(f) + 30]
+        if isinstance(a.get("at"), (list, tuple)):
+            asks.append(a)
+    out = dict({k: v for k, v in doc.items() if k not in ("devices", "alien")}, alien=asks)
+    path = os.path.splitext(l1_path)[0] + ".bank.json"
+    with open(path, "w") as f:
+        json.dump(out, f)
+    return path
 
 
 def measure_devices(ctx, film, scene_path):

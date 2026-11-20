@@ -4,8 +4,12 @@ frame of every source, every word and its frame, the level of the voice on each 
 Five devices. Each takes a scene (the Score's L1) and an ask, measures what it needs by signal, and gives
 back a patch of plain scene items (and, for a relit take, one baked clip): nothing here draws, and the
 engine needs no new op to show any of it. No model is read (the engine's rule): which word, which picture,
-which year come from the caller, a model that read the script. A device that cannot stand on this film
-(no round shape, no picture under the word) says so and leaves the film as it was; it never fails a render.
+which year come from the caller, a model that read the script. A device that meets a fixable gap repairs it and
+says what it did (owner, 16 Nov 2026: a fix gets the outcome): answer's words with no picture still land as
+words, a lamp with nothing to relight burns as a glow at the voice's level, a diecut over a plate cuts its letters
+from the next picture, a lamp makes the take's matte when the scene has none. Only a true impossibility (no word,
+no round shape anywhere) leaves the film as it was, and the palette (worker/scene/palette) then runs the device's
+fallback chain; it never fails a render.
 
     from scene import alien
     alien.DEVICES                       # name -> {"card", "claim", "plan"}

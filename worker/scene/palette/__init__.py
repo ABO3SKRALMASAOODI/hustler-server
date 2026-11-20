@@ -150,6 +150,8 @@ def _discover():
             e.setdefault("fallback", ())
             e.setdefault("needs", ())
             e.setdefault("layer", "surface")
+            if isinstance(e["layer"], int):         # a family that numbers its layers (1 = rhythm ... 6 = look)
+                e["layer"] = LAYERS[min(max(e["layer"], 1), len(LAYERS)) - 1]
             e.setdefault("words", ())
             e.setdefault("span", False)
             found[name] = e
@@ -191,12 +193,15 @@ def spans(name):
     return bool((DEVICES.get(resolve(name)) or {}).get("span"))
 
 
-def menu(layers=LAYERS):
-    """One card a device, by layer: its fields, what it does, the kind of moment it amplifies. For the Director."""
+def menu(layers=LAYERS, families=None):
+    """One card a device, by layer: its fields, what it does, the kind of moment it amplifies. For the Director.
+    ``families``: only the devices of these family modules (e.g. type, behind, hud)."""
     _discover()
     out = []
     for layer in layers:
         for name in sorted(n for n, e in DEVICES.items() if e["layer"] == layer):
+            if families and DEVICES[name].get("family") not in families:
+                continue
             out.append(f"[{layer}] {card(name)}")
     return "\n".join(out)
 
@@ -211,7 +216,8 @@ def units(name):
 def card(name):
     """A device's card with its fields' units and ranges."""
     u = units(name)
-    return DEVICES[name]["card"] + (f". Units: {u}" if u else "")
+    amp = DEVICES[name].get("amplifies")
+    return DEVICES[name]["card"] + (f". Units: {u}" if u else "") + (f". Amplifies: {amp}." if amp else "")
 
 
 def _span(ask, l1):
@@ -377,16 +383,79 @@ def _try(cur, work, ask, sense):
     try:
         patch = DEVICES[ask["dev"]]["plan"](cur, work, ask, sense)
     except Exception as e:      # noqa: BLE001 - a device is never the reason a film does not render: its fallback runs
-        return None, f"{type(e).__name__}: {str(e)[:200]}"
+        return None, f"{e.__class__.__name__}: {str(e)[:200]}"      # `type` here is the type family module
     if not isinstance(patch, dict):
         return None, "no patch"
     if patch.get("skip"):
         return None, str(patch["skip"])
+    dropped = glyph_safe(patch, cur.get("voices"))
+    if dropped and isinstance(patch.get("log"), dict):
+        patch["log"]["glyphs_dropped"] = dropped
+    # the watermark's keep-out is the owner's: a device's own type that would meet it moves down, as one block
+    moved = _clear_mark(cur, patch, ask.get("id") or "")
+    if moved and isinstance(patch.get("log"), dict):
+        patch["log"]["moved_off_mark"] = moved
     nxt = merge(cur, patch)
     ok, why = eligible(nxt)
     if not ok:
         return None, "would break the scene: " + "; ".join(why[:3])
     return (patch, nxt), None
+
+
+_GLYPH = {}
+
+
+def _has(voice, ch):
+    key = (voice.get("font"), voice.get("family"), str(voice.get("var")), ch)
+    if key not in _GLYPH:
+        try:
+            from ..alien import glyphs
+            got, _ = glyphs.face(voice).shape(ch, 100)
+            _GLYPH[key] = bool(got) and all(g[0] != 0 for g in got)
+        except Exception:      # noqa: BLE001 - a face that cannot be read is the engine's to report
+            _GLYPH[key] = True
+    return _GLYPH[key]
+
+
+def glyph_safe(patch, voices):
+    """A device's words with any character its face cannot draw taken out (a dash or a symbol a model wrote that the
+    display face lacks), so a strict render never stops on a device's type. Returns how many characters went."""
+    n = 0
+    for it in patch.get("items") or []:
+        if it.get("k") not in ("word", "join") or not isinstance(it.get("t"), str):
+            continue
+        v = (patch.get("voices") or {}).get(it.get("v")) or (voices or {}).get(it.get("v"))
+        if not v:
+            continue
+        keep = "".join(c for c in it["t"] if c.isspace() or _has(v, c))
+        if keep != it["t"]:
+            n += len(it["t"]) - len(keep)
+            it["t"] = keep if keep.strip() else "."
+    return n
+
+
+def _clear_mark(cur, patch, ask_id):
+    from . import kit as K
+    try:
+        W, H = [int(v) for v in (cur.get("frame") or [1080, 1920])]
+        voices = dict(cur.get("voices") or {}, **(patch.get("voices") or {}))
+        return K.clear_of_mark(patch.get("items") or [], voices, W, H, f"{ask_id}.")
+    except Exception:      # noqa: BLE001 - a word that cannot be measured is the engine's to report
+        return 0.0
+
+
+def chain(name):
+    """The device and its fallbacks, each once, in order (a name the palette does not know resolves first)."""
+    _discover()
+    seen, out, todo = set(), [], [resolve(name)]
+    while todo:
+        n = todo.pop(0)
+        if n in seen or n not in DEVICES:
+            continue
+        seen.add(n)
+        out.append(n)
+        todo += list(DEVICES[n]["fallback"])
+    return out
 
 
 def asks_of(l1):
@@ -397,6 +466,10 @@ def asks_of(l1):
 
 
 WORD_DEVICES = ("lamp", "diecut", "answer", "word_blend")
+# devices that set the words themselves (the type family's pages, names, counts, words behind him): the builder's display
+# copy of the same words leaves while one stands, as it does for the word devices; they seat themselves off other type
+SETS_WORDS = WORD_DEVICES + ("counter", "staircase", "name", "ladder", "brackets", "typewriter", "redact", "type_run", "verb",
+                             "behind", "marquee", "chapter")
 SEAT_ROWS = (0.30, 0.46, 0.62, 0.22, 0.74)        # baselines a word device may move to when its seat is taken
 
 
@@ -551,10 +624,10 @@ def apply(l1, work, asks=None, pool=None):
         dev, (patch, nxt) = landed
         made |= {i["id"] for i in patch.get("items") or []}
         echoes = set()
-        if dev in WORD_DEVICES:
+        if dev in SETS_WORDS:
             texts = device_text(dict(ask, dev=dev), patch)
             box = seat_box(patch, ask, ranges_of(dev))
-            if dev != "word_blend":
+            if dev in WORD_DEVICES and dev != "word_blend":
                 seats.append(box)
             echoes = drop_echoes(nxt, texts, box[4], box[5], made)
             if echoes:

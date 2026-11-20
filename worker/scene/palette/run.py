@@ -13,7 +13,8 @@ from . import apply, menu
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="scene.palette.run")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("menu")
+    m = sub.add_parser("menu")
+    m.add_argument("--family")
     a = sub.add_parser("apply")
     a.add_argument("--l1", required=True)
     a.add_argument("--work", required=True)
@@ -22,7 +23,7 @@ def main(argv=None):
     a.add_argument("--log")
     args = ap.parse_args(argv)
     if args.cmd == "menu":
-        print(menu())
+        print(menu(families=args.family.split(",") if args.family else None))
         return 0
     l1 = json.load(open(args.l1, encoding="utf-8"))
     asks = json.load(open(args.asks, encoding="utf-8")) if args.asks else None
