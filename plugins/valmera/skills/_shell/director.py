@@ -202,7 +202,7 @@ def capability(pictures, take, pal=None):
         for name in sorted(pal.DEVICES):
             miss = [n for n in pal.DEVICES[name].get("needs") or () if n in have and not have[n]]
             if miss:
-                fb = (pal.DEVICES[name].get("fallback") or ("white",))[0]
+                fb = next((d for d in pal.DEVICES[name].get("fallback") or () if d in pal.DEVICES), "white")
                 short.append(f"{name} (needs {', '.join(miss)}; would land as {fb})")
     if short:
         lines.append("- cannot stand on this material: " + "; ".join(short))
