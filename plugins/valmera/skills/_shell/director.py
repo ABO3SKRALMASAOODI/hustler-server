@@ -142,8 +142,9 @@ def round_shapes(path):
     try:
         import cv2
         im = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-        if im is None or palette_module() is None:
+        if im is None:
             return None
+        palette_module()                 # the worker on the path; the rhyme's own finder is in scene.alien on every worker
         from scene.alien import rhyme
         ph, pw = im.shape[:2]
         k = rhyme.SIDE / min(pw, ph)
