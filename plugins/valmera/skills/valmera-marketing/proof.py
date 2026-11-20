@@ -9,9 +9,10 @@ ideas   one model call reads what editors answer to (the 02-editing-tutorials re
 script  records the real output first: the clip is uploaded to a local stack of the product (the Gauntlet's runner, its
         own database, storage and worker; nothing of production is written, no customer is involved), the sentence is
         typed, the export is downloaded (studio.py). A vision model then checks the export against the sentence, element by
-        element; a sentence whose result is not visible is not shown: the second sentence is recorded, and if that fails
-        too the run stops. Then the narration is written around the recording, every claim audited against its receipts
-        by a second call, and the typed sentence is spoken word for word
+        element, while the session stays open; a result it finds short gets a follow-up typed in the same session (up
+        to FOLLOW_UPS, written by a model from the check), the way a customer asks again, and only then does the next
+        idea get its turn. Then the narration is written around the recording, every claim audited against its receipts
+        by a second call, and every typed sentence is spoken word for word
 supply  the narrator (Phonon Easton, the stories read), real footage per line (worker/footage; a line whose only picture
         is the recording gets footage of what its words name too), free photographs of what it names, and the recording
         cut in with its own sound between two narrator lines: the clip as uploaded (the before) and the export (the after);
@@ -88,7 +89,11 @@ STACK = {"be": "main", "fe": "main", "plan_models": {}, "planner_model": "off", 
          "kv": {"studio_for_all_plans": {"on": False}}, "openai_key": True, "trial_per_account_usd": 3.0, "spend_cap_usd": 3,
          "transcriber": "deepgram", "stock": True, "allow_free_stock": True,
          "slots": {"agent": 2, "index": 1, "media": 2}}
-STACK_V = 4           # a recording made on other stack settings is never reused (4, 17 Nov: the phone view, the Studio photographed)
+STACK_V = 5           # a recording made on other stack settings is never reused (4, 17 Nov: the phone view, the Studio photographed;
+                      # 5, 20 Nov: the session stays open after each result for a follow-up typed from the export's check)
+FOLLOW_UPS = 2        # follow-up requests typed in the same Studio session before an idea gives way to the next (20 Nov: the
+                      # first export of i0 had every asked element and three defects; the run refused it instead of asking again)
+FOLLOW_UP_WAIT_S = 1800   # how long the open session waits for the check and the follow-up's words
 VIEW = "phone"        # the Studio as a phone shows it: the film shows the product's own screen at phone size (studio.py ui/)
 
 
@@ -429,8 +434,13 @@ DEVICE_MENU = ("timeline (on the line that says the typed sentence, the frame pu
 
 
 def format_of(script, knobs=None):
-    """showcase or tutorial: the direction's, else the idea's, else the tutorial (the narrated path)."""
-    f = (knobs or {}).get("format") or (script.get("idea_full") or {}).get("format")
+    """showcase or tutorial: the direction's, else the idea's, else the tutorial (the narrated path). A recording with
+    follow-ups is a tutorial: its narration and typed line say every sentence typed, while the showcase's Studio
+    photographs show the first sentence alone."""
+    idea = script.get("idea_full") or {}
+    if idea.get("follow_ups") or (script.get("receipts") or {}).get("follow_ups"):
+        return "tutorial"
+    f = (knobs or {}).get("format") or idea.get("format")
     return f if f in D.FORMATS else "tutorial"
 
 
@@ -560,9 +570,13 @@ def snap_window(words, t0, t1):
     return round(max(a - 0.25, 0.0), 2), round(b + 0.15, 2)
 
 
-def record(ctx, idea, k, ask_text):
+def record(ctx, idea, k, ask_text, follow_ups=None):
     """One session on a local stack of the product: upload the clip, type the sentence before the first result, export.
-    The record (upload, export, EDLs, journey, sha256s) is kept in this run's folder and deleted with it."""
+    While the session stays open each result is exported and checked against everything typed so far (answer_turn);
+    a result the check finds short gets a follow-up typed in the same session, the way a customer asks again, up to
+    `follow_ups` (FOLLOW_UPS) of them. The record (upload, every export, EDLs, journey, every typed ask with its phase,
+    sha256s) is kept in this run's folder and deleted with it. A kept record.json is reused: its follow-ups are never
+    typed again."""
     studio_root = os.path.join(ctx.tmp, "studio")
     sid = f"m{ctx.run_id[-6:]}-{k}-s{STACK_V}"
     rec_p = os.path.join(studio_root, "records", sid, "record.json")
@@ -577,24 +591,44 @@ def record(ctx, idea, k, ask_text):
             return json.load(open(os.path.join(destination, "record.json")))
         ctx.log(f"reusing verified synthetic recording {original['sid']} from {original.get('recorded_at')}")
         return reuse_record(idea["recording"], destination)
+    n_follow = FOLLOW_UPS if follow_ups is None else int(follow_ups)
+    live = live_dir(ctx, sid)
+    shutil.rmtree(live, ignore_errors=True)          # a session that did not finish left turns of a project now gone
     words = json3_words(next(s["captions"] for s in sources() if s["file"] == idea["file"]))
     t0, t1 = snap_window([w for w in words if idea["t0"] - 20 <= w[0] <= idea["t1"] + 20], float(idea["t0"]), float(idea["t1"]))
-    spec = dict(settings=STACK, sessions=[dict(sid=sid, source=idea["file"], t0=t0, t1=t1, plan=PLAN, view=VIEW,
-                                                asks=[dict(text=ask_text, phase="before_first_result")], note=idea.get("title"))])
+    asks = [dict(text=ask_text, phase="before_first_result")] + [dict(live=True, phase="after_result")] * n_follow
+    row = dict(sid=sid, source=idea["file"], t0=t0, t1=t1, plan=PLAN, view=VIEW, asks=asks, note=idea.get("title"))
+    if n_follow:
+        row["follow_ups"] = dict(dir=live, wait_s=FOLLOW_UP_WAIT_S)
+    spec = dict(settings=STACK, sessions=[row])
     sp = os.path.join(ctx.run_dir, f"studio_spec_{k}.json")
     jsave(sp, spec)
     run = f"wf2-{ctx.run_id}-{k}"
     env = dict(os.environ, VALMERA_STUDIO=studio_root)
     env.pop("ANTHROPIC_API_KEY", None)
-    ctx.log(f"recording {sid}: {idea['source']} {t0}-{t1} s, typed {ask_text!r} (stack {run})")
+    ctx.log(f"recording {sid}: {idea['source']} {t0}-{t1} s, typed {ask_text!r} (stack {run}, up to {n_follow} follow-ups)")
     t = time.time()
     command = ["zsh", HEAVY, f"wf-studio-{ctx.run_id}", PY, os.path.join(HERE, "studio.py"), "record", "--spec", sp, "--run", run,
                "--parallel", "1"]
     if os.environ.get("GAUNTLET_LOCK_HELD") != "1":
         command = ["zsh", f"{VV}/ops-loop/tools/gauntlet_lock.sh", *command]
-    r = subprocess.run(command,
-                       cwd=HERE, env=env, capture_output=True, text=True, timeout=5400)
-    ctx.log_raw((r.stdout or "")[-3000:] + (r.stderr or "")[-1500:])
+    out_p = os.path.join(studio_root, f"{sid}.out.txt")
+    os.makedirs(studio_root, exist_ok=True)
+    must = (idea.get("must_see") or [[]])[0] or []
+    limit = 5400 + n_follow * (3600 + FOLLOW_UP_WAIT_S)
+    with open(out_p, "w") as out:
+        proc = subprocess.Popen(command, cwd=HERE, env=env, stdout=out, stderr=subprocess.STDOUT, text=True)
+        while proc.poll() is None:
+            if n_follow:
+                answer_turns(ctx, idea, live, must, n_follow)
+            if time.time() - t > limit:
+                proc.kill()
+                proc.wait()
+                break
+            time.sleep(5)
+    rc = proc.returncode
+    tail = open(out_p, errors="replace").read()[-4500:]
+    ctx.log_raw(tail)
     rd = os.path.join(G, "runs", run)
     try:          # the stack is down after the recording; its database and its folder (the clip, the browser's files) go too
         subprocess.run([PY, os.path.join(G, "runner", "stack.py"), "down", run, "--drop-db"], cwd=os.path.join(G, "runner"),
@@ -603,12 +637,134 @@ def record(ctx, idea, k, ask_text):
         pass
     shutil.rmtree(rd, ignore_errors=True)
     shutil.rmtree(os.path.join(studio_root, "corpus", sid), ignore_errors=True)
+    for name in os.listdir(live) if os.path.isdir(live) else []:     # the turns' export copies: the record keeps every export
+        shutil.rmtree(os.path.join(live, name, "exports"), ignore_errors=True)
     if not os.path.exists(rec_p):
-        raise RuntimeError(f"the recording {sid} kept nothing (exit {r.returncode}): {(r.stdout or '')[-300:]} {(r.stderr or '')[-300:]}")
+        raise RuntimeError(f"the recording {sid} kept nothing (exit {rc}): {tail[-600:]}")
     rec = json.load(open(rec_p))
     rec["recorded_in_s"] = round(time.time() - t)
     jsave(rec_p, rec)
     return rec
+
+
+# ----------------------------------------------------------------- follow-ups in the same session
+
+def live_dir(ctx, sid):
+    """Where an open session hands its results to the workflow and reads the next request (studio.py Recording.turn)."""
+    return os.path.join(ctx.tmp, "studio", "live", sid)
+
+
+def asks_of(rec):
+    """Every sentence typed in a recording, in order: [text]; the first is the idea's, the rest its follow-ups."""
+    return [str(a.get("text")) for a in rec.get("asks") or [] if a.get("text")]
+
+
+def check_text(asks):
+    """export_check's sentence: the one sentence as it was, or every sentence typed in the session, in order."""
+    return asks[0] if len(asks) == 1 else list(asks)
+
+
+def answer_turns(ctx, idea, live, must, n_follow):
+    """Every result the open session is waiting on (turn_<i>.json without answer_<i>.json): its export is checked
+    against everything typed so far (check_<i>.json, kept for the script); when the check finds it short and the
+    session has follow-ups left, a follow-up is written from the check and typed next; else the session ends on it."""
+    if not os.path.isdir(live):
+        return
+    for name in sorted(os.listdir(live)):
+        if not (name.startswith("turn_") and name.endswith(".json")):
+            continue
+        i = name[5:-5]
+        ans_p = os.path.join(live, f"answer_{i}.json")
+        if os.path.exists(ans_p):
+            continue
+        turn = jload(os.path.join(live, name), {}) or {}
+        asks = [str(a.get("text")) for a in turn.get("asks") or [] if a.get("text")]
+        answer = dict(stop=True)
+        try:
+            if not turn.get("exports") or not asks:
+                answer["why"] = "the result was not exported"
+            else:
+                chk = jload(os.path.join(live, f"check_{i}.json"))
+                if not (isinstance(chk, dict) and chk.get("v") == CHECK_V):
+                    chk = dict(export_check(ctx, turn, check_text(asks), must), stack_v=STACK_V)
+                    jsave(os.path.join(live, f"check_{i}.json"), chk)
+                ctx.log(f"result of request {i} ({len(asks)} typed): {'shown' if chk.get('ok') else 'not shown'}: "
+                        f"{chk.get('why') or chk.get('looks')}")
+                if chk.get("ok"):
+                    answer["why"] = "the check found everything asked, visibly"
+                elif len(asks) - 1 >= n_follow:
+                    answer["why"] = f"{n_follow} follow-ups typed"
+                elif not chk.get("elements"):
+                    answer["why"] = f"nothing to ask again: {chk.get('why')}"
+                else:
+                    text, use = follow_up(ctx, idea, asks, chk)
+                    chk.setdefault("spend", []).extend(use)
+                    jsave(os.path.join(live, f"check_{i}.json"), chk)
+                    if text:
+                        answer = dict(text=text)
+                        ctx.log(f"follow-up {len(asks)} typed in the same session: {text!r}")
+                    else:
+                        answer["why"] = "no follow-up came back"
+        except Exception as e:  # noqa: BLE001 - the session never hangs on a check; it ends on this result and the script checks it
+            answer["why"] = f"the check failed: {repr(e)[:300]}"
+            ctx.log(f"result of request {i}: {answer['why']}")
+        jsave(ans_p, answer)
+
+
+FOLLOW_UP_WORDS = 24     # a narrator reads the follow-up word for word in the film
+
+
+def follow_up(ctx, idea, asks, chk):
+    """The next message a customer types after seeing the result: written by a model from the check's findings (what
+    was not visible, the defects), in plain words. (text or None, [spend])."""
+    system = ("You are a video editor using Valmera, an AI video editor: you uploaded a clip, typed what you wanted into its chat, "
+              "and looked at the result it returned. A careful look at that result found what is listed below. Write the next "
+              "message you would type into the same chat so the product fixes it: plain words a customer types, one or two short "
+              f"sentences, at most {FOLLOW_UP_WORDS} words, saying what to change and how it should look instead; cover every "
+              "defect and every asked thing that is not visible, most important first; never repeat what already works, never "
+              "name a tool, a setting or a timecode, never thank or greet. A narrator will read it aloud word for word in a film, "
+              "so write numbers as words and use no digits or symbols.")
+    facts = dict(typed_so_far=asks, technique=idea.get("technique"), not_visible=[e.get("asked") for e in chk.get("elements") or []
+                                                                             if isinstance(e, dict) and not e.get("visible")],
+                 defects=chk.get("defects") or [], looks=chk.get("looks"))
+    note, spend = "", []
+    for _ in range(3):
+        got, use = ask(system, "# The result's check\n" + json.dumps(facts, ensure_ascii=False) + note
+                       + "\n\nReturn JSON only: {\"say\": the message}", what="follow-up", effort="low", max_tokens=2000)
+        spend.append(use)
+        text = " ".join(str((got if isinstance(got, dict) else {}).get("say") or "").split())
+        n = len(text.split())
+        if text and n <= FOLLOW_UP_WORDS + 6 and not any(c.isdigit() for c in text):
+            return text, spend
+        note = (f"\n\nYour last message ({text!r}) had {n} words" + (" and digits" if any(c.isdigit() for c in text) else "")
+                + f": at most {FOLLOW_UP_WORDS} words, numbers as words.")
+    return None, spend
+
+
+def turn_check(ctx, rec):
+    """The check made while the session was open of the result the session ended on (the same export, by sha256),
+    pointed at the record's own files; None when there is none."""
+    ex = next((e for e in rec.get("exports") or [] if e.get("tag") == "final"), (rec.get("exports") or [None])[-1])
+    live = live_dir(ctx, rec.get("sid") or "")
+    if not ex or not os.path.isdir(live):
+        return None
+    for name in sorted(os.listdir(live), key=lambda n: (len(n), n), reverse=True):
+        if not (name.startswith("check_") and name.endswith(".json")):
+            continue
+        chk = jload(os.path.join(live, name), {}) or {}
+        if chk.get("v") == CHECK_V and (chk.get("export") or {}).get("sha256") == ex.get("sha256"):
+            return dict(chk, export=ex, upload=rec.get("upload"))
+    return None
+
+
+def turns_of(ctx, rec):
+    """Each typed request's checked result, for script_state: [{asked, ok, why, export_sha256}]."""
+    live, out = live_dir(ctx, rec.get("sid") or ""), []
+    for i, a in enumerate(rec.get("asks") or [], 1):
+        chk = jload(os.path.join(live, f"check_{i}.json"), {}) or {}
+        out.append(dict(asked=a.get("text"), phase=a.get("phase"), follow_up=bool(a.get("follow_up")), ok=chk.get("ok"),
+                        why=chk.get("why"), export_sha256=(chk.get("export") or {}).get("sha256")))
+    return out
 
 
 def frames(path, times, w=288):
@@ -724,8 +880,15 @@ def export_check(ctx, rec, ask_text, must_see):
     n = min(int(ex["dur"]), 40)
     et = [round(0.5 + i * (ex["dur"] - 1) / max(n - 1, 1), 2) for i in range(n)]
     ut = [round(0.5 + i * (up["dur"] - 1) / 9, 2) for i in range(10)]
-    content = [dict(type="text", text=f"The sentence typed into the product: {ask_text!r}\nThe elements are the parts of this sentence, "
-                                      "and only those: what the film's planner hoped to see as well (a note, never a reason to fail): "
+    if isinstance(ask_text, (list, tuple)):     # follow-ups typed in the same session after seeing the result before
+        typed = ("The sentences typed into the product, in order, in one session: the first before its first result, each later "
+                 "one a follow-up typed after seeing the result before it:\n" + "\n".join(f"{n}. {t!r}" for n, t in enumerate(ask_text, 1))
+                 + "\nThe elements are the parts of these sentences (where a follow-up changes an earlier ask, the follow-up's "
+                   "words win), and only those: what the film's planner hoped to see as well (a note, never a reason to fail): ")
+    else:
+        typed = (f"The sentence typed into the product: {ask_text!r}\nThe elements are the parts of this sentence, "
+                 "and only those: what the film's planner hoped to see as well (a note, never a reason to fail): ")
+    content = [dict(type="text", text=typed +
                                       f"{json.dumps(must_see)}\n"
                                       f"First, the clip as uploaded ({up['w']}x{up['h']}, {up['dur']} s), ten frames:")]
     for t, b in zip(ut, frames(up["file"], ut)):
@@ -778,9 +941,21 @@ def export_check(ctx, rec, ask_text, must_see):
 # ----------------------------------------------------------------- the script
 
 def receipts(rec, chk, ask_text):
+    """The facts a film may state about its recording. Every sentence typed in the session is here: `typed` is the first
+    (before the first result), `follow_ups` the ones typed after seeing a result, `asks` all of them with their phase,
+    and `exports` every export the session kept with its sha256; the film says and shows them all (typed_line)."""
     ex = chk["export"]
     up_words, ex_words = spoken(rec, ex)
-    return dict(typed=ask_text, upload_says=up_words, export_says=ex_words, phase="before the first result", first_result_s=rec.get("first_result_s"), session_s=rec.get("seconds"),
+    asks = [a for a in rec.get("asks") or [] if a.get("text")] or [dict(text=ask_text, phase="before_first_result")]
+    extra = {}
+    if len(asks) > 1:
+        extra = dict(follow_ups=[dict(typed=a["text"], phase="after seeing the result before it, in the same Studio session",
+                                      written_from=a.get("written_from")) for a in asks[1:]],
+                     sentences_typed=len(asks), result_shown="the export after the last sentence")
+    return dict(typed=asks[0]["text"], **extra, asks=[dict(text=a["text"], phase=a.get("phase"), follow_up=bool(a.get("follow_up"))) for a in asks],
+                exports=[dict(tag=e.get("tag"), sha256=e.get("sha256"), edl_version=e.get("edl_version"), seconds=e.get("dur"))
+                         for e in rec.get("exports") or []],
+                upload_says=up_words, export_says=ex_words, phase="before the first result", first_result_s=rec.get("first_result_s"), session_s=rec.get("seconds"),
                 upload=dict(seconds=rec["upload"]["dur"], w=rec["upload"]["w"], h=rec["upload"]["h"], sha256=rec["upload"]["sha256"]),
                 export=dict(seconds=ex["dur"], w=ex["w"], h=ex["h"], sha256=ex["sha256"], edl_version=ex.get("edl_version")),
                 visible=[dict(asked=e.get("asked"), how=e.get("how"), seconds=e.get("seconds")) for e in chk.get("elements") or []],
@@ -792,6 +967,17 @@ def receipts(rec, chk, ask_text):
 
 def norm_words(s):
     return [x for x in (F.norm_word(w) for w in str(s).split()) if x]
+
+
+def typed_sentences(rc):
+    """Every sentence typed in the recording's session, in order (the first, then its follow-ups)."""
+    return [rc.get("typed")] + [f["typed"] for f in rc.get("follow_ups") or []]
+
+
+def typed_line(rc):
+    """What the film shows as typed: the sentence, or every sentence typed in the session, in order, so the film never
+    shows one sentence for an edit two made."""
+    return " / ".join(str(t) for t in typed_sentences(rc) if t)
 
 
 SHOW_ROLES = ("figure", "key", "name")       # the display roles of a marketing line (the stories cutter's own names)
@@ -891,6 +1077,11 @@ def anchor_show(sc):
     return notes
 
 
+def form_words(rc):
+    """The narration's most words: the form's, plus the follow-ups it says word for word."""
+    return FORM["words"][1] + sum(len(str(f.get("typed") or "").split()) for f in (rc or {}).get("follow_ups") or [])
+
+
 def script_problems(sc, ask_text, rc):
     segs = sc.get("segments") or []
     p = []
@@ -898,8 +1089,9 @@ def script_problems(sc, ask_text, rc):
     if not lo <= len(segs) <= hi:
         p.append(f"{len(segs)} segments; {lo}-{hi} wanted")
     n = sum(len(str(s.get("say", "")).split()) for s in segs)
-    if not FORM["words"][0] <= n <= FORM["words"][1]:
-        p.append(f"{n} spoken words; {FORM['words'][0]}-{FORM['words'][1]} wanted")
+    hi = form_words(rc)
+    if not FORM["words"][0] <= n <= hi:
+        p.append(f"{n} spoken words; {FORM['words'][0]}-{hi} wanted")
     pr = sc.get("proof") or {}
     b, a = pr.get("before_after"), pr.get("after_after")
     if not (isinstance(b, int) and isinstance(a, int) and 0 <= b < a <= len(segs) - 2):
@@ -909,6 +1101,9 @@ def script_problems(sc, ask_text, rc):
     want = norm_words(ask_text)
     if not any(" ".join(want) in " ".join(norm_words(s.get("say", ""))) for s in segs):
         p.append(f"no segment says the typed sentence word for word: {ask_text!r}")
+    for f in (rc or {}).get("follow_ups") or []:       # the film never says one sentence did what two did
+        if not any(" ".join(norm_words(f["typed"])) in " ".join(norm_words(s.get("say", ""))) for s in segs):
+            p.append(f"no segment says the follow-up typed after the first result word for word: {f['typed']!r}")
     have = json.dumps(rc)
     for s in segs:
         if not 1 <= len(str(s.get("fallback_text") or "").split()) <= 5:
@@ -927,7 +1122,9 @@ def audit(sc, rc):
     system = ("You audit a marketing script for truth before it is narrated. You get the script and the receipts of the one real "
               "recording it shows. List every claim about Valmera, the edit or the recording (speed, what it did, what was typed, what "
               "is visible or said in the before and the after) and whether the receipts support it: what the upload and the export say "
-              "is in upload_says and export_says, what the export shows is in visible and looks. General statements about editing, and "
+              "is in upload_says and export_says, what the export shows is in visible and looks; every sentence typed is in asks, and when "
+              "follow_ups is present more than one sentence was typed in the session (the after is the result of all of them), so "
+              "a claim that one sentence or one try made it is unsupported. General statements about editing, and "
               "plain descriptions of the before and the after that these receipts bear out, are supported. Return JSON only: {\"claims\": [{\"text\": the words, \"supported\": true|false, \"why\": a few words}]}")
     copy = [dict(say=s.get("say"), show=[show_text(x) for x in s.get("show") or []], fallback_text=s.get("fallback_text"))
             for s in sc.get("segments") or []]
@@ -1027,14 +1224,19 @@ def write(ctx, idea, card, rc, notes=None, inventory=None, hook=None):
                f"# The idea\n{json.dumps(idea, ensure_ascii=False)}\n\n# The recording's receipts (the only facts about Valmera you may state)\n"
                f"{json.dumps(rc, ensure_ascii=False)}\n\n# The style\n{json.dumps(card, ensure_ascii=False)}\n\n# The references' pace (medians)\n"
                f"{json.dumps(pace)}\n\n"
-               f"# Form\n{FORM['words'][0]}-{FORM['words'][1]} spoken words in {FORM['segments'][0]}-{FORM['segments'][1]} segments; with the "
+               f"# Form\n{FORM['words'][0]}-{form_words(rc)} spoken words in {FORM['segments'][0]}-{FORM['segments'][1]} segments; with the "
                f"before (at most 3 s) and the after (at most 4 s) the film runs {FORM['seconds'][0]}-{FORM['seconds'][1]} s"
                + (f", after the opening beat's {round(float(hook['t'][1]) - float(hook['t'][0]), 1)} s" if hook else "") + ". The first segment is "
                + ("the hook, heard right after the opening beat: in under twelve words it lands what the beat showed (the edit, or "
                   "the pain it removes), never a greeting or 'did you know'. The " if hook else
                   "the hook, heard in the first second: the pain or the stake in under twelve words, never a greeting or 'did you know'. The ") +
                "before comes by the third or fourth segment; one segment, just before the after, says the typed sentence word for word "
-               f"(\"{rc['typed']}\") introduced in a few words of your own; after the after, one or two lines name what changed (only what "
+               f"(\"{rc['typed']}\") introduced in a few words of your own"
+               + ("; that same segment then says, word for word, what was typed next in the same session after seeing the "
+                  "first result (" + "; then ".join(f"\"{f['typed']}\"" for f in rc["follow_ups"]) + "), each introduced by at "
+                  "most two words of your own (\"then\", \"and then\"): the after is the result of all of them, so never "
+                  "speak as if one sentence or one try made it" if rc.get("follow_ups") else "")
+               + "; after the after, one or two lines name what changed (only what "
                "the receipts show as visible), then the last segment is the call to action inside the film: the viewer tries it at "
                "valmera.io, said plainly, shown as VALMERA.IO.\n\n"
                + (f"# The opening beat (fixed, before your first segment)\n{json.dumps(hook, ensure_ascii=False)}\n\n" if hook else "")
@@ -1108,8 +1310,9 @@ def script(ctx, ideas_out):
     stt = jload(keep, {}) or {}
     spend = []
     able = {s["id"]: s for s in able_cards(ctx)}
-    # the first sentence of each idea, best idea first, three recordings at most a film: an idea whose result the product
-    # does not visibly deliver gives way to the next idea, not to a second try of the same
+    # the first sentence of each idea, best idea first, three ideas at most a film: a result the check finds short gets
+    # follow-ups typed in the same Studio session (record, answer_turns; FOLLOW_UPS), the way a customer asks again; an
+    # idea whose last follow-up is still short gives way to the next idea
     tries = [(ii, idea, (idea.get("asks") or [""])[0], ((idea.get("must_see") or [[]])[0] or [])) for ii, idea in enumerate(ideas_out["ideas"][:3])]
     chosen = None
     for ii, idea, ask_text, must in tries:
@@ -1130,13 +1333,25 @@ def script(ctx, ideas_out):
             else:
                 continue                 # checked by this check and not shown: never shown
         rec = record(ctx, idea, k, ask_text)
-        chk = old if old.get("v") == CHECK_V and old.get("stack_v") == STACK_V else dict(export_check(ctx, rec, ask_text, must), stack_v=STACK_V)
+        asks = asks_of(rec) or [ask_text]
+        if old.get("v") == CHECK_V and old.get("stack_v") == STACK_V:
+            chk = old
+        else:
+            # the check the open session made of the result it ended on, else a check of the final export now; both read
+            # every sentence typed in the session
+            chk = turn_check(ctx, rec) or dict(export_check(ctx, rec, check_text(asks), must), stack_v=STACK_V)
+            for name in sorted(os.listdir(live_dir(ctx, rec["sid"]))) if os.path.isdir(live_dir(ctx, rec["sid"])) else []:
+                c = jload(os.path.join(live_dir(ctx, rec["sid"]), name), {}) if name.startswith("check_") else {}
+                if isinstance(c, dict) and (c.get("export") or {}).get("sha256") != (chk.get("export") or {}).get("sha256"):
+                    spend += c.get("spend") or []
         spend += chk.pop("spend", []) if "spend" in chk else []
         stt[tag] = dict(ok=chk["ok"], check=chk, record=os.path.join(ctx.tmp, "studio", "records", rec["sid"], "record.json"),
-                        product_failures=int(stt.get(tag, {}).get("product_failures") or 0))
+                        product_failures=int(stt.get(tag, {}).get("product_failures") or 0), asks=asks, turns=turns_of(ctx, rec))
         jsave(keep, stt)
-        ctx.log(f"recording {tag}: {'shown' if chk['ok'] else 'not shown'}: {chk.get('why') or chk.get('looks')}")
+        ctx.log(f"recording {tag}: {'shown' if chk['ok'] else 'not shown'} after {len(asks)} typed: {chk.get('why') or chk.get('looks')}")
         if chk["ok"]:
+            if len(asks) > 1:       # the film says and shows every sentence; the studio photographs show only the first
+                idea = dict(idea, follow_ups=asks[1:])
             chosen = (idea, ask_text, rec, chk, tag)
             break
     if not chosen:
@@ -1230,7 +1445,7 @@ def siblings(ctx, idea, rec, tag, stt, keep):
             if len(have) >= 2:
                 break
             try:
-                record(ctx, idea, f"{tag}t{j}", ask_text)
+                record(ctx, idea, f"{tag}t{j}", ask_text, follow_ups=0)    # a sibling export is shown as made
             except RuntimeError as e:          # a session that kept nothing: the next sentence, then the film without it
                 ctx.log(f"triptych sentence {j + 1}: {str(e)[:200]}")
             have = same_upload(rec, roots)
@@ -1694,7 +1909,7 @@ def recording_source(script, role):
     title = "THE UPLOAD — original clip uploaded to Valmera" if role == "upload" else "THE EXPORT — actual Valmera export"
     return dict(url="valmera studio recording", title=title,
                 description=f"Recorded synthetic Studio session. {role} SHA256: {receipts[role]['sha256']}. "
-                            f"Exact submitted request: {receipts['typed']}")
+                            f"Exact submitted request: {typed_line(receipts)}")
 
 
 SHOT_MIN_S, SHOT_MAX_S = 0.45, 3.0     # the recording's own shots: never shorter (a flicker), never longer (one picture a line)
@@ -2852,27 +3067,34 @@ def instruction_panel(l1, clock, sc, typed):
     if not words:
         raise RuntimeError("the typed instruction has no spoken timing")
     start, end = F.Clock.f(words[0]["t0"]), F.Clock.f(words[-1]["t1"])
-    voices = dict(l1["voices"], receipt=dict(font="InterDisplay-Bold.ttf", px=64, track=0),
-                  receipt_label=dict(font="InterDisplay-Bold.ttf", px=56, track=1))
-    panel = F.Plan(voices, {})
-    lines, line = [], []
-    for word in typed.split():
-        candidate = " ".join(line + [word])
-        if line and panel.R.width("receipt", candidate) > 0.74 * F.W:
+    # the sentence at 64 px under the face; a longer typed line (a follow-up after it) steps down to 46 px and
+    # rises, so every typed word stays on screen instead of the panel refusing the film
+    for px in (64, 58, 52, 46):
+        pitch = round(px * 1.22)
+        voices = dict(l1["voices"], receipt=dict(font="InterDisplay-Bold.ttf", px=px, track=0),
+                      receipt_label=dict(font="InterDisplay-Bold.ttf", px=56 if px >= 58 else 48, track=1))
+        panel = F.Plan(voices, {})
+        lines, line = [], []
+        for word in typed.split():
+            candidate = " ".join(line + [word])
+            if line and panel.R.width("receipt", candidate) > 0.74 * F.W:
+                lines.append(" ".join(line))
+                line = []
+            line.append(word)
+        if line:
             lines.append(" ".join(line))
-            line = []
-        line.append(word)
-    if line:
-        lines.append(" ".join(line))
-    top = 0.53
-    bottom = top + (90 + len(lines) * 78) / F.H
-    if bottom > 0.80:
-        raise RuntimeError("typed instruction cannot fit readably in the receipt panel")
+        height = (90 + len(lines) * pitch) / F.H
+        top = min(0.53, 0.80 - height)
+        if top >= 0.30:
+            break
+    if top < 0.30:
+        top = 0.30          # the longest line still shows whole, above the lower third
+    bottom = top + height
     panel.block([start, end], [0.08, top, 0.92, bottom], "#121A27", z=20, op=0.96)
     panel.word([start, end], D.TYPED_LABEL, "receipt_label", 0.12, top + 54 / F.H,
                ink="#7FE3FF", z=21)
     for k, line in enumerate(lines):
-        panel.word([start, end], line, "receipt", 0.12, top + (126 + k * 78) / F.H, z=21)
+        panel.word([start, end], line, "receipt", 0.12, top + (126 + k * pitch) / F.H, z=21)
     for it in panel.items:
         it["id"] = "receipt." + it["id"]
     l1["voices"] = voices
@@ -2880,7 +3102,7 @@ def instruction_panel(l1, clock, sc, typed):
     l1["items"] = [it for it in l1["items"] if not (
         it.get("k") == "word" and it["f"][0] < end and it["f"][1] > start)]
     l1["items"].extend(panel.items)
-    return dict(typed=typed, frames=[start, end], lines=lines, minimum_px=56)
+    return dict(typed=typed, frames=[start, end], lines=lines, minimum_px=min(px, voices["receipt_label"]["px"]))
 
 
 def caption_spans(rec, edl, per=3):
@@ -2952,7 +3174,7 @@ def lay_devices(ctx, l1, sc, pack, clock, script, knobs):
             export_at = float(pack["product"]["after"]["t"][0])
         i = int(sc["proof"]["after_after"])
         words = clock.seg_words(i)
-        typed = script["receipts"]["typed"]
+        typed = typed_line(script["receipts"])           # every sentence typed in the session, in order
         wf = D.word_frames(words, typed, F.norm_word)
         f_send = min(max(b for _, b in wf), f_after) if wf else f_after
         f0 = max(F.Clock.f(words[0]["t0"]) - 6, 0) if words else max(f_after - 90, 0)
@@ -3209,8 +3431,8 @@ def score(ctx, script):
         devices["cta"] = lay_cta(ctx, l1, sc, pack, clock, script)
         if devices["cta"].get("frames"):
             devices.setdefault("laid", []).append(devices["cta"])
-        receipt_panel = (instruction_panel(l1, clock, sc, script["receipts"]["typed"]) if not devices.get("typed_line")
-                         else dict(typed=script["receipts"]["typed"], device=devices["typed_line"]))
+        receipt_panel = (instruction_panel(l1, clock, sc, typed_line(script["receipts"])) if not devices.get("typed_line")
+                         else dict(typed=typed_line(script["receipts"]), device=devices["typed_line"]))
         spans_dev = [d["frames"] for d in devices.get("laid") or []]
         seen = dict(beats, pictures=[p for p in beats.get("pictures") or []          # a picture a device covers is not seen
                                      if not any(a <= p["f"][0] and p["f"][1] <= z for a, z in spans_dev)])

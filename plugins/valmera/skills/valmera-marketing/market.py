@@ -150,6 +150,8 @@ def sources_md(folder):
     if rc:
         out += ["", "## The recording (what Valmera really did)", "",
                 f"- Typed into the Studio, {rc.get('phase')}: \"{rc.get('typed')}\"",
+                *[f"- Then typed in the same session, {f.get('phase')}: \"{f.get('typed')}\"" for f in rc.get("follow_ups") or []],
+                *[f"- Export {e.get('tag')}: sha256 {e.get('sha256')} (edit v{e.get('edl_version')})" for e in rc.get("exports") or []],
                 f"- Upload: {(rc.get('upload') or {}).get('seconds')} s, {(rc.get('upload') or {}).get('w')}x{(rc.get('upload') or {}).get('h')}, sha256 {(rc.get('upload') or {}).get('sha256')}",
                 f"- Export: {(rc.get('export') or {}).get('seconds')} s, {(rc.get('export') or {}).get('w')}x{(rc.get('export') or {}).get('h')}, sha256 {(rc.get('export') or {}).get('sha256')}",
                 f"- Product: {json.dumps(rc.get('product'))}; source clip {json.dumps(rc.get('source'))}"]
@@ -222,7 +224,7 @@ def main():
         os.remove(log) if os.path.exists(log) else None
         print(json.dumps(dict(delivered=folder, title=(rec.get("script") or {}).get("title"), style=(rec.get("style") or {}).get("id"),
                               topic=topic, seconds=round(time.time() - t0), spend_usd=rec.get("spend_usd"), checks_ok=res.get("checks_ok"),
-                              measured=st.get("measured"), pictures_fit=mk.get("pictures_fit"), typed=(mk.get("receipts") or {}).get("typed"), music=bool(rec.get("music")), work_empty=res.get("work_empty"),
+                              measured=st.get("measured"), pictures_fit=mk.get("pictures_fit"), typed=(mk.get("receipts") or {}).get("typed"), follow_ups=[f.get("typed") for f in (mk.get("receipts") or {}).get("follow_ups") or []], music=bool(rec.get("music")), work_empty=res.get("work_empty"),
                               files=sorted(os.listdir(folder))), ensure_ascii=False))
         return 0
     st = (jload(os.path.join(STATE_ROOT, "work", rid, "run.json"), {}) or {}) if rid else {}

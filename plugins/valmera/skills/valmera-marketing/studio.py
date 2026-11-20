@@ -17,6 +17,11 @@ spec.json:
     An ask may carry "shorts": {"plan_s": 1800, "edit_s": 4200, "final_s": 2400}: the Shorts board it makes is carried to
     finished films (Edit on every card, every reel exported and downloaded to shorts/). "view": "phone" on a session
     photographs the Studio as a phone shows it (ui/).
+    Follow-ups in the same session: a session with "follow_ups": {"dir": <folder>, "wait_s": 1800} hands each result to
+    the caller before the next request (Recording.turn: exports/ask<i>.mp4 kept, <dir>/turn_<i>.json written) and waits
+    for <dir>/answer_<i>.json: {"text": ...} is typed next, into an ask marked {"live": true, "phase": "after_result"}
+    (its words are written from the check of the result before it), {"stop": true} ends the session on that result.
+    The record keeps every typed ask (its phase, follow_up, written_from) and every export with its sha256.
 
 What happens, per session, on a local stack of the product at that commit (the Gauntlet's runner:
 its own database, storage and worker; nothing of production is written, no customer is involved):
@@ -85,15 +90,17 @@ def write_session(row):
     p = probe(clip)
     steps = [dict(type="upload", asset_ids=[1], first=True)]
     for a in row["asks"]:
-        steps.append(dict(type="prompt", text=a["text"], typed_phase=a.get("phase", "after_result"), export_before=bool(a.get("export_before")),
-                          shorts=a.get("shorts")))
+        # a live ask's words are not known yet: they are written in the session, from the check of the result before it
+        steps.append(dict(type="prompt", text=a.get("text"), typed_phase=a.get("phase", "after_result"), export_before=bool(a.get("export_before")),
+                          shorts=a.get("shorts"), live=bool(a.get("live"))))
     plan = row.get("plan", "plus_2026")
     view = "phone" if row.get("view") == "phone" else "desktop"
     doc = dict(sid=sid, project_id=0, kind="edit", mode="edit", surface="studio",
                account={"class": row.get("class", "plus"), "plan": plan, "device_type": view, "device_browser": "chrome"},
                uploads=[dict(asset_id=1, project_id=0, kind="original", filename=name, bytes=os.path.getsize(clip), duration_s=p["dur"],
                              width=p["w"], height=p["h"], fps=p["fps"])],
-               steps=steps, studio=dict(source=row["source"], t0=row["t0"], t1=row["t1"], note=row.get("note"), view=view))
+               steps=steps, studio=dict(source=row["source"], t0=row["t0"], t1=row["t1"], note=row.get("note"), view=view,
+                                        follow_ups=row.get("follow_ups")))
     with open(os.path.join(d, "session.json"), "w") as f:
         json.dump(doc, f, indent=1, ensure_ascii=False)
     return clip
@@ -110,14 +117,15 @@ def drive(run, sid, browser="chrome"):
     class Recording(D.Replay):
         def send(self, text):
             """The sentence typed the way a person types it, the real Studio photographed at every word (a film shows the
-            product's own screen, never a drawing of it): ui/type_<step>_<k>.png, at the view's device scale."""
+            product's own screen, never a drawing of it): ui/type_<send>_<k>.png, at the view's device scale, numbered by
+            the sentences sent (a count of the files over 100 named a follow-up's photographs type_00 too, over the first's)."""
             p = self.page
             if not os.path.exists(os.path.join(self.out, "shots", "site.png")):
                 self.site_shot()
             ta = p.locator("textarea").first
             ta.click(timeout=15000)
-            n = len([x for x in os.listdir(os.path.join(self.out, "shots")) if x.startswith("type_")]) if os.path.isdir(os.path.join(self.out, "shots")) else 0
-            tag = f"type_{n // 100:02d}"
+            self.sends = getattr(self, "sends", 0) + 1
+            tag = f"type_{self.sends - 1:02d}"
             self.shot(f"{tag}_00")
             words = text.split()
             for k, w in enumerate(words):
@@ -153,16 +161,81 @@ def drive(run, sid, browser="chrome"):
             self.shot(f"result_{tag}")            # the Studio with its result in the player
 
         def do_prompt(self, i, step, pending):
+            fu = (self.doc.get("studio") or {}).get("follow_ups") or None
+            if step.get("live"):
+                # a follow-up, typed in this same session after its result was checked (turn): its words came back from
+                # the check; with none, the session ends on the result it has
+                text, self.next_text = getattr(self, "next_text", None), None
+                if not text:
+                    return False
+                step = dict(step, text=text)
             if step.get("export_before") and self.pid and self.log.doc.get("renders"):
                 self.keep_export(f"before_ask_{i}")
             ok = super().do_prompt(i, step, pending)
+            if step.get("live"):
+                row = (self.log.doc.get("steps") or [{}])[-1]
+                if row.get("prompt") == step["text"]:
+                    row.update(follow_up=True, written_from=f"ask{getattr(self, 'turn_i', None)}")
+                    self.log.save()
             if step.get("shorts") and self.pid:
                 try:
                     self.finish_shorts(dict(step["shorts"]) if isinstance(step["shorts"], dict) else {})
                 except Exception as e:  # noqa: BLE001   what was kept stays kept; the record says where it stopped
                     self.log.doc.setdefault("shorts", {})["error"] = str(e)[:400]
                     self.log.save()
+            if fu and ok and self.pid:
+                self.turn(i, step["text"], fu)
             return ok
+
+        def turn(self, i, text, fu):
+            """The result of request i, exported and handed to the workflow while this session stays open, the way a
+            person watches a result before typing the next message: the export (exports/ask<i>.mp4, with its EDL in
+            edl/), the upload and the requests typed so far go to <dir>/turn_<i>.json; the session waits for
+            <dir>/answer_<i>.json, {"text": the follow-up to type} or {"stop": true}. With no answer in wait_s the
+            session ends on this result."""
+            d = fu["dir"]
+            os.makedirs(d, exist_ok=True)
+            self.next_text, self.final_from, self.turn_i = None, None, i
+            if self.log.doc.get("renders"):
+                self.keep_export(f"ask{i}")
+            row = next((e for e in reversed(self.log.doc.get("exports") or []) if e.get("tag") == f"ask{i}"), None)
+            exports = []
+            if row and os.path.exists(os.path.join(self.out, row["file"])):
+                tdir = os.path.join(d, f"turn_{i}")
+                os.makedirs(os.path.join(tdir, "exports"), exist_ok=True)
+                os.makedirs(os.path.join(tdir, "edl"), exist_ok=True)
+                dst = os.path.join(tdir, "exports", f"ask{i}.mp4")
+                shutil.copy2(os.path.join(self.out, row["file"]), dst)
+                if row.get("edl_version") is not None:
+                    e = self.stack.q("SELECT json FROM edls WHERE project_id=%s AND version=%s", (self.pid, row["edl_version"]), one=True)
+                    if e:
+                        with open(os.path.join(tdir, "edl", f"v{int(row['edl_version']):03d}.json"), "w") as f:
+                            json.dump(e["json"], f, ensure_ascii=False)
+                exports.append(dict(tag="final", file=dst, edl_version=row.get("edl_version"), sha256=sha256(dst), **probe(dst)))
+            st = self.doc.get("studio") or {}
+            clip_dir = os.path.join(CORPUS, self.a.sid, "media", "1")
+            clip = os.path.join(clip_dir, sorted(os.listdir(clip_dir))[0])
+            asks = [dict(text=s["prompt"], phase=s.get("typed_phase")) for s in self.log.doc.get("steps") or [] if s.get("prompt")]
+            doc = dict(i=i, sid=self.a.sid, text=text, asks=asks, state="done", failures=list(self.log.doc.get("failures") or []),
+                       source=dict(file=st.get("source"), t0=st.get("t0"), t1=st.get("t1")),
+                       upload=dict(file=clip, sha256=sha256(clip), **probe(clip)), exports=exports, at=time.time())
+            with open(os.path.join(d, f"turn_{i}.json.part"), "w") as f:
+                json.dump(doc, f, ensure_ascii=False, default=str)
+            os.replace(os.path.join(d, f"turn_{i}.json.part"), os.path.join(d, f"turn_{i}.json"))
+            ans_p, t, ans = os.path.join(d, f"answer_{i}.json"), time.time(), None
+            while time.time() - t < float(fu.get("wait_s") or 1800):
+                if os.path.exists(ans_p):
+                    try:
+                        ans = json.load(open(ans_p))
+                        break
+                    except ValueError:
+                        pass
+                self.page.wait_for_timeout(3000)
+            ans = ans if isinstance(ans, dict) else dict(stop=True, why="no answer in time")
+            self.log.doc.setdefault("turns", []).append(dict(i=i, export=row and row.get("file"), answer=ans, waited_s=round(time.time() - t, 1)))
+            self.log.save()
+            self.next_text = str(ans.get("text") or "").strip() or None
+            self.final_from = None if self.next_text else row
 
         def api(self, method, path, body=None):
             """The product's own API from the signed-in page, as the Studio's buttons call it (the session's token)."""
@@ -264,7 +337,15 @@ def drive(run, sid, browser="chrome"):
             self.log.save()
 
         def download(self):
+            fr = getattr(self, "final_from", None)
             v = self.edl()
+            if fr and v and v["version"] == fr.get("edl_version") and os.path.exists(os.path.join(self.out, fr["file"])):
+                # the session ended on a result it already exported (turn): the same edit version, the same file
+                shutil.copy2(os.path.join(self.out, fr["file"]), os.path.join(self.out, "delivered.mp4"))
+                self.log.doc["delivered"] = dict(file="delivered.mp4", what=f"the export of the last request ({fr['tag']}), the same edit version",
+                                                 edl_version=v["version"])
+                self.log.save()
+                return
             super().download()
             if (self.log.doc.get("delivered") or {}).get("file") == "delivered.mp4":
                 self.log.doc["delivered"]["edl_version"] = v and v["version"]
@@ -445,12 +526,14 @@ def collect_one(run, sid):
     for s in j.get("steps") or []:
         if s.get("prompt"):
             asks.append(dict(text=s["prompt"], phase=s.get("typed_phase"), seconds=s.get("seconds"), result=s.get("result"), reply=s.get("reply"),
-                             edl_before=s.get("edl_before"), edl_after=s.get("edl_after"), changed=s.get("edit_changed")))
+                             edl_before=s.get("edl_before"), edl_after=s.get("edl_after"), changed=s.get("edit_changed"),
+                             follow_up=bool(s.get("follow_up")), written_from=s.get("written_from")))
     rec = dict(sid=sid, run=run, be_sha=j.get("be_sha"), fe_sha=j.get("fe_sha"), account=dict(plan=j.get("plan"), cls=j.get("account_class")),
                models=j.get("settings"), recorded_at=j.get("started_at"), state=j.get("state"), failures=j.get("failures"),
                source=dict(file=sess["studio"]["source"], t0=sess["studio"]["t0"], t1=sess["studio"]["t1"]),
                upload=dict(file=os.path.join(out, "upload.mp4"), sha256=sha256(os.path.join(tmp, "upload.mp4")), **probe(os.path.join(tmp, "upload.mp4"))),
                first_result_s=j.get("first_result_s"), seconds=j.get("seconds"), cost_usd=j.get("cost_usd"), asks=asks, exports=kept, previews=previews,
+               turns=j.get("turns"),
                edl_versions={str(k): v for k, v in sorted(edls.items())}, journey=os.path.join(out, "journey.json"),
                shorts=dict(plan=sh.get("plan"), children=sh.get("children"), edited=sh.get("edited"), finals=sh.get("finals"),
                            seconds=sh.get("seconds"), error=sh.get("error"), films=shorts) if sh else None,
