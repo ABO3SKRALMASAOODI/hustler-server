@@ -297,10 +297,10 @@ def test_after_the_refill_the_wallet_is_assumed_refilled_and_upgrades_go_on():
     assert state["wallet_basis"] == "assumed_refill"
     assert state["wallet_usd"] == pytest.approx(4.26 + 200.0 - 10.0)
     assert state["last_refill_at"] == "2026-12-08T00:00:00+00:00"
-    assert state["next_refill_at"] == "2027-01-07T00:00:00+00:00"
-    assert state["days_left"] == 29.0
+    assert state["next_refill_at"] == "2027-01-08T00:00:00+00:00"
+    assert state["days_left"] == 30.0
     assert state["assumed"]["spent_since_refill_usd"] == pytest.approx(10.0)
-    assert state["allowance_usd"] == pytest.approx((194.26 - 15.0) / 29.0)
+    assert state["allowance_usd"] == pytest.approx((194.26 - 15.0) / 30.0)
     got = model_budget.decide(w, CUSTOMER, HAIKU, True, now=late)
     assert got["model"] == OPUS and got["wallet_basis"] == "assumed_refill"
     # a balance confirmed after the refill always wins
@@ -308,14 +308,50 @@ def test_after_the_refill_the_wallet_is_assumed_refilled_and_upgrades_go_on():
     state = model_budget.budget_state(w, cfg, late)
     assert state["wallet_basis"] == "confirmed"
     assert state["wallet_usd"] == pytest.approx(50.0)
-    # and a cycle later it repeats: 7 Jan passed, nothing confirmed since
-    later = datetime(2027, 1, 8, tzinfo=UTC)
+    # and a cycle later it repeats: 8 Jan passed, nothing confirmed since
+    later = datetime(2027, 1, 8, 6, tzinfo=UTC)
     state = model_budget.budget_state(World(wallet=50.0, since=1.0,
                                             confirmed_at="2026-12-08T09:00:00+00:00"),
                                       cfg, later)
     assert state["wallet_basis"] == "assumed_refill"
-    assert state["last_refill_at"] == "2027-01-07T00:00:00+00:00"
+    assert state["last_refill_at"] == "2027-01-08T00:00:00+00:00"
     assert state["wallet_usd"] == pytest.approx(203.26)
+
+
+@pytest.mark.parametrize("line_end", [REFILL, "2026-11-08T00:00:00+00:00"])
+def test_refills_stay_on_the_8th_across_december_january_and_february(line_end):
+    """claude_credit's cycle_end equals refill_at in production (both 8 Dec):
+    the refills follow its monthly cycle. When its cycle_end is earlier, the
+    governor's own refill_at steps by calendar month on the same day. Before
+    the fix both paths stepped 30 days: 7 Jan, 6 Feb, 8 Mar..."""
+    w = World(line_cfg={"cycle_budget_usd": 1000.0, "safety_margin_usd": 10,
+                        "cycle_end": line_end})
+    cfg = model_budget.parse_config(None)
+    expect = [
+        (datetime(2026, 12, 7, 23, tzinfo=UTC), "2026-11-08", "2026-12-08"),
+        (datetime(2026, 12, 8, tzinfo=UTC), "2026-12-08", "2027-01-08"),
+        (datetime(2026, 12, 31, tzinfo=UTC), "2026-12-08", "2027-01-08"),
+        (datetime(2027, 1, 7, 23, tzinfo=UTC), "2026-12-08", "2027-01-08"),
+        (datetime(2027, 1, 8, 1, tzinfo=UTC), "2027-01-08", "2027-02-08"),
+        (datetime(2027, 2, 7, tzinfo=UTC), "2027-01-08", "2027-02-08"),
+        (datetime(2027, 2, 8, tzinfo=UTC), "2027-02-08", "2027-03-08"),
+        (datetime(2027, 2, 28, tzinfo=UTC), "2027-02-08", "2027-03-08"),
+    ]
+    for now, last, nxt in expect:
+        got_last, got_next, source = model_budget.refill_window(w, cfg, now)
+        assert (got_last.date().isoformat(), got_next.date().isoformat()) == (
+            last, nxt), now
+        assert source == ("claude_credit" if line_end == REFILL
+                          else "model_budget")
+
+
+def test_own_monthly_refills_clamp_to_the_months_end():
+    w = World(line_cfg={"cycle_budget_usd": 1000.0, "safety_margin_usd": 10,
+                        "cycle_end": "2026-11-08T00:00:00+00:00"})
+    cfg = model_budget.parse_config({"refill_at": "2027-01-31T00:00:00+00:00"})
+    last, nxt, _ = model_budget.refill_window(w, cfg, datetime(2027, 3, 1, tzinfo=UTC))
+    assert (last.date().isoformat(), nxt.date().isoformat()) == (
+        "2027-02-28", "2027-03-31")
 
 
 def test_claude_credits_own_cycle_end_wins_once_it_moved_past_refill_at():
@@ -771,8 +807,39 @@ def test_the_admin_summary_reads_the_same_numbers():
                                 now=datetime(2026, 12, 9, tzinfo=UTC))
     assert late["wallet_basis"] == "assumed_refill"
     assert late["assumed"]["wallet_usd"] == pytest.approx(201.26)
-    assert late["next_refill_at"] == "2027-01-07T00:00:00+00:00"
+    assert late["next_refill_at"] == "2027-01-08T00:00:00+00:00"
     assert model_budget.summary(World(budget={"on": False}), now=NOW) == {
         "on": False, "ladder": [OPUS, SONNET, HAIKU], "reserve_usd": 15.0,
         "refill_at": REFILL, "refill_usd": 200.0, "nonexpiring_usd": 4.26,
         "cycle_days": 30.0, "account_share": 0.4, "charge_as": HAIKU}
+
+
+def test_question_need_asks_the_plans_helper_model_not_the_upgrade(monkeypatch):
+    """_question_needs_customer forces a tool call (question_need). On an
+    upgraded request agent_lanes[0] is Opus/Sonnet, which drops a forced
+    tool_choice (claude_lane._NO_FORCED_TOOL): the judge goes to the plan's
+    helper model (llm.helper_lane) like every other helper."""
+    import question_need
+    import quality_verifier
+    seen = []
+    monkeypatch.setattr(question_need, "needed",
+                        lambda client, model, request, q: seen.append(
+                            (client, model)) or True)
+    monkeypatch.setattr(quality_verifier, "request_text_for", lambda ctx: "edit")
+    opus, haiku = object(), object()
+    ctx = SimpleNamespace(
+        agent_lanes=[{"client": opus, "model": OPUS},
+                     {"client": haiku, "model": HAIKU}],
+        llm_client=opus, agent_model=OPUS,
+        helper_client=haiku, helper_model=HAIKU)
+    assert agent_tools._question_needs_customer(ctx, "Which file?") is True
+    assert seen[-1] == (haiku, HAIKU)
+    # not upgraded: the turn's own client and model, as before
+    ctx = SimpleNamespace(agent_lanes=[{"client": haiku, "model": HAIKU}],
+                          llm_client=haiku, agent_model=HAIKU)
+    agent_tools._question_needs_customer(ctx, "Which file?")
+    assert seen[-1] == (haiku, HAIKU)
+    # a bare context with only its lanes keeps working
+    ctx = SimpleNamespace(agent_lanes=[{"client": haiku, "model": "m"}])
+    agent_tools._question_needs_customer(ctx, "Which file?")
+    assert seen[-1] == (haiku, "m")

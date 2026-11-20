@@ -14,8 +14,8 @@ keeping the API credits without running out of credits."
 THE WALLET. The owner-confirmed Anthropic balance minus everything metered
 since (exactly as backend/anthropic_wallet.py estimates it). The credit is
 refilled by the owner's subscription: ``refill_usd`` of promotional credit
-every ``cycle_days`` from ``refill_at`` (claude_credit's own cycle_end when it
-has moved past refill_at), and unused promotional credit is lost at each
+monthly from ``refill_at`` (claude_credit's own monthly cycle when its
+cycle_end is at or past refill_at), and unused promotional credit is lost at each
 refill; ``nonexpiring_usd`` (purchased credit) is kept. When a refill moment
 has passed and no balance was confirmed after it, the wallet is ASSUMED to be
 ``nonexpiring_usd + refill_usd`` minus the spend metered since the refill. A
@@ -58,7 +58,6 @@ customers; the entry "replay" governs every account of a replay stack
 """
 
 import json
-import math
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -304,24 +303,40 @@ def governed(user_id, cfg):
 def refill_window(conn, cfg, now=None, ccfg=None):
     """(last_refill, next_refill, source): the refill moments around ``now``.
     claude_credit's own cycle (its configured cycle_end, monthly) when that
-    cycle_end has moved past ``refill_at``; else ``refill_at`` repeating every
-    ``cycle_days`` in both directions. ``ccfg``: claude_credit's config when
-    the caller already read it."""
+    cycle_end is at or past ``refill_at`` (both are the subscription's monthly
+    date, 8 Dec in Nov 2026); else ``refill_at`` repeating by calendar month
+    on the same day (``cycle_days`` / 30, at least one month) in both
+    directions, so the refills never drift off the subscription's date.
+    ``ccfg``: claude_credit's config when the caller already read it."""
     now = _now(now)
     base = _parse_time(cfg["refill_at"])
     try:
         import claude_credit
         ccfg = ccfg or claude_credit.read_config(conn)
-        if ccfg.get("cycle_end") and ccfg["cycle_end"] > base:
+        if ccfg.get("cycle_end") and ccfg["cycle_end"] >= base:
             start, end = claude_credit.cycle_window(ccfg, now)
             return start, end, "claude_credit"
     except Exception as exc:  # noqa: BLE001 - our own refill_at stands
         _log_once("refill:" + type(exc).__name__,
                   f"claude_credit cycle unreadable ({str(exc)[:120]})")
-    step = timedelta(days=float(cfg["cycle_days"]))
-    n = math.floor((now - base) / step)
-    last = base + n * step
-    return last, last + step, "model_budget"
+    months = max(1, int(round(float(cfg["cycle_days"]) / 30.0)))
+    n = (now.year - base.year) * 12 + (now.month - base.month)
+    n -= n % months
+    if _add_months(base, n) > now:
+        n -= months
+    return _add_months(base, n), _add_months(base, n + months), "model_budget"
+
+
+def _add_months(moment, months):
+    """``moment`` moved by whole calendar months, the day clamped to the
+    month's length (31 Jan + 1 month = 28 or 29 Feb)."""
+    month0 = moment.month - 1 + int(months)
+    year = moment.year + month0 // 12
+    month = month0 % 12 + 1
+    leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+    days = [31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    return moment.replace(year=year, month=month,
+                          day=min(moment.day, days[month - 1]))
 
 
 # ------------------------------------------------------------------ meters

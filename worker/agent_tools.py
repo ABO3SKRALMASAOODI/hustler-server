@@ -27325,10 +27325,17 @@ def _question_can_wait(ctx, question):
 
 
 def _question_needs_customer(ctx, question):
-    lane = (getattr(ctx, "agent_lanes", None) or [{}])[0]
+    # A helper call like the others (llm.helper_lane): when the model budget
+    # upgraded the editing turn to Opus/Sonnet, agent_lanes[0] is that
+    # upgrade, which drops question_need's forced tool_choice
+    # (claude_lane._NO_FORCED_TOOL) and costs the upgrade's price. The plan's
+    # helper model answers it; otherwise the turn's own client and model.
+    client, model = llm.helper_lane(ctx)
+    if client is None or not model:
+        lane = (getattr(ctx, "agent_lanes", None) or [{}])[0]
+        client, model = lane.get("client"), lane.get("model")
     return question_need.needed(
-        lane.get("client"), lane.get("model"),
-        quality_verifier.request_text_for(ctx), question)
+        client, model, quality_verifier.request_text_for(ctx), question)
 
 
 def ask_user(ctx, question):
