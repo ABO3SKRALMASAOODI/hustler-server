@@ -353,3 +353,16 @@ def test_a_card_behind_the_speaker_stands_only_on_his_take():
     cards = sorted((i for i in out["items"] if i["k"] == "card"), key=lambda i: i["f"][0])
     assert [c["f"] for c in cards] == [[10, 20], [40, 50]] and trimmed == {"nw": 20}
     assert len(cards[1]["crop"]) == 10 and cards[1]["src"][0] == round(0.3333 + (1.6667 - 0.3333) / 40 * 30, 5)
+
+
+def test_a_sprite_wider_than_an_atlas_page_gets_a_page_of_its_own():
+    """20 Nov m06: a 5434x922 marquee sprite stopped the short ("larger than an atlas page")."""
+    import numpy as np
+    from scene import type_atlas as TA
+    big = np.full((922, 5434, 4), 255, np.uint8)
+    small = np.full((40, 120, 4), 128, np.uint8)
+    pages, meta = TA.pack({"big": (big, {}), "small": (small, {})})
+    b, s = meta["big"], meta["small"]
+    assert b["page"] != s["page"] and (b["aw"], b["ah"]) == (5434, 922)
+    assert pages[b["page"]].shape[1] >= 5434 and pages[b["page"]].shape[0] >= 922
+    assert (pages[b["page"]][:922, :5434] == 255).all()
