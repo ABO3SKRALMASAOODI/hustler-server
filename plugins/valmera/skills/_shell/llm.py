@@ -201,6 +201,26 @@ def _top_level_starts(s):
     return starts
 
 
+def _repaired(s, k, limit=40):
+    """(value, end) of the JSON value starting at k after machine-syntax repair, else (None, k). A model writes a
+    double quote inside a string without its backslash (20 Nov m07: 'He is 7\'6", which matches'): the string
+    that ended too early is the last unescaped quote before the point where parsing failed, so that quote is
+    escaped and the value read again."""
+    dec, t = json.JSONDecoder(), s
+    for _ in range(limit):
+        try:
+            v, end = dec.raw_decode(t, k)
+            return v, end - (len(t) - len(s))
+        except json.JSONDecodeError as e:
+            q = t.rfind('"', k, e.pos)
+            while q > k and t[q - 1] == "\\":
+                q = t.rfind('"', k, q - 1)
+            if q <= k:
+                return None, k
+            t = t[:q] + "\\" + t[q:]
+    return None, k
+
+
 def json_block(text):
     """The model's JSON answer (machine syntax only). A model that corrects itself writes a second complete answer
     after the first (19 Nov: Sonnet wrote one placements object, "Correction -", then the corrected one): the last
@@ -215,7 +235,9 @@ def json_block(text):
         try:
             v, end = dec.raw_decode(s, k)
         except ValueError:
-            continue
+            v, end = _repaired(s, k)
+            if v is None:
+                continue
         found.append((end - k, v))
     if found:
         kind = type(max(found, key=lambda r: r[0])[1])
