@@ -5,7 +5,7 @@ across it (the references: a profile 'Backed by Y Combinator' on a tilted card, 
 The line is measured on the picture (``sense.text_boxes``: the most prominent line of text) unless the ask names
 its box. A picture with no line of text (a photograph) is pushed into its largest face, else its brightest light, and
 carries no highlighter: a mark is laid only across a line that is there. This is the scene palette's proof object; the marketing workflow's own proof.py is another thing."""
-from ._util import arg, base_at, decel, ease, frames, make_room, pictures, uid
+from ._util import arg, base_at, colour, decel, ease, frames, make_room, num, pictures, uid
 
 LAYER = "rhythm"
 
@@ -72,7 +72,7 @@ def proof_object(l1, work, ask, sense):
     ye = 0.5 - ((by0 + by1) / 2 - 0.5) * h * S
     n = b - a
     p1, p2 = int(n * 0.42), int(n * 0.72)
-    tilt0 = (float(arg(ask, "rx", 52.0)), float(arg(ask, "ry", -18.0)), float(arg(ask, "rot", -9.0)))
+    tilt0 = (num(ask, "rx", 52.0), num(ask, "ry", -18.0), num(ask, "rot", -9.0))
     mid = (tilt0[0] * 0.42, tilt0[1] * 0.4, tilt0[2] * 0.35)
 
     def run(v0, v1, v2, fn1=decel, fn2=ease):
@@ -88,10 +88,10 @@ def proof_object(l1, work, ask, sense):
                 "grade": {"lift": 0, "gamma": 1, "gain": 0.45, "sat": 0.6, "contrast": 1, "temp": 0, "tint": 0}}
     else:
         base = {"id": uid(l1, "pd_pfd"), "k": "shot", "f": [a, b], "pic": "plate",
-                "plate": {"c0": arg(ask, "c0", "#3A3029"), "c1": arg(ask, "c1", "#0E0B09"), "grain": 0.05}}
+                "plate": {"c0": colour(ask, "c0", "#3A3029"), "c1": colour(ask, "c1", "#0E0B09"), "grain": 0.05}}
     card = {"id": uid(l1, "pd_pfc"), "k": "card", "f": [a, b], "pic": pic, "crop": [0, 0, 1, 1], "x": x, "y": y, "w": round(w, 5),
             "h": round(h, 5), "s": s, "rx": rx, "ry": ry, "rot": rot, "radius": 0.004, "z": -10,
-            "dof": {"blur": float(arg(ask, "dof", 3.0)), "focus": [(bx0 + bx1) / 2, (by0 + by1) / 2]},
+            "dof": {"blur": num(ask, "dof", 3.0), "focus": [(bx0 + bx1) / 2, (by0 + by1) / 2]},
             "shadow": {"dx": 0.012, "dy": 0.03, "blur": 0.035, "a": 0.6}}
     items = keep + [base, card]
     evs = [{"f": a, "kind": "paper", "strength": 0.4}]
@@ -103,7 +103,7 @@ def proof_object(l1, work, ask, sense):
         grow = decel(m, 0.0, 1.0, 3.0) + [1.0] * (n - p2 - m)
         rect = [[round(fx0 - 0.01, 5), round(fy0 - pad, 5), round(fx0 - 0.01 + (fx1 - fx0 + 0.02) * max(g, 0.01), 5), round(fy1 + pad, 5)]
                 for g in grow]
-        items.append({"id": uid(l1, "pd_pfm"), "k": "flash", "f": [a + p2, b], "mode": "mark", "rect": rect, "c": arg(ask, "c", "#FFD84A"),
+        items.append({"id": uid(l1, "pd_pfm"), "k": "flash", "f": [a + p2, b], "mode": "mark", "rect": rect, "c": colour(ask, "c", "#FFD84A"),
                       "z": -5})
         evs.append({"f": a + p2, "kind": "mark", "strength": 0.6})
     return {"items": items, "drop": drop, "log": {"pic": pic, "box": [round(v, 4) for v in (bx0, by0, bx1, by1)], "box_from": found,

@@ -5,7 +5,7 @@ change, never a white flash, so a run of them stays far under three luminance fl
 
 Signal places them: the strength follows the voice's level over the moment when the film has a voice
 (``follow: "voice"``), else lands hard and decays."""
-from ._util import arg, base_at, frames, hit, shots, uid
+from ._util import arg, base_at, frames, hit, num, shots, uid
 
 LAYER = "surface"
 
@@ -24,9 +24,9 @@ def _amounts(sense, a, b, follow, peak):
 
 def rgb_split(l1, work, ask, sense):
     a, b = frames(l1, ask, default_len=6)
-    px = float(arg(ask, "px", 18.0))
+    px = num(ask, "px", 18.0)
     amt = _amounts(sense, a, b, arg(ask, "follow", "hit"), 1.0)
-    it = {"id": uid(l1, "pd_rgb"), "k": "flash", "f": [a, b], "mode": "rgb_split", "px": px, "angle": float(arg(ask, "angle", 0.0)),
+    it = {"id": uid(l1, "pd_rgb"), "k": "flash", "f": [a, b], "mode": "rgb_split", "px": px, "angle": num(ask, "angle", 0.0),
           "amount": amt, "z": 40}
     return {"items": [it], "log": {"f": [a, b], "px": px},
             "events": [{"f": a, "kind": "glitch", "strength": round(min(px / 30.0, 1.0), 2)}]}
@@ -34,9 +34,9 @@ def rgb_split(l1, work, ask, sense):
 
 def slice_(l1, work, ask, sense):
     a, b = frames(l1, ask, default_len=4)
-    shift = float(arg(ask, "shift", 110.0))
-    items = [{"id": uid(l1, "pd_slc"), "k": "flash", "f": [a, b], "mode": "slice", "shift": shift, "band": float(arg(ask, "band", 52.0)),
-              "density": float(arg(ask, "density", 0.38)), "rate": int(arg(ask, "rate", 1)), "amount": hit(b - a, 1.0, 0.35, 2.0), "z": 41}]
+    shift = num(ask, "shift", 110.0)
+    items = [{"id": uid(l1, "pd_slc"), "k": "flash", "f": [a, b], "mode": "slice", "shift": shift, "band": num(ask, "band", 52.0),
+              "density": num(ask, "density", 0.38), "rate": int(num(ask, "rate", 1)), "amount": hit(b - a, 1.0, 0.35, 2.0), "z": 41}]
     if arg(ask, "split", True):
         items.append({"id": uid(l1, "pd_slr"), "k": "flash", "f": [a, b], "mode": "rgb_split", "px": shift * 0.12, "angle": 0.0,
                       "amount": hit(b - a, 1.0, 0.3), "z": 42})
@@ -72,7 +72,7 @@ def glitch(l1, work, ask, sense):
 def tear(l1, work, ask, sense):
     """A band tear across a stretch: every half second or so a few frames of torn bands, the rest clean."""
     a, b = frames(l1, ask, default_len=45, min_len=8)
-    every = max(int(arg(ask, "every", 14)), 6)
+    every = max(int(num(ask, "every", 14)), 6)
     items, evs = [], []
     import random
     r = random.Random(f"{l1.get('seed')}:{ask.get('id')}")
@@ -99,7 +99,7 @@ def on_picture(l1, work, ask, sense):
     for i, v in enumerate(hit(b - a, 1.0, 0.25)):
         if 0 <= a - lo + i < n:
             amt[a - lo + i] = round(v, 4)
-    it = dict(sh, treat={"mode": "rgb_split", "px": float(arg(ask, "px", 18.0)), "angle": float(arg(ask, "angle", 0.0))}, amount=amt)
+    it = dict(sh, treat={"mode": "rgb_split", "px": num(ask, "px", 18.0), "angle": num(ask, "angle", 0.0)}, amount=amt)
     return {"items": [it], "log": {"shot": sh["id"]}, "events": [{"f": a, "kind": "glitch", "strength": 0.6}]}
 
 

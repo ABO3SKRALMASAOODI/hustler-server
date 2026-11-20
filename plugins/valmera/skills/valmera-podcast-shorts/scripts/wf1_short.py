@@ -1100,8 +1100,12 @@ def score(ctx, script):
         knobs["coverage_final"] = True
         l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
     if l1.get("devices") or l1.get("alien"):
-        # the sound design hears the Director's devices: laid now, their landings planned again with the take's own
-        # turn and words, before the taste check counts what lands with every sound
+        # the sound design hears the Director's devices: laid now on the scene the render draws (one base picture on
+        # every frame first), their landings planned again with the take's own turn and words, before the taste check
+        # counts what lands with every sound
+        healed = wf1_film.heal_base(l1)
+        if healed:
+            beats["base_healed"] = healed
         beats["devices_heard"] = chain.hear_devices(ctx, l1, beats, lambda x: F.replan_sound(x, pack))
     taste = F.taste_check(l1, beats)
     dropped = 0
@@ -1110,7 +1114,7 @@ def score(ctx, script):
         taste = dict(F.taste_check(l1, beats), repaired=dropped)
     healed = wf1_film.heal_base(l1)                          # one base picture on every frame, the renderer's rule
     if healed:
-        beats["base_healed"] = healed
+        beats["base_healed"] = (beats.get("base_healed") or []) + healed if isinstance(healed, list) else healed
     out = os.path.join(ctx.supply, "l1.json")
     json.dump(l1, open(out, "w"), ensure_ascii=False)
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")       # the same scene with the take's sound as its spine: what the music is cut to

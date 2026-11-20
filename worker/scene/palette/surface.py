@@ -7,7 +7,7 @@ The display's words stay out of the watermark's corner (``_util.KEEPOUT``) and n
 live inside the asked section only."""
 import numpy as np
 
-from ._util import KEEPOUT, arg, frames, uid
+from ._util import KEEPOUT, arg, colour, frames, num, uid
 
 LAYER = "surface"
 OSD = {"osd": {"font": "BebasNeue-Regular.ttf", "px": 46, "track": 70, "shadow": {"a": 0.55, "blur": 0.004}}}
@@ -35,7 +35,7 @@ def rew(l1, work, ask, sense):
     a, b = frames(l1, ask, default_len=60, min_len=12)
     n = b - a
     word = str(arg(ask, "label", "REW <<"))
-    items = [_flash(l1, a, b, "vhs", track=float(arg(ask, "track", 0.15)), roll=float(arg(ask, "roll", 0.45)), amount=1.0)]
+    items = [_flash(l1, a, b, "vhs", track=num(ask, "track", 0.15), roll=num(ask, "roll", 0.45), amount=1.0)]
     items.append(_word(l1, items, a, b, word, 0.075, 0.085, op=_blink(n)))
     stamp = str(arg(ask, "stamp", "")).strip()
     if stamp:
@@ -45,7 +45,7 @@ def rew(l1, work, ask, sense):
 
 def vhs(l1, work, ask, sense):
     a, b = frames(l1, ask, default_len=60, min_len=8)
-    items = [_flash(l1, a, b, "vhs", track=float(arg(ask, "track", 0.75)), roll=float(arg(ask, "roll", 0.25)), amount=1.0)]
+    items = [_flash(l1, a, b, "vhs", track=num(ask, "track", 0.75), roll=num(ask, "roll", 0.25), amount=1.0)]
     if arg(ask, "label", "PLAY >"):
         items.append(_word(l1, items, a, b, str(arg(ask, "label", "PLAY >")), 0.075, 0.085))
     return {"items": items, "voices": OSD, "log": {"f": [a, b]}, "events": [{"f": a, "kind": "surface", "strength": 0.4}]}
@@ -53,13 +53,13 @@ def vhs(l1, work, ask, sense):
 
 def projector(l1, work, ask, sense):
     a, b = frames(l1, ask, default_len=60, min_len=8)
-    items = [_flash(l1, a, b, "projector", flicker=float(arg(ask, "flicker", 0.05)), weave=float(arg(ask, "weave", 1.6)), rate=2)]
+    items = [_flash(l1, a, b, "projector", flicker=num(ask, "flicker", 0.05), weave=num(ask, "weave", 1.6), rate=2)]
     return {"items": items, "log": {"f": [a, b]}, "events": [{"f": a, "kind": "surface", "strength": 0.3}]}
 
 
 def led(l1, work, ask, sense):
     a, b = frames(l1, ask, default_len=45, min_len=6)
-    items = [_flash(l1, a, b, "led", cell=float(arg(ask, "cell", 16)), gap=float(arg(ask, "gap", 0.18)), levels=int(arg(ask, "levels", 7)))]
+    items = [_flash(l1, a, b, "led", cell=num(ask, "cell", 16), gap=num(ask, "gap", 0.18), levels=int(num(ask, "levels", 7)))]
     return {"items": items, "log": {"f": [a, b]}, "events": [{"f": a, "kind": "surface", "strength": 0.4}]}
 
 
@@ -84,13 +84,13 @@ def xerox(l1, work, ask, sense):
     a, b = frames(l1, ask, default_len=45, min_len=6)
     th = arg(ask, "th")
     th = float(th) if th is not None else min(max(_middle_light(l1, sense, a, b) * 0.8, 0.1), 0.7)
-    items = [_flash(l1, a, b, "xerox", th=round(th, 4), toner=1.0, rate=2, **({"c": arg(ask, "c")} if arg(ask, "c") else {}))]
+    items = [_flash(l1, a, b, "xerox", th=round(th, 4), toner=1.0, rate=2, **({"c": colour(ask, "c")} if colour(ask, "c") else {}))]
     return {"items": items, "log": {"f": [a, b]}, "events": [{"f": a, "kind": "surface", "strength": 0.4}]}
 
 
 def paper(l1, work, ask, sense):
     a, b = frames(l1, ask, default_len=45, min_len=6)
-    items = [_flash(l1, a, b, "paper", ink=float(arg(ask, "ink", 0.9)), **({"c": arg(ask, "c")} if arg(ask, "c") else {}))]
+    items = [_flash(l1, a, b, "paper", ink=num(ask, "ink", 0.9), **({"c": colour(ask, "c")} if colour(ask, "c") else {}))]
     return {"items": items, "log": {"f": [a, b]}, "events": [{"f": a, "kind": "surface", "strength": 0.3}]}
 
 
@@ -123,9 +123,9 @@ DEVICES = {
     "led": {"plan": led, "needs": (), "fallback": ("projector",),
             "card": "f cell gap. The frame on a board of lamps. For a stadium, a scoreboard, fame, a billboard, Times Square"},
     "xerox": {"plan": xerox, "needs": (), "fallback": ("paper",),
-              "card": "f th c?. A photocopy: hard tone, toner noise. For a document, a leak, a dossier, punk energy, a list"},
+              "card": "f th?(0-1, measured when absent) c?(#hex toner). A photocopy: hard tone, toner noise. For a document, a leak, a dossier, punk energy, a list"},
     "paper": {"plan": paper, "needs": (), "fallback": ("projector",),
-              "card": "f ink c?. Printed on a page. For a newspaper, a book, a letter, a quote in print"},
+              "card": "f ink(0-1 how much becomes ink) c?(#hex paper). Printed on a page. For a newspaper, a book, a letter, a quote in print"},
     "thermal_hud": {"plan": thermal_hud, "needs": (), "fallback": ("projector",),
                     "card": "f label read. A thermal scope with brackets and read-outs. For military, surveillance, a target, a hunt"},
 }

@@ -14,6 +14,47 @@ def arg(ask, k, default=None):
     return (ask.get("args") or {}).get(k, default)
 
 
+def num(ask, k, default, words=None):
+    """A number argument as the device reads it: a number, or a number written as text; a word the device names in
+    ``words`` (a direction written "in" or "left"); anything else (a colour where a strength was meant, a word) is the
+    device's own default, so a field written in another shape never stops the device."""
+    v = arg(ask, k, default)
+    if isinstance(v, bool):
+        return float(default)
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        w = v.strip().lower()
+        if words and w in words:
+            return float(words[w])
+        try:
+            return float(w)
+        except ValueError:
+            return float(default)
+    return float(default)
+
+
+NAMED = {"red": "#E8341C", "blue": "#1F4BFF", "yellow": "#FFD21F", "green": "#13A35A", "white": "#FFFFFF", "black": "#0B0B0B",
+         "gold": "#FFC94A", "orange": "#FF7A1A", "pink": "#FF5FA2", "purple": "#7A3CFF", "cyan": "#22D3EE", "magenta": "#E030C8",
+         "grey": "#8A8A8A", "gray": "#8A8A8A", "cream": "#F2EFE6", "amber": "#FFB020", "teal": "#0FA3A3", "warm": "#FFD27A"}
+
+
+def colour(ask, k, default=None):
+    """A colour argument as the engine draws it ("#RRGGBB"): a hex written with or without its hash or in three
+    digits, or a plain colour name; anything else (true, a word the engine has no ink for) is the default."""
+    v = arg(ask, k, None)
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in NAMED:
+            return NAMED[s]
+        h = s.lstrip("#")
+        if len(h) == 3:
+            h = "".join(ch * 2 for ch in h)
+        if len(h) == 6 and all(ch in "0123456789abcdef" for ch in h):
+            return "#" + h.upper()
+    return default
+
+
 def frames(l1, ask, default_len=12, min_len=1):
     """(a, b): the programme frames an ask covers, clamped to the film. ``f``, ``at``/``until``/``len`` in frames,
     or ``t``/``t_end``/``dur`` in seconds; a span too short is lengthened to ``min_len`` (the moment, repaired)."""

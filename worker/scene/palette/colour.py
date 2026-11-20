@@ -1,12 +1,12 @@
 """Selective colour: one hue kept in a grey world (Schindler's coat), and colour blooming back out of mono from
 that hue. The kept hue is measured on the picture (its strongest colour) unless the ask names one."""
-from ._util import arg, base_at, ease, frames, uid
+from ._util import arg, base_at, colour, ease, frames, num, uid
 
 LAYER = "surface"
 
 
 def _key(l1, ask, sense, f):
-    c = arg(ask, "c")
+    c = colour(ask, "c")
     if c:
         return c
     sh = base_at(l1, f)
@@ -18,7 +18,7 @@ def _key(l1, ask, sense, f):
 def keep_hue(l1, work, ask, sense):
     a, b = frames(l1, ask, default_len=45, min_len=6)
     key = _key(l1, ask, sense, (a + b) // 2)
-    it = {"id": uid(l1, "pd_kh"), "k": "flash", "f": [a, b], "mode": "keep_hue", "c": key, "th": float(arg(ask, "width", 0.07)), "z": 20}
+    it = {"id": uid(l1, "pd_kh"), "k": "flash", "f": [a, b], "mode": "keep_hue", "c": key, "th": num(ask, "width", 0.07), "z": 20}
     return {"items": [it], "log": {"key": key}, "events": [{"f": a, "kind": "colour", "strength": 0.4}]}
 
 
@@ -27,7 +27,7 @@ def bloom(l1, work, ask, sense):
     a, b = frames(l1, ask, default_len=30, min_len=8)
     key = _key(l1, ask, sense, a)
     n = b - a
-    hold = max(int(n * float(arg(ask, "hold", 0.35))), 1)
+    hold = max(int(n * num(ask, "hold", 0.35)), 1)
     th = [0.06] * hold + [round(v, 4) for v in ease(n - hold, 0.06, 0.62)]
     it = {"id": uid(l1, "pd_kb"), "k": "flash", "f": [a, b], "mode": "keep_hue", "c": key, "th": th, "z": 20}
     return {"items": [it], "log": {"key": key}, "events": [{"f": a + hold, "kind": "colour", "strength": 0.5}]}

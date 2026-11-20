@@ -207,3 +207,24 @@ def test_a_director_ask_on_one_word_lands_on_that_word(tmp_path):
     assert frames(l1, {"at": [40, 70]}) == (40, 70)
     assert frames(l1, {"f": 12, "t": "word", "until": {"w": 3}}, default_len=10) == (12, 22)
     assert pictures(l1, {"pool": ["p2"]})[0] == "p2"
+
+
+def test_a_fault_the_scene_already_had_is_not_the_devices(tmp_path):
+    """A builder left one frame without a base picture: a device that adds nothing wrong still lands."""
+    l1 = scene_of([{"id": "s", "k": "shot", "f": [0, 59], "pic": "plate", "plate": {"c0": "#202020", "c1": "#202020"}}], 60)
+    assert not eligible(l1)[0]
+    out, log = palette.apply(l1, str(tmp_path), [{"dev": "rgb_split", "id": "g", "f": [10, 20]}])
+    assert log[0]["done"] and log[0]["landed"] == "rgb_split" and not log[0]["tried"], log
+
+
+def test_a_field_written_in_another_shape_is_read_never_a_stop(tmp_path):
+    """The Director wrote a colour where a strength was meant, a word for a direction, true for a colour."""
+    from scene.palette._util import colour, num
+    assert num({"ink": "#2B2118"}, "ink", 0.9) == 0.9 and num({"dir": "in"}, "dir", -1, words={"in": 1}) == 1.0
+    assert num({"px": "24"}, "px", 18) == 24.0 and num({"px": True}, "px", 18) == 18.0
+    assert colour({"glow": True}, "glow", "#FFD27A") == "#FFD27A" and colour({"c": "red"}, "c") == "#E8341C"
+    assert colour({"c": "e9d8a6"}, "c") == "#E9D8A6" and colour({"c": "blueish"}, "c") is None
+    l1 = scene_of([{"id": "s", "k": "shot", "f": [0, 60], "pic": "plate", "plate": {"c0": "#202020", "c1": "#202020"}}], 60)
+    out, log = palette.apply(l1, str(tmp_path), [{"dev": "paper", "id": "p", "f": [0, 30], "args": {"ink": "#2B2118", "c": "#E9D8A6"}}])
+    assert log[0]["landed"] == "paper" and not log[0]["tried"], log
+    assert [i for i in out["items"] if i.get("mode") == "paper"][0]["c"] == "#E9D8A6"

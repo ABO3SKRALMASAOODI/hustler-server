@@ -263,7 +263,12 @@ def _try(cur, work, ask, sense):
     nxt = merge(cur, patch)
     ok, why = eligible(nxt)
     if not ok:
-        return None, "would break the scene: " + "; ".join(why[:3])
+        # a fault the scene already carried before this device (a frame its builder left without a base picture) is
+        # not this device's: only a problem the patch adds sends the ask to its fallback
+        _, was = eligible(cur)
+        why = [w for w in why if w not in set(was)]
+        if why:
+            return None, "would break the scene: " + "; ".join(why[:3])
     return (patch, nxt), None
 
 

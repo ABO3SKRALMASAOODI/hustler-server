@@ -10,7 +10,7 @@ import os
 
 import numpy as np
 
-from ._util import arg, base_at, decel, frac_crop, frames, make_room, pictures, uid
+from ._util import arg, base_at, decel, frac_crop, frames, make_room, num, pictures, uid
 
 LAYER = "rhythm"
 
@@ -89,7 +89,7 @@ def parallax(l1, work, ask, sense):
         return {"skip": f"cannot read {pic}"}
     if d.shape != img.shape[:2]:
         d = cv2.resize(d, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_LINEAR)
-    ls = layers(img, d, int(arg(ask, "layers", 3)))
+    ls = layers(img, d, int(num(ask, "layers", 3)))
     key = hashlib.sha1(f"{sense.path(pic)}:{len(ls)}".encode()).hexdigest()[:10]
     out = os.path.join(work, "palette", "layers")
     os.makedirs(out, exist_ok=True)
@@ -98,7 +98,8 @@ def parallax(l1, work, ask, sense):
     crop = frac_crop(iw, ih, W, H, *(arg(ask, "centre") or (0.5, 0.45)), zoom=1.0)
     n = b - a
     import zlib
-    side = float(arg(ask, "dir", 1 if zlib.crc32(f"{l1.get('seed')}:{ask.get('id')}".encode()) % 2 else -1))
+    side = num(ask, "dir", 1 if zlib.crc32(f"{l1.get('seed')}:{ask.get('id')}".encode()) % 2 else -1,
+               words={"in": 1, "right": 1, "forward": 1, "out": -1, "left": -1, "back": -1})
     assets, items = {}, []
     drop, keep = make_room(l1, a, b, "pd_px")
     for i, (rgb, al) in enumerate(ls):
@@ -116,7 +117,7 @@ def parallax(l1, work, ask, sense):
             cs = [frac_crop(iw, ih, W, H, (crop[0] + crop[2]) / 2 - side * 0.006 * t, (crop[1] + crop[3]) / 2, z)
                   for t, z in zip(decel(n, 0, 1, 2.5), decel(n, 1.0, push, 2.5))]
             items.append({"id": uid(l1, "pd_pxb"), "k": "shot", "f": [a, b], "pic": aid, "crop": [[round(v, 6) for v in c] for c in cs],
-                          "blur": float(arg(ask, "far_blur", 1.2))})
+                          "blur": num(ask, "far_blur", 1.2)})
         else:
             s_end = 1.0 + 0.07 * depth_k + 0.09 * depth_k * depth_k
             dx = side * (0.012 + 0.03 * depth_k)

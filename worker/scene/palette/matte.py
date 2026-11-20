@@ -8,7 +8,7 @@ person drawn again through his matte, as himself or as a pass of ``shot.keep`` (
 
 A moment asked where the take is not on screen is moved to the nearest stretch of the take (logged): the device
 lands on the person nearest the moment, never nowhere. A film with no take runs the fallback chain."""
-from ._util import arg, cut, decel, envelope, frames, is_take, pictures, shots, take_id, uid
+from ._util import arg, colour, cut, decel, envelope, frames, is_take, num, pictures, shots, take_id, uid
 
 LAYER = "surface"
 FIELDS = ("#E8341C", "#1F4BFF", "#FFD21F", "#0E0E0E", "#F2EFE6", "#13A35A")
@@ -76,7 +76,7 @@ def _plate(l1, items, lo, hi, c):
 
 
 def _field(l1, ask, i=0):
-    c = arg(ask, "c") or arg(ask, "field")
+    c = colour(ask, "c") or colour(ask, "field")
     if c:
         return c
     import zlib
@@ -104,9 +104,9 @@ def plate_strobe(l1, work, ask, sense):
     wins, p = _ready(l1, sense, ask, default_len=24, min_len=8)
     if wins is None:
         return p
-    hold = max(int(arg(ask, "hold", 3)), 2)
+    hold = max(int(num(ask, "hold", 3)), 2)
     pics = pictures(l1, ask)
-    plates = [c for c in ("#E8341C", "#1F4BFF", "#13A35A", "#B0249A") if c != arg(ask, "skip")]
+    plates = [c for c in ("#E8341C", "#1F4BFF", "#13A35A", "#B0249A") if c != colour(ask, "skip")]
     evs, k = [], 0
     for sh, lo, hi in wins:
         f = lo
@@ -129,14 +129,14 @@ def silhouette(l1, work, ask, sense):
     wins, p = _ready(l1, sense, ask)
     if wins is None:
         return p
-    field, ink = _field(l1, ask), arg(ask, "ink", "#0B0B0B")
+    field, ink = _field(l1, ask), colour(ask, "ink", "#0B0B0B")
     if field.upper() in ("#0E0E0E", "#0B0B0B"):
         ink = "#F2EFE6"
     for sh, lo, hi in wins:
         p["items"].append(_plate(l1, p["items"], lo, hi, field))
         passes = [{"mode": "fill", "c": ink, "f": [lo, hi]}]
-        if arg(ask, "glow"):
-            passes.insert(0, {"mode": "glow", "c": arg(ask, "glow"), "w": 34, "f": [lo, hi]})
+        if arg(ask, "glow"):                        # a glow asked as true is the warm halo
+            passes.insert(0, {"mode": "glow", "c": colour(ask, "glow", "#FFD27A"), "w": 34, "f": [lo, hi]})
         p["items"].append(_shot_with(l1, sh, passes))
     p["events"] = [{"f": wins[0][1], "kind": "silhouette", "strength": 0.9}]
     return p
@@ -148,7 +148,7 @@ def poster(l1, work, ask, sense):
     if wins is None:
         return p
     field = _field(l1, ask)
-    dark, light = arg(ask, "ink", "#121212"), arg(ask, "light", "#F2EFE6")
+    dark, light = colour(ask, "ink", "#121212"), colour(ask, "light", "#F2EFE6")
     for sh, lo, hi in wins:
         p["items"].append(_plate(l1, p["items"], lo, hi, field))
         p["items"].append(_shot_with(l1, sh, [{"mode": "outline", "c": light, "w": 12, "f": [lo, hi]},
@@ -162,14 +162,14 @@ def glow(l1, work, ask, sense):
     wins, p = _ready(l1, sense, ask, default_len=24)
     if wins is None:
         return p
-    c = arg(ask, "c", "#FFD27A")
+    c = colour(ask, "c", "#FFD27A")
     for sh, lo, hi in wins:
         s0 = sh["f"][0]
         n = sh["f"][1] - s0
         env = [0.0] * n
-        for i, v in enumerate(envelope(hi - lo, 4, max((hi - lo) // 2, 4), float(arg(ask, "amount", 0.9)))):
+        for i, v in enumerate(envelope(hi - lo, 4, max((hi - lo) // 2, 4), num(ask, "amount", 0.9))):
             env[lo - s0 + i] = round(v, 4)
-        p["items"].append(_shot_with(l1, sh, [{"mode": "glow", "c": c, "w": float(arg(ask, "w", 36)), "a": env, "f": [lo, hi]},
+        p["items"].append(_shot_with(l1, sh, [{"mode": "glow", "c": c, "w": min(max(num(ask, "w", 36), 14.0), 90.0), "a": env, "f": [lo, hi]},
                                               {"mode": "person", "f": [lo, hi]}]))
     p["events"] = [{"f": wins[0][1], "kind": "glow", "strength": 0.6}]
     return p
@@ -180,14 +180,14 @@ def clones(l1, work, ask, sense):
     wins, p = _ready(l1, sense, ask, default_len=30)
     if wins is None:
         return p
-    spread = float(arg(ask, "spread", 0.26))
-    count = max(1, min(int(arg(ask, "count", 2)), 3))
+    spread = num(ask, "spread", 0.26)
+    count = max(1, min(int(num(ask, "count", 2)), 3))
     for sh, lo, hi in wins:
         s0 = sh["f"][0]
         n = sh["f"][1] - s0
         passes = []
-        if arg(ask, "field"):
-            p["items"].append(_plate(l1, p["items"], lo, hi, arg(ask, "field")))
+        if colour(ask, "field"):
+            p["items"].append(_plate(l1, p["items"], lo, hi, colour(ask, "field")))
         for j in range(1, count + 1):
             for side in (-1, 1):
                 dx = [0.0] * n
@@ -209,11 +209,11 @@ def sticker(l1, work, ask, sense):
         return p
     pics = pictures(l1, ask)
     for i, (sh, lo, hi) in enumerate(wins):
-        if pics and not arg(ask, "field"):
+        if pics and not colour(ask, "field"):
             p["items"].append(_picture_card(l1, p["items"], pics[i % len(pics)], lo, hi))
         else:
             p["items"].append(_plate(l1, p["items"], lo, hi, _field(l1, ask, i)))
-        p["items"].append(_shot_with(l1, sh, [{"mode": "outline", "c": arg(ask, "c", "#FFFFFF"), "w": float(arg(ask, "w", 16)), "f": [lo, hi]},
+        p["items"].append(_shot_with(l1, sh, [{"mode": "outline", "c": colour(ask, "c", "#FFFFFF"), "w": min(max(num(ask, "w", 16), 6.0), 30.0), "f": [lo, hi]},
                                               {"mode": "person", "f": [lo, hi]}]))
     p["events"] = [{"f": wins[0][1], "kind": "sticker", "strength": 0.7}]
     return p
@@ -253,11 +253,11 @@ DEVICES = {
                "card": "f c(field) ink light. The speaker in two inks with a paper outline on a field: a screen print. For a name, "
                        "a legend, the verdict on a person"},
     "glow": {"plan": glow, "needs": ("take", "matte"), "fallback": ("leak",),
-             "card": "f c w amount. A halo swells round the speaker and settles. For a realisation, pride, the payoff landing on him"},
+             "card": "f c w(px 14-90) amount(0-1). A halo swells round the speaker and settles. For a realisation, pride, the payoff landing on him"},
     "clones": {"plan": clones, "needs": ("take", "matte"), "fallback": ("glow",),
-               "card": "f count(1-3) spread field?. Ghost copies slide out of him. For 'all of us', doubt, many versions, scale"},
+               "card": "f count(1-3) spread(0.1-0.4 of the frame) field?. Ghost copies slide out of him. For 'all of us', doubt, many versions, scale"},
     "sticker": {"plan": sticker, "needs": ("take", "matte"), "fallback": ("bg_swap",),
-                "card": "f pics[]|field c w. The speaker cut out like a sticker, white border, on a picture or colour. Playful, a "
+                "card": "f pics[]|field c w(px 6-30). The speaker cut out like a sticker, white border, on a picture or colour. Playful, a "
                         "meme beat, a punchline"},
     "keep_colour": {"plan": keep_colour, "needs": ("take", "matte"), "fallback": TAKE,
                     "card": "f. The room drained to grey, the speaker in colour. For focus on him, the one who mattered, isolation"},

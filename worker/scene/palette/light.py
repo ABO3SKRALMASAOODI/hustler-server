@@ -2,7 +2,7 @@
 flare off the brightest light. Screened over the frame under the type. A burn whitens the frame once, as a cut
 to white would: one luminance event, never a strobe."""
 from ..plan import AR
-from ._util import arg, base_at, envelope, frac_crop, frames, uid
+from ._util import arg, base_at, colour, envelope, frac_crop, frames, num, uid
 
 LAYER = "surface"
 
@@ -10,11 +10,11 @@ LAYER = "surface"
 def leak(l1, work, ask, sense):
     a, b = frames(l1, ask, default_len=36, min_len=10)
     n = b - a
-    amt = float(arg(ask, "amount", 0.85))
-    it = {"id": uid(l1, "pd_lk"), "k": "flash", "f": [a, b], "mode": "leak", "speed": float(arg(ask, "speed", 1.0)),
+    amt = num(ask, "amount", 0.85)
+    it = {"id": uid(l1, "pd_lk"), "k": "flash", "f": [a, b], "mode": "leak", "speed": num(ask, "speed", 1.0),
           "amount": [round(v, 4) for v in envelope(n, max(n // 5, 3), max(n // 3, 4), amt)], "z": 30}
-    if arg(ask, "c"):
-        it["c"] = arg(ask, "c")
+    if colour(ask, "c"):
+        it["c"] = colour(ask, "c")
     return {"items": [it], "log": {"f": [a, b]}, "events": [{"f": a + n // 5, "kind": "light", "strength": round(amt * 0.6, 2)}]}
 
 
@@ -44,7 +44,7 @@ def prism(l1, work, ask, sense):
             crop = AR(sh.get("crop"), a + n // 2, sh["f"][0]) or (frac_crop(asset["w"], asset["h"], W, H) if asset.get("w") else None)
             at = list(sense.bright(sh["pic"], float((sh.get("src") or [0, 0])[0]), crop))
     it = {"id": uid(l1, "pd_pr"), "k": "flash", "f": [a, b], "mode": "prism", "at": [round(float(at[0]), 4), round(float(at[1]), 4)],
-          "amount": [round(v, 4) for v in envelope(n, max(n // 4, 2), max(n // 2, 3), float(arg(ask, "amount", 0.9)))], "z": 32}
+          "amount": [round(v, 4) for v in envelope(n, max(n // 4, 2), max(n // 2, 3), num(ask, "amount", 0.9))], "z": 32}
     return {"items": [it], "log": {"at": it["at"]}, "events": [{"f": a + n // 4, "kind": "light", "strength": 0.5}]}
 
 
