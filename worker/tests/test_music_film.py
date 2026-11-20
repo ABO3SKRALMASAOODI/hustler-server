@@ -55,7 +55,7 @@ def _marks(dur=32.0, turn=None, payoff=14.1):
 def test_a_model_reads_the_turn_and_the_payoff_from_the_films_lines_and_fails_closed():
     lines = [(0.0, "FedEx had five thousand dollars left."), (21.2, "A lender said no."), (32.1, "And he won twenty-seven thousand.")]
     got = MF.story_marks(lines, 58.0, lambda system, user, schema: {"turn_s": 21.2, "payoff_s": 32.1, "mood": "tense, daring"})
-    assert got == {"turn_s": 21.2, "payoff_s": 32.1, "mood": "tense, daring"}
+    assert got == {"turn_s": 21.2, "payoff_s": 32.1, "close_s": None, "mood": "tense, daring", "arc": None}
     back = MF.story_marks(lines, 58.0, lambda *a: {"turn_s": 40.0, "payoff_s": 32.1, "mood": "x"})
     assert back["turn_s"] is None and back["payoff_s"] == 32.1          # a turn after the payoff is no turn
     out = MF.story_marks(lines, 58.0, lambda *a: {"turn_s": 99.0, "payoff_s": None, "mood": ""})
