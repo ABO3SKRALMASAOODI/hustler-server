@@ -55,6 +55,35 @@ DEVICES = {}
 FAMILY_OF = {}            # an unknown device name a model may write -> the registered device of its family
 
 
+# The alien bank's cards as the palette shows them, every number with its unit (the bank's own cards name fields only, and
+# a model that reads "lift" with no unit writes 0.6 where the device means 0.018 frame widths)
+ALIEN_CARDS = {
+    "rhyme": "rhyme at cuts[] n pool[] order[] r grow mono. A chain of pictures cut on one round shape, registered and "
+             "growing through every cut. Needs at least 4 pictures with a round shape in them",
+    "diecut": "diecut at t width lift dim seat. The word is stamped out of the live picture: its letters lift, carrying the "
+              "footage, and drop back. A word that must feel made of the moment",
+    "lamp": "lamp at t ink width room seat behind. The word is a light: it relights the speaker's take, throws his shadow, "
+            "and burns at the level of the voice. Needs the speaker on screen for at least half a second",
+    "arc": "arc marks[{f year stakes}] bars develop. The finish follows the year each sentence speaks from, the light and "
+           "the frame follow the stakes",
+    "answer": "answer at picks[{f pic word}] width dim seat. Each named picture is first seen inside its own word, then "
+              "takes the frame on the stressed vowel",
+}
+NEEDS = {"lamp": ("take", "voice"), "rhyme": ("pictures", "rounds"), "answer": ("pictures", "voice"), "diecut": ("words",)}
+# field: (lowest, highest, default, unit). clean() maps a value outside the range onto it and logs the repair.
+ALIEN_RANGES = {
+    "diecut": {"width": (0.3, 0.92, 0.84, "of the frame's width"), "lift": (0.0, 0.05, 0.018, "frame widths the letters rise"),
+               "dim": (0.3, 1.0, 0.7, "light left on the frame while the letters are up"), "up": (3, 12, 7, "frames"),
+               "down": (3, 10, 5, "frames")},
+    "lamp": {"width": (0.3, 0.8, 0.62, "of the frame's width"), "room": (0.0, 0.7, 0.42, "how far the room's light falls at full voice"),
+             "tail": (0, 20, 10, "frames the light takes to die")},
+    "answer": {"width": (0.4, 0.92, 0.82, "of the frame's width"), "dim": (0.1, 0.8, 0.32, "light left on the outgoing picture")},
+    "rhyme": {"r": (0.12, 0.42, 0.3, "the shape's radius, of the frame's width"), "grow": (1.0, 1.3, 1.12, "scale a cut"),
+              "n": (3, 13, 4, "pictures")},
+    "arc": {"bars": (0.0, 0.15, 0.085, "of the frame's height"), "develop": (0, 24, 6, "frames")},
+}
+
+
 def _alien_entries():
     """The alien bank's five devices, registered here under their own names. A device that cannot stand on the film
     runs its fallback chain (the bank's own 'skip' is the signal for it)."""
@@ -78,7 +107,8 @@ def _alien_entries():
             return patch
         return plan
     for name, d in alien.DEVICES.items():
-        out[name] = {"card": d["card"], "layer": layer.get(name, "alien"), "needs": tuple(d.get("needs") or ()),
+        out[name] = {"card": ALIEN_CARDS.get(name, d["card"]), "layer": layer.get(name, "alien"),
+                     "needs": tuple(NEEDS.get(name) or d.get("needs") or ()), "ranges": ALIEN_RANGES.get(name, {}),
                      "plan": wrap(name, d["plan"]), "fallback": chains.get(name, ("white",)), "family": "alien"}
 
     def arc_stakes(l1, work, ask, sense):
@@ -130,7 +160,7 @@ def resolve(name):
     if n in FAMILY_OF and FAMILY_OF[n] in DEVICES:
         return FAMILY_OF[n]
     for k in sorted(DEVICES):
-        if n and (k.startswith(n) or n.startswith(k)):
+        if len(n) >= 3 and (k.startswith(n) or n.startswith(k)):
             return k
     return "white" if "white" in DEVICES else sorted(DEVICES)[0]
 
@@ -141,8 +171,21 @@ def menu(layers=LAYERS):
     out = []
     for layer in layers:
         for name in sorted(n for n, e in DEVICES.items() if e["layer"] == layer):
-            out.append(f"[{layer}] {DEVICES[name]['card']}")
+            out.append(f"[{layer}] {card(name)}")
     return "\n".join(out)
+
+
+def units(name):
+    """The fields' units and drawable ranges of a device, as card text: 'lift 0-0.05 frame widths the letters rise
+    (default 0.018)'."""
+    rs = (DEVICES.get(name) or {}).get("ranges") or {}
+    return "; ".join(f"{k} {lo:g}-{hi:g} {u} (default {d:g})" for k, (lo, hi, d, u) in rs.items())
+
+
+def card(name):
+    """A device's card with its fields' units and ranges."""
+    u = units(name)
+    return DEVICES[name]["card"] + (f". Units: {u}" if u else "")
 
 
 def _span(ask, l1):
@@ -202,43 +245,99 @@ def merge(l1, patch):
     return out
 
 
-SEATS = {"center": (0.5, 0.45), "centre": (0.5, 0.45), "middle": (0.5, 0.45), "top": (0.5, 0.28), "upper": (0.5, 0.3),
-         "bottom": (0.5, 0.66), "lower": (0.5, 0.64), "left": (0.32, 0.45), "right": (0.68, 0.45)}
+SEATS = {"center": (0.5, 0.45), "centre": (0.5, 0.45), "middle": (0.5, 0.45), "mid": (0.5, 0.45), "top": (0.5, 0.28),
+         "upper": (0.5, 0.3), "high": (0.5, 0.3), "above": (0.5, 0.3), "bottom": (0.5, 0.66), "lower": (0.5, 0.64),
+         "low": (0.5, 0.64), "below": (0.5, 0.64), "left": (0.32, 0.45), "right": (0.68, 0.45),
+         "top_left": (0.34, 0.3), "upper_left": (0.34, 0.3), "top_right": (0.66, 0.3), "upper_right": (0.66, 0.3),
+         "bottom_left": (0.34, 0.64), "lower_left": (0.34, 0.64), "bottom_right": (0.66, 0.64), "lower_right": (0.66, 0.64),
+         "head": (0.5, 0.3), "over_head": (0.5, 0.24), "beside": (0.5, 0.36), "side": (0.5, 0.36), "face": (0.5, 0.36)}
 NAMED = {"room": {"dark": 0.3, "dim": 0.35, "low": 0.35, "warm": 0.55, "bright": 0.7, "lit": 0.65}}
-NUMBERS = ("width", "lift", "dim", "room", "r", "grow", "bars", "develop", "amount", "th", "y", "h", "stakes", "angle")
-INTS = ("n", "run", "flips", "count", "times")
+WORDED = {"small": 0.25, "low": 0.25, "little": 0.25, "subtle": 0.25, "soft": 0.3, "medium": 0.5, "mid": 0.5, "normal": 0.5,
+          "big": 0.85, "large": 0.85, "high": 0.85, "strong": 0.9, "wide": 0.9, "max": 1.0, "full": 1.0, "huge": 1.0}
+NUMBERS = ("width", "lift", "dim", "room", "r", "grow", "bars", "develop", "amount", "th", "y", "h", "stakes", "angle",
+           "tail", "up", "down")
+INTS = ("n", "run", "flips", "count", "times", "up", "down", "develop", "tail")
+SEAT_X = (0.06, 0.94)
+SEAT_Y = (0.14, 0.86)
+
+
+def ranges_of(dev):
+    _discover()
+    return dict((DEVICES.get(dev) or {}).get("ranges") or {})
 
 
 def clean(ask):
-    """An ask's fields in the shapes the devices read (a model writes "center" for a seat, "warm" for a room, true for a
-    size): a seat named becomes its place, a number written as a word its number, and a field that cannot be read is left
-    to the device's own default. The ask's meaning is the caller's; this only reads its format. Returns (ask, notes)."""
+    """An ask's fields in the shapes and ranges the device reads, every change logged as a repair, nothing refused.
+    A seat named becomes its place (``"low"`` a seat low in the frame); a number written as a word is its number; a
+    true for a ranged field is the device's default and a worded size ("big") a point of its range; a value outside
+    the device's drawable range is mapped onto it (diecut lift 0.6 meant "a big lift": the device's highest, 0.05 frame
+    widths); a seat that would put a block of the ask's width off the frame moves in. The ask's meaning is the caller's;
+    this reads its format and its units. Returns (ask, notes)."""
     out, notes = dict(ask), []
+    rs = ranges_of(resolve(out.get("dev"))) if out.get("dev") else {}
     seat = out.get("seat")
     if seat is not None:
-        if isinstance(seat, str) and seat.strip().lower() in SEATS:
-            out["seat"] = list(SEATS[seat.strip().lower()])
-        elif not (isinstance(seat, (list, tuple)) and len(seat) == 2 and all(isinstance(v, (int, float)) for v in seat)):
+        key = seat.strip().lower().replace("-", "_").replace(" ", "_") if isinstance(seat, str) else None
+        if key in SEATS:
+            out["seat"] = list(SEATS[key])
+            notes.append(f"seat {seat!r} read as {out['seat']}")
+        elif isinstance(seat, dict) and all(isinstance(seat.get(k), (int, float)) for k in ("x", "y")):
+            out["seat"] = [float(seat["x"]), float(seat["y"])]
+        elif not (isinstance(seat, (list, tuple)) and len(seat) == 2 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in seat)):
             out.pop("seat")
             notes.append(f"seat {seat!r} left to the device")
     for k in NUMBERS:
+        if k not in out:
+            continue
         v = out.get(k)
         if v is None or (isinstance(v, (int, float)) and not isinstance(v, bool)):
             continue
-        named = NAMED.get(k, {}).get(str(v).strip().lower()) if isinstance(v, str) else None
-        try:
-            out[k] = float(named if named is not None else v) if not isinstance(v, bool) else None
-        except (TypeError, ValueError):
-            out[k] = None
-        if out[k] is None:
+        got = None
+        if isinstance(v, bool):
+            if k in rs:
+                got = rs[k][2] if v else rs[k][0]
+        elif isinstance(v, str):
+            w = v.strip().lower()
+            named = NAMED.get(k, {}).get(w)
+            if named is not None:
+                got = named
+            elif w in WORDED and k in rs:
+                lo, hi = rs[k][0], rs[k][1]
+                got = lo + (hi - lo) * WORDED[w]
+            else:
+                try:
+                    got = float(w.rstrip("%")) / (100.0 if w.endswith("%") else 1.0)
+                except ValueError:
+                    got = None
+        if got is None:
             out.pop(k)
             notes.append(f"{k} {v!r} left to the device")
+        else:
+            out[k] = float(got)
+            notes.append(f"{k} {v!r} read as {round(float(got), 4)}")
     for k in INTS:
-        if k in out and not isinstance(out[k], int):
+        if k in out and not (isinstance(out[k], int) and not isinstance(out[k], bool)):
             try:
-                out[k] = int(float(out[k]))
+                out[k] = int(round(float(out[k])))
             except (TypeError, ValueError):
                 out.pop(k)
+    for k, (lo, hi, _d, unit) in rs.items():           # onto the device's drawable range
+        v = out.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and not (lo <= v <= hi):
+            got = min(max(float(v), lo), hi)
+            got = int(round(got)) if isinstance(v, int) and float(lo).is_integer() and float(hi).is_integer() else round(got, 4)
+            out[k] = got
+            notes.append(f"{k} {v!r} is outside {lo:g}-{hi:g} {unit}: mapped to {got:g}")
+    if isinstance(out.get("seat"), list):              # a block of the ask's width stays inside the frame
+        x, y = [float(q) for q in out["seat"]]
+        half = None
+        if "width" in rs:
+            half = float(out.get("width") or rs["width"][2]) / 2 + float(out.get("lift") or 0.0) + 0.02
+        x0, x1 = (max(SEAT_X[0], half), min(SEAT_X[1], 1 - half)) if half is not None and half < 0.5 else (0.5, 0.5) if half else SEAT_X
+        nx, ny = min(max(x, x0), x1), min(max(y, SEAT_Y[0]), SEAT_Y[1])
+        if (nx, ny) != (x, y):
+            notes.append(f"seat {[round(x, 3), round(y, 3)]} moved to {[round(nx, 3), round(ny, 3)]} to stay inside the frame")
+        out["seat"] = [round(nx, 4), round(ny, 4)]
     if "ink" in out and not (isinstance(out["ink"], str) and out["ink"].startswith("#") and len(out["ink"]) == 7):
         out.pop("ink")
     for k in ("order", "pool"):
@@ -271,21 +370,112 @@ def asks_of(l1):
     return out
 
 
+WORD_DEVICES = ("lamp", "diecut", "answer", "word_blend")
+SEAT_ROWS = (0.30, 0.46, 0.62, 0.22, 0.74)        # baselines a word device may move to when its seat is taken
+
+
+def _words(t):
+    return ["".join(ch for ch in w.lower() if ch.isalnum()) for w in str(t or "").split() if any(ch.isalnum() for ch in w)]
+
+
+def _within(a, b):
+    """Is word list a a contiguous run of word list b?"""
+    return bool(a) and any(b[i:i + len(a)] == a for i in range(len(b) - len(a) + 1))
+
+
+def same_text(a, b):
+    wa, wb = _words(a), _words(b)
+    return bool(wa and wb) and (_within(wa, wb) or _within(wb, wa))
+
+
+def device_text(ask, patch):
+    """The words a word device sets on the frame: its "t", an answer's picked words, a word blend's own items."""
+    if ask.get("t"):
+        return [str(ask["t"])]
+    if ask.get("dev") == "answer":
+        return [str(p.get("word")) for p in ask.get("picks") or [] if isinstance(p, dict) and p.get("word")]
+    return sorted({str(i.get("t")) for i in (patch or {}).get("items") or [] if i.get("k") == "word" and i.get("t")})
+
+
+def seat_box(patch, ask, rs):
+    """[x0, y0, x1, y1, f0, f1] of the block a word device set (its patch's seat, else its ask's)."""
+    st = (patch or {}).get("seat")
+    f = st.get("f") if isinstance(st, dict) and st.get("f") else span(ask, {"dur_f": 10 ** 9})
+    if isinstance(st, dict) and all(k in st for k in ("x", "y", "w", "h")):
+        x, y, w, h = float(st["x"]), float(st["y"]), float(st["w"]), float(st["h"])
+    else:
+        x, y = [float(v) for v in (ask.get("seat") or (0.5, 0.5))]
+        w, h = float(ask.get("width") or (rs.get("width") or (0, 0, 0.8))[2]), 0.1
+    return [x - w / 2, y - h, x + w / 2, y, int(f[0]), int(f[1])]
+
+
+def _clash(b, others, pad=0.015):
+    """How much of block b another block standing at the same time covers (0 when none)."""
+    worst = 0.0
+    for o in others:
+        if o[5] <= b[4] or b[5] <= o[4]:
+            continue
+        ox = max(0.0, min(b[2], o[2]) - max(b[0], o[0]) + pad)
+        oy = max(0.0, min(b[3], o[3]) - max(b[1], o[1]) + pad)
+        worst = max(worst, ox * oy / max((b[2] - b[0]) * (b[3] - b[1]), 1e-6))
+    return worst
+
+
+def free_seat(box, others, x=0.5):
+    """The seat (centre x, baseline y) among SEAT_ROWS where a block of box's size stands clear of the others, else
+    where it is covered least."""
+    w, h = box[2] - box[0], box[3] - box[1]
+    best = None
+    for y in SEAT_ROWS:
+        b = [x - w / 2, y - h, x + w / 2, y, box[4], box[5]]
+        c = _clash(b, others)
+        if best is None or c < best[0] - 1e-9:
+            best = (c, [x, y])
+        if c == 0.0:
+            break
+    return best[1]
+
+
+def drop_echoes(cur, texts, f0, f1, made):
+    """Ids of the builder's own display type that says one of ``texts`` while [f0, f1) stands (a word device sets that
+    word now, so the builder's copy of it leaves): the display block's lines and its bar go together."""
+    gone = set()
+    for it in cur.get("items") or []:
+        if it.get("k") != "word" or it["id"] in made or it.get("role") == "cap" or it["f"][1] <= f0 or it["f"][0] >= f1:
+            continue
+        if any(same_text(it.get("t"), t) for t in texts):
+            on = it.get("on", it["f"][0])
+            for j in cur["items"]:
+                if j["id"] in made:
+                    continue
+                if j.get("k") == "word" and j.get("role") == it.get("role") and j.get("on", j["f"][0]) == on and \
+                        j["f"][0] < it["f"][1] and j["f"][1] > it["f"][0]:
+                    gone.add(j["id"])
+                elif j.get("k") == "card" and j.get("pic") == "plate" and j.get("bar_on") == on:
+                    gone.add(j["id"])
+            gone.add(it["id"])
+    return gone
+
+
 def apply(l1, work, asks=None, pool=None):
-    """(scene, log). Every ask in layer order (then in the order asked); after each device the scene is checked with
-    the engine's own ``eligible``, and an ask that cannot stand runs its device's fallback chain. The scene handed in
-    is not changed. ``pool``: picture asset ids a device may draw from (default: every picture in the scene)."""
+    """(scene, log). Every ask in layer order (a section's finish first in its layer: it is the surface the other
+    devices stand on), then in the order asked; after each device the scene is checked with the engine's own
+    ``eligible``, and an ask that cannot stand runs its device's fallback chain. A word device sets its word once: the
+    builder's display copy of that word leaves while it stands, and two word devices at the same time take distinct
+    seats. The scene handed in is not changed. ``pool``: picture asset ids a device may draw from (default: every
+    picture in the scene)."""
     _discover()
     from .sense import Sense
     asks = asks_of(l1) if asks is None else [dict(a) for a in asks]
     cur = copy.deepcopy({k: v for k, v in l1.items() if k not in ("devices", "alien")})
     sense = Sense(cur, work, pool=pool)
-    log, events = [], []
+    log, events, made, seats = [], [], set(), []
 
     def order(t):
         n, a = t
-        e = DEVICES[resolve(a.get("dev"))]
-        return (LAYERS.index(e["layer"]) if e["layer"] in LAYERS else len(LAYERS), n)
+        dev = resolve(a.get("dev"))
+        e = DEVICES[dev]
+        return (LAYERS.index(e["layer"]) if e["layer"] in LAYERS else len(LAYERS), 0 if dev == "finish" else 1, n)
     for n, ask in sorted(enumerate(asks), key=order):
         asked = ask.get("dev")
         name = resolve(asked)
@@ -296,8 +486,6 @@ def apply(l1, work, asks=None, pool=None):
         row = {"id": ask["id"], "dev": name, "asked": asked, "beat": ask.get("beat"), "f": list(_span(ask, cur))}
         if name != asked:
             row["mapped"] = f"{asked} -> {name}"
-        if cleaned:
-            row["cleaned"] = cleaned
         chain, tried, landed = [name], [], None
         seen = set()
         while chain:
@@ -306,23 +494,45 @@ def apply(l1, work, asks=None, pool=None):
                 continue
             seen.add(dev)
             sense.l1 = cur
-            got, why = _try(cur, work, dict(ask, dev=dev), sense)
+            dask, dnotes = (ask, []) if dev == name else clean(dict(ask, dev=dev))
+            got, why = _try(cur, work, dict(dask, dev=dev), sense)
+            if got is not None and dev in WORD_DEVICES and dev != "word_blend":
+                box = seat_box(got[0], dask, ranges_of(dev))
+                if _clash(box, seats) > 0:          # another word device stands there: this one takes a free seat
+                    seat = free_seat(box, seats)
+                    again, _ = _try(cur, work, dict(dask, dev=dev, seat=seat), sense)
+                    if again is not None:
+                        got = again
+                        dnotes = dnotes + [f"seat moved to {seat}: another word device stood at {[round(v, 3) for v in box[:4]]}"]
             if got is not None:
                 landed = (dev, got)
+                cleaned = cleaned + [c for c in dnotes if c not in cleaned]
                 break
             tried.append(dict(dev=dev, why=why))
             chain += [d for d in DEVICES[dev].get("fallback") or () if d not in seen]
+        if cleaned:
+            row["cleaned"] = cleaned
         if landed is None:
             log.append(dict(row, done=False, tried=tried))
             continue
         dev, (patch, nxt) = landed
+        made |= {i["id"] for i in patch.get("items") or []}
+        echoes = set()
+        if dev in WORD_DEVICES:
+            texts = device_text(dict(ask, dev=dev), patch)
+            box = seat_box(patch, ask, ranges_of(dev))
+            if dev != "word_blend":
+                seats.append(box)
+            echoes = drop_echoes(nxt, texts, box[4], box[5], made)
+            if echoes:
+                nxt = dict(nxt, items=[i for i in nxt["items"] if i["id"] not in echoes])
         cur = nxt
         sense.l1 = cur
         sense.lum += [int(f) for f in patch.get("lum") or []]
         for e in patch.get("events") or []:
             events.append(dict(e, dev=dev, id=ask["id"]))
         log.append(dict(row, done=True, landed=dev, fallback=bool(tried), tried=tried, log=patch.get("log"),
-                        marks=patch.get("marks") or [], seat=patch.get("seat")))
+                        marks=patch.get("marks") or [], seat=patch.get("seat"), **({"replaced": sorted(echoes)} if echoes else {})))
     cur["device_events"] = sorted(events, key=lambda e: (int(e.get("f", 0)), str(e.get("id"))))
     cur["device_log"] = log
     return cur, log

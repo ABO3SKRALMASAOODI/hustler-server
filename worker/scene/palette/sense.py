@@ -85,8 +85,28 @@ class Sense:
         p = str((shot or {}).get("pic"))
         return p == "main" or p.startswith("own:")
 
-    def cards_at(self, f):
-        return [i for i in self.l1.get("items") or [] if i.get("k") == "card" and i["f"][0] <= f < i["f"][1]]
+    def cards_at(self, f, overlays=False):
+        """Cards on screen at frame f. Without ``overlays``, the cards that are pictures of the film only: not the
+        palette's own overlays (a gate, scanlines, a spotlight's vignette), not the alien bank's, not a card drawn
+        behind the speaker."""
+        out = [i for i in self.l1.get("items") or [] if i.get("k") == "card" and i["f"][0] <= f < i["f"][1]]
+        if not overlays:
+            out = [i for i in out if not str(i.get("pic")).startswith(("palette_", "alien")) and not i.get("behind")]
+        return out
+
+    def negative(self, a, b):
+        """[bool] a frame of [a, b): is the whole frame already printed negative there (an odd number of full-frame
+        negative flashes stand on it)? A negative laid over a negative prints positive again."""
+        n = [0] * max(int(b) - int(a), 0)
+        for i in self.l1.get("items") or []:
+            if i.get("k") != "flash" or i.get("mode") != "neg" or i.get("rect"):
+                continue
+            al = i.get("a", 1.0)
+            if (max(al) if isinstance(al, list) and al else float(al if not isinstance(al, list) else 0)) < 0.5:
+                continue
+            for f in range(max(int(i["f"][0]), int(a)), min(int(i["f"][1]), int(b))):
+                n[f - int(a)] += 1
+        return [c % 2 == 1 for c in n]
 
     def words_in(self, a, b, role=None):
         return [i for i in self.l1.get("items") or [] if i.get("k") == "word" and i["f"][0] < b and i["f"][1] > a

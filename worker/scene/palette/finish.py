@@ -22,7 +22,9 @@ SURFACE_OF = {"bw": "mono", "black_and_white": "mono", "silver": "mono", "film":
               "paper": "mono", "xerox": "threshold", "photocopy": "threshold", "led": "halftone", "dot": "halftone",
               "dots": "halftone", "tear": "neg", "negative": "neg", "x_ray": "xray", "schematic": "blueprint",
               "night": "night_vision", "posterize": "posterise", "solarize": "solarise", "color": "colour",
-              "none": "colour", "colour_bloom": "bloom", "mono_to_colour": "bloom"}
+              "none": "colour", "colour_bloom": "bloom", "mono_to_colour": "bloom", "rewind": "crt", "monitor": "crt",
+              "screen": "crt", "monochrome": "mono", "grayscale": "mono", "greyscale": "mono", "sepia": "mono",
+              "film_gate": "gate", "vintage": "gate", "super8": "gate", "8mm": "gate", "color_bloom": "bloom"}
 FRAME_SURFACES = ("thermal", "threshold", "halftone", "xray", "blueprint", "night_vision", "posterise", "solarise", "line")
 
 
@@ -124,8 +126,20 @@ def finish(l1, work, ask, sense):
                 "assets": {aid: {"kind": "image", "path": overlay(work, "crt", W, H)}}, "events": ev,
                 "log": {"surface": s, "f": [a, b]}}
     if s == "neg":
-        return {"items": [{"id": f"{i}n", "k": "flash", "f": [a, b], "mode": "neg", "a": 1.0}], "lum": [a, b],
-                "events": ev, "log": {"surface": s, "f": [a, b]}}
+        # printed negative where the frame is positive now; frames a device already turned negative keep that (a second
+        # negative over them would print them positive and both would vanish)
+        pol = sense.negative(a, b)
+        runs, f0 = [], None
+        for q, neg_ in enumerate(pol + [True]):
+            if not neg_ and f0 is None:
+                f0 = a + q
+            elif neg_ and f0 is not None:
+                runs.append((f0, a + q))
+                f0 = None
+        items = [{"id": f"{i}n" if k == 0 else f"{i}n{k}", "k": "flash", "f": [lo, hi], "mode": "neg", "a": 1.0}
+                 for k, (lo, hi) in enumerate(runs)]
+        return {"items": items, "lum": sorted({f for r in runs for f in r}), "events": ev,
+                "log": {"surface": s, "f": [a, b], **({"kept_negative": sum(pol)} if any(pol) else {})}}
     if s not in FRAME_SURFACES:
         s = "mono"
         items, drop = looked(l1, a, b, f"m{i}", look="mono_silver")
@@ -144,4 +158,9 @@ DEVICES = {
                "card": "finish f[a,b] surface(mono|gate|crt|bloom|thermal|threshold|halftone|xray|blueprint|night_vision|posterise|solarise|line|neg|colour). The surface a section is printed on, switched on its cut. The past, a memory, a screen, a change of world; bloom: colour returns on the turn"},
 }
 ALIASES = {"surface": "finish", "section": "finish", "mono": "finish", "gate": "finish", "crt": "finish", "bloom": "finish",
-           "black_and_white": "finish", "bw": "finish"}
+           "colour": "finish", "color": "finish", "finish": "finish"}
+# every surface the finish card names, and every name it reads as one (SURFACE_OF), is the finish device with the surface
+# carried in "as" (a name the variant device also draws, a frame re-render, resolves to the variant: it draws the same
+# mode over the ask's span)
+ALIASES.update({k: "finish" for k in tuple(SURFACE_OF) + FRAME_SURFACES if k not in ("neg", "negative", "tear")})
+ALIASES.update({"tear": "finish"})

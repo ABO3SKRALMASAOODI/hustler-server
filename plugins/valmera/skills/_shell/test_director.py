@@ -118,3 +118,68 @@ def test_the_ledger_keeps_each_films_sequence(tmp_path, monkeypatch):
     row = DLG.record("wf1", "r1", "/films/a", str(sup))
     assert row["seq"] == ["neg@hook", "white@payoff", "neg_split"] and row["surfaces"] == ["gate"]
     assert DLG.recent(5) == ["wf1 " + row["at"][:10] + ": neg@hook, white@payoff, neg_split; surfaces gate"]
+
+
+def test_the_cache_is_keyed_on_the_words_it_read(tmp_path):
+    first = dict(asks=[dict(dev="neg", at=dict(w=3, word="smart."))], beats=[], sections=[])
+    again = dict(asks=[dict(dev="tint", at=dict(w=1, word="is"))], beats=[], sections=[])
+    ask = Ask(first, again)
+    d1 = DR.direct(str(tmp_path), SENTENCES, rows(), STRESS, ask=ask, recent=[])
+    assert d1["key"] and DR.direct(str(tmp_path), SENTENCES, rows(), STRESS, ask=ask, recent=[])["key"] == d1["key"]
+    assert len(ask.calls) == 1                                       # same words: the cached answer
+    rescored = [dict(i=0, text="AI is not smart at all."), SENTENCES[1], SENTENCES[2]]
+    out, t = [], 0.0
+    for s in rescored:
+        for w in s["text"].split():
+            out.append(dict(w=w, t0=t, t1=t + 0.3, seg=s["i"]))
+            t += 0.35
+    d2 = DR.direct(str(tmp_path), rescored, out, STRESS, ask=ask, recent=[])
+    assert len(ask.calls) == 2 and d2["key"] != d1["key"]           # the lines were scored again: directed again
+    assert d2["asks"][0]["dev"] == "tint"
+
+
+def test_a_provider_failure_is_asked_again_on_resume(tmp_path):
+    ask = Ask(RuntimeError("overloaded"))
+    d1 = DR.direct(str(tmp_path), SENTENCES, rows(), STRESS, ask=ask, recent=[])
+    assert d1["by"] == "signal" and d1["retry"] and d1["asks"]
+    ask2 = Ask(RuntimeError("still overloaded"))                    # fails again: the signal answer it had is kept
+    d2 = DR.direct(str(tmp_path), SENTENCES, rows(), STRESS, ask=ask2, recent=[])
+    assert len(ask2.calls) == 1 and d2["by"] == "signal" and d2["asks"] == d1["asks"] and d2["retry"]
+    good = dict(asks=[dict(dev="lamp", at=dict(w=3, word="smart."))], beats=[], sections=[])
+    ask3 = Ask(good)
+    d3 = DR.direct(str(tmp_path), SENTENCES, rows(), STRESS, ask=ask3, recent=[])
+    assert len(ask3.calls) == 1 and d3["by"] == "model" and not d3["retry"] and d3["asks"][0]["dev"] == "lamp"
+    ask4 = Ask()
+    assert DR.direct(str(tmp_path), SENTENCES, rows(), STRESS, ask=ask4, recent=[])["by"] == "model" and not ask4.calls
+
+
+def test_the_sheet_says_what_the_material_can_hold(tmp_path):
+    from PIL import Image, ImageDraw
+    pics = []
+    for k in range(2):
+        p = tmp_path / f"r{k}.png"
+        im = Image.new("RGB", (360, 640), (30, 30, 30))
+        ImageDraw.Draw(im).ellipse([90, 210, 270, 390], fill=(240, 230, 210))
+        im.save(p)
+        pics.append(dict(id=f"P{k}", path=str(p), kind="photo"))
+    ask = Ask(dict(asks=[], beats=[], sections=[]))
+    d = DR.direct(str(tmp_path), SENTENCES, rows(), STRESS, pictures=pics, take=dict(on_camera=True), ask=ask, recent=[])
+    text = ask.calls[0]["content"][0]["text"]
+    assert "What this material can hold" in text and "round shapes: 2 of the pictures" in text
+    assert "rhyme (needs rounds" in text                              # information for the model, not a gate
+    assert "use most of the palette" not in DR.SYSTEM and "10 to 30" not in DR.SYSTEM
+    assert "lift 0-0.05 frame widths" in text                         # the cards carry their units
+    assert d["can"]
+
+
+def test_devices_on_the_speaker_hold_the_take_and_cutaways_step_round_them():
+    asks = [dict(dev="lamp", id="dr0", f=[30, 60], at=[30, 60], t="AI"), dict(dev="neg_world", id="dr1", f=[200, 240]),
+            dict(dev="white", id="dr2", f=100), dict(dev="spotlight", id="dr3", f=[230, 260])]
+    spans = DR.take_spans(asks, dur_f=400)
+    assert spans == [[29, 70], [199, 260]]
+    ins = [(0, 50, "clip", "a", dict(src=[10.0, 11.6667])), (90, 120, "photo", "b", {}), (180, 300, "clip", "c", dict(src=[0.0, 4.0]))]
+    rows_, cleared = DR.hold_take(ins, spans)
+    assert [(r[0], r[1]) for r in rows_] == [(0, 29), (90, 120), (180, 199), (260, 300)]
+    assert rows_[0][4]["src"] == [10.0, round(10.0 + 29 / 30, 4)]   # a clip cut keeps its own speed
+    assert rows_[3][4]["src"] == [round(80 / 30, 4), 4.0]
+    assert cleared == 21 + 61
