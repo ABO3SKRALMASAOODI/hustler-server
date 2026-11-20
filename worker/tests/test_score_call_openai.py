@@ -122,16 +122,16 @@ def test_director_uses_configured_local_responses_endpoint(monkeypatch):
                 "status": "completed", "usage": {"input_tokens": 4, "output_tokens": 2}}}))
 
     _client_with(monkeypatch, handler)
-    monkeypatch.setattr(call_openai.config, "OPENAI_BASE_URL", "http://127.0.0.1:8787/v1/")
+    monkeypatch.setattr(call_openai.config, "OPENAI_BASE_URL", "http://127.0.0.1:8788/v1/")
     monkeypatch.setattr(call_openai.config, "OPENAI_API_KEY", "local-codex-only")
     result = call.stream("gpt-6-sol", "s", "c", max_tokens=10, effort="low",
                          purpose="director_scout", deadline=time.monotonic() + 5)
     assert result.text == "local score"
     assert result.usd == result.usage.provider_cost_usd == 0.0
-    assert seen == ["http://127.0.0.1:8787/v1/responses"]
+    assert seen == ["http://127.0.0.1:8788/v1/responses"]
 
 
-@pytest.mark.parametrize('base', ['http://127.0.0.1:8787/v1/', 'https://proxy.example/v1'])
+@pytest.mark.parametrize('base', ['http://127.0.0.1:8788/v1/', 'https://proxy.example/v1'])
 def test_director_uses_the_configured_responses_host(monkeypatch, base):
     seen = []
     def handler(request):
@@ -189,9 +189,9 @@ def test_stream_cost_uses_actual_top_level_serving_tier(monkeypatch, served, mul
 
 
 @pytest.mark.parametrize("url", ["https://api.openai.com/v1/responses",
-    "http://127.0.0.1.evil.test:8787/v1/responses",
-    "http://127.0.0.1:8787/paid", "http://127.0.0.1:8888/v1/responses",
-    "http://127.0.0.1:8787/v1/responses?forward=paid"])
+    "http://127.0.0.1.evil.test:8788/v1/responses",
+    "http://127.0.0.1:8788/paid", "http://127.0.0.1:8888/v1/responses",
+    "http://127.0.0.1:8788/v1/responses?forward=paid"])
 def test_subscription_flag_cannot_exempt_another_transport(monkeypatch, url):
     monkeypatch.setenv("CODEX_PROXY_LOCAL", "1")
     assert not call_openai.subscription_endpoint(url)
@@ -199,14 +199,14 @@ def test_subscription_flag_cannot_exempt_another_transport(monkeypatch, url):
 
 def test_local_endpoint_without_subscription_optin_remains_metered(monkeypatch):
     monkeypatch.delenv("CODEX_PROXY_LOCAL", raising=False)
-    assert not call_openai.subscription_endpoint("http://127.0.0.1:8787/v1/responses")
+    assert not call_openai.subscription_endpoint("http://127.0.0.1:8788/v1/responses")
 
 
 def test_local_transport_failure_does_not_create_unknown_paid_billing(monkeypatch):
     import openai_budget
     _client_with(monkeypatch, lambda req: httpx.Response(503, content=b"adapter busy"))
     monkeypatch.setenv("CODEX_PROXY_LOCAL", "1")
-    monkeypatch.setattr(call_openai.config, "OPENAI_BASE_URL", "http://127.0.0.1:8787/v1")
+    monkeypatch.setattr(call_openai.config, "OPENAI_BASE_URL", "http://127.0.0.1:8788/v1")
     monkeypatch.setattr(openai_budget, "reserve", lambda *a, **k: pytest.fail("paid admission"))
     journal = []
     monkeypatch.setattr(call_openai.openai_cache, "record", lambda *a, **kw: journal.append(kw))
@@ -246,3 +246,16 @@ def test_a_rejection_before_generation_is_journaled_as_zero_not_unknown_billing(
             openai_budget.legacy_workflow_total(day)
     else:
         assert openai_budget.legacy_workflow_total(day) == 0
+
+
+def test_the_macs_proxy_port_is_8788_or_the_configured_one(monkeypatch):
+    """20 Nov: the proxy moved to 8788 on 19 Nov (the CRM's server holds 8787) but this check still named 8787, so
+    every workflow call through the proxy was treated as paid OpenAI (out of credit), refused, and the named picture
+    check fell to a Claude lane with no key: the marketing writer got no pictures."""
+    monkeypatch.setenv("CODEX_PROXY_LOCAL", "1")
+    monkeypatch.delenv("CODEX_PROXY_PORT", raising=False)
+    assert call_openai.subscription_endpoint("http://127.0.0.1:8788/v1/responses")
+    assert not call_openai.subscription_endpoint("http://127.0.0.1:8787/v1/responses")   # the CRM's port
+    monkeypatch.setenv("CODEX_PROXY_PORT", "8790")
+    assert call_openai.subscription_endpoint("http://127.0.0.1:8790/v1/responses")
+    assert not call_openai.subscription_endpoint("http://127.0.0.1:8788/v1/responses")
