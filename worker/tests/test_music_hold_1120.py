@@ -85,9 +85,47 @@ def test_no_400ms_window_of_speech_has_the_bed_over_the_voice():
     on = np.zeros(len(t), bool)
     for a, b in words:
         on[int(a / HOP):int(b / HOP)] = True
-    speech = on & (v4 > -35.0)
+    p90 = float(np.percentile(v4[v4 > -70], 90))
+    speech = on & (v4 > p90 - P["hold_deep_db"])
     assert float(np.mean(m4[speech] > v4[speech])) <= 0.005
-    assert notes["frames400_over"] <= 0.005 and notes["words_over"] == 0.0
+    assert notes["voiced_over"] <= 0.005 and notes["words_over"] <= 0.03
+
+
+def test_the_voice_itself_says_where_it_speaks_not_only_the_stamps():
+    """A stretch the word stamps miss (a word's tail, a word whisper never wrote) is still voice: the bed is held
+    under it as under a stamped word."""
+    t, mk, vk, spoken, words = _scene(climb_db=18.0, quiet_every=0)
+    missed = [w for w in words if 26.0 <= w[0] < 30.0]
+    stamped = [w for w in words if w not in missed]
+    P = MU.profile_for("podcast")
+    g = np.full(len(t), 4.0)
+    sp = np.zeros(len(t), bool)
+    for a, b in stamped:
+        sp[int(round(a / HOP)):int(round(a / HOP)) + 40] = True
+    marks = {"dur_s": len(t) * HOP, "words": stamped, "turn_s": 18.0, "payoff_s": 30.0}
+    g2, notes = MU.hold_under_words(t, mk, g, vk, np.ones(len(t), bool), sp, stamped, marks, {}, P, -23.0)
+    v4, m4 = MU._pmean_db(vk, 40), MU._pmean_db(mk + g2, 40)
+    sel = (t >= 26.0) & (t < 29.5) & (v4 > -35.0)
+    assert sel.sum() > 100 and float(np.mean(m4[sel] > v4[sel])) <= 0.01
+    assert float(np.median((v4 - m4)[sel])) >= P["hold_floor_db"]
+
+
+def test_the_floor_reads_the_phrase_so_the_bed_does_not_follow_each_word():
+    """Words 4 dB apart inside one phrase: the bed holds one level under the phrase, it does not dip on the quieter
+    words and rise on the louder ones (a pump). Read word by word, each quiet word would have pulled it 2 dB under."""
+    t, mk, vk, spoken, words = _scene(climb_db=0.0, quiet_every=0)
+    for k, (a, b) in enumerate(words):
+        i0 = int(round(a / HOP))
+        vk[i0:i0 + 40] += (-4.0 if k % 2 else 0.0)
+    mk = np.full(len(t), -29.0)                                     # a level song, a little closer than its depth
+    P = MU.profile_for("podcast")
+    marks = {"dur_s": len(t) * HOP, "words": words, "turn_s": 18.0, "payoff_s": 30.0,
+             "story_arc": {"setup": "mid", "build": "mid", "payoff": "mid", "close": "mid"}}
+    g2, notes = MU.hold_under_words(t, mk, np.zeros(len(t)), vk, np.ones(len(t), bool), spoken, words, marks, {}, P, -23.0)
+    lv = [float(np.mean(g2[int(a / HOP):int(b / HOP)])) for a, b in words[10:-10]]
+    loud, quiet = np.mean(lv[0::2]), np.mean(lv[1::2])
+    assert abs(loud - quiet) < 0.5                                 # the same bed under the loud word and the quiet one
+    assert float(np.std(lv)) < 1.0
 
 
 def test_each_part_sits_at_the_depth_its_story_chose():
@@ -98,14 +136,30 @@ def test_each_part_sits_at_the_depth_its_story_chose():
     assert quiet["setup"] > quiet["payoff"]                        # and the story's own arc rises into its payoff
 
 
-def _part_depths(arc):
-    marks = {"turn_s": 18.0, "payoff_s": 30.0, "story_arc": arc}
+def _part_depths(arc, close_s=None):
+    marks = {"turn_s": 18.0, "payoff_s": 30.0}
+    if arc:
+        marks["story_arc"] = arc
+    if close_s is not None:
+        marks["close_s"] = close_s
     t, mk, vk, words, g, g2, notes, P = _hold(marks, quiet_every=0)
-    assert notes["by"] == "story" and notes["arc"] == arc
+    assert notes["by"] == ("story" if arc else "default") and notes["arc"] == (arc or MU.ARC_DEFAULT)
     out = {}
-    for name, a, b in [("setup", 0.0, 18.0), ("payoff", 30.0, 40.0)]:
-        out[name] = float(np.median(_gaps(vk, mk + g2, words, a, b)))
+    for name, a, b in [("setup", 0.0, 18.0), ("payoff", 30.0, close_s or 40.0), ("close", close_s or 40.0, 40.0)]:
+        gp = _gaps(vk, mk + g2, words, a, b)
+        out[name] = float(np.median(gp)) if len(gp) else None
     return out, notes
+
+
+def test_the_read_arc_is_heard_against_the_default():
+    """The model's arc moves the bed, not one template: a low setup sits at least 2 dB further under the voice than
+    the default's mid one, a low close at least 2 dB further under than a mid close (no re-centring cancels it)."""
+    low = {"setup": "low", "build": "mid", "payoff": "high", "close": "low"}
+    got, _ = _part_depths(low, close_s=35.0)
+    base, _ = _part_depths(None, close_s=35.0)
+    assert got["setup"] - base["setup"] >= 2.0
+    assert got["close"] - base["close"] >= 2.0
+    assert abs(got["payoff"] - base["payoff"]) < 1.0                # where the arcs agree, the bed agrees
 
 
 def test_a_quiet_close_stays_quiet_after_the_last_word():
@@ -116,7 +170,7 @@ def test_a_quiet_close_stays_quiet_after_the_last_word():
         m4 = MU._pmean_db(mk + g2, 40)
         return float(np.max(m4[t > last + 0.6]))
     quiet, rings = tail_level("low"), tail_level("mid")
-    assert quiet <= -23.0 - (MU.UNDER_VOICE["podcast"] + MU.ARC_DB["low"] - MU.HOLD["hold_center_up_db"]) + 0.5
+    assert quiet <= -23.0 - (MU.UNDER_VOICE["podcast"] + MU.ARC_DB["low"]) + 0.5
     assert rings - quiet > 3.0                                     # a confident close lets the song ring out
 
 
@@ -132,6 +186,11 @@ def test_the_story_parts_come_from_its_marks():
     bad = MU.arc_parts({"turn_s": 12.0, "payoff_s": 30.0, "close_s": 29.0}, {}, words, 42.0)   # a close before its payoff is none
     assert [p[0] for p in bad] == ["setup", "build", "payoff"]
     assert MU.story_arc({"story_arc": {"setup": "loud", "close": "low"}}) == dict(MU.ARC_DEFAULT, close="low")
+    # no close read: the close is the voice's last phrase after the payoff (its last pause of a breath or more)
+    gap = [(x, x + 0.3) for x in np.arange(0.5, 36.0, 0.5)] + [(36.6, 36.9), (37.0, 37.3), (37.4, 37.7), (37.8, 38.2)]
+    tail = MU.arc_parts({"turn_s": 12.0, "payoff_s": 30.0}, {}, gap, 42.0)
+    assert [p[0] for p in tail] == ["setup", "build", "payoff", "close"] and tail[3][1] == pytest.approx(36.6)
+    assert MU.last_phrase(words, 30.0, 39.8) is None                 # one run of words: no phrase to call the close
 
 
 # ----------------------------------------------------------------- the reading and its way to the mix

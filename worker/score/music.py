@@ -93,15 +93,22 @@ UNDER_VOICE = {"stories": 5.0, "marketing": 8.0, "podcast": 5.5, "longform": 15.
 # voice on 4-23% of voiced 400 ms frames, while the film's median read 5.5 under. One template that climbs, whatever
 # the story. The 28 judge reels hold the music's level flat across a film's thirds (median +0.2, -0.1, -0.2 dB against
 # its own median) and move it with the story. With "hold" in a profile (the podcast kind) each part of the story sits
-# at the depth its arc chose (hold_under_words), the song's own swells play inside a part, and no voiced 400 ms frame
-# has the bed within hold_floor_db of the voice. The customer Director's bed (PROFILE alone) is unchanged.
+# at the depth its arc chose (hold_under_words), the song's own swells play inside a part, and the floor is read on the
+# voice itself: the phrase's level (not each word's, so the bed does not pump with the words) and the voice's own 0.4 s
+# level wherever it speaks, stamped or not. The customer Director's bed (PROFILE alone) is unchanged.
 HOLD = {"hold": True,
-        "hold_floor_db": 2.0,          # the bed's 0.4 s K level stays at least this far under the voice's while it speaks
+        "hold_floor_db": 2.0,          # the bed's 0.4 s K level stays at least this far under the phrase it plays under
+        "hold_frame_db": 0.5,          # and under the voice's own 0.4 s level on every voiced frame
+        "hold_active_db": 8.0,         # a frame is voiced when the voice's 0.4 s level is within this of its 90th percentile
+        "hold_deep_db": 10.0,          # a voiced frame quieter than the 90th percentile less this is read at that level (no holes)
+        "hold_phrase_gap_s": 0.35,     # a phrase: the voice's run, through breaths shorter than this
+        "hold_room_db": 1.0,           # the closest part sits at least this far under the floor's own line
         "hold_raise_max_db": 6.0,      # a part of the song quieter than its depth is brought up by at most this
         "hold_edge_s": 0.3,            # a part's depth changes inside this either side of its first word
-        "hold_spread_s": 0.2, "hold_attack_s": 0.05, "hold_release_s": 0.25,   # the floor's dip: over its window, eased
-        "hold_center_up_db": 2.0, "hold_center_down_db": 1.0}                   # how far a whole arc moves to sit about under_voice_db
-ARC_DB = {"low": 2.5, "mid": 0.0, "high": -1.5}          # a part's depth against the kind's under_voice_db
+        "hold_spread_s": 0.3, "hold_attack_s": 0.12, "hold_release_s": 0.4}   # the floor's dip: over its window, eased
+# A part's depth against the kind's under_voice_db. The depths are the story's own: they are not re-centred on the
+# film's average, so a low setup sits 5 dB further under the voice than a high payoff whatever the rest of the arc.
+ARC_DB = {"low": 2.5, "mid": 0.0, "high": -2.5}
 ARC_PARTS = ("setup", "build", "payoff", "close")
 ARC_DEFAULT = {"setup": "mid", "build": "mid", "payoff": "high", "close": "mid"}
 
@@ -1080,7 +1087,8 @@ def arc_parts(marks, plan, words, dur):
     """The story's parts on the film's clock, through its last word: [(part, t0, t1)]. The setup runs to the turn (else
     the build the arrangement played, else 4 s before the payoff), the build to the payoff, the payoff to the close
     (marks["close_s"]: where the story keeps talking after it pays off) or the last word. A film with one mark pays off
-    there; a film with none is all setup. The tail after the last word belongs to the close."""
+    there; a film with none is all setup. The tail after the last word belongs to the close. With no close_s read, the
+    close is the voice's last phrase after the payoff (last_phrase), so a low or a high close is heard on its words."""
     last = max((b for _a, b in words), default=dur)
     pay, turn = marks.get("payoff_s"), marks.get("turn_s")
     if pay is None:
@@ -1100,10 +1108,24 @@ def arc_parts(marks, plan, words, dur):
     else:
         b0 = max(0.0, pay - 4.0)
     close = float(close) if close is not None and pay + 1.0 < float(close) < last - 0.3 else None
+    if close is None and marks.get("close_s") is None:
+        close = last_phrase(words, pay + 1.0, last)
     parts = [("setup", 0.0, b0), ("build", b0, pay), ("payoff", pay, close if close is not None else max(last, pay))]
     if close is not None:
         parts.append(("close", close, last))
     return [p for p in parts if p[2] - p[1] > 0.05]
+
+
+def last_phrase(words, after, last, gap_s=0.35, min_s=1.5, max_s=6.0):
+    """Where the voice's last phrase starts (the word after its last pause of gap_s or more), when it starts after
+    `after` and lasts min_s to max_s to the last word; else None."""
+    ws = sorted(words)
+    for (_a0, b0), (a1, _b1) in zip(ws[::-1][1:], ws[::-1]):
+        if a1 - b0 >= gap_s and after <= a1 and min_s <= last - a1 <= max_s:
+            return float(a1)
+        if last - a1 > max_s:
+            break
+    return None
 
 
 def arc_target(t, parts, arc, under_db):
@@ -1141,28 +1163,30 @@ def _spread_min(x, h):
     return out
 
 
-def _word_levels(vk, words, nf, hop_s, quiet_db, breath_s=0.35):
-    """(speech mask, voice dB per frame): every word's frames at the word's own level (power mean), a gap under
-    breath_s between two words at the quieter one's; words under quiet_db are left out."""
-    lvl = np.full(nf, -120.0)
-    on = np.zeros(nf, bool)
-    prev = None
-    for a, b in sorted(words):
-        i0 = int(a / hop_s)
-        i1 = min(nf, max(i0 + 1, int(math.ceil(b / hop_s))))
-        if i0 >= nf:
-            continue
-        V = 10 * np.log10(np.mean(10 ** (vk[i0:i1] / 10)) + 1e-12)
-        if V < quiet_db:
-            prev = None
-            continue
-        lvl[i0:i1] = np.maximum(lvl[i0:i1], V)
-        on[i0:i1] = True
-        if prev is not None and 0 < i0 - prev[0] <= int(breath_s / hop_s):
-            lvl[prev[0]:i0] = np.maximum(lvl[prev[0]:i0], min(prev[1], V))
-            on[prev[0]:i0] = True
-        prev = (i1, V)
-    return on, lvl
+def _phrase_levels(vk, speech, hop_s, quiet_db, gap_s):
+    """The voice's level per frame of each phrase (a run of speech through breaths shorter than gap_s): the power
+    mean of its voiced frames (above quiet_db). -120 outside speech."""
+    nf = len(vk)
+    out = np.full(nf, -120.0)
+    on = np.array(speech[:nf], bool)
+    if not on.any():
+        return out
+    # close the breaths
+    gap = int(round(gap_s / hop_s))
+    idx = np.flatnonzero(on)
+    runs, s0, prev = [], idx[0], idx[0]
+    for i in idx[1:]:
+        if i - prev > gap:
+            runs.append((s0, prev + 1))
+            s0 = i
+        prev = i
+    runs.append((s0, prev + 1))
+    for a, b in runs:
+        seg = vk[a:b]
+        seg = seg[seg > quiet_db]
+        if len(seg):
+            out[a:b] = 10 * np.log10(np.mean(10 ** (seg / 10)) + 1e-12)
+    return out
 
 
 def word_gaps(vk, mk_g, words, live=None, hop_s=0.01, quiet_db=None):
@@ -1223,55 +1247,67 @@ def _part_moves(t, rows, parts, target, raise_max, edge, lo=-30.0):
     return np.interp(t, np.array([k[0] for k in knots]), np.array([k[1] for k in knots])), notes
 
 
-def hold_under_words(t, mk, g, vk, live, spoken, words, marks, plan, P, v_ref):
-    """The bed held under the voice, word by word, on the story's arc (profile "hold"): (gain dB per frame, notes).
+def _resting(rows, g, floored, parts, hop_s, hole_db=6.0):
+    """The words a part's depth is read on: the bed's resting level, not its designed moments. A word the engine's
+    ride holds hole_db or more under the part's usual level (a hole before a hit, the end's hole) and a word the floor
+    already pulled down (floored) are left out, so a part keeps its depth beside them."""
+    nf = len(g)
+    out = []
+    for name, a, b in parts:
+        sel = [r for r in rows if a <= r[0] < b]
+        if not sel:
+            continue
+        gi = np.array([g[min(nf - 1, int(r[0] / hop_s))] for r in sel])
+        fl = np.array([floored[min(nf - 1, int(r[0] / hop_s))] for r in sel])
+        keep = (gi >= float(np.median(gi)) - hole_db) & (fl > -1.0)
+        if keep.sum() < 3:
+            keep = gi >= float(np.median(gi)) - hole_db
+        out += [r for r, k in zip(sel, keep) if k]
+    return out
 
-    1. Each part of the story (arc_parts) is moved to its arc's depth (_part_moves: its words' gaps, voice minus music,
-       K, a word at a time), so a song that climbs inside a part is held level and no part inherits the song's own
-       crest. A quieter part comes up by at most hold_raise_max_db.
+
+def hold_under_words(t, mk, g, vk, live, spoken, words, marks, plan, P, v_ref):
+    """The bed held under the voice on the story's arc (profile "hold"): (gain dB per frame, notes).
+
+    1. Each part of the story (arc_parts) is moved as a whole to its arc's depth (_part_moves: its words' gaps, voice
+       minus music, K, read on each half of the part), so a song that climbs inside a part is held level and no part
+       inherits the song's own crest. A quieter part comes up by at most hold_raise_max_db. The depths are the arc's
+       own (ARC_DB about under_voice_db), never re-centred, so the story's contrast is what the listener hears.
     2. After the last word the close decides: a low close stays at its depth to the end (a quiet reflective close
        stays quiet, its last hit with it); a mid or high close lets the song ring out at its own level.
-    3. Ducking measured per word: each spoken word keeps the bed hold_floor_db under its own level (its frames' power
-       mean), and no 400 ms window of speech has the bed over the voice. Where either would fail, the bed comes down
-       over that window, eased in ahead and out after. A word quieter than the speech level less 12 dB is read at
-       that level, so a dying syllable never digs a hole in the bed.
-    Then 1 and 3 once more: the parts the floor pulled under their depth come back towards it, and the floor holds."""
+    3. The floor, read on the voice itself: wherever the voice speaks (its 0.4 s level within hold_active_db of its
+       90th percentile, or a stamped word), the bed's 0.4 s level stays hold_floor_db under the phrase's level and
+       hold_frame_db under the voice's own 0.4 s level. A phrase's level is one number, so the bed does not follow
+       each word; where the floor bites, the dip covers its window and is eased in and out.
+    Then 1 and 3 once more, so a part the floor pulled under its depth comes back to it, and the floor holds."""
     hop_s = float(t[1] - t[0]) if len(t) > 1 else 0.01
     nf = len(g)
     arc = story_arc(marks)
     parts = arc_parts(marks, plan, words, nf * hop_s)
-    target = arc_target(t, parts, arc, P["under_voice_db"])
-    # the arc is the story's shape; the film still sits about under_voice_db under its voice over its words (the
-    # judge's films: 4.5 to 6.4 dB at the median): a quiet story comes up by at most hold_center_up_db, a loud one
-    # goes down by at most hold_center_down_db
-    w_on = spoken[:nf]
-    shift = 0.0
-    if w_on.any():
-        shift = float(np.clip(P["under_voice_db"] - float(np.mean(target[w_on])), -float(P["hold_center_up_db"]), float(P["hold_center_down_db"])))
-        target = target + shift
-    quiet = v_ref - 20.0
-    raise_max, edge, floor = float(P["hold_raise_max_db"]), float(P["hold_edge_s"]), float(P["hold_floor_db"])
-    target = np.maximum(target, floor + 1.5)             # the closest part still leaves the floor room under each word
-    notes = {"arc": arc, "by": "story" if marks.get("story_arc") else "default", "centred_db": round(shift, 1),
+    floor = float(P["hold_floor_db"])
+    target = np.maximum(arc_target(t, parts, arc, P["under_voice_db"]), floor + float(P["hold_room_db"]))   # the closest part still leaves the floor room
+    notes = {"arc": arc, "by": "story" if marks.get("story_arc") else "default",
              "parts": [{"part": n, "t": [round(a, 2), round(b, 2)], "depth_db": round(float(np.median(target[int(a / hop_s):max(int(a / hop_s) + 1, int(b / hop_s))])), 1)}
                        for n, a, b in parts]}
+    quiet = v_ref - 20.0
+    raise_max, edge = float(P["hold_raise_max_db"]), float(P["hold_edge_s"])
     last = max(b for _a, b in words)
     tail = t > last + 0.1
     w4 = max(1, int(round(0.4 / hop_s)))
     vk4 = _pmean_db(vk, w4)
-    # two readings, both held: each word at its own level (its frames' power mean; a breath inside a phrase at the
-    # quieter of its two words) keeps the bed floor dB under it, and no 400 ms window of speech has the bed over the
-    # voice. A word's fall into the pause after it is never read as a quieter word (no dip on every word's tail)
-    on_w, vw = _word_levels(vk, words, nf, hop_s, quiet)
-    on_4 = spoken[:nf] & (vk4 > quiet)
-    speech = on_w | on_4
-    ref = np.minimum(np.where(on_w, np.maximum(vw, v_ref - 12.0) - floor, 99.0),
-                     np.where(on_4, np.maximum(vk4, v_ref - 12.0) - float(P.get("hold_frame_db", 0.0)), 99.0))
+    # where the voice speaks, read on the voice itself as well as on the word stamps (a word's tail, a missed word)
+    heard = vk4 > -70.0
+    p90 = float(np.percentile(vk4[heard], 90)) if heard.any() else v_ref
+    act = vk4 >= p90 - float(P["hold_active_db"])
+    speech = act | (spoken[:nf] & (vk4 > quiet))
+    ph = _phrase_levels(vk, speech, hop_s, quiet, float(P["hold_phrase_gap_s"]))
+    ref = np.where(speech, np.minimum(np.maximum(ph, v_ref - 12.0) - floor,
+                                      np.maximum(vk4, p90 - float(P["hold_deep_db"])) - float(P["hold_frame_db"])), 99.0)
     g2 = np.array(g, np.float64)
     moved = []
-    for rnd in range(2):
-        floored = np.zeros(nf)
-        rows = word_gaps(vk, mk + g2, words, live, hop_s, quiet_db=quiet)
+    floored = np.zeros(nf)
+    for rnd in range(3):
+        rows = _resting(word_gaps(vk, mk + g2, words, live, hop_s, quiet_db=quiet), g, floored, parts, hop_s)
         corr, pn = _part_moves(t, rows, parts, target, raise_max if rnd == 0 else 3.0, edge, lo=-30.0 if rnd == 0 else -3.0)
         if corr is None:
             if rnd == 0:
@@ -1286,12 +1322,12 @@ def hold_under_words(t, mk, g, vk, live, spoken, words, marks, plan, P, v_ref):
         if arc["close"] == "low" and tail.any():
             # a quiet close stays quiet: after the last word the bed keeps the close's depth under the voice's level
             m4 = _pmean_db(np.where(live, mk + g2, -120.0), w4)
-            cap = v_ref - (P["under_voice_db"] + ARC_DB["low"] + shift)
+            cap = v_ref - max(float(P["under_voice_db"]) + ARC_DB["low"], floor + float(P["hold_room_db"]))
             over = np.where(tail & live, np.clip(m4 - cap, 0.0, 40.0), 0.0)
             if over.max() > 0.05:
                 g2 = g2 + _smooth(_spread_min(-over, w4 // 2), hop_s, 0.1, 0.3)
             notes["close_tail_db"] = round(float(-over.max()), 1)
-        for _ in range(6):
+        for _ in range(8):
             m4 = _pmean_db(np.where(live, mk + g2, -120.0), w4)
             over = np.where(speech, m4 - ref, 0.0)
             if over.max() <= 0.05:
@@ -1308,11 +1344,18 @@ def hold_under_words(t, mk, g, vk, live, spoken, words, marks, plan, P, v_ref):
                     nt["words"] = row["words"]
     m4 = _pmean_db(np.where(live, mk + g2, -120.0), w4)
     after = word_gaps(vk, mk + g2, words, live, hop_s, quiet_db=quiet)
+    rest = {r[0] for r in _resting(after, g, np.zeros(nf), parts, hop_s)}
+    for nt in notes["parts"]:
+        a, b = nt["t"]
+        gp = [r[3] for r in after if a <= r[0] < b]
+        gr = [r[3] for r in after if a <= r[0] < b and r[0] in rest]
+        nt["word_gap_db"] = round(float(np.median(gp)), 1) if gp else None
+        nt["resting_gap_db"] = round(float(np.median(gr)), 1) if gr else None      # the bed's level beside the ride's holes
     gaps = np.array([r[3] for r in after]) if after else np.zeros(0)
     notes.update(floor_db=floor, floored_frames=int((floored < -0.5).sum()), floored_max_db=round(float(-floored.min()), 1) if nf else 0.0,
                  words=len(gaps), word_gap_db=round(float(np.median(gaps)), 1) if len(gaps) else None,
                  words_over=round(float(np.mean(gaps < 0)), 3) if len(gaps) else None,
-                 frames400_over=round(float(np.mean(m4[on_4] > vk4[on_4])), 3) if on_4.any() else None)
+                 voiced_over=round(float(np.mean(m4[act] > vk4[act])), 3) if act.any() else None)
     return g2, notes
 
 
@@ -1776,7 +1819,7 @@ def mix_film(film, song_path, marks, out=None, kind="stories", vocals=None, sung
         song = analyse(song_path, vocals=vocals, sung=sung)
         plan = arrange(song, marks, profile=prof)
     rep = {"song": os.path.basename(str(song_path)), "supplied": bool(supplied), "words": len(marks["words"]), "from": "the film's own sound",
-           "marks": {k: marks.get(k) for k in ("dur_s", "turn_s", "payoff_s", "end_hit_s")}, "plan": {k: v for k, v in plan.items() if k != "grid"}}
+           "marks": {k: marks.get(k) for k in ("dur_s", "turn_s", "payoff_s", "end_hit_s", "close_s", "story_arc")}, "plan": {k: v for k, v in plan.items() if k != "grid"}}
     if not plan.get("ok"):
         return rep
     with tempfile.TemporaryDirectory(dir=os.path.dirname(os.path.abspath(out)) if out else None) as tmp:
