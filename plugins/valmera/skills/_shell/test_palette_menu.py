@@ -76,7 +76,7 @@ def test_the_laid_scene_is_redone_when_the_scene_it_was_laid_from_changes(tmp_pa
 
     def fake_sh(ctx, cmd, **kw):
         src = json.load(open(l1))
-        out = cmd[-1].split("--out ")[1].split(" ")[0]
+        out = cmd[-1].split("--out ")[1].split(" ")[0].strip("'")
         runs.append(src["devices"][0]["t"])
         open(out, "w").write(json.dumps({"laid": src["devices"][0]["t"]}))
         return ""
@@ -107,3 +107,29 @@ def test_the_podcast_render_cache_goes_with_the_laid_scene(tmp_path):
         (sup / name).write_text("x")
     wf1.invalidate_render(SimpleNamespace(supply=str(sup), run_dir=str(tmp_path)))
     assert sorted(os.listdir(sup)) == ["l1.json"]
+
+
+def test_a_worker_without_the_palette_lays_the_alien_bank_from_the_directors_asks(tmp_path, monkeypatch):
+    """Before the palette's executor release the synced worker has only scene.alien: the Director's asks for the bank's
+    own devices reach it with their [a, z] span, the others wait, and the scene drawn carries no devices field."""
+    import json
+    from types import SimpleNamespace
+    import chain
+    l1 = tmp_path / "l1.json"
+    l1.write_text(json.dumps({"devices": [{"dev": "lamp", "f": [10, 40], "t": "LOVE"}, {"dev": "diecut", "at": 50, "until": 70, "t": "NO"},
+                                          {"dev": "neg_world", "f": [0, 30]}], "alien": [{"dev": "arc", "at": [0, 90]}], "items": []}))
+    seen = {}
+
+    def fake_sh(ctx, cmd, **kw):
+        line = cmd[-1]
+        seen["mod"] = line.split(" -m ")[1].split(" ")[0]
+        src = line.split("--l1 ")[1].split(" ")[0].strip("'")
+        seen["scene"] = json.load(open(src))
+        open(line.split("--out ")[1].split(" ")[0].strip("'"), "w").write("{}")
+        return ""
+    monkeypatch.setattr(chain, "sh", fake_sh)
+    monkeypatch.setattr(chain, "engine_kind", lambda: "scene")
+    monkeypatch.setattr(chain.brand, "worker_dir", lambda: str(tmp_path))
+    chain.lay_devices(SimpleNamespace(run_id="t", supply=str(tmp_path), log=print), str(l1))
+    assert seen["mod"] == "scene.alien.run" and "devices" not in seen["scene"]
+    assert [(a["dev"], a["at"]) for a in seen["scene"]["alien"]] == [("arc", [0, 90]), ("lamp", [10, 40]), ("diecut", [50, 70])]

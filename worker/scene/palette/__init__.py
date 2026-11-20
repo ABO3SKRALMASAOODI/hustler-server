@@ -86,7 +86,7 @@ ALIEN_RANGES = {
              "tail": (0, 20, 10, "frames the light takes to die")},
     "answer": {"width": (0.4, 0.92, 0.82, "of the frame's width"), "dim": (0.1, 0.8, 0.32, "light left on the outgoing picture")},
     "rhyme": {"r": (0.12, 0.42, 0.3, "the shape's radius, of the frame's width"), "grow": (1.0, 1.3, 1.12, "scale a cut"),
-              "n": (3, 13, 4, "pictures")},
+              "n": (2, 13, 4, "pictures")},
     "arc": {"bars": (0.0, 0.15, 0.085, "of the frame's height"), "develop": (0, 24, 6, "frames")},
 }
 
@@ -543,6 +543,23 @@ def free_seat(box, others, x=0.5):
     return best[1]
 
 
+def type_boxes(patch, scene):
+    """[x0, y0, x1, y1, f0, f1] of each word a device set, where it rests, as drawn (none where it cannot be measured)."""
+    from . import kit as K
+    out = []
+    try:
+        W, H = [int(v) for v in (scene.get("frame") or [1080, 1920])]
+        voices = dict(scene.get("voices") or {}, **(patch.get("voices") or {}))
+        for it in patch.get("items") or []:
+            if it.get("k") == "word" and not it.get("behind"):
+                b = K.item_box(it, voices, W, H)
+                if b:
+                    out.append([float(b[0]), float(b[1]), float(b[2]), float(b[3]), int(it["f"][0]), int(it["f"][1])])
+    except Exception:      # noqa: BLE001 - a word that cannot be measured leaves no seat taken
+        return out
+    return out
+
+
 def drop_echoes(cur, texts, f0, f1, made):
     """Ids of the builder's own display type that says one of ``texts`` while [f0, f1) stands (a word device sets that
     word now, so the builder's copy of it leaves): the display block's lines and its bar go together."""
@@ -646,6 +663,8 @@ def apply(l1, work, asks=None, pool=None):
             box = seat_box(patch, ask, ranges_of(dev))
             if dev in WORD_DEVICES and dev != "word_blend":
                 seats.append(box)
+            elif dev not in WORD_DEVICES:           # the type family's own words: a later word device seats itself off them
+                seats += type_boxes(patch, nxt)
             echoes = drop_echoes(nxt, texts, box[4], box[5], made)
             if echoes:
                 nxt = dict(nxt, items=[i for i in nxt["items"] if i["id"] not in echoes])

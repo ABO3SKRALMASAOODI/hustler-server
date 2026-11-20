@@ -60,8 +60,15 @@ def film(tmp_path, n_shots=4, dur=150):
             "film": {}, "items": items, "sound": []}
 
 
+def _apply(l1, work, asks):
+    """palette.apply with each log row's ``dev`` the device that stood (the shared log names it ``landed``; ``dev`` there
+    is the device asked, resolved)."""
+    out, log = palette.apply(l1, work, asks)
+    return out, [dict(r, asked_dev=r.get("dev"), dev=r.get("landed") or r.get("dev")) if r.get("done") else r for r in log]
+
+
 def laid(l1, tmp_path, asks):
-    out, log = palette.apply(l1, str(tmp_path), asks)
+    out, log = _apply(l1, str(tmp_path), asks)
     ok, why = eligible(out)
     assert ok, why
     return out, log
@@ -74,11 +81,12 @@ def mine(out, ask_id):
 # ------------------------------------------------------------------ the registry
 
 def test_every_family_registers_its_devices_with_cards_layers_and_fallbacks():
+    palette._discover()
     for name in ("counter", "staircase", "name", "ladder", "brackets", "highlight", "flip", "typewriter", "redact", "chapter",
                  "type_run", "marquee", "verb", "readalong", "behind", "track", "fineprint", "donut", "bar",
                  "answer", "rhyme", "lamp", "diecut", "arc"):
         d = palette.DEVICES[name]
-        assert callable(d["plan"]) and d["card"].startswith(name) and d["layer"] in range(1, 7)
+        assert callable(d["plan"]) and d["card"].startswith(name) and d["layer"] in palette.LAYERS
         assert all(f in palette.DEVICES for f in d["fallback"]), (name, d["fallback"])
     assert len(palette.menu().splitlines()) == len(palette.DEVICES)
     assert "verb" in palette.chain("counter") and palette.chain("counter")[0] == "counter"
@@ -386,7 +394,7 @@ def _in_mark(out, own):
     return bad
 
 
-@pytest.mark.parametrize("dev", sorted(d for d in palette.DEVICES if d != "behind"))
+@pytest.mark.parametrize("dev", sorted(d for d in palette._discover() if d != "behind"))
 def test_no_device_lands_in_the_watermark_with_a_face_top_right(tmp_path, monkeypatch, dev):
     """Every device in the palette, on every frame it stands, with the speaker's face high on the right (where the HUD's
     box is pushed to the watermark's edge)."""
@@ -521,7 +529,7 @@ def test_behind_reads_the_takes_matte_and_seats_the_word_by_it(tmp_path, monkeyp
           "items": [{"id": "s0", "k": "shot", "f": [0, 24], "pic": "main", "src": [0.0, 0.8]}]}
     monkeypatch.setattr(PB, "ensure_matte", lambda l1, work, a, z: ({"matte": {"kind": "video", "path": "matte_src.mp4"}}, "fixture"))
     monkeypatch.setattr(K, "detect_faces", lambda rgb: [[0.30, 0.30, 0.54, 0.50]])
-    out, log = palette.apply(l1, str(tmp_path), [{"dev": "behind", "id": "b", "at": 2, "until": 22, "args": {"t": "LOVE", "small": "I"}}])
+    out, log = _apply(l1, str(tmp_path), [{"dev": "behind", "id": "b", "at": 2, "until": 22, "args": {"t": "LOVE", "small": "I"}}])
     assert log[0]["dev"] == "behind", log
     meas = log[0]["log"]["measured"]
     assert meas and meas["seen_min"] >= PB.SEEN and meas["hidden"] > 0.0, meas
@@ -564,7 +572,7 @@ def test_a_word_behind_the_speaker_is_drawn_only_where_the_matte_is_empty(tmp_pa
           "items": [{"id": "s0", "k": "shot", "f": [0, 24], "pic": "main", "src": [0.0, 0.8]}]}
     monkeypatch.setattr(PB, "ensure_matte", lambda l1, work, a, z: ({"matte": {"kind": "video", "path": "matte_src.mp4"}}, "fixture"))
     monkeypatch.setattr(K, "detect_faces", lambda rgb: [[0.30, 0.48, 0.54, 0.62]])
-    out, log = palette.apply(l1, str(tmp_path), [{"dev": "behind", "id": "b", "at": 2, "until": 22, "args": {"t": "LOVE", "ink": "#FF0000", "hold": 20}}])
+    out, log = _apply(l1, str(tmp_path), [{"dev": "behind", "id": "b", "at": 2, "until": 22, "args": {"t": "LOVE", "ink": "#FF0000", "hold": 20}}])
     assert log[0]["dev"] == "behind" and log[0]["done"], log
     word = next(i for i in out["items"] if i["id"] == "b.bh")
     assert word["behind"] and out["assets"]["matte"]["path"] == "matte_src.mp4"
@@ -601,7 +609,7 @@ def test_a_close_up_with_no_room_behind_the_head_lands_the_words_in_front(tmp_pa
           "items": [{"id": "s0", "k": "shot", "f": [0, 24], "pic": "main", "src": [0.0, 0.8]}]}
     monkeypatch.setattr(PB, "ensure_matte", lambda l1, work, a, z: ({"matte": {"kind": "video", "path": "matte_src.mp4"}}, "fixture"))
     monkeypatch.setattr(K, "detect_faces", lambda rgb: [[0.2, 0.15, 0.8, 0.45]])
-    out, log = palette.apply(l1, str(tmp_path), [{"dev": "behind", "id": "b", "at": 1, "until": 22, "args": {"t": "LOVE", "small": "I"}}])
+    out, log = _apply(l1, str(tmp_path), [{"dev": "behind", "id": "b", "at": 1, "until": 22, "args": {"t": "LOVE", "small": "I"}}])
     assert log[0]["done"] and log[0]["log"].get("front"), log
     words = [i for i in mine(out, "b") if i["k"] == "word"]
     assert words and not any(i.get("behind") for i in words) and " ".join(i["t"] for i in words) == "I LOVE"

@@ -46,8 +46,15 @@ def menu(families=TYPE_FAMILIES, py=None):
 
 
 def names(text):
-    """The device names on a menu (the first word of each card)."""
-    return {ln.split(" ", 1)[0] for ln in (text or "").splitlines() if ln.strip()}
+    """The device names on a menu (the first word of each card, after its "[layer]" tag)."""
+    out = set()
+    for ln in (text or "").splitlines():
+        words = ln.split()
+        if words and words[0].startswith("[") and words[0].endswith("]"):
+            words = words[1:]
+        if words:
+            out.add(words[0])
+    return out
 
 
 def ask_for(row, seg, text, a, b, n, limit=None):
