@@ -124,28 +124,47 @@ def palette_menu():
     return pal.menu(), sorted(pal.DEVICES)
 
 
-def round_count(path, side=480):
-    """How many round shapes a picture holds that the engine's rhyme would cut on: its own circle finder and its support
-    floor (worker/scene/alien/rhyme), on the still; Hough alone where the engine cannot be imported."""
+def round_shapes(path):
+    """The round shapes a picture holds that the engine's rhyme would cut on, by its own circle finder and support floor
+    (worker/scene/alien/rhyme): [(cx, cy, r) as fractions of the width (cx, r) and height (cy)], with the picture's
+    size: ([...], pw, ph). None where it cannot be read or the engine cannot be imported."""
     try:
         import cv2
         im = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-        if im is None:
+        if im is None or palette_module() is None:
             return None
-        if palette_module() is not None:
-            from scene.alien import rhyme
-            k = rhyme.SIDE / min(im.shape[:2])
-            g = cv2.resize(im, (max(int(im.shape[1] * k) // 2 * 2, 2), max(int(im.shape[0] * k) // 2 * 2, 2)), interpolation=cv2.INTER_AREA)
-            cs, _ = rhyme.circles(g)
-            return int(sum(1 for c in cs if c[3] >= rhyme.MIN_SUPPORT))
-        k = side / max(im.shape[:2])
-        g = cv2.GaussianBlur(cv2.resize(im, (max(int(im.shape[1] * k), 2), max(int(im.shape[0] * k), 2))), (5, 5), 1.5)
-        h, w = g.shape
-        c = cv2.HoughCircles(g, cv2.HOUGH_GRADIENT, dp=1.2, minDist=min(w, h) * 0.25, param1=120, param2=40,
-                             minRadius=int(min(w, h) * 0.06), maxRadius=int(min(w, h) * 0.45))
-        return 0 if c is None else int(len(c[0][:4]))
+        from scene.alien import rhyme
+        ph, pw = im.shape[:2]
+        k = rhyme.SIDE / min(pw, ph)
+        w, h = max(int(pw * k) // 2 * 2, 2), max(int(ph * k) // 2 * 2, 2)
+        cs, _ = rhyme.circles(cv2.resize(im, (w, h), interpolation=cv2.INTER_AREA))
+        return [(c[0] / w, c[1] / h, c[2] / w) for c in cs if c[3] >= rhyme.MIN_SUPPORT][:2], pw, ph
     except Exception:      # noqa: BLE001 - not measured: the sheet says so
         return None
+
+
+def round_count(path):
+    got = round_shapes(path)
+    return None if got is None else len(got[0])
+
+
+def shared_rounds(pictures, W=1080, H=1920):
+    """How many of the pictures can stand one round shape on one seat of the frame (the rhyme's own test: the largest
+    shape that that many pictures hold on one seat). 0 when none or not measured."""
+    try:
+        from scene.alien import rhyme
+    except Exception:      # noqa: BLE001
+        return 0
+    shapes = [p["_round"] for p in pictures if p.get("_round") and p["_round"][0]]
+    if not shapes:
+        return 0
+    seats = [(x / 100.0, y / 100.0) for x in range(32, 69, 8) for y in range(30, 63, 8)]
+    best = 0
+    for R in (0.40, 0.34, 0.28, 0.22, 0.16):
+        for seat in seats:
+            n = sum(1 for cs, pw, ph in shapes if any(rhyme.fits(c, seat, R, pw, ph, W, H) for c in cs))
+            best = max(best, n)
+    return best
 
 
 RHYME_PICTURES = 4          # the rhyme chain cuts on one round shape through at least this many pictures
@@ -156,6 +175,7 @@ def capability(pictures, take, pal=None):
     (a device asked for anyway runs and falls back to its next device where it cannot stand)."""
     pics = list(pictures or [])
     rounds = [p for p in pics if isinstance(p.get("rounds"), int) and p["rounds"] > 0]
+    shared = shared_rounds(pics)
     faces = [p for p in pics if isinstance(p.get("faces"), int) and p["faces"] > 0]
     clips = [p for p in pics if p.get("kind") == "clip"]
     tk = take or {}
@@ -168,11 +188,11 @@ def capability(pictures, take, pal=None):
         except Exception:      # noqa: BLE001
             matte = None
     depth = bool(os.environ.get("VALMERA_DEPTH_PY"))
-    have = {"pictures": len(pics) > 0, "rounds": len(rounds) >= RHYME_PICTURES, "faces": bool(faces) or on_cam,
+    have = {"pictures": len(pics) > 0, "rounds": shared >= RHYME_PICTURES, "faces": bool(faces) or on_cam,
             "take": on_cam, "matte": on_cam and matte is not False, "depth": depth}
     lines = [f"- pictures: {len(pics)} on the contact sheet ({len(clips)} moving clips, {len(pics) - len(clips)} stills)",
-             f"- round shapes: {len(rounds)} of the pictures show one the engine can register (a rhyme chain cuts through "
-             f"{RHYME_PICTURES} or more that share one seat)",
+             f"- round shapes: {len(rounds)} of the pictures show one the engine can register; at most {shared} of them hold "
+             f"one on a shared seat of the frame (a rhyme chain cuts through {RHYME_PICTURES} or more on one seat)",
              f"- faces: {len(faces)} pictures show a face" + ("; the speaker's face is in the take" if on_cam else ""),
              "- the speaker: " + ("on camera; a device that stands on him (lamp, neg_world, a spotlight on his face) keeps "
                                   "him on screen over its span" if on_cam else "not on camera: devices that stand on him fall back"),
@@ -532,7 +552,10 @@ def direct(supply, sentences, word_rows, stress_t=(), pictures=(), take=None, st
     pictures = [dict(p) for p in pictures or ()]
     for p in pictures:                       # what signal reads of each picture's shapes, for the sheet and the cards' needs
         if "rounds" not in p and p.get("path"):
-            p["rounds"] = round_count(p["path"])
+            got = round_shapes(p["path"])
+            p["rounds"] = None if got is None else len(got[0])
+            if got:
+                p["_round"] = got
     dur = float(dur_s or (words[-1]["t1"] if words else 0.0))
     pal = palette_module()
     can = capability(pictures, take, pal)
