@@ -240,6 +240,13 @@ def features(conn, now=None):
     now = now or datetime.now(timezone.utc)
     trial = trial_toggle.status(conn, now=now)
     studio = status(conn, now=now)
+    import model_budget
+    # The model budget governor's line (model_budget.summary): today's
+    # allowance, spend and the model a paying request would get now. Read
+    # last, inside a savepoint: any doubt is an "unavailable" line.
+    budget = claude_plans.safe(conn, model_budget.summary,
+                               default={"error": "unavailable"})
     return {"trial": trial, "studio_plus": studio,
             "opus_supervision": opus_supervision.status(conn),
+            "model_budget": budget,
             "spend": studio["spend"], "takes_effect_s": 30}

@@ -2211,14 +2211,27 @@ def run_agent_job(worker_db, job):
         # Keep contracted credit prices; subscription cohorts still control
         # Studio feature entitlements. Whatever stands behind this lane has
         # passed llm.editing_lanes.
+        # trialing, govern=True: positional, so test doubles of the lane
+        # lookup (lambda *a) keep working.
         paid_claude = _claude_paid_lane(worker_db, job, subscribed, plan,
-                                        payload)
+                                        payload, trialing, True)
         if paid_claude is not None:
             ctx.claude_paid = paid_claude
-            ctx.agent_lanes = [paid_claude["lane"]] + list(ctx.agent_lanes or [])
-            if paid_claude.get("credit_model"):
+            # An upgraded request (model_budget) keeps the plan's lane right
+            # behind it: a provider failure on the upgrade continues there.
+            ctx.agent_lanes = ([paid_claude["lane"]]
+                               + ([paid_claude["helper_lane"]]
+                                  if paid_claude.get("helper_lane") else [])
+                               + list(ctx.agent_lanes or []))
+            if paid_claude.get("credit_aliases"):
+                ctx.credit_price_aliases = dict(paid_claude["credit_aliases"])
+            elif paid_claude.get("credit_model"):
                 ctx.credit_price_aliases = {
                     paid_claude["lane"]["model"]: paid_claude["credit_model"]}
+            metrics = getattr(ctx, "editing_metrics", None)
+            if paid_claude.get("model_budget") and isinstance(metrics, dict):
+                # job result: what the governor chose and why
+                metrics["model_budget"] = paid_claude["model_budget"]
             print(f"[agent] job {job['id']}: paid Claude lane "
                   f"{paid_claude['lane']['model']} (plan {plan})", flush=True)
         if not ctx.agent_lanes:
@@ -2232,9 +2245,12 @@ def run_agent_job(worker_db, job):
     # Vision is reached from eight places that know nothing about plans, so the
     # plan is published to this THREAD for the duration of the turn and cleared
     # in the finally below (worker threads are reused across jobs).
+    # The helper lane: vision, critics and text helpers keep the plan's model
+    # when the governor upgraded only the editing turn (model_budget).
     llm.set_turn_plan(plan if subscribed else "", project_id=ctx.project_id,
-                      lane=(ctx.agent_lanes[0] if ctx.agent_lanes and
-                            ctx.claude_trial is None else None))
+                      lane=((ctx.claude_paid or {}).get("helper_lane")
+                            or (ctx.agent_lanes[0] if ctx.agent_lanes and
+                                ctx.claude_trial is None else None)))
     if ctx.agent_model != config.AGENT_MODEL:
         print(f"[agent] job {job['id']}: plan {plan} -> {ctx.agent_model}",
               flush=True)
@@ -2498,7 +2514,8 @@ def _probe_paid_lane(worker_db, job):
         return False
 
 
-def _claude_paid_lane(worker_db, job, subscribed, plan, payload):
+def _claude_paid_lane(worker_db, job, subscribed, plan, payload,
+                      trialing=False, govern=False):
     """A funded paid Claude primary, independent of the trial cutoff.
 
     Trial budget cutoffs do not disable this paid route. Actual provider
@@ -2529,12 +2546,97 @@ def _claude_paid_lane(worker_db, job, subscribed, plan, payload):
                         if flag["credit_parity"] else
                         edit_rung.fallback_model()
                         if edit_rung.is_rung_model(model) else None)
-        return {"lane": claude_lane.lane(model, name="claude_paid"),
-                "credit_model": credit_model}
+        route = {"lane": claude_lane.lane(model, name="claude_paid"),
+                 "credit_model": credit_model,
+                 "credit_aliases": ({model: credit_model} if credit_model
+                                    else {})}
+        if govern:
+            # An editing request (not a Shorts helper lane): the governor.
+            _apply_model_budget(worker_db, job, route, model, subscribed,
+                                trialing, payload, flag)
+        return route
     except Exception as exc:  # noqa: BLE001 - today's lanes on any doubt
         print(f"[agent] job {job.get('id')}: new-subscriber lane lookup "
               f"failed ({str(exc)[:160]}); contracted lanes", flush=True)
         return None
+
+
+def _apply_model_budget(worker_db, job, route, plan_model, subscribed,
+                        trialing, payload, flag):
+    """The model budget governor (model_budget, owner 20 Nov 2026): a paying
+    customer's request edits on the best model today's Anthropic allowance
+    can pay for; the plan's model is the floor. Decided once per request,
+    kept by its continuations. Only the editing turn's model changes: the
+    plan's lane stays behind it (a provider failure falls back to it) and is
+    the lane every helper role, vision and critic uses. The upgraded model's
+    calls are charged at ``charge_as`` (the plan's Haiku card), like the edit
+    rung. Never raises; any doubt leaves the route as it was."""
+    try:
+        import model_budget
+        payload = payload if isinstance(payload, dict) else {}
+        root = int(payload.get("root_agent_job_id") or job.get("id") or 0)
+        decision = model_budget.kept(
+            payload.get("model_budget"), root, plan_model,
+            payload.get("continuation_state"))
+        if decision is None:
+            decision = worker_db.run(
+                model_budget.decide, job.get("user_id"), plan_model,
+                bool(subscribed) and not trialing)
+            decision = dict(decision or {}, root=root)
+        if not isinstance(decision, dict) or not decision.get("model"):
+            return route
+        model = str(decision["model"])
+        route["model_budget"] = decision
+        if decision.get("upgraded") and model != plan_model \
+                and claude_lane.is_claude_model(model):
+            helper = route["lane"]
+            route["lane"] = claude_lane.lane(model, name="claude_paid")
+            route["helper_lane"] = helper
+            aliases = dict(route.get("credit_aliases") or {})
+            # Credit parity (an owner's choice on studio_for_all_plans)
+            # still prices every Claude call at the plan's contracted card;
+            # otherwise the upgrade is charged as the plan's model would be.
+            aliases[model] = (route.get("credit_model")
+                              if flag.get("credit_parity")
+                              and route.get("credit_model")
+                              else decision.get("charge_as") or plan_model)
+            route["credit_aliases"] = aliases
+        else:
+            decision["model"] = plan_model
+            decision["upgraded"] = False
+        # Continuations copy the payload: the request keeps its model. The
+        # row is stamped too, so a slice resumed after a worker death keeps
+        # it and admin sees the decision on the job.
+        payload["model_budget"] = decision
+        if job.get("payload") is not payload and isinstance(job, dict):
+            job["payload"] = payload
+        try:
+            worker_db.run(_stamp_model_budget, job.get("id"), decision)
+        except Exception as exc:  # noqa: BLE001 - the stamp is a record
+            print(f"[agent] job {job.get('id')}: model budget stamp not "
+                  f"written ({str(exc)[:120]})", flush=True)
+        print(f"[agent] job {job.get('id')}: model budget -> {model} "
+              f"({decision.get('reason')}; allowance "
+              f"{decision.get('allowance_usd')}, spent today "
+              f"{decision.get('spent_today_usd')})", flush=True)
+    except Exception as exc:  # noqa: BLE001 - the plan's model
+        print(f"[agent] job {job.get('id')}: model budget skipped "
+              f"({type(exc).__name__}: {str(exc)[:160]}); plan model",
+              flush=True)
+    return route
+
+
+def _stamp_model_budget(conn, job_id, decision):
+    """The request's model decision on its job row (payload.model_budget)."""
+    if not job_id:
+        return
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE video_jobs
+                          SET payload = COALESCE(payload, '{}'::jsonb)
+                                        || jsonb_build_object('model_budget',
+                                                              %s::jsonb)
+                        WHERE id = %s""",
+                    (json.dumps(decision, default=str), int(job_id)))
 
 
 # The outcome of a request that ended on a question to the user (ask_user).

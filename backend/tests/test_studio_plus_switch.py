@@ -336,6 +336,9 @@ def test_the_card_shows_both_switches_on_one_shared_line():
     assert out["trial"]["state"] == "off"
     assert out["studio_plus"]["state"] == "on"
     assert out["spend"]["budget_usd"] == out["trial"]["spend"]["budget_usd"]
+    # the model budget governor's line (model_budget.summary); a read it
+    # cannot make is an "unavailable" line, never a failed card
+    assert isinstance(out["model_budget"], dict) and out["model_budget"]
     # The free-trial cutoff preserves the subscriber's included Studio.
     w.cycle_usd = 195.0
     w.kv["free_result"] = json.dumps({"on": True})
