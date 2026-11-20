@@ -17,12 +17,16 @@ from . import picks as K
 
 # Shots of 1-2 frames are the punctuation devices' (white, black, negative frames, glimpses): 8.6% of the judge's shots.
 # A strobe or a burst cuts no shorter than the judge's p10 shot (0.13 s, 4 frames) and a burst's own strobe lasts about a
-# second, then lands and holds (20 Nov rating: bursts asked over 3.5 s strobed 34 three-frame shots and strobe sections
-# cut 2-frame framings, so 21% of one film's shots were 1-2 frames and it read over-strobed).
+# second (20 Nov rating: bursts asked over 3.5 s strobed 34 three-frame shots and strobe sections cut 2-frame framings,
+# so 21% of one film's shots were 1-2 frames and it read over-strobed). The rest of a long burst cuts at brisk pace
+# through its own pictures, each one moving, and ends on a landing of normal length: the caller's chosen picture, else
+# the speaker's take (20 Nov review: one picture held for the rest of the span put a stock resume page under the
+# captions for 2.5 s).
 STROBE_F = (4, 8)          # a strobe section's shots, in frames
 BRISK_F = (10, 24)         # a brisk section: a new picture every 0.33-0.8 s (MM 16.1 a 10 s at the median)
 BURST_F = (3, 6)           # a list burst: 3-6 frames a picture
-BURST_RUN_S = 1.2          # the burst's strobe, at most; the picture it lands on holds the rest of its span
+BURST_RUN_S = 1.2          # the burst's strobe, at most
+LAND_S = (0.5, 0.9)        # a long burst's landing, in seconds (the caller's "land" stands, up to a second)
 TASTE_UP = 3.0             # the tightest any framing is drawn: three output pixels a source pixel (TASTE 4.2)
 
 
@@ -61,25 +65,68 @@ def _framing(pic, W, H, k, rng):
     return name, crop
 
 
+def _on_clock(it, pic, t0, fps):
+    """A clip's item on its own clock from t0, inside the range a viewer may see of it (pic.span()): real speed, moved
+    earlier when t0 leaves too little room; a range shorter than the item plays whole and its last verified frame holds
+    for the rest (K.clocked's rule: never a second nobody checked). Returns the item(s)."""
+    n = it["f"][1] - it["f"][0]
+    need = n / fps
+    lo, hi = pic.span()
+    if hi - lo >= need - 1e-6:
+        t0 = min(max(float(t0), lo), hi - need)
+        it["src"] = [round(t0, 4), round(min(t0 + need, hi), 4)]
+        return [it]
+    run = int((hi - lo) * fps + 1e-6)
+    if run < 2:
+        it["src"] = [round(lo, 4), round(lo, 4)]
+        return [it]
+    head, tail = K.split_frames(it, run, f"{it['id']}~h")
+    head["src"] = [round(lo, 4), round(min(lo + run / fps, hi), 4)]
+    tail["src"] = [round(min(lo + run / fps, hi), 4)] * 2
+    return [head, tail]
+
+
+def _fits(pic, n, fps):
+    """Whether a picture's verified range holds n frames at real speed (a still always does)."""
+    if not pic.video:
+        return True
+    lo, hi = pic.span()
+    return hi - lo >= n / fps - 1e-6
+
+
 def _clip_shots(seq, a, lens, fps, look, mono, ask_id, tag):
     """Items for a run of (pic, t0, crop, gain) laid end to end from frame a with the given lengths."""
     items, marks, pos = [], [], a
     for i, ((pic, t0, crop, gain), n) in enumerate(zip(seq, lens)):
         it = dict(look, id=f"{ask_id}.{tag}{i}", k="shot", f=[pos, pos + n], pic=pic.aid)
         # a picture in a strobe still moves: a 3% push across its few frames, so the run never reads as stills
-        # (a picture that holds, a burst's landing, pushes the way the references push a held picture: about 8% a second)
+        # (a picture that holds, a burst's brisk shots and landing, pushes the way the references push a held picture)
         push = 0.03 if n <= 8 else min(0.04 + 0.06 * n / fps, 0.14)
         it["crop"] = [K.r5(K.scale_crop(crop, 1.0 / (1.0 + push * j / max(n - 1, 1)))) for j in range(n)]
-        if pic.video:
-            it["src"] = [round(t0, 4), round(t0 + n / fps, 4)]
         if abs(gain - 1.0) > 0.01:
             it["grade"] = {"lift": 0.0, "gamma": 1.0, "gain": round(gain, 3), "sat": 1.0, "contrast": 1.0, "temp": 0.0, "tint": 0.0}
         if mono:
             it["treat"] = {"mode": "mono"}
-        items.append(it)
+        items += _on_clock(it, pic, t0, fps) if pic.video else [it]
         marks.append({"f": pos, "what": f"{tag} cut", "kind": "cut", "strength": 0.8 if i == 0 else 0.35})
         pos += n
     return items, marks
+
+
+def _crop_of(pic, j, W, H, rng):
+    """The j-th showing's framing of a picture in a run: a clip alternates its cover and a tighter look at its face
+    (or its middle); a still steps through its framings."""
+    if not pic.video:
+        return list(_framing(pic, W, H, j, rng)[1])
+    crop = K.cover_on(pic, W, H)
+    if pic.faces and j % 2 == 1:
+        f = max(pic.faces, key=lambda q: q[2] * q[3])
+        c2 = K.cam_of(pic, W, H, TASTE_UP).on_face(f[:4], 0.34, eyes=f[4] if len(f) > 4 else None)
+        crop = c2 if _tight_ok(pic, c2, W) else crop
+    elif j % 2 == 1:
+        c2 = K.scale_crop(crop, 0.8)
+        crop = c2 if _tight_ok(pic, c2, W) else crop
+    return list(crop)
 
 
 def _strobe_seq(pics, k, lens, W, H, fps, rng, order=None, land=None):
@@ -101,18 +148,7 @@ def _strobe_seq(pics, k, lens, W, H, fps, rng, order=None, land=None):
     seq = []
     for pic, j in raw:
         t0 = when[pic.aid][j][0]
-        if pic.video:
-            crop = K.cover_on(pic, W, H)
-            if pic.faces and j % 2 == 1:
-                f = max(pic.faces, key=lambda q: q[2] * q[3])
-                c2 = K.cam_of(pic, W, H, TASTE_UP).on_face(f[:4], 0.34, eyes=f[4] if len(f) > 4 else None)
-                crop = c2 if _tight_ok(pic, c2, W) else crop
-            elif j % 2 == 1:
-                c2 = K.scale_crop(crop, 0.8)
-                crop = c2 if _tight_ok(pic, c2, W) else crop
-        else:
-            crop = _framing(pic, W, H, j, rng)[1]
-        seq.append([pic, t0, list(crop), 1.0])
+        seq.append([pic, t0, _crop_of(pic, j, W, H, rng), 1.0])
     lum = [K.luminance(p, t0 + 0.02, c) for p, t0, c, _ in seq]
     if order is None and land is not None and len(seq) > 2:
         # the brighter ones falling, the darker ones rising into the landing: one turn of light, the landing last
@@ -152,31 +188,224 @@ def _strobe_seq(pics, k, lens, W, H, fps, rng, order=None, land=None):
 
 # ----------------------------------------------------------------- burst
 
+def _brisk_lengths(n, rng, lo=BRISK_F[0], hi=BRISK_F[1]):
+    """Shot lengths in [lo, hi] frames (when n allows) adding up to n: a brisk run's cuts, evenly spread, a little loose."""
+    if n <= 0:
+        return []
+    k = max(math.ceil(n / hi), 1)
+    if n >= 2 * lo:
+        k = max(k, min(int(round(n / ((lo + hi) / 2))), n // lo))
+    out = [n // k + (1 if i < n % k else 0) for i in range(k)]
+    for _ in range(k):
+        x, y = rng.randrange(k), rng.randrange(k)
+        d = rng.randint(1, 4)
+        if x != y and out[x] + d <= hi and out[y] - d >= lo:
+            out[x] += d
+            out[y] -= d
+    return out
+
+
+def _take_landing(l1, work, was, b, z, ask_id):
+    """The speaker's take on [b, z): the pieces of the take shots the burst replaced when the take was there (its clock
+    and framing, untouched); else the take on its own clock, read off the take shot nearest the landing (a take runs
+    with his voice: the frame's time on that shot's clock), at that shot's framing and pushing in, the way a held
+    picture moves. None when the scene shows no take whose clock reaches the landing."""
+    pieces, pos = [], b
+    for q in sorted(was, key=lambda q: q["f"][0]):
+        if q["f"][1] <= pos or q["f"][0] >= z:
+            continue
+        if q["f"][0] > pos or not K.is_take(q.get("pic")):
+            pieces = None
+            break
+        pieces.append(sense.slice_shot(q, pos, min(q["f"][1], z), f"{ask_id}.land{len(pieces)}"))
+        pos = min(q["f"][1], z)
+        if pos >= z:
+            return pieces
+    W, H, fps = K.geometry(l1)
+    takes = [q for q in K.shots(l1) if K.is_take(q.get("pic")) and isinstance(q.get("src"), (list, tuple)) and len(q["src"]) == 2
+             and q["f"][1] > q["f"][0] and not q.get("treat")]
+    takes.sort(key=lambda q: 0 if q["f"][0] < z and q["f"][1] > b else min(abs(b - q["f"][1]), abs(q["f"][0] - z)))
+    for q in takes[:4]:
+        a_ = (l1.get("assets") or {}).get(q["pic"]) or {}
+        dur = float(a_.get("dur") or 0.0)
+        f0, f1 = q["f"]
+        s0, s1 = float(q["src"][0]), float(q["src"][1])
+        rate = (s1 - s0) / (f1 - f0)
+        if abs(rate * fps - 1.0) > 0.05:          # a ramp or a freeze: his clock at real speed from its nearer end
+            anchor, t_anchor, rate = (f1, s1, 1.0 / fps) if f1 <= b else (f0, s0, 1.0 / fps)
+        else:
+            anchor, t_anchor = f0, s0
+        t_b, t_z = t_anchor + rate * (b - anchor), t_anchor + rate * (z - anchor)
+        if t_b < 0 or (dur and t_z > dur):
+            continue
+        c = q.get("crop")
+        if isinstance(c, list) and c and isinstance(c[0], (list, tuple)):
+            c = list(c[-1] if f1 <= b else c[0])
+        elif not (isinstance(c, list) and len(c) == 4):
+            pic = K.pic_of_asset(l1, work, q["pic"])                  # no framing of its own: the cover the engine draws
+            c = list(K.cover_on(pic, W, H)) if pic is not None else None
+        it = {k: q[k] for k in ("look", "grade") if k in q and not isinstance(q[k], list)}      # the take's own look
+        it.update(id=f"{ask_id}.land0", k="shot", f=[b, z], pic=q["pic"], src=[round(t_b, 4), round(t_z, 4)])
+        if c is not None:
+            n = z - b
+            push = min(0.04 + 0.06 * n / fps, 0.14)
+            it["crop"] = [K.r5(K.scale_crop(c, 1.0 / (1.0 + push * j / max(n - 1, 1)))) for j in range(n)]
+        return [it]
+    return None
+
+
+def _look_of(pic, cache):
+    """A picture's small grey still (16x16), for telling a new picture from one that looks the same."""
+    if pic.aid not in cache:
+        st = K.still_of(pic, size=(16, 16))
+        cache[pic.aid] = None if st is None else [float(v) for v in st.reshape(-1)] if hasattr(st, "reshape") else None
+    return cache[pic.aid]
+
+
+def _unlike(p, q, cache):
+    """Mean absolute grey difference of two pictures' stills (0-255); 255 when either cannot be read."""
+    a, b = _look_of(p, cache), _look_of(q, cache)
+    if not a or not b or len(a) != len(b):
+        return 255.0
+    return sum(abs(x - y) for x, y in zip(a, b)) / len(a)
+
+
+def _brisk_seq(pics, lens, start, avoid_last, W, H, fps, rng, used, before=None, given=False):
+    """(pic, t0, crop, 1.0) for a brisk run after a strobe: the burst's own pictures in turn from ``start``, a picture
+    whose verified range holds the shot before one that does not, never the same picture twice running and, at the
+    end, not the landing's; each clip at a moment of its own, each still at a framing it has not shown yet. Unless the
+    order is the caller's, each cut goes to the one of the next few pictures that looks least like the shot before
+    (``before``: the strobe's last picture), so a brisk run reads as new pictures, never two pages that look alike."""
+    seq, prev, k = [], before, start
+    plan, cache = [], {}
+    for i, n in enumerate(lens):
+        order = [pics[(k + d) % len(pics)] for d in range(len(pics))]
+        last = i == len(lens) - 1
+
+        def rank(p):
+            return (not _fits(p, n, fps), prev is not None and p.aid == prev.aid,
+                    last and avoid_last is not None and p.aid == avoid_last)
+        best = min(rank(p) for p in order)
+        near = [p for p in order if rank(p) == best][:1 if given else 4]
+        pic = near[0] if (given or prev is None) else max(near, key=lambda p: (_unlike(p, prev, cache), -order.index(p)))
+        k = pics.index(pic) + 1
+        prev = pic
+        plan.append((pic, n))
+    count = {}
+    for pic, n in plan:
+        count[pic.aid] = count.get(pic.aid, 0) + 1
+    longest = {}
+    for pic, n in plan:
+        longest[pic.aid] = max(longest.get(pic.aid, 0), n)
+    when = {aid: None for aid in count}
+    seen = {}
+    for pic, n in plan:
+        if when[pic.aid] is None:
+            when[pic.aid] = K.moments(pic, count[pic.aid], longest[pic.aid] / fps, rng)
+        j = seen.get(pic.aid, 0)
+        seen[pic.aid] = j + 1
+        u = used.get(pic.aid, 0)
+        used[pic.aid] = u + 1
+        seq.append((pic, when[pic.aid][j][0], _crop_of(pic, u, W, H, rng), 1.0))
+    return seq, k
+
+
 def burst(l1, work, ask, sense_=None, pool=None):
-    """A list burst: 8-45 related pictures at 2-5 frames each over [a, z), the last one landing and held.
-    ask: at/until, pics, frames (one length for all), land (frames the last holds, default 6), mono, order ("given")."""
+    """A list burst: 8-45 related pictures at 3-6 frames each over [a, z), ending on a landing.
+    A burst up to about two seconds strobes and lands on its last picture (the caller's last chosen one when it chose).
+    A longer one strobes about a second, cuts the rest at brisk pace (10-24 frames) through its own pictures, each one
+    moving, and ends on a landing of 0.5-1 s: the caller's last chosen picture, else the speaker's take where the base
+    had it, else the picture found nearest these words. A clip never shows past its verified range.
+    ask: at/until, pics, frames (one length for all), land (frames the landing holds), mono, order ("given")."""
     W, H, fps = K.geometry(l1)
     args = K.args_of(ask)
     a, z = K.span(l1, args, default_s=1.2, least=6)
     rng = K.rng_of(l1, args)
-    land = min(int(args.get("land", 6)), max((z - a) // 3, 2))
-    land = max(land, z - a - int(round(BURST_RUN_S * fps)))       # the strobe runs about a second, the landing holds the rest
+    total = z - a
+    run = int(round(BURST_RUN_S * fps))
     fixed = args.get("frames")
     lo, hi = (max(int(fixed), BURST_F[0]), max(int(fixed), BURST_F[0])) if fixed else BURST_F
-    lens = _lengths(z - a - land, lo, hi, rng) + [land]
-    pics = K.pictures(l1, work, args, pool, sense_=sense_, need=len(lens), length_s=hi / fps + 0.05)
+    one_s = int(round(fps))
+    long_ = total > run + int(round(LAND_S[0] * fps)) + BRISK_F[0]
+    ask_id = args.get("id", "burst")
+    if not long_:
+        land = min(int(args.get("land", 6)), max(total // 3, 2))
+        land = max(land, total - run)
+        lens = _lengths(total - land, lo, hi, rng) + [land]
+        pics = K.pictures(l1, work, args, pool, sense_=sense_, need=len(lens), length_s=hi / fps + 0.05)
+        if not pics:
+            return {"skip": "no pictures to burst"}
+        picked = [p for p in pics if p.chosen is not None]
+        landing = max(picked, key=lambda p: p.chosen) if picked else None      # the caller's last chosen picture lands
+        seq, lum = _strobe_seq(pics, len(lens), lens, W, H, fps, rng, order=args.get("order"), land=landing)
+        keep, gone, was = K.carve(l1, a, z)
+        items, marks = _clip_shots(seq, a, lens, fps, K.inherit(was), bool(args.get("mono")), ask_id, "b")
+        used = list({p.aid: p for p, *_ in seq}.values())
+        return _patch(keep, gone, items, used, marks,
+                      {"shots": len(lens), "pictures": len(used), "lengths": lens, "flashes": K.flashes(lum, lens, fps),
+                       "chosen": len(picked), "pool_added": len(pics) - len(picked), "lands_on": seq[-1][0].aid})
+
+    # a long burst: about a second of strobe, brisk cuts through its own pictures, a landing of normal length
+    want = args.get("land")
+    land = int(want) if isinstance(want, (int, float)) and not isinstance(want, bool) and want > 0 else \
+        rng.randint(int(round(LAND_S[0] * fps)), int(round(LAND_S[1] * fps)))
+    land = max(min(land, one_s, total // 3), 2)
+    strobe = _lengths(run, lo, hi, rng)
+    if len(strobe) > 1 and strobe[-1] > hi:              # the strobe's odd frames go to the brisk run, not a long last flash
+        strobe[-1] = hi
+    run = sum(strobe)
+    brisk_n = total - run - land
+    pics = K.pictures(l1, work, args, pool, sense_=sense_, need=len(strobe) + max(brisk_n // BRISK_F[0], 1) + 1,
+                      length_s=BRISK_F[1] / fps + 0.05)
     if not pics:
         return {"skip": "no pictures to burst"}
     picked = [p for p in pics if p.chosen is not None]
-    landing = max(picked, key=lambda p: p.chosen) if picked else None      # the caller's last chosen picture lands and holds
-    seq, lum = _strobe_seq(pics, len(lens), lens, W, H, fps, rng, order=args.get("order"), land=landing)
     keep, gone, was = K.carve(l1, a, z)
-    items, marks = _clip_shots(seq, a, lens, fps, K.inherit(was), bool(args.get("mono")), args.get("id", "burst"), "b")
+    look = K.inherit(was)
+    landing, take = None, None
+    if picked:
+        landing = max(picked, key=lambda p: p.chosen)                         # the caller's last chosen picture lands
+    else:
+        take = _take_landing(l1, work, was, z - land, z, ask_id)                        # else the speaker, as the base had him
+        if take is None:
+            # else the picture found nearest these words (the pool's first) whose verified range holds the landing
+            landing = next((p for p in pics if _fits(p, land, fps)), None) or \
+                max(pics, key=lambda p: p.span()[1] - p.span()[0])
+    if landing is not None and not _fits(landing, land, fps):
+        # a clip shorter than the landing: it lands for its verified run (at least 6 frames, its last frame holding the
+        # deficit), and the frames it cannot hold go to the brisk run before it
+        lo_, hi_ = landing.span()
+        land = max(min(land, int((hi_ - lo_) * fps + 1e-6)), 6)
+        brisk_n = total - run - land
+    if 0 < brisk_n < BRISK_F[0]:
+        strobe = _lengths(run + brisk_n, lo, hi, rng)
+        brisk_n = 0
+        run = sum(strobe)
+    brisk = _brisk_lengths(brisk_n, rng)
+    seq_s, lum = _strobe_seq(pics, len(strobe), strobe, W, H, fps, rng, order=args.get("order"))
+    used_n = {}
+    for p, *_ in seq_s:
+        used_n[p.aid] = used_n.get(p.aid, 0) + 1
+    seq_b, _k = _brisk_seq(pics, brisk, len(strobe) % len(pics), landing.aid if landing is not None else None,
+                           W, H, fps, rng, used_n, before=seq_s[-1][0] if seq_s else None,
+                           given=str(args.get("order") or "") == "given")
+    seq = list(seq_s) + list(seq_b)
+    lens = strobe + brisk
+    if landing is not None:
+        t0 = K.moments(landing, 1, land / fps, rng)[0][0]
+        seq.append((landing, t0, _crop_of(landing, 0, W, H, rng), 1.0))
+        lens = lens + [land]
+    items, marks = _clip_shots(seq, a, lens, fps, look, bool(args.get("mono")), ask_id, "b")
+    if take is not None:
+        items += take
+        marks.append({"f": z - land, "what": "b cut", "kind": "cut", "strength": 0.5})
+        lens = lens + [land]
     used = list({p.aid: p for p, *_ in seq}.values())
     return _patch(keep, gone, items, used, marks,
-                  {"shots": len(items), "pictures": len(used), "lengths": lens, "flashes": K.flashes(lum, lens, fps),
+                  {"shots": len(lens), "pictures": len(used), "lengths": lens, "strobe_f": sum(strobe),
+                   "brisk": len(brisk), "landing_f": land, "flashes": K.flashes(lum, strobe, fps),
                    "chosen": len(picked), "pool_added": len(pics) - len(picked),
-                   "lands_on": seq[-1][0].aid})
+                   "lands_on": "take" if take is not None else landing.aid})
 
 
 # ----------------------------------------------------------------- contour
@@ -665,7 +894,7 @@ ALIASES = {"list_burst": "burst", "strobe": "burst", "montage": "burst", "strobe
 
 DEVICES = {
     "burst": {"plan": burst, "layer": "rhythm", "needs": ("pictures",), "fallback": ("contour", "snap"), "span": True,
-              "card": "burst at until pics[] frames land mono order. A list burst: 8-45 related pictures at 2-5 frames each, the last one held; for figures, enumerations, the hook"},
+              "card": "burst at until pics[] frames land mono order. A list burst: related pictures at 3-6 frames each for about a second, a longer span cut on at brisk pace through them, landing 0.5-1 s on the last chosen picture (else the speaker); for figures, enumerations, the hook"},
     "contour": {"plan": contour, "layer": "rhythm", "needs": (), "fallback": ("snap",), "span": True,
                 "words": ("sections[].at", "sections[].f", "sections[].until", "stress[]"),
                 "card": "contour sections[{at:[first last] energy:strobe|brisk|hold}] stress[]. The pace contour: strobe stretches of 2-8 frame shots against brisk ones and holds; lists and the hook strobe, the turn and payoff hold"},

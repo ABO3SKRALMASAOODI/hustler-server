@@ -52,10 +52,10 @@ def callback(l1, work, ask, sense_=None, pool=None):
     span_ = z - a
     land_min = 6
     if per * len(op) + land_min > span_:                 # a short payoff: quicker returns, then fewer of them
-        per = max((span_ - land_min) // max(len(op), 1), 2)
+        per = max((span_ - land_min) // max(len(op), 1), 3)     # a return is never a 1-2 frame sliver (punctuation's)
         op = op[:max((span_ - land_min) // per, 1)]
     elif span_ - per * len(op) > span_ // 2 and len(op) > 1:
-        per = max((span_ - span_ // 2) // len(op), 2)
+        per = max((span_ - span_ // 2) // len(op), 3)
     land = span_ - per * len(op)
     lens = [per] * len(op) + [land]
     seq = [(p, t, c) for _, p, t, c in op] + [(op[0][1], op[0][2], op[0][3])]
@@ -67,8 +67,10 @@ def callback(l1, work, ask, sense_=None, pool=None):
     for i, ((p, t, c), n) in enumerate(zip(seq, lens)):
         it = dict(look, id=f"{args.get('id', 'cb')}.r{i}", k="shot", f=[pos, pos + n], pic=p.aid,
                   crop=[K.r5(K.scale_crop(c, 1.0 / (1.0 + (0.06 if i == len(seq) - 1 else 0.03) * j / max(n - 1, 1)))) for j in range(n)])
-        if p.video:
-            it["src"] = [round(t, 4), round(t + n / fps, 4)]
+        if p.video:                                      # inside the range a viewer may see of it, never past it
+            lo_, hi_ = p.span()
+            t0 = min(max(float(t), lo_), max(hi_ - n / fps, lo_))
+            it["src"] = [round(t0, 4), round(min(t0 + n / fps, hi_), 4)]
         if abs(gains[i] - 1.0) > 0.01:
             it["grade"] = {"lift": 0.0, "gamma": 1.0, "gain": round(gains[i], 3), "sat": 1.0, "contrast": 1.0, "temp": 0.0, "tint": 0.0}
         items.append(it)
