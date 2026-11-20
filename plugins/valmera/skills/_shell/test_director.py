@@ -123,6 +123,81 @@ def test_the_ledger_keeps_each_films_sequence(tmp_path, monkeypatch):
     assert DLG.recent(5) == ["wf1 " + row["at"][:10] + ": neg@hook, white@payoff, neg_split; surfaces gate"]
 
 
+# --------------------------------------------------------------------- word-numbered fields reach the devices as frames (review 20 Nov)
+
+def _scene(tmp_path, n_words=30, per_word=9):
+    """A take of solid colour with stills beside it, and its words every ``per_word`` frames from frame 30."""
+    from PIL import Image
+    pics, assets = [], {}
+    for k, g in enumerate((30, 90, 150, 210, 60, 120)):
+        p = tmp_path / f"p{k}.png"
+        Image.new("RGB", (480, 640), (g, g, 255 - g)).save(p)
+        assets[f"p{k}"] = dict(kind="image", path=str(p), w=480, h=640)
+        pics.append(f"p{k}")
+    dur = 30 + n_words * per_word + 30
+    items = [dict(id="s0", k="shot", f=[0, dur // 2], pic="p0"), dict(id="s1", k="shot", f=[dur // 2, dur], pic="p1")]
+    l1 = dict(l1=1, sid="t", seed=3, fps=30, frame=[540, 960], dur_f=dur, assets=assets, spine=[], voices={}, film={}, items=items, sound=[])
+    return l1, (lambda w: 30 + w * per_word if 0 <= w < n_words else None)
+
+
+def test_a_directors_contour_grid_collage_and_callback_land_on_the_frames_of_their_words(tmp_path):
+    pal = DR._palette()
+    assert pal is not None and "steps[]" in pal.word_fields("grid") and "sections[].at" in pal.word_fields("contour")
+    l1, frame_of = _scene(tmp_path)
+    words = [dict(n=i, w=f"w{i}", seg=i // 10) for i in range(30)]
+    d = dict(asks=[
+        # words 2-8 strobe, 8-12 hold: the section's frames, not frames 2-8 at the start of the film
+        dict(dev="contour", at=dict(w=2, seg=0, word="w2"), args=dict(sections=[dict(at=[2, 7], energy="strobe"), dict(at=[8, 12], energy="hold")],
+                                                                      stress=[[4, 0.9], 6]), pics=[]),
+        dict(dev="grid", at=dict(w=14, seg=1, word="w14"), args=dict(steps=[14, 15, 16, 17, 18, 19]), pics=["P1", "P2"]),
+        dict(dev="collage", at=dict(w=21, seg=2, word="w21"), args=dict(steps=[21, 23, 25, 27]), pics=["P3"]),
+        dict(dev="callback", at=dict(w=27, seg=2, word="w27"), until=dict(w=29, seg=2, word="w29"), args={"from": [0, 3]}, pics=[])],
+        sections=[])
+    asks, notes = DR.palette_asks(d, frame_of, lambda seg: (frame_of(seg * 10), frame_of(min(seg * 10 + 9, 29)) + 9),
+                                  {"P1": "p2", "P2": "p3", "P3": "p4"}.get, l1["dur_f"])
+    by = {a["dev"]: a for a in asks}
+    c = by["contour"]
+    assert c["sections"][0]["at"] == [frame_of(2), frame_of(8)] and c["sections"][1]["at"] == [frame_of(8), frame_of(13)]
+    assert c["stress"] == [[frame_of(4), 0.9], frame_of(6)] and c["f"][1] >= frame_of(13)
+    g = by["grid"]
+    assert g["steps"] == [frame_of(w) for w in range(14, 20)] and g["pool"] == ["p2", "p3"] and g["f"][1] > frame_of(19)
+    assert by["collage"]["steps"] == [frame_of(w) for w in (21, 23, 25, 27)] and by["callback"]["from"] == [frame_of(0), frame_of(4)]
+    out, log = pal.apply(l1, str(tmp_path), asks)
+    assert all(r["done"] and not r["fallback"] for r in log), [(r["dev"], r.get("tried")) for r in log]
+    tiles = sorted((i for i in out["items"] if str(i["id"]).startswith("dr1.t")), key=lambda i: i["f"][0])
+    assert [t["f"][0] for t in tiles] == [frame_of(w) for w in range(14, 20)]          # one tile per word, on its word
+    prints = sorted((i for i in out["items"] if str(i["id"]).startswith("dr2.c")), key=lambda i: i["f"][0])
+    assert [p["f"][0] for p in prints] == [frame_of(w) for w in (21, 23, 25, 27)]
+    strobe = [i for i in out["items"] if i["k"] == "shot" and str(i["id"]).startswith("dr0.s0")]
+    assert strobe and min(s["f"][0] for s in strobe) == frame_of(2) and max(s["f"][1] for s in strobe) == frame_of(8)
+    assert all(s["f"][0] >= frame_of(2) for s in strobe)                                # never the film's first frames
+
+
+def test_the_signal_director_lays_lane_b_devices_by_signal():
+    text = ["We started with nothing at all.", "Then the first shop opened in a small town by the river.",
+            "Every year we added one more shop and one more city.", "Some years it nearly broke us.",
+            "My father worked every single day of every single week.", "Now we all live within walking distance."]
+    sl = [dict(i=i, text=t) for i, t in enumerate(text)]
+    rw, t = [], 0.0
+    for s_ in sl:
+        for w in s_["text"].split():
+            rw.append(dict(w=w, t0=t, t1=t + 0.3, seg=s_["i"]))
+            t += 0.36
+        t += 0.4
+    sents, words = DR.numbered(sl, rw)
+    hot = [w["n"] for w in words if w["n"] % 3 == 1]
+    devs = set()
+    for s in range(12):
+        d = DR.signal_director(sents, words, hot, seed=s, recent=[])
+        devs |= {a["dev"] for a in d["asks"]}
+        for a in d["asks"]:
+            if a["dev"] in ("grid", "collage"):
+                assert len(a["args"]["steps"]) >= 3 and all(isinstance(x, int) for x in a["args"]["steps"])
+    assert {"snap", "settle", "whip", "glimpse"} & devs and ({"grid", "collage"} & devs) and "burst" in devs
+
+
+
+
 def test_the_cache_is_keyed_on_the_words_it_read(tmp_path):
     first = dict(asks=[dict(dev="neg", at=dict(w=3, word="smart."))], beats=[], sections=[])
     again = dict(asks=[dict(dev="tint", at=dict(w=1, word="is"))], beats=[], sections=[])

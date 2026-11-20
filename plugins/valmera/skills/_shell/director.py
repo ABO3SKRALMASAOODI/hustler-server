@@ -74,10 +74,11 @@ SYSTEM = ("You are the Director of a vertical short film. You choose, moment by 
           "\"layout\": bleed|window|prints|collage|grid|split|type, \"energy\": strobe|brisk|hold}], "
           "\"asks\": [{\"dev\": a device name from the palette, \"beat\": index into beats or null, \"at\": {\"w\": word "
           "number, \"word\": the word}, \"until\": {\"w\": word number, \"word\": the word} (spans only), \"args\": {the "
-          "device's own fields from its card, e.g. \"mode\", \"surface\", \"run\", \"n\", \"c\", \"part\"; any time field of a card "
-          "(f, at, cuts, marks[].f, picks[].f) is a WORD NUMBER and any picture field (pic, pool) a picture id: the engine "
-          "turns them into frames and assets; numbers in the units and ranges the card gives}, \"pics\": [picture ids it "
-          "uses]}; as many asks as this material earns, stacked where a moment deserves it, none where restraint serves it], "
+          "device's own fields from its card, e.g. \"mode\", \"surface\", \"run\", \"n\", \"c\", \"part\"; every time field of a card "
+          "(f, at, until, cuts, steps, from, stress, sections[].at, marks[].f, picks[].f) is a WORD NUMBER, a [first, last] pair of "
+          "word numbers is a stretch, and any picture field (pic, pool) a picture id: the engine turns them into frames and assets; "
+          "numbers in the units and ranges the card gives}, \"pics\": [picture ids it uses]}; as many asks as this material earns, "
+          "stacked where a moment deserves it, none where restraint serves it], "
           "\"display\": [up to six words or short phrases to set large, ranked best first: {\"seg\": sentence number, \"text\": "
           "one to three consecutive words exactly as said, \"role\": hook|turn|payoff|figure|name|contrast, \"key\": the "
           "one word set largest}], \"past_segs\": [sentence numbers that tell of the past], \"payoff_seg\": the sentence "
@@ -113,6 +114,11 @@ def palette_module():
         return palette
     except Exception:      # noqa: BLE001
         return None
+
+
+
+
+_palette = palette_module      # the name palette_asks reads the registry's word fields through
 
 
 def palette_menu():
@@ -424,7 +430,8 @@ def repair(d, sentences, words, names=(), seed=0):
 
 # --------------------------------------------------------------------- the signal director
 
-POOL = ("white", "neg", "tint", "blur_in", "spotlight", "neg_split", "variant", "word_blend", "black")
+POOL = ("white", "neg", "tint", "blur_in", "spotlight", "neg_split", "variant", "word_blend", "black", "snap", "settle", "whip", "glimpse")
+SPREADS = ("grid", "collage")      # a sentence dense with stress fills a layout one tile (or print) per stressed word
 VARIANT_MODES = ("thermal", "threshold", "halftone", "xray", "blueprint", "posterise", "solarise", "line", "mosaic", "night_vision")
 FINISHES = ("mono", "gate", "crt", "bloom", "thermal", "halftone", "threshold", "xray")
 
@@ -476,7 +483,8 @@ def signal_director(sentences, words, stress_w, pictures=(), seed=0, recent=(), 
         if b["role"] == "quote":
             dev = pool[k % len(pool)]
             k += 1
-            args = dict(mode=modes[k % len(modes)]) if dev == "variant" else dict(c=rng.choice(("cyan", "magenta"))) if dev == "tint" else {}
+            args = dict(mode=modes[k % len(modes)]) if dev == "variant" else dict(c=rng.choice(("cyan", "magenta"))) if dev == "tint" else \
+                dict(size=rng.choice((1.2, 1.3, 1.4))) if dev == "snap" else dict(dir=rng.choice(("in", "in", "out"))) if dev == "settle" else {}
             asks.append(dict(dev=dev, beat=bi, at=a, args=args, pics=[]))
             if k % 3 == 0:
                 asks.append(dict(dev="blur_in", beat=bi, at=a, args={}, pics=[]))
@@ -487,6 +495,37 @@ def signal_director(sentences, words, stress_w, pictures=(), seed=0, recent=(), 
             prev = max(0, b["w"] - 1)
             asks.append(dict(dev="black", beat=bi, at=dict(w=prev, seg=words[prev]["seg"], word=words[prev]["w"]), args=dict(n=2), pics=[]))
             asks.append(dict(dev="white", beat=bi, at=a, args={}, pics=[]))
+    # a burst on the strongest stress between the hook and the payoff, about a second of pictures from the pool
+    # nearest it; and the sentence densest with stress spreads into a layout, one tile per stressed word
+    hook_t = words[first[0]]["t0"] + 2.0
+    mid_hot = [w for w in hot if words[w]["t0"] >= hook_t and w < pay_w - 2]
+    burst_w = None
+    if mid_hot:
+        burst_w = rng.choice(mid_hot[:max(len(mid_hot) // 2, 1)])
+        end = next((x["n"] for x in words if x["n"] > burst_w and x["t0"] >= words[burst_w]["t0"] + rng.uniform(0.9, 1.4)), None)
+        if end is not None and end < pay_w:
+            asks.append(dict(dev="burst", beat=None, at=dict(w=burst_w, seg=words[burst_w]["seg"], word=words[burst_w]["w"]),
+                             until=dict(w=end, seg=words[end]["seg"], word=words[end]["w"]), args={}, pics=[]))
+    dense = []
+    for sg in range(1, payoff):
+        ws = [x for x in words if x["seg"] == sg]
+        if len(ws) < 4 or (burst_w is not None and ws[0]["n"] <= burst_w <= ws[-1]["n"]):
+            continue
+        sec = max(ws[-1]["t1"] - ws[0]["t0"], 0.5)
+        steps = [w for w in hot if words[w]["seg"] == sg]
+        if len(steps) < 3:                                   # too few peaks: every word a third of a second apart
+            steps, last_t = [], -9.0
+            for x in ws:
+                if x["t0"] - last_t >= 0.33:
+                    steps.append(x["n"])
+                    last_t = x["t0"]
+        dense.append((len([w for w in hot if words[w]["seg"] == sg]) / sec, sg, steps[:9], ws))
+    if dense:
+        _, sg, steps, ws = max(dense, key=lambda q: (q[0], -q[1]))
+        if len(steps) >= 3:
+            lay = _least_used(SPREADS, recent, rng)[0]
+            asks.append(dict(dev=lay, beat=None, at=dict(w=steps[0], seg=sg, word=words[steps[0]]["w"]),
+                             until=dict(w=ws[-1]["n"], seg=sg, word=ws[-1]["w"]), args=dict(steps=list(steps)), pics=[]))
     # sections: the hook's sentence strobes, the payoff holds; one middle stretch gets a surface of its own
     sections = []
     fin = _least_used(FINISHES, recent, rng)[0]
@@ -683,12 +722,103 @@ def film_pictures(l1, placed, out_dir, ffmpeg="ffmpeg", fps=30.0, most=36):
         ids[pid] = key
         if len(out) >= most:
             break
+    # the supply's pictures the film did not place (the scene's pool): the Director may choose them by id too; a pool
+    # id resolves to the picture's path, which the palette's devices read from the pool
+    for r in l1.get("pool") or []:
+        if len(out) >= most:
+            break
+        path = r.get("path")
+        if not path or path in seen or path in by_path:
+            continue
+        seen.add(path)
+        clip = str(r.get("kind") or "").lower() in ("clip", "video")
+        st = still_of(path, out_dir, ffmpeg, float(r.get("seconds") or 1.0) / 2 if clip else None)
+        if not st:
+            continue
+        pid = f"P{len(out)}"
+        t = r.get("t") if isinstance(r.get("t"), (list, tuple)) else None
+        row = dict(id=pid, path=st, kind=("clip" if clip else "photo") + ", supply, not placed",
+                   label=str(r.get("subject") or r.get("shows") or "")[:60])
+        if t:
+            row["at"] = f"{float(t[0]):.1f}-{float(t[1]):.1f}s"
+        out.append(row)
+        ids[pid] = path
     return out, ids
 
 
 # --------------------------------------------------------------------- to the palette
 
 SPAN_DEVICES = ("finish", "neg_hold", "neg_split", "neg_world", "variant", "spotlight", "word_blend", "tint", "lamp", "diecut")
+WORD_FIELDS = ("marks[].f", "picks[].f", "cuts[]")      # time fields every card may carry; a device declares more (palette "words")
+
+
+def _word_no(v):
+    """A word number as the model wrote it (7, 7.0, "7"), or None."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    if isinstance(v, str) and v.strip().isdigit():
+        return int(v.strip())
+    return None
+
+
+def words_to_frames(row, fields, frame_of, end_of):
+    """The time fields of one ask (``fields``: the palette's "words" specs) turned from word numbers into programme
+    frames, in place: a word is its start frame, a [first, last] pair the stretch from the first word's start to the last
+    word's end. A word with no frame leaves a list (or keeps the field as it was). Returns the frames written."""
+    got = []
+
+    def one(v, pair=True):
+        w = _word_no(v)
+        if w is not None:
+            f = frame_of(w)
+            if f is not None:
+                got.append(int(f))
+            return None if f is None else int(f)          # None: a word with no frame
+        if pair and isinstance(v, (list, tuple)) and len(v) == 2 and _word_no(v[0]) is not None and _word_no(v[1]) is not None:
+            a, b = frame_of(_word_no(v[0])), end_of(_word_no(v[1]))
+            if a is not None and b is not None:
+                got.extend([int(a), int(b)])
+                return [int(a), int(max(b, a + 1))]
+        return v
+    for spec in fields:
+        if spec.endswith("[]"):
+            key = spec[:-2]
+            if isinstance(row.get(key), list):
+                out = []
+                for el in row[key]:
+                    if isinstance(el, (list, tuple)) and el and _word_no(el[0]) is not None:      # a [word, strength] pair
+                        f = frame_of(_word_no(el[0]))
+                        if f is not None:
+                            got.append(int(f))
+                            out.append([int(f)] + list(el[1:]))
+                    elif _word_no(el) is not None:
+                        f = frame_of(_word_no(el))
+                        if f is not None:
+                            got.append(int(f))
+                            out.append(int(f))
+                row[key] = out
+        elif "[]." in spec:
+            key, sub_ = spec.split("[].", 1)
+            if isinstance(row.get(key), list):
+                conv = []
+                for d in row[key]:
+                    if isinstance(d, dict) and d.get(sub_) is not None:
+                        d = dict(d, **{sub_: one(d[sub_])})
+                        if d[sub_] is None and key not in ("marks", "picks"):
+                            d.pop(sub_)                       # a mark or a pick keeps None: the ask's own frame stands in
+                    conv.append(d)
+                row[key] = conv
+        elif row.get(spec) is not None:
+            v = one(row[spec])
+            if v is None:
+                row.pop(spec)
+            else:
+                row[spec] = v
+    return got
 
 
 def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
@@ -698,6 +828,12 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
     black and white) becomes a finish ask over its sentences; the arc's years become the arc's marks. Returns (asks, notes)."""
     out, notes = [], []
     dur_f = int(dur_f or 10 ** 9)
+    pal = _palette()
+
+    def end_of(w):
+        nxt = frame_of(w + 1)
+        f = frame_of(w)
+        return nxt if nxt is not None else (None if f is None else f + 12)
     for k, a in enumerate(d.get("asks") or []):
         f = frame_of(a["at"]["w"])
         if f is None:
@@ -707,26 +843,28 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
         args = dict(a.get("args") or {})
         dev = str(a["dev"])
         row = dict(args, dev=dev, id=f"dr{k}", beat=a.get("beat"))
+        row.pop("f", None)                                # the ask's own place is its at/until word, set below
+        # every time field the device declares (the palette registry's "words"), plus the ones every card may carry,
+        # from word numbers to programme frames
+        fields = WORD_FIELDS + tuple(x for x in (pal.word_fields(dev) if pal else ()) if x not in WORD_FIELDS)
+        inner = words_to_frames(row, fields, frame_of, end_of)
+        for key in ("marks", "picks"):
+            if isinstance(row.get(key), list):
+                row[key] = [dict(m, f=f) if isinstance(m, dict) and "f" in m and m["f"] is None else m for m in row[key]]
+                if pic_key:
+                    row[key] = [dict(m, pic=pic_key(str(m["pic"])) or m["pic"]) if isinstance(m, dict) and m.get("pic") is not None else m
+                                for m in row[key]]
+        spanning = dev in SPAN_DEVICES or dev in SURFACES or bool(pal and pal.spans(dev))
         if a.get("until"):
-            g = max(frame_of(a["until"]["w"]) or f, f) + 6
-        elif dev in SPAN_DEVICES or dev in SURFACES:
+            g = max(end_of(a["until"]["w"]) or frame_of(a["until"]["w"]) or f, f + 2)
+        elif spanning:
             g = (seg_span(a["at"]["seg"])[1] if seg_span else None) or f + 30
             g = min(g, f + 90)
         else:
             g = None
+        if inner and (g is not None or spanning):         # a stretch reaches every step, section and cut it names
+            g = max(g or f, max(inner) + (12 if pal and pal.spans(dev) else 0))
         row["f"] = [f, min(max(int(g), f + 2), dur_f)] if g is not None else f
-        for key in ("marks", "picks"):                 # time fields inside a card's lists are word numbers: frames now
-            if isinstance(row.get(key), list):
-                conv = []
-                for m in row[key]:
-                    if isinstance(m, dict) and isinstance(m.get("f"), int):
-                        m = dict(m, f=frame_of(m["f"]) if frame_of(m["f"]) is not None else f)
-                    if isinstance(m, dict) and m.get("pic") is not None and pic_key:
-                        m = dict(m, pic=pic_key(str(m["pic"])) or m["pic"])
-                    conv.append(m)
-                row[key] = conv
-        if isinstance(row.get("cuts"), list):
-            row["cuts"] = [frame_of(c) for c in row["cuts"] if isinstance(c, int) and frame_of(c) is not None]
         if isinstance(row.get("pool"), list) and pic_key:
             row["pool"] = [pic_key(str(p)) or p for p in row["pool"]]
         pics = [p for p in ([pic_key(p) for p in a.get("pics") or []] if pic_key else []) if p]

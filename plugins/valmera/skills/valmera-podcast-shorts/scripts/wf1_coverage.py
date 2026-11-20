@@ -62,7 +62,7 @@ def plan(words, title, work, llm, named=None, off_camera=None):
             return old
     prompt = '''Direct documentary pictures for a spoken podcast clip. Return JSON:
 {"entities":[{"name":str,"is":"person|company|place|product|event|thing","must_show":str,"word_ids":[int]}],
- "windows":[{"first":int,"last":int,"name":str,"external":true,"must_show":str,"why":str,
+ "windows":[{"first":int,"last":int,"name":str,"external":true,"association":false,"must_show":str,"why":str,
    "depictions":[{"name":str,"must_show":str,"video_searches":[str]}]}],
  "moves":[{"word":int,"why":str}]}.
 named lists the referents the script stage resolved from the whole moment, each with the event-level
@@ -112,6 +112,14 @@ a generic boardroom for a company, a galaxy for the solar system, or a later eve
 For abstract or hypothetical claims show a truthful concrete illustration/document and explicitly
 say what it DOES NOT establish. A campus can illustrate studying there without claiming it records
 the particular conversation. Do not invent evidence of an unfilmed event or hypothetical number.
+An abstract claim, verdict or feeling that no literal picture can show (a lowest moment, no plan B,
+everything collapsing, the real deal, starting from zero) may take an ASSOCIATION window: set
+"association": true, name the picture of what the words MEAN as its subject (a cheetah at full speed
+for no plan B, falling dominoes for collapsing, an empty stadium at night for a lowest moment), give
+must_show as what that picture shows and video_searches for it, and say in why the meaning it carries.
+An association picture is a picture of the meaning, never presented as the event, the place or the
+person, and never in place of a named subject's own picture: a named person, company or event keeps
+its literal window. Association windows count toward the picture share like any other.
 Keep the opening audio and captions intact. External pictures may begin on the very first word;
 they never remove or delay speech or captions. Do not impose a two-second speaker-only opening.
 An entity named in the opening still needs a picture window on its words.
@@ -425,7 +433,8 @@ def proposals(coverage, footage, pictures, fps=30, lead=3, rejected=None, fits=N
                     measured = motion.of_shot(rec['path'],*rec['src'])
                     rec['placed_motion_p90'] = measured['p90']
             out.append([pos,end,kind,name,dict(rec, window=i, illustration=window['must_show'], clause=window.get('say'),
-                                                    clause_t=[window['t0'],window['t1']])])
+                                                    clause_t=[window['t0'],window['t1']],
+                                                    **({'association':window['must_show']} if window.get('association') is True else {}))])
             used.append(rec); pos=end
     return out
 
@@ -559,6 +568,90 @@ def require_coverage(ins, coverage, duration, fps=30, final=False):
                            f'moving={moving/max(real,.01):.3f}, new/10s={rate:.2f}, missing windows={missing}; '
                            'replace rejected pictures or fetch more before rendering',report)
     return report
+
+
+def device_pool(pack, report=None, fps=30, lead=3, work=None, ffmpeg='ffmpeg', placed=()):
+    """Every picture the supply holds for this short, as the palette's pool (worker/scene/palette/picks): the clips and
+    photographs research found and the checks did not turn down, each with what the supply measured of it (size,
+    length, faces, the subject's place across the frame) and the programme seconds of the window it was found for.
+    The devices draw from it (a burst, a grid, a collage, panels): a moment is never left to the few pictures the
+    windows placed (20 Nov: m02 placed 22 of 65 pictures and 43 sat unused). A picture the check cut clear of another
+    editor's text is offered as its cleared copy. report: the build's placement report (rejected paths, cleared text).
+    work: when given, every clip has its seated text and still bands measured and cut away first
+    (placement_check.clear_seated_text; a placed clip too: the model check counts a name lower third as attribution, but
+    a device that shows it again beside the film's own name label stacks two), measured once and kept in
+    work/pool_text.json; a clip whose text no band can shed rides as ``text_kept`` and the devices offer it last.
+    ``placed`` is accepted for callers that pass it and no longer narrows the measure."""
+    report = report or {}
+    placed = set(placed or ())
+    memo_path = os.path.join(work, 'pool_text.json') if work else None
+    try:
+        memo = json.load(open(memo_path)) if memo_path and os.path.exists(memo_path) else {}
+    except (OSError, ValueError):
+        memo = {}
+
+    def unseated(rec):
+        """The record with another editor's seated text cut away (or recorded), for a clip no check looked at."""
+        p = rec.get('path')
+        key = f"v4|{p}|{os.path.getsize(p) if p and os.path.isfile(p) else 0}"       # v4: text lines, still bands and marks, held text in the graphics zones
+        if key in memo:
+            got = memo[key]
+            return dict(rec, **got) if got.get('path') is None or os.path.isfile(got['path']) else rec
+        import placement_check
+        new, how = placement_check.clear_seated_text(rec, ffmpeg, work)
+        got = {k: new[k] for k in ('path', 'w', 'h', 'x', 'faces', 'text_kept', 'text_cleared') if k in new and new.get(k) != rec.get(k)}
+        memo[key] = got
+        return dict(rec, **got)
+    rejected = set(report.get('rejected_paths') or [])
+    cleared = {r.get('from_path'): r.get('path') for r in report.get('text_cleared') or [] if r.get('from_path') and r.get('path')}
+    windows = (pack.get('coverage') or {}).get('windows') or []
+
+    def span(i):
+        if not isinstance(i, int) or not 0 <= i < len(windows):
+            return None
+        w = windows[i]
+        return [round(float(w['t0']) + lead / fps, 3), round(float(w['t1']) + lead / fps, 3)]
+    out, seen = [], set()
+
+    def add(rec, kind, window, subject):
+        path = cleared.get(rec.get('path'), rec.get('path'))
+        if not path or path in seen or rec.get('path') in rejected or path in rejected or rec.get('dull') or not os.path.isfile(str(path)):
+            return
+        seen.add(path)
+        orig = rec.get('path')
+        if work and kind == 'clip' and path == orig:
+            rec = unseated(rec)
+            path = rec['path']
+        row = dict(id='pl' + hashlib.sha256(path.encode()).hexdigest()[:8], path=path, kind=kind, subject=subject,
+                   shows=str(rec.get('shows') or rec.get('title') or '')[:120], window=window, t=span(window))
+        if path != orig:
+            row['from_path'] = orig                     # the cleared copy answers for its original
+        if path == orig or rec.get('text_cleared'):
+            row.update({k: rec[k] for k in ('w', 'h') if rec.get(k)})
+        if kind == 'clip' and rec.get('seconds'):
+            row['seconds'] = float(rec['seconds'])
+        if rec.get('faces') and (path == orig or rec.get('text_cleared')):
+            row['faces'] = rec['faces']
+        if isinstance(rec.get('x'), (int, float)):
+            row['x'] = float(rec['x'])
+        if rec.get('text_kept'):
+            row['text_kept'] = str(rec['text_kept'])[:80]
+        out.append(row)
+    for ln in pack.get('footage') or []:
+        i = ln.get('i')
+        for c in ln.get('clips') or []:
+            add(c, 'clip', i if isinstance(i, int) else None, c.get('subject'))
+    for name, recs in (pack.get('pictures') or {}).items():
+        wins = [k for k, w in enumerate(windows) if w.get('name') == name or name in (w.get('subjects') or [])]
+        for r in recs:
+            add(r, 'photo', wins[0] if wins else None, name)
+    if memo_path and memo:
+        try:
+            json.dump(memo, open(memo_path + '.part', 'w'))
+            os.replace(memo_path + '.part', memo_path)
+        except OSError:
+            pass
+    return out
 
 
 def expand_context(coverage, available, work, llm):

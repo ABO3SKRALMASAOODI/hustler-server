@@ -12,7 +12,14 @@ family is a new file and no shared list is edited. An entry is
      "needs":    ("take", "matte", "pictures", "cards", "words", "faces", "rounds", "depth", "voice"),   (what it reads)
      "plan":     plan(l1, work, ask, sense) -> patch,
      "fallback": ("other", "devices"),       (tried in turn when this one cannot stand on the film)
-     "family":   "punct" | "finish" | "rhythm" | "type" | "hud" | "alien" | ...}
+     "family":   "punct" | "finish" | "rhythm" | "type" | "hud" | "alien" | ...,
+     "words":    ("steps[]", "sections[].at", "stress[]", "from", ...),   (optional: its time fields beyond f/at/until)
+     "span":     True}                       (optional: it lays over a stretch, so an ask with no end runs to the sentence's)
+
+``words`` names every time field of the device's own, so a caller that addresses moments by spoken word number (the
+Director: ``_shell/director.py`` palette_asks) turns each into programme frames: "x" is a field, "x[]" each element of
+a list (an element that is itself a list has its first value turned: a [word, strength] pair), "x[].y" the field y of
+each dict in list x. A value that is a pair [first, last] is a stretch: its first word's start to its last word's end.
 
 An ask is a dict in programme frames: ``{"dev": name, "id": "d3", "f": [a, b] (or "at": a), ...the device's own
 fields}``. A workflow resolves the Director's sentence-and-word addresses to frames before it hands asks here.
@@ -120,7 +127,11 @@ def _alien_entries():
             marks = [dict(f=a, stakes=float(ask.get("stakes", -0.4)))]
         return alien.DEVICES["arc"]["plan"](l1, work, dict(ask, dev="arc", marks=marks))
     out["arc_stakes"] = {"card": "arc_stakes marks[{f stakes}]. The arc's light and frame on the story's height alone",
-                         "layer": "look", "needs": (), "plan": arc_stakes, "fallback": ("finish",), "family": "alien"}
+                         "layer": "look", "needs": (), "plan": arc_stakes, "fallback": ("finish",), "family": "alien",
+                         "words": ("marks[].f",)}
+    for name, w in (("rhyme", ("cuts[]",)), ("answer", ("picks[].f",)), ("arc", ("marks[].f",))):
+        if name in out:
+            out[name]["words"] = w
     return out
 
 
@@ -139,6 +150,8 @@ def _discover():
             e.setdefault("fallback", ())
             e.setdefault("needs", ())
             e.setdefault("layer", "surface")
+            e.setdefault("words", ())
+            e.setdefault("span", False)
             found[name] = e
         FAMILY_OF.update(getattr(mod, "ALIASES", None) or {})
     for name, e in _alien_entries().items():
@@ -163,6 +176,19 @@ def resolve(name):
         if len(n) >= 3 and (k.startswith(n) or n.startswith(k)):
             return k
     return "white" if "white" in DEVICES else sorted(DEVICES)[0]
+
+
+def word_fields(name):
+    """The time fields of a device beyond f/at/until, as its entry declares them (see ``words`` above): () for none."""
+    _discover()
+    e = DEVICES.get(resolve(name)) or {}
+    return tuple(e.get("words") or ())
+
+
+def spans(name):
+    """True when the device lays over a stretch rather than on one frame."""
+    _discover()
+    return bool((DEVICES.get(resolve(name)) or {}).get("span"))
 
 
 def menu(layers=LAYERS):
@@ -468,6 +494,8 @@ def apply(l1, work, asks=None, pool=None):
     from .sense import Sense
     asks = asks_of(l1) if asks is None else [dict(a) for a in asks]
     cur = copy.deepcopy({k: v for k, v in l1.items() if k not in ("devices", "alien")})
+    from .picks import stamp_ranges
+    stamp_ranges(cur)            # each clip's checked slice, kept on its asset before any device carves its shots away
     sense = Sense(cur, work, pool=pool)
     log, events, made, seats = [], [], set(), []
 

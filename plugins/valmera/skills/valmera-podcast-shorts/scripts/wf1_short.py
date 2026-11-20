@@ -1107,6 +1107,13 @@ def score(ctx, script):
     healed = wf1_film.heal_base(l1)                          # one base picture on every frame, the renderer's rule
     if healed:
         beats["base_healed"] = healed
+    # every picture the supply holds rides the scene as the palette's pool: the devices the director asks for (a burst,
+    # a grid, a collage, panels) draw from all of it, never only the pictures the windows placed
+    # (a clip no shot or card of the film shows has another editor's seated text cut away first, by signal: the builder
+    # registers every supply clip as an asset, so "placed" is what the items show)
+    l1["pool"] = wf1_coverage.device_pool(pack, beats.get("placement_check"), work=ctx.supply, ffmpeg=pack.get("ffmpeg") or "ffmpeg",
+                                          placed={(l1.get("assets") or {}).get(it.get("pic"), {}).get("path") for it in l1["items"]
+                                                  if it.get("k") in ("shot", "card") and it.get("pic")} - {None})
     out = os.path.join(ctx.supply, "l1.json")
     json.dump(l1, open(out, "w"), ensure_ascii=False)
     l1_audio = os.path.join(ctx.supply, "l1_audio.json")       # the same scene with the take's sound as its spine: what the music is cut to

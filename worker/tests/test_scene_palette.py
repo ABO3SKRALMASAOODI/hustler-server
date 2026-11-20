@@ -333,9 +333,13 @@ def test_a_fallback_never_reads_the_asked_devices_field_in_its_own_units(film):
     l1, work = film
     out, log = palette.apply(dict(l1, devices=[{"dev": "rhyme", "id": "r", "at": [40, 120], "n": 8}]), work)
     r = log[0]
-    assert r["done"] and r["landed"] == "neg" and r["fallback"]
-    flips = [i for i in out["items"] if i["id"].startswith("rn")]
-    assert flips and all(i["f"][1] - i["f"][0] == 1 for i in flips)     # 8 pictures is not an 8-frame (or 2-frame) flip
+    assert r["done"] and r["landed"] in ("match_pos", "neg") and r["fallback"]
+    if r["landed"] == "neg":
+        flips = [i for i in out["items"] if i["id"].startswith("rn")]
+        assert flips and all(i["f"][1] - i["f"][0] == 1 for i in flips)     # 8 pictures is not an 8-frame (or 2-frame) flip
+    else:                       # with lane B's match devices registered, the rhyme's chain lands on a position match
+        chain = [i for i in out["items"] if i["id"].startswith("r.m") and "~" not in i["id"]]
+        assert 2 <= len(chain) <= 8                                              # n read as pictures, never as frames
 
 
 def test_a_card_behind_the_speaker_stands_only_on_his_take():
