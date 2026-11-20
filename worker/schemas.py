@@ -49,6 +49,8 @@ from pydantic import (AfterValidator, BaseModel, Field, field_validator,
 PIPELINE_VERSION = 13
 
 MIN_SPAN_S = 0.05
+# The shortest a text overlay plays (edit_batch stretches a shorter span).
+TEXT_MIN_SPAN_S = 0.3
 GAIN_MIN_DB = -60.0
 GAIN_MAX_DB = 12.0
 HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -3833,7 +3835,8 @@ def validate_edl(data, duration=None, *, render_fragment=False):
             raise EDLValidationError(f"texts[{i}].text is empty.")
         tx.text = tx.text.strip()[:200]
         tx.start, tx.end = _r(tx.start), _r(tx.end)
-        _check_span(f"texts[{i}]", tx.start, tx.end, prog_dur, min_len=0.3)
+        _check_span(f"texts[{i}]", tx.start, tx.end, prog_dur,
+                    min_len=TEXT_MIN_SPAN_S)
         for fname in ("x", "y"):
             fv = getattr(tx, fname)
             if fv is not None:
