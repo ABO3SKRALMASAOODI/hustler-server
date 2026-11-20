@@ -124,3 +124,23 @@ def test_the_song_covers_the_whole_film_and_enters_where_it_is_full(monkeypatch)
     rec, _use = P.choose("wf1", {"title": "x"}, 58.2, "film_clean.mp4")
     assert rec["length_s"] == 58.2 and rec["cover"] == "whole film" and rec["start"] == "0:16"
     assert "length_s" in rec["how"] and "whole film" in rec["how"] and "Instagram" in rec["how"]
+
+
+def test_the_posted_song_is_told_the_films_own_bed_and_its_mood(tmp_path):
+    """music-mix lane, 20 Nov 2026: a mischievous Cuban short played an earnest orchestral bed while its posted song was
+    a light funk cue. The chooser now reads the brief's mood first and is told the bed the film carries."""
+    seen = []
+    ans = dict(song="Pocket Money", artist="Steven Beddall", start="0:01", why="light", alternates=[])
+    pal_names = {(s["song"], s["artist"]) for s in P.palette()["songs"]}
+    if ("Pocket Money", "Steven Beddall") not in pal_names:
+        s0 = P.palette()["songs"][0]
+        ans.update(song=s0["song"], artist=s0["artist"])
+    music = dict(title="Passacaglia (Hip Hop)", author="someone", why="a cheeky classical beat",
+                 does=dict(marks=dict(mood="light, mischievous, confident")))
+    rec, _use = P.choose("wf1", dict(title="Fake weight room", direction="light, upbeat, mischievous music fits."), 50, "film_clean.mp4",
+                         ask=fake_ask(ans, seen), film_music=music)
+    system, content = seen[0]
+    text = content[0]["text"]
+    assert "mischievous" in text and "Passacaglia (Hip Hop)" in text and "light, mischievous, confident" in text
+    assert "The mood its brief asks for comes first" in system and "never a heavy prestige theme" in system
+    assert P.bed_line(None) == "" and P.bed_line({}) == ""

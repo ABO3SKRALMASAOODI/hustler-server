@@ -183,14 +183,14 @@ def main(argv=None):
     om = ((old.get("does") or {}).get("marks") or {})
     sj = doc.get("script") or {}
     names = [str(n.get("name") if isinstance(n, dict) else n) for n in (sj.get("names") or [])][:6]
-    brief = " ".join(str(sj.get(k) or "") for k in ("title", "hook_line", "direction"))[:700]
+    brief = " ".join(str(sj.get(k) or "") for k in ("title", "hook_line", "direction"))[:1800]
     if names:
         brief = f"About: {', '.join(names)}. {brief}"
     call = None if a.no_model else MF.openai_call(timeout=1205)
     mood = om.get("mood") or ""
     turn_s, payoff_s = om.get("turn_s"), om.get("payoff_s")
     if (payoff_s is None or not mood) and call is not None:
-        got = MF.story_marks(lines, dur, call) or {}
+        got = MF.story_marks(lines, dur, call, brief=brief) or {}
         mood = mood or got.get("mood") or ""
         if payoff_s is None:
             turn_s, payoff_s = got.get("turn_s"), got.get("payoff_s")
