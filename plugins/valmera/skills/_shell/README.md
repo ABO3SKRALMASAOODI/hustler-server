@@ -132,7 +132,25 @@ each, never one twice, every chapter closing on its own hit; `film.json` lists t
 lines. **A song the owner hands over** (`--args '{"song": "<file>"}'`) gets the same section choice
 and level flow and is delivered as `film_song.mp4` beside the clean `film.mp4` (a test song is never the
 film). A narrated film hands the scene with its narration as the spine (`score.l1_audio`); a film whose
-sound is one file is scored against that sound. A music fault never stops a run: the clean film is delivered. **A renderer other than the Mac engine**: `SHELL_RENDER_CMD=<script>` (workflows that
+sound is one file is scored against that sound. A music fault never stops a run: the clean film is delivered.
+
+**The story chooses the music** (owner, 20 Nov 2026: "disco music on a Mark Cuban short ... the music should really
+give you some sort of goosebumps"). The reference set is now a described palette of cinematic, emotional, epic,
+inspiring and building cues (Pixabay Music and Mixkit, free licences; club, house, phonk and gym tracks of the old
+set retired by a model reading their pages and measures): each row carries `about` and `use_for` (what a model read
+of the track's page and its signal measures; it never hears audio) and `arc` (measured: where it opens, builds,
+peaks and drops out, how harmony-led or beat-led it is). On such a palette `music_film.story_rank` shows a model the
+film's own lines with their seconds, its turn and payoff, who it is about (`chain.music_version` puts the script's
+`names` in the brief) and the mood, against every candidate, and the engine auditions the model's picks in its
+order (a later pick wins only when the first cannot be arranged or carries the film five defects worse); tempo and
+drop alignment come after fit. Long-form chapters hand their own lines (`music_chapters.chapter_lines`). Without a
+model the signal path runs as before. Building the palette: `.valmera/week-1119/music/palette/` (`measure.py`,
+`describe.py`, `build_index.py`, `listen.py`); the owner's listening page is `.valmera/models/music_ref/listen.html`.
+**A delivered film's music chosen again** (`rescore_music.py <film folder> <new folder>`): reads `film_clean.mp4`
+and `film.json`, hears the lines again with local faster-whisper, chooses on the same path and writes a NEW folder
+with `film.mp4`, a copied `film_clean.mp4`, an updated `film.json` and `rescore.json` (the choice, what the model was
+shown, and measured checks: the picture byte-identical to the delivered one, loudness, the bed recovered as film
+minus clean). The delivered folder is only read. **A renderer other than the Mac engine**: `SHELL_RENDER_CMD=<script>` (workflows that
 render through `wf3.render`): the script gets the scene, the work folder, the sound and the output path.
 If that adapter runs the renderer entirely on another host, set `SHELL_RENDER_REMOTE=1` so network
 transfer does not reserve a Mac render slot. Local renderers always retain `heavy.sh`; the remote

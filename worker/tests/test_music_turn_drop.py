@@ -90,7 +90,7 @@ def _run_score(monkeypatch, tmp_path, **kw):
     import music_film as MF
     seen = {}
 
-    def facts(kind, marks, brief="", mood=""):
+    def facts(kind, marks, brief="", mood="", lines=None):
         seen["mood"] = mood
         return {"kind": kind, "mood": mood}
 

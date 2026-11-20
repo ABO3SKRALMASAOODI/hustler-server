@@ -17,7 +17,8 @@ from scene.spine import samples
 from .faults import SceneFault
 
 FF = os.environ.get("FFMPEG_BIN", "ffmpeg")
-SOUNDS = os.environ.get("VALMERA_SOUNDS") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sound_library")
+LIBRARY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sound_library")
+SOUNDS = os.environ.get("VALMERA_SOUNDS") or LIBRARY
 SR = 48000
 TARGET_LUFS = -14.0                  # the delivered master
 CEIL_DBTP, LIMIT_DBFS = -1.0, -1.6   # never over -1 dBTP after the encode; the limiter starts at -1.6 dBFS
@@ -193,6 +194,8 @@ def split_audio(plan):
             report.setdefault("replaced", []).append(dict(id=s["replaced"]["id"], by=s["s"], at=s.get("event_f")))
         f = s.get("file") or (s.get("s", "") + ".flac")
         p = os.path.join(SOUNDS, os.path.basename(f))
+        if not os.path.exists(p) and SOUNDS != LIBRARY:     # a sound placed before the run switched to a set: the library's
+            p = os.path.join(LIBRARY, os.path.basename(f))
         if not os.path.exists(p):
             report["skipped"].append(f)
             continue

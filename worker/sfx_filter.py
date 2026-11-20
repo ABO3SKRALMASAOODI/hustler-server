@@ -187,7 +187,13 @@ def playable(rows, lib_dir=None, key="id"):
 
 
 def row(sid, lib_dir=None):
-    return _data(lib_dir)["man"].get(id_of(sid))
+    """A recording's manifest row: from `lib_dir`, else (a set that does not carry it: a plan designed on the product
+    library before the run switched to a set) from the product library, so a sound already placed resolves."""
+    sid = id_of(sid)
+    got = _data(lib_dir)["man"].get(sid)
+    if got is None and _data(lib_dir)["lib_dir"] != LIB_DIR:
+        got = _data(LIB_DIR)["man"].get(sid)
+    return got
 
 
 def _hit(x):
@@ -210,6 +216,8 @@ def swap(item, lib_dir=None):
     old_x, new_x = row(sid, lib_dir), row(new, lib_dir) if new else None
     if not new_x:
         return item, False
+    if old_x is None:                                          # measured nowhere: the item's own peak is the old hit
+        old_x = {"peak_s": item.get("peak_s"), "hit_s": item.get("peak_s")}
     start, trim = float(item.get("start_s") or 0.0), float(item.get("trim_s") or 0.0)
     peak = float(item["peak_s"]) if item.get("peak_s") is not None else _hit(old_x)
     t_hit = start - trim + peak                                # the programme second the old hit landed on
