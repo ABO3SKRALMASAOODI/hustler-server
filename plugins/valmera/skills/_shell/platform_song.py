@@ -141,7 +141,8 @@ def bed_line(music):
     m = music or {}
     if not m.get("title"):
         return ""
-    mood = (((m.get("does") or {}).get("marks") or {}).get("mood") or "").strip()
+    does = m.get("does") or {}
+    mood = str((does.get("marks") or {}).get("mood") or does.get("mood") or "").strip()
     out = f"\n\nTHE FILM'S OWN MUSIC BED (in the film file; the posted song replaces it): \"{m.get('title')}\" by {m.get('author')}"
     if mood:
         out += f", chosen for the mood: {mood}"
