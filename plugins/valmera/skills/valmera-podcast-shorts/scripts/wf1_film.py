@@ -1088,6 +1088,7 @@ def build(script, sup, style_id, direction=None):
     # timing (a word too early, too close to another or too short to hold gives its place to the next), so a film
     # never loses its display words to timing. A long phrase is stacked (display_rows), never skipped for its length.
     omit = []
+    free = set()                                         # rows a device draws only in part: the caption keeps its seat for the rest
     devices = []                                         # the palette's asks: rows whose type performs (laid at the render, chain.alien_bank)
     proposed = d.get("display") or []
     for row in proposed:
@@ -1117,11 +1118,21 @@ def build(script, sup, style_id, direction=None):
         perf = row.get("perform") if isinstance(row.get("perform"), dict) else None
         if perf and perf.get("dev"):
             # the model chose the device that makes this row's type perform (palette_menu): the palette draws it on the
-            # scene's word clock; a device that draws the words itself takes the row's place and its caption words
+            # scene's word clock, ending by the row's window (b) or its sentence, never past the next subject
             import palette_menu
-            devices.append(palette_menu.ask_for(row, seg, text, a, b, len(devices)))
+            limit = min([Clock.f(clock.segs[seg][1]) + 10] + next_subject)
+            ask = palette_menu.ask_for(row, seg, text, a, b, len(devices), limit=limit)
+            devices.append(ask)
             if perf["dev"] in palette_menu.REPLACES:
-                omit += F.said_span(clock, seg, text)
+                # a device that draws the words itself takes the row's place and the caption words it draws; a word of
+                # the row it does not draw stays in the caption, which then keeps its seat (the device seats itself off it)
+                mask = palette_menu.drawn(ask, text)
+                span = F.said_span(clock, seg, text)
+                if all(mask):
+                    omit += span
+                else:
+                    omit += palette_menu.omit_of(span, text, mask, F.norm_word)
+                    free.add((a, b, text))
                 P.events.append(a)
                 shown.append((a, b, text))
                 continue
@@ -1166,7 +1177,7 @@ def build(script, sup, style_id, direction=None):
         P.block([a, b], [0.5 - wd / 2 - 0.022, y - 0.030, 0.5 + wd / 2 + 0.022, y_last + 0.013], pal["plate"], z=6, op=0.78, radius=0.008)
         for n, r_ in enumerate(rows):
             P.word([a, b], r_, "lab", 0.5, y + 0.036 * n, pal["ink"], 0.95, align="c", z=7, role="stat")
-    lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), hold=[(a - 1, b) for a, b, _ in shown], z=5,
+    lines = F.caption_build(P, clock, "cap", cap_y, f_end=min(f_voice_end + 8, f_end), hold=[(a - 1, b) for a, b, t in shown if (a, b, t) not in free], z=5,
                             omit=omit)
     P.items = inside(P.items, f_end)
     P.items = ink_by_ground(P.items, P.voices, bright)

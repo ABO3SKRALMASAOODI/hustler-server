@@ -1179,8 +1179,10 @@ def render_revision(sc):
 
 
 def invalidate_render(ctx):
+    # the palette's laid scene (chain.alien_bank) is drawn from the l1 the score just rewrote: it goes with the render
     for name in ('film_engine.mp4','film_engine.mp4.log.json','sound.m4a',
-                 'film_engine_music.mp4','music.json'):
+                 'film_engine_music.mp4','music.json',
+                 'l1.alien.json','l1.alien.json.part','l1.alien.json.key','alien_bank.json'):
         path=os.path.join(ctx.supply,name)
         if os.path.exists(path):os.remove(path)
     for name in ('final.mp4','final_music.mp4','final_song.mp4'):

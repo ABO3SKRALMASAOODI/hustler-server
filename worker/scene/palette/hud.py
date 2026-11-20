@@ -142,29 +142,108 @@ def track(l1, work, ask, sense=None):
         items.append(K.rect(f"{ask['id']}.ln{j}", (a, z), rr, col, a=0.95, z=4))
     label = str(o.get("label") or o.get("t") or "").upper().strip()
     voices = {}
+    stand = K.others_t(l1, a, z) + K.caption_boxes(l1, a, z)
+    cap = K.caption_top(l1, a, z)
+    taken = []                                           # (box, f0, f1) of the label, for the note to clear
+    log_seat = {}
     if label:
         vl = K.mono(o.get("px", 36))
         vn = f"pal.{ask['id']}.lab"
         voices[vn] = vl
-        _, bl = K.ink_box(vl, label)
-        xs = [round(max(min(q[0], 0.96 - (bl[2] - bl[0]) / W), 0.03), 6) for q in B]
-        ys = [round(max(q[1] - 0.010, 0.12 + (bl[3] - bl[1]) / H), 6) for q in B]
+        f0, f1, xs, ys, side = seat_label(vl, label, B, a + 2, z, a, W, H, stand, cap, LABEL_SEATS)
+        log_seat["label"] = side
         k = min(len(label), 12)
         for q in range(k):
             m = max(1, round(len(label) * (q + 1) / k))
-            f0, f1 = a + 2 + q, (a + 3 + q if q < k - 1 else z)
-            if f1 <= f0 or f0 >= z:
+            g0, g1 = f0 + q, (f0 + 1 + q if q < k - 1 else f1)
+            if g1 <= g0 or g0 >= f1:
                 continue
-            items.append(K.word(f"{ask['id']}.lab{q:02d}", (f0, f1), label[:m], vn, xs[f0 - a:f1 - a], ys[f0 - a:f1 - a], col, z=8, role="graphic", on=a,
+            items.append(K.word(f"{ask['id']}.lab{q:02d}", (g0, g1), label[:m], vn, xs[g0 - a:g1 - a], ys[g0 - a:g1 - a], col, z=8, role="graphic", on=a,
                                 op=0.95))
+        taken += [(K.drawn(vl, label, xs[i], ys[i], W, H), a + i, a + i + 1) for i in range(f0 - a, f1 - a, 4)]
     note = str(o.get("note") or "").upper().strip()
     if note:
         vnn = f"pal.{ask['id']}.note"
         voices[vnn] = K.mono(30.0)
-        items.append(K.word(f"{ask['id']}.note", (min(a + 6, z - 1), z), note, vnn, [round(q[0], 6) for q in B[min(6, n - 1):]],
-                            [round(min(q[3] + 0.024, 0.95), 6) for q in B[min(6, n - 1):]], col, z=8, role="graphic", on=a, op=0.8))
+        f0, f1, xs, ys, side = seat_label(voices[vnn], note, B, min(a + 6, z - 1), z, a, W, H, stand + taken, cap, NOTE_SEATS)
+        log_seat["note"] = side
+        if f1 > f0:
+            items.append(K.word(f"{ask['id']}.note", (f0, f1), note, vnn, xs[f0 - a:f1 - a], ys[f0 - a:f1 - a], col, z=8, role="graphic", on=a, op=0.8))
     return {"items": items, "voices": voices, "marks": [{"f": a, "what": "track locks", "kind": "hud", "strength": 0.4}],
-            "log": {"follows": what, "style": style, "frames": n}}
+            "log": {"follows": what, "style": style, "frames": n, "seats": log_seat}}
+
+
+# where a label can sit on the tracked box: (name, preference) and its pen from the box (x0, y0, x1, y1) and the line's
+# ink box (bx): above the top edge, inside it, under the bottom edge, right-aligned over the top, beside the box on
+# either side at its top, or stacked over a label set above it
+_SIDE = 0.015
+LABEL_SEATS = (("above", 0.0, lambda q, bx, W, H: (q[0] - bx[0] / W, q[1] - 0.010 - bx[3] / H)),
+               ("inside", 0.05, lambda q, bx, W, H: (q[0] + 0.012 - bx[0] / W, q[1] + 0.012 - bx[1] / H)),
+               ("right", 0.06, lambda q, bx, W, H: (q[2] - bx[2] / W, q[1] - 0.010 - bx[3] / H)),
+               ("beside", 0.07, lambda q, bx, W, H: (q[2] + _SIDE - bx[0] / W, q[1] - bx[1] / H)),
+               ("before", 0.07, lambda q, bx, W, H: (q[0] - _SIDE - bx[2] / W, q[1] - bx[1] / H)),
+               ("below", 0.08, lambda q, bx, W, H: (q[0] - bx[0] / W, q[3] + 0.012 - bx[1] / H)))
+NOTE_SEATS = (("below", 0.0, lambda q, bx, W, H: (q[0] - bx[0] / W, q[3] + 0.014 - bx[1] / H)),
+              ("inside", 0.05, lambda q, bx, W, H: (q[0] + 0.012 - bx[0] / W, q[3] - 0.012 - bx[3] / H)),
+              ("right", 0.06, lambda q, bx, W, H: (q[2] - bx[2] / W, q[3] + 0.014 - bx[1] / H)),
+              ("beside", 0.07, lambda q, bx, W, H: (q[2] + _SIDE - bx[0] / W, q[3] - bx[3] / H)),
+              ("before", 0.07, lambda q, bx, W, H: (q[0] - _SIDE - bx[2] / W, q[3] - bx[3] / H)),
+              ("beside_top", 0.08, lambda q, bx, W, H: (q[2] + _SIDE - bx[0] / W, q[1] + 0.034 - bx[1] / H)),
+              ("above", 0.08, lambda q, bx, W, H: (q[0] - bx[0] / W, q[1] - 0.010 - bx[3] / H)),
+              ("stacked", 0.09, lambda q, bx, W, H: (q[0] - bx[0] / W, q[1] - 0.044 - bx[3] / H)))
+
+
+def seat_label(v, text, B, f0, f1, a, W, H, stand, cap, seats):
+    """(first frame, last frame, xs, ys, seat) for a mono line riding a tracked box over [f0, f1): the seat whose
+    line stays off the watermark, off the type laid before it (``stand``: (box, from, to)) and inside the frame,
+    measured on every fourth frame as drawn. The line is kept inside the frame and off the watermark on every frame;
+    when type laid before it still stands where the best seat is, its hold is shortened to the frames that are
+    clear. xs and ys run from frame a."""
+    _, bx = K.ink_box(v, text)
+    lw = (bx[2] - bx[0]) / W
+    g = 0.012                                            # a breath between two pieces of type, never touching
+    stand = [([b[0] - g, b[1] - g, b[2] + g, b[3] + g], f0_, f1_) for b, f0_, f1_ in stand]
+    best = None
+    for name, pref, pen in seats:
+        xs, ys, cost, hits = [], [], pref, []
+        for i, q in enumerate(B):
+            x, y = pen(q, bx, W, H)
+            x = min(max(x, 0.03 - bx[0] / W), 0.97 - lw - bx[0] / W)
+            blk = [x + bx[0] / W, y + bx[1] / H, x + bx[2] / W, y + bx[3] / H]
+            if K.overlap(blk, K.MARK) > 0:                 # off the watermark: the line drops below the keep-out
+                y += K.MARK[3] + 0.006 - blk[1]
+                blk = [blk[0], K.MARK[3] + 0.006, blk[2], K.MARK[3] + 0.006 + (bx[3] - bx[1]) / H]
+                cost += 0.004
+            if blk[1] < 0.105:
+                y += 0.105 - blk[1]
+            if blk[3] > 0.97:
+                y -= blk[3] - 0.97
+                cost += 0.01
+            xs.append(round(x, 6))
+            ys.append(round(y, 6))
+            f = a + i
+            if f0 <= f < f1 and i % 2 == 0:
+                area = max((blk[2] - blk[0]) * (blk[3] - blk[1]), 1e-6)
+                hit = sum(K.overlap(blk, ob) for ob, g0, g1 in stand if g0 <= f < g1) / area
+                if blk[3] > cap - 0.01:
+                    cost += 0.02
+                if hit > 0.02:
+                    hits.append(f)
+                cost += 0.5 * hit
+        if best is None or cost < best[0]:
+            best = (cost, name, xs, ys, hits)
+    _, name, xs, ys, hits = best
+    g0, g1 = f0, f1
+    if hits:                                             # the type laid first keeps its place: the line yields its frames
+        first, last = min(hits), max(hits)
+        if first - f0 >= 10:
+            g1 = first
+        elif f1 - (last + 2) >= 10:
+            g0 = last + 2
+        else:                                            # it stands there the whole time: the line gives it the frame
+            g1 = g0
+            name += " (yields)"
+    return g0, max(g1, g0), xs, ys, name
 
 
 CORNERS = ("tl", "tr", "bl")
@@ -178,16 +257,33 @@ def fineprint(l1, work, ask, sense=None):
     if not lines:
         return {"skip": "fineprint needs words"}
     a, z, hit = K.span(l1, ask, need=int(o.get("hold", 60)))
-    corner = o.get("corner") or K.rng_of(l1, ask).choice(CORNERS)
+    asked = o.get("corner") if o.get("corner") in CORNERS else K.rng_of(l1, ask).choice(CORNERS)
     v = K.mono(o.get("px", 36))
     lh = 1.35 * v["px"] / H
     wmax = max(K.ink_box(v, ln)[1][2] for ln in lines) / W
-    if corner == "tl":
-        x0, y0 = 0.06, 0.135
-    elif corner == "tr":
-        x0, y0 = 0.94 - wmax, K.MARK[3] + 0.03
-    else:
-        x0, y0 = 0.06, K.caption_top(l1, a, z) - 0.04 - lh * len(lines)
+    stand = K.others(l1, a, z)
+    faces = S.faces_over(a, z)
+    cap = K.caption_top(l1, a, z)
+
+    def at(c):
+        if c == "tl":
+            x, y = 0.06, 0.135
+            if x + wmax > K.MARK[0]:                    # a line long enough to reach the watermark starts under it
+                y = K.MARK[3] + 0.03
+        elif c == "tr":
+            x, y = 0.94 - wmax, K.MARK[3] + 0.03
+        else:
+            x, y = 0.06, cap - 0.04 - lh * len(lines)
+        return max(x, 0.03), y
+
+    def cost(c):                                       # the asked corner first; another when the type laid before is there
+        x, y = at(c)
+        blk = [x, y, x + wmax, y + lh * len(lines)]
+        area = max((blk[2] - blk[0]) * (blk[3] - blk[1]), 1e-6)
+        return (0.0 if c == asked else 0.05) + sum(K.overlap(blk, b) for b in stand) / area + 40 * K.overlap(blk, K.MARK) / area \
+            + 0.5 * sum(K.overlap(blk, f) for f in faces) / area
+    corner = min((asked,) + tuple(c for c in CORNERS if c != asked), key=cost)
+    x0, y0 = at(corner)
     tone, _ = S.ground([x0, y0, x0 + wmax, y0 + lh * len(lines)], a, z)
     ink = K.DARK if tone > 0.62 else ("#FFFFFF" if o.get("white", True) else pal["accent"])
     vn = f"pal.{ask['id']}.fp"
@@ -205,7 +301,7 @@ def fineprint(l1, work, ask, sense=None):
             f += 1
     if o.get("dot"):
         items.append(K.rect(f"{ask['id']}.dot", (a, z), [round(x0 - 0.026, 5), round(y0 + 0.4 * lh, 5), round(x0 - 0.012, 5), round(y0 + 0.4 * lh + 0.008, 5)], "#FF3B30"))
-    return {"items": items, "voices": {vn: v}, "marks": [], "log": {"corner": corner, "lines": lines}}
+    return {"items": items, "voices": {vn: v}, "marks": [], "log": {"corner": corner, "asked": asked, "lines": lines}}
 
 
 def _share(o):
@@ -225,14 +321,31 @@ def donut(l1, work, ask, sense=None):
     r = float(o.get("r", 0.13))
     rpx = r * W
     cap = K.caption_top(l1, a, z)
+    stand = K.others(l1, a, z)
+    lab_h = 0.06 if o.get("label") else 0.0
+    cands = []
     if faces:
         f = faces[0]
         left, right = f[0], 1 - f[2]
-        cx = (f[0] - r - 0.05) if left > right else (f[2] + r + 0.05)
-        cx = min(max(cx, r + 0.05), 0.95 - r)
-        cy = min(max((f[1] + f[3]) / 2, K.MARK[3] + 0.03 + rpx / H), cap - 0.04 - rpx / H)
+        sides = [(f[0] - r - 0.05), (f[2] + r + 0.05)]
+        if right >= left:
+            sides.reverse()
+        for k, cx in enumerate(sides):
+            for dy in (0.0, -0.12, 0.12):
+                cands.append((cx, (f[1] + f[3]) / 2 + dy, 0.05 * k + 0.1 * abs(dy)))
     else:
-        cx, cy = 0.5, min(0.40, cap - 0.04 - rpx / H)
+        cands = [(0.5, 0.40, 0.0), (0.5, 0.30, 0.05), (0.5, 0.52, 0.05)]
+    best = None
+    for cx, cy, pref in cands:                         # beside the face, off the type laid before it and the watermark
+        cx = min(max(cx, r + 0.05), 0.95 - r)
+        cy = min(max(cy, K.MARK[3] + 0.03 + rpx / H), cap - 0.04 - rpx / H - lab_h)
+        blk = [cx - r, cy - rpx / H, cx + r, cy + rpx / H + lab_h]
+        area = (blk[2] - blk[0]) * (blk[3] - blk[1])
+        c = pref + sum(K.overlap(blk, b) for b in stand) / area + 40 * K.overlap(blk, K.MARK) / area \
+            + 0.6 * sum(K.overlap(blk, fb) for fb in faces[:1]) / area
+        if best is None or c < best[0]:
+            best = (c, cx, cy)
+    _, cx, cy = best
     N = int(o.get("dots", 40))
     dv = {"font": "InterDisplay-Bold.ttf", "px": K.px(34.0), "track": 0}
     _, db = K.ink_box(dv, "•")

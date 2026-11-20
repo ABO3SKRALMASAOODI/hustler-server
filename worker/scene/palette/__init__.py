@@ -121,6 +121,16 @@ def glyph_safe(patch, voices):
     return n
 
 
+def _clear_mark(cur, patch, ask_id):
+    from . import kit as K
+    try:
+        W, H = [int(v) for v in (cur.get("frame") or [1080, 1920])]
+        voices = dict(cur.get("voices") or {}, **(patch.get("voices") or {}))
+        return K.clear_of_mark(patch.get("items") or [], voices, W, H, f"{ask_id}.")
+    except Exception:      # noqa: BLE001 - a word that cannot be measured is the engine's to report
+        return 0.0
+
+
 def chain(name):
     """The device and its fallbacks, each once, in order. A name the palette does not know (a model's slip) is read as
     the one device every word can stand on, ``verb``."""
@@ -154,13 +164,17 @@ def apply(l1, work, asks=None, sense=None):
             try:
                 patch = plan(cur, work, a2, sense)
             except Exception as e:      # noqa: BLE001 - a device is never the reason a film does not render: the next one runs
-                patch = {"skip": f"{type(e).__name__}: {e}"}
+                patch = {"skip": f"{e.__class__.__name__}: {e}"}      # the package's own `type` is its type family
             if patch.get("skip"):
                 tried.append({"dev": name, "why": patch["skip"]})
                 continue
             dropped = glyph_safe(patch, cur.get("voices"))
             if dropped and isinstance(patch.get("log"), dict):
                 patch["log"]["glyphs_dropped"] = dropped
+            # the watermark's keep-out is the owner's: a device's own type that would meet it moves down, as one block
+            moved = _clear_mark(cur, patch, ask["id"])
+            if moved and isinstance(patch.get("log"), dict):
+                patch["log"]["moved_off_mark"] = moved
             nxt = merge(cur, patch)
             ok, why = eligible(nxt)
             if not ok:

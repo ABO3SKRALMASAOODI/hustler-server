@@ -29,3 +29,81 @@ def test_a_perform_row_becomes_an_ask_on_its_own_words():
     assert ask["args"]["to"] == 1200 and ask["args"]["t"] == "1,200 miles" and "dev" not in ask["args"]
     hl = palette_menu.ask_for({"perform": {"dev": "highlight", "t": "here"}}, 1, "wouldn't be here", 250, 284, 0)
     assert hl["until"] == 284 and hl["args"]["t"] == "here"          # a decoration lives as long as the row it marks
+
+
+def test_every_device_on_the_menu_has_one_category_and_a_bounded_end():
+    """A device that draws its words replaces the row (chapter says its own title) and ends by the row's window unless
+    the model named its end; a decoration ends inside its row or its sentence (the caption read along is one sentence,
+    never the rest of the film)."""
+    assert "chapter" in palette_menu.REPLACES and "chapter" not in palette_menu.DECORATES
+    assert not set(palette_menu.REPLACES) & set(palette_menu.DECORATES)
+    a, b, limit = 250, 284, 330
+    for dev in palette_menu.REPLACES:
+        ask = palette_menu.ask_for({"perform": {"dev": dev}}, 1, "wouldn't be here", a, b, 0, limit=limit)
+        assert ask["bound"] == b and "until" not in ask, dev
+        own = palette_menu.ask_for({"perform": {"dev": dev, "until": {"seg": 1, "word": "here"}}}, 1, "wouldn't be here", a, b, 0, limit=limit)
+        assert own["until"] == {"seg": 1, "word": "here"} and own["bound"] == limit, dev
+    for dev in palette_menu.DECORATES:
+        ask = palette_menu.ask_for({"perform": {"dev": dev}}, 1, "wouldn't be here", a, b, 0, limit=limit)
+        assert a < ask["until"] <= limit and ask["bound"] == ask["until"], dev
+        if dev in palette_menu.ON_THE_ROW:
+            assert ask["until"] == b, dev
+    assert palette_menu.ask_for({"perform": {"dev": "readalong"}}, 1, "wouldn't be here", a, b, 0, limit=limit)["until"] == limit
+
+
+def test_a_device_that_draws_part_of_its_row_leaves_the_rest_in_the_caption():
+    ask = palette_menu.ask_for({"perform": {"dev": "behind", "t": "LOVE", "small": "I"}}, 4, "I love you", 600, 640, 0)
+    assert palette_menu.drawn(ask, "I love you") == [True, True, False]
+    span = [{"w": "I"}, {"w": "love"}, {"w": "you"}]
+    assert [r["w"] for r in palette_menu.omit_of(span, "I love you", [True, True, False])] == ["I", "love"]
+    um = [{"w": "I"}, {"w": "uh"}, {"w": "love"}, {"w": "you"}]
+    assert [r["w"] for r in palette_menu.omit_of(um, "I love you", [True, True, False])] == ["I", "uh", "love"]
+    whole = palette_menu.ask_for({"perform": {"dev": "typewriter"}}, 4, "I love you", 600, 640, 0)
+    assert all(palette_menu.drawn(whole, "I love you"))                    # handed the row: it draws every word
+    fig = palette_menu.ask_for({"perform": {"dev": "counter", "from": 0, "to": 1200, "t": "1,200"}}, 3, "1,200 miles", 577, 611, 0)
+    assert all(palette_menu.drawn(fig, "1,200 miles"))                     # a figure device draws its row and its unit
+
+
+def test_the_laid_scene_is_redone_when_the_scene_it_was_laid_from_changes(tmp_path, monkeypatch):
+    """A rebuilt score rewrites l1.json: the palette lays it again; the same scene is drawn from the cache."""
+    import json
+    from types import SimpleNamespace
+    import chain
+    l1 = tmp_path / "l1.json"
+    l1.write_text(json.dumps({"devices": [{"dev": "verb", "t": "ONE"}], "items": []}))
+    ctx = SimpleNamespace(run_id="t", supply=str(tmp_path))
+    runs = []
+
+    def fake_sh(ctx, cmd, **kw):
+        src = json.load(open(l1))
+        out = cmd[-1].split("--out ")[1].split(" ")[0]
+        runs.append(src["devices"][0]["t"])
+        open(out, "w").write(json.dumps({"laid": src["devices"][0]["t"]}))
+        return ""
+    monkeypatch.setattr(chain, "sh", fake_sh)
+    monkeypatch.setattr(chain, "engine_kind", lambda: "scene")
+    monkeypatch.setattr(chain.brand, "worker_dir", lambda: str(tmp_path))
+    out = chain.alien_bank(ctx, str(l1))
+    assert json.load(open(out))["laid"] == "ONE"
+    assert chain.alien_bank(ctx, str(l1)) == out and runs == ["ONE"]       # the same scene: drawn from the cache
+    l1.write_text(json.dumps({"devices": [{"dev": "verb", "t": "TWO"}], "items": []}))
+    out2 = chain.alien_bank(ctx, str(l1))
+    assert json.load(open(out2))["laid"] == "TWO" and runs == ["ONE", "TWO"]  # rebuilt: laid again, never the old palette
+
+
+def test_the_podcast_render_cache_goes_with_the_laid_scene(tmp_path):
+    import importlib
+    from types import SimpleNamespace
+    pod = os.path.join(os.path.dirname(HERE), "valmera-podcast-shorts", "scripts")
+    sys.path.insert(0, pod)
+    try:
+        wf1 = importlib.import_module("wf1_short")
+    except Exception as e:      # noqa: BLE001 - the podcast package needs its own environment
+        import pytest
+        pytest.skip(f"wf1_short does not import here: {e}")
+    sup = tmp_path / "supply"
+    sup.mkdir()
+    for name in ("film_engine.mp4", "l1.alien.json", "l1.alien.json.part", "l1.alien.json.key", "alien_bank.json", "l1.json"):
+        (sup / name).write_text("x")
+    wf1.invalidate_render(SimpleNamespace(supply=str(sup), run_dir=str(tmp_path)))
+    assert sorted(os.listdir(sup)) == ["l1.json"]

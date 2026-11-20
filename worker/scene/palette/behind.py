@@ -143,8 +143,89 @@ def stand_behind(l1, work, a, z, ask=None):
     return {"ok": True, "items": items, "assets": assets, "log": why}
 
 
+def matte_frames(l1, work, assets, a, z, n=6, size=(135, 240)):
+    """{programme frame: the person's matte on it, float 0..1 at ``size``}: the take's matte through each take shot's
+    own crop and clock, on ``n`` frames of [a, z). {} when it cannot be read."""
+    l1m = dict(l1, assets=dict(l1.get("assets") or {}, **(assets or {})))
+    if "matte" not in l1m["assets"]:
+        return {}
+    on = dict(l1m, items=[dict(sh, pic="matte") for sh in take_shots(l1m, a, z)])
+    out = {}
+    for f in sorted(set(np.linspace(a, max(a, z - 1), n).astype(int).tolist())):
+        try:
+            got = asense.shot_frames(on, work, f, f + 1, size=size, gray=True)
+        except Exception:      # noqa: BLE001 - a frame that cannot be read is not measured
+            continue
+        if got.get(f) is not None:
+            out[f] = got[f].astype(np.float32) / 255.0
+    return out
+
+
+def _sat(m):
+    """The summed-area table of a matte: the mean of any box in four reads."""
+    return np.pad(m, ((1, 0), (1, 0))).cumsum(0).cumsum(1)
+
+
+def _cover(sat, box):
+    """Mean matte (0..1) inside a frame-fraction box."""
+    h, w = sat.shape[0] - 1, sat.shape[1] - 1
+    x0, x1 = int(np.clip(round(box[0] * w), 0, w)), int(np.clip(round(box[2] * w), 0, w))
+    y0, y1 = int(np.clip(round(box[1] * h), 0, h)), int(np.clip(round(box[3] * h), 0, h))
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    return float(sat[y1, x1] - sat[y0, x1] - sat[y1, x0] + sat[y0, x0]) / ((x1 - x0) * (y1 - y0))
+
+
+SEEN = 0.70        # each letter keeps at least this share of itself in view on its worst frame
+FRONT = 0.5        # under this on the best seat behind the head, a letter would be lost: the words stand in front
+DEPTH = 0.16       # the head over the lower part of the letters: the share of the word it is good for it to cover
+
+
+def seat_behind(v0, t, mattes, W, H, top, bottom, base_ref, small=None, high=0.105):
+    """(voice, pen x, baseline, measure) for a word set behind the speaker, chosen on the matte itself: every letter
+    mostly in view on every measured frame (the head passes over the lower part of the letters, never across a whole
+    glyph), as large, as central and as near ``base_ref`` as that allows. Its ink stays under ``top`` where it meets the
+    watermark's columns (under ``high`` elsewhere) and its baseline over ``bottom``. ``small``: (voice, text, gap) of
+    the line set over it, kept in view too. Always gives a seat: the best measured."""
+    sats = [_sat(m) for m in mattes]
+    best = None
+    for sc in (1.0, 0.88, 0.76, 0.66, 0.57, 0.49):
+        v = dict(v0, px=round(v0["px"] * sc, 2))
+        m = K.metrics(v, t)
+        gl = m["glyphs"] or [m["ink"]]
+        _, b = K.ink_box(v, t)
+        bw, bh = (b[2] - b[0]) / W, (b[3] - b[1]) / H
+        sh = 0.0
+        if small:
+            _, sb = K.ink_box(small[0], small[1])
+            sh = (sb[3] - sb[1]) / H + small[2]
+        for dx in np.arange(-0.30, 0.3001, 0.05):
+            cx = 0.5 + float(dx)
+            if cx - bw / 2 < 0.025 or cx + bw / 2 > 0.975:
+                continue
+            roof = top if cx + bw / 2 > K.MARK[0] and cx - bw / 2 < K.MARK[2] else high
+            lo_b = roof + bh + sh
+            for base in np.arange(lo_b, max(bottom, lo_b) + 1e-6, 0.012):
+                x, y = K.place(v, t, cx, float(base), W, H)
+                boxes = [[x + g[0] / W, y + g[1] / H, x + g[2] / W, y + g[3] / H] for g in gl]
+                if small:
+                    vs, st, gap = small
+                    sx, sy = K.place(vs, st, cx, float(base) - bh - gap, W, H)
+                    boxes.append(K.drawn(vs, st, sx, sy, W, H))
+                seen = [min(1.0 - _cover(sa, bx) for sa in sats) for bx in boxes]
+                hid = float(np.mean([np.mean([_cover(sa, bx) for sa in sats]) for bx in boxes]))
+                short = sum(max(0.0, SEEN - q) for q in seen)
+                score = -10.0 * short + 1.2 * min(hid, DEPTH) - 0.6 * (1.0 - sc) - 0.8 * abs(float(base) - base_ref) - 0.4 * abs(dx)
+                if best is None or score > best[0]:
+                    best = (score, v, x, float(base), {"scale": sc, "dx": round(float(dx), 2), "seen_min": round(min(seen), 3), "hidden": round(hid, 3)})
+    _, v, x, base, meas = best
+    return v, x, base, meas
+
+
 def behind(l1, work, ask, sense=None):
-    """A word (and a small line over it) set huge behind the speaker's head: the head passes in front of the letters."""
+    """A word (and a small line over it) set huge behind the speaker's head: the head passes in front of the letters.
+    Its seat is measured on the matte over the hold: every letter stays mostly in view and the head covers the lower
+    part of the word, the way the references set it."""
     from .type import cased, text_of, vname, _marks
     o = K.opts(ask)
     W, H, fps, dur = K.size(l1)
@@ -166,31 +247,52 @@ def behind(l1, work, ask, sense=None):
     faces = S.faces_over(land, z)
     if faces:
         f = max(faces, key=lambda q: (q[2] - q[0]) * (q[3] - q[1]))
-        base = f[1] + float(o.get("depth", 0.12)) * (f[3] - f[1])
+        base_ref = f[1] + float(o.get("depth", 0.12)) * (f[3] - f[1])
     else:
-        base = 0.36 + bh / 2
-    base = max(base, K.MARK[3] + 0.015 + bh)
+        base_ref = 0.36 + bh / 2
     small = cased(" ".join(str(o.get("small") or "").split()), o, "upper")
-    x, y = K.place(v, t, 0.5, base, W, H)
+    vs = K.mono(max(K.FLOOR_PX + 4, min(48.0, v["px"] * 0.2 / K.SCALE))) if small else None
+    top = K.MARK[3] + 0.015
+    bottom = K.caption_top(l1, land, z) - 0.03
+    mattes = list(matte_frames(l1, work, got.get("assets"), land, z).values())
+    meas = None
+    if mattes:
+        v, x, base, meas = seat_behind(v, t, mattes, W, H, top, bottom, base_ref, small=(vs, small, 0.018) if small else None)
+        if meas["seen_min"] < FRONT:
+            # a framing with no room behind the head for every letter (a close-up: the head fills the width, the body
+            # the rest): the same words land in front, off his face, on the same word, so the payoff still reads
+            from .type import verb
+            words = " ".join(w for w in (small, t) if w)
+            got2 = verb(l1, work, dict(ask, dev="verb", args=dict(o, t=words, verb=o.get("verb") or "punch")), sense)
+            if not got2.get("skip"):
+                got2["log"] = dict(got2.get("log") or {}, front="no seat behind this framing keeps every letter in view", measured=meas)
+                return got2
+        _, b = K.ink_box(v, t)
+        bh = (b[3] - b[1]) / H
+        cx = x + (b[0] + b[2]) / 2 / W
+    else:                                                # no matte to read: the head's own box
+        base = max(base_ref, top + bh + ((K.ink_box(vs, small)[1][3] - K.ink_box(vs, small)[1][1]) / H + 0.018 if small else 0.0))
+        cx = 0.5
+        x, _ = K.place(v, t, cx, base, W, H)
+    y = base
     tone, _ = S.ground([0.03, base - bh, 0.97, base], land, z)
     ink = o.get("ink") or (K.DARK if tone > 0.62 else (pal["accent"] if o.get("accent") else pal["ink"]))
     n = z - land
     vn = vname(ask, "bh")
-    it = K.word(f"{ask['id']}.bh", (land, z), t, vn, x, [round(y + d, 6) for d in K.ease_out(n, 0.028, 0.0, frames=7)], ink, z=4,
+    it = K.word(f"{ask['id']}.bh", (land, z), t, vn, round(x, 6), [round(y + d, 6) for d in K.ease_out(n, 0.028, 0.0, frames=7)], ink, z=4,
                 role="graphic", on=land, behind=True,
                 op=[round(min(1.0, (q + 1) / 3.0) * (1.0 if q < n - 4 else max(0.0, (n - q - 1) / 4.0)), 3) for q in range(n)],
                 s=[round(1.0 + 0.04 * max(0.0, 1 - q / 8.0), 5) for q in range(n)])
     items = [it] + list(got.get("items") or [])
     voices = {vn: v}
     if small:
-        vs = K.mono(max(K.FLOOR_PX + 4, min(48.0, v["px"] * 0.2 / K.SCALE)))
-        sx, sy = K.place(vs, small, 0.5, base - bh - 0.018, W, H)
+        sx, sy = K.place(vs, small, cx, base - bh - 0.018, W, H)
         voices[vn + "s"] = vs
         items.append(K.word(f"{ask['id']}.bs", (land, z), small, vn + "s", sx, sy, pal["accent"] if tone < 0.55 else K.DARK, z=4, role="graphic", on=land,
                             behind=True, op=it["op"]))
     return {"items": items, "assets": got.get("assets") or {}, "voices": voices, "marks": _marks(land, "word behind", 0.8),
-            "seat": {"x": 0.5, "y": base, "w": (b[2] - b[0]) / W, "h": bh, "f": [land, z]},
-            "log": {"t": t, "matte": got.get("log"), "faces": len(faces), "base": round(base, 4)}}
+            "seat": {"x": cx, "y": base, "w": (b[2] - b[0]) / W, "h": bh, "f": [land, z]},
+            "log": {"t": t, "matte": got.get("log"), "faces": len(faces), "base": round(base, 4), "measured": meas}}
 
 
 DEVICES = {

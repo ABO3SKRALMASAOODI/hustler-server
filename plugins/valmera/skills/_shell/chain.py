@@ -465,7 +465,18 @@ def alien_bank(ctx, l1_path):
     if not (asks or devices) or engine_kind() != "scene":
         return l1_path
     out = os.path.splitext(l1_path)[0] + ".alien.json"
-    if not os.path.exists(out):
+    # the laid scene is keyed on the scene it was laid from: a rebuilt score (a repair, new captions) is laid again, so no
+    # caller can draw the palette's output of an older scene
+    import hashlib
+    key = hashlib.sha256(open(l1_path, "rb").read()).hexdigest()
+    try:
+        have = open(out + ".key").read().strip() if os.path.exists(out) else None
+    except OSError:
+        have = None
+    if have != key:
+        for p in (out, out + ".key"):
+            if os.path.exists(p):
+                os.remove(p)
         wk = brand.worker_dir()
         # the palette lays its own asks and the alien bank's, by layer, each with its fallback chain; a worker without the
         # palette lays the alien bank as before
@@ -474,6 +485,9 @@ def alien_bank(ctx, l1_path):
                               f"--out {out}.part --log {os.path.join(ctx.supply, 'alien_bank.json')}"],
            label=f"wf-alien-{ctx.run_id}", heavy=True, timeout=1800)
         os.replace(out + ".part", out)
+        with open(out + ".key.part", "w") as f:
+            f.write(key)
+        os.replace(out + ".key.part", out + ".key")
     return out
 
 

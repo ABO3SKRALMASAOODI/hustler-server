@@ -881,8 +881,9 @@ def caption_build(P, clock, v, y, ink="#FFFFFF", f_end=None, skip=(), hold=(), z
         ons = []
         for j, (w, _) in enumerate(pairs):
             nominal = Clock.f(w['t0']) + (lag if lag is not None else late)
-            if j == 0 and lag is None:
-                nominal = first
+            if j == 0 and lag is None and (w is ws[0] or first > a):
+                nominal = first                          # a line inks its first word as it opens; a word whose
+                                                         # leading words a display printed inks on its own word
             ons.append(max(nominal, first, ons[-1] + 1 if ons else 0))
         ceiling = min([h0 for h0, h1 in hold if h0 > first] +
                       ([f_end] if f_end is not None else [max(b, ons[-1] + 6)]))

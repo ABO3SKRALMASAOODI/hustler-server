@@ -12,6 +12,7 @@ import random
 import numpy as np
 
 from ..alien import glyphs, sense as asense
+from ..plan import A
 
 MARK = (0.5594, 0.115, 0.9146, 0.1923)   # the watermark's keep-out (renderer.watermark_geometry at 1080x1920): no type, ever
 READ = (0.05, 0.10, 0.95, 0.80)          # where reading type stands (TASTE P2); a graphic may pass it, never the mark
@@ -171,7 +172,22 @@ def span(l1, ask, need=24, text=None):
     if z - a < 2:
         z = min(dur, a + max(2, need))
         a = min(a, z - 2)
+    z = bounded(o, z, a + 2)
     return a, z, hit or []
+
+
+def bounded(o, z, floor=None):
+    """``z`` no later than the ask's ``bound`` (the frame the caller's window ends: the next subject, the next display),
+    never before ``floor`` (a figure still lands on the frame it is said, and holds a beat)."""
+    b = o.get("bound")
+    if b is None or isinstance(b, bool):
+        return z
+    try:
+        b = int(b)
+    except (TypeError, ValueError):
+        return z
+    out = min(int(z), b)
+    return max(out, int(floor)) if floor is not None else out
 
 
 def times(l1, text, a, z, hit):
@@ -212,9 +228,74 @@ def voice(font=SANS, px=120.0, track=0, shadow=0.55, var=None, glow=None):
     return v
 
 
+_MET = {}
+
+
+def metrics(v, text):
+    """How the renderer draws a line, in pixels from the item's pen (x, y), y down: {"adv", "ink" (as drawn: shaped with
+    the voice's tracking and set in the middle of the compiler's slot), "c" (the ink centre a scale grows from),
+    "glyphs" ([x0, y0, x1, y1] of each glyph's ink, in reading order)}. The engine's own shaper and slot
+    (scene.type.compiler_advance, scene.type_atlas), so a seat measured here is the seat drawn."""
+    key = (v.get("font"), v.get("family"), str(v.get("var")), round(float(v.get("px", 58)), 3), float(v.get("track", 0) or 0),
+           bool(v.get("shaped")), str(text))
+    got = _MET.get(key)
+    if got is not None:
+        return got
+    px, tr = float(v.get("px", 58)), float(v.get("track", 0) or 0)
+    try:
+        from .. import type as ST
+        face = glyphs.face(v)
+        lines, adv = face.outline(text, px, tr)
+        quads = [list(q[1:]) for q in face.quads(text, px, tr)]
+        try:
+            dx = (float(ST.compiler_advance(text, v)) - adv) / 2.0
+        except Exception:      # noqa: BLE001 - a face Pillow cannot open: the line sits at its own pen
+            dx = 0.0
+    except Exception:      # noqa: BLE001 - no shaper here: the plain measure
+        adv, b = glyphs.box(v, text, px)
+        lines, quads, dx = None, [list(b)], 0.0
+    if lines is not None and len(lines):
+        raw = [float(lines[:, [0, 2]].min()), float(lines[:, [1, 3]].min()), float(lines[:, [0, 2]].max()), float(lines[:, [1, 3]].max())]
+    elif lines is not None:
+        raw = [0.0, -px, float(adv), 0.0]
+    else:
+        raw = list(quads[0])
+    got = {"adv": float(adv), "ink": [raw[0] + dx, raw[1], raw[2] + dx, raw[3]], "c": ((raw[0] + raw[2]) / 2 + dx, (raw[1] + raw[3]) / 2),
+           "glyphs": [[q[0] + dx, q[1], q[2] + dx, q[3]] for q in quads], "dx": dx}
+    if len(_MET) > 20000:
+        _MET.clear()
+    _MET[key] = got
+    return got
+
+
 def ink_box(v, text):
-    """(advance, [x0, y0, x1, y1]) of a line's ink, pixels from its pen (baseline left), y down."""
-    return glyphs.box(v, text, v["px"])
+    """(advance, [x0, y0, x1, y1]) of a line's ink as the renderer draws it, pixels from its pen (baseline left), y down."""
+    m = metrics(v, text)
+    return m["adv"], list(m["ink"])
+
+
+def drawn(v, text, x, y, W, H, s=1.0, part=None):
+    """[x0, y0, x1, y1] (frame fractions) of a line's ink as drawn with its pen at (x, y) and scale ``s`` (the renderer
+    scales a word about its ink centre). ``part``: (first, last) glyph of the line to measure instead of the whole."""
+    m = metrics(v, text)
+    b = m["ink"]
+    if part is not None and m["glyphs"]:
+        gs = m["glyphs"][part[0]:part[1]] or m["glyphs"]
+        b = [min(g[0] for g in gs), min(g[1] for g in gs), max(g[2] for g in gs), max(g[3] for g in gs)]
+    X, Y = float(x) * W, float(y) * H
+    cx, cy = X + m["c"][0], Y + m["c"][1]
+    s = float(s)
+    return [(cx + (X + b[0] - cx) * s) / W, (cy + (Y + b[1] - cy) * s) / H, (cx + (X + b[2] - cx) * s) / W, (cy + (Y + b[3] - cy) * s) / H]
+
+
+def item_box(it, voices, W, H, f=None):
+    """Where a word item's ink stands on programme frame f (its last frame when None), as drawn."""
+    v = (voices or {}).get(it.get("v"))
+    if not v:
+        return None
+    lo = it["f"][0]
+    f = it["f"][1] - 1 if f is None else f
+    return drawn(v, str(it.get("t") or ""), A(it.get("x", 0), f, lo), A(it.get("y", 0), f, lo), W, H, s=A(it.get("s", 1), f, lo))
 
 
 def fit(v, text, width_px, cap_px=None, floor_px=None):
@@ -237,8 +318,7 @@ def place(v, text, cx, base_y, W, H, align="c"):
 
 def block_of(v, text, x, y, W, H, s=1.0):
     """[x0, y0, x1, y1] (frame fractions) a line's ink takes with its pen at (x, y)."""
-    _, b = ink_box(v, text)
-    return [x + b[0] * s / W, y + b[1] * s / H, x + b[2] * s / W, y + b[3] * s / H]
+    return drawn(v, text, x, y, W, H, s=s)
 
 
 def wrap(v, text, width_px):
@@ -259,7 +339,9 @@ def wrap(v, text, width_px):
 # ----------------------------------------------------------------- what the frame holds there
 
 def caption_top(l1, a=None, z=None):
-    """The highest a caption's ink reaches (frame fraction), over [a, z) or the whole film; 0.80 with none."""
+    """The highest a caption's ink reaches on the lower caption seat (frame fraction), over [a, z) or the whole film;
+    0.80 with none. A caption the film lifts to the top of the frame (over a busy lower picture) is not a floor: it is
+    in the way where it stands (``caption_boxes``)."""
     tops = []
     for it in l1.get("items") or []:
         if it.get("k") != "word" or it.get("role") != "cap":
@@ -267,13 +349,33 @@ def caption_top(l1, a=None, z=None):
         if a is not None and (it["f"][1] <= a or it["f"][0] >= z):
             continue
         y = it["y"][-1] if isinstance(it.get("y"), list) else it.get("y", 0.8)
+        if float(y) < 0.45:
+            continue
         px = float(((l1.get("voices") or {}).get(it.get("v")) or {}).get("px", 58))
         tops.append(float(y) - 0.8 * px / l1["frame"][1])
     return min(tops) if tops else 0.80
 
 
-def others(l1, a, z, skip=()):
-    """Boxes of the type already standing between a and z that is not a caption: a block must not land on it."""
+def caption_boxes(l1, a, z, pad=0.012):
+    """[(box, f0, f1)] of the captions standing between a and z, as drawn, padded: type laid off the caption seat
+    must not land on one."""
+    W, H = l1["frame"]
+    out = []
+    for it in l1.get("items") or []:
+        if it.get("k") != "word" or it.get("role") != "cap" or it["f"][1] <= a or it["f"][0] >= z:
+            continue
+        try:
+            b = item_box(it, l1.get("voices"), W, H)
+        except Exception:      # noqa: BLE001
+            b = None
+        if b:
+            out.append(([b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad], int(it["f"][0]), int(it["f"][1])))
+    return out
+
+
+def others_t(l1, a, z, skip=()):
+    """[(box, f0, f1)]: the type already standing between a and z that is not a caption, each with the frames it
+    stands. Its box is where it rests (its last frame), as drawn."""
     W, H = l1["frame"]
     out = []
     for it in l1.get("items") or []:
@@ -281,16 +383,47 @@ def others(l1, a, z, skip=()):
             continue
         if it["f"][1] <= a or it["f"][0] >= z:
             continue
-        v = (l1.get("voices") or {}).get(it.get("v"))
-        if not v:
-            continue
         try:
-            x = float(it["x"][-1] if isinstance(it.get("x"), list) else it.get("x", 0))
-            y = float(it["y"][-1] if isinstance(it.get("y"), list) else it.get("y", 0))
-            out.append(block_of(v, it["t"], x, y, W, H))
+            b = item_box(it, l1.get("voices"), W, H)
         except Exception:      # noqa: BLE001 - a word that cannot be measured is not in the way
-            continue
+            b = None
+        if b:
+            out.append((b, int(it["f"][0]), int(it["f"][1])))
     return out
+
+
+def others(l1, a, z, skip=()):
+    """Boxes of the type already standing between a and z that is not a caption: a block must not land on it."""
+    return [b for b, _, _ in others_t(l1, a, z, skip)]
+
+
+def clear_of_mark(items, voices, W, H, own):
+    """A device's own type (items whose id starts with ``own``) moved down, as one block, until no word of it meets
+    the watermark's keep-out on any frame: a repair, never a refusal. Returns how far it moved (frame fraction)."""
+    mine = [it for it in items if str(it.get("id", "")).startswith(own) and it.get("k") in ("word", "flash")]
+    need = 0.0
+    for it in mine:
+        if it.get("k") != "word" or it.get("role") == "cap":
+            continue
+        lo, hi = it["f"]
+        for f in sorted({lo, (lo + hi) // 2, hi - 1} | set(range(lo, hi, 4))):
+            try:
+                b = item_box(it, voices, W, H, f)
+            except Exception:      # noqa: BLE001
+                b = None
+            if b and overlap(b, MARK) > 1e-6:
+                need = max(need, MARK[3] + 0.006 - b[1])
+    if need <= 0:
+        return 0.0
+    for it in mine:
+        if it.get("k") == "word":
+            y = it.get("y", 0)
+            it["y"] = [round(float(q) + need, 6) for q in y] if isinstance(y, list) else round(float(y) + need, 6)
+        elif it.get("mode") in ("fill", "neg") and it.get("rect") is not None:
+            r = it["rect"]
+            sh = (lambda q: [q[0], round(q[1] + need, 5), q[2], round(q[3] + need, 5)])
+            it["rect"] = [sh(q) for q in r] if isinstance(r[0], (list, tuple)) else sh(r)
+    return round(need, 4)
 
 
 def overlap(a, b):
@@ -410,12 +543,14 @@ def seat(l1, S, a, z, bw, bh, prefer=0.36, align="c", x=None, avoid=(), lo=0.13,
     Returns (x0, baseline y)."""
     cap = caption_top(l1, a, z) - 0.03
     faces = S.faces_over(a, z)
-    stand = list(others(l1, a, z)) + [list(b) for b in avoid]
+    stand = list(others(l1, a, z)) + [list(b) for b in avoid] + [b for b, _, _ in caption_boxes(l1, a, z)]
     hi = max(cap, lo + bh + 0.02)
     xs = [x] if x is not None else ([0.5 - bw / 2] if align == "c" else [0.07, 0.5 - bw / 2])
     best, at = None, (xs[0], min(max(prefer + bh, lo + bh), hi))
     for x0 in xs:
-        for y1 in np.arange(lo + bh, hi + 1e-6, 0.012):
+        # under the watermark's keep-out where the block's columns meet it, with room for a word's landing punch
+        top = max(lo, MARK[3] + 0.012 + 0.12 * bh) if (x0 < MARK[2] and x0 + bw > MARK[0]) else lo
+        for y1 in np.arange(top + bh, max(hi, top + bh) + 1e-6, 0.012):
             box = [x0, y1 - bh, x0 + bw, y1]
             s = -abs((y1 - bh / 2) - prefer) * 1.2
             for fb in faces:

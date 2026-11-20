@@ -110,6 +110,7 @@ def counter(l1, work, ask, sense=None):
     if land - a < 8:
         a = max(0, land - run)
     z = max(z, min(land + hold, dur))
+    z = min(K.bounded(o, z, land + 8), dur)                # the row's window ends it; the figure still lands and holds a beat
     if z <= land:
         land = max(a + 2, z - 4)
     span_f = land - a
@@ -421,8 +422,8 @@ def brackets(l1, work, ask, sense=None):
 # --------------------------------------------------------------------------- a word on screen, marked on its hit
 
 def target(l1, text, a, z, prefer_big=True):
-    """The word item on screen between a and z whose text holds ``text`` (display type first), with where the
-    phrase's ink starts and ends inside it, in pixels from its pen."""
+    """(item, voice, lo, hi): the word item on screen between a and z whose text holds ``text`` (display type first),
+    and the phrase's characters in it [lo, hi), widened to whole words (a phrase is marked word by word)."""
     want = K.norm(text)
     if not want:
         return None
@@ -440,22 +441,85 @@ def target(l1, text, a, z, prefer_big=True):
     if not v:
         return None
     full = str(it["t"])
-    lo = full.lower().find(str(text).lower().strip())
-    if lo < 0:
-        lo, hi = 0, len(full)
-    else:
-        hi = lo + len(str(text).strip())
-    adv0 = K.ink_box(v, full[:lo])[0] if lo > 0 else 0.0
-    _, b = K.ink_box(v, full[lo:hi])
-    return it, v, adv0 + b[0], adv0 + b[2], b[1], b[3]
+    pos = [i for i, ch in enumerate(full) if ch.isalnum()]
+    k = "".join(full[i].lower() for i in pos).find(want)
+    lo, hi = (pos[k], pos[k + len(want) - 1] + 1) if k >= 0 else (0, len(full))
+    while lo > 0 and not full[lo - 1].isspace():
+        lo -= 1
+    while hi < len(full) and not full[hi].isspace():
+        hi += 1
+    return it, v, lo, hi
 
 
 def _rest(x):
     return float(x[-1] if isinstance(x, list) else x)
 
 
+def _glyph_span(v, full, lo, hi):
+    """The glyphs of characters [lo, hi) of a line, as indices into its shaped glyphs (spaces carry none)."""
+    n = lambda t: len(K.metrics(v, t)["glyphs"]) if t else 0      # noqa: E731
+    return n(full[:lo]), n(full[:hi])
+
+
+def _geo(it, v, f, W, H, part=None):
+    """(ink box of the line, or of its glyphs ``part``, as drawn on frame f; its scale there) in frame fractions."""
+    lo = it["f"][0]
+    s = float(K.A(it.get("s", 1), f, lo))
+    return K.drawn(v, str(it["t"]), K.A(it.get("x", 0), f, lo), K.A(it.get("y", 0), f, lo), W, H, s=s, part=part), s
+
+
+
+def recolour(it, v, lo, hi, ink, f_from, W, H, tag="rc"):
+    """The item from ``f_from`` on with only characters [lo, hi) in ``ink``: the line is cut into its words before,
+    the phrase and its words after, each laid where the renderer draws it inside the whole line (its pen moved on the
+    line's own measured glyphs, and through the line's scale about the line's centre), so nothing moves and only the
+    phrase changes ink. Before ``f_from`` the item stands as it was. Returns (items, drop)."""
+    full = str(it["t"])
+    f0, f1 = it["f"]
+    f_from = min(max(int(f_from), f0), f1)
+    items, drop = [], []
+    if f_from > f0:
+        items.append(K.cut(it, f0, f_from))
+    else:
+        drop.append(it["id"])
+    if f_from >= f1:
+        return items, drop
+    line = K.metrics(v, full)
+    gl = line["glyphs"]
+    pieces = []
+    pre, mid, post = full[:lo], full[lo:hi], full[hi:]
+    g0, g1 = _glyph_span(v, full, lo, hi)
+    if pre.strip():
+        pieces.append((pre.rstrip(), it.get("ink"), 0, "a"))
+    pieces.append((mid, ink, g0, "p"))
+    if post.strip():
+        pieces.append((post.lstrip(), it.get("ink"), g1, "b"))
+    rest = K.cut(it, f_from, f1)
+    n = f1 - f_from
+    for text, col, g, key in pieces:
+        pm = K.metrics(v, text)
+        if not pm["glyphs"] or g >= len(gl):
+            off = K.ink_box(v, full[:max(full.find(text), 0)])[0] if text in full else 0.0
+        else:
+            off = gl[g][0] - pm["glyphs"][0][0]
+        cl, cp = line["c"], pm["c"]
+        xs, ys = [], []
+        for q in range(n):
+            f = f_from + q
+            s = float(K.A(it.get("s", 1), f, f0))
+            X, Y = float(K.A(it.get("x", 0), f, f0)) * W, float(K.A(it.get("y", 0), f, f0)) * H
+            xs.append(round((X + cl[0] - cp[0] + (off - cl[0] + cp[0]) * s) / W, 6))
+            ys.append(round((Y + (cl[1] - cp[1]) * (1 - s)) / H, 6))
+        pc = dict(rest, id=f"{it['id']}~{tag}{key}", t=text, x=xs if len(set(xs)) > 1 else xs[0], y=ys if len(set(ys)) > 1 else ys[0], ink=col)
+        if key == "p" and col != it.get("ink"):
+            pc.pop("stroke", None)
+        items.append(pc)
+    return items, drop
+
+
 def highlight(l1, work, ask, sense=None):
-    """A marker sweeps behind a word on its hit, left to right in five frames; the word's ink turns to read on it."""
+    """A marker sweeps behind a phrase on its hit, left to right in five frames, measured on the line as it is drawn
+    on every frame (its pen, its scale, its voice); only the phrase's ink turns to read on it."""
     o, W, H, fps, dur, S, pal = _base(l1, work, ask, sense)
     t = text_of(o)
     if not t:
@@ -465,46 +529,46 @@ def highlight(l1, work, ask, sense=None):
     got = target(l1, t, f_hit, f_hit + 2)
     if got is None:
         return {"skip": f"'{t}' is not on screen there"}
-    it, v, ix0, ix1, iy0, iy1 = got
-    x, y = _rest(it["x"]), _rest(it["y"])
-    s = _rest(it.get("s", 1.0))
+    it, v, lo, hi = got
+    f_hit = max(f_hit, it["f"][0])
+    part = _glyph_span(v, str(it["t"]), lo, hi)
     style = o.get("style") or K.rng_of(l1, ask).choice(["marker", "box", "under"])
-    px = float(v["px"]) * s
-    X0, X1 = x + ix0 * s / W, x + ix1 * s / W
-    top, bot = y + iy0 * s / H, y + iy1 * s / H
-    pad = 0.12 * px / W
-    if style == "under":
-        r0 = [X0 - pad / 2, y + 0.06 * px / H, X0 - pad / 2, y + 0.16 * px / H]
-    elif style == "marker":
-        r0 = [X0 - pad, top + 0.38 * (bot - top), X0 - pad, bot + 0.08 * px / H]
-    else:
-        r0 = [X0 - pad, top - 0.12 * px / H, X0 - pad, bot + 0.14 * px / H]
     end = min(it["f"][1], max(z, f_hit + 10))
     n = end - f_hit
     if n < 2:
         return {"skip": "the word leaves before its hit"}
     grow = K.ease_out(n, 0.0, 1.0, frames=5)
-    right = X1 + (pad / 2 if style == "under" else pad)
+    rects = []
+    for q in range(n):
+        f = f_hit + q
+        (X0, top, X1, bot), s = _geo(it, v, f, W, H, part)
+        line, _ = _geo(it, v, f, W, H)
+        px = float(v["px"]) * s
+        pad = 0.12 * px / W
+        base = line[3] - (K.metrics(v, str(it["t"]))["ink"][3]) * s / H        # the baseline as drawn
+        if style == "under":
+            r = [X0 - pad / 2, base + 0.06 * px / H, X1 + pad / 2, base + 0.16 * px / H]
+        elif style == "marker":
+            r = [X0 - pad, top + 0.38 * (bot - top), X1 + pad, bot + 0.08 * px / H]
+        else:
+            r = [X0 - pad, top - 0.12 * px / H, X1 + pad, bot + 0.14 * px / H]
+        rects.append([round(r[0], 5), round(r[1], 5), round(r[0] + (r[2] - r[0]) * grow[q], 5), round(r[3], 5)])
     col = o.get("c") or pal["accent"]
-    rects = [[round(r0[0], 5), round(r0[1], 5), round(r0[0] + (right - r0[0]) * g, 5), round(r0[3], 5)] for g in grow]
     items = [K.rect(f"{ask['id']}.hl", (f_hit, end), rects, col, a=float(o.get("a", 1.0)), z=2)]
     drop = []
+    turned = False
     if style != "under" and K.lum(col) > 0.45 and K.lum(it.get("ink") or "#FFFFFF") > 0.45:
-        flip = min(f_hit + 2, end - 1)
-        if it["f"][0] < flip:
-            items.append(K.cut(it, it["f"][0], flip))
-        dark = K.cut(it, flip, it["f"][1], new_id=f"{it['id']}~hl")
-        dark["ink"] = K.DARK
-        dark.pop("stroke", None)
-        items.append(dark)
-        if it["f"][0] >= flip:
-            drop.append(it["id"])
+        # the phrase turns dark once the marker is under all of it (its fourth frame), never dark on the picture
+        got_i, drop = recolour(it, v, lo, hi, K.DARK, min(f_hit + 4, end - 1), W, H, tag="hl")
+        items += got_i
+        turned = True
     return {"items": items, "drop": drop, "marks": _marks(f_hit, "marker sweeps", 0.5),
-            "log": {"word": it["t"], "style": style, "hit": f_hit, "on": it["id"]}}
+            "log": {"word": it["t"], "phrase": str(it["t"])[lo:hi], "style": style, "hit": f_hit, "on": it["id"], "ink_turned": turned}}
 
 
 def flip(l1, work, ask, sense=None):
-    """A word on screen flips on its hit: two negative frames over it, then it stands in the accent."""
+    """A phrase on screen flips on its hit: two negative frames over it, then it stands in the accent (the rest of its
+    line keeps its ink)."""
     o, W, H, fps, dur, S, pal = _base(l1, work, ask, sense)
     t = text_of(o)
     if not t:
@@ -514,21 +578,18 @@ def flip(l1, work, ask, sense=None):
     got = target(l1, t, f_hit, f_hit + 2)
     if got is None:
         return {"skip": f"'{t}' is not on screen there"}
-    it, v, ix0, ix1, iy0, iy1 = got
-    x, y, s = _rest(it["x"]), _rest(it["y"]), _rest(it.get("s", 1.0))
+    it, v, lo, hi = got
+    f_hit = max(f_hit, it["f"][0])
+    part = _glyph_span(v, str(it["t"]), lo, hi)
+    (X0, top, X1, bot), s = _geo(it, v, f_hit, W, H, part)
     px = float(v["px"]) * s
-    box = [x + ix0 * s / W - 0.1 * px / W, y + iy0 * s / H - 0.12 * px / H, x + ix1 * s / W + 0.1 * px / W, y + iy1 * s / H + 0.1 * px / H]
+    box = [X0 - 0.1 * px / W, top - 0.12 * px / H, X1 + 0.1 * px / W, bot + 0.1 * px / H]
     items = [{"id": f"{ask['id']}.neg", "k": "flash", "f": [f_hit, min(f_hit + 2, dur)], "mode": "neg", "rect": [round(q, 5) for q in box], "z": 3}]
     drop = []
     if it["f"][1] > f_hit + 2:
-        if it["f"][0] < f_hit + 2:
-            items.append(K.cut(it, it["f"][0], f_hit + 2))
-        else:
-            drop.append(it["id"])
-        rest = K.cut(it, f_hit + 2, it["f"][1], new_id=f"{it['id']}~fl")
-        rest["ink"] = o.get("c") or pal["accent"]
-        items.append(rest)
-    return {"items": items, "drop": drop, "marks": _marks(f_hit, "word flips", 0.7), "log": {"word": it["t"], "hit": f_hit}}
+        got_i, drop = recolour(it, v, lo, hi, o.get("c") or pal["accent"], f_hit + 2, W, H, tag="fl")
+        items += got_i
+    return {"items": items, "drop": drop, "marks": _marks(f_hit, "word flips", 0.7), "log": {"word": it["t"], "phrase": str(it["t"])[lo:hi], "hit": f_hit}}
 
 
 # --------------------------------------------------------------------------- typed and redacted on the voice
@@ -701,6 +762,7 @@ def chapter(l1, work, ask, sense=None):
     a = K.frame_of(l1, o.get("at")) or 0
     n = int(o.get("dur", 15))
     a, z = max(0, min(a, dur - 4)), min(dur, max(a, 0) + max(n, 4))
+    z = K.bounded(o, z, a + 4)
     pol = o.get("polarity") or K.rng_of(l1, ask).choice(["dark", "accent", "light"])
     c0, c1, ink = {"dark": ("#141312", "#070707", pal["ink"]), "light": ("#ECE6DA", "#CFC8BA", K.DARK),
                    "accent": (pal["accent"], pal["accent"], K.DARK if K.lum(pal["accent"]) > 0.45 else pal["ink"])}[pol]
@@ -762,7 +824,7 @@ def type_run(l1, work, ask, sense=None):
     if pages[0][0] > a:
         pages[0][0] = a
     if z - pages[-1][0] < 6:
-        z = min(dur, pages[-1][0] + 8)
+        z = min(dur, K.bounded(o, pages[-1][0] + 8, pages[-1][0] + 4))
     keep, gone, was = _carve(l1, a, z)
     ci, cd = K.clear_captions(l1, a, z)                  # the pages are the words: no caption over them
     keep, gone = keep + ci, gone + cd
@@ -827,6 +889,7 @@ def marquee(l1, work, ask, sense=None):
     x_start = 0.10 - b[0] / W if left else 0.90 - b[2] / W
     xs = [round(x_start + (-1 if left else 1) * travel * (q / max(n - 1, 1)), 6) for q in range(n)]
     cy = float(o.get("y", 0.46))
+    cy = max(cy, K.MARK[3] + 0.012 + (b[3] - b[1]) / H / 2)     # it crosses the whole frame: under the watermark's keep-out
     y = cy + (b[3] - b[1]) / H / 2 - b[3] / H
     ink, tone = _ink(S, [0.0, cy - 0.15, 1.0, cy + 0.15], a, z, pal, prefer=o.get("ink"))
     it = K.word(f"{ask['id']}.mq", (a, z), t, vname(ask, "mq"), xs, round(y, 6), ink, z=6, role="graphic", on=a)
@@ -935,6 +998,7 @@ def readalong(l1, work, ask, sense=None):
     a = K.frame_of(l1, o.get("at")) if o.get("at") is not None else 0
     z = K.frame_of(l1, o.get("until")) if o.get("until") is not None else dur
     a, z = a or 0, z or dur
+    z = K.bounded(o, z, a + 2)
     dim = float(o.get("dim", 0.34))
     caps = [it for it in l1.get("items") or [] if it.get("k") == "word" and it.get("role") == "cap" and a <= int(it.get("on", it["f"][0])) < z]
     if not caps:
