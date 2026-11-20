@@ -374,3 +374,57 @@ def test_the_measured_holds_send_their_windows_back_to_research_once(tmp_path, m
     few = dict(measured, holds=[], cuts_per_10s=1.0)
     assert wf.hold_windows(few, coverage, [dict(window=0)] * 3 + [dict(window=1)] * 12 + [dict(window=2)]) == [2]
     assert wf.hold_windows(dict(measured, holds=[], cuts_per_10s=6.0), coverage, []) == []
+
+
+def test_the_check_names_the_object_a_picture_shows_from_the_sound_sets_own_families(tmp_path, monkeypatch):
+    """Lane sfx-moments (20 Nov): the raters heard no paper on the letter or the cheque a picture showed. The check (a
+    model) names the object, from the families the workflow's sound-effect set holds (its own rows); a name outside
+    them is no object; the picture's record carries it to its asset (worker/score/sound_screen.py sounds it)."""
+    import json
+    import placement_check as pc
+    sounds = tmp_path / "set"
+    sounds.mkdir()
+    (sounds / "manifest.json").write_text(json.dumps([
+        {"id": "paper_2", "file": "paper_2.flac", "family": "paper", "use": "book pages flipping: a document on screen"},
+        {"id": "shutter_1", "file": "shutter_1.flac", "family": "shutter", "use": "a camera shutter"},
+        {"id": "w", "file": "w.flac"}]))
+    monkeypatch.setenv("VALMERA_SOUNDS", str(sounds))
+    assert pc.foley_menu() == {"paper": "book pages flipping: a document on screen"}     # effects are not objects
+    path = tmp_path / "letter.jpg"
+    path.write_bytes(b"fixture")
+    monkeypatch.setattr(pc, "evidence", lambda *a: b"pixels")
+
+    class Clock:
+        words = [dict(w="letter", t0=0, t1=1)]
+        segs = [(0, 1)]
+    systems = []
+
+    def call(system, content, **kwargs):
+        systems.append(system)
+        return json.dumps({"placements": [{"id": 0, "ok": True, "fit": 8, "reason": "the letter", "foley": "Paper"},
+                                          {"id": 1, "ok": True, "fit": 6, "reason": "a phone", "foley": "phone"}]}), {}
+    letter = dict(path=str(path), src=[0, 1], page="https://example.org/letter")
+    phone = dict(path=str(tmp_path / "phone.jpg"), src=[0, 1], page="https://example.org/phone")
+    (tmp_path / "phone.jpg").write_bytes(b"other")
+    kept, report = pc.check([[0, 30, "image", "letter", letter], [30, 60, "image", "phone", phone]],
+                            {"segments": [{"say": "letter"}]}, Clock(), str(tmp_path), "unused", call=call)
+    assert "foley" in systems[0] and "paper (book pages flipping" in systems[0]
+    assert letter["foley"] == "paper" and "foley" not in phone                   # the set holds no phone recording
+    assert [p["foley"] for p in report["placements"]] == ["paper", None]
+    monkeypatch.delenv("VALMERA_SOUNDS")
+    assert pc.foley_menu() == {} and pc.foley_ask({}) == ""                         # no set: nothing asked
+
+
+def test_a_pictures_object_reaches_its_asset():
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location("film_for_foley", os.path.join(here, "..", "..", "valmera-stories", "film.py"))
+    film = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(film)
+    except Exception as e:  # noqa: BLE001 - film.py needs the worker on its path in this environment
+        pytest.skip(f"film.py not importable here: {e!r}"[:200])
+    P = film.Plan({}, {})
+    P.image("p00", dict(path="/x/letter.jpg", w=800, h=600, foley="paper"))
+    P.video("v01", dict(path="/x/clip.mp4", w=1920, h=1080, fps=30, seconds=3.0))
+    assert P.assets["p00"]["foley"] == "paper" and "foley" not in P.assets["v01"]
