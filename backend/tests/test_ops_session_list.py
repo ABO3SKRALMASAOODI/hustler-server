@@ -130,3 +130,61 @@ def test_page_filters_counts_and_pages_newest_first():
     assert only["total"] == 5
     assert all(r["surface"] == "studio" and r["edited"] for r in only["sessions"])
     assert L.page(rep, edited=False)["total"] == 15
+
+
+class _Cur:
+    """Answers the projects query, then the assets query."""
+    def __init__(self, projects, assets):
+        self.answers = [projects, assets]
+        self.calls = []
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+
+    def fetchall(self):
+        return self.answers.pop(0)
+
+
+def asset(id_, kind, at, project_id=1, **kw):
+    row = {"id": id_, "project_id": project_id, "kind": kind,
+           "storage_key": f"k/{id_}", "duration_s": 30, "width": 1080,
+           "height": 1920, "variant": None, "edl_version": None,
+           "filename": None, "purged_at": None,
+           "created_at": T + timedelta(seconds=at)}
+    row.update(kw)
+    return row
+
+
+def test_each_row_carries_its_upload_and_what_it_got_signed():
+    """Owner, 20 Nov: the list shows each session's uploaded video and the
+    delivered one at once, as Journeys did, without opening the chat."""
+    row = {"key": "1:a", "project_id": 1, "started_at": S_iso(0),
+           "ended_at": S_iso(600)}
+    cur = _Cur([{"id": 1, "root": 1}],
+               [asset(10, "original", -60, filename="talk.mov"),
+                asset(11, "proxy", -50),
+                asset(12, "render", 120, variant="preview", edl_version="2"),
+                asset(13, "render", 300, variant="final", edl_version="3"),
+                asset(14, "render", 5000, variant="final")])   # a later session's
+    found = L.media(cur, [row])
+    m = found["1:a"]
+    assert m["uploaded"]["asset_id"] == 10 and m["uploaded"]["play_key"] == "k/11"   # plays the proxy
+    assert m["got"]["asset_id"] == 13 and m["got"]["kind"] == "export"
+    assert m["renders"] == 2
+    assert L.media_keys(found) == ["k/11", "k/13"]
+    rows = L.attach_media([row], found, {"k/11": "https://u/11", "k/13": "https://u/13"})
+    assert rows[0]["uploaded"]["url"] == "https://u/11" and "play_key" not in rows[0]["uploaded"]
+    assert rows[0]["got"]["url"] == "https://u/13" and rows[0]["got"]["edl_version"] == 3
+
+
+def test_a_session_that_delivered_nothing_says_so():
+    row = {"key": "1:b", "project_id": 1, "started_at": S_iso(0),
+           "ended_at": S_iso(60)}
+    found = L.media(_Cur([{"id": 1, "root": 1}], [asset(10, "original", -5)]), [row])
+    rows = L.attach_media([row], found, {"k/10": "https://u/10"})
+    assert rows[0]["uploaded"]["url"] == "https://u/10" and rows[0]["got"] is None
+    assert L.media(_Cur([], []), []) == {}
+
+
+def S_iso(seconds):
+    return (T + timedelta(seconds=seconds)).isoformat()

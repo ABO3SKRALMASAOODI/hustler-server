@@ -181,6 +181,21 @@ def ops_session_list():
                             page=page, per_page=per_page)
     out.update(computed_at=computed_at.isoformat(timespec="seconds"),
                cache_age_s=age)
+    # Each row's uploaded video and what it got, signed now (owner, 20 Nov:
+    # see the work at once, without opening every chat). A failure here
+    # keeps the list and says so; the rows are never withheld for it.
+    try:
+        conn = _connect()
+        try:
+            found = session_list.media(conn.cursor(), out["sessions"])
+        finally:
+            conn.close()
+        urls = _presign_many(session_list.media_keys(found))
+        out["sessions"] = session_list.attach_media(out["sessions"], found,
+                                                    urls)
+    except Exception as e:  # noqa: BLE001
+        current_app.logger.warning("session-list media: %s", e)
+        out["media_error"] = str(e)[:200]
     return jsonify(out)
 
 

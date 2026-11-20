@@ -325,3 +325,107 @@ def page(report, surface=None, edited=None, page=1, per_page=50):
             "counts": counts(rows), "page": page, "pages": pages,
             "per_page": per_page, "surface": surface, "edited": edited,
             "sessions": shown[lo:lo + per_page]}
+
+
+# ── The videos of the rows shown (owner, 20 Nov 2026) ───────────────────
+# "Earlier it showed me the uploaded and the final video, so I can grasp
+# things fast; now I have to enter every chat." Each row on the page carries
+# the upload its session worked on and the last video it delivered, picked
+# the way Journeys picks them. Storage keys only: the route signs them on
+# every request, so a cached list never holds an expired link.
+MEDIA_SOURCES = ("original", "video_clip", "proxy")
+RENDER_BEFORE = timedelta(minutes=2)
+RENDER_AFTER = timedelta(minutes=15)
+
+
+def media(cur, rows):
+    """{session key: {"uploaded": part or None, "got": part or None,
+    "renders": n}} for these rows, from one projects and one assets query."""
+    from ops_loop import journeys as J
+    if not rows:
+        return {}
+    roots = sorted({r["project_id"] for r in rows})
+    cur.execute("""SELECT p.id, COALESCE(p.parent_project_id, p.id) AS root
+                     FROM projects p
+                    WHERE p.id = ANY(%(roots)s)
+                       OR p.parent_project_id = ANY(%(roots)s)""",
+                {"roots": roots})
+    root_of = {r["id"]: r["root"] for r in cur.fetchall()}
+    if not root_of:
+        return {}
+    lo = min(S._aware(r["started_at"]) for r in rows) - RENDER_BEFORE
+    cur.execute("""
+        SELECT a.id, a.project_id, a.kind, a.storage_key,
+               a.duration_s, a.width, a.height,
+               a.meta->>'variant' AS variant,
+               a.meta->>'edl_version' AS edl_version,
+               LEFT(a.meta->>'filename', 160) AS filename,
+               a.meta->>'r2_purged_at' AS purged_at, a.created_at
+          FROM assets a
+         WHERE a.project_id = ANY(%(pids)s)
+           AND (a.kind = ANY(%(src)s)
+                OR (a.kind = 'render' AND a.created_at >= %(lo)s))
+         ORDER BY a.id""", {"pids": list(root_of), "src": list(MEDIA_SOURCES),
+                            "lo": lo})
+    by_root = {}
+    for a in cur.fetchall():
+        a = dict(a)
+        root = root_of.get(a["project_id"])
+        if root is not None:
+            by_root.setdefault(root, []).append(a)
+    out = {}
+    for r in rows:
+        start, end = S._aware(r["started_at"]), S._aware(r["ended_at"])
+        sources, renders = [], []
+        for a in by_root.get(r["project_id"], []):
+            purged = bool(a.get("purged_at"))
+            if a["kind"] in MEDIA_SOURCES:
+                if S._aware(a["created_at"]) <= end + RENDER_AFTER:
+                    sources.append({
+                        "asset_id": a["id"], "project_id": a["project_id"],
+                        "kind": a["kind"], "filename": a.get("filename"),
+                        "duration_s": a.get("duration_s"),
+                        "width": a.get("width"), "height": a.get("height"),
+                        "storage_key": a["storage_key"], "purged": purged,
+                        "created_at": S._iso(a["created_at"])})
+            elif (a["kind"] == "render"
+                  and start - RENDER_BEFORE <= S._aware(a["created_at"])
+                  <= end + RENDER_AFTER):
+                renders.append({
+                    "asset_id": a["id"], "variant": a.get("variant"),
+                    "job_type": "final" if a.get("variant") == "final"
+                    else None,
+                    "edl_version": S._int(a.get("edl_version")),
+                    "duration_s": a.get("duration_s"),
+                    "width": a.get("width"), "height": a.get("height"),
+                    "created_at": S._iso(a["created_at"]),
+                    "storage_key": a["storage_key"], "purged": purged})
+        ctx = {"project": {"id": r["project_id"]}, "sources": sources[-40:],
+               "renders": renders}
+        got, all_renders = J._pick_render(ctx)
+        out[r["key"]] = {"uploaded": J._pick_source(ctx), "got": got,
+                         "renders": len(all_renders)}
+    return out
+
+
+def media_keys(found):
+    return sorted({part["play_key"] for m in found.values()
+                   for part in (m.get("uploaded"), m.get("got"))
+                   if part and part.get("play_key")})
+
+
+def attach_media(sessions, found, urls):
+    """The rows with `uploaded` and `got` beside them, each with its signed
+    `url` (None when it could not be signed) in place of the storage key."""
+    out = []
+    for r in sessions:
+        m = found.get(r["key"]) or {}
+        row = dict(r, renders_shown=m.get("renders", 0))
+        for name in ("uploaded", "got"):
+            part = dict(m[name]) if m.get(name) else None
+            if part:
+                part["url"] = urls.get(part.pop("play_key", None) or "")
+                part.pop("play_asset_id", None)
+            row[name] = part
+        out.append(row)
+    return out
