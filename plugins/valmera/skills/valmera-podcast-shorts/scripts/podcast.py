@@ -693,6 +693,20 @@ def build_short(run, m, fetched, pod, tries=3):
             run.log(f"{m['id']} made: {os.path.basename(rep['delivered'])}")
             return rec
         st = rep.get("stopped") or {}
+        if not st and not (r.stdout or "").strip():
+            # The short died before its first stage could report (20 Nov 05:35 UTC: macOS withdrew this run's
+            # access to ~/Documents and 17 shorts each "stopped (start: )" within a second, then the set was
+            # delivered short of them). That is the machine, not the moment: the run holds, nothing is delivered
+            # short, and the same link continues every short where it stopped.
+            try:
+                with open(os.path.join(state, "log.txt")) as lf:
+                    why = " ".join(lf.read()[-600:].split())[-300:]
+            except OSError as e:
+                why = f"its log is unreadable too ({e})"
+            run.log(f"{m['id']} could not start ({why[:200]})")
+            run.route_out.set()
+            err = f"{ROUTE_OUT}: the short could not start: {why}"
+            break
         new = f"{st.get('stage') or 'start'}: {st.get('error') or (r.stdout or '')[-300:]}"
         run.log(f"{m['id']} stopped ({new[:200]})")
         if wf1_film.WALL in new:                                 # not this short's fault and not gone in a minute: the run waits for the wall to lift
