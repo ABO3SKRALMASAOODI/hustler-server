@@ -35,8 +35,9 @@ for one.
   "same person, new world" beat on a cut or a drop.
 
 Every subject effect is silent and zoom-free: it never brings a sound or a
-camera move with it, and none is added to "support" it. Flashing is held to
-3 full-frame flashes a second unless the user asked for flashing.
+camera move with it, and none is added to "support" it. Past 3 full-frame
+flashes a second the result says so and the export is flagged
+contains_flashing; flashing the customer asked for stays.
 
 ## Evidence to inspect
 

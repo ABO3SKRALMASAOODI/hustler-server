@@ -161,7 +161,8 @@ def measure_at1(out_dir, monkeypatch, opted_in=True):
     wm_diff = max(int(np.abs(y1[f].astype(int) - y0[f])[
         wm_alpha].max()) for f in got) if got else 0
     import flash_safety
-    return {"result": res.splitlines()[0][:160], "planned": planned,
+    return {"result": res.splitlines()[0][:160], "result_full": res,
+            "planned": planned,
             "rendered_runs": runs, "gaps_f": gaps,
             "exact_1_frame": all(n == 1 for _f, n in runs),
             "on_planned_frame": [f for f, _n in runs] == planned,
@@ -185,10 +186,12 @@ def test_at_1d_1_accelerating_negatives(tmp_path, monkeypatch):
 
 
 @local_only(V02)
-def test_at_1d_1_without_the_ask_flash_safety_thins_the_tail(
+def test_at_1d_1_without_a_strobe_word_every_negative_is_kept(
         tmp_path, monkeypatch):
+    # p5968: flash safety informs; the editor's placements are never thinned
     m = measure_at1(str(tmp_path), monkeypatch, opted_in=False)
-    assert m["flash"]["peak_per_s"] <= 3 and not m["flash"]["over_limit"]
+    assert len(m["planned"]) >= 6, m
+    assert m["flash"]["over_limit"] and "contains_flashing" in m["result_full"]
     assert m["exact_1_frame"] and m["on_planned_frame"], m
 
 
@@ -528,7 +531,7 @@ def measure_at7(out_dir, monkeypatch):
         flagged = bool((quality_verifier.flash_assessment(
             ctx.edl, {}, msg) or {}).get("over_limit"))
         out[name] = {"kept": len(fx), "result": res.splitlines()[0][:160],
-                     "thinned_reported": "flash safety held" in res,
+                     "flash_said": "contains_flashing" in res,
                      "flash_risk": risk["value"],
                      "contains_flashing": flagged,
                      "assess": flash_safety.assess(ctx.edl,
@@ -537,12 +540,14 @@ def measure_at7(out_dir, monkeypatch):
 
 
 @local_only(V02)
-def test_at_1d_7_flash_safety_thins_or_flags(tmp_path, monkeypatch):
+def test_at_1d_7_flash_safety_informs_and_flags(tmp_path, monkeypatch):
+    # p5968 (19 Nov 2026): with or without a strobe word in the message,
+    # every hit the editor wrote is kept; the result says how fast the film
+    # flashes and the export is flagged contains_flashing
     m = measure_at7(str(tmp_path), monkeypatch)
-    assert m["auto"]["kept"] == 3 and m["auto"]["thinned_reported"], m
-    assert m["auto"]["flash_risk"] <= 3 and not m["auto"][
-        "contains_flashing"], m
-    assert m["optin"]["kept"] == 6 and m["optin"]["contains_flashing"], m
+    for name in ("auto", "optin"):
+        assert m[name]["kept"] == 6 and m[name]["flash_said"], m
+        assert m[name]["contains_flashing"], m
 
 
 # ── perf ────────────────────────────────────────────────────────────────

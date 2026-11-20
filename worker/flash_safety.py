@@ -216,6 +216,28 @@ def flash_events(edl, index=None):
     return sorted(out, key=lambda e: e["t"])
 
 
+def notice(edl, index=None):
+    """One line of information for an editor's own write: how fast the film
+    now flashes when it passes the photosensitivity limit, "" otherwise.
+
+    p5968 (19 Nov 2026): a paying user asked for "white flashes and strobe
+    effects"; every check that read flashing as a fault taught the editor to
+    remove them, so the strobes they asked for were taken out. A write the
+    editor chose is kept as written: the limit informs it and marks the
+    export ``contains_flashing``; it never thins, refuses or removes."""
+    try:
+        a = assess(edl, index)
+    except Exception:  # noqa: BLE001 — a reading never fails a write
+        return ""
+    if not a["over_limit"]:
+        return ""
+    return (f"the film now plays up to {a['peak_per_s']} full-frame flashes "
+            f"in one second (the photosensitivity guideline is "
+            f"{a['max_per_s']}): kept as written, and the export is marked "
+            "contains_flashing. Flashes or strobes the customer asked for "
+            "stay; thin them only where nobody asked for them")
+
+
 def assess(edl, index=None, request_text=None, fps=None, max_per_s=None):
     """{events, peak_per_s, over_limit, opted_in, contains_flashing}.
 

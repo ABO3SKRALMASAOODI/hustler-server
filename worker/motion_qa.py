@@ -1383,13 +1383,15 @@ def audit(edl, index=None, *, intensity="designed", request_text=None,
     except Exception as e:  # noqa: BLE001
         ledger = {"error": str(e)[:160]}
     flash = flash_safety.assess(edl, index, request_text)
-    if flash.get("over_limit") and not flash.get("opted_in"):
+    if flash.get("over_limit"):
+        # information (p5968): flashes the customer asked for stay
         findings.append({"code": "flash_rate_exceeded",
-                         "severity": "blocking", "id": None,
+                         "severity": "advisory", "id": None,
                          "message": (f"{flash['peak_per_s']} full-frame "
-                                     "flashes in one second (limit "
-                                     f"{flash['max_per_s']}): thin them or "
-                                     "say the user asked for flashing")})
+                                     "flashes in one second (photosensitivity "
+                                     f"guideline {flash['max_per_s']}): the "
+                                     "export is marked contains_flashing; "
+                                     "thin only flashes nobody asked for")})
     rows = fxgraph.static_report(edl, index)
     for r in rows:
         if r.get("pending_measure"):
@@ -1541,7 +1543,7 @@ def critic_evidence(edl, index=None, *, proof_result=None, cards=None,
                     request_text=None):
     """[{id, time_s, metric, value, bar, pass}] deterministic rows the
     visual critic's motion findings can be corroborated by: the audit's
-    flash and restraint findings (EDL-level, every lane) and the latest
+    restraint findings (EDL-level, every lane) and the latest
     proof's failed metrics, each placed at its device's program time."""
     rows = []
     try:
@@ -1559,7 +1561,9 @@ def critic_evidence(edl, index=None, *, proof_result=None, cards=None,
         if isinstance(m, dict) and m.get("start") is not None:
             times[str(m.get("id"))] = float(m["start"])
     for f in a.get("findings") or []:
-        if f["code"] in ("flash_rate_exceeded", "inside_payoff_hold",
+        # the flash rate informs, never corroborates a blocking flash
+        # complaint (p5968: strobes the customer asked for were removed)
+        if f["code"] in ("inside_payoff_hold",
                          "consecutive_shots", "punctuation_families",
                          "overlapping_devices"):
             rows.append({"id": f.get("id"), "time_s": times.get(

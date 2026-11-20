@@ -100,23 +100,26 @@ def test_assess_reads_the_peak_from_the_edl():
     assert flash_safety.assess(motion, {}, "")["peak_per_s"] == 4
 
 
-def test_the_verifier_blocks_unasked_flashing_and_flags_opt_in():
+def test_the_verifier_informs_on_flashing_and_flags_it_never_blocks():
+    """p5968 (19 Nov 2026): flashing past the limit was a blocking finding
+    whenever a word rule missed the ask in this one message, and the editor
+    removed strobes a paying user asked for. It is information now: an
+    advisory finding, the record flagged contains_flashing, nothing held."""
     edl = _flashy_edl(5)
     preview = {"edl_version": 3, "storage_key": "r.mp4"}
-    rec = quality_verifier.build_verification_record(
-        7, 3, {}, edl, {}, preview=preview, request_text="make a reel")
-    codes = [r["code"] for r in rec["unresolved_findings"]]
-    assert quality_verifier.FLASH_FINDING in codes
-    assert rec["status"] == "repair_required"
-    # the program flashes past the limit: whatever lets it export (thinning
-    # aside) is an opt-in, so the record carries the export flag already
-    assert rec["contains_flashing"] is True
-    rec = quality_verifier.build_verification_record(
-        7, 3, {}, edl, {}, preview=preview,
-        request_text="strobe him white on every kick")
-    assert quality_verifier.FLASH_FINDING not in [
-        r["code"] for r in rec["findings"]]
-    assert rec["contains_flashing"] is True
+    for text in ("make a reel", "strobe him white on every kick",
+                 "mete destellos en cada golpe", ""):
+        rec = quality_verifier.build_verification_record(
+            7, 3, {}, edl, {}, preview=preview, request_text=text)
+        assert quality_verifier.FLASH_FINDING not in [
+            r["code"] for r in rec["unresolved_findings"]], text
+        row = next(r for r in rec["findings"]
+                   if r["code"] == quality_verifier.FLASH_FINDING)
+        assert row["severity"] == "advisory"
+        assert not quality_verifier.is_blocking(row)
+        assert "customer asked for stay" in row["message"]
+        assert rec["status"] != "repair_required"
+        assert rec["contains_flashing"] is True
     calm = quality_verifier.build_verification_record(
         7, 3, {}, _flashy_edl(2), {}, preview=preview, request_text="")
     assert calm["contains_flashing"] is False
@@ -145,25 +148,20 @@ def test_the_export_gate_reads_the_same_rule_loaded_by_path():
     assert '**_flash_flag(edl_row["json"])' in src
 
 
-def test_an_earlier_opt_in_is_acknowledged_not_thinned():
-    """Opt-in is read from the current request; a follow-up turn on an edit
-    the user asked to strobe ("fix the typo") gets a finding the editor
-    acknowledges by naming the earlier request — it never has to strip the
-    user's own flashing to export."""
+def test_an_earlier_ask_for_flashing_needs_no_acknowledgement():
+    """A follow-up turn ("fix the typo") on an edit the user asked to strobe
+    two messages ago: the flashing stays and nothing has to be justified."""
     edl = _flashy_edl(5)
     preview = {"edl_version": 4, "storage_key": "r.mp4"}
     rec = quality_verifier.build_verification_record(
         7, 4, {}, edl, {}, preview=preview, request_text="fix the typo")
-    row = next(r for r in rec["unresolved_findings"]
-               if r["code"] == quality_verifier.FLASH_FINDING)
-    assert "earlier message" in row["repair"]
-    assert "asked for it earlier" in row["message"]     # what the editor reads
-    assert "justify_verification_findings" in row["repair"]
-    assert quality_verifier.FLASH_FINDING not in \
-        quality_verifier.NON_JUSTIFIABLE_FINDINGS
-    done = quality_verifier.justify_findings(
-        rec, [row["finding_id"]],
-        "The user asked for 'strobe him white on every kick' two messages "
-        "ago; this turn only fixed a typo.")
-    assert done["status"] == "justified"
-    assert done["contains_flashing"] is True
+    assert not [r for r in rec["unresolved_findings"]
+                if r["code"] == quality_verifier.FLASH_FINDING]
+    assert rec["contains_flashing"] is True
+
+
+def test_the_editor_is_told_how_fast_the_film_flashes():
+    assert flash_safety.notice(_flashy_edl(2), {}) == ""
+    line = flash_safety.notice(_flashy_edl(5), {})
+    assert "5 full-frame flashes in one second" in line
+    assert "kept as written" in line and "contains_flashing" in line
