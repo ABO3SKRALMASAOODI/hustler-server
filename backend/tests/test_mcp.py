@@ -2825,17 +2825,65 @@ def test_download_without_kind_hands_out_the_finished_export(client,
     receipt = got["structuredContent"]["download_receipt"]
     assert receipt["asset_id"] == 51 and receipt["render_type"] == \
         "final_export"
-    # No final yet: the draft comes back, and says what it is.
+    # No final yet: the tool makes the deliverable. #4 recurred on
+    # p5909 (16 Nov): the app called download_url twice after draft
+    # previews and never exported, so the user kept a 480p draft. The
+    # download now starts the full-quality export of the newest version.
     DB["render_assets"] = DB["render_assets"][:1]
+    monkeypatch.setattr(mcpmod, "_latest_edl_version", lambda *_a: 9)
+    exports = []
+
+    def fake_export(tok, args):
+        exports.append(args)
+        return {"content": [{"type": "text", "text": (
+                    "PROJECT 3: export of EDL v9 is job 777. Call "
+                    "wait_for_job(job_id=777) until done.")}],
+                "structuredContent": {"export": {
+                    "project_id": 3, "edl_version": 9, "job_id": 777}},
+                "isError": False}
+
+    monkeypatch.setattr(mcpmod, "_t_export_final", fake_export)
+    got = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "download_url", "arguments": {"project_id": 3},
+    }).get_json()["result"]
+    assert exports == [{"project_id": 3, "edl_version": 9}]
+    assert got["isError"] is False
+    assert got["structuredContent"]["export"]["job_id"] == 777
+    assert got["structuredContent"]["started_by"] == "download_url"
+    assert "download_url started it" in got["content"][0]["text"]
+    assert "wait_for_job(job_id=777)" in got["content"][0]["text"]
+    # A final of an OLDER version is not the user's video either: the edit
+    # moved on, so the newest version is exported.
+    DB["render_assets"].append(
+        {"id": 52, "project_id": 3, "storage_key": "media/3/f7.mp4",
+         "duration_s": 20.0, "width": 1080, "height": 1920,
+         "meta": {"variant": "final", "edl_version": 7,
+                  "render_job_id": 90}})
+    exports.clear()
+    got = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "download_url", "arguments": {"project_id": 3},
+    }).get_json()["result"]
+    assert exports == [{"project_id": 3, "edl_version": 9}]
+    assert got["structuredContent"]["export"]["job_id"] == 777
+    DB["render_assets"] = DB["render_assets"][:1]
+    # When the export cannot start (open findings to repair, a wall), the
+    # draft still comes back, says what it is and why no export ran.
+    monkeypatch.setattr(mcpmod, "_t_export_final", lambda tok, args: {
+        "content": [{"type": "text", "text": "EDL v9 still has 1 unresolved "
+                     "verification finding(s), so no export was started"}],
+        "isError": True})
     got = rpc(client, "tools/call", STATIC_TOKEN, {
         "name": "download_url", "arguments": {"project_id": 3},
     }).get_json()["result"]
     text = got["content"][0]["text"]
     assert "DRAFT PREVIEW (270x480)" in text and "NOT the finished video" \
         in text
+    assert "export could not start yet" in text and "unresolved" in text
     assert "export_final(project_id=3, edl_version=9)" in text
     assert got["structuredContent"]["preview_receipt"]["deliverable"] is \
         False
+    assert "unresolved" in got["structuredContent"]["preview_receipt"][
+        "export_blocked"]
     # An explicit preview request is still served (the editors' evidence),
     # with the same label.
     got = rpc(client, "tools/call", STATIC_TOKEN, {
@@ -2845,7 +2893,7 @@ def test_download_without_kind_hands_out_the_finished_export(client,
     assert "DRAFT PREVIEW" in got["content"][0]["text"]
     tool = next(t for t in mcpmod.SESSION_TOOLS if t["name"] == "download_url")
     assert "low-resolution review drafts" in tool["description"]
-    assert "does not create an export" in tool["description"]
+    assert "starts that full-quality export" in tool["description"]
 
 
 # ── Ticket #45 / #39 / #4 (30 Oct 2026): a preview is judged by its facts ──
@@ -3031,12 +3079,12 @@ def test_every_preview_kind_and_version_path(client, monkeypatch):
         assert receipt["audio_model_review"] is False
     # Unpinned and older than the edit: the answer says so, and names the
     # render of the current version when one is running.
-    text = _download(client, monkeypatch)["content"][0]["text"]
+    text = _download(client, monkeypatch, kind="preview")["content"][0]["text"]
     assert "edit is now at v5" in text and "render of EDL v3" in text
     assert "render_preview(project_id=3, complete=true)" in text
     DB["render_jobs"] = [{"id": 900, "project_id": 3, "type": "preview",
                           "state": "queued", "progress": 0, "v": 5}]
-    text = _download(client, monkeypatch)["content"][0]["text"]
+    text = _download(client, monkeypatch, kind="preview")["content"][0]["text"]
     assert "v5 is rendering as job 900: wait_for_job(job_id=900)" in text
     DB["render_jobs"] = []
     for version, kind in ((4, "preview"), (2, "preview_check")):

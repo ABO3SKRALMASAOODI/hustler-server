@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from scene import palette
-from test_scene_palette import scene_of
+from test_scene_palette_devices import scene_of
 
 # ------------------------------------------------------------------ drawn: the renderer additions
 
@@ -187,7 +187,7 @@ def test_the_person_stays_his_while_the_world_behind_him_becomes_the_plate(tmp_p
     take = one(film([sh], dur=12, assets=assets), work=str(tmp_path))
     l1 = scene_of([sh], 12, assets, frame=(1080, 1920))
     out, log = palette.apply(l1, str(tmp_path), [{"dev": "bg_swap", "id": "x", "f": [0, 12], "c": "#00C040"}])
-    assert log[0]["done"] and log[0]["dev"] == "bg_swap", log
+    assert log[0]["done"] and log[0]["landed"] == "bg_swap", log
     got = stills(out, [5], work=str(tmp_path))[5][..., :3].astype(int)
     H, W = got.shape[:2]
     inside = (slice(int(H * 0.42), int(H * 0.58)), slice(int(W * 0.38), int(W * 0.62)))

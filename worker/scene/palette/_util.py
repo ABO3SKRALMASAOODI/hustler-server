@@ -19,23 +19,29 @@ def frames(l1, ask, default_len=12, min_len=1):
     or ``t``/``t_end``/``dur`` in seconds; a span too short is lengthened to ``min_len`` (the moment, repaired)."""
     dur = int(l1["dur_f"])
     fps = float(l1.get("fps") or 30)
-    if isinstance(ask.get("f"), (list, tuple)) and len(ask["f"]) == 2:
-        a, b = int(ask["f"][0]), int(ask["f"][1])
+    f, at = ask.get("f"), ask.get("at")
+    if isinstance(f, (list, tuple)) and len(f) == 2:
+        a, b = int(f[0]), int(f[1])
+    elif isinstance(at, (list, tuple)) and len(at) == 2 and not isinstance(f, (int, float)):   # the alien bank's [a, z]
+        a, b = int(at[0]), int(at[1])
     else:
-        if ask.get("at") is not None and not isinstance(ask.get("at"), dict):
-            a = int(ask["at"])
-        elif ask.get("t") is not None:
+        if isinstance(f, (int, float)) and not isinstance(f, bool):      # one frame: the Director's word landing
+            a = int(f)
+        elif at is not None and isinstance(at, (int, float)):
+            a = int(at)
+        elif isinstance(ask.get("t"), (int, float)) and not isinstance(ask.get("t"), bool):
             a = int(round(float(ask["t"]) * fps))
         else:
             a = 0
-        if ask.get("until") is not None and not isinstance(ask.get("until"), dict):
+        if isinstance(ask.get("until"), (int, float)) and not isinstance(ask.get("until"), bool):
             b = int(ask["until"])
-        elif ask.get("t_end") is not None:
+        elif isinstance(ask.get("t_end"), (int, float)) and not isinstance(ask.get("t_end"), bool):
             b = int(round(float(ask["t_end"]) * fps))
-        elif ask.get("dur") is not None:
+        elif isinstance(ask.get("dur"), (int, float)) and not isinstance(ask.get("dur"), bool):
             b = a + int(round(float(ask["dur"]) * fps))
         else:
-            b = a + int(arg(ask, "len", default_len))
+            n = arg(ask, "len", default_len)
+            b = a + (int(n) if isinstance(n, (int, float)) and not isinstance(n, bool) and n > 0 else default_len)
     a = min(max(a, 0), dur - 1)
     b = min(max(b, a + max(min_len, 1)), dur)
     if b - a < min_len:
@@ -93,7 +99,11 @@ def pictures(l1, ask=None, kinds=("image", "video")):
         a = assets.get(k) or {}
         return (k not in ("matte", t) and a.get("kind") in kinds and not str(k).startswith("own:")
                 and os.path.normpath(str(a.get("path"))) != take_path and not str(k).startswith("pal:"))
-    out = [p for p in (arg(ask or {}, "pics") or []) if ok(p)]
+    asked = list(arg(ask or {}, "pics") or []) + [p for p in (arg(ask or {}, "pool") or []) if isinstance(p, str)]
+    out = []
+    for p in asked:                     # its own pictures (``pics``, or the Director's ``pool``), each once
+        if ok(p) and p not in out:
+            out.append(p)
     for it in sorted(l1.get("items") or [], key=lambda i: i["f"][0]):
         p = it.get("pic")
         if p and ok(p) and p not in out:

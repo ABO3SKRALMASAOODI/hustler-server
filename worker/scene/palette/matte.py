@@ -38,10 +38,10 @@ def _ready(l1, sense, ask, default_len=30, min_len=6):
     wins, moved = _windows(l1, a, b, min_len)
     if not wins:
         return None, {"skip": "the take is never long enough on screen"}
-    m = sense.matte()
-    if not m:
+    got = sense.matte()
+    if not got or "matte" not in got:
         return None, {"skip": "no matte could be made for the take"}
-    base = {"items": [], "assets": {"matte": l1["assets"]["matte"]}, "log": {"f": [a, b], "moved": moved, "windows": [[w[1], w[2]] for w in wins]}}
+    base = {"items": [], "assets": {"matte": got["matte"]}, "log": {"f": [a, b], "moved": moved, "windows": [[w[1], w[2]] for w in wins]}}
     t = take_id(l1)
     if t != "main" and "main" not in l1["assets"]:
         base["assets"]["main"] = l1["assets"][t]

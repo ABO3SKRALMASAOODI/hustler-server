@@ -81,14 +81,22 @@ def test_the_bank_is_inside_the_code_fingerprint():
         assert need in rel, need
 
 
-def test_menu_and_a_device_that_cannot_stand_leaves_the_film():
+def test_menu_and_a_device_that_cannot_stand_falls_back():
+    """Owner, 16 and 20 Nov 2026: a fix gets the outcome, never a refusal. A device that cannot stand on the film runs
+    its fallback chain, so the moment still carries a device, and the log says why the asked one could not."""
     assert set(alien.DEVICES) == {"rhyme", "diecut", "lamp", "arc", "answer"}
     assert len(alien.menu().splitlines()) == 5
     base = scene_of([{"id": "s0", "k": "shot", "f": [0, 60], "pic": "plate", "plate": {"c0": "#101010", "c1": "#101010"}}], 60)
     out, log = alien.apply(base, "/nonexistent", [{"dev": "rhyme", "at": [0, 60], "n": 3}, {"dev": "nothing"}, {"dev": "lamp", "at": [5, 40], "t": "X"},
                                                  {"dev": "answer", "at": [0, 60], "picks": [{"f": 3, "pic": "gone"}]}])
-    assert [r["done"] for r in log] == [False] * 4 and all(r["why"] for r in log)
-    assert out["items"] == base["items"] and "alien" not in out
+    assert all(r["done"] for r in log), log
+    by = {r["dev"]: r for r in log}
+    for dev in ("rhyme", "lamp", "answer"):
+        assert by[dev]["fallback"] and by[dev]["landed"] != dev and by[dev]["why"], by[dev]
+    assert by["nothing"]["landed"] == "white"
+    assert len(out["items"]) > len(base["items"]) and "alien" not in out
+    ok, why = eligible(out)
+    assert ok or why == ["uharfbuzz is not installed"], why
 
 
 # ------------------------------------------------------------------ rhyme
@@ -273,9 +281,11 @@ def test_the_voice_decides_the_frame(tmp_path):
 
 @needs_hb
 @needs_ffmpeg
-def test_lamp_relights_the_take_and_leaves_the_rest(tmp_path):
+def test_lamp_relights_the_take_and_leaves_the_rest(tmp_path, monkeypatch):
     import cv2
     from scene.alien import lamp
+    from scene.palette import sense as PS
+    monkeypatch.setattr(PS, "rvm_path", lambda: None)      # the take without a matte: the word stands in front
     clip(str(tmp_path / "take.mp4"), n=45, size=(270, 480), move=0.0)
     l1 = scene_of([{"id": "s0", "k": "shot", "f": [0, 45], "pic": "main", "src": [0.0, 1.5]}], 45, {"main": {"kind": "video", "path": "take.mp4"}})
     l1["frame"] = [270, 480]

@@ -19,7 +19,7 @@ import numpy as np
 
 from .faults import SceneFault
 from . import looks
-from .plan import A, AR, BLENDS, IDENTITY, JOINS, KEEP_MODES, MODES, PLATES, TREATS, held, hex3
+from .plan import A, AR, BLENDS, IDENTITY, JOINS, KEEP_MODES, MODES, PLATES, TREATS, held, hex3, keep_on
 
 GLSL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "glsl")
 HEADER = {"core": "#version 330 core\n",
@@ -733,7 +733,7 @@ class Runtime:
             return
         tilt = self.card_tilt(it, f, cx, cy, hw, hh, s, rot)
         sh = it.get("shadow")
-        if sh and float(sh.get("a", 0)) > 0 and it.get("blend", "normal") == "normal":
+        if sh and float(sh.get("a", 0)) > 0 and (it.get("blend") or "normal") == "normal":
             p, vao = self.P["shadow"]
             sigma = max(float(sh.get("blur", 0.01)) * W, 0.5)
             sx, sy = cx + float(sh.get("dx", 0)) * W, cy + float(sh.get("dy", 0)) * W
@@ -1133,7 +1133,8 @@ class Runtime:
         if shots and self.plan.take_shot(shots[-1]):
             back_c = [i for i in by["card"] if i.get("behind")]
             back_w = [i for i in by["word"] if i.get("behind")]
-            keep = shots[-1].get("keep") or None            # the person drawn again by passes of his own (plan.KEEP_MODES)
+            # the person drawn again by passes of his own (plan.KEEP_MODES), only on frames inside a pass's window
+            keep = keep_on(shots[-1], f) or None
         if shots:                                           # stage 0: base
             self.draw_shot(shots[-1], f)
             if back_c or back_w or keep:
@@ -1154,9 +1155,8 @@ class Runtime:
             for it in sorted(back_w, key=zid):
                 self.draw_word(it, f)
             m = self.matte_tex(shots[-1], f)
-            # the passes whose window holds this frame; where none does, he is drawn as himself
-            on = [kp for kp in (keep or []) if not kp.get("f") or int(kp["f"][0]) <= f < int(kp["f"][1])]
-            for kp in (on or [None]):
+            # the passes whose window holds this frame; with behind items and no live pass he is drawn as himself
+            for kp in (keep or [None]):
                 self.draw_kept(shots[-1], f, m, kp)
             ctx.disable(mgl.BLEND)
             by["card"] = [i for i in by["card"] if not i.get("behind")]

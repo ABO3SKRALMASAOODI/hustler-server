@@ -1,14 +1,13 @@
 """python -m scene.palette.run apply --l1 L1 --work DIR --out L1_OUT [--asks ASKS.json] [--log LOG.json]
    python -m scene.palette.run menu
 
-Lays the scene's ``devices`` (and its ``alien`` asks) into plain scene items before the engine draws it. Anything
-made on the way (the take's matte, a still's depth layers) is written inside ``DIR/palette/``. The log lists each
-ask, the device that landed it (after any fallback) and the landings the sound workflow may amplify (``events``)."""
+Lays the asks a scene carries (``devices``, then the older ``alien``) in layer order and writes the scene to draw.
+What a device makes (a matte, an overlay) goes inside ``DIR/palette/``; the log says what landed for every ask."""
 import argparse
 import json
 import sys
 
-from . import apply, events, menu
+from . import apply, menu
 
 
 def main(argv=None):
@@ -28,15 +27,14 @@ def main(argv=None):
     l1 = json.load(open(args.l1, encoding="utf-8"))
     asks = json.load(open(args.asks, encoding="utf-8")) if args.asks else None
     out, log = apply(l1, args.work, asks)
-    out["device_events"] = events(log)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(out, f)
     if args.log:
         with open(args.log, "w", encoding="utf-8") as f:
             json.dump(log, f, indent=1)
     for r in log:
-        tried = "".join(f" [{t['dev']}: {t['why']}]" for t in r.get("tried") or [])
-        print(("done  " if r.get("done") else "bare  ") + f"{r.get('asked')}->{r.get('dev')} {r['id']}{tried}")
+        what = r.get("landed") if r["done"] else "left: " + "; ".join(f"{t['dev']}: {t['why']}" for t in r.get("tried") or [])
+        print(f"{r['id']} {r['asked']} -> {what}")
     return 0
 
 

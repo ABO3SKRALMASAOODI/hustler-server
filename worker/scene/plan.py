@@ -33,6 +33,34 @@ CARD_BLENDS = ("normal", "add", "screen", "multiply")
 # how the person is drawn again through his matte, pass by pass (shot.keep): himself (also as an offset clone),
 # a flat silhouette, a halo, an outline sticker, a two-colour poster
 KEEP_MODES = {"person": 0, "fill": 1, "glow": 2, "outline": 3, "duo": 4}
+
+
+def keep_on(it, a, b=None):
+    """The passes of a shot's ``keep`` live in programme frames [a, b) (b = a + 1 when not given): a pass without a
+    window ``f`` is live on every frame of the shot. The engine draws the sandwich, reads the matte and costs it only
+    where some pass is live, so a short pass on a long take costs its own frames."""
+    b = a + 1 if b is None else b
+    return [kp for kp in (it.get("keep") or []) if isinstance(kp, dict)
+            and (not kp.get("f") or (int(kp["f"][0]) < b and int(kp["f"][1]) > a))]
+
+
+def keep_frames(it, a, b):
+    """How many frames of [a, b) some pass of a shot's ``keep`` is live on."""
+    lo, hi = max(int(it["f"][0]), a), min(int(it["f"][1]), b)
+    if hi <= lo:
+        return 0
+    spans = []
+    for kp in keep_on(it, lo, hi):
+        if not kp.get("f"):
+            return hi - lo
+        spans.append((max(int(kp["f"][0]), lo), min(int(kp["f"][1]), hi)))
+    n, end = 0, lo
+    for s, e in sorted(spans):
+        s = max(s, end)
+        if e > s:
+            n += e - s
+            end = e
+    return n
 JOINS = {"seam": 1, "weave": 2, "glyph": 3}
 PLATES = {"paper": 1, "static": 2}
 IDENTITY = {"lift": 0.0, "gamma": 1.0, "gain": 1.0, "sat": 1.0, "contrast": 1.0, "temp": 0.0, "tint": 0.0}
@@ -275,7 +303,8 @@ class Plan:
                     k = (it["pic"], self.src_frame(it, f))
                     if k not in ks:
                         ks.append(k)
-            if (behind and any(b["f"][0] <= f < b["f"][1] for b in behind)) or (keepers and any(k["f"][0] <= f < k["f"][1] for k in keepers)):
+            if (behind and any(b["f"][0] <= f < b["f"][1] for b in behind)) or \
+                    (keepers and any(k["f"][0] <= f < k["f"][1] and keep_on(k, f) for k in keepers)):
                 sh = next((q for q in shots if q["f"][0] <= f < q["f"][1]), None)
                 if self.take_shot(sh):
                     ks.append(("matte", self.matte_frame(sh, f)))

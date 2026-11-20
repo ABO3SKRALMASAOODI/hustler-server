@@ -3,7 +3,8 @@ field, then lifted flat while the camera pushes into the line that proves the cl
 across it (the references: a profile 'Backed by Y Combinator' on a tilted card, Forbes on a desk).
 
 The line is measured on the picture (``sense.text_boxes``: the most prominent line of text) unless the ask names
-its box. This is the scene palette's proof object; the marketing workflow's own proof.py is another thing."""
+its box. A picture with no line of text (a photograph) is pushed into its largest face, else its brightest light, and
+carries no highlighter: a mark is laid only across a line that is there. This is the scene palette's proof object; the marketing workflow's own proof.py is another thing."""
 from ._util import arg, base_at, decel, ease, frames, make_room, pictures, uid
 
 LAYER = "rhythm"
@@ -24,6 +25,24 @@ def _doc(l1, ask, a, sense):
     return ims[0] if ims else None
 
 
+def _interest(sense, pic):
+    """(box, how) the push goes into when the ask names no box: the most prominent line of text measured on the picture
+    ("measured"), else the largest face ("face"), else the picture's brightest light ("light"). Fractions."""
+    tb = sense.text_boxes(pic)
+    if tb:
+        return list(tb[0]), "measured"
+    try:
+        fc = sense.faces(pic)
+    except Exception:      # noqa: BLE001 - no face read: the light
+        fc = []
+    if fc:
+        x0, y0, x1, y1 = max(fc, key=lambda r: (r[2] - r[0]) * (r[3] - r[1]))[:4]
+        px, py = (x1 - x0) * 0.6, (y1 - y0) * 0.5
+        return [max(x0 - px, 0.0), max(y0 - py, 0.0), min(x1 + px, 1.0), min(y1 + py, 1.0)], "face"
+    cx, cy = sense.bright(pic)
+    return [max(cx - 0.22, 0.0), max(cy - 0.16, 0.0), min(cx + 0.22, 1.0), min(cy + 0.16, 1.0)], "light"
+
+
 def proof_object(l1, work, ask, sense):
     a, b = frames(l1, ask, default_len=66, min_len=30)
     pic = _doc(l1, ask, a, sense)
@@ -38,16 +57,17 @@ def proof_object(l1, work, ask, sense):
     box = arg(ask, "box")
     found = "asked"
     if not box:
-        tb = sense.text_boxes(pic)
-        box, found = (list(tb[0]), "measured") if tb else ([0.12, 0.42, 0.88, 0.52], "centre")
+        box, found = _interest(sense, pic)
     bx0, by0, bx1, by1 = [float(v) for v in box]
+    line = found in ("asked", "measured")       # a line of text to push into and mark; else a face or the light
     # the card: the picture's shape, as wide as the frame allows
     w = 0.84
     h = w * W / (iw / ih) / H
     if h > 0.62:
         h = 0.62
         w = h * H * (iw / ih) / W
-    S = min(max(0.86 / max((bx1 - bx0) * w, 1e-3), 1.0), 3.4)            # the push: the line fills the frame's width
+    # the push: the line fills the frame's width; a face or the light is pushed into, never past a close-up
+    S = min(max(0.86 / max((bx1 - bx0) * w, 1e-3), 1.0), 3.4 if line else 2.0)
     xe = 0.5 - ((bx0 + bx1) / 2 - 0.5) * w * S
     ye = 0.5 - ((by0 + by1) / 2 - 0.5) * h * S
     n = b - a
@@ -75,7 +95,7 @@ def proof_object(l1, work, ask, sense):
             "shadow": {"dx": 0.012, "dy": 0.03, "blur": 0.035, "a": 0.6}}
     items = keep + [base, card]
     evs = [{"f": a, "kind": "paper", "strength": 0.4}]
-    if arg(ask, "mark", True) and n - p2 >= 6:
+    if line and arg(ask, "mark", True) and n - p2 >= 6:
         fx0, fx1 = xe + (bx0 - 0.5) * w * S, xe + (bx1 - 0.5) * w * S
         fy0, fy1 = ye + (by0 - 0.5) * h * S, ye + (by1 - 0.5) * h * S
         pad = 0.15 * (fy1 - fy0)
@@ -94,5 +114,5 @@ DEVICES = {
     "proof_object": {"plan": proof_object, "needs": ("still",), "fallback": ("parallax", "leak"),
                      "card": "f(>=1 s) pics[document|screenshot|profile] box[x0,y0,x1,y1]? desk(plate|blur) mark. The source lies "
                              "tilted on a desk with depth of field, lifts flat as the camera pushes into the line that proves the "
-                             "claim, a highlighter across it. For a claim with a source: a headline, a filing, a post, a profile"},
+                             "claim (measured on it), a highlighter across it; a picture with no line: the push goes to its face or light. For a claim with a source: a headline, a filing, a post, a profile"},
 }

@@ -15,7 +15,7 @@ import numpy as np
 from . import bake, looks, reader, segments
 from . import type_atlas as TA
 from .faults import SceneFault
-from .plan import ANIM, ANIM_RECT, KINDS, PLAN_VERSION, Plan, canon, eligible, fingerprint, scene_of, sized
+from .plan import ANIM, ANIM_RECT, KINDS, PLAN_VERSION, Plan, canon, eligible, fingerprint, keep_frames, scene_of, sized
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE_VERSION = "scene-3"      # in every plan and so in every segment's hash: a segment kept by another engine is never taken for this one's
@@ -219,8 +219,10 @@ def program(plan):
                 c["flash"] += n
             elif k == "join":
                 c["join"] += n
-            if it.get("behind") or it.get("keep"):
+            if it.get("behind"):
                 c["under"] += n
+            elif it.get("keep"):
+                c["under"] += keep_frames(it, lo, hi)
         c["finish"] = (b - a) if (fl.get("grain") or fl.get("vignette") or lens or fl.get("mesh") or fl.get("raster")) else 0
         c["lens"] = (b - a) if lens else 0
         c["out"] = b - a
@@ -246,7 +248,7 @@ def estimate(plan, tier="mac"):
 
 
 DEGRADE = (("lens", "bloom and halation off"), ("easu", "edge-directed upscale off"),
-           ("word_blur", "type blur-ins off"), ("under", "behind-the-subject items drawn in front"))
+           ("word_blur", "type blur-ins off"), ("under", "behind-the-subject items drawn in front, a world swapped behind him gone"))
 
 
 def degrade(doc, step):
@@ -261,9 +263,28 @@ def degrade(doc, step):
             if it["k"] == "word":
                 it.pop("blur", None)
     elif step == "under":
+        # A behind item that covers the frame (a plate, a picture or a grey copy of the room laid behind the person) is
+        # a world swapped in behind him: drawn in front it would hide him, so it goes and the take shows plain. A word
+        # or a smaller card comes in front, as before. A shot's keep passes go: the person is drawn once, as shot.
+        keep = []
         for it in doc["items"]:
+            if it.get("behind") and it["k"] == "card" and _covers(it):
+                continue
             it.pop("behind", None)
             it.pop("keep", None)
+            keep.append(it)
+        doc["items"] = keep
+
+
+def _covers(it, share=0.85):
+    """Does a card cover the frame (at least ``share`` of it at its smallest size)?"""
+    def low(v, d):
+        if isinstance(v, list):
+            v = [x for x in v if isinstance(x, (int, float))]
+            return min(v) if v else d
+        return float(v) if isinstance(v, (int, float)) else d
+    s = low(it.get("s"), 1.0)
+    return min(low(it.get("w"), 0.0) * s, 1.0) * min(low(it.get("h"), 0.0) * s, 1.0) >= share
 
 
 # ------------------------------------------------------------------ compile

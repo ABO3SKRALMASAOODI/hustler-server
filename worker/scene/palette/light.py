@@ -32,7 +32,9 @@ def prism(l1, work, ask, sense):
     """An anamorphic streak and a rainbow ghost off the picture's brightest light, swelling and gone."""
     a, b = frames(l1, ask, default_len=24, min_len=8)
     n = b - a
-    at = arg(ask, "at")
+    at = arg(ask, "origin")
+    if not (isinstance(at, (list, tuple)) and len(at) == 2 and all(isinstance(v, (int, float)) and 0 <= v <= 1 for v in at)):
+        at = None
     if not at:
         sh = base_at(l1, a + n // 2)
         at = [0.72, 0.3]
@@ -53,5 +55,5 @@ DEVICES = {
                  "card": "f(6-20 frames, ends on a cut) origin[x,y]. The frame burns through to white-hot. For an ending, a loss, "
                          "'gone', a chapter that closes"},
     "prism": {"plan": prism, "needs": (), "fallback": ("leak",),
-              "card": "f at[x,y]?. A lens flare streak and rainbow ghost off the brightest light. For a reveal, fame, a stage, a win"},
+              "card": "f origin[x,y]?. A lens flare streak and rainbow ghost off the brightest light. For a reveal, fame, a stage, a win"},
 }
