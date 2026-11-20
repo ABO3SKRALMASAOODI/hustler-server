@@ -255,3 +255,66 @@ def test_the_journeys_route_is_admin_only_and_signs_each_request(
                         lambda *a, **k: {"pending": True, "retry_after_s": 5})
     assert c.get("/admin/video/ops/journeys",
                  headers=_admin(app)).get_json()["pending"] is True
+
+
+# ── Why a session has no video (owner, 20 Nov 2026) ─────────────────────
+
+def _ctx(**kw):
+    base = {"surface": "studio", "settled": True, "timeline": [], "errors": [],
+            "jobs": [], "requests": [], "earlier_requests": [], "replies": []}
+    base.update(kw)
+    return base
+
+
+def _call(tool, error=False, text=""):
+    return {"via": "mcp", "tool": tool, "error": error, "text": text,
+            "status": "error" if error else "ok"}
+
+
+def test_a_story_with_a_video_has_no_why():
+    assert _story()["why"] is None
+
+
+def test_an_mcp_app_that_never_asked_for_a_video_is_not_our_failure():
+    w = journeys.why_no_video(_ctx(surface="mcp", timeline=[
+        _call("get_transcript"), _call("search_stock"), _call("search_stock"),
+        _call("add_stock_media", True, "TRANSIENT_FAILURE: 187 MB")]), None)
+    assert w["kind"] == "app_never_asked" and w["fault"] == "none"
+    assert "never asked Valmera to render or export" in w["line"]
+    assert "search_stock ×2" in w["line"]
+
+
+def test_an_mcp_render_that_failed_is_ours_with_its_words():
+    w = journeys.why_no_video(_ctx(surface="mcp", timeline=[
+        _call("keep_segments"),
+        _call("render_preview", True, "render failed: source missing")]), None)
+    assert w["kind"] == "product_failed" and w["fault"] == "ours"
+    assert "render_preview" in w["line"] and "source missing" in w["line"]
+
+
+def test_the_wall_the_failure_and_the_silent_agent_each_say_so():
+    wall = journeys.why_no_video(_ctx(
+        requests=[{"text": "cut it", "held_by_subscribe_wall": True}],
+        replies=[{"paywall": True, "text": "plans"}]), None)
+    assert wall["kind"] == "paywall" and wall["fault"] == "wall"
+    failed = journeys.why_no_video(_ctx(
+        requests=[{"text": "cut it"}], jobs=[{"type": "agent_turn", "state": "failed"}],
+        errors=[{"what": "agent_turn job 7 failed", "detail": "timeout"}]), None)
+    assert failed["kind"] == "product_failed" and "agent_turn job 7 failed: timeout" in failed["line"]
+    quiet = journeys.why_no_video(_ctx(
+        requests=[{"text": "make it punchy"}], jobs=[{"type": "agent_turn", "state": "done"}],
+        replies=[{"paywall": False, "text": "Which part should I cut?"}]), None)
+    assert quiet["kind"] == "agent_no_video" and quiet["fault"] == "ours"
+    assert "Which part should I cut?" in quiet["line"]
+    assert journeys.why_no_video(_ctx(settled=False), None)["kind"] == "running"
+    assert journeys.why_no_video(_ctx(), None)["kind"] == "upload_only"
+
+
+def test_a_customers_habit_is_one_line_on_each_of_their_cards():
+    sts = ([{"who": {"user_id": 7}, "why": {"kind": "app_never_asked"}}] * 4
+           + [{"who": {"user_id": 7}, "why": None}]
+           + [{"who": {"user_id": 8}, "why": {"kind": "paywall"}}] * 2)
+    pat = journeys.customer_patterns(sts, "7d")
+    assert pat[7] == ("This customer: 5 sessions in 7 days: 4 their AI app never "
+                      "asked for a video; 1 delivered a video.")
+    assert 8 not in pat                                   # fewer than 3 sessions

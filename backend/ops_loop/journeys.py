@@ -611,6 +611,132 @@ def _review_card(r):
     }
 
 
+# ── Why a session has no video (owner, 20 Nov 2026) ────────────────────
+# "Was it not delivered because it was using MCP, because the agent had that
+# issue, or what? How can we improve the product if I can't even know what's
+# happening?" Each card without a video says why, from its own rows only:
+# which tools ran, which failed and with what words, the failed jobs, the
+# subscribe wall's replies. `fault` is "ours" (the product failed), "wall"
+# (the subscribe wall), "none" (nothing was asked of us, or it is running)
+# or "unknown" (no video and nothing recorded to explain it).
+DELIVERY_TOOLS = frozenset((
+    "render_preview", "export_final", "make_shorts", "make_first_cut",
+    "download_url", "record_website", "record_website_demo",
+    "showcase_demo"))
+WHY_DETAIL_CHARS = 220
+
+
+def _called(tl):
+    counts = {}
+    for t in tl:
+        name = t.get("tool")
+        if _visible_tool(name):
+            counts[name] = counts.get(name, 0) + 1
+    top = sorted(counts.items(), key=lambda kv: -kv[1])
+    return ", ".join(f"{k} ×{v}" if v > 1 else k for k, v in top[:6])
+
+
+def _err_line(e):
+    detail = _plain(e.get("detail") or "", WHY_DETAIL_CHARS)
+    return f"{e['what']}" + (f": {detail}" if detail else "")
+
+
+def why_no_video(ctx, got):
+    """{kind, fault, line} for a session that delivered no video, else None."""
+    if got:
+        return None
+    tl = ctx.get("timeline") or []
+    errors = ctx.get("errors") or []
+    jobs = ctx.get("jobs") or []
+    if not ctx.get("settled", True):
+        return {"kind": "running", "fault": "none",
+                "line": "Still running: no video yet."}
+    if ctx.get("surface") == "mcp":
+        mcp = [t for t in tl if t.get("via") == "mcp"]
+        asked = [t for t in mcp if t.get("tool") in DELIVERY_TOOLS]
+        if not asked:
+            return {"kind": "app_never_asked", "fault": "none",
+                    "line": "Their AI app never asked Valmera to render or "
+                            "export a video in this session. It only called: "
+                            + (_called(mcp) or "nothing") + "."}
+        failed = [t for t in asked if t.get("error")]
+        if failed:
+            t = failed[-1]
+            return {"kind": "product_failed", "fault": "ours",
+                    "line": f"Our {t['tool']} failed when the app asked for "
+                            "the video: " + _plain(t.get("text") or
+                                                   t.get("status") or "",
+                                                   WHY_DETAIL_CHARS)}
+        return {"kind": "render_missing", "fault": "ours",
+                "line": "The app asked for a video (" + ", ".join(sorted(
+                    {t["tool"] for t in asked})) + ") and the call answered, "
+                "but no video was stored for this session."}
+    requests = ctx.get("requests") or []
+    held = [r for r in requests if r.get("held_by_subscribe_wall")]
+    paywalls = sum(1 for r in ctx.get("replies") or [] if r.get("paywall"))
+    failed_jobs = [j for j in jobs if j.get("state") == "failed"]
+    if held and paywalls and not failed_jobs:
+        return {"kind": "paywall", "fault": "wall",
+                "line": f"Held by the subscribe wall: the customer asked "
+                        f"({len(held)} request{'s' if len(held) != 1 else ''})"
+                        ", is not subscribed, so nothing ran."}
+    if errors:
+        return {"kind": "product_failed", "fault": "ours",
+                "line": "Our product failed: " + _err_line(errors[-1])
+                + (f" ({len(errors)} failures in this session)"
+                   if len(errors) > 1 else "")}
+    if not requests and not ctx.get("earlier_requests"):
+        return {"kind": "upload_only", "fault": "unknown",
+                "line": "Uploaded only: the customer typed nothing, and no "
+                        "first cut was rendered (nothing recorded says why)."}
+    turns = [j for j in jobs if j.get("type") == "agent_turn"]
+    replies = [r for r in ctx.get("replies") or [] if not r.get("paywall")
+               and (r.get("text") or "").strip()]
+    if turns:
+        last = replies[-1]["text"] if replies else ""
+        return {"kind": "agent_no_video", "fault": "ours",
+                "line": f"The agent ran ({len(turns)} turn"
+                        f"{'s' if len(turns) != 1 else ''}) but made no "
+                        "video" + (f". Its last reply: “{_plain(last, 160)}”"
+                                   if last else ".")}
+    return {"kind": "unknown", "fault": "unknown",
+            "line": "No video, no error and no agent turn recorded: the "
+                    "request was never picked up."}
+
+
+WHY_PATTERN = {"app_never_asked": "their AI app never asked for a video",
+               "product_failed": "our product failed",
+               "render_missing": "a video was asked for and not stored",
+               "paywall": "held by the subscribe wall",
+               "agent_no_video": "the agent made no video",
+               "upload_only": "upload only",
+               "unknown": "no video, nothing recorded",
+               "running": "still running"}
+
+
+def customer_patterns(stories, window):
+    """{user_id: line} for a customer with 3 or more sessions in the window:
+    how many delivered and why the others did not, so a customer's habit is
+    seen at once (owner, 20 Nov: "why are we discovering this now?")."""
+    by_user = {}
+    for st in stories:
+        by_user.setdefault((st.get("who") or {}).get("user_id"), []).append(st)
+    out = {}
+    for uid, sts in by_user.items():
+        if uid is None or len(sts) < 3:
+            continue
+        counts = {}
+        for st in sts:
+            k = (st.get("why") or {}).get("kind") or "delivered"
+            counts[k] = counts.get(k, 0) + 1
+        parts = [f"{n} {WHY_PATTERN.get(k, 'delivered a video') if k != 'delivered' else 'delivered a video'}"
+                 for k, n in sorted(counts.items(), key=lambda kv: -kv[1])]
+        out[uid] = (f"This customer: {len(sts)} sessions in "
+                    f"{'24 h' if window == '24h' else '7 days'}: "
+                    + "; ".join(parts) + ".")
+    return out
+
+
 def story(s, ctx, review, person, trial, extra):
     rv = _review_card(review)
     src = _pick_source(ctx, rv and rv.get("source_asset_id"))
@@ -653,6 +779,8 @@ def story(s, ctx, review, person, trial, extra):
         "automatic_first_cut": first_cut,
         "mcp_calls": mcp_calls[:8], "mcp_calls_total": len(mcp_calls),
         "got": got, "renders": len(renders),
+        "why": why_no_video(dict(ctx, surface=s["surface"],
+                                 settled=s["settled"]), got),
         "process": _process(ctx),
         "review": rv,
         "next": _timeline(ctx, s, extra, renders, src),
@@ -690,6 +818,9 @@ def sessions(cur, now=None, window="7d", limit=MAX_SESSIONS):
             matched.add(review["id"])
         stories.append(story(x, ctx, review, people.get(x["user_id"]),
                              trial, extra))
+    patterns = customer_patterns(stories, window)
+    for st in stories:
+        st["pattern"] = patterns.get((st.get("who") or {}).get("user_id"))
     reviewed = sum(1 for st in stories if st["review"])
     return {"window": window, "since": _iso(since), "stories": stories,
             "counts": {"sessions": len(stories), "reviewed": reviewed,
