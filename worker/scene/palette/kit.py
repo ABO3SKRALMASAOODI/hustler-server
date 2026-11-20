@@ -40,9 +40,19 @@ def mono(n):
 
 
 def opts(ask):
-    """An ask's fields, wherever the caller put them: at the top or under ``args``."""
+    """An ask's fields, wherever the caller put them: at the top or under ``args``. An ask placed by its programme frames
+    ("f": a frame or [a, z], as the Director's asks and palette.apply's log carry them) and no "at" is at those frames:
+    every device here reads its place from "at" (20 Nov rating: type devices asked at 4-24 s read no "at", found their text
+    nowhere and landed at frame 0, so counters, names and ladders piled into the first second)."""
     out = dict(ask.get("args") or {})
     out.update({k: v for k, v in ask.items() if k != "args"})
+    if out.get("at") is None and isinstance(out.get("f"), (int, float, list, tuple)) and not isinstance(out.get("f"), bool):
+        f = out["f"]
+        if isinstance(f, (list, tuple)):
+            if len(f) >= 2 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in f[:2]):
+                out["at"] = [int(f[0]), int(f[1])]
+        else:
+            out["at"] = int(f)
     return out
 
 
@@ -165,6 +175,12 @@ def span(l1, ask, need=24, text=None):
         if u is not None:
             nxt = [w[1] for w in words if w[1] > u]
             z = max(z or 0, (nxt[0] if nxt else u + need))
+    if hit and at is not None:
+        # the device has its place: its text said a second or more away from it (a title's "the" said in the hook) is
+        # another moment's, so the device stands on its own place (a name asked at 4 s landed on frame 22's "the")
+        slack = int(round(fps))
+        if not a - slack <= hit[0][1] <= (z if z is not None else a) + slack:
+            hit = None
     if z is None:
         last = max([h[1] for h in hit] if hit else [a])
         z = last + need

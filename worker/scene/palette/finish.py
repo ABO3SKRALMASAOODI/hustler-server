@@ -158,8 +158,11 @@ def finish(l1, work, ask, sense):
         s = "mono"
         items, drop = looked(l1, a, b, f"m{i}", look="mono_silver")
         return {"items": items, "drop": drop, "events": ev, "log": {"surface": "mono", "asked": ask.get("surface")}}
-    return {"items": [{"id": f"{i}f", "k": "flash", "f": [a, b], "mode": s, "a": 1.0}], "events": ev,
-            "log": {"surface": s, "f": [a, b]}}
+    it = {"id": f"{i}f", "k": "flash", "f": [a, b], "mode": s, "a": 1.0}
+    if s == "threshold":                    # split each picture at its own middle light, so it prints readable, never blobs
+        from .surface import own_light
+        it["th"] = own_light(l1, sense, a, b, lo=0.12, hi=0.88)
+    return {"items": [it], "events": ev, "log": {"surface": s, "f": [a, b], **({"th": it["th"]} if "th" in it and not isinstance(it["th"], list) else {})}}
 
 
 def AS_span(ask, l1):

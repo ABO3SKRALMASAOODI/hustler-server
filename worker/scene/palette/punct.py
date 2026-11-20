@@ -255,14 +255,23 @@ def variant(l1, work, ask, sense):
     flips = max(1, min(int(ask.get("flips") or 1), 6))
     rect = ask.get("rect")
     items = []
+    lv = None
+    if mode == "threshold":                 # split each picture at its own middle light (readable, never blobs)
+        from .surface import own_light
+        lv = own_light(l1, sense, a, b, lo=0.12, hi=0.88)
+
+    def th(f0, f1):
+        if lv is None:
+            return {}
+        return {"th": lv if not isinstance(lv, list) else lv[min(max(f0 - a, 0), len(lv) - 1):max(min(f1 - a, len(lv)), 1)]}
     if flips == 1:
-        items.append(flash(f"{i}v", a, b, mode, 1.0, rect=rect, **({"cell": 22} if mode == "mosaic" else {})))
+        items.append(flash(f"{i}v", a, b, mode, 1.0, rect=rect, **({"cell": 22} if mode == "mosaic" else {}), **th(a, b)))
     else:                                  # the picture and its re-render alternate, two frames each way
         f = a
         for k in range(flips):
             if f + 2 > int(l1["dur_f"]):
                 break
-            items.append(flash(f"{i}v{k}", f, f + 2, mode, 1.0, rect=rect))
+            items.append(flash(f"{i}v{k}", f, f + 2, mode, 1.0, rect=rect, **th(f, f + 2)))
             f += GAP if k % 2 else 4
     return {"items": items, "events": [{"f": a, "kind": "variant", "strength": 0.5}], "log": {"mode": mode, "flips": len(items)}}
 

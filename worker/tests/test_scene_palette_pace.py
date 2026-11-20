@@ -123,12 +123,12 @@ def test_the_palette_imports_no_model_code():
 
 # ------------------------------------------------------------------ burst, contour
 
-def test_a_burst_gives_two_to_five_frame_shots_from_the_pool(film):
+def test_a_burst_gives_three_to_six_frame_shots_from_the_pool(film):
     l1, work = film
     out, patch = lay(l1, work, {"dev": "burst", "id": "b", "f": [30, 75]})
     bs = [s for s in shots(out) if s["id"].startswith("b.b")]
-    assert len(bs) >= 8
-    assert all(2 <= s["f"][1] - s["f"][0] <= 5 for s in bs[:-1]) and bs[-1]["f"][1] - bs[-1]["f"][0] >= 2
+    assert len(bs) >= 6
+    assert all(3 <= s["f"][1] - s["f"][0] <= 6 for s in bs[:-1]) and bs[-1]["f"][1] - bs[-1]["f"][0] >= 6
     assert bs[0]["f"][0] == 30 and bs[-1]["f"][1] == 75
     pool_ids = set(patch["assets"])
     assert len({s["pic"] for s in bs} & pool_ids) >= 4                     # the pool's pictures, added to the scene
@@ -506,3 +506,99 @@ def test_shrink_never_lifts_a_layouts_ground_away_from_its_cards(film):
     out, _ = lay(l1, work, {"dev": "split", "id": "sp", "f": [120, 180], "pics": ["p1", "p2"]})
     patch = palette.plan(out, work, {"dev": "shrink", "id": "sh", "at": 180, "frames": 14})
     assert patch.get("skip")
+
+
+def _held(out, prefix):
+    """(pic, frames) of every run of one picture in a burst's items, neighbouring shots of the same picture as one."""
+    bs = sorted((s for s in shots(out) if s["id"].startswith(prefix)), key=lambda s: s["f"][0])
+    runs = []
+    for s in bs:
+        if runs and runs[-1][0] == s["pic"] and runs[-1][2] == s["f"][0]:
+            runs[-1][1] += s["f"][1] - s["f"][0]
+            runs[-1][2] = s["f"][1]
+        else:
+            runs.append([s["pic"], s["f"][1] - s["f"][0], s["f"][1]])
+    return bs, [(p, n) for p, n, _ in runs]
+
+
+@needs_ffmpeg
+def test_a_long_burst_strobes_a_second_then_cuts_brisk_and_lands_on_the_speaker(film):
+    """20 Nov review of short 02: a 3.5 s burst strobed 1.2 s and then held whatever picture landed (a stock resume page)
+    for 2.5 s under the captions. Now the strobe runs about a second, the rest cuts at brisk pace through the burst's
+    own pictures, each moving, and with no picture chosen to land it ends on the speaker's take, about 0.5-1 s."""
+    l1, work = film
+    out, patch = lay(l1, work, {"dev": "burst", "id": "b", "f": [10, 115]})      # 3.5 s, all over the take
+    bs, runs = _held(out, "b.b")
+    assert bs[0]["f"][0] == 10 and all(s["f"][1] - s["f"][0] >= 3 for s in bs)
+    assert max(n for _, n in runs) <= 30                                     # no burst picture holds over a second
+    strobe = [s for s in bs if s["f"][1] - s["f"][0] <= 6]
+    brisk = [s for s in bs if s["f"][1] - s["f"][0] > 6]
+    assert strobe[-1]["f"][1] - 10 <= 40 and len(brisk) >= 2
+    assert all(10 <= s["f"][1] - s["f"][0] <= 24 for s in brisk)
+    for s in brisk:                                                          # each brisk picture moves
+        w = [c[2] - c[0] for c in s["crop"]]
+        assert w[0] / w[-1] >= 1.04
+    assert len({s["pic"] for s in brisk}) >= 2
+    land = [i for i in out["items"] if i["id"].startswith("b.land")]
+    assert patch["log"]["lands_on"] == "take" and land and all(i["pic"] == "main" for i in land)
+    assert land[-1]["f"][1] == 115 and land[0]["f"][0] == bs[-1]["f"][1]
+    assert 15 <= 115 - land[0]["f"][0] <= 30
+    t1 = next(i for i in l1["items"] if i["id"] == "t1")                      # the take as the base had it: its own clock
+    assert land[0]["src"][0] == pytest.approx(t1["src"][0] + (land[0]["f"][0] - 0) * 4.0 / 120, abs=1e-3)
+
+
+@needs_ffmpeg
+def test_a_long_burst_over_a_cutaway_lands_on_the_speaker_on_his_own_clock(film):
+    """Where the base shows a cutaway under the landing, the burst still lands on the speaker: the take on the clock of
+    the take shot nearest the landing (his voice's time there), never the pool's last picture."""
+    l1, work = film
+    out, patch = lay(l1, work, {"dev": "burst", "id": "b", "f": [60, 170]})      # the landing falls on s1 (v1)
+    land = [i for i in out["items"] if i["id"].startswith("b.land")]
+    assert patch["log"]["lands_on"] == "take" and len(land) == 1 and land[0]["pic"] == "main"
+    b, z = land[0]["f"]
+    assert z == 170 and 15 <= z - b <= 30
+    assert land[0]["src"] == pytest.approx([6.0 + (b - 180) / 30, 6.0 + (z - 180) / 30], abs=1e-3)
+    w = [c[2] - c[0] for c in land[0]["crop"]]
+    assert w[0] / w[-1] >= 1.04                                                  # he is pushed in on, not frozen
+
+
+def test_a_long_burst_lands_on_the_callers_picture_and_holds_nothing_else(film):
+    """With a picture chosen to land, the burst lands on it for 0.5-1 s; no other burst picture holds over a second."""
+    l1, work = film
+    out, patch = lay(l1, work, {"dev": "burst", "id": "b", "f": [30, 135], "pics": ["p1", "p2"]})
+    bs, runs = _held(out, "b.b")
+    assert bs[0]["f"][0] == 30 and bs[-1]["f"][1] == 135
+    assert bs[-1]["pic"] == "p2" and patch["log"]["lands_on"] == "p2"
+    assert 15 <= bs[-1]["f"][1] - bs[-1]["f"][0] <= 30
+    assert all(n <= 30 for p, n in runs[:-1])
+    w = [c[2] - c[0] for c in bs[-1]["crop"]]
+    assert w[0] / w[-1] >= 1.05                                                  # the landing pushes in
+
+
+@needs_ffmpeg
+def test_no_burst_shot_plays_a_clip_past_its_verified_range(film):
+    """20 Nov review: the long landing was chosen without checking its clip had room, and src ran past pic.span(). A clip
+    whose verified range (0.4 s) is shorter than the landing, chosen to land, and a pool of such clips: every burst item
+    stays inside its clip's range, and the burst still fills its span."""
+    l1, work = film
+    l1 = dict(l1, assets=dict(l1["assets"], v1=dict(l1["assets"]["v1"], rng=[1.0, 1.4])))
+    pool = []
+    for i in range(4):
+        p = os.path.join(work, f"cl{i}.mp4")
+        shutil.copy(os.path.join(work, "clip.mp4"), p)
+        pool.append({"id": f"cl{i}", "path": p, "kind": "clip", "w": 320, "h": 568, "seconds": 4.0, "rng": [0.5 + i * 0.3, 0.8 + i * 0.3]})
+    l1 = dict(l1, pool=pool)
+    rngs = {"v1": [1.0, 1.4], **{r["id"]: r["rng"] for r in pool}}
+    for ask in ({"dev": "burst", "id": "b", "f": [10, 115], "pics": ["cl0", "v1"]},
+                {"dev": "burst", "id": "b", "f": [180, 285]},
+                {"dev": "burst", "id": "b", "f": [180, 225], "pics": ["v1"]}):
+        out, patch = lay(l1, work, ask)
+        items = [i for i in out["items"] if i["id"].startswith("b.b")]
+        assert items and min(i["f"][0] for i in items) == ask["f"][0]
+        assert max(i["f"][1] for i in out["items"] if i["id"].startswith("b.")) == ask["f"][1]
+        for it in items:
+            if it["pic"] in rngs:
+                lo, hi = rngs[it["pic"]]
+                assert lo - 1e-6 <= it["src"][0] <= it["src"][1] <= hi + 1e-6, (ask, it["id"], it["src"])
+        if ask.get("pics"):
+            assert patch["log"]["lands_on"] == "v1"

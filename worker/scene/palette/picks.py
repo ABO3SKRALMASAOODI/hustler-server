@@ -504,7 +504,7 @@ def moments(pic, n, length_s, rng):
         u = (k + 0.5) / n if n > 1 else 0.5
         u = min(max(u + (rng.random() - 0.5) * 0.5 / max(n, 1), 0.0), 1.0)
         t0 = lo + room * u
-        out.append([round(t0, 4), round(t0 + length_s, 4)])
+        out.append([round(t0, 4), round(min(t0 + length_s, hi), 4)])     # a range shorter than the moment ends at its end
     return out
 
 

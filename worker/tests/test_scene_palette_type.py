@@ -614,3 +614,43 @@ def test_a_close_up_with_no_room_behind_the_head_lands_the_words_in_front(tmp_pa
     words = [i for i in mine(out, "b") if i["k"] == "word"]
     assert words and not any(i.get("behind") for i in words) and " ".join(i["t"] for i in words) == "I LOVE"
     assert words[0]["f"][0] == 1                                               # on the word that says it
+
+
+# ------------------------------------------------------------------ asks placed by their frames (the Director's shape)
+
+def test_a_type_device_asked_by_its_frames_lands_there_not_at_frame_0(tmp_path):
+    """20 Nov rating: the Director's asks carry "f" (programme frames) and no "at"; the type family read only "at", found
+    the text nowhere near and landed at frame 0, so names, ladders and counters asked at 4-24 s piled into the first
+    second. Each lands on its own frames now."""
+    l1 = film(tmp_path, dur=150)
+    asks = [{"dev": "name", "id": "n", "f": 64, "name": "Mark Cuban", "title": "brother", "layout": "stack"},
+            {"dev": "ladder", "id": "L", "f": [20, 40], "words": [{"t": "the", "w": "whisper"}, {"t": "lowest", "w": "shout"}]},
+            {"dev": "verb", "id": "v", "f": 88, "t": "sold", "verb": "punch"},
+            # text that is not said word for word (a title, a label): it used to find nothing and stand at frame 0
+            {"dev": "name", "id": "n2", "f": 100, "name": "The Fat Kid", "title": "high school 1971"},
+            {"dev": "ladder", "id": "L2", "f": [112, 130], "words": [{"t": "before", "w": "whisper"}, {"t": "the fame", "w": "shout"}]}]
+    out, log = laid(l1, tmp_path, asks)
+    said = {r[0]: r[1] for r in l1["said"]}
+    assert all(r["done"] for r in log), log
+    assert min(i["f"][0] for i in mine(out, "n")) >= 60 and next(i for i in mine(out, "n") if i["t"] == "MARK CUBAN")["f"][0] == said["Mark"]
+    assert next(i for i in mine(out, "L") if i["t"] == "LOWEST")["f"][0] == said["lowest"]
+    assert min(i["f"][0] for i in mine(out, "v")) >= 88
+    assert min(i["f"][0] for i in mine(out, "n2")) >= 90 and min(i["f"][0] for i in mine(out, "L2")) >= 112      # the small line types on just before
+
+
+def test_a_counter_whose_figure_word_was_read_as_a_frame_counts_in_its_own_place(tmp_path):
+    """A counter asked at frames 100-140 whose lands was a word number (12) read as a frame counted from frame 0; the
+    figure lands inside its own place now, and counts to the figure asked."""
+    l1 = film(tmp_path, dur=150)
+    out, log = laid(l1, tmp_path, [{"dev": "counter", "id": "k", "f": [100, 140], "lands": 12,
+                                    "args": {"from": 0, "to": 4.3e9, "unit": "short", "fmt": "${n}"}}])
+    ticks = sorted((i for i in mine(out, "k") if i["k"] == "word" and i["id"].startswith("k.c")), key=lambda i: i["f"][0])
+    assert log[0]["done"] and ticks and ticks[-1]["t"] == "$4.3B"
+    assert ticks[0]["f"][0] >= 100 - 18 and ticks[-1]["f"][0] >= 100            # never in the first second
+
+
+def test_readalong_asked_by_its_frames_ends_with_them(tmp_path):
+    l1 = film(tmp_path, dur=150)
+    out, log = laid(l1, tmp_path, [{"dev": "readalong", "id": "r", "f": [20, 70]}])
+    assert log[0]["done"]
+    assert all(i["f"][1] <= 72 for i in mine(out, "r"))

@@ -7,7 +7,7 @@ The display's words stay out of the watermark's corner (``_util.KEEPOUT``) and n
 live inside the asked section only."""
 import numpy as np
 
-from ._util import KEEPOUT, arg, colour, frames, num, uid
+from ._util import KEEPOUT, arg, colour, frames, num, over, uid
 
 LAYER = "surface"
 OSD = {"osd": {"font": "BebasNeue-Regular.ttf", "px": 46, "track": 70, "shadow": {"a": 0.55, "blur": 0.004}}}
@@ -63,28 +63,42 @@ def led(l1, work, ask, sense):
     return {"items": items, "log": {"f": [a, b]}, "events": [{"f": a, "kind": "surface", "strength": 0.4}]}
 
 
-def _middle_light(l1, sense, a, b):
-    """The light in the middle of the section's pictures (their median), where a hard tone should split them."""
+def own_light(l1, sense, a, b, k=1.0, lo=0.1, hi=0.7):
+    """Where a hard tone splits each picture of [a, b): one level a frame, each shot's own median light (times ``k``), so
+    a dark picture and a bright one both print half ink, half paper and stay readable (20 Nov rating: one level for a
+    whole section printed dark faces as black blobs where nothing could be read). One number when every shot agrees."""
     from ..plan import AR
-    from ._util import frac_crop, over
+    from ._util import frac_crop
     W, H = (l1.get("frame") or [1080, 1920])[:2]
-    vals = []
-    for sh in over(l1, a, b):
+    out = []
+    for f0, f1, sh in sorted(((max(a, s_["f"][0]), min(b, s_["f"][1]), s_) for s_ in over(l1, a, b)), key=lambda r: r[0]):
         asset = (l1.get("assets") or {}).get(sh.get("pic"))
-        if not asset:
-            continue
-        f = (max(a, sh["f"][0]) + min(b, sh["f"][1])) // 2
-        crop = AR(sh.get("crop"), f, sh["f"][0]) or (frac_crop(asset["w"], asset["h"], W, H) if asset.get("w") else None)
-        src = sh.get("src") or [0, 0]
-        vals.append(sense.luma(sh["pic"], float(src[0]), crop))
-    return float(np.median(vals)) if vals else 0.45
+        v = None
+        if asset:
+            f = (f0 + f1) // 2
+            crop = AR(sh.get("crop"), f, sh["f"][0]) or (frac_crop(asset["w"], asset["h"], W, H) if asset.get("w") else None)
+            src = sh.get("src") or [0, 0]
+            t = float(src[0]) + (f - sh["f"][0]) / float(l1.get("fps") or 30)
+            try:
+                v = sense.luma(sh["pic"], t if sh.get("src") else 0.0, crop)
+            except Exception:      # noqa: BLE001 - a picture that cannot be read keeps the section's level
+                v = None
+        out.append((f0, f1, v))
+    known = [v for _, _, v in out if v is not None]
+    mid = float(np.median(known)) if known else 0.45
+    lv = [None] * max(b - a, 1)
+    for f0, f1, v in out:
+        for f in range(max(f0, a), min(f1, b)):
+            lv[f - a] = v
+    th = [round(min(max((v if v is not None else mid) * k, lo), hi), 4) for v in lv]
+    return th[0] if len(set(th)) == 1 else th
 
 
 def xerox(l1, work, ask, sense):
     a, b = frames(l1, ask, default_len=45, min_len=6)
     th = arg(ask, "th")
-    th = float(th) if th is not None else min(max(_middle_light(l1, sense, a, b) * 0.8, 0.1), 0.7)
-    items = [_flash(l1, a, b, "xerox", th=round(th, 4), toner=1.0, rate=2, **({"c": colour(ask, "c")} if colour(ask, "c") else {}))]
+    th = float(th) if th is not None else own_light(l1, sense, a, b, k=0.8)
+    items = [_flash(l1, a, b, "xerox", th=th, toner=1.0, rate=2, **({"c": colour(ask, "c")} if colour(ask, "c") else {}))]
     return {"items": items, "log": {"f": [a, b]}, "events": [{"f": a, "kind": "surface", "strength": 0.4}]}
 
 
