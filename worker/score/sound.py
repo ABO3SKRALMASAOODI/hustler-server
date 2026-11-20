@@ -1106,6 +1106,15 @@ def plan_sounds(events, ctx):
         close = turn                                       # the turn is the close: one landing, not two
         close_t = close["f"] / fps
         turn = None
+    if screen and ctx.get("beats"):
+        # the story's register at each hero landing, as the Director (a model) chose it: a beat it held lands soft
+        for e, roles in ((hook, ("hook",)), (turn, ("turn", "payoff")), (close, ("payoff", "close"))):
+            if e is None:
+                continue
+            near = [b for b in ctx["beats"] if isinstance(b, dict) and b.get("role") in roles and
+                    isinstance(b.get("f"), (int, float)) and abs(int(b["f"]) - e["f"]) <= fps]
+            if near and min(near, key=lambda b: abs(int(b["f"]) - e["f"])).get("energy") == "hold":
+                e["soft"] = True
     turn_t = turn["f"] / fps if turn is not None else None
     cands = sorted(cands, key=lambda e: e["f"])
     ladder = tiers_for([e for e in cands if not any(e is x for x in (hook, turn, close))])
@@ -1287,6 +1296,8 @@ def plan_sounds(events, ctx):
                         it["tier"] = tier_now
                         if hero_now and it["layer"] == "hit":
                             it["duck_db"] = DUCK_DB          # the song makes room under a hero hit (scene.audio.master)
+                            if screen and e.get("soft"):
+                                it["soft"] = True            # a held beat: a dry hit at an accent's level (sound_screen)
                     hidden = _heard(group, ctx, ref, under, hero_now and not screen, tier_now)
                     if screen and hero_now:          # the hero keeps the recording heard best of its tries
                         got = min([float(it.get("heard_db", 99.0)) for it in group if it.get("layer") == "hit"] or [99.0])
@@ -2164,7 +2175,7 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
            "words": words or [], "bed": bed, "ref_at": ref_at, "np10": (supply or {}).get("np10"), "own_tiers": bool(own_tiers),
            "turn_f": int(round(float(turn_s) * fps)) if turn_s is not None else None, "close_s": close_s,
            "delivery_tail_s": float((supply or {}).get("delivery_tail_s", 0.0)),
-           "tick_10s": (supply or {}).get("tick_10s"), "screen": screen,
+           "tick_10s": (supply or {}).get("tick_10s"), "screen": screen, "beats": l1.get("sound_beats") if screen else None,
            "seed": film_seed(l1.get("sid"), l1.get("seed"), D, [e.get("src") for e in (l1.get("spine") or [])][:64],
                              sorted(str((a or {}).get("path")) for a in (l1.get("assets") or {}).values())[:64])}
     sounds, report = plan_sounds(events, ctx)

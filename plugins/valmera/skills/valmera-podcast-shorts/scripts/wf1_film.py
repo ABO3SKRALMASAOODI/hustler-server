@@ -1246,6 +1246,11 @@ def build(script, sup, style_id, direction=None):
                 bands.append(dict(energy=en, take=is_take, fault=repr(e)[:200]))
     # the film's word clock, for the palette's devices: each word on the frame a display word lands on it, and its sentence
     l1["said"] = [[w["w"], Clock.f(w["t0"]) - 1, Clock.f(w["t1"]), int(w.get("seg", 0))] for w in clock.words]
+    # the Director's story beats for the sound's hero hits (worker/score/sound_screen.py): a beat it held (energy hold)
+    # lands a short dry hit, not a trailer impact (lane sfx-moments, 20 Nov: an impact on a suicide line read wrong)
+    l1["sound_beats"] = [dict(f=int(word_frame(b["w"])), role=b.get("role"), energy=b.get("energy"))
+                         for b in (dr.get("beats") or []) if isinstance(b, dict) and isinstance(b.get("w"), int)
+                         and b.get("role") in ("hook", "turn", "payoff", "close") and word_frame(b["w"]) is not None]
     if devices:
         l1["devices"] = devices
     l1 = F.engines_finish(l1, sup, stress, drive_ids, meta, dict(d, look_pictures=look_pics),

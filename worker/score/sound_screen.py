@@ -45,6 +45,8 @@ in-shot camera drifts, and nothing sounded the paper or the money a picture show
              ranks its moments (matters): an object the picture shows (paper, or the family a model named for the
              picture, asset `foley`), a glitch, typing, a hard landing, a cut that really travels (a whip, a card's
              slide, a crop moving at WHIP_V of a whip), then type. An in-shot camera move sounds only as a whip.
+  register   a hero on a beat the Director held (its energy `hold`, scene `sound_beats`) lands a short dry hit at an
+             accent's level, never a trailer impact: a model chose the beat's weight, the signal sets the level.
   amount     RATE_10S sounds a 10 s at most besides the hook, the turn and the close (which always land), and no quiet
              tick layer: what is placed is meant to be heard.
   heard      each hit is levelled on the judge's own ruler (TEARDOWN 9: a 50 ms K-weighted peak against the voice's
@@ -512,6 +514,16 @@ def layers(e, part, tier, t, st, lib, preroll, avoid=()):
         out.append((sid, what))
         _keep(st, cls, sid, t)
 
+    if tier == "hero" and e.get("soft"):
+        # a held beat (the Director's energy at the hook, the turn or the close): a hit, short and dry, no climb and no
+        # trailer impact (raters, 20 Nov: an impact on 'the lowest moment of my life' read tonally wrong)
+        sid = pick("hit", st, lib, t, want_s=0.4, fits_=fit, avoid=avoid) or \
+            pick("impact", st, lib, t, want_s=0.6, fits_=fit, avoid=avoid, transient=True)
+        if sid is None:
+            return [], "hit"
+        cls = (st.get("desc", {}).get(sid) or {}).get("kind") or "hit"
+        take(cls, sid)
+        return out, cls
     if tier == "hero":
         want = {"hook": 0.8, "payoff": 1.0, "close": 1.2}.get(part, 1.0)
         lead_room = room >= (0.4 if part == "hook" else 1.2)
@@ -642,6 +654,8 @@ def restrain(sounds, voice, rate, shift_db, lib, report=None, fps=None, sample=N
             continue
         was = s["db"]
         tier = s.get("tier") or "body"
+        if s.get("soft") and tier == "hero":
+            tier = "accent"
         if hf is not None:
             over = float(hf) + float(s["db"]) - (ref + HF_OVER.get(tier, 8.0))
             if over > 0:
@@ -769,6 +783,8 @@ def level(group, under, rate, sample, fps, voice=None, masking=None, hf_ref=None
         if it.get("layer") not in ("hit", "accent") or it.get("for") == "counter" or it.get("start_s") is None:
             continue
         tier = it.get("tier") or "body"
+        if it.get("soft") and tier == "hero":
+            tier = "accent"                            # a held beat's hit sits at an accent's level, kept as the hero's landing
         r = reading(it, sample(it["s"]), under, rate, fps, voice, srate)
         if r is None or r[5] is None:
             continue
@@ -800,7 +816,7 @@ def level(group, under, rate, sample, fps, voice=None, masking=None, hf_ref=None
                 break
             g += STEP_DB
             p = prominence(r, g)
-        if p < HEARD_DB and tier == "hero":
+        if p < HEARD_DB and it.get("tier") == "hero":
             # the hook, the turn and the close land where the story does, often on a word: heard there, up to its
             # ceiling, for its attack over the syllable it lands on (the references' hero hits sit at or over the voice)
             while p < HEARD_AIM and g + STEP_DB <= ceiling + 1e-6:

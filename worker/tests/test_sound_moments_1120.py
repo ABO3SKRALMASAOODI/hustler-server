@@ -196,3 +196,28 @@ def test_an_object_a_model_named_lands_with_its_own_sound():
     assert not other or LIB[other[0][0]].get("family") != "paper"
     # a customer's events carry no foley: unchanged
     assert not any(x.get("foley") for x in SD.l1_events(l1))
+
+
+def test_a_beat_the_director_held_lands_a_dry_hit_not_a_trailer_impact():
+    """Raters, 20 Nov: 'a trailer-style impact on a suicide line is tonally wrong'. The Director (a model) gives each
+    story beat its energy; a hero landing on a beat it held is a short hit at an accent's level, no climb."""
+    from tests.test_sound_screen import LIB, _st, _pre
+    soft, cls = SCR.layers({"kind": "picture", "f": 45, "room_s": 3.0, "soft": True, "_w": 0.5}, "hook", "hero", 1.5, _st(), LIB, _pre)
+    assert cls == "hit" and [w for _s, w in soft] == ["hit"] and LIB[soft[0][0]]["reference"]["class"] == "hit"
+    loud, cls2 = SCR.layers({"kind": "picture", "f": 45, "room_s": 3.0, "_w": 0.5}, "close", "hero", 1.5, _st(), LIB, _pre)
+    assert cls2 == "impact"
+    l1 = _plain_l1()
+    ev = SCR.annotate(SD.l1_events(l1), l1)
+    held, rep = SD.plan_sounds([dict(e) for e in ev], _ctx(l1, beats=[{"f": 45, "role": "hook", "energy": "hold"},
+                                                                      {"f": 271, "role": "payoff", "energy": "strobe"}]))
+    hook = next(s for s in held if s.get("part") == "hook" and s.get("layer") == "hit")
+    turn = next(s for s in held if s.get("part") == "payoff" and s.get("layer") == "hit")
+    assert hook.get("soft") and not turn.get("soft")
+    row = next(r for r in rep["placed"] if r["part"] == "hook")
+    assert row["class"] != "impact"
+    # the ruler sets a held beat's hit at an accent's level
+    voice = _voice()
+    smp = _click()
+    it = dict(_item("hero", db=-40.0), soft=True)
+    SCR.level([it], voice, AR, lambda sid: smp, 30.0, srate=SR)
+    assert it["over_voice_db"] <= SCR.LEVEL_TOP["accent"] + 0.2
