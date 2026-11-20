@@ -327,3 +327,25 @@ def test_devices_that_need_the_speaker_report_their_frames_and_fall_back_when_to
     assert "would light 7 frames" in patch["skip"]
     out, log = palette.apply(dict(l1, devices=[{"dev": "neg_world", "id": "nw", "f": [70, 100]}]), work)
     assert log[0]["done"] and log[0]["landed"] != "neg_world" and log[0]["fallback"]
+
+
+def test_a_fallback_never_reads_the_asked_devices_field_in_its_own_units(film):
+    l1, work = film
+    out, log = palette.apply(dict(l1, devices=[{"dev": "rhyme", "id": "r", "at": [40, 120], "n": 8}]), work)
+    r = log[0]
+    assert r["done"] and r["landed"] == "neg" and r["fallback"]
+    flips = [i for i in out["items"] if i["id"].startswith("rn")]
+    assert flips and all(i["f"][1] - i["f"][0] == 1 for i in flips)     # 8 pictures is not an 8-frame (or 2-frame) flip
+
+
+def test_a_card_behind_the_speaker_stands_only_on_his_take():
+    l1 = {"dur_f": 60, "assets": {}, "items": [
+        {"id": "t", "k": "shot", "f": [0, 20], "pic": "main", "src": [0.0, 0.6667]},
+        {"id": "lit", "k": "shot", "f": [20, 40], "pic": "alien:x", "src": [0.0, 0.6667]},
+        {"id": "t2", "k": "shot", "f": [40, 60], "pic": "own:cut1", "src": [1.0, 1.6667]},
+        {"id": "nw", "k": "card", "f": [10, 50], "pic": "main", "src": [0.3333, 1.6667], "behind": True, "treat": {"mode": "neg"},
+         "crop": [[0, 0, 1, 1]] * 40}]}
+    out, trimmed = palette.behind_on_take(l1)
+    cards = sorted((i for i in out["items"] if i["k"] == "card"), key=lambda i: i["f"][0])
+    assert [c["f"] for c in cards] == [[10, 20], [40, 50]] and trimmed == {"nw": 20}
+    assert len(cards[1]["crop"]) == 10 and cards[1]["src"][0] == round(0.3333 + (1.6667 - 0.3333) / 40 * 30, 5)

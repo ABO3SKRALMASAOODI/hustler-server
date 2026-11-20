@@ -370,7 +370,7 @@ DEVICES = {
     "neg_split": {"plan": neg_split, "layer": "look", "fallback": ("white",),
                   "ranges": {"y": (0.05, 0.95, 0.5, "the band's centre, of the frame's height"), "h": (0.05, 0.6, 0.16, "the band's height, of the frame's")},
                   "card": "neg_split f[a,b] part(left|right|top|bottom|band) y h. Half the frame, or a band of it, negative. Two sides, a split, a tear"},
-    "neg_world": {"plan": neg_world, "layer": "surface", "needs": ("take", "matte"), "fallback": ("neg_split",),
+    "neg_world": {"plan": neg_world, "layer": "look", "needs": ("take", "matte"), "fallback": ("neg_split",),
                   "card": "neg_world f[a,b]. The world round the speaker inverts while he stays (his matte). Isolation, 'everyone else', a verdict on the world. Needs the speaker on screen for at least half a second of the span"},
     "white": {"plan": white, "layer": "look", "fallback": ("neg_split",), "ranges": {"n": (1, 5, 3, "frames")},
               "card": "white at n(1-5) card(bool). One white frame with a fast decay, full frame or clipped to the card on screen. Payoff join, a name reveal, a drop"},

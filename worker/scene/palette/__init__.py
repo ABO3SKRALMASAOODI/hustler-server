@@ -494,7 +494,12 @@ def apply(l1, work, asks=None, pool=None):
                 continue
             seen.add(dev)
             sense.l1 = cur
-            dask, dnotes = (ask, []) if dev == name else clean(dict(ask, dev=dev))
+            if dev == name:
+                dask, dnotes = ask, []
+            else:                           # a field the asked device reads in other units is left to the fallback's default
+                mine, theirs = ranges_of(name), ranges_of(dev)
+                other = [k for k in mine if k in theirs and mine[k][3] != theirs[k][3]]
+                dask, dnotes = clean(dict({k: v for k, v in ask.items() if k not in other}, dev=dev))
             got, why = _try(cur, work, dict(dask, dev=dev), sense)
             if got is not None and dev in WORD_DEVICES and dev != "word_blend":
                 box = seat_box(got[0], dask, ranges_of(dev))
@@ -533,6 +538,46 @@ def apply(l1, work, asks=None, pool=None):
             events.append(dict(e, dev=dev, id=ask["id"]))
         log.append(dict(row, done=True, landed=dev, fallback=bool(tried), tried=tried, log=patch.get("log"),
                         marks=patch.get("marks") or [], seat=patch.get("seat"), **({"replaced": sorted(echoes)} if echoes else {})))
+    cur, trimmed = behind_on_take(cur)
+    if trimmed:
+        for r in log:
+            got = {k: v for k, v in trimmed.items() if k.startswith(str(r["id"]))}
+            if got:
+                r["behind_trimmed"] = got
     cur["device_events"] = sorted(events, key=lambda e: (int(e.get("f", 0)), str(e.get("id"))))
     cur["device_log"] = log
     return cur, log
+
+
+def behind_on_take(l1):
+    """(scene, {card id: frames left}). A card drawn behind the speaker stands only on frames whose base picture is his
+    take: the engine draws the depth sandwich through the take's matte there, and anywhere else (a later device put its
+    own picture under those frames) the card would be drawn in front of the whole frame. Such a card keeps its take
+    frames, each run of them its own piece, its clock and per-frame values cut with it."""
+    from ..alien import sense as AS
+    shots = sorted((i for i in l1.get("items") or [] if i.get("k") == "shot"), key=lambda i: i["f"][0])
+
+    def take_at(f):
+        sh = next((s for s in shots if s["f"][0] <= f < s["f"][1]), None)
+        p = str((sh or {}).get("pic"))
+        return bool(sh and sh.get("src") and (p == "main" or p.startswith("own:")))
+    items, trimmed = [], {}
+    for it in l1.get("items") or []:
+        if it.get("k") != "card" or not it.get("behind"):
+            items.append(it)
+            continue
+        on = [take_at(f) for f in range(it["f"][0], it["f"][1])]
+        if all(on):
+            items.append(it)
+            continue
+        runs, f0 = [], None
+        for q, ok in enumerate(on + [False]):
+            if ok and f0 is None:
+                f0 = it["f"][0] + q
+            elif not ok and f0 is not None:
+                runs.append((f0, it["f"][0] + q))
+                f0 = None
+        for k, (lo, hi) in enumerate(runs):
+            items.append(AS.slice_shot(it, lo, hi, new_id=it["id"] if k == 0 else f"{it['id']}~{k}"))
+        trimmed[it["id"]] = sum(on)
+    return (dict(l1, items=items), trimmed) if trimmed else (l1, {})
