@@ -186,8 +186,10 @@ def test_screen_placement_end_to_end_sounds_only_what_the_picture_does():
            "np10": 6.0, "seed": SD.film_seed("screen"), "screen": True, "tick_10s": 1.5}
     sounds, rep = SD.plan_sounds(ev, ctx)
     frames = {e["f"] for e in ev if SD.motivated(e)}
-    assert sounds and all(s["event_f"] in frames for s in sounds)
-    assert not any(s["event_f"] == 30 for s in sounds)                           # the plain cut to a clip
+    # every sound sits on a motivated event's frame, or is the hook's, the turn's or the close's landing (lane
+    # sfx-moments: a new picture on the story's beat triggers its hit, plain cut or not)
+    assert sounds and all(s["event_f"] in frames or s.get("part") in ("hook", "payoff", "close") for s in sounds)
+    assert not any(s["event_f"] == 30 and s.get("part") not in ("hook", "payoff", "close") for s in sounds)     # a plain cut
     lib = SD.library()
     excluded = SD.excluded()
     assert not any(s["s"] in excluded for s in sounds)

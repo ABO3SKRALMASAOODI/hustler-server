@@ -911,7 +911,9 @@ def motivated(e):
     cut to the next picture, the upload's own cut and a reframe of the same take show nothing that sounds."""
     k = e.get("kind")
     if k in ("picture", "cut"):
-        return bool(e.get("moving") or e.get("flash_cut"))      # flash_cut: a flash frame on it (sound_screen.annotate)
+        # flash_cut: a flash frame on it; document / foley: the picture shows an object landing, a page or what a
+        # model named (sound_screen.annotate, the workflow films only)
+        return bool(e.get("moving") or e.get("flash_cut") or e.get("document") or e.get("foley"))
     return k in ("card", "page", "display", "counter", "flash", "burst", "move")
 
 
@@ -988,6 +990,13 @@ def plan_sounds(events, ctx):
     tick_rate = float(ctx["tick_10s"]) if ctx.get("tick_10s") is not None else TICK_10S.get(cls, 0.0)
     n_tick = max(0, int(tick_rate * dur_s / 10.0 + 1e-9))
     tick_win = max(1, int(math.ceil(tick_rate * TICK_BURST))) if n_tick else 0
+    screen = bool(ctx.get("screen"))
+    if screen:
+        # the workflow films (sound_screen, lane sfx-moments): fewer sounds, each one heard. No quiet tick layer (the
+        # raters measured 9-17 of a film's 13-21 sounds under the voice) and at most SCR.RATE_10S a 10 s.
+        n_tick, tick_win = 0, 0
+        total = max(1, min(total, int(SCR.RATE_10S * dur_s / 10.0 + 1e-9)))
+        win = max(1, min(win, int(math.ceil(SCR.RATE_10S * BURST))))
     al["sounds"], al["sounds_10s"] = total, win
     seed = ctx.get("seed")
     if seed is None:
@@ -1010,7 +1019,6 @@ def plan_sounds(events, ctx):
         i0, i1 = max(0, int((t + a) * AR / FRAME)), min(len(speech), int((t + b) * AR / FRAME) + 1)
         return bool(speech[i0:i1].any())
 
-    screen = bool(ctx.get("screen"))
     try:
         # screen placement (sound_screen, the workflow films): the class a model gave each recording of the workflow's
         # set stands; the ruler's re-classing is what put a camera shutter in a sweep's slot
@@ -1044,20 +1052,38 @@ def plan_sounds(events, ctx):
     # (or the upload's own cut, or a reframe of one take) shows nothing that makes a sound: sounded, it is a button pressed
     # in the background. Only what visibly moves or lands asks for one (motivated); everything else is the music's.
     report["unmotivated"] = sum(1 for e in cands if not motivated(e))
+    every = sorted(cands, key=lambda e: e["f"])                       # every landing, the plain cuts too
     cands = sorted([e for e in cands if motivated(e)] + trains, key=lambda e: e["f"])
+    if screen:
+        # whooshes only where a cut really travels (raters, 20 Nov: sweeps on in-shot camera drifts are noise); an
+        # in-shot move sounds only when it moves like a whip
+        report["drifts"] = sum(1 for e in cands if e["kind"] == "move" and not SCR.whip_move(e))
+        cands = [e for e in cands if e["kind"] != "move" or SCR.whip_move(e)]
     total = min(total, max(1, sum(1 for e in cands if e["kind"] not in ("counter", "burst"))))
     report["allow"] = al["sounds"] = total
 
     # ---- the three hero landings: the hook, the turn, the close
-    lands = [e for e in cands if e["kind"] in ("picture", "cut", "card", "page", "display", "counter", "flash")]
-    hook = next((e for e in cands if 1 < e["f"] < HOOK_S * fps and e["kind"] in ("picture", "card", "page") and _weight(e) >= 0.45), None) \
-        or next((e for e in cands if e["f"] < HOOK_S * fps and e["kind"] in DESIGNED), None)
+    # screen placement: found among every landing on screen. A new picture landing on the story's beat is what
+    # triggers the hit there, plain cut or not (raters, 20 Nov: the hook, the turn and the payoff were dry in half the
+    # films because only "motivated" events could carry them), and SCR.SNAP_S either side of the mark.
+    heroes_from = [e for e in every if e["kind"] != "move"] if screen else cands
+    snap = SCR.SNAP_S if screen else SNAP_S
+    lands = [e for e in heroes_from if e["kind"] in ("picture", "cut", "card", "page", "display", "counter", "flash")]
+    hook = next((e for e in heroes_from if 1 < e["f"] < HOOK_S * fps and e["kind"] in ("picture", "card", "page") and _weight(e) >= 0.45), None) \
+        or next((e for e in heroes_from if e["f"] < HOOK_S * fps and e["kind"] in DESIGNED), None)
+    if screen:
+        # the hook lands where the voice leaves it room: among the opening's landings, one in a breath first (a hit on
+        # a word is held under the word and goes unheard: raters, 20 Nov), then a new picture, then the earliest
+        opening = [e for e in lands if 1 < e["f"] < HOOK_S * fps]
+        if opening:
+            hook = min(opening, key=lambda e: (1 if spoken(e["f"] / fps, -0.05, 0.2) else 0,
+                                               0 if e["kind"] in ("picture", "card", "page") and _weight(e) >= 0.45 else 1, e["f"]))
     close_s, close_by = (ctx.get("close_s"), "caller") if ctx.get("close_s") is not None else \
         close_time([e["f"] / fps for e in events if e["kind"] in DESIGNED + ("cut", "move")], words, dur_s, bed)
     close = None
-    if close_s is not None:
-        near = [e for e in cands if abs(e["f"] / fps - close_s) <= 2.5 / fps and e is not hook]
-        close = min(near, key=lambda e: abs(e["f"] / fps - close_s)) if near else None
+    if close_s is not None:                    # the song's last hit is read on the same frame (music.marks_from_l1)
+        near = [e for e in heroes_from if abs(e["f"] / fps - close_s) <= 2.5 / fps and e is not hook and not (screen and e["kind"] == "burst")]
+        close = min(near, key=lambda e: (abs(e["f"] / fps - close_s), KIND_RANK.get(e["kind"], 9) if screen else 0)) if near else None
     if close is None and close_s is None:                                      # no word to close after: the last designed landing of the film
         late = [e for e in cands if e["f"] >= PAYOFF_FROM * end_f and e["kind"] in ("display", "card", "page", "picture", "counter")]
         close = max(late, key=lambda e: e["f"]) if late else None
@@ -1067,8 +1093,11 @@ def plan_sounds(events, ctx):
     turn = None
     if ctx.get("turn_f") is not None:
         tf = int(ctx["turn_f"])
-        near = [e for e in lands if abs(e["f"] - tf) <= SNAP_S * fps and e is not hook]      # the music's own snap: the drop lands there
-        turn = min(near, key=lambda e: abs(e["f"] - tf)) if near else None      # nothing lands there: the song's drop is the turn
+        near = [e for e in lands if abs(e["f"] - tf) <= snap * fps and e is not hook]      # the music's own snap: the drop lands there
+        if screen:                             # in a breath first, then the nearest (music.sounds_on_the_drop joins them)
+            turn = min(near, key=lambda e: (1 if spoken(e["f"] / fps, -0.05, 0.2) else 0, abs(e["f"] - tf), KIND_RANK.get(e["kind"], 9))) if near else None
+        else:
+            turn = min(near, key=lambda e: abs(e["f"] - tf)) if near else None      # nothing lands there: the song's drop is the turn
     elif close is not None and cls in ("P", "M"):          # nobody named the turn: the heaviest landing of the second half is it
         late = [e for e in lands if 0.5 * close["f"] <= e["f"] <= close["f"] - 2.0 * fps and e is not hook]
         if late:
@@ -1107,13 +1136,17 @@ def plan_sounds(events, ctx):
         if not any(e is x for x in structural):
             pool.setdefault(bin_of(e["f"] / fps), []).append(e)
     for rows in pool.values():                 # new graphics and type first, then the bigger picture change, a breath before a word
-        rows.sort(key=lambda e: (e["kind"] != "burst", 1 if on_cut(e) else 0, -_weight(e), 1 if spoken(e["f"] / fps) else 0, e["f"]))
+        if screen:                             # the moments that matter first: an object shown, a hard landing, real travel
+            rows.sort(key=lambda e: (e["kind"] != "burst", -SCR.matters(e), 1 if spoken(e["f"] / fps) else 0, -_weight(e), e["f"]))
+        else:
+            rows.sort(key=lambda e: (e["kind"] != "burst", 1 if on_cut(e) else 0, -_weight(e), 1 if spoken(e["f"] / fps) else 0, e["f"]))
     in_bin = [0] * nb
     in_sec = {}
     n_else = sum(1 for e in cands if not on_cut(e) and not any(e is x for x in structural))
     cut_budget = max(int(math.ceil(CUT_SHARE * want)), want - n_else)       # what lands on a cut moves (a whip, a page turn)
     report["cut_budget"] = cut_budget
-    state = {"aud": [], "tick": [], "all": [], "busy": [], "cut_items": 0, "items": 0, "own_cut": 0, "own_t": []}
+    # screen placement: the hook, the turn and the close always land and are not counted in the film's amount
+    state = {"aud": [], "tick": [], "all": [], "busy": [], "cut_items": 0, "items": 0, "own_cut": 0, "own_t": [], "heroes": 0}
     placed = []
     # The Director's own library sounds are the film's own gestures (the impact under the hook title, the riser into
     # the payoff's hit): they take their place in the one hierarchy. Round seven: they were set at the first library's
@@ -1175,6 +1208,10 @@ def plan_sounds(events, ctx):
         e0 = e
         t = e["f"] / fps
         tier = tier_of(e, part, ladder)
+        if screen and tier in ("body", "tick") and e["kind"] not in ("counter", "burst"):
+            # what is placed is meant to be heard (no quiet layer); an object the picture shows, a hard landing or a
+            # cut that really travels is an accent of the film
+            tier = "accent" if SCR.matters(e) >= 2.0 else "body"
         if tier in ("accent", "body") and not on_cut(e) and len(state["tick"]) < n_tick and (not screen or e["kind"] in ("display", "counter")) and (
                 len(state["aud"]) >= cap["aud"] or any(sum(1 for g in state["aud"] + [t] if w0 <= g < w0 + 10.0) > win
                                                        for w0 in [g for g in state["aud"] + [t] if t - 10.0 < g <= t])):
@@ -1185,7 +1222,7 @@ def plan_sounds(events, ctx):
         n_items = len(steps) if (steps and e["kind"] == "burst") else 1
         if close_t is not None and t > close_t + 1e-6:
             return refuse(e, "after the close: the film's last hit is its last sound")
-        if layer == "aud" and len(state["aud"]) >= cap["aud"]:
+        if layer == "aud" and len(state["aud"]) - state["heroes"] >= cap["aud"] and not (screen and hero):
             return refuse(e, f"the footage carries {total} (class {cls}{', a bed' if bed else ''})")
         if layer == "tick" and len(state["tick"]) >= n_tick:
             return refuse(e, f"the film carries {n_tick} small ticks")
@@ -1223,13 +1260,17 @@ def plan_sounds(events, ctx):
             # Round seven: a hit that still sat in the voice at its tier's floor was planned, then taken out by the last
             # signal check, and the moment went silent (the turn of p5574, three pictures of p5565). It is given another
             # recording, then the tier under it: a landing under a word is a quieter landing, never no landing.
-            for tier_now in {"hero": ("hero", "accent", "body"), "accent": ("accent", "body")}.get(tier, (tier,)):
+            ladder_now = {"hero": ("hero", "accent", "body"), "accent": ("accent", "body")}.get(tier, (tier,))
+            if screen and tier == "hero":
+                ladder_now = ("hero",)                # a hero keeps its landing: its recordings take turns, its tier stays
+            for tier_now in ladder_now:
                 part_now = part if tier_now == "hero" else "plain" if tier != tier_now else part
                 hero_now = tier_now == "hero"
                 under = (TIER_UNDER[tier_now] if TIER_UNDER[tier_now] is not None else al["under_voice_db"]) if spoken(t) and tier_now != "tick" else None
                 w = HERO_W.get(part_now, 1.0) if hero_now else _weight(e)     # the close is the film's heaviest hit, the turn next
                 avoid = set()
-                for _ in range(TRIES):
+                best = None
+                for _ in range(SCR.HERO_TRIES if screen and hero_now else TRIES):
                     layers, kcls = _layers_for(e, part_now, tier_now, t, st, avoid)
                     if not layers:
                         break
@@ -1246,10 +1287,20 @@ def plan_sounds(events, ctx):
                         it["tier"] = tier_now
                         if hero_now and it["layer"] == "hit":
                             it["duck_db"] = DUCK_DB          # the song makes room under a hero hit (scene.audio.master)
-                    hidden = _heard(group, ctx, ref, under, hero_now, tier_now)
+                    hidden = _heard(group, ctx, ref, under, hero_now and not screen, tier_now)
+                    if screen and hero_now:          # the hero keeps the recording heard best of its tries
+                        got = min([float(it.get("heard_db", 99.0)) for it in group if it.get("layer") == "hit"] or [99.0])
+                        if best is None or got > best[0]:
+                            best = (got, [dict(it) for it in group], list(layers), kcls)
+                        if hidden:
+                            SCR.forget(st, t)
                     if not hidden or steps:
                         break
                     avoid |= {sid for sid, what in layers if what == "hit"}
+                if screen and hero_now and best is not None and (hidden or not layers):
+                    _got, group, layers, kcls = best      # none of its tries stood clear: the one heard best lands
+                    SCR.retake(st, t, [(kcls if what == "hit" else SCR.class_of(st, sid), sid) for sid, what in layers])
+                    hidden = None
                 if layers and not hidden:
                     break
             if tier_now != tier:
@@ -1269,6 +1320,8 @@ def plan_sounds(events, ctx):
                 climb = max(float(it["peak_s"]) - float(it.get("trim_s", 0)) for it in leads)
                 state["busy"].append((t - climb, t - TICK_SPACE_S))
         (state["tick"] if layer == "tick" else state["aud"]).append(t)
+        if screen and hero and layer == "aud":
+            state["heroes"] += 1
         state["all"].append(t)
         if e["kind"] == "burst":
             state["busy"].append((t, end_t))
@@ -1288,7 +1341,9 @@ def plan_sounds(events, ctx):
         return True
 
     spare, done, cap = [], set(), {"aud": total}
-    for e, part in sorted(((hook, "hook"), (turn, "payoff"), (close, "close")), key=lambda x: (x[1] != "close", x[1] != "payoff")):
+    heroes = ((hook, "hook"), (turn, "payoff"), (close, "close"))
+    # screen placement: in film order, so the close's climb has only the room after the turn
+    for e, part in (heroes if screen else sorted(heroes, key=lambda x: (x[1] != "close", x[1] != "payoff"))):
         if e is None:
             continue
         if (part == "hook" and dir_hook) or (part == "close" and dir_close):
@@ -1313,10 +1368,18 @@ def plan_sounds(events, ctx):
     quota["on"] = False
     for e in sorted(spare, key=lambda e: (["open", "build", "after", "middle", "tail"].index(section_of(e["f"] / fps, dur_s, turn_t, close_t)),
                                           1 if on_cut(e) else 0, -_weight(e), e["f"])):
-        if len(state["aud"]) >= total and len(state["tick"]) >= n_tick:
+        if len(state["aud"]) - state["heroes"] >= total and len(state["tick"]) >= n_tick:
             refuse(e, "the film's amount was spent where its shape asked for it")
             continue
         attempt(e, "plain")
+    if screen:
+        # a moment the shape's shares never reached (a part whose share rounds under one sound) still lands while the
+        # film's amount lasts, the moments that matter most first: a landing the picture makes, never a filler
+        rest = [e for k in sorted(pool) for e in pool[k] if id(e) not in done]
+        for e in sorted(rest, key=lambda e: (-SCR.matters(e), 1 if spoken(e["f"] / fps) else 0, e["f"])):
+            if len(state["aud"]) - state["heroes"] >= total:
+                break
+            attempt(e, "plain")
     # A stretch with nothing landing on screen stays without sound effects: the music carries it (owner, 16 Nov: no filler).
     sounds, report = _signal_check(placed, ctx, report)
     sounds += [s for s in existing if s.get("s") not in lib]          # the Director's voice layers (echo, swell) as written
@@ -1628,6 +1691,15 @@ def _item(iid, sid, f, fps, db, ev, part, what):
     return it
 
 
+def _full_band(sid):
+    """A recording's own samples at the mix rate, in stereo as it plays: what the judge's ruler reads of it
+    (sound_screen.reading)."""
+    x = library().get(sid)
+    if not x:
+        return np.zeros((0, 2), np.float32)
+    return pcm(os.path.join(SOUNDS, x["file"]), SR, 2)
+
+
 def _bands_pw(x):
     """Per 20 ms frame of a mono AR signal: power in each of PRESENT_BANDS (frames x 4)."""
     n = len(x) // FRAME
@@ -1741,8 +1813,30 @@ def _heard(group, ctx, ref, under, structural, tier="body"):
         return None
     speech, fps = ctx["speech"], float(ctx["fps"])
     worst = masked = None
+    screen = bool(ctx.get("screen"))
+    if screen:
+        # the workflow films (sound_screen.level, lane sfx-moments): each hit set on the judge's own ruler, at the
+        # references' level over the voice and raised until its 50 ms peak stands HEARD_DB over its surroundings, never
+        # into the speech band; its leads are then checked over it as before
+        v = ctx["voice"] * (10 ** (float(ctx.get("voice_shift_db") or 0.0) / 20))
+        if "_hf_ref" not in ctx:
+            ctx["_hf_ref"] = SCR.voice_hf(ctx["voice"], AR, float(ctx.get("voice_shift_db") or 0.0))
+
+        def mask(it):
+            it["_fps"] = fps
+            need = _mask_need(it, vb, speech, fps, True)
+            it.pop("_fps", None)
+            return need
+        for it in group:
+            if it.get("layer") in ("hit", "accent") and it.get("for") != "counter" and not it.get("tier"):
+                it["tier"] = tier
+        p = SCR.level(group, v, AR, _full_band, fps, masking=mask, hf_ref=ctx["_hf_ref"], lib=library(), srate=SR)
+        if p is not None and p < SCR.HEARD_DB and not structural:
+            worst = f"the voice would hide it here ({p:.1f} dB over its surroundings at its loudest)"
     for it in list(group):
         t_ = it.get("tier") or tier
+        if screen and it.get("layer") != "lead":
+            continue
         if it.get("layer") == "lead":
             it["_fps"] = fps
             need = _masking(it, vb, speech, fps)
@@ -1812,6 +1906,10 @@ def present_over(sounds, voice, bed, fps, voice_shift_db=0.0):
     pad = np.pad(vb, k, mode="edge")
     vb = np.max(np.stack([pad[j:j + len(vb)] for j in range(2 * k + 1)]), axis=0)
     lib, out = library(), []
+    screen = SCR.on()
+    if screen:
+        bed_v = np.asarray(bed[:n], np.float32)
+        hf_ref = SCR.voice_hf(v, AR)
     for s in sounds:
         it = dict(s)
         if it.get("s") not in lib or it.get("for") == "counter" or it.get("start_s") is None:
@@ -1842,6 +1940,26 @@ def present_over(sounds, voice, bed, fps, voice_shift_db=0.0):
             out.append(it)
             continue
         tier = it.get("tier") or "body"
+        if screen and it.get("layer") in ("hit", "accent") and it.get("for") != "burst":
+            # the workflow films (lane sfx-moments): the same judge's ruler with the song in the surroundings; raised
+            # (never lowered) until heard over the voice and the song together. A body sound the two still cover is
+            # clutter and goes; a hero or an accent keeps its moment at its best level.
+            it.pop("_fps", None)
+            was = float(it["db"])
+
+            def mask(x):
+                x["_fps"] = float(fps)
+                need = _mask_need(x, vb, speech, fps, True) if speech.any() else 0.0
+                x.pop("_fps", None)
+                return need
+            p = SCR.level([it], v + bed_v, AR, _full_band, fps, voice=v, masking=mask, hf_ref=hf_ref, lib=lib, start=was, srate=SR)
+            if it["db"] > was:
+                it["lifted_for_bed_db"] = round(it["db"] - was, 1)
+            if p is not None and p < SCR.HEARD_DB and tier in ("body", "tick"):
+                continue
+            it["over_bed_db"] = round(p, 1) if p is not None else None
+            out.append(it)
+            continue
         goal = TIER_PRESENT.get(tier, PRESENT_DB) if it.get("tier") else PRESENT_DB
         p = _presence(it, both)
         if p < goal:
@@ -1859,15 +1977,16 @@ def present_over(sounds, voice, bed, fps, voice_shift_db=0.0):
             continue                                 # the song and the voice cover it even lifted: a sound nobody hears is clutter
         it["over_bed_db"] = round(min(p, 60.0), 1)
         out.append(it)
-    return screen_restrain(out, voice, voice_shift_db)
+    return screen_restrain(out, voice, voice_shift_db, fps=fps)
 
 
-def screen_restrain(sounds, voice, voice_shift_db=0.0):
-    """Screen placement (the workflow films): the 2-8 kHz restraint once more after a lift, so the band limit is the
-    final level over the song too (sound_screen.restrain). Anything else comes back as it was."""
+def screen_restrain(sounds, voice, voice_shift_db=0.0, fps=None):
+    """Screen placement (the workflow films): the ceilings once more after a lift, so they are the final level over
+    the song too (sound_screen.restrain: the 2-8 kHz spike limit, and with fps the judge's LEVEL_TOP over the voice).
+    Anything else comes back as it was."""
     if not SCR.on() or voice is None or not len(voice):
         return sounds
-    return SCR.restrain(sounds, voice, AR, voice_shift_db, library())
+    return SCR.restrain(sounds, voice, AR, voice_shift_db, library(), fps=fps, sample=_full_band if fps else None, srate=SR)
 
 
 def _signal_check(placed, ctx, report):
@@ -1883,9 +2002,13 @@ def _signal_check(placed, ctx, report):
         keep = []
         for it in g["items"]:
             if vb is not None and it["for"] != "counter":
-                need = _masking(it, vb, speech, ctx["fps"])
+                need = _mask_need(it, vb, speech, ctx["fps"], bool(ctx.get("screen")))
+                if ctx.get("screen") and it.get("tier") == "hero" and it["layer"] == "hit":
+                    need = 0.0                           # levelled on the judge's ruler: heard where the story lands
                 if need > 0:
                     lowest = tier_floor(it["s"], g["ref"], it["tier"], lead=it["layer"] == "lead") if it.get("tier") else floor_for(it["s"], g["ref"])
+                    if ctx.get("screen") and it["layer"] != "lead":
+                        lowest = GAIN_MIN                    # the workflow films: levelled on the judge's ruler, eased, kept
                     if it["db"] - need >= lowest:
                         it["db"] = round(it["db"] - need, 1)
                         it["eased_db"] = round(need, 1)
@@ -1918,6 +2041,14 @@ def _signal_check(placed, ctx, report):
     report["gestures"] = len(report.get("placed") or []) + len(report.get("body") or []) + len(report.get("ticks") or [])
     report["sounds"] = len(out)
     return out, report
+
+
+def _mask_need(it, vb, speech, fps, screen=False):
+    """_masking, with a hero hit of the workflow films allowed to the voice's own level (SCR.HERO_MASK_DB)."""
+    need = _masking(it, vb, speech, fps)
+    if screen and need > 0 and it.get("tier") == "hero" and it.get("layer") == "hit":
+        need = max(0.0, need - SCR.HERO_MASK_DB)
+    return need
 
 
 def _masking(it, vb, speech, fps):
@@ -2037,8 +2168,8 @@ def design(l1, work=None, index=None, perc=None, asks=None, src=None, supply=Non
            "seed": film_seed(l1.get("sid"), l1.get("seed"), D, [e.get("src") for e in (l1.get("spine") or [])][:64],
                              sorted(str((a or {}).get("path")) for a in (l1.get("assets") or {}).values())[:64])}
     sounds, report = plan_sounds(events, ctx)
-    if screen:                               # held under the voice in the band the voice leaves bare (2-8 kHz)
-        sounds = SCR.restrain(sounds, voice, AR, shift, library(), report)
+    if screen:                               # the ceilings: no 2-8 kHz spike, never louder than LEVEL_TOP over the voice
+        sounds = SCR.restrain(sounds, voice, AR, shift, library(), report, fps=fps, sample=_full_band, srate=SR)
         report.setdefault("screen", {})["placement"] = "screen"
     if (index or {}).get("first_film"):
         import first_film_sound

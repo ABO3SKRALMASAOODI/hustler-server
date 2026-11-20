@@ -841,6 +841,10 @@ def build(script, sup, style_id, direction=None):
     for row in ins:                                      # a clip the check cut clear of another editor's text is a new file
         if row[4]["path"] not in keys:
             keys[row[4]["path"]] = (P.video if row[2] == "clip" else P.image)(f"{'v' if row[2] == 'clip' else 'p'}{len(keys):02d}", row[4])
+        if row[4].get("foley") and keys.get(row[4]["path"]) in P.assets:
+            # the object the check saw in this picture (placement_check foley): its landing sounds as that object
+            # (worker/score/sound_screen.py)
+            P.assets[keys[row[4]["path"]]]["foley"] = str(row[4]["foley"])
     coverage_report = require_coverage(ins, coverage, f_end/FPS, final=bool(d.get('coverage_final')))
     past = {int(i) for i in d.get("past_segs") or [] if isinstance(i, int)}
     cut_pts, drive_ids, look_pics, mono_spans, bright = [], set(), [], [], []

@@ -1404,12 +1404,14 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
             # can discard a quiet sample. This adds no events or recordings.
             l1['sound'] = audibility.present_hits(l1['sound'], lv, music,
                 lambda items: AU.split_audio(_Plan(dict(l1,sound=items),src))[1], alternatives=audibility.recording_alternatives)
-        lv_ar = to_ar(lv)
+        # the voice as each channel plays it: ffmpeg's stereo-to-mono sums a centred voice 3 dB over either channel,
+        # and every sound was levelled against the voice per channel (sound.voice_shift) (lane sfx-moments)
+        lv_ar = to_ar(lv.mean(axis=1) if np.ndim(lv) == 2 else lv)
         l1["sound"] = SD.present_over(l1["sound"], lv_ar, to_ar(music), float(l1["fps"]))
         if kind == 'podcast':
             l1['sound'] = audibility.present_hits(l1['sound'], lv, music,
                 lambda items: AU.split_audio(_Plan(dict(l1,sound=items),src))[1], alternatives=audibility.recording_alternatives)
-            l1['sound'] = SD.screen_restrain(l1['sound'], lv_ar)     # the workflow films: the band limit is the final level
+            l1['sound'] = SD.screen_restrain(l1['sound'], lv_ar, fps=float(l1["fps"]))     # the workflow films: the ceilings are the final level
         rep["lifted_for_bed"] = sum(1 for x in l1["sound"] if x.get("lifted_for_bed_db"))
         rep['final_sounds'] = l1['sound']
         _v, fx, _ = AU.split_audio(_Plan(l1, src))
@@ -1452,6 +1454,8 @@ def mix(l1, work, song_path, film=None, out=None, vocals=None, turn_s=None, kind
                     l1['sound']=audibility.present_hits(l1['sound'],lv,bed*(c/a),
                         lambda items: np.asarray(AU.split_audio(_Plan(dict(l1,sound=items),src))[1])*(b/a),
                         alternatives=audibility.recording_alternatives)
+                    # the workflow films: the ceilings stay the final level after this lift too (lane sfx-moments)
+                    l1['sound'] = SD.screen_restrain(l1['sound'], lv_ar, fps=float(l1["fps"]))
                     _v,own,_=AU.split_audio(_Plan(l1,src))
                 rep['master']=AU.master(voice,np.asarray(own)+bed,m4a,tmp,total)
                 actual=audibility.verified_mix(lv,own,bed,_decode(m4a,SR,1))

@@ -34,9 +34,27 @@ on-off-on flicker) and type being typed (single characters revealed left to righ
 glitch and typing recordings can answer them; and the 2-8 kHz restraint is applied again after the song's lift
 (score.sound.present_over, score.music), so it is the final level.
 
-What this reads is measured: the crop path and blur of a shot, a card's position and scale curve, an asset's kind,
-the set's signal measures (manifest `screen`) and the class a model gave each recording when it joined the set
-(manifest `reference.class`). Nothing reads a word anyone wrote.
+Moments round, 20 Nov (lane sfx-moments; independent raters on the ten Cuban shorts: of 13-21 sounds a film about 4
+were audible, "most sit under speech", the hook, the turn and the payoff were dry in half the films, whooshes rode
+in-shot camera drifts, and nothing sounded the paper or the money a picture showed). Fewer sounds, each heard:
+  moments    the hook's landing, the turn and the close are found among every landing on screen (a new picture on
+             the story's beat sounds even when it is a plain cut): the hook on an opening landing in a breath first, the
+             turn SNAP_S either side of its mark, the close on the song's last hit; each hero tries HERO_TRIES
+             recordings and keeps the one heard best (an impact whose body sits in the speech band is held under the
+             word and lost); the rest of the film
+             ranks its moments (matters): an object the picture shows (paper, or the family a model named for the
+             picture, asset `foley`), a glitch, typing, a hard landing, a cut that really travels (a whip, a card's
+             slide, a crop moving at WHIP_V of a whip), then type. An in-shot camera move sounds only as a whip.
+  amount     RATE_10S sounds a 10 s at most besides the hook, the turn and the close (which always land), and no quiet
+             tick layer: what is placed is meant to be heard.
+  heard      each hit is levelled on the judge's own ruler (TEARDOWN 9: a 50 ms K-weighted peak against the voice's
+             400 ms level; the references' audible sounds sit at about the voice's level, "as loud as a stressed
+             word"), read at the mix rate in stereo as it plays: LEVEL by tier, raised up to LEVEL_TOP while its own
+             loudest 50 ms stands under HEARD_AIM over the median of what plays around it (the voice, and the song once
+             it is known), never into the speech band (the voice's own masking check; a hero's attack may sit at the
+             syllable it lands on, HERO_MASK_DB) and never a 2-8 kHz spike (HF_OVER over the voice's own top band). A
+             sound the voice still hides gives its place to the next moment; a hero keeps its landing and is raised to
+             its ceiling. The ceilings are applied again after any later lift (restrain), so they are the final level.
 """
 import hashlib
 import math
@@ -50,9 +68,33 @@ SAME_GAP_S = 2.5            # one recording again only this far from its last us
 MOVE_STILL = 0.004          # score.sound.MOVE_STILL: under this a frame does not move
 FAST_V = 0.05               # a crop moving this share of the frame in one frame is a whip
 HF_BAND = (2000.0, 8000.0)
-HF_OVER = {"hero": 3.0, "accent": 0.0, "body": -3.0, "tick": -6.0}   # dB against the voice's own 2-8 kHz level (p90)
+# dB against the voice's own 2-8 kHz level (p90): a spike ceiling, not a level. Under it a sound at the references' level
+# is heard; the old values (hero +3, accent 0, body -3, tick -6) held every sound under the voice's top band, and the
+# raters measured 9-17 of a film's 13-21 sounds under the voice (lane sfx-moments, 20 Nov).
+HF_OVER = {"hero": 12.0, "accent": 10.0, "body": 8.0, "tick": 4.0}
 TONAL = 0.45                # five partials holding this share of the energy: a pitched recording
 GAIN_MIN = -36.0
+GAIN_MAX = -2.0             # score.sound.GAIN_MAX
+
+# moments and amount (lane sfx-moments)
+RATE_10S = 2.0              # sounds a 10 s at most besides the hook, the turn and the close (the judge's median, 3.6 audible
+                            # a 10 s, counts those three and the sounds under the bed's own hits)
+SNAP_S = 0.35               # the turn takes a landing this near its mark (music.sounds_on_the_drop joins a hit this near the drop)
+HERO_TRIES = 4              # recordings a hero tries for the one heard best
+WHIP_V = 0.6                # a crop travelling this share of a whip's speed is a cut that travels; an in-shot move sounds only as fast
+# heard (lane sfx-moments): the judge's ruler, a 50 ms K-weighted peak against the voice's 400 ms level
+LEVEL = {"hero": 4.0, "accent": 2.0, "body": 0.0, "tick": -2.0}        # where a hit starts (the references' median: about +2)
+LEVEL_TOP = {"hero": 6.5, "accent": 4.5, "body": 3.0, "tick": 1.0}     # the most it comes up to be heard (the references'
+                                                                         # loud reels: +3.4 to +6.8 median, the voice's syllables +3 to +5)
+HEARD_DB = 6.0              # its 50 ms peak this far over the median of its surroundings (TEARDOWN 9: "audible")
+HEARD_AIM = 7.5             # what the plan aims for: the renderer's leveller moves the voice a dB or two after it
+SNR_MIN = -6.0              # and at its own loudest 50 ms no further under what plays there (a syllable's peak in the
+                            # window is the voice's own dynamics, not the sound: read at the sound's peak, against both)
+HERO_MASK_DB = 6.0          # a hero hit may come this much nearer the voice's syllables than the masking margin (MASK_DB 3):
+                            # for its attack up to 3 dB over a syllable's peak, as the references' hero hits sit ("at or over
+                            # the voice"); the hook's landing is often on its first word
+WIN_S, HOP_S, VOICE_S, AROUND_S = 0.05, 0.01, 0.4, 1.0
+STEP_DB = 0.5
 
 
 def on(supply=None):
@@ -204,6 +246,8 @@ def annotate(events, l1):
         a = assets.get(str(it.get("pic"))) or {}
         if a.get("kind") == "document" or a.get("provider") == "primary-document" or a.get("document") is True:
             e["document"] = True
+        if a.get("foley") and k in ("picture", "cut", "card"):
+            e["foley"] = str(a["foley"])             # the object a model saw in this picture (the workflow's picture check)
         if k == "move" and it.get("k") == "shot":
             s, v = crop_travel(it.get("crop"), int(e["f"]) - int(it["f"][0]), fps)
             if s:
@@ -217,8 +261,8 @@ def annotate(events, l1):
                 e.update(travel_s=round(max(n, 2) / fps, 3), speed=round(min(1.0, max(bl) / 12.0), 3), whip=True)
             else:
                 s, v = crop_travel(it.get("crop"), max(1, i0), fps)
-                if s and v >= 0.25:
-                    e.update(travel_s=round(s, 3), speed=round(v, 3))
+                if s and v >= WHIP_V:                   # a crop that only drifts from the cut is a plain cut (raters: whooshes
+                    e.update(travel_s=round(s, 3), speed=round(v, 3))      # on camera drift, not on travel)
             if a.get("kind") == "image":
                 e["still"] = True
         elif k in ("card", "picture") and it.get("k") == "card":
@@ -261,7 +305,36 @@ def fits(e, part=None):
         f.add("glitch")
     if e.get("typed"):
         f.add("type")
+    if e.get("foley") and k in ("picture", "cut", "card"):
+        f.add(str(e["foley"]))
     return f
+
+
+EFFECT_FAMILIES = ("shutter", "glitch", "type")
+
+
+def whip_move(e):
+    """An in-shot camera move that travels like a whip (raters, 20 Nov: whooshes on drifting camera moves read as noise)."""
+    return e.get("kind") == "move" and float(e.get("speed") or 0.0) >= WHIP_V
+
+
+def matters(e):
+    """How much this moment asks for a sound, by what the picture does (lane sfx-moments): an object it shows landing,
+    a glitch or typing first, a hard landing, a cut that really travels, a photograph's shutter, then type and cards."""
+    f = fits(e)
+    if f - {"shutter"}:
+        return 3.0
+    if e.get("slam"):
+        return 2.5
+    if e.get("whip") or (e.get("travel_s") and float(e.get("speed") or 0.0) >= WHIP_V and e.get("kind") != "move"):
+        return 2.0
+    if whip_move(e):
+        return 1.6
+    if "shutter" in f:
+        return 1.5
+    if e.get("kind") in ("card", "page", "display", "counter", "flash", "burst"):
+        return 1.0
+    return 0.5
 
 
 # ----------------------------------------------------------------- the choice
@@ -383,6 +456,28 @@ def pick(cls, st, lib, t, want_s=None, want_c=None, fits_=(), avoid=(), low=Fals
     return best[1] if best else None
 
 
+def forget(st, t):
+    """The tries made at t leave the palette and the voices heard (a try the voice hid, or one a better try replaced)."""
+    heard = st.setdefault("heard", [])
+    gone = {s2 for u, s2 in heard if abs(u - t) < 1e-6}
+    if gone:
+        heard[:] = [(u, s2) for u, s2 in heard if abs(u - t) >= 1e-6]
+        for pal in st.setdefault("palette", {}).values():
+            pal[:] = [s2 for s2 in pal if s2 not in gone or any(s3 == s2 for _u, s3 in heard)]
+
+
+def retake(st, t, pairs):
+    """The moment at t plays these [(class, recording)] after all: the palette and the voices heard say so."""
+    forget(st, t)
+    for cls, sid in pairs:
+        if sid:
+            _keep(st, cls, sid, t)
+
+
+def class_of(st, sid):
+    return ((st.get("desc") or {}).get(sid) or {}).get("kind") or "whoosh"
+
+
 def _keep(st, cls, sid, t):
     pal = st.setdefault("palette", {}).setdefault(cls, [])
     if sid not in pal:
@@ -411,12 +506,7 @@ def layers(e, part, tier, t, st, lib, preroll, avoid=()):
     out = []
     # every call for this moment is a new try: an earlier try here was hidden by the voice (at this tier or the one
     # above it), so it never joins the palette and never counts as heard
-    heard = st.setdefault("heard", [])
-    gone = {s2 for u, s2 in heard if abs(u - t) < 1e-6}
-    if gone:
-        heard[:] = [(u, s2) for u, s2 in heard if abs(u - t) >= 1e-6]
-        for pal in st.setdefault("palette", {}).values():
-            pal[:] = [s2 for s2 in pal if s2 not in gone or any(s3 == s2 for _u, s3 in heard)]
+    forget(st, t)
 
     def take(cls, sid, what="hit"):
         out.append((sid, what))
@@ -453,17 +543,17 @@ def layers(e, part, tier, t, st, lib, preroll, avoid=()):
             if sid and (lib.get(sid) or {}).get("family") == "glitch":
                 take(cls, sid)
                 return out, cls
+    for fam in sorted(fit - set(EFFECT_FAMILIES)):   # paper, or the object a model named: the object's own sound
+        for cls in ("whoosh", "click", "hit"):
+            sid = pick(cls, st, lib, t, want_s=0.5, fits_={fam}, avoid=avoid, only=fam)
+            if sid and (lib.get(sid) or {}).get("family") == fam:
+                take(cls, sid)
+                return out, cls
     if "shutter" in fit and tier != "accent" and not travels(e):
         sid = pick("click", st, lib, t, want_s=0.25, fits_={"shutter"}, avoid=avoid)
         if sid:
             take("click", sid)
             return out, "click"
-    if "paper" in fit:
-        for cls in ("whoosh", "click", "hit"):
-            sid = pick(cls, st, lib, t, want_s=0.5, fits_={"paper"}, avoid=avoid)
-            if sid and (lib.get(sid) or {}).get("family") == "paper":
-                take(cls, sid)
-                return out, cls
     if e.get("typed") and "type" in fit:              # type being typed: the keys under it, from its first character
         sid = pick("click", st, lib, t, fits_={"type"}, avoid=avoid, only="type")      # trimmed to the typing's length
         if sid:
@@ -533,23 +623,191 @@ def voice_hf(voice, rate, shift_db=0.0):
     return float(np.percentile(hi[spoken], 90)) + float(shift_db)
 
 
-def restrain(sounds, voice, rate, shift_db, lib, report=None):
-    """Each set recording's 2-8 kHz level (its measured hf_db plus its gain) held under the voice's own by its tier."""
+def restrain(sounds, voice, rate, shift_db, lib, report=None, fps=None, sample=None, srate=None):
+    """The ceilings, the final word on every set recording's level: its 2-8 kHz level (its measured hf_db plus its
+    gain) never more than HF_OVER over the voice's own top band (a spike), and, with fps and sample, its 50 ms
+    K-weighted peak never more than LEVEL_TOP over the voice's 400 ms level (the judge's ruler: a hit that loud is a
+    cringe, whatever lifted it; score.audibility's broadband lift rides up to the voice's loudest syllables)."""
     ref = voice_hf(voice, rate, shift_db)
     done = []
     if ref is None:
         return sounds
+    v = None
+    if fps and sample is not None:
+        v = np.asarray(voice, np.float64) * (10 ** (float(shift_db) / 20))
     for s in sounds:
         x = lib.get(s.get("s")) or {}
         hf = _scr(x).get("hf_db")
-        if hf is None or s.get("db") is None:
+        if s.get("db") is None:
             continue
-        cap = ref + HF_OVER.get(s.get("tier") or "body", -3.0)
-        over = float(hf) + float(s["db"]) - cap
-        if over > 0:
-            was = s["db"]
-            s["db"] = round(max(GAIN_MIN, float(s["db"]) - over), 1)
+        was = s["db"]
+        tier = s.get("tier") or "body"
+        if hf is not None:
+            over = float(hf) + float(s["db"]) - (ref + HF_OVER.get(tier, 8.0))
+            if over > 0:
+                s["db"] = round(max(GAIN_MIN, float(s["db"]) - over), 1)
+        if v is not None and s.get("layer") in ("hit", "accent") and s.get("for") not in ("counter", "burst") \
+                and s.get("start_s") is not None and s.get("event_f") is not None:
+            r = reading(s, sample(s["s"]), v, rate, fps, srate=srate)
+            if r is not None and r[5] is not None:
+                top = r[5] + LEVEL_TOP.get(tier, 3.0) - float(_db(r[2][r[3]].max()))
+                if float(s["db"]) > top + 0.05:
+                    s["db"] = round(max(GAIN_MIN, top), 1)
+        if s["db"] != was:
             done.append(dict(id=s.get("id"), s=s.get("s"), tier=s.get("tier"), db=[was, s["db"]]))
     if report is not None:
         report.setdefault("screen", {}).update(voice_hf_db=round(ref, 1), restrained=done)
     return sounds
+
+
+# ----------------------------------------------------------------- heard: the judge's own ruler (lane sfx-moments)
+
+_KW = {}
+
+
+def _kw(n, rate):
+    if (n, rate) not in _KW:
+        from .sound_signal import _kweight
+        _KW[(n, rate)] = _kweight(np.fft.rfftfreq(n, 1.0 / rate)).astype(np.float64)
+    return _KW[(n, rate)]
+
+
+def k_power(x, rate, k0=0, k1=None, win=WIN_S, hop=HOP_S):
+    """K-weighted mean-square power of x in frames k0 .. k1-1 of the film's grid (frame k spans k * hop to
+    k * hop + win seconds); a frame past either end reads 0. Stereo: the mean of its channels' powers (as loudness
+    sums them; the mean of the samples reads a wide stereo sweep up to 3 dB under what plays)."""
+    x = np.asarray(x, np.float64)
+    if x.ndim == 2:
+        return np.mean([k_power(x[:, c], rate, k0, k1, win, hop) for c in range(x.shape[1])], axis=0) if x.shape[1] else \
+            np.zeros(max(0, int(k1 or 0) - int(k0)))
+    n, h = int(round(win * rate)), int(round(hop * rate))
+    total = 1 + (len(x) - n) // h if len(x) >= n else 0
+    k1 = total if k1 is None else int(k1)
+    k0 = int(k0)
+    out = np.zeros(max(0, k1 - k0))
+    a, b = max(k0, 0), min(k1, total)
+    if b <= a:
+        return out
+    idx = np.arange(a, b) * h
+    X = np.abs(np.fft.rfft(x[idx[:, None] + np.arange(n)[None, :]], axis=1)) ** 2
+    out[a - k0:b - k0] = 2.0 * (X * _kw(n, rate)).sum(axis=1) / float(n * n)
+    return out
+
+
+def _db(p):
+    return 10.0 * np.log10(np.maximum(np.asarray(p, np.float64), 1e-20))
+
+
+def voice_level(pv, ctr, t):
+    """The voice's 400 ms K level around t (TEARDOWN 9's reference), from its 50 ms frame powers `pv` centred at
+    `ctr`: the level its speech holds within 1.5 s (the median of its 400 ms levels within 12 dB of their loudest), so
+    a hit in a breath or on a word's last syllable is set against the speech around it, not against the dip."""
+    k = max(1, int(round(VOICE_S / HOP_S)))
+    l400 = _db(np.convolve(pv, np.ones(k) / k, mode="same"))
+    near = np.abs(ctr - t) <= 1.5
+    if not near.any():
+        return None
+    top = float(l400[near].max())
+    if top < -90:
+        return None
+    return float(np.median(l400[near][l400[near] >= top - 12.0]))
+
+
+def reading(it, smp, under, rate, fps, voice=None, srate=None):
+    """What the judge's ruler reads of one placed hit: (frame centres, the surroundings' power, the hit's power at
+    0 dB, the hit window, the surroundings window, the voice's level there). None when it cannot be read. The hit's
+    samples may come at their own rate (srate: the full band; a bright sweep read at 16 kHz loses its top octave and
+    reads several dB quieter than the ear and the judge hear it); the powers are mean squares on one time grid."""
+    t = float(it["event_f"]) / float(fps)
+    srate = srate or rate
+    smp = np.asarray(smp, np.float64)[int(round(float(it.get("trim_s", 0)) * srate)):]
+    if it.get("dur_s"):
+        smp = smp[:int(round(float(it["dur_s"]) * srate))]
+    if not len(smp) or under is None or not len(under):
+        return None
+    k0 = max(0, int(math.floor((t - AROUND_S - 0.6) / HOP_S)))
+    k1 = int(math.ceil((t + AROUND_S + 0.6) / HOP_S))
+    pu = k_power(under, rate, k0, k1)
+    pv = pu if voice is None else k_power(voice, rate, k0, k1)
+    lay = np.zeros((int(round((k1 - k0) * HOP_S * srate + WIN_S * srate)) + 1,) + smp.shape[1:])
+    at = int(round(float(it["start_s"]) * srate)) - int(round(k0 * HOP_S * srate))
+    a, b = max(0, at), min(len(lay), at + len(smp))
+    if b > a:
+        lay[a:b] = smp[a - at:b - at]
+    ps = k_power(lay, srate, 0, k1 - k0)
+    ctr = np.arange(k0, k1) * HOP_S + WIN_S / 2.0
+    hitw = (ctr >= t - 0.05) & (ctr <= t + 0.15)
+    sur = (np.abs(ctr - t) <= AROUND_S) & ~((ctr >= t - 0.1) & (ctr <= t + 0.25))
+    if not hitw.any() or not sur.any() or float(ps[hitw].max()) <= 0:
+        return None
+    return ctr, pu, ps, hitw, sur, voice_level(pv, ctr, t)
+
+
+def prominence(r, g_db):
+    """How heard the hit is at gain g_db, dB: the mix's 50 ms frame at the hit's own loudest over the median of what
+    plays around it (TEARDOWN 9's 'audible'; the voice and the song, not the hit's own tail), held under HEARD_DB
+    while the hit sits more than -SNR_MIN under what plays with it (a syllable peak in the window is the voice's
+    dynamics, not the sound)."""
+    _ctr, pu, ps, hitw, sur, _vo = r
+    g = 10 ** (g_db / 10.0)
+    k = np.flatnonzero(hitw)[int(np.argmax(ps[hitw]))]
+    over = float(_db(pu[k] + ps[k] * g) - np.median(_db(pu[sur])))
+    snr = float(_db(ps[k] * g) - _db(pu[k]))
+    return min(over, HEARD_DB + (snr - SNR_MIN))
+
+
+def level(group, under, rate, sample, fps, voice=None, masking=None, hf_ref=None, lib=None, gain_min=GAIN_MIN, gain_max=GAIN_MAX,
+          start=None, srate=None):
+    """Each hit of a gesture made heard on the judge's ruler: set at LEVEL[tier] over the voice's 400 ms level (its
+    own 50 ms K-weighted peak), then raised in STEP_DB steps up to LEVEL_TOP[tier] while its peak stands under
+    HEARD_DB over the median of its surroundings (`under`: the voice, or the voice and the song). Never into the
+    speech band (masking(item) > 0 lowers it) and never a 2-8 kHz spike (HF_OVER over the voice's own top band,
+    hf_ref). start: a level already set (the plan's, when the song comes in): never lowered under it. Writes db,
+    heard_db and over_voice_db on each item; returns the lowest heard_db (None: nothing read)."""
+    worst = None
+    for it in group:
+        if it.get("layer") not in ("hit", "accent") or it.get("for") == "counter" or it.get("start_s") is None:
+            continue
+        tier = it.get("tier") or "body"
+        r = reading(it, sample(it["s"]), under, rate, fps, voice, srate)
+        if r is None or r[5] is None:
+            continue
+        vo = r[5]
+        own0 = float(_db(r[2][r[3]].max()))
+        g = vo + LEVEL.get(tier, 0.0) - own0
+        top = vo + LEVEL_TOP.get(tier, 3.0) - own0
+        hf = _scr((lib or {}).get(it["s"])).get("hf_db")
+        if hf_ref is not None and hf is not None:
+            top = min(top, hf_ref + HF_OVER.get(tier, 8.0) - float(hf))
+        top = min(top, gain_max)
+        g = max(gain_min, min(g, top))
+        if start is not None:
+            g = max(g, float(start))
+            top = max(top, g)
+        ceiling = top
+        if masking is not None and start is None:
+            for _ in range(8):                         # down until the speech band is clear (its 80th percentile first)
+                it["db"] = round(g, 1)
+                need = masking(it)
+                if need <= 0 or g <= gain_min:
+                    break
+                g = max(gain_min, g - need)
+                top = min(top, g)
+        p = prominence(r, g)
+        while p < HEARD_AIM and g + STEP_DB <= top + 1e-6:
+            it["db"] = round(g + STEP_DB, 1)
+            if masking is not None and masking(it) > 0:
+                break
+            g += STEP_DB
+            p = prominence(r, g)
+        if p < HEARD_DB and tier == "hero":
+            # the hook, the turn and the close land where the story does, often on a word: heard there, up to its
+            # ceiling, for its attack over the syllable it lands on (the references' hero hits sit at or over the voice)
+            while p < HEARD_AIM and g + STEP_DB <= ceiling + 1e-6:
+                g += STEP_DB
+                p = prominence(r, g)
+        it["db"] = round(g, 1)
+        it["heard_db"] = round(p, 1)
+        it["over_voice_db"] = round(own0 + g - vo, 1)
+        worst = p if worst is None else min(worst, p)
+    return worst

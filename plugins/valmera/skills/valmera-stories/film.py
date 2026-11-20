@@ -227,11 +227,15 @@ class Plan:
 
     def image(self, key, rec):
         self.assets[key] = dict(kind="image", path=rec["path"], w=int(rec["w"]), h=int(rec["h"]))
+        if rec.get("foley"):                     # the object a model saw in it: its landing sounds as that object
+            self.assets[key]["foley"] = str(rec["foley"])
         return key
 
     def video(self, key, rec):
         self.assets[key] = dict(kind="video", path=rec["path"], w=int(rec.get("w") or W), h=int(rec.get("h") or H), fps=float(rec.get("fps") or FPS),
                                 dur=float(rec.get("seconds") or 0))
+        if rec.get("foley"):
+            self.assets[key]["foley"] = str(rec["foley"])
         if rec.get("landings"):
             # what the clip's own edit lands on screen, in its seconds (a recorded export's b-roll and titles): the sound
             # design reads each landing a played window shows as an event (score.sound.landing_events)
