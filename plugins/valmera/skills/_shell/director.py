@@ -125,12 +125,19 @@ def palette_menu():
 
 
 def round_count(path, side=480):
-    """How many round shapes signal finds in a picture (Hough on the gradient, as the engine's rhyme reads them)."""
+    """How many round shapes a picture holds that the engine's rhyme would cut on: its own circle finder and its support
+    floor (worker/scene/alien/rhyme), on the still; Hough alone where the engine cannot be imported."""
     try:
         import cv2
         im = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if im is None:
             return None
+        if palette_module() is not None:
+            from scene.alien import rhyme
+            k = rhyme.SIDE / min(im.shape[:2])
+            g = cv2.resize(im, (max(int(im.shape[1] * k) // 2 * 2, 2), max(int(im.shape[0] * k) // 2 * 2, 2)), interpolation=cv2.INTER_AREA)
+            cs, _ = rhyme.circles(g)
+            return int(sum(1 for c in cs if c[3] >= rhyme.MIN_SUPPORT))
         k = side / max(im.shape[:2])
         g = cv2.GaussianBlur(cv2.resize(im, (max(int(im.shape[1] * k), 2), max(int(im.shape[0] * k), 2))), (5, 5), 1.5)
         h, w = g.shape
@@ -164,7 +171,8 @@ def capability(pictures, take, pal=None):
     have = {"pictures": len(pics) > 0, "rounds": len(rounds) >= RHYME_PICTURES, "faces": bool(faces) or on_cam,
             "take": on_cam, "matte": on_cam and matte is not False, "depth": depth}
     lines = [f"- pictures: {len(pics)} on the contact sheet ({len(clips)} moving clips, {len(pics) - len(clips)} stills)",
-             f"- round shapes: {len(rounds)} of the pictures show one (a rhyme chain cuts through {RHYME_PICTURES} or more)",
+             f"- round shapes: {len(rounds)} of the pictures show one the engine can register (a rhyme chain cuts through "
+             f"{RHYME_PICTURES} or more that share one seat)",
              f"- faces: {len(faces)} pictures show a face" + ("; the speaker's face is in the take" if on_cam else ""),
              "- the speaker: " + ("on camera; a device that stands on him (lamp, neg_world, a spotlight on his face) keeps "
                                   "him on screen over its span" if on_cam else "not on camera: devices that stand on him fall back"),

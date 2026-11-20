@@ -842,16 +842,6 @@ def build(script, sup, style_id, direction=None):
         if row[4]["path"] not in keys:
             keys[row[4]["path"]] = (P.video if row[2] == "clip" else P.image)(f"{'v' if row[2] == 'clip' else 'p'}{len(keys):02d}", row[4])
     coverage_report = require_coverage(ins, coverage, f_end/FPS, final=bool(d.get('coverage_final')))
-    # The Director's devices that stand on the speaker (a lamp relights his take, the world goes negative round him, a
-    # spotlight finds his face) need him on screen over their span: the take holds there and the cutaways step round it
-    # (they were measured for coverage above, before the hold)
-    if dr and take.get("on_camera") is not False:
-        DR = _director()
-        pre, _ = DR.palette_asks(dr, word_frame, seg_span, None, f_end)
-        held = DR.take_spans(pre, f_end)
-        if held:
-            ins, cleared = DR.hold_take(ins, held, fps=FPS)
-            coverage_report['take_held'] = dict(spans=held, cleared_f=cleared)
     past = {int(i) for i in d.get("past_segs") or [] if isinstance(i, int)}
     cut_pts, drive_ids, look_pics, mono_spans, bright = [], set(), [], [], []
     if take.get("still"):
@@ -866,6 +856,16 @@ def build(script, sup, style_id, direction=None):
     coverage_report['stress_moves']=signal_moves
     coverage_report['take_pieces']=[dict(f=pc["f"], who=pc["who"], punch=pc["punch"], cut=pc["cut"]) for pc in pieces]
     coverage_report['speaker_on_camera']=take.get("on_camera")
+    # The Director's devices that stand on the speaker (a lamp relights his take, the world goes negative round him, a
+    # spotlight finds his face) need him on screen over their span: the take holds there and the cutaways step round it
+    # (coverage and the speaker's moves were measured above, before the hold, so their cached checks stay valid)
+    if dr and take.get("on_camera") is not False:
+        DR = _director()
+        pre, _ = DR.palette_asks(dr, word_frame, seg_span, None, f_end)
+        held = DR.take_spans(pre, f_end)
+        if held:
+            ins, cleared = DR.hold_take(ins, held, fps=FPS)
+            coverage_report['take_held'] = dict(spans=held, cleared_f=cleared)
 
     def take_shot(a, b):
         """The take between pictures: each framing on the one who speaks it, cut where the show cut and where the
