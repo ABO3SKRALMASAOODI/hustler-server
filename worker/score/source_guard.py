@@ -83,6 +83,42 @@ def _named_detail(item, views, rects, ratio, shots, boxes):
     return True
 
 
+def _selected_region(item, rects, ratio, shots, boxes):
+    """An explicit model-selected region is not an automatic saliency crop.
+
+    Like a supplied named detail, it can omit unrelated subjects. Every
+    rendered window must remain inside that selection and contain any subject
+    or printed line it intersects. Reject absent/malformed provenance, source-cut crossings,
+    out-of-bounds geometry and aspect mismatches rather than blessing them.
+    """
+    region = item.get("source_region")
+    if not isinstance(region, (list, tuple)) or len(region) != 4:
+        return False
+    if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in region):
+        return False
+    if not (0 <= region[0] < region[2] <= 1 and 0 <= region[1] < region[3] <= 1):
+        return False
+    if tuple(region) == (0, 0, 1, 1):
+        return False
+    start, end = item["src"]
+    if not any(s["start"] <= start and end <= s["end"] and
+               _overlaps(start, end, s["start"], s["end"]) for s in shots):
+        return False
+    for c in rects:
+        if not (region[0] - 1e-4 <= c[0] < c[2] <= region[2] + 1e-4 and
+                region[1] - 1e-4 <= c[1] < c[3] <= region[3] + 1e-4 and
+                0 <= c[0] < c[2] <= 1 and 0 <= c[1] < c[3] <= 1 and
+                abs((c[2] - c[0]) / (c[3] - c[1]) - ratio) < .005):
+            return False
+        for b in boxes:
+            if (min(c[2], b[2]) > max(c[0], b[0]) and
+                    min(c[3], b[3]) > max(c[1], b[1]) and
+                    not (c[0] <= b[0] and c[1] <= b[1] and
+                         c[2] >= b[2] and c[3] >= b[3])):
+                return False
+    return True
+
+
 def apply(l1, index, perception, *, views=None):
     if not index.get("_first_film_source_guard"):
         return []
@@ -138,11 +174,16 @@ def apply(l1, index, perception, *, views=None):
                 0 <= c[1] < c[3] <= 1 and abs((c[2]-c[0])/(c[3]-c[1])-ratio) < .005 and all(c[0] <= b[0] and c[1] <= b[1]
                 and c[2] >= b[2] and c[3] >= b[3] for b in boxes) for c in rects))
         detail = _named_detail(item, views, rects, ratio, shots, boxes)
-        safe = safe or detail
-        reason = "named_detail_crop" if detail else "subject_boxes_contained"
+        printed = [row["box"] for row in (perception or {}).get("text") or []
+                   if row.get("t") and _overlaps(start, end, *row["t"]) and
+                   row.get("seen", 0) >= 1 and len(row.get("box") or []) == 4]
+        selected = _selected_region(item, rects, ratio, shots, boxes + printed)
+        safe = safe or detail or selected
+        reason = ("named_detail_crop" if detail else "selected_region_crop" if selected
+                  else "subject_boxes_contained")
         # A verified named view is already a model-selected source detail;
         # unrelated desktop headings must not replace it with the whole screen.
-        if not detail and static_text_needs_fit(perception, start, end, w, h):
+        if not (detail or selected) and static_text_needs_fit(perception, start, end, w, h):
             # Lowering already supports a source rectangle extending past
             # the canvas: the on-spine source is fitted over its blurred
             # backdrop. Do not override that geometry with a saliency crop.
