@@ -29,6 +29,13 @@ uniform int uTaps;          // 0: one sample, the picture as it always was
 uniform vec2 uCentreB;
 uniform float uScaleB;
 uniform vec4 uCropB;
+// A card can be a plane tilted in depth (rx, ry) and seen through a lens: every frame pixel is taken back to the
+// card's own plane through the inverse of its homography. Depth of field: the blur grows with the distance in
+// depth from the point in focus. Drawn by tilted(), on its own path, so a flat card is drawn as it always was.
+uniform int uTilt;          // 0: flat, as every card always was
+uniform mat3 uHom;          // frame pixel -> the card's plane (pixels about its centre, before scale)
+uniform vec2 uTiltZ;        // depth of the plane, frame px, per unit of the plane's x and y
+uniform vec2 uDof;          // blur sigma in frame px for 100 px of depth; the depth in focus
 
 float sdRound(vec2 p, vec2 b, float r) {
   vec2 q = abs(p) - b + r;
@@ -68,9 +75,51 @@ vec4 shutter(vec2 px) {
   return vec4(c * a, a);
 }
 
+vec4 tilted(vec2 px) {
+  vec3 h = uHom * vec3(px, 1.0);
+  if (h.z <= 0.0) discard;
+  vec2 q = h.xy / h.z;
+  vec2 fw = fwidth(q);
+  float pxq = max(max(fw.x, fw.y), 1e-4);    // the plane's units under one frame pixel
+  float sd = sdRound(q, uHalf, uRadius);
+  float cov = clamp(0.5 - sd / pxq, 0.0, 1.0);
+  if (cov <= 0.0) discard;
+  vec2 tv = q / (2.0 * uHalf) + 0.5;
+  vec3 c;
+  float ta = 1.0;
+  if (uPlate == 1) {
+    float r = length((tv - uLight) * vec2(uHalf.x / max(uHalf.x, uHalf.y), uHalf.y / max(uHalf.x, uHalf.y)) * 2.0);
+    c = mix(uC0, uC1, smoothstep(0.0, 1.15, r));
+    if (any(notEqual(uC0, uC1))) c *= 1.0 + 0.10 * exp(-r * r * 6.0);
+    if (uPlateGrain > 0.0) c += texelFetch(uNoise, (ivec2(px) + uNoiseAt) & ivec2(1023), 0).r * uPlateGrain * 0.29;
+  } else if (uPlate == 2) {
+    c = mix(uC0, uC1, static_bit(px, uStatic.x, uStatic.y, uStatic.z));
+  } else {
+    vec2 uv = mix(uCrop.xy, uCrop.zw, warp(tv));
+    float tpp = (uCrop.z - uCrop.x) * uTexSize.x / (2.0 * uHalf.x) * pxq;
+    if (uLook == 1) gWin = window_at(uv);
+    float sig = max(uDof.x * abs(dot(q, uTiltZ) - uDof.y) / 100.0, uBlur) * tpp;      // texels
+    c = sig > 0.35 ? gauss(uTex, uv, uTexSize, sig).rgb : tpp > 1.05 ? textureLod(uTex, uv, log2(tpp)).rgb : catrom(uTex, uv, uTexSize);
+    if (uAlpha == 1) {
+      ta = textureLod(uTex, uv, max(log2(max(tpp, 1.0)), 0.0)).a;
+      c = clamp(c / max(ta, 1e-3), 0.0, 1.0);
+    }
+    if (uTreat >= 20) c = rerender(uv, max(tpp, 0.25), c, px, uFrame);
+  }
+  if (uTreat != 0 && uTreat < 20) c = treat(c, uTreat, uTreatC, uTreatHasC == 1, uTreatTh, px);
+  c = grade(c);
+  if (uBorder > 0.0) {
+    float inner = sdRound(q, uHalf - uBorder, max(uRadius - uBorder, 0.0));
+    c = mix(c, uBorderC, clamp(0.5 + inner / pxq, 0.0, 1.0));
+  }
+  float a = cov * uOp * ta;
+  return vec4(c * a, a);
+}
+
 void main() {
   vec2 px = gl_FragCoord.xy;
   if (uTaps > 0) { o = shutter(px); return; }
+  if (uTilt == 1) { o = tilted(px); return; }
   vec2 d = px - uCentre;
   vec2 q = vec2(uRot.x * d.x + uRot.y * d.y, -uRot.y * d.x + uRot.x * d.y) / uScale;
   float sd = sdRound(q, uHalf, uRadius);

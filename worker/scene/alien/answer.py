@@ -78,7 +78,12 @@ def plan(l1, work, ask):
     a, z = [int(v) for v in ask["at"]]
     assets = l1.get("assets") or {}
     picks = sorted((p for p in ask.get("picks") or [] if p.get("pic") in assets and a <= int(p["f"]) < z - 3), key=lambda p: int(p["f"]))
+    # a named word with no picture to be born in it is still a word that lands: it shouts on its own frame
+    bare = sorted((p for p in ask.get("picks") or [] if p not in picks and str(p.get("word") or "").strip() and p.get("f") is not None),
+                  key=lambda p: int(p["f"]))
     if not picks:
+        if bare:
+            return words_only(l1, work, ask, bare, a, z)
         return {"skip": "answer needs a word and a picture for it"}
     lev = sense.level(l1, work, ask)
     heard = float(lev.max()) > 0
@@ -146,6 +151,37 @@ def plan(l1, work, ask):
             sh["src"] = [round(t0 + rate * (c - o), 5), round(t1, 5)]
         items.append(sh)
         log.append({"word": word, "pic": p["pic"], "onset": o, "lands": c, "t": round(t0, 3), "frames": e - c})
-    return {"items": items, "drop": gone, "voices": voices,
-            "marks": [{"f": c, "what": "answer lands"} for c in land],
-            "log": {"picks": log, "heard": heard}}
+    patch = {"items": items, "drop": gone, "voices": voices,
+             "marks": [{"f": c, "what": "answer lands"} for c in land],
+             "log": {"picks": log, "heard": heard}}
+    bare = [p for p in bare if all(abs(int(p["f"]) - c) > 3 for c in land)]
+    if bare:
+        extra = words_only(l1, work, ask, bare, a, z)
+        patch["items"] += extra.get("items") or []
+        patch["voices"].update(extra.get("voices") or {})
+        patch["marks"] += extra.get("marks") or []
+        patch["log"]["words_only"] = extra.get("log")
+    return patch
+
+
+def words_only(l1, work, ask, bare, a, z):
+    """The fallback for named words without a picture: each word punched in large on its own frame, held to the
+    next one (the palette's ``verb``), so the run still lands on every syllable that names something."""
+    from ..palette import type as PT
+    items, voices, marks, log = [], {}, [], []
+    fs = [min(max(int(p["f"]), a), z - 2) for p in bare]
+    for i, p in enumerate(bare):
+        end = min(fs[i + 1] if i + 1 < len(bare) else z, z)
+        if end - fs[i] < 2:
+            continue
+        got = PT.verb(l1, work, {"id": f"{ask['id']}.x{i}", "dev": "verb", "at": [fs[i], end],
+                                 "args": {"t": str(p["word"]), "verb": "punch", "seat": ask.get("seat")}})
+        if got.get("skip"):
+            continue
+        items += got["items"]
+        voices.update(got.get("voices") or {})
+        marks += [{"f": fs[i], "what": "answer word lands"}]
+        log.append({"word": p["word"], "f": fs[i], "picture": p.get("pic") in (l1.get("assets") or {})})
+    if not items:
+        return {"skip": "answer needs a word and a picture for it"}
+    return {"items": items, "voices": voices, "marks": marks, "log": {"words": log}}

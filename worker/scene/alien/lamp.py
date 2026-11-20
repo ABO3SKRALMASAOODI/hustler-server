@@ -24,6 +24,7 @@ import numpy as np
 from . import glyphs, sense
 
 K = 0.25                      # light is low frequency: it is solved on a quarter-size grid
+SEEN_F = 12                   # frames a lamp must light to be seen at all: fewer, and the ask's fallback lands instead
 
 
 def _hex(c):
@@ -115,14 +116,30 @@ def plan(l1, work, ask):
     W, H = [int(v) for v in (l1.get("frame") or [1080, 1920])]
     a, z = [int(v) for v in ask["at"]]
     text = str(ask.get("t") or "").strip()
-    if not text or z - a < 6:
-        return {"skip": "lamp needs a word and 6 frames"}
+    if not text:
+        return {"skip": "lamp needs a word"}
+    if z - a < 6:                                                     # a light needs six frames to strike and burn
+        z = min(a + 6, int(l1["dur_f"]))
+        a = max(0, z - 6)
     sh0 = sense.shot_at(l1, a)
-    if sh0 is None or not sense.path_of(l1, work, sh0.get("pic")):
-        return {"skip": "lamp needs a picture under its word"}
+    p0 = sense.path_of(l1, work, (sh0 or {}).get("pic"))
+    if sh0 is None or not p0 or not os.path.exists(p0):
+        return glow_only(l1, work, ask, a, z, "no picture under the word to relight")
     tail = int(ask.get("tail") if ask.get("tail") is not None else 10)
-    z2 = min(z + tail, sh0["f"][1], int(l1["dur_f"]))                 # the light dies inside the shot it was lit in
+    # the light dies inside the take it was lit in: the shots that follow on the same source (the speaker's framings,
+    # punch-ins cut from one take) are one lit set, so the lamp carries through their cuts
+    p0 = sense.path_of(l1, work, sh0.get("pic"))
+    run, end = [sh0], sh0["f"][1]
+    while end < z + tail:
+        nx = sense.shot_at(l1, end)
+        if nx is None or nx is run[-1] or not nx.get("src") or not sh0.get("src") or sense.path_of(l1, work, nx.get("pic")) != p0:
+            break
+        run.append(nx)
+        end = nx["f"][1]
+    z2 = min(z + tail, end, int(l1["dur_f"]))
     a2 = max(a - 1, sh0["f"][0])
+    if z2 - a2 < SEEN_F:
+        return {"skip": f"the lamp would light {z2 - a2} frames of the picture under its word (needs {SEEN_F})"}
     voice = {"font": ask.get("font") or "InterDisplay-Black.ttf", "track": 0, "glow": {"a": 0.55, "blur": 0.03}}
     voice["px"] = round(glyphs.fit_px(voice, text, float(ask.get("width") or 0.62) * W, cap_px=0.16 * H), 2)
     _, b = glyphs.box(voice, text, voice["px"])
@@ -146,10 +163,19 @@ def plan(l1, work, ask):
     room = float(ask.get("room") if ask.get("room") is not None else 0.42)
     frames = sense.shot_frames(l1, work, a2, z2)
     if len(frames) < z2 - a2:
-        return {"skip": "the take could not be read under the lamp"}
-    matte, mp = {}, sense.path_of(l1, work, "matte")
+        return glow_only(l1, work, ask, a, z, "the take could not be read under the lamp")
+    made = {}
+    if "matte" not in (l1.get("assets") or {}) and sh0.get("src"):
+        try:                                                          # no matte in the scene: it is made now, on the take
+            from ..palette import behind as PB
+            got, _why = PB.ensure_matte(l1, work, a2, z2)
+            made = got or {}
+        except Exception:      # noqa: BLE001 - without a matte the wall is lit and nobody casts a shadow
+            made = {}
+    l1m = dict(l1, assets=dict(l1.get("assets") or {}, **made)) if made else l1
+    matte, mp = {}, sense.path_of(l1m, work, "matte")
     if mp and os.path.exists(mp) and sh0.get("src"):
-        on_matte = dict(l1, items=[dict(sh0, pic="matte")])          # the matte lies on the take: same clock, same crop
+        on_matte = dict(l1m, items=[dict(sh, pic="matte") for sh in run if sh.get("src")])   # the matte lies on the take: same clock, same crop
         matte = {f: m.astype(np.float32) / 255.0 for f, m in sense.shot_frames(on_matte, work, a2, z2, size=(gw, gh), gray=True).items()}
     rel = os.path.join("alien", f"{ask['id']}.mp4")
     os.makedirs(os.path.join(work, "alien"), exist_ok=True)
@@ -162,7 +188,7 @@ def plan(l1, work, ask):
         wr.stdin.close()
         wr.wait()
     if wr.returncode:
-        return {"skip": "the relit take could not be written"}
+        return glow_only(l1, work, ask, a, z, "the relit take could not be written")
     keep, gone, was = sense.carve(l1, a2, z2)
     inherit = {k: v for k, v in sh0.items() if k in ("look", "grade", "shutter", "window")}
     aid = f"alien:{ask['id']}"
@@ -171,11 +197,45 @@ def plan(l1, work, ask):
     op = [round(float(min(max(0.5 + 0.5 * e[f] / 0.8, 0.0), 1.0)) if f < z else float(on[f]), 4) for f in range(a, z2)]
     word = {"id": f"{ask['id']}.word", "k": "word", "f": [a, z2], "t": text, "v": vname, "x": round(pen[0] / W, 6), "y": round(pen[1] / H, 6),
             "ink": ask.get("ink") or "#FF4A1C", "op": op, "role": "big", "on": a, "z": 8}
-    if matte and ask.get("behind", True):
+    if matte and ask.get("behind", True) and sense.Plan_take(l1m, shot):
         word["behind"] = True
     return {"items": keep + [shot, word], "drop": gone, "voices": {vname: voice},
-            "assets": {aid: {"kind": "video", "path": rel}},
+            "assets": dict(made, **{aid: {"kind": "video", "path": rel}}),
             "marks": [{"f": a, "what": "lamp strike"}],
             "seat": {"x": sx, "y": sy, "w": bw, "h": bh, "f": [a, z2]},
             "log": {"px": voice["px"], "seat": [round(sx, 4), round(sy, 4)], "frames": z2 - a2, "matte": bool(matte),
                     "level": [round(float(v), 3) for v in e[a:z2]], "clip": rel}}
+
+
+def glow_only(l1, work, ask, a, z, why):
+    """The lamp where there is no take to relight: the word burns in its ink with a glow at the level of the voice, and
+    the frame takes a breath of its colour on the stressed syllables (at most an eighth of the frame's light, so it
+    reads as a lamp, never as a flash)."""
+    fps = float(l1.get("fps") or 30)
+    W, H = [int(v) for v in (l1.get("frame") or [1080, 1920])]
+    text = str(ask.get("t") or "").strip()
+    tail = int(ask.get("tail") if ask.get("tail") is not None else 10)
+    z2 = min(z + tail, int(l1["dur_f"]))
+    voice = {"font": ask.get("font") or "InterDisplay-Black.ttf", "track": 0, "glow": {"a": 0.75, "blur": 0.03}}
+    voice["px"] = round(glyphs.fit_px(voice, text, float(ask.get("width") or 0.62) * W, cap_px=0.16 * H), 2)
+    _, b = glyphs.box(voice, text, voice["px"])
+    bw, bh = (b[2] - b[0]) / W, (b[3] - b[1]) / H
+    sx, sy = [float(v) for v in ask["seat"]] if ask.get("seat") else seat_of(ask.get("faces"), bw, bh)
+    pen = (sx * W - (b[0] + b[2]) / 2, sy * H - b[3])
+    lev = sense.envelope(sense.level(l1, work, ask))
+    env = np.zeros(int(l1["dur_f"]) + 1, np.float32)
+    env[:len(lev)] = lev
+    e = []
+    for f in range(a, z2):
+        on = 1.0 if f < z else float(np.exp(-(f - z + 1) / max(tail / 3.0, 1.0)))
+        e.append(on * min(max((f - a + 1) / 2.0, 0.0), 1.0) * float(np.clip(0.42 + 0.78 * env[f], 0, 1.25)))
+    vname = f"alien.{ask['id']}"
+    ink = ask.get("ink") or "#FF4A1C"
+    word = {"id": f"{ask['id']}.word", "k": "word", "f": [a, z2], "t": text, "v": vname, "x": round(pen[0] / W, 6), "y": round(pen[1] / H, 6),
+            "ink": ink, "op": [round(min(max(0.5 + 0.5 * v / 0.8, 0.0), 1.0), 4) if i < z - a else round(min(v / 0.8, 1.0), 4) for i, v in enumerate(e)],
+            "role": "big", "on": a, "z": 8}
+    spill = {"id": f"{ask['id']}.spill", "k": "flash", "f": [a, z2], "mode": "fill", "c": ink,
+             "a": [round(min(0.12, 0.10 * v), 4) for v in e]}
+    return {"items": [spill, word], "voices": {vname: voice}, "marks": [{"f": a, "what": "lamp strike"}],
+            "seat": {"x": sx, "y": sy, "w": bw, "h": bh, "f": [a, z2]},
+            "log": {"px": voice["px"], "seat": [round(sx, 4), round(sy, 4)], "glow_only": why, "level": [round(v, 3) for v in e]}}

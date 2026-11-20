@@ -15,6 +15,7 @@ ask  {"dev": "diecut", "at": [a, z], "t": "GONE", "font": "InterDisplay-Black.tt
       "hole": "#0A0908", "up": 7, "down": 5 (frames)}
 """
 import math
+import os
 
 import numpy as np
 
@@ -71,8 +72,11 @@ def plan(l1, work, ask):
     W, H = [int(v) for v in (l1.get("frame") or [1080, 1920])]
     a, z = [int(v) for v in ask["at"]]
     text = str(ask.get("t") or "").strip()
-    if not text or z - a < 8:
-        return {"skip": "diecut needs a word and 8 frames"}
+    if not text:
+        return {"skip": "diecut needs a word"}
+    if z - a < 8:                                             # a lift needs eight frames: the word is held that long
+        z = min(a + 8, int(l1["dur_f"]))
+        a = max(0, z - 8)
     voice = {"font": ask.get("font") or "InterDisplay-Black.ttf", "track": 0, "shadow": {"a": 0.5, "blur": 0.016}}
     voice["px"] = round(glyphs.fit_px(voice, text, float(ask.get("width") or 0.84) * W, cap_px=0.2 * H), 2)
     _, b = glyphs.box(voice, text, voice["px"])
@@ -98,15 +102,28 @@ def plan(l1, work, ask):
            "x": [round(pen_x + ux * (lift * v + 0.0016), 6) for v in e], "y": [round(pen_y + uy * (lift * v + 0.0016) * W / H, 6) for v in e],
            "s": [round(1.0 + 0.022 * v, 5) for v in e], "ink": "#FFF4E2", "op": [round(min(0.55, 2.0 * v), 4) for v in e], "role": "big", "on": a, "z": 10}
     items, f = [hole, rim], a
+    pictured = sorted((i for i in l1.get("items") or [] if i.get("k") == "shot" and sense.path_of(l1, work, i.get("pic"))
+                       and os.path.exists(sense.path_of(l1, work, i.get("pic")))), key=lambda i: i["f"][0])
+    borrowed = 0
     while f < z:
         sh = sense.shot_at(l1, f)
         g = f + 1
         while g < z and abs(e[g - a] - e[f - a]) < 1e-9 and sense.shot_at(l1, g) is sh:
             g += 1                                           # frames at one height under one shot are one junction
         p = sense.path_of(l1, work, (sh or {}).get("pic"))
-        if sh is None or not p:
-            f = g
-            continue
+        if sh is None or not p or not os.path.exists(p):
+            # a plate (or a picture that cannot be read) has nothing to cut: the letters carry the next picture of the
+            # film (else the last one before), held on its first frame, so the word is still cut from footage
+            alt = next((i for i in pictured if i["f"][0] >= f), None) or next((i for i in reversed(pictured) if i["f"][1] <= f), None)
+            if alt is None:
+                f = g
+                continue
+            sh = dict(alt, f=[f, g], src=[sense.src_time(alt, alt["f"][0], fps)] * 2 if alt.get("src") else None,
+                      crop=sense.crop_at(alt, alt["f"][0], *[sense.probe(sense.path_of(l1, work, alt["pic"]))[k] for k in ("w", "h")], W, H))
+            if sh.get("src") is None:
+                sh.pop("src")
+            p = sense.path_of(l1, work, sh["pic"])
+            borrowed += g - f
         info = sense.probe(p)
         v = e[f - a]
         dx, dy = ux * lift * v, uy * lift * v * W / H         # the lift in frame fractions (x of the width, y of the height)
@@ -135,4 +152,4 @@ def plan(l1, work, ask):
     return {"items": items, "voices": {vname: voice, vname + ".rim": {k: v for k, v in voice.items() if k != "shadow"}},
             "marks": [{"f": a, "what": "diecut lift"}, {"f": z - 1, "what": "diecut seat"}],
             "seat": {"x": sx, "y": sy, "w": bw, "h": bh, "f": [a, z]},
-            "log": {"px": voice["px"], "seat": [round(sx, 4), round(sy, 4)], "junctions": len(items) - 2}}
+            "log": {"px": voice["px"], "seat": [round(sx, 4), round(sy, 4)], "junctions": len(items) - 2, "borrowed_frames": borrowed}}

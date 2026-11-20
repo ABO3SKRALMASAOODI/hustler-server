@@ -111,12 +111,20 @@ vec2 warp(vec2 tv) {
     if (d == 2 && tv.y < o) tv.y = o;
     if (d == 3 && tv.y > o) tv.y = o;
   }
+  if (uTreat == 28) {          // slice: some bands of the picture torn sideways, each by its own amount
+    float b = floor(tv.y * max(uTreatP.y, 1.0));
+    uint h = hash3(uvec3(uint(int(b) + 4096), uint(int(uTreatP.z)), 77u));
+    if (float(h & 0xFFFFu) / 65535.0 < uTreatP.w) tv.x += (float(h >> 16) / 65535.0 - 0.5) * 2.0 * uTreatP.x;
+  }
   return tv;
 }
 
 // Re-renders that read the neighbourhood: a drawing, a blueprint, a radiograph. k is source texels
 // per output pixel, so a line is as wide on the frame whatever the source's size.
 vec3 rerender(vec2 uv, float k, vec3 c, vec2 px, vec2 frame) {
+  if (uTreat == 27)            // rgb split: red one way, blue the other, green where it was
+    return vec3(sample_pic(uv + uTreatP.xy, k).r, c.g, sample_pic(uv - uTreatP.xy, k).b);
+  if (uTreat == 28) return c;
   float l = luma(c);
   if (uTreat == 20) {          // line art: a difference of gaussians, inked, with a whisper of tone under it
     float a = luma(gauss(uTex, uv, uTexSize, 1.1 * k).rgb);
