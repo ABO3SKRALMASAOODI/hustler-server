@@ -258,6 +258,11 @@ def test_an_upgraded_turn_edits_on_opus_with_haiku_behind_and_for_helpers(
         "claude-opus-5-5", "claude-haiku-5-5"]
     assert ctx.agent_model == "claude-opus-5-5"
     assert seen["lane"] is haiku
+    # text helpers (request contract, reply rewrites, asks, music) go to the
+    # plan's Haiku, not the upgraded editing model (llm.helper_lane)
+    assert (ctx.helper_client, ctx.helper_model) == (haiku["client"],
+                                                     "claude-haiku-5-5")
+    assert llm.helper_lane(ctx) == (haiku["client"], "claude-haiku-5-5")
     assert ctx.credit_price_aliases == {"claude-opus-5-5": "claude-haiku-5-5"}
 
 

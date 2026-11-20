@@ -359,8 +359,11 @@ def _call(ctx, name, schema, system, content, max_tokens=4000, model=None):
         "name": name, "description": "Record the structured result.", "parameters": schema, "strict": True}}
     messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
     t0 = time.monotonic()
-    client = ctx.llm_client
-    model = model or getattr(ctx, "ask_model", None) or ctx.agent_model
+    # The plan's model when only the editing turn was upgraded
+    # (model_budget): llm.helper_lane keeps the forced tool call working.
+    own = llm.helper_lane(ctx)
+    client = own[0]
+    model = model or getattr(ctx, "ask_model", None) or own[1]
     if model and str(model).startswith("claude-") and not getattr(client, "is_claude_lane", False) \
             and client is not None:
         try:
@@ -371,8 +374,7 @@ def _call(ctx, name, schema, system, content, max_tokens=4000, model=None):
                 model = None
         except Exception:  # noqa: BLE001 - no lane: the turn's own model checks
             model = None
-    model = model or ctx.agent_model
-    own = (ctx.llm_client, ctx.agent_model)
+    model = model or own[1]
     import openai_credit
     if str(model).startswith("gpt-") and getattr(client, "is_claude_lane", False):
         # A check named on OpenAI. While its credit is out (worker/openai_credit.py) the turn's

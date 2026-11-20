@@ -944,6 +944,25 @@ def turn_plan():
     return getattr(_turn, "plan", "") or ""
 
 
+def helper_lane(ctx, client=None):
+    """(client, model) for a turn's helper calls: the request contract, the
+    reply rewrites (auto-render reply, honesty, language, question
+    translation), score asks and the music choosers. When the model budget
+    governor upgraded only the editing turn (model_budget, 20 Nov 2026) the
+    helpers stay on the plan's model (ctx.helper_client / ctx.helper_model):
+    they cost what they cost before, and their forced tool calls keep working
+    (Claude Sonnet/Opus drop a forced tool_choice, claude_lane._NO_FORCED_TOOL).
+    Otherwise the turn's own client (``client`` when the caller holds it)
+    and model, exactly as before."""
+    helper_client = getattr(ctx, "helper_client", None)
+    helper_model = getattr(ctx, "helper_model", None)
+    if helper_client is not None and helper_model:
+        return helper_client, helper_model
+    if client is None:
+        client = getattr(ctx, "llm_client", None)
+    return client, getattr(ctx, "agent_model", None)
+
+
 # The provider's own words for "I do not take images". Matched on the error
 # body because the only honest source for this is the API itself: a model card
 # claiming multimodality is not evidence (deepseek-v4-pro claimed it and 400s).

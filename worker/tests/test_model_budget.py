@@ -31,29 +31,45 @@ INTERNAL = 60
 
 
 class World:
-    """app_kv, the wallet's meters and llm_calls, by statement shape."""
+    """app_kv, the wallet's meters, spend_ledger, llm_calls and video_jobs,
+    by statement shape."""
 
     def __init__(self, wallet=69.04, baseline=100.0, spent_today=0.0,
                  lifetime=100.0, company=0.0, budget=None, account=None,
-                 samples=None, cycle=12.0, line_cfg=None):
+                 samples=None, cycle=12.0, line_cfg=None, fence=None,
+                 lane_spent=None, since=0.0, confirmed_at=None, flying=(),
+                 project=(), typical=None, source_s=None, progress=None,
+                 request_premium=0.0):
         self.kv = {}
         if wallet is not None:
             self.kv["anthropic_wallet"] = json.dumps({
                 "confirmed_balance_usd": wallet, "meter_baseline_usd": baseline,
-                "confirmed_at": "2026-11-20T10:00:00+00:00"})
+                "confirmed_at": confirmed_at or "2026-11-20T10:00:00+00:00"})
         if budget is not None:
             self.kv["model_budget"] = json.dumps(budget)
         # a credit line well above the wallet unless a test sets one
         self.kv["claude_credit"] = json.dumps(line_cfg or {
             "cycle_budget_usd": 1000.0, "safety_margin_usd": 10,
             "cycle_start": "2026-11-05T00:00:00+00:00", "cycle_end": REFILL})
+        # no company room unless a test gives the company lanes a share
+        self.kv["spend_fence"] = json.dumps(fence or {
+            "internal": {"*": {"day_usd": 0, "cycle_usd": 0}},
+            "replay": {"anthropic": {"day_usd": 0, "cycle_usd": 0}}})
+        self.lane_spent = lane_spent or {}
         self.spent_today = spent_today
         # the wallet meter counts today's customer spend as well
         self.lifetime = lifetime + spent_today
         self.company = company
+        self.since = since
         self.account = account or {}
         self.samples = samples or {}
         self.cycle = cycle
+        self.flying = list(flying)
+        self.project = list(project)
+        self.typical = typical
+        self.source_s = source_s
+        self.progress = progress
+        self.request_premium = request_premium
         self.sql = []
         self.stamped = []
         self._rows = []
@@ -74,6 +90,12 @@ class World:
     def commit(self):
         pass
 
+    @staticmethod
+    def _mixrow(mix):
+        return {"prompt": mix["fresh"] + mix["cached"] + mix["written"],
+                "cached": mix["cached"], "written": mix["written"],
+                "completion": mix["out"]}
+
     def execute(self, sql, params=None):
         q = " ".join(sql.split())
         p = params or ()
@@ -88,10 +110,18 @@ class World:
             self._rows = [{"usd": self.spent_today}]
         elif "WHERE day >= %s AND day < %s" in q:             # cycle spend
             self._rows = [{"usd": self.cycle}]
+        elif "FROM trial_budget_days WHERE day >= %s" in q:   # since a refill
+            self._rows = [{"usd": self.since}]
         elif "AS usd FROM trial_budget_days" in q:
             self._rows = [{"usd": self.lifetime}]
         elif q.startswith("SELECT to_regclass('public.spend_ledger')"):
             self._rows = [{"t": "spend_ledger"}]
+        elif "WHERE provider = 'anthropic' AND lane = ANY(%s)" in q:
+            self._rows = [{"lane": lane, "usd": usd}
+                          for lane, usd in self.lane_spent.items()
+                          if lane in p[0]]
+        elif "lane<>'customer' AND day >= %s" in q:
+            self._rows = [{"usd": 0.0}]
         elif "FROM spend_ledger" in q:
             self._rows = [{"usd": self.company}]
         elif "information_schema.columns" in q:
@@ -100,6 +130,31 @@ class World:
             models = p[1]
             self._rows = [{"model": m, "usd": usd}
                           for m in models for usd in self.samples.get(m, [])]
+        elif "FROM video_jobs j WHERE j.type = 'agent_turn'" in q:  # in flight
+            self._rows = [r for r in self.flying
+                          if r["id"] != p[1] and r.get("root", r["id"]) != p[2]]
+        elif "LEFT JOIN LATERAL" in q:                        # typical request
+            if self.typical:
+                row = self._mixrow(self.typical["mix"])
+                row.update(duration_s=self.typical.get("duration_s"), n=50)
+                self._rows = [row]
+            else:
+                self._rows = [{"prompt": None, "cached": None, "written": None,
+                               "completion": None, "duration_s": None, "n": 0}]
+        elif "FROM assets WHERE project_id = %s" in q:
+            self._rows = [{"dur": self.source_s}]
+        elif "COUNT(DISTINCT l.job_id) AS slices" in q:       # this request
+            if self.progress:
+                row = self._mixrow(self.progress["mix"])
+                row["slices"] = self.progress["slices"]
+            else:
+                row = {"prompt": None, "cached": None, "written": None,
+                       "completion": None, "slices": 0}
+            self._rows = [row]
+        elif "(%s = 0 OR l.project_id = %s)" in q:            # its premium cost
+            self._rows = [{"usd": self.request_premium}]
+        elif "WHERE l.project_id = %s AND l.purpose = %s" in q:  # its project
+            self._rows = [self._mixrow(m) for m in self.project]
         elif "FROM llm_calls l JOIN video_jobs j" in q:
             self._rows = [{"usd": self.account.get(int(p[2]), 0.0)}]
         elif q.startswith("UPDATE video_jobs"):
@@ -229,11 +284,61 @@ def test_wallet_unknown_or_any_error_falls_back_silently():
     assert got["model"] == HAIKU and got["reason"] == "error"
 
 
-def test_after_the_refill_date_nothing_is_assumed():
-    late = datetime(2026, 12, 9, tzinfo=UTC)
-    got = model_budget.decide(World(wallet=200.0), CUSTOMER, HAIKU, True,
-                              now=late)
-    assert got["model"] == HAIKU and got["reason"] == "refill_passed"
+def test_after_the_refill_the_wallet_is_assumed_refilled_and_upgrades_go_on():
+    """Owner, 20 Nov: the subscription refills the credit at 8 Dec. With no
+    balance confirmed after the refill, the wallet is nonexpiring + refill -
+    the spend since, the next refill moves a cycle on, and paying requests
+    keep being upgraded (before the fix: "refill_passed", Haiku)."""
+    late = datetime(2026, 12, 9, 12, tzinfo=UTC)
+    w = World(wallet=20.0, since=10.0)
+    cfg = model_budget.parse_config(None)
+    state = model_budget.budget_state(w, cfg, late)
+    assert state["problem"] is None
+    assert state["wallet_basis"] == "assumed_refill"
+    assert state["wallet_usd"] == pytest.approx(4.26 + 200.0 - 10.0)
+    assert state["last_refill_at"] == "2026-12-08T00:00:00+00:00"
+    assert state["next_refill_at"] == "2027-01-07T00:00:00+00:00"
+    assert state["days_left"] == 29.0
+    assert state["assumed"]["spent_since_refill_usd"] == pytest.approx(10.0)
+    assert state["allowance_usd"] == pytest.approx((194.26 - 15.0) / 29.0)
+    got = model_budget.decide(w, CUSTOMER, HAIKU, True, now=late)
+    assert got["model"] == OPUS and got["wallet_basis"] == "assumed_refill"
+    # a balance confirmed after the refill always wins
+    w = World(wallet=50.0, confirmed_at="2026-12-08T09:00:00+00:00")
+    state = model_budget.budget_state(w, cfg, late)
+    assert state["wallet_basis"] == "confirmed"
+    assert state["wallet_usd"] == pytest.approx(50.0)
+    # and a cycle later it repeats: 7 Jan passed, nothing confirmed since
+    later = datetime(2027, 1, 8, tzinfo=UTC)
+    state = model_budget.budget_state(World(wallet=50.0, since=1.0,
+                                            confirmed_at="2026-12-08T09:00:00+00:00"),
+                                      cfg, later)
+    assert state["wallet_basis"] == "assumed_refill"
+    assert state["last_refill_at"] == "2027-01-07T00:00:00+00:00"
+    assert state["wallet_usd"] == pytest.approx(203.26)
+
+
+def test_claude_credits_own_cycle_end_wins_once_it_moved_past_refill_at():
+    late = datetime(2026, 12, 20, tzinfo=UTC)
+    w = World(wallet=20.0, since=5.0, line_cfg={
+        "cycle_budget_usd": 1000.0, "safety_margin_usd": 10,
+        "cycle_end": "2027-01-08T00:00:00+00:00"})
+    state = model_budget.budget_state(w, model_budget.parse_config(None), late)
+    assert state["refill_source"] == "claude_credit"
+    assert state["last_refill_at"] == "2026-12-08T00:00:00+00:00"
+    assert state["next_refill_at"] == "2027-01-08T00:00:00+00:00"
+    assert state["wallet_basis"] == "assumed_refill"
+
+
+def test_until_the_refill_only_what_expires_is_spread():
+    # with no reserve, the purchased (non-expiring) $4.26 is kept, the
+    # promotional rest is spread over the days to the refill
+    w = World(wallet=69.04)
+    cfg = model_budget.parse_config({"reserve_usd": 0})
+    state = model_budget.budget_state(w, cfg, NOW)
+    assert state["keep_usd"] == pytest.approx(4.26)
+    assert state["allowance_usd"] == pytest.approx((69.04 - 4.26) / 18.0)
+    assert state["next_refill_at"] == REFILL and state["wallet_basis"] == "confirmed"
 
 
 # ------------------------------------------------------------------ learning
@@ -314,7 +419,8 @@ def test_an_upgraded_request_edits_on_opus_and_helpers_keep_haiku(
     assert plain["lane"]["model"] == HAIKU and "model_budget" not in plain
 
 
-def test_a_continuation_keeps_the_model(lane_up, monkeypatch):
+def test_a_continuation_keeps_its_model_while_its_next_slice_fits(
+        lane_up, monkeypatch):
     calls = []
 
     def decide(conn, *a):
@@ -323,23 +429,187 @@ def test_a_continuation_keeps_the_model(lane_up, monkeypatch):
 
     monkeypatch.setattr(model_budget, "decide", decide)
     first = {}
-    _route(World(), first)
+    _route(World(wallet=200.0), first)
     assert len(calls) == 1
-    # the continuation's payload is a copy of the first slice's
+    # the continuation's payload is a copy of the first slice's; its first
+    # slice cost $0.30 on Opus and the next one fits the day
     cont = dict(first, root_agent_job_id=501, continuation_sequence=1,
                 logical_turn_continuation=True)
-    route = _route(World(), cont, job={"id": 502, "user_id": CUSTOMER})
-    assert len(calls) == 1                      # not decided again
+    slice_mix = {"fresh": 10_000, "cached": 300_000, "written": 30_000,
+                 "out": 6_000}
+    route = _route(World(wallet=200.0, progress={"mix": slice_mix, "slices": 1}),
+                   cont, job={"id": 502, "user_id": CUSTOMER})
+    assert len(calls) == 1                      # not a new request
     assert route["lane"]["model"] == OPUS
     assert cont["model_budget"]["reason"] == "continuation"
-    # the budget dropping meanwhile does not move a request mid-way
+    assert cont["model_budget"]["expected_usd"] == pytest.approx(
+        model_budget.mix_cost(OPUS, slice_mix))
+    # a NEW request (no inherited decision) is decided afresh
     monkeypatch.setattr(model_budget, "decide", lambda conn, *a: (
         model_budget._decision(HAIKU, HAIKU, "daily_allowance", None)))
-    assert _route(World(), dict(cont), job={"id": 503, "user_id": CUSTOMER}
-                  )["lane"]["model"] == OPUS
-    # a NEW request (no inherited decision) is decided afresh
     assert _route(World(), {}, job={"id": 600, "user_id": CUSTOMER}
                   )["lane"]["model"] == HAIKU
+
+
+def test_a_long_request_steps_down_the_ladder_at_its_slice_boundaries(lane_up):
+    """Review 20 Nov: a request that turns out long (the golden p5857 needs
+    10-12M tokens) must not run every slice on Opus. Each slice boundary
+    decides again from the request's own spend; before the fix the model was
+    kept for every slice whatever it cost."""
+    previous = model_budget._decision(OPUS, HAIKU, "fits", None,
+                                      expected_usd=1.2)
+    previous["root"] = 501
+    # 2 slices so far, 3M tokens: about $1.65 a slice on Opus, $1.02 on
+    # Sonnet. Today: (69.04-15)/18 = $3.00, $1.9 spent (most of it this
+    # request's): Opus no longer fits, Sonnet does.
+    mix = {"fresh": 100_000, "cached": 2_600_000, "written": 260_000,
+           "out": 40_000}
+    cont = {"model_budget": dict(previous), "root_agent_job_id": 501}
+    world = World(wallet=69.04 - 1.9, spent_today=1.9,
+                  progress={"mix": mix, "slices": 2}, request_premium=1.9,
+                  account={CUSTOMER: 0.0})
+    route = _route(world, cont, job={"id": 503, "user_id": CUSTOMER})
+    got = cont["model_budget"]
+    assert route["lane"]["model"] == SONNET and route["helper_lane"]["model"] == HAIKU
+    assert got["reason"] == "stepped_down" and got["stepped_from"] == OPUS
+    assert got["slices"] == 2 and got["request_premium_usd"] == pytest.approx(1.9)
+    assert got["expected_usd"] == pytest.approx(
+        model_budget.mix_cost(SONNET, {k: v / 2 for k, v in mix.items()}))
+    # more spent: Sonnet no longer fits either, the request finishes on the
+    # plan's model (never stopped)
+    cont = {"model_budget": dict(previous), "root_agent_job_id": 501}
+    world = World(wallet=69.04 - 2.5, spent_today=2.5,
+                  progress={"mix": mix, "slices": 2}, request_premium=2.5)
+    route = _route(world, cont, job={"id": 504, "user_id": CUSTOMER})
+    assert route["lane"]["model"] == HAIKU and "helper_lane" not in route
+    assert cont["model_budget"]["reason"] == "stepped_down"
+    assert cont["model_budget"]["upgraded"] is False
+    # a stepped-down request never climbs back
+    sonnet = model_budget._decision(SONNET, HAIKU, "stepped_down", None)
+    sonnet["root"] = 501
+    got = model_budget.reconsider(World(wallet=500.0, progress={
+        "mix": {k: v / 100 for k, v in mix.items()}, "slices": 1}),
+        CUSTOMER, HAIKU, sonnet, 501, now=NOW)
+    assert got["model"] == SONNET and got["reason"] == "continuation"
+
+
+def test_the_first_decision_is_priced_from_the_requests_size():
+    """Review 20 Nov: expected_usd was flat ($1.20 Opus) whatever the source.
+    A project whose requests use millions of tokens is priced on Opus's card
+    from its own history; a short one from the typical request scaled by its
+    source length."""
+    big = {"fresh": 150_000, "cached": 4_000_000, "written": 400_000,
+           "out": 60_000}
+    # $10.3 a day: the flat $1.20 would give Opus; this project's own
+    # requests cost about $4.0 on Opus, more than 40% of the day
+    w = World(wallet=200.0, project=[big, big])
+    got = model_budget.decide(w, CUSTOMER, HAIKU, True, project_id=77,
+                              root=900, now=NOW)
+    assert got["estimate_basis"] == "project"
+    assert got["costs"][OPUS] == pytest.approx(model_budget.mix_cost(OPUS, big),
+                                               abs=1e-3)
+    assert got["model"] == SONNET
+    assert got["expected_usd"] == pytest.approx(model_budget.mix_cost(SONNET, big),
+                                                abs=1e-3)
+    # no history on the project: the typical request, scaled by source length
+    typical = {"mix": {"fresh": 14_000, "cached": 327_000, "written": 67_000,
+                       "out": 10_000}, "duration_s": 1000.0}
+    short = World(wallet=200.0, typical=typical, source_s=500.0)
+    got = model_budget.decide(short, CUSTOMER, HAIKU, True, project_id=78,
+                              now=NOW)
+    assert got["estimate_basis"] == "source_length" and got["model"] == OPUS
+    assert got["expected_usd"] == pytest.approx(
+        model_budget.mix_cost(OPUS, typical["mix"]) * 0.5, abs=1e-3)
+    long = World(wallet=200.0, typical=typical, source_s=60_000.0)
+    got = model_budget.decide(long, CUSTOMER, HAIKU, True, project_id=79,
+                              now=NOW)
+    # scaled at most 4x
+    assert got["costs"][OPUS] == pytest.approx(
+        model_budget.mix_cost(OPUS, typical["mix"]) * 4.0, abs=1e-3)
+
+
+def test_requests_that_start_together_count_each_other():
+    """Review 20 Nov: spent_today is cached and counts only metered calls, so
+    requests starting together could all get Opus. Upgraded jobs queued or
+    running count at what they are still expected to spend."""
+    flying = [{"id": 700, "user_id": CUSTOMER + 5, "expected": 6.0, "spent": 0.5},
+              {"id": 701, "user_id": CUSTOMER + 6, "expected": 3.0, "spent": 0.0}]
+    # $10.28 a day; without the in-flight jobs Opus (1.2) fits
+    assert _decide(World(wallet=200.0))["model"] == OPUS
+    got = _decide(World(wallet=200.0, flying=flying))
+    assert got["inflight_usd"] == pytest.approx(8.5)
+    # 8.5 + 1.2 = 9.7 fits; with one more they no longer do
+    assert got["model"] == OPUS
+    flying.append({"id": 702, "user_id": CUSTOMER + 7, "expected": 1.0, "spent": 0.0})
+    got = _decide(World(wallet=200.0, flying=flying))
+    assert got["model"] == SONNET and got["inflight_usd"] == pytest.approx(9.5)
+    # the account's own requests in flight count against its share
+    mine = [{"id": 710, "user_id": CUSTOMER, "expected": 3.5, "spent": 0.0}]
+    assert _decide(World(wallet=200.0, flying=mine))["model"] == SONNET
+    # a request's own jobs are never in its way
+    got = model_budget.decide(World(wallet=200.0, flying=[
+        {"id": 900, "user_id": CUSTOMER, "expected": 9.0, "spent": 0.0}]),
+        CUSTOMER, HAIKU, True, root=900, now=NOW)
+    assert got["model"] == OPUS
+
+
+def test_company_room_comes_off_the_wallet_before_it_is_spread():
+    """Review 20 Nov: the replay and internal lanes may still spend their
+    cycle shares from the same wallet; production read $20.96 replay and
+    $20 internal. Their remaining room is subtracted before spreading, from
+    the ledger spend_ledger.room and the fence read."""
+    w = World(wallet=69.04, fence={
+        "replay": {"anthropic": {"day_usd": 10.0, "cycle_usd": 72.37}}},
+        lane_spent={"replay": 51.41, "internal": 0.0})
+    state = model_budget.budget_state(w, model_budget.parse_config(None), NOW)
+    assert state["company_room"] == {"internal": pytest.approx(20.0),
+                                     "replay": pytest.approx(20.96)}
+    assert state["company_room_usd"] == pytest.approx(40.96)
+    assert state["allowance_usd"] == pytest.approx((69.04 - 40.96 - 15.0) / 18.0)
+    assert _decide(w)["model"] == HAIKU          # $0.73 a day: nothing fits
+    # a spent share leaves no room to subtract
+    w = World(wallet=69.04, lane_spent={"replay": 100.0, "internal": 25.0},
+              fence={"replay": {"anthropic": {"day_usd": 10, "cycle_usd": 72.37}}})
+    state = model_budget.budget_state(w, model_budget.parse_config(None), NOW)
+    assert state["company_room_usd"] == 0.0
+    # the same numbers spend_ledger.room gives the fence
+    import spend_ledger
+    w = World(wallet=69.04, fence={
+        "replay": {"anthropic": {"day_usd": 100.0, "cycle_usd": 72.37}}},
+        lane_spent={"replay": 51.41})
+    w.execute = _per_lane(w.execute, w)
+    room = spend_ledger.room(w, "replay", "anthropic", now=NOW)
+    assert model_budget.company_room(w, NOW)["lanes"]["replay"] == \
+        pytest.approx(room["cycle_usd"] - room["cycle_spent_usd"])
+
+
+def _per_lane(execute, world):
+    """spend_ledger._spent's own statement, per lane, for the comparison."""
+    def run(sql, params=None):
+        q = " ".join(sql.split())
+        if "FROM spend_ledger WHERE lane = %s AND provider = %s" in q:
+            world._rows = [{"usd": world.lane_spent.get(params[0], 0.0)}]
+            return
+        execute(sql, params)
+    return run
+
+
+def test_a_replay_account_is_governed_when_the_replay_is_listed(monkeypatch):
+    """A golden replay runs with SPEND_LANE=replay and a synthetic account
+    whose id is not known in advance: "replay" in test_user_ids governs it."""
+    monkeypatch.setenv("SPEND_LANE", "replay")
+    w = World(wallet=200.0)
+    got = _decide(w, user=123456)
+    assert got["model"] == HAIKU and got["reason"] == "not_customer"
+    w = World(wallet=200.0, budget={"test_user_ids": ["replay"]})
+    assert _decide(w, user=123456)["model"] == OPUS
+    # a known id works too
+    w = World(wallet=200.0, budget={"test_user_ids": [123456]})
+    assert _decide(w, user=123456)["model"] == OPUS
+    # production (no SPEND_LANE) never reads "replay" as an internal account
+    monkeypatch.delenv("SPEND_LANE")
+    w = World(wallet=200.0, budget={"test_user_ids": ["replay"]})
+    assert _decide(w, user=INTERNAL)["reason"] == "not_customer"
 
 
 def test_a_slice_that_failed_on_the_upgrade_continues_on_the_plan_model(
@@ -371,6 +641,73 @@ def test_a_governor_failure_keeps_the_plan_lane(lane_up, monkeypatch):
     monkeypatch.setattr(model_budget, "kept", boom)
     route = _route(World(), {})
     assert route["lane"]["model"] == HAIKU and "helper_lane" not in route
+
+
+# ------------------------------------------------------------------ helpers
+
+class _Stream:
+    def __init__(self, result):
+        self.result = result
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def get_final_message(self):
+        return self.result
+
+
+class _FakeSdk:
+    def __init__(self, results):
+        self.results = list(results)
+        self.bodies = []
+        self.messages = self
+
+    def with_options(self, **kw):
+        return self
+
+    def stream(self, **body):
+        self.bodies.append(body)
+        return _Stream(self.results.pop(0))
+
+
+def test_a_governed_opus_turns_request_contract_call_goes_to_haiku_forced(
+        lane_up, monkeypatch):
+    """Review 20 Nov: helpers read ctx.agent_model / ctx.llm_client, so on an
+    upgraded turn they ran on Opus, whose lane drops a forced tool_choice
+    (claude_lane._NO_FORCED_TOOL): the contract could come back as text and
+    fall back. They go to the plan's Haiku, with the tool call forced."""
+    import request_contract
+    name = "record_contract"
+    sdk = _FakeSdk([SimpleNamespace(
+        content=[SimpleNamespace(type="tool_use", id="t1", name=name,
+                                 input={"ok": True})],
+        stop_reason="tool_use", stop_details=None, _request_id="r",
+        usage=SimpleNamespace(input_tokens=10, output_tokens=5,
+                              cache_read_input_tokens=0,
+                              cache_creation_input_tokens=0))])
+    monkeypatch.setattr(claude_lane, "_sdk", lambda: sdk)
+    monkeypatch.setattr(claude_trial, "meter_paid", lambda model, usd: None)
+    monkeypatch.setattr(claude_trial, "meter",
+                        lambda model, usd, kind="llm": None)
+    ctx = agent_tools.ToolContext.__new__(agent_tools.ToolContext)
+    ctx.llm_client, ctx.agent_model = claude_lane.ClaudeLaneClient(), OPUS
+    ctx.helper_client = claude_lane.ClaudeLaneClient()
+    ctx.helper_model = HAIKU
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}},
+              "required": ["ok"], "additionalProperties": False}
+    try:
+        request_contract._call(ctx, name, schema, "system", {"x": 1})
+    except Exception:  # noqa: BLE001 - the body sent is what is checked
+        pass
+    body = sdk.bodies[0]
+    assert body["model"] == HAIKU
+    assert body["tool_choice"] == {"type": "tool", "name": name}
+    # without a helper lane the turn's own model answers, as before
+    assert llm.helper_lane(SimpleNamespace(llm_client="c", agent_model=OPUS)) \
+        == ("c", OPUS)
 
 
 # ------------------------------------------------------------------ billing
@@ -426,6 +763,16 @@ def test_the_admin_summary_reads_the_same_numbers():
     assert out["on"] is True and out["next_model"] == OPUS
     assert out["allowance_usd"] == pytest.approx(185 / 18)
     assert out["reason_text"]
+    assert out["next_refill_at"] == REFILL and out["wallet_basis"] == "confirmed"
+    assert out["refill_usd"] == 200.0 and out["nonexpiring_usd"] == 4.26
+    assert out["company_room_usd"] == 0.0 and "inflight_usd" in out
+    # after the refill the card shows the assumption
+    late = model_budget.summary(World(wallet=20.0, since=3.0),
+                                now=datetime(2026, 12, 9, tzinfo=UTC))
+    assert late["wallet_basis"] == "assumed_refill"
+    assert late["assumed"]["wallet_usd"] == pytest.approx(201.26)
+    assert late["next_refill_at"] == "2027-01-07T00:00:00+00:00"
     assert model_budget.summary(World(budget={"on": False}), now=NOW) == {
         "on": False, "ladder": [OPUS, SONNET, HAIKU], "reserve_usd": 15.0,
-        "refill_at": REFILL, "account_share": 0.4, "charge_as": HAIKU}
+        "refill_at": REFILL, "refill_usd": 200.0, "nonexpiring_usd": 4.26,
+        "cycle_days": 30.0, "account_share": 0.4, "charge_as": HAIKU}

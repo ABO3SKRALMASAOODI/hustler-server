@@ -60,9 +60,11 @@ _SCHEMA = {
 def _client(ctx):
     """(client, model): the turn's own lane when it has one (its model goes
     with it), else the pooled client on the default model."""
-    client = getattr(ctx, "llm_client", None)
+    # The plan's model when only the editing turn was upgraded
+    # (model_budget): llm.helper_lane keeps the forced tool call working.
+    client, model = llm.helper_lane(ctx)
     if client is not None:
-        return client, getattr(ctx, "agent_model", None) or config.AGENT_MODEL
+        return client, model or config.AGENT_MODEL
     if not getattr(config, "OPENAI_API_KEY", None):
         return None, None
     try:

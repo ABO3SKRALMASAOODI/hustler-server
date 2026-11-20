@@ -2223,6 +2223,12 @@ def run_agent_job(worker_db, job):
                                + ([paid_claude["helper_lane"]]
                                   if paid_claude.get("helper_lane") else [])
                                + list(ctx.agent_lanes or []))
+            helper_lane = paid_claude.get("helper_lane")
+            if helper_lane:
+                # Helpers (request contract, reply rewrites, asks, music)
+                # stay on the plan's model: llm.helper_lane.
+                ctx.helper_client = helper_lane["client"]
+                ctx.helper_model = helper_lane["model"]
             if paid_claude.get("credit_aliases"):
                 ctx.credit_price_aliases = dict(paid_claude["credit_aliases"])
             elif paid_claude.get("credit_model"):
@@ -2575,13 +2581,21 @@ def _apply_model_budget(worker_db, job, route, plan_model, subscribed,
         import model_budget
         payload = payload if isinstance(payload, dict) else {}
         root = int(payload.get("root_agent_job_id") or job.get("id") or 0)
-        decision = model_budget.kept(
-            payload.get("model_budget"), root, plan_model,
-            payload.get("continuation_state"))
+        # A continuation decides again at its slice boundary from what the
+        # request has really spent (model_budget.reconsider): it keeps its
+        # model while the next slice fits, else continues a rung cheaper.
+        decision = None
+        if model_budget.kept(payload.get("model_budget"), root, plan_model,
+                             payload.get("continuation_state")) is not None:
+            decision = worker_db.run(
+                model_budget.reconsider, job.get("user_id"), plan_model,
+                payload.get("model_budget"), root, job.get("project_id"),
+                payload.get("continuation_state"))
         if decision is None:
             decision = worker_db.run(
                 model_budget.decide, job.get("user_id"), plan_model,
-                bool(subscribed) and not trialing)
+                bool(subscribed) and not trialing, job.get("project_id"),
+                root)
             decision = dict(decision or {}, root=root)
         if not isinstance(decision, dict) or not decision.get("model"):
             return route
@@ -3953,7 +3967,10 @@ def _reply_after_auto_render(ctx, client, messages, tools, draft, honesty):
         return draft
     msgs = messages + [{"role": "assistant", "content": draft},
                        {"role": "system", "content": _RENDERED_AFTER_DRAFT}]
-    model = ctx.agent_model or config.AGENT_MODEL
+    # Helpers stay on the plan's model when only the editing turn was
+    # upgraded (model_budget): llm.helper_lane.
+    client, model = llm.helper_lane(ctx, client)
+    model = model or config.AGENT_MODEL
     try:
         resp = llm.create_with_dialect(
             client, model, msgs, tools=tools, tool_choice="none",
@@ -4958,7 +4975,10 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
          "do not claim anything the facts do not show."},
     ]
     redraft = ""
-    model = ctx.agent_model or config.AGENT_MODEL
+    # Helpers stay on the plan's model when only the editing turn was
+    # upgraded (model_budget): llm.helper_lane.
+    client, model = llm.helper_lane(ctx, client)
+    model = model or config.AGENT_MODEL
     try:
         resp = llm.create_with_dialect(
             client, model, msgs, tools=tools,
@@ -5059,7 +5079,10 @@ def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
     answered "Sure", four letters, and got a reply in Russian."""
     texts = _customer_texts(ctx, user_text)
     joined = " ".join(x for x in texts if x)
-    model = ctx.agent_model or config.AGENT_MODEL
+    # Helpers stay on the plan's model when only the editing turn was
+    # upgraded (model_budget): llm.helper_lane.
+    client, model = llm.helper_lane(ctx, client)
+    model = model or config.AGENT_MODEL
     verdict = reply_language.judge(client, model, texts, final)
     flip = _language_flip(joined, user_text, final, verdict)
     if flip is None:
@@ -5116,7 +5139,10 @@ def _translate_question(ctx, client, question, texts, flip):
     question unchanged when the rewrite fails (ticket #980: a question still
     judged a flip after one in-loop refusal is repaired, never refused
     again, so the customer always gets it)."""
-    model = ctx.agent_model or config.AGENT_MODEL
+    # Helpers stay on the plan's model when only the editing turn was
+    # upgraded (model_budget): llm.helper_lane.
+    client, model = llm.helper_lane(ctx, client)
+    model = model or config.AGENT_MODEL
     _kind, u_side, _r_side = flip
     msgs = [
         {"role": "system", "content": (
@@ -7349,10 +7375,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             if getattr(ctx, "ask_verdict", None) is None:
                 # A reply never says "done" for what the film does not show
                 # (reply_truth, 14 Nov 2026): the screening sheets beside the
-                # draft, on the turn's own model.
+                # draft, on the turn's own model (the plan's model when only
+                # the editing turn was upgraded: llm.helper_lane).
                 import reply_truth
+                _h_client, _h_model = llm.helper_lane(ctx, client)
                 final = reply_truth.enforce(
-                    ctx, client, ctx.agent_model or model,
+                    ctx, _h_client, _h_model or model,
                     quality_verifier.request_text_for(ctx), final, honesty, strict=True)
             # Language MUST run on the model draft before the English
             # quality advisory is appended — otherwise a Cyrillic reply
@@ -7460,8 +7488,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     # (ticket #980: three refusals in one turn).
                     _u_text = user_message["content"] or ""
                     _u_texts = _customer_texts(ctx, _u_text)
+                    _h_client, _h_model = llm.helper_lane(ctx, client)
                     _q_verdict = reply_language.judge(
-                        client, ctx.agent_model or config.AGENT_MODEL,
+                        _h_client, _h_model or config.AGENT_MODEL,
                         _u_texts, q.question)
                     _q_flip = _language_flip(" ".join(_u_texts), _u_text,
                                              q.question, _q_verdict)
@@ -7479,7 +7508,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     # bypass rendered evidence by claiming completion in its preamble.
                     import reply_truth
                     q.question = reply_truth.enforce(
-                        ctx, client, ctx.agent_model or model,
+                        ctx, _h_client, _h_model or model,
                         quality_verifier.request_text_for(ctx), q.question,
                         honesty, strict=True)
                     _question_outcome = ("partial" if q.question == reply_truth.UNVERIFIED

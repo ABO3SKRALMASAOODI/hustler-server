@@ -487,6 +487,11 @@ class ToolContext:
         # builds a context without going through run_agent_job working.
         self.llm_client = None
         self.agent_model = config.AGENT_MODEL
+        # The plan's lane for helper calls when the model budget governor
+        # upgraded only the editing turn (llm.helper_lane); None = the
+        # turn's own client and model.
+        self.helper_client = None
+        self.helper_model = None
         # Does this user hold a plan (a trial counts)? Decides the model above
         # and what the out-of-credits message may honestly promise — a
         # subscriber's pool comes back, a free account's does not.
