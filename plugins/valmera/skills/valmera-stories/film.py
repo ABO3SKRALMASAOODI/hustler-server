@@ -1121,13 +1121,29 @@ def design_sound(l1, sup, d, turn_f=None, spoken=None, np10=None):
         # each word's own moment on the narration's clock (the film's clock repairs spans the aligner shared out)
         words = [dict(t0=float(a), t1=float(b)) for a, b in spoken] if spoken else \
             [dict(t0=float(w["start"]), t1=float(max(w["end"], w["start"] + 0.02))) for w in wd["words"]]
-        return SD.design(dict(l1, spine=spine, sound=[]), index=dict(words=words, video=dict(duration=dur)), src=sup["narration"],
-                         turn_s=(turn_f / FPS if turn_f is not None else None), bed=bool(d.get("bed")),
-                         supply=dict(np10=float(np10) if np10 is not None else None, bed=bool(d.get("bed")),
-                                     delivery_tail_s=float(d.get("delivery_tail_s", 0.0)),
-                                     tick_10s=d.get("tick_10s")))
+        sounds, rep = SD.design(dict(l1, spine=spine, sound=[]), index=dict(words=words, video=dict(duration=dur)), src=sup["narration"],
+                                turn_s=(turn_f / FPS if turn_f is not None else None), bed=bool(d.get("bed")),
+                                supply=dict(np10=float(np10) if np10 is not None else None, bed=bool(d.get("bed")),
+                                            delivery_tail_s=float(d.get("delivery_tail_s", 0.0)),
+                                            tick_10s=d.get("tick_10s")))
+        # what this plan was made with, so a later pass plans it again the same way (replan_sound: the Director's
+        # devices laid after the finish)
+        rep["replan"] = dict(turn_f=turn_f, np10=np10, bed=bool(d.get("bed")), delivery_tail_s=float(d.get("delivery_tail_s", 0.0)),
+                             tick_10s=d.get("tick_10s"), spoken=[[round(float(a), 4), round(float(b), 4)] for a, b in spoken] if spoken else None)
+        return sounds, rep
     except Exception as e:  # noqa: BLE001 - a film is never lost to its sound design
         return [], {"fault": repr(e)[:300]}
+
+
+def replan_sound(l1, sup):
+    """The film's sound design planned again on what l1 carries now, with the turn, supply and words its first plan was
+    made with (design_sound's ``replan``): the scene's device landings (``device_events``, worker/scene/palette) are
+    events it answers. (sounds, report); a fault is the report."""
+    a = (l1.get("sound_design") or {}).get("replan")
+    if not a:
+        return [], {"fault": "no first plan to follow"}
+    return design_sound(l1, sup, dict(bed=a.get("bed"), delivery_tail_s=a.get("delivery_tail_s", 0.0), tick_10s=a.get("tick_10s")),
+                        turn_f=a.get("turn_f"), spoken=[tuple(x) for x in a["spoken"]] if a.get("spoken") else None, np10=a.get("np10"))
 
 
 def audio_scene(l1, sup):

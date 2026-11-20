@@ -532,6 +532,41 @@ def reframe_change(before, after):
     return round(1.0-overlap/union, 4)
 
 
+# the palette's device landings (worker/scene/palette, ``device_events``: {f, kind, strength, dev}) as sound events.
+# A device that tears, flips or burns the whole frame is a flash (a glitch when it tears); one that brings a new world
+# in is a picture landing over the frame. A soft change (a leak drifting in, colour returning, a halo, a vignette, a
+# strobe of plates every few frames) is not a moment that sounds, and nothing under DEVICE_MIN is.
+DEVICE_GLITCH = ("glitch", "smear", "tear", "slice", "rgb_split", "split_picture")
+DEVICE_PICTURE = ("swap", "silhouette", "poster", "sticker", "clones", "flight", "answer", "rhyme", "proof_object", "mark")
+DEVICE_QUIET = ("light", "colour", "colour_bloom", "glow", "spotlight", "blur_in", "strobe", "word_blend", "paper", "keep_colour")
+DEVICE_MIN = 0.45
+
+
+def device_landings(l1):
+    """The landings of the devices a scene carries, as sound events: [{f, kind, size, device, landing}] where size is the
+    device's own strength (sound_choice.weight_of reads it as the share of the frame that changed). [] without
+    ``device_events``."""
+    out, D = [], int(l1.get("dur_f") or 0)
+    for e in l1.get("device_events") or []:
+        if not isinstance(e, dict):
+            continue
+        try:
+            f, s = int(e["f"]), float(e.get("strength", 0.5))
+        except (KeyError, TypeError, ValueError):
+            continue
+        kind = str(e.get("kind") or e.get("dev") or "")
+        if s < DEVICE_MIN or kind in DEVICE_QUIET or kind.startswith("finish") or not (0 <= f < (D or f + 1)):
+            continue
+        row = {"f": f, "id": f"device:{e.get('id') or kind}:{f}", "device": kind, "size": round(min(s, 1.0), 3), "landing": True}
+        if kind in DEVICE_PICTURE:
+            row.update(kind="card", photo=True, area=1.0)
+        else:
+            row.update(kind="flash", glitch=kind in DEVICE_GLITCH or "glitch" in kind)
+        if not any(abs(f - o["f"]) <= 2 for o in out):
+            out.append(row)
+    return out
+
+
 def landing_events(l1):
     """The landings a source's own edit makes inside the items that play it, by programme frame: [{f, kind, ...}].
     An asset may carry ``landings``: [{t: source second, kind: picture|title}] (a recorded export's b-roll and titles
@@ -670,6 +705,13 @@ def l1_events(l1, kshots=()):
             e["moving"] = True                    # the cut travels (a whip, a slide): the picture itself asks for a sweep
     for s in shots:                               # a fast camera move inside a shot (a punch-in, a whip): its start is a moment
         ev += [{"f": f, "kind": "move", "id": s["id"]} for f in move_starts(s)]
+    # the devices a workflow's Director laid (worker/scene/palette) name their own landings (``device_events``): each
+    # one strong enough to sound takes the place of the plain event at its frame, so the sound answers what the device
+    # does there (a tear sounds as a glitch, a world swapped behind the speaker as a picture landing). Scenes without
+    # ``device_events`` (every customer film) add nothing here.
+    devs = device_landings(l1)
+    if devs:
+        ev = [e for e in ev if not (e["kind"] in ("picture", "cut", "flash", "card") and any(abs(e["f"] - d["f"]) <= 2 for d in devs))] + devs
     out = []
     for e in sorted(ev, key=lambda e: (e["f"], KIND_RANK.get(e["kind"], 9))):
         if 0 <= e["f"] < D and not any(abs(e["f"] - o["f"]) <= 2 for o in out):
@@ -972,7 +1014,9 @@ def plan_sounds(events, ctx):
     end_f = int(ctx.get("prog_end_f") or D)
     dur_s = end_f / fps
     lib = library()
-    pics = [e for e in events if e["kind"] in ("picture", "cut") or (e["kind"] in ("card",) and e.get("area", 0) >= 0.35)]
+    # a device's landing is a moment, not a new picture of the supply: it competes for the allowance, never widens it
+    pics = [e for e in events if not e.get("device") and
+            (e["kind"] in ("picture", "cut") or (e["kind"] in ("card",) and e.get("area", 0) >= 0.35))]
     np10 = ctx.get("np10")
     if np10 is None:
         np10 = len(pics) / max(dur_s, 1e-3) * 10

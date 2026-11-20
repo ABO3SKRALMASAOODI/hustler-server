@@ -269,3 +269,48 @@ def test_folded_shaders_draw_the_new_paths_as_the_full_ones(pics, tmp_path, monk
     folded = [one(s, 2, work=str(tmp_path)) for s in scenes]
     for a, b in zip(full, folded):
         assert np.abs(a - b).max() <= 1
+
+
+# ------------------------------------------------------------------ review round (20 Nov): passes live in their windows
+
+
+def test_a_keep_pass_draws_only_inside_its_window_and_costs_only_there(tmp_path):
+    """A short pass on a long take shot: outside its window the frame is the plain take, byte for byte (no sandwich,
+    no matte read), and the cost and the matte demand count its own frames only."""
+    from scene import compile as SC
+    assets, sh = matte_case(tmp_path, n=24)
+    kept = dict(sh, keep=[{"mode": "fill", "c": "#FF00FF", "f": [8, 14]}])
+    take = stills(film([sh], dur=24, assets=assets), [3, 10, 20], work=str(tmp_path))
+    got = stills(film([kept], dur=24, assets=assets), [3, 10, 20], work=str(tmp_path))
+    assert np.array_equal(got[3], take[3]) and np.array_equal(got[20], take[20]), "outside the window: the take itself"
+    H, W = got[10].shape[:2]
+    assert np.abs(got[10][H // 2, W // 2, :3].astype(int) - (255, 0, 255)).max() <= 3, "inside: the pass"
+    plan = SC.compile(film([kept], dur=24, assets=assets), str(tmp_path), segment=False)
+    want = plan.demand(range(24))
+    with_matte = sorted(f for f, ks in want.items() if any(k[0] == "matte" for k in ks))
+    assert with_matte == list(range(8, 14))
+    assert sum(s["ops"].get("under", 0) for s in SC.program(plan)) == 6
+
+
+def test_the_under_step_takes_the_world_away_and_keeps_the_word_in_front():
+    """compile.degrade('under'): a frame-covering card behind the person goes (the take shows plain, he is never hidden
+    under it); a word behind him comes in front, as before; keep passes go."""
+    from scene import compile as SC
+    doc = {"film": {}, "items": [
+        {"id": "s", "k": "shot", "f": [0, 10], "pic": "main", "keep": [{"mode": "glow", "f": [0, 4]}]},
+        {"id": "plate", "k": "card", "f": [0, 10], "pic": "plate", "x": 0.5, "y": 0.5, "w": 1.0, "h": 1.0, "s": [1.06, 1.0], "behind": True},
+        {"id": "w", "k": "word", "f": [0, 10], "t": "HI", "v": "cap", "behind": True},
+        {"id": "small", "k": "card", "f": [0, 10], "pic": "plate", "x": 0.5, "y": 0.5, "w": 0.4, "h": 0.3, "behind": True}]}
+    SC.degrade(doc, "under")
+    ids = {i["id"]: i for i in doc["items"]}
+    assert "plate" not in ids and "keep" not in ids["s"]
+    assert not ids["w"].get("behind") and not ids["small"].get("behind")
+
+
+def test_a_card_shadow_with_a_null_blend_is_drawn_as_normal(pics):
+    card = {"id": "c", "k": "card", "f": [0, 4], "pic": "b", "x": 0.5, "y": 0.5, "w": 0.5, "h": 0.3, "s": 1, "rot": 0, "op": 1,
+            "shadow": {"dx": 0.02, "dy": 0.03, "blur": 0.02, "a": 0.8}}
+    plain = one(small([shot(), card], 4, pics))
+    null = one(small([shot(), dict(card, blend=None)], 4, pics))
+    bare = one(small([shot(), dict(card, shadow={"a": 0})], 4, pics))
+    assert np.array_equal(plain, null) and not np.array_equal(plain, bare)

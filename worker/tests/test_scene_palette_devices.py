@@ -53,7 +53,8 @@ def test_the_palette_is_inside_the_code_fingerprint():
 
 
 def test_every_device_has_a_card_a_plan_and_a_chain_that_ends_on_any_film():
-    assert len(palette.DEVICES) >= 30
+    palette._discover()
+    assert len(palette.DEVICES) >= 45
     for name, d in palette.DEVICES.items():
         assert callable(d["plan"]) and d["card"] and d["layer"] in palette.LAYERS, name
         for fb in d.get("fallback") or ():
@@ -128,3 +129,81 @@ def test_parallax_layers_cover_the_frame_and_the_near_one_is_the_near_part():
     assert near[180, 90] > 0.95 and near[40, 90] < 0.05
     far = ls[0][0].astype(int)
     assert np.abs(far[180, 90] - (200, 120, 40)).sum() > 120, "the far layer is filled where the near block stood"
+
+
+# ------------------------------------------------------------------ review round (20 Nov)
+
+
+def _photo(path, text=False):
+    from PIL import Image, ImageDraw, ImageFont
+    im = Image.new("RGB", (900, 1200), (60, 64, 70))
+    d = ImageDraw.Draw(im)
+    if text:
+        im.paste((236, 232, 222), (0, 0, 900, 1200))
+        font = ImageFont.truetype(os.path.join(WORKER, "fonts", "InterDisplay-Bold.ttf"), 46)
+        for k, line in enumerate(("THE COMPANY FILED", "FOR BANKRUPTCY ON", "MONDAY, 14 MARCH")):
+            d.text((80, 420 + k * 90), line, fill=(20, 20, 20), font=font)
+    else:
+        d.ellipse([560, 160, 760, 360], fill=(250, 246, 230))          # a lamp, high right: the light
+    im.save(path)
+    return path
+
+
+def test_proof_object_marks_a_measured_line_and_never_a_photograph(tmp_path):
+    for text in (False, True):
+        p = _photo(str(tmp_path / f"p{int(text)}.png"), text)
+        l1 = scene_of([{"id": "s", "k": "shot", "f": [0, 90], "pic": "p", "crop": [0, 0, 1, 1]}], 90,
+                      {"p": {"kind": "image", "path": p, "w": 900, "h": 1200}})
+        out, log = palette.apply(l1, str(tmp_path / f"w{int(text)}"), [{"dev": "proof_object", "id": "q", "f": [0, 90]}])
+        assert log[0]["done"] and log[0]["landed"] == "proof_object", log
+        marks = [i for i in out["items"] if i["k"] == "flash" and i.get("mode") == "mark"]
+        how = log[0]["log"]["box_from"]
+        if text:
+            assert how == "measured" and len(marks) == 1
+            box = log[0]["log"]["box"]
+            assert 0.3 < box[1] < 0.6, box                                # one of the printed lines
+        else:
+            assert how in ("face", "light") and not marks, (how, marks)
+            box = log[0]["log"]["box"]
+            assert box[0] < 0.73 < box[2] and box[1] < 0.22 < box[3], box    # pushed towards the lamp
+
+
+def test_the_alien_bank_lays_in_its_own_order_inside_a_layer_and_rows_keep_marks_and_seat(tmp_path):
+    l1 = scene_of([{"id": "s", "k": "shot", "f": [0, 90], "pic": "plate", "plate": {"c0": "#202020", "c1": "#202020"}}], 90)
+    asks = [{"dev": "diecut", "id": "d", "at": [10, 40], "t": "GO"}, {"dev": "lamp", "id": "l", "at": [50, 80], "t": "ME"}]
+    out, log = palette.apply(l1, str(tmp_path), asks)
+    assert [r["id"] for r in log][:2] == ["l", "d"], log                  # lamp before diecut (alien.ORDER), whatever the asking order
+    assert all("marks" in r and "seat" in r for r in log if r.get("done"))
+
+
+def test_no_machine_path_is_written_in_the_palette():
+    root = os.path.join(WORKER, "scene", "palette")
+    for name in os.listdir(root):
+        if name.endswith(".py"):
+            assert "/Users/" not in open(os.path.join(root, name), encoding="utf-8").read(), name
+
+
+def test_model_files_are_found_through_the_environment_only(tmp_path, monkeypatch):
+    from scene.palette import sense as S
+    (tmp_path / "depth").mkdir()
+    (tmp_path / "depth" / "depth_anything_v2_vits.pth").write_bytes(b"x")
+    (tmp_path / "rvm_mobilenetv3_fp32.onnx").write_bytes(b"x")
+    monkeypatch.setenv("VALMERA_MODELS", str(tmp_path))
+    monkeypatch.setenv("VALMERA_TORCH_PY", "/opt/torch/bin/python")
+    assert S.rvm_path() == str(tmp_path / "rvm_mobilenetv3_fp32.onnx")
+    assert S.model("depth_anything_v2_vits.pth") == str(tmp_path / "depth" / "depth_anything_v2_vits.pth")
+    assert S.torch_pythons()[0] == "/opt/torch/bin/python"
+    monkeypatch.delenv("VALMERA_MODELS")
+    monkeypatch.delenv("VALMERA_MODELS_DIR", raising=False)
+    assert S.model_dirs() == [os.path.join(WORKER, "models")]
+
+
+def test_a_director_ask_on_one_word_lands_on_that_word(tmp_path):
+    """The Director's asks arrive as one frame (``f``: the word's frame) and its pictures as ``pool``."""
+    from scene.palette._util import frames, pictures
+    l1 = scene_of([{"id": "s", "k": "shot", "f": [0, 300], "pic": "plate"}], 300,
+                  {"p1": {"kind": "image", "path": "a.png"}, "p2": {"kind": "image", "path": "b.png"}})
+    assert frames(l1, {"f": 120}, default_len=30) == (120, 150)
+    assert frames(l1, {"at": [40, 70]}) == (40, 70)
+    assert frames(l1, {"f": 12, "t": "word", "until": {"w": 3}}, default_len=10) == (12, 22)
+    assert pictures(l1, {"pool": ["p2"]})[0] == "p2"

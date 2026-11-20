@@ -1099,6 +1099,10 @@ def score(ctx, script):
     else:
         knobs["coverage_final"] = True
         l1, beats = wf1_film.build(sc, pack, script["style"]["id"], knobs)
+    if l1.get("devices") or l1.get("alien"):
+        # the sound design hears the Director's devices: laid now, their landings planned again with the take's own
+        # turn and words, before the taste check counts what lands with every sound
+        beats["devices_heard"] = chain.hear_devices(ctx, l1, beats, lambda x: F.replan_sound(x, pack))
     taste = F.taste_check(l1, beats)
     dropped = 0
     if not taste["ok"]:
