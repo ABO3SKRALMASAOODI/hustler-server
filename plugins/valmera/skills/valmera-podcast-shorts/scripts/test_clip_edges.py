@@ -50,7 +50,8 @@ def test_a_long_moment_is_tightened_by_the_same_model_on_its_timed_sentences():
         return json.dumps(dict(t0=3270.0, t1=3306.5, hook="Susan pulled me aside", payoff="really really bad", title="If it's bad", why="w")), {}
     spend = podcast.tighten({}, m, words, ask=ask)
     assert len(spend) == 2 and "measured at 124 s" in seen[0] and "runs 110 s" in seen[1]
-    assert (m["t0"], m["t1"], m["hook"], m["title"]) == (3270.0, 3306.5, "Susan pulled me aside", "If it's bad")
+    assert (m["t0"], m["t1"], m["title"]) == (3270.0, 3306.5, "If it's bad")
+    assert m["hook"] == "word word word word word." != "Susan pulled me aside"      # 20 Nov: read from the transcript, never the model's quote
     assert m["tightened"]["from_s"] == [3183.0, 3307.0] and m["duration_s"] == 36.5
     # no answer that fits: the moment stays as chosen and the script stage cuts it
     m2 = dict(t0=100.0, t1=200.0, hook="h", payoff="p")

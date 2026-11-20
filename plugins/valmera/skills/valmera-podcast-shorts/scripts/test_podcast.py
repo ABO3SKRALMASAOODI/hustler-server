@@ -636,3 +636,28 @@ def test_a_short_that_dies_before_its_first_stage_holds_the_delivery(tmp_path, m
     rec = podcast.build_short(run, dict(id="m11", style="prints", title="t"), dict(info={}, video="x"), {})
     assert len(started) == 1 and run.route_out.is_set()
     assert podcast.ROUTE_OUT in rec["error"] and "Operation not permitted" in rec["error"]
+
+
+def test_a_moment_reads_its_hook_and_payoff_from_the_transcript_not_from_the_model():
+    """20 Nov: the selection quoted the transcript line by line and the Claude backend stopped the answer; the
+    model now gives seconds and the code reads the words."""
+    lines = ["[0:00:01|1.0-4.0] We bet the whole company.", "[0:00:04|4.2-9.0] Then the market turned.", "[0:00:09|9.1-12.0] And we won."]
+    assert podcast.line_at(lines, 4.3, "start") == "Then the market turned."
+    assert podcast.line_at(lines, 12.2, "end") == "And we won."
+    assert podcast.line_at(lines, None, "start") == ""
+    assert '"hook":' not in podcast.SELECT_CONTRACT and '"payoff":' not in podcast.SELECT_CONTRACT
+    assert "Never quote the transcript" in podcast.SELECT_CONTRACT
+
+
+def test_a_tightened_window_reads_its_hook_and_payoff_from_its_own_sentences():
+    words = [(10.0 + i, w) for i, w in enumerate("He bet the company. Then markets fell hard. We still won it all.".split())]
+    m = {"t0": 10.0, "t1": 22.5, "title": "The bet"}
+    ask = lambda system, content, **kw: ('{"t0": 10.0, "t1": 22.5, "title": "The bet", "why": "x"}', {})
+    podcast.MOMENT_MAX_S, keep = 55.0, podcast.MOMENT_MAX_S
+    try:
+        podcast.tighten({"title": "t"}, m, words, ask=ask)
+    finally:
+        podcast.MOMENT_MAX_S = keep
+    assert "word for word" not in podcast.TIGHTEN_SYSTEM
+    assert m["hook"] and m["hook"].startswith("He bet")
+    assert m["payoff"] and m["payoff"].endswith("all.")

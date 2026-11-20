@@ -395,8 +395,8 @@ TIGHTEN_SYSTEM = (
     "hook and payoff when both fit inside 55 seconds; otherwise choose the strongest self-contained arc inside it. A "
     "list or a count the hook promises is kept whole inside the window, or the hook does not promise it.\n\n"
     'Return JSON only: {"t0": the start second of the window\'s first sentence (from its line), "t1": the end second of '
-    'its last sentence, "hook": the window\'s first sentence word for word, "payoff": its last sentence word for word, '
-    '"title": a plain title in at most six words, true to what the window says, "why": one sentence}')
+    'its last sentence, "title": a plain title in at most six words, true to what the window says, "why": one '
+    'sentence}. Never quote the sentences: give seconds, and the code reads the words itself.')
 
 
 TIGHTEN_SLACK_S = 2.0       # a tightened window keeps to its moment's own sentences (their measured ends, a word's slack)
@@ -426,8 +426,9 @@ def tighten(info, m, words, ask=None):
         inside = t0 - TIGHTEN_SLACK_S <= a < b <= t1 + TIGHTEN_SLACK_S      # its own sentences: a neighbour's lines are never told twice
         if 8.0 <= b - a <= MOMENT_MAX_S + 5.0 and inside:
             m["tightened"] = dict(from_s=[t0, t1], why=got.get("why"))
-            m.update(t0=round(a, 2), t1=round(b, 2), hook=got.get("hook") or m.get("hook"), payoff=got.get("payoff") or m.get("payoff"),
-                     title=got.get("title") or m.get("title"))
+            lines = sentence_lines(near)
+            m.update(t0=round(a, 2), t1=round(b, 2), hook=line_at(lines, a, "start") or m.get("hook"),
+                     payoff=line_at(lines, b, "end") or m.get("payoff"), title=got.get("title") or m.get("title"))
             break
         where = "inside" if inside else f"reaching outside (by {max(t0 - a, b - t1, 0):.1f} s) a moment that runs"
         note = (f"\n\nYour window {a:.1f}-{b:.1f} s runs {b - a:.0f} s {where} {t0:.1f}-{t1:.1f} s: choose one of "
@@ -451,7 +452,30 @@ SELECT_SYSTEM = (
     "of the people, companies, places and events he names, a new picture about every second.")
 
 
-SELECT_CONTRACT = '\n\nWalk the whole transcript in order and return every moment that clears the bar: a stranger stops within two seconds, stays to the end, and leaves with something. Grade each moment on its own. There is no target number, no minimum and no maximum: a weak hour gives few, a strong one many. A moment must stand alone without the episode, open on its hook in its first sentence, end on its payoff, run 18 to 55 seconds, and be about at least one real thing a camera has filmed (a person, company, product, place or event, named or plainly meant), because the film shows real footage of what is said. A strong opinion, confession, prediction, number or funny exchange about real things is a moment like a story is. Only talk with nothing real in it at all is left out. Moments never overlap.\n\nReturn JSON only: {"podcast": {"speaker": the main guest\'s full name, "host": the host\'s name or "", "show": the show\'s name or "", "year": the year it was recorded, "short_title": the episode in at most eight words}, "moments": [each {"title": a plain title in at most six words, "t0": the start second of the sentence the hook opens (from its line), "t1": the end second of the sentence the payoff closes (from its line), "hook": the first line a viewer hears, from the words, "payoff": the line it lands on, "why": why a stranger watches to the end, "speakers": how many people speak in it, "names": the people heard or named, "shows": the real filmed things a picture can show for it, most important first, "styles": [{"id": a style id from the list, "why": what in this moment that style needs}] best fit first, at least two, "hook_score": 1-10, "payoff_score": 1-10, "story_score": 1-10, "strength": 1-10 overall}], "left_out": [every other candidate you weighed and left out, each {"t0": seconds, "title": title, "why": the reason}]}'
+SELECT_CONTRACT = '\n\nWalk the whole transcript in order and return every moment that clears the bar: a stranger stops within two seconds, stays to the end, and leaves with something. Grade each moment on its own. There is no target number, no minimum and no maximum: a weak hour gives few, a strong one many. A moment must stand alone without the episode, open on its hook in its first sentence, end on its payoff, run 18 to 55 seconds, and be about at least one real thing a camera has filmed (a person, company, product, place or event, named or plainly meant), because the film shows real footage of what is said. A strong opinion, confession, prediction, number or funny exchange about real things is a moment like a story is. Only talk with nothing real in it at all is left out. Moments never overlap.\n\nNever quote the transcript in your answer: give seconds, and the code reads the words itself. Return JSON only: {"podcast": {"speaker": the main guest\'s full name, "host": the host\'s name or "", "show": the show\'s name or "", "year": the year it was recorded, "short_title": the episode in at most eight words}, "moments": [each {"title": a plain title in at most six words, "t0": the start second of the sentence the hook opens (from its line), "t1": the end second of the sentence the payoff closes (from its line), "why": why a stranger watches to the end, "speakers": how many people speak in it, "names": the people heard or named, "shows": the real filmed things a picture can show for it, most important first, "styles": [{"id": a style id from the list, "why": what in this moment that style needs}] best fit first, at least two, "hook_score": 1-10, "payoff_score": 1-10, "story_score": 1-10, "strength": 1-10 overall}], "left_out": [every other candidate you weighed and left out, each {"t0": seconds, "title": title, "why": the reason}]}'
+
+
+def line_at(lines, t, edge):
+    """The words of the sentence line a moment opens on (edge 'start': the line holding t, else the next) or closes on
+    (edge 'end': the last line ending by t). Read from the transcript itself, so the model never quotes it."""
+    import re as _re
+    try:
+        t = float(t)
+    except (TypeError, ValueError):
+        return ""
+    rows = []
+    for ln in lines:
+        m = _re.match(r"\[[^|]*\|([0-9.]+)-([0-9.]+)\] (.*)", ln)
+        if m:
+            rows.append((float(m.group(1)), float(m.group(2)), m.group(3)))
+    if not rows:
+        return ""
+    if edge == "start":
+        hit = next((r for r in rows if r[0] - 0.3 <= t < r[1]), None) or next((r for r in rows if r[0] >= t - 0.3), rows[-1])
+    else:
+        before = [r for r in rows if r[1] <= t + 0.8]
+        hit = before[-1] if before else rows[0]
+    return hit[2]
 
 
 def select_prompt(info, styles, lines, part=None):
@@ -545,9 +569,9 @@ def moments(run, fetched):
     rows, left, pod, spend = [], [], {}, []
     for k, (p0, p1, ws) in enumerate(parts):
         content = select_prompt(info, styles, sentence_lines(ws), part=(k + 1, len(parts), p0, p1) if len(parts) > 1 else None)
-        got = {}
-        for _ in range(2):
-            text, use = llm.ask(SELECT_SYSTEM + SELECT_CONTRACT, content, effort="high", max_tokens=48000)
+        got, note = {}, ""
+        for _ in range(3):
+            text, use = llm.ask(SELECT_SYSTEM + SELECT_CONTRACT, content + note, effort="high", max_tokens=48000)
             spend.append(dict(stage="moments", what="find and grade every moment", **use))
             try:
                 got = llm.json_block(text)
@@ -555,9 +579,16 @@ def moments(run, fetched):
                 got = {}
             if isinstance(got, dict) and isinstance(got.get("moments"), list):
                 break
+            # 20 Nov (Alexandr Wang, YC): the Claude backend's output check stopped an answer that quoted the
+            # transcript line by line, and the identical second ask came back from the proxy's cache. Asked again in
+            # other words (so it is a new request), for seconds and titles only.
+            note = ("\n\nYour last answer could not be used. Answer again with the JSON only: seconds, short titles of "
+                    "your own and scores. Do not quote or paraphrase the transcript's sentences.")
         else:
             raise RuntimeError("the selection gave no moments")
-        rows += [dict(r, part=k + 1) for r in got["moments"] if isinstance(r, dict)]
+        lines = sentence_lines(ws)
+        rows += [dict(r, part=k + 1, hook=line_at(lines, r.get("t0"), "start"), payoff=line_at(lines, r.get("t1"), "end"))
+                 for r in got["moments"] if isinstance(r, dict)]
         left += [r for r in got.get("left_out") or [] if isinstance(r, dict)]
         pod = pod or (got.get("podcast") if isinstance(got.get("podcast"), dict) else {})
     under = [dict(t0=r.get("t0"), title=r.get("title"), why=f"graded {r.get('strength')} of 10, under the bar of {BAR:g}") for r in rows
