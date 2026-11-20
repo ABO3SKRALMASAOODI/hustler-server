@@ -3116,6 +3116,27 @@ def _one_complete_per_key(key, wait_s=None, db_url=None):
                 pass
 
 
+def _assembled_object_bytes(key, wait=False, wait_s=None, poll_s=1.0):
+    """The size of the object a completion assembled, or None.
+
+    A consumed upload id ("gone") with no readable object yet is what a
+    completion still assembling in storage looks like from a second call
+    (#1602: the object appeared 3-60 s after the id was consumed). Then the
+    object is looked for again until ``wait_s`` before the call reports a
+    failure; a truly expired or aborted upload costs that wait once."""
+    nbytes = storage.head_bytes(key)
+    if nbytes is not None or not wait:
+        return nbytes
+    deadline = time.monotonic() + max(
+        0.0, UPLOAD_COMPLETE_WAIT_S if wait_s is None else wait_s)
+    while time.monotonic() < deadline:
+        time.sleep(poll_s)
+        nbytes = storage.head_bytes(key)
+        if nbytes is not None:
+            return nbytes
+    return None
+
+
 def _finish_multipart(user_id, project_id, key, upload_id, parts, detail,
                       repaired_out=None):
     """Complete a multipart upload through storage.finish_multipart, which
@@ -3142,7 +3163,7 @@ def _finish_multipart(user_id, project_id, key, upload_id, parts, detail,
                                         "parts": res["repaired"][:50]},
                                 origin="server")
         return None
-    if storage.head_bytes(key) is not None:
+    if _assembled_object_bytes(key, wait=res.get("gone")) is not None:
         return None                      # a retry of a complete that landed
     text = storage.finish_failure_text(res)
     record_client_event(user_id, project_id, "upload_failed",
