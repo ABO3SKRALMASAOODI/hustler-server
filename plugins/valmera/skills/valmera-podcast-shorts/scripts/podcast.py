@@ -179,7 +179,10 @@ def rungs():
         out.append(("mweb+token", pot + ["--extractor-args", "youtube:player_client=mweb"]))
     out += [("tv", ["--extractor-args", "youtube:player_client=tv"]), ("safari", ["--extractor-args", "youtube:player_client=web_safari"]),
             ("mweb", ["--extractor-args", "youtube:player_client=mweb"])]
-    return out
+    # 20 Nov (Alexandr Wang): YouTube walled this Mac's IPv6 range while its IPv4 address opened every source, and
+    # yt-dlp takes the system's preferred family. Each rung is asked again on IPv4 at once; the ladder then leads
+    # with whichever rung delivered (run.state["rung"]).
+    return [r for name, extra in out for r in ((name, extra), (name + "+ipv4", ["--force-ipv4"] + extra))]
 
 
 def ladder(run, args, done, timeout=3600, what="yt-dlp"):

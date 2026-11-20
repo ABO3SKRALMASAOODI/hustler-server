@@ -212,7 +212,8 @@ def test_fetch_walks_the_rungs_when_youtube_walls_a_player_and_remembers_the_one
     monkeypatch.setattr(podcast, "_ytdlp", fake)
     run = podcast.Run("https://youtu.be/abcdefghijk", str(tmp_path))
     ok = lambda r: r.returncode == 0  # noqa: E731
-    assert podcast.ladder(run, ["-J", "x"], ok).stdout.startswith("{") and len(calls) == 2 and run.state["rung"] == "embedded"
+    assert podcast.ladder(run, ["-J", "x"], ok).stdout.startswith("{") and len(calls) == 3 and run.state["rung"] == "embedded"
+    assert "--force-ipv4" in calls[1]                         # the plain rung is asked again on IPv4 before the next player
     calls.clear()
     podcast.ladder(run, ["-J", "x"], ok)
     assert len(calls) == 1                                    # the rung that worked goes first from then on
@@ -661,3 +662,11 @@ def test_a_tightened_window_reads_its_hook_and_payoff_from_its_own_sentences():
     assert "word for word" not in podcast.TIGHTEN_SYSTEM
     assert m["hook"] and m["hook"].startswith("He bet")
     assert m["payoff"] and m["payoff"].endswith("all.")
+
+
+def test_every_source_rung_is_asked_again_on_ipv4():
+    """20 Nov: the Mac's IPv6 range was walled while IPv4 opened every source."""
+    names = [n for n, _ in podcast.rungs()]
+    assert names[:2] == ["plain", "plain+ipv4"]
+    assert all(n.endswith("+ipv4") == ("--force-ipv4" in extra) for n, extra in podcast.rungs())
+    assert len([n for n in names if n.endswith("+ipv4")]) == len(names) // 2
