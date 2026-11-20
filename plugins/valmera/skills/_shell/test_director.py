@@ -265,3 +265,60 @@ def test_devices_on_the_speaker_hold_the_take_and_cutaways_step_round_them():
     assert rows_[0][4]["src"] == [10.0, round(10.0 + 29 / 30, 4)]   # a clip cut keeps its own speed
     assert rows_[3][4]["src"] == [round(80 / 30, 4), 4.0]
     assert cleared == 21 + 61
+
+
+def test_a_word_number_written_as_text_becomes_the_words_said_there(tmp_path):
+    """20 Nov rating: ladders printed '3 4 5 11' and type pages '0 1 2 3' where the answer put word numbers in text fields."""
+    sents, words = DR.numbered(SENTENCES, rows())
+    ans = dict(asks=[dict(dev="ladder", at=dict(w=4, word="Ask"), args=dict(words=[dict(t=5, w="whisper"), dict(t=6, w="whisper"), dict(t=11, w="shout")])),
+                     dict(dev="type_run", at=dict(w=4, word="Ask"), until=dict(w=7, word="and"), args=dict(words=[4, "5", 6])),
+                     dict(dev="verb", at=dict(w=3, word="smart."), args=dict(t=3, verb="punch")),
+                     dict(dev="diecut", at=dict(w=5, word="four"), args=dict(t="four AIs")),
+                     dict(dev="staircase", at=dict(w=4, word="Ask"), args=dict(lines=[[4, 6]]))])
+    d, rep = DR.repair(ans, sents, words)
+    a = d["asks"]
+    assert [r["t"] for r in a[0]["args"]["words"]] == ["four", "AIs", "answers"] and a[0]["args"]["words"][2]["w"] == "shout"
+    assert a[1]["args"]["words"] == ["Ask", "four", "AIs"]
+    assert a[2]["args"]["t"] == "smart"
+    assert a[3]["args"]["t"] == "four AIs"                                       # text stays text
+    assert a[4]["args"]["lines"] == ["Ask four AIs"]
+    assert sum("word number" in r or "word numbers" in r for r in rep) >= 4
+
+
+def test_a_figure_he_says_stays_the_figure():
+    sents = [dict(i=0, text="I got fired after 20 minutes on the floor of the store.")]
+    rws = [dict(w=w, t0=0.3 * k, t1=0.3 * k + 0.25, seg=0) for k, w in enumerate(sents[0]["text"].split())]
+    s, words = DR.numbered(sents, rws)
+    d, _ = DR.repair(dict(asks=[dict(dev="diecut", at=dict(w=4, word="20"), args=dict(t="20")),
+                                dict(dev="verb", at=dict(w=4, word="20"), args=dict(t=7))]), s, words)
+    assert d["asks"][0]["args"]["t"] == "20"                                     # said in its sentence: the figure itself
+    assert d["asks"][1]["args"]["t"] == "the"                                    # word 7 is 'the'
+
+
+def test_a_device_that_sets_his_words_and_got_none_sets_the_words_said():
+    sents, words = DR.numbered(SENTENCES, rows())
+    ans = dict(asks=[dict(dev="type_run", at=dict(w=4, word="Ask"), until=dict(w=6, word="AIs")),
+                     dict(dev="verb", at=dict(w=3, word="smart.")),
+                     dict(dev="ladder", at=dict(w=12, word="I")),
+                     dict(dev="white", at=dict(w=2, word="not"))])
+    d, rep = DR.repair(ans, sents, words)
+    a = d["asks"]
+    assert a[0]["args"]["t"] == "Ask four AIs"
+    assert a[1]["args"]["t"] == "smart"
+    assert a[2]["args"]["t"] == "I trust the seeing"                              # its word and the next ones of its sentence
+    assert "t" not in a[3]["args"]                                               # a flash sets no words
+    assert sum("set no words" in r for r in rep) == 3
+
+
+def test_a_counters_figure_word_lands_on_its_frame():
+    """A counter's lands is a word: read as a frame it drew the count in the first second (five Cuban films, 20 Nov)."""
+    d = dict(asks=[dict(dev="counter", at=dict(w=20, seg=1, word="1,200"), args=dict(lands=21, to=1200, fmt="{n} MILES")),
+                   dict(dev="staircase", at=dict(w=20, seg=1, word="x"), args=dict(lines=[dict(t="1,200", at=21), dict(t="MILES", at=22)]))])
+    asks, _ = DR.palette_asks(d, lambda w: 10 * w, lambda i: (i * 100, i * 100 + 90), None, 400)
+    assert asks[0]["lands"] == 210 and asks[0]["to"] == 1200
+    assert [x["at"] for x in asks[1]["lines"]] == [210, 220]
+
+
+def test_the_strobe_floor_leaves_one_and_two_frame_shots_to_punctuation():
+    lo, hi = DR.energy_band("strobe")["hold"]
+    assert lo * 30 >= 3.9 and hi <= 0.6
