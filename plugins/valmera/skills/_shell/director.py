@@ -718,6 +718,7 @@ def palette_asks(d, frame_of, seg_span=None, pic_key=None, dur_f=None):
                 row["picks"] = [dict(f=f + 8 * q, pic=p, word=a["at"]["word"]) for q, p in enumerate(pics[:3])]
             last = max([int(m["f"]) for m in row.get("picks") or [] if isinstance(m, dict) and isinstance(m.get("f"), int)] + [f])
             row["at"] = [f, min(max(row["f"][1] if isinstance(row["f"], list) else f, last + 30), dur_f)]
+            row.setdefault("t", args.get("t") or args.get("text") or a["at"]["word"])     # its fallback (diecut) sets the word
         elif dev == "rhyme":
             cuts = [c for c in row.get("cuts") or [] if isinstance(c, int)]
             end = max(cuts + [row["f"][1] if isinstance(row["f"], list) else f + 60]) + 8

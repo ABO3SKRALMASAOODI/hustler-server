@@ -97,6 +97,9 @@ def test_palette_asks_spans_sections_and_the_arc():
     assert any(a["dev"] == "finish" and a.get("surface") == "crt" and a["f"] == [100, 190] for a in asks)
     assert not any(a.get("surface") == "mono" for a in asks)                      # mono is the builder's own black and white
     assert by["arc"]["marks"] == [dict(f=50, stakes=-0.4, year=1999)]
+    ans, _ = DR.palette_asks(dict(asks=[dict(dev="answer", at=dict(w=4, seg=1, word="Ask"), args={}, pics=[])]),
+                             lambda w: 10 * w, None, None, 400)
+    assert ans[0]["t"] == "Ask"                                                   # its diecut fallback has its word
 
 
 def test_around_moves_asks_clear_of_a_hero_device():
